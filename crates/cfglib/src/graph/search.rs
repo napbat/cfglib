@@ -212,7 +212,7 @@ impl EpochMarks {
     ///
     /// The buffer is only walked when the epoch would wrap, which needs
     /// `u32::MAX` searches over one buffer.
-    fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         if self.epoch == u32::MAX {
             self.stamps.fill(0);
             self.epoch = 1;
@@ -222,12 +222,12 @@ impl EpochMarks {
     }
 
     /// Whether `index` is marked in the current epoch.
-    fn is_marked(&self, index: usize) -> bool {
+    pub(crate) fn is_marked(&self, index: usize) -> bool {
         self.stamps[index] == self.epoch
     }
 
     /// Mark `index` for the current epoch.
-    fn mark(&mut self, index: usize) {
+    pub(crate) fn mark(&mut self, index: usize) {
         self.stamps[index] = self.epoch;
     }
 

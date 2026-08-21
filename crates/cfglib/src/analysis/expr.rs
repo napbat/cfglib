@@ -161,9 +161,13 @@ pub fn recover_block_expressions<I: ExprInstr>(
                 .iter()
                 .map(|variable| {
                     // Inline if this is a single-use temporary defined in this block.
-                    if use_count.get(variable).copied().unwrap_or(0) == 1
-                        && let Some(subexpression) = variable_expressions.remove(variable)
-                    {
+                    let single_use = use_count.get(variable).copied().unwrap_or(0) == 1;
+                    let subexpression = if single_use {
+                        variable_expressions.remove(variable)
+                    } else {
+                        None
+                    };
+                    if let Some(subexpression) = subexpression {
                         return subexpression;
                     }
                     ExprNode::Leaf(variable.clone())
@@ -291,9 +295,7 @@ mod tests {
         for (_, expr) in &trees.roots {
             if let ExprNode::Op { operands, .. } = expr {
                 for op in operands {
-                    if let ExprNode::Leaf(loc) = op
-                        && *loc == 10
-                    {
+                    if let ExprNode::Leaf(10) = op {
                         // Good — t0 is a leaf, not inlined.
                     }
                 }

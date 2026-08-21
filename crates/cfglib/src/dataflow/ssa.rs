@@ -14,7 +14,8 @@ use alloc::vec::Vec;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::dataflow::{InstrInfo, ProgramPoint, VariableId};
-use crate::graph::dominator::DominatorTree;
+use crate::graph::dominator::{DominatorChildOrder, DominatorTree};
+use crate::graph::search::EpochMarks;
 
 /// The dominance frontier of every block.
 #[derive(Debug, Clone)]
@@ -31,13 +32,12 @@ impl DominanceFrontiers {
         let mut frontiers = vec![BTreeSet::new(); cfg.num_blocks()];
 
         for block in cfg.blocks() {
-            let predecessors: Vec<BlockId> = cfg.predecessors(block.id()).collect();
-            if predecessors.len() < 2 {
+            if cfg.predecessor_edges(block.id()).len() < 2 {
                 continue;
             }
 
             let frontier_root = dom.idom(block.id()).unwrap_or(block.id());
-            for predecessor in predecessors {
+            for predecessor in cfg.predecessors(block.id()) {
                 let mut runner = predecessor;
                 while runner != frontier_root {
                     frontiers[runner.index()].insert(block.id());
@@ -114,36 +114,43 @@ impl<V> PhiPlacements<V> {
 #[must_use]
 pub fn place_phis<I: InstrInfo>(cfg: &Cfg<I>, dom: &DominatorTree) -> PhiPlacements<I::Variable> {
     let frontiers = DominanceFrontiers::compute(cfg, dom);
-    let mut definition_blocks: BTreeMap<I::Variable, BTreeSet<BlockId>> = BTreeMap::new();
+    let mut definition_blocks: BTreeMap<I::Variable, Vec<BlockId>> = BTreeMap::new();
 
     for block in cfg.blocks() {
         for instruction in block.instructions() {
             for variable in instruction.defs() {
-                definition_blocks
-                    .entry(variable.clone())
-                    .or_default()
-                    .insert(block.id());
+                let blocks = definition_blocks.entry(variable.clone()).or_default();
+                if blocks.last().copied() != Some(block.id()) {
+                    blocks.push(block.id());
+                }
             }
         }
     }
 
     let mut placements = vec![Vec::new(); cfg.num_blocks()];
+    let mut has_phi = EpochMarks::new(cfg.num_blocks());
+    let mut visited = EpochMarks::new(cfg.num_blocks());
     for (variable, definitions) in definition_blocks {
-        let mut worklist: Vec<BlockId> = definitions.iter().copied().collect();
-        let mut has_phi = BTreeSet::new();
-        let mut visited = definitions;
+        has_phi.reset();
+        visited.reset();
+        for &block in &definitions {
+            visited.mark(block.index());
+        }
+        let mut worklist = definitions;
 
         while let Some(block) = worklist.pop() {
             for &frontier_block in frontiers.frontier(block) {
-                if !has_phi.insert(frontier_block) {
+                if has_phi.is_marked(frontier_block.index()) {
                     continue;
                 }
+                has_phi.mark(frontier_block.index());
 
                 placements[frontier_block.index()].push(PhiPlacement {
                     variable: variable.clone(),
                     predecessors: cfg.predecessors(frontier_block).collect(),
                 });
-                if visited.insert(frontier_block) {
+                if !visited.is_marked(frontier_block.index()) {
+                    visited.mark(frontier_block.index());
                     worklist.push(frontier_block);
                 }
             }
@@ -389,7 +396,10 @@ fn rename_drafts<I: InstrInfo>(
     max_versions: &mut BTreeMap<I::Variable, SsaVersion>,
 ) {
     let mut stacks = BTreeMap::new();
-    let mut visited = BTreeSet::new();
+    let mut visited = alloc::vec![false; cfg.num_blocks()];
+    // The event stack consumes siblings in reverse, so descending links
+    // preserve `DominatorTree::children`'s ascending DFS visitation.
+    let children = dom.child_links(DominatorChildOrder::Descending);
     let mut roots = vec![cfg.entry()];
     roots.extend(
         cfg.blocks()
@@ -402,12 +412,15 @@ fn rename_drafts<I: InstrInfo>(
         let mut events = vec![RenameEvent::Enter(root)];
         while let Some(event) = events.pop() {
             match event {
-                RenameEvent::Enter(block) if visited.insert(block) => {
+                RenameEvent::Enter(block) if !visited[block.index()] => {
+                    visited[block.index()] = true;
                     let pushed = rename_block(cfg, block, drafts, &mut stacks, max_versions);
                     events.push(RenameEvent::Exit(pushed));
-                    let mut children = dom.children(block);
-                    children.reverse();
-                    events.extend(children.into_iter().map(RenameEvent::Enter));
+                    let mut child = children.first_child(block);
+                    while let Some(next) = child {
+                        events.push(RenameEvent::Enter(next));
+                        child = children.next_sibling(next);
+                    }
                 }
                 RenameEvent::Enter(_) => {}
                 RenameEvent::Exit(pushed_variables) => {

@@ -52,22 +52,24 @@ pub fn build_call_graph<I: CallInfo>(
     }
 
     for (caller_key, cfg) in functions {
-        let Some(&caller) = key_to_id.get(caller_key) else {
+        let Some(&source_node) = key_to_id.get(caller_key) else {
             continue;
         };
         for block in cfg.blocks() {
             for instruction in block.instructions() {
-                if let Some(callee_key) = instruction.callee()
-                    && let Some(&callee) = key_to_id.get(&callee_key)
-                {
-                    graph.add_edge(
-                        caller,
-                        callee,
-                        CallMetadata {
-                            is_tail_call: instruction.is_tail_call(),
-                        },
-                    );
-                }
+                let Some(callee_key) = instruction.callee() else {
+                    continue;
+                };
+                let Some(&destination_node) = key_to_id.get(&callee_key) else {
+                    continue;
+                };
+                graph.add_edge(
+                    source_node,
+                    destination_node,
+                    CallMetadata {
+                        is_tail_call: instruction.is_tail_call(),
+                    },
+                );
             }
         }
     }

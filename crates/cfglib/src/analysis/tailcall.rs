@@ -37,14 +37,16 @@ pub fn detect_tail_calls<I: FlowControl>(cfg: &Cfg<I>) -> Vec<TailCall> {
     for block in cfg.blocks() {
         let bid = block.id();
         let succs: Vec<BlockId> = cfg.successors(bid).collect();
-        if succs.len() == 1
-            && exit_blocks.contains(&succs[0])
-            && let Some(last) = block.instructions().last()
-            && matches!(
-                last.flow_effect(),
-                FlowEffect::Call | FlowEffect::ConditionalCall
-            )
-        {
+        if succs.len() != 1 || !exit_blocks.contains(&succs[0]) {
+            continue;
+        }
+        let Some(last) = block.instructions().last() else {
+            continue;
+        };
+        if matches!(
+            last.flow_effect(),
+            FlowEffect::Call | FlowEffect::ConditionalCall
+        ) {
             let idx = block.instructions().len().saturating_sub(1);
             results.push(TailCall {
                 block: bid,
@@ -109,6 +111,6 @@ mod tests {
         cfg.add_edge(cfg.entry(), b, EdgeKind::Fallthrough);
 
         let tails = detect_tail_calls(&cfg);
-        assert!(tails.is_empty());
+        assert_eq!(tails.len(), 0);
     }
 }

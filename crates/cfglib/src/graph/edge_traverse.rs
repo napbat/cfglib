@@ -48,8 +48,8 @@ pub fn breadth_first_edges<N, E>(
 /// bound.
 ///
 /// `filter` decides whether an edge is traversed at all: a rejected edge
-/// produces no step and does not visit its far endpoint (it may be offered
-/// again when reached from another node, so the filter should be pure).
+/// produces no step and does not visit its far endpoint. The filter should be
+/// pure so its decision depends only on the edge.
 /// `max_depth` bounds the walk in hops from `start`: edges leaving a node
 /// `max_depth` hops away are not taken (`Some(0)` reports nothing).
 #[must_use]
@@ -63,7 +63,6 @@ pub fn walk_edges<N, E>(
     let forward = matches!(direction, TraversalDirection::Outgoing);
     let mut steps = Vec::new();
     let mut seen_node = vec![false; graph.node_count()];
-    let mut seen_edge = vec![false; graph.edge_slot_count()];
     let mut queue: VecDeque<(NodeId, usize)> = VecDeque::new();
     seen_node[start.index()] = true;
     queue.push_back((start, 0));
@@ -78,14 +77,10 @@ pub fn walk_edges<N, E>(
             graph.incoming_edges(node)
         };
         for &edge_id in adjacency {
-            if seen_edge[edge_id.index()] {
-                continue;
-            }
             let edge = graph.edge(edge_id);
             if !filter(edge) {
                 continue;
             }
-            seen_edge[edge_id.index()] = true;
             steps.push(EdgeStep {
                 edge: edge_id,
                 source: edge.source(),
@@ -122,7 +117,9 @@ pub fn shortest_path_edges<N, E>(
         return Some(Vec::new());
     }
     let forward = matches!(direction, TraversalDirection::Outgoing);
-    let mut parent_edge: Vec<Option<EdgeId>> = vec![None; graph.node_count()];
+    // `seen` guards every read. A plain edge id halves the parent table on
+    // targets where `Option<EdgeId>` cannot use a niche.
+    let mut parent_edge = vec![EdgeId::from_raw(0); graph.node_count()];
     let mut seen = vec![false; graph.node_count()];
     let mut queue = VecDeque::new();
     seen[from.index()] = true;
@@ -145,7 +142,7 @@ pub fn shortest_path_edges<N, E>(
                 continue;
             }
             seen[next.index()] = true;
-            parent_edge[next.index()] = Some(edge_id);
+            parent_edge[next.index()] = edge_id;
             if next == to {
                 break 'search;
             }
@@ -153,10 +150,13 @@ pub fn shortest_path_edges<N, E>(
         }
     }
 
-    parent_edge[to.index()]?;
+    if !seen[to.index()] {
+        return None;
+    }
     let mut path = Vec::new();
     let mut current = to;
-    while let Some(edge_id) = parent_edge[current.index()] {
+    while current != from {
+        let edge_id = parent_edge[current.index()];
         path.push(edge_id);
         let edge = graph.edge(edge_id);
         current = if forward {
@@ -229,7 +229,10 @@ mod tests {
             .map(|s| *graph.edge(s.edge).payload())
             .collect();
         assert_eq!(payloads, ["x", "z"]);
-        assert!(walk_edges(&graph, a, TraversalDirection::Outgoing, Some(0), |_| true).is_empty());
+        assert_eq!(
+            walk_edges(&graph, a, TraversalDirection::Outgoing, Some(0), |_| true).len(),
+            0
+        );
     }
 
     #[test]
@@ -240,6 +243,13 @@ mod tests {
         assert_eq!(graph.edge(path[0]).source(), a);
         assert_eq!(graph.edge(path[0]).target(), b);
         assert_eq!(graph.edge(path[1]).target(), c);
+
+        let incoming = shortest_path_edges(&graph, c, a, TraversalDirection::Incoming).unwrap();
+        assert_eq!(incoming.len(), 2);
+        assert_eq!(graph.edge(incoming[0]).source(), b);
+        assert_eq!(graph.edge(incoming[0]).target(), c);
+        assert_eq!(graph.edge(incoming[1]).source(), a);
+        assert_eq!(graph.edge(incoming[1]).target(), b);
 
         assert_eq!(
             shortest_path_edges(&graph, a, a, TraversalDirection::Outgoing),

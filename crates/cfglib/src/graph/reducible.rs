@@ -10,12 +10,14 @@
 
 extern crate alloc;
 use alloc::vec::Vec;
+use smallvec::SmallVec;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
 use crate::graph::dominator::DominatorTree;
-use crate::graph::structure::is_reducible;
+use crate::graph::structure::find_irreducible_entry;
+use crate::graph::traverse::{TraversalDirection, reachable};
 
 /// Transform an irreducible CFG into a reducible one by node splitting.
 ///
@@ -43,89 +45,18 @@ pub fn make_reducible<I: Clone>(cfg: &mut Cfg<I>) -> usize {
 
     loop {
         let dom = DominatorTree::compute(cfg);
-        if is_reducible(cfg, &dom) {
-            break;
-        }
-
-        // Find irreducible entries and split ONE per iteration.
+        // Find an irreducible entry and split ONE per iteration.
         // After each split the dominator tree is stale, so we
         // must recompute before picking the next target.
-        let irreducible_targets = find_irreducible_entries(cfg, &dom);
-
-        if let Some(&target) = irreducible_targets.first() {
+        if let Some(target) = find_irreducible_entry(cfg, &dom) {
             split_node(cfg, target);
             total_split += 1;
         } else {
-            break; // Safety valve.
+            break;
         }
     }
 
     total_split
-}
-
-/// Find blocks that are irreducible loop entries — targets of
-/// retreating edges that don't dominate their source.
-fn find_irreducible_entries<I>(cfg: &Cfg<I>, dom: &DominatorTree) -> Vec<BlockId> {
-    const WHITE: u8 = 0;
-    const GRAY: u8 = 1;
-    const BLACK: u8 = 2;
-
-    let n = cfg.num_blocks();
-    if n == 0 {
-        return Vec::new();
-    }
-
-    let mut color = alloc::vec![WHITE; n];
-    let mut stack: Vec<(BlockId, bool)> = alloc::vec![(cfg.entry(), false)];
-    let mut targets = Vec::new();
-    let mut seen = alloc::vec![false; n];
-
-    while let Some((node, processed)) = stack.pop() {
-        if processed {
-            color[node.index()] = BLACK;
-            continue;
-        }
-        if color[node.index()] != WHITE {
-            continue;
-        }
-        color[node.index()] = GRAY;
-        stack.push((node, true));
-
-        for succ in cfg.successors(node) {
-            match color[succ.index()] {
-                WHITE => stack.push((succ, false)),
-                GRAY if !dom.dominates(succ, node) && !seen[succ.index()] => {
-                    targets.push(succ);
-                    seen[succ.index()] = true;
-                }
-                _ => {}
-            }
-        }
-    }
-
-    targets
-}
-
-/// Check if `from` can reach `to` by following edges in the CFG.
-fn can_reach<I>(cfg: &Cfg<I>, from: BlockId, to: BlockId) -> bool {
-    let n = cfg.num_blocks();
-    let mut visited = alloc::vec![false; n];
-    let mut stack = alloc::vec![from];
-    while let Some(node) = stack.pop() {
-        if node == to {
-            return true;
-        }
-        if visited[node.index()] {
-            continue;
-        }
-        visited[node.index()] = true;
-        for succ in cfg.successors(node) {
-            if !visited[succ.index()] {
-                stack.push(succ);
-            }
-        }
-    }
-    false
 }
 
 /// Duplicate block `target` — create a copy and redirect external
@@ -133,7 +64,7 @@ fn can_reach<I>(cfg: &Cfg<I>, from: BlockId, to: BlockId) -> bool {
 /// on the original. This breaks the irreducible entry by giving
 /// external entries their own copy of the block.
 fn split_node<I: Clone>(cfg: &mut Cfg<I>, target: BlockId) {
-    // Create a clone of the target block.
+    // Duplicate the target's instructions into a new block.
     let copy = cfg.new_block();
     let insts = cfg.block(target).instructions().to_vec();
     for inst in insts {
@@ -143,36 +74,43 @@ fn split_node<I: Clone>(cfg: &mut Cfg<I>, target: BlockId) {
     // Partition predecessors: keep edges from blocks that target
     // can reach (they're in a cycle with target), redirect the rest
     // to the copy (they're external entries).
-    let pred_edges: Vec<crate::edge::EdgeId> = cfg.predecessor_edges(target).to_vec();
-    let to_redirect: Vec<crate::edge::EdgeId> = pred_edges
-        .iter()
-        .filter(|&&eid| {
-            let src = cfg.edge(eid).source();
-            // If target can reach src, they're in a cycle — keep it.
-            // Otherwise redirect to copy.
-            !can_reach(cfg, target, src)
-        })
-        .copied()
-        .collect();
-
-    for eid in to_redirect {
-        cfg.edges[eid.index()].as_mut().unwrap().target = copy;
-        cfg.preds[target.index()].retain(|e| *e != eid);
-        cfg.preds[copy.index()].push(eid);
+    let cycle_reachable = reachable(cfg, [target], TraversalDirection::Outgoing);
+    let mut redirected = SmallVec::<[crate::edge::EdgeId; 4]>::new();
+    {
+        let edges = &mut cfg.edges;
+        cfg.preds[target.index()].retain(|eid| {
+            let eid = *eid;
+            let edge = edges[eid.index()].as_mut().unwrap();
+            // If target can reach the source, they're in a cycle — keep it.
+            if cycle_reachable[edge.source.index()] {
+                true
+            } else {
+                edge.target = copy;
+                redirected.push(eid);
+                false
+            }
+        });
     }
+    cfg.preds[copy.index()].extend(redirected);
 
-    // Clone outgoing edges from target to copy.
-    let outgoing: Vec<(BlockId, EdgeKind)> = cfg
+    // Clone outgoing edges from target to copy. Original edge identities stay
+    // attached to `target`; the copy receives fresh identities in the same
+    // adjacency order with all semantic metadata retained.
+    let outgoing: Vec<(BlockId, EdgeKind, Option<f64>)> = cfg
         .successor_edges(target)
         .iter()
         .map(|&eid| {
             let e = cfg.edge(eid);
-            (e.target(), e.kind())
+            (e.target(), e.kind(), e.weight())
         })
         .collect();
 
-    for (succ, kind) in outgoing {
-        cfg.add_edge(copy, succ, kind);
+    for (succ, kind, weight) in outgoing {
+        if let Some(weight) = weight {
+            cfg.add_weighted_edge(copy, succ, kind, weight);
+        } else {
+            cfg.add_edge(copy, succ, kind);
+        }
     }
 }
 
@@ -237,5 +175,75 @@ mod tests {
 
         let dom2 = DominatorTree::compute(&cfg);
         assert!(is_reducible(&cfg, &dom2), "should be reducible after");
+    }
+
+    #[test]
+    fn multiple_splits_recompute_the_next_irreducible_entry() {
+        let mut cfg: Cfg<()> = Cfg::new();
+        let cycle: Vec<_> = (0..4).map(|_| cfg.new_block()).collect();
+        let external = cfg.new_block();
+
+        cfg.add_edge(cfg.entry(), cycle[0], EdgeKind::ConditionalTrue);
+        cfg.add_edge(cycle[0], cycle[1], EdgeKind::Fallthrough);
+        cfg.add_edge(cycle[1], cycle[2], EdgeKind::Fallthrough);
+        cfg.add_edge(cycle[2], cycle[3], EdgeKind::Fallthrough);
+        cfg.add_edge(cycle[3], cycle[0], EdgeKind::Back);
+        cfg.add_edge(cfg.entry(), external, EdgeKind::ConditionalFalse);
+        cfg.add_edge(external, cycle[1], EdgeKind::Unconditional);
+
+        let before = DominatorTree::compute(&cfg);
+        assert!(!is_reducible(&cfg, &before));
+        let original_blocks = cfg.num_blocks();
+
+        assert_eq!(make_reducible(&mut cfg), 3);
+        assert_eq!(cfg.num_blocks(), original_blocks + 3);
+        let after = DominatorTree::compute(&cfg);
+        assert!(is_reducible(&cfg, &after));
+    }
+
+    #[test]
+    fn splitting_preserves_outgoing_edge_metadata_and_order() {
+        // B is the first irreducible entry witnessed by the DFS. Splitting it
+        // must retain B's original edges and reproduce their complete metadata
+        // on the new copy in adjacency order.
+        let mut cfg = Cfg::new();
+        let a = cfg.new_block();
+        let b = cfg.new_block();
+        let exit = cfg.new_block();
+        cfg.block_mut(cfg.entry())
+            .instructions_vec_mut()
+            .push(ff("entry"));
+        cfg.block_mut(a).instructions_vec_mut().push(ff("a"));
+        cfg.block_mut(b).instructions_vec_mut().push(ff("b"));
+        cfg.block_mut(exit).instructions_vec_mut().push(ff("exit"));
+
+        cfg.add_edge(cfg.entry(), a, EdgeKind::ConditionalTrue);
+        let redirected = cfg.add_weighted_edge(cfg.entry(), b, EdgeKind::ConditionalFalse, 0.125);
+        cfg.add_edge(a, b, EdgeKind::Fallthrough);
+        let back = cfg.add_weighted_edge(b, a, EdgeKind::Back, 0.75);
+        let leave = cfg.add_weighted_edge(b, exit, EdgeKind::SwitchCase, 0.25);
+        let original_block_count = cfg.num_blocks();
+
+        let dom = DominatorTree::compute(&cfg);
+        assert_eq!(find_irreducible_entry(&cfg, &dom), Some(b));
+        assert_eq!(make_reducible(&mut cfg), 1);
+
+        let copy = BlockId::from_index(original_block_count);
+        assert_eq!(cfg.edge(redirected).target(), copy);
+        assert_eq!(cfg.edge(redirected).weight(), Some(0.125));
+        assert_eq!(cfg.successor_edges(b), &[back, leave]);
+
+        let copied = cfg.successor_edges(copy);
+        assert_eq!(copied.len(), 2);
+        assert_ne!(copied[0], back);
+        assert_ne!(copied[1], leave);
+        assert_eq!(cfg.edge(copied[0]).source(), copy);
+        assert_eq!(cfg.edge(copied[0]).target(), a);
+        assert_eq!(cfg.edge(copied[0]).kind(), EdgeKind::Back);
+        assert_eq!(cfg.edge(copied[0]).weight(), Some(0.75));
+        assert_eq!(cfg.edge(copied[1]).source(), copy);
+        assert_eq!(cfg.edge(copied[1]).target(), exit);
+        assert_eq!(cfg.edge(copied[1]).kind(), EdgeKind::SwitchCase);
+        assert_eq!(cfg.edge(copied[1]).weight(), Some(0.25));
     }
 }

@@ -117,9 +117,12 @@ fn lift_region<I: Clone>(
         current = None;
 
         // --- TryCatch region ---
-        if region_entries.contains(&block.0)
-            && let Some(node) = lift_try_catch(cfg, dom, pdom, block, visited, region_entries)
-        {
+        let region_node = if region_entries.contains(&block.0) {
+            lift_try_catch(cfg, dom, pdom, block, visited, region_entries)
+        } else {
+            None
+        };
+        if let Some(node) = region_node {
             result.push(node);
             current = advance_merge(pdom, block, visited);
             continue;
@@ -647,16 +650,18 @@ fn lift_loop<I: Clone>(
     if is_conditional {
         let node = lift_conditional(cfg, dom, pdom, header, visited, region_entries);
         body.push(node);
-        if let Some(merge) = pdom.idom(header)
-            && !visited.contains(&merge.0)
+        if let Some(merge) = pdom
+            .idom(header)
+            .filter(|merge| !visited.contains(&merge.0))
         {
             body.extend(lift_region(cfg, dom, pdom, merge, visited, region_entries));
         }
     } else if has_switch {
         let node = lift_switch(cfg, dom, pdom, header, visited, region_entries);
         body.push(node);
-        if let Some(merge) = pdom.idom(header)
-            && !visited.contains(&merge.0)
+        if let Some(merge) = pdom
+            .idom(header)
+            .filter(|merge| !visited.contains(&merge.0))
         {
             body.extend(lift_region(cfg, dom, pdom, merge, visited, region_entries));
         }

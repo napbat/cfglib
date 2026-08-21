@@ -190,7 +190,7 @@ mod tests {
         cfg.block_mut(b).instructions_vec_mut().push(ff("b"));
         cfg.add_edge(cfg.entry(), b, EdgeKind::Fallthrough);
         let model = build_eh_model(&cfg);
-        assert!(model.eh_edges.is_empty());
+        assert_eq!(model.eh_edges.len(), 0);
         assert!(
             model
                 .block_kinds

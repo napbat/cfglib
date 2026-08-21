@@ -535,12 +535,7 @@ impl<I> Cfg<I> {
         let new_id = self.new_block();
         self.blocks[new_id.index()].instructions = tail_insts;
 
-        // Move outgoing edges from `id` to `new_id`.
-        let outgoing: SmallVec<[EdgeId; 2]> = self.succs[id.index()].drain(..).collect();
-        for &eid in &outgoing {
-            self.edges[eid.index()].as_mut().unwrap().source = new_id;
-            self.succs[new_id.index()].push(eid);
-        }
+        self.move_outgoing_edges(id, new_id);
 
         // Insert fallthrough edge from original to new block.
         self.add_edge(id, new_id, EdgeKind::Fallthrough);
@@ -556,11 +551,40 @@ impl<I> Cfg<I> {
     ///
     /// Panics if either block is out of range or an incoming edge was removed.
     pub fn redirect_edges_to(&mut self, old: BlockId, new_target: BlockId) {
-        let incoming: SmallVec<[EdgeId; 4]> = self.preds[old.index()].clone();
-        for eid in incoming {
+        let old_index = old.index();
+        let new_target_index = new_target.index();
+        let _ = &self.preds[old_index];
+        let _ = &self.preds[new_target_index];
+        if old == new_target {
+            return;
+        }
+
+        let incoming = core::mem::take(&mut self.preds[old_index]);
+        for &eid in &incoming {
             self.edges[eid.index()].as_mut().unwrap().target = new_target;
-            self.preds[old.index()].retain(|e| *e != eid);
-            self.preds[new_target.index()].push(eid);
+        }
+        self.preds[new_target_index].extend(incoming);
+    }
+
+    /// Move every outgoing edge of `old` to `new_source` in adjacency order.
+    ///
+    /// Only the source endpoint changes: edge identities, targets, kinds,
+    /// weights, and predecessor adjacency all remain intact. When
+    /// `new_source` has no outgoing edges, ownership of `old`'s complete
+    /// adjacency buffer moves without reallocating.
+    pub(crate) fn move_outgoing_edges(&mut self, old: BlockId, new_source: BlockId) {
+        if old == new_source {
+            return;
+        }
+
+        let outgoing = core::mem::take(&mut self.succs[old.index()]);
+        for &eid in &outgoing {
+            self.edges[eid.index()].as_mut().unwrap().source = new_source;
+        }
+        if self.succs[new_source.index()].is_empty() {
+            self.succs[new_source.index()] = outgoing;
+        } else {
+            self.succs[new_source.index()].extend(outgoing);
         }
     }
 
@@ -777,6 +801,7 @@ impl<I: Clone> Cfg<I> {
 #[cfg(test)]
 mod tests {
     extern crate alloc;
+    extern crate std;
     use super::*;
     use crate::edge::EdgeKind;
     use crate::test_util::MockInst;
@@ -846,6 +871,110 @@ mod tests {
 
         // Double-remove returns None.
         assert!(cfg.remove_edge(e1).is_none());
+    }
+
+    #[test]
+    fn split_block_preserves_outgoing_edge_identity_and_metadata() {
+        let mut cfg = Cfg::<u32>::new();
+        let source = cfg.entry();
+        let sink = cfg.new_block();
+        cfg.block_mut(source).instructions_vec_mut().extend([1, 2]);
+        let outgoing = cfg.add_weighted_edge(source, sink, EdgeKind::ConditionalTrue, 0.75);
+
+        let split = cfg.split_block(source, 1);
+        let [fallthrough] = cfg.successor_edges(source) else {
+            panic!("split source should have one fallthrough edge");
+        };
+
+        assert_eq!(cfg.successor_edges(split), &[outgoing]);
+        assert_eq!(cfg.edge(outgoing).source(), split);
+        assert_eq!(cfg.edge(outgoing).target(), sink);
+        assert_eq!(cfg.edge(outgoing).kind(), EdgeKind::ConditionalTrue);
+        assert_eq!(cfg.edge(outgoing).weight(), Some(0.75));
+        assert_eq!(cfg.edge(*fallthrough).source(), source);
+        assert_eq!(cfg.edge(*fallthrough).target(), split);
+        assert_eq!(cfg.predecessor_edges(sink), &[outgoing]);
+    }
+
+    #[test]
+    fn redirect_edges_moves_predecessors_in_order() {
+        let mut cfg = Cfg::<MockInst>::new();
+        let old = cfg.new_block();
+        let new_target = cfg.new_block();
+        let first = cfg.add_edge(cfg.entry(), new_target, EdgeKind::Fallthrough);
+        let second = cfg.add_edge(cfg.entry(), old, EdgeKind::ConditionalTrue);
+        let third = cfg.add_weighted_edge(cfg.entry(), old, EdgeKind::ConditionalFalse, 0.25);
+
+        cfg.redirect_edges_to(old, new_target);
+
+        assert_eq!(cfg.predecessor_edges(old), &[]);
+        assert_eq!(cfg.predecessor_edges(new_target), &[first, second, third]);
+        assert_eq!(cfg.edge(second).target(), new_target);
+        assert_eq!(cfg.edge(third).target(), new_target);
+        assert_eq!(cfg.edge(third).weight(), Some(0.25));
+    }
+
+    #[test]
+    fn redirect_edges_to_same_block_is_a_noop() {
+        let mut cfg = Cfg::<MockInst>::new();
+        let target = cfg.new_block();
+        let edge = cfg.add_edge(cfg.entry(), target, EdgeKind::Fallthrough);
+
+        cfg.redirect_edges_to(target, target);
+
+        assert_eq!(cfg.predecessor_edges(target), &[edge]);
+        assert_eq!(cfg.edge(edge).target(), target);
+    }
+
+    #[test]
+    fn redirect_edges_rejects_an_invalid_target_before_mutating() {
+        let mut cfg = Cfg::<MockInst>::new();
+        let old_target = cfg.new_block();
+        let edge = cfg.add_edge(cfg.entry(), old_target, EdgeKind::Fallthrough);
+        let invalid = BlockId::from_raw(u32::MAX);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cfg.redirect_edges_to(old_target, invalid);
+        }));
+
+        assert!(panic.is_err());
+        assert_eq!(cfg.predecessor_edges(old_target), &[edge]);
+        assert_eq!(cfg.edge(edge).target(), old_target);
+    }
+
+    #[test]
+    fn move_outgoing_edges_preserves_order_identity_and_metadata() {
+        let mut cfg = Cfg::<MockInst>::new();
+        let old = cfg.new_block();
+        let new_source = cfg.new_block();
+        let sink = cfg.new_block();
+        let existing = cfg.add_edge(new_source, sink, EdgeKind::Fallthrough);
+        let first = cfg.add_weighted_edge(old, sink, EdgeKind::ConditionalTrue, 0.25);
+        let second = cfg.add_weighted_edge(old, sink, EdgeKind::ConditionalFalse, 0.75);
+        let becomes_self = cfg.add_weighted_edge(old, new_source, EdgeKind::Back, 0.875);
+        let old_self = cfg.add_weighted_edge(old, old, EdgeKind::Unconditional, 0.5);
+
+        cfg.move_outgoing_edges(old, new_source);
+
+        assert_eq!(cfg.successor_edges(old), &[]);
+        assert_eq!(
+            cfg.successor_edges(new_source),
+            &[existing, first, second, becomes_self, old_self]
+        );
+        assert_eq!(cfg.edge(first).source(), new_source);
+        assert_eq!(cfg.edge(first).target(), sink);
+        assert_eq!(cfg.edge(first).kind(), EdgeKind::ConditionalTrue);
+        assert_eq!(cfg.edge(first).weight(), Some(0.25));
+        assert_eq!(cfg.edge(second).weight(), Some(0.75));
+        assert_eq!(cfg.edge(becomes_self).source(), new_source);
+        assert_eq!(cfg.edge(becomes_self).target(), new_source);
+        assert_eq!(cfg.edge(becomes_self).weight(), Some(0.875));
+        assert_eq!(cfg.edge(old_self).source(), new_source);
+        assert_eq!(cfg.edge(old_self).target(), old);
+        assert_eq!(cfg.edge(old_self).weight(), Some(0.5));
+        assert_eq!(cfg.predecessor_edges(sink), &[existing, first, second]);
+        assert_eq!(cfg.predecessor_edges(new_source), &[becomes_self]);
+        assert_eq!(cfg.predecessor_edges(old), &[old_self]);
     }
 
     #[test]

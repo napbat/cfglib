@@ -131,7 +131,7 @@ mod tests {
         // Adding a second edge entry→a doesn't change dominators.
         cfg.add_edge(cfg.entry(), a, EdgeKind::ConditionalTrue);
         let (_new_dom, update) = update_after_edge_insert(&cfg, &dom, cfg.entry(), a);
-        assert!(update.changed.is_empty());
+        assert_eq!(update.changed.len(), 0);
     }
 
     #[test]

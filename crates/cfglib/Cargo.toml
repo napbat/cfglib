@@ -21,3 +21,7 @@ serde = ["dep:serde", "smallvec/serde"]
 [dependencies]
 serde = { workspace = true, optional = true }
 smallvec.workspace = true
+
+[[bench]]
+name = "performance"
+harness = false

@@ -131,7 +131,7 @@ mod tests {
         let cfg = Cfg::<DfInst>::new();
         let dom = DominatorTree::compute(&cfg);
         let ssa = build_ssa(&cfg, &dom);
-        assert!(compute_phi_webs(&ssa).webs.is_empty());
+        assert_eq!(compute_phi_webs(&ssa).webs.len(), 0);
     }
 
     #[test]

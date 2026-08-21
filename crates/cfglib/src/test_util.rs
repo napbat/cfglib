@@ -169,9 +169,7 @@ impl crate::dataflow::constprop::ConstantFolder for DfInst {
 
     fn fold_constant(&self, _known: &alloc::collections::BTreeMap<u16, i64>) -> Option<(u16, i64)> {
         // If this instruction is a constant load, report it.
-        if let Some(val) = self.constant
-            && let Some(&dst) = self.defs.first()
-        {
+        if let (Some(val), Some(&dst)) = (self.constant, self.defs.first()) {
             return Some((dst, val));
         }
         None

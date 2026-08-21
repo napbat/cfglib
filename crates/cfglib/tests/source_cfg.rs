@@ -272,7 +272,7 @@ fn goto_wiring_uses_consumer_string_targets() {
 
     let resolution = resolve_jump_edges(&mut cfg);
     assert_eq!(resolution.resolved, 1);
-    assert!(resolution.unresolved.is_empty());
+    assert_eq!(resolution.unresolved.len(), 0);
     let back = cfg
         .edges()
         .find(|edge| edge.kind() == EdgeKind::Jump)

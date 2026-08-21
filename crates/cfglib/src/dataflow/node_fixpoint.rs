@@ -17,6 +17,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::fixpoint::Direction;
+use crate::graph::traverse::{Adjacency, Incoming, Outgoing};
 use crate::graph::view::{DenseNodeId, DirectedGraphView};
 
 /// A node-level dataflow problem over a graph view `G`.
@@ -175,47 +176,69 @@ where
 fn solve_seeded<G, P>(
     graph: &G,
     problem: &P,
-    mut worklist: VecDeque<G::NodeId>,
-    mut queued: Vec<bool>,
+    worklist: VecDeque<G::NodeId>,
+    queued: Vec<bool>,
 ) -> NodeFacts<P::Fact>
 where
     G: DirectedGraphView,
     P: NodeProblem<G>,
 {
     let node_count = graph.node_count();
-    let forward = matches!(problem.direction(), Direction::Forward);
     let boundary = problem.boundary(graph);
-    let mut input = vec![problem.bottom(graph); node_count];
-    let mut output = vec![problem.bottom(graph); node_count];
+    let input = vec![problem.bottom(graph); node_count];
+    let output = vec![problem.bottom(graph); node_count];
 
+    match problem.direction() {
+        Direction::Forward => solve_seeded_by_axis(
+            graph, problem, Incoming, Outgoing, worklist, queued, &boundary, input, output,
+        ),
+        Direction::Backward => solve_seeded_by_axis(
+            graph, problem, Outgoing, Incoming, worklist, queued, &boundary, input, output,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn solve_seeded_by_axis<G, P, U, D>(
+    graph: &G,
+    problem: &P,
+    upstream: U,
+    downstream: D,
+    mut worklist: VecDeque<G::NodeId>,
+    mut queued: Vec<bool>,
+    boundary: &P::Fact,
+    mut input: Vec<P::Fact>,
+    mut output: Vec<P::Fact>,
+) -> NodeFacts<P::Fact>
+where
+    G: DirectedGraphView,
+    P: NodeProblem<G>,
+    U: Adjacency,
+    D: Adjacency,
+{
     while let Some(node) = worklist.pop_front() {
         queued[node.index()] = false;
 
-        let upstream: Vec<G::NodeId> = if forward {
-            graph.predecessors(node).collect()
-        } else {
-            graph.successors(node).collect()
+        let mut neighbors = upstream.neighbors(graph, node);
+        let met = match neighbors.next() {
+            None => boundary.clone(),
+            Some(first) => match neighbors.next() {
+                None => output[first.index()].clone(),
+                Some(second) => {
+                    let mut current = problem.meet(&output[first.index()], &output[second.index()]);
+                    for from in neighbors {
+                        current = problem.meet(&current, &output[from.index()]);
+                    }
+                    current
+                }
+            },
         };
-        let mut met: Option<P::Fact> = None;
-        for from in upstream {
-            let fact = &output[from.index()];
-            met = Some(match met {
-                Some(current) => problem.meet(&current, fact),
-                None => fact.clone(),
-            });
-        }
-        let met = met.unwrap_or_else(|| boundary.clone());
 
         let transferred = problem.transfer(graph, node, &met);
         input[node.index()] = met;
         if transferred != output[node.index()] {
             output[node.index()] = transferred;
-            let downstream: Vec<G::NodeId> = if forward {
-                graph.successors(node).collect()
-            } else {
-                graph.predecessors(node).collect()
-            };
-            for next in downstream {
+            for next in downstream.neighbors(graph, node) {
                 if !queued[next.index()] {
                     queued[next.index()] = true;
                     worklist.push_back(next);

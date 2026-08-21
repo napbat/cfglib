@@ -77,14 +77,24 @@ mod tests {
     fn merge_blocks_merges_linear_chain() {
         let mut cfg = Cfg::new();
         let b = cfg.new_block();
+        let c = cfg.new_block();
+        let d = cfg.new_block();
         cfg.block_mut(cfg.entry())
             .instructions_vec_mut()
             .push(ff("a"));
         cfg.block_mut(b).instructions_vec_mut().push(ff("b"));
+        cfg.block_mut(c).instructions_vec_mut().push(ff("c"));
+        cfg.block_mut(d).instructions_vec_mut().push(ff("d"));
         cfg.add_edge(cfg.entry(), b, EdgeKind::Fallthrough);
+        cfg.add_edge(b, c, EdgeKind::Fallthrough);
+        cfg.add_edge(c, d, EdgeKind::Fallthrough);
         let merged = merge_blocks(&mut cfg);
-        assert_eq!(merged, 1);
-        assert_eq!(cfg.block(cfg.entry()).instructions().len(), 2);
+        assert_eq!(merged, 3);
+        assert_eq!(cfg.block(cfg.entry()).instructions().len(), 4);
+        assert_eq!(cfg.successor_edges(cfg.entry()).len(), 0);
+        assert!(cfg.block(b).instructions().is_empty());
+        assert!(cfg.block(c).instructions().is_empty());
+        assert!(cfg.block(d).instructions().is_empty());
     }
 
     #[test]
@@ -108,7 +118,8 @@ mod tests {
     #[test]
     fn remove_empty_blocks_bypasses_empty_block() {
         let mut cfg = Cfg::new();
-        let empty = cfg.new_block();
+        let first_empty = cfg.new_block();
+        let second_empty = cfg.new_block();
         let target = cfg.new_block();
         cfg.block_mut(cfg.entry())
             .instructions_vec_mut()
@@ -116,13 +127,18 @@ mod tests {
         cfg.block_mut(target)
             .instructions_vec_mut()
             .push(ff("target"));
-        cfg.add_edge(cfg.entry(), empty, EdgeKind::Fallthrough);
-        cfg.add_edge(empty, target, EdgeKind::Fallthrough);
+        cfg.add_edge(cfg.entry(), first_empty, EdgeKind::Fallthrough);
+        cfg.add_edge(first_empty, second_empty, EdgeKind::Fallthrough);
+        cfg.add_edge(second_empty, target, EdgeKind::Fallthrough);
         let removed = remove_empty_blocks(&mut cfg);
-        assert_eq!(removed, 1);
+        assert_eq!(removed, 2);
         let succs: Vec<_> = cfg.successors(cfg.entry()).collect();
         assert_eq!(succs.len(), 1);
         assert_eq!(succs[0], target);
+        assert_eq!(cfg.predecessor_edges(first_empty).len(), 0);
+        assert_eq!(cfg.successor_edges(first_empty).len(), 0);
+        assert_eq!(cfg.predecessor_edges(second_empty).len(), 0);
+        assert_eq!(cfg.successor_edges(second_empty).len(), 0);
     }
 
     #[test]

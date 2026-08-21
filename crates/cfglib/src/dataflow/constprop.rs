@@ -118,32 +118,28 @@ impl<I: ConstantFolder> Problem<I> for ConstPropProblem {
 
     fn transfer(&self, cfg: &Cfg<I>, block: BlockId, input: &Self::Fact) -> Self::Fact {
         let mut state = input.clone();
+        let mut known: BTreeMap<I::Variable, I::Const> = state
+            .iter()
+            .filter_map(|(variable, value)| {
+                value
+                    .as_const()
+                    .map(|constant| (variable.clone(), constant.clone()))
+            })
+            .collect();
 
         for inst in cfg.block(block).instructions() {
-            // Build known-constants map for the folder.
-            let known: BTreeMap<I::Variable, I::Const> = state
-                .iter()
-                .filter_map(|(variable, value)| {
-                    value
-                        .as_const()
-                        .map(|constant| (variable.clone(), constant.clone()))
-                })
-                .collect();
-
             // Try constant folding. The folder answers for ONE def, but a
             // multi-def instruction redefined its co-defined variables too:
             // bottom every def first so no stale constant survives, then
             // record the folded one.
-            if let Some((loc, val)) = inst.fold_constant(&known) {
-                for variable in inst.defs() {
-                    state.insert(variable.clone(), ConstValue::Bottom);
-                }
-                state.insert(loc, ConstValue::Const(val));
-            } else {
-                // Default: all defs become Bottom (non-constant).
-                for variable in inst.defs() {
-                    state.insert(variable.clone(), ConstValue::Bottom);
-                }
+            let folded = inst.fold_constant(&known);
+            for variable in inst.defs() {
+                state.insert(variable.clone(), ConstValue::Bottom);
+                known.remove(variable);
+            }
+            if let Some((loc, val)) = folded {
+                state.insert(loc.clone(), ConstValue::Const(val.clone()));
+                known.insert(loc, val);
             }
         }
 
@@ -165,6 +161,50 @@ mod tests {
     use crate::cfg::Cfg;
     use crate::edge::EdgeKind;
     use crate::test_util::{DfInst, df_const, df_def, df_use};
+
+    #[derive(Clone, Copy)]
+    enum Fold {
+        Literal(i64),
+        Copy(u16),
+        Opaque,
+    }
+
+    struct KnownSensitiveInst {
+        uses: alloc::vec::Vec<u16>,
+        defs: alloc::vec::Vec<u16>,
+        fold: Fold,
+    }
+
+    impl InstrInfo for KnownSensitiveInst {
+        type Variable = u16;
+
+        fn uses(&self) -> &[Self::Variable] {
+            &self.uses
+        }
+
+        fn defs(&self) -> &[Self::Variable] {
+            &self.defs
+        }
+    }
+
+    impl ConstantFolder for KnownSensitiveInst {
+        type Const = i64;
+
+        fn fold_constant(
+            &self,
+            known: &BTreeMap<Self::Variable, Self::Const>,
+        ) -> Option<(Self::Variable, Self::Const)> {
+            let destination = *self.defs.first()?;
+            match self.fold {
+                Fold::Literal(value) => Some((destination, value)),
+                Fold::Copy(source) => known
+                    .get(&source)
+                    .copied()
+                    .map(|value| (destination, value)),
+                Fold::Opaque => None,
+            }
+        }
+    }
 
     #[test]
     fn meet_top_with_const() {
@@ -274,5 +314,44 @@ mod tests {
         let result = constant_propagation(&cfg);
         let fact_out = result.fact_out(cfg.entry());
         assert_eq!(fact_out.get(&0), Some(&ConstValue::Bottom));
+    }
+
+    #[test]
+    fn known_constants_are_updated_and_killed_within_one_block() {
+        let mut cfg = Cfg::new();
+        cfg.block_mut(cfg.entry()).instructions_vec_mut().extend([
+            KnownSensitiveInst {
+                uses: alloc::vec![],
+                defs: alloc::vec![0],
+                fold: Fold::Literal(7),
+            },
+            KnownSensitiveInst {
+                uses: alloc::vec![0],
+                defs: alloc::vec![1],
+                fold: Fold::Copy(0),
+            },
+            KnownSensitiveInst {
+                uses: alloc::vec![],
+                defs: alloc::vec![0],
+                fold: Fold::Opaque,
+            },
+            KnownSensitiveInst {
+                uses: alloc::vec![0],
+                defs: alloc::vec![2],
+                fold: Fold::Copy(0),
+            },
+            KnownSensitiveInst {
+                uses: alloc::vec![1],
+                defs: alloc::vec![3],
+                fold: Fold::Copy(1),
+            },
+        ]);
+
+        let result = constant_propagation(&cfg);
+        let out = result.fact_out(cfg.entry());
+        assert_eq!(out.get(&0), Some(&ConstValue::Bottom));
+        assert_eq!(out.get(&1), Some(&ConstValue::Const(7)));
+        assert_eq!(out.get(&2), Some(&ConstValue::Bottom));
+        assert_eq!(out.get(&3), Some(&ConstValue::Const(7)));
     }
 }

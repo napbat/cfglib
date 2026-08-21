@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn an_empty_fact_space_is_legal() {
         let clauses = HornClauses::new(0);
-        assert!(clauses.derivable().is_empty());
+        assert_eq!(clauses.derivable().len(), 0);
     }
 
     #[test]

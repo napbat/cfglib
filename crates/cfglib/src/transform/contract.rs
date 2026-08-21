@@ -4,7 +4,6 @@
 //! merging in [`super::cleanup`].
 
 extern crate alloc;
-use alloc::vec::Vec;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
@@ -17,7 +16,7 @@ use crate::cfg::Cfg;
 ///
 /// Returns `true` if contraction was performed, `false` if the edge
 /// cannot be contracted (e.g., target has other predecessors, or
-/// source has other successors).
+/// source has other successors). The CFG entry is never accepted as a target.
 ///
 /// Requires `I: Clone` because instruction vectors are manipulated.
 ///
@@ -35,16 +34,25 @@ use crate::cfg::Cfg;
 /// assert!(contract_edge(&mut cfg, b0, b1));
 /// ```
 pub fn contract_edge<I: Clone>(cfg: &mut Cfg<I>, source: BlockId, target: BlockId) -> bool {
+    if target == cfg.entry() {
+        return false;
+    }
+
     // Target must have exactly one predecessor (source).
-    if cfg.predecessor_edges(target).len() != 1 {
+    let [incoming] = cfg.predecessor_edges(target) else {
         return false;
-    }
+    };
+    let incoming = *incoming;
     // Source must have exactly one successor (target).
-    if cfg.successor_edges(source).len() != 1 {
+    let [connecting] = cfg.successor_edges(source) else {
         return false;
-    }
+    };
+    let connecting = *connecting;
     // Don't contract self-loops.
-    if source == target {
+    if source == target
+        || cfg.edge(incoming).source() != source
+        || cfg.edge(connecting).target() != target
+    {
         return false;
     }
 
@@ -55,33 +63,20 @@ pub fn contract_edge<I: Clone>(cfg: &mut Cfg<I>, source: BlockId, target: BlockI
         .extend(target_instrs);
 
     // Copy label if source doesn't have one.
-    if cfg.block(source).label().is_none()
-        && let Some(lbl) = cfg.block(target).label()
-    {
-        let owned = alloc::string::String::from(lbl);
-        cfg.block_mut(source).set_label(owned);
+    let inherited_label = if cfg.block(source).label().is_none() {
+        cfg.block(target).label().map(alloc::string::String::from)
+    } else {
+        None
+    };
+    if let Some(label) = inherited_label {
+        cfg.block_mut(source).set_label(label);
     }
 
     // Remove the edge source → target.
-    let edge_to_remove: Vec<_> = cfg
-        .successor_edges(source)
-        .iter()
-        .copied()
-        .filter(|&eid| cfg.edge(eid).target() == target)
-        .collect();
-    for eid in edge_to_remove {
-        cfg.remove_edge(eid);
-    }
+    cfg.remove_edge(connecting);
 
     // Redirect target's outgoing edges to source.
-    let target_out: Vec<_> = cfg.successor_edges(target).to_vec();
-    for &eid in &target_out {
-        let e = cfg.edge(eid);
-        let dest = e.target();
-        let kind = e.kind();
-        cfg.remove_edge(eid);
-        cfg.add_edge(source, dest, kind);
-    }
+    cfg.move_outgoing_edges(target, source);
 
     true
 }
@@ -131,6 +126,57 @@ mod tests {
 
         // merge has 2 predecessors — cannot contract.
         assert!(!contract_edge(&mut cfg, a, merge));
+    }
+
+    #[test]
+    fn contract_refuses_to_consume_the_entry_block() {
+        let mut cfg = Cfg::<u32>::new();
+        let entry = cfg.entry();
+        let source = cfg.new_block();
+        cfg.block_mut(entry).push(0);
+        cfg.block_mut(source).push(1);
+        let outgoing = cfg.add_edge(entry, source, EdgeKind::Fallthrough);
+        let back = cfg.add_edge(source, entry, EdgeKind::Back);
+
+        assert!(!contract_edge(&mut cfg, source, entry));
+
+        assert_eq!(cfg.block(entry).instructions(), &[0]);
+        assert_eq!(cfg.block(source).instructions(), &[1]);
+        assert_eq!(cfg.successor_edges(entry), &[outgoing]);
+        assert_eq!(cfg.successor_edges(source), &[back]);
+        assert_eq!(cfg.edge(back).target(), entry);
+        assert!(crate::verify(&cfg).is_ok());
+    }
+
+    #[test]
+    fn contract_preserves_parallel_weighted_edges_and_back_edge_identity() {
+        let mut cfg = Cfg::<u32>::new();
+        let source = cfg.entry();
+        let target = cfg.new_block();
+        let sink = cfg.new_block();
+        cfg.block_mut(source).push(0);
+        cfg.block_mut(target).push(1);
+        cfg.block_mut(sink).push(2);
+        cfg.add_edge(source, target, EdgeKind::Fallthrough);
+        let first = cfg.add_weighted_edge(target, sink, EdgeKind::ConditionalTrue, 0.25);
+        let second = cfg.add_weighted_edge(target, sink, EdgeKind::ConditionalFalse, 0.75);
+        let back = cfg.add_weighted_edge(target, source, EdgeKind::Back, 0.875);
+
+        assert!(contract_edge(&mut cfg, source, target));
+
+        assert_eq!(cfg.successor_edges(target), &[]);
+        assert_eq!(cfg.successor_edges(source), &[first, second, back]);
+        assert_eq!(cfg.edge(first).source(), source);
+        assert_eq!(cfg.edge(first).target(), sink);
+        assert_eq!(cfg.edge(first).kind(), EdgeKind::ConditionalTrue);
+        assert_eq!(cfg.edge(first).weight(), Some(0.25));
+        assert_eq!(cfg.edge(second).kind(), EdgeKind::ConditionalFalse);
+        assert_eq!(cfg.edge(second).weight(), Some(0.75));
+        assert_eq!(cfg.edge(back).source(), source);
+        assert_eq!(cfg.edge(back).target(), source);
+        assert_eq!(cfg.edge(back).kind(), EdgeKind::Back);
+        assert_eq!(cfg.edge(back).weight(), Some(0.875));
+        assert_eq!(cfg.num_edges(), 3);
     }
 
     #[test]

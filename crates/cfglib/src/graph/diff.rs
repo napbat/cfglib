@@ -185,20 +185,22 @@ pub fn cfg_diff<I, J>(left: &Cfg<I>, right: &Cfg<J>) -> CfgDiff {
             continue;
         }
         let fp = &left_fps[&lb];
-        if let Some(candidates) = fp_to_right.get_mut(fp)
-            && let Some(pos) = candidates.iter().position(|rb| !right_matched.contains(rb))
-        {
-            let rb = candidates.remove(pos);
-            let ic_changed =
-                left.block(lb).instructions().len() != right.block(rb).instructions().len();
-            matched.push(BlockMatch {
-                left: lb,
-                right: rb,
-                instruction_count_changed: ic_changed,
-            });
-            left_matched.insert(lb);
-            right_matched.insert(rb);
-        }
+        let Some(candidates) = fp_to_right.get_mut(fp) else {
+            continue;
+        };
+        let Some(pos) = candidates.iter().position(|rb| !right_matched.contains(rb)) else {
+            continue;
+        };
+        let rb = candidates.remove(pos);
+        let ic_changed =
+            left.block(lb).instructions().len() != right.block(rb).instructions().len();
+        matched.push(BlockMatch {
+            left: lb,
+            right: rb,
+            instruction_count_changed: ic_changed,
+        });
+        left_matched.insert(lb);
+        right_matched.insert(rb);
     }
 
     let left_only: Vec<BlockId> = left_blocks

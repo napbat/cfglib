@@ -172,7 +172,7 @@ mod tests {
 
         let dom = DominatorTree::compute(&cfg);
         let loops = detect_loops(&cfg, &dom);
-        assert!(!loops.is_empty());
+        assert_ne!(loops.len(), 0);
 
         let invs = find_loop_invariants(&cfg, &loops[0]);
         assert!(

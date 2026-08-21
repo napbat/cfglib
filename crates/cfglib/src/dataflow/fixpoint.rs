@@ -15,10 +15,8 @@ use crate::cfg::Cfg;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     /// Forward: information flows from predecessors to successors.
-    /// Iteration order: reverse postorder.
     Forward,
     /// Backward: information flows from successors to predecessors.
-    /// Iteration order: postorder.
     Backward,
 }
 
@@ -26,6 +24,8 @@ pub enum Direction {
 ///
 /// `F` is the flow fact type (e.g. `BTreeSet<DefSite>` for reaching
 /// definitions, or `BTreeSet<I::Variable>` for liveness).
+/// Termination requires `meet` and `transfer` to be monotone over a
+/// finite-height fact lattice.
 pub trait Problem<I> {
     /// The flow fact (lattice element) type.
     type Fact: Clone + PartialEq;
@@ -36,7 +36,7 @@ pub trait Problem<I> {
     /// Initial (bottom) value for each block.
     fn bottom(&self) -> Self::Fact;
 
-    /// Initial value for the entry (forward) or exit (backward) block.
+    /// Initial value for the entry (forward) or each exit (backward) block.
     fn entry_fact(&self) -> Self::Fact;
 
     /// Meet/join operator: merge information from multiple paths.
@@ -121,17 +121,20 @@ pub fn solve<I, P: Problem<I>>(cfg: &Cfg<I>, problem: &P) -> FixpointResult<P::F
         }
     }
 
-    // Build worklist in appropriate traversal order.
-    let order = match problem.direction() {
-        Direction::Forward => cfg.reverse_postorder(),
-        Direction::Backward => cfg.dfs_postorder(),
+    // Forward solving ignores blocks unreachable from the entry. Backward
+    // solving starts from every allocated block because every exit receives
+    // the boundary fact, including exits in disconnected components.
+    let mut worklist: BTreeSet<u32> = match problem.direction() {
+        Direction::Forward => cfg
+            .dfs_preorder()
+            .into_iter()
+            .map(|block| block.0)
+            .collect(),
+        Direction::Backward => cfg.blocks().iter().map(|block| block.id().0).collect(),
     };
 
-    let mut worklist: BTreeSet<u32> = order.iter().map(|b| b.0).collect();
-
-    while let Some(b_raw) = worklist.pop_first() {
-        let block = BlockId(b_raw);
-
+    while let Some(raw_block) = worklist.pop_first() {
+        let block = BlockId(raw_block);
         match problem.direction() {
             Direction::Forward => {
                 // IN = meet of all predecessors' OUT.
@@ -185,5 +188,54 @@ pub fn solve<I, P: Problem<I>>(cfg: &Cfg<I>, problem: &P) -> FixpointResult<P::F
     FixpointResult {
         block_in,
         block_out,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::edge::EdgeKind;
+
+    #[test]
+    fn backward_solver_propagates_through_disconnected_components() {
+        struct BackwardReachability;
+
+        impl Problem<()> for BackwardReachability {
+            type Fact = bool;
+
+            fn direction(&self) -> Direction {
+                Direction::Backward
+            }
+
+            fn bottom(&self) -> Self::Fact {
+                false
+            }
+
+            fn entry_fact(&self) -> Self::Fact {
+                true
+            }
+
+            fn meet(&self, a: &Self::Fact, b: &Self::Fact) -> Self::Fact {
+                *a || *b
+            }
+
+            fn transfer(&self, _cfg: &Cfg<()>, _block: BlockId, input: &Self::Fact) -> Self::Fact {
+                *input
+            }
+        }
+
+        let mut cfg = Cfg::new();
+        let disconnected_predecessor = cfg.new_block();
+        let disconnected_exit = cfg.new_block();
+        cfg.add_edge(
+            disconnected_predecessor,
+            disconnected_exit,
+            EdgeKind::Fallthrough,
+        );
+        let result = solve(&cfg, &BackwardReachability);
+        assert!(*result.fact_in(disconnected_predecessor));
+        assert!(*result.fact_out(disconnected_predecessor));
+        assert!(*result.fact_in(disconnected_exit));
+        assert!(*result.fact_out(disconnected_exit));
     }
 }

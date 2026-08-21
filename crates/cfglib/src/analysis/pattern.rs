@@ -169,9 +169,7 @@ pub fn detect_cfg_patterns<I>(cfg: &Cfg<I>) -> Vec<CfgPattern> {
             let true_target = cfg.successor_edges(*entry).iter().find_map(|&eid| {
                 (cfg.edge(eid).kind() == EdgeKind::ConditionalTrue).then(|| cfg.edge(eid).target())
             });
-            if let Some(target) = true_target
-                && arms[1] == target
-            {
+            if true_target == Some(arms[1]) {
                 arms.swap(0, 1);
             }
         }

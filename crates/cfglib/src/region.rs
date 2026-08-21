@@ -708,7 +708,7 @@ mod tests {
             Some(id)
         );
         // A frontend that records no routes carries no records.
-        assert!(cfg.cleanups().is_empty());
+        assert_eq!(cfg.cleanups().len(), 0);
         assert!(cfg.cleanup(HandlerRef::new(id, 0)).is_none());
     }
 

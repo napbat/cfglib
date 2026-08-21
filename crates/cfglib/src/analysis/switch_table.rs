@@ -56,15 +56,17 @@ pub trait SwitchSource {
 pub fn detect_switch_tables<I: SwitchSource>(cfg: &Cfg<I>) -> Vec<JumpTable<I::Target>> {
     let mut tables = Vec::new();
     for block in cfg.blocks() {
-        if let Some(last) = block.instructions().last()
-            && let Some((targets, default_target)) = last.switch_targets()
-        {
-            tables.push(JumpTable {
-                block: block.id(),
-                targets,
-                default_target,
-            });
-        }
+        let Some(last) = block.instructions().last() else {
+            continue;
+        };
+        let Some((targets, default_target)) = last.switch_targets() else {
+            continue;
+        };
+        tables.push(JumpTable {
+            block: block.id(),
+            targets,
+            default_target,
+        });
     }
     tables
 }
@@ -117,9 +119,7 @@ pub fn recover_switch_tables<I, T>(
         }
 
         // Add default target if present.
-        if let Some(default) = &table.default_target
-            && let Some(default_block) = resolve(default)
-        {
+        if let Some(default_block) = table.default_target.as_ref().and_then(&mut resolve) {
             cfg.add_edge(table.block, default_block, EdgeKind::Unconditional);
         }
 

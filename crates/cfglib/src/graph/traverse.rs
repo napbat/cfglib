@@ -299,7 +299,10 @@ fn shortest_path_from<G: DirectedGraphView, A: Adjacency>(
         goal.index() < graph.node_count(),
         "goal node is out of range"
     );
-    let mut previous = vec![None; graph.node_count()];
+    // `visited` guards every read, so an arbitrary valid node is a cheaper
+    // uninitialised marker than `Option<NodeId>` (which is wider for dense
+    // integer IDs).
+    let mut previous = vec![start; graph.node_count()];
     let mut visited = vec![false; graph.node_count()];
     let mut queue = VecDeque::new();
     visited[start.index()] = true;
@@ -310,7 +313,7 @@ fn shortest_path_from<G: DirectedGraphView, A: Adjacency>(
             let mut path = vec![goal];
             let mut current = goal;
             while current != start {
-                current = previous[current.index()]?;
+                current = previous[current.index()];
                 path.push(current);
             }
             path.reverse();
@@ -320,7 +323,7 @@ fn shortest_path_from<G: DirectedGraphView, A: Adjacency>(
         for next in axis.neighbors(graph, node) {
             if !visited[next.index()] {
                 visited[next.index()] = true;
-                previous[next.index()] = Some(node);
+                previous[next.index()] = node;
                 queue.push_back(next);
             }
         }
@@ -404,49 +407,59 @@ fn reachable_from<G: DirectedGraphView, A: Adjacency>(
     visited
 }
 
-/// Breadth-first discovery order from `start` together with the hop count to
-/// every node reachable by walking `direction` edges, `None` for the
-/// unreachable ones. `start` itself is discovered first, at distance 0.
+/// Hop counts from `start`, using `usize::MAX` for unreachable nodes, while
+/// reporting each node in breadth-first discovery order to `discovered`.
 ///
 /// `max_depth` bounds the walk: nodes farther than that many hops are neither
-/// discovered nor measured. `None` walks the whole reachable set.
+/// discovered nor measured. `None` walks the whole reachable set. `start`
+/// itself is reported first, at distance 0.
 fn breadth_first_bounded<G: DirectedGraphView, A: Adjacency>(
     axis: A,
     graph: &G,
     start: G::NodeId,
     max_depth: Option<usize>,
-) -> (Vec<G::NodeId>, Vec<Option<usize>>) {
-    let mut distances = vec![None; graph.node_count()];
-    let mut order = Vec::new();
-    let mut queue = VecDeque::new();
-    distances[start.index()] = Some(0);
-    order.push(start);
-    queue.push_back((start, 0_usize));
+) -> Vec<usize> {
+    breadth_first_bounded_with(axis, graph, start, max_depth, |_| {})
+}
 
-    while let Some((node, depth)) = queue.pop_front() {
+fn breadth_first_bounded_with<G: DirectedGraphView, A: Adjacency>(
+    axis: A,
+    graph: &G,
+    start: G::NodeId,
+    max_depth: Option<usize>,
+    mut discovered: impl FnMut(G::NodeId),
+) -> Vec<usize> {
+    let mut distances = vec![usize::MAX; graph.node_count()];
+    let mut queue = VecDeque::new();
+    distances[start.index()] = 0;
+    discovered(start);
+    queue.push_back(start);
+
+    while let Some(node) = queue.pop_front() {
+        let depth = distances[node.index()];
         if max_depth.is_some_and(|limit| depth >= limit) {
             continue;
         }
         for next in axis.neighbors(graph, node) {
-            if distances[next.index()].is_none() {
-                distances[next.index()] = Some(depth + 1);
-                order.push(next);
-                queue.push_back((next, depth + 1));
+            if distances[next.index()] == usize::MAX {
+                distances[next.index()] = depth + 1;
+                discovered(next);
+                queue.push_back(next);
             }
         }
     }
 
-    (order, distances)
+    distances
 }
 
-/// Hop counts from `start` to every node reachable along `axis`, `None` for
-/// the unreachable ones. `start` itself is at distance 0.
+/// Hop counts from `start` to every node reachable along `axis`, using
+/// `usize::MAX` for unreachable nodes. `start` itself is at distance 0.
 fn breadth_first_distances<G: DirectedGraphView, A: Adjacency>(
     axis: A,
     graph: &G,
     start: G::NodeId,
-) -> Vec<Option<usize>> {
-    breadth_first_bounded(axis, graph, start, None).1
+) -> Vec<usize> {
+    breadth_first_bounded(axis, graph, start, None)
 }
 
 /// Return the nearest node reachable from both `a` and `b` by walking
@@ -544,9 +557,10 @@ fn nearest_meet<G: DirectedGraphView, A: Adjacency>(
     graph
         .node_ids()
         .filter_map(|node| {
-            let reached_from_a = from_a[node.index()]?;
-            let reached_from_b = from_b[node.index()]?;
-            Some((reached_from_a + reached_from_b, node))
+            let reached_from_a = from_a[node.index()];
+            let reached_from_b = from_b[node.index()];
+            (reached_from_a != usize::MAX && reached_from_b != usize::MAX)
+                .then(|| (reached_from_a + reached_from_b, node))
         })
         .min()
         .map(|(_, node)| node)
@@ -664,8 +678,11 @@ fn all_meets<G: DirectedGraphView, A: Adjacency>(
 ) -> Vec<CommonAncestor<G::NodeId>> {
     assert!(a.index() < graph.node_count(), "node `a` is out of range");
     assert!(b.index() < graph.node_count(), "node `b` is out of range");
-    let (_, from_a) = breadth_first_bounded(axis, graph, a, max_depth);
-    let (order_b, from_b) = breadth_first_bounded(axis, graph, b, max_depth);
+    let from_a = breadth_first_bounded(axis, graph, a, max_depth);
+    let mut order_b = Vec::new();
+    let from_b = breadth_first_bounded_with(axis, graph, b, max_depth, |node| {
+        order_b.push(node);
+    });
 
     // Walking `b`'s discovery order — rather than the node ids — is what
     // makes the result's order the documented one; the bound is already
@@ -673,10 +690,12 @@ fn all_meets<G: DirectedGraphView, A: Adjacency>(
     order_b
         .into_iter()
         .filter_map(|node| {
-            Some(CommonAncestor {
+            let from_a = from_a[node.index()];
+            let from_b = from_b[node.index()];
+            (from_a != usize::MAX && from_b != usize::MAX).then_some(CommonAncestor {
                 node,
-                from_a: from_a[node.index()]?,
-                from_b: from_b[node.index()]?,
+                from_a,
+                from_b,
             })
         })
         .collect()
@@ -807,7 +826,7 @@ mod tests {
 
         // An empty graph yields an empty table rather than panicking.
         let empty = DirectedGraph::<(), ()>::new();
-        assert!(reachable(&empty, [], TraversalDirection::Outgoing).is_empty());
+        assert_eq!(reachable(&empty, [], TraversalDirection::Outgoing).len(), 0);
     }
 
     #[test]
@@ -1064,8 +1083,9 @@ mod tests {
             )),
             vec![mid]
         );
-        assert!(
-            common_ancestors(&graph, left, right, TraversalDirection::Incoming, Some(0)).is_empty()
+        assert_eq!(
+            common_ancestors(&graph, left, right, TraversalDirection::Incoming, Some(0)).len(),
+            0
         );
         // A bound at or beyond the eccentricity is the unbounded answer.
         assert_eq!(
@@ -1104,11 +1124,13 @@ mod tests {
         let lonely = graph.add_node(());
         let end = graph.add_node(());
         graph.add_edge(start, end, ());
-        assert!(
-            common_ancestors(&graph, start, lonely, TraversalDirection::Outgoing, None).is_empty()
+        assert_eq!(
+            common_ancestors(&graph, start, lonely, TraversalDirection::Outgoing, None).len(),
+            0
         );
-        assert!(
-            common_ancestors(&graph, end, lonely, TraversalDirection::Incoming, None).is_empty()
+        assert_eq!(
+            common_ancestors(&graph, end, lonely, TraversalDirection::Incoming, None).len(),
+            0
         );
     }
 

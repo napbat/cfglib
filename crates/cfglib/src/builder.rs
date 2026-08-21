@@ -520,10 +520,13 @@ pub struct JumpResolution<T> {
 pub fn resolve_jump_edges<I: JumpTargets>(cfg: &mut Cfg<I>) -> JumpResolution<I::Target> {
     let mut labels: BTreeMap<I::Target, BlockId> = BTreeMap::new();
     for block in cfg.blocks() {
-        if let Some(first) = block.instructions().first()
-            && first.flow_effect() == FlowEffect::Label
-            && let Some(token) = first.label()
-        {
+        let Some(first) = block.instructions().first() else {
+            continue;
+        };
+        if first.flow_effect() != FlowEffect::Label {
+            continue;
+        }
+        if let Some(token) = first.label() {
             labels.insert(token, block.id());
         }
     }
@@ -662,7 +665,7 @@ mod tests {
 
         let resolution = resolve_jump_edges(&mut cfg);
         assert_eq!(resolution.resolved, 1);
-        assert!(resolution.unresolved.is_empty());
+        assert_eq!(resolution.unresolved.len(), 0);
         let jump_edge = cfg
             .edges()
             .find(|edge| edge.kind() == EdgeKind::Jump)
@@ -1027,7 +1030,7 @@ mod tests {
             .edges()
             .filter(|e| e.kind() == EdgeKind::Unconditional)
             .collect();
-        assert!(!unconditional_edges.is_empty());
+        assert_ne!(unconditional_edges.len(), 0);
         assert!(cfg.num_blocks() >= 4);
     }
 

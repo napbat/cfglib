@@ -48,6 +48,12 @@ impl DenseNodeId for u32 {
 /// [`DirectedGraph`](super::directed::DirectedGraph), [`Cfg`](crate::Cfg),
 /// or a consumer-owned structure. Node identities must follow the
 /// [`DenseNodeId`] contract.
+///
+/// Forward and reverse adjacency must describe the same edge **multiset**.
+/// Every occurrence of `target` in `successors(source)` must have exactly one
+/// matching occurrence of `source` in `predecessors(target)`, including each
+/// parallel edge. Algorithms may combine the two directions without rebuilding
+/// or deduplicating either one.
 pub trait DirectedGraphView {
     /// Node identity used by this view.
     type NodeId: DenseNodeId;

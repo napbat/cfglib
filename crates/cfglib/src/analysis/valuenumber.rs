@@ -12,7 +12,7 @@ use smallvec::SmallVec;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::dataflow::InstrInfo;
-use crate::graph::dominator::DominatorTree;
+use crate::graph::dominator::{DominatorChildLinks, DominatorChildOrder, DominatorTree};
 
 /// A value number — opaque identifier for a computed value.
 pub type ValueNumber = u32;
@@ -148,10 +148,11 @@ pub fn global_value_numbering<I: ValueNumberInfo>(
     let mut variable_values: BTreeMap<I::Variable, ValueNumber> = BTreeMap::new();
     let mut expr_to_vn: BTreeMap<ExprKey<I::Operation>, ValueNumber> = BTreeMap::new();
     let mut next_vn: ValueNumber = 0;
+    let children = dom.child_links(DominatorChildOrder::Ascending);
 
     gvn_dfs(
         cfg,
-        dom,
+        &children,
         cfg.entry(),
         &mut variable_values,
         &mut expr_to_vn,
@@ -168,7 +169,7 @@ pub fn global_value_numbering<I: ValueNumberInfo>(
 /// Recursive DFS over the dominator tree with push/pop scoping.
 fn gvn_dfs<I: ValueNumberInfo>(
     cfg: &Cfg<I>,
-    dom: &DominatorTree,
+    children: &DominatorChildLinks<BlockId>,
     bid: BlockId,
     variable_values: &mut BTreeMap<I::Variable, ValueNumber>,
     expr_to_vn: &mut BTreeMap<ExprKey<I::Operation>, ValueNumber>,
@@ -250,17 +251,18 @@ fn gvn_dfs<I: ValueNumberInfo>(
     blocks.insert(bid, BlockValueNumbers { inst_vn, redundant });
 
     // Recurse into dominator-tree children.
-    let children = dom.children(bid);
-    for child in children {
+    let mut child = children.first_child(bid);
+    while let Some(next) = child {
         gvn_dfs(
             cfg,
-            dom,
-            child,
+            children,
+            next,
             variable_values,
             expr_to_vn,
             next_vn,
             blocks,
         );
+        child = children.next_sibling(next);
     }
 
     // Pop scope: undo all insertions/overwrites from this block.
@@ -379,7 +381,7 @@ mod tests {
             vn_inst(2, &[0, 1], &[3]), // different opcode
         ]);
         let (bvn, _) = local_value_numbering(&cfg, cfg.entry(), 0);
-        assert!(bvn.redundant.is_empty());
+        assert_eq!(bvn.redundant.len(), 0);
     }
 
     #[test]
@@ -428,7 +430,7 @@ mod tests {
         cfg.add_edge(cfg.entry(), b, EdgeKind::ConditionalFalse);
         let dom = DominatorTree::compute(&cfg);
         let vn = global_value_numbering(&cfg, &dom);
-        assert!(vn.blocks[&a].redundant.is_empty());
-        assert!(vn.blocks[&b].redundant.is_empty());
+        assert_eq!(vn.blocks[&a].redundant.len(), 0);
+        assert_eq!(vn.blocks[&b].redundant.len(), 0);
     }
 }
