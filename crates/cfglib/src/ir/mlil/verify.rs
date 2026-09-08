@@ -123,8 +123,17 @@ fn verify_cfg<D: Dialect>(function: &Function<D>, issues: &mut Vec<VerificationI
     }
 
     for block in function.cfg.blocks() {
-        if block.id() != entry && block.is_empty() {
-            issue(issues, format!("semantic block {} is empty", block.id()));
+        if block.id() != entry
+            && block.is_empty()
+            && !function.cfg.successor_edges(block.id()).is_empty()
+        {
+            issue(
+                issues,
+                format!(
+                    "semantic block {} is empty but has outgoing edges",
+                    block.id()
+                ),
+            );
         }
     }
 }

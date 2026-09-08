@@ -208,3 +208,60 @@ fn unreachable_blocks_are_preserved() {
     let function = lifting.builder.finish().unwrap();
     assert_eq!(function.cfg().block_count(), 3, "the orphan block survives");
 }
+
+/// A terminal block without statements retains a control-flow path whose
+/// destination is outside the recovered function.
+#[test]
+fn an_empty_terminal_block_lifts_as_an_unresolved_exit() {
+    let mut builder = FunctionBuilder::<TestDialect>::new("test".into());
+    let entry = builder.entry();
+    let branch = builder.new_block("branch");
+    let resolved = builder.new_block("resolved");
+    let unresolved = builder.new_block("unresolved");
+    builder.add_edge(entry, branch, Edge::Entry).unwrap();
+    builder.add_edge(branch, resolved, Edge::False).unwrap();
+    builder.add_edge(branch, unresolved, Edge::True).unwrap();
+    builder
+        .append(
+            branch,
+            Statement::Branch {
+                condition: read(9, &[0], ScalarType::U32),
+            },
+            None,
+        )
+        .unwrap();
+    builder
+        .append(resolved, Statement::Return { values: Vec::new() }, None)
+        .unwrap();
+    let function = builder.finish().expect("the RTL exit is valid");
+
+    let lifting = lift(&function, &()).expect("the unresolved exit lifts");
+    let lifted_unresolved = lifting
+        .maps
+        .block(unresolved)
+        .expect("the empty exit keeps its block mapping");
+    let function = lifting.builder.finish().expect("the MLIL exit is valid");
+
+    assert!(function.cfg().block(lifted_unresolved).is_empty());
+    assert!(function.cfg().successor_edges(lifted_unresolved).is_empty());
+}
+
+#[test]
+fn an_empty_forwarding_block_remains_invalid_mlil() {
+    let mut builder = FunctionBuilder::<TestDialect>::new("test".into());
+    let entry = builder.entry();
+    let forwarding = builder.new_block("forwarding");
+    let exit = builder.new_block("exit");
+    builder.add_edge(entry, forwarding, Edge::Entry).unwrap();
+    builder.add_edge(forwarding, exit, Edge::Fall).unwrap();
+    builder
+        .append(exit, Statement::Return { values: Vec::new() }, None)
+        .unwrap();
+    let function = builder.finish().expect("the RTL forwarding block is valid");
+
+    let lifting = lift(&function, &()).expect("the RTL structure lifts");
+    assert!(
+        lifting.builder.finish().is_err(),
+        "a nonterminal semantic block must contain an instruction"
+    );
+}
