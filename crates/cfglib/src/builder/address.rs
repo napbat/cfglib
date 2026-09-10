@@ -54,7 +54,7 @@ unsigned_address_space!(u8, u16, u32, u64, usize);
 /// One instruction's address-shaped control transfer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AddressFlow<A, K> {
-    /// Continues at the next instruction.
+    /// Continues at the instruction's exclusive end address.
     FallThrough,
     /// Leaves the function normally.
     Return,
@@ -62,7 +62,8 @@ pub enum AddressFlow<A, K> {
     Throw,
     /// Transfers to a target the stream does not name.
     Indirect,
-    /// Branches to `target` when taken, falls through otherwise.
+    /// Branches to `target` when taken. Otherwise, continues at the
+    /// instruction's exclusive end address.
     Conditional {
         /// Taken-path target address.
         target: A,
@@ -72,7 +73,8 @@ pub enum AddressFlow<A, K> {
         /// Branch target address.
         target: A,
     },
-    /// Calls `target` and continues at the next instruction.
+    /// Calls `target` and continues at the instruction's exclusive end
+    /// address.
     Call {
         /// Call target address.
         target: A,
@@ -142,7 +144,7 @@ pub struct AddressHandler<A> {
 /// Why one edge exists, as described to the payload builder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddressEdgeRole<'k, A, K> {
-    /// Sequential continuation into the next block.
+    /// Sequential continuation from an instruction's exclusive end address.
     Sequential,
     /// Taken path of a conditional branch.
     ConditionalTaken,
@@ -192,12 +194,12 @@ pub enum AddressBuildError<A> {
         /// The empty instruction's address.
         address: A,
     },
-    /// An instruction begins before its predecessor ends.
-    OverlappingInstruction {
-        /// The overlapping instruction's address.
+    /// Instruction start addresses are not in strictly increasing order.
+    UnorderedInstruction {
+        /// The preceding instruction's address.
+        previous: A,
+        /// The next instruction's address.
         address: A,
-        /// Where the previous instruction ends.
-        previous_end: A,
     },
     /// An instruction's end does not fit the address space.
     AddressOverflow {
@@ -241,13 +243,9 @@ impl<A: fmt::Display> fmt::Display for AddressBuildError<A> {
             Self::ZeroSizeInstruction { address } => {
                 write!(formatter, "instruction at {address} occupies no addresses")
             }
-            Self::OverlappingInstruction {
-                address,
-                previous_end,
-            } => write!(
+            Self::UnorderedInstruction { previous, address } => write!(
                 formatter,
-                "instruction at {address} begins before the previous instruction ends at \
-                 {previous_end}"
+                "instruction addresses are not increasing: {previous} then {address}"
             ),
             Self::AddressOverflow { address } => write!(
                 formatter,
@@ -292,7 +290,8 @@ pub struct AddressGraph<I: AddressInstruction, E> {
 /// Builds a CFG from a sorted, sized, addressed instruction stream.
 ///
 /// Leaders are introduced at the entry, at every direct branch target,
-/// after every block-ending instruction, and at exception boundaries —
+/// after every block-ending instruction, at each overlapping path boundary,
+/// and at exception boundaries —
 /// every instruction inside a protected range leads its own block, so
 /// unwind edges stay instruction-exact. Handlers sharing one protected
 /// range share one region; enclosing regions are registered before nested
@@ -310,9 +309,13 @@ pub struct AddressGraph<I: AddressInstruction, E> {
 ///
 /// # Errors
 ///
-/// Returns an [`AddressBuildError`] when instructions overlap or have zero
-/// size, a direct target is off an instruction boundary, or exception
-/// metadata names invalid addresses.
+/// Instructions can overlap when they have different start addresses. The
+/// builder uses each instruction's exclusive end address for fall-through
+/// edges, so one byte range can belong to more than one control-flow path.
+///
+/// Returns an [`AddressBuildError`] when instruction starts are not strictly
+/// increasing, an instruction has zero size, a direct target is off an
+/// instruction boundary, or exception metadata names invalid addresses.
 pub fn build_address_cfg<I: AddressInstruction, E>(
     instructions: Vec<I>,
     handlers: &[AddressHandler<I::Address>],
@@ -347,7 +350,8 @@ pub fn build_address_cfg<I: AddressInstruction, E>(
 fn validate_instructions<I: AddressInstruction>(
     instructions: &[I],
 ) -> Result<Option<I::Address>, AddressBuildError<I::Address>> {
-    let mut previous_end = None;
+    let mut previous_address = None;
+    let mut code_end = None;
     for instruction in instructions {
         let address = instruction.address();
         let end = instruction
@@ -356,17 +360,17 @@ fn validate_instructions<I: AddressInstruction>(
         if end <= address {
             return Err(AddressBuildError::ZeroSizeInstruction { address });
         }
-        if let Some(previous_end) = previous_end
-            && address < previous_end
+        if let Some(previous) = previous_address
+            && address <= previous
         {
-            return Err(AddressBuildError::OverlappingInstruction {
-                address,
-                previous_end,
-            });
+            return Err(AddressBuildError::UnorderedInstruction { previous, address });
         }
-        previous_end = Some(end);
+        previous_address = Some(address);
+        if code_end.is_none_or(|current| end > current) {
+            code_end = Some(end);
+        }
     }
-    Ok(previous_end)
+    Ok(code_end)
 }
 
 fn collect_flow_leaders<I: AddressInstruction>(
@@ -400,10 +404,28 @@ fn collect_flow_leaders<I: AddressInstruction>(
                 }
             }
         }
-        if flow.ends_basic_block()
-            && let Some(next) = instructions.get(position + 1)
+        let next = instructions.get(position + 1);
+        let continues_to_next =
+            next.is_some_and(|next| instruction.end_address() == Some(next.address()));
+        if let Some(next) = next
+            && (!matches!(&flow, AddressFlow::FallThrough) || !continues_to_next)
         {
             leaders.insert(next.address());
+        }
+        let continuation_starts_block = match &flow {
+            AddressFlow::FallThrough => !continues_to_next,
+            AddressFlow::Conditional { .. } | AddressFlow::Call { .. } => true,
+            AddressFlow::Return
+            | AddressFlow::Throw
+            | AddressFlow::Indirect
+            | AddressFlow::Unconditional { .. }
+            | AddressFlow::Switch { .. } => false,
+        };
+        if continuation_starts_block
+            && let Some(continuation) = instruction.end_address()
+            && instruction_addresses.contains(&continuation)
+        {
+            leaders.insert(continuation);
         }
     }
     Ok(leaders)
@@ -489,13 +511,15 @@ fn add_normal_edges<I: AddressInstruction, E>(
         .map(crate::BasicBlock::id)
         .collect();
 
-    for (position, &block) in blocks.iter().enumerate() {
+    for &block in &blocks {
         let Some(terminator) = cfg.block(block).instructions().last() else {
             continue;
         };
         let source = terminator.address();
         let flow = terminator.flow();
-        let next = blocks.get(position + 1).copied();
+        let continuation = terminator
+            .end_address()
+            .and_then(|address| instruction_blocks.get(&address).copied());
         add_terminator_edges(
             cfg,
             instruction_blocks,
@@ -503,7 +527,7 @@ fn add_normal_edges<I: AddressInstruction, E>(
             block,
             source,
             flow,
-            next,
+            continuation,
         );
     }
 }
@@ -515,7 +539,7 @@ fn add_terminator_edges<I: AddressInstruction, E>(
     block: BlockId,
     source: I::Address,
     flow: AddressFlow<I::Address, I::CaseKey>,
-    next: Option<BlockId>,
+    continuation: Option<BlockId>,
 ) {
     let mut add = |cfg: &mut Cfg<I, E>,
                    target: BlockId,
@@ -539,7 +563,7 @@ fn add_terminator_edges<I: AddressInstruction, E>(
     };
     match flow {
         AddressFlow::FallThrough => {
-            if let Some(next) = next {
+            if let Some(next) = continuation {
                 add(
                     cfg,
                     next,
@@ -555,7 +579,7 @@ fn add_terminator_edges<I: AddressInstruction, E>(
                 EdgeKind::ConditionalTrue,
                 AddressEdgeRole::ConditionalTaken,
             );
-            if let Some(next) = next {
+            if let Some(next) = continuation {
                 add(
                     cfg,
                     next,
@@ -595,7 +619,7 @@ fn add_terminator_edges<I: AddressInstruction, E>(
                 EdgeKind::Call,
                 AddressEdgeRole::Call,
             );
-            if let Some(next) = next {
+            if let Some(next) = continuation {
                 add(
                     cfg,
                     next,

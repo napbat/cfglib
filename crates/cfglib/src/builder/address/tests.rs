@@ -14,6 +14,7 @@ use super::{
 #[derive(Debug, Clone)]
 struct Inst {
     address: u32,
+    size: u32,
     flow: AddressFlow<u32, i32>,
     throws: bool,
 }
@@ -21,6 +22,7 @@ struct Inst {
 fn inst(address: u32, flow: AddressFlow<u32, i32>) -> Inst {
     Inst {
         address,
+        size: 1,
         flow,
         throws: true,
     }
@@ -35,7 +37,7 @@ impl AddressInstruction for Inst {
     }
 
     fn end_address(&self) -> Option<u32> {
-        self.address.checked_add(1)
+        self.address.checked_add(self.size)
     }
 
     fn flow(&self) -> AddressFlow<u32, i32> {
@@ -44,6 +46,15 @@ impl AddressInstruction for Inst {
 
     fn retains_exception_edge(&self) -> bool {
         self.throws
+    }
+}
+
+fn sized_inst(address: u32, size: u32, flow: AddressFlow<u32, i32>) -> Inst {
+    Inst {
+        address,
+        size,
+        flow,
+        throws: true,
     }
 }
 
@@ -266,16 +277,60 @@ fn shared_protected_ranges_share_one_region() {
 }
 
 #[test]
+fn overlapping_paths_use_each_instruction_end_for_fall_through() {
+    let instructions = vec![
+        sized_inst(0, 2, AddressFlow::Conditional { target: 3 }),
+        sized_inst(2, 5, AddressFlow::FallThrough),
+        inst(3, AddressFlow::FallThrough),
+        inst(4, AddressFlow::FallThrough),
+        inst(5, AddressFlow::FallThrough),
+        inst(6, AddressFlow::FallThrough),
+        inst(7, AddressFlow::Return),
+    ];
+
+    let graph = build_address_cfg(instructions, &[], payload).unwrap();
+
+    assert_eq!(graph.cfg.block_count(), 4);
+    assert_eq!(graph.instruction_blocks[&3], graph.instruction_blocks[&6]);
+    assert_ne!(graph.instruction_blocks[&2], graph.instruction_blocks[&3]);
+    assert_ne!(graph.instruction_blocks[&6], graph.instruction_blocks[&7]);
+    let mut edges: Vec<_> = graph.cfg.edges().map(|edge| *edge.payload()).collect();
+    edges.sort_unstable_by_key(|&(source, target, _, role)| (source, target, role));
+    assert_eq!(
+        edges,
+        vec![
+            (0, 2, EdgeKind::ConditionalFalse, "fall"),
+            (0, 3, EdgeKind::ConditionalTrue, "taken"),
+            (2, 7, EdgeKind::Fallthrough, "seq"),
+            (6, 7, EdgeKind::Fallthrough, "seq"),
+        ]
+    );
+}
+
+#[test]
+fn a_fall_through_does_not_cross_an_address_gap() {
+    let instructions = vec![
+        inst(0, AddressFlow::FallThrough),
+        inst(2, AddressFlow::Return),
+    ];
+
+    let graph = build_address_cfg(instructions, &[], payload).unwrap();
+
+    assert_eq!(graph.cfg.block_count(), 2);
+    assert_eq!(graph.cfg.edge_count(), 0);
+}
+
+#[test]
 fn invalid_streams_are_rejected_with_exact_errors() {
-    let overlapping = vec![
+    let duplicate = vec![
         inst(0, AddressFlow::FallThrough),
         inst(0, AddressFlow::Return),
     ];
     assert_eq!(
-        build_address_cfg(overlapping, &[], payload).unwrap_err(),
-        AddressBuildError::OverlappingInstruction {
+        build_address_cfg(duplicate, &[], payload).unwrap_err(),
+        AddressBuildError::UnorderedInstruction {
+            previous: 0,
             address: 0,
-            previous_end: 1,
         },
     );
 
