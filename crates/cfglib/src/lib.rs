@@ -206,8 +206,8 @@ pub use analysis::value_numbering::{
 };
 pub use block::{BasicBlock, BlockId};
 pub use builder::address::{
-    AddressBuildError, AddressEdgeInfo, AddressEdgeRole, AddressFlow, AddressGraph, AddressHandler,
-    AddressInstruction, AddressSpace, build_address_cfg,
+    AddressBuildError, AddressCfgOptions, AddressEdgeInfo, AddressGraph, AddressHandler,
+    AddressInstruction, AddressSpace, CallPolicy, build_address_cfg,
 };
 pub use builder::structured::{
     StructuredEdge, StructuredSink, StructuredWalk, StructuredWalkIssue,
@@ -268,7 +268,10 @@ pub use exception::{
     SehRegistrationChain, VectoredExceptionModel, VectoredHandler, VectoredHandlerId,
     VectoredHandlerKind, VectoredHandlerOrder, VehModel, install_clr_region, install_seh_region,
 };
-pub use flow::{CallInfo, FlowControl, FlowEffect, JumpTargets};
+pub use flow::{
+    CallInfo, CallSite, EdgeRole, Flow, FlowControl, FlowEffect, JumpTargets, Transfer, Transfers,
+    UnresolvedRole, UnresolvedTransfer,
+};
 pub use graph::call_graph::{
     CallMetadata, FunctionNode, call_graph, find_function, is_recursive_function,
     propagate_summaries,

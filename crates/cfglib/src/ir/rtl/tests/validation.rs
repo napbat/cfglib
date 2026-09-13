@@ -246,8 +246,11 @@ fn an_empty_terminal_block_lifts_as_an_unresolved_exit() {
     assert!(function.cfg().successor_edges(lifted_unresolved).is_empty());
 }
 
+/// A block without statements that continues on one edge is a trampoline:
+/// a machine block holding only a jump, or a `nop` that leads a block,
+/// lifts without inventing an instruction for it.
 #[test]
-fn an_empty_forwarding_block_remains_invalid_mlil() {
+fn an_empty_forwarding_block_lifts_as_a_trampoline() {
     let mut builder = FunctionBuilder::<TestDialect>::new("test".into());
     let entry = builder.entry();
     let forwarding = builder.new_block("forwarding");
@@ -260,8 +263,41 @@ fn an_empty_forwarding_block_remains_invalid_mlil() {
     let function = builder.finish().expect("the RTL forwarding block is valid");
 
     let lifting = lift(&function, &()).expect("the RTL structure lifts");
+    let lifted_forwarding = lifting
+        .maps
+        .block(forwarding)
+        .expect("the trampoline keeps its block mapping");
+    let function = lifting
+        .builder
+        .finish()
+        .expect("an empty block with one continuation is valid MLIL");
+    assert!(function.cfg().block(lifted_forwarding).is_empty());
+    assert_eq!(function.cfg().successor_edges(lifted_forwarding).len(), 1);
+}
+
+/// An empty block cannot decide between successors: that takes a branch.
+#[test]
+fn an_empty_deciding_block_remains_invalid_mlil() {
+    let mut builder = FunctionBuilder::<TestDialect>::new("test".into());
+    let entry = builder.entry();
+    let deciding = builder.new_block("deciding");
+    let left = builder.new_block("left");
+    let right = builder.new_block("right");
+    builder.add_edge(entry, deciding, Edge::Entry).unwrap();
+    builder.add_edge(deciding, left, Edge::True).unwrap();
+    builder.add_edge(deciding, right, Edge::False).unwrap();
+    for block in [left, right] {
+        builder
+            .append(block, Statement::Return { values: Vec::new() }, None)
+            .unwrap();
+    }
+    let function = builder
+        .finish()
+        .expect("the RTL graph is structurally valid");
+
+    let lifting = lift(&function, &()).expect("the RTL structure lifts");
     assert!(
         lifting.builder.finish().is_err(),
-        "a nonterminal semantic block must contain an instruction"
+        "an empty block that decides between successors is invalid"
     );
 }

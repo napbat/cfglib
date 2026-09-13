@@ -10,16 +10,16 @@ use super::error::Result;
 use super::template::LiftedStatement;
 use super::types::{Constraint, Shape};
 
-/// The canonical edge vocabulary for dialects with plain two-way
-/// branching.
+/// The canonical edge vocabulary for dialects with plain two-way branching
+/// and exception unwind flow.
 ///
 /// A dialect whose control flow is fallthrough plus conditional
-/// true/false — no fused dispatch, no exceptional edges — can use this
+/// true/false plus unwind edges — no fused dispatch or typed handlers — can use this
 /// as its [`Dialect::Edge`] (and its
 /// [`mlil::Dialect::Edge`](crate::ir::mlil::Dialect::Edge)) and delegate
 /// the trait's edge hooks to [`kind`](Self::kind) and
-/// [`is_entry`](Self::is_entry). Dialects with switches, exceptions, or
-/// legacy continuations define their own edge type instead.
+/// [`is_entry`](Self::is_entry). Dialects with switches, typed handler
+/// metadata, or legacy continuations define their own edge type instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Edge {
     /// The synthetic root's unique entry edge.
@@ -30,6 +30,8 @@ pub enum Edge {
     True,
     /// Not-taken branch of a conditional.
     False,
+    /// Exceptional transfer from a faulting operation to a handler.
+    Unwind,
 }
 
 impl Edge {
@@ -40,6 +42,7 @@ impl Edge {
             Self::Entry | Self::Fall => EdgeKind::Fallthrough,
             Self::True => EdgeKind::ConditionalTrue,
             Self::False => EdgeKind::ConditionalFalse,
+            Self::Unwind => EdgeKind::ExceptionUnwind,
         }
     }
 

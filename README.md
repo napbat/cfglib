@@ -147,7 +147,7 @@ definition-to-reference bindings.
 | Block splitting | `split_block()`, mapped payload-aware variants, and validated multi-point splitting with automatic stable edge transfer |
 | `serde` feature | Optional serialization support |
 
-| Leader-based construction | `build_address_cfg`, `AddressInstruction` / `AddressSpace` traits, `AddressFlow`, `AddressHandler` | Machine/bytecode streams: leaders at targets, after terminators, and at exception boundaries; typed normal + unwind edges through a consumer payload hook; nested regions registered enclosing-first with parents wired |
+| Leader-based construction | `build_address_cfg`, `AddressCfgOptions` / `CallPolicy`, `AddressInstruction` / `AddressSpace` traits, `Flow`, `AddressHandler` | Machine/bytecode streams: caller-selected function entry; calls kept as edges or flattened into reported call sites; leaders at targets, after terminators, at exceptional instructions, and at exception boundaries; known successors retained beside explicit unresolved transfers; typed normal, instruction-exceptional, and unwind edges through a consumer payload hook, every kind chosen by `EdgeRole::kind`; nested regions registered enclosing-first with parents wired |
 | Structured-marker walk driver | `StructuredWalk` + `StructuredSink` | The if/else/loop/break/continue frame bookkeeping for lifts that emit into checked builders (RTL, MLIL) or any block store; typed `StructuredWalkIssue` misuse reporting |
 
 ### Generic register-transfer IR (`ir::rtl`)

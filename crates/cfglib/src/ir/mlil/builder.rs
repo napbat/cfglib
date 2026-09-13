@@ -332,9 +332,13 @@ fn require_source_span<D: Dialect>(source: Option<&D::SourceSpan>) -> Result<()>
 impl<D: VerifyDialect> FunctionBuilder<D> {
     /// Completes and strictly verifies the function.
     ///
-    /// An empty semantic block is valid when it has no outgoing edges. Such a
-    /// block represents an unresolved or opaque function exit. A semantic
-    /// block with outgoing edges must contain an instruction.
+    /// An empty semantic block is valid when it forwards control unchanged:
+    /// it has no outgoing edge and represents an unresolved or opaque exit,
+    /// or it has exactly one non-exceptional outgoing edge and is a
+    /// trampoline, such as a machine block holding only a jump or a `nop`.
+    /// A block that decides between successors must hold the instruction
+    /// that decides, and a block with an exceptional edge must hold the
+    /// instruction that throws.
     ///
     /// # Errors
     ///

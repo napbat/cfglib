@@ -182,6 +182,12 @@ impl mlil::AnalysisDialect for SemanticDialect {
     }
 }
 
+#[test]
+fn canonical_edge_vocabulary_preserves_unwind_flow() {
+    assert_eq!(Edge::Unwind.kind(), EdgeKind::ExceptionUnwind);
+    assert!(!Edge::Unwind.is_entry());
+}
+
 impl hlil::Dialect for SemanticDialect {
     type Operation = LiftedStatement<TestDialect>;
     type Constant = Vec<u64>;

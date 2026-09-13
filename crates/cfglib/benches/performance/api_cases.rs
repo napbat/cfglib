@@ -1,5 +1,6 @@
 use super::harness::{BenchmarkSuite, benchmark_coverage};
 
+mod address;
 mod analysis;
 mod dataflow;
 mod fixtures;
@@ -18,6 +19,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "breadth_first_events",
     "breadth_first_view_edges",
     "breadth_first_view_edges_with",
+    "build_address_cfg",
     "call_graph",
     "canonicalize_loops",
     "cfg_block_nesting_depths",
@@ -149,6 +151,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
 ];
 
 pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
+    address::register(suite);
     benchmark_coverage!(suite, "cfg_depth_first_preorder", [depth_first_preorder]);
     benchmark_coverage!(suite, "cfg_breadth_first", [breadth_first]);
     benchmark_coverage!(

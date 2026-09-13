@@ -122,15 +122,33 @@ fn verify_cfg<D: Dialect>(function: &Function<D>, issues: &mut Vec<VerificationI
         issue(issues, "synthetic root edge is not an entry edge");
     }
 
+    // An empty semantic block can only forward control unchanged: one
+    // non-exceptional successor, or none for an opaque exit. Deciding
+    // between successors needs a branch, and an exceptional edge needs a
+    // throwing instruction to own it.
     for block in function.cfg.blocks() {
-        if block.id() != entry
-            && block.is_empty()
-            && !function.cfg.successor_edges(block.id()).is_empty()
+        if block.id() == entry || !block.is_empty() {
+            continue;
+        }
+        let outgoing = function.cfg.successor_edges(block.id());
+        if outgoing.len() > 1 {
+            issue(
+                issues,
+                format!(
+                    "empty semantic block {} decides between {} outgoing edges",
+                    block.id(),
+                    outgoing.len()
+                ),
+            );
+        }
+        if outgoing
+            .iter()
+            .any(|&edge| D::edge_kind(function.cfg.edge(edge).payload()).is_exceptional())
         {
             issue(
                 issues,
                 format!(
-                    "semantic block {} is empty but has outgoing edges",
+                    "empty semantic block {} has an exceptional edge and no throwing instruction",
                     block.id()
                 ),
             );

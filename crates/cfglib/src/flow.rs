@@ -1,13 +1,28 @@
-//! Control-flow classification for builder-driven construction.
+//! The flow substrate: how an operation transfers control, and how the
+//! builders read it.
 //!
 //! Direct structural construction
 //! ([`Cfg::new_block`](crate::Cfg::new_block) /
-//! [`Cfg::add_edge`](crate::Cfg::add_edge)) needs no trait at all.
-//! [`FlowControl`] exists for the other front door: frontends with a flat,
-//! structured instruction stream implement it so
-//! [`CfgBuilder`](crate::CfgBuilder) can classify each instruction, and
-//! the opt-in companions here ([`JumpTargets`], [`CallInfo`]) type the
-//! branch and call targets those instructions carry.
+//! [`Cfg::add_edge`](crate::Cfg::add_edge)) needs no trait at all. The two
+//! builder front doors read one of two descriptions:
+//!
+//! - [`Flow`] states an operation's successors by target identity: a code
+//!   address, a label, a block. [`build_address_cfg`](crate::build_address_cfg)
+//!   reads it through [`AddressInstruction`](crate::AddressInstruction), and
+//!   any walker that follows control from operation to operation reads it
+//!   through [`Flow::transfers`]. Every edge it produces carries an
+//!   [`EdgeRole`], and [`EdgeRole::kind`] is the one mapping from a role to
+//!   the structural [`EdgeKind`](crate::EdgeKind).
+//! - [`FlowControl`] classifies an operation in a flat, structured stream
+//!   (`if`/`else`/`endif`, loops, breaks) so [`CfgBuilder`](crate::CfgBuilder)
+//!   can pair the markers, and the opt-in companions ([`JumpTargets`],
+//!   [`CallInfo`]) type the branch and call targets those operations carry.
+
+pub mod transfer;
+
+pub use transfer::{
+    CallSite, EdgeRole, Flow, Transfer, Transfers, UnresolvedRole, UnresolvedTransfer,
+};
 
 /// Classification of an instruction's effect on control flow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
