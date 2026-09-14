@@ -141,6 +141,15 @@ impl crate::dataflow::constant_propagation::ConstantFolder for DfInst {
         }
         None
     }
+
+    fn fold_branch(&self, known: &alloc::collections::BTreeMap<u16, i64>) -> Option<bool> {
+        // A predicated instruction stands for the block's conditional
+        // terminator: it branches when the predicate variable matches the
+        // recorded polarity, and a non-zero value is the true condition.
+        let (variable, when_true) = self.pred?;
+        let value = known.get(&variable)?;
+        Some((*value != 0) == when_true)
+    }
 }
 
 /// Default fields for a `DfInst` (no copy, no expr, no constant).
@@ -162,7 +171,10 @@ fn df_base(name: &'static str) -> DfInst {
 
 /// Create a [`DfInst`] predicated on `(variable, polarity)`. Per the
 /// [`Predicated`](crate::dataflow::Predicated) contract, the predicate
-/// variable is also a use.
+/// variable is also a use. As the last instruction of a block it is also
+/// the block's conditional terminator, so
+/// [`ConstantFolder::fold_branch`](crate::ConstantFolder::fold_branch)
+/// decides the same condition.
 pub fn df_pred(name: &'static str, variable: u16, when_true: bool) -> DfInst {
     DfInst {
         pred: Some((variable, when_true)),

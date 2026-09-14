@@ -119,6 +119,41 @@ pub trait AnalysisDialect: Dialect {
         known: &BTreeMap<VariableId, Self::Constant>,
     ) -> Option<(VariableId, Self::Constant)>;
 
+    /// Decides the conditional transfer an instruction ends its block with.
+    ///
+    /// Returns `Some(true)` when `known` proves that the
+    /// [`ConditionalTrue`](EdgeKind::ConditionalTrue) edge is taken, and
+    /// `Some(false)` when it proves that the
+    /// [`ConditionalFalse`](EdgeKind::ConditionalFalse) edge is taken.
+    /// Returns `None` when the instruction is not a conditional terminator,
+    /// or when the condition is not decided.
+    ///
+    /// `known` holds the same entries [`fold_constant`](Self::fold_constant)
+    /// receives. The default answers `None`, which leaves every outgoing
+    /// edge of the block executable.
+    fn fold_branch(
+        instruction: &Instruction<Self>,
+        known: &BTreeMap<VariableId, Self::Constant>,
+    ) -> Option<bool> {
+        let _ = (instruction, known);
+        None
+    }
+
+    /// Meets two constants of this dialect's domain.
+    ///
+    /// `Some(c)` is the greatest constant below both `a` and `b`. `None` is
+    /// the lattice bottom: no constant of the domain is below both.
+    ///
+    /// A domain of exact values answers `Some` only for equal arguments,
+    /// which is the default. A domain that carries partial knowledge, such
+    /// as known bits, answers with the part on which `a` and `b` agree.
+    ///
+    /// The result must be below both arguments, so meeting it again with
+    /// either argument must return the result itself.
+    fn meet_constants(a: &Self::Constant, b: &Self::Constant) -> Option<Self::Constant> {
+        (a == b).then(|| a.clone())
+    }
+
     /// Returns the statically known target of a call operation.
     fn callee(operation: &Self::Operation) -> Option<Self::Callee>;
 }

@@ -190,6 +190,14 @@ impl<D: AnalysisDialect> ConstantFolder for Instruction<D> {
     ) -> Option<(Self::Variable, Self::Const)> {
         D::fold_constant(self, known)
     }
+
+    fn fold_branch(&self, known: &BTreeMap<Self::Variable, Self::Const>) -> Option<bool> {
+        D::fold_branch(self, known)
+    }
+
+    fn meet_constants(a: &Self::Const, b: &Self::Const) -> Option<Self::Const> {
+        D::meet_constants(a, b)
+    }
 }
 
 impl<D: AnalysisDialect> ExprInstr for Instruction<D> {

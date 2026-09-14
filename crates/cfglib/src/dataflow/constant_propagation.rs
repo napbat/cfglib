@@ -36,11 +36,29 @@ impl<C: Clone + Eq> ConstValue<C> {
     /// - Const(a) ⊓ Const(a) = Const(a)
     /// - Const(a) ⊓ Const(b) = Bottom  (a ≠ b)
     /// - Bottom ⊓ x = Bottom
+    ///
+    /// This is [`meet_with`](Self::meet_with) under the generic equality
+    /// rule. A caller that has a [`ConstantFolder`] adapter meets through
+    /// [`ConstantFolder::meet_constants`] instead, so a domain that holds
+    /// partial knowledge keeps the part both values agree on.
     #[must_use]
     pub fn meet(self, other: Self) -> Self {
+        self.meet_with(other, |a, b| (a == b).then(|| a.clone()))
+    }
+
+    /// Meet two lattice values with a domain-defined constant meet.
+    ///
+    /// `meet_constants` answers the greatest constant below both of its
+    /// arguments, or `None` when no constant is below both. `Top` and
+    /// `Bottom` behave as in [`meet`](Self::meet); only two constants
+    /// consult the hook.
+    #[must_use]
+    pub fn meet_with(self, other: Self, meet_constants: impl FnOnce(&C, &C) -> Option<C>) -> Self {
         match (self, other) {
             (ConstValue::Top, x) | (x, ConstValue::Top) => x,
-            (ConstValue::Const(a), ConstValue::Const(b)) if a == b => ConstValue::Const(a),
+            (ConstValue::Const(a), ConstValue::Const(b)) => {
+                meet_constants(&a, &b).map_or(ConstValue::Bottom, ConstValue::Const)
+            }
             _ => ConstValue::Bottom,
         }
     }
@@ -84,6 +102,47 @@ pub trait ConstantFolder: InstrInfo {
         &self,
         known: &BTreeMap<Self::Variable, Self::Const>,
     ) -> Option<(Self::Variable, Self::Const)>;
+
+    /// Decides the conditional transfer this instruction ends its block
+    /// with.
+    ///
+    /// Returns `Some(true)` when the known constants prove that the
+    /// [`ConditionalTrue`](crate::EdgeKind::ConditionalTrue) edge is taken,
+    /// and `Some(false)` when they prove that the
+    /// [`ConditionalFalse`](crate::EdgeKind::ConditionalFalse) edge is
+    /// taken. Returns `None` when the instruction is not a conditional
+    /// terminator, or when the condition is not decided.
+    ///
+    /// `known` is built exactly as for
+    /// [`fold_constant`](Self::fold_constant): only variables whose lattice
+    /// value is `Const(v)` are present.
+    ///
+    /// The default answers `None`, which leaves every outgoing edge of the
+    /// block executable. Only
+    /// [`SccpAnalysis`](crate::SccpAnalysis) reads this hook; the
+    /// unconditional [`constant_propagation`] solve ignores it.
+    fn fold_branch(&self, known: &BTreeMap<Self::Variable, Self::Const>) -> Option<bool> {
+        let _ = known;
+        None
+    }
+
+    /// Meets two constants of this domain.
+    ///
+    /// `Some(c)` is the greatest constant below both `a` and `b`. `None` is
+    /// the lattice bottom: no constant of the domain is below both.
+    ///
+    /// A domain of exact values answers `Some` only for equal arguments,
+    /// which is the default. A domain that carries partial knowledge, such
+    /// as known bits, answers with the part on which `a` and `b` agree.
+    ///
+    /// The result must be below both arguments, so meeting it again with
+    /// either argument must return the result itself. A hook that breaks
+    /// that contract could raise a lattice value and make the solve
+    /// diverge; [`SccpAnalysis`](crate::SccpAnalysis) checks it with a
+    /// debug assertion.
+    fn meet_constants(a: &Self::Const, b: &Self::Const) -> Option<Self::Const> {
+        (a == b).then(|| a.clone())
+    }
 }
 
 /// The constant propagation problem.
@@ -111,7 +170,7 @@ impl<I: ConstantFolder, E> Problem<I, E> for ConstPropProblem {
         let mut result = a.clone();
         for (variable, value) in b {
             let entry = result.entry(variable.clone()).or_insert(ConstValue::Top);
-            *entry = entry.clone().meet(value.clone());
+            *entry = entry.clone().meet_with(value.clone(), I::meet_constants);
         }
         result
     }
