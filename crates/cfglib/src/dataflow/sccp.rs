@@ -216,12 +216,52 @@ impl<V: VariableId, C: Clone + Eq> SccpAnalysis<V, C> {
     /// Edges are only ever added, so the result stays monotone: a condition
     /// that lowers to `Bottom` on a later pass activates the arm that was
     /// withheld, and `executable_edges` then names both arms.
+    ///
+    /// Every live-in is unknown here. Use
+    /// [`compute_seeded`](Self::compute_seeded) when the caller knows what
+    /// one of them holds.
     #[must_use]
     pub fn compute<I, E>(cfg: &Cfg<I, E>, ssa: &SsaForm<V>) -> Self
     where
         I: ConstantFolder<Const = C> + InstrInfo<Variable = V>,
     {
-        let mut values = BTreeMap::new();
+        Self::compute_seeded(cfg, ssa, &BTreeMap::new())
+    }
+
+    /// Run sparse conditional constant propagation with known live-ins.
+    ///
+    /// `live_ins` names the constant that one variable already holds when
+    /// the function starts. The solve seeds each entry as the version-zero
+    /// value of that variable, which is what [`SsaForm`] gives a read that
+    /// no definition reaches. A live-in has no definition, so nothing in the
+    /// solve can lower it: the seed stays for the whole analysis.
+    ///
+    /// A caller supplies a live-in it knows from outside the function. An
+    /// argument the calling convention names is one such value. A hidden
+    /// register an observation captured is another. A variable that
+    /// `live_ins` does not name stays `Bottom`, as it is in
+    /// [`compute`](Self::compute).
+    ///
+    /// `ssa` must have been computed from `cfg`. Every other rule of
+    /// [`compute`](Self::compute) applies without change.
+    #[must_use]
+    pub fn compute_seeded<I, E>(
+        cfg: &Cfg<I, E>,
+        ssa: &SsaForm<V>,
+        live_ins: &BTreeMap<V, C>,
+    ) -> Self
+    where
+        I: ConstantFolder<Const = C> + InstrInfo<Variable = V>,
+    {
+        let mut values = live_ins
+            .iter()
+            .map(|(variable, constant)| {
+                (
+                    SsaValue::live_in(variable.clone()),
+                    ConstValue::Const(constant.clone()),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         let mut executable_edges = BTreeSet::new();
         let mut reachable_blocks = BTreeSet::new();
         let mut cfg_worklist = Vec::new();
@@ -607,6 +647,89 @@ mod tests {
             Some(&ConstValue::Bottom),
             "live-in arm makes the phi unknowable"
         );
+    }
+
+    #[test]
+    fn a_seeded_live_in_decides_a_branch_on_it() {
+        // Variable 0 is never defined, so the predicate is undecided
+        // without a seed. The seed names what the caller knows enters the
+        // function, and the true arm alone stays executable.
+        let mut cfg = Cfg::<DfInst>::new();
+        let taken = cfg.new_block();
+        let not_taken = cfg.new_block();
+        cfg.block_mut(cfg.entry()).push(df_pred("branch", 0, true));
+        cfg.add_edge(cfg.entry(), taken, EdgeKind::ConditionalTrue);
+        cfg.add_edge(cfg.entry(), not_taken, EdgeKind::ConditionalFalse);
+
+        let dom = DominatorTree::compute(&cfg);
+        let ssa = SsaForm::compute(&cfg, &dom);
+        let seeds = BTreeMap::from([(0_u16, 1_i64)]);
+        let result = SccpAnalysis::compute_seeded(&cfg, &ssa, &seeds);
+
+        assert_eq!(
+            result.values.get(&SsaValue::live_in(0)),
+            Some(&ConstValue::Const(1))
+        );
+        assert!(result.executable_edges.contains(&(cfg.entry(), taken)));
+        assert!(!result.executable_edges.contains(&(cfg.entry(), not_taken)));
+        assert!(!result.reachable_blocks.contains(&not_taken));
+    }
+
+    #[test]
+    fn a_phi_over_a_seeded_live_in_folds() {
+        // Arm A defines x = 5 and arm B leaves the live-in untouched. The
+        // seed states that the live-in is also 5, so the merge phi folds
+        // where the unseeded solve reaches bottom.
+        let mut cfg = Cfg::<DfInst>::new();
+        let arm_a = cfg.new_block();
+        let arm_b = cfg.new_block();
+        let merge = cfg.new_block();
+        cfg.block_mut(cfg.entry()).push(df_def("branch", 9));
+        cfg.block_mut(arm_a).push(df_const("x5", 0, 5));
+        cfg.block_mut(arm_b).push(df_use("noop", 9));
+        cfg.block_mut(merge).push(df_use("use_x", 0));
+        cfg.add_edge(cfg.entry(), arm_a, EdgeKind::ConditionalTrue);
+        cfg.add_edge(cfg.entry(), arm_b, EdgeKind::ConditionalFalse);
+        cfg.add_edge(arm_a, merge, EdgeKind::Fallthrough);
+        cfg.add_edge(arm_b, merge, EdgeKind::Fallthrough);
+
+        let dom = DominatorTree::compute(&cfg);
+        let ssa = SsaForm::compute(&cfg, &dom);
+        let phi = &ssa.block(merge).phis[0];
+        let seeds = BTreeMap::from([(0_u16, 5_i64)]);
+        let seeded = SccpAnalysis::compute_seeded(&cfg, &ssa, &seeds);
+
+        assert_eq!(
+            seeded.values.get(&phi.result),
+            Some(&ConstValue::Const(5)),
+            "both incoming values are the same constant"
+        );
+    }
+
+    #[test]
+    fn an_unseeded_live_in_still_bottoms() {
+        // Variable 0 carries a seed and variable 1 does not. Seeding one
+        // live-in must not make another one optimistic.
+        let mut cfg = Cfg::<DfInst>::new();
+        cfg.block_mut(cfg.entry()).push(df_use("read", 0));
+        cfg.block_mut(cfg.entry()).push(df_pred("branch", 1, true));
+        let taken = cfg.new_block();
+        let not_taken = cfg.new_block();
+        cfg.add_edge(cfg.entry(), taken, EdgeKind::ConditionalTrue);
+        cfg.add_edge(cfg.entry(), not_taken, EdgeKind::ConditionalFalse);
+
+        let dom = DominatorTree::compute(&cfg);
+        let ssa = SsaForm::compute(&cfg, &dom);
+        let seeds = BTreeMap::from([(0_u16, 7_i64)]);
+        let result = SccpAnalysis::compute_seeded(&cfg, &ssa, &seeds);
+
+        assert_eq!(result.values.get(&SsaValue::live_in(1)), None);
+        assert_eq!(
+            lattice_of(&result.values, &SsaValue::live_in(1)),
+            ConstValue::<i64>::Bottom
+        );
+        assert!(result.executable_edges.contains(&(cfg.entry(), taken)));
+        assert!(result.executable_edges.contains(&(cfg.entry(), not_taken)));
     }
 
     #[test]

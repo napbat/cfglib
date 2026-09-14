@@ -350,6 +350,9 @@ pub struct SsaBlock<V> {
 pub struct SsaForm<V> {
     blocks: Vec<SsaBlock<V>>,
     max_versions: BTreeMap<V, SsaVersion>,
+    /// Immediate dominator of every block, in block-index order, from the
+    /// tree the renaming walked. [`SsaForm::value_at`] climbs it.
+    idom: Vec<Option<BlockId>>,
 }
 
 impl<V: VariableId> SsaForm<V> {
@@ -388,6 +391,58 @@ impl<V: VariableId> SsaForm<V> {
     #[must_use]
     pub fn max_version(&self, variable: &V) -> SsaVersion {
         self.max_versions.get(variable).copied().unwrap_or(0)
+    }
+
+    /// Return the SSA value of `variable` that reaches `point`.
+    ///
+    /// The answer is the value the instruction at `point` would read, so a
+    /// definition of `variable` by that instruction itself is not counted.
+    ///
+    /// The search follows the order the renaming used:
+    ///
+    /// 1. the last definition of `variable` earlier in the same block;
+    /// 2. the phi of `variable` at the start of that block;
+    /// 3. the same two rules in the immediate dominator, and in each of its
+    ///    own dominators in turn; and
+    /// 4. the version-zero live-in, when no dominator defines `variable`.
+    ///
+    /// A `point` outside the form answers with the live-in.
+    #[must_use]
+    pub fn value_at(&self, point: ProgramPoint, variable: &V) -> SsaValue<V> {
+        let mut block = Some(point.block);
+        let mut limit = point.inst_idx;
+        while let Some(current) = block {
+            if let Some(found) = self.value_in_block(current, limit, variable) {
+                return found;
+            }
+            block = self.idom.get(current.index()).copied().flatten();
+            limit = usize::MAX;
+        }
+        SsaValue::live_in(variable.clone())
+    }
+
+    /// Return the definition of `variable` in `block` before index `limit`.
+    fn value_in_block(&self, block: BlockId, limit: usize, variable: &V) -> Option<SsaValue<V>> {
+        let contents = self.blocks.get(block.index())?;
+        let end = limit.min(contents.instructions.len());
+        let definition = contents.instructions[..end]
+            .iter()
+            .rev()
+            .find_map(|instruction| {
+                instruction
+                    .defs
+                    .iter()
+                    .rev()
+                    .find(|value| value.variable == *variable)
+            });
+        if let Some(definition) = definition {
+            return Some(definition.clone());
+        }
+        contents
+            .phis
+            .iter()
+            .find(|phi| phi.result.variable == *variable)
+            .map(|phi| phi.result.clone())
     }
 }
 
@@ -620,9 +675,13 @@ impl<V: VariableId> SsaForm<V> {
         let mut max_versions = BTreeMap::new();
         rename_drafts(cfg, dom, &mut drafts, &mut max_versions);
         let blocks = finish_blocks(drafts, &mut max_versions);
+        let idom = (0..cfg.block_count())
+            .map(|index| dom.idom(BlockId::from_index(index)))
+            .collect();
         SsaForm {
             blocks,
             max_versions,
+            idom,
         }
     }
 }
@@ -764,6 +823,80 @@ mod tests {
         assert_eq!(
             ssa.block(handler).instructions[0].uses[0],
             ssa.block(landing).instructions[0].defs[0]
+        );
+    }
+
+    #[test]
+    fn value_at_finds_the_reaching_definition_in_the_same_block() {
+        let mut cfg = Cfg::<DfInst>::new();
+        cfg.block_mut(cfg.entry()).instructions_mut().extend([
+            df_use("read live-in", 0),
+            df_def("first", 0),
+            df_use("read first", 0),
+            df_def("second", 0),
+        ]);
+
+        let dom = DominatorTree::compute(&cfg);
+        let ssa = SsaForm::compute(&cfg, &dom);
+        let at = |index| {
+            ssa.value_at(
+                ProgramPoint {
+                    block: cfg.entry(),
+                    inst_idx: index,
+                },
+                &0,
+            )
+        };
+
+        assert_eq!(at(0), SsaValue::live_in(0), "no definition precedes it");
+        assert_eq!(at(1), SsaValue::live_in(0), "its own definition is later");
+        assert_eq!(at(2), SsaValue::new(0, 1));
+        assert_eq!(at(4), SsaValue::new(0, 2), "the block end reads the last");
+    }
+
+    #[test]
+    fn value_at_reads_the_phi_and_the_dominator() {
+        let mut cfg = Cfg::<DfInst>::new();
+        let left = cfg.new_block();
+        let right = cfg.new_block();
+        let merge = cfg.new_block();
+        let entry = cfg.entry();
+        cfg.add_edge(entry, left, EdgeKind::ConditionalTrue);
+        cfg.add_edge(entry, right, EdgeKind::ConditionalFalse);
+        cfg.add_edge(left, merge, EdgeKind::Fallthrough);
+        cfg.add_edge(right, merge, EdgeKind::Fallthrough);
+        cfg.block_mut(entry).push(df_def("entry", 1));
+        cfg.block_mut(left).push(df_def("left", 0));
+        cfg.block_mut(right).push(df_def("right", 0));
+        cfg.block_mut(merge).push(df_use("merged", 0));
+
+        let dom = DominatorTree::compute(&cfg);
+        let ssa = SsaForm::compute(&cfg, &dom);
+        let start_of_merge = ProgramPoint {
+            block: merge,
+            inst_idx: 0,
+        };
+
+        assert_eq!(
+            ssa.value_at(start_of_merge, &0),
+            ssa.block(merge).phis[0].result,
+            "the phi of the block answers before any dominator"
+        );
+        assert_eq!(
+            ssa.value_at(start_of_merge, &1),
+            ssa.block(entry).instructions[0].defs[0],
+            "the immediate dominator supplies a variable the block merges not"
+        );
+        assert_eq!(
+            ssa.value_at(
+                ProgramPoint {
+                    block: left,
+                    inst_idx: 0
+                },
+                &0
+            ),
+            SsaValue::live_in(0),
+            "no dominator of the arm defines it"
         );
     }
 
