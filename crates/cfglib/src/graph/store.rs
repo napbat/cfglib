@@ -31,8 +31,8 @@
 //!
 //! delta   nodes  appended payloads
 //!         edges  appended records
-//!         last   one u32 pair per node: last edge of each direction's
-//!                circular chain
+//!         last   one u32 pair per node once the delta holds an edge: last
+//!                edge of each direction's circular chain
 //!         next   one u32 pair per delta edge: its successor in each
 //!                direction's chain
 //!
@@ -51,8 +51,12 @@
 //! which is what makes append-order iteration possible from one pointer
 //! instead of a head-and-tail pair.
 //!
+//! Those slots exist only while the delta holds an edge, so a store whose
+//! adjacency is entirely in the base — every compacted one — carries no
+//! per-node delta state at all.
+//!
 //! Both slots live in one array, because both are written by the same append:
-//! [`add_node`](Graph::add_node) is two pushes and one bit, and
+//! [`add_node`](Graph::add_node) is one push and one bit, and
 //! [`add_edge`](Graph::add_edge) is two pushes, one bit, and the four links of
 //! the two chains it joins. That fixed cost is the whole of what a procedure's
 //! flow graph — a few hundred nodes, built and discarded — ever pays.
@@ -265,8 +269,8 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// Add a node and return its stable identity.
     ///
     /// Constant time, and no allocation beyond the amortized growth of the
-    /// delta arrays: a node costs its payload, one push of its eight bytes of
-    /// chain slots, and two bits.
+    /// delta arrays: a node costs its payload and one bit, and its eight
+    /// bytes of chain slots only once the store holds a delta edge.
     ///
     /// # Panics
     ///
@@ -278,7 +282,6 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
             "node count exceeds the dense identity space"
         );
         self.delta_nodes.push(payload);
-        self.chains.push_node();
         self.live_nodes.push_live();
         self.live_node_count += 1;
         Id::from_index(slot)
@@ -303,9 +306,10 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
             "edge count exceeds the dense identity space"
         );
 
+        let nodes = self.node_bound();
         self.delta_edges
             .push(EdgeRecord::new(source, target, payload));
-        self.chains.append(source.index(), target.index());
+        self.chains.append(source.index(), target.index(), nodes);
         self.live_edges.push_live();
         self.live_edge_count += 1;
         Id::from_index(slot)

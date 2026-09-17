@@ -74,7 +74,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         self.live_edge_count = edges.len();
         self.live_nodes.reset_all_live(nodes.len());
         self.live_edges.reset_all_live(edges.len());
-        self.chains.reset(nodes.len());
+        self.chains.reset();
         self.relocations_clear();
         self.base_nodes = nodes.into_boxed_slice();
         self.base_edges = edges.into_boxed_slice();

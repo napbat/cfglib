@@ -16,6 +16,12 @@
 //! and per delta edge, because every append joins both chains at once: the
 //! pair is what one node or one edge costs, so appending either is a single
 //! push rather than one per direction.
+//!
+//! The per-node array is materialized lazily: it exists only while the delta
+//! holds an edge, because a node with nothing appended to it has nothing to
+//! say. A compacted store therefore carries no per-node array at all, rather
+//! than one all-[`NONE`] pair per node of a graph whose adjacency is entirely
+//! in the base — and that is the state a store spends most of its life in.
 
 extern crate alloc;
 
@@ -53,10 +59,17 @@ const fn chain_of(direction: TraversalDirection) -> usize {
 
 /// Per-node circular chains threading both directions of the delta's
 /// adjacency.
+///
+/// [`append`](Self::append) is the only operation that grows either array,
+/// and [`reset`](Self::reset) releases both. Three invariants follow, and
+/// every reader depends on them: `last.len()` is at most the store's node
+/// bound, an absent slot means [`UNLINKED`], and a non-empty `last` implies a
+/// non-empty `next`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct DeltaChains {
-    /// Last delta edge appended to each node slot's two chains, or [`NONE`].
+    /// Last delta edge appended to each materialized node slot's two chains,
+    /// or [`NONE`].
     last: Vec<Links>,
     /// Successor of each delta edge within each of its two circular chains.
     next: Vec<Links>,
@@ -77,9 +90,11 @@ impl DeltaChains {
         }
     }
 
-    /// Give one more node slot two empty chains.
-    pub(super) fn push_node(&mut self) {
-        self.last.push(UNLINKED);
+    /// How many node slots the chains have materialized, which is the whole
+    /// of what the delta costs per node.
+    #[cfg(test)]
+    pub(super) fn node_slots(&self) -> usize {
+        self.last.len()
     }
 
     /// Append the next delta edge to its source's outgoing chain and to its
@@ -87,14 +102,33 @@ impl DeltaChains {
     ///
     /// One edge joins both chains, so its links are one record and the append
     /// is one push.
-    pub(super) fn append(&mut self, source: usize, target: usize) {
+    ///
+    /// `nodes` is the store's node bound. The first append after a reset
+    /// materializes the per-node array to it in one step, and every later one
+    /// finds both endpoints already covered — so the threading itself never
+    /// asks, and the array is absent exactly while the delta is empty.
+    pub(super) fn append(&mut self, source: usize, target: usize, nodes: usize) {
+        if self.last.len() < nodes {
+            self.materialize(nodes);
+        }
         let appended = u32::try_from(self.next.len()).expect("delta edge index exceeds u32::MAX");
         self.next.push(UNLINKED);
         self.thread(source, chain_of(TraversalDirection::Outgoing), appended);
         self.thread(target, chain_of(TraversalDirection::Incoming), appended);
     }
 
-    /// Splice `appended` in as the last element of one of `node`'s chains.
+    /// Give every node slot two empty chains, which is what the first append
+    /// after a reset owes the nodes the base already describes.
+    ///
+    /// Out of line because it runs once per delta, against an append path
+    /// that runs once per edge.
+    #[cold]
+    fn materialize(&mut self, nodes: usize) {
+        self.last.resize(nodes, UNLINKED);
+    }
+
+    /// Splice `appended` in as the last element of one of `node`'s chains,
+    /// whose slots [`append`](Self::append) has already materialized.
     fn thread(&mut self, node: usize, chain: usize, appended: u32) {
         let last = self.last[node][chain];
         self.next[appended as usize][chain] = if last == NONE {
@@ -110,13 +144,10 @@ impl DeltaChains {
     /// The first and last delta edges of one of `node`'s chains, when it has
     /// one.
     ///
-    /// A store with no delta edges has no chain to walk, and answering that
-    /// from the link array's length spares every walk over a compacted store
-    /// one read per node of a head array that is entirely [`NONE`].
+    /// A node the delta has never touched has no slot at all, which is how a
+    /// walk over a compacted store answers from the array's length instead of
+    /// reading one per-node entry that is entirely [`NONE`].
     fn ends(&self, node: usize, chain: usize) -> Option<(u32, u32)> {
-        if self.next.is_empty() {
-            return None;
-        }
         let last = self.last.get(node)?[chain];
         if last == NONE {
             return None;
@@ -125,19 +156,22 @@ impl DeltaChains {
     }
 
     /// Forget one of a node's chains, whose edges an overlay has taken over.
+    ///
+    /// A node the delta has never touched has no chain to forget.
     pub(super) fn detach_node(&mut self, node: usize, direction: TraversalDirection) {
-        self.last[node][chain_of(direction)] = NONE;
+        if let Some(links) = self.last.get_mut(node) {
+            links[chain_of(direction)] = NONE;
+        }
     }
 
-    /// Drop every chain and restart with `nodes` empty ones.
+    /// Drop every chain.
     ///
-    /// The link array is released rather than cleared: after a compaction
-    /// the delta is empty, and holding two `u32` per edge of the graph that
-    /// was just folded into the base would quietly keep a third of the
-    /// store's memory alive for nothing.
-    pub(super) fn reset(&mut self, nodes: usize) {
-        self.last.clear();
-        self.last.resize(nodes, UNLINKED);
+    /// Both arrays are released rather than cleared: after a compaction the
+    /// delta is empty, and holding two `u32` per edge of the graph that was
+    /// just folded into the base — or eight bytes per node of it — would
+    /// quietly keep a large part of the store's memory alive for nothing.
+    pub(super) fn reset(&mut self) {
+        self.last = Vec::new();
         self.next = Vec::new();
     }
 }

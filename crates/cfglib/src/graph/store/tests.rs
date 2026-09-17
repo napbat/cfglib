@@ -118,6 +118,43 @@ fn insertion_order_survives_the_base_delta_boundary() {
     );
 }
 
+/// The delta charges nothing per node of a store that is entirely base: a
+/// compacted graph, and a graph with nodes but no edges, hold no chain slots
+/// at all.
+#[test]
+fn the_delta_charges_nothing_per_node_of_a_compacted_store() {
+    let mut isolated = Graph::<&'static str, &'static str>::new();
+    isolated.add_node("no edges");
+    assert_eq!(isolated.chains.node_slots(), 0);
+
+    let (mut graph, nodes) = diamond();
+    assert!(graph.chains.node_slots() > 0);
+
+    graph.compact();
+    assert_eq!(graph.chains.node_slots(), 0);
+    assert_eq!(
+        graph.successors(nodes[0]).collect::<Vec<_>>(),
+        [nodes[1], nodes[2]],
+        "the base still answers for every node the delta released"
+    );
+
+    // One append re-materializes the slots, and the store is back to
+    // charging for them until the next compaction.
+    graph.add_edge(nodes[1], nodes[2], "e");
+    assert_eq!(graph.chains.node_slots(), graph.node_bound());
+    assert_eq!(
+        graph.successors(nodes[1]).collect::<Vec<_>>(),
+        [nodes[3], nodes[2]]
+    );
+    assert_eq!(
+        graph.predecessors(nodes[2]).collect::<Vec<_>>(),
+        [nodes[0], nodes[1]]
+    );
+
+    graph.compact();
+    assert_eq!(graph.chains.node_slots(), 0);
+}
+
 #[test]
 fn parallel_and_self_edges_are_retained_in_order() {
     let mut graph = Graph::new();
