@@ -214,6 +214,10 @@ impl<D: Dialect> FunctionBuilder<D> {
     }
 
     /// Returns the number of blocks, including the synthetic root.
+    ///
+    /// A builder only ever allocates blocks, so no slot is ever retired and
+    /// this count doubles as the block-identity bound — the one place where
+    /// ranging over `0..block_count()` names every block.
     #[must_use]
     pub fn block_count(&self) -> usize {
         self.cfg.block_count()

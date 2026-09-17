@@ -311,6 +311,13 @@ pub fn lower<D: Lower>(function: &MlilFunction<D::Mlil>) -> Result<Lowered<D>> {
         parameters,
         function.signature().returns.clone(),
     ))?;
+    // Indexed by source block, which is sound because an MLIL function's CFG
+    // comes from a builder that never retires a slot.
+    debug_assert_eq!(
+        cfg.block_count(),
+        cfg.block_bound(),
+        "a lowered MLIL CFG must hold no removed block slots"
+    );
     let mut blocks: Vec<BlockId> = Vec::with_capacity(cfg.block_count());
     for block_id in cfg.block_ids() {
         let block = cfg.block(block_id);

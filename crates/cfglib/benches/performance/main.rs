@@ -44,7 +44,7 @@ use fixtures::{
 };
 use harness::{BenchmarkSuite, benchmark_case, benchmark_target};
 use structural_oracles::{
-    assert_branchy_cfg, assert_branchy_graph, assert_builder_cfg, assert_cfg_shape,
+    FanOut, assert_branchy_cfg, assert_branchy_graph, assert_builder_cfg, assert_cfg_shape,
     assert_dense_permutation, assert_empty_chain, assert_high_fan_in, assert_irreducible_fixture,
     assert_linear_cfg, assert_split_weighted_fan_out, assert_weighted_fan_out,
     assert_weighted_irreducible,
@@ -529,16 +529,19 @@ fn main() {
         },
         |(result, merged): &(Cfg<u32>, usize)| {
             assert_eq!(*merged, NODE_COUNT / 2 - 1);
-            assert_cfg_shape(result, NODE_COUNT / 2, 0);
+            // Merging a linear chain leaves ONE live block holding every
+            // instruction; the consumed blocks are gone, and only their
+            // identity slots survive until a compact.
+            assert_cfg_shape(result, 1, 0);
+            assert_eq!(result.block_bound(), NODE_COUNT / 2);
+            assert_eq!(
+                result.block_ids().collect::<Vec<_>>(),
+                [result.entry()],
+                "only the merge target stays live"
+            );
             assert_eq!(
                 result.block(result.entry()).instructions(),
                 &(0..fixture_u32(NODE_COUNT) / 2).collect::<Vec<_>>()
-            );
-            assert!(
-                result
-                    .blocks()
-                    .skip(1)
-                    .all(|block| block.instructions().is_empty())
             );
         }
     );
@@ -556,9 +559,16 @@ fn main() {
         },
         |(result, removed): &(Cfg<u32>, usize)| {
             assert_eq!(*removed, NODE_COUNT / 2 - 2);
-            assert_cfg_shape(result, NODE_COUNT / 2, 1);
+            // Bypassing the empty middle removes it: only the instruction
+            // carriers stay live, joined by the surviving first edge.
+            assert_cfg_shape(result, 2, 1);
+            assert_eq!(result.block_bound(), NODE_COUNT / 2);
             assert_eq!(result.block(result.entry()).instructions(), &[0]);
             let last = BlockId::from_index(NODE_COUNT / 2 - 1);
+            assert_eq!(
+                result.block_ids().collect::<Vec<_>>(),
+                [result.entry(), last]
+            );
             assert_eq!(
                 result.block(last).instructions(),
                 &[fixture_u32(NODE_COUNT / 2 - 1)]
@@ -592,8 +602,7 @@ fn main() {
             NODE_COUNT,
             fan_out_source,
             fan_out_target,
-            false,
-            false,
+            FanOut::Intact,
         )
     );
     bench!(
@@ -625,8 +634,7 @@ fn main() {
                 NODE_COUNT,
                 fan_out_source,
                 fan_out_target,
-                true,
-                false,
+                FanOut::Merged,
             );
         }
     );
@@ -644,8 +652,7 @@ fn main() {
                 NODE_COUNT,
                 fan_out_source,
                 fan_out_target,
-                true,
-                false,
+                FanOut::Contracted,
             );
         }
     );

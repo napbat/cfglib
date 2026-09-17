@@ -48,9 +48,9 @@ impl<I, E> GraphView for SsaDominatorView<'_, I, E> {
     }
 
     fn successors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
-        let original_count = self.cfg.block_count();
-        let original = (node < original_count).then(|| BlockId::from_index(node));
-        (node == original_count)
+        let original_bound = self.cfg.block_bound();
+        let original = (node < original_bound).then(|| BlockId::from_index(node));
+        (node == original_bound)
             .then_some(self.roots.as_slice())
             .into_iter()
             .flatten()
@@ -64,11 +64,11 @@ impl<I, E> GraphView for SsaDominatorView<'_, I, E> {
     }
 
     fn predecessors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
-        let original_count = self.cfg.block_count();
-        let original = (node < original_count).then(|| BlockId::from_index(node));
+        let original_bound = self.cfg.block_bound();
+        let original = (node < original_bound).then(|| BlockId::from_index(node));
         let virtual_predecessor = original
             .filter(|block| self.roots.binary_search(block).is_ok())
-            .map(|_| original_count);
+            .map(|_| original_bound);
         virtual_predecessor.into_iter().chain(
             original
                 .into_iter()
@@ -116,16 +116,16 @@ fn complete_dominator_forest<I, E>(
 
     let view = SsaDominatorView { cfg, roots };
     let complete = DominatorTree::<usize>::compute(&view);
-    let original_count = cfg.block_count();
-    let idom = (0..original_count)
+    let original_bound = cfg.block_bound();
+    let idom = (0..original_bound)
         .map(|node| {
             complete
                 .idom(node)
-                .filter(|&parent| parent < original_count)
+                .filter(|&parent| parent < original_bound)
                 .map(BlockId::from_index)
         })
         .collect();
-    let reachable = (0..original_count)
+    let reachable = (0..original_bound)
         .map(|node| complete.is_reachable(node))
         .collect();
     Some(DominatorTree::from_forest_parts(idom, reachable))
@@ -360,7 +360,11 @@ pub struct SsaForm<V> {
 }
 
 impl<V: VariableId> SsaForm<V> {
-    /// Return all SSA blocks in source CFG order.
+    /// Return all SSA blocks, indexed by source [`BlockId`].
+    ///
+    /// The slice is sized by the source CFG's block *bound*, so a slot the
+    /// source retired holds an empty block rather than shifting its
+    /// successors' indices.
     #[must_use]
     pub fn blocks(&self) -> &[SsaBlock<V>] {
         &self.blocks
@@ -493,19 +497,31 @@ fn create_drafts<I: InstrInfo, E>(
     cfg: &Cfg<I, E>,
     placements: &PhiPlacements<I::Variable>,
 ) -> Vec<BlockDraft<I::Variable>> {
-    cfg.block_ids()
-        .map(|block| BlockDraft {
-            phis: placements
-                .at(block)
-                .iter()
-                .map(|placement| PhiDraft {
-                    variable: placement.variable.clone(),
-                    predecessors: placement.predecessors.clone(),
-                    result: None,
-                    operands: BTreeMap::new(),
-                })
-                .collect(),
-            instructions: Vec::with_capacity(cfg.block(block).instructions().len()),
+    // Block-indexed, so one draft per slot up to the identity bound;
+    // a retired slot keeps an empty draft that `finish_blocks` renders as an
+    // empty SSA block.
+    (0..cfg.block_bound())
+        .map(BlockId::from_index)
+        .map(|block| {
+            if !cfg.contains_block(block) {
+                return BlockDraft {
+                    phis: Vec::new(),
+                    instructions: Vec::new(),
+                };
+            }
+            BlockDraft {
+                phis: placements
+                    .at(block)
+                    .iter()
+                    .map(|placement| PhiDraft {
+                        variable: placement.variable.clone(),
+                        predecessors: placement.predecessors.clone(),
+                        result: None,
+                        operands: BTreeMap::new(),
+                    })
+                    .collect(),
+                instructions: Vec::with_capacity(cfg.block(block).instructions().len()),
+            }
         })
         .collect()
 }

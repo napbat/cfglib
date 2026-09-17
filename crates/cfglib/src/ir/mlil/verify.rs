@@ -35,13 +35,15 @@ fn verify_signature<D: Dialect>(function: &Function<D>, issues: &mut Vec<Verific
 }
 
 fn verify_regions<D: Dialect>(function: &Function<D>, issues: &mut Vec<VerificationIssue>) {
-    let block_count = function.cfg.block_count();
     let entry = function.cfg.entry();
     let check_block = |issues: &mut Vec<VerificationIssue>,
                        block: crate::BlockId,
                        region: crate::RegionId,
                        role: &str| {
-        if block.index() >= block_count {
+        // Existence is membership, not an index below the live count: a
+        // removed block keeps its slot, and a slot below the bound may hold
+        // no block at all.
+        if !function.cfg.contains_block(block) {
             issue(issues, format!("{region} {role} {block} does not exist"));
         } else if block == entry {
             issue(

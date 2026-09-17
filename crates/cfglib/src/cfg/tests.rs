@@ -132,7 +132,7 @@ fn redirect_edges_rejects_an_invalid_target_before_mutating() {
     let mut cfg = Cfg::<MockInst>::new();
     let old_target = cfg.new_block();
     let edge = cfg.add_edge(cfg.entry(), old_target, EdgeKind::Fallthrough);
-    let invalid = BlockId::from_index(cfg.block_count());
+    let invalid = BlockId::from_index(cfg.block_bound());
 
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         cfg.redirect_edges_to(old_target, invalid);

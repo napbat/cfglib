@@ -414,12 +414,18 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     }
 
     /// The number of nodes the store holds.
+    ///
+    /// A quantity, never an index range: use [`node_bound`](Self::node_bound)
+    /// to size or iterate a node-indexed array.
     #[must_use]
     pub const fn node_count(&self) -> usize {
         self.live_node_count
     }
 
     /// The number of edges the store holds.
+    ///
+    /// A quantity, never an index range: use [`edge_bound`](Self::edge_bound)
+    /// to size or iterate an edge-indexed array.
     #[must_use]
     pub const fn edge_count(&self) -> usize {
         self.live_edge_count
@@ -428,7 +434,8 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// The number of node slots, removed nodes included.
     ///
     /// Every live [`Id`] is below this, so it is the correct size for a
-    /// node-indexed side table — and it is what the store reports as
+    /// node-indexed side table — a bound sizes an array, a count answers
+    /// "how many" — and it is what the store reports as
     /// [`GraphView::node_bound`](crate::GraphView::node_bound),
     /// because an analysis sizing an array by that number must cover every
     /// identity the view yields.
@@ -448,7 +455,8 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// The number of edge slots, removed edges included.
     ///
     /// The edge counterpart of [`node_bound`](Self::node_bound), and the
-    /// correct size for an edge-indexed side table.
+    /// correct size for an edge-indexed side table — a bound sizes an array,
+    /// a count answers "how many".
     #[must_use]
     pub fn edge_bound(&self) -> usize {
         self.base_edges.len() + self.delta_edges.len()

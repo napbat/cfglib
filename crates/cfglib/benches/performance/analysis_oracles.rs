@@ -11,7 +11,7 @@ pub(super) fn directed_distances(
     start: NodeId,
     direction: TraversalDirection,
 ) -> (Vec<usize>, Vec<NodeId>) {
-    let mut distances = vec![usize::MAX; graph.node_count()];
+    let mut distances = vec![usize::MAX; graph.node_bound()];
     let mut order = Vec::with_capacity(graph.node_bound());
     let mut queue = VecDeque::new();
     distances[start.index()] = 0;
@@ -38,7 +38,7 @@ pub(super) fn directed_distances(
 }
 
 pub(super) fn reference_cfg_preorder(cfg: &Cfg<u32>) -> Vec<BlockId> {
-    let mut visited = vec![false; cfg.block_count()];
+    let mut visited = vec![false; cfg.block_bound()];
     let mut order = Vec::with_capacity(cfg.block_count());
     let mut stack = vec![cfg.entry()];
     while let Some(block) = stack.pop() {
@@ -59,7 +59,7 @@ pub(super) fn reference_cfg_preorder(cfg: &Cfg<u32>) -> Vec<BlockId> {
 }
 
 pub(super) fn reference_cfg_breadth_first(cfg: &Cfg<u32>) -> Vec<BlockId> {
-    let mut visited = vec![false; cfg.block_count()];
+    let mut visited = vec![false; cfg.block_bound()];
     let mut order = Vec::with_capacity(cfg.block_count());
     let mut queue = VecDeque::from([cfg.entry()]);
     visited[cfg.entry().index()] = true;
@@ -220,7 +220,7 @@ pub(super) fn assert_control_dependence_graph(
     cfg: &Cfg<u32>,
     post_dominators: &DominatorTree,
 ) {
-    assert_eq!(result.node_count(), cfg.block_count());
+    assert_eq!(result.node_count(), cfg.block_bound());
     for node in result.node_ids() {
         assert_eq!(*result.node(node), BlockId::from_index(node.index()));
     }
@@ -368,7 +368,7 @@ pub(super) fn assert_phi_ssa(
     layer_count: usize,
     variable_count: usize,
 ) {
-    assert_eq!(ssa.blocks().len(), source.block_count());
+    assert_eq!(ssa.blocks().len(), source.block_bound());
     assert_eq!(ssa.phis().count(), layer_count * variable_count);
     let mut definitions = BTreeSet::new();
     for block_id in source.block_ids() {

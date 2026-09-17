@@ -274,26 +274,45 @@ pub(super) fn assert_high_fan_in(
     }
 }
 
+/// What the weighted fan-out fixture should look like after the operation
+/// under test folded — or did not fold — its `source -> target` edge.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum FanOut {
+    /// Untouched: `source` and `target` are still two instruction-carrying
+    /// blocks joined by the connecting edge.
+    Intact,
+    /// `merge_blocks` folded `target` into `source` and retired its slot.
+    Merged,
+    /// `contract_edge` folded `target` into `source` but leaves the emptied
+    /// block live.
+    Contracted,
+}
+
 pub(super) fn assert_weighted_fan_out(
     cfg: &Cfg<u32>,
     edge_count: usize,
     source: BlockId,
     target: BlockId,
-    merged: bool,
-    target_retains_instructions: bool,
+    state: FanOut,
 ) {
-    let live_edges = if merged { edge_count } else { edge_count + 1 };
-    assert_cfg_shape(cfg, 3, live_edges);
+    let folded = state != FanOut::Intact;
+    let live_edges = if folded { edge_count } else { edge_count + 1 };
+    // A merged block is removed for real; its slot stays reserved, so the
+    // identity bound still spans all three original blocks either way.
+    let live_blocks = if state == FanOut::Merged { 2 } else { 3 };
+    assert_cfg_shape(cfg, live_blocks, live_edges);
+    assert_eq!(cfg.block_bound(), 3);
     let sink = BlockId::from_raw(2);
-    let outgoing_source = if merged { source } else { target };
+    let outgoing_source = if folded { source } else { target };
 
-    if merged {
+    if folded {
+        assert_eq!(
+            cfg.contains_block(target),
+            state == FanOut::Contracted,
+            "a merged block is retired while a contracted block stays live"
+        );
         assert_eq!(cfg.block(source).instructions(), &[0, 1]);
-        if target_retains_instructions {
-            assert_eq!(cfg.block(target).instructions(), &[1]);
-        } else {
-            assert_eq!(cfg.block(target).instructions().len(), 0);
-        }
+        assert_eq!(cfg.block(target).instructions().len(), 0);
         assert_eq!(cfg.outgoing(target).count(), 0);
     } else {
         assert_eq!(cfg.block(source).instructions(), &[0]);

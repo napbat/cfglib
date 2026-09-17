@@ -105,6 +105,9 @@ pub fn is_recursive_function<C>(
 /// until their summaries stabilize, so `compute` must be monotone over a
 /// finite-height summary domain for termination.
 ///
+/// The returned vector is indexed by [`NodeId::index`] and sized by the
+/// graph's node *bound*, so a removed node keeps `bottom` in its slot.
+///
 /// Generic over any [`Graph`] — the same shape serves module
 /// graphs, type-relation closures, or any callee-first aggregation.
 #[must_use]
@@ -113,7 +116,7 @@ pub fn propagate_summaries<N, E, S: Clone + PartialEq>(
     bottom: &S,
     mut compute: impl FnMut(&Graph<N, E>, NodeId, &[S]) -> S,
 ) -> Vec<S> {
-    let mut summaries = alloc::vec![bottom.clone(); graph.node_count()];
+    let mut summaries = alloc::vec![bottom.clone(); graph.node_bound()];
     let components = tarjan_scc(graph);
     // Components arrive in reverse topological order: callees first.
     for component in &components.components {

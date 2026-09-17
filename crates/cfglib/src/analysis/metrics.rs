@@ -192,7 +192,7 @@ pub fn block_nesting_depths<G: RootedView>(graph: &G) -> Vec<usize> {
 #[must_use]
 pub fn cfg_block_nesting_depths<I>(cfg: &Cfg<I>) -> Vec<usize> {
     let dom = DominatorTree::compute(cfg);
-    depths_of(cfg.block_count(), &detect_loops_tagged(cfg, &dom))
+    depths_of(cfg.block_bound(), &detect_loops_tagged(cfg, &dom))
 }
 
 fn depths_of<N: DenseId>(n: usize, loops: &[crate::NaturalLoop<N>]) -> Vec<usize> {

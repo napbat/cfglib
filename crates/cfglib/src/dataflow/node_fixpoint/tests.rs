@@ -163,7 +163,7 @@ fn a_backward_seeded_solve_walks_the_out_edges() {
 #[should_panic(expected = "seed node is out of range")]
 fn an_out_of_range_seed_panics() {
     let (graph, _) = flow_fixture();
-    let beyond = NodeId::from_index(graph.node_count());
+    let beyond = NodeId::from_index(graph.node_bound());
     let _ = solve_node_problem_from(&graph, &Taint::forward(alloc::vec![]), &[beyond]);
 }
 

@@ -92,25 +92,25 @@ impl<E> SemanticVerifyReport<E> {
     }
 }
 
-fn verify_edge_endpoints<I, E>(cfg: &Cfg<I, E>, block_count: usize, errors: &mut Vec<VerifyError>) {
+fn verify_edge_endpoints<I, E>(cfg: &Cfg<I, E>, block_bound: usize, errors: &mut Vec<VerifyError>) {
     for edge in cfg.edges() {
-        if edge.source().index() >= block_count {
+        if edge.source().index() >= block_bound {
             errors.push(VerifyError {
                 message: alloc::format!(
-                    "edge {} source {} out of bounds (block_count={})",
+                    "edge {} source {} out of bounds (block_bound={})",
                     edge.id(),
                     edge.source(),
-                    block_count
+                    block_bound
                 ),
             });
         }
-        if edge.target().index() >= block_count {
+        if edge.target().index() >= block_bound {
             errors.push(VerifyError {
                 message: alloc::format!(
-                    "edge {} target {} out of bounds (block_count={})",
+                    "edge {} target {} out of bounds (block_bound={})",
                     edge.id(),
                     edge.target(),
-                    block_count
+                    block_bound
                 ),
             });
         }
@@ -211,13 +211,15 @@ fn verify_unique_adjacency<I, E>(cfg: &Cfg<I, E>, errors: &mut Vec<VerifyError>)
 #[must_use]
 pub fn verify<I, E>(cfg: &Cfg<I, E>) -> VerifyReport {
     let mut errors = Vec::new();
-    let n = cfg.block_count();
+    // Identities, not quantities: removed blocks keep their slots, so every
+    // live index is bounded by `block_bound`, which `block_count` undercuts.
+    let n = cfg.block_bound();
 
     // 1. Entry in bounds.
     if cfg.entry().index() >= n {
         errors.push(VerifyError {
             message: alloc::format!(
-                "entry block {} out of bounds (block_count={})",
+                "entry block {} out of bounds (block_bound={})",
                 cfg.entry(),
                 n
             ),
@@ -495,6 +497,103 @@ mod tests {
         cfg.add_edge(a, merge, EdgeKind::Fallthrough);
         cfg.add_edge(b, merge, EdgeKind::Fallthrough);
 
+        assert!(verify(&cfg).is_ok());
+    }
+
+    #[test]
+    fn merging_a_linear_chain_leaves_one_verifiable_block() {
+        let mut cfg = Cfg::new();
+        let mut previous = cfg.entry();
+        cfg.block_mut(previous).instructions_mut().push(ff("b0"));
+        for _ in 1..8 {
+            let next = cfg.new_block();
+            cfg.block_mut(next).instructions_mut().push(ff("b"));
+            cfg.add_edge(previous, next, EdgeKind::Fallthrough);
+            previous = next;
+        }
+        assert_eq!(cfg.block_count(), 8);
+
+        assert_eq!(crate::merge_blocks(&mut cfg), 7);
+
+        let result = verify(&cfg);
+        assert!(
+            result.is_ok(),
+            "a merged chain is still a valid CFG: {:?}",
+            result.errors
+        );
+        assert_eq!(cfg.block_count(), 1, "the chain collapsed into the entry");
+        assert_eq!(
+            cfg.block_bound(),
+            8,
+            "the consumed blocks keep their identity slots"
+        );
+        assert_eq!(cfg.block(cfg.entry()).instructions().len(), 8);
+    }
+
+    #[test]
+    fn a_diamond_missing_an_arm_survives_every_whole_graph_analysis() {
+        use crate::dataflow::liveness::LivenessProblem;
+        use crate::test_util::{DfInst, df_def, df_use};
+
+        let mut cfg: Cfg<DfInst> = Cfg::new();
+        let left = cfg.new_block();
+        let right = cfg.new_block();
+        let merge = cfg.new_block();
+        cfg.block_mut(cfg.entry()).push(df_def("def", 0));
+        cfg.block_mut(left).push(df_use("left", 0));
+        cfg.block_mut(right).push(df_use("right", 0));
+        cfg.block_mut(merge).push(df_use("merge", 0));
+        cfg.add_edge(cfg.entry(), left, EdgeKind::ConditionalTrue);
+        cfg.add_edge(cfg.entry(), right, EdgeKind::ConditionalFalse);
+        cfg.add_edge(left, merge, EdgeKind::Fallthrough);
+        cfg.add_edge(right, merge, EdgeKind::Fallthrough);
+
+        // Retiring the low-indexed arm leaves a live block whose index sits
+        // above the live count — the shape that a count-sized array truncates.
+        assert!(cfg.remove_block(left));
+        assert_eq!(cfg.block_count(), 3);
+        assert_eq!(cfg.block_bound(), 4);
+
+        let report = verify(&cfg);
+        assert!(
+            report.is_ok(),
+            "a retired slot is not a violation: {:?}",
+            report.errors
+        );
+
+        let dominators = crate::DominatorTree::compute(&cfg);
+        assert_eq!(dominators.idom(merge), Some(right));
+        assert!(!dominators.is_reachable(left));
+
+        let post_dominators = crate::DominatorTree::compute_post(&cfg);
+        assert_eq!(post_dominators.idom(cfg.entry()), Some(right));
+        assert_eq!(post_dominators.idom(right), Some(merge));
+
+        let facts = crate::solve_problem(&cfg, &LivenessProblem).expect("liveness solves");
+        assert!(facts.fact_in(merge).contains(&0));
+        assert!(
+            facts.fact_in(left).is_empty(),
+            "a retired slot keeps the bottom fact"
+        );
+
+        let ssa = crate::SsaForm::compute(&cfg, &dominators);
+        assert_eq!(ssa.blocks().len(), cfg.block_bound());
+        assert_eq!(ssa.block(merge).instructions.len(), 1);
+        assert_eq!(ssa.block(left).instructions.len(), 0);
+
+        let reversed = crate::reverse_cfg(&cfg);
+        let reversed_report = verify(&reversed);
+        assert!(
+            reversed_report.is_ok(),
+            "the reverse of a holed CFG verifies: {:?}",
+            reversed_report.errors
+        );
+        assert_eq!(reversed.entry(), merge);
+        assert_eq!(reversed.block_count(), cfg.block_count());
+        assert_eq!(reversed.block_bound(), cfg.block_bound());
+
+        cfg.compact();
+        assert_eq!(cfg.block_bound(), cfg.block_count());
         assert!(verify(&cfg).is_ok());
     }
 

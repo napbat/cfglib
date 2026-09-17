@@ -273,6 +273,9 @@ impl<I, E> Cfg<I, E> {
     }
 
     /// Number of live basic blocks.
+    ///
+    /// A quantity, never an index range: use [`block_bound`](Self::block_bound)
+    /// to size or iterate a block-indexed array.
     #[inline]
     #[must_use]
     pub const fn block_count(&self) -> usize {
@@ -281,7 +284,8 @@ impl<I, E> Cfg<I, E> {
 
     /// An exclusive upper bound on every live [`BlockId`]'s index.
     ///
-    /// The right size for a block-indexed side table. It exceeds
+    /// The right size for a block-indexed side table — a bound sizes an
+    /// array, a count answers "how many". It exceeds
     /// [`block_count`](Self::block_count) exactly when blocks have been
     /// removed without a [`compact`](Self::compact).
     #[inline]
@@ -291,6 +295,9 @@ impl<I, E> Cfg<I, E> {
     }
 
     /// Number of live edges.
+    ///
+    /// A quantity, never an index range: use [`edge_bound`](Self::edge_bound)
+    /// to size or iterate an edge-indexed array.
     #[inline]
     #[must_use]
     pub const fn edge_count(&self) -> usize {
@@ -298,6 +305,9 @@ impl<I, E> Cfg<I, E> {
     }
 
     /// An exclusive upper bound on every live [`EdgeId`]'s index.
+    ///
+    /// The right size for an edge-indexed side table — a bound sizes an
+    /// array, a count answers "how many".
     #[inline]
     #[must_use]
     pub fn edge_bound(&self) -> usize {

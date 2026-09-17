@@ -272,6 +272,13 @@ pub fn lift<D: Lift>(
 
     // Phase 5: mirror blocks. Edges wait until every instruction exists,
     // so edge lifting can reference emitted instruction identities.
+    // Indexed by source block, which is sound because an RTL function's CFG
+    // comes from a builder that never retires a slot.
+    debug_assert_eq!(
+        cfg.block_count(),
+        cfg.block_bound(),
+        "a lifted RTL CFG must hold no removed block slots"
+    );
     let mut block_map: Vec<BlockId> = Vec::with_capacity(cfg.block_count());
     for block_id in cfg.block_ids() {
         let block = cfg.block(block_id);

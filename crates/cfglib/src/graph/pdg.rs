@@ -59,51 +59,52 @@ pub fn program_dependence_graph<I: InstrInfo>(
         cfg.edge_count().saturating_add(instruction_count),
     );
 
-    let block_ids: Vec<BlockId> = cfg.block_ids().collect();
-    let block_nodes: Vec<NodeId> = block_ids
-        .iter()
-        .map(|&block| graph.add_node(DependenceNode::Block(block)))
-        .collect();
-    let instruction_nodes: Vec<Vec<NodeId>> = block_ids
-        .iter()
-        .map(|&block| {
-            (0..cfg.block(block).instructions().len())
-                .map(|inst_idx| {
-                    graph.add_node(DependenceNode::Instruction(ProgramPoint {
-                        block,
-                        inst_idx,
-                    }))
-                })
-                .collect()
-        })
-        .collect();
-
+    // Both tables are addressed by block index, so they span every slot up to
+    // the identity bound; a retired slot keeps no predicate and no
+    // instructions.
+    let mut block_nodes: Vec<Option<NodeId>> = alloc::vec![None; cfg.block_bound()];
+    let mut instruction_nodes: Vec<Vec<NodeId>> = alloc::vec![Vec::new(); cfg.block_bound()];
+    for block in cfg.block_ids() {
+        block_nodes[block.index()] = Some(graph.add_node(DependenceNode::Block(block)));
+    }
+    for block in cfg.block_ids() {
+        instruction_nodes[block.index()] = (0..cfg.block(block).instructions().len())
+            .map(|inst_idx| {
+                graph.add_node(DependenceNode::Instruction(ProgramPoint {
+                    block,
+                    inst_idx,
+                }))
+            })
+            .collect();
+    }
     let post_dominators = DominatorTree::compute_post(cfg);
     let control = control_dependence_graph(cfg, &post_dominators);
     let mut controllers = BTreeSet::new();
     for edge in control.edges() {
         let controller = *control.node(edge.source());
         let dependent = *control.node(edge.target());
+        // The dependence graph spans every block slot, so skip any pair a
+        // retired slot contributed: it carries no predicate node.
+        let (Some(controller_node), Some(dependent_node)) = (
+            block_nodes[controller.index()],
+            block_nodes[dependent.index()],
+        ) else {
+            continue;
+        };
         controllers.insert(controller);
 
-        let controller_node = block_nodes[controller.index()];
-        graph.add_edge(
-            controller_node,
-            block_nodes[dependent.index()],
-            DependenceKind::Control,
-        );
+        graph.add_edge(controller_node, dependent_node, DependenceKind::Control);
         for &instruction in &instruction_nodes[dependent.index()] {
             graph.add_edge(controller_node, instruction, DependenceKind::Control);
         }
     }
 
     for controller in controllers {
+        let Some(controller_node) = block_nodes[controller.index()] else {
+            continue;
+        };
         if let Some(&predicate) = instruction_nodes[controller.index()].last() {
-            graph.add_edge(
-                predicate,
-                block_nodes[controller.index()],
-                DependenceKind::Control,
-            );
+            graph.add_edge(predicate, controller_node, DependenceKind::Control);
         }
     }
 

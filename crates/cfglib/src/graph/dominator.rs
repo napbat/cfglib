@@ -606,13 +606,12 @@ impl DominatorTree<BlockId> {
     ///
     /// Exits are the CFG's blocks with no successors; a CFG with none
     /// (e.g. ending in an infinite loop) falls back to treating the
-    /// last-allocated block as the exit, preserving long-standing
+    /// last-allocated live block as the exit, preserving long-standing
     /// behavior. See [`compute_post_from`](Self::compute_post_from) for
     /// the view-generic entry point with caller-chosen exits.
     #[must_use]
     pub fn compute_post<I, E>(cfg: &Cfg<I, E>) -> Self {
-        let node_count = cfg.block_count();
-        if node_count == 0 {
+        if cfg.block_count() == 0 {
             return DominatorTree {
                 idom: Vec::new(),
                 reachable: Vec::new(),
@@ -620,7 +619,10 @@ impl DominatorTree<BlockId> {
         }
         let mut exits: Vec<BlockId> = cfg.exit_blocks().collect();
         if exits.is_empty() {
-            exits.push(BlockId::from_index(node_count - 1));
+            // The fallback names a block, not a quantity: a removed block
+            // keeps its slot, so the highest live identity is the last one
+            // `block_ids` yields, not `block_count() - 1`.
+            exits.extend(cfg.block_ids().last());
         }
         Self::compute_post_from(cfg, &exits)
     }

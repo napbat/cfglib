@@ -204,13 +204,13 @@ mod tests {
         cfg.add_edge(a, b, EdgeKind::Fallthrough);
         let back = cfg.add_weighted_edge(b, a, EdgeKind::Back, 0.75);
         let leave = cfg.add_weighted_edge(b, exit, EdgeKind::SwitchCase, 0.25);
-        let original_block_count = cfg.block_count();
+        let original_block_bound = cfg.block_bound();
 
         let dom = DominatorTree::compute(&cfg);
         assert_eq!(find_irreducible_entry(&cfg, &dom), Some(b));
         assert_eq!(make_reducible(&mut cfg), 1);
 
-        let copy = BlockId::from_index(original_block_count);
+        let copy = BlockId::from_index(original_block_bound);
         assert_eq!(cfg.edge(redirected).target(), copy);
         assert_eq!(cfg.edge(redirected).weight(), Some(0.125));
         assert_eq!(cfg.outgoing(b).collect::<Vec<_>>(), &[back, leave]);

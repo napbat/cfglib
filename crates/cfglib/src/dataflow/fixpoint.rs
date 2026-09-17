@@ -457,7 +457,9 @@ fn try_solve_with_worklist<I, E, P: TryProblem<I, E>>(
     mut worklist: BTreeSet<u32>,
     config: SolveConfig,
 ) -> Result<Facts<P::Fact>, TrySolveError<P::Error>> {
-    let n = cfg.block_count();
+    // Block-indexed side tables: sized by the identity bound, never by the
+    // live count, so a removed block's slot still has a well-defined fact.
+    let n = cfg.block_bound();
     let bottom = problem.bottom();
     let forward = matches!(problem.direction(), Direction::Forward);
 

@@ -16,6 +16,7 @@ use super::{
 };
 
 mod memory;
+mod removal;
 mod rewrite;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

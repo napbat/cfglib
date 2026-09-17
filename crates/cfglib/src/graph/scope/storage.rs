@@ -231,7 +231,7 @@ impl<S, L, R, D, Q> ScopeGraph<S, L, R, D, Q> {
     ///
     /// Panics when `scope` does not belong to this graph.
     pub fn add_datum(&mut self, scope: ScopeId, relation: R, data: D) -> ScopeDatumId {
-        assert!(scope.index() < self.scope_count(), "scope is out of range");
+        assert!(scope.index() < self.scope_bound(), "scope is out of range");
         let id = ScopeDatumId::from_index(self.data.len());
         self.data.push(ScopeDatum {
             scope,
@@ -248,7 +248,7 @@ impl<S, L, R, D, Q> ScopeGraph<S, L, R, D, Q> {
     ///
     /// Panics when `scope` does not belong to this graph.
     pub fn add_reference(&mut self, scope: ScopeId, data: Q) -> ScopeReferenceId {
-        assert!(scope.index() < self.scope_count(), "scope is out of range");
+        assert!(scope.index() < self.scope_bound(), "scope is out of range");
         let id = ScopeReferenceId::from_index(self.references.len());
         self.references.push(ScopeReference { scope, data });
         self.scope_references[scope.index()].push(id);
