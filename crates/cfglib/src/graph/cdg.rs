@@ -7,10 +7,10 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use crate::graph::directed::DirectedGraph;
 use crate::graph::dominator::DominatorTree;
 use crate::graph::search::EpochMarks;
-use crate::graph::view::{DenseNodeId, DirectedGraphView};
+use crate::graph::store::Graph;
+use crate::graph::view::{DenseId, GraphView};
 
 /// Compute control dependences from a graph view and its post-dominator
 /// tree.
@@ -48,17 +48,17 @@ use crate::graph::view::{DenseNodeId, DirectedGraphView};
 /// assert!(controlled.contains(&right));
 /// ```
 #[must_use]
-pub fn control_dependence_graph<G: DirectedGraphView>(
+pub fn control_dependence_graph<G: GraphView>(
     source: &G,
     post_dominators: &DominatorTree<G::NodeId>,
-) -> DirectedGraph<G::NodeId, ()> {
-    let mut graph = DirectedGraph::with_capacity(source.node_count(), source.node_count());
-    let nodes: Vec<_> = (0..source.node_count())
+) -> Graph<G::NodeId, ()> {
+    let mut graph = Graph::with_capacity(source.node_bound(), source.node_bound());
+    let nodes: Vec<_> = (0..source.node_bound())
         .map(G::NodeId::from_index)
         .map(|node| graph.add_node(node))
         .collect();
     let post_dominator_depths = post_dominators.analysis_depths();
-    let mut seen_dependents = EpochMarks::new(source.node_count());
+    let mut seen_dependents = EpochMarks::new(source.node_bound());
     let mut dependents = Vec::new();
     let mut controllers: Vec<_> = source.node_ids().collect();
     // Stable edge IDs expose global `(controller, dependent)` ordering. Dense
@@ -115,13 +115,13 @@ mod tests {
     use crate::block::BlockId;
     use crate::cfg::Cfg;
     use crate::edge::EdgeKind;
-    use crate::graph::directed::NodeId;
+    use crate::graph::store::NodeId;
     use crate::test_util::ff;
     use alloc::collections::BTreeSet;
     use alloc::vec;
     use core::cmp::Ordering;
 
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     struct ReverseOrdNode(usize);
 
     impl PartialOrd for ReverseOrdNode {
@@ -136,7 +136,7 @@ mod tests {
         }
     }
 
-    impl DenseNodeId for ReverseOrdNode {
+    impl DenseId for ReverseOrdNode {
         fn from_index(index: usize) -> Self {
             Self(index)
         }
@@ -148,10 +148,10 @@ mod tests {
 
     struct ReverseOrdGraph;
 
-    impl DirectedGraphView for ReverseOrdGraph {
+    impl GraphView for ReverseOrdGraph {
         type NodeId = ReverseOrdNode;
 
-        fn node_count(&self) -> usize {
+        fn node_bound(&self) -> usize {
             6
         }
 
@@ -215,7 +215,7 @@ mod tests {
         let graph = control_dependence_graph(&cfg, &post_dominators);
         let controlled: BTreeSet<_> = graph
             .successors(node(cfg.entry()))
-            .map(|dependent| graph[dependent])
+            .map(|dependent| *graph.node(dependent))
             .collect();
 
         assert_eq!(controlled, BTreeSet::from([left, right]));
@@ -226,8 +226,8 @@ mod tests {
     fn exit_unreachable_regions_emit_no_dependences() {
         // With no exits, no node has post-dominance facts; straight-line
         // edges must not become fabricated control dependences.
-        use crate::graph::directed::DirectedGraph;
-        let mut graph: DirectedGraph<(), ()> = DirectedGraph::new();
+        use crate::graph::store::Graph;
+        let mut graph: Graph<(), ()> = Graph::new();
         let a = graph.add_node(());
         let b = graph.add_node(());
         graph.add_edge(a, b, ());
@@ -241,12 +241,15 @@ mod tests {
     fn custom_id_order_retains_global_edge_identity_order() {
         let post = DominatorTree::compute_post_from(&ReverseOrdGraph, &[ReverseOrdNode(5)]);
         let graph = control_dependence_graph(&ReverseOrdGraph, &post);
-        for index in 0..ReverseOrdGraph.node_count() {
-            assert_eq!(graph[NodeId::from_index(index)], ReverseOrdNode(index));
+        for index in 0..ReverseOrdGraph.node_bound() {
+            assert_eq!(
+                *graph.node(NodeId::from_index(index)),
+                ReverseOrdNode(index)
+            );
         }
         let relations: Vec<_> = graph
             .edges()
-            .map(|edge| (graph[edge.source()], graph[edge.target()]))
+            .map(|edge| (*graph.node(edge.source()), *graph.node(edge.target())))
             .collect();
 
         assert_eq!(
@@ -271,7 +274,7 @@ mod tests {
         let post_dominators = DominatorTree::compute_post(&cfg);
         let graph = control_dependence_graph(&cfg, &post_dominators);
 
-        assert_eq!(graph.node_count(), cfg.block_count());
+        assert_eq!(graph.node_bound(), cfg.block_bound());
         assert_eq!(graph.edge_count(), 0);
     }
 }

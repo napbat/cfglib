@@ -1,0 +1,19 @@
+entry bb0
+bb0:
+    x = read()
+    branch x
+bb1: loop_header
+    y = x + 1
+bb3:
+    catch e
+bb4:
+    e is Overflow
+bb5:
+    return y
+bb0 -> bb1 true
+bb0 -> bb5 false
+bb1 -> bb1 back
+bb1 -> bb3 unwind
+region r0 protected=bb0,bb1
+    handler catch entry=bb3 body=bb3
+    handler filter entry=bb3 filter=bb4 body=?

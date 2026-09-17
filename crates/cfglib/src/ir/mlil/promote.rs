@@ -144,7 +144,7 @@ where
 
     builder.copy_blocks(&source.cfg);
     let mut rewritten = 0usize;
-    for index in 0..source.instruction_points.len() {
+    for index in 0..source.instruction_count() {
         let id = InstructionId::from_raw(
             u32::try_from(index).expect("existing identities fit their own space"),
         );

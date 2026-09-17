@@ -311,9 +311,17 @@ pub fn lower<D: Lower>(function: &MlilFunction<D::Mlil>) -> Result<Lowered<D>> {
         parameters,
         function.signature().returns.clone(),
     ))?;
+    // Indexed by source block, which is sound because an MLIL function's CFG
+    // comes from a builder that never retires a slot.
+    debug_assert_eq!(
+        cfg.block_count(),
+        cfg.block_bound(),
+        "a lowered MLIL CFG must hold no removed block slots"
+    );
     let mut blocks: Vec<BlockId> = Vec::with_capacity(cfg.block_count());
-    for block in cfg.blocks() {
-        if block.id() == cfg.entry() {
+    for block_id in cfg.block_ids() {
+        let block = cfg.block(block_id);
+        if block_id == cfg.entry() {
             blocks.push(builder.entry());
         } else {
             let label = block.label().unwrap_or("b").to_string();
@@ -322,7 +330,8 @@ pub fn lower<D: Lower>(function: &MlilFunction<D::Mlil>) -> Result<Lowered<D>> {
     }
 
     let mut statements: Vec<Vec<StatementId>> = vec![Vec::new(); function.instruction_count()];
-    for block in cfg.blocks() {
+    for block_id in cfg.block_ids() {
+        let block = cfg.block(block_id);
         for instruction in block.instructions() {
             let spans = function
                 .provenance()
@@ -331,7 +340,7 @@ pub fn lower<D: Lower>(function: &MlilFunction<D::Mlil>) -> Result<Lowered<D>> {
                 .collect();
             let mut context = LowerContext {
                 builder: &mut builder,
-                block: blocks[block.id().index()],
+                block: blocks[block_id.index()],
                 placement: &placement,
                 spans,
                 statements: Vec::new(),

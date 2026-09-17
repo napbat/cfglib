@@ -1,30 +1,45 @@
-//! Explicit identity remapping for control-flow graph rewrites.
+//! What one control-flow-graph transform did to the identities it touched.
+//!
+//! Two things in this crate answer "what became what", and they are not the
+//! same thing. [`Renumbering`] is the **dense** answer a compaction gives:
+//! total over the old slot space, every identity affected, an array lookup.
+//! [`Rewrite`] is the **sparse** answer a transform gives: only the
+//! identities it touched appear, and a missing entry means the transform left
+//! that identity alone.
+//!
+//! The two compose in one direction — [`Rewrite::then_renumbered`] carries a
+//! transform's record across a later compaction — so a consumer that runs a
+//! pass and then compacts still has one mapping from the identities it held
+//! to the identities it now holds.
 
 extern crate alloc;
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
+use crate::block::BlockTag;
+use crate::edge::EdgeTag;
+use crate::graph::store::Renumbering;
 use crate::{BlockId, EdgeId};
 
 /// Old-to-new block and edge identities produced by one graph rewrite.
 ///
-/// Only affected old identities appear in the maps. A missing entry therefore
-/// means "unchanged"; an entry with no replacements means "removed"; one
+/// Only affected old identities appear. A missing entry therefore means
+/// "unchanged"; an entry with no replacements means "removed"; one
 /// replacement means retained or redirected; several replacements mean an
 /// identity expanded, as when one block or edge is split. Every identity
 /// allocated by the rewrite is listed separately, including a new identity
 /// that is also one of an old identity's replacements.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RewriteMap {
+pub struct Rewrite {
     blocks: BTreeMap<BlockId, Vec<BlockId>>,
     edges: BTreeMap<EdgeId, Vec<EdgeId>>,
     created_blocks: Vec<BlockId>,
     created_edges: Vec<EdgeId>,
 }
 
-impl RewriteMap {
-    /// Create an empty identity rewrite.
+impl Rewrite {
+    /// Create an empty rewrite record.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -44,15 +59,16 @@ impl RewriteMap {
             && self.created_edges.is_empty()
     }
 
-    /// Replacements of an affected old block, or `None` when it was unchanged.
+    /// Replacements of an affected old block, or `None` when it was
+    /// unchanged.
     #[must_use]
-    pub fn block_replacements(&self, old: BlockId) -> Option<&[BlockId]> {
+    pub fn blocks(&self, old: BlockId) -> Option<&[BlockId]> {
         self.blocks.get(&old).map(Vec::as_slice)
     }
 
     /// Replacements of an affected old edge, or `None` when it was unchanged.
     #[must_use]
-    pub fn edge_replacements(&self, old: EdgeId) -> Option<&[EdgeId]> {
+    pub fn edges(&self, old: EdgeId) -> Option<&[EdgeId]> {
         self.edges.get(&old).map(Vec::as_slice)
     }
 
@@ -135,6 +151,73 @@ impl RewriteMap {
             }
         }
     }
+
+    /// Carry this record across a compaction that ran after it.
+    ///
+    /// Every replacement and created identity is translated to the number
+    /// `renumbering` gave it; an identity the compaction dropped disappears
+    /// from the replacement set, which is exactly the record's existing
+    /// spelling for "removed".
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cfglib::{Cfg, EdgeKind, remove_unreachable_mapped};
+    ///
+    /// let mut cfg = Cfg::<u32>::new();
+    /// let live = cfg.new_block();
+    /// let dead = cfg.new_block();
+    /// cfg.add_edge(cfg.entry(), live, EdgeKind::Fallthrough);
+    /// cfg.block_mut(dead).push(7);
+    ///
+    /// let (_, rewrite) = remove_unreachable_mapped(&mut cfg);
+    /// let renumbering = cfg.compact();
+    /// let compacted = rewrite.then_renumbered(&renumbering);
+    /// assert_eq!(compacted.blocks(dead), Some([].as_slice()));
+    /// ```
+    #[must_use]
+    pub fn then_renumbered(&self, renumbering: &Renumbering<BlockTag, EdgeTag>) -> Self {
+        let blocks = self
+            .blocks
+            .iter()
+            .map(|(&old, replacements)| {
+                (
+                    old,
+                    replacements
+                        .iter()
+                        .filter_map(|&block| renumbering.node(block))
+                        .collect(),
+                )
+            })
+            .collect();
+        let edges = self
+            .edges
+            .iter()
+            .map(|(&old, replacements)| {
+                (
+                    old,
+                    replacements
+                        .iter()
+                        .filter_map(|&edge| renumbering.edge(edge))
+                        .collect(),
+                )
+            })
+            .collect();
+        Self {
+            blocks,
+            edges,
+            created_blocks: self
+                .created_blocks
+                .iter()
+                .filter_map(|&block| renumbering.node(block))
+                .collect(),
+            created_edges: self
+                .created_edges
+                .iter()
+                .filter_map(|&edge| renumbering.edge(edge))
+                .collect(),
+        }
+    }
 }
 
 fn unique<T: Copy + PartialEq>(values: impl IntoIterator<Item = T>) -> Vec<T> {
@@ -193,17 +276,17 @@ mod tests {
         let b = BlockId::from_index(1);
         let c = BlockId::from_index(2);
         let d = BlockId::from_index(3);
-        let mut first = RewriteMap::new();
+        let mut first = Rewrite::new();
         first.record_block(a, [b, c]);
         first.record_created_block(c);
 
-        let mut second = RewriteMap::new();
+        let mut second = Rewrite::new();
         second.record_block(b, [d]);
         second.record_block(c, []);
         first.compose(second);
 
-        assert_eq!(first.block_replacements(a), Some([d].as_slice()));
-        assert_eq!(first.block_replacements(c), Some([].as_slice()));
+        assert_eq!(first.blocks(a), Some([d].as_slice()));
+        assert_eq!(first.blocks(c), Some([].as_slice()));
         assert!(first.created_blocks().is_empty());
     }
 }

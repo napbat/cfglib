@@ -12,8 +12,8 @@ use alloc::vec::Vec;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeId;
-use crate::graph::edge_view::{DenseEdgeId, EdgeGraphView};
-use crate::graph::view::{DenseNodeId, RootedGraphView};
+use crate::graph::edge_view::EdgeView;
+use crate::graph::view::{DenseId, RootedView};
 
 /// A single verification failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,25 +92,25 @@ impl<E> SemanticVerifyReport<E> {
     }
 }
 
-fn verify_edge_endpoints<I, E>(cfg: &Cfg<I, E>, block_count: usize, errors: &mut Vec<VerifyError>) {
+fn verify_edge_endpoints<I, E>(cfg: &Cfg<I, E>, block_bound: usize, errors: &mut Vec<VerifyError>) {
     for edge in cfg.edges() {
-        if edge.source().index() >= block_count {
+        if edge.source().index() >= block_bound {
             errors.push(VerifyError {
                 message: alloc::format!(
-                    "edge {} source {} out of bounds (block_count={})",
+                    "edge {} source {} out of bounds (block_bound={})",
                     edge.id(),
                     edge.source(),
-                    block_count
+                    block_bound
                 ),
             });
         }
-        if edge.target().index() >= block_count {
+        if edge.target().index() >= block_bound {
             errors.push(VerifyError {
                 message: alloc::format!(
-                    "edge {} target {} out of bounds (block_count={})",
+                    "edge {} target {} out of bounds (block_bound={})",
                     edge.id(),
                     edge.target(),
-                    block_count
+                    block_bound
                 ),
             });
         }
@@ -118,10 +118,10 @@ fn verify_edge_endpoints<I, E>(cfg: &Cfg<I, E>, block_count: usize, errors: &mut
 }
 
 fn verify_adjacency<I, E>(cfg: &Cfg<I, E>, errors: &mut Vec<VerifyError>) {
-    for block in cfg.blocks() {
-        let block_id = block.id();
-        for &edge_id in cfg.successor_edges(block_id) {
-            if edge_id.index() >= cfg.edge_slots() {
+    for block_id_ in cfg.block_ids() {
+        let block_id = block_id_;
+        for edge_id in cfg.outgoing(block_id) {
+            if edge_id.index() >= cfg.edge_bound() {
                 errors.push(VerifyError {
                     message: alloc::format!(
                         "block {block_id} successor edge {edge_id} out of bounds"
@@ -138,8 +138,8 @@ fn verify_adjacency<I, E>(cfg: &Cfg<I, E>, errors: &mut Vec<VerifyError>) {
                 });
             }
         }
-        for &edge_id in cfg.predecessor_edges(block_id) {
-            if edge_id.index() >= cfg.edge_slots() {
+        for edge_id in cfg.incoming(block_id) {
+            if edge_id.index() >= cfg.edge_bound() {
                 errors.push(VerifyError {
                     message: alloc::format!(
                         "block {block_id} predecessor edge {edge_id} out of bounds"
@@ -160,10 +160,10 @@ fn verify_adjacency<I, E>(cfg: &Cfg<I, E>, errors: &mut Vec<VerifyError>) {
 }
 
 fn verify_unique_adjacency<I, E>(cfg: &Cfg<I, E>, errors: &mut Vec<VerifyError>) {
-    for block in cfg.blocks() {
-        let block_id = block.id();
+    for block_id_ in cfg.block_ids() {
+        let block_id = block_id_;
         let mut seen = alloc::collections::BTreeSet::new();
-        for &edge_id in cfg.successor_edges(block_id) {
+        for edge_id in cfg.outgoing(block_id) {
             if !seen.insert(edge_id) {
                 errors.push(VerifyError {
                     message: alloc::format!(
@@ -173,7 +173,7 @@ fn verify_unique_adjacency<I, E>(cfg: &Cfg<I, E>, errors: &mut Vec<VerifyError>)
             }
         }
         seen.clear();
-        for &edge_id in cfg.predecessor_edges(block_id) {
+        for edge_id in cfg.incoming(block_id) {
             if !seen.insert(edge_id) {
                 errors.push(VerifyError {
                     message: alloc::format!(
@@ -211,13 +211,15 @@ fn verify_unique_adjacency<I, E>(cfg: &Cfg<I, E>, errors: &mut Vec<VerifyError>)
 #[must_use]
 pub fn verify<I, E>(cfg: &Cfg<I, E>) -> VerifyReport {
     let mut errors = Vec::new();
-    let n = cfg.block_count();
+    // Identities, not quantities: removed blocks keep their slots, so every
+    // live index is bounded by `block_bound`, which `block_count` undercuts.
+    let n = cfg.block_bound();
 
     // 1. Entry in bounds.
     if cfg.entry().index() >= n {
         errors.push(VerifyError {
             message: alloc::format!(
-                "entry block {} out of bounds (block_count={})",
+                "entry block {} out of bounds (block_bound={})",
                 cfg.entry(),
                 n
             ),
@@ -235,7 +237,7 @@ pub fn verify<I, E>(cfg: &Cfg<I, E>) -> VerifyReport {
         if bid == cfg.entry() {
             continue;
         }
-        if cfg.predecessor_edges(bid).is_empty() {
+        if cfg.incoming(bid).next().is_none() {
             errors.push(VerifyError {
                 message: alloc::format!("reachable block {bid} has no predecessors"),
             });
@@ -255,8 +257,8 @@ where
 {
     let structural = verify(cfg);
     let mut semantic_errors = Vec::new();
-    for block in cfg.blocks() {
-        validator.validate_block(cfg, block.id(), &mut semantic_errors);
+    for block_id in cfg.block_ids() {
+        validator.validate_block(cfg, block_id, &mut semantic_errors);
     }
     for edge in cfg.edges() {
         validator.validate_edge(cfg, edge.id(), &mut semantic_errors);
@@ -268,10 +270,10 @@ where
     }
 }
 
-/// Validate the [`RootedGraphView`] contract on consumer-owned storage.
+/// Validate the [`RootedView`] contract on consumer-owned storage.
 ///
 /// Checks performed:
-/// 1. The root node's index is within `0..node_count()`.
+/// 1. The root node's index is within `0..node_bound()`.
 /// 2. Forward and reverse adjacency mirror each other with matching
 ///    multiplicity (every successor entry has a matching predecessor entry).
 /// 3. Every reachable non-root node has at least one predecessor.
@@ -280,9 +282,9 @@ where
 /// its own graph store — the counterpart of [`verify`], which checks the
 /// storage invariants of [`Cfg`] itself.
 #[must_use]
-pub fn verify_view<G: RootedGraphView>(graph: &G) -> VerifyReport {
+pub fn verify_view<G: RootedView>(graph: &G) -> VerifyReport {
     let mut errors = Vec::new();
-    let node_count = graph.node_count();
+    let node_count = graph.node_bound();
 
     let root = graph.root();
     if root.index() >= node_count {
@@ -362,17 +364,17 @@ pub fn verify_view<G: RootedGraphView>(graph: &G) -> VerifyReport {
 #[must_use]
 pub fn verify_edge_view<G>(graph: &G) -> VerifyReport
 where
-    G: EdgeGraphView + RootedGraphView,
+    G: EdgeView + RootedView,
 {
     let mut result = verify_view(graph);
     let mut live = BTreeSet::new();
     for edge_id in graph.edge_ids() {
         let index = edge_id.index();
-        if index >= graph.edge_slot_count() {
+        if index >= graph.edge_bound() {
             result.errors.push(VerifyError {
                 message: alloc::format!(
-                    "edge index {index} out of bounds (edge_slot_count={})",
-                    graph.edge_slot_count()
+                    "edge index {index} out of bounds (edge_bound={})",
+                    graph.edge_bound()
                 ),
             });
             continue;
@@ -383,14 +385,14 @@ where
             });
             continue;
         }
-        let edge = graph.edge_ref(edge_id);
-        if edge.source().index() >= graph.node_count()
-            || edge.target().index() >= graph.node_count()
+        let edge = graph.edge(edge_id);
+        if edge.source().index() >= graph.node_bound()
+            || edge.target().index() >= graph.node_bound()
         {
             result.errors.push(VerifyError {
                 message: alloc::format!(
                     "edge index {index} has endpoint outside node_count {}",
-                    graph.node_count()
+                    graph.node_bound()
                 ),
             });
         }
@@ -399,7 +401,7 @@ where
     let mut outgoing_counts = BTreeMap::new();
     let mut incoming_counts = BTreeMap::new();
     for node in graph.node_ids() {
-        for edge_id in graph.outgoing_edges(node) {
+        for edge_id in graph.outgoing(node) {
             let index = edge_id.index();
             if !live.contains(&index) {
                 result.errors.push(VerifyError {
@@ -411,17 +413,17 @@ where
                 continue;
             }
             *outgoing_counts.entry(index).or_insert(0) += 1;
-            if graph.edge_ref(edge_id).source() != node {
+            if graph.edge(edge_id).source() != node {
                 result.errors.push(VerifyError {
                     message: alloc::format!(
                         "node {} lists edge index {index}, whose source is {}",
                         node.index(),
-                        graph.edge_ref(edge_id).source().index()
+                        graph.edge(edge_id).source().index()
                     ),
                 });
             }
         }
-        for edge_id in graph.incoming_edges(node) {
+        for edge_id in graph.incoming(node) {
             let index = edge_id.index();
             if !live.contains(&index) {
                 result.errors.push(VerifyError {
@@ -433,12 +435,12 @@ where
                 continue;
             }
             *incoming_counts.entry(index).or_insert(0) += 1;
-            if graph.edge_ref(edge_id).target() != node {
+            if graph.edge(edge_id).target() != node {
                 result.errors.push(VerifyError {
                     message: alloc::format!(
                         "node {} lists edge index {index}, whose target is {}",
                         node.index(),
-                        graph.edge_ref(edge_id).target().index()
+                        graph.edge(edge_id).target().index()
                     ),
                 });
             }
@@ -499,6 +501,103 @@ mod tests {
     }
 
     #[test]
+    fn merging_a_linear_chain_leaves_one_verifiable_block() {
+        let mut cfg = Cfg::new();
+        let mut previous = cfg.entry();
+        cfg.block_mut(previous).instructions_mut().push(ff("b0"));
+        for _ in 1..8 {
+            let next = cfg.new_block();
+            cfg.block_mut(next).instructions_mut().push(ff("b"));
+            cfg.add_edge(previous, next, EdgeKind::Fallthrough);
+            previous = next;
+        }
+        assert_eq!(cfg.block_count(), 8);
+
+        assert_eq!(crate::merge_blocks(&mut cfg), 7);
+
+        let result = verify(&cfg);
+        assert!(
+            result.is_ok(),
+            "a merged chain is still a valid CFG: {:?}",
+            result.errors
+        );
+        assert_eq!(cfg.block_count(), 1, "the chain collapsed into the entry");
+        assert_eq!(
+            cfg.block_bound(),
+            8,
+            "the consumed blocks keep their identity slots"
+        );
+        assert_eq!(cfg.block(cfg.entry()).instructions().len(), 8);
+    }
+
+    #[test]
+    fn a_diamond_missing_an_arm_survives_every_whole_graph_analysis() {
+        use crate::dataflow::liveness::LivenessProblem;
+        use crate::test_util::{DfInst, df_def, df_use};
+
+        let mut cfg: Cfg<DfInst> = Cfg::new();
+        let left = cfg.new_block();
+        let right = cfg.new_block();
+        let merge = cfg.new_block();
+        cfg.block_mut(cfg.entry()).push(df_def("def", 0));
+        cfg.block_mut(left).push(df_use("left", 0));
+        cfg.block_mut(right).push(df_use("right", 0));
+        cfg.block_mut(merge).push(df_use("merge", 0));
+        cfg.add_edge(cfg.entry(), left, EdgeKind::ConditionalTrue);
+        cfg.add_edge(cfg.entry(), right, EdgeKind::ConditionalFalse);
+        cfg.add_edge(left, merge, EdgeKind::Fallthrough);
+        cfg.add_edge(right, merge, EdgeKind::Fallthrough);
+
+        // Retiring the low-indexed arm leaves a live block whose index sits
+        // above the live count — the shape that a count-sized array truncates.
+        assert!(cfg.remove_block(left));
+        assert_eq!(cfg.block_count(), 3);
+        assert_eq!(cfg.block_bound(), 4);
+
+        let report = verify(&cfg);
+        assert!(
+            report.is_ok(),
+            "a retired slot is not a violation: {:?}",
+            report.errors
+        );
+
+        let dominators = crate::DominatorTree::compute(&cfg);
+        assert_eq!(dominators.idom(merge), Some(right));
+        assert!(!dominators.is_reachable(left));
+
+        let post_dominators = crate::DominatorTree::compute_post(&cfg);
+        assert_eq!(post_dominators.idom(cfg.entry()), Some(right));
+        assert_eq!(post_dominators.idom(right), Some(merge));
+
+        let facts = crate::solve_problem(&cfg, &LivenessProblem).expect("liveness solves");
+        assert!(facts.fact_in(merge).contains(&0));
+        assert!(
+            facts.fact_in(left).is_empty(),
+            "a retired slot keeps the bottom fact"
+        );
+
+        let ssa = crate::SsaForm::compute(&cfg, &dominators);
+        assert_eq!(ssa.blocks().len(), cfg.block_bound());
+        assert_eq!(ssa.block(merge).instructions.len(), 1);
+        assert_eq!(ssa.block(left).instructions.len(), 0);
+
+        let reversed = crate::reverse_cfg(&cfg);
+        let reversed_report = verify(&reversed);
+        assert!(
+            reversed_report.is_ok(),
+            "the reverse of a holed CFG verifies: {:?}",
+            reversed_report.errors
+        );
+        assert_eq!(reversed.entry(), merge);
+        assert_eq!(reversed.block_count(), cfg.block_count());
+        assert_eq!(reversed.block_bound(), cfg.block_bound());
+
+        cfg.compact();
+        assert_eq!(cfg.block_bound(), cfg.block_count());
+        assert!(verify(&cfg).is_ok());
+    }
+
+    #[test]
     fn verify_error_count() {
         let cfg: Cfg<crate::test_util::MockInst> = Cfg::new();
         let result = verify(&cfg);
@@ -507,7 +606,7 @@ mod tests {
 
     #[test]
     fn verify_view_accepts_consistent_consumer_view() {
-        let mut graph = crate::graph::directed::DirectedGraph::new();
+        let mut graph = crate::graph::store::Graph::new();
         let root = graph.add_node(());
         let child = graph.add_node(());
         graph.add_edge(root, child, ());
@@ -520,11 +619,15 @@ mod tests {
     #[test]
     fn verify_view_reports_one_sided_adjacency() {
         struct Broken;
-        impl crate::graph::view::DirectedGraphView for Broken {
+        impl crate::graph::view::GraphView for Broken {
             type NodeId = usize;
 
-            fn node_count(&self) -> usize {
+            fn node_bound(&self) -> usize {
                 2
+            }
+
+            fn node_ids(&self) -> impl Iterator<Item = usize> + '_ {
+                0..2
             }
 
             fn successors(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
@@ -535,7 +638,7 @@ mod tests {
                 core::iter::empty()
             }
         }
-        impl crate::graph::view::RootedGraphView for Broken {
+        impl crate::graph::view::RootedView for Broken {
             fn root(&self) -> usize {
                 0
             }
@@ -589,7 +692,7 @@ mod tests {
         ) {
             let mut conditional_count = 0;
             let mut expected_handler = 0;
-            for &edge in cfg.successor_edges(block) {
+            for edge in cfg.outgoing(block) {
                 let edge = cfg.edge(edge);
                 if matches!(
                     edge.kind(),

@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use super::{Edge, MediumOperation, Toy, Type};
 use crate::ir::hlil::lift_function;
 use crate::ir::mlil;
+use crate::test_util::golden::assert_golden;
 
 fn typed(variable: mlil::VariableId) -> mlil::TypedVariable<Toy> {
     mlil::TypedVariable::new(variable, Type::Integer)
@@ -50,16 +51,12 @@ fn overlapping_parallel_copy_stages_through_temporaries() {
 
     let lifted = lift_function(&builder.finish().unwrap()).unwrap();
     assert!(lifted.function.verify().is_ok());
-    let pseudo = lifted.function.to_pseudocode();
     // Every source is read into a temporary before any destination is
     // written, so the swap keeps both values.
-    assert!(pseudo.contains("v2 = v0;"), "{pseudo}");
-    assert!(pseudo.contains("v3 = v1;"), "{pseudo}");
-    assert!(pseudo.contains("v1 = v2;"), "{pseudo}");
-    assert!(pseudo.contains("v0 = v3;"), "{pseudo}");
-    let write = pseudo.find("v1 = v2;").expect(&pseudo);
-    let stage = pseudo.find("v3 = v1;").expect(&pseudo);
-    assert!(stage < write, "reads happen before writes: {pseudo}");
+    assert_golden(
+        "hlil/parallel-copy-staged.pseudo",
+        &lifted.function.to_pseudocode(),
+    );
 }
 
 #[test]
@@ -100,8 +97,7 @@ fn disjoint_parallel_copy_moves_directly() {
 
     let lifted = lift_function(&builder.finish().unwrap()).unwrap();
     let pseudo = lifted.function.to_pseudocode();
-    assert!(pseudo.contains("v2 = v0;"), "{pseudo}");
-    assert!(pseudo.contains("v3 = v1;"), "{pseudo}");
+    assert_golden("hlil/parallel-copy-direct.pseudo", &pseudo);
     assert_eq!(
         lifted.function.variables().len(),
         4,
@@ -168,10 +164,10 @@ fn fused_compare_branch_becomes_the_loop_condition() {
 
     let lifted = lift_function(&builder.finish().unwrap()).unwrap();
     assert!(lifted.report.is_fully_structured(), "{:?}", lifted.report);
-    let pseudo = lifted.function.to_pseudocode();
-    assert!(pseudo.contains("while (below(v0, v1)) {"), "{pseudo}");
-    assert!(pseudo.contains("v0 = add(v0, 1);"), "{pseudo}");
-    assert!(pseudo.contains("return v0;"), "{pseudo}");
+    assert_golden(
+        "hlil/fused-loop-condition.pseudo",
+        &lifted.function.to_pseudocode(),
+    );
 }
 
 #[test]
@@ -232,8 +228,10 @@ fn zero_use_fused_branch_embeds_its_whole_condition() {
 
     let lifted = lift_function(&builder.finish().unwrap()).unwrap();
     assert!(lifted.report.is_fully_structured(), "{:?}", lifted.report);
-    let pseudo = lifted.function.to_pseudocode();
-    assert!(pseudo.contains("if (below()"), "{pseudo}");
+    assert_golden(
+        "hlil/fused-embedded-condition.pseudo",
+        &lifted.function.to_pseudocode(),
+    );
 }
 
 #[test]
@@ -277,7 +275,9 @@ fn single_pair_parallel_copy_inlines_as_a_copy() {
         .unwrap();
     let lifted = lift_function(&builder.finish().unwrap()).unwrap();
     assert!(lifted.function.verify().is_ok());
-    let pseudo = lifted.function.to_pseudocode();
-    assert!(pseudo.contains("return v0;"), "{pseudo}");
-    assert!(!pseudo.contains("v1 ="), "{pseudo}");
+    // The single pair inlines as a copy: no temporary is left behind.
+    assert_golden(
+        "hlil/parallel-copy-single.pseudo",
+        &lifted.function.to_pseudocode(),
+    );
 }

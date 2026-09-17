@@ -58,8 +58,9 @@ impl DeadCode {
             .expect("an unbounded solve cannot exceed a step limit");
 
         let mut instructions = Vec::new();
-        for block in cfg.blocks() {
-            let block_id = block.id();
+        for block_id_ in cfg.block_ids() {
+            let block = cfg.block(block_id_);
+            let block_id = block_id_;
             let mut live = liveness.fact_out(block_id).clone();
             let insts = block.instructions();
             let mut dead = Vec::new();
@@ -88,9 +89,7 @@ impl DeadCode {
 
         let reached = reachable(cfg, [cfg.entry()], TraversalDirection::Outgoing);
         let unreachable_blocks = cfg
-            .blocks()
-            .iter()
-            .map(crate::block::BasicBlock::id)
+            .block_ids()
             .filter(|block| !reached[block.index()])
             .collect();
 

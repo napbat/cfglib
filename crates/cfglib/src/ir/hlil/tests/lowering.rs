@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use super::super::{ExpressionKind, FunctionBuilder, Signature, StatementKind};
 use super::{Operation, Toy, Type};
 use crate::ir::hlil::{lift_function, lower_function};
+use crate::test_util::golden::assert_golden;
 
 /// `while (lt(i, n)) { if (lt(i, 100)) { break; } i = add(i, 1); } return i;`
 fn structured_counting_loop() -> crate::ir::hlil::Function<Toy> {
@@ -121,11 +122,10 @@ fn lowering_and_relifting_round_trips_a_while_loop() {
         "{:?}",
         relifted.report
     );
-    let pseudo = relifted.function.to_pseudocode();
-    assert!(pseudo.contains("while (lt(v0, v1)) {"), "{pseudo}");
-    assert!(pseudo.contains("break;"), "{pseudo}");
-    assert!(pseudo.contains("v0 = add(v0, 1);"), "{pseudo}");
-    assert!(pseudo.contains("return v0;"), "{pseudo}");
+    assert_golden(
+        "hlil/relift-while-loop.pseudo",
+        &relifted.function.to_pseudocode(),
+    );
 }
 
 #[test]
@@ -199,12 +199,10 @@ fn lowering_and_relifting_round_trips_a_switch() {
         "{:?}",
         relifted.report
     );
-    let pseudo = relifted.function.to_pseudocode();
-    assert!(pseudo.contains("switch (v0) {"), "{pseudo}");
-    assert!(pseudo.contains("case 1, 2: {"), "{pseudo}");
-    assert!(pseudo.contains("case 3: {"), "{pseudo}");
-    assert!(pseudo.contains("default: {"), "{pseudo}");
-    assert!(pseudo.contains("return v1;"), "{pseudo}");
+    assert_golden(
+        "hlil/relift-switch.pseudo",
+        &relifted.function.to_pseudocode(),
+    );
 }
 
 #[test]
@@ -282,11 +280,10 @@ fn lowering_registers_declared_exception_regions() {
     assert!(region.handlers[0].body.is_known());
 
     let relifted = lift_function(&lowered.function).unwrap();
-    let pseudo = relifted.function.to_pseudocode();
-    assert!(pseudo.contains("try {"), "{pseudo}");
-    assert!(pseudo.contains("} catch (...)"), "{pseudo}");
-    assert!(pseudo.contains("return 7;"), "{pseudo}");
-    assert!(pseudo.contains("return v0;"), "{pseudo}");
+    assert_golden(
+        "hlil/relift-try-catch.pseudo",
+        &relifted.function.to_pseudocode(),
+    );
 }
 
 #[test]

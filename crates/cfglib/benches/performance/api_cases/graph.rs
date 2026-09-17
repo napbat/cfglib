@@ -1,17 +1,25 @@
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::ops::ControlFlow;
 
 use cfglib::{
-    CallInfo, Cfg, DirectedGraph, DominatorTree, EdgeKind, EpochMarks, OpenBfsConfig,
-    OpenDfsConfig, OpenPathsConfig, OpenSearchConfig, Rooted, SearchConfig, SearchOrder,
-    SearchScratch, SemanticValidator, TraversalDirection, Visit, VisitedPolicy,
-    breadth_first_events, call_graph, canonicalize_loops, condensation, condensation_of,
-    depth_first_edges, depth_first_events, depth_first_postorder, detect_loops_tagged,
-    find_back_edges_tagged, find_function, follow, follow_path, insert_preheader,
-    is_recursive_function, is_reducible, kosaraju_scc, loop_exit_blocks, min_label_relaxation,
-    open_breadth_first_events, open_breadth_first_paths, open_depth_first_events, open_search,
-    program_dependence_graph, propagate_summaries, reachable, reverse_cfg, reverse_postorder,
-    search, search_with_marks, search_with_scratch, to_view_dot, topological_sort, verify,
-    verify_edge_view, verify_view, verify_with, write_view_dot,
+    CallInfo, Cfg, DominatorTree, EdgeKind, EpochMarks, FoldEnter, Graph, GraphView, MarkScope,
+    NodeId, OpenBfsConfig, OpenDfsConfig, OpenFold, OpenFoldConfig, OpenPathsConfig,
+    OpenSearchConfig, Rooted, SearchConfig, SearchOrder, SearchScratch, SemanticValidator,
+    TraversalDirection, Visit, VisitedPolicy, breadth_first_events, call_graph, canonicalize_loops,
+    condensation, condensation_of, depth_first_edges, depth_first_events, depth_first_postorder,
+    detect_loops_tagged, find_back_edges_tagged, find_function, follow, follow_path,
+    insert_preheader, is_recursive_function, is_reducible, kosaraju_scc, loop_exit_blocks,
+    min_label_relaxation, open_breadth_first_events, open_breadth_first_paths,
+    open_depth_first_events, open_fold_post_order, open_search, program_dependence_graph,
+    propagate_summaries, reachable, reverse_cfg, reverse_postorder, scan_predecessors, search,
+    search_with_marks, search_with_scratch, to_dot, to_text, topological_sort, verify,
+    verify_edge_view, verify_view, verify_with, write_dot, write_text,
+};
+use cfglib::{
+    DotEdgeAttributes, DotStyle, EdgeId, TextStyle, bind_edge_attributes, bind_label,
+    control_flow_edge_attributes, display_label, no_label, parse_cfg_text, parse_text,
+    plain_edge_attributes,
 };
 
 use super::BenchmarkSuite;
@@ -37,13 +45,29 @@ impl<I, E> SemanticValidator<I, E> for NoopValidator {
     type Error = ();
 }
 
-fn chain_graph(node_count: usize) -> DirectedGraph<(), ()> {
-    let mut graph = DirectedGraph::with_capacity(node_count, node_count.saturating_sub(1));
-    let nodes: Vec<_> = (0..node_count).map(|_| graph.add_node(())).collect();
-    for edge in nodes.windows(2) {
-        graph.add_edge(edge[0], edge[1], ());
+/// A labeled chain, so the output writers have text to render and the
+/// parsers have text to read.
+fn chain_graph(node_count: usize) -> Graph<String, String> {
+    let mut graph = Graph::with_capacity(node_count, node_count.saturating_sub(1));
+    let nodes: Vec<_> = (0..node_count)
+        .map(|index| graph.add_node(format!("node {index}")))
+        .collect();
+    for (index, edge) in nodes.windows(2).enumerate() {
+        graph.add_edge(edge[0], edge[1], format!("edge {index}"));
     }
     graph
+}
+
+/// One CFG in the line-oriented text form, for the reader to read.
+fn chain_cfg_text(block_count: usize) -> String {
+    let mut text = String::from("entry bb0\n");
+    for index in 0..block_count {
+        writeln!(text, "bb{index}:\n    op {index}").unwrap();
+    }
+    for index in 1..block_count {
+        writeln!(text, "bb{} -> bb{index} fallthrough", index - 1).unwrap();
+    }
+    text
 }
 
 fn loop_cfg() -> Cfg<u32> {
@@ -101,12 +125,7 @@ fn register_dense_traversals(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_depth_first_edges",
-        covers [
-            depth_first_edges,
-            depth_first_edges_with,
-            depth_first_view_edges,
-            depth_first_view_edges_with,
-        ],
+        covers [depth_first_edges, depth_first_edges_with],
         || depth_first_edges(&graph, root, TraversalDirection::Outgoing),
         |steps: &Vec<_>| assert!(!steps.is_empty())
     );
@@ -295,6 +314,13 @@ fn register_open_traversals(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
+        "api_open_fold_post_order",
+        covers[open_fold_post_order],
+        || open_fold_post_order(&mut SubtreeSize, 0_usize, OpenFoldConfig::new()),
+        |size: &Option<usize>| assert_eq!(*size, Some(NODE_COUNT))
+    );
+    benchmark_case!(
+        suite,
         "api_open_search",
         covers[open_search],
         || {
@@ -317,9 +343,62 @@ fn register_open_traversals(suite: &mut BenchmarkSuite<'_>) {
     );
 }
 
+/// A fold over the same open chain the open-traversal cases walk, answering
+/// each subtree's node count.
+struct SubtreeSize;
+
+impl OpenFold for SubtreeSize {
+    type Node = usize;
+    type Mark = usize;
+    type Value = usize;
+    type Accumulator = usize;
+
+    fn successors(&mut self, node: &usize, out: &mut Vec<usize>) {
+        if *node + 1 < NODE_COUNT {
+            out.push(*node + 1);
+        }
+    }
+
+    fn mark(&mut self, node: &usize) -> Option<usize> {
+        Some(*node)
+    }
+
+    fn enter(&mut self, _node: &usize) -> FoldEnter<usize, usize> {
+        FoldEnter::Fold {
+            accumulator: 1,
+            marks: MarkScope::Shared,
+        }
+    }
+
+    fn absorb(
+        &mut self,
+        accumulator: &mut usize,
+        _child: &usize,
+        value: Option<usize>,
+    ) -> ControlFlow<()> {
+        *accumulator += value.unwrap_or_default();
+        ControlFlow::Continue(())
+    }
+
+    fn finish(&mut self, _node: &usize, accumulator: usize) -> Option<usize> {
+        Some(accumulator)
+    }
+}
+
 fn register_graph_algorithms(suite: &mut BenchmarkSuite<'_>) {
     let graph = branchy_graph(NODE_COUNT);
-    let root = cfglib::NodeId::from_raw(0);
+    let root = NodeId::from_raw(0);
+    let scanned_target = NodeId::from_index(NODE_COUNT / 2);
+    let stored_predecessors: BTreeSet<NodeId> =
+        GraphView::predecessors(&graph, scanned_target).collect();
+
+    benchmark_case!(
+        suite,
+        "api_scan_predecessors",
+        covers[scan_predecessors],
+        || scan_predecessors(&graph, scanned_target).collect::<BTreeSet<_>>(),
+        |scanned: &BTreeSet<NodeId>| assert_eq!(scanned, &stored_predecessors)
+    );
     let components = kosaraju_scc(&graph);
     let dag = chain_graph(NODE_COUNT);
 
@@ -388,7 +467,6 @@ fn register_cfg_graphs(suite: &mut BenchmarkSuite<'_>) {
     let cfg = branchy_cfg(NODE_COUNT);
     let graph = branchy_graph(NODE_COUNT);
     let rooted = Rooted::new(&graph, cfglib::NodeId::from_raw(0));
-    let dot_graph = chain_graph(128);
 
     benchmark_case!(
         suite,
@@ -432,26 +510,99 @@ fn register_cfg_graphs(suite: &mut BenchmarkSuite<'_>) {
         || verify_with(&cfg, &NoopValidator),
         |report| assert!(report.is_ok())
     );
+}
+
+/// The output writers and the readers that undo them.
+fn register_output_formats(suite: &mut BenchmarkSuite<'_>) {
+    let cfg = branchy_cfg(NODE_COUNT);
+    let output_graph = chain_graph(128);
+    let graph_text = output_graph.to_text();
+    let cfg_text = chain_cfg_text(128);
+
     benchmark_case!(
         suite,
-        "api_to_view_dot",
-        covers[to_view_dot],
-        || to_view_dot(&dot_graph, |node| node.index().to_string()),
+        "api_to_dot",
+        covers[to_dot, display_label, plain_edge_attributes],
+        || to_dot(
+            &output_graph,
+            &DotStyle::new(display_label, plain_edge_attributes)
+        ),
         |dot: &String| assert!(dot.starts_with("digraph view"))
     );
     benchmark_case!(
         suite,
-        "api_write_view_dot",
-        covers[write_view_dot],
+        "api_write_dot",
+        covers[write_dot, no_label, bind_edge_attributes],
         || {
+            let style = DotStyle::new(
+                no_label,
+                bind_edge_attributes::<EdgeId, String, _>(|_, label| DotEdgeAttributes {
+                    label: std::borrow::Cow::Borrowed(label),
+                    ..DotEdgeAttributes::plain()
+                }),
+            );
             let mut dot = String::new();
-            let result = write_view_dot(&dot_graph, &mut dot, |node| node.index().to_string());
+            let result = write_dot(&output_graph, &mut dot, &style);
             (result, dot)
         },
         |(result, dot)| {
             assert!(result.is_ok());
             assert!(dot.starts_with("digraph view"));
         }
+    );
+    benchmark_case!(
+        suite,
+        "api_control_flow_edge_attributes",
+        covers[control_flow_edge_attributes],
+        || cfg
+            .edge_ids()
+            .filter(|&id| control_flow_edge_attributes(id, &cfg[id]).color.is_some())
+            .count(),
+        |styled: &usize| assert_eq!(*styled, cfg.edge_count())
+    );
+    benchmark_case!(
+        suite,
+        "api_to_text",
+        covers[to_text, bind_label],
+        || to_text(
+            &output_graph,
+            &TextStyle::new(
+                bind_label::<NodeId, String, _>(|_, label| std::borrow::Cow::Borrowed(label)),
+                no_label,
+            )
+        ),
+        |text: &String| assert!(text.starts_with("n0 node 0"))
+    );
+    benchmark_case!(
+        suite,
+        "api_write_text",
+        covers[write_text],
+        || {
+            let mut text = String::new();
+            let result = write_text(&output_graph, &mut text, &TextStyle::plain());
+            (result, text)
+        },
+        |(result, text)| {
+            assert!(result.is_ok());
+            assert!(text.starts_with("n0\n"));
+        }
+    );
+    benchmark_case!(
+        suite,
+        "api_parse_text",
+        covers[parse_text],
+        || parse_text(&graph_text),
+        |parsed: &Result<Graph<String, String>, _>| assert_eq!(
+            parsed.as_ref().unwrap().node_count(),
+            output_graph.node_count()
+        )
+    );
+    benchmark_case!(
+        suite,
+        "api_parse_cfg_text",
+        covers[parse_cfg_text],
+        || parse_cfg_text(&cfg_text, |line| Ok::<_, String>(line.to_owned())),
+        |parsed: &Result<Cfg<String>, _>| assert_eq!(parsed.as_ref().unwrap().block_count(), 128)
     );
 }
 
@@ -570,6 +721,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     register_open_traversals(suite);
     register_graph_algorithms(suite);
     register_cfg_graphs(suite);
+    register_output_formats(suite);
     register_call_graph(suite);
     register_loop_structure(suite);
 }

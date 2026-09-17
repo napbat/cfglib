@@ -34,8 +34,9 @@ pub fn detect_tail_calls<I: FlowControl>(cfg: &Cfg<I>) -> Vec<TailCall> {
     let mut results = Vec::new();
     let exit_blocks: alloc::collections::BTreeSet<BlockId> = cfg.exit_blocks().collect();
 
-    for block in cfg.blocks() {
-        let bid = block.id();
+    for block_id in cfg.block_ids() {
+        let block = cfg.block(block_id);
+        let bid = block_id;
         let succs: Vec<BlockId> = cfg.successors(bid).collect();
         if succs.len() == 1 && exit_blocks.contains(&succs[0]) {
             if let Some(last) = block.instructions().last() {
@@ -65,11 +66,12 @@ pub fn detect_tail_calls<I: FlowControl>(cfg: &Cfg<I>) -> Vec<TailCall> {
 #[must_use]
 pub fn detect_explicit_tail_calls<I: CallInfo>(cfg: &Cfg<I>) -> Vec<TailCall> {
     let mut results = Vec::new();
-    for block in cfg.blocks() {
+    for block_id in cfg.block_ids() {
+        let block = cfg.block(block_id);
         for (idx, instruction) in block.instructions().iter().enumerate() {
             if instruction.is_tail_call() {
                 results.push(TailCall {
-                    block: block.id(),
+                    block: block_id,
                     inst_idx: Some(idx),
                     explicit: true,
                 });

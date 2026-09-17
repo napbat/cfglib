@@ -40,7 +40,7 @@ pub fn extend_equivalent_coverage<D: Dialect>(cfg: &mut Cfg<Instruction<D>, D::E
             let mut grown = false;
             let mut candidates: BTreeSet<BlockId> = BTreeSet::new();
             for &block in &protected {
-                for &edge in cfg.successor_edges(block) {
+                for edge in cfg.outgoing(block) {
                     let reference = cfg.edge(edge);
                     if !reference.kind().is_exceptional() {
                         candidates.insert(reference.target());
@@ -59,7 +59,7 @@ pub fn extend_equivalent_coverage<D: Dialect>(cfg: &mut Cfg<Instruction<D>, D::E
                 if throws {
                     continue;
                 }
-                let enclosed = cfg.predecessor_edges(candidate).iter().all(|&edge| {
+                let enclosed = cfg.incoming(candidate).all(|edge| {
                     let reference = cfg.edge(edge);
                     reference.kind().is_exceptional() || protected.contains(&reference.source())
                 });

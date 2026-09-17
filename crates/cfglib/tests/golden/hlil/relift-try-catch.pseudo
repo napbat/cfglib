@@ -1,0 +1,6 @@
+try {
+    v0 = call();
+} catch (...) {
+    return 7;
+}
+return v0;

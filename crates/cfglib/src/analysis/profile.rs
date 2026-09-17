@@ -51,15 +51,14 @@ impl CfgProfile {
         // Derive block weights: sum of incoming edge weights.
         // Entry block gets weight 1.0 if no incoming edges have weights.
         block_weights.insert(cfg.entry(), 1.0);
-        for block in cfg.blocks() {
-            let bid = block.id();
+        for block_id in cfg.block_ids() {
+            let bid = block_id;
             if bid == cfg.entry() {
                 continue;
             }
             let in_weight: f64 = cfg
-                .predecessor_edges(bid)
-                .iter()
-                .filter_map(|&eid| edge_weights.get(&eid))
+                .incoming(bid)
+                .filter_map(|eid| edge_weights.get(&eid))
                 .sum();
             if in_weight > 0.0 {
                 block_weights.insert(bid, in_weight);
@@ -103,13 +102,9 @@ impl CfgProfile {
 
 /// Set uniform edge weights on `cfg` (equal probability for all successors).
 pub fn set_uniform_edge_weights<I>(cfg: &mut Cfg<I>) {
-    let block_ids: Vec<BlockId> = cfg
-        .blocks()
-        .iter()
-        .map(crate::block::BasicBlock::id)
-        .collect();
+    let block_ids: Vec<BlockId> = cfg.block_ids().collect();
     for bid in block_ids {
-        let succs = cfg.successor_edges(bid).to_vec();
+        let succs: Vec<_> = cfg.outgoing(bid).collect();
         if succs.is_empty() {
             continue;
         }

@@ -435,9 +435,9 @@ fn reachable_worklist<I, E, P: TryProblem<I, E>>(cfg: &Cfg<I, E>, problem: &P) -
         Direction::Forward => cfg
             .depth_first_preorder()
             .into_iter()
-            .map(|block| block.0)
+            .map(BlockId::raw)
             .collect(),
-        Direction::Backward => cfg.blocks().iter().map(|block| block.id().0).collect(),
+        Direction::Backward => cfg.block_ids().map(BlockId::raw).collect(),
     }
 }
 
@@ -445,11 +445,8 @@ fn seed_worklist<I, E>(cfg: &Cfg<I, E>, seeds: &[BlockId]) -> BTreeSet<u32> {
     seeds
         .iter()
         .map(|seed| {
-            assert!(
-                seed.index() < cfg.block_count(),
-                "seed block is out of range"
-            );
-            seed.0
+            assert!(cfg.contains_block(*seed), "seed block is out of range");
+            seed.raw()
         })
         .collect()
 }
@@ -460,7 +457,9 @@ fn try_solve_with_worklist<I, E, P: TryProblem<I, E>>(
     mut worklist: BTreeSet<u32>,
     config: SolveConfig,
 ) -> Result<Facts<P::Fact>, TrySolveError<P::Error>> {
-    let n = cfg.block_count();
+    // Block-indexed side tables: sized by the identity bound, never by the
+    // live count, so a removed block's slot still has a well-defined fact.
+    let n = cfg.block_bound();
     let bottom = problem.bottom();
     let forward = matches!(problem.direction(), Direction::Forward);
 
@@ -480,7 +479,7 @@ fn try_solve_with_worklist<I, E, P: TryProblem<I, E>>(
             }
         }
         steps += 1;
-        let block = BlockId(block_raw);
+        let block = BlockId::from_raw(block_raw);
 
         // Meet over the upstream facts in the analysis direction; a block
         // with no upstream receives the problem's entry fact.
@@ -522,7 +521,7 @@ fn try_solve_with_worklist<I, E, P: TryProblem<I, E>>(
             if new_out != block_out[block.index()] {
                 block_out[block.index()] = new_out;
                 for downstream in cfg.successors(block) {
-                    worklist.insert(downstream.0);
+                    worklist.insert(downstream.raw());
                 }
             }
         } else {
@@ -533,7 +532,7 @@ fn try_solve_with_worklist<I, E, P: TryProblem<I, E>>(
             if new_in != block_in[block.index()] {
                 block_in[block.index()] = new_in;
                 for downstream in cfg.predecessors(block) {
-                    worklist.insert(downstream.0);
+                    worklist.insert(downstream.raw());
                 }
             }
         }

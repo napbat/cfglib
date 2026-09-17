@@ -5,7 +5,7 @@ use alloc::string::String;
 use alloc::vec;
 use core::cmp::Ordering;
 
-use crate::{DirectedGraphView, EdgeGraphView, TraversalDirection, shortest_path};
+use crate::{TraversalDirection, shortest_path};
 
 use super::{
     ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeGraphPathLabel, ScopeGraphQuery,
@@ -252,18 +252,18 @@ fn storage_is_an_edge_aware_graph_view() {
     let parent = graph.add_scope("parent");
     let edge = graph.add_edge(child, parent, "lexical");
 
-    assert_eq!(graph.node_count(), 2);
+    assert_eq!(graph.scope_count(), 2);
     assert_eq!(graph.edge_ids().collect::<alloc::vec::Vec<_>>(), vec![edge]);
-    assert_eq!(graph.edge_ref(edge).source(), child);
-    assert_eq!(graph.edge_ref(edge).target(), parent);
+    assert_eq!(graph.edge(edge).source(), child);
+    assert_eq!(graph.edge(edge).target(), parent);
     assert_eq!(
         shortest_path(&graph, child, parent, TraversalDirection::Outgoing),
         Some(vec![child, parent])
     );
 
-    assert_eq!(graph.remove_edge(edge), Some("lexical"));
+    assert!(graph.remove_edge(edge));
     assert_eq!(graph.edge_count(), 0);
-    assert_eq!(graph.edge_slot_count(), 1);
+    assert_eq!(graph.edge_bound(), 1);
 }
 
 #[test]

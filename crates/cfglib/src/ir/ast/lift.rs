@@ -95,7 +95,7 @@ fn is_back_edge<I, E>(
     edge: crate::EdgeId,
 ) -> bool {
     let edge = cfg.edge(edge);
-    back_edges.contains(&(edge.source().0, edge.target().0))
+    back_edges.contains(&(edge.source().raw(), edge.target().raw()))
 }
 
 /// Whether an edge transfers control exceptionally rather than sequentially.
@@ -105,10 +105,9 @@ fn is_exception_edge(kind: EdgeKind) -> bool {
 
 /// Successors reached by sequential control flow, excluding exception edges.
 fn flow_successors<I, E>(cfg: &Cfg<I, E>, block: BlockId) -> Vec<BlockId> {
-    cfg.successor_edges(block)
-        .iter()
-        .filter(|&&edge| !is_exception_edge(cfg.edge(edge).kind()))
-        .map(|&edge| cfg.edge(edge).target())
+    cfg.outgoing(block)
+        .filter(|&edge| !is_exception_edge(cfg.edge(edge).kind()))
+        .map(|edge| cfg.edge(edge).target())
         .collect()
 }
 
@@ -117,25 +116,25 @@ fn classify_block<I, E>(
     back_edges: &BTreeSet<(u32, u32)>,
     block: BlockId,
 ) -> BlockFlowKind {
-    let successors = cfg.successor_edges(block);
-    let predecessors = cfg.predecessor_edges(block);
+    let successors: Vec<crate::EdgeId> = cfg.outgoing(block).collect();
+    let predecessors: Vec<crate::EdgeId> = cfg.incoming(block).collect();
     if predecessors
         .iter()
         .any(|&edge| is_back_edge(cfg, back_edges, edge))
     {
         BlockFlowKind::LoopHeader
-    } else if has_edge_kind(cfg, successors, EdgeKind::ConditionalTrue)
-        && has_edge_kind(cfg, successors, EdgeKind::ConditionalFalse)
+    } else if has_edge_kind(cfg, &successors, EdgeKind::ConditionalTrue)
+        && has_edge_kind(cfg, &successors, EdgeKind::ConditionalFalse)
     {
         BlockFlowKind::Conditional
-    } else if has_edge_kind(cfg, successors, EdgeKind::SwitchCase) {
+    } else if has_edge_kind(cfg, &successors, EdgeKind::SwitchCase) {
         BlockFlowKind::Switch
     } else if successors
         .iter()
         .any(|&edge| is_back_edge(cfg, back_edges, edge))
     {
         BlockFlowKind::BackEdge
-    } else if has_edge_kind(cfg, successors, EdgeKind::Jump) {
+    } else if has_edge_kind(cfg, &successors, EdgeKind::Jump) {
         BlockFlowKind::Jump
     } else {
         BlockFlowKind::Linear
@@ -172,7 +171,7 @@ fn block_is_allowed(allowed_blocks: Option<&BTreeSet<BlockId>>, block: BlockId) 
 /// Produce a label name for a block (used in Goto/Label nodes).
 fn block_label_name<I, E>(cfg: &Cfg<I, E>, id: BlockId) -> alloc::string::String {
     cfg.block(id).label().map_or_else(
-        || alloc::format!(".bb{}", id.0),
+        || alloc::format!(".bb{}", id.raw()),
         alloc::string::String::from,
     )
 }
@@ -254,7 +253,7 @@ fn lift_with_report_by<'a, I, E, O>(
     let pdom = DominatorTree::compute_post(cfg);
     let natural_loops: BTreeMap<u32, NaturalLoop> = detect_loops_tagged(cfg, &dom)
         .into_iter()
-        .map(|natural| (natural.header.0, natural))
+        .map(|natural| (natural.header.raw(), natural))
         .collect();
     let back_edges = natural_loops
         .values()
@@ -262,7 +261,7 @@ fn lift_with_report_by<'a, I, E, O>(
             natural
                 .latches
                 .iter()
-                .map(|latch| (latch.0, natural.header.0))
+                .map(|latch| (latch.raw(), natural.header.raw()))
         })
         .collect();
     let order = cfg.reverse_postorder();
@@ -272,7 +271,7 @@ fn lift_with_report_by<'a, I, E, O>(
         back_edges: &back_edges,
         loops: &natural_loops,
         anchors: &anchors,
-        visited: alloc::vec![false; cfg.block_count()],
+        visited: alloc::vec![false; cfg.block_bound()],
         goto_targets: BTreeSet::new(),
         labeled_blocks: BTreeSet::new(),
         loop_stack: Vec::new(),
@@ -295,7 +294,7 @@ fn lift_with_report_by<'a, I, E, O>(
     {
         let pending_body = lift_region(cfg, &mut state, pending, None, None, map);
         if !pending_body.is_empty() {
-            state.labeled_blocks.insert(pending.0);
+            state.labeled_blocks.insert(pending.raw());
             state.report.swept_blocks.push(pending);
             body.push(AstNode::Label {
                 name: block_label_name(cfg, pending),
@@ -316,7 +315,7 @@ fn lift_with_report_by<'a, I, E, O>(
     state
         .report
         .unresolved_labels
-        .extend(pending_labels.into_iter().map(BlockId));
+        .extend(pending_labels.into_iter().map(BlockId::from_raw));
     for region in cfg.regions() {
         // Inert tombstones (removed regions) carry nothing to structure.
         if region.protected_blocks.is_empty() && region.handlers.is_empty() {
@@ -370,7 +369,7 @@ fn lift_region<'a, I, E, O>(
             // Anything else is recorded, never dropped: the jump is
             // explicit and the completeness sweep emits the target under
             // the matching label.
-            if cfg.predecessor_edges(block).len() == 1 && !region_member(cfg, block) {
+            if cfg.incoming(block).count() == 1 && !region_member(cfg, block) {
                 result.extend(lift_region(cfg, state, block, None, stop, map));
             } else {
                 push_goto(cfg, state, &mut result, block, GotoReason::BoundaryEscape);
@@ -413,7 +412,7 @@ fn lift_block<'a, I, E, O>(
     result: &mut Vec<AstNode<O>>,
     map: &mut impl FnMut(&'a I) -> O,
 ) -> Option<BlockId> {
-    let successor_edges = cfg.successor_edges(block);
+    let outgoing: Vec<crate::EdgeId> = cfg.outgoing(block).collect();
     let flow = classify_block(cfg, state.back_edges, block);
 
     if flow == BlockFlowKind::LoopHeader {
@@ -436,7 +435,7 @@ fn lift_block<'a, I, E, O>(
 
     if flow == BlockFlowKind::BackEdge {
         push_block(result, cfg, block, map);
-        let target = successor_edges
+        let target = outgoing
             .iter()
             .find(|&&edge| is_back_edge(cfg, state.back_edges, edge))
             .map(|&edge| cfg.edge(edge).target());
@@ -452,7 +451,7 @@ fn lift_block<'a, I, E, O>(
 
     if flow == BlockFlowKind::Jump {
         push_block(result, cfg, block, map);
-        for &eid in successor_edges {
+        for eid in outgoing {
             let edge = cfg.edge(eid);
             if edge.kind() == EdgeKind::Jump {
                 let target = edge.target();
@@ -465,7 +464,7 @@ fn lift_block<'a, I, E, O>(
                 if let Some(node) = resolve_loop_transfer(cfg, state, target) {
                     result.push(node);
                 } else if !state.is_visited(target)
-                    && cfg.predecessor_edges(target).len() == 1
+                    && cfg.incoming(target).count() == 1
                     && !region_member(cfg, target)
                 {
                     // Exclusively owned jump target — this explicit jump
@@ -481,7 +480,7 @@ fn lift_block<'a, I, E, O>(
         return None;
     }
 
-    if successor_edges.is_empty() {
+    if outgoing.is_empty() {
         let insts = map_block(cfg, block, map);
         if !insts.is_empty() {
             result.push(AstNode::Return {
@@ -523,9 +522,8 @@ fn through_trampolines<I, E>(
             break;
         }
         let mut normal = cfg
-            .successor_edges(current)
-            .iter()
-            .map(|&edge| cfg.edge(edge))
+            .outgoing(current)
+            .map(|edge| cfg.edge(edge))
             .filter(|edge| !is_exception_edge(edge.kind()));
         let (Some(edge), None) = (normal.next(), normal.next()) else {
             break;
@@ -549,7 +547,7 @@ fn resolve_loop_transfer<I, E, O>(
 ) -> Option<AstNode<O>> {
     let (target, hops) = through_trampolines(cfg, state, target);
     let position = state.loop_stack.iter().rposition(|context| {
-        context.continue_target == target.0 || context.follow == Some(target.0)
+        context.continue_target == target.raw() || context.follow == Some(target.raw())
     })?;
     // The consumed trampolines carry no content; the sweep must not
     // resurrect them as labeled residue.
@@ -563,11 +561,11 @@ fn resolve_loop_transfer<I, E, O>(
         state.loop_stack[position].labeled = true;
         Some(block_label_name(
             cfg,
-            BlockId(state.loop_stack[position].header),
+            BlockId::from_raw(state.loop_stack[position].header),
         ))
     };
     let context = &state.loop_stack[position];
-    Some(if context.continue_target == target.0 {
+    Some(if context.continue_target == target.raw() {
         AstNode::Continue { label }
     } else {
         AstNode::Break { label }
@@ -597,7 +595,7 @@ fn push_goto<I, E, O>(
     target: BlockId,
     reason: GotoReason,
 ) {
-    state.goto_targets.insert(target.0);
+    state.goto_targets.insert(target.raw());
     state.report.gotos.push(GotoDiagnostic { target, reason });
     result.push(AstNode::Goto {
         target: block_label_name(cfg, target),
@@ -638,7 +636,7 @@ fn lift_conditional<'a, I, E, O>(
 ) -> AstNode<O> {
     let mut true_target = None;
     let mut false_target = None;
-    for &eid in cfg.successor_edges(block) {
+    for eid in cfg.outgoing(block) {
         match cfg.edge(eid).kind() {
             EdgeKind::ConditionalTrue => true_target = Some(cfg.edge(eid).target()),
             EdgeKind::ConditionalFalse => false_target = Some(cfg.edge(eid).target()),
@@ -679,12 +677,12 @@ fn lift_switch<'a, I, E, O>(
     let mut case_edges: BTreeMap<u32, Vec<crate::EdgeId>> = BTreeMap::new();
     let mut default_edge = None;
     let mut default_target = None;
-    for &eid in cfg.successor_edges(block) {
+    for eid in cfg.outgoing(block) {
         let edge = cfg.edge(eid);
         match edge.kind() {
             EdgeKind::SwitchCase => {
                 let target = edge.target();
-                let edges = case_edges.entry(target.0).or_default();
+                let edges = case_edges.entry(target.raw()).or_default();
                 if edges.is_empty() {
                     case_targets.push(target);
                 }
@@ -713,7 +711,7 @@ fn lift_switch<'a, I, E, O>(
 
     let mut cases = Vec::new();
     for target in case_targets {
-        let edges = case_edges.remove(&target.0).unwrap_or_default();
+        let edges = case_edges.remove(&target.raw()).unwrap_or_default();
         let body = lift_switch_arm(cfg, state, target, allowed_blocks, merge, map);
         cases.push(SwitchCase {
             id: target,

@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::graph::view::DirectedGraphView;
+use crate::graph::view::GraphView;
 
 /// A recognized structural pattern, over node identity `N`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,7 +67,7 @@ pub enum CfgPattern<N = BlockId> {
 /// // Detects structural patterns like diamond, self-loop, etc.
 /// ```
 #[must_use]
-pub fn detect_patterns<G: DirectedGraphView>(graph: &G) -> Vec<CfgPattern<G::NodeId>> {
+pub fn detect_patterns<G: GraphView>(graph: &G) -> Vec<CfgPattern<G::NodeId>> {
     let mut patterns = Vec::new();
 
     for bid in graph.node_ids() {
@@ -164,7 +164,7 @@ pub fn detect_cfg_patterns<I>(cfg: &Cfg<I>) -> Vec<CfgPattern> {
     // Orient diamond arms: arms[0] = ConditionalTrue side when tagged.
     for pattern in &mut patterns {
         if let CfgPattern::Diamond { entry, arms, .. } = pattern {
-            let true_target = cfg.successor_edges(*entry).iter().find_map(|&eid| {
+            let true_target = cfg.outgoing(*entry).find_map(|eid| {
                 (cfg.edge(eid).kind() == EdgeKind::ConditionalTrue).then(|| cfg.edge(eid).target())
             });
             if let Some(target) = true_target {
@@ -176,9 +176,11 @@ pub fn detect_cfg_patterns<I>(cfg: &Cfg<I>) -> Vec<CfgPattern> {
     }
 
     // Empty trampolines: no instructions, exactly one successor, not entry.
-    for block in cfg.blocks() {
-        let bid = block.id();
-        if block.instructions().is_empty() && cfg.successors(bid).len() == 1 && bid != cfg.entry() {
+    for block_id in cfg.block_ids() {
+        let block = cfg.block(block_id);
+        let bid = block_id;
+        if block.instructions().is_empty() && cfg.successors(bid).count() == 1 && bid != cfg.entry()
+        {
             patterns.push(CfgPattern::EmptyTrampoline { block: bid });
         }
     }
@@ -227,8 +229,8 @@ mod tests {
     fn isolated_cycle_terminates() {
         // Every node one-pred/one-succ around a cycle: the backward chain
         // walk must terminate (it previously looped forever here).
-        use crate::graph::directed::DirectedGraph;
-        let mut graph: DirectedGraph<(), ()> = DirectedGraph::new();
+        use crate::graph::store::Graph;
+        let mut graph: Graph<(), ()> = Graph::new();
         let a = graph.add_node(());
         let b = graph.add_node(());
         graph.add_edge(a, b, ());

@@ -10,15 +10,14 @@ use std::time::Duration;
 use std::time::Instant;
 
 use cfglib::{
-    BlockId, Cfg, CfgBuilder, CommonAncestor, ConstValue, ConstantFolder, DenseNodeId,
-    DirectedGraph, Direction, DominanceFrontiers, DominatorTree, EdgeKind, EdgeStep, Facts,
-    FlowControl, FlowEffect, InstrInfo, IntervalAnalysis, NaturalLoop, NodeFacts, NodeId,
-    NodeProblem, PhiPlacements, Problem, ProgramPoint, Rooted, SccDecomposition, SccpAnalysis,
-    SsaForm, SsaValue, TraversalDirection, ValueNumberInfo, ValueNumbering, breadth_first,
-    breadth_first_edges, common_ancestors, constant_propagation, contract_edge,
-    control_dependence_graph, depth_first_preorder, detect_loops, merge_blocks,
-    nearest_common_ancestor, remove_empty_blocks, shortest_path, shortest_path_edges,
-    solve_node_problem, solve_problem, tarjan_scc,
+    BlockId, Cfg, CfgBuilder, CommonAncestor, ConstValue, ConstantFolder, DenseId, Direction,
+    DominanceFrontiers, DominatorTree, EdgeKind, EdgeStep, Facts, FlowControl, FlowEffect, Graph,
+    InstrInfo, IntervalAnalysis, NaturalLoop, NodeFacts, NodeId, NodeProblem, PhiPlacements,
+    Problem, ProgramPoint, Rooted, SccDecomposition, SccpAnalysis, SsaForm, SsaValue,
+    TraversalDirection, ValueNumberInfo, ValueNumbering, breadth_first, breadth_first_edges,
+    common_ancestors, constant_propagation, contract_edge, control_dependence_graph,
+    depth_first_preorder, detect_loops, merge_blocks, nearest_common_ancestor, remove_empty_blocks,
+    shortest_path, shortest_path_edges, solve_node_problem, solve_problem, tarjan_scc,
 };
 
 mod analysis_oracles;
@@ -45,7 +44,7 @@ use fixtures::{
 };
 use harness::{BenchmarkSuite, benchmark_case, benchmark_target};
 use structural_oracles::{
-    assert_branchy_cfg, assert_branchy_graph, assert_builder_cfg, assert_cfg_shape,
+    FanOut, assert_branchy_cfg, assert_branchy_graph, assert_builder_cfg, assert_cfg_shape,
     assert_dense_permutation, assert_empty_chain, assert_high_fan_in, assert_irreducible_fixture,
     assert_linear_cfg, assert_split_weighted_fan_out, assert_weighted_fan_out,
     assert_weighted_irreducible,
@@ -206,7 +205,7 @@ fn main() {
     bench!(
         "directed_build_branchy",
         || branchy_graph(NODE_COUNT),
-        |result: &DirectedGraph<(), ()>| assert_branchy_graph(result, NODE_COUNT)
+        |result: &Graph<(), ()>| assert_branchy_graph(result, NODE_COUNT)
     );
     bench!(
         "cfg_depth_first_preorder",
@@ -258,7 +257,7 @@ fn main() {
             )
             .expect("fixture target is reachable")
         },
-        |result: &Vec<cfglib::graph::directed::EdgeId>| assert_edge_path(
+        |result: &Vec<cfglib::EdgeId>| assert_edge_path(
             result,
             &graph,
             NodeId::from_raw(0),
@@ -336,7 +335,7 @@ fn main() {
     bench!(
         "cfg_control_dependence_graph",
         || { control_dependence_graph(&cfg, &cfg_post_dominators) },
-        |result: &DirectedGraph<BlockId, ()>| assert_control_dependence_graph(
+        |result: &Graph<BlockId, ()>| assert_control_dependence_graph(
             result,
             &cfg,
             &cfg_post_dominators,
@@ -530,15 +529,19 @@ fn main() {
         },
         |(result, merged): &(Cfg<u32>, usize)| {
             assert_eq!(*merged, NODE_COUNT / 2 - 1);
-            assert_cfg_shape(result, NODE_COUNT / 2, 0);
+            // Merging a linear chain leaves ONE live block holding every
+            // instruction; the consumed blocks are gone, and only their
+            // identity slots survive until a compact.
+            assert_cfg_shape(result, 1, 0);
+            assert_eq!(result.block_bound(), NODE_COUNT / 2);
+            assert_eq!(
+                result.block_ids().collect::<Vec<_>>(),
+                [result.entry()],
+                "only the merge target stays live"
+            );
             assert_eq!(
                 result.block(result.entry()).instructions(),
                 &(0..fixture_u32(NODE_COUNT) / 2).collect::<Vec<_>>()
-            );
-            assert!(
-                result.blocks()[1..]
-                    .iter()
-                    .all(|block| block.instructions().is_empty())
             );
         }
     );
@@ -556,9 +559,16 @@ fn main() {
         },
         |(result, removed): &(Cfg<u32>, usize)| {
             assert_eq!(*removed, NODE_COUNT / 2 - 2);
-            assert_cfg_shape(result, NODE_COUNT / 2, 1);
+            // Bypassing the empty middle removes it: only the instruction
+            // carriers stay live, joined by the surviving first edge.
+            assert_cfg_shape(result, 2, 1);
+            assert_eq!(result.block_bound(), NODE_COUNT / 2);
             assert_eq!(result.block(result.entry()).instructions(), &[0]);
             let last = BlockId::from_index(NODE_COUNT / 2 - 1);
+            assert_eq!(
+                result.block_ids().collect::<Vec<_>>(),
+                [result.entry(), last]
+            );
             assert_eq!(
                 result.block(last).instructions(),
                 &[fixture_u32(NODE_COUNT / 2 - 1)]
@@ -592,8 +602,7 @@ fn main() {
             NODE_COUNT,
             fan_out_source,
             fan_out_target,
-            false,
-            false,
+            FanOut::Intact,
         )
     );
     bench!(
@@ -625,8 +634,7 @@ fn main() {
                 NODE_COUNT,
                 fan_out_source,
                 fan_out_target,
-                true,
-                false,
+                FanOut::Merged,
             );
         }
     );
@@ -644,8 +652,7 @@ fn main() {
                 NODE_COUNT,
                 fan_out_source,
                 fan_out_target,
-                true,
-                false,
+                FanOut::Contracted,
             );
         }
     );

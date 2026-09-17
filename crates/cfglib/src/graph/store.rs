@@ -1,0 +1,567 @@
+//! Incrementally updatable compressed graph storage.
+//!
+//! [`Graph`] is one type in two states at once: a **compressed base** that
+//! costs nothing per node beyond its payload, and an **incremental delta**
+//! holding everything added since the base was built. Both states are always
+//! present and always readable; [`compact`](Graph::compact) folds the second
+//! into the first when a consumer decides to pay for it.
+//!
+//! # Why not an arena
+//!
+//! The obvious store keeps two `SmallVec` adjacency containers per node. That
+//! is the right shape for a few thousand basic blocks and the wrong one for a
+//! whole codebase: two `SmallVec<[EdgeId; 4]>` fields cost 32 bytes of inline
+//! storage on every node whether or not they are used, and a node whose
+//! degree crosses the inline bound moves to its own heap allocation — so a
+//! million-node symbol graph pays tens of megabytes of inline slack plus one
+//! allocation per high-degree node, and every scan of it chases a pointer per
+//! node.
+//!
+//! A pure compressed-sparse-row index removes both costs but cannot be
+//! updated: appending one edge to node 3 means shifting every later node's
+//! run. That is the trade this module refuses to make.
+//!
+//! # The shape
+//!
+//! ```text
+//! base    nodes  [ N N N N N ]            payloads, dense
+//!         edges  [ E E E E E E E ]        records, dense, insertion order
+//!         out    offsets[i]..offsets[i+1] -> flat edge-id array
+//!         in     offsets[i]..offsets[i+1] -> flat edge-id array
+//!
+//! delta   nodes  appended payloads
+//!         edges  appended records
+//!         last   one u32 pair per node: last edge of each direction's
+//!                circular chain
+//!         next   one u32 pair per delta edge: its successor in each
+//!                direction's chain
+//!
+//! live    one bit per node slot, one bit per edge slot
+//! ```
+//!
+//! Adjacency of a node is its base run followed by its delta chain. Base
+//! identities are all below delta identities and both parts are ordered, so
+//! the concatenation is exactly insertion order, parallel edges included.
+//!
+//! ## Cost per node
+//!
+//! Two chain slots, eight bytes, and no allocation — against 32 bytes of
+//! inline `SmallVec` storage plus a heap allocation on overflow. The chains
+//! are circular with the per-node slot naming the chain's **last** element,
+//! which is what makes append-order iteration possible from one pointer
+//! instead of a head-and-tail pair.
+//!
+//! Both slots live in one array, because both are written by the same append:
+//! [`add_node`](Graph::add_node) is two pushes and one bit, and
+//! [`add_edge`](Graph::add_edge) is two pushes, one bit, and the four links of
+//! the two chains it joins. That fixed cost is the whole of what a procedure's
+//! flow graph — a few hundred nodes, built and discarded — ever pays.
+//!
+//! ## Removal
+//!
+//! Removing clears a bit in a liveness bitset — 1/64th the cost of a
+//! `Vec<Option<T>>` tombstone, and the payload of a removed entity stays
+//! readable through [`node`](Graph::node) and [`edge`](Graph::edge) until the
+//! next compaction. Removing a node removes its edges in both directions.
+//! Nothing else moves, so every identity a consumer holds stays valid.
+//!
+//! ## Redirection
+//!
+//! [`redirect_edge_source`](Graph::redirect_edge_source) and
+//! [`redirect_edge_target`](Graph::redirect_edge_target) move one endpoint
+//! and keep the edge — its identity, its payload, and the other endpoint.
+//! That is what lets a control-flow transform bypass, merge, or split a block
+//! without invalidating the edge identities a caller is holding. The affected
+//! nodes get a replacement adjacency run, which the walk reads exactly as it
+//! reads a compressed one — a whole run rather than a per-edge filter,
+//! because the walk is the inner loop of every algorithm in the crate and
+//! does not tolerate a second question per edge.
+//!
+//! ## Compaction
+//!
+//! [`compact`](Graph::compact) rebuilds the base from the live entities and
+//! returns a [`Renumbering`]: a total old-to-new mapping that
+//! [`compose`](Renumbering::compose)s, so a consumer that skipped several
+//! compactions folds them into one lookup.
+//!
+//! # There is no builder
+//!
+//! `Graph::new()`, `add_node`, `add_edge`, `compact()` *is* the builder, and
+//! it is also the store, so a consumer that keeps mutating does not have to
+//! choose a type up front or rebuild to get back to a mutable one.
+//!
+//! # Dense analyses
+//!
+//! The crate's algorithms size node-indexed arrays by
+//! [`GraphView::node_bound`](crate::GraphView::node_bound) and iterate
+//! [`GraphView::node_ids`](crate::GraphView::node_ids). The store answers the
+//! first with its slot count and the second with its live nodes, so an
+//! analysis over a store with removed entities in it is neither unsound nor
+//! obliged to compact first — see [`node_bound`](Graph::node_bound).
+
+extern crate alloc;
+
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+use core::marker::PhantomData;
+
+use crate::graph::traverse::TraversalDirection;
+
+use adjacency::{DeltaChains, MAX_SLOTS};
+use liveness::LiveSet;
+use relocate::Relocations;
+
+mod adjacency;
+mod compact;
+mod edge;
+mod id;
+mod liveness;
+mod relocate;
+mod renumbering;
+mod view;
+
+#[cfg(test)]
+mod tests;
+
+pub use adjacency::AdjacentEdges;
+pub use edge::EdgeRecord;
+pub use id::{EdgeId, EdgeTag, Id, IdTag, NodeId, NodeTag};
+pub use renumbering::Renumbering;
+
+/// Narrow a slot count to the dense identity space.
+fn raw_index(value: usize) -> u32 {
+    u32::try_from(value).expect("dense slot count exceeds u32::MAX")
+}
+
+fn empty_slice<T>() -> Box<[T]> {
+    Vec::new().into_boxed_slice()
+}
+
+/// A directed multigraph stored as a compressed base plus an appendable
+/// delta, with stable dense identities and explicit compaction.
+///
+/// Node and edge payloads are consumer-defined; parallel edges and self edges
+/// are retained; forward and reverse adjacency are both maintained. The tag
+/// parameters exist so a consumer can give its nodes and edges domain
+/// identities ([`Id<MyNodeTag>`](Id)) without a newtype and a pair of
+/// conversion shims; the defaults cover the ordinary case.
+///
+/// See the [module documentation](self) for the storage design.
+///
+/// # Examples
+///
+/// ```
+/// use cfglib::Graph;
+///
+/// let mut graph = Graph::new();
+/// let definition = graph.add_node("definition");
+/// let call = graph.add_node("call");
+/// let flow = graph.add_edge(definition, call, "returns");
+///
+/// assert_eq!(graph.successors(definition).collect::<Vec<_>>(), [call]);
+/// assert_eq!(graph.edge(flow).payload(), &"returns");
+///
+/// // Appending after a compaction costs no allocation per node.
+/// graph.compact();
+/// let other = graph.add_node("other");
+/// graph.add_edge(definition, other, "escapes");
+/// assert_eq!(graph.successors(definition).collect::<Vec<_>>(), [call, other]);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "serde",
+    serde(bound(
+        serialize = "N: serde::Serialize, E: serde::Serialize",
+        deserialize = "N: serde::Deserialize<'de>, E: serde::Deserialize<'de>"
+    ))
+)]
+pub struct Graph<N, E, NT: IdTag = NodeTag, ET: IdTag = EdgeTag> {
+    base_nodes: Box<[N]>,
+    base_edges: Box<[EdgeRecord<E, NT>]>,
+    out_offsets: Box<[u32]>,
+    out_edges: Box<[u32]>,
+    in_offsets: Box<[u32]>,
+    in_edges: Box<[u32]>,
+    delta_nodes: Vec<N>,
+    delta_edges: Vec<EdgeRecord<E, NT>>,
+    chains: DeltaChains,
+    live_nodes: LiveSet,
+    live_edges: LiveSet,
+    live_node_count: usize,
+    live_edge_count: usize,
+    /// Replacement adjacency runs, present only once an edge has been
+    /// redirected; see [`redirect_edge_source`](Graph::redirect_edge_source).
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    relocations: Option<Box<Relocations>>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    edge_tag: PhantomData<fn() -> ET>,
+}
+
+impl<N, E> Graph<N, E> {
+    /// Create an empty store with the default node and edge tags.
+    ///
+    /// Tagged stores use [`tagged`](Graph::tagged) instead, for the reason
+    /// `HashMap::new` is restricted to the default hasher: a type parameter
+    /// with a default is still a parameter, and inference cannot recover it
+    /// from the payloads alone.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::tagged()
+    }
+
+    /// Create an empty default-tagged store with room for the requested
+    /// nodes and edges.
+    #[must_use]
+    pub fn with_capacity(nodes: usize, edges: usize) -> Self {
+        Self::tagged_with_capacity(nodes, edges)
+    }
+}
+
+impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
+    /// Create an empty store over consumer-chosen identity tags.
+    #[must_use]
+    pub fn tagged() -> Self {
+        Self {
+            base_nodes: empty_slice(),
+            base_edges: empty_slice(),
+            out_offsets: empty_slice(),
+            out_edges: empty_slice(),
+            in_offsets: empty_slice(),
+            in_edges: empty_slice(),
+            delta_nodes: Vec::new(),
+            delta_edges: Vec::new(),
+            chains: DeltaChains::new(),
+            live_nodes: LiveSet::new(),
+            live_edges: LiveSet::new(),
+            live_node_count: 0,
+            live_edge_count: 0,
+            relocations: None,
+            edge_tag: PhantomData,
+        }
+    }
+
+    /// Create an empty tagged store with room for the requested nodes and
+    /// edges.
+    ///
+    /// The reservation covers the delta, which is where a fresh store puts
+    /// everything, so a consumer that knows its size builds without a single
+    /// reallocation and then compacts once.
+    #[must_use]
+    pub fn tagged_with_capacity(nodes: usize, edges: usize) -> Self {
+        Self {
+            delta_nodes: Vec::with_capacity(nodes),
+            delta_edges: Vec::with_capacity(edges),
+            chains: DeltaChains::with_capacity(nodes, edges),
+            live_nodes: LiveSet::with_capacity(nodes),
+            live_edges: LiveSet::with_capacity(edges),
+            ..Self::tagged()
+        }
+    }
+
+    /// Add a node and return its stable identity.
+    ///
+    /// Constant time, and no allocation beyond the amortized growth of the
+    /// delta arrays: a node costs its payload, one push of its eight bytes of
+    /// chain slots, and two bits.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the store would exceed the dense identity space.
+    pub fn add_node(&mut self, payload: N) -> Id<NT> {
+        let slot = self.node_bound();
+        assert!(
+            slot < MAX_SLOTS,
+            "node count exceeds the dense identity space"
+        );
+        self.delta_nodes.push(payload);
+        self.chains.push_node();
+        self.live_nodes.push_live();
+        self.live_node_count += 1;
+        Id::from_index(slot)
+    }
+
+    /// Add a directed edge and return its stable identity.
+    ///
+    /// Parallel edges and self edges are retained. The edge is appended to
+    /// both endpoints' delta chains in constant time; a node that was part of
+    /// the compressed base gains delta neighbors without its base run moving.
+    ///
+    /// # Panics
+    ///
+    /// Panics when either endpoint is out of range or has been removed, or
+    /// when the store would exceed the dense identity space.
+    pub fn add_edge(&mut self, source: Id<NT>, target: Id<NT>, payload: E) -> Id<ET> {
+        self.assert_live_endpoint(source, "source");
+        self.assert_live_endpoint(target, "target");
+        let slot = self.edge_bound();
+        assert!(
+            slot < MAX_SLOTS,
+            "edge count exceeds the dense identity space"
+        );
+
+        self.delta_edges
+            .push(EdgeRecord::new(source, target, payload));
+        self.chains.append(source.index(), target.index());
+        self.live_edges.push_live();
+        self.live_edge_count += 1;
+        Id::from_index(slot)
+    }
+
+    /// Remove an edge, returning whether it had been live.
+    ///
+    /// Every other identity, in both directions of adjacency, is unaffected.
+    pub fn remove_edge(&mut self, edge: Id<ET>) -> bool {
+        self.retire_edge(edge.index())
+    }
+
+    /// Remove a node and all of its edges, returning whether it had been
+    /// live.
+    ///
+    /// Costs one walk of the node's two adjacency axes. An edge removed this
+    /// way is indistinguishable from one removed directly.
+    pub fn remove_node(&mut self, node: Id<NT>) -> bool {
+        let index = node.index();
+        if !self.node_is_live(index) {
+            return false;
+        }
+        self.clear_adjacency(node, TraversalDirection::Outgoing);
+        self.clear_adjacency(node, TraversalDirection::Incoming);
+        self.live_nodes.clear(index);
+        self.live_node_count -= 1;
+        true
+    }
+
+    /// Borrow a node payload.
+    ///
+    /// A removed node's payload stays readable until the next compaction;
+    /// ask [`contains_node`](Self::contains_node) when that distinction
+    /// matters.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `node` names no slot in this store.
+    #[must_use]
+    pub fn node(&self, node: Id<NT>) -> &N {
+        let index = node.index();
+        let base = self.base_nodes.len();
+        if index < base {
+            &self.base_nodes[index]
+        } else {
+            &self.delta_nodes[index - base]
+        }
+    }
+
+    /// Mutably borrow a node payload.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `node` names no slot in this store.
+    pub fn node_mut(&mut self, node: Id<NT>) -> &mut N {
+        let index = node.index();
+        let base = self.base_nodes.len();
+        if index < base {
+            &mut self.base_nodes[index]
+        } else {
+            &mut self.delta_nodes[index - base]
+        }
+    }
+
+    /// Borrow an edge's endpoints and payload.
+    ///
+    /// A removed edge's record stays readable until the next compaction.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `edge` names no slot in this store.
+    #[must_use]
+    pub fn edge(&self, edge: Id<ET>) -> &EdgeRecord<E, NT> {
+        let index = edge.index();
+        let base = self.base_edges.len();
+        if index < base {
+            &self.base_edges[index]
+        } else {
+            &self.delta_edges[index - base]
+        }
+    }
+
+    /// Mutably borrow an edge record, whose payload is the mutable part.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `edge` names no slot in this store.
+    pub fn edge_mut(&mut self, edge: Id<ET>) -> &mut EdgeRecord<E, NT> {
+        let index = edge.index();
+        let base = self.base_edges.len();
+        if index < base {
+            &mut self.base_edges[index]
+        } else {
+            &mut self.delta_edges[index - base]
+        }
+    }
+
+    /// Whether `node` names a node the store still holds.
+    #[must_use]
+    pub fn contains_node(&self, node: Id<NT>) -> bool {
+        self.node_is_live(node.index())
+    }
+
+    /// Whether `edge` names an edge the store still holds.
+    #[must_use]
+    pub fn contains_edge(&self, edge: Id<ET>) -> bool {
+        self.edge_is_live(edge.index())
+    }
+
+    /// Whether any node slot is a tombstone, which is the only reason a
+    /// question about a node has to reach the bitset at all.
+    ///
+    /// A store that has only ever been appended to or compacted answers every
+    /// liveness question from its two counters, so the endpoint check on the
+    /// append path and the node test starting every adjacency walk touch no
+    /// second array.
+    pub(super) fn tombstoned_nodes(&self) -> bool {
+        self.live_node_count != self.node_bound()
+    }
+
+    /// Whether any edge slot is a tombstone, the edge counterpart of
+    /// [`tombstoned_nodes`](Self::tombstoned_nodes).
+    pub(super) fn tombstoned_edges(&self) -> bool {
+        self.live_edge_count != self.edge_bound()
+    }
+
+    /// Whether `slot` names a node the store still holds.
+    fn node_is_live(&self, slot: usize) -> bool {
+        slot < self.node_bound() && (!self.tombstoned_nodes() || self.live_nodes.is_live(slot))
+    }
+
+    /// Whether `slot` names an edge the store still holds.
+    fn edge_is_live(&self, slot: usize) -> bool {
+        slot < self.edge_bound() && (!self.tombstoned_edges() || self.live_edges.is_live(slot))
+    }
+
+    /// The number of nodes the store holds.
+    ///
+    /// A quantity, never an index range: use [`node_bound`](Self::node_bound)
+    /// to size or iterate a node-indexed array.
+    #[must_use]
+    pub const fn node_count(&self) -> usize {
+        self.live_node_count
+    }
+
+    /// The number of edges the store holds.
+    ///
+    /// A quantity, never an index range: use [`edge_bound`](Self::edge_bound)
+    /// to size or iterate an edge-indexed array.
+    #[must_use]
+    pub const fn edge_count(&self) -> usize {
+        self.live_edge_count
+    }
+
+    /// The number of node slots, removed nodes included.
+    ///
+    /// Every live [`Id`] is below this, so it is the correct size for a
+    /// node-indexed side table — a bound sizes an array, a count answers
+    /// "how many" — and it is what the store reports as
+    /// [`GraphView::node_bound`](crate::GraphView::node_bound),
+    /// because an analysis sizing an array by that number must cover every
+    /// identity the view yields.
+    ///
+    /// The consequence is worth stating plainly: a removed node remains a
+    /// node of the *view*, with no edges. Reachability-based analyses
+    /// (dominators, traversals) simply find it unreachable, but a whole-graph
+    /// partition such as [`tarjan_scc`](crate::tarjan_scc) reports it as a
+    /// singleton component. [`compact`](Self::compact) first when that
+    /// matters; [`is_compact`](Self::is_compact) says whether it would change
+    /// anything.
+    #[must_use]
+    pub fn node_bound(&self) -> usize {
+        self.base_nodes.len() + self.delta_nodes.len()
+    }
+
+    /// The number of edge slots, removed edges included.
+    ///
+    /// The edge counterpart of [`node_bound`](Self::node_bound), and the
+    /// correct size for an edge-indexed side table — a bound sizes an array,
+    /// a count answers "how many".
+    #[must_use]
+    pub fn edge_bound(&self) -> usize {
+        self.base_edges.len() + self.delta_edges.len()
+    }
+
+    /// Whether the store holds no nodes.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.live_node_count == 0
+    }
+
+    /// Iterate over every live node identity in ascending order.
+    pub fn node_ids(&self) -> impl Iterator<Item = Id<NT>> + '_ {
+        let tombstoned = self.tombstoned_nodes();
+        (0..self.node_bound())
+            .filter(move |&slot| !tombstoned || self.live_nodes.is_live(slot))
+            .map(Id::from_index)
+    }
+
+    /// Iterate over every live edge identity in ascending order, which is
+    /// also insertion order.
+    pub fn edge_ids(&self) -> impl Iterator<Item = Id<ET>> + '_ {
+        let tombstoned = self.tombstoned_edges();
+        (0..self.edge_bound())
+            .filter(move |&slot| !tombstoned || self.live_edges.is_live(slot))
+            .map(Id::from_index)
+    }
+
+    /// Iterate over every live node payload in identity order.
+    pub fn nodes(&self) -> impl Iterator<Item = &N> + '_ {
+        self.node_ids().map(|node| self.node(node))
+    }
+
+    /// Iterate over every live edge record in insertion order.
+    pub fn edges(&self) -> impl Iterator<Item = &EdgeRecord<E, NT>> + '_ {
+        self.edge_ids().map(|edge| self.edge(edge))
+    }
+
+    pub(super) fn assert_live_endpoint(&self, node: Id<NT>, role: &str) {
+        assert!(
+            node.index() < self.node_bound(),
+            "{role} node is out of range"
+        );
+        assert!(
+            self.node_is_live(node.index()),
+            "{role} node has been removed"
+        );
+    }
+
+    pub(super) fn retire_edge(&mut self, slot: usize) -> bool {
+        if !self.live_edges.clear(slot) {
+            return false;
+        }
+        self.live_edge_count -= 1;
+        true
+    }
+}
+
+impl<N, E, NT: IdTag, ET: IdTag> Default for Graph<N, E, NT, ET> {
+    fn default() -> Self {
+        Self::tagged()
+    }
+}
+
+/// Node payloads are what `graph[id]` means.
+///
+/// Edges have no indexing counterpart: a node tag and an edge tag can be the
+/// same type, so two [`Index`](core::ops::Index) implementations would overlap. Reach an edge
+/// through [`edge`](Graph::edge), which returns the whole record.
+impl<N, E, NT: IdTag, ET: IdTag> core::ops::Index<Id<NT>> for Graph<N, E, NT, ET> {
+    type Output = N;
+
+    /// # Panics
+    ///
+    /// Panics when `node` names no slot in this store.
+    fn index(&self, node: Id<NT>) -> &Self::Output {
+        self.node(node)
+    }
+}

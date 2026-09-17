@@ -96,7 +96,7 @@ fn normal_and_exceptional_edges_receive_different_physical_states() {
     assert_eq!(facts.fact_on(handler_one), Some(&9));
     assert_eq!(facts.fact_on(unwind), Some(&257));
     assert_eq!(
-        cfg.successor_edges(entry),
+        cfg.outgoing(entry).collect::<Vec<_>>(),
         [normal, handler_zero, handler_one, unwind]
     );
 }

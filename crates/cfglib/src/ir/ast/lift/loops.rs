@@ -30,7 +30,7 @@ struct ConditionalTargets {
 fn conditional_targets<I, E>(cfg: &Cfg<I, E>, block: BlockId) -> Option<ConditionalTargets> {
     let mut true_target = None;
     let mut false_target = None;
-    for &eid in cfg.successor_edges(block) {
+    for eid in cfg.outgoing(block) {
         match cfg.edge(eid).kind() {
             EdgeKind::ConditionalTrue => true_target = Some(cfg.edge(eid).target()),
             EdgeKind::ConditionalFalse => false_target = Some(cfg.edge(eid).target()),
@@ -118,9 +118,8 @@ fn while_chain<I, E>(cfg: &Cfg<I, E>, natural: &NaturalLoop, header: BlockId) ->
             return None;
         }
         let sequential_predecessors = cfg
-            .predecessor_edges(next)
-            .iter()
-            .filter(|&&edge| !is_exception_edge(cfg.edge(edge).kind()))
+            .incoming(next)
+            .filter(|&edge| !is_exception_edge(cfg.edge(edge).kind()))
             .count();
         if sequential_predecessors != 1 {
             return None;
@@ -174,7 +173,7 @@ fn endless_follow<I, E>(
 ) -> Option<BlockId> {
     let mut fallback = None;
     for &block in &natural.body {
-        for &eid in cfg.successor_edges(block) {
+        for eid in cfg.outgoing(block) {
             let edge = cfg.edge(eid);
             let sequential = matches!(
                 edge.kind(),
@@ -205,7 +204,7 @@ pub(super) fn lift_loop<'a, I, E, O>(
     map: &mut impl FnMut(&'a I) -> O,
 ) -> (AstNode<O>, Option<BlockId>) {
     let fallback;
-    let natural = if let Some(natural) = state.loops.get(&header.0) {
+    let natural = if let Some(natural) = state.loops.get(&header.raw()) {
         natural
     } else {
         // The classification and the loop map derive from the same back
@@ -241,9 +240,9 @@ pub(super) fn lift_loop<'a, I, E, O>(
     }
 
     state.loop_stack.push(LoopContext {
-        header: header.0,
-        follow: follow.map(|block| block.0),
-        continue_target: continue_target.0,
+        header: header.raw(),
+        follow: follow.map(BlockId::raw),
+        continue_target: continue_target.raw(),
         labeled: false,
     });
 
@@ -261,7 +260,7 @@ pub(super) fn lift_loop<'a, I, E, O>(
         .expect("the loop context pushed above is still on the stack");
     let node = AstNode::Loop { header, kind, body };
     let node = if context.labeled {
-        state.labeled_blocks.insert(header.0);
+        state.labeled_blocks.insert(header.raw());
         AstNode::Label {
             name: block_label_name(cfg, header),
             body: vec![node],
@@ -358,10 +357,10 @@ fn lift_header_body<'a, I, E, O>(
     map: &mut impl FnMut(&'a I) -> O,
 ) -> Vec<AstNode<O>> {
     let mut body = Vec::new();
-    let successor_edges = cfg.successor_edges(header);
-    let is_conditional = has_edge_kind(cfg, successor_edges, EdgeKind::ConditionalTrue)
-        && has_edge_kind(cfg, successor_edges, EdgeKind::ConditionalFalse);
-    let has_switch = has_edge_kind(cfg, successor_edges, EdgeKind::SwitchCase);
+    let outgoing: Vec<crate::EdgeId> = cfg.outgoing(header).collect();
+    let is_conditional = has_edge_kind(cfg, &outgoing, EdgeKind::ConditionalTrue)
+        && has_edge_kind(cfg, &outgoing, EdgeKind::ConditionalFalse);
+    let has_switch = has_edge_kind(cfg, &outgoing, EdgeKind::SwitchCase);
 
     if is_conditional {
         let node = lift_conditional(cfg, state, header, Some(bound), map);
@@ -377,7 +376,7 @@ fn lift_header_body<'a, I, E, O>(
         }
     } else {
         push_block(&mut body, cfg, header, map);
-        for &eid in successor_edges {
+        for eid in outgoing {
             let edge = cfg.edge(eid);
             if !is_back_edge(cfg, state.back_edges, eid) && !is_exception_edge(edge.kind()) {
                 body.extend(lift_region(

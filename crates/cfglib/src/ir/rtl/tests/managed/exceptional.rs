@@ -130,15 +130,15 @@ fn exceptional_edge_carries_the_emitted_throw_site() {
     );
     let commit_block = function
         .cfg()
-        .blocks()
-        .iter()
-        .find(|block| {
-            block
+        .block_ids()
+        .find(|&block| {
+            function
+                .cfg()
+                .block(block)
                 .instructions()
                 .iter()
                 .any(|instruction| instruction.id() == emitted[1])
         })
-        .map(crate::BasicBlock::id)
         .expect("the commit instruction has a block");
     assert_ne!(
         commit_block,
@@ -233,7 +233,6 @@ fn lowering_remaps_the_throw_site_edge() {
         .function
         .cfg()
         .blocks()
-        .iter()
         .flat_map(crate::BasicBlock::instructions)
         .find(|node| node.id() == statement)
         .expect("the named statement exists in the lowered function");

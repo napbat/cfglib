@@ -1,8 +1,8 @@
 use cfglib::{
-    Cfg, Direction, DominatorTree, Edge, EdgeGraphView, EdgeId, EdgeKind, FilteredEdges,
-    KeyedGraph, NodeId, RootedGraphView, TraversalDirection, TryEdgeProblem, TrySolveError,
-    breadth_first_view_edges, remove_empty_blocks_mapped, split_node_at_points,
-    try_solve_edge_problem_from, verify_edge_view,
+    Cfg, Direction, DominatorTree, Edge, EdgeId, EdgeKind, EdgeView, FilteredEdges, KeyedGraph,
+    NodeId, RootedView, TraversalDirection, TryEdgeProblem, TrySolveError, breadth_first_edges,
+    remove_empty_blocks_mapped, split_node_at_points, try_solve_edge_problem_from,
+    verify_edge_view,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,7 +52,7 @@ fn normal_and_full_flow_algorithms_share_storage_but_not_reachability() {
     let normal = FilteredEdges::new(&cfg, is_normal);
     assert!(verify_edge_view(&normal).is_ok());
     assert_eq!(normal.root(), entry);
-    assert_eq!(normal.edge_slot_count(), cfg.edge_slot_count());
+    assert_eq!(normal.edge_bound(), cfg.edge_bound());
     assert!(!normal.edge_ids().any(|edge| edge == exceptional));
     let normal_dominators = DominatorTree::compute(&normal);
     assert!(normal_dominators.dominates(entry, merge));
@@ -89,13 +89,13 @@ fn parallel_switch_and_continuation_edges_keep_identity_and_order() {
 
     assert_ne!(default, case);
     assert_ne!(first_continuation, second_continuation);
-    assert_eq!(cfg.successor_edges(entry), [default, case]);
+    assert_eq!(cfg.outgoing(entry).collect::<Vec<_>>(), [default, case]);
     assert_eq!(
-        cfg.successor_edges(target),
+        cfg.outgoing(target).collect::<Vec<_>>(),
         [first_continuation, second_continuation]
     );
 
-    let steps = breadth_first_view_edges(&cfg, entry, TraversalDirection::Outgoing);
+    let steps = breadth_first_edges(&cfg, entry, TraversalDirection::Outgoing);
     let ids: Vec<_> = steps.iter().map(|step| step.edge).collect();
     assert_eq!(
         ids,
@@ -118,18 +118,15 @@ fn split_redirect_bypass_and_clone_report_metadata_preserving_mappings() {
         [(1, Route::Synthetic), (2, Route::Synthetic)],
     )
     .unwrap();
-    assert_eq!(split.block_replacements(entry), Some(parts.as_slice()));
-    assert_eq!(
-        split.edge_replacements(outgoing),
-        Some([outgoing].as_slice())
-    );
+    assert_eq!(split.blocks(entry), Some(parts.as_slice()));
+    assert_eq!(split.edges(outgoing), Some([outgoing].as_slice()));
     assert_eq!(cfg.edge(outgoing).source(), parts[2]);
     assert_eq!(cfg.edge(outgoing).payload(), &Route::SwitchCase(9));
 
     let mut clone_blocks = parts.clone();
     clone_blocks.push(exit);
     let (clone, cloned) = cfg.subgraph_mapped(&clone_blocks);
-    let cloned_outgoing = cloned.edge_replacements(outgoing).unwrap()[0];
+    let cloned_outgoing = cloned.edges(outgoing).unwrap()[0];
     assert_eq!(clone.edge(cloned_outgoing).payload(), &Route::SwitchCase(9));
     assert!(cloned.created_edges().contains(&cloned_outgoing));
 
@@ -142,12 +139,9 @@ fn split_redirect_bypass_and_clone_report_metadata_preserving_mappings() {
         bypass.add_edge_with_payload(empty, target, EdgeKind::Fallthrough, Route::Synthetic);
     let (count, mapping) = remove_empty_blocks_mapped(&mut bypass);
     assert_eq!(count, 1);
-    assert_eq!(
-        mapping.edge_replacements(incoming),
-        Some([incoming].as_slice())
-    );
-    assert_eq!(mapping.edge_replacements(removed), Some([].as_slice()));
-    assert_eq!(mapping.block_replacements(empty), Some([].as_slice()));
+    assert_eq!(mapping.edges(incoming), Some([incoming].as_slice()));
+    assert_eq!(mapping.edges(removed), Some([].as_slice()));
+    assert_eq!(mapping.blocks(empty), Some([].as_slice()));
     assert_eq!(bypass.edge(incoming).target(), target);
     assert_eq!(bypass.edge(incoming).payload(), &Route::SwitchCase(3));
 }
@@ -174,7 +168,7 @@ fn handler_and_unwind_payloads_remain_distinct_and_ordered() {
         ),
         cfg.add_edge_with_payload(entry, unwind, EdgeKind::ExceptionUnwind, Route::Unwind),
     ];
-    assert_eq!(cfg.successor_edges(entry), edges);
+    assert_eq!(cfg.outgoing(entry).collect::<Vec<_>>(), edges);
     assert_eq!(cfg.edge(edges[0]).payload(), &Route::Handler { order: 0 });
     assert_eq!(cfg.edge(edges[1]).payload(), &Route::Handler { order: 1 });
     assert_eq!(cfg.edge(edges[2]).payload(), &Route::Unwind);
@@ -253,7 +247,7 @@ fn keyed_seeded_dataflow_preserves_bottom_and_consumer_errors() {
     assert_eq!(facts.fact_out(reached), &Some(3));
     assert_eq!(facts.fact_in(island), &None);
     assert_eq!(facts.fact_on(edge), Some(&Some(2)));
-    assert_eq!(graph.edge_ref(edge).data(), &Route::Normal);
+    assert_eq!(graph.edge(edge).data(), &Route::Normal);
 
     let error = try_solve_edge_problem_from(
         &graph,

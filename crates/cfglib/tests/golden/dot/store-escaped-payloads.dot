@@ -1,0 +1,8 @@
+digraph view {
+    rankdir=TB;
+    node [shape=box fontname="monospace" fontsize=10];
+    edge [fontname="monospace" fontsize=9];
+    n0 [label="say \"hi\"\lback\\slash\l"];
+    n1 [label="plain\l"];
+    n0 -> n1;
+}

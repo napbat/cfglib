@@ -7,7 +7,7 @@ use alloc::vec;
 use core::ops::ControlFlow;
 
 use crate::graph::traverse::{Adjacency, TraversalDirection, by_axis};
-use crate::graph::view::{DenseNodeId, DirectedGraphView};
+use crate::graph::view::{DenseId, GraphView};
 
 /// An event of a [`breadth_first_events`] walk.
 ///
@@ -51,9 +51,9 @@ pub enum BfsEvent<N> {
 /// ```
 /// use core::ops::ControlFlow;
 ///
-/// use cfglib::{BfsEvent, DirectedGraph, TraversalDirection, breadth_first_events};
+/// use cfglib::{BfsEvent, Graph, TraversalDirection, breadth_first_events};
 ///
-/// let mut graph = DirectedGraph::<&str, ()>::new();
+/// let mut graph = Graph::<&str, ()>::new();
 /// let root = graph.add_node("root");
 /// let left = graph.add_node("left");
 /// let right = graph.add_node("right");
@@ -84,7 +84,7 @@ pub enum BfsEvent<N> {
 ///
 /// Panics when `start` is not a node in `graph`.
 #[must_use]
-pub fn breadth_first_events<G: DirectedGraphView, B>(
+pub fn breadth_first_events<G: GraphView, B>(
     graph: &G,
     start: G::NodeId,
     direction: TraversalDirection,
@@ -93,18 +93,18 @@ pub fn breadth_first_events<G: DirectedGraphView, B>(
     by_axis!(direction, breadth_first_events_from(graph, start, on_event))
 }
 
-fn breadth_first_events_from<G: DirectedGraphView, A: Adjacency, B>(
+fn breadth_first_events_from<G: GraphView, A: Adjacency, B>(
     axis: A,
     graph: &G,
     start: G::NodeId,
     mut on_event: impl FnMut(BfsEvent<G::NodeId>) -> ControlFlow<B>,
 ) -> Option<B> {
     assert!(
-        start.index() < graph.node_count(),
+        start.index() < graph.node_bound(),
         "start node is out of range"
     );
 
-    let mut discovered = vec![false; graph.node_count()];
+    let mut discovered = vec![false; graph.node_bound()];
     let mut queue = VecDeque::new();
     discovered[start.index()] = true;
     emit_or_break!(on_event, BfsEvent::Discover(start, 0));

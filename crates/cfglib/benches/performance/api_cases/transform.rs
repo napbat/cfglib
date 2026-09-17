@@ -12,6 +12,10 @@ use cfglib::{
     split_critical_edges, split_critical_edges_mapped, split_critical_edges_with, split_node,
     split_node_at_points, split_node_with_payload_mapped, verify,
 };
+use cfglib::{
+    ExclusiveExtent, ExtentPromotionDecision, HandlerRef, RelaxError, promote_exclusive_extents,
+    recover_exclusive_extents, relax_layout,
+};
 
 use super::BenchmarkSuite;
 use super::fixtures::{ApiInst, dataflow_cfg};
@@ -563,8 +567,107 @@ fn register_exception_regions(suite: &mut BenchmarkSuite<'_>) {
     );
 }
 
+/// One protected block, one catch handler, and a shared continuation — the
+/// shape extent recovery has to reason about.
+fn guarded_cfg() -> Cfg<ApiInst> {
+    let mut cfg = Cfg::<ApiInst>::new();
+    let entry = cfg.entry();
+    let handler = cfg.new_block();
+    let body = cfg.new_block();
+    let join = cfg.new_block();
+    cfg.add_edge(entry, body, EdgeKind::Fallthrough);
+    cfg.add_edge(entry, handler, EdgeKind::ExceptionHandler);
+    cfg.add_edge(body, join, EdgeKind::Fallthrough);
+    cfg.add_edge(handler, join, EdgeKind::Fallthrough);
+    let mut handler_types = HandlerTypes::new();
+    install_clr_region(
+        &mut cfg,
+        &mut handler_types,
+        ClrExceptionRegion {
+            protected_blocks: BTreeSet::from([entry]),
+            handlers: vec![ClrHandler {
+                entry: handler,
+                body: HandlerBody::Unknown,
+                kind: ClrHandlerKind::Catch { ty: 1_u32 },
+            }],
+            parent: None,
+        },
+    );
+    cfg
+}
+
+fn register_extents(suite: &mut BenchmarkSuite<'_>) {
+    let guarded = guarded_cfg();
+
+    benchmark_case!(
+        suite,
+        "api_recover_exclusive_extents",
+        covers[recover_exclusive_extents, recover_exclusive_extents_with],
+        || recover_exclusive_extents(&guarded),
+        |extents: &Vec<ExclusiveExtent>| assert_eq!(extents.len(), 1)
+    );
+    benchmark_case!(
+        suite,
+        "api_promote_exclusive_extents",
+        covers[promote_exclusive_extents],
+        || {
+            let mut candidate = guarded.clone();
+            let bodies: Vec<(HandlerRef, BTreeSet<BlockId>)> =
+                recover_exclusive_extents(&candidate)
+                    .into_iter()
+                    .map(|extent| (extent.handler, extent.blocks))
+                    .collect();
+            let decisions = promote_exclusive_extents(&mut candidate, |handler| {
+                bodies
+                    .iter()
+                    .find(|(candidate, _)| *candidate == handler)
+                    .map(|(_, blocks)| blocks.clone())
+            });
+            (candidate, decisions)
+        },
+        |(candidate, decisions): &(Cfg<ApiInst>, Vec<ExtentPromotionDecision>)| {
+            assert!(verify(candidate).is_ok());
+            assert_eq!(decisions.len(), 1);
+        }
+    );
+}
+
+fn register_layout(suite: &mut BenchmarkSuite<'_>) {
+    // Every eighth item widens once, so the relaxation needs a second pass
+    // before it reaches its fixed point.
+    let items: Vec<usize> = (0..BLOCK_COUNT).map(|index| index % 4).collect();
+
+    benchmark_case!(
+        suite,
+        "api_relax_layout",
+        covers[relax_layout],
+        || {
+            let mut candidate = items.clone();
+            relax_layout(
+                &mut candidate,
+                |item: &usize, _offset| Ok::<usize, ()>(item + 1),
+                |offsets: &[usize], total| Ok::<usize, ()>(offsets.len() + total),
+                |item: &mut usize, offset, _context| {
+                    let widen = *item == 0 && offset % 8 == 0;
+                    if widen {
+                        *item = 1;
+                    }
+                    Ok::<bool, ()>(widen)
+                },
+            )
+        },
+        |result: &Result<(Vec<usize>, usize, usize), RelaxError<()>>| {
+            let (offsets, total, _context) = result.as_ref().expect("the relaxation converges");
+            assert_eq!(offsets.len(), BLOCK_COUNT);
+            assert!(*total >= BLOCK_COUNT);
+        }
+    );
+}
+
 pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     register_cleanup(suite);
+    register_extents(suite);
+    register_layout(suite);
     register_tail_duplication(suite);
     register_node_edits(suite);
     register_critical_edges(suite);

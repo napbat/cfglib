@@ -4,7 +4,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec;
 
-use crate::{DirectedGraphView, EdgeGraphView, SearchOrder};
+use crate::{GraphView, SearchOrder};
 
 use super::{
     StackGraph, StackGraphError, StackLinearResolutionError, StackNodeKind, StackPartialPathConfig,
@@ -96,7 +96,7 @@ fn direct_resolution_applies_symbol_guards_and_builds_reverse_bindings() {
     add_edge(&mut graph, scope, wrong, 0);
     add_edge(&mut graph, scope, definition, 0);
 
-    assert_eq!(graph.edge_ref(first_edge).source(), reference);
+    assert_eq!(graph.edge(first_edge).source(), reference);
     assert_eq!(
         graph.successors(reference).collect::<alloc::vec::Vec<_>>(),
         vec![scope]
@@ -531,7 +531,7 @@ fn changed_file_partitions_rebuild_without_disturbing_other_files() {
         .file_paths(stable)
         .map(|(id, _)| id)
         .collect::<alloc::vec::Vec<_>>();
-    let old_slot_count = graph.node_count();
+    let old_slot_count = graph.node_bound();
 
     assert_eq!(
         graph.clear_file(changed).expect("known file"),
@@ -551,8 +551,8 @@ fn changed_file_partitions_rebuild_without_disturbing_other_files() {
         .replace_file(&graph, changed, StackPartialPathConfig::new())
         .expect("known file");
 
-    assert!(graph.node_count() > old_slot_count);
-    assert_eq!(graph.live_node_count(), 6);
+    assert!(graph.node_bound() > old_slot_count);
+    assert_eq!(graph.node_count(), 6);
     assert!(
         old_partial_ids
             .iter()
@@ -583,7 +583,7 @@ fn stale_partial_path_edges_report_a_structured_error() {
         .expect("known file");
     let edge = add_edge(&mut graph, reference, definition, 0);
     let database = StackPartialPathDatabase::compute(&graph, StackPartialPathConfig::new());
-    assert!(graph.remove_edge(edge).is_some());
+    assert!(graph.remove_edge(edge));
 
     assert_eq!(
         StackResolution::try_compute_from_partials(

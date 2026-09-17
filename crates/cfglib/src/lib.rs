@@ -1,10 +1,15 @@
 //! Generic graph and dataflow framework for code intelligence and program analysis.
 //!
-//! [`DirectedGraph`] stores arbitrary node and edge payloads for value-flow,
-//! symbol, type-relation, import, call, and grammar graphs. Algorithms consume
-//! [`DirectedGraphView`] / [`RootedGraphView`], while [`EdgeGraphView`] and
-//! [`FilteredEdges`] retain edge identity and data without rebuilding, so
-//! consumer-owned graph stores participate without migrating their data.
+//! [`Graph`] is the one store: a compressed base plus an appendable delta,
+//! holding arbitrary node and edge payloads for value-flow, symbol,
+//! type-relation, import, call, and grammar graphs, with constant-time
+//! addition, bit-cheap removal, identity-preserving endpoint redirection, and
+//! an explicit [`compact`](Graph::compact) that reports its [`Renumbering`].
+//! Identities are one type, [`Id<T>`](Id), tagged per entity kind.
+//! Algorithms consume [`GraphView`] / [`RootedView`], while [`NodeView`],
+//! [`EdgeView`], and [`FilteredEdges`] retain payloads and edge identity
+//! without rebuilding, so consumer-owned graph stores participate without
+//! migrating their data.
 //! [`breadth_first_events`] and [`depth_first_events`] expose traversal-tree
 //! structure for dense graphs; [`open_breadth_first_events`] and
 //! [`open_depth_first_events`] provide the corresponding discovery streams
@@ -49,6 +54,20 @@
 //! MLIL ([`lift_hlil_function`]) with effect-ordered single-use inlining,
 //! and lowered back to flat MLIL ([`lower_hlil_function`]) so both
 //! directions of the pipeline meet at either level.
+//! Output is three formats over one set of writers. [`write_dot`] draws any
+//! node- and edge-bearing view through a [`DotStyle`] — a node-label hook, an
+//! edge-attribute hook ([`DotEdgeAttributes`]), a graph name, an identifier
+//! prefix, and a [`DotRankDir`] — so [`Cfg`] and [`Graph`] are two styles
+//! rather than two writers. [`write_text`] prints the same view one fact per
+//! line, and [`parse_text`] reads it back into a plain [`Graph`], which is
+//! what makes the form comparable: write, parse, write again is a fixed
+//! point. [`Cfg::to_text`] is the control-flow reading of it — block headers
+//! with indented instructions, edges named by [`EdgeKind`], and exception
+//! regions — and [`parse_cfg_text`] reads that back with a consumer-supplied
+//! instruction parser. Pseudocode printers at every IR level
+//! ([`AstNode::to_pseudocode`], [`ir::rtl::Function::to_pseudocode`],
+//! [`ir::hlil::Function::to_pseudocode`]) share [`IndentedWriter`], so
+//! indentation is decided once and a label is written straight into the sink.
 //! [`PassPipeline`] composes named, ordered, fallible transformations over any
 //! of these IR levels or a consumer-owned compilation context, retaining a
 //! change report and failed-pass identity without imposing dialect policy.
@@ -88,20 +107,24 @@
 //!
 //! # Extension contracts
 //!
-//! [`DirectedGraph`] owns arbitrary graph storage without requiring a consumer
-//! trait. Existing graph stores implement [`DenseNodeId`] and
-//! [`DirectedGraphView`] (plus [`EdgeGraphView`] for edge-sensitive algorithms
-//! and [`RootedGraphView`], or the [`Rooted`] adapter, for entry-requiring
-//! algorithms) to reuse the generic algorithms.
+//! [`Graph`] owns arbitrary graph storage without requiring a consumer
+//! trait. Existing graph stores implement [`DenseId`] and [`GraphView`]
+//! (plus [`NodeView`] for graph-owned payloads, [`EdgeView`] for
+//! edge-sensitive algorithms, and [`RootedView`] or the [`Rooted`] adapter
+//! for entry-requiring algorithms) to reuse the generic algorithms. A view
+//! reports a **bound** that sizes dense side tables and separately yields its
+//! **live** identities, so a store with removed entities in it is neither
+//! unsound to analyze nor obliged to compact first.
 //! Instruction types implement progressively richer traits only when they
 //! need CFG or dataflow facilities — every associated type below is the
 //! consumer's own:
 //!
 //! ```text
-//! DirectedGraph<N, E>       (owned arbitrary graph; no adapter trait)
-//! DirectedGraphView         (existing consumer-owned graph storage)
-//!   ├─ EdgeGraphView        (stable edge identity, endpoints, data)
-//!   └─ RootedGraphView      (adds a distinguished entry node; `Rooted` adapts)
+//! Graph<N, E>               (owned arbitrary graph; no adapter trait)
+//! GraphView                 (existing consumer-owned graph storage)
+//!   ├─ NodeView             (graph-owned node payloads)
+//!   ├─ EdgeView             (stable edge identity, endpoints, data)
+//!   └─ RootedView           (adds a distinguished entry node; `Rooted` adapts)
 //!
 //! FlowControl               (required only by CfgBuilder)
 //!   └─ JumpTargets          (optional — explicit goto/label wiring, Target)
@@ -117,7 +140,7 @@
 //!
 //! MemoryAlias<Location>     (optional may-alias oracle consumed by MemorySSA)
 //!
-//! DisplayInstr              (optional — rendering only: DOT, pseudocode)
+//! DisplayInstr              (optional — rendering only: DOT, text, pseudocode)
 //! CallInfo                  (optional — call graphs, Callee)
 //! SwitchSource              (optional — switch table recovery, Target)
 //! ```
@@ -143,17 +166,31 @@
 //!   unreachable blocks are legal (dead code after a return/goto). SSA treats
 //!   disconnected source components as independent dominator-forest roots, so
 //!   their internal def-use flow remains intact without inheriting entry state.
-//! - [`Cfg::blocks`] iterates in allocation order and [`Cfg::edges`] in
-//!   insertion order; both orders are stable and part of the API.
+//! - [`Cfg::blocks`] iterates live blocks in allocation order and
+//!   [`Cfg::edges`] live edges in insertion order; both orders are stable and
+//!   part of the API. A removed block or edge is skipped, keeps its slot, and
+//!   stays readable through [`Cfg::block`] until [`Cfg::compact`] renumbers
+//!   the survivors.
 //! - [`ProgramPoint`] instruction indices are positions, not identities:
 //!   [`Cfg::split_block`] and instruction edits invalidate them. Persist
 //!   consumer-keyed results (e.g. by syntax-node id), not program points.
-//! - Analyses index node identities densely; consumer block anchors
-//!   (source ranges, syntax nodes) belong in dense-indexed side tables or
-//!   in the instruction payload itself.
+//! - Analyses size dense side tables by [`Cfg::block_bound`] /
+//!   [`GraphView::node_bound`] and iterate [`Cfg::block_ids`] /
+//!   [`GraphView::node_ids`]; the two coincide until something is removed.
+//!   Consumer block anchors (source ranges, syntax nodes) belong in those
+//!   side tables or in the instruction payload itself.
+//! - A transform reports what it did as a [`Rewrite`] (sparse: only the
+//!   identities it touched) and a compaction as a [`Renumbering`] (total over
+//!   the old identity space). [`Rewrite::then_renumbered`] carries the first
+//!   across the second.
 
 #![no_std]
 #![warn(missing_docs)]
+
+// Golden-file comparison reads the rendered output back from disk, which the
+// crate itself never does.
+#[cfg(test)]
+extern crate std;
 
 pub(crate) fn usize_to_f64(value: usize) -> f64 {
     if let Ok(value) = u32::try_from(value) {
@@ -204,16 +241,13 @@ pub use analysis::tail_call::{TailCall, detect_explicit_tail_calls, detect_tail_
 pub use analysis::value_numbering::{
     BlockValueNumbers, ValueNumber, ValueNumberInfo, ValueNumbering,
 };
-pub use block::{BasicBlock, BlockId};
+pub use block::{BasicBlock, BlockId, BlockTag};
 pub use builder::address::{
     AddressBuildError, AddressCfgOptions, AddressEdgeInfo, AddressGraph, AddressHandler,
     AddressInstruction, AddressSpace, CallPolicy, build_address_cfg,
 };
-pub use builder::structured::{
-    StructuredEdge, StructuredSink, StructuredWalk, StructuredWalkIssue,
-};
 pub use builder::{BuildError, CfgBuilder, JumpResolution, resolve_jump_edges};
-pub use cfg::{Cfg, Predecessors, SplitPointError, Successors};
+pub use cfg::{Cfg, CfgEdge, CfgRenumbering, SplitPointError, parse_cfg_text};
 pub use dataflow::abstract_interpretation::{
     AbstractDomain, AbstractFacts, Lattice, abstract_interpret,
 };
@@ -260,8 +294,8 @@ pub use dataflow::ssa::{
 };
 pub use dataflow::ssa_destruction::{PhiCopy, copies_by_predecessor, eliminate_phis};
 pub use dataflow::{DefSite, EffectInfo, InstrInfo, Predicated, ProgramPoint, UseSite, VariableId};
-pub use display::DisplayInstr;
-pub use edge::{Edge, EdgeId, EdgeKind};
+pub use display::{DisplayInstr, IndentedWriter};
+pub use edge::{Edge, EdgeId, EdgeKind, EdgeTag, KindedEdge};
 pub use exception::{
     ClrExceptionRegion, ClrHandler, ClrHandlerKind, ExceptionDisposition, ExceptionFlow,
     ExceptionPhase, SehExceptionRegion, SehHandler, SehHandlerKind, SehRegistration,
@@ -278,20 +312,21 @@ pub use graph::call_graph::{
 };
 pub use graph::cdg::control_dependence_graph;
 pub use graph::diff::{BlockFingerprint, BlockMatch, CfgDiff};
-pub use graph::directed::{DirectedEdge, DirectedGraph, NodeId};
 pub use graph::dominator::DominatorTree;
-pub use graph::dot::{to_view_dot, write_view_dot};
-pub use graph::edge_traverse::{
-    EdgeStep, breadth_first_edges, breadth_first_edges_with, breadth_first_view_edges,
-    breadth_first_view_edges_with, depth_first_edges, depth_first_edges_with,
-    depth_first_view_edges, depth_first_view_edges_with, shortest_path_edges,
-    shortest_path_view_edges, walk_edges, walk_view_edges,
+pub use graph::dot::{
+    DotEdgeAttributes, DotEdgeStyle, DotRankDir, DotStyle, bind_edge_attributes,
+    control_flow_edge_attributes, plain_edge_attributes, to_dot, write_dot,
 };
-pub use graph::edge_view::{DenseEdgeId, EdgeGraphView, EdgeRef, FilteredEdges};
+pub use graph::edge_traverse::{
+    EdgeStep, breadth_first_edges, breadth_first_edges_with, depth_first_edges,
+    depth_first_edges_with, shortest_path_edges,
+};
+pub use graph::edge_view::{EdgeRef, EdgeView, FilteredEdges};
 pub use graph::eh::{EhBlockKind, EhEdge, EhEdgeKind, EhModel};
 pub use graph::horn::HornClauses;
 pub use graph::interval::{Interval, IntervalAnalysis};
 pub use graph::keyed::KeyedGraph;
+pub use graph::label::{Label, bind_label, display_label, no_label};
 pub use graph::loop_nest::{LoopNestNode, LoopNestingTree};
 pub use graph::open::{
     FoldEnter, MarkScope, OpenBfsConfig, OpenBfsEvent, OpenDfsConfig, OpenDfsEvent, OpenFold,
@@ -307,26 +342,29 @@ pub use graph::scc::{
     Scc, SccDecomposition, condensation, condensation_of, kosaraju_scc, tarjan_scc,
 };
 pub use graph::scope::{
-    Scope, ScopeDatum, ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeGraphPathLabel, ScopeGraphQuery,
-    ScopeId, ScopeLinearResolutionError, ScopePath, ScopeQuery, ScopeReference, ScopeReferenceId,
-    ScopeResolution, ScopeResolutionCandidate, ScopeResolutionConfig, ScopeResolutionIndex,
-    ScopeResolutionStats,
+    Scope, ScopeDatum, ScopeDatumId, ScopeEdgeId, ScopeEdgeTag, ScopeGraph, ScopeGraphPathLabel,
+    ScopeGraphQuery, ScopeId, ScopeLinearResolutionError, ScopePath, ScopeQuery, ScopeReference,
+    ScopeReferenceId, ScopeResolution, ScopeResolutionCandidate, ScopeResolutionConfig,
+    ScopeResolutionIndex, ScopeResolutionStats, ScopeTag,
 };
 pub use graph::search::{
     BfsEvent, DfsEvent, EpochMarks, SearchConfig, SearchOrder, SearchScratch, Visit, VisitedPolicy,
     breadth_first_events, depth_first_events, search, search_with_marks, search_with_scratch,
 };
 pub use graph::stack::{
-    StackEdge, StackEdgeId, StackFileId, StackGraph, StackGraphError, StackLinearResolutionError,
-    StackNode, StackNodeId, StackNodeKind, StackPartialPath, StackPartialPathConfig,
-    StackPartialPathDatabase, StackPartialPathId, StackPartialPathSet, StackPartialPathStats,
-    StackPath, StackPathError, StackPathStep, StackResolution, StackResolutionIndex,
-    StackReverseIndex, StackScopedSymbol, StackSearchConfig, StackSearchStats,
+    StackEdge, StackEdgeId, StackEdgeTag, StackFileId, StackFileTag, StackGraph, StackGraphError,
+    StackLinearResolutionError, StackNode, StackNodeId, StackNodeKind, StackNodeTag,
+    StackPartialPath, StackPartialPathConfig, StackPartialPathDatabase, StackPartialPathId,
+    StackPartialPathSet, StackPartialPathStats, StackPath, StackPathError, StackPathStep,
+    StackResolution, StackResolutionIndex, StackReverseIndex, StackScopedSymbol, StackSearchConfig,
+    StackSearchStats,
 };
+pub use graph::store::{AdjacentEdges, EdgeRecord, Graph, Id, IdTag, NodeId, NodeTag, Renumbering};
 pub use graph::structure::{
     BackEdge, CanonicalLoop, NaturalLoop, canonicalize_loops, detect_loops, detect_loops_tagged,
     find_back_edges, find_back_edges_tagged, insert_preheader, is_reducible, loop_exit_blocks,
 };
+pub use graph::text::{TextError, TextErrorKind, TextStyle, parse_text, to_text, write_text};
 pub use graph::traverse::{
     CommonAncestor, TraversalDirection, breadth_first, common_ancestors, depth_first_postorder,
     depth_first_preorder, nearest_common_ancestor, reachable, reverse_postorder, shortest_path,
@@ -337,7 +375,7 @@ pub use graph::verify::{
     verify_view, verify_with,
 };
 pub use graph::view::{
-    DenseNodeId, DirectedGraphView, Reversed, Rooted, RootedGraphView, scan_predecessors,
+    DenseId, GraphView, NodeView, Reversed, Rooted, RootedView, scan_predecessors,
 };
 pub use ir::ast::{
     AstNode, CatchHandler, GotoDiagnostic, GotoReason, LiftReport, LoopKind, SwitchCase, lift,
@@ -401,7 +439,7 @@ pub use region::{
     promote_exclusive_extents, promote_handler_extents, recover_exclusive_extents,
     recover_exclusive_extents_with,
 };
-pub use rewrite::RewriteMap;
+pub use rewrite::Rewrite;
 pub use transform::cleanup::{
     merge_blocks, merge_blocks_mapped, remove_empty_blocks, remove_empty_blocks_mapped,
     remove_unreachable, remove_unreachable_mapped, simplify, simplify_mapped,

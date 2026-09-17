@@ -131,7 +131,7 @@ impl<S: Clone + Eq> StackResolutionIndex<S> {
         config: StackSearchConfig,
     ) -> Self {
         let resolutions = graph
-            .live_node_ids()
+            .node_ids()
             .filter(|&node| graph.node(node).kind().is_reference())
             .map(|reference| {
                 StackResolution::compute_from_partials(graph, database, reference, config)

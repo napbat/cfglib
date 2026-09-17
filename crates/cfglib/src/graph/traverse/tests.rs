@@ -1,6 +1,6 @@
 use super::*;
 use crate::edge::EdgeKind;
-use crate::graph::directed::{DirectedGraph, NodeId};
+use crate::graph::store::{Graph, NodeId};
 use crate::test_util::ff;
 use alloc::vec;
 
@@ -19,14 +19,11 @@ fn cfg_traversal_methods_delegate_to_generic_algorithms() {
     assert_eq!(cfg.depth_first_postorder(), vec![last, middle, cfg.entry()]);
     assert_eq!(cfg.reverse_postorder(), vec![cfg.entry(), middle, last]);
     assert_eq!(cfg.breadth_first(), vec![cfg.entry(), middle, last]);
-    assert_eq!(cfg.dfs_preorder(), cfg.depth_first_preorder());
-    assert_eq!(cfg.dfs_postorder(), cfg.depth_first_postorder());
-    assert_eq!(cfg.bfs(), cfg.breadth_first());
 }
 
 #[test]
 fn directed_graph_can_be_walked_in_both_directions() {
-    let mut graph = DirectedGraph::<&str, ()>::new();
+    let mut graph = Graph::<&str, ()>::new();
     let first = graph.add_node("first");
     let second = graph.add_node("second");
     let third = graph.add_node("third");
@@ -48,8 +45,8 @@ fn directed_graph_can_be_walked_in_both_directions() {
 }
 
 /// `a -> b -> c` with a `c -> b` back edge, plus a disconnected `d`.
-fn reach_fixture() -> (DirectedGraph<(), ()>, [NodeId; 4]) {
-    let mut graph = DirectedGraph::<(), ()>::new();
+fn reach_fixture() -> (Graph<(), ()>, [NodeId; 4]) {
+    let mut graph = Graph::<(), ()>::new();
     let a = graph.add_node(());
     let b = graph.add_node(());
     let c = graph.add_node(());
@@ -69,7 +66,7 @@ fn reachable_from_no_seeds_marks_nothing() {
     );
 
     // An empty graph yields an empty table rather than panicking.
-    let empty = DirectedGraph::<(), ()>::new();
+    let empty = Graph::<(), ()>::new();
     assert!(reachable(&empty, [], TraversalDirection::Outgoing).is_empty());
 }
 
@@ -112,7 +109,7 @@ fn reachable_walks_predecessors_in_the_incoming_direction() {
 
 #[test]
 fn reachable_handles_self_loops() {
-    let mut graph = DirectedGraph::<(), ()>::new();
+    let mut graph = Graph::<(), ()>::new();
     let only = graph.add_node(());
     let other = graph.add_node(());
     graph.add_edge(only, only, ());
@@ -129,8 +126,8 @@ fn reachable_handles_self_loops() {
 
 /// `root -> mid`, `mid -> left`, `mid -> right`, both legs into `bottom`.
 /// `root` has the smallest id but is the *farther* common ancestor.
-fn diamond() -> (DirectedGraph<(), ()>, [NodeId; 5]) {
-    let mut graph = DirectedGraph::<(), ()>::new();
+fn diamond() -> (Graph<(), ()>, [NodeId; 5]) {
+    let mut graph = Graph::<(), ()>::new();
     let root = graph.add_node(());
     let mid = graph.add_node(());
     let left = graph.add_node(());
@@ -220,7 +217,7 @@ fn nearest_common_ancestor_breaks_ties_by_smallest_node_id() {
 
 #[test]
 fn nearest_common_ancestor_without_a_shared_node_is_none() {
-    let mut graph = DirectedGraph::<(), ()>::new();
+    let mut graph = Graph::<(), ()>::new();
     let start = graph.add_node(());
     let lonely = graph.add_node(());
     let end = graph.add_node(());
@@ -260,8 +257,8 @@ fn nearest_common_ancestor_terminates_on_cycles() {
 
 /// Two shared sinks at the same distance, offered to the traversal in
 /// descending id order — discovery order and id order disagree.
-fn twin_sinks() -> (DirectedGraph<(), ()>, [NodeId; 4]) {
-    let mut graph = DirectedGraph::<(), ()>::new();
+fn twin_sinks() -> (Graph<(), ()>, [NodeId; 4]) {
+    let mut graph = Graph::<(), ()>::new();
     let first_sink = graph.add_node(());
     let second_sink = graph.add_node(());
     let left = graph.add_node(());
@@ -362,7 +359,7 @@ fn common_ancestors_of_a_node_with_itself_is_its_reachable_set() {
 
 #[test]
 fn common_ancestors_without_a_shared_node_is_empty() {
-    let mut graph = DirectedGraph::<(), ()>::new();
+    let mut graph = Graph::<(), ()>::new();
     let start = graph.add_node(());
     let lonely = graph.add_node(());
     let end = graph.add_node(());
@@ -414,7 +411,7 @@ fn common_ancestors_generalizes_nearest_common_ancestor() {
 
 #[test]
 fn topological_sort_rejects_cycles() {
-    let mut graph = DirectedGraph::<(), ()>::new();
+    let mut graph = Graph::<(), ()>::new();
     let left = graph.add_node(());
     let right = graph.add_node(());
     graph.add_edge(left, right, ());

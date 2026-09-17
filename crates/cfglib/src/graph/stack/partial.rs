@@ -259,7 +259,7 @@ impl StackPartialPathSet {
                 .is_some_and(|limit| route.edges.len() >= limit);
             let mut extensions = Vec::new();
             for edge in graph
-                .outgoing_edges(route.current)
+                .outgoing(route.current)
                 .filter(|&edge| edge_belongs_to_file(graph, edge, file))
             {
                 if route.edges.contains(&edge) {
@@ -328,7 +328,7 @@ impl StackPartialPathDatabase {
     pub fn new<F, S, N, E>(graph: &StackGraph<F, S, N, E>) -> Self {
         Self {
             paths: Vec::new(),
-            paths_by_start: vec![Vec::new(); graph.node_count()],
+            paths_by_start: vec![Vec::new(); graph.node_bound()],
             paths_by_file: vec![Vec::new(); graph.file_count()],
         }
     }
@@ -431,7 +431,7 @@ impl StackPartialPathDatabase {
 
     fn install<F, S, N, E>(&mut self, graph: &StackGraph<F, S, N, E>, set: StackPartialPathSet) {
         self.paths_by_start
-            .resize_with(graph.node_count(), Vec::new);
+            .resize_with(graph.node_bound(), Vec::new);
         self.paths_by_file.resize_with(graph.file_count(), Vec::new);
         for path in set.paths {
             let id = StackPartialPathId::from_index(self.paths.len());

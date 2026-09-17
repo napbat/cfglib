@@ -1,6 +1,6 @@
 use cfglib::{
-    DenseNodeId, DirectedGraph, DirectedGraphView, DominatorTree, TraversalDirection,
-    breadth_first, shortest_path, tarjan_scc, topological_sort,
+    DenseId, DominatorTree, Graph, GraphView, TraversalDirection, breadth_first, shortest_path,
+    tarjan_scc, topological_sort,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,7 +32,7 @@ struct FlowEdge {
 
 #[test]
 fn symtree_like_value_flow_uses_generic_storage_and_reverse_queries() {
-    let mut graph = DirectedGraph::new();
+    let mut graph = Graph::new();
     let seed = graph.add_node(FlowNode::Definition {
         symbol: "seed".into(),
         path: "src/main.rs".into(),
@@ -89,9 +89,9 @@ fn symtree_like_value_flow_uses_generic_storage_and_reverse_queries() {
         shortest_path(&graph, output, seed, TraversalDirection::Incoming),
         Some(vec![output, call_result, parameter, seed])
     );
-    assert_eq!(graph[assignment].payload().kind, FlowKind::Assign);
-    assert_eq!(graph[assignment].payload().path, "src/main.rs");
-    assert_eq!(graph[assignment].payload().line, 4);
+    assert_eq!(graph.edge(assignment).payload().kind, FlowKind::Assign);
+    assert_eq!(graph.edge(assignment).payload().path, "src/main.rs");
+    assert_eq!(graph.edge(assignment).payload().line, 4);
     assert_eq!(topological_sort(&graph).unwrap().len(), 4);
 }
 
@@ -106,23 +106,27 @@ struct ExistingGraph {
     incoming: Vec<Vec<u32>>,
 }
 
-impl DirectedGraphView for ExistingGraph {
+impl GraphView for ExistingGraph {
     type NodeId = u32;
 
-    fn node_count(&self) -> usize {
+    fn node_bound(&self) -> usize {
         self.outgoing.len()
     }
 
+    fn node_ids(&self) -> impl Iterator<Item = Self::NodeId> + '_ {
+        (0..self.outgoing.len()).map(DenseId::from_index)
+    }
+
     fn successors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
-        self.outgoing[DenseNodeId::index(node)]
+        self.outgoing[DenseId::index(node)]
             .iter()
-            .map(|edge| self.edges[DenseNodeId::index(*edge)].target)
+            .map(|edge| self.edges[DenseId::index(*edge)].target)
     }
 
     fn predecessors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
-        self.incoming[DenseNodeId::index(node)]
+        self.incoming[DenseId::index(node)]
             .iter()
-            .map(|edge| self.edges[DenseNodeId::index(*edge)].source)
+            .map(|edge| self.edges[DenseId::index(*edge)].source)
     }
 }
 
@@ -171,7 +175,7 @@ fn widened_algorithms_run_on_rooted_consumer_views() {
     };
 
     // A value-flow graph with a diamond and a cycle, in consumer storage.
-    let mut graph = DirectedGraph::new();
+    let mut graph = Graph::new();
     let seed = graph.add_node("seed");
     let left = graph.add_node("left");
     let right = graph.add_node("right");

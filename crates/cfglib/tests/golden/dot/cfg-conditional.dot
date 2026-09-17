@@ -1,0 +1,10 @@
+digraph cfg {
+    rankdir=TB;
+    node [shape=box fontname="monospace" fontsize=10];
+    edge [fontname="monospace" fontsize=9];
+    bb0 [label="bb0\lbr\l"];
+    bb1 [label="bb1\l(empty)\l"];
+    bb2 [label="bb2\l(empty)\l"];
+    bb0 -> bb1 [color=green4 style=solid label="T"];
+    bb0 -> bb2 [color=red style=solid label="F"];
+}

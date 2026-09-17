@@ -199,7 +199,7 @@ mod tests {
             use_("use_r0", 0),
         ])
         .unwrap();
-        let merge_block = cfg.blocks().last().unwrap().id();
+        let merge_block = cfg.block_ids().last().expect("the fixture has blocks");
         let rd = ReachingDefs::compute(&cfg);
         let defs_at_merge = rd.defs_of_at_entry(&0, merge_block);
         assert_eq!(
@@ -223,7 +223,7 @@ mod tests {
         let rd = ReachingDefs::compute(&cfg);
         // The loop header should have defs reaching from both
         // the pre-loop init and the loop body update (via back-edge).
-        let header = BlockId(1);
+        let header = BlockId::from_raw(1);
         let defs = rd.defs_of_at_entry(&0, header);
         assert!(!defs.is_empty(), "at least the init def reaches the header");
     }

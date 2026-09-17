@@ -172,7 +172,7 @@ fn activate_successors<I: ConstantFolder, E>(
         Some(false) => Some(EdgeKind::ConditionalTrue),
         None => None,
     };
-    for &id in cfg.successor_edges(block) {
+    for id in cfg.outgoing(block) {
         let edge = cfg.edge(id);
         if Some(edge.kind()) != withheld && !executable.contains(&(block, edge.target())) {
             worklist.push((block, edge.target()));

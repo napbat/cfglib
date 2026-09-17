@@ -30,17 +30,17 @@ pub(super) fn region_anchors<'c, I, E>(
 ) -> BTreeMap<u32, Vec<&'c Region>> {
     let mut position: BTreeMap<u32, usize> = BTreeMap::new();
     for (index, block) in order.iter().enumerate() {
-        position.insert(block.0, index);
+        position.insert(block.raw(), index);
     }
     let mut anchors: BTreeMap<u32, Vec<&Region>> = BTreeMap::new();
     for region in cfg.regions() {
         let anchor = region
             .protected_blocks
             .iter()
-            .min_by_key(|block| position.get(&block.0).copied().unwrap_or(usize::MAX))
+            .min_by_key(|block| position.get(&block.raw()).copied().unwrap_or(usize::MAX))
             .copied();
         if let Some(anchor) = anchor {
-            anchors.entry(anchor.0).or_default().push(region);
+            anchors.entry(anchor.raw()).or_default().push(region);
         }
     }
     for candidates in anchors.values_mut() {
@@ -130,7 +130,7 @@ pub(super) fn lift_try_catch<'a, I, E, O>(
     allowed_blocks: Option<&BTreeSet<BlockId>>,
     map: &mut impl FnMut(&'a I) -> O,
 ) -> Option<(AstNode<O>, Option<BlockId>)> {
-    let candidates = state.anchors.get(&block.0)?;
+    let candidates = state.anchors.get(&block.raw())?;
     let (region, handler_bodies) = candidates
         .iter()
         .filter(|region| !state.structured_regions.contains(&region.id.0))

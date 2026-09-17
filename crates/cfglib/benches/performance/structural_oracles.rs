@@ -1,7 +1,5 @@
 use super::fixtures::{BuilderInst, fixture_f64, fixture_u32};
-use super::{
-    BTreeSet, BlockId, Cfg, DenseNodeId, DirectedGraph, DominatorTree, EdgeKind, FlowEffect, NodeId,
-};
+use super::{BTreeSet, BlockId, Cfg, DenseId, DominatorTree, EdgeKind, FlowEffect, Graph, NodeId};
 
 pub(super) fn assert_cfg_shape<I>(cfg: &Cfg<I>, expected_blocks: usize, expected_edges: usize) {
     assert_eq!(
@@ -22,11 +20,7 @@ pub(super) fn assert_cfg_shape<I>(cfg: &Cfg<I>, expected_blocks: usize, expected
     );
 }
 
-fn assert_directed_shape<N, E>(
-    graph: &DirectedGraph<N, E>,
-    expected_nodes: usize,
-    expected_edges: usize,
-) {
+fn assert_directed_shape<N, E>(graph: &Graph<N, E>, expected_nodes: usize, expected_edges: usize) {
     assert_eq!(
         graph.node_count(),
         expected_nodes,
@@ -41,22 +35,22 @@ fn assert_directed_shape<N, E>(
     let mut outgoing_count = 0;
     let mut incoming_count = 0;
     for node in graph.node_ids() {
-        let outgoing: BTreeSet<_> = graph.outgoing_edges(node).iter().copied().collect();
-        let incoming: BTreeSet<_> = graph.incoming_edges(node).iter().copied().collect();
+        let outgoing: BTreeSet<_> = graph.outgoing(node).collect();
+        let incoming: BTreeSet<_> = graph.incoming(node).collect();
         assert_eq!(
             outgoing.len(),
-            graph.outgoing_edges(node).len(),
+            graph.outgoing(node).count(),
             "duplicate outgoing edge identity"
         );
         assert_eq!(
             incoming.len(),
-            graph.incoming_edges(node).len(),
+            graph.incoming(node).count(),
             "duplicate incoming edge identity"
         );
-        for &edge in graph.outgoing_edges(node) {
+        for edge in graph.outgoing(node) {
             assert_eq!(graph.edge(edge).source(), node);
         }
-        for &edge in graph.incoming_edges(node) {
+        for edge in graph.incoming(node) {
             assert_eq!(graph.edge(edge).target(), node);
         }
         outgoing_count += outgoing.len();
@@ -64,15 +58,24 @@ fn assert_directed_shape<N, E>(
     }
     assert_eq!(outgoing_count, expected_edges);
     assert_eq!(incoming_count, expected_edges);
-    for edge in graph.edges() {
-        assert!(graph.outgoing_edges(edge.source()).contains(&edge.id()));
-        assert!(graph.incoming_edges(edge.target()).contains(&edge.id()));
+    for edge in graph.edge_ids() {
+        let record = graph.edge(edge);
+        assert!(
+            graph
+                .outgoing(record.source())
+                .any(|candidate| candidate == edge)
+        );
+        assert!(
+            graph
+                .incoming(record.target())
+                .any(|candidate| candidate == edge)
+        );
     }
 }
 
 pub(super) fn assert_dense_permutation<N>(nodes: &[N], expected_count: usize)
 where
-    N: Copy + DenseNodeId + core::fmt::Debug,
+    N: Copy + DenseId + core::fmt::Debug,
 {
     assert_eq!(nodes.len(), expected_count);
     let mut seen = vec![false; expected_count];
@@ -92,21 +95,16 @@ fn branchy_edge_count(node_count: usize) -> usize {
 }
 
 fn has_cfg_edge<I>(cfg: &Cfg<I>, source: BlockId, target: BlockId, kind: EdgeKind) -> bool {
-    cfg.successor_edges(source).iter().any(|&edge| {
+    cfg.outgoing(source).any(|edge| {
         let edge = cfg.edge(edge);
         edge.target() == target && edge.kind() == kind
     })
 }
 
-pub(super) fn has_directed_edge<N, E>(
-    graph: &DirectedGraph<N, E>,
-    source: NodeId,
-    target: NodeId,
-) -> bool {
+pub(super) fn has_directed_edge<N, E>(graph: &Graph<N, E>, source: NodeId, target: NodeId) -> bool {
     graph
-        .outgoing_edges(source)
-        .iter()
-        .any(|&edge| graph.edge(edge).target() == target)
+        .outgoing(source)
+        .any(|edge| graph.edge(edge).target() == target)
 }
 
 pub(super) fn assert_branchy_cfg(cfg: &Cfg<u32>, node_count: usize) {
@@ -145,7 +143,7 @@ pub(super) fn assert_branchy_cfg(cfg: &Cfg<u32>, node_count: usize) {
     }
 }
 
-pub(super) fn assert_branchy_graph(graph: &DirectedGraph<(), ()>, node_count: usize) {
+pub(super) fn assert_branchy_graph(graph: &Graph<(), ()>, node_count: usize) {
     assert_directed_shape(graph, node_count, branchy_edge_count(node_count));
     for index in 0..node_count - 1 {
         assert!(has_directed_edge(
@@ -178,16 +176,18 @@ pub(super) fn assert_builder_cfg(
     expected_edge_kinds: &[(EdgeKind, usize)],
 ) {
     assert_cfg_shape(cfg, expected_blocks, expected_edges);
-    assert_eq!(cfg.dfs_preorder().len(), expected_blocks);
+    assert_eq!(cfg.depth_first_preorder().len(), expected_blocks);
 
     let instructions: Vec<_> = cfg
         .blocks()
-        .iter()
         .flat_map(cfglib::BasicBlock::instructions)
         .collect();
     assert_eq!(
         instructions.len(),
-        expected_effects.iter().map(|(_, count)| count).sum()
+        expected_effects
+            .iter()
+            .map(|(_, count)| count)
+            .sum::<usize>()
     );
     for &(effect, expected) in expected_effects {
         assert_eq!(
@@ -226,12 +226,12 @@ pub(super) fn assert_linear_cfg(cfg: &Cfg<u32>, node_count: usize) {
         let block = BlockId::from_index(index);
         assert_eq!(cfg.block(block).instructions(), &[fixture_u32(index)]);
         if index + 1 < node_count {
-            assert_eq!(cfg.successor_edges(block).len(), 1);
-            let edge = cfg.edge(cfg.successor_edges(block)[0]);
+            assert_eq!(cfg.outgoing(block).count(), 1);
+            let edge = cfg.edge(cfg.outgoing(block).next().unwrap());
             assert_eq!(edge.target(), BlockId::from_index(index + 1));
             assert_eq!(edge.kind(), EdgeKind::Fallthrough);
         } else {
-            assert_eq!(cfg.successor_edges(block).len(), 0);
+            assert_eq!(cfg.outgoing(block).count(), 0);
         }
     }
 }
@@ -262,12 +262,9 @@ pub(super) fn assert_high_fan_in(
     assert_cfg_shape(cfg, predecessor_count + 3, predecessor_count);
     let expected_target = if redirected { new_target } else { old_target };
     let empty_target = if redirected { old_target } else { new_target };
-    assert_eq!(cfg.predecessor_edges(empty_target).len(), 0);
-    assert_eq!(
-        cfg.predecessor_edges(expected_target).len(),
-        predecessor_count
-    );
-    for (index, &edge_id) in cfg.predecessor_edges(expected_target).iter().enumerate() {
+    assert_eq!(cfg.incoming(empty_target).count(), 0);
+    assert_eq!(cfg.incoming(expected_target).count(), predecessor_count);
+    for (index, edge_id) in cfg.incoming(expected_target).enumerate() {
         assert_eq!(edge_id.index(), index);
         let edge = cfg.edge(edge_id);
         assert_eq!(edge.source(), BlockId::from_index(index + 3));
@@ -277,27 +274,45 @@ pub(super) fn assert_high_fan_in(
     }
 }
 
+/// What the weighted fan-out fixture should look like after the operation
+/// under test folded — or did not fold — its `source -> target` edge.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum FanOut {
+    /// Untouched: `source` and `target` are still two instruction-carrying
+    /// blocks joined by the connecting edge.
+    Intact,
+    /// `merge_blocks` folded `target` into `source` and removed it.
+    Merged,
+    /// `contract_edge` folded `target` into `source` and removed it, which is
+    /// the same shape `Merged` leaves behind.
+    Contracted,
+}
+
 pub(super) fn assert_weighted_fan_out(
     cfg: &Cfg<u32>,
     edge_count: usize,
     source: BlockId,
     target: BlockId,
-    merged: bool,
-    target_retains_instructions: bool,
+    state: FanOut,
 ) {
-    let live_edges = if merged { edge_count } else { edge_count + 1 };
-    assert_cfg_shape(cfg, 3, live_edges);
+    let folded = state != FanOut::Intact;
+    let live_edges = if folded { edge_count } else { edge_count + 1 };
+    // A folded block is removed for real; its slot stays reserved, so the
+    // identity bound still spans all three original blocks either way.
+    let live_blocks = if folded { 2 } else { 3 };
+    assert_cfg_shape(cfg, live_blocks, live_edges);
+    assert_eq!(cfg.block_bound(), 3);
     let sink = BlockId::from_raw(2);
-    let outgoing_source = if merged { source } else { target };
+    let outgoing_source = if folded { source } else { target };
 
-    if merged {
+    if folded {
+        assert!(
+            !cfg.contains_block(target),
+            "merging and contracting both retire the block they fold"
+        );
         assert_eq!(cfg.block(source).instructions(), &[0, 1]);
-        if target_retains_instructions {
-            assert_eq!(cfg.block(target).instructions(), &[1]);
-        } else {
-            assert_eq!(cfg.block(target).instructions().len(), 0);
-        }
-        assert_eq!(cfg.successor_edges(target).len(), 0);
+        assert_eq!(cfg.block(target).instructions().len(), 0);
+        assert_eq!(cfg.outgoing(target).count(), 0);
     } else {
         assert_eq!(cfg.block(source).instructions(), &[0]);
         assert_eq!(cfg.block(target).instructions(), &[1]);
@@ -307,7 +322,7 @@ pub(super) fn assert_weighted_fan_out(
         assert_eq!(connecting.kind(), EdgeKind::Fallthrough);
     }
     assert_eq!(cfg.block(sink).instructions(), &[2]);
-    assert_eq!(cfg.successor_edges(outgoing_source).len(), edge_count);
+    assert_eq!(cfg.outgoing(outgoing_source).count(), edge_count);
 
     assert_weighted_outgoing_edges(cfg, edge_count, outgoing_source, source);
 }
@@ -365,16 +380,16 @@ pub(super) fn assert_split_weighted_fan_out(
     assert_eq!(connecting.kind(), EdgeKind::Fallthrough);
     assert!(connecting.weight().is_none());
 
-    let [fallthrough] = cfg.successor_edges(target) else {
+    let [fallthrough] = cfg.outgoing(target).collect::<Vec<_>>()[..] else {
         panic!("split source should have one outgoing edge");
     };
     assert_eq!(fallthrough.index(), edge_count + 1);
-    let fallthrough = cfg.edge(*fallthrough);
+    let fallthrough = cfg.edge(fallthrough);
     assert_eq!(fallthrough.source(), target);
     assert_eq!(fallthrough.target(), split);
     assert_eq!(fallthrough.kind(), EdgeKind::Fallthrough);
     assert!(fallthrough.weight().is_none());
-    assert_eq!(cfg.successor_edges(split).len(), edge_count);
+    assert_eq!(cfg.outgoing(split).count(), edge_count);
     assert_weighted_outgoing_edges(cfg, edge_count, split, source);
 }
 
@@ -427,7 +442,7 @@ pub(super) fn assert_weighted_irreducible(cfg: &Cfg<u32>, made_reducible: bool) 
         let copy = BlockId::from_raw(4);
         assert_eq!(cfg.block(copy).instructions(), &[2]);
         assert_eq!(
-            cfg.successor_edges(copy),
+            cfg.outgoing(copy).collect::<Vec<_>>(),
             &[cfglib::EdgeId::from_raw(5), cfglib::EdgeId::from_raw(6)]
         );
         for (index, (target, kind, weight)) in [
@@ -459,11 +474,7 @@ pub(super) fn assert_irreducible_fixture(
         original_blocks + expected_splits,
         original_edges + expected_splits,
     );
-    assert!(
-        cfg.blocks()
-            .iter()
-            .all(|block| block.instructions().is_empty())
-    );
+    assert!(cfg.blocks().all(|block| block.instructions().is_empty()));
 
     let dominators = DominatorTree::compute(cfg);
     assert_eq!(
@@ -477,19 +488,19 @@ pub(super) fn assert_irreducible_fixture(
         let first_copy = BlockId::from_index(original_blocks);
         for index in 0..external_entries {
             let external = BlockId::from_index(1 + cycle_nodes + index);
-            let outgoing = cfg.successor_edges(external);
+            let outgoing: Vec<_> = cfg.outgoing(external).collect();
             assert_eq!(outgoing.len(), 1);
             let edge = cfg.edge(outgoing[0]);
             assert_eq!(edge.target(), first_copy);
             assert_eq!(edge.kind(), EdgeKind::Unconditional);
             assert!(edge.weight().is_none());
         }
-        assert_eq!(cfg.predecessor_edges(cycle_entry).len(), 1);
+        assert_eq!(cfg.incoming(cycle_entry).count(), 1);
         for split_index in 0..expected_splits {
             let original = BlockId::from_index(2 + split_index);
             let copy = BlockId::from_index(original_blocks + split_index);
-            let original_outgoing = cfg.successor_edges(original);
-            let copied_outgoing = cfg.successor_edges(copy);
+            let original_outgoing: Vec<_> = cfg.outgoing(original).collect();
+            let copied_outgoing: Vec<_> = cfg.outgoing(copy).collect();
             assert_eq!(original_outgoing.len(), 1);
             assert_eq!(copied_outgoing.len(), 1);
             let original_edge = cfg.edge(original_outgoing[0]);
@@ -509,9 +520,6 @@ pub(super) fn assert_irreducible_fixture(
             assert_eq!(copied_edge.id().index(), original_edges + split_index);
         }
     } else {
-        assert_eq!(
-            cfg.predecessor_edges(cycle_entry).len(),
-            external_entries + 1
-        );
+        assert_eq!(cfg.incoming(cycle_entry).count(), external_entries + 1);
     }
 }

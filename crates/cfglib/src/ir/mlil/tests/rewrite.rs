@@ -83,3 +83,54 @@ fn proven_constants_materialize_without_changing_identities() {
         function.provenance().mappings_from(2).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn a_derived_graph_reindexes_the_instruction_table() {
+    let mut builder = FunctionBuilder::<ToyDialect>::new("toy::derived".into());
+    let body = builder.new_block("body");
+    let value = builder.declare_variable(0, None).unwrap();
+    let constant = builder
+        .append_instruction(
+            body,
+            Operation::Constant(1),
+            Vec::new(),
+            vec![TypedVariable::new(value, Type::Integer)],
+            false,
+            None,
+        )
+        .unwrap();
+    let ret = builder
+        .append_instruction(
+            body,
+            Operation::Return,
+            vec![TypedVariable::new(value, Type::Integer)],
+            Vec::new(),
+            false,
+            None,
+        )
+        .unwrap();
+    builder
+        .add_edge(builder.entry(), body, Edge::Entry, None)
+        .unwrap();
+    let function = builder.finish().unwrap();
+
+    // Dropping the leading instruction moves the one after it. A stale
+    // position table would hand `constant`'s identity the return.
+    let derived = function.with_derived_cfg(|cfg| {
+        cfg.block_mut(body).instructions_mut().remove(0);
+    });
+
+    assert_eq!(derived.instruction(constant), None);
+    assert_eq!(derived.instruction(ret).map(Instruction::id), Some(ret));
+    assert_eq!(
+        derived.instruction_point(ret),
+        Some(crate::ProgramPoint {
+            block: body,
+            inst_idx: 0,
+        })
+    );
+    assert_eq!(
+        function.instruction(constant).map(Instruction::id),
+        Some(constant)
+    );
+}

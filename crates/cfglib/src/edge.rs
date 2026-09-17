@@ -1,8 +1,8 @@
 //! Edges connecting basic blocks in a control-flow graph.
 
-use crate::block::BlockId;
+use crate::graph::edge_view::EdgeRef;
 
-pub use crate::graph::directed::EdgeId;
+pub use crate::graph::store::{EdgeId, EdgeTag};
 
 /// The kind of a control-flow edge.
 ///
@@ -89,44 +89,115 @@ impl EdgeKind {
     }
 }
 
-impl core::fmt::Display for EdgeKind {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let label = match self {
-            EdgeKind::Fallthrough => "fallthrough",
-            EdgeKind::ConditionalTrue => "true",
-            EdgeKind::ConditionalFalse => "false",
-            EdgeKind::Unconditional => "unconditional",
-            EdgeKind::Back => "back",
-            EdgeKind::Call => "call",
-            EdgeKind::CallReturn => "call_return",
-            EdgeKind::SwitchCase => "case",
-            EdgeKind::Jump => "jump",
-            EdgeKind::IndirectJump => "indirect_jump",
-            EdgeKind::IndirectCall => "indirect_call",
-            EdgeKind::ExceptionHandler => "handler",
-            EdgeKind::ExceptionUnwind => "unwind",
-            EdgeKind::ExceptionLeave => "leave",
-            EdgeKind::ExceptionResume => "resume",
-            EdgeKind::ExceptionContinue => "continue_exception",
-        };
-        f.write_str(label)
+/// An edge payload that declares a control-flow [`EdgeKind`].
+///
+/// The kind-sensitive algorithms — back-edge detection honoring builder tags,
+/// switch recovery, linearization — take this trait rather than a concrete
+/// [`Cfg`](crate::Cfg), so a consumer whose own edge payload carries a kind
+/// participates without a parallel implementation.
+pub trait KindedEdge {
+    /// The control-flow classification of this edge.
+    fn kind(&self) -> EdgeKind;
+}
+
+impl EdgeKind {
+    /// Every kind, in declaration order.
+    ///
+    /// This is what [`from_name`](Self::from_name) searches, so naming stays
+    /// defined in exactly one place: [`name`](Self::name).
+    pub const ALL: [Self; 16] = [
+        Self::Fallthrough,
+        Self::ConditionalTrue,
+        Self::ConditionalFalse,
+        Self::Unconditional,
+        Self::Back,
+        Self::Call,
+        Self::CallReturn,
+        Self::SwitchCase,
+        Self::Jump,
+        Self::IndirectJump,
+        Self::IndirectCall,
+        Self::ExceptionHandler,
+        Self::ExceptionUnwind,
+        Self::ExceptionLeave,
+        Self::ExceptionResume,
+        Self::ExceptionContinue,
+    ];
+
+    /// The canonical name of this kind, which is what
+    /// [`Display`](core::fmt::Display) prints and what the text form of a
+    /// control-flow graph writes.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Fallthrough => "fallthrough",
+            Self::ConditionalTrue => "true",
+            Self::ConditionalFalse => "false",
+            Self::Unconditional => "unconditional",
+            Self::Back => "back",
+            Self::Call => "call",
+            Self::CallReturn => "call_return",
+            Self::SwitchCase => "case",
+            Self::Jump => "jump",
+            Self::IndirectJump => "indirect_jump",
+            Self::IndirectCall => "indirect_call",
+            Self::ExceptionHandler => "handler",
+            Self::ExceptionUnwind => "unwind",
+            Self::ExceptionLeave => "leave",
+            Self::ExceptionResume => "resume",
+            Self::ExceptionContinue => "continue_exception",
+        }
+    }
+
+    /// The kind with this canonical name, or `None` for an unknown name.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.name() == name)
     }
 }
 
-/// A directed edge between two basic blocks.
+impl core::fmt::Display for EdgeKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate alloc;
+
+    use alloc::collections::BTreeSet;
+
+    use super::EdgeKind;
+
+    #[test]
+    fn every_kind_has_a_distinct_name_that_reads_back() {
+        let names: BTreeSet<_> = EdgeKind::ALL.iter().map(|kind| kind.name()).collect();
+        assert_eq!(
+            names.len(),
+            EdgeKind::ALL.len(),
+            "two kinds share a name, so one of them cannot be read back"
+        );
+        for kind in EdgeKind::ALL {
+            assert_eq!(EdgeKind::from_name(kind.name()), Some(kind));
+        }
+        assert_eq!(EdgeKind::from_name("sideways"), None);
+    }
+}
+
+/// A directed edge's payload: its classification, optional branch weight, and
+/// consumer-defined metadata.
+///
+/// Identity and endpoints belong to the store, not to the payload;
+/// [`Cfg::edge`](crate::Cfg::edge) hands out an [`EdgeRef`] that carries all
+/// three together.
 ///
 /// `E` is consumer-owned metadata. The default unit payload preserves the
-/// original `Cfg<I>` surface, while frontends that need switch labels, handler
+/// compact `Cfg<I>` surface, while frontends that need switch labels, handler
 /// identities, continuation tokens, or source provenance use `Cfg<I, E>`.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Edge<E = ()> {
-    /// Edge identity.
-    pub(crate) id: EdgeId,
-    /// Source block.
-    pub(crate) source: BlockId,
-    /// Target block.
-    pub(crate) target: BlockId,
     /// Classification.
     pub(crate) kind: EdgeKind,
     /// Optional branch weight / probability (0.0–1.0).
@@ -142,10 +213,7 @@ pub struct Edge<E = ()> {
 
 impl<E: PartialEq> PartialEq for Edge<E> {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-            && self.source == other.source
-            && self.target == other.target
-            && self.kind == other.kind
+        self.kind == other.kind
             && self.weight.map(f64::to_bits) == other.weight.map(f64::to_bits)
             && self.payload == other.payload
     }
@@ -154,45 +222,39 @@ impl<E: PartialEq> PartialEq for Edge<E> {
 impl<E: Eq> Eq for Edge<E> {}
 
 impl<E> Edge<E> {
-    /// The edge's unique identifier.
-    #[inline]
-    #[must_use]
-    pub fn id(&self) -> EdgeId {
-        self.id
-    }
-
-    /// The source block of this edge.
-    #[inline]
-    #[must_use]
-    pub fn source(&self) -> BlockId {
-        self.source
-    }
-
-    /// The target block of this edge.
-    #[inline]
-    #[must_use]
-    pub fn target(&self) -> BlockId {
-        self.target
+    /// Create an edge payload.
+    pub(crate) const fn new(kind: EdgeKind, weight: Option<f64>, payload: E) -> Self {
+        Self {
+            kind,
+            weight,
+            payload,
+        }
     }
 
     /// The classification of this edge.
     #[inline]
     #[must_use]
-    pub fn kind(&self) -> EdgeKind {
+    pub const fn kind(&self) -> EdgeKind {
         self.kind
+    }
+
+    /// Set the classification of this edge.
+    #[inline]
+    pub const fn set_kind(&mut self, kind: EdgeKind) {
+        self.kind = kind;
     }
 
     /// The branch weight / probability, if set.
     #[inline]
     #[must_use]
-    pub fn weight(&self) -> Option<f64> {
+    pub const fn weight(&self) -> Option<f64> {
         self.weight
     }
 
     /// Set the branch weight / probability.
     #[inline]
-    pub fn set_weight(&mut self, w: Option<f64>) {
-        self.weight = w;
+    pub const fn set_weight(&mut self, weight: Option<f64>) {
+        self.weight = weight;
     }
 
     /// The consumer-defined edge metadata.
@@ -213,5 +275,39 @@ impl<E> Edge<E> {
     #[must_use]
     pub fn into_payload(self) -> E {
         self.payload
+    }
+}
+
+impl<E> KindedEdge for Edge<E> {
+    fn kind(&self) -> EdgeKind {
+        self.kind
+    }
+}
+
+/// Control-flow accessors of a borrowed edge whose data is an [`Edge`].
+///
+/// [`Cfg::edge`](crate::Cfg::edge) and every view adapter over a CFG yield
+/// `EdgeRef<'_, BlockId, EdgeId, Edge<E>>`, so identity, endpoints, kind,
+/// weight, and payload all read off one value.
+impl<'g, N: Copy, I: Copy, E> EdgeRef<'g, N, I, Edge<E>> {
+    /// The classification of this edge.
+    #[inline]
+    #[must_use]
+    pub const fn kind(&self) -> EdgeKind {
+        self.data().kind
+    }
+
+    /// The branch weight / probability, if set.
+    #[inline]
+    #[must_use]
+    pub const fn weight(&self) -> Option<f64> {
+        self.data().weight
+    }
+
+    /// The consumer-defined edge metadata.
+    #[inline]
+    #[must_use]
+    pub const fn payload(&self) -> &'g E {
+        &self.data().payload
     }
 }

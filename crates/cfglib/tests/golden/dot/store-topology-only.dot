@@ -1,0 +1,8 @@
+digraph topology {
+    rankdir=LR;
+    node [shape=box fontname="monospace" fontsize=10];
+    edge [fontname="monospace" fontsize=9];
+    n0;
+    n1;
+    n0 -> n1;
+}

@@ -19,6 +19,7 @@
 //! to define their own instruction types.
 
 mod dataflow_inst;
+pub(crate) mod golden;
 mod memory_inst;
 mod mock_inst;
 pub(crate) mod toy;

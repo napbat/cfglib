@@ -191,7 +191,7 @@ fn if_endif_no_else() {
     // bb2: []   (merge — c, ret)
     assert!(cfg.block_count() >= 3);
     // Entry has two successors: true arm + false arm (merge).
-    assert_eq!(cfg.successor_edges(cfg.entry()).len(), 2);
+    assert_eq!(cfg.outgoing(cfg.entry()).count(), 2);
 }
 
 #[test]
@@ -213,7 +213,7 @@ fn if_else_endif() {
     // bb2: [else, c] → merge(bb3)
     // bb3: [d, ret]
     assert!(cfg.block_count() >= 4);
-    assert_eq!(cfg.successor_edges(cfg.entry()).len(), 2);
+    assert_eq!(cfg.outgoing(cfg.entry()).count(), 2);
 }
 
 #[test]
@@ -324,8 +324,8 @@ fn dominator_tree_linear() {
     .unwrap();
     let dom = crate::graph::dominator::DominatorTree::compute(&cfg);
     // Entry dominates all blocks.
-    for b in cfg.blocks() {
-        assert!(dom.dominates(cfg.entry(), b.id()));
+    for block_id in cfg.block_ids() {
+        assert!(dom.dominates(cfg.entry(), block_id));
     }
 }
 

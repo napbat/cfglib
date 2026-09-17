@@ -13,7 +13,8 @@ use crate::edge::EdgeKind;
 /// Build the reverse (transpose) of a CFG.
 ///
 /// Every edge `(A → B)` in the original becomes `(B → A)` in the
-/// reverse. Block contents are preserved. The new entry is:
+/// reverse. Block contents and block identities are preserved, including
+/// the reserved slots a removed block left behind. The new entry is:
 /// - The sole exit block if there is exactly one.
 /// - A new synthetic block connected to all exit blocks otherwise.
 ///
@@ -42,12 +43,16 @@ pub fn reverse_cfg<I: Clone>(cfg: &Cfg<I>) -> Cfg<I> {
 
     let mut rev = Cfg::new();
 
-    // Copy block contents (block 0 already exists from Cfg::new).
-    for _i in 1..cfg.block_count() {
+    // Mirror identities, not the live count: a removed block keeps its slot,
+    // so the reverse allocates up to the same bound and retires the slots the
+    // source no longer holds once its own entry is chosen. Block 0 already
+    // exists from `Cfg::new`.
+    for _i in 1..cfg.block_bound() {
         rev.new_block();
     }
-    for src in cfg.blocks() {
-        let bid = src.id();
+    for block_id in cfg.block_ids() {
+        let src = cfg.block(block_id);
+        let bid = block_id;
         let dst = rev.block_mut(bid);
         *dst.instructions_mut() = src.instructions().to_vec();
         if let Some(lbl) = src.label() {
@@ -72,6 +77,13 @@ pub fn reverse_cfg<I: Clone>(cfg: &Cfg<I>) -> Cfg<I> {
         rev.set_entry(synth);
     }
     // If no exits (infinite loop), entry stays as block 0.
+
+    for index in 0..cfg.block_bound() {
+        let block = BlockId::from_index(index);
+        if !cfg.contains_block(block) && block != rev.entry() {
+            rev.remove_block(block);
+        }
+    }
 
     rev
 }

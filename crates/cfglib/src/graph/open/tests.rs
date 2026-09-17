@@ -1,10 +1,10 @@
 extern crate alloc;
 
 use super::*;
-use crate::graph::directed::{DirectedGraph, NodeId};
 use crate::graph::search::{
     DfsEvent, SearchConfig, SearchOrder, Visit, VisitedPolicy, depth_first_events, search,
 };
+use crate::graph::store::{Graph, NodeId};
 use crate::graph::traverse::TraversalDirection;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -289,8 +289,8 @@ fn follow_path_returns_the_chain_including_the_seed() {
 }
 
 /// `a -> b`, `a -> c`, `b -> d`, `c -> d`, `d -> a`.
-fn dense_diamond() -> (DirectedGraph<(), ()>, [NodeId; 4]) {
-    let mut graph = DirectedGraph::<(), ()>::new();
+fn dense_diamond() -> (Graph<(), ()>, [NodeId; 4]) {
+    let mut graph = Graph::<(), ()>::new();
     let a = graph.add_node(());
     let b = graph.add_node(());
     let c = graph.add_node(());

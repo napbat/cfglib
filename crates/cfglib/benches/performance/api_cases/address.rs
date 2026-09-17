@@ -87,7 +87,6 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "address_cfg_explicit_entry",
-        covers[build_address_cfg],
         || {
             let options = AddressCfgOptions {
                 entry: Some(entry),

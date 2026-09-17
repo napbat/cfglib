@@ -74,9 +74,8 @@ pub fn cfg_purity<I: EffectInfo>(cfg: &Cfg<I>) -> Purity<I::Effect> {
 /// Collect per-block purity for every block in the CFG.
 #[must_use]
 pub fn block_purities<I: EffectInfo>(cfg: &Cfg<I>) -> Vec<(BlockId, Purity<I::Effect>)> {
-    cfg.blocks()
-        .iter()
-        .map(|b| (b.id(), block_purity(cfg, b.id())))
+    cfg.block_ids()
+        .map(|block| (block, block_purity(cfg, block)))
         .collect()
 }
 

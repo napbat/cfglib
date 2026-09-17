@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 
 use crate::cfg::Cfg;
 use crate::edge::{Edge, EdgeId, EdgeKind};
-use crate::rewrite::RewriteMap;
+use crate::rewrite::Rewrite;
 
 /// Split every critical edge and return the number split.
 ///
@@ -16,7 +16,7 @@ pub fn split_critical_edges<I>(cfg: &mut Cfg<I>) -> usize {
 }
 
 /// Split critical edges using default payloads for synthetic fallthroughs.
-pub fn split_critical_edges_mapped<I, E>(cfg: &mut Cfg<I, E>) -> (usize, RewriteMap)
+pub fn split_critical_edges_mapped<I, E>(cfg: &mut Cfg<I, E>) -> (usize, Rewrite)
 where
     E: Default,
 {
@@ -33,26 +33,26 @@ where
 pub fn split_critical_edges_with<I, E>(
     cfg: &mut Cfg<I, E>,
     mut payload_for: impl FnMut(EdgeId, &Edge<E>) -> E,
-) -> (usize, RewriteMap) {
+) -> (usize, Rewrite) {
     let mut critical = Vec::new();
-    for block in cfg.blocks() {
-        let source = block.id();
-        if cfg.successor_edges(source).len() < 2 {
+    for block_id in cfg.block_ids() {
+        let source = block_id;
+        if cfg.outgoing(source).count() < 2 {
             continue;
         }
-        for &edge in cfg.successor_edges(source) {
+        for edge in cfg.outgoing(source) {
             let target = cfg.edge(edge).target();
-            if cfg.predecessor_edges(target).len() >= 2 {
+            if cfg.incoming(target).count() >= 2 {
                 critical.push(edge);
             }
         }
     }
 
-    let mut mapping = RewriteMap::new();
+    let mut mapping = Rewrite::new();
     for &edge in &critical {
         let (target, payload) = {
             let original = cfg.edge(edge);
-            (original.target(), payload_for(edge, original))
+            (original.target(), payload_for(edge, original.data()))
         };
         let middle = cfg.new_block();
         let (_, redirected) = cfg.redirect_edge_target_mapped(edge, middle);
@@ -117,7 +117,7 @@ mod tests {
 
         let (count, mapping) = split_critical_edges_with(&mut cfg, |_, edge| *edge.payload());
         assert_eq!(count, 1);
-        let replacements = mapping.edge_replacements(original).unwrap();
+        let replacements = mapping.edges(original).unwrap();
         assert_eq!(replacements.len(), 2);
         assert_eq!(replacements[0], original);
         assert_eq!(cfg.edge(original).kind(), EdgeKind::ConditionalTrue);

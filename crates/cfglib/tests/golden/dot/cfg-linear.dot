@@ -1,0 +1,8 @@
+digraph cfg {
+    rankdir=TB;
+    node [shape=box fontname="monospace" fontsize=10];
+    edge [fontname="monospace" fontsize=9];
+    bb0 [label="bb0\lentry_inst\l"];
+    bb1 [label="bb1\lsecond_inst\l"];
+    bb0 -> bb1 [color=black style=solid];
+}

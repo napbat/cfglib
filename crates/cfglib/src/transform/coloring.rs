@@ -7,8 +7,8 @@ use alloc::vec::Vec;
 use crate::cfg::Cfg;
 use crate::dataflow::liveness::Liveness;
 use crate::dataflow::{InstrInfo, VariableId};
-use crate::graph::directed::DirectedGraph;
-use crate::graph::view::DirectedGraphView;
+use crate::graph::store::Graph;
+use crate::graph::view::GraphView;
 
 fn connect<V: VariableId>(adjacency: &mut BTreeMap<V, BTreeSet<V>>, left: &V, right: &V) {
     adjacency.entry(left.clone()).or_default();
@@ -46,14 +46,15 @@ fn connect_clique<V: VariableId>(
 /// together. Each undirected relation is stored once; [`color_graph`] treats
 /// both incoming and outgoing adjacency as conflicts.
 #[must_use]
-pub fn interference_graph<I, V>(cfg: &Cfg<I>, live: &Liveness<V>) -> DirectedGraph<V, ()>
+pub fn interference_graph<I, V>(cfg: &Cfg<I>, live: &Liveness<V>) -> Graph<V, ()>
 where
     I: InstrInfo<Variable = V>,
     V: VariableId,
 {
     let mut adjacency: BTreeMap<V, BTreeSet<V>> = BTreeMap::new();
-    for block in cfg.blocks() {
-        let mut active = live.live_out(block.id()).clone();
+    for block_id in cfg.block_ids() {
+        let block = cfg.block(block_id);
+        let mut active = live.live_out(block_id).clone();
         connect_clique(&mut adjacency, &active);
 
         for instruction in block.instructions().iter().rev() {
@@ -72,7 +73,7 @@ where
         }
     }
 
-    let mut graph = DirectedGraph::with_capacity(adjacency.len(), adjacency.len());
+    let mut graph = Graph::with_capacity(adjacency.len(), adjacency.len());
     let nodes: BTreeMap<V, _> = adjacency
         .keys()
         .cloned()
@@ -107,7 +108,7 @@ pub struct ColorAssignment<N> {
 /// as neighbors. The function therefore works with an interference graph
 /// emitted by [`interference_graph`] and with consumer-owned graph views.
 #[must_use]
-pub fn color_graph<G: DirectedGraphView>(graph: &G) -> ColorAssignment<G::NodeId> {
+pub fn color_graph<G: GraphView>(graph: &G) -> ColorAssignment<G::NodeId> {
     let mut neighbors = BTreeMap::new();
     for node in graph.node_ids() {
         let adjacent: BTreeSet<_> = graph
@@ -154,7 +155,7 @@ mod tests {
 
     #[test]
     fn triangle_needs_three_colors() {
-        let mut graph = DirectedGraph::<(), ()>::new();
+        let mut graph = Graph::<(), ()>::new();
         let first = graph.add_node(());
         let second = graph.add_node(());
         let third = graph.add_node(());
@@ -171,7 +172,7 @@ mod tests {
 
     #[test]
     fn independent_nodes_share_one_color() {
-        let mut graph = DirectedGraph::<(), ()>::new();
+        let mut graph = Graph::<(), ()>::new();
         graph.add_node(());
         graph.add_node(());
         assert_eq!(color_graph(&graph).num_colors, 1);
@@ -179,7 +180,7 @@ mod tests {
 
     #[test]
     fn empty_graph_uses_no_colors() {
-        let graph = DirectedGraph::<(), ()>::new();
+        let graph = Graph::<(), ()>::new();
         assert_eq!(color_graph(&graph).num_colors, 0);
     }
 
@@ -191,8 +192,14 @@ mod tests {
         let live = Liveness::compute(&cfg);
 
         let graph = interference_graph(&cfg, &live);
-        let left = graph.node_ids().find(|&node| graph[node] == 0).unwrap();
-        let right = graph.node_ids().find(|&node| graph[node] == 1).unwrap();
+        let left = graph
+            .node_ids()
+            .find(|&node| *graph.node(node) == 0)
+            .unwrap();
+        let right = graph
+            .node_ids()
+            .find(|&node| *graph.node(node) == 1)
+            .unwrap();
         let result = color_graph(&graph);
 
         assert_eq!(graph.node_count(), 3);

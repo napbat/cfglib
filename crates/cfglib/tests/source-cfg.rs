@@ -8,6 +8,12 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
+/// The package's golden-file comparison, shared with the unit tests.
+#[path = "../src/test_util/golden.rs"]
+mod golden;
+
+use golden::assert_golden;
+
 use cfglib::{
     Cfg, CfgBuilder, ConstValue, ConstantFolder, DisplayInstr, DominatorTree, EdgeKind, ExprInstr,
     ExprNode, FlowControl, FlowEffect, InstrInfo, JumpTable, JumpTargets, Liveness, ReachingDefs,
@@ -239,22 +245,22 @@ fn expression_trees_use_source_operators_and_constants() {
 }
 
 #[test]
-fn dot_rendering_needs_only_display_instr_and_escapes_source_text() {
+fn rendering_needs_only_display_instr_and_escapes_source_text() {
     // DisplayInstr alone — Stmt's FlowControl is irrelevant here, and the
     // bound-free escape hatch needs no trait at all.
     let mut cfg = Cfg::<Stmt>::new();
     cfg.block_mut(cfg.entry())
         .push(Stmt::new(1, "print(\"quoted \\ text\")"));
+    let tail = cfg.new_block();
+    cfg.block_mut(tail).push(Stmt::new(2, "return"));
+    cfg.add_edge(cfg.entry(), tail, EdgeKind::Fallthrough);
 
-    let dot = cfg.to_dot();
-    assert!(dot.contains("digraph cfg"));
-    assert!(
-        dot.contains("print(\\\"quoted \\\\ text\\\")"),
-        "source text is escaped: {dot}"
+    assert_golden("dot/source-statements.dot", &cfg.to_dot());
+    assert_golden("text/source-statements.txt", &cfg.to_text());
+    assert_golden(
+        "dot/source-node-ids.dot",
+        &cfg.to_dot_with(|stmt| Cow::Owned(format!("node {}", stmt.node))),
     );
-
-    let with = cfg.to_dot_with(|stmt| Cow::Owned(format!("node {}", stmt.node)));
-    assert!(with.contains("node 1"));
 }
 
 #[test]

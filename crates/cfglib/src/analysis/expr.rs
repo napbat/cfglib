@@ -202,9 +202,8 @@ pub fn recover_block_expressions<I: ExprInstr, E>(
 pub fn recover_expressions<I: ExprInstr, E>(
     cfg: &Cfg<I, E>,
 ) -> Vec<BlockExprTrees<I::Variable, I::Operator, I::Const>> {
-    cfg.blocks()
-        .iter()
-        .map(|b| recover_block_expressions(cfg, b.id()))
+    cfg.block_ids()
+        .map(|block| recover_block_expressions(cfg, block))
         .collect()
 }
 

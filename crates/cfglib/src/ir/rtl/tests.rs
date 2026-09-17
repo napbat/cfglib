@@ -19,6 +19,8 @@ use super::{
 /// Managed-language dialect tests: constraint domains, exceptional
 /// ownership, dispatch, expansion, and lowering.
 mod managed;
+/// Golden pseudocode for representative RTL functions.
+mod pseudocode;
 /// Read-resolver tests, split out to respect the source-size policy.
 mod resolver;
 /// Return-value lowering tests, split out to respect the source-size
@@ -306,7 +308,6 @@ fn instructions(
     function
         .cfg()
         .blocks()
-        .iter()
         .flat_map(|block| block.instructions().iter())
         .collect()
 }
@@ -472,7 +473,6 @@ fn parallel_hazard_pre_copies_when_webs_unite() {
     let header_len = function
         .cfg()
         .blocks()
-        .iter()
         .find(|block| block.label() == Some("header"))
         .map(|block| block.instructions().len());
     assert_eq!(header_len, Some(4));

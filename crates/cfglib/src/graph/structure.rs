@@ -3,21 +3,24 @@
 //! Identifies loop structures and classifies a graph as reducible or
 //! irreducible, building on the dominator tree and back-edge detection.
 //!
-//! The core detectors are generic over [`DirectedGraphView`] /
-//! [`RootedGraphView`] and use dominance only. [`Cfg`] consumers whose
-//! builders tag explicit [`EdgeKind::Back`] edges (structured `loop` /
-//! `continue` markers, including on irreducible machine CFGs) can use the
-//! `_tagged` variants, which union the tags with dominance-based detection.
+//! The core detectors are generic over [`GraphView`] / [`RootedView`] and use
+//! dominance only. A consumer whose builder tags explicit
+//! [`EdgeKind::Back`] edges (structured `loop` / `continue` markers, including
+//! on irreducible machine CFGs) uses the `_tagged` variants, which union the
+//! tags with dominance-based detection. Those are generic too: any
+//! [`EdgeView`] whose edge data declares a [`KindedEdge`] kind participates,
+//! so the tag-aware detectors are not a second copy written against [`Cfg`].
 
 extern crate alloc;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use super::dominator::DominatorTree;
-use super::view::{DenseNodeId, DirectedGraphView, RootedGraphView};
+use super::edge_view::EdgeView;
+use super::view::{DenseId, GraphView, RootedView};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::edge::EdgeKind;
+use crate::edge::{EdgeKind, KindedEdge};
 
 /// A natural loop over node identity `N`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,7 +70,7 @@ pub struct BackEdge<N = BlockId> {
 /// assert_eq!(backs[0].tail, b1);
 /// ```
 #[must_use]
-pub fn find_back_edges<G: DirectedGraphView>(
+pub fn find_back_edges<G: GraphView>(
     graph: &G,
     dom: &DominatorTree<G::NodeId>,
 ) -> Vec<BackEdge<G::NodeId>> {
@@ -88,17 +91,25 @@ pub fn find_back_edges<G: DirectedGraphView>(
     backs
 }
 
-/// Find back-edges in a [`Cfg`], honoring explicit [`EdgeKind::Back`] tags.
+/// Find back-edges in an edge view, honoring explicit [`EdgeKind::Back`] tags.
 ///
 /// The union of [`find_back_edges`]'s dominance-based detection and the
 /// builder's tags. The tags matter on irreducible machine CFGs where a
 /// frontend knows an edge is a loop back-edge even though dominance cannot
 /// prove it.
 #[must_use]
-pub fn find_back_edges_tagged<I, E>(cfg: &Cfg<I, E>, dom: &DominatorTree) -> Vec<BackEdge> {
-    let mut backs = find_back_edges(cfg, dom);
-    for edge in cfg.edges() {
-        if edge.kind() == EdgeKind::Back {
+pub fn find_back_edges_tagged<G>(
+    graph: &G,
+    dom: &DominatorTree<G::NodeId>,
+) -> Vec<BackEdge<G::NodeId>>
+where
+    G: EdgeView,
+    G::EdgeData: KindedEdge,
+{
+    let mut backs = find_back_edges(graph, dom);
+    for edge in graph.edge_ids() {
+        let edge = graph.edge(edge);
+        if edge.data().kind() == EdgeKind::Back {
             backs.push(BackEdge {
                 tail: edge.source(),
                 header: edge.target(),
@@ -115,7 +126,7 @@ pub fn find_back_edges_tagged<I, E>(cfg: &Cfg<I, E>, dom: &DominatorTree) -> Vec
 /// The body is the set of nodes that can reach any latch without going
 /// through `header`, plus `header` itself. A single multi-source reverse walk
 /// computes the same union without revisiting a shared body for every latch.
-fn loop_body_for<G: DirectedGraphView>(
+fn loop_body_for<G: GraphView>(
     graph: &G,
     header: G::NodeId,
     latches: &[G::NodeId],
@@ -140,7 +151,7 @@ fn loop_body_for<G: DirectedGraphView>(
 }
 
 /// Build merged, depth-annotated loops from a set of back-edges.
-fn loops_from_backs<G: DirectedGraphView>(
+fn loops_from_backs<G: GraphView>(
     graph: &G,
     backs: &[BackEdge<G::NodeId>],
 ) -> Vec<NaturalLoop<G::NodeId>> {
@@ -170,7 +181,7 @@ fn loops_from_backs<G: DirectedGraphView>(
     // Build a map from node → number of loops containing it, then
     // each loop's depth = (count of its header) − 1 (itself).
     {
-        let node_count = graph.node_count();
+        let node_count = graph.node_bound();
         let mut containing: Vec<u32> = alloc::vec![0; node_count];
         for lp in &loops {
             for &b in &lp.body {
@@ -220,18 +231,25 @@ fn loops_from_backs<G: DirectedGraphView>(
 /// assert!(loops[0].body.contains(&b1));
 /// ```
 #[must_use]
-pub fn detect_loops<G: DirectedGraphView>(
+pub fn detect_loops<G: GraphView>(
     graph: &G,
     dom: &DominatorTree<G::NodeId>,
 ) -> Vec<NaturalLoop<G::NodeId>> {
     loops_from_backs(graph, &find_back_edges(graph, dom))
 }
 
-/// Detect natural loops in a [`Cfg`], honoring explicit
+/// Detect natural loops in an edge view, honoring explicit
 /// [`EdgeKind::Back`] tags (see [`find_back_edges_tagged`]).
 #[must_use]
-pub fn detect_loops_tagged<I, E>(cfg: &Cfg<I, E>, dom: &DominatorTree) -> Vec<NaturalLoop> {
-    loops_from_backs(cfg, &find_back_edges_tagged(cfg, dom))
+pub fn detect_loops_tagged<G>(
+    graph: &G,
+    dom: &DominatorTree<G::NodeId>,
+) -> Vec<NaturalLoop<G::NodeId>>
+where
+    G: EdgeView,
+    G::EdgeData: KindedEdge,
+{
+    loops_from_backs(graph, &find_back_edges_tagged(graph, dom))
 }
 
 /// Whether the graph is reducible.
@@ -244,7 +262,7 @@ pub fn detect_loops_tagged<I, E>(cfg: &Cfg<I, E>, dom: &DominatorTree) -> Vec<Na
 /// node whose target does not dominate the source witnesses an
 /// irreducible cycle.
 #[must_use]
-pub fn is_reducible<G: RootedGraphView>(graph: &G, dom: &DominatorTree<G::NodeId>) -> bool {
+pub fn is_reducible<G: RootedView>(graph: &G, dom: &DominatorTree<G::NodeId>) -> bool {
     find_irreducible_entry(graph, dom).is_none()
 }
 
@@ -253,7 +271,7 @@ pub fn is_reducible<G: RootedGraphView>(graph: &G, dom: &DominatorTree<G::NodeId
 /// Keeping target discovery and the Boolean query on one traversal prevents
 /// transformations from choosing a different witness than [`is_reducible`]
 /// used to reject the graph.
-pub(crate) fn find_irreducible_entry<G: RootedGraphView>(
+pub(crate) fn find_irreducible_entry<G: RootedView>(
     graph: &G,
     dom: &DominatorTree<G::NodeId>,
 ) -> Option<G::NodeId> {
@@ -261,7 +279,7 @@ pub(crate) fn find_irreducible_entry<G: RootedGraphView>(
     const GRAY: u8 = 1;
     const BLACK: u8 = 2;
 
-    let n = graph.node_count();
+    let n = graph.node_bound();
     if n == 0 {
         return None;
     }
@@ -318,9 +336,7 @@ pub struct CanonicalLoop {
 pub fn insert_preheader<I: Clone>(cfg: &mut Cfg<I>, lp: &NaturalLoop) -> Option<BlockId> {
     // Collect non-backedge predecessors of the header.
     let outside_preds: Vec<crate::edge::EdgeId> = cfg
-        .predecessor_edges(lp.header)
-        .iter()
-        .copied()
+        .incoming(lp.header)
         .filter(|&eid| {
             let src = cfg.edge(eid).source();
             !lp.body.contains(&src)
@@ -353,7 +369,7 @@ pub fn insert_preheader<I: Clone>(cfg: &mut Cfg<I>, lp: &NaturalLoop) -> Option<
 /// An exit node is any node **outside** the loop body that has a
 /// predecessor inside the loop body.
 #[must_use]
-pub fn loop_exit_blocks<G: DirectedGraphView>(
+pub fn loop_exit_blocks<G: GraphView>(
     graph: &G,
     lp: &NaturalLoop<G::NodeId>,
 ) -> BTreeSet<G::NodeId> {

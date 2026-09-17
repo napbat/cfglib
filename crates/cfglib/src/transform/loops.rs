@@ -70,9 +70,7 @@ pub fn rotate_loop<I: Clone>(cfg: &mut Cfg<I>, lp: &NaturalLoop) -> Option<LoopR
 
     // Redirect the old latch → header edge to latch → bottom_test.
     let latch_edges: Vec<_> = cfg
-        .successor_edges(latch)
-        .iter()
-        .copied()
+        .outgoing(latch)
         .filter(|&eid| cfg.edge(eid).target() == header)
         .collect();
     for eid in latch_edges {

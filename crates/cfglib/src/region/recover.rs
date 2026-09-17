@@ -38,7 +38,7 @@ use crate::region::{HandlerBody, HandlerRef, RegionId};
 /// entry should keep saying so.
 pub fn promote_handler_extents<I, E>(cfg: &mut Cfg<I, E>) -> usize {
     let dominators = DominatorTree::compute(cfg);
-    let block_ids: Vec<BlockId> = cfg.blocks().iter().map(crate::BasicBlock::id).collect();
+    let block_ids: Vec<BlockId> = cfg.block_ids().collect();
     let mut promotions = Vec::new();
     for (region_index, region) in cfg.regions().iter().enumerate() {
         for (handler_index, handler) in region.handlers.iter().enumerate() {
@@ -182,9 +182,7 @@ pub fn recover_exclusive_extents_with<I, E>(
         .filter_map(|(handler, entry)| {
             let from_entry = entry_reachability.get(&entry)?;
             let blocks: BTreeSet<BlockId> = cfg
-                .blocks()
-                .iter()
-                .map(crate::BasicBlock::id)
+                .block_ids()
                 .filter(|block| {
                     from_entry[block.index()]
                         && !method_reachable[block.index()]
@@ -199,10 +197,10 @@ pub fn recover_exclusive_extents_with<I, E>(
                 boundary_blocks.insert(entry);
             }
             for &block in &blocks {
-                for &edge in cfg.successor_edges(block) {
-                    let edge_ref = cfg.edge(edge);
-                    if is_normal(edge, edge_ref) && !blocks.contains(&edge_ref.target()) {
-                        boundary_blocks.insert(edge_ref.target());
+                for edge in cfg.outgoing(block) {
+                    let edge = cfg.edge(edge);
+                    if is_normal(edge.id(), edge.data()) && !blocks.contains(&edge.target()) {
+                        boundary_blocks.insert(edge.target());
                     }
                 }
             }
@@ -221,12 +219,12 @@ pub fn recover_exclusive_extents_with<I, E>(
                 if block == entry {
                     continue;
                 }
-                for &edge in cfg.predecessor_edges(block) {
-                    let edge_ref = cfg.edge(edge);
-                    if is_normal(edge, edge_ref) && !blocks.contains(&edge_ref.source()) {
+                for edge in cfg.incoming(block) {
+                    let edge = cfg.edge(edge);
+                    if is_normal(edge.id(), edge.data()) && !blocks.contains(&edge.source()) {
                         issues.insert(ExtentIssue::ExternalEntry {
                             block,
-                            predecessor: edge_ref.source(),
+                            predecessor: edge.source(),
                         });
                     }
                 }

@@ -60,8 +60,8 @@ impl DefUseChains {
         let mut def_use: BTreeMap<DefSite, BTreeSet<UseSite>> = BTreeMap::new();
         let mut use_def: BTreeMap<UseSite, BTreeSet<DefSite>> = BTreeMap::new();
 
-        for b in cfg.blocks() {
-            let block = b.id();
+        for block_id in cfg.block_ids() {
+            let block = block_id;
             let insts = cfg.block(block).instructions();
 
             // Track the current reaching defs as we walk forward
@@ -158,11 +158,11 @@ mod tests {
         let chains = DefUseChains::compute(&cfg);
 
         let def_site = DefSite {
-            block: BlockId(0),
+            block: BlockId::from_raw(0),
             inst_idx: 0,
         };
         let use_site = DefSite {
-            block: BlockId(0),
+            block: BlockId::from_raw(0),
             inst_idx: 1,
         };
 
@@ -198,7 +198,7 @@ mod tests {
         let cfg = CfgBuilder::build(vec![def("def", 0), use_("use1", 0), use_("use2", 0)]).unwrap();
         let chains = DefUseChains::compute(&cfg);
         let def_site = DefSite {
-            block: BlockId(0),
+            block: BlockId::from_raw(0),
             inst_idx: 0,
         };
         assert_eq!(chains.uses_of(def_site).len(), 2);

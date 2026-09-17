@@ -184,9 +184,9 @@ impl<V: VariableId> Liveness<V> {
         cfg: &Cfg<I, E>,
     ) -> BTreeSet<V> {
         let mut all = BTreeSet::new();
-        for b in cfg.blocks() {
-            all.extend(self.live_in(b.id()).iter().cloned());
-            all.extend(self.live_out(b.id()).iter().cloned());
+        for block_id in cfg.block_ids() {
+            all.extend(self.live_in(block_id).iter().cloned());
+            all.extend(self.live_out(block_id).iter().cloned());
         }
         all
     }

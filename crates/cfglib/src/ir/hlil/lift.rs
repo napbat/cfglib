@@ -339,9 +339,9 @@ fn trampolines_cleared<D: LiftDialect>(
 ) -> Option<crate::Cfg<mlil::Instruction<D>, <D as mlil::Dialect>::Edge>> {
     let cfg = source.cfg();
     let doomed: Vec<BlockId> = cfg
-        .blocks()
-        .iter()
-        .filter(|block| {
+        .block_ids()
+        .filter(|&block| {
+            let block = cfg.block(block);
             !block.instructions().is_empty()
                 && block.instructions().iter().all(|instruction| {
                     instruction.defs().is_empty()
@@ -352,7 +352,6 @@ fn trampolines_cleared<D: LiftDialect>(
                         )
                 })
         })
-        .map(crate::BasicBlock::id)
         .collect();
     if doomed.is_empty() {
         return None;

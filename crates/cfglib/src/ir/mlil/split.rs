@@ -33,6 +33,15 @@ use super::{
 };
 
 /// The result of splitting one function's variables by SSA phi-webs.
+///
+/// This is the **variable** axis of identity rewriting, which is deliberately
+/// separate from the graph axis: a variable is not a graph entity, so a
+/// [`Rewrite`](crate::Rewrite) (blocks and edges) and a
+/// [`Renumbering`](crate::Renumbering) (a compacted store) have nothing to
+/// say about it, and folding the three together would only hide which
+/// identities a given pass can actually move. The naming is the same on both
+/// axes: an old identity maps to the identities that replaced it, and the
+/// reverse index answers where a new identity came from.
 #[derive(Debug, Clone)]
 pub struct VariableSplit<D: super::Dialect> {
     /// The rebuilt function. Block, edge, instruction, and region
@@ -170,7 +179,7 @@ pub(super) fn split_variables<D: VerifyDialect>(source: &Function<D>) -> Result<
     // stable identity order appended at their original points, edges and
     // regions in insertion order — every rebuilt identity matches.
     builder.copy_blocks(&source.cfg);
-    for index in 0..source.instruction_points.len() {
+    for index in 0..source.instruction_count() {
         let id = InstructionId::from_raw(
             u32::try_from(index).expect("existing identities fit their own space"),
         );

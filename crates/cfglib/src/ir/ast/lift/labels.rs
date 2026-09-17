@@ -16,11 +16,11 @@ use crate::cfg::Cfg;
 /// The block whose emission this node anchors, when it has one.
 fn anchor<I>(node: &AstNode<I>) -> Option<u32> {
     match node {
-        AstNode::Block { id, .. } | AstNode::Return { id, .. } => Some(id.0),
+        AstNode::Block { id, .. } | AstNode::Return { id, .. } => Some(id.raw()),
         AstNode::IfThenElse { condition, .. } | AstNode::Switch { condition, .. } => {
-            Some(condition.0)
+            Some(condition.raw())
         }
-        AstNode::Loop { header, .. } => Some(header.0),
+        AstNode::Loop { header, .. } => Some(header.raw()),
         _ => None,
     }
 }
@@ -48,7 +48,7 @@ fn apply_to_node<I, E, O>(
     let node = apply_to_children(cfg, node, pending);
     match wrap {
         Some(block) => AstNode::Label {
-            name: block_label_name(cfg, crate::BlockId(block)),
+            name: block_label_name(cfg, crate::BlockId::from_raw(block)),
             body: vec![node],
         },
         None => node,

@@ -1,4 +1,4 @@
-//! Strongly connected components for any [`DirectedGraphView`].
+//! Strongly connected components for any [`GraphView`].
 //!
 //! Both implementations are iterative — they do not consume the host call
 //! stack for deeply nested code graphs — and compute the same partition. They
@@ -19,8 +19,8 @@ use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::graph::directed::{DirectedGraph, NodeId};
-use crate::graph::view::{DenseNodeId, DirectedGraphView};
+use crate::graph::store::{Graph, NodeId};
+use crate::graph::view::{DenseId, GraphView};
 
 /// A maximal set of mutually reachable nodes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,7 +57,7 @@ pub struct SccDecomposition<N> {
     component_of: Vec<usize>,
 }
 
-impl<N: DenseNodeId> SccDecomposition<N> {
+impl<N: DenseId> SccDecomposition<N> {
     /// Return the component index containing `node`.
     #[must_use]
     pub fn component_index(&self, node: N) -> usize {
@@ -86,7 +86,7 @@ impl<N: DenseNodeId> SccDecomposition<N> {
     #[must_use]
     pub fn is_dag<G>(&self, graph: &G) -> bool
     where
-        G: DirectedGraphView<NodeId = N>,
+        G: GraphView<NodeId = N>,
     {
         self.components.iter().all(|component| {
             if !component.is_singleton() {
@@ -124,7 +124,7 @@ struct SccFrame<N> {
 }
 
 /// Push the frame for `node`, taking its successors onto the arena's tail.
-fn enter<G: DirectedGraphView>(
+fn enter<G: GraphView>(
     graph: &G,
     node: G::NodeId,
     arena: &mut Vec<G::NodeId>,
@@ -144,7 +144,7 @@ fn enter<G: DirectedGraphView>(
 /// Nodes are read in id order and each node's successors in adjacency order,
 /// and a pair is reported the first time it is seen, so the edge sequence is
 /// deterministic and shared by both condensations rather than derived twice.
-fn for_each_component_edge<G: DirectedGraphView>(
+fn for_each_component_edge<G: GraphView>(
     graph: &G,
     components: &SccDecomposition<G::NodeId>,
     mut on_edge: impl FnMut(usize, usize),
@@ -175,9 +175,9 @@ fn for_each_component_edge<G: DirectedGraphView>(
 /// [`kosaraju_scc`] — wants [`condensation_of`] instead, which preserves the
 /// numbering it is given.
 #[must_use]
-pub fn condensation<G: DirectedGraphView>(graph: &G) -> DirectedGraph<Scc<G::NodeId>, ()> {
+pub fn condensation<G: GraphView>(graph: &G) -> Graph<Scc<G::NodeId>, ()> {
     let components = tarjan_scc(graph);
-    let mut condensed = DirectedGraph::with_capacity(components.len(), components.len());
+    let mut condensed = Graph::with_capacity(components.len(), components.len());
     let ids: Vec<NodeId> = components
         .components
         .iter()
@@ -225,11 +225,11 @@ pub fn condensation<G: DirectedGraphView>(graph: &G) -> DirectedGraph<Scc<G::Nod
 /// order — so the pass itself can simply walk `components` from 0 upwards.
 ///
 /// ```
-/// use cfglib::{DirectedGraph, NodeId, condensation_of, kosaraju_scc};
+/// use cfglib::{Graph, NodeId, condensation_of, kosaraju_scc};
 ///
 /// // A symbol-dependency graph: `stmt` uses `expr`, `expr` and `term` are
 /// // mutually recursive, and both use `atom`.
-/// let mut grammar = DirectedGraph::<&str, ()>::new();
+/// let mut grammar = Graph::<&str, ()>::new();
 /// let stmt = grammar.add_node("stmt");
 /// let expr = grammar.add_node("expr");
 /// let term = grammar.add_node("term");
@@ -243,7 +243,7 @@ pub fn condensation<G: DirectedGraphView>(graph: &G) -> DirectedGraph<Scc<G::Nod
 /// let dag = condensation_of(&grammar, &components);
 ///
 /// // The cycle is one component, and the numbering is the input's.
-/// assert_eq!(dag.node_count(), components.len());
+/// assert_eq!(dag.node_bound(), components.len());
 /// assert_eq!(components.component_index(expr), components.component_index(term));
 /// assert_eq!(dag[NodeId::from_index(components.component_index(stmt))], ());
 ///
@@ -252,7 +252,7 @@ pub fn condensation<G: DirectedGraphView>(graph: &G) -> DirectedGraph<Scc<G::Nod
 ///     .node_ids()
 ///     .map(|component| dag.predecessors(component).count())
 ///     .collect();
-/// let mut ready: Vec<usize> = (0..dag.node_count()).filter(|&c| pending[c] == 0).collect();
+/// let mut ready: Vec<usize> = (0..dag.node_bound()).filter(|&c| pending[c] == 0).collect();
 /// let mut processed = Vec::new();
 /// while !ready.is_empty() {
 ///     let position = ready.iter().enumerate().min_by_key(|&(_, c)| *c).map(|(p, _)| p);
@@ -267,7 +267,7 @@ pub fn condensation<G: DirectedGraphView>(graph: &G) -> DirectedGraph<Scc<G::Nod
 /// }
 ///
 /// // Sources-first numbering means ascending order already IS that order.
-/// assert_eq!(processed, (0..dag.node_count()).collect::<Vec<_>>());
+/// assert_eq!(processed, (0..dag.node_bound()).collect::<Vec<_>>());
 /// ```
 ///
 /// # Panics
@@ -276,18 +276,18 @@ pub fn condensation<G: DirectedGraphView>(graph: &G) -> DirectedGraph<Scc<G::Nod
 /// covers a fixed node space, and one that disagrees with this graph's node
 /// count cannot index it.
 #[must_use]
-pub fn condensation_of<G: DirectedGraphView>(
+pub fn condensation_of<G: GraphView>(
     graph: &G,
     components: &SccDecomposition<G::NodeId>,
-) -> DirectedGraph<(), ()> {
+) -> Graph<(), ()> {
     assert!(
-        components.component_of.len() == graph.node_count(),
+        components.component_of.len() == graph.node_bound(),
         "the decomposition covers {} nodes but the graph has {}: condensation_of takes the decomposition OF this graph",
         components.component_of.len(),
-        graph.node_count()
+        graph.node_bound()
     );
 
-    let mut condensed = DirectedGraph::with_capacity(components.len(), components.len());
+    let mut condensed = Graph::with_capacity(components.len(), components.len());
     for _ in 0..components.len() {
         condensed.add_node(());
     }
@@ -305,8 +305,8 @@ pub fn condensation_of<G: DirectedGraphView>(
 /// same partition with the opposite numbering (sources first) for consumers
 /// that must process a component before its successors.
 #[must_use]
-pub fn tarjan_scc<G: DirectedGraphView>(graph: &G) -> SccDecomposition<G::NodeId> {
-    let node_count = graph.node_count();
+pub fn tarjan_scc<G: GraphView>(graph: &G) -> SccDecomposition<G::NodeId> {
+    let node_count = graph.node_bound();
     let mut next_index = 0_usize;
     let mut stack = Vec::new();
     let mut on_stack = vec![false; node_count];
@@ -425,10 +425,10 @@ pub fn tarjan_scc<G: DirectedGraphView>(graph: &G) -> SccDecomposition<G::NodeId
 /// # Examples
 ///
 /// ```
-/// use cfglib::{DirectedGraph, kosaraju_scc, tarjan_scc};
+/// use cfglib::{Graph, kosaraju_scc, tarjan_scc};
 ///
 /// // entry -> (a <-> b) -> exit
-/// let mut graph = DirectedGraph::<&str, ()>::new();
+/// let mut graph = Graph::<&str, ()>::new();
 /// let entry = graph.add_node("entry");
 /// let a = graph.add_node("a");
 /// let b = graph.add_node("b");
@@ -451,8 +451,8 @@ pub fn tarjan_scc<G: DirectedGraphView>(graph: &G) -> SccDecomposition<G::NodeId
 /// assert_eq!(leaves_first.component_index(exit), 0);
 /// ```
 #[must_use]
-pub fn kosaraju_scc<G: DirectedGraphView>(graph: &G) -> SccDecomposition<G::NodeId> {
-    let node_count = graph.node_count();
+pub fn kosaraju_scc<G: GraphView>(graph: &G) -> SccDecomposition<G::NodeId> {
+    let node_count = graph.node_bound();
     let mut visited = vec![false; node_count];
     let mut finish_order: Vec<G::NodeId> = Vec::with_capacity(node_count);
     // One arena and one frame stack for the whole pass, on the discipline

@@ -17,7 +17,7 @@ use crate::cfg::Cfg;
 use crate::dataflow::{InstrInfo, ProgramPoint, VariableId};
 use crate::graph::dominator::{DominatorChildOrder, DominatorTree};
 use crate::graph::search::EpochMarks;
-use crate::graph::view::{DirectedGraphView, RootedGraphView};
+use crate::graph::view::{DenseId, GraphView, RootedView};
 use crate::kosaraju_scc;
 
 /// Whole-CFG dominance view with a private virtual root connected to the
@@ -29,21 +29,28 @@ struct SsaDominatorView<'a, I, E> {
 
 impl<I, E> SsaDominatorView<'_, I, E> {
     fn virtual_root(&self) -> usize {
-        self.cfg.block_count()
+        self.cfg.block_bound()
     }
 }
 
-impl<I, E> DirectedGraphView for SsaDominatorView<'_, I, E> {
+impl<I, E> GraphView for SsaDominatorView<'_, I, E> {
     type NodeId = usize;
 
-    fn node_count(&self) -> usize {
-        self.cfg.block_count() + 1
+    fn node_bound(&self) -> usize {
+        self.cfg.block_bound() + 1
+    }
+
+    fn node_ids(&self) -> impl Iterator<Item = Self::NodeId> + '_ {
+        self.cfg
+            .block_ids()
+            .map(DenseId::index)
+            .chain(core::iter::once(self.virtual_root()))
     }
 
     fn successors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
-        let original_count = self.cfg.block_count();
-        let original = (node < original_count).then(|| BlockId::from_index(node));
-        (node == original_count)
+        let original_bound = self.cfg.block_bound();
+        let original = (node < original_bound).then(|| BlockId::from_index(node));
+        (node == original_bound)
             .then_some(self.roots.as_slice())
             .into_iter()
             .flatten()
@@ -57,11 +64,11 @@ impl<I, E> DirectedGraphView for SsaDominatorView<'_, I, E> {
     }
 
     fn predecessors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
-        let original_count = self.cfg.block_count();
-        let original = (node < original_count).then(|| BlockId::from_index(node));
+        let original_bound = self.cfg.block_bound();
+        let original = (node < original_bound).then(|| BlockId::from_index(node));
         let virtual_predecessor = original
             .filter(|block| self.roots.binary_search(block).is_ok())
-            .map(|_| original_count);
+            .map(|_| original_bound);
         virtual_predecessor.into_iter().chain(
             original
                 .into_iter()
@@ -70,7 +77,7 @@ impl<I, E> DirectedGraphView for SsaDominatorView<'_, I, E> {
     }
 }
 
-impl<I, E> RootedGraphView for SsaDominatorView<'_, I, E> {
+impl<I, E> RootedView for SsaDominatorView<'_, I, E> {
     fn root(&self) -> Self::NodeId {
         self.virtual_root()
     }
@@ -83,11 +90,7 @@ fn complete_dominator_forest<I, E>(
     cfg: &Cfg<I, E>,
     dominators: &DominatorTree,
 ) -> Option<DominatorTree> {
-    if cfg
-        .blocks()
-        .iter()
-        .all(|block| dominators.is_reachable(block.id()))
-    {
+    if cfg.block_ids().all(|block| dominators.is_reachable(block)) {
         return None;
     }
 
@@ -113,16 +116,16 @@ fn complete_dominator_forest<I, E>(
 
     let view = SsaDominatorView { cfg, roots };
     let complete = DominatorTree::<usize>::compute(&view);
-    let original_count = cfg.block_count();
-    let idom = (0..original_count)
+    let original_bound = cfg.block_bound();
+    let idom = (0..original_bound)
         .map(|node| {
             complete
                 .idom(node)
-                .filter(|&parent| parent < original_count)
+                .filter(|&parent| parent < original_bound)
                 .map(BlockId::from_index)
         })
         .collect();
-    let reachable = (0..original_count)
+    let reachable = (0..original_bound)
         .map(|node| complete.is_reachable(node))
         .collect();
     Some(DominatorTree::from_forest_parts(idom, reachable))
@@ -140,18 +143,18 @@ impl DominanceFrontiers {
     /// and Kennedy.
     #[must_use]
     pub fn compute<I, E>(cfg: &Cfg<I, E>, dom: &DominatorTree) -> Self {
-        let mut frontiers = vec![BTreeSet::new(); cfg.block_count()];
+        let mut frontiers = vec![BTreeSet::new(); cfg.block_bound()];
 
-        for block in cfg.blocks() {
-            if cfg.predecessor_edges(block.id()).len() < 2 {
+        for block_id in cfg.block_ids() {
+            if cfg.incoming(block_id).count() < 2 {
                 continue;
             }
 
-            let frontier_root = dom.idom(block.id()).unwrap_or(block.id());
-            for predecessor in cfg.predecessors(block.id()) {
+            let frontier_root = dom.idom(block_id).unwrap_or(block_id);
+            for predecessor in cfg.predecessors(block_id) {
                 let mut runner = predecessor;
                 while runner != frontier_root {
-                    frontiers[runner.index()].insert(block.id());
+                    frontiers[runner.index()].insert(block_id);
                     let Some(parent) = dom.idom(runner) else {
                         break;
                     };
@@ -229,20 +232,21 @@ impl<V> PhiPlacements<V> {
         let frontiers = DominanceFrontiers::compute(cfg, dom);
         let mut definition_blocks: BTreeMap<I::Variable, Vec<BlockId>> = BTreeMap::new();
 
-        for block in cfg.blocks() {
+        for block_id in cfg.block_ids() {
+            let block = cfg.block(block_id);
             for instruction in block.instructions() {
                 for variable in instruction.defs() {
                     let blocks = definition_blocks.entry(variable.clone()).or_default();
-                    if blocks.last().copied() != Some(block.id()) {
-                        blocks.push(block.id());
+                    if blocks.last().copied() != Some(block_id) {
+                        blocks.push(block_id);
                     }
                 }
             }
         }
 
-        let mut placements = vec![Vec::new(); cfg.block_count()];
-        let mut has_phi = EpochMarks::new(cfg.block_count());
-        let mut visited = EpochMarks::new(cfg.block_count());
+        let mut placements = vec![Vec::new(); cfg.block_bound()];
+        let mut has_phi = EpochMarks::new(cfg.block_bound());
+        let mut visited = EpochMarks::new(cfg.block_bound());
         for (variable, definitions) in definition_blocks {
             has_phi.reset();
             visited.reset();
@@ -356,7 +360,11 @@ pub struct SsaForm<V> {
 }
 
 impl<V: VariableId> SsaForm<V> {
-    /// Return all SSA blocks in source CFG order.
+    /// Return all SSA blocks, indexed by source [`BlockId`].
+    ///
+    /// The slice is sized by the source CFG's block *bound*, so a slot the
+    /// source retired holds an empty block rather than shifting its
+    /// successors' indices.
     #[must_use]
     pub fn blocks(&self) -> &[SsaBlock<V>] {
         &self.blocks
@@ -489,20 +497,31 @@ fn create_drafts<I: InstrInfo, E>(
     cfg: &Cfg<I, E>,
     placements: &PhiPlacements<I::Variable>,
 ) -> Vec<BlockDraft<I::Variable>> {
-    cfg.blocks()
-        .iter()
-        .map(|block| BlockDraft {
-            phis: placements
-                .at(block.id())
-                .iter()
-                .map(|placement| PhiDraft {
-                    variable: placement.variable.clone(),
-                    predecessors: placement.predecessors.clone(),
-                    result: None,
-                    operands: BTreeMap::new(),
-                })
-                .collect(),
-            instructions: Vec::with_capacity(block.instructions().len()),
+    // Block-indexed, so one draft per slot up to the identity bound;
+    // a retired slot keeps an empty draft that `finish_blocks` renders as an
+    // empty SSA block.
+    (0..cfg.block_bound())
+        .map(BlockId::from_index)
+        .map(|block| {
+            if !cfg.contains_block(block) {
+                return BlockDraft {
+                    phis: Vec::new(),
+                    instructions: Vec::new(),
+                };
+            }
+            BlockDraft {
+                phis: placements
+                    .at(block)
+                    .iter()
+                    .map(|placement| PhiDraft {
+                        variable: placement.variable.clone(),
+                        predecessors: placement.predecessors.clone(),
+                        result: None,
+                        operands: BTreeMap::new(),
+                    })
+                    .collect(),
+                instructions: Vec::with_capacity(cfg.block(block).instructions().len()),
+            }
         })
         .collect()
 }
@@ -565,15 +584,13 @@ fn rename_drafts<I: InstrInfo, E>(
     max_versions: &mut BTreeMap<I::Variable, SsaVersion>,
 ) {
     let mut stacks = BTreeMap::new();
-    let mut visited = vec![false; cfg.block_count()];
+    let mut visited = vec![false; cfg.block_bound()];
     // The event stack consumes siblings in reverse, so descending links
     // preserve `DominatorTree::children`'s ascending DFS visitation.
     let children = dom.child_links(DominatorChildOrder::Descending);
     let mut roots = vec![cfg.entry()];
     roots.extend(
-        cfg.blocks()
-            .iter()
-            .map(crate::block::BasicBlock::id)
+        cfg.block_ids()
             .filter(|&block| block != cfg.entry() && dom.idom(block).is_none()),
     );
 
@@ -675,7 +692,7 @@ impl<V: VariableId> SsaForm<V> {
         let mut max_versions = BTreeMap::new();
         rename_drafts(cfg, dom, &mut drafts, &mut max_versions);
         let blocks = finish_blocks(drafts, &mut max_versions);
-        let idom = (0..cfg.block_count())
+        let idom = (0..cfg.block_bound())
             .map(|index| dom.idom(BlockId::from_index(index)))
             .collect();
         SsaForm {

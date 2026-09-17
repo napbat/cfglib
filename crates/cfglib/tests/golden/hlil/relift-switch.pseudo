@@ -1,0 +1,12 @@
+switch (v0) {
+    case 1, 2: {
+        v1 = 10;
+    }
+    case 3: {
+        v1 = 20;
+    }
+    default: {
+        v1 = 30;
+    }
+}
+return v1;

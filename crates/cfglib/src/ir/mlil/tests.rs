@@ -16,6 +16,7 @@ use super::{
 };
 
 mod memory;
+mod removal;
 mod rewrite;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -185,16 +186,16 @@ impl super::PromoteDialect for ToyDialect {
 
 impl VerifyDialect for ToyDialect {
     fn verify(function: &super::Function<Self>, issues: &mut Vec<VerificationIssue>) {
-        for block in function.cfg().blocks().iter().skip(1) {
-            if function.cfg().successor_edges(block.id()).is_empty()
+        for block_id in function.cfg().block_ids().skip(1) {
+            let block = function.cfg().block(block_id);
+            if function.cfg().outgoing(block_id).next().is_none()
                 && !matches!(
                     block.instructions().last().map(Instruction::operation),
                     Some(Operation::Return)
                 )
             {
                 issues.push(VerificationIssue::new(format!(
-                    "block {} does not end in return",
-                    block.id()
+                    "block {block_id} does not end in return"
                 )));
             }
         }

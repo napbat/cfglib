@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
+use crate::edge::EdgeId;
 use crate::graph::dominator::DominatorTree;
 use crate::ir::ast::{AstNode, GotoReason, LiftReport};
 use crate::region::HandlerBody;
@@ -130,7 +131,7 @@ fn duplicate_targets<I: Clone, E: Clone>(
         if !eligible(cfg, &dominators, region_blocks, target) {
             continue;
         }
-        let incoming = cfg.predecessor_edges(target).to_vec();
+        let incoming: Vec<EdgeId> = cfg.incoming(target).collect();
         if incoming.len() < 2 {
             continue;
         }
@@ -149,7 +150,7 @@ fn duplicate_targets<I: Clone, E: Clone>(
             for instruction in instructions {
                 cfg.block_mut(copy).push(instruction);
             }
-            for successor_edge in cfg.successor_edges(target).to_vec() {
+            for successor_edge in cfg.outgoing(target).collect::<Vec<_>>() {
                 let (kind, target, payload) = {
                     let edge = cfg.edge(successor_edge);
                     (edge.kind(), edge.target(), edge.payload().clone())
@@ -196,19 +197,17 @@ fn eligible<I, E>(
     // A loop header's copy would re-enter the loop from outside its
     // natural structure.
     let looping = cfg
-        .predecessor_edges(target)
-        .iter()
-        .any(|&edge| dominators.dominates(target, cfg.edge(edge).source()));
+        .incoming(target)
+        .any(|edge| dominators.dominates(target, cfg.edge(edge).source()));
     if looping {
         return false;
     }
     // Exceptional flow references blocks (and consumer payloads reference
     // throw sites) that a copy cannot honestly carry.
     let exceptional = cfg
-        .successor_edges(target)
-        .iter()
-        .chain(cfg.predecessor_edges(target))
-        .any(|&edge| {
+        .outgoing(target)
+        .chain(cfg.incoming(target))
+        .any(|edge| {
             matches!(
                 cfg.edge(edge).kind(),
                 crate::EdgeKind::ExceptionHandler
@@ -262,7 +261,7 @@ mod tests {
         let (_, after) = crate::lift_with_report(&cfg);
         assert!(after.is_fully_structured(), "{after:?}");
         // The original tail kept one predecessor; the copy took the other.
-        assert_eq!(cfg.predecessor_edges(tail).len(), 1);
+        assert_eq!(cfg.incoming(tail).count(), 1);
     }
 
     #[test]
@@ -293,9 +292,9 @@ mod tests {
         cfg.add_edge(right, header, EdgeKind::Fallthrough);
         cfg.add_edge(header, header, EdgeKind::Back);
         cfg.add_edge(header, exit, EdgeKind::ConditionalFalse);
-        let blocks = cfg.blocks().len();
+        let blocks = cfg.block_count();
         let _ = duplicate_structuring_tails(&mut cfg);
-        assert_eq!(cfg.blocks().len(), blocks, "a loop header was copied");
+        assert_eq!(cfg.block_count(), blocks, "a loop header was copied");
     }
 
     #[test]

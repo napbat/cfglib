@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 use crate::cfg::Cfg;
 use crate::graph::dominator::DominatorTree;
 use crate::graph::structure::{detect_loops, detect_loops_tagged};
-use crate::graph::view::{DenseNodeId, RootedGraphView};
+use crate::graph::view::{DenseId, RootedView};
 
 /// Topology-level metrics for any rooted graph view.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,8 +50,8 @@ pub struct CfgMetrics {
 }
 
 /// Everything except loop nesting, computed in one pass.
-fn topology<G: RootedGraphView>(graph: &G) -> GraphMetrics {
-    let n = graph.node_count();
+fn topology<G: RootedView>(graph: &G) -> GraphMetrics {
+    let n = graph.node_bound();
 
     // Reachability from the root, counting reachable-region edges as we go
     // (an edge's source being reachable implies its target is too).
@@ -107,11 +107,11 @@ impl GraphMetrics {
     ///
     /// # Panics
     ///
-    /// Panics when the view's root index is outside `0..node_count()` — a
-    /// broken [`RootedGraphView`] implementation; validate consumer views with
+    /// Panics when the view's root index is outside `0..node_bound()` — a
+    /// broken [`RootedView`] implementation; validate consumer views with
     /// [`verify_view`](crate::verify_view).
     #[must_use]
-    pub fn compute<G: RootedGraphView>(graph: &G) -> Self {
+    pub fn compute<G: RootedView>(graph: &G) -> Self {
         let mut metrics = topology(graph);
         if metrics.node_count > 1 {
             let dom = DominatorTree::compute(graph);
@@ -156,7 +156,7 @@ impl CfgMetrics {
         }
 
         let n = cfg.block_count();
-        let instruction_count: usize = cfg.blocks().iter().map(|b| b.instructions().len()).sum();
+        let instruction_count: usize = cfg.blocks().map(|b| b.instructions().len()).sum();
         let avg_instr = if n > 0 {
             crate::usize_to_f64(instruction_count) / crate::usize_to_f64(n)
         } else {
@@ -179,8 +179,8 @@ impl CfgMetrics {
 /// explicit `Back` edges want [`cfg_block_nesting_depths`], which honors
 /// the tags exactly as [`CfgMetrics::compute`] does.
 #[must_use]
-pub fn block_nesting_depths<G: RootedGraphView>(graph: &G) -> Vec<usize> {
-    let n = graph.node_count();
+pub fn block_nesting_depths<G: RootedView>(graph: &G) -> Vec<usize> {
+    let n = graph.node_bound();
     let dom = DominatorTree::compute(graph);
     depths_of(n, &detect_loops(graph, &dom))
 }
@@ -192,10 +192,10 @@ pub fn block_nesting_depths<G: RootedGraphView>(graph: &G) -> Vec<usize> {
 #[must_use]
 pub fn cfg_block_nesting_depths<I>(cfg: &Cfg<I>) -> Vec<usize> {
     let dom = DominatorTree::compute(cfg);
-    depths_of(cfg.block_count(), &detect_loops_tagged(cfg, &dom))
+    depths_of(cfg.block_bound(), &detect_loops_tagged(cfg, &dom))
 }
 
-fn depths_of<N: DenseNodeId>(n: usize, loops: &[crate::NaturalLoop<N>]) -> Vec<usize> {
+fn depths_of<N: DenseId>(n: usize, loops: &[crate::NaturalLoop<N>]) -> Vec<usize> {
     let mut depths = vec![0usize; n];
     for lp in loops {
         for &node in &lp.body {
@@ -283,10 +283,10 @@ mod tests {
 
     #[test]
     fn graph_metrics_on_consumer_view() {
-        use crate::graph::directed::DirectedGraph;
+        use crate::graph::store::Graph;
         use crate::graph::view::Rooted;
 
-        let mut graph = DirectedGraph::new();
+        let mut graph = Graph::new();
         let a = graph.add_node("a");
         let b = graph.add_node("b");
         let c = graph.add_node("c");

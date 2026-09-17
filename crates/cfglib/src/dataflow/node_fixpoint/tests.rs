@@ -1,7 +1,7 @@
 extern crate alloc;
 
 use super::*;
-use crate::graph::directed::{DirectedGraph, NodeId};
+use crate::graph::store::{Graph, NodeId};
 
 /// Taint: a node is tainted when it is a source or any upstream node's
 /// output is tainted — over a value-flow-shaped graph.
@@ -26,18 +26,18 @@ impl Taint {
     }
 }
 
-impl<E> NodeProblem<DirectedGraph<&'static str, E>> for Taint {
+impl<E> NodeProblem<Graph<&'static str, E>> for Taint {
     type Fact = bool;
 
     fn direction(&self) -> Direction {
         self.direction
     }
 
-    fn bottom(&self, _graph: &DirectedGraph<&'static str, E>) -> bool {
+    fn bottom(&self, _graph: &Graph<&'static str, E>) -> bool {
         false
     }
 
-    fn boundary(&self, _graph: &DirectedGraph<&'static str, E>) -> bool {
+    fn boundary(&self, _graph: &Graph<&'static str, E>) -> bool {
         false
     }
 
@@ -45,19 +45,14 @@ impl<E> NodeProblem<DirectedGraph<&'static str, E>> for Taint {
         *a || *b
     }
 
-    fn transfer(
-        &self,
-        _graph: &DirectedGraph<&'static str, E>,
-        node: NodeId,
-        input: &bool,
-    ) -> bool {
+    fn transfer(&self, _graph: &Graph<&'static str, E>, node: NodeId, input: &bool) -> bool {
         *input || self.sources.contains(&node)
     }
 }
 
 /// `source -> a <-> b`, plus `clean -> b` and a disconnected `island`.
-fn flow_fixture() -> (DirectedGraph<&'static str, ()>, [NodeId; 5]) {
-    let mut graph: DirectedGraph<&'static str, ()> = DirectedGraph::new();
+fn flow_fixture() -> (Graph<&'static str, ()>, [NodeId; 5]) {
+    let mut graph: Graph<&'static str, ()> = Graph::new();
     let source = graph.add_node("source");
     let a = graph.add_node("a");
     let b = graph.add_node("b");
@@ -124,7 +119,7 @@ fn no_seeds_leaves_every_fact_at_bottom() {
     }
 
     // An empty graph has nothing to seed and nothing to solve.
-    let empty: DirectedGraph<&'static str, ()> = DirectedGraph::new();
+    let empty: Graph<&'static str, ()> = Graph::new();
     let facts = solve_node_problem_from(&empty, &Taint::forward(alloc::vec![]), &[]).unwrap();
     assert_eq!(empty.node_count(), 0);
     assert!(empty.node_ids().all(|node| *facts.fact_out(node)));
@@ -168,7 +163,7 @@ fn a_backward_seeded_solve_walks_the_out_edges() {
 #[should_panic(expected = "seed node is out of range")]
 fn an_out_of_range_seed_panics() {
     let (graph, _) = flow_fixture();
-    let beyond = NodeId::from_index(graph.node_count());
+    let beyond = NodeId::from_index(graph.node_bound());
     let _ = solve_node_problem_from(&graph, &Taint::forward(alloc::vec![]), &[beyond]);
 }
 
@@ -192,7 +187,7 @@ struct Guarded {
     forbidden: NodeId,
 }
 
-impl<E> TryNodeProblem<DirectedGraph<&'static str, E>> for Guarded {
+impl<E> TryNodeProblem<Graph<&'static str, E>> for Guarded {
     type Fact = bool;
     type Error = &'static str;
 
@@ -200,11 +195,11 @@ impl<E> TryNodeProblem<DirectedGraph<&'static str, E>> for Guarded {
         Direction::Forward
     }
 
-    fn bottom(&self, _graph: &DirectedGraph<&'static str, E>) -> bool {
+    fn bottom(&self, _graph: &Graph<&'static str, E>) -> bool {
         false
     }
 
-    fn boundary(&self, _graph: &DirectedGraph<&'static str, E>) -> Result<bool, Self::Error> {
+    fn boundary(&self, _graph: &Graph<&'static str, E>) -> Result<bool, Self::Error> {
         Ok(false)
     }
 
@@ -214,7 +209,7 @@ impl<E> TryNodeProblem<DirectedGraph<&'static str, E>> for Guarded {
 
     fn transfer(
         &self,
-        _graph: &DirectedGraph<&'static str, E>,
+        _graph: &Graph<&'static str, E>,
         node: NodeId,
         input: &bool,
     ) -> Result<bool, Self::Error> {

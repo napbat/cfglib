@@ -35,13 +35,15 @@ fn verify_signature<D: Dialect>(function: &Function<D>, issues: &mut Vec<Verific
 }
 
 fn verify_regions<D: Dialect>(function: &Function<D>, issues: &mut Vec<VerificationIssue>) {
-    let block_count = function.cfg.block_count();
     let entry = function.cfg.entry();
     let check_block = |issues: &mut Vec<VerificationIssue>,
                        block: crate::BlockId,
                        region: crate::RegionId,
                        role: &str| {
-        if block.index() >= block_count {
+        // Existence is membership, not an index below the live count: a
+        // removed block keeps its slot, and a slot below the bound may hold
+        // no block at all.
+        if !function.cfg.contains_block(block) {
             issue(issues, format!("{region} {role} {block} does not exist"));
         } else if block == entry {
             issue(
@@ -103,13 +105,13 @@ fn verify_cfg<D: Dialect>(function: &Function<D>, issues: &mut Vec<VerificationI
     }
 
     let entry = function.cfg.entry();
-    if !function.cfg.predecessor_edges(entry).is_empty() {
+    if function.cfg.incoming(entry).next().is_some() {
         issue(issues, "synthetic root has incoming edges");
     }
     if !function.cfg.block(entry).is_empty() {
         issue(issues, "synthetic root contains semantic instructions");
     }
-    let outgoing = function.cfg.successor_edges(entry);
+    let outgoing: Vec<EdgeId> = function.cfg.outgoing(entry).collect();
     if outgoing.len() != 1 {
         issue(
             issues,
@@ -126,17 +128,18 @@ fn verify_cfg<D: Dialect>(function: &Function<D>, issues: &mut Vec<VerificationI
     // non-exceptional successor, or none for an opaque exit. Deciding
     // between successors needs a branch, and an exceptional edge needs a
     // throwing instruction to own it.
-    for block in function.cfg.blocks() {
-        if block.id() == entry || !block.is_empty() {
+    for block_id in function.cfg.block_ids() {
+        let block = function.cfg.block(block_id);
+        if block_id == entry || !block.is_empty() {
             continue;
         }
-        let outgoing = function.cfg.successor_edges(block.id());
+        let outgoing: Vec<EdgeId> = function.cfg.outgoing(block_id).collect();
         if outgoing.len() > 1 {
             issue(
                 issues,
                 format!(
                     "empty semantic block {} decides between {} outgoing edges",
-                    block.id(),
+                    block_id,
                     outgoing.len()
                 ),
             );
@@ -148,8 +151,8 @@ fn verify_cfg<D: Dialect>(function: &Function<D>, issues: &mut Vec<VerificationI
             issue(
                 issues,
                 format!(
-                    "empty semantic block {} has an exceptional edge and no throwing instruction",
-                    block.id()
+                    "empty semantic block {block_id} has an exceptional edge and no throwing \
+                     instruction"
                 ),
             );
         }
@@ -187,7 +190,8 @@ fn verify_instructions<D: Dialect>(function: &Function<D>, issues: &mut Vec<Veri
     }
     let mut seen = BTreeSet::new();
     let mut count = 0usize;
-    for block in function.cfg.blocks() {
+    for block_id in function.cfg.block_ids() {
+        let block = function.cfg.block(block_id);
         for (inst_idx, instruction) in block.instructions().iter().enumerate() {
             count += 1;
             let id = instruction.id();
@@ -195,16 +199,16 @@ fn verify_instructions<D: Dialect>(function: &Function<D>, issues: &mut Vec<Veri
                 issue(issues, format!("duplicate instruction identity {id}"));
             }
             let expected_point = ProgramPoint {
-                block: block.id(),
+                block: block_id,
                 inst_idx,
             };
             match function.instruction_points.get(id.index()) {
-                Some(point) if *point == expected_point => {}
-                Some(point) => issue(
+                Some(Some(point)) if *point == expected_point => {}
+                Some(Some(point)) => issue(
                     issues,
                     format!("instruction {id} is at {expected_point} but indexed at {point}"),
                 ),
-                None => issue(
+                Some(None) | None => issue(
                     issues,
                     format!("instruction {id} has no identity-table entry"),
                 ),
@@ -222,11 +226,15 @@ fn verify_instructions<D: Dialect>(function: &Function<D>, issues: &mut Vec<Veri
         );
     }
     for (index, point) in function.instruction_points.iter().enumerate() {
-        let valid = function
-            .cfg
-            .blocks()
-            .get(point.block.index())
-            .and_then(|block| block.instructions().get(point.inst_idx))
+        let valid = point
+            .filter(|point| function.cfg.contains_block(point.block))
+            .and_then(|point| {
+                function
+                    .cfg
+                    .block(point.block)
+                    .instructions()
+                    .get(point.inst_idx)
+            })
             .is_some_and(|instruction| instruction.id().index() == index);
         if !valid {
             issue(
@@ -312,13 +320,13 @@ fn verify_edges<D: Dialect>(function: &Function<D>, issues: &mut Vec<Verificatio
 }
 
 fn verify_provenance<D: Dialect>(function: &Function<D>, issues: &mut Vec<VerificationIssue>) {
-    let live_edges: BTreeSet<EdgeId> = function.cfg.edges().map(crate::Edge::id).collect();
+    let live_edges: BTreeSet<EdgeId> = function.cfg.edge_ids().collect();
     for entry in function.provenance.entries() {
         if D::span_is_empty(&entry.source) {
             issue(issues, "provenance contains an empty source span");
         }
         let valid = match entry.entity {
-            EntityId::Block(block) => block.index() < function.cfg.block_count(),
+            EntityId::Block(block) => function.cfg.contains_block(block),
             EntityId::Edge(edge) => live_edges.contains(&edge),
             EntityId::Instruction(instruction) => function.instruction(instruction).is_some(),
             EntityId::Variable(variable) => function.variable(variable).is_some(),

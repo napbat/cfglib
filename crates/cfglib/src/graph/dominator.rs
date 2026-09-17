@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::graph::traverse::{TraversalDirection, reverse_postorder};
-use crate::graph::view::{DenseNodeId, DirectedGraphView, RootedGraphView};
+use crate::graph::view::{DenseId, GraphView, RootedView};
 
 /// A dominator tree computed from a rooted directed graph.
 ///
@@ -112,7 +112,7 @@ pub(crate) struct DominatorChildLinks<N> {
     next_sibling: Vec<Option<N>>,
 }
 
-impl<N: DenseNodeId> DominatorChildLinks<N> {
+impl<N: DenseId> DominatorChildLinks<N> {
     /// First child of `parent` in the selected order.
     pub(crate) fn first_child(&self, parent: N) -> Option<N> {
         self.first_child[parent.index()]
@@ -132,7 +132,7 @@ fn compact_depths_supported(node_count: usize) -> bool {
 ///
 /// Keeping this as a view avoids copying every node, edge, and adjacency list
 /// merely to run the generic dominator algorithm.
-struct PostDominatorView<'g, G: DirectedGraphView> {
+struct PostDominatorView<'g, G: GraphView> {
     graph: &'g G,
     exits: &'g [G::NodeId],
     /// Small exit lists use linear multiplicity counts; large lists are
@@ -142,7 +142,7 @@ struct PostDominatorView<'g, G: DirectedGraphView> {
 
 const POST_DOMINATOR_BINARY_SEARCH_THRESHOLD: usize = 16;
 
-impl<G: DirectedGraphView> PostDominatorView<'_, G> {
+impl<G: GraphView> PostDominatorView<'_, G> {
     #[inline]
     fn exit_multiplicity(&self, node: G::NodeId) -> usize {
         if self.binary_search_exits {
@@ -153,18 +153,25 @@ impl<G: DirectedGraphView> PostDominatorView<'_, G> {
     }
 }
 
-impl<G: DirectedGraphView> DirectedGraphView for PostDominatorView<'_, G> {
+impl<G: GraphView> GraphView for PostDominatorView<'_, G> {
     // The virtual exit is private implementation state.  Use `usize` for the
     // augmented view so callers' IDs are never asked to represent the
-    // out-of-range index at `graph.node_count()`.
+    // out-of-range index at `graph.node_bound()`.
     type NodeId = usize;
 
-    fn node_count(&self) -> usize {
-        self.graph.node_count() + 1
+    fn node_bound(&self) -> usize {
+        self.graph.node_bound() + 1
+    }
+
+    fn node_ids(&self) -> impl Iterator<Item = Self::NodeId> + '_ {
+        self.graph
+            .node_ids()
+            .map(DenseId::index)
+            .chain(core::iter::once(self.graph.node_bound()))
     }
 
     fn successors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
-        let original_count = self.graph.node_count();
+        let original_count = self.graph.node_bound();
         let is_virtual = node == original_count;
         let original = (node < original_count).then(|| G::NodeId::from_index(node));
         is_virtual
@@ -172,26 +179,26 @@ impl<G: DirectedGraphView> DirectedGraphView for PostDominatorView<'_, G> {
             .into_iter()
             .flatten()
             .copied()
-            .map(DenseNodeId::index)
+            .map(DenseId::index)
             .chain(
                 original
                     .into_iter()
-                    .flat_map(move |node| self.graph.predecessors(node).map(DenseNodeId::index)),
+                    .flat_map(move |node| self.graph.predecessors(node).map(DenseId::index)),
             )
     }
 
     fn predecessors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
-        let original_count = self.graph.node_count();
+        let original_count = self.graph.node_bound();
         let original = (node < original_count).then(|| G::NodeId::from_index(node));
         let exit_multiplicity = original.map_or(0, |node| self.exit_multiplicity(node));
         original
             .into_iter()
-            .flat_map(move |node| self.graph.successors(node).map(DenseNodeId::index))
+            .flat_map(move |node| self.graph.successors(node).map(DenseId::index))
             .chain(core::iter::repeat_n(original_count, exit_multiplicity))
     }
 }
 
-impl<N: DenseNodeId> DominatorTree<N> {
+impl<N: DenseId> DominatorTree<N> {
     /// Constructs an internal dominator forest from already validated dense
     /// parent and reachability tables.
     pub(crate) fn from_forest_parts(idom: Vec<Option<N>>, reachable: Vec<bool>) -> Self {
@@ -204,7 +211,7 @@ impl<N: DenseNodeId> DominatorTree<N> {
     #[must_use]
     pub fn compute<G>(graph: &G) -> Self
     where
-        G: RootedGraphView<NodeId = N>,
+        G: RootedView<NodeId = N>,
     {
         Self::compute_from(graph, graph.root())
     }
@@ -223,10 +230,10 @@ impl<N: DenseNodeId> DominatorTree<N> {
     #[must_use]
     pub fn compute_with_diff<G>(graph: &G, previous: &Self) -> (Self, Vec<N>)
     where
-        G: RootedGraphView<NodeId = N>,
+        G: RootedView<NodeId = N>,
     {
         let next = Self::compute(graph);
-        let changed = (0..graph.node_count())
+        let changed = (0..graph.node_bound())
             .map(N::from_index)
             .filter(|&node| previous.idom(node) != next.idom(node))
             .collect();
@@ -237,10 +244,10 @@ impl<N: DenseNodeId> DominatorTree<N> {
     #[must_use]
     pub fn compute_from<G>(graph: &G, root: N) -> Self
     where
-        G: DirectedGraphView<NodeId = N>,
+        G: GraphView<NodeId = N>,
     {
         let order = reverse_postorder(graph, root, TraversalDirection::Outgoing);
-        let node_count = graph.node_count();
+        let node_count = graph.node_bound();
         let mut order_index = vec![usize::MAX; node_count];
         for (index, node) in order.iter().copied().enumerate() {
             order_index[node.index()] = index;
@@ -527,7 +534,7 @@ impl<N: DenseNodeId> DominatorTree<N> {
     }
 }
 
-impl<N: DenseNodeId> DominatorTree<N> {
+impl<N: DenseId> DominatorTree<N> {
     /// Compute the **post-dominator** tree of any graph view from its exit
     /// nodes.
     ///
@@ -544,9 +551,9 @@ impl<N: DenseNodeId> DominatorTree<N> {
     #[must_use]
     pub fn compute_post_from<G>(graph: &G, exits: &[N]) -> Self
     where
-        G: DirectedGraphView<NodeId = N>,
+        G: GraphView<NodeId = N>,
     {
-        let node_count = graph.node_count();
+        let node_count = graph.node_bound();
         if node_count == 0 {
             return DominatorTree {
                 idom: Vec::new(),
@@ -599,13 +606,12 @@ impl DominatorTree<BlockId> {
     ///
     /// Exits are the CFG's blocks with no successors; a CFG with none
     /// (e.g. ending in an infinite loop) falls back to treating the
-    /// last-allocated block as the exit, preserving long-standing
+    /// last-allocated live block as the exit, preserving long-standing
     /// behavior. See [`compute_post_from`](Self::compute_post_from) for
     /// the view-generic entry point with caller-chosen exits.
     #[must_use]
     pub fn compute_post<I, E>(cfg: &Cfg<I, E>) -> Self {
-        let node_count = cfg.block_count();
-        if node_count == 0 {
+        if cfg.block_count() == 0 {
             return DominatorTree {
                 idom: Vec::new(),
                 reachable: Vec::new(),
@@ -613,7 +619,10 @@ impl DominatorTree<BlockId> {
         }
         let mut exits: Vec<BlockId> = cfg.exit_blocks().collect();
         if exits.is_empty() {
-            exits.push(BlockId::from_index(node_count - 1));
+            // The fallback names a block, not a quantity: a removed block
+            // keeps its slot, so the highest live identity is the last one
+            // `block_ids` yields, not `block_count() - 1`.
+            exits.extend(cfg.block_ids().last());
         }
         Self::compute_post_from(cfg, &exits)
     }
@@ -624,13 +633,13 @@ mod tests {
     use super::*;
     use crate::cfg::Cfg;
     use crate::edge::EdgeKind;
-    use crate::graph::directed::{DirectedGraph, NodeId};
+    use crate::graph::store::{Graph, NodeId};
     use crate::test_util::MockInst;
 
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
     struct BoundedNode(u8);
 
-    impl DenseNodeId for BoundedNode {
+    impl DenseId for BoundedNode {
         fn from_index(index: usize) -> Self {
             assert!(index < 4, "bounded ID cannot represent a synthetic node");
             Self(u8::try_from(index).expect("test node index fits in u8"))
@@ -643,11 +652,15 @@ mod tests {
 
     struct BoundedDiamond;
 
-    impl DirectedGraphView for BoundedDiamond {
+    impl GraphView for BoundedDiamond {
         type NodeId = BoundedNode;
 
-        fn node_count(&self) -> usize {
+        fn node_bound(&self) -> usize {
             4
+        }
+
+        fn node_ids(&self) -> impl Iterator<Item = Self::NodeId> + '_ {
+            (0..4).map(BoundedNode)
         }
 
         fn successors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
@@ -754,7 +767,7 @@ mod tests {
 
     #[test]
     fn depth_tables_match_queries_when_parents_have_larger_ids() {
-        let mut graph = DirectedGraph::<(), ()>::new();
+        let mut graph = Graph::<(), ()>::new();
         let leaf = graph.add_node(());
         let middle = graph.add_node(());
         let child = graph.add_node(());
@@ -783,7 +796,7 @@ mod tests {
 
     #[test]
     fn full_analysis_depths_match_public_dominance_queries() {
-        let mut graph = DirectedGraph::<(), ()>::new();
+        let mut graph = Graph::<(), ()>::new();
         let root = graph.add_node(());
         let left = graph.add_node(());
         let right = graph.add_node(());
@@ -810,7 +823,7 @@ mod tests {
 
     #[test]
     fn child_links_follow_the_selected_sibling_order() {
-        let mut graph = DirectedGraph::<(), ()>::new();
+        let mut graph = Graph::<(), ()>::new();
         let root = graph.add_node(());
         let first = graph.add_node(());
         let second = graph.add_node(());
@@ -853,7 +866,7 @@ mod tests {
     fn post_dominators_over_a_consumer_view() {
         // Diamond in consumer storage: a -> {b, c} -> d. Everything is
         // post-dominated by d; the branch is post-dominated by the merge.
-        let mut graph = DirectedGraph::<&str, ()>::new();
+        let mut graph = Graph::<&str, ()>::new();
         let a = graph.add_node("a");
         let b = graph.add_node("b");
         let c = graph.add_node("c");
@@ -878,18 +891,18 @@ mod tests {
     #[test]
     #[should_panic(expected = "post-dominator exit index is outside the graph")]
     fn post_dominators_reject_an_exit_outside_the_graph() {
-        let mut graph = DirectedGraph::<(), ()>::new();
+        let mut graph = Graph::<(), ()>::new();
         graph.add_node(());
 
         let outside = NodeId::from_raw(
-            u32::try_from(graph.node_count()).expect("test graph size fits in u32"),
+            u32::try_from(graph.node_bound()).expect("test graph size fits in u32"),
         );
         let _ = DominatorTree::compute_post_from(&graph, &[outside]);
     }
 
     #[test]
     fn post_dominator_view_preserves_duplicate_exit_edges() {
-        let mut graph = DirectedGraph::<(), ()>::new();
+        let mut graph = Graph::<(), ()>::new();
         let exit = graph.add_node(());
         let exits = [exit, exit];
         let reverse = PostDominatorView {
@@ -897,7 +910,7 @@ mod tests {
             exits: &exits,
             binary_search_exits: false,
         };
-        let virtual_exit = graph.node_count();
+        let virtual_exit = graph.node_bound();
 
         assert_eq!(
             reverse.successors(virtual_exit).collect::<Vec<_>>(),
@@ -920,7 +933,7 @@ mod tests {
 
     #[test]
     fn post_dominators_accept_large_unsorted_exit_lists() {
-        let mut graph = DirectedGraph::<(), ()>::new();
+        let mut graph = Graph::<(), ()>::new();
         let entry = graph.add_node(());
         let mut exits = Vec::new();
         for _ in 0..16 {

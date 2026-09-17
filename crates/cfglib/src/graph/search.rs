@@ -1,4 +1,4 @@
-//! Discipline-configurable search over any [`DirectedGraphView`].
+//! Discipline-configurable search over any [`GraphView`].
 //!
 //! The traversals in [`traverse`](super::traverse) each answer one fixed
 //! question — "every node in preorder", "every node reachable from a seed
@@ -35,7 +35,7 @@ use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
 use crate::graph::traverse::{Adjacency, TraversalDirection, by_axis};
-use crate::graph::view::{DenseNodeId, DirectedGraphView};
+use crate::graph::view::{DenseId, GraphView};
 
 /// The frontier discipline of a [`search`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -249,10 +249,10 @@ enum PathStep {
 /// Every buffer a search fills whose size is O(the walk) rather than O(the
 /// graph) — the ones [`EpochMarks`] deliberately left in the call.
 ///
-/// Nodes are stored as the dense indices [`DenseNodeId`] guarantees they are,
+/// Nodes are stored as the dense indices [`DenseId`] guarantees they are,
 /// and the cores convert at the boundary. That is what keeps the buffers — and
 /// so [`SearchScratch`] — free of a node-id type parameter: one scratch type
-/// serves every [`DirectedGraphView`], and one scratch instance can be reused
+/// serves every [`GraphView`], and one scratch instance can be reused
 /// across graphs whose ids differ.
 #[derive(Debug, Clone, Default)]
 struct SearchBuffers {
@@ -404,11 +404,11 @@ impl SearchScratch {
 /// ```
 /// use core::ops::ControlFlow;
 ///
-/// use cfglib::{DirectedGraph, SearchConfig, SearchOrder, TraversalDirection, Visit, search};
+/// use cfglib::{Graph, SearchConfig, SearchOrder, TraversalDirection, Visit, search};
 ///
 /// //     a -> b -> d
 /// //     a -> c
-/// let mut graph = DirectedGraph::<&str, ()>::new();
+/// let mut graph = Graph::<&str, ()>::new();
 /// let a = graph.add_node("a");
 /// let b = graph.add_node("b");
 /// let c = graph.add_node("c");
@@ -446,13 +446,13 @@ impl SearchScratch {
 /// [`SearchOrder::BreadthFirst`] with [`VisitedPolicy::Path`] — a
 /// breadth-first frontier has no unwind on which to un-mark.
 #[must_use]
-pub fn search<G: DirectedGraphView, B>(
+pub fn search<G: GraphView, B>(
     graph: &G,
     seeds: impl IntoIterator<Item = G::NodeId>,
     config: SearchConfig,
     visitor: impl FnMut(G::NodeId, usize) -> ControlFlow<B, Visit>,
 ) -> Option<B> {
-    let mut scratch = SearchScratch::new(graph.node_count());
+    let mut scratch = SearchScratch::new(graph.node_bound());
     search_with_scratch(graph, seeds, config, &mut scratch, visitor)
 }
 
@@ -489,12 +489,12 @@ pub fn search<G: DirectedGraphView, B>(
 /// use core::ops::ControlFlow;
 ///
 /// use cfglib::{
-///     DirectedGraph, DirectedGraphView, EpochMarks, SearchConfig, SearchOrder,
+///     Graph, GraphView, EpochMarks, SearchConfig, SearchOrder,
 ///     TraversalDirection, Visit, search_with_marks,
 /// };
 ///
 /// //     a -> b -> c,  d -> c
-/// let mut graph = DirectedGraph::<&str, ()>::new();
+/// let mut graph = Graph::<&str, ()>::new();
 /// let a = graph.add_node("a");
 /// let b = graph.add_node("b");
 /// let c = graph.add_node("c");
@@ -504,7 +504,7 @@ pub fn search<G: DirectedGraphView, B>(
 /// graph.add_edge(d, c, ());
 ///
 /// let config = SearchConfig::new(SearchOrder::BreadthFirst, TraversalDirection::Outgoing);
-/// let mut marks = EpochMarks::new(graph.node_count());
+/// let mut marks = EpochMarks::new(graph.node_bound());
 /// let mut closures = Vec::new();
 ///
 /// for root in graph.node_ids() {
@@ -529,7 +529,7 @@ pub fn search<G: DirectedGraphView, B>(
 /// [`search`] rejects: a seed that is not a node in `graph`, and
 /// [`SearchOrder::BreadthFirst`] paired with [`VisitedPolicy::Path`].
 #[must_use]
-pub fn search_with_marks<G: DirectedGraphView, B>(
+pub fn search_with_marks<G: GraphView, B>(
     graph: &G,
     seeds: impl IntoIterator<Item = G::NodeId>,
     config: SearchConfig,
@@ -566,12 +566,12 @@ pub fn search_with_marks<G: DirectedGraphView, B>(
 /// use core::ops::ControlFlow;
 ///
 /// use cfglib::{
-///     DirectedGraph, DirectedGraphView, SearchConfig, SearchOrder, SearchScratch,
+///     Graph, GraphView, SearchConfig, SearchOrder, SearchScratch,
 ///     TraversalDirection, Visit, search_with_scratch,
 /// };
 ///
 /// //     a -> b -> c,  d -> c
-/// let mut graph = DirectedGraph::<&str, ()>::new();
+/// let mut graph = Graph::<&str, ()>::new();
 /// let a = graph.add_node("a");
 /// let b = graph.add_node("b");
 /// let c = graph.add_node("c");
@@ -581,7 +581,7 @@ pub fn search_with_marks<G: DirectedGraphView, B>(
 /// graph.add_edge(d, c, ());
 ///
 /// let config = SearchConfig::new(SearchOrder::DepthFirst, TraversalDirection::Outgoing);
-/// let mut scratch = SearchScratch::new(graph.node_count());
+/// let mut scratch = SearchScratch::new(graph.node_bound());
 /// let mut closures = Vec::new();
 ///
 /// for root in graph.node_ids() {
@@ -606,7 +606,7 @@ pub fn search_with_marks<G: DirectedGraphView, B>(
 /// [`search`] rejects: a seed that is not a node in `graph`, and
 /// [`SearchOrder::BreadthFirst`] paired with [`VisitedPolicy::Path`].
 #[must_use]
-pub fn search_with_scratch<G: DirectedGraphView, B>(
+pub fn search_with_scratch<G: GraphView, B>(
     graph: &G,
     seeds: impl IntoIterator<Item = G::NodeId>,
     config: SearchConfig,
@@ -618,7 +618,7 @@ pub fn search_with_scratch<G: DirectedGraphView, B>(
 }
 
 /// The one search: validate, reset, and dispatch to the discipline's core.
-fn search_in<G: DirectedGraphView, B>(
+fn search_in<G: GraphView, B>(
     graph: &G,
     seeds: impl IntoIterator<Item = G::NodeId>,
     config: SearchConfig,
@@ -634,17 +634,17 @@ fn search_in<G: DirectedGraphView, B>(
     // four-element minimum, which for a one-seed search is four times the
     // bytes a `collect` of the same iterator used to ask the allocator for —
     // and at these sizes the allocator charges by the byte.
-    let staged = seeds.into_iter().map(DenseNodeId::index);
+    let staged = seeds.into_iter().map(DenseId::index);
     buffers.seeds.reserve_exact(staged.size_hint().0);
     buffers.seeds.extend(staged);
     for &seed in &buffers.seeds {
-        assert!(seed < graph.node_count(), "seed node is out of range");
+        assert!(seed < graph.node_bound(), "seed node is out of range");
     }
     assert!(
-        marks.capacity() >= graph.node_count(),
+        marks.capacity() >= graph.node_bound(),
         "visited marks cover {} nodes but the graph has {}: size EpochMarks by the node space it is reused over",
         marks.capacity(),
-        graph.node_count()
+        graph.node_bound()
     );
     marks.reset();
 
@@ -677,7 +677,7 @@ fn may_expand(config: SearchConfig, depth: usize) -> bool {
     config.max_depth.is_none_or(|limit| depth < limit)
 }
 
-fn depth_first_global<G: DirectedGraphView, A: Adjacency, B>(
+fn depth_first_global<G: GraphView, A: Adjacency, B>(
     axis: A,
     graph: &G,
     config: SearchConfig,
@@ -711,7 +711,7 @@ fn depth_first_global<G: DirectedGraphView, A: Adjacency, B>(
             continue;
         }
         adjacent.clear();
-        adjacent.extend(axis.neighbors(graph, id).map(DenseNodeId::index));
+        adjacent.extend(axis.neighbors(graph, id).map(DenseId::index));
         for &successor in adjacent.iter().rev() {
             if !visited.is_marked(successor) {
                 stack.push((successor, depth + 1));
@@ -722,7 +722,7 @@ fn depth_first_global<G: DirectedGraphView, A: Adjacency, B>(
     None
 }
 
-fn depth_first_path<G: DirectedGraphView, A: Adjacency, B>(
+fn depth_first_path<G: GraphView, A: Adjacency, B>(
     axis: A,
     graph: &G,
     config: SearchConfig,
@@ -765,7 +765,7 @@ fn depth_first_path<G: DirectedGraphView, A: Adjacency, B>(
             continue;
         }
         adjacent.clear();
-        adjacent.extend(axis.neighbors(graph, id).map(DenseNodeId::index));
+        adjacent.extend(axis.neighbors(graph, id).map(DenseId::index));
         for &successor in adjacent.iter().rev() {
             stack.push(PathStep::Enter(successor, depth + 1));
         }
@@ -774,7 +774,7 @@ fn depth_first_path<G: DirectedGraphView, A: Adjacency, B>(
     None
 }
 
-fn breadth_first_global<G: DirectedGraphView, A: Adjacency, B>(
+fn breadth_first_global<G: GraphView, A: Adjacency, B>(
     axis: A,
     graph: &G,
     config: SearchConfig,
@@ -812,7 +812,7 @@ fn breadth_first_global<G: DirectedGraphView, A: Adjacency, B>(
         if !may_expand(config, depth) {
             continue;
         }
-        for next in axis.neighbors(graph, id).map(DenseNodeId::index) {
+        for next in axis.neighbors(graph, id).map(DenseId::index) {
             if !visited.is_marked(next) {
                 visited.mark(next);
                 queue.push((next, depth + 1));

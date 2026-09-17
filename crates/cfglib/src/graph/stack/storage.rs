@@ -5,81 +5,48 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::ops::Index;
 
-use crate::graph::directed::{DirectedGraph, EdgeId as DirectedEdgeId, NodeId};
-use crate::graph::edge_view::{DenseEdgeId, EdgeGraphView, EdgeRef};
-use crate::graph::view::{DenseNodeId, DirectedGraphView};
-use crate::identity::define_dense_id;
+use crate::graph::edge_view::{EdgeRef, EdgeView};
+use crate::graph::store::{Graph, Id, IdTag};
+use crate::graph::view::GraphView;
 
-define_dense_id! {
-    /// Dense identity of a file partition in a [`StackGraph`].
-    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-    pub struct StackFileId(u32);
-    display = "f";
-    /// Construct a file identity from a dense zero-based index.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `index` exceeds `u32::MAX`.
-    from_index = "stack-graph file index exceeds u32::MAX";
+/// Tag marking an identity that addresses a stack-graph file partition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StackFileTag;
+
+impl IdTag for StackFileTag {
+    const PREFIX: &'static str = "f";
 }
 
-define_dense_id! {
-    /// Dense identity of a node in a [`StackGraph`].
-    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-    pub struct StackNodeId(u32);
-    display = "sn";
-    /// Construct a node identity from a dense zero-based index.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `index` exceeds `u32::MAX`.
-    from_index = "stack-graph node index exceeds u32::MAX";
+/// Tag marking an identity that addresses a stack-graph node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StackNodeTag;
+
+impl IdTag for StackNodeTag {
+    const PREFIX: &'static str = "sn";
 }
 
-impl StackNodeId {
-    const fn graph_id(self) -> NodeId {
-        NodeId::from_raw(self.0)
-    }
+/// Tag marking an identity that addresses a stack-graph edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StackEdgeTag;
+
+impl IdTag for StackEdgeTag {
+    const PREFIX: &'static str = "sg-e";
 }
 
-impl DenseNodeId for StackNodeId {
-    fn from_index(index: usize) -> Self {
-        Self::from_index(index)
-    }
+/// Dense identity of a file partition in a [`StackGraph`].
+///
+/// A file is not a graph entity — it indexes the graph's file table — but it
+/// is dense and stable, so it shares the crate's one identity definition.
+pub type StackFileId = Id<StackFileTag>;
 
-    fn index(self) -> usize {
-        self.index()
-    }
-}
+/// Dense identity of a node in a [`StackGraph`].
+pub type StackNodeId = Id<StackNodeTag>;
 
-define_dense_id! {
-    /// Stable identity of an edge in a [`StackGraph`].
-    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-    pub struct StackEdgeId(u32);
-    display = "sg-e";
-    /// Construct an edge identity from a dense arena index.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `index` exceeds `u32::MAX`.
-    from_index = "stack-graph edge index exceeds u32::MAX";
-}
+/// Stable identity of an edge in a [`StackGraph`].
+pub type StackEdgeId = Id<StackEdgeTag>;
 
-impl StackEdgeId {
-    const fn graph_id(self) -> DirectedEdgeId {
-        DirectedEdgeId::from_raw(self.0)
-    }
-}
-
-impl DenseEdgeId for StackEdgeId {
-    fn from_index(index: usize) -> Self {
-        Self::from_index(index)
-    }
-
-    fn index(self) -> usize {
-        self.index()
-    }
-}
+/// The store a [`StackGraph`] is built on.
+type StackStore<S, N, E> = Graph<StackNode<S, N>, StackEdge<E>, StackNodeTag, StackEdgeTag>;
 
 /// The semantic kind of one stack-graph node.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,8 +164,6 @@ pub struct StackNode<S, N> {
     file: Option<StackFileId>,
     kind: StackNodeKind<S>,
     payload: Option<N>,
-    #[cfg_attr(feature = "serde", serde(default = "live_node_default"))]
-    live: bool,
 }
 
 impl<S, N> StackNode<S, N> {
@@ -224,20 +189,6 @@ impl<S, N> StackNode<S, N> {
     pub const fn payload_mut(&mut self) -> Option<&mut N> {
         self.payload.as_mut()
     }
-
-    /// Whether this node is part of the current file generation.
-    ///
-    /// Clearing a file leaves its old nodes as tombstones so identities in
-    /// diagnostics and caches never silently refer to newly allocated nodes.
-    #[must_use]
-    pub const fn is_live(&self) -> bool {
-        self.live
-    }
-}
-
-#[cfg(feature = "serde")]
-const fn live_node_default() -> bool {
-    true
 }
 
 /// Consumer data and precedence carried by one stack-graph edge.
@@ -331,7 +282,7 @@ impl core::error::Error for StackGraphError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct StackGraph<F = (), S = (), N = (), E = ()> {
-    graph: DirectedGraph<StackNode<S, N>, StackEdge<E>>,
+    graph: StackStore<S, N, E>,
     files: Vec<F>,
     file_nodes: Vec<Vec<StackNodeId>>,
     root: StackNodeId,
@@ -342,27 +293,17 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
     /// Create an empty graph containing the root and jump-to-scope singletons.
     #[must_use]
     pub fn new() -> Self {
-        let mut graph = DirectedGraph::new();
-        let root = StackNodeId::from_index(
-            graph
-                .add_node(StackNode {
-                    file: None,
-                    kind: StackNodeKind::Root,
-                    payload: None,
-                    live: true,
-                })
-                .index(),
-        );
-        let jump_to_scope = StackNodeId::from_index(
-            graph
-                .add_node(StackNode {
-                    file: None,
-                    kind: StackNodeKind::JumpToScope,
-                    payload: None,
-                    live: true,
-                })
-                .index(),
-        );
+        let mut graph = StackStore::tagged();
+        let root = graph.add_node(StackNode {
+            file: None,
+            kind: StackNodeKind::Root,
+            payload: None,
+        });
+        let jump_to_scope = graph.add_node(StackNode {
+            file: None,
+            kind: StackNodeKind::JumpToScope,
+            payload: None,
+        });
         Self {
             graph,
             files: Vec::new(),
@@ -510,16 +451,11 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
         payload: N,
     ) -> Result<StackNodeId, StackGraphError> {
         self.require_file(file)?;
-        let node = StackNodeId::from_index(
-            self.graph
-                .add_node(StackNode {
-                    file: Some(file),
-                    kind,
-                    payload: Some(payload),
-                    live: true,
-                })
-                .index(),
-        );
+        let node = self.graph.add_node(StackNode {
+            file: Some(file),
+            kind,
+            payload: Some(payload),
+        });
         self.file_nodes[file.index()].push(node);
         Ok(node)
     }
@@ -551,30 +487,32 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
         {
             return Err(StackGraphError::CrossFileEdge { source, target });
         }
-        let edge = self.graph.add_edge(
-            source.graph_id(),
-            target.graph_id(),
+        Ok(self.graph.add_edge(
+            source,
+            target,
             StackEdge {
                 precedence,
                 payload,
             },
-        );
-        Ok(StackEdgeId::from_index(edge.index()))
+        ))
     }
 
     /// Remove an edge while preserving every other identity.
-    pub fn remove_edge(&mut self, edge: StackEdgeId) -> Option<StackEdge<E>> {
-        self.graph
-            .remove_edge(edge.graph_id())
-            .map(crate::graph::directed::DirectedEdge::into_payload)
+    ///
+    /// Returns whether the edge had been live.
+    pub fn remove_edge(&mut self, edge: StackEdgeId) -> bool {
+        self.graph.remove_edge(edge)
     }
 
-    /// Retire every node and incident edge belonging to `file`.
+    /// Remove every node and incident edge belonging to `file`.
     ///
-    /// The file identity and payload remain available for rebuilding. Retired
-    /// node and edge slots become tombstones and are never reused. After adding
-    /// the replacement nodes and edges, update a [`StackPartialPathDatabase`](super::StackPartialPathDatabase)
-    /// with [`replace_file`](super::StackPartialPathDatabase::replace_file).
+    /// The file identity and payload remain available for rebuilding. Removed
+    /// node and edge slots are never reused, and their payloads stay readable
+    /// through [`node`](Self::node), so identities in diagnostics and caches
+    /// never silently refer to newly allocated nodes. After adding the
+    /// replacement nodes and edges, update a
+    /// [`StackPartialPathDatabase`](super::StackPartialPathDatabase) with
+    /// [`replace_file`](super::StackPartialPathDatabase::replace_file).
     ///
     /// # Errors
     ///
@@ -582,18 +520,8 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
     pub fn clear_file(&mut self, file: StackFileId) -> Result<Vec<StackNodeId>, StackGraphError> {
         self.require_file(file)?;
         let retired = core::mem::take(&mut self.file_nodes[file.index()]);
-        let mut incident_edges = Vec::new();
         for &node in &retired {
-            incident_edges.extend(self.outgoing_edges(node));
-            incident_edges.extend(self.incoming_edges(node));
-        }
-        incident_edges.sort_unstable();
-        incident_edges.dedup();
-        for edge in incident_edges {
-            let _ = self.remove_edge(edge);
-        }
-        for &node in &retired {
-            self.graph.node_mut(node.graph_id()).live = false;
+            self.graph.remove_node(node);
         }
         Ok(retired)
     }
@@ -646,7 +574,7 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
     /// Panics when `node` does not belong to this graph.
     #[must_use]
     pub fn node(&self, node: StackNodeId) -> &StackNode<S, N> {
-        self.graph.node(node.graph_id())
+        self.graph.node(node)
     }
 
     /// Mutably borrow one node.
@@ -655,7 +583,7 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
     ///
     /// Panics when `node` does not belong to this graph.
     pub fn node_mut(&mut self, node: StackNodeId) -> &mut StackNode<S, N> {
-        self.graph.node_mut(node.graph_id())
+        self.graph.node_mut(node)
     }
 
     /// Borrow one live edge.
@@ -665,13 +593,12 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
     /// Panics when `edge` is out of range or was removed.
     #[must_use]
     pub fn edge(&self, edge: StackEdgeId) -> EdgeRef<'_, StackNodeId, StackEdgeId, StackEdge<E>> {
-        let value = self.graph.edge(edge.graph_id());
-        EdgeRef::new(
-            edge,
-            StackNodeId::from_index(value.source().index()),
-            StackNodeId::from_index(value.target().index()),
-            value.payload(),
-        )
+        assert!(
+            self.graph.contains_edge(edge),
+            "stack-graph edge {edge} has been removed"
+        );
+        let value = self.graph.edge(edge);
+        EdgeRef::new(edge, value.source(), value.target(), value.payload())
     }
 
     /// Mutably borrow one live edge's data and precedence.
@@ -680,7 +607,11 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
     ///
     /// Panics when `edge` is out of range or was removed.
     pub fn edge_mut(&mut self, edge: StackEdgeId) -> &mut StackEdge<E> {
-        self.graph.edge_mut(edge.graph_id()).payload_mut()
+        assert!(
+            self.graph.contains_edge(edge),
+            "stack-graph edge {edge} has been removed"
+        );
+        self.graph.edge_mut(edge).payload_mut()
     }
 
     /// Set the precedence used when comparing paths through `edge`.
@@ -697,45 +628,26 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
         (0..self.files.len()).map(StackFileId::from_index)
     }
 
-    /// Iterate over every node slot, including retired file generations.
-    pub fn node_ids(&self) -> impl ExactSizeIterator<Item = StackNodeId> + '_ {
-        (0..self.node_count()).map(StackNodeId::from_index)
-    }
-
     /// Iterate over the singleton nodes and current file-generation nodes.
-    pub fn live_node_ids(&self) -> impl Iterator<Item = StackNodeId> + '_ {
-        self.node_ids().filter(|&node| self.node(node).is_live())
+    pub fn node_ids(&self) -> impl Iterator<Item = StackNodeId> + '_ {
+        self.graph.node_ids()
     }
 
     /// Iterate over every live edge identity in insertion order.
     pub fn edge_ids(&self) -> impl Iterator<Item = StackEdgeId> + '_ {
-        self.graph
-            .edges()
-            .map(|edge| StackEdgeId::from_index(edge.id().index()))
+        self.graph.edge_ids()
     }
 
     /// Return outgoing edge identities in insertion order.
     #[must_use = "iterators are lazy and do nothing unless consumed"]
-    pub fn outgoing_edges(
-        &self,
-        node: StackNodeId,
-    ) -> impl ExactSizeIterator<Item = StackEdgeId> + '_ {
-        self.graph
-            .outgoing_edges(node.graph_id())
-            .iter()
-            .map(|edge| StackEdgeId::from_index(edge.index()))
+    pub fn outgoing(&self, node: StackNodeId) -> impl Iterator<Item = StackEdgeId> + '_ {
+        self.graph.outgoing(node)
     }
 
     /// Return incoming edge identities in insertion order.
     #[must_use = "iterators are lazy and do nothing unless consumed"]
-    pub fn incoming_edges(
-        &self,
-        node: StackNodeId,
-    ) -> impl ExactSizeIterator<Item = StackEdgeId> + '_ {
-        self.graph
-            .incoming_edges(node.graph_id())
-            .iter()
-            .map(|edge| StackEdgeId::from_index(edge.index()))
+    pub fn incoming(&self, node: StackNodeId) -> impl Iterator<Item = StackEdgeId> + '_ {
+        self.graph.incoming(node)
     }
 
     /// Return the number of file partitions.
@@ -744,40 +656,43 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
         self.files.len()
     }
 
-    /// Return the number of node slots, including retired-file tombstones.
+    /// Return the number of live nodes, including the two singletons.
     #[must_use]
-    pub fn node_count(&self) -> usize {
+    pub const fn node_count(&self) -> usize {
         self.graph.node_count()
     }
 
-    /// Return the number of live nodes, including the two singletons.
+    /// An exclusive upper bound on every live [`StackNodeId`] index.
+    ///
+    /// The right size for a node-indexed side table; it exceeds
+    /// [`node_count`](Self::node_count) once a file has been cleared.
     #[must_use]
-    pub fn live_node_count(&self) -> usize {
-        self.live_node_ids().count()
+    pub fn node_bound(&self) -> usize {
+        self.graph.node_bound()
     }
 
     /// Return whether `node` belongs to the current graph generation.
     #[must_use]
     pub fn contains_node(&self, node: StackNodeId) -> bool {
-        self.graph.contains_node(node.graph_id()) && self.node(node).is_live()
+        self.graph.contains_node(node)
     }
 
     /// Return the number of live edges.
     #[must_use]
-    pub fn edge_count(&self) -> usize {
+    pub const fn edge_count(&self) -> usize {
         self.graph.edge_count()
     }
 
-    /// Return the number of edge slots, including removed-edge tombstones.
+    /// An exclusive upper bound on every live [`StackEdgeId`] index.
     #[must_use]
-    pub fn edge_slot_count(&self) -> usize {
-        self.graph.edge_slot_count()
+    pub fn edge_bound(&self) -> usize {
+        self.graph.edge_bound()
     }
 
     /// Return whether `edge` identifies a live edge in this graph.
     #[must_use]
     pub fn contains_edge(&self, edge: StackEdgeId) -> bool {
-        self.graph.contains_edge(edge.graph_id())
+        self.graph.contains_edge(edge)
     }
 
     fn require_file(&self, file: StackFileId) -> Result<(), StackGraphError> {
@@ -811,46 +726,48 @@ impl<F, S, N, E> Default for StackGraph<F, S, N, E> {
     }
 }
 
-impl<F, S, N, E> DirectedGraphView for StackGraph<F, S, N, E> {
+impl<F, S, N, E> GraphView for StackGraph<F, S, N, E> {
     type NodeId = StackNodeId;
 
-    fn node_count(&self) -> usize {
-        self.node_count()
+    fn node_bound(&self) -> usize {
+        StackGraph::node_bound(self)
+    }
+
+    fn node_ids(&self) -> impl Iterator<Item = StackNodeId> + '_ {
+        StackGraph::node_ids(self)
     }
 
     fn successors(&self, node: StackNodeId) -> impl Iterator<Item = StackNodeId> + '_ {
-        self.outgoing_edges(node)
-            .map(|edge| self.edge(edge).target())
+        self.graph.successors(node)
     }
 
     fn predecessors(&self, node: StackNodeId) -> impl Iterator<Item = StackNodeId> + '_ {
-        self.incoming_edges(node)
-            .map(|edge| self.edge(edge).source())
+        self.graph.predecessors(node)
     }
 }
 
-impl<F, S, N, E> EdgeGraphView for StackGraph<F, S, N, E> {
+impl<F, S, N, E> EdgeView for StackGraph<F, S, N, E> {
     type EdgeId = StackEdgeId;
     type EdgeData = StackEdge<E>;
 
-    fn edge_slot_count(&self) -> usize {
-        self.edge_slot_count()
+    fn edge_bound(&self) -> usize {
+        StackGraph::edge_bound(self)
     }
 
     fn edge_ids(&self) -> impl Iterator<Item = StackEdgeId> + '_ {
-        self.edge_ids()
+        StackGraph::edge_ids(self)
     }
 
-    fn outgoing_edges(&self, node: StackNodeId) -> impl Iterator<Item = StackEdgeId> + '_ {
-        self.outgoing_edges(node)
+    fn outgoing(&self, node: StackNodeId) -> impl Iterator<Item = StackEdgeId> + '_ {
+        StackGraph::outgoing(self, node)
     }
 
-    fn incoming_edges(&self, node: StackNodeId) -> impl Iterator<Item = StackEdgeId> + '_ {
-        self.incoming_edges(node)
+    fn incoming(&self, node: StackNodeId) -> impl Iterator<Item = StackEdgeId> + '_ {
+        StackGraph::incoming(self, node)
     }
 
-    fn edge_ref(&self, edge: StackEdgeId) -> EdgeRef<'_, StackNodeId, StackEdgeId, StackEdge<E>> {
-        self.edge(edge)
+    fn edge(&self, edge: StackEdgeId) -> EdgeRef<'_, StackNodeId, StackEdgeId, StackEdge<E>> {
+        StackGraph::edge(self, edge)
     }
 }
 

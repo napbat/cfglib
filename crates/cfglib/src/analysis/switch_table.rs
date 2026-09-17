@@ -55,11 +55,12 @@ pub trait SwitchSource {
 #[must_use]
 pub fn detect_switch_tables<I: SwitchSource>(cfg: &Cfg<I>) -> Vec<JumpTable<I::Target>> {
     let mut tables = Vec::new();
-    for block in cfg.blocks() {
+    for block_id in cfg.block_ids() {
+        let block = cfg.block(block_id);
         if let Some(last) = block.instructions().last() {
             if let Some((targets, default_target)) = last.switch_targets() {
                 tables.push(JumpTable {
-                    block: block.id(),
+                    block: block_id,
                     targets,
                     default_target,
                 });
@@ -96,10 +97,8 @@ pub fn recover_switch_tables<I, T>(
 
     for table in tables {
         let edges_to_remove: Vec<_> = cfg
-            .successor_edges(table.block)
-            .iter()
-            .filter(|&&eid| cfg.edge(eid).kind() == EdgeKind::IndirectJump)
-            .copied()
+            .outgoing(table.block)
+            .filter(|&eid| cfg.edge(eid).kind() == EdgeKind::IndirectJump)
             .collect();
         for eid in edges_to_remove {
             cfg.remove_edge(eid);

@@ -1,4 +1,10 @@
 //! Crate-internal macro for defining dense `u32`-backed identity newtypes.
+//!
+//! This is for a dense index into a plain array — a region, a datum, a
+//! reference, a partial path, an IR statement. An identity that addresses a
+//! *store* entity is [`Id<T>`](crate::Id) instead, so the store mints it and
+//! one definition carries ordering, hashing, display, and serialization for
+//! every kind of node and edge in the crate.
 
 /// Defines a dense identity newtype backed by a `u32`.
 ///
@@ -17,7 +23,7 @@
 ///   panicking `from_index` constructor; the doc comment (including its
 ///   `# Panics` section) and the `expect` message come from the call site.
 ///
-/// Type-specific extras — `DenseNodeId`/`DenseEdgeId` impls, private
+/// Type-specific extras — `DenseId`/`DenseId` impls, private
 /// helpers, extra constructors — stay outside the macro, written next to
 /// the invocation.
 macro_rules! define_dense_id {

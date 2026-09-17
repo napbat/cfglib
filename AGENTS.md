@@ -104,7 +104,7 @@ with `uv run --no-project python scripts/check_repository_policy.py`.
   implement `core::error::Error`.
 - Counting accessors use the `*_count` suffix (`block_count`, `edge_count`,
   `value_count`); do not introduce `num_*` names.
-- `_mapped` marks the `RewriteMap`-returning variant of a transform that also
+- `_mapped` marks the `Rewrite`-returning variant of a transform that also
   exists without one; a transform whose only form returns a map takes no
   suffix. Passes that only add blocks or edges return the new identities
   directly instead of a map.

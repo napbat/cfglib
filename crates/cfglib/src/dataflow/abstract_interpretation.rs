@@ -114,9 +114,9 @@ pub fn abstract_interpret<I, E, D: AbstractDomain<I>>(cfg: &Cfg<I, E>) -> Abstra
     // Convert Vec-indexed results to BTreeMap-keyed results.
     let mut block_in = BTreeMap::new();
     let mut block_out = BTreeMap::new();
-    for b in cfg.blocks() {
-        block_in.insert(b.id(), result.fact_in(b.id()).clone());
-        block_out.insert(b.id(), result.fact_out(b.id()).clone());
+    for block_id in cfg.block_ids() {
+        block_in.insert(block_id, result.fact_in(block_id).clone());
+        block_out.insert(block_id, result.fact_out(block_id).clone());
     }
 
     AbstractFacts {

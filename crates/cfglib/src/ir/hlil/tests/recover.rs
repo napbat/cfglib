@@ -11,6 +11,7 @@ use crate::ir::hlil::{
     lift_function, recover_structure,
 };
 use crate::ir::mlil;
+use crate::test_util::golden::assert_golden;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UpdateForm {
@@ -155,8 +156,10 @@ fn counted_loop_recovers_as_for() {
         recovery.function.to_pseudocode()
     );
     assert!(recovery.function.verify().is_ok());
-    let pseudo = recovery.function.to_pseudocode();
-    assert!(pseudo.contains("for ("), "{pseudo}");
+    assert_golden(
+        "hlil/recover-for-loop.pseudo",
+        &recovery.function.to_pseudocode(),
+    );
     // The loop maps to the recovered statement; the init keeps its copy.
     let recovered_loop = recovery.statements[&looped];
     assert!(matches!(
@@ -243,9 +246,11 @@ fn assigning_diamond_recovers_as_selection() {
     let recovery = recover_structure(&function).unwrap();
     assert_eq!(recovery.selects, 1, "{}", recovery.function.to_pseudocode());
     assert!(recovery.function.verify().is_ok());
-    let pseudo = recovery.function.to_pseudocode();
-    assert!(pseudo.contains("select("), "{pseudo}");
-    assert!(!pseudo.contains("if"), "{pseudo}");
+    // The diamond became one selection: no `if` survives in the golden.
+    assert_golden(
+        "hlil/recover-select.pseudo",
+        &recovery.function.to_pseudocode(),
+    );
     // The diamond and both arms map to the single recovered assignment.
     assert_eq!(
         recovery.statements[&diamond],
@@ -375,10 +380,11 @@ fn paired_region_recovers_with_suppressed_exits() {
     let recovery = recover_structure(&function).unwrap();
     assert_eq!(recovery.regions, 1, "{}", recovery.function.to_pseudocode());
     assert!(recovery.function.verify().is_ok());
-    let pseudo = recovery.function.to_pseudocode();
-    assert!(pseudo.contains("acquire"), "{pseudo}");
-    assert!(!pseudo.contains("release"), "{pseudo}");
-    assert!(!pseudo.contains("try"), "{pseudo}");
+    // The pair became one region: its release and its `try` are gone.
+    assert_golden(
+        "hlil/recover-region.pseudo",
+        &recovery.function.to_pseudocode(),
+    );
     // Enter, try, cleanup, and the suppressed normal exit all map onto the
     // region.
     let region = recovery.statements[&ids.enter];
@@ -447,8 +453,10 @@ fn exit_on_true_loop_negates_by_operation_inversion() {
 
     let lifted = lift_function(&function).unwrap();
     assert!(lifted.function.verify().is_ok());
-    let pseudo = lifted.function.to_pseudocode();
     // The exit-on-true test inverted in place: `while (at-least(...))`
     // instead of a wrapped negation or a degraded endless loop.
-    assert!(pseudo.contains("while (at-least(v0, v1))"), "{pseudo}");
+    assert_golden(
+        "hlil/recover-inverted-loop.pseudo",
+        &lifted.function.to_pseudocode(),
+    );
 }

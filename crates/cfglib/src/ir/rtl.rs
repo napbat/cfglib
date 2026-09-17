@@ -56,6 +56,7 @@ mod expr;
 mod function;
 mod lift;
 mod lower;
+mod pseudocode;
 mod render;
 mod statement;
 mod template;

@@ -1,14 +1,14 @@
 extern crate alloc;
 
 use super::*;
-use crate::graph::directed::{DirectedGraph, NodeId};
+use crate::graph::store::{Graph, NodeId};
 use crate::graph::traverse::TraversalDirection;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
-fn bfs_graph() -> (DirectedGraph<(), ()>, [NodeId; 4]) {
-    let mut graph = DirectedGraph::new();
+fn bfs_graph() -> (Graph<(), ()>, [NodeId; 4]) {
+    let mut graph = Graph::new();
     let root = graph.add_node(());
     let left = graph.add_node(());
     let right = graph.add_node(());
@@ -22,7 +22,7 @@ fn bfs_graph() -> (DirectedGraph<(), ()>, [NodeId; 4]) {
     (graph, [root, left, right, merge])
 }
 
-fn bfs_events(graph: &DirectedGraph<(), ()>, start: NodeId) -> Vec<BfsEvent<NodeId>> {
+fn bfs_events(graph: &Graph<(), ()>, start: NodeId) -> Vec<BfsEvent<NodeId>> {
     let mut events = Vec::new();
     let outcome = breadth_first_events(graph, start, TraversalDirection::Outgoing, |event| {
         events.push(event);
@@ -54,7 +54,7 @@ fn breadth_first_events_classify_edges_in_level_order() {
 
 #[test]
 fn breadth_first_events_follow_the_selected_axis() {
-    let mut graph = DirectedGraph::<(), ()>::new();
+    let mut graph = Graph::<(), ()>::new();
     let first = graph.add_node(());
     let middle = graph.add_node(());
     let last = graph.add_node(());
@@ -100,8 +100,8 @@ fn breadth_first_events_stop_at_the_break_event() {
 
 /// `a -> b`, `a -> d`, `a -> c`, `b -> c`, `c -> a`, `d -> c`: one graph
 /// carrying all four edge classes.
-fn dfs_graph() -> (DirectedGraph<(), ()>, [NodeId; 4]) {
-    let mut graph = DirectedGraph::<(), ()>::new();
+fn dfs_graph() -> (Graph<(), ()>, [NodeId; 4]) {
+    let mut graph = Graph::<(), ()>::new();
     let a = graph.add_node(());
     let b = graph.add_node(());
     let c = graph.add_node(());
@@ -115,7 +115,7 @@ fn dfs_graph() -> (DirectedGraph<(), ()>, [NodeId; 4]) {
     (graph, [a, b, c, d])
 }
 
-fn dfs_events(graph: &DirectedGraph<(), ()>, start: NodeId) -> Vec<DfsEvent<NodeId>> {
+fn dfs_events(graph: &Graph<(), ()>, start: NodeId) -> Vec<DfsEvent<NodeId>> {
     let mut log = Vec::new();
     let outcome = depth_first_events(graph, start, TraversalDirection::Outgoing, |event| {
         log.push(event);
@@ -154,7 +154,7 @@ fn depth_first_events_classify_every_edge_in_a_pinned_order() {
 
 #[test]
 fn depth_first_events_report_self_edges_as_back_edges() {
-    let mut graph = DirectedGraph::<(), ()>::new();
+    let mut graph = Graph::<(), ()>::new();
     let only = graph.add_node(());
     graph.add_edge(only, only, ());
     assert_eq!(
@@ -169,7 +169,7 @@ fn depth_first_events_report_self_edges_as_back_edges() {
 
 #[test]
 fn depth_first_events_only_cover_the_reachable_set() {
-    let mut graph = DirectedGraph::<(), ()>::new();
+    let mut graph = Graph::<(), ()>::new();
     let a = graph.add_node(());
     let b = graph.add_node(());
     let unreached = graph.add_node(());

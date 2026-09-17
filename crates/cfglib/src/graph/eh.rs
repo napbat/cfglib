@@ -5,7 +5,6 @@
 //! caller-owned edge metadata — enabling accurate runtime-neutral analysis.
 
 extern crate alloc;
-use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
@@ -94,22 +93,79 @@ pub struct EhEdge {
 }
 
 /// EH model for a CFG.
+///
+/// Every block-keyed table is a dense vector indexed by block, sized by the
+/// source CFG's block bound: the classification is total over blocks anyway,
+/// and the rest answer in one load instead of a tree descent.
 #[derive(Debug, Clone)]
 pub struct EhModel {
-    /// Classification of each block.
-    pub block_kinds: BTreeMap<BlockId, EhBlockKind>,
-    /// All exception-control edges, including leave, rethrow, and continue.
-    pub eh_edges: Vec<EhEdge>,
-    /// Landing pad → set of blocks it protects.
-    pub protected_by: BTreeMap<BlockId, BTreeSet<BlockId>>,
-    /// Handler entry block → region/handler identities that use that entry.
+    block_kinds: Vec<EhBlockKind>,
+    eh_edges: Vec<EhEdge>,
+    protected_by: Vec<BTreeSet<BlockId>>,
+    handlers: Vec<Vec<HandlerRef>>,
+    cleanups: Vec<Option<Cleanup>>,
+}
+
+mod build;
+
+static NO_PROTECTED_BLOCKS: BTreeSet<BlockId> = BTreeSet::new();
+
+impl EhModel {
+    /// The block bound this model was computed over.
     ///
-    /// The identity provides a lossless route back to
-    /// [`HandlerKind`] and consumer-owned
-    /// [`HandlerMetadata`](crate::HandlerMetadata).
-    pub handlers: BTreeMap<BlockId, Vec<HandlerRef>>,
-    /// Cleanup handler entry block → what the cleanup does once its body
-    /// ends, for the handlers whose frontend recorded it
+    /// Every block-keyed query answers for an index below it.
+    #[must_use]
+    pub fn block_bound(&self) -> usize {
+        self.block_kinds.len()
+    }
+
+    /// The exception-handling role of one block.
+    ///
+    /// A block outside the model — one added after it was computed — reads as
+    /// [`EhBlockKind::Normal`].
+    #[must_use]
+    pub fn block_kind(&self, block: BlockId) -> EhBlockKind {
+        self.block_kinds
+            .get(block.index())
+            .copied()
+            .unwrap_or(EhBlockKind::Normal)
+    }
+
+    /// Every block and its exception-handling role, in block order.
+    pub fn block_kinds(&self) -> impl Iterator<Item = (BlockId, EhBlockKind)> + '_ {
+        self.block_kinds
+            .iter()
+            .enumerate()
+            .map(|(index, &kind)| (BlockId::from_index(index), kind))
+    }
+
+    /// All exception-control edges, including leave, rethrow, and continue.
+    #[must_use]
+    pub fn eh_edges(&self) -> &[EhEdge] {
+        &self.eh_edges
+    }
+
+    /// The blocks `handler_entry` protects, empty when it protects none.
+    #[must_use]
+    pub fn protected_by(&self, handler_entry: BlockId) -> &BTreeSet<BlockId> {
+        self.protected_by
+            .get(handler_entry.index())
+            .unwrap_or(&NO_PROTECTED_BLOCKS)
+    }
+
+    /// The region/handler identities entered at `handler_entry`.
+    ///
+    /// The identity provides a lossless route back to [`HandlerKind`] and
+    /// consumer-owned [`HandlerMetadata`](crate::HandlerMetadata).
+    #[must_use]
+    pub fn handlers(&self, handler_entry: BlockId) -> &[HandlerRef] {
+        self.handlers
+            .get(handler_entry.index())
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// What the cleanup entered at `handler_entry` does once its body ends,
+    /// for the handlers whose frontend recorded it
     /// ([`Cfg::add_continuation`](crate::Cfg::add_continuation)).
     ///
     /// A `finally` lowered as a single shared block is entered by every route
@@ -119,18 +175,24 @@ pub struct EhModel {
     /// cleanup was entered by a `return`", and [`Cleanup::resume_from`] names
     /// the block those edges leave (`None` when the cleanup diverges, in
     /// which case its recorded routes are unreachable).
-    pub cleanups: BTreeMap<BlockId, Cleanup>,
-}
+    #[must_use]
+    pub fn cleanup(&self, handler_entry: BlockId) -> Option<&Cleanup> {
+        self.cleanups.get(handler_entry.index())?.as_ref()
+    }
 
-mod build;
+    /// Every recorded cleanup with the handler entry block it belongs to.
+    pub fn cleanups(&self) -> impl Iterator<Item = (BlockId, &Cleanup)> + '_ {
+        self.cleanups
+            .iter()
+            .enumerate()
+            .filter_map(|(index, cleanup)| Some((BlockId::from_index(index), cleanup.as_ref()?)))
+    }
 
-impl EhModel {
     /// All blocks classified as `kind`.
     fn blocks_of_kind(&self, kind: EhBlockKind) -> Vec<BlockId> {
-        self.block_kinds
-            .iter()
-            .filter(|&(_, k)| *k == kind)
-            .map(|(&block, _)| block)
+        self.block_kinds()
+            .filter(|&(_, candidate)| candidate == kind)
+            .map(|(block, _)| block)
             .collect()
     }
 
@@ -191,12 +253,11 @@ mod tests {
         cfg.block_mut(b).instructions_mut().push(ff("b"));
         cfg.add_edge(cfg.entry(), b, EdgeKind::Fallthrough);
         let model = EhModel::compute(&cfg);
-        assert!(model.eh_edges.is_empty());
+        assert!(model.eh_edges().is_empty());
         assert!(
             model
-                .block_kinds
-                .values()
-                .all(|&k| k == EhBlockKind::Normal)
+                .block_kinds()
+                .all(|(_, kind)| kind == EhBlockKind::Normal)
         );
     }
 
@@ -210,9 +271,9 @@ mod tests {
         cfg.block_mut(handler).instructions_mut().push(ff("catch"));
         cfg.add_edge(cfg.entry(), handler, EdgeKind::ExceptionHandler);
         let model = EhModel::compute(&cfg);
-        assert_eq!(model.eh_edges.len(), 1);
-        assert_eq!(model.block_kinds[&handler], EhBlockKind::LandingPad);
-        assert!(model.protected_by[&handler].contains(&cfg.entry()));
+        assert_eq!(model.eh_edges().len(), 1);
+        assert_eq!(model.block_kind(handler), EhBlockKind::LandingPad);
+        assert!(model.protected_by(handler).contains(&cfg.entry()));
     }
 
     #[test]
@@ -235,13 +296,13 @@ mod tests {
         });
 
         let model = EhModel::compute(&cfg);
-        assert_eq!(model.eh_edges[0].edge_id, edge);
-        assert_eq!(model.block_kinds[&handler], EhBlockKind::LandingPad);
+        assert_eq!(model.eh_edges()[0].edge_id, edge);
+        assert_eq!(model.block_kind(handler), EhBlockKind::LandingPad);
         assert_eq!(
-            model.handlers[&handler],
+            model.handlers(handler),
             alloc::vec![HandlerRef::new(region, 0)]
         );
-        assert!(model.protected_by[&handler].contains(&entry));
+        assert!(model.protected_by(handler).contains(&entry));
     }
 
     #[test]
@@ -272,7 +333,7 @@ mod tests {
         });
 
         // Without records the model is exactly what it always was.
-        assert!(EhModel::compute(&cfg).cleanups.is_empty());
+        assert!(EhModel::compute(&cfg).cleanups().next().is_none());
 
         let handler = HandlerRef::new(region, 0);
         cfg.set_cleanup_resume(handler, cleanup);
@@ -295,8 +356,8 @@ mod tests {
         cfg.add_edge(cleanup, exit, EdgeKind::Fallthrough);
 
         let model = EhModel::compute(&cfg);
-        assert_eq!(model.block_kinds[&cleanup], EhBlockKind::Cleanup);
-        let recorded = &model.cleanups[&cleanup];
+        assert_eq!(model.block_kind(cleanup), EhBlockKind::Cleanup);
+        let recorded = model.cleanup(cleanup).expect("the cleanup was recorded");
         assert_eq!(recorded.handler, handler);
         assert_eq!(recorded.resume_from, Some(cleanup));
         assert_eq!(
@@ -388,7 +449,7 @@ mod tests {
         let model = EhModel::compute(&cfg);
         assert_eq!(
             model
-                .eh_edges
+                .eh_edges()
                 .iter()
                 .map(|edge| edge.kind)
                 .collect::<alloc::vec::Vec<_>>(),
@@ -399,8 +460,8 @@ mod tests {
                 EhEdgeKind::Continue,
             ]
         );
-        assert_eq!(model.eh_edges[0].edge_id, handler_edge);
-        assert_eq!(cfg[model.eh_edges[0].edge_id].payload().metadata(), &11);
+        assert_eq!(model.eh_edges()[0].edge_id, handler_edge);
+        assert_eq!(cfg[model.eh_edges()[0].edge_id].payload().metadata(), &11);
         assert_eq!(
             model.resume_blocks(),
             alloc::vec![rethrow, continue_decision]
@@ -427,9 +488,9 @@ mod tests {
         });
 
         let model = EhModel::compute(&cfg);
-        assert_eq!(model.block_kinds[&cleanup], EhBlockKind::Cleanup);
+        assert_eq!(model.block_kind(cleanup), EhBlockKind::Cleanup);
         assert_eq!(
-            model.handlers[&cleanup],
+            model.handlers(cleanup),
             alloc::vec![HandlerRef::new(region, 0)]
         );
     }

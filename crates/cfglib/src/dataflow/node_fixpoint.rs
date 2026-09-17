@@ -1,4 +1,4 @@
-//! Node-level fixpoint dataflow over any [`DirectedGraphView`].
+//! Node-level fixpoint dataflow over any [`GraphView`].
 //!
 //! The instruction fixpoint in [`fixpoint`](super::fixpoint) is bound to
 //! [`Cfg`](crate::Cfg) blocks; this is its graph-shaped counterpart: one
@@ -23,13 +23,13 @@ use core::convert::Infallible;
 
 use super::fixpoint::{Direction, SolveConfig, SolveError, TrySolveError, collapse_infallible};
 use crate::graph::traverse::{Adjacency, Incoming, Outgoing};
-use crate::graph::view::{DenseNodeId, DirectedGraphView};
+use crate::graph::view::{DenseId, GraphView};
 
 /// A node-level dataflow problem over a graph view `G`.
 ///
 /// Termination requires the usual contract: `meet` and `transfer` monotone
 /// over a finite-height fact lattice.
-pub trait NodeProblem<G: DirectedGraphView> {
+pub trait NodeProblem<G: GraphView> {
     /// The per-node dataflow fact.
     type Fact: Clone + PartialEq;
 
@@ -57,7 +57,7 @@ pub trait NodeProblem<G: DirectedGraphView> {
 /// verification and abstract interpretation where a boundary, merge, or
 /// transfer can reject the input graph. The solver reports those consumer
 /// errors separately from its own configured step limit.
-pub trait TryNodeProblem<G: DirectedGraphView> {
+pub trait TryNodeProblem<G: GraphView> {
     /// The per-node dataflow fact.
     type Fact: Clone + PartialEq;
 
@@ -110,13 +110,13 @@ pub struct NodeFacts<F> {
 impl<F> NodeFacts<F> {
     /// The met fact entering `node`.
     #[must_use]
-    pub fn fact_in<N: DenseNodeId>(&self, node: N) -> &F {
+    pub fn fact_in<N: DenseId>(&self, node: N) -> &F {
         &self.input[node.index()]
     }
 
     /// The transferred fact leaving `node`.
     #[must_use]
-    pub fn fact_out<N: DenseNodeId>(&self, node: N) -> &F {
+    pub fn fact_out<N: DenseId>(&self, node: N) -> &F {
         &self.output[node.index()]
     }
 
@@ -136,7 +136,7 @@ impl<F> NodeFacts<F> {
 /// configurations without changing result handling.
 pub fn solve_node_problem<G, P>(graph: &G, problem: &P) -> Result<NodeFacts<P::Fact>, SolveError>
 where
-    G: DirectedGraphView,
+    G: GraphView,
     P: NodeProblem<G>,
 {
     solve_node_problem_with_config(graph, problem, SolveConfig::new())
@@ -164,19 +164,19 @@ where
 /// # Examples
 ///
 /// ```
-/// use cfglib::{DirectedGraph, Direction, NodeId, NodeProblem, solve_node_problem_from};
+/// use cfglib::{Graph, Direction, NodeId, NodeProblem, solve_node_problem_from};
 ///
 /// // Forward taint over a value-flow graph.
 /// struct Taint(Vec<NodeId>);
-/// impl NodeProblem<DirectedGraph<&'static str, ()>> for Taint {
+/// impl NodeProblem<Graph<&'static str, ()>> for Taint {
 ///     type Fact = bool;
 ///     fn direction(&self) -> Direction {
 ///         Direction::Forward
 ///     }
-///     fn bottom(&self, _: &DirectedGraph<&'static str, ()>) -> bool {
+///     fn bottom(&self, _: &Graph<&'static str, ()>) -> bool {
 ///         false
 ///     }
-///     fn boundary(&self, _: &DirectedGraph<&'static str, ()>) -> bool {
+///     fn boundary(&self, _: &Graph<&'static str, ()>) -> bool {
 ///         false
 ///     }
 ///     fn meet(&self, a: &bool, b: &bool) -> bool {
@@ -184,7 +184,7 @@ where
 ///     }
 ///     fn transfer(
 ///         &self,
-///         _: &DirectedGraph<&'static str, ()>,
+///         _: &Graph<&'static str, ()>,
 ///         node: NodeId,
 ///         input: &bool,
 ///     ) -> bool {
@@ -192,7 +192,7 @@ where
 ///     }
 /// }
 ///
-/// let mut graph = DirectedGraph::<&'static str, ()>::new();
+/// let mut graph = Graph::<&'static str, ()>::new();
 /// let edited = graph.add_node("edited");
 /// let downstream = graph.add_node("downstream");
 /// let untouched = graph.add_node("untouched");
@@ -218,7 +218,7 @@ pub fn solve_node_problem_from<G, P>(
     seeds: &[G::NodeId],
 ) -> Result<NodeFacts<P::Fact>, SolveError>
 where
-    G: DirectedGraphView,
+    G: GraphView,
     P: NodeProblem<G>,
 {
     solve_node_problem_from_with_config(graph, problem, seeds, SolveConfig::new())
@@ -236,14 +236,14 @@ pub fn solve_node_problem_with_config<G, P>(
     config: SolveConfig,
 ) -> Result<NodeFacts<P::Fact>, SolveError>
 where
-    G: DirectedGraphView,
+    G: GraphView,
     P: NodeProblem<G>,
 {
     let fallible = InfallibleNodeProblem(problem);
     collapse_infallible(try_solve_with_worklist(
         graph,
         &fallible,
-        NodeWorklist::all(graph.node_count()),
+        NodeWorklist::all(graph.node_bound()),
         config,
     ))
 }
@@ -265,7 +265,7 @@ pub fn solve_node_problem_from_with_config<G, P>(
     config: SolveConfig,
 ) -> Result<NodeFacts<P::Fact>, SolveError>
 where
-    G: DirectedGraphView,
+    G: GraphView,
     P: NodeProblem<G>,
 {
     let fallible = InfallibleNodeProblem(problem);
@@ -288,7 +288,7 @@ pub fn try_solve_node_problem<G, P>(
     problem: &P,
 ) -> Result<NodeFacts<P::Fact>, TrySolveError<P::Error>>
 where
-    G: DirectedGraphView,
+    G: GraphView,
     P: TryNodeProblem<G>,
 {
     try_solve_node_problem_with_config(graph, problem, SolveConfig::new())
@@ -310,7 +310,7 @@ pub fn try_solve_node_problem_from<G, P>(
     seeds: &[G::NodeId],
 ) -> Result<NodeFacts<P::Fact>, TrySolveError<P::Error>>
 where
-    G: DirectedGraphView,
+    G: GraphView,
     P: TryNodeProblem<G>,
 {
     try_solve_node_problem_from_with_config(graph, problem, seeds, SolveConfig::new())
@@ -328,13 +328,13 @@ pub fn try_solve_node_problem_with_config<G, P>(
     config: SolveConfig,
 ) -> Result<NodeFacts<P::Fact>, TrySolveError<P::Error>>
 where
-    G: DirectedGraphView,
+    G: GraphView,
     P: TryNodeProblem<G>,
 {
     try_solve_with_worklist(
         graph,
         problem,
-        NodeWorklist::all(graph.node_count()),
+        NodeWorklist::all(graph.node_bound()),
         config,
     )
 }
@@ -357,18 +357,18 @@ pub fn try_solve_node_problem_from_with_config<G, P>(
     config: SolveConfig,
 ) -> Result<NodeFacts<P::Fact>, TrySolveError<P::Error>>
 where
-    G: DirectedGraphView,
+    G: GraphView,
     P: TryNodeProblem<G>,
 {
     try_solve_with_worklist(graph, problem, seed_worklist(graph, seeds), config)
 }
 
-fn seed_worklist<G: DirectedGraphView>(graph: &G, seeds: &[G::NodeId]) -> NodeWorklist {
+fn seed_worklist<G: GraphView>(graph: &G, seeds: &[G::NodeId]) -> NodeWorklist {
     let mut nodes: Vec<_> = seeds
         .iter()
         .map(|seed| {
             assert!(
-                seed.index() < graph.node_count(),
+                seed.index() < graph.node_bound(),
                 "seed node is out of range"
             );
             seed.index()
@@ -376,7 +376,7 @@ fn seed_worklist<G: DirectedGraphView>(graph: &G, seeds: &[G::NodeId]) -> NodeWo
         .collect();
     nodes.sort_unstable();
     nodes.dedup();
-    NodeWorklist::from_sorted(nodes, graph.node_count())
+    NodeWorklist::from_sorted(nodes, graph.node_bound())
 }
 
 struct NodeWorklist {
@@ -426,7 +426,7 @@ fn try_solve_with_worklist<G, P>(
     config: SolveConfig,
 ) -> Result<NodeFacts<P::Fact>, TrySolveError<P::Error>>
 where
-    G: DirectedGraphView,
+    G: GraphView,
     P: TryNodeProblem<G>,
 {
     match problem.direction() {
@@ -448,12 +448,12 @@ fn try_solve_by_axis<G, P, U, D>(
     config: SolveConfig,
 ) -> Result<NodeFacts<P::Fact>, TrySolveError<P::Error>>
 where
-    G: DirectedGraphView,
+    G: GraphView,
     P: TryNodeProblem<G>,
     U: Adjacency,
     D: Adjacency,
 {
-    let node_count = graph.node_count();
+    let node_count = graph.node_bound();
     let boundary = problem.boundary(graph).map_err(TrySolveError::Problem)?;
     let mut input = vec![problem.bottom(graph); node_count];
     let mut output = vec![problem.bottom(graph); node_count];
@@ -511,7 +511,7 @@ struct InfallibleNodeProblem<'p, P>(&'p P);
 
 impl<G, P> TryNodeProblem<G> for InfallibleNodeProblem<'_, P>
 where
-    G: DirectedGraphView,
+    G: GraphView,
     P: NodeProblem<G>,
 {
     type Fact = P::Fact;

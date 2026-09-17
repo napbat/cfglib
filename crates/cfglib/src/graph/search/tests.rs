@@ -1,11 +1,11 @@
 use super::*;
-use crate::graph::directed::{DirectedGraph, NodeId};
+use crate::graph::store::{Graph, NodeId};
 use alloc::vec;
 
 /// `a -> b -> d`, `a -> c`: depth-first reaches `d` before `c`,
 /// breadth-first the other way round.
-fn fork() -> (DirectedGraph<(), ()>, [NodeId; 4]) {
-    let mut graph = DirectedGraph::<(), ()>::new();
+fn fork() -> (Graph<(), ()>, [NodeId; 4]) {
+    let mut graph = Graph::<(), ()>::new();
     let a = graph.add_node(());
     let b = graph.add_node(());
     let c = graph.add_node(());
@@ -17,8 +17,8 @@ fn fork() -> (DirectedGraph<(), ()>, [NodeId; 4]) {
 }
 
 /// `a -> b`, `a -> c`, `b -> d`, `c -> d`: two paths reach `d`.
-fn diamond() -> (DirectedGraph<(), ()>, [NodeId; 4]) {
-    let mut graph = DirectedGraph::<(), ()>::new();
+fn diamond() -> (Graph<(), ()>, [NodeId; 4]) {
+    let mut graph = Graph::<(), ()>::new();
     let a = graph.add_node(());
     let b = graph.add_node(());
     let c = graph.add_node(());
@@ -35,7 +35,7 @@ fn config(order: SearchOrder) -> SearchConfig {
 }
 
 /// Visit order under `config`, seeded at `seeds`, descending everywhere.
-fn visit_order<G: DirectedGraphView>(
+fn visit_order<G: GraphView>(
     graph: &G,
     seeds: impl IntoIterator<Item = G::NodeId>,
     config: SearchConfig,
@@ -54,7 +54,7 @@ fn nodes<N: Copy>(order: &[(N, usize)]) -> Vec<N> {
 }
 
 /// The same, over marks the caller owns.
-fn marked_order<G: DirectedGraphView>(
+fn marked_order<G: GraphView>(
     graph: &G,
     seeds: impl IntoIterator<Item = G::NodeId>,
     config: SearchConfig,
@@ -70,7 +70,7 @@ fn marked_order<G: DirectedGraphView>(
 }
 
 /// The same, over a scratch the caller owns.
-fn scratch_order<G: DirectedGraphView>(
+fn scratch_order<G: GraphView>(
     graph: &G,
     seeds: impl IntoIterator<Item = G::NodeId>,
     config: SearchConfig,
@@ -230,7 +230,7 @@ fn duplicate_seeds_dedup_globally_and_repeat_on_paths() {
 #[test]
 fn cycles_terminate_under_both_policies() {
     // a -> b -> c -> a, with a self-edge on c.
-    let mut graph = DirectedGraph::<(), ()>::new();
+    let mut graph = Graph::<(), ()>::new();
     let a = graph.add_node(());
     let b = graph.add_node(());
     let c = graph.add_node(());
@@ -262,7 +262,7 @@ fn cycles_terminate_under_both_policies() {
 #[test]
 fn max_depth_bounds_expansion_not_visiting() {
     // A chain a -> b -> c -> d.
-    let mut graph = DirectedGraph::<(), ()>::new();
+    let mut graph = Graph::<(), ()>::new();
     let a = graph.add_node(());
     let b = graph.add_node(());
     let c = graph.add_node(());

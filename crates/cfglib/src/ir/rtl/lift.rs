@@ -92,8 +92,9 @@ pub fn lift<D: Lift>(
             }
         }
     }
-    for block in cfg.blocks() {
-        let annotations = ssa.block(block.id());
+    for block_id in cfg.block_ids() {
+        let block = cfg.block(block_id);
+        let annotations = ssa.block(block_id);
         for (index, node) in block.instructions().iter().enumerate() {
             let annotation = annotations
                 .instructions
@@ -167,8 +168,9 @@ pub fn lift<D: Lift>(
 
     // Phase 3: infer each web's constraint from read wants and
     // assignment value shapes.
-    for block in cfg.blocks() {
-        let annotations = ssa.block(block.id());
+    for block_id in cfg.block_ids() {
+        let block = cfg.block(block_id);
+        let annotations = ssa.block(block_id);
         for (index, node) in block.instructions().iter().enumerate() {
             let annotation = &annotations.instructions[index];
             let mut cursor = 0usize;
@@ -270,9 +272,17 @@ pub fn lift<D: Lift>(
 
     // Phase 5: mirror blocks. Edges wait until every instruction exists,
     // so edge lifting can reference emitted instruction identities.
+    // Indexed by source block, which is sound because an RTL function's CFG
+    // comes from a builder that never retires a slot.
+    debug_assert_eq!(
+        cfg.block_count(),
+        cfg.block_bound(),
+        "a lifted RTL CFG must hold no removed block slots"
+    );
     let mut block_map: Vec<BlockId> = Vec::with_capacity(cfg.block_count());
-    for block in cfg.blocks() {
-        if block.id() == cfg.entry() {
+    for block_id in cfg.block_ids() {
+        let block = cfg.block(block_id);
+        if block_id == cfg.entry() {
             block_map.push(builder.entry());
         } else {
             let label = block.label().unwrap_or("b").to_string();
@@ -316,13 +326,12 @@ pub fn lift<D: Lift>(
         current: None,
         native_defined: false,
     };
-    for block in cfg.blocks() {
+    for block_id in cfg.block_ids() {
+        let block = cfg.block(block_id);
         let has_exceptional_successor = cfg
-            .successor_edges(block.id())
-            .iter()
-            .copied()
+            .outgoing(block_id)
             .any(|edge| cfg.edge(edge).kind().is_exceptional());
-        let annotations = ssa.block(block.id());
+        let annotations = ssa.block(block_id);
         for (index, node) in block.instructions().iter().enumerate() {
             let annotation = &annotations.instructions[index];
             let spans = function
@@ -331,7 +340,7 @@ pub fn lift<D: Lift>(
                 .map(|entry| entry.source.clone())
                 .collect();
             emitter.statement(
-                block.id().index(),
+                block_id.index(),
                 node.id(),
                 node.statement(),
                 has_exceptional_successor && node.statement().may_throw(),
