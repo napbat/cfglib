@@ -325,6 +325,9 @@ pub use graph::stack::{
     StackPath, StackPathError, StackPathStep, StackResolution, StackResolutionIndex,
     StackReverseIndex, StackScopedSymbol, StackSearchConfig, StackSearchStats,
 };
+pub use graph::store::{
+    AdjacentEdges, EdgeRecord, EdgeTag, Graph, Id, IdTag, NodeTag, Renumbering,
+};
 pub use graph::structure::{
     BackEdge, CanonicalLoop, NaturalLoop, canonicalize_loops, detect_loops, detect_loops_tagged,
     find_back_edges, find_back_edges_tagged, insert_preheader, is_reducible, loop_exit_blocks,

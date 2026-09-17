@@ -22,6 +22,7 @@ pub mod scc;
 pub mod scope;
 pub mod search;
 pub mod stack;
+pub mod store;
 pub mod structure;
 pub mod traverse;
 pub mod verify;

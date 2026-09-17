@@ -260,6 +260,15 @@ impl<N, E> Index<u32> for CsrDirectedGraph<N, E> {
 ///
 /// The builder retains only dense node and edge arenas. It creates both flat
 /// adjacency indexes once, when [`finish`](Self::finish) is called.
+///
+/// # Superseded
+///
+/// [`graph::store::Graph`](crate::graph::store::Graph) covers this and more:
+/// it is the same compressed representation, but it can be mutated after the
+/// indexes exist and it does not need a second type to be built.
+/// `Graph::new()`, `add_node`, `add_edge`, `compact()` is this builder plus
+/// [`finish`](Self::finish), and the result stays appendable. New code should
+/// use it; this type is kept until its callers move.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CsrDirectedGraphBuilder<N, E> {
     nodes: Vec<N>,

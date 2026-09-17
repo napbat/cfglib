@@ -86,6 +86,8 @@ assert_eq!(
 let dominators = DominatorTree::compute(&Rooted::new(&graph, source));
 ```
 
+`graph::store::Graph<N, E>` is the storage engine those payloads are moving to. It keeps a compressed sparse-row base beside an appendable delta in one type: adding a node or an edge is constant time with no per-node allocation, removal clears a bit in a liveness bitset, and `compact()` folds the delta back into the base and hands back a `Renumbering` describing every identity it moved. That is what makes whole-codebase graphs affordable — a million nodes and four million edges cost roughly half the memory of the arena and build in roughly half the time, while the arena spends one inline adjacency container per node and a heap allocation on every node whose degree overflows it. Identities are tagged (`Id<NodeTag>`, `Id<EdgeTag>`) so a block id and a symbol id stay distinct types without a newtype and a conversion shim for each. The module documentation states the design and its costs; `benches/graph-store.rs` measures it against `DirectedGraph`.
+
 ### Scope graphs
 
 `graph::scope::ScopeGraph<S, L, R, D, Q>` separates language facts from
