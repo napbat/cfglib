@@ -14,7 +14,7 @@ use alloc::collections::BTreeMap;
 
 use super::directed::{DirectedGraph, EdgeId, NodeId};
 use super::edge_view::{EdgeGraphView, EdgeRef};
-use super::view::DirectedGraphView;
+use super::view::{DirectedGraphView, NodeGraphView};
 
 /// A directed multigraph keyed by a consumer identity `K`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +118,14 @@ impl<K: Ord, N, E> DirectedGraphView for KeyedGraph<K, N, E> {
 
     fn predecessors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
         self.graph.predecessors(node)
+    }
+}
+
+impl<K: Ord, N, E> NodeGraphView for KeyedGraph<K, N, E> {
+    type NodeData = N;
+
+    fn node_ref(&self, node: Self::NodeId) -> &Self::NodeData {
+        self.graph.node(node)
     }
 }
 

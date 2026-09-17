@@ -278,7 +278,9 @@ pub use graph::call_graph::{
 };
 pub use graph::cdg::control_dependence_graph;
 pub use graph::diff::{BlockFingerprint, BlockMatch, CfgDiff};
-pub use graph::directed::{DirectedEdge, DirectedGraph, NodeId};
+pub use graph::directed::{
+    CsrDirectedEdge, CsrDirectedGraph, CsrDirectedGraphBuilder, DirectedEdge, DirectedGraph, NodeId,
+};
 pub use graph::dominator::DominatorTree;
 pub use graph::dot::{to_view_dot, write_view_dot};
 pub use graph::edge_traverse::{
@@ -337,7 +339,8 @@ pub use graph::verify::{
     verify_view, verify_with,
 };
 pub use graph::view::{
-    DenseNodeId, DirectedGraphView, Reversed, Rooted, RootedGraphView, scan_predecessors,
+    DenseNodeId, DirectedGraphView, NodeGraphView, Reversed, Rooted, RootedGraphView,
+    scan_predecessors,
 };
 pub use ir::ast::{
     AstNode, CatchHandler, GotoDiagnostic, GotoReason, LiftReport, LoopKind, SwitchCase, lift,

@@ -24,6 +24,14 @@ impl<I, E> crate::graph::view::DirectedGraphView for Cfg<I, E> {
     }
 }
 
+impl<I, E> crate::graph::view::NodeGraphView for Cfg<I, E> {
+    type NodeData = BasicBlock<I>;
+
+    fn node_ref(&self, node: Self::NodeId) -> &Self::NodeData {
+        self.block(node)
+    }
+}
+
 impl<I, E> crate::graph::view::RootedGraphView for Cfg<I, E> {
     fn root(&self) -> Self::NodeId {
         self.entry()

@@ -5,7 +5,7 @@ use crate::cfg::Cfg;
 use crate::edge::Edge;
 
 use super::directed::{DirectedGraph, EdgeId, NodeId};
-use super::view::{DirectedGraphView, Reversed, Rooted, RootedGraphView};
+use super::view::{DirectedGraphView, NodeGraphView, Reversed, Rooted, RootedGraphView};
 
 /// A copyable, ordered edge identity backed by a dense arena index.
 ///
@@ -311,6 +311,18 @@ where
             .incoming_edges(node)
             .filter(|&edge| self.accepts(edge))
             .map(|edge| self.graph.edge_ref(edge).source())
+    }
+}
+
+impl<G, P> NodeGraphView for FilteredEdges<'_, G, P>
+where
+    G: EdgeGraphView + NodeGraphView,
+    P: Fn(G::EdgeId, &G::EdgeData) -> bool,
+{
+    type NodeData = G::NodeData;
+
+    fn node_ref(&self, node: Self::NodeId) -> &Self::NodeData {
+        self.graph.node_ref(node)
     }
 }
 

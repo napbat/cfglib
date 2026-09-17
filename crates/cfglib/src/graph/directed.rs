@@ -1,10 +1,12 @@
 //! Payload-generic directed multigraph storage.
 //!
-//! [`DirectedGraph`] is the graph substrate for code-intelligence products that
-//! do not model basic blocks: value-flow graphs, call graphs, type-relation
-//! graphs, import graphs, grammar dependencies, and similar structures. Nodes
-//! and edges both retain consumer-defined payloads, parallel edges are valid,
-//! and forward/reverse adjacency is maintained together.
+//! [`DirectedGraph`] is mutable arena storage; [`CsrDirectedGraph`] is compact
+//! immutable storage with compressed sparse-row adjacency. Both are graph
+//! substrates for code-intelligence products that do not model basic blocks:
+//! value-flow graphs, call graphs, type-relation graphs, import graphs, grammar
+//! dependencies, and similar structures. Nodes and edges retain consumer-defined
+//! payloads, parallel edges are valid, and forward/reverse adjacency is
+//! maintained together.
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -12,8 +14,12 @@ use core::ops::Index;
 
 use smallvec::SmallVec;
 
-use crate::graph::view::{DenseNodeId, DirectedGraphView};
+use crate::graph::view::{DenseNodeId, DirectedGraphView, NodeGraphView};
 use crate::identity::define_dense_id;
+
+mod csr;
+
+pub use csr::{CsrDirectedEdge, CsrDirectedGraph, CsrDirectedGraphBuilder};
 
 define_dense_id! {
     /// Dense identity of a node in a [`DirectedGraph`].
@@ -332,6 +338,14 @@ impl<N, E> DirectedGraphView for DirectedGraph<N, E> {
 
     fn predecessors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
         self.predecessors(node)
+    }
+}
+
+impl<N, E> NodeGraphView for DirectedGraph<N, E> {
+    type NodeData = N;
+
+    fn node_ref(&self, node: Self::NodeId) -> &Self::NodeData {
+        self.node(node)
     }
 }
 

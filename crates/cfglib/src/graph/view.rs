@@ -4,6 +4,7 @@
 //! identities so traversals, SCC computation, dominance, and coloring run on
 //! [`DirectedGraph`](super::directed::DirectedGraph),
 //! [`Cfg`](crate::Cfg), or consumer-owned storage without migration.
+//! [`NodeGraphView`] adds access to graph-owned node payloads.
 //! [`RootedGraphView`] adds a distinguished entry node for algorithms that
 //! need one (dominators, reachability, structural analysis); [`Rooted`] roots
 //! any plain view at a chosen node.
@@ -80,6 +81,23 @@ pub trait DirectedGraphView {
     fn predecessors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_;
 }
 
+/// Read-only node payloads associated with a [`DirectedGraphView`].
+///
+/// Adjacency-only algorithms keep depending on [`DirectedGraphView`]. Consumers
+/// that need graph-owned node data use this companion trait without depending
+/// on an arena, CSR, or domain-specific storage representation.
+pub trait NodeGraphView: DirectedGraphView {
+    /// Data exposed for each node.
+    type NodeData: ?Sized;
+
+    /// Borrow one node's data.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `node` does not belong to this view.
+    fn node_ref(&self, node: Self::NodeId) -> &Self::NodeData;
+}
+
 /// A directed-graph view with a distinguished root/entry node.
 ///
 /// Entry-requiring algorithms (dominance, reachability metrics, interval and
@@ -148,6 +166,14 @@ impl<G: DirectedGraphView> DirectedGraphView for Rooted<'_, G> {
     }
 }
 
+impl<G: NodeGraphView> NodeGraphView for Rooted<'_, G> {
+    type NodeData = G::NodeData;
+
+    fn node_ref(&self, node: Self::NodeId) -> &Self::NodeData {
+        self.graph.node_ref(node)
+    }
+}
+
 impl<G: DirectedGraphView> RootedGraphView for Rooted<'_, G> {
     fn root(&self) -> Self::NodeId {
         self.root
@@ -206,6 +232,14 @@ impl<G: DirectedGraphView> DirectedGraphView for Reversed<'_, G> {
 
     fn predecessors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
         self.graph.successors(node)
+    }
+}
+
+impl<G: NodeGraphView> NodeGraphView for Reversed<'_, G> {
+    type NodeData = G::NodeData;
+
+    fn node_ref(&self, node: Self::NodeId) -> &Self::NodeData {
+        self.graph.node_ref(node)
     }
 }
 
