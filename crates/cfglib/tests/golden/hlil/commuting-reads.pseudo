@@ -1,0 +1,1 @@
+return add(load(v0), load(v1));

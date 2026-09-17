@@ -19,6 +19,8 @@ use super::{
 /// Managed-language dialect tests: constraint domains, exceptional
 /// ownership, dispatch, expansion, and lowering.
 mod managed;
+/// Golden pseudocode for representative RTL functions.
+mod pseudocode;
 /// Read-resolver tests, split out to respect the source-size policy.
 mod resolver;
 /// Return-value lowering tests, split out to respect the source-size

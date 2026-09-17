@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use super::{Edge, MediumOperation, Toy, Type};
 use crate::ir::hlil::lift_function;
 use crate::ir::mlil;
+use crate::test_util::golden::assert_golden;
 
 #[test]
 fn commuting_reads_fold_into_one_expression() {
@@ -67,10 +68,9 @@ fn commuting_reads_fold_into_one_expression() {
         .unwrap();
 
     let lifted = lift_function(&builder.finish().unwrap()).unwrap();
-    let pseudo = lifted.function.to_pseudocode();
-    assert!(
-        pseudo.contains("return add(load(v0), load(v1));"),
-        "{pseudo}"
+    assert_golden(
+        "hlil/commuting-reads.pseudo",
+        &lifted.function.to_pseudocode(),
     );
 }
 
@@ -130,14 +130,11 @@ fn reads_do_not_cross_writes() {
         .unwrap();
 
     let lifted = lift_function(&builder.finish().unwrap()).unwrap();
-    let pseudo = lifted.function.to_pseudocode();
-    let load_at = pseudo.find("load(v0)").expect(&pseudo);
-    let store_at = pseudo.find("deref(v1) = v2;").expect(&pseudo);
-    assert!(
-        load_at < store_at,
-        "the load stays before the store: {pseudo}"
+    // The load stays where it was: ahead of the store it must not cross.
+    assert_golden(
+        "hlil/reads-before-writes.pseudo",
+        &lifted.function.to_pseudocode(),
     );
-    assert!(pseudo.contains("v3 = load(v0);"), "{pseudo}");
 }
 
 #[test]
@@ -218,16 +215,13 @@ fn effectful_definitions_inline_only_when_order_is_preserved() {
         .unwrap();
 
     let lifted = lift_function(&builder.finish().unwrap()).unwrap();
-    let pseudo = lifted.function.to_pseudocode();
-    // First call inlined into x's assignment.
-    assert!(pseudo.contains("v1 = call();"), "{pseudo}");
-    assert!(!pseudo.contains("v0 = call()"), "{pseudo}");
-    // Second call pair: the temporary materializes so the calls stay in
-    // order, and the pure copy chain still folds into the return.
-    let second = pseudo.find("v2 = call(").expect(&pseudo);
-    let third = pseudo.find("v3 = call(").expect(&pseudo);
-    assert!(second < third, "{pseudo}");
-    assert!(pseudo.contains("return v2;"), "{pseudo}");
+    // The first call inlines into its one use. The second pair materializes
+    // a temporary so the calls keep their order, and the pure copy chain
+    // still folds into the return.
+    assert_golden(
+        "hlil/ordered-calls.pseudo",
+        &lifted.function.to_pseudocode(),
+    );
 }
 
 #[test]
@@ -286,10 +280,11 @@ fn inlining_crosses_a_straight_line_block_run() {
         .unwrap();
     let lifted = lift_function(&builder.finish().unwrap()).unwrap();
     assert!(lifted.function.verify().is_ok());
-    let pseudo = lifted.function.to_pseudocode();
-    assert!(pseudo.contains("return add(v0, 7);"), "{pseudo}");
-    assert!(!pseudo.contains("v1 ="), "{pseudo}");
-    assert!(!pseudo.contains("v2 ="), "{pseudo}");
+    // Both temporaries inline across the straight-line block run.
+    assert_golden(
+        "hlil/inline-across-blocks.pseudo",
+        &lifted.function.to_pseudocode(),
+    );
 }
 
 #[test]
@@ -345,8 +340,9 @@ fn previous_value_operands_pin_both_sides() {
         .unwrap();
 
     let lifted = lift_function(&builder.finish().unwrap()).unwrap();
-    let pseudo = lifted.function.to_pseudocode();
-    assert!(pseudo.contains("= add(v0, v0)"), "{pseudo}");
-    assert!(!pseudo.contains("call(v0, add"), "{pseudo}");
-    assert!(!pseudo.contains("return call"), "{pseudo}");
+    // Neither side of the previous-value operand moves across the call.
+    assert_golden(
+        "hlil/previous-value-operand.pseudo",
+        &lifted.function.to_pseudocode(),
+    );
 }

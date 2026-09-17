@@ -1,0 +1,4 @@
+while (lt(v0, v1)) {
+    v0 = add(v0, 1);
+}
+return v0;

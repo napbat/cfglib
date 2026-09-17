@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use super::{Edge, MediumOperation, Toy, Type};
 use crate::ir::hlil::lift_function;
 use crate::ir::mlil;
+use crate::test_util::golden::assert_golden;
 
 #[test]
 fn transitively_dead_pure_definitions_are_omitted() {
@@ -91,9 +92,11 @@ fn effectful_dead_result_is_retained() {
         .unwrap();
     let source = builder.finish().unwrap();
 
-    let pseudo = lift_function(&source).unwrap().function.to_pseudocode();
-
-    assert!(pseudo.contains("call()"), "{pseudo}");
+    // The call survives its dead result because it is observable.
+    assert_golden(
+        "hlil/effectful-dead-result.pseudo",
+        &lift_function(&source).unwrap().function.to_pseudocode(),
+    );
 }
 
 #[test]

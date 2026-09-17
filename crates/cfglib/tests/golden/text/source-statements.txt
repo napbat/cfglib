@@ -1,0 +1,6 @@
+entry bb0
+bb0:
+    print("quoted \\ text")
+bb1:
+    return
+bb0 -> bb1 fallthrough

@@ -1,0 +1,12 @@
+while (lt(v0, v1)) {
+    if (lt(v1, v0)) {
+        break;
+    } else {
+        v0 = add(v0, 1);
+        continue;
+    }
+}
+return v0;
+pad: {
+    return v0;
+}

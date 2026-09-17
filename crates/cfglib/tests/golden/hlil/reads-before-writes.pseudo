@@ -1,0 +1,3 @@
+v3 = load(v0);
+deref(v1) = v2;
+return v3;

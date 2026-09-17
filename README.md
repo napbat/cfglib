@@ -322,7 +322,8 @@ inverted — before falling back to a wrapping `logical_not`.
 | CFG diff | `CfgDiff::compute` | Structural comparison (bindiff-style fingerprinting), no trait bounds |
 | Exception handling model | `EhModel::compute` | Payload-generic CFG input; stable source `EdgeId`, exact handler/unwind/leave/resume/continue kinds, landing pads, cleanup/resume blocks, handler identities, protected-by mapping, and cleanup continuations |
 | Integrity verification | `verify`, `verify_view`, `verify_edge_view`; `verify_with` + `SemanticValidator` | Structural node/edge-view checks plus deterministic typed consumer hooks for cardinality, ordering, and provenance rules |
-| DOT export | `to_dot` (`DisplayInstr`), `to_dot_with` (bound-free), `write_view_dot` / `to_view_dot` (any view) | Graphviz output with escaped labels |
+| DOT export | `write_dot` / `to_dot` + `DotStyle` (any node- and edge-bearing view); `Cfg::to_dot` (`DisplayInstr`), `Cfg::to_dot_with` (bound-free), `Graph::to_dot` | One writer; the style supplies node labels, edge attributes, graph name, and layout direction. Labels are escaped and left-justified |
+| Text form | `write_text` / `to_text` + `TextStyle`, `parse_text`; `Cfg::to_text`, `parse_cfg_text` | One line per node and per edge, ids are the dense indices. Round trips: write → parse → write is a fixed point, so two graphs compare as text |
 
 ### Dataflow framework
 
@@ -411,7 +412,30 @@ generic instruction payload.
 | Try/catch/finally | From region metadata; unknown or malformed handler extents degrade to explicit `Goto`/`Label` flow — reachable code is never dropped |
 | Label/goto | Exact post-pass labeling: only blocks a goto actually targets are wrapped |
 | Traversal | `child_bodies` (every nested sequence in execution order), `visit`, `for_each_instruction`, and `map_instructions` — the re-leveling hook from opaque payloads to another representation |
-| Pseudocode | `to_pseudocode` via `DisplayInstr` — rendering never requires flow classification |
+| Pseudocode | `to_pseudocode` / `write_pseudocode` via `DisplayInstr` — rendering never requires flow classification |
+
+### Output
+
+Every renderer writes through one indentation authority, [`IndentedWriter`],
+and takes a `&mut dyn fmt::Write` sink; the `to_*` forms are the allocating
+counterparts.
+
+| Form | Entry points | Notes |
+|---|---|---|
+| DOT | `write_dot` / `to_dot` over a `DotStyle`; `Cfg::write_dot`, `Cfg::write_dot_with`, `Graph::write_dot` | `DotStyle` carries the node-label hook, the edge-attribute hook (`DotEdgeAttributes`: label, color, style, penwidth), the graph name, the node-identifier prefix, and `DotRankDir`. `control_flow_edge_attributes` is the CFG's kind-to-color mapping; `plain_edge_attributes` decorates nothing |
+| Text | `write_text` / `to_text` over a `TextStyle`, read back by `parse_text`; `Cfg::write_text` / `Cfg::to_text`, read back by `parse_cfg_text` | One fact per line. `n3 label`, `n3 -> n5 label`, `#` comments; a CFG adds `entry bb0`, `bb3:` headers with indented instructions, `bb3 -> bb5 kind`, and `region` / `handler` lines. Escapes are `\\`, `\n`, `\r`, and a leading `\-` |
+| Pseudocode | `ir::ast::AstNode::to_pseudocode`, `ir::rtl::Function::to_pseudocode`, `ir::hlil::Function::to_pseudocode`, each with a `write_pseudocode` counterpart | RTL prints transfers as `dst <- expr`, brackets a parallel transfer as `par { … }`, suffixes effects with `! …`, and ends each block with its outgoing edges and their kinds |
+
+Both label hooks are ordinary closures or function items of type
+`Label<Id, Data>`; `no_label` and `display_label` cover the common answers,
+and `bind_label` / `bind_edge_attributes` state the higher-ranked signature
+for a closure that would otherwise infer one fixed payload lifetime.
+
+The text form is a readable projection — identity, topology, and label text.
+Edge weights, non-text consumer payloads, and cleanup records live in the
+`serde` representation of the store, which remains the fidelity path.
+
+[`IndentedWriter`]: https://docs.rs/cfglib/latest/cfglib/struct.IndentedWriter.html
 
 ## Extension contracts
 
@@ -438,7 +462,7 @@ InstrInfo<Variable = V>   (optional — native IR variables, defs/uses)
 
 MemoryAlias<Location>     (optional may-alias oracle consumed by MemorySSA)
 
-DisplayInstr              (rendering only — DOT, pseudocode)
+DisplayInstr              (rendering only — DOT, text, pseudocode)
 CallInfo                  (call graphs, explicit tail calls — associated Callee)
 SwitchSource              (switch table recovery — associated Target)
 ```

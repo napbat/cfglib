@@ -1,0 +1,9 @@
+while (lt(v0, v1)) {
+    if (lt(v0, 100)) {
+        break;
+    } else {
+        v0 = add(v0, 1);
+        continue;
+    }
+}
+return v0;

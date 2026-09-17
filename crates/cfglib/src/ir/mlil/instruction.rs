@@ -242,6 +242,12 @@ impl<D: Dialect> DisplayInstr for Instruction<D> {
     fn mnemonic(&self) -> Cow<'_, str> {
         Cow::Owned(format!("{self}"))
     }
+
+    /// An MLIL instruction renders by naming its operands, so the owned form
+    /// would allocate once per instruction; writing into the sink does not.
+    fn write_mnemonic(&self, sink: &mut dyn fmt::Write) -> fmt::Result {
+        write!(sink, "{self}")
+    }
 }
 
 fn split_typed<D: Dialect>(values: Vec<TypedVariable<D>>) -> (Vec<VariableId>, Vec<D::ValueType>) {

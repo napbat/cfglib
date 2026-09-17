@@ -5,6 +5,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::ir::mlil;
+use crate::test_util::golden::assert_golden;
 use crate::test_util::toy::Span;
 
 use super::{
@@ -174,10 +175,7 @@ fn builder_constructs_verifies_and_renders() {
     assert_eq!(function.source(), "toy::bump");
     assert_eq!(function.signature().parameters, vec![counter]);
 
-    let pseudo = function.to_pseudocode();
-    assert!(pseudo.contains("if (lt(v0, 10)) {"), "{pseudo}");
-    assert!(pseudo.contains("v0 = add(v0, 1);"), "{pseudo}");
-    assert!(pseudo.contains("return v0;"), "{pseudo}");
+    assert_golden("hlil/builder-if-loop.pseudo", &function.to_pseudocode());
 
     assert_eq!(function.provenance().mappings_from(5).count(), 1);
 }
@@ -321,13 +319,12 @@ fn lift_recovers_a_while_loop_with_inlined_expressions() {
     assert!(lifted.report.is_fully_structured(), "{:?}", lifted.report);
     assert!(lifted.function.verify().is_ok());
 
-    let pseudo = lifted.function.to_pseudocode();
-    assert!(pseudo.contains("while (lt(v0, v1)) {"), "{pseudo}");
-    assert!(pseudo.contains("v0 = add(v0, 1);"), "{pseudo}");
-    assert!(pseudo.contains("return v0;"), "{pseudo}");
-    // The comparison and the constant were inlined: no temporaries survive.
-    assert!(!pseudo.contains("v2 ="), "{pseudo}");
-    assert!(!pseudo.contains("v3 ="), "{pseudo}");
+    // The comparison and the constant are inlined into the header, so the
+    // golden shows the loop with no surviving temporaries.
+    assert_golden(
+        "hlil/lift-while-loop.pseudo",
+        &lifted.function.to_pseudocode(),
+    );
 
     // Signature and variables carried over one-to-one.
     assert_eq!(lifted.function.signature().parameters.len(), 2);
@@ -370,11 +367,10 @@ fn lift_can_omit_correspondence_and_provenance() {
     assert!(lifted.instructions.is_empty());
     assert!(lifted.function.provenance().is_empty());
     assert!(lifted.function.verify().is_ok());
-    assert!(
-        lifted
-            .function
-            .to_pseudocode()
-            .contains("while (lt(v0, v1))")
+    // Omitting the metadata changes nothing a reader sees: the same golden.
+    assert_golden(
+        "hlil/lift-while-loop.pseudo",
+        &lifted.function.to_pseudocode(),
     );
 }
 
@@ -443,13 +439,7 @@ fn lift_recovers_a_switch_with_case_values_and_default() {
 
     let lifted = lift_function(&builder.finish().unwrap()).unwrap();
     assert!(lifted.report.is_fully_structured(), "{:?}", lifted.report);
-    let pseudo = lifted.function.to_pseudocode();
-    assert!(pseudo.contains("switch (v0) {"), "{pseudo}");
-    assert!(pseudo.contains("case 1, 2: {"), "{pseudo}");
-    assert!(pseudo.contains("case 3: {"), "{pseudo}");
-    assert!(pseudo.contains("default: {"), "{pseudo}");
-    assert!(pseudo.contains("v1 = 30;"), "{pseudo}");
-    assert!(pseudo.contains("return v1;"), "{pseudo}");
+    assert_golden("hlil/lift-switch.pseudo", &lifted.function.to_pseudocode());
 }
 
 #[test]
@@ -525,12 +515,10 @@ fn lift_structures_declared_exception_regions() {
         .unwrap();
 
     let lifted = lift_function(&builder.finish().unwrap()).unwrap();
-    let pseudo = lifted.function.to_pseudocode();
-    assert!(pseudo.contains("try {"), "{pseudo}");
-    assert!(pseudo.contains("} catch (...)"), "{pseudo}");
-    assert!(pseudo.contains("return 7;"), "{pseudo}");
-    assert!(pseudo.contains("v0 = call();"), "{pseudo}");
-    assert!(pseudo.contains("return v0;"), "{pseudo}");
+    assert_golden(
+        "hlil/lift-try-catch.pseudo",
+        &lifted.function.to_pseudocode(),
+    );
 }
 #[test]
 fn variable_splitting_composes_with_lifting() {
@@ -596,18 +584,10 @@ fn variable_splitting_composes_with_lifting() {
     let split = function.split_variables().unwrap();
     assert_eq!(split.splits[&mlil::VariableId::from_raw(0)].len(), 2);
     let lifted = lift_function(&split.function).unwrap();
-    let pseudo = lifted.function.to_pseudocode();
-
-    let target_of = |value: &str| {
-        let position = pseudo.find(value).expect(&pseudo);
-        let line_start = pseudo[..position].rfind('\n').map_or(0, |at| at + 1);
-        pseudo[line_start..position].trim().to_string()
-    };
-    let first_lifetime = target_of(" = 1;");
-    let second_lifetime = target_of(" = 2;");
-    assert_ne!(
-        first_lifetime, second_lifetime,
-        "each lifetime gets its own local: {pseudo}"
+    // Each lifetime of the split variable is assigned to its own local.
+    assert_golden(
+        "hlil/split-variables.pseudo",
+        &lifted.function.to_pseudocode(),
     );
 }
 

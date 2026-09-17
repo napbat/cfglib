@@ -1,78 +1,396 @@
-//! DOT (Graphviz) export for control-flow graphs.
+//! DOT (Graphviz) export for every graph in the crate.
+//!
+//! One writer serves all of them. [`write_dot`] walks any view that exposes
+//! node payloads ([`NodeView`]) and edge identity ([`EdgeView`]) and asks a
+//! [`DotStyle`] what to print: how to name the graph, what text labels a
+//! node, and which Graphviz attributes an edge carries. [`Cfg`] and
+//! [`Graph`] are two styles over that one writer rather than two writers.
+//!
+//! # Label text
+//!
+//! A node label is ordinary text with real line breaks. The writer escapes
+//! it — backslashes and quotes cannot break out of the attribute — and ends
+//! every line with Graphviz's `\l`, which left-justifies it. Program text is
+//! therefore safe to hand back from a label hook exactly as it reads.
 
 extern crate alloc;
 use alloc::borrow::Cow;
+use alloc::format;
 use alloc::string::String;
-use core::fmt;
+use core::fmt::{self, Write as _};
 
+use crate::block::{BasicBlock, BlockId};
 use crate::cfg::Cfg;
 use crate::display::DisplayInstr;
-use crate::edge::EdgeKind;
-use crate::graph::view::{DenseId, GraphView};
+use crate::edge::{Edge, EdgeId, EdgeKind};
+use crate::graph::edge_view::EdgeView;
+use crate::graph::label::{Label, bind_label, display_label, no_label};
+use crate::graph::store::{Graph, Id, IdTag};
+use crate::graph::view::{DenseId, NodeView};
 
-/// Escape label text for safe embedding in a double-quoted DOT string.
-///
-/// Backslashes and quotes are escaped, and raw line breaks become DOT `\n`
-/// escape sequences, so labels sourced from real program text (statements,
-/// string literals) cannot break out of the attribute.
-fn escape_label(label: &str) -> String {
-    let mut escaped = String::with_capacity(label.len());
-    for ch in label.chars() {
-        match ch {
-            '\\' => escaped.push_str("\\\\"),
-            '"' => escaped.push_str("\\\""),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => {}
-            _ => escaped.push(ch),
-        }
-    }
-    escaped
+/// The direction successive ranks of a drawing flow in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DotRankDir {
+    /// Top to bottom — Graphviz's own default, and the usual reading order
+    /// for a control-flow graph.
+    #[default]
+    TopToBottom,
+    /// Left to right.
+    LeftToRight,
+    /// Bottom to top.
+    BottomToTop,
+    /// Right to left.
+    RightToLeft,
 }
 
-/// Write any graph view in DOT format with consumer-provided node labels.
+impl DotRankDir {
+    /// The Graphviz `rankdir` attribute value.
+    #[must_use]
+    pub const fn attribute(self) -> &'static str {
+        match self {
+            Self::TopToBottom => "TB",
+            Self::LeftToRight => "LR",
+            Self::BottomToTop => "BT",
+            Self::RightToLeft => "RL",
+        }
+    }
+}
+
+/// The Graphviz attributes one edge carries.
 ///
-/// Nodes are named `n{index}`; the label callback supplies display text,
-/// which is escaped before embedding. This is the topology-only counterpart
-/// of [`Cfg::write_dot`] for value-flow, call, and type-relation graphs.
+/// Every field is optional; an edge that sets none of them is drawn with the
+/// graph's `edge` defaults and printed without an attribute list at all.
+#[derive(Debug, Clone, Default)]
+pub struct DotEdgeAttributes<'a> {
+    /// Text drawn beside the edge, escaped by the writer.
+    pub label: Cow<'a, str>,
+    /// Graphviz color name, such as `green4`.
+    pub color: Option<&'a str>,
+    /// Graphviz line style, such as `dashed`.
+    pub style: Option<&'a str>,
+    /// Line thickness in points.
+    pub penwidth: Option<f64>,
+}
+
+impl DotEdgeAttributes<'_> {
+    /// Attributes that add nothing to the graph's edge defaults.
+    #[must_use]
+    pub const fn plain() -> Self {
+        Self {
+            label: Cow::Borrowed(""),
+            color: None,
+            style: None,
+            penwidth: None,
+        }
+    }
+
+    /// Whether the edge adds nothing to the graph's edge defaults.
+    #[must_use]
+    pub fn is_plain(&self) -> bool {
+        self.label.is_empty()
+            && self.color.is_none()
+            && self.style.is_none()
+            && self.penwidth.is_none()
+    }
+}
+
+/// An edge-attribute hook as a plain function pointer.
+pub type DotEdgeStyle<Edge, Data> = for<'d> fn(Edge, &'d Data) -> DotEdgeAttributes<'d>;
+
+/// How one graph is rendered: its name, its identifiers, and its hooks.
+///
+/// The two hooks are the whole policy. `node_label` turns a node and its
+/// payload into label text, `edge_attributes` turns an edge and its payload
+/// into [`DotEdgeAttributes`]. Both are ordinary closures or function items,
+/// so a consumer renders its own payloads without implementing a trait.
+#[derive(Debug, Clone, Copy)]
+pub struct DotStyle<NodeLabel, EdgeAttributes> {
+    graph_name: &'static str,
+    node_prefix: &'static str,
+    rankdir: DotRankDir,
+    node_label: NodeLabel,
+    edge_attributes: EdgeAttributes,
+}
+
+impl<NodeLabel, EdgeAttributes> DotStyle<NodeLabel, EdgeAttributes> {
+    /// A style over the two hooks, named `view`, numbering nodes `n0`, `n1`,
+    /// and laid out top to bottom.
+    pub const fn new(node_label: NodeLabel, edge_attributes: EdgeAttributes) -> Self {
+        Self {
+            graph_name: "view",
+            node_prefix: "n",
+            rankdir: DotRankDir::TopToBottom,
+            node_label,
+            edge_attributes,
+        }
+    }
+
+    /// Name the `digraph`. The name must be a DOT identifier.
+    #[must_use]
+    pub const fn named(mut self, graph_name: &'static str) -> Self {
+        self.graph_name = graph_name;
+        self
+    }
+
+    /// Set the prefix every node identifier is written with.
+    #[must_use]
+    pub const fn node_prefix(mut self, node_prefix: &'static str) -> Self {
+        self.node_prefix = node_prefix;
+        self
+    }
+
+    /// Set the layout direction.
+    #[must_use]
+    pub const fn rankdir(mut self, rankdir: DotRankDir) -> Self {
+        self.rankdir = rankdir;
+        self
+    }
+}
+
+impl<Node, NodeData: ?Sized, Edge, EdgeData: ?Sized>
+    DotStyle<Label<Node, NodeData>, DotEdgeStyle<Edge, EdgeData>>
+{
+    /// Topology only: unlabeled nodes and undecorated edges.
+    #[must_use]
+    pub fn plain() -> Self {
+        Self::new(
+            no_label as Label<Node, NodeData>,
+            plain_edge_attributes as DotEdgeStyle<Edge, EdgeData>,
+        )
+    }
+}
+
+/// Bind an edge-attribute closure to the higher-ranked signature
+/// [`write_dot`] requires, as
+/// [`bind_label`] does for node labels.
+#[must_use]
+pub fn bind_edge_attributes<Edge, Data, Hook>(hook: Hook) -> Hook
+where
+    Data: ?Sized,
+    Hook: for<'d> Fn(Edge, &'d Data) -> DotEdgeAttributes<'d>,
+{
+    hook
+}
+
+/// An edge-attribute hook that decorates nothing.
+#[must_use]
+pub fn plain_edge_attributes<Edge, Data: ?Sized>(
+    _edge: Edge,
+    _data: &Data,
+) -> DotEdgeAttributes<'_> {
+    DotEdgeAttributes::plain()
+}
+
+/// The color, line style, label, and thickness of one control-flow edge.
+///
+/// This is the hook [`Cfg::write_dot`] installs: every [`EdgeKind`] has a
+/// fixed color and line style, and a weighted edge is labeled with its
+/// probability and drawn proportionally thicker.
+#[must_use]
+pub fn control_flow_edge_attributes<E>(_edge: EdgeId, data: &Edge<E>) -> DotEdgeAttributes<'_> {
+    let (color, style, kind_label) = match data.kind() {
+        EdgeKind::Fallthrough => ("black", "solid", ""),
+        EdgeKind::ConditionalTrue => ("green4", "solid", "T"),
+        EdgeKind::ConditionalFalse => ("red", "solid", "F"),
+        EdgeKind::Unconditional => ("blue", "solid", ""),
+        EdgeKind::Back => ("blue", "dashed", "back"),
+        EdgeKind::Call => ("purple", "solid", "call"),
+        EdgeKind::CallReturn => ("purple", "dashed", "ret"),
+        EdgeKind::SwitchCase => ("orange", "dotted", "case"),
+        EdgeKind::Jump => ("blue", "bold", "jmp"),
+        EdgeKind::IndirectJump => ("blue", "dotted", "ijmp"),
+        EdgeKind::IndirectCall => ("purple", "dotted", "icall"),
+        EdgeKind::ExceptionHandler => ("darkred", "solid", "handler"),
+        EdgeKind::ExceptionUnwind => ("darkred", "dashed", "unwind"),
+        EdgeKind::ExceptionLeave => ("darkred", "dotted", "leave"),
+        EdgeKind::ExceptionResume => ("darkred", "bold", "resume"),
+        EdgeKind::ExceptionContinue => ("darkgreen", "dashed", "continue"),
+    };
+    let label = match data.weight() {
+        Some(weight) if kind_label.is_empty() => Cow::Owned(format!("({weight:.2})")),
+        Some(weight) => Cow::Owned(format!("{kind_label} ({weight:.2})")),
+        None => Cow::Borrowed(kind_label),
+    };
+    DotEdgeAttributes {
+        label,
+        color: Some(color),
+        style: Some(style),
+        // 1.0 to 4.0 points, so a hot edge reads as the spine of the drawing.
+        penwidth: data.weight().map(|weight| 1.0 + weight * 3.0),
+    }
+}
+
+/// Write any node- and edge-bearing view in DOT format.
 ///
 /// # Errors
 ///
 /// Returns the sink's formatting error if a write fails.
-pub fn write_view_dot<G: GraphView>(
-    graph: &G,
-    w: &mut dyn fmt::Write,
-    mut node_label: impl FnMut(G::NodeId) -> String,
-) -> fmt::Result {
-    writeln!(w, "digraph view {{")?;
+pub fn write_dot<G, NodeLabel, EdgeAttributes>(
+    view: &G,
+    sink: &mut dyn fmt::Write,
+    style: &DotStyle<NodeLabel, EdgeAttributes>,
+) -> fmt::Result
+where
+    G: NodeView + EdgeView,
+    NodeLabel: for<'d> Fn(G::NodeId, &'d G::NodeData) -> Cow<'d, str>,
+    EdgeAttributes: for<'d> Fn(G::EdgeId, &'d G::EdgeData) -> DotEdgeAttributes<'d>,
+{
+    let prefix = style.node_prefix;
+    writeln!(sink, "digraph {} {{", style.graph_name)?;
+    writeln!(sink, "    rankdir={};", style.rankdir.attribute())?;
     writeln!(
-        w,
+        sink,
         "    node [shape=box fontname=\"monospace\" fontsize=10];"
     )?;
-    for node in graph.node_ids() {
-        let label = escape_label(&node_label(node));
-        writeln!(w, "    n{} [label=\"{label}\"];", node.index())?;
-    }
-    for node in graph.node_ids() {
-        for successor in graph.successors(node) {
-            writeln!(w, "    n{} -> n{};", node.index(), successor.index())?;
+    writeln!(sink, "    edge [fontname=\"monospace\" fontsize=9];")?;
+
+    for node in view.node_ids() {
+        write!(sink, "    {prefix}{}", node.index())?;
+        let label = (style.node_label)(node, view.node(node));
+        if !label.is_empty() {
+            sink.write_str(" [label=\"")?;
+            write_escaped_lines(sink, &label)?;
+            sink.write_str("\"]")?;
         }
+        writeln!(sink, ";")?;
     }
-    writeln!(w, "}}")
+
+    for id in view.edge_ids() {
+        let edge = view.edge(id);
+        write!(
+            sink,
+            "    {prefix}{} -> {prefix}{}",
+            edge.source().index(),
+            edge.target().index()
+        )?;
+        write_edge_attributes(sink, &(style.edge_attributes)(id, edge.data()))?;
+        writeln!(sink, ";")?;
+    }
+
+    writeln!(sink, "}}")
 }
 
-/// Render any graph view in DOT format with consumer-provided node labels.
+/// Render any node- and edge-bearing view in DOT format.
 ///
-/// The allocating counterpart of [`write_view_dot`], matching
-/// [`Cfg::to_dot_with`].
+/// The allocating counterpart of [`write_dot`].
 ///
 /// # Panics
 ///
 /// Panics only if writing to an in-memory [`String`] unexpectedly fails.
 #[must_use]
-pub fn to_view_dot<G: GraphView>(graph: &G, node_label: impl FnMut(G::NodeId) -> String) -> String {
+pub fn to_dot<G, NodeLabel, EdgeAttributes>(
+    view: &G,
+    style: &DotStyle<NodeLabel, EdgeAttributes>,
+) -> String
+where
+    G: NodeView + EdgeView,
+    NodeLabel: for<'d> Fn(G::NodeId, &'d G::NodeData) -> Cow<'d, str>,
+    EdgeAttributes: for<'d> Fn(G::EdgeId, &'d G::EdgeData) -> DotEdgeAttributes<'d>,
+{
     let mut out = String::new();
-    write_view_dot(graph, &mut out, node_label).expect("writing DOT to a String cannot fail");
+    write_dot(view, &mut out, style).expect("writing DOT to a String cannot fail");
     out
+}
+
+/// Escape label text and terminate every line with Graphviz's `\l`.
+fn write_escaped_lines(sink: &mut dyn fmt::Write, label: &str) -> fmt::Result {
+    for line in label.split('\n') {
+        write_escaped_label(sink, line)?;
+        sink.write_str("\\l")?;
+    }
+    Ok(())
+}
+
+fn write_edge_attributes(
+    sink: &mut dyn fmt::Write,
+    attributes: &DotEdgeAttributes<'_>,
+) -> fmt::Result {
+    if attributes.is_plain() {
+        return Ok(());
+    }
+    sink.write_str(" [")?;
+    let mut separator = "";
+    if let Some(color) = attributes.color {
+        write!(sink, "{separator}color={color}")?;
+        separator = " ";
+    }
+    if let Some(style) = attributes.style {
+        write!(sink, "{separator}style={style}")?;
+        separator = " ";
+    }
+    if !attributes.label.is_empty() {
+        write!(sink, "{separator}label=\"")?;
+        write_escaped_label(sink, &attributes.label)?;
+        sink.write_char('"')?;
+        separator = " ";
+    }
+    if let Some(penwidth) = attributes.penwidth {
+        write!(sink, "{separator}penwidth={penwidth:.1}")?;
+    }
+    sink.write_char(']')
+}
+
+/// Escape one line of attribute text, mapping a line break to DOT's `\n`.
+fn write_escaped_label(sink: &mut dyn fmt::Write, label: &str) -> fmt::Result {
+    for ch in label.chars() {
+        match ch {
+            '\\' => sink.write_str("\\\\")?,
+            '"' => sink.write_str("\\\"")?,
+            '\n' => sink.write_str("\\n")?,
+            '\r' => {}
+            _ => sink.write_char(ch)?,
+        }
+    }
+    Ok(())
+}
+
+impl<N: fmt::Display, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
+    /// Write the store in DOT format, labeling each node with its payload.
+    ///
+    /// Nodes are named by their tag and dense index — `n0`, `n1`, … for the
+    /// default tag. Edges are drawn undecorated; [`write_dot`] with a
+    /// [`DotStyle`] of your own renders edge payloads too.
+    ///
+    /// # Errors
+    ///
+    /// Returns the sink's formatting error if a write fails.
+    pub fn write_dot(&self, sink: &mut dyn fmt::Write) -> fmt::Result {
+        write_dot(self, sink, &store_style::<N, E, NT, ET>())
+    }
+
+    /// Produce the DOT representation of the store as a [`String`].
+    ///
+    /// # Panics
+    ///
+    /// Panics only if writing to an in-memory [`String`] unexpectedly fails.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cfglib::Graph;
+    ///
+    /// let mut graph = Graph::new();
+    /// let definition = graph.add_node("definition");
+    /// let call = graph.add_node("call");
+    /// graph.add_edge(definition, call, ());
+    ///
+    /// let dot = graph.to_dot();
+    /// assert!(dot.contains("n0 [label=\"definition\\l\"];"));
+    /// assert!(dot.contains("n0 -> n1;"));
+    /// ```
+    #[must_use]
+    pub fn to_dot(&self) -> String {
+        to_dot(self, &store_style::<N, E, NT, ET>())
+    }
+}
+
+fn store_style<N: fmt::Display, E, NT: IdTag, ET: IdTag>()
+-> DotStyle<Label<Id<NT>, N>, DotEdgeStyle<Id<ET>, E>> {
+    DotStyle::new(
+        display_label as Label<Id<NT>, N>,
+        plain_edge_attributes as DotEdgeStyle<Id<ET>, E>,
+    )
+    .node_prefix(NT::PREFIX)
 }
 
 impl<I, E> Cfg<I, E> {
@@ -87,90 +405,16 @@ impl<I, E> Cfg<I, E> {
     /// Returns the sink's formatting error if a write fails.
     pub fn write_dot_with(
         &self,
-        w: &mut dyn fmt::Write,
-        mut label: impl FnMut(&I) -> Cow<'_, str>,
+        sink: &mut dyn fmt::Write,
+        label: impl Fn(&I) -> Cow<'_, str>,
     ) -> fmt::Result {
-        writeln!(w, "digraph cfg {{")?;
-        writeln!(
-            w,
-            "    node [shape=box fontname=\"monospace\" fontsize=10];"
-        )?;
-        writeln!(w, "    edge [fontname=\"monospace\" fontsize=9];")?;
-
-        for id in self.block_ids() {
-            let block = self.block(id);
-            let label_prefix = block
-                .label()
-                .map(|l| alloc::format!("{}:\\n", escape_label(l)))
-                .unwrap_or_default();
-
-            // Build a label with the mnemonic of each instruction.
-            let mut body = String::new();
-            for inst in block.instructions() {
-                let m = label(inst);
-                if !m.is_empty() {
-                    if !body.is_empty() {
-                        body.push_str("\\l");
-                    }
-                    body.push_str(&escape_label(&m));
-                }
-            }
-
-            if body.is_empty() {
-                body.push_str("(empty)");
-            }
-
-            body.push_str("\\l");
-
-            writeln!(w, "    {id} [label=\"{label_prefix}{id}\\n{body}\"];")?;
-        }
-
-        for edge in self.edges() {
-            let (color, style, lbl) = match edge.kind() {
-                EdgeKind::Fallthrough => ("black", "solid", ""),
-                EdgeKind::ConditionalTrue => ("green4", "solid", "T"),
-                EdgeKind::ConditionalFalse => ("red", "solid", "F"),
-                EdgeKind::Unconditional => ("blue", "solid", ""),
-                EdgeKind::Back => ("blue", "dashed", "back"),
-                EdgeKind::Call => ("purple", "solid", "call"),
-                EdgeKind::CallReturn => ("purple", "dashed", "ret"),
-                EdgeKind::SwitchCase => ("orange", "dotted", "case"),
-                EdgeKind::Jump => ("blue", "bold", "jmp"),
-                EdgeKind::IndirectJump => ("blue", "dotted", "ijmp"),
-                EdgeKind::IndirectCall => ("purple", "dotted", "icall"),
-                EdgeKind::ExceptionHandler => ("darkred", "solid", "handler"),
-                EdgeKind::ExceptionUnwind => ("darkred", "dashed", "unwind"),
-                EdgeKind::ExceptionLeave => ("darkred", "dotted", "leave"),
-                EdgeKind::ExceptionResume => ("darkred", "bold", "resume"),
-                EdgeKind::ExceptionContinue => ("darkgreen", "dashed", "continue"),
-            };
-            write!(
-                w,
-                "    {} -> {} [color={color} style={style}",
-                edge.source(),
-                edge.target(),
-            )?;
-
-            // Show weight in the label if present.
-            let weight_str = edge
-                .weight()
-                .map(|w| alloc::format!(" ({w:.2})"))
-                .unwrap_or_default();
-            let full_label = alloc::format!("{lbl}{weight_str}");
-            if !full_label.is_empty() {
-                write!(w, " label=\"{full_label}\"")?;
-            }
-
-            // Thicker line for high-probability edges.
-            if let Some(wt) = edge.weight() {
-                let penwidth = 1.0 + wt * 3.0; // 1.0–4.0
-                write!(w, " penwidth={penwidth:.1}")?;
-            }
-
-            writeln!(w, "];")?;
-        }
-
-        writeln!(w, "}}")
+        let style = DotStyle::new(
+            block_label(label),
+            control_flow_edge_attributes as DotEdgeStyle<EdgeId, Edge<E>>,
+        )
+        .named("cfg")
+        .node_prefix("bb");
+        write_dot(self, sink, &style)
     }
 
     /// Produce the DOT representation as a [`String`] using a caller-supplied
@@ -180,12 +424,40 @@ impl<I, E> Cfg<I, E> {
     ///
     /// Panics only if writing to an in-memory [`String`] unexpectedly fails.
     #[must_use]
-    pub fn to_dot_with(&self, label: impl FnMut(&I) -> Cow<'_, str>) -> String {
-        let mut s = String::new();
-        self.write_dot_with(&mut s, label)
-            .expect("fmt::Write to String cannot fail");
-        s
+    pub fn to_dot_with(&self, label: impl Fn(&I) -> Cow<'_, str>) -> String {
+        let mut out = String::new();
+        self.write_dot_with(&mut out, label)
+            .expect("writing DOT to a String cannot fail");
+        out
     }
+}
+
+/// The node label of a control-flow graph: the block's own name, its
+/// identity, and one line per instruction.
+fn block_label<I>(
+    label: impl Fn(&I) -> Cow<'_, str>,
+) -> impl for<'b> Fn(BlockId, &'b BasicBlock<I>) -> Cow<'b, str> {
+    bind_label::<BlockId, BasicBlock<I>, _>(move |id, block| {
+        let mut text = String::new();
+        if let Some(name) = block.label() {
+            text.push_str(name);
+            text.push_str(":\n");
+        }
+        let _ = write!(text, "{id}");
+        let mut empty = true;
+        for instruction in block.instructions() {
+            let rendered = label(instruction);
+            if !rendered.is_empty() {
+                text.push('\n');
+                text.push_str(&rendered);
+                empty = false;
+            }
+        }
+        if empty {
+            text.push_str("\n(empty)");
+        }
+        Cow::Owned(text)
+    })
 }
 
 impl<I: DisplayInstr, E> Cfg<I, E> {
@@ -194,8 +466,8 @@ impl<I: DisplayInstr, E> Cfg<I, E> {
     /// # Errors
     ///
     /// Returns the sink's formatting error if a write fails.
-    pub fn write_dot(&self, w: &mut dyn fmt::Write) -> fmt::Result {
-        self.write_dot_with(w, DisplayInstr::mnemonic)
+    pub fn write_dot(&self, sink: &mut dyn fmt::Write) -> fmt::Result {
+        self.write_dot_with(sink, DisplayInstr::mnemonic)
     }
 
     /// Produce the DOT representation as a [`String`].
@@ -224,95 +496,9 @@ impl<I: DisplayInstr, E> Cfg<I, E> {
     /// ```
     #[must_use]
     pub fn to_dot(&self) -> String {
-        let mut s = String::new();
-        self.write_dot(&mut s)
-            .expect("fmt::Write to String cannot fail");
-        s
+        self.to_dot_with(DisplayInstr::mnemonic)
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{String, write_view_dot};
-    use crate::cfg::Cfg;
-    use crate::edge::EdgeKind;
-    use crate::graph::store::Graph;
-    use crate::test_util::{MockInst, ff};
-
-    #[test]
-    fn view_dot_renders_nodes_edges_and_escapes_labels() {
-        let mut graph = Graph::new();
-        let a = graph.add_node("say \"hi\"\nback\\slash");
-        let b = graph.add_node("plain");
-        graph.add_edge(a, b, ());
-
-        let mut out = String::new();
-        write_view_dot(&graph, &mut out, |node| String::from(*graph.node(node))).unwrap();
-        assert!(out.starts_with("digraph view {"));
-        assert!(out.contains("n0 -> n1;"));
-        assert!(out.contains("say \\\"hi\\\"\\nback\\\\slash"));
-        assert!(out.contains("[label=\"plain\"]"));
-    }
-
-    #[test]
-    fn to_dot_contains_digraph_wrapper() {
-        let mut cfg = Cfg::new();
-        cfg.block_mut(cfg.entry())
-            .instructions_mut()
-            .push(ff("nop"));
-        let dot = cfg.to_dot();
-        assert!(dot.starts_with("digraph cfg {"));
-        assert!(dot.trim_end().ends_with('}'));
-    }
-
-    #[test]
-    fn to_dot_contains_block_labels() {
-        let mut cfg = Cfg::new();
-        let b = cfg.new_block();
-        cfg.block_mut(cfg.entry())
-            .instructions_mut()
-            .push(ff("entry_inst"));
-        cfg.block_mut(b).instructions_mut().push(ff("second_inst"));
-        cfg.add_edge(cfg.entry(), b, EdgeKind::Fallthrough);
-        let dot = cfg.to_dot();
-        assert!(dot.contains("entry_inst"), "should contain mnemonic");
-        assert!(dot.contains("second_inst"), "should contain mnemonic");
-    }
-
-    #[test]
-    fn to_dot_conditional_edge_colors() {
-        let mut cfg = Cfg::new();
-        let a = cfg.new_block();
-        let b = cfg.new_block();
-        cfg.block_mut(cfg.entry()).instructions_mut().push(ff("br"));
-        cfg.add_edge(cfg.entry(), a, EdgeKind::ConditionalTrue);
-        cfg.add_edge(cfg.entry(), b, EdgeKind::ConditionalFalse);
-        let dot = cfg.to_dot();
-        assert!(dot.contains("green4"), "true edge should be green");
-        assert!(dot.contains("red"), "false edge should be red");
-        assert!(dot.contains("\"T\""), "true edge label");
-        assert!(dot.contains("\"F\""), "false edge label");
-    }
-
-    #[test]
-    fn to_dot_empty_block_shows_empty_label() {
-        let cfg: Cfg<MockInst> = Cfg::new();
-        let dot = cfg.to_dot();
-        assert!(dot.contains("(empty)"), "empty block should say (empty)");
-    }
-
-    #[test]
-    fn to_dot_edge_weight_shows_penwidth() {
-        let mut cfg = Cfg::new();
-        let b = cfg.new_block();
-        cfg.block_mut(cfg.entry()).instructions_mut().push(ff("a"));
-        let eid = cfg.add_edge(cfg.entry(), b, EdgeKind::Fallthrough);
-        cfg.edge_mut(eid).set_weight(Some(0.75));
-        let dot = cfg.to_dot();
-        assert!(
-            dot.contains("penwidth="),
-            "weighted edge should have penwidth"
-        );
-        assert!(dot.contains("0.75"), "weight value should appear in label");
-    }
-}
+mod tests;

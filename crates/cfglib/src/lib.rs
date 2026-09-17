@@ -54,6 +54,20 @@
 //! MLIL ([`lift_hlil_function`]) with effect-ordered single-use inlining,
 //! and lowered back to flat MLIL ([`lower_hlil_function`]) so both
 //! directions of the pipeline meet at either level.
+//! Output is three formats over one set of writers. [`write_dot`] draws any
+//! node- and edge-bearing view through a [`DotStyle`] — a node-label hook, an
+//! edge-attribute hook ([`DotEdgeAttributes`]), a graph name, an identifier
+//! prefix, and a [`DotRankDir`] — so [`Cfg`] and [`Graph`] are two styles
+//! rather than two writers. [`write_text`] prints the same view one fact per
+//! line, and [`parse_text`] reads it back into a plain [`Graph`], which is
+//! what makes the form comparable: write, parse, write again is a fixed
+//! point. [`Cfg::to_text`] is the control-flow reading of it — block headers
+//! with indented instructions, edges named by [`EdgeKind`], and exception
+//! regions — and [`parse_cfg_text`] reads that back with a consumer-supplied
+//! instruction parser. Pseudocode printers at every IR level
+//! ([`AstNode::to_pseudocode`], [`ir::rtl::Function::to_pseudocode`],
+//! [`ir::hlil::Function::to_pseudocode`]) share [`IndentedWriter`], so
+//! indentation is decided once and a label is written straight into the sink.
 //! [`PassPipeline`] composes named, ordered, fallible transformations over any
 //! of these IR levels or a consumer-owned compilation context, retaining a
 //! change report and failed-pass identity without imposing dialect policy.
@@ -126,7 +140,7 @@
 //!
 //! MemoryAlias<Location>     (optional may-alias oracle consumed by MemorySSA)
 //!
-//! DisplayInstr              (optional — rendering only: DOT, pseudocode)
+//! DisplayInstr              (optional — rendering only: DOT, text, pseudocode)
 //! CallInfo                  (optional — call graphs, Callee)
 //! SwitchSource              (optional — switch table recovery, Target)
 //! ```
@@ -172,6 +186,11 @@
 
 #![no_std]
 #![warn(missing_docs)]
+
+// Golden-file comparison reads the rendered output back from disk, which the
+// crate itself never does.
+#[cfg(test)]
+extern crate std;
 
 pub(crate) fn usize_to_f64(value: usize) -> f64 {
     if let Ok(value) = u32::try_from(value) {
@@ -228,7 +247,7 @@ pub use builder::address::{
     AddressInstruction, AddressSpace, CallPolicy, build_address_cfg,
 };
 pub use builder::{BuildError, CfgBuilder, JumpResolution, resolve_jump_edges};
-pub use cfg::{Cfg, CfgEdge, CfgRenumbering, SplitPointError};
+pub use cfg::{Cfg, CfgEdge, CfgRenumbering, SplitPointError, parse_cfg_text};
 pub use dataflow::abstract_interpretation::{
     AbstractDomain, AbstractFacts, Lattice, abstract_interpret,
 };
@@ -275,7 +294,7 @@ pub use dataflow::ssa::{
 };
 pub use dataflow::ssa_destruction::{PhiCopy, copies_by_predecessor, eliminate_phis};
 pub use dataflow::{DefSite, EffectInfo, InstrInfo, Predicated, ProgramPoint, UseSite, VariableId};
-pub use display::DisplayInstr;
+pub use display::{DisplayInstr, IndentedWriter};
 pub use edge::{Edge, EdgeId, EdgeKind, EdgeTag, KindedEdge};
 pub use exception::{
     ClrExceptionRegion, ClrHandler, ClrHandlerKind, ExceptionDisposition, ExceptionFlow,
@@ -294,7 +313,10 @@ pub use graph::call_graph::{
 pub use graph::cdg::control_dependence_graph;
 pub use graph::diff::{BlockFingerprint, BlockMatch, CfgDiff};
 pub use graph::dominator::DominatorTree;
-pub use graph::dot::{to_view_dot, write_view_dot};
+pub use graph::dot::{
+    DotEdgeAttributes, DotEdgeStyle, DotRankDir, DotStyle, bind_edge_attributes,
+    control_flow_edge_attributes, plain_edge_attributes, to_dot, write_dot,
+};
 pub use graph::edge_traverse::{
     EdgeStep, breadth_first_edges, breadth_first_edges_with, depth_first_edges,
     depth_first_edges_with, shortest_path_edges,
@@ -304,6 +326,7 @@ pub use graph::eh::{EhBlockKind, EhEdge, EhEdgeKind, EhModel};
 pub use graph::horn::HornClauses;
 pub use graph::interval::{Interval, IntervalAnalysis};
 pub use graph::keyed::KeyedGraph;
+pub use graph::label::{Label, bind_label, display_label, no_label};
 pub use graph::loop_nest::{LoopNestNode, LoopNestingTree};
 pub use graph::open::{
     FoldEnter, MarkScope, OpenBfsConfig, OpenBfsEvent, OpenDfsConfig, OpenDfsEvent, OpenFold,
@@ -341,6 +364,7 @@ pub use graph::structure::{
     BackEdge, CanonicalLoop, NaturalLoop, canonicalize_loops, detect_loops, detect_loops_tagged,
     find_back_edges, find_back_edges_tagged, insert_preheader, is_reducible, loop_exit_blocks,
 };
+pub use graph::text::{TextError, TextErrorKind, TextStyle, parse_text, to_text, write_text};
 pub use graph::traverse::{
     CommonAncestor, TraversalDirection, breadth_first, common_ancestors, depth_first_postorder,
     depth_first_preorder, nearest_common_ancestor, reachable, reverse_postorder, shortest_path,

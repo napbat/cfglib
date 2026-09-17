@@ -1,0 +1,5 @@
+n0 says "hi"\nand a back\\slash
+n2 \-> not an arrow
+n0 -> n2 crosses the hole
+n2 -> n0
+n0 -> n0 self

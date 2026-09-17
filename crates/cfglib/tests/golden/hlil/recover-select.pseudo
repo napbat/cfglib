@@ -1,0 +1,2 @@
+v1 = select(v0, 1, 2);
+return v1;

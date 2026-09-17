@@ -100,27 +100,88 @@ pub trait KindedEdge {
     fn kind(&self) -> EdgeKind;
 }
 
+impl EdgeKind {
+    /// Every kind, in declaration order.
+    ///
+    /// This is what [`from_name`](Self::from_name) searches, so naming stays
+    /// defined in exactly one place: [`name`](Self::name).
+    pub const ALL: [Self; 16] = [
+        Self::Fallthrough,
+        Self::ConditionalTrue,
+        Self::ConditionalFalse,
+        Self::Unconditional,
+        Self::Back,
+        Self::Call,
+        Self::CallReturn,
+        Self::SwitchCase,
+        Self::Jump,
+        Self::IndirectJump,
+        Self::IndirectCall,
+        Self::ExceptionHandler,
+        Self::ExceptionUnwind,
+        Self::ExceptionLeave,
+        Self::ExceptionResume,
+        Self::ExceptionContinue,
+    ];
+
+    /// The canonical name of this kind, which is what
+    /// [`Display`](core::fmt::Display) prints and what the text form of a
+    /// control-flow graph writes.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Fallthrough => "fallthrough",
+            Self::ConditionalTrue => "true",
+            Self::ConditionalFalse => "false",
+            Self::Unconditional => "unconditional",
+            Self::Back => "back",
+            Self::Call => "call",
+            Self::CallReturn => "call_return",
+            Self::SwitchCase => "case",
+            Self::Jump => "jump",
+            Self::IndirectJump => "indirect_jump",
+            Self::IndirectCall => "indirect_call",
+            Self::ExceptionHandler => "handler",
+            Self::ExceptionUnwind => "unwind",
+            Self::ExceptionLeave => "leave",
+            Self::ExceptionResume => "resume",
+            Self::ExceptionContinue => "continue_exception",
+        }
+    }
+
+    /// The kind with this canonical name, or `None` for an unknown name.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.name() == name)
+    }
+}
+
 impl core::fmt::Display for EdgeKind {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let label = match self {
-            EdgeKind::Fallthrough => "fallthrough",
-            EdgeKind::ConditionalTrue => "true",
-            EdgeKind::ConditionalFalse => "false",
-            EdgeKind::Unconditional => "unconditional",
-            EdgeKind::Back => "back",
-            EdgeKind::Call => "call",
-            EdgeKind::CallReturn => "call_return",
-            EdgeKind::SwitchCase => "case",
-            EdgeKind::Jump => "jump",
-            EdgeKind::IndirectJump => "indirect_jump",
-            EdgeKind::IndirectCall => "indirect_call",
-            EdgeKind::ExceptionHandler => "handler",
-            EdgeKind::ExceptionUnwind => "unwind",
-            EdgeKind::ExceptionLeave => "leave",
-            EdgeKind::ExceptionResume => "resume",
-            EdgeKind::ExceptionContinue => "continue_exception",
-        };
-        f.write_str(label)
+        f.write_str(self.name())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate alloc;
+
+    use alloc::collections::BTreeSet;
+
+    use super::EdgeKind;
+
+    #[test]
+    fn every_kind_has_a_distinct_name_that_reads_back() {
+        let names: BTreeSet<_> = EdgeKind::ALL.iter().map(|kind| kind.name()).collect();
+        assert_eq!(
+            names.len(),
+            EdgeKind::ALL.len(),
+            "two kinds share a name, so one of them cannot be read back"
+        );
+        for kind in EdgeKind::ALL {
+            assert_eq!(EdgeKind::from_name(kind.name()), Some(kind));
+        }
+        assert_eq!(EdgeKind::from_name("sideways"), None);
     }
 }
 

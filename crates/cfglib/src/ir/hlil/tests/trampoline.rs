@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use super::{Edge, MediumOperation, Toy, Type};
 use crate::ir::hlil::lift_function;
 use crate::ir::mlil;
+use crate::test_util::golden::assert_golden;
 
 /// A pre-tested loop whose conditional break routes through a block
 /// holding an explicit jump instruction, with that block claimed by an
@@ -106,8 +107,9 @@ fn claimed_trampoline_loop() -> mlil::Function<Toy> {
 fn a_region_claimed_jump_trampoline_resolves_as_a_break() {
     let lifted = lift_function(&claimed_trampoline_loop()).unwrap();
     assert!(lifted.report.gotos.is_empty(), "{:?}", lifted.report);
-    let pseudo = lifted.function.to_pseudocode();
-    assert!(pseudo.contains("while (lt(v0, v1)) {"), "{pseudo}");
-    assert!(pseudo.contains("break;"), "{pseudo}");
-    assert!(!pseudo.contains("goto"), "{pseudo}");
+    // The trampoline resolved to a break; no goto survives.
+    assert_golden(
+        "hlil/trampoline-break.pseudo",
+        &lifted.function.to_pseudocode(),
+    );
 }
