@@ -178,9 +178,8 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         // The overlay takes over both nodes' chains as well as their runs.
         let previous_index = previous.index();
         let endpoint_index = endpoint.index();
-        let chains = self.chains_mut(direction);
-        chains.detach_node(previous_index);
-        chains.detach_node(endpoint_index);
+        self.chains.detach_node(previous_index, direction);
+        self.chains.detach_node(endpoint_index, direction);
         let relocations = self.relocations.get_or_insert_default();
         let runs = relocations.runs_mut(direction);
         runs.insert(raw_index(previous.index()), leaving);

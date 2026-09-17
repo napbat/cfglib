@@ -275,6 +275,31 @@ fn the_view_reports_slots_so_dense_analyses_stay_in_bounds() {
 }
 
 #[test]
+fn liveness_answers_survive_the_tombstone_boundary() {
+    let (mut graph, nodes) = diamond();
+    let edges: Vec<_> = graph.edge_ids().collect();
+
+    // Nothing has been removed, so containment is answered from the counts.
+    assert!(graph.contains_node(nodes[1]));
+    assert!(!graph.contains_node(NodeId::from_raw(4)));
+    assert!(graph.contains_edge(edges[0]));
+
+    graph.remove_node(nodes[1]);
+    assert!(!graph.contains_node(nodes[1]));
+    assert!(graph.contains_node(nodes[2]));
+    assert!(!graph.contains_edge(edges[0]), "its edges went with it");
+    assert!(graph.outgoing(nodes[1]).next().is_none());
+    assert_eq!(graph.incoming(nodes[3]).count(), 1);
+
+    // Compaction retires every tombstone, so the counts answer again.
+    graph.compact();
+    assert_eq!(graph.node_ids().count(), 3);
+    assert_eq!(graph.edge_ids().count(), 2);
+    assert!(graph.contains_node(NodeId::from_raw(2)));
+    assert!(!graph.contains_node(NodeId::from_raw(3)));
+}
+
+#[test]
 fn the_edge_view_exposes_live_edges_and_their_endpoints() {
     let (mut graph, nodes) = diamond();
     let edges: Vec<_> = graph.edge_ids().collect();

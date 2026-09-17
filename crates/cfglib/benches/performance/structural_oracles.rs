@@ -281,10 +281,10 @@ pub(super) enum FanOut {
     /// Untouched: `source` and `target` are still two instruction-carrying
     /// blocks joined by the connecting edge.
     Intact,
-    /// `merge_blocks` folded `target` into `source` and retired its slot.
+    /// `merge_blocks` folded `target` into `source` and removed it.
     Merged,
-    /// `contract_edge` folded `target` into `source` but leaves the emptied
-    /// block live.
+    /// `contract_edge` folded `target` into `source` and removed it, which is
+    /// the same shape `Merged` leaves behind.
     Contracted,
 }
 
@@ -297,19 +297,18 @@ pub(super) fn assert_weighted_fan_out(
 ) {
     let folded = state != FanOut::Intact;
     let live_edges = if folded { edge_count } else { edge_count + 1 };
-    // A merged block is removed for real; its slot stays reserved, so the
+    // A folded block is removed for real; its slot stays reserved, so the
     // identity bound still spans all three original blocks either way.
-    let live_blocks = if state == FanOut::Merged { 2 } else { 3 };
+    let live_blocks = if folded { 2 } else { 3 };
     assert_cfg_shape(cfg, live_blocks, live_edges);
     assert_eq!(cfg.block_bound(), 3);
     let sink = BlockId::from_raw(2);
     let outgoing_source = if folded { source } else { target };
 
     if folded {
-        assert_eq!(
-            cfg.contains_block(target),
-            state == FanOut::Contracted,
-            "a merged block is retired while a contracted block stays live"
+        assert!(
+            !cfg.contains_block(target),
+            "merging and contracting both retire the block they fold"
         );
         assert_eq!(cfg.block(source).instructions(), &[0, 1]);
         assert_eq!(cfg.block(target).instructions().len(), 0);

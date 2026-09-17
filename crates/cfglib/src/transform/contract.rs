@@ -11,6 +11,11 @@ use crate::rewrite::Rewrite;
 
 /// Contract an edge by merging `target` into `source`.
 ///
+/// `target` is removed: its instructions, its label, and its outgoing edges
+/// move to `source`, and the block itself stops being a block of the CFG,
+/// exactly as [`merge_blocks`](crate::merge_blocks) leaves the chain it
+/// folded. Its slot stays reserved, so every surviving identity is unchanged.
+///
 /// This compatibility entry point reports only whether contraction happened.
 /// Use [`contract_edge_mapped`] when clients retain graph identities. The CFG
 /// entry is never accepted as `target`, and self-loops are not contracted.
@@ -23,9 +28,9 @@ pub fn contract_edge<I, E>(cfg: &mut Cfg<I, E>, source: BlockId, target: BlockId
 ///
 /// Returns `None` unless `source` has exactly one outgoing edge, that edge
 /// targets `target`, and it is `target`'s sole incoming edge. The connecting
-/// edge maps to removal, `target` maps to `source`, and redirected outgoing
-/// edges map to themselves. The CFG entry is never accepted as `target`, and
-/// self-loops are not contracted.
+/// edge maps to removal, `target` is removed and maps to `source`, and
+/// redirected outgoing edges map to themselves. The CFG entry is never
+/// accepted as `target`, and self-loops are not contracted.
 pub fn contract_edge_mapped<I, E>(
     cfg: &mut Cfg<I, E>,
     source: BlockId,
@@ -70,12 +75,12 @@ fn contract_edge_inner<I, E>(
         mapping.record_edge(connecting, []);
     }
     cfg.move_outgoing_edges(target, source);
-    for edge in cfg.outgoing(source) {
-        if let Some(mapping) = mapping.as_deref_mut() {
+    let moved: Vec<EdgeId> = cfg.outgoing(source).collect();
+    cfg.remove_block(target);
+    if let Some(mapping) = mapping {
+        for edge in moved {
             mapping.record_edge(edge, [edge]);
         }
-    }
-    if let Some(mapping) = mapping {
         mapping.record_block(target, [source]);
     }
     true
@@ -141,6 +146,34 @@ mod tests {
         assert_eq!(mapping.blocks(target), Some([entry].as_slice()));
         assert_eq!(cfg.edge(outgoing).source(), entry);
         assert_eq!(cfg.edge(outgoing).payload(), &"provenance");
+        assert!(!cfg.contains_block(target), "the contracted block is gone");
+        assert_eq!(cfg.block_count(), 2);
+        assert_eq!(cfg.block_bound(), 3, "its slot stays reserved");
+    }
+
+    #[test]
+    fn contract_removes_the_block_it_folds_like_a_merge() {
+        let mut cfg = Cfg::<u32>::new();
+        let source = cfg.entry();
+        let target = cfg.new_block();
+        let sink = cfg.new_block();
+        cfg.block_mut(source).push(0);
+        cfg.block_mut(target).push(1);
+        cfg.block_mut(sink).push(2);
+        cfg.add_edge(source, target, EdgeKind::Fallthrough);
+        cfg.add_edge(target, sink, EdgeKind::Jump);
+
+        assert!(contract_edge(&mut cfg, source, target));
+
+        assert!(!cfg.contains_block(target));
+        assert_eq!(cfg.block_count(), 2);
+        assert_eq!(cfg.block(source).instructions(), &[0, 1]);
+        assert_eq!(
+            cfg.block_ids().collect::<Vec<_>>(),
+            [source, sink],
+            "a contracted block is no longer a block of the CFG"
+        );
+        assert!(crate::verify(&cfg).is_ok());
     }
 
     #[test]
@@ -179,6 +212,7 @@ mod tests {
 
         assert!(contract_edge(&mut cfg, source, target));
 
+        assert!(!cfg.contains_block(target));
         assert_eq!(cfg.outgoing(target).collect::<Vec<_>>(), &[]);
         assert_eq!(
             cfg.outgoing(source).collect::<Vec<_>>(),

@@ -31,9 +31,10 @@
 //!
 //! delta   nodes  appended payloads
 //!         edges  appended records
-//!         out    one u32 per node: last edge of a circular chain
-//!         in     one u32 per node: last edge of a circular chain
-//!         next   one u32 per delta edge, per direction
+//!         last   one u32 pair per node: last edge of each direction's
+//!                circular chain
+//!         next   one u32 pair per delta edge: its successor in each
+//!                direction's chain
 //!
 //! live    one bit per node slot, one bit per edge slot
 //! ```
@@ -49,6 +50,12 @@
 //! are circular with the per-node slot naming the chain's **last** element,
 //! which is what makes append-order iteration possible from one pointer
 //! instead of a head-and-tail pair.
+//!
+//! Both slots live in one array, because both are written by the same append:
+//! [`add_node`](Graph::add_node) is two pushes and one bit, and
+//! [`add_edge`](Graph::add_edge) is two pushes, one bit, and the four links of
+//! the two chains it joins. That fixed cost is the whole of what a procedure's
+//! flow graph — a few hundred nodes, built and discarded — ever pays.
 //!
 //! ## Removal
 //!
@@ -178,8 +185,7 @@ pub struct Graph<N, E, NT: IdTag = NodeTag, ET: IdTag = EdgeTag> {
     in_edges: Box<[u32]>,
     delta_nodes: Vec<N>,
     delta_edges: Vec<EdgeRecord<E, NT>>,
-    out_chains: DeltaChains,
-    in_chains: DeltaChains,
+    chains: DeltaChains,
     live_nodes: LiveSet,
     live_edges: LiveSet,
     live_node_count: usize,
@@ -228,8 +234,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
             in_edges: empty_slice(),
             delta_nodes: Vec::new(),
             delta_edges: Vec::new(),
-            out_chains: DeltaChains::new(),
-            in_chains: DeltaChains::new(),
+            chains: DeltaChains::new(),
             live_nodes: LiveSet::new(),
             live_edges: LiveSet::new(),
             live_node_count: 0,
@@ -250,8 +255,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         Self {
             delta_nodes: Vec::with_capacity(nodes),
             delta_edges: Vec::with_capacity(edges),
-            out_chains: DeltaChains::with_capacity(nodes, edges),
-            in_chains: DeltaChains::with_capacity(nodes, edges),
+            chains: DeltaChains::with_capacity(nodes, edges),
             live_nodes: LiveSet::with_capacity(nodes),
             live_edges: LiveSet::with_capacity(edges),
             ..Self::tagged()
@@ -261,8 +265,8 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// Add a node and return its stable identity.
     ///
     /// Constant time, and no allocation beyond the amortized growth of the
-    /// delta arrays: a node costs its payload, eight bytes of chain slots,
-    /// and two bits.
+    /// delta arrays: a node costs its payload, one push of its eight bytes of
+    /// chain slots, and two bits.
     ///
     /// # Panics
     ///
@@ -274,8 +278,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
             "node count exceeds the dense identity space"
         );
         self.delta_nodes.push(payload);
-        self.out_chains.push_node();
-        self.in_chains.push_node();
+        self.chains.push_node();
         self.live_nodes.push_live();
         self.live_node_count += 1;
         Id::from_index(slot)
@@ -302,8 +305,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
 
         self.delta_edges
             .push(EdgeRecord::new(source, target, payload));
-        self.out_chains.append(source.index());
-        self.in_chains.append(target.index());
+        self.chains.append(source.index(), target.index());
         self.live_edges.push_live();
         self.live_edge_count += 1;
         Id::from_index(slot)
@@ -323,7 +325,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// way is indistinguishable from one removed directly.
     pub fn remove_node(&mut self, node: Id<NT>) -> bool {
         let index = node.index();
-        if index >= self.node_bound() || !self.live_nodes.is_live(index) {
+        if !self.node_is_live(index) {
             return false;
         }
         self.clear_adjacency(node, TraversalDirection::Outgoing);
@@ -404,13 +406,40 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// Whether `node` names a node the store still holds.
     #[must_use]
     pub fn contains_node(&self, node: Id<NT>) -> bool {
-        self.live_nodes.is_live(node.index())
+        self.node_is_live(node.index())
     }
 
     /// Whether `edge` names an edge the store still holds.
     #[must_use]
     pub fn contains_edge(&self, edge: Id<ET>) -> bool {
-        self.live_edges.is_live(edge.index())
+        self.edge_is_live(edge.index())
+    }
+
+    /// Whether any node slot is a tombstone, which is the only reason a
+    /// question about a node has to reach the bitset at all.
+    ///
+    /// A store that has only ever been appended to or compacted answers every
+    /// liveness question from its two counters, so the endpoint check on the
+    /// append path and the node test starting every adjacency walk touch no
+    /// second array.
+    pub(super) fn tombstoned_nodes(&self) -> bool {
+        self.live_node_count != self.node_bound()
+    }
+
+    /// Whether any edge slot is a tombstone, the edge counterpart of
+    /// [`tombstoned_nodes`](Self::tombstoned_nodes).
+    pub(super) fn tombstoned_edges(&self) -> bool {
+        self.live_edge_count != self.edge_bound()
+    }
+
+    /// Whether `slot` names a node the store still holds.
+    fn node_is_live(&self, slot: usize) -> bool {
+        slot < self.node_bound() && (!self.tombstoned_nodes() || self.live_nodes.is_live(slot))
+    }
+
+    /// Whether `slot` names an edge the store still holds.
+    fn edge_is_live(&self, slot: usize) -> bool {
+        slot < self.edge_bound() && (!self.tombstoned_edges() || self.live_edges.is_live(slot))
     }
 
     /// The number of nodes the store holds.
@@ -470,16 +499,18 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
 
     /// Iterate over every live node identity in ascending order.
     pub fn node_ids(&self) -> impl Iterator<Item = Id<NT>> + '_ {
+        let tombstoned = self.tombstoned_nodes();
         (0..self.node_bound())
-            .filter(|&slot| self.live_nodes.is_live(slot))
+            .filter(move |&slot| !tombstoned || self.live_nodes.is_live(slot))
             .map(Id::from_index)
     }
 
     /// Iterate over every live edge identity in ascending order, which is
     /// also insertion order.
     pub fn edge_ids(&self) -> impl Iterator<Item = Id<ET>> + '_ {
+        let tombstoned = self.tombstoned_edges();
         (0..self.edge_bound())
-            .filter(|&slot| self.live_edges.is_live(slot))
+            .filter(move |&slot| !tombstoned || self.live_edges.is_live(slot))
             .map(Id::from_index)
     }
 
@@ -493,21 +524,13 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         self.edge_ids().map(|edge| self.edge(edge))
     }
 
-    /// One direction's incremental chains, which relocation detaches.
-    pub(crate) const fn chains_mut(&mut self, direction: TraversalDirection) -> &mut DeltaChains {
-        match direction {
-            TraversalDirection::Outgoing => &mut self.out_chains,
-            TraversalDirection::Incoming => &mut self.in_chains,
-        }
-    }
-
     pub(super) fn assert_live_endpoint(&self, node: Id<NT>, role: &str) {
         assert!(
             node.index() < self.node_bound(),
             "{role} node is out of range"
         );
         assert!(
-            self.live_nodes.is_live(node.index()),
+            self.node_is_live(node.index()),
             "{role} node has been removed"
         );
     }

@@ -171,6 +171,13 @@ const HUB_SHARE: usize = 100;
 const HUB_DEGREE: usize = 100;
 const APPENDS: usize = 100_000;
 
+/// The other scale the same store has to serve: one procedure's flow graph,
+/// built and thrown away. Nothing here is large enough to miss cache, so the
+/// whole measurement is the fixed per-append cost.
+const SMALL_NODES: usize = 500;
+const SMALL_EDGES: usize = 1_500;
+const SMALL_BUILDS: usize = 1_000;
+
 /// A shuffled edge list with the degree skew of a real symbol graph.
 fn edge_list(rng: &mut Rng) -> Vec<(u32, u32)> {
     let hubs = NODES / HUB_SHARE;
@@ -204,6 +211,32 @@ fn append_list(rng: &mut Rng) -> Vec<(u32, u32)> {
             (source, target)
         })
         .collect()
+}
+
+/// A procedure-sized edge list, reused by every repetition so the two small
+/// cases build the identical graph a thousand times over.
+fn small_edge_list(rng: &mut Rng) -> Vec<(u32, u32)> {
+    (0..SMALL_EDGES)
+        .map(|_| {
+            let source = u32::try_from(rng.below(SMALL_NODES)).expect("node index fits in u32");
+            let target = u32::try_from(rng.below(SMALL_NODES)).expect("node index fits in u32");
+            (source, target)
+        })
+        .collect()
+}
+
+/// A build that states no capacity, which is how a consumer that does not
+/// know its block count builds: the growth of every array is part of the
+/// measurement.
+fn build_small(edges: &[(u32, u32)]) -> Graph<u32, ()> {
+    let mut graph = Graph::new();
+    for node in 0..SMALL_NODES {
+        graph.add_node(u32::try_from(node).expect("node index fits in u32"));
+    }
+    for &(source, target) in edges {
+        graph.add_edge(Id::from_raw(source), Id::from_raw(target), ());
+    }
+    graph
 }
 
 fn build_store(edges: &[(u32, u32)]) -> Graph<u32, ()> {
@@ -305,6 +338,33 @@ fn run_store(edges: &[(u32, u32)], appends: &[(u32, u32)]) -> Vec<(&'static str,
     ]
 }
 
+fn run_small(edges: &[(u32, u32)]) -> Vec<(&'static str, Sample)> {
+    let (built, build_scan) = measure(|| {
+        let mut total = 0_usize;
+        for _ in 0..SMALL_BUILDS {
+            total = total.wrapping_add(scan_store(&build_small(edges)));
+        }
+        total
+    });
+    assert!(built > 0, "the scan must observe the whole graph");
+
+    let (compacted, build_compact_scan) = measure(|| {
+        let mut total = 0_usize;
+        for _ in 0..SMALL_BUILDS {
+            let mut graph = build_small(edges);
+            drop(graph.compact());
+            total = total.wrapping_add(scan_store(&graph));
+        }
+        total
+    });
+    assert_eq!(compacted, built, "compaction preserves every successor");
+
+    vec![
+        ("build_scan", build_scan),
+        ("build_compact_scan", build_compact_scan),
+    ]
+}
+
 /// Enough repetitions for the minimum to be meaningful without turning a
 /// four-million-edge benchmark into a coffee break.
 const REPEATS: usize = 5;
@@ -326,4 +386,13 @@ fn main() {
 
     let store = fastest((0..REPEATS).map(|_| run_store(&edges, &appends)).collect());
     report("Graph", &store);
+
+    let small = small_edge_list(&mut rng);
+    println!(
+        "
+graph-store: {SMALL_NODES} nodes, {} edges, {SMALL_BUILDS} builds; best of {REPEATS}; mode: {mode}",
+        small.len()
+    );
+    let procedure = fastest((0..REPEATS).map(|_| run_small(&small)).collect());
+    report("Graph", &procedure);
 }

@@ -9,10 +9,17 @@ The latest local comparison and its measurement limits are recorded in
 [RESULTS.md](RESULTS.md).
 
 `graph-store.rs` is a separate, self-contained target measuring `Graph` at
-symbol-graph scale: one million nodes, four million skewed-degree edges, a
-hundred thousand incremental appends, and compaction. It follows the same
-two-build convention, prints one line per case, and takes the fastest of five
-runs.
+the two scales it exists for. The first table is symbol-graph scale: one
+million nodes, four million skewed-degree edges, a hundred thousand
+incremental appends, and compaction. The second is procedure scale: five
+hundred nodes and fifteen hundred edges built without a stated capacity and
+thrown away, a thousand times over, where the whole measurement is the fixed
+per-append cost rather than the memory system. It follows the same two-build
+convention, prints one line per case, and takes the fastest of five runs.
+
+The large table is sensitive to whatever else the machine is doing; pin the
+process to one core and raise its priority before comparing two revisions of
+it. The procedure-scale table is stable without that.
 
 ## Adding a benchmark
 
