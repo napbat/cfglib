@@ -17,8 +17,6 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "breadth_first_edges",
     "breadth_first_edges_with",
     "breadth_first_events",
-    "breadth_first_view_edges",
-    "breadth_first_view_edges_with",
     "build_address_cfg",
     "call_graph",
     "canonicalize_loops",
@@ -42,8 +40,6 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "depth_first_events",
     "depth_first_postorder",
     "depth_first_preorder",
-    "depth_first_view_edges",
-    "depth_first_view_edges_with",
     "detect_cfg_patterns",
     "detect_explicit_tail_calls",
     "detect_loops",
@@ -59,6 +55,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "find_loop_invariants",
     "follow",
     "follow_path",
+    "index_paths_may_overlap",
     "insert_preheader",
     "install_clr_region",
     "install_seh_region",
@@ -75,6 +72,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "linearize",
     "loop_exit_blocks",
     "make_reducible",
+    "meet_options",
     "merge_blocks",
     "merge_blocks_mapped",
     "min_label_relaxation",
@@ -82,13 +80,18 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "open_breadth_first_events",
     "open_breadth_first_paths",
     "open_depth_first_events",
+    "open_fold_post_order",
     "open_search",
     "program_dependence_graph",
+    "promote_exclusive_extents",
     "propagate_summaries",
     "reachable",
     "recover_block_expressions",
     "recover_expressions",
+    "recover_exclusive_extents",
+    "recover_exclusive_extents_with",
     "recover_switch_tables",
+    "relax_layout",
     "remove_dead_code",
     "remove_dead_code_mapped",
     "remove_empty_blocks",
@@ -99,13 +102,13 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "reverse_cfg",
     "reverse_postorder",
     "rotate_loop",
+    "scan_predecessors",
     "search",
     "search_with_marks",
     "search_with_scratch",
     "set_uniform_edge_weights",
     "shortest_path",
     "shortest_path_edges",
-    "shortest_path_view_edges",
     "simplify",
     "simplify_mapped",
     "solve_edge_problem",
@@ -145,8 +148,6 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "verify_edge_view",
     "verify_view",
     "verify_with",
-    "walk_edges",
-    "walk_view_edges",
     "write_view_dot",
 ];
 
@@ -157,21 +158,10 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     benchmark_coverage!(
         suite,
         "directed_breadth_first_edges",
-        [
-            breadth_first_edges,
-            breadth_first_edges_with,
-            breadth_first_view_edges,
-            breadth_first_view_edges_with,
-            walk_edges,
-            walk_view_edges,
-        ]
+        [breadth_first_edges, breadth_first_edges_with]
     );
     benchmark_coverage!(suite, "directed_shortest_path", [shortest_path]);
-    benchmark_coverage!(
-        suite,
-        "directed_shortest_path_edges",
-        [shortest_path_edges, shortest_path_view_edges]
-    );
+    benchmark_coverage!(suite, "directed_shortest_path_edges", [shortest_path_edges]);
     benchmark_coverage!(
         suite,
         "directed_nearest_common_ancestor",

@@ -3,7 +3,6 @@
 pub mod call_graph;
 pub mod cdg;
 pub mod diff;
-pub mod directed;
 pub mod dominator;
 pub mod dot;
 pub mod edge_traverse;

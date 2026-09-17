@@ -1,14 +1,14 @@
 use cfglib::{
-    AbstractDomain, Cfg, DirectedGraph, Direction, DominatorTree, EdgeProblem, Lattice, NodeId,
+    AbstractDomain, Cfg, Direction, DominatorTree, EdgeProblem, Graph, Lattice, NodeId,
     SolveConfig, SsaForm, TryEdgeProblem, TryNodeProblem, TryProblem, abstract_interpret,
-    alias_propagation, copies_by_predecessor, copy_propagation, eliminate_phis, solve_edge_problem,
-    solve_edge_problem_from, solve_edge_problem_from_with_config, solve_edge_problem_with_config,
-    solve_node_problem_from, solve_node_problem_from_with_config, solve_problem_from,
-    solve_problem_from_with_config, try_solve_edge_problem, try_solve_edge_problem_from,
-    try_solve_edge_problem_from_with_config, try_solve_edge_problem_with_config,
-    try_solve_node_problem, try_solve_node_problem_from, try_solve_node_problem_from_with_config,
-    try_solve_node_problem_with_config, try_solve_problem, try_solve_problem_from,
-    try_solve_problem_from_with_config, try_solve_problem_with_config,
+    alias_propagation, copies_by_predecessor, copy_propagation, eliminate_phis,
+    index_paths_may_overlap, meet_options, solve_edge_problem, solve_edge_problem_from,
+    solve_edge_problem_from_with_config, solve_edge_problem_with_config, solve_node_problem_from,
+    solve_node_problem_from_with_config, solve_problem_from, solve_problem_from_with_config,
+    try_solve_edge_problem, try_solve_edge_problem_from, try_solve_edge_problem_from_with_config,
+    try_solve_edge_problem_with_config, try_solve_node_problem, try_solve_node_problem_from,
+    try_solve_node_problem_from_with_config, try_solve_node_problem_with_config, try_solve_problem,
+    try_solve_problem_from, try_solve_problem_from_with_config, try_solve_problem_with_config,
 };
 
 use super::BenchmarkSuite;
@@ -83,7 +83,7 @@ impl TryProblem<u32> for TryCfgReachability {
 
 struct TryGraphReachability;
 
-impl TryNodeProblem<DirectedGraph<(), ()>> for TryGraphReachability {
+impl TryNodeProblem<Graph<(), ()>> for TryGraphReachability {
     type Fact = bool;
     type Error = ();
 
@@ -91,11 +91,11 @@ impl TryNodeProblem<DirectedGraph<(), ()>> for TryGraphReachability {
         Direction::Forward
     }
 
-    fn bottom(&self, _graph: &DirectedGraph<(), ()>) -> Self::Fact {
+    fn bottom(&self, _graph: &Graph<(), ()>) -> Self::Fact {
         false
     }
 
-    fn boundary(&self, _graph: &DirectedGraph<(), ()>) -> Result<Self::Fact, Self::Error> {
+    fn boundary(&self, _graph: &Graph<(), ()>) -> Result<Self::Fact, Self::Error> {
         Ok(true)
     }
 
@@ -105,7 +105,7 @@ impl TryNodeProblem<DirectedGraph<(), ()>> for TryGraphReachability {
 
     fn transfer(
         &self,
-        _graph: &DirectedGraph<(), ()>,
+        _graph: &Graph<(), ()>,
         _node: NodeId,
         input: &Self::Fact,
     ) -> Result<Self::Fact, Self::Error> {
@@ -115,18 +115,18 @@ impl TryNodeProblem<DirectedGraph<(), ()>> for TryGraphReachability {
 
 struct EdgeReachability;
 
-impl EdgeProblem<DirectedGraph<(), ()>> for EdgeReachability {
+impl EdgeProblem<Graph<(), ()>> for EdgeReachability {
     type Fact = bool;
 
     fn direction(&self) -> Direction {
         Direction::Forward
     }
 
-    fn bottom(&self, _graph: &DirectedGraph<(), ()>) -> Self::Fact {
+    fn bottom(&self, _graph: &Graph<(), ()>) -> Self::Fact {
         false
     }
 
-    fn boundary(&self, graph: &DirectedGraph<(), ()>, node: NodeId) -> Option<Self::Fact> {
+    fn boundary(&self, graph: &Graph<(), ()>, node: NodeId) -> Option<Self::Fact> {
         graph.predecessors(node).next().is_none().then_some(true)
     }
 
@@ -136,7 +136,7 @@ impl EdgeProblem<DirectedGraph<(), ()>> for EdgeReachability {
 
     fn transfer_node(
         &self,
-        _graph: &DirectedGraph<(), ()>,
+        _graph: &Graph<(), ()>,
         _node: NodeId,
         flow_fact: &Self::Fact,
     ) -> Self::Fact {
@@ -146,7 +146,7 @@ impl EdgeProblem<DirectedGraph<(), ()>> for EdgeReachability {
 
 struct TryEdgeReachability;
 
-impl TryEdgeProblem<DirectedGraph<(), ()>> for TryEdgeReachability {
+impl TryEdgeProblem<Graph<(), ()>> for TryEdgeReachability {
     type Fact = bool;
     type Error = ();
 
@@ -154,13 +154,13 @@ impl TryEdgeProblem<DirectedGraph<(), ()>> for TryEdgeReachability {
         Direction::Forward
     }
 
-    fn bottom(&self, _graph: &DirectedGraph<(), ()>) -> Self::Fact {
+    fn bottom(&self, _graph: &Graph<(), ()>) -> Self::Fact {
         false
     }
 
     fn boundary(
         &self,
-        graph: &DirectedGraph<(), ()>,
+        graph: &Graph<(), ()>,
         node: NodeId,
     ) -> Result<Option<Self::Fact>, Self::Error> {
         Ok(graph.predecessors(node).next().is_none().then_some(true))
@@ -168,7 +168,7 @@ impl TryEdgeProblem<DirectedGraph<(), ()>> for TryEdgeReachability {
 
     fn meet(
         &self,
-        _graph: &DirectedGraph<(), ()>,
+        _graph: &Graph<(), ()>,
         _node: NodeId,
         left: &Self::Fact,
         right: &Self::Fact,
@@ -178,7 +178,7 @@ impl TryEdgeProblem<DirectedGraph<(), ()>> for TryEdgeReachability {
 
     fn transfer_node(
         &self,
-        _graph: &DirectedGraph<(), ()>,
+        _graph: &Graph<(), ()>,
         _node: NodeId,
         flow_fact: &Self::Fact,
     ) -> Result<Self::Fact, Self::Error> {
@@ -412,7 +412,44 @@ fn register_edge_solvers(suite: &mut BenchmarkSuite<'_>) {
     );
 }
 
+/// The length of the synthetic index paths the alias helper compares.
+const INDEX_PATH_LENGTH: usize = 64;
+
+/// The number of facts the option-meet helper folds together.
+const MEET_COUNT: u64 = 1_024;
+
+fn register_lattice_helpers(suite: &mut BenchmarkSuite<'_>) {
+    let left: Vec<u32> = (0..INDEX_PATH_LENGTH)
+        .map(|index| u32::try_from(index).expect("a small index fits in u32"))
+        .collect();
+    let right = left.clone();
+    // A heap fixture the optimizer cannot fold the meet loop away against.
+    let facts: Vec<u64> = (0..MEET_COUNT).rev().collect();
+
+    benchmark_case!(
+        suite,
+        "api_meet_options",
+        covers[meet_options],
+        || {
+            let mut merged: Option<u64> = None;
+            for &value in &facts {
+                merged = meet_options(&merged, &Some(value), |left, right| *left.min(right));
+            }
+            merged
+        },
+        |merged: &Option<u64>| assert_eq!(*merged, Some(0))
+    );
+    benchmark_case!(
+        suite,
+        "api_index_paths_may_overlap",
+        covers[index_paths_may_overlap],
+        || index_paths_may_overlap(&left, &right, |index| Some(*index)),
+        |overlap: &bool| assert!(*overlap, "identical index paths always overlap")
+    );
+}
+
 pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
+    register_lattice_helpers(suite);
     register_analyses(suite);
     register_cfg_solvers(suite);
     register_node_solvers(suite);

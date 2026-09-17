@@ -8,7 +8,7 @@ use core::fmt;
 use crate::cfg::Cfg;
 use crate::display::DisplayInstr;
 use crate::edge::EdgeKind;
-use crate::graph::view::{DenseNodeId, DirectedGraphView};
+use crate::graph::view::{DenseId, GraphView};
 
 /// Escape label text for safe embedding in a double-quoted DOT string.
 ///
@@ -38,7 +38,7 @@ fn escape_label(label: &str) -> String {
 /// # Errors
 ///
 /// Returns the sink's formatting error if a write fails.
-pub fn write_view_dot<G: DirectedGraphView>(
+pub fn write_view_dot<G: GraphView>(
     graph: &G,
     w: &mut dyn fmt::Write,
     mut node_label: impl FnMut(G::NodeId) -> String,
@@ -69,10 +69,7 @@ pub fn write_view_dot<G: DirectedGraphView>(
 ///
 /// Panics only if writing to an in-memory [`String`] unexpectedly fails.
 #[must_use]
-pub fn to_view_dot<G: DirectedGraphView>(
-    graph: &G,
-    node_label: impl FnMut(G::NodeId) -> String,
-) -> String {
+pub fn to_view_dot<G: GraphView>(graph: &G, node_label: impl FnMut(G::NodeId) -> String) -> String {
     let mut out = String::new();
     write_view_dot(graph, &mut out, node_label).expect("writing DOT to a String cannot fail");
     out
@@ -100,8 +97,8 @@ impl<I, E> Cfg<I, E> {
         )?;
         writeln!(w, "    edge [fontname=\"monospace\" fontsize=9];")?;
 
-        for block in &self.blocks {
-            let id = block.id();
+        for id in self.block_ids() {
+            let block = self.block(id);
             let label_prefix = block
                 .label()
                 .map(|l| alloc::format!("{}:\\n", escape_label(l)))
@@ -239,12 +236,12 @@ mod tests {
     use super::{String, write_view_dot};
     use crate::cfg::Cfg;
     use crate::edge::EdgeKind;
-    use crate::graph::directed::DirectedGraph;
+    use crate::graph::store::Graph;
     use crate::test_util::{MockInst, ff};
 
     #[test]
     fn view_dot_renders_nodes_edges_and_escapes_labels() {
-        let mut graph = DirectedGraph::new();
+        let mut graph = Graph::new();
         let a = graph.add_node("say \"hi\"\nback\\slash");
         let b = graph.add_node("plain");
         graph.add_edge(a, b, ());

@@ -10,8 +10,7 @@ use core::fmt;
 use core::hash::Hash;
 use core::marker::PhantomData;
 
-use crate::graph::edge_view::DenseEdgeId;
-use crate::graph::view::DenseNodeId;
+use crate::graph::view::DenseId;
 
 /// The entity kind a dense [`Id`] addresses.
 ///
@@ -95,17 +94,7 @@ impl<T: IdTag> fmt::Debug for Id<T> {
     }
 }
 
-impl<T: IdTag> DenseNodeId for Id<T> {
-    fn from_index(index: usize) -> Self {
-        Self::from_index(index)
-    }
-
-    fn index(self) -> usize {
-        self.index()
-    }
-}
-
-impl<T: IdTag> DenseEdgeId for Id<T> {
+impl<T: IdTag> DenseId for Id<T> {
     fn from_index(index: usize) -> Self {
         Self::from_index(index)
     }
@@ -146,15 +135,10 @@ impl IdTag for EdgeTag {
 }
 
 /// A node identity in the default-tagged [`Graph`](super::Graph).
-///
-/// This alias stays inside `graph::store` rather than joining the crate
-/// facade: the facade's `NodeId` is still
-/// [`graph::directed::NodeId`](crate::graph::directed::NodeId) until the two
-/// stores are unified.
 pub type NodeId = Id<NodeTag>;
 
-/// An edge identity in the default-tagged [`Graph`](super::Graph).
+/// An edge identity in a [`Graph`](super::Graph) or a [`Cfg`](crate::Cfg).
 ///
-/// This alias stays inside `graph::store`; the facade's `EdgeId` is still
-/// [`edge::EdgeId`](crate::edge::EdgeId) until the two stores are unified.
+/// Both stores mint their edges from the same tag: an edge is an edge, and a
+/// separate newtype per store only bought a conversion shim between them.
 pub type EdgeId = Id<EdgeTag>;

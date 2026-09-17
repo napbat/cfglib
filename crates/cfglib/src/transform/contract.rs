@@ -2,9 +2,12 @@
 
 extern crate alloc;
 
+use alloc::vec::Vec;
+
 use crate::block::BlockId;
 use crate::cfg::{Cfg, SplitPointError};
-use crate::rewrite::RewriteMap;
+use crate::edge::EdgeId;
+use crate::rewrite::Rewrite;
 
 /// Contract an edge by merging `target` into `source`.
 ///
@@ -27,8 +30,8 @@ pub fn contract_edge_mapped<I, E>(
     cfg: &mut Cfg<I, E>,
     source: BlockId,
     target: BlockId,
-) -> Option<RewriteMap> {
-    let mut mapping = RewriteMap::new();
+) -> Option<Rewrite> {
+    let mut mapping = Rewrite::new();
     contract_edge_inner(cfg, source, target, Some(&mut mapping)).then_some(mapping)
 }
 
@@ -36,13 +39,13 @@ fn contract_edge_inner<I, E>(
     cfg: &mut Cfg<I, E>,
     source: BlockId,
     target: BlockId,
-    mut mapping: Option<&mut RewriteMap>,
+    mut mapping: Option<&mut Rewrite>,
 ) -> bool {
     if source == target || target == cfg.entry() {
         return false;
     }
-    let source_outgoing = cfg.successor_edges(source);
-    let target_incoming = cfg.predecessor_edges(target);
+    let source_outgoing: Vec<EdgeId> = cfg.outgoing(source).collect();
+    let target_incoming: Vec<EdgeId> = cfg.incoming(target).collect();
     if source_outgoing.len() != 1 || target_incoming.len() != 1 {
         return false;
     }
@@ -67,7 +70,7 @@ fn contract_edge_inner<I, E>(
         mapping.record_edge(connecting, []);
     }
     cfg.move_outgoing_edges(target, source);
-    for &edge in cfg.successor_edges(source) {
+    for edge in cfg.outgoing(source) {
         if let Some(mapping) = mapping.as_deref_mut() {
             mapping.record_edge(edge, [edge]);
         }
@@ -92,7 +95,7 @@ pub fn split_node_with_payload_mapped<I, E>(
     block: BlockId,
     at: usize,
     payload: E,
-) -> (BlockId, RewriteMap) {
+) -> (BlockId, Rewrite) {
     cfg.split_block_with_payload_mapped(block, at, payload)
 }
 
@@ -110,7 +113,7 @@ pub fn split_node_at_points<I, E>(
     cfg: &mut Cfg<I, E>,
     block: BlockId,
     points: impl IntoIterator<Item = (usize, E)>,
-) -> Result<(alloc::vec::Vec<BlockId>, RewriteMap), SplitPointError> {
+) -> Result<(alloc::vec::Vec<BlockId>, Rewrite), SplitPointError> {
     cfg.split_block_at_points_with_payloads(block, points)
 }
 
@@ -133,12 +136,9 @@ mod tests {
 
         let entry = cfg.entry();
         let mapping = contract_edge_mapped(&mut cfg, entry, target).unwrap();
-        assert_eq!(mapping.edge_replacements(connecting), Some([].as_slice()));
-        assert_eq!(
-            mapping.edge_replacements(outgoing),
-            Some([outgoing].as_slice())
-        );
-        assert_eq!(mapping.block_replacements(target), Some([entry].as_slice()));
+        assert_eq!(mapping.edges(connecting), Some([].as_slice()));
+        assert_eq!(mapping.edges(outgoing), Some([outgoing].as_slice()));
+        assert_eq!(mapping.blocks(target), Some([entry].as_slice()));
         assert_eq!(cfg.edge(outgoing).source(), entry);
         assert_eq!(cfg.edge(outgoing).payload(), &"provenance");
     }
@@ -157,8 +157,8 @@ mod tests {
 
         assert_eq!(cfg.block(entry).instructions(), &[0]);
         assert_eq!(cfg.block(source).instructions(), &[1]);
-        assert_eq!(cfg.successor_edges(entry), &[outgoing]);
-        assert_eq!(cfg.successor_edges(source), &[back]);
+        assert_eq!(cfg.outgoing(entry).collect::<Vec<_>>(), &[outgoing]);
+        assert_eq!(cfg.outgoing(source).collect::<Vec<_>>(), &[back]);
         assert_eq!(cfg.edge(back).target(), entry);
         assert!(crate::verify(&cfg).is_ok());
     }
@@ -179,8 +179,11 @@ mod tests {
 
         assert!(contract_edge(&mut cfg, source, target));
 
-        assert_eq!(cfg.successor_edges(target), &[]);
-        assert_eq!(cfg.successor_edges(source), &[first, second, back]);
+        assert_eq!(cfg.outgoing(target).collect::<Vec<_>>(), &[]);
+        assert_eq!(
+            cfg.outgoing(source).collect::<Vec<_>>(),
+            &[first, second, back]
+        );
         assert_eq!(cfg.edge(first).source(), source);
         assert_eq!(cfg.edge(first).target(), sink);
         assert_eq!(cfg.edge(first).kind(), EdgeKind::ConditionalTrue);
@@ -215,9 +218,9 @@ mod tests {
         let (blocks, mapping) = split_node_at_points(&mut cfg, entry, [(1, 10), (2, 20)]).unwrap();
         assert_eq!(blocks.len(), 3);
         assert_eq!(cfg.block(blocks[1]).instructions()[0].1, "may_throw");
-        assert_eq!(mapping.block_replacements(entry), Some(blocks.as_slice()));
-        let first_edge = cfg.successor_edges(blocks[0])[0];
-        let second_edge = cfg.successor_edges(blocks[1])[0];
+        assert_eq!(mapping.blocks(entry), Some(blocks.as_slice()));
+        let first_edge = cfg.outgoing(blocks[0]).next().unwrap();
+        let second_edge = cfg.outgoing(blocks[1]).next().unwrap();
         assert_eq!(cfg.edge(first_edge).payload(), &10);
         assert_eq!(cfg.edge(second_edge).payload(), &20);
     }

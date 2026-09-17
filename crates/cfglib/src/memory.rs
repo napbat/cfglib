@@ -470,10 +470,11 @@ impl<L, V, F> MemoryTrace<L, V, F> {
         let mut entries = Vec::new();
         let mut by_point = BTreeMap::new();
 
-        for block in cfg.blocks() {
+        for block_id in cfg.block_ids() {
+            let block = cfg.block(block_id);
             for (inst_idx, instruction) in block.instructions().iter().enumerate() {
                 let point = ProgramPoint {
-                    block: block.id(),
+                    block: block_id,
                     inst_idx,
                 };
                 let start = entries.len();

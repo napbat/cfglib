@@ -107,9 +107,9 @@ pub fn remove_dead_code<I: crate::dataflow::EffectInfo, E: Clone + Default>(
 /// which the unbounded configuration cannot produce.
 pub fn remove_dead_code_mapped<I: crate::dataflow::EffectInfo, E: Clone + Default>(
     cfg: &mut Cfg<I, E>,
-) -> (usize, crate::rewrite::RewriteMap) {
+) -> (usize, crate::rewrite::Rewrite) {
     let mut total = 0;
-    let mut mapping = crate::rewrite::RewriteMap::new();
+    let mut mapping = crate::rewrite::Rewrite::new();
     loop {
         let instructions = dead_code_elimination(cfg);
         let (structural, round_map) = super::cleanup::simplify_mapped(cfg);

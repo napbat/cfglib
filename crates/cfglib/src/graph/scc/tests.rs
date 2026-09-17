@@ -1,7 +1,7 @@
 use super::*;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::graph::directed::DirectedGraph;
+use crate::graph::store::Graph;
 use crate::test_util::ff;
 
 #[test]
@@ -20,7 +20,7 @@ fn cfg_uses_generic_scc_algorithm() {
 #[test]
 fn condensation_collapses_cycles_to_a_dag() {
     // entry -> (a <-> b) -> exit
-    let mut graph = DirectedGraph::<&str, ()>::new();
+    let mut graph = Graph::<&str, ()>::new();
     let entry = graph.add_node("entry");
     let a = graph.add_node("a");
     let b = graph.add_node("b");
@@ -36,15 +36,15 @@ fn condensation_collapses_cycles_to_a_dag() {
     assert!(tarjan_scc(&condensed).is_dag(&condensed));
     let cycle_component = condensed
         .node_ids()
-        .find(|&node| condensed[node].nodes.len() == 2)
+        .find(|&node| condensed.node(node).nodes.len() == 2)
         .expect("the a/b component");
-    assert!(condensed[cycle_component].contains(a));
-    assert!(condensed[cycle_component].contains(b));
+    assert!(condensed.node(cycle_component).contains(a));
+    assert!(condensed.node(cycle_component).contains(b));
 }
 
 #[test]
 fn directed_graph_cycle_forms_one_component() {
-    let mut graph = DirectedGraph::<&str, ()>::new();
+    let mut graph = Graph::<&str, ()>::new();
     let left = graph.add_node("left");
     let right = graph.add_node("right");
     graph.add_edge(left, right, ());
@@ -60,9 +60,9 @@ fn directed_graph_cycle_forms_one_component() {
 /// Shapes both algorithms must agree on: a chain, a diamond, a cycle with
 /// a tail, two cycles in series, a self-loop beside a plain node, a
 /// disconnected pair, and the empty graph.
-fn fixtures() -> Vec<(&'static str, DirectedGraph<(), ()>)> {
-    fn build(node_count: usize, edges: &[(usize, usize)]) -> DirectedGraph<(), ()> {
-        let mut graph = DirectedGraph::<(), ()>::new();
+fn fixtures() -> Vec<(&'static str, Graph<(), ()>)> {
+    fn build(node_count: usize, edges: &[(usize, usize)]) -> Graph<(), ()> {
+        let mut graph = Graph::<(), ()>::new();
         for _ in 0..node_count {
             graph.add_node(());
         }
@@ -143,8 +143,8 @@ fn kosaraju_numbers_components_topologically() {
 /// `a`, and `g` is isolated. A branching frame (`b` has two successors)
 /// makes this the shape that catches a depth-first walk which loses a
 /// frame's remaining successors when a sibling subtree finishes.
-fn nested() -> (DirectedGraph<&'static str, ()>, [NodeId; 7]) {
-    let mut graph = DirectedGraph::<&str, ()>::new();
+fn nested() -> (Graph<&'static str, ()>, [NodeId; 7]) {
+    let mut graph = Graph::<&str, ()>::new();
     let outer_a = graph.add_node("a");
     let outer_b = graph.add_node("b");
     let outer_c = graph.add_node("c");
@@ -168,12 +168,18 @@ fn nested() -> (DirectedGraph<&'static str, ()>, [NodeId; 7]) {
 /// The component sequence, as payload names.
 fn sequence(
     result: &SccDecomposition<NodeId>,
-    graph: &DirectedGraph<&'static str, ()>,
+    graph: &Graph<&'static str, ()>,
 ) -> Vec<Vec<&'static str>> {
     result
         .components
         .iter()
-        .map(|component| component.nodes.iter().map(|&node| graph[node]).collect())
+        .map(|component| {
+            component
+                .nodes
+                .iter()
+                .map(|&node| *graph.node(node))
+                .collect()
+        })
         .collect()
 }
 
@@ -214,7 +220,7 @@ fn tarjan_numbering_matches_the_hand_computed_leaves_first_order() {
 }
 
 /// The component pairs of a condensation, as a set.
-fn condensed_pairs(dag: &DirectedGraph<(), ()>) -> BTreeSet<(usize, usize)> {
+fn condensed_pairs(dag: &Graph<(), ()>) -> BTreeSet<(usize, usize)> {
     dag.edges()
         .map(|edge| (edge.source().index(), edge.target().index()))
         .collect()
@@ -260,7 +266,7 @@ fn condensation_of_numbers_its_nodes_by_the_decomposition_it_is_given() {
 fn condensation_of_deduplicates_parallel_and_repeated_component_edges() {
     // Two nodes of the same component both point into the other, one of
     // them twice: three graph edges, one component edge.
-    let mut graph = DirectedGraph::<(), ()>::new();
+    let mut graph = Graph::<(), ()>::new();
     let left = graph.add_node(());
     let right = graph.add_node(());
     let sink = graph.add_node(());
@@ -306,7 +312,7 @@ fn condensation_of_tarjan_is_the_condensation_without_its_payloads() {
 #[should_panic(expected = "the decomposition covers 4 nodes but the graph has 2")]
 fn condensation_of_another_graphs_decomposition_panics() {
     let (four, _) = nested_pair();
-    let mut two = DirectedGraph::<&str, ()>::new();
+    let mut two = Graph::<&str, ()>::new();
     let first = two.add_node("a");
     let second = two.add_node("b");
     two.add_edge(first, second, ());
@@ -314,8 +320,8 @@ fn condensation_of_another_graphs_decomposition_panics() {
 }
 
 /// A four-node graph for the mismatch test: `a <-> b`, `c -> d`.
-fn nested_pair() -> (DirectedGraph<&'static str, ()>, [NodeId; 4]) {
-    let mut graph = DirectedGraph::<&str, ()>::new();
+fn nested_pair() -> (Graph<&'static str, ()>, [NodeId; 4]) {
+    let mut graph = Graph::<&str, ()>::new();
     let a = graph.add_node("a");
     let b = graph.add_node("b");
     let c = graph.add_node("c");
@@ -328,7 +334,7 @@ fn nested_pair() -> (DirectedGraph<&'static str, ()>, [NodeId; 4]) {
 
 #[test]
 fn self_edge_is_not_a_dag() {
-    let mut graph = DirectedGraph::<(), ()>::new();
+    let mut graph = Graph::<(), ()>::new();
     let node = graph.add_node(());
     graph.add_edge(node, node, ());
     let result = tarjan_scc(&graph);

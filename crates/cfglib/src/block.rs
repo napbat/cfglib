@@ -5,32 +5,29 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::identity::define_dense_id;
+use crate::graph::store::{Id, IdTag};
 
-define_dense_id! {
-    /// Opaque identifier for a basic block within a [`Cfg`](crate::Cfg).
-    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-    pub struct BlockId(pub(crate) u32);
-    display = "bb";
-    /// Create a `BlockId` from a dense zero-based index.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `index` exceeds `u32::MAX`.
-    from_index = "block index exceeds u32::MAX";
+/// Tag marking an identity that addresses a basic block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BlockTag;
+
+impl IdTag for BlockTag {
+    const PREFIX: &'static str = "bb";
 }
 
-impl crate::graph::view::DenseNodeId for BlockId {
-    fn from_index(index: usize) -> Self {
-        Self::from_index(index)
-    }
-
-    fn index(self) -> usize {
-        self.index()
-    }
-}
+/// Opaque identifier for a basic block within a [`Cfg`](crate::Cfg).
+///
+/// A block identity is its slot in the CFG's store. Slots are never reused,
+/// so an identity stays valid until [`Cfg::compact`](crate::Cfg::compact)
+/// renumbers the graph and reports the change as a
+/// [`Renumbering`](crate::Renumbering).
+pub type BlockId = Id<BlockTag>;
 
 /// A basic block containing a linear sequence of instructions.
+///
+/// The block does not carry its own identity: that is the slot the CFG minted
+/// it in, which [`Cfg::block_ids`](crate::Cfg::block_ids) yields and
+/// [`Cfg::block`](crate::Cfg::block) resolves.
 ///
 /// Predication (ARM IT blocks, GPU wave predication, CMOV sequences) is not
 /// block state: instructions declare their guards through
@@ -39,8 +36,6 @@ impl crate::graph::view::DenseNodeId for BlockId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BasicBlock<I> {
-    /// Block identity.
-    pub(crate) id: BlockId,
     /// Instructions in program order.
     pub(crate) instructions: Vec<I>,
     /// Optional human-readable label (e.g. from a `label` instruction).
@@ -48,11 +43,12 @@ pub struct BasicBlock<I> {
 }
 
 impl<I> BasicBlock<I> {
-    /// The block's unique identifier.
-    #[inline]
-    #[must_use]
-    pub fn id(&self) -> BlockId {
-        self.id
+    /// Create an empty block.
+    pub(crate) const fn new() -> Self {
+        Self {
+            instructions: Vec::new(),
+            label: None,
+        }
     }
 
     /// The instructions inside this block.
@@ -95,5 +91,11 @@ impl<I> BasicBlock<I> {
     #[inline]
     pub fn set_label(&mut self, label: impl Into<String>) {
         self.label = Some(label.into());
+    }
+}
+
+impl<I> Default for BasicBlock<I> {
+    fn default() -> Self {
+        Self::new()
     }
 }

@@ -107,16 +107,15 @@ fn edge_kind_discriminant(k: EdgeKind) -> u8 {
 /// Compute a structural fingerprint for a block.
 fn fingerprint<I>(cfg: &Cfg<I>, block: BlockId) -> BlockFingerprint {
     let mut discs: Vec<u8> = cfg
-        .successor_edges(block)
-        .iter()
-        .map(|&eid| edge_kind_discriminant(cfg.edge(eid).kind()))
+        .outgoing(block)
+        .map(|eid| edge_kind_discriminant(cfg.edge(eid).kind()))
         .collect();
     discs.sort_unstable();
 
     BlockFingerprint {
         instruction_count: cfg.block(block).instructions().len(),
-        out_degree: cfg.successor_edges(block).len(),
-        in_degree: cfg.predecessor_edges(block).len(),
+        out_degree: cfg.outgoing(block).count(),
+        in_degree: cfg.incoming(block).count(),
         out_edge_discriminants: discs,
     }
 }

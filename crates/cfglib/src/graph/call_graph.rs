@@ -1,4 +1,4 @@
-//! Whole-program call-graph construction on [`DirectedGraph`].
+//! Whole-program call-graph construction on [`Graph`].
 //!
 //! A call graph does not need its own storage abstraction. Functions are node
 //! payloads, call details are edge payloads, and all traversal, SCC, dominance,
@@ -13,8 +13,8 @@ use alloc::vec::Vec;
 
 use crate::cfg::Cfg;
 use crate::flow::CallInfo;
-use crate::graph::directed::{DirectedGraph, NodeId};
 use crate::graph::scc::tarjan_scc;
+use crate::graph::store::{Graph, NodeId};
 
 /// Payload of a function node in a call graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,8 +39,8 @@ pub struct CallMetadata {
 #[must_use]
 pub fn call_graph<I: CallInfo>(
     functions: &[(I::Callee, &Cfg<I>)],
-) -> DirectedGraph<FunctionNode<I::Callee>, CallMetadata> {
-    let mut graph = DirectedGraph::with_capacity(functions.len(), functions.len());
+) -> Graph<FunctionNode<I::Callee>, CallMetadata> {
+    let mut graph = Graph::with_capacity(functions.len(), functions.len());
     let mut key_to_id = BTreeMap::new();
 
     for (key, _) in functions {
@@ -78,16 +78,16 @@ pub fn call_graph<I: CallInfo>(
 /// Find a function node by its identity.
 #[must_use]
 pub fn find_function<C: Ord>(
-    graph: &DirectedGraph<FunctionNode<C>, CallMetadata>,
+    graph: &Graph<FunctionNode<C>, CallMetadata>,
     id: &C,
 ) -> Option<NodeId> {
-    graph.node_ids().find(|&node| graph[node].id == *id)
+    graph.node_ids().find(|&node| graph.node(node).id == *id)
 }
 
 /// Return whether a function is directly or mutually recursive.
 #[must_use]
 pub fn is_recursive_function<C>(
-    graph: &DirectedGraph<FunctionNode<C>, CallMetadata>,
+    graph: &Graph<FunctionNode<C>, CallMetadata>,
     function: NodeId,
 ) -> bool {
     graph.successors(function).any(|callee| callee == function)
@@ -105,13 +105,13 @@ pub fn is_recursive_function<C>(
 /// until their summaries stabilize, so `compute` must be monotone over a
 /// finite-height summary domain for termination.
 ///
-/// Generic over any [`DirectedGraph`] — the same shape serves module
+/// Generic over any [`Graph`] — the same shape serves module
 /// graphs, type-relation closures, or any callee-first aggregation.
 #[must_use]
 pub fn propagate_summaries<N, E, S: Clone + PartialEq>(
-    graph: &DirectedGraph<N, E>,
+    graph: &Graph<N, E>,
     bottom: &S,
-    mut compute: impl FnMut(&DirectedGraph<N, E>, NodeId, &[S]) -> S,
+    mut compute: impl FnMut(&Graph<N, E>, NodeId, &[S]) -> S,
 ) -> Vec<S> {
     let mut summaries = alloc::vec![bottom.clone(); graph.node_count()];
     let components = tarjan_scc(graph);
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn topology_and_recursion_use_shared_algorithms() {
-        let mut graph = DirectedGraph::new();
+        let mut graph = Graph::new();
         let main = graph.add_node(FunctionNode { id: "main" });
         let helper = graph.add_node(FunctionNode { id: "helper" });
         graph.add_edge(
@@ -192,7 +192,7 @@ mod tests {
     #[test]
     fn summaries_propagate_callee_first_and_stabilise_cycles() {
         // main calls a; a and b are mutually recursive; a calls leaf.
-        let mut graph = DirectedGraph::new();
+        let mut graph = Graph::new();
         let main = graph.add_node(FunctionNode { id: "main" });
         let a = graph.add_node(FunctionNode { id: "a" });
         let b = graph.add_node(FunctionNode { id: "b" });
@@ -212,7 +212,7 @@ mod tests {
             |graph, node, summaries| {
                 let mut reach = alloc::collections::BTreeSet::new();
                 for callee in graph.successors(node) {
-                    reach.insert(graph[callee].id);
+                    reach.insert(graph.node(callee).id);
                     reach.extend(summaries[callee.index()].iter().copied());
                 }
                 reach

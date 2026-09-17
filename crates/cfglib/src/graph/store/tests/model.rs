@@ -87,6 +87,31 @@ impl Model {
         slot
     }
 
+    /// Move one endpoint, keeping the edge's identity and appending it to
+    /// the new endpoint's adjacency — the contract
+    /// [`redirect_edge_source`](Graph::redirect_edge_source) states.
+    fn redirect_edge(&mut self, edge: usize, endpoint: usize, outgoing: bool) -> usize {
+        let record = &mut self.edges[edge];
+        let moved = if outgoing {
+            &mut record.source
+        } else {
+            &mut record.target
+        };
+        let previous = *moved;
+        if previous == endpoint {
+            return previous;
+        }
+        *moved = endpoint;
+        let adjacency = if outgoing {
+            &mut self.outgoing
+        } else {
+            &mut self.incoming
+        };
+        adjacency[previous].retain(|&candidate| candidate != edge);
+        adjacency[endpoint].push(edge);
+        previous
+    }
+
     fn remove_edge(&mut self, edge: usize) -> bool {
         match self.edges.get_mut(edge) {
             Some(record) if record.live => {
@@ -200,12 +225,12 @@ fn assert_sequence(
 
 fn assert_agrees(graph: &Store, model: &Model, step: usize) {
     assert_eq!(
-        graph.node_slot_count(),
+        graph.node_bound(),
         model.nodes.len(),
         "node slot count at step {step}"
     );
     assert_eq!(
-        graph.edge_slot_count(),
+        graph.edge_bound(),
         model.edges.len(),
         "edge slot count at step {step}"
     );
@@ -235,7 +260,7 @@ fn assert_agrees(graph: &Store, model: &Model, step: usize) {
     for (slot, entry) in model.nodes.iter().enumerate() {
         let node = node_id(slot);
         assert_eq!(
-            graph.is_live_node(node),
+            graph.contains_node(node),
             entry.live,
             "node {slot} liveness at step {step}"
         );
@@ -277,7 +302,7 @@ fn assert_agrees(graph: &Store, model: &Model, step: usize) {
     for (slot, entry) in model.edges.iter().enumerate() {
         let edge = Id::from_index(slot);
         assert_eq!(
-            graph.is_live_edge(edge),
+            graph.contains_edge(edge),
             entry.live,
             "edge {slot} liveness at step {step}"
         );
@@ -312,6 +337,7 @@ struct Exercised {
     compactions: usize,
     removed_nodes: usize,
     removed_edges: usize,
+    redirected_edges: usize,
     self_edges: usize,
     parallel_edges: usize,
 }
@@ -355,8 +381,11 @@ impl Session {
             _ if choice < 68 && self.model.edges.len() < MAX_EDGE_SLOTS => {
                 self.add_edge(&live_nodes, step);
             }
-            _ if choice < 82 && !self.model.edges.is_empty() => self.remove_edge(step),
-            _ if choice < 92 && !self.model.nodes.is_empty() => self.remove_node(step),
+            _ if choice < 78 && !self.model.edges.is_empty() => self.remove_edge(step),
+            _ if choice < 86 && self.model.live_edge_slots().next().is_some() => {
+                self.redirect_edge(&live_nodes, step);
+            }
+            _ if choice < 94 && !self.model.nodes.is_empty() => self.remove_node(step),
             _ => self.compact(step),
         }
     }
@@ -387,6 +416,28 @@ impl Session {
             .graph
             .add_edge(node_id(source), node_id(target), payload);
         assert_eq!(actual.index(), expected, "add_edge identity at step {step}");
+    }
+
+    fn redirect_edge(&mut self, live_nodes: &[usize], step: usize) {
+        let live: Vec<usize> = self.model.live_edge_slots().collect();
+        let edge = live[self.rng.below(live.len())];
+        let endpoint = live_nodes[self.rng.below(live_nodes.len())];
+        let outgoing = self.rng.below(2) == 0;
+
+        let expected = self.model.redirect_edge(edge, endpoint, outgoing);
+        let actual = if outgoing {
+            self.graph
+                .redirect_edge_source(Id::from_index(edge), node_id(endpoint))
+        } else {
+            self.graph
+                .redirect_edge_target(Id::from_index(edge), node_id(endpoint))
+        };
+        assert_eq!(
+            actual.index(),
+            expected,
+            "redirect reports the previous endpoint at step {step}"
+        );
+        self.exercised.redirected_edges += usize::from(expected != endpoint);
     }
 
     fn remove_edge(&mut self, step: usize) {
@@ -468,6 +519,11 @@ fn random_operation_sequences_match_the_reference_model() {
         exercised.removed_edges > 100,
         "edge removals: {}",
         exercised.removed_edges
+    );
+    assert!(
+        exercised.redirected_edges > 100,
+        "edge redirections: {}",
+        exercised.redirected_edges
     );
     assert!(
         exercised.self_edges > 10,

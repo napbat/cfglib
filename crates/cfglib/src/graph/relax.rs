@@ -1,4 +1,4 @@
-//! Edge-defined minimum-label relaxation over [`DirectedGraph`].
+//! Edge-defined minimum-label relaxation over [`Graph`].
 //!
 //! Unlike node-only traversals, relaxation retains parallel edge identities and
 //! may revisit a node whenever a smaller label reaches it. This supports
@@ -8,7 +8,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use super::directed::{DirectedEdge, DirectedGraph, NodeId};
+use super::store::{EdgeRecord, Graph, NodeId};
 use super::traverse::TraversalDirection;
 
 /// Compute the minimum label reachable at every node from `seeds`.
@@ -34,9 +34,9 @@ use super::traverse::TraversalDirection;
 /// # Examples
 ///
 /// ```rust
-/// use cfglib::{DirectedGraph, TraversalDirection, min_label_relaxation};
+/// use cfglib::{Graph, TraversalDirection, min_label_relaxation};
 ///
-/// let mut graph = DirectedGraph::new();
+/// let mut graph = Graph::new();
 /// let start = graph.add_node(());
 /// let middle = graph.add_node(());
 /// let end = graph.add_node(());
@@ -54,15 +54,15 @@ use super::traverse::TraversalDirection;
 /// ```
 #[must_use]
 pub fn min_label_relaxation<N, E, L>(
-    graph: &DirectedGraph<N, E>,
+    graph: &Graph<N, E>,
     seeds: impl IntoIterator<Item = (NodeId, L)>,
     direction: TraversalDirection,
-    mut relax: impl FnMut(&DirectedEdge<E>, &L) -> Option<L>,
+    mut relax: impl FnMut(&EdgeRecord<E>, &L) -> Option<L>,
 ) -> Vec<Option<L>>
 where
     L: Ord,
 {
-    let mut labels: Vec<Option<L>> = (0..graph.node_count()).map(|_| None).collect();
+    let mut labels: Vec<Option<L>> = (0..graph.node_bound()).map(|_| None).collect();
     let mut worklist: Vec<(NodeId, L)> = seeds.into_iter().collect();
     let forward = matches!(direction, TraversalDirection::Outgoing);
 
@@ -78,12 +78,12 @@ where
         let label = labels[node.index()]
             .as_ref()
             .expect("the candidate label was just stored");
-        let adjacency = if forward {
-            graph.outgoing_edges(node)
+        let adjacency: Vec<_> = if forward {
+            graph.outgoing(node).collect()
         } else {
-            graph.incoming_edges(node)
+            graph.incoming(node).collect()
         };
-        for &edge_id in adjacency {
+        for edge_id in adjacency {
             let edge = graph.edge(edge_id);
             if let Some(candidate) = relax(edge, label) {
                 let far = if forward {
@@ -110,7 +110,7 @@ mod tests {
         Block,
     }
 
-    fn apply_rule(edge: &DirectedEdge<Rule>, label: u32) -> Option<u32> {
+    fn apply_rule(edge: &EdgeRecord<Rule>, label: u32) -> Option<u32> {
         match *edge.payload() {
             Rule::Mint(label) => Some(label),
             Rule::Carry => Some(label),
@@ -120,7 +120,7 @@ mod tests {
 
     #[test]
     fn smaller_label_reexpands_a_previously_visited_node() {
-        let mut graph = DirectedGraph::new();
+        let mut graph = Graph::new();
         let root = graph.add_node(());
         let bridge = graph.add_node(());
         let join = graph.add_node(());
@@ -144,7 +144,7 @@ mod tests {
 
     #[test]
     fn incoming_relaxation_uses_the_real_edge_payload() {
-        let mut graph = DirectedGraph::new();
+        let mut graph = Graph::new();
         let source = graph.add_node(());
         let middle = graph.add_node(());
         let sink = graph.add_node(());
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn parallel_edges_and_competing_seeds_choose_the_minimum() {
-        let mut graph = DirectedGraph::new();
+        let mut graph = Graph::new();
         let source = graph.add_node(());
         let target = graph.add_node(());
         graph.add_edge(source, target, Rule::Carry);
@@ -182,7 +182,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "seed node is out of range")]
     fn rejects_a_seed_from_outside_the_graph() {
-        let graph = DirectedGraph::<(), ()>::new();
+        let graph = Graph::<(), ()>::new();
         let _ = min_label_relaxation(
             &graph,
             [(NodeId::from_index(0), 0_u32)],

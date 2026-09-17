@@ -818,13 +818,12 @@ fn lowering_round_trips_with_rewrite_maps() {
         mlil_function.cfg().block_count(),
         "blocks mirror one-to-one"
     );
-    for block in mlil_function.cfg().blocks() {
+    for block_id in mlil_function.cfg().block_ids() {
         assert!(
-            lowered.block(block.id()).is_some(),
-            "every block maps: {}",
-            block.id()
+            lowered.block(block_id).is_some(),
+            "every block maps: {block_id}"
         );
-        for instruction in block.instructions() {
+        for instruction in mlil_function.cfg().block(block_id).instructions() {
             assert!(
                 !lowered.statements(instruction.id()).is_empty(),
                 "every instruction lowers to at least one statement"

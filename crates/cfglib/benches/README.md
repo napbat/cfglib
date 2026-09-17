@@ -8,11 +8,11 @@ results.
 The latest local comparison and its measurement limits are recorded in
 [RESULTS.md](RESULTS.md).
 
-`graph-store.rs` is a separate, self-contained target comparing
-`DirectedGraph` with `graph::store::Graph` at symbol-graph scale: one
-million nodes, four million skewed-degree edges, a hundred thousand
-incremental appends, and compaction. It follows the same two-build
-convention, prints one line per case, and takes the fastest of five runs.
+`graph-store.rs` is a separate, self-contained target measuring `Graph` at
+symbol-graph scale: one million nodes, four million skewed-degree edges, a
+hundred thousand incremental appends, and compaction. It follows the same
+two-build convention, prints one line per case, and takes the fastest of five
+runs.
 
 ## Adding a benchmark
 

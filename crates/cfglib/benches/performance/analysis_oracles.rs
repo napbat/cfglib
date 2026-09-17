@@ -1,28 +1,28 @@
 use super::fixtures::{WIDE_FACT_WORDS, fixture_u32};
 use super::structural_oracles::has_directed_edge;
 use super::{
-    BTreeSet, BlockId, Cfg, CommonAncestor, ConstantInst, DirectedGraph, DominanceFrontiers,
-    DominatorTree, EdgeStep, Facts, IntervalAnalysis, NodeFacts, NodeId, PhiPlacements,
-    ProgramPoint, SsaForm, SsaValue, TraversalDirection, VecDeque,
+    BTreeSet, BlockId, Cfg, CommonAncestor, ConstantInst, DominanceFrontiers, DominatorTree,
+    EdgeStep, Facts, Graph, IntervalAnalysis, NodeFacts, NodeId, PhiPlacements, ProgramPoint,
+    SsaForm, SsaValue, TraversalDirection, VecDeque,
 };
 
 pub(super) fn directed_distances(
-    graph: &DirectedGraph<(), ()>,
+    graph: &Graph<(), ()>,
     start: NodeId,
     direction: TraversalDirection,
 ) -> (Vec<usize>, Vec<NodeId>) {
     let mut distances = vec![usize::MAX; graph.node_count()];
-    let mut order = Vec::with_capacity(graph.node_count());
+    let mut order = Vec::with_capacity(graph.node_bound());
     let mut queue = VecDeque::new();
     distances[start.index()] = 0;
     queue.push_back(start);
     while let Some(node) = queue.pop_front() {
         order.push(node);
-        let adjacent = match direction {
-            TraversalDirection::Outgoing => graph.outgoing_edges(node),
-            TraversalDirection::Incoming => graph.incoming_edges(node),
+        let adjacent: Vec<_> = match direction {
+            TraversalDirection::Outgoing => graph.outgoing(node).collect(),
+            TraversalDirection::Incoming => graph.incoming(node).collect(),
         };
-        for &edge_id in adjacent {
+        for edge_id in adjacent {
             let edge = graph.edge(edge_id);
             let next = match direction {
                 TraversalDirection::Outgoing => edge.target(),
@@ -75,9 +75,9 @@ pub(super) fn reference_cfg_breadth_first(cfg: &Cfg<u32>) -> Vec<BlockId> {
     order
 }
 
-pub(super) fn assert_edge_traversal(steps: &[EdgeStep], graph: &DirectedGraph<(), ()>) {
+pub(super) fn assert_edge_traversal(steps: &[EdgeStep], graph: &Graph<(), ()>) {
     assert_eq!(steps.len(), graph.edge_count());
-    let mut seen = vec![false; graph.edge_slot_count()];
+    let mut seen = vec![false; graph.edge_bound()];
     for step in steps {
         assert!(!seen[step.edge.index()], "edge traversal repeated an edge");
         seen[step.edge.index()] = true;
@@ -85,14 +85,14 @@ pub(super) fn assert_edge_traversal(steps: &[EdgeStep], graph: &DirectedGraph<()
         assert_eq!(step.source, edge.source());
         assert_eq!(step.target, edge.target());
     }
-    assert!(graph.edges().all(|edge| seen[edge.id().index()]));
+    assert!(graph.edge_ids().all(|edge| seen[edge.index()]));
 
     let mut expected = Vec::with_capacity(graph.edge_count());
-    let mut expanded = vec![false; graph.node_count()];
+    let mut expanded = vec![false; graph.node_bound()];
     let mut queue = VecDeque::from([NodeId::from_raw(0)]);
     expanded[0] = true;
     while let Some(node) = queue.pop_front() {
-        for &edge_id in graph.outgoing_edges(node) {
+        for edge_id in graph.outgoing(node) {
             let edge = graph.edge(edge_id);
             expected.push(EdgeStep {
                 edge: edge_id,
@@ -108,12 +108,7 @@ pub(super) fn assert_edge_traversal(steps: &[EdgeStep], graph: &DirectedGraph<()
     assert_eq!(steps, expected);
 }
 
-pub(super) fn assert_node_path(
-    path: &[NodeId],
-    graph: &DirectedGraph<(), ()>,
-    from: NodeId,
-    to: NodeId,
-) {
+pub(super) fn assert_node_path(path: &[NodeId], graph: &Graph<(), ()>, from: NodeId, to: NodeId) {
     assert_eq!(path.first(), Some(&from));
     assert_eq!(path.last(), Some(&to));
     let (distances, _) = directed_distances(graph, from, TraversalDirection::Outgoing);
@@ -125,8 +120,8 @@ pub(super) fn assert_node_path(
 }
 
 pub(super) fn assert_edge_path(
-    path: &[cfglib::graph::directed::EdgeId],
-    graph: &DirectedGraph<(), ()>,
+    path: &[cfglib::EdgeId],
+    graph: &Graph<(), ()>,
     from: NodeId,
     to: NodeId,
 ) {
@@ -145,7 +140,7 @@ pub(super) fn assert_edge_path(
 
 pub(super) fn assert_common_ancestor_results(
     results: &[CommonAncestor<NodeId>],
-    graph: &DirectedGraph<(), ()>,
+    graph: &Graph<(), ()>,
     a: NodeId,
     b: NodeId,
 ) {
@@ -183,16 +178,16 @@ pub(super) fn assert_dominance_frontiers(
     cfg: &Cfg<u32>,
     dominators: &DominatorTree,
 ) {
-    let mut expected = vec![BTreeSet::new(); cfg.block_count()];
-    for block in cfg.blocks() {
-        if cfg.predecessor_edges(block.id()).len() < 2 {
+    let mut expected = vec![BTreeSet::new(); cfg.block_bound()];
+    for block_id in cfg.block_ids() {
+        if cfg.incoming(block_id).count() < 2 {
             continue;
         }
-        let root = dominators.idom(block.id()).unwrap_or(block.id());
-        for predecessor in cfg.predecessors(block.id()) {
+        let root = dominators.idom(block_id).unwrap_or(block_id);
+        for predecessor in cfg.predecessors(block_id) {
             let mut runner = predecessor;
             while runner != root {
-                expected[runner.index()].insert(block.id());
+                expected[runner.index()].insert(block_id);
                 let Some(parent) = dominators.idom(runner) else {
                     break;
                 };
@@ -200,11 +195,8 @@ pub(super) fn assert_dominance_frontiers(
             }
         }
     }
-    for block in cfg.blocks() {
-        assert_eq!(
-            frontiers.frontier(block.id()),
-            &expected[block.id().index()]
-        );
+    for block_id in cfg.block_ids() {
+        assert_eq!(frontiers.frontier(block_id), &expected[block_id.index()]);
     }
 }
 
@@ -224,7 +216,7 @@ pub(super) fn assert_branchy_post_dominators(dominators: &DominatorTree, node_co
 }
 
 pub(super) fn assert_control_dependence_graph(
-    result: &DirectedGraph<BlockId, ()>,
+    result: &Graph<BlockId, ()>,
     cfg: &Cfg<u32>,
     post_dominators: &DominatorTree,
 ) {
@@ -234,8 +226,7 @@ pub(super) fn assert_control_dependence_graph(
     }
 
     let mut expected = BTreeSet::new();
-    for controller in cfg.blocks() {
-        let controller = controller.id();
+    for controller in cfg.block_ids() {
         for target in cfg.successors(controller) {
             if post_dominators.dominates(target, controller) {
                 continue;
@@ -380,15 +371,16 @@ pub(super) fn assert_phi_ssa(
     assert_eq!(ssa.blocks().len(), source.block_count());
     assert_eq!(ssa.phis().count(), layer_count * variable_count);
     let mut definitions = BTreeSet::new();
-    for block in source.blocks() {
-        let ssa_block = ssa.block(block.id());
-        assert_eq!(ssa_block.block, block.id());
+    for block_id in source.block_ids() {
+        let block = source.block(block_id);
+        let ssa_block = ssa.block(block_id);
+        assert_eq!(ssa_block.block, block_id);
         assert_eq!(ssa_block.instructions.len(), block.instructions().len());
         for (index, annotation) in ssa_block.instructions.iter().enumerate() {
             assert_eq!(
                 annotation.point,
                 ProgramPoint {
-                    block: block.id(),
+                    block: block_id,
                     inst_idx: index
                 }
             );
@@ -400,16 +392,13 @@ pub(super) fn assert_phi_ssa(
         for phi in &ssa_block.phis {
             assert!(phi.result.version > 0);
             assert!(definitions.insert(phi.result.clone()));
-            assert_eq!(
-                phi.operands.len(),
-                source.predecessor_edges(block.id()).len()
-            );
+            assert_eq!(phi.operands.len(), source.incoming(block_id).count());
             assert_eq!(
                 phi.operands
                     .iter()
                     .map(|(block, _)| *block)
                     .collect::<Vec<_>>(),
-                source.predecessors(block.id()).collect::<Vec<_>>()
+                source.predecessors(block_id).collect::<Vec<_>>()
             );
             assert!(
                 phi.operands

@@ -74,7 +74,7 @@ impl<I, E> Cfg<I, E> {
     ///
     /// // Both routes leave the same block, and each one is identifiable.
     /// let model = EhModel::compute(&cfg);
-    /// let recorded = &model.cleanups[&cleanup_block];
+    /// let recorded = model.cleanup(cleanup_block).unwrap();
     /// assert_eq!(recorded.resume_from, Some(cleanup_block));
     /// assert_eq!(
     ///     recorded.resumes_for(CompletionReason::Return).collect::<Vec<_>>(),
@@ -113,7 +113,7 @@ impl<I, E> Cfg<I, E> {
             "handler does not exist in this CFG"
         );
         debug_assert!(
-            resume_from.index() < self.blocks.len(),
+            self.contains_block(resume_from),
             "resume block does not exist in this CFG"
         );
         self.cleanup_entry(handler).resume_from = Some(resume_from);

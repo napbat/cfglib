@@ -31,11 +31,7 @@ fn full_solve_reaches_fixpoint_and_counts_steps() {
 fn seeding_every_block_matches_the_full_solve() {
     let (cfg, _, _) = liveness_fixture();
     let full = solve_problem(&cfg, &LivenessProblem).unwrap();
-    let all: alloc::vec::Vec<BlockId> = cfg
-        .blocks()
-        .iter()
-        .map(crate::block::BasicBlock::id)
-        .collect();
+    let all: alloc::vec::Vec<BlockId> = cfg.block_ids().collect();
     let seeded = solve_problem_from(&cfg, &LivenessProblem, &all).unwrap();
     for block in &all {
         assert_eq!(seeded.fact_in(*block), full.fact_in(*block));

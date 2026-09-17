@@ -3,19 +3,28 @@
 
 extern crate alloc;
 use alloc::vec::Vec;
-use smallvec::SmallVec;
 
-use crate::block::{BasicBlock, BlockId};
-use crate::edge::{Edge, EdgeId};
+use crate::block::{BasicBlock, BlockId, BlockTag};
+use crate::edge::{Edge, EdgeId, EdgeTag};
+use crate::graph::edge_view::EdgeRef;
+use crate::graph::store::Graph;
 use crate::region::{Cleanup, Region};
 
 mod cleanup;
+mod compact;
 mod mutation;
 mod regions;
 mod subgraph;
 mod view;
 
-pub use view::{Predecessors, Successors};
+/// The store a [`Cfg`] is built on: blocks as nodes, edges as edges.
+pub(crate) type CfgStore<I, E> = Graph<BasicBlock<I>, Edge<E>, BlockTag, EdgeTag>;
+
+pub use compact::CfgRenumbering;
+
+/// One borrowed control-flow edge: identity, endpoints, kind, weight, and
+/// consumer payload.
+pub type CfgEdge<'g, E> = EdgeRef<'g, BlockId, EdgeId, Edge<E>>;
 
 /// Why a requested instruction split-point sequence is invalid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,26 +67,33 @@ impl core::error::Error for SplitPointError {}
 
 /// A control-flow graph over instruction type `I` and edge payload `E`.
 ///
+/// The graph itself is a [`Graph`] whose nodes are [`BasicBlock`]s and whose
+/// edges are [`Edge`]s; the CFG adds the entry block and the exception
+/// metadata that make it a *control-flow* graph. Identities are therefore the
+/// store's: stable until [`compact`](Self::compact) renumbers them and
+/// reports the change.
+///
 /// `E = ()` retains the compact unannotated form. A frontend can instead use
 /// `Cfg<I, E>` to keep format-specific edge provenance without teaching
 /// cfglib about that format.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "serde",
+    serde(bound(
+        serialize = "I: serde::Serialize, E: serde::Serialize",
+        deserialize = "I: serde::Deserialize<'de>, E: serde::Deserialize<'de>"
+    ))
+)]
 pub struct Cfg<I, E = ()> {
-    pub(crate) blocks: Vec<BasicBlock<I>>,
-    /// Edge arena — slots become `None` when removed via [`remove_edge`].
-    pub(crate) edges: Vec<Option<Edge<E>>>,
-    /// Successor edge ids per block (indexed by `BlockId`).
-    pub(crate) succs: Vec<SmallVec<[EdgeId; 2]>>,
-    /// Predecessor edge ids per block (indexed by `BlockId`).
-    pub(crate) preds: Vec<SmallVec<[EdgeId; 4]>>,
+    pub(crate) graph: CfgStore<I, E>,
     /// Entry block.
     pub(crate) entry: BlockId,
     /// Exception-handler regions (optional; empty for simple ISAs).
     pub(crate) regions: Vec<Region>,
     /// Cleanup records for handlers that continue somewhere once their body
     /// ends (optional; empty unless a frontend records them).
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[cfg_attr(feature = "serde", serde(default = "Vec::new"))]
     pub(crate) cleanups: Vec<Cleanup>,
 }
 
@@ -102,16 +118,10 @@ impl<I, E> Cfg<I, E> {
     /// ```
     #[must_use]
     pub fn with_edge_payload() -> Self {
-        let entry = BlockId(0);
+        let mut graph = CfgStore::<I, E>::tagged();
+        let entry = graph.add_node(BasicBlock::new());
         Self {
-            blocks: alloc::vec![BasicBlock {
-                id: entry,
-                instructions: Vec::new(),
-                label: None,
-            }],
-            edges: Vec::new(),
-            succs: alloc::vec![SmallVec::new()],
-            preds: alloc::vec![SmallVec::new()],
+            graph,
             entry,
             regions: Vec::new(),
             cleanups: Vec::new(),
@@ -121,7 +131,7 @@ impl<I, E> Cfg<I, E> {
     /// The entry block of the graph.
     #[inline]
     #[must_use]
-    pub fn entry(&self) -> BlockId {
+    pub const fn entry(&self) -> BlockId {
         self.entry
     }
 
@@ -129,56 +139,57 @@ impl<I, E> Cfg<I, E> {
     ///
     /// # Panics
     ///
-    /// Panics (debug) if `id` does not refer to a block in this CFG.
+    /// Panics if `id` does not refer to a live block in this CFG.
     #[inline]
     pub fn set_entry(&mut self, id: BlockId) {
-        debug_assert!(
-            id.index() < self.blocks.len(),
-            "BlockId {} out of range (block_count = {})",
-            id,
-            self.blocks.len(),
+        assert!(
+            self.graph.contains_node(id),
+            "block {id} is not a live block of this CFG"
         );
         self.entry = id;
     }
 
     /// Look up a block by id.
     ///
+    /// A removed block's contents stay readable until the next
+    /// [`compact`](Self::compact); ask
+    /// [`contains_block`](Self::contains_block) when that distinction
+    /// matters.
+    ///
     /// # Panics
     ///
-    /// Panics if `id` does not refer to a block in this CFG.
+    /// Panics if `id` names no block slot in this CFG.
     #[inline]
     #[must_use]
     pub fn block(&self, id: BlockId) -> &BasicBlock<I> {
-        debug_assert!(
-            id.index() < self.blocks.len(),
-            "BlockId {} out of range (block_count = {})",
-            id,
-            self.blocks.len(),
-        );
-        &self.blocks[id.index()]
+        self.graph.node(id)
     }
 
     /// Mutable access to a block.
     ///
     /// # Panics
     ///
-    /// Panics if `id` does not refer to a block in this CFG.
+    /// Panics if `id` names no block slot in this CFG.
     #[inline]
     pub fn block_mut(&mut self, id: BlockId) -> &mut BasicBlock<I> {
-        debug_assert!(
-            id.index() < self.blocks.len(),
-            "BlockId {} out of range (block_count = {})",
-            id,
-            self.blocks.len(),
-        );
-        &mut self.blocks[id.index()]
+        self.graph.node_mut(id)
     }
 
-    /// All blocks in allocation order.
+    /// All live blocks in identity order.
+    pub fn blocks(&self) -> impl Iterator<Item = &BasicBlock<I>> + '_ {
+        self.block_ids().map(|id| self.block(id))
+    }
+
+    /// Every live block identity in ascending order.
+    pub fn block_ids(&self) -> impl Iterator<Item = BlockId> + '_ {
+        self.graph.node_ids()
+    }
+
+    /// Whether `id` names a block that has not been removed.
     #[inline]
     #[must_use]
-    pub fn blocks(&self) -> &[BasicBlock<I>] {
-        &self.blocks
+    pub fn contains_block(&self, id: BlockId) -> bool {
+        self.graph.contains_node(id)
     }
 
     /// Look up an edge by id.
@@ -188,61 +199,50 @@ impl<I, E> Cfg<I, E> {
     /// Panics if `id` does not refer to a live edge in this CFG.
     #[inline]
     #[must_use]
-    pub fn edge(&self, id: EdgeId) -> &Edge<E> {
-        self.edges[id.index()]
-            .as_ref()
-            .expect("edge has been removed")
+    pub fn edge(&self, id: EdgeId) -> CfgEdge<'_, E> {
+        assert!(self.graph.contains_edge(id), "edge {id} has been removed");
+        let record = self.graph.edge(id);
+        EdgeRef::new(id, record.source(), record.target(), record.payload())
     }
 
-    /// All live edges (skips tombstones left by [`Self::remove_edge`]).
-    pub fn edges(&self) -> impl Iterator<Item = &Edge<E>> {
-        self.edges.iter().filter_map(|slot| slot.as_ref())
+    /// All live edges in insertion order.
+    pub fn edges(&self) -> impl Iterator<Item = CfgEdge<'_, E>> + '_ {
+        self.edge_ids().map(|id| self.edge(id))
     }
 
-    /// Number of edge slots (including tombstones).
-    ///
-    /// This is the raw arena length, **not** the count of live edges.
-    /// Use `edges().count()` for the live edge count.
+    /// Every live edge identity in insertion order.
+    pub fn edge_ids(&self) -> impl Iterator<Item = EdgeId> + '_ {
+        self.graph.edge_ids()
+    }
+
+    /// Whether `id` names an edge that has not been removed.
     #[inline]
-    pub(crate) fn edge_slots(&self) -> usize {
-        self.edges.len()
+    #[must_use]
+    pub fn contains_edge(&self, id: EdgeId) -> bool {
+        self.graph.contains_edge(id)
     }
 
-    /// Successor edges for a block.
+    /// Outgoing edge identities of a block, in insertion order.
     ///
     /// # Panics
     ///
-    /// Panics if `id` does not refer to a block in this CFG.
-    #[inline]
-    #[must_use]
-    pub fn successor_edges(&self, id: BlockId) -> &[EdgeId] {
-        debug_assert!(
-            id.index() < self.succs.len(),
-            "BlockId {} out of range for successor lookup (block_count = {})",
-            id,
-            self.succs.len(),
-        );
-        &self.succs[id.index()]
+    /// Panics if `id` names no block slot in this CFG.
+    #[must_use = "iterators are lazy and do nothing unless consumed"]
+    pub fn outgoing(&self, id: BlockId) -> impl Iterator<Item = EdgeId> + '_ {
+        self.graph.outgoing(id)
     }
 
-    /// Predecessor edges for a block.
+    /// Incoming edge identities of a block, in insertion order.
     ///
     /// # Panics
     ///
-    /// Panics if `id` does not refer to a block in this CFG.
-    #[inline]
-    #[must_use]
-    pub fn predecessor_edges(&self, id: BlockId) -> &[EdgeId] {
-        debug_assert!(
-            id.index() < self.preds.len(),
-            "BlockId {} out of range for predecessor lookup (block_count = {})",
-            id,
-            self.preds.len(),
-        );
-        &self.preds[id.index()]
+    /// Panics if `id` names no block slot in this CFG.
+    #[must_use = "iterators are lazy and do nothing unless consumed"]
+    pub fn incoming(&self, id: BlockId) -> impl Iterator<Item = EdgeId> + '_ {
+        self.graph.incoming(id)
     }
 
-    /// Successor block ids (allocation-free).
+    /// Successor block ids (allocation-free), retaining parallel entries.
     ///
     /// # Examples
     ///
@@ -259,35 +259,47 @@ impl<I, E> Cfg<I, E> {
     /// let succs: Vec<_> = cfg.successors(b0).collect();
     /// assert_eq!(succs.len(), 2);
     /// ```
-    #[must_use]
-    pub fn successors(&self, id: BlockId) -> Successors<'_, I, E> {
-        Successors {
-            cfg: self,
-            iter: self.succs[id.index()].iter(),
-        }
+    #[must_use = "iterators are lazy and do nothing unless consumed"]
+    pub fn successors(&self, id: BlockId) -> impl Iterator<Item = BlockId> + '_ {
+        self.graph.successors(id)
     }
 
-    /// Predecessor block ids (allocation-free).
-    #[must_use]
-    pub fn predecessors(&self, id: BlockId) -> Predecessors<'_, I, E> {
-        Predecessors {
-            cfg: self,
-            iter: self.preds[id.index()].iter(),
-        }
+    /// Predecessor block ids (allocation-free), retaining parallel entries.
+    #[must_use = "iterators are lazy and do nothing unless consumed"]
+    pub fn predecessors(&self, id: BlockId) -> impl Iterator<Item = BlockId> + '_ {
+        self.graph.predecessors(id)
     }
 
-    /// Number of basic blocks.
+    /// Number of live basic blocks.
     #[inline]
     #[must_use]
-    pub fn block_count(&self) -> usize {
-        self.blocks.len()
+    pub const fn block_count(&self) -> usize {
+        self.graph.node_count()
     }
 
-    /// Number of live edges (excludes tombstones).
+    /// An exclusive upper bound on every live [`BlockId`]'s index.
+    ///
+    /// The right size for a block-indexed side table. It exceeds
+    /// [`block_count`](Self::block_count) exactly when blocks have been
+    /// removed without a [`compact`](Self::compact).
     #[inline]
     #[must_use]
-    pub fn edge_count(&self) -> usize {
-        self.edges.iter().filter(|e| e.is_some()).count()
+    pub fn block_bound(&self) -> usize {
+        self.graph.node_bound()
+    }
+
+    /// Number of live edges.
+    #[inline]
+    #[must_use]
+    pub const fn edge_count(&self) -> usize {
+        self.graph.edge_count()
+    }
+
+    /// An exclusive upper bound on every live [`EdgeId`]'s index.
+    #[inline]
+    #[must_use]
+    pub fn edge_bound(&self) -> usize {
+        self.graph.edge_bound()
     }
 
     /// Returns an iterator over exit blocks — blocks with no outgoing edges.
@@ -308,10 +320,8 @@ impl<I, E> Cfg<I, E> {
     /// assert_eq!(exits, vec![b1]);
     /// ```
     pub fn exit_blocks(&self) -> impl Iterator<Item = BlockId> + '_ {
-        self.blocks
-            .iter()
-            .filter(|b| self.succs[b.id().index()].is_empty())
-            .map(BasicBlock::id)
+        self.block_ids()
+            .filter(|&id| self.outgoing(id).next().is_none())
     }
 }
 

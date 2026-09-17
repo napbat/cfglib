@@ -33,6 +33,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
             && self.delta_edges.is_empty()
             && self.live_node_count == self.base_nodes.len()
             && self.live_edge_count == self.base_edges.len()
+            && !self.has_relocations()
     }
 
     /// Rebuild the compressed base from the live entities and report the new
@@ -49,7 +50,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// # Examples
     ///
     /// ```
-    /// use cfglib::graph::store::Graph;
+    /// use cfglib::Graph;
     ///
     /// let mut graph = Graph::<&'static str, ()>::new();
     /// let dropped = graph.add_node("dropped");
@@ -62,7 +63,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// assert_eq!(graph.node(renumbering.node(kept).unwrap()), &"kept");
     /// ```
     pub fn compact(&mut self) -> Renumbering<NT, ET> {
-        let node_map = surviving_slots(&self.live_nodes, self.node_slot_count());
+        let node_map = surviving_slots(&self.live_nodes, self.node_bound());
         let nodes = self.take_live_nodes(&node_map);
         let (edges, edge_map) = self.take_live_edges(&node_map);
 
@@ -75,6 +76,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         self.live_edges.reset_all_live(edges.len());
         self.out_chains.reset(nodes.len());
         self.in_chains.reset(nodes.len());
+        self.relocations_clear();
         self.base_nodes = nodes.into_boxed_slice();
         self.base_edges = edges.into_boxed_slice();
         self.out_offsets = out_offsets.into_boxed_slice();

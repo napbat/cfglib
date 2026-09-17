@@ -104,14 +104,14 @@ mod tests {
     fn copies_are_grouped_by_predecessor() {
         let copies = vec![
             PhiCopy {
-                from_block: BlockId(0),
-                to_block: BlockId(2),
+                from_block: BlockId::from_raw(0),
+                to_block: BlockId::from_raw(2),
                 destination: SsaValue::new(0_u16, 3),
                 source: SsaValue::new(0_u16, 1),
             },
             PhiCopy {
-                from_block: BlockId(1),
-                to_block: BlockId(2),
+                from_block: BlockId::from_raw(1),
+                to_block: BlockId::from_raw(2),
                 destination: SsaValue::new(0_u16, 3),
                 source: SsaValue::new(0_u16, 2),
             },

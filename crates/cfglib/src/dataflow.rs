@@ -10,7 +10,7 @@
 //! The instruction-level machinery is CFG-bound; the
 //! [`node_fixpoint`] module is its graph-shaped counterpart, solving
 //! per-node fact problems over any
-//! [`DirectedGraphView`](crate::DirectedGraphView) (taint or reachability
+//! [`GraphView`](crate::GraphView) (taint or reachability
 //! over a value-flow graph, closure over an import graph).
 //!
 //! # Usage

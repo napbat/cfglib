@@ -10,8 +10,8 @@ use core::convert::Infallible;
 use crate::dataflow::fixpoint::{
     Direction, SolveConfig, SolveError, TrySolveError, collapse_infallible,
 };
-use crate::graph::edge_view::{DenseEdgeId, EdgeGraphView, EdgeRef};
-use crate::graph::view::DenseNodeId;
+use crate::graph::edge_view::{EdgeRef, EdgeView};
+use crate::graph::view::DenseId;
 
 /// A dataflow problem whose transfer can distinguish individual edges.
 ///
@@ -20,7 +20,7 @@ use crate::graph::view::DenseNodeId;
 /// transfer from `node_input`, while a normal edge uses `node_output`. The same
 /// two physical facts are supplied during backward analysis; the default edge
 /// transfer uses the fact flowing in the selected analysis direction.
-pub trait EdgeProblem<G: EdgeGraphView> {
+pub trait EdgeProblem<G: EdgeView> {
     /// Lattice element propagated through nodes and edges.
     type Fact: Clone + PartialEq;
 
@@ -71,7 +71,7 @@ pub trait EdgeProblem<G: EdgeGraphView> {
 /// for verification and abstract interpretation where a transfer or lattice
 /// merge can reject the input program. The solver reports those consumer
 /// errors separately from its own configured step limit.
-pub trait TryEdgeProblem<G: EdgeGraphView> {
+pub trait TryEdgeProblem<G: EdgeView> {
     /// Lattice element propagated through nodes and edges.
     type Fact: Clone + PartialEq;
 
@@ -155,7 +155,7 @@ pub trait TryEdgeProblem<G: EdgeGraphView> {
 /// start the flow, and each edge chooses whether it observes the node's
 /// pre-state — an exceptional edge leaving before the node's effect
 /// commits — or its post-state.
-pub trait ReachableEdgeProblem<G: EdgeGraphView> {
+pub trait ReachableEdgeProblem<G: EdgeView> {
     /// Lattice element for reached program points.
     type Fact: Clone + PartialEq;
 
@@ -220,7 +220,7 @@ pub trait ReachableEdgeProblem<G: EdgeGraphView> {
 #[derive(Debug, Clone, Copy)]
 pub struct Reachable<P>(pub P);
 
-impl<G: EdgeGraphView, P: ReachableEdgeProblem<G>> TryEdgeProblem<G> for Reachable<P> {
+impl<G: EdgeView, P: ReachableEdgeProblem<G>> TryEdgeProblem<G> for Reachable<P> {
     type Fact = Option<P::Fact>;
     type Error = P::Error;
 
@@ -291,20 +291,20 @@ pub struct EdgeFacts<F> {
 impl<F> EdgeFacts<F> {
     /// Physical input fact for `node`.
     #[must_use]
-    pub fn fact_in<N: DenseNodeId>(&self, node: N) -> &F {
+    pub fn fact_in<N: DenseId>(&self, node: N) -> &F {
         &self.node_input[node.index()]
     }
 
     /// Physical output fact for `node`.
     #[must_use]
-    pub fn fact_out<N: DenseNodeId>(&self, node: N) -> &F {
+    pub fn fact_out<N: DenseId>(&self, node: N) -> &F {
         &self.node_output[node.index()]
     }
 
     /// Fact on a live edge in the solved view, or `None` for a tombstone or an
     /// edge excluded by a filtered view.
     #[must_use]
-    pub fn fact_on<E: DenseEdgeId>(&self, edge: E) -> Option<&F> {
+    pub fn fact_on<E: DenseId>(&self, edge: E) -> Option<&F> {
         self.edge.get(edge.index()).and_then(Option::as_ref)
     }
 
@@ -330,7 +330,7 @@ impl<F> EdgeFacts<F> {
 /// configurations without changing result handling.
 pub fn solve_edge_problem<G, P>(graph: &G, problem: &P) -> Result<EdgeFacts<P::Fact>, SolveError>
 where
-    G: EdgeGraphView,
+    G: EdgeView,
     P: EdgeProblem<G>,
 {
     solve_edge_problem_with_config(graph, problem, SolveConfig::new())
@@ -356,7 +356,7 @@ pub fn solve_edge_problem_from<G, P>(
     seeds: &[G::NodeId],
 ) -> Result<EdgeFacts<P::Fact>, SolveError>
 where
-    G: EdgeGraphView,
+    G: EdgeView,
     P: EdgeProblem<G>,
 {
     solve_edge_problem_from_with_config(graph, problem, seeds, SolveConfig::new())
@@ -374,14 +374,14 @@ pub fn solve_edge_problem_with_config<G, P>(
     config: SolveConfig,
 ) -> Result<EdgeFacts<P::Fact>, SolveError>
 where
-    G: EdgeGraphView,
+    G: EdgeView,
     P: EdgeProblem<G>,
 {
     let fallible = InfallibleProblem(problem);
     collapse_infallible(try_solve_with_worklist(
         graph,
         &fallible,
-        (0..graph.node_count()).collect(),
+        (0..graph.node_bound()).collect(),
         config,
     ))
 }
@@ -404,7 +404,7 @@ pub fn solve_edge_problem_from_with_config<G, P>(
     config: SolveConfig,
 ) -> Result<EdgeFacts<P::Fact>, SolveError>
 where
-    G: EdgeGraphView,
+    G: EdgeView,
     P: EdgeProblem<G>,
 {
     let fallible = InfallibleProblem(problem);
@@ -427,7 +427,7 @@ pub fn try_solve_edge_problem<G, P>(
     problem: &P,
 ) -> Result<EdgeFacts<P::Fact>, TrySolveError<P::Error>>
 where
-    G: EdgeGraphView,
+    G: EdgeView,
     P: TryEdgeProblem<G>,
 {
     try_solve_edge_problem_with_config(graph, problem, SolveConfig::new())
@@ -449,7 +449,7 @@ pub fn try_solve_edge_problem_from<G, P>(
     seeds: &[G::NodeId],
 ) -> Result<EdgeFacts<P::Fact>, TrySolveError<P::Error>>
 where
-    G: EdgeGraphView,
+    G: EdgeView,
     P: TryEdgeProblem<G>,
 {
     try_solve_edge_problem_from_with_config(graph, problem, seeds, SolveConfig::new())
@@ -467,10 +467,10 @@ pub fn try_solve_edge_problem_with_config<G, P>(
     config: SolveConfig,
 ) -> Result<EdgeFacts<P::Fact>, TrySolveError<P::Error>>
 where
-    G: EdgeGraphView,
+    G: EdgeView,
     P: TryEdgeProblem<G>,
 {
-    try_solve_with_worklist(graph, problem, (0..graph.node_count()).collect(), config)
+    try_solve_with_worklist(graph, problem, (0..graph.node_bound()).collect(), config)
 }
 
 /// Solve a fallible edge-sensitive problem from `seeds` with a deterministic
@@ -491,18 +491,18 @@ pub fn try_solve_edge_problem_from_with_config<G, P>(
     config: SolveConfig,
 ) -> Result<EdgeFacts<P::Fact>, TrySolveError<P::Error>>
 where
-    G: EdgeGraphView,
+    G: EdgeView,
     P: TryEdgeProblem<G>,
 {
     try_solve_with_worklist(graph, problem, seed_worklist(graph, seeds), config)
 }
 
-fn seed_worklist<G: EdgeGraphView>(graph: &G, seeds: &[G::NodeId]) -> BTreeSet<usize> {
+fn seed_worklist<G: EdgeView>(graph: &G, seeds: &[G::NodeId]) -> BTreeSet<usize> {
     seeds
         .iter()
         .map(|seed| {
             assert!(
-                seed.index() < graph.node_count(),
+                seed.index() < graph.node_bound(),
                 "seed node is out of range"
             );
             seed.index()
@@ -517,13 +517,13 @@ fn try_solve_with_worklist<G, P>(
     config: SolveConfig,
 ) -> Result<EdgeFacts<P::Fact>, TrySolveError<P::Error>>
 where
-    G: EdgeGraphView,
+    G: EdgeView,
     P: TryEdgeProblem<G>,
 {
     let bottom = problem.bottom(graph);
-    let mut node_input = vec![bottom.clone(); graph.node_count()];
-    let mut node_output = vec![bottom.clone(); graph.node_count()];
-    let mut edge = vec![None; graph.edge_slot_count()];
+    let mut node_input = vec![bottom.clone(); graph.node_bound()];
+    let mut node_output = vec![bottom.clone(); graph.node_bound()];
+    let mut edge = vec![None; graph.edge_bound()];
     for edge_id in graph.edge_ids() {
         edge[edge_id.index()] = Some(bottom.clone());
     }
@@ -585,14 +585,14 @@ fn try_meet_edges<G, P>(
     incoming: bool,
 ) -> Result<P::Fact, P::Error>
 where
-    G: EdgeGraphView,
+    G: EdgeView,
     P: TryEdgeProblem<G>,
 {
     let mut merged = problem.boundary(graph, node)?;
     let edges: Vec<_> = if incoming {
-        graph.incoming_edges(node).collect()
+        graph.incoming(node).collect()
     } else {
-        graph.outgoing_edges(node).collect()
+        graph.outgoing(node).collect()
     };
     for edge in edges {
         let fact = edge_facts[edge.index()]
@@ -621,7 +621,7 @@ fn try_solve_forward_node<G, P>(
     worklist: &mut BTreeSet<usize>,
 ) -> Result<(), P::Error>
 where
-    G: EdgeGraphView,
+    G: EdgeView,
     P: TryEdgeProblem<G>,
 {
     let input = try_meet_edges(graph, problem, node, bottom, edge_facts, true)?;
@@ -629,12 +629,12 @@ where
     node_input[node.index()] = input;
     node_output[node.index()] = output;
 
-    let outgoing: Vec<_> = graph.outgoing_edges(node).collect();
+    let outgoing: Vec<_> = graph.outgoing(node).collect();
     for edge_id in outgoing {
-        let edge_ref = graph.edge_ref(edge_id);
+        let edge = graph.edge(edge_id);
         let new_fact = problem.transfer_edge(
             graph,
-            edge_ref,
+            edge,
             &node_input[node.index()],
             &node_output[node.index()],
         )?;
@@ -643,7 +643,7 @@ where
             .expect("adjacency contains an edge excluded from the view");
         if new_fact != *fact {
             *fact = new_fact;
-            worklist.insert(edge_ref.target().index());
+            worklist.insert(edge.target().index());
         }
     }
     Ok(())
@@ -662,7 +662,7 @@ fn try_solve_backward_node<G, P>(
     worklist: &mut BTreeSet<usize>,
 ) -> Result<(), P::Error>
 where
-    G: EdgeGraphView,
+    G: EdgeView,
     P: TryEdgeProblem<G>,
 {
     let output = try_meet_edges(graph, problem, node, bottom, edge_facts, false)?;
@@ -670,12 +670,12 @@ where
     node_output[node.index()] = output;
     node_input[node.index()] = input;
 
-    let incoming: Vec<_> = graph.incoming_edges(node).collect();
+    let incoming: Vec<_> = graph.incoming(node).collect();
     for edge_id in incoming {
-        let edge_ref = graph.edge_ref(edge_id);
+        let edge = graph.edge(edge_id);
         let new_fact = problem.transfer_edge(
             graph,
-            edge_ref,
+            edge,
             &node_input[node.index()],
             &node_output[node.index()],
         )?;
@@ -684,7 +684,7 @@ where
             .expect("adjacency contains an edge excluded from the view");
         if new_fact != *fact {
             *fact = new_fact;
-            worklist.insert(edge_ref.source().index());
+            worklist.insert(edge.source().index());
         }
     }
     Ok(())
@@ -694,7 +694,7 @@ struct InfallibleProblem<'problem, P>(&'problem P);
 
 impl<G, P> TryEdgeProblem<G> for InfallibleProblem<'_, P>
 where
-    G: EdgeGraphView,
+    G: EdgeView,
     P: EdgeProblem<G>,
 {
     type Fact = P::Fact;

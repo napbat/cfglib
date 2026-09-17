@@ -1,7 +1,7 @@
 //! The [`search`](super::search::search) disciplines over an *open* node
 //! space — one discovered lazily, with no dense identities.
 //!
-//! [`DirectedGraphView`](super::view::DirectedGraphView) requires the graph to
+//! [`GraphView`](super::view::GraphView) requires the graph to
 //! exist: dense ids in `0..node_count`, adjacency on demand. Plenty of real
 //! walks have no such graph. An import chase probes a live resolver and mints
 //! the next node from the answer; a re-export chase walks a `(file, name)`

@@ -35,7 +35,7 @@ pub(super) const MAX_SLOTS: usize = NONE as usize;
 /// Per-node circular chains threading one direction of the delta's adjacency.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub(super) struct DeltaChains {
+pub(crate) struct DeltaChains {
     /// Last delta edge appended to each node slot's chain, or [`NONE`].
     last: Vec<u32>,
     /// Successor of each delta edge within its node's circular chain.
@@ -86,6 +86,11 @@ impl DeltaChains {
             return None;
         }
         Some((self.next[last as usize], last))
+    }
+
+    /// Forget one node's chain, whose edges an overlay has taken over.
+    pub(super) fn detach_node(&mut self, node: usize) {
+        self.last[node] = NONE;
     }
 
     /// Drop every chain and restart with `nodes` empty ones.
@@ -196,10 +201,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// Panics when `node` names no slot in this store.
     fn cursor(&self, node: Id<NT>, axis: &Axis<'_>) -> AdjacencyCursor {
         let index = node.index();
-        assert!(
-            index < self.node_slot_count(),
-            "node identity is out of range"
-        );
+        assert!(index < self.node_bound(), "node identity is out of range");
         if !self.live_nodes.is_live(index) {
             return AdjacencyCursor::EXHAUSTED;
         }
@@ -220,13 +222,23 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// Whether any edge slot is a tombstone, which is the only reason a
     /// walk has to consult the liveness bitset.
     fn tombstoned_edges(&self) -> bool {
-        self.live_edge_count != self.edge_slot_count()
+        self.live_edge_count != self.edge_bound()
     }
 
     fn adjacent(&self, node: Id<NT>, direction: TraversalDirection) -> AdjacentEdges<'_, ET> {
-        let axis = self.axis(direction);
+        let mut axis = self.axis(direction);
+        let mut cursor = self.cursor(node, &axis);
+        // A node whose edges have moved reads its compressed run from a
+        // replacement instead; its chain still carries whatever arrived
+        // after the move. The relocation module states why this is a whole
+        // run rather than a filter and a tail.
+        if let Some(run) = self.overlay(node.index(), direction) {
+            axis.edges = run;
+            cursor.base = 0;
+            cursor.base_end = raw_index(run.len());
+        }
         AdjacentEdges {
-            cursor: self.cursor(node, &axis),
+            cursor,
             axis,
             live: self.tombstoned_edges().then_some(&self.live_edges),
             delta_base: raw_index(self.base_edges.len()),
@@ -274,19 +286,13 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
 
     /// Remove every live edge reachable from `node` in `direction`.
     ///
-    /// This walk resolves its axis on every step because the loop body needs
-    /// the store mutably. That is the removal path, not a scan, so the extra
-    /// loads never reach an analysis.
+    /// The walk is collected first because the loop body needs the store
+    /// mutably. That is the removal path, not a scan, so the buffer never
+    /// reaches an analysis.
     pub(super) fn clear_adjacency(&mut self, node: Id<NT>, direction: TraversalDirection) {
-        let mut cursor = self.cursor(node, &self.axis(direction));
-        loop {
-            let axis = self.axis(direction);
-            let delta_base = raw_index(self.base_edges.len());
-            let live = self.tombstoned_edges().then_some(&self.live_edges);
-            let Some(edge) = advance(&mut cursor, &axis, live, delta_base) else {
-                return;
-            };
-            self.retire_edge(edge as usize);
+        let incident: Vec<Id<ET>> = self.adjacent(node, direction).collect();
+        for edge in incident {
+            self.retire_edge(edge.index());
         }
     }
 }

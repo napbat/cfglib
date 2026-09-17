@@ -6,7 +6,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::{BlockId, DirectedGraph, NodeId, SsaForm, SsaValue, VariableId};
+use crate::{BlockId, Graph, NodeId, SsaForm, SsaValue, VariableId};
 
 use super::{MemoryEventSite, MemorySSA, MemorySsaValue};
 
@@ -156,7 +156,7 @@ impl<V: fmt::Debug> core::error::Error for MemoryValueFlowError<V> {}
 /// semantics remain consumer-defined.
 #[derive(Debug)]
 pub struct MemoryValueFlow<V> {
-    graph: DirectedGraph<MemoryValueNode<V>, MemoryValueEdge>,
+    graph: Graph<MemoryValueNode<V>, MemoryValueEdge>,
     nodes: BTreeMap<MemoryValueNode<V>, NodeId>,
 }
 
@@ -182,7 +182,7 @@ where
         F: Clone + Eq,
     {
         let mut flow = Self {
-            graph: DirectedGraph::new(),
+            graph: Graph::new(),
             nodes: BTreeMap::new(),
         };
         flow.add_nodes(memory, ssa)?;
@@ -194,7 +194,7 @@ where
 
     /// Combined dependency graph in deterministic construction order.
     #[must_use]
-    pub const fn graph(&self) -> &DirectedGraph<MemoryValueNode<V>, MemoryValueEdge> {
+    pub const fn graph(&self) -> &Graph<MemoryValueNode<V>, MemoryValueEdge> {
         &self.graph
     }
 

@@ -46,8 +46,9 @@ pub fn reverse_cfg<I: Clone>(cfg: &Cfg<I>) -> Cfg<I> {
     for _i in 1..cfg.block_count() {
         rev.new_block();
     }
-    for src in cfg.blocks() {
-        let bid = src.id();
+    for block_id in cfg.block_ids() {
+        let src = cfg.block(block_id);
+        let bid = block_id;
         let dst = rev.block_mut(bid);
         *dst.instructions_mut() = src.instructions().to_vec();
         if let Some(lbl) = src.label() {

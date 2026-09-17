@@ -1,4 +1,4 @@
-//! Program-dependence graph construction on [`DirectedGraph`].
+//! Program-dependence graph construction on [`Graph`].
 //!
 //! The builder combines control dependences and def-use chains into one graph
 //! that can be traversed in either direction for slicing, provenance, clone
@@ -14,8 +14,8 @@ use crate::cfg::Cfg;
 use crate::dataflow::def_use::DefUseChains;
 use crate::dataflow::{InstrInfo, ProgramPoint};
 use crate::graph::cdg::control_dependence_graph;
-use crate::graph::directed::{DirectedGraph, NodeId};
 use crate::graph::dominator::DominatorTree;
+use crate::graph::store::{Graph, NodeId};
 
 /// A node in a program-dependence graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -49,30 +49,28 @@ pub enum DependenceKind {
 #[must_use]
 pub fn program_dependence_graph<I: InstrInfo>(
     cfg: &Cfg<I>,
-) -> DirectedGraph<DependenceNode, DependenceKind> {
+) -> Graph<DependenceNode, DependenceKind> {
     let instruction_count = cfg
         .blocks()
-        .iter()
         .map(|block| block.instructions().len())
         .sum::<usize>();
-    let mut graph = DirectedGraph::with_capacity(
+    let mut graph = Graph::with_capacity(
         cfg.block_count().saturating_add(instruction_count),
         cfg.edge_count().saturating_add(instruction_count),
     );
 
-    let block_nodes: Vec<NodeId> = cfg
-        .blocks()
+    let block_ids: Vec<BlockId> = cfg.block_ids().collect();
+    let block_nodes: Vec<NodeId> = block_ids
         .iter()
-        .map(|block| graph.add_node(DependenceNode::Block(block.id())))
+        .map(|&block| graph.add_node(DependenceNode::Block(block)))
         .collect();
-    let instruction_nodes: Vec<Vec<NodeId>> = cfg
-        .blocks()
+    let instruction_nodes: Vec<Vec<NodeId>> = block_ids
         .iter()
-        .map(|block| {
-            (0..block.instructions().len())
+        .map(|&block| {
+            (0..cfg.block(block).instructions().len())
                 .map(|inst_idx| {
                     graph.add_node(DependenceNode::Instruction(ProgramPoint {
-                        block: block.id(),
+                        block,
                         inst_idx,
                     }))
                 })
@@ -84,8 +82,8 @@ pub fn program_dependence_graph<I: InstrInfo>(
     let control = control_dependence_graph(cfg, &post_dominators);
     let mut controllers = BTreeSet::new();
     for edge in control.edges() {
-        let controller = control[edge.source()];
-        let dependent = control[edge.target()];
+        let controller = *control.node(edge.source());
+        let dependent = *control.node(edge.target());
         controllers.insert(controller);
 
         let controller_node = block_nodes[controller.index()];
@@ -128,13 +126,10 @@ mod tests {
     use crate::graph::traverse::{TraversalDirection, depth_first_preorder};
     use crate::test_util::{DfInst, df_def, df_use};
 
-    fn find_node(
-        graph: &DirectedGraph<DependenceNode, DependenceKind>,
-        payload: DependenceNode,
-    ) -> NodeId {
+    fn find_node(graph: &Graph<DependenceNode, DependenceKind>, payload: DependenceNode) -> NodeId {
         graph
             .node_ids()
-            .find(|&node| graph[node] == payload)
+            .find(|&node| *graph.node(node) == payload)
             .expect("dependence node must exist")
     }
 

@@ -614,7 +614,7 @@ impl ScopeResolution {
                 .max_path_length
                 .is_some_and(|limit| path.len() >= limit);
             let mut next = None;
-            for edge_id in graph.outgoing_edges(path.end()) {
+            for edge_id in graph.outgoing(path.end()) {
                 let edge = graph.edge(edge_id);
                 if path.contains_scope(edge.target()) {
                     continue;
@@ -704,7 +704,7 @@ impl ScopeResolution {
             let at_length_limit = config
                 .max_path_length
                 .is_some_and(|limit| work.path.len() >= limit);
-            for edge_id in graph.outgoing_edges(work.path.end()) {
+            for edge_id in graph.outgoing(work.path.end()) {
                 let edge = graph.edge(edge_id);
                 if work.path.contains_scope(edge.target()) {
                     continue;

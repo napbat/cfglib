@@ -12,7 +12,7 @@ use crate::{BlockId, Cfg};
 
 /// Fails when `block` does not exist in `cfg`.
 pub(crate) fn check_block<I, E>(cfg: &Cfg<I, E>, block: BlockId) -> Result<(), String> {
-    if block.index() < cfg.block_count() {
+    if cfg.contains_block(block) {
         Ok(())
     } else {
         Err(format!(

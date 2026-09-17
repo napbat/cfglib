@@ -444,7 +444,7 @@ impl RegionIndex {
     /// The index is a snapshot: recompute after adding regions or blocks.
     #[must_use]
     pub fn compute<I>(cfg: &Cfg<I>) -> Self {
-        let mut innermost = vec![None; cfg.block_count()];
+        let mut innermost = vec![None; cfg.block_bound()];
         for region in cfg.regions() {
             for &block in &region.protected_blocks {
                 if let Some(slot) = innermost.get_mut(block.index()) {

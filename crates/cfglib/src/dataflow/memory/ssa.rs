@@ -763,7 +763,7 @@ where
     F: Clone,
 {
     let mut shadow = Cfg::new();
-    for expected_index in 1..cfg.block_count() {
+    for expected_index in 1..cfg.block_bound() {
         let block = shadow.new_block();
         debug_assert_eq!(block.index(), expected_index);
     }

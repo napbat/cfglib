@@ -12,7 +12,7 @@ use super::id::{EdgeTag, Id, IdTag, NodeTag};
 ///
 /// Named for what it is: compaction assigns new dense numbers, and this is
 /// the numbering. It is total over the old slot space rather than sparse like
-/// [`RewriteMap`](crate::RewriteMap) — a compaction touches every identity,
+/// [`Rewrite`](crate::Rewrite) — a compaction touches every identity,
 /// so a lookup is an array read, not a tree descent, and "absent" can mean
 /// only one thing: the entity was removed.
 ///
@@ -50,15 +50,15 @@ impl<NT: IdTag, ET: IdTag> Renumbering<NT, ET> {
         translate(&self.edges, old.index())
     }
 
-    /// The number of old node slots this renumbering covers.
+    /// The old node bound this renumbering covers.
     #[must_use]
-    pub fn node_slot_count(&self) -> usize {
+    pub fn node_bound(&self) -> usize {
         self.nodes.len()
     }
 
-    /// The number of old edge slots this renumbering covers.
+    /// The old edge bound this renumbering covers.
     #[must_use]
-    pub fn edge_slot_count(&self) -> usize {
+    pub fn edge_bound(&self) -> usize {
         self.edges.len()
     }
 
@@ -68,7 +68,7 @@ impl<NT: IdTag, ET: IdTag> Renumbering<NT, ET> {
     /// # Examples
     ///
     /// ```
-    /// use cfglib::graph::store::Graph;
+    /// use cfglib::Graph;
     ///
     /// let mut graph = Graph::<&'static str, ()>::new();
     /// let first = graph.add_node("first");

@@ -2,6 +2,7 @@
 
 extern crate alloc;
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 use core::fmt;
@@ -92,6 +93,11 @@ where
 pub struct ProvenanceMap<D: Vocabulary, Entity> {
     source: D::Source,
     entries: Vec<ProvenanceEntry<D, Entity>>,
+    /// Reverse index: the spans recorded for each entity, in the same order
+    /// [`entries`](Self::entries) lists them. Answering "what does this
+    /// entity come from?" is the common direction, and a scan of every entry
+    /// is the wrong shape for it.
+    spans_by_entity: BTreeMap<Entity, Vec<D::SourceSpan>>,
 }
 
 impl<D: Vocabulary, Entity: Copy + Ord> ProvenanceMap<D, Entity> {
@@ -101,6 +107,7 @@ impl<D: Vocabulary, Entity: Copy + Ord> ProvenanceMap<D, Entity> {
         Self {
             source,
             entries: Vec::new(),
+            spans_by_entity: BTreeMap::new(),
         }
     }
 
@@ -126,13 +133,15 @@ impl<D: Vocabulary, Entity: Copy + Ord> ProvenanceMap<D, Entity> {
             return Err(ProvenanceError::new("source span is empty or reversed"));
         }
         let entry = ProvenanceEntry { source, entity };
-        match self.entries.binary_search(&entry) {
-            Ok(_) => Ok(false),
-            Err(position) => {
-                self.entries.insert(position, entry);
-                Ok(true)
-            }
+        let Err(position) = self.entries.binary_search(&entry) else {
+            return Ok(false);
+        };
+        let spans = self.spans_by_entity.entry(entity).or_default();
+        if let Err(slot) = spans.binary_search(&entry.source) {
+            spans.insert(slot, entry.source.clone());
         }
+        self.entries.insert(position, entry);
+        Ok(true)
     }
 
     /// Returns all mappings in deterministic order.
@@ -151,11 +160,23 @@ impl<D: Vocabulary, Entity: Copy + Ord> ProvenanceMap<D, Entity> {
             .filter(move |entry| D::span_contains(&entry.source, &point))
     }
 
-    /// Returns mappings that identify `entity`.
+    /// Returns mappings that identify `entity`, in span order.
+    ///
+    /// Answered from the reverse index, so the cost is the entity lookup plus
+    /// one binary search per span rather than a scan of every mapping.
     pub fn mappings_to(&self, entity: Entity) -> impl Iterator<Item = &ProvenanceEntry<D, Entity>> {
-        self.entries
+        self.spans_by_entity
+            .get(&entity)
+            .map_or(&[][..], Vec::as_slice)
             .iter()
-            .filter(move |entry| entry.entity == entity)
+            .filter_map(move |source| {
+                let probe = ProvenanceEntry {
+                    source: source.clone(),
+                    entity,
+                };
+                let position = self.entries.binary_search(&probe).ok()?;
+                self.entries.get(position)
+            })
     }
 
     /// Returns whether no source correspondence has been recorded.

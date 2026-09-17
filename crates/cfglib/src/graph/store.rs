@@ -6,17 +6,16 @@
 //! present and always readable; [`compact`](Graph::compact) folds the second
 //! into the first when a consumer decides to pay for it.
 //!
-//! # Why not the arena
+//! # Why not an arena
 //!
-//! The arena stores in this crate ([`DirectedGraph`](crate::DirectedGraph),
-//! [`Cfg`](crate::Cfg)) keep two `SmallVec` adjacency containers per node.
-//! That is the right shape for a few thousand basic blocks and the wrong one
-//! for a whole codebase: two `SmallVec<[EdgeId; 4]>` fields cost 32 bytes of
-//! inline storage on every node whether or not they are used, and a node
-//! whose degree crosses the inline bound moves to its own heap allocation —
-//! so a million-node symbol graph pays tens of megabytes of inline slack plus
-//! one allocation per high-degree node, and every scan of it chases a pointer
-//! per node.
+//! The obvious store keeps two `SmallVec` adjacency containers per node. That
+//! is the right shape for a few thousand basic blocks and the wrong one for a
+//! whole codebase: two `SmallVec<[EdgeId; 4]>` fields cost 32 bytes of inline
+//! storage on every node whether or not they are used, and a node whose
+//! degree crosses the inline bound moves to its own heap allocation — so a
+//! million-node symbol graph pays tens of megabytes of inline slack plus one
+//! allocation per high-degree node, and every scan of it chases a pointer per
+//! node.
 //!
 //! A pure compressed-sparse-row index removes both costs but cannot be
 //! updated: appending one edge to node 3 means shifting every later node's
@@ -41,9 +40,7 @@
 //!
 //! Adjacency of a node is its base run followed by its delta chain. Base
 //! identities are all below delta identities and both parts are ordered, so
-//! the concatenation is exactly insertion order — the order
-//! [`DirectedGraph`](crate::DirectedGraph) produces today, parallel edges
-//! included. Consumers see no reordering when they move.
+//! the concatenation is exactly insertion order, parallel edges included.
 //!
 //! ## Cost per node
 //!
@@ -61,6 +58,18 @@
 //! next compaction. Removing a node removes its edges in both directions.
 //! Nothing else moves, so every identity a consumer holds stays valid.
 //!
+//! ## Redirection
+//!
+//! [`redirect_edge_source`](Graph::redirect_edge_source) and
+//! [`redirect_edge_target`](Graph::redirect_edge_target) move one endpoint
+//! and keep the edge — its identity, its payload, and the other endpoint.
+//! That is what lets a control-flow transform bypass, merge, or split a block
+//! without invalidating the edge identities a caller is holding. The affected
+//! nodes get a replacement adjacency run, which the walk reads exactly as it
+//! reads a compressed one — a whole run rather than a per-edge filter,
+//! because the walk is the inner loop of every algorithm in the crate and
+//! does not tolerate a second question per edge.
+//!
 //! ## Compaction
 //!
 //! [`compact`](Graph::compact) rebuilds the base from the live entities and
@@ -73,17 +82,15 @@
 //! `Graph::new()`, `add_node`, `add_edge`, `compact()` *is* the builder, and
 //! it is also the store, so a consumer that keeps mutating does not have to
 //! choose a type up front or rebuild to get back to a mutable one.
-//! [`CsrDirectedGraphBuilder`](crate::CsrDirectedGraphBuilder) is superseded
-//! by this module and kept only until its callers move.
 //!
 //! # Dense analyses
 //!
-//! The crate's algorithms index arrays by node index, so a view must report a
-//! bound that covers every identity it yields. [`Graph`] reports its **slot**
-//! count, tombstones included, through
-//! [`DirectedGraphView::node_count`](crate::DirectedGraphView::node_count) —
-//! see [`node_slot_count`](Graph::node_slot_count) for what that means for an
-//! analysis run over a store with removed nodes in it.
+//! The crate's algorithms size node-indexed arrays by
+//! [`GraphView::node_bound`](crate::GraphView::node_bound) and iterate
+//! [`GraphView::node_ids`](crate::GraphView::node_ids). The store answers the
+//! first with its slot count and the second with its live nodes, so an
+//! analysis over a store with removed entities in it is neither unsound nor
+//! obliged to compact first — see [`node_bound`](Graph::node_bound).
 
 extern crate alloc;
 
@@ -95,12 +102,14 @@ use crate::graph::traverse::TraversalDirection;
 
 use adjacency::{DeltaChains, MAX_SLOTS};
 use liveness::LiveSet;
+use relocate::Relocations;
 
 mod adjacency;
 mod compact;
 mod edge;
 mod id;
 mod liveness;
+mod relocate;
 mod renumbering;
 mod view;
 
@@ -135,7 +144,7 @@ fn empty_slice<T>() -> Box<[T]> {
 /// # Examples
 ///
 /// ```
-/// use cfglib::graph::store::Graph;
+/// use cfglib::Graph;
 ///
 /// let mut graph = Graph::new();
 /// let definition = graph.add_node("definition");
@@ -175,6 +184,13 @@ pub struct Graph<N, E, NT: IdTag = NodeTag, ET: IdTag = EdgeTag> {
     live_edges: LiveSet,
     live_node_count: usize,
     live_edge_count: usize,
+    /// Replacement adjacency runs, present only once an edge has been
+    /// redirected; see [`redirect_edge_source`](Graph::redirect_edge_source).
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    relocations: Option<Box<Relocations>>,
     #[cfg_attr(feature = "serde", serde(skip))]
     edge_tag: PhantomData<fn() -> ET>,
 }
@@ -218,6 +234,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
             live_edges: LiveSet::new(),
             live_node_count: 0,
             live_edge_count: 0,
+            relocations: None,
             edge_tag: PhantomData,
         }
     }
@@ -251,7 +268,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     ///
     /// Panics when the store would exceed the dense identity space.
     pub fn add_node(&mut self, payload: N) -> Id<NT> {
-        let slot = self.node_slot_count();
+        let slot = self.node_bound();
         assert!(
             slot < MAX_SLOTS,
             "node count exceeds the dense identity space"
@@ -277,7 +294,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     pub fn add_edge(&mut self, source: Id<NT>, target: Id<NT>, payload: E) -> Id<ET> {
         self.assert_live_endpoint(source, "source");
         self.assert_live_endpoint(target, "target");
-        let slot = self.edge_slot_count();
+        let slot = self.edge_bound();
         assert!(
             slot < MAX_SLOTS,
             "edge count exceeds the dense identity space"
@@ -306,7 +323,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// way is indistinguishable from one removed directly.
     pub fn remove_node(&mut self, node: Id<NT>) -> bool {
         let index = node.index();
-        if index >= self.node_slot_count() || !self.live_nodes.is_live(index) {
+        if index >= self.node_bound() || !self.live_nodes.is_live(index) {
             return false;
         }
         self.clear_adjacency(node, TraversalDirection::Outgoing);
@@ -319,7 +336,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// Borrow a node payload.
     ///
     /// A removed node's payload stays readable until the next compaction;
-    /// ask [`is_live_node`](Self::is_live_node) when that distinction
+    /// ask [`contains_node`](Self::contains_node) when that distinction
     /// matters.
     ///
     /// # Panics
@@ -384,15 +401,15 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         }
     }
 
-    /// Whether `node` names a node that has not been removed.
+    /// Whether `node` names a node the store still holds.
     #[must_use]
-    pub fn is_live_node(&self, node: Id<NT>) -> bool {
+    pub fn contains_node(&self, node: Id<NT>) -> bool {
         self.live_nodes.is_live(node.index())
     }
 
-    /// Whether `edge` names an edge that has not been removed.
+    /// Whether `edge` names an edge the store still holds.
     #[must_use]
-    pub fn is_live_edge(&self, edge: Id<ET>) -> bool {
+    pub fn contains_edge(&self, edge: Id<ET>) -> bool {
         self.live_edges.is_live(edge.index())
     }
 
@@ -412,7 +429,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     ///
     /// Every live [`Id`] is below this, so it is the correct size for a
     /// node-indexed side table — and it is what the store reports as
-    /// [`DirectedGraphView::node_count`](crate::DirectedGraphView::node_count),
+    /// [`GraphView::node_bound`](crate::GraphView::node_bound),
     /// because an analysis sizing an array by that number must cover every
     /// identity the view yields.
     ///
@@ -424,13 +441,16 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// matters; [`is_compact`](Self::is_compact) says whether it would change
     /// anything.
     #[must_use]
-    pub fn node_slot_count(&self) -> usize {
+    pub fn node_bound(&self) -> usize {
         self.base_nodes.len() + self.delta_nodes.len()
     }
 
     /// The number of edge slots, removed edges included.
+    ///
+    /// The edge counterpart of [`node_bound`](Self::node_bound), and the
+    /// correct size for an edge-indexed side table.
     #[must_use]
-    pub fn edge_slot_count(&self) -> usize {
+    pub fn edge_bound(&self) -> usize {
         self.base_edges.len() + self.delta_edges.len()
     }
 
@@ -442,7 +462,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
 
     /// Iterate over every live node identity in ascending order.
     pub fn node_ids(&self) -> impl Iterator<Item = Id<NT>> + '_ {
-        (0..self.node_slot_count())
+        (0..self.node_bound())
             .filter(|&slot| self.live_nodes.is_live(slot))
             .map(Id::from_index)
     }
@@ -450,9 +470,14 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// Iterate over every live edge identity in ascending order, which is
     /// also insertion order.
     pub fn edge_ids(&self) -> impl Iterator<Item = Id<ET>> + '_ {
-        (0..self.edge_slot_count())
+        (0..self.edge_bound())
             .filter(|&slot| self.live_edges.is_live(slot))
             .map(Id::from_index)
+    }
+
+    /// Iterate over every live node payload in identity order.
+    pub fn nodes(&self) -> impl Iterator<Item = &N> + '_ {
+        self.node_ids().map(|node| self.node(node))
     }
 
     /// Iterate over every live edge record in insertion order.
@@ -460,9 +485,17 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         self.edge_ids().map(|edge| self.edge(edge))
     }
 
-    fn assert_live_endpoint(&self, node: Id<NT>, role: &str) {
+    /// One direction's incremental chains, which relocation detaches.
+    pub(crate) const fn chains_mut(&mut self, direction: TraversalDirection) -> &mut DeltaChains {
+        match direction {
+            TraversalDirection::Outgoing => &mut self.out_chains,
+            TraversalDirection::Incoming => &mut self.in_chains,
+        }
+    }
+
+    pub(super) fn assert_live_endpoint(&self, node: Id<NT>, role: &str) {
         assert!(
-            node.index() < self.node_slot_count(),
+            node.index() < self.node_bound(),
             "{role} node is out of range"
         );
         assert!(
@@ -471,7 +504,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         );
     }
 
-    fn retire_edge(&mut self, slot: usize) -> bool {
+    pub(super) fn retire_edge(&mut self, slot: usize) -> bool {
         if !self.live_edges.clear(slot) {
             return false;
         }
@@ -483,5 +516,21 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
 impl<N, E, NT: IdTag, ET: IdTag> Default for Graph<N, E, NT, ET> {
     fn default() -> Self {
         Self::tagged()
+    }
+}
+
+/// Node payloads are what `graph[id]` means.
+///
+/// Edges have no indexing counterpart: a node tag and an edge tag can be the
+/// same type, so two [`Index`](core::ops::Index) implementations would overlap. Reach an edge
+/// through [`edge`](Graph::edge), which returns the whole record.
+impl<N, E, NT: IdTag, ET: IdTag> core::ops::Index<Id<NT>> for Graph<N, E, NT, ET> {
+    type Output = N;
+
+    /// # Panics
+    ///
+    /// Panics when `node` names no slot in this store.
+    fn index(&self, node: Id<NT>) -> &Self::Output {
+        self.node(node)
     }
 }

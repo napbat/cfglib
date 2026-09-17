@@ -4,14 +4,14 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use crate::graph::directed::DirectedGraph;
 use crate::graph::dominator::DominatorTree;
-use crate::graph::edge_view::EdgeGraphView;
+use crate::graph::edge_view::EdgeView;
 use crate::graph::scc::tarjan_scc;
+use crate::graph::store::Graph;
 use crate::graph::traverse::{TraversalDirection, depth_first_preorder};
-use crate::graph::view::{DirectedGraphView, NodeGraphView, Rooted};
+use crate::graph::view::{GraphView, Rooted};
 
-use super::{Graph, Id, NodeId};
+use super::{Id, NodeId};
 
 mod model;
 
@@ -30,11 +30,8 @@ fn diamond() -> (Graph<&'static str, &'static str>, Vec<NodeId>) {
 }
 
 /// The same shape in the arena store, for view comparisons.
-fn arena_diamond() -> (
-    DirectedGraph<&'static str, &'static str>,
-    Vec<crate::NodeId>,
-) {
-    let mut graph = DirectedGraph::new();
+fn arena_diamond() -> (Graph<&'static str, &'static str>, Vec<crate::NodeId>) {
+    let mut graph = Graph::new();
     let nodes: Vec<_> = ["entry", "left", "right", "exit"]
         .into_iter()
         .map(|payload| graph.add_node(payload))
@@ -76,7 +73,7 @@ fn an_empty_store_has_nothing_and_is_already_compact() {
     assert!(graph.is_compact());
     assert_eq!(graph.node_count(), 0);
     assert_eq!(graph.edge_count(), 0);
-    assert_eq!(graph.node_slot_count(), 0);
+    assert_eq!(graph.node_bound(), 0);
     assert_eq!(graph.node_ids().count(), 0);
     assert_eq!(graph.edge_ids().count(), 0);
 
@@ -160,8 +157,8 @@ fn removing_a_node_removes_its_edges_in_both_directions() {
     assert_eq!(graph.predecessors(nodes[3]).collect::<Vec<_>>(), [nodes[2]]);
     assert!(graph.outgoing(nodes[1]).next().is_none());
     assert!(graph.incoming(nodes[1]).next().is_none());
-    assert!(!graph.is_live_node(nodes[1]));
-    assert!(graph.edge_ids().all(|edge| graph.is_live_edge(edge)));
+    assert!(!graph.contains_node(nodes[1]));
+    assert!(graph.edge_ids().all(|edge| graph.contains_edge(edge)));
 }
 
 #[test]
@@ -173,7 +170,7 @@ fn removing_an_edge_leaves_every_other_identity_alone() {
     assert!(!graph.remove_edge(Id::from_index(99)));
 
     assert_eq!(graph.edge_count(), 3);
-    assert_eq!(graph.edge_slot_count(), 4);
+    assert_eq!(graph.edge_bound(), 4);
     assert_eq!(graph.successors(nodes[0]).collect::<Vec<_>>(), [nodes[2]]);
     assert_eq!(graph.edge_ids().collect::<Vec<_>>(), edges[1..]);
     assert_eq!(graph.edge(edges[1]).payload(), &"b");
@@ -185,16 +182,16 @@ fn removed_payloads_stay_readable_until_compaction() {
     let edge = graph.edge_ids().next().expect("the diamond has edges");
     graph.remove_node(nodes[1]);
 
-    assert!(!graph.is_live_node(nodes[1]));
+    assert!(!graph.contains_node(nodes[1]));
     assert_eq!(graph.node(nodes[1]), &"left");
-    assert!(!graph.is_live_edge(edge));
+    assert!(!graph.contains_edge(edge));
     assert_eq!(graph.edge(edge).payload(), &"a");
 
     let renumbering = graph.compact();
     assert_eq!(renumbering.node(nodes[1]), None);
     assert_eq!(renumbering.edge(edge), None);
-    assert_eq!(graph.node_slot_count(), 3);
-    assert_eq!(graph.edge_slot_count(), 2);
+    assert_eq!(graph.node_bound(), 3);
+    assert_eq!(graph.edge_bound(), 2);
 }
 
 #[test]
@@ -215,8 +212,8 @@ fn compacting_an_untouched_store_is_the_identity() {
     let (mut graph, _) = diamond();
     let first = graph.compact();
     assert!(first.is_identity());
-    assert_eq!(first.node_slot_count(), 4);
-    assert_eq!(first.edge_slot_count(), 4);
+    assert_eq!(first.node_bound(), 4);
+    assert_eq!(first.edge_bound(), 4);
 
     let second = graph.compact();
     assert!(second.is_identity());
@@ -255,7 +252,7 @@ fn composed_renumberings_match_the_two_compactions_they_describe() {
         graph.node(composed.node(nodes[3]).expect("exit is still present")),
         &"exit"
     );
-    assert_eq!(composed.node_slot_count(), 4);
+    assert_eq!(composed.node_bound(), 4);
 }
 
 #[test]
@@ -263,18 +260,17 @@ fn the_view_reports_slots_so_dense_analyses_stay_in_bounds() {
     let (mut graph, nodes) = diamond();
     graph.remove_node(nodes[1]);
 
-    assert_eq!(DirectedGraphView::node_count(&graph), 4);
+    assert_eq!(GraphView::node_bound(&graph), 4);
     assert_eq!(graph.node_count(), 3);
-    assert!(graph.node_ids().count() < DirectedGraphView::node_count(&graph));
+    assert_eq!(graph.node_ids().count(), 3);
 
-    // The removed slot is an isolated node of the view, exactly as
-    // `node_slot_count` documents: a whole-graph partition sees it.
+    // A removed node is not a node of the view at all, so a whole-graph
+    // partition reports no phantom singleton for it.
     let uncompacted = tarjan_scc(&graph);
-    assert_eq!(uncompacted.components.len(), 4);
-    assert_eq!(uncompacted.component(nodes[1]).nodes.len(), 1);
+    assert_eq!(uncompacted.components.len(), 3);
 
     graph.compact();
-    assert_eq!(DirectedGraphView::node_count(&graph), 3);
+    assert_eq!(GraphView::node_bound(&graph), 3);
     assert_eq!(tarjan_scc(&graph).components.len(), 3);
 }
 
@@ -284,17 +280,17 @@ fn the_edge_view_exposes_live_edges_and_their_endpoints() {
     let edges: Vec<_> = graph.edge_ids().collect();
     graph.remove_edge(edges[0]);
 
-    assert_eq!(EdgeGraphView::edge_slot_count(&graph), 4);
+    assert_eq!(EdgeView::edge_bound(&graph), 4);
     assert_eq!(graph.edge_ids().count(), 3);
     assert_eq!(
-        EdgeGraphView::outgoing_edges(&graph, nodes[0]).collect::<Vec<_>>(),
+        EdgeView::outgoing(&graph, nodes[0]).collect::<Vec<_>>(),
         [edges[1]]
     );
-    let reference = graph.edge_ref(edges[1]);
+    let reference = graph.edge(edges[1]);
     assert_eq!(reference.source(), nodes[0]);
     assert_eq!(reference.target(), nodes[2]);
-    assert_eq!(reference.data(), &"b");
-    assert_eq!(graph.node_ref(nodes[0]), &"entry");
+    assert_eq!(reference.payload(), &"b");
+    assert_eq!(graph.node(nodes[0]), &"entry");
 }
 
 #[test]
@@ -303,7 +299,9 @@ fn the_edge_view_refuses_a_removed_edge() {
     let (mut graph, _) = diamond();
     let edge = graph.edge_ids().next().expect("the diamond has edges");
     graph.remove_edge(edge);
-    let _ = graph.edge_ref(edge);
+    // The inherent accessor keeps the record readable; the view does not.
+    assert_eq!(graph.edge(edge).payload(), &"a");
+    let _ = EdgeView::edge(&graph, edge);
 }
 
 #[test]

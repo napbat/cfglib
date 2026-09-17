@@ -1,5 +1,5 @@
-//! Arena storage against the incrementally compacted store, at the scale the
-//! store exists for: a whole-codebase symbol graph.
+//! The incrementally compacted store at the scale it exists for: a
+//! whole-codebase symbol graph.
 //!
 //! The benchmark has the same two builds as `benches/performance`. The
 //! default build installs `System` directly and reports wall-clock time;
@@ -12,10 +12,10 @@
 //! $env:RUSTFLAGS = "--cfg cfglib_bench_alloc"; cargo bench -p cfglib --bench graph-store
 //! ```
 //!
-//! Both stores are built from one shuffled edge list so neither sees an
-//! adjacency order the other does not, and the degree distribution is skewed
-//! the way a real symbol graph's is: one percent of the nodes carry a hundred
-//! edges each.
+//! The store is built from one shuffled edge list, so no phase sees the
+//! grouped-by-source arrival order a compressed index would find unfairly
+//! easy, and the degree distribution is skewed the way a real symbol graph's
+//! is: one percent of the nodes carry a hundred edges each.
 
 use std::alloc::System;
 #[cfg(cfglib_bench_alloc)]
@@ -25,8 +25,7 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use cfglib::graph::directed::DirectedGraph;
-use cfglib::graph::store::Graph;
+use cfglib::{Graph, Id};
 
 #[cfg(cfglib_bench_alloc)]
 struct CountingAllocator;
@@ -207,44 +206,15 @@ fn append_list(rng: &mut Rng) -> Vec<(u32, u32)> {
         .collect()
 }
 
-fn build_arena(edges: &[(u32, u32)]) -> DirectedGraph<u32, ()> {
-    let mut graph = DirectedGraph::with_capacity(NODES, edges.len());
-    for node in 0..NODES {
-        graph.add_node(u32::try_from(node).expect("node index fits in u32"));
-    }
-    for &(source, target) in edges {
-        graph.add_edge(
-            cfglib::NodeId::from_raw(source),
-            cfglib::NodeId::from_raw(target),
-            (),
-        );
-    }
-    graph
-}
-
 fn build_store(edges: &[(u32, u32)]) -> Graph<u32, ()> {
     let mut graph = Graph::with_capacity(NODES, edges.len());
     for node in 0..NODES {
         graph.add_node(u32::try_from(node).expect("node index fits in u32"));
     }
     for &(source, target) in edges {
-        graph.add_edge(
-            cfglib::Id::from_raw(source),
-            cfglib::Id::from_raw(target),
-            (),
-        );
+        graph.add_edge(Id::from_raw(source), Id::from_raw(target), ());
     }
     graph
-}
-
-fn scan_arena(graph: &DirectedGraph<u32, ()>) -> usize {
-    let mut total = 0_usize;
-    for node in graph.node_ids() {
-        for successor in graph.successors(node) {
-            total = total.wrapping_add(successor.index());
-        }
-    }
-    total
 }
 
 fn scan_store(graph: &Graph<u32, ()>) -> usize {
@@ -255,19 +225,6 @@ fn scan_store(graph: &Graph<u32, ()>) -> usize {
         }
     }
     total
-}
-
-/// The arena's only way back to a compact representation: build a
-/// replacement, which is what its documentation tells consumers to do.
-fn rebuild_arena(graph: &DirectedGraph<u32, ()>) -> DirectedGraph<u32, ()> {
-    let mut rebuilt = DirectedGraph::with_capacity(graph.node_count(), graph.edge_count());
-    for node in graph.node_ids() {
-        rebuilt.add_node(*graph.node(node));
-    }
-    for edge in graph.edges() {
-        rebuilt.add_edge(edge.source(), edge.target(), ());
-    }
-    rebuilt
 }
 
 /// Milliseconds to one decimal place, computed in integers so the report
@@ -319,35 +276,6 @@ fn fastest(runs: Vec<Vec<(&'static str, Sample)>>) -> Vec<(&'static str, Sample)
     best.take().expect("at least one run")
 }
 
-fn run_arena(edges: &[(u32, u32)], appends: &[(u32, u32)]) -> Vec<(&'static str, Sample)> {
-    let (mut graph, build) = measure(|| build_arena(edges));
-    let (total, scan) = measure(|| scan_arena(&graph));
-    assert!(total > 0, "the scan must observe the whole graph");
-
-    let (_, incremental) = measure(|| {
-        for &(source, target) in appends {
-            graph.add_edge(
-                cfglib::NodeId::from_raw(source),
-                cfglib::NodeId::from_raw(target),
-                (),
-            );
-        }
-        scan_arena(&graph)
-    });
-
-    let (rebuilt, compaction) = measure(|| rebuild_arena(&graph));
-    assert_eq!(rebuilt.edge_count(), graph.edge_count());
-    graph = rebuilt;
-    let ((), teardown) = measure(move || drop(graph));
-    vec![
-        ("build", build),
-        ("successor_scan", scan),
-        ("append_and_scan", incremental),
-        ("compact", compaction),
-        ("footprint", footprint(teardown)),
-    ]
-}
-
 fn run_store(edges: &[(u32, u32)], appends: &[(u32, u32)]) -> Vec<(&'static str, Sample)> {
     let (mut graph, build) = measure(|| build_store(edges));
     // The renumbering is dropped inside the measured region so the phase
@@ -359,11 +287,7 @@ fn run_store(edges: &[(u32, u32)], appends: &[(u32, u32)]) -> Vec<(&'static str,
 
     let (_, incremental) = measure(|| {
         for &(source, target) in appends {
-            graph.add_edge(
-                cfglib::Id::from_raw(source),
-                cfglib::Id::from_raw(target),
-                (),
-            );
+            graph.add_edge(Id::from_raw(source), Id::from_raw(target), ());
         }
         scan_store(&graph)
     });
@@ -400,8 +324,6 @@ fn main() {
         edges.len()
     );
 
-    let arena = fastest((0..REPEATS).map(|_| run_arena(&edges, &appends)).collect());
     let store = fastest((0..REPEATS).map(|_| run_store(&edges, &appends)).collect());
-    report("DirectedGraph", &arena);
     report("Graph", &store);
 }

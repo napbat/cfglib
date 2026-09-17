@@ -80,11 +80,7 @@ pub fn linearize<I: Clone>(
 ) -> Vec<LinearInst<I>> {
     let sorted: Vec<BlockId> = match order {
         BlockOrder::ReversePostorder => cfg.reverse_postorder(),
-        BlockOrder::AllocationOrder => cfg
-            .blocks()
-            .iter()
-            .map(super::super::block::BasicBlock::id)
-            .collect(),
+        BlockOrder::AllocationOrder => cfg.block_ids().collect(),
         BlockOrder::Custom(ids) => ids,
     };
 
@@ -118,11 +114,7 @@ pub fn linearize<I: Clone>(
             None
         };
 
-        let succ_edges: Vec<_> = cfg
-            .successor_edges(id)
-            .iter()
-            .map(|&eid| cfg.edge(eid))
-            .collect();
+        let succ_edges: Vec<_> = cfg.outgoing(id).map(|eid| cfg.edge(eid)).collect();
 
         emit_tail_jump(cfg, id, &succ_edges, next_in_layout, emitter, &mut out);
     }
@@ -144,7 +136,7 @@ fn is_fallthrough_kind(kind: EdgeKind) -> bool {
 fn emit_tail_jump<I: Clone>(
     cfg: &Cfg<I>,
     id: BlockId,
-    succ_edges: &[&crate::edge::Edge],
+    succ_edges: &[crate::CfgEdge<'_, ()>],
     next_in_layout: Option<BlockId>,
     emitter: &dyn Emitter<I>,
     out: &mut Vec<LinearInst<I>>,

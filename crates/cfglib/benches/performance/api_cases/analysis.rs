@@ -158,11 +158,7 @@ fn register_expressions_and_ast(suite: &mut BenchmarkSuite<'_>) {
     );
 
     let mut predicated = dataflow_cfg(BLOCK_COUNT, INSTRUCTIONS_PER_BLOCK);
-    let block_ids: Vec<_> = predicated
-        .blocks()
-        .iter()
-        .map(cfglib::BasicBlock::id)
-        .collect();
+    let block_ids: Vec<_> = predicated.block_ids().collect();
     for block in block_ids {
         for instruction in predicated.block_mut(block).instructions_mut() {
             instruction.uses.push(0);

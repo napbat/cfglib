@@ -19,6 +19,6 @@ pub use query::{
     ScopeResolutionStats,
 };
 pub use storage::{
-    Scope, ScopeDatum, ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeId, ScopeReference,
-    ScopeReferenceId,
+    Scope, ScopeDatum, ScopeDatumId, ScopeEdgeId, ScopeEdgeTag, ScopeGraph, ScopeId,
+    ScopeReference, ScopeReferenceId, ScopeTag,
 };

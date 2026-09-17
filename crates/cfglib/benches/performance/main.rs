@@ -10,15 +10,14 @@ use std::time::Duration;
 use std::time::Instant;
 
 use cfglib::{
-    BlockId, Cfg, CfgBuilder, CommonAncestor, ConstValue, ConstantFolder, DenseNodeId,
-    DirectedGraph, Direction, DominanceFrontiers, DominatorTree, EdgeKind, EdgeStep, Facts,
-    FlowControl, FlowEffect, InstrInfo, IntervalAnalysis, NaturalLoop, NodeFacts, NodeId,
-    NodeProblem, PhiPlacements, Problem, ProgramPoint, Rooted, SccDecomposition, SccpAnalysis,
-    SsaForm, SsaValue, TraversalDirection, ValueNumberInfo, ValueNumbering, breadth_first,
-    breadth_first_edges, common_ancestors, constant_propagation, contract_edge,
-    control_dependence_graph, depth_first_preorder, detect_loops, merge_blocks,
-    nearest_common_ancestor, remove_empty_blocks, shortest_path, shortest_path_edges,
-    solve_node_problem, solve_problem, tarjan_scc,
+    BlockId, Cfg, CfgBuilder, CommonAncestor, ConstValue, ConstantFolder, DenseId, Direction,
+    DominanceFrontiers, DominatorTree, EdgeKind, EdgeStep, Facts, FlowControl, FlowEffect, Graph,
+    InstrInfo, IntervalAnalysis, NaturalLoop, NodeFacts, NodeId, NodeProblem, PhiPlacements,
+    Problem, ProgramPoint, Rooted, SccDecomposition, SccpAnalysis, SsaForm, SsaValue,
+    TraversalDirection, ValueNumberInfo, ValueNumbering, breadth_first, breadth_first_edges,
+    common_ancestors, constant_propagation, contract_edge, control_dependence_graph,
+    depth_first_preorder, detect_loops, merge_blocks, nearest_common_ancestor, remove_empty_blocks,
+    shortest_path, shortest_path_edges, solve_node_problem, solve_problem, tarjan_scc,
 };
 
 mod analysis_oracles;
@@ -206,7 +205,7 @@ fn main() {
     bench!(
         "directed_build_branchy",
         || branchy_graph(NODE_COUNT),
-        |result: &DirectedGraph<(), ()>| assert_branchy_graph(result, NODE_COUNT)
+        |result: &Graph<(), ()>| assert_branchy_graph(result, NODE_COUNT)
     );
     bench!(
         "cfg_depth_first_preorder",
@@ -258,7 +257,7 @@ fn main() {
             )
             .expect("fixture target is reachable")
         },
-        |result: &Vec<cfglib::graph::directed::EdgeId>| assert_edge_path(
+        |result: &Vec<cfglib::EdgeId>| assert_edge_path(
             result,
             &graph,
             NodeId::from_raw(0),
@@ -336,7 +335,7 @@ fn main() {
     bench!(
         "cfg_control_dependence_graph",
         || { control_dependence_graph(&cfg, &cfg_post_dominators) },
-        |result: &DirectedGraph<BlockId, ()>| assert_control_dependence_graph(
+        |result: &Graph<BlockId, ()>| assert_control_dependence_graph(
             result,
             &cfg,
             &cfg_post_dominators,
@@ -536,8 +535,9 @@ fn main() {
                 &(0..fixture_u32(NODE_COUNT) / 2).collect::<Vec<_>>()
             );
             assert!(
-                result.blocks()[1..]
-                    .iter()
+                result
+                    .blocks()
+                    .skip(1)
                     .all(|block| block.instructions().is_empty())
             );
         }

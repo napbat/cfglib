@@ -7,7 +7,6 @@
 //! than consuming structured markers.
 
 pub mod address;
-pub mod structured;
 
 extern crate alloc;
 use alloc::collections::BTreeMap;
@@ -103,16 +102,8 @@ struct BuildState<I> {
 
 impl<I: FlowControl> BuildState<I> {
     fn new() -> Self {
-        let mut cfg = Cfg {
-            blocks: Vec::new(),
-            edges: Vec::new(),
-            succs: Vec::new(),
-            preds: Vec::new(),
-            entry: BlockId(0),
-            regions: Vec::new(),
-            cleanups: Vec::new(),
-        };
-        let current = cfg.new_block();
+        let cfg = Cfg::new();
+        let current = cfg.entry();
         Self {
             cfg,
             current,
@@ -230,9 +221,8 @@ impl<I: FlowControl> BuildState<I> {
         }
         let has_alternate = self
             .cfg
-            .successor_edges(pre_block)
-            .iter()
-            .any(|&edge| self.cfg.edge(edge).kind() == EdgeKind::ConditionalFalse);
+            .outgoing(pre_block)
+            .any(|edge| self.cfg.edge(edge).kind() == EdgeKind::ConditionalFalse);
         if !has_alternate {
             self.cfg
                 .add_edge(pre_block, merge, EdgeKind::ConditionalFalse);
@@ -490,15 +480,14 @@ impl CfgBuilder {
     /// Remove empty blocks at the end that have no predecessors (dead code
     /// artefacts from the builder).
     fn trim_trailing_empty<I>(cfg: &mut Cfg<I>) {
-        while cfg.blocks.len() > 1 {
-            let last = BlockId::from_index(cfg.blocks.len() - 1);
-            if cfg.block(last).is_empty() && cfg.predecessor_edges(last).is_empty() {
-                cfg.blocks.pop();
-                cfg.succs.pop();
-                cfg.preds.pop();
-            } else {
+        while let Some(last) = cfg.block_ids().last() {
+            if last == cfg.entry()
+                || !cfg.block(last).is_empty()
+                || cfg.incoming(last).next().is_some()
+            {
                 break;
             }
+            cfg.remove_block(last);
         }
     }
 }
@@ -529,11 +518,12 @@ pub struct JumpResolution<T> {
 /// uniqueness before building.
 pub fn resolve_jump_edges<I: JumpTargets>(cfg: &mut Cfg<I>) -> JumpResolution<I::Target> {
     let mut labels: BTreeMap<I::Target, BlockId> = BTreeMap::new();
-    for block in cfg.blocks() {
+    for block_id in cfg.block_ids() {
+        let block = cfg.block(block_id);
         if let Some(first) = block.instructions().first() {
             if first.flow_effect() == FlowEffect::Label {
                 if let Some(token) = first.label() {
-                    labels.insert(token, block.id());
+                    labels.insert(token, block_id);
                 }
             }
         }
@@ -544,7 +534,8 @@ pub fn resolve_jump_edges<I: JumpTargets>(cfg: &mut Cfg<I>) -> JumpResolution<I:
         resolved: 0,
         unresolved: Vec::new(),
     };
-    for block in cfg.blocks() {
+    for block_id in cfg.block_ids() {
+        let block = cfg.block(block_id);
         let Some(last) = block.instructions().last() else {
             continue;
         };
@@ -557,17 +548,16 @@ pub fn resolve_jump_edges<I: JumpTargets>(cfg: &mut Cfg<I>) -> JumpResolution<I:
             continue;
         };
         if let Some(&target) = labels.get(&token) {
-            pending.push((block.id(), target, kind));
+            pending.push((block_id, target, kind));
         } else {
-            resolution.unresolved.push((block.id(), token));
+            resolution.unresolved.push((block_id, token));
         }
     }
 
     for (source, target, kind) in pending {
         let already_wired = cfg
-            .successor_edges(source)
-            .iter()
-            .any(|&edge| cfg.edge(edge).target() == target && cfg.edge(edge).kind() == kind);
+            .outgoing(source)
+            .any(|edge| cfg.edge(edge).target() == target && cfg.edge(edge).kind() == kind);
         if !already_wired {
             cfg.add_edge(source, target, kind);
             resolution.resolved += 1;

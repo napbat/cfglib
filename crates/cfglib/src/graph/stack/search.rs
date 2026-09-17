@@ -204,7 +204,7 @@ impl<S: Clone + Eq> StackResolution<S> {
                 .max_path_length
                 .is_some_and(|limit| path.len() >= limit);
             let mut extensions = Vec::new();
-            for edge in graph.outgoing_edges(path.end()) {
+            for edge in graph.outgoing(path.end()) {
                 if path.contains_edge(edge) {
                     stats.cycle_cut_count += 1;
                     continue;
@@ -271,7 +271,7 @@ impl<S: Clone + Eq> StackResolution<S> {
                 .max_path_length
                 .is_some_and(|limit| path.len() >= limit);
             let mut next = None;
-            for edge in graph.outgoing_edges(path.end()) {
+            for edge in graph.outgoing(path.end()) {
                 if path.contains_edge(edge) {
                     stats.cycle_cut_count += 1;
                     continue;
@@ -400,7 +400,7 @@ impl<S: Clone + Eq> StackResolutionIndex<S> {
     #[must_use]
     pub fn compute<F, N, E>(graph: &StackGraph<F, S, N, E>, config: StackSearchConfig) -> Self {
         let resolutions = graph
-            .live_node_ids()
+            .node_ids()
             .filter(|&node| graph.node(node).kind().is_reference())
             .map(|reference| StackResolution::compute(graph, reference, config))
             .collect();
@@ -417,7 +417,7 @@ impl<S: Clone + Eq> StackResolutionIndex<S> {
         config: StackSearchConfig,
     ) -> Result<Self, StackLinearResolutionError> {
         let resolutions = graph
-            .live_node_ids()
+            .node_ids()
             .filter(|&node| graph.node(node).kind().is_reference())
             .map(|reference| StackResolution::try_compute_linear(graph, reference, config))
             .collect::<Result<Vec<_>, _>>()?;
@@ -428,8 +428,8 @@ impl<S: Clone + Eq> StackResolutionIndex<S> {
         graph: &StackGraph<F, S, N, E>,
         resolutions: Vec<StackResolution<S>>,
     ) -> Self {
-        let mut resolution_by_node = vec![None; graph.node_count()];
-        let mut references_by_definition = vec![Vec::new(); graph.node_count()];
+        let mut resolution_by_node = vec![None; graph.node_bound()];
+        let mut references_by_definition = vec![Vec::new(); graph.node_bound()];
         for (index, resolution) in resolutions.iter().enumerate() {
             let reference = resolution.reference();
             resolution_by_node[reference.index()] = Some(index);
@@ -487,7 +487,7 @@ impl StackReverseIndex {
     ) -> Self {
         let mut index = Self::empty(graph);
         for reference in graph
-            .live_node_ids()
+            .node_ids()
             .filter(|&node| graph.node(node).kind().is_reference())
         {
             let resolution = StackResolution::compute(graph, reference, config);
@@ -508,7 +508,7 @@ impl StackReverseIndex {
     ) -> Result<Self, StackLinearResolutionError> {
         let mut index = Self::empty(graph);
         for reference in graph
-            .live_node_ids()
+            .node_ids()
             .filter(|&node| graph.node(node).kind().is_reference())
         {
             let resolution = StackResolution::try_compute_linear(graph, reference, config)?;
@@ -519,7 +519,7 @@ impl StackReverseIndex {
 
     fn empty<F, S, N, E>(graph: &StackGraph<F, S, N, E>) -> Self {
         Self {
-            references_by_definition: vec![Vec::new(); graph.node_count()],
+            references_by_definition: vec![Vec::new(); graph.node_bound()],
         }
     }
 

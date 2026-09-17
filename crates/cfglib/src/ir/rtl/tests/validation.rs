@@ -243,7 +243,7 @@ fn an_empty_terminal_block_lifts_as_an_unresolved_exit() {
     let function = lifting.builder.finish().expect("the MLIL exit is valid");
 
     assert!(function.cfg().block(lifted_unresolved).is_empty());
-    assert!(function.cfg().successor_edges(lifted_unresolved).is_empty());
+    assert!(function.cfg().outgoing(lifted_unresolved).next().is_none());
 }
 
 /// A block without statements that continues on one edge is a trampoline:
@@ -272,7 +272,7 @@ fn an_empty_forwarding_block_lifts_as_a_trampoline() {
         .finish()
         .expect("an empty block with one continuation is valid MLIL");
     assert!(function.cfg().block(lifted_forwarding).is_empty());
-    assert_eq!(function.cfg().successor_edges(lifted_forwarding).len(), 1);
+    assert_eq!(function.cfg().outgoing(lifted_forwarding).count(), 1);
 }
 
 /// An empty block cannot decide between successors: that takes a branch.

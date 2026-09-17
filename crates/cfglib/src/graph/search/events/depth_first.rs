@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
 use crate::graph::traverse::{Adjacency, TraversalDirection, by_axis};
-use crate::graph::view::{DenseNodeId, DirectedGraphView};
+use crate::graph::view::{DenseId, GraphView};
 
 /// An event of a [`depth_first_events`] walk.
 ///
@@ -97,10 +97,10 @@ enum Color {
 /// ```
 /// use core::ops::ControlFlow;
 ///
-/// use cfglib::{DfsEvent, DirectedGraph, TraversalDirection, depth_first_events};
+/// use cfglib::{DfsEvent, Graph, TraversalDirection, depth_first_events};
 ///
 /// // a -> b -> c -> a, plus a chord a -> c.
-/// let mut graph = DirectedGraph::<&str, ()>::new();
+/// let mut graph = Graph::<&str, ()>::new();
 /// let a = graph.add_node("a");
 /// let b = graph.add_node("b");
 /// let c = graph.add_node("c");
@@ -130,7 +130,7 @@ enum Color {
 ///
 /// Panics when `start` is not a node in `graph`.
 #[must_use]
-pub fn depth_first_events<G: DirectedGraphView, B>(
+pub fn depth_first_events<G: GraphView, B>(
     graph: &G,
     start: G::NodeId,
     direction: TraversalDirection,
@@ -139,18 +139,18 @@ pub fn depth_first_events<G: DirectedGraphView, B>(
     by_axis!(direction, depth_first_events_from(graph, start, on_event))
 }
 
-fn depth_first_events_from<G: DirectedGraphView, A: Adjacency, B>(
+fn depth_first_events_from<G: GraphView, A: Adjacency, B>(
     axis: A,
     graph: &G,
     start: G::NodeId,
     mut on_event: impl FnMut(DfsEvent<G::NodeId>) -> ControlFlow<B>,
 ) -> Option<B> {
     assert!(
-        start.index() < graph.node_count(),
+        start.index() < graph.node_bound(),
         "start node is out of range"
     );
 
-    let mut color = vec![Color::White; graph.node_count()];
+    let mut color = vec![Color::White; graph.node_bound()];
     // Every frame's successors, appended as the frame is pushed and truncated
     // away as it pops. The top frame owns `arena[frame.start..]`.
     let mut arena: Vec<G::NodeId> = Vec::new();

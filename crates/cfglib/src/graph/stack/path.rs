@@ -199,16 +199,17 @@ impl<S: Clone + Eq> StackPath<S> {
         if !graph.contains_edge(edge) {
             return Err(StackPathError::UnknownEdge(edge));
         }
-        let edge_ref = graph.edge(edge);
-        if edge_ref.source() != self.end {
+        let stored = graph.edge(edge);
+        if stored.source() != self.end {
             return Err(StackPathError::IncorrectSource {
                 expected: self.end,
-                actual: edge_ref.source(),
+                actual: stored.source(),
             });
         }
 
-        self.apply_node(graph, edge_ref.target())?;
-        self.end = edge_ref.target();
+        let target = stored.target();
+        self.apply_node(graph, target)?;
+        self.end = target;
         self.steps.push(StackPathStep::Edge(edge));
         self.edge_count += 1;
         if graph.node(self.end).kind().is_jump_to_scope() {

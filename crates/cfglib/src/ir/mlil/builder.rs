@@ -20,7 +20,7 @@ pub struct FunctionBuilder<D: Dialect> {
     variables: Vec<Variable<D>>,
     signature: Signature<D>,
     provenance: ProvenanceMap<D>,
-    instruction_points: Vec<ProgramPoint>,
+    instruction_points: Vec<Option<ProgramPoint>>,
 }
 
 impl<D: Dialect> FunctionBuilder<D> {
@@ -169,9 +169,9 @@ impl<D: Dialect> FunctionBuilder<D> {
 
     /// Mirrors the source block skeleton so rebuilt identities match.
     pub(super) fn copy_blocks(&mut self, source: &Cfg<Instruction<D>, D::Edge>) {
-        for block in source.blocks().iter().skip(1) {
-            let rebuilt = self.new_block(block.label().unwrap_or(""));
-            debug_assert_eq!(rebuilt, block.id());
+        for block_id in source.block_ids().skip(1) {
+            let rebuilt = self.new_block(source.block(block_id).label().unwrap_or(""));
+            debug_assert_eq!(rebuilt, block_id);
         }
     }
 
@@ -273,7 +273,7 @@ impl<D: Dialect> FunctionBuilder<D> {
         self.cfg
             .block_mut(block)
             .push(Instruction::new(id, operation, uses, defs, may_throw));
-        self.instruction_points.push(point);
+        self.instruction_points.push(Some(point));
         if let Some(span) = source {
             self.provenance.insert(span, EntityId::Instruction(id))?;
         }

@@ -1,35 +1,43 @@
-//! [`KeyedGraph`]: a [`DirectedGraph`] whose nodes are minted from sparse
-//! consumer keys.
+//! [`KeyedGraph`]: a [`Graph`] whose nodes are minted from sparse consumer
+//! keys.
 //!
-//! The dense-identity contract ([`DenseNodeId`](super::view::DenseNodeId)) is what keeps the
-//! algorithms allocation-lean, but consumer graphs are usually keyed by
-//! sparse identities (symbol ids, paths, coordinates). Every adopter ends
-//! up writing the same `BTreeMap<K, NodeId>` interner; this wraps that once
-//! and stays a plain [`DirectedGraph`] underneath — the view impl and
+//! The dense-identity contract ([`DenseId`](super::view::DenseId)) is what
+//! keeps the algorithms allocation-lean, but consumer graphs are usually
+//! keyed by sparse identities (symbol ids, paths, coordinates). Every adopter
+//! ends up writing the same `BTreeMap<K, NodeId>` interner; this wraps that
+//! once and stays a plain [`Graph`] underneath — the view impls and
 //! [`graph`](KeyedGraph::graph)/[`into_parts`](KeyedGraph::into_parts)
 //! expose it, so every algorithm in the crate applies unchanged.
 
 extern crate alloc;
 use alloc::collections::BTreeMap;
 
-use super::directed::{DirectedGraph, EdgeId, NodeId};
-use super::edge_view::{EdgeGraphView, EdgeRef};
-use super::view::{DirectedGraphView, NodeGraphView};
+use super::edge_view::{EdgeRef, EdgeView};
+use super::store::{EdgeId, Graph, NodeId};
+use super::view::{GraphView, NodeView};
 
 /// A directed multigraph keyed by a consumer identity `K`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "serde",
+    serde(bound(
+        serialize = "K: serde::Serialize + Ord, N: serde::Serialize, E: serde::Serialize",
+        deserialize = "K: serde::Deserialize<'de> + Ord, N: serde::Deserialize<'de>, \
+                       E: serde::Deserialize<'de>"
+    ))
+)]
 pub struct KeyedGraph<K: Ord, N, E> {
-    graph: DirectedGraph<N, E>,
+    graph: Graph<N, E>,
     ids: BTreeMap<K, NodeId>,
 }
 
 impl<K: Clone + Ord, N, E> KeyedGraph<K, N, E> {
     /// Create an empty keyed graph.
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
-            graph: DirectedGraph::new(),
+            graph: Graph::new(),
             ids: BTreeMap::new(),
         }
     }
@@ -69,12 +77,12 @@ impl<K: Clone + Ord, N, E> KeyedGraph<K, N, E> {
 
     /// Borrow the underlying graph (for algorithms and payload access).
     #[must_use]
-    pub const fn graph(&self) -> &DirectedGraph<N, E> {
+    pub const fn graph(&self) -> &Graph<N, E> {
         &self.graph
     }
 
     /// Mutably borrow the underlying graph.
-    pub const fn graph_mut(&mut self) -> &mut DirectedGraph<N, E> {
+    pub const fn graph_mut(&mut self) -> &mut Graph<N, E> {
         &mut self.graph
     }
 
@@ -85,7 +93,7 @@ impl<K: Clone + Ord, N, E> KeyedGraph<K, N, E> {
 
     /// Consume the wrapper, returning the graph and the key table.
     #[must_use]
-    pub fn into_parts(self) -> (DirectedGraph<N, E>, BTreeMap<K, NodeId>) {
+    pub fn into_parts(self) -> (Graph<N, E>, BTreeMap<K, NodeId>) {
         (self.graph, self.ids)
     }
 }
@@ -105,11 +113,15 @@ impl<K: Clone + Ord, N, E> Default for KeyedGraph<K, N, E> {
     }
 }
 
-impl<K: Ord, N, E> DirectedGraphView for KeyedGraph<K, N, E> {
+impl<K: Ord, N, E> GraphView for KeyedGraph<K, N, E> {
     type NodeId = NodeId;
 
-    fn node_count(&self) -> usize {
-        self.graph.node_count()
+    fn node_bound(&self) -> usize {
+        self.graph.node_bound()
+    }
+
+    fn node_ids(&self) -> impl Iterator<Item = Self::NodeId> + '_ {
+        self.graph.node_ids()
     }
 
     fn successors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
@@ -121,36 +133,36 @@ impl<K: Ord, N, E> DirectedGraphView for KeyedGraph<K, N, E> {
     }
 }
 
-impl<K: Ord, N, E> NodeGraphView for KeyedGraph<K, N, E> {
+impl<K: Ord, N, E> NodeView for KeyedGraph<K, N, E> {
     type NodeData = N;
 
-    fn node_ref(&self, node: Self::NodeId) -> &Self::NodeData {
+    fn node(&self, node: Self::NodeId) -> &Self::NodeData {
         self.graph.node(node)
     }
 }
 
-impl<K: Ord, N, E> EdgeGraphView for KeyedGraph<K, N, E> {
+impl<K: Ord, N, E> EdgeView for KeyedGraph<K, N, E> {
     type EdgeId = EdgeId;
     type EdgeData = E;
 
-    fn edge_slot_count(&self) -> usize {
-        EdgeGraphView::edge_slot_count(&self.graph)
+    fn edge_bound(&self) -> usize {
+        self.graph.edge_bound()
     }
 
     fn edge_ids(&self) -> impl Iterator<Item = EdgeId> + '_ {
-        EdgeGraphView::edge_ids(&self.graph)
+        self.graph.edge_ids()
     }
 
-    fn outgoing_edges(&self, node: NodeId) -> impl Iterator<Item = EdgeId> + '_ {
-        EdgeGraphView::outgoing_edges(&self.graph, node)
+    fn outgoing(&self, node: NodeId) -> impl Iterator<Item = EdgeId> + '_ {
+        self.graph.outgoing(node)
     }
 
-    fn incoming_edges(&self, node: NodeId) -> impl Iterator<Item = EdgeId> + '_ {
-        EdgeGraphView::incoming_edges(&self.graph, node)
+    fn incoming(&self, node: NodeId) -> impl Iterator<Item = EdgeId> + '_ {
+        self.graph.incoming(node)
     }
 
-    fn edge_ref(&self, edge: EdgeId) -> EdgeRef<'_, NodeId, EdgeId, E> {
-        EdgeGraphView::edge_ref(&self.graph, edge)
+    fn edge(&self, edge: EdgeId) -> EdgeRef<'_, NodeId, EdgeId, E> {
+        EdgeView::edge(&self.graph, edge)
     }
 }
 

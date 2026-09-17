@@ -1,6 +1,6 @@
 use super::{
-    BTreeMap, BlockId, Cfg, CfgBuilder, ConstantFolder, DirectedGraph, Direction, EdgeKind,
-    FlowControl, FlowEffect, InstrInfo, NodeId, NodeProblem, Problem, ValueNumberInfo,
+    BTreeMap, BlockId, Cfg, CfgBuilder, ConstantFolder, Direction, EdgeKind, FlowControl,
+    FlowEffect, Graph, InstrInfo, NodeId, NodeProblem, Problem, ValueNumberInfo,
 };
 
 pub(super) fn fixture_u32(value: usize) -> u32 {
@@ -40,10 +40,10 @@ pub(super) fn branchy_cfg(node_count: usize) -> Cfg<u32> {
     cfg
 }
 
-pub(super) fn branchy_graph(node_count: usize) -> DirectedGraph<(), ()> {
+pub(super) fn branchy_graph(node_count: usize) -> Graph<(), ()> {
     assert!(node_count > 0);
     let edge_capacity = node_count * 2 + node_count / 32;
-    let mut graph = DirectedGraph::with_capacity(node_count, edge_capacity);
+    let mut graph = Graph::with_capacity(node_count, edge_capacity);
     let nodes: Vec<_> = (0..node_count).map(|_| graph.add_node(())).collect();
     for index in 0..node_count - 1 {
         graph.add_edge(nodes[index], nodes[index + 1], ());
@@ -57,9 +57,9 @@ pub(super) fn branchy_graph(node_count: usize) -> DirectedGraph<(), ()> {
     graph
 }
 
-pub(super) fn reverse_id_chain_graph(node_count: usize) -> (DirectedGraph<(), ()>, NodeId) {
+pub(super) fn reverse_id_chain_graph(node_count: usize) -> (Graph<(), ()>, NodeId) {
     assert!(node_count > 0);
-    let mut graph = DirectedGraph::with_capacity(node_count, node_count - 1);
+    let mut graph = Graph::with_capacity(node_count, node_count - 1);
     let nodes: Vec<_> = (0..node_count).map(|_| graph.add_node(())).collect();
     for index in 1..node_count {
         graph.add_edge(nodes[index], nodes[index - 1], ());
@@ -178,12 +178,9 @@ pub(super) fn weighted_irreducible_cfg() -> Cfg<u32> {
     cfg
 }
 
-pub(super) fn multi_latch_graph(
-    chain_nodes: usize,
-    latch_count: usize,
-) -> (DirectedGraph<(), ()>, NodeId) {
+pub(super) fn multi_latch_graph(chain_nodes: usize, latch_count: usize) -> (Graph<(), ()>, NodeId) {
     let mut graph =
-        DirectedGraph::with_capacity(chain_nodes + latch_count + 1, chain_nodes + latch_count * 2);
+        Graph::with_capacity(chain_nodes + latch_count + 1, chain_nodes + latch_count * 2);
     let header = graph.add_node(());
     let mut tail = header;
     for _ in 0..chain_nodes {
@@ -201,18 +198,18 @@ pub(super) fn multi_latch_graph(
 
 pub(super) struct Reachability;
 
-impl NodeProblem<DirectedGraph<(), ()>> for Reachability {
+impl NodeProblem<Graph<(), ()>> for Reachability {
     type Fact = bool;
 
     fn direction(&self) -> Direction {
         Direction::Forward
     }
 
-    fn bottom(&self, _graph: &DirectedGraph<(), ()>) -> bool {
+    fn bottom(&self, _graph: &Graph<(), ()>) -> bool {
         false
     }
 
-    fn boundary(&self, _graph: &DirectedGraph<(), ()>) -> bool {
+    fn boundary(&self, _graph: &Graph<(), ()>) -> bool {
         true
     }
 
@@ -220,7 +217,7 @@ impl NodeProblem<DirectedGraph<(), ()>> for Reachability {
         *a || *b
     }
 
-    fn transfer(&self, _graph: &DirectedGraph<(), ()>, _node: NodeId, input: &bool) -> bool {
+    fn transfer(&self, _graph: &Graph<(), ()>, _node: NodeId, input: &bool) -> bool {
         *input
     }
 }
@@ -281,18 +278,18 @@ impl Problem<u32> for WideCfgFact {
 
 pub(super) struct WideNodeFact;
 
-impl NodeProblem<DirectedGraph<(), ()>> for WideNodeFact {
+impl NodeProblem<Graph<(), ()>> for WideNodeFact {
     type Fact = Vec<u64>;
 
     fn direction(&self) -> Direction {
         Direction::Forward
     }
 
-    fn bottom(&self, _graph: &DirectedGraph<(), ()>) -> Self::Fact {
+    fn bottom(&self, _graph: &Graph<(), ()>) -> Self::Fact {
         vec![0; WIDE_FACT_WORDS]
     }
 
-    fn boundary(&self, _graph: &DirectedGraph<(), ()>) -> Self::Fact {
+    fn boundary(&self, _graph: &Graph<(), ()>) -> Self::Fact {
         vec![u64::MAX; WIDE_FACT_WORDS]
     }
 
@@ -300,12 +297,7 @@ impl NodeProblem<DirectedGraph<(), ()>> for WideNodeFact {
         a.iter().zip(b).map(|(left, right)| left | right).collect()
     }
 
-    fn transfer(
-        &self,
-        _graph: &DirectedGraph<(), ()>,
-        _node: NodeId,
-        input: &Self::Fact,
-    ) -> Self::Fact {
+    fn transfer(&self, _graph: &Graph<(), ()>, _node: NodeId, input: &Self::Fact) -> Self::Fact {
         input.clone()
     }
 }

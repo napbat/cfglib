@@ -1,16 +1,18 @@
+use std::collections::BTreeSet;
 use std::ops::ControlFlow;
 
 use cfglib::{
-    CallInfo, Cfg, DirectedGraph, DominatorTree, EdgeKind, EpochMarks, OpenBfsConfig,
-    OpenDfsConfig, OpenPathsConfig, OpenSearchConfig, Rooted, SearchConfig, SearchOrder,
-    SearchScratch, SemanticValidator, TraversalDirection, Visit, VisitedPolicy,
-    breadth_first_events, call_graph, canonicalize_loops, condensation, condensation_of,
-    depth_first_edges, depth_first_events, depth_first_postorder, detect_loops_tagged,
-    find_back_edges_tagged, find_function, follow, follow_path, insert_preheader,
-    is_recursive_function, is_reducible, kosaraju_scc, loop_exit_blocks, min_label_relaxation,
-    open_breadth_first_events, open_breadth_first_paths, open_depth_first_events, open_search,
-    program_dependence_graph, propagate_summaries, reachable, reverse_cfg, reverse_postorder,
-    search, search_with_marks, search_with_scratch, to_view_dot, topological_sort, verify,
+    CallInfo, Cfg, DominatorTree, EdgeKind, EpochMarks, FoldEnter, Graph, GraphView, MarkScope,
+    NodeId, OpenBfsConfig, OpenDfsConfig, OpenFold, OpenFoldConfig, OpenPathsConfig,
+    OpenSearchConfig, Rooted, SearchConfig, SearchOrder, SearchScratch, SemanticValidator,
+    TraversalDirection, Visit, VisitedPolicy, breadth_first_events, call_graph, canonicalize_loops,
+    condensation, condensation_of, depth_first_edges, depth_first_events, depth_first_postorder,
+    detect_loops_tagged, find_back_edges_tagged, find_function, follow, follow_path,
+    insert_preheader, is_recursive_function, is_reducible, kosaraju_scc, loop_exit_blocks,
+    min_label_relaxation, open_breadth_first_events, open_breadth_first_paths,
+    open_depth_first_events, open_fold_post_order, open_search, program_dependence_graph,
+    propagate_summaries, reachable, reverse_cfg, reverse_postorder, scan_predecessors, search,
+    search_with_marks, search_with_scratch, to_view_dot, topological_sort, verify,
     verify_edge_view, verify_view, verify_with, write_view_dot,
 };
 
@@ -37,8 +39,8 @@ impl<I, E> SemanticValidator<I, E> for NoopValidator {
     type Error = ();
 }
 
-fn chain_graph(node_count: usize) -> DirectedGraph<(), ()> {
-    let mut graph = DirectedGraph::with_capacity(node_count, node_count.saturating_sub(1));
+fn chain_graph(node_count: usize) -> Graph<(), ()> {
+    let mut graph = Graph::with_capacity(node_count, node_count.saturating_sub(1));
     let nodes: Vec<_> = (0..node_count).map(|_| graph.add_node(())).collect();
     for edge in nodes.windows(2) {
         graph.add_edge(edge[0], edge[1], ());
@@ -101,12 +103,7 @@ fn register_dense_traversals(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_depth_first_edges",
-        covers [
-            depth_first_edges,
-            depth_first_edges_with,
-            depth_first_view_edges,
-            depth_first_view_edges_with,
-        ],
+        covers [depth_first_edges, depth_first_edges_with],
         || depth_first_edges(&graph, root, TraversalDirection::Outgoing),
         |steps: &Vec<_>| assert!(!steps.is_empty())
     );
@@ -295,6 +292,13 @@ fn register_open_traversals(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
+        "api_open_fold_post_order",
+        covers[open_fold_post_order],
+        || open_fold_post_order(&mut SubtreeSize, 0_usize, OpenFoldConfig::new()),
+        |size: &Option<usize>| assert_eq!(*size, Some(NODE_COUNT))
+    );
+    benchmark_case!(
+        suite,
         "api_open_search",
         covers[open_search],
         || {
@@ -317,9 +321,62 @@ fn register_open_traversals(suite: &mut BenchmarkSuite<'_>) {
     );
 }
 
+/// A fold over the same open chain the open-traversal cases walk, answering
+/// each subtree's node count.
+struct SubtreeSize;
+
+impl OpenFold for SubtreeSize {
+    type Node = usize;
+    type Mark = usize;
+    type Value = usize;
+    type Accumulator = usize;
+
+    fn successors(&mut self, node: &usize, out: &mut Vec<usize>) {
+        if *node + 1 < NODE_COUNT {
+            out.push(*node + 1);
+        }
+    }
+
+    fn mark(&mut self, node: &usize) -> Option<usize> {
+        Some(*node)
+    }
+
+    fn enter(&mut self, _node: &usize) -> FoldEnter<usize, usize> {
+        FoldEnter::Fold {
+            accumulator: 1,
+            marks: MarkScope::Shared,
+        }
+    }
+
+    fn absorb(
+        &mut self,
+        accumulator: &mut usize,
+        _child: &usize,
+        value: Option<usize>,
+    ) -> ControlFlow<()> {
+        *accumulator += value.unwrap_or_default();
+        ControlFlow::Continue(())
+    }
+
+    fn finish(&mut self, _node: &usize, accumulator: usize) -> Option<usize> {
+        Some(accumulator)
+    }
+}
+
 fn register_graph_algorithms(suite: &mut BenchmarkSuite<'_>) {
     let graph = branchy_graph(NODE_COUNT);
-    let root = cfglib::NodeId::from_raw(0);
+    let root = NodeId::from_raw(0);
+    let scanned_target = NodeId::from_index(NODE_COUNT / 2);
+    let stored_predecessors: BTreeSet<NodeId> =
+        GraphView::predecessors(&graph, scanned_target).collect();
+
+    benchmark_case!(
+        suite,
+        "api_scan_predecessors",
+        covers[scan_predecessors],
+        || scan_predecessors(&graph, scanned_target).collect::<BTreeSet<_>>(),
+        |scanned: &BTreeSet<NodeId>| assert_eq!(scanned, &stored_predecessors)
+    );
     let components = kosaraju_scc(&graph);
     let dag = chain_graph(NODE_COUNT);
 

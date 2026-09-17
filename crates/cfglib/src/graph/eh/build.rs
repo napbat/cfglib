@@ -2,7 +2,8 @@
 
 extern crate alloc;
 
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeSet;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
@@ -22,7 +23,7 @@ impl EhModel {
     /// [`Region`]: crate::Region
     ///
     /// Cleanup records the frontend attached to a handler
-    /// ([`Cfg::add_continuation`]) are carried into [`EhModel::cleanups`],
+    /// ([`Cfg::add_continuation`]) are carried into [`EhModel::cleanup`],
     /// keyed by that handler's entry block, so an analysis reads
     /// cleanup-then-continue structure instead of a fan of indistinguishable
     /// out-edges.
@@ -39,7 +40,7 @@ impl EhModel {
     ///
     /// let model = EhModel::compute(&cfg);
     /// // No exception edges, so no landing pads.
-    /// assert!(model.eh_edges.is_empty());
+    /// assert!(model.eh_edges().is_empty());
     /// ```
     #[must_use]
     pub fn compute<I, E>(cfg: &Cfg<I, E>) -> Self {
@@ -47,21 +48,28 @@ impl EhModel {
     }
 }
 
-#[derive(Default)]
+/// The model under construction, already sized to the source CFG so every
+/// table is a dense block-indexed vector from the start.
 struct EhModelBuilder {
-    block_kinds: BTreeMap<BlockId, EhBlockKind>,
+    block_kinds: Vec<EhBlockKind>,
     eh_edges: Vec<EhEdge>,
-    protected_by: BTreeMap<BlockId, BTreeSet<BlockId>>,
-    handlers: BTreeMap<BlockId, Vec<HandlerRef>>,
-    cleanups: BTreeMap<BlockId, Cleanup>,
+    protected_by: Vec<BTreeSet<BlockId>>,
+    handlers: Vec<Vec<HandlerRef>>,
+    cleanups: Vec<Option<Cleanup>>,
 }
 
 impl EhModelBuilder {
     fn from_cfg<I, E>(cfg: &Cfg<I, E>) -> Self {
-        let mut builder = Self::default();
+        let blocks = cfg.block_bound();
+        let mut builder = Self {
+            block_kinds: vec![EhBlockKind::Normal; blocks],
+            eh_edges: Vec::new(),
+            protected_by: vec![BTreeSet::new(); blocks],
+            handlers: vec![Vec::new(); blocks],
+            cleanups: vec![None; blocks],
+        };
         builder.classify_edges(cfg);
         builder.classify_regions(cfg);
-        builder.fill_normal_blocks(cfg);
         builder
     }
 
@@ -79,49 +87,40 @@ impl EhModelBuilder {
             });
             match kind {
                 EhEdgeKind::Handler | EhEdgeKind::Unwind => {
-                    self.block_kinds
-                        .entry(edge.target())
-                        .or_insert(EhBlockKind::LandingPad);
-                    self.protected_by
-                        .entry(edge.target())
-                        .or_default()
-                        .insert(edge.source());
+                    self.infer_kind(edge.target(), EhBlockKind::LandingPad);
+                    self.protected_by[edge.target().index()].insert(edge.source());
                 }
                 EhEdgeKind::Resume | EhEdgeKind::Continue => {
-                    self.block_kinds
-                        .entry(edge.source())
-                        .or_insert(EhBlockKind::Resume);
+                    self.infer_kind(edge.source(), EhBlockKind::Resume);
                 }
                 EhEdgeKind::Leave => {}
             }
         }
     }
 
-    fn classify_regions<I, E>(&mut self, cfg: &Cfg<I, E>) {
-        for region in cfg.regions() {
-            for (index, handler) in region.handlers.iter().enumerate() {
-                let target = handler.entry;
-                let handler_ref = HandlerRef::new(region.id, index);
-                self.handlers.entry(target).or_default().push(handler_ref);
-                if let Some(cleanup) = cfg.cleanup(handler_ref) {
-                    self.cleanups.insert(target, cleanup.clone());
-                }
-                // Region metadata is more precise than the role inferred from
-                // an exception edge, so this intentionally overwrites it.
-                self.block_kinds.insert(target, handler.kind.into());
-                self.protected_by
-                    .entry(target)
-                    .or_default()
-                    .extend(region.protected_blocks.iter().copied());
-            }
+    /// Record a role inferred from an edge, which never overrides the more
+    /// precise role region metadata gives the same block.
+    fn infer_kind(&mut self, block: BlockId, kind: EhBlockKind) {
+        let slot = &mut self.block_kinds[block.index()];
+        if *slot == EhBlockKind::Normal {
+            *slot = kind;
         }
     }
 
-    fn fill_normal_blocks<I, E>(&mut self, cfg: &Cfg<I, E>) {
-        for block in cfg.blocks() {
-            self.block_kinds
-                .entry(block.id())
-                .or_insert(EhBlockKind::Normal);
+    fn classify_regions<I, E>(&mut self, cfg: &Cfg<I, E>) {
+        for region in cfg.regions() {
+            for (index, handler) in region.handlers.iter().enumerate() {
+                let target = handler.entry.index();
+                let handler_ref = HandlerRef::new(region.id, index);
+                self.handlers[target].push(handler_ref);
+                if let Some(cleanup) = cfg.cleanup(handler_ref) {
+                    self.cleanups[target] = Some(cleanup.clone());
+                }
+                // Region metadata is more precise than the role inferred from
+                // an exception edge, so this intentionally overwrites it.
+                self.block_kinds[target] = handler.kind.into();
+                self.protected_by[target].extend(region.protected_blocks.iter().copied());
+            }
         }
     }
 

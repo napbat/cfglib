@@ -1,21 +1,43 @@
 //! Read-only graph view traits consumed by the generic algorithms.
 //!
-//! [`DirectedGraphView`] abstracts forward/reverse adjacency over dense node
-//! identities so traversals, SCC computation, dominance, and coloring run on
-//! [`DirectedGraph`](super::directed::DirectedGraph),
-//! [`Cfg`](crate::Cfg), or consumer-owned storage without migration.
-//! [`NodeGraphView`] adds access to graph-owned node payloads.
-//! [`RootedGraphView`] adds a distinguished entry node for algorithms that
-//! need one (dominators, reachability, structural analysis); [`Rooted`] roots
-//! any plain view at a chosen node.
+//! [`GraphView`] abstracts forward and reverse adjacency over dense node
+//! identities, so traversals, SCC computation, dominance, and coloring run on
+//! [`Graph`](crate::Graph), [`Cfg`](crate::Cfg), or consumer-owned storage
+//! without migration. [`NodeView`] adds access to graph-owned node payloads,
+//! [`EdgeView`](super::edge_view::EdgeView) adds edge identity and data, and
+//! [`RootedView`] adds a distinguished entry node for the algorithms that need
+//! one (dominators, reachability, structural analysis); [`Rooted`] roots any
+//! plain view at a chosen node.
+//!
+//! # The dense-identity contract
+//!
+//! A view has a **bound** and a set of **live identities**. The bound is an
+//! exclusive upper limit on every identity the view yields, so an analysis
+//! sizes a side table by [`GraphView::node_bound`] and indexes it by
+//! [`DenseId::index`] without a bounds failure. The live identities are what
+//! [`GraphView::node_ids`] yields, and a store that removed a node simply
+//! stops yielding it: a removed node is not a node of the view, not an
+//! isolated one.
+//!
+//! The two numbers coincide exactly when nothing has been removed, which is
+//! the ordinary case; keeping them distinct is what lets a mutable store
+//! serve an analysis without first being compacted.
 
-/// A copyable, ordered node identity backed by a dense zero-based index.
+use core::fmt::Debug;
+use core::hash::Hash;
+
+/// A copyable, ordered identity backed by a dense zero-based index.
 ///
-/// Implementations of [`DirectedGraphView`] must yield every index in
-/// `0..node_count()` exactly once. This contract lets graph algorithms use
-/// compact vectors instead of imposing hashing on consumer identities. Dense
-/// `u32` and `usize` handles implement this trait directly.
-pub trait DenseNodeId: Copy + Ord {
+/// One trait covers nodes and edges: the contract is identical for both, and
+/// splitting it only forced every dense identity in the crate to implement
+/// the same two methods twice. The supertraits are what the algorithms need
+/// of an identity — comparison for ordered sets, hashing for keyed side
+/// tables, and formatting for diagnostics.
+///
+/// Implementations must round-trip: `Self::from_index(id.index()) == id` for
+/// every identity a view yields. Dense `u32` and `usize` handles implement
+/// this trait directly.
+pub trait DenseId: Copy + Ord + Hash + Debug {
     /// Construct an identity from a valid dense zero-based index.
     fn from_index(index: usize) -> Self;
 
@@ -23,7 +45,7 @@ pub trait DenseNodeId: Copy + Ord {
     fn index(self) -> usize;
 }
 
-impl DenseNodeId for usize {
+impl DenseId for usize {
     fn from_index(index: usize) -> Self {
         index
     }
@@ -33,42 +55,48 @@ impl DenseNodeId for usize {
     }
 }
 
-impl DenseNodeId for u32 {
+impl DenseId for u32 {
     fn from_index(index: usize) -> Self {
-        Self::try_from(index).expect("node index exceeds u32::MAX")
+        Self::try_from(index).expect("dense index exceeds u32::MAX")
     }
 
     fn index(self) -> usize {
-        usize::try_from(self).expect("u32 node index exceeds usize::MAX")
+        usize::try_from(self).expect("u32 dense index exceeds usize::MAX")
     }
 }
 
 /// Read-only directed adjacency consumed by generic graph algorithms.
 ///
-/// A view may be backed by
-/// [`DirectedGraph`](super::directed::DirectedGraph), [`Cfg`](crate::Cfg),
-/// or a consumer-owned structure. Node identities must follow the
-/// [`DenseNodeId`] contract.
+/// A view may be backed by [`Graph`](crate::Graph), [`Cfg`](crate::Cfg), or a
+/// consumer-owned structure. Node identities follow the [`DenseId`] contract.
 ///
-/// Forward and reverse adjacency must describe the same edge **multiset**.
-/// Every occurrence of `target` in `successors(source)` must have exactly one
-/// matching occurrence of `source` in `predecessors(target)`, including each
-/// parallel edge. Algorithms may combine the two directions without rebuilding
-/// or deduplicating either one.
-pub trait DirectedGraphView {
+/// # Contract
+///
+/// - Every identity yielded by [`node_ids`](Self::node_ids), by
+///   [`successors`](Self::successors), or by
+///   [`predecessors`](Self::predecessors) has an
+///   [`index`](DenseId::index) below [`node_bound`](Self::node_bound).
+/// - [`node_ids`](Self::node_ids) yields every live node exactly once. The
+///   stores in this crate yield ascending index order; an algorithm must not
+///   depend on that, because a consumer-owned view need not.
+/// - Forward and reverse adjacency describe the same edge **multiset**: every
+///   occurrence of `target` in `successors(source)` has exactly one matching
+///   occurrence of `source` in `predecessors(target)`, parallel edges
+///   included. Algorithms may combine the two directions without rebuilding
+///   or deduplicating either one.
+pub trait GraphView {
     /// Node identity used by this view.
-    type NodeId: DenseNodeId;
+    type NodeId: DenseId;
 
-    /// Return the number of nodes in the view.
-    fn node_count(&self) -> usize;
-
-    /// Iterate over every node identity exactly once.
+    /// An exclusive upper bound on every node index this view yields.
     ///
-    /// Dense identities make this implementation universal, so adapters only
-    /// need to expose node count plus forward and reverse adjacency.
-    fn node_ids(&self) -> impl Iterator<Item = Self::NodeId> + '_ {
-        (0..self.node_count()).map(Self::NodeId::from_index)
-    }
+    /// This is the correct size for a node-indexed side table. It is at least
+    /// the number of live nodes and may exceed it when the backing store has
+    /// removed nodes without compacting.
+    fn node_bound(&self) -> usize;
+
+    /// Iterate over every live node identity exactly once.
+    fn node_ids(&self) -> impl Iterator<Item = Self::NodeId> + '_;
 
     /// Iterate over the outgoing neighbors of `node`.
     fn successors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_;
@@ -81,12 +109,12 @@ pub trait DirectedGraphView {
     fn predecessors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_;
 }
 
-/// Read-only node payloads associated with a [`DirectedGraphView`].
+/// Read-only node payloads associated with a [`GraphView`].
 ///
-/// Adjacency-only algorithms keep depending on [`DirectedGraphView`]. Consumers
-/// that need graph-owned node data use this companion trait without depending
-/// on an arena, CSR, or domain-specific storage representation.
-pub trait NodeGraphView: DirectedGraphView {
+/// Adjacency-only algorithms keep depending on [`GraphView`]. Consumers that
+/// need graph-owned node data use this companion trait without depending on a
+/// particular store.
+pub trait NodeView: GraphView {
     /// Data exposed for each node.
     type NodeData: ?Sized;
 
@@ -95,33 +123,33 @@ pub trait NodeGraphView: DirectedGraphView {
     /// # Panics
     ///
     /// Panics when `node` does not belong to this view.
-    fn node_ref(&self, node: Self::NodeId) -> &Self::NodeData;
+    fn node(&self, node: Self::NodeId) -> &Self::NodeData;
 }
 
-/// A directed-graph view with a distinguished root/entry node.
+/// A graph view with a distinguished root/entry node.
 ///
 /// Entry-requiring algorithms (dominance, reachability metrics, interval and
 /// loop analysis) take this trait instead of a separate root argument, so a
 /// [`Cfg`](crate::Cfg) participates directly through its entry block while
 /// consumer graphs opt in via [`Rooted`] or their own implementation.
-pub trait RootedGraphView: DirectedGraphView {
+pub trait RootedView: GraphView {
     /// The root node from which reachability, dominance, and orderings are
     /// computed.
     fn root(&self) -> Self::NodeId;
 }
 
-/// Adapter that roots any [`DirectedGraphView`] at a chosen node.
+/// Adapter that roots any [`GraphView`] at a chosen node.
 ///
 /// Consumer-owned graphs that have no intrinsic entry (value-flow graphs,
 /// type-relation graphs) use this to run entry-requiring algorithms without
-/// implementing [`RootedGraphView`] on their storage.
+/// implementing [`RootedView`] on their storage.
 ///
 /// # Examples
 ///
 /// ```
-/// use cfglib::{DirectedGraph, DominatorTree, Rooted};
+/// use cfglib::{DominatorTree, Graph, Rooted};
 ///
-/// let mut graph = DirectedGraph::new();
+/// let mut graph = Graph::new();
 /// let a = graph.add_node("a");
 /// let b = graph.add_node("b");
 /// graph.add_edge(a, b, ());
@@ -131,12 +159,12 @@ pub trait RootedGraphView: DirectedGraphView {
 /// assert_eq!(dominators.idom(b), Some(a));
 /// ```
 #[derive(Debug, Clone, Copy)]
-pub struct Rooted<'g, G: DirectedGraphView> {
+pub struct Rooted<'g, G: GraphView> {
     graph: &'g G,
     root: G::NodeId,
 }
 
-impl<'g, G: DirectedGraphView> Rooted<'g, G> {
+impl<'g, G: GraphView> Rooted<'g, G> {
     /// Root `graph` at `root`.
     #[must_use]
     pub const fn new(graph: &'g G, root: G::NodeId) -> Self {
@@ -150,11 +178,15 @@ impl<'g, G: DirectedGraphView> Rooted<'g, G> {
     }
 }
 
-impl<G: DirectedGraphView> DirectedGraphView for Rooted<'_, G> {
+impl<G: GraphView> GraphView for Rooted<'_, G> {
     type NodeId = G::NodeId;
 
-    fn node_count(&self) -> usize {
-        self.graph.node_count()
+    fn node_bound(&self) -> usize {
+        self.graph.node_bound()
+    }
+
+    fn node_ids(&self) -> impl Iterator<Item = Self::NodeId> + '_ {
+        self.graph.node_ids()
     }
 
     fn successors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
@@ -166,15 +198,15 @@ impl<G: DirectedGraphView> DirectedGraphView for Rooted<'_, G> {
     }
 }
 
-impl<G: NodeGraphView> NodeGraphView for Rooted<'_, G> {
+impl<G: NodeView> NodeView for Rooted<'_, G> {
     type NodeData = G::NodeData;
 
-    fn node_ref(&self, node: Self::NodeId) -> &Self::NodeData {
-        self.graph.node_ref(node)
+    fn node(&self, node: Self::NodeId) -> &Self::NodeData {
+        self.graph.node(node)
     }
 }
 
-impl<G: DirectedGraphView> RootedGraphView for Rooted<'_, G> {
+impl<G: GraphView> RootedView for Rooted<'_, G> {
     fn root(&self) -> Self::NodeId {
         self.root
     }
@@ -189,9 +221,9 @@ impl<G: DirectedGraphView> RootedGraphView for Rooted<'_, G> {
 /// # Examples
 ///
 /// ```
-/// use cfglib::{DirectedGraph, Reversed, Rooted, DominatorTree};
+/// use cfglib::{DominatorTree, Graph, Reversed, Rooted};
 ///
-/// let mut graph = DirectedGraph::new();
+/// let mut graph = Graph::new();
 /// let a = graph.add_node("a");
 /// let b = graph.add_node("b");
 /// graph.add_edge(a, b, ());
@@ -201,11 +233,11 @@ impl<G: DirectedGraphView> RootedGraphView for Rooted<'_, G> {
 /// assert_eq!(dominators.idom(a), Some(b));
 /// ```
 #[derive(Debug, Clone, Copy)]
-pub struct Reversed<'g, G: DirectedGraphView> {
+pub struct Reversed<'g, G: GraphView> {
     graph: &'g G,
 }
 
-impl<'g, G: DirectedGraphView> Reversed<'g, G> {
+impl<'g, G: GraphView> Reversed<'g, G> {
     /// Reverse `graph`.
     #[must_use]
     pub const fn new(graph: &'g G) -> Self {
@@ -219,11 +251,15 @@ impl<'g, G: DirectedGraphView> Reversed<'g, G> {
     }
 }
 
-impl<G: DirectedGraphView> DirectedGraphView for Reversed<'_, G> {
+impl<G: GraphView> GraphView for Reversed<'_, G> {
     type NodeId = G::NodeId;
 
-    fn node_count(&self) -> usize {
-        self.graph.node_count()
+    fn node_bound(&self) -> usize {
+        self.graph.node_bound()
+    }
+
+    fn node_ids(&self) -> impl Iterator<Item = Self::NodeId> + '_ {
+        self.graph.node_ids()
     }
 
     fn successors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
@@ -235,22 +271,22 @@ impl<G: DirectedGraphView> DirectedGraphView for Reversed<'_, G> {
     }
 }
 
-impl<G: NodeGraphView> NodeGraphView for Reversed<'_, G> {
+impl<G: NodeView> NodeView for Reversed<'_, G> {
     type NodeData = G::NodeData;
 
-    fn node_ref(&self, node: Self::NodeId) -> &Self::NodeData {
-        self.graph.node_ref(node)
+    fn node(&self, node: Self::NodeId) -> &Self::NodeData {
+        self.graph.node(node)
     }
 }
 
 /// The incoming neighbors of `node` by scanning every node's successors.
 ///
-/// The honest [`DirectedGraphView::predecessors`] implementation for a view
-/// that stores only forward adjacency: O(nodes × edges) per query, correct
-/// by construction, and free of a reverse index the consumer never queries.
+/// The honest [`GraphView::predecessors`] implementation for a view that
+/// stores only forward adjacency: O(nodes × edges) per query, correct by
+/// construction, and free of a reverse index the consumer never queries.
 /// Views on an algorithm's hot reverse path should maintain real reverse
 /// adjacency instead.
-pub fn scan_predecessors<G: DirectedGraphView>(
+pub fn scan_predecessors<G: GraphView>(
     graph: &G,
     node: G::NodeId,
 ) -> impl Iterator<Item = G::NodeId> + '_ {
@@ -267,12 +303,12 @@ mod tests {
 
     use alloc::vec::Vec;
 
-    use super::scan_predecessors;
-    use crate::graph::directed::DirectedGraph;
+    use super::{GraphView, scan_predecessors};
+    use crate::graph::store::Graph;
 
     #[test]
     fn scanning_matches_stored_reverse_adjacency() {
-        let mut graph = DirectedGraph::new();
+        let mut graph = Graph::new();
         let a = graph.add_node("a");
         let b = graph.add_node("b");
         let c = graph.add_node("c");
@@ -282,11 +318,24 @@ mod tests {
 
         for node in [a, b, c] {
             let mut scanned: Vec<_> = scan_predecessors(&graph, node).collect();
-            let mut stored: Vec<_> = graph.predecessors(node).collect();
+            let mut stored: Vec<_> = GraphView::predecessors(&graph, node).collect();
             scanned.sort_unstable();
             stored.sort_unstable();
             assert_eq!(scanned, stored);
         }
         assert!(scan_predecessors(&graph, b).next().is_none());
+    }
+
+    #[test]
+    fn a_removed_node_leaves_the_view() {
+        let mut graph = Graph::new();
+        let kept = graph.add_node("kept");
+        let dropped = graph.add_node("dropped");
+        graph.add_edge(kept, dropped, ());
+        graph.remove_node(dropped);
+
+        assert_eq!(graph.node_ids().collect::<Vec<_>>(), [kept]);
+        assert_eq!(graph.node_bound(), 2, "the bound still covers both slots");
+        assert!(GraphView::successors(&graph, kept).next().is_none());
     }
 }

@@ -283,20 +283,20 @@ impl<D: Dialect> FunctionBuilder<D> {
     /// or a block with exceptional edges lacks exactly one throwing
     /// statement to own them.
     pub fn finish(self) -> Result<Function<D>> {
-        for block in self.cfg.blocks() {
+        for block_id in self.cfg.block_ids() {
+            let block = self.cfg.block(block_id);
             let statements = block.instructions();
             for (index, node) in statements.iter().enumerate() {
                 if node.statement().is_terminator() && index + 1 != statements.len() {
                     return Err(Error::InvalidConstruction(format!(
-                        "control-flow statement is not last in block {}",
-                        block.id()
+                        "control-flow statement is not last in block {block_id}"
                     )));
                 }
             }
         }
 
-        let mut normal: Vec<usize> = vec![0; self.cfg.block_count()];
-        let mut exceptional: Vec<usize> = vec![0; self.cfg.block_count()];
+        let mut normal: Vec<usize> = vec![0; self.cfg.block_bound()];
+        let mut exceptional: Vec<usize> = vec![0; self.cfg.block_bound()];
         for edge in self.cfg.edges() {
             let source = edge.source().index();
             if edge.kind().is_exceptional() {
@@ -305,32 +305,29 @@ impl<D: Dialect> FunctionBuilder<D> {
                 normal[source] += 1;
             }
         }
-        for block in self.cfg.blocks() {
-            let index = block.id().index();
+        for block_id in self.cfg.block_ids() {
+            let block = self.cfg.block(block_id);
+            let index = block_id.index();
             match block.instructions().last().map(StatementNode::statement) {
                 Some(Statement::Return { .. }) if normal[index] + exceptional[index] != 0 => {
                     return Err(Error::InvalidConstruction(format!(
-                        "return block {} has outgoing edges",
-                        block.id()
+                        "return block {block_id} has outgoing edges"
                     )));
                 }
                 Some(Statement::Branch { .. }) if normal[index] < 2 => {
                     return Err(Error::InvalidConstruction(format!(
                         "branch block {} decides between {} outgoing edges",
-                        block.id(),
-                        normal[index]
+                        block_id, normal[index]
                     )));
                 }
                 Some(Statement::Dispatch { .. }) if normal[index] == 0 => {
                     return Err(Error::InvalidConstruction(format!(
-                        "dispatch block {} has no outgoing edges",
-                        block.id()
+                        "dispatch block {block_id} has no outgoing edges"
                     )));
                 }
                 Some(Statement::Raise { .. }) if normal[index] != 0 => {
                     return Err(Error::InvalidConstruction(format!(
-                        "raise block {} has a normal outgoing edge",
-                        block.id()
+                        "raise block {block_id} has a normal outgoing edge"
                     )));
                 }
                 _ => {}
@@ -345,8 +342,8 @@ impl<D: Dialect> FunctionBuilder<D> {
                     .count();
                 if throwing != 1 {
                     return Err(Error::InvalidConstruction(format!(
-                        "block {} has exceptional edges but {throwing} throwing statements",
-                        block.id()
+                        "block {block_id} has exceptional edges but {throwing} throwing \
+                         statements"
                     )));
                 }
             }

@@ -66,41 +66,27 @@ pub fn make_reducible<I: Clone>(cfg: &mut Cfg<I>) -> usize {
 fn split_node<I: Clone>(cfg: &mut Cfg<I>, target: BlockId) {
     // Duplicate the target's instructions into a new block.
     let copy = cfg.new_block();
-    let insts = cfg.block(target).instructions().to_vec();
-    for inst in insts {
-        cfg.blocks[copy.index()].instructions.push(inst);
-    }
+    let instructions = cfg.block(target).instructions().to_vec();
+    cfg.block_mut(copy).instructions_mut().extend(instructions);
 
     // Partition predecessors: keep edges from blocks that target
     // can reach (they're in a cycle with target), redirect the rest
     // to the copy (they're external entries).
     let cycle_reachable = reachable(cfg, [target], TraversalDirection::Outgoing);
-    let mut redirected = SmallVec::<[crate::edge::EdgeId; 4]>::new();
-    {
-        let edges = &mut cfg.edges;
-        cfg.preds[target.index()].retain(|eid| {
-            let eid = *eid;
-            let edge = edges[eid.index()]
-                .as_mut()
-                .expect("predecessor adjacency must reference a live edge");
-            if cycle_reachable[edge.source.index()] {
-                true
-            } else {
-                edge.target = copy;
-                redirected.push(eid);
-                false
-            }
-        });
+    let external: SmallVec<[crate::edge::EdgeId; 4]> = cfg
+        .incoming(target)
+        .filter(|&edge| !cycle_reachable[cfg.edge(edge).source().index()])
+        .collect();
+    for edge in external {
+        cfg.redirect_edge_target(edge, copy);
     }
-    cfg.preds[copy.index()].extend(redirected);
 
     // Clone outgoing edges from target to copy. Original edge identities stay
     // attached to `target`; the copy receives fresh identities in the same
     // adjacency order with all semantic metadata retained.
     let outgoing: Vec<(BlockId, EdgeKind, Option<f64>)> = cfg
-        .successor_edges(target)
-        .iter()
-        .map(|&eid| {
+        .outgoing(target)
+        .map(|eid| {
             let e = cfg.edge(eid);
             (e.target(), e.kind(), e.weight())
         })
@@ -227,9 +213,9 @@ mod tests {
         let copy = BlockId::from_index(original_block_count);
         assert_eq!(cfg.edge(redirected).target(), copy);
         assert_eq!(cfg.edge(redirected).weight(), Some(0.125));
-        assert_eq!(cfg.successor_edges(b), &[back, leave]);
+        assert_eq!(cfg.outgoing(b).collect::<Vec<_>>(), &[back, leave]);
 
-        let copied = cfg.successor_edges(copy);
+        let copied: Vec<_> = cfg.outgoing(copy).collect();
         assert_eq!(copied.len(), 2);
         assert_ne!(copied[0], back);
         assert_ne!(copied[1], leave);

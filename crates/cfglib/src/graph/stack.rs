@@ -24,6 +24,6 @@ pub use search::{
     StackSearchConfig, StackSearchStats,
 };
 pub use storage::{
-    StackEdge, StackEdgeId, StackFileId, StackGraph, StackGraphError, StackNode, StackNodeId,
-    StackNodeKind,
+    StackEdge, StackEdgeId, StackEdgeTag, StackFileId, StackFileTag, StackGraph, StackGraphError,
+    StackNode, StackNodeId, StackNodeKind, StackNodeTag,
 };

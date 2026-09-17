@@ -115,10 +115,11 @@ fn sound_substitutions<I: CopySource, E>(
 ) -> BTreeMap<I::Variable, Substitution<I::Variable>> {
     let mut def_sites: BTreeMap<I::Variable, Vec<super::ProgramPoint>> = BTreeMap::new();
     let mut use_sites: BTreeMap<I::Variable, Vec<super::ProgramPoint>> = BTreeMap::new();
-    for block in cfg.blocks() {
+    for block_id in cfg.block_ids() {
+        let block = cfg.block(block_id);
         for (inst_idx, inst) in block.instructions().iter().enumerate() {
             let point = super::ProgramPoint {
-                block: block.id(),
+                block: block_id,
                 inst_idx,
             };
             for def in inst.defs() {
@@ -139,16 +140,17 @@ fn sound_substitutions<I: CopySource, E>(
     };
 
     let mut substitutions = BTreeMap::new();
-    for block in cfg.blocks() {
+    for block_id in cfg.block_ids() {
+        let block = cfg.block(block_id);
         for (inst_idx, inst) in block.instructions().iter().enumerate() {
             let Some((definitions, uses)) = pairs(inst, propagation) else {
                 continue;
             };
-            if !dom.is_reachable(block.id()) {
+            if !dom.is_reachable(block_id) {
                 continue;
             }
             let alias_point = super::ProgramPoint {
-                block: block.id(),
+                block: block_id,
                 inst_idx,
             };
             for (dst, src) in definitions.iter().cloned().zip(uses.iter().cloned()) {
@@ -225,11 +227,7 @@ fn propagate<I: CopySource + Clone, E>(
             instructions_removed: 0,
         };
     }
-    let block_ids: Vec<BlockId> = cfg
-        .blocks()
-        .iter()
-        .map(super::super::block::BasicBlock::id)
-        .collect();
+    let block_ids: Vec<BlockId> = cfg.block_ids().collect();
     let mut uses_rewritten = 0;
     for &bid in &block_ids {
         for (inst_idx, inst) in cfg.block_mut(bid).instructions_mut().iter_mut().enumerate() {

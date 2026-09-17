@@ -21,7 +21,11 @@ pub struct Function<D: Dialect> {
     pub(super) variables: Vec<Variable<D>>,
     pub(super) signature: Signature<D>,
     pub(super) provenance: ProvenanceMap<D>,
-    pub(super) instruction_points: Vec<ProgramPoint>,
+    /// Where each stable [`InstructionId`] currently sits, or `None` once a
+    /// derived graph dropped it. Every door that changes the graph rebuilds
+    /// this table, so an identity never resolves to somebody else's
+    /// instruction.
+    pub(super) instruction_points: Vec<Option<ProgramPoint>>,
 }
 
 impl<D: Dialect> Function<D> {
@@ -66,24 +70,46 @@ impl<D: Dialect> Function<D> {
     /// Identity order is allocation order, which is independent of graph
     /// position; use [`Self::cfg`] for block-structured iteration.
     pub fn instructions(&self) -> impl Iterator<Item = &Instruction<D>> {
-        self.instruction_points.iter().filter_map(|point| {
-            self.cfg
-                .blocks()
-                .get(point.block.index())?
-                .instructions()
-                .get(point.inst_idx)
-        })
+        self.instruction_points
+            .iter()
+            .filter_map(|point| self.at((*point)?))
     }
 
     /// Looks up one instruction by stable identity.
+    ///
+    /// `None` once a derived graph has dropped the instruction.
     #[must_use]
     pub fn instruction(&self, id: InstructionId) -> Option<&Instruction<D>> {
-        let point = *self.instruction_points.get(id.index())?;
+        self.at((*self.instruction_points.get(id.index())?)?)
+    }
+
+    /// Borrow the instruction stored at one program point.
+    fn at(&self, point: ProgramPoint) -> Option<&Instruction<D>> {
         self.cfg
-            .blocks()
-            .get(point.block.index())?
+            .contains_block(point.block)
+            .then(|| self.cfg.block(point.block))?
             .instructions()
             .get(point.inst_idx)
+    }
+
+    /// Rebuild the identity-to-position table from the graph.
+    ///
+    /// Every door that hands a caller the graph to change works on a clone
+    /// and calls this afterwards, which is what keeps
+    /// [`instruction`](Self::instruction) honest about a transform that
+    /// moved or dropped instructions. A transform that duplicates a block
+    /// leaves one identity at several positions; the table then names the
+    /// last of them.
+    pub(super) fn reindex_instructions(&mut self) {
+        self.instruction_points.fill(None);
+        for block in self.cfg.block_ids() {
+            for (inst_idx, instruction) in self.cfg.block(block).instructions().iter().enumerate() {
+                let Some(slot) = self.instruction_points.get_mut(instruction.id().index()) else {
+                    continue;
+                };
+                *slot = Some(ProgramPoint { block, inst_idx });
+            }
+        }
     }
 
     /// Returns the number of instructions — the exclusive upper bound of
@@ -96,7 +122,9 @@ impl<D: Dialect> Function<D> {
     /// Returns the current graph location of one stable instruction.
     #[must_use]
     pub fn instruction_point(&self, id: InstructionId) -> Option<ProgramPoint> {
-        self.instruction_points.get(id.index()).copied()
+        (*self.instruction_points.get(id.index())?)
+            .as_ref()
+            .copied()
     }
 
     /// Computes a dominator tree over ordinary and exceptional control flow.
@@ -145,6 +173,7 @@ impl<D: Dialect> Function<D> {
     pub fn with_promoted_handler_extents(&self) -> (Self, usize) {
         let mut derived = self.clone();
         let promoted = crate::promote_handler_extents(&mut derived.cfg);
+        derived.reindex_instructions();
         (derived, promoted)
     }
 
@@ -162,14 +191,17 @@ impl<D: Dialect> Function<D> {
     {
         let mut derived = self.clone();
         let duplicated = crate::duplicate_structuring_tails(&mut derived.cfg);
+        derived.reindex_instructions();
         (derived, duplicated)
     }
 
     /// Returns a derived function whose graph the caller transformed in
     /// place — the generic door for consumer-specific presentation views
     /// (detaching coverage a recovered construct regenerates, specializing
-    /// edges). Identity tables keep describing the original function, and
-    /// canonical storage is never mutated.
+    /// edges). Canonical storage is never mutated, and the derived
+    /// function's identity-to-position table is rebuilt from the transformed
+    /// graph, so [`instruction`](Self::instruction) stays honest about what
+    /// the transform moved or dropped.
     #[must_use]
     pub fn with_derived_cfg<R>(
         &self,
@@ -177,6 +209,7 @@ impl<D: Dialect> Function<D> {
     ) -> Self {
         let mut derived = self.clone();
         let _ = transform(&mut derived.cfg);
+        derived.reindex_instructions();
         derived
     }
 

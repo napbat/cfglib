@@ -55,20 +55,20 @@ fn remove_edge_tombstones_correctly() {
     assert_eq!(cfg.edges().count(), 2);
 
     // Remove one edge.
-    let removed = cfg.remove_edge(e1).unwrap();
-    assert_eq!(removed.kind(), EdgeKind::ConditionalTrue);
+    assert_eq!(cfg.edge(e1).kind(), EdgeKind::ConditionalTrue);
+    assert!(cfg.remove_edge(e1));
 
-    // edges() should now skip the tombstone.
+    // edges() should now skip the removed slot.
     assert_eq!(cfg.edges().count(), 1);
-    let remaining: Vec<&Edge> = cfg.edges().collect();
-    assert_eq!(remaining[0].id(), e2);
+    let remaining: Vec<_> = cfg.edges().map(|edge| edge.id()).collect();
+    assert_eq!(remaining[0], e2);
 
     // Successor list should only contain e2.
-    assert_eq!(cfg.successor_edges(b0).len(), 1);
-    assert_eq!(cfg.successor_edges(b0)[0], e2);
+    assert_eq!(cfg.outgoing(b0).count(), 1);
+    assert_eq!(cfg.outgoing(b0).next().unwrap(), e2);
 
-    // Double-remove returns None.
-    assert!(cfg.remove_edge(e1).is_none());
+    // Double-remove reports that there was nothing to do.
+    assert!(!cfg.remove_edge(e1));
 }
 
 #[test]
@@ -80,18 +80,18 @@ fn split_block_preserves_outgoing_edge_identity_and_metadata() {
     let outgoing = cfg.add_weighted_edge(source, sink, EdgeKind::ConditionalTrue, 0.75);
 
     let split = cfg.split_block(source, 1);
-    let [fallthrough] = cfg.successor_edges(source) else {
+    let [fallthrough] = cfg.outgoing(source).collect::<Vec<_>>()[..] else {
         panic!("split source should have one fallthrough edge");
     };
 
-    assert_eq!(cfg.successor_edges(split), &[outgoing]);
+    assert_eq!(cfg.outgoing(split).collect::<Vec<_>>(), &[outgoing]);
     assert_eq!(cfg.edge(outgoing).source(), split);
     assert_eq!(cfg.edge(outgoing).target(), sink);
     assert_eq!(cfg.edge(outgoing).kind(), EdgeKind::ConditionalTrue);
     assert_eq!(cfg.edge(outgoing).weight(), Some(0.75));
-    assert_eq!(cfg.edge(*fallthrough).source(), source);
-    assert_eq!(cfg.edge(*fallthrough).target(), split);
-    assert_eq!(cfg.predecessor_edges(sink), &[outgoing]);
+    assert_eq!(cfg.edge(fallthrough).source(), source);
+    assert_eq!(cfg.edge(fallthrough).target(), split);
+    assert_eq!(cfg.incoming(sink).collect::<Vec<_>>(), &[outgoing]);
 }
 
 #[test]
@@ -105,8 +105,11 @@ fn redirect_edges_moves_predecessors_in_order() {
 
     cfg.redirect_edges_to(old, new_target);
 
-    assert_eq!(cfg.predecessor_edges(old), &[]);
-    assert_eq!(cfg.predecessor_edges(new_target), &[first, second, third]);
+    assert_eq!(cfg.incoming(old).collect::<Vec<_>>(), &[]);
+    assert_eq!(
+        cfg.incoming(new_target).collect::<Vec<_>>(),
+        &[first, second, third]
+    );
     assert_eq!(cfg.edge(second).target(), new_target);
     assert_eq!(cfg.edge(third).target(), new_target);
     assert_eq!(cfg.edge(third).weight(), Some(0.25));
@@ -120,7 +123,7 @@ fn redirect_edges_to_same_block_is_a_noop() {
 
     cfg.redirect_edges_to(target, target);
 
-    assert_eq!(cfg.predecessor_edges(target), &[edge]);
+    assert_eq!(cfg.incoming(target).collect::<Vec<_>>(), &[edge]);
     assert_eq!(cfg.edge(edge).target(), target);
 }
 
@@ -136,7 +139,7 @@ fn redirect_edges_rejects_an_invalid_target_before_mutating() {
     }));
 
     assert!(panic.is_err());
-    assert_eq!(cfg.predecessor_edges(old_target), &[edge]);
+    assert_eq!(cfg.incoming(old_target).collect::<Vec<_>>(), &[edge]);
     assert_eq!(cfg.edge(edge).target(), old_target);
 }
 
@@ -154,9 +157,9 @@ fn move_outgoing_edges_preserves_order_identity_and_metadata() {
 
     cfg.move_outgoing_edges(old, new_source);
 
-    assert_eq!(cfg.successor_edges(old), &[]);
+    assert_eq!(cfg.outgoing(old).collect::<Vec<_>>(), &[]);
     assert_eq!(
-        cfg.successor_edges(new_source),
+        cfg.outgoing(new_source).collect::<Vec<_>>(),
         &[existing, first, second, becomes_self, old_self]
     );
     assert_eq!(cfg.edge(first).source(), new_source);
@@ -170,9 +173,15 @@ fn move_outgoing_edges_preserves_order_identity_and_metadata() {
     assert_eq!(cfg.edge(old_self).source(), new_source);
     assert_eq!(cfg.edge(old_self).target(), old);
     assert_eq!(cfg.edge(old_self).weight(), Some(0.5));
-    assert_eq!(cfg.predecessor_edges(sink), &[existing, first, second]);
-    assert_eq!(cfg.predecessor_edges(new_source), &[becomes_self]);
-    assert_eq!(cfg.predecessor_edges(old), &[old_self]);
+    assert_eq!(
+        cfg.incoming(sink).collect::<Vec<_>>(),
+        &[existing, first, second]
+    );
+    assert_eq!(
+        cfg.incoming(new_source).collect::<Vec<_>>(),
+        &[becomes_self]
+    );
+    assert_eq!(cfg.incoming(old).collect::<Vec<_>>(), &[old_self]);
 }
 
 #[test]

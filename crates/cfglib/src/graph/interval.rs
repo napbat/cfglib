@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use smallvec::SmallVec;
 
 use crate::block::BlockId;
-use crate::graph::view::{DenseNodeId, RootedGraphView};
+use crate::graph::view::{DenseId, RootedView};
 
 /// One interval in the source graph's first-level partition.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,8 +47,8 @@ pub struct IntervalAnalysis<N = BlockId> {
 /// Allen & Cocke interval construction: starting from the entry,
 /// repeatedly absorb successor blocks whose only header-reaching
 /// predecessor is within the current interval.
-fn compute_intervals_from_graph<G: RootedGraphView>(graph: &G) -> Vec<Interval<G::NodeId>> {
-    if graph.node_count() == 0 {
+fn compute_intervals_from_graph<G: RootedView>(graph: &G) -> Vec<Interval<G::NodeId>> {
+    if graph.node_bound() == 0 {
         return Vec::new();
     }
 
@@ -155,7 +155,7 @@ impl IntervalCount for WideCount {
 
 fn compute_intervals_with_count<G, C>(graph: &G) -> Vec<Interval<G::NodeId>>
 where
-    G: RootedGraphView,
+    G: RootedView,
     C: IntervalCount,
 {
     let mut intervals = Vec::new();
@@ -163,7 +163,7 @@ where
     // the current interval. Assigned nodes use a sentinel because their count
     // is never consulted again. This single table replaces separate assigned,
     // in-interval, total-predecessor, and inside-predecessor tables.
-    let mut remaining_predecessors = alloc::vec![C::from_usize(0); graph.node_count()];
+    let mut remaining_predecessors = alloc::vec![C::from_usize(0); graph.node_bound()];
     for node in graph.node_ids() {
         remaining_predecessors[node.index()] = C::from_usize(graph.predecessors(node).count());
     }
@@ -247,12 +247,12 @@ where
 /// let result = IntervalAnalysis::compute(&cfg);
 /// assert!(result.is_reducible);
 /// ```
-impl<N: DenseNodeId> IntervalAnalysis<N> {
+impl<N: DenseId> IntervalAnalysis<N> {
     /// Compute the source graph's first-level interval partition.
     #[must_use]
     pub fn compute<G>(graph: &G) -> Self
     where
-        G: RootedGraphView<NodeId = N>,
+        G: RootedView<NodeId = N>,
     {
         let mut levels = Vec::new();
 
@@ -276,25 +276,25 @@ mod tests {
     use crate::builder::CfgBuilder;
     use crate::flow::FlowEffect;
     use crate::test_util::{MockInst, ff};
-    use crate::{DenseNodeId, DirectedGraph, DirectedGraphView, NodeId, Rooted, RootedGraphView};
+    use crate::{DenseId, Graph, GraphView, NodeId, Rooted, RootedView};
     use alloc::vec;
 
     struct ReverseNodeIds<'g> {
-        graph: &'g DirectedGraph<(), ()>,
+        graph: &'g Graph<(), ()>,
         root: NodeId,
     }
 
-    impl DirectedGraphView for ReverseNodeIds<'_> {
+    impl GraphView for ReverseNodeIds<'_> {
         type NodeId = NodeId;
 
-        fn node_count(&self) -> usize {
-            self.graph.node_count()
+        fn node_bound(&self) -> usize {
+            self.graph.node_bound()
         }
 
         fn node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
-            (0..self.graph.node_count())
+            (0..self.graph.node_bound())
                 .rev()
-                .map(<NodeId as DenseNodeId>::from_index)
+                .map(<NodeId as DenseId>::from_index)
         }
 
         fn successors(&self, node: NodeId) -> impl Iterator<Item = NodeId> + '_ {
@@ -306,7 +306,7 @@ mod tests {
         }
     }
 
-    impl RootedGraphView for ReverseNodeIds<'_> {
+    impl RootedView for ReverseNodeIds<'_> {
         fn root(&self) -> NodeId {
             self.root
         }
@@ -323,7 +323,7 @@ mod tests {
 
     #[test]
     fn empty_view_has_one_empty_level() {
-        let graph = DirectedGraph::<(), ()>::new();
+        let graph = Graph::<(), ()>::new();
         let view = Rooted::new(&graph, NodeId::from_index(0));
 
         let result = IntervalAnalysis::compute(&view);
@@ -377,7 +377,7 @@ mod tests {
 
     #[test]
     fn reverse_id_chain_is_one_ordered_interval() {
-        let mut graph = DirectedGraph::<(), ()>::new();
+        let mut graph = Graph::<(), ()>::new();
         let nodes: Vec<_> = (0..8).map(|_| graph.add_node(())).collect();
         for index in 1..nodes.len() {
             graph.add_edge(nodes[index], nodes[index - 1], ());
@@ -398,7 +398,7 @@ mod tests {
 
     #[test]
     fn permuted_node_iteration_still_indexes_predecessor_counts_by_id() {
-        let mut graph = DirectedGraph::<(), ()>::new();
+        let mut graph = Graph::<(), ()>::new();
         let root = graph.add_node(());
         let child = graph.add_node(());
         graph.add_edge(root, child, ());
@@ -422,7 +422,7 @@ mod tests {
 
     #[test]
     fn parallel_predecessor_edges_are_counted_individually() {
-        let mut graph = DirectedGraph::<(), ()>::with_capacity(2, 255);
+        let mut graph = Graph::<(), ()>::with_capacity(2, 255);
         let root = graph.add_node(());
         let child = graph.add_node(());
         for _ in 0..255 {
@@ -465,7 +465,7 @@ mod tests {
 
     #[test]
     fn non_header_self_loop_starts_a_new_interval() {
-        let mut graph = DirectedGraph::<(), ()>::new();
+        let mut graph = Graph::<(), ()>::new();
         let root = graph.add_node(());
         let loop_header = graph.add_node(());
         let exit = graph.add_node(());
@@ -491,7 +491,7 @@ mod tests {
 
     #[test]
     fn unreachable_nodes_are_not_assigned_to_intervals() {
-        let mut graph = DirectedGraph::<(), ()>::new();
+        let mut graph = Graph::<(), ()>::new();
         let root = graph.add_node(());
         let reachable = graph.add_node(());
         let unreachable = graph.add_node(());

@@ -9,7 +9,7 @@
 //! propagation, "all callers dead" elimination, and dependency readiness.
 //!
 //! This deliberately does not ride
-//! [`DirectedGraphView`](super::view::DirectedGraphView): a single meet
+//! [`GraphView`](super::view::GraphView): a single meet
 //! operator cannot be conjunction at the clause class and disjunction at the
 //! fact class, so encoding a clause set as a plain graph would either lose the
 //! AND or lose the OR. The clause set is its own storage, and the solve is the
