@@ -108,6 +108,28 @@ impl DenseBits {
         changed
     }
 
+    /// Removes every index, keeping the universe and the buffer.
+    ///
+    /// This is a fill of the word array, so it costs O(universe / 64) and no
+    /// allocation — which is what lets one row be reused across the many
+    /// small problems a whole-codebase pass solves instead of being rebuilt
+    /// per problem.
+    pub fn clear(&mut self) {
+        self.words.fill(0);
+    }
+
+    /// The packed words, 64 indices each, least-significant bit first.
+    ///
+    /// Exposed so a consumer can run its own word-parallel operation over a
+    /// row — a population count against a mask, a difference, a three-way
+    /// merge — without unpacking it one index at a time. Word `w` holds
+    /// indices `64 * w .. 64 * w + 64`; the last word's bits above the
+    /// universe are always zero.
+    #[must_use]
+    pub fn words(&self) -> &[u64] {
+        &self.words
+    }
+
     /// The number of indices in the set.
     #[must_use]
     pub fn count_ones(&self) -> usize {
@@ -118,12 +140,73 @@ impl DenseBits {
     }
 
     /// The set's indices in ascending order.
+    ///
+    /// One step per *set* index, not one per index in the universe: an empty
+    /// word is skipped whole.
     pub fn ones(&self) -> impl Iterator<Item = usize> + '_ {
-        self.words.iter().enumerate().flat_map(|(position, &word)| {
-            (0..64)
-                .filter(move |bit| word & (1 << bit) != 0)
-                .map(move |bit| position * 64 + bit)
-        })
+        WordOnes::new(self.words.iter().copied())
+    }
+
+    /// The indices in both sets, in ascending order.
+    ///
+    /// The two rows are intersected 64 indices at a time, so a pair of large
+    /// sparse sets costs one `and` per word rather than one probe per index.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the universes differ.
+    pub fn intersection<'a>(&'a self, other: &'a Self) -> impl Iterator<Item = usize> + 'a {
+        assert_eq!(
+            self.len, other.len,
+            "intersected sets must share one universe"
+        );
+        WordOnes::new(
+            self.words
+                .iter()
+                .zip(&other.words)
+                .map(|(&left, &right)| left & right),
+        )
+    }
+}
+
+/// The set indices of a word sequence, in ascending order.
+///
+/// One iterator for every row-shaped answer: the words may be a set's own, or
+/// any combination of two rows computed a word at a time. Each step clears
+/// the lowest set bit of the word in hand, so the work is proportional to the
+/// answer rather than to the universe.
+struct WordOnes<I: Iterator<Item = u64>> {
+    words: core::iter::Enumerate<I>,
+    /// Set bits of the word in hand that have not been yielded yet.
+    remaining: u64,
+    /// The index of the word in hand's bit zero.
+    base: usize,
+}
+
+impl<I: Iterator<Item = u64>> WordOnes<I> {
+    fn new(words: I) -> Self {
+        Self {
+            words: words.enumerate(),
+            remaining: 0,
+            base: 0,
+        }
+    }
+}
+
+impl<I: Iterator<Item = u64>> Iterator for WordOnes<I> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<usize> {
+        loop {
+            if self.remaining != 0 {
+                let bit = self.remaining.trailing_zeros() as usize;
+                self.remaining &= self.remaining - 1;
+                return Some(self.base + bit);
+            }
+            let (position, word) = self.words.next()?;
+            self.remaining = word;
+            self.base = position * 64;
+        }
     }
 }
 
@@ -159,6 +242,61 @@ mod tests {
         assert!(left.union_with(&right));
         assert!(!left.union_with(&right));
         assert_eq!(left.ones().collect::<Vec<_>>(), [1, 9]);
+    }
+
+    #[test]
+    fn clear_empties_the_set_and_keeps_the_universe() {
+        let mut bits = DenseBits::new(130);
+        bits.insert(0);
+        bits.insert(129);
+        bits.clear();
+        assert_eq!(bits.len(), 130);
+        assert_eq!(bits.count_ones(), 0);
+        assert!(bits.ones().next().is_none());
+        assert!(bits.insert(129), "a cleared index is newly set again");
+    }
+
+    #[test]
+    fn words_expose_the_packed_representation() {
+        let mut bits = DenseBits::new(130);
+        bits.insert(0);
+        bits.insert(64);
+        bits.insert(129);
+        assert_eq!(bits.words(), [1, 1, 2]);
+    }
+
+    #[test]
+    fn intersection_yields_the_common_indices_in_order() {
+        let mut left = DenseBits::new(200);
+        let mut right = DenseBits::new(200);
+        for index in [1, 63, 64, 130, 199] {
+            left.insert(index);
+        }
+        for index in [0, 63, 65, 130] {
+            right.insert(index);
+        }
+        assert_eq!(left.intersection(&right).collect::<Vec<_>>(), [63, 130]);
+        assert_eq!(
+            left.intersection(&right).collect::<Vec<_>>(),
+            right.intersection(&left).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn a_disjoint_intersection_is_empty() {
+        let mut left = DenseBits::new(70);
+        let mut right = DenseBits::new(70);
+        left.insert(3);
+        right.insert(69);
+        assert!(left.intersection(&right).next().is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "intersected sets must share one universe")]
+    fn intersecting_different_universes_panics() {
+        let left = DenseBits::new(70);
+        let right = DenseBits::new(71);
+        let _ = left.intersection(&right).count();
     }
 
     #[test]

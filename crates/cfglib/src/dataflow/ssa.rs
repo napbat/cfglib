@@ -16,7 +16,7 @@ use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::dataflow::{InstrInfo, ProgramPoint, VariableId};
 use crate::graph::dominator::{DominatorChildOrder, DominatorTree};
-use crate::graph::search::EpochMarks;
+use crate::graph::epoch::EpochMarks;
 use crate::graph::view::{DenseId, GraphView, RootedView};
 use crate::kosaraju_scc;
 

@@ -30,10 +30,10 @@
 //! passes whose searches are so small that the *call* is the cost.
 
 extern crate alloc;
-use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
+use crate::graph::epoch::EpochMarks;
 use crate::graph::traverse::{Adjacency, TraversalDirection, by_axis};
 use crate::graph::view::{DenseId, GraphView};
 
@@ -128,112 +128,6 @@ impl SearchConfig {
     pub const fn with_max_depth(mut self, max_depth: usize) -> Self {
         self.max_depth = Some(max_depth);
         self
-    }
-}
-
-/// Reusable visited marks for repeated searches over one dense node space.
-///
-/// [`search`] owns its marks, so every call allocates and zeroes a buffer
-/// sized to the whole graph. A pass that searches **once per root** over one
-/// node space — a nulling closure per grammar nonterminal, a reachable set per
-/// definition — pays that O(node count) buffer per root, so its cost scales
-/// with the graph even when each search touches a handful of nodes. That is
-/// the shape consumers hand-roll an epoch stamp for, and why they decline a
-/// substrate that owns its marks.
-///
-/// `EpochMarks` is that stamp, owned by the caller: each node holds the epoch
-/// it was last marked in, so clearing the marks is a bump of the current epoch
-/// rather than a walk over the buffer. Allocate one per node space, hand it to
-/// every [`search_with_marks`] of the pass, and marking costs O(1) amortized
-/// per root instead of O(node count).
-///
-/// # Cost
-///
-/// The win is exactly the buffer, so it is largest when each search is small
-/// against the graph. Measured on 16,384 nodes whose closures are four nodes
-/// each, one search per node: 8.3ms with a fresh buffer per search, 1.5ms over
-/// one reused buffer (5.4x). It narrows as searches grow — a search that
-/// visits a large fraction of the graph is dominated by the walk, and reuse
-/// lands in the noise.
-///
-/// # Allocation
-///
-/// The buffer holds one `u32` stamp per node and is the only allocation in a
-/// search whose size is O(node count); what remains per call is O(seeds) and
-/// O(nodes visited) — the seed vector, the frontier, and (for the depth-first
-/// cores alone, which read a node's successors in reverse) one adjacency
-/// buffer refilled per expansion. Those are what [`SearchScratch`] owns, for
-/// the pass whose searches are so small that the call itself is the cost.
-/// Sizing is fixed at
-/// construction: a buffer smaller than the graph is a panic, not a resize, so
-/// that a marks buffer never silently reallocates in the middle of the pass it
-/// exists to keep allocation-free. A buffer **larger** than the graph is fine,
-/// which is how one buffer covers a set of graphs — size it by the largest.
-///
-/// # Examples
-///
-/// ```
-/// use cfglib::EpochMarks;
-///
-/// let marks = EpochMarks::new(64);
-/// assert_eq!(marks.capacity(), 64);
-/// ```
-#[derive(Debug, Clone)]
-pub struct EpochMarks {
-    /// Per node, the epoch it was last marked in; marked when it equals
-    /// `epoch`.
-    stamps: Vec<u32>,
-    /// The current epoch. Never zero, so a zero stamp is always unmarked —
-    /// which is both the initial state and the un-mark of
-    /// [`VisitedPolicy::Path`].
-    epoch: u32,
-}
-
-impl EpochMarks {
-    /// Marks covering `node_count` nodes, with nothing marked.
-    #[must_use]
-    pub fn new(node_count: usize) -> Self {
-        Self {
-            stamps: vec![0; node_count],
-            epoch: 1,
-        }
-    }
-
-    /// Return how many nodes these marks cover.
-    ///
-    /// A [`search_with_marks`] over a graph with more nodes than this panics;
-    /// a consumer whose node space grew builds a new buffer.
-    #[must_use]
-    pub fn capacity(&self) -> usize {
-        self.stamps.len()
-    }
-
-    /// Clear every mark in O(1) by moving to a fresh epoch.
-    ///
-    /// The buffer is only walked when the epoch would wrap, which needs
-    /// `u32::MAX` searches over one buffer.
-    pub(crate) fn reset(&mut self) {
-        if self.epoch == u32::MAX {
-            self.stamps.fill(0);
-            self.epoch = 1;
-        } else {
-            self.epoch += 1;
-        }
-    }
-
-    /// Whether `index` is marked in the current epoch.
-    pub(crate) fn is_marked(&self, index: usize) -> bool {
-        self.stamps[index] == self.epoch
-    }
-
-    /// Mark `index` for the current epoch.
-    pub(crate) fn mark(&mut self, index: usize) {
-        self.stamps[index] = self.epoch;
-    }
-
-    /// Un-mark `index`, the unwind of [`VisitedPolicy::Path`].
-    fn unmark(&mut self, index: usize) {
-        self.stamps[index] = 0;
     }
 }
 

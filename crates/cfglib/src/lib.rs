@@ -328,6 +328,7 @@ pub use graph::edge_traverse::{
 };
 pub use graph::edge_view::{EdgeRef, EdgeView, FilteredEdges};
 pub use graph::eh::{EhBlockKind, EhEdge, EhEdgeKind, EhModel};
+pub use graph::epoch::{EpochMarks, EpochSet};
 pub use graph::fanout::{DenseFanout, Fanout, SortedMap};
 pub use graph::horn::HornClauses;
 pub use graph::interval::{Interval, IntervalAnalysis};
@@ -354,7 +355,7 @@ pub use graph::scope::{
     ScopeResolutionIndex, ScopeResolutionStats, ScopeTag,
 };
 pub use graph::search::{
-    BfsEvent, DfsEvent, EpochMarks, SearchConfig, SearchOrder, SearchScratch, Visit, VisitedPolicy,
+    BfsEvent, DfsEvent, SearchConfig, SearchOrder, SearchScratch, Visit, VisitedPolicy,
     breadth_first_events, depth_first_events, search, search_with_marks, search_with_scratch,
 };
 pub use graph::stack::{

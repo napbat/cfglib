@@ -356,6 +356,55 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         self.incoming(node).map(|edge| self.edge(edge).source())
     }
 
+    /// The number of live outgoing edges of `node`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `node` names no slot in this store.
+    #[must_use]
+    pub fn out_degree(&self, node: Id<NT>) -> usize {
+        self.degree(node, TraversalDirection::Outgoing)
+    }
+
+    /// The number of live incoming edges of `node`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `node` names no slot in this store.
+    #[must_use]
+    pub fn in_degree(&self, node: Id<NT>) -> usize {
+        self.degree(node, TraversalDirection::Incoming)
+    }
+
+    /// Count one node's adjacency without materializing it.
+    ///
+    /// The base run's length is the difference of two offsets, so the
+    /// compressed half is constant time however many edges it holds, and only
+    /// the delta chain is walked — which is the shape a consumer asking for a
+    /// degree wants, because the store it asks spends most of its life
+    /// compacted and answers in O(1) there.
+    ///
+    /// A store holding tombstoned edges cannot do either: whether a run entry
+    /// is still live is one bitset probe per edge, and skipping it would count
+    /// removed edges. Such a store counts the walk instead, which is what a
+    /// caller would have written by hand.
+    fn degree(&self, node: Id<NT>, direction: TraversalDirection) -> usize {
+        let walk = self.adjacent(node, direction);
+        if walk.live.is_some() {
+            return walk.count();
+        }
+        let mut count = (walk.cursor.base_end - walk.cursor.base) as usize;
+        let mut delta = walk.cursor.delta;
+        while delta != NONE {
+            count += 1;
+            if delta == walk.cursor.delta_last {
+                break;
+            }
+            delta = walk.axis.chains.next[delta as usize][walk.axis.chain];
+        }
+        count
+    }
+
     /// Remove every live edge reachable from `node` in `direction`.
     ///
     /// The walk is collected first because the loop body needs the store

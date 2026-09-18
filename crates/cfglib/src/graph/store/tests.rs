@@ -214,6 +214,57 @@ fn removing_an_edge_leaves_every_other_identity_alone() {
 }
 
 #[test]
+fn degrees_agree_with_the_walk_in_every_store_state() {
+    let (mut graph, nodes) = diamond();
+    let degrees = |graph: &Graph<&'static str, &'static str>| {
+        nodes
+            .iter()
+            .map(|&node| (graph.out_degree(node), graph.in_degree(node)))
+            .collect::<Vec<_>>()
+    };
+    let walked = |graph: &Graph<&'static str, &'static str>| {
+        nodes
+            .iter()
+            .map(|&node| (graph.outgoing(node).count(), graph.incoming(node).count()))
+            .collect::<Vec<_>>()
+    };
+
+    // Entirely in the delta, where every edge is one chain step.
+    assert_eq!(degrees(&graph), walked(&graph));
+    assert_eq!(degrees(&graph), [(2, 0), (1, 1), (1, 1), (0, 2)]);
+
+    // Entirely in the compressed base, which is the constant-time answer.
+    graph.compact();
+    assert_eq!(degrees(&graph), walked(&graph));
+
+    // A base plus a delta, and then a tombstone, which is the counted walk.
+    graph.add_edge(nodes[3], nodes[0], "back");
+    assert_eq!(degrees(&graph), walked(&graph));
+    assert_eq!(graph.out_degree(nodes[3]), 1);
+    let removed = graph.edge_ids().next().expect("the diamond has edges");
+    assert!(graph.remove_edge(removed));
+    assert_eq!(degrees(&graph), walked(&graph));
+    assert_eq!(graph.out_degree(nodes[0]), 1);
+}
+
+#[test]
+fn a_redirected_endpoint_is_counted_at_its_new_node() {
+    let (mut graph, nodes) = diamond();
+    graph.compact();
+    let edge = graph.edge_ids().next().expect("the diamond has edges");
+    graph.redirect_edge_target(edge, nodes[2]);
+
+    for &node in &nodes {
+        assert_eq!(
+            (graph.out_degree(node), graph.in_degree(node)),
+            (graph.outgoing(node).count(), graph.incoming(node).count()),
+        );
+    }
+    assert_eq!(graph.in_degree(nodes[1]), 0);
+    assert_eq!(graph.in_degree(nodes[2]), 2);
+}
+
+#[test]
 fn removed_payloads_stay_readable_until_compaction() {
     let (mut graph, nodes) = diamond();
     let edge = graph.edge_ids().next().expect("the diamond has edges");

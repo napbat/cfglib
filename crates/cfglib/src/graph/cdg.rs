@@ -8,7 +8,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::graph::dominator::DominatorTree;
-use crate::graph::search::EpochMarks;
+use crate::graph::epoch::EpochMarks;
 use crate::graph::store::Graph;
 use crate::graph::view::{DenseId, GraphView};
 
