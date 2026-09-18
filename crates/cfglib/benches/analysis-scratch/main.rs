@@ -23,8 +23,8 @@ mod allocation;
 mod fixtures;
 
 use cfglib::{
-    Cfg, DominanceFrontiers, DominatorTree, ExactMemoryAlias, MemorySSA, MemoryTrace,
-    MemoryValueFlow, PhiPlacements, SsaForm, TraversalDirection, reverse_postorder,
+    Cfg, DominanceFrontiers, DominatorScratch, DominatorTree, ExactMemoryAlias, MemorySSA,
+    MemoryTrace, MemoryValueFlow, PhiPlacements, SsaForm, TraversalDirection, reverse_postorder,
 };
 
 use allocation::case;
@@ -73,6 +73,10 @@ impl Cases<'_> {
             reverse_postorder(cfg, cfg.entry(), TraversalDirection::Outgoing)
         });
         self.run(subject, "dominator-tree", || DominatorTree::compute(cfg));
+        let mut dominator_scratch = DominatorScratch::new();
+        self.run(subject, "dominator-tree-in", || {
+            DominatorTree::compute_in(&mut dominator_scratch, cfg)
+        });
         self.run(subject, "dominance-frontiers", || {
             DominanceFrontiers::compute(cfg, &dominators)
         });

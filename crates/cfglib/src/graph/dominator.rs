@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::graph::traverse::{TraversalDirection, reverse_postorder};
+use crate::graph::traverse::{PostorderScratch, TraversalDirection, reverse_postorder_in};
 use crate::graph::view::{DenseId, GraphView, RootedView};
 
 /// A dominator tree computed from a rooted directed graph.
@@ -198,6 +198,74 @@ impl<G: GraphView> GraphView for PostDominatorView<'_, G> {
     }
 }
 
+/// Every buffer [`DominatorTree::compute_in`] fills, owned by the caller.
+///
+/// A whole-codebase pass computes a dominator tree once per procedure, and
+/// most procedures are a handful of blocks. At that size the tree is not the
+/// cost, the *call* is: a reverse postorder with its own visited row,
+/// frontier, and adjacency buffer, then a position index and a working parent
+/// array, each a malloc and a free for a four-block answer. This moves all
+/// five out of the call, leaving only the two exact-sized arrays the tree
+/// itself keeps.
+///
+/// Hand one scratch to every [`compute_in`](DominatorTree::compute_in) of the
+/// pass. The buffers grow to the largest graph the pass meets and are then
+/// reused by every graph after it, so the whole pass allocates a bounded
+/// number of times instead of a few times per procedure.
+///
+/// # One scratch, any graph
+///
+/// Nodes are held as dense indices rather than as a node-id type, so the
+/// scratch carries no type parameter: one instance serves a [`Cfg`], a
+/// [`Graph`](crate::Graph), and a consumer-defined [`GraphView`], in any
+/// order, and it is [`Send`], so a worker thread can own one for the whole
+/// corpus it is handed.
+///
+/// # Sizing
+///
+/// Nothing is fixed at construction and nothing is released by a call. Every
+/// buffer is cleared and resized on entry, so a scratch used on a large graph
+/// and then on a small one is correct and allocation-free, and the space it
+/// holds is the high-water mark of the sequence.
+///
+/// # Examples
+///
+/// ```
+/// use cfglib::{Cfg, DominatorScratch, DominatorTree, EdgeKind};
+///
+/// let mut cfg = Cfg::<u32>::new();
+/// let entry = cfg.entry();
+/// let then_block = cfg.new_block();
+/// cfg.add_edge(entry, then_block, EdgeKind::ConditionalTrue);
+///
+/// let mut scratch = DominatorScratch::new();
+/// let tree = DominatorTree::compute_in(&mut scratch, &cfg);
+/// assert_eq!(tree, DominatorTree::compute(&cfg));
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct DominatorScratch {
+    /// The reverse postorder the iteration walks, and the walk's own buffers.
+    postorder: PostorderScratch,
+    /// Each node's position in that order, or [`usize::MAX`] when the root
+    /// does not reach it.
+    order_index: Vec<usize>,
+    /// The working immediate-dominator array, in order positions rather than
+    /// node indices, which is what makes the intersection a walk down two
+    /// integers.
+    dominators: Vec<Option<usize>>,
+}
+
+impl DominatorScratch {
+    /// Scratch holding nothing yet.
+    ///
+    /// Every buffer is sized by the first graph it sees, so there is no node
+    /// count to state here.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 impl<N: DenseId> DominatorTree<N> {
     /// Constructs an internal dominator forest from already validated dense
     /// parent and reachability tables.
@@ -213,7 +281,22 @@ impl<N: DenseId> DominatorTree<N> {
     where
         G: RootedView<NodeId = N>,
     {
-        Self::compute_from(graph, graph.root())
+        Self::compute_in(&mut DominatorScratch::new(), graph)
+    }
+
+    /// Compute the dominator tree of a rooted graph view over caller-owned
+    /// working storage.
+    ///
+    /// This is [`compute`](Self::compute) with the call's buffers taken out of
+    /// it. The tree it returns is the same one, built by the same code: the
+    /// allocating entry point is this function over a fresh
+    /// [`DominatorScratch`].
+    #[must_use]
+    pub fn compute_in<G>(scratch: &mut DominatorScratch, graph: &G) -> Self
+    where
+        G: RootedView<NodeId = N>,
+    {
+        Self::compute_from_in(scratch, graph, graph.root())
     }
 
     /// Recompute the dominator tree and report which nodes' immediate
@@ -246,23 +329,46 @@ impl<N: DenseId> DominatorTree<N> {
     where
         G: GraphView<NodeId = N>,
     {
-        let order = reverse_postorder(graph, root, TraversalDirection::Outgoing);
+        Self::compute_from_in(&mut DominatorScratch::new(), graph, root)
+    }
+
+    /// Compute dominators from an explicit root over caller-owned working
+    /// storage.
+    ///
+    /// This is [`compute_from`](Self::compute_from) with the call's buffers
+    /// taken out of it; see [`DominatorScratch`].
+    #[must_use]
+    pub fn compute_from_in<G>(scratch: &mut DominatorScratch, graph: &G, root: N) -> Self
+    where
+        G: GraphView<NodeId = N>,
+    {
+        reverse_postorder_in(
+            &mut scratch.postorder,
+            graph,
+            root,
+            TraversalDirection::Outgoing,
+        );
+        let order = &scratch.postorder.order;
         let node_count = graph.node_bound();
-        let mut order_index = vec![usize::MAX; node_count];
+        scratch.order_index.clear();
+        scratch.order_index.resize(node_count, usize::MAX);
+        let order_index = &mut scratch.order_index;
         for (index, node) in order.iter().copied().enumerate() {
-            order_index[node.index()] = index;
+            order_index[node] = index;
         }
 
-        let mut dominators = vec![None; order.len()];
+        let dominators = &mut scratch.dominators;
+        dominators.clear();
+        dominators.resize(order.len(), None);
         dominators[order_index[root.index()]] = Some(order_index[root.index()]);
 
         let mut changed = true;
         while changed {
             changed = false;
-            for node in order.iter().copied().filter(|node| *node != root) {
-                let node_order = order_index[node.index()];
+            for node in order.iter().copied().filter(|&node| node != root.index()) {
+                let node_order = order_index[node];
                 let mut new_parent_index = None;
-                for predecessor in graph.predecessors(node) {
+                for predecessor in graph.predecessors(N::from_index(node)) {
                     let predecessor_order = order_index[predecessor.index()];
                     if predecessor_order == usize::MAX || dominators[predecessor_order].is_none() {
                         continue;
@@ -271,7 +377,7 @@ impl<N: DenseId> DominatorTree<N> {
                     new_parent_index = Some(match new_parent_index {
                         None => predecessor_order,
                         Some(parent) if predecessor_order == parent => parent,
-                        Some(parent) => Self::intersect(&dominators, predecessor_order, parent),
+                        Some(parent) => Self::intersect(dominators, predecessor_order, parent),
                     });
                 }
                 let Some(new_parent_index) = new_parent_index else {
@@ -286,14 +392,14 @@ impl<N: DenseId> DominatorTree<N> {
         }
 
         let mut immediate = vec![None; node_count];
-        for (index, parent) in dominators.into_iter().enumerate() {
+        for (index, parent) in dominators.iter().copied().enumerate() {
             let node = order[index];
-            immediate[node.index()] = parent.map(|parent_index| order[parent_index]);
+            immediate[node] = parent.map(|parent_index| N::from_index(order[parent_index]));
         }
         immediate[root.index()] = None;
         let mut reachable = vec![false; node_count];
-        for node in order {
-            reachable[node.index()] = true;
+        for &node in order {
+            reachable[node] = true;
         }
         Self {
             idom: immediate,
@@ -629,371 +735,4 @@ impl DominatorTree<BlockId> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::cfg::Cfg;
-    use crate::edge::EdgeKind;
-    use crate::graph::store::{Graph, NodeId};
-    use crate::test_util::MockInst;
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    struct BoundedNode(u8);
-
-    impl DenseId for BoundedNode {
-        fn from_index(index: usize) -> Self {
-            assert!(index < 4, "bounded ID cannot represent a synthetic node");
-            Self(u8::try_from(index).expect("test node index fits in u8"))
-        }
-
-        fn index(self) -> usize {
-            usize::from(self.0)
-        }
-    }
-
-    struct BoundedDiamond;
-
-    impl GraphView for BoundedDiamond {
-        type NodeId = BoundedNode;
-
-        fn node_bound(&self) -> usize {
-            4
-        }
-
-        fn node_ids(&self) -> impl Iterator<Item = Self::NodeId> + '_ {
-            (0..4).map(BoundedNode)
-        }
-
-        fn successors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
-            const EMPTY: &[u8] = &[];
-            const ENTRY: &[u8] = &[1, 2];
-            const TO_EXIT: &[u8] = &[3];
-            let successors = match node.0 {
-                0 => ENTRY,
-                1 | 2 => TO_EXIT,
-                _ => EMPTY,
-            };
-            successors.iter().copied().map(BoundedNode)
-        }
-
-        fn predecessors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
-            const EMPTY: &[u8] = &[];
-            const FROM_ENTRY: &[u8] = &[0];
-            const MERGE: &[u8] = &[1, 2];
-            let predecessors = match node.0 {
-                1 | 2 => FROM_ENTRY,
-                3 => MERGE,
-                _ => EMPTY,
-            };
-            predecessors.iter().copied().map(BoundedNode)
-        }
-    }
-
-    #[test]
-    fn single_block_cfg() {
-        let cfg: Cfg<MockInst> = Cfg::new();
-        let dom = DominatorTree::compute(&cfg);
-        assert_eq!(dom.idom(cfg.entry()), None);
-        assert!(dom.dominates(cfg.entry(), cfg.entry()));
-        assert_eq!(dom.children(cfg.entry()).len(), 0);
-    }
-
-    #[test]
-    fn linear_chain_dominance() {
-        let mut cfg: Cfg<MockInst> = Cfg::new();
-        let b1 = cfg.new_block();
-        let b2 = cfg.new_block();
-        cfg.add_edge(cfg.entry(), b1, EdgeKind::Fallthrough);
-        cfg.add_edge(b1, b2, EdgeKind::Fallthrough);
-        let dom = DominatorTree::compute(&cfg);
-        assert!(dom.dominates(cfg.entry(), b1));
-        assert!(dom.dominates(cfg.entry(), b2));
-        assert!(dom.dominates(b1, b2));
-        assert!(!dom.dominates(b2, b1));
-        assert_eq!(dom.idom(b1), Some(cfg.entry()));
-        assert_eq!(dom.idom(b2), Some(b1));
-    }
-
-    #[test]
-    fn diamond_idom_at_merge() {
-        let mut cfg: Cfg<MockInst> = Cfg::new();
-        let a = cfg.new_block();
-        let b = cfg.new_block();
-        let merge = cfg.new_block();
-        cfg.add_edge(cfg.entry(), a, EdgeKind::ConditionalTrue);
-        cfg.add_edge(cfg.entry(), b, EdgeKind::ConditionalFalse);
-        cfg.add_edge(a, merge, EdgeKind::Fallthrough);
-        cfg.add_edge(b, merge, EdgeKind::Fallthrough);
-        let dom = DominatorTree::compute(&cfg);
-        // Merge block's idom should be entry (not a or b).
-        assert_eq!(dom.idom(merge), Some(cfg.entry()));
-        assert!(dom.dominates(cfg.entry(), a));
-        assert!(dom.dominates(cfg.entry(), b));
-        assert!(!dom.dominates(a, b));
-        assert!(!dom.dominates(b, a));
-    }
-
-    #[test]
-    fn self_loop_dominance() {
-        let mut cfg: Cfg<MockInst> = Cfg::new();
-        cfg.add_edge(cfg.entry(), cfg.entry(), EdgeKind::Back);
-        let dom = DominatorTree::compute(&cfg);
-        assert_eq!(dom.idom(cfg.entry()), None);
-        assert!(dom.dominates(cfg.entry(), cfg.entry()));
-    }
-
-    #[test]
-    fn unreachable_block_not_dominated() {
-        let mut cfg: Cfg<MockInst> = Cfg::new();
-        let unreachable = cfg.new_block();
-        let dom = DominatorTree::compute(&cfg);
-        // Entry still dominates itself.
-        assert!(dom.dominates(cfg.entry(), cfg.entry()));
-        // Unreachable block has no idom.
-        assert_eq!(dom.idom(unreachable), None);
-    }
-
-    #[test]
-    fn depth_computation() {
-        let mut cfg: Cfg<MockInst> = Cfg::new();
-        let b1 = cfg.new_block();
-        let b2 = cfg.new_block();
-        cfg.add_edge(cfg.entry(), b1, EdgeKind::Fallthrough);
-        cfg.add_edge(b1, b2, EdgeKind::Fallthrough);
-        let dom = DominatorTree::compute(&cfg);
-        assert_eq!(dom.depth(cfg.entry()), Some(0));
-        assert_eq!(dom.depth(b1), Some(1));
-        assert_eq!(dom.depth(b2), Some(2));
-    }
-
-    #[test]
-    fn depth_tables_match_queries_when_parents_have_larger_ids() {
-        let mut graph = Graph::<(), ()>::new();
-        let leaf = graph.add_node(());
-        let middle = graph.add_node(());
-        let child = graph.add_node(());
-        let root = graph.add_node(());
-        let unreachable = graph.add_node(());
-        graph.add_edge(root, child, ());
-        graph.add_edge(child, middle, ());
-        graph.add_edge(middle, leaf, ());
-
-        let dom = DominatorTree::compute_from(&graph, root);
-        let depths = dom.depths();
-        let AnalysisDepths::Compact(compact_depths) = dom.analysis_depths() else {
-            panic!("small test graph should use compact depths");
-        };
-        for node in [root, child, middle, leaf] {
-            let expected = dom.depth(node).expect("reachable node has a depth");
-            assert_eq!(depths[node.index()], expected);
-            assert_eq!(
-                compact_depths[node.index()],
-                u32::try_from(expected).expect("test depth fits u32")
-            );
-        }
-        assert_eq!(depths[unreachable.index()], usize::MAX);
-        assert_eq!(compact_depths[unreachable.index()], u32::MAX);
-    }
-
-    #[test]
-    fn full_analysis_depths_match_public_dominance_queries() {
-        let mut graph = Graph::<(), ()>::new();
-        let root = graph.add_node(());
-        let left = graph.add_node(());
-        let right = graph.add_node(());
-        let merge = graph.add_node(());
-        let unreachable = graph.add_node(());
-        graph.add_edge(root, left, ());
-        graph.add_edge(root, right, ());
-        graph.add_edge(left, merge, ());
-        graph.add_edge(right, merge, ());
-
-        let dom = DominatorTree::compute_from(&graph, root);
-        let full_depths = AnalysisDepths::Full(dom.depths());
-        let nodes = [root, left, right, merge, unreachable];
-        for dominator in nodes {
-            for node in nodes {
-                assert_eq!(
-                    dom.dominates_with_analysis_depths(dominator, node, &full_depths),
-                    dom.dominates(dominator, node),
-                    "mismatch for {dominator:?} dominating {node:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn child_links_follow_the_selected_sibling_order() {
-        let mut graph = Graph::<(), ()>::new();
-        let root = graph.add_node(());
-        let first = graph.add_node(());
-        let second = graph.add_node(());
-        let grandchild = graph.add_node(());
-        let unreachable = graph.add_node(());
-        graph.add_edge(root, first, ());
-        graph.add_edge(root, second, ());
-        graph.add_edge(first, grandchild, ());
-
-        let dom = DominatorTree::compute_from(&graph, root);
-        let ascending = dom.child_links(DominatorChildOrder::Ascending);
-        let descending = dom.child_links(DominatorChildOrder::Descending);
-
-        let collect = |links: &DominatorChildLinks<NodeId>, parent| {
-            let mut children = Vec::new();
-            let mut child = links.first_child(parent);
-            while let Some(next) = child {
-                children.push(next);
-                child = links.next_sibling(next);
-            }
-            children
-        };
-
-        assert_eq!(collect(&ascending, root), vec![first, second]);
-        assert_eq!(collect(&descending, root), vec![second, first]);
-        assert_eq!(collect(&ascending, first), vec![grandchild]);
-        assert_eq!(collect(&ascending, unreachable).len(), 0);
-    }
-
-    #[test]
-    fn compact_depth_selection_falls_back_before_the_sentinel_can_be_a_depth() {
-        let largest_compact = usize::try_from(u32::MAX).expect("u32 fits supported usize targets");
-        assert!(compact_depths_supported(largest_compact));
-        if let Some(too_large) = largest_compact.checked_add(1) {
-            assert!(!compact_depths_supported(too_large));
-        }
-    }
-
-    #[test]
-    fn post_dominators_over_a_consumer_view() {
-        // Diamond in consumer storage: a -> {b, c} -> d. Everything is
-        // post-dominated by d; the branch is post-dominated by the merge.
-        let mut graph = Graph::<&str, ()>::new();
-        let a = graph.add_node("a");
-        let b = graph.add_node("b");
-        let c = graph.add_node("c");
-        let d = graph.add_node("d");
-        graph.add_edge(a, b, ());
-        graph.add_edge(a, c, ());
-        graph.add_edge(b, d, ());
-        graph.add_edge(c, d, ());
-
-        let post = DominatorTree::compute_post_from(&graph, &[d]);
-        assert_eq!(post.idom(a), Some(d));
-        assert_eq!(post.idom(b), Some(d));
-        assert_eq!(post.idom(c), Some(d));
-        assert!(post.dominates(d, a), "d post-dominates the entry");
-
-        // No exits: nothing is reachable on the reverse graph.
-        let empty = DominatorTree::compute_post_from(&graph, &[]);
-        assert_eq!(empty.idom(a), None);
-        assert_eq!(empty.depth(a), None);
-    }
-
-    #[test]
-    #[should_panic(expected = "post-dominator exit index is outside the graph")]
-    fn post_dominators_reject_an_exit_outside_the_graph() {
-        let mut graph = Graph::<(), ()>::new();
-        graph.add_node(());
-
-        let outside = NodeId::from_raw(
-            u32::try_from(graph.node_bound()).expect("test graph size fits in u32"),
-        );
-        let _ = DominatorTree::compute_post_from(&graph, &[outside]);
-    }
-
-    #[test]
-    fn post_dominator_view_preserves_duplicate_exit_edges() {
-        let mut graph = Graph::<(), ()>::new();
-        let exit = graph.add_node(());
-        let exits = [exit, exit];
-        let reverse = PostDominatorView {
-            graph: &graph,
-            exits: &exits,
-            binary_search_exits: false,
-        };
-        let virtual_exit = graph.node_bound();
-
-        assert_eq!(
-            reverse.successors(virtual_exit).collect::<Vec<_>>(),
-            vec![exit.index(), exit.index()]
-        );
-        assert_eq!(
-            reverse.predecessors(exit.index()).collect::<Vec<_>>(),
-            vec![virtual_exit, virtual_exit]
-        );
-    }
-
-    #[test]
-    fn post_dominators_do_not_require_consumer_ids_for_the_virtual_exit() {
-        let post = DominatorTree::compute_post_from(&BoundedDiamond, &[BoundedNode(3)]);
-        assert_eq!(post.idom(BoundedNode(0)), Some(BoundedNode(3)));
-        assert_eq!(post.idom(BoundedNode(1)), Some(BoundedNode(3)));
-        assert_eq!(post.idom(BoundedNode(2)), Some(BoundedNode(3)));
-        assert!(post.dominates(BoundedNode(3), BoundedNode(0)));
-    }
-
-    #[test]
-    fn post_dominators_accept_large_unsorted_exit_lists() {
-        let mut graph = Graph::<(), ()>::new();
-        let entry = graph.add_node(());
-        let mut exits = Vec::new();
-        for _ in 0..16 {
-            let exit = graph.add_node(());
-            graph.add_edge(entry, exit, ());
-            exits.push(exit);
-        }
-
-        let ordered = DominatorTree::compute_post_from(&graph, &exits);
-        exits.reverse();
-        let reversed = DominatorTree::compute_post_from(&graph, &exits);
-        assert_eq!(reversed, ordered);
-    }
-
-    #[test]
-    fn children_returns_immediate_children() {
-        let mut cfg: Cfg<MockInst> = Cfg::new();
-        let a = cfg.new_block();
-        let b = cfg.new_block();
-        let c = cfg.new_block();
-        cfg.add_edge(cfg.entry(), a, EdgeKind::ConditionalTrue);
-        cfg.add_edge(cfg.entry(), b, EdgeKind::ConditionalFalse);
-        cfg.add_edge(a, c, EdgeKind::Fallthrough);
-        let dom = DominatorTree::compute(&cfg);
-        let mut entry_children = dom.children(cfg.entry());
-        entry_children.sort();
-        assert_eq!(entry_children.len(), 2);
-        assert!(entry_children.contains(&a));
-        assert!(entry_children.contains(&b));
-        assert_eq!(dom.children(a), vec![c]);
-    }
-
-    #[test]
-    fn compute_with_diff_detects_an_idom_change() {
-        let mut cfg: Cfg<MockInst> = Cfg::new();
-        let a = cfg.new_block();
-        let b = cfg.new_block();
-        cfg.add_edge(cfg.entry(), a, EdgeKind::Fallthrough);
-        cfg.add_edge(a, b, EdgeKind::Fallthrough);
-
-        let dom = DominatorTree::compute(&cfg);
-        // Add a shortcut edge from entry directly to b.
-        cfg.add_edge(cfg.entry(), b, EdgeKind::ConditionalTrue);
-        let (next, changed) = DominatorTree::compute_with_diff(&cfg, &dom);
-
-        // b's idom should have changed from a to entry.
-        assert!(changed.contains(&b));
-        assert_eq!(next.idom(b), Some(cfg.entry()));
-    }
-
-    #[test]
-    fn compute_with_diff_reports_no_change_for_a_redundant_edge() {
-        let mut cfg: Cfg<MockInst> = Cfg::new();
-        let a = cfg.new_block();
-        cfg.add_edge(cfg.entry(), a, EdgeKind::Fallthrough);
-
-        let dom = DominatorTree::compute(&cfg);
-        // A second entry→a edge doesn't change dominators.
-        cfg.add_edge(cfg.entry(), a, EdgeKind::ConditionalTrue);
-        let (_next, changed) = DominatorTree::compute_with_diff(&cfg, &dom);
-        assert!(changed.is_empty());
-    }
-}
+mod tests;

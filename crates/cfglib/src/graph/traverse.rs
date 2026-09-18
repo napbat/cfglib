@@ -182,36 +182,98 @@ fn postorder_from<G: GraphView, A: Adjacency>(
     graph: &G,
     start: G::NodeId,
 ) -> Vec<G::NodeId> {
+    let mut scratch = PostorderScratch::default();
+    postorder_from_in(axis, &mut scratch, graph, start);
+    scratch
+        .order
+        .iter()
+        .copied()
+        .map(G::NodeId::from_index)
+        .collect()
+}
+
+/// Every buffer a postorder walk fills, owned by the caller.
+///
+/// Nodes are held as the dense indices [`DenseId`] guarantees they are, which
+/// is what keeps the buffers free of a node-id type parameter: one scratch
+/// serves every [`GraphView`], including the private augmented views the
+/// dominator algorithms run over, whose ids differ from the graph's own.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PostorderScratch {
+    /// The answer: nodes in postorder, as dense indices.
+    pub(crate) order: Vec<usize>,
+    /// Whether a node has been entered.
+    visited: Vec<bool>,
+    /// The walk's frontier. The flag is whether the node's successors have
+    /// already been pushed, so the second pop is its postorder position.
+    stack: Vec<(usize, bool)>,
+    /// One expanded node's adjacency, refilled per expansion, because the
+    /// rev-push convention needs it in reverse.
+    adjacent: Vec<usize>,
+}
+
+/// Walk `graph` from `start` in postorder, leaving the answer in
+/// `scratch.order`.
+///
+/// Every buffer is emptied on entry, so a walk never inherits a previous
+/// one's marks or frontier, and none is released, so a scratch reused across
+/// a sequence of graphs allocates only while it is growing to the largest of
+/// them.
+fn postorder_from_in<G: GraphView, A: Adjacency>(
+    axis: A,
+    scratch: &mut PostorderScratch,
+    graph: &G,
+    start: G::NodeId,
+) {
     assert!(
         start.index() < graph.node_bound(),
         "start node is out of range"
     );
-    let mut visited = vec![false; graph.node_bound()];
-    let mut order = Vec::with_capacity(graph.node_bound());
-    let mut stack = vec![(start, false)];
-    let mut adjacent = Vec::new();
+    scratch.order.clear();
+    scratch.order.reserve(graph.node_bound());
+    scratch.visited.clear();
+    scratch.visited.resize(graph.node_bound(), false);
+    scratch.stack.clear();
+    scratch.stack.push((start.index(), false));
+    scratch.adjacent.clear();
 
-    while let Some((node, processed)) = stack.pop() {
+    while let Some((node, processed)) = scratch.stack.pop() {
         if processed {
-            order.push(node);
+            scratch.order.push(node);
             continue;
         }
-        if visited[node.index()] {
+        if scratch.visited[node] {
             continue;
         }
 
-        visited[node.index()] = true;
-        stack.push((node, true));
-        adjacent.clear();
-        adjacent.extend(axis.neighbors(graph, node));
-        for &successor in adjacent.iter().rev() {
-            if !visited[successor.index()] {
-                stack.push((successor, false));
+        scratch.visited[node] = true;
+        scratch.stack.push((node, true));
+        scratch.adjacent.clear();
+        scratch.adjacent.extend(
+            axis.neighbors(graph, G::NodeId::from_index(node))
+                .map(DenseId::index),
+        );
+        for &successor in scratch.adjacent.iter().rev() {
+            if !scratch.visited[successor] {
+                scratch.stack.push((successor, false));
             }
         }
     }
+}
 
-    order
+/// Walk `graph` from `start` in **reverse** postorder, leaving the answer in
+/// `scratch.order`.
+///
+/// This is [`reverse_postorder`] without the call's buffers, for the analyses
+/// that run it once per procedure over a whole codebase.
+pub(crate) fn reverse_postorder_in<G: GraphView>(
+    scratch: &mut PostorderScratch,
+    graph: &G,
+    start: G::NodeId,
+    direction: TraversalDirection,
+) {
+    by_axis!(direction, postorder_from_in(scratch, graph, start));
+    scratch.order.reverse();
 }
 
 /// Return reverse postorder from `start`.
