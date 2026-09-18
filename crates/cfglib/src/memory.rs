@@ -467,8 +467,29 @@ impl<L, V, F> MemoryTrace<L, V, F> {
     where
         I: MemoryEventInfo<Location = L, Fence = F> + InstrInfo<Variable = V>,
     {
-        let mut entries = Vec::new();
-        let mut by_point = BTreeMap::new();
+        let mut trace = Self::empty();
+        trace.rebuild(cfg);
+        trace
+    }
+
+    /// A trace of nothing, for a consumer that fills it per procedure.
+    pub(crate) fn empty() -> Self {
+        Self {
+            entries: Vec::new(),
+            by_point: BTreeMap::new(),
+        }
+    }
+
+    /// Replace the trace's contents with `cfg`'s, keeping the entry buffer.
+    ///
+    /// This is [`compute`](Self::compute) for a caller that holds one trace
+    /// across a whole codebase rather than building one per procedure.
+    pub(crate) fn rebuild<I, E>(&mut self, cfg: &Cfg<I, E>)
+    where
+        I: MemoryEventInfo<Location = L, Fence = F> + InstrInfo<Variable = V>,
+    {
+        self.entries.clear();
+        self.by_point.clear();
 
         for block_id in cfg.block_ids() {
             let block = cfg.block(block_id);
@@ -477,21 +498,23 @@ impl<L, V, F> MemoryTrace<L, V, F> {
                     block: block_id,
                     inst_idx,
                 };
-                let start = entries.len();
-                entries.extend(instruction.memory_events().enumerate().map(
-                    |(event_index, event)| MemoryTraceEntry {
-                        point,
-                        event_index,
-                        event,
-                    },
-                ));
-                if entries.len() != start {
-                    by_point.insert(point, start..entries.len());
+                let start = self.entries.len();
+                self.entries
+                    .extend(
+                        instruction
+                            .memory_events()
+                            .enumerate()
+                            .map(|(event_index, event)| MemoryTraceEntry {
+                                point,
+                                event_index,
+                                event,
+                            }),
+                    );
+                if self.entries.len() != start {
+                    self.by_point.insert(point, start..self.entries.len());
                 }
             }
         }
-
-        Self { entries, by_point }
     }
 
     /// Every event in stable structural order.

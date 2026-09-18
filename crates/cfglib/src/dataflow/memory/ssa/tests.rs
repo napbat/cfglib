@@ -6,8 +6,8 @@ use alloc::vec::Vec;
 use crate::test_util::MemInst;
 use crate::{
     Cfg, DominatorTree, EdgeKind, ExactMemoryAlias, MemoryAccess, MemoryAccessKind,
-    MemoryDefinition, MemoryEvent, MemoryEventSite, MemorySSA, MemorySSAEvent, MemoryUse,
-    ProgramPoint, SsaForm,
+    MemoryDefinition, MemoryEvent, MemoryEventSite, MemorySSA, MemorySSAEvent, MemorySsaScratch,
+    MemoryUse, ProgramPoint, SsaForm,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -297,4 +297,141 @@ fn address_dependencies_resolve_to_ordinary_ssa_values() {
             .unwrap()
             .uses
     );
+}
+
+/// Give every block of a shared shape a load, a store, and a
+/// read/modify/write over a small set of locations that repeats across
+/// blocks, so the shadow CFG takes memory phis.
+fn with_memory(mut cfg: Cfg<Instruction>) -> Cfg<Instruction> {
+    const LOCATIONS: [Location; 3] = [Location::A, Location::B, Location::C];
+    for (index, block) in cfg.block_ids().collect::<Vec<_>>().into_iter().enumerate() {
+        let location = LOCATIONS[index % LOCATIONS.len()];
+        let next = LOCATIONS[(index + 1) % LOCATIONS.len()];
+        cfg.block_mut(block)
+            .push(Instruction::access(location, MemoryAccessKind::Write));
+        cfg.block_mut(block)
+            .push(Instruction::access(next, MemoryAccessKind::Read));
+        cfg.block_mut(block).push(Instruction::access(
+            location,
+            MemoryAccessKind::ReadModifyWrite,
+        ));
+    }
+    cfg
+}
+
+#[test]
+fn one_scratch_reused_down_a_sequence_computes_the_allocating_answer() {
+    let sequence: Vec<_> = crate::test_util::shapes::scratch_sequence::<Instruction>()
+        .into_iter()
+        .map(with_memory)
+        .collect();
+    let mut scratch = MemorySsaScratch::new();
+    // Twice, so the second pass sees a scratch every buffer of which is
+    // already at the sequence's high-water mark.
+    for _ in 0..2 {
+        for cfg in &sequence {
+            let computed: MemorySSA<Location, u8, Fence> =
+                MemorySSA::compute_in(&mut scratch, cfg, &ExactMemoryAlias);
+            assert_eq!(
+                computed,
+                MemorySSA::compute(cfg, &ExactMemoryAlias),
+                "{} blocks",
+                cfg.block_count()
+            );
+        }
+    }
+}
+
+#[test]
+fn a_reused_scratch_survives_a_large_procedure_before_a_small_one() {
+    let large = with_memory(crate::test_util::shapes::diamond_chain::<Instruction>(30));
+    let small = with_memory(crate::test_util::shapes::diamond_chain::<Instruction>(1));
+    let mut scratch = MemorySsaScratch::new();
+
+    let first: MemorySSA<Location, u8, Fence> =
+        MemorySSA::compute_in(&mut scratch, &large, &ExactMemoryAlias);
+    assert_eq!(first, MemorySSA::compute(&large, &ExactMemoryAlias));
+    let second: MemorySSA<Location, u8, Fence> =
+        MemorySSA::compute_in(&mut scratch, &small, &ExactMemoryAlias);
+    assert_eq!(second, MemorySSA::compute(&small, &ExactMemoryAlias));
+}
+
+#[test]
+fn a_reused_scratch_crosses_procedures_with_disjoint_locations() {
+    // The alias merge is the buffer that could carry one procedure's
+    // locations into the next one's class numbering.
+    let first = linear_cfg([
+        Instruction::access(Location::C, MemoryAccessKind::Write),
+        Instruction::access(Location::A, MemoryAccessKind::Read),
+    ]);
+    let second = linear_cfg([Instruction::access(Location::B, MemoryAccessKind::Write)]);
+
+    let mut scratch = MemorySsaScratch::new();
+    for cfg in [&first, &second, &first] {
+        let computed: MemorySSA<Location, u8, Fence> =
+            MemorySSA::compute_in(&mut scratch, cfg, &ExactMemoryAlias);
+        assert_eq!(computed, MemorySSA::compute(cfg, &ExactMemoryAlias));
+    }
+    let only_b: MemorySSA<Location, u8, Fence> =
+        MemorySSA::compute_in(&mut scratch, &second, &ExactMemoryAlias);
+    assert_eq!(only_b.classes().len(), 1);
+    assert_eq!(only_b.class_of(&Location::A), None);
+}
+
+#[test]
+fn the_public_accessors_agree_element_by_element_across_a_reused_scratch() {
+    // Derived equality compares the stored maps; this walks the answer the
+    // way a consumer reads it, so the proof does not rest on the derive.
+    let cfg = with_memory(crate::test_util::shapes::diamond_chain::<Instruction>(3));
+    let mut scratch = MemorySsaScratch::new();
+    drop(MemorySSA::<Location, u8, Fence>::compute_in(
+        &mut scratch,
+        &with_memory(crate::test_util::shapes::diamond_chain::<Instruction>(12)),
+        &ExactMemoryAlias,
+    ));
+    let computed: MemorySSA<Location, u8, Fence> =
+        MemorySSA::compute_in(&mut scratch, &cfg, &ExactMemoryAlias);
+    let expected: MemorySSA<Location, u8, Fence> = MemorySSA::compute(&cfg, &ExactMemoryAlias);
+
+    assert_eq!(computed.classes(), expected.classes());
+    assert_eq!(computed.phis(), expected.phis());
+    assert_eq!(computed.events(), expected.events());
+    for location in [Location::A, Location::B, Location::C] {
+        assert_eq!(computed.class_of(&location), expected.class_of(&location));
+    }
+    for event in computed.events() {
+        let site = event.site();
+        assert_eq!(computed.event(site), expected.event(site));
+        assert_eq!(
+            computed.events_at(site.point()),
+            expected.events_at(site.point())
+        );
+        assert_eq!(
+            computed.reaching_definition(site),
+            expected.reaching_definition(site)
+        );
+        assert_eq!(
+            computed.clobbered_definition(site),
+            expected.clobbered_definition(site)
+        );
+        assert_eq!(
+            computed.reaching_definitions(site),
+            expected.reaching_definitions(site)
+        );
+        assert_eq!(
+            computed.transitive_readers(site),
+            expected.transitive_readers(site)
+        );
+        for version in [
+            event.read_version(),
+            event.written_version(),
+            event.clobbered_version(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert_eq!(computed.definition(version), expected.definition(version));
+            assert_eq!(computed.users(version), expected.users(version));
+        }
+    }
 }

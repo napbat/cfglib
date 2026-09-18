@@ -280,9 +280,9 @@ pub use dataflow::fixpoint::{
 pub use dataflow::liveness::{Liveness, LivenessProblem};
 pub use dataflow::memory::{
     ConservativeMemoryAlias, ExactMemoryAlias, MemoryAlias, MemoryClassId, MemoryDefinition,
-    MemoryEventSite, MemoryLocationClass, MemoryPhi, MemorySSA, MemorySSAEvent, MemorySsaValue,
-    MemoryUse, MemoryValueEdge, MemoryValueFlow, MemoryValueFlowError, MemoryValueNode,
-    MemoryValueRole, index_paths_may_overlap,
+    MemoryEventSite, MemoryLocationClass, MemoryPhi, MemorySSA, MemorySSAEvent, MemorySsaScratch,
+    MemorySsaValue, MemoryUse, MemoryValueEdge, MemoryValueFlow, MemoryValueFlowError,
+    MemoryValueFlowScratch, MemoryValueNode, MemoryValueRole, index_paths_may_overlap,
 };
 pub use dataflow::node_fixpoint::{
     NodeFacts, NodeProblem, TryNodeProblem, solve_node_problem, solve_node_problem_from,

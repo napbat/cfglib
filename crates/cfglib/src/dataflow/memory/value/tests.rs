@@ -8,7 +8,9 @@ use crate::{
     MemoryEventInfo, MemoryEventSite, MemorySSA, ProgramPoint, SsaForm,
 };
 
-use super::{MemoryValueEdge, MemoryValueFlow, MemoryValueFlowError, MemoryValueRole};
+use super::{
+    MemoryValueEdge, MemoryValueFlow, MemoryValueFlowError, MemoryValueFlowScratch, MemoryValueRole,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Location {
@@ -495,4 +497,125 @@ fn fences_remain_explicit_without_claiming_value_dependencies() {
     let (_, _, flow) = analyses(&cfg);
     assert!(flow.event_node(site(cfg.entry(), 0)).is_some());
     assert_eq!(flow.edge_count(), 0);
+}
+
+/// Give every block of a shared shape an address-selected load and a store,
+/// so every event resolves address, stored, and loaded variables.
+fn with_value_flow(mut cfg: Cfg<Instruction>) -> Cfg<Instruction> {
+    for (index, block) in cfg.block_ids().collect::<Vec<_>>().into_iter().enumerate() {
+        let address = u8::try_from(index % 3).expect("a small index fits in u8");
+        cfg.block_mut(block).push(Instruction::plain([], [address]));
+        cfg.block_mut(block).push(Instruction::access(
+            [address],
+            [10],
+            MemoryAccess::read(Location::Value, [10]).with_address_uses([address]),
+        ));
+        cfg.block_mut(block).push(Instruction::access(
+            [10],
+            [],
+            MemoryAccess::write(Location::Value, [10]),
+        ));
+    }
+    cfg
+}
+
+#[test]
+fn one_scratch_reused_down_a_sequence_computes_the_allocating_answer() {
+    let sequence: Vec<_> = crate::test_util::shapes::scratch_sequence::<Instruction>()
+        .into_iter()
+        .map(with_value_flow)
+        .collect();
+    let mut scratch = MemoryValueFlowScratch::new();
+    for _ in 0..2 {
+        for cfg in &sequence {
+            let dominators = DominatorTree::compute(cfg);
+            let ssa = SsaForm::compute(cfg, &dominators);
+            let memory: MemorySSA<Location, u8, Fence> = MemorySSA::compute(cfg, &ExactMemoryAlias);
+            assert_eq!(
+                MemoryValueFlow::compute_in(&mut scratch, &memory, &ssa),
+                MemoryValueFlow::compute(&memory, &ssa),
+                "{} blocks",
+                cfg.block_count()
+            );
+        }
+    }
+}
+
+#[test]
+fn a_reused_scratch_reports_the_same_error_after_a_valid_procedure() {
+    // The buffers are refilled per event, so a partly filled one from the
+    // event that failed must not reach the next call.
+    let valid = with_value_flow(crate::test_util::shapes::diamond_chain::<Instruction>(4));
+    let mut invalid = Cfg::<Instruction>::new();
+    invalid.block_mut(invalid.entry()).push(Instruction::access(
+        [],
+        [],
+        MemoryAccess::read(Location::Value, [9]),
+    ));
+
+    let mut scratch = MemoryValueFlowScratch::new();
+    let dominators = DominatorTree::compute(&valid);
+    let ssa = SsaForm::compute(&valid, &dominators);
+    let memory: MemorySSA<Location, u8, Fence> = MemorySSA::compute(&valid, &ExactMemoryAlias);
+    assert!(MemoryValueFlow::compute_in(&mut scratch, &memory, &ssa).is_ok());
+
+    let dominators = DominatorTree::compute(&invalid);
+    let ssa = SsaForm::compute(&invalid, &dominators);
+    let memory: MemorySSA<Location, u8, Fence> = MemorySSA::compute(&invalid, &ExactMemoryAlias);
+    assert_eq!(
+        MemoryValueFlow::compute_in(&mut scratch, &memory, &ssa),
+        MemoryValueFlow::compute(&memory, &ssa)
+    );
+    assert!(matches!(
+        MemoryValueFlow::compute_in(&mut scratch, &memory, &ssa),
+        Err(MemoryValueFlowError::MissingVariable {
+            role: MemoryValueRole::Loaded,
+            ..
+        })
+    ));
+
+    let dominators = DominatorTree::compute(&valid);
+    let ssa = SsaForm::compute(&valid, &dominators);
+    let memory: MemorySSA<Location, u8, Fence> = MemorySSA::compute(&valid, &ExactMemoryAlias);
+    assert_eq!(
+        MemoryValueFlow::compute_in(&mut scratch, &memory, &ssa),
+        MemoryValueFlow::compute(&memory, &ssa)
+    );
+}
+
+#[test]
+fn the_public_accessors_agree_across_a_reused_scratch() {
+    // Derived equality compares the stored graph; this walks the answer the
+    // way a consumer reads it, so the proof does not rest on the derive.
+    let large = with_value_flow(crate::test_util::shapes::diamond_chain::<Instruction>(12));
+    let cfg = with_value_flow(crate::test_util::shapes::diamond_chain::<Instruction>(2));
+    let mut scratch = MemoryValueFlowScratch::new();
+    let (large_ssa, large_memory, _) = analyses(&large);
+    drop(MemoryValueFlow::compute_in(&mut scratch, &large_memory, &large_ssa).unwrap());
+
+    let dominators = DominatorTree::compute(&cfg);
+    let ssa = SsaForm::compute(&cfg, &dominators);
+    let memory: MemorySSA<Location, u8, Fence> = MemorySSA::compute(&cfg, &ExactMemoryAlias);
+    let computed = MemoryValueFlow::compute_in(&mut scratch, &memory, &ssa).unwrap();
+    let expected = MemoryValueFlow::compute(&memory, &ssa).unwrap();
+
+    assert_eq!(computed.node_count(), expected.node_count());
+    assert_eq!(computed.edge_count(), expected.edge_count());
+    for node in expected.graph().node_ids() {
+        assert_eq!(computed.graph().node(node), expected.graph().node(node));
+    }
+    for edge in expected.graph().edges() {
+        assert!(has_edge(
+            &computed,
+            edge.source(),
+            edge.target(),
+            *edge.payload()
+        ));
+    }
+    for event in memory.events() {
+        assert_eq!(
+            computed.event_node(event.site()),
+            expected.event_node(event.site())
+        );
+    }
 }

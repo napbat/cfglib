@@ -7,13 +7,13 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use crate::union_find::DisjointSet;
 use crate::{BlockId, Cfg, DominatorTree, InstrInfo, ProgramPoint, SsaForm, SsaValue, VariableId};
 
 use crate::memory::{
-    MemoryAccess, MemoryAccessKind, MemoryAtomicity, MemoryEvent, MemoryEventInfo,
-    MemoryOperations, MemoryTrace, MemoryTraceEntry,
+    MemoryAccess, MemoryAccessKind, MemoryAtomicity, MemoryEvent, MemoryEventInfo, MemoryOperations,
 };
+
+use shadow::{ShadowInstruction, build_location_classes, build_shadow_cfg};
 
 /// Caller-defined may-alias relation for memory locations.
 ///
@@ -392,7 +392,7 @@ impl<L, V, F> MemorySSAEvent<L, V, F> {
 /// Fence events remain ordered and queryable but do not define memory values:
 /// their cross-thread happens-before meaning is consumer-specific. As with
 /// [`SsaForm::compute`], the CFG entry must not be a branch target.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemorySSA<L, V, F> {
     classes: Vec<MemoryLocationClass<L>>,
     class_by_location: BTreeMap<L, MemoryClassId>,
@@ -418,11 +418,32 @@ where
         I: MemoryEventInfo<Location = L, Fence = F> + InstrInfo<Variable = V>,
         A: MemoryAlias<L> + ?Sized,
     {
-        let trace = MemoryTrace::compute(cfg);
-        let (classes, class_by_location) = build_location_classes(trace.entries(), alias);
-        let shadow = build_shadow_cfg(cfg, trace.entries(), &class_by_location);
-        let dominators = DominatorTree::compute(&shadow);
-        let ssa = SsaForm::compute(&shadow, &dominators);
+        Self::compute_in(&mut MemorySsaScratch::new(), cfg, alias)
+    }
+
+    /// Computes location-aware memory SSA over caller-owned working storage.
+    ///
+    /// This is [`compute`](Self::compute) with the call's buffers taken out of
+    /// it: the event trace, the alias merge, and the dominator and SSA
+    /// buffers of the shadow CFG the analysis runs over. The answer is the
+    /// same one, built by the same code — the allocating entry point is this
+    /// function over a fresh [`MemorySsaScratch`].
+    #[must_use]
+    pub fn compute_in<I, E, A>(
+        scratch: &mut MemorySsaScratch<L, V, F>,
+        cfg: &Cfg<I, E>,
+        alias: &A,
+    ) -> Self
+    where
+        I: MemoryEventInfo<Location = L, Fence = F> + InstrInfo<Variable = V>,
+        A: MemoryAlias<L> + ?Sized,
+    {
+        scratch.reset();
+        scratch.trace.rebuild(cfg);
+        let (classes, class_by_location) = build_location_classes(scratch, alias);
+        let shadow = build_shadow_cfg(cfg, scratch.trace.entries(), &class_by_location);
+        let dominators = DominatorTree::compute_in(&mut scratch.dominators, &shadow);
+        let ssa = SsaForm::compute_in(&mut scratch.ssa, &shadow, &dominators);
         Self::from_shadow_ssa(classes, class_by_location, &shadow, &ssa)
     }
 
@@ -731,121 +752,10 @@ where
     }
 }
 
-#[derive(Clone)]
-struct ShadowInstruction<L, V, F> {
-    site: MemoryEventSite,
-    event: MemoryEvent<L, V, F>,
-    class: Option<MemoryClassId>,
-    uses: Vec<MemoryClassId>,
-    defs: Vec<MemoryClassId>,
-}
+mod scratch;
+mod shadow;
 
-impl<L, V, F> InstrInfo for ShadowInstruction<L, V, F> {
-    type Variable = MemoryClassId;
-
-    fn uses(&self) -> &[Self::Variable] {
-        &self.uses
-    }
-
-    fn defs(&self) -> &[Self::Variable] {
-        &self.defs
-    }
-}
-
-fn build_shadow_cfg<I, E, L, V, F>(
-    cfg: &Cfg<I, E>,
-    entries: &[MemoryTraceEntry<L, V, F>],
-    class_by_location: &BTreeMap<L, MemoryClassId>,
-) -> Cfg<ShadowInstruction<L, V, F>>
-where
-    L: Clone + Ord,
-    V: Clone,
-    F: Clone,
-{
-    let mut shadow = Cfg::new();
-    for expected_index in 1..cfg.block_bound() {
-        let block = shadow.new_block();
-        debug_assert_eq!(block.index(), expected_index);
-    }
-    shadow.set_entry(cfg.entry());
-    for edge in cfg.edges() {
-        shadow.add_edge(edge.source(), edge.target(), edge.kind());
-    }
-
-    for entry in entries {
-        let site = MemoryEventSite::new(entry.point(), entry.event_index());
-        let event = entry.event().clone();
-        let class = match &event {
-            MemoryEvent::Access(access) => Some(
-                *class_by_location
-                    .get(access.location())
-                    .expect("every access location must have an alias class"),
-            ),
-            MemoryEvent::Fence(_) => None,
-        };
-        let uses = class.into_iter().collect();
-        let defs = if event.writes() {
-            class.into_iter().collect()
-        } else {
-            Vec::new()
-        };
-        shadow.block_mut(site.point.block).push(ShadowInstruction {
-            site,
-            event,
-            class,
-            uses,
-            defs,
-        });
-    }
-    shadow
-}
-
-fn build_location_classes<L, V, F, A>(
-    entries: &[MemoryTraceEntry<L, V, F>],
-    alias: &A,
-) -> (Vec<MemoryLocationClass<L>>, BTreeMap<L, MemoryClassId>)
-where
-    L: Clone + Ord,
-    A: MemoryAlias<L> + ?Sized,
-{
-    let locations: Vec<L> = entries
-        .iter()
-        .filter_map(|entry| match entry.event() {
-            MemoryEvent::Access(access) => Some(access.location().clone()),
-            MemoryEvent::Fence(_) => None,
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    let mut union_find = DisjointSet::new(locations.len());
-    for left in 0..locations.len() {
-        for right in left + 1..locations.len() {
-            if alias.may_alias(&locations[left], &locations[right])
-                || alias.may_alias(&locations[right], &locations[left])
-            {
-                union_find.union_toward_min(left, right);
-            }
-        }
-    }
-
-    let mut class_by_root = BTreeMap::new();
-    let mut classes: Vec<MemoryLocationClass<L>> = Vec::new();
-    let mut class_by_location = BTreeMap::new();
-    for (location_index, location) in locations.into_iter().enumerate() {
-        let root = union_find.find(location_index);
-        let id = *class_by_root.entry(root).or_insert_with(|| {
-            let id = MemoryClassId(classes.len());
-            classes.push(MemoryLocationClass {
-                id,
-                locations: Vec::new(),
-            });
-            id
-        });
-        classes[id.index()].locations.push(location.clone());
-        class_by_location.insert(location, id);
-    }
-    (classes, class_by_location)
-}
+pub use scratch::MemorySsaScratch;
 
 #[cfg(test)]
 mod tests;

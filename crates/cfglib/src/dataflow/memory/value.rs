@@ -6,6 +6,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::fmt;
 
+use crate::memory::MemoryAccess;
 use crate::{BlockId, Graph, NodeId, SsaForm, SsaValue, VariableId};
 
 use super::{MemoryEventSite, MemorySSA, MemorySsaValue};
@@ -154,10 +155,119 @@ impl<V: fmt::Debug> core::error::Error for MemoryValueFlowError<V> {}
 /// [`Read`](MemoryValueEdge::Read) and a [`Write`](MemoryValueEdge::Write).
 /// Fence events are retained as isolated event nodes because their happens-before
 /// semantics remain consumer-defined.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct MemoryValueFlow<V> {
     graph: Graph<MemoryValueNode<V>, MemoryValueEdge>,
     nodes: BTreeMap<MemoryValueNode<V>, NodeId>,
+}
+
+/// Every buffer [`MemoryValueFlow::compute_in`] fills, owned by the caller.
+///
+/// The graph is the answer and its storage has to be allocated. What does not
+/// is the resolution of one event's declared address, stored, and loaded
+/// variables to the SSA values its source instruction gives them: three
+/// vectors per event, and the walk visits every event twice, once to intern
+/// its nodes and once to add its edges. On a procedure with a few thousand
+/// memory events that is most of what the call allocates.
+///
+/// This holds those three buffers, refilled per event and never released.
+///
+/// # One scratch, many procedures
+///
+/// The type parameter is the ordinary SSA variable, so one scratch serves
+/// every form over that vocabulary whatever its size, and it is [`Send`] when
+/// the variable is.
+///
+/// # Examples
+///
+/// ```
+/// use cfglib::{
+///     Cfg, DominatorTree, ExactMemoryAlias, MemorySSA, MemoryValueFlow, MemoryValueFlowScratch,
+///     SsaForm,
+/// };
+/// # use cfglib::{InstrInfo, MemoryAccess, MemoryEvent, MemoryEventInfo};
+/// # #[derive(Clone)]
+/// # struct Inst(Vec<u8>, Vec<MemoryEvent<u32, u8, ()>>);
+/// # impl InstrInfo for Inst {
+/// #     type Variable = u8;
+/// #     fn uses(&self) -> &[u8] { &self.0 }
+/// #     fn defs(&self) -> &[u8] { &[] }
+/// # }
+/// # impl MemoryEventInfo for Inst {
+/// #     type Location = u32;
+/// #     type Fence = ();
+/// #     fn memory_events(&self) -> impl Iterator<Item = MemoryEvent<u32, u8, ()>> {
+/// #         self.1.iter().cloned()
+/// #     }
+/// # }
+/// let mut cfg = Cfg::<Inst>::new();
+/// cfg.block_mut(cfg.entry()).push(Inst(
+///     vec![1],
+///     vec![MemoryEvent::Access(MemoryAccess::write(7, [1]))],
+/// ));
+/// let dominators = DominatorTree::compute(&cfg);
+/// let ssa = SsaForm::compute(&cfg, &dominators);
+/// let memory: MemorySSA<u32, u8, ()> = MemorySSA::compute(&cfg, &ExactMemoryAlias);
+///
+/// let mut scratch = MemoryValueFlowScratch::new();
+/// let flow = MemoryValueFlow::compute_in(&mut scratch, &memory, &ssa).unwrap();
+/// assert_eq!(flow, MemoryValueFlow::compute(&memory, &ssa).unwrap());
+/// ```
+#[derive(Debug)]
+pub struct MemoryValueFlowScratch<V> {
+    /// The SSA values selecting one event's binding or sub-location.
+    addresses: Vec<SsaValue<V>>,
+    /// The SSA values one event stores.
+    stored: Vec<SsaValue<V>>,
+    /// The SSA values one event loads.
+    loaded: Vec<SsaValue<V>>,
+}
+
+impl<V> Default for MemoryValueFlowScratch<V> {
+    fn default() -> Self {
+        Self {
+            addresses: Vec::new(),
+            stored: Vec::new(),
+            loaded: Vec::new(),
+        }
+    }
+}
+
+impl<V> MemoryValueFlowScratch<V> {
+    /// Scratch holding nothing yet.
+    ///
+    /// Every buffer is sized by the widest event it sees, so there is no
+    /// count to state here.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl<V: VariableId> MemoryValueFlowScratch<V> {
+    /// Resolve one access's three declared variable lists into the buffers.
+    fn resolve<L>(
+        &mut self,
+        site: MemoryEventSite,
+        instruction: &crate::SsaInstruction<V>,
+        access: &MemoryAccess<L, V>,
+    ) -> Result<(), MemoryValueFlowError<V>> {
+        resolve_uses(
+            &mut self.addresses,
+            site,
+            instruction,
+            access.address_uses(),
+            MemoryValueRole::Address,
+        )?;
+        resolve_uses(
+            &mut self.stored,
+            site,
+            instruction,
+            access.value_uses(),
+            MemoryValueRole::Stored,
+        )?;
+        resolve_defs(&mut self.loaded, site, instruction, access.value_defs())
+    }
 }
 
 impl<V> MemoryValueFlow<V>
@@ -181,14 +291,37 @@ where
         L: Clone + Ord,
         F: Clone + Eq,
     {
+        Self::compute_in(&mut MemoryValueFlowScratch::new(), memory, ssa)
+    }
+
+    /// Computes ordinary-value dependencies over caller-owned working
+    /// storage.
+    ///
+    /// This is [`compute`](Self::compute) with the per-event resolution
+    /// buffers taken out of it; see [`MemoryValueFlowScratch`]. The graph it
+    /// returns is the same one, built by the same code, and it reports the
+    /// same errors.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`compute`](Self::compute).
+    pub fn compute_in<L, F>(
+        scratch: &mut MemoryValueFlowScratch<V>,
+        memory: &MemorySSA<L, V, F>,
+        ssa: &SsaForm<V>,
+    ) -> Result<Self, MemoryValueFlowError<V>>
+    where
+        L: Clone + Ord,
+        F: Clone + Eq,
+    {
         let mut flow = Self {
             graph: Graph::new(),
             nodes: BTreeMap::new(),
         };
-        flow.add_nodes(memory, ssa)?;
+        flow.add_nodes(scratch, memory, ssa)?;
         flow.add_value_edges(ssa);
         flow.add_phi_edges(memory);
-        flow.add_event_edges(memory, ssa)?;
+        flow.add_event_edges(scratch, memory, ssa)?;
         Ok(flow)
     }
 
@@ -243,6 +376,7 @@ where
 
     fn add_nodes<L, F>(
         &mut self,
+        scratch: &mut MemoryValueFlowScratch<V>,
         memory: &MemorySSA<L, V, F>,
         ssa: &SsaForm<V>,
     ) -> Result<(), MemoryValueFlowError<V>>
@@ -289,25 +423,14 @@ where
             let Some(access) = event.access() else {
                 continue;
             };
-            for value in resolve_uses(
-                event.site(),
-                instruction,
-                access.address_uses(),
-                MemoryValueRole::Address,
-            )?
-            .into_iter()
-            .chain(resolve_uses(
-                event.site(),
-                instruction,
-                access.value_uses(),
-                MemoryValueRole::Stored,
-            )?)
-            .chain(resolve_defs(
-                event.site(),
-                instruction,
-                access.value_defs(),
-            )?) {
-                self.intern(MemoryValueNode::Value(value));
+            scratch.resolve(event.site(), instruction, access)?;
+            for value in scratch
+                .addresses
+                .iter()
+                .chain(&scratch.stored)
+                .chain(&scratch.loaded)
+            {
+                self.intern(MemoryValueNode::Value(value.clone()));
             }
         }
         Ok(())
@@ -370,6 +493,7 @@ where
 
     fn add_event_edges<L, F>(
         &mut self,
+        scratch: &mut MemoryValueFlowScratch<V>,
         memory: &MemorySSA<L, V, F>,
         ssa: &SsaForm<V>,
     ) -> Result<(), MemoryValueFlowError<V>>
@@ -386,15 +510,9 @@ where
             let Some(access) = event.access() else {
                 continue;
             };
-            for (input_index, value) in resolve_uses(
-                site,
-                instruction,
-                access.address_uses(),
-                MemoryValueRole::Address,
-            )?
-            .into_iter()
-            .enumerate()
-            {
+            scratch.resolve(site, instruction, access)?;
+            for input_index in 0..scratch.addresses.len() {
+                let value = scratch.addresses[input_index].clone();
                 let source = self.intern(MemoryValueNode::Value(value));
                 self.graph.add_edge(
                     source,
@@ -402,15 +520,8 @@ where
                     MemoryValueEdge::Address { site, input_index },
                 );
             }
-            for (input_index, value) in resolve_uses(
-                site,
-                instruction,
-                access.value_uses(),
-                MemoryValueRole::Stored,
-            )?
-            .into_iter()
-            .enumerate()
-            {
+            for input_index in 0..scratch.stored.len() {
+                let value = scratch.stored[input_index].clone();
                 let source = self.intern(MemoryValueNode::Value(value));
                 self.graph.add_edge(
                     source,
@@ -428,10 +539,8 @@ where
                 self.graph
                     .add_edge(event_node, target, MemoryValueEdge::Write { site });
             }
-            for (output_index, value) in resolve_defs(site, instruction, access.value_defs())?
-                .into_iter()
-                .enumerate()
-            {
+            for output_index in 0..scratch.loaded.len() {
+                let value = scratch.loaded[output_index].clone();
                 let target = self.intern(MemoryValueNode::Value(value));
                 self.graph.add_edge(
                     event_node,
@@ -444,49 +553,54 @@ where
     }
 }
 
+/// Resolve declared use variables into `buffer`, replacing its contents.
 fn resolve_uses<V: VariableId>(
+    buffer: &mut Vec<SsaValue<V>>,
     site: MemoryEventSite,
     instruction: &crate::SsaInstruction<V>,
     variables: &[V],
     role: MemoryValueRole,
-) -> Result<Vec<SsaValue<V>>, MemoryValueFlowError<V>> {
-    variables
-        .iter()
-        .map(|variable| {
-            instruction
-                .uses
-                .iter()
-                .find(|value| value.variable == *variable)
-                .cloned()
-                .ok_or_else(|| MemoryValueFlowError::MissingVariable {
-                    site,
-                    variable: variable.clone(),
-                    role,
-                })
-        })
-        .collect()
+) -> Result<(), MemoryValueFlowError<V>> {
+    buffer.clear();
+    for variable in variables {
+        let value = instruction
+            .uses
+            .iter()
+            .find(|value| value.variable == *variable)
+            .cloned()
+            .ok_or_else(|| MemoryValueFlowError::MissingVariable {
+                site,
+                variable: variable.clone(),
+                role,
+            })?;
+        buffer.push(value);
+    }
+    Ok(())
 }
 
+/// Resolve declared definition variables into `buffer`, replacing its
+/// contents.
 fn resolve_defs<V: VariableId>(
+    buffer: &mut Vec<SsaValue<V>>,
     site: MemoryEventSite,
     instruction: &crate::SsaInstruction<V>,
     variables: &[V],
-) -> Result<Vec<SsaValue<V>>, MemoryValueFlowError<V>> {
-    variables
-        .iter()
-        .map(|variable| {
-            instruction
-                .defs
-                .iter()
-                .find(|value| value.variable == *variable)
-                .cloned()
-                .ok_or_else(|| MemoryValueFlowError::MissingVariable {
-                    site,
-                    variable: variable.clone(),
-                    role: MemoryValueRole::Loaded,
-                })
-        })
-        .collect()
+) -> Result<(), MemoryValueFlowError<V>> {
+    buffer.clear();
+    for variable in variables {
+        let value = instruction
+            .defs
+            .iter()
+            .find(|value| value.variable == *variable)
+            .cloned()
+            .ok_or_else(|| MemoryValueFlowError::MissingVariable {
+                site,
+                variable: variable.clone(),
+                role: MemoryValueRole::Loaded,
+            })?;
+        buffer.push(value);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

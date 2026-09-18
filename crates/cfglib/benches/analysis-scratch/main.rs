@@ -24,8 +24,8 @@ mod fixtures;
 
 use cfglib::{
     Cfg, DominanceFrontiers, DominatorScratch, DominatorTree, ExactMemoryAlias, MemorySSA,
-    MemoryTrace, MemoryValueFlow, PhiPlacements, SsaForm, SsaScratch, TraversalDirection,
-    reverse_postorder,
+    MemorySsaScratch, MemoryTrace, MemoryValueFlow, MemoryValueFlowScratch, PhiPlacements, SsaForm,
+    SsaScratch, TraversalDirection, reverse_postorder,
 };
 
 use allocation::case;
@@ -95,8 +95,17 @@ impl Cases<'_> {
         self.run(subject, "memory-ssa", || {
             MemorySSA::<Slot, u32, ()>::compute(cfg, &ExactMemoryAlias)
         });
+        let mut memory_scratch = MemorySsaScratch::new();
+        self.run(subject, "memory-ssa-in", || {
+            MemorySSA::<Slot, u32, ()>::compute_in(&mut memory_scratch, cfg, &ExactMemoryAlias)
+        });
         self.run(subject, "memory-value-flow", || {
             MemoryValueFlow::compute(&memory, &ssa).expect("fixture events match their SSA form")
+        });
+        let mut flow_scratch = MemoryValueFlowScratch::new();
+        self.run(subject, "memory-value-flow-in", || {
+            MemoryValueFlow::compute_in(&mut flow_scratch, &memory, &ssa)
+                .expect("fixture events match their SSA form")
         });
     }
 }

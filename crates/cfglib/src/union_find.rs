@@ -49,6 +49,18 @@ impl DisjointSet {
         }
     }
 
+    /// Returns the forest to `len` singleton sets, keeping both arrays.
+    ///
+    /// This is [`new`](Self::new) for a caller that solves one merge problem
+    /// per procedure over a whole codebase and does not want two allocations
+    /// per procedure for it.
+    pub(crate) fn reset(&mut self, len: usize) {
+        self.parent.clear();
+        self.parent.extend(0..len);
+        self.rank.clear();
+        self.rank.resize(len, 0);
+    }
+
     /// Appends one new singleton set and returns its element index.
     pub fn push(&mut self) -> usize {
         let index = self.parent.len();
