@@ -24,7 +24,8 @@ mod fixtures;
 
 use cfglib::{
     Cfg, DominanceFrontiers, DominatorScratch, DominatorTree, ExactMemoryAlias, MemorySSA,
-    MemoryTrace, MemoryValueFlow, PhiPlacements, SsaForm, TraversalDirection, reverse_postorder,
+    MemoryTrace, MemoryValueFlow, PhiPlacements, SsaForm, SsaScratch, TraversalDirection,
+    reverse_postorder,
 };
 
 use allocation::case;
@@ -84,6 +85,10 @@ impl Cases<'_> {
             PhiPlacements::compute(cfg, &dominators)
         });
         self.run(subject, "ssa-form", || SsaForm::compute(cfg, &dominators));
+        let mut ssa_scratch = SsaScratch::new();
+        self.run(subject, "ssa-form-in", || {
+            SsaForm::compute_in(&mut ssa_scratch, cfg, &dominators)
+        });
         self.run(subject, "memory-trace", || {
             MemoryTrace::<Slot, u32, ()>::compute(cfg)
         });

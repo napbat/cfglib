@@ -107,12 +107,30 @@ pub(crate) enum DominatorChildOrder {
 /// Keeping this separate from [`DominatorTree`] avoids permanently increasing
 /// every tree's memory footprint for the few passes that need repeated child
 /// traversal.
+#[derive(Debug)]
 pub(crate) struct DominatorChildLinks<N> {
     first_child: Vec<Option<N>>,
     next_sibling: Vec<Option<N>>,
 }
 
+impl<N> Default for DominatorChildLinks<N> {
+    fn default() -> Self {
+        Self {
+            first_child: Vec::new(),
+            next_sibling: Vec::new(),
+        }
+    }
+}
+
 impl<N: DenseId> DominatorChildLinks<N> {
+    /// Unlink every node and cover `node_count` of them, keeping the arrays.
+    pub(crate) fn reset(&mut self, node_count: usize) {
+        self.first_child.clear();
+        self.first_child.resize(node_count, None);
+        self.next_sibling.clear();
+        self.next_sibling.resize(node_count, None);
+    }
+
     /// First child of `parent` in the selected order.
     pub(crate) fn first_child(&self, parent: N) -> Option<N> {
         self.first_child[parent.index()]
@@ -503,25 +521,35 @@ impl<N: DenseId> DominatorTree<N> {
 
     /// Build compact child adjacency in a caller-selected sibling order.
     pub(crate) fn child_links(&self, order: DominatorChildOrder) -> DominatorChildLinks<N> {
-        let mut first_child = vec![None; self.idom.len()];
-        let mut next_sibling = vec![None; self.idom.len()];
+        let mut links = DominatorChildLinks::default();
+        self.child_links_in(&mut links, order);
+        links
+    }
+
+    /// Build that adjacency into caller-owned arrays, for a pass that walks
+    /// one tree's children per procedure over a whole codebase.
+    pub(crate) fn child_links_in(
+        &self,
+        links: &mut DominatorChildLinks<N>,
+        order: DominatorChildOrder,
+    ) {
+        links.reset(self.idom.len());
+        let DominatorChildLinks {
+            first_child,
+            next_sibling,
+        } = links;
 
         match order {
             DominatorChildOrder::Ascending => {
                 for index in (0..self.idom.len()).rev() {
-                    self.prepend_child(index, &mut first_child, &mut next_sibling);
+                    self.prepend_child(index, first_child, next_sibling);
                 }
             }
             DominatorChildOrder::Descending => {
                 for index in 0..self.idom.len() {
-                    self.prepend_child(index, &mut first_child, &mut next_sibling);
+                    self.prepend_child(index, first_child, next_sibling);
                 }
             }
-        }
-
-        DominatorChildLinks {
-            first_child,
-            next_sibling,
         }
     }
 

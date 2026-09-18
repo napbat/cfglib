@@ -72,6 +72,13 @@ pub struct EpochMarks {
     pub(crate) epoch: u32,
 }
 
+impl Default for EpochMarks {
+    /// Marks covering nothing, for a consumer that sizes them on first use.
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
 impl EpochMarks {
     /// Marks covering `node_count` nodes, with nothing marked.
     #[must_use]
@@ -101,6 +108,19 @@ impl EpochMarks {
             self.epoch = 1;
         } else {
             self.epoch += 1;
+        }
+    }
+
+    /// Grow the buffer to cover `node_count` nodes, keeping the marks.
+    ///
+    /// A new stamp is zero, which is never the current epoch, so growing
+    /// never marks a node. This is what a reusable scratch does on entry,
+    /// which is a different moment from the one the fixed capacity above
+    /// protects: the size is settled before the pass starts rather than
+    /// changing under it.
+    pub(crate) fn grow_to(&mut self, node_count: usize) {
+        if self.stamps.len() < node_count {
+            self.stamps.resize(node_count, 0);
         }
     }
 
