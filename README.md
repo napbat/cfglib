@@ -86,7 +86,7 @@ assert_eq!(
 let dominators = DominatorTree::compute(&Rooted::new(&graph, source));
 ```
 
-`Graph` keeps a compressed sparse-row base beside an appendable delta in one type: adding a node or an edge is constant time with no per-node allocation, removal clears a bit in a liveness bitset, redirecting one endpoint keeps the edge's identity, and `compact()` folds the delta back into the base and hands back a `Renumbering` describing every identity it moved. That is what makes whole-codebase graphs affordable — a million nodes and four million edges build in roughly half the time an arena of per-node adjacency containers takes, without the inline slack and the per-node allocation that arena spends. The module documentation states the design and its costs; `benches/graph-store.rs` measures it.
+`Graph` keeps a compressed sparse-row base beside an appendable delta in one type: adding a node or an edge is constant time with no per-node allocation, removal clears a bit in a liveness bitset, `out_degree`/`in_degree` answer from the compressed run's two offsets plus a walk of whatever was appended since, redirecting one endpoint keeps the edge's identity, and `compact()` folds the delta back into the base and hands back a `Renumbering` describing every identity it moved. That is what makes whole-codebase graphs affordable — a million nodes and four million edges build in roughly half the time an arena of per-node adjacency containers takes, without the inline slack and the per-node allocation that arena spends. The module documentation states the design and its costs; `benches/graph-store.rs` measures it.
 
 `Fanout<K, V>`, `DenseFanout<V, K>`, and `SortedMap<K, V>` are that compressed base without the edges. They are built-once tables — from pairs or from grouped values, read-only afterwards — holding every key's run of values end to end in one array, keyed by a sparse ordered key, by a dense `0..bound` index (any `DenseId`, so a tagged `Id<T>` keys one directly), or, in the single-value case, by a sparse key to one value. A reverse index from a symbol to its reference sites, a scope to the rows declared in it, or a file to its flow sites is the same shape as adjacency and should cost the same: three allocations for the whole table rather than one per key, `get` returning a slice, `iter()` walking keys ascending, and `heap_bytes()` reporting exactly what the columns hold.
 
@@ -289,6 +289,7 @@ inverted — before falling back to a wrapping `logical_not`.
 | Edge-aware traversal | `breadth_first_view_edges[_with]`, `depth_first_view_edges[_with]`, `shortest_path_view_edges`, and matching owned-graph wrappers | Every distinct edge once with identity + endpoints over any edge view; parallel-edge provenance; `walk_*` names remain breadth-first compatibility aliases |
 | Configurable search | `search` + `SearchConfig` (order, visited policy, direction, depth bound) | First-match, pruning (`Visit::Skip`), early exit (`ControlFlow::Break`), and backtracking as configuration; `VisitedPolicy::Path` un-marks on unwind so every route to a node is reported |
 | Reusable search marks | `search_with_marks` + `EpochMarks` | The same search with its visited marks in a caller-owned epoch-stamped buffer: a per-root pass allocates marks once instead of an O(node count) buffer per root, and each search still starts from a clean set (epoch bump, O(1)) |
+| Readable dense set | `EpochSet` | The same epoch stamp with its members kept: constant-time `insert`/`contains`, a constant-time `clear`, and `ones` in one pass over the answer rather than the universe (insertion order, not ascending) |
 | Reusable search scratch | `search_with_scratch` + `SearchScratch` | The same search with the marks *and* the call's own buffers — seeds, frontier, adjacency — caller-owned, for a pass whose searches are small enough that the call is the cost; marks and buffers both reset on entry |
 | Disjoint sets | `DisjointSet` (`union` by rank, `union_toward_min` for deterministic minimum representatives, growable via `push`) | The union-find backing phi webs, may-alias classes, and lane webs, usable directly by consumers |
 | Open post-order fold | `open_fold_post_order` + `OpenFold` trait (`FoldEnter::Leaf`/`Fold`, `MarkScope::Shared`/`Isolated`) | Child-answers-to-parent folding over a lazily discovered space: caller-keyed cycle guard (nodes need no `Ord`), per-node mark scoping (exact per-path marking or persistent pruning), early exit, depth bound — C++-style member lookup and type-algebra evaluators without hand-written frame stacks |
@@ -306,6 +307,7 @@ inverted — before falling back to a wrapping `logical_not`.
 | Horn-clause derivability | `HornClauses` | AND-OR closure (`head <- b1 & b2`): nullability, all-arguments-constant, all-callers-dead |
 | Topological sort | `topological_sort` | Stable ordering or cycle detection |
 | Dominator tree | `DominatorTree::compute` (rooted views), `compute_from` (explicit root) | Cooper-Harvey-Kennedy over any graph view |
+| Reusable dominator scratch | `DominatorTree::compute_in`, `compute_from_in` + `DominatorScratch` | The same tree with the call's five buffers caller-owned, for a pass computing one tree per procedure over a codebase; the scratch holds dense indices, so one instance serves every graph and node-id type |
 | Post-dominator tree | `DominatorTree::compute_post` (CFG), `compute_post_from` (any view + explicit exits) | Virtual-exit handling built in |
 | Dominance frontiers | `DominanceFrontiers::compute` | For SSA φ-placement |
 | Dominator recompute diff | `DominatorTree::compute_with_diff` | Recompute after a graph edit, reporting the nodes whose idom changed |
@@ -336,11 +338,12 @@ inverted — before falling back to a wrapping `logical_not`.
 | Edge-sensitive fixpoint | `solve_edge_problem`, `solve_edge_problem_from`, `EdgeProblem` trait | Full or seeded per-edge transfer over any edge view; stable id/data plus physical node pre/post states and deterministic bounded-solve errors |
 | Fallible edge-sensitive fixpoint | `try_solve_edge_problem`, `try_solve_edge_problem_from`, `TryEdgeProblem` trait | Preserves consumer boundary, merge, node-transfer, and edge-transfer errors separately from solver limits |
 | Reachability-lifted edge analysis | `Reachable` + `ReachableEdgeProblem` trait | Verification-style analyses over `Option` facts: `None` is unreached bottom, transfers short-circuit, entry facts start the flow, and each edge chooses pre- or post-state (exceptional edges observe the state the node received) |
-| Dense bit-set facts | `DenseBits` | Set-of-indices lattice element packed 64 per word; `union_with` is the join and reports change for convergence checks |
+| Dense bit-set facts | `DenseBits` | Set-of-indices lattice element packed 64 per word; `union_with` is the join and reports change for convergence checks; `clear` is a word fill, `words` exposes the packed row, and `ones`/`intersection` step one set index at a time rather than one universe index |
 | Reaching definitions | `ReachingDefs::compute` | Which writes reach each point |
 | Liveness | `Liveness::compute` | Live-in / live-out at each block; `live_before_instructions` / `live_after_instructions` replay the block transfer for instruction-granular sets (dead-store detection) |
 | Def-use / use-def chains | `DefUseChains::compute` | Bidirectional def↔use links; dead-def detection |
 | SSA construction | `SsaForm::compute` | IDF phi placement plus full dominator-forest renaming, including disconnected handler/dead-code components |
+| Reusable SSA scratch | `SsaForm::compute_in` + `SsaScratch` | The same form with every working buffer caller-owned — frontiers, definition lists, renaming stacks, phi drafts, the walk's own stacks — leaving only the form itself allocated per procedure |
 | Phi placement | `PhiPlacements::compute` | Structural IDF phase for consumers that only need placement |
 | SSA deconstruction | `eliminate_phis`, `copies_by_predecessor` | φ-to-copy lowering |
 | Phi webs | `PhiWebs::compute` | Congruence classes for register coalescing |
@@ -348,7 +351,9 @@ inverted — before falling back to a wrapping `logical_not`.
 | Sparse conditional constant propagation | `SccpAnalysis::compute` | SSA-based, marks unreachable edges |
 | Copy and value-alias propagation | `copy_propagation`, `alias_propagation`, `CopySource` trait | Guarded chain resolution and dead transfer removal; pairwise aliases may refine types or metadata without changing runtime values |
 | Memory-event trace | `MemoryTrace::compute`, `MemoryEventInfo` trait | Ordered, location-typed reads, writes, read/modify/write accesses, address-variable dependencies, and fences; instruction summaries distinguish separate read+write from compound modification |
+| Reusable memory-SSA scratch | `MemorySSA::compute_in` + `MemorySsaScratch` | The same answer with the event trace, the alias merge, and the shadow CFG's dominator and SSA buffers caller-owned |
 | Memory SSA | `dataflow::memory::MemorySSA::compute`, `MemoryAlias` trait | Event-driven SSA per may-alias location class: loop/branch φ-nodes, reaching writes and clobbers, bidirectional def-use chains, transitive readers, and ordinary-SSA address inputs |
+| Reusable value-flow scratch | `MemoryValueFlow::compute_in` + `MemoryValueFlowScratch` | The same graph with the per-event address/stored/loaded resolution buffers caller-owned |
 | Memory value flow | `dataflow::memory::MemoryValueFlow::compute` | One graph over ordinary SSA values, versioned memory states, and exact events; typed address/store/read/write/load and ordinary/memory-phi edges retain the complete transfer path |
 | Abstract interpretation | `abstract_interpret`, `AbstractDomain` trait | Generic abstract domain framework |
 
