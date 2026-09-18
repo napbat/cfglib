@@ -56,6 +56,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::borrow::Borrow;
 use core::marker::PhantomData;
 
 use crate::graph::view::DenseId;
@@ -75,7 +76,7 @@ fn run_bound(count: usize) -> u32 {
 /// Every key owns at least one value, so [`contains_key`](Self::contains_key)
 /// and a non-empty [`get`](Self::get) mean the same thing. Keys are stored
 /// once and never copied, so a key may be a `String` or any other owned
-/// identity.
+/// identity, and it is read back through any borrowed form of itself.
 ///
 /// # Examples
 ///
@@ -163,6 +164,12 @@ impl<K: Ord, V> Fanout<K, V> {
     /// is every value given for it in the order it was given. A group with no
     /// values contributes no key.
     ///
+    /// This is the sparse reading of grouped data: the key travels with its
+    /// group because the key space is not dense.
+    /// [`DenseFanout::from_grouped`] is the dense one — the groups are
+    /// positional, one per key of a `0..bound` space in key order, and a key
+    /// with no values keeps its place as an empty run.
+    ///
     /// # Panics
     ///
     /// Panics when the groups hold more than `u32::MAX` values in total.
@@ -193,17 +200,41 @@ impl<K: Ord, V> Fanout<K, V> {
     }
 
     /// The values recorded for `key`, or an empty slice when it is absent.
+    ///
+    /// `key` may be given in any borrowed form of the table's key type, the
+    /// way a [`BTreeMap`](alloc::collections::BTreeMap) is queried: a
+    /// `Fanout<String, _>` reads with a `&str` and a `Fanout<PathBuf, _>` with
+    /// a `&Path`, so a caller that owns its keys need not build one to ask a
+    /// question. The borrowed form orders keys the same way the owned one
+    /// does, which is what [`Borrow`] already promises.
     #[must_use]
-    pub fn get(&self, key: &K) -> &[V] {
-        self.keys
-            .binary_search(key)
-            .map_or(&[][..], |index| self.run(index))
+    pub fn get<Q>(&self, key: &Q) -> &[V]
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.search(key).map_or(&[][..], |index| self.run(index))
     }
 
     /// Whether the table holds a run for `key`.
+    ///
+    /// Takes a borrowed key on the same terms as [`get`](Self::get).
     #[must_use]
-    pub fn contains_key(&self, key: &K) -> bool {
-        self.keys.binary_search(key).is_ok()
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.search(key).is_ok()
+    }
+
+    /// Where `key` sits in the key column, or `Err` when it is absent.
+    fn search<Q>(&self, key: &Q) -> Result<usize, usize>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.keys.binary_search_by(|probe| probe.borrow().cmp(key))
     }
 }
 
@@ -342,7 +373,9 @@ impl<V, K: DenseId> DenseFanout<V, K> {
     ///
     /// One counting pass and one placing pass, so building costs
     /// `O(pairs + bound)` rather than a sort, and each key's run keeps the
-    /// order its pairs arrived in.
+    /// order its pairs arrived in. Data that is already grouped by key goes
+    /// through [`from_grouped`](Self::from_grouped) instead, which skips both
+    /// passes.
     ///
     /// # Panics
     ///
@@ -388,6 +421,64 @@ impl<V, K: DenseId> DenseFanout<V, K> {
             .into_iter()
             .map(|slot| slot.expect("every counted pair filled its reserved slot"))
             .collect::<Vec<_>>();
+
+        Self {
+            offsets: offsets.into_boxed_slice(),
+            values: values.into_boxed_slice(),
+            key: PhantomData,
+        }
+    }
+
+    /// Builds the table over the `0..bound` key space from one group per key,
+    /// in ascending key order, `bound` being the number of groups.
+    ///
+    /// A key whose group is empty owns an empty run, and every group keeps its
+    /// own order. Values move from a group straight into the value column, so
+    /// a caller that already holds its data grouped by key — a row list per
+    /// file, a value list per node — pays the two columns and nothing per
+    /// group, where [`from_pairs`](Self::from_pairs) would have it flatten the
+    /// groups into pairs that the counting pass then regroups.
+    ///
+    /// [`Fanout::from_grouped`] is the sparse counterpart, taking `(key,
+    /// group)` pairs in any key order; there an empty group contributes no
+    /// key at all, because a sparse table holds only the keys it was given.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cfglib::DenseFanout;
+    ///
+    /// // The group's position is the key, so key 1 is present and empty.
+    /// let rows: DenseFanout<&str> =
+    ///     DenseFanout::from_grouped([vec!["a"], Vec::new(), vec!["c", "b"]]);
+    ///
+    /// assert_eq!(rows.bound(), 3);
+    /// assert_eq!(rows.get(0), ["a"]);
+    /// assert!(rows.get(1).is_empty());
+    /// assert_eq!(rows.get(2), ["c", "b"]);
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics when the groups hold more than `u32::MAX` values in total.
+    #[must_use]
+    pub fn from_grouped<G: IntoIterator<Item = V>>(groups: impl IntoIterator<Item = G>) -> Self {
+        let groups = groups.into_iter();
+        // A group count the iterator already knows — every `Vec` or array of
+        // groups knows it — sizes the offsets column once; the value column
+        // grows by one `extend` per group, and both are then frozen to the
+        // exact sizes `heap_bytes` reports.
+        let mut offsets: Vec<u32> = Vec::with_capacity(groups.size_hint().0 + 1);
+        let mut values: Vec<V> = Vec::new();
+        for group in groups {
+            offsets.push(run_bound(values.len()));
+            values.extend(group);
+        }
+        // The closing bound is also where the total is checked, so a table
+        // that would overflow the run space panics rather than truncating.
+        if !offsets.is_empty() {
+            offsets.push(run_bound(values.len()));
+        }
 
         Self {
             offsets: offsets.into_boxed_slice(),
@@ -546,21 +637,40 @@ impl<K: Ord, V> SortedMap<K, V> {
     }
 
     /// The value recorded for `key`, or `None` when it is absent.
+    ///
+    /// `key` may be given in any borrowed form of the map's key type, on the
+    /// same terms as [`Fanout::get`] and
+    /// [`BTreeMap::get`](alloc::collections::BTreeMap::get).
     #[must_use]
-    pub fn get(&self, key: &K) -> Option<&V> {
-        let index = self
-            .entries
-            .binary_search_by(|entry| entry.0.cmp(key))
-            .ok()?;
+    pub fn get<Q>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        let index = self.search(key).ok()?;
         Some(&self.entries[index].1)
     }
 
     /// Whether the map holds an entry for `key`.
+    ///
+    /// Takes a borrowed key on the same terms as [`get`](Self::get).
     #[must_use]
-    pub fn contains_key(&self, key: &K) -> bool {
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.search(key).is_ok()
+    }
+
+    /// Where `key` sits in the entry column, or `Err` when it is absent.
+    fn search<Q>(&self, key: &Q) -> Result<usize, usize>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
         self.entries
-            .binary_search_by(|entry| entry.0.cmp(key))
-            .is_ok()
+            .binary_search_by(|entry| entry.0.borrow().cmp(key))
     }
 }
 

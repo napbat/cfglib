@@ -1,10 +1,12 @@
 //! Behavior tests for the built-once key tables.
 
 extern crate alloc;
+extern crate std;
 
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
+use std::path::{Path, PathBuf};
 
 use crate::graph::store::NodeId;
 
@@ -122,6 +124,36 @@ fn keys_and_values_need_not_be_copyable() {
 }
 
 #[test]
+fn an_owned_key_is_looked_up_through_a_borrowed_one() {
+    let sites = Fanout::from_grouped([
+        ("beta".to_string(), vec![2_u32]),
+        ("alpha".to_string(), vec![1]),
+    ]);
+
+    assert_eq!(sites.get("alpha"), [1]);
+    assert!(sites.contains_key("beta"));
+    assert!(sites.get("gamma").is_empty());
+    assert!(!sites.contains_key("gamma"));
+
+    // The owned form still reads, which is what a `&K` caller passes.
+    assert_eq!(sites.get(&"alpha".to_string()), [1]);
+    assert!(sites.contains_key(&"beta".to_string()));
+}
+
+#[test]
+fn a_path_keyed_table_is_looked_up_by_path() {
+    let flows = Fanout::from_grouped([
+        (PathBuf::from("src/main.rs"), vec![2_u32, 1]),
+        (PathBuf::from("src/lib.rs"), vec![3]),
+    ]);
+
+    assert_eq!(flows.get(Path::new("src/lib.rs")), [3]);
+    assert_eq!(flows.get(Path::new("src/main.rs")), [2, 1]);
+    assert!(flows.contains_key(Path::new("src/main.rs")));
+    assert!(!flows.contains_key(Path::new("src/other.rs")));
+}
+
+#[test]
 fn heap_bytes_counts_the_three_columns_and_nothing_else() {
     let sites = Fanout::from_pairs(vec![(1_u32, 10_u32), (1, 11), (4, 40)]);
 
@@ -192,6 +224,46 @@ fn dense_heap_bytes_counts_both_columns_and_nothing_else() {
 }
 
 #[test]
+fn a_dense_groups_position_is_its_key() {
+    let grouped: DenseFanout<u32> =
+        DenseFanout::from_grouped([vec![11_u32, 10], Vec::new(), vec![30]]);
+
+    assert_eq!(grouped.bound(), 3);
+    assert_eq!(grouped.value_count(), 3);
+    assert_eq!(grouped.get(0), [11, 10]);
+    assert!(grouped.get(1).is_empty());
+    assert_eq!(grouped.get(2), [30]);
+
+    // The same table the equivalent pairs build, column for column.
+    assert_eq!(
+        grouped,
+        DenseFanout::from_pairs(3, [(0_usize, 11_u32), (0, 10), (2, 30)])
+    );
+    assert_eq!(grouped.heap_bytes(), 4 * OFFSET_BYTES + 3 * VALUE_BYTES);
+}
+
+#[test]
+fn an_empty_group_is_still_a_key_of_the_space() {
+    let rows: DenseFanout<u32> = DenseFanout::from_grouped([Vec::new(), Vec::new()]);
+
+    assert_eq!(rows.bound(), 2);
+    assert_eq!(rows.value_count(), 0);
+    assert!(rows.get(1).is_empty());
+    assert_eq!(rows.iter().count(), 2);
+    assert_eq!(rows.heap_bytes(), 3 * OFFSET_BYTES);
+}
+
+#[test]
+fn no_groups_at_all_build_the_empty_key_space() {
+    let rows = DenseFanout::<u32>::from_grouped(Vec::<Vec<u32>>::new());
+
+    assert_eq!(rows, DenseFanout::default());
+    assert_eq!(rows.bound(), 0);
+    assert_eq!(rows.value_count(), 0);
+    assert_eq!(rows.heap_bytes(), 0);
+}
+
+#[test]
 #[should_panic(expected = "dense fan-out key is outside 0..2")]
 fn a_dense_key_at_the_bound_is_rejected_while_building() {
     let _ = DenseFanout::from_pairs(2, [(2_usize, "past the end")]);
@@ -221,6 +293,18 @@ fn a_tagged_identity_keys_a_dense_table() {
     assert_eq!(references.get(call), ["tail", "hot"]);
     assert!(references.get(definition).is_empty());
     assert_eq!(references.iter().count(), 3);
+}
+
+#[test]
+fn groups_need_not_arrive_from_an_iterator_that_knows_its_length() {
+    let filtered = (0..4_u32)
+        .filter(|index| index % 2 == 0)
+        .map(|index| vec![index]);
+    let references: DenseFanout<u32, NodeId> = DenseFanout::from_grouped(filtered);
+
+    assert_eq!(references.bound(), 2);
+    assert_eq!(references.get(NodeId::from_index(0)), [0]);
+    assert_eq!(references.get(NodeId::from_index(1)), [2]);
 }
 
 #[test]
@@ -271,6 +355,23 @@ fn a_merge_sees_one_keys_pairs_in_the_order_they_were_recorded() {
             .collect::<Vec<_>>(),
         [("a", "2".to_string()), ("b", "134".to_string())]
     );
+}
+
+#[test]
+fn a_sorted_map_of_owned_keys_is_looked_up_through_a_borrowed_one() {
+    let map = SortedMap::from_pairs(
+        vec![("b".to_string(), 1_u32), ("a".to_string(), 2)],
+        |slot, value| *slot = value,
+    );
+
+    assert_eq!(map.get("a"), Some(&2));
+    assert_eq!(map.get("c"), None);
+    assert!(map.contains_key("b"));
+    assert!(!map.contains_key("c"));
+
+    // The owned form still reads, which is what a `&K` caller passes.
+    assert_eq!(map.get(&"b".to_string()), Some(&1));
+    assert!(map.contains_key(&"a".to_string()));
 }
 
 #[test]
