@@ -8,6 +8,7 @@ pub mod dot;
 pub mod edge_traverse;
 pub mod edge_view;
 pub mod eh;
+pub mod fanout;
 pub mod horn;
 pub mod interval;
 pub mod keyed;

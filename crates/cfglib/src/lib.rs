@@ -6,6 +6,11 @@
 //! addition, bit-cheap removal, identity-preserving endpoint redirection, and
 //! an explicit [`compact`](Graph::compact) that reports its [`Renumbering`].
 //! Identities are one type, [`Id<T>`](Id), tagged per entity kind.
+//! [`Fanout`], [`DenseFanout`], and [`SortedMap`] are that base's shape
+//! without the edges: built-once tables from sparse keys, from a dense
+//! `0..bound` key space, and from sparse keys to one value, so a reverse
+//! index or a per-scope row table costs a few allocations rather than one
+//! per key.
 //! Algorithms consume [`GraphView`] / [`RootedView`], while [`NodeView`],
 //! [`EdgeView`], and [`FilteredEdges`] retain payloads and edge identity
 //! without rebuilding, so consumer-owned graph stores participate without
@@ -323,6 +328,7 @@ pub use graph::edge_traverse::{
 };
 pub use graph::edge_view::{EdgeRef, EdgeView, FilteredEdges};
 pub use graph::eh::{EhBlockKind, EhEdge, EhEdgeKind, EhModel};
+pub use graph::fanout::{DenseFanout, Fanout, SortedMap};
 pub use graph::horn::HornClauses;
 pub use graph::interval::{Interval, IntervalAnalysis};
 pub use graph::keyed::KeyedGraph;
