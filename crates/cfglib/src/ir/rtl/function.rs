@@ -16,8 +16,7 @@ use super::dialect::Dialect;
 use super::error::{Error, Result};
 use super::expr::{Expr, Place};
 use super::statement::{Statement, StatementId, StatementNode};
-use super::types::Constraint as _;
-use super::types::Shape;
+use super::types::{Constraint, Shape};
 
 /// Deterministic many-to-many source provenance for RTL statements.
 pub type ProvenanceMap<D> = crate::ir::provenance::ProvenanceMap<D, StatementId>;
@@ -220,7 +219,7 @@ impl<D: Dialect> FunctionBuilder<D> {
     /// transfer, a width mismatch between a place and its value, a
     /// destination lane written twice anywhere in one transfer, a
     /// zero-lane value, a non-scalar branch condition or dispatch
-    /// scrutinee, or a width-changing reinterpretation.
+    /// scrutinee, or a total-bit-width-changing reinterpretation.
     pub fn append(
         &mut self,
         block: BlockId,
@@ -473,21 +472,23 @@ fn validate_expr<D: Dialect>(expr: &Expr<D>) -> Result<()> {
             Ok(())
         }
         Expr::Reinterpret { operand, shape } => {
-            let Shape { scalar, lanes } = operand.shape();
-            if lanes != shape.lanes {
-                return Err(Error::InvalidConstruction(format!(
-                    "reinterpretation changes width {lanes} to {}",
-                    shape.lanes
-                )));
-            }
-            if let (Some(from), Some(to)) = (scalar.width(), shape.scalar.width())
+            let source = operand.shape();
+            if let (Some(from), Some(to)) = (total_bit_width(&source), total_bit_width(shape))
                 && from != to
             {
                 return Err(Error::InvalidConstruction(format!(
-                    "reinterpretation changes lane width {from} to {to}"
+                    "reinterpretation changes total bit width {from} to {to}"
                 )));
             }
             validate_expr(operand)
         }
     }
+}
+
+/// Returns the total known bit width of one shape.
+fn total_bit_width<C: Constraint>(shape: &Shape<C>) -> Option<u64> {
+    shape
+        .scalar
+        .width()
+        .map(|width| u64::from(width) * u64::from(shape.lanes))
 }

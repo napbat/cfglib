@@ -65,7 +65,7 @@ fn duplicate_lane_across_assignments_is_rejected() {
     assert!(error.is_err(), "two writes of one lane must not validate");
 }
 
-/// Reinterpretation preserves lane width, not just lane count.
+/// Reinterpretation preserves total bit width.
 #[test]
 fn cross_width_reinterpret_is_rejected() {
     let mut builder = FunctionBuilder::<TestDialect>::new("test".into());
@@ -99,6 +99,49 @@ fn cross_width_reinterpret_is_rejected() {
             None,
         )
         .expect("a same-width reinterpretation validates");
+}
+
+/// Reinterpretation can regroup lanes when the total bit width is unchanged.
+#[test]
+fn reinterpret_can_regroup_lanes() {
+    let mut builder = FunctionBuilder::<TestDialect>::new("test".into());
+    let entry = builder.entry();
+    let body = builder.new_block("body");
+    builder.add_edge(entry, body, Edge::Entry).unwrap();
+    builder
+        .append(
+            body,
+            assign(
+                1,
+                &[0],
+                Expr::Reinterpret {
+                    operand: alloc::boxed::Box::new(Expr::Const {
+                        bits: vec![1, 2],
+                        shape: ValueShape::vector(ScalarType::U32, 2),
+                    }),
+                    shape: ValueShape::scalar(ScalarType::F64),
+                },
+            ),
+            None,
+        )
+        .expect("two 32-bit lanes can become one 64-bit lane");
+    builder
+        .append(
+            body,
+            assign(
+                2,
+                &[0, 1],
+                Expr::Reinterpret {
+                    operand: alloc::boxed::Box::new(Expr::Const {
+                        bits: vec![1],
+                        shape: ValueShape::scalar(ScalarType::F64),
+                    }),
+                    shape: ValueShape::vector(ScalarType::U32, 2),
+                },
+            ),
+            None,
+        )
+        .expect("one 64-bit lane can become two 32-bit lanes");
 }
 
 /// A wide scalar lane carries multiple constant words.

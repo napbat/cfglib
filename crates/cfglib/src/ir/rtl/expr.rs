@@ -45,7 +45,10 @@ pub enum Expr<D: Dialect> {
         /// The result shape.
         shape: Shape<D::Constraint>,
     },
-    /// A bit reinterpretation to a same-width shape.
+    /// A bit reinterpretation to a shape with the same total bit width.
+    ///
+    /// The source and target can have different lane counts. For example,
+    /// two 32-bit lanes can become one 64-bit lane.
     Reinterpret {
         /// The reinterpreted value.
         operand: Box<Expr<D>>,

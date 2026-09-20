@@ -55,7 +55,7 @@ pub enum VarExpr<D: Dialect> {
         /// The result shape.
         shape: Shape<D::Constraint>,
     },
-    /// A bit reinterpretation to a same-width shape.
+    /// A bit reinterpretation to a shape with the same total bit width.
     Reinterpret {
         /// The reinterpreted value.
         operand: Box<VarExpr<D>>,
