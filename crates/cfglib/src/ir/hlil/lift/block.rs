@@ -304,7 +304,7 @@ fn plan_inlining<D: LiftDialect, P: Borrow<mlil::Instruction<D>>>(
                     .is_some_and(|f| !f.reads.contains(&defined))
             });
         }
-        if viable[position].is_some() {
+        if viable[position].is_some() && !D::materialize_value(instruction.operation()) {
             let mut reads = BTreeSet::new();
             let mut effects = instruction.effects().to_vec();
             let mut may_throw = instruction.may_throw();

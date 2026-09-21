@@ -288,6 +288,60 @@ fn inlining_crosses_a_straight_line_block_run() {
 }
 
 #[test]
+fn dialect_can_keep_a_single_use_value_materialized() {
+    let mut builder = mlil::FunctionBuilder::<Toy>::new("toy::materialized".into());
+    let block = builder.new_block("body");
+    let input = builder.declare_variable(0, None).unwrap();
+    let staged = builder.declare_variable(1, None).unwrap();
+    let result = builder.declare_variable(1, None).unwrap();
+    let typed = |variable| mlil::TypedVariable::<Toy>::new(variable, Type::Integer);
+    builder
+        .append_instruction(
+            block,
+            MediumOperation::Materialized,
+            vec![typed(input)],
+            vec![typed(staged)],
+            false,
+            None,
+        )
+        .unwrap();
+    builder
+        .append_instruction(
+            block,
+            MediumOperation::Add,
+            vec![typed(staged), typed(input)],
+            vec![typed(result)],
+            false,
+            None,
+        )
+        .unwrap();
+    builder
+        .append_instruction(
+            block,
+            MediumOperation::Return,
+            vec![typed(result)],
+            Vec::new(),
+            false,
+            None,
+        )
+        .unwrap();
+    builder
+        .add_edge(builder.entry(), block, Edge::Entry, None)
+        .unwrap();
+
+    let lifted = lift_function(&builder.finish().unwrap()).unwrap();
+    let statements = lifted.function.body();
+    assert_eq!(statements.len(), 2);
+    assert!(matches!(
+        lifted
+            .function
+            .statement(statements[0])
+            .map(crate::ir::hlil::Statement::kind),
+        Some(crate::ir::hlil::StatementKind::Assign { .. })
+    ));
+}
+
+#[test]
 fn previous_value_operands_pin_both_sides() {
     // producer = add(a, a) feeds a merge's previous-value slot, and the
     // merge's own definition feeds the return: neither may inline — the

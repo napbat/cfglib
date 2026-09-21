@@ -121,6 +121,8 @@ pub(crate) enum MediumOperation {
     /// A read-modify-write merge: operand 1 reads the destination's
     /// previous value.
     Merge,
+    /// A value that the dialect requires as a visible statement.
+    Materialized,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,6 +177,7 @@ impl mlil::Dialect for Toy {
             MediumOperation::Jump => "jump",
             MediumOperation::Return => "return",
             MediumOperation::Merge => "merge",
+            MediumOperation::Materialized => "materialized",
         }
     }
 
@@ -247,13 +250,19 @@ impl LiftDialect for Toy {
         matches!(operation, MediumOperation::Merge).then_some(1)
     }
 
+    fn materialize_value(operation: &MediumOperation) -> bool {
+        matches!(operation, MediumOperation::Materialized)
+    }
+
     fn lift_operation(operation: &MediumOperation) -> Lifted<Operation> {
         match operation {
             MediumOperation::Add => Lifted::Operation(Operation::Add),
             MediumOperation::LessThan => Lifted::Operation(Operation::LessThan),
             MediumOperation::Not => Lifted::Operation(Operation::Not),
             MediumOperation::Load => Lifted::Operation(Operation::Load),
-            MediumOperation::Call | MediumOperation::Merge => Lifted::Operation(Operation::Call),
+            MediumOperation::Call | MediumOperation::Merge | MediumOperation::Materialized => {
+                Lifted::Operation(Operation::Call)
+            }
             MediumOperation::Store => Lifted::Store {
                 location: Operation::Deref,
             },

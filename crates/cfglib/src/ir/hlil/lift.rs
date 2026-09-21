@@ -133,6 +133,16 @@ pub trait LiftDialect:
         None
     }
 
+    /// Tests whether one definition must remain a visible statement.
+    ///
+    /// Return `true` when moving the value into its consumer would lose a
+    /// semantic relation that the expression tree cannot state. The default
+    /// permits normal single-use inlining.
+    #[must_use]
+    fn materialize_value(_operation: &<Self as mlil::Dialect>::Operation) -> bool {
+        false
+    }
+
     /// The exact negation of one operation applied to the same operands —
     /// a comparison with its relation inverted. Consulted before
     /// [`logical_not`](Self::logical_not) when a loop condition needs the
