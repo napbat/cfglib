@@ -240,12 +240,21 @@ are the other half of that contract, for a lift that wants the improvement in it
 stored form: `eliminate_dead_code(live_out)` (which takes the exit seed, keeps
 every instruction with declared effects, and keeps a throwing instruction because
 it is the throw site its block's exceptional edges leave from),
-`propagate_copies[_with_exits]()`, and `prune_variables()` each decide over the graph and
+`propagate_copies[_with_exits]()`, `coalesce_copies(is_temporary)`, and
+`prune_variables()` each decide over the graph and
 rebuild a function that verifies. Blocks, edges, exception regions, cleanup
 routes, and the signature survive; a dropped instruction takes its provenance
 with it, and instruction identities become dense again. `prune_variables` is the
 variable axis and reports `VariablePruning` both ways, exactly as
 `split_variables` reports `VariableSplit`.
+
+`coalesce_copies` runs copy propagation's direction in reverse, which a lift
+needs after it: propagation rewrites readers to the lifter temporary a value was
+computed into, so the named register web survives only as a copy of it. Where a
+temporary is defined once, read only from that definition, and copied into a
+variable defined only by that copy, the two are one value with two names — the
+definition is rewritten to define the named variable, the readers follow, and
+the copy goes. The caller says which variables are the lift's own. Chains resolve in one pass.
 
 Memory stays outside variables by contract: anything aliasable lives behind
 dialect load/store operations ordered by their declared effects, while

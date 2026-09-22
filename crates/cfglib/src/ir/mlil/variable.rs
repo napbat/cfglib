@@ -37,18 +37,26 @@ impl<D: Dialect> TypedVariable<D> {
     }
 }
 
-/// Pairs each variable of one occurrence list with its type.
+/// Pairs each variable of one occurrence list with its type, under a
+/// renaming of the identities.
 ///
 /// The two lists come from one instruction and a verified instruction
 /// keeps them the same length, so a shorter type list truncates rather
-/// than inventing a type.
+/// than inventing a type. An occurrence keeps the value type the
+/// instruction carried for it whatever `rename` does with its identity.
 pub(super) fn typed<D: Dialect>(
     variables: &[VariableId],
     value_types: &[D::ValueType],
+    rename: impl Fn(VariableId) -> VariableId,
 ) -> Vec<TypedVariable<D>> {
     variables
         .iter()
         .zip(value_types)
-        .map(|(&variable, value_type)| TypedVariable::new(variable, value_type.clone()))
+        .map(|(&variable, value_type)| TypedVariable::new(rename(variable), value_type.clone()))
         .collect()
+}
+
+/// The renaming that changes nothing.
+pub(super) const fn unchanged(variable: VariableId) -> VariableId {
+    variable
 }

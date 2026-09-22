@@ -22,7 +22,8 @@
 //! verifies first refuses it.
 //!
 //! A **canonical rebuild** — [`Function::eliminate_dead_code`],
-//! [`Function::propagate_copies`], [`Function::prune_variables`],
+//! [`Function::propagate_copies`], [`Function::coalesce_copies`],
+//! [`Function::prune_variables`],
 //! [`Function::split_variables`], [`Function::promote_memory`],
 //! [`Function::rewrite_instructions`] — takes the same decision and rebuilds a
 //! function that verifies, which is what a lift stores. Each states exactly
@@ -31,6 +32,7 @@
 
 mod builder;
 mod canonical;
+mod coalesce;
 mod constant;
 mod coverage;
 mod dialect;

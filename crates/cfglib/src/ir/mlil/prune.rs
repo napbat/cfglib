@@ -21,8 +21,8 @@ use alloc::vec::Vec;
 
 use super::variable::typed;
 use super::{
-    EntityId, Function, FunctionBuilder, InstructionId, Result, Signature, TypedVariable,
-    VariableId, VerifyDialect,
+    EntityId, Function, FunctionBuilder, InstructionId, Result, Signature, VariableId,
+    VerifyDialect,
 };
 
 /// The result of pruning one function's unreferenced variables.
@@ -112,14 +112,12 @@ fn prune<D: VerifyDialect>(source: &Function<D>) -> Result<(Function<D>, Variabl
         let rebuilt = builder.append_instruction(
             point.block,
             instruction.operation().clone(),
-            renumber(
-                &pruning,
-                typed::<D>(instruction.uses(), instruction.use_types()),
-            ),
-            renumber(
-                &pruning,
-                typed::<D>(instruction.defs(), instruction.def_types()),
-            ),
+            typed::<D>(instruction.uses(), instruction.use_types(), |variable| {
+                pruning.renumbered(variable)
+            }),
+            typed::<D>(instruction.defs(), instruction.def_types(), |variable| {
+                pruning.renumbered(variable)
+            }),
             instruction.may_throw(),
             None,
         )?;
@@ -183,19 +181,4 @@ fn identity_pruning<D: VerifyDialect>(function: &Function<D>) -> VariablePruning
             .map(|variable| (variable.id, variable.id))
             .collect(),
     }
-}
-
-fn renumber<D: VerifyDialect>(
-    pruning: &VariablePruning,
-    occurrences: Vec<TypedVariable<D>>,
-) -> Vec<TypedVariable<D>> {
-    occurrences
-        .into_iter()
-        .map(|occurrence| {
-            TypedVariable::new(
-                pruning.renumbered(occurrence.variable),
-                occurrence.value_type,
-            )
-        })
-        .collect()
 }

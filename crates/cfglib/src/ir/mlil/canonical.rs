@@ -22,7 +22,7 @@ use alloc::vec::Vec;
 
 use crate::{BlockId, Cfg, CopyPropagationStats, DeadCode};
 
-use super::variable::typed;
+use super::variable::{typed, unchanged};
 use super::{
     AnalysisDialect, EntityId, Function, FunctionBuilder, Instruction, InstructionId, Result,
     VariableId, VerifyDialect,
@@ -70,9 +70,12 @@ impl<D: VerifyDialect> Function<D> {
         if dropped.is_empty() {
             return Ok((self.clone(), 0));
         }
-        let function = rebuild(self, &self.cfg, |instruction| {
-            !dropped.contains(&instruction.id())
-        })?;
+        let function = rebuild(
+            self,
+            &self.cfg,
+            |instruction| !dropped.contains(&instruction.id()),
+            unchanged,
+        )?;
         Ok((function, dropped.len()))
     }
 }
@@ -118,22 +121,27 @@ impl<D: AnalysisDialect + VerifyDialect> Function<D> {
         if statistics.copies_removed == 0 && statistics.uses_rewritten == 0 {
             return Ok((self.clone(), statistics));
         }
-        Ok((rebuild(self, &cfg, |_| true)?, statistics))
+        Ok((rebuild(self, &cfg, |_| true, unchanged)?, statistics))
     }
 }
 
 /// Rebuilds one canonical function from `cfg`, keeping the instructions
-/// `keep` accepts.
+/// `keep` accepts and renaming every variable occurrence through
+/// `rename`.
 ///
 /// `cfg` holds the source's blocks, edges, exception regions, and cleanup
 /// routes; its instructions are the source's, possibly fewer and with
 /// rewritten operands. Every non-instruction identity survives, the kept
 /// instructions renumber densely in graph order, and a provenance entry
-/// naming an instruction that did not survive is dropped with it.
-fn rebuild<D: VerifyDialect>(
+/// naming an instruction that did not survive is dropped with it. The
+/// variable table is copied whole, so a renaming leaves the variables it
+/// renamed away declared and unoccurring — [`Function::prune_variables`]
+/// is what drops them.
+pub(super) fn rebuild<D: VerifyDialect>(
     source: &Function<D>,
     cfg: &Cfg<Instruction<D>, D::Edge>,
     keep: impl Fn(&Instruction<D>) -> bool,
+    rename: impl Fn(VariableId) -> VariableId,
 ) -> Result<Function<D>> {
     let mut builder = FunctionBuilder::<D>::new(source.source().clone());
     for variable in source.variables() {
@@ -151,8 +159,8 @@ fn rebuild<D: VerifyDialect>(
             let rebuilt = builder.append_instruction(
                 block,
                 instruction.operation().clone(),
-                typed::<D>(instruction.uses(), instruction.use_types()),
-                typed::<D>(instruction.defs(), instruction.def_types()),
+                typed::<D>(instruction.uses(), instruction.use_types(), &rename),
+                typed::<D>(instruction.defs(), instruction.def_types(), &rename),
                 instruction.may_throw(),
                 None,
             )?;

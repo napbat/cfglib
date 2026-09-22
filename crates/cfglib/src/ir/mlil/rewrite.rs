@@ -4,7 +4,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use super::variable::typed;
+use super::variable::{typed, unchanged};
 use super::{
     Dialect, Error, Function, FunctionBuilder, Instruction, InstructionId, Result, TypedVariable,
     VerifyDialect,
@@ -99,8 +99,8 @@ impl<D: VerifyDialect> Function<D> {
                 } else {
                     (
                         instruction.operation().clone(),
-                        typed::<D>(instruction.uses(), instruction.use_types()),
-                        typed::<D>(instruction.defs(), instruction.def_types()),
+                        typed::<D>(instruction.uses(), instruction.use_types(), unchanged),
+                        typed::<D>(instruction.defs(), instruction.def_types(), unchanged),
                         instruction.may_throw(),
                     )
                 };

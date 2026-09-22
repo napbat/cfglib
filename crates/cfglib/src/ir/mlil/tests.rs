@@ -16,6 +16,7 @@ use super::{
 };
 
 mod canonical;
+mod coalesce;
 mod memory;
 mod promote;
 mod removal;
