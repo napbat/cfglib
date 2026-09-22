@@ -255,7 +255,7 @@ temporary is defined once, read only from that definition, and copied into a
 variable defined only by that copy, the two are one value with two names — the
 definition is rewritten to define the named variable, the readers follow, and
 the copy goes. The caller says which variables are the lift's own. Chains
-resolve in one pass, and `drop_unread_definitions(of)` is the companion for what
+resolve in one pass, and `drop_unread_definitions[_with_exits](of)` is the companion for what
 an effect states but nothing reads: a call under a calling convention defines
 every register the convention does not preserve, and dead-code elimination
 cannot touch those because the call itself has effects.

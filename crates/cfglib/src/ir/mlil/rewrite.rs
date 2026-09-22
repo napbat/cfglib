@@ -5,6 +5,9 @@ extern crate alloc;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
+use crate::BlockId;
+use crate::dataflow::liveness::Liveness;
+
 use super::variable::{typed, unchanged};
 use super::{
     Dialect, Error, Function, FunctionBuilder, Instruction, InstructionId, Result, TypedVariable,
@@ -133,7 +136,10 @@ impl<D: VerifyDialect> Function<D> {
     /// `of` selects the instructions to consider — the caller knows which
     /// of its operations state writes they do not compute. A variable any
     /// instruction reads anywhere stays, so a definition a later read
-    /// observes through a merge is never dropped.
+    /// observes through a merge is never dropped. What the function hands
+    /// back to its caller is not in the graph at all:
+    /// [`Self::drop_unread_definitions_with_exits`] is the door that takes
+    /// it.
     ///
     /// Nothing is removed, so every block, edge, instruction, variable,
     /// and provenance identity survives; a function with nothing to drop
@@ -147,7 +153,29 @@ impl<D: VerifyDialect> Function<D> {
         &self,
         of: impl Fn(&Instruction<D>) -> bool,
     ) -> Result<(Self, usize)> {
+        self.drop_unread_definitions_with_exits(of, |_| Vec::new())
+    }
+
+    /// [`Self::drop_unread_definitions`] told what leaves each block.
+    ///
+    /// A definition that is live at an exit under `live_out` counts as
+    /// read and stays: something outside the function observes it, which
+    /// is exactly what a call's result register is when the function
+    /// returns it. A caller normally answers for the blocks with no
+    /// successors and hands back an empty vector everywhere else, and the
+    /// empty seed is [`Self::drop_unread_definitions`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the rebuilt function fails structural or
+    /// dialect verification.
+    pub fn drop_unread_definitions_with_exits(
+        &self,
+        of: impl Fn(&Instruction<D>) -> bool,
+        live_out: impl Fn(BlockId) -> Vec<VariableId>,
+    ) -> Result<(Self, usize)> {
         let read = read_variables(self);
+        let observed = live_definitions(self, live_out);
         let mut dropped = 0usize;
         let rewrite = self.rewrite_instructions(|instruction| {
             if !of(instruction) {
@@ -157,7 +185,9 @@ impl<D: VerifyDialect> Function<D> {
                 .defs()
                 .iter()
                 .zip(instruction.def_types())
-                .filter(|(defined, _)| read.contains(defined))
+                .filter(|(defined, _)| {
+                    read.contains(defined) || observed.contains(&(instruction.id(), **defined))
+                })
                 .map(|(&defined, value_type)| TypedVariable::new(defined, value_type.clone()))
                 .collect();
             if kept.len() == instruction.defs().len() {
@@ -173,6 +203,38 @@ impl<D: VerifyDialect> Function<D> {
         })?;
         Ok((rewrite.function, dropped))
     }
+}
+
+/// Every definition whose value is still live where its instruction
+/// leaves it, the caller's exit seed included.
+///
+/// With an empty seed this is a subset of what
+/// [`read_variables`] answers — a definition is live only because
+/// something reads the variable — so the unseeded door keeps exactly what
+/// it always kept.
+fn live_definitions<D: Dialect>(
+    function: &Function<D>,
+    live_out: impl Fn(BlockId) -> Vec<VariableId>,
+) -> BTreeSet<(InstructionId, VariableId)> {
+    let liveness: Liveness<VariableId> = Liveness::compute_with_exits(function.cfg(), live_out);
+    let mut observed = BTreeSet::new();
+    for block in function.cfg().block_ids() {
+        let after = liveness.live_after_instructions(function.cfg(), block);
+        for (index, instruction) in function
+            .cfg()
+            .block(block)
+            .instructions()
+            .iter()
+            .enumerate()
+        {
+            for &defined in instruction.defs() {
+                if after[index].contains(&defined) {
+                    observed.insert((instruction.id(), defined));
+                }
+            }
+        }
+    }
+    observed
 }
 
 /// Every variable some instruction of the function reads.

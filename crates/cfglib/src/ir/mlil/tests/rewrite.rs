@@ -247,3 +247,51 @@ fn a_selected_instruction_loses_its_own_unread_definition() {
             .is_empty()
     );
 }
+
+/// The call defines a register nothing inside the function reads, and the
+/// caller reads it back: the seed is what says so.
+#[test]
+fn an_exit_seed_keeps_the_definition_it_names() {
+    let (function, [returned, read, _, _]) = clobbering_function();
+    let exit = function
+        .cfg()
+        .block_ids()
+        .find(|&block| function.cfg().outgoing(block).next().is_none())
+        .expect("the fixture has one exit");
+    let call = |instruction: &Instruction<ToyDialect>| {
+        matches!(instruction.operation(), Operation::Store(_))
+    };
+
+    let (seeded, count) = function
+        .drop_unread_definitions_with_exits(call, |block| {
+            if block == exit {
+                vec![returned]
+            } else {
+                Vec::new()
+            }
+        })
+        .unwrap();
+    assert_eq!(count, 1, "only the definition nothing observes goes");
+    let report = seeded.verify();
+    assert!(report.is_ok(), "{:?}", report.issues);
+    assert_eq!(
+        seeded
+            .instructions()
+            .find(|instruction| call(instruction))
+            .expect("the call stays")
+            .defs(),
+        &[returned, read],
+        "the seeded definition counts as read"
+    );
+
+    let (unseeded, count) = function.drop_unread_definitions(call).unwrap();
+    assert_eq!(count, 2, "without the seed the same definition goes");
+    assert_eq!(
+        unseeded
+            .instructions()
+            .find(|instruction| call(instruction))
+            .expect("the call stays")
+            .defs(),
+        &[read]
+    );
+}
