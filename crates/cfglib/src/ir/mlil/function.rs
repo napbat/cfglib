@@ -272,6 +272,40 @@ impl<D: VerifyDialect> Function<D> {
         super::promote::promote_memory(self)
     }
 
+    /// Rebuilds the function with every unaliased memory location promoted
+    /// to a mutable variable, per `classify` rather than per the dialect's
+    /// [`promotion_access`](super::PromoteDialect::promotion_access).
+    ///
+    /// It exists because the address judgment is not always a property of
+    /// the instruction. A machine frontend cannot tell a frame slot from
+    /// any other pointer dereference by looking at `load(add(v9, 0x30))`
+    /// alone — that is a slot only once a stack-pointer analysis has
+    /// proved what `v9` holds — so the trait method, which sees one
+    /// instruction and no analysis context, has nothing to answer with.
+    /// The consumer that ran the analysis answers instead, and gets the
+    /// same aliasing contract, validation, and identity-preserving rewrite
+    /// as [`Self::promote_memory`], which is this door passed the trait
+    /// method.
+    ///
+    /// `classify` is called once per instruction in the collection pass
+    /// and once per instruction in the rewrite pass, both in instruction
+    /// order, and must answer the same for the same instruction both
+    /// times; it is [`FnMut`] so the analysis can be memoized by
+    /// [`InstructionId`](super::InstructionId).
+    ///
+    /// # Errors
+    ///
+    /// Returns a verification report if the stored function is invalid.
+    pub fn promote_memory_with(
+        &self,
+        classify: impl FnMut(&super::Instruction<D>) -> super::PromotionAccess<D::Location>,
+    ) -> Result<super::MemoryPromotion<D>>
+    where
+        D: super::PromoteDialect,
+    {
+        super::promote::promote_memory_with(self, classify)
+    }
+
     /// Rebuilds the function with one variable per SSA phi-web, separating
     /// unrelated lifetimes that shared a storage-derived variable.
     ///

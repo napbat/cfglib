@@ -15,6 +15,14 @@
 //! sound part: shape validation, conservative disqualification, and an
 //! identity-preserving rewrite.
 //!
+//! [`PromoteDialect::promotion_access`] sees one instruction and nothing
+//! else, which is enough for a dialect whose operations name their slots
+//! and not enough for a machine frontend, where `load(add(v9, 0x30))` is a
+//! frame slot only once an analysis has proved what `v9` holds. Such a
+//! consumer supplies the classification itself through
+//! [`Function::promote_memory_with`]; both entry points run the same
+//! implementation.
+//!
 //! Each rewritten access becomes a dialect copy at the same instruction
 //! identity — nothing is deleted, so blocks, edges, instructions, regions,
 //! and provenance all keep their ids, and the ordinary cleanup passes
@@ -63,6 +71,12 @@ pub trait PromoteDialect: Dialect {
     /// asserts the instruction cannot touch any reported location. When
     /// that cannot be proven, return [`Escape`](PromotionAccess::Escape) or
     /// [`EscapeAll`](PromotionAccess::EscapeAll).
+    ///
+    /// The instruction is all the judgment gets. A dialect that cannot
+    /// decide an address without analysis context returns
+    /// [`EscapeAll`](PromotionAccess::EscapeAll) here and leaves the
+    /// judgment to a consumer calling
+    /// [`Function::promote_memory_with`].
     fn promotion_access(instruction: &Instruction<Self>) -> PromotionAccess<Self::Location>;
 
     /// The dialect copy operation rewritten accesses become (one use, one
@@ -90,11 +104,14 @@ pub struct MemoryPromotion<D: PromoteDialect> {
 
 /// The locations that survived classification: accessed somewhere, never
 /// escaped, and well-shaped at every access.
-fn promotable_locations<D: PromoteDialect>(source: &Function<D>) -> BTreeSet<D::Location> {
+fn promotable_locations<D: PromoteDialect>(
+    source: &Function<D>,
+    classify: &mut impl FnMut(&Instruction<D>) -> PromotionAccess<D::Location>,
+) -> BTreeSet<D::Location> {
     let mut seen: BTreeSet<D::Location> = BTreeSet::new();
     let mut escaped: BTreeSet<D::Location> = BTreeSet::new();
     for instruction in source.instructions() {
-        match D::promotion_access(instruction) {
+        match classify(instruction) {
             PromotionAccess::Load(location) => {
                 if instruction.defs().len() != 1 {
                     escaped.insert(location.clone());
@@ -119,11 +136,37 @@ pub(super) fn promote_memory<D>(source: &Function<D>) -> Result<MemoryPromotion<
 where
     D: PromoteDialect + VerifyDialect,
 {
+    promote_memory_with(source, D::promotion_access)
+}
+
+/// Promotes with `classify` standing in for
+/// [`PromoteDialect::promotion_access`], so a consumer holding analysis
+/// results the trait method cannot see supplies the memory judgment
+/// itself. Everything else — the aliasing contract the classification
+/// asserts, shape validation, conservative disqualification, and the
+/// identity-preserving rewrite — is exactly as for
+/// [`promote_memory`], which is this function passed the trait method.
+///
+/// `classify` is called once per instruction in the collection pass and
+/// once per instruction in the rewrite pass, both in instruction order,
+/// and **must answer the same for the same instruction both times**: the
+/// collection pass decides which locations are promotable and the rewrite
+/// pass decides which accesses become copies, so an answer that changes
+/// between them rewrites accesses the escape analysis never saw. It is
+/// [`FnMut`] so a consumer can memoize its analysis by
+/// [`InstructionId`].
+pub(super) fn promote_memory_with<D>(
+    source: &Function<D>,
+    mut classify: impl FnMut(&Instruction<D>) -> PromotionAccess<D::Location>,
+) -> Result<MemoryPromotion<D>>
+where
+    D: PromoteDialect + VerifyDialect,
+{
     let report = source.verify();
     if !report.is_ok() {
         return Err(report.into());
     }
-    let locations = promotable_locations(source);
+    let locations = promotable_locations(source, &mut classify);
     if locations.is_empty() {
         return Ok(MemoryPromotion {
             function: source.clone(),
@@ -154,7 +197,7 @@ where
         let instruction = source
             .instruction(id)
             .expect("a verified function stores every indexed instruction");
-        let rewrite = match D::promotion_access(instruction) {
+        let rewrite = match classify(instruction) {
             PromotionAccess::Load(location) => promoted.get(&location).map(|&slot| {
                 let value_type = instruction.def_types()[0].clone();
                 (

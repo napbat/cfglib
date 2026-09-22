@@ -16,6 +16,7 @@ use super::{
 };
 
 mod memory;
+mod promote;
 mod removal;
 mod rewrite;
 
@@ -693,108 +694,6 @@ fn split_variables_preserves_parameters_identities_and_provenance() {
             .count(),
         2
     );
-}
-
-#[test]
-fn promote_memory_rewrites_unaliased_slots() {
-    let mut builder = FunctionBuilder::<ToyDialect>::new("toy::slots".into());
-    let body = builder.new_block("body");
-    let input = builder.declare_variable(0, None).unwrap();
-    let first = builder.declare_variable(0, None).unwrap();
-    let pointer = builder.declare_variable(0, None).unwrap();
-    let second = builder.declare_variable(0, None).unwrap();
-    let typed = |variable| TypedVariable::new(variable, Type::Integer);
-    // Slot 0 is only loaded and stored; slot 1's address escapes.
-    builder
-        .append_instruction(
-            body,
-            Operation::Store(0),
-            vec![typed(input)],
-            Vec::new(),
-            false,
-            None,
-        )
-        .unwrap();
-    builder
-        .append_instruction(
-            body,
-            Operation::Load(0),
-            Vec::new(),
-            vec![typed(first)],
-            false,
-            None,
-        )
-        .unwrap();
-    builder
-        .append_instruction(
-            body,
-            Operation::AddressOf(1),
-            Vec::new(),
-            vec![typed(pointer)],
-            false,
-            None,
-        )
-        .unwrap();
-    builder
-        .append_instruction(
-            body,
-            Operation::Store(1),
-            vec![typed(first)],
-            Vec::new(),
-            false,
-            None,
-        )
-        .unwrap();
-    builder
-        .append_instruction(
-            body,
-            Operation::Load(1),
-            Vec::new(),
-            vec![typed(second)],
-            false,
-            None,
-        )
-        .unwrap();
-    builder
-        .append_instruction(
-            body,
-            Operation::Return,
-            vec![typed(second)],
-            Vec::new(),
-            false,
-            None,
-        )
-        .unwrap();
-    builder
-        .add_edge(builder.entry(), body, Edge::Entry, None)
-        .unwrap();
-    let function = builder.finish().unwrap();
-
-    let promotion = function.promote_memory().unwrap();
-    assert!(promotion.function.verify().is_ok());
-    assert_eq!(promotion.rewritten, 2);
-    assert_eq!(promotion.promoted.len(), 1, "{:?}", promotion.promoted);
-    let slot = promotion.promoted[&0];
-    assert_eq!(promotion.function.variable(slot).unwrap().role, 9);
-    assert_eq!(promotion.function.variable(slot).unwrap().native, Some(0));
-
-    let instruction = |index| {
-        promotion
-            .function
-            .instruction(InstructionId::from_raw(index))
-            .unwrap()
-    };
-    // The unaliased slot's accesses became copies through its variable.
-    assert_eq!(*instruction(0).operation(), Operation::Copy);
-    assert_eq!(instruction(0).uses(), [input]);
-    assert_eq!(instruction(0).defs(), [slot]);
-    assert_eq!(*instruction(1).operation(), Operation::Copy);
-    assert_eq!(instruction(1).uses(), [slot]);
-    assert_eq!(instruction(1).defs(), [first]);
-    // The escaped slot's accesses stayed memory operations.
-    assert_eq!(*instruction(3).operation(), Operation::Store(1));
-    assert_eq!(*instruction(4).operation(), Operation::Load(1));
-    assert_eq!(*instruction(5).operation(), Operation::Return);
 }
 
 #[test]
