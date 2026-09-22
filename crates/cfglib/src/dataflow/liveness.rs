@@ -9,6 +9,7 @@
 
 extern crate alloc;
 use alloc::collections::BTreeSet;
+use alloc::vec::Vec;
 
 use super::fixpoint::{self, Direction, Facts, Problem};
 use super::{InstrInfo, VariableId};
@@ -44,6 +45,71 @@ impl<I: InstrInfo, E> Problem<I, E> for LivenessProblem {
     /// set of variables live at the block's entry.
     fn transfer(&self, cfg: &Cfg<I, E>, block: BlockId, live_out: &Self::Fact) -> Self::Fact {
         let mut live = live_out.clone();
+        for inst in cfg.block(block).instructions().iter().rev() {
+            backward_transfer(&mut live, inst);
+        }
+        live
+    }
+}
+
+/// The liveness problem with caller-supplied live-out seeds.
+///
+/// A graph says nothing about what leaves it: the value a function hands
+/// back, the storage a caller reads again, the state something reached
+/// through a non-returning exit observes. Each is live at an exit and
+/// invisible to a solve that only reads instructions, so the caller
+/// states it here rather than patching a fake reader into the graph.
+///
+/// The seed of a block joins its live-out set before the block's backward
+/// transfer runs, so the solve is otherwise [`LivenessProblem`]. Seeding a
+/// block with successors is meaningful and additive — the seed joins what
+/// flows back from them — but a caller normally seeds the blocks with no
+/// successors and answers with an empty vector everywhere else.
+///
+/// The seeds join the transfer, not the reported facts, so
+/// [`Facts::fact_out`](super::fixpoint::Facts::fact_out) still reports
+/// what flows back from a block's successors alone; a consumer replaying
+/// the transfer joins the same seed it supplied.
+pub struct SeededLivenessProblem<S> {
+    live_out: S,
+}
+
+impl<S> SeededLivenessProblem<S> {
+    /// The liveness problem seeded by `live_out` at every block.
+    pub const fn new(live_out: S) -> Self {
+        Self { live_out }
+    }
+}
+
+impl<I, E, S> Problem<I, E> for SeededLivenessProblem<S>
+where
+    I: InstrInfo,
+    S: Fn(BlockId) -> Vec<I::Variable>,
+{
+    type Fact = BTreeSet<I::Variable>;
+
+    fn direction(&self) -> Direction {
+        Direction::Backward
+    }
+
+    fn bottom(&self) -> Self::Fact {
+        BTreeSet::new()
+    }
+
+    fn entry_fact(&self) -> Self::Fact {
+        // Nothing flows back into a block without successors; whatever
+        // leaves the function there arrives as that block's seed.
+        BTreeSet::new()
+    }
+
+    fn meet(&self, a: &Self::Fact, b: &Self::Fact) -> Self::Fact {
+        a.union(b).cloned().collect()
+    }
+
+    /// Backward transfer over `live_out` joined with the block's seed.
+    fn transfer(&self, cfg: &Cfg<I, E>, block: BlockId, live_out: &Self::Fact) -> Self::Fact {
+        let mut live = live_out.clone();
+        live.extend((self.live_out)(block));
         for inst in cfg.block(block).instructions().iter().rev() {
             backward_transfer(&mut live, inst);
         }
@@ -305,6 +371,42 @@ mod tests {
         assert!(after[0].contains(&0), "the first def feeds the use");
         assert!(before[1].contains(&0), "the use reads a live value");
         assert!(!after[2].contains(&0), "the final def is a dead store");
+    }
+
+    /// A seed is live-out of the block it names and flows backward from
+    /// there like any other live-out fact.
+    #[test]
+    fn a_seed_is_live_out_of_the_block_it_names() {
+        use crate::cfg::Cfg;
+        use crate::edge::EdgeKind;
+        use crate::test_util::DfInst;
+
+        let mut cfg: Cfg<DfInst> = Cfg::new();
+        let exit = cfg.new_block();
+        cfg.block_mut(cfg.entry()).push(def("def_r0", 0));
+        cfg.add_edge(cfg.entry(), exit, EdgeKind::Fallthrough);
+
+        let problem = SeededLivenessProblem::new(|block| {
+            if block == exit {
+                vec![0_u16]
+            } else {
+                alloc::vec::Vec::new()
+            }
+        });
+        let seeded = fixpoint::solve_problem(&cfg, &problem).unwrap();
+        assert!(
+            seeded.fact_in(exit).contains(&0),
+            "the seed is live where it was stated"
+        );
+        assert!(
+            seeded.fact_out(cfg.entry()).contains(&0),
+            "and reaches the definition that produces it"
+        );
+
+        assert!(
+            !Liveness::compute(&cfg).is_live_out(&0, cfg.entry()),
+            "without the seed nothing observes the definition"
+        );
     }
 
     #[test]

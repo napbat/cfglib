@@ -36,6 +36,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "copies_by_predecessor",
     "copy_propagation",
     "dead_code_elimination",
+    "dead_code_elimination_with_exits",
     "duplicate_structuring_tails",
     "duplicate_structuring_tails_with_structure",
     "depth_first_edges",

@@ -4,13 +4,13 @@ use cfglib::{
     BlockId, BlockOrder, Cfg, ClrExceptionRegion, ClrHandler, ClrHandlerKind, DominatorTree,
     EdgeKind, Emitter, FlowEffect, HandlerBody, HandlerTypes, Liveness, SehExceptionRegion,
     SehHandler, SehHandlerKind, color_graph, contract_edge_mapped, dead_code_elimination,
-    detect_loops_tagged, duplicate_structuring_tails, duplicate_structuring_tails_with_structure,
-    eliminate_pre, find_loop_invariants, install_clr_region, install_seh_region,
-    interference_graph, linearize, merge_blocks_mapped, promote_handler_extents, remove_dead_code,
-    remove_dead_code_mapped, remove_empty_blocks_mapped, remove_unreachable,
-    remove_unreachable_mapped, resolve_jump_edges, rotate_loop, simplify, simplify_mapped,
-    split_critical_edges, split_critical_edges_mapped, split_critical_edges_with, split_node,
-    split_node_at_points, split_node_with_payload_mapped, verify,
+    dead_code_elimination_with_exits, detect_loops_tagged, duplicate_structuring_tails,
+    duplicate_structuring_tails_with_structure, eliminate_pre, find_loop_invariants,
+    install_clr_region, install_seh_region, interference_graph, linearize, merge_blocks_mapped,
+    promote_handler_extents, remove_dead_code, remove_dead_code_mapped, remove_empty_blocks_mapped,
+    remove_unreachable, remove_unreachable_mapped, resolve_jump_edges, rotate_loop, simplify,
+    simplify_mapped, split_critical_edges, split_critical_edges_mapped, split_critical_edges_with,
+    split_node, split_node_at_points, split_node_with_payload_mapped, verify,
 };
 use cfglib::{
     ExclusiveExtent, ExtentPromotionDecision, HandlerRef, RelaxError, promote_exclusive_extents,
@@ -314,8 +314,18 @@ fn register_critical_edges(suite: &mut BenchmarkSuite<'_>) {
     );
 }
 
-fn register_dataflow_transforms(suite: &mut BenchmarkSuite<'_>) {
+fn register_dead_code_transforms(suite: &mut BenchmarkSuite<'_>) {
     let cfg = dataflow_cfg(64, 8);
+    let exit = cfg
+        .block_ids()
+        .last()
+        .expect("the dataflow fixture allocates blocks");
+    let escaping: Vec<u32> = cfg
+        .block(exit)
+        .instructions()
+        .last()
+        .map(|instruction| instruction.defs.clone())
+        .unwrap_or_default();
     benchmark_case!(
         suite,
         "api_dead_code_elimination",
@@ -323,6 +333,26 @@ fn register_dataflow_transforms(suite: &mut BenchmarkSuite<'_>) {
         || {
             let mut candidate = cfg.clone();
             let removed = dead_code_elimination(&mut candidate);
+            (candidate, removed)
+        },
+        |(candidate, removed)| {
+            assert!(*removed > 0);
+            assert!(verify(candidate).is_ok());
+        }
+    );
+    benchmark_case!(
+        suite,
+        "api_dead_code_elimination_with_exits",
+        covers[dead_code_elimination_with_exits],
+        || {
+            let mut candidate = cfg.clone();
+            let removed = dead_code_elimination_with_exits(&mut candidate, |block| {
+                if block == exit {
+                    escaping.clone()
+                } else {
+                    Vec::new()
+                }
+            });
             (candidate, removed)
         },
         |(candidate, removed)| {
@@ -358,7 +388,10 @@ fn register_dataflow_transforms(suite: &mut BenchmarkSuite<'_>) {
             assert!(verify(candidate).is_ok());
         }
     );
+}
 
+fn register_dataflow_transforms(suite: &mut BenchmarkSuite<'_>) {
+    let cfg = dataflow_cfg(64, 8);
     let live = Liveness::compute(&cfg);
     let conflicts = interference_graph(&cfg, &live);
     benchmark_case!(
@@ -671,6 +704,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     register_tail_duplication(suite);
     register_node_edits(suite);
     register_critical_edges(suite);
+    register_dead_code_transforms(suite);
     register_dataflow_transforms(suite);
     register_loops(suite);
     register_frontend_utilities(suite);

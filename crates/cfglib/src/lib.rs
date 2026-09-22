@@ -277,7 +277,7 @@ pub use dataflow::fixpoint::{
     try_solve_problem, try_solve_problem_from, try_solve_problem_from_with_config,
     try_solve_problem_with_config,
 };
-pub use dataflow::liveness::{Liveness, LivenessProblem};
+pub use dataflow::liveness::{Liveness, LivenessProblem, SeededLivenessProblem};
 pub use dataflow::memory::{
     ConservativeMemoryAlias, ExactMemoryAlias, MemoryAlias, MemoryClassId, MemoryDefinition,
     MemoryEventSite, MemoryLocationClass, MemoryPhi, MemorySSA, MemorySSAEvent, MemorySsaScratch,
@@ -459,7 +459,10 @@ pub use transform::contract::{
 pub use transform::critical::{
     split_critical_edges, split_critical_edges_mapped, split_critical_edges_with,
 };
-pub use transform::dce::{dead_code_elimination, remove_dead_code, remove_dead_code_mapped};
+pub use transform::dce::{
+    dead_code_elimination, dead_code_elimination_with_exits, remove_dead_code,
+    remove_dead_code_mapped,
+};
 pub use transform::duplicate::{
     TailDuplication, duplicate_structuring_tails, duplicate_structuring_tails_with_structure,
 };

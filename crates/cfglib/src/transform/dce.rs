@@ -9,6 +9,7 @@
 
 extern crate alloc;
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::vec::Vec;
 
 use crate::analysis::dead_code::DeadCode;
 use crate::block::BlockId;
@@ -50,7 +51,28 @@ use crate::cfg::Cfg;
 /// Panics only if the unbounded fixpoint solve reports a step-limit error,
 /// which the unbounded configuration cannot produce.
 pub fn dead_code_elimination<I: crate::dataflow::EffectInfo, E>(cfg: &mut Cfg<I, E>) -> usize {
-    let dead = DeadCode::compute(cfg);
+    dead_code_elimination_with_exits(cfg, |_| Vec::new())
+}
+
+/// [`dead_code_elimination`] told what leaves each block.
+///
+/// `live_out` names the variables live at the end of a block, which is
+/// what a graph read from the inside cannot know: a returned value, the
+/// storage a caller reads again, the state something reached through a
+/// non-returning exit observes. A caller normally answers for the blocks
+/// with no successors and hands back an empty vector everywhere else.
+///
+/// Returns the number of instructions removed.
+///
+/// # Panics
+///
+/// Panics only if the unbounded fixpoint solve reports a step-limit error,
+/// which the unbounded configuration cannot produce.
+pub fn dead_code_elimination_with_exits<I: crate::dataflow::EffectInfo, E>(
+    cfg: &mut Cfg<I, E>,
+    live_out: impl Fn(BlockId) -> Vec<I::Variable>,
+) -> usize {
+    let dead = DeadCode::compute_with_exits(cfg, live_out);
     let removed = dead.instructions.len();
 
     let mut per_block: BTreeMap<BlockId, BTreeSet<usize>> = BTreeMap::new();
@@ -148,6 +170,22 @@ mod tests {
         assert_eq!(removed, 1, "should remove the dead def of loc0");
         assert_eq!(cfg.block(cfg.entry()).instructions().len(), 1);
         assert_eq!(cfg.block(cfg.entry()).instructions()[0].name, "live_def");
+    }
+
+    #[test]
+    fn dead_code_elimination_with_exits_keeps_what_leaves() {
+        let mut cfg: Cfg<DfInst> = Cfg::new();
+        cfg.block_mut(cfg.entry()).push(df_def("leaves", 0));
+        cfg.block_mut(cfg.entry()).push(df_def("dead", 1));
+
+        let removed = dead_code_elimination_with_exits(&mut cfg, |_| alloc::vec![0]);
+        assert_eq!(removed, 1, "only the unobserved definition goes");
+        assert_eq!(cfg.block(cfg.entry()).instructions().len(), 1);
+        assert_eq!(cfg.block(cfg.entry()).instructions()[0].name, "leaves");
+
+        // Without the seed the same definition is dead.
+        assert_eq!(dead_code_elimination(&mut cfg), 1);
+        assert!(cfg.block(cfg.entry()).instructions().is_empty());
     }
 
     #[test]

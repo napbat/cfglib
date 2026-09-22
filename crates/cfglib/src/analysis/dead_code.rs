@@ -41,6 +41,10 @@ pub struct DeadCode {
 impl DeadCode {
     /// Analyze `cfg` for dead instructions and unreachable blocks.
     ///
+    /// Nothing leaves the graph: a definition survives only because
+    /// something inside reads it. [`compute_with_exits`](Self::compute_with_exits)
+    /// is the same analysis told what leaves.
+    ///
     /// Requiring [`EffectInfo`] is deliberate, exactly as in
     /// [`dead_code_elimination`](crate::dead_code_elimination): a consumer
     /// must state an effect vocabulary before anything is called dead, which
@@ -52,16 +56,43 @@ impl DeadCode {
     /// error, which the unbounded configuration cannot produce.
     #[must_use]
     pub fn compute<I: EffectInfo, E>(cfg: &Cfg<I, E>) -> Self {
-        use crate::dataflow::liveness::LivenessProblem;
+        Self::compute_with_exits(cfg, |_| Vec::new())
+    }
 
-        let liveness = fixpoint::solve_problem(cfg, &LivenessProblem)
+    /// Analyze `cfg` with `live_out` stating what leaves each block.
+    ///
+    /// A function's own graph never says that a value outlives it — what a
+    /// return hands back, the storage a caller reads again, the state
+    /// something reached through a non-returning exit observes — so the
+    /// definitions that produce those values read as dead. `live_out`
+    /// states them: its variables are live at the end of the named block,
+    /// and everything their definitions transitively read stays live with
+    /// them. A caller normally answers for the blocks with no successors
+    /// and hands back an empty vector everywhere else.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the unbounded fixpoint solve reports a step-limit
+    /// error, which the unbounded configuration cannot produce.
+    #[must_use]
+    pub fn compute_with_exits<I: EffectInfo, E>(
+        cfg: &Cfg<I, E>,
+        live_out: impl Fn(BlockId) -> Vec<I::Variable>,
+    ) -> Self {
+        use crate::dataflow::liveness::SeededLivenessProblem;
+
+        let problem = SeededLivenessProblem::new(&live_out);
+        let liveness = fixpoint::solve_problem(cfg, &problem)
             .expect("an unbounded solve cannot exceed a step limit");
 
         let mut instructions = Vec::new();
-        for block_id_ in cfg.block_ids() {
-            let block = cfg.block(block_id_);
-            let block_id = block_id_;
+        for block_id in cfg.block_ids() {
+            let block = cfg.block(block_id);
+            // The solved out-fact carries what flows back from the
+            // successors; the seed is what leaves here, exactly as the
+            // problem's own transfer joined it.
             let mut live = liveness.fact_out(block_id).clone();
+            live.extend(live_out(block_id));
             let insts = block.instructions();
             let mut dead = Vec::new();
 
@@ -173,6 +204,63 @@ mod tests {
             alloc::vec![ProgramPoint {
                 block: orphan,
                 inst_idx: 0,
+            }]
+        );
+    }
+
+    /// A definition nothing inside the graph reads is dead, and the same
+    /// definition is live once an exit says the value leaves. The chain
+    /// feeding it lives with it.
+    #[test]
+    fn a_definition_the_exit_seed_observes_is_not_dead() {
+        let mut cfg: Cfg<DfInst> = Cfg::new();
+        let exit = cfg.new_block();
+        cfg.block_mut(cfg.entry()).push(df_def("source", 0));
+        cfg.block_mut(exit).push({
+            let mut inst = df_def("leaves", 1);
+            inst.uses.push(0);
+            inst
+        });
+        cfg.add_edge(cfg.entry(), exit, EdgeKind::Fallthrough);
+
+        let unseeded = DeadCode::compute(&cfg);
+        assert_eq!(
+            unseeded.instructions,
+            alloc::vec![ProgramPoint {
+                block: exit,
+                inst_idx: 0,
+            }],
+            "nothing inside the graph reads what the exit produces"
+        );
+
+        let seeded = DeadCode::compute_with_exits(&cfg, |block| {
+            if block == exit {
+                alloc::vec![1]
+            } else {
+                Vec::new()
+            }
+        });
+        assert!(
+            seeded.instructions.is_empty(),
+            "the seeded definition and its source both survive: {:?}",
+            seeded.instructions
+        );
+    }
+
+    /// A seed names one variable, not the whole exit: an unrelated
+    /// definition in the same block stays dead.
+    #[test]
+    fn an_exit_seed_keeps_only_what_it_names() {
+        let mut cfg: Cfg<DfInst> = Cfg::new();
+        cfg.block_mut(cfg.entry()).push(df_def("kept", 0));
+        cfg.block_mut(cfg.entry()).push(df_def("dropped", 1));
+
+        let dead = DeadCode::compute_with_exits(&cfg, |_| alloc::vec![0]);
+        assert_eq!(
+            dead.instructions,
+            alloc::vec![ProgramPoint {
+                block: cfg.entry(),
+                inst_idx: 1,
             }]
         );
     }
