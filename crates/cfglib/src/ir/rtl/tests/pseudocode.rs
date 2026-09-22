@@ -115,6 +115,7 @@ fn branching_function() -> Function<TestDialect> {
         .append(
             body,
             Statement::Effect {
+                writes: Vec::new(),
                 operation: EffectOp::Emit,
                 operands: vec![read(0, &[0], ScalarType::U32)],
                 effects: vec![Effect::Emit],

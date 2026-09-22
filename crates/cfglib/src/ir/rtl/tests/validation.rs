@@ -6,8 +6,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::{
-    Edge, Effect, Expr, FunctionBuilder, Place, ScalarType, Statement, TestDialect, ValueShape,
-    assign, constant, lift, read,
+    Edge, Effect, EffectOp, Expr, FunctionBuilder, Place, ScalarType, Statement, TestDialect,
+    ValueShape, assign, constant, lift, read,
 };
 
 /// A transfer with no assignments is rejected: it would silently drop
@@ -63,6 +63,63 @@ fn duplicate_lane_across_assignments_is_rejected() {
         None,
     );
     assert!(error.is_err(), "two writes of one lane must not validate");
+}
+
+/// One lane written twice by an effect's writes is rejected for the
+/// same reason a transfer's are: the result is undefined.
+#[test]
+fn duplicate_lane_across_effect_writes_is_rejected() {
+    let mut builder = FunctionBuilder::<TestDialect>::new("test".into());
+    let entry = builder.entry();
+    let body = builder.new_block("body");
+    builder.add_edge(entry, body, Edge::Entry).unwrap();
+    let error = builder.append(
+        body,
+        Statement::Effect {
+            operation: EffectOp::Emit,
+            operands: Vec::new(),
+            writes: vec![
+                Place {
+                    storage: 0,
+                    lanes: vec![0, 1],
+                },
+                Place {
+                    storage: 0,
+                    lanes: vec![1],
+                },
+            ],
+            effects: vec![Effect::Emit],
+            may_throw: false,
+        },
+        None,
+    );
+    assert!(error.is_err(), "two writes of one lane must not validate");
+}
+
+/// An effect may write the very storage an operand reads: reads observe
+/// the pre-write state, so the two never contend.
+#[test]
+fn an_effect_may_write_the_storage_an_operand_reads() {
+    let mut builder = FunctionBuilder::<TestDialect>::new("test".into());
+    let entry = builder.entry();
+    let body = builder.new_block("body");
+    builder.add_edge(entry, body, Edge::Entry).unwrap();
+    builder
+        .append(
+            body,
+            Statement::Effect {
+                operation: EffectOp::Emit,
+                operands: vec![read(0, &[0], ScalarType::U32)],
+                writes: vec![Place {
+                    storage: 0,
+                    lanes: vec![0],
+                }],
+                effects: vec![Effect::Emit],
+                may_throw: false,
+            },
+            None,
+        )
+        .expect("a write and a read of one storage are compatible");
 }
 
 /// Reinterpretation preserves total bit width.

@@ -40,6 +40,7 @@ fn structured(
 
 fn emit_twice(storage: u8, scalar: ScalarType) -> Statement<TestDialect> {
     Statement::Effect {
+        writes: Vec::new(),
         operation: EffectOp::Emit,
         operands: vec![read(storage, &[0], scalar), read(storage, &[0], scalar)],
         effects: vec![Effect::Emit],

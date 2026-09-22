@@ -3,7 +3,9 @@
 //! RTL is the level where storage is still raw, so the printer says exactly
 //! that: a transfer names the lanes it writes and the value it writes into
 //! them, a parallel transfer is bracketed so its simultaneity is visible,
-//! and a block ends with the edges leaving it and the kind of each.
+//! an effect names the places it writes without a value before its
+//! operation, and a block ends with the edges leaving it and the kind of
+//! each.
 //!
 //! ```text
 //! fn "shade"(0[0], 1[0]) -> F32
@@ -11,6 +13,7 @@
 //!     -> bb1 fallthrough [Entry]
 //! bb1 body:
 //!     0[0]:F32 <- add(0[0]:F32, 0x3f800000:F32)
+//!     2[0] = call(0[0]:F32)
 //!     branch less(0[0]:F32, 0x0:F32)
 //!     -> bb2 true [True]
 //!     -> bb3 false [False]
@@ -136,10 +139,18 @@ fn write_statement<D: Dialect>(
         Statement::Effect {
             operation,
             operands,
+            writes,
             effects,
             may_throw,
         } => {
             printer.indent()?;
+            for (position, place) in writes.iter().enumerate() {
+                printer.write_str(if position == 0 { "" } else { ", " })?;
+                write_place::<D>(printer, place)?;
+            }
+            if !writes.is_empty() {
+                printer.write_str(" = ")?;
+            }
             printer.write_str(D::effect_mnemonic(operation))?;
             write_operands::<D>(printer, operands)?;
             write_effects::<D>(printer, effects, *may_throw)?;

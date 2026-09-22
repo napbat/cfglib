@@ -1,0 +1,8 @@
+fn "clobber"()
+bb0 root:
+    -> bb1 fallthrough [Entry]
+bb1 body:
+    0[0] <- 0x1:U32
+    2[0], 3[0] = emit(0[0]:U32) ! Emit
+    emit(2[0]:U32, 3[0]:U32) ! Emit
+    return

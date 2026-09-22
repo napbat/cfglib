@@ -377,23 +377,8 @@ fn validate_statement<D: Dialect>(statement: &Statement<D>) -> Result<()> {
                         .into(),
                 ));
             }
-            // A lane written twice anywhere in one parallel transfer has
-            // no defined result, whether the writes share a place or not.
-            let mut written: BTreeSet<(&<D as Vocabulary>::NativeVariable, u8)> = BTreeSet::new();
+            validate_writes("transfer", statement)?;
             for (place, value) in assignments {
-                if place.lanes.is_empty() {
-                    return Err(Error::InvalidConstruction(
-                        "assignment writes no lanes".into(),
-                    ));
-                }
-                for &lane in &place.lanes {
-                    if !written.insert((&place.storage, lane)) {
-                        return Err(Error::InvalidConstruction(format!(
-                            "transfer writes lane {lane} of {:?} twice",
-                            place.storage
-                        )));
-                    }
-                }
                 let width = value.shape().lanes;
                 if usize::from(width) != place.lanes.len() {
                     return Err(Error::InvalidConstruction(format!(
@@ -405,7 +390,16 @@ fn validate_statement<D: Dialect>(statement: &Statement<D>) -> Result<()> {
             }
             Ok(())
         }
-        Statement::Effect { operands, .. } | Statement::Raise { operands, .. } => {
+        Statement::Effect { operands, .. } => {
+            // A written lane is a definition; an operand naming the same
+            // storage reads the pre-write state, so the overlap is legal.
+            validate_writes("effect", statement)?;
+            for operand in operands {
+                validate_expr(operand)?;
+            }
+            Ok(())
+        }
+        Statement::Raise { operands, .. } => {
             for operand in operands {
                 validate_expr(operand)?;
             }
@@ -439,6 +433,38 @@ fn validate_statement<D: Dialect>(statement: &Statement<D>) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Rejects an empty destination and a lane one statement writes twice.
+///
+/// A lane written twice anywhere in one statement has no defined result,
+/// whether the writes share a place or not — a parallel transfer's
+/// assignments and an effect's writes are alike in that.
+fn validate_writes<D: Dialect>(kind: &str, statement: &Statement<D>) -> Result<()> {
+    let mut written: BTreeSet<(<D as Vocabulary>::NativeVariable, u8)> = BTreeSet::new();
+    let mut failure = None;
+    statement.for_each_write(&mut |place| {
+        if failure.is_some() {
+            return;
+        }
+        if place.lanes.is_empty() {
+            failure = Some(Error::InvalidConstruction(format!(
+                "{kind} writes no lanes of {:?}",
+                place.storage
+            )));
+            return;
+        }
+        for &lane in &place.lanes {
+            if !written.insert((place.storage.clone(), lane)) {
+                failure = Some(Error::InvalidConstruction(format!(
+                    "{kind} writes lane {lane} of {:?} twice",
+                    place.storage
+                )));
+                return;
+            }
+        }
+    });
+    failure.map_or(Ok(()), Err)
 }
 
 fn validate_expr<D: Dialect>(expr: &Expr<D>) -> Result<()> {

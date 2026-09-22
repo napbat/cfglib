@@ -29,6 +29,8 @@ mod returns;
 /// Construction and completion validation tests, split out to respect
 /// the source-size policy.
 mod validation;
+/// Effect statements that declare the places they write.
+mod writes;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Effect {
@@ -363,6 +365,7 @@ fn storage_reuse_splits_into_typed_webs() {
         .append(
             body,
             Statement::Effect {
+                writes: Vec::new(),
                 operation: EffectOp::Emit,
                 operands: vec![read(2, &[0], ScalarType::U32)],
                 effects: vec![Effect::Emit],

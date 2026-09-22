@@ -3,9 +3,9 @@
 //! A [`VarExpr::Read`] names positions and a constraint, never a
 //! variable: the web variables live in each MLIL instruction's
 //! positional `uses`/`defs` lists (one use per read in pre-order, the
-//! assignment target as the sole definition), so the templates survive
-//! generic operand rewriting. [`WebInfo`] describes the typed variables
-//! the lift recovered.
+//! assignment target or the effect's writes as the definitions), so the
+//! templates survive generic operand rewriting. [`WebInfo`] describes
+//! the typed variables the lift recovered.
 
 extern crate alloc;
 
@@ -151,8 +151,10 @@ impl<D: Dialect> VarExpr<D> {
 /// [`Lift::emit`](super::Lift::emit) hook.
 ///
 /// The statement is a template over the instruction's positional
-/// variable lists: reads align with `uses` in pre-order, and an
-/// assignment's written variable is the instruction's sole definition.
+/// variable lists: reads align with `uses` in pre-order, an
+/// assignment's written variable is the instruction's sole definition,
+/// and an effect's [`writes`](super::Statement::Effect::writes) align
+/// with `defs` in write order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiftedStatement<D: Dialect> {
     /// One serialized assignment of a value to positions of the
@@ -171,6 +173,10 @@ pub enum LiftedStatement<D: Dialect> {
         effects: Vec<<D as Vocabulary>::Effect>,
     },
     /// An effect-bearing operation.
+    ///
+    /// The places it writes without expressing a value are the
+    /// instruction's definitions, in write order; the operands observe
+    /// the state before them.
     Effect {
         /// The dialect effect operation.
         operation: D::EffectOp,

@@ -22,6 +22,7 @@ extern crate alloc;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::ToString;
 use alloc::vec::Vec;
+use smallvec::SmallVec;
 
 use crate::ir::dialect::Vocabulary;
 use crate::ir::mlil::{FunctionBuilder as MlilBuilder, Signature as MlilSignature};
@@ -103,20 +104,23 @@ pub fn lift<D: Lift>(
             for value in &annotation.uses {
                 id_of(value, &mut union);
             }
-            if let Statement::Transfer { assignments, .. } = node.statement() {
-                let mut cursor = 0usize;
-                for (place, _) in assignments {
-                    let defs = annotation
-                        .defs
-                        .get(cursor..cursor + place.lanes.len())
-                        .ok_or_else(|| Error::Lifting("SSA lost a definition".into()))?;
-                    let first = id_of(&defs[0], &mut union);
-                    for value in &defs[1..] {
-                        let other = id_of(value, &mut union);
-                        union.union_toward_min(first, other);
-                    }
-                    cursor += place.lanes.len();
+            // The lanes one place writes together are one web, whether
+            // the place is a transfer's destination or an effect's write.
+            let mut widths = SmallVec::<[usize; 4]>::new();
+            node.statement()
+                .for_each_write(&mut |place| widths.push(place.lanes.len()));
+            let mut cursor = 0usize;
+            for width in widths {
+                let defs = annotation
+                    .defs
+                    .get(cursor..cursor + width)
+                    .ok_or_else(|| Error::Lifting("SSA lost a definition".into()))?;
+                let first = id_of(&defs[0], &mut union);
+                for value in &defs[1..] {
+                    let other = id_of(value, &mut union);
+                    union.union_toward_min(first, other);
                 }
+                cursor += width;
             }
         }
     }
@@ -167,7 +171,8 @@ pub fn lift<D: Lift>(
     }
 
     // Phase 3: infer each web's constraint from read wants and
-    // assignment value shapes.
+    // assignment value shapes. An effect's write states no value, so it
+    // observes nothing and its web's constraint comes from its reads.
     for block_id in cfg.block_ids() {
         let block = cfg.block(block_id);
         let annotations = ssa.block(block_id);

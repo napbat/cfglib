@@ -254,6 +254,7 @@ fn dropped_exceptional_behavior_is_rejected() {
         .append(
             body,
             Statement::Effect {
+                writes: Vec::new(),
                 operation: EffectOp::DropThrow,
                 operands: Vec::new(),
                 effects: vec![Effect::Call],
@@ -284,6 +285,7 @@ fn foreign_operand_is_rejected() {
         .append(
             body,
             Statement::Effect {
+                writes: Vec::new(),
                 operation: EffectOp::Smuggle,
                 operands: Vec::new(),
                 effects: Vec::new(),
@@ -321,6 +323,7 @@ fn exceptional_edges_need_one_owning_statement() {
             .append(
                 body,
                 Statement::Effect {
+                    writes: Vec::new(),
                     operation: EffectOp::Invoke,
                     operands: Vec::new(),
                     effects: vec![Effect::Call],

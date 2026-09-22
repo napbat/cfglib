@@ -37,6 +37,13 @@ use super::{
 pub enum Lifted<Operation> {
     /// The instruction applies `operation` to its lifted operands; with one
     /// definition it is a value, with none an effect statement.
+    ///
+    /// HLIL has no form for an operation with several definitions — an
+    /// effect statement that writes more than one place, such as a call
+    /// stating the registers it clobbers. Lifting one is reported as
+    /// [`Error::UnsupportedLift`](super::Error::UnsupportedLift) rather
+    /// than silently dropping the extra definitions; eliminate or split
+    /// them at MLIL first.
     Operation(Operation),
     /// The instruction stores its **last** use into the place formed by
     /// `location` over the preceding uses (`store(addr, v)` becomes

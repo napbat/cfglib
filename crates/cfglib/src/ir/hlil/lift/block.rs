@@ -462,7 +462,8 @@ impl<D: LiftDialect + VerifyDialect> Lifter<'_, D> {
     }
 
     /// Emits one dialect operation: a value (inlined or assigned) with one
-    /// definition, an effect statement with none.
+    /// definition, an effect statement with none. An operation with
+    /// several definitions has no HLIL form and is rejected.
     fn emit_operation(
         &mut self,
         position: usize,

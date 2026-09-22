@@ -26,6 +26,8 @@ use super::super::{
 /// Exceptional-flow tests: throw-site ownership, continuation splits,
 /// emission validation, and cross-domain edge remapping.
 mod exceptional;
+/// The lowering direction for an effect that declares its writes.
+mod writes;
 
 /// A two-level class hierarchy: `parents` maps each class to its
 /// superclass; class 0 is the root.
@@ -487,9 +489,18 @@ impl Lower for Managed {
             }
             LiftedStatement::Effect { operation, .. } => {
                 let operands = reads(context)?;
+                // An effect's definitions are the places it writes
+                // without expressing a value; each lowers to its
+                // variable's planned place.
+                let writes = instruction
+                    .defs()
+                    .iter()
+                    .map(|&variable| context.place(variable).cloned())
+                    .collect::<Result<Vec<_>>>()?;
                 context.emit(Statement::Effect {
                     operation: *operation,
                     operands,
+                    writes,
                     effects: instruction.effects().to_vec(),
                     may_throw: instruction.may_throw(),
                 })?;
@@ -711,6 +722,7 @@ fn dispatch_lifts_to_a_structured_switch() {
             .append(
                 block,
                 Statement::Effect {
+                    writes: Vec::new(),
                     operation: EffectOp::Invoke,
                     operands: Vec::new(),
                     effects: vec![Effect::Call],

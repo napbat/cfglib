@@ -42,6 +42,10 @@ pub enum Statement<D: Dialect> {
         operation: D::EffectOp,
         /// Operand values in operation order.
         operands: Vec<Expr<D>>,
+        /// Places the operation writes with values the statement does not
+        /// express, in write order. Every read of the statement observes
+        /// the state before these writes.
+        writes: Vec<Place<D>>,
         /// Observable effects of the operation.
         effects: Vec<<D as Vocabulary>::Effect>,
         /// Whether the operation can transfer exceptionally.
@@ -69,6 +73,9 @@ pub enum Statement<D: Dialect> {
     /// A terminating exceptional raise — a `throw`, a deliberate trap.
     /// Control leaves through the block's exceptional edges, or unwinds
     /// out of the function when the block has none.
+    ///
+    /// A raise declares no writes: control never reaches the point where
+    /// they would be observable.
     Raise {
         /// The dialect effect operation performing the raise.
         operation: D::EffectOp,
@@ -107,6 +114,32 @@ impl<D: Dialect> Statement<D> {
                     value.for_each_read(visit);
                 }
             }
+        }
+    }
+
+    /// Visits every written place in deterministic def order.
+    ///
+    /// A transfer's destinations come first in assignment order, an
+    /// effect's [`writes`](Self::Effect::writes) in write order, and
+    /// every other form writes nothing. The order is the contract that
+    /// keeps SSA definition positions aligned with places, exactly as
+    /// [`for_each_read`](Self::for_each_read) does for uses.
+    pub fn for_each_write(&self, visit: &mut impl FnMut(&Place<D>)) {
+        match self {
+            Self::Transfer { assignments, .. } => {
+                for (place, _) in assignments {
+                    visit(place);
+                }
+            }
+            Self::Effect { writes, .. } => {
+                for place in writes {
+                    visit(place);
+                }
+            }
+            Self::Branch { .. }
+            | Self::Dispatch { .. }
+            | Self::Return { .. }
+            | Self::Raise { .. } => {}
         }
     }
 
@@ -154,13 +187,11 @@ impl<D: Dialect> StatementNode<D> {
             }
         });
         let mut defs = Vec::new();
-        if let Statement::Transfer { assignments, .. } = &statement {
-            for (place, _) in assignments {
-                for &lane in &place.lanes {
-                    defs.push((place.storage.clone(), lane));
-                }
+        statement.for_each_write(&mut |place| {
+            for &lane in &place.lanes {
+                defs.push((place.storage.clone(), lane));
             }
-        }
+        });
         Self {
             id,
             statement,

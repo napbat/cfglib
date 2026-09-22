@@ -177,6 +177,23 @@ pub(super) struct Emitter<'a, D: Lift> {
     pub(super) native_defined: bool,
 }
 
+/// What one serialized statement defines.
+#[derive(Clone, Copy, Debug)]
+enum Defined<'a> {
+    /// The statement defines nothing.
+    Nothing,
+    /// One assignment's target web. `merge` marks that unwritten
+    /// positions survive, so the target is also the trailing use.
+    Target {
+        /// The defined web.
+        web: usize,
+        /// Whether unwritten positions keep their previous value.
+        merge: bool,
+    },
+    /// An effect's written webs, in write order.
+    Writes(&'a [usize]),
+}
+
 /// One rebuilt assignment awaiting serialization.
 struct PendingAssign<D: Dialect> {
     target: usize,
@@ -217,16 +234,19 @@ impl ExceptionalFlow {
 /// through.
 ///
 /// It validates the dialect's expansion: every use must be a variable
-/// the statement made available (its reads, its assignment target, a
-/// context temporary, or an earlier definition of the same statement),
-/// exactly one appended instruction may carry the statement's exceptional
-/// behavior, and no native web may be defined before that throw site.
+/// the statement made available (its reads, its assignment target, its
+/// writes, a context temporary, or an earlier definition of the same
+/// statement), exactly one appended instruction may carry the
+/// statement's exceptional behavior, and no native web may be defined
+/// before that throw site — the statement's own writes excepted, because
+/// they are defined after its throw point.
 pub struct Emission<'a, 'b, D: Lift> {
     emitter: &'a mut Emitter<'b, D>,
     source: usize,
     statement: StatementId,
     reads: Vec<TypedVariable<MlilOf<D>>>,
     target: Option<TypedVariable<MlilOf<D>>>,
+    targets: Vec<TypedVariable<MlilOf<D>>>,
     merge: bool,
     exceptional_flow: ExceptionalFlow,
     spans: Vec<<D as Vocabulary>::SourceSpan>,
@@ -252,6 +272,17 @@ impl<D: Lift> Emission<'_, '_, D> {
     #[must_use]
     pub const fn target(&self) -> Option<&TypedVariable<MlilOf<D>>> {
         self.target.as_ref()
+    }
+
+    /// The typed web variables an effect's
+    /// [`writes`](super::Statement::Effect::writes) define, in write
+    /// order — the instruction `defs` of the one-operation form.
+    ///
+    /// Empty for every other statement form; an assignment's definition
+    /// is [`target`](Self::target).
+    #[must_use]
+    pub fn targets(&self) -> &[TypedVariable<MlilOf<D>>] {
+        &self.targets
     }
 
     /// Whether the statement can transfer exceptionally — exactly one
@@ -361,6 +392,18 @@ impl<D: Lift> Emission<'_, '_, D> {
             if !self.allowed.contains(&defined.variable) {
                 self.allowed.push(defined.variable);
             }
+            // A statement's own writes are defined *after* its throw
+            // point: the operation that throws is the operation that
+            // produces them, so committing one is not pre-throw native
+            // state. A call that may throw and defines its results is
+            // exactly that shape.
+            if self
+                .targets
+                .iter()
+                .any(|write| write.variable == defined.variable)
+            {
+                continue;
+            }
             if self
                 .emitter
                 .web_index
@@ -401,9 +444,9 @@ impl<D: Lift> Emission<'_, '_, D> {
     }
 
     /// Appends the one-operation form: uses are the statement's reads
-    /// (plus the merging assignment's trailing target), the definition
-    /// is the assignment target, and the statement's exceptional
-    /// behavior lands on this instruction.
+    /// (plus the merging assignment's trailing target), the definitions
+    /// are the assignment target or the effect's writes, and the
+    /// statement's exceptional behavior lands on this instruction.
     ///
     /// # Errors
     ///
@@ -418,7 +461,10 @@ impl<D: Lift> Emission<'_, '_, D> {
         {
             uses.push(target.clone());
         }
-        let defs: Vec<TypedVariable<MlilOf<D>>> = self.target.iter().cloned().collect();
+        // An assignment target and an effect's writes are mutually
+        // exclusive, so the chain is one or the other.
+        let defs: Vec<TypedVariable<MlilOf<D>>> =
+            self.target.iter().chain(&self.targets).cloned().collect();
         let may_throw = self.may_throw();
         self.append(operation, uses, defs, may_throw)
     }
@@ -544,8 +590,7 @@ impl<D: Lift> Emitter<'_, D> {
         id: StatementId,
         statement: LiftedStatement<D>,
         reads: &[usize],
-        target: Option<usize>,
-        merge: bool,
+        defined: Defined<'_>,
         may_throw: bool,
         has_exceptional_successors: bool,
         spans: Vec<<D as Vocabulary>::SourceSpan>,
@@ -556,16 +601,24 @@ impl<D: Lift> Emitter<'_, D> {
         }
         let reads: Vec<TypedVariable<MlilOf<D>>> =
             reads.iter().map(|&web| self.typed(web)).collect();
-        let target = target.map(|web| self.typed(web));
+        let (target, targets, merge) = match defined {
+            Defined::Nothing => (None, Vec::new(), false),
+            Defined::Target { web, merge } => (Some(self.typed(web)), Vec::new(), merge),
+            Defined::Writes(webs) => (
+                None,
+                webs.iter().map(|&web| self.typed(web)).collect(),
+                false,
+            ),
+        };
         let mut allowed = SmallVec::<[VariableId; 8]>::new();
-        for variable in reads.iter().map(|typed| typed.variable) {
+        for variable in reads
+            .iter()
+            .chain(&target)
+            .chain(&targets)
+            .map(|typed| typed.variable)
+        {
             if !allowed.contains(&variable) {
                 allowed.push(variable);
-            }
-        }
-        if let Some(target) = &target {
-            if !allowed.contains(&target.variable) {
-                allowed.push(target.variable);
             }
         }
         let exceptional_flow = ExceptionalFlow::from_flags(may_throw, has_exceptional_successors)?;
@@ -575,6 +628,7 @@ impl<D: Lift> Emitter<'_, D> {
             statement: id,
             reads,
             target,
+            targets,
             merge,
             exceptional_flow,
             spans,
@@ -629,8 +683,10 @@ impl<D: Lift> Emitter<'_, D> {
                 effects: Vec::new(),
             },
             reads,
-            Some(temporary),
-            false,
+            Defined::Target {
+                web: temporary,
+                merge: false,
+            },
             false,
             false,
             spans.to_vec(),
@@ -731,8 +787,10 @@ impl<D: Lift> Emitter<'_, D> {
                         effects: Vec::new(),
                     },
                     &[hazard],
-                    Some(temporary),
-                    false,
+                    Defined::Target {
+                        web: temporary,
+                        merge: false,
+                    },
                     false,
                     false,
                     spans.to_vec(),
@@ -765,8 +823,10 @@ impl<D: Lift> Emitter<'_, D> {
                     effects: statement_effects,
                 },
                 &pending.reads,
-                Some(pending.target),
-                merges,
+                Defined::Target {
+                    web: pending.target,
+                    merge: merges,
+                },
                 throws,
                 exceptional,
                 spans.to_vec(),
@@ -803,6 +863,7 @@ impl<D: Lift> Emitter<'_, D> {
             Statement::Effect {
                 operation,
                 operands,
+                writes,
                 effects,
                 may_throw,
             } => {
@@ -812,6 +873,19 @@ impl<D: Lift> Emitter<'_, D> {
                     .iter()
                     .map(|operand| self.rebuild(operand, &annotation.uses, &mut cursor, &mut reads))
                     .collect::<Result<Vec<_>>>()?;
+                // One web per written place: phase 1 united the lanes a
+                // place writes together, so its first definition names
+                // the whole web.
+                let mut written = Vec::with_capacity(writes.len());
+                let mut def_cursor = 0usize;
+                for place in writes {
+                    let value = annotation
+                        .defs
+                        .get(def_cursor)
+                        .ok_or_else(|| Error::Lifting("SSA lost a definition".into()))?;
+                    written.push(self.resolver.web(value)?);
+                    def_cursor += place.lanes.len();
+                }
                 self.hand_off(
                     source,
                     id,
@@ -821,8 +895,7 @@ impl<D: Lift> Emitter<'_, D> {
                         effects: effects.clone(),
                     },
                     &reads,
-                    None,
-                    false,
+                    Defined::Writes(&written),
                     *may_throw,
                     has_exceptional_successors,
                     spans,
@@ -838,8 +911,7 @@ impl<D: Lift> Emitter<'_, D> {
                     id,
                     LiftedStatement::Branch { condition },
                     &reads,
-                    None,
-                    false,
+                    Defined::Nothing,
                     false,
                     false,
                     spans,
@@ -855,8 +927,7 @@ impl<D: Lift> Emitter<'_, D> {
                     id,
                     LiftedStatement::Dispatch { scrutinee },
                     &reads,
-                    None,
-                    false,
+                    Defined::Nothing,
                     false,
                     false,
                     spans,
@@ -878,8 +949,7 @@ impl<D: Lift> Emitter<'_, D> {
                     id,
                     LiftedStatement::Return { values: lowered },
                     &return_reads,
-                    None,
-                    false,
+                    Defined::Nothing,
                     false,
                     false,
                     spans,
@@ -905,8 +975,7 @@ impl<D: Lift> Emitter<'_, D> {
                         effects: effects.clone(),
                     },
                     &reads,
-                    None,
-                    false,
+                    Defined::Nothing,
                     true,
                     has_exceptional_successors,
                     spans,
