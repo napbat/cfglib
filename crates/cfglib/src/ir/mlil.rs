@@ -6,6 +6,28 @@
 //! representation useful across managed runtimes, native instruction sets,
 //! shaders, and source-language compilers without flattening their semantics
 //! into strings or a closed library-owned opcode enum.
+//!
+//! A transform reaches a function one of two ways, and the difference is the
+//! module's central contract.
+//!
+//! A **derived view** — [`Function::copy_propagated_cfg`],
+//! [`Function::dead_code_eliminated_cfg`],
+//! [`Function::with_promoted_handler_extents`],
+//! [`Function::with_duplicated_structuring_tails`],
+//! [`Function::with_derived_cfg`] — answers with a graph and leaves the
+//! function it came from alone. It is for presentation and analysis: the
+//! canonical function keeps describing the original program, identities and
+//! provenance included. A derived graph that dropped instructions is not a
+//! function anymore — the provenance still names what went — so every door that
+//! verifies first refuses it.
+//!
+//! A **canonical rebuild** — [`Function::eliminate_dead_code`],
+//! [`Function::propagate_copies`], [`Function::prune_variables`],
+//! [`Function::split_variables`], [`Function::promote_memory`],
+//! [`Function::rewrite_instructions`] — takes the same decision and rebuilds a
+//! function that verifies, which is what a lift stores. Each states exactly
+//! which identities it keeps; what a rebuild drops takes its provenance with
+//! it.
 
 mod builder;
 mod canonical;

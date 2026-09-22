@@ -214,6 +214,11 @@ impl<D: Dialect> Function<D> {
     }
 
     /// Reports effect-aware dead definitions and unreachable blocks.
+    ///
+    /// Nothing leaves the graph, so a definition whose only observer is
+    /// outside the function reads as dead; state what leaves through
+    /// [`Self::eliminate_dead_code`] or
+    /// [`DeadCode::compute_with_exits`](crate::DeadCode::compute_with_exits).
     #[must_use]
     pub fn dead_code(&self) -> crate::DeadCode {
         crate::DeadCode::compute(&self.cfg)
@@ -222,7 +227,10 @@ impl<D: Dialect> Function<D> {
     /// Returns a graph with effect-free dead definitions removed.
     ///
     /// The canonical function and its stable provenance are not mutated;
-    /// instruction positions in the returned view are derived data.
+    /// instruction positions in the returned view are derived data, so the
+    /// graph is for presentation and analysis. [`Self::eliminate_dead_code`]
+    /// is the canonical counterpart: it takes the same decision, plus what
+    /// leaves the function, and rebuilds a function that verifies.
     #[must_use]
     pub fn dead_code_eliminated_cfg(&self) -> (Cfg<Instruction<D>, D::Edge>, usize) {
         let mut cfg = self.cfg.clone();
@@ -341,6 +349,8 @@ impl<D: AnalysisDialect> Function<D> {
     ///
     /// The canonical function and its identity-indexed provenance are not
     /// mutated. Removed copies retain no graph position in the returned view.
+    /// [`Self::propagate_copies`] is the canonical counterpart: same
+    /// propagation, rebuilt into a function that verifies.
     #[must_use]
     pub fn copy_propagated_cfg(
         &self,

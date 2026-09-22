@@ -162,6 +162,20 @@ consumer-defined native locations. Its checked builder retains stable statement
 identities, ordered parameters and returns, exception regions, exact caller edge
 payloads, and deterministic many-to-many source provenance.
 
+An effect statement states what it writes as well as what it reads:
+`Statement::Effect { writes, .. }` names the places the operation writes with
+values the statement does not express — the registers a call clobbers, the flags
+an instruction leaves behind — and those places are the statement's definitions.
+Every read of the statement observes the state before them, so an operand may
+name a written storage and reads one version older; a lane written twice in one
+statement is refused exactly as in a parallel transfer. The lift unites the lanes
+of one written place into a single web, takes no shape from a write (there is no
+value to take one from), and hands the writes to emission as the instruction's
+`defs`, which is why an effect needs no companion transfer of undefined values to
+say what it clobbers. A statement's own writes are defined after its throw point,
+so a call that may throw and defines its results is a legal one-instruction
+emission.
+
 `MlilBridge` associates an RTL dialect with a semantic MLIL dialect without
 requiring the dialect markers or native-location types to match. `lift()` uses
 lane SSA and live phi webs to recover typed semantic variables, then performs
@@ -216,6 +230,22 @@ last throwing instruction. `with_derived_cfg(transform)` is the general
 form of the same door: it clones the function and hands the consumer the
 clone's CFG for dialect-aware presentation surgery (detaching a runtime's
 self-covering cleanup ranges) — the canonical function is never touched.
+
+Those `*_cfg` and `with_*` doors are **derived views**: they answer with a graph
+for presentation and analysis, and the function they came from still describes
+the original program, provenance and all. A derived graph that dropped
+instructions no longer verifies as a function, so every door that verifies first
+— SSA, sparse constants, the HLIL bridge — refuses it. The **canonical rebuilds**
+are the other half of that contract, for a lift that wants the improvement in its
+stored form: `eliminate_dead_code(live_out)` (which takes the exit seed, keeps
+every instruction with declared effects, and keeps a throwing instruction because
+it is the throw site its block's exceptional edges leave from),
+`propagate_copies()`, and `prune_variables()` each decide over the graph and
+rebuild a function that verifies. Blocks, edges, exception regions, cleanup
+routes, and the signature survive; a dropped instruction takes its provenance
+with it, and instruction identities become dense again. `prune_variables` is the
+variable axis and reports `VariablePruning` both ways, exactly as
+`split_variables` reports `VariableSplit`.
 
 Memory stays outside variables by contract: anything aliasable lives behind
 dialect load/store operations ordered by their declared effects, while
@@ -368,7 +398,7 @@ inverted — before falling back to a wrapping `logical_not`.
 | Explicit alias sets | `AliasSets::new` / `merge`; `MemoryAlias` trait | Caller-populated union-find classes usable directly as the alias oracle for memory SSA; an unmerged pair is a proof of disjointness |
 | Index-path aliasing | `index_paths_may_overlap` | The `base[i][j]` kernel for alias oracles over indexed storage: unequal arity or unknown components stay conservative, fully known disagreement proves disjointness |
 | Exclusive handler extents | `recover_exclusive_extents[_with]`, `promote_exclusive_extents` | Evidence-reporting sibling of `promote_handler_extents`: blocks exclusively reachable from one handler entry along normal edges, boundary and ambiguity issues, and atomic per-region promotion that refuses overlap |
-| Dead code analysis | `DeadCode::compute` | Liveness-dead instructions (effect-guarded) and unreachable blocks, reported without mutating — the analysis `dead_code_elimination` applies |
+| Dead code analysis | `DeadCode::compute`, `DeadCode::compute_with_exits` | Liveness-dead instructions (effect-guarded) and unreachable blocks, reported without mutating — the analysis `dead_code_elimination` applies. The seeded form takes what leaves each block (a returned value, storage a caller reads again, state a non-returning exit hands on), which a graph read from the inside cannot state; `SeededLivenessProblem` carries the seed into the solve |
 | Purity classification | `cfg_purity`, `block_purity`, `EffectInfo` (associated `Effect`) | Consumer effect vocabularies — machine memory/IO, allocation, panics |
 | Metrics | `GraphMetrics::compute` (any rooted view); `CfgMetrics::compute` | Node/edge counts, cyclomatic complexity, nesting depth, instruction density |
 | Pattern detection | `detect_patterns` (any view), `detect_cfg_patterns` (adds trampolines + arm orientation) | Diamond, chain, self-loop, empty trampoline |
@@ -390,7 +420,7 @@ fallible pass stops execution.
 | Merge blocks | `merge_blocks` | Coalesce single-succ/single-pred chains |
 | Remove empty blocks | `remove_empty_blocks` | Bypass empty fallthrough blocks |
 | Critical edge splitting | `split_critical_edges`, `split_critical_edges_with` | Insert blocks on multi-succ → multi-pred edges while retaining the original edge identity/payload and mapping both halves |
-| Dead code elimination | `dead_code_elimination` (instructions), `remove_dead_code[_mapped]` (plus the structure left dead) | Liveness-based; requires `EffectInfo` so side-effecting code is never silently deleted |
+| Dead code elimination | `dead_code_elimination[_with_exits]` (instructions), `remove_dead_code[_mapped]` (plus the structure left dead) | Liveness-based; requires `EffectInfo` so side-effecting code is never silently deleted. The `_with_exits` form seeds what leaves each block |
 | Edge contraction | `contract_edge`, `contract_edge_mapped` | Merge two blocks connected by a single edge; mapped form preserves surviving edge identities/payloads |
 | Node splitting | `split_node`, `split_node_at_points` | Split at one or several validated consumer-selected instruction boundaries |
 | Loop rotation | `rotate_loop` | Top-tested → bottom-tested loop form |
@@ -431,7 +461,7 @@ counterparts.
 |---|---|---|
 | DOT | `write_dot` / `to_dot` over a `DotStyle`; `Cfg::write_dot`, `Cfg::write_dot_with`, `Graph::write_dot` | `DotStyle` carries the node-label hook, the edge-attribute hook (`DotEdgeAttributes`: label, color, style, penwidth), the graph name, the node-identifier prefix, and `DotRankDir`. `control_flow_edge_attributes` is the CFG's kind-to-color mapping; `plain_edge_attributes` decorates nothing |
 | Text | `write_text` / `to_text` over a `TextStyle`, read back by `parse_text`; `Cfg::write_text` / `Cfg::to_text`, read back by `parse_cfg_text` | One fact per line. `n3 label`, `n3 -> n5 label`, `#` comments; a CFG adds `entry bb0`, `bb3:` headers with indented instructions, `bb3 -> bb5 kind`, and `region` / `handler` lines. Escapes are `\\`, `\n`, `\r`, and a leading `\-` |
-| Pseudocode | `ir::ast::AstNode::to_pseudocode`, `ir::rtl::Function::to_pseudocode`, `ir::hlil::Function::to_pseudocode`, each with a `write_pseudocode` counterpart | RTL prints transfers as `dst <- expr`, brackets a parallel transfer as `par { … }`, suffixes effects with `! …`, and ends each block with its outgoing edges and their kinds |
+| Pseudocode | `ir::ast::AstNode::to_pseudocode`, `ir::rtl::Function::to_pseudocode`, `ir::hlil::Function::to_pseudocode`, each with a `write_pseudocode` counterpart | RTL prints transfers as `dst <- expr`, brackets a parallel transfer as `par { … }`, prints an effect that writes places as `p1, p2 = op(…)`, suffixes effects with `! …`, and ends each block with its outgoing edges and their kinds |
 
 Both label hooks are ordinary closures or function items of type
 `Label<Id, Data>`; `no_label` and `display_label` cover the common answers,

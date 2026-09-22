@@ -47,9 +47,10 @@
 //! exception regions and signatures), and reusable analyses over that CFG.
 //! [`ir::rtl`] sits below MLIL for machine-shaped languages: each native
 //! instruction becomes one parallel typed transfer over raw storage
-//! lanes, and [`lift_rtl_function`] recovers typed variables (def-use
-//! webs over per-lane SSA) while emitting into an associated, potentially
-//! distinct MLIL dialect. [`lower_rtl_function`] maps that MLIL back through
+//! lanes, or an effect statement that additionally names the places it
+//! writes without expressing their values, and [`lift_rtl_function`]
+//! recovers typed variables (def-use webs over per-lane SSA) while
+//! emitting into an associated, potentially distinct MLIL dialect. [`lower_rtl_function`] maps that MLIL back through
 //! target placement. Both directions retain signatures, exception regions,
 //! fallibly translated edges, and many-to-many provenance; variable-shaped
 //! languages can skip RTL and build MLIL directly.

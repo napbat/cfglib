@@ -40,6 +40,23 @@
 //! ([`WebInfo::live_in`](WebInfo::live_in)) enumerate parameters and
 //! input channels for signature assignment.
 //!
+//! A statement says what it writes as well as what it reads, and the two
+//! forms of writing differ only in whether a value comes with the place.
+//! A [`Statement::Transfer`] pairs each destination with the value it
+//! receives; a [`Statement::Effect`] names places in
+//! [`writes`](Statement::Effect::writes) that the operation writes with
+//! values the statement does not express — the registers a call clobbers,
+//! the flags an instruction leaves behind. Both are definitions: they
+//! unite their lanes into one web, they start a fresh version of the
+//! storage, and every read of the same statement observes the state
+//! before them, so an operand may name a written storage and reads one
+//! version older. A write takes no shape from a value it does not have,
+//! so its web is typed by its readers, and it arrives at MLIL as the
+//! emitted instruction's `defs` — which is why an effect never needs a
+//! companion transfer of undefined values to state what it clobbers. A
+//! statement's own writes are defined after its throw point, so a call
+//! that may throw and defines its results emits as one instruction.
+//!
 //! Webs make storage reuse harmless: one register reused for a float and
 //! then a counter becomes two typed variables, and a parallel transfer's
 //! reads never see its own writes because they reference prior versions.
