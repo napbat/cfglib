@@ -1,5 +1,9 @@
 //! Generic mutable variables and point-specific typed occurrences.
 
+extern crate alloc;
+
+use alloc::vec::Vec;
+
 use super::{Dialect, VariableId};
 
 /// One declared MLIL variable before SSA renaming.
@@ -31,4 +35,20 @@ impl<D: Dialect> TypedVariable<D> {
             value_type,
         }
     }
+}
+
+/// Pairs each variable of one occurrence list with its type.
+///
+/// The two lists come from one instruction and a verified instruction
+/// keeps them the same length, so a shorter type list truncates rather
+/// than inventing a type.
+pub(super) fn typed<D: Dialect>(
+    variables: &[VariableId],
+    value_types: &[D::ValueType],
+) -> Vec<TypedVariable<D>> {
+    variables
+        .iter()
+        .zip(value_types)
+        .map(|(&variable, value_type)| TypedVariable::new(variable, value_type.clone()))
+        .collect()
 }

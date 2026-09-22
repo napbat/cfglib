@@ -4,6 +4,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
+use super::variable::typed;
 use super::{
     Dialect, Error, Function, FunctionBuilder, Instruction, InstructionId, Result, TypedVariable,
     VerifyDialect,
@@ -98,8 +99,8 @@ impl<D: VerifyDialect> Function<D> {
                 } else {
                     (
                         instruction.operation().clone(),
-                        typed(instruction.uses(), instruction.use_types()),
-                        typed(instruction.defs(), instruction.def_types()),
+                        typed::<D>(instruction.uses(), instruction.use_types()),
+                        typed::<D>(instruction.defs(), instruction.def_types()),
                         instruction.may_throw(),
                     )
                 };
@@ -116,15 +117,4 @@ impl<D: VerifyDialect> Function<D> {
             rewritten,
         })
     }
-}
-
-fn typed<D: Dialect>(
-    variables: &[super::VariableId],
-    value_types: &[D::ValueType],
-) -> Vec<TypedVariable<D>> {
-    variables
-        .iter()
-        .zip(value_types)
-        .map(|(&variable, value_type)| TypedVariable::new(variable, value_type.clone()))
-        .collect()
 }

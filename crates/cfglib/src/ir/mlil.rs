@@ -8,6 +8,7 @@
 //! into strings or a closed library-owned opcode enum.
 
 mod builder;
+mod canonical;
 mod constant;
 mod coverage;
 mod dialect;
@@ -17,6 +18,7 @@ mod identity;
 mod instruction;
 mod promote;
 mod provenance;
+mod prune;
 mod rewrite;
 mod split;
 mod variable;
@@ -32,6 +34,7 @@ pub use identity::{EntityId, InstructionId, VariableId};
 pub use instruction::Instruction;
 pub use promote::{MemoryPromotion, PromoteDialect, PromotionAccess};
 pub use provenance::{ProvenanceEntry, ProvenanceMap};
+pub use prune::VariablePruning;
 pub use rewrite::{InstructionReplacement, InstructionRewrite};
 pub use split::VariableSplit;
 pub use variable::{TypedVariable, Variable};

@@ -15,6 +15,7 @@ use super::{
     InstructionMetadata, TypedVariable, VariableId, VerificationIssue, VerifyDialect,
 };
 
+mod canonical;
 mod memory;
 mod promote;
 mod removal;

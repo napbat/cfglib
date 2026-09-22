@@ -415,8 +415,9 @@ pub use ir::mlil::{
     PromotionAccess as MlilPromotionAccess, ProvenanceEntry as MlilProvenanceEntry,
     ProvenanceMap as MlilProvenanceMap, Result as MlilResult, Signature as MlilSignature,
     TypedVariable as MlilTypedVariable, Variable as MlilVariable, VariableId as MlilVariableId,
-    VariableSplit as MlilVariableSplit, VerificationIssue as MlilVerificationIssue,
-    VerificationReport as MlilVerificationReport, VerifyDialect as MlilVerifyDialect,
+    VariablePruning as MlilVariablePruning, VariableSplit as MlilVariableSplit,
+    VerificationIssue as MlilVerificationIssue, VerificationReport as MlilVerificationReport,
+    VerifyDialect as MlilVerifyDialect,
 };
 pub use ir::provenance::{ProvenanceEntry, ProvenanceError, ProvenanceMap};
 pub use ir::rtl::{
