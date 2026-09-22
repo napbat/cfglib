@@ -66,10 +66,11 @@ impl<I: InstrInfo, E> Problem<I, E> for LivenessProblem {
 /// flows back from them — but a caller normally seeds the blocks with no
 /// successors and answers with an empty vector everywhere else.
 ///
-/// The seeds join the transfer, not the reported facts, so
-/// [`Facts::fact_out`](super::fixpoint::Facts::fact_out) still reports
-/// what flows back from a block's successors alone; a consumer replaying
-/// the transfer joins the same seed it supplied.
+/// The seeds join the transfer, not the meet, so the facts a raw solve
+/// returns carry only what flows back from a block's successors.
+/// [`Liveness::compute_with_exits`] is the door that joins them back in
+/// and is what a consumer should use; solving this problem directly is
+/// for a caller that wants the fixpoint facts themselves.
 pub struct SeededLivenessProblem<S> {
     live_out: S,
 }
@@ -171,6 +172,41 @@ impl<V: VariableId> Liveness<V> {
         let result = fixpoint::solve_problem(cfg, &LivenessProblem)
             .expect("an unbounded solve cannot exceed a step limit");
         Self { inner: result }
+    }
+
+    /// Run liveness seeded with what leaves each block.
+    ///
+    /// A graph says nothing about what outlives it, so a value a caller
+    /// reads back after the function returns is invisible to
+    /// [`compute`](Self::compute). `live_out` states it: its variables
+    /// are live at the end of the named block, and everything their
+    /// definitions read stays live with them. A caller normally answers
+    /// for the blocks with no successors and hands back an empty vector
+    /// everywhere else.
+    ///
+    /// Every query on the result accounts for the seed, including
+    /// [`live_out`](Self::live_out) and the per-instruction sets.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the unbounded fixpoint solve reports a step-limit
+    /// error, which the unbounded configuration cannot produce.
+    #[must_use]
+    pub fn compute_with_exits<I: InstrInfo<Variable = V>, E>(
+        cfg: &Cfg<I, E>,
+        live_out: impl Fn(BlockId) -> Vec<V>,
+    ) -> Self {
+        let problem = SeededLivenessProblem::new(&live_out);
+        let mut inner = fixpoint::solve_problem(cfg, &problem)
+            .expect("an unbounded solve cannot exceed a step limit");
+        // The seed joins the transfer, not the meet, so the solved
+        // out-facts do not carry it. Report what each transfer saw.
+        for block in cfg.block_ids() {
+            let mut fact = inner.fact_out(block).clone();
+            fact.extend(live_out(block));
+            inner.set_fact_out(block, fact);
+        }
+        Self { inner }
     }
 
     /// Variables live at the **entry** of a block.

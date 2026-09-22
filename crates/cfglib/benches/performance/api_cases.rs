@@ -35,6 +35,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "control_dependence_graph",
     "copies_by_predecessor",
     "copy_propagation",
+    "copy_propagation_with_exits",
     "dead_code_elimination",
     "dead_code_elimination_with_exits",
     "duplicate_structuring_tails",

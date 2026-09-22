@@ -238,6 +238,99 @@ fn copy_propagation_leaves_a_copy_free_function_untouched() {
     assert_eq!(propagated, function);
 }
 
+/// `mov rax, rcx; add rax, rdx; ret`: the function's result is a copy of
+/// one of its inputs, and the only reader inside the function is the
+/// instruction that consumes it.
+fn returned_copy_function() -> (Function<ToyDialect>, VariableId, VariableId) {
+    let mut builder = FunctionBuilder::<ToyDialect>::new("toy::returned-copy".into());
+    let body = builder.new_block("body");
+    let argument = builder.declare_variable(0, None).unwrap();
+    let result = builder.declare_variable(0, None).unwrap();
+    builder
+        .append_instruction(
+            body,
+            Operation::Copy,
+            vec![integer(argument)],
+            vec![integer(result)],
+            false,
+            None,
+        )
+        .unwrap();
+    builder
+        .append_instruction(
+            body,
+            Operation::Store(0),
+            vec![integer(result)],
+            Vec::new(),
+            false,
+            None,
+        )
+        .unwrap();
+    builder
+        .append_instruction(body, Operation::Return, Vec::new(), Vec::new(), false, None)
+        .unwrap();
+    builder
+        .add_edge(builder.entry(), body, Edge::Entry, None)
+        .unwrap();
+    builder
+        .set_signature(Signature::<ToyDialect>::new(
+            vec![argument],
+            vec![Type::Integer],
+        ))
+        .unwrap();
+    (builder.finish().unwrap(), argument, result)
+}
+
+#[test]
+fn an_unseeded_propagation_drops_the_definition_a_caller_reads_back() {
+    let (function, _, _) = returned_copy_function();
+    let (propagated, statistics) = function.propagate_copies().unwrap();
+
+    assert_eq!(statistics.copies_removed, 1);
+    assert!(
+        propagated
+            .instructions()
+            .all(|instruction| *instruction.operation() != Operation::Copy),
+        "nothing defines the result any more"
+    );
+}
+
+#[test]
+fn an_exit_seed_keeps_the_copy_that_defines_the_result() {
+    let (function, argument, result) = returned_copy_function();
+    let exit = exit_block(&function);
+    let (propagated, statistics) = function
+        .propagate_copies_with_exits(|block| {
+            if block == exit {
+                vec![result]
+            } else {
+                Vec::new()
+            }
+        })
+        .unwrap();
+
+    assert_eq!(
+        statistics.uses_rewritten, 1,
+        "the reader inside still reads through to the source"
+    );
+    assert_eq!(
+        statistics.copies_removed, 0,
+        "the definition the caller reads back stays"
+    );
+    let report = propagated.verify();
+    assert!(report.is_ok(), "{:?}", report.issues);
+    let copy = propagated
+        .instructions()
+        .find(|instruction| *instruction.operation() == Operation::Copy)
+        .expect("the copy survives");
+    assert_eq!(copy.defs(), &[result]);
+    let store = propagated
+        .instructions()
+        .find(|instruction| *instruction.operation() == Operation::Store(0))
+        .expect("the store survives");
+    assert_eq!(store.uses(), &[argument]);
+}
+
 /// A function with one parameter, one occurring variable, one variable
 /// only the provenance names, and one nothing names at all.
 fn pruning_function() -> (Function<ToyDialect>, [VariableId; 4]) {

@@ -1,14 +1,15 @@
 use cfglib::{
     AbstractDomain, Cfg, Direction, DominatorTree, EdgeProblem, Graph, Lattice, NodeId,
     SolveConfig, SsaForm, TryEdgeProblem, TryNodeProblem, TryProblem, abstract_interpret,
-    alias_propagation, copies_by_predecessor, copy_propagation, eliminate_phis,
-    index_paths_may_overlap, meet_options, solve_edge_problem, solve_edge_problem_from,
-    solve_edge_problem_from_with_config, solve_edge_problem_with_config, solve_node_problem_from,
-    solve_node_problem_from_with_config, solve_problem_from, solve_problem_from_with_config,
-    try_solve_edge_problem, try_solve_edge_problem_from, try_solve_edge_problem_from_with_config,
-    try_solve_edge_problem_with_config, try_solve_node_problem, try_solve_node_problem_from,
-    try_solve_node_problem_from_with_config, try_solve_node_problem_with_config, try_solve_problem,
-    try_solve_problem_from, try_solve_problem_from_with_config, try_solve_problem_with_config,
+    alias_propagation, copies_by_predecessor, copy_propagation, copy_propagation_with_exits,
+    eliminate_phis, index_paths_may_overlap, meet_options, solve_edge_problem,
+    solve_edge_problem_from, solve_edge_problem_from_with_config, solve_edge_problem_with_config,
+    solve_node_problem_from, solve_node_problem_from_with_config, solve_problem_from,
+    solve_problem_from_with_config, try_solve_edge_problem, try_solve_edge_problem_from,
+    try_solve_edge_problem_from_with_config, try_solve_edge_problem_with_config,
+    try_solve_node_problem, try_solve_node_problem_from, try_solve_node_problem_from_with_config,
+    try_solve_node_problem_with_config, try_solve_problem, try_solve_problem_from,
+    try_solve_problem_from_with_config, try_solve_problem_with_config,
 };
 
 use super::BenchmarkSuite;
@@ -243,6 +244,22 @@ fn register_analyses(suite: &mut BenchmarkSuite<'_>) {
         |(_, stats)| {
             assert_eq!(stats.uses_rewritten, 1);
             assert_eq!(stats.copies_removed, 1);
+        }
+    );
+    benchmark_case!(
+        suite,
+        "api_copy_propagation_with_exits",
+        covers[copy_propagation_with_exits],
+        || {
+            let mut candidate = copies_fixture.clone();
+            // The copy's destination leaves the function, so the rewrite
+            // still happens and the copy stays.
+            let stats = copy_propagation_with_exits(&mut candidate, |_| vec![1]);
+            (candidate, stats)
+        },
+        |(_, stats)| {
+            assert_eq!(stats.uses_rewritten, 1);
+            assert_eq!(stats.copies_removed, 0);
         }
     );
     benchmark_case!(

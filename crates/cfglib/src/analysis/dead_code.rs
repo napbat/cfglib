@@ -13,7 +13,8 @@ use alloc::vec::Vec;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::dataflow::{EffectInfo, ProgramPoint, fixpoint};
+use crate::dataflow::liveness::Liveness;
+use crate::dataflow::{EffectInfo, ProgramPoint};
 use crate::graph::traverse::{TraversalDirection, reachable};
 
 /// Everything dead in a CFG, found without mutating it.
@@ -79,20 +80,12 @@ impl DeadCode {
         cfg: &Cfg<I, E>,
         live_out: impl Fn(BlockId) -> Vec<I::Variable>,
     ) -> Self {
-        use crate::dataflow::liveness::SeededLivenessProblem;
-
-        let problem = SeededLivenessProblem::new(&live_out);
-        let liveness = fixpoint::solve_problem(cfg, &problem)
-            .expect("an unbounded solve cannot exceed a step limit");
+        let liveness = Liveness::compute_with_exits(cfg, live_out);
 
         let mut instructions = Vec::new();
         for block_id in cfg.block_ids() {
             let block = cfg.block(block_id);
-            // The solved out-fact carries what flows back from the
-            // successors; the seed is what leaves here, exactly as the
-            // problem's own transfer joined it.
-            let mut live = liveness.fact_out(block_id).clone();
-            live.extend(live_out(block_id));
+            let mut live = liveness.live_out(block_id).clone();
             let insts = block.instructions();
             let mut dead = Vec::new();
 

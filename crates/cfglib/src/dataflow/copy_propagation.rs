@@ -17,6 +17,7 @@ use alloc::vec::Vec;
 
 use super::InstrInfo;
 use super::def_use::DefUseChains;
+use super::liveness::Liveness;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 
@@ -219,6 +220,7 @@ struct PropagationStats {
 fn propagate<I: CopySource + Clone, E>(
     cfg: &mut Cfg<I, E>,
     propagation: Propagation,
+    live_out: impl Fn(BlockId) -> Vec<I::Variable>,
 ) -> PropagationStats {
     let substitutions = sound_substitutions(cfg, propagation);
     if substitutions.is_empty() {
@@ -245,22 +247,38 @@ fn propagate<I: CopySource + Clone, E>(
     }
 
     let chains = DefUseChains::compute(cfg);
+    let liveness = Liveness::compute_with_exits(cfg, live_out);
     let mut instructions_removed = 0;
     for &bid in &block_ids {
-        let insts = cfg.block(bid).instructions().to_vec();
-        let mut new_insts = Vec::with_capacity(insts.len());
-        for (inst_idx, inst) in insts.into_iter().enumerate() {
+        let live_after = liveness.live_after_instructions(&*cfg, bid);
+        let mut next_idx = 0usize;
+        cfg.block_mut(bid).instructions_mut().retain(|inst| {
+            let inst_idx = next_idx;
+            next_idx += 1;
+            let Some((definitions, _)) = pairs(inst, propagation) else {
+                return true;
+            };
             let def_site = super::ProgramPoint {
                 block: bid,
                 inst_idx,
             };
-            if pairs(&inst, propagation).is_some() && chains.uses_of(def_site).is_empty() {
-                instructions_removed += 1;
-                continue;
+            if !chains.uses_of(def_site).is_empty() {
+                return true;
             }
-            new_insts.push(inst);
-        }
-        *cfg.block_mut(bid).instructions_mut() = new_insts;
+            // A definition the caller says leaves the function is read
+            // by something this graph does not contain, so the transfer
+            // that produces it stays even though nothing here reads it.
+            // Its uses elsewhere were rewritten to the source all the
+            // same.
+            if definitions
+                .iter()
+                .any(|definition| live_after[inst_idx].contains(definition))
+            {
+                return true;
+            }
+            instructions_removed += 1;
+            false
+        });
     }
     PropagationStats {
         uses_rewritten,
@@ -297,7 +315,30 @@ fn propagate<I: CopySource + Clone, E>(
 ///
 /// Returns the number of rewrites and removals.
 pub fn copy_propagation<I: CopySource + Clone, E>(cfg: &mut Cfg<I, E>) -> CopyPropagationStats {
-    let stats = propagate(cfg, Propagation::Copies);
+    copy_propagation_with_exits(cfg, |_| Vec::new())
+}
+
+/// [`copy_propagation`] told what leaves each block.
+///
+/// A graph says nothing about what outlives it, so a function whose
+/// result is only ever a copy of one of its inputs loses that result: the
+/// copy reads through to the source, nothing inside reads the copy, and
+/// the removal takes the only definition of the place a caller reads
+/// back. `live_out` states what leaves — a returned value, storage a
+/// caller reads again, the state a non-returning exit hands on — and a
+/// transfer whose definition is live there is never removed. Its uses
+/// inside the function are still rewritten to the source, so the
+/// propagation is not otherwise weakened.
+///
+/// A caller normally answers for the blocks with no successors and hands
+/// back an empty vector everywhere else.
+///
+/// Returns the number of rewrites and removals.
+pub fn copy_propagation_with_exits<I: CopySource + Clone, E>(
+    cfg: &mut Cfg<I, E>,
+    live_out: impl Fn(BlockId) -> Vec<I::Variable>,
+) -> CopyPropagationStats {
+    let stats = propagate(cfg, Propagation::Copies, live_out);
     CopyPropagationStats {
         uses_rewritten: stats.uses_rewritten,
         copies_removed: stats.instructions_removed,
@@ -315,7 +356,7 @@ pub fn copy_propagation<I: CopySource + Clone, E>(cfg: &mut Cfg<I, E>) -> CopyPr
 ///
 /// Returns the number of rewritten uses and removed alias instructions.
 pub fn alias_propagation<I: CopySource + Clone, E>(cfg: &mut Cfg<I, E>) -> AliasPropagationStats {
-    let stats = propagate(cfg, Propagation::Aliases);
+    let stats = propagate(cfg, Propagation::Aliases, |_| Vec::new());
     AliasPropagationStats {
         uses_rewritten: stats.uses_rewritten,
         aliases_removed: stats.instructions_removed,
@@ -457,6 +498,59 @@ mod tests {
         assert_eq!(result.copies_removed, 1);
         let insts = cfg.block(cfg.entry()).instructions();
         assert_eq!(insts.last().unwrap().uses[0], 7);
+    }
+
+    /// `mov rax, rcx; add rax, rdx; ret` in variable form: the result is
+    /// a copy of one of the inputs, one instruction inside reads it, and
+    /// the place the caller reads back afterwards is the copy's
+    /// destination.
+    fn returned_copy_cfg() -> Cfg<DfInst> {
+        let mut cfg: Cfg<DfInst> = Cfg::new();
+        cfg.block_mut(cfg.entry())
+            .instructions_mut()
+            .extend([df_copy("mov", 1, 7), df_use("add", 1)]);
+        cfg
+    }
+
+    #[test]
+    fn an_unseeded_run_removes_the_copy_a_caller_would_read_back() {
+        let mut cfg = returned_copy_cfg();
+        let result = copy_propagation(&mut cfg);
+        assert_eq!(result.uses_rewritten, 1);
+        assert_eq!(result.copies_removed, 1);
+        assert_eq!(
+            cfg.block(cfg.entry()).instructions().len(),
+            1,
+            "nothing defines the result any more"
+        );
+    }
+
+    #[test]
+    fn a_definition_an_exit_observes_keeps_its_copy() {
+        let mut cfg = returned_copy_cfg();
+        let result = copy_propagation_with_exits(&mut cfg, |_| alloc::vec![1]);
+        assert_eq!(
+            result.uses_rewritten, 1,
+            "the reader inside still reads through to the source"
+        );
+        assert_eq!(
+            result.copies_removed, 0,
+            "the definition the caller reads back stays"
+        );
+        let instructions = cfg.block(cfg.entry()).instructions();
+        assert_eq!(instructions.len(), 2);
+        assert_eq!(instructions[0].defs, [1]);
+        assert_eq!(instructions[1].uses, [7]);
+    }
+
+    #[test]
+    fn an_exit_seed_naming_nothing_leaves_the_propagation_alone() {
+        let mut seeded = returned_copy_cfg();
+        let mut plain = returned_copy_cfg();
+        let seeded_result = copy_propagation_with_exits(&mut seeded, |_| Vec::new());
+        let plain_result = copy_propagation(&mut plain);
+        assert_eq!(seeded_result.uses_rewritten, plain_result.uses_rewritten);
+        assert_eq!(seeded_result.copies_removed, plain_result.copies_removed);
     }
 
     #[test]

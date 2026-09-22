@@ -240,7 +240,7 @@ are the other half of that contract, for a lift that wants the improvement in it
 stored form: `eliminate_dead_code(live_out)` (which takes the exit seed, keeps
 every instruction with declared effects, and keeps a throwing instruction because
 it is the throw site its block's exceptional edges leave from),
-`propagate_copies()`, and `prune_variables()` each decide over the graph and
+`propagate_copies[_with_exits]()`, and `prune_variables()` each decide over the graph and
 rebuild a function that verifies. Blocks, edges, exception regions, cleanup
 routes, and the signature survive; a dropped instruction takes its provenance
 with it, and instruction identities become dense again. `prune_variables` is the
@@ -379,7 +379,7 @@ inverted — before falling back to a wrapping `logical_not`.
 | Phi webs | `PhiWebs::compute` | Congruence classes for register coalescing |
 | Constant propagation | `constant_propagation`, `ConstantFolder` (associated `Const`) | Top/Const/Bottom lattice over a consumer constant domain — machine words, strings, bools, float bits |
 | Sparse conditional constant propagation | `SccpAnalysis::compute` | SSA-based, marks unreachable edges |
-| Copy and value-alias propagation | `copy_propagation`, `alias_propagation`, `CopySource` trait | Guarded chain resolution and dead transfer removal; pairwise aliases may refine types or metadata without changing runtime values |
+| Copy and value-alias propagation | `copy_propagation[_with_exits]`, `alias_propagation`, `CopySource` trait | Guarded chain resolution and dead transfer removal; pairwise aliases may refine types or metadata without changing runtime values. The `_with_exits` form keeps a copy whose definition is live at an exit — a function whose result is only ever a copy of an input otherwise loses the definition a caller reads back — while still rewriting that copy's readers inside the function |
 | Memory-event trace | `MemoryTrace::compute`, `MemoryEventInfo` trait | Ordered, location-typed reads, writes, read/modify/write accesses, address-variable dependencies, and fences; instruction summaries distinguish separate read+write from compound modification |
 | Reusable memory-SSA scratch | `MemorySSA::compute_in` + `MemorySsaScratch` | The same answer with the event trace, the alias merge, and the shadow CFG's dominator and SSA buffers caller-owned |
 | Memory SSA | `dataflow::memory::MemorySSA::compute`, `MemoryAlias` trait | Event-driven SSA per may-alias location class: loop/branch φ-nodes, reaching writes and clobbers, bidirectional def-use chains, transitive readers, and ordinary-SSA address inputs |

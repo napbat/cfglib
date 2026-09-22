@@ -235,6 +235,16 @@ impl<F> Facts<F> {
     pub const fn steps(&self) -> usize {
         self.steps
     }
+
+    /// Replaces the OUT fact of one block.
+    ///
+    /// The solver owns these facts. A problem whose boundary condition
+    /// the solver cannot express — a backward analysis seeded per block,
+    /// where the seed joins the transfer rather than the meet over
+    /// successors — reports through this what its transfer actually saw.
+    pub(crate) fn set_fact_out(&mut self, block: BlockId, fact: F) {
+        self.block_out[block.index()] = fact;
+    }
 }
 
 /// Meets two optional facts, treating `None` as unreachable bottom.

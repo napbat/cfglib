@@ -263,7 +263,7 @@ pub use dataflow::constant_propagation::{
 };
 pub use dataflow::copy_propagation::{
     AliasPairs, AliasPropagationStats, CopyPropagationStats, CopySource, alias_propagation,
-    copy_propagation,
+    copy_propagation, copy_propagation_with_exits,
 };
 pub use dataflow::def_use::DefUseChains;
 pub use dataflow::edge_fixpoint::{

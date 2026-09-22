@@ -82,15 +82,39 @@ impl<D: AnalysisDialect + VerifyDialect> Function<D> {
     /// propagated into its readers and then removed.
     ///
     /// A removed copy loses its provenance with its identity; a function
-    /// with no copy to propagate is returned unchanged.
+    /// with no copy to propagate is returned unchanged. A function whose
+    /// result is only ever a copy of one of its inputs loses the
+    /// definition of that result, because nothing inside the function
+    /// reads it — state what leaves through
+    /// [`Self::propagate_copies_with_exits`].
     ///
     /// # Errors
     ///
     /// Returns an error when the rebuilt function fails structural or
     /// dialect verification.
     pub fn propagate_copies(&self) -> Result<(Self, CopyPropagationStats)> {
+        self.propagate_copies_with_exits(|_| Vec::new())
+    }
+
+    /// [`Self::propagate_copies`] told what leaves each block.
+    ///
+    /// A copy whose definition is live at an exit under `live_out` is
+    /// never removed: something outside the function reads it, and
+    /// removing it would leave that place undefined where the caller
+    /// looks. Its uses inside the function are rewritten to the source
+    /// all the same. A caller normally answers for the blocks with no
+    /// successors and hands back an empty vector everywhere else.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the rebuilt function fails structural or
+    /// dialect verification.
+    pub fn propagate_copies_with_exits(
+        &self,
+        live_out: impl Fn(BlockId) -> Vec<VariableId>,
+    ) -> Result<(Self, CopyPropagationStats)> {
         let mut cfg = self.cfg.clone();
-        let statistics = crate::copy_propagation(&mut cfg);
+        let statistics = crate::copy_propagation_with_exits(&mut cfg, live_out);
         if statistics.copies_removed == 0 && statistics.uses_rewritten == 0 {
             return Ok((self.clone(), statistics));
         }
