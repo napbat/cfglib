@@ -10,13 +10,19 @@
 //!
 //! This is a classic SSA/def-use chain optimization that simplifies
 //! redundant moves and phi-resolved copies.
+//!
+//! Every step is linear in the function, which a lifted machine function
+//! of several thousand instructions needs: chains resolve in one shared
+//! walk, an instruction is matched against its own operands rather than
+//! against the whole substitution table, dominance answers from one depth
+//! table, and whether a transfer still reaches a reader is liveness
+//! rather than a per-site reaching-definitions solve.
 
 extern crate alloc;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
 use super::InstrInfo;
-use super::def_use::DefUseChains;
 use super::liveness::Liveness;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
@@ -132,11 +138,15 @@ fn sound_substitutions<I: CopySource, E>(
         }
     }
     let dom = crate::DominatorTree::compute(cfg);
+    // One depth table for the whole pass: a dominance query then rejects
+    // a deeper candidate outright instead of walking the idom chain, so a
+    // long chain of blocks costs the pass nothing quadratic.
+    let depths = dom.analysis_depths();
     let point_dominates = |a: super::ProgramPoint, b: super::ProgramPoint| {
         if a.block == b.block {
             a.inst_idx < b.inst_idx
         } else {
-            dom.dominates(a.block, b.block)
+            dom.dominates_with_analysis_depths(a.block, b.block, &depths)
         }
     };
 
@@ -190,26 +200,54 @@ fn sound_substitutions<I: CopySource, E>(
         }
     }
 
-    let targets: Vec<I::Variable> = substitutions.keys().cloned().collect();
-    for dst in targets {
-        let mut resolved = substitutions[&dst].source.clone();
-        let definition = substitutions[&dst].definition;
-        let mut seen = alloc::collections::BTreeSet::new();
-        while let Some(next) = substitutions.get(&resolved) {
-            if !seen.insert(next.source.clone()) {
-                break; // cycle guard
-            }
-            resolved = next.source.clone();
-        }
-        substitutions.insert(
-            dst,
-            Substitution {
-                source: resolved,
-                definition,
-            },
-        );
-    }
+    resolve_chains(&mut substitutions);
     substitutions
+}
+
+/// Rewrites each substitution's source to the end of its chain.
+///
+/// The walk is shared: every node of a path it followed learns the same
+/// terminal, so a chain of `k` links costs `O(k)` for the whole table
+/// rather than `O(k)` per link.
+///
+/// A cycle cannot occur — an admitted source is defined at a site that
+/// strictly dominates its own transfer, and that order is irreflexive —
+/// but the walk still stops at a repeat rather than looping forever.
+fn resolve_chains<V: Clone + Ord>(substitutions: &mut BTreeMap<V, Substitution<V>>) {
+    let keys: Vec<V> = substitutions.keys().cloned().collect();
+    let mut terminal: BTreeMap<V, V> = BTreeMap::new();
+    let mut path: Vec<V> = Vec::new();
+    let mut on_path: BTreeSet<V> = BTreeSet::new();
+    for key in keys {
+        if terminal.contains_key(&key) {
+            continue;
+        }
+        path.clear();
+        on_path.clear();
+        let mut current = key;
+        let end = loop {
+            if let Some(found) = terminal.get(&current) {
+                break found.clone();
+            }
+            let Some(next) = substitutions.get(&current) else {
+                break current;
+            };
+            if !on_path.insert(current.clone()) {
+                break current;
+            }
+            let source = next.source.clone();
+            path.push(current);
+            current = source;
+        };
+        for node in path.drain(..) {
+            terminal.insert(node, end.clone());
+        }
+    }
+    for (dst, substitution) in &mut *substitutions {
+        if let Some(end) = terminal.get(dst) {
+            substitution.source = end.clone();
+        }
+    }
 }
 
 struct PropagationStats {
@@ -231,22 +269,40 @@ fn propagate<I: CopySource + Clone, E>(
     }
     let block_ids: Vec<BlockId> = cfg.block_ids().collect();
     let mut uses_rewritten = 0;
+    // Each instruction is matched against its own operands rather than
+    // against the whole substitution table. A source the rewrite
+    // introduces is itself a candidate only when it sorts after the
+    // variable it replaced, which is exactly what one ascending pass over
+    // the table would have reached.
+    let mut candidates: BTreeSet<I::Variable> = BTreeSet::new();
     for &bid in &block_ids {
         for (inst_idx, inst) in cfg.block_mut(bid).instructions_mut().iter_mut().enumerate() {
             let point = super::ProgramPoint {
                 block: bid,
                 inst_idx,
             };
-            for (old, substitution) in &substitutions {
-                if substitution.definition != point && inst.uses().contains(old) {
-                    inst.rewrite_use(old, &substitution.source);
-                    uses_rewritten += 1;
+            candidates.clear();
+            candidates.extend(inst.uses().iter().cloned());
+            while let Some(old) = candidates.pop_first() {
+                let Some(substitution) = substitutions.get(&old) else {
+                    continue;
+                };
+                if substitution.definition == point {
+                    continue;
+                }
+                inst.rewrite_use(&old, &substitution.source);
+                uses_rewritten += 1;
+                if substitution.source > old {
+                    candidates.insert(substitution.source.clone());
                 }
             }
         }
     }
 
-    let chains = DefUseChains::compute(cfg);
+    // Whether a transfer's value still reaches a reader is liveness: a
+    // definition reaches a use exactly when it is live immediately after
+    // the instruction that made it. Asking it that way also answers for
+    // what leaves the function, which reaching definitions cannot see.
     let liveness = Liveness::compute_with_exits(cfg, live_out);
     let mut instructions_removed = 0;
     for &bid in &block_ids {
@@ -258,18 +314,10 @@ fn propagate<I: CopySource + Clone, E>(
             let Some((definitions, _)) = pairs(inst, propagation) else {
                 return true;
             };
-            let def_site = super::ProgramPoint {
-                block: bid,
-                inst_idx,
-            };
-            if !chains.uses_of(def_site).is_empty() {
-                return true;
-            }
-            // A definition the caller says leaves the function is read
-            // by something this graph does not contain, so the transfer
-            // that produces it stays even though nothing here reads it.
-            // Its uses elsewhere were rewritten to the source all the
-            // same.
+            // A definition the caller says leaves the function is read by
+            // something this graph does not contain, so the transfer that
+            // produces it stays even though nothing here reads it. Its
+            // uses elsewhere were rewritten to the source all the same.
             if definitions
                 .iter()
                 .any(|definition| live_after[inst_idx].contains(definition))
@@ -288,7 +336,8 @@ fn propagate<I: CopySource + Clone, E>(
 
 /// Run copy propagation on the CFG.
 ///
-/// 1. Build def and use site maps plus the dominator tree.
+/// 1. Build def and use site maps plus the dominator tree and its depth
+///    table.
 /// 2. Find copy instructions (`dst = src`) that are **provably
 ///    value-preserving**: the copy is `dst`'s only definition, it
 ///    dominates every use of `dst`, and `src` is stable — either never
@@ -296,7 +345,8 @@ fn propagate<I: CopySource + Clone, E>(
 ///    value) or defined exactly once at a site dominating the copy.
 /// 3. Replace the dominated uses of each such `dst` with `src`,
 ///    resolving copy chains (`a = b; c = a` → uses of `c` read `b`).
-/// 4. Remove dead copies (whose defs have no remaining uses).
+/// 4. Remove the copies nothing reads any more — those whose
+///    definitions are not live immediately after them.
 ///
 /// Multi-definition variables — reused storage slots, loop-carried
 /// values — never propagate: the guards make the pass sound on any
@@ -551,6 +601,85 @@ mod tests {
         let plain_result = copy_propagation(&mut plain);
         assert_eq!(seeded_result.uses_rewritten, plain_result.uses_rewritten);
         assert_eq!(seeded_result.copies_removed, plain_result.copies_removed);
+    }
+
+    /// A function of `copies + readers + 1` instructions: one definition,
+    /// a copy chain over it, then many readers of the chain's end.
+    fn copy_chain_cfg(copies: u16, readers: usize) -> Cfg<DfInst> {
+        let mut cfg: Cfg<DfInst> = Cfg::new();
+        let block = cfg.entry();
+        cfg.block_mut(block).push(df_def("source", 0));
+        for index in 0..copies {
+            cfg.block_mut(block).push(df_copy("mov", index + 1, index));
+        }
+        for _ in 0..readers {
+            cfg.block_mut(block).push(df_use("read", copies));
+        }
+        cfg
+    }
+
+    /// The same chain spread over a chain of blocks, which is what a
+    /// lifted machine function looks like.
+    fn copy_chain_blocks(blocks: usize, per_block: u16) -> Cfg<DfInst> {
+        let mut cfg: Cfg<DfInst> = Cfg::new();
+        let mut block = cfg.entry();
+        cfg.block_mut(block).push(df_def("source", 0));
+        let mut next = 0u16;
+        for index in 0..blocks {
+            for _ in 0..per_block {
+                cfg.block_mut(block).push(df_copy("mov", next + 1, next));
+                next += 1;
+            }
+            if index + 1 < blocks {
+                let following = cfg.new_block();
+                cfg.add_edge(block, following, EdgeKind::Fallthrough);
+                block = following;
+            }
+        }
+        for _ in 0..per_block {
+            cfg.block_mut(block).push(df_use("read", next));
+        }
+        cfg
+    }
+
+    /// The size is the point: a chain this long is what made the pass
+    /// quadratic, once in resolving each link's chain from scratch and
+    /// again in matching every instruction against the whole
+    /// substitution table.
+    #[test]
+    fn a_long_copy_chain_resolves_at_scale() {
+        let mut cfg = copy_chain_cfg(6000, 2000);
+        let result = copy_propagation(&mut cfg);
+
+        assert_eq!(result.copies_removed, 6000, "the whole chain goes");
+        assert_eq!(result.uses_rewritten, 7999);
+        let instructions = cfg.block(cfg.entry()).instructions();
+        assert_eq!(instructions.len(), 2001, "the definition and its readers");
+        assert!(
+            instructions[1..].iter().all(|inst| inst.uses == [0]),
+            "every reader reads the definition the chain started at"
+        );
+    }
+
+    /// The same chain spread over a long chain of blocks, where every
+    /// dominance query the pass makes walks the tree.
+    #[test]
+    fn a_copy_chain_across_many_blocks_resolves_at_scale() {
+        let mut cfg = copy_chain_blocks(512, 8);
+        let result = copy_propagation(&mut cfg);
+
+        assert_eq!(result.copies_removed, 4096);
+        let last = cfg
+            .block_ids()
+            .last()
+            .expect("the fixture allocates blocks");
+        assert!(
+            cfg.block(last)
+                .instructions()
+                .iter()
+                .all(|inst| inst.uses.first().is_none_or(|&used| used == 0)),
+            "every reader reads the definition the chain started at"
+        );
     }
 
     #[test]
