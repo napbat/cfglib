@@ -2,12 +2,13 @@
 
 extern crate alloc;
 
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use super::variable::{typed, unchanged};
 use super::{
     Dialect, Error, Function, FunctionBuilder, Instruction, InstructionId, Result, TypedVariable,
-    VerifyDialect,
+    VariableId, VerifyDialect,
 };
 
 /// A complete replacement for one existing instruction.
@@ -117,4 +118,70 @@ impl<D: VerifyDialect> Function<D> {
             rewritten,
         })
     }
+
+    /// Returns the function with the unread definitions of the selected
+    /// instructions dropped, and how many definitions that dropped.
+    ///
+    /// An instruction with declared effects survives dead-code
+    /// elimination whole, definitions and all, which is right for the
+    /// instruction and wrong for the definitions: a call under a calling
+    /// convention states that it writes every register the convention
+    /// does not preserve, and most of those writes are never read. This
+    /// drops exactly those definitions and leaves the operation, the
+    /// uses, and the exceptional behavior alone.
+    ///
+    /// `of` selects the instructions to consider — the caller knows which
+    /// of its operations state writes they do not compute. A variable any
+    /// instruction reads anywhere stays, so a definition a later read
+    /// observes through a merge is never dropped.
+    ///
+    /// Nothing is removed, so every block, edge, instruction, variable,
+    /// and provenance identity survives; a function with nothing to drop
+    /// comes back unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the rebuilt function fails structural or
+    /// dialect verification.
+    pub fn drop_unread_definitions(
+        &self,
+        of: impl Fn(&Instruction<D>) -> bool,
+    ) -> Result<(Self, usize)> {
+        let read = read_variables(self);
+        let mut dropped = 0usize;
+        let rewrite = self.rewrite_instructions(|instruction| {
+            if !of(instruction) {
+                return None;
+            }
+            let kept: Vec<TypedVariable<D>> = instruction
+                .defs()
+                .iter()
+                .zip(instruction.def_types())
+                .filter(|(defined, _)| read.contains(defined))
+                .map(|(&defined, value_type)| TypedVariable::new(defined, value_type.clone()))
+                .collect();
+            if kept.len() == instruction.defs().len() {
+                return None;
+            }
+            dropped += instruction.defs().len() - kept.len();
+            Some(InstructionReplacement::new(
+                instruction.operation().clone(),
+                typed::<D>(instruction.uses(), instruction.use_types(), unchanged),
+                kept,
+                instruction.may_throw(),
+            ))
+        })?;
+        Ok((rewrite.function, dropped))
+    }
+}
+
+/// Every variable some instruction of the function reads.
+fn read_variables<D: Dialect>(function: &Function<D>) -> BTreeSet<VariableId> {
+    let mut read = BTreeSet::new();
+    for block in function.cfg().block_ids() {
+        for instruction in function.cfg().block(block).instructions() {
+            read.extend(instruction.uses().iter().copied());
+        }
+    }
+    read
 }

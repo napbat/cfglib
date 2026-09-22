@@ -23,7 +23,7 @@
 //!
 //! A **canonical rebuild** — [`Function::eliminate_dead_code`],
 //! [`Function::propagate_copies`], [`Function::coalesce_copies`],
-//! [`Function::prune_variables`],
+//! [`Function::prune_variables`], [`Function::drop_unread_definitions`],
 //! [`Function::split_variables`], [`Function::promote_memory`],
 //! [`Function::rewrite_instructions`] — takes the same decision and rebuilds a
 //! function that verifies, which is what a lift stores. Each states exactly
