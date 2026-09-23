@@ -13,7 +13,11 @@ pub struct Variable<D: Dialect> {
     pub id: VariableId,
     /// Semantic role used by analyses and presentation.
     pub role: D::VariableRole,
-    /// Optional source-native storage provenance.
+    /// Optional source-native storage hint.
+    ///
+    /// This names storage associated with the source value. A lowerer can
+    /// choose another physical home. A variable without this hint can still
+    /// lower to machine storage chosen by the lowerer.
     pub native: Option<D::NativeVariable>,
 }
 

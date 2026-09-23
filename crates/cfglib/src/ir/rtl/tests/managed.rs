@@ -20,7 +20,7 @@ use crate::test_util::toy::{self, Span};
 use super::super::{
     Constraint, Dialect, EdgeContext, Emission, Expr, FunctionBuilder, Lift, LiftedStatement,
     Lower, LowerContext, LowerEdgeContext, MlilBridge, Place, Placement, Result, ScalarType, Shape,
-    Signature, Statement, StatementId, VarExpr, lift, lower,
+    Signature, Statement, StatementId, VarExpr, lift, lower, lower_with_placement,
 };
 
 /// Exceptional-flow tests: throw-site ownership, continuation splits,
@@ -867,6 +867,51 @@ fn lowering_round_trips_with_rewrite_maps() {
         mlil_function.signature().returns
     );
     assert_eq!(relifted.cfg().regions().len(), 1);
+}
+
+#[test]
+fn lowering_uses_a_caller_supplied_place() {
+    let mut builder = FunctionBuilder::<Managed>::new("test".into());
+    let body = builder.new_block("body");
+    builder
+        .add_edge(builder.entry(), body, JvmRtlEdge::Entry)
+        .unwrap();
+    builder
+        .append(body, slot_write(0, word_const(7)), None)
+        .unwrap();
+    builder
+        .append(
+            body,
+            Statement::Return {
+                values: vec![slot_read(0, JvmConstraint::Word(ScalarType::I32))],
+            },
+            None,
+        )
+        .unwrap();
+    let source = builder.finish().unwrap();
+    let function = lift(&source, &hierarchy())
+        .unwrap()
+        .builder
+        .finish()
+        .unwrap();
+    let variable = function.cfg().block(body).instructions()[0].defs()[0];
+    let mut placement = <Managed as Lower>::plan(&function).unwrap();
+    placement.assign(
+        variable,
+        Place {
+            storage: 3,
+            lanes: vec![0],
+        },
+    );
+    let lowered = lower_with_placement::<Managed>(&function, placement).unwrap();
+    assert_eq!(
+        lowered.placement.place(variable).map(|place| place.storage),
+        Some(3)
+    );
+    assert!(matches!(
+        lowered.function.cfg().block(body).instructions()[0].statement(),
+        Statement::Transfer { assignments, .. } if assignments[0].0.storage == 3
+    ));
 }
 
 /// Fused source spans survive RTL → MLIL → RTL without selecting only

@@ -46,7 +46,7 @@ fn connect_clique<V: VariableId>(
 /// together. Each undirected relation is stored once; [`color_graph`] treats
 /// both incoming and outgoing adjacency as conflicts.
 #[must_use]
-pub fn interference_graph<I, V>(cfg: &Cfg<I>, live: &Liveness<V>) -> Graph<V, ()>
+pub fn interference_graph<I, V, E>(cfg: &Cfg<I, E>, live: &Liveness<V>) -> Graph<V, ()>
 where
     I: InstrInfo<Variable = V>,
     V: VariableId,
@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn interference_builder_returns_generic_graph_with_variable_payloads() {
-        let mut cfg = Cfg::new();
+        let mut cfg = Cfg::<_, &str>::with_edge_payload();
         cfg.block_mut(cfg.entry())
             .push(df_op("sum", "add", 2, &[0, 1]));
         let live = Liveness::compute(&cfg);

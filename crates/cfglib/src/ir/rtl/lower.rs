@@ -293,8 +293,26 @@ impl<D: Lower> Lowered<D> {
 /// has no legal storage or an instruction no target representation, and
 /// construction errors when the emitted RTL is structurally invalid.
 pub fn lower<D: Lower>(function: &MlilFunction<D::Mlil>) -> Result<Lowered<D>> {
-    let cfg = function.cfg();
     let placement = D::plan(function)?;
+    lower_with_placement(function, placement)
+}
+
+/// Lowers one MLIL function with a caller-supplied storage assignment.
+///
+/// The caller must assign a place to every variable that the function uses.
+/// This entry point lets a backend coordinate register allocation and frame
+/// layout without changing the dialect's default round-trip plan.
+///
+/// # Errors
+///
+/// Returns [`Error::Lowering`](super::Error::Lowering) when the assignment
+/// omits a used variable or an instruction has no target representation.
+/// Returns a construction error when the emitted RTL is invalid.
+pub fn lower_with_placement<D: Lower>(
+    function: &MlilFunction<D::Mlil>,
+    placement: Placement<D>,
+) -> Result<Lowered<D>> {
+    let cfg = function.cfg();
 
     let mut builder = FunctionBuilder::<D>::new(function.source().clone());
     let parameters = function
