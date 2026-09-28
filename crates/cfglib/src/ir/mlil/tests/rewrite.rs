@@ -1,5 +1,148 @@
 use super::*;
 use crate::ir::mlil::ConstantMaterializationDialect;
+use crate::ir::mlil::InstructionEdit;
+use crate::ir::mlil::InstructionReplacement;
+
+#[test]
+fn splice_preserves_order_and_remaps_source_correspondences() {
+    let mut builder = FunctionBuilder::<ToyDialect>::new("toy::splice".into());
+    let body = builder.new_block("body");
+    let value = builder.declare_variable(0, Some(7)).unwrap();
+    let copied = builder.declare_variable(0, None).unwrap();
+    let original = builder
+        .append_instruction(
+            body,
+            Operation::Copy,
+            vec![TypedVariable::new(value, Type::Integer)],
+            vec![TypedVariable::new(copied, Type::Integer)],
+            false,
+            Some(Span { start: 9, end: 10 }),
+        )
+        .unwrap();
+    builder
+        .append_instruction(
+            body,
+            Operation::Return,
+            vec![TypedVariable::new(copied, Type::Integer)],
+            Vec::new(),
+            false,
+            None,
+        )
+        .unwrap();
+    builder
+        .add_edge(builder.entry(), body, Edge::Entry, None)
+        .unwrap();
+    let function = builder.finish().unwrap();
+
+    let result = function
+        .splice_instructions_with_variables([(1, None)], |instruction, added| {
+            (instruction.id() == original).then(|| {
+                let temporary = TypedVariable::new(added[0], Type::Integer);
+                InstructionEdit::new(
+                    vec![InstructionReplacement::new(
+                        Operation::Copy,
+                        vec![TypedVariable::new(value, Type::Integer)],
+                        vec![temporary.clone()],
+                        false,
+                    )],
+                    Some(InstructionReplacement::new(
+                        Operation::Copy,
+                        vec![temporary.clone()],
+                        vec![TypedVariable::new(copied, Type::Integer)],
+                        false,
+                    )),
+                    vec![InstructionReplacement::new(
+                        Operation::Copy,
+                        vec![TypedVariable::new(copied, Type::Integer)],
+                        vec![temporary],
+                        false,
+                    )],
+                )
+            })
+        })
+        .unwrap();
+    assert_eq!(result.function.instruction_count(), 4);
+    assert_eq!(result.before[original.index()].len(), 1);
+    assert_eq!(result.after[original.index()].len(), 1);
+    let mapped = result.original_instructions[original.index()];
+    assert_eq!(mapped.raw(), original.raw() + 1);
+    assert_eq!(
+        result.function.instruction(mapped).unwrap().uses(),
+        [result.added_variables[0]]
+    );
+    for id in result.before[original.index()]
+        .iter()
+        .chain(core::iter::once(&mapped))
+        .chain(result.after[original.index()].iter())
+    {
+        assert!(
+            result
+                .function
+                .provenance()
+                .mappings_to(crate::ir::mlil::EntityId::Instruction(*id))
+                .any(|entry| entry.source == Span { start: 9, end: 10 })
+        );
+    }
+    assert!(result.function.verify().is_ok());
+}
+
+#[test]
+fn splice_follows_block_order_after_a_derived_reordering() {
+    let mut builder = FunctionBuilder::<ToyDialect>::new("toy::reordered".into());
+    let body = builder.new_block("body");
+    let input = builder.declare_variable(0, None).unwrap();
+    let first_result = builder.declare_variable(0, None).unwrap();
+    let second_result = builder.declare_variable(0, None).unwrap();
+    for result in [first_result, second_result] {
+        builder
+            .append_instruction(
+                body,
+                Operation::Copy,
+                vec![TypedVariable::new(input, Type::Integer)],
+                vec![TypedVariable::new(result, Type::Integer)],
+                false,
+                None,
+            )
+            .unwrap();
+    }
+    builder
+        .append_instruction(
+            body,
+            Operation::Return,
+            vec![TypedVariable::new(second_result, Type::Integer)],
+            Vec::new(),
+            false,
+            None,
+        )
+        .unwrap();
+    builder
+        .add_edge(builder.entry(), body, Edge::Entry, None)
+        .unwrap();
+    let function = builder.finish().unwrap().with_derived_cfg(|cfg| {
+        cfg.block_mut(body).instructions_mut().swap(0, 1);
+    });
+
+    let result = function
+        .splice_instructions_with_variables(core::iter::empty(), |_, _| None)
+        .unwrap();
+    let ordered: Vec<_> = result
+        .function
+        .cfg()
+        .block(body)
+        .instructions()
+        .iter()
+        .map(Instruction::id)
+        .collect();
+    assert_eq!(
+        ordered,
+        [
+            result.original_instructions[1],
+            result.original_instructions[0],
+            result.original_instructions[2],
+        ]
+    );
+    assert!(result.function.verify().is_ok());
+}
 
 impl ConstantMaterializationDialect for ToyDialect {
     fn materialize_constant(
@@ -8,6 +151,68 @@ impl ConstantMaterializationDialect for ToyDialect {
     ) -> Option<Self::Operation> {
         matches!(instruction.operation(), Operation::Copy).then_some(Operation::Constant(*constant))
     }
+}
+
+#[test]
+fn added_abi_variable_keeps_existing_identities_and_provenance() {
+    let mut builder = FunctionBuilder::<ToyDialect>::new("toy::abi".into());
+    let body = builder.new_block("body");
+    let target = builder.declare_variable(0, Some(7)).unwrap();
+    let call = builder
+        .append_instruction(
+            body,
+            Operation::Return,
+            vec![TypedVariable::new(target, Type::Integer)],
+            Vec::new(),
+            false,
+            Some(Span { start: 9, end: 10 }),
+        )
+        .unwrap();
+    builder
+        .add_edge(builder.entry(), body, Edge::Entry, None)
+        .unwrap();
+    let function = builder.finish().unwrap();
+
+    let rewritten = function
+        .rewrite_instructions_with_variables([(1, Some(8))], |instruction, added| {
+            (instruction.id() == call).then(|| {
+                InstructionReplacement::new(
+                    Operation::Return,
+                    vec![
+                        TypedVariable::new(target, Type::Integer),
+                        TypedVariable::new(added[0], Type::Integer),
+                    ],
+                    Vec::new(),
+                    false,
+                )
+            })
+        })
+        .unwrap();
+    assert_eq!(rewritten.rewritten, 1);
+    assert_eq!(rewritten.added_variables.len(), 1);
+    assert_eq!(
+        rewritten
+            .function
+            .variable(target)
+            .map(|variable| variable.id),
+        Some(target)
+    );
+    assert_eq!(
+        rewritten.function.instruction(call).unwrap().uses(),
+        [target, rewritten.added_variables[0]]
+    );
+    assert_eq!(
+        rewritten.function.instruction_point(call),
+        function.instruction_point(call)
+    );
+    assert_eq!(
+        rewritten
+            .function
+            .provenance()
+            .mappings_from(9)
+            .collect::<Vec<_>>(),
+        function.provenance().mappings_from(9).collect::<Vec<_>>()
+    );
 }
 
 #[test]

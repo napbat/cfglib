@@ -44,6 +44,7 @@ mod promote;
 mod provenance;
 mod prune;
 mod rewrite;
+mod splice;
 mod split;
 mod variable;
 mod verify;
@@ -60,6 +61,7 @@ pub use promote::{MemoryPromotion, PromoteDialect, PromotionAccess};
 pub use provenance::{ProvenanceEntry, ProvenanceMap};
 pub use prune::VariablePruning;
 pub use rewrite::{InstructionReplacement, InstructionRewrite};
+pub use splice::{InstructionEdit, InstructionSplice};
 pub use split::VariableSplit;
 pub use variable::{TypedVariable, Variable};
 

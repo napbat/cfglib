@@ -44,6 +44,18 @@ impl<D: Dialect> InstructionReplacement<D> {
             may_throw,
         }
     }
+
+    /// Returns the checked operation and its typed instruction operands.
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        D::Operation,
+        Vec<TypedVariable<D>>,
+        Vec<TypedVariable<D>>,
+        bool,
+    ) {
+        (self.operation, self.uses, self.defs, self.may_throw)
+    }
 }
 
 /// The result of an identity-preserving instruction rewrite.
@@ -53,6 +65,9 @@ pub struct InstructionRewrite<D: Dialect> {
     pub function: Function<D>,
     /// Number of instructions for which the callback supplied a replacement.
     pub rewritten: usize,
+    /// Identities of variables declared after the original variables, in
+    /// requested order.
+    pub added_variables: Vec<VariableId>,
 }
 
 impl<D: VerifyDialect> Function<D> {
@@ -71,12 +86,39 @@ impl<D: VerifyDialect> Function<D> {
         &self,
         mut replacement: impl FnMut(&Instruction<D>) -> Option<InstructionReplacement<D>>,
     ) -> Result<InstructionRewrite<D>> {
+        self.rewrite_instructions_with_variables(core::iter::empty(), |instruction, _| {
+            replacement(instruction)
+        })
+    }
+
+    /// Rebuilds selected instructions after adding declared variables.
+    ///
+    /// Existing variable and instruction identities, graph structure,
+    /// signature, and provenance remain unchanged. The new variable IDs are
+    /// passed to `replacement` in declaration order and returned in
+    /// [`InstructionRewrite::added_variables`]. This permits a checked ABI
+    /// refinement to add an argument or clobber location that the original
+    /// machine lift never read, without referring to an undeclared operand.
+    ///
+    /// # Errors
+    /// Returns an error when the added variables exceed the identity space,
+    /// a replacement uses an undeclared variable, or the rebuilt function
+    /// fails structural or dialect verification.
+    pub fn rewrite_instructions_with_variables(
+        &self,
+        additional: impl IntoIterator<Item = (D::VariableRole, Option<D::NativeVariable>)>,
+        mut replacement: impl FnMut(&Instruction<D>, &[VariableId]) -> Option<InstructionReplacement<D>>,
+    ) -> Result<InstructionRewrite<D>> {
         let mut builder = FunctionBuilder::<D>::new(self.source().clone());
         for variable in self.variables() {
             let rebuilt =
                 builder.declare_variable(variable.role.clone(), variable.native.clone())?;
             debug_assert_eq!(rebuilt, variable.id);
         }
+        let added_variables = additional
+            .into_iter()
+            .map(|(role, native)| builder.declare_variable(role, native))
+            .collect::<Result<Vec<_>>>()?;
         builder.copy_blocks(self.cfg());
 
         let mut rewritten = 0usize;
@@ -92,7 +134,7 @@ impl<D: VerifyDialect> Function<D> {
                 .instruction(id)
                 .ok_or_else(|| Error::InvalidConstruction("missing indexed instruction".into()))?;
             let (operation, uses, defs, may_throw) =
-                if let Some(replacement) = replacement(instruction) {
+                if let Some(replacement) = replacement(instruction, &added_variables) {
                     rewritten += 1;
                     (
                         replacement.operation,
@@ -119,6 +161,7 @@ impl<D: VerifyDialect> Function<D> {
         Ok(InstructionRewrite {
             function: builder.finish()?,
             rewritten,
+            added_variables,
         })
     }
 
