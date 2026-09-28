@@ -10,6 +10,7 @@
 //! at MLIL through [`Lift::value_type`](super::Lift::value_type).
 
 use core::fmt::Debug;
+use core::num::NonZeroU16;
 
 /// One dialect-owned lane constraint domain.
 ///
@@ -98,6 +99,16 @@ pub enum ScalarType {
     U256,
     /// 512-bit unsigned integer.
     U512,
+    /// Integer with an explicit nonzero bit width.
+    ///
+    /// Prefer [`ScalarType::integer`] to obtain the canonical named variant
+    /// for standard widths.
+    Integer {
+        /// Number of bits in the lane.
+        bits: NonZeroU16,
+        /// Whether arithmetic interprets the high bit as a sign bit.
+        signed: bool,
+    },
     /// Boolean truth value of dialect-defined width.
     Bool,
     /// Uninterpreted bits.
@@ -105,6 +116,46 @@ pub enum ScalarType {
 }
 
 impl ScalarType {
+    /// Returns the canonical integer constraint, or `None` for zero width.
+    #[must_use]
+    pub const fn integer(bits: u16, signed: bool) -> Option<Self> {
+        Some(match (bits, signed) {
+            (8, true) => Self::I8,
+            (16, true) => Self::I16,
+            (32, true) => Self::I32,
+            (64, true) => Self::I64,
+            (128, true) => Self::I128,
+            (256, true) => Self::I256,
+            (512, true) => Self::I512,
+            (8, false) => Self::U8,
+            (16, false) => Self::U16,
+            (32, false) => Self::U32,
+            (64, false) => Self::U64,
+            (128, false) => Self::U128,
+            (256, false) => Self::U256,
+            (512, false) => Self::U512,
+            (_, signed) => match NonZeroU16::new(bits) {
+                Some(bits) => Self::Integer { bits, signed },
+                None => return None,
+            },
+        })
+    }
+
+    /// Returns the signedness of an integer interpretation.
+    #[must_use]
+    pub const fn integer_signedness(self) -> Option<bool> {
+        match self {
+            Self::I8 | Self::I16 | Self::I32 | Self::I64 | Self::I128 | Self::I256 | Self::I512 => {
+                Some(true)
+            }
+            Self::U8 | Self::U16 | Self::U32 | Self::U64 | Self::U128 | Self::U256 | Self::U512 => {
+                Some(false)
+            }
+            Self::Integer { signed, .. } => Some(signed),
+            _ => None,
+        }
+    }
+
     /// The lane width in bits, when the interpretation fixes one.
     ///
     /// `Bool` and `Bits` leave the width to the storage and return
@@ -121,6 +172,7 @@ impl ScalarType {
             Self::F128 | Self::I128 | Self::U128 => Some(128),
             Self::I256 | Self::U256 => Some(256),
             Self::I512 | Self::U512 => Some(512),
+            Self::Integer { bits, .. } => Some(bits.get() as u32),
             Self::Bool | Self::Bits => None,
         }
     }
@@ -141,17 +193,14 @@ impl ScalarType {
     /// The conversion between the two is value-representation-exact, so
     /// inference merges them instead of conflicting; the consumer can
     /// spell the difference as an ordinary conversion.
-    const fn integer_merge(self, other: Self) -> Option<Self> {
-        match (self, other) {
-            (Self::I8 | Self::U8, Self::U8 | Self::I8) => Some(Self::I8),
-            (Self::I16 | Self::U16, Self::U16 | Self::I16) => Some(Self::I16),
-            (Self::I32 | Self::U32, Self::U32 | Self::I32) => Some(Self::I32),
-            (Self::I64 | Self::U64, Self::U64 | Self::I64) => Some(Self::I64),
-            (Self::I128 | Self::U128, Self::U128 | Self::I128) => Some(Self::I128),
-            (Self::I256 | Self::U256, Self::U256 | Self::I256) => Some(Self::I256),
-            (Self::I512 | Self::U512, Self::U512 | Self::I512) => Some(Self::I512),
-            _ => None,
+    fn integer_merge(self, other: Self) -> Option<Self> {
+        let left = self.integer_signedness()?;
+        let right = other.integer_signedness()?;
+        let width = self.width()?;
+        if width != other.width()? {
+            return None;
         }
+        Self::integer(u16::try_from(width).ok()?, left || right)
     }
 }
 
@@ -269,3 +318,40 @@ impl<C: Constraint> Shape<C> {
 
 /// A numeric value shape — [`Shape`] over [`ScalarType`].
 pub type ValueShape = Shape<ScalarType>;
+
+#[cfg(test)]
+mod tests {
+    extern crate alloc;
+
+    use alloc::vec;
+
+    use super::{Constraint, ScalarType, Shape};
+
+    #[test]
+    fn exact_integer_widths_preserve_constant_storage() {
+        for (width, words) in [(1, 1), (6, 1), (65, 2), (80, 2), (513, 9)] {
+            let scalar = ScalarType::integer(width, false).expect("nonzero width");
+            assert_eq!(scalar.width(), Some(u32::from(width)));
+            assert_eq!(scalar.word_count(), words);
+            assert!(Shape::scalar(scalar).holds_words(&vec![0; words]));
+            assert!(!Shape::scalar(scalar).holds_words(&vec![0; words + 1]));
+        }
+        assert_eq!(ScalarType::integer(0, false), None);
+        assert_eq!(ScalarType::integer(32, false), Some(ScalarType::U32));
+    }
+
+    #[test]
+    fn exact_integer_merges_preserve_width_and_signedness() {
+        let unsigned = ScalarType::integer(6, false).expect("nonzero width");
+        let signed = ScalarType::integer(6, true).expect("nonzero width");
+        assert_eq!(unsigned.merge(&signed, &()), Some(signed));
+        assert_eq!(signed.merge(&unsigned, &()), Some(signed));
+        assert_eq!(unsigned.merge(&ScalarType::U8, &()), None);
+        assert_eq!(unsigned.merge(&ScalarType::F80, &()), None);
+        let explicit = ScalarType::Integer {
+            bits: core::num::NonZeroU16::new(32).expect("nonzero width"),
+            signed: false,
+        };
+        assert_eq!(explicit.merge(&ScalarType::I32, &()), Some(ScalarType::I32));
+    }
+}
