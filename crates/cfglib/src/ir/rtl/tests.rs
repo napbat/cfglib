@@ -19,6 +19,8 @@ use super::{
 /// Managed-language dialect tests: constraint domains, exceptional
 /// ownership, dispatch, expansion, and lowering.
 mod managed;
+/// Parallel-move serialization of multi-assignment transfers.
+mod parallel;
 /// Golden pseudocode for representative RTL functions.
 mod pseudocode;
 /// Read-resolver tests, split out to respect the source-size policy.
@@ -393,9 +395,9 @@ fn storage_reuse_splits_into_typed_webs() {
 }
 
 /// A loop-carried parallel transfer whose target is read by a sibling
-/// serializes through a synthetic pre-state copy.
+/// serializes readers first and needs no pre-state copy.
 #[test]
-fn parallel_hazard_pre_copies_when_webs_unite() {
+fn parallel_overlap_without_cycle_orders_readers_first() {
     let mut builder = FunctionBuilder::<TestDialect>::new("test".into());
     let entry = builder.entry();
     let header = builder.new_block("header");
@@ -404,8 +406,7 @@ fn parallel_hazard_pre_copies_when_webs_unite() {
     builder.add_edge(header, header, Edge::True).unwrap();
     builder.add_edge(header, exit, Edge::False).unwrap();
     // Parallel: r0.x ← r1.x / r0.x ; r2.x ← r1.x % r0.x. The loop back
-    // edge φ-unites r0.x's versions, so the sibling read needs the
-    // pre-state copy.
+    // edge φ-unites r0.x's versions, so the remainder must run first.
     builder
         .append(
             header,
@@ -470,21 +471,21 @@ fn parallel_hazard_pre_copies_when_webs_unite() {
         .iter()
         .filter(|web| web.storage.is_none())
         .collect();
-    assert_eq!(synthetic.len(), 1, "one pre-state copy temporary");
+    assert!(synthetic.is_empty(), "no pre-state copy temporary");
     let function = lifting.builder.finish().unwrap();
-    // header holds: copy, div, rem, branch.
-    let header_len = function
+    // header holds: rem, div, branch.
+    let header = function
         .cfg()
         .blocks()
         .find(|block| block.label() == Some("header"))
-        .map(|block| block.instructions().len());
-    assert_eq!(header_len, Some(4));
+        .expect("header block");
+    assert_eq!(header.instructions().len(), 3);
 }
 
 /// A straight-line swap has distinct old and new webs, but still needs
-/// both native pre-state values while its assignments serialize.
+/// one native pre-state value while its assignments serialize.
 #[test]
-fn parallel_hazard_pre_copies_split_webs_in_straight_line_code() {
+fn parallel_swap_copies_one_pre_state() {
     let mut builder = FunctionBuilder::<TestDialect>::new("test".into());
     let entry = builder.entry();
     let body = builder.new_block("body");
@@ -526,12 +527,12 @@ fn parallel_hazard_pre_copies_split_webs_in_straight_line_code() {
         .iter()
         .filter(|web| web.storage.is_none())
         .count();
-    assert_eq!(synthetic_count, 2, "both old values are staged");
+    assert_eq!(synthetic_count, 1, "one old value is staged");
     let function = lifting.builder.finish().unwrap();
     assert_eq!(
         instructions(&function).len(),
-        5,
-        "two copies, two writes, return"
+        4,
+        "one copy, two writes, return"
     );
 }
 

@@ -13,7 +13,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::ToString;
 use alloc::vec::Vec;
@@ -27,11 +27,14 @@ use crate::{BlockId, EdgeId, SsaValue};
 
 use super::dialect::{Dialect, Lift, MlilBridge};
 use super::error::{Error, Result};
-use super::expr::{Expr, Place};
+use super::expr::Expr;
 use super::render::Webs;
 use super::statement::{Lane, Statement, StatementId};
 use super::template::{LiftedStatement, VarExpr, WebInfo};
 use super::types::Shape;
+
+/// Parallel-move serialization of multi-assignment transfers.
+mod parallel;
 
 type MlilOf<D> = <D as MlilBridge>::Mlil;
 
@@ -698,141 +701,6 @@ impl<D: Lift> Emitter<'_, D> {
             },
             temporary,
         ))
-    }
-
-    /// Finds pre-state webs whose native lanes a serialized write would clobber.
-    fn serialization_hazards(&self, assignments: &[PendingAssign<D>]) -> BTreeSet<usize> {
-        let mut hazards = BTreeSet::new();
-        for assignment in assignments {
-            for &read in &assignment.reads {
-                let read_info = &self.webs[read];
-                let overlaps_target = assignments.iter().any(|target| {
-                    let target_info = &self.webs[target.target];
-                    target_info.storage.is_some()
-                        && target_info.storage == read_info.storage
-                        && target.positions.iter().any(|&position| {
-                            target_info
-                                .lanes
-                                .get(usize::from(position))
-                                .is_some_and(|lane| read_info.lanes.contains(lane))
-                        })
-                });
-                if overlaps_target {
-                    hazards.insert(read);
-                }
-            }
-        }
-        hazards
-    }
-
-    /// Serializes one parallel transfer: rebuild every assignment
-    /// against pre-statement state, pre-copy hazarded targets, then
-    /// emit one MLIL assignment per destination.
-    #[expect(clippy::too_many_arguments, reason = "one slot per statement facet")]
-    fn transfer(
-        &mut self,
-        source: usize,
-        id: StatementId,
-        assignments: &[(Place<D>, Expr<D>)],
-        effects: &[<D as Vocabulary>::Effect],
-        may_throw: bool,
-        has_exceptional_successors: bool,
-        spans: &[<D as Vocabulary>::SourceSpan],
-        annotation: &crate::SsaInstruction<Lane<D>>,
-    ) -> Result<()> {
-        let mut use_cursor = 0usize;
-        let mut def_cursor = 0usize;
-        let mut lifted: Vec<PendingAssign<D>> = Vec::new();
-        for (place, value) in assignments {
-            let mut reads = Vec::new();
-            let value = self.rebuild(value, &annotation.uses, &mut use_cursor, &mut reads)?;
-            let target = annotation
-                .defs
-                .get(def_cursor)
-                .ok_or_else(|| Error::Lifting("SSA lost a definition".into()))?;
-            let target = self.resolver.web(target)?;
-            let mut positions = Vec::with_capacity(place.lanes.len());
-            for offset in 0..place.lanes.len() {
-                let def = &annotation.defs[def_cursor + offset];
-                positions.push(self.position(target, def.variable.1)?);
-            }
-            def_cursor += place.lanes.len();
-            lifted.push(PendingAssign {
-                target,
-                positions,
-                value,
-                reads,
-            });
-        }
-        // Serialize: every read whose native lanes overlap a target keeps
-        // its pre-state through a synthetic copy. Compare native storage,
-        // not web identity: a straight-line definition starts a fresh web,
-        // while its sibling still reads the older web in the same location.
-        if lifted.len() > 1 {
-            for hazard in self.serialization_hazards(&lifted) {
-                let shape = self.webs[hazard].shape.clone();
-                let temporary = self.declare_temporary(shape.clone())?;
-                let all: Vec<u8> = (0..shape.lanes).collect();
-                self.hand_off(
-                    source,
-                    id,
-                    LiftedStatement::Assign {
-                        positions: all.clone(),
-                        width: shape.lanes,
-                        merges: false,
-                        value: VarExpr::Read {
-                            positions: all,
-                            scalar: shape.scalar,
-                        },
-                        effects: Vec::new(),
-                    },
-                    &[hazard],
-                    Defined::Target {
-                        web: temporary,
-                        merge: false,
-                    },
-                    false,
-                    false,
-                    spans.to_vec(),
-                )?;
-                for pending in &mut lifted {
-                    for web in &mut pending.reads {
-                        if *web == hazard {
-                            *web = temporary;
-                        }
-                    }
-                }
-            }
-        }
-        let mut first = true;
-        for pending in lifted {
-            let width = self.webs[pending.target].shape.lanes;
-            let merges = pending.positions.len() < usize::from(width);
-            let statement_effects = if first { effects.to_vec() } else { Vec::new() };
-            let throws = first && may_throw;
-            let exceptional = first && has_exceptional_successors;
-            first = false;
-            self.hand_off(
-                source,
-                id,
-                LiftedStatement::Assign {
-                    positions: pending.positions,
-                    width,
-                    merges,
-                    value: pending.value,
-                    effects: statement_effects,
-                },
-                &pending.reads,
-                Defined::Target {
-                    web: pending.target,
-                    merge: merges,
-                },
-                throws,
-                exceptional,
-                spans.to_vec(),
-            )?;
-        }
-        Ok(())
     }
 
     #[expect(clippy::too_many_lines, reason = "one arm per statement form")]

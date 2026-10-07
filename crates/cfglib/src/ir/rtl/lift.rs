@@ -7,9 +7,9 @@
 //! register reused for a float and later a counter becomes two variables
 //! with honest constraints, so the consumer renders reinterpretations
 //! only where a web genuinely mixes representations. Parallel transfers
-//! serialize safely because reads reference prior versions; when a
-//! target web is also read by a sibling assignment, the pre-state is
-//! copied into a synthetic temporary first.
+//! serialize as a parallel move: assignments that read a storage come
+//! before assignments that write it. Only a read/write cycle (a swap)
+//! copies one pre-state into a synthetic temporary to break the cycle.
 //!
 //! Emission is dialect-driven through [`super::Emission`]; edges lift
 //! *after* every instruction exists, so
