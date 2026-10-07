@@ -157,6 +157,47 @@ fn elimination_keeps_an_effectful_instruction_nothing_reads() {
     );
 }
 
+#[test]
+fn removal_drops_an_effectful_instruction_and_its_provenance() {
+    let (function, _) = dead_code_function();
+    let (removed, count) = function
+        .remove_instructions(|instruction| *instruction.operation() == Operation::Store(0))
+        .unwrap();
+
+    assert_eq!(count, 1);
+    let report = removed.verify();
+    assert!(report.is_ok(), "{:?}", report.issues);
+    assert!(
+        removed
+            .instructions()
+            .all(|instruction| *instruction.operation() != Operation::Store(0)),
+        "a removal takes an instruction that elimination keeps"
+    );
+    assert_eq!(removed.provenance().mappings_from(3).count(), 0);
+    assert_eq!(removed.cfg().block_count(), function.cfg().block_count());
+}
+
+#[test]
+fn removal_refuses_a_definition_that_a_kept_instruction_reads() {
+    let (function, _) = dead_code_function();
+    assert!(
+        function
+            .remove_instructions(|instruction| *instruction.operation() == Operation::Constant(2))
+            .is_err(),
+        "the store reads what the constant defines"
+    );
+}
+
+#[test]
+fn removal_refuses_a_transfer_of_control() {
+    let (function, _) = dead_code_function();
+    assert!(
+        function
+            .remove_instructions(|instruction| *instruction.operation() == Operation::Return)
+            .is_err()
+    );
+}
+
 /// A function whose only reader of a constant is a copy, and whose only
 /// reader of the copy is an effectful instruction.
 fn copy_function() -> Function<ToyDialect> {

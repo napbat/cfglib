@@ -18,9 +18,10 @@
 extern crate alloc;
 
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::format;
 use alloc::vec::Vec;
 
-use crate::{BlockId, Cfg, CopyPropagationStats, DeadCode};
+use crate::{BlockId, Cfg, CopyPropagationStats, DeadCode, FlowControl, FlowEffect};
 
 use super::variable::{typed, unchanged};
 use super::{
@@ -77,6 +78,72 @@ impl<D: VerifyDialect> Function<D> {
             unchanged,
         )?;
         Ok((function, dropped.len()))
+    }
+
+    /// Returns the function without the instructions that `remove`
+    /// selects, and how many instructions that removed.
+    ///
+    /// A consumer removes an instruction when another statement already
+    /// states what it does: a call that states the push of its own return
+    /// address, or a return that states the pop of it. The removal is
+    /// checked. A removed instruction must not transfer control, and no
+    /// kept instruction may read what a removed one defines. What leaves the
+    /// function is outside the graph, so the caller answers for a
+    /// definition that only an exit observes. A function with nothing to
+    /// remove is returned unchanged, identities and all.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConstruction`](super::Error::InvalidConstruction)
+    /// when a selected instruction transfers control or a kept instruction
+    /// reads one of its definitions, and an error when the rebuilt function
+    /// fails structural or dialect verification.
+    pub fn remove_instructions(
+        &self,
+        remove: impl Fn(&Instruction<D>) -> bool,
+    ) -> Result<(Self, usize)> {
+        let mut removed = BTreeSet::new();
+        let mut read = BTreeSet::new();
+        for block in self.cfg.blocks() {
+            for instruction in block.instructions() {
+                if remove(instruction) {
+                    if !matches!(
+                        instruction.flow_effect(),
+                        FlowEffect::Fallthrough | FlowEffect::MayThrow
+                    ) {
+                        return Err(super::Error::InvalidConstruction(format!(
+                            "instruction {} transfers control and cannot be removed",
+                            instruction.id()
+                        )));
+                    }
+                    removed.insert(instruction.id());
+                } else {
+                    read.extend(instruction.uses().iter().copied());
+                }
+            }
+        }
+        if removed.is_empty() {
+            return Ok((self.clone(), 0));
+        }
+        for block in self.cfg.blocks() {
+            for instruction in block.instructions() {
+                if removed.contains(&instruction.id())
+                    && let Some(defined) = instruction.defs().iter().find(|id| read.contains(id))
+                {
+                    return Err(super::Error::InvalidConstruction(format!(
+                        "instruction {} defines {defined}, which a kept instruction reads",
+                        instruction.id()
+                    )));
+                }
+            }
+        }
+        let function = rebuild(
+            self,
+            &self.cfg,
+            |instruction| !removed.contains(&instruction.id()),
+            unchanged,
+        )?;
+        Ok((function, removed.len()))
     }
 }
 
