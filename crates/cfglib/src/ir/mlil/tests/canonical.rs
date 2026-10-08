@@ -198,6 +198,68 @@ fn removal_refuses_a_transfer_of_control() {
     );
 }
 
+#[test]
+fn removal_takes_a_copy_of_a_variable_into_itself() {
+    let mut builder = FunctionBuilder::<ToyDialect>::new("toy::self_copy".into());
+    let body = builder.new_block("body");
+    let value = builder.declare_variable(0, None).unwrap();
+    builder
+        .append_instruction(
+            body,
+            Operation::Constant(3),
+            Vec::new(),
+            vec![integer(value)],
+            false,
+            None,
+        )
+        .unwrap();
+    builder
+        .append_instruction(
+            body,
+            Operation::Copy,
+            vec![integer(value)],
+            vec![integer(value)],
+            false,
+            None,
+        )
+        .unwrap();
+    builder
+        .append_instruction(
+            body,
+            Operation::Store(0),
+            vec![integer(value)],
+            Vec::new(),
+            false,
+            None,
+        )
+        .unwrap();
+    builder
+        .append_instruction(body, Operation::Return, Vec::new(), Vec::new(), false, None)
+        .unwrap();
+    builder
+        .add_edge(builder.entry(), body, Edge::Entry, None)
+        .unwrap();
+    let function = builder.finish().unwrap();
+
+    let (removed, count) = function
+        .remove_instructions(|instruction| *instruction.operation() == Operation::Copy)
+        .expect("the copy reads the variable that the store reads");
+
+    assert_eq!(count, 1);
+    let operations: Vec<_> = removed
+        .instructions()
+        .map(|instruction| *instruction.operation())
+        .collect();
+    assert_eq!(
+        operations,
+        [
+            Operation::Constant(3),
+            Operation::Store(0),
+            Operation::Return
+        ]
+    );
+}
+
 /// A function whose only reader of a constant is a copy, and whose only
 /// reader of the copy is an effectful instruction.
 fn copy_function() -> Function<ToyDialect> {

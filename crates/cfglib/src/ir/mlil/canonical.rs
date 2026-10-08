@@ -85,10 +85,12 @@ impl<D: VerifyDialect> Function<D> {
     ///
     /// A consumer removes an instruction when another statement already
     /// states what it does: a call that states the push of its own return
-    /// address, or a return that states the pop of it. The removal is
-    /// checked. A removed instruction must not transfer control, and no
-    /// kept instruction may read what a removed one defines. What leaves the
-    /// function is outside the graph, so the caller answers for a
+    /// address, a return that states the pop of it, or a copy of a variable
+    /// into itself. The removal is checked. A removed instruction must not
+    /// transfer control, and no kept instruction may read what a removed one
+    /// defines, unless the removed one reads that variable too: the readers
+    /// then see the definition that reached the removed instruction. What
+    /// leaves the function is outside the graph, so the caller answers for a
     /// definition that only an exit observes. A function with nothing to
     /// remove is returned unchanged, identities and all.
     ///
@@ -96,8 +98,9 @@ impl<D: VerifyDialect> Function<D> {
     ///
     /// Returns [`Error::InvalidConstruction`](super::Error::InvalidConstruction)
     /// when a selected instruction transfers control or a kept instruction
-    /// reads one of its definitions, and an error when the rebuilt function
-    /// fails structural or dialect verification.
+    /// reads one of its definitions that it does not read itself, and an
+    /// error when the rebuilt function fails structural or dialect
+    /// verification.
     pub fn remove_instructions(
         &self,
         remove: impl Fn(&Instruction<D>) -> bool,
@@ -128,7 +131,10 @@ impl<D: VerifyDialect> Function<D> {
         for block in self.cfg.blocks() {
             for instruction in block.instructions() {
                 if removed.contains(&instruction.id())
-                    && let Some(defined) = instruction.defs().iter().find(|id| read.contains(id))
+                    && let Some(defined) = instruction
+                        .defs()
+                        .iter()
+                        .find(|id| read.contains(id) && !instruction.uses().contains(id))
                 {
                     return Err(super::Error::InvalidConstruction(format!(
                         "instruction {} defines {defined}, which a kept instruction reads",
