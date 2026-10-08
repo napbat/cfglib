@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 
 use super::variable::typed;
 use super::{
-    EntityId, Function, FunctionBuilder, InstructionId, Result, Signature, VariableId,
+    EntityId, Function, FunctionBuilder, InstructionId, Result, Signature, Variable, VariableId,
     VerifyDialect,
 };
 
@@ -75,6 +75,40 @@ impl<D: VerifyDialect> Function<D> {
     /// dialect verification.
     pub fn prune_variables(&self) -> Result<(Self, VariablePruning)> {
         prune(self)
+    }
+
+    /// Returns the function with a new role and native storage hint for
+    /// some of its variables.
+    ///
+    /// `redeclare` answers the new role and hint of a variable that changes,
+    /// and `None` for a variable that keeps its declaration. Every identity
+    /// of the function stays: variables, blocks, edges, instructions, and
+    /// regions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the changed function fails structural or
+    /// dialect verification.
+    pub fn redeclare_variables(
+        &self,
+        mut redeclare: impl FnMut(&Variable<D>) -> Option<(D::VariableRole, Option<D::NativeVariable>)>,
+    ) -> Result<Self> {
+        let mut function = self.clone();
+        let mut changed = false;
+        for variable in &mut function.variables {
+            if let Some((role, native)) = redeclare(variable) {
+                variable.role = role;
+                variable.native = native;
+                changed = true;
+            }
+        }
+        if changed {
+            let report = function.verify();
+            if !report.is_ok() {
+                return Err(report.into());
+            }
+        }
+        Ok(function)
     }
 }
 
