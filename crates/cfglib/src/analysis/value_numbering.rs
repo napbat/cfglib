@@ -361,7 +361,7 @@ mod tests {
             vn_inst(2, &[0, 1], &[3]), // different opcode
         ]);
         let (bvn, _) = BlockValueNumbers::compute(&cfg, cfg.entry(), 0);
-        assert!(bvn.redundant.is_empty());
+        assert_eq!(bvn.redundant, [] as [usize; 0]);
     }
 
     #[test]
@@ -410,8 +410,8 @@ mod tests {
         cfg.add_edge(cfg.entry(), b, EdgeKind::ConditionalFalse);
         let dom = DominatorTree::compute(&cfg);
         let vn = ValueNumbering::compute(&cfg, &dom);
-        assert!(vn.blocks[&a].redundant.is_empty());
-        assert!(vn.blocks[&b].redundant.is_empty());
+        assert_eq!(vn.blocks[&a].redundant, [] as [usize; 0]);
+        assert_eq!(vn.blocks[&b].redundant, [] as [usize; 0]);
     }
 
     #[test]

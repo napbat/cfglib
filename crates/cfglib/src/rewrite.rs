@@ -287,6 +287,6 @@ mod tests {
 
         assert_eq!(first.blocks(a), Some([d].as_slice()));
         assert_eq!(first.blocks(c), Some([].as_slice()));
-        assert!(first.created_blocks().is_empty());
+        assert_eq!(first.created_blocks(), []);
     }
 }

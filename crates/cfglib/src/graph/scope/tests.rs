@@ -286,8 +286,8 @@ fn local_data_shadows_parent_data_without_crossing_namespaces() {
 
     let index = ScopeResolutionIndex::compute(&graph, &LexicalQuery, ScopeResolutionConfig::new());
     assert_eq!(index.references_to(inner), &[use_x]);
-    assert!(index.references_to(outer).is_empty());
-    assert!(index.references_to(outer_type).is_empty());
+    assert_eq!(index.references_to(outer), []);
+    assert_eq!(index.references_to(outer_type), []);
 }
 
 #[test]

@@ -139,7 +139,10 @@ mod tests {
         let cfg = Cfg::<DfInst>::new();
         let dom = DominatorTree::compute(&cfg);
         let ssa = SsaForm::compute(&cfg, &dom);
-        assert!(PhiWebs::compute(&ssa).webs.is_empty());
+        assert_eq!(
+            PhiWebs::compute(&ssa).webs,
+            [] as [crate::dataflow::phi_web::PhiWeb<u16>; 0]
+        );
     }
 
     #[test]

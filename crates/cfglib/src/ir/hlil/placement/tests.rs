@@ -138,7 +138,7 @@ fn branch_local_variable_stays_in_the_branch_body() {
     let placements = VariablePlacements::compute(&function);
 
     assert_eq!(placements.placement(value), Some(first_use));
-    assert!(placements.before(branch).is_empty());
+    assert_eq!(placements.before(branch), []);
     assert_eq!(placements.before(first_use), [value]);
 }
 
@@ -163,7 +163,7 @@ fn loop_local_variable_stays_in_the_loop_body() {
     let placements = VariablePlacements::compute(&function);
 
     assert_eq!(placements.placement(value), Some(first_use));
-    assert!(placements.before(loop_statement).is_empty());
+    assert_eq!(placements.before(loop_statement), []);
 }
 
 #[test]
@@ -189,7 +189,7 @@ fn for_clause_variable_anchors_before_the_loop() {
 
     assert_eq!(placements.placement(value), Some(loop_statement));
     assert_eq!(placements.before(loop_statement), [value]);
-    assert!(placements.before(initializer).is_empty());
+    assert_eq!(placements.before(initializer), []);
 }
 
 #[test]

@@ -703,10 +703,11 @@ fn lift_switch<'a, I, E, O>(
             state.visit(target);
         }
     }
-    if let Some(target) = default_target {
-        if Some(target) != merge && block_is_allowed(allowed_blocks, target) {
-            state.visit(target);
-        }
+    if let Some(target) = default_target
+        && Some(target) != merge
+        && block_is_allowed(allowed_blocks, target)
+    {
+        state.visit(target);
     }
 
     let mut cases = Vec::new();

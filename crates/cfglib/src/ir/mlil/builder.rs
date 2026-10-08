@@ -94,12 +94,12 @@ impl<D: Dialect> FunctionBuilder<D> {
                 self.require_region_block(filter_block, "filter block")?;
             }
         }
-        if let Some(parent) = region.parent {
-            if parent.index() >= self.cfg.regions().len() {
-                return Err(Error::InvalidConstruction(format!(
-                    "region parent {parent} has not been added"
-                )));
-            }
+        if let Some(parent) = region.parent
+            && parent.index() >= self.cfg.regions().len()
+        {
+            return Err(Error::InvalidConstruction(format!(
+                "region parent {parent} has not been added"
+            )));
         }
         Ok(self.cfg.add_region(region))
     }

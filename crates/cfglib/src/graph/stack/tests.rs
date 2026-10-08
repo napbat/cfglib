@@ -109,7 +109,7 @@ fn direct_resolution_applies_symbol_guards_and_builds_reverse_bindings() {
 
     let index = StackResolutionIndex::compute(&graph, StackSearchConfig::new());
     assert_eq!(index.references_to(definition), &[reference]);
-    assert!(index.references_to(wrong).is_empty());
+    assert_eq!(index.references_to(wrong), []);
     assert_eq!(index.resolution(reference), Some(&resolution));
     assert_eq!(index.resolution(scope), None);
 
@@ -220,8 +220,8 @@ fn scoped_symbols_pause_a_lookup_and_jump_to_an_exported_scope() {
     assert_eq!(resolution.paths().len(), 1);
     let path = &resolution.paths()[0];
     assert_eq!(path.end(), member_definition);
-    assert!(path.symbol_stack().is_empty());
-    assert!(path.scope_stack().is_empty());
+    assert_eq!(path.symbol_stack(), []);
+    assert_eq!(path.scope_stack(), []);
     assert!(path.steps().iter().any(|step| matches!(
         step,
         StackPathStep::Jump { target, .. } if *target == member_scope
@@ -566,7 +566,7 @@ fn changed_file_partitions_rebuild_without_disturbing_other_files() {
     let index =
         StackResolutionIndex::compute_from_partials(&graph, &database, StackSearchConfig::new());
     assert_eq!(index.resolution(old_reference), None);
-    assert!(index.references_to(old_definition).is_empty());
+    assert_eq!(index.references_to(old_definition), []);
     assert_eq!(index.references_to(new_definition), &[new_reference]);
     assert_eq!(index.references_to(stable_definition), &[stable_reference]);
 }
@@ -628,7 +628,7 @@ fn partial_path_extraction_reports_bounds() {
     )
     .expect("known file");
     assert!(count_limited.stats().path_count_limited);
-    assert!(count_limited.paths().is_empty());
+    assert_eq!(count_limited.paths(), []);
 }
 
 #[cfg(feature = "serde")]

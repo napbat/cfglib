@@ -127,7 +127,7 @@ fn register_dense_traversals(suite: &mut BenchmarkSuite<'_>) {
         "api_depth_first_edges",
         covers [depth_first_edges, depth_first_edges_with],
         || depth_first_edges(&graph, root, TraversalDirection::Outgoing),
-        |steps: &Vec<_>| assert!(!steps.is_empty())
+        |steps: &Vec<_>| assert_ne!(steps.as_slice(), [])
     );
     benchmark_case!(
         suite,

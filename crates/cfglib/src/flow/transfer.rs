@@ -413,7 +413,10 @@ mod tests {
     #[test]
     fn leaving_flows_make_no_transfer() {
         for flow in [Flow::<u32, char>::Return, Flow::Throw] {
-            assert!(transfers(&flow).is_empty());
+            assert_eq!(
+                transfers(&flow),
+                [] as [crate::flow::transfer::Transfer<'_, u32, char>; 0]
+            );
             assert!(flow.ends_block());
             assert!(!flow.continues());
         }

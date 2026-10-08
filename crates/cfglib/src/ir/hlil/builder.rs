@@ -235,14 +235,13 @@ impl<D: Dialect> FunctionBuilder<D> {
                 self.require_statement(statement)?;
             }
         }
-        if let StatementKind::Assign { target, .. } = kind {
-            if let Some(expression) = self.expressions.get(target.index()) {
-                if matches!(expression.kind(), ExpressionKind::Constant(_)) {
-                    return Err(Error::InvalidConstruction(format!(
-                        "assignment target {target} is a constant"
-                    )));
-                }
-            }
+        if let StatementKind::Assign { target, .. } = kind
+            && let Some(expression) = self.expressions.get(target.index())
+            && matches!(expression.kind(), ExpressionKind::Constant(_))
+        {
+            return Err(Error::InvalidConstruction(format!(
+                "assignment target {target} is a constant"
+            )));
         }
         if let StatementKind::Switch { cases, .. } = kind {
             for case in cases {
@@ -255,12 +254,12 @@ impl<D: Dialect> FunctionBuilder<D> {
         }
         if let StatementKind::Try { handlers, .. } = kind {
             for handler in handlers {
-                if let Some(binding) = handler.binding {
-                    if binding.index() >= self.variables.len() {
-                        return Err(Error::InvalidConstruction(format!(
-                            "handler binds undeclared variable {binding}"
-                        )));
-                    }
+                if let Some(binding) = handler.binding
+                    && binding.index() >= self.variables.len()
+                {
+                    return Err(Error::InvalidConstruction(format!(
+                        "handler binds undeclared variable {binding}"
+                    )));
                 }
             }
         }

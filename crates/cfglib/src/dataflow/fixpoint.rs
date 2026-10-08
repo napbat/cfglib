@@ -478,15 +478,15 @@ fn try_solve_with_worklist<I, E, P: TryProblem<I, E>>(
 
     let mut steps = 0;
     while let Some(block_raw) = worklist.pop_first() {
-        if let Some(limit) = config.max_steps {
-            if steps >= limit {
-                return Err(SolveError::StepLimitExceeded {
-                    limit,
-                    steps,
-                    pending_node: block_raw as usize,
-                }
-                .into());
+        if let Some(limit) = config.max_steps
+            && steps >= limit
+        {
+            return Err(SolveError::StepLimitExceeded {
+                limit,
+                steps,
+                pending_node: block_raw as usize,
             }
+            .into());
         }
         steps += 1;
         let block = BlockId::from_raw(block_raw);

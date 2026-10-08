@@ -32,7 +32,7 @@ impl AddressInstruction for Inst {
     }
 
     fn retains_exception_edge(&self) -> bool {
-        self.address % 3 != 0
+        !self.address.is_multiple_of(3)
     }
 }
 
@@ -65,7 +65,10 @@ fn payload(_: AddressEdgeInfo<'_, u32, u32>) {}
 fn assert_graph(graph: &AddressGraph<Inst, ()>) {
     assert_eq!(graph.instruction_blocks.len(), INSTRUCTION_COUNT);
     assert_eq!(graph.handler_refs.len(), HANDLER_COUNT);
-    assert!(graph.unresolved_transfers.is_empty());
+    assert_eq!(
+        graph.unresolved_transfers,
+        [] as [cfglib::UnresolvedTransfer<u32>; 0]
+    );
 }
 
 pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {

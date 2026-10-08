@@ -275,7 +275,6 @@ impl<'pass, T, E> PassPipeline<'pass, T, E> {
     }
 
     /// Returns scheduled pass identities in execution order.
-    #[must_use]
     pub fn ids(&self) -> impl ExactSizeIterator<Item = PassId> + '_ {
         self.passes.iter().map(|pass| pass.id())
     }

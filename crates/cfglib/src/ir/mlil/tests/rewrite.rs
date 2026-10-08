@@ -269,7 +269,7 @@ fn proven_constants_materialize_without_changing_identities() {
     );
     let rewritten = materialized.function.instruction(copy).unwrap();
     assert_eq!(rewritten.operation(), &Operation::Constant(42));
-    assert!(rewritten.uses().is_empty());
+    assert_eq!(rewritten.uses(), []);
     assert_eq!(rewritten.defs(), [result]);
     assert_eq!(
         materialized.function.instruction_point(copy),
@@ -443,13 +443,13 @@ fn a_selected_instruction_loses_its_own_unread_definition() {
         })
         .unwrap();
     assert_eq!(count, 1, "the load's own definition is unread");
-    assert!(
+    assert_eq!(
         dropped
             .instructions()
             .find(|instruction| matches!(instruction.operation(), Operation::Load(_)))
             .expect("the load stays")
-            .defs()
-            .is_empty()
+            .defs(),
+        []
     );
 }
 

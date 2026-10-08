@@ -833,7 +833,7 @@ fn events_follow_levels_and_report_every_refused_route() {
         [0],
         OpenBfsConfig::new(),
         |node, out| {
-            assert!(out.is_empty());
+            assert_eq!(out.as_slice(), [] as [u32; 0]);
             match node {
                 0 => out.extend([1, 2]),
                 1 | 2 => out.push(3),

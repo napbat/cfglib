@@ -139,23 +139,23 @@ fn classify_loop<I, E>(cfg: &Cfg<I, E>, natural: &NaturalLoop, header: BlockId) 
             .iter()
             .next()
             .expect("a one-element set has a first element");
-        if latch != header {
-            if let Some(targets) = conditional_targets(cfg, latch) {
-                let true_back = targets.true_target == header;
-                let false_back = targets.false_target == header;
-                if true_back != false_back {
-                    let other = if true_back {
-                        targets.false_target
-                    } else {
-                        targets.true_target
+        if latch != header
+            && let Some(targets) = conditional_targets(cfg, latch)
+        {
+            let true_back = targets.true_target == header;
+            let false_back = targets.false_target == header;
+            if true_back != false_back {
+                let other = if true_back {
+                    targets.false_target
+                } else {
+                    targets.true_target
+                };
+                if !natural.body.contains(&other) {
+                    return LoopShape::DoWhile {
+                        latch,
+                        exit: other,
+                        continue_on_true: true_back,
                     };
-                    if !natural.body.contains(&other) {
-                        return LoopShape::DoWhile {
-                            latch,
-                            exit: other,
-                            continue_on_true: true_back,
-                        };
-                    }
                 }
             }
         }

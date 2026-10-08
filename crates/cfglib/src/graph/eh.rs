@@ -253,7 +253,7 @@ mod tests {
         cfg.block_mut(b).instructions_mut().push(ff("b"));
         cfg.add_edge(cfg.entry(), b, EdgeKind::Fallthrough);
         let model = EhModel::compute(&cfg);
-        assert!(model.eh_edges().is_empty());
+        assert_eq!(model.eh_edges(), []);
         assert!(
             model
                 .block_kinds()

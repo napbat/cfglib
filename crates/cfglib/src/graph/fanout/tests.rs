@@ -33,7 +33,7 @@ fn an_empty_table_holds_nothing_and_allocates_nothing() {
     assert!(empty.is_empty());
     assert_eq!(empty.value_count(), 0);
     assert_eq!(empty.heap_bytes(), 0);
-    assert!(empty.get(&7).is_empty());
+    assert_eq!(empty.get(&7), [] as [u32; 0]);
     assert!(!empty.contains_key(&7));
     assert_eq!(empty.keys().count(), 0);
     assert_eq!(empty.iter().count(), 0);
@@ -102,7 +102,7 @@ fn a_group_without_values_contributes_no_key() {
 
     assert_eq!(sites.len(), 1);
     assert!(!sites.contains_key(&"write"));
-    assert!(sites.get(&"write").is_empty());
+    assert_eq!(sites.get(&"write"), [] as [u32; 0]);
     assert_eq!(
         Fanout::<&str, u32>::from_grouped([("write", Vec::new())]),
         Fanout::default()
@@ -132,7 +132,7 @@ fn an_owned_key_is_looked_up_through_a_borrowed_one() {
 
     assert_eq!(sites.get("alpha"), [1]);
     assert!(sites.contains_key("beta"));
-    assert!(sites.get("gamma").is_empty());
+    assert_eq!(sites.get("gamma"), [] as [u32; 0]);
     assert!(!sites.contains_key("gamma"));
 
     // The owned form still reads, which is what a `&K` caller passes.
@@ -176,7 +176,7 @@ fn a_dense_table_keeps_each_keys_arrival_order() {
     assert_eq!(rows.bound(), 3);
     assert_eq!(rows.value_count(), 4);
     assert_eq!(rows.get(0), ["a", "d"]);
-    assert!(rows.get(1).is_empty());
+    assert_eq!(rows.get(1), [] as [&str; 0]);
     assert_eq!(rows.get(2), ["c", "b"]);
 }
 
@@ -200,7 +200,7 @@ fn a_dense_key_space_survives_having_no_values() {
 
     assert_eq!(rows.bound(), 4);
     assert_eq!(rows.value_count(), 0);
-    assert!(rows.get(3).is_empty());
+    assert_eq!(rows.get(3), [] as [u32; 0]);
     assert_eq!(rows.heap_bytes(), 5 * OFFSET_BYTES);
 }
 
@@ -231,7 +231,7 @@ fn a_dense_groups_position_is_its_key() {
     assert_eq!(grouped.bound(), 3);
     assert_eq!(grouped.value_count(), 3);
     assert_eq!(grouped.get(0), [11, 10]);
-    assert!(grouped.get(1).is_empty());
+    assert_eq!(grouped.get(1), [] as [u32; 0]);
     assert_eq!(grouped.get(2), [30]);
 
     // The same table the equivalent pairs build, column for column.
@@ -248,7 +248,7 @@ fn an_empty_group_is_still_a_key_of_the_space() {
 
     assert_eq!(rows.bound(), 2);
     assert_eq!(rows.value_count(), 0);
-    assert!(rows.get(1).is_empty());
+    assert_eq!(rows.get(1), [] as [u32; 0]);
     assert_eq!(rows.iter().count(), 2);
     assert_eq!(rows.heap_bytes(), 3 * OFFSET_BYTES);
 }
@@ -291,7 +291,7 @@ fn a_tagged_identity_keys_a_dense_table() {
         DenseFanout::from_pairs(3, [(call, "tail"), (call, "hot")]);
 
     assert_eq!(references.get(call), ["tail", "hot"]);
-    assert!(references.get(definition).is_empty());
+    assert_eq!(references.get(definition), [] as [&str; 0]);
     assert_eq!(references.iter().count(), 3);
 }
 

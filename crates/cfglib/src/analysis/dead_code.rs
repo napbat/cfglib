@@ -153,7 +153,7 @@ mod tests {
                 inst_idx: 0,
             }]
         );
-        assert!(dead.unreachable_blocks.is_empty());
+        assert_eq!(dead.unreachable_blocks, [] as [crate::BlockId; 0]);
     }
 
     #[test]

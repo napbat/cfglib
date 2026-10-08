@@ -293,5 +293,5 @@ fn non_copy_stack_symbols_resolve_directly_and_from_file_summaries() {
     let reverse =
         StackResolutionIndex::compute_from_partials(&graph, &partials, StackSearchConfig::new());
     assert_eq!(reverse.references_to(preferred), &[reference]);
-    assert!(reverse.references_to(fallback).is_empty());
+    assert_eq!(reverse.references_to(fallback), []);
 }

@@ -838,18 +838,18 @@ impl<'a, D: LiftDialect + VerifyDialect> Lifter<'a, D> {
                 let ListEnd { value, instruction } =
                     end.expect("Expect::Branch guarantees a branch end");
                 let body_statements = self.translate_nodes(body)?;
-                if condition_statements.is_empty() {
-                    if let Some(value) = self.loop_condition(value, *exit_on_true)? {
-                        let statement = self.builder.add_statement(
-                            StatementKind::While {
-                                condition: value,
-                                body: body_statements,
-                            },
-                            None,
-                        )?;
-                        self.map_instruction(instruction, EntityId::Statement(statement))?;
-                        return Ok(statement);
-                    }
+                if condition_statements.is_empty()
+                    && let Some(value) = self.loop_condition(value, *exit_on_true)?
+                {
+                    let statement = self.builder.add_statement(
+                        StatementKind::While {
+                            condition: value,
+                            body: body_statements,
+                        },
+                        None,
+                    )?;
+                    self.map_instruction(instruction, EntityId::Statement(statement))?;
+                    return Ok(statement);
                 }
                 // The condition needs statements (or an unavailable
                 // negation): state the test explicitly at the loop top.
@@ -871,18 +871,18 @@ impl<'a, D: LiftDialect + VerifyDialect> Lifter<'a, D> {
                     self.translate_list(*latch, condition, Expect::Branch)?;
                 let ListEnd { value, instruction } =
                     end.expect("Expect::Branch guarantees a branch end");
-                if condition_statements.is_empty() {
-                    if let Some(value) = self.loop_condition(value, !*continue_on_true)? {
-                        let statement = self.builder.add_statement(
-                            StatementKind::DoWhile {
-                                body: body_statements,
-                                condition: value,
-                            },
-                            None,
-                        )?;
-                        self.map_instruction(instruction, EntityId::Statement(statement))?;
-                        return Ok(statement);
-                    }
+                if condition_statements.is_empty()
+                    && let Some(value) = self.loop_condition(value, !*continue_on_true)?
+                {
+                    let statement = self.builder.add_statement(
+                        StatementKind::DoWhile {
+                            body: body_statements,
+                            condition: value,
+                        },
+                        None,
+                    )?;
+                    self.map_instruction(instruction, EntityId::Statement(statement))?;
+                    return Ok(statement);
                 }
                 // State the post-test explicitly at the loop bottom.
                 let test = self.exit_test(value, !*continue_on_true, instruction)?;

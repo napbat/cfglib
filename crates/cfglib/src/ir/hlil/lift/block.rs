@@ -266,22 +266,22 @@ fn plan_inlining<D: LiftDialect, P: Borrow<mlil::Instruction<D>>>(
                 // the merge point must stay visible as a variable.
                 continue;
             }
-            if let Some(&candidate) = active.get(&variable) {
-                if viable[candidate] == Some(position) {
-                    let relevant = facts[candidate]
-                        .as_ref()
-                        .is_some_and(CandidateFacts::is_effect_relevant);
-                    if relevant && last_effectful.is_some_and(|latest| candidate < latest) {
-                        // Inlining here would evaluate this tree after a
-                        // later-defined effectful tree: keep it materialized.
-                        continue;
-                    }
-                    inline_at[candidate] = Some(position);
-                    consumed.push(candidate);
-                    active.remove(&variable);
-                    if relevant {
-                        last_effectful = Some(candidate);
-                    }
+            if let Some(&candidate) = active.get(&variable)
+                && viable[candidate] == Some(position)
+            {
+                let relevant = facts[candidate]
+                    .as_ref()
+                    .is_some_and(CandidateFacts::is_effect_relevant);
+                if relevant && last_effectful.is_some_and(|latest| candidate < latest) {
+                    // Inlining here would evaluate this tree after a
+                    // later-defined effectful tree: keep it materialized.
+                    continue;
+                }
+                inline_at[candidate] = Some(position);
+                consumed.push(candidate);
+                active.remove(&variable);
+                if relevant {
+                    last_effectful = Some(candidate);
                 }
             }
         }
@@ -704,10 +704,9 @@ impl<D: LiftDialect + VerifyDialect> Lifter<'_, D> {
             .by_consumer
             .get(&position)
             .and_then(|consumed| consumed.get(&variable))
+            && let Some(expression) = state.built[candidate].take()
         {
-            if let Some(expression) = state.built[candidate].take() {
-                return Ok(expression);
-            }
+            return Ok(expression);
         }
         let value_type = instruction
             .use_types()
