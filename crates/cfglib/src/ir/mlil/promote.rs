@@ -80,8 +80,9 @@ pub trait PromoteDialect: Dialect {
     fn promotion_access(instruction: &Instruction<Self>) -> PromotionAccess<Self::Location>;
 
     /// The dialect copy operation rewritten accesses become (one use, one
-    /// definition).
-    fn copy_operation() -> Self::Operation;
+    /// definition), for a copied value of `value_type`. A dialect whose
+    /// reads state a type reads the copied variable at that type.
+    fn copy_operation(value_type: &Self::ValueType) -> Self::Operation;
 
     /// The role and native provenance of the variable standing in for one
     /// promoted location.
@@ -185,7 +186,7 @@ where
         promoted.insert(location.clone(), builder.declare_variable(role, native)?);
     }
 
-    builder.copy_blocks(&source.cfg);
+    builder.mirror_blocks(&source.cfg);
     let mut rewritten = 0usize;
     for index in 0..source.instruction_count() {
         let id = InstructionId::from_raw(
@@ -220,7 +221,8 @@ where
             rewritten += 1;
             // A classified access to an unaliased location neither faults
             // nor keeps its memory effects: it is a plain copy now.
-            builder.append_instruction(point.block, D::copy_operation(), uses, defs, false, None)?
+            let operation = D::copy_operation(&defs[0].value_type);
+            builder.append_instruction(point.block, operation, uses, defs, false, None)?
         } else {
             let uses = instruction
                 .uses()

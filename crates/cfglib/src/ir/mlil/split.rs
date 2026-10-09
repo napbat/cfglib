@@ -178,7 +178,7 @@ pub(super) fn split_variables<D: VerifyDialect>(source: &Function<D>) -> Result<
     // Identical graph structure: blocks in identity order, instructions in
     // stable identity order appended at their original points, edges and
     // regions in insertion order — every rebuilt identity matches.
-    builder.copy_blocks(&source.cfg);
+    builder.mirror_blocks(&source.cfg);
     for index in 0..source.instruction_count() {
         let id = InstructionId::from_raw(
             u32::try_from(index).expect("existing identities fit their own space"),

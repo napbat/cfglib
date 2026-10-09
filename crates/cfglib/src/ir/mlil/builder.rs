@@ -2,6 +2,7 @@
 
 extern crate alloc;
 
+use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -21,6 +22,9 @@ pub struct FunctionBuilder<D: Dialect> {
     signature: Signature<D>,
     provenance: ProvenanceMap<D>,
     instruction_points: Vec<Option<ProgramPoint>>,
+    /// The copied edges that [`Self::copy_structure`] left out, whose
+    /// provenance goes with them.
+    dropped: BTreeSet<EdgeId>,
 }
 
 impl<D: Dialect> FunctionBuilder<D> {
@@ -35,6 +39,7 @@ impl<D: Dialect> FunctionBuilder<D> {
             signature: Signature::<D>::default(),
             provenance: ProvenanceMap::new(source),
             instruction_points: Vec::new(),
+            dropped: BTreeSet::new(),
         }
     }
 
@@ -94,12 +99,12 @@ impl<D: Dialect> FunctionBuilder<D> {
                 self.require_region_block(filter_block, "filter block")?;
             }
         }
-        if let Some(parent) = region.parent {
-            if parent.index() >= self.cfg.regions().len() {
-                return Err(Error::InvalidConstruction(format!(
-                    "region parent {parent} has not been added"
-                )));
-            }
+        if let Some(parent) = region.parent
+            && parent.index() >= self.cfg.regions().len()
+        {
+            return Err(Error::InvalidConstruction(format!(
+                "region parent {parent} has not been added"
+            )));
         }
         Ok(self.cfg.add_region(region))
     }
@@ -167,21 +172,60 @@ impl<D: Dialect> FunctionBuilder<D> {
         Ok(())
     }
 
-    /// Mirrors the source block skeleton so rebuilt identities match.
-    pub(super) fn copy_blocks(&mut self, source: &Cfg<Instruction<D>, D::Edge>) {
-        for block_id in source.block_ids().skip(1) {
-            let rebuilt = self.new_block(source.block(block_id).label().unwrap_or(""));
-            debug_assert_eq!(rebuilt, block_id);
+    /// Adds one block for each block slot of `source` after its synthetic
+    /// root, so a block of the rebuild has the identity and the label of its
+    /// source block.
+    ///
+    /// A slot that the source left unused, as a removed block leaves it,
+    /// stays unused in the rebuild too. Call this before any other
+    /// [`new_block`](Self::new_block): a block added later takes the next
+    /// slot after the mirrored ones.
+    pub fn mirror_blocks<I, E>(&mut self, source: &Cfg<I, E>) {
+        let mut unused = Vec::new();
+        for index in 1..source.block_bound() {
+            let block = BlockId::from_index(index);
+            let rebuilt = if source.contains_block(block) {
+                self.new_block(source.block(block).label().unwrap_or(""))
+            } else {
+                let slot = self.cfg.new_block();
+                unused.push(slot);
+                slot
+            };
+            debug_assert_eq!(rebuilt, block);
+        }
+        for slot in unused {
+            self.cfg.remove_block(slot);
         }
     }
 
     /// Copies every edge, exception region, and cleanup route verbatim.
     ///
     /// Blocks must already mirror the source; call after instructions are
-    /// appended so edge endpoints and cleanup blocks exist.
+    /// appended so edge endpoints and cleanup blocks exist. An edge slot that
+    /// the source left unused stays unused, so every copied edge keeps its
+    /// identity. An exceptional edge that no appended instruction of its
+    /// block can take is left out (see [`untaken_edges`]): a rewrite that
+    /// removed the throw site of a block, or made it a copy, leaves the
+    /// block nothing that throws.
     pub(super) fn copy_structure(&mut self, source: &Cfg<Instruction<D>, D::Edge>) -> Result<()> {
+        let root = self.cfg.entry();
         for edge in source.edges() {
-            self.add_edge(edge.source(), edge.target(), edge.payload().clone(), None)?;
+            // An unused slot takes an edge that leaves at once, which keeps
+            // the slot from any later edge.
+            while self.cfg.edge_bound() < edge.id().index() {
+                let kind = D::edge_kind(edge.payload());
+                let slot = self
+                    .cfg
+                    .add_edge_with_payload(root, root, kind, edge.payload().clone());
+                self.cfg.remove_edge(slot);
+            }
+            let copied =
+                self.add_edge(edge.source(), edge.target(), edge.payload().clone(), None)?;
+            debug_assert_eq!(copied, edge.id());
+        }
+        for edge in untaken_edges(&self.cfg, source.regions()) {
+            self.cfg.remove_edge(edge);
+            self.dropped.insert(edge);
         }
         for region in source.regions() {
             self.add_region(region.clone())?;
@@ -315,6 +359,9 @@ impl<D: Dialect> FunctionBuilder<D> {
     ///
     /// Returns an error when `source` is empty or reversed.
     pub fn map_entity(&mut self, source: D::SourceSpan, entity: EntityId) -> Result<bool> {
+        if matches!(entity, EntityId::Edge(edge) if self.dropped.contains(&edge)) {
+            return Ok(false);
+        }
         Ok(self.provenance.insert(source, entity)?)
     }
 
@@ -331,6 +378,31 @@ fn require_source_span<D: Dialect>(source: Option<&D::SourceSpan>) -> Result<()>
     } else {
         Ok(())
     }
+}
+
+/// Returns the exceptional edges of `cfg` that their source block cannot
+/// take: the block holds no throwing instruction, and no region of `regions`
+/// protects it.
+pub(super) fn untaken_edges<D: Dialect>(
+    cfg: &Cfg<Instruction<D>, D::Edge>,
+    regions: &[Region],
+) -> Vec<EdgeId> {
+    let protected: BTreeSet<BlockId> = regions
+        .iter()
+        .flat_map(|region| region.protected_blocks.iter().copied())
+        .collect();
+    cfg.block_ids()
+        .filter(|block| {
+            !protected.contains(block)
+                && !cfg
+                    .block(*block)
+                    .instructions()
+                    .iter()
+                    .any(Instruction::may_throw)
+        })
+        .flat_map(|block| cfg.outgoing(block))
+        .filter(|edge| cfg.edge(*edge).kind().is_exceptional())
+        .collect()
 }
 
 impl<D: VerifyDialect> FunctionBuilder<D> {

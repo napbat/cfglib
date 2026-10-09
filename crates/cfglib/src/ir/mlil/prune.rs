@@ -161,7 +161,7 @@ fn prune<D: VerifyDialect>(source: &Function<D>) -> Result<(Function<D>, Variabl
 
     // Instructions rebuild in identity order at their own points, which
     // is what keeps every instruction identity and position.
-    builder.copy_blocks(&source.cfg);
+    builder.mirror_blocks(&source.cfg);
     for index in 0..source.instruction_count() {
         let raw = u32::try_from(index).expect("existing identities fit their own space");
         let id = InstructionId::from_raw(raw);

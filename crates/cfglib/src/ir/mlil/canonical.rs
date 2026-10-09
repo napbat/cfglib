@@ -221,7 +221,9 @@ impl<D: VerifyDialect> Function<D> {
     /// variables, the signature, and every other correspondence stay. A
     /// caller removes only an instruction that transfers no control and
     /// whose definitions no kept instruction reads, so the function still
-    /// verifies.
+    /// verifies. A block that holds no throwing instruction never takes an
+    /// exceptional edge, so such a block loses its exceptional edges, as one
+    /// does whose load became a copy before the removal.
     fn remove(&mut self, removed: &BTreeSet<InstructionId>) {
         let mut renumbered: Vec<Option<InstructionId>> =
             alloc::vec![None; self.instruction_count()];
@@ -241,6 +243,10 @@ impl<D: VerifyDialect> Function<D> {
                 instruction.set_id(id);
             }
         }
+        let untaken = super::builder::untaken_edges(&self.cfg, self.cfg.regions());
+        for edge in &untaken {
+            self.cfg.remove_edge(*edge);
+        }
         self.instruction_points = alloc::vec![None; next];
         self.reindex_instructions();
         let mut provenance = ProvenanceMap::new(self.provenance.source().clone());
@@ -250,6 +256,7 @@ impl<D: VerifyDialect> Function<D> {
                     Some(id) => EntityId::Instruction(id),
                     None => continue,
                 },
+                EntityId::Edge(id) if untaken.contains(&id) => continue,
                 other => other,
             };
             // A stored entry has a valid span, so the insert cannot fail.
@@ -328,7 +335,7 @@ pub(super) fn rebuild<D: VerifyDialect>(
         let rebuilt = builder.declare_variable(variable.role.clone(), variable.native.clone())?;
         debug_assert_eq!(rebuilt, variable.id);
     }
-    builder.copy_blocks(cfg);
+    builder.mirror_blocks(cfg);
 
     let mut rebuilt_instructions: BTreeMap<InstructionId, InstructionId> = BTreeMap::new();
     for block in cfg.block_ids() {

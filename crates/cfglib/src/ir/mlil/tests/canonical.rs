@@ -606,3 +606,107 @@ fn the_canonical_rebuilds_compose() {
     );
     assert!(pruned.ssa().is_ok(), "a canonical function still lifts");
 }
+
+/// A block whose instruction no longer throws, as a load that promotion
+/// turned into a copy, keeps an exceptional edge that it cannot take.
+#[test]
+fn a_removal_drops_the_exceptional_edges_of_a_block_without_a_throw_site() {
+    let mut builder = FunctionBuilder::<ToyDialect>::new("toy::unthrown".into());
+    let unread = builder.declare_variable(0, None).unwrap();
+    let head = builder.new_block("head");
+    let exit = builder.new_block("exit");
+    let pad = builder.new_block("pad");
+    builder
+        .append_instruction(
+            head,
+            Operation::Constant(1),
+            Vec::new(),
+            vec![integer(unread)],
+            false,
+            None,
+        )
+        .unwrap();
+    for block in [exit, pad] {
+        builder
+            .append_instruction(
+                block,
+                Operation::Return,
+                Vec::new(),
+                Vec::new(),
+                false,
+                None,
+            )
+            .unwrap();
+    }
+    builder
+        .add_edge(builder.entry(), head, Edge::Entry, None)
+        .unwrap();
+    builder.add_edge(head, exit, Edge::Next, None).unwrap();
+    builder.add_edge(head, pad, Edge::Unwind, None).unwrap();
+    let mut function = builder.finish().unwrap();
+
+    let removed = function.eliminate_dead_code_in_place(|_| Vec::new());
+
+    assert_eq!(removed, 1);
+    let report = function.verify();
+    assert!(report.is_ok(), "{:?}", report.issues);
+    assert!(
+        function
+            .cfg()
+            .edges()
+            .all(|edge| !edge.kind().is_exceptional()),
+        "the emptied block takes no exceptional edge"
+    );
+}
+
+/// A rebuild that removes the throw site of a block leaves out the
+/// exceptional edge that the throw site owned.
+#[test]
+fn a_rebuild_without_the_throw_site_drops_its_exceptional_edge() {
+    let mut builder = FunctionBuilder::<ToyDialect>::new("toy::rethrown".into());
+    let loaded = builder.declare_variable(0, None).unwrap();
+    let head = builder.new_block("head");
+    let exit = builder.new_block("exit");
+    let pad = builder.new_block("pad");
+    builder
+        .append_instruction(
+            head,
+            Operation::Load(0),
+            Vec::new(),
+            vec![integer(loaded)],
+            true,
+            None,
+        )
+        .unwrap();
+    for block in [exit, pad] {
+        builder
+            .append_instruction(
+                block,
+                Operation::Return,
+                Vec::new(),
+                Vec::new(),
+                false,
+                None,
+            )
+            .unwrap();
+    }
+    builder
+        .add_edge(builder.entry(), head, Edge::Entry, None)
+        .unwrap();
+    builder.add_edge(head, exit, Edge::Next, None).unwrap();
+    builder.add_edge(head, pad, Edge::Unwind, None).unwrap();
+    let function = builder.finish().unwrap();
+
+    let (rebuilt, removed) = function
+        .remove_instructions(|instruction| *instruction.operation() == Operation::Load(0))
+        .unwrap();
+
+    assert_eq!(removed, 1);
+    assert!(
+        rebuilt
+            .cfg()
+            .edges()
+            .all(|edge| !edge.kind().is_exceptional()),
+        "the block without its load takes no exceptional edge"
+    );
+}

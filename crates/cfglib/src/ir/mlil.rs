@@ -46,6 +46,7 @@ mod prune;
 mod rewrite;
 mod splice;
 mod split;
+mod straight;
 mod variable;
 mod verify;
 

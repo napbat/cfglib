@@ -97,7 +97,7 @@ impl<D: VerifyDialect> Function<D> {
             .into_iter()
             .map(|(role, native)| builder.declare_variable(role, native))
             .collect::<Result<Vec<_>>>()?;
-        builder.copy_blocks(self.cfg());
+        builder.mirror_blocks(self.cfg());
 
         let mut originals = vec![None; self.instruction_count()];
         let mut before = vec![Vec::new(); self.instruction_count()];

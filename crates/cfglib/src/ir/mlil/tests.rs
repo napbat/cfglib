@@ -21,6 +21,7 @@ mod memory;
 mod promote;
 mod removal;
 mod rewrite;
+mod straight;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum Type {
@@ -178,7 +179,7 @@ impl super::PromoteDialect for ToyDialect {
         }
     }
 
-    fn copy_operation() -> Operation {
+    fn copy_operation(_value_type: &Self::ValueType) -> Operation {
         Operation::Copy
     }
 
