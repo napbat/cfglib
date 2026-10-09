@@ -112,6 +112,31 @@ fn elimination_drops_the_unread_definition_and_its_provenance() {
     );
 }
 
+/// The in-place doors keep no builder, so they number the survivors and map
+/// their provenance themselves. They must answer what the rebuild answers.
+#[test]
+fn the_in_place_removals_number_and_map_as_the_rebuild_does() {
+    let (function, _) = dead_code_function();
+    let (eliminated, removed) = function.eliminate_dead_code(|_| Vec::new()).unwrap();
+    let mut in_place = function.clone();
+    assert_eq!(
+        in_place.eliminate_dead_code_in_place(|_| Vec::new()),
+        removed
+    );
+    assert_eq!(in_place, eliminated);
+
+    let store = |instruction: &crate::ir::mlil::Instruction<ToyDialect>| {
+        *instruction.operation() == Operation::Store(0)
+    };
+    let (without_store, removed) = function.remove_instructions(store).unwrap();
+    let mut in_place = function.clone();
+    assert_eq!(
+        in_place.remove_instructions_in_place(store).unwrap(),
+        removed
+    );
+    assert_eq!(in_place, without_store);
+}
+
 #[test]
 fn an_exit_seed_keeps_the_definition_it_names() {
     let (function, unread) = dead_code_function();

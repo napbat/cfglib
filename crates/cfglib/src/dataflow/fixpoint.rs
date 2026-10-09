@@ -236,14 +236,16 @@ impl<F> Facts<F> {
         self.steps
     }
 
-    /// Replaces the OUT fact of one block.
+    /// Creates the facts of a solve that a specialized solver performed.
     ///
-    /// The solver owns these facts. A problem whose boundary condition
-    /// the solver cannot express — a backward analysis seeded per block,
-    /// where the seed joins the transfer rather than the meet over
-    /// successors — reports through this what its transfer actually saw.
-    pub(crate) fn set_fact_out(&mut self, block: BlockId, fact: F) {
-        self.block_out[block.index()] = fact;
+    /// `block_in` and `block_out` are indexed by `BlockId::index()` up to
+    /// the block bound of the graph, as the generic solver indexes them.
+    pub(crate) const fn from_parts(block_in: Vec<F>, block_out: Vec<F>, steps: usize) -> Self {
+        Self {
+            block_in,
+            block_out,
+            steps,
+        }
     }
 }
 

@@ -260,6 +260,19 @@ an effect states but nothing reads: a call under a calling convention defines
 every register the convention does not preserve, and dead-code elimination
 cannot touch those because the call itself has effects.
 
+A pass pipeline that changes one function many times uses the **in-place
+doors**: `replace_instructions`, `eliminate_dead_code_in_place`,
+`remove_instructions_in_place`, and
+`drop_unread_definitions_with_exits_in_place` take `&mut self` and take the
+same decisions as the doors above. A door that finds nothing to change does no
+other work, so a pipeline that runs to a fixed point pays only for the analysis
+of its last round. `replace_instructions` swaps the replaced instructions in
+their positions and verifies the function; when verification fails, every
+replaced instruction returns. `retain_parameters` drops signature parameters,
+and `prune_variables` then drops their declarations when nothing else names
+them. `Liveness` solves over one bit row per block, with one bit for each
+variable that the graph or an exit seed names.
+
 Memory stays outside variables by contract: anything aliasable lives behind
 dialect load/store operations ordered by their declared effects, while
 variables are unaliasable dataflow-visible storage. `promote_memory()`

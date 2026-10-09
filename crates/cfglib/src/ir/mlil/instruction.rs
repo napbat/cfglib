@@ -61,6 +61,12 @@ impl<D: Dialect> Instruction<D> {
         self.id
     }
 
+    /// Gives the instruction a new identity, for a function that numbers
+    /// its instructions again after a removal.
+    pub(super) const fn set_id(&mut self, id: InstructionId) {
+        self.id = id;
+    }
+
     /// Returns the dialect-defined semantic operation.
     #[must_use]
     pub const fn operation(&self) -> &D::Operation {

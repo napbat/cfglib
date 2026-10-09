@@ -276,8 +276,10 @@ fn verify_instruction<D: Dialect>(
             );
         }
     }
-    let distinct_definitions = instruction.defs().iter().copied().collect::<BTreeSet<_>>();
-    if distinct_definitions.len() != instruction.defs().len() {
+    // An instruction defines few variables, so a pairwise test costs less
+    // than a set.
+    let defs = instruction.defs();
+    if (1..defs.len()).any(|index| defs[..index].contains(&defs[index])) {
         issue(
             issues,
             format!("{} defines one variable more than once", instruction.id()),

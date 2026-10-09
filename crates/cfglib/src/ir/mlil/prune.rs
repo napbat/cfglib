@@ -77,6 +77,34 @@ impl<D: VerifyDialect> Function<D> {
         prune(self)
     }
 
+    /// Returns the function with only the signature parameters that `keep`
+    /// accepts, in their order.
+    ///
+    /// A dropped parameter stays declared, so a later
+    /// [`Self::prune_variables`] removes it when nothing else names it.
+    /// Every identity of the function stays: variables, blocks, edges,
+    /// instructions, and regions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the changed function fails structural or
+    /// dialect verification.
+    pub fn retain_parameters(&self, mut keep: impl FnMut(VariableId) -> bool) -> Result<Self> {
+        let mut function = self.clone();
+        let before = function.signature.parameters.len();
+        function
+            .signature
+            .parameters
+            .retain(|&parameter| keep(parameter));
+        if function.signature.parameters.len() != before {
+            let report = function.verify();
+            if !report.is_ok() {
+                return Err(report.into());
+            }
+        }
+        Ok(function)
+    }
+
     /// Returns the function with a new role and native storage hint for
     /// some of its variables.
     ///

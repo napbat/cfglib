@@ -11,7 +11,7 @@ extern crate alloc;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
-use super::fixpoint::{self, Direction, Facts, Problem};
+use super::fixpoint::{Direction, Facts, Problem};
 use super::{InstrInfo, VariableId};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
@@ -128,6 +128,141 @@ fn backward_transfer<I: InstrInfo>(live: &mut BTreeSet<I::Variable>, instruction
     }
 }
 
+/// The variables of one solve, sorted, so that a variable's position is its
+/// bit in every row.
+struct Universe<V> {
+    variables: Vec<V>,
+}
+
+impl<V: Ord + Clone> Universe<V> {
+    /// Sets the bit of `variable` in `row`.
+    fn insert(&self, row: &mut [u64], variable: &V) {
+        if let Ok(index) = self.variables.binary_search(variable) {
+            row[index / 64] |= 1 << (index % 64);
+        }
+    }
+
+    /// Clears the bit of `variable` in `row`.
+    fn remove(&self, row: &mut [u64], variable: &V) {
+        if let Ok(index) = self.variables.binary_search(variable) {
+            row[index / 64] &= !(1 << (index % 64));
+        }
+    }
+
+    /// Returns the variables of `row`.
+    fn set(&self, row: &[u64]) -> BTreeSet<V> {
+        let mut set = BTreeSet::new();
+        for (word_index, &word) in row.iter().enumerate() {
+            let mut bits = word;
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                set.insert(self.variables[word_index * 64 + bit].clone());
+                bits &= bits - 1;
+            }
+        }
+        set
+    }
+}
+
+/// Solves liveness and returns the facts of every block, with the seed of a
+/// block in its live-out set.
+///
+/// The fixpoint is the one that [`SeededLivenessProblem`] reaches: the
+/// live-in set of a block is what it reads before it writes, joined with
+/// what its live-out set and its seed hold minus what it writes. Only the
+/// representation differs. Each block holds a row of words with one bit for
+/// each variable that the graph or a seed names, so a join or a comparison
+/// costs a few word operations instead of a set rebuild.
+fn solve<I: InstrInfo, E>(
+    cfg: &Cfg<I, E>,
+    live_out: impl Fn(BlockId) -> Vec<I::Variable>,
+) -> Facts<BTreeSet<I::Variable>> {
+    let bound = cfg.block_bound();
+    let mut seeds: Vec<Vec<I::Variable>> = alloc::vec![Vec::new(); bound];
+    let mut variables = Vec::new();
+    for block in cfg.block_ids() {
+        let seed = live_out(block);
+        variables.extend(seed.iter().cloned());
+        seeds[block.index()] = seed;
+        for instruction in cfg.block(block).instructions() {
+            variables.extend(instruction.uses().iter().cloned());
+            variables.extend(instruction.defs().iter().cloned());
+        }
+    }
+    variables.sort();
+    variables.dedup();
+    let words = variables.len().div_ceil(64);
+    let universe = Universe { variables };
+    let row = |block: usize| block * words..(block + 1) * words;
+
+    // The upward-exposed reads, the writes, and the seed of each block.
+    let mut reads = alloc::vec![0u64; bound * words];
+    let mut writes = alloc::vec![0u64; bound * words];
+    let mut seeded = alloc::vec![0u64; bound * words];
+    for block in cfg.block_ids() {
+        let index = block.index();
+        for variable in &seeds[index] {
+            universe.insert(&mut seeded[row(index)], variable);
+        }
+        for instruction in cfg.block(block).instructions().iter().rev() {
+            for variable in instruction.defs() {
+                universe.remove(&mut reads[row(index)], variable);
+                universe.insert(&mut writes[row(index)], variable);
+            }
+            for variable in instruction.uses() {
+                universe.insert(&mut reads[row(index)], variable);
+            }
+        }
+    }
+
+    let mut live_in = alloc::vec![0u64; bound * words];
+    let mut flowing_out = alloc::vec![0u64; bound * words];
+    let mut queued = alloc::vec![false; bound];
+    let mut worklist: Vec<BlockId> = cfg.block_ids().collect();
+    for block in &worklist {
+        queued[block.index()] = true;
+    }
+    let mut next = alloc::vec![0u64; words];
+    let mut steps = 0;
+    while let Some(block) = worklist.pop() {
+        steps += 1;
+        let index = block.index();
+        queued[index] = false;
+        let out = &mut flowing_out[row(index)];
+        out.fill(0);
+        for successor in cfg.successors(block) {
+            for (word, from) in out.iter_mut().zip(&live_in[row(successor.index())]) {
+                *word |= *from;
+            }
+        }
+        for (position, word) in next.iter_mut().enumerate() {
+            let at = index * words + position;
+            *word = ((out[position] | seeded[at]) & !writes[at]) | reads[at];
+        }
+        if next[..] != live_in[row(index)] {
+            live_in[row(index)].copy_from_slice(&next);
+            for predecessor in cfg.predecessors(block) {
+                if !queued[predecessor.index()] {
+                    queued[predecessor.index()] = true;
+                    worklist.push(predecessor);
+                }
+            }
+        }
+    }
+
+    let mut block_in = alloc::vec![BTreeSet::new(); bound];
+    let mut block_out = alloc::vec![BTreeSet::new(); bound];
+    for block in cfg.block_ids() {
+        let index = block.index();
+        for (word, seed) in flowing_out[row(index)].iter_mut().zip(&seeded[row(index)]) {
+            *word |= *seed;
+        }
+        block_in[index] = universe.set(&live_in[row(index)]);
+        block_out[index] = universe.set(&flowing_out[row(index)]);
+    }
+    Facts::from_parts(block_in, block_out, steps)
+}
+
 /// Result of a liveness analysis with convenient query methods.
 ///
 /// # Examples
@@ -162,16 +297,9 @@ pub struct Liveness<V> {
 
 impl<V: VariableId> Liveness<V> {
     /// Run liveness analysis on the given CFG.
-    ///
-    /// # Panics
-    ///
-    /// Panics only if the unbounded fixpoint solve reports a step-limit
-    /// error, which the unbounded configuration cannot produce.
     #[must_use]
     pub fn compute<I: InstrInfo<Variable = V>, E>(cfg: &Cfg<I, E>) -> Self {
-        let result = fixpoint::solve_problem(cfg, &LivenessProblem)
-            .expect("an unbounded solve cannot exceed a step limit");
-        Self { inner: result }
+        Self::compute_with_exits(cfg, |_| Vec::new())
     }
 
     /// Run liveness seeded with what leaves each block.
@@ -186,27 +314,14 @@ impl<V: VariableId> Liveness<V> {
     ///
     /// Every query on the result accounts for the seed, including
     /// [`live_out`](Self::live_out) and the per-instruction sets.
-    ///
-    /// # Panics
-    ///
-    /// Panics only if the unbounded fixpoint solve reports a step-limit
-    /// error, which the unbounded configuration cannot produce.
     #[must_use]
     pub fn compute_with_exits<I: InstrInfo<Variable = V>, E>(
         cfg: &Cfg<I, E>,
         live_out: impl Fn(BlockId) -> Vec<V>,
     ) -> Self {
-        let problem = SeededLivenessProblem::new(&live_out);
-        let mut inner = fixpoint::solve_problem(cfg, &problem)
-            .expect("an unbounded solve cannot exceed a step limit");
-        // The seed joins the transfer, not the meet, so the solved
-        // out-facts do not carry it. Report what each transfer saw.
-        for block in cfg.block_ids() {
-            let mut fact = inner.fact_out(block).clone();
-            fact.extend(live_out(block));
-            inner.set_fact_out(block, fact);
+        Self {
+            inner: solve(cfg, live_out),
         }
-        Self { inner }
     }
 
     /// Variables live at the **entry** of a block.
@@ -298,6 +413,7 @@ impl<V: VariableId> Liveness<V> {
 mod tests {
     use super::*;
     use crate::builder::CfgBuilder;
+    use crate::dataflow::fixpoint;
     use crate::flow::FlowEffect;
     use crate::test_util::{df_def as def, df_ff, df_use as use_, df_with_effect};
     use alloc::vec;
@@ -455,5 +571,51 @@ mod tests {
         assert!(all.contains(&1));
         // r2 is defined but never used, so not live.
         assert!(!all.contains(&2));
+    }
+
+    /// A loop that carries one variable around its back edge, with a
+    /// variable above 64 so that the rows hold more than one word, and a
+    /// seed at the exit. The solve must reach the fixpoint of the problem.
+    #[test]
+    fn liveness_matches_the_seeded_problem_across_a_loop() {
+        use crate::edge::EdgeKind;
+        use crate::test_util::{DfInst, df_copy};
+
+        let mut cfg: Cfg<DfInst> = Cfg::new();
+        let head = cfg.new_block();
+        let body = cfg.new_block();
+        let exit = cfg.new_block();
+        cfg.block_mut(cfg.entry()).push(def("def_r0", 0));
+        cfg.block_mut(cfg.entry()).push(def("def_r70", 70));
+        cfg.block_mut(head).push(use_("use_r0", 0));
+        cfg.block_mut(body).push(df_copy("copy_r1_r70", 1, 70));
+        cfg.block_mut(body).push(df_copy("copy_r0_r1", 0, 1));
+        cfg.block_mut(exit).push(def("def_r2", 2));
+        cfg.add_edge(cfg.entry(), head, EdgeKind::Fallthrough);
+        cfg.add_edge(head, body, EdgeKind::ConditionalTrue);
+        cfg.add_edge(head, exit, EdgeKind::ConditionalFalse);
+        cfg.add_edge(body, head, EdgeKind::Fallthrough);
+        let seed = |block| {
+            if block == exit {
+                vec![2_u16, 99]
+            } else {
+                alloc::vec::Vec::new()
+            }
+        };
+
+        let problem = SeededLivenessProblem::new(seed);
+        let expected = fixpoint::solve_problem(&cfg, &problem).unwrap();
+        let live = Liveness::compute_with_exits(&cfg, seed);
+        for block in cfg.block_ids() {
+            assert_eq!(live.live_in(block), expected.fact_in(block), "{block}");
+            let mut out = expected.fact_out(block).clone();
+            out.extend(seed(block));
+            assert_eq!(live.live_out(block), &out, "{block}");
+        }
+        assert!(live.is_live_in(&70, head), "the loop carries r70");
+        assert!(
+            live.is_live_in(&99, exit),
+            "a seed nothing defines stays live"
+        );
     }
 }

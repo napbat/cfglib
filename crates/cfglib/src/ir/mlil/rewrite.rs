@@ -10,9 +10,12 @@ use crate::dataflow::liveness::Liveness;
 
 use super::variable::{typed, unchanged};
 use super::{
-    Dialect, Error, Function, FunctionBuilder, Instruction, InstructionId, Result, TypedVariable,
-    VariableId, VerifyDialect,
+    Dialect, Error, Function, Instruction, InstructionId, Result, TypedVariable, VariableId,
+    VerifyDialect,
 };
+
+/// The replacement of each replaced instruction, in identity order.
+type Replacements<D> = Vec<(InstructionId, InstructionReplacement<D>)>;
 
 /// A complete replacement for one existing instruction.
 ///
@@ -71,7 +74,7 @@ pub struct InstructionRewrite<D: Dialect> {
 }
 
 impl<D: VerifyDialect> Function<D> {
-    /// Rebuilds the function with selected instructions replaced in place.
+    /// Returns the function with selected instructions replaced in place.
     ///
     /// Blocks, edges, exception regions, variables, signatures, instruction
     /// identities, graph positions, and provenance are preserved exactly.
@@ -81,7 +84,7 @@ impl<D: VerifyDialect> Function<D> {
     /// # Errors
     ///
     /// Returns an error when a replacement refers to an undeclared variable
-    /// or the rebuilt function fails structural or dialect verification.
+    /// or the changed function fails structural or dialect verification.
     pub fn rewrite_instructions(
         &self,
         mut replacement: impl FnMut(&Instruction<D>) -> Option<InstructionReplacement<D>>,
@@ -89,6 +92,28 @@ impl<D: VerifyDialect> Function<D> {
         self.rewrite_instructions_with_variables(core::iter::empty(), |instruction, _| {
             replacement(instruction)
         })
+    }
+
+    /// Replaces selected instructions of this function and returns how many
+    /// it replaced.
+    ///
+    /// `replacement` sees the function and then each instruction in identity
+    /// order. Every identity, the graph, the signature, and the provenance
+    /// stay. When `replacement` replaces nothing, the function does no other
+    /// work. Replacement metadata is recomputed from its operation through
+    /// the dialect contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a replacement refers to an undeclared variable
+    /// or the changed function fails structural or dialect verification. The
+    /// function then keeps its old instructions.
+    pub fn replace_instructions(
+        &mut self,
+        mut replacement: impl FnMut(&Self, &Instruction<D>) -> Option<InstructionReplacement<D>>,
+    ) -> Result<usize> {
+        let replacements = self.replacements(|instruction| replacement(self, instruction))?;
+        self.apply_replacements(replacements)
     }
 
     /// Rebuilds selected instructions after adding declared variables.
@@ -100,69 +125,128 @@ impl<D: VerifyDialect> Function<D> {
     /// refinement to add an argument or clobber location that the original
     /// machine lift never read, without referring to an undeclared operand.
     ///
+    /// `replacement` sees the instructions in identity order. When it
+    /// replaces nothing and no variable is added, the function comes back
+    /// unchanged without a check.
+    ///
     /// # Errors
     /// Returns an error when the added variables exceed the identity space,
-    /// a replacement uses an undeclared variable, or the rebuilt function
+    /// a replacement uses an undeclared variable, or the changed function
     /// fails structural or dialect verification.
     pub fn rewrite_instructions_with_variables(
         &self,
         additional: impl IntoIterator<Item = (D::VariableRole, Option<D::NativeVariable>)>,
         mut replacement: impl FnMut(&Instruction<D>, &[VariableId]) -> Option<InstructionReplacement<D>>,
     ) -> Result<InstructionRewrite<D>> {
-        let mut builder = FunctionBuilder::<D>::new(self.source().clone());
-        for variable in self.variables() {
-            let rebuilt =
-                builder.declare_variable(variable.role.clone(), variable.native.clone())?;
-            debug_assert_eq!(rebuilt, variable.id);
-        }
-        let added_variables = additional
-            .into_iter()
-            .map(|(role, native)| builder.declare_variable(role, native))
+        let additional: Vec<_> = additional.into_iter().collect();
+        // The added variables follow the existing ones, so their identities
+        // are known before any replacement names them.
+        let added_variables = (self.variables().len()..self.variables().len() + additional.len())
+            .map(|index| {
+                u32::try_from(index).map(VariableId::from_raw).map_err(|_| {
+                    Error::InvalidConstruction("variable identity exceeds u32::MAX".into())
+                })
+            })
             .collect::<Result<Vec<_>>>()?;
-        builder.copy_blocks(self.cfg());
+        let replacements =
+            self.replacements(|instruction| replacement(instruction, &added_variables))?;
+        let mut function = self.clone();
+        for ((role, native), &id) in additional.into_iter().zip(&added_variables) {
+            function
+                .variables
+                .push(super::Variable { id, role, native });
+        }
+        let rewritten = if replacements.is_empty() && added_variables.is_empty() {
+            0
+        } else if replacements.is_empty() {
+            let report = function.verify();
+            if !report.is_ok() {
+                return Err(report.into());
+            }
+            0
+        } else {
+            function.apply_replacements(replacements)?
+        };
+        Ok(InstructionRewrite {
+            function,
+            rewritten,
+            added_variables,
+        })
+    }
 
-        let mut rewritten = 0usize;
+    /// Returns the replacement of each instruction that `replacement`
+    /// replaces, in identity order.
+    fn replacements(
+        &self,
+        mut replacement: impl FnMut(&Instruction<D>) -> Option<InstructionReplacement<D>>,
+    ) -> Result<Replacements<D>> {
+        let mut replacements = Vec::new();
         for index in 0..self.instruction_count() {
             let raw = u32::try_from(index).map_err(|_| {
                 Error::InvalidConstruction("instruction identity exceeds u32::MAX".into())
             })?;
             let id = InstructionId::from_raw(raw);
-            let point = self
-                .instruction_point(id)
-                .ok_or_else(|| Error::InvalidConstruction("missing instruction point".into()))?;
             let instruction = self
                 .instruction(id)
                 .ok_or_else(|| Error::InvalidConstruction("missing indexed instruction".into()))?;
-            let (operation, uses, defs, may_throw) =
-                if let Some(replacement) = replacement(instruction, &added_variables) {
-                    rewritten += 1;
-                    (
-                        replacement.operation,
-                        replacement.uses,
-                        replacement.defs,
-                        replacement.may_throw,
-                    )
-                } else {
-                    (
-                        instruction.operation().clone(),
-                        typed::<D>(instruction.uses(), instruction.use_types(), unchanged),
-                        typed::<D>(instruction.defs(), instruction.def_types(), unchanged),
-                        instruction.may_throw(),
-                    )
-                };
-            let rebuilt =
-                builder.append_instruction(point.block, operation, uses, defs, may_throw, None)?;
-            debug_assert_eq!(rebuilt, id);
+            if let Some(replaced) = replacement(instruction) {
+                replacements.push((id, replaced));
+            }
         }
+        Ok(replacements)
+    }
 
-        builder.copy_structure(self.cfg())?;
-        builder.copy_metadata(self.signature().clone(), self.provenance())?;
-
-        Ok(InstructionRewrite {
-            function: builder.finish()?,
-            rewritten,
-            added_variables,
-        })
+    /// Puts each replacement at the position of its instruction and
+    /// verifies the result.
+    ///
+    /// When the result does not verify, every replaced instruction returns.
+    fn apply_replacements(&mut self, replacements: Replacements<D>) -> Result<usize> {
+        if replacements.is_empty() {
+            return Ok(0);
+        }
+        let count = replacements.len();
+        let mut replaced = Vec::with_capacity(count);
+        let mut failure = None;
+        for (id, replacement) in replacements {
+            let Some(point) = self.instruction_point(id) else {
+                failure = Some(Error::InvalidConstruction(
+                    "missing instruction point".into(),
+                ));
+                break;
+            };
+            let Some(slot) = self
+                .cfg
+                .block_mut(point.block)
+                .instructions_mut()
+                .get_mut(point.inst_idx)
+            else {
+                failure = Some(Error::InvalidConstruction(
+                    "missing indexed instruction".into(),
+                ));
+                break;
+            };
+            let (operation, uses, defs, may_throw) = replacement.into_parts();
+            let fresh = Instruction::new(id, operation, uses, defs, may_throw);
+            replaced.push((point, core::mem::replace(slot, fresh)));
+        }
+        let failure = failure.or_else(|| {
+            let report = self.verify();
+            (!report.is_ok()).then(|| report.into())
+        });
+        let Some(failure) = failure else {
+            return Ok(count);
+        };
+        for (point, old) in replaced {
+            if let Some(slot) = self
+                .cfg
+                .block_mut(point.block)
+                .instructions_mut()
+                .get_mut(point.inst_idx)
+            {
+                *slot = old;
+            }
+        }
+        Err(failure)
     }
 
     /// Returns the function with the unread definitions of the selected
@@ -217,11 +301,56 @@ impl<D: VerifyDialect> Function<D> {
         of: impl Fn(&Instruction<D>) -> bool,
         live_out: impl Fn(BlockId) -> Vec<VariableId>,
     ) -> Result<(Self, usize)> {
+        let (replacements, dropped) = self.unread_definitions(of, live_out)?;
+        let mut function = self.clone();
+        function.apply_replacements(replacements)?;
+        Ok((function, dropped))
+    }
+
+    /// [`Self::drop_unread_definitions_with_exits`] on this function:
+    /// drops the definitions and returns how many it dropped.
+    ///
+    /// A function with nothing to drop does no other work.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the changed function fails structural or
+    /// dialect verification. The function then stays as it was.
+    pub fn drop_unread_definitions_with_exits_in_place(
+        &mut self,
+        of: impl Fn(&Instruction<D>) -> bool,
+        live_out: impl Fn(BlockId) -> Vec<VariableId>,
+    ) -> Result<usize> {
+        let (replacements, dropped) = self.unread_definitions(of, live_out)?;
+        self.apply_replacements(replacements)?;
+        Ok(dropped)
+    }
+
+    /// Returns the replacement of each instruction that `of` selects and
+    /// that defines something that no reader and no exit observes, and the
+    /// number of definitions that the replacements drop.
+    ///
+    /// The liveness runs only when some selected definition has no reader.
+    fn unread_definitions(
+        &self,
+        of: impl Fn(&Instruction<D>) -> bool,
+        live_out: impl Fn(BlockId) -> Vec<VariableId>,
+    ) -> Result<(Replacements<D>, usize)> {
         let read = read_variables(self);
+        let candidate = |instruction: &Instruction<D>| {
+            of(instruction)
+                && instruction
+                    .defs()
+                    .iter()
+                    .any(|defined| !read.contains(defined))
+        };
+        if !self.instructions().any(candidate) {
+            return Ok((Vec::new(), 0));
+        }
         let observed = live_definitions(self, live_out);
         let mut dropped = 0usize;
-        let rewrite = self.rewrite_instructions(|instruction| {
-            if !of(instruction) {
+        let replacements = self.replacements(|instruction| {
+            if !candidate(instruction) {
                 return None;
             }
             let kept: Vec<TypedVariable<D>> = instruction
@@ -244,7 +373,7 @@ impl<D: VerifyDialect> Function<D> {
                 instruction.may_throw(),
             ))
         })?;
-        Ok((rewrite.function, dropped))
+        Ok((replacements, dropped))
     }
 }
 

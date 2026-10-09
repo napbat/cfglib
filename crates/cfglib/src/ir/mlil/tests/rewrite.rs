@@ -500,3 +500,24 @@ fn an_exit_seed_keeps_the_definition_it_names() {
         &[read]
     );
 }
+
+#[test]
+fn a_replacement_that_fails_verification_keeps_the_old_instructions() {
+    let (mut function, [_, _, _, loaded]) = clobbering_function();
+    let original = function.clone();
+    let typed = |variable| TypedVariable::new(variable, Type::Integer);
+    let undeclared = VariableId::from_raw(99);
+    let result = function.replace_instructions(|_, instruction| {
+        (!matches!(instruction.operation(), Operation::Return)).then(|| {
+            InstructionReplacement::new(
+                Operation::Copy,
+                vec![typed(undeclared)],
+                vec![typed(loaded)],
+                false,
+            )
+        })
+    });
+
+    assert!(result.is_err(), "an undeclared variable fails verification");
+    assert_eq!(function, original, "every replaced instruction returns");
+}

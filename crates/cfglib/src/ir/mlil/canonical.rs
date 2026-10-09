@@ -25,8 +25,8 @@ use crate::{BlockId, Cfg, CopyPropagationStats, DeadCode, FlowControl, FlowEffec
 
 use super::variable::{typed, unchanged};
 use super::{
-    AnalysisDialect, EntityId, Function, FunctionBuilder, Instruction, InstructionId, Result,
-    VariableId, VerifyDialect,
+    AnalysisDialect, EntityId, Function, FunctionBuilder, Instruction, InstructionId,
+    ProvenanceMap, Result, VariableId, VerifyDialect,
 };
 
 impl<D: VerifyDialect> Function<D> {
@@ -54,30 +54,29 @@ impl<D: VerifyDialect> Function<D> {
         &self,
         live_out: impl Fn(BlockId) -> Vec<VariableId>,
     ) -> Result<(Self, usize)> {
-        let dead = DeadCode::compute_with_exits(&self.cfg, live_out);
-        let dropped: BTreeSet<InstructionId> = dead
-            .instructions
-            .iter()
-            .filter_map(|point| {
-                let instruction = self
-                    .cfg
-                    .block(point.block)
-                    .instructions()
-                    .get(point.inst_idx)?;
-                (instruction.effects().is_empty() && !instruction.may_throw())
-                    .then(|| instruction.id())
-            })
-            .collect();
+        let dropped = self.dead_instructions(live_out);
         if dropped.is_empty() {
             return Ok((self.clone(), 0));
         }
-        let function = rebuild(
-            self,
-            &self.cfg,
-            |instruction| !dropped.contains(&instruction.id()),
-            unchanged,
-        )?;
+        let function = self.without(&dropped)?;
         Ok((function, dropped.len()))
+    }
+
+    /// [`Self::eliminate_dead_code`] on this function: removes the dead
+    /// instructions and returns how many it removed.
+    ///
+    /// The kept instructions are numbered again densely in block order, as
+    /// the rebuild of [`Self::eliminate_dead_code`] numbers them. A function
+    /// with nothing to remove does no other work.
+    pub fn eliminate_dead_code_in_place(
+        &mut self,
+        live_out: impl Fn(BlockId) -> Vec<VariableId>,
+    ) -> usize {
+        let dropped = self.dead_instructions(live_out);
+        if !dropped.is_empty() {
+            self.remove(&dropped);
+        }
+        dropped.len()
     }
 
     /// Returns the function without the instructions that `remove`
@@ -105,6 +104,65 @@ impl<D: VerifyDialect> Function<D> {
         &self,
         remove: impl Fn(&Instruction<D>) -> bool,
     ) -> Result<(Self, usize)> {
+        let removed = self.removable(remove)?;
+        if removed.is_empty() {
+            return Ok((self.clone(), 0));
+        }
+        let function = self.without(&removed)?;
+        Ok((function, removed.len()))
+    }
+
+    /// [`Self::remove_instructions`] on this function: removes the
+    /// selected instructions and returns how many it removed.
+    ///
+    /// The kept instructions are numbered again densely in block order, as
+    /// the rebuild of [`Self::remove_instructions`] numbers them. A function
+    /// with nothing to remove does no other work.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidConstruction`](super::Error::InvalidConstruction)
+    /// when a selected instruction transfers control or a kept instruction
+    /// reads one of its definitions that it does not read itself. The
+    /// function then stays as it was.
+    pub fn remove_instructions_in_place(
+        &mut self,
+        remove: impl Fn(&Instruction<D>) -> bool,
+    ) -> Result<usize> {
+        let removed = self.removable(remove)?;
+        if !removed.is_empty() {
+            self.remove(&removed);
+        }
+        Ok(removed.len())
+    }
+
+    /// Returns the instructions without effects that define only what no
+    /// reader and no exit under `live_out` observes.
+    fn dead_instructions(
+        &self,
+        live_out: impl Fn(BlockId) -> Vec<VariableId>,
+    ) -> BTreeSet<InstructionId> {
+        let dead = DeadCode::compute_with_exits(&self.cfg, live_out);
+        dead.instructions
+            .iter()
+            .filter_map(|point| {
+                let instruction = self
+                    .cfg
+                    .block(point.block)
+                    .instructions()
+                    .get(point.inst_idx)?;
+                (instruction.effects().is_empty() && !instruction.may_throw())
+                    .then(|| instruction.id())
+            })
+            .collect()
+    }
+
+    /// Returns the instructions that `remove` selects, after the checks of
+    /// [`Self::remove_instructions`].
+    fn removable(
+        &self,
+        remove: impl Fn(&Instruction<D>) -> bool,
+    ) -> Result<BTreeSet<InstructionId>> {
         let mut removed = BTreeSet::new();
         let mut read = BTreeSet::new();
         for block in self.cfg.blocks() {
@@ -126,7 +184,7 @@ impl<D: VerifyDialect> Function<D> {
             }
         }
         if removed.is_empty() {
-            return Ok((self.clone(), 0));
+            return Ok(removed);
         }
         for block in self.cfg.blocks() {
             for instruction in block.instructions() {
@@ -143,13 +201,62 @@ impl<D: VerifyDialect> Function<D> {
                 }
             }
         }
-        let function = rebuild(
+        Ok(removed)
+    }
+
+    /// Rebuilds the function without the instructions of `removed`.
+    fn without(&self, removed: &BTreeSet<InstructionId>) -> Result<Self> {
+        rebuild(
             self,
             &self.cfg,
             |instruction| !removed.contains(&instruction.id()),
             unchanged,
-        )?;
-        Ok((function, removed.len()))
+        )
+    }
+
+    /// Removes the instructions of `removed` and numbers the rest densely in
+    /// block order, as a rebuild of the function numbers them.
+    ///
+    /// The provenance of a removed instruction goes with it. The graph, the
+    /// variables, the signature, and every other correspondence stay. A
+    /// caller removes only an instruction that transfers no control and
+    /// whose definitions no kept instruction reads, so the function still
+    /// verifies.
+    fn remove(&mut self, removed: &BTreeSet<InstructionId>) {
+        let mut renumbered: Vec<Option<InstructionId>> =
+            alloc::vec![None; self.instruction_count()];
+        let mut next = 0usize;
+        let blocks: Vec<BlockId> = self.cfg.block_ids().collect();
+        for block in blocks {
+            let instructions = self.cfg.block_mut(block).instructions_mut();
+            instructions.retain(|instruction| !removed.contains(&instruction.id()));
+            for instruction in instructions.iter_mut() {
+                // The kept identities number fewer than the old ones, which
+                // fit the identity space.
+                let id = InstructionId::from_raw(u32::try_from(next).unwrap_or(u32::MAX));
+                next += 1;
+                if let Some(slot) = renumbered.get_mut(instruction.id().index()) {
+                    *slot = Some(id);
+                }
+                instruction.set_id(id);
+            }
+        }
+        self.instruction_points = alloc::vec![None; next];
+        self.reindex_instructions();
+        let mut provenance = ProvenanceMap::new(self.provenance.source().clone());
+        for entry in self.provenance.entries() {
+            let entity = match entry.entity {
+                EntityId::Instruction(id) => match renumbered.get(id.index()).copied().flatten() {
+                    Some(id) => EntityId::Instruction(id),
+                    None => continue,
+                },
+                other => other,
+            };
+            // A stored entry has a valid span, so the insert cannot fail.
+            let _ = provenance.insert(entry.source.clone(), entity);
+        }
+        self.provenance = provenance;
+        debug_assert!(self.verify().is_ok(), "a removal keeps the function valid");
     }
 }
 
