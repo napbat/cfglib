@@ -279,6 +279,75 @@ fn branch_with_single_successor_is_rejected() {
     assert!(builder.finish().is_err());
 }
 
+/// A branch with one internal edge, its other side declared as an exit.
+fn branch_with_one_internal_edge() -> (FunctionBuilder<TestDialect>, crate::BlockId, crate::BlockId)
+{
+    let mut builder = FunctionBuilder::<TestDialect>::new("test".into());
+    let entry = builder.entry();
+    let head = builder.new_block("head");
+    let next = builder.new_block("next");
+    builder.add_edge(entry, head, Edge::Entry).unwrap();
+    builder.add_edge(head, next, Edge::False).unwrap();
+    builder
+        .append(
+            head,
+            Statement::Branch {
+                condition: read(9, &[0], ScalarType::U32),
+            },
+            None,
+        )
+        .unwrap();
+    (builder, head, next)
+}
+
+/// A declared exit is one of a branch's two successors: the graph
+/// completes with no placeholder block or edge standing for it.
+#[test]
+fn a_declared_exit_completes_a_branch() {
+    let (builder, head, next) = branch_with_one_internal_edge();
+    let function = builder
+        .finish_with_exits(&[(head, Edge::True), (next, Edge::Fall)])
+        .expect("the taken exit and the leaf exit complete the graph");
+    assert_eq!(
+        function.cfg().block_count(),
+        3,
+        "no block stands for an exit"
+    );
+    assert_eq!(function.cfg().outgoing(head).count(), 1);
+}
+
+/// Exits only add the successors they declare: a branch still needs two,
+/// and an exit must name a non-root block with normal, non-entry metadata,
+/// declared once, never out of a return.
+#[test]
+fn malformed_exits_are_rejected() {
+    let (builder, head, _) = branch_with_one_internal_edge();
+    assert!(
+        builder.finish_with_exits(&[]).is_err(),
+        "one side is missing"
+    );
+    for exits in [
+        vec![(head, Edge::True), (head, Edge::True)],
+        vec![(head, Edge::Unwind)],
+        vec![(head, Edge::Entry)],
+    ] {
+        let (builder, _, _) = branch_with_one_internal_edge();
+        assert!(builder.finish_with_exits(&exits).is_err(), "{exits:?}");
+    }
+    let (builder, _, _) = branch_with_one_internal_edge();
+    let root = builder.entry();
+    assert!(builder.finish_with_exits(&[(root, Edge::True)]).is_err());
+
+    let mut builder = FunctionBuilder::<TestDialect>::new("test".into());
+    let entry = builder.entry();
+    let body = builder.new_block("body");
+    builder.add_edge(entry, body, Edge::Entry).unwrap();
+    builder
+        .append(body, Statement::Return { values: Vec::new() }, None)
+        .unwrap();
+    assert!(builder.finish_with_exits(&[(body, Edge::Fall)]).is_err());
+}
+
 /// Unreachable blocks are legal and lift faithfully — dead code after a
 /// return or throw is source-faithful in managed bytecode.
 #[test]

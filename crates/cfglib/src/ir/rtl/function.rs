@@ -282,6 +282,28 @@ impl<D: Dialect> FunctionBuilder<D> {
     /// or a block with exceptional edges lacks exactly one throwing
     /// statement to own them.
     pub fn finish(self) -> Result<Function<D>> {
+        self.finish_with_exits(&[])
+    }
+
+    /// Completes a graph that control also leaves through declared exits,
+    /// validating its control-flow structure with each exit counted as
+    /// one outgoing normal edge of its block.
+    ///
+    /// An exit names a block and the normal edge metadata control
+    /// continues with to a successor outside the graph — an instruction
+    /// body's exits continue to the instruction's successor. The graph
+    /// gains no block or edge for an exit, so the caller keeps the exits
+    /// with the returned function; without them a branch block may hold
+    /// fewer than two edges. [`Self::finish`] is this with no exits.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::finish`], counting exits as normal
+    /// edges, and an error when an exit names the synthetic root or a
+    /// block the graph does not hold, carries entry or exceptional
+    /// metadata, or repeats both the block and the metadata of an earlier
+    /// exit.
+    pub fn finish_with_exits(self, exits: &[(BlockId, D::Edge)]) -> Result<Function<D>> {
         for block_id in self.cfg.block_ids() {
             let block = self.cfg.block(block_id);
             let statements = block.instructions();
@@ -303,6 +325,23 @@ impl<D: Dialect> FunctionBuilder<D> {
             } else {
                 normal[source] += 1;
             }
+        }
+        for (index, (block, metadata)) in exits.iter().enumerate() {
+            self.require_region_block(*block, "exit block")?;
+            if D::is_entry_edge(metadata) || D::edge_kind(metadata).is_exceptional() {
+                return Err(Error::InvalidConstruction(format!(
+                    "exit of block {block} carries entry or exceptional metadata"
+                )));
+            }
+            if exits[..index]
+                .iter()
+                .any(|(other, earlier)| other == block && earlier == metadata)
+            {
+                return Err(Error::InvalidConstruction(format!(
+                    "exit of block {block} is declared twice"
+                )));
+            }
+            normal[block.index()] += 1;
         }
         for block_id in self.cfg.block_ids() {
             let block = self.cfg.block(block_id);

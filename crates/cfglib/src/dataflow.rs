@@ -166,10 +166,11 @@ pub type UseSite = ProgramPoint;
 /// instruction rather than the block's completed state. Every other edge, and
 /// an unwind out of a block that reports no throwing instruction, departs
 /// after the block's last instruction.
-pub(crate) fn departs_before_throws<I: InstrInfo, E>(
-    cfg: &Cfg<I, E>,
-    edge: CfgEdge<'_, E>,
-) -> bool {
+///
+/// This classifies the departure point for variable definitions. An analysis
+/// of memory must also include writes that can commit before an exception.
+#[must_use]
+pub fn departs_before_throws<I: InstrInfo, E>(cfg: &Cfg<I, E>, edge: CfgEdge<'_, E>) -> bool {
     edge.kind() == EdgeKind::ExceptionUnwind
         && cfg
             .block(edge.source())

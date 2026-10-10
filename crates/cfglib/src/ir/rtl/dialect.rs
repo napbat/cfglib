@@ -85,6 +85,25 @@ pub trait Dialect: Vocabulary {
     /// Returns a compact stable mnemonic for an effect operation.
     fn effect_mnemonic(operation: &Self::EffectOp) -> &str;
 
+    /// Returns whether a normal completion of `operation` always writes
+    /// every lane of its write place at index `output`.
+    ///
+    /// `output` indexes the statement's
+    /// [`writes`](super::Statement::Effect::writes), not a lane. A write
+    /// that only some completions produce — under a guard the operation
+    /// evaluates, or in one of several outcome alternatives — is not
+    /// definite: a path through such a statement may leave the place
+    /// holding whatever it held before, or nothing. A transfer's
+    /// assignments are always definite and do not consult this.
+    ///
+    /// The default promises nothing, which is always sound: a consumer
+    /// checking that storage is written before it is read then refuses a
+    /// read the dialect has not vouched for.
+    fn effect_output_is_definite(operation: &Self::EffectOp, output: usize) -> bool {
+        let _ = (operation, output);
+        false
+    }
+
     /// Maps caller edge metadata to cfglib's structural edge kind.
     fn edge_kind(edge: &Self::Edge) -> EdgeKind;
 
