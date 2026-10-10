@@ -160,7 +160,15 @@ impl<D: Dialect> FunctionBuilder<D> {
         }
     }
 
-    fn copy_cleanups(&mut self, cleanups: &[Cleanup]) -> Result<()> {
+    /// Copies cleanup resume blocks and continuation routes.
+    ///
+    /// Register the regions and blocks before copying their cleanup routes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a handler or continuation block does not belong
+    /// to this function.
+    pub fn copy_cleanups(&mut self, cleanups: &[Cleanup]) -> Result<()> {
         for cleanup in cleanups {
             if let Some(resume_from) = cleanup.resume_from {
                 self.set_cleanup_resume(cleanup.handler, resume_from)?;
