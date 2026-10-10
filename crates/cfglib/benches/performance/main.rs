@@ -1,3 +1,5 @@
+//! Benchmarks: performance.
+
 use std::alloc::System;
 #[cfg(cfglib_bench_alloc)]
 use std::alloc::{GlobalAlloc, Layout};
@@ -52,7 +54,10 @@ use structural_oracles::{
 
 // A linear registry keeps each measured operation next to its semantic oracle,
 // which is easier to audit than distributing benchmark definitions by fixture.
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "benchmark driver lists every scenario in one place"
+)]
 fn main() {
     const NODE_COUNT: usize = 4_096;
     const BUILDER_REGION_COUNT: usize = 2_048;

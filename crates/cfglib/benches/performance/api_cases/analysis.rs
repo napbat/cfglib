@@ -72,14 +72,14 @@ fn register_metrics_and_patterns(suite: &mut BenchmarkSuite<'_>) {
         "api_detect_patterns",
         covers[detect_patterns],
         || detect_patterns(&graph),
-        |result: &Vec<_>| assert!(!result.is_empty())
+        |result: &Vec<_>| assert_ne!(result.as_slice(), [])
     );
     benchmark_case!(
         suite,
         "api_detect_cfg_patterns",
         covers[detect_cfg_patterns],
         || detect_cfg_patterns(&patterns),
-        |result: &Vec<_>| assert!(!result.is_empty())
+        |result: &Vec<_>| assert_ne!(result.as_slice(), [])
     );
 }
 

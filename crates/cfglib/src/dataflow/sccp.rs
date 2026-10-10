@@ -194,7 +194,7 @@ fn evaluate_phis<I: ConstantFolder>(
     for phi in &ssa.block(block).phis {
         let mut candidate = ConstValue::Top;
         for (predecessor, operand) in &phi.operands {
-            if executable_edges.contains(&(*predecessor, block)) {
+            if executable_edges.contains(&(predecessor.block, block)) {
                 candidate = candidate.meet_with(lattice_of(values, operand), I::meet_constants);
             }
         }

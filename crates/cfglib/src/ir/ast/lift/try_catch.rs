@@ -187,17 +187,17 @@ pub(super) fn lift_try_catch<'a, I, E, O>(
             &mut try_body,
             map,
         );
-        if let Some(next) = next {
-            if !state.is_visited(next) {
-                try_body.extend(lift_region(
-                    cfg,
-                    state,
-                    next,
-                    Some(&try_bound),
-                    continuation,
-                    map,
-                ));
-            }
+        if let Some(next) = next
+            && !state.is_visited(next)
+        {
+            try_body.extend(lift_region(
+                cfg,
+                state,
+                next,
+                Some(&try_bound),
+                continuation,
+                map,
+            ));
         }
     }
     // Protected successors the classified walk did not reach (for example

@@ -182,14 +182,14 @@ fn emit_tail_jump<I: Clone>(
 
     // Handle the fallthrough edge: emit a jump only if the layout
     // successor is not the fallthrough target.
-    if let Some(ft) = fallthrough {
-        if next_in_layout != Some(ft.target()) {
-            out.push(LinearInst {
-                inst: emitter.emit_jump(ft.target()),
-                block: id,
-                index: usize::MAX,
-            });
-        }
+    if let Some(ft) = fallthrough
+        && next_in_layout != Some(ft.target())
+    {
+        out.push(LinearInst {
+            inst: emitter.emit_jump(ft.target()),
+            block: id,
+            index: usize::MAX,
+        });
     }
 }
 

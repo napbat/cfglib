@@ -36,4 +36,4 @@ pub(crate) use dataflow_inst::{
 pub(crate) use memory_inst::MemInst;
 pub(crate) use mock_inst::{MockInst, diamond_cfg, ff};
 pub(crate) use ud_inst::{UdInst, ud_inst};
-pub(crate) use vn_inst::{VnInst, vn_impure, vn_inst};
+pub(crate) use vn_inst::{VnInst, vn_impure, vn_inst, vn_throwing};

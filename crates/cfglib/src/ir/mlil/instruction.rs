@@ -128,6 +128,10 @@ impl<D: Dialect> InstrInfo for Instruction<D> {
     fn defs(&self) -> &[Self::Variable] {
         &self.defs
     }
+
+    fn may_unwind(&self) -> bool {
+        self.may_throw
+    }
 }
 
 impl<D: MemoryDialect> MemoryEventInfo for Instruction<D> {

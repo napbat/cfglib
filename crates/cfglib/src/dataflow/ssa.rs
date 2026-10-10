@@ -75,8 +75,16 @@ impl<V> SsaValue<V> {
 pub struct SsaPhi<V> {
     /// SSA value defined by the phi.
     pub result: SsaValue<V>,
-    /// Incoming SSA value for each CFG predecessor.
-    pub operands: Vec<(BlockId, SsaValue<V>)>,
+    /// Incoming values and their departure points in CFG predecessors, in
+    /// CFG predecessor order.
+    ///
+    /// An [`ExceptionUnwind`](crate::EdgeKind::ExceptionUnwind) edge
+    /// contributes one operand per throwing instruction of its source, named
+    /// by that instruction's index: the value before the instruction, so the
+    /// throwing instruction's own definitions never arrive. A normal
+    /// departure, and an unwind out of a block that reports no throwing
+    /// instruction, uses the predecessor's instruction count as its index.
+    pub operands: Vec<(ProgramPoint, SsaValue<V>)>,
 }
 
 /// SSA annotations for one source instruction.

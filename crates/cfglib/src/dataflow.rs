@@ -1,7 +1,7 @@
 //! Data flow analysis framework.
 //!
 //! Provides generic infrastructure for computing data flow properties
-//! over a [`Cfg`](crate::Cfg):
+//! over a [`Cfg`]:
 //!
 //! - **Reaching definitions** — which writes can reach a given point
 //! - **Liveness** — which variables are live at each point
@@ -38,7 +38,14 @@ pub mod sccp;
 pub mod ssa;
 pub mod ssa_destruction;
 
+extern crate alloc;
+use alloc::vec::Vec;
+
 use crate::block::BlockId;
+use crate::cfg::{Cfg, CfgEdge};
+use crate::edge::{Edge, EdgeId, EdgeKind};
+use crate::graph::edge_view::FilteredEdges;
+use crate::graph::traverse::{TraversalDirection, reachable};
 
 /// An IR-defined identity that participates in data-flow analysis.
 ///
@@ -75,6 +82,18 @@ pub trait InstrInfo {
 
     /// Variables that this instruction **writes** (defines).
     fn defs(&self) -> &[Self::Variable];
+
+    /// Whether execution can unwind before this instruction defines its outputs.
+    ///
+    /// An [`ExceptionUnwind`](crate::EdgeKind::ExceptionUnwind) successor
+    /// observes the values before this instruction, so its own definitions
+    /// never reach the handler. Normal successors observe its completed
+    /// definitions. Adapters with exceptional control flow must report every
+    /// possible unwind point: a block with an unwind successor and no such
+    /// instruction is treated as unwinding after its last instruction.
+    fn may_unwind(&self) -> bool {
+        false
+    }
 }
 
 /// Opt-in: instructions whose execution is predicated on a condition
@@ -138,3 +157,68 @@ impl core::fmt::Display for ProgramPoint {
 pub type DefSite = ProgramPoint;
 /// Alias for [`ProgramPoint`] used in use-site contexts.
 pub type UseSite = ProgramPoint;
+
+/// Whether `edge` leaves its source before a throwing instruction.
+///
+/// An [`ExceptionUnwind`](crate::EdgeKind::ExceptionUnwind) edge departs
+/// immediately before every source instruction that
+/// [`may_unwind`](InstrInfo::may_unwind), so it carries the state before that
+/// instruction rather than the block's completed state. Every other edge, and
+/// an unwind out of a block that reports no throwing instruction, departs
+/// after the block's last instruction.
+pub(crate) fn departs_before_throws<I: InstrInfo, E>(
+    cfg: &Cfg<I, E>,
+    edge: CfgEdge<'_, E>,
+) -> bool {
+    edge.kind() == EdgeKind::ExceptionUnwind
+        && cfg
+            .block(edge.source())
+            .instructions()
+            .iter()
+            .any(InstrInfo::may_unwind)
+}
+
+/// The first instruction of `block` before which an unwind can leave it.
+///
+/// `None` when no edge out of `block` [departs before a throwing
+/// instruction](departs_before_throws). Every definition at or after the
+/// answer may be missing on the unwind path.
+pub(crate) fn first_unwind_point<I: InstrInfo, E>(
+    cfg: &Cfg<I, E>,
+    block: BlockId,
+) -> Option<usize> {
+    let unwinds = cfg
+        .outgoing(block)
+        .any(|edge| cfg.edge(edge).kind() == EdgeKind::ExceptionUnwind);
+    if !unwinds {
+        return None;
+    }
+    cfg.block(block)
+        .instructions()
+        .iter()
+        .position(InstrInfo::may_unwind)
+}
+
+/// Per block, whether an unwind out of `block` reaches it without entering
+/// `block` again.
+///
+/// Such a block can be entered after `block` left before a throwing
+/// instruction, so it must not rely on anything `block` does from its
+/// [first unwind point](first_unwind_point) on. A path that re-enters
+/// `block` and unwinds again returns to the same successors, so excluding
+/// `block` loses no such path.
+pub(crate) fn unwind_reach<I, E>(cfg: &Cfg<I, E>, block: BlockId) -> Vec<bool> {
+    let without_block = FilteredEdges::new(cfg, |edge: EdgeId, _: &Edge<E>| {
+        cfg.edge(edge).target() != block
+    });
+    let unwind_successors = cfg.outgoing(block).filter_map(|edge| {
+        let edge = cfg.edge(edge);
+        let target = edge.target();
+        (edge.kind() == EdgeKind::ExceptionUnwind && target != block).then_some(target)
+    });
+    reachable(
+        &without_block,
+        unwind_successors,
+        TraversalDirection::Outgoing,
+    )
+}

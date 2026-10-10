@@ -179,12 +179,14 @@ pub enum MemoryUse {
         /// Event consuming the memory state.
         site: MemoryEventSite,
     },
-    /// One predecessor operand of a memory phi.
+    /// One incoming operand of a memory phi.
     Phi {
         /// Block containing the phi.
         block: BlockId,
-        /// Predecessor supplying this operand.
-        predecessor: BlockId,
+        /// Source departure point supplying this operand: an unwind leaves
+        /// before the named instruction, and a normal edge leaves at its
+        /// block's instruction count.
+        predecessor: ProgramPoint,
         /// Memory state produced by the phi.
         result: MemorySsaValue,
     },
@@ -195,7 +197,7 @@ pub enum MemoryUse {
 pub struct MemoryPhi {
     block: BlockId,
     result: MemorySsaValue,
-    operands: Vec<(BlockId, MemorySsaValue)>,
+    operands: Vec<(ProgramPoint, MemorySsaValue)>,
 }
 
 impl MemoryPhi {
@@ -211,9 +213,13 @@ impl MemoryPhi {
         &self.result
     }
 
-    /// Incoming state for every CFG predecessor, in predecessor order.
+    /// Incoming state for every departure point, in CFG predecessor order.
+    ///
+    /// An unwind out of a block leaves before each of its throwing source
+    /// instructions and carries the memory state before that instruction. A
+    /// normal edge leaves at its block's instruction count.
     #[must_use]
-    pub fn operands(&self) -> &[(BlockId, MemorySsaValue)] {
+    pub fn operands(&self) -> &[(ProgramPoint, MemorySsaValue)] {
         &self.operands
     }
 }
@@ -444,7 +450,7 @@ where
         let shadow = build_shadow_cfg(cfg, scratch.trace.entries(), &class_by_location);
         let dominators = DominatorTree::compute_in(&mut scratch.dominators, &shadow);
         let ssa = SsaForm::compute_in(&mut scratch.ssa, &shadow, &dominators);
-        Self::from_shadow_ssa(classes, class_by_location, &shadow, &ssa)
+        Self::from_shadow_ssa(classes, class_by_location, cfg, &shadow, &ssa)
     }
 
     /// Alias classes in deterministic identity order.
@@ -644,9 +650,10 @@ where
         self.events.iter().filter(|entry| entry.is_fence())
     }
 
-    fn from_shadow_ssa(
+    fn from_shadow_ssa<I, E>(
         classes: Vec<MemoryLocationClass<L>>,
         class_by_location: BTreeMap<L, MemoryClassId>,
+        cfg: &Cfg<I, E>,
         shadow: &Cfg<ShadowInstruction<L, V, F>>,
         ssa: &SsaForm<MemoryClassId>,
     ) -> Self {
@@ -654,6 +661,21 @@ where
         let mut phi_by_result = BTreeMap::new();
         let mut definitions = BTreeMap::new();
         let mut users: BTreeMap<MemorySsaValue, Vec<MemoryUse>> = BTreeMap::new();
+        // A shadow departure names a shadow step; consumers know the source
+        // instruction it stands in, or the source block's end.
+        let departure = |point: ProgramPoint| {
+            shadow
+                .block(point.block)
+                .instructions()
+                .get(point.inst_idx)
+                .map_or(
+                    ProgramPoint {
+                        block: point.block,
+                        inst_idx: cfg.block(point.block).instructions().len(),
+                    },
+                    |step| step.point,
+                )
+        };
 
         for class in &classes {
             definitions.insert(
@@ -672,7 +694,12 @@ where
                         class: phi.result.variable,
                     },
                 );
-                for (predecessor, operand) in &phi.operands {
+                let operands: Vec<_> = phi
+                    .operands
+                    .iter()
+                    .map(|(point, value)| (departure(*point), value.clone()))
+                    .collect();
+                for (predecessor, operand) in &operands {
                     users
                         .entry(operand.clone())
                         .or_default()
@@ -685,7 +712,7 @@ where
                 phis.push(MemoryPhi {
                     block: block.block,
                     result: phi.result.clone(),
-                    operands: phi.operands.clone(),
+                    operands,
                 });
             }
         }
@@ -696,7 +723,9 @@ where
         for block in ssa.blocks() {
             let shadow_instructions = shadow.block(block.block).instructions();
             for (instruction_index, renamed) in block.instructions.iter().enumerate() {
-                let source = &shadow_instructions[instruction_index];
+                let Some(source) = &shadow_instructions[instruction_index].event else {
+                    continue;
+                };
                 let input = renamed.uses.first().cloned();
                 let output = renamed.defs.first().cloned();
                 let reads = source.event.reads();

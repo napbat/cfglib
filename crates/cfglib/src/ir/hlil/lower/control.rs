@@ -193,10 +193,10 @@ impl<D: LowerDialect + mlil::VerifyDialect> Lowerer<'_, D> {
     }
 
     fn adopt_forward_gotos(&mut self, label: Option<&str>) {
-        if let Some(label) = label {
-            if let Some(waiting) = self.forward_gotos.remove(label) {
-                self.pending.extend(waiting);
-            }
+        if let Some(label) = label
+            && let Some(waiting) = self.forward_gotos.remove(label)
+        {
+            self.pending.extend(waiting);
         }
     }
 

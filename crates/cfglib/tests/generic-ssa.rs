@@ -1,3 +1,5 @@
+//! Integration tests: generic ssa.
+
 use cfglib::{Cfg, DominatorTree, EdgeKind, InstrInfo, SsaForm, SsaValue};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

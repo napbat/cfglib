@@ -643,6 +643,18 @@ fn a_removal_drops_the_exceptional_edges_of_a_block_without_a_throw_site() {
         .unwrap();
     builder.add_edge(head, exit, Edge::Next, None).unwrap();
     builder.add_edge(head, pad, Edge::Unwind, None).unwrap();
+    builder
+        .add_region(crate::Region {
+            id: crate::RegionId::from_raw(0),
+            protected_blocks: [head].into_iter().collect(),
+            handlers: vec![crate::Handler {
+                entry: pad,
+                body: crate::HandlerBody::known([pad]),
+                kind: crate::HandlerKind::CatchAll,
+            }],
+            parent: None,
+        })
+        .unwrap();
     let mut function = builder.finish().unwrap();
 
     let removed = function.eliminate_dead_code_in_place(|_| Vec::new());
@@ -695,6 +707,18 @@ fn a_rebuild_without_the_throw_site_drops_its_exceptional_edge() {
         .unwrap();
     builder.add_edge(head, exit, Edge::Next, None).unwrap();
     builder.add_edge(head, pad, Edge::Unwind, None).unwrap();
+    builder
+        .add_region(crate::Region {
+            id: crate::RegionId::from_raw(0),
+            protected_blocks: [head].into_iter().collect(),
+            handlers: vec![crate::Handler {
+                entry: pad,
+                body: crate::HandlerBody::known([pad]),
+                kind: crate::HandlerKind::CatchAll,
+            }],
+            parent: None,
+        })
+        .unwrap();
     let function = builder.finish().unwrap();
 
     let (rebuilt, removed) = function

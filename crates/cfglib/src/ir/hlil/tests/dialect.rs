@@ -134,6 +134,8 @@ pub(crate) enum Edge {
     Jump,
     Case(i64),
     Except,
+    /// Leaves a protected block before each of its throwing instructions.
+    Unwind,
 }
 
 impl mlil::Dialect for Toy {
@@ -189,6 +191,7 @@ impl mlil::Dialect for Toy {
             Edge::Jump => EdgeKind::Jump,
             Edge::Case(_) => EdgeKind::SwitchCase,
             Edge::Except => EdgeKind::ExceptionHandler,
+            Edge::Unwind => EdgeKind::ExceptionUnwind,
         }
     }
 

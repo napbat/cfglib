@@ -31,12 +31,13 @@ pub enum MemoryValueEdge {
         /// Source instruction performing the transfer.
         point: crate::ProgramPoint,
     },
-    /// One predecessor ordinary value flows into an ordinary SSA phi.
+    /// One incoming ordinary value flows into an ordinary SSA phi.
     ValuePhi {
         /// Block containing the phi.
         block: BlockId,
-        /// Predecessor supplying this operand.
-        predecessor: BlockId,
+        /// Departure point supplying this operand, as in
+        /// [`SsaPhi::operands`](crate::SsaPhi::operands).
+        predecessor: crate::ProgramPoint,
     },
     /// An ordinary SSA value selects an event's binding or sub-location.
     Address {
@@ -69,12 +70,13 @@ pub enum MemoryValueEdge {
         /// Position in [`MemoryAccess::value_defs`](crate::MemoryAccess::value_defs).
         output_index: usize,
     },
-    /// One predecessor memory state flows into a memory phi.
+    /// One incoming memory state flows into a memory phi.
     MemoryPhi {
         /// Block containing the phi.
         block: BlockId,
-        /// Predecessor supplying this operand.
-        predecessor: BlockId,
+        /// Departure point supplying this operand, as in
+        /// [`MemoryPhi::operands`](crate::MemoryPhi::operands).
+        predecessor: crate::ProgramPoint,
     },
 }
 

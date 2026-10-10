@@ -134,7 +134,10 @@ fn run_iterations<T>(iterations: u64, operation: &mut impl FnMut() -> T) -> Dura
 // Nanoseconds per operation are intentionally a floating-point statistic; the
 // calibrated iteration count is far below the range where integer precision
 // would affect the printed tenth of a nanosecond.
-#[allow(clippy::cast_precision_loss)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "benchmark timing statistics tolerate f64 precision loss"
+)]
 pub(super) fn benchmark<T>(name: &str, target: Duration, mut operation: impl FnMut() -> T) {
     let mut iterations = 1_u64;
     loop {

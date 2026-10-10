@@ -78,6 +78,18 @@ fn rename_block<I: InstrInfo, E>(
     let block_instructions = &mut instructions[block.index()];
     block_instructions.reserve(cfg.block(block).instructions().len());
     for (inst_idx, instruction) in cfg.block(block).instructions().iter().enumerate() {
+        if instruction.may_unwind() {
+            for edge in cfg.outgoing(block) {
+                let edge = cfg.edge(edge);
+                if edge.kind() == crate::EdgeKind::ExceptionUnwind {
+                    phis.set_operands(
+                        edge.target(),
+                        ProgramPoint { block, inst_idx },
+                        |variable| current_value(variable, stacks),
+                    );
+                }
+            }
+        }
         let uses = instruction
             .uses()
             .iter()
@@ -98,7 +110,14 @@ fn rename_block<I: InstrInfo, E>(
     }
 
     for successor in cfg.successors(block) {
-        phis.set_operands(successor, block, |variable| current_value(variable, stacks));
+        phis.set_operands(
+            successor,
+            ProgramPoint {
+                block,
+                inst_idx: cfg.block(block).instructions().len(),
+            },
+            |variable| current_value(variable, stacks),
+        );
     }
     pushed.len() - pushed_before
 }

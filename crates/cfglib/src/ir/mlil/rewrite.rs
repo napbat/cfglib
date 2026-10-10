@@ -14,6 +14,15 @@ use super::{
     VerifyDialect,
 };
 
+/// Owned parts of an [`InstructionReplacement`]: operation, uses, defs, and
+/// whether the operation may throw.
+type ReplacementParts<D> = (
+    <D as Dialect>::Operation,
+    Vec<TypedVariable<D>>,
+    Vec<TypedVariable<D>>,
+    bool,
+);
+
 /// The replacement of each replaced instruction, in identity order.
 type Replacements<D> = Vec<(InstructionId, InstructionReplacement<D>)>;
 
@@ -49,14 +58,7 @@ impl<D: Dialect> InstructionReplacement<D> {
     }
 
     /// Returns the checked operation and its typed instruction operands.
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        D::Operation,
-        Vec<TypedVariable<D>>,
-        Vec<TypedVariable<D>>,
-        bool,
-    ) {
+    pub(crate) fn into_parts(self) -> ReplacementParts<D> {
         (self.operation, self.uses, self.defs, self.may_throw)
     }
 }

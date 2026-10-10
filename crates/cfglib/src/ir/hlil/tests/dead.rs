@@ -133,3 +133,96 @@ fn dead_definition_after_a_terminator_is_still_rejected() {
 
     assert!(error.contains("follows its block's terminator"), "{error}");
 }
+
+/// `protected: x = 1; call (throws); x = 2`, unwinding to a handler that
+/// returns `x` and falling through to a block that returns something else.
+/// The handler reads the first write, so it stays; no path reads the second.
+#[test]
+fn a_write_a_handler_reads_before_a_throw_is_retained() {
+    let mut builder = mlil::FunctionBuilder::<Toy>::new("toy::unwind".into());
+    let protected = builder.new_block("protected");
+    let after = builder.new_block("after");
+    let pad = builder.new_block("pad");
+    let x = builder.declare_variable(1, None).unwrap();
+    let result = builder.declare_variable(1, None).unwrap();
+    let typed = |variable| mlil::TypedVariable::<Toy>::new(variable, Type::Integer);
+    let mut append = |block, operation, uses, defs, may_throw| {
+        builder
+            .append_instruction(block, operation, uses, defs, may_throw, None)
+            .unwrap()
+    };
+    let first = append(
+        protected,
+        MediumOperation::Constant(1),
+        Vec::new(),
+        vec![typed(x)],
+        false,
+    );
+    append(
+        protected,
+        MediumOperation::Call,
+        Vec::new(),
+        Vec::new(),
+        true,
+    );
+    let second = append(
+        protected,
+        MediumOperation::Constant(2),
+        Vec::new(),
+        vec![typed(x)],
+        false,
+    );
+    append(
+        after,
+        MediumOperation::Constant(0),
+        Vec::new(),
+        vec![typed(result)],
+        false,
+    );
+    append(
+        after,
+        MediumOperation::Return,
+        vec![typed(result)],
+        Vec::new(),
+        false,
+    );
+    append(
+        pad,
+        MediumOperation::Return,
+        vec![typed(x)],
+        Vec::new(),
+        false,
+    );
+    builder
+        .add_edge(builder.entry(), protected, Edge::Entry, None)
+        .unwrap();
+    builder
+        .add_edge(protected, after, Edge::Fall, None)
+        .unwrap();
+    builder
+        .add_edge(protected, pad, Edge::Unwind, None)
+        .unwrap();
+    builder
+        .add_region(crate::Region {
+            id: crate::RegionId::from_raw(0),
+            protected_blocks: [protected].into_iter().collect(),
+            handlers: vec![crate::Handler {
+                entry: pad,
+                body: crate::HandlerBody::known([pad]),
+                kind: crate::HandlerKind::CatchAll,
+            }],
+            parent: None,
+        })
+        .unwrap();
+
+    let lifted = lift_function(&builder.finish().unwrap()).unwrap();
+
+    assert!(
+        lifted.instructions.contains_key(&first),
+        "the handler reads the write before the call"
+    );
+    assert!(
+        !lifted.instructions.contains_key(&second),
+        "no path reads the write after the call"
+    );
+}

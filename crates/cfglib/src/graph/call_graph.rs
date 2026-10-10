@@ -57,16 +57,16 @@ pub fn call_graph<I: CallInfo>(
         };
         for block in cfg.blocks() {
             for instruction in block.instructions() {
-                if let Some(callee_key) = instruction.callee() {
-                    if let Some(&callee) = key_to_id.get(&callee_key) {
-                        graph.add_edge(
-                            caller,
-                            callee,
-                            CallMetadata {
-                                is_tail_call: instruction.is_tail_call(),
-                            },
-                        );
-                    }
+                if let Some(callee_key) = instruction.callee()
+                    && let Some(&callee) = key_to_id.get(&callee_key)
+                {
+                    graph.add_edge(
+                        caller,
+                        callee,
+                        CallMetadata {
+                            is_tail_call: instruction.is_tail_call(),
+                        },
+                    );
                 }
             }
         }

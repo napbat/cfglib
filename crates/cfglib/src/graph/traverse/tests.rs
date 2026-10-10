@@ -67,7 +67,10 @@ fn reachable_from_no_seeds_marks_nothing() {
 
     // An empty graph yields an empty table rather than panicking.
     let empty = Graph::<(), ()>::new();
-    assert!(reachable(&empty, [], TraversalDirection::Outgoing).is_empty());
+    assert_eq!(
+        reachable(&empty, [], TraversalDirection::Outgoing),
+        [] as [bool; 0]
+    );
 }
 
 #[test]
@@ -324,8 +327,9 @@ fn common_ancestors_bound_each_side_by_max_depth() {
         )),
         vec![mid]
     );
-    assert!(
-        common_ancestors(&graph, left, right, TraversalDirection::Incoming, Some(0)).is_empty()
+    assert_eq!(
+        common_ancestors(&graph, left, right, TraversalDirection::Incoming, Some(0)),
+        [] as [crate::graph::traverse::CommonAncestor<crate::NodeId>; 0]
     );
     // A bound at or beyond the eccentricity is the unbounded answer.
     assert_eq!(
@@ -364,8 +368,14 @@ fn common_ancestors_without_a_shared_node_is_empty() {
     let lonely = graph.add_node(());
     let end = graph.add_node(());
     graph.add_edge(start, end, ());
-    assert!(common_ancestors(&graph, start, lonely, TraversalDirection::Outgoing, None).is_empty());
-    assert!(common_ancestors(&graph, end, lonely, TraversalDirection::Incoming, None).is_empty());
+    assert_eq!(
+        common_ancestors(&graph, start, lonely, TraversalDirection::Outgoing, None),
+        [] as [crate::graph::traverse::CommonAncestor<crate::NodeId>; 0]
+    );
+    assert_eq!(
+        common_ancestors(&graph, end, lonely, TraversalDirection::Incoming, None),
+        [] as [crate::graph::traverse::CommonAncestor<crate::NodeId>; 0]
+    );
 }
 
 #[test]

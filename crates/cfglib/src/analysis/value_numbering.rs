@@ -12,7 +12,7 @@ use smallvec::SmallVec;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::dataflow::InstrInfo;
+use crate::dataflow::{InstrInfo, first_unwind_point, unwind_reach};
 use crate::graph::dominator::{DominatorChildOrder, DominatorTree};
 
 /// A value number — opaque identifier for a computed value.
@@ -146,26 +146,47 @@ impl ValueNumbering {
     /// entry and popped on exit. This avoids cloning maps for every
     /// block and runs in O(n · α) time per instruction (where α is the
     /// `BTreeMap` operation cost).
+    ///
+    /// An [`ExceptionUnwind`](crate::EdgeKind::ExceptionUnwind) edge leaves
+    /// its block before each instruction that
+    /// [`may_unwind`](crate::InstrInfo::may_unwind). A dominator child that
+    /// such an unwind reaches without passing through its parent again
+    /// therefore sees neither the expressions its parent first computes at
+    /// or after its first throwing instruction nor the values the parent
+    /// writes there: those variables receive fresh value numbers in the
+    /// child's scope. A block without such an unwind adds no work.
     #[must_use]
     pub fn compute<I: ValueNumberInfo>(cfg: &Cfg<I>, dom: &DominatorTree) -> Self {
         let mut blocks = BTreeMap::new();
-        let mut variable_values: BTreeMap<I::Variable, ValueNumber> = BTreeMap::new();
-        let mut expr_to_vn: BTreeMap<ExprKey<I::Operator>, ValueNumber> = BTreeMap::new();
-        let mut next_vn: ValueNumber = 0;
+        let mut tables = GvnTables {
+            variable_values: BTreeMap::new(),
+            expr_to_vn: BTreeMap::new(),
+            next_vn: 0,
+        };
+        let mut suffixes: BTreeMap<BlockId, UnwindSuffix<I::Variable, I::Operator>> =
+            BTreeMap::new();
         let children = dom.child_links(DominatorChildOrder::Ascending);
         let mut events = vec![GvnEvent::Enter(cfg.entry())];
 
         while let Some(event) = events.pop() {
             match event {
                 GvnEvent::Enter(block) => {
-                    let scope = number_block(
-                        cfg,
-                        block,
-                        &mut variable_values,
-                        &mut expr_to_vn,
-                        &mut next_vn,
-                        &mut blocks,
-                    );
+                    let mut after_unwind = None;
+                    if let Some(parent) = dom.idom(block)
+                        && let Some(suffix) = suffixes.get_mut(&parent)
+                    {
+                        let reach = suffix
+                            .reach
+                            .get_or_insert_with(|| unwind_reach(cfg, parent));
+                        if reach[block.index()] {
+                            after_unwind = Some(&*suffix);
+                        }
+                    }
+                    let NumberedBlock { scope, suffix } =
+                        number_block(cfg, block, after_unwind, &mut tables, &mut blocks);
+                    if let Some(suffix) = suffix {
+                        suffixes.insert(block, suffix);
+                    }
                     events.push(GvnEvent::Exit(scope));
                     if let Some(child) = children.first_child(block) {
                         events.push(GvnEvent::Sibling(child));
@@ -178,21 +199,62 @@ impl ValueNumbering {
                     events.push(GvnEvent::Enter(block));
                 }
                 GvnEvent::Exit(scope) => {
-                    exit_scope(scope, &mut variable_values, &mut expr_to_vn);
+                    suffixes.remove(&scope.block);
+                    exit_scope(scope, &mut tables);
                 }
             }
         }
 
         ValueNumbering {
             blocks,
-            value_count: next_vn,
+            value_count: tables.next_vn,
         }
     }
 }
 
+/// The scoped tables of the dominator-tree walk.
+struct GvnTables<V, Op> {
+    variable_values: BTreeMap<V, ValueNumber>,
+    expr_to_vn: BTreeMap<ExprKey<Op>, ValueNumber>,
+    next_vn: ValueNumber,
+}
+
+impl<V: Clone + Ord, Op> GvnTables<V, Op> {
+    /// Give `variable` a fresh value number, saving its previous one in
+    /// `saved` unless an earlier change in the same scope already did.
+    fn redefine(&mut self, saved: &mut BTreeMap<V, Option<ValueNumber>>, variable: &V) {
+        saved
+            .entry(variable.clone())
+            .or_insert_with(|| self.variable_values.get(variable).copied());
+        let vn = self.next_vn;
+        self.next_vn += 1;
+        self.variable_values.insert(variable.clone(), vn);
+    }
+}
+
+/// What a block does from its first unwind point on, which a dominator
+/// child entered after an unwind out of the block must not see.
+struct UnwindSuffix<V, Op> {
+    /// Variables written at or after the first throwing instruction.
+    variables: Vec<V>,
+    /// Expressions first made available at or after it.
+    expressions: Vec<ExprKey<Op>>,
+    /// Per block, whether an unwind out of the block reaches it without
+    /// re-entering the block; computed when a child first asks.
+    reach: Option<Vec<bool>>,
+}
+
 struct GvnScope<V, Op> {
+    block: BlockId,
     saved_variables: BTreeMap<V, Option<ValueNumber>>,
     expressions: Vec<ExprKey<Op>>,
+    /// Parent expressions hidden from this scope, restored on exit.
+    hidden: Vec<(ExprKey<Op>, ValueNumber)>,
+}
+
+struct NumberedBlock<V, Op> {
+    scope: GvnScope<V, Op>,
+    suffix: Option<UnwindSuffix<V, Op>>,
 }
 
 enum GvnEvent<V, Op> {
@@ -201,18 +263,40 @@ enum GvnEvent<V, Op> {
     Exit(GvnScope<V, Op>),
 }
 
-/// Number one block and return the mutations to undo when its scope exits.
+/// Number one block and return the mutations to undo when its scope exits,
+/// with what the block does from its first unwind point on when an unwind
+/// can leave it.
+///
+/// `after_unwind` is the parent's suffix when an unwind out of the parent
+/// reaches this block; it is hidden before the block is numbered.
 fn number_block<I: ValueNumberInfo>(
     cfg: &Cfg<I>,
     bid: BlockId,
-    variable_values: &mut BTreeMap<I::Variable, ValueNumber>,
-    expr_to_vn: &mut BTreeMap<ExprKey<I::Operator>, ValueNumber>,
-    next_vn: &mut ValueNumber,
+    after_unwind: Option<&UnwindSuffix<I::Variable, I::Operator>>,
+    tables: &mut GvnTables<I::Variable, I::Operator>,
     blocks: &mut BTreeMap<BlockId, BlockValueNumbers>,
-) -> GvnScope<I::Variable, I::Operator> {
+) -> NumberedBlock<I::Variable, I::Operator> {
     // Snapshot the current scope so we can restore on exit.
     let mut saved_variables: BTreeMap<I::Variable, Option<ValueNumber>> = BTreeMap::new();
     let mut expr_added: Vec<ExprKey<I::Operator>> = Vec::new();
+    let mut hidden = Vec::new();
+    if let Some(suffix) = after_unwind {
+        for variable in &suffix.variables {
+            tables.redefine(&mut saved_variables, variable);
+        }
+        for key in &suffix.expressions {
+            if let Some(vn) = tables.expr_to_vn.remove(key) {
+                hidden.push((key.clone(), vn));
+            }
+        }
+    }
+
+    let first_unwind = first_unwind_point(cfg, bid);
+    let mut suffix = first_unwind.map(|_| UnwindSuffix {
+        variables: Vec::new(),
+        expressions: Vec::new(),
+        reach: None,
+    });
 
     // Process instructions in this block.
     let insts = cfg.block(bid).instructions();
@@ -220,18 +304,19 @@ fn number_block<I: ValueNumberInfo>(
     let mut redundant = Vec::new();
 
     for (idx, inst) in insts.iter().enumerate() {
+        // From the first throwing instruction on, an unwind can leave
+        // before this instruction's writes and expressions.
+        let unwinding = first_unwind.is_some_and(|first| idx >= first);
+        if unwinding && let Some(unwound) = &mut suffix {
+            unwound.variables.extend(inst.defs().iter().cloned());
+        }
         if !inst.is_pure() || inst.defs().is_empty() {
             // A skipped instruction still REDEFINES its defs: give each a
             // fresh value number (scoped, restored on exit) so later
             // expressions over them are not falsely matched against
             // pre-redefinition keys.
             for variable in inst.defs() {
-                saved_variables
-                    .entry(variable.clone())
-                    .or_insert_with(|| variable_values.get(variable).copied());
-                let vn = *next_vn;
-                *next_vn += 1;
-                variable_values.insert(variable.clone(), vn);
+                tables.redefine(&mut saved_variables, variable);
             }
             inst_vn.push(None);
             continue;
@@ -241,13 +326,13 @@ fn number_block<I: ValueNumberInfo>(
             .uses()
             .iter()
             .map(|variable| {
-                if let Some(&vn) = variable_values.get(variable) {
+                if let Some(&vn) = tables.variable_values.get(variable) {
                     vn
                 } else {
-                    let vn = *next_vn;
-                    *next_vn += 1;
+                    let vn = tables.next_vn;
+                    tables.next_vn += 1;
                     saved_variables.insert(variable.clone(), None);
-                    variable_values.insert(variable.clone(), vn);
+                    tables.variable_values.insert(variable.clone(), vn);
                     vn
                 }
             })
@@ -258,51 +343,55 @@ fn number_block<I: ValueNumberInfo>(
             operands,
         };
 
-        if let Some(&existing_vn) = expr_to_vn.get(&key) {
-            inst_vn.push(Some(existing_vn));
+        let vn = if let Some(&existing_vn) = tables.expr_to_vn.get(&key) {
             redundant.push(idx);
-            for variable in inst.defs() {
-                saved_variables
-                    .entry(variable.clone())
-                    .or_insert_with(|| variable_values.get(variable).copied());
-                variable_values.insert(variable.clone(), existing_vn);
-            }
+            existing_vn
         } else {
-            let vn = *next_vn;
-            *next_vn += 1;
-            expr_added.push(key.clone());
-            expr_to_vn.insert(key, vn);
-            inst_vn.push(Some(vn));
-            for variable in inst.defs() {
-                saved_variables
-                    .entry(variable.clone())
-                    .or_insert_with(|| variable_values.get(variable).copied());
-                variable_values.insert(variable.clone(), vn);
+            let vn = tables.next_vn;
+            tables.next_vn += 1;
+            if unwinding && let Some(unwound) = &mut suffix {
+                unwound.expressions.push(key.clone());
             }
+            expr_added.push(key.clone());
+            tables.expr_to_vn.insert(key, vn);
+            vn
+        };
+        inst_vn.push(Some(vn));
+        for variable in inst.defs() {
+            saved_variables
+                .entry(variable.clone())
+                .or_insert_with(|| tables.variable_values.get(variable).copied());
+            tables.variable_values.insert(variable.clone(), vn);
         }
     }
 
+    if let Some(suffix) = &mut suffix {
+        suffix.variables.sort();
+        suffix.variables.dedup();
+    }
     blocks.insert(bid, BlockValueNumbers { inst_vn, redundant });
-    GvnScope {
+    let scope = GvnScope {
+        block: bid,
         saved_variables,
         expressions: expr_added,
-    }
+        hidden,
+    };
+    NumberedBlock { scope, suffix }
 }
 
-fn exit_scope<V: Ord, Op: Ord>(
-    scope: GvnScope<V, Op>,
-    variable_values: &mut BTreeMap<V, ValueNumber>,
-    expr_to_vn: &mut BTreeMap<ExprKey<Op>, ValueNumber>,
-) {
+fn exit_scope<V: Ord, Op: Ord>(scope: GvnScope<V, Op>, tables: &mut GvnTables<V, Op>) {
     for key in scope.expressions {
-        expr_to_vn.remove(&key);
+        tables.expr_to_vn.remove(&key);
     }
     for (variable, previous) in scope.saved_variables {
         if let Some(value_number) = previous {
-            variable_values.insert(variable, value_number);
+            tables.variable_values.insert(variable, value_number);
         } else {
-            variable_values.remove(&variable);
+            tables.variable_values.remove(&variable);
         }
+    }
+    for (key, value_number) in scope.hidden {
+        tables.expr_to_vn.insert(key, value_number);
     }
 }
 
@@ -319,7 +408,7 @@ mod tests {
     use super::*;
     use crate::cfg::Cfg;
     use crate::edge::EdgeKind;
-    use crate::test_util::{VnInst, vn_impure, vn_inst};
+    use crate::test_util::{VnInst, vn_impure, vn_inst, vn_throwing};
 
     #[test]
     fn impure_redefinition_invalidates_value_numbers() {
@@ -361,7 +450,7 @@ mod tests {
             vn_inst(2, &[0, 1], &[3]), // different opcode
         ]);
         let (bvn, _) = BlockValueNumbers::compute(&cfg, cfg.entry(), 0);
-        assert!(bvn.redundant.is_empty());
+        assert_eq!(bvn.redundant, [] as [usize; 0]);
     }
 
     #[test]
@@ -410,8 +499,8 @@ mod tests {
         cfg.add_edge(cfg.entry(), b, EdgeKind::ConditionalFalse);
         let dom = DominatorTree::compute(&cfg);
         let vn = ValueNumbering::compute(&cfg, &dom);
-        assert!(vn.blocks[&a].redundant.is_empty());
-        assert!(vn.blocks[&b].redundant.is_empty());
+        assert_eq!(vn.blocks[&a].redundant, [] as [usize; 0]);
+        assert_eq!(vn.blocks[&b].redundant, [] as [usize; 0]);
     }
 
     #[test]
@@ -440,5 +529,78 @@ mod tests {
             numbering.value_count,
             ValueNumber::try_from(BLOCK_COUNT).expect("test block count fits in a value number")
         );
+    }
+
+    /// `entry → protected`, which falls through to `normal` and unwinds to
+    /// `handler`, numbered with each block's instructions. Returns
+    /// `(numbering, protected, normal, handler)`.
+    fn number_protected_region(
+        protected_instructions: impl IntoIterator<Item = VnInst>,
+        successor_instructions: &[VnInst],
+    ) -> (ValueNumbering, BlockId, BlockId, BlockId) {
+        let mut cfg: Cfg<VnInst> = Cfg::new();
+        let protected = cfg.new_block();
+        let normal = cfg.new_block();
+        let handler = cfg.new_block();
+        cfg.add_edge(cfg.entry(), protected, EdgeKind::Fallthrough);
+        cfg.add_edge(protected, normal, EdgeKind::Fallthrough);
+        cfg.add_edge(protected, handler, EdgeKind::ExceptionUnwind);
+        cfg.block_mut(protected)
+            .instructions_mut()
+            .extend(protected_instructions);
+        for block in [normal, handler] {
+            cfg.block_mut(block)
+                .instructions_mut()
+                .extend(successor_instructions.iter().cloned());
+        }
+        let dominators = DominatorTree::compute(&cfg);
+        (
+            ValueNumbering::compute(&cfg, &dominators),
+            protected,
+            normal,
+            handler,
+        )
+    }
+
+    #[test]
+    fn a_handler_reuses_only_expressions_computed_before_the_throw() {
+        let (numbering, _, normal, handler) = number_protected_region(
+            [
+                vn_inst(1, &[0, 1], &[10]),
+                vn_throwing(99, &[], &[]),
+                vn_inst(2, &[0, 1], &[11]),
+            ],
+            &[vn_inst(1, &[0, 1], &[12]), vn_inst(2, &[0, 1], &[13])],
+        );
+
+        assert_eq!(numbering.blocks[&normal].redundant, [0, 1]);
+        assert_eq!(
+            numbering.blocks[&handler].redundant,
+            [0],
+            "the second expression is computed after the call can unwind"
+        );
+    }
+
+    #[test]
+    fn a_handler_does_not_reuse_values_a_later_throw_observes_differently() {
+        // protected: x = op1(a); call; x = op2(b); y = op4(x); call
+        // The first call unwinds with x = op1(a) and the second with
+        // x = op2(b), so op4(x) in the handler matches neither.
+        let (numbering, protected, normal, handler) = number_protected_region(
+            [
+                vn_inst(1, &[0], &[5]),
+                vn_throwing(99, &[], &[]),
+                vn_inst(2, &[1], &[5]),
+                vn_inst(4, &[5], &[6]),
+                vn_throwing(99, &[], &[]),
+            ],
+            &[vn_inst(4, &[5], &[7])],
+        );
+
+        let computed = numbering.blocks[&protected].inst_vn[3];
+        assert_eq!(numbering.blocks[&normal].redundant, [0]);
+        assert_eq!(numbering.blocks[&normal].inst_vn[0], computed);
+        assert_eq!(numbering.blocks[&handler].redundant, [] as [usize; 0]);
+        assert_ne!(numbering.blocks[&handler].inst_vn[0], computed);
     }
 }

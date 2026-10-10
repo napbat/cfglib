@@ -1,3 +1,5 @@
+//! Integration tests: code intelligence graph.
+
 use cfglib::{
     DenseId, DominatorTree, Graph, GraphView, TraversalDirection, breadth_first, shortest_path,
     tarjan_scc, topological_sort,

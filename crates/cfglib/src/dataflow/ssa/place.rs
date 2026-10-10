@@ -16,7 +16,10 @@ use core::ops::Range;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::dataflow::{InstrInfo, VariableId};
+use crate::dataflow::{
+    InstrInfo, ProgramPoint, VariableId, departs_before_throws, first_unwind_point,
+};
+use crate::edge::EdgeKind;
 use crate::graph::dominator::DominatorTree;
 
 use super::SsaValue;
@@ -27,8 +30,8 @@ use super::scratch::SsaScratch;
 pub struct PhiPlacement<V> {
     /// The source-IR variable merged by the phi.
     pub variable: V,
-    /// CFG predecessors that contribute operands, in CFG predecessor order.
-    pub predecessors: Vec<BlockId>,
+    /// Departure points that contribute operands, in CFG predecessor order.
+    pub predecessors: Vec<ProgramPoint>,
 }
 
 /// Phi placements indexed by containing block.
@@ -124,7 +127,7 @@ pub(super) struct PhiDrafts<V> {
     /// vectors this exists to keep.
     pub(super) by_block: Vec<Vec<PhiDraft<V>>>,
     /// Every phi's predecessors, end to end.
-    pub(super) predecessors: Vec<BlockId>,
+    pub(super) predecessors: Vec<ProgramPoint>,
     /// One operand slot per entry in [`predecessors`](Self::predecessors),
     /// filled while the predecessor block is renamed.
     pub(super) operands: Vec<Option<SsaValue<V>>>,
@@ -153,8 +156,14 @@ impl<V: VariableId> PhiDrafts<V> {
         self.operands.clear();
     }
 
-    /// Record a phi for `variable` at `block`, merging `predecessors`.
-    fn place(&mut self, block: BlockId, variable: V, predecessors: impl Iterator<Item = BlockId>) {
+    /// Record a phi for `variable` at `block`, merging the values that leave
+    /// `predecessors`.
+    fn place(
+        &mut self,
+        block: BlockId,
+        variable: V,
+        predecessors: impl Iterator<Item = ProgramPoint>,
+    ) {
         let start = self.predecessors.len();
         self.predecessors.extend(predecessors);
         let end = self.predecessors.len();
@@ -171,21 +180,21 @@ impl<V: VariableId> PhiDrafts<V> {
         &self.by_block[block.index()]
     }
 
-    /// One phi's predecessors, in CFG predecessor order.
-    pub(super) fn predecessors(&self, draft: &PhiDraft<V>) -> &[BlockId] {
+    /// One phi's departure points, in CFG predecessor order.
+    pub(super) fn predecessors(&self, draft: &PhiDraft<V>) -> &[ProgramPoint] {
         &self.predecessors[draft.operands.clone()]
     }
 
-    /// Record the value reaching every phi of `block` along the edge from
-    /// `predecessor`.
+    /// Record the value reaching every phi of `block` from the departure
+    /// point `predecessor`.
     ///
-    /// A parallel edge occupies two operand positions and receives the value
-    /// at both, which is what the per-phi map this replaced did by answering
-    /// the same value to both of its lookups.
+    /// Parallel edges occupy several operand positions and receive the value
+    /// at each, which is what the per-phi map this replaced did by answering
+    /// the same value to every lookup.
     pub(super) fn set_operands(
         &mut self,
         block: BlockId,
-        predecessor: BlockId,
+        predecessor: ProgramPoint,
         mut value: impl FnMut(&V) -> SsaValue<V>,
     ) {
         for draft in &self.by_block[block.index()] {
@@ -205,6 +214,11 @@ impl<V: VariableId> PhiDrafts<V> {
 
 /// Place a phi for every variable at every iterated dominance frontier of its
 /// definitions, leaving the result in `scratch.phis`.
+///
+/// A block can dominate its unwind successor while a definition it makes
+/// at or after its first throwing instruction does not reach that
+/// successor. Such a definition also places a phi at the unwind successor,
+/// whose operands name the value before each throwing instruction.
 pub(super) fn place_phis<I: InstrInfo, E>(
     scratch: &mut SsaScratch<I::Variable>,
     cfg: &Cfg<I, E>,
@@ -214,6 +228,7 @@ pub(super) fn place_phis<I: InstrInfo, E>(
         frontiers,
         definition_blocks,
         block_pool,
+        unwound_definitions,
         has_phi,
         placed,
         worklist,
@@ -223,7 +238,8 @@ pub(super) fn place_phis<I: InstrInfo, E>(
     frontiers.rebuild(cfg, dom);
 
     for block_id in cfg.block_ids() {
-        for instruction in cfg.block(block_id).instructions() {
+        let first_unwind = first_unwind_point(cfg, block_id);
+        for (index, instruction) in cfg.block(block_id).instructions().iter().enumerate() {
             for variable in instruction.defs() {
                 let blocks = match definition_blocks.entry(variable.clone()) {
                     Entry::Vacant(slot) => slot.insert(block_pool.pop().unwrap_or_default()),
@@ -232,10 +248,16 @@ pub(super) fn place_phis<I: InstrInfo, E>(
                 if blocks.last().copied() != Some(block_id) {
                     blocks.push(block_id);
                 }
+                if first_unwind.is_some_and(|first| index >= first) {
+                    unwound_definitions.push((variable.clone(), block_id));
+                }
             }
         }
     }
+    unwound_definitions.sort_unstable();
+    unwound_definitions.dedup();
 
+    let mut unwound = 0;
     for (variable, definitions) in definition_blocks.iter_mut() {
         has_phi.reset();
         placed.reset();
@@ -247,6 +269,31 @@ pub(super) fn place_phis<I: InstrInfo, E>(
         worklist.clear();
         worklist.append(definitions);
 
+        // Both lists ascend by variable, so one cursor walks the unwound
+        // definitions alongside the map.
+        while let Some((unwound_variable, source)) = unwound_definitions.get(unwound) {
+            if unwound_variable > variable {
+                break;
+            }
+            unwound += 1;
+            if unwound_variable < variable {
+                continue;
+            }
+            for edge in cfg.outgoing(*source) {
+                let edge = cfg.edge(edge);
+                let target = edge.target();
+                if edge.kind() != EdgeKind::ExceptionUnwind || has_phi.is_marked(target.index()) {
+                    continue;
+                }
+                has_phi.mark(target.index());
+                phis.place(target, variable.clone(), arrivals(cfg, target));
+                if !placed.is_marked(target.index()) {
+                    placed.mark(target.index());
+                    worklist.push(target);
+                }
+            }
+        }
+
         while let Some(block) = worklist.pop() {
             for &frontier_block in frontiers.frontier(block) {
                 if has_phi.is_marked(frontier_block.index()) {
@@ -257,7 +304,7 @@ pub(super) fn place_phis<I: InstrInfo, E>(
                 phis.place(
                     frontier_block,
                     variable.clone(),
-                    cfg.predecessors(frontier_block),
+                    arrivals(cfg, frontier_block),
                 );
                 if !placed.is_marked(frontier_block.index()) {
                     placed.mark(frontier_block.index());
@@ -266,4 +313,31 @@ pub(super) fn place_phis<I: InstrInfo, E>(
             }
         }
     }
+}
+
+/// The departure point of every edge into `block`, in CFG predecessor order.
+///
+/// A normal edge departs at its source's end, named by the source's
+/// instruction count. An edge that [departs before
+/// throws](departs_before_throws) contributes one departure before each of
+/// its source's throwing instructions.
+fn arrivals<I: InstrInfo, E>(
+    cfg: &Cfg<I, E>,
+    block: BlockId,
+) -> impl Iterator<Item = ProgramPoint> + '_ {
+    cfg.incoming(block).flat_map(move |edge| {
+        let edge = cfg.edge(edge);
+        let source = edge.source();
+        let instructions = cfg.block(source).instructions();
+        let before_throws = departs_before_throws(cfg, edge);
+        let end = instructions.len();
+        (if before_throws { 0 } else { end }..=end)
+            .filter(move |&index| {
+                !before_throws || instructions.get(index).is_some_and(InstrInfo::may_unwind)
+            })
+            .map(move |inst_idx| ProgramPoint {
+                block: source,
+                inst_idx,
+            })
+    })
 }

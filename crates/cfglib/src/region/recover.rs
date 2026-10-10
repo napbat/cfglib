@@ -61,10 +61,10 @@ pub fn promote_handler_extents<I, E>(cfg: &mut Cfg<I, E>) -> usize {
     let promoted = promotions.len();
     for (region_index, handler_index, extent) in promotions {
         let region_id = cfg.regions()[region_index].id;
-        if let Some(region) = cfg.region_mut(region_id) {
-            if let Some(handler) = region.handlers.get_mut(handler_index) {
-                handler.body = HandlerBody::Known(extent);
-            }
+        if let Some(region) = cfg.region_mut(region_id)
+            && let Some(handler) = region.handlers.get_mut(handler_index)
+        {
+            handler.body = HandlerBody::Known(extent);
         }
     }
     promoted

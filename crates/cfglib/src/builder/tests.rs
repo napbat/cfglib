@@ -93,7 +93,7 @@ fn resolve_wires_forward_goto() {
 
     let resolution = resolve_jump_edges(&mut cfg);
     assert_eq!(resolution.resolved, 1);
-    assert!(resolution.unresolved.is_empty());
+    assert_eq!(resolution.unresolved, [] as [(crate::BlockId, &str); 0]);
     let jump_edge = cfg
         .edges()
         .find(|edge| edge.kind() == EdgeKind::Jump)

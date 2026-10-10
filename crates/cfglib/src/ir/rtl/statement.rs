@@ -230,4 +230,8 @@ impl<D: Dialect> InstrInfo for StatementNode<D> {
     fn defs(&self) -> &[Self::Variable] {
         &self.defs
     }
+
+    fn may_unwind(&self) -> bool {
+        self.statement.may_throw()
+    }
 }

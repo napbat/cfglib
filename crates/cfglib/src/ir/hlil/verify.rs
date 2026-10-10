@@ -186,10 +186,10 @@ fn verify_statement_shape<D: Dialect>(
 ) {
     match kind {
         StatementKind::Assign { target, .. } => {
-            if let Some(expression) = function.expression(*target) {
-                if matches!(expression.kind(), ExpressionKind::Constant(_)) {
-                    issue(issues, format!("{id} assigns into constant {target}"));
-                }
+            if let Some(expression) = function.expression(*target)
+                && matches!(expression.kind(), ExpressionKind::Constant(_))
+            {
+                issue(issues, format!("{id} assigns into constant {target}"));
             }
         }
         StatementKind::Switch { cases, .. } => {
@@ -201,10 +201,10 @@ fn verify_statement_shape<D: Dialect>(
         }
         StatementKind::Try { handlers, .. } => {
             for handler in handlers {
-                if let Some(binding) = handler.binding {
-                    if function.variable(binding).is_none() {
-                        issue(issues, format!("{id} binds undeclared variable {binding}"));
-                    }
+                if let Some(binding) = handler.binding
+                    && function.variable(binding).is_none()
+                {
+                    issue(issues, format!("{id} binds undeclared variable {binding}"));
                 }
             }
         }

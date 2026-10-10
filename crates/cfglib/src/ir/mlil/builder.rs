@@ -380,9 +380,9 @@ fn require_source_span<D: Dialect>(source: Option<&D::SourceSpan>) -> Result<()>
     }
 }
 
-/// Returns the exceptional edges of `cfg` that their source block cannot
-/// take: the block holds no throwing instruction, and no region of `regions`
-/// protects it.
+/// Returns exceptional edges that their source block cannot take.
+/// A region can describe handler dispatch, but cannot make a non-throwing
+/// block unwind. Keep other exceptional routes that a region describes.
 pub(super) fn untaken_edges<D: Dialect>(
     cfg: &Cfg<Instruction<D>, D::Edge>,
     regions: &[Region],
@@ -393,15 +393,17 @@ pub(super) fn untaken_edges<D: Dialect>(
         .collect();
     cfg.block_ids()
         .filter(|block| {
-            !protected.contains(block)
-                && !cfg
-                    .block(*block)
-                    .instructions()
-                    .iter()
-                    .any(Instruction::may_throw)
+            !cfg.block(*block)
+                .instructions()
+                .iter()
+                .any(Instruction::may_throw)
         })
         .flat_map(|block| cfg.outgoing(block))
-        .filter(|edge| cfg.edge(*edge).kind().is_exceptional())
+        .filter(|edge| {
+            let edge = cfg.edge(*edge);
+            edge.kind() == crate::EdgeKind::ExceptionUnwind
+                || (edge.kind().is_exceptional() && !protected.contains(&edge.source()))
+        })
         .collect()
 }
 

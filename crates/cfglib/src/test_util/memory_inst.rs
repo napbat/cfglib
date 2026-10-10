@@ -18,6 +18,8 @@ pub struct MemInst<L, F> {
     pub defs: Vec<u8>,
     /// Memory events, in semantic order.
     pub events: Vec<MemoryEvent<L, u8, F>>,
+    /// Whether execution can unwind before this instruction completes.
+    pub may_unwind: bool,
 }
 
 impl<L, F> MemInst<L, F> {
@@ -36,7 +38,15 @@ impl<L, F> MemInst<L, F> {
             uses: uses.into_iter().collect(),
             defs: defs.into_iter().collect(),
             events: events.into_iter().collect(),
+            may_unwind: false,
         }
+    }
+
+    /// This instruction, able to unwind before it completes.
+    #[must_use]
+    pub fn unwinding(mut self) -> Self {
+        self.may_unwind = true;
+        self
     }
 }
 
@@ -48,6 +58,10 @@ impl<L, F> InstrInfo for MemInst<L, F> {
     }
     fn defs(&self) -> &[u8] {
         &self.defs
+    }
+
+    fn may_unwind(&self) -> bool {
+        self.may_unwind
     }
 }
 

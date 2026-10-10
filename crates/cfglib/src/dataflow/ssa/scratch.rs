@@ -84,6 +84,10 @@ pub struct SsaScratch<V> {
     pub(super) definition_blocks: BTreeMap<V, Vec<BlockId>>,
     /// Definition lists whose variable is gone, kept for the next procedure.
     pub(super) block_pool: Vec<Vec<BlockId>>,
+    /// Every `(variable, block)` whose definition there sits at or after the
+    /// block's first unwind point, sorted, so an unwind out of the block can
+    /// miss it.
+    pub(super) unwound_definitions: Vec<(V, BlockId)>,
     /// Blocks that already carry a phi for the variable being placed.
     pub(super) has_phi: EpochMarks,
     /// Blocks already on the placement worklist for that variable.
@@ -120,6 +124,7 @@ impl<V> Default for SsaScratch<V> {
             frontiers: FrontierRuns::default(),
             definition_blocks: BTreeMap::new(),
             block_pool: Vec::new(),
+            unwound_definitions: Vec::new(),
             has_phi: EpochMarks::default(),
             placed: EpochMarks::default(),
             worklist: Vec::new(),
@@ -165,6 +170,7 @@ impl<V: crate::dataflow::VariableId> SsaScratch<V> {
             blocks.clear();
             self.block_pool.push(blocks);
         }
+        self.unwound_definitions.clear();
         for marks in [&mut self.has_phi, &mut self.placed] {
             marks.grow_to(block_bound);
             marks.reset();

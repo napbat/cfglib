@@ -703,7 +703,6 @@ impl<D: Lift> Emitter<'_, D> {
         ))
     }
 
-    #[expect(clippy::too_many_lines, reason = "one arm per statement form")]
     pub(super) fn statement(
         &mut self,
         source: usize,

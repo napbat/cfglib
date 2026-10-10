@@ -9,19 +9,19 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
-use crate::dataflow::VariableId;
 use crate::dataflow::ssa::{SsaForm, SsaValue};
+use crate::dataflow::{ProgramPoint, VariableId};
 
 /// A copy to be materialized on a specific CFG edge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PhiCopy<V> {
-    /// Predecessor block containing the source side of the edge.
-    pub from_block: BlockId,
+    /// Departure point. Copy before this instruction, or at block end.
+    pub from: ProgramPoint,
     /// Block containing the lowered phi.
     pub to_block: BlockId,
     /// SSA value defined by the phi.
     pub destination: SsaValue<V>,
-    /// SSA value supplied by `from_block`.
+    /// SSA value supplied at `from`.
     pub source: SsaValue<V>,
 }
 
@@ -33,7 +33,7 @@ pub fn eliminate_phis<V: VariableId>(ssa: &SsaForm<V>) -> Vec<PhiCopy<V>> {
     for (block, phi) in ssa.phis() {
         for (predecessor, source) in &phi.operands {
             copies.push(PhiCopy {
-                from_block: *predecessor,
+                from: *predecessor,
                 to_block: block,
                 destination: phi.result.clone(),
                 source: source.clone(),
@@ -44,18 +44,15 @@ pub fn eliminate_phis<V: VariableId>(ssa: &SsaForm<V>) -> Vec<PhiCopy<V>> {
     copies
 }
 
-/// Group phi copies by the predecessor block where they must be emitted.
+/// Group phi copies by the departure point where they must be emitted.
 ///
 /// Copies in one group form a parallel assignment and may need a temporary
 /// when the native instruction representation lowers a cycle.
 #[must_use]
-pub fn copies_by_predecessor<V>(copies: &[PhiCopy<V>]) -> Vec<(BlockId, Vec<&PhiCopy<V>>)> {
-    let mut by_predecessor: BTreeMap<BlockId, Vec<&PhiCopy<V>>> = BTreeMap::new();
+pub fn copies_by_predecessor<V>(copies: &[PhiCopy<V>]) -> Vec<(ProgramPoint, Vec<&PhiCopy<V>>)> {
+    let mut by_predecessor: BTreeMap<ProgramPoint, Vec<&PhiCopy<V>>> = BTreeMap::new();
     for copy in copies {
-        by_predecessor
-            .entry(copy.from_block)
-            .or_default()
-            .push(copy);
+        by_predecessor.entry(copy.from).or_default().push(copy);
     }
     by_predecessor.into_iter().collect()
 }
@@ -104,13 +101,19 @@ mod tests {
     fn copies_are_grouped_by_predecessor() {
         let copies = vec![
             PhiCopy {
-                from_block: BlockId::from_raw(0),
+                from: ProgramPoint {
+                    block: BlockId::from_raw(0),
+                    inst_idx: 1,
+                },
                 to_block: BlockId::from_raw(2),
                 destination: SsaValue::new(0_u16, 3),
                 source: SsaValue::new(0_u16, 1),
             },
             PhiCopy {
-                from_block: BlockId::from_raw(1),
+                from: ProgramPoint {
+                    block: BlockId::from_raw(1),
+                    inst_idx: 1,
+                },
                 to_block: BlockId::from_raw(2),
                 destination: SsaValue::new(0_u16, 3),
                 source: SsaValue::new(0_u16, 2),

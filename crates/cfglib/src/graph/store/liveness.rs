@@ -40,7 +40,7 @@ impl LiveSet {
     /// Append one live slot and return its index.
     pub(super) fn push_live(&mut self) -> usize {
         let index = self.len;
-        if index % BITS_PER_WORD == 0 {
+        if index.is_multiple_of(BITS_PER_WORD) {
             self.words.push(0);
         }
         self.len += 1;

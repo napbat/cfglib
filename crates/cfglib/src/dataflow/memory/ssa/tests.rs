@@ -435,3 +435,85 @@ fn the_public_accessors_agree_element_by_element_across_a_reused_scratch() {
         }
     }
 }
+
+/// `entry` writes A, then `protected` holds a faulting store to A, a call
+/// that reports no memory event, and a final store to A. It falls through
+/// to `normal` and unwinds to `handler`, and both read A.
+#[test]
+fn a_handler_reads_the_memory_state_before_each_throwing_instruction() {
+    let mut cfg = Cfg::<Instruction>::new();
+    let protected = cfg.new_block();
+    let normal = cfg.new_block();
+    let handler = cfg.new_block();
+    cfg.add_edge(cfg.entry(), protected, EdgeKind::Fallthrough);
+    cfg.add_edge(protected, normal, EdgeKind::Fallthrough);
+    cfg.add_edge(protected, handler, EdgeKind::ExceptionUnwind);
+    cfg.block_mut(cfg.entry())
+        .push(Instruction::access(Location::A, MemoryAccessKind::Write));
+    cfg.block_mut(protected).instructions_mut().extend([
+        Instruction::access(Location::A, MemoryAccessKind::Write).unwinding(),
+        Instruction::plain(Vec::new(), Vec::new()).unwinding(),
+        Instruction::access(Location::A, MemoryAccessKind::Write),
+    ]);
+    cfg.block_mut(normal)
+        .push(Instruction::access(Location::A, MemoryAccessKind::Read));
+    cfg.block_mut(handler)
+        .push(Instruction::access(Location::A, MemoryAccessKind::Read));
+
+    let memory = MemorySSA::compute(&cfg, &ExactMemoryAlias);
+    assert_eq!(
+        memory.reaching_definition(site(normal, 0)),
+        Some(&MemoryDefinition::Event {
+            site: site(protected, 2),
+        })
+    );
+    let Some(MemoryDefinition::Phi { block, .. }) = memory.reaching_definition(site(handler, 0))
+    else {
+        panic!("the handler merges the states its throws observe");
+    };
+    assert_eq!(*block, handler);
+    let phi = memory
+        .phis()
+        .iter()
+        .find(|phi| phi.block() == handler)
+        .expect("the handler holds the merge");
+    let operands: Vec<_> = phi
+        .operands()
+        .iter()
+        .map(|(departure, value)| (*departure, memory.definition(value).cloned()))
+        .collect();
+    assert_eq!(
+        operands,
+        [
+            (
+                ProgramPoint {
+                    block: protected,
+                    inst_idx: 0,
+                },
+                Some(MemoryDefinition::Event {
+                    site: site(cfg.entry(), 0),
+                }),
+            ),
+            (
+                ProgramPoint {
+                    block: protected,
+                    inst_idx: 1,
+                },
+                Some(MemoryDefinition::Event {
+                    site: site(protected, 0),
+                }),
+            ),
+        ],
+        "the faulting store reaches only the later call, and the final store neither"
+    );
+    assert_eq!(
+        memory.transitive_readers(site(protected, 0)),
+        [site(handler, 0)],
+        "the call that follows the store unwinds with it"
+    );
+    assert_eq!(
+        memory.transitive_readers(site(protected, 2)),
+        [site(normal, 0)],
+        "no unwind observes the final store"
+    );
+}

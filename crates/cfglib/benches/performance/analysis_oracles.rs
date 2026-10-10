@@ -352,7 +352,13 @@ pub(super) fn assert_phi_placements(
         assert_eq!(at_merge.len(), variable_count);
         for (variable, placement) in at_merge.iter().enumerate() {
             assert_eq!(placement.variable, fixture_u32(variable));
-            assert_eq!(placement.predecessors, [left, right]);
+            assert_eq!(
+                placement.predecessors,
+                [left, right].map(|block| ProgramPoint {
+                    block,
+                    inst_idx: variable_count,
+                })
+            );
         }
     }
     for index in 0..=3 * layer_count {
@@ -396,9 +402,15 @@ pub(super) fn assert_phi_ssa(
             assert_eq!(
                 phi.operands
                     .iter()
-                    .map(|(block, _)| *block)
+                    .map(|(point, _)| *point)
                     .collect::<Vec<_>>(),
-                source.predecessors(block_id).collect::<Vec<_>>()
+                source
+                    .predecessors(block_id)
+                    .map(|block| ProgramPoint {
+                        block,
+                        inst_idx: source.block(block).instructions().len(),
+                    })
+                    .collect::<Vec<_>>()
             );
             assert!(
                 phi.operands

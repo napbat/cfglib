@@ -364,7 +364,7 @@ fn compute_with_diff_reports_no_change_for_a_redundant_edge() {
     // A second entry→a edge doesn't change dominators.
     cfg.add_edge(cfg.entry(), a, EdgeKind::ConditionalTrue);
     let (_next, changed) = DominatorTree::compute_with_diff(&cfg, &dom);
-    assert!(changed.is_empty());
+    assert_eq!(changed, [] as [crate::BlockId; 0]);
 }
 
 #[test]

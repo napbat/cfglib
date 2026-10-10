@@ -22,10 +22,11 @@ extern crate alloc;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
-use super::InstrInfo;
 use super::liveness::Liveness;
+use super::{InstrInfo, ProgramPoint, first_unwind_point, unwind_reach};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
+use crate::graph::dominator::{AnalysisDepths, DominatorTree};
 
 /// Borrowed pairwise alias definitions and their corresponding value sources.
 pub type AliasPairs<'a, V> = (&'a [V], &'a [V]);
@@ -111,6 +112,74 @@ fn pairs<I: CopySource>(
     (!definitions.is_empty() && definitions.len() == uses.len()).then_some((definitions, uses))
 }
 
+/// Whether every execution reaching one program point has executed another.
+///
+/// Instruction order answers within a block and the dominator tree across
+/// blocks, with one refinement: an unwind leaves its block before a throwing
+/// instruction. A point at or after its block's first throwing instruction
+/// therefore does not dominate a block that an unwind out of its block
+/// reaches without passing through that block again.
+struct PointDominance<'g, I, E> {
+    cfg: &'g Cfg<I, E>,
+    dominators: DominatorTree,
+    /// One depth table for the whole pass: a dominance query then rejects a
+    /// deeper candidate outright instead of walking the idom chain, so a
+    /// long chain of blocks costs the pass nothing quadratic.
+    depths: AnalysisDepths,
+    /// Per block, the first instruction an unwind out of it leaves before.
+    first_unwind: Vec<Option<usize>>,
+    /// Per block asked about so far, the blocks an unwind out of it reaches
+    /// without re-entering it.
+    unwind_reach: BTreeMap<BlockId, Vec<bool>>,
+}
+
+impl<'g, I: InstrInfo, E> PointDominance<'g, I, E> {
+    fn compute(cfg: &'g Cfg<I, E>) -> Self {
+        let dominators = DominatorTree::compute(cfg);
+        let depths = dominators.analysis_depths();
+        let mut first_unwind = alloc::vec![None; cfg.block_bound()];
+        for block in cfg.block_ids() {
+            first_unwind[block.index()] = first_unwind_point(cfg, block);
+        }
+        Self {
+            cfg,
+            dominators,
+            depths,
+            first_unwind,
+            unwind_reach: BTreeMap::new(),
+        }
+    }
+
+    fn is_reachable(&self, block: BlockId) -> bool {
+        self.dominators.is_reachable(block)
+    }
+
+    /// Whether every execution reaching `point` has executed `dominator`.
+    fn dominates(&mut self, dominator: ProgramPoint, point: ProgramPoint) -> bool {
+        if dominator.block == point.block {
+            return dominator.inst_idx < point.inst_idx;
+        }
+        if !self.dominators.dominates_with_analysis_depths(
+            dominator.block,
+            point.block,
+            &self.depths,
+        ) {
+            return false;
+        }
+        let unwinds_before = self.first_unwind[dominator.block.index()]
+            .is_some_and(|first| first <= dominator.inst_idx);
+        !unwinds_before || !self.after_unwind(dominator.block)[point.block.index()]
+    }
+
+    /// The blocks an unwind out of `block` reaches without re-entering it.
+    fn after_unwind(&mut self, block: BlockId) -> &[bool] {
+        let cfg = self.cfg;
+        self.unwind_reach
+            .entry(block)
+            .or_insert_with(|| unwind_reach(cfg, block))
+    }
+}
+
 /// The provably value-preserving substitutions of the selected transfers,
 /// with chains resolved: each admitted `dst → src` satisfies the
 /// sole-definition, stable-source, and dominated-uses guards, and
@@ -120,12 +189,12 @@ fn sound_substitutions<I: CopySource, E>(
     cfg: &Cfg<I, E>,
     propagation: Propagation,
 ) -> BTreeMap<I::Variable, Substitution<I::Variable>> {
-    let mut def_sites: BTreeMap<I::Variable, Vec<super::ProgramPoint>> = BTreeMap::new();
-    let mut use_sites: BTreeMap<I::Variable, Vec<super::ProgramPoint>> = BTreeMap::new();
+    let mut def_sites: BTreeMap<I::Variable, Vec<ProgramPoint>> = BTreeMap::new();
+    let mut use_sites: BTreeMap<I::Variable, Vec<ProgramPoint>> = BTreeMap::new();
     for block_id in cfg.block_ids() {
         let block = cfg.block(block_id);
         for (inst_idx, inst) in block.instructions().iter().enumerate() {
-            let point = super::ProgramPoint {
+            let point = ProgramPoint {
                 block: block_id,
                 inst_idx,
             };
@@ -137,19 +206,7 @@ fn sound_substitutions<I: CopySource, E>(
             }
         }
     }
-    let dom = crate::DominatorTree::compute(cfg);
-    // One depth table for the whole pass: a dominance query then rejects
-    // a deeper candidate outright instead of walking the idom chain, so a
-    // long chain of blocks costs the pass nothing quadratic.
-    let depths = dom.analysis_depths();
-    let point_dominates = |a: super::ProgramPoint, b: super::ProgramPoint| {
-        if a.block == b.block {
-            a.inst_idx < b.inst_idx
-        } else {
-            dom.dominates_with_analysis_depths(a.block, b.block, &depths)
-        }
-    };
-
+    let mut dominance = PointDominance::compute(cfg);
     let mut substitutions = BTreeMap::new();
     for block_id in cfg.block_ids() {
         let block = cfg.block(block_id);
@@ -157,10 +214,10 @@ fn sound_substitutions<I: CopySource, E>(
             let Some((definitions, uses)) = pairs(inst, propagation) else {
                 continue;
             };
-            if !dom.is_reachable(block_id) {
+            if !dominance.is_reachable(block_id) {
                 continue;
             }
-            let alias_point = super::ProgramPoint {
+            let alias_point = ProgramPoint {
                 block: block_id,
                 inst_idx,
             };
@@ -175,7 +232,7 @@ fn sound_substitutions<I: CopySource, E>(
                 // `src` must hold one stable value wherever `dst` is read.
                 match def_sites.get(&src).map(Vec::as_slice) {
                     None | Some([]) => {}
-                    Some([site]) if point_dominates(*site, alias_point) => {}
+                    Some([site]) if dominance.dominates(*site, alias_point) => {}
                     Some(_) => continue,
                 }
                 // Every use of `dst` must see this alias. A same-instruction
@@ -184,7 +241,7 @@ fn sound_substitutions<I: CopySource, E>(
                 let dominated = use_sites.get(&dst).is_none_or(|sites| {
                     sites
                         .iter()
-                        .all(|&site| site == alias_point || point_dominates(alias_point, site))
+                        .all(|&site| site == alias_point || dominance.dominates(alias_point, site))
                 });
                 if !dominated {
                     continue;
@@ -354,14 +411,14 @@ fn propagate<I: CopySource + Clone, E>(
 /// leaving such copies in place. Single-assignment input satisfies every
 /// guard, so SSA consumers see the previous behavior unchanged.
 ///
-/// Dominance is judged at block granularity, which relies on the
-/// standard well-formedness assumption that every use is reached only
-/// after its definition executed (verifier-checked bytecode and
-/// compiler-produced graphs guarantee this). A path that entered the
-/// copy's block but left through a mid-block exceptional exit before the
-/// copy cannot reach a use of the destination: the copy is the
-/// destination's only definition, so such a use would read an
-/// unassigned variable.
+/// Dominance is judged per program point: by instruction order within a
+/// block and by the dominator tree across blocks. An
+/// [`ExceptionUnwind`](crate::EdgeKind::ExceptionUnwind) edge leaves its
+/// block before each instruction that
+/// [`may_unwind`](InstrInfo::may_unwind), so a site at or after its block's
+/// first such instruction does not dominate what the unwind reaches
+/// without passing through that block again. A handler that reads the
+/// destination therefore keeps reading the value it held before the copy.
 ///
 /// Returns the number of rewrites and removals.
 pub fn copy_propagation<I: CopySource + Clone, E>(cfg: &mut Cfg<I, E>) -> CopyPropagationStats {
@@ -418,7 +475,10 @@ mod tests {
     use super::*;
     use crate::cfg::Cfg;
     use crate::edge::EdgeKind;
-    use crate::test_util::{DfInst, UdInst, df_copy, df_def, df_use, ud_inst};
+    use crate::flow::FlowEffect;
+    use crate::test_util::{
+        DfInst, UdInst, df_copy, df_def, df_ff, df_use, df_with_effect, ud_inst,
+    };
 
     /// Whether the mock instruction is a pairwise alias set.
     #[derive(Debug, Clone, Copy)]
@@ -713,5 +773,55 @@ mod tests {
         assert_eq!(result.aliases_removed, 0);
         let alias = &cfg.block(cfg.entry()).instructions()[0];
         assert_eq!(alias.uses, [0, 1]);
+    }
+
+    /// `entry: def r0`, then `protected` holding `instructions`, which falls
+    /// through to `normal` and unwinds to `handler`; both read r1. Returns
+    /// `(cfg, normal, handler)`.
+    fn protected_copy(
+        instructions: impl IntoIterator<Item = DfInst>,
+    ) -> (Cfg<DfInst>, BlockId, BlockId) {
+        let mut cfg: Cfg<DfInst> = Cfg::new();
+        let protected = cfg.new_block();
+        let normal = cfg.new_block();
+        let handler = cfg.new_block();
+        cfg.add_edge(cfg.entry(), protected, EdgeKind::Fallthrough);
+        cfg.add_edge(protected, normal, EdgeKind::Fallthrough);
+        cfg.add_edge(protected, handler, EdgeKind::ExceptionUnwind);
+        cfg.block_mut(cfg.entry()).push(df_def("def_r0", 0));
+        cfg.block_mut(protected)
+            .instructions_mut()
+            .extend(instructions);
+        cfg.block_mut(normal).push(df_use("success", 1));
+        cfg.block_mut(handler).push(df_use("catch", 1));
+        (cfg, normal, handler)
+    }
+
+    fn call() -> DfInst {
+        df_with_effect(df_ff("call"), FlowEffect::MayThrow)
+    }
+
+    #[test]
+    fn a_copy_after_a_throw_does_not_reach_the_handler() {
+        let (mut cfg, normal, handler) = protected_copy([call(), df_copy("mov", 1, 0)]);
+
+        let result = copy_propagation(&mut cfg);
+
+        assert_eq!(result.uses_rewritten, 0, "the handler reads r1 as it was");
+        assert_eq!(result.copies_removed, 0);
+        assert_eq!(cfg.block(handler).instructions()[0].uses, [1]);
+        assert_eq!(cfg.block(normal).instructions()[0].uses, [1]);
+    }
+
+    #[test]
+    fn a_copy_before_a_throw_reaches_both_successors() {
+        let (mut cfg, normal, handler) = protected_copy([df_copy("mov", 1, 0), call()]);
+
+        let result = copy_propagation(&mut cfg);
+
+        assert_eq!(result.uses_rewritten, 2);
+        assert_eq!(result.copies_removed, 1);
+        assert_eq!(cfg.block(handler).instructions()[0].uses, [0]);
+        assert_eq!(cfg.block(normal).instructions()[0].uses, [0]);
     }
 }

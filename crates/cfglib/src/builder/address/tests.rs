@@ -670,7 +670,10 @@ fn flattened_calls_continue_in_their_block_and_are_reported() {
             },
         ]
     );
-    assert!(graph.unresolved_transfers.is_empty());
+    assert_eq!(
+        graph.unresolved_transfers,
+        [] as [crate::flow::transfer::UnresolvedTransfer<u32>; 0]
+    );
 }
 
 #[test]

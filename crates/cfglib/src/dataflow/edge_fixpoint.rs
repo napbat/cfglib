@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use core::convert::Infallible;
 
 use crate::dataflow::fixpoint::{
-    Direction, SolveConfig, SolveError, TrySolveError, collapse_infallible,
+    Direction, Facts, SolveConfig, SolveError, TrySolveError, collapse_infallible,
 };
 use crate::graph::edge_view::{EdgeRef, EdgeView};
 use crate::graph::view::DenseId;
@@ -319,6 +319,15 @@ impl<F> EdgeFacts<F> {
     pub const fn steps(&self) -> usize {
         self.steps
     }
+
+    /// The node facts of a solve over a [`Cfg`](crate::Cfg), as its block
+    /// facts.
+    ///
+    /// A CFG's nodes are its blocks, indexed alike, so each block keeps its
+    /// own physical input and output. The edge facts are dropped.
+    pub(crate) fn into_block_facts(self) -> Facts<F> {
+        Facts::from_parts(self.node_input, self.node_output, self.steps)
+    }
 }
 
 /// Solve an edge-sensitive problem to a fixpoint without a step limit.
@@ -530,15 +539,15 @@ where
 
     let mut steps = 0;
     while let Some(node_index) = worklist.pop_first() {
-        if let Some(limit) = config.max_steps() {
-            if steps >= limit {
-                return Err(SolveError::StepLimitExceeded {
-                    limit,
-                    steps,
-                    pending_node: node_index,
-                }
-                .into());
+        if let Some(limit) = config.max_steps()
+            && steps >= limit
+        {
+            return Err(SolveError::StepLimitExceeded {
+                limit,
+                steps,
+                pending_node: node_index,
             }
+            .into());
         }
         steps += 1;
         let node = G::NodeId::from_index(node_index);
@@ -609,7 +618,10 @@ where
 // The solver's per-node step borrows each state slice separately so the
 // worklist loop can keep disjoint mutable borrows; bundling them into a
 // struct would force the loop to re-borrow the whole solver state.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "internal solver step threads all solver state explicitly"
+)]
 fn try_solve_forward_node<G, P>(
     graph: &G,
     problem: &P,
@@ -650,7 +662,10 @@ where
 }
 
 // Same disjoint-borrow constraint as `try_solve_forward_node`.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "internal solver step threads all solver state explicitly"
+)]
 fn try_solve_backward_node<G, P>(
     graph: &G,
     problem: &P,

@@ -439,7 +439,7 @@ fn register_loops(suite: &mut BenchmarkSuite<'_>) {
         "api_find_loop_invariants",
         covers[find_loop_invariants],
         || find_loop_invariants(&cfg, &natural_loop),
-        |invariants: &Vec<_>| assert!(!invariants.is_empty())
+        |invariants: &Vec<_>| assert_ne!(invariants.as_slice(), [])
     );
     benchmark_case!(
         suite,
@@ -479,7 +479,10 @@ fn register_frontend_utilities(suite: &mut BenchmarkSuite<'_>) {
         },
         |(candidate, resolution)| {
             assert_eq!(resolution.resolved, 1);
-            assert!(resolution.unresolved.is_empty());
+            assert_eq!(
+                resolution.unresolved,
+                [] as [(cfglib::Id<cfglib::BlockTag>, u32); 0]
+            );
             assert!(verify(candidate).is_ok());
         }
     );

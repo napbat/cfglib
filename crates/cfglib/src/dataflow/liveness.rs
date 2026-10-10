@@ -12,11 +12,19 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use super::fixpoint::{Direction, Facts, Problem};
-use super::{InstrInfo, VariableId};
+use super::{InstrInfo, VariableId, departs_before_throws, first_unwind_point};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
+use crate::edge::EdgeKind;
 
 /// The liveness problem.
+///
+/// A block-level fact cannot separate what an unwind successor reads from
+/// what a normal successor reads. Each instruction that
+/// [`may_unwind`](InstrInfo::may_unwind) toward an unwind successor therefore
+/// keeps everything live after the block live before it. That is sound but
+/// coarser than [`Liveness`], which reads unwind successors only before
+/// throwing instructions and normal successors only after the block.
 pub struct LivenessProblem;
 
 impl<I: InstrInfo, E> Problem<I, E> for LivenessProblem {
@@ -44,11 +52,7 @@ impl<I: InstrInfo, E> Problem<I, E> for LivenessProblem {
     /// Walk the block's instructions in **reverse** to compute the
     /// set of variables live at the block's entry.
     fn transfer(&self, cfg: &Cfg<I, E>, block: BlockId, live_out: &Self::Fact) -> Self::Fact {
-        let mut live = live_out.clone();
-        for inst in cfg.block(block).instructions().iter().rev() {
-            backward_transfer(&mut live, inst);
-        }
-        live
+        backward_block(cfg, block, live_out.clone(), live_out)
     }
 }
 
@@ -61,10 +65,11 @@ impl<I: InstrInfo, E> Problem<I, E> for LivenessProblem {
 /// states it here rather than patching a fake reader into the graph.
 ///
 /// The seed of a block joins its live-out set before the block's backward
-/// transfer runs, so the solve is otherwise [`LivenessProblem`]. Seeding a
-/// block with successors is meaningful and additive — the seed joins what
-/// flows back from them — but a caller normally seeds the blocks with no
-/// successors and answers with an empty vector everywhere else.
+/// transfer runs, so the solve is otherwise [`LivenessProblem`], including
+/// its coarse treatment of unwinds. Seeding a block with successors is
+/// meaningful and additive — the seed joins what flows back from them — but
+/// a caller normally seeds the blocks with no successors and answers with an
+/// empty vector everywhere else.
 ///
 /// The seeds join the transfer, not the meet, so the facts a raw solve
 /// returns carry only what flows back from a block's successors.
@@ -111,11 +116,29 @@ where
     fn transfer(&self, cfg: &Cfg<I, E>, block: BlockId, live_out: &Self::Fact) -> Self::Fact {
         let mut live = live_out.clone();
         live.extend((self.live_out)(block));
-        for inst in cfg.block(block).instructions().iter().rev() {
-            backward_transfer(&mut live, inst);
-        }
-        live
+        backward_block(cfg, block, live, live_out)
     }
+}
+
+/// One block's backward transfer for the block-level problems, from `live`
+/// at its end.
+///
+/// A throwing instruction keeps every variable of `successors` live before
+/// it, because an unwind successor's reads are among them.
+fn backward_block<I: InstrInfo, E>(
+    cfg: &Cfg<I, E>,
+    block: BlockId,
+    mut live: BTreeSet<I::Variable>,
+    successors: &BTreeSet<I::Variable>,
+) -> BTreeSet<I::Variable> {
+    let unwinds = first_unwind_point(cfg, block).is_some();
+    for instruction in cfg.block(block).instructions().iter().rev() {
+        backward_transfer(&mut live, instruction);
+        if unwinds && instruction.may_unwind() {
+            live.extend(successors.iter().cloned());
+        }
+    }
+    live
 }
 
 /// One instruction's backward step: kill its defs, then gen its uses.
@@ -167,12 +190,9 @@ impl<V: Ord + Clone> Universe<V> {
 /// Solves liveness and returns the facts of every block, with the seed of a
 /// block in its live-out set.
 ///
-/// The fixpoint is the one that [`SeededLivenessProblem`] reaches: the
-/// live-in set of a block is what it reads before it writes, joined with
-/// what its live-out set and its seed hold minus what it writes. Only the
-/// representation differs. Each block holds a row of words with one bit for
-/// each variable that the graph or a seed names, so a join or a comparison
-/// costs a few word operations instead of a set rebuild.
+/// Normal departures use all completed definitions. Unwind departures use
+/// only definitions before the first possible unwind. The block's reads
+/// join both paths. Bit rows keep the repeated joins allocation-free.
 fn solve<I: InstrInfo, E>(
     cfg: &Cfg<I, E>,
     live_out: impl Fn(BlockId) -> Vec<I::Variable>,
@@ -199,10 +219,28 @@ fn solve<I: InstrInfo, E>(
     let mut reads = alloc::vec![0u64; bound * words];
     let mut writes = alloc::vec![0u64; bound * words];
     let mut seeded = alloc::vec![0u64; bound * words];
+    let has_unwind = cfg
+        .edges()
+        .any(|edge| edge.kind() == EdgeKind::ExceptionUnwind);
+    // Per block, whether an instruction may unwind, and the writes before
+    // the first one: the only writes every unwind departure has completed.
+    let mut unwinding = alloc::vec![false; if has_unwind { bound } else { 0 }];
+    let mut before_unwind = alloc::vec![0u64; if has_unwind { bound * words } else { 0 }];
     for block in cfg.block_ids() {
         let index = block.index();
         for variable in &seeds[index] {
             universe.insert(&mut seeded[row(index)], variable);
+        }
+        if has_unwind {
+            for instruction in cfg.block(block).instructions() {
+                if instruction.may_unwind() {
+                    unwinding[index] = true;
+                    break;
+                }
+                for variable in instruction.defs() {
+                    universe.insert(&mut before_unwind[row(index)], variable);
+                }
+            }
         }
         for instruction in cfg.block(block).instructions().iter().rev() {
             for variable in instruction.defs() {
@@ -223,6 +261,7 @@ fn solve<I: InstrInfo, E>(
         queued[block.index()] = true;
     }
     let mut next = alloc::vec![0u64; words];
+    let mut unwind_out = alloc::vec![0u64; if has_unwind { words } else { 0 }];
     let mut steps = 0;
     while let Some(block) = worklist.pop() {
         steps += 1;
@@ -230,14 +269,28 @@ fn solve<I: InstrInfo, E>(
         queued[index] = false;
         let out = &mut flowing_out[row(index)];
         out.fill(0);
-        for successor in cfg.successors(block) {
-            for (word, from) in out.iter_mut().zip(&live_in[row(successor.index())]) {
+        unwind_out.fill(0);
+        for edge in cfg.outgoing(block) {
+            let edge = cfg.edge(edge);
+            let destination =
+                if has_unwind && unwinding[index] && edge.kind() == EdgeKind::ExceptionUnwind {
+                    &mut unwind_out[..]
+                } else {
+                    &mut out[..]
+                };
+            for (word, from) in destination
+                .iter_mut()
+                .zip(&live_in[row(edge.target().index())])
+            {
                 *word |= *from;
             }
         }
         for (position, word) in next.iter_mut().enumerate() {
             let at = index * words + position;
             *word = ((out[position] | seeded[at]) & !writes[at]) | reads[at];
+            if has_unwind {
+                *word |= unwind_out[position] & !before_unwind[at];
+            }
         }
         if next[..] != live_in[row(index)] {
             live_in[row(index)].copy_from_slice(&next);
@@ -330,7 +383,10 @@ impl<V: VariableId> Liveness<V> {
         self.inner.fact_in(block)
     }
 
-    /// Variables live at the **exit** of a block.
+    /// Variables live after normal completion of a block.
+    ///
+    /// An unwind that leaves before a throwing instruction does not read this
+    /// set; [`live_on_unwind`](Self::live_on_unwind) is what it reads.
     #[must_use]
     pub fn live_out(&self, block: BlockId) -> &BTreeSet<V> {
         self.inner.fact_out(block)
@@ -342,7 +398,7 @@ impl<V: VariableId> Liveness<V> {
         self.live_in(block).contains(variable)
     }
 
-    /// Check if a variable is live at a block's exit.
+    /// Check if a variable is live after normal completion of a block.
     #[must_use]
     pub fn is_live_out(&self, variable: &V, block: BlockId) -> bool {
         self.live_out(block).contains(variable)
@@ -353,8 +409,10 @@ impl<V: VariableId> Liveness<V> {
     /// Element `i` is the live set at the point just before instruction `i`;
     /// for a non-empty block the first element equals
     /// [`live_in`](Self::live_in). Computed on demand by replaying the
-    /// block's backward transfer from [`live_out`](Self::live_out), exactly
-    /// as the block-level fixpoint did.
+    /// block's backward transfer from [`live_out`](Self::live_out). An
+    /// instruction that may unwind also keeps
+    /// [`live_on_unwind`](Self::live_on_unwind) live before it, since the
+    /// unwind leaves before its definitions complete.
     #[must_use]
     pub fn live_before_instructions<I: InstrInfo<Variable = V>, E>(
         &self,
@@ -364,8 +422,12 @@ impl<V: VariableId> Liveness<V> {
         let instructions = cfg.block(block).instructions();
         let mut sets = alloc::vec![BTreeSet::new(); instructions.len()];
         let mut live = self.live_out(block).clone();
+        let unwind = self.live_on_unwind(cfg, block);
         for (index, instruction) in instructions.iter().enumerate().rev() {
             backward_transfer(&mut live, instruction);
+            if instruction.may_unwind() {
+                live.extend(unwind.iter().cloned());
+            }
             sets[index].clone_from(&live);
         }
         sets
@@ -373,11 +435,12 @@ impl<V: VariableId> Liveness<V> {
 
     /// Variables live immediately **after** each instruction of `block`.
     ///
-    /// Element `i` is the live set at the point just after instruction `i`;
-    /// for a non-empty block the last element equals
+    /// Element `i` is the live set at the point just after instruction `i`
+    /// completes normally; for a non-empty block the last element equals
     /// [`live_out`](Self::live_out). A definition at instruction `i` whose
     /// variable is absent from element `i` is a dead store within this
-    /// analysis's precision.
+    /// analysis's precision: an unwind out of instruction `i` never observes
+    /// that definition.
     #[must_use]
     pub fn live_after_instructions<I: InstrInfo<Variable = V>, E>(
         &self,
@@ -387,11 +450,39 @@ impl<V: VariableId> Liveness<V> {
         let instructions = cfg.block(block).instructions();
         let mut sets = alloc::vec![BTreeSet::new(); instructions.len()];
         let mut live = self.live_out(block).clone();
+        let unwind = self.live_on_unwind(cfg, block);
         for (index, instruction) in instructions.iter().enumerate().rev() {
             sets[index].clone_from(&live);
             backward_transfer(&mut live, instruction);
+            if instruction.may_unwind() {
+                live.extend(unwind.iter().cloned());
+            }
         }
         sets
+    }
+
+    /// Variables an unwind out of `block` can read.
+    ///
+    /// This is the live-in of every unwind successor whose edge departs
+    /// before a throwing instruction. Each instruction of `block` that
+    /// [`may_unwind`](InstrInfo::may_unwind) keeps the set live before it.
+    /// An unwind out of a block that reports no throwing instruction departs
+    /// after the block, so its successors are in
+    /// [`live_out`](Self::live_out) instead and this set is empty.
+    #[must_use]
+    pub fn live_on_unwind<I: InstrInfo<Variable = V>, E>(
+        &self,
+        cfg: &Cfg<I, E>,
+        block: BlockId,
+    ) -> BTreeSet<V> {
+        let mut live = BTreeSet::new();
+        for edge in cfg.outgoing(block) {
+            let edge = cfg.edge(edge);
+            if departs_before_throws(cfg, edge) {
+                live.extend(self.live_in(edge.target()).iter().cloned());
+            }
+        }
+        live
     }
 
     /// All variables that are live somewhere in the program.
@@ -617,5 +708,68 @@ mod tests {
             live.is_live_in(&99, exit),
             "a seed nothing defines stays live"
         );
+    }
+
+    /// `entry → protected`, which falls through to `normal` and unwinds to
+    /// `handler`, with `instructions` in `protected`.
+    fn protected_region(
+        instructions: impl IntoIterator<Item = crate::test_util::DfInst>,
+    ) -> (Cfg<crate::test_util::DfInst>, [BlockId; 3]) {
+        let mut cfg = Cfg::new();
+        let protected = cfg.new_block();
+        let normal = cfg.new_block();
+        let handler = cfg.new_block();
+        cfg.add_edge(cfg.entry(), protected, EdgeKind::Fallthrough);
+        cfg.add_edge(protected, normal, EdgeKind::Fallthrough);
+        cfg.add_edge(protected, handler, EdgeKind::ExceptionUnwind);
+        cfg.block_mut(protected)
+            .instructions_mut()
+            .extend(instructions);
+        (cfg, [protected, normal, handler])
+    }
+
+    fn call() -> crate::test_util::DfInst {
+        df_with_effect(df_ff("call"), FlowEffect::MayThrow)
+    }
+
+    #[test]
+    fn each_throw_keeps_live_only_the_writes_it_has_completed() {
+        let (mut cfg, [protected, _, handler]) = protected_region([
+            def("first", 0),
+            call(),
+            def("second", 0),
+            call(),
+            def("third", 0),
+        ]);
+        cfg.block_mut(handler).push(use_("catch", 0));
+
+        let live = Liveness::compute(&cfg);
+        let after = live.live_after_instructions(&cfg, protected);
+        assert!(after[0].contains(&0), "the first call unwinds with it");
+        assert!(after[2].contains(&0), "the second call unwinds with it");
+        assert!(!after[4].contains(&0), "no unwind observes the last write");
+        assert!(
+            !live.is_live_in(&0, protected),
+            "every unwind follows a write"
+        );
+        assert!(
+            !live.is_live_out(&0, protected),
+            "the normal path never reads it"
+        );
+        assert_eq!(live.live_on_unwind(&cfg, protected), BTreeSet::from([0]));
+    }
+
+    #[test]
+    fn a_normal_read_is_not_live_before_a_throw_that_precedes_its_write() {
+        let (mut cfg, [protected, normal, _]) = protected_region([call(), def("result", 0)]);
+        cfg.block_mut(normal).push(use_("success", 0));
+
+        let live = Liveness::compute(&cfg);
+        assert!(live.is_live_out(&0, protected));
+        assert!(
+            !live.is_live_in(&0, protected),
+            "the handler never reads it"
+        );
+        assert!(live.live_before_instructions(&cfg, protected)[0].is_empty());
     }
 }

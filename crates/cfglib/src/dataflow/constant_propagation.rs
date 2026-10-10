@@ -8,14 +8,19 @@
 //! The constant domain `C` is consumer-typed via
 //! [`ConstantFolder::Const`] — a machine word for a binary adapter, a
 //! literal enum (int/float/string/bool) for a source language.
+//!
+//! An unwind that leaves its block before a throwing instruction carries
+//! the constants known before that instruction, so the solve runs on the
+//! [edge-sensitive solver](super::edge_fixpoint).
 
 extern crate alloc;
 use alloc::collections::BTreeMap;
 
-use super::InstrInfo;
-use super::fixpoint::{self, Direction, Facts, Problem};
+use super::edge_fixpoint::{self, EdgeProblem};
+use super::fixpoint::{Direction, Facts};
+use super::{InstrInfo, departs_before_throws};
 use crate::block::BlockId;
-use crate::cfg::Cfg;
+use crate::cfg::{Cfg, CfgEdge};
 
 /// The lattice value for a single variable, over constant domain `C`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -146,36 +151,38 @@ pub trait ConstantFolder: InstrInfo {
 }
 
 /// The constant propagation problem.
+///
+/// A normal edge carries the constants known at its source's end. An edge
+/// that leaves before throwing instructions carries the meet of the
+/// constants known before each of them, so a throwing instruction's own
+/// definitions and every later one in its block never reach the handler.
 pub struct ConstPropProblem;
 
 /// The flow fact: a map from variable to lattice value.
 pub type ConstFact<V, C> = BTreeMap<V, ConstValue<C>>;
 
-impl<I: ConstantFolder, E> Problem<I, E> for ConstPropProblem {
-    type Fact = ConstFact<I::Variable, I::Const>;
-
-    fn direction(&self) -> Direction {
-        Direction::Forward
-    }
-
-    fn bottom(&self) -> Self::Fact {
-        BTreeMap::new()
-    }
-
-    fn entry_fact(&self) -> Self::Fact {
-        BTreeMap::new()
-    }
-
-    fn meet(&self, a: &Self::Fact, b: &Self::Fact) -> Self::Fact {
-        let mut result = a.clone();
-        for (variable, value) in b {
+impl ConstPropProblem {
+    /// Meets two facts variable by variable through the domain's meet.
+    fn meet_facts<I: ConstantFolder>(
+        left: &ConstFact<I::Variable, I::Const>,
+        right: &ConstFact<I::Variable, I::Const>,
+    ) -> ConstFact<I::Variable, I::Const> {
+        let mut result = left.clone();
+        for (variable, value) in right {
             let entry = result.entry(variable.clone()).or_insert(ConstValue::Top);
             *entry = entry.clone().meet_with(value.clone(), I::meet_constants);
         }
         result
     }
 
-    fn transfer(&self, cfg: &Cfg<I, E>, block: BlockId, input: &Self::Fact) -> Self::Fact {
+    /// Replays `block` over the constants known at its entry, handing the
+    /// state before each throwing instruction to `before_unwind`.
+    fn replay<I: ConstantFolder, E>(
+        cfg: &Cfg<I, E>,
+        block: BlockId,
+        input: &ConstFact<I::Variable, I::Const>,
+        mut before_unwind: impl FnMut(&ConstFact<I::Variable, I::Const>),
+    ) -> ConstFact<I::Variable, I::Const> {
         let mut state = input.clone();
         let mut known: BTreeMap<I::Variable, I::Const> = state
             .iter()
@@ -187,6 +194,9 @@ impl<I: ConstantFolder, E> Problem<I, E> for ConstPropProblem {
             .collect();
 
         for inst in cfg.block(block).instructions() {
+            if inst.may_unwind() {
+                before_unwind(&state);
+            }
             // Try constant folding. The folder answers for ONE def, but a
             // multi-def instruction redefined its co-defined variables too:
             // bottom every def first so no stale constant survives, then
@@ -206,7 +216,52 @@ impl<I: ConstantFolder, E> Problem<I, E> for ConstPropProblem {
     }
 }
 
+impl<I: ConstantFolder, E> EdgeProblem<Cfg<I, E>> for ConstPropProblem {
+    type Fact = ConstFact<I::Variable, I::Const>;
+
+    fn direction(&self) -> Direction {
+        Direction::Forward
+    }
+
+    fn bottom(&self, _cfg: &Cfg<I, E>) -> Self::Fact {
+        BTreeMap::new()
+    }
+
+    fn meet(&self, left: &Self::Fact, right: &Self::Fact) -> Self::Fact {
+        Self::meet_facts::<I>(left, right)
+    }
+
+    fn transfer_node(&self, cfg: &Cfg<I, E>, block: BlockId, input: &Self::Fact) -> Self::Fact {
+        Self::replay(cfg, block, input, |_| {})
+    }
+
+    fn transfer_edge(
+        &self,
+        cfg: &Cfg<I, E>,
+        edge: CfgEdge<'_, E>,
+        input: &Self::Fact,
+        output: &Self::Fact,
+    ) -> Self::Fact {
+        if !departs_before_throws(cfg, edge) {
+            return output.clone();
+        }
+        let mut departing: Option<Self::Fact> = None;
+        Self::replay(cfg, edge.source(), input, |state| {
+            departing = Some(match departing.take() {
+                None => state.clone(),
+                Some(earlier) => Self::meet_facts::<I>(&earlier, state),
+            });
+        });
+        departing.expect("an edge departing before throws leaves a block that may unwind")
+    }
+}
+
 /// Run constant propagation on the CFG.
+///
+/// Blocks unreachable from the entry keep empty facts and contribute
+/// nothing to the blocks they branch to. A block's entry fact meets every
+/// incoming edge, and an unwind edge carries only the constants known
+/// before its source's throwing instructions.
 ///
 /// # Panics
 ///
@@ -216,8 +271,10 @@ impl<I: ConstantFolder, E> Problem<I, E> for ConstPropProblem {
 pub fn constant_propagation<I: ConstantFolder, E>(
     cfg: &Cfg<I, E>,
 ) -> Facts<ConstFact<I::Variable, I::Const>> {
-    fixpoint::solve_problem(cfg, &ConstPropProblem)
+    let reachable = cfg.depth_first_preorder();
+    edge_fixpoint::solve_edge_problem_from(cfg, &ConstPropProblem, &reachable)
         .expect("an unbounded solve cannot exceed a step limit")
+        .into_block_facts()
 }
 
 #[cfg(test)]
@@ -225,7 +282,10 @@ mod tests {
     use super::*;
     use crate::cfg::Cfg;
     use crate::edge::EdgeKind;
-    use crate::test_util::{DfInst, UdInst, df_const, df_def, df_use, ud_inst};
+    use crate::flow::FlowEffect;
+    use crate::test_util::{
+        DfInst, UdInst, df_const, df_def, df_ff, df_use, df_with_effect, ud_inst,
+    };
 
     #[derive(Debug, Clone, Copy)]
     enum Fold {
@@ -383,5 +443,56 @@ mod tests {
         assert_eq!(out.get(&1), Some(&ConstValue::Const(7)));
         assert_eq!(out.get(&2), Some(&ConstValue::Bottom));
         assert_eq!(out.get(&3), Some(&ConstValue::Const(7)));
+    }
+
+    fn throwing(instruction: DfInst) -> DfInst {
+        df_with_effect(instruction, FlowEffect::MayThrow)
+    }
+
+    /// `entry: x = 1`, then `protected` holding `instructions`, which falls
+    /// through to `normal` and unwinds to `handler`. Returns
+    /// `(cfg, normal, handler)`.
+    fn protected_region(
+        instructions: impl IntoIterator<Item = DfInst>,
+    ) -> (Cfg<DfInst>, BlockId, BlockId) {
+        let mut cfg = Cfg::new();
+        let protected = cfg.new_block();
+        let normal = cfg.new_block();
+        let handler = cfg.new_block();
+        cfg.add_edge(cfg.entry(), protected, EdgeKind::Fallthrough);
+        cfg.add_edge(protected, normal, EdgeKind::Fallthrough);
+        cfg.add_edge(protected, handler, EdgeKind::ExceptionUnwind);
+        cfg.block_mut(cfg.entry()).push(df_const("prior", 0, 1));
+        cfg.block_mut(protected)
+            .instructions_mut()
+            .extend(instructions);
+        (cfg, normal, handler)
+    }
+
+    #[test]
+    fn a_handler_sees_the_constant_before_a_faulting_load() {
+        let (cfg, normal, handler) = protected_region([throwing(df_const("load", 0, 2))]);
+
+        let result = constant_propagation(&cfg);
+        assert_eq!(result.fact_in(handler).get(&0), Some(&ConstValue::Const(1)));
+        assert_eq!(result.fact_in(normal).get(&0), Some(&ConstValue::Const(2)));
+    }
+
+    #[test]
+    fn a_handler_meets_the_constants_each_throw_observes() {
+        let (cfg, normal, handler) = protected_region([
+            throwing(df_ff("first call")),
+            df_const("second value", 0, 2),
+            throwing(df_ff("second call")),
+            df_const("final value", 0, 3),
+        ]);
+
+        let result = constant_propagation(&cfg);
+        assert_eq!(
+            result.fact_in(handler).get(&0),
+            Some(&ConstValue::Bottom),
+            "the first call observes 1 and the second observes 2"
+        );
+        assert_eq!(result.fact_in(normal).get(&0), Some(&ConstValue::Const(3)));
     }
 }

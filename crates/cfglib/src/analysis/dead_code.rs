@@ -23,10 +23,13 @@ pub struct DeadCode {
     /// Instructions whose definitions are never used, in block order and
     /// ascending instruction order within a block.
     ///
-    /// An instruction with declared side effects is never listed, and a dead
-    /// instruction's uses keep nothing alive, so a chain feeding only a dead
-    /// instruction is listed with it. Instructions of unreachable blocks are
-    /// liveness-dead like any other (no live-out ever reaches them).
+    /// An instruction with declared side effects, or one that
+    /// [`may_unwind`](crate::InstrInfo::may_unwind), is never listed, and a
+    /// dead instruction's uses keep nothing alive, so a chain feeding only a
+    /// dead instruction is listed with it. A throwing instruction keeps what
+    /// its unwind successors read live before it. Instructions of
+    /// unreachable blocks are liveness-dead like any other (no live-out ever
+    /// reaches them).
     ///
     /// [`ProgramPoint`] indices are positions, not identities: any
     /// instruction edit invalidates the analysis.
@@ -86,22 +89,26 @@ impl DeadCode {
         for block_id in cfg.block_ids() {
             let block = cfg.block(block_id);
             let mut live = liveness.live_out(block_id).clone();
+            let unwind = liveness.live_on_unwind(cfg, block_id);
             let insts = block.instructions();
             let mut dead = Vec::new();
 
             for (index, inst) in insts.iter().enumerate().rev() {
-                let has_side_effect = !inst.effects().is_empty();
+                let has_side_effect = !inst.effects().is_empty() || inst.may_unwind();
                 let defs_live = inst.defs().iter().any(|def| live.contains(def));
 
                 if !has_side_effect && !inst.defs().is_empty() && !defs_live {
                     dead.push(index);
-                } else {
-                    for def in inst.defs() {
-                        live.remove(def);
-                    }
-                    for used in inst.uses() {
-                        live.insert(used.clone());
-                    }
+                    continue;
+                }
+                for def in inst.defs() {
+                    live.remove(def);
+                }
+                for used in inst.uses() {
+                    live.insert(used.clone());
+                }
+                if inst.may_unwind() {
+                    live.extend(unwind.iter().cloned());
                 }
             }
 
@@ -134,7 +141,8 @@ impl DeadCode {
 mod tests {
     use super::*;
     use crate::edge::EdgeKind;
-    use crate::test_util::{DfInst, TestEffect, df_def, df_impure, df_use};
+    use crate::flow::FlowEffect;
+    use crate::test_util::{DfInst, TestEffect, df_def, df_impure, df_use, df_with_effect};
 
     #[test]
     fn a_dead_definition_is_reported_and_a_live_one_is_not() {
@@ -153,7 +161,7 @@ mod tests {
                 inst_idx: 0,
             }]
         );
-        assert!(dead.unreachable_blocks.is_empty());
+        assert_eq!(dead.unreachable_blocks, [] as [crate::BlockId; 0]);
     }
 
     #[test]
@@ -264,5 +272,35 @@ mod tests {
         cfg.block_mut(cfg.entry()).push(df_def("keep", 0));
         cfg.block_mut(cfg.entry()).push(df_use("use", 0));
         assert!(DeadCode::compute(&cfg).is_empty());
+    }
+
+    /// `protected: r0 = first; r7 = load (throws); r0 = second`, falling
+    /// through to an empty `normal` and unwinding to a handler that reads
+    /// r0. Only the write after the throw is dead; the faulting load stays
+    /// although nothing reads what it loads.
+    #[test]
+    fn a_handler_keeps_the_write_before_a_throw_alive() {
+        let mut cfg: Cfg<DfInst> = Cfg::new();
+        let protected = cfg.new_block();
+        let normal = cfg.new_block();
+        let handler = cfg.new_block();
+        cfg.add_edge(cfg.entry(), protected, EdgeKind::Fallthrough);
+        cfg.add_edge(protected, normal, EdgeKind::Fallthrough);
+        cfg.add_edge(protected, handler, EdgeKind::ExceptionUnwind);
+        cfg.block_mut(protected).instructions_mut().extend([
+            df_def("first", 0),
+            df_with_effect(df_def("load", 7), FlowEffect::MayThrow),
+            df_def("second", 0),
+        ]);
+        cfg.block_mut(handler).push(df_use("catch", 0));
+
+        let dead = DeadCode::compute(&cfg);
+        assert_eq!(
+            dead.instructions,
+            alloc::vec![ProgramPoint {
+                block: protected,
+                inst_idx: 2,
+            }]
+        );
     }
 }

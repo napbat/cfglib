@@ -57,14 +57,14 @@ pub fn detect_switch_tables<I: SwitchSource>(cfg: &Cfg<I>) -> Vec<JumpTable<I::T
     let mut tables = Vec::new();
     for block_id in cfg.block_ids() {
         let block = cfg.block(block_id);
-        if let Some(last) = block.instructions().last() {
-            if let Some((targets, default_target)) = last.switch_targets() {
-                tables.push(JumpTable {
-                    block: block_id,
-                    targets,
-                    default_target,
-                });
-            }
+        if let Some(last) = block.instructions().last()
+            && let Some((targets, default_target)) = last.switch_targets()
+        {
+            tables.push(JumpTable {
+                block: block_id,
+                targets,
+                default_target,
+            });
         }
     }
     tables
@@ -113,10 +113,10 @@ pub fn recover_switch_tables<I, T>(
             }
         }
 
-        if let Some(default) = &table.default_target {
-            if let Some(default_block) = resolve(default) {
-                cfg.add_edge(table.block, default_block, EdgeKind::Unconditional);
-            }
+        if let Some(default) = &table.default_target
+            && let Some(default_block) = resolve(default)
+        {
+            cfg.add_edge(table.block, default_block, EdgeKind::Unconditional);
         }
 
         results.push(SwitchRecovery {

@@ -1,3 +1,5 @@
+//! Integration tests: edge aware flow.
+
 use cfglib::{
     Cfg, Direction, DominatorTree, Edge, EdgeId, EdgeKind, EdgeView, FilteredEdges, KeyedGraph,
     NodeId, RootedView, TraversalDirection, TryEdgeProblem, TrySolveError, breadth_first_edges,

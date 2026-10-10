@@ -55,6 +55,7 @@ where
     for block_id in cfg.block_ids() {
         let block = cfg.block(block_id);
         let mut active = live.live_out(block_id).clone();
+        let unwind = live.live_on_unwind(cfg, block_id);
         connect_clique(&mut adjacency, &active);
 
         for instruction in block.instructions().iter().rev() {
@@ -69,6 +70,9 @@ where
                 active.remove(definition);
             }
             active.extend(instruction.uses().iter().cloned());
+            if instruction.may_unwind() {
+                active.extend(unwind.iter().cloned());
+            }
             connect_clique(&mut adjacency, &active);
         }
     }

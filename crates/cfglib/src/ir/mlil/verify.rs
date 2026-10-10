@@ -88,13 +88,13 @@ fn verify_regions<D: Dialect>(function: &Function<D>, issues: &mut Vec<Verificat
                 check_block(issues, filter_block, region.id, "filter block");
             }
         }
-        if let Some(parent) = region.parent {
-            if parent.index() >= position {
-                issue(
-                    issues,
-                    format!("{} parent {parent} was not added before it", region.id),
-                );
-            }
+        if let Some(parent) = region.parent
+            && parent.index() >= position
+        {
+            issue(
+                issues,
+                format!("{} parent {parent} was not added before it", region.id),
+            );
         }
     }
 }

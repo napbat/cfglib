@@ -263,7 +263,11 @@ impl<D: VerifyDialect> Function<D> {
             let _ = provenance.insert(entry.source.clone(), entity);
         }
         self.provenance = provenance;
-        debug_assert!(self.verify().is_ok(), "a removal keeps the function valid");
+        debug_assert!(
+            self.verify().is_ok(),
+            "a removal keeps the function valid: {:?}",
+            self.verify()
+        );
     }
 }
 

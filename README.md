@@ -242,11 +242,13 @@ every instruction with declared effects, and keeps a throwing instruction becaus
 it is the throw site its block's exceptional edges leave from),
 `propagate_copies[_with_exits]()`, `coalesce_copies(is_temporary)`, and
 `prune_variables()` each decide over the graph and
-rebuild a function that verifies. Blocks, edges, exception regions, cleanup
-routes, and the signature survive; a dropped instruction takes its provenance
-with it, and instruction identities become dense again. `prune_variables` is the
-variable axis and reports `VariablePruning` both ways, exactly as
-`split_variables` reports `VariableSplit`.
+rebuild a function that verifies. Blocks, exception regions, cleanup routes,
+and the signature survive. An unwind edge is removed when its block has no
+throwing instruction, even if a region still protects that block. Other
+exceptional routes described by a region remain. A dropped instruction or
+edge takes its provenance with it. Instruction identities become dense again.
+`prune_variables` is the variable axis and reports `VariablePruning` both ways,
+exactly as `split_variables` reports `VariableSplit`.
 
 `coalesce_copies` runs copy propagation's direction in reverse, which a lift
 needs after it: propagation rewrites readers to the lifter temporary a value was
@@ -395,23 +397,23 @@ inverted — before falling back to a wrapping `logical_not`.
 | Fallible edge-sensitive fixpoint | `try_solve_edge_problem`, `try_solve_edge_problem_from`, `TryEdgeProblem` trait | Preserves consumer boundary, merge, node-transfer, and edge-transfer errors separately from solver limits |
 | Reachability-lifted edge analysis | `Reachable` + `ReachableEdgeProblem` trait | Verification-style analyses over `Option` facts: `None` is unreached bottom, transfers short-circuit, entry facts start the flow, and each edge chooses pre- or post-state (exceptional edges observe the state the node received) |
 | Dense bit-set facts | `DenseBits` | Set-of-indices lattice element packed 64 per word; `union_with` is the join and reports change for convergence checks; `clear` is a word fill, `words` exposes the packed row, and `ones`/`intersection` step one set index at a time rather than one universe index |
-| Reaching definitions | `ReachingDefs::compute` | Which writes reach each point |
-| Liveness | `Liveness::compute` | Live-in / live-out at each block; `live_before_instructions` / `live_after_instructions` replay the block transfer for instruction-granular sets (dead-store detection) |
+| Reaching definitions | `ReachingDefs::compute` | Which writes reach each point; an `ExceptionUnwind` edge carries only the writes completed before each instruction that `InstrInfo::may_unwind` |
+| Liveness | `Liveness::compute` | Live-in / normal-completion live-out at each block; `live_on_unwind` is what unwind successors read before each throwing instruction; `live_before_instructions` / `live_after_instructions` replay the block transfer for instruction-granular sets (dead-store detection) |
 | Def-use / use-def chains | `DefUseChains::compute` | Bidirectional def↔use links; dead-def detection |
-| SSA construction | `SsaForm::compute` | IDF phi placement plus full dominator-forest renaming, including disconnected handler/dead-code components |
+| SSA construction | `SsaForm::compute` | IDF phi placement plus full dominator-forest renaming, including disconnected handler/dead-code components; each phi operand names its departure point, so an unwind contributes the value before each throwing instruction |
 | Reusable SSA scratch | `SsaForm::compute_in` + `SsaScratch` | The same form with every working buffer caller-owned — frontiers, definition lists, renaming stacks, phi drafts, the walk's own stacks — leaving only the form itself allocated per procedure |
 | Phi placement | `PhiPlacements::compute` | Structural IDF phase for consumers that only need placement |
 | SSA deconstruction | `eliminate_phis`, `copies_by_predecessor` | φ-to-copy lowering |
 | Phi webs | `PhiWebs::compute` | Congruence classes for register coalescing |
-| Constant propagation | `constant_propagation`, `ConstantFolder` (associated `Const`) | Top/Const/Bottom lattice over a consumer constant domain — machine words, strings, bools, float bits |
+| Constant propagation | `constant_propagation`, `ConstantFolder` (associated `Const`) | Top/Const/Bottom lattice over a consumer constant domain — machine words, strings, bools, float bits; an unwind carries the constants known before each throwing instruction |
 | Sparse conditional constant propagation | `SccpAnalysis::compute` | SSA-based, marks unreachable edges |
-| Copy and value-alias propagation | `copy_propagation[_with_exits]`, `alias_propagation`, `CopySource` trait | Guarded chain resolution and dead transfer removal; pairwise aliases may refine types or metadata without changing runtime values. The `_with_exits` form keeps a copy whose definition is live at an exit — a function whose result is only ever a copy of an input otherwise loses the definition a caller reads back — while still rewriting that copy's readers inside the function |
+| Copy and value-alias propagation | `copy_propagation[_with_exits]`, `alias_propagation`, `CopySource` trait | Guarded chain resolution and dead transfer removal; pairwise aliases may refine types or metadata without changing runtime values. The `_with_exits` form keeps a copy whose definition is live at an exit — a function whose result is only ever a copy of an input otherwise loses the definition a caller reads back — while still rewriting that copy's readers inside the function. A transfer at or after a throwing instruction never substitutes into code its unwind reaches |
 | Memory-event trace | `MemoryTrace::compute`, `MemoryEventInfo` trait | Ordered, location-typed reads, writes, read/modify/write accesses, address-variable dependencies, and fences; instruction summaries distinguish separate read+write from compound modification |
 | Reusable memory-SSA scratch | `MemorySSA::compute_in` + `MemorySsaScratch` | The same answer with the event trace, the alias merge, and the shadow CFG's dominator and SSA buffers caller-owned |
-| Memory SSA | `dataflow::memory::MemorySSA::compute`, `MemoryAlias` trait | Event-driven SSA per may-alias location class: loop/branch φ-nodes, reaching writes and clobbers, bidirectional def-use chains, transitive readers, and ordinary-SSA address inputs |
+| Memory SSA | `dataflow::memory::MemorySSA::compute`, `MemoryAlias` trait | Event-driven SSA per may-alias location class: loop/branch φ-nodes, reaching writes and clobbers, bidirectional def-use chains, transitive readers, and ordinary-SSA address inputs; an unwind observes the memory state before each throwing instruction |
 | Reusable value-flow scratch | `MemoryValueFlow::compute_in` + `MemoryValueFlowScratch` | The same graph with the per-event address/stored/loaded resolution buffers caller-owned |
 | Memory value flow | `dataflow::memory::MemoryValueFlow::compute` | One graph over ordinary SSA values, versioned memory states, and exact events; typed address/store/read/write/load and ordinary/memory-phi edges retain the complete transfer path |
-| Abstract interpretation | `abstract_interpret`, `AbstractDomain` trait | Generic abstract domain framework |
+| Abstract interpretation | `abstract_interpret`, `AbstractDomain` trait | Generic abstract domain framework on the edge-sensitive solver; an unwind carries the state before each throwing instruction |
 
 ### Higher-level analyses
 
@@ -419,7 +421,7 @@ inverted — before falling back to a wrapping `logical_not`.
 |---|---|---|
 | Expression tree recovery | `recover_expressions`, `ExprInstr` (associated `Operator` + `Const`) | Rebuild expression DAGs from flat instructions |
 | Value numbering (local) | `BlockValueNumbers::compute` | Per-block hash-consing |
-| Value numbering (global) | `ValueNumbering::compute`, `ValueNumberInfo` (associated `Operator`) | Dominator-scoped GVN over any operation identity |
+| Value numbering (global) | `ValueNumbering::compute`, `ValueNumberInfo` (associated `Operator`) | Dominator-scoped GVN over any operation identity; a child an unwind reaches never reuses what its parent computes or writes from the first throwing instruction on |
 | Redundancy counting | `ValueNumbering::redundant_count` | From GVN results |
 | Explicit alias sets | `AliasSets::new` / `merge`; `MemoryAlias` trait | Caller-populated union-find classes usable directly as the alias oracle for memory SSA; an unmerged pair is a proof of disjointness |
 | Index-path aliasing | `index_paths_may_overlap` | The `base[i][j]` kernel for alias oracles over indexed storage: unequal arity or unknown components stay conservative, fully known disagreement proves disjointness |

@@ -123,7 +123,6 @@ impl<F, H> SehRegistrationChain<F, H> {
     }
 
     /// Iterate from the innermost/newest registration outward.
-    #[must_use]
     pub fn dispatch_order(&self) -> impl DoubleEndedIterator<Item = &SehRegistration<F, H>> {
         self.registrations.iter().rev()
     }

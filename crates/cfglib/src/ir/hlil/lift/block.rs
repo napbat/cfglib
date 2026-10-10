@@ -7,8 +7,10 @@
 //! cross only instructions the dialect declares them to commute with
 //! ([`LiftDialect::evaluation_commutes`] — refused by default). Effectful
 //! definitions inlined into one consumer additionally keep their original
-//! relative order across its operands. Everything else materializes as an
-//! assignment at its original position.
+//! relative order across its operands. A value an unwind successor reads
+//! stays materialized before each throwing instruction that can leave
+//! toward it. Everything else materializes as an assignment at its
+//! original position.
 
 extern crate alloc;
 
@@ -114,12 +116,33 @@ fn is_value_shape<D: LiftDialect>(shape: &Shape<D>) -> bool {
     )
 }
 
+/// What an unwind out of each throwing instruction of a list reads.
+///
+/// A list can join several frontend blocks, so each throwing instruction
+/// answers for the unwind successors of its own block.
+struct UnwindReads {
+    /// Per list position, the block a throwing instruction there unwinds
+    /// out of.
+    blocks: Vec<Option<BlockId>>,
+    /// Per such block, the variables live into its unwind successors.
+    live: BTreeMap<BlockId, BTreeSet<mlil::VariableId>>,
+}
+
+impl UnwindReads {
+    /// The variables an unwind out of the instruction at `position` reads.
+    fn at(&self, position: usize) -> Option<&BTreeSet<mlil::VariableId>> {
+        self.live.get(&self.blocks[position]?)
+    }
+}
+
 /// Instructions retained by the presentation lift after local dead-value
 /// pruning. A backward liveness walk removes pure fallthrough definitions
-/// whose results cannot reach a retained instruction or another block.
+/// whose results cannot reach a retained instruction, an unwind successor,
+/// or another block.
 fn retained_positions<D: LiftDialect, P: Borrow<mlil::Instruction<D>>>(
     instructions: &[P],
     live_out: &BTreeSet<mlil::VariableId>,
+    unwind: &UnwindReads,
 ) -> Vec<bool> {
     let mut live = live_out.clone();
     let mut retained = vec![true; instructions.len()];
@@ -141,6 +164,9 @@ fn retained_positions<D: LiftDialect, P: Borrow<mlil::Instruction<D>>>(
             live.remove(definition);
         }
         live.extend(instruction.uses().iter().copied());
+        if let Some(reads) = unwind.at(position) {
+            live.extend(reads.iter().copied());
+        }
     }
     retained
 }
@@ -172,11 +198,13 @@ impl<D: LiftDialect> CandidateFacts<D> {
 
 /// Exact local single-use positions: one use between the definition and
 /// the variable's next redefinition, and dead beyond the list unless
-/// redefined inside it.
+/// redefined inside it. An unwind successor reading the value before a
+/// throwing instruction counts as a use that cannot inline.
 fn single_use_positions<D: LiftDialect, P: Borrow<mlil::Instruction<D>>>(
     instructions: &[P],
     shapes: &[Shape<D>],
     live_out: &BTreeSet<mlil::VariableId>,
+    unwind: &UnwindReads,
     retained: &[bool],
 ) -> Vec<Option<usize>> {
     struct PendingUse {
@@ -199,6 +227,12 @@ fn single_use_positions<D: LiftDialect, P: Borrow<mlil::Instruction<D>>>(
             if let Some(pending) = active.get_mut(&variable) {
                 pending.occurrences = pending.occurrences.saturating_add(1);
                 pending.use_position.get_or_insert(position);
+            }
+        }
+        // The unwind leaves before this instruction's writes.
+        for variable in unwind.at(position).into_iter().flatten() {
+            if let Some(pending) = active.get_mut(variable) {
+                pending.occurrences = pending.occurrences.saturating_add(1);
             }
         }
         for &variable in instruction.defs() {
@@ -238,10 +272,11 @@ fn plan_inlining<D: LiftDialect, P: Borrow<mlil::Instruction<D>>>(
     instructions: &[P],
     shapes: &[Shape<D>],
     live_out: &BTreeSet<mlil::VariableId>,
+    unwind: &UnwindReads,
     retained: &[bool],
 ) -> Vec<Option<usize>> {
     let length = instructions.len();
-    let viable = single_use_positions(instructions, shapes, live_out, retained);
+    let viable = single_use_positions(instructions, shapes, live_out, unwind, retained);
 
     // Order-safety walk over the movable candidates.
     let mut inline_at: Vec<Option<usize>> = vec![None; length];
@@ -266,22 +301,22 @@ fn plan_inlining<D: LiftDialect, P: Borrow<mlil::Instruction<D>>>(
                 // the merge point must stay visible as a variable.
                 continue;
             }
-            if let Some(&candidate) = active.get(&variable) {
-                if viable[candidate] == Some(position) {
-                    let relevant = facts[candidate]
-                        .as_ref()
-                        .is_some_and(CandidateFacts::is_effect_relevant);
-                    if relevant && last_effectful.is_some_and(|latest| candidate < latest) {
-                        // Inlining here would evaluate this tree after a
-                        // later-defined effectful tree: keep it materialized.
-                        continue;
-                    }
-                    inline_at[candidate] = Some(position);
-                    consumed.push(candidate);
-                    active.remove(&variable);
-                    if relevant {
-                        last_effectful = Some(candidate);
-                    }
+            if let Some(&candidate) = active.get(&variable)
+                && viable[candidate] == Some(position)
+            {
+                let relevant = facts[candidate]
+                    .as_ref()
+                    .is_some_and(CandidateFacts::is_effect_relevant);
+                if relevant && last_effectful.is_some_and(|latest| candidate < latest) {
+                    // Inlining here would evaluate this tree after a
+                    // later-defined effectful tree: keep it materialized.
+                    continue;
+                }
+                inline_at[candidate] = Some(position);
+                consumed.push(candidate);
+                active.remove(&variable);
+                if relevant {
+                    last_effectful = Some(candidate);
                 }
             }
         }
@@ -349,6 +384,26 @@ struct ListState {
 }
 
 impl<D: LiftDialect + VerifyDialect> Lifter<'_, D> {
+    /// What an unwind out of each throwing instruction of `instructions`
+    /// reads, from the source function's liveness.
+    fn unwind_reads<P: Borrow<mlil::Instruction<D>>>(&self, instructions: &[P]) -> UnwindReads {
+        let mut live = BTreeMap::new();
+        let blocks = instructions
+            .iter()
+            .map(|instruction| {
+                let instruction = instruction.borrow();
+                if !instruction.may_throw() {
+                    return None;
+                }
+                let block = self.source.instruction_point(instruction.id())?.block;
+                live.entry(block)
+                    .or_insert_with(|| self.liveness.live_on_unwind(self.source.cfg(), block));
+                Some(block)
+            })
+            .collect();
+        UnwindReads { blocks, live }
+    }
+
     /// Translates one block-shaped instruction list into statements, with
     /// its terminator value when the caller expects one.
     pub(super) fn translate_list<P>(
@@ -364,13 +419,10 @@ impl<D: LiftDialect + VerifyDialect> Lifter<'_, D> {
             .iter()
             .map(|instruction| classify(instruction.borrow()))
             .collect();
-        let retained = retained_positions(instructions, self.liveness.live_out(block));
-        let inline_at = plan_inlining(
-            instructions,
-            &shapes,
-            self.liveness.live_out(block),
-            &retained,
-        );
+        let unwind = self.unwind_reads(instructions);
+        let live_out = self.liveness.live_out(block);
+        let retained = retained_positions(instructions, live_out, &unwind);
+        let inline_at = plan_inlining(instructions, &shapes, live_out, &unwind, &retained);
         let mut by_consumer: BTreeMap<usize, BTreeMap<mlil::VariableId, usize>> = BTreeMap::new();
         for (candidate, consumer) in inline_at.iter().enumerate() {
             if let Some(consumer) = consumer {
@@ -704,10 +756,9 @@ impl<D: LiftDialect + VerifyDialect> Lifter<'_, D> {
             .by_consumer
             .get(&position)
             .and_then(|consumed| consumed.get(&variable))
+            && let Some(expression) = state.built[candidate].take()
         {
-            if let Some(expression) = state.built[candidate].take() {
-                return Ok(expression);
-            }
+            return Ok(expression);
         }
         let value_type = instruction
             .use_types()

@@ -280,9 +280,10 @@ pub fn meet_options<F: Clone>(
 ///
 /// # Examples
 ///
-/// See [`Liveness::compute`](crate::dataflow::liveness::Liveness::compute)
-/// and [`ReachingDefs::compute`](crate::dataflow::reaching::ReachingDefs::compute)
-/// for concrete usage.
+/// [`LivenessProblem`](crate::dataflow::liveness::LivenessProblem) is a
+/// concrete problem. Analyses whose exceptional edges carry their own facts,
+/// such as [`ReachingDefs`](crate::dataflow::reaching::ReachingDefs), run on
+/// the [edge-sensitive solver](crate::dataflow::edge_fixpoint) instead.
 ///
 /// ```
 /// # use cfglib::{Cfg, EdgeKind, InstrInfo};
@@ -293,13 +294,13 @@ pub fn meet_options<F: Clone>(
 /// #     fn uses(&self) -> &[u16] { &self.uses }
 /// #     fn defs(&self) -> &[u16] { &self.defs }
 /// # }
-/// use cfglib::dataflow::liveness::Liveness;
+/// use cfglib::{LivenessProblem, solve_problem};
 ///
 /// let mut cfg = Cfg::<Inst>::new();
 /// cfg.block_mut(cfg.entry()).push(Inst { uses: vec![], defs: vec![0] });
 ///
-/// let live = Liveness::compute(&cfg);
-/// assert!(live.live_in(cfg.entry()).is_empty()); // r0 defined, not used
+/// let facts = solve_problem(&cfg, &LivenessProblem).unwrap();
+/// assert!(facts.fact_in(cfg.entry()).is_empty()); // r0 defined, not used
 /// ```
 pub fn solve_problem<I, E, P: Problem<I, E>>(
     cfg: &Cfg<I, E>,
@@ -480,15 +481,15 @@ fn try_solve_with_worklist<I, E, P: TryProblem<I, E>>(
 
     let mut steps = 0;
     while let Some(block_raw) = worklist.pop_first() {
-        if let Some(limit) = config.max_steps {
-            if steps >= limit {
-                return Err(SolveError::StepLimitExceeded {
-                    limit,
-                    steps,
-                    pending_node: block_raw as usize,
-                }
-                .into());
+        if let Some(limit) = config.max_steps
+            && steps >= limit
+        {
+            return Err(SolveError::StepLimitExceeded {
+                limit,
+                steps,
+                pending_node: block_raw as usize,
             }
+            .into());
         }
         steps += 1;
         let block = BlockId::from_raw(block_raw);

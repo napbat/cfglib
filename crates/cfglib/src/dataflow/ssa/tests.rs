@@ -4,8 +4,140 @@
 use super::*;
 use crate::builder::CfgBuilder;
 use crate::edge::EdgeKind;
-use crate::test_util::{DfInst, df_def, df_use};
+use crate::flow::FlowEffect;
+use crate::test_util::{DfInst, df_def, df_ff, df_use, df_with_effect};
 use alloc::vec;
+
+fn throwing(instruction: DfInst) -> DfInst {
+    df_with_effect(instruction, FlowEffect::MayThrow)
+}
+
+/// `entry → protected`, which falls through to `normal` and unwinds to
+/// `handler`. Returns `(protected, normal, handler)`.
+fn protected_region(cfg: &mut Cfg<DfInst>) -> (BlockId, BlockId, BlockId) {
+    let protected = cfg.new_block();
+    let normal = cfg.new_block();
+    let handler = cfg.new_block();
+    cfg.add_edge(cfg.entry(), protected, EdgeKind::Fallthrough);
+    cfg.add_edge(protected, normal, EdgeKind::Fallthrough);
+    cfg.add_edge(protected, handler, EdgeKind::ExceptionUnwind);
+    (protected, normal, handler)
+}
+
+fn departure(block: BlockId, inst_idx: usize) -> ProgramPoint {
+    ProgramPoint { block, inst_idx }
+}
+
+#[test]
+fn a_handler_reads_the_definition_before_the_faulting_instruction() {
+    let mut cfg = Cfg::<DfInst>::new();
+    let (protected, normal, handler) = protected_region(&mut cfg);
+    cfg.block_mut(cfg.entry()).push(df_def("prior", 0));
+    cfg.block_mut(protected).push(throwing(df_def("load", 0)));
+    cfg.block_mut(normal).push(df_use("success", 0));
+    cfg.block_mut(handler).push(df_use("catch", 0));
+
+    let ssa = SsaForm::compute(&cfg, &DominatorTree::compute(&cfg));
+    let prior = ssa.block(cfg.entry()).instructions[0].defs[0].clone();
+    let loaded = &ssa.block(protected).instructions[0].defs[0];
+    assert_eq!(&ssa.block(normal).instructions[0].uses[0], loaded);
+    let [phi] = ssa.block(handler).phis.as_slice() else {
+        panic!("the handler merges the value before the load");
+    };
+    assert_eq!(phi.operands, [(departure(protected, 0), prior)]);
+    assert_eq!(ssa.block(handler).instructions[0].uses[0], phi.result);
+
+    let live = crate::Liveness::compute(&cfg);
+    assert!(live.live_in(protected).contains(&0));
+    assert!(live.live_before_instructions(&cfg, protected)[0].contains(&0));
+    assert!(live.live_after_instructions(&cfg, cfg.entry())[0].contains(&0));
+}
+
+#[test]
+fn multiple_unwind_points_keep_their_distinct_completed_definitions() {
+    let mut cfg = Cfg::<DfInst>::new();
+    let (protected, normal, handler) = protected_region(&mut cfg);
+    cfg.block_mut(cfg.entry()).push(df_def("prior", 0));
+    for name in ["first load", "second load"] {
+        cfg.block_mut(protected).push(throwing(df_def(name, 0)));
+    }
+    cfg.block_mut(handler).push(df_use("caught", 0));
+    cfg.block_mut(normal).push(df_use("completed", 0));
+
+    let ssa = SsaForm::compute(&cfg, &DominatorTree::compute(&cfg));
+    let phi = &ssa.block(handler).phis[0];
+    let prior = ssa.block(cfg.entry()).instructions[0].defs[0].clone();
+    let first = ssa.block(protected).instructions[0].defs[0].clone();
+    assert_eq!(
+        phi.operands,
+        [
+            (departure(protected, 0), prior),
+            (departure(protected, 1), first),
+        ]
+    );
+    assert_eq!(ssa.block(handler).instructions[0].uses[0], phi.result);
+    assert_eq!(
+        ssa.block(normal).instructions[0].uses[0],
+        ssa.block(protected).instructions[1].defs[0]
+    );
+    let live = crate::Liveness::compute(&cfg);
+    assert!(
+        live.live_before_instructions(&cfg, protected)
+            .iter()
+            .all(|set| set.contains(&0))
+    );
+}
+
+#[test]
+fn a_definition_before_every_throw_reaches_the_handler_without_a_phi() {
+    let mut cfg = Cfg::<DfInst>::new();
+    let (protected, normal, handler) = protected_region(&mut cfg);
+    cfg.block_mut(protected).push(df_def("completed", 0));
+    cfg.block_mut(protected).push(throwing(df_ff("call")));
+    cfg.block_mut(normal).push(df_use("success", 0));
+    cfg.block_mut(handler).push(df_use("catch", 0));
+
+    let ssa = SsaForm::compute(&cfg, &DominatorTree::compute(&cfg));
+    let completed = &ssa.block(protected).instructions[0].defs[0];
+    assert!(
+        ssa.block(handler).phis.is_empty(),
+        "every throw already observes the one definition"
+    );
+    assert_eq!(&ssa.block(handler).instructions[0].uses[0], completed);
+    assert_eq!(&ssa.block(normal).instructions[0].uses[0], completed);
+}
+
+#[test]
+fn a_join_of_normal_and_unwind_paths_merges_their_distinct_values() {
+    let mut cfg = Cfg::<DfInst>::new();
+    let (protected, normal, handler) = protected_region(&mut cfg);
+    let join = cfg.new_block();
+    cfg.add_edge(normal, join, EdgeKind::Fallthrough);
+    cfg.add_edge(handler, join, EdgeKind::Fallthrough);
+    cfg.block_mut(protected).push(df_def("before call", 0));
+    cfg.block_mut(protected).push(throwing(df_ff("call")));
+    cfg.block_mut(protected).push(df_def("after call", 0));
+    cfg.block_mut(join).push(df_use("merged", 0));
+
+    let ssa = SsaForm::compute(&cfg, &DominatorTree::compute(&cfg));
+    let before = ssa.block(protected).instructions[0].defs[0].clone();
+    let after = ssa.block(protected).instructions[2].defs[0].clone();
+    let [unwound] = ssa.block(handler).phis.as_slice() else {
+        panic!("the definition after the call needs a handler phi");
+    };
+    assert_eq!(unwound.operands, [(departure(protected, 1), before)]);
+    let [merged] = ssa.block(join).phis.as_slice() else {
+        panic!("the join merges the normal and the unwind value");
+    };
+    assert_eq!(
+        merged.operands,
+        [
+            (departure(normal, 0), after),
+            (departure(handler, 0), unwound.result.clone()),
+        ]
+    );
+    assert_eq!(ssa.block(join).instructions[0].uses[0], merged.result);
+}
 
 #[test]
 fn no_phis_in_linear_cfg() {

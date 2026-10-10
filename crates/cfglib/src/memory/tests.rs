@@ -198,13 +198,12 @@ fn point_lookup_and_fence_query_are_exact() {
 
     let trace = MemoryTrace::compute(&cfg);
 
-    assert!(
-        trace
-            .entries_at(ProgramPoint {
-                block: entry,
-                inst_idx: 0,
-            })
-            .is_empty()
+    assert_eq!(
+        trace.entries_at(ProgramPoint {
+            block: entry,
+            inst_idx: 0,
+        }),
+        []
     );
     assert_eq!(
         trace
