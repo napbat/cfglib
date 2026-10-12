@@ -68,6 +68,14 @@ impl<D: Dialect> Placement<D> {
     pub fn place(&self, variable: VariableId) -> Option<&Place<D>> {
         self.places.get(&variable.raw())
     }
+
+    /// Returns every assigned place in variable order.
+    ///
+    /// A target can use these places to reserve scratch storage that does not
+    /// overlap a caller-supplied placement.
+    pub fn places(&self) -> impl Iterator<Item = &Place<D>> {
+        self.places.values()
+    }
 }
 
 /// Plans one whole place per MLIL variable, preserving native storage.
@@ -166,12 +174,28 @@ pub trait Lower: MlilBridge {
 pub struct LowerContext<'a, D: Lower> {
     builder: &'a mut FunctionBuilder<D>,
     block: BlockId,
+    function: &'a MlilFunction<D::Mlil>,
     placement: &'a Placement<D>,
     spans: Vec<<D as crate::ir::dialect::Vocabulary>::SourceSpan>,
     statements: Vec<StatementId>,
 }
 
 impl<D: Lower> LowerContext<'_, D> {
+    /// Returns the source function and its variable types.
+    ///
+    /// A target uses the complete declarations when several logical places
+    /// share one physical storage cell.
+    #[must_use]
+    pub const fn function(&self) -> &MlilFunction<D::Mlil> {
+        self.function
+    }
+
+    /// Returns the complete storage plan for this function.
+    #[must_use]
+    pub const fn placement(&self) -> &Placement<D> {
+        self.placement
+    }
+
     /// The planned target place of one MLIL variable.
     ///
     /// # Errors
@@ -359,6 +383,7 @@ pub fn lower_with_placement<D: Lower>(
             let mut context = LowerContext {
                 builder: &mut builder,
                 block: blocks[block_id.index()],
+                function,
                 placement: &placement,
                 spans,
                 statements: Vec::new(),

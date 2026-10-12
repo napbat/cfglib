@@ -53,6 +53,107 @@ pub struct InstructionSplice<D: Dialect> {
 }
 
 impl<D: VerifyDialect> Function<D> {
+    /// Appends checked instructions at existing block-end gaps.
+    ///
+    /// Original instruction, block, edge, variable and provenance identities
+    /// are unchanged. New instructions receive dense IDs after the originals;
+    /// their IDs are returned in request order. No source span is invented for
+    /// a gap with no original instruction.
+    ///
+    /// # Errors
+    ///
+    /// Rejects missing blocks, appends after a control terminal, invalid typed
+    /// operands and structurally or semantically invalid completed functions.
+    pub fn append_block_instructions(
+        &self,
+        instructions: impl IntoIterator<Item = (crate::BlockId, InstructionReplacement<D>)>,
+    ) -> Result<(Self, Vec<InstructionId>)> {
+        let mut builder = FunctionBuilder::from_function(self);
+        let inserted = instructions
+            .into_iter()
+            .map(|(block, instruction)| {
+                builder.require_fallthrough_gap(block)?;
+                append(&mut builder, block, instruction)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok((builder.finish()?, inserted))
+    }
+
+    /// Grafts new blocks before the existing semantic entry without rebuilding
+    /// any original instruction, variable, edge, or source correspondence.
+    ///
+    /// The callback receives an identity-preserving builder and the original
+    /// semantic entry. It must return a newly allocated prefix entry block.
+    /// Only the synthetic root's original edge is redirected. Prefix success
+    /// edges must be added by the callback; source body edges stay exact.
+    ///
+    /// # Errors
+    /// Rejects edits to original storage, new source correspondences, and
+    /// structurally or semantically invalid completed functions.
+    pub fn graft_entry(
+        &self,
+        construct: impl FnOnce(&mut FunctionBuilder<D>, crate::BlockId) -> Result<crate::BlockId>,
+    ) -> Result<Self> {
+        let roots: Vec<_> = self.cfg.outgoing(self.cfg.entry()).collect();
+        if roots.len() != 1 {
+            return Err(Error::InvalidConstruction(
+                "entry graft requires one root edge".into(),
+            ));
+        }
+        let root_edge = roots[0];
+        let original_entry = self.cfg.edge(root_edge).target();
+        let mut builder = FunctionBuilder::from_function(self);
+        let prefix_entry = construct(&mut builder, original_entry)?;
+        if prefix_entry.index() < self.cfg.block_bound() {
+            return Err(Error::InvalidConstruction(
+                "entry graft must start in a new block".into(),
+            ));
+        }
+        builder.graft_entry(prefix_entry)?;
+        let function = builder.finish()?;
+        let unchanged = function.signature == self.signature
+            && function.provenance == self.provenance
+            && function.variables.get(..self.variables.len()) == Some(self.variables.as_slice())
+            && function.cfg.regions() == self.cfg.regions()
+            && function.cfg.cleanups() == self.cfg.cleanups()
+            && self.cfg.block_ids().all(|block| {
+                function.cfg.contains_block(block)
+                    && function.cfg.block(block) == self.cfg.block(block)
+            })
+            && self.cfg.edges().all(|edge| {
+                if !function.cfg.contains_edge(edge.id()) {
+                    return false;
+                }
+                let current = function.cfg.edge(edge.id());
+                current.source() == edge.source()
+                    && current.target()
+                        == (if edge.id() == root_edge {
+                            prefix_entry
+                        } else {
+                            edge.target()
+                        })
+                    && current.kind() == edge.kind()
+                    && current.payload() == edge.payload()
+                    && current.weight() == edge.weight()
+            })
+            && function
+                .cfg
+                .edges()
+                .filter(|edge| !self.cfg.contains_edge(edge.id()))
+                .all(|edge| {
+                    edge.source().index() >= self.cfg.block_bound()
+                        && (edge.target().index() >= self.cfg.block_bound()
+                            || edge.target() == original_entry)
+                        && !D::is_entry_edge(edge.payload())
+                });
+        if !unchanged {
+            return Err(Error::InvalidConstruction(
+                "entry graft changed original function storage".into(),
+            ));
+        }
+        Ok(function)
+    }
+
     /// Inserts checked instructions before and after selected instructions.
     ///
     /// The callback sees all newly declared variable IDs. Existing blocks,

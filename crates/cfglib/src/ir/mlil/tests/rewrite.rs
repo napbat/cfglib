@@ -521,3 +521,236 @@ fn a_replacement_that_fails_verification_keeps_the_old_instructions() {
     assert!(result.is_err(), "an undeclared variable fails verification");
     assert_eq!(function, original, "every replaced instruction returns");
 }
+
+#[test]
+fn entry_graft_preserves_stable_body_and_provenance() {
+    let mut builder = FunctionBuilder::<ToyDialect>::new("toy::entry-graft".into());
+    let body = builder.new_block("body");
+    let input = builder.declare_variable(0, Some(7)).unwrap();
+    let copied = builder.declare_variable(0, None).unwrap();
+    let original = builder
+        .append_instruction(
+            body,
+            Operation::Copy,
+            vec![TypedVariable::new(input, Type::Integer)],
+            vec![TypedVariable::new(copied, Type::Integer)],
+            false,
+            Some(Span { start: 9, end: 10 }),
+        )
+        .unwrap();
+    builder
+        .append_instruction(
+            body,
+            Operation::Return,
+            vec![TypedVariable::new(copied, Type::Integer)],
+            Vec::new(),
+            false,
+            None,
+        )
+        .unwrap();
+    let root_edge = builder
+        .add_edge(builder.entry(), body, Edge::Entry, None)
+        .unwrap();
+    let function = builder.finish().unwrap();
+    let graft = function
+        .graft_entry(|builder, entry| {
+            let prefix = builder.new_block("prefix");
+            let temporary = builder.declare_variable(1, None)?;
+            builder.append_instruction(
+                prefix,
+                Operation::Copy,
+                vec![TypedVariable::new(input, Type::Integer)],
+                vec![TypedVariable::new(temporary, Type::Integer)],
+                false,
+                None,
+            )?;
+            builder.add_edge(prefix, entry, Edge::Next, None)?;
+            Ok(prefix)
+        })
+        .unwrap();
+    assert_eq!(graft.instruction(original), function.instruction(original));
+    assert_eq!(
+        graft.instruction_point(original),
+        function.instruction_point(original)
+    );
+    assert_eq!(graft.cfg().block(body), function.cfg().block(body));
+    assert_eq!(graft.provenance(), function.provenance());
+    assert_eq!(graft.signature(), function.signature());
+    assert_eq!(
+        &graft.variables()[..function.variables().len()],
+        function.variables()
+    );
+    assert_eq!(graft.cfg().edge(root_edge).source(), function.cfg().entry());
+    let inserted = InstructionId::from_raw(
+        u32::try_from(function.instruction_count()).expect("fixture instruction count fits"),
+    );
+    assert!(
+        graft
+            .provenance()
+            .mappings_to(super::EntityId::Instruction(inserted))
+            .next()
+            .is_none()
+    );
+}
+
+#[test]
+fn entry_graft_rejects_new_source_provenance_and_body_edges() {
+    let mut builder = FunctionBuilder::<ToyDialect>::new("toy::entry-graft-rejection".into());
+    let body = builder.new_block("body");
+    builder
+        .add_edge(builder.entry(), body, Edge::Entry, None)
+        .unwrap();
+    builder
+        .append_instruction(body, Operation::Return, Vec::new(), Vec::new(), false, None)
+        .unwrap();
+    let function = builder.finish().unwrap();
+    let source_event = function.graft_entry(|builder, entry| {
+        let prefix = builder.new_block("prefix");
+        let temporary = builder.declare_variable(1, None)?;
+        builder.append_instruction(
+            prefix,
+            Operation::Constant(7),
+            Vec::new(),
+            vec![TypedVariable::new(temporary, Type::Integer)],
+            false,
+            Some(Span { start: 9, end: 10 }),
+        )?;
+        builder.add_edge(prefix, entry, Edge::Next, None)?;
+        Ok(prefix)
+    });
+    assert!(source_event.is_err());
+    let body_edge = function.graft_entry(|builder, entry| {
+        let prefix = builder.new_block("prefix");
+        builder.add_edge(prefix, entry, Edge::Next, None)?;
+        builder.add_edge(entry, prefix, Edge::Next, None)?;
+        Ok(prefix)
+    });
+    assert!(body_edge.is_err());
+}
+
+#[test]
+fn block_end_insertion_preserves_empty_nonempty_and_exceptional_boundaries() {
+    let mut builder = FunctionBuilder::<ToyDialect>::new("toy::block-end".into());
+    let body = builder.new_block("body");
+    let normal = builder.new_block("normal");
+    let unwind = builder.new_block("unwind");
+    let returned = builder.new_block("returned");
+    let loaded = builder.declare_variable(0, None).unwrap();
+    let value = builder.declare_variable(0, None).unwrap();
+    let original = builder
+        .append_instruction(
+            body,
+            Operation::Load(0),
+            Vec::new(),
+            vec![TypedVariable::new(loaded, Type::Integer)],
+            true,
+            Some(Span { start: 9, end: 10 }),
+        )
+        .unwrap();
+    builder
+        .add_edge(builder.entry(), body, Edge::Entry, None)
+        .unwrap();
+    builder.add_edge(body, normal, Edge::Next, None).unwrap();
+    builder.add_edge(body, unwind, Edge::Unwind, None).unwrap();
+    builder
+        .add_edge(normal, returned, Edge::Next, None)
+        .unwrap();
+    builder
+        .add_edge(unwind, returned, Edge::Next, None)
+        .unwrap();
+    builder
+        .append_instruction(
+            returned,
+            Operation::Return,
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+        )
+        .unwrap();
+    let function = builder.finish().unwrap();
+    let (appended, inserted) = function
+        .append_block_instructions([body, normal, unwind].map(|block| {
+            (
+                block,
+                InstructionReplacement::new(
+                    Operation::Constant(7),
+                    Vec::new(),
+                    vec![TypedVariable::new(value, Type::Integer)],
+                    false,
+                ),
+            )
+        }))
+        .unwrap();
+    assert_eq!(inserted.len(), 3);
+    assert_eq!(
+        appended.instruction(original),
+        function.instruction(original)
+    );
+    assert_eq!(
+        appended.instruction_point(original),
+        function.instruction_point(original)
+    );
+    assert_eq!(appended.provenance(), function.provenance());
+    assert_eq!(appended.signature(), function.signature());
+    assert_eq!(appended.variables(), function.variables());
+    for edge in function.cfg().edges() {
+        let retained = appended.cfg().edge(edge.id());
+        assert_eq!(retained.source(), edge.source());
+        assert_eq!(retained.target(), edge.target());
+        assert_eq!(retained.data(), edge.data());
+    }
+    for (block, id) in [body, normal, unwind].into_iter().zip(inserted) {
+        assert_eq!(
+            appended
+                .cfg()
+                .block(block)
+                .instructions()
+                .last()
+                .unwrap()
+                .id(),
+            id
+        );
+        assert_eq!(appended.instruction_point(id).unwrap().block, block);
+        assert_eq!(
+            id.index(),
+            function.instruction_count()
+                + [body, normal, unwind]
+                    .iter()
+                    .position(|held| *held == block)
+                    .unwrap()
+        );
+        assert!(
+            appended
+                .provenance()
+                .mappings_to(EntityId::Instruction(id))
+                .next()
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn block_end_insertion_rejects_missing_blocks_and_control_terminals() {
+    let mut builder = FunctionBuilder::<ToyDialect>::new("toy::bad-block-end".into());
+    let body = builder.new_block("body");
+    builder
+        .add_edge(builder.entry(), body, Edge::Entry, None)
+        .unwrap();
+    builder
+        .append_instruction(body, Operation::Return, Vec::new(), Vec::new(), false, None)
+        .unwrap();
+    let function = builder.finish().unwrap();
+    let terminal = || InstructionReplacement::new(Operation::Return, Vec::new(), Vec::new(), false);
+    assert!(
+        function
+            .append_block_instructions([(body, terminal())])
+            .is_err()
+    );
+    let missing = crate::BlockId::from_index(function.cfg().block_bound());
+    assert!(
+        function
+            .append_block_instructions([(missing, terminal())])
+            .is_err()
+    );
+}

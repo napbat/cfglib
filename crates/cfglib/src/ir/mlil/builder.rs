@@ -8,7 +8,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::region::{Cleanup, Continuation, HandlerKind, HandlerRef, Region, RegionId};
-use crate::{BlockId, Cfg, EdgeId, ProgramPoint};
+use crate::{BlockId, Cfg, EdgeId, FlowControl, FlowEffect, ProgramPoint};
 
 use super::{
     Dialect, EntityId, Error, Function, Instruction, InstructionId, ProvenanceMap, Result,
@@ -41,6 +41,31 @@ impl<D: Dialect> FunctionBuilder<D> {
             instruction_points: Vec::new(),
             dropped: BTreeSet::new(),
         }
+    }
+
+    /// Starts an identity-preserving extension of an existing function.
+    pub(super) fn from_function(function: &Function<D>) -> Self {
+        Self {
+            cfg: function.cfg.clone(),
+            variables: function.variables.clone(),
+            signature: function.signature.clone(),
+            provenance: function.provenance.clone(),
+            instruction_points: function.instruction_points.clone(),
+            dropped: BTreeSet::new(),
+        }
+    }
+
+    /// Rewires only the synthetic root's existing edge.
+    pub(super) fn graft_entry(&mut self, target: BlockId) -> Result<()> {
+        self.require_block(target)?;
+        let edges: Vec<_> = self.cfg.outgoing(self.cfg.entry()).collect();
+        if edges.len() != 1 {
+            return Err(Error::InvalidConstruction(
+                "entry graft requires one root edge".into(),
+            ));
+        }
+        self.cfg.redirect_edge_target(edges[0], target);
+        Ok(())
     }
 
     /// Declares the ordered parameter and return signature.
@@ -371,6 +396,34 @@ impl<D: Dialect> FunctionBuilder<D> {
             return Ok(false);
         }
         Ok(self.provenance.insert(source, entity)?)
+    }
+
+    /// Requires a gap that no existing instruction transfers control past.
+    pub(super) fn require_fallthrough_gap(&self, block: BlockId) -> Result<()> {
+        self.require_block(block)?;
+        if self
+            .cfg
+            .block(block)
+            .instructions()
+            .last()
+            .is_some_and(|instruction| {
+                !matches!(
+                    instruction.flow_effect(),
+                    FlowEffect::Fallthrough
+                        | FlowEffect::Call
+                        | FlowEffect::ConditionalCall
+                        | FlowEffect::IndirectCall
+                        | FlowEffect::MayThrow
+                        | FlowEffect::Label
+                        | FlowEffect::Declaration
+                )
+            })
+        {
+            return Err(Error::InvalidConstruction(format!(
+                "block {block} ends in a control transfer"
+            )));
+        }
+        Ok(())
     }
 
     fn require_block(&self, block: BlockId) -> Result<()> {

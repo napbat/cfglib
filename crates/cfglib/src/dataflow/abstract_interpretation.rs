@@ -49,14 +49,14 @@ pub struct AbstractFacts<D> {
 }
 
 impl<D> AbstractFacts<D> {
-    /// The abstract state entering `block`, if the block was reached.
+    /// The abstract state entering `block`. Unreached blocks retain bottom.
     #[must_use]
     pub fn fact_in(&self, block: BlockId) -> Option<&D> {
         self.block_in.get(&block)
     }
 
-    /// The abstract state after `block` completes normally, if the block
-    /// was reached.
+    /// The abstract state after `block` completes normally.
+    /// Unreached blocks retain bottom.
     #[must_use]
     pub fn fact_out(&self, block: BlockId) -> Option<&D> {
         self.block_out.get(&block)
@@ -93,33 +93,49 @@ impl<D> AbstractProblem<D> {
 }
 
 impl<I: InstrInfo, E, D: AbstractDomain<I>> EdgeProblem<Cfg<I, E>> for AbstractProblem<D> {
-    type Fact = D;
+    // An unreached edge is not a reached edge carrying the domain's bottom.
+    type Fact = Option<D>;
 
     fn direction(&self) -> Direction {
         Direction::Forward
     }
 
-    fn bottom(&self, _cfg: &Cfg<I, E>) -> D {
-        D::bottom()
+    fn bottom(&self, _cfg: &Cfg<I, E>) -> Option<D> {
+        None
     }
 
     /// A reached block that nothing branches to starts from the entry value.
-    fn boundary(&self, cfg: &Cfg<I, E>, block: BlockId) -> Option<D> {
-        cfg.incoming(block).next().is_none().then(D::entry_value)
+    fn boundary(&self, cfg: &Cfg<I, E>, block: BlockId) -> Option<Option<D>> {
+        cfg.incoming(block)
+            .next()
+            .is_none()
+            .then(|| Some(D::entry_value()))
     }
 
-    fn meet(&self, left: &D, right: &D) -> D {
-        left.meet(right)
+    fn meet(&self, left: &Option<D>, right: &Option<D>) -> Option<D> {
+        match (left, right) {
+            (Some(left), Some(right)) => Some(left.meet(right)),
+            (None, other) | (other, None) => other.clone(),
+        }
     }
 
-    fn transfer_node(&self, cfg: &Cfg<I, E>, block: BlockId, input: &D) -> D {
-        Self::replay(cfg, block, input, |_| {})
+    fn transfer_node(&self, cfg: &Cfg<I, E>, block: BlockId, input: &Option<D>) -> Option<D> {
+        input
+            .as_ref()
+            .map(|input| Self::replay(cfg, block, input, |_| {}))
     }
 
-    fn transfer_edge(&self, cfg: &Cfg<I, E>, edge: CfgEdge<'_, E>, input: &D, output: &D) -> D {
+    fn transfer_edge(
+        &self,
+        cfg: &Cfg<I, E>,
+        edge: CfgEdge<'_, E>,
+        input: &Option<D>,
+        output: &Option<D>,
+    ) -> Option<D> {
         if !departs_before_throws(cfg, edge) {
             return output.clone();
         }
+        let input = input.as_ref()?;
         let mut departing: Option<D> = None;
         Self::replay(cfg, edge.source(), input, |state| {
             departing = Some(match departing.take() {
@@ -127,7 +143,7 @@ impl<I: InstrInfo, E, D: AbstractDomain<I>> EdgeProblem<Cfg<I, E>> for AbstractP
                 Some(earlier) => earlier.meet(state),
             });
         });
-        departing.expect("an edge departing before throws leaves a block that may unwind")
+        Some(departing.expect("an edge departing before throws leaves a block that may unwind"))
     }
 }
 
@@ -162,8 +178,14 @@ where
     let mut block_in = BTreeMap::new();
     let mut block_out = BTreeMap::new();
     for block_id in cfg.block_ids() {
-        block_in.insert(block_id, result.fact_in(block_id).clone());
-        block_out.insert(block_id, result.fact_out(block_id).clone());
+        block_in.insert(
+            block_id,
+            result.fact_in(block_id).clone().unwrap_or_else(D::bottom),
+        );
+        block_out.insert(
+            block_id,
+            result.fact_out(block_id).clone().unwrap_or_else(D::bottom),
+        );
     }
 
     AbstractFacts {
@@ -255,6 +277,41 @@ mod tests {
         // Entry block out should be present and equal to entry value
         // (identity transfer).
         assert_eq!(result.fact_out(cfg.entry()), Some(&Sign::Zero));
+    }
+
+    #[test]
+    fn disconnected_predecessor_does_not_contribute_a_domain_bottom() {
+        for connect_other in [false, true] {
+            let mut cfg = Cfg::new();
+            let joined = cfg.new_block();
+            let normal = cfg.new_block();
+            let other = cfg.new_block();
+            cfg.add_edge(cfg.entry(), normal, EdgeKind::Fallthrough);
+            cfg.add_edge(normal, joined, EdgeKind::Fallthrough);
+            cfg.add_edge(other, joined, EdgeKind::Fallthrough);
+            cfg.block_mut(normal).push(df_const("positive", 0, 3));
+            cfg.block_mut(other).push(df_const("negative", 0, -2));
+            if connect_other {
+                cfg.add_edge(cfg.entry(), other, EdgeKind::Fallthrough);
+            }
+            let result: AbstractFacts<Sign> = abstract_interpret(&cfg);
+            assert_eq!(
+                result.fact_in(joined),
+                Some(if connect_other {
+                    &Sign::Bottom
+                } else {
+                    &Sign::Pos
+                })
+            );
+            assert_eq!(
+                result.fact_out(other),
+                Some(if connect_other {
+                    &Sign::Neg
+                } else {
+                    &Sign::Bottom
+                })
+            );
+        }
     }
 
     fn throwing(instruction: DfInst) -> DfInst {

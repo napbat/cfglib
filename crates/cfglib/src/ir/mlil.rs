@@ -34,6 +34,7 @@ mod builder;
 mod canonical;
 mod coalesce;
 mod constant;
+mod control;
 mod coverage;
 mod dialect;
 mod error;
@@ -52,6 +53,7 @@ mod verify;
 
 pub use builder::FunctionBuilder;
 pub use constant::{ConstantMaterialization, ConstantMaterializationDialect};
+pub use control::{ControlFlowMap, ControlFlowReduction};
 pub use coverage::extend_equivalent_coverage;
 pub use dialect::{AnalysisDialect, Dialect, InstructionMetadata, MemoryDialect, VerifyDialect};
 pub use error::{Error, Result, VerificationIssue, VerificationReport};
