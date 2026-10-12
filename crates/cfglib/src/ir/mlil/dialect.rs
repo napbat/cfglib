@@ -59,6 +59,14 @@ pub trait Dialect: Vocabulary {
     /// Returns a compact stable mnemonic for an operation.
     fn mnemonic(operation: &Self::Operation) -> &str;
 
+    /// Returns whether this operation must remain first in its block.
+    ///
+    /// An entry-dependent operation cannot move into its predecessor block.
+    /// The default permits straight-block merging.
+    fn requires_block_entry(_operation: &Self::Operation) -> bool {
+        false
+    }
+
     /// Maps caller edge metadata to cfglib's structural edge kind.
     fn edge_kind(edge: &Self::Edge) -> EdgeKind;
 

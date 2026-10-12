@@ -30,6 +30,8 @@ impl<D: VerifyDialect> Function<D> {
     /// that block. The synthetic root stays empty and keeps its one entry
     /// edge, and the block that the root enters stays, so a fact about the
     /// entry block keeps its block.
+    /// A block that starts with a dialect-declared entry-dependent operation
+    /// also keeps its entry boundary.
     ///
     /// A block that an exceptional edge leaves holds the throw site of that
     /// edge. A join therefore refuses a block that holds a throwing
@@ -130,14 +132,19 @@ fn straighten<D: VerifyDialect>(cfg: &mut Cfg<Instruction<D>, D::Edge>) -> usize
     }
 }
 
-/// Returns the blocks that an exception region or a cleanup names on their
-/// own: each handler entry, and the block that each cleanup resumes from and
-/// each of its routes resumes at.
-fn pinned<I, E>(cfg: &Cfg<I, E>) -> BTreeSet<BlockId> {
+/// Returns blocks whose entries an exception region, cleanup, or dialect
+/// operation names independently of their predecessors.
+fn pinned<D: VerifyDialect>(cfg: &Cfg<Instruction<D>, D::Edge>) -> BTreeSet<BlockId> {
     let mut pinned: BTreeSet<BlockId> = cfg
         .regions()
         .iter()
         .flat_map(|region| region.handlers.iter().map(|handler| handler.entry))
+        .chain(cfg.block_ids().filter(|&block| {
+            cfg.block(block)
+                .instructions()
+                .first()
+                .is_some_and(|instruction| D::requires_block_entry(instruction.operation()))
+        }))
         .collect();
     for cleanup in cfg.cleanups() {
         pinned.extend(cleanup.resume_from);

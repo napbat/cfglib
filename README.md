@@ -250,6 +250,11 @@ edge takes its provenance with it. Instruction identities become dense again.
 `prune_variables` is the variable axis and reports `VariablePruning` both ways,
 exactly as `split_variables` reports `VariableSplit`.
 
+`merge_straight_blocks()` preserves an entry-dependent first instruction when
+the dialect returns true from `Dialect::requires_block_entry`. It does not
+move that instruction after a predecessor's operations. The default returns
+false, so ordinary straight blocks still merge.
+
 `coalesce_copies` runs copy propagation's direction in reverse, which a lift
 needs after it: propagation rewrites readers to the lifter temporary a value was
 computed into, so the named register web survives only as a copy of it. Where a
