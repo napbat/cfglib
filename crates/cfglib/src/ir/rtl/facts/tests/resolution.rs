@@ -409,6 +409,7 @@ fn effects_nondeterminism_and_raises_give_no_constants() {
         outcome: (),
         guard: Some(guard),
         payload: &[],
+        binds: &[],
     });
     for index in [loaded.first, chosen] {
         record.read(Selection::FiniteIndexed {

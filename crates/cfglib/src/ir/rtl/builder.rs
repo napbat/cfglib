@@ -25,7 +25,12 @@ use super::statement::{Control, Raise, Selection, ValueRange, WriteTarget};
 /// - A [`WriteTarget::Root`] plan covers its whole root (see
 ///   [`WriteTarget`]); two writes of one instruction never cover the same bit.
 /// - A one-bit guard or condition has type [`Bits::BOOL`].
-/// - An unconditional [`Raise`] is followed by [`Control::Terminating`].
+/// - An unconditional [`Raise`] is followed by [`Control::Terminating`], and
+///   no statement follows it. The record holds no [`WriteTarget`] at all,
+///   because the delta of such a record never commits and the summaries of
+///   the facts would count the write as a kill.
+/// - The bindings of one [`Raise`] name each root once, and each bound value
+///   has the width of its root.
 ///
 /// The consumer checks the contract when the record is sealed and reports a
 /// violation through [`Self::Error`].
@@ -69,6 +74,9 @@ pub trait InstructionBuilder<D: Dialect> {
     ) -> ValueRange<Self::Value>;
 
     /// Raises an outcome when its guard is one, or unconditionally.
+    ///
+    /// The bindings of the raise are the state that the outcome publishes.
+    /// The delta commits nothing when the outcome is raised.
     fn raise(&mut self, raise: Raise<'_, D, Self::Value>);
 
     /// Adds a write to the delta that commits at the instruction boundary.

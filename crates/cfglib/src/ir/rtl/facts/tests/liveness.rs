@@ -6,7 +6,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::toy::{Block, Function, Root, Toy, roots_in};
-use crate::ir::rtl::{BlockSummaries, Control, RootLiveness, RootTable};
+use crate::ir::rtl::{BlockSummaries, Control, InstructionBuilder, Raise, RootLiveness, RootTable};
 
 /// The blocks of the loop that the tests share.
 struct Loop {
@@ -156,6 +156,28 @@ fn a_partial_write_keeps_its_root_live_above_it() {
     let (table, summaries) = facts(&function);
     let liveness = RootLiveness::compute_seeded(&function, &table, &summaries, |_, _| {});
     assert_eq!(live(&table, liveness.live_in(first)), [Root::Acc]);
+}
+
+#[test]
+fn a_raise_binding_does_not_make_its_root_live() {
+    let mut function = Function::new();
+    let entry = function.block();
+    let mut record = function.record_in(entry);
+    let sticky = record.read_whole(Root::Acc);
+    let guard = record.constant_value(1, 1);
+    record.raise(Raise {
+        outcome: (),
+        guard: Some(guard),
+        payload: &[],
+        binds: &[(Root::Tmp, sticky)],
+    });
+    record.end(Control::Advance);
+
+    let (table, summaries) = facts(&function);
+    let liveness = RootLiveness::compute_seeded(&function, &table, &summaries, |_, _| {});
+    assert_eq!(table.roots(), [Root::Acc, Root::Tmp]);
+    // The value of the binding reads `Acc`. Nothing reads `Tmp`.
+    assert_eq!(live(&table, liveness.live_in(entry)), [Root::Acc]);
 }
 
 #[test]

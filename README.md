@@ -184,7 +184,7 @@ One machine instruction is one atomic state update:
 - Writes collect into one delta. The delta commits at the instruction boundary.
 - One control boundary ends the instruction.
 
-A fault is a typed outcome that an effect or a raise declares. It is not a control-flow successor. An instruction has no control flow of its own. A repeated instruction branches to its own address, and a choice inside one instruction is a select or a guarded write.
+A fault is a typed outcome that an effect or a raise declares. It is not a control-flow successor. A raised outcome commits nothing of the delta. A raise can publish state of its own, its bindings: some architectures set state before they raise, such as the status flags of a floating-point exception that the program does not mask. An instruction has no control flow of its own. A repeated instruction branches to its own address, and a choice inside one instruction is a select or a guarded write.
 
 Every RTL value is a signless bit vector. Signedness, a floating format, and a lane structure are properties of an operator, not of a value.
 
@@ -201,7 +201,7 @@ The builder takes these plain-data types, and a record yields them. Every slice 
 
 - `Selection` says where a read takes its bits: `Direct` (one `Place`), `FiniteIndexed` (the candidate that an index value picks), or `SparseIndexed` (an element of a sparse bank, such as a model-specific register).
 - `WriteTarget` says what a write changes: `Root`, `FiniteIndexed`, or `SparseIndexed`. A `Root` write carries a complete coverage plan: ascending `SpanAction` values that start at bit zero, end at the root width, and leave no gap. Each span has an `Action`: `PreservePreState`, `TakeInput`, or `Nondeterministic`.
-- `Raise` names an outcome, an optional one-bit guard, and a payload. A raised outcome publishes no normal state update.
+- `Raise` names an outcome, an optional one-bit guard, a payload, and its bindings. A raised outcome publishes no state of the delta. A binding pairs a root with the new value of the whole root. The value comes from the state before the instruction, like every other value. A binding is not a write: on the normal path the root keeps its value.
 - `Control` ends the instruction: `Advance`, `Jump`, `Branch`, `Call`, `Return`, `Dispatch`, or `Terminating`. A `Dispatch` names a scrutinee. The case values belong to the decoded control flow, not to the record.
 - `Statement` is one statement of a sealed record: `Read`, `Constant`, `Apply`, `Nondet`, `Effect`, `Raise`, or `Write`. A `ValueRange` is a run of consecutive results.
 
@@ -210,7 +210,8 @@ The builder takes these plain-data types, and a record yields them. Every slice 
 - Every operand is a handle that the builder returned earlier.
 - A `WriteTarget::Root` plan covers its whole root. Two writes of one instruction never cover the same bit.
 - A guard or condition has type `Bits::BOOL`.
-- An unconditional `Raise` is followed by `Control::Terminating`.
+- An unconditional `Raise` is followed by `Control::Terminating`, and no statement follows it. The record holds no write: the delta of such a record never commits.
+- The bindings of one `Raise` name each root once. Each bound value has the width of its root.
 
 #### RTL facts
 
@@ -218,8 +219,8 @@ Every RTL fact is a side table. The algorithms read the function through `Functi
 
 | Fact | Entry point | Description |
 |---|---|---|
-| Root table | `RootTable::collect` | The roots that the function names, in ascending order. The position of a root is its dense index. |
-| Block summaries | `BlockSummaries::compute`; `BlockSummaries::block` → `BlockSummary` | Per block: `reads_before_write`, `writes`, and `kills`. A root is a whole unit here. A partial write reads its root and writes it. An indexed or sparse write is a may-write and never kills. |
+| Root table | `RootTable::collect` | The roots that the function names, in ascending order. A raise binding names its root. The position of a root is its dense index. |
+| Block summaries | `BlockSummaries::compute`; `BlockSummaries::block` → `BlockSummary` | Per block: `reads_before_write`, `writes`, and `kills`. A root is a whole unit here. A partial write reads its root and writes it. An indexed or sparse write is a may-write and never kills. A raise binding is not a write, and it does not read its root. |
 | Root liveness | `RootLiveness::compute`, `RootLiveness::compute_seeded` with `ExitSeed`; `live_in`, `live_out` | Whole-root liveness. `compute` makes every named root live after each exit block. `compute_seeded` calls a closure for each exit block, and the closure states the live roots through `ExitSeed::insert` or `ExitSeed::insert_all`. |
 | Parameter placement | `ParamPlacement::compute`; `roots_at`, `param_count` | The roots that need a block parameter at each block: the pruned iterated dominance frontier of the blocks that write the root. The call takes the `DominatorTree`, the `DominanceFrontiers`, the root table, the summaries, and the liveness. |
 | Selection resolution | `SelectionResolution::compute` with `RootConstant` entry values; `candidate`, `resolved` → `ResolvedSelection` | The indexed reads and writes whose index is a constant. The analysis follows root constants across blocks and evaluates the index with `Fold`. After a call, every root is unknown. |

@@ -7,8 +7,8 @@ use alloc::vec::Vec;
 
 use super::toy::{Function, Root, SLOTS, Toy, roots_in, whole_places};
 use crate::ir::rtl::{
-    BitSlice, Bits, BlockSummaries, Control, InstructionBuilder, Place, RootTable, Selection,
-    WriteTarget,
+    BitSlice, Bits, BlockSummaries, Control, InstructionBuilder, Place, Raise, RootTable,
+    Selection, WriteTarget,
 };
 
 fn summarize(function: &Function) -> (RootTable<Toy>, BlockSummaries) {
@@ -67,6 +67,50 @@ fn the_table_names_every_selected_written_and_candidate_root_once() {
     assert_eq!(table.index_of(Root::Flag), Some(1));
     assert_eq!(table.index_of(Root::Top), None);
     assert_eq!(table.root(6), Root::Bank);
+}
+
+#[test]
+fn a_raise_binding_names_its_root_but_neither_reads_nor_writes_it() {
+    let mut function = Function::new();
+    let entry = function.block();
+    let mut record = function.record_in(entry);
+    let value = record.constant_value(3, 64);
+    let guard = record.constant_value(1, 1);
+    record.raise(Raise {
+        outcome: (),
+        guard: Some(guard),
+        payload: &[],
+        binds: &[(Root::Tmp, value)],
+    });
+    record.end(Control::Advance);
+
+    let (table, _) = summarize(&function);
+    assert_eq!(table.roots(), [Root::Tmp]);
+    let (reads, writes, kills) = sets(&function, entry);
+    assert_eq!((reads, writes, kills), (vec![], vec![], vec![]));
+}
+
+#[test]
+fn the_value_of_a_raise_binding_reads_its_own_roots_and_kills_nothing() {
+    let mut function = Function::new();
+    let entry = function.block();
+    let mut record = function.record_in(entry);
+    let sticky = record.read_whole(Root::Acc);
+    let guard = record.constant_value(1, 1);
+    record.raise(Raise {
+        outcome: (),
+        guard: Some(guard),
+        payload: &[],
+        binds: &[(Root::Tmp, sticky)],
+    });
+    let next = record.constant_value(5, 64);
+    record.write_whole(Root::Acc, next);
+    record.end(Control::Advance);
+
+    let (reads, writes, kills) = sets(&function, entry);
+    assert_eq!(reads, [Root::Acc]);
+    assert_eq!(writes, [Root::Acc]);
+    assert_eq!(kills, [Root::Acc]);
 }
 
 #[test]

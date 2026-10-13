@@ -139,8 +139,11 @@ pub enum WriteTarget<'a, D: Dialect, V> {
 
 /// A non-normal outcome that one statement of the instruction raises.
 ///
-/// When the outcome is raised, the instruction publishes no normal state
-/// update.
+/// When the outcome is raised, the delta of the instruction commits nothing.
+/// The raise can still publish state of its own, its
+/// [`binds`](Self::binds): the architecture sets some state before it
+/// raises, such as the status flags of a floating-point exception that the
+/// program does not mask.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Raise<'a, D: Dialect, V> {
     /// The kind of outcome.
@@ -152,6 +155,19 @@ pub struct Raise<'a, D: Dialect, V> {
     /// The values that the outcome carries, such as a fault vector and an
     /// error code.
     pub payload: &'a [V],
+    /// The state that the outcome publishes, as pairs of a root and the new
+    /// value of the whole root.
+    ///
+    /// A value is computed from the state before the instruction, like every
+    /// other value of the record. Its width is the width of its root. A root
+    /// appears at most once. The pairs are in the order of the producer, and a
+    /// consumer reports them in that order.
+    ///
+    /// A binding is not a write. On the normal path the root keeps the value
+    /// that it has before the instruction, and the delta does not contain the
+    /// binding. The bound values are uses of their definitions, and nothing
+    /// else.
+    pub binds: &'a [(D::Root, V)],
 }
 
 /// The single control boundary that ends an instruction.

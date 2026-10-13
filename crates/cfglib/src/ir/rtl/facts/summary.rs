@@ -102,6 +102,10 @@ impl BlockSummary {
 ///   A partial [`WriteTarget::Root`] write, every candidate of an indexed
 ///   write, and the bank of a sparse write are such roots. An indexed or a
 ///   sparse write is a may-write: it never kills.
+/// - A binding of a [`Raise`](crate::ir::rtl::Raise) is not a write, and it
+///   does not read its root. The roots that the bound value reads are
+///   upward-exposed reads like any other. On the normal path the bound root
+///   keeps its value.
 /// - An instruction that ends with [`Control::Call`] reads and writes every
 ///   root of the table after its own statements, because an unknown callee
 ///   can read and change any of them. The call kills nothing.

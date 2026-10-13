@@ -10,11 +10,11 @@ use crate::ir::rtl::{Dialect, FunctionView, Place, RecordView, Selection, Statem
 /// The roots that one function names, in ascending order.
 ///
 /// A function names a root when a read selects it, when a write targets it,
-/// when it is a candidate of an indexed selection or write, or when it is the
-/// bank of a sparse access. The position of a root in the table is its dense
-/// index: the bit rows of every other RTL fact use it. Ascending order makes
-/// the index a stable rank, so a fact that lists roots by index lists them
-/// in root order.
+/// when it is a candidate of an indexed selection or write, when it is the
+/// bank of a sparse access, or when a raise binds it. The position of a root
+/// in the table is its dense index: the bit rows of every other RTL fact use
+/// it. Ascending order makes the index a stable rank, so a fact that lists
+/// roots by index lists them in root order.
 ///
 /// The set of these roots is the set T(F) of the function.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +35,9 @@ impl<D: Dialect> RootTable<D> {
                     match statement {
                         Statement::Read { source, .. } => roots.extend(selection_roots(source)),
                         Statement::Write { target, .. } => roots.extend(target_roots(target)),
+                        Statement::Raise(raise) => {
+                            roots.extend(raise.binds.iter().map(|&(root, _)| root));
+                        }
                         _ => {}
                     }
                 }

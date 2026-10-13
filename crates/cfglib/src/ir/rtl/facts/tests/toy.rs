@@ -250,6 +250,7 @@ enum Stored {
     Raise {
         guard: Option<Value>,
         payload: Vec<Value>,
+        binds: Vec<(Root, Value)>,
     },
     Write {
         target: StoredTarget,
@@ -296,10 +297,15 @@ impl Stored {
                 args,
                 outcomes: &[],
             },
-            Self::Raise { guard, payload } => Statement::Raise(Raise {
+            Self::Raise {
+                guard,
+                payload,
+                binds,
+            } => Statement::Raise(Raise {
                 outcome: (),
                 guard: *guard,
                 payload,
+                binds,
             }),
             Self::Write { target } => Statement::Write {
                 target: target.view(),
@@ -579,6 +585,7 @@ impl InstructionBuilder<Toy> for Builder<'_> {
         self.statements.push(Stored::Raise {
             guard: raise.guard,
             payload: raise.payload.to_vec(),
+            binds: raise.binds.to_vec(),
         });
     }
 
