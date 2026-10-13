@@ -250,6 +250,11 @@ edge takes its provenance with it. Instruction identities become dense again.
 `prune_variables` is the variable axis and reports `VariablePruning` both ways,
 exactly as `split_variables` reports `VariableSplit`.
 
+`eliminate_dead_code_with_roots_in_place` also accepts observed instruction
+roots. It retains their input definitions without declaring fake side effects.
+`DeadCode::compute_with_roots` exposes the same analysis without changing the
+graph. Later overwrites and unrelated definitions can still be dead.
+
 `merge_straight_blocks()` preserves an entry-dependent first instruction when
 the dialect returns true from `Dialect::requires_block_entry`. It does not
 move that instruction after a predecessor's operations. The default returns

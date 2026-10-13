@@ -54,7 +54,7 @@ impl<D: VerifyDialect> Function<D> {
         &self,
         live_out: impl Fn(BlockId) -> Vec<VariableId>,
     ) -> Result<(Self, usize)> {
-        let dropped = self.dead_instructions(live_out);
+        let dropped = self.dead_instructions(live_out, |_| false);
         if dropped.is_empty() {
             return Ok((self.clone(), 0));
         }
@@ -72,7 +72,21 @@ impl<D: VerifyDialect> Function<D> {
         &mut self,
         live_out: impl Fn(BlockId) -> Vec<VariableId>,
     ) -> usize {
-        let dropped = self.dead_instructions(live_out);
+        self.eliminate_dead_code_with_roots_in_place(live_out, |_| false)
+    }
+
+    /// Removes dead definitions while retaining additional observed roots.
+    ///
+    /// `observed` retains each selected instruction and its input definitions.
+    /// The callback can describe implicit consumers without adding fake
+    /// instruction effects. Kept instructions are numbered densely in block
+    /// order, as in [`Self::eliminate_dead_code_in_place`].
+    pub fn eliminate_dead_code_with_roots_in_place(
+        &mut self,
+        live_out: impl Fn(BlockId) -> Vec<VariableId>,
+        observed: impl Fn(&Instruction<D>) -> bool,
+    ) -> usize {
+        let dropped = self.dead_instructions(live_out, observed);
         if !dropped.is_empty() {
             self.remove(&dropped);
         }
@@ -141,8 +155,11 @@ impl<D: VerifyDialect> Function<D> {
     fn dead_instructions(
         &self,
         live_out: impl Fn(BlockId) -> Vec<VariableId>,
+        observed: impl Fn(&Instruction<D>) -> bool,
     ) -> BTreeSet<InstructionId> {
-        let dead = DeadCode::compute_with_exits(&self.cfg, live_out);
+        let dead = DeadCode::compute_with_roots(&self.cfg, live_out, |_, instruction| {
+            observed(instruction)
+        });
         dead.instructions
             .iter()
             .filter_map(|point| {

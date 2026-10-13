@@ -83,6 +83,26 @@ impl DeadCode {
         cfg: &Cfg<I, E>,
         live_out: impl Fn(BlockId) -> Vec<I::Variable>,
     ) -> Self {
+        Self::compute_with_roots(cfg, live_out, |_, _| false)
+    }
+
+    /// Analyzes `cfg` with exit values and additional observed instructions.
+    ///
+    /// `observed` retains an instruction and the definitions that supply its
+    /// inputs. It does not declare a side effect or alter the graph. This is
+    /// useful when a consumer observes a definition through metadata rather
+    /// than an explicit variable read.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the unbounded fixpoint solve reports a step-limit error,
+    /// which the unbounded configuration cannot produce.
+    #[must_use]
+    pub fn compute_with_roots<I: EffectInfo, E>(
+        cfg: &Cfg<I, E>,
+        live_out: impl Fn(BlockId) -> Vec<I::Variable>,
+        observed: impl Fn(ProgramPoint, &I) -> bool,
+    ) -> Self {
         let liveness = Liveness::compute_with_exits(cfg, live_out);
 
         let mut instructions = Vec::new();
@@ -94,7 +114,15 @@ impl DeadCode {
             let mut dead = Vec::new();
 
             for (index, inst) in insts.iter().enumerate().rev() {
-                let has_side_effect = !inst.effects().is_empty() || inst.may_unwind();
+                let has_side_effect = !inst.effects().is_empty()
+                    || inst.may_unwind()
+                    || observed(
+                        ProgramPoint {
+                            block: block_id,
+                            inst_idx: index,
+                        },
+                        inst,
+                    );
                 let defs_live = inst.defs().iter().any(|def| live.contains(def));
 
                 if !has_side_effect && !inst.defs().is_empty() && !defs_live {
@@ -263,6 +291,35 @@ mod tests {
                 block: cfg.entry(),
                 inst_idx: 1,
             }]
+        );
+    }
+
+    #[test]
+    fn an_observed_root_keeps_its_dependencies_not_later_overwrites() {
+        let mut cfg: Cfg<DfInst> = Cfg::new();
+        let block = cfg.new_block();
+        cfg.add_edge(cfg.entry(), block, EdgeKind::Fallthrough);
+        cfg.block_mut(cfg.entry()).push(df_def("input", 0));
+        let mut derived = df_def("derived", 1);
+        derived.uses.push(0);
+        cfg.block_mut(block).push(derived);
+        let mut observed = df_def("observed", 2);
+        observed.uses.push(1);
+        cfg.block_mut(block).push(observed);
+        cfg.block_mut(block).push(df_def("later", 2));
+        cfg.block_mut(block).push(df_def("unrelated", 3));
+
+        let dead = DeadCode::compute_with_roots(
+            &cfg,
+            |_| Vec::new(),
+            |point, _| point == (ProgramPoint { block, inst_idx: 1 }),
+        );
+        assert_eq!(
+            dead.instructions,
+            alloc::vec![
+                ProgramPoint { block, inst_idx: 2 },
+                ProgramPoint { block, inst_idx: 3 },
+            ]
         );
     }
 
