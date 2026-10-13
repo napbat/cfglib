@@ -18,7 +18,6 @@
 ///
 /// - `display = "prefix";` implements `core::fmt::Display` as the prefix
 ///   followed by the raw value.
-/// - `raw;` adds the `raw` accessor returning the backing `u32`.
 /// - a doc comment followed by `from_index = "overflow message";` adds the
 ///   panicking `from_index` constructor; the doc comment (including its
 ///   `# Panics` section) and the `expect` message come from the call site.
@@ -62,21 +61,6 @@ macro_rules! define_dense_id {
         impl ::core::fmt::Display for $name {
             fn fmt(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
                 ::core::write!(formatter, "{}{}", $prefix, self.0)
-            }
-        }
-
-        crate::identity::define_dense_id! { @extras $name; $($rest)* }
-    };
-    (@extras $name:ident;
-        raw;
-        $($rest:tt)*
-    ) => {
-        impl $name {
-            /// Returns the compact raw identity.
-            #[inline]
-            #[must_use]
-            pub const fn raw(self) -> u32 {
-                self.0
             }
         }
 

@@ -1,76 +1,23 @@
-//! Generic medium-level intermediate-language storage and analysis contracts.
+//! The medium-level contract: a flat function in static single assignment
+//! form with block parameters.
 //!
-//! MLIL functions use [`Cfg`](crate::Cfg) for control-flow storage while a
-//! caller-defined [`Dialect`] supplies the semantic operation, type, effect,
-//! edge, source, and native-variable vocabularies. This keeps the shared
-//! representation useful across managed runtimes, native instruction sets,
-//! shaders, and source-language compilers without flattening their semantics
-//! into strings or a closed library-owned opcode enum.
+//! Every instruction defines zero or more values and reads values by handle.
+//! There is no expression tree and no mutable variable. A block receives its
+//! join values as ordered parameters, and the terminator that ends each block
+//! owns its successor records: the target block, the values passed to the
+//! target's parameters, and the edge metadata. The parameters of the entry
+//! block are the parameters of the function. Predecessors are derived from
+//! the successor records, never stored.
 //!
-//! A transform reaches a function one of two ways, and the difference is the
-//! module's central contract.
-//!
-//! A **derived view** — [`Function::copy_propagated_cfg`],
-//! [`Function::dead_code_eliminated_cfg`],
-//! [`Function::with_promoted_handler_extents`],
-//! [`Function::with_duplicated_structuring_tails`],
-//! [`Function::with_derived_cfg`] — answers with a graph and leaves the
-//! function it came from alone. It is for presentation and analysis: the
-//! canonical function keeps describing the original program, identities and
-//! provenance included. A derived graph that dropped instructions is not a
-//! function anymore — the provenance still names what went — so every door that
-//! verifies first refuses it.
-//!
-//! A **canonical rebuild** — [`Function::eliminate_dead_code`],
-//! [`Function::propagate_copies`], [`Function::coalesce_copies`],
-//! [`Function::prune_variables`], [`Function::drop_unread_definitions`],
-//! [`Function::split_variables`], [`Function::promote_memory`],
-//! [`Function::rewrite_instructions`] — takes the same decision and rebuilds a
-//! function that verifies, which is what a lift stores. Each states exactly
-//! which identities it keeps; what a rebuild drops takes its provenance with
-//! it.
+//! [`FunctionView`] returns slices for contiguous data, so an implementation
+//! keeps its parameters, instructions, operands, and results in dense pools.
+//! [`AnalysisDialect`] supplies the semantic hooks that the generic analyses
+//! of this crate need.
 
-mod builder;
-mod canonical;
-mod coalesce;
-mod constant;
-mod control;
-mod coverage;
+mod analysis;
 mod dialect;
-mod error;
-mod function;
-mod identity;
-mod instruction;
-mod promote;
-mod provenance;
-mod prune;
-mod rewrite;
-mod splice;
-mod split;
-mod straight;
-mod variable;
-mod verify;
+mod view;
 
-pub use builder::FunctionBuilder;
-pub use constant::{ConstantMaterialization, ConstantMaterializationDialect};
-pub use control::{ControlFlowMap, ControlFlowReduction};
-pub use coverage::extend_equivalent_coverage;
-pub use dialect::{AnalysisDialect, Dialect, InstructionMetadata, MemoryDialect, VerifyDialect};
-pub use error::{Error, Result, VerificationIssue, VerificationReport};
-pub use function::Function;
-pub use identity::{EntityId, InstructionId, VariableId};
-pub use instruction::Instruction;
-pub use promote::{MemoryPromotion, PromoteDialect, PromotionAccess};
-pub use provenance::{ProvenanceEntry, ProvenanceMap};
-pub use prune::VariablePruning;
-pub use rewrite::{InstructionReplacement, InstructionRewrite};
-pub use splice::{InstructionEdit, InstructionSplice};
-pub use split::VariableSplit;
-pub use variable::{TypedVariable, Variable};
-
-/// Ordered parameter and return signature of one MLIL function.
-pub type Signature<D> =
-    crate::ir::signature::Signature<VariableId, <D as crate::ir::dialect::Vocabulary>::ValueType>;
-
-#[cfg(test)]
-mod tests;
+pub use analysis::{AnalysisDialect, Effects, Lattice};
+pub use dialect::Dialect;
+pub use view::{FunctionView, Successor, ValueDef};

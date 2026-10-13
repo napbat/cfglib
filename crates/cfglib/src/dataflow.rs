@@ -101,9 +101,6 @@ pub trait InstrInfo {
 /// statements).
 ///
 /// The predicate is expressed in the consumer's own variable domain.
-/// [`lift_predicated`](crate::lift_predicated) regionizes maximal runs of
-/// same-predicate instructions into
-/// [`AstNode::Guarded`](crate::AstNode::Guarded) nodes.
 ///
 /// # Contract
 ///

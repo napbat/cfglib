@@ -1,10 +1,8 @@
 //! Indented text output, and display-only instruction rendering.
 //!
-//! [`IndentedWriter`] is the one place indentation is decided. Every
-//! pseudocode printer in the crate — [`ir::ast`](crate::ir::ast),
-//! [`ir::rtl`](crate::ir::rtl), [`ir::hlil`](crate::ir::hlil) — writes
-//! through it, so a nested construct is indented by the writer rather than
-//! by each printer counting spaces.
+//! [`IndentedWriter`] is the one place indentation is decided. Every text
+//! printer in the crate writes through it, so a nested construct is indented
+//! by the writer rather than by each printer counting spaces.
 //!
 //! [`DisplayInstr`] is deliberately independent of
 //! [`FlowControl`](crate::FlowControl): rendering a graph for humans (DOT

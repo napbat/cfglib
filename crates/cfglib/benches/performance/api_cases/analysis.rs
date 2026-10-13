@@ -1,10 +1,8 @@
 use cfglib::{
-    AstNode, BlockId, Cfg, EdgeKind, FlowEffect, Purity, block_nesting_depths, block_purities,
-    block_purity, cfg_block_nesting_depths, cfg_purity, detect_cfg_patterns,
-    detect_explicit_tail_calls, detect_patterns, detect_switch_tables, detect_tail_calls, lift,
-    lift_borrowed, lift_borrowed_with_report, lift_predicated, lift_with_report,
-    recover_block_expressions, recover_expressions, recover_switch_tables,
-    set_uniform_edge_weights, verify,
+    BlockId, Cfg, EdgeKind, FlowEffect, Purity, block_nesting_depths, block_purities, block_purity,
+    cfg_block_nesting_depths, cfg_purity, detect_cfg_patterns, detect_explicit_tail_calls,
+    detect_patterns, detect_switch_tables, detect_tail_calls, recover_block_expressions,
+    recover_expressions, recover_switch_tables, set_uniform_edge_weights, verify,
 };
 
 use super::BenchmarkSuite;
@@ -108,7 +106,7 @@ fn register_purity(suite: &mut BenchmarkSuite<'_>) {
     );
 }
 
-fn register_expressions_and_ast(suite: &mut BenchmarkSuite<'_>) {
+fn register_expressions(suite: &mut BenchmarkSuite<'_>) {
     let cfg = dataflow_cfg(BLOCK_COUNT, INSTRUCTIONS_PER_BLOCK);
     benchmark_case!(
         suite,
@@ -123,54 +121,6 @@ fn register_expressions_and_ast(suite: &mut BenchmarkSuite<'_>) {
         covers[recover_expressions],
         || recover_expressions(&cfg),
         |trees: &Vec<_>| assert_eq!(trees.len(), BLOCK_COUNT)
-    );
-    benchmark_case!(
-        suite,
-        "api_lift",
-        covers[lift],
-        || lift(&cfg),
-        |ast| assert!(matches!(ast, AstNode::Sequence { .. }))
-    );
-    benchmark_case!(
-        suite,
-        "api_lift_borrowed",
-        covers[lift_borrowed],
-        || lift_borrowed(&cfg),
-        |ast| assert!(matches!(ast, AstNode::Sequence { .. }))
-    );
-    benchmark_case!(
-        suite,
-        "api_lift_borrowed_with_report",
-        covers[lift_borrowed_with_report],
-        || lift_borrowed_with_report(&cfg),
-        |lifted: &(AstNode<&ApiInst>, cfglib::LiftReport)| {
-            assert!(matches!(lifted.0, AstNode::Sequence { .. }));
-        }
-    );
-    benchmark_case!(
-        suite,
-        "api_lift_with_report",
-        covers[lift_with_report],
-        || lift_with_report(&cfg),
-        |lifted: &(AstNode<ApiInst>, cfglib::LiftReport)| {
-            assert!(matches!(lifted.0, AstNode::Sequence { .. }));
-        }
-    );
-
-    let mut predicated = dataflow_cfg(BLOCK_COUNT, INSTRUCTIONS_PER_BLOCK);
-    let block_ids: Vec<_> = predicated.block_ids().collect();
-    for block in block_ids {
-        for instruction in predicated.block_mut(block).instructions_mut() {
-            instruction.uses.push(0);
-            instruction.predicate = Some((0, true));
-        }
-    }
-    benchmark_case!(
-        suite,
-        "api_lift_predicated",
-        covers[lift_predicated],
-        || lift_predicated(&predicated),
-        |ast| assert!(matches!(ast, AstNode::Sequence { .. }))
     );
 }
 
@@ -242,7 +192,7 @@ fn register_profile(suite: &mut BenchmarkSuite<'_>) {
 pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     register_metrics_and_patterns(suite);
     register_purity(suite);
-    register_expressions_and_ast(suite);
+    register_expressions(suite);
     register_switch_and_calls(suite);
     register_profile(suite);
 }
