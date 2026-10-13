@@ -11,10 +11,12 @@ extern crate alloc;
 use alloc::collections::BTreeMap;
 
 use crate::block::BlockId;
-use crate::cfg::{Cfg, CfgEdge};
+use crate::dataflow::cfg_view::CfgView;
 use crate::dataflow::edge_fixpoint::{self, EdgeProblem};
 use crate::dataflow::fixpoint::Direction;
 use crate::dataflow::{InstrInfo, departs_before_throws};
+use crate::graph::edge_view::EdgeRef;
+use crate::graph::traverse::{TraversalDirection, depth_first_preorder};
 
 /// A lattice element for abstract interpretation.
 pub trait Lattice: Clone + PartialEq {
@@ -72,17 +74,14 @@ struct AbstractProblem<D> {
 impl<D> AbstractProblem<D> {
     /// Replays `block` from `input`, handing the state before each throwing
     /// instruction to `before_unwind`.
-    fn replay<I: InstrInfo, E>(
-        cfg: &Cfg<I, E>,
-        block: BlockId,
-        input: &D,
-        mut before_unwind: impl FnMut(&D),
-    ) -> D
+    fn replay<G>(cfg: &G, block: BlockId, input: &D, mut before_unwind: impl FnMut(&D)) -> D
     where
-        D: AbstractDomain<I>,
+        G: CfgView,
+        G::Inst: InstrInfo,
+        D: AbstractDomain<G::Inst>,
     {
         let mut state = input.clone();
-        for inst in cfg.block(block).instructions() {
+        for inst in cfg.instructions(block) {
             if inst.may_unwind() {
                 before_unwind(&state);
             }
@@ -92,7 +91,12 @@ impl<D> AbstractProblem<D> {
     }
 }
 
-impl<I: InstrInfo, E, D: AbstractDomain<I>> EdgeProblem<Cfg<I, E>> for AbstractProblem<D> {
+impl<G, D> EdgeProblem<G> for AbstractProblem<D>
+where
+    G: CfgView,
+    G::Inst: InstrInfo,
+    D: AbstractDomain<G::Inst>,
+{
     // An unreached edge is not a reached edge carrying the domain's bottom.
     type Fact = Option<D>;
 
@@ -100,12 +104,12 @@ impl<I: InstrInfo, E, D: AbstractDomain<I>> EdgeProblem<Cfg<I, E>> for AbstractP
         Direction::Forward
     }
 
-    fn bottom(&self, _cfg: &Cfg<I, E>) -> Option<D> {
+    fn bottom(&self, _cfg: &G) -> Option<D> {
         None
     }
 
     /// A reached block that nothing branches to starts from the entry value.
-    fn boundary(&self, cfg: &Cfg<I, E>, block: BlockId) -> Option<Option<D>> {
+    fn boundary(&self, cfg: &G, block: BlockId) -> Option<Option<D>> {
         cfg.incoming(block)
             .next()
             .is_none()
@@ -119,7 +123,7 @@ impl<I: InstrInfo, E, D: AbstractDomain<I>> EdgeProblem<Cfg<I, E>> for AbstractP
         }
     }
 
-    fn transfer_node(&self, cfg: &Cfg<I, E>, block: BlockId, input: &Option<D>) -> Option<D> {
+    fn transfer_node(&self, cfg: &G, block: BlockId, input: &Option<D>) -> Option<D> {
         input
             .as_ref()
             .map(|input| Self::replay(cfg, block, input, |_| {}))
@@ -127,8 +131,8 @@ impl<I: InstrInfo, E, D: AbstractDomain<I>> EdgeProblem<Cfg<I, E>> for AbstractP
 
     fn transfer_edge(
         &self,
-        cfg: &Cfg<I, E>,
-        edge: CfgEdge<'_, E>,
+        cfg: &G,
+        edge: EdgeRef<'_, BlockId, G::EdgeId, G::EdgeData>,
         input: &Option<D>,
         output: &Option<D>,
     ) -> Option<D> {
@@ -162,22 +166,23 @@ impl<I: InstrInfo, E, D: AbstractDomain<I>> EdgeProblem<Cfg<I, E>> for AbstractP
 /// Panics only if the unbounded fixpoint solve reports a step-limit error,
 /// which the unbounded configuration cannot produce.
 #[must_use]
-pub fn abstract_interpret<I, E, D>(cfg: &Cfg<I, E>) -> AbstractFacts<D>
+pub fn abstract_interpret<G, D>(cfg: &G) -> AbstractFacts<D>
 where
-    I: InstrInfo,
-    D: AbstractDomain<I>,
+    G: CfgView,
+    G::Inst: InstrInfo,
+    D: AbstractDomain<G::Inst>,
 {
     let problem = AbstractProblem::<D> {
         _marker: core::marker::PhantomData,
     };
-    let reachable = cfg.depth_first_preorder();
+    let reachable = depth_first_preorder(cfg, cfg.root(), TraversalDirection::Outgoing);
     let result = edge_fixpoint::solve_edge_problem_from(cfg, &problem, &reachable)
         .expect("an unbounded solve cannot exceed a step limit");
 
     // Convert Vec-indexed results to BTreeMap-keyed results.
     let mut block_in = BTreeMap::new();
     let mut block_out = BTreeMap::new();
-    for block_id in cfg.block_ids() {
+    for block_id in cfg.node_ids() {
         block_in.insert(
             block_id,
             result.fact_in(block_id).clone().unwrap_or_else(D::bottom),

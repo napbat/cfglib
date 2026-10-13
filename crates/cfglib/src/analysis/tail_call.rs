@@ -9,7 +9,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
-use crate::cfg::Cfg;
+use crate::dataflow::cfg_view::CfgView;
 use crate::flow::{CallInfo, FlowControl, FlowEffect};
 
 /// A detected tail call site.
@@ -30,23 +30,29 @@ pub struct TailCall {
 /// tail-call markers, use [`detect_explicit_tail_calls`] instead (or in
 /// addition).
 #[must_use]
-pub fn detect_tail_calls<I: FlowControl>(cfg: &Cfg<I>) -> Vec<TailCall> {
+pub fn detect_tail_calls<G>(cfg: &G) -> Vec<TailCall>
+where
+    G: CfgView,
+    G::Inst: FlowControl,
+{
     let mut results = Vec::new();
-    let exit_blocks: alloc::collections::BTreeSet<BlockId> = cfg.exit_blocks().collect();
+    let exit_blocks: alloc::collections::BTreeSet<BlockId> = cfg
+        .node_ids()
+        .filter(|&block| cfg.outgoing(block).next().is_none())
+        .collect();
 
-    for block_id in cfg.block_ids() {
-        let block = cfg.block(block_id);
-        let bid = block_id;
+    for bid in cfg.node_ids() {
+        let instructions = cfg.instructions(bid);
         let succs: Vec<BlockId> = cfg.successors(bid).collect();
         if succs.len() == 1
             && exit_blocks.contains(&succs[0])
-            && let Some(last) = block.instructions().last()
+            && let Some(last) = instructions.last()
             && matches!(
                 last.flow_effect(),
                 FlowEffect::Call | FlowEffect::ConditionalCall
             )
         {
-            let idx = block.instructions().len().saturating_sub(1);
+            let idx = instructions.len().saturating_sub(1);
             results.push(TailCall {
                 block: bid,
                 inst_idx: Some(idx),
@@ -64,11 +70,14 @@ pub fn detect_tail_calls<I: FlowControl>(cfg: &Cfg<I>) -> Vec<TailCall> {
 /// no callee are still reported when marked — an indirect tail call has no
 /// resolved target but is a tail call nonetheless.
 #[must_use]
-pub fn detect_explicit_tail_calls<I: CallInfo>(cfg: &Cfg<I>) -> Vec<TailCall> {
+pub fn detect_explicit_tail_calls<G>(cfg: &G) -> Vec<TailCall>
+where
+    G: CfgView,
+    G::Inst: CallInfo,
+{
     let mut results = Vec::new();
-    for block_id in cfg.block_ids() {
-        let block = cfg.block(block_id);
-        for (idx, instruction) in block.instructions().iter().enumerate() {
+    for block_id in cfg.node_ids() {
+        for (idx, instruction) in cfg.instructions(block_id).iter().enumerate() {
             if instruction.is_tail_call() {
                 results.push(TailCall {
                     block: block_id,
@@ -84,6 +93,7 @@ pub fn detect_explicit_tail_calls<I: CallInfo>(cfg: &Cfg<I>) -> Vec<TailCall> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cfg::Cfg;
     use crate::edge::EdgeKind;
     use crate::test_util::{df_call, ff};
 

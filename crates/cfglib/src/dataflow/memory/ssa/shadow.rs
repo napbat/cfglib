@@ -7,6 +7,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use crate::cfg::Cfg;
+use crate::dataflow::cfg_view::CfgView;
 use crate::dataflow::{InstrInfo, ProgramPoint};
 use crate::edge::EdgeKind;
 use crate::memory::{MemoryEvent, MemoryTraceEntry};
@@ -74,35 +75,37 @@ impl<L, V, F> InstrInfo for ShadowInstruction<L, V, F> {
 /// when it reports no event, so an unwind out of the shadow carries the
 /// memory state before that instruction exactly as it does for ordinary
 /// variables.
-pub(super) fn build_shadow_cfg<I, E, L, V, F>(
-    cfg: &Cfg<I, E>,
+pub(super) fn build_shadow_cfg<G, L, V, F>(
+    cfg: &G,
     entries: &[MemoryTraceEntry<L, V, F>],
     class_by_location: &BTreeMap<L, MemoryClassId>,
 ) -> Cfg<ShadowInstruction<L, V, F>>
 where
-    I: InstrInfo,
+    G: CfgView,
+    G::Inst: InstrInfo,
     L: Clone + Ord,
     V: Clone,
     F: Clone,
 {
     let mut shadow = Cfg::new();
-    for expected_index in 1..cfg.block_bound() {
+    for expected_index in 1..cfg.node_bound() {
         let block = shadow.new_block();
         debug_assert_eq!(block.index(), expected_index);
     }
-    shadow.set_entry(cfg.entry());
-    for edge in cfg.edges() {
-        shadow.add_edge(edge.source(), edge.target(), edge.kind());
+    shadow.set_entry(cfg.root());
+    for edge in cfg.edge_ids() {
+        let endpoints = cfg.edge(edge);
+        shadow.add_edge(endpoints.source(), endpoints.target(), cfg.edge_kind(edge));
     }
 
     // The trace follows block-allocation, instruction, and event order, so
     // one cursor pairs every source instruction with its events.
     let mut entries = entries.iter().peekable();
-    for block in cfg.block_ids() {
+    for block in cfg.node_ids() {
         let unwinds_out = cfg
             .outgoing(block)
-            .any(|edge| cfg.edge(edge).kind() == EdgeKind::ExceptionUnwind);
-        for (inst_idx, instruction) in cfg.block(block).instructions().iter().enumerate() {
+            .any(|edge| cfg.edge_kind(edge) == EdgeKind::ExceptionUnwind);
+        for (inst_idx, instruction) in cfg.instructions(block).iter().enumerate() {
             let point = ProgramPoint { block, inst_idx };
             let mut unwinds = unwinds_out && instruction.may_unwind();
             while let Some(entry) = entries.next_if(|entry| entry.point() == point) {

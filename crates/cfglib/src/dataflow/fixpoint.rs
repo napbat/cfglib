@@ -16,8 +16,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::convert::Infallible;
 
-use crate::block::BlockId;
-use crate::cfg::Cfg;
+use crate::graph::traverse::{TraversalDirection, depth_first_preorder};
+use crate::graph::view::{DenseId, RootedView};
 
 /// Direction of the data flow analysis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,11 +133,16 @@ pub(crate) fn collapse_infallible<T>(
 
 /// A data flow problem to be solved by the fixpoint engine.
 ///
+/// `V` is the rooted graph view that the problem runs on. A problem over
+/// instructions implements the trait for every
+/// [`CfgView`](super::cfg_view::CfgView) whose instruction type it reads, so
+/// one problem serves [`Cfg`](crate::Cfg) and every consumer view alike.
+///
 /// `F` is the flow fact type (e.g. `BTreeSet<DefSite>` for reaching
 /// definitions, or `BTreeSet<I::Variable>` for liveness).
 /// Termination requires `meet` and `transfer` to be monotone over a
 /// finite-height fact lattice.
-pub trait Problem<I, E = ()> {
+pub trait Problem<V: RootedView> {
     /// The flow fact (lattice element) type.
     type Fact: Clone + PartialEq;
 
@@ -155,7 +160,7 @@ pub trait Problem<I, E = ()> {
 
     /// Transfer function: given the incoming fact for a block, compute
     /// the outgoing fact after the block's instructions are applied.
-    fn transfer(&self, cfg: &Cfg<I, E>, block: BlockId, input: &Self::Fact) -> Self::Fact;
+    fn transfer(&self, view: &V, block: V::NodeId, input: &Self::Fact) -> Self::Fact;
 }
 
 /// A fallible data flow problem.
@@ -165,7 +170,7 @@ pub trait Problem<I, E = ()> {
 /// the input program. The solver reports those consumer errors separately from
 /// its own configured step limit. Termination without a step limit requires
 /// `meet` and `transfer` to be monotone over a finite-height fact lattice.
-pub trait TryProblem<I, E = ()> {
+pub trait TryProblem<V: RootedView> {
     /// The flow fact (lattice element) type.
     type Fact: Clone + PartialEq;
 
@@ -200,8 +205,8 @@ pub trait TryProblem<I, E = ()> {
     /// Returns a consumer error when the block rejects the incoming fact.
     fn transfer(
         &self,
-        cfg: &Cfg<I, E>,
-        block: BlockId,
+        view: &V,
+        block: V::NodeId,
         input: &Self::Fact,
     ) -> Result<Self::Fact, Self::Error>;
 }
@@ -209,9 +214,9 @@ pub trait TryProblem<I, E = ()> {
 /// Per-block facts computed by a fixpoint solve.
 #[derive(Debug, Clone)]
 pub struct Facts<F> {
-    /// The IN fact for each block (indexed by `BlockId::index()`).
+    /// The IN fact for each block (indexed by `DenseId::index()`).
     block_in: Vec<F>,
-    /// The OUT fact for each block (indexed by `BlockId::index()`).
+    /// The OUT fact for each block (indexed by `DenseId::index()`).
     block_out: Vec<F>,
     /// Number of worklist entries processed.
     steps: usize,
@@ -220,13 +225,13 @@ pub struct Facts<F> {
 impl<F> Facts<F> {
     /// Get the IN fact for a block.
     #[must_use]
-    pub fn fact_in(&self, block: BlockId) -> &F {
+    pub fn fact_in<N: DenseId>(&self, block: N) -> &F {
         &self.block_in[block.index()]
     }
 
     /// Get the OUT fact for a block.
     #[must_use]
-    pub fn fact_out(&self, block: BlockId) -> &F {
+    pub fn fact_out<N: DenseId>(&self, block: N) -> &F {
         &self.block_out[block.index()]
     }
 
@@ -238,8 +243,8 @@ impl<F> Facts<F> {
 
     /// Creates the facts of a solve that a specialized solver performed.
     ///
-    /// `block_in` and `block_out` are indexed by `BlockId::index()` up to
-    /// the block bound of the graph, as the generic solver indexes them.
+    /// `block_in` and `block_out` are indexed by `DenseId::index()` up to
+    /// the node bound of the graph, as the generic solver indexes them.
     pub(crate) const fn from_parts(block_in: Vec<F>, block_out: Vec<F>, steps: usize) -> Self {
         Self {
             block_in,
@@ -302,11 +307,11 @@ pub fn meet_options<F: Clone>(
 /// let facts = solve_problem(&cfg, &LivenessProblem).unwrap();
 /// assert!(facts.fact_in(cfg.entry()).is_empty()); // r0 defined, not used
 /// ```
-pub fn solve_problem<I, E, P: Problem<I, E>>(
-    cfg: &Cfg<I, E>,
+pub fn solve_problem<V: RootedView, P: Problem<V>>(
+    view: &V,
     problem: &P,
 ) -> Result<Facts<P::Fact>, SolveError> {
-    solve_problem_with_config(cfg, problem, SolveConfig::new())
+    solve_problem_with_config(view, problem, SolveConfig::new())
 }
 
 /// Run the fixpoint iteration from only the initial `seeds`.
@@ -324,12 +329,12 @@ pub fn solve_problem<I, E, P: Problem<I, E>>(
 /// # Errors
 ///
 /// The unbounded configuration cannot produce a solver-limit error.
-pub fn solve_problem_from<I, E, P: Problem<I, E>>(
-    cfg: &Cfg<I, E>,
+pub fn solve_problem_from<V: RootedView, P: Problem<V>>(
+    view: &V,
     problem: &P,
-    seeds: &[BlockId],
+    seeds: &[V::NodeId],
 ) -> Result<Facts<P::Fact>, SolveError> {
-    solve_problem_from_with_config(cfg, problem, seeds, SolveConfig::new())
+    solve_problem_from_with_config(view, problem, seeds, SolveConfig::new())
 }
 
 /// Run the fixpoint iteration with deterministic bounded iteration.
@@ -338,16 +343,16 @@ pub fn solve_problem_from<I, E, P: Problem<I, E>>(
 ///
 /// Returns [`SolveError::StepLimitExceeded`] when work remains at the
 /// configured limit.
-pub fn solve_problem_with_config<I, E, P: Problem<I, E>>(
-    cfg: &Cfg<I, E>,
+pub fn solve_problem_with_config<V: RootedView, P: Problem<V>>(
+    view: &V,
     problem: &P,
     config: SolveConfig,
 ) -> Result<Facts<P::Fact>, SolveError> {
     let fallible = InfallibleProblem(problem);
     collapse_infallible(try_solve_with_worklist(
-        cfg,
+        view,
         &fallible,
-        reachable_worklist(cfg, &fallible),
+        reachable_worklist(view, &fallible),
         config,
     ))
 }
@@ -362,17 +367,17 @@ pub fn solve_problem_with_config<I, E, P: Problem<I, E>>(
 ///
 /// Returns [`SolveError::StepLimitExceeded`] when work remains at the
 /// configured limit.
-pub fn solve_problem_from_with_config<I, E, P: Problem<I, E>>(
-    cfg: &Cfg<I, E>,
+pub fn solve_problem_from_with_config<V: RootedView, P: Problem<V>>(
+    view: &V,
     problem: &P,
-    seeds: &[BlockId],
+    seeds: &[V::NodeId],
     config: SolveConfig,
 ) -> Result<Facts<P::Fact>, SolveError> {
     let fallible = InfallibleProblem(problem);
     collapse_infallible(try_solve_with_worklist(
-        cfg,
+        view,
         &fallible,
-        seed_worklist(cfg, seeds),
+        seed_worklist(view, seeds),
         config,
     ))
 }
@@ -383,11 +388,11 @@ pub fn solve_problem_from_with_config<I, E, P: Problem<I, E>>(
 ///
 /// Returns [`TrySolveError::Problem`] for a consumer error. The unbounded
 /// configuration cannot produce a solver-limit error.
-pub fn try_solve_problem<I, E, P: TryProblem<I, E>>(
-    cfg: &Cfg<I, E>,
+pub fn try_solve_problem<V: RootedView, P: TryProblem<V>>(
+    view: &V,
     problem: &P,
 ) -> Result<Facts<P::Fact>, TrySolveError<P::Error>> {
-    try_solve_problem_with_config(cfg, problem, SolveConfig::new())
+    try_solve_problem_with_config(view, problem, SolveConfig::new())
 }
 
 /// Run a fallible fixpoint iteration from only the initial `seeds`.
@@ -400,12 +405,12 @@ pub fn try_solve_problem<I, E, P: TryProblem<I, E>>(
 ///
 /// Returns [`TrySolveError::Problem`] for a consumer error. The unbounded
 /// configuration cannot produce a solver-limit error.
-pub fn try_solve_problem_from<I, E, P: TryProblem<I, E>>(
-    cfg: &Cfg<I, E>,
+pub fn try_solve_problem_from<V: RootedView, P: TryProblem<V>>(
+    view: &V,
     problem: &P,
-    seeds: &[BlockId],
+    seeds: &[V::NodeId],
 ) -> Result<Facts<P::Fact>, TrySolveError<P::Error>> {
-    try_solve_problem_from_with_config(cfg, problem, seeds, SolveConfig::new())
+    try_solve_problem_from_with_config(view, problem, seeds, SolveConfig::new())
 }
 
 /// Run a fallible fixpoint iteration with a deterministic step limit.
@@ -414,12 +419,12 @@ pub fn try_solve_problem_from<I, E, P: TryProblem<I, E>>(
 ///
 /// Returns [`TrySolveError::Problem`] for a consumer error or
 /// [`TrySolveError::Solver`] when work remains at the configured limit.
-pub fn try_solve_problem_with_config<I, E, P: TryProblem<I, E>>(
-    cfg: &Cfg<I, E>,
+pub fn try_solve_problem_with_config<V: RootedView, P: TryProblem<V>>(
+    view: &V,
     problem: &P,
     config: SolveConfig,
 ) -> Result<Facts<P::Fact>, TrySolveError<P::Error>> {
-    try_solve_with_worklist(cfg, problem, reachable_worklist(cfg, problem), config)
+    try_solve_with_worklist(view, problem, reachable_worklist(view, problem), config)
 }
 
 /// Run a fallible fixpoint iteration from `seeds` with a deterministic step
@@ -433,46 +438,52 @@ pub fn try_solve_problem_with_config<I, E, P: TryProblem<I, E>>(
 ///
 /// Returns [`TrySolveError::Problem`] for a consumer error or
 /// [`TrySolveError::Solver`] when work remains at the configured limit.
-pub fn try_solve_problem_from_with_config<I, E, P: TryProblem<I, E>>(
-    cfg: &Cfg<I, E>,
+pub fn try_solve_problem_from_with_config<V: RootedView, P: TryProblem<V>>(
+    view: &V,
     problem: &P,
-    seeds: &[BlockId],
+    seeds: &[V::NodeId],
     config: SolveConfig,
 ) -> Result<Facts<P::Fact>, TrySolveError<P::Error>> {
-    try_solve_with_worklist(cfg, problem, seed_worklist(cfg, seeds), config)
+    try_solve_with_worklist(view, problem, seed_worklist(view, seeds), config)
 }
 
-/// Blocks eligible for the initial raw-ID worklist.
-fn reachable_worklist<I, E, P: TryProblem<I, E>>(cfg: &Cfg<I, E>, problem: &P) -> BTreeSet<u32> {
+/// Blocks eligible for the initial worklist, as dense indices.
+fn reachable_worklist<V: RootedView, P: TryProblem<V>>(view: &V, problem: &P) -> BTreeSet<usize> {
     match problem.direction() {
-        Direction::Forward => cfg
-            .depth_first_preorder()
+        Direction::Forward => depth_first_preorder(view, view.root(), TraversalDirection::Outgoing)
             .into_iter()
-            .map(BlockId::raw)
+            .map(DenseId::index)
             .collect(),
-        Direction::Backward => cfg.block_ids().map(BlockId::raw).collect(),
+        Direction::Backward => view.node_ids().map(DenseId::index).collect(),
     }
 }
 
-fn seed_worklist<I, E>(cfg: &Cfg<I, E>, seeds: &[BlockId]) -> BTreeSet<u32> {
+fn seed_worklist<V: RootedView>(view: &V, seeds: &[V::NodeId]) -> BTreeSet<usize> {
+    let mut live = vec![false; view.node_bound()];
+    for block in view.node_ids() {
+        live[block.index()] = true;
+    }
     seeds
         .iter()
         .map(|seed| {
-            assert!(cfg.contains_block(*seed), "seed block is out of range");
-            seed.raw()
+            assert!(
+                live.get(seed.index()).copied().unwrap_or(false),
+                "seed block is out of range"
+            );
+            seed.index()
         })
         .collect()
 }
 
-fn try_solve_with_worklist<I, E, P: TryProblem<I, E>>(
-    cfg: &Cfg<I, E>,
+fn try_solve_with_worklist<V: RootedView, P: TryProblem<V>>(
+    view: &V,
     problem: &P,
-    mut worklist: BTreeSet<u32>,
+    mut worklist: BTreeSet<usize>,
     config: SolveConfig,
 ) -> Result<Facts<P::Fact>, TrySolveError<P::Error>> {
     // Block-indexed side tables: sized by the identity bound, never by the
     // live count, so a removed block's slot still has a well-defined fact.
-    let n = cfg.block_bound();
+    let n = view.node_bound();
     let bottom = problem.bottom();
     let forward = matches!(problem.direction(), Direction::Forward);
 
@@ -480,24 +491,24 @@ fn try_solve_with_worklist<I, E, P: TryProblem<I, E>>(
     let mut block_out: Vec<P::Fact> = vec![bottom; n];
 
     let mut steps = 0;
-    while let Some(block_raw) = worklist.pop_first() {
+    while let Some(block_index) = worklist.pop_first() {
         if let Some(limit) = config.max_steps
             && steps >= limit
         {
             return Err(SolveError::StepLimitExceeded {
                 limit,
                 steps,
-                pending_node: block_raw as usize,
+                pending_node: block_index,
             }
             .into());
         }
         steps += 1;
-        let block = BlockId::from_raw(block_raw);
+        let block = V::NodeId::from_index(block_index);
 
         // Meet over the upstream facts in the analysis direction; a block
         // with no upstream receives the problem's entry fact.
         let merged = if forward {
-            let mut upstream = cfg.predecessors(block);
+            let mut upstream = view.predecessors(block);
             match upstream.next() {
                 None => problem.entry_fact().map_err(TrySolveError::Problem)?,
                 Some(first) => {
@@ -511,7 +522,7 @@ fn try_solve_with_worklist<I, E, P: TryProblem<I, E>>(
                 }
             }
         } else {
-            let mut upstream = cfg.successors(block);
+            let mut upstream = view.successors(block);
             match upstream.next() {
                 None => problem.entry_fact().map_err(TrySolveError::Problem)?,
                 Some(first) => {
@@ -529,23 +540,23 @@ fn try_solve_with_worklist<I, E, P: TryProblem<I, E>>(
         if forward {
             block_in[block.index()] = merged;
             let new_out = problem
-                .transfer(cfg, block, &block_in[block.index()])
+                .transfer(view, block, &block_in[block.index()])
                 .map_err(TrySolveError::Problem)?;
             if new_out != block_out[block.index()] {
                 block_out[block.index()] = new_out;
-                for downstream in cfg.successors(block) {
-                    worklist.insert(downstream.raw());
+                for downstream in view.successors(block) {
+                    worklist.insert(downstream.index());
                 }
             }
         } else {
             block_out[block.index()] = merged;
             let new_in = problem
-                .transfer(cfg, block, &block_out[block.index()])
+                .transfer(view, block, &block_out[block.index()])
                 .map_err(TrySolveError::Problem)?;
             if new_in != block_in[block.index()] {
                 block_in[block.index()] = new_in;
-                for downstream in cfg.predecessors(block) {
-                    worklist.insert(downstream.raw());
+                for downstream in view.predecessors(block) {
+                    worklist.insert(downstream.index());
                 }
             }
         }
@@ -561,7 +572,7 @@ fn try_solve_with_worklist<I, E, P: TryProblem<I, E>>(
 /// Adapter that runs an infallible [`Problem`] on the fallible solver core.
 struct InfallibleProblem<'p, P>(&'p P);
 
-impl<I, E, P: Problem<I, E>> TryProblem<I, E> for InfallibleProblem<'_, P> {
+impl<V: RootedView, P: Problem<V>> TryProblem<V> for InfallibleProblem<'_, P> {
     type Fact = P::Fact;
     type Error = Infallible;
 
@@ -583,11 +594,11 @@ impl<I, E, P: Problem<I, E>> TryProblem<I, E> for InfallibleProblem<'_, P> {
 
     fn transfer(
         &self,
-        cfg: &Cfg<I, E>,
-        block: BlockId,
+        view: &V,
+        block: V::NodeId,
         input: &Self::Fact,
     ) -> Result<Self::Fact, Self::Error> {
-        Ok(Problem::transfer(self.0, cfg, block, input))
+        Ok(Problem::transfer(self.0, view, block, input))
     }
 }
 

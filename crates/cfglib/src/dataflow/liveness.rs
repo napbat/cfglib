@@ -11,11 +11,11 @@ extern crate alloc;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
+use super::cfg_view::CfgView;
 use super::fixpoint::{Direction, Facts, Problem};
 use super::{InstrInfo, VariableId, departs_before_throws, first_unwind_point};
 use crate::block::BlockId;
-use crate::cfg::Cfg;
-use crate::edge::EdgeKind;
+use crate::edge::{EdgeKind, KindedEdge};
 
 /// The liveness problem.
 ///
@@ -27,8 +27,13 @@ use crate::edge::EdgeKind;
 /// throwing instructions and normal successors only after the block.
 pub struct LivenessProblem;
 
-impl<I: InstrInfo, E> Problem<I, E> for LivenessProblem {
-    type Fact = BTreeSet<I::Variable>;
+impl<V, Var> Problem<V> for LivenessProblem
+where
+    V: CfgView,
+    V::Inst: InstrInfo<Variable = Var>,
+    Var: VariableId,
+{
+    type Fact = BTreeSet<Var>;
 
     fn direction(&self) -> Direction {
         Direction::Backward
@@ -51,8 +56,8 @@ impl<I: InstrInfo, E> Problem<I, E> for LivenessProblem {
     ///
     /// Walk the block's instructions in **reverse** to compute the
     /// set of variables live at the block's entry.
-    fn transfer(&self, cfg: &Cfg<I, E>, block: BlockId, live_out: &Self::Fact) -> Self::Fact {
-        backward_block(cfg, block, live_out.clone(), live_out)
+    fn transfer(&self, view: &V, block: BlockId, live_out: &Self::Fact) -> Self::Fact {
+        backward_block(view, block, live_out.clone(), live_out)
     }
 }
 
@@ -87,12 +92,14 @@ impl<S> SeededLivenessProblem<S> {
     }
 }
 
-impl<I, E, S> Problem<I, E> for SeededLivenessProblem<S>
+impl<V, Var, S> Problem<V> for SeededLivenessProblem<S>
 where
-    I: InstrInfo,
-    S: Fn(BlockId) -> Vec<I::Variable>,
+    V: CfgView,
+    V::Inst: InstrInfo<Variable = Var>,
+    Var: VariableId,
+    S: Fn(BlockId) -> Vec<Var>,
 {
-    type Fact = BTreeSet<I::Variable>;
+    type Fact = BTreeSet<Var>;
 
     fn direction(&self) -> Direction {
         Direction::Backward
@@ -113,10 +120,10 @@ where
     }
 
     /// Backward transfer over `live_out` joined with the block's seed.
-    fn transfer(&self, cfg: &Cfg<I, E>, block: BlockId, live_out: &Self::Fact) -> Self::Fact {
+    fn transfer(&self, view: &V, block: BlockId, live_out: &Self::Fact) -> Self::Fact {
         let mut live = live_out.clone();
         live.extend((self.live_out)(block));
-        backward_block(cfg, block, live, live_out)
+        backward_block(view, block, live, live_out)
     }
 }
 
@@ -125,14 +132,19 @@ where
 ///
 /// A throwing instruction keeps every variable of `successors` live before
 /// it, because an unwind successor's reads are among them.
-fn backward_block<I: InstrInfo, E>(
-    cfg: &Cfg<I, E>,
+fn backward_block<V, Var>(
+    cfg: &V,
     block: BlockId,
-    mut live: BTreeSet<I::Variable>,
-    successors: &BTreeSet<I::Variable>,
-) -> BTreeSet<I::Variable> {
+    mut live: BTreeSet<Var>,
+    successors: &BTreeSet<Var>,
+) -> BTreeSet<Var>
+where
+    V: CfgView,
+    V::Inst: InstrInfo<Variable = Var>,
+    Var: VariableId,
+{
     let unwinds = first_unwind_point(cfg, block).is_some();
-    for instruction in cfg.block(block).instructions().iter().rev() {
+    for instruction in cfg.instructions(block).iter().rev() {
         backward_transfer(&mut live, instruction);
         if unwinds && instruction.may_unwind() {
             live.extend(successors.iter().cloned());
@@ -193,18 +205,20 @@ impl<V: Ord + Clone> Universe<V> {
 /// Normal departures use all completed definitions. Unwind departures use
 /// only definitions before the first possible unwind. The block's reads
 /// join both paths. Bit rows keep the repeated joins allocation-free.
-fn solve<I: InstrInfo, E>(
-    cfg: &Cfg<I, E>,
-    live_out: impl Fn(BlockId) -> Vec<I::Variable>,
-) -> Facts<BTreeSet<I::Variable>> {
-    let bound = cfg.block_bound();
-    let mut seeds: Vec<Vec<I::Variable>> = alloc::vec![Vec::new(); bound];
+fn solve<V, Var>(cfg: &V, live_out: impl Fn(BlockId) -> Vec<Var>) -> Facts<BTreeSet<Var>>
+where
+    V: CfgView,
+    V::Inst: InstrInfo<Variable = Var>,
+    Var: VariableId,
+{
+    let bound = cfg.node_bound();
+    let mut seeds: Vec<Vec<Var>> = alloc::vec![Vec::new(); bound];
     let mut variables = Vec::new();
-    for block in cfg.block_ids() {
+    for block in cfg.node_ids() {
         let seed = live_out(block);
         variables.extend(seed.iter().cloned());
         seeds[block.index()] = seed;
-        for instruction in cfg.block(block).instructions() {
+        for instruction in cfg.instructions(block) {
             variables.extend(instruction.uses().iter().cloned());
             variables.extend(instruction.defs().iter().cloned());
         }
@@ -220,19 +234,19 @@ fn solve<I: InstrInfo, E>(
     let mut writes = alloc::vec![0u64; bound * words];
     let mut seeded = alloc::vec![0u64; bound * words];
     let has_unwind = cfg
-        .edges()
-        .any(|edge| edge.kind() == EdgeKind::ExceptionUnwind);
+        .edge_ids()
+        .any(|edge| cfg.edge_kind(edge) == EdgeKind::ExceptionUnwind);
     // Per block, whether an instruction may unwind, and the writes before
     // the first one: the only writes every unwind departure has completed.
     let mut unwinding = alloc::vec![false; if has_unwind { bound } else { 0 }];
     let mut before_unwind = alloc::vec![0u64; if has_unwind { bound * words } else { 0 }];
-    for block in cfg.block_ids() {
+    for block in cfg.node_ids() {
         let index = block.index();
         for variable in &seeds[index] {
             universe.insert(&mut seeded[row(index)], variable);
         }
         if has_unwind {
-            for instruction in cfg.block(block).instructions() {
+            for instruction in cfg.instructions(block) {
                 if instruction.may_unwind() {
                     unwinding[index] = true;
                     break;
@@ -242,7 +256,7 @@ fn solve<I: InstrInfo, E>(
                 }
             }
         }
-        for instruction in cfg.block(block).instructions().iter().rev() {
+        for instruction in cfg.instructions(block).iter().rev() {
             for variable in instruction.defs() {
                 universe.remove(&mut reads[row(index)], variable);
                 universe.insert(&mut writes[row(index)], variable);
@@ -256,7 +270,7 @@ fn solve<I: InstrInfo, E>(
     let mut live_in = alloc::vec![0u64; bound * words];
     let mut flowing_out = alloc::vec![0u64; bound * words];
     let mut queued = alloc::vec![false; bound];
-    let mut worklist: Vec<BlockId> = cfg.block_ids().collect();
+    let mut worklist: Vec<BlockId> = cfg.node_ids().collect();
     for block in &worklist {
         queued[block.index()] = true;
     }
@@ -272,12 +286,14 @@ fn solve<I: InstrInfo, E>(
         unwind_out.fill(0);
         for edge in cfg.outgoing(block) {
             let edge = cfg.edge(edge);
-            let destination =
-                if has_unwind && unwinding[index] && edge.kind() == EdgeKind::ExceptionUnwind {
-                    &mut unwind_out[..]
-                } else {
-                    &mut out[..]
-                };
+            let destination = if has_unwind
+                && unwinding[index]
+                && edge.data().kind() == EdgeKind::ExceptionUnwind
+            {
+                &mut unwind_out[..]
+            } else {
+                &mut out[..]
+            };
             for (word, from) in destination
                 .iter_mut()
                 .zip(&live_in[row(edge.target().index())])
@@ -305,7 +321,7 @@ fn solve<I: InstrInfo, E>(
 
     let mut block_in = alloc::vec![BTreeSet::new(); bound];
     let mut block_out = alloc::vec![BTreeSet::new(); bound];
-    for block in cfg.block_ids() {
+    for block in cfg.node_ids() {
         let index = block.index();
         for (word, seed) in flowing_out[row(index)].iter_mut().zip(&seeded[row(index)]) {
             *word |= *seed;
@@ -351,7 +367,11 @@ pub struct Liveness<V> {
 impl<V: VariableId> Liveness<V> {
     /// Run liveness analysis on the given CFG.
     #[must_use]
-    pub fn compute<I: InstrInfo<Variable = V>, E>(cfg: &Cfg<I, E>) -> Self {
+    pub fn compute<G>(cfg: &G) -> Self
+    where
+        G: CfgView,
+        G::Inst: InstrInfo<Variable = V>,
+    {
         Self::compute_with_exits(cfg, |_| Vec::new())
     }
 
@@ -368,10 +388,11 @@ impl<V: VariableId> Liveness<V> {
     /// Every query on the result accounts for the seed, including
     /// [`live_out`](Self::live_out) and the per-instruction sets.
     #[must_use]
-    pub fn compute_with_exits<I: InstrInfo<Variable = V>, E>(
-        cfg: &Cfg<I, E>,
-        live_out: impl Fn(BlockId) -> Vec<V>,
-    ) -> Self {
+    pub fn compute_with_exits<G>(cfg: &G, live_out: impl Fn(BlockId) -> Vec<V>) -> Self
+    where
+        G: CfgView,
+        G::Inst: InstrInfo<Variable = V>,
+    {
         Self {
             inner: solve(cfg, live_out),
         }
@@ -414,12 +435,16 @@ impl<V: VariableId> Liveness<V> {
     /// [`live_on_unwind`](Self::live_on_unwind) live before it, since the
     /// unwind leaves before its definitions complete.
     #[must_use]
-    pub fn live_before_instructions<I: InstrInfo<Variable = V>, E>(
+    pub fn live_before_instructions<G>(
         &self,
-        cfg: &Cfg<I, E>,
+        cfg: &G,
         block: BlockId,
-    ) -> alloc::vec::Vec<BTreeSet<V>> {
-        let instructions = cfg.block(block).instructions();
+    ) -> alloc::vec::Vec<BTreeSet<V>>
+    where
+        G: CfgView,
+        G::Inst: InstrInfo<Variable = V>,
+    {
+        let instructions = cfg.instructions(block);
         let mut sets = alloc::vec![BTreeSet::new(); instructions.len()];
         let mut live = self.live_out(block).clone();
         let unwind = self.live_on_unwind(cfg, block);
@@ -442,12 +467,16 @@ impl<V: VariableId> Liveness<V> {
     /// analysis's precision: an unwind out of instruction `i` never observes
     /// that definition.
     #[must_use]
-    pub fn live_after_instructions<I: InstrInfo<Variable = V>, E>(
+    pub fn live_after_instructions<G>(
         &self,
-        cfg: &Cfg<I, E>,
+        cfg: &G,
         block: BlockId,
-    ) -> alloc::vec::Vec<BTreeSet<V>> {
-        let instructions = cfg.block(block).instructions();
+    ) -> alloc::vec::Vec<BTreeSet<V>>
+    where
+        G: CfgView,
+        G::Inst: InstrInfo<Variable = V>,
+    {
+        let instructions = cfg.instructions(block);
         let mut sets = alloc::vec![BTreeSet::new(); instructions.len()];
         let mut live = self.live_out(block).clone();
         let unwind = self.live_on_unwind(cfg, block);
@@ -470,11 +499,11 @@ impl<V: VariableId> Liveness<V> {
     /// after the block, so its successors are in
     /// [`live_out`](Self::live_out) instead and this set is empty.
     #[must_use]
-    pub fn live_on_unwind<I: InstrInfo<Variable = V>, E>(
-        &self,
-        cfg: &Cfg<I, E>,
-        block: BlockId,
-    ) -> BTreeSet<V> {
+    pub fn live_on_unwind<G>(&self, cfg: &G, block: BlockId) -> BTreeSet<V>
+    where
+        G: CfgView,
+        G::Inst: InstrInfo<Variable = V>,
+    {
         let mut live = BTreeSet::new();
         for edge in cfg.outgoing(block) {
             let edge = cfg.edge(edge);
@@ -487,12 +516,13 @@ impl<V: VariableId> Liveness<V> {
 
     /// All variables that are live somewhere in the program.
     #[must_use]
-    pub fn all_live_variables<I: InstrInfo<Variable = V>, E>(
-        &self,
-        cfg: &Cfg<I, E>,
-    ) -> BTreeSet<V> {
+    pub fn all_live_variables<G>(&self, cfg: &G) -> BTreeSet<V>
+    where
+        G: CfgView,
+        G::Inst: InstrInfo<Variable = V>,
+    {
         let mut all = BTreeSet::new();
-        for block_id in cfg.block_ids() {
+        for block_id in cfg.node_ids() {
             all.extend(self.live_in(block_id).iter().cloned());
             all.extend(self.live_out(block_id).iter().cloned());
         }
@@ -504,6 +534,7 @@ impl<V: VariableId> Liveness<V> {
 mod tests {
     use super::*;
     use crate::builder::CfgBuilder;
+    use crate::cfg::Cfg;
     use crate::dataflow::fixpoint;
     use crate::flow::FlowEffect;
     use crate::test_util::{df_def as def, df_ff, df_use as use_, df_with_effect};

@@ -15,11 +15,11 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use crate::block::BlockId;
-use crate::cfg::Cfg;
+use crate::dataflow::cfg_view::CfgView;
 use crate::dataflow::{
     InstrInfo, ProgramPoint, VariableId, departs_before_throws, first_unwind_point,
 };
-use crate::edge::EdgeKind;
+use crate::edge::{EdgeKind, KindedEdge};
 use crate::graph::dominator::DominatorTree;
 
 use super::SsaValue;
@@ -79,13 +79,17 @@ impl<V: VariableId> PhiPlacements<V> {
     /// and operands are also required (and see its precondition: the entry
     /// block must not be a branch target).
     #[must_use]
-    pub fn compute<I: InstrInfo<Variable = V>, E>(cfg: &Cfg<I, E>, dom: &DominatorTree) -> Self {
+    pub fn compute<G>(cfg: &G, dom: &DominatorTree) -> Self
+    where
+        G: CfgView,
+        G::Inst: InstrInfo<Variable = V>,
+    {
         let mut scratch = SsaScratch::new();
-        scratch.reset_placement(cfg.block_bound());
+        scratch.reset_placement(cfg.node_bound());
         place_phis(&mut scratch, cfg, dom);
 
         let drafts = &scratch.phis;
-        let placements = (0..cfg.block_bound())
+        let placements = (0..cfg.node_bound())
             .map(|index| {
                 drafts
                     .at(BlockId::from_index(index))
@@ -219,11 +223,12 @@ impl<V: VariableId> PhiDrafts<V> {
 /// at or after its first throwing instruction does not reach that
 /// successor. Such a definition also places a phi at the unwind successor,
 /// whose operands name the value before each throwing instruction.
-pub(super) fn place_phis<I: InstrInfo, E>(
-    scratch: &mut SsaScratch<I::Variable>,
-    cfg: &Cfg<I, E>,
-    dom: &DominatorTree,
-) {
+pub(super) fn place_phis<G, V>(scratch: &mut SsaScratch<V>, cfg: &G, dom: &DominatorTree)
+where
+    G: CfgView,
+    G::Inst: InstrInfo<Variable = V>,
+    V: VariableId,
+{
     let SsaScratch {
         frontiers,
         definition_blocks,
@@ -237,9 +242,9 @@ pub(super) fn place_phis<I: InstrInfo, E>(
     } = scratch;
     frontiers.rebuild(cfg, dom);
 
-    for block_id in cfg.block_ids() {
+    for block_id in cfg.node_ids() {
         let first_unwind = first_unwind_point(cfg, block_id);
-        for (index, instruction) in cfg.block(block_id).instructions().iter().enumerate() {
+        for (index, instruction) in cfg.instructions(block_id).iter().enumerate() {
             for variable in instruction.defs() {
                 let blocks = match definition_blocks.entry(variable.clone()) {
                     Entry::Vacant(slot) => slot.insert(block_pool.pop().unwrap_or_default()),
@@ -282,7 +287,9 @@ pub(super) fn place_phis<I: InstrInfo, E>(
             for edge in cfg.outgoing(*source) {
                 let edge = cfg.edge(edge);
                 let target = edge.target();
-                if edge.kind() != EdgeKind::ExceptionUnwind || has_phi.is_marked(target.index()) {
+                if edge.data().kind() != EdgeKind::ExceptionUnwind
+                    || has_phi.is_marked(target.index())
+                {
                     continue;
                 }
                 has_phi.mark(target.index());
@@ -321,14 +328,15 @@ pub(super) fn place_phis<I: InstrInfo, E>(
 /// instruction count. An edge that [departs before
 /// throws](departs_before_throws) contributes one departure before each of
 /// its source's throwing instructions.
-fn arrivals<I: InstrInfo, E>(
-    cfg: &Cfg<I, E>,
-    block: BlockId,
-) -> impl Iterator<Item = ProgramPoint> + '_ {
+fn arrivals<G>(cfg: &G, block: BlockId) -> impl Iterator<Item = ProgramPoint> + '_
+where
+    G: CfgView,
+    G::Inst: InstrInfo,
+{
     cfg.incoming(block).flat_map(move |edge| {
         let edge = cfg.edge(edge);
         let source = edge.source();
-        let instructions = cfg.block(source).instructions();
+        let instructions = cfg.instructions(source);
         let before_throws = departs_before_throws(cfg, edge);
         let end = instructions.len();
         (if before_throws { 0 } else { end }..=end)

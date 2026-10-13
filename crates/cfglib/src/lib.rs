@@ -106,6 +106,9 @@
 //!   ├─ NodeView             (graph-owned node payloads)
 //!   ├─ EdgeView             (stable edge identity, endpoints, data)
 //!   └─ RootedView           (adds a distinguished entry node; `Rooted` adapts)
+//! CfgView                   (RootedView + EdgeView + block instruction slices;
+//!                            `Cfg` implements it, every instruction-level
+//!                            analysis reads it)
 //!
 //! FlowControl               (required only by CfgBuilder)
 //!   └─ JumpTargets          (optional — explicit goto/label wiring, Target)
@@ -135,8 +138,9 @@
 //! loaded values, state reads/writes, and ordinary/memory phis.
 //!
 //! Additionally, [`Problem`] is the trait for pluggable instruction-level
-//! dataflow analyses (run by [`solve_problem`]), [`NodeProblem`] its
-//! node-level counterpart over any graph view (run by [`solve_node_problem`]),
+//! dataflow analyses over any rooted view (run by [`solve_problem`]),
+//! [`NodeProblem`] its node-level counterpart over any graph view (run by
+//! [`solve_node_problem`]),
 //! [`EdgeProblem`] its edge-sensitive counterpart (run by
 //! [`solve_edge_problem`]), [`TryEdgeProblem`] the error-preserving edge
 //! variant, and [`Emitter`] the trait for linearization output.
@@ -233,6 +237,7 @@ pub use dataflow::abstract_interpretation::{
     AbstractDomain, AbstractFacts, Lattice, abstract_interpret,
 };
 pub use dataflow::bits::DenseBits;
+pub use dataflow::cfg_view::CfgView;
 pub use dataflow::constant_propagation::{
     ConstFact, ConstPropProblem, ConstValue, ConstantFolder, constant_propagation,
 };

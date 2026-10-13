@@ -17,7 +17,8 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use crate::{BlockId, Cfg, InstrInfo, ProgramPoint, SsaForm, SsaValue, VariableId};
+use crate::dataflow::cfg_view::CfgView;
+use crate::{BlockId, InstrInfo, ProgramPoint, SsaForm, SsaValue, VariableId};
 
 /// Instruction-level summary of reported memory accesses.
 ///
@@ -463,9 +464,10 @@ pub struct MemoryTrace<L, V, F> {
 impl<L, V, F> MemoryTrace<L, V, F> {
     /// Builds a static memory-event trace for `cfg`.
     #[must_use]
-    pub fn compute<I, E>(cfg: &Cfg<I, E>) -> Self
+    pub fn compute<G>(cfg: &G) -> Self
     where
-        I: MemoryEventInfo<Location = L, Fence = F> + InstrInfo<Variable = V>,
+        G: CfgView,
+        G::Inst: MemoryEventInfo<Location = L, Fence = F> + InstrInfo<Variable = V>,
     {
         let mut trace = Self::empty();
         trace.rebuild(cfg);
@@ -484,16 +486,16 @@ impl<L, V, F> MemoryTrace<L, V, F> {
     ///
     /// This is [`compute`](Self::compute) for a caller that holds one trace
     /// across a whole codebase rather than building one per procedure.
-    pub(crate) fn rebuild<I, E>(&mut self, cfg: &Cfg<I, E>)
+    pub(crate) fn rebuild<G>(&mut self, cfg: &G)
     where
-        I: MemoryEventInfo<Location = L, Fence = F> + InstrInfo<Variable = V>,
+        G: CfgView,
+        G::Inst: MemoryEventInfo<Location = L, Fence = F> + InstrInfo<Variable = V>,
     {
         self.entries.clear();
         self.by_point.clear();
 
-        for block_id in cfg.block_ids() {
-            let block = cfg.block(block_id);
-            for (inst_idx, instruction) in block.instructions().iter().enumerate() {
+        for block_id in cfg.node_ids() {
+            for (inst_idx, instruction) in cfg.instructions(block_id).iter().enumerate() {
                 let point = ProgramPoint {
                     block: block_id,
                     inst_idx,

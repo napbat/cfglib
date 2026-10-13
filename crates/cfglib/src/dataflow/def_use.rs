@@ -10,9 +10,9 @@ use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
+use super::cfg_view::CfgView;
 use super::reaching::{ReachingDef, ReachingDefs};
 use super::{DefSite, InstrInfo, UseSite};
-use crate::cfg::Cfg;
 
 /// Def-use and use-def chain results.
 #[derive(Debug, Clone)]
@@ -54,19 +54,23 @@ impl DefUseChains {
     /// assert!(chains.dead_defs().is_empty());
     /// ```
     #[must_use]
-    pub fn compute<I: InstrInfo, E>(cfg: &Cfg<I, E>) -> Self {
+    pub fn compute<G>(cfg: &G) -> Self
+    where
+        G: CfgView,
+        G::Inst: InstrInfo,
+    {
         let reaching = ReachingDefs::compute(cfg);
 
         let mut def_use: BTreeMap<DefSite, BTreeSet<UseSite>> = BTreeMap::new();
         let mut use_def: BTreeMap<UseSite, BTreeSet<DefSite>> = BTreeMap::new();
 
-        for block_id in cfg.block_ids() {
+        for block_id in cfg.node_ids() {
             let block = block_id;
-            let insts = cfg.block(block).instructions();
+            let insts = cfg.instructions(block);
 
             // Track the current reaching defs as we walk forward
             // through the block, so intra-block kills are respected.
-            let mut current_reaching: BTreeSet<ReachingDef<I::Variable>> =
+            let mut current_reaching: BTreeSet<ReachingDef<<G::Inst as InstrInfo>::Variable>> =
                 reaching.reaching_in(block).clone();
 
             for (idx, inst) in insts.iter().enumerate() {

@@ -12,9 +12,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
-use crate::cfg::Cfg;
+use crate::dataflow::cfg_view::CfgView;
 use crate::dataflow::liveness::Liveness;
-use crate::dataflow::{EffectInfo, ProgramPoint};
+use crate::dataflow::{EffectInfo, InstrInfo, ProgramPoint};
 use crate::graph::traverse::{TraversalDirection, reachable};
 
 /// Everything dead in a CFG, found without mutating it.
@@ -59,7 +59,11 @@ impl DeadCode {
     /// Panics only if the unbounded fixpoint solve reports a step-limit
     /// error, which the unbounded configuration cannot produce.
     #[must_use]
-    pub fn compute<I: EffectInfo, E>(cfg: &Cfg<I, E>) -> Self {
+    pub fn compute<G>(cfg: &G) -> Self
+    where
+        G: CfgView,
+        G::Inst: EffectInfo,
+    {
         Self::compute_with_exits(cfg, |_| Vec::new())
     }
 
@@ -79,10 +83,14 @@ impl DeadCode {
     /// Panics only if the unbounded fixpoint solve reports a step-limit
     /// error, which the unbounded configuration cannot produce.
     #[must_use]
-    pub fn compute_with_exits<I: EffectInfo, E>(
-        cfg: &Cfg<I, E>,
-        live_out: impl Fn(BlockId) -> Vec<I::Variable>,
-    ) -> Self {
+    pub fn compute_with_exits<G>(
+        cfg: &G,
+        live_out: impl Fn(BlockId) -> Vec<<G::Inst as InstrInfo>::Variable>,
+    ) -> Self
+    where
+        G: CfgView,
+        G::Inst: EffectInfo,
+    {
         Self::compute_with_roots(cfg, live_out, |_, _| false)
     }
 
@@ -98,19 +106,22 @@ impl DeadCode {
     /// Panics only if the unbounded fixpoint solve reports a step-limit error,
     /// which the unbounded configuration cannot produce.
     #[must_use]
-    pub fn compute_with_roots<I: EffectInfo, E>(
-        cfg: &Cfg<I, E>,
-        live_out: impl Fn(BlockId) -> Vec<I::Variable>,
-        observed: impl Fn(ProgramPoint, &I) -> bool,
-    ) -> Self {
+    pub fn compute_with_roots<G>(
+        cfg: &G,
+        live_out: impl Fn(BlockId) -> Vec<<G::Inst as InstrInfo>::Variable>,
+        observed: impl Fn(ProgramPoint, &G::Inst) -> bool,
+    ) -> Self
+    where
+        G: CfgView,
+        G::Inst: EffectInfo,
+    {
         let liveness = Liveness::compute_with_exits(cfg, live_out);
 
         let mut instructions = Vec::new();
-        for block_id in cfg.block_ids() {
-            let block = cfg.block(block_id);
+        for block_id in cfg.node_ids() {
             let mut live = liveness.live_out(block_id).clone();
             let unwind = liveness.live_on_unwind(cfg, block_id);
-            let insts = block.instructions();
+            let insts = cfg.instructions(block_id);
             let mut dead = Vec::new();
 
             for (index, inst) in insts.iter().enumerate().rev() {
@@ -146,9 +157,9 @@ impl DeadCode {
             }));
         }
 
-        let reached = reachable(cfg, [cfg.entry()], TraversalDirection::Outgoing);
+        let reached = reachable(cfg, [cfg.root()], TraversalDirection::Outgoing);
         let unreachable_blocks = cfg
-            .block_ids()
+            .node_ids()
             .filter(|block| !reached[block.index()])
             .collect();
 
@@ -168,6 +179,7 @@ impl DeadCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cfg::Cfg;
     use crate::edge::EdgeKind;
     use crate::flow::FlowEffect;
     use crate::test_util::{DfInst, TestEffect, df_def, df_impure, df_use, df_with_effect};

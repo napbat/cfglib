@@ -12,8 +12,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
-use crate::cfg::Cfg;
 use crate::dataflow::EffectInfo;
+use crate::dataflow::cfg_view::CfgView;
 
 /// Purity verdict for a block or CFG, over a consumer effect vocabulary `E`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,9 +51,13 @@ fn collect_effects<E: Clone + Ord>(mut all: Vec<E>) -> Purity<E> {
 
 /// Analyze purity of a single block.
 #[must_use]
-pub fn block_purity<I: EffectInfo>(cfg: &Cfg<I>, block: BlockId) -> Purity<I::Effect> {
+pub fn block_purity<G>(cfg: &G, block: BlockId) -> Purity<<G::Inst as EffectInfo>::Effect>
+where
+    G: CfgView,
+    G::Inst: EffectInfo,
+{
     let mut all = Vec::new();
-    for inst in cfg.block(block).instructions() {
+    for inst in cfg.instructions(block) {
         all.extend_from_slice(inst.effects());
     }
     collect_effects(all)
@@ -61,10 +65,14 @@ pub fn block_purity<I: EffectInfo>(cfg: &Cfg<I>, block: BlockId) -> Purity<I::Ef
 
 /// Analyze purity of the entire CFG.
 #[must_use]
-pub fn cfg_purity<I: EffectInfo>(cfg: &Cfg<I>) -> Purity<I::Effect> {
+pub fn cfg_purity<G>(cfg: &G) -> Purity<<G::Inst as EffectInfo>::Effect>
+where
+    G: CfgView,
+    G::Inst: EffectInfo,
+{
     let mut all = Vec::new();
-    for b in cfg.blocks() {
-        for inst in b.instructions() {
+    for block in cfg.node_ids() {
+        for inst in cfg.instructions(block) {
             all.extend_from_slice(inst.effects());
         }
     }
@@ -73,8 +81,12 @@ pub fn cfg_purity<I: EffectInfo>(cfg: &Cfg<I>) -> Purity<I::Effect> {
 
 /// Collect per-block purity for every block in the CFG.
 #[must_use]
-pub fn block_purities<I: EffectInfo>(cfg: &Cfg<I>) -> Vec<(BlockId, Purity<I::Effect>)> {
-    cfg.block_ids()
+pub fn block_purities<G>(cfg: &G) -> Vec<(BlockId, Purity<<G::Inst as EffectInfo>::Effect>)>
+where
+    G: CfgView,
+    G::Inst: EffectInfo,
+{
+    cfg.node_ids()
         .map(|block| (block, block_purity(cfg, block)))
         .collect()
 }

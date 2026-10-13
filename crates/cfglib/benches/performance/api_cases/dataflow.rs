@@ -52,7 +52,7 @@ impl AbstractDomain<ApiInst> for Seen {
 
 struct TryCfgReachability;
 
-impl TryProblem<u32> for TryCfgReachability {
+impl TryProblem<Cfg<u32>> for TryCfgReachability {
     type Fact = bool;
     type Error = ();
 
@@ -224,7 +224,7 @@ fn register_analyses(suite: &mut BenchmarkSuite<'_>) {
         suite,
         "api_abstract_interpret",
         covers[abstract_interpret],
-        || abstract_interpret::<_, _, Seen>(&cfg),
+        || abstract_interpret::<_, Seen>(&cfg),
         |facts| assert_eq!(
             facts.fact_out(cfglib::BlockId::from_index(127)),
             Some(&Seen(true))

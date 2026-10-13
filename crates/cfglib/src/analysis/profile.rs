@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
+use crate::dataflow::cfg_view::CfgView;
 use crate::edge::EdgeId;
 
 /// Profile data for a CFG.
@@ -22,7 +23,9 @@ pub struct CfgProfile {
 }
 
 impl CfgProfile {
-    /// Build a profile from edge weights already set on the CFG.
+    /// Build a profile from the edge weights that the view reports.
+    ///
+    /// A [`Cfg`] reports the weights set on its edges.
     ///
     /// # Examples
     ///
@@ -38,22 +41,21 @@ impl CfgProfile {
     /// assert!(profile.hottest_block().is_some());
     /// ```
     #[must_use]
-    pub fn from_edge_weights<I>(cfg: &Cfg<I>) -> Self {
+    pub fn from_edge_weights<G: CfgView>(cfg: &G) -> Self {
         let mut edge_weights = BTreeMap::new();
         let mut block_weights = BTreeMap::new();
 
-        for edge in cfg.edges() {
-            if let Some(w) = edge.weight() {
-                edge_weights.insert(edge.id(), w);
+        for id in cfg.edge_ids() {
+            if let Some(w) = cfg.edge_weight(id) {
+                edge_weights.insert(id, w);
             }
         }
 
         // Derive block weights: sum of incoming edge weights.
         // Entry block gets weight 1.0 if no incoming edges have weights.
-        block_weights.insert(cfg.entry(), 1.0);
-        for block_id in cfg.block_ids() {
-            let bid = block_id;
-            if bid == cfg.entry() {
+        block_weights.insert(cfg.root(), 1.0);
+        for bid in cfg.node_ids() {
+            if bid == cfg.root() {
                 continue;
             }
             let in_weight: f64 = cfg

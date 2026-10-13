@@ -8,11 +8,11 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
-use crate::cfg::Cfg;
+use crate::dataflow::cfg_view::CfgView;
 use crate::dataflow::constant_propagation::{ConstValue, ConstantFolder};
 use crate::dataflow::ssa::{SsaForm, SsaInstruction, SsaValue};
 use crate::dataflow::{InstrInfo, VariableId};
-use crate::edge::EdgeKind;
+use crate::edge::{EdgeKind, KindedEdge};
 
 /// Result of SCCP analysis.
 #[derive(Debug, Clone)]
@@ -92,16 +92,18 @@ fn known_constants<V: VariableId, C: Clone + Eq>(
         .collect()
 }
 
-fn evaluate_block<I: ConstantFolder, E>(
-    cfg: &Cfg<I, E>,
+fn evaluate_block<G, I>(
+    cfg: &G,
     ssa: &SsaForm<I::Variable>,
     block: BlockId,
     values: &mut BTreeMap<SsaValue<I::Variable>, ConstValue<I::Const>>,
     worklist: &mut Vec<SsaValue<I::Variable>>,
-) {
+) where
+    G: CfgView<Inst = I>,
+    I: ConstantFolder,
+{
     for (instruction, annotation) in cfg
-        .block(block)
-        .instructions()
+        .instructions(block)
         .iter()
         .zip(&ssa.block(block).instructions)
     {
@@ -132,15 +134,18 @@ fn evaluate_block<I: ConstantFolder, E>(
 
 /// The branch outcome the last instruction of `block` proves, or `None` when
 /// the block does not end in a decided conditional transfer.
-fn decided_branch<I: ConstantFolder, E>(
-    cfg: &Cfg<I, E>,
+fn decided_branch<G, I>(
+    cfg: &G,
     ssa: &SsaForm<I::Variable>,
     block: BlockId,
     values: &BTreeMap<SsaValue<I::Variable>, ConstValue<I::Const>>,
-) -> Option<bool> {
+) -> Option<bool>
+where
+    G: CfgView<Inst = I>,
+    I: ConstantFolder,
+{
     let (instruction, annotation) = cfg
-        .block(block)
-        .instructions()
+        .instructions(block)
         .iter()
         .zip(&ssa.block(block).instructions)
         .next_back()?;
@@ -159,14 +164,17 @@ fn decided_branch<I: ConstantFolder, E>(
 /// the executable set stays monotone. Re-derivation happens on every drain
 /// scan, so an edge already in `executable` is skipped rather than queued
 /// again for a pop that would do nothing.
-fn activate_successors<I: ConstantFolder, E>(
-    cfg: &Cfg<I, E>,
+fn activate_successors<G, I>(
+    cfg: &G,
     ssa: &SsaForm<I::Variable>,
     block: BlockId,
     values: &BTreeMap<SsaValue<I::Variable>, ConstValue<I::Const>>,
     executable: &BTreeSet<(BlockId, BlockId)>,
     worklist: &mut Vec<(BlockId, BlockId)>,
-) {
+) where
+    G: CfgView<Inst = I>,
+    I: ConstantFolder,
+{
     let withheld = match decided_branch(cfg, ssa, block, values) {
         Some(true) => Some(EdgeKind::ConditionalFalse),
         Some(false) => Some(EdgeKind::ConditionalTrue),
@@ -174,7 +182,7 @@ fn activate_successors<I: ConstantFolder, E>(
     };
     for id in cfg.outgoing(block) {
         let edge = cfg.edge(id);
-        if Some(edge.kind()) != withheld && !executable.contains(&(block, edge.target())) {
+        if Some(edge.data().kind()) != withheld && !executable.contains(&(block, edge.target())) {
             worklist.push((block, edge.target()));
         }
     }
@@ -221,9 +229,10 @@ impl<V: VariableId, C: Clone + Eq> SccpAnalysis<V, C> {
     /// [`compute_seeded`](Self::compute_seeded) when the caller knows what
     /// one of them holds.
     #[must_use]
-    pub fn compute<I, E>(cfg: &Cfg<I, E>, ssa: &SsaForm<V>) -> Self
+    pub fn compute<G>(cfg: &G, ssa: &SsaForm<V>) -> Self
     where
-        I: ConstantFolder<Const = C> + InstrInfo<Variable = V>,
+        G: CfgView,
+        G::Inst: ConstantFolder<Const = C> + InstrInfo<Variable = V>,
     {
         Self::compute_seeded(cfg, ssa, &BTreeMap::new())
     }
@@ -245,13 +254,10 @@ impl<V: VariableId, C: Clone + Eq> SccpAnalysis<V, C> {
     /// `ssa` must have been computed from `cfg`. Every other rule of
     /// [`compute`](Self::compute) applies without change.
     #[must_use]
-    pub fn compute_seeded<I, E>(
-        cfg: &Cfg<I, E>,
-        ssa: &SsaForm<V>,
-        live_ins: &BTreeMap<V, C>,
-    ) -> Self
+    pub fn compute_seeded<G>(cfg: &G, ssa: &SsaForm<V>, live_ins: &BTreeMap<V, C>) -> Self
     where
-        I: ConstantFolder<Const = C> + InstrInfo<Variable = V>,
+        G: CfgView,
+        G::Inst: ConstantFolder<Const = C> + InstrInfo<Variable = V>,
     {
         let mut values = live_ins
             .iter()
@@ -267,12 +273,12 @@ impl<V: VariableId, C: Clone + Eq> SccpAnalysis<V, C> {
         let mut cfg_worklist = Vec::new();
         let mut ssa_worklist = Vec::new();
 
-        reachable_blocks.insert(cfg.entry());
-        evaluate_block(cfg, ssa, cfg.entry(), &mut values, &mut ssa_worklist);
+        reachable_blocks.insert(cfg.root());
+        evaluate_block(cfg, ssa, cfg.root(), &mut values, &mut ssa_worklist);
         activate_successors(
             cfg,
             ssa,
-            cfg.entry(),
+            cfg.root(),
             &values,
             &executable_edges,
             &mut cfg_worklist,
@@ -285,7 +291,7 @@ impl<V: VariableId, C: Clone + Eq> SccpAnalysis<V, C> {
                 }
 
                 let newly_reachable = reachable_blocks.insert(target);
-                evaluate_phis::<I>(
+                evaluate_phis::<G::Inst>(
                     ssa,
                     target,
                     &executable_edges,
@@ -316,7 +322,7 @@ impl<V: VariableId, C: Clone + Eq> SccpAnalysis<V, C> {
             while !ssa_worklist.is_empty() {
                 ssa_worklist.clear();
                 for &block in &reachable_blocks {
-                    evaluate_phis::<I>(
+                    evaluate_phis::<G::Inst>(
                         ssa,
                         block,
                         &executable_edges,
@@ -348,6 +354,7 @@ impl<V: VariableId, C: Clone + Eq> SccpAnalysis<V, C> {
 mod tests {
     use super::*;
 
+    use crate::cfg::Cfg;
     use crate::dataflow::constant_propagation::constant_propagation;
     use crate::graph::dominator::DominatorTree;
     use crate::test_util::{DfInst, df_const, df_def, df_pred, df_use};

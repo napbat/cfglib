@@ -6,40 +6,39 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
-use crate::cfg::Cfg;
 use crate::graph::dominator::{DominatorScratch, DominatorTree};
 use crate::graph::view::{DenseId, GraphView, RootedView};
 use crate::kosaraju_scc;
 
 /// Whole-CFG dominance view with a private virtual root connected to the
 /// ordinary entry and every source SCC of otherwise unreachable code.
-struct SsaDominatorView<'a, I, E> {
-    cfg: &'a Cfg<I, E>,
+struct SsaDominatorView<'a, G> {
+    cfg: &'a G,
     roots: &'a [BlockId],
 }
 
-impl<I, E> SsaDominatorView<'_, I, E> {
+impl<G: GraphView> SsaDominatorView<'_, G> {
     fn virtual_root(&self) -> usize {
-        self.cfg.block_bound()
+        self.cfg.node_bound()
     }
 }
 
-impl<I, E> GraphView for SsaDominatorView<'_, I, E> {
+impl<G: GraphView<NodeId = BlockId>> GraphView for SsaDominatorView<'_, G> {
     type NodeId = usize;
 
     fn node_bound(&self) -> usize {
-        self.cfg.block_bound() + 1
+        self.cfg.node_bound() + 1
     }
 
     fn node_ids(&self) -> impl Iterator<Item = Self::NodeId> + '_ {
         self.cfg
-            .block_ids()
+            .node_ids()
             .map(DenseId::index)
             .chain(core::iter::once(self.virtual_root()))
     }
 
     fn successors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
-        let original_bound = self.cfg.block_bound();
+        let original_bound = self.cfg.node_bound();
         let original = (node < original_bound).then(|| BlockId::from_index(node));
         (node == original_bound)
             .then_some(self.roots)
@@ -55,7 +54,7 @@ impl<I, E> GraphView for SsaDominatorView<'_, I, E> {
     }
 
     fn predecessors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
-        let original_bound = self.cfg.block_bound();
+        let original_bound = self.cfg.node_bound();
         let original = (node < original_bound).then(|| BlockId::from_index(node));
         let virtual_predecessor = original
             .filter(|block| self.roots.binary_search(block).is_ok())
@@ -68,7 +67,7 @@ impl<I, E> GraphView for SsaDominatorView<'_, I, E> {
     }
 }
 
-impl<I, E> RootedView for SsaDominatorView<'_, I, E> {
+impl<G: GraphView<NodeId = BlockId>> RootedView for SsaDominatorView<'_, G> {
     fn root(&self) -> Self::NodeId {
         self.virtual_root()
     }
@@ -81,19 +80,19 @@ impl<I, E> RootedView for SsaDominatorView<'_, I, E> {
 /// Returns `None` when the entry already reaches every block, which is the
 /// common case and the one that must stay free: the check is a scan, and the
 /// whole forest construction below it never runs.
-pub(super) fn complete_dominator_forest<I, E>(
+pub(super) fn complete_dominator_forest<G: RootedView<NodeId = BlockId>>(
     scratch: &mut DominatorScratch,
     roots: &mut Vec<BlockId>,
-    cfg: &Cfg<I, E>,
+    cfg: &G,
     dominators: &DominatorTree,
 ) -> Option<DominatorTree> {
-    if cfg.block_ids().all(|block| dominators.is_reachable(block)) {
+    if cfg.node_ids().all(|block| dominators.is_reachable(block)) {
         return None;
     }
 
     let components = kosaraju_scc(cfg);
     roots.clear();
-    roots.push(cfg.entry());
+    roots.push(cfg.root());
     for (component_index, component) in components.components.iter().enumerate() {
         let Some(&first) = component.nodes.iter().next() else {
             continue;
@@ -114,7 +113,7 @@ pub(super) fn complete_dominator_forest<I, E>(
 
     let view = SsaDominatorView { cfg, roots };
     let complete = DominatorTree::<usize>::compute_in(scratch, &view);
-    let original_bound = cfg.block_bound();
+    let original_bound = cfg.node_bound();
     let idom = (0..original_bound)
         .map(|node| {
             complete

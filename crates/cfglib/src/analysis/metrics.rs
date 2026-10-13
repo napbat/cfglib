@@ -4,13 +4,13 @@
 //! for program analysis, code quality assessment, and heuristic-driven
 //! transformation or decompilation. [`GraphMetrics::compute`] serves any rooted
 //! graph view; [`CfgMetrics::compute`] adds instruction-level measurements for a
-//! [`Cfg`].
+//! [`CfgView`].
 
 extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::cfg::Cfg;
+use crate::dataflow::cfg_view::CfgView;
 use crate::graph::dominator::DominatorTree;
 use crate::graph::structure::{detect_loops, detect_loops_tagged};
 use crate::graph::view::{DenseId, RootedView};
@@ -35,7 +35,7 @@ pub struct GraphMetrics {
     pub exit_count: usize,
 }
 
-/// Instruction-aware metrics for a [`Cfg`].
+/// Instruction-aware metrics for a [`CfgView`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct CfgMetrics {
     /// Topology metrics (loop depth honors [`EdgeKind::Back`] tags via
@@ -143,20 +143,20 @@ impl CfgMetrics {
     /// assert_eq!(m.graph.exit_count, 2);
     /// ```
     #[must_use]
-    pub fn compute<I>(cfg: &Cfg<I>) -> Self {
+    pub fn compute<G: CfgView>(cfg: &G) -> Self {
         let mut graph = topology(cfg);
+        let n = cfg.node_ids().count();
 
         // Honor explicit back-edge tags for loop depth on CFGs (one dominator
         // computation — not GraphMetrics::compute's dominance-only pass plus a
         // second).
-        if cfg.block_count() > 1 {
+        if n > 1 {
             let dom = DominatorTree::compute(cfg);
             let loops = detect_loops_tagged(cfg, &dom);
             graph.max_nesting_depth = loops.iter().map(|lp| lp.depth).max().unwrap_or(0);
         }
 
-        let n = cfg.block_count();
-        let instruction_count: usize = cfg.blocks().map(|b| b.instructions().len()).sum();
+        let instruction_count: usize = cfg.node_ids().map(|b| cfg.instructions(b).len()).sum();
         let avg_instr = if n > 0 {
             crate::usize_to_f64(instruction_count) / crate::usize_to_f64(n)
         } else {
@@ -175,8 +175,8 @@ impl CfgMetrics {
 ///
 /// Returns a vector indexed by dense node index, where each value is the
 /// number of loops containing that node — **dominance-based** detection,
-/// like every view-generic algorithm. [`Cfg`] callers whose builders tag
-/// explicit `Back` edges want [`cfg_block_nesting_depths`], which honors
+/// like every view-generic algorithm. Callers of a [`CfgView`] whose builders
+/// tag explicit `Back` edges want [`cfg_block_nesting_depths`], which honors
 /// the tags exactly as [`CfgMetrics::compute`] does.
 #[must_use]
 pub fn block_nesting_depths<G: RootedView>(graph: &G) -> Vec<usize> {
@@ -185,14 +185,14 @@ pub fn block_nesting_depths<G: RootedView>(graph: &G) -> Vec<usize> {
     depths_of(n, &detect_loops(graph, &dom))
 }
 
-/// Compute the nesting depth of each block of a [`Cfg`], honoring
+/// Compute the nesting depth of each block of a [`CfgView`], honoring
 /// explicit [`EdgeKind::Back`](crate::EdgeKind::Back) tags — the tagged
 /// counterpart of [`block_nesting_depths`], consistent with
 /// [`CfgMetrics::compute`]'s loop depth.
 #[must_use]
-pub fn cfg_block_nesting_depths<I>(cfg: &Cfg<I>) -> Vec<usize> {
+pub fn cfg_block_nesting_depths<G: CfgView>(cfg: &G) -> Vec<usize> {
     let dom = DominatorTree::compute(cfg);
-    depths_of(cfg.block_bound(), &detect_loops_tagged(cfg, &dom))
+    depths_of(cfg.node_bound(), &detect_loops_tagged(cfg, &dom))
 }
 
 fn depths_of<N: DenseId>(n: usize, loops: &[crate::NaturalLoop<N>]) -> Vec<usize> {
@@ -210,6 +210,7 @@ fn depths_of<N: DenseId>(n: usize, loops: &[crate::NaturalLoop<N>]) -> Vec<usize
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cfg::Cfg;
     use crate::edge::EdgeKind;
     use crate::test_util::ff;
 

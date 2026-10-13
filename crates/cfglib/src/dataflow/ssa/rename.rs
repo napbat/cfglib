@@ -7,8 +7,9 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
-use crate::cfg::Cfg;
+use crate::dataflow::cfg_view::CfgView;
 use crate::dataflow::{InstrInfo, ProgramPoint, VariableId};
+use crate::edge::KindedEdge;
 use crate::graph::dominator::{DominatorChildOrder, DominatorTree};
 
 use super::scratch::SsaScratch;
@@ -52,12 +53,17 @@ pub(super) fn fresh_value<V: VariableId>(
 ///
 /// Returns how many variables were pushed onto the shared stack, which is what
 /// the matching [`RenameEvent::Exit`] unwinds.
-fn rename_block<I: InstrInfo, E>(
-    scratch: &mut SsaScratch<I::Variable>,
-    cfg: &Cfg<I, E>,
+fn rename_block<G, V>(
+    scratch: &mut SsaScratch<V>,
+    cfg: &G,
     block: BlockId,
-    max_versions: &mut BTreeMap<I::Variable, SsaVersion>,
-) -> usize {
+    max_versions: &mut BTreeMap<V, SsaVersion>,
+) -> usize
+where
+    G: CfgView,
+    G::Inst: InstrInfo<Variable = V>,
+    V: VariableId,
+{
     let SsaScratch {
         phis,
         instructions,
@@ -76,12 +82,12 @@ fn rename_block<I: InstrInfo, E>(
     }
 
     let block_instructions = &mut instructions[block.index()];
-    block_instructions.reserve(cfg.block(block).instructions().len());
-    for (inst_idx, instruction) in cfg.block(block).instructions().iter().enumerate() {
+    block_instructions.reserve(cfg.instructions(block).len());
+    for (inst_idx, instruction) in cfg.instructions(block).iter().enumerate() {
         if instruction.may_unwind() {
             for edge in cfg.outgoing(block) {
                 let edge = cfg.edge(edge);
-                if edge.kind() == crate::EdgeKind::ExceptionUnwind {
+                if edge.data().kind() == crate::EdgeKind::ExceptionUnwind {
                     phis.set_operands(
                         edge.target(),
                         ProgramPoint { block, inst_idx },
@@ -114,7 +120,7 @@ fn rename_block<I: InstrInfo, E>(
             successor,
             ProgramPoint {
                 block,
-                inst_idx: cfg.block(block).instructions().len(),
+                inst_idx: cfg.instructions(block).len(),
             },
             |variable| current_value(variable, stacks),
         );
@@ -139,20 +145,24 @@ fn push_value<V: VariableId>(
 }
 
 /// Rename every block reachable from a root of the dominator forest.
-pub(super) fn rename<I: InstrInfo, E>(
-    scratch: &mut SsaScratch<I::Variable>,
-    cfg: &Cfg<I, E>,
+pub(super) fn rename<G, V>(
+    scratch: &mut SsaScratch<V>,
+    cfg: &G,
     dom: &DominatorTree,
-    max_versions: &mut BTreeMap<I::Variable, SsaVersion>,
-) {
+    max_versions: &mut BTreeMap<V, SsaVersion>,
+) where
+    G: CfgView,
+    G::Inst: InstrInfo<Variable = V>,
+    V: VariableId,
+{
     // The event stack consumes siblings in reverse, so descending links
     // preserve `DominatorTree::children`'s ascending DFS visitation.
     dom.child_links_in(&mut scratch.children, DominatorChildOrder::Descending);
     scratch.roots.clear();
-    scratch.roots.push(cfg.entry());
+    scratch.roots.push(cfg.root());
     scratch.roots.extend(
-        cfg.block_ids()
-            .filter(|&block| block != cfg.entry() && dom.idom(block).is_none()),
+        cfg.node_ids()
+            .filter(|&block| block != cfg.root() && dom.idom(block).is_none()),
     );
 
     for index in 0..scratch.roots.len() {

@@ -1,4 +1,6 @@
-//! Higher-level analysis passes built on top of the CFG.
+//! Higher-level analysis passes over any
+//! [`CfgView`](crate::dataflow::cfg_view::CfgView), which [`Cfg`](crate::Cfg)
+//! implements.
 
 pub mod alias;
 pub mod dead_code;

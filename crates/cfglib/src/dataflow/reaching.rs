@@ -12,11 +12,13 @@ extern crate alloc;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
+use super::cfg_view::CfgView;
 use super::edge_fixpoint::{self, EdgeProblem};
 use super::fixpoint::{Direction, Facts};
 use super::{DefSite, InstrInfo, VariableId, departs_before_throws};
 use crate::block::BlockId;
-use crate::cfg::{Cfg, CfgEdge};
+use crate::graph::edge_view::EdgeRef;
+use crate::graph::traverse::{TraversalDirection, depth_first_preorder};
 
 /// A reaching definition: which IR variable was defined, and where.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -38,14 +40,19 @@ pub struct ReachingDefsProblem;
 impl ReachingDefsProblem {
     /// Replays `block` over the definitions reaching its entry, handing the
     /// definitions that reach each throwing instruction to `before_unwind`.
-    fn replay<I: InstrInfo, E>(
-        cfg: &Cfg<I, E>,
+    fn replay<G, Var>(
+        cfg: &G,
         block: BlockId,
-        input: &BTreeSet<ReachingDef<I::Variable>>,
-        mut before_unwind: impl FnMut(&BTreeSet<ReachingDef<I::Variable>>),
-    ) -> BTreeSet<ReachingDef<I::Variable>> {
+        input: &BTreeSet<ReachingDef<Var>>,
+        mut before_unwind: impl FnMut(&BTreeSet<ReachingDef<Var>>),
+    ) -> BTreeSet<ReachingDef<Var>>
+    where
+        G: CfgView,
+        G::Inst: InstrInfo<Variable = Var>,
+        Var: VariableId,
+    {
         let mut reaching = input.clone();
-        for (inst_idx, instruction) in cfg.block(block).instructions().iter().enumerate() {
+        for (inst_idx, instruction) in cfg.instructions(block).iter().enumerate() {
             if instruction.may_unwind() {
                 before_unwind(&reaching);
             }
@@ -70,14 +77,19 @@ impl ReachingDefsProblem {
     }
 }
 
-impl<I: InstrInfo, E> EdgeProblem<Cfg<I, E>> for ReachingDefsProblem {
-    type Fact = BTreeSet<ReachingDef<I::Variable>>;
+impl<G, Var> EdgeProblem<G> for ReachingDefsProblem
+where
+    G: CfgView,
+    G::Inst: InstrInfo<Variable = Var>,
+    Var: VariableId,
+{
+    type Fact = BTreeSet<ReachingDef<Var>>;
 
     fn direction(&self) -> Direction {
         Direction::Forward
     }
 
-    fn bottom(&self, _cfg: &Cfg<I, E>) -> Self::Fact {
+    fn bottom(&self, _cfg: &G) -> Self::Fact {
         BTreeSet::new()
     }
 
@@ -85,14 +97,14 @@ impl<I: InstrInfo, E> EdgeProblem<Cfg<I, E>> for ReachingDefsProblem {
         left.union(right).cloned().collect()
     }
 
-    fn transfer_node(&self, cfg: &Cfg<I, E>, block: BlockId, input: &Self::Fact) -> Self::Fact {
+    fn transfer_node(&self, cfg: &G, block: BlockId, input: &Self::Fact) -> Self::Fact {
         Self::replay(cfg, block, input, |_| {})
     }
 
     fn transfer_edge(
         &self,
-        cfg: &Cfg<I, E>,
-        edge: CfgEdge<'_, E>,
+        cfg: &G,
+        edge: EdgeRef<'_, BlockId, G::EdgeId, G::EdgeData>,
         input: &Self::Fact,
         output: &Self::Fact,
     ) -> Self::Fact {
@@ -150,8 +162,12 @@ impl<V: VariableId> ReachingDefs<V> {
     /// Panics only if the unbounded fixpoint solve reports a step-limit
     /// error, which the unbounded configuration cannot produce.
     #[must_use]
-    pub fn compute<I: InstrInfo<Variable = V>, E>(cfg: &Cfg<I, E>) -> Self {
-        let reachable = cfg.depth_first_preorder();
+    pub fn compute<G>(cfg: &G) -> Self
+    where
+        G: CfgView,
+        G::Inst: InstrInfo<Variable = V>,
+    {
+        let reachable = depth_first_preorder(cfg, cfg.root(), TraversalDirection::Outgoing);
         let facts = edge_fixpoint::solve_edge_problem_from(cfg, &ReachingDefsProblem, &reachable)
             .expect("an unbounded solve cannot exceed a step limit");
         Self {
@@ -191,6 +207,7 @@ impl<V: VariableId> ReachingDefs<V> {
 mod tests {
     use super::*;
     use crate::builder::CfgBuilder;
+    use crate::cfg::Cfg;
     use crate::flow::FlowEffect;
     use crate::test_util::{
         df_def as def, df_ff as ff, df_use as use_, df_with_effect as with_effect,

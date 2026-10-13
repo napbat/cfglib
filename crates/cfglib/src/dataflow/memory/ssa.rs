@@ -7,6 +7,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use crate::dataflow::cfg_view::CfgView;
 use crate::{BlockId, Cfg, DominatorTree, InstrInfo, ProgramPoint, SsaForm, SsaValue, VariableId};
 
 use crate::memory::{
@@ -419,9 +420,10 @@ where
 {
     /// Computes location-aware memory SSA for `cfg` using `alias`.
     #[must_use]
-    pub fn compute<I, E, A>(cfg: &Cfg<I, E>, alias: &A) -> Self
+    pub fn compute<G, A>(cfg: &G, alias: &A) -> Self
     where
-        I: MemoryEventInfo<Location = L, Fence = F> + InstrInfo<Variable = V>,
+        G: CfgView,
+        G::Inst: MemoryEventInfo<Location = L, Fence = F> + InstrInfo<Variable = V>,
         A: MemoryAlias<L> + ?Sized,
     {
         Self::compute_in(&mut MemorySsaScratch::new(), cfg, alias)
@@ -435,13 +437,10 @@ where
     /// same one, built by the same code — the allocating entry point is this
     /// function over a fresh [`MemorySsaScratch`].
     #[must_use]
-    pub fn compute_in<I, E, A>(
-        scratch: &mut MemorySsaScratch<L, V, F>,
-        cfg: &Cfg<I, E>,
-        alias: &A,
-    ) -> Self
+    pub fn compute_in<G, A>(scratch: &mut MemorySsaScratch<L, V, F>, cfg: &G, alias: &A) -> Self
     where
-        I: MemoryEventInfo<Location = L, Fence = F> + InstrInfo<Variable = V>,
+        G: CfgView,
+        G::Inst: MemoryEventInfo<Location = L, Fence = F> + InstrInfo<Variable = V>,
         A: MemoryAlias<L> + ?Sized,
     {
         scratch.reset();
@@ -650,10 +649,10 @@ where
         self.events.iter().filter(|entry| entry.is_fence())
     }
 
-    fn from_shadow_ssa<I, E>(
+    fn from_shadow_ssa<G: CfgView>(
         classes: Vec<MemoryLocationClass<L>>,
         class_by_location: BTreeMap<L, MemoryClassId>,
-        cfg: &Cfg<I, E>,
+        cfg: &G,
         shadow: &Cfg<ShadowInstruction<L, V, F>>,
         ssa: &SsaForm<MemoryClassId>,
     ) -> Self {
@@ -671,7 +670,7 @@ where
                 .map_or(
                     ProgramPoint {
                         block: point.block,
-                        inst_idx: cfg.block(point.block).instructions().len(),
+                        inst_idx: cfg.instructions(point.block).len(),
                     },
                     |step| step.point,
                 )

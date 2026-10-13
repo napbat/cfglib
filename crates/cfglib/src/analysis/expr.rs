@@ -19,8 +19,8 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
-use crate::cfg::Cfg;
 use crate::dataflow::InstrInfo;
+use crate::dataflow::cfg_view::CfgView;
 
 /// A node in an expression tree over variables `V`, operators `Op`, and
 /// constants `C` — all consumer-typed.
@@ -125,16 +125,21 @@ pub struct BlockExprTrees<V, Op, C> {
     pub roots: Vec<(V, ExprNode<V, Op, C>)>,
 }
 
+/// The [`BlockExprTrees`] that instructions of type `I` recover to.
+type TreesOf<I> =
+    BlockExprTrees<<I as InstrInfo>::Variable, <I as ExprInstr>::Operator, <I as ExprInstr>::Const>;
+
 /// Recover expression trees for a single block.
 ///
 /// Walks the block's instructions and builds expression trees by
 /// inlining single-use temporaries into their use sites.
 #[must_use]
-pub fn recover_block_expressions<I: ExprInstr, E>(
-    cfg: &Cfg<I, E>,
-    block: BlockId,
-) -> BlockExprTrees<I::Variable, I::Operator, I::Const> {
-    let insts = cfg.block(block).instructions();
+pub fn recover_block_expressions<G>(cfg: &G, block: BlockId) -> TreesOf<G::Inst>
+where
+    G: CfgView,
+    G::Inst: ExprInstr,
+{
+    let insts = cfg.instructions(block);
 
     // Map from variable → the expression that defines it (within this block).
     let mut variable_expressions = BTreeMap::new();
@@ -154,7 +159,7 @@ pub fn recover_block_expressions<I: ExprInstr, E>(
                 variable_expressions.insert(destination.clone(), ExprNode::Const(c));
             }
         } else if let Some((op, _operand_locs)) = inst.as_expr() {
-            let operands: Vec<ExprNode<I::Variable, I::Operator, I::Const>> = inst
+            let operands: Vec<ExprNode<_, _, _>> = inst
                 .uses()
                 .iter()
                 .map(|variable| {
@@ -199,10 +204,12 @@ pub fn recover_block_expressions<I: ExprInstr, E>(
 
 /// Recover expression trees for all blocks in the CFG.
 #[must_use]
-pub fn recover_expressions<I: ExprInstr, E>(
-    cfg: &Cfg<I, E>,
-) -> Vec<BlockExprTrees<I::Variable, I::Operator, I::Const>> {
-    cfg.block_ids()
+pub fn recover_expressions<G>(cfg: &G) -> Vec<TreesOf<G::Inst>>
+where
+    G: CfgView,
+    G::Inst: ExprInstr,
+{
+    cfg.node_ids()
         .map(|block| recover_block_expressions(cfg, block))
         .collect()
 }
