@@ -204,8 +204,9 @@ impl fmt::Debug for IndentedWriter<'_> {
 
 /// Opt-in, display-only rendering of instructions.
 ///
-/// Used by [`Cfg::write_dot`](crate::Cfg::write_dot),
-/// and [`Cfg::write_text`](crate::Cfg::write_text).
+/// [`Cfg::write_dot`](crate::Cfg::write_dot) and
+/// [`Cfg::write_text`](crate::Cfg::write_text) use it.
+///
 /// Return a short human-readable label: a machine mnemonic, a source
 /// statement excerpt, or a node kind. Labels are escaped by the renderers,
 /// so raw program text is safe to return.
