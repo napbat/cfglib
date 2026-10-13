@@ -34,6 +34,17 @@ use super::statement::{Control, Raise, Selection, ValueRange, WriteTarget};
 ///
 /// The consumer checks the contract when the record is sealed and reports a
 /// violation through [`Self::Error`].
+///
+/// # Choice identity
+///
+/// A `nondet` statement, a `Nondeterministic` write span, and an operator
+/// application whose operands have no single value (an invalid division or
+/// remainder, or an overshift) each make one choice. The choice has the
+/// identity (domain, instruction, statement position, ordinal among the
+/// statement's choices, evaluation of the instruction). The ordinal of a write
+/// counts its `Nondeterministic` spans in plan order. An executor may choose
+/// lazily. An optimizer must not duplicate or merge such a statement unless it
+/// keeps that identity.
 pub trait InstructionBuilder<D: Dialect> {
     /// A handle to one value of the record, dense within the consumer's
     /// storage.
