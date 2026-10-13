@@ -1,8 +1,8 @@
 //! Disjoint-set forest over dense indices.
 //!
 //! [`DisjointSet`] backs equivalence-class construction wherever elements
-//! already carry dense `usize` identities: phi webs, may-alias location
-//! classes, and lane webs all reduce to it. Two union strategies are offered
+//! already carry dense `usize` identities: phi webs and may-alias location
+//! classes both reduce to it. Two union strategies are offered
 //! because consumers disagree on what the surviving representative means:
 //! [`union`](DisjointSet::union) balances by rank and leaves the
 //! representative unspecified, while

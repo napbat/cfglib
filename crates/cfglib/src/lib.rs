@@ -115,7 +115,7 @@
 //!
 //! InstrInfo<Variable = V>   (optional — native IR variables for dataflow)
 //!   ├─ EffectInfo           (optional — side effects, Effect; purity + DCE)
-//!   ├─ Predicated           (optional — guarded execution; lift_predicated)
+//!   ├─ Predicated           (optional — guarded execution)
 //!   ├─ CopySource           (optional — copy propagation)
 //!   ├─ ConstantFolder       (optional — constant propagation, Const)
 //!   ├─ ExprInstr            (optional — expression trees, Operator + Const)
@@ -124,7 +124,7 @@
 //!
 //! MemoryAlias<Location>     (optional may-alias oracle consumed by MemorySSA)
 //!
-//! DisplayInstr              (optional — rendering only: DOT, text, pseudocode)
+//! DisplayInstr              (optional — rendering only: DOT, text)
 //! CallInfo                  (optional — call graphs, Callee)
 //! SwitchSource              (optional — switch table recovery, Target)
 //! ```
