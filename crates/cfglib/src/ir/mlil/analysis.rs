@@ -66,13 +66,17 @@ pub trait AnalysisDialect: Dialect {
 
     /// Decides which successor record of the terminator `op` is taken.
     ///
-    /// Returns the position of the taken successor among `successors`
-    /// records, or `None` when the operands do not decide it.
-    fn fold_branch(
+    /// `edges` yields the edge metadata of the successor records in
+    /// terminator order, so a dialect that keeps switch case values in its
+    /// edges can decide a switch. Returns the position of the taken successor
+    /// record, or `None` when the operands do not decide it.
+    fn fold_branch<'e>(
         op: &Self::Op,
         args: &[Lattice<Self::Constant>],
-        successors: usize,
-    ) -> Option<usize>;
+        edges: impl ExactSizeIterator<Item = &'e Self::Edge>,
+    ) -> Option<usize>
+    where
+        Self::Edge: 'e;
 
     /// Returns the operand position that `op` copies unchanged into its only
     /// result, or `None` when `op` is not a copy.
