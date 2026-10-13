@@ -223,3 +223,24 @@ fn a_block_without_instructions_has_an_empty_summary() {
     let (reads, writes, kills) = sets(&function, empty);
     assert_eq!((reads, writes, kills), (vec![], vec![], vec![]));
 }
+
+#[test]
+fn a_call_reads_and_writes_every_root_without_killing_any() {
+    let mut function = Function::new();
+    let entry = function.block();
+    let mut record = function.record_in(entry);
+    let value = record.constant_value(1, 64);
+    record.write_whole(Root::Acc, value);
+    record.end(Control::Advance);
+    let mut record = function.record_in(entry);
+    record.read_whole(Root::Tmp);
+    let target = record.constant_value(0x1000, 64);
+    record.end(Control::Call { target });
+
+    let (reads, writes, kills) = sets(&function, entry);
+    // `Acc` is killed before the call, so the call's read of it is not
+    // upward-exposed; `Tmp` is read before any write.
+    assert_eq!(reads, [Root::Tmp]);
+    assert_eq!(writes, [Root::Acc, Root::Tmp]);
+    assert_eq!(kills, [Root::Acc]);
+}

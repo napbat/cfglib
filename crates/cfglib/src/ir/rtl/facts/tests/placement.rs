@@ -240,3 +240,19 @@ fn an_indexed_write_is_a_definition_of_every_candidate() {
     );
     assert_eq!(placement.roots_at(join), [Root::Slot0, Root::Slot1]);
 }
+
+#[test]
+fn a_call_in_one_arm_is_a_definition_of_every_root() {
+    let (placement, join) = one_armed_diamond(
+        |function, left| {
+            let mut record = function.record_in(left);
+            let target = record.constant_value(0x1000, 64);
+            record.end(Control::Call { target });
+        },
+        &[Root::Acc, Root::Slot0, Root::Slot1],
+    );
+    assert_eq!(
+        placement.roots_at(join),
+        [Root::Acc, Root::Slot0, Root::Slot1]
+    );
+}

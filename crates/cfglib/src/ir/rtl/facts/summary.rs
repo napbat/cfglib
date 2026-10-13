@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use super::roots::{RootTable, selection_roots, target_roots};
 use crate::DenseBits;
 use crate::graph::view::DenseId;
-use crate::ir::rtl::{Action, Dialect, FunctionView, RecordView, Statement, WriteTarget};
+use crate::ir::rtl::{Action, Control, Dialect, FunctionView, RecordView, Statement, WriteTarget};
 
 /// The root sets of one block. A set holds dense indices of a [`RootTable`].
 ///
@@ -102,6 +102,9 @@ impl BlockSummary {
 ///   A partial [`WriteTarget::Root`] write, every candidate of an indexed
 ///   write, and the bank of a sparse write are such roots. An indexed or a
 ///   sparse write is a may-write: it never kills.
+/// - An instruction that ends with [`Control::Call`] reads and writes every
+///   root of the table after its own statements, because an unknown callee
+///   can read and change any of them. The call kills nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockSummaries {
     /// One summary per block identity below the node bound of the view.
@@ -138,6 +141,12 @@ impl BlockSummaries {
                 }
                 for &index in &pending {
                     summary.kills.insert(index);
+                }
+                if matches!(record.control(), Control::Call { .. }) {
+                    for index in 0..roots.len() {
+                        summary.read(index);
+                        summary.writes.insert(index);
+                    }
                 }
             }
         }
