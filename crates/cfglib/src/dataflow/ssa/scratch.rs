@@ -38,10 +38,10 @@ use super::rename::RenameEvent;
 /// # One scratch, many procedures
 ///
 /// The type parameter is the source-IR variable, so one scratch serves every
-/// CFG whose instructions name variables the same way, whatever their size
-/// and whatever their instruction or edge-payload types. It is [`Send`] when
-/// the variable is, so a worker thread owns one for the whole corpus it is
-/// handed.
+/// [`CfgView`](crate::dataflow::cfg_view::CfgView) whose instructions name
+/// variables the same way, whatever their size and whatever their instruction
+/// or edge-payload types. It is [`Send`] when the variable is, so a worker
+/// thread owns one for the whole corpus it is handed.
 ///
 /// # Sizing
 ///

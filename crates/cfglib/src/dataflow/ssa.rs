@@ -1,7 +1,7 @@
 //! Generic Static Single Assignment (SSA) construction.
 //!
 //! The SSA representation is independent of an instruction set and of the
-//! concrete instruction type stored in [`Cfg`]. An [`InstrInfo`] adapter
+//! concrete instruction type that a [`CfgView`] holds. An [`InstrInfo`] adapter
 //! supplies its native variable identity, and [`SsaForm::compute`] produces
 //! renamed definitions, uses, and phi operands keyed by [`ProgramPoint`]. The
 //! original
@@ -20,7 +20,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
-use crate::cfg::Cfg;
+use crate::dataflow::cfg_view::CfgView;
 use crate::dataflow::{InstrInfo, ProgramPoint, VariableId};
 use crate::graph::dominator::DominatorTree;
 
@@ -240,7 +240,11 @@ impl<V: VariableId> SsaForm<V> {
     /// ([`insert_preheader`](crate::insert_preheader) /
     /// [`split_block`](crate::Cfg::split_block)).
     #[must_use]
-    pub fn compute<I: InstrInfo<Variable = V>, E>(cfg: &Cfg<I, E>, dom: &DominatorTree) -> Self {
+    pub fn compute<G>(cfg: &G, dom: &DominatorTree) -> Self
+    where
+        G: CfgView,
+        G::Inst: InstrInfo<Variable = V>,
+    {
         Self::compute_in(&mut SsaScratch::new(), cfg, dom)
     }
 
@@ -252,12 +256,12 @@ impl<V: VariableId> SsaForm<V> {
     /// allocating entry point is this function over a fresh [`SsaScratch`],
     /// and it keeps the same precondition.
     #[must_use]
-    pub fn compute_in<I: InstrInfo<Variable = V>, E>(
-        scratch: &mut SsaScratch<V>,
-        cfg: &Cfg<I, E>,
-        dom: &DominatorTree,
-    ) -> Self {
-        scratch.reset(cfg.block_bound());
+    pub fn compute_in<G>(scratch: &mut SsaScratch<V>, cfg: &G, dom: &DominatorTree) -> Self
+    where
+        G: CfgView,
+        G::Inst: InstrInfo<Variable = V>,
+    {
+        scratch.reset(cfg.node_bound());
         let complete = forest::complete_dominator_forest(
             &mut scratch.dominators,
             &mut scratch.forest_roots,
@@ -268,8 +272,8 @@ impl<V: VariableId> SsaForm<V> {
         place::place_phis(scratch, cfg, dom);
         let mut max_versions = BTreeMap::new();
         rename::rename(scratch, cfg, dom, &mut max_versions);
-        let blocks = rename::finish_blocks(scratch, cfg.block_bound(), &mut max_versions);
-        let idom = (0..cfg.block_bound())
+        let blocks = rename::finish_blocks(scratch, cfg.node_bound(), &mut max_versions);
+        let idom = (0..cfg.node_bound())
             .map(|index| dom.idom(BlockId::from_index(index)))
             .collect();
         SsaForm {

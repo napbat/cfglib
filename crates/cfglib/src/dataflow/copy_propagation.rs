@@ -22,8 +22,9 @@ extern crate alloc;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
+use super::cfg_view::CfgView;
 use super::liveness::Liveness;
-use super::{InstrInfo, ProgramPoint, first_unwind_point, unwind_reach};
+use super::{InstrInfo, ProgramPoint, VariableId, first_unwind_point, unwind_reach};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::graph::dominator::{AnalysisDepths, DominatorTree};
@@ -119,8 +120,8 @@ fn pairs<I: CopySource>(
 /// instruction. A point at or after its block's first throwing instruction
 /// therefore does not dominate a block that an unwind out of its block
 /// reaches without passing through that block again.
-struct PointDominance<'g, I, E> {
-    cfg: &'g Cfg<I, E>,
+struct PointDominance<'g, G> {
+    cfg: &'g G,
     dominators: DominatorTree,
     /// One depth table for the whole pass: a dominance query then rejects a
     /// deeper candidate outright instead of walking the idom chain, so a
@@ -133,12 +134,16 @@ struct PointDominance<'g, I, E> {
     unwind_reach: BTreeMap<BlockId, Vec<bool>>,
 }
 
-impl<'g, I: InstrInfo, E> PointDominance<'g, I, E> {
-    fn compute(cfg: &'g Cfg<I, E>) -> Self {
+impl<'g, G> PointDominance<'g, G>
+where
+    G: CfgView,
+    G::Inst: InstrInfo,
+{
+    fn compute(cfg: &'g G) -> Self {
         let dominators = DominatorTree::compute(cfg);
         let depths = dominators.analysis_depths();
-        let mut first_unwind = alloc::vec![None; cfg.block_bound()];
-        for block in cfg.block_ids() {
+        let mut first_unwind = alloc::vec![None; cfg.node_bound()];
+        for block in cfg.node_ids() {
             first_unwind[block.index()] = first_unwind_point(cfg, block);
         }
         Self {
@@ -185,15 +190,16 @@ impl<'g, I: InstrInfo, E> PointDominance<'g, I, E> {
 /// sole-definition, stable-source, and dominated-uses guards, and
 /// soundness composes across links — each link's source is stable at and
 /// below its transfer, and dominance is transitive.
-fn sound_substitutions<I: CopySource, E>(
-    cfg: &Cfg<I, E>,
-    propagation: Propagation,
-) -> BTreeMap<I::Variable, Substitution<I::Variable>> {
-    let mut def_sites: BTreeMap<I::Variable, Vec<ProgramPoint>> = BTreeMap::new();
-    let mut use_sites: BTreeMap<I::Variable, Vec<ProgramPoint>> = BTreeMap::new();
-    for block_id in cfg.block_ids() {
-        let block = cfg.block(block_id);
-        for (inst_idx, inst) in block.instructions().iter().enumerate() {
+fn sound_substitutions<G, V>(cfg: &G, propagation: Propagation) -> BTreeMap<V, Substitution<V>>
+where
+    G: CfgView,
+    G::Inst: CopySource<Variable = V>,
+    V: VariableId,
+{
+    let mut def_sites: BTreeMap<V, Vec<ProgramPoint>> = BTreeMap::new();
+    let mut use_sites: BTreeMap<V, Vec<ProgramPoint>> = BTreeMap::new();
+    for block_id in cfg.node_ids() {
+        for (inst_idx, inst) in cfg.instructions(block_id).iter().enumerate() {
             let point = ProgramPoint {
                 block: block_id,
                 inst_idx,
@@ -208,9 +214,8 @@ fn sound_substitutions<I: CopySource, E>(
     }
     let mut dominance = PointDominance::compute(cfg);
     let mut substitutions = BTreeMap::new();
-    for block_id in cfg.block_ids() {
-        let block = cfg.block(block_id);
-        for (inst_idx, inst) in block.instructions().iter().enumerate() {
+    for block_id in cfg.node_ids() {
+        for (inst_idx, inst) in cfg.instructions(block_id).iter().enumerate() {
             let Some((definitions, uses)) = pairs(inst, propagation) else {
                 continue;
             };

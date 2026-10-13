@@ -13,14 +13,12 @@
 //! - [`loops`] — loop rotation and loop-invariant detection.
 //! - [`pass`] — named, ordered, fallible pass composition and reports.
 //! - [`pre`] — partial redundancy elimination.
-//! - [`duplicate`] — structuring-driven tail duplication.
 
 pub mod cleanup;
 pub mod coloring;
 pub mod contract;
 pub mod critical;
 pub mod dce;
-pub mod duplicate;
 pub mod layout;
 pub mod linearize;
 pub mod loops;

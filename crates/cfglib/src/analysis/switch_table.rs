@@ -20,6 +20,7 @@ use alloc::vec::Vec;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
+use crate::dataflow::cfg_view::CfgView;
 use crate::edge::EdgeKind;
 
 /// A recovered multi-way dispatch site over branch-target tokens `T`.
@@ -53,11 +54,14 @@ pub trait SwitchSource {
 /// Returns one [`JumpTable`] per block whose final instruction reports
 /// targets through [`SwitchSource::switch_targets`].
 #[must_use]
-pub fn detect_switch_tables<I: SwitchSource>(cfg: &Cfg<I>) -> Vec<JumpTable<I::Target>> {
+pub fn detect_switch_tables<G>(cfg: &G) -> Vec<JumpTable<<G::Inst as SwitchSource>::Target>>
+where
+    G: CfgView,
+    G::Inst: SwitchSource,
+{
     let mut tables = Vec::new();
-    for block_id in cfg.block_ids() {
-        let block = cfg.block(block_id);
-        if let Some(last) = block.instructions().last()
+    for block_id in cfg.node_ids() {
+        if let Some(last) = cfg.instructions(block_id).last()
             && let Some((targets, default_target)) = last.switch_targets()
         {
             tables.push(JumpTable {
@@ -80,6 +84,9 @@ pub struct SwitchRecovery {
 }
 
 /// Reconstruct switch tables from detected jump-table patterns.
+///
+/// This function rewires the CFG, so it takes a [`Cfg`] and not a
+/// [`CfgView`].
 ///
 /// For each [`JumpTable`], removes the existing `IndirectJump` edge(s) from
 /// the block and replaces them with `SwitchCase` edges to each resolved

@@ -35,31 +35,13 @@
 //! instruction-adjacent axis — variables, constants, operators, effects,
 //! branch targets, callees — is consumer-typed rather than imposed by the
 //! library.
-//! [`ir::ast`] reconstructs structured control flow over any instruction
-//! payload without changing its semantic level — loops classified as
-//! pre-/post-tested, switch arms with their dispatch edges and default,
-//! breaks and continues derived from natural-loop membership, and a
-//! [`LiftReport`] naming exactly what degraded to gotos. [`lift_borrowed`]
-//! retains that structure while borrowing payloads from the source CFG, so
-//! presentation and cross-level lifts do not duplicate instruction storage.
-//! [`ir::mlil`] layers stable semantic identities, point-specific types,
-//! many-to-many source provenance, checked construction (including
-//! exception regions and signatures), and reusable analyses over that CFG.
-//! [`ir::rtl`] sits below MLIL for machine-shaped languages: each native
-//! instruction becomes one parallel typed transfer over raw storage
-//! lanes, or an effect statement that additionally names the places it
-//! writes without expressing their values, and [`lift_rtl_function`]
-//! recovers typed variables (def-use webs over per-lane SSA) while
-//! emitting into an associated, potentially distinct MLIL dialect. [`lower_rtl_function`] maps that MLIL back through
-//! target placement. Both directions retain signatures, exception regions,
-//! fallibly translated edges, and many-to-many provenance; variable-shaped
-//! languages can skip RTL and build MLIL directly.
-//! [`ir::hlil`] is the structured, expression-oriented level above it:
-//! statement trees with nested typed expression trees, built either
-//! bottom-up by a source frontend ([`HlilFunctionBuilder`]) or lifted from
-//! MLIL ([`lift_hlil_function`]) with effect-ordered single-use inlining,
-//! and lowered back to flat MLIL ([`lower_hlil_function`]) so both
-//! directions of the pipeline meet at either level.
+//! [`ir`] holds the IR traits and nothing else. [`ir::rtl`] is the
+//! register-transfer contract: a write-only [`ir::rtl::InstructionBuilder`]
+//! through which instruction semantics describe one atomic state update, and
+//! read-only views over the sealed records. [`ir::mlil`] is the read-only
+//! contract of a flat static single assignment function with block
+//! parameters. Every IR storage, builder, and editing machinery belongs to the
+//! consumer; the algorithms here read through the views and report facts.
 //! Output is three formats over one set of writers. [`write_dot`] draws any
 //! node- and edge-bearing view through a [`DotStyle`] — a node-label hook, an
 //! edge-attribute hook ([`DotEdgeAttributes`]), a graph name, an identifier
@@ -70,18 +52,11 @@
 //! point. [`Cfg::to_text`] is the control-flow reading of it — block headers
 //! with indented instructions, edges named by [`EdgeKind`], and exception
 //! regions — and [`parse_cfg_text`] reads that back with a consumer-supplied
-//! instruction parser. Pseudocode printers at every IR level
-//! ([`AstNode::to_pseudocode`], [`ir::rtl::Function::to_pseudocode`],
-//! [`ir::hlil::Function::to_pseudocode`]) share [`IndentedWriter`], so
+//! instruction parser. Every printer shares [`IndentedWriter`], so
 //! indentation is decided once and a label is written straight into the sink.
-//! [`PassPipeline`] composes named, ordered, fallible transformations over any
-//! of these IR levels or a consumer-owned compilation context, retaining a
-//! change report and failed-pass identity without imposing dialect policy.
-//! Every level's dialect ([`Vocabulary`], [`ir::rtl::Dialect`],
-//! [`ir::mlil::Dialect`], [`ir::hlil::Dialect`]) keeps operations, types,
-//! effects, edge meaning,
-//! and source coordinates entirely consumer-defined, so one dialect type
-//! serves source lowering and binary lifting alike.
+//! [`PassPipeline`] composes named, ordered, fallible transformations over a
+//! consumer-owned target, retaining a change report and failed-pass identity
+//! without imposing a dialect policy.
 //!
 //! # Quick start
 //!
@@ -131,13 +106,16 @@
 //!   ├─ NodeView             (graph-owned node payloads)
 //!   ├─ EdgeView             (stable edge identity, endpoints, data)
 //!   └─ RootedView           (adds a distinguished entry node; `Rooted` adapts)
+//! CfgView                   (RootedView + EdgeView + block instruction slices;
+//!                            `Cfg` implements it, every instruction-level
+//!                            analysis reads it)
 //!
 //! FlowControl               (required only by CfgBuilder)
 //!   └─ JumpTargets          (optional — explicit goto/label wiring, Target)
 //!
 //! InstrInfo<Variable = V>   (optional — native IR variables for dataflow)
 //!   ├─ EffectInfo           (optional — side effects, Effect; purity + DCE)
-//!   ├─ Predicated           (optional — guarded execution; lift_predicated)
+//!   ├─ Predicated           (optional — guarded execution)
 //!   ├─ CopySource           (optional — copy propagation)
 //!   ├─ ConstantFolder       (optional — constant propagation, Const)
 //!   ├─ ExprInstr            (optional — expression trees, Operator + Const)
@@ -146,7 +124,7 @@
 //!
 //! MemoryAlias<Location>     (optional may-alias oracle consumed by MemorySSA)
 //!
-//! DisplayInstr              (optional — rendering only: DOT, text, pseudocode)
+//! DisplayInstr              (optional — rendering only: DOT, text)
 //! CallInfo                  (optional — call graphs, Callee)
 //! SwitchSource              (optional — switch table recovery, Target)
 //! ```
@@ -160,8 +138,9 @@
 //! loaded values, state reads/writes, and ordinary/memory phis.
 //!
 //! Additionally, [`Problem`] is the trait for pluggable instruction-level
-//! dataflow analyses (run by [`solve_problem`]), [`NodeProblem`] its
-//! node-level counterpart over any graph view (run by [`solve_node_problem`]),
+//! dataflow analyses over any rooted view (run by [`solve_problem`]),
+//! [`NodeProblem`] its node-level counterpart over any graph view (run by
+//! [`solve_node_problem`]),
 //! [`EdgeProblem`] its edge-sensitive counterpart (run by
 //! [`solve_edge_problem`]), [`TryEdgeProblem`] the error-preserving edge
 //! variant, and [`Emitter`] the trait for linearization output.
@@ -258,6 +237,7 @@ pub use dataflow::abstract_interpretation::{
     AbstractDomain, AbstractFacts, Lattice, abstract_interpret,
 };
 pub use dataflow::bits::DenseBits;
+pub use dataflow::cfg_view::CfgView;
 pub use dataflow::constant_propagation::{
     ConstFact, ConstPropProblem, ConstValue, ConstantFolder, constant_propagation,
 };
@@ -385,58 +365,6 @@ pub use graph::verify::{
 pub use graph::view::{
     DenseId, GraphView, NodeView, Reversed, Rooted, RootedView, scan_predecessors,
 };
-pub use ir::ast::{
-    AstNode, CatchHandler, GotoDiagnostic, GotoReason, LiftReport, LoopKind, SwitchCase, lift,
-    lift_borrowed, lift_borrowed_with_report, lift_predicated, lift_with_report,
-};
-pub use ir::dialect::Vocabulary;
-pub use ir::hlil::{
-    Dialect as HlilDialect, EntityId as HlilEntityId, Error as HlilError,
-    Expression as HlilExpression, ExpressionId as HlilExpressionId,
-    ExpressionKind as HlilExpressionKind, Function as HlilFunction,
-    FunctionBuilder as HlilFunctionBuilder, Handler as HlilHandler, HandlerKind as HlilHandlerKind,
-    LiftDialect as HlilLiftDialect, LiftMetadata as HlilLiftMetadata, Lifted as HlilLifted,
-    LiftedFunction as HlilLiftedFunction, LowerDialect as HlilLowerDialect,
-    LoweredFunction as HlilLoweredFunction, ProvenanceEntry as HlilProvenanceEntry,
-    ProvenanceMap as HlilProvenanceMap, Result as HlilResult, Signature as HlilSignature,
-    Statement as HlilStatement, StatementId as HlilStatementId, StatementKind as HlilStatementKind,
-    SwitchArm as HlilSwitchArm, Variable as HlilVariable, VariableId as HlilVariableId,
-    VerificationIssue as HlilVerificationIssue, VerificationReport as HlilVerificationReport,
-    VerifyDialect as HlilVerifyDialect, lift_function as lift_hlil_function,
-    lift_function_with_metadata as lift_hlil_function_with_metadata,
-    lift_function_with_structure as lift_hlil_function_with_structure,
-    lower_function as lower_hlil_function,
-};
-pub use ir::mlil::{
-    AnalysisDialect as MlilAnalysisDialect, Dialect as MlilDialect, EntityId as MlilEntityId,
-    Error as MlilError, Function as MlilFunction, FunctionBuilder as MlilFunctionBuilder,
-    Instruction as MlilInstruction, InstructionId as MlilInstructionId,
-    InstructionMetadata as MlilInstructionMetadata, MemoryDialect as MlilMemoryDialect,
-    MemoryPromotion as MlilMemoryPromotion, PromoteDialect as MlilPromoteDialect,
-    PromotionAccess as MlilPromotionAccess, ProvenanceEntry as MlilProvenanceEntry,
-    ProvenanceMap as MlilProvenanceMap, Result as MlilResult, Signature as MlilSignature,
-    TypedVariable as MlilTypedVariable, Variable as MlilVariable, VariableId as MlilVariableId,
-    VariablePruning as MlilVariablePruning, VariableSplit as MlilVariableSplit,
-    VerificationIssue as MlilVerificationIssue, VerificationReport as MlilVerificationReport,
-    VerifyDialect as MlilVerifyDialect,
-};
-pub use ir::provenance::{ProvenanceEntry, ProvenanceError, ProvenanceMap};
-pub use ir::rtl::{
-    Constraint as RtlConstraint, Dialect as RtlDialect, Edge as RtlEdge,
-    EdgeContext as RtlEdgeContext, Emission as RtlEmission, Error as RtlError, Expr as RtlExpr,
-    Function as RtlFunction, FunctionBuilder as RtlFunctionBuilder, Inference as RtlInference,
-    Lane as RtlLane, Lift as RtlLift, LiftMaps as RtlLiftMaps,
-    LiftedStatement as RtlLiftedStatement, Lifting as RtlLifting, Lower as RtlLower,
-    LowerContext as RtlLowerContext, LowerEdgeContext as RtlLowerEdgeContext,
-    Lowered as RtlLowered, MlilBridge as RtlMlilBridge, Place as RtlPlace,
-    Placement as RtlPlacement, ProvenanceMap as RtlProvenanceMap, ReadResolver as RtlReadResolver,
-    ResolvedRead as RtlResolvedRead, Result as RtlResult, ScalarInference, ScalarType,
-    Shape as RtlShape, Signature as RtlSignature, Statement as RtlStatement,
-    StatementId as RtlStatementId, StatementNode as RtlStatementNode, ValueShape,
-    VarExpr as RtlVarExpr, WebInfo as RtlWebInfo, Webs as RtlWebs, lift as lift_rtl_function,
-    lower as lower_rtl_function, referenced_webs as rtl_referenced_webs,
-};
-pub use ir::signature::Signature;
 pub use memory::{
     MemoryAccess, MemoryAccessKind, MemoryAtomicity, MemoryEvent, MemoryEventInfo,
     MemoryOperations, MemoryTrace, MemoryTraceEntry,
@@ -464,9 +392,6 @@ pub use transform::critical::{
 pub use transform::dce::{
     dead_code_elimination, dead_code_elimination_with_exits, remove_dead_code,
     remove_dead_code_mapped,
-};
-pub use transform::duplicate::{
-    TailDuplication, duplicate_structuring_tails, duplicate_structuring_tails_with_structure,
 };
 pub use transform::layout::{RelaxError, relax_layout};
 pub use transform::linearize::{BlockOrder, Emitter, LinearInst, linearize};

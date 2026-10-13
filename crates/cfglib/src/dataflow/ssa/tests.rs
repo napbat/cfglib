@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::builder::CfgBuilder;
+use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
 use crate::flow::FlowEffect;
 use crate::test_util::{DfInst, df_def, df_ff, df_use, df_with_effect};

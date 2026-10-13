@@ -12,8 +12,6 @@
 //!   the test module's location and fence vocabularies.
 //! - [`shapes`] — block-and-edge shapes shared by the reusable-scratch
 //!   differential tests.
-//! - [`toy`] — the shared core of the per-level IR "toy dialect"
-//!   fixtures (source spans, lifted-statement metadata).
 //!
 //! `DfInst` implements **all** instruction traits (`FlowControl`,
 //! `DisplayInstr`, `InstrInfo`, `EffectInfo`, `Predicated`, `CopySource`,
@@ -25,7 +23,6 @@ pub(crate) mod golden;
 mod memory_inst;
 mod mock_inst;
 pub(crate) mod shapes;
-pub(crate) mod toy;
 mod ud_inst;
 mod vn_inst;
 

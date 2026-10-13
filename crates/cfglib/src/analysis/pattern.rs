@@ -4,13 +4,13 @@
 //! self-loops, trampolines) for downstream consumers. [`detect_patterns`]
 //! is topology-only and serves any graph view; [`detect_cfg_patterns`]
 //! additionally orients diamond arms by edge kind and detects empty
-//! trampoline blocks, which need [`Cfg`] instruction knowledge.
+//! trampoline blocks, which need [`CfgView`] instruction knowledge.
 
 extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
-use crate::cfg::Cfg;
+use crate::dataflow::cfg_view::CfgView;
 use crate::edge::EdgeKind;
 use crate::graph::view::GraphView;
 
@@ -152,20 +152,20 @@ pub fn detect_patterns<G: GraphView>(graph: &G) -> Vec<CfgPattern<G::NodeId>> {
     patterns
 }
 
-/// Scan a [`Cfg`] for patterns, adding instruction-aware refinements.
+/// Scan a [`CfgView`] for patterns, adding instruction-aware refinements.
 ///
 /// Runs [`detect_patterns`], orients each diamond's `arms[0]` to the
 /// [`EdgeKind::ConditionalTrue`] side, and additionally detects
 /// [`CfgPattern::EmptyTrampoline`] blocks.
 #[must_use]
-pub fn detect_cfg_patterns<I>(cfg: &Cfg<I>) -> Vec<CfgPattern> {
+pub fn detect_cfg_patterns<G: CfgView>(cfg: &G) -> Vec<CfgPattern> {
     let mut patterns = detect_patterns(cfg);
 
     // Orient diamond arms: arms[0] = ConditionalTrue side when tagged.
     for pattern in &mut patterns {
         if let CfgPattern::Diamond { entry, arms, .. } = pattern {
             let true_target = cfg.outgoing(*entry).find_map(|eid| {
-                (cfg.edge(eid).kind() == EdgeKind::ConditionalTrue).then(|| cfg.edge(eid).target())
+                (cfg.edge_kind(eid) == EdgeKind::ConditionalTrue).then(|| cfg.edge(eid).target())
             });
             if let Some(target) = true_target
                 && arms[1] == target
@@ -176,10 +176,8 @@ pub fn detect_cfg_patterns<I>(cfg: &Cfg<I>) -> Vec<CfgPattern> {
     }
 
     // Empty trampolines: no instructions, exactly one successor, not entry.
-    for block_id in cfg.block_ids() {
-        let block = cfg.block(block_id);
-        let bid = block_id;
-        if block.instructions().is_empty() && cfg.successors(bid).count() == 1 && bid != cfg.entry()
+    for bid in cfg.node_ids() {
+        if cfg.instructions(bid).is_empty() && cfg.successors(bid).count() == 1 && bid != cfg.root()
         {
             patterns.push(CfgPattern::EmptyTrampoline { block: bid });
         }

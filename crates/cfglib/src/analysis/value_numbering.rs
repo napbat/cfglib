@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use smallvec::SmallVec;
 
 use crate::block::BlockId;
-use crate::cfg::Cfg;
+use crate::dataflow::cfg_view::CfgView;
 use crate::dataflow::{InstrInfo, first_unwind_point, unwind_reach};
 use crate::graph::dominator::{DominatorChildOrder, DominatorTree};
 
@@ -72,15 +72,15 @@ impl BlockValueNumbers {
     /// Returns the block's numbering together with the next unassigned value
     /// number, so successive blocks can thread a shared counter.
     #[must_use]
-    pub fn compute<I: ValueNumberInfo>(
-        cfg: &Cfg<I>,
-        block: BlockId,
-        start_vn: ValueNumber,
-    ) -> (Self, ValueNumber) {
+    pub fn compute<G>(cfg: &G, block: BlockId, start_vn: ValueNumber) -> (Self, ValueNumber)
+    where
+        G: CfgView,
+        G::Inst: ValueNumberInfo,
+    {
         let mut next_vn = start_vn;
-        let mut variable_values: BTreeMap<I::Variable, ValueNumber> = BTreeMap::new();
-        let mut expr_to_vn: BTreeMap<ExprKey<I::Operator>, ValueNumber> = BTreeMap::new();
-        let insts = cfg.block(block).instructions();
+        let mut variable_values = BTreeMap::new();
+        let mut expr_to_vn = BTreeMap::new();
+        let insts = cfg.instructions(block);
         let mut inst_vn = Vec::with_capacity(insts.len());
         let mut redundant = Vec::new();
 
@@ -156,17 +156,20 @@ impl ValueNumbering {
     /// writes there: those variables receive fresh value numbers in the
     /// child's scope. A block without such an unwind adds no work.
     #[must_use]
-    pub fn compute<I: ValueNumberInfo>(cfg: &Cfg<I>, dom: &DominatorTree) -> Self {
+    pub fn compute<G>(cfg: &G, dom: &DominatorTree) -> Self
+    where
+        G: CfgView,
+        G::Inst: ValueNumberInfo,
+    {
         let mut blocks = BTreeMap::new();
         let mut tables = GvnTables {
             variable_values: BTreeMap::new(),
             expr_to_vn: BTreeMap::new(),
             next_vn: 0,
         };
-        let mut suffixes: BTreeMap<BlockId, UnwindSuffix<I::Variable, I::Operator>> =
-            BTreeMap::new();
+        let mut suffixes: BTreeMap<BlockId, UnwindSuffix<_, _>> = BTreeMap::new();
         let children = dom.child_links(DominatorChildOrder::Ascending);
-        let mut events = vec![GvnEvent::Enter(cfg.entry())];
+        let mut events = vec![GvnEvent::Enter(cfg.root())];
 
         while let Some(event) = events.pop() {
             match event {
@@ -269,13 +272,17 @@ enum GvnEvent<V, Op> {
 ///
 /// `after_unwind` is the parent's suffix when an unwind out of the parent
 /// reaches this block; it is hidden before the block is numbered.
-fn number_block<I: ValueNumberInfo>(
-    cfg: &Cfg<I>,
+fn number_block<G, I>(
+    cfg: &G,
     bid: BlockId,
     after_unwind: Option<&UnwindSuffix<I::Variable, I::Operator>>,
     tables: &mut GvnTables<I::Variable, I::Operator>,
     blocks: &mut BTreeMap<BlockId, BlockValueNumbers>,
-) -> NumberedBlock<I::Variable, I::Operator> {
+) -> NumberedBlock<I::Variable, I::Operator>
+where
+    G: CfgView<Inst = I>,
+    I: ValueNumberInfo,
+{
     // Snapshot the current scope so we can restore on exit.
     let mut saved_variables: BTreeMap<I::Variable, Option<ValueNumber>> = BTreeMap::new();
     let mut expr_added: Vec<ExprKey<I::Operator>> = Vec::new();
@@ -299,7 +306,7 @@ fn number_block<I: ValueNumberInfo>(
     });
 
     // Process instructions in this block.
-    let insts = cfg.block(bid).instructions();
+    let insts = cfg.instructions(bid);
     let mut inst_vn = Vec::with_capacity(insts.len());
     let mut redundant = Vec::new();
 

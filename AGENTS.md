@@ -86,8 +86,8 @@ with `uv run --no-project python scripts/check_repository_policy.py`.
 - Top-level namespace modules (`analysis`, `dataflow`, `graph`, `ir`, `transform`)
   declare `pub mod` children and hoist nothing; the crate root is the single
   flat facade that re-exports every public item, one `pub use` per module,
-  alphabetized. Domain modules with a narrow API (`cfg`, `exception`, `ir::ast`,
-  `ir::mlil`, and split coordinators such as `graph/search/events`) keep
+  alphabetized. Domain modules with a narrow API (`cfg`, `exception`,
+  `ir::rtl`, `ir::mlil`, and split coordinators such as `graph/search/events`) keep
   children private and re-export their public surface.
 - Compound words in file and identifier names are underscore-separated and
   spelled in full (`constant_propagation`, `value_numbering`, `call_graph`);
@@ -139,16 +139,13 @@ with `uv run --no-project python scripts/check_repository_policy.py`.
   no more restrictive than necessary.
 - Preserve this workspace's `no_std` plus `alloc` compatibility unless the task
   explicitly changes that contract.
-- Keep `ir::rtl`, `ir::mlil`, and `ir::hlil` language-neutral. The library owns
-  generic function, instruction, statement, expression, variable, provenance,
-  checked-construction, structuring, and analysis integration, while a
-  consumer-defined dialect owns operations, constants, value types, effects,
-  edge payloads, source coordinates, native-variable provenance, constant
-  folding, call targets, and semantic verification. The level-independent
-  vocabulary lives once in `ir::dialect::Vocabulary`; `ir::rtl::MlilBridge`
-  relates distinct storage and semantic dialects, while
-  `ir::hlil::LiftDialect` relates MLIL and HLIL. Do not add language-, VM-, ABI-,
-  or ISA-specific variants to any generic layer.
+- Keep `ir::rtl` and `ir::mlil` language-neutral and trait-only. The library
+  owns the IR traits and the generic algorithms that read through them and
+  report facts. The consumer owns every IR storage, builder, and editing
+  machinery, and a consumer-defined dialect owns operations, roots, constants,
+  value types, effects, edge payloads, outcomes, and constant folding. Do not
+  add IR storage, or language-, VM-, ABI-, or ISA-specific variants, to any
+  generic layer.
 - Avoid unnecessary cloning, allocation, collection, dynamic dispatch, and generic
   indirection. Optimize for a clear ownership story before micro-optimizing.
 - Return structured errors for recoverable failures. Do not panic in public APIs

@@ -3,6 +3,8 @@ extern crate alloc;
 use alloc::collections::BTreeSet;
 
 use super::*;
+use crate::block::BlockId;
+use crate::cfg::Cfg;
 use crate::dataflow::liveness::LivenessProblem;
 use crate::edge::EdgeKind;
 use crate::test_util::{DfInst, df_def, df_use};
@@ -68,7 +70,7 @@ fn an_out_of_range_seed_panics() {
 /// A fallible liveness clone that rejects any block defining variable 7.
 struct Rejecting;
 
-impl TryProblem<DfInst> for Rejecting {
+impl TryProblem<Cfg<DfInst>> for Rejecting {
     type Fact = BTreeSet<u16>;
     type Error = &'static str;
 
@@ -123,7 +125,7 @@ fn a_fallible_solve_succeeds_on_clean_input() {
 fn backward_solver_propagates_through_disconnected_components() {
     struct BackwardReachability;
 
-    impl Problem<()> for BackwardReachability {
+    impl Problem<Cfg<()>> for BackwardReachability {
         type Fact = bool;
 
         fn direction(&self) -> Direction {

@@ -16,11 +16,13 @@
 extern crate alloc;
 use alloc::collections::BTreeMap;
 
+use super::cfg_view::CfgView;
 use super::edge_fixpoint::{self, EdgeProblem};
 use super::fixpoint::{Direction, Facts};
 use super::{InstrInfo, departs_before_throws};
 use crate::block::BlockId;
-use crate::cfg::{Cfg, CfgEdge};
+use crate::graph::edge_view::EdgeRef;
+use crate::graph::traverse::{TraversalDirection, depth_first_preorder};
 
 /// The lattice value for a single variable, over constant domain `C`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -161,6 +163,9 @@ pub struct ConstPropProblem;
 /// The flow fact: a map from variable to lattice value.
 pub type ConstFact<V, C> = BTreeMap<V, ConstValue<C>>;
 
+/// The flow fact of a solve over instructions of type `I`.
+type InstFact<I> = ConstFact<<I as InstrInfo>::Variable, <I as ConstantFolder>::Const>;
+
 impl ConstPropProblem {
     /// Meets two facts variable by variable through the domain's meet.
     fn meet_facts<I: ConstantFolder>(
@@ -177,14 +182,18 @@ impl ConstPropProblem {
 
     /// Replays `block` over the constants known at its entry, handing the
     /// state before each throwing instruction to `before_unwind`.
-    fn replay<I: ConstantFolder, E>(
-        cfg: &Cfg<I, E>,
+    fn replay<G>(
+        cfg: &G,
         block: BlockId,
-        input: &ConstFact<I::Variable, I::Const>,
-        mut before_unwind: impl FnMut(&ConstFact<I::Variable, I::Const>),
-    ) -> ConstFact<I::Variable, I::Const> {
+        input: &InstFact<G::Inst>,
+        mut before_unwind: impl FnMut(&InstFact<G::Inst>),
+    ) -> InstFact<G::Inst>
+    where
+        G: CfgView,
+        G::Inst: ConstantFolder,
+    {
         let mut state = input.clone();
-        let mut known: BTreeMap<I::Variable, I::Const> = state
+        let mut known: BTreeMap<_, _> = state
             .iter()
             .filter_map(|(variable, value)| {
                 value
@@ -193,7 +202,7 @@ impl ConstPropProblem {
             })
             .collect();
 
-        for inst in cfg.block(block).instructions() {
+        for inst in cfg.instructions(block) {
             if inst.may_unwind() {
                 before_unwind(&state);
             }
@@ -216,29 +225,33 @@ impl ConstPropProblem {
     }
 }
 
-impl<I: ConstantFolder, E> EdgeProblem<Cfg<I, E>> for ConstPropProblem {
-    type Fact = ConstFact<I::Variable, I::Const>;
+impl<G> EdgeProblem<G> for ConstPropProblem
+where
+    G: CfgView,
+    G::Inst: ConstantFolder,
+{
+    type Fact = InstFact<G::Inst>;
 
     fn direction(&self) -> Direction {
         Direction::Forward
     }
 
-    fn bottom(&self, _cfg: &Cfg<I, E>) -> Self::Fact {
+    fn bottom(&self, _cfg: &G) -> Self::Fact {
         BTreeMap::new()
     }
 
     fn meet(&self, left: &Self::Fact, right: &Self::Fact) -> Self::Fact {
-        Self::meet_facts::<I>(left, right)
+        Self::meet_facts::<G::Inst>(left, right)
     }
 
-    fn transfer_node(&self, cfg: &Cfg<I, E>, block: BlockId, input: &Self::Fact) -> Self::Fact {
+    fn transfer_node(&self, cfg: &G, block: BlockId, input: &Self::Fact) -> Self::Fact {
         Self::replay(cfg, block, input, |_| {})
     }
 
     fn transfer_edge(
         &self,
-        cfg: &Cfg<I, E>,
-        edge: CfgEdge<'_, E>,
+        cfg: &G,
+        edge: EdgeRef<'_, BlockId, G::EdgeId, G::EdgeData>,
         input: &Self::Fact,
         output: &Self::Fact,
     ) -> Self::Fact {
@@ -249,7 +262,7 @@ impl<I: ConstantFolder, E> EdgeProblem<Cfg<I, E>> for ConstPropProblem {
         Self::replay(cfg, edge.source(), input, |state| {
             departing = Some(match departing.take() {
                 None => state.clone(),
-                Some(earlier) => Self::meet_facts::<I>(&earlier, state),
+                Some(earlier) => Self::meet_facts::<G::Inst>(&earlier, state),
             });
         });
         departing.expect("an edge departing before throws leaves a block that may unwind")
@@ -268,10 +281,12 @@ impl<I: ConstantFolder, E> EdgeProblem<Cfg<I, E>> for ConstPropProblem {
 /// Panics only if the unbounded fixpoint solve reports a step-limit error,
 /// which the unbounded configuration cannot produce.
 #[must_use]
-pub fn constant_propagation<I: ConstantFolder, E>(
-    cfg: &Cfg<I, E>,
-) -> Facts<ConstFact<I::Variable, I::Const>> {
-    let reachable = cfg.depth_first_preorder();
+pub fn constant_propagation<G>(cfg: &G) -> Facts<InstFact<G::Inst>>
+where
+    G: CfgView,
+    G::Inst: ConstantFolder,
+{
+    let reachable = depth_first_preorder(cfg, cfg.root(), TraversalDirection::Outgoing);
     edge_fixpoint::solve_edge_problem_from(cfg, &ConstPropProblem, &reachable)
         .expect("an unbounded solve cannot exceed a step limit")
         .into_block_facts()

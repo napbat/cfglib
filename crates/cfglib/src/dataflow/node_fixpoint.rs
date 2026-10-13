@@ -1,11 +1,12 @@
 //! Node-level fixpoint dataflow over any [`GraphView`].
 //!
-//! The instruction fixpoint in [`fixpoint`](super::fixpoint) is bound to
-//! [`Cfg`](crate::Cfg) blocks; this is its graph-shaped counterpart: one
-//! fact per node, meet over the in-edges (out-edges backward), transfer
-//! per node. It serves analyses over non-CFG graphs — taint or
-//! reachability-with-facts over a value-flow graph, closure over an import
-//! or include graph — anywhere the graph is the program representation.
+//! The instruction fixpoint in [`fixpoint`](super::fixpoint) solves one fact
+//! per block of a rooted view; this is its graph-shaped counterpart: one
+//! fact per node of any [`GraphView`], meet over the in-edges (out-edges
+//! backward), transfer per node. It serves analyses over non-CFG graphs —
+//! taint or reachability-with-facts over a value-flow graph, closure over an
+//! import or include graph — anywhere the graph is the program
+//! representation.
 //!
 //! [`solve_node_problem`] queues every node; [`solve_node_problem_from`]
 //! queues a chosen subset, so an incremental or dirty-region analysis pays

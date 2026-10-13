@@ -1,14 +1,15 @@
 //! Data flow analysis framework.
 //!
 //! Provides generic infrastructure for computing data flow properties
-//! over a [`Cfg`]:
+//! over any [`CfgView`]:
 //!
 //! - **Reaching definitions** — which writes can reach a given point
 //! - **Liveness** — which variables are live at each point
 //! - **Def-use / use-def chains** — linking writers to readers
 //!
-//! The instruction-level machinery is CFG-bound; the
-//! [`node_fixpoint`] module is its graph-shaped counterpart, solving
+//! [`CfgView`] is the one read-only trait that the
+//! instruction-level machinery reads, and [`Cfg`](crate::Cfg) implements it.
+//! The [`node_fixpoint`] module is the graph-shaped counterpart, solving
 //! per-node fact problems over any
 //! [`GraphView`](crate::GraphView) (taint or reachability
 //! over a value-flow graph, closure over an import graph).
@@ -24,6 +25,7 @@
 
 pub mod abstract_interpretation;
 pub mod bits;
+pub mod cfg_view;
 pub mod constant_propagation;
 pub mod copy_propagation;
 pub mod def_use;
@@ -42,10 +44,11 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
-use crate::cfg::{Cfg, CfgEdge};
-use crate::edge::{Edge, EdgeId, EdgeKind};
-use crate::graph::edge_view::FilteredEdges;
+use crate::edge::{EdgeKind, KindedEdge};
+use crate::graph::edge_view::{EdgeRef, FilteredEdges};
 use crate::graph::traverse::{TraversalDirection, reachable};
+
+use self::cfg_view::CfgView;
 
 /// An IR-defined identity that participates in data-flow analysis.
 ///
@@ -101,9 +104,6 @@ pub trait InstrInfo {
 /// statements).
 ///
 /// The predicate is expressed in the consumer's own variable domain.
-/// [`lift_predicated`](crate::lift_predicated) regionizes maximal runs of
-/// same-predicate instructions into
-/// [`AstNode::Guarded`](crate::AstNode::Guarded) nodes.
 ///
 /// # Contract
 ///
@@ -170,11 +170,17 @@ pub type UseSite = ProgramPoint;
 /// This classifies the departure point for variable definitions. An analysis
 /// of memory must also include writes that can commit before an exception.
 #[must_use]
-pub fn departs_before_throws<I: InstrInfo, E>(cfg: &Cfg<I, E>, edge: CfgEdge<'_, E>) -> bool {
-    edge.kind() == EdgeKind::ExceptionUnwind
-        && cfg
-            .block(edge.source())
-            .instructions()
+pub fn departs_before_throws<V>(
+    view: &V,
+    edge: EdgeRef<'_, BlockId, V::EdgeId, V::EdgeData>,
+) -> bool
+where
+    V: CfgView,
+    V::Inst: InstrInfo,
+{
+    edge.data().kind() == EdgeKind::ExceptionUnwind
+        && view
+            .instructions(edge.source())
             .iter()
             .any(InstrInfo::may_unwind)
 }
@@ -184,18 +190,18 @@ pub fn departs_before_throws<I: InstrInfo, E>(cfg: &Cfg<I, E>, edge: CfgEdge<'_,
 /// `None` when no edge out of `block` [departs before a throwing
 /// instruction](departs_before_throws). Every definition at or after the
 /// answer may be missing on the unwind path.
-pub(crate) fn first_unwind_point<I: InstrInfo, E>(
-    cfg: &Cfg<I, E>,
-    block: BlockId,
-) -> Option<usize> {
-    let unwinds = cfg
+pub(crate) fn first_unwind_point<V>(view: &V, block: BlockId) -> Option<usize>
+where
+    V: CfgView,
+    V::Inst: InstrInfo,
+{
+    let unwinds = view
         .outgoing(block)
-        .any(|edge| cfg.edge(edge).kind() == EdgeKind::ExceptionUnwind);
+        .any(|edge| view.edge_kind(edge) == EdgeKind::ExceptionUnwind);
     if !unwinds {
         return None;
     }
-    cfg.block(block)
-        .instructions()
+    view.instructions(block)
         .iter()
         .position(InstrInfo::may_unwind)
 }
@@ -208,14 +214,14 @@ pub(crate) fn first_unwind_point<I: InstrInfo, E>(
 /// [first unwind point](first_unwind_point) on. A path that re-enters
 /// `block` and unwinds again returns to the same successors, so excluding
 /// `block` loses no such path.
-pub(crate) fn unwind_reach<I, E>(cfg: &Cfg<I, E>, block: BlockId) -> Vec<bool> {
-    let without_block = FilteredEdges::new(cfg, |edge: EdgeId, _: &Edge<E>| {
-        cfg.edge(edge).target() != block
+pub(crate) fn unwind_reach<V: CfgView>(view: &V, block: BlockId) -> Vec<bool> {
+    let without_block = FilteredEdges::new(view, |edge: V::EdgeId, _: &V::EdgeData| {
+        view.edge(edge).target() != block
     });
-    let unwind_successors = cfg.outgoing(block).filter_map(|edge| {
-        let edge = cfg.edge(edge);
+    let unwind_successors = view.outgoing(block).filter_map(|edge| {
+        let edge = view.edge(edge);
         let target = edge.target();
-        (edge.kind() == EdgeKind::ExceptionUnwind && target != block).then_some(target)
+        (edge.data().kind() == EdgeKind::ExceptionUnwind && target != block).then_some(target)
     });
     reachable(
         &without_block,
