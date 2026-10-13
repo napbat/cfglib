@@ -188,6 +188,14 @@ pub enum Control<V> {
         /// The return address.
         target: V,
     },
+    /// A multi-way transfer: execution continues at the decoded successor
+    /// whose case value equals `scrutinee`, or at the decoded default
+    /// successor. The case values belong to the decoded control flow, not to
+    /// the record.
+    Dispatch {
+        /// The value that selects the case.
+        scrutinee: V,
+    },
     /// The instruction does not continue: it ended in an unconditional
     /// [`Raise`] or a terminating intrinsic.
     Terminating,
