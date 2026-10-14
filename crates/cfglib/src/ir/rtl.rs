@@ -8,10 +8,12 @@
 //! - one control boundary ends the instruction.
 //!
 //! A state update is never partially committed. A fault is a typed outcome
-//! that an effect or a raise declares; it is not a control-flow successor. An
-//! instruction has no control flow of its own: a repeated instruction branches
-//! to its own address, and a choice inside one instruction is a select or a
-//! guarded write.
+//! that an effect or a raise declares; it is not a control-flow successor. A
+//! raised outcome commits nothing of the delta. A raise can publish state of
+//! its own: its bindings pair roots with values that come from the state
+//! before the instruction. An instruction has no control flow of its own: a
+//! repeated instruction branches to its own address, and a choice inside one
+//! instruction is a select or a guarded write.
 //!
 //! Instruction semantics emit a record through the write-only
 //! [`InstructionBuilder`]. The consumer owns the storage behind the builder and
