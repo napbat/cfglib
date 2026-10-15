@@ -43,6 +43,10 @@
 //! parameters; value analyses over it belong to the consumer. Every IR
 //! storage, builder, and editing machinery belongs to the consumer; the
 //! algorithms here read through the views and report facts.
+//! [`ControlTree::compute`] structures a [`Cfg`] into `if / else`, loops,
+//! `switch`, `try / catch`, and `goto` form. The tree is a fact about the graph
+//! in the way [`DominatorTree`] is: a flat arena of nodes that name blocks,
+//! edges, regions, and instruction spans, holding no instruction of its own.
 //! Output is three formats over one set of writers. [`write_dot`] draws any
 //! node- and edge-bearing view through a [`DotStyle`] — a node-label hook, an
 //! edge-attribute hook ([`DotEdgeAttributes`]), a graph name, an identifier
@@ -209,6 +213,11 @@ pub mod union_find;
 pub(crate) mod test_util;
 
 pub use analysis::alias::AliasSets;
+pub use analysis::control_tree::{
+    BlockSpan, CatchHandler, ChildBodies, ControlBody, ControlDescent, ControlNode, ControlNodeId,
+    ControlRun, ControlTree, ControlVisitor, GotoDiagnostic, GotoReason, LiftReport, LoopKind,
+    Preorder, SwitchCase,
+};
 pub use analysis::dead_code::DeadCode;
 pub use analysis::expr::{
     BlockExprTrees, ExprInstr, ExprNode, recover_block_expressions, recover_expressions,

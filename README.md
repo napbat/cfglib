@@ -173,7 +173,7 @@ A fact is a side table about one state of a function. No algorithm changes the f
 
 Every dialect type is plain data that the consumer defines. The traits contain no language, runtime, calling convention, opcode, or source-location type.
 
-cfglib no longer holds IR storage. The removal covers the RTL and MLIL function types and builders, the lift and lower functions between the IR levels, HLIL, AST structuring and pseudocode printing, tail duplication, the shared vocabulary trait, the provenance map, and the value analyses over MLIL (use index, liveness, constant propagation, and dead-instruction marking). A consumer that needs one of them keeps it in its own crate.
+cfglib no longer holds IR storage. The removal covers the RTL and MLIL function types and builders, the lift and lower functions between the IR levels, HLIL, tail duplication, the shared vocabulary trait, the provenance map, and the value analyses over MLIL (use index, liveness, constant propagation, and dead-instruction marking). A consumer that needs one of them keeps it in its own crate.
 
 #### Register-transfer contract (`ir::rtl`)
 
@@ -383,6 +383,8 @@ These analyses take `&G` where `G: CfgView`: `ReachingDefs`, `Liveness`, `DefUse
 | Profiling | `CfgProfile::from_edge_weights`, `set_uniform_edge_weights` | Edge-weight-based hot/cold block analysis |
 | Tail call detection | `detect_tail_calls` (heuristic), `detect_explicit_tail_calls` (`CallInfo` markers) | |
 | Switch table recovery | `detect_switch_tables` (`SwitchSource`), `recover_switch_tables` | Consumer-typed targets: addresses, syntax nodes; dispatch → structured switch |
+| Control tree | `ControlTree::compute`, `compute_with_report` (→ `LiftReport`), `compute_predicated[_with_report]`, `compute_with_report_treating_empty` | The structured form of a `Cfg`: `if/else`, pre-tested, post-tested, and endless loops, `switch` with case edges and a default, `try/catch` over declared handler extents, `break`/`continue` (labeled across loops), `goto`/`label`, and guarded runs of predicated instructions. A payload-free fact like `DominatorTree`: a flat arena of `ControlNode`s that name `BlockId`, `EdgeId`, `RegionId`, and `BlockSpan` instruction ranges, so it holds no instruction and never borrows the graph. Merge points are immediate post-dominators; an exit-free region has none. No reachable code is dropped, and `LiftReport` lists every goto, swept block, unstructured region, and dangling label |
+| Control tree traversal | `ControlTree::preorder`, `walk` (`ControlVisitor`), `child_bodies`, `for_each_instruction`, `write_pseudocode` / `to_pseudocode` | Non-recursive preorder and enter/leave walks, the child bodies of any node in execution order, every instruction in program-structure order, and indented pseudocode whose instruction text the caller supplies |
 
 ### Transforms
 
