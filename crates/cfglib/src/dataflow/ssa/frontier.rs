@@ -8,6 +8,13 @@
 //!
 //! Both read any [`RootedView`], so a [`Cfg`](crate::Cfg) and a
 //! consumer-owned function view share the one algorithm.
+//!
+//! For every reachable block `x`, the frontier is the one that
+//! [`DominatorTree::frontier`] states: block `y` is a member when `x`
+//! dominates a predecessor of `y` and does not strictly dominate `y`. This
+//! includes a tree root that is a branch target, such as an entry with a back
+//! edge into it: the root is in its own frontier and in the frontier of every
+//! block on the path back to it.
 
 extern crate alloc;
 
@@ -26,6 +33,9 @@ mod tests;
 /// The block type `N` is the node identity of the view the frontiers were
 /// computed from. It defaults to [`BlockId`], the identity of a
 /// [`Cfg`](crate::Cfg).
+///
+/// For a reachable block, the set equals [`DominatorTree::frontier`] of that
+/// block. This type computes every set at once and keeps them.
 #[derive(Debug, Clone)]
 pub struct DominanceFrontiers<N = BlockId> {
     /// `frontiers[b]` is the dominance-frontier set of `b`.
@@ -104,15 +114,23 @@ impl<N: DenseId> FrontierRuns<N> {
     {
         self.pairs.clear();
         for block in graph.node_ids() {
-            // A frontier block is a join: it has two incoming edges at least.
-            if graph.predecessors(block).nth(1).is_none() {
+            // A frontier block is a join: two incoming paths at least. A tree
+            // root has one path that is not an edge, the start of its tree,
+            // so one predecessor edge already makes it a join.
+            let tree_root = dom.idom(block).is_none() && dom.is_reachable(block);
+            let joins_at = if tree_root { 1 } else { 2 };
+            if graph.predecessors(block).nth(joins_at - 1).is_none() {
                 continue;
             }
 
-            let frontier_root = dom.idom(block).unwrap_or(block);
+            // The walk stops at the immediate dominator of `block`. A tree
+            // root has none, so the walk goes up to the root and adds it as
+            // well: the root dominates the predecessor and does not strictly
+            // dominate itself.
+            let stop = (!tree_root).then(|| dom.idom(block).unwrap_or(block));
             for predecessor in graph.predecessors(block) {
                 let mut runner = predecessor;
-                while runner != frontier_root {
+                while Some(runner) != stop {
                     self.pairs.push((runner, block));
                     let Some(parent) = dom.idom(runner) else {
                         break;

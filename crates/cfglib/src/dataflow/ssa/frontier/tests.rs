@@ -141,3 +141,58 @@ fn a_block_with_one_predecessor_has_no_frontier_entry() {
         [Vec::<u32>::new(), Vec::new(), Vec::new()]
     );
 }
+
+#[test]
+fn an_entry_with_one_back_edge_is_a_join() {
+    // `0 → 1 → 0` and `1 → 2`: the start of the function is the second path
+    // into the entry.
+    let graph = adjacency(3, &[(0, 1), (1, 0), (1, 2)]);
+    let frontiers = DominanceFrontiers::compute(&graph, &DominatorTree::compute(&graph));
+    assert_eq!(
+        frontier_indices(&frontiers, 3),
+        [vec![0], vec![0], Vec::new()]
+    );
+}
+
+#[test]
+fn an_entry_with_two_back_edges_is_in_its_own_frontier() {
+    let graph = adjacency(4, &[(0, 1), (1, 0), (0, 2), (2, 0), (1, 3)]);
+    let frontiers = DominanceFrontiers::compute(&graph, &DominatorTree::compute(&graph));
+    assert_eq!(
+        frontier_indices(&frontiers, 4),
+        [vec![0], vec![0], vec![0], Vec::new()]
+    );
+}
+
+/// Every digraph on up to four nodes, self-loops included: the table agrees
+/// with the on-demand frontier for every reachable node. The two are one rule
+/// computed two ways.
+#[test]
+fn the_table_agrees_with_the_on_demand_frontier_on_every_small_digraph() {
+    let mut on_demand = Vec::new();
+    for count in 1..=4_u32 {
+        let pairs: Vec<(u32, u32)> = (0..count)
+            .flat_map(|source| (0..count).map(move |target| (source, target)))
+            .collect();
+        for mask in 0..1_u32 << pairs.len() {
+            let edges: Vec<(u32, u32)> = pairs
+                .iter()
+                .enumerate()
+                .filter(|&(bit, _)| mask & (1 << bit) != 0)
+                .map(|(_, &edge)| edge)
+                .collect();
+            let graph = adjacency(count as usize, &edges);
+            let dominators = DominatorTree::compute(&graph);
+            let table = DominanceFrontiers::compute(&graph, &dominators);
+            for node in (0..count).filter(|&node| dominators.is_reachable(node)) {
+                dominators.frontier(&graph, node, &mut on_demand);
+                let expected: BTreeSet<u32> = on_demand.iter().copied().collect();
+                assert_eq!(
+                    *table.frontier(node),
+                    expected,
+                    "frontier of {node} in {edges:?}"
+                );
+            }
+        }
+    }
+}
