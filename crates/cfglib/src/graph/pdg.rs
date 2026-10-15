@@ -14,7 +14,7 @@ use crate::cfg::Cfg;
 use crate::dataflow::def_use::DefUseChains;
 use crate::dataflow::{InstrInfo, ProgramPoint};
 use crate::graph::cdg::control_dependence_graph;
-use crate::graph::dominator::DominatorTree;
+use crate::graph::dominator::PostDominatorTree;
 use crate::graph::store::{Graph, NodeId};
 
 /// A node in a program-dependence graph.
@@ -77,7 +77,7 @@ pub fn program_dependence_graph<I: InstrInfo>(
             })
             .collect();
     }
-    let post_dominators = DominatorTree::compute_post(cfg);
+    let post_dominators = PostDominatorTree::compute(cfg);
     let control = control_dependence_graph(cfg, &post_dominators);
     let mut controllers = BTreeSet::new();
     for edge in control.edges() {

@@ -114,7 +114,7 @@ pub(super) fn complete_dominator_forest<G: RootedView<NodeId = BlockId>>(
     let view = SsaDominatorView { cfg, roots };
     let complete = DominatorTree::<usize>::compute_in(scratch, &view);
     let original_bound = cfg.node_bound();
-    let idom = (0..original_bound)
+    let idom: Vec<Option<BlockId>> = (0..original_bound)
         .map(|node| {
             complete
                 .idom(node)
@@ -122,8 +122,11 @@ pub(super) fn complete_dominator_forest<G: RootedView<NodeId = BlockId>>(
                 .map(BlockId::from_index)
         })
         .collect();
-    let reachable = (0..original_bound)
+    let reachable: Vec<bool> = (0..original_bound)
         .map(|node| complete.is_reachable(node))
         .collect();
-    Some(DominatorTree::from_forest_parts(idom, reachable))
+    Some(DominatorTree::from_forest_parts(&idom, &reachable))
 }
+
+#[cfg(test)]
+mod tests;

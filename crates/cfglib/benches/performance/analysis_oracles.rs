@@ -2,8 +2,8 @@ use super::fixtures::{WIDE_FACT_WORDS, fixture_u32};
 use super::structural_oracles::has_directed_edge;
 use super::{
     BTreeSet, BlockId, Cfg, CommonAncestor, ConstantInst, DominanceFrontiers, DominatorTree,
-    EdgeStep, Facts, Graph, IntervalAnalysis, NodeFacts, NodeId, PhiPlacements, ProgramPoint,
-    SsaForm, SsaValue, TraversalDirection, VecDeque,
+    EdgeStep, Facts, Graph, IntervalAnalysis, NodeFacts, NodeId, PhiPlacements, PostDominatorTree,
+    PostNode, ProgramPoint, SsaForm, SsaValue, TraversalDirection, VecDeque,
 };
 
 pub(super) fn directed_distances(
@@ -164,11 +164,12 @@ pub(super) fn assert_branchy_dominators(dominators: &DominatorTree, node_count: 
         assert!(dominators.is_reachable(block));
         if index == 0 {
             assert_eq!(dominators.idom(block), None);
-            assert_eq!(dominators.depth(block), Some(0));
+            assert_eq!(dominators.level(block), Some(0));
         } else {
             let parent = ((index - 1) / 2) * 2;
             assert_eq!(dominators.idom(block), Some(BlockId::from_index(parent)));
-            assert_eq!(dominators.depth(block), Some(index.div_ceil(2)));
+            let level = u32::try_from(index.div_ceil(2)).expect("fixture level fits in u32");
+            assert_eq!(dominators.level(block), Some(level));
         }
     }
 }
@@ -200,25 +201,25 @@ pub(super) fn assert_dominance_frontiers(
     }
 }
 
-pub(super) fn assert_branchy_post_dominators(dominators: &DominatorTree, node_count: usize) {
+pub(super) fn assert_branchy_post_dominators(post: &PostDominatorTree, node_count: usize) {
     for index in 0..node_count {
         let block = BlockId::from_index(index);
-        assert!(dominators.is_reachable(block));
+        assert!(post.contains(block));
         let expected = if index + 1 == node_count {
-            None
+            PostNode::Exit
         } else if index % 2 == 0 {
-            Some(BlockId::from_index((index + 2).min(node_count - 1)))
+            PostNode::Node(BlockId::from_index((index + 2).min(node_count - 1)))
         } else {
-            Some(BlockId::from_index(index + 1))
+            PostNode::Node(BlockId::from_index(index + 1))
         };
-        assert_eq!(dominators.idom(block), expected);
+        assert_eq!(post.ipdom(block), Some(expected));
     }
 }
 
 pub(super) fn assert_control_dependence_graph(
     result: &Graph<BlockId, ()>,
     cfg: &Cfg<u32>,
-    post_dominators: &DominatorTree,
+    post_dominators: &PostDominatorTree,
 ) {
     assert_eq!(result.node_count(), cfg.block_bound());
     for node in result.node_ids() {
@@ -228,15 +229,17 @@ pub(super) fn assert_control_dependence_graph(
     let mut expected = BTreeSet::new();
     for controller in cfg.block_ids() {
         for target in cfg.successors(controller) {
-            if post_dominators.dominates(target, controller) {
+            if post_dominators.post_dominates(target, controller) {
                 continue;
             }
-            let immediate = post_dominators.idom(controller);
+            let immediate = post_dominators.ipdom(controller);
             let mut dependent = target;
             loop {
                 expected.insert((controller, dependent));
-                match post_dominators.idom(dependent) {
-                    Some(next) if Some(next) != immediate => dependent = next,
+                match post_dominators.ipdom(dependent) {
+                    Some(next @ PostNode::Node(parent)) if Some(next) != immediate => {
+                        dependent = parent;
+                    }
                     _ => break,
                 }
             }

@@ -565,9 +565,16 @@ mod tests {
         assert_eq!(dominators.idom(merge), Some(right));
         assert!(!dominators.is_reachable(left));
 
-        let post_dominators = crate::DominatorTree::compute_post(&cfg);
-        assert_eq!(post_dominators.idom(cfg.entry()), Some(right));
-        assert_eq!(post_dominators.idom(right), Some(merge));
+        let post_dominators = crate::PostDominatorTree::compute(&cfg);
+        assert_eq!(
+            post_dominators.ipdom(cfg.entry()),
+            Some(crate::PostNode::Node(right))
+        );
+        assert_eq!(
+            post_dominators.ipdom(right),
+            Some(crate::PostNode::Node(merge))
+        );
+        assert_eq!(post_dominators.exits(), [merge]);
 
         let facts = crate::solve_problem(&cfg, &LivenessProblem).expect("liveness solves");
         assert!(facts.fact_in(merge).contains(&0));

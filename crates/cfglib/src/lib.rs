@@ -298,7 +298,10 @@ pub use graph::call_graph::{
 };
 pub use graph::cdg::control_dependence_graph;
 pub use graph::diff::{BlockFingerprint, BlockMatch, CfgDiff};
-pub use graph::dominator::{DominatorScratch, DominatorTree};
+pub use graph::dominator::{
+    DominatorScratch, DominatorTree, FrontierScratch, PostDominatorScratch, PostDominatorTree,
+    PostNode,
+};
 pub use graph::dot::{
     DotEdgeAttributes, DotEdgeStyle, DotRankDir, DotStyle, bind_edge_attributes,
     control_flow_edge_attributes, plain_edge_attributes, to_dot, write_dot,

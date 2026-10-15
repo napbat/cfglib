@@ -196,8 +196,8 @@ fn postorder_from<G: GraphView, A: Adjacency>(
 ///
 /// Nodes are held as the dense indices [`DenseId`] guarantees they are, which
 /// is what keeps the buffers free of a node-id type parameter: one scratch
-/// serves every [`GraphView`], including the private augmented views the
-/// dominator algorithms run over, whose ids differ from the graph's own.
+/// serves every [`GraphView`], including views whose ids differ from the
+/// graph's own.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PostorderScratch {
     /// The answer: nodes in postorder, as dense indices.
@@ -259,21 +259,6 @@ fn postorder_from_in<G: GraphView, A: Adjacency>(
             }
         }
     }
-}
-
-/// Walk `graph` from `start` in **reverse** postorder, leaving the answer in
-/// `scratch.order`.
-///
-/// This is [`reverse_postorder`] without the call's buffers, for the analyses
-/// that run it once per procedure over a whole codebase.
-pub(crate) fn reverse_postorder_in<G: GraphView>(
-    scratch: &mut PostorderScratch,
-    graph: &G,
-    start: G::NodeId,
-    direction: TraversalDirection,
-) {
-    by_axis!(direction, postorder_from_in(scratch, graph, start));
-    scratch.order.reverse();
 }
 
 /// Return reverse postorder from `start`.

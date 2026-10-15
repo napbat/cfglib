@@ -15,11 +15,12 @@ use cfglib::{
     BlockId, Cfg, CfgBuilder, CommonAncestor, ConstValue, ConstantFolder, DenseId, Direction,
     DominanceFrontiers, DominatorTree, EdgeKind, EdgeStep, Facts, FlowControl, FlowEffect, Graph,
     InstrInfo, IntervalAnalysis, NaturalLoop, NodeFacts, NodeId, NodeProblem, PhiPlacements,
-    Problem, ProgramPoint, Rooted, SccDecomposition, SccpAnalysis, SsaForm, SsaValue,
-    TraversalDirection, ValueNumberInfo, ValueNumbering, breadth_first, breadth_first_edges,
-    common_ancestors, constant_propagation, contract_edge, control_dependence_graph,
-    depth_first_preorder, detect_loops, merge_blocks, nearest_common_ancestor, remove_empty_blocks,
-    shortest_path, shortest_path_edges, solve_node_problem, solve_problem, tarjan_scc,
+    PostDominatorTree, PostNode, Problem, ProgramPoint, Rooted, SccDecomposition, SccpAnalysis,
+    SsaForm, SsaValue, TraversalDirection, ValueNumberInfo, ValueNumbering, breadth_first,
+    breadth_first_edges, common_ancestors, constant_propagation, contract_edge,
+    control_dependence_graph, depth_first_preorder, detect_loops, merge_blocks,
+    nearest_common_ancestor, remove_empty_blocks, shortest_path, shortest_path_edges,
+    solve_node_problem, solve_problem, tarjan_scc,
 };
 
 mod analysis_oracles;
@@ -73,7 +74,7 @@ fn main() {
     let _ = target_ms;
     let cfg = branchy_cfg(NODE_COUNT);
     let cfg_dominators = DominatorTree::compute(&cfg);
-    let cfg_post_dominators = DominatorTree::compute_post(&cfg);
+    let cfg_post_dominators = PostDominatorTree::compute(&cfg);
     let graph = branchy_graph(NODE_COUNT);
     let (reverse_id_chain, reverse_id_root) = reverse_id_chain_graph(NODE_COUNT);
     let wide_cfg = branchy_cfg(1_024);
@@ -323,17 +324,17 @@ fn main() {
     );
     bench!(
         "cfg_post_dominators",
-        || DominatorTree::compute_post(&cfg),
-        |result: &DominatorTree| assert_branchy_post_dominators(result, NODE_COUNT)
+        || PostDominatorTree::compute(&cfg),
+        |result: &PostDominatorTree| assert_branchy_post_dominators(result, NODE_COUNT)
     );
     bench!(
         "cfg_post_dominators_many_exits",
-        || { DominatorTree::compute_post(&many_exits) },
-        |result: &DominatorTree| {
+        || { PostDominatorTree::compute(&many_exits) },
+        |result: &PostDominatorTree| {
             for index in 0..NODE_COUNT {
                 let block = BlockId::from_index(index);
-                assert!(result.is_reachable(block));
-                assert_eq!(result.idom(block), None);
+                assert!(result.contains(block));
+                assert_eq!(result.ipdom(block), Some(PostNode::Exit));
             }
         }
     );
@@ -347,12 +348,14 @@ fn main() {
         )
     );
     bench!(
-        "cfg_dominator_depths_linear",
-        || { linear_dominators.depths() },
-        |result: &Vec<usize>| {
-            assert_eq!(result.len(), NODE_COUNT / 2);
-            assert!(result.iter().copied().eq(0..NODE_COUNT / 2));
-        }
+        "cfg_dominator_queries_linear",
+        || {
+            let root = BlockId::from_index(0);
+            (0..NODE_COUNT / 2)
+                .filter(|&index| linear_dominators.dominates(root, BlockId::from_index(index)))
+                .count()
+        },
+        |result: &usize| assert_eq!(*result, NODE_COUNT / 2)
     );
     bench!(
         "directed_tarjan_scc",
