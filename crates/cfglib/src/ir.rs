@@ -1,8 +1,10 @@
-//! Intermediate-representation traits.
+//! Intermediate-representation traits and the generic algorithms over them.
 //!
-//! This module defines contracts only. It holds no IR storage, no builder
+//! This module defines contracts. It holds no IR storage, no builder
 //! implementation, and no editing machinery: a consumer owns those and
-//! implements the traits here on its own dense storage.
+//! implements the traits here on its own dense storage. Where an algorithm
+//! creates a function, it drives a builder trait that the consumer
+//! implements, and the consumer's builder seals the function.
 //!
 //! - [`rtl`] is the register-transfer level. Instruction semantics describe one
 //!   atomic state update through the write-only
@@ -13,9 +15,14 @@
 //!   form with block parameters, read through
 //!   [`FunctionView`](mlil::FunctionView). Value analyses over it belong to the
 //!   consumer.
+//! - `hlil` is the structured level: statement and expression trees read
+//!   through a view, built through a write-only builder trait that the consumer
+//!   implements, and produced from or lowered to a flat variable-based
+//!   function by generic algorithms.
 //!
 //! The generic algorithms of this crate read through these views and report
-//! facts. The consumer applies every change.
+//! facts. An algorithm never edits the function it reads, and the consumer
+//! applies every change.
 
 pub mod mlil;
 pub mod rtl;

@@ -4,7 +4,7 @@ Generic, `no_std` graph and dataflow framework for code intelligence, program an
 
 `cfglib` has purpose-built storage for arbitrary directed relations, language-parametric scope graphs, file-incremental stack graphs, and `Cfg<I, E = ()>` graphs. A `Cfg` has basic blocks, typed control-flow edges, caller-owned edge metadata, and exception regions.
 
-`cfglib::ir` holds IR traits and nothing else. `ir::rtl` is the register-transfer contract. `ir::mlil` is the read-only view contract of a flat function in static single assignment form with block parameters. The consumer owns every IR storage, builder, and editing pass. The consumer also owns the value analyses over an MLIL function. The generic algorithms read the IR through views and return facts. They never change the function that they read.
+`cfglib::ir` holds IR traits and the generic algorithms over them. `ir::rtl` is the register-transfer contract. `ir::mlil` is the read-only view contract of a flat function in static single assignment form with block parameters. `ir::hlil` is the structured contract: a read-only view of statement and expression trees, a builder trait that the consumer implements, and the lift, lower, and recovery algorithms that drive it. The consumer owns every IR storage, builder implementation, and editing pass. The consumer also owns the value analyses over an MLIL function. The generic algorithms read the IR through views and return facts. An algorithm that creates IR drives a builder trait that the consumer implements. No algorithm changes the function that it reads.
 
 Small read-only node and edge view contracts let consumer-owned stores and zero-copy filtered views reuse the algorithms. `CfgView` extends them for the instruction-level analyses, so a consumer block store runs the same dataflow as `Cfg`. Every instruction-adjacent axis is consumer-typed. Dataflow variables, constants, expression operators, side-effect vocabularies, branch targets, call targets, and edge payloads all come from the adapter. x86 registers and flags, shader register components, bytecode locals, compiler IR values, and source-language symbols do not need a library-owned numbering scheme. String literals and symbol ids flow through the analyses as naturally as machine words and addresses.
 
@@ -162,18 +162,19 @@ definition-to-reference bindings.
 
 ### IR trait contracts (`ir`)
 
-`cfglib::ir` holds IR traits and nothing else. It has no IR storage, no builder implementation, and no editing code. The consumer owns the dense arenas, builds its own records, and applies every change. The generic algorithms read the IR through views and return facts.
+`cfglib::ir` holds IR traits and the generic algorithms over them. It has no IR storage, no builder implementation, and no editing code. The consumer owns the dense arenas, builds its own records, and applies every change. The generic algorithms read the IR through views and return facts.
 
-A fact is a side table about one state of a function. No algorithm changes the function that it reads. After an edit, the consumer computes the facts again. A root liveness table is a fact, and cfglib stores no liveness inside a function.
+A fact is a side table about one state of a function. No algorithm changes the function that it reads. After an edit, the consumer computes the facts again. A root liveness table is a fact, and cfglib stores no liveness inside a function. An algorithm that creates a function does so only through a consumer-implemented builder trait, and the consumer owns the storage behind it.
 
 | Level | Module | The consumer implements | cfglib provides |
 |---|---|---|---|
 | Register transfer (RTL) | `ir::rtl` | `Dialect`, `InstructionBuilder`, `RecordView`, `FunctionView`, `Fold` | `RootTable`, `BlockSummaries`, `RootLiveness`, `ParamPlacement`, `SelectionResolution` |
 | Medium level (MLIL) | `ir::mlil` | `Dialect`, `FunctionView` | Nothing. Value analyses over the view belong to the consumer. |
+| Structured (HLIL) | `ir::hlil` | `Dialect`, `FunctionView`, `FunctionBuilder`, `FlatBuilder`, `FlatFunction`, `LiftInstruction`, `LiftEdge`, `LiftDialect`, `RecoverDialect`, `VerifyDialect`, `Pseudocode` | `lift`, `lower`, `recover_structure`, `VariablePlacements`, `verify`, `pseudocode` |
 
 Every dialect type is plain data that the consumer defines. The traits contain no language, runtime, calling convention, opcode, or source-location type.
 
-cfglib no longer holds IR storage. The removal covers the RTL and MLIL function types and builders, the lift and lower functions between the IR levels, HLIL, tail duplication, the shared vocabulary trait, the provenance map, and the value analyses over MLIL (use index, liveness, constant propagation, and dead-instruction marking). A consumer that needs one of them keeps it in its own crate.
+cfglib no longer holds IR storage. The removal covers the RTL, MLIL, and HLIL function types and builder implementations, tail duplication, the shared vocabulary trait, the provenance map, and the value analyses over MLIL (use index, liveness, constant propagation, and dead-instruction marking). A consumer that needs one of them keeps it in its own crate. Lift and lower between a variable-based flat IR and HLIL are generic algorithms over consumer-implemented builder traits.
 
 #### Register-transfer contract (`ir::rtl`)
 
