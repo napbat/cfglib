@@ -1,0 +1,22 @@
+signature (v0) returns 1
+v0 source
+v1 source
+bb0
+  -> bb1 Entry
+bb1
+  switch(v0)
+  -> bb2 Case 1
+  -> bb2 Case 2
+  -> bb3 Case 3
+  -> bb4 Default
+bb2
+  v1 = const 10
+  -> bb5 Fall
+bb3
+  v1 = const 20
+  -> bb5 Fall
+bb4
+  v1 = const 30
+  -> bb5 Fall
+bb5
+  return(v1)

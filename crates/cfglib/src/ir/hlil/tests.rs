@@ -28,10 +28,15 @@ macro_rules! over_toys {
 pub(crate) use over_toys;
 
 mod fixtures;
+mod flat;
+mod flat_storage;
 mod imp;
 mod kit;
+mod lowering;
 mod recovery;
 mod rendering;
+mod sketch;
+mod sketch_build;
 mod storage;
 mod sym;
 mod verification;

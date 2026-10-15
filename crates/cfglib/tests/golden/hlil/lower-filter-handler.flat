@@ -1,0 +1,19 @@
+signature (v0) returns 1
+v0 source
+v1 temporary
+bb0
+  -> bb1 Entry
+bb1
+  call(v0) !
+  -> bb2 Except
+  -> bb4 Fall
+bb2
+  v0 = const 9
+  -> bb4 Fall
+bb3
+  v1 = const 1
+  return(v1)
+bb4
+  return(v0)
+region0 protects {bb1}
+  handler bb2 Filter(bb3) {bb2}

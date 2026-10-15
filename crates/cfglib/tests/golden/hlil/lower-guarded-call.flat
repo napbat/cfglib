@@ -1,0 +1,16 @@
+signature () returns 1
+v0 source
+v1 temporary
+bb0
+  -> bb1 Entry
+bb1
+  v0 = call() !
+  -> bb2 Except
+  -> bb3 Fall
+bb2
+  v1 = const 7
+  return(v1)
+bb3
+  return(v0)
+region0 protects {bb1}
+  handler bb2 CatchAll {bb2}

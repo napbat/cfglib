@@ -1,0 +1,38 @@
+signature (v1) returns 1
+v0 source
+v1 source
+v2 temporary
+v3 temporary
+v4 temporary
+v5 temporary
+v6 temporary
+v7 temporary
+bb0
+  -> bb1 Entry
+bb1
+  v0 = const 0
+  -> bb2 Fall
+bb2
+  v2 = lt(v0, v1)
+  branch(v2)
+  -> bb4 True
+  -> bb6 False
+bb3
+  v7 = const 1
+  v0 = add(v0, v7)
+  -> bb2 Jump
+bb4
+  v3 = const 2
+  v4 = lt(v0, v3)
+  branch(v4)
+  -> bb3 True
+  -> bb5 False
+bb5
+  call(v0) !
+  v5 = const 7
+  v6 = lt(v5, v0)
+  branch(v6)
+  -> bb3 False
+  -> bb6 True
+bb6
+  return(v0)

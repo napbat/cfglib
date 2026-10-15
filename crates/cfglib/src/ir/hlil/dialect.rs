@@ -147,3 +147,75 @@ pub trait Pseudocode: Dialect {
         write!(formatter, "{constant:?}")
     }
 }
+
+/// The lift-time policy of a dialect: the hooks that have no instruction or
+/// edge to read.
+///
+/// The marker implements this beside [`Dialect`]. The instruction and edge
+/// types of the flat function carry the per-subject hooks through
+/// `LiftInstruction` and `LiftEdge`.
+pub trait LiftDialect: Dialect {
+    /// The effect vocabulary of the flat instructions. It is the
+    /// [`EffectInfo::Effect`](crate::EffectInfo::Effect) of every instruction
+    /// that implements `LiftInstruction` for this
+    /// dialect.
+    type Effect: Clone + Debug + Ord;
+
+    /// The type of an expression evaluated only for its effects, and of the
+    /// condition that a fused branch synthesizes.
+    fn void_type() -> Self::Type;
+
+    /// The metadata of a variable that stages overlapping
+    /// `ParallelCopy` moves, for a
+    /// staged value of type `ty`. `None` rejects overlapping moves.
+    #[must_use]
+    fn temporary_variable(ty: &Self::Type) -> Option<Self::Variable> {
+        let _ = ty;
+        None
+    }
+
+    /// An operation that computes the logical negation of its single
+    /// operand, used to state an exit-on-true loop condition structurally.
+    /// `None` degrades such a loop to `loop { ...; if (c) break; }`.
+    #[must_use]
+    fn logical_not() -> Option<Self::Op> {
+        None
+    }
+
+    /// The exact negation of `op` applied to the same operands: a comparison
+    /// with its relation inverted. It is consulted before
+    /// [`logical_not`](Self::logical_not) when a loop condition needs the
+    /// opposite polarity, and gives `while (a < b)` instead of
+    /// `while (!(a >= b))`.
+    #[must_use]
+    fn negate_operation(op: &Self::Op) -> Option<Self::Op> {
+        let _ = op;
+        None
+    }
+
+    /// Whether moving the evaluation of one computation across another keeps
+    /// the observable behavior.
+    ///
+    /// It is consulted when inlining would carry an effectful or throwing
+    /// definition past an intervening effectful or throwing instruction:
+    /// `moved` describes the definition that evaluates later than it was
+    /// written, and `crossed` the instruction that it moves across. The
+    /// default refuses every pair, which keeps all effectful evaluations in
+    /// program order. A dialect typically allows read-read pairs, so that two
+    /// memory loads fold into one expression.
+    #[must_use]
+    fn evaluation_commutes(
+        moved_effects: &[Self::Effect],
+        moved_may_throw: bool,
+        crossed_effects: &[Self::Effect],
+        crossed_may_throw: bool,
+    ) -> bool {
+        let _ = (
+            moved_effects,
+            moved_may_throw,
+            crossed_effects,
+            crossed_may_throw,
+        );
+        false
+    }
+}

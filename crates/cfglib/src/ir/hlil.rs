@@ -17,8 +17,17 @@
 //! [`finish`](FunctionBuilder::finish). No algorithm edits the function it
 //! reads.
 //!
+//! A flat function is written the same way. The consumer implements
+//! [`FlatBuilder`] over its own [`Cfg`](crate::Cfg) of instructions and edge
+//! payloads, and [`lower`](fn@lower) names each instruction and edge in HLIL
+//! terms ([`Lowered`], [`LowerEdge`]). The consumer chooses the flat operation
+//! and the [`EdgeKind`](crate::EdgeKind).
+//!
 //! The generic algorithms:
 //!
+//! - [`lower`](fn@lower) flattens a function into blocks and edges through a
+//!   [`FlatBuilder`], linearizes the expression trees into typed temporaries,
+//!   and registers the declared exception regions;
 //! - [`verify`] checks the structural invariants and calls the dialect's
 //!   [`VerifyDialect`] hook;
 //! - [`pseudocode`] writes the indented text of a function through the
@@ -36,6 +45,8 @@ mod builder;
 mod correspondence;
 mod dialect;
 mod error;
+mod flat_builder;
+mod lower;
 mod name;
 mod placement;
 mod pseudocode;
@@ -46,8 +57,10 @@ mod view;
 
 pub use builder::FunctionBuilder;
 pub use correspondence::Correspondence;
-pub use dialect::{Dialect, Pseudocode, RecoverDialect, VerifyDialect};
+pub use dialect::{Dialect, LiftDialect, Pseudocode, RecoverDialect, VerifyDialect};
 pub use error::{LiftError, LowerError, RecoverError};
+pub use flat_builder::{Appended, FlatBuilder, LowerEdge, Lowered, Occurrence, VariableOrigin};
+pub use lower::{LoweredFunction, lower};
 pub use placement::VariablePlacements;
 pub use pseudocode::{pseudocode, write_pseudocode};
 pub use recover::{Recovery, has_recovery_candidates, recover_structure};

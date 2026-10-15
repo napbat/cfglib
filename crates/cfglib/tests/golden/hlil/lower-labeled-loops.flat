@@ -1,0 +1,50 @@
+signature (v0, v1) returns 1
+v0 source
+v1 source
+v2 temporary
+v3 temporary
+v4 temporary
+v5 temporary
+v6 temporary
+v7 temporary
+v8 temporary
+v9 temporary
+v10 temporary
+v11 temporary
+bb0
+  -> bb1 Entry
+bb1
+  v2 = lt(v0, v1)
+  branch(v2)
+  -> bb2 True
+  -> bb7 False
+bb2
+  v3 = const 50
+  v4 = lt(v1, v3)
+  branch(v4)
+  -> bb3 True
+  -> bb1 False
+bb3
+  v5 = const 1
+  v6 = lt(v0, v5)
+  branch(v6)
+  -> bb4 False
+  -> bb7 True
+bb4
+  v7 = const 2
+  v8 = lt(v0, v7)
+  branch(v8)
+  -> bb1 True
+  -> bb5 False
+bb5
+  v9 = const 3
+  v10 = lt(v0, v9)
+  branch(v10)
+  -> bb6 False
+  -> bb1 True
+bb6
+  v11 = const 1
+  v1 = add(v1, v11)
+  -> bb2 Jump
+bb7
+  return(v0)
