@@ -39,9 +39,10 @@
 //! register-transfer contract: a write-only [`ir::rtl::InstructionBuilder`]
 //! through which instruction semantics describe one atomic state update, and
 //! read-only views over the sealed records. [`ir::mlil`] is the read-only
-//! contract of a flat static single assignment function with block
-//! parameters. Every IR storage, builder, and editing machinery belongs to the
-//! consumer; the algorithms here read through the views and report facts.
+//! view contract of a flat static single assignment function with block
+//! parameters; value analyses over it belong to the consumer. Every IR
+//! storage, builder, and editing machinery belongs to the consumer; the
+//! algorithms here read through the views and report facts.
 //! Output is three formats over one set of writers. [`write_dot`] draws any
 //! node- and edge-bearing view through a [`DotStyle`] — a node-label hook, an
 //! edge-attribute hook ([`DotEdgeAttributes`]), a graph name, an identifier

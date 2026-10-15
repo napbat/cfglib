@@ -11,7 +11,8 @@
 //!   [`FunctionView`](rtl::FunctionView).
 //! - [`mlil`] is the medium level: a flat function in static single assignment
 //!   form with block parameters, read through
-//!   [`FunctionView`](mlil::FunctionView).
+//!   [`FunctionView`](mlil::FunctionView). Value analyses over it belong to the
+//!   consumer.
 //!
 //! The generic algorithms of this crate read through these views and report
 //! facts. The consumer applies every change.
