@@ -4,7 +4,7 @@ Generic, `no_std` graph and dataflow framework for code intelligence, program an
 
 `cfglib` has purpose-built storage for arbitrary directed relations, language-parametric scope graphs, file-incremental stack graphs, and `Cfg<I, E = ()>` graphs. A `Cfg` has basic blocks, typed control-flow edges, caller-owned edge metadata, and exception regions.
 
-`cfglib::ir` holds IR traits and nothing else. `ir::rtl` is the register-transfer contract. `ir::mlil` is the contract of a flat function in static single assignment form with block parameters. The consumer owns every IR storage, builder, and editing pass. The generic algorithms read the IR through views and return facts. They never change the function that they read.
+`cfglib::ir` holds IR traits and nothing else. `ir::rtl` is the register-transfer contract. `ir::mlil` is the read-only view contract of a flat function in static single assignment form with block parameters. The consumer owns every IR storage, builder, and editing pass. The consumer also owns the value analyses over an MLIL function. The generic algorithms read the IR through views and return facts. They never change the function that they read.
 
 Small read-only node and edge view contracts let consumer-owned stores and zero-copy filtered views reuse the algorithms. `CfgView` extends them for the instruction-level analyses, so a consumer block store runs the same dataflow as `Cfg`. Every instruction-adjacent axis is consumer-typed. Dataflow variables, constants, expression operators, side-effect vocabularies, branch targets, call targets, and edge payloads all come from the adapter. x86 registers and flags, shader register components, bytecode locals, compiler IR values, and source-language symbols do not need a library-owned numbering scheme. String literals and symbol ids flow through the analyses as naturally as machine words and addresses.
 
@@ -164,16 +164,16 @@ definition-to-reference bindings.
 
 `cfglib::ir` holds IR traits and nothing else. It has no IR storage, no builder implementation, and no editing code. The consumer owns the dense arenas, builds its own records, and applies every change. The generic algorithms read the IR through views and return facts.
 
-A fact is a side table about one state of a function. No algorithm changes the function that it reads. After an edit, the consumer computes the facts again. A use index is a fact, and cfglib stores no use list inside a function.
+A fact is a side table about one state of a function. No algorithm changes the function that it reads. After an edit, the consumer computes the facts again. A root liveness table is a fact, and cfglib stores no liveness inside a function.
 
 | Level | Module | The consumer implements | cfglib provides |
 |---|---|---|---|
 | Register transfer (RTL) | `ir::rtl` | `Dialect`, `InstructionBuilder`, `RecordView`, `FunctionView`, `Fold` | `RootTable`, `BlockSummaries`, `RootLiveness`, `ParamPlacement`, `SelectionResolution` |
-| Medium level (MLIL) | `ir::mlil` | `Dialect`, `FunctionView`, `AnalysisDialect` | `UseIndex`, `ValueLiveness`, `SccpFacts`, `DeadInstructions` |
+| Medium level (MLIL) | `ir::mlil` | `Dialect`, `FunctionView` | Nothing. Value analyses over the view belong to the consumer. |
 
 Every dialect type is plain data that the consumer defines. The traits contain no language, runtime, calling convention, opcode, or source-location type.
 
-cfglib no longer holds IR storage. The removal covers the RTL and MLIL function types and builders, the lift and lower functions between the IR levels, HLIL, AST structuring and pseudocode printing, tail duplication, the shared vocabulary trait, and the provenance map. A consumer that needs one of them keeps it in its own crate.
+cfglib no longer holds IR storage. The removal covers the RTL and MLIL function types and builders, the lift and lower functions between the IR levels, HLIL, AST structuring and pseudocode printing, tail duplication, the shared vocabulary trait, the provenance map, and the value analyses over MLIL (use index, liveness, constant propagation, and dead-instruction marking). A consumer that needs one of them keeps it in its own crate.
 
 #### Register-transfer contract (`ir::rtl`)
 
@@ -256,7 +256,6 @@ An MLIL function is flat and in static single assignment form:
 | `Dialect` | The vocabulary of one medium-level dialect. The associated types are `Op` (an operation with its immediate attributes), `Type` (the type of a value), and `Edge` (the metadata of a successor record, such as the case value of a switch arm). |
 | `FunctionView<D>` | A `RootedView` over the blocks. The methods `params`, `insts`, `operands`, and `results` return slices, so the consumer keeps them in dense pools. The view also gives `op`, `successors`, `block_of`, `def`, `ty`, `inst_bound`, and `value_bound`. |
 | `ValueDef`, `Successor` | `ValueDef` says where a value is defined: `Result` of an instruction or `Param` of a block. `Successor` is one successor record: `target`, `args`, and `edge`. |
-| `AnalysisDialect` | The semantic hooks of the generic analyses: `effects`, `fold`, `fold_branch`, and `copy_of`, with the associated type `Constant`. `Effects` has the flags `ordered`, `may_trap`, `nondeterministic`, and `terminator`, and `Effects::is_pure` is true when no flag is set. `Lattice` is `Undefined`, `Constant`, or `Varying`. |
 
 A `FunctionView` follows these rules:
 
@@ -266,25 +265,7 @@ A `FunctionView` follows these rules:
 - The adjacency of the `RootedView` agrees with `successors`.
 - An identity below a bound that the view does not yield is a removed entity.
 
-#### MLIL analyses
-
-| Analysis | Entry point | Description |
-|---|---|---|
-| Use index | `UseIndex::build`; `uses`, `use_count`; `Use::Operand`, `Use::Edge` | The uses of every value in one flat table. An argument of a successor record is a use on the edge, at the end of the block that holds the record. The consumer builds the index when it needs it, and builds it again after an edit. |
-| Value liveness | `ValueLiveness::compute`; `live_in`, `live_out`, `is_live_in`, `is_live_out` | The values that are live at the start and at the end of each block, in ascending order. A block parameter is defined at the start of its block. The algorithm walks backward from each use, so its cost follows the live ranges. |
-| Sparse conditional constant propagation | `SccpFacts::compute`; `value`, `is_block_executable`, `executable_blocks`, `is_edge_executable` | The `Lattice` value of each value, with the executable blocks and edges. `AnalysisDialect::fold_branch` decides a branch. A block parameter takes the meet of the arguments on its executable incoming edges. |
-| Dead instructions | `DeadInstructions::compute`; `as_slice`, `contains`, `len`, `is_empty` | The pure instructions that no live code uses, including chains of them. A use on a successor edge counts. The marking does not look through block parameters. The consumer deletes the marked instructions. |
-
-```rust
-use cfglib::ir::mlil::{DeadInstructions, SccpFacts, UseIndex, ValueLiveness};
-
-// `function` implements `ir::mlil::FunctionView<D>`.
-let uses = UseIndex::build(&function);
-let liveness = ValueLiveness::compute(&function, &uses);
-let constants = SccpFacts::compute(&function, &uses);
-let dead = DeadInstructions::compute(&function, &uses);
-// The consumer deletes the instructions in `dead`, then computes new facts.
-```
+`ir::mlil` has no analysis of its own. A consumer that needs use lists, liveness, constant propagation, or dead-instruction marking builds them over `FunctionView`. The dialect of the consumer owns the semantics that those analyses need, such as effects and constant folding.
 
 ### Graph algorithms
 
@@ -490,7 +471,6 @@ ir::rtl::RecordView<D>    (one sealed instruction record)
 ir::rtl::FunctionView<D>  (RootedView + blocks of instruction records)
 
 ir::mlil::Dialect         (Op, Type, Edge)
-└── ir::mlil::AnalysisDialect  (Constant, effects, fold, fold_branch, copy_of)
 ir::mlil::FunctionView<D> (RootedView + blocks of flat SSA instructions)
 ```
 
@@ -568,7 +548,7 @@ let ssa = SsaForm::compute(&cfg, &dominators);
 
 `SsaForm<V>` is a non-mutating view over the source CFG. It stores renamed phi results, operands, instruction uses, and instruction definitions as `SsaValue<V>`, while each `SsaInstruction` keeps a `ProgramPoint` back to the native instruction. Version `0` denotes a live-in or otherwise undefined incoming value.
 
-For an IR adapter, implement the `ir::rtl` or `ir::mlil` traits on your own dense storage. Keep every arena, builder, and editing pass in your crate. Call the facts of cfglib on your function view, and apply their answers yourself. A machine-shaped language emits `ir::rtl` records through `InstructionBuilder`. A consumer that builds a block-parameter form from those records uses `ParamPlacement` to find where each root needs a parameter. A variable-shaped language implements `ir::mlil::FunctionView` directly. `UseIndex`, `ValueLiveness`, `SccpFacts`, and `DeadInstructions` then describe the function, and the consumer's own passes delete or rewrite instructions.
+For an IR adapter, implement the `ir::rtl` or `ir::mlil` traits on your own dense storage. Keep every arena, builder, and editing pass in your crate. Call the facts of cfglib on your function view, and apply their answers yourself. A machine-shaped language emits `ir::rtl` records through `InstructionBuilder`. A consumer that builds a block-parameter form from those records uses `ParamPlacement` to find where each root needs a parameter. A variable-shaped language implements `ir::mlil::FunctionView` directly. The consumer writes its own value analyses over that view, because they depend on the semantics of its dialect, and its own passes delete or rewrite instructions.
 
 The concrete shader-bytecode adapter (the d3dasm decompiler's `cfg`
 module) derives native register-component identities from decoded masks
