@@ -23,8 +23,19 @@
 //! terms ([`Lowered`], [`LowerEdge`]). The consumer chooses the flat operation
 //! and the [`EdgeKind`](crate::EdgeKind).
 //!
+//! A flat function is read through [`FlatFunction`]: the consumer's
+//! [`Cfg`](crate::Cfg) with its variable table and signature. The instruction
+//! type of the graph implements [`LiftInstruction`] and the edge payload
+//! [`LiftEdge`] to say what each of them stands for ([`InstructionShape`]),
+//! and the marker's [`LiftDialect`] holds the policy that has no subject.
+//!
 //! The generic algorithms:
 //!
+//! - [`lift`](fn@lift) structures a [`FlatFunction`] into a
+//!   [`ControlTree`](crate::ControlTree) and translates it through a
+//!   [`FunctionBuilder`], inlining each definition into its consumer when that
+//!   provably keeps the evaluation order, and returns the [`Correspondence`]
+//!   of flat instructions to structured entities;
 //! - [`lower`](fn@lower) flattens a function into blocks and edges through a
 //!   [`FlatBuilder`], linearizes the expression trees into typed temporaries,
 //!   and registers the declared exception regions;
@@ -40,12 +51,19 @@
 //! - [`for_each_child_body`], [`visit_statements`], [`visit_expression_tree`],
 //!   [`expressions_equal`], and [`compound_assignment`] are the walks that
 //!   every consumer of the shapes needs.
+//!
+//! The algorithms compose. A caller lifts a flat function, recovers the
+//! structure of the lifted function when [`has_recovery_candidates`] finds
+//! something to recover, and moves the [`Correspondence`] along with
+//! [`Correspondence::remap`].
 
 mod builder;
 mod correspondence;
 mod dialect;
 mod error;
+mod flat;
 mod flat_builder;
+mod lift;
 mod lower;
 mod name;
 mod placement;
@@ -59,7 +77,9 @@ pub use builder::FunctionBuilder;
 pub use correspondence::Correspondence;
 pub use dialect::{Dialect, LiftDialect, Pseudocode, RecoverDialect, VerifyDialect};
 pub use error::{LiftError, LowerError, RecoverError};
+pub use flat::{FlatFunction, InstructionShape, LiftEdge, LiftInstruction};
 pub use flat_builder::{Appended, FlatBuilder, LowerEdge, Lowered, Occurrence, VariableOrigin};
+pub use lift::{LiftMetadata, LiftedFunction, lift, lift_trampolines, lift_with_tree};
 pub use lower::{LoweredFunction, lower};
 pub use placement::VariablePlacements;
 pub use pseudocode::{pseudocode, write_pseudocode};

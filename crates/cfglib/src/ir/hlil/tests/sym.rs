@@ -96,7 +96,10 @@ impl Kit for Sym {
         match prim {
             Prim::Add => "add",
             Prim::LessThan => "lt",
+            Prim::Below => "below",
             Prim::Not => "not",
+            Prim::Load => "load",
+            Prim::Deref => "deref",
             Prim::Call => "call",
             Prim::Acquire => "acquire",
             Prim::Release => "release",

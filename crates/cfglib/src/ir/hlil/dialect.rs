@@ -153,11 +153,12 @@ pub trait Pseudocode: Dialect {
 ///
 /// The marker implements this beside [`Dialect`]. The instruction and edge
 /// types of the flat function carry the per-subject hooks through
-/// `LiftInstruction` and `LiftEdge`.
+/// [`LiftInstruction`](super::LiftInstruction) and
+/// [`LiftEdge`](super::LiftEdge).
 pub trait LiftDialect: Dialect {
     /// The effect vocabulary of the flat instructions. It is the
     /// [`EffectInfo::Effect`](crate::EffectInfo::Effect) of every instruction
-    /// that implements `LiftInstruction` for this
+    /// that implements [`LiftInstruction`](super::LiftInstruction) for this
     /// dialect.
     type Effect: Clone + Debug + Ord;
 
@@ -166,7 +167,7 @@ pub trait LiftDialect: Dialect {
     fn void_type() -> Self::Type;
 
     /// The metadata of a variable that stages overlapping
-    /// `ParallelCopy` moves, for a
+    /// [`ParallelCopy`](super::InstructionShape::ParallelCopy) moves, for a
     /// staged value of type `ty`. `None` rejects overlapping moves.
     #[must_use]
     fn temporary_variable(ty: &Self::Type) -> Option<Self::Variable> {

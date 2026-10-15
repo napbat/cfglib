@@ -14,7 +14,10 @@ use super::storage::{ExprId, StmtId, ToyHlilBuilder, VarId};
 pub(crate) enum Prim {
     Add,
     LessThan,
+    Below,
     Not,
+    Load,
+    Deref,
     Call,
     Acquire,
     Release,

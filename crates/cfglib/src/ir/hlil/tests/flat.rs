@@ -28,7 +28,6 @@ use crate::ir::hlil::{
 use crate::region::{HandlerBody, HandlerKind, Region, RegionId};
 use crate::{Cfg, verify};
 
-use super::imp::ImpType;
 use super::{Imp, Kit, Prim, Sym, Ty};
 
 /// A variable of a flat toy function.
@@ -71,9 +70,13 @@ pub(crate) trait FlatKit: Kit + LiftDialect {
     }
 
     /// How the flat operation `op` touches memory, if it does. A throwing
-    /// operation writes.
+    /// operation writes, and a load reads.
     fn access(op: &Self::Op) -> Option<Access> {
-        Self::throws(op).then_some(Access::Write)
+        if Self::throws(op) {
+            Some(Access::Write)
+        } else {
+            (*op == Self::op(Prim::Load)).then_some(Access::Read)
+        }
     }
 }
 
@@ -106,20 +109,6 @@ impl FlatKit for Sym {
     fn unwind_kind() -> EdgeKind {
         EdgeKind::ExceptionUnwind
     }
-}
-
-impl LiftDialect for Imp {
-    type Effect = Access;
-
-    fn void_type() -> ImpType {
-        ImpType::Void
-    }
-}
-
-impl LiftDialect for Sym {
-    type Effect = &'static str;
-
-    fn void_type() {}
 }
 
 /// What a flat instruction is. This is the shape `lift` classifies and
