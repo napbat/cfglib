@@ -7,33 +7,81 @@ use alloc::vec::Vec;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeId;
-use crate::{ControlNode, ControlTree, LiftReport};
+use crate::{ControlNode, ControlTree, LiftReport, LoopKind};
 
 /// The blocks whose instructions a tree must hold: the blocks the entry
-/// reaches, and the blocks a region claims — protected blocks, handler
-/// entries, filter funclets, and the blocks of known handler extents — with
-/// everything those reach, over edges of every kind. Sorted.
+/// reaches, and the blocks the handlers own — handler entries, filter
+/// funclets, and the blocks of known handler extents. Sorted.
+///
+/// A protected block the entry cannot reach is dead code and is not owned.
 pub(super) fn owned_blocks<I, E>(cfg: &Cfg<I, E>) -> Vec<BlockId> {
-    let mut owned = alloc::vec![false; cfg.block_bound()];
-    let mut stack = alloc::vec![cfg.entry()];
+    let mut owned = reach(cfg, Vec::new());
+    owned.extend(handler_owned(cfg));
+    owned.sort_unstable();
+    owned.dedup();
+    owned
+}
+
+/// The blocks a tree may hold beyond the owned ones: everything the owned
+/// blocks reach over edges of every kind, which a walk can inline;
+/// everything the goto targets of `report` reach, which the sweep emits so
+/// that the label resolves; and the code a region continues at, since the
+/// walk resumes there even when only a dead protected block leads to it.
+/// Sorted.
+fn allowed_blocks<I, E>(cfg: &Cfg<I, E>, report: &LiftReport) -> Vec<BlockId> {
+    let mut roots = handler_owned(cfg);
+    roots.extend(report.gotos.iter().map(|goto| goto.target));
     for region in cfg.regions() {
-        stack.extend(region.protected_blocks.iter().copied());
-        for handler in &region.handlers {
-            stack.push(handler.entry);
-            if let crate::HandlerKind::Filter { filter_block } = handler.kind {
-                stack.push(filter_block);
-            }
-            stack.extend(handler.body.blocks().into_iter().flatten().copied());
+        let inside: BTreeSet<BlockId> = region
+            .protected_blocks
+            .iter()
+            .copied()
+            .chain(
+                region
+                    .handlers
+                    .iter()
+                    .flat_map(|handler| handler.body.blocks().into_iter().flatten().copied()),
+            )
+            .chain(region.handlers.iter().map(|handler| handler.entry))
+            .collect();
+        for &block in &inside {
+            roots.extend(
+                cfg.outgoing(block)
+                    .map(|edge| cfg.edge(edge))
+                    .filter(|edge| !edge.kind().is_exceptional())
+                    .map(|edge| edge.target())
+                    .filter(|target| !inside.contains(target)),
+            );
         }
     }
+    reach(cfg, roots)
+}
+
+/// What the entry and `roots` reach over edges of every kind. Sorted.
+fn reach<I, E>(cfg: &Cfg<I, E>, mut stack: Vec<BlockId>) -> Vec<BlockId> {
+    stack.push(cfg.entry());
+    let mut reached = alloc::vec![false; cfg.block_bound()];
     while let Some(block) = stack.pop() {
-        if !core::mem::replace(&mut owned[block.index()], true) {
+        if !core::mem::replace(&mut reached[block.index()], true) {
             stack.extend(cfg.successors(block));
         }
     }
     cfg.block_ids()
-        .filter(|block| owned[block.index()])
+        .filter(|block| reached[block.index()])
         .collect()
+}
+
+/// The handler entries, filter funclets, and known extent blocks.
+fn handler_owned<I, E>(cfg: &Cfg<I, E>) -> Vec<BlockId> {
+    let mut owned = Vec::new();
+    for handler in cfg.regions().iter().flat_map(|region| &region.handlers) {
+        owned.push(handler.entry);
+        if let crate::HandlerKind::Filter { filter_block } = handler.kind {
+            owned.push(filter_block);
+        }
+        owned.extend(handler.body.blocks().into_iter().flatten().copied());
+    }
+    owned
 }
 
 /// The block sets a handler owns: its entry with its known extent, and its
@@ -114,8 +162,10 @@ fn render(tree: &ControlTree) -> alloc::string::String {
 /// Check the invariants of one graph's tree and report.
 ///
 /// - Every node is reachable from the root exactly once.
-/// - The instructions of every owned block appear exactly once, and no other
-///   instruction appears.
+/// - No instruction appears twice, and the instructions of every owned block
+///   appear.
+/// - No instruction appears that neither an owned block nor a goto reaches:
+///   dead code stays dead.
 /// - The gotos in the tree are exactly the reported ones.
 /// - Every goto target has one label or is reported as a dangling label, never
 ///   both, and no block is labeled twice.
@@ -123,22 +173,40 @@ fn render(tree: &ControlTree) -> alloc::string::String {
 pub(super) fn check<I, E>(cfg: &Cfg<I, E>, tree: &ControlTree, report: &LiftReport, context: &str) {
     assert_eq!(tree.preorder().count(), tree.node_count(), "{context}");
 
+    let instructions = |blocks: Vec<BlockId>| -> Vec<(BlockId, usize)> {
+        blocks
+            .into_iter()
+            .flat_map(|block| {
+                (0..cfg.block(block).instructions().len()).map(move |index| (block, index))
+            })
+            .collect()
+    };
     let mut seen = Vec::new();
     tree.for_each_instruction(cfg, |point, _| seen.push((point.block, point.inst_idx)));
     seen.sort_unstable();
-    let mut expected: Vec<(BlockId, usize)> = owned_blocks(cfg)
-        .into_iter()
-        .flat_map(|block| {
-            (0..cfg.block(block).instructions().len()).map(move |index| (block, index))
-        })
-        .collect();
-    expected.sort_unstable();
+    let mut once = seen.clone();
+    once.dedup();
     assert_eq!(
+        once,
         seen,
-        expected,
-        "coverage of {context}\n{}\n{report:?}",
+        "an instruction twice in {context}\n{}\n{report:?}",
         render(tree)
     );
+    for instruction in instructions(owned_blocks(cfg)) {
+        assert!(
+            once.contains(&instruction),
+            "instruction {instruction:?} lost in {context}\n{}\n{report:?}",
+            render(tree)
+        );
+    }
+    let allowed = instructions(allowed_blocks(cfg, report));
+    for instruction in &once {
+        assert!(
+            allowed.contains(instruction),
+            "dead instruction {instruction:?} emitted in {context}\n{}\n{report:?}",
+            render(tree)
+        );
+    }
 
     let mut gotos: Vec<BlockId> = tree
         .preorder()
@@ -174,10 +242,31 @@ pub(super) fn check<I, E>(cfg: &Cfg<I, E>, tree: &ControlTree, report: &LiftRepo
             "label of goto {target} in {context}"
         );
     }
+    // A goto to a block with instructions finds its label unless the tree
+    // holds that block only as a loop's test. No node stands for an empty
+    // block or for a test, so the report lists such a target and the consumer
+    // falls back.
+    let mut tests: Vec<BlockId> = Vec::new();
+    for id in tree.preorder() {
+        if let ControlNode::Loop { kind, .. } = *tree.node(id) {
+            match kind {
+                LoopKind::Endless => {}
+                LoopKind::While { condition, .. } => {
+                    tests.extend(tree.spans(condition).iter().map(|span| span.block()));
+                }
+                LoopKind::DoWhile { latch, .. } => tests.push(latch.block()),
+            }
+        }
+    }
     for block in &report.unresolved_labels {
         assert!(
             reported.contains(block),
             "dangling label {block} without a goto in {context}"
+        );
+        assert!(
+            cfg.block(*block).instructions().is_empty() || tests.contains(block),
+            "goto to block {block} with instructions dangles in {context}\n{}\n{report:?}",
+            render(tree)
         );
     }
     for block in &report.swept_blocks {

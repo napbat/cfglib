@@ -31,6 +31,7 @@ over_toys!(
     a_pre_tested_loop_that_exits_on_true_states_its_negation,
     a_loop_condition_that_needs_statements_becomes_an_explicit_test,
     a_loop_without_a_test_is_endless,
+    a_dead_protected_leave_block_leaves_no_dangling_goto,
 );
 
 /// How the test of a loop reads.
@@ -477,4 +478,47 @@ fn a_filter_handler_keeps_its_kind_and_leaves_its_predicate_to_the_sweep<D: Flat
         lifted_text(&source),
         "try {\n    v0 = call();\n} filter () {\n    when {\n    }\n    return 1;\n}\nreturn v0;\npredicate: {\n    return 0;\n}\n"
     );
+}
+
+/// `try { return i } catch { i = i + i }`, whose catch falls into a join that
+/// holds only a jump, then `return i`. A dead block that only jumps to the
+/// join, protected by the try, is the leave that a body which cannot complete
+/// leaves behind.
+fn a_dead_protected_leave_block_leaves_no_dangling_goto<D: FlatKit>() {
+    let mut flat = ToyFlatBuilder::<D>::new();
+    let body = flat.new_block(Some("body"));
+    let pad = flat.new_block(Some("pad"));
+    let join = flat.new_block(Some("join"));
+    let after = flat.new_block(Some("after"));
+    let leave = flat.new_block(Some("leave"));
+    let i = flat.int_variable(0);
+    flat.give_back(body, &[i]);
+    flat.operate(pad, Prim::Add, &[int::<D>(i), int::<D>(i)], &[int::<D>(i)]);
+    flat.jump(pad);
+    flat.jump(join);
+    flat.give_back(after, &[i]);
+    flat.jump(leave);
+    flat.start(body);
+    flat.connect(body, pad, ToyEdge::Except);
+    flat.connect(pad, join, ToyEdge::Fall);
+    flat.connect(join, after, ToyEdge::Fall);
+    flat.connect(leave, join, ToyEdge::Fall);
+    flat.add_region(Region {
+        id: RegionId::from_raw(0),
+        protected_blocks: [body, leave].into_iter().collect(),
+        handlers: vec![RegionHandler {
+            entry: pad,
+            body: HandlerBody::known([pad]),
+            kind: HandlerKind::CatchAll,
+        }],
+        parent: None,
+    });
+    flat.takes(&[i]);
+    let source = flat.finish_unchecked();
+
+    // The dead leave block is unreachable source: lifting it would need a
+    // goto to the join, which is empty and so has no label.
+    let text = lifted_text(&source);
+    assert!(!text.contains("goto"), "{text}");
+    assert_eq!(text.matches("return").count(), 2, "{text}");
 }

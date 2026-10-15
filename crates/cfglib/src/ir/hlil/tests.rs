@@ -34,6 +34,7 @@ mod flat_fixtures;
 mod flat_lift;
 mod flat_storage;
 mod fused;
+mod generated;
 mod imp;
 mod kit;
 mod lifting;

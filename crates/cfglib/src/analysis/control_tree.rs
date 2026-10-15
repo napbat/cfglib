@@ -31,7 +31,8 @@
 //! [`GotoReason`]), which blocks only the completeness sweep reached, which
 //! exception regions stayed ordinary flow, and which goto labels found no
 //! anchor. No owned code is dropped: the tree holds the blocks the entry
-//! reaches and the blocks a region claims, a dead catch pad among them.
+//! reaches and the blocks a handler owns, a dead catch pad among them. A
+//! protected block the entry cannot reach is dead code and is dropped.
 //!
 //! # Variants
 //!

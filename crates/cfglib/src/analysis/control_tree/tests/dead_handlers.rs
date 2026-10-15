@@ -417,7 +417,10 @@ fn with_region(
 #[test]
 fn every_small_graph_with_a_handler_keeps_every_owned_block() {
     // Three blocks, every terminator, every region: any guarded block, any
-    // pad, any extent, with and without an exception edge into the pad.
+    // pad, any extent, with and without an exception edge into the pad, and
+    // with any one block empty. Gotos to an empty block dangle by design;
+    // `check` holds every other label to resolve. A block the caller treats
+    // as empty gives the tree of a graph where it really is.
     let count = 3;
     let all = terminators(count, &[Fallthrough, Back], false);
     for_each_graph(count, &all, |picked: &[Terminator]| {
@@ -435,19 +438,34 @@ fn every_small_graph_with_a_handler_keeps_every_owned_block() {
                         .map(|(_, &block)| block)
                         .collect();
                     for live in [false, true] {
-                        let mut cfg = graph(picked, &vec![1; count], unpredicated);
-                        with_region(&mut cfg, protected, handler, &extent, live);
-                        isolate_handlers(&mut cfg);
-                        let (tree, report) = ControlTree::compute_with_report(&cfg);
-                        check(
-                            &cfg,
-                            &tree,
-                            &report,
-                            &alloc::format!(
+                        let build = |lengths: &[usize]| {
+                            let mut cfg = graph(picked, lengths, unpredicated);
+                            with_region(&mut cfg, protected, handler, &extent, live);
+                            isolate_handlers(&mut cfg);
+                            cfg
+                        };
+                        for emptied in [None, Some(0), Some(1), Some(2)] {
+                            let mut lengths = vec![1; count];
+                            if let Some(block) = emptied {
+                                lengths[block] = 0;
+                            }
+                            let cfg = build(&lengths);
+                            let context = alloc::format!(
                                 "{picked:?} guarding {protected}, pad {handler} extent \
-                                 {extent:?} live {live}"
-                            ),
-                        );
+                                 {extent:?} live {live} emptied {emptied:?}"
+                            );
+                            let (tree, report) = ControlTree::compute_with_report(&cfg);
+                            check(&cfg, &tree, &report, &context);
+                            if let Some(block) = emptied {
+                                let full = build(&vec![1; count]);
+                                let hole = full.block_ids().nth(block).unwrap();
+                                assert_eq!(
+                                    ControlTree::compute_with_report_treating_empty(&full, &[hole]),
+                                    (tree, report),
+                                    "{context}"
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -477,15 +495,18 @@ impl Random {
 
 /// A graph of five to nine blocks with one or two regions whose pads are
 /// often dead, so pads and their extents land inside loops, branches, and
-/// each other. Only a pad's own extent and exception edges enter it.
-fn random_graph_with_regions(random: &mut Random) -> Cfg<DfInst> {
+/// each other. Only a pad's own extent and exception edges enter it. A block
+/// is empty with `empty_percent` chance.
+fn random_graph_with_regions(random: &mut Random, empty_percent: usize) -> Cfg<DfInst> {
     let count = 5 + random.below(5);
     let mut cfg: Cfg<DfInst> = Cfg::new();
     let ids: Vec<BlockId> = core::iter::once(cfg.entry())
         .chain((1..count).map(|_| cfg.new_block()))
         .collect();
     for &block in &ids {
-        cfg.block_mut(block).push(crate::test_util::df_ff("i"));
+        if empty_percent == 0 || !random.chance(empty_percent) {
+            cfg.block_mut(block).push(crate::test_util::df_ff("i"));
+        }
     }
     for &block in &ids {
         match random.below(20) {
@@ -565,13 +586,39 @@ fn random_graph_with_regions(random: &mut Random) -> Cfg<DfInst> {
 fn random_graphs_with_handlers_keep_every_owned_block() {
     let mut random = Random(0x9E37_79B9_7F4A_7C15);
     for sample in 0..40_000 {
-        let cfg = random_graph_with_regions(&mut random);
+        let cfg = random_graph_with_regions(&mut random, 0);
         let (tree, report) = ControlTree::compute_with_report(&cfg);
         check(
             &cfg,
             &tree,
             &report,
             &alloc::format!("sample {sample}: {}", describe(&cfg)),
+        );
+    }
+}
+
+#[test]
+fn random_graphs_with_handlers_and_empty_blocks_keep_every_label() {
+    // Gotos to an empty block dangle by design, and the report lists them;
+    // every other label resolves. Treating the empty blocks as empty is the
+    // same as clearing them.
+    let mut random = Random(0xD1B5_4A32_D192_ED03);
+    for sample in 0..40_000 {
+        let mut cfg = random_graph_with_regions(&mut random, 30);
+        let context = alloc::format!("sample {sample}: {}", describe(&cfg));
+        let (tree, report) = ControlTree::compute_with_report(&cfg);
+        check(&cfg, &tree, &report, &context);
+        let emptied: Vec<BlockId> = cfg
+            .block_ids()
+            .filter(|&block| cfg.block(block).instructions().is_empty())
+            .collect();
+        for &block in &emptied {
+            cfg.block_mut(block).push(crate::test_util::df_ff("i"));
+        }
+        assert_eq!(
+            ControlTree::compute_with_report_treating_empty(&cfg, &emptied),
+            (tree, report),
+            "{context}"
         );
     }
 }

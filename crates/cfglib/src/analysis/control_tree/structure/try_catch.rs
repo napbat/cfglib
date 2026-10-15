@@ -8,7 +8,8 @@ use super::super::node::{CatchHandler, ControlNode};
 use super::{Structurer, flow_successors};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::region::{HandlerKind, HandlerRef, Region};
+use crate::graph::traverse::{TraversalDirection, reverse_postorder};
+use crate::region::{Handler, HandlerKind, HandlerRef, Region};
 
 /// The blocks of `inner` also admitted by the enclosing bound, so a nested
 /// region never escapes the extent it was entered under.
@@ -49,23 +50,62 @@ pub(super) fn region_anchors<'c, I, E>(
     anchors
 }
 
-/// The blocks a region claims: its protected blocks, and each handler's entry,
-/// filter funclet, and known extent. They are sweep roots because they can
-/// carry code without any incoming CFG edge — a funclet is invoked by the
-/// runtime, and a handler pad is dead when no call unwinds into it.
-pub(super) fn metadata_roots<I, E>(cfg: &Cfg<I, E>) -> Vec<BlockId> {
+/// The blocks the handlers of every region own, in the order the sweep
+/// reaches them: each handler's entry, its filter funclet, then the blocks of
+/// its known extent that carry code, in flow order.
+///
+/// A handler body is source code (a catch clause, a finally block, a filter
+/// predicate) even when no exception edge enters the pad, and a funclet is
+/// invoked by the runtime, so these blocks carry code without any incoming
+/// edge from the entry. Protected blocks are not handler code: one the entry
+/// cannot reach is dead code.
+pub(super) fn handler_roots<I, E>(
+    cfg: &Cfg<I, E>,
+    carries_code: impl Fn(BlockId) -> bool,
+) -> Vec<BlockId> {
+    let mut listed: BTreeSet<BlockId> = BTreeSet::new();
     let mut roots = Vec::new();
     for region in cfg.regions() {
-        roots.extend(region.protected_blocks.iter().copied());
         for handler in &region.handlers {
-            roots.push(handler.entry);
-            if let HandlerKind::Filter { filter_block } = handler.kind {
-                roots.push(filter_block);
+            for block in handler_blocks_in_order(cfg, handler, &carries_code) {
+                if listed.insert(block) {
+                    roots.push(block);
+                }
             }
-            roots.extend(handler.body.blocks().into_iter().flatten().copied());
         }
     }
     roots
+}
+
+/// One handler's blocks: its entry, its filter funclet, then the blocks of
+/// its known extent that carry code: those the entry reaches in reverse
+/// postorder, then the rest by block.
+///
+/// An extent block without code, such as the jump a source `leave` compiles
+/// to, holds nothing to emit; walking from it would only reach the code that
+/// follows the handler.
+fn handler_blocks_in_order<I, E>(
+    cfg: &Cfg<I, E>,
+    handler: &Handler,
+    carries_code: &impl Fn(BlockId) -> bool,
+) -> Vec<BlockId> {
+    let mut listed: BTreeSet<BlockId> = BTreeSet::new();
+    let mut blocks = alloc::vec![handler.entry];
+    listed.insert(handler.entry);
+    if let HandlerKind::Filter { filter_block } = handler.kind
+        && listed.insert(filter_block)
+    {
+        blocks.push(filter_block);
+    }
+    if let Some(extent) = handler.body.blocks() {
+        let flow = reverse_postorder(cfg, handler.entry, TraversalDirection::Outgoing);
+        for block in flow.into_iter().chain(extent.iter().copied()) {
+            if extent.contains(&block) && carries_code(block) && listed.insert(block) {
+                blocks.push(block);
+            }
+        }
+    }
+    blocks
 }
 
 /// The complete handler extents of `region`, or `None` when any handler's

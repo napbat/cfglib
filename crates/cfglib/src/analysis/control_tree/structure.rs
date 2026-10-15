@@ -16,7 +16,6 @@ use crate::cfg::Cfg;
 use crate::edge::{EdgeId, EdgeKind};
 use crate::graph::dominator::{DominatorTree, PostDominatorTree, PostNode};
 use crate::graph::structure::{NaturalLoop, detect_loops_tagged};
-use crate::graph::traverse::{TraversalDirection, reverse_postorder};
 use crate::region::Region;
 use roots::VirtualRoot;
 
@@ -56,9 +55,9 @@ struct Structurer<'cfg, I, E> {
     pdom: PostDominatorTree<u32>,
     /// Whether the entry reaches each block, by dense index.
     reachable: Vec<bool>,
-    /// The blocks a region claims: protected blocks, handler entries, filter
-    /// funclets, and the blocks of known handler extents. Sweep roots.
-    metadata_roots: Vec<BlockId>,
+    /// The blocks the handlers own: entries, filter funclets, and the blocks
+    /// of known extents. Sweep roots.
+    handler_roots: Vec<BlockId>,
     /// Dominance-proven and explicitly tagged back-edge endpoint pairs.
     ///
     /// Machine frontends normally describe every native jump as
@@ -189,23 +188,27 @@ impl ControlTree {
     ///
     /// # Code the entry does not reach
     ///
-    /// A block is *owned* when the entry reaches it, or when a region claims
-    /// it — a protected block, a handler entry, a filter funclet, a block of a
-    /// known handler extent — and every block such a claimed block reaches, over
-    /// edges of every kind. The tree holds the instructions of each owned block
-    /// exactly once, whether or not an exception edge leads into the handler:
-    /// a catch pad is dead when no call unwinds into it, yet its body, and
-    /// the code it falls into beyond its declared extent, is still code. Blocks
-    /// nothing claims and the entry cannot reach are dropped.
+    /// A block is *owned* when the entry reaches it, or when a handler owns
+    /// it: a handler entry, a filter funclet, or a block of a known handler
+    /// extent. The tree holds the instructions of each owned block exactly
+    /// once, whether or not an exception edge leads into the handler: a catch
+    /// pad is dead when no call unwinds into it, yet its body is the source of
+    /// a catch clause and still code. Code that only dead code reaches is
+    /// dropped, and so is a protected block the entry cannot reach: such a
+    /// block is unreachable source, not part of any handler. The exception
+    /// is a goto — a transfer out of owned code to a block nothing owns finds
+    /// its label, because the sweep emits that block and whatever it then
+    /// names.
     ///
-    /// - Branches in claimed code merge as if the function began there too, so
-    ///   a dead pad's `if` rejoins like any other; the post-dominator tree is
-    ///   rooted at a virtual block that precedes the entry and every block the
-    ///   entry misses. That changes no fact about a block the entry reaches.
+    /// - Branches in dead owned code merge as if the function began there too,
+    ///   so a dead pad's `if` rejoins like any other; the post-dominator tree
+    ///   is rooted at a virtual block that precedes the entry and every block
+    ///   the entry misses. That changes no fact about a block the entry
+    ///   reaches.
     /// - A handler body is lifted inside the enclosing loop's bound, which
     ///   holds the dead blocks that feed the loop — the pad and its extent
     ///   among them — but only blocks the entry reaches can pick a loop's follow.
-    /// - What the structured walk leaves out of a claimed region is swept under
+    /// - What the structured walk leaves out of an owned extent is swept under
     ///   its label, so a goto into it always finds a target.
     ///
     /// A region is well formed when its handlers' entries and extents are not
@@ -303,7 +306,9 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         Self {
             cfg,
             pdom: PostDominatorTree::compute(&VirtualRoot::new(cfg, unreachable)),
-            metadata_roots: try_catch::metadata_roots(cfg),
+            handler_roots: try_catch::handler_roots(cfg, |block| {
+                !emptied[block.index()] && !cfg.block(block).instructions().is_empty()
+            }),
             reachable,
             back_edges,
             loops,
@@ -325,31 +330,26 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         self.anchors = try_catch::region_anchors(cfg, &order);
         let mut body = self.lift_region(cfg.entry(), None, None);
 
-        // Completeness sweep: emit every owned block the structured walk
-        // refused or never reached, each under its label so the boundary
-        // `Goto`s and exception edges that lead there stay resolvable. A block
-        // is owned when the entry reaches it or a region claims it (a protected
-        // block, a handler entry, a filter funclet, a block of a known handler
-        // extent) and everything such a block reaches — a handler pad with no exception
+        // Completeness sweep: emit every block the structured walk refused or
+        // never reached, each under its label so the boundary `Goto`s and
+        // exception edges that lead there stay resolvable. The entry's blocks
+        // come first, then the handlers' own blocks — a pad with no exception
         // edge or a funclet carries code, though no edge from the entry leads
         // to it.
         let sweep_order = self.sweep_order(&order);
         while let Some(&pending) = sweep_order.iter().find(|block| !self.is_visited(**block)) {
-            let pending_body = self.lift_region(pending, None, None);
-            if !pending_body.is_empty() {
-                self.report.swept_blocks.push(pending);
-                if self.labeled_blocks.insert(pending) {
-                    let swept = self.tables.seal(pending_body);
-                    body.push(ControlNode::Label {
-                        block: pending,
-                        body: swept,
-                    });
-                } else {
-                    // A labeled loop headed by `pending` already carries the
-                    // label: a second one would name the block twice.
-                    body.extend(pending_body);
-                }
-            }
+            self.sweep(pending, &mut body);
+        }
+        // A goto always finds its label: the target of one that left a handler
+        // for code only that handler reaches is swept too, and so is whatever
+        // the sweep then names.
+        while let Some(target) = self
+            .goto_targets
+            .iter()
+            .copied()
+            .find(|&target| !self.is_visited(target))
+        {
+            self.sweep(target, &mut body);
         }
 
         // Exact labeling: wrap the emission of every goto target that has no
@@ -381,24 +381,38 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         (self.tables.finish(root), self.report)
     }
 
+    /// Emit the code at `pending`, which nothing structured reached, under
+    /// its label at the end of `body`.
+    fn sweep(&mut self, pending: BlockId, body: &mut Vec<ControlNode>) {
+        let pending_body = self.lift_region(pending, None, None);
+        if pending_body.is_empty() {
+            return;
+        }
+        self.report.swept_blocks.push(pending);
+        if self.labeled_blocks.insert(pending) {
+            let swept = self.tables.seal(pending_body);
+            body.push(ControlNode::Label {
+                block: pending,
+                body: swept,
+            });
+        } else {
+            // A labeled loop headed by `pending` already carries the label: a
+            // second one would name the block twice.
+            body.extend(pending_body);
+        }
+    }
+
     /// The blocks the completeness sweep walks, in order: reverse postorder
-    /// from the entry, then reverse postorder from each region-claimed block
-    /// the entry misses, over the blocks not yet listed.
+    /// from the entry, then the handlers' own blocks the entry misses.
     fn sweep_order(&self, order: &[BlockId]) -> Vec<BlockId> {
         let mut listed = alloc::vec![false; self.cfg.block_bound()];
         let mut sweep = order.to_vec();
         for block in order {
             listed[block.index()] = true;
         }
-        for &root in &self.metadata_roots {
-            if listed[root.index()] {
-                continue;
-            }
-            for block in reverse_postorder(self.cfg, root, TraversalDirection::Outgoing) {
-                if !listed[block.index()] {
-                    listed[block.index()] = true;
-                    sweep.push(block);
-                }
+        for &root in &self.handler_roots {
+            if !core::mem::replace(&mut listed[root.index()], true) {
+                sweep.push(root);
             }
         }
         sweep

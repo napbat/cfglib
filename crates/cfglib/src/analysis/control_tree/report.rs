@@ -40,8 +40,7 @@ pub struct LiftReport {
     pub gotos: Vec<GotoDiagnostic>,
     /// Blocks emitted by the completeness sweep rather than the structured
     /// walk: goto targets, handler pads reached only through exception edges,
-    /// and code only a region claims, such as a dead pad's tail or a filter
-    /// funclet.
+    /// and code only a handler owns, such as a filter funclet.
     pub swept_blocks: Vec<BlockId>,
     /// Regions left as ordinary control flow because a handler extent was
     /// unknown or the region was shadowed by an enclosing structured region
@@ -49,6 +48,12 @@ pub struct LiftReport {
     pub unstructured_regions: Vec<RegionId>,
     /// Goto targets whose label could not be attached to any emitted node;
     /// the tree contains a dangling goto and the consumer should fall back.
+    ///
+    /// A label attaches to the node that emits its block: a leaf, a branch or
+    /// dispatch, or a loop header. A block with no instructions, or one a loop
+    /// keeps only as its test (a post-tested loop's latch, a pre-tested loop's
+    /// condition chain past the header), has no such node. A goto to a block
+    /// with instructions that is neither is always labeled.
     pub unresolved_labels: Vec<BlockId>,
 }
 
