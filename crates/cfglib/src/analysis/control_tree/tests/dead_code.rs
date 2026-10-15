@@ -14,7 +14,9 @@ use super::pseudocode;
 use crate::ControlTree;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::edge::EdgeKind::{self, ExceptionLeave, Fallthrough};
+use crate::edge::EdgeKind::{
+    self, ConditionalFalse, ConditionalTrue, ExceptionLeave, Fallthrough, Unconditional,
+};
 use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
 use crate::test_util::{MockInst, ff};
 
@@ -103,6 +105,55 @@ fn a_dead_protected_block_that_leaves_through_an_emptied_join_is_dropped() {
 }
 
 #[test]
+fn a_dead_pad_split_by_a_suspension_keeps_its_tail_in_the_handler() {
+    // The pad b3 leaves through two ordinary edges, an exit and a
+    // fallthrough to its tail b4 (a suspension has both), so the walk cannot
+    // follow a single successor. The tail is the handler's own code and
+    // belongs in its body, not at the end of the function.
+    let (mut cfg, b) = blocks(5);
+    cfg.add_edge(b[0], b[1], Fallthrough);
+    cfg.add_edge(b[1], b[2], Fallthrough);
+    cfg.add_edge(b[3], b[2], Unconditional);
+    cfg.add_edge(b[3], b[4], Fallthrough);
+    catch(&mut cfg, &[b[1]], b[3], &[b[3], b[4]], None);
+    let (text, report) = tree_text(&cfg);
+    assert_eq!(
+        text,
+        "b0\ntry {\n    b1\n} catch {\n    b3\n    b4\n}\nb2\n"
+    );
+    assert!(report.swept_blocks.is_empty(), "{report:?}");
+    assert!(report.is_fully_structured(), "{report:?}");
+}
+
+#[test]
+fn a_dead_pad_tail_that_cannot_reach_the_loop_stays_in_the_handler() {
+    // A loop b1..b3 with a pad b4 whose extent holds b5, a tail that throws
+    // and so never reaches the latch: the loop's bound has the pad (it feeds
+    // the latch) but not the tail, which the handler walk used to escape as a
+    // goto and a sweep.
+    //
+    // b0 -> b1 --true--> b2 -> b3 -> b1 (back) ; b1 --false--> b6
+    // b4 --true--> b5 (tail, no successor) ; b4 --false--> b3
+    let (mut cfg, b) = blocks(7);
+    cfg.add_edge(b[0], b[1], Fallthrough);
+    cfg.add_edge(b[1], b[2], ConditionalTrue);
+    cfg.add_edge(b[1], b[6], ConditionalFalse);
+    cfg.add_edge(b[2], b[3], Fallthrough);
+    cfg.add_edge(b[3], b[1], EdgeKind::Back);
+    cfg.add_edge(b[4], b[5], ConditionalTrue);
+    cfg.add_edge(b[4], b[3], ConditionalFalse);
+    catch(&mut cfg, &[b[2]], b[4], &[b[4], b[5]], None);
+    let (text, report) = tree_text(&cfg);
+    assert_eq!(text.matches("b5\n").count(), 1, "{text}");
+    assert!(
+        report.gotos.iter().all(|goto| goto.target != b[5]),
+        "{report:?}"
+    );
+    assert!(!report.swept_blocks.contains(&b[5]), "{report:?}");
+    assert!(report.unresolved_labels.is_empty(), "{report:?}");
+}
+
+#[test]
 fn a_goto_out_of_a_dead_pad_finds_the_dead_code_it_names() {
     // The pad b3 flows to b4, which a second dead block b5 also enters, so
     // the pad cannot inline it and the transfer is a goto. Nothing owns b4,
@@ -120,6 +171,34 @@ fn a_goto_out_of_a_dead_pad_finds_the_dead_code_it_names() {
     assert_eq!(text.matches("b4\n").count(), 1, "{text}");
     assert!(text.contains(".bb4:"), "{text}");
     assert!(!text.contains("b5"), "{text}");
+}
+
+#[test]
+fn a_nested_pad_stays_with_its_own_region() {
+    // The finally pad b3 is reachable and splits on a suspension, so its
+    // walk ends at b3. Its extent also names b5, the pad of a region that
+    // protects b4. That region lifts b5 when the sweep reaches b4; the outer
+    // handler must not take it first and leave the inner catch a goto.
+    //
+    // b0 -> b1 -> b3 ; b3 -> b2 (unconditional) ; b3 -> b4 -> b2
+    // outer region: protects b1, pad b3 with extent {b3, b4, b5}
+    // inner region: protects b4, pad b5 with extent {b5}
+    let (mut cfg, b) = blocks(6);
+    cfg.add_edge(b[0], b[1], Fallthrough);
+    cfg.add_edge(b[1], b[3], Fallthrough);
+    cfg.add_edge(b[3], b[2], Unconditional);
+    cfg.add_edge(b[3], b[4], Fallthrough);
+    cfg.add_edge(b[4], b[2], Fallthrough);
+    let outer = catch(&mut cfg, &[b[1]], b[3], &[b[3], b[4], b[5]], None);
+    catch(&mut cfg, &[b[4]], b[5], &[b[5]], Some(outer));
+    let (text, report) = tree_text(&cfg);
+    assert!(
+        report.gotos.iter().all(|goto| goto.target != b[5]),
+        "{report:?}"
+    );
+    assert_eq!(text.matches("b5\n").count(), 1, "{text}");
+    let catch_at = text.rfind("catch {").expect("the inner catch");
+    assert!(text[catch_at..].contains("b5"), "{text}");
 }
 
 #[test]

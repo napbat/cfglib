@@ -200,16 +200,19 @@ impl ControlTree {
     /// its label, because the sweep emits that block and whatever it then
     /// names.
     ///
+    /// - A handler body is lifted inside its handler: the walk from the pad,
+    ///   then the rest of the extent that the entry cannot reach, in flow
+    ///   order. The enclosing loop's bound holds the dead blocks that feed the
+    ///   loop, and the handler's bound adds its own dead extent, so a tail that
+    ///   cannot reach the loop stays in the handler. A pad of a region that
+    ///   has not been structured yet stays with that region.
+    /// - A reachable block of an extent that the walk did not reach waits for
+    ///   the sweep, as it always has.
     /// - Branches in dead owned code merge as if the function began there too,
     ///   so a dead pad's `if` rejoins like any other; the post-dominator tree
     ///   is rooted at a virtual block that precedes the entry and every block
     ///   the entry misses. That changes no fact about a block the entry
-    ///   reaches.
-    /// - A handler body is lifted inside the enclosing loop's bound, which
-    ///   holds the dead blocks that feed the loop — the pad and its extent
-    ///   among them — but only blocks the entry reaches can pick a loop's follow.
-    /// - What the structured walk leaves out of an owned extent is swept under
-    ///   its label, so a goto into it always finds a target.
+    ///   reaches, and only blocks the entry reaches can pick a loop's follow.
     ///
     /// A region is well formed when its handlers' entries and extents are not
     /// among its protected blocks and ordinary flow enters them only from

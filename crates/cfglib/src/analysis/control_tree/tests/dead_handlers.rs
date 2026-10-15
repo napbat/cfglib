@@ -166,7 +166,12 @@ fn a_block_only_a_known_extent_claims_is_emitted() {
     let (tree, report) = ControlTree::compute_with_report(&cfg);
     check(&cfg, &tree, &report, "orphan in a known extent");
     assert_eq!(owned_blocks(&cfg), [b[0], b[1], b[2], b[3], b[5]]);
-    assert!(report.swept_blocks.contains(&b[5]), "{report:?}");
+    // The extent is the handler's own code, so the block lands inside it.
+    assert!(report.swept_blocks.is_empty(), "{report:?}");
+    assert_eq!(
+        pseudocode(&cfg, &tree),
+        "b0\ntry {\n    b1\n} catch {\n    b3\n    b5\n}\nb2\n"
+    );
 }
 
 #[test]

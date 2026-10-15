@@ -249,16 +249,42 @@ impl<I, E> Structurer<'_, I, E> {
         allowed_blocks: Option<&BTreeSet<BlockId>>,
         continuation: Option<BlockId>,
     ) -> (Vec<CatchHandler>, Vec<ControlNode>) {
+        let cfg = self.cfg;
         let mut handlers = Vec::new();
         let mut finally_nodes = Vec::new();
         for ((index, handler), handler_blocks) in
             region.handlers.iter().enumerate().zip(handler_bodies)
         {
             // A synthetic landing entry belongs to its handler even when the
-            // enclosing bound does not name it.
+            // enclosing bound does not name it. So do the extent blocks the
+            // entry cannot reach: they are the handler's own dead code, and
+            // only a block that feeds an enclosing loop is in that loop's
+            // bound.
             let mut handler_bound = intersect_bounds(allowed_blocks, handler_blocks);
             handler_bound.insert(handler.entry);
-            let nodes = self.lift_region(handler.entry, Some(&handler_bound), continuation);
+            handler_bound.extend(
+                handler_blocks
+                    .iter()
+                    .copied()
+                    .filter(|block| !self.reachable[block.index()]),
+            );
+            let mut nodes = self.lift_region(handler.entry, Some(&handler_bound), continuation);
+            // The walk ends where the pad's flow splits without a branch (a
+            // suspension with an exit and a resume edge). The rest of the
+            // extent that the entry cannot reach follows in flow order; a
+            // reachable block waits for the sweep that always emitted it, and
+            // a pad of a nested region waits for that region.
+            let owned =
+                handler_blocks_in_order(cfg, handler, &|block| self.instruction_count(block) > 0);
+            for block in owned {
+                if handler_blocks.contains(&block)
+                    && !self.reachable[block.index()]
+                    && !self.is_visited(block)
+                    && !self.awaits_its_handler(region, block)
+                {
+                    nodes.extend(self.lift_region(block, Some(&handler_bound), continuation));
+                }
+            }
             if handler.kind == HandlerKind::Finally {
                 // Multiple finally handlers concatenate in declaration order.
                 finally_nodes.extend(nodes);
@@ -272,5 +298,22 @@ impl<I, E> Structurer<'_, I, E> {
             }
         }
         (handlers, finally_nodes)
+    }
+
+    /// Whether `block` is a pad, or in the extent, of a handler of a region
+    /// other than `region` that the walk has not structured yet. That region
+    /// lifts the block when it reaches the region's anchor.
+    fn awaits_its_handler(&self, region: &Region, block: BlockId) -> bool {
+        self.cfg.regions().iter().any(|other| {
+            other.id != region.id
+                && !self.structured_regions.contains(&other.id.0)
+                && other.handlers.iter().any(|handler| {
+                    handler.entry == block
+                        || handler
+                            .body
+                            .blocks()
+                            .is_some_and(|blocks| blocks.contains(&block))
+                })
+        })
     }
 }
