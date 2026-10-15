@@ -475,9 +475,12 @@ ir::rtl::FunctionView<D>  (RootedView + blocks of instruction records)
 
 ir::mlil::Dialect         (Op, Type, Edge)
 ir::mlil::FunctionView<D> (RootedView + blocks of flat SSA instructions)
+
+ir::hlil::Dialect         (Op, Constant, Type, Variable)
+ir::hlil::FunctionView<D> (read-only statement and expression trees)
 ```
 
-The `ir` traits follow the same rule. The consumer implements `ir::rtl::FunctionView` or `ir::mlil::FunctionView` on its own dense storage. Both are `RootedView`s, so the graph algorithms, such as `DominatorTree::compute`, run on them directly.
+The `ir` traits follow the same rule. The consumer implements `ir::rtl::FunctionView`, `ir::mlil::FunctionView`, or `ir::hlil::FunctionView` on its own dense storage. The RTL and MLIL views are `RootedView`s, so the graph algorithms, such as `DominatorTree::compute`, run on them directly. The HLIL view is a pair of trees, not a graph.
 
 `MemoryEventInfo` is the single instruction-side source of truth for memory.
 Directional `MemoryAccess::read`, `write`, and `read_modify_write`

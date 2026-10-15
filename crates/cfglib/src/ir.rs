@@ -15,14 +15,15 @@
 //!   form with block parameters, read through
 //!   [`FunctionView`](mlil::FunctionView). Value analyses over it belong to the
 //!   consumer.
-//! - `hlil` is the structured level: statement and expression trees read
-//!   through a view, built through a write-only builder trait that the consumer
-//!   implements, and produced from or lowered to a flat variable-based
-//!   function by generic algorithms.
+//! - [`hlil`] is the structured level: statement and expression trees read
+//!   through a [`FunctionView`](hlil::FunctionView). Generic algorithms
+//!   verify, print, and analyze such a function, and the consumer builds and
+//!   stores it.
 //!
 //! The generic algorithms of this crate read through these views and report
 //! facts. An algorithm never edits the function it reads, and the consumer
 //! applies every change.
 
+pub mod hlil;
 pub mod mlil;
 pub mod rtl;
