@@ -4,7 +4,7 @@
 //! dialects. The dialects represent every vocabulary differently, so a body
 //! that passes on both cannot depend on one representation.
 
-use crate::ir::hlil::{Pseudocode, VerifyDialect};
+use crate::ir::hlil::{FunctionBuilder, Pseudocode, RecoverDialect, VerifyDialect};
 
 use super::storage::{ExprId, StmtId, ToyHlilBuilder, VarId};
 
@@ -18,6 +18,10 @@ pub(crate) enum Prim {
     Call,
     Acquire,
     Release,
+    Caught,
+    Throw,
+    /// An operation whose source spelling expands into multiple statements.
+    Expanded,
 }
 
 /// The value types that the shared test bodies use.
@@ -29,7 +33,7 @@ pub(crate) enum Ty {
 }
 
 /// A toy dialect that the shared test bodies run over.
-pub(crate) trait Kit: VerifyDialect + Pseudocode {
+pub(crate) trait Kit: VerifyDialect + Pseudocode + RecoverDialect {
     /// The type that a test names by `ty`.
     fn ty(ty: Ty) -> Self::Type;
 

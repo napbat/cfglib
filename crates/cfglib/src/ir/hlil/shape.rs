@@ -1,9 +1,10 @@
 //! The borrowed shapes of structured statements and expressions.
 //!
 //! A [`FunctionView`](super::FunctionView) lends these types out of the
-//! consumer's storage. Every slice inside them is flat, so a consumer keeps
-//! its operands and bodies in dense pools and lends them back without
-//! rebuilding them.
+//! consumer's storage, and the [`FunctionBuilder`](super::FunctionBuilder)
+//! takes the same parts as input. Every slice inside them is flat, so a
+//! consumer keeps its operands and bodies in dense pools and lends them back
+//! without rebuilding them.
 
 use super::dialect::Dialect;
 

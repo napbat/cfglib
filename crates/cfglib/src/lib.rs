@@ -42,10 +42,12 @@
 //! records. [`ir::mlil`] is the read-only view contract of a flat static
 //! single assignment function with block parameters; value analyses over it
 //! belong to the consumer. [`ir::hlil`] is the structured contract: a
-//! read-only [`ir::hlil::FunctionView`] of statement and expression trees,
-//! with verification, pseudocode, and declaration placement over it. Every IR
-//! storage, builder implementation, and editing machinery belongs to the
-//! consumer; the algorithms here read through the views and report facts.
+//! read-only [`ir::hlil::FunctionView`] of statement and expression trees and
+//! a write-only [`ir::hlil::FunctionBuilder`] that the consumer implements,
+//! with verification, pseudocode, declaration placement, and structure
+//! recovery over them. Every IR storage, builder implementation, and editing
+//! machinery belongs to the consumer; the algorithms here read through the
+//! views, drive the builders, and report facts.
 //! [`ControlTree::compute`] structures a [`Cfg`] into `if / else`, loops,
 //! `switch`, `try / catch`, and `goto` form. The tree is a fact about the graph
 //! in the way [`DominatorTree`] is: a flat arena of nodes that name blocks,

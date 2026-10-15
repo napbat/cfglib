@@ -1,7 +1,7 @@
 //! Declaration placement over the toy dialects.
 
-use crate::ir::hlil::VariablePlacements;
 use crate::ir::hlil::tests::{Kit, ToyHlilBuilder, over_toys};
+use crate::ir::hlil::{FunctionBuilder, VariablePlacements};
 
 over_toys!(
     shared_branch_variable_anchors_before_if,

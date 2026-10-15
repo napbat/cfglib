@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 
 use crate::graph::view::DenseId;
 use crate::ir::hlil::{
-    Dialect, ExprShape, FunctionView, Handler, HandlerKind, StmtShape, SwitchArm,
+    Dialect, ExprShape, FunctionBuilder, FunctionView, Handler, HandlerKind, StmtShape, SwitchArm,
     VerificationReport, VerifyDialect, verify,
 };
 
@@ -293,8 +293,10 @@ impl<D: Dialect> FunctionView<D> for ToyHlil<D> {
 /// Builds a [`ToyHlil`] bottom-up and verifies it when it is sealed.
 ///
 /// The builder is write-only. A handle is a plain index, so nothing stops a
-/// test from using one twice or from inventing one; [`finish`](Self::finish)
-/// reports such a function through [`verify`].
+/// test from using one twice or from inventing one; [`finish`] reports such a
+/// function through [`verify`].
+///
+/// [`finish`]: FunctionBuilder::finish
 pub(crate) struct ToyHlilBuilder<D: Dialect> {
     function: ToyHlil<D>,
 }
@@ -329,7 +331,22 @@ impl<D: VerifyDialect> ToyHlilBuilder<D> {
         id
     }
 
-    pub(crate) fn declare_variable(
+    /// Seals the function without verifying it, so a test can hand a
+    /// malformed function to an algorithm.
+    pub(crate) fn finish_unchecked(mut self, body: &[StmtId]) -> ToyHlil<D> {
+        self.function.body = body.to_vec();
+        self.function
+    }
+}
+
+impl<D: VerifyDialect> FunctionBuilder<D> for ToyHlilBuilder<D> {
+    type Stmt = StmtId;
+    type Expr = ExprId;
+    type Var = VarId;
+    type Function = ToyHlil<D>;
+    type Error = VerificationReport;
+
+    fn declare_variable(
         &mut self,
         variable: &D::Variable,
         declared_type: Option<&D::Type>,
@@ -341,20 +358,20 @@ impl<D: VerifyDialect> ToyHlilBuilder<D> {
         id
     }
 
-    pub(crate) fn set_signature(&mut self, parameters: &[VarId], returns: &[D::Type]) {
+    fn set_signature(&mut self, parameters: &[VarId], returns: &[D::Type]) {
         self.function.parameters = parameters.to_vec();
         self.function.returns = returns.to_vec();
     }
 
-    pub(crate) fn read_variable(&mut self, variable: VarId, ty: &D::Type) -> ExprId {
+    fn read_variable(&mut self, variable: VarId, ty: &D::Type) -> ExprId {
         self.push_expr(ExprKind::Variable(variable), ty)
     }
 
-    pub(crate) fn constant(&mut self, constant: &D::Constant, ty: &D::Type) -> ExprId {
+    fn constant(&mut self, constant: &D::Constant, ty: &D::Type) -> ExprId {
         self.push_expr(ExprKind::Constant(constant.clone()), ty)
     }
 
-    pub(crate) fn apply(&mut self, op: &D::Op, operands: &[ExprId], ty: &D::Type) -> ExprId {
+    fn apply(&mut self, op: &D::Op, operands: &[ExprId], ty: &D::Type) -> ExprId {
         let kind = ExprKind::Operation {
             op: op.clone(),
             operands: operands.to_vec(),
@@ -362,20 +379,15 @@ impl<D: VerifyDialect> ToyHlilBuilder<D> {
         self.push_expr(kind, ty)
     }
 
-    pub(crate) fn expression_statement(&mut self, expression: ExprId) -> StmtId {
+    fn expression_statement(&mut self, expression: ExprId) -> StmtId {
         self.push_stmt(StmtNode::Expression(expression))
     }
 
-    pub(crate) fn assign(&mut self, target: ExprId, value: ExprId) -> StmtId {
+    fn assign(&mut self, target: ExprId, value: ExprId) -> StmtId {
         self.push_stmt(StmtNode::Assign { target, value })
     }
 
-    pub(crate) fn if_(
-        &mut self,
-        condition: ExprId,
-        then_body: &[StmtId],
-        else_body: &[StmtId],
-    ) -> StmtId {
+    fn if_(&mut self, condition: ExprId, then_body: &[StmtId], else_body: &[StmtId]) -> StmtId {
         self.push_stmt(StmtNode::If {
             condition,
             then_body: then_body.to_vec(),
@@ -383,27 +395,27 @@ impl<D: VerifyDialect> ToyHlilBuilder<D> {
         })
     }
 
-    pub(crate) fn while_(&mut self, condition: ExprId, body: &[StmtId]) -> StmtId {
+    fn while_(&mut self, condition: ExprId, body: &[StmtId]) -> StmtId {
         self.push_stmt(StmtNode::While {
             condition,
             body: body.to_vec(),
         })
     }
 
-    pub(crate) fn do_while(&mut self, body: &[StmtId], condition: ExprId) -> StmtId {
+    fn do_while(&mut self, body: &[StmtId], condition: ExprId) -> StmtId {
         self.push_stmt(StmtNode::DoWhile {
             body: body.to_vec(),
             condition,
         })
     }
 
-    pub(crate) fn loop_(&mut self, body: &[StmtId]) -> StmtId {
+    fn loop_(&mut self, body: &[StmtId]) -> StmtId {
         self.push_stmt(StmtNode::Loop {
             body: body.to_vec(),
         })
     }
 
-    pub(crate) fn for_(
+    fn for_(
         &mut self,
         initializer: &[StmtId],
         condition: Option<ExprId>,
@@ -418,7 +430,7 @@ impl<D: VerifyDialect> ToyHlilBuilder<D> {
         })
     }
 
-    pub(crate) fn switch(
+    fn switch(
         &mut self,
         scrutinee: ExprId,
         arms: &[SwitchArm<'_, D, StmtId>],
@@ -438,30 +450,30 @@ impl<D: VerifyDialect> ToyHlilBuilder<D> {
         })
     }
 
-    pub(crate) fn break_(&mut self, label: Option<&str>) -> StmtId {
+    fn break_(&mut self, label: Option<&str>) -> StmtId {
         self.push_stmt(StmtNode::Break(label.map(String::from)))
     }
 
-    pub(crate) fn continue_(&mut self, label: Option<&str>) -> StmtId {
+    fn continue_(&mut self, label: Option<&str>) -> StmtId {
         self.push_stmt(StmtNode::Continue(label.map(String::from)))
     }
 
-    pub(crate) fn return_(&mut self, values: &[ExprId]) -> StmtId {
+    fn return_(&mut self, values: &[ExprId]) -> StmtId {
         self.push_stmt(StmtNode::Return(values.to_vec()))
     }
 
-    pub(crate) fn labeled(&mut self, label: &str, body: &[StmtId]) -> StmtId {
+    fn labeled(&mut self, label: &str, body: &[StmtId]) -> StmtId {
         self.push_stmt(StmtNode::Labeled {
             label: label.into(),
             body: body.to_vec(),
         })
     }
 
-    pub(crate) fn goto(&mut self, label: &str) -> StmtId {
+    fn goto(&mut self, label: &str) -> StmtId {
         self.push_stmt(StmtNode::Goto(label.into()))
     }
 
-    pub(crate) fn try_(
+    fn try_(
         &mut self,
         body: &[StmtId],
         handlers: &[Handler<'_, D, StmtId, VarId>],
@@ -490,7 +502,7 @@ impl<D: VerifyDialect> ToyHlilBuilder<D> {
         })
     }
 
-    pub(crate) fn region(&mut self, op: &D::Op, operands: &[ExprId], body: &[StmtId]) -> StmtId {
+    fn region(&mut self, op: &D::Op, operands: &[ExprId], body: &[StmtId]) -> StmtId {
         self.push_stmt(StmtNode::Region {
             op: op.clone(),
             operands: operands.to_vec(),
@@ -498,11 +510,11 @@ impl<D: VerifyDialect> ToyHlilBuilder<D> {
         })
     }
 
-    pub(crate) fn finish(mut self, body: &[StmtId]) -> Result<ToyHlil<D>, VerificationReport> {
-        self.function.body = body.to_vec();
-        let report = verify::<D, _>(&self.function);
+    fn finish(self, body: &[StmtId]) -> Result<ToyHlil<D>, VerificationReport> {
+        let function = self.finish_unchecked(body);
+        let report = verify::<D, _>(&function);
         if report.is_ok() {
-            Ok(self.function)
+            Ok(function)
         } else {
             Err(report)
         }

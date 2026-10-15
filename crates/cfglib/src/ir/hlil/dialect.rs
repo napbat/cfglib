@@ -57,6 +57,79 @@ pub trait VerifyDialect: Dialect {
     fn verify<F: FunctionView<Self>>(function: &F, issues: &mut Vec<VerificationIssue>);
 }
 
+/// The hooks that steer structure recovery.
+///
+/// Binary and bytecode frontends encode source constructs as flatter shapes: a
+/// counted loop arrives as `init; while (c) { ...; update }`, a conditional
+/// expression as an assigning diamond, and a language region protocol
+/// (`synchronized`, `lock`) as paired enter and exit operations with an
+/// exceptional cleanup handler.
+/// [`recover_structure`](super::recover_structure) restores those shapes.
+///
+/// Every hook defaults to "not claimed", so a dialect opts into each recovery
+/// independently.
+pub trait RecoverDialect: Dialect {
+    /// The operation that selects between two values by a condition, applied
+    /// as `select(condition, when_true, when_false)` with exactly one arm
+    /// evaluated. `None` disables conditional-expression recovery.
+    #[must_use]
+    fn select() -> Option<Self::Op> {
+        None
+    }
+
+    /// Whether an assignment that produces a value of this type is one plain
+    /// expression in the source language of the dialect, so that it can be a
+    /// `for` initializer, a `for` update, or a selection arm. A type that
+    /// expands to several statements (a dual-view zero pattern) returns
+    /// `false`.
+    #[must_use]
+    fn single_expression_assignment(value_type: &Self::Type) -> bool {
+        let _ = value_type;
+        true
+    }
+
+    /// Whether `op` has one expression spelling. Returns `false` for an
+    /// operation that a renderer must expand into several statements.
+    /// Recovery checks every operation in the value tree of an assignment and
+    /// leaves the assignment out of `for` clauses and selections if any
+    /// operation is not expression-like.
+    #[must_use]
+    fn single_expression_operation(op: &Self::Op) -> bool {
+        let _ = op;
+        true
+    }
+
+    /// The [`Region`](super::StmtShape::Region) operation that recovers one
+    /// paired enter and exit protocol, given its enter operation. `None`
+    /// leaves the enter operation as an ordinary statement.
+    #[must_use]
+    fn region_enter(op: &Self::Op) -> Option<Self::Op> {
+        let _ = op;
+        None
+    }
+
+    /// Whether `exit` releases what `enter` acquired.
+    #[must_use]
+    fn releases(enter: &Self::Op, exit: &Self::Op) -> bool {
+        let _ = (enter, exit);
+        false
+    }
+
+    /// Whether `op` materializes the delivered exception inside a handler.
+    #[must_use]
+    fn is_exception_materialization(op: &Self::Op) -> bool {
+        let _ = op;
+        false
+    }
+
+    /// Whether `op` throws its operand.
+    #[must_use]
+    fn is_throw(op: &Self::Op) -> bool {
+        let _ = op;
+        false
+    }
+}
+
 /// The spelling hooks of the built-in pseudocode writer.
 pub trait Pseudocode: Dialect {
     /// Returns the compact stable mnemonic of an operation.

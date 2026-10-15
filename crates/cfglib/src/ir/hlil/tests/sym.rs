@@ -14,7 +14,7 @@ use core::fmt;
 
 use crate::graph::view::DenseId;
 use crate::ir::hlil::{
-    Dialect, ExprShape, FunctionView, Pseudocode, VerificationIssue, VerifyDialect,
+    Dialect, ExprShape, FunctionView, Pseudocode, RecoverDialect, VerificationIssue, VerifyDialect,
 };
 
 use super::kit::{Kit, Prim, Ty};
@@ -55,6 +55,32 @@ impl VerifyDialect for Sym {
     }
 }
 
+impl RecoverDialect for Sym {
+    fn select() -> Option<&'static str> {
+        Some("select")
+    }
+
+    fn single_expression_operation(op: &&'static str) -> bool {
+        *op != "expanded"
+    }
+
+    fn region_enter(op: &&'static str) -> Option<&'static str> {
+        (*op == "acquire").then_some("acquire")
+    }
+
+    fn releases(enter: &&'static str, exit: &&'static str) -> bool {
+        *enter == "acquire" && *exit == "release"
+    }
+
+    fn is_exception_materialization(op: &&'static str) -> bool {
+        *op == "caught"
+    }
+
+    fn is_throw(op: &&'static str) -> bool {
+        *op == "throw"
+    }
+}
+
 impl Kit for Sym {
     fn ty(_: Ty) {}
 
@@ -74,6 +100,9 @@ impl Kit for Sym {
             Prim::Call => "call",
             Prim::Acquire => "acquire",
             Prim::Release => "release",
+            Prim::Caught => "caught",
+            Prim::Throw => "throw",
+            Prim::Expanded => "expanded",
         }
     }
 }

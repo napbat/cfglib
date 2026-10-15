@@ -3,7 +3,9 @@
 //! Operations are a closed enum, constants are `i64`, types are a three-case
 //! enum, and the metadata of a variable is a bare number. Its verification
 //! hook checks the operand types of a comparison, which reads the operand
-//! expressions through the view.
+//! expressions through the view. Its recovery hooks claim selection through
+//! `select`, the `acquire` and `release` protocol, and a boolean target is
+//! not a single-expression assignment.
 
 extern crate alloc;
 
@@ -12,7 +14,7 @@ use alloc::vec::Vec;
 
 use crate::graph::view::DenseId;
 use crate::ir::hlil::{
-    Dialect, ExprShape, FunctionView, Pseudocode, VerificationIssue, VerifyDialect,
+    Dialect, ExprShape, FunctionView, Pseudocode, RecoverDialect, VerificationIssue, VerifyDialect,
 };
 
 use super::kit::{Kit, Prim, Ty};
@@ -36,8 +38,12 @@ pub(crate) enum ImpOp {
     LessThan,
     Not,
     Call,
+    Select,
     Acquire,
     Release,
+    Caught,
+    Throw,
+    Expanded,
 }
 
 impl Dialect for Imp {
@@ -54,8 +60,12 @@ impl Pseudocode for Imp {
             ImpOp::LessThan => "lt",
             ImpOp::Not => "not",
             ImpOp::Call => "call",
+            ImpOp::Select => "select",
             ImpOp::Acquire => "acquire",
             ImpOp::Release => "release",
+            ImpOp::Caught => "caught",
+            ImpOp::Throw => "throw",
+            ImpOp::Expanded => "expanded",
         }
     }
 }
@@ -84,6 +94,36 @@ impl VerifyDialect for Imp {
     }
 }
 
+impl RecoverDialect for Imp {
+    fn select() -> Option<ImpOp> {
+        Some(ImpOp::Select)
+    }
+
+    fn single_expression_assignment(value_type: &ImpType) -> bool {
+        *value_type != ImpType::Boolean
+    }
+
+    fn single_expression_operation(op: &ImpOp) -> bool {
+        *op != ImpOp::Expanded
+    }
+
+    fn region_enter(op: &ImpOp) -> Option<ImpOp> {
+        (*op == ImpOp::Acquire).then_some(ImpOp::Acquire)
+    }
+
+    fn releases(enter: &ImpOp, exit: &ImpOp) -> bool {
+        *enter == ImpOp::Acquire && *exit == ImpOp::Release
+    }
+
+    fn is_exception_materialization(op: &ImpOp) -> bool {
+        *op == ImpOp::Caught
+    }
+
+    fn is_throw(op: &ImpOp) -> bool {
+        *op == ImpOp::Throw
+    }
+}
+
 impl Kit for Imp {
     fn ty(ty: Ty) -> ImpType {
         match ty {
@@ -109,6 +149,9 @@ impl Kit for Imp {
             Prim::Call => ImpOp::Call,
             Prim::Acquire => ImpOp::Acquire,
             Prim::Release => ImpOp::Release,
+            Prim::Caught => ImpOp::Caught,
+            Prim::Throw => ImpOp::Throw,
+            Prim::Expanded => ImpOp::Expanded,
         }
     }
 }

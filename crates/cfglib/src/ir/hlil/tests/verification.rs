@@ -6,7 +6,9 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use crate::graph::view::DenseId;
-use crate::ir::hlil::{Handler, HandlerKind, SwitchArm, VerificationReport, verify};
+use crate::ir::hlil::{
+    FunctionBuilder, Handler, HandlerKind, SwitchArm, VerificationReport, verify,
+};
 
 use super::{ExprId, Imp, Kit, Prim, StmtId, Sym, ToyHlilBuilder, Ty, VarId};
 

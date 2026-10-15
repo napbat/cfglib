@@ -55,7 +55,9 @@ pub enum ChildBodyKind {
 ///   compound statement that lists the body. The order among the siblings of
 ///   one body is free.
 /// - Every index below a `*_count` is live. The view has no removed slots: a
-///   rewrite builds a new function instead of editing this one.
+///   rewrite builds a new function through a
+///   [`FunctionBuilder`](super::FunctionBuilder) instead of editing this one,
+///   as [`recover_structure`](super::recover_structure) does.
 /// - A handle that a view yields is below its count. The methods of the view
 ///   panic or return unspecified data for a handle outside the function, as an
 ///   index into a pool does; [`verify`](fn@super::verify) is the check that a

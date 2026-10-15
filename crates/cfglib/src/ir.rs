@@ -16,9 +16,10 @@
 //!   [`FunctionView`](mlil::FunctionView). Value analyses over it belong to the
 //!   consumer.
 //! - [`hlil`] is the structured level: statement and expression trees read
-//!   through a [`FunctionView`](hlil::FunctionView). Generic algorithms
-//!   verify, print, and analyze such a function, and the consumer builds and
-//!   stores it.
+//!   through a [`FunctionView`](hlil::FunctionView) and built through a
+//!   write-only [`FunctionBuilder`](hlil::FunctionBuilder) that the consumer
+//!   implements. Generic algorithms verify, print, analyze, and rebuild such a
+//!   function, and the consumer stores it.
 //!
 //! The generic algorithms of this crate read through these views and report
 //! facts. An algorithm never edits the function it reads, and the consumer

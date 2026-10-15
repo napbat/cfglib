@@ -5,9 +5,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::ir::hlil::{
-    ChildBodyKind, FunctionView, Handler, HandlerKind, SwitchArm, compound_assignment,
-    expressions_equal, for_each_child_body, for_each_statement_expression, visit_expression_tree,
-    visit_statements,
+    ChildBodyKind, FunctionBuilder, FunctionView, Handler, HandlerKind, SwitchArm,
+    compound_assignment, expressions_equal, for_each_child_body, for_each_statement_expression,
+    visit_expression_tree, visit_statements,
 };
 
 use super::{Kit, Prim, StmtId, ToyHlil, ToyHlilBuilder, Ty};
