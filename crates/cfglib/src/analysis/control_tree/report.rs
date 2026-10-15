@@ -39,8 +39,9 @@ pub struct LiftReport {
     /// Every emitted goto in emission order.
     pub gotos: Vec<GotoDiagnostic>,
     /// Blocks emitted by the completeness sweep rather than the structured
-    /// walk (goto targets, handler pads reached only through exception
-    /// edges, unreachable code).
+    /// walk: goto targets, handler pads reached only through exception edges,
+    /// and code only a region claims, such as a dead pad's tail or a filter
+    /// funclet.
     pub swept_blocks: Vec<BlockId>,
     /// Regions left as ordinary control flow because a handler extent was
     /// unknown or the region was shadowed by an enclosing structured region

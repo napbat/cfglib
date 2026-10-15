@@ -253,9 +253,9 @@ pub enum LoopKind {
 
 /// A single non-finally handler arm inside a [`ControlNode::TryCatch`].
 ///
-/// The historical name is retained for compatibility; [`Self::kind`]
-/// distinguishes catch, catch-all, fault, and filter arms. Consumer handler
-/// metadata (catch types, filter predicates, ordering) stays in
+/// [`Self::kind`] distinguishes catch, catch-all, fault, and filter arms.
+/// Finally handlers have no arm: their bodies are joined into
+/// [`ControlNode::TryCatch::finally_body`]. Consumer handler metadata (catch types, filter predicates, ordering) stays in
 /// consumer-keyed side tables such as
 /// [`HandlerMetadata`](crate::HandlerMetadata), addressed by
 /// [`Self::handler`].

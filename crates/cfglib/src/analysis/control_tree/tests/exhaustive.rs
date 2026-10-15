@@ -10,15 +10,16 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use super::invariants::check;
+use crate::ControlTree;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
 use crate::test_util::{DfInst, df_ff, df_pred};
-use crate::{ControlNode, ControlTree, LiftReport};
 
 /// How one block ends.
 #[derive(Clone, Copy, Debug)]
-enum Terminator {
+pub(super) enum Terminator {
     Exit,
     One(usize, EdgeKind),
     Branch(usize, usize),
@@ -44,7 +45,7 @@ impl Terminator {
 }
 
 /// Every terminator over `count` blocks, switches included on request.
-fn terminators(count: usize, kinds: &[EdgeKind], switches: bool) -> Vec<Terminator> {
+pub(super) fn terminators(count: usize, kinds: &[EdgeKind], switches: bool) -> Vec<Terminator> {
     let mut all = vec![Terminator::Exit];
     for target in 0..count {
         all.extend(kinds.iter().map(|&kind| Terminator::One(target, kind)));
@@ -71,7 +72,7 @@ fn terminators(count: usize, kinds: &[EdgeKind], switches: bool) -> Vec<Terminat
 
 /// The graph of `terminators`, block `b` holding `instructions[b]` instructions
 /// under `predicate`.
-fn graph(
+pub(super) fn graph(
     terminators: &[Terminator],
     instructions: &[usize],
     predicate: fn(usize, usize) -> Option<(u16, bool)>,
@@ -97,7 +98,7 @@ fn graph(
     cfg
 }
 
-fn unpredicated(_: usize, _: usize) -> Option<(u16, bool)> {
+pub(super) fn unpredicated(_: usize, _: usize) -> Option<(u16, bool)> {
     None
 }
 
@@ -106,70 +107,13 @@ fn alternating(block: usize, index: usize) -> Option<(u16, bool)> {
     (block % 2 == 1).then_some((1, index == 0))
 }
 
-fn reachable(cfg: &Cfg<DfInst>) -> Vec<BlockId> {
-    cfg.reverse_postorder()
-}
-
-/// Check the invariants of one graph's tree and report.
-fn check(cfg: &Cfg<DfInst>, tree: &ControlTree, report: &LiftReport, context: &str) {
-    // Every node is reachable from the root exactly once.
-    assert_eq!(tree.preorder().count(), tree.node_count(), "{context}");
-
-    // The instructions of every reachable block appear exactly once, and no
-    // other instruction appears.
-    let mut seen = Vec::new();
-    tree.for_each_instruction(cfg, |point, _| seen.push((point.block, point.inst_idx)));
-    seen.sort_unstable();
-    let mut expected: Vec<(BlockId, usize)> = reachable(cfg)
-        .into_iter()
-        .flat_map(|block| {
-            (0..cfg.block(block).instructions().len()).map(move |index| (block, index))
-        })
-        .collect();
-    expected.sort_unstable();
-    assert_eq!(seen, expected, "coverage of {context}");
-
-    // Gotos are exactly the reported ones.
-    let mut gotos: Vec<BlockId> = tree
-        .preorder()
-        .filter_map(|id| match *tree.node(id) {
-            ControlNode::Goto { target } => Some(target),
-            _ => None,
-        })
-        .collect();
-    gotos.sort_unstable();
-    let mut reported: Vec<BlockId> = report.gotos.iter().map(|goto| goto.target).collect();
-    reported.sort_unstable();
-    assert_eq!(gotos, reported, "gotos of {context}");
-
-    // A goto target has a label, or is reported as dangling.
-    let labels: Vec<BlockId> = tree
-        .preorder()
-        .filter_map(|id| match *tree.node(id) {
-            ControlNode::Label { block, .. } => Some(block),
-            _ => None,
-        })
-        .collect();
-    for target in &reported {
-        assert!(
-            labels.contains(target) != report.unresolved_labels.contains(target),
-            "label of goto {target} in {context}"
-        );
-    }
-    for block in &report.swept_blocks {
-        assert!(labels.contains(block), "swept {block} in {context}");
-    }
-    assert_eq!(
-        report.is_fully_structured(),
-        report.gotos.is_empty()
-            && report.unstructured_regions.is_empty()
-            && report.unresolved_labels.is_empty()
-    );
-}
-
 /// Call `visit` with every assignment of a terminator to each of `count`
 /// blocks.
-fn for_each_graph(count: usize, terminators: &[Terminator], mut visit: impl FnMut(&[Terminator])) {
+pub(super) fn for_each_graph(
+    count: usize,
+    terminators: &[Terminator],
+    mut visit: impl FnMut(&[Terminator]),
+) {
     let mut choice = vec![0_usize; count];
     loop {
         let picked: Vec<Terminator> = choice.iter().map(|&i| terminators[i]).collect();

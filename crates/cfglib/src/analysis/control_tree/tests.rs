@@ -21,8 +21,10 @@ use crate::edge::EdgeKind;
 use crate::flow::FlowEffect;
 use crate::test_util::{MockInst, ff};
 
+mod dead_handlers;
 mod exhaustive;
 mod exit_free;
+mod invariants;
 mod predicated;
 mod regions;
 mod traversal;

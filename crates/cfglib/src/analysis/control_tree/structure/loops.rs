@@ -69,7 +69,12 @@ enum LoopShape {
 /// runs each link exactly once (one flow successor, and past the header one
 /// flow predecessor), so a loop-exiting conditional at the end makes the
 /// whole chain the pre-test.
-fn while_chain<I, E>(cfg: &Cfg<I, E>, natural: &NaturalLoop, header: BlockId) -> Option<LoopShape> {
+fn while_chain<I, E>(
+    cfg: &Cfg<I, E>,
+    natural: &NaturalLoop,
+    header: BlockId,
+    visited: &[bool],
+) -> Option<LoopShape> {
     let mut chain = alloc::vec![header];
     let mut current = header;
     loop {
@@ -110,7 +115,13 @@ fn while_chain<I, E>(cfg: &Cfg<I, E>, natural: &NaturalLoop, header: BlockId) ->
             return None;
         };
         let next = *next;
-        if next == header || !natural.body.contains(&next) || chain.contains(&next) {
+        if next == header
+            || !natural.body.contains(&next)
+            || chain.contains(&next)
+            || visited[next.index()]
+        {
+            // A link already emitted elsewhere would be emitted again as
+            // part of the condition.
             return None;
         }
         let sequential_predecessors = cfg
@@ -125,8 +136,13 @@ fn while_chain<I, E>(cfg: &Cfg<I, E>, natural: &NaturalLoop, header: BlockId) ->
     }
 }
 
-fn classify_loop<I, E>(cfg: &Cfg<I, E>, natural: &NaturalLoop, header: BlockId) -> LoopShape {
-    if let Some(shape) = while_chain(cfg, natural, header) {
+fn classify_loop<I, E>(
+    cfg: &Cfg<I, E>,
+    natural: &NaturalLoop,
+    header: BlockId,
+    visited: &[bool],
+) -> LoopShape {
+    if let Some(shape) = while_chain(cfg, natural, header, visited) {
         return shape;
     }
     if natural.latches.len() == 1 {
@@ -136,6 +152,7 @@ fn classify_loop<I, E>(cfg: &Cfg<I, E>, natural: &NaturalLoop, header: BlockId) 
             .next()
             .expect("a one-element set has a first element");
         if latch != header
+            && !visited[latch.index()]
             && let Some(targets) = conditional_targets(cfg, latch)
         {
             let true_back = targets.true_target == header;
@@ -165,10 +182,14 @@ fn classify_loop<I, E>(cfg: &Cfg<I, E>, natural: &NaturalLoop, header: BlockId) 
 fn endless_follow<I, E>(
     cfg: &Cfg<I, E>,
     natural: &NaturalLoop,
+    reachable: &[bool],
     allowed_blocks: Option<&BTreeSet<BlockId>>,
 ) -> Option<BlockId> {
     let mut fallback = None;
-    for &block in &natural.body {
+    // The body walk also collects dead code that feeds the loop. Such a block
+    // is still the loop's to lift, but an exit only it takes is no exit of a
+    // loop the entry runs.
+    for &block in natural.body.iter().filter(|block| reachable[block.index()]) {
         for eid in cfg.outgoing(block) {
             let edge = cfg.edge(eid);
             let sequential = matches!(
@@ -220,13 +241,16 @@ impl<I, E> Structurer<'_, I, E> {
             Some(allowed) => natural.body.intersection(allowed).copied().collect(),
         };
 
-        let shape = classify_loop(cfg, natural, header);
+        let shape = classify_loop(cfg, natural, header, &self.visited);
         let (follow, continue_target) = match &shape {
             LoopShape::While { exit, .. } | LoopShape::SelfLoop { exit, .. } => {
                 (Some(*exit), header)
             }
             LoopShape::DoWhile { latch, exit, .. } => (Some(*exit), *latch),
-            LoopShape::Endless => (endless_follow(cfg, natural, allowed_blocks), header),
+            LoopShape::Endless => (
+                endless_follow(cfg, natural, &self.reachable, allowed_blocks),
+                header,
+            ),
         };
 
         // A multi-block condition chain belongs to the loop's test, not its

@@ -49,20 +49,23 @@ pub(super) fn region_anchors<'c, I, E>(
     anchors
 }
 
-/// Handler entries and filter funclets: sweep roots that can carry code
-/// without any incoming CFG edge.
+/// The blocks a region claims: its protected blocks, and each handler's entry,
+/// filter funclet, and known extent. They are sweep roots because they can
+/// carry code without any incoming CFG edge — a funclet is invoked by the
+/// runtime, and a handler pad is dead when no call unwinds into it.
 pub(super) fn metadata_roots<I, E>(cfg: &Cfg<I, E>) -> Vec<BlockId> {
-    cfg.regions()
-        .iter()
-        .flat_map(|region| region.handlers.iter())
-        .flat_map(|handler| {
-            let filter = match handler.kind {
-                HandlerKind::Filter { filter_block } => Some(filter_block),
-                _ => None,
-            };
-            core::iter::once(handler.entry).chain(filter)
-        })
-        .collect()
+    let mut roots = Vec::new();
+    for region in cfg.regions() {
+        roots.extend(region.protected_blocks.iter().copied());
+        for handler in &region.handlers {
+            roots.push(handler.entry);
+            if let HandlerKind::Filter { filter_block } = handler.kind {
+                roots.push(filter_block);
+            }
+            roots.extend(handler.body.blocks().into_iter().flatten().copied());
+        }
+    }
+    roots
 }
 
 /// The complete handler extents of `region`, or `None` when any handler's

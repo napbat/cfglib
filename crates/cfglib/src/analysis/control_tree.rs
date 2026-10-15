@@ -30,7 +30,8 @@
 //! lists exactly which transfers fell back to a `Goto` ([`GotoDiagnostic`],
 //! [`GotoReason`]), which blocks only the completeness sweep reached, which
 //! exception regions stayed ordinary flow, and which goto labels found no
-//! anchor. No reachable code is dropped.
+//! anchor. No owned code is dropped: the tree holds the blocks the entry
+//! reaches and the blocks a region claims, a dead catch pad among them.
 //!
 //! # Variants
 //!
