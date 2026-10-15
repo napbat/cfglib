@@ -7,7 +7,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use crate::graph::dominator::DominatorTree;
+use crate::graph::dominator::{PostDominatorTree, PostNode};
 use crate::graph::epoch::EpochMarks;
 use crate::graph::store::Graph;
 use crate::graph::view::{DenseId, GraphView};
@@ -24,7 +24,7 @@ use crate::graph::view::{DenseId, GraphView};
 ///
 /// ```
 /// use cfglib::{
-///     Cfg, DominatorTree, EdgeKind, NodeId, control_dependence_graph,
+///     Cfg, EdgeKind, NodeId, PostDominatorTree, control_dependence_graph,
 /// };
 ///
 /// let mut cfg = Cfg::<u32>::new();
@@ -37,7 +37,7 @@ use crate::graph::view::{DenseId, GraphView};
 /// cfg.add_edge(left, merge, EdgeKind::Fallthrough);
 /// cfg.add_edge(right, merge, EdgeKind::Fallthrough);
 ///
-/// let post_dominators = DominatorTree::compute_post(&cfg);
+/// let post_dominators = PostDominatorTree::compute(&cfg);
 /// let dependences = control_dependence_graph(&cfg, &post_dominators);
 /// let branch_node = NodeId::from_index(branch.index());
 /// let controlled: Vec<_> = dependences
@@ -50,14 +50,13 @@ use crate::graph::view::{DenseId, GraphView};
 #[must_use]
 pub fn control_dependence_graph<G: GraphView>(
     source: &G,
-    post_dominators: &DominatorTree<G::NodeId>,
+    post_dominators: &PostDominatorTree<G::NodeId>,
 ) -> Graph<G::NodeId, ()> {
     let mut graph = Graph::with_capacity(source.node_bound(), source.node_bound());
     let nodes: Vec<_> = (0..source.node_bound())
         .map(G::NodeId::from_index)
         .map(|node| graph.add_node(node))
         .collect();
-    let post_dominator_depths = post_dominators.analysis_depths();
     let mut seen_dependents = EpochMarks::new(source.node_bound());
     let mut dependents = Vec::new();
     let mut controllers: Vec<_> = source.node_ids().collect();
@@ -66,37 +65,37 @@ pub fn control_dependence_graph<G: GraphView>(
     controllers.sort_unstable();
 
     for controller in controllers {
-        // Control dependence is defined through post-dominance; a node the
-        // post-dominator computation never reached (it cannot reach any
-        // exit) has NO post-dominance facts, and emitting its edges would
-        // fabricate "A selects whether B executes" claims for straight-line
-        // code in exit-unreachable regions.
-        if !post_dominators.is_reachable(controller) {
+        // Control dependence is defined through post-dominance, and a block
+        // the entry cannot reach has no post-dominance facts. Emitting its
+        // edges would fabricate "A selects whether B executes" claims for
+        // code that never runs. Every reachable block has facts, because the
+        // tree gives each exit-free region a cut.
+        if !post_dominators.contains(controller) {
             continue;
         }
         seen_dependents.reset();
         dependents.clear();
         for target in source.successors(controller) {
-            if !post_dominators.is_reachable(target) {
+            if !post_dominators.contains(target) {
                 continue;
             }
-            if post_dominators.dominates_with_analysis_depths(
-                target,
-                controller,
-                &post_dominator_depths,
-            ) {
+            if post_dominators.post_dominates(target, controller) {
                 continue;
             }
 
-            let immediate_post_dominator = post_dominators.idom(controller);
+            let immediate_post_dominator = post_dominators.ipdom(controller);
             let mut dependent = target;
             loop {
                 if !seen_dependents.is_marked(dependent.index()) {
                     seen_dependents.mark(dependent.index());
                     dependents.push(dependent);
                 }
-                match post_dominators.idom(dependent) {
-                    Some(next) if Some(next) != immediate_post_dominator => dependent = next,
+                match post_dominators.ipdom(dependent) {
+                    Some(next @ PostNode::Node(parent))
+                        if Some(next) != immediate_post_dominator =>
+                    {
+                        dependent = parent;
+                    }
                     _ => break,
                 }
             }
@@ -116,6 +115,7 @@ mod tests {
     use crate::cfg::Cfg;
     use crate::edge::EdgeKind;
     use crate::graph::store::NodeId;
+    use crate::graph::view::Rooted;
     use crate::test_util::ff;
     use alloc::collections::BTreeSet;
     use alloc::vec;
@@ -211,7 +211,7 @@ mod tests {
         cfg.add_edge(left, merge, EdgeKind::Fallthrough);
         cfg.add_edge(right, merge, EdgeKind::Fallthrough);
 
-        let post_dominators = DominatorTree::compute_post(&cfg);
+        let post_dominators = PostDominatorTree::compute(&cfg);
         let graph = control_dependence_graph(&cfg, &post_dominators);
         let controlled: BTreeSet<_> = graph
             .successors(node(cfg.entry()))
@@ -223,23 +223,49 @@ mod tests {
     }
 
     #[test]
-    fn exit_unreachable_regions_emit_no_dependences() {
-        // With no exits, no node has post-dominance facts; straight-line
-        // edges must not become fabricated control dependences.
-        use crate::graph::store::Graph;
-        let mut graph: Graph<(), ()> = Graph::new();
-        let a = graph.add_node(());
-        let b = graph.add_node(());
-        graph.add_edge(a, b, ());
+    fn blocks_the_entry_cannot_reach_emit_no_dependences() {
+        // `island` never runs, so its branch must not become a fabricated
+        // control dependence of the live blocks it names.
+        let mut cfg: Cfg<()> = Cfg::new();
+        let live = cfg.new_block();
+        let tail = cfg.new_block();
+        let island = cfg.new_block();
+        cfg.add_edge(cfg.entry(), live, EdgeKind::Fallthrough);
+        cfg.add_edge(live, tail, EdgeKind::Fallthrough);
+        cfg.add_edge(island, live, EdgeKind::ConditionalTrue);
+        cfg.add_edge(island, tail, EdgeKind::ConditionalFalse);
 
-        let post = DominatorTree::compute_post_from(&graph, &[]);
-        let cdg = control_dependence_graph(&graph, &post);
+        let post = PostDominatorTree::compute(&cfg);
+        assert!(!post.contains(island));
+        let cdg = control_dependence_graph(&cfg, &post);
         assert_eq!(cdg.edge_count(), 0);
     }
 
     #[test]
+    fn a_branch_into_an_exit_free_loop_still_controls_both_arms() {
+        // Without a cut the spinning arm has no post-dominance facts, so the
+        // branch would control nothing and a dead-code pass would delete it.
+        let mut cfg: Cfg<()> = Cfg::new();
+        let spin = cfg.new_block();
+        let out = cfg.new_block();
+        cfg.add_edge(cfg.entry(), spin, EdgeKind::ConditionalTrue);
+        cfg.add_edge(cfg.entry(), out, EdgeKind::ConditionalFalse);
+        cfg.add_edge(spin, spin, EdgeKind::Unconditional);
+
+        let post = PostDominatorTree::compute(&cfg);
+        let graph = control_dependence_graph(&cfg, &post);
+        let controlled: BTreeSet<_> = graph
+            .successors(node(cfg.entry()))
+            .map(|dependent| *graph.node(dependent))
+            .collect();
+
+        assert_eq!(controlled, BTreeSet::from([spin, out]));
+        assert_eq!(graph.edge_count(), 2);
+    }
+
+    #[test]
     fn custom_id_order_retains_global_edge_identity_order() {
-        let post = DominatorTree::compute_post_from(&ReverseOrdGraph, &[ReverseOrdNode(5)]);
+        let post = PostDominatorTree::compute(&Rooted::new(&ReverseOrdGraph, ReverseOrdNode(0)));
         let graph = control_dependence_graph(&ReverseOrdGraph, &post);
         for index in 0..ReverseOrdGraph.node_bound() {
             assert_eq!(
@@ -271,7 +297,7 @@ mod tests {
         cfg.block_mut(next).push(ff("next"));
         cfg.add_edge(cfg.entry(), next, EdgeKind::Fallthrough);
 
-        let post_dominators = DominatorTree::compute_post(&cfg);
+        let post_dominators = PostDominatorTree::compute(&cfg);
         let graph = control_dependence_graph(&cfg, &post_dominators);
 
         assert_eq!(graph.node_bound(), cfg.block_bound());

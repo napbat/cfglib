@@ -173,7 +173,8 @@ fn existing_consumer_graph_can_adopt_algorithms_without_storage_migration() {
 #[test]
 fn widened_algorithms_run_on_rooted_consumer_views() {
     use cfglib::{
-        GraphMetrics, Rooted, control_dependence_graph, detect_loops, detect_patterns, verify_view,
+        GraphMetrics, PostDominatorTree, Rooted, control_dependence_graph, detect_loops,
+        detect_patterns, verify_view,
     };
 
     // A value-flow graph with a diamond and a cycle, in consumer storage.
@@ -212,10 +213,24 @@ fn widened_algorithms_run_on_rooted_consumer_views() {
         cfglib::CfgPattern::Diamond { entry, merge: m, .. } if *entry == seed && *m == merge
     )));
 
-    // Control dependence over the view via post-dominators on the reverse
-    // relation is exercised through the CFG path elsewhere; here we pin that
-    // the CDG builder accepts a plain consumer view with dominators computed
-    // from it.
-    let cdg = control_dependence_graph(&graph, &DominatorTree::compute_from(&graph, seed));
+    // The cycle has no exit, so the post-dominator tree cuts it at the latch.
+    // Control dependence then covers the whole consumer view: the diamond's
+    // branch controls both arms, and the latch controls the loop.
+    let post_dominators = PostDominatorTree::compute(&rooted);
+    assert_eq!(post_dominators.cut_roots(), [feedback]);
+    let cdg = control_dependence_graph(&graph, &post_dominators);
     assert_eq!(cdg.node_count(), graph.node_count());
+    let mut dependences: Vec<_> = cdg
+        .edges()
+        .map(|edge| (*cdg.node(edge.source()), *cdg.node(edge.target())))
+        .collect();
+    dependences.sort_unstable();
+    let mut expected = [
+        (seed, left),
+        (seed, right),
+        (feedback, merge),
+        (feedback, feedback),
+    ];
+    expected.sort_unstable();
+    assert_eq!(dependences, expected);
 }

@@ -1,11 +1,22 @@
 //! Dominator and post-dominator trees over graphs, CFGs, and
 //! consumer-defined views.
 
+extern crate alloc;
 use super::*;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
 use crate::graph::store::{Graph, NodeId};
 use crate::test_util::MockInst;
+use alloc::vec;
+
+mod adversarial;
+mod determinism;
+mod differential;
+mod exhaustive;
+mod forest;
+mod frontier;
+mod post;
+mod support;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct BoundedNode(u8);
@@ -65,7 +76,7 @@ fn single_block_cfg() {
     let dom = DominatorTree::compute(&cfg);
     assert_eq!(dom.idom(cfg.entry()), None);
     assert!(dom.dominates(cfg.entry(), cfg.entry()));
-    assert_eq!(dom.children(cfg.entry()).len(), 0);
+    assert_eq!(dom.children(cfg.entry()).count(), 0);
 }
 
 #[test]
@@ -124,20 +135,20 @@ fn unreachable_block_not_dominated() {
 }
 
 #[test]
-fn depth_computation() {
+fn level_computation() {
     let mut cfg: Cfg<MockInst> = Cfg::new();
     let b1 = cfg.new_block();
     let b2 = cfg.new_block();
     cfg.add_edge(cfg.entry(), b1, EdgeKind::Fallthrough);
     cfg.add_edge(b1, b2, EdgeKind::Fallthrough);
     let dom = DominatorTree::compute(&cfg);
-    assert_eq!(dom.depth(cfg.entry()), Some(0));
-    assert_eq!(dom.depth(b1), Some(1));
-    assert_eq!(dom.depth(b2), Some(2));
+    assert_eq!(dom.level(cfg.entry()), Some(0));
+    assert_eq!(dom.level(b1), Some(1));
+    assert_eq!(dom.level(b2), Some(2));
 }
 
 #[test]
-fn depth_tables_match_queries_when_parents_have_larger_ids() {
+fn levels_and_preorder_follow_the_tree_when_parents_have_larger_ids() {
     let mut graph = Graph::<(), ()>::new();
     let leaf = graph.add_node(());
     let middle = graph.add_node(());
@@ -149,47 +160,67 @@ fn depth_tables_match_queries_when_parents_have_larger_ids() {
     graph.add_edge(middle, leaf, ());
 
     let dom = DominatorTree::compute_from(&graph, root);
-    let depths = dom.depths();
-    let AnalysisDepths::Compact(compact_depths) = dom.analysis_depths() else {
-        panic!("small test graph should use compact depths");
-    };
-    for node in [root, child, middle, leaf] {
-        let expected = dom.depth(node).expect("reachable node has a depth");
-        assert_eq!(depths[node.index()], expected);
-        assert_eq!(
-            compact_depths[node.index()],
-            u32::try_from(expected).expect("test depth fits u32")
-        );
+    for (node, level) in [(root, 0), (child, 1), (middle, 2), (leaf, 3)] {
+        assert_eq!(dom.level(node), Some(level));
     }
-    assert_eq!(depths[unreachable.index()], usize::MAX);
-    assert_eq!(compact_depths[unreachable.index()], u32::MAX);
+    assert_eq!(dom.level(unreachable), None);
+    assert_eq!(dom.preorder(), [root, child, middle, leaf]);
+    assert_eq!(dom.subtree(child), [child, middle, leaf]);
+    assert_eq!(dom.subtree(unreachable).len(), 0);
 }
 
 #[test]
-fn full_analysis_depths_match_public_dominance_queries() {
+fn dominance_keeps_its_answers_for_unreachable_nodes() {
     let mut graph = Graph::<(), ()>::new();
     let root = graph.add_node(());
-    let left = graph.add_node(());
-    let right = graph.add_node(());
-    let merge = graph.add_node(());
+    let child = graph.add_node(());
     let unreachable = graph.add_node(());
-    graph.add_edge(root, left, ());
-    graph.add_edge(root, right, ());
-    graph.add_edge(left, merge, ());
-    graph.add_edge(right, merge, ());
+    let other = graph.add_node(());
+    graph.add_edge(root, child, ());
+    graph.add_edge(unreachable, child, ());
+    graph.add_edge(unreachable, other, ());
 
     let dom = DominatorTree::compute_from(&graph, root);
-    let full_depths = AnalysisDepths::Full(dom.depths());
-    let nodes = [root, left, right, merge, unreachable];
-    for dominator in nodes {
-        for node in nodes {
-            assert_eq!(
-                dom.dominates_with_analysis_depths(dominator, node, &full_depths),
-                dom.dominates(dominator, node),
-                "mismatch for {dominator:?} dominating {node:?}"
-            );
-        }
-    }
+    assert!(dom.dominates(unreachable, unreachable));
+    assert!(!dom.strictly_dominates(unreachable, unreachable));
+    assert!(!dom.dominates(root, unreachable));
+    assert!(!dom.dominates(unreachable, root));
+    assert!(!dom.dominates(unreachable, child));
+    assert!(!dom.dominates(unreachable, other));
+    assert_eq!(
+        dom.idom(child),
+        Some(root),
+        "an unreachable predecessor is skipped"
+    );
+    assert_eq!(dom.nearest_common_dominator(root, unreachable), None);
+}
+
+#[test]
+fn nearest_common_dominator_of_skips_unreachable_nodes() {
+    let mut cfg: Cfg<MockInst> = Cfg::new();
+    let a = cfg.new_block();
+    let b = cfg.new_block();
+    let merge = cfg.new_block();
+    let unreachable = cfg.new_block();
+    cfg.add_edge(cfg.entry(), a, EdgeKind::ConditionalTrue);
+    cfg.add_edge(cfg.entry(), b, EdgeKind::ConditionalFalse);
+    cfg.add_edge(a, merge, EdgeKind::Fallthrough);
+    cfg.add_edge(b, merge, EdgeKind::Fallthrough);
+    let dom = DominatorTree::compute(&cfg);
+
+    assert_eq!(dom.nearest_common_dominator(a, b), Some(cfg.entry()));
+    assert_eq!(dom.nearest_common_dominator(a, merge), Some(cfg.entry()));
+    assert_eq!(dom.nearest_common_dominator(merge, merge), Some(merge));
+    assert_eq!(
+        dom.nearest_common_dominator_of([merge, unreachable, a]),
+        Some(cfg.entry())
+    );
+    assert_eq!(
+        dom.nearest_common_dominator_of([unreachable, merge]),
+        Some(merge)
+    );
+    assert_eq!(dom.nearest_common_dominator_of([unreachable]), None);
+    assert_eq!(dom.nearest_common_dominator_of([]), None);
 }
 
 #[test]
@@ -224,98 +255,43 @@ fn child_links_follow_the_selected_sibling_order() {
     assert_eq!(collect(&ascending, unreachable).len(), 0);
 }
 
-#[test]
-fn compact_depth_selection_falls_back_before_the_sentinel_can_be_a_depth() {
-    let largest_compact = usize::try_from(u32::MAX).expect("u32 fits supported usize targets");
-    assert!(compact_depths_supported(largest_compact));
-    if let Some(too_large) = largest_compact.checked_add(1) {
-        assert!(!compact_depths_supported(too_large));
+#[cfg(target_pointer_width = "64")]
+struct Oversized;
+
+#[cfg(target_pointer_width = "64")]
+impl GraphView for Oversized {
+    type NodeId = usize;
+
+    fn node_bound(&self) -> usize {
+        usize::try_from(u32::MAX).expect("u32 fits a 64-bit usize") + 1
+    }
+
+    fn node_ids(&self) -> impl Iterator<Item = usize> + '_ {
+        core::iter::once(0)
+    }
+
+    fn successors(&self, _node: usize) -> impl Iterator<Item = usize> + '_ {
+        core::iter::empty()
+    }
+
+    fn predecessors(&self, _node: usize) -> impl Iterator<Item = usize> + '_ {
+        core::iter::empty()
     }
 }
 
 #[test]
-fn post_dominators_over_a_consumer_view() {
-    // Diamond in consumer storage: a -> {b, c} -> d. Everything is
-    // post-dominated by d; the branch is post-dominated by the merge.
-    let mut graph = Graph::<&str, ()>::new();
-    let a = graph.add_node("a");
-    let b = graph.add_node("b");
-    let c = graph.add_node("c");
-    let d = graph.add_node("d");
-    graph.add_edge(a, b, ());
-    graph.add_edge(a, c, ());
-    graph.add_edge(b, d, ());
-    graph.add_edge(c, d, ());
-
-    let post = DominatorTree::compute_post_from(&graph, &[d]);
-    assert_eq!(post.idom(a), Some(d));
-    assert_eq!(post.idom(b), Some(d));
-    assert_eq!(post.idom(c), Some(d));
-    assert!(post.dominates(d, a), "d post-dominates the entry");
-
-    // No exits: nothing is reachable on the reverse graph.
-    let empty = DominatorTree::compute_post_from(&graph, &[]);
-    assert_eq!(empty.idom(a), None);
-    assert_eq!(empty.depth(a), None);
+#[cfg(target_pointer_width = "64")]
+#[should_panic(expected = "node bound exceeds the dense u32 range")]
+fn a_node_bound_beyond_u32_is_rejected() {
+    let _ = DominatorTree::compute_from(&Oversized, 0);
 }
 
 #[test]
-#[should_panic(expected = "post-dominator exit index is outside the graph")]
-fn post_dominators_reject_an_exit_outside_the_graph() {
+#[should_panic(expected = "dominator root is not a node of the graph")]
+fn a_root_outside_the_graph_is_rejected() {
     let mut graph = Graph::<(), ()>::new();
     graph.add_node(());
-
-    let outside =
-        NodeId::from_raw(u32::try_from(graph.node_bound()).expect("test graph size fits in u32"));
-    let _ = DominatorTree::compute_post_from(&graph, &[outside]);
-}
-
-#[test]
-fn post_dominator_view_preserves_duplicate_exit_edges() {
-    let mut graph = Graph::<(), ()>::new();
-    let exit = graph.add_node(());
-    let exits = [exit, exit];
-    let reverse = PostDominatorView {
-        graph: &graph,
-        exits: &exits,
-        binary_search_exits: false,
-    };
-    let virtual_exit = graph.node_bound();
-
-    assert_eq!(
-        reverse.successors(virtual_exit).collect::<Vec<_>>(),
-        vec![exit.index(), exit.index()]
-    );
-    assert_eq!(
-        reverse.predecessors(exit.index()).collect::<Vec<_>>(),
-        vec![virtual_exit, virtual_exit]
-    );
-}
-
-#[test]
-fn post_dominators_do_not_require_consumer_ids_for_the_virtual_exit() {
-    let post = DominatorTree::compute_post_from(&BoundedDiamond, &[BoundedNode(3)]);
-    assert_eq!(post.idom(BoundedNode(0)), Some(BoundedNode(3)));
-    assert_eq!(post.idom(BoundedNode(1)), Some(BoundedNode(3)));
-    assert_eq!(post.idom(BoundedNode(2)), Some(BoundedNode(3)));
-    assert!(post.dominates(BoundedNode(3), BoundedNode(0)));
-}
-
-#[test]
-fn post_dominators_accept_large_unsorted_exit_lists() {
-    let mut graph = Graph::<(), ()>::new();
-    let entry = graph.add_node(());
-    let mut exits = Vec::new();
-    for _ in 0..16 {
-        let exit = graph.add_node(());
-        graph.add_edge(entry, exit, ());
-        exits.push(exit);
-    }
-
-    let ordered = DominatorTree::compute_post_from(&graph, &exits);
-    exits.reverse();
-    let reversed = DominatorTree::compute_post_from(&graph, &exits);
-    assert_eq!(reversed, ordered);
+    let _ = DominatorTree::compute_from(&graph, NodeId::from_raw(1));
 }
 
 #[test]
@@ -328,12 +304,9 @@ fn children_returns_immediate_children() {
     cfg.add_edge(cfg.entry(), b, EdgeKind::ConditionalFalse);
     cfg.add_edge(a, c, EdgeKind::Fallthrough);
     let dom = DominatorTree::compute(&cfg);
-    let mut entry_children = dom.children(cfg.entry());
-    entry_children.sort();
-    assert_eq!(entry_children.len(), 2);
-    assert!(entry_children.contains(&a));
-    assert!(entry_children.contains(&b));
-    assert_eq!(dom.children(a), vec![c]);
+    assert_eq!(dom.children(cfg.entry()).collect::<Vec<_>>(), [a, b]);
+    assert_eq!(dom.children(a).collect::<Vec<_>>(), [c]);
+    assert_eq!(dom.children(c).count(), 0);
 }
 
 #[test]

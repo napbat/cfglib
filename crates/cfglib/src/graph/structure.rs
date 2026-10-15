@@ -75,10 +75,9 @@ pub fn find_back_edges<G: GraphView>(
     dom: &DominatorTree<G::NodeId>,
 ) -> Vec<BackEdge<G::NodeId>> {
     let mut backs = Vec::new();
-    let depths = dom.analysis_depths();
     for node in graph.node_ids() {
         for successor in graph.successors(node) {
-            if dom.dominates_with_analysis_depths(successor, node, &depths) {
+            if dom.dominates(successor, node) {
                 backs.push(BackEdge {
                     tail: node,
                     header: successor,

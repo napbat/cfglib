@@ -27,7 +27,7 @@ use super::liveness::Liveness;
 use super::{InstrInfo, ProgramPoint, VariableId, first_unwind_point, unwind_reach};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::graph::dominator::{AnalysisDepths, DominatorTree};
+use crate::graph::dominator::DominatorTree;
 
 /// Borrowed pairwise alias definitions and their corresponding value sources.
 pub type AliasPairs<'a, V> = (&'a [V], &'a [V]);
@@ -123,10 +123,6 @@ fn pairs<I: CopySource>(
 struct PointDominance<'g, G> {
     cfg: &'g G,
     dominators: DominatorTree,
-    /// One depth table for the whole pass: a dominance query then rejects a
-    /// deeper candidate outright instead of walking the idom chain, so a
-    /// long chain of blocks costs the pass nothing quadratic.
-    depths: AnalysisDepths,
     /// Per block, the first instruction an unwind out of it leaves before.
     first_unwind: Vec<Option<usize>>,
     /// Per block asked about so far, the blocks an unwind out of it reaches
@@ -141,7 +137,6 @@ where
 {
     fn compute(cfg: &'g G) -> Self {
         let dominators = DominatorTree::compute(cfg);
-        let depths = dominators.analysis_depths();
         let mut first_unwind = alloc::vec![None; cfg.node_bound()];
         for block in cfg.node_ids() {
             first_unwind[block.index()] = first_unwind_point(cfg, block);
@@ -149,7 +144,6 @@ where
         Self {
             cfg,
             dominators,
-            depths,
             first_unwind,
             unwind_reach: BTreeMap::new(),
         }
@@ -164,11 +158,7 @@ where
         if dominator.block == point.block {
             return dominator.inst_idx < point.inst_idx;
         }
-        if !self.dominators.dominates_with_analysis_depths(
-            dominator.block,
-            point.block,
-            &self.depths,
-        ) {
+        if !self.dominators.dominates(dominator.block, point.block) {
             return false;
         }
         let unwinds_before = self.first_unwind[dominator.block.index()]
