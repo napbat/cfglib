@@ -22,7 +22,7 @@ fn family_of(seed: u64) -> Family {
 /// selects, with parallel edges and unreachable blocks on alternate seeds.
 /// Every third graph also gets one exit and one spin, hung from random
 /// blocks, because the families alone seldom produce both.
-fn small_graph(seed: u64, rng: &mut Rng) -> (Recipe, EdgeList) {
+pub(super) fn small_graph(seed: u64, rng: &mut Rng) -> (Recipe, EdgeList) {
     let recipe = Recipe {
         family: family_of(seed),
         node_count: [6, 9, 14][usize::try_from(seed % 3).expect("a residue fits in usize")],
@@ -41,7 +41,7 @@ fn small_graph(seed: u64, rng: &mut Rng) -> (Recipe, EdgeList) {
 }
 
 /// How many small graphs a sweep visits.
-const SMALL_SEEDS: u64 = 240;
+pub(super) const SMALL_SEEDS: u64 = 240;
 
 #[test]
 fn random_graphs_match_the_definition() {

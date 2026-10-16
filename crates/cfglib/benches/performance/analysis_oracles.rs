@@ -229,18 +229,13 @@ pub(super) fn assert_control_dependence_graph(
 
     let mut expected = BTreeSet::new();
     for controller in cfg.block_ids() {
+        let immediate = post_dominators.ipdom(controller);
         for target in cfg.successors(controller) {
-            if post_dominators.post_dominates(target, controller) {
-                continue;
-            }
-            let immediate = post_dominators.ipdom(controller);
             let mut dependent = target;
-            loop {
+            while Some(PostNode::Node(dependent)) != immediate {
                 expected.insert((controller, dependent));
                 match post_dominators.ipdom(dependent) {
-                    Some(next @ PostNode::Node(parent)) if Some(next) != immediate => {
-                        dependent = parent;
-                    }
+                    Some(PostNode::Node(parent)) => dependent = parent,
                     _ => break,
                 }
             }

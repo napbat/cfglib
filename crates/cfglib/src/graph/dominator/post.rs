@@ -442,6 +442,87 @@ impl<N: DenseId> PostDominatorTree<N> {
         .map(move |position| tree.order[position])
     }
 
+    /// Iterate over the blocks that are control dependent on the arm
+    /// `from -> to`.
+    ///
+    /// A block `w` is control dependent on the arm when `w` post-dominates `to`
+    /// and does not strictly post-dominate `from`. These are `to`, then its
+    /// immediate post-dominator, and so on up the tree, stopping before the
+    /// immediate post-dominator of `from`. The nearest block comes first, and
+    /// nothing comes when `to` is that immediate post-dominator.
+    ///
+    /// The arm `u -> u` of a block that branches back to itself yields `u`
+    /// first, because a block does not strictly post-dominate itself.
+    ///
+    /// The answer is empty when `from` or `to` is outside the tree, and when
+    /// the immediate post-dominator of `from` is not a strict post-dominator
+    /// of `to`. For an edge of the graph the tree was computed from, that
+    /// last case is exactly `to` being the immediate post-dominator, because
+    /// the parent property puts every successor at or below the tail's
+    /// immediate post-dominator. The method does not check that the edge
+    /// exists, so it costs O(1 + the number of blocks it yields).
+    ///
+    /// # Panics
+    ///
+    /// Panics when `from` or `to` has an index beyond the node bound the tree
+    /// was computed with, as [`contains`](Self::contains) does.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cfglib::{Cfg, EdgeKind, PostDominatorTree};
+    ///
+    /// let mut cfg = Cfg::<u32>::new();
+    /// let branch = cfg.entry();
+    /// let left = cfg.new_block();
+    /// let right = cfg.new_block();
+    /// let merge = cfg.new_block();
+    /// cfg.add_edge(branch, left, EdgeKind::ConditionalTrue);
+    /// cfg.add_edge(branch, right, EdgeKind::ConditionalFalse);
+    /// cfg.add_edge(left, merge, EdgeKind::Fallthrough);
+    /// cfg.add_edge(right, merge, EdgeKind::Fallthrough);
+    /// let post = PostDominatorTree::compute(&cfg);
+    ///
+    /// // The branch decides whether the left block runs, and the merge is
+    /// // reached either way.
+    /// assert_eq!(post.control_dependents(branch, left).collect::<Vec<_>>(), [left]);
+    /// assert_eq!(post.control_dependents(left, merge).count(), 0);
+    /// ```
+    ///
+    /// A block that loops back to itself decides whether it runs again, so the
+    /// arm into itself is one of its own dependences:
+    ///
+    /// ```
+    /// use cfglib::{Cfg, EdgeKind, PostDominatorTree};
+    ///
+    /// let mut cfg = Cfg::<u32>::new();
+    /// let head = cfg.entry();
+    /// let exit = cfg.new_block();
+    /// cfg.add_edge(head, head, EdgeKind::ConditionalTrue);
+    /// cfg.add_edge(head, exit, EdgeKind::ConditionalFalse);
+    /// let post = PostDominatorTree::compute(&cfg);
+    ///
+    /// assert_eq!(post.control_dependents(head, head).collect::<Vec<_>>(), [head]);
+    /// assert_eq!(post.control_dependents(head, exit).count(), 0);
+    /// ```
+    pub fn control_dependents(&self, from: N, to: N) -> impl Iterator<Item = N> + '_ {
+        let stop = self.ipdom(from);
+        let below_stop = self.contains(to)
+            && match stop {
+                None => false,
+                Some(PostNode::Exit) => true,
+                Some(PostNode::Node(top)) => self.strictly_post_dominates(top, to),
+            };
+        core::iter::successors(below_stop.then_some(to), move |&block| {
+            match self.ipdom(block) {
+                Some(PostNode::Node(parent)) if stop != Some(PostNode::Node(parent)) => {
+                    Some(parent)
+                }
+                _ => None,
+            }
+        })
+    }
+
     /// Collect the control-dependence sources of `block` into `out`.
     ///
     /// A block `x` is a source when `block` post-dominates a successor of `x`
@@ -452,9 +533,10 @@ impl<N: DenseId> PostDominatorTree<N> {
     ///
     /// `out` is cleared first and receives each source once, in preorder of
     /// this tree. A block outside the tree has no sources, and is no one's.
-    /// A block that branches back to itself is its own source, although
-    /// [`control_dependence_graph`](crate::control_dependence_graph) leaves
-    /// that single self-edge out.
+    /// A block that branches back to itself is its own source. The edges of
+    /// [`control_dependence_graph`](crate::control_dependence_graph) are this
+    /// same relation: it has the edge `x -> block` exactly when `x` is a
+    /// source of `block`.
     ///
     /// # Panics
     ///
