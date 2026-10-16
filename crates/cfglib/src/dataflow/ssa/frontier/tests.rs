@@ -51,6 +51,36 @@ impl RootedView for Adjacency {
     }
 }
 
+/// An [`Adjacency`] that yields its nodes from the highest identity down, so
+/// the walk meets the blocks out of ascending order.
+struct Descending(Adjacency);
+
+impl GraphView for Descending {
+    type NodeId = u32;
+
+    fn node_bound(&self) -> usize {
+        self.0.node_bound()
+    }
+
+    fn node_ids(&self) -> impl Iterator<Item = u32> + '_ {
+        (0..u32::try_from(self.0.node_bound()).expect("a toy graph has few nodes")).rev()
+    }
+
+    fn successors(&self, node: u32) -> impl Iterator<Item = u32> + '_ {
+        self.0.successors(node)
+    }
+
+    fn predecessors(&self, node: u32) -> impl Iterator<Item = u32> + '_ {
+        self.0.predecessors(node)
+    }
+}
+
+impl RootedView for Descending {
+    fn root(&self) -> u32 {
+        self.0.root()
+    }
+}
+
 /// `0 → 1, 2` and `1, 2 → 3`.
 fn diamond_edges() -> Vec<(u32, u32)> {
     vec![(0, 1), (0, 2), (1, 3), (2, 3)]
@@ -220,6 +250,36 @@ fn every_frontier_is_strictly_ascending_on_every_small_digraph() {
                 "frontier of {node} in {edges:?}"
             );
         }
+    }
+}
+
+/// Two edges into one join walk the same runners twice, and a runner is
+/// listed once.
+#[test]
+fn parallel_edges_do_not_repeat_a_frontier_member() {
+    let graph = adjacency(4, &[(0, 1), (0, 2), (1, 3), (1, 3), (2, 3), (2, 3)]);
+    let frontiers = DominanceFrontiers::compute(&graph, &DominatorTree::compute(&graph));
+    assert_eq!(
+        frontier_indices(&frontiers, 4),
+        [vec![], vec![3], vec![3], vec![]]
+    );
+}
+
+/// The order a view yields its nodes in changes the order the walk emits its
+/// pairs in and nothing else: the frontiers are the ones the ascending view
+/// gives.
+#[test]
+fn a_view_that_yields_its_nodes_in_descending_order_gets_the_same_frontiers() {
+    for (count, edges) in small_digraphs() {
+        let ascending = adjacency(count as usize, &edges);
+        let expected = DominanceFrontiers::compute(&ascending, &DominatorTree::compute(&ascending));
+        let descending = Descending(adjacency(count as usize, &edges));
+        let table = DominanceFrontiers::compute(&descending, &DominatorTree::compute(&descending));
+        assert_eq!(
+            frontier_indices(&table, count),
+            frontier_indices(&expected, count),
+            "frontiers of {edges:?}"
+        );
     }
 }
 
