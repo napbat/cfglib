@@ -1,0 +1,9 @@
+signature (v0) returns 1
+v0 source
+bb0
+  -> bb1 Entry
+bb1
+  return(v0)
+bb2
+  v0 = const 1
+  return(v0)

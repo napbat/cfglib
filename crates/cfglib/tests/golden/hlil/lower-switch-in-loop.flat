@@ -1,0 +1,33 @@
+signature (v0) returns 1
+v0 source
+v1 source
+v2 temporary
+v3 temporary
+v4 temporary
+bb0
+  -> bb1 Entry
+bb1
+  v2 = const 10
+  v3 = lt(v1, v2)
+  branch(v3)
+  -> bb2 True
+  -> bb6 False
+bb2
+  switch(v0)
+  -> bb3 Case 1
+  -> bb1 Case 2
+  -> bb4 Case 3
+  -> bb4 Case 4
+  -> bb5 Default
+bb3
+  v1 = const 5
+  -> bb1 Jump
+bb4
+  call(v1) !
+  -> bb1 Fall
+bb5
+  v4 = const 1
+  v1 = add(v1, v4)
+  -> bb1 Fall
+bb6
+  return(v1)

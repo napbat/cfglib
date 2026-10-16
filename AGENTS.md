@@ -87,8 +87,9 @@ with `uv run --no-project python scripts/check_repository_policy.py`.
   declare `pub mod` children and hoist nothing; the crate root is the single
   flat facade that re-exports every public item, one `pub use` per module,
   alphabetized. Domain modules with a narrow API (`cfg`, `exception`,
-  `ir::rtl`, `ir::mlil`, and split coordinators such as `graph/search/events`) keep
-  children private and re-export their public surface.
+  `ir::rtl`, `ir::mlil`, `ir::hlil`, and split coordinators such as
+  `graph/search/events`) keep children private and re-export their public
+  surface.
 - Compound words in file and identifier names are underscore-separated and
   spelled in full (`constant_propagation`, `value_numbering`, `call_graph`);
   domain-standard acronyms (`ssa`, `scc`, `sccp`, `dce`, `pre`, `cdg`, `pdg`,
@@ -139,13 +140,18 @@ with `uv run --no-project python scripts/check_repository_policy.py`.
   no more restrictive than necessary.
 - Preserve this workspace's `no_std` plus `alloc` compatibility unless the task
   explicitly changes that contract.
-- Keep `ir::rtl` and `ir::mlil` language-neutral and trait-only. The library
-  owns the IR traits and the generic algorithms that read through them and
-  report facts. The consumer owns every IR storage, builder, and editing
-  machinery, and a consumer-defined dialect owns operations, roots, constants,
-  value types, effects, edge payloads, outcomes, and constant folding. Do not
-  add IR storage, or language-, VM-, ABI-, or ISA-specific variants, to any
-  generic layer.
+- Keep `ir::rtl`, `ir::mlil`, and `ir::hlil` language-neutral and trait-only.
+  The library owns the IR traits and the generic algorithms that read through
+  them and report facts. The consumer owns every IR storage, builder
+  implementation, and editing machinery, and a consumer-defined dialect owns
+  operations, roots, constants, value types, variable metadata, effects, edge
+  payloads, outcomes, and constant folding. An algorithm may produce a new
+  function through a consumer-implemented builder trait
+  (`ir::hlil::FunctionBuilder`, `ir::hlil::FlatBuilder`): it appends to a
+  function that the consumer's builder owns, it seals that function only
+  through the builder's `finish`, and it reads its input only through view
+  traits. It never edits the function it reads. Do not add IR storage, or
+  language-, VM-, ABI-, or ISA-specific variants, to any generic layer.
 - Avoid unnecessary cloning, allocation, collection, dynamic dispatch, and generic
   indirection. Optimize for a clear ownership story before micro-optimizing.
 - Return structured errors for recoverable failures. Do not panic in public APIs
@@ -182,9 +188,10 @@ with `uv run --no-project python scripts/check_repository_policy.py`.
 - Test behavior and invariants rather than implementation details.
 - Cover meaningful edge cases, failure paths, and interactions with exceptional
   control flow where relevant.
-- Exercise generic RTL/MLIL with distinct non-production toy dialects so bridge
-  storage, edge translation, provenance, and analyses cannot accidentally
-  depend on one consumer's semantic vocabulary or native-location type.
+- Exercise generic RTL/MLIL/HLIL with distinct non-production toy dialects so
+  bridge storage, edge translation, provenance, and analyses cannot
+  accidentally depend on one consumer's semantic vocabulary or native-location
+  type.
 - Keep tests deterministic, focused, and readable. Use table-driven tests only when
   the cases share the same semantics and setup.
 - Do not remove or weaken a test merely to make a change pass.

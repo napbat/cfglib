@@ -1,0 +1,23 @@
+signature (v0) returns 1
+v0 source
+v1 source
+v2 temporary
+v3 temporary
+v4 temporary
+v5 temporary
+v6 temporary
+v7 temporary
+bb0
+  -> bb1 Entry
+bb1
+  v2 = const 4
+  v3 = add(v0, v2)
+  v4 = const 2
+  call(v3, v4) !
+  v1 = copy(v0)
+  v1 = const 3
+  v5 = const 8
+  v6 = call(v1) !
+  store@add(v0, v5, v6)
+  v7 = const 5
+  return(v0, v7)

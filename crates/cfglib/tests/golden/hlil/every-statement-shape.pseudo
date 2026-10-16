@@ -1,0 +1,53 @@
+for (
+    v0 = 0;
+    ; lt(v0, v1) ;
+    v0 = add(v0, 1);
+) {
+    call(v0);
+}
+for (
+    ;  ;
+) {
+    break;
+}
+outer: {
+    do {
+        continue outer;
+    } while (not(v1));
+    loop {
+        break outer;
+    }
+}
+switch (v0) {
+    case 1, 2: {
+        call(v0);
+    }
+    case 3: {
+    }
+    default: {
+        goto done;
+    }
+}
+try {
+    call();
+} catch () v2 {
+    v2;
+} fault () {
+    0;
+} filter () {
+    when {
+        v0;
+    }
+    0;
+} finally {
+    release();
+}
+@acquire(v1) {
+    if (v0) {
+        return;
+    } else {
+        return v0, v1;
+    }
+}
+done: {
+}

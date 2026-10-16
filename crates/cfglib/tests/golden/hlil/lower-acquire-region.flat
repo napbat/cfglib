@@ -1,0 +1,12 @@
+signature (v0) returns 1
+v0 source
+v1 temporary
+bb0
+  -> bb1 Entry
+bb1
+  enter@acquire(v0)
+  call(v0) !
+  v1 = const 1
+  v0 = add(v0, v1)
+  exit@acquire(v0)
+  return(v0)

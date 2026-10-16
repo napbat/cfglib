@@ -3,6 +3,7 @@
 //! implements.
 
 pub mod alias;
+pub mod control_tree;
 pub mod dead_code;
 pub mod expr;
 pub mod metrics;
