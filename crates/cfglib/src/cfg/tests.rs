@@ -185,6 +185,30 @@ fn move_outgoing_edges_preserves_order_identity_and_metadata() {
 }
 
 #[test]
+fn redirecting_onto_a_block_keeps_the_edges_added_after_its_last_redirect() {
+    let mut cfg = Cfg::<MockInst>::new();
+    let a = cfg.entry();
+    let b = cfg.new_block();
+    let c = cfg.new_block();
+    let d = cfg.new_block();
+    let first = cfg.add_edge(a, b, EdgeKind::Unconditional);
+    let resident = cfg.add_edge(c, d, EdgeKind::Unconditional);
+    cfg.redirect_edge_source(first, c);
+    let appended = cfg.add_edge(c, b, EdgeKind::Unconditional);
+    let arriving = cfg.add_edge(d, a, EdgeKind::Unconditional);
+
+    cfg.redirect_edge_source(arriving, c);
+
+    assert_eq!(
+        cfg.outgoing(c).collect::<Vec<_>>(),
+        &[resident, first, appended, arriving]
+    );
+    assert_eq!(cfg.incoming(b).collect::<Vec<_>>(), &[first, appended]);
+    let report = crate::verify(&cfg);
+    assert!(report.is_ok(), "{:?}", report.errors);
+}
+
+#[test]
 fn exit_blocks_iterator() {
     let mut cfg = Cfg::<MockInst>::new();
     let b1 = cfg.new_block();

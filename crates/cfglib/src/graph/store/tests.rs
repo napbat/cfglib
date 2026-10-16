@@ -264,6 +264,115 @@ fn a_redirected_endpoint_is_counted_at_its_new_node() {
     assert_eq!(graph.in_degree(nodes[2]), 2);
 }
 
+/// Every live edge is listed once by its source and once by its target, and
+/// every listing agrees with the edge's own endpoints.
+fn assert_mirrored<N, E>(graph: &Graph<N, E>) {
+    let mut listed = Vec::new();
+    for node in graph.node_ids() {
+        for edge in graph.outgoing(node) {
+            assert_eq!(graph.edge(edge).source(), node, "outgoing listing");
+            listed.push((edge, TraversalDirection::Outgoing));
+        }
+        for edge in graph.incoming(node) {
+            assert_eq!(graph.edge(edge).target(), node, "incoming listing");
+            listed.push((edge, TraversalDirection::Incoming));
+        }
+    }
+    for edge in graph.edge_ids() {
+        for direction in [TraversalDirection::Outgoing, TraversalDirection::Incoming] {
+            let count = listed
+                .iter()
+                .filter(|&&(candidate, side)| candidate == edge && side == direction)
+                .count();
+            assert_eq!(
+                count, 1,
+                "edge {edge:?} listed {count} time(s) {direction:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_edge_appended_after_a_relocation_survives_the_next_one() {
+    // A relocation gives `c` an overlay run, an append then lands in its
+    // delta chain, and a second relocation onto `c` must carry both.
+    let mut graph = Graph::<&'static str, &'static str>::new();
+    let [a, b, c, d] = ["a", "b", "c", "d"].map(|payload| graph.add_node(payload));
+    let moved = graph.add_edge(a, b, "moved");
+    let resident = graph.add_edge(c, d, "resident");
+    graph.redirect_edge_source(moved, c);
+    let appended = graph.add_edge(c, b, "appended");
+    let arriving = graph.add_edge(d, a, "arriving");
+    assert_eq!(
+        graph.outgoing(c).collect::<Vec<_>>(),
+        [resident, moved, appended]
+    );
+
+    graph.redirect_edge_source(arriving, c);
+
+    assert_eq!(
+        graph.outgoing(c).collect::<Vec<_>>(),
+        [resident, moved, appended, arriving]
+    );
+    assert_eq!(graph.incoming(b).collect::<Vec<_>>(), [moved, appended]);
+    assert_eq!(graph.out_degree(c), 4);
+    assert_mirrored(&graph);
+}
+
+#[test]
+fn a_chain_edge_leaves_a_node_that_already_has_an_overlay() {
+    // The same shape, relocating *away* from the node whose delta chain
+    // holds the edge: the survivors must keep the rest of the chain.
+    let mut graph = Graph::<&'static str, &'static str>::new();
+    let [a, b, c, d] = ["a", "b", "c", "d"].map(|payload| graph.add_node(payload));
+    let moved = graph.add_edge(a, b, "moved");
+    let resident = graph.add_edge(c, d, "resident");
+    graph.redirect_edge_source(moved, c);
+    let first = graph.add_edge(c, b, "first");
+    let second = graph.add_edge(c, a, "second");
+
+    graph.redirect_edge_source(first, d);
+
+    assert_eq!(
+        graph.outgoing(c).collect::<Vec<_>>(),
+        [resident, moved, second]
+    );
+    assert_eq!(graph.outgoing(d).collect::<Vec<_>>(), [first]);
+    assert_mirrored(&graph);
+}
+
+#[test]
+fn verify_reports_an_edge_its_endpoint_stopped_listing() {
+    // The shape of a dropped listing: the edge is live and its other
+    // endpoint still lists it, but one endpoint's chain has forgotten it.
+    for (direction, role) in [
+        (TraversalDirection::Outgoing, "successor"),
+        (TraversalDirection::Incoming, "predecessor"),
+    ] {
+        let mut cfg = crate::Cfg::<u32>::new();
+        let source = cfg.entry();
+        let target = cfg.new_block();
+        let edge = cfg.add_edge(source, target, crate::EdgeKind::Unconditional);
+        assert!(crate::verify(&cfg).is_ok());
+
+        let forgetful = match direction {
+            TraversalDirection::Outgoing => source,
+            TraversalDirection::Incoming => target,
+        };
+        cfg.graph.chains.detach_node(forgetful.index(), direction);
+
+        let report = crate::verify(&cfg);
+        assert!(!report.is_ok(), "a dropped {role} listing must be reported");
+        assert!(
+            report.errors[0]
+                .message
+                .contains(&alloc::format!("edge {edge} is not a {role} edge")),
+            "{:?}",
+            report.errors
+        );
+    }
+}
+
 #[test]
 fn removed_payloads_stay_readable_until_compaction() {
     let (mut graph, nodes) = diamond();

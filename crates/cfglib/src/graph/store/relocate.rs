@@ -189,10 +189,11 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
 
     /// The node's complete current adjacency along `direction`, which is what
     /// its overlay run has to reproduce.
+    ///
+    /// That is the walk, not the overlay run alone: a node that has an overlay
+    /// still threads every edge appended since through its delta chain, and
+    /// the replacement run is about to take that chain over too.
     fn materialize(&self, node: Id<NT>, direction: TraversalDirection) -> Vec<u32> {
-        if let Some(run) = self.overlay(node.index(), direction) {
-            return run.to_vec();
-        }
         let adjacent: Box<dyn Iterator<Item = Id<ET>> + '_> = match direction {
             TraversalDirection::Outgoing => Box::new(self.outgoing(node)),
             TraversalDirection::Incoming => Box::new(self.incoming(node)),

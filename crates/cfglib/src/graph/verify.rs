@@ -117,7 +117,58 @@ fn verify_edge_endpoints<I, E>(cfg: &Cfg<I, E>, block_bound: usize, errors: &mut
     }
 }
 
+/// Name every live edge that its source's successors or its target's
+/// predecessors fail to list.
+///
+/// [`verify_adjacency`] checks the converse, that every listing names an edge
+/// that agrees with it, which a dropped listing cannot violate. It counts the
+/// agreeing listings as it goes, and only a count that differs from the live
+/// edges calls this walk, so a sound CFG never pays for it.
+fn report_unlisted_edges<I, E>(cfg: &Cfg<I, E>, errors: &mut Vec<VerifyError>) {
+    let bound = cfg.edge_bound();
+    let mut successor_listed = alloc::vec![false; bound];
+    let mut predecessor_listed = alloc::vec![false; bound];
+    for block in cfg.block_ids() {
+        for edge in cfg.outgoing(block) {
+            if let Some(listed) = successor_listed.get_mut(edge.index()) {
+                *listed = true;
+            }
+        }
+        for edge in cfg.incoming(block) {
+            if let Some(listed) = predecessor_listed.get_mut(edge.index()) {
+                *listed = true;
+            }
+        }
+    }
+    for edge in cfg.edges() {
+        let index = edge.id().index();
+        if index >= bound {
+            continue;
+        }
+        if !successor_listed[index] {
+            errors.push(VerifyError {
+                message: alloc::format!(
+                    "edge {} is not a successor edge of its source {}",
+                    edge.id(),
+                    edge.source()
+                ),
+            });
+        }
+        if !predecessor_listed[index] {
+            errors.push(VerifyError {
+                message: alloc::format!(
+                    "edge {} is not a predecessor edge of its target {}",
+                    edge.id(),
+                    edge.target()
+                ),
+            });
+        }
+    }
+}
+
 fn verify_adjacency<I, E>(cfg: &Cfg<I, E>, errors: &mut Vec<VerifyError>) {
+    let mut successor_listings = 0;
+    let mut predecessor_listings = 0;
     for block_id_ in cfg.block_ids() {
         let block_id = block_id_;
         for edge_id in cfg.outgoing(block_id) {
@@ -136,6 +187,8 @@ fn verify_adjacency<I, E>(cfg: &Cfg<I, E>, errors: &mut Vec<VerifyError>) {
                         cfg.edge(edge_id).source()
                     ),
                 });
+            } else {
+                successor_listings += 1;
             }
         }
         for edge_id in cfg.incoming(block_id) {
@@ -154,8 +207,13 @@ fn verify_adjacency<I, E>(cfg: &Cfg<I, E>, errors: &mut Vec<VerifyError>) {
                         cfg.edge(edge_id).target()
                     ),
                 });
+            } else {
+                predecessor_listings += 1;
             }
         }
+    }
+    if successor_listings != cfg.edge_count() || predecessor_listings != cfg.edge_count() {
+        report_unlisted_edges(cfg, errors);
     }
 }
 
@@ -190,7 +248,8 @@ fn verify_unique_adjacency<I, E>(cfg: &Cfg<I, E>, errors: &mut Vec<VerifyError>)
 /// Checks performed:
 /// 1. Entry block index is within bounds.
 /// 2. Every edge references valid source/target block IDs.
-/// 3. Adjacency lists (`succs`/`preds`) are consistent with edges.
+/// 3. Adjacency lists (`succs`/`preds`) are consistent with edges, and every
+///    live edge is listed by both of its endpoints.
 /// 4. Every reachable non-entry block has at least one predecessor.
 /// 5. No duplicate edges in adjacency lists.
 ///

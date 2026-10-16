@@ -327,9 +327,44 @@ fn assert_agrees(graph: &Store, model: &Model, step: usize) {
 
 /// Slot ceilings that keep one comparison pass cheap enough to run after
 /// every one of the ten thousand operations.
-const MAX_NODE_SLOTS: usize = 128;
 const MAX_EDGE_SLOTS: usize = 512;
 const OPERATIONS: usize = 10_000;
+
+/// The operation mix of one session: the cumulative percentage below which a
+/// draw picks each operation, with compaction taking whatever is left.
+#[derive(Clone, Copy)]
+struct Mix {
+    max_nodes: usize,
+    add_node: usize,
+    add_edge: usize,
+    remove_edge: usize,
+    redirect_edge: usize,
+    remove_node: usize,
+}
+
+/// Growth first, with a compaction every sixteen operations or so: the store
+/// is rebuilt before an overlay can grow old.
+const BALANCED: Mix = Mix {
+    max_nodes: 128,
+    add_node: 22,
+    add_edge: 68,
+    remove_edge: 78,
+    redirect_edge: 86,
+    remove_node: 94,
+};
+
+/// A few nodes, constant redirection, and a compaction every hundred
+/// operations: the same nodes take overlay runs, then appends into their
+/// delta chains, then more relocations, which is the interleaving a balanced
+/// mix reaches only by luck.
+const CHURN: Mix = Mix {
+    max_nodes: 12,
+    add_node: 6,
+    add_edge: 40,
+    remove_edge: 44,
+    redirect_edge: 98,
+    remove_node: 99,
+};
 
 /// Counts proving the sequence reached the states the comparison is for.
 #[derive(Default)]
@@ -345,6 +380,7 @@ struct Exercised {
 /// One store, one model, and the generator driving both of them.
 struct Session {
     rng: Rng,
+    mix: Mix,
     graph: Store,
     model: Model,
     exercised: Exercised,
@@ -352,9 +388,10 @@ struct Session {
 }
 
 impl Session {
-    fn new(seed: u64) -> Self {
+    fn new(seed: u64, mix: Mix) -> Self {
         Self {
             rng: Rng::new(seed),
+            mix,
             graph: Store::new(),
             model: Model::default(),
             exercised: Exercised::default(),
@@ -372,20 +409,25 @@ impl Session {
     fn apply(&mut self, step: usize) {
         let live_nodes: Vec<usize> = self.model.live_nodes().collect();
         let choice = self.rng.below(100);
+        let mix = self.mix;
         match choice {
             _ if live_nodes.is_empty()
-                || (choice < 22 && self.model.nodes.len() < MAX_NODE_SLOTS) =>
+                || (choice < mix.add_node && self.model.nodes.len() < mix.max_nodes) =>
             {
                 self.add_node(step);
             }
-            _ if choice < 68 && self.model.edges.len() < MAX_EDGE_SLOTS => {
+            _ if choice < mix.add_edge && self.model.edges.len() < MAX_EDGE_SLOTS => {
                 self.add_edge(&live_nodes, step);
             }
-            _ if choice < 78 && !self.model.edges.is_empty() => self.remove_edge(step),
-            _ if choice < 86 && self.model.live_edge_slots().next().is_some() => {
+            _ if choice < mix.remove_edge && !self.model.edges.is_empty() => {
+                self.remove_edge(step);
+            }
+            _ if choice < mix.redirect_edge && self.model.live_edge_slots().next().is_some() => {
                 self.redirect_edge(&live_nodes, step);
             }
-            _ if choice < 94 && !self.model.nodes.is_empty() => self.remove_node(step),
+            _ if choice < mix.remove_node && !self.model.nodes.is_empty() => {
+                self.remove_node(step);
+            }
             _ => self.compact(step),
         }
     }
@@ -494,13 +536,20 @@ impl Session {
     }
 }
 
-#[test]
-fn random_operation_sequences_match_the_reference_model() {
-    let mut session = Session::new(0x2545_F491_4F6C_DD1D);
+/// Apply `OPERATIONS` operations drawn with `mix`, comparing the store with
+/// the model after every one.
+fn run_session(seed: u64, mix: Mix) -> Session {
+    let mut session = Session::new(seed, mix);
     for step in 0..OPERATIONS {
         session.apply(step);
         assert_agrees(&session.graph, &session.model, step);
     }
+    session
+}
+
+#[test]
+fn random_operation_sequences_match_the_reference_model() {
+    let session = run_session(0x2545_F491_4F6C_DD1D, BALANCED);
 
     // The comparison above proves little unless the sequence actually
     // reached the states it is meant to cover.
@@ -539,4 +588,31 @@ fn random_operation_sequences_match_the_reference_model() {
         !session.graph.is_empty(),
         "the sequence must not end with an empty store"
     );
+}
+
+/// A relocation gives a node an overlay run, and an edge appended afterwards
+/// lives in the node's delta chain beside it. Compacting every few operations
+/// rebuilds the store before the two can meet, so this session keeps a dozen
+/// nodes and rarely compacts, across several seeds.
+#[test]
+fn relocated_nodes_keep_the_edges_appended_after_their_overlay() {
+    for seed in [
+        0x2545_F491_4F6C_DD1D,
+        0x9E37_79B9_7F4A_7C15,
+        0xD1B5_4A32_D192_ED03,
+        0x8CB9_2BA7_2F3D_8DD7,
+    ] {
+        let session = run_session(seed, CHURN);
+        let exercised = &session.exercised;
+        assert!(
+            exercised.redirected_edges > 1_000,
+            "edge redirections: {}",
+            exercised.redirected_edges
+        );
+        assert!(
+            exercised.compactions > 20,
+            "compactions: {}",
+            exercised.compactions
+        );
+    }
 }
