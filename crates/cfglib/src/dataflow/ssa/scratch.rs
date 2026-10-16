@@ -18,8 +18,8 @@ use super::rename::RenameEvent;
 /// Every buffer [`SsaForm::compute_in`](super::SsaForm::compute_in) fills,
 /// owned by the caller.
 ///
-/// SSA construction over a four-block procedure costs about sixty
-/// allocations, and only a third of them are the form it returns. The rest is
+/// SSA construction over a four-block procedure costs about forty
+/// allocations, and only a quarter of them are the form it returns. The rest is
 /// the call: a dominance-frontier set per block, a definition list and a
 /// renaming stack per variable, a phi list per merge block, a predecessor and
 /// an operand vector per phi, a pushed-variable vector per block entered, an
@@ -28,8 +28,9 @@ use super::rename::RenameEvent;
 /// are that small.
 ///
 /// This moves every one of those out of the call. What remains allocated per
-/// call is the form itself — its blocks, its renamed operand vectors, and its
-/// version map — plus the tree nodes of the two maps keyed by variable.
+/// call is the form itself — its blocks, the operands that outgrow the inline
+/// storage of an instruction or a phi, and its version map — plus the tree
+/// nodes of the two maps keyed by variable.
 ///
 /// Hand one scratch to every [`compute_in`](super::SsaForm::compute_in) of
 /// the pass. The buffers grow to the largest procedure the pass meets and are

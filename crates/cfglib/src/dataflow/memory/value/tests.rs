@@ -123,8 +123,8 @@ fn ordinary_ssa_transfers_share_the_combined_graph() {
     let instruction = ssa
         .instruction(ProgramPoint { block, inst_idx: 1 })
         .unwrap();
-    let source = flow.value_node(&instruction.uses[0]).unwrap();
-    let target = flow.value_node(&instruction.defs[0]).unwrap();
+    let source = flow.value_node(&instruction.uses()[0]).unwrap();
+    let target = flow.value_node(&instruction.defs()[0]).unwrap();
 
     assert!(has_edge(
         &flow,
@@ -153,7 +153,7 @@ fn ordinary_ssa_phis_share_the_combined_graph() {
     let (ssa, _, flow) = analyses(&cfg);
     let phi = &ssa.block(merge).phis[0];
     let target = flow.value_node(&phi.result).unwrap();
-    for (predecessor, operand) in &phi.operands {
+    for (predecessor, operand) in phi.operands() {
         assert!(has_edge(
             &flow,
             flow.value_node(operand).unwrap(),
@@ -190,17 +190,17 @@ fn stored_values_reach_loaded_definitions_through_memory_state() {
     let store_instruction = ssa.instruction(store_site.point()).unwrap();
     let load_instruction = ssa.instruction(load_site.point()).unwrap();
     let stored = store_instruction
-        .uses
+        .uses()
         .iter()
         .find(|value| value.variable == 1)
         .unwrap();
     let address = store_instruction
-        .uses
+        .uses()
         .iter()
         .find(|value| value.variable == 7)
         .unwrap();
     let loaded = load_instruction
-        .defs
+        .defs()
         .iter()
         .find(|value| value.variable == 2)
         .unwrap();
@@ -294,9 +294,9 @@ fn read_modify_write_connects_every_value_and_state_role() {
     let event = memory.event(event_site).unwrap();
     let instruction = ssa.instruction(event_site.point()).unwrap();
     let event_node = flow.event_node(event_site).unwrap();
-    let input_node = flow.value_node(&instruction.uses[0]).unwrap();
-    let address_node = flow.value_node(&instruction.uses[1]).unwrap();
-    let output_node = flow.value_node(&instruction.defs[0]).unwrap();
+    let input_node = flow.value_node(&instruction.uses()[0]).unwrap();
+    let address_node = flow.value_node(&instruction.uses()[1]).unwrap();
+    let output_node = flow.value_node(&instruction.defs()[0]).unwrap();
     let read_node = flow.memory_node(event.read_version().unwrap()).unwrap();
     let written_node = flow.memory_node(event.written_version().unwrap()).unwrap();
 
@@ -412,7 +412,7 @@ fn memory_value_edges_preserve_operand_order_and_repetition() {
     let used = |variable| {
         flow.value_node(
             instruction
-                .uses
+                .uses()
                 .iter()
                 .find(|value| value.variable == variable)
                 .unwrap(),
@@ -422,7 +422,7 @@ fn memory_value_edges_preserve_operand_order_and_repetition() {
     let defined = |variable| {
         flow.value_node(
             instruction
-                .defs
+                .defs()
                 .iter()
                 .find(|value| value.variable == variable)
                 .unwrap(),

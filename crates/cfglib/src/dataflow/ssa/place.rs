@@ -13,6 +13,7 @@ extern crate alloc;
 use alloc::collections::btree_map::Entry;
 use alloc::vec::Vec;
 use core::ops::Range;
+use smallvec::SmallVec;
 
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
@@ -22,16 +23,23 @@ use crate::dataflow::{
 use crate::edge::{EdgeKind, KindedEdge};
 use crate::graph::dominator::DominatorTree;
 
-use super::SsaValue;
 use super::scratch::SsaScratch;
+use super::{INLINE_OPERANDS, SsaValue};
 
 /// A structural phi placement before SSA values are renamed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PhiPlacement<V> {
     /// The source-IR variable merged by the phi.
     pub variable: V,
+    predecessors: SmallVec<[ProgramPoint; INLINE_OPERANDS]>,
+}
+
+impl<V> PhiPlacement<V> {
     /// Departure points that contribute operands, in CFG predecessor order.
-    pub predecessors: Vec<ProgramPoint>,
+    #[must_use]
+    pub fn predecessors(&self) -> &[ProgramPoint] {
+        &self.predecessors
+    }
 }
 
 /// Phi placements indexed by containing block.
@@ -96,7 +104,7 @@ impl<V: VariableId> PhiPlacements<V> {
                     .iter()
                     .map(|draft| PhiPlacement {
                         variable: draft.variable.clone(),
-                        predecessors: drafts.predecessors(draft).to_vec(),
+                        predecessors: drafts.predecessors(draft).iter().copied().collect(),
                     })
                     .collect()
             })

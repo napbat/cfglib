@@ -80,11 +80,11 @@ fn x86_registers_flags_and_stack_slots_keep_native_identities() {
     let phi = &ssa.block(merge).phis[0];
 
     assert_eq!(phi.result.variable, rax);
-    assert_eq!(phi.operands.len(), 2);
-    assert_ne!(phi.operands[0].1, phi.operands[1].1);
-    assert_eq!(ssa.block(merge).instructions[0].uses[0], phi.result);
+    assert_eq!(phi.operands().len(), 2);
+    assert_ne!(phi.operands()[0].1, phi.operands()[1].1);
+    assert_eq!(ssa.block(merge).instructions[0].uses()[0], phi.result);
     assert_eq!(
-        ssa.block(cfg.entry()).instructions[0].uses[0],
+        ssa.block(cfg.entry()).instructions[0].uses()[0],
         SsaValue::live_in(stack)
     );
 }
@@ -171,10 +171,10 @@ fn shader_register_components_are_independent_ssa_variables() {
     let ssa = SsaForm::compute(&cfg, &dominators);
     let instructions = &ssa.block(cfg.entry()).instructions;
 
-    assert_eq!(instructions[0].uses[0], SsaValue::live_in(input_x));
-    assert_eq!(instructions[2].uses[0], instructions[0].defs[0]);
-    assert_eq!(instructions[2].uses[1], instructions[1].defs[0]);
-    assert_eq!(instructions[2].defs.len(), 3);
+    assert_eq!(instructions[0].uses()[0], SsaValue::live_in(input_x));
+    assert_eq!(instructions[2].uses()[0], instructions[0].defs()[0]);
+    assert_eq!(instructions[2].uses()[1], instructions[1].defs()[0]);
+    assert_eq!(instructions[2].defs().len(), 3);
     assert_eq!(ssa.max_version(&temporary_x), 1);
     assert_eq!(ssa.max_version(&temporary_y), 1);
 }

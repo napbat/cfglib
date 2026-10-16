@@ -31,7 +31,7 @@ pub fn eliminate_phis<V: VariableId>(ssa: &SsaForm<V>) -> Vec<PhiCopy<V>> {
     let mut copies = Vec::new();
 
     for (block, phi) in ssa.phis() {
-        for (predecessor, source) in &phi.operands {
+        for (predecessor, source) in phi.operands() {
             copies.push(PhiCopy {
                 from: *predecessor,
                 to_block: block,

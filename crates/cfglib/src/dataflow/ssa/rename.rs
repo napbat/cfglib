@@ -5,6 +5,7 @@ extern crate alloc;
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use smallvec::SmallVec;
 
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
@@ -101,7 +102,7 @@ where
             .iter()
             .map(|variable| current_value(variable, stacks))
             .collect();
-        let mut defs = Vec::with_capacity(instruction.defs().len());
+        let mut defs = SmallVec::new();
         for variable in instruction.defs() {
             let value = fresh_value(variable, max_versions);
             push_value(stacks, value_pool, variable, value.clone());

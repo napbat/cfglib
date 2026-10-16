@@ -295,7 +295,7 @@ fn address_dependencies_resolve_to_ordinary_ssa_values() {
                 inst_idx: 1,
             })
             .unwrap()
-            .uses
+            .uses()
     );
 }
 

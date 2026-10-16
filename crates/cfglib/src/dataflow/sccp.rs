@@ -81,7 +81,7 @@ fn known_constants<V: VariableId, C: Clone + Eq>(
     values: &BTreeMap<SsaValue<V>, ConstValue<C>>,
 ) -> BTreeMap<V, C> {
     annotation
-        .uses
+        .uses()
         .iter()
         .filter_map(|value| {
             values
@@ -112,7 +112,7 @@ fn evaluate_block<G, I>(
         if let Some((variable, constant)) = instruction.fold_constant(&known) {
             // The folder answers for ONE def; every co-defined variable of a
             // multi-def instruction was still redefined and must bottom.
-            for definition in &annotation.defs {
+            for definition in annotation.defs() {
                 if definition.variable == variable {
                     update_value::<I>(
                         values,
@@ -125,7 +125,7 @@ fn evaluate_block<G, I>(
                 }
             }
         } else {
-            for definition in &annotation.defs {
+            for definition in annotation.defs() {
                 update_value::<I>(values, worklist, definition, ConstValue::Bottom);
             }
         }
@@ -201,7 +201,7 @@ fn evaluate_phis<I: ConstantFolder>(
 ) {
     for phi in &ssa.block(block).phis {
         let mut candidate = ConstValue::Top;
-        for (predecessor, operand) in &phi.operands {
+        for (predecessor, operand) in phi.operands() {
             if executable_edges.contains(&(predecessor.block, block)) {
                 candidate = candidate.meet_with(lattice_of(values, operand), I::meet_constants);
             }
@@ -503,7 +503,7 @@ mod tests {
         cfg.block_mut(cfg.entry()).push(df_const("constant", 0, 42));
         let dom = DominatorTree::compute(&cfg);
         let ssa = SsaForm::compute(&cfg, &dom);
-        let definition = ssa.block(cfg.entry()).instructions[0].defs[0].clone();
+        let definition = ssa.block(cfg.entry()).instructions[0].defs()[0].clone();
         let result = SccpAnalysis::compute(&cfg, &ssa);
         assert_eq!(result.values[&definition], ConstValue::Const(42));
     }

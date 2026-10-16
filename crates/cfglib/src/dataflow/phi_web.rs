@@ -50,7 +50,7 @@ impl<V: VariableId> PhiWebs<V> {
             .blocks()
             .iter()
             .flat_map(|block| block.instructions.iter())
-            .flat_map(|instruction| instruction.uses.iter().cloned())
+            .flat_map(|instruction| instruction.uses().iter().cloned())
             .collect();
         let phis: Vec<&crate::dataflow::ssa::SsaPhi<V>> = ssa.phis().map(|(_, phi)| phi).collect();
         let mut live = vec![false; phis.len()];
@@ -59,7 +59,7 @@ impl<V: VariableId> PhiWebs<V> {
             for (index, phi) in phis.iter().enumerate() {
                 if !live[index] && used.contains(&phi.result) {
                     live[index] = true;
-                    for (_, operand) in &phi.operands {
+                    for (_, operand) in phi.operands() {
                         used.insert(operand.clone());
                     }
                     changed = true;
@@ -83,7 +83,7 @@ impl<V: VariableId> PhiWebs<V> {
 
         for phi in phis {
             for value in
-                core::iter::once(&phi.result).chain(phi.operands.iter().map(|(_, value)| value))
+                core::iter::once(&phi.result).chain(phi.operands().iter().map(|(_, value)| value))
             {
                 if !value_to_index.contains_key(value) {
                     let index = all_values.len();
@@ -96,7 +96,7 @@ impl<V: VariableId> PhiWebs<V> {
         let mut union_find = DisjointSet::new(all_values.len());
         for phi in phis {
             let result_index = value_to_index[&phi.result];
-            for (_, operand) in &phi.operands {
+            for (_, operand) in phi.operands() {
                 union_find.union(result_index, value_to_index[operand]);
             }
         }

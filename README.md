@@ -552,7 +552,7 @@ let dominators = DominatorTree::compute(&cfg);
 let ssa = SsaForm::compute(&cfg, &dominators);
 ```
 
-`SsaForm<V>` is a non-mutating view over the source CFG. It stores renamed phi results, operands, instruction uses, and instruction definitions as `SsaValue<V>`, while each `SsaInstruction` keeps a `ProgramPoint` back to the native instruction. Version `0` denotes a live-in or otherwise undefined incoming value.
+`SsaForm<V>` is a non-mutating view over the source CFG. It stores renamed phi results, operands, instruction uses, and instruction definitions as `SsaValue<V>`, while each `SsaInstruction` keeps a `ProgramPoint` back to the native instruction. Read the lists through `SsaPhi::operands`, `SsaInstruction::uses`, and `SsaInstruction::defs`, which return slices; a record holds a short list inline, so a typical instruction or two-way phi costs no allocation of its own. `PhiPlacement::predecessors` follows the same shape. Version `0` denotes a live-in or otherwise undefined incoming value.
 
 For an IR adapter, implement the `ir::rtl` or `ir::mlil` traits on your own dense storage. Keep every arena, builder, and editing pass in your crate. Call the facts of cfglib on your function view, and apply their answers yourself. A machine-shaped language emits `ir::rtl` records through `InstructionBuilder`. A consumer that builds a block-parameter form from those records uses `ParamPlacement` to find where each root needs a parameter. A variable-shaped language implements `ir::mlil::FunctionView` directly. The consumer writes its own value analyses over that view, because they depend on the semantics of its dialect, and its own passes delete or rewrite instructions.
 
