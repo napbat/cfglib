@@ -6,6 +6,7 @@ mod dataflow;
 mod fixtures;
 mod graph;
 mod transform;
+mod traversal;
 
 pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "abstract_interpret",
@@ -212,4 +213,5 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     dataflow::register(suite);
     graph::register(suite);
     transform::register(suite);
+    traversal::register(suite);
 }
