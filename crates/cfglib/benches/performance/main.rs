@@ -11,6 +11,7 @@ use std::time::Duration;
 #[cfg(not(cfglib_bench_alloc))]
 use std::time::Instant;
 
+use cfglib::ir::rtl::{BlockSummaries, ParamPlacement, RootLiveness, RootTable};
 use cfglib::{
     BlockId, Cfg, CfgBuilder, CommonAncestor, ConstValue, ConstantFolder, DenseId, Direction,
     DominanceFrontiers, DominatorTree, EdgeKind, EdgeStep, Facts, FlowControl, FlowEffect, Graph,
@@ -27,6 +28,7 @@ mod analysis_oracles;
 mod api_cases;
 mod fixtures;
 mod harness;
+mod rtl_placement;
 mod structural_oracles;
 
 use analysis_oracles::{
@@ -46,6 +48,7 @@ use fixtures::{
     weighted_high_fan_out_cfg, weighted_irreducible_cfg,
 };
 use harness::{BenchmarkSuite, benchmark_case, benchmark_target};
+use rtl_placement::{SyntheticFunction, assert_param_placement};
 use structural_oracles::{
     FanOut, assert_branchy_cfg, assert_branchy_graph, assert_builder_cfg, assert_cfg_shape,
     assert_dense_permutation, assert_empty_chain, assert_high_fan_in, assert_irreducible_fixture,
@@ -101,6 +104,12 @@ fn main() {
     let phi_storm_dominators = DominatorTree::compute(&phi_storm);
     let unreachable_ssa_cfg = unreachable_constants(256, 256);
     let unreachable_ssa_dominators = DominatorTree::compute(&unreachable_ssa_cfg);
+    let rtl = SyntheticFunction::new(NODE_COUNT);
+    let rtl_roots = RootTable::collect(&rtl);
+    let rtl_summaries = BlockSummaries::compute(&rtl, &rtl_roots);
+    let rtl_liveness = RootLiveness::compute(&rtl, &rtl_roots, &rtl_summaries);
+    let rtl_dominators = DominatorTree::compute(&rtl);
+    let rtl_frontiers = DominanceFrontiers::compute(&rtl, &rtl_dominators);
 
     println!(
         "cfglib synthetic benchmark: {NODE_COUNT} nodes, {} CFG edges, {} graph edges",
@@ -323,6 +332,26 @@ fn main() {
         "cfg_dominance_frontiers",
         || { DominanceFrontiers::compute(&cfg, &cfg_dominators) },
         |result: &DominanceFrontiers| assert_dominance_frontiers(result, &cfg, &cfg_dominators,)
+    );
+    bench!(
+        "rtl_param_placement",
+        || {
+            ParamPlacement::compute(
+                &rtl,
+                &rtl_dominators,
+                &rtl_frontiers,
+                &rtl_roots,
+                &rtl_summaries,
+                &rtl_liveness,
+            )
+        },
+        |result: &ParamPlacement<_>| assert_param_placement(
+            result,
+            &rtl,
+            &rtl_dominators,
+            &rtl_roots,
+            &rtl_liveness,
+        )
     );
     bench!(
         "cfg_post_dominators",

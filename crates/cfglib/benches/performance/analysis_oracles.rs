@@ -197,7 +197,12 @@ pub(super) fn assert_dominance_frontiers(
         }
     }
     for block_id in cfg.block_ids() {
-        assert_eq!(frontiers.frontier(block_id), &expected[block_id.index()]);
+        assert!(
+            frontiers
+                .frontier(block_id)
+                .iter()
+                .eq(&expected[block_id.index()])
+        );
     }
 }
 
