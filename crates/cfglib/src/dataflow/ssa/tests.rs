@@ -556,3 +556,19 @@ fn a_phi_wider_than_its_inline_storage_lists_every_departure_in_cfg_order() {
     let placements = PhiPlacements::compute(&cfg, &dom);
     assert_eq!(placements.at(merge)[0].predecessors(), expected);
 }
+
+#[test]
+fn a_blocks_instruction_vector_holds_no_spare_capacity() {
+    // The vector moves into the form, so room the allocator's growth step
+    // would add stays allocated for the life of the form.
+    let cfg = CfgBuilder::build(vec![
+        df_def("first", 0),
+        df_use("second", 0),
+        df_def("third", 1),
+    ])
+    .unwrap();
+    let form = SsaForm::compute(&cfg, &DominatorTree::compute(&cfg));
+    for block in form.blocks() {
+        assert_eq!(block.instructions.capacity(), block.instructions.len());
+    }
+}

@@ -83,7 +83,9 @@ where
     }
 
     let block_instructions = &mut instructions[block.index()];
-    block_instructions.reserve(cfg.instructions(block).len());
+    // The vector moves into the finished block, so it is sized to the block
+    // rather than to the allocator's minimum growth step.
+    block_instructions.reserve_exact(cfg.instructions(block).len());
     for (inst_idx, instruction) in cfg.instructions(block).iter().enumerate() {
         if instruction.may_unwind() {
             for edge in cfg.outgoing(block) {
