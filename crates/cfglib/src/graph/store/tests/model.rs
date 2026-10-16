@@ -13,6 +13,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::graph::store::{Graph, Id, NodeTag};
+use crate::graph::traverse::TraversalDirection;
 
 /// A xorshift generator, so the sequence is reproducible without a
 /// dependency and without a table of pre-baked operations.
@@ -110,6 +111,22 @@ impl Model {
         adjacency[previous].retain(|&candidate| candidate != edge);
         adjacency[endpoint].push(edge);
         previous
+    }
+
+    /// Move every live edge of `old` to `new` along one direction, one
+    /// redirect at a time: the contract the store's bulk move states.
+    /// Returns how many edges moved.
+    fn move_adjacency(&mut self, old: usize, new: usize, outgoing: bool) -> usize {
+        let adjacency = if outgoing {
+            &self.outgoing
+        } else {
+            &self.incoming
+        };
+        let moving: Vec<usize> = self.live_edges_of(&adjacency[old]).collect();
+        for &edge in &moving {
+            self.redirect_edge(edge, new, outgoing);
+        }
+        moving.len()
     }
 
     fn remove_edge(&mut self, edge: usize) -> bool {
@@ -373,6 +390,7 @@ struct Exercised {
     removed_nodes: usize,
     removed_edges: usize,
     redirected_edges: usize,
+    moved_adjacencies: usize,
     self_edges: usize,
     parallel_edges: usize,
 }
@@ -423,7 +441,11 @@ impl Session {
                 self.remove_edge(step);
             }
             _ if choice < mix.redirect_edge && self.model.live_edge_slots().next().is_some() => {
-                self.redirect_edge(&live_nodes, step);
+                if self.rng.below(4) == 0 {
+                    self.move_adjacency(&live_nodes);
+                } else {
+                    self.redirect_edge(&live_nodes, step);
+                }
             }
             _ if choice < mix.remove_node && !self.model.nodes.is_empty() => {
                 self.remove_node(step);
@@ -480,6 +502,27 @@ impl Session {
             "redirect reports the previous endpoint at step {step}"
         );
         self.exercised.redirected_edges += usize::from(expected != endpoint);
+    }
+
+    /// Move a whole adjacency run between two distinct live nodes, which the
+    /// model spells as redirecting its live edges one by one.
+    fn move_adjacency(&mut self, live_nodes: &[usize]) {
+        let old = live_nodes[self.rng.below(live_nodes.len())];
+        let new = live_nodes[self.rng.below(live_nodes.len())];
+        let outgoing = self.rng.below(2) == 0;
+        if old == new {
+            return;
+        }
+
+        let moved = self.model.move_adjacency(old, new, outgoing);
+        let direction = if outgoing {
+            TraversalDirection::Outgoing
+        } else {
+            TraversalDirection::Incoming
+        };
+        self.graph
+            .move_adjacency(node_id(old), node_id(new), direction);
+        self.exercised.moved_adjacencies += usize::from(moved > 0);
     }
 
     fn remove_edge(&mut self, step: usize) {
@@ -575,6 +618,11 @@ fn random_operation_sequences_match_the_reference_model() {
         exercised.redirected_edges
     );
     assert!(
+        exercised.moved_adjacencies > 100,
+        "bulk moves: {}",
+        exercised.moved_adjacencies
+    );
+    assert!(
         exercised.self_edges > 10,
         "self edges: {}",
         exercised.self_edges
@@ -608,6 +656,11 @@ fn relocated_nodes_keep_the_edges_appended_after_their_overlay() {
             exercised.redirected_edges > 1_000,
             "edge redirections: {}",
             exercised.redirected_edges
+        );
+        assert!(
+            exercised.moved_adjacencies > 200,
+            "bulk moves: {}",
+            exercised.moved_adjacencies
         );
         assert!(
             exercised.compactions > 20,

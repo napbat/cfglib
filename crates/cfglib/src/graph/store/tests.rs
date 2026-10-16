@@ -342,6 +342,64 @@ fn a_chain_edge_leaves_a_node_that_already_has_an_overlay() {
 }
 
 #[test]
+fn a_bulk_move_carries_the_overlay_and_the_delta_chain_in_order() {
+    let mut graph = Graph::<&'static str, &'static str>::new();
+    let [a, b, c, d] = ["a", "b", "c", "d"].map(|payload| graph.add_node(payload));
+    let moved = graph.add_edge(a, b, "moved");
+    let resident = graph.add_edge(c, d, "resident");
+    graph.redirect_edge_source(moved, c);
+    let appended = graph.add_edge(c, b, "appended");
+    let own = graph.add_edge(a, d, "own");
+
+    graph.move_adjacency(c, a, TraversalDirection::Outgoing);
+
+    assert_eq!(
+        graph.outgoing(a).collect::<Vec<_>>(),
+        [own, resident, moved, appended]
+    );
+    assert!(graph.outgoing(c).next().is_none());
+    for edge in [resident, moved, appended] {
+        assert_eq!(graph.edge(edge).source(), a);
+    }
+    assert_eq!(graph.incoming(b).collect::<Vec<_>>(), [moved, appended]);
+    assert_mirrored(&graph);
+
+    // The emptied node is an ordinary node again.
+    let later = graph.add_edge(c, d, "later");
+    assert_eq!(graph.outgoing(c).collect::<Vec<_>>(), [later]);
+    assert_mirrored(&graph);
+}
+
+#[test]
+fn a_bulk_move_leaves_removed_edges_as_they_were() {
+    let mut graph = Graph::<&'static str, &'static str>::new();
+    let [a, b, c] = ["a", "b", "c"].map(|payload| graph.add_node(payload));
+    let dead = graph.add_edge(a, b, "dead");
+    let live = graph.add_edge(a, c, "live");
+    graph.compact();
+    assert!(graph.remove_edge(dead));
+
+    graph.move_adjacency(a, b, TraversalDirection::Outgoing);
+
+    assert_eq!(graph.edge(dead).source(), a, "a removed edge is not moved");
+    assert_eq!(graph.edge(live).source(), b);
+    assert_eq!(graph.outgoing(b).collect::<Vec<_>>(), [live]);
+    assert_mirrored(&graph);
+}
+
+#[test]
+fn a_bulk_move_of_nothing_names_no_replacement() {
+    let mut graph = Graph::<&'static str, &'static str>::new();
+    let [empty, gone] = ["empty", "gone"].map(|payload| graph.add_node(payload));
+    graph.remove_node(gone);
+
+    graph.move_adjacency(empty, gone, TraversalDirection::Incoming);
+
+    assert!(graph.incoming(empty).next().is_none());
+    assert!(graph.incoming(gone).next().is_none());
+}
+
+#[test]
 fn verify_reports_an_edge_its_endpoint_stopped_listing() {
     // The shape of a dropped listing: the edge is live and its other
     // endpoint still lists it, but one endpoint's chain has forgotten it.

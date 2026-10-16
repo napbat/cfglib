@@ -81,6 +81,12 @@
 //! because the walk is the inner loop of every algorithm in the crate and
 //! does not tolerate a second question per edge.
 //!
+//! Later relocations edit that run in place, and a transform that moves a
+//! whole block's edges ([`Cfg::redirect_edges_to`](crate::Cfg::redirect_edges_to),
+//! merging, splitting) moves the node's entire run in one pass rather than
+//! edge by edge, so landing edges on a high-degree node costs the edges that
+//! land, not the node's degree.
+//!
 //! ## Compaction
 //!
 //! [`compact`](Graph::compact) rebuilds the base from the live entities and
