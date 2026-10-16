@@ -197,12 +197,8 @@ pub(super) fn assert_dominance_frontiers(
         }
     }
     for block_id in cfg.block_ids() {
-        assert!(
-            frontiers
-                .frontier(block_id)
-                .iter()
-                .eq(&expected[block_id.index()])
-        );
+        let members: Vec<_> = expected[block_id.index()].iter().copied().collect();
+        assert_eq!(frontiers.frontier(block_id), members);
     }
 }
 

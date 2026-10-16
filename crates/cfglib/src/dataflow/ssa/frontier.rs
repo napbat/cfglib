@@ -1,10 +1,11 @@
-//! Dominance frontiers, in the two shapes their two consumers want.
+//! Dominance frontiers as one flat run table.
 //!
-//! One algorithm — the runner walk of Cooper, Harvey, and Kennedy — feeds
-//! both: [`FrontierRuns`] is the flat run table SSA construction reads and a
-//! scratch reuses, and [`DominanceFrontiers`] is the per-block set a consumer
-//! asking for one block's frontier reads. The public type is built from the
-//! flat one, so there is one statement of the rule rather than two.
+//! The runner walk of Cooper, Harvey, and Kennedy collects `(runner, frontier
+//! block)` pairs, and sorting them makes every block's frontier one
+//! contiguous, ascending run. [`FrontierRuns`] is that table, which an SSA
+//! scratch rebuilds in place for each procedure, and [`DominanceFrontiers`]
+//! is the same table handed to a consumer that asks for one block's frontier.
+//! There is one statement of the rule rather than two.
 //!
 //! Both read any [`RootedView`], so a [`Cfg`](crate::Cfg) and a
 //! consumer-owned function view share the one algorithm.
@@ -18,7 +19,6 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
@@ -34,12 +34,14 @@ mod tests;
 /// computed from. It defaults to [`BlockId`], the identity of a
 /// [`Cfg`](crate::Cfg).
 ///
-/// For a reachable block, the set equals [`DominatorTree::frontier`] of that
-/// block. This type computes every set at once and keeps them.
+/// For a reachable block, the frontier holds the members of
+/// [`DominatorTree::frontier`] of that block, in ascending order. This type
+/// computes every frontier at once and keeps them in one flat table, which
+/// is two buffers however many blocks there are.
 #[derive(Debug, Clone)]
 pub struct DominanceFrontiers<N = BlockId> {
-    /// `frontiers[b]` is the dominance-frontier set of `b`.
-    frontiers: Vec<BTreeSet<N>>,
+    /// Every block's frontier, flat.
+    runs: FrontierRuns<N>,
 }
 
 impl<N: DenseId> DominanceFrontiers<N> {
@@ -57,33 +59,31 @@ impl<N: DenseId> DominanceFrontiers<N> {
     {
         let mut runs = FrontierRuns::default();
         runs.rebuild(graph, dom);
-        let frontiers = (0..graph.node_bound())
-            .map(|index| {
-                // Grown by insertion rather than collected: a set built from
-                // a sorted iterator is bulk-loaded, which costs a second node
-                // for the one-member frontiers most blocks have.
-                let mut frontier = BTreeSet::new();
-                frontier.extend(runs.frontier(N::from_index(index)).iter().copied());
-                frontier
-            })
-            .collect();
-        Self { frontiers }
+        // The pair list is the walk's scratch. A scratch keeps it for the
+        // next procedure, but a table that is kept has no use for it.
+        runs.pairs = Vec::new();
+        Self { runs }
     }
 
-    /// Return the dominance-frontier set for `block`.
+    /// Return the dominance frontier of `block`, in ascending order.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `block` is not below the node bound of the view that
+    /// computed the frontiers.
     #[must_use]
-    pub fn frontier(&self, block: N) -> &BTreeSet<N> {
-        &self.frontiers[block.index()]
+    pub fn frontier(&self, block: N) -> &[N] {
+        self.runs.frontier(block)
     }
 }
 
 /// Every block's dominance frontier in one flat run table.
 ///
-/// A [`BTreeSet`] per block is one allocation per block that has a frontier
-/// and a tree node per member, rebuilt for every procedure of a codebase.
-/// The same answer is a sorted pair list collapsed into runs: three buffers
-/// however many blocks there are, and a frontier read back as a slice in
-/// ascending order, which is the order the set iterated in.
+/// A sorted pair list collapsed into runs: the table is one buffer of
+/// members and one of run starts however many blocks there are, and a
+/// frontier is read back as a slice in ascending order. The pair list is
+/// what the walk sorts to get there, and a scratch keeps it between
+/// procedures.
 #[derive(Debug, Clone)]
 pub(super) struct FrontierRuns<N = BlockId> {
     /// `(runner, frontier block)` pairs, sorted and deduplicated, which is

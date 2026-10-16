@@ -7,6 +7,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::DominanceFrontiers;
+use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
 use crate::graph::dominator::DominatorTree;
@@ -84,7 +85,7 @@ fn cfg(count: usize, edges: &[(u32, u32)]) -> Cfg<u32> {
 
 fn frontier_indices(frontiers: &DominanceFrontiers<u32>, count: u32) -> Vec<Vec<u32>> {
     (0..count)
-        .map(|node| frontiers.frontier(node).iter().copied().collect())
+        .map(|node| frontiers.frontier(node).to_vec())
         .collect()
 }
 
@@ -164,35 +165,98 @@ fn an_entry_with_two_back_edges_is_in_its_own_frontier() {
     );
 }
 
-/// Every digraph on up to four nodes, self-loops included: the table agrees
-/// with the on-demand frontier for every reachable node. The two are one rule
-/// computed two ways.
-#[test]
-fn the_table_agrees_with_the_on_demand_frontier_on_every_small_digraph() {
-    let mut on_demand = Vec::new();
-    for count in 1..=4_u32 {
+/// Every digraph on up to four nodes, self-loops included, as a node count
+/// and an edge list.
+fn small_digraphs() -> impl Iterator<Item = (u32, Vec<(u32, u32)>)> {
+    (1..=4_u32).flat_map(|count| {
         let pairs: Vec<(u32, u32)> = (0..count)
             .flat_map(|source| (0..count).map(move |target| (source, target)))
             .collect();
-        for mask in 0..1_u32 << pairs.len() {
-            let edges: Vec<(u32, u32)> = pairs
+        (0..1_u32 << pairs.len()).map(move |mask| {
+            let edges = pairs
                 .iter()
                 .enumerate()
                 .filter(|&(bit, _)| mask & (1 << bit) != 0)
                 .map(|(_, &edge)| edge)
                 .collect();
-            let graph = adjacency(count as usize, &edges);
-            let dominators = DominatorTree::compute(&graph);
-            let table = DominanceFrontiers::compute(&graph, &dominators);
-            for node in (0..count).filter(|&node| dominators.is_reachable(node)) {
-                dominators.frontier(&graph, node, &mut on_demand);
-                let expected: BTreeSet<u32> = on_demand.iter().copied().collect();
-                assert_eq!(
-                    *table.frontier(node),
-                    expected,
-                    "frontier of {node} in {edges:?}"
-                );
-            }
+            (count, edges)
+        })
+    })
+}
+
+/// Every small digraph: the table agrees with the on-demand frontier for
+/// every reachable node. The two are one rule computed two ways.
+#[test]
+fn the_table_agrees_with_the_on_demand_frontier_on_every_small_digraph() {
+    let mut on_demand = Vec::new();
+    for (count, edges) in small_digraphs() {
+        let graph = adjacency(count as usize, &edges);
+        let dominators = DominatorTree::compute(&graph);
+        let table = DominanceFrontiers::compute(&graph, &dominators);
+        for node in (0..count).filter(|&node| dominators.is_reachable(node)) {
+            dominators.frontier(&graph, node, &mut on_demand);
+            let expected: BTreeSet<u32> = on_demand.iter().copied().collect();
+            assert!(
+                table.frontier(node).iter().eq(&expected),
+                "frontier of {node} in {edges:?}"
+            );
         }
     }
+}
+
+/// A frontier reads back in strictly ascending order for every block of every
+/// small digraph, including the blocks that the walk reaches only through an
+/// unreachable predecessor.
+#[test]
+fn every_frontier_is_strictly_ascending_on_every_small_digraph() {
+    for (count, edges) in small_digraphs() {
+        let graph = adjacency(count as usize, &edges);
+        let table = DominanceFrontiers::compute(&graph, &DominatorTree::compute(&graph));
+        for node in 0..count {
+            assert!(
+                table
+                    .frontier(node)
+                    .is_sorted_by(|left, right| left < right),
+                "frontier of {node} in {edges:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_cloned_table_reads_the_same_frontiers() {
+    let graph = adjacency(4, &loop_edges());
+    let table = DominanceFrontiers::compute(&graph, &DominatorTree::compute(&graph));
+    assert_eq!(
+        frontier_indices(&table.clone(), 4),
+        [vec![], vec![1], vec![1], vec![]]
+    );
+}
+
+#[test]
+fn a_removed_block_has_an_empty_frontier_and_leaves_the_others_in_place() {
+    let edges = [(0, 1), (0, 2), (0, 3), (1, 4), (2, 4), (3, 4)];
+    let mut cfg = cfg(5, &edges);
+    let orphan = BlockId::from_index(3);
+    let before = DominanceFrontiers::compute(&cfg, &DominatorTree::compute(&cfg));
+    assert_eq!(before.frontier(orphan), [BlockId::from_index(4)]);
+
+    assert!(cfg.remove_block(orphan));
+    assert!(cfg.block_bound() > cfg.block_count());
+    let after = DominanceFrontiers::compute(&cfg, &DominatorTree::compute(&cfg));
+    assert_eq!(after.frontier(orphan), []);
+    for node in [1, 2] {
+        assert_eq!(
+            after.frontier(BlockId::from_index(node)),
+            [BlockId::from_index(4)]
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "index out of bounds")]
+fn a_block_past_the_node_bound_panics() {
+    let graph = adjacency(2, &[(0, 1)]);
+    let table = DominanceFrontiers::compute(&graph, &DominatorTree::compute(&graph));
+    let _ = table.frontier(2);
 }
