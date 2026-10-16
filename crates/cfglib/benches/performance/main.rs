@@ -366,9 +366,10 @@ fn main() {
             let cycle_count = (NODE_COUNT - 1) / 32;
             assert_eq!(result.len(), NODE_COUNT - 16 * cycle_count);
             let mut seen = vec![false; NODE_COUNT];
-            for (component_index, component) in result.components.iter().enumerate() {
-                assert!(!component.nodes.is_empty());
-                for &node in &component.nodes {
+            for (component_index, component) in result.components().enumerate() {
+                assert_ne!(component, []);
+                assert!(component.windows(2).all(|pair| pair[0] < pair[1]));
+                for &node in component {
                     assert!(!seen[node.index()]);
                     seen[node.index()] = true;
                     assert_eq!(result.component_index(node), component_index);
@@ -378,24 +379,22 @@ fn main() {
             for cycle in 1..=cycle_count {
                 let end = cycle * 32;
                 let component = result.component(NodeId::from_index(end));
-                assert_eq!(component.nodes.len(), 17);
+                assert_eq!(component.nodes().len(), 17);
                 assert!(
                     (end - 16..=end).all(|index| component.contains(NodeId::from_index(index)))
                 );
             }
             assert_eq!(
                 result
-                    .components
-                    .iter()
-                    .filter(|component| component.nodes.len() == 17)
+                    .components()
+                    .filter(|component| component.len() == 17)
                     .count(),
                 cycle_count
             );
             assert!(
                 result
-                    .components
-                    .iter()
-                    .all(|component| { component.nodes.len() == 1 || component.nodes.len() == 17 })
+                    .components()
+                    .all(|component| component.len() == 1 || component.len() == 17)
             );
         }
     );

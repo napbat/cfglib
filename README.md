@@ -299,7 +299,7 @@ A `FunctionView` follows these rules:
 | Reusable post-dominator scratch | `PostDominatorTree::compute_in` + `PostDominatorScratch` | The same tree with the call's working buffers caller-owned, parallel to `DominatorScratch` |
 | Dominance frontiers | `DominanceFrontiers::compute` | For SSA φ-placement |
 | Dominator recompute diff | `DominatorTree::compute_with_diff` | Recompute after a graph edit, reporting the nodes whose idom changed |
-| Strongly connected components | `tarjan_scc` → `SccDecomposition<N>`, `condensation` → component DAG | Generic iterative Tarjan algorithm, reverse-topological order (leaves first) |
+| Strongly connected components | `tarjan_scc` → `SccDecomposition<N>`, `condensation` → component DAG of owned `Scc<N>` payloads | Generic iterative Tarjan algorithm, reverse-topological order (leaves first); components are ascending slices of one flat array (`components()`, `component(node)` → `Scc` with `nodes()`, `contains`, `is_singleton`) |
 | SCC in topological order | `kosaraju_scc` → `SccDecomposition<N>` | The same partition numbered sources first (`index(u) < index(v)` across every edge); the classic deterministic two-pass algorithm, for budgeted forward closures over the condensation |
 | Condensation of a given decomposition | `condensation_of(graph, &SccDecomposition)` → `Graph<(), ()>` | The component DAG whose node index **is** the given decomposition's component index, either algorithm's; deduplicated edges, and in-degrees plus dependents straight off the graph (the one-pass fixpoint shape) |
 | Back-edge detection | `find_back_edges` (dominance, any view), `find_back_edges_tagged` (CFG, honors `Back` tags) | |

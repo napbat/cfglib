@@ -522,11 +522,11 @@ fn the_view_reports_slots_so_dense_analyses_stay_in_bounds() {
     // A removed node is not a node of the view at all, so a whole-graph
     // partition reports no phantom singleton for it.
     let uncompacted = tarjan_scc(&graph);
-    assert_eq!(uncompacted.components.len(), 3);
+    assert_eq!(uncompacted.len(), 3);
 
     graph.compact();
     assert_eq!(GraphView::node_bound(&graph), 3);
-    assert_eq!(tarjan_scc(&graph).components.len(), 3);
+    assert_eq!(tarjan_scc(&graph).len(), 3);
 }
 
 #[test]
@@ -617,14 +617,12 @@ fn the_algorithms_agree_with_the_arena_store() {
     let arena_components = tarjan_scc(&arena);
     assert_eq!(
         store_components
-            .components
-            .iter()
-            .map(|component| indexes(component.nodes.iter().copied(), Id::index))
+            .components()
+            .map(|nodes| indexes(nodes.iter().copied(), Id::index))
             .collect::<Vec<_>>(),
         arena_components
-            .components
-            .iter()
-            .map(|component| indexes(component.nodes.iter().copied(), crate::NodeId::index))
+            .components()
+            .map(|nodes| indexes(nodes.iter().copied(), crate::NodeId::index))
             .collect::<Vec<_>>()
     );
 

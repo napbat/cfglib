@@ -91,7 +91,7 @@ pub fn is_recursive_function<C>(
     function: NodeId,
 ) -> bool {
     graph.successors(function).any(|callee| callee == function)
-        || tarjan_scc(graph).component(function).nodes.len() > 1
+        || tarjan_scc(graph).component(function).nodes().len() > 1
 }
 
 /// Compute a per-node summary over a dependency graph in callee-first
@@ -119,15 +119,14 @@ pub fn propagate_summaries<N, E, S: Clone + PartialEq>(
     let mut summaries = alloc::vec![bottom.clone(); graph.node_bound()];
     let components = tarjan_scc(graph);
     // Components arrive in reverse topological order: callees first.
-    for component in &components.components {
-        let cyclic = component.nodes.len() > 1
+    for component in components.components() {
+        let cyclic = component.len() > 1
             || component
-                .nodes
                 .iter()
                 .any(|&node| graph.successors(node).any(|callee| callee == node));
         loop {
             let mut changed = false;
-            for &node in &component.nodes {
+            for &node in component {
                 let updated = compute(graph, node, &summaries);
                 if updated != summaries[node.index()] {
                     summaries[node.index()] = updated;

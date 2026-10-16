@@ -427,11 +427,7 @@ fn register_graph_algorithms(suite: &mut BenchmarkSuite<'_>) {
         covers[kosaraju_scc],
         || kosaraju_scc(&graph),
         |result| assert_eq!(
-            result
-                .components
-                .iter()
-                .map(|component| component.nodes.len())
-                .sum::<usize>(),
+            result.components().map(<[_]>::len).sum::<usize>(),
             NODE_COUNT
         )
     );
