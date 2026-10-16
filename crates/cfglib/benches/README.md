@@ -59,6 +59,12 @@ dense fan-out read once per parser step, layered route and fold walks, and a
 linear stack reverse index. Cases there that time a method or constructor name
 no facade function.
 
+`performance/rtl_placement.rs` holds the one fixture that is not a `Cfg` or a
+`Graph`: a synthetic register-transfer function, the consumer-owned view that
+`ir::rtl` facts read, with the oracle behind `rtl_param_placement`. The case
+times `ParamPlacement::compute` alone, with the dominator tree, frontiers,
+summaries, and liveness built before timing.
+
 ## CPU timing
 
 The default build installs `std::alloc::System` directly as the global
