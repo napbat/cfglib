@@ -149,6 +149,11 @@ pub fn open_breadth_first_paths<N: Clone + PartialEq, B>(
 ) -> Option<B> {
     let mut frontier: VecDeque<Vec<N>> = VecDeque::new();
     let mut scratch: Vec<N> = Vec::new();
+    // Routes the frontier has finished with, kept with their capacity: every
+    // route a walk extends is copied once per descending successor, and a
+    // recycled route turns each copy into a `clone_from` instead of an
+    // allocation.
+    let mut spare: Vec<Vec<N>> = Vec::new();
 
     for seed in seeds {
         let route = vec![seed];
@@ -161,12 +166,13 @@ pub fn open_breadth_first_paths<N: Clone + PartialEq, B>(
         }
     }
 
-    while let Some(mut route) = frontier.pop_front() {
+    'routes: while let Some(mut route) = frontier.pop_front() {
         scratch.clear();
         if let Some(current) = route.last() {
             successors(current, &mut scratch);
         }
-        for next in scratch.drain(..) {
+        let mut extensions = scratch.drain(..).peekable();
+        while let Some(next) = extensions.next() {
             if route.contains(&next) {
                 if let ControlFlow::Break(value) = on_event(OpenPathsEvent::Refused(&route, &next))
                 {
@@ -181,10 +187,19 @@ pub fn open_breadth_first_paths<N: Clone + PartialEq, B>(
                 ControlFlow::Continue(verdict) => verdict,
             };
             if matches!(verdict, Visit::Descend) && may_expand(config.max_depth, route.len() - 1) {
-                frontier.push_back(route.clone());
+                if extensions.peek().is_none() {
+                    // No successor is left to extend this route, so the
+                    // frontier takes the route itself instead of a copy.
+                    frontier.push_back(route);
+                    continue 'routes;
+                }
+                let mut copy = spare.pop().unwrap_or_default();
+                copy.clone_from(&route);
+                frontier.push_back(copy);
             }
             route.pop();
         }
+        spare.push(route);
     }
 
     None
@@ -329,5 +344,66 @@ mod tests {
             diamond,
         );
         assert_eq!(routes, alloc::vec![alloc::vec!["app"], alloc::vec!["app"]]);
+    }
+
+    /// Every node leads to every other, in an order that puts the refused
+    /// successors (those already on the route) before, between, and after the
+    /// accepted ones as routes grow.
+    fn complete_from(node: u32, out: &mut Vec<u32>) {
+        out.extend((0..5).map(|offset| (node + 3 * offset) % 5));
+    }
+
+    /// Routes level by level, the plain way: no frontier, no recycled or moved
+    /// route, a new vector per extension.
+    fn levels(seed: u32, max_depth: usize, seal: impl Fn(&[u32]) -> bool) -> Vec<Vec<u32>> {
+        let mut all = alloc::vec![alloc::vec![seed]];
+        let mut level = alloc::vec![alloc::vec![seed]];
+        for _ in 0..max_depth {
+            let mut next_level = Vec::new();
+            for route in &level {
+                if seal(route) {
+                    continue;
+                }
+                let mut successors = Vec::new();
+                complete_from(*route.last().unwrap(), &mut successors);
+                for node in successors.into_iter().filter(|node| !route.contains(node)) {
+                    let mut extended = route.clone();
+                    extended.push(node);
+                    next_level.push(extended);
+                }
+            }
+            all.extend(next_level.iter().cloned());
+            level = next_level;
+        }
+        all
+    }
+
+    #[test]
+    fn extended_routes_match_a_level_by_level_enumeration() {
+        // Sealing routes that end in 4 makes some nodes' last successor sealed
+        // and others' extended, so the route moved into the frontier and the
+        // copies made for earlier successors both get exercised.
+        let seal = |route: &[u32]| route.last() == Some(&4);
+        for max_depth in [0, 1, 2, 4, 5] {
+            let mut walked = Vec::new();
+            let outcome = open_breadth_first_paths::<_, ()>(
+                [0_u32],
+                OpenPathsConfig::new().with_max_depth(max_depth),
+                |node: &u32, out: &mut Vec<u32>| complete_from(*node, out),
+                |event| {
+                    let OpenPathsEvent::Route(route) = event else {
+                        return ControlFlow::Continue(Visit::Descend);
+                    };
+                    walked.push(route.to_vec());
+                    ControlFlow::Continue(if seal(route) {
+                        Visit::Skip
+                    } else {
+                        Visit::Descend
+                    })
+                },
+            );
+            assert_eq!(outcome, None);
+            assert_eq!(walked, levels(0, max_depth, seal), "max depth {max_depth}");
+        }
     }
 }
