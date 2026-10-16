@@ -8,11 +8,12 @@
 
 extern crate alloc;
 use alloc::vec::Vec;
+use smallvec::SmallVec;
 
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
 use crate::edge::EdgeKind;
-use crate::graph::view::GraphView;
+use crate::graph::view::{DenseId, GraphView};
 
 /// A recognized structural pattern, over node identity `N`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +51,12 @@ pub enum CfgPattern<N = BlockId> {
     },
 }
 
+/// The only item `items` yields, or `None` when it yields none or several.
+fn sole<T>(mut items: impl Iterator<Item = T>) -> Option<T> {
+    let first = items.next()?;
+    items.next().is_none().then_some(first)
+}
+
 /// Scan a graph view for topology-level patterns.
 ///
 /// # Examples
@@ -71,81 +78,69 @@ pub fn detect_patterns<G: GraphView>(graph: &G) -> Vec<CfgPattern<G::NodeId>> {
     let mut patterns = Vec::new();
 
     for bid in graph.node_ids() {
-        let succs: Vec<G::NodeId> = graph.successors(bid).collect();
+        let succs: SmallVec<[G::NodeId; 4]> = graph.successors(bid).collect();
 
         if succs.contains(&bid) {
             patterns.push(CfgPattern::SelfLoop { block: bid });
         }
 
         // Diamond detection: two successors that share a single successor.
-        if succs.len() == 2 {
-            let (a, b) = (succs[0], succs[1]);
-            let a_succs: Vec<G::NodeId> = graph.successors(a).collect();
-            let b_succs: Vec<G::NodeId> = graph.successors(b).collect();
-            if a_succs.len() == 1 && b_succs.len() == 1 && a_succs[0] == b_succs[0] {
-                patterns.push(CfgPattern::Diamond {
-                    entry: bid,
-                    arms: [a, b],
-                    merge: a_succs[0],
-                });
-            }
+        if let [a, b] = succs[..]
+            && let Some(merge) = sole(graph.successors(a))
+            && sole(graph.successors(b)) == Some(merge)
+        {
+            patterns.push(CfgPattern::Diamond {
+                entry: bid,
+                arms: [a, b],
+                merge,
+            });
         }
     }
 
     // Chain detection: sequences of single-pred, single-succ nodes.
-    let mut visited = alloc::collections::BTreeSet::new();
+    let mut visited = alloc::vec![false; graph.node_bound()];
+    let mut chain = Vec::new();
+    // `walked[node] == search` once candidate number `search`'s backward walk
+    // has passed `node`; a fresh number resets the whole table.
+    let mut walked = alloc::vec![0_usize; graph.node_bound()];
+    let mut search = 0;
     for bid in graph.node_ids() {
-        if visited.contains(&bid) {
-            continue;
-        }
-        let preds: Vec<G::NodeId> = graph.predecessors(bid).collect();
-        if preds.len() != 1 {
-            continue;
-        }
-        let succs: Vec<G::NodeId> = graph.successors(bid).collect();
-        if succs.len() != 1 {
+        if visited[bid.index()]
+            || sole(graph.predecessors(bid)).is_none()
+            || sole(graph.successors(bid)).is_none()
+        {
             continue;
         }
 
         // Walk backward to find chain start. The walked set guards against
         // isolated cycles (every node one-pred/one-succ), which would
         // otherwise loop forever; a direct self-loop is the len-1 case.
-        let mut walked = alloc::collections::BTreeSet::new();
-        walked.insert(bid);
+        search += 1;
+        walked[bid.index()] = search;
         let mut start = bid;
-        loop {
-            let ps: Vec<G::NodeId> = graph.predecessors(start).collect();
-            if ps.len() != 1 || !walked.insert(ps[0]) {
-                break;
-            }
-            let ss: Vec<G::NodeId> = graph.successors(ps[0]).collect();
-            if ss.len() != 1 {
-                break;
-            }
-            start = ps[0];
+        while let Some(pred) = sole(graph.predecessors(start))
+            && core::mem::replace(&mut walked[pred.index()], search) != search
+            && sole(graph.successors(pred)).is_some()
+        {
+            start = pred;
         }
-        let mut chain = alloc::vec![start];
-        visited.insert(start);
+        chain.clear();
+        chain.push(start);
+        visited[start.index()] = true;
         let mut cur = start;
-        loop {
-            let ss: Vec<G::NodeId> = graph.successors(cur).collect();
-            if ss.len() != 1 {
-                break;
-            }
-            let next = ss[0];
-            if next == cur || visited.contains(&next) {
-                break;
-            }
-            let ps: Vec<G::NodeId> = graph.predecessors(next).collect();
-            if ps.len() != 1 {
-                break;
-            }
+        while let Some(next) = sole(graph.successors(cur))
+            && next != cur
+            && !visited[next.index()]
+            && sole(graph.predecessors(next)).is_some()
+        {
             chain.push(next);
-            visited.insert(next);
+            visited[next.index()] = true;
             cur = next;
         }
         if chain.len() >= 2 {
-            patterns.push(CfgPattern::Chain { blocks: chain });
+            patterns.push(CfgPattern::Chain {
+                blocks: chain.clone(),
+            });
         }
     }
 
@@ -254,6 +249,71 @@ mod tests {
         assert!(
             pats.iter()
                 .any(|p| matches!(p, CfgPattern::SelfLoop { .. }))
+        );
+    }
+
+    #[test]
+    fn detect_patterns_reports_every_pattern_family_in_order() {
+        use crate::graph::store::Graph;
+        let mut graph: Graph<(), ()> = Graph::new();
+        let n: Vec<_> = (0..18).map(|_| graph.add_node(())).collect();
+        let edges = [
+            // A run 0..=3 into a branch, whose arms rejoin at 6.
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 4),
+            (3, 5),
+            (4, 6),
+            (5, 6),
+            // A self-loop inside a tail that keeps going.
+            (6, 6),
+            (6, 7),
+            (7, 8),
+            (8, 9),
+            // A bare two-cycle and a bare self-loop.
+            (10, 11),
+            (11, 10),
+            (12, 12),
+            // Parallel edges to the same arm.
+            (13, 14),
+            (13, 14),
+            (14, 15),
+            // An isolated tail whose head has two predecessors.
+            (16, 17),
+            (9, 17),
+        ];
+        for (source, target) in edges {
+            graph.add_edge(n[source], n[target], ());
+        }
+
+        // Diamonds and self-loops come first in node order, then chains by
+        // first member; a cycle's chain starts where the backward walk stops.
+        assert_eq!(
+            detect_patterns(&graph),
+            alloc::vec![
+                CfgPattern::Diamond {
+                    entry: n[3],
+                    arms: [n[4], n[5]],
+                    merge: n[6]
+                },
+                CfgPattern::SelfLoop { block: n[6] },
+                CfgPattern::SelfLoop { block: n[12] },
+                CfgPattern::Diamond {
+                    entry: n[13],
+                    arms: [n[14], n[14]],
+                    merge: n[15]
+                },
+                CfgPattern::Chain {
+                    blocks: alloc::vec![n[0], n[1], n[2], n[3]]
+                },
+                CfgPattern::Chain {
+                    blocks: alloc::vec![n[7], n[8], n[9]]
+                },
+                CfgPattern::Chain {
+                    blocks: alloc::vec![n[11], n[10]]
+                },
+            ]
         );
     }
 }
