@@ -5,11 +5,12 @@ use alloc::vec::Vec;
 
 use crate::{
     Cfg, DominatorTree, EdgeKind, ExactMemoryAlias, InstrInfo, MemoryAccess, MemoryEvent,
-    MemoryEventInfo, MemoryEventSite, MemorySSA, ProgramPoint, SsaForm,
+    MemoryEventInfo, MemoryEventSite, MemorySSA, ProgramPoint, SsaForm, SsaValue,
 };
 
 use super::{
-    MemoryValueEdge, MemoryValueFlow, MemoryValueFlowError, MemoryValueFlowScratch, MemoryValueRole,
+    MemoryValueEdge, MemoryValueFlow, MemoryValueFlowError, MemoryValueFlowScratch,
+    MemoryValueNode, MemoryValueRole,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -618,4 +619,35 @@ fn the_public_accessors_agree_across_a_reused_scratch() {
             expected.event_node(event.site())
         );
     }
+}
+
+#[test]
+fn every_node_is_found_by_the_value_it_stands_for() {
+    // One variable renamed, and one memory class written, far past the
+    // handful of versions a node table keeps inline.
+    let mut cfg = Cfg::new();
+    let block = cfg.entry();
+    for _ in 0..8 {
+        cfg.block_mut(block).push(Instruction::plain([1], [1]));
+        cfg.block_mut(block).push(Instruction::access(
+            [1],
+            [],
+            MemoryAccess::write(Location::Value, [1]),
+        ));
+    }
+    let (_, memory, flow) = analyses(&cfg);
+
+    for node in flow.graph().node_ids() {
+        let found = match flow.graph().node(node) {
+            MemoryValueNode::Value(value) => flow.value_node(value),
+            MemoryValueNode::Memory(value) => flow.memory_node(value),
+            MemoryValueNode::Event(site) => flow.event_node(*site),
+        };
+        assert_eq!(found, Some(node));
+    }
+    let class = memory.classes().first().expect("the fixture writes memory");
+    assert!(flow.memory_node(&SsaValue::new(class.id(), 8)).is_some());
+    assert_eq!(flow.value_node(&SsaValue::new(1, 99)), None);
+    assert_eq!(flow.value_node(&SsaValue::new(7, 0)), None);
+    assert_eq!(flow.memory_node(&SsaValue::new(class.id(), 99)), None);
 }

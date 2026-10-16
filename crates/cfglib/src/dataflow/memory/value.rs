@@ -6,8 +6,10 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::fmt;
 
+use smallvec::SmallVec;
+
 use crate::memory::MemoryAccess;
-use crate::{BlockId, Graph, NodeId, SsaForm, SsaValue, VariableId};
+use crate::{BlockId, Graph, NodeId, SsaForm, SsaValue, SsaVersion, VariableId};
 
 use super::{MemoryEventSite, MemorySSA, MemorySsaValue};
 
@@ -160,7 +162,63 @@ impl<V: fmt::Debug> core::error::Error for MemoryValueFlowError<V> {}
 #[derive(Debug, PartialEq, Eq)]
 pub struct MemoryValueFlow<V> {
     graph: Graph<MemoryValueNode<V>, MemoryValueEdge>,
-    nodes: BTreeMap<MemoryValueNode<V>, NodeId>,
+    nodes: NodeIndex<V>,
+}
+
+/// The nodes of one variable's or memory class's versions, indexed by version.
+///
+/// Most have a handful of versions, so the table lives inline until one grows
+/// past that.
+type VersionTable = SmallVec<[Option<NodeId>; 4]>;
+
+/// Graph identity of every node, by the value it stands for.
+///
+/// The versions of one variable or memory class are dense, so each keeps a
+/// version-indexed table instead of one ordered-map entry per renamed value.
+/// Only events, which have no dense index, stay in a map.
+#[derive(Debug, PartialEq, Eq)]
+struct NodeIndex<V> {
+    values: BTreeMap<V, VersionTable>,
+    memory: Vec<VersionTable>,
+    events: BTreeMap<MemoryEventSite, NodeId>,
+}
+
+impl<V: VariableId> NodeIndex<V> {
+    const fn new() -> Self {
+        Self {
+            values: BTreeMap::new(),
+            memory: Vec::new(),
+            events: BTreeMap::new(),
+        }
+    }
+
+    fn value(&self, value: &SsaValue<V>) -> Option<NodeId> {
+        self.values
+            .get(&value.variable)
+            .and_then(|table| table.get(value.version))
+            .copied()
+            .flatten()
+    }
+
+    fn memory(&self, value: &MemorySsaValue) -> Option<NodeId> {
+        self.memory
+            .get(value.variable.index())
+            .and_then(|table| table.get(value.version))
+            .copied()
+            .flatten()
+    }
+}
+
+/// The node of `version` in `table`, made by `create` when it has none yet.
+fn version_node(
+    table: &mut VersionTable,
+    version: SsaVersion,
+    create: impl FnOnce() -> NodeId,
+) -> NodeId {
+    if table.len() <= version {
+        table.resize(version + 1, None);
+    }
+    *table[version].get_or_insert_with(create)
 }
 
 /// Every buffer [`MemoryValueFlow::compute_in`] fills, owned by the caller.
@@ -168,9 +226,8 @@ pub struct MemoryValueFlow<V> {
 /// The graph is the answer and its storage has to be allocated. What does not
 /// is the resolution of one event's declared address, stored, and loaded
 /// variables to the SSA values its source instruction gives them: three
-/// vectors per event, and the walk visits every event twice, once to intern
-/// its nodes and once to add its edges. On a procedure with a few thousand
-/// memory events that is most of what the call allocates.
+/// vectors per event. On a procedure with a few thousand memory events that
+/// is most of what the call allocates.
 ///
 /// This holds those three buffers, refilled per event and never released.
 ///
@@ -318,12 +375,11 @@ where
     {
         let mut flow = Self {
             graph: Graph::new(),
-            nodes: BTreeMap::new(),
+            nodes: NodeIndex::new(),
         };
-        flow.add_nodes(scratch, memory, ssa)?;
-        flow.add_value_edges(ssa);
-        flow.add_phi_edges(memory);
-        flow.add_event_edges(scratch, memory, ssa)?;
+        flow.add_values(ssa);
+        flow.add_memory_states(memory);
+        flow.add_events(scratch, memory, ssa)?;
         Ok(flow)
     }
 
@@ -336,19 +392,19 @@ where
     /// Graph identity of an ordinary SSA value participating in memory flow.
     #[must_use]
     pub fn value_node(&self, value: &SsaValue<V>) -> Option<NodeId> {
-        self.node(&MemoryValueNode::Value(value.clone()))
+        self.nodes.value(value)
     }
 
     /// Graph identity of a memory SSA state.
     #[must_use]
     pub fn memory_node(&self, value: &MemorySsaValue) -> Option<NodeId> {
-        self.node(&MemoryValueNode::Memory(value.clone()))
+        self.nodes.memory(value)
     }
 
     /// Graph identity of one exact memory event.
     #[must_use]
     pub fn event_node(&self, site: MemoryEventSite) -> Option<NodeId> {
-        self.node(&MemoryValueNode::Event(site))
+        self.nodes.events.get(&site).copied()
     }
 
     /// Number of ordinary-value, memory-state, and event nodes.
@@ -363,87 +419,46 @@ where
         self.graph.edge_count()
     }
 
-    fn node(&self, node: &MemoryValueNode<V>) -> Option<NodeId> {
-        self.nodes.get(node).copied()
+    fn intern_value(&mut self, value: &SsaValue<V>) -> NodeId {
+        let table = match self.nodes.values.get_mut(&value.variable) {
+            Some(table) => table,
+            None => self.nodes.values.entry(value.variable.clone()).or_default(),
+        };
+        version_node(table, value.version, || {
+            self.graph.add_node(MemoryValueNode::Value(value.clone()))
+        })
     }
 
-    fn intern(&mut self, node: MemoryValueNode<V>) -> NodeId {
-        if let Some(&id) = self.nodes.get(&node) {
-            return id;
+    fn intern_memory(&mut self, value: &MemorySsaValue) -> NodeId {
+        let class = value.variable.index();
+        if self.nodes.memory.len() <= class {
+            self.nodes.memory.resize_with(class + 1, VersionTable::new);
         }
-        let id = self.graph.add_node(node.clone());
-        self.nodes.insert(node, id);
-        id
+        version_node(&mut self.nodes.memory[class], value.version, || {
+            self.graph.add_node(MemoryValueNode::Memory(value.clone()))
+        })
     }
 
-    fn add_nodes<L, F>(
-        &mut self,
-        scratch: &mut MemoryValueFlowScratch<V>,
-        memory: &MemorySSA<L, V, F>,
-        ssa: &SsaForm<V>,
-    ) -> Result<(), MemoryValueFlowError<V>>
-    where
-        L: Clone + Ord,
-        F: Clone + Eq,
-    {
+    fn intern_event(&mut self, site: MemoryEventSite) -> NodeId {
+        *self
+            .nodes
+            .events
+            .entry(site)
+            .or_insert_with(|| self.graph.add_node(MemoryValueNode::Event(site)))
+    }
+
+    /// Adds every ordinary-value node and the dependency edges between them.
+    ///
+    /// Each value is interned once, where its edges are added, so no value is
+    /// looked up again to find the node it already made.
+    fn add_values(&mut self, ssa: &SsaForm<V>) {
+        let mut uses: SmallVec<[NodeId; 4]> = SmallVec::new();
+        let mut defs: SmallVec<[NodeId; 4]> = SmallVec::new();
         for block in ssa.blocks() {
             for phi in &block.phis {
-                self.intern(MemoryValueNode::Value(phi.result.clone()));
-                for (_, operand) in &phi.operands {
-                    self.intern(MemoryValueNode::Value(operand.clone()));
-                }
-            }
-            for instruction in &block.instructions {
-                for value in instruction.uses.iter().chain(&instruction.defs) {
-                    self.intern(MemoryValueNode::Value(value.clone()));
-                }
-            }
-        }
-        for class in memory.classes() {
-            self.intern(MemoryValueNode::Memory(SsaValue::live_in(class.id())));
-        }
-        for phi in memory.phis() {
-            self.intern(MemoryValueNode::Memory(phi.result().clone()));
-            for (_, operand) in phi.operands() {
-                self.intern(MemoryValueNode::Memory(operand.clone()));
-            }
-        }
-        for event in memory.events() {
-            self.intern(MemoryValueNode::Event(event.site()));
-            if let Some(value) = event.read_version() {
-                self.intern(MemoryValueNode::Memory(value.clone()));
-            }
-            if let Some(value) = event.written_version() {
-                self.intern(MemoryValueNode::Memory(value.clone()));
-            }
-            if let Some(value) = event.clobbered_version() {
-                self.intern(MemoryValueNode::Memory(value.clone()));
-            }
-            let instruction = ssa
-                .instruction(event.site().point())
-                .ok_or(MemoryValueFlowError::MissingInstruction { site: event.site() })?;
-            let Some(access) = event.access() else {
-                continue;
-            };
-            scratch.resolve(event.site(), instruction, access)?;
-            for value in scratch
-                .addresses
-                .iter()
-                .chain(&scratch.stored)
-                .chain(&scratch.loaded)
-            {
-                self.intern(MemoryValueNode::Value(value.clone()));
-            }
-        }
-        Ok(())
-    }
-
-    fn add_value_edges(&mut self, ssa: &SsaForm<V>) {
-        for block in ssa.blocks() {
-            for phi in &block.phis {
-                let target = self.intern(MemoryValueNode::Value(phi.result.clone()));
+                let target = self.intern_value(&phi.result);
                 for (predecessor, operand) in &phi.operands {
-                    let source = self.intern(MemoryValueNode::Value(operand.clone()));
+                    let source = self.intern_value(operand);
                     self.graph.add_edge(
                         source,
                         target,
@@ -455,10 +470,16 @@ where
                 }
             }
             for instruction in &block.instructions {
-                for source in &instruction.uses {
-                    let source = self.intern(MemoryValueNode::Value(source.clone()));
-                    for target in &instruction.defs {
-                        let target = self.intern(MemoryValueNode::Value(target.clone()));
+                uses.clear();
+                defs.clear();
+                for value in &instruction.uses {
+                    uses.push(self.intern_value(value));
+                }
+                for value in &instruction.defs {
+                    defs.push(self.intern_value(value));
+                }
+                for &source in &uses {
+                    for &target in &defs {
                         self.graph.add_edge(
                             source,
                             target,
@@ -472,15 +493,20 @@ where
         }
     }
 
-    fn add_phi_edges<L, F>(&mut self, memory: &MemorySSA<L, V, F>)
+    /// Adds every memory-state node a phi or a class's live-in makes, and the
+    /// phi edges between them.
+    fn add_memory_states<L, F>(&mut self, memory: &MemorySSA<L, V, F>)
     where
         L: Clone + Ord,
         F: Clone + Eq,
     {
+        for class in memory.classes() {
+            self.intern_memory(&SsaValue::live_in(class.id()));
+        }
         for phi in memory.phis() {
-            let target = self.intern(MemoryValueNode::Memory(phi.result().clone()));
+            let target = self.intern_memory(phi.result());
             for (predecessor, operand) in phi.operands() {
-                let source = self.intern(MemoryValueNode::Memory(operand.clone()));
+                let source = self.intern_memory(operand);
                 self.graph.add_edge(
                     source,
                     target,
@@ -493,7 +519,12 @@ where
         }
     }
 
-    fn add_event_edges<L, F>(
+    /// Adds every event node, the nodes its access names, and its edges.
+    ///
+    /// An event's memory states are interned before its resolved values, and
+    /// the values in the order their edges are added: address, stored, then
+    /// loaded.
+    fn add_events<L, F>(
         &mut self,
         scratch: &mut MemoryValueFlowScratch<V>,
         memory: &MemorySSA<L, V, F>,
@@ -505,7 +536,14 @@ where
     {
         for event in memory.events() {
             let site = event.site();
-            let event_node = self.intern(MemoryValueNode::Event(site));
+            let event_node = self.intern_event(site);
+            let read = event.read_version().map(|value| self.intern_memory(value));
+            let written = event
+                .written_version()
+                .map(|value| self.intern_memory(value));
+            if let Some(value) = event.clobbered_version() {
+                self.intern_memory(value);
+            }
             let instruction = ssa
                 .instruction(site.point())
                 .ok_or(MemoryValueFlowError::MissingInstruction { site })?;
@@ -513,37 +551,32 @@ where
                 continue;
             };
             scratch.resolve(site, instruction, access)?;
-            for input_index in 0..scratch.addresses.len() {
-                let value = scratch.addresses[input_index].clone();
-                let source = self.intern(MemoryValueNode::Value(value));
+            for (input_index, value) in scratch.addresses.iter().enumerate() {
+                let source = self.intern_value(value);
                 self.graph.add_edge(
                     source,
                     event_node,
                     MemoryValueEdge::Address { site, input_index },
                 );
             }
-            for input_index in 0..scratch.stored.len() {
-                let value = scratch.stored[input_index].clone();
-                let source = self.intern(MemoryValueNode::Value(value));
+            for (input_index, value) in scratch.stored.iter().enumerate() {
+                let source = self.intern_value(value);
                 self.graph.add_edge(
                     source,
                     event_node,
                     MemoryValueEdge::Store { site, input_index },
                 );
             }
-            if let Some(value) = event.read_version() {
-                let source = self.intern(MemoryValueNode::Memory(value.clone()));
+            if let Some(source) = read {
                 self.graph
                     .add_edge(source, event_node, MemoryValueEdge::Read { site });
             }
-            if let Some(value) = event.written_version() {
-                let target = self.intern(MemoryValueNode::Memory(value.clone()));
+            if let Some(target) = written {
                 self.graph
                     .add_edge(event_node, target, MemoryValueEdge::Write { site });
             }
-            for output_index in 0..scratch.loaded.len() {
-                let value = scratch.loaded[output_index].clone();
-                let target = self.intern(MemoryValueNode::Value(value));
+            for (output_index, value) in scratch.loaded.iter().enumerate() {
+                let target = self.intern_value(value);
                 self.graph.add_edge(
                     event_node,
                     target,
