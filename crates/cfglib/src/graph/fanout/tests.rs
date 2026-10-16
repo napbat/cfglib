@@ -181,6 +181,29 @@ fn a_dense_table_keeps_each_keys_arrival_order() {
 }
 
 #[test]
+fn a_dense_table_matches_naive_grouping_with_empty_keys_everywhere() {
+    // Keys 0, 3, 4 and 8 stay empty, so empty runs open, interleave with, and
+    // close the key space; the arrival order of each key's values is the
+    // order of a plain per-key push.
+    let bound = 9;
+    let mut state = 0x2545_f491_u32;
+    let mut pairs = Vec::new();
+    let mut naive = vec![Vec::new(); bound];
+    for value in 0..200_u32 {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let key = [1_usize, 2, 5, 6, 7][(state >> 16) as usize % 5];
+        pairs.push((key, value));
+        naive[key].push(value);
+    }
+
+    let rows = DenseFanout::from_pairs(bound, pairs);
+
+    assert_eq!(rows, DenseFanout::from_grouped(naive));
+    assert_eq!(rows.value_count(), 200);
+    assert!(rows.get(0).is_empty() && rows.get(8).is_empty());
+}
+
+#[test]
 fn a_dense_table_yields_every_key_of_its_space() {
     let rows = DenseFanout::from_pairs(3, [(1_usize, 5_u32)]);
 

@@ -395,7 +395,8 @@ impl<V, K: DenseId> DenseFanout<V, K> {
         let pairs: Vec<(K, V)> = pairs.into_iter().collect();
         // Every run bound is a `u32`, so the total is checked once here,
         // before the counting pass writes it into the offsets column.
-        let value_count = run_bound(pairs.len()) as usize;
+        let total = run_bound(pairs.len());
+        let value_count = total as usize;
         if bound == 0 {
             assert!(
                 pairs.is_empty(),
@@ -404,27 +405,35 @@ impl<V, K: DenseId> DenseFanout<V, K> {
             return Self::default();
         }
 
+        // The offsets column doubles as the placement cursors, so building
+        // needs no column of its own for them: it counts each key's pairs,
+        // turns the counts into the bounds where the runs *end*, and placing
+        // then walks the pairs backwards, each one taking the slot just below
+        // its key's bound. That leaves every bound at its run's start, and the
+        // closing bound is the total.
         let mut offsets = vec![0_u32; bound + 1];
         for (key, _) in &pairs {
             let index = key.index();
             assert!(index < bound, "dense fan-out key is outside 0..{bound}");
-            offsets[index + 1] += 1;
+            offsets[index] += 1;
         }
-        for index in 1..offsets.len() {
-            offsets[index] += offsets[index - 1];
+        let mut end = 0_u32;
+        for count in &mut offsets[..bound] {
+            end += *count;
+            *count = end;
         }
+        offsets[bound] = total;
 
-        // Placing moves each value to the slot its key's cursor names, and a
-        // slot can only be written through an owned `Option`; every slot is
+        // A slot can only be written through an owned `Option`; every slot is
         // written exactly once, because the counting pass reserved one per
-        // pair.
-        let mut cursors: Vec<u32> = offsets[..bound].to_vec();
+        // pair. Backwards placement keeps each key's arrival order: its last
+        // pair takes the highest slot of the run.
         let mut slots: Vec<Option<V>> = Vec::with_capacity(value_count);
         slots.resize_with(value_count, || None);
-        for (key, value) in pairs {
-            let cursor = &mut cursors[key.index()];
-            slots[*cursor as usize] = Some(value);
-            *cursor += 1;
+        for (key, value) in pairs.into_iter().rev() {
+            let start = &mut offsets[key.index()];
+            *start -= 1;
+            slots[*start as usize] = Some(value);
         }
         let values = slots
             .into_iter()
