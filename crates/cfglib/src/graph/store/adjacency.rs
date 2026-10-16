@@ -305,9 +305,16 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
 
     /// Start a walk over one node's adjacency along `axis`.
     ///
+    /// Forced inline for the reason [`adjacent`](Self::adjacent) is.
+    ///
     /// # Panics
     ///
     /// Panics when `node` names no slot in this store.
+    #[inline(always)]
+    #[expect(
+        clippy::inline_always,
+        reason = "an out-of-line call keeps the walk in memory; see `adjacent`"
+    )]
     fn cursor(&self, node: Id<NT>, axis: &Axis<'_>) -> AdjacencyCursor {
         let index = node.index();
         assert!(index < self.node_bound(), "node identity is out of range");
@@ -328,6 +335,24 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         }
     }
 
+    /// Start a walk over `node`'s live edges along `direction`, in insertion
+    /// order.
+    ///
+    /// Forced inline, with [`cursor`](Self::cursor) and the iterator layers
+    /// over it, because the hint is not enough here. A walk is built from
+    /// 4- and 8-byte stores, and any copy of it between frames (a returned
+    /// value moved into the consumer's loop variable) reads it back in 16-byte
+    /// pieces. A load that spans several narrower stores cannot be forwarded,
+    /// so every scan waits for its own start to retire: whether the optimizer
+    /// elided the copy depended on the surrounding code, and where it did not
+    /// a scan cost 15% to 50% more cycles at the same instruction count.
+    /// Inlined, the walk is built where the loop that steps it is, and there
+    /// is nothing to copy.
+    #[inline(always)]
+    #[expect(
+        clippy::inline_always,
+        reason = "a call leaves the walk to be copied out of a return slot, which stalls on store forwarding"
+    )]
     pub(super) fn adjacent(
         &self,
         node: Id<NT>,

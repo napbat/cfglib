@@ -77,6 +77,18 @@ impl Relocations {
         }
     }
 
+    /// The replacement run for `node`, found through the ordered map.
+    ///
+    /// Out of line: a walk start is forced inline everywhere, and the map
+    /// descent would go with it into every scan of a store that has never
+    /// relocated an edge and so never reaches this.
+    #[inline(never)]
+    fn run(&self, node: usize, direction: TraversalDirection) -> Option<&[u32]> {
+        self.runs(direction)
+            .get(&raw_index(node))
+            .map(Vec::as_slice)
+    }
+
     fn runs_mut(&mut self, direction: TraversalDirection) -> &mut BTreeMap<u32, Vec<u32>> {
         match direction {
             TraversalDirection::Outgoing => &mut self.outgoing,
@@ -92,11 +104,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// edge, and nothing at all inside the walk.
     #[inline]
     pub(super) fn overlay(&self, node: usize, direction: TraversalDirection) -> Option<&[u32]> {
-        let relocations = self.relocations.as_deref()?;
-        relocations
-            .runs(direction)
-            .get(&raw_index(node))
-            .map(Vec::as_slice)
+        self.relocations.as_deref()?.run(node, direction)
     }
 
     /// Forget every overlay, which is what a rebuilt index makes true.

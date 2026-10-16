@@ -139,6 +139,10 @@ pub use id::{EdgeId, EdgeTag, Id, IdTag, NodeId, NodeTag};
 pub use renumbering::Renumbering;
 
 /// Narrow a slot count to the dense identity space.
+///
+/// Inlined because every walk start narrows one, and a call there costs more
+/// than the check.
+#[inline]
 fn raw_index(value: usize) -> u32 {
     u32::try_from(value).expect("dense slot count exceeds u32::MAX")
 }
@@ -281,6 +285,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// # Panics
     ///
     /// Panics when the store would exceed the dense identity space.
+    #[inline]
     pub fn add_node(&mut self, payload: N) -> Id<NT> {
         let slot = self.node_bound();
         assert!(
@@ -303,6 +308,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     ///
     /// Panics when either endpoint is out of range or has been removed, or
     /// when the store would exceed the dense identity space.
+    #[inline]
     pub fn add_edge(&mut self, source: Id<NT>, target: Id<NT>, payload: E) -> Id<ET> {
         self.assert_live_endpoint(source, "source");
         self.assert_live_endpoint(target, "target");

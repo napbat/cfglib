@@ -59,6 +59,10 @@ pub enum TraversalDirection {
 /// second public spelling of a direction consumers already pass.
 pub(crate) trait Adjacency: Copy {
     /// Iterate `node`'s neighbors along this axis.
+    ///
+    /// Implementations are inlined into the cores, so the iterator is built
+    /// in the core's own frame instead of returned through a hidden slot and
+    /// copied (see `Graph::adjacent`).
     fn neighbors<G: GraphView>(
         self,
         graph: &G,
@@ -75,6 +79,7 @@ pub(crate) struct Outgoing;
 pub(crate) struct Incoming;
 
 impl Adjacency for Outgoing {
+    #[inline]
     fn neighbors<G: GraphView>(
         self,
         graph: &G,
@@ -85,6 +90,7 @@ impl Adjacency for Outgoing {
 }
 
 impl Adjacency for Incoming {
+    #[inline]
     fn neighbors<G: GraphView>(
         self,
         graph: &G,
