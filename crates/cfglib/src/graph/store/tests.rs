@@ -14,6 +14,8 @@ use crate::graph::view::{GraphView, Rooted};
 use super::{Id, NodeId};
 
 mod model;
+#[cfg(feature = "serde")]
+mod serde_format;
 
 /// Four nodes in a diamond, built and left uncompacted.
 fn diamond() -> (Graph<&'static str, &'static str>, Vec<NodeId>) {
