@@ -133,15 +133,110 @@ pub trait OpenFold {
     fn finish(&mut self, node: &Self::Node, accumulator: Self::Accumulator) -> Option<Self::Value>;
 }
 
+/// The live mark set, with the order its marks were set in.
+///
+/// Isolation is an undo, not a copy: a node that sandboxes its children
+/// records how many marks were set when it was entered, and taking back
+/// everything its subtree added is dropping the marks past that length. A
+/// mark is only ever set when absent, so the log and the set always hold the
+/// same keys.
+struct Marks<K> {
+    set: BTreeSet<K>,
+    log: Vec<K>,
+}
+
+impl<K: Clone + Ord> Marks<K> {
+    const fn new() -> Self {
+        Self {
+            set: BTreeSet::new(),
+            log: Vec::new(),
+        }
+    }
+
+    fn contains(&self, key: &K) -> bool {
+        self.set.contains(key)
+    }
+
+    /// The number of marks set, which is also the position of the next one.
+    fn len(&self) -> usize {
+        self.log.len()
+    }
+
+    /// Sets a mark the caller has checked is absent.
+    fn insert(&mut self, key: K) {
+        self.set.insert(key.clone());
+        self.log.push(key);
+    }
+
+    /// Takes back every mark set after the first `len`.
+    fn truncate(&mut self, len: usize) {
+        while self.log.len() > len {
+            if let Some(key) = self.log.pop() {
+                self.set.remove(&key);
+            }
+        }
+    }
+}
+
+/// The marks an `Isolated` node restores, as lengths of the mark log.
+struct Sandbox {
+    /// The marks as seen at the node's entry, before its own key.
+    entry: usize,
+    /// The same marks plus the node's own key: what each child starts from.
+    with_key: usize,
+}
+
 struct Frame<F: OpenFold> {
     node: F::Node,
-    key: Option<F::Mark>,
     accumulator: F::Accumulator,
-    children: Vec<Option<F::Node>>,
-    next: usize,
-    /// The mark set as seen at this node's entry, for an `Isolated` node.
-    sandbox: Option<BTreeSet<F::Mark>>,
+    /// Where this node's children start on the walk's shared child stack.
+    /// They are pushed in reverse, so the next one to fold is on top, and the
+    /// frame has none left once the stack is back down to `base`.
+    base: usize,
+    sandbox: Option<Sandbox>,
     broke: bool,
+}
+
+/// The state of one walk: its frames, their children, and the live marks.
+struct Walk<F: OpenFold> {
+    stack: Vec<Frame<F>>,
+    /// Every open frame's unfolded children, the deepest frame's on top.
+    pending: Vec<F::Node>,
+    /// The buffer `successors` fills, reused for every node.
+    scratch: Vec<F::Node>,
+    marks: Marks<F::Mark>,
+}
+
+impl<F: OpenFold> Walk<F> {
+    /// Opens a frame for `node`, whose own key (if it has one) is already the
+    /// last mark set; `entry_marks` is how many marks were set before it.
+    fn push_frame(
+        &mut self,
+        fold: &mut F,
+        node: F::Node,
+        accumulator: F::Accumulator,
+        scope: MarkScope,
+        entry_marks: usize,
+    ) {
+        let base = self.pending.len();
+        self.scratch.clear();
+        fold.successors(&node, &mut self.scratch);
+        self.pending.extend(self.scratch.drain(..).rev());
+        // The sandbox restores the marks as seen at entry, before this node's
+        // own key: once an isolated node finishes, a sibling may reach it
+        // again through its own route.
+        let sandbox = (scope == MarkScope::Isolated).then(|| Sandbox {
+            entry: entry_marks,
+            with_key: self.marks.len(),
+        });
+        self.stack.push(Frame {
+            node,
+            accumulator,
+            base,
+            sandbox,
+            broke: false,
+        });
+    }
 }
 
 /// Folds the space reachable from `root` in post-order under `fold`'s rules.
@@ -219,32 +314,41 @@ pub fn open_fold_post_order<F: OpenFold>(
     root: F::Node,
     config: OpenFoldConfig,
 ) -> Option<F::Value> {
-    let mut marks: BTreeSet<F::Mark> = BTreeSet::new();
-    let mut stack: Vec<Frame<F>> = Vec::new();
+    let mut walk = Walk::<F> {
+        stack: Vec::new(),
+        pending: Vec::new(),
+        scratch: Vec::new(),
+        marks: Marks::new(),
+    };
 
     let root_key = fold.mark(&root);
-    if let Some(key) = &root_key {
-        marks.insert(key.clone());
+    if let Some(key) = root_key {
+        walk.marks.insert(key);
     }
     match fold.enter(&root) {
         FoldEnter::Leaf(value) => return value,
         FoldEnter::Fold {
             accumulator,
             marks: scope,
-        } => {
-            push_frame(fold, &mut stack, &marks, root, root_key, accumulator, scope);
-        }
+        } => walk.push_frame(fold, root, accumulator, scope, 0),
     }
 
     let mut result = None;
-    while let Some(frame) = stack.last_mut() {
-        if frame.broke || frame.next >= frame.children.len() {
-            let Some(frame) = stack.pop() else { break };
+    while let Some(frame) = walk.stack.last_mut() {
+        let child = if frame.broke || walk.pending.len() <= frame.base {
+            None
+        } else {
+            walk.pending.pop()
+        };
+        let Some(child) = child else {
+            let Some(frame) = walk.stack.pop() else { break };
+            // A node stopped early leaves its remaining children unfolded.
+            walk.pending.truncate(frame.base);
             let value = fold.finish(&frame.node, frame.accumulator);
             if let Some(sandbox) = frame.sandbox {
-                marks = sandbox;
+                walk.marks.truncate(sandbox.entry);
             }
-            match stack.last_mut() {
+            match walk.stack.last_mut() {
                 Some(parent) => {
                     if fold
                         .absorb(&mut parent.accumulator, &frame.node, value)
@@ -256,29 +360,25 @@ pub fn open_fold_post_order<F: OpenFold>(
                 None => result = value,
             }
             continue;
-        }
+        };
 
-        // An isolated parent resets its children's shared start state:
-        // marks as seen at its own entry, plus its own key.
-        if frame.next > 0
-            && let Some(sandbox) = &frame.sandbox
-        {
-            marks = sandbox.clone();
-            if let Some(key) = &frame.key {
-                marks.insert(key.clone());
-            }
+        // An isolated parent resets its children's shared start state: marks
+        // as seen at its own entry, plus its own key. For its first child
+        // that is the state it already has.
+        if let Some(sandbox) = &frame.sandbox {
+            walk.marks.truncate(sandbox.with_key);
         }
-        let child = frame.children[frame.next].take();
-        frame.next += 1;
-        let Some(child) = child else { continue };
 
         let refused_by_depth = config
             .max_depth
-            .is_some_and(|max_depth| stack.len() > max_depth);
+            .is_some_and(|max_depth| walk.stack.len() > max_depth);
         let child_key = fold.mark(&child);
-        let refused = refused_by_depth || child_key.as_ref().is_some_and(|key| marks.contains(key));
+        let refused = refused_by_depth
+            || child_key
+                .as_ref()
+                .is_some_and(|key| walk.marks.contains(key));
         if refused {
-            if let Some(parent) = stack.last_mut()
+            if let Some(parent) = walk.stack.last_mut()
                 && fold
                     .absorb(&mut parent.accumulator, &child, None)
                     .is_break()
@@ -288,12 +388,13 @@ pub fn open_fold_post_order<F: OpenFold>(
             continue;
         }
 
-        if let Some(key) = &child_key {
-            marks.insert(key.clone());
+        let entry_marks = walk.marks.len();
+        if let Some(key) = child_key {
+            walk.marks.insert(key);
         }
         match fold.enter(&child) {
             FoldEnter::Leaf(value) => {
-                if let Some(parent) = stack.last_mut()
+                if let Some(parent) = walk.stack.last_mut()
                     && fold
                         .absorb(&mut parent.accumulator, &child, value)
                         .is_break()
@@ -304,53 +405,10 @@ pub fn open_fold_post_order<F: OpenFold>(
             FoldEnter::Fold {
                 accumulator,
                 marks: scope,
-            } => {
-                push_frame(
-                    fold,
-                    &mut stack,
-                    &marks,
-                    child,
-                    child_key,
-                    accumulator,
-                    scope,
-                );
-            }
+            } => walk.push_frame(fold, child, accumulator, scope, entry_marks),
         }
     }
     result
-}
-
-fn push_frame<F: OpenFold>(
-    fold: &mut F,
-    stack: &mut Vec<Frame<F>>,
-    marks: &BTreeSet<F::Mark>,
-    node: F::Node,
-    key: Option<F::Mark>,
-    accumulator: F::Accumulator,
-    scope: MarkScope,
-) {
-    let mut successors = Vec::new();
-    fold.successors(&node, &mut successors);
-    let children = successors.into_iter().map(Some).collect();
-    // The sandbox restores the marks as seen at entry, before this node's
-    // own key: once an isolated node finishes, a sibling may reach it again
-    // through its own route.
-    let sandbox = (scope == MarkScope::Isolated).then(|| {
-        let mut sandbox = marks.clone();
-        if let Some(key) = &key {
-            sandbox.remove(key);
-        }
-        sandbox
-    });
-    stack.push(Frame {
-        node,
-        key,
-        accumulator,
-        children,
-        next: 0,
-        sandbox,
-        broke: false,
-    });
 }
 
 #[cfg(test)]
