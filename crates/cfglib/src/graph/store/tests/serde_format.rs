@@ -130,3 +130,29 @@ fn compaction_folds_a_loaded_overlay_into_the_index() {
     let encoded = serde_json::to_string(&decoded).expect("the store serializes");
     assert!(!encoded.contains("relocations"), "{encoded}");
 }
+
+/// The golden with its incoming map replaced, to exercise the loader.
+fn stored_with_incoming(incoming: &str) -> String {
+    let stored = include_str!("../../../../tests/golden/serde/relocated-store.json");
+    let original = r#""incoming":{"2":[],"3":[2,3,1]}"#;
+    assert!(stored.contains(original), "the golden's overlay changed");
+    stored.replace(original, &alloc::format!(r#""incoming":{incoming}"#))
+}
+
+#[test]
+fn overlay_keys_may_arrive_in_any_order() {
+    let (expected, ..) = relocated_store();
+    let decoded: Store = serde_json::from_str(&stored_with_incoming(r#"{"3":[2,3,1],"2":[]}"#))
+        .expect("the reordered encoding loads");
+    assert_same_listings(&decoded, &expected);
+}
+
+#[test]
+fn an_overlay_key_that_cannot_name_a_node_is_rejected() {
+    let error = serde_json::from_str::<Store>(&stored_with_incoming(r#"{"4294967295":[]}"#))
+        .expect_err("no node has the last identity");
+    assert!(
+        error.to_string().contains("dense identity space"),
+        "{error}"
+    );
+}
