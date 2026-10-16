@@ -143,7 +143,7 @@ fn a_branch_into_a_spin_does_not_let_the_exit_post_dominate_it() {
             exits: &["out"],
             cut_roots: &["spin"],
             ipdoms: &[("entry", "X*"), ("spin", "X*"), ("out", "X*")],
-            dependences: &[("entry", "spin"), ("entry", "out")],
+            dependences: &[("entry", "spin"), ("entry", "out"), ("spin", "spin")],
         },
     );
 }
@@ -182,6 +182,7 @@ fn a_flattened_function_with_a_tamper_loop_keeps_its_dispatcher_joins() {
                 ("disp", "tamper"),
                 ("disp", "loop_end"),
                 ("disp", "disp"),
+                ("tamper", "tamper"),
             ],
         },
     );
@@ -315,7 +316,7 @@ fn a_component_of_exit_free_blocks_that_leads_to_another_is_not_cut() {
             exits: &[],
             cut_roots: &["c"],
             ipdoms: &[("entry", "a"), ("a", "b"), ("b", "c"), ("c", "X*")],
-            dependences: &[("b", "a"), ("b", "b")],
+            dependences: &[("b", "a"), ("b", "b"), ("c", "c")],
         },
     );
 }
@@ -343,7 +344,7 @@ fn an_entry_that_only_spins_is_its_own_cut() {
             exits: &[],
             cut_roots: &["entry"],
             ipdoms: &[("entry", "X*")],
-            dependences: &[],
+            dependences: &[("entry", "entry")],
         },
     );
     let post = PostDominatorTree::compute(&EdgeList::new(1, vec![(0, 0)]).graph());

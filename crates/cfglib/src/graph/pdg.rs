@@ -203,4 +203,34 @@ mod tests {
         assert!(slice.contains(&seed));
         assert!(slice.contains(&definition));
     }
+
+    #[test]
+    fn a_block_that_loops_back_to_itself_controls_its_own_predicate_and_instructions() {
+        let mut cfg: Cfg<DfInst> = Cfg::new();
+        let exit = cfg.new_block();
+        cfg.block_mut(cfg.entry()).push(df_def("test", 0));
+        cfg.add_edge(cfg.entry(), cfg.entry(), EdgeKind::ConditionalTrue);
+        cfg.add_edge(cfg.entry(), exit, EdgeKind::ConditionalFalse);
+
+        let graph = program_dependence_graph(&cfg);
+        let predicate = find_node(&graph, DependenceNode::Block(cfg.entry()));
+        let instruction = find_node(
+            &graph,
+            DependenceNode::Instruction(ProgramPoint {
+                block: cfg.entry(),
+                inst_idx: 0,
+            }),
+        );
+        let controls = |source: NodeId, target: NodeId| {
+            graph.edges().any(|edge| {
+                edge.source() == source
+                    && edge.target() == target
+                    && *edge.payload() == DependenceKind::Control
+            })
+        };
+
+        assert!(controls(predicate, predicate));
+        assert!(controls(predicate, instruction));
+        assert!(controls(instruction, predicate));
+    }
 }

@@ -3,17 +3,29 @@
 //! Node `B` is control-dependent on node `A` when `A` selects whether `B`
 //! executes. The resulting graph has one node per source node and an edge
 //! `A -> B` for that relation; node payloads retain the original identity.
+//!
+//! The relation is the one of Pingali and Bilardi: `B` depends on an arm
+//! `A -> T` when `B` post-dominates `T` and does not strictly post-dominate
+//! `A`. A block that branches back to itself is therefore control dependent
+//! on itself.
 
 extern crate alloc;
 use alloc::vec::Vec;
 
-use crate::graph::dominator::{PostDominatorTree, PostNode};
+use crate::graph::dominator::PostDominatorTree;
 use crate::graph::epoch::EpochMarks;
 use crate::graph::store::Graph;
 use crate::graph::view::{DenseId, GraphView};
 
 /// Compute control dependences from a graph view and its post-dominator
 /// tree.
+///
+/// The graph has the edge `A -> B` exactly when `B` is control dependent on
+/// an arm `A -> T` to a successor `T` of `A`, which is when `B`
+/// post-dominates `T` and does not strictly post-dominate `A`. These are the
+/// blocks of [`PostDominatorTree::control_dependents`], and an arm that
+/// leads back to `A` itself gives the edge `A -> A`. Parallel records
+/// contribute one edge, and a block the entry cannot reach has none.
 ///
 /// Returned nodes are allocated in source dense-index order, so a source node
 /// and its graph node have the same dense index even when the view overrides
@@ -47,6 +59,31 @@ use crate::graph::view::{DenseId, GraphView};
 /// assert!(controlled.contains(&left));
 /// assert!(controlled.contains(&right));
 /// ```
+///
+/// A block that branches back to itself decides whether it runs again, so it
+/// is control dependent on itself and the graph has the edge from it to
+/// itself:
+///
+/// ```
+/// use cfglib::{
+///     Cfg, EdgeKind, NodeId, PostDominatorTree, control_dependence_graph,
+/// };
+///
+/// let mut cfg = Cfg::<u32>::new();
+/// let head = cfg.entry();
+/// let exit = cfg.new_block();
+/// cfg.add_edge(head, head, EdgeKind::ConditionalTrue);
+/// cfg.add_edge(head, exit, EdgeKind::ConditionalFalse);
+///
+/// let post_dominators = PostDominatorTree::compute(&cfg);
+/// let dependences = control_dependence_graph(&cfg, &post_dominators);
+/// let head_node = NodeId::from_index(head.index());
+/// let controlled: Vec<_> = dependences
+///     .successors(head_node)
+///     .map(|node| dependences[node])
+///     .collect();
+/// assert_eq!(controlled, [head]);
+/// ```
 #[must_use]
 pub fn control_dependence_graph<G: GraphView>(
     source: &G,
@@ -76,27 +113,10 @@ pub fn control_dependence_graph<G: GraphView>(
         seen_dependents.reset();
         dependents.clear();
         for target in source.successors(controller) {
-            if !post_dominators.contains(target) {
-                continue;
-            }
-            if post_dominators.post_dominates(target, controller) {
-                continue;
-            }
-
-            let immediate_post_dominator = post_dominators.ipdom(controller);
-            let mut dependent = target;
-            loop {
+            for dependent in post_dominators.control_dependents(controller, target) {
                 if !seen_dependents.is_marked(dependent.index()) {
                     seen_dependents.mark(dependent.index());
                     dependents.push(dependent);
-                }
-                match post_dominators.ipdom(dependent) {
-                    Some(next @ PostNode::Node(parent))
-                        if Some(next) != immediate_post_dominator =>
-                    {
-                        dependent = parent;
-                    }
-                    _ => break,
                 }
             }
         }
@@ -241,10 +261,20 @@ mod tests {
         assert_eq!(cdg.edge_count(), 0);
     }
 
+    fn dependences_of(cfg: &Cfg<()>) -> Vec<(BlockId, BlockId)> {
+        let post = PostDominatorTree::compute(cfg);
+        let graph = control_dependence_graph(cfg, &post);
+        graph
+            .edges()
+            .map(|edge| (*graph.node(edge.source()), *graph.node(edge.target())))
+            .collect()
+    }
+
     #[test]
     fn a_branch_into_an_exit_free_loop_still_controls_both_arms() {
         // Without a cut the spinning arm has no post-dominance facts, so the
         // branch would control nothing and a dead-code pass would delete it.
+        // The spin governs only itself, through the arm back into itself.
         let mut cfg: Cfg<()> = Cfg::new();
         let spin = cfg.new_block();
         let out = cfg.new_block();
@@ -258,9 +288,72 @@ mod tests {
             .successors(node(cfg.entry()))
             .map(|dependent| *graph.node(dependent))
             .collect();
+        let spin_controls: BTreeSet<_> = graph
+            .successors(node(spin))
+            .map(|dependent| *graph.node(dependent))
+            .collect();
 
         assert_eq!(controlled, BTreeSet::from([spin, out]));
-        assert_eq!(graph.edge_count(), 2);
+        assert_eq!(spin_controls, BTreeSet::from([spin]));
+        assert_eq!(graph.edge_count(), 3);
+    }
+
+    #[test]
+    fn a_block_that_loops_back_to_itself_is_control_dependent_on_itself() {
+        let mut cfg: Cfg<()> = Cfg::new();
+        let head = cfg.entry();
+        let exit = cfg.new_block();
+        cfg.add_edge(head, head, EdgeKind::ConditionalTrue);
+        cfg.add_edge(head, exit, EdgeKind::ConditionalFalse);
+
+        assert_eq!(dependences_of(&cfg), [(head, head)]);
+    }
+
+    #[test]
+    fn parallel_self_loop_records_give_one_edge() {
+        let mut cfg: Cfg<()> = Cfg::new();
+        let head = cfg.entry();
+        let exit = cfg.new_block();
+        cfg.add_edge(head, head, EdgeKind::ConditionalTrue);
+        cfg.add_edge(head, head, EdgeKind::ConditionalFalse);
+        cfg.add_edge(head, exit, EdgeKind::Fallthrough);
+
+        assert_eq!(dependences_of(&cfg), [(head, head)]);
+    }
+
+    #[test]
+    fn a_self_loop_another_arm_already_governs_still_gives_one_edge() {
+        // `head -> body -> head` reaches `head` through the arm into `body`
+        // as well as through the arm into itself.
+        let mut cfg: Cfg<()> = Cfg::new();
+        let head = cfg.entry();
+        let body = cfg.new_block();
+        let exit = cfg.new_block();
+        cfg.add_edge(head, head, EdgeKind::ConditionalTrue);
+        cfg.add_edge(head, body, EdgeKind::ConditionalFalse);
+        cfg.add_edge(head, exit, EdgeKind::Fallthrough);
+        cfg.add_edge(body, head, EdgeKind::Back);
+
+        assert_eq!(dependences_of(&cfg), [(head, head), (head, body)]);
+    }
+
+    #[test]
+    fn a_self_loop_on_a_branch_arm_adds_only_its_own_edge() {
+        let mut cfg: Cfg<()> = Cfg::new();
+        let branch = cfg.entry();
+        let spinner = cfg.new_block();
+        let plain = cfg.new_block();
+        let merge = cfg.new_block();
+        cfg.add_edge(branch, spinner, EdgeKind::ConditionalTrue);
+        cfg.add_edge(branch, plain, EdgeKind::ConditionalFalse);
+        cfg.add_edge(spinner, spinner, EdgeKind::ConditionalTrue);
+        cfg.add_edge(spinner, merge, EdgeKind::ConditionalFalse);
+        cfg.add_edge(plain, merge, EdgeKind::Fallthrough);
+
+        assert_eq!(
+            dependences_of(&cfg),
+            [(branch, spinner), (branch, plain), (spinner, spinner)]
+        );
     }
 
     #[test]

@@ -295,7 +295,7 @@ A `FunctionView` follows these rules:
 | Topological sort | `topological_sort` | Stable ordering or cycle detection |
 | Dominator tree | `DominatorTree::compute` (rooted views), `compute_from` (explicit root) | Simple Lengauer-Tarjan over any graph view, O(m log n) with explicit stacks. The tree is numbered once in preorder, so `dominates` is O(1) and `subtree`, `preorder`, `level`, `children`, and `nearest_common_dominator` need no extra tables |
 | Reusable dominator scratch | `DominatorTree::compute_in`, `compute_from_in` + `DominatorScratch` | The same tree with the call's working buffers caller-owned, for a pass computing one tree per procedure over a codebase; the scratch holds dense indices, so one instance serves every graph and node-id type |
-| Post-dominator tree | `PostDominatorTree::compute` (rooted views) → `PostDominatorTree<N>`, `PostNode` | Over a virtual exit that every exit joins. Exit-free regions are cut at the blocks closing each loop, so every reachable block has facts independent of successor order. `post_dominates` is O(1); `ipdom`, `nearest_common_post_dominator`, `exits`, `cut_roots`, `reaches_exit`, `subtree`, `children`, and `frontier` (the control-dependence sources of a block) answer from the one numbered tree |
+| Post-dominator tree | `PostDominatorTree::compute` (rooted views) → `PostDominatorTree<N>`, `PostNode` | Over a virtual exit that every exit joins. Exit-free regions are cut at the blocks closing each loop, so every reachable block has facts independent of successor order. `post_dominates` is O(1); `ipdom`, `nearest_common_post_dominator`, `exits`, `cut_roots`, `reaches_exit`, `subtree`, `children`, `frontier` (the control-dependence sources of a block), and `control_dependents` (the blocks control dependent on one arm) answer from the one numbered tree |
 | Reusable post-dominator scratch | `PostDominatorTree::compute_in` + `PostDominatorScratch` | The same tree with the call's working buffers caller-owned, parallel to `DominatorScratch` |
 | Dominance frontiers | `DominanceFrontiers::compute`; `frontier` → `&[N]` | Every block's frontier in one flat run table, read back as a slice in ascending order. For SSA φ-placement |
 | Dominator recompute diff | `DominatorTree::compute_with_diff` | Recompute after a graph edit, reporting the nodes whose idom changed |
@@ -305,7 +305,7 @@ A `FunctionView` follows these rules:
 | Back-edge detection | `find_back_edges` (dominance, any view), `find_back_edges_tagged` (CFG, honors `Back` tags) | |
 | Natural loop detection | `detect_loops` / `detect_loops_tagged` → `Vec<NaturalLoop<N>>` | Header, body, latches, nesting depth |
 | Loop nesting tree | `LoopNestingTree::compute` | Parent/child loop hierarchy |
-| Control dependence graph | `control_dependence_graph` → `Graph<N, ()>` | From post-dominator tree, over any view |
+| Control dependence graph | `control_dependence_graph` → `Graph<N, ()>` | From post-dominator tree, over any view; a block that branches back to itself has the edge to itself |
 | Program dependence graph | `program_dependence_graph` → `Graph<DependenceNode, DependenceKind>` | Control + def-use edges; reverse traversal performs backward slicing |
 | Interval analysis | `IntervalAnalysis::compute` | T1-T2 reduction over rooted views; reducibility test |
 | Reducibility transform | `make_reducible` | Node splitting for irreducible CFGs |
