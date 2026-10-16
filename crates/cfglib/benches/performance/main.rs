@@ -42,7 +42,7 @@ use fixtures::{
     branchy_cfg, branchy_graph, build_conditional_break_chain, build_eight_case_switch_chain,
     build_if_else_chain, build_two_case_switch_chain, empty_chain_cfg, fixture_u32,
     high_fan_in_cfg, independent_constants, irreducible_cfg, linear_cfg, linear_constants,
-    many_exit_cfg, multi_latch_graph, phi_storm_cfg, reverse_id_chain_graph,
+    many_exit_cfg, multi_latch_graph, phi_storm_cfg, reverse_id_chain_graph, unreachable_constants,
     weighted_high_fan_out_cfg, weighted_irreducible_cfg,
 };
 use harness::{BenchmarkSuite, benchmark_case, benchmark_target};
@@ -99,6 +99,8 @@ fn main() {
     let linear_constant_dominators = DominatorTree::compute(&linear_constant_cfg);
     let phi_storm = phi_storm_cfg(32, 128);
     let phi_storm_dominators = DominatorTree::compute(&phi_storm);
+    let unreachable_ssa_cfg = unreachable_constants(256, 256);
+    let unreachable_ssa_dominators = DominatorTree::compute(&unreachable_ssa_cfg);
 
     println!(
         "cfglib synthetic benchmark: {NODE_COUNT} nodes, {} CFG edges, {} graph edges",
@@ -395,6 +397,20 @@ fn main() {
                     .iter()
                     .all(|component| { component.nodes.len() == 1 || component.nodes.len() == 17 })
             );
+        }
+    );
+    bench!(
+        "cfg_build_ssa_unreachable",
+        || SsaForm::compute(&unreachable_ssa_cfg, &unreachable_ssa_dominators),
+        |result: &SsaForm<u32>| {
+            let block_count = 256 + 2 * 256;
+            assert_eq!(result.blocks().len(), block_count);
+            for index in 0..block_count {
+                let block = BlockId::from_index(index);
+                assert_eq!(result.block(block).block, block);
+                assert_eq!(result.block(block).instructions.len(), 1);
+            }
+            assert!(result.max_version(&0) >= block_count);
         }
     );
     bench!(
