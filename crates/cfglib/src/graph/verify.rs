@@ -5,7 +5,7 @@
 //! IDs, and every non-entry reachable block has at least one predecessor.
 
 extern crate alloc;
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -217,12 +217,46 @@ fn verify_adjacency<I, E>(cfg: &Cfg<I, E>, errors: &mut Vec<VerifyError>) {
     }
 }
 
+/// Detects an edge listed twice within one adjacency walk.
+///
+/// Each walk stamps the edges it meets with its own number, so starting the
+/// next walk costs nothing. An identity beyond the edge bound has no stamp
+/// slot and is tracked in `stray` instead.
+struct WalkStamps {
+    stamps: Vec<usize>,
+    stray: BTreeSet<EdgeId>,
+    walk: usize,
+}
+
+impl WalkStamps {
+    fn new(edge_bound: usize) -> Self {
+        Self {
+            stamps: alloc::vec![0; edge_bound],
+            stray: BTreeSet::new(),
+            walk: 0,
+        }
+    }
+
+    fn begin_walk(&mut self) {
+        self.walk += 1;
+        self.stray.clear();
+    }
+
+    /// Records `edge` in the current walk; true when it was already recorded.
+    fn repeats(&mut self, edge: EdgeId) -> bool {
+        match self.stamps.get_mut(edge.index()) {
+            Some(stamp) => core::mem::replace(stamp, self.walk) == self.walk,
+            None => !self.stray.insert(edge),
+        }
+    }
+}
+
 fn verify_unique_adjacency<I, E>(cfg: &Cfg<I, E>, errors: &mut Vec<VerifyError>) {
-    for block_id_ in cfg.block_ids() {
-        let block_id = block_id_;
-        let mut seen = alloc::collections::BTreeSet::new();
+    let mut seen = WalkStamps::new(cfg.edge_bound());
+    for block_id in cfg.block_ids() {
+        seen.begin_walk();
         for edge_id in cfg.outgoing(block_id) {
-            if !seen.insert(edge_id) {
+            if seen.repeats(edge_id) {
                 errors.push(VerifyError {
                     message: alloc::format!(
                         "block {block_id} has duplicate successor edge {edge_id}"
@@ -230,15 +264,59 @@ fn verify_unique_adjacency<I, E>(cfg: &Cfg<I, E>, errors: &mut Vec<VerifyError>)
                 });
             }
         }
-        seen.clear();
+        seen.begin_walk();
         for edge_id in cfg.incoming(block_id) {
-            if !seen.insert(edge_id) {
+            if seen.repeats(edge_id) {
                 errors.push(VerifyError {
                     message: alloc::format!(
                         "block {block_id} has duplicate predecessor edge {edge_id}"
                     ),
                 });
             }
+        }
+    }
+}
+
+/// A `(source, target)` adjacency entry as plain indices.
+type Pair = (usize, usize);
+
+/// Walks the distinct entries of the sorted slice `left` in order, with each
+/// entry's multiplicity in `left` and in the sorted slice `right`.
+fn multiplicities<'a>(
+    left: &'a [Pair],
+    right: &'a [Pair],
+) -> impl Iterator<Item = (Pair, usize, usize)> + 'a {
+    let mut right_runs = right.chunk_by(|a, b| a == b).peekable();
+    left.chunk_by(|a, b| a == b).map(move |run| {
+        let pair = run[0];
+        while right_runs.next_if(|other| other[0] < pair).is_some() {}
+        let mirrored = right_runs
+            .next_if(|other| other[0] == pair)
+            .map_or(0, <[Pair]>::len);
+        (pair, run.len(), mirrored)
+    })
+}
+
+/// Reports every entry whose multiplicity differs between the sorted
+/// `forward` and `reverse` lists: first those present forward, then those
+/// present only in reverse.
+fn report_adjacency_mismatches(forward: &[Pair], reverse: &[Pair], errors: &mut Vec<VerifyError>) {
+    for ((source, target), count, mirrored) in multiplicities(forward, reverse) {
+        if mirrored != count {
+            errors.push(VerifyError {
+                message: alloc::format!(
+                    "adjacency mismatch: {count} successor edge(s) {source}->{target} but {mirrored} predecessor entrie(s)"
+                ),
+            });
+        }
+    }
+    for ((source, target), count, mirrored) in multiplicities(reverse, forward) {
+        if mirrored == 0 {
+            errors.push(VerifyError {
+                message: alloc::format!(
+                    "adjacency mismatch: {count} predecessor entrie(s) {source}->{target} with no successor edge"
+                ),
+            });
         }
     }
 }
@@ -357,38 +435,24 @@ pub fn verify_view<G: RootedView>(graph: &G) -> VerifyReport {
     }
 
     // Forward and reverse adjacency must agree as multisets of (source, target).
-    let mut forward: BTreeMap<(usize, usize), usize> = BTreeMap::new();
-    let mut reverse: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+    let mut forward: Vec<Pair> = Vec::with_capacity(node_count);
+    let mut reverse: Vec<Pair> = Vec::with_capacity(node_count);
     for node in graph.node_ids() {
-        for successor in graph.successors(node) {
-            *forward
-                .entry((node.index(), successor.index()))
-                .or_insert(0) += 1;
-        }
-        for predecessor in graph.predecessors(node) {
-            *reverse
-                .entry((predecessor.index(), node.index()))
-                .or_insert(0) += 1;
-        }
+        forward.extend(
+            graph
+                .successors(node)
+                .map(|successor| (node.index(), successor.index())),
+        );
+        reverse.extend(
+            graph
+                .predecessors(node)
+                .map(|predecessor| (predecessor.index(), node.index())),
+        );
     }
-    for (&(source, target), &count) in &forward {
-        let mirrored = reverse.get(&(source, target)).copied().unwrap_or(0);
-        if mirrored != count {
-            errors.push(VerifyError {
-                message: alloc::format!(
-                    "adjacency mismatch: {count} successor edge(s) {source}->{target} but {mirrored} predecessor entrie(s)"
-                ),
-            });
-        }
-    }
-    for (&(source, target), &count) in &reverse {
-        if !forward.contains_key(&(source, target)) {
-            errors.push(VerifyError {
-                message: alloc::format!(
-                    "adjacency mismatch: {count} predecessor entrie(s) {source}->{target} with no successor edge"
-                ),
-            });
-        }
+    forward.sort_unstable();
+    reverse.sort_unstable();
+    if forward != reverse {
+        report_adjacency_mismatches(&forward, &reverse, &mut errors);
     }
 
     // Every reachable non-root node has a predecessor.
@@ -414,6 +478,14 @@ pub fn verify_view<G: RootedView>(graph: &G) -> VerifyReport {
     VerifyReport { errors }
 }
 
+/// What [`verify_edge_view`] has seen of one edge slot.
+#[derive(Clone, Copy, Default)]
+struct EdgeSlot {
+    live: bool,
+    outgoing: usize,
+    incoming: usize,
+}
+
 /// Validate the node and stable-edge contracts of an edge-aware rooted view.
 ///
 /// In addition to [`verify_view`], this checks dense edge-slot bounds, unique
@@ -426,19 +498,19 @@ where
     G: EdgeView + RootedView,
 {
     let mut result = verify_view(graph);
-    let mut live = BTreeSet::new();
+    let edge_bound = graph.edge_bound();
+    let mut slots = alloc::vec![EdgeSlot::default(); edge_bound];
     for edge_id in graph.edge_ids() {
         let index = edge_id.index();
-        if index >= graph.edge_bound() {
+        if index >= edge_bound {
             result.errors.push(VerifyError {
                 message: alloc::format!(
-                    "edge index {index} out of bounds (edge_bound={})",
-                    graph.edge_bound()
+                    "edge index {index} out of bounds (edge_bound={edge_bound})"
                 ),
             });
             continue;
         }
-        if !live.insert(index) {
+        if core::mem::replace(&mut slots[index].live, true) {
             result.errors.push(VerifyError {
                 message: alloc::format!("edge index {index} appears more than once"),
             });
@@ -457,12 +529,10 @@ where
         }
     }
 
-    let mut outgoing_counts = BTreeMap::new();
-    let mut incoming_counts = BTreeMap::new();
     for node in graph.node_ids() {
         for edge_id in graph.outgoing(node) {
             let index = edge_id.index();
-            if !live.contains(&index) {
+            let Some(slot) = slots.get_mut(index).filter(|slot| slot.live) else {
                 result.errors.push(VerifyError {
                     message: alloc::format!(
                         "node {} has non-live outgoing edge index {index}",
@@ -470,8 +540,8 @@ where
                     ),
                 });
                 continue;
-            }
-            *outgoing_counts.entry(index).or_insert(0) += 1;
+            };
+            slot.outgoing += 1;
             if graph.edge(edge_id).source() != node {
                 result.errors.push(VerifyError {
                     message: alloc::format!(
@@ -484,7 +554,7 @@ where
         }
         for edge_id in graph.incoming(node) {
             let index = edge_id.index();
-            if !live.contains(&index) {
+            let Some(slot) = slots.get_mut(index).filter(|slot| slot.live) else {
                 result.errors.push(VerifyError {
                     message: alloc::format!(
                         "node {} has non-live incoming edge index {index}",
@@ -492,8 +562,8 @@ where
                     ),
                 });
                 continue;
-            }
-            *incoming_counts.entry(index).or_insert(0) += 1;
+            };
+            slot.incoming += 1;
             if graph.edge(edge_id).target() != node {
                 result.errors.push(VerifyError {
                     message: alloc::format!(
@@ -505,9 +575,8 @@ where
             }
         }
     }
-    for edge in live {
-        let outgoing = outgoing_counts.get(&edge).copied().unwrap_or(0);
-        let incoming = incoming_counts.get(&edge).copied().unwrap_or(0);
+    for (edge, slot) in slots.iter().enumerate().filter(|(_, slot)| slot.live) {
+        let (outgoing, incoming) = (slot.outgoing, slot.incoming);
         if outgoing != 1 || incoming != 1 {
             result.errors.push(VerifyError {
                 message: alloc::format!(
@@ -520,300 +589,4 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::edge::EdgeKind;
-    use crate::test_util::ff;
-
-    #[test]
-    fn valid_cfg_passes() {
-        let mut cfg = Cfg::new();
-        let b = cfg.new_block();
-        cfg.block_mut(cfg.entry()).instructions_mut().push(ff("a"));
-        cfg.block_mut(b).instructions_mut().push(ff("b"));
-        cfg.add_edge(cfg.entry(), b, EdgeKind::Fallthrough);
-
-        let result = verify(&cfg);
-        assert!(result.is_ok(), "valid CFG should pass: {:?}", result.errors);
-    }
-
-    #[test]
-    fn single_block_cfg_passes() {
-        let mut cfg = Cfg::new();
-        cfg.block_mut(cfg.entry()).instructions_mut().push(ff("a"));
-        assert!(verify(&cfg).is_ok());
-    }
-
-    #[test]
-    fn diamond_cfg_passes() {
-        let mut cfg = Cfg::new();
-        let a = cfg.new_block();
-        let b = cfg.new_block();
-        let merge = cfg.new_block();
-        cfg.block_mut(cfg.entry()).instructions_mut().push(ff("e"));
-        cfg.add_edge(cfg.entry(), a, EdgeKind::ConditionalTrue);
-        cfg.add_edge(cfg.entry(), b, EdgeKind::ConditionalFalse);
-        cfg.add_edge(a, merge, EdgeKind::Fallthrough);
-        cfg.add_edge(b, merge, EdgeKind::Fallthrough);
-
-        assert!(verify(&cfg).is_ok());
-    }
-
-    #[test]
-    fn merging_a_linear_chain_leaves_one_verifiable_block() {
-        let mut cfg = Cfg::new();
-        let mut previous = cfg.entry();
-        cfg.block_mut(previous).instructions_mut().push(ff("b0"));
-        for _ in 1..8 {
-            let next = cfg.new_block();
-            cfg.block_mut(next).instructions_mut().push(ff("b"));
-            cfg.add_edge(previous, next, EdgeKind::Fallthrough);
-            previous = next;
-        }
-        assert_eq!(cfg.block_count(), 8);
-
-        assert_eq!(crate::merge_blocks(&mut cfg), 7);
-
-        let result = verify(&cfg);
-        assert!(
-            result.is_ok(),
-            "a merged chain is still a valid CFG: {:?}",
-            result.errors
-        );
-        assert_eq!(cfg.block_count(), 1, "the chain collapsed into the entry");
-        assert_eq!(
-            cfg.block_bound(),
-            8,
-            "the consumed blocks keep their identity slots"
-        );
-        assert_eq!(cfg.block(cfg.entry()).instructions().len(), 8);
-    }
-
-    #[test]
-    fn a_diamond_missing_an_arm_survives_every_whole_graph_analysis() {
-        use crate::dataflow::liveness::LivenessProblem;
-        use crate::test_util::{DfInst, df_def, df_use};
-
-        let mut cfg: Cfg<DfInst> = Cfg::new();
-        let left = cfg.new_block();
-        let right = cfg.new_block();
-        let merge = cfg.new_block();
-        cfg.block_mut(cfg.entry()).push(df_def("def", 0));
-        cfg.block_mut(left).push(df_use("left", 0));
-        cfg.block_mut(right).push(df_use("right", 0));
-        cfg.block_mut(merge).push(df_use("merge", 0));
-        cfg.add_edge(cfg.entry(), left, EdgeKind::ConditionalTrue);
-        cfg.add_edge(cfg.entry(), right, EdgeKind::ConditionalFalse);
-        cfg.add_edge(left, merge, EdgeKind::Fallthrough);
-        cfg.add_edge(right, merge, EdgeKind::Fallthrough);
-
-        // Retiring the low-indexed arm leaves a live block whose index sits
-        // above the live count — the shape that a count-sized array truncates.
-        assert!(cfg.remove_block(left));
-        assert_eq!(cfg.block_count(), 3);
-        assert_eq!(cfg.block_bound(), 4);
-
-        let report = verify(&cfg);
-        assert!(
-            report.is_ok(),
-            "a retired slot is not a violation: {:?}",
-            report.errors
-        );
-
-        let dominators = crate::DominatorTree::compute(&cfg);
-        assert_eq!(dominators.idom(merge), Some(right));
-        assert!(!dominators.is_reachable(left));
-
-        let post_dominators = crate::PostDominatorTree::compute(&cfg);
-        assert_eq!(
-            post_dominators.ipdom(cfg.entry()),
-            Some(crate::PostNode::Node(right))
-        );
-        assert_eq!(
-            post_dominators.ipdom(right),
-            Some(crate::PostNode::Node(merge))
-        );
-        assert_eq!(post_dominators.exits(), [merge]);
-
-        let facts = crate::solve_problem(&cfg, &LivenessProblem).expect("liveness solves");
-        assert!(facts.fact_in(merge).contains(&0));
-        assert!(
-            facts.fact_in(left).is_empty(),
-            "a retired slot keeps the bottom fact"
-        );
-
-        let ssa = crate::SsaForm::compute(&cfg, &dominators);
-        assert_eq!(ssa.blocks().len(), cfg.block_bound());
-        assert_eq!(ssa.block(merge).instructions.len(), 1);
-        assert_eq!(ssa.block(left).instructions.len(), 0);
-
-        let reversed = crate::reverse_cfg(&cfg);
-        let reversed_report = verify(&reversed);
-        assert!(
-            reversed_report.is_ok(),
-            "the reverse of a holed CFG verifies: {:?}",
-            reversed_report.errors
-        );
-        assert_eq!(reversed.entry(), merge);
-        assert_eq!(reversed.block_count(), cfg.block_count());
-        assert_eq!(reversed.block_bound(), cfg.block_bound());
-
-        cfg.compact();
-        assert_eq!(cfg.block_bound(), cfg.block_count());
-        assert!(verify(&cfg).is_ok());
-    }
-
-    #[test]
-    fn verify_error_count() {
-        let cfg: Cfg<crate::test_util::MockInst> = Cfg::new();
-        let result = verify(&cfg);
-        assert_eq!(result.error_count(), 0);
-    }
-
-    #[test]
-    fn verify_view_accepts_consistent_consumer_view() {
-        let mut graph = crate::graph::store::Graph::new();
-        let root = graph.add_node(());
-        let child = graph.add_node(());
-        graph.add_edge(root, child, ());
-        graph.add_edge(root, child, ());
-
-        let rooted = crate::graph::view::Rooted::new(&graph, root);
-        assert!(verify_view(&rooted).is_ok());
-    }
-
-    #[test]
-    fn verify_view_reports_one_sided_adjacency() {
-        struct Broken;
-        impl crate::graph::view::GraphView for Broken {
-            type NodeId = usize;
-
-            fn node_bound(&self) -> usize {
-                2
-            }
-
-            fn node_ids(&self) -> impl Iterator<Item = usize> + '_ {
-                0..2
-            }
-
-            fn successors(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
-                (node == 0).then_some(1).into_iter()
-            }
-
-            fn predecessors(&self, _node: usize) -> impl Iterator<Item = usize> + '_ {
-                core::iter::empty()
-            }
-        }
-        impl crate::graph::view::RootedView for Broken {
-            fn root(&self) -> usize {
-                0
-            }
-        }
-
-        let result = verify_view(&Broken);
-        assert!(!result.is_ok());
-        assert!(
-            result
-                .errors
-                .iter()
-                .any(|error| error.message.contains("adjacency mismatch"))
-        );
-        assert!(
-            result
-                .errors
-                .iter()
-                .any(|error| error.message.contains("no predecessors"))
-        );
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum Route {
-        Normal,
-        Handler(u8),
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum SemanticError {
-        ConditionalCardinality {
-            block: BlockId,
-            actual: usize,
-        },
-        HandlerOrder {
-            block: BlockId,
-            expected: u8,
-            actual: u8,
-        },
-    }
-
-    struct RouteValidator;
-
-    impl SemanticValidator<(), Route> for RouteValidator {
-        type Error = SemanticError;
-
-        fn validate_block(
-            &self,
-            cfg: &Cfg<(), Route>,
-            block: BlockId,
-            errors: &mut Vec<Self::Error>,
-        ) {
-            let mut conditional_count = 0;
-            let mut expected_handler = 0;
-            for edge in cfg.outgoing(block) {
-                let edge = cfg.edge(edge);
-                if matches!(
-                    edge.kind(),
-                    EdgeKind::ConditionalTrue | EdgeKind::ConditionalFalse
-                ) {
-                    conditional_count += 1;
-                }
-                if let Route::Handler(actual) = *edge.payload() {
-                    if actual != expected_handler {
-                        errors.push(SemanticError::HandlerOrder {
-                            block,
-                            expected: expected_handler,
-                            actual,
-                        });
-                    }
-                    expected_handler += 1;
-                }
-            }
-            if conditional_count != 0 && conditional_count != 2 {
-                errors.push(SemanticError::ConditionalCardinality {
-                    block,
-                    actual: conditional_count,
-                });
-            }
-        }
-    }
-
-    #[test]
-    fn semantic_hooks_return_typed_cardinality_and_order_errors() {
-        let mut cfg = Cfg::<(), Route>::with_edge_payload();
-        let branch = cfg.new_block();
-        let handler_a = cfg.new_block();
-        let handler_b = cfg.new_block();
-        let entry = cfg.entry();
-        cfg.add_edge_with_payload(entry, branch, EdgeKind::ConditionalTrue, Route::Normal);
-        cfg.add_edge_with_payload(
-            entry,
-            handler_a,
-            EdgeKind::ExceptionHandler,
-            Route::Handler(1),
-        );
-        cfg.add_edge_with_payload(
-            entry,
-            handler_b,
-            EdgeKind::ExceptionHandler,
-            Route::Handler(0),
-        );
-
-        let result = verify_with(&cfg, &RouteValidator);
-        assert!(result.structural.is_ok());
-        assert!(!result.is_ok());
-        assert_eq!(result.semantic_errors.len(), 3);
-        assert!(matches!(
-            result.semantic_errors[2],
-            SemanticError::ConditionalCardinality { actual: 1, .. }
-        ));
-    }
-}
+mod tests;
