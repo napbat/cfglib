@@ -159,6 +159,84 @@ fn linear_resolution_matches_direct_search_and_rejects_branching() {
     );
 }
 
+/// `use x -> a -> b -> c -> def x`, with an edge from every scope to a pop of
+/// another symbol that no path can take, listed before or after the onward
+/// edge.
+fn decoyed_chain(decoy_first: bool) -> (Graph, super::StackNodeId, super::StackNodeId) {
+    let mut graph = Graph::new();
+    let file = graph.add_file("main.rs");
+    let reference = graph
+        .add_push_symbol_node(file, "x", true, "use x")
+        .expect("known file");
+    let decoy = graph
+        .add_pop_symbol_node(file, "y", false, "decoy")
+        .expect("known file");
+    let scopes: alloc::vec::Vec<_> = ["a", "b", "c"]
+        .into_iter()
+        .map(|name| graph.add_scope_node(file, false, name).expect("known file"))
+        .collect();
+    let definition = graph
+        .add_pop_symbol_node(file, "x", true, "def x")
+        .expect("known file");
+    add_edge(&mut graph, reference, scopes[0], 0);
+    for (index, &scope) in scopes.iter().enumerate() {
+        let onward = scopes.get(index + 1).copied().unwrap_or(definition);
+        if decoy_first {
+            add_edge(&mut graph, scope, decoy, 0);
+        }
+        add_edge(&mut graph, scope, onward, 0);
+        if !decoy_first {
+            add_edge(&mut graph, scope, decoy, 0);
+        }
+    }
+    (graph, reference, definition)
+}
+
+#[test]
+fn linear_resolution_agrees_with_direct_search_whichever_edge_comes_last() {
+    let configs = [
+        StackSearchConfig::new(),
+        StackSearchConfig::new().with_max_path_length(2),
+        StackSearchConfig::new().with_max_path_count(3),
+        StackSearchConfig::new().with_max_complete_path_count(0),
+    ];
+    for decoy_first in [true, false] {
+        let (graph, reference, definition) = decoyed_chain(decoy_first);
+        for config in configs {
+            let direct = StackResolution::compute(&graph, reference, config);
+            let linear = StackResolution::try_compute_linear(&graph, reference, config)
+                .expect("the decoy is rejected, so the chain is linear");
+            assert_eq!(linear, direct, "decoy first: {decoy_first}, {config:?}");
+        }
+        let full = StackResolution::try_compute_linear(&graph, reference, configs[0])
+            .expect("the chain is linear");
+        assert_eq!(full.paths().len(), 1);
+        assert_eq!(full.paths()[0].end(), definition);
+        assert_eq!(full.stats().rejected_extension_count, 3);
+    }
+}
+
+#[test]
+fn linear_resolution_cuts_a_cycle_it_walks_into() {
+    let mut graph = Graph::new();
+    let file = graph.add_file("main.rs");
+    let reference = graph
+        .add_push_symbol_node(file, "x", true, "use x")
+        .expect("known file");
+    let a = graph.add_scope_node(file, false, "a").expect("known file");
+    let b = graph.add_scope_node(file, false, "b").expect("known file");
+    add_edge(&mut graph, reference, a, 0);
+    add_edge(&mut graph, a, b, 0);
+    add_edge(&mut graph, b, a, 0);
+
+    let direct = StackResolution::compute(&graph, reference, StackSearchConfig::new());
+    let linear = StackResolution::try_compute_linear(&graph, reference, StackSearchConfig::new())
+        .expect("the cycle has one way on at every step");
+    assert_eq!(linear, direct);
+    assert_eq!(linear.stats().cycle_cut_count, 1);
+    assert!(!linear.is_resolved());
+}
+
 #[test]
 fn greater_edge_precedence_shadows_a_competing_definition() {
     let mut graph = Graph::new();
