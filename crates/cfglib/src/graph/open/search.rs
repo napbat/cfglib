@@ -2,13 +2,95 @@
 
 extern crate alloc;
 
-use alloc::collections::{BTreeSet, VecDeque};
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
+use core::mem;
 use core::ops::ControlFlow;
+use smallvec::SmallVec;
 
 use crate::graph::search::{SearchOrder, Visit, VisitedPolicy};
 
 use super::may_expand;
+
+/// Nodes a walk keeps inline before it allocates: its stack or frontier, and
+/// the marks it has set.
+const INLINE_NODES: usize = 8;
+
+/// The nodes a walk has marked.
+///
+/// The open searches consumers run mostly touch a handful of nodes, where one
+/// linear scan of an inline array costs less than a tree's allocation and
+/// pointer chasing. A walk that outgrows the array moves its marks into a
+/// [`BTreeSet`] once and stays there, so a large walk keeps the logarithmic
+/// lookups the search documents. Both forms answer by the node's `Ord`.
+enum Marks<N> {
+    Few(SmallVec<[N; INLINE_NODES]>),
+    Many(BTreeSet<N>),
+}
+
+/// Marks `node` in the inline list, reporting whether it was unmarked, or hands
+/// `node` back when the list is full.
+fn insert_inline<N: Ord>(nodes: &mut SmallVec<[N; INLINE_NODES]>, node: N) -> Result<bool, N> {
+    if nodes.contains(&node) {
+        Ok(false)
+    } else if nodes.len() < INLINE_NODES {
+        nodes.push(node);
+        Ok(true)
+    } else {
+        Err(node)
+    }
+}
+
+/// The set a full inline list becomes when `node` joins it. Out of line: it
+/// runs once per walk that outgrows the list, and inlining it would bloat
+/// every mark inserted on the hot path.
+#[inline(never)]
+fn spill<N: Ord>(nodes: &mut SmallVec<[N; INLINE_NODES]>, node: N) -> BTreeSet<N> {
+    let mut set: BTreeSet<N> = nodes.drain(..).collect();
+    set.insert(node);
+    set
+}
+
+impl<N: Ord> Marks<N> {
+    fn new() -> Self {
+        Self::Few(SmallVec::new())
+    }
+
+    fn contains(&self, node: &N) -> bool {
+        match self {
+            Self::Few(nodes) => nodes.contains(node),
+            Self::Many(nodes) => nodes.contains(node),
+        }
+    }
+
+    /// Marks `node`, reporting whether it was unmarked.
+    #[inline]
+    fn insert(&mut self, node: N) -> bool {
+        match self {
+            Self::Few(nodes) => match insert_inline(nodes, node) {
+                Ok(inserted) => inserted,
+                Err(node) => {
+                    *self = Self::Many(spill(nodes, node));
+                    true
+                }
+            },
+            Self::Many(nodes) => nodes.insert(node),
+        }
+    }
+
+    fn remove(&mut self, node: &N) {
+        match self {
+            Self::Few(nodes) => {
+                if let Some(at) = nodes.iter().position(|marked| marked == node) {
+                    nodes.swap_remove(at);
+                }
+            }
+            Self::Many(nodes) => {
+                nodes.remove(node);
+            }
+        }
+    }
+}
 
 /// The discipline an [`open_search`] runs under.
 ///
@@ -64,8 +146,9 @@ impl OpenSearchConfig {
 ///
 /// # Semantics
 ///
-/// Identical to [`search`](crate::graph::search::search), with visited marks held in
-/// a `BTreeSet` instead of a dense table:
+/// Identical to [`search`](crate::graph::search::search), with visited marks held
+/// in an ordered set (a short inline list while the walk is small) instead of a
+/// dense table:
 ///
 /// - **Seeds** are visited at depth 0 in the order given; deduplicated under
 ///   [`VisitedPolicy::Global`], each starting a fresh path context under
@@ -131,7 +214,6 @@ pub fn open_search<N: Clone + Ord, B>(
     successors: impl FnMut(&N, &mut Vec<N>),
     visitor: impl FnMut(&N, usize) -> ControlFlow<B, Visit>,
 ) -> Option<B> {
-    let seeds: Vec<N> = seeds.into_iter().collect();
     match (config.order, config.visited) {
         (SearchOrder::DepthFirst, VisitedPolicy::Global) => {
             open_depth_first_global(seeds, config, successors, visitor)
@@ -151,15 +233,17 @@ pub fn open_search<N: Clone + Ord, B>(
 }
 
 fn open_depth_first_global<N: Clone + Ord, B>(
-    seeds: Vec<N>,
+    seeds: impl IntoIterator<Item = N>,
     config: OpenSearchConfig,
     mut successors: impl FnMut(&N, &mut Vec<N>),
     mut visitor: impl FnMut(&N, usize) -> ControlFlow<B, Visit>,
 ) -> Option<B> {
-    let mut visited: BTreeSet<N> = BTreeSet::new();
+    let mut visited = Marks::new();
     // Reversed so the first seed pops first; the same convention applies to
     // successors below, so push order is expansion order.
-    let mut stack: Vec<(N, usize)> = seeds.into_iter().rev().map(|seed| (seed, 0)).collect();
+    let mut stack: SmallVec<[(N, usize); INLINE_NODES]> =
+        seeds.into_iter().map(|seed| (seed, 0)).collect();
+    stack.reverse();
     let mut discovered = Vec::new();
 
     while let Some((node, depth)) = stack.pop() {
@@ -195,17 +279,17 @@ enum PathStep<N> {
 }
 
 fn open_depth_first_path<N: Clone + Ord, B>(
-    seeds: Vec<N>,
+    seeds: impl IntoIterator<Item = N>,
     config: OpenSearchConfig,
     mut successors: impl FnMut(&N, &mut Vec<N>),
     mut visitor: impl FnMut(&N, usize) -> ControlFlow<B, Visit>,
 ) -> Option<B> {
-    let mut on_path: BTreeSet<N> = BTreeSet::new();
-    let mut stack: Vec<PathStep<N>> = seeds
+    let mut on_path = Marks::new();
+    let mut stack: SmallVec<[PathStep<N>; INLINE_NODES]> = seeds
         .into_iter()
-        .rev()
         .map(|seed| PathStep::Enter(seed, 0))
         .collect();
+    stack.reverse();
     let mut discovered = Vec::new();
 
     while let Some(step) = stack.pop() {
@@ -242,36 +326,46 @@ fn open_depth_first_path<N: Clone + Ord, B>(
 }
 
 fn open_breadth_first_global<N: Clone + Ord, B>(
-    seeds: Vec<N>,
+    seeds: impl IntoIterator<Item = N>,
     config: OpenSearchConfig,
     mut successors: impl FnMut(&N, &mut Vec<N>),
     mut visitor: impl FnMut(&N, usize) -> ControlFlow<B, Visit>,
 ) -> Option<B> {
-    let mut visited: BTreeSet<N> = BTreeSet::new();
-    let mut queue: VecDeque<(N, usize)> = VecDeque::new();
+    let mut visited = Marks::new();
+    // The frontier a first-in first-out queue would hold, one depth at a time:
+    // every node of one depth precedes every node of the next in discovery
+    // order, so draining a level and filling the following one visits nodes in
+    // the queue's order without storing a depth beside each node.
+    let mut level: SmallVec<[N; INLINE_NODES]> = SmallVec::new();
     for seed in seeds {
         if visited.insert(seed.clone()) {
-            queue.push_back((seed, 0));
+            level.push(seed);
         }
     }
+    let mut following: SmallVec<[N; INLINE_NODES]> = SmallVec::new();
     let mut discovered = Vec::new();
+    let mut depth = 0;
 
-    while let Some((node, depth)) = queue.pop_front() {
-        match visitor(&node, depth) {
-            ControlFlow::Break(value) => return Some(value),
-            ControlFlow::Continue(Visit::Skip) => continue,
-            ControlFlow::Continue(Visit::Descend) => {}
-        }
-        if !may_expand(config.max_depth, depth) {
-            continue;
-        }
-        discovered.clear();
-        successors(&node, &mut discovered);
-        for next in discovered.drain(..) {
-            if visited.insert(next.clone()) {
-                queue.push_back((next, depth + 1));
+    while !level.is_empty() {
+        for node in level.drain(..) {
+            match visitor(&node, depth) {
+                ControlFlow::Break(value) => return Some(value),
+                ControlFlow::Continue(Visit::Skip) => continue,
+                ControlFlow::Continue(Visit::Descend) => {}
+            }
+            if !may_expand(config.max_depth, depth) {
+                continue;
+            }
+            discovered.clear();
+            successors(&node, &mut discovered);
+            for next in discovered.drain(..) {
+                if visited.insert(next.clone()) {
+                    following.push(next);
+                }
             }
         }
+        mem::swap(&mut level, &mut following);
+        depth += 1;
     }
 
     None

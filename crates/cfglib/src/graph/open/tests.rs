@@ -326,6 +326,75 @@ fn the_open_search_matches_the_dense_search_node_for_node() {
     }
 }
 
+/// Nodes `0..count`, each with edges to the next two: a diamond at every step,
+/// so a walk meets each node along many routes.
+fn skip_chain(count: usize) -> Graph<(), ()> {
+    let mut graph = Graph::<(), ()>::new();
+    let nodes: Vec<_> = (0..count).map(|_| graph.add_node(())).collect();
+    for (index, &node) in nodes.iter().enumerate() {
+        for onward in nodes.iter().skip(index + 1).take(2) {
+            graph.add_edge(node, *onward, ());
+        }
+    }
+    graph
+}
+
+#[test]
+fn the_open_search_matches_the_dense_one_past_its_inline_marks() {
+    // Global marks reach 40 nodes and 13 seeds; path marks go 14 deep. Both
+    // pass the handful of marks a small walk keeps inline.
+    let cases = [
+        (SearchOrder::DepthFirst, VisitedPolicy::Global, 40),
+        (SearchOrder::BreadthFirst, VisitedPolicy::Global, 40),
+        (SearchOrder::DepthFirst, VisitedPolicy::Path, 14),
+    ];
+    for (order, visited, count) in cases {
+        let graph = skip_chain(count);
+        let seeds: Vec<usize> = (0..12).chain([3, 3]).collect();
+        let mut dense = Vec::new();
+        let outcome = search(
+            &graph,
+            seeds.iter().map(|&seed| NodeId::from_index(seed)),
+            SearchConfig {
+                order,
+                visited,
+                direction: TraversalDirection::Outgoing,
+                max_depth: None,
+            },
+            |node, depth| {
+                dense.push((node.index(), depth));
+                ControlFlow::<(), _>::Continue(Visit::Descend)
+            },
+        );
+        assert_eq!(outcome, None);
+
+        let mut open = Vec::new();
+        let outcome = open_search(
+            seeds.iter().copied(),
+            OpenSearchConfig {
+                order,
+                visited,
+                max_depth: None,
+            },
+            |node: &usize, out: &mut Vec<usize>| {
+                out.extend(
+                    graph
+                        .successors(NodeId::from_index(*node))
+                        .map(NodeId::index),
+                );
+            },
+            |node, depth| {
+                open.push((*node, depth));
+                ControlFlow::<(), _>::Continue(Visit::Descend)
+            },
+        );
+        assert_eq!(outcome, None);
+
+        assert!(open.len() >= count, "{order:?} {visited:?}");
+        assert_eq!(dense, open, "{order:?} {visited:?}");
+    }
+}
+
 /// An [`OpenDfsEvent`] projected to owned data. The events themselves
 /// borrow the walk's frontier, so a pinned sequence has to be copied out.
 #[derive(Debug, Clone, PartialEq, Eq)]
