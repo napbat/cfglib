@@ -105,13 +105,15 @@ impl CfgProfile {
 /// Set uniform edge weights on `cfg` (equal probability for all successors).
 pub fn set_uniform_edge_weights<I>(cfg: &mut Cfg<I>) {
     let block_ids: Vec<BlockId> = cfg.block_ids().collect();
+    let mut succs = Vec::new();
     for bid in block_ids {
-        let succs: Vec<_> = cfg.outgoing(bid).collect();
+        succs.clear();
+        succs.extend(cfg.outgoing(bid));
         if succs.is_empty() {
             continue;
         }
         let w = 1.0 / crate::usize_to_f64(succs.len());
-        for eid in succs {
+        for &eid in &succs {
             cfg.edge_mut(eid).set_weight(Some(w));
         }
     }
@@ -139,6 +141,31 @@ mod tests {
         assert_eq!(profile.edge_weights.len(), 2);
         for &w in profile.edge_weights.values() {
             assert!((w - 0.5).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn uniform_weights_follow_each_blocks_own_out_degree() {
+        let mut cfg = Cfg::<u32>::new();
+        let entry = cfg.entry();
+        let [a, b, c, d] = core::array::from_fn(|_| cfg.new_block());
+        cfg.add_edge(entry, a, EdgeKind::ConditionalTrue);
+        cfg.add_edge(entry, b, EdgeKind::ConditionalFalse);
+        cfg.add_edge(entry, c, EdgeKind::IndirectJump);
+        cfg.add_edge(a, d, EdgeKind::Fallthrough);
+        cfg.add_edge(b, d, EdgeKind::Fallthrough);
+        set_uniform_edge_weights(&mut cfg);
+
+        let mut weights: Vec<_> = cfg
+            .edges()
+            .map(|edge| (edge.source(), edge.target(), edge.weight()))
+            .collect();
+        weights.sort_unstable_by_key(|&(source, target, _)| (source, target));
+        assert_eq!(weights.len(), 5);
+        for (source, _, weight) in weights {
+            let expected = if source == entry { 1.0 / 3.0 } else { 1.0 };
+            let weight = weight.expect("every edge of a block with successors is weighted");
+            assert!((weight - expected).abs() < 1e-12, "{source}: {weight}");
         }
     }
 

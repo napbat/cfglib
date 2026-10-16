@@ -112,6 +112,32 @@ fn leaders_split_at_targets_and_after_terminators() {
 }
 
 #[test]
+fn instruction_blocks_maps_every_address_to_the_block_holding_it() {
+    let instructions = vec![
+        inst(0, Flow::Conditional { target: 3 }),
+        inst(1, Flow::Next),
+        inst(2, Flow::Next),
+        inst(3, Flow::Return),
+    ];
+    let graph =
+        build_address_cfg(instructions, &[], AddressCfgOptions::default(), payload).unwrap();
+
+    let mut expected = Vec::new();
+    for block in graph.cfg.block_ids() {
+        for instruction in graph.cfg.block(block).instructions() {
+            expected.push((instruction.address(), block));
+        }
+    }
+    expected.sort_unstable();
+    let mapped: Vec<_> = graph
+        .instruction_blocks
+        .iter()
+        .map(|(&address, &block)| (address, block))
+        .collect();
+    assert_eq!(mapped, expected);
+}
+
+#[test]
 fn switches_and_calls_produce_keyed_and_continuation_edges() {
     let instructions = vec![
         inst(

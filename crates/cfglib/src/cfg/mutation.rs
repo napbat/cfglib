@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 
 use crate::block::{BasicBlock, BlockId};
 use crate::edge::{Edge, EdgeId, EdgeKind};
+use crate::graph::traverse::TraversalDirection;
 use crate::rewrite::Rewrite;
 
 use super::{Cfg, SplitPointError};
@@ -321,15 +322,13 @@ impl<I, E> Cfg<I, E> {
         if old == new_target {
             return;
         }
-        let incoming: Vec<EdgeId> = self.incoming(old).collect();
-        for &edge in &incoming {
-            self.graph.redirect_edge_target(edge, new_target);
-        }
         if let Some(mapping) = mapping {
-            for edge in incoming {
+            for edge in self.incoming(old) {
                 mapping.record_edge(edge, [edge]);
             }
         }
+        self.graph
+            .move_adjacency(old, new_target, TraversalDirection::Incoming);
     }
 
     /// Redirect one edge's source while retaining its identity and payload.
@@ -398,10 +397,8 @@ impl<I, E> Cfg<I, E> {
         if old == new_source {
             return;
         }
-        let outgoing: Vec<EdgeId> = self.outgoing(old).collect();
-        for edge in outgoing {
-            self.graph.redirect_edge_source(edge, new_source);
-        }
+        self.graph
+            .move_adjacency(old, new_source, TraversalDirection::Outgoing);
     }
 
     /// Mutable access to an edge's kind, weight, and consumer payload.

@@ -11,7 +11,8 @@ use crate::dataflow::cfg_view::CfgView;
 use crate::{BlockId, Cfg, DominatorTree, InstrInfo, ProgramPoint, SsaForm, SsaValue, VariableId};
 
 use crate::memory::{
-    MemoryAccess, MemoryAccessKind, MemoryAtomicity, MemoryEvent, MemoryEventInfo, MemoryOperations,
+    MemoryAccess, MemoryAccessKind, MemoryAtomicity, MemoryEvent, MemoryEventInfo,
+    MemoryOperations, MemoryTraceEntry,
 };
 
 use shadow::{ShadowInstruction, build_location_classes, build_shadow_cfg};
@@ -449,7 +450,14 @@ where
         let shadow = build_shadow_cfg(cfg, scratch.trace.entries(), &class_by_location);
         let dominators = DominatorTree::compute_in(&mut scratch.dominators, &shadow);
         let ssa = SsaForm::compute_in(&mut scratch.ssa, &shadow, &dominators);
-        Self::from_shadow_ssa(classes, class_by_location, cfg, &shadow, &ssa)
+        Self::from_shadow_ssa(
+            classes,
+            class_by_location,
+            cfg,
+            scratch.trace.entries(),
+            &shadow,
+            &ssa,
+        )
     }
 
     /// Alias classes in deterministic identity order.
@@ -653,7 +661,8 @@ where
         classes: Vec<MemoryLocationClass<L>>,
         class_by_location: BTreeMap<L, MemoryClassId>,
         cfg: &G,
-        shadow: &Cfg<ShadowInstruction<L, V, F>>,
+        trace: &[MemoryTraceEntry<L, V, F>],
+        shadow: &Cfg<ShadowInstruction>,
         ssa: &SsaForm<MemoryClassId>,
     ) -> Self {
         let mut phis = Vec::new();
@@ -725,13 +734,14 @@ where
                 let Some(source) = &shadow_instructions[instruction_index].event else {
                     continue;
                 };
+                let entry = &trace[source.trace_index];
                 let input = renamed.uses.first().cloned();
                 let output = renamed.defs.first().cloned();
-                let reads = source.event.reads();
-                let writes = source.event.writes();
+                let reads = entry.event().reads();
+                let writes = entry.event().writes();
                 let event = MemorySSAEvent {
-                    site: source.site,
-                    event: source.event.clone(),
+                    site: MemoryEventSite::new(entry.point(), entry.event_index()),
+                    event: entry.event().clone(),
                     class: source.class,
                     read_version: reads.then(|| {
                         input

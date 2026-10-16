@@ -299,3 +299,174 @@ fn unmarked_nodes_fold_on_every_reach() {
     );
     assert_eq!(fold.folded, [0, 1, 3, 2, 3]);
 }
+
+/// A fold whose nodes each choose their own mark scope and say whether they
+/// stop after their first child, recording what each node absorbed. Every
+/// node folds to itself, so a refused child shows as an absorbed `None`.
+struct Scoped<'a> {
+    children: &'a [&'a [usize]],
+    leaves: &'a [bool],
+    scopes: &'a [MarkScope],
+    stops: &'a [bool],
+    entered: Vec<usize>,
+    absorbed: Vec<(usize, bool)>,
+}
+
+impl<'a> Scoped<'a> {
+    fn new(
+        children: &'a [&'a [usize]],
+        leaves: &'a [bool],
+        scopes: &'a [MarkScope],
+        stops: &'a [bool],
+    ) -> Self {
+        Self {
+            children,
+            leaves,
+            scopes,
+            stops,
+            entered: Vec::new(),
+            absorbed: Vec::new(),
+        }
+    }
+}
+
+impl OpenFold for Scoped<'_> {
+    type Node = usize;
+    type Mark = usize;
+    type Value = usize;
+    type Accumulator = usize;
+
+    fn successors(&mut self, node: &usize, out: &mut Vec<usize>) {
+        out.extend_from_slice(self.children[*node]);
+    }
+
+    fn mark(&mut self, node: &usize) -> Option<usize> {
+        Some(*node)
+    }
+
+    fn enter(&mut self, node: &usize) -> FoldEnter<usize, usize> {
+        self.entered.push(*node);
+        if self.leaves[*node] {
+            FoldEnter::Leaf(Some(*node))
+        } else {
+            FoldEnter::Fold {
+                accumulator: *node,
+                marks: self.scopes[*node],
+            }
+        }
+    }
+
+    fn absorb(
+        &mut self,
+        accumulator: &mut usize,
+        child: &usize,
+        value: Option<usize>,
+    ) -> ControlFlow<()> {
+        self.absorbed.push((*child, value.is_some()));
+        if self.stops[*accumulator] {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    }
+
+    fn finish(&mut self, _node: &usize, accumulator: usize) -> Option<usize> {
+        Some(accumulator)
+    }
+}
+
+#[test]
+fn an_isolated_parent_forgets_a_leafs_mark_between_children() {
+    // 0 reaches the leaf 1 twice. Persistent marks refuse the second reach; an
+    // isolated parent starts each child from its own entry marks, so the leaf
+    // answers both times.
+    let children: &[&[usize]] = &[&[1, 1], &[]];
+    let leaves = &[false, true];
+    let stops = &[false, false];
+
+    let mut isolated = Scoped::new(children, leaves, &[MarkScope::Isolated; 2], stops);
+    assert_eq!(
+        open_fold_post_order(&mut isolated, 0, OpenFoldConfig::new()),
+        Some(0)
+    );
+    assert_eq!(isolated.absorbed, [(1, true), (1, true)]);
+
+    let mut shared = Scoped::new(children, leaves, &[MarkScope::Shared; 2], stops);
+    assert_eq!(
+        open_fold_post_order(&mut shared, 0, OpenFoldConfig::new()),
+        Some(0)
+    );
+    assert_eq!(shared.absorbed, [(1, true), (1, false)]);
+}
+
+#[test]
+fn an_isolated_ancestor_takes_back_what_a_shared_subtree_marked() {
+    // 0 is isolated; 1 and 2 are shared and both fold the leaf 3. What 1's
+    // subtree marked (its own key and 3) is gone before 2 starts, so 2's
+    // subtree folds 3 too instead of refusing it.
+    let children: &[&[usize]] = &[&[1, 2], &[3], &[3], &[]];
+    let leaves = &[false, false, false, true];
+    let scopes = &[
+        MarkScope::Isolated,
+        MarkScope::Shared,
+        MarkScope::Shared,
+        MarkScope::Shared,
+    ];
+    let mut fold = Scoped::new(children, leaves, scopes, &[false; 4]);
+    assert_eq!(
+        open_fold_post_order(&mut fold, 0, OpenFoldConfig::new()),
+        Some(0)
+    );
+    assert_eq!(fold.entered, [0, 1, 3, 2, 3]);
+    assert_eq!(fold.absorbed, [(3, true), (1, true), (3, true), (2, true)]);
+}
+
+#[test]
+fn an_isolated_node_takes_back_its_own_key_and_its_subtrees_when_it_finishes() {
+    // 0 is shared and reaches 1 twice around the leaf 3. 1 is isolated: its
+    // subtree marks 2, and once 1 finishes that mark and 1's own key are gone,
+    // so the second reach of 1 folds it (and 2) again. Marks 0 itself set
+    // before — 1's first key, then the leaf 3 — stay.
+    let children: &[&[usize]] = &[&[1, 3, 1, 3], &[2], &[], &[]];
+    let leaves = &[false, false, true, true];
+    let scopes = &[
+        MarkScope::Shared,
+        MarkScope::Isolated,
+        MarkScope::Shared,
+        MarkScope::Shared,
+    ];
+    let mut fold = Scoped::new(children, leaves, scopes, &[false; 4]);
+    assert_eq!(
+        open_fold_post_order(&mut fold, 0, OpenFoldConfig::new()),
+        Some(0)
+    );
+    assert_eq!(fold.entered, [0, 1, 2, 3, 1, 2]);
+    assert_eq!(
+        fold.absorbed,
+        [
+            (2, true),
+            (1, true),
+            (3, true),
+            (2, true),
+            (1, true),
+            (3, false)
+        ]
+    );
+}
+
+#[test]
+fn a_stopped_node_leaves_its_children_to_no_one_else() {
+    // 1 stops after its first child, 2, leaving 3 unfolded. When 1 finishes
+    // the walk resumes with 0's next child, 4 — not with 1's leftover 3.
+    let children: &[&[usize]] = &[&[1, 4], &[2, 3], &[], &[], &[]];
+    let leaves = &[false, false, true, true, true];
+    let scopes = &[MarkScope::Shared; 5];
+    let stops = &[false, true, false, false, false];
+    let mut fold = Scoped::new(children, leaves, scopes, stops);
+    assert_eq!(
+        open_fold_post_order(&mut fold, 0, OpenFoldConfig::new()),
+        Some(0)
+    );
+    assert_eq!(fold.entered, [0, 1, 2, 4]);
+    assert_eq!(fold.absorbed, [(2, true), (1, true), (4, true)]);
+}

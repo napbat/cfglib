@@ -271,8 +271,16 @@ impl<S: Clone + Eq> StackResolution<S> {
                 .max_path_length
                 .is_some_and(|limit| path.len() >= limit);
             let mut next = None;
-            for edge in graph.outgoing(path.end()) {
-                if path.contains_edge(edge) {
+            let end = path.end();
+            let mut edges = graph.outgoing(end).peekable();
+            // The prefix is copied only for an extension that a later edge
+            // will extend again; the last one consumes it.
+            let mut held = Some(path);
+            while let Some(edge) = edges.next() {
+                let Some(current) = &held else {
+                    unreachable!("the prefix is held until the last outgoing edge consumes it")
+                };
+                if current.contains_edge(edge) {
                     stats.cycle_cut_count += 1;
                     continue;
                 }
@@ -280,12 +288,20 @@ impl<S: Clone + Eq> StackResolution<S> {
                     stats.path_length_limited = true;
                     continue;
                 }
-                let Ok(candidate) = path.clone().append_owned(graph, edge) else {
+                let base = if edges.peek().is_some() {
+                    current.clone()
+                } else {
+                    let Some(prefix) = held.take() else {
+                        unreachable!("the prefix is held until the last outgoing edge consumes it")
+                    };
+                    prefix
+                };
+                let Ok(candidate) = base.append_owned(graph, edge) else {
                     stats.rejected_extension_count += 1;
                     continue;
                 };
                 if next.is_some() {
-                    return Err(StackLinearResolutionError::MultipleEdges { node: path.end() });
+                    return Err(StackLinearResolutionError::MultipleEdges { node: end });
                 }
                 if candidate.is_complete(graph) {
                     stats.complete_path_count += 1;

@@ -78,10 +78,10 @@ where
         let label = labels[node.index()]
             .as_ref()
             .expect("the candidate label was just stored");
-        let adjacency: Vec<_> = if forward {
-            graph.outgoing(node).collect()
+        let adjacency = if forward {
+            graph.outgoing(node)
         } else {
-            graph.incoming(node).collect()
+            graph.incoming(node)
         };
         for edge_id in adjacency {
             let edge = graph.edge(edge_id);

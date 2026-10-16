@@ -254,40 +254,6 @@ fn breadth_first_with_path_marks_is_rejected() {
     );
 }
 
-#[test]
-fn follow_stops_at_the_end_the_bound_and_the_cycle() {
-    let chain = |node: &u32| (*node < 3).then(|| node + 1);
-    assert_eq!(follow(0, 16, chain), 3, "runs out of steps to take");
-    assert_eq!(follow(0, 2, chain), 2, "the hop bound stops it");
-    assert_eq!(
-        follow(9, 16, chain),
-        9,
-        "a seed with no step is its own answer"
-    );
-
-    // The guard is the whole path, not the seed: `0 -> 1 -> 2 -> 3 -> 1`
-    // closes on a middle node and never returns to where it started.
-    let lasso = |node: &u32| Some(if *node == 3 { 1 } else { node + 1 });
-    assert_eq!(follow(0, 16, lasso), 3);
-    assert_eq!(follow_path(0, 16, lasso), vec![0, 1, 2, 3]);
-}
-
-#[test]
-fn follow_path_returns_the_chain_including_the_seed() {
-    let chain = |node: &u32| (*node < 3).then(|| node + 1);
-    assert_eq!(follow_path(0, 16, chain), vec![0, 1, 2, 3]);
-    assert_eq!(follow_path(0, 2, chain), vec![0, 1, 2]);
-    assert_eq!(follow_path(0, 0, chain), vec![0]);
-    assert_eq!(follow_path(9, 16, chain), vec![9]);
-    // `follow` is the last node of exactly this chain.
-    for hops in 0..5 {
-        assert_eq!(
-            Some(follow(0, hops, chain)),
-            follow_path(0, hops, chain).pop()
-        );
-    }
-}
-
 /// `a -> b`, `a -> c`, `b -> d`, `c -> d`, `d -> a`.
 fn dense_diamond() -> (Graph<(), ()>, [NodeId; 4]) {
     let mut graph = Graph::<(), ()>::new();
@@ -357,6 +323,75 @@ fn the_open_search_matches_the_dense_search_node_for_node() {
                 assert_eq!(dense, open, "{order:?} {visited:?} {max_depth:?}");
             }
         }
+    }
+}
+
+/// Nodes `0..count`, each with edges to the next two: a diamond at every step,
+/// so a walk meets each node along many routes.
+fn skip_chain(count: usize) -> Graph<(), ()> {
+    let mut graph = Graph::<(), ()>::new();
+    let nodes: Vec<_> = (0..count).map(|_| graph.add_node(())).collect();
+    for (index, &node) in nodes.iter().enumerate() {
+        for onward in nodes.iter().skip(index + 1).take(2) {
+            graph.add_edge(node, *onward, ());
+        }
+    }
+    graph
+}
+
+#[test]
+fn the_open_search_matches_the_dense_one_past_its_inline_marks() {
+    // Global marks reach 40 nodes and 13 seeds; path marks go 14 deep. Both
+    // pass the handful of marks a small walk keeps inline.
+    let cases = [
+        (SearchOrder::DepthFirst, VisitedPolicy::Global, 40),
+        (SearchOrder::BreadthFirst, VisitedPolicy::Global, 40),
+        (SearchOrder::DepthFirst, VisitedPolicy::Path, 14),
+    ];
+    for (order, visited, count) in cases {
+        let graph = skip_chain(count);
+        let seeds: Vec<usize> = (0..12).chain([3, 3]).collect();
+        let mut dense = Vec::new();
+        let outcome = search(
+            &graph,
+            seeds.iter().map(|&seed| NodeId::from_index(seed)),
+            SearchConfig {
+                order,
+                visited,
+                direction: TraversalDirection::Outgoing,
+                max_depth: None,
+            },
+            |node, depth| {
+                dense.push((node.index(), depth));
+                ControlFlow::<(), _>::Continue(Visit::Descend)
+            },
+        );
+        assert_eq!(outcome, None);
+
+        let mut open = Vec::new();
+        let outcome = open_search(
+            seeds.iter().copied(),
+            OpenSearchConfig {
+                order,
+                visited,
+                max_depth: None,
+            },
+            |node: &usize, out: &mut Vec<usize>| {
+                out.extend(
+                    graph
+                        .successors(NodeId::from_index(*node))
+                        .map(NodeId::index),
+                );
+            },
+            |node, depth| {
+                open.push((*node, depth));
+                ControlFlow::<(), _>::Continue(Visit::Descend)
+            },
+        );
+        assert_eq!(outcome, None);
+
+        assert!(open.len() >= count, "{order:?} {visited:?}");
+        assert_eq!(dense, open, "{order:?} {visited:?}");
     }
 }
 

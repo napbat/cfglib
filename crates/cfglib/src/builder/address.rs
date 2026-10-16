@@ -549,22 +549,26 @@ fn populate_blocks<I: AddressInstruction, E>(
 ) -> Populated<I, E> {
     let mut cfg = Cfg::with_edge_payload();
     let mut current = cfg.entry();
-    let mut instruction_blocks = BTreeMap::new();
     let mut blocks_by_instruction = Vec::with_capacity(instructions.len());
     let mut terminators = Vec::new();
     for (position, instruction) in instructions.into_iter().enumerate() {
-        let address = addresses[position];
         if position != 0 && leaders[position] {
             terminators.push((current, position - 1));
             current = cfg.new_block();
         }
         cfg.block_mut(current).push(instruction);
-        instruction_blocks.insert(address, current);
         blocks_by_instruction.push(current);
     }
     if !addresses.is_empty() {
         terminators.push((current, addresses.len() - 1));
     }
+    // Instruction starts are strictly increasing, so the map builds in bulk
+    // instead of descending the tree once per instruction.
+    let instruction_blocks = addresses
+        .iter()
+        .copied()
+        .zip(blocks_by_instruction.iter().copied())
+        .collect();
     Populated {
         cfg,
         instruction_blocks,

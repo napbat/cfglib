@@ -164,6 +164,37 @@ impl DeltaChains {
         }
     }
 
+    /// Move one of a node's chains onto the end of `run` in append order and
+    /// forget it, dropping the edges `live` rejects.
+    ///
+    /// This is how an overlay run takes over the edges appended since it was
+    /// built. `delta_base` is the store's base edge count, which turns a delta
+    /// position into an edge identity exactly as the walk does.
+    pub(super) fn drain_into(
+        &mut self,
+        node: usize,
+        direction: TraversalDirection,
+        delta_base: u32,
+        live: Option<&LiveSet>,
+        run: &mut Vec<u32>,
+    ) {
+        let chain = chain_of(direction);
+        let Some((mut delta, last)) = self.ends(node, chain) else {
+            return;
+        };
+        loop {
+            let edge = delta_base + delta;
+            if live.is_none_or(|set| set.is_live(edge as usize)) {
+                run.push(edge);
+            }
+            if delta == last {
+                break;
+            }
+            delta = self.next[delta as usize][chain];
+        }
+        self.detach_node(node, direction);
+    }
+
     /// Drop every chain.
     ///
     /// Both arrays are released rather than cleared: after a compaction the
@@ -274,9 +305,16 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
 
     /// Start a walk over one node's adjacency along `axis`.
     ///
+    /// Forced inline for the reason [`adjacent`](Self::adjacent) is.
+    ///
     /// # Panics
     ///
     /// Panics when `node` names no slot in this store.
+    #[inline(always)]
+    #[expect(
+        clippy::inline_always,
+        reason = "an out-of-line call keeps the walk in memory; see `adjacent`"
+    )]
     fn cursor(&self, node: Id<NT>, axis: &Axis<'_>) -> AdjacencyCursor {
         let index = node.index();
         assert!(index < self.node_bound(), "node identity is out of range");
@@ -297,7 +335,29 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         }
     }
 
-    fn adjacent(&self, node: Id<NT>, direction: TraversalDirection) -> AdjacentEdges<'_, ET> {
+    /// Start a walk over `node`'s live edges along `direction`, in insertion
+    /// order.
+    ///
+    /// Forced inline, with [`cursor`](Self::cursor) and the iterator layers
+    /// over it, because the hint is not enough here. A walk is built from
+    /// 4- and 8-byte stores, and any copy of it between frames (a returned
+    /// value moved into the consumer's loop variable) reads it back in 16-byte
+    /// pieces. A load that spans several narrower stores cannot be forwarded,
+    /// so every scan waits for its own start to retire: whether the optimizer
+    /// elided the copy depended on the surrounding code, and where it did not
+    /// a scan cost 15% to 50% more cycles at the same instruction count.
+    /// Inlined, the walk is built where the loop that steps it is, and there
+    /// is nothing to copy.
+    #[inline(always)]
+    #[expect(
+        clippy::inline_always,
+        reason = "a call leaves the walk to be copied out of a return slot, which stalls on store forwarding"
+    )]
+    pub(super) fn adjacent(
+        &self,
+        node: Id<NT>,
+        direction: TraversalDirection,
+    ) -> AdjacentEdges<'_, ET> {
         let mut axis = self.axis(direction);
         let mut cursor = self.cursor(node, &axis);
         // A node whose edges have moved reads its compressed run from a
@@ -316,6 +376,33 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
             delta_base: raw_index(self.base_edges.len()),
             tag: PhantomData,
         }
+    }
+
+    /// The live edges of `node`'s compressed run along `direction`, copied
+    /// into a new vector with room for one more.
+    ///
+    /// The relocation module builds a node's first overlay run from this: it
+    /// is the run the overlay replaces, and the one extra slot is the edge a
+    /// redirect is about to append. Only the compressed run is copied; the
+    /// node's delta chain is [`DeltaChains::drain_into`]'s.
+    pub(super) fn live_base_run(&self, node: Id<NT>, direction: TraversalDirection) -> Vec<u32> {
+        let axis = self.axis(direction);
+        let index = node.index();
+        let run = if index + 1 < axis.offsets.len() {
+            &axis.edges[axis.offsets[index] as usize..axis.offsets[index + 1] as usize]
+        } else {
+            &[]
+        };
+        let mut copy = Vec::with_capacity(run.len() + 1);
+        match self.tombstoned_edges().then_some(&self.live_edges) {
+            Some(live) => copy.extend(
+                run.iter()
+                    .copied()
+                    .filter(|&edge| live.is_live(edge as usize)),
+            ),
+            None => copy.extend_from_slice(run),
+        }
+        copy
     }
 
     /// Iterate over the live outgoing edges of `node` in insertion order.

@@ -11,6 +11,7 @@
 extern crate alloc;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
+use core::ops::Bound;
 
 use super::cfg_view::CfgView;
 use super::edge_fixpoint::{self, EdgeProblem};
@@ -27,6 +28,38 @@ pub struct ReachingDef<V> {
     pub variable: V,
     /// Where the write happened.
     pub site: DefSite,
+}
+
+/// The key range holding every definition of `variable`.
+///
+/// [`ReachingDef`] orders by variable first, so one variable's definitions
+/// are a contiguous run of the set and a lookup or a kill descends to it
+/// instead of scanning the whole set.
+fn variable_run<V: VariableId>(variable: &V) -> (Bound<ReachingDef<V>>, Bound<ReachingDef<V>>) {
+    let at = |block: BlockId, inst_idx: usize| {
+        Bound::Included(ReachingDef {
+            variable: variable.clone(),
+            site: DefSite { block, inst_idx },
+        })
+    };
+    (
+        at(BlockId::from_index(0), 0),
+        at(BlockId::from_index(u32::MAX as usize), usize::MAX),
+    )
+}
+
+/// The definitions of `variable` in `set`, ordered by site.
+pub(super) fn definitions_of<'set, V: VariableId>(
+    set: &'set BTreeSet<ReachingDef<V>>,
+    variable: &V,
+) -> impl Iterator<Item = &'set ReachingDef<V>> {
+    set.range(variable_run(variable))
+}
+
+/// Removes every definition of `variable` from `set`.
+pub(super) fn kill_variable<V: VariableId>(set: &mut BTreeSet<ReachingDef<V>>, variable: &V) {
+    set.extract_if(variable_run(variable), |_| true)
+        .for_each(drop);
 }
 
 /// The reaching definitions problem.
@@ -63,7 +96,7 @@ impl ReachingDefsProblem {
             let site = DefSite { block, inst_idx };
             // Kill: remove all previous defs of the same variables.
             for variable in defs {
-                reaching.retain(|definition| &definition.variable != variable);
+                kill_variable(&mut reaching, variable);
             }
             // Gen: add the new defs.
             for variable in defs {
@@ -195,9 +228,7 @@ impl<V: VariableId> ReachingDefs<V> {
     /// All definitions of a specific variable reaching a block's entry.
     #[must_use]
     pub fn defs_of_at_entry(&self, variable: &V, block: BlockId) -> Vec<DefSite> {
-        self.reaching_in(block)
-            .iter()
-            .filter(|rd| &rd.variable == variable)
+        definitions_of(self.reaching_in(block), variable)
             .map(|rd| rd.site)
             .collect()
     }
@@ -342,5 +373,42 @@ mod tests {
                 inst_idx: 0,
             }]
         );
+    }
+
+    #[test]
+    fn a_variable_run_holds_exactly_that_variables_definitions_at_every_site() {
+        let at = |block: usize, inst_idx| DefSite {
+            block: BlockId::from_index(block),
+            inst_idx,
+        };
+        let extremes = [
+            at(0, 0),
+            at(0, usize::MAX),
+            at(3, 7),
+            at(u32::MAX as usize, 0),
+            at(u32::MAX as usize, usize::MAX),
+        ];
+        // Neighbouring variables carry the same extreme sites, so a run that
+        // overshot either end would pick them up.
+        let mut set: BTreeSet<ReachingDef<u16>> = [0, 1, 2]
+            .into_iter()
+            .flat_map(|variable| {
+                extremes
+                    .into_iter()
+                    .map(move |site| ReachingDef { variable, site })
+            })
+            .collect();
+
+        let found: Vec<DefSite> = definitions_of(&set, &1).map(|rd| rd.site).collect();
+        assert_eq!(found, extremes);
+        assert_eq!(definitions_of(&set, &3).count(), 0);
+
+        kill_variable(&mut set, &3);
+        assert_eq!(set.len(), 15, "an absent variable kills nothing");
+        kill_variable(&mut set, &1);
+        assert_eq!(set.len(), 10);
+        assert!(set.iter().all(|rd| rd.variable != 1));
+        assert_eq!(definitions_of(&set, &0).count(), extremes.len());
+        assert_eq!(definitions_of(&set, &2).count(), extremes.len());
     }
 }

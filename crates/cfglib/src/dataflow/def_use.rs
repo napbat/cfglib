@@ -11,7 +11,7 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use super::cfg_view::CfgView;
-use super::reaching::{ReachingDef, ReachingDefs};
+use super::reaching::{ReachingDef, ReachingDefs, definitions_of, kill_variable};
 use super::{DefSite, InstrInfo, UseSite};
 
 /// Def-use and use-def chain results.
@@ -82,16 +82,11 @@ impl DefUseChains {
                 // For each variable this instruction uses, find all
                 // reaching defs of that variable at this point.
                 for variable in inst.uses() {
-                    let suppliers: BTreeSet<DefSite> = current_reaching
-                        .iter()
-                        .filter(|rd| &rd.variable == variable)
-                        .map(|rd| rd.site)
-                        .collect();
-
-                    for &def_site in &suppliers {
-                        def_use.entry(def_site).or_default().insert(use_site);
+                    let suppliers = use_def.entry(use_site).or_default();
+                    for definition in definitions_of(&current_reaching, variable) {
+                        def_use.entry(definition.site).or_default().insert(use_site);
+                        suppliers.insert(definition.site);
                     }
-                    use_def.entry(use_site).or_default().extend(suppliers);
                 }
 
                 // Apply this instruction's defs: kill + gen.
@@ -102,7 +97,7 @@ impl DefUseChains {
                         inst_idx: idx,
                     };
                     for variable in defs {
-                        current_reaching.retain(|rd| &rd.variable != variable);
+                        kill_variable(&mut current_reaching, variable);
                     }
                     for variable in defs {
                         current_reaching.insert(ReachingDef {

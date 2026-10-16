@@ -597,12 +597,41 @@ where
     G: EdgeView,
     P: TryEdgeProblem<G>,
 {
-    let mut merged = problem.boundary(graph, node)?;
-    let edges: Vec<_> = if incoming {
-        graph.incoming(node).collect()
+    let boundary = problem.boundary(graph, node)?;
+    let merged = if incoming {
+        meet_edge_facts(
+            graph,
+            problem,
+            node,
+            boundary,
+            graph.incoming(node),
+            edge_facts,
+        )?
     } else {
-        graph.outgoing(node).collect()
+        meet_edge_facts(
+            graph,
+            problem,
+            node,
+            boundary,
+            graph.outgoing(node),
+            edge_facts,
+        )?
     };
+    Ok(merged.unwrap_or_else(|| bottom.clone()))
+}
+
+fn meet_edge_facts<G, P>(
+    graph: &G,
+    problem: &P,
+    node: G::NodeId,
+    mut merged: Option<P::Fact>,
+    edges: impl Iterator<Item = G::EdgeId>,
+    edge_facts: &[Option<P::Fact>],
+) -> Result<Option<P::Fact>, P::Error>
+where
+    G: EdgeView,
+    P: TryEdgeProblem<G>,
+{
     for edge in edges {
         let fact = edge_facts[edge.index()]
             .as_ref()
@@ -612,7 +641,7 @@ where
             None => fact.clone(),
         });
     }
-    Ok(merged.unwrap_or_else(|| bottom.clone()))
+    Ok(merged)
 }
 
 // The solver's per-node step borrows each state slice separately so the
@@ -641,8 +670,7 @@ where
     node_input[node.index()] = input;
     node_output[node.index()] = output;
 
-    let outgoing: Vec<_> = graph.outgoing(node).collect();
-    for edge_id in outgoing {
+    for edge_id in graph.outgoing(node) {
         let edge = graph.edge(edge_id);
         let new_fact = problem.transfer_edge(
             graph,
@@ -685,8 +713,7 @@ where
     node_output[node.index()] = output;
     node_input[node.index()] = input;
 
-    let incoming: Vec<_> = graph.incoming(node).collect();
-    for edge_id in incoming {
+    for edge_id in graph.incoming(node) {
         let edge = graph.edge(edge_id);
         let new_fact = problem.transfer_edge(
             graph,

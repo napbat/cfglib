@@ -13,7 +13,7 @@ use crate::edge::EdgeKind;
 use crate::memory::{MemoryEvent, MemoryTraceEntry};
 
 use super::scratch::MemorySsaScratch;
-use super::{MemoryAlias, MemoryClassId, MemoryEventSite, MemoryLocationClass};
+use super::{MemoryAlias, MemoryClassId, MemoryLocationClass};
 
 /// One step of the shadow CFG: a memory event over its alias class, or the
 /// unwind point of a throwing source instruction that reports no event.
@@ -23,13 +23,14 @@ use super::{MemoryAlias, MemoryClassId, MemoryEventSite, MemoryLocationClass};
 /// use vector and a definition vector, because those two allocations per
 /// event are most of what building the shadow costs: [`Option::as_slice`]
 /// gives [`InstrInfo`](crate::InstrInfo) the slices it asks for without
-/// either.
+/// either. The event itself stays in the trace, which the step points into,
+/// so building the shadow copies no event.
 #[derive(Clone)]
-pub(super) struct ShadowInstruction<L, V, F> {
+pub(super) struct ShadowInstruction {
     /// The source instruction this step belongs to.
     pub(super) point: ProgramPoint,
     /// The replayed event, or `None` for a bare unwind point.
-    pub(super) event: Option<ShadowEvent<L, V, F>>,
+    pub(super) event: Option<ShadowEvent>,
     /// Whether an unwind can leave before this step: the first step of a
     /// source instruction that may unwind toward an unwind successor.
     unwinds: bool,
@@ -37,15 +38,15 @@ pub(super) struct ShadowInstruction<L, V, F> {
 
 /// One memory event of a [`ShadowInstruction`].
 #[derive(Clone)]
-pub(super) struct ShadowEvent<L, V, F> {
-    pub(super) site: MemoryEventSite,
-    pub(super) event: MemoryEvent<L, V, F>,
+pub(super) struct ShadowEvent {
+    /// The event's position in the trace the shadow was built from.
+    pub(super) trace_index: usize,
     pub(super) class: Option<MemoryClassId>,
     /// Whether this event replaces its class's state as well as reading it.
     writes: bool,
 }
 
-impl<L, V, F> InstrInfo for ShadowInstruction<L, V, F> {
+impl InstrInfo for ShadowInstruction {
     type Variable = MemoryClassId;
 
     fn uses(&self) -> &[Self::Variable] {
@@ -79,13 +80,11 @@ pub(super) fn build_shadow_cfg<G, L, V, F>(
     cfg: &G,
     entries: &[MemoryTraceEntry<L, V, F>],
     class_by_location: &BTreeMap<L, MemoryClassId>,
-) -> Cfg<ShadowInstruction<L, V, F>>
+) -> Cfg<ShadowInstruction>
 where
     G: CfgView,
     G::Inst: InstrInfo,
-    L: Clone + Ord,
-    V: Clone,
-    F: Clone,
+    L: Ord,
 {
     let mut shadow = Cfg::new();
     for expected_index in 1..cfg.node_bound() {
@@ -100,7 +99,7 @@ where
 
     // The trace follows block-allocation, instruction, and event order, so
     // one cursor pairs every source instruction with its events.
-    let mut entries = entries.iter().peekable();
+    let mut entries = entries.iter().enumerate().peekable();
     for block in cfg.node_ids() {
         let unwinds_out = cfg
             .outgoing(block)
@@ -108,10 +107,10 @@ where
         for (inst_idx, instruction) in cfg.instructions(block).iter().enumerate() {
             let point = ProgramPoint { block, inst_idx };
             let mut unwinds = unwinds_out && instruction.may_unwind();
-            while let Some(entry) = entries.next_if(|entry| entry.point() == point) {
-                let site = MemoryEventSite::new(point, entry.event_index());
-                let event = entry.event().clone();
-                let class = match &event {
+            while let Some((trace_index, entry)) =
+                entries.next_if(|(_, entry)| entry.point() == point)
+            {
+                let class = match entry.event() {
                     MemoryEvent::Access(access) => Some(
                         *class_by_location
                             .get(access.location())
@@ -119,14 +118,12 @@ where
                     ),
                     MemoryEvent::Fence(_) => None,
                 };
-                let writes = event.writes();
                 shadow.block_mut(block).push(ShadowInstruction {
                     point,
                     event: Some(ShadowEvent {
-                        site,
-                        event,
+                        trace_index,
                         class,
-                        writes,
+                        writes: entry.event().writes(),
                     }),
                     unwinds,
                 });

@@ -53,6 +53,12 @@ stale. Constructors, accessors, and associated analysis entry points are
 exercised by the workloads but are not individually timed as facade
 functions.
 
+`api_cases/traversal.rs` holds the small-run shapes that the 1,024-node chains
+of `graph.rs` hide behind per-step costs: many short chases and searches, a
+dense fan-out read once per parser step, layered route and fold walks, and a
+linear stack reverse index. Cases there that time a method or constructor name
+no facade function.
+
 ## CPU timing
 
 The default build installs `std::alloc::System` directly as the global
