@@ -11,6 +11,7 @@ use std::time::Duration;
 #[cfg(not(cfglib_bench_alloc))]
 use std::time::Instant;
 
+use cfglib::ir::rtl::{BlockSummaries, ParamPlacement, RootLiveness, RootTable};
 use cfglib::{
     BlockId, Cfg, CfgBuilder, CommonAncestor, ConstValue, ConstantFolder, DenseId, Direction,
     DominanceFrontiers, DominatorTree, EdgeKind, EdgeStep, Facts, FlowControl, FlowEffect, Graph,
@@ -27,6 +28,7 @@ mod analysis_oracles;
 mod api_cases;
 mod fixtures;
 mod harness;
+mod rtl_placement;
 mod structural_oracles;
 
 use analysis_oracles::{
@@ -42,10 +44,11 @@ use fixtures::{
     branchy_cfg, branchy_graph, build_conditional_break_chain, build_eight_case_switch_chain,
     build_if_else_chain, build_two_case_switch_chain, empty_chain_cfg, fixture_u32,
     high_fan_in_cfg, independent_constants, irreducible_cfg, linear_cfg, linear_constants,
-    many_exit_cfg, multi_latch_graph, phi_storm_cfg, reverse_id_chain_graph,
+    many_exit_cfg, multi_latch_graph, phi_storm_cfg, reverse_id_chain_graph, unreachable_constants,
     weighted_high_fan_out_cfg, weighted_irreducible_cfg,
 };
 use harness::{BenchmarkSuite, benchmark_case, benchmark_target};
+use rtl_placement::{SyntheticFunction, assert_param_placement};
 use structural_oracles::{
     FanOut, assert_branchy_cfg, assert_branchy_graph, assert_builder_cfg, assert_cfg_shape,
     assert_dense_permutation, assert_empty_chain, assert_high_fan_in, assert_irreducible_fixture,
@@ -99,6 +102,14 @@ fn main() {
     let linear_constant_dominators = DominatorTree::compute(&linear_constant_cfg);
     let phi_storm = phi_storm_cfg(32, 128);
     let phi_storm_dominators = DominatorTree::compute(&phi_storm);
+    let unreachable_ssa_cfg = unreachable_constants(256, 256);
+    let unreachable_ssa_dominators = DominatorTree::compute(&unreachable_ssa_cfg);
+    let rtl = SyntheticFunction::new(NODE_COUNT);
+    let rtl_roots = RootTable::collect(&rtl);
+    let rtl_summaries = BlockSummaries::compute(&rtl, &rtl_roots);
+    let rtl_liveness = RootLiveness::compute(&rtl, &rtl_roots, &rtl_summaries);
+    let rtl_dominators = DominatorTree::compute(&rtl);
+    let rtl_frontiers = DominanceFrontiers::compute(&rtl, &rtl_dominators);
 
     println!(
         "cfglib synthetic benchmark: {NODE_COUNT} nodes, {} CFG edges, {} graph edges",
@@ -323,6 +334,26 @@ fn main() {
         |result: &DominanceFrontiers| assert_dominance_frontiers(result, &cfg, &cfg_dominators,)
     );
     bench!(
+        "rtl_param_placement",
+        || {
+            ParamPlacement::compute(
+                &rtl,
+                &rtl_dominators,
+                &rtl_frontiers,
+                &rtl_roots,
+                &rtl_summaries,
+                &rtl_liveness,
+            )
+        },
+        |result: &ParamPlacement<_>| assert_param_placement(
+            result,
+            &rtl,
+            &rtl_dominators,
+            &rtl_roots,
+            &rtl_liveness,
+        )
+    );
+    bench!(
         "cfg_post_dominators",
         || PostDominatorTree::compute(&cfg),
         |result: &PostDominatorTree| assert_branchy_post_dominators(result, NODE_COUNT)
@@ -364,9 +395,10 @@ fn main() {
             let cycle_count = (NODE_COUNT - 1) / 32;
             assert_eq!(result.len(), NODE_COUNT - 16 * cycle_count);
             let mut seen = vec![false; NODE_COUNT];
-            for (component_index, component) in result.components.iter().enumerate() {
-                assert!(!component.nodes.is_empty());
-                for &node in &component.nodes {
+            for (component_index, component) in result.components().enumerate() {
+                assert_ne!(component, []);
+                assert!(component.windows(2).all(|pair| pair[0] < pair[1]));
+                for &node in component {
                     assert!(!seen[node.index()]);
                     seen[node.index()] = true;
                     assert_eq!(result.component_index(node), component_index);
@@ -376,25 +408,37 @@ fn main() {
             for cycle in 1..=cycle_count {
                 let end = cycle * 32;
                 let component = result.component(NodeId::from_index(end));
-                assert_eq!(component.nodes.len(), 17);
+                assert_eq!(component.nodes().len(), 17);
                 assert!(
                     (end - 16..=end).all(|index| component.contains(NodeId::from_index(index)))
                 );
             }
             assert_eq!(
                 result
-                    .components
-                    .iter()
-                    .filter(|component| component.nodes.len() == 17)
+                    .components()
+                    .filter(|component| component.len() == 17)
                     .count(),
                 cycle_count
             );
             assert!(
                 result
-                    .components
-                    .iter()
-                    .all(|component| { component.nodes.len() == 1 || component.nodes.len() == 17 })
+                    .components()
+                    .all(|component| component.len() == 1 || component.len() == 17)
             );
+        }
+    );
+    bench!(
+        "cfg_build_ssa_unreachable",
+        || SsaForm::compute(&unreachable_ssa_cfg, &unreachable_ssa_dominators),
+        |result: &SsaForm<u32>| {
+            let block_count = 256 + 2 * 256;
+            assert_eq!(result.blocks().len(), block_count);
+            for index in 0..block_count {
+                let block = BlockId::from_index(index);
+                assert_eq!(result.block(block).block, block);
+                assert_eq!(result.block(block).instructions.len(), 1);
+            }
+            assert!(result.max_version(&0) >= block_count);
         }
     );
     bench!(

@@ -15,31 +15,80 @@
 //! to the graph it walks.
 
 extern crate alloc;
+use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::fmt;
+use core::marker::PhantomData;
 
 use crate::graph::store::{Graph, NodeId};
 use crate::graph::view::{DenseId, GraphView};
 
-/// A maximal set of mutually reachable nodes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Scc<N> {
-    /// Nodes in this component.
-    pub nodes: BTreeSet<N>,
+/// A maximal set of mutually reachable nodes, in ascending order.
+///
+/// `S` is where the nodes live, so one type serves both ways a component
+/// travels. `Scc<N>` owns them in a `Box<[N]>`, which is what
+/// [`condensation`] carries on its nodes; `Scc<N, &[N]>` borrows them from a
+/// [`SccDecomposition`], which is what [`SccDecomposition::component`]
+/// returns without copying.
+pub struct Scc<N, S = Box<[N]>> {
+    nodes: S,
+    element: PhantomData<fn() -> N>,
 }
 
-impl<N: Copy + Ord> Scc<N> {
+impl<N, S> Scc<N, S> {
+    /// Wrap nodes that are already in ascending order and free of duplicates.
+    const fn new(nodes: S) -> Self {
+        Self {
+            nodes,
+            element: PhantomData,
+        }
+    }
+}
+
+impl<N: Copy + Ord, S: AsRef<[N]>> Scc<N, S> {
+    /// Return the nodes of this component in ascending order.
+    #[must_use]
+    pub fn nodes(&self) -> &[N] {
+        self.nodes.as_ref()
+    }
+
     /// Return whether this component contains one node.
     #[must_use]
     pub fn is_singleton(&self) -> bool {
-        self.nodes.len() == 1
+        self.nodes().len() == 1
     }
 
     /// Return whether `node` belongs to this component.
     #[must_use]
     pub fn contains(&self, node: N) -> bool {
-        self.nodes.contains(&node)
+        self.nodes().binary_search(&node).is_ok()
+    }
+}
+
+impl<N, S: Clone> Clone for Scc<N, S> {
+    fn clone(&self) -> Self {
+        Self::new(self.nodes.clone())
+    }
+}
+
+impl<N, S: Copy> Copy for Scc<N, S> {}
+
+impl<N, S: PartialEq> PartialEq for Scc<N, S> {
+    fn eq(&self, other: &Self) -> bool {
+        self.nodes == other.nodes
+    }
+}
+
+impl<N, S: Eq> Eq for Scc<N, S> {}
+
+impl<N: Copy + Ord + fmt::Debug, S: AsRef<[N]>> fmt::Debug for Scc<N, S> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Scc")
+            .field("nodes", &self.nodes())
+            .finish()
     }
 }
 
@@ -49,15 +98,45 @@ impl<N: Copy + Ord> Scc<N> {
 /// [`components`](Self::components) is a property of the algorithm that
 /// produced it: [`tarjan_scc`] numbers them in reverse topological order
 /// (leaves first), [`kosaraju_scc`] in topological order (sources first).
+///
+/// Every component's nodes sit in one array, component after component, each
+/// run in ascending order, with the offsets where the runs begin. However
+/// many components there are, a decomposition is three allocations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SccDecomposition<N> {
-    /// The components, ordered by the producing algorithm's numbering
-    /// contract — see [`tarjan_scc`] and [`kosaraju_scc`].
-    pub components: Vec<Scc<N>>,
+    nodes: Vec<N>,
+    /// `offsets[i]..offsets[i + 1]` is component `i` within `nodes`.
+    offsets: Vec<usize>,
     component_of: Vec<usize>,
 }
 
 impl<N: DenseId> SccDecomposition<N> {
+    /// An empty decomposition with room for `node_bound` nodes, the most any
+    /// graph that size can hold; `component_of` reads `unassigned` until a
+    /// node is placed.
+    fn with_node_bound(node_bound: usize, unassigned: usize) -> Self {
+        let mut offsets = Vec::with_capacity(node_bound + 1);
+        offsets.push(0);
+        Self {
+            nodes: Vec::with_capacity(node_bound),
+            offsets,
+            component_of: vec![unassigned; node_bound],
+        }
+    }
+
+    /// Close the component whose nodes were appended to `nodes` since the
+    /// last one, putting them in ascending order.
+    fn close_component(&mut self) {
+        let start = *self
+            .offsets
+            .last()
+            .expect("offsets always hold the leading zero");
+        if self.nodes.len() - start > 1 {
+            self.nodes[start..].sort_unstable();
+        }
+        self.offsets.push(self.nodes.len());
+    }
+
     /// Return the component index containing `node`.
     #[must_use]
     pub fn component_index(&self, node: N) -> usize {
@@ -66,20 +145,28 @@ impl<N: DenseId> SccDecomposition<N> {
 
     /// Return the component containing `node`.
     #[must_use]
-    pub fn component(&self, node: N) -> &Scc<N> {
-        &self.components[self.component_index(node)]
+    pub fn component(&self, node: N) -> Scc<N, &[N]> {
+        let index = self.component_index(node);
+        Scc::new(&self.nodes[self.offsets[index]..self.offsets[index + 1]])
+    }
+
+    /// Return each component's nodes, ascending, in component order.
+    pub fn components(&self) -> impl ExactSizeIterator<Item = &[N]> + DoubleEndedIterator + Clone {
+        self.offsets
+            .windows(2)
+            .map(|run| &self.nodes[run[0]..run[1]])
     }
 
     /// Return the number of components.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.components.len()
+        self.offsets.len() - 1
     }
 
     /// Return whether the decomposition contains no components.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.components.is_empty()
+        self.len() == 0
     }
 
     /// Return whether `graph` is acyclic.
@@ -88,14 +175,9 @@ impl<N: DenseId> SccDecomposition<N> {
     where
         G: GraphView<NodeId = N>,
     {
-        self.components.iter().all(|component| {
-            if !component.is_singleton() {
-                return false;
-            }
-            let Some(&node) = component.nodes.iter().next() else {
-                return false;
-            };
-            !graph.successors(node).any(|successor| successor == node)
+        self.components().all(|component| match *component {
+            [node] => !graph.successors(node).any(|successor| successor == node),
+            _ => false,
         })
     }
 }
@@ -179,9 +261,8 @@ pub fn condensation<G: GraphView>(graph: &G) -> Graph<Scc<G::NodeId>, ()> {
     let components = tarjan_scc(graph);
     let mut condensed = Graph::with_capacity(components.len(), components.len());
     let ids: Vec<NodeId> = components
-        .components
-        .iter()
-        .map(|component| condensed.add_node(component.clone()))
+        .components()
+        .map(|nodes| condensed.add_node(Scc::new(Box::from(nodes))))
         .collect();
 
     for_each_component_edge(graph, &components, |from, to| {
@@ -200,8 +281,9 @@ pub fn condensation<G: GraphView>(graph: &G) -> Graph<Scc<G::NodeId>, ()> {
 /// [`condensation`] means matching two decompositions of the same graph
 /// against each other, which is both wasteful and a place for the two
 /// numberings to disagree. Here the numbering is an input: whichever algorithm
-/// produced `components`, node `i` of the result **is** `components.components[i]`,
-/// and `components.component_index(node)` indexes the result directly.
+/// produced `components`, node `i` of the result **is** the `i`th item of
+/// `components.components()`, and `components.component_index(node)` indexes
+/// the result directly.
 ///
 /// The edges are the same as [`condensation`]'s: one per pair of distinct
 /// components connected in the source graph, deduplicated, so parallel edges
@@ -209,9 +291,9 @@ pub fn condensation<G: GraphView>(graph: &G) -> Graph<Scc<G::NodeId>, ()> {
 /// into one. The result is acyclic by construction.
 ///
 /// Node and edge payloads are `()` deliberately. The caller already owns the
-/// components (it passed them in), so carrying a clone of each [`Scc`] would
-/// duplicate a `BTreeSet` per component to say what
-/// `components.components[i]` already says; and everything a fixpoint needs
+/// components (it passed them in), so carrying a copy of each [`Scc`] would
+/// allocate one `Box<[N]>` per component to say what
+/// `components.components()` already says; and everything a fixpoint needs
 /// beyond the partition — the in-degree of a component, the dependents to
 /// re-queue when its fact changes — falls out of the returned graph's
 /// `predecessors` and `successors`.
@@ -312,8 +394,8 @@ pub fn tarjan_scc<G: GraphView>(graph: &G) -> SccDecomposition<G::NodeId> {
     let mut on_stack = vec![false; node_count];
     let mut indices = vec![usize::MAX; node_count];
     let mut lowlinks = vec![0_usize; node_count];
-    let mut component_of = vec![0_usize; node_count];
-    let mut components = Vec::new();
+    // Nodes never reached (a removed slot) stay in component 0.
+    let mut result = SccDecomposition::with_node_bound(node_count, 0);
     // Every frame's successors, appended as the frame is pushed and truncated
     // away as it pops. Both are empty again when a root's walk ends, so one
     // allocation covers the whole decomposition rather than one per root.
@@ -354,20 +436,16 @@ pub fn tarjan_scc<G: GraphView>(graph: &G) -> SccDecomposition<G::NodeId> {
             }
 
             if lowlinks[node.index()] == indices[node.index()] {
-                let mut nodes = BTreeSet::new();
+                let component_index = result.len();
                 while let Some(member) = stack.pop() {
                     on_stack[member.index()] = false;
-                    nodes.insert(member);
+                    result.component_of[member.index()] = component_index;
+                    result.nodes.push(member);
                     if member == node {
                         break;
                     }
                 }
-
-                let component_index = components.len();
-                for member in &nodes {
-                    component_of[member.index()] = component_index;
-                }
-                components.push(Scc { nodes });
+                result.close_component();
             }
 
             let Some(finished) = calls.pop() else { break };
@@ -379,10 +457,7 @@ pub fn tarjan_scc<G: GraphView>(graph: &G) -> SccDecomposition<G::NodeId> {
         }
     }
 
-    SccDecomposition {
-        components,
-        component_of,
-    }
+    result
 }
 
 /// Compute strongly connected components with Kosaraju's algorithm, numbering
@@ -491,35 +566,30 @@ pub fn kosaraju_scc<G: GraphView>(graph: &G) -> SccDecomposition<G::NodeId> {
     // is in a source component of the condensation, and every root after it
     // is in a source component of what remains — which is what makes the
     // minting order topological.
-    let mut component_of = vec![usize::MAX; node_count];
-    let mut components: Vec<Scc<G::NodeId>> = Vec::new();
+    let mut result = SccDecomposition::with_node_bound(node_count, usize::MAX);
     let mut stack = Vec::new();
 
     for root in finish_order.into_iter().rev() {
-        if component_of[root.index()] != usize::MAX {
+        if result.component_of[root.index()] != usize::MAX {
             continue;
         }
 
-        let index = components.len();
-        let mut nodes = BTreeSet::new();
-        component_of[root.index()] = index;
+        let index = result.len();
+        result.component_of[root.index()] = index;
         stack.push(root);
         while let Some(node) = stack.pop() {
-            nodes.insert(node);
+            result.nodes.push(node);
             for predecessor in graph.predecessors(node) {
-                if component_of[predecessor.index()] == usize::MAX {
-                    component_of[predecessor.index()] = index;
+                if result.component_of[predecessor.index()] == usize::MAX {
+                    result.component_of[predecessor.index()] = index;
                     stack.push(predecessor);
                 }
             }
         }
-        components.push(Scc { nodes });
+        result.close_component();
     }
 
-    SccDecomposition {
-        components,
-        component_of,
-    }
+    result
 }
 
 #[cfg(test)]

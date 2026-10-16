@@ -5,6 +5,7 @@ extern crate alloc;
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use smallvec::SmallVec;
 
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
@@ -82,7 +83,9 @@ where
     }
 
     let block_instructions = &mut instructions[block.index()];
-    block_instructions.reserve(cfg.instructions(block).len());
+    // The vector moves into the finished block, so it is sized to the block
+    // rather than to the allocator's minimum growth step.
+    block_instructions.reserve_exact(cfg.instructions(block).len());
     for (inst_idx, instruction) in cfg.instructions(block).iter().enumerate() {
         if instruction.may_unwind() {
             for edge in cfg.outgoing(block) {
@@ -101,7 +104,7 @@ where
             .iter()
             .map(|variable| current_value(variable, stacks))
             .collect();
-        let mut defs = Vec::with_capacity(instruction.defs().len());
+        let mut defs = SmallVec::new();
         for variable in instruction.defs() {
             let value = fresh_value(variable, max_versions);
             push_value(stacks, value_pool, variable, value.clone());

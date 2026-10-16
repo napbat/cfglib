@@ -146,23 +146,22 @@ impl CutBuffers {
         let entry = &mut self.entry;
         entry.clear();
         entry.resize(reachable.len(), false);
-        for component in &components.components {
+        for component in components.components() {
+            let contains = |block: G::NodeId| component.binary_search(&block).is_ok();
             let is_sink = component
-                .nodes
                 .iter()
-                .all(|&block| graph.successors(block).all(|next| component.contains(next)));
+                .all(|&block| graph.successors(block).all(contains));
             if !is_sink {
                 continue;
             }
-            for &block in &component.nodes {
+            for &block in component {
                 entry[block.index()] = block == root
                     || graph
                         .predecessors(block)
-                        .any(|before| reachable[before.index()] && !component.contains(before));
+                        .any(|before| reachable[before.index()] && !contains(before));
             }
             roots.extend(
                 component
-                    .nodes
                     .iter()
                     .copied()
                     .filter(|&block| graph.successors(block).any(|next| entry[next.index()])),

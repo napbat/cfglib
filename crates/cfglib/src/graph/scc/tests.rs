@@ -3,6 +3,7 @@ use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
 use crate::graph::store::Graph;
 use crate::test_util::ff;
+use alloc::format;
 
 #[test]
 fn cfg_uses_generic_scc_algorithm() {
@@ -36,7 +37,7 @@ fn condensation_collapses_cycles_to_a_dag() {
     assert!(tarjan_scc(&condensed).is_dag(&condensed));
     let cycle_component = condensed
         .node_ids()
-        .find(|&node| condensed.node(node).nodes.len() == 2)
+        .find(|&node| condensed.node(node).nodes().len() == 2)
         .expect("the a/b component");
     assert!(condensed.node(cycle_component).contains(a));
     assert!(condensed.node(cycle_component).contains(b));
@@ -91,9 +92,8 @@ fn fixtures() -> Vec<(&'static str, Graph<(), ()>)> {
 
 fn partition(result: &SccDecomposition<NodeId>) -> BTreeSet<BTreeSet<NodeId>> {
     result
-        .components
-        .iter()
-        .map(|component| component.nodes.clone())
+        .components()
+        .map(|nodes| nodes.iter().copied().collect())
         .collect()
 }
 
@@ -107,8 +107,8 @@ fn kosaraju_and_tarjan_agree_on_the_partition() {
         assert_eq!(kosaraju.is_dag(&graph), tarjan.is_dag(&graph), "{name}");
         for node in graph.node_ids() {
             assert_eq!(
-                kosaraju.component(node).nodes,
-                tarjan.component(node).nodes,
+                kosaraju.component(node).nodes(),
+                tarjan.component(node).nodes(),
                 "{name}"
             );
         }
@@ -171,15 +171,8 @@ fn sequence(
     graph: &Graph<&'static str, ()>,
 ) -> Vec<Vec<&'static str>> {
     result
-        .components
-        .iter()
-        .map(|component| {
-            component
-                .nodes
-                .iter()
-                .map(|&node| *graph.node(node))
-                .collect()
-        })
+        .components()
+        .map(|nodes| nodes.iter().map(|&node| *graph.node(node)).collect())
         .collect()
 }
 
@@ -340,4 +333,102 @@ fn self_edge_is_not_a_dag() {
     let result = tarjan_scc(&graph);
     assert!(result.component(node).is_singleton());
     assert!(!result.is_dag(&graph));
+}
+
+#[test]
+fn components_are_ascending_runs_of_one_flat_array() {
+    for (name, graph) in fixtures() {
+        for (algorithm, result) in [
+            ("tarjan", tarjan_scc(&graph)),
+            ("kosaraju", kosaraju_scc(&graph)),
+        ] {
+            let label = format!("{name}/{algorithm}");
+            assert_eq!(result.components().len(), result.len(), "{label}");
+            assert_eq!(result.is_empty(), graph.node_count() == 0, "{label}");
+
+            let mut seen = BTreeSet::new();
+            for (index, nodes) in result.components().enumerate() {
+                assert!(!nodes.is_empty(), "{label}");
+                assert!(nodes.windows(2).all(|pair| pair[0] < pair[1]), "{label}");
+                for &node in nodes {
+                    assert!(seen.insert(node), "{label}: {node:?} in two components");
+                    assert_eq!(result.component_index(node), index, "{label}");
+                    assert_eq!(result.component(node).nodes(), nodes, "{label}");
+                }
+            }
+            assert_eq!(seen.len(), graph.node_count(), "{label}");
+
+            let forward: Vec<&[NodeId]> = result.components().collect();
+            let mut backward: Vec<&[NodeId]> = result.components().rev().collect();
+            backward.reverse();
+            assert_eq!(forward, backward, "{label}");
+        }
+    }
+}
+
+/// A cycle entered at its highest node, so the order in which each
+/// algorithm collects the members is not ascending.
+fn descending_cycle() -> (Graph<(), ()>, [NodeId; 5]) {
+    let mut graph = Graph::<(), ()>::new();
+    let nodes = [(); 5].map(|()| graph.add_node(()));
+    let [root, first, second, third, gap] = nodes;
+    graph.add_edge(root, third, ());
+    graph.add_edge(third, first, ());
+    graph.add_edge(first, second, ());
+    graph.add_edge(second, third, ());
+    graph.add_edge(gap, root, ());
+    (graph, nodes)
+}
+
+#[test]
+fn component_nodes_are_ascending_whatever_order_they_were_found_in() {
+    let (graph, [root, first, second, third, gap]) = descending_cycle();
+    for (algorithm, result) in [
+        ("tarjan", tarjan_scc(&graph)),
+        ("kosaraju", kosaraju_scc(&graph)),
+    ] {
+        let cycle = result.component(first);
+        assert_eq!(cycle.nodes(), [first, second, third], "{algorithm}");
+        assert!(!cycle.is_singleton(), "{algorithm}");
+        for member in [first, second, third] {
+            assert!(cycle.contains(member), "{algorithm}");
+        }
+        for outsider in [root, gap] {
+            assert!(!cycle.contains(outsider), "{algorithm}");
+            assert!(result.component(outsider).is_singleton(), "{algorithm}");
+        }
+    }
+}
+
+#[test]
+fn condensation_payloads_are_owned_copies_of_the_components() {
+    for (name, graph) in fixtures() {
+        let components = tarjan_scc(&graph);
+        let dag = condensation(&graph);
+        assert_eq!(dag.node_count(), components.len(), "{name}");
+        for (index, nodes) in components.components().enumerate() {
+            let owned: &Scc<NodeId> = dag.node(NodeId::from_index(index));
+            assert_eq!(owned.nodes(), nodes, "{name}");
+            assert_eq!(owned.is_singleton(), nodes.len() == 1, "{name}");
+            let borrowed = components.component(nodes[0]);
+            assert_eq!(borrowed.nodes(), owned.nodes(), "{name}");
+            assert!(nodes.iter().all(|&node| owned.contains(node)), "{name}");
+        }
+    }
+}
+
+#[test]
+fn component_views_compare_and_print_by_their_nodes() {
+    let (graph, [_, first, second, third, gap]) = descending_cycle();
+    let result = tarjan_scc(&graph);
+    let cycle = result.component(second);
+    assert_eq!(cycle, result.component(third));
+    assert_ne!(cycle, result.component(gap));
+    let rendered = format!("{cycle:?}");
+    assert!(rendered.starts_with("Scc { nodes: ["), "{rendered}");
+    assert!(rendered.contains(&format!("{first:?}")), "{rendered}");
+
+    let owned: Scc<NodeId> = Scc::new(Box::from(cycle.nodes()));
+    assert_eq!(owned.clone(), owned);
+    assert_eq!(owned.nodes(), cycle.nodes());
 }

@@ -18,6 +18,7 @@ extern crate alloc;
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use smallvec::SmallVec;
 
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
@@ -36,6 +37,24 @@ pub use scratch::SsaScratch;
 
 /// A per-variable SSA version number.
 pub type SsaVersion = usize;
+
+// The inline capacities cover the common record without a heap allocation and
+// keep the records small. In symtree's flow build over its own source, 89% of
+// instructions use at most two values, 98% define at most one, and 62% of
+// phis merge exactly two. A wider inline array moved that build's instruction
+// count by under 0.05% and its allocation count by under 0.2%, and grew every
+// record.
+
+/// Uses an instruction keeps inside its own record before spilling.
+const INLINE_USES: usize = 2;
+/// Definitions an instruction keeps inside its own record before spilling.
+const INLINE_DEFS: usize = 1;
+/// Operands a phi keeps inside its own record before spilling.
+const INLINE_OPERANDS: usize = 2;
+
+type UseList<V> = SmallVec<[SsaValue<V>; INLINE_USES]>;
+type DefList<V> = SmallVec<[SsaValue<V>; INLINE_DEFS]>;
+type Operands<V> = SmallVec<[(ProgramPoint, SsaValue<V>); INLINE_OPERANDS]>;
 
 /// A source-IR variable qualified by an SSA version.
 ///
@@ -75,6 +94,10 @@ impl<V> SsaValue<V> {
 pub struct SsaPhi<V> {
     /// SSA value defined by the phi.
     pub result: SsaValue<V>,
+    operands: Operands<V>,
+}
+
+impl<V> SsaPhi<V> {
     /// Incoming values and their departure points in CFG predecessors, in
     /// CFG predecessor order.
     ///
@@ -84,7 +107,10 @@ pub struct SsaPhi<V> {
     /// throwing instruction's own definitions never arrive. A normal
     /// departure, and an unwind out of a block that reports no throwing
     /// instruction, uses the predecessor's instruction count as its index.
-    pub operands: Vec<(ProgramPoint, SsaValue<V>)>,
+    #[must_use]
+    pub fn operands(&self) -> &[(ProgramPoint, SsaValue<V>)] {
+        &self.operands
+    }
 }
 
 /// SSA annotations for one source instruction.
@@ -92,10 +118,22 @@ pub struct SsaPhi<V> {
 pub struct SsaInstruction<V> {
     /// Position of the original instruction in the source CFG.
     pub point: ProgramPoint,
+    uses: UseList<V>,
+    defs: DefList<V>,
+}
+
+impl<V> SsaInstruction<V> {
     /// Renamed operands, preserving the adapter's use order.
-    pub uses: Vec<SsaValue<V>>,
+    #[must_use]
+    pub fn uses(&self) -> &[SsaValue<V>] {
+        &self.uses
+    }
+
     /// Fresh definitions, preserving the adapter's definition order.
-    pub defs: Vec<SsaValue<V>>,
+    #[must_use]
+    pub fn defs(&self) -> &[SsaValue<V>] {
+        &self.defs
+    }
 }
 
 /// SSA contents associated with one CFG block.

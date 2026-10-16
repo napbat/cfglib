@@ -14,6 +14,8 @@ use crate::graph::view::{GraphView, Rooted};
 use super::{Id, NodeId};
 
 mod model;
+#[cfg(feature = "serde")]
+mod serde_format;
 
 /// Four nodes in a diamond, built and left uncompacted.
 fn diamond() -> (Graph<&'static str, &'static str>, Vec<NodeId>) {
@@ -342,6 +344,75 @@ fn a_chain_edge_leaves_a_node_that_already_has_an_overlay() {
 }
 
 #[test]
+fn a_store_carries_an_overlay_only_once_it_relocates() {
+    let (mut graph, nodes) = diamond();
+    graph.compact();
+    assert!(!graph.has_relocations());
+    let edge = graph.edge_ids().next().expect("the diamond has edges");
+
+    graph.redirect_edge_target(edge, nodes[3]);
+    assert!(graph.has_relocations());
+    assert!(!graph.is_compact());
+
+    graph.compact();
+    assert!(!graph.has_relocations());
+    assert!(graph.is_compact());
+}
+
+#[test]
+fn nodes_added_after_the_first_relocation_relocate_too() {
+    let mut graph = Graph::<&'static str, &'static str>::new();
+    let [a, b] = ["a", "b"].map(|payload| graph.add_node(payload));
+    let first = graph.add_edge(a, b, "first");
+    let second = graph.add_edge(b, a, "second");
+    graph.redirect_edge_source(first, b);
+
+    // The overlay's index was sized for two nodes; these are past its end.
+    let later: Vec<_> = (0..40).map(|_| graph.add_node("later")).collect();
+    for pair in later.windows(2) {
+        graph.add_edge(pair[0], pair[1], "chain");
+    }
+    let (head, tail) = (later[0], later[39]);
+    assert!(graph.outgoing(tail).next().is_none());
+    assert_mirrored(&graph);
+
+    graph.redirect_edge_source(second, tail);
+    graph.redirect_edge_target(first, tail);
+    graph.move_adjacency(head, tail, TraversalDirection::Outgoing);
+
+    assert_eq!(graph.outgoing(tail).count(), 2);
+    assert_eq!(graph.incoming(tail).count(), 2);
+    assert!(graph.outgoing(head).next().is_none());
+    assert_eq!(graph.edge(second).source(), tail);
+    assert_mirrored(&graph);
+}
+
+#[test]
+fn stores_that_relocated_the_same_edges_in_either_order_are_equal() {
+    let relocate = |first_moves_first: bool| {
+        let mut graph = Graph::<&'static str, &'static str>::new();
+        let [a, b, c, d] = ["a", "b", "c", "d"].map(|payload| graph.add_node(payload));
+        let first = graph.add_edge(a, b, "first");
+        let second = graph.add_edge(c, d, "second");
+        let moves = [(first, d), (second, b)];
+        let order = if first_moves_first {
+            [moves[0], moves[1]]
+        } else {
+            [moves[1], moves[0]]
+        };
+        for (edge, source) in order {
+            graph.redirect_edge_source(edge, source);
+        }
+        graph
+    };
+
+    let forward = relocate(true);
+    let backward = relocate(false);
+    assert!(forward.has_relocations());
+    assert_eq!(forward, backward);
+}
+
+#[test]
 fn a_bulk_move_carries_the_overlay_and_the_delta_chain_in_order() {
     let mut graph = Graph::<&'static str, &'static str>::new();
     let [a, b, c, d] = ["a", "b", "c", "d"].map(|payload| graph.add_node(payload));
@@ -522,11 +593,11 @@ fn the_view_reports_slots_so_dense_analyses_stay_in_bounds() {
     // A removed node is not a node of the view at all, so a whole-graph
     // partition reports no phantom singleton for it.
     let uncompacted = tarjan_scc(&graph);
-    assert_eq!(uncompacted.components.len(), 3);
+    assert_eq!(uncompacted.len(), 3);
 
     graph.compact();
     assert_eq!(GraphView::node_bound(&graph), 3);
-    assert_eq!(tarjan_scc(&graph).components.len(), 3);
+    assert_eq!(tarjan_scc(&graph).len(), 3);
 }
 
 #[test]
@@ -617,14 +688,12 @@ fn the_algorithms_agree_with_the_arena_store() {
     let arena_components = tarjan_scc(&arena);
     assert_eq!(
         store_components
-            .components
-            .iter()
-            .map(|component| indexes(component.nodes.iter().copied(), Id::index))
+            .components()
+            .map(|nodes| indexes(nodes.iter().copied(), Id::index))
             .collect::<Vec<_>>(),
         arena_components
-            .components
-            .iter()
-            .map(|component| indexes(component.nodes.iter().copied(), crate::NodeId::index))
+            .components()
+            .map(|nodes| indexes(nodes.iter().copied(), crate::NodeId::index))
             .collect::<Vec<_>>()
     );
 

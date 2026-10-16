@@ -197,7 +197,8 @@ pub(super) fn assert_dominance_frontiers(
         }
     }
     for block_id in cfg.block_ids() {
-        assert_eq!(frontiers.frontier(block_id), &expected[block_id.index()]);
+        let members: Vec<_> = expected[block_id.index()].iter().copied().collect();
+        assert_eq!(frontiers.frontier(block_id), members);
     }
 }
 
@@ -335,8 +336,8 @@ pub(super) fn assert_linear_ssa(ssa: &SsaForm<u32>, block_count: usize) {
         assert_eq!(ssa_block.instructions.len(), 1);
         let instruction = &ssa_block.instructions[0];
         assert_eq!(instruction.point, ProgramPoint { block, inst_idx: 0 });
-        assert_eq!(instruction.uses.len(), 0);
-        assert_eq!(instruction.defs, [SsaValue::new(0, index + 1)]);
+        assert_eq!(instruction.uses().len(), 0);
+        assert_eq!(instruction.defs(), [SsaValue::new(0, index + 1)]);
     }
     assert_eq!(ssa.max_version(&0), block_count);
 }
@@ -356,7 +357,7 @@ pub(super) fn assert_phi_placements(
         for (variable, placement) in at_merge.iter().enumerate() {
             assert_eq!(placement.variable, fixture_u32(variable));
             assert_eq!(
-                placement.predecessors,
+                placement.predecessors(),
                 [left, right].map(|block| ProgramPoint {
                     block,
                     inst_idx: variable_count,
@@ -393,17 +394,17 @@ pub(super) fn assert_phi_ssa(
                     inst_idx: index
                 }
             );
-            assert_eq!(annotation.uses.len(), 0);
-            assert_eq!(annotation.defs.len(), 1);
-            assert!(annotation.defs[0].version > 0);
-            assert!(definitions.insert(annotation.defs[0].clone()));
+            assert_eq!(annotation.uses().len(), 0);
+            assert_eq!(annotation.defs().len(), 1);
+            assert!(annotation.defs()[0].version > 0);
+            assert!(definitions.insert(annotation.defs()[0].clone()));
         }
         for phi in &ssa_block.phis {
             assert!(phi.result.version > 0);
             assert!(definitions.insert(phi.result.clone()));
-            assert_eq!(phi.operands.len(), source.incoming(block_id).count());
+            assert_eq!(phi.operands().len(), source.incoming(block_id).count());
             assert_eq!(
-                phi.operands
+                phi.operands()
                     .iter()
                     .map(|(point, _)| *point)
                     .collect::<Vec<_>>(),
@@ -416,7 +417,7 @@ pub(super) fn assert_phi_ssa(
                     .collect::<Vec<_>>()
             );
             assert!(
-                phi.operands
+                phi.operands()
                     .iter()
                     .all(|(_, value)| value.variable == phi.result.variable)
             );

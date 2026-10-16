@@ -457,7 +457,7 @@ where
         for block in ssa.blocks() {
             for phi in &block.phis {
                 let target = self.intern_value(&phi.result);
-                for (predecessor, operand) in &phi.operands {
+                for (predecessor, operand) in phi.operands() {
                     let source = self.intern_value(operand);
                     self.graph.add_edge(
                         source,
@@ -472,10 +472,10 @@ where
             for instruction in &block.instructions {
                 uses.clear();
                 defs.clear();
-                for value in &instruction.uses {
+                for value in instruction.uses() {
                     uses.push(self.intern_value(value));
                 }
-                for value in &instruction.defs {
+                for value in instruction.defs() {
                     defs.push(self.intern_value(value));
                 }
                 for &source in &uses {
@@ -599,7 +599,7 @@ fn resolve_uses<V: VariableId>(
     buffer.clear();
     for variable in variables {
         let value = instruction
-            .uses
+            .uses()
             .iter()
             .find(|value| value.variable == *variable)
             .cloned()
@@ -624,7 +624,7 @@ fn resolve_defs<V: VariableId>(
     buffer.clear();
     for variable in variables {
         let value = instruction
-            .defs
+            .defs()
             .iter()
             .find(|value| value.variable == *variable)
             .cloned()

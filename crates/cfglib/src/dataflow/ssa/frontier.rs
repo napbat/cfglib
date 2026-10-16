@@ -1,10 +1,12 @@
-//! Dominance frontiers, in the two shapes their two consumers want.
+//! Dominance frontiers as one flat run table.
 //!
-//! One algorithm — the runner walk of Cooper, Harvey, and Kennedy — feeds
-//! both: [`FrontierRuns`] is the flat run table SSA construction reads and a
-//! scratch reuses, and [`DominanceFrontiers`] is the per-block set a consumer
-//! asking for one block's frontier reads. The public type is built from the
-//! flat one, so there is one statement of the rule rather than two.
+//! The runner walk of Cooper, Harvey, and Kennedy collects `(runner, frontier
+//! block)` pairs, and grouping them by runner makes every block's frontier
+//! one contiguous, ascending run. [`FrontierRuns`] is that table, which an
+//! SSA scratch rebuilds in place for each procedure, and
+//! [`DominanceFrontiers`] is the same table handed to a consumer that asks
+//! for one block's frontier. There is one statement of the rule rather than
+//! two.
 //!
 //! Both read any [`RootedView`], so a [`Cfg`](crate::Cfg) and a
 //! consumer-owned function view share the one algorithm.
@@ -18,7 +20,6 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
@@ -34,12 +35,14 @@ mod tests;
 /// computed from. It defaults to [`BlockId`], the identity of a
 /// [`Cfg`](crate::Cfg).
 ///
-/// For a reachable block, the set equals [`DominatorTree::frontier`] of that
-/// block. This type computes every set at once and keeps them.
+/// For a reachable block, the frontier holds the members of
+/// [`DominatorTree::frontier`] of that block, in ascending order. This type
+/// computes every frontier at once and keeps them in one flat table, which
+/// is two buffers however many blocks there are.
 #[derive(Debug, Clone)]
 pub struct DominanceFrontiers<N = BlockId> {
-    /// `frontiers[b]` is the dominance-frontier set of `b`.
-    frontiers: Vec<BTreeSet<N>>,
+    /// Every block's frontier, flat.
+    runs: FrontierRuns<N>,
 }
 
 impl<N: DenseId> DominanceFrontiers<N> {
@@ -57,42 +60,42 @@ impl<N: DenseId> DominanceFrontiers<N> {
     {
         let mut runs = FrontierRuns::default();
         runs.rebuild(graph, dom);
-        let frontiers = (0..graph.node_bound())
-            .map(|index| {
-                // Grown by insertion rather than collected: a set built from
-                // a sorted iterator is bulk-loaded, which costs a second node
-                // for the one-member frontiers most blocks have.
-                let mut frontier = BTreeSet::new();
-                frontier.extend(runs.frontier(N::from_index(index)).iter().copied());
-                frontier
-            })
-            .collect();
-        Self { frontiers }
+        // A scratch keeps the pair list for the next procedure, but a table
+        // that is kept has no use for it.
+        runs.pairs = Vec::new();
+        Self { runs }
     }
 
-    /// Return the dominance-frontier set for `block`.
+    /// Return the dominance frontier of `block`, in ascending order.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `block` is not below the node bound of the view that
+    /// computed the frontiers.
     #[must_use]
-    pub fn frontier(&self, block: N) -> &BTreeSet<N> {
-        &self.frontiers[block.index()]
+    pub fn frontier(&self, block: N) -> &[N] {
+        self.runs.frontier(block)
     }
 }
 
 /// Every block's dominance frontier in one flat run table.
 ///
-/// A [`BTreeSet`] per block is one allocation per block that has a frontier
-/// and a tree node per member, rebuilt for every procedure of a codebase.
-/// The same answer is a sorted pair list collapsed into runs: three buffers
-/// however many blocks there are, and a frontier read back as a slice in
-/// ascending order, which is the order the set iterated in.
+/// The runner walk emits each `(runner, frontier block)` pair once, and the
+/// table groups them by runner with a counting pass instead of a sort: the
+/// table is one buffer of members and one of run starts however many blocks
+/// there are, and a frontier is read back as a slice in ascending order. The
+/// pair list is the walk's own scratch, and a scratch keeps it between
+/// procedures.
 #[derive(Debug, Clone)]
 pub(super) struct FrontierRuns<N = BlockId> {
-    /// `(runner, frontier block)` pairs, sorted and deduplicated, which is
-    /// what makes the runs contiguous and each one ascending.
+    /// The `(runner, frontier block)` pairs of the last walk, in the order
+    /// the walk emitted them.
     pairs: Vec<(N, N)>,
     /// Where each block's run starts in [`blocks`](Self::blocks). One longer
     /// than the block bound, so a run is `starts[b]..starts[b + 1]`.
     starts: Vec<usize>,
-    /// The frontier members themselves, grouped by runner.
+    /// The frontier members themselves, grouped by runner, each run strictly
+    /// ascending.
     blocks: Vec<N>,
 }
 
@@ -112,7 +115,12 @@ impl<N: DenseId> FrontierRuns<N> {
     where
         G: RootedView<NodeId = N>,
     {
+        let bound = graph.node_bound();
         self.pairs.clear();
+        // `starts` is not read until the pairs are grouped, so the walk uses
+        // it to remember, per runner, the block whose walk reached it last.
+        self.starts.clear();
+        self.starts.resize(bound + 1, usize::MAX);
         for block in graph.node_ids() {
             // A frontier block is a join: two incoming paths at least. A tree
             // root has one path that is not an edge, the start of its tree,
@@ -126,11 +134,14 @@ impl<N: DenseId> FrontierRuns<N> {
             // The walk stops at the immediate dominator of `block`. A tree
             // root has none, so the walk goes up to the root and adds it as
             // well: the root dominates the predecessor and does not strictly
-            // dominate itself.
+            // dominate itself. A runner that an earlier predecessor's walk
+            // reached for this block continues exactly as that walk did, so
+            // the walk stops there and each pair is emitted once.
             let stop = (!tree_root).then(|| dom.idom(block).unwrap_or(block));
             for predecessor in graph.predecessors(block) {
                 let mut runner = predecessor;
-                while Some(runner) != stop {
+                while Some(runner) != stop && self.starts[runner.index()] != block.index() {
+                    self.starts[runner.index()] = block.index();
                     self.pairs.push((runner, block));
                     let Some(parent) = dom.idom(runner) else {
                         break;
@@ -139,21 +150,40 @@ impl<N: DenseId> FrontierRuns<N> {
                 }
             }
         }
-        self.pairs.sort_unstable();
-        self.pairs.dedup();
 
-        let bound = graph.node_bound();
-        self.starts.clear();
-        self.starts.resize(bound + 1, 0);
-        for &(runner, _) in &self.pairs {
+        // Group the pairs by runner without comparing them. `starts` first
+        // holds the run lengths as running totals, so `starts[b]` is where
+        // run `b` begins; the scatter then advances each cursor to the end of
+        // its run, which is where the next run begins. The pairs of one block
+        // come together, so the runs come out ascending when the walk met its
+        // blocks in ascending order, as it does for every store here, and
+        // only then.
+        let mut ascending = true;
+        let mut previous = None;
+        self.starts.fill(0);
+        for &(runner, block) in &self.pairs {
             self.starts[runner.index() + 1] += 1;
+            ascending &= previous <= Some(block);
+            previous = Some(block);
         }
         for index in 1..self.starts.len() {
             self.starts[index] += self.starts[index - 1];
         }
         self.blocks.clear();
-        self.blocks
-            .extend(self.pairs.iter().map(|&(_, block)| block));
+        self.blocks.resize(self.pairs.len(), N::from_index(0));
+        for &(runner, block) in &self.pairs {
+            let cursor = &mut self.starts[runner.index()];
+            self.blocks[*cursor] = block;
+            *cursor += 1;
+        }
+        self.starts.rotate_right(1);
+        self.starts[0] = 0;
+
+        if !ascending {
+            for run in self.starts.windows(2) {
+                self.blocks[run[0]..run[1]].sort_unstable();
+            }
+        }
     }
 
     /// The dominance frontier of `block`, in ascending order.

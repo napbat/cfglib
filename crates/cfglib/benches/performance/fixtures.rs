@@ -455,3 +455,34 @@ pub(super) fn build_eight_case_switch_chain(region_count: usize) -> Cfg<BuilderI
     }))
     .expect("synthetic switches are balanced")
 }
+
+/// A chain of `live` blocks plus `groups` unreachable regions that each jump
+/// into it: even groups are one block, odd groups a three-block cycle that
+/// leaves from its middle block. Every block defines variable zero, so the
+/// regions are source components of unreachable code with definitions that
+/// flow into live blocks. The CFG has `live + 2 * groups` blocks.
+pub(super) fn unreachable_constants(live: usize, groups: usize) -> Cfg<ConstantInst> {
+    assert!(live > 1);
+    let mut cfg = linear_constants(live);
+    for group in 0..groups {
+        let size = if group % 2 == 0 { 1 } else { 3 };
+        let blocks: Vec<BlockId> = (0..size).map(|_| cfg.new_block()).collect();
+        for (offset, &block) in blocks.iter().enumerate() {
+            cfg.block_mut(block).push(ConstantInst {
+                defs: vec![0],
+                uses: Vec::new(),
+                value: fixture_u64(group * 4 + offset),
+            });
+        }
+        let target = BlockId::from_index(1 + group % (live - 1));
+        if size == 1 {
+            cfg.add_edge(blocks[0], target, EdgeKind::Fallthrough);
+        } else {
+            cfg.add_edge(blocks[0], blocks[1], EdgeKind::Fallthrough);
+            cfg.add_edge(blocks[1], blocks[2], EdgeKind::ConditionalTrue);
+            cfg.add_edge(blocks[1], target, EdgeKind::ConditionalFalse);
+            cfg.add_edge(blocks[2], blocks[0], EdgeKind::Back);
+        }
+    }
+    cfg
+}

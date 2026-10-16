@@ -440,7 +440,7 @@ impl<L, V, F> MemoryTraceEntry<L, V, F> {
             .iter()
             .map(|address| {
                 instruction
-                    .uses
+                    .uses()
                     .iter()
                     .find(|value| &value.variable == address)
                     .cloned()

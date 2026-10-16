@@ -35,10 +35,13 @@
 //! # What it costs
 //!
 //! A store that never relocates carries one `Option` pointer and no per-edge
-//! work at all. A store that does pays one `Vec` per node whose adjacency
-//! changed, built at that node's degree on its first relocation and edited in
-//! place after that, and the next [`compact`](super::Graph::compact) folds
-//! every overlay back into the index.
+//! work at all. A store that does allocates, on its first relocation along a
+//! direction, one four-byte index slot per node, so finding a node's run is
+//! two loads rather than a descent, and then pays one `Vec` per node whose
+//! adjacency changed, built at that node's degree on its first relocation
+//! and edited in place after that. The next
+//! [`compact`](super::Graph::compact) folds every overlay back into the
+//! compressed index and frees all of it.
 //!
 //! A run drops the edges that were removed while it was in use as it is
 //! rebuilt, and whenever its length reaches a power of two as it grows, so
@@ -47,8 +50,6 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeMap;
-use alloc::collections::btree_map::Entry;
 use alloc::vec::Vec;
 use core::mem;
 
@@ -59,37 +60,43 @@ use super::id::{Id, IdTag};
 use super::liveness::LiveSet;
 use super::raw_index;
 
+use runs::Runs;
+
+#[cfg(feature = "serde")]
+mod format;
+mod runs;
+
 /// Replacement adjacency runs for the nodes whose edges have moved.
+///
+/// Serializes as two maps from node to run, outgoing then incoming, whatever
+/// the in-memory index looks like; see the `format` module.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(super) struct Relocations {
-    /// Replacement outgoing runs, keyed by node.
-    outgoing: BTreeMap<u32, Vec<u32>>,
-    /// Replacement incoming runs, keyed by node.
-    incoming: BTreeMap<u32, Vec<u32>>,
+    /// Replacement outgoing runs.
+    outgoing: Runs,
+    /// Replacement incoming runs.
+    incoming: Runs,
 }
 
 impl Relocations {
-    fn runs(&self, direction: TraversalDirection) -> &BTreeMap<u32, Vec<u32>> {
+    fn runs(&self, direction: TraversalDirection) -> &Runs {
         match direction {
             TraversalDirection::Outgoing => &self.outgoing,
             TraversalDirection::Incoming => &self.incoming,
         }
     }
 
-    /// The replacement run for `node`, found through the ordered map.
+    /// The replacement run for `node`, found through the dense index.
     ///
-    /// Out of line: a walk start is forced inline everywhere, and the map
-    /// descent would go with it into every scan of a store that has never
+    /// Out of line: a walk start is forced inline everywhere, and even this
+    /// lookup would go with it into every scan of a store that has never
     /// relocated an edge and so never reaches this.
     #[inline(never)]
     fn run(&self, node: usize, direction: TraversalDirection) -> Option<&[u32]> {
-        self.runs(direction)
-            .get(&raw_index(node))
-            .map(Vec::as_slice)
+        self.runs(direction).get(node)
     }
 
-    fn runs_mut(&mut self, direction: TraversalDirection) -> &mut BTreeMap<u32, Vec<u32>> {
+    fn runs_mut(&mut self, direction: TraversalDirection) -> &mut Runs {
         match direction {
             TraversalDirection::Outgoing => &mut self.outgoing,
             TraversalDirection::Incoming => &mut self.incoming,
@@ -259,21 +266,39 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         edit: impl FnOnce(&mut Vec<u32>, Option<&LiveSet>) -> R,
     ) -> R {
         let index = node.index();
-        let fresh = if self.overlay(index, direction).is_some() {
-            Vec::new()
-        } else {
-            self.live_base_run(node, direction)
-        };
+        if self.overlay(index, direction).is_none() {
+            self.start_run(node, direction);
+        }
         let live = self.tombstoned_edges().then_some(&self.live_edges);
         let delta_base = raw_index(self.base_edges.len());
-        let runs = self.relocations.get_or_insert_default().runs_mut(direction);
-        let run = match runs.entry(raw_index(index)) {
-            Entry::Occupied(occupied) => occupied.into_mut(),
-            Entry::Vacant(vacant) => vacant.insert(fresh),
-        };
+        let run = self
+            .relocations
+            .as_deref_mut()
+            .and_then(|relocations| relocations.runs_mut(direction).get_mut(index))
+            .expect("a node being edited has a run, which start_run gave it");
         self.chains
             .drain_into(index, direction, delta_base, live, run);
         edit(run, live)
+    }
+
+    /// Give `node` its first overlay run along `direction`: the live edges of
+    /// its compressed run.
+    ///
+    /// Apart from [`with_run`](Self::with_run), which every edit goes
+    /// through, so that the by-value `Vec` that becomes the run is passed
+    /// once per relocated node and never on the repeated path: copied into an
+    /// argument slot it is read back as two 16-byte halves that straddle
+    /// narrower stores, a load that cannot be forwarded, and with the run
+    /// handed in on every edit that stall was the dominant cost of a
+    /// redirect.
+    #[inline(never)]
+    fn start_run(&mut self, node: Id<NT>, direction: TraversalDirection) {
+        let run = self.live_base_run(node, direction);
+        let node_bound = self.node_bound();
+        self.relocations
+            .get_or_insert_default()
+            .runs_mut(direction)
+            .insert(node.index(), node_bound, run);
     }
 }
 

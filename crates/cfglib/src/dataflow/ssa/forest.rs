@@ -93,14 +93,14 @@ pub(super) fn complete_dominator_forest<G: RootedView<NodeId = BlockId>>(
     let components = kosaraju_scc(cfg);
     roots.clear();
     roots.push(cfg.root());
-    for (component_index, component) in components.components.iter().enumerate() {
-        let Some(&first) = component.nodes.iter().next() else {
+    for (component_index, component) in components.components().enumerate() {
+        let Some(&first) = component.first() else {
             continue;
         };
         if dominators.is_reachable(first) {
             continue;
         }
-        let has_external_predecessor = component.nodes.iter().copied().any(|block| {
+        let has_external_predecessor = component.iter().copied().any(|block| {
             cfg.predecessors(block)
                 .any(|predecessor| components.component_index(predecessor) != component_index)
         });

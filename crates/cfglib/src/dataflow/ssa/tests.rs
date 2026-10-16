@@ -39,14 +39,14 @@ fn a_handler_reads_the_definition_before_the_faulting_instruction() {
     cfg.block_mut(handler).push(df_use("catch", 0));
 
     let ssa = SsaForm::compute(&cfg, &DominatorTree::compute(&cfg));
-    let prior = ssa.block(cfg.entry()).instructions[0].defs[0].clone();
-    let loaded = &ssa.block(protected).instructions[0].defs[0];
-    assert_eq!(&ssa.block(normal).instructions[0].uses[0], loaded);
+    let prior = ssa.block(cfg.entry()).instructions[0].defs()[0].clone();
+    let loaded = &ssa.block(protected).instructions[0].defs()[0];
+    assert_eq!(&ssa.block(normal).instructions[0].uses()[0], loaded);
     let [phi] = ssa.block(handler).phis.as_slice() else {
         panic!("the handler merges the value before the load");
     };
-    assert_eq!(phi.operands, [(departure(protected, 0), prior)]);
-    assert_eq!(ssa.block(handler).instructions[0].uses[0], phi.result);
+    assert_eq!(phi.operands(), [(departure(protected, 0), prior)]);
+    assert_eq!(ssa.block(handler).instructions[0].uses()[0], phi.result);
 
     let live = crate::Liveness::compute(&cfg);
     assert!(live.live_in(protected).contains(&0));
@@ -67,19 +67,19 @@ fn multiple_unwind_points_keep_their_distinct_completed_definitions() {
 
     let ssa = SsaForm::compute(&cfg, &DominatorTree::compute(&cfg));
     let phi = &ssa.block(handler).phis[0];
-    let prior = ssa.block(cfg.entry()).instructions[0].defs[0].clone();
-    let first = ssa.block(protected).instructions[0].defs[0].clone();
+    let prior = ssa.block(cfg.entry()).instructions[0].defs()[0].clone();
+    let first = ssa.block(protected).instructions[0].defs()[0].clone();
     assert_eq!(
-        phi.operands,
+        phi.operands(),
         [
             (departure(protected, 0), prior),
             (departure(protected, 1), first),
         ]
     );
-    assert_eq!(ssa.block(handler).instructions[0].uses[0], phi.result);
+    assert_eq!(ssa.block(handler).instructions[0].uses()[0], phi.result);
     assert_eq!(
-        ssa.block(normal).instructions[0].uses[0],
-        ssa.block(protected).instructions[1].defs[0]
+        ssa.block(normal).instructions[0].uses()[0],
+        ssa.block(protected).instructions[1].defs()[0]
     );
     let live = crate::Liveness::compute(&cfg);
     assert!(
@@ -99,13 +99,13 @@ fn a_definition_before_every_throw_reaches_the_handler_without_a_phi() {
     cfg.block_mut(handler).push(df_use("catch", 0));
 
     let ssa = SsaForm::compute(&cfg, &DominatorTree::compute(&cfg));
-    let completed = &ssa.block(protected).instructions[0].defs[0];
+    let completed = &ssa.block(protected).instructions[0].defs()[0];
     assert!(
         ssa.block(handler).phis.is_empty(),
         "every throw already observes the one definition"
     );
-    assert_eq!(&ssa.block(handler).instructions[0].uses[0], completed);
-    assert_eq!(&ssa.block(normal).instructions[0].uses[0], completed);
+    assert_eq!(&ssa.block(handler).instructions[0].uses()[0], completed);
+    assert_eq!(&ssa.block(normal).instructions[0].uses()[0], completed);
 }
 
 #[test]
@@ -121,23 +121,23 @@ fn a_join_of_normal_and_unwind_paths_merges_their_distinct_values() {
     cfg.block_mut(join).push(df_use("merged", 0));
 
     let ssa = SsaForm::compute(&cfg, &DominatorTree::compute(&cfg));
-    let before = ssa.block(protected).instructions[0].defs[0].clone();
-    let after = ssa.block(protected).instructions[2].defs[0].clone();
+    let before = ssa.block(protected).instructions[0].defs()[0].clone();
+    let after = ssa.block(protected).instructions[2].defs()[0].clone();
     let [unwound] = ssa.block(handler).phis.as_slice() else {
         panic!("the definition after the call needs a handler phi");
     };
-    assert_eq!(unwound.operands, [(departure(protected, 1), before)]);
+    assert_eq!(unwound.operands(), [(departure(protected, 1), before)]);
     let [merged] = ssa.block(join).phis.as_slice() else {
         panic!("the join merges the normal and the unwind value");
     };
     assert_eq!(
-        merged.operands,
+        merged.operands(),
         [
             (departure(normal, 0), after),
             (departure(handler, 0), unwound.result.clone()),
         ]
     );
-    assert_eq!(ssa.block(join).instructions[0].uses[0], merged.result);
+    assert_eq!(ssa.block(join).instructions[0].uses()[0], merged.result);
 }
 
 #[test]
@@ -203,9 +203,9 @@ fn renaming_uses_latest_definition() {
     let dom = DominatorTree::compute(&cfg);
     let ssa = SsaForm::compute(&cfg, &dom);
     let instructions = &ssa.block(cfg.entry()).instructions;
-    assert_eq!(instructions[0].defs[0], SsaValue::new(0, 1));
-    assert_eq!(instructions[1].defs[0], SsaValue::new(0, 2));
-    assert_eq!(instructions[2].uses[0], SsaValue::new(0, 2));
+    assert_eq!(instructions[0].defs()[0], SsaValue::new(0, 1));
+    assert_eq!(instructions[1].defs()[0], SsaValue::new(0, 2));
+    assert_eq!(instructions[2].uses()[0], SsaValue::new(0, 2));
 }
 
 #[test]
@@ -214,7 +214,7 @@ fn read_before_definition_is_live_in() {
     let dom = DominatorTree::compute(&cfg);
     let ssa = SsaForm::compute(&cfg, &dom);
     assert_eq!(
-        ssa.block(cfg.entry()).instructions[0].uses[0],
+        ssa.block(cfg.entry()).instructions[0].uses()[0],
         SsaValue::live_in(7)
     );
 }
@@ -238,10 +238,10 @@ fn diamond_phi_has_renamed_result_and_operands() {
     let phi = &ssa.block(merge).phis[0];
     assert_eq!(phi.result.variable, 0);
     assert_ne!(phi.result.version, 0);
-    assert_eq!(phi.operands.len(), 2);
-    assert!(phi.operands.iter().all(|(_, value)| value.version != 0));
-    assert_ne!(phi.operands[0].1, phi.operands[1].1);
-    assert_eq!(ssa.block(merge).instructions[0].uses[0], phi.result);
+    assert_eq!(phi.operands().len(), 2);
+    assert!(phi.operands().iter().all(|(_, value)| value.version != 0));
+    assert_ne!(phi.operands()[0].1, phi.operands()[1].1);
+    assert_eq!(ssa.block(merge).instructions[0].uses()[0], phi.result);
 }
 
 #[test]
@@ -252,7 +252,7 @@ fn unreachable_block_is_still_annotated() {
     let dom = DominatorTree::compute(&cfg);
     let ssa = SsaForm::compute(&cfg, &dom);
     assert_eq!(ssa.block(unreachable).instructions.len(), 1);
-    assert_eq!(ssa.block(unreachable).instructions[0].defs[0].variable, 3);
+    assert_eq!(ssa.block(unreachable).instructions[0].defs()[0].variable, 3);
 }
 
 #[test]
@@ -267,8 +267,8 @@ fn disconnected_definition_reaches_its_component_successor() {
     let dom = DominatorTree::compute(&cfg);
     let ssa = SsaForm::compute(&cfg, &dom);
     assert_eq!(
-        ssa.block(handler).instructions[0].uses[0],
-        ssa.block(landing).instructions[0].defs[0]
+        ssa.block(handler).instructions[0].uses()[0],
+        ssa.block(landing).instructions[0].defs()[0]
     );
 }
 
@@ -330,7 +330,7 @@ fn value_at_reads_the_phi_and_the_dominator() {
     );
     assert_eq!(
         ssa.value_at(start_of_merge, &1),
-        ssa.block(entry).instructions[0].defs[0],
+        ssa.block(entry).instructions[0].defs()[0],
         "the immediate dominator supplies a variable the block merges not"
     );
     assert_eq!(
@@ -357,7 +357,7 @@ fn disconnected_component_does_not_inherit_entry_definitions() {
     let dom = DominatorTree::compute(&cfg);
     let ssa = SsaForm::compute(&cfg, &dom);
     assert_eq!(
-        ssa.block(disconnected).instructions[0].uses[0],
+        ssa.block(disconnected).instructions[0].uses()[0],
         SsaValue::live_in(0)
     );
 }
@@ -467,10 +467,108 @@ fn parallel_edges_give_every_phi_operand_position_its_value() {
     let dom = DominatorTree::compute(&cfg);
     let form = SsaForm::compute(&cfg, &dom);
     let phi = &form.block(merge).phis[0];
-    assert_eq!(phi.operands.len(), 3);
+    assert_eq!(phi.operands().len(), 3);
     assert!(
-        phi.operands.iter().all(|(_, value)| !value.is_live_in()),
+        phi.operands().iter().all(|(_, value)| !value.is_live_in()),
         "every operand position names the definition reaching it: {:?}",
-        phi.operands
+        phi.operands()
     );
+}
+
+#[test]
+fn an_instruction_wider_than_its_inline_storage_keeps_every_value_in_order() {
+    // More uses and definitions than an instruction record holds inline, with
+    // a repeated variable on each side.
+    let mut cfg = Cfg::<DfInst>::new();
+    let entry = cfg.entry();
+    for variable in 0..5 {
+        cfg.block_mut(entry).push(df_def("seed", variable));
+    }
+    cfg.block_mut(entry).push(DfInst {
+        uses: vec![4, 2, 2, 0, 3, 1],
+        defs: vec![1, 0, 1, 7],
+        ..df_ff("wide")
+    });
+
+    let form = SsaForm::compute(&cfg, &DominatorTree::compute(&cfg));
+    let instructions = &form.block(entry).instructions;
+    let wide = &instructions[5];
+    let seeded = |variable: u16| instructions[usize::from(variable)].defs()[0].clone();
+    assert_eq!(
+        wide.uses(),
+        [
+            seeded(4),
+            seeded(2),
+            seeded(2),
+            seeded(0),
+            seeded(3),
+            seeded(1)
+        ]
+    );
+    assert_eq!(
+        wide.defs(),
+        [
+            SsaValue::new(1, 2),
+            SsaValue::new(0, 2),
+            SsaValue::new(1, 3),
+            SsaValue::new(7, 1),
+        ]
+    );
+    assert_eq!(form.max_version(&1), 3);
+}
+
+#[test]
+fn a_phi_wider_than_its_inline_storage_lists_every_departure_in_cfg_order() {
+    // Four arms merge, one more operand than a phi record holds inline.
+    let mut cfg = Cfg::<DfInst>::new();
+    let merge = cfg.new_block();
+    let arms: Vec<BlockId> = (0..4).map(|_| cfg.new_block()).collect();
+    for (index, &arm) in arms.iter().enumerate() {
+        let kind = if index == 0 {
+            EdgeKind::ConditionalTrue
+        } else {
+            EdgeKind::ConditionalFalse
+        };
+        cfg.add_edge(cfg.entry(), arm, kind);
+        cfg.add_edge(arm, merge, EdgeKind::Fallthrough);
+        cfg.block_mut(arm).push(df_def("arm", 0));
+    }
+    cfg.block_mut(merge).push(df_use("merged", 0));
+
+    let dom = DominatorTree::compute(&cfg);
+    let form = SsaForm::compute(&cfg, &dom);
+    let [phi] = form.block(merge).phis.as_slice() else {
+        panic!("the merge needs exactly one phi");
+    };
+    let expected: Vec<ProgramPoint> = cfg
+        .predecessors(merge)
+        .map(|block| departure(block, cfg.block(block).instructions().len()))
+        .collect();
+    let departures: Vec<ProgramPoint> = phi.operands().iter().map(|(point, _)| *point).collect();
+    assert_eq!(departures, expected);
+    for (point, value) in phi.operands() {
+        assert_eq!(
+            value,
+            &form.instruction(departure(point.block, 0)).unwrap().defs()[0]
+        );
+    }
+
+    let placements = PhiPlacements::compute(&cfg, &dom);
+    assert_eq!(placements.at(merge)[0].predecessors(), expected);
+}
+
+#[test]
+fn a_blocks_instruction_vector_holds_no_spare_capacity() {
+    // The vector moves into the form, so room the allocator's growth step
+    // would add stays allocated for the life of the form.
+    let cfg = CfgBuilder::build(vec![
+        df_def("first", 0),
+        df_use("second", 0),
+        df_def("third", 1),
+    ])
+    .unwrap();
+    let form = SsaForm::compute(&cfg, &DominatorTree::compute(&cfg));
+    for block in form.blocks() {
+        assert_eq!(block.instructions.capacity(), block.instructions.len());
+    }
 }

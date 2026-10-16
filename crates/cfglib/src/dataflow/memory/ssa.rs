@@ -374,7 +374,7 @@ impl<L, V, F> MemorySSAEvent<L, V, F> {
             .iter()
             .map(|address| {
                 instruction
-                    .uses
+                    .uses()
                     .iter()
                     .find(|value| &value.variable == address)
                     .cloned()
@@ -703,7 +703,7 @@ where
                     },
                 );
                 let operands: Vec<_> = phi
-                    .operands
+                    .operands()
                     .iter()
                     .map(|(point, value)| (departure(*point), value.clone()))
                     .collect();
@@ -735,8 +735,8 @@ where
                     continue;
                 };
                 let entry = &trace[source.trace_index];
-                let input = renamed.uses.first().cloned();
-                let output = renamed.defs.first().cloned();
+                let input = renamed.uses().first().cloned();
+                let output = renamed.defs().first().cloned();
                 let reads = entry.event().reads();
                 let writes = entry.event().writes();
                 let event = MemorySSAEvent {
