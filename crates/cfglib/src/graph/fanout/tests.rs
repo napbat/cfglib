@@ -284,6 +284,30 @@ fn reading_a_dense_key_past_the_bound_panics() {
 }
 
 #[test]
+#[should_panic(expected = "dense fan-out key is outside 0..2")]
+fn reading_the_largest_index_panics_instead_of_wrapping() {
+    let rows = DenseFanout::from_pairs(2, [(1_usize, "here")]);
+
+    let _ = rows.get(usize::MAX);
+}
+
+#[test]
+#[should_panic(expected = "dense fan-out key is outside 0..0")]
+fn reading_any_key_of_the_empty_table_panics() {
+    let rows = DenseFanout::<u32>::default();
+
+    let _ = rows.get(0);
+}
+
+#[test]
+fn the_last_key_of_a_dense_table_reads_its_own_run() {
+    let rows = DenseFanout::from_pairs(3, [(2_usize, "tail"), (0, "head"), (2, "end")]);
+
+    assert_eq!(rows.get(2), ["tail", "end"]);
+    assert_eq!(rows.get(0), ["head"]);
+}
+
+#[test]
 fn a_tagged_identity_keys_a_dense_table() {
     let definition = NodeId::from_index(0);
     let call = NodeId::from_index(2);

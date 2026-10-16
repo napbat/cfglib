@@ -66,6 +66,15 @@ fn run_bound(count: usize) -> u32 {
     u32::try_from(count).expect("fan-out value count exceeds u32::MAX")
 }
 
+/// Reject a key outside a dense table's `0..bound` key space.
+///
+/// Kept out of line so the read it guards stays small enough to inline.
+#[cold]
+#[inline(never)]
+fn key_outside(bound: usize) -> ! {
+    panic!("dense fan-out key is outside 0..{bound}")
+}
+
 /// A sparse ordered key to its run of values, every run in one array.
 ///
 /// The table costs three allocations no matter how many keys it holds, which
@@ -507,14 +516,15 @@ impl<V, K: DenseId> DenseFanout<V, K> {
     /// table's own space that recorded nothing is not an error: it owns an
     /// empty run.
     #[must_use]
+    #[inline]
     pub fn get(&self, key: K) -> &[V] {
         let index = key.index();
-        assert!(
-            index < self.bound(),
-            "dense fan-out key is outside 0..{}",
-            self.bound()
-        );
-        self.run(index)
+        // One read of the key's two run bounds: the window exists exactly when
+        // `index < bound`, and the empty table has no window at all.
+        let Some(&[start, end]) = self.offsets.get(index..).and_then(<[u32]>::first_chunk) else {
+            key_outside(self.bound())
+        };
+        &self.values[start as usize..end as usize]
     }
 
     /// Every key of the space with its run, ascending, empty runs included.
