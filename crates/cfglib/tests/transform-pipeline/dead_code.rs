@@ -46,6 +46,30 @@ fn dead_code_elimination_removes_a_whole_dead_chain_but_no_effect() {
     );
 }
 
+#[test]
+fn dead_code_elimination_removes_a_chain_that_spans_blocks_in_one_call() {
+    let mut builder = Builder::<Route>::new();
+    let entry = builder.entry();
+    builder.push(entry, Inst::add(10, 0, 2));
+    let middle = builder.block([Inst::add(11, 10, 10)]);
+    let last = builder.block([Inst::add(12, 11, 11), Inst::print(0), Inst::ret()]);
+    builder.edge(entry, middle, EdgeKind::Fallthrough);
+    builder.edge(middle, last, EdgeKind::Fallthrough);
+    let mut cfg = builder.finish();
+
+    assert_eq!(
+        dead_code_elimination(&mut cfg),
+        3,
+        "a chain feeding only a dead instruction is dead with it, wherever its links sit"
+    );
+    assert_eq!(cfg.block(entry).instructions(), []);
+    assert_eq!(cfg.block(middle).instructions(), []);
+    assert_eq!(
+        cfg.block(last).instructions(),
+        [Inst::print(0), Inst::ret()]
+    );
+}
+
 fn elimination_case<E: Payload>(seed: u64) {
     let before = random_program::<E>(seed, true);
     let mut cfg = before.clone();
