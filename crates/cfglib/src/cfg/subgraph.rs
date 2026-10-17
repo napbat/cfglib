@@ -17,7 +17,9 @@ impl<I: Clone, E: Clone> Cfg<I, E> {
     /// The first block in `blocks` becomes the entry.
     ///
     /// Edges that cross the boundary (one endpoint outside the set)
-    /// are dropped.
+    /// are dropped. So are the exception regions and cleanup records: the
+    /// extracted CFG starts with none, and a caller that wants them registers
+    /// them against the new identities the mapping reports.
     ///
     /// # Examples
     ///

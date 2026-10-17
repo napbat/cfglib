@@ -397,19 +397,29 @@ fallible pass stops execution.
 | Transform | Function | Description |
 |---|---|---|
 | Simplify (all-in-one) | `simplify`, `simplify_mapped` | Unreachable removal + block merging + empty bypass until stable; mapped form composes identity changes |
-| Remove unreachable | `remove_unreachable` | DFS reachability pruning |
-| Merge blocks | `merge_blocks` | Coalesce single-succ/single-pred chains |
-| Remove empty blocks | `remove_empty_blocks` | Bypass empty fallthrough blocks |
+| Remove unreachable | `remove_unreachable` | Reachability pruning; blocks named by exception metadata are kept |
+| Merge blocks | `merge_blocks` | Coalesce single-succ/single-pred chains inside one protected region |
+| Remove empty blocks | `remove_empty_blocks` | Bypass empty fallthrough blocks that no handler or cleanup names |
 | Critical edge splitting | `split_critical_edges`, `split_critical_edges_with` | Insert blocks on multi-succ → multi-pred edges while retaining the original edge identity/payload and mapping both halves |
 | Dead code elimination | `dead_code_elimination[_with_exits]` (instructions), `remove_dead_code[_mapped]` (plus the structure left dead) | Liveness-based; requires `EffectInfo` so side-effecting code is never silently deleted. The `_with_exits` form seeds what leaves each block |
-| Edge contraction | `contract_edge`, `contract_edge_mapped` | Merge two blocks connected by a single edge; mapped form preserves surviving edge identities/payloads |
-| Node splitting | `Cfg::split_block`, `Cfg::split_block_at_points[_with_payloads]` | Split at one or several validated consumer-selected instruction boundaries |
+| Edge contraction | `contract_edge`, `contract_edge_mapped` | Merge two blocks connected by a single edge; mapped form preserves surviving edge identities/payloads. Refuses exception edges and merges across a protection boundary |
+| Node splitting | `Cfg::split_block`, `Cfg::split_block_at_points[_with_payloads]` | Split at one or several validated consumer-selected instruction boundaries; the new blocks stay in the original's regions |
 | Loop rotation | `rotate_loop` | Top-tested → bottom-tested loop form |
 | Loop invariant detection | `find_loop_invariants` | Identify hoistable instructions |
 | Partial redundancy elimination | `PreAnalysis::compute`, `eliminate_pre` | GVN-based PRE |
 | Graph coloring | `interference_graph`, `color_graph` | Interference builder returns a `Graph`; coloring accepts any graph view |
 | Linearization | `linearize`, `Emitter` trait, `BlockOrder` | Re-serialize CFG to a flat stream; emitters speak `BlockId`, naming is theirs |
 | Width relaxation | `relax_layout` | The assembler fixed point for symbolic layouts: monotone branch widening against caller-resolved labels, offset-dependent (alignment) widths, converged offsets plus the final label context |
+
+The structural passes (`simplify`, `merge_blocks`, `remove_empty_blocks`,
+`remove_unreachable`, `contract_edge`) keep a CFG's exception metadata true, so
+`Cfg::compact` and `EhModel` stay usable after any sequence of them. A block a
+handler, filter, or cleanup names by a single reference is never removed or
+merged away (`remove_unreachable` treats such blocks as roots), and two blocks
+merge only when the same regions protect both. `Cfg::split_block` is the
+inverse: the new tail joins every region and handler body of the original.
+Call `Cfg::remove_unreachable_regions` first to drop regions nothing can raise
+into together with their handler blocks.
 
 ### Output
 

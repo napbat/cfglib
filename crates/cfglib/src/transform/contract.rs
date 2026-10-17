@@ -1,7 +1,7 @@
 //! Edge contraction: folding one block into the block that leads to it.
 
 extern crate alloc;
-
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
@@ -11,14 +11,19 @@ use crate::rewrite::Rewrite;
 
 /// Contract an edge by merging `target` into `source`.
 ///
-/// `target` is removed: its instructions, its label, and its outgoing edges
-/// move to `source`, and the block itself stops being a block of the CFG,
-/// exactly as [`merge_blocks`](crate::merge_blocks) leaves the chain it
-/// folded. Its slot stays reserved, so every surviving identity is unchanged.
+/// `target` is removed: its instructions, its label (when `source` has none),
+/// and its outgoing edges move to `source`, and the block itself stops being
+/// a block of the CFG, exactly as [`merge_blocks`](crate::merge_blocks) leaves
+/// the chain it folded. Its slot stays reserved, so every surviving identity
+/// is unchanged.
 ///
-/// This compatibility entry point reports only whether contraction happened.
-/// Use [`contract_edge_mapped`] when clients retain graph identities. The CFG
-/// entry is never accepted as `target`, and self-loops are not contracted.
+/// Returns whether contraction happened. Use [`contract_edge_mapped`] when
+/// clients retain graph identities. The CFG entry is never accepted as
+/// `target`, self-loops are not contracted, and an exception edge is never
+/// contracted. When the CFG has exception regions, `source` and `target` must
+/// also be protected by the same regions and belong to the same known handler
+/// bodies, and no handler, filter, or cleanup may name `target`: folding must
+/// not move code across a protection boundary or strand exception metadata.
 pub fn contract_edge<I, E>(cfg: &mut Cfg<I, E>, source: BlockId, target: BlockId) -> bool {
     contract_edge_inner(cfg, source, target, None)
 }
@@ -29,8 +34,8 @@ pub fn contract_edge<I, E>(cfg: &mut Cfg<I, E>, source: BlockId, target: BlockId
 /// Returns `None` unless `source` has exactly one outgoing edge, that edge
 /// targets `target`, and it is `target`'s sole incoming edge. The connecting
 /// edge maps to removal, `target` is removed and maps to `source`, and
-/// redirected outgoing edges map to themselves. The CFG entry is never
-/// accepted as `target`, and self-loops are not contracted.
+/// redirected outgoing edges map to themselves. The refusals documented on
+/// [`contract_edge`] apply here too.
 pub fn contract_edge_mapped<I, E>(
     cfg: &mut Cfg<I, E>,
     source: BlockId,
@@ -40,7 +45,10 @@ pub fn contract_edge_mapped<I, E>(
     contract_edge_inner(cfg, source, target, Some(&mut mapping)).then_some(mapping)
 }
 
-fn contract_edge_inner<I, E>(
+/// The one contraction every merge goes through, so a label, a region rule,
+/// or an identity record cannot differ between [`contract_edge`] and
+/// [`merge_blocks`](crate::merge_blocks).
+pub(crate) fn contract_edge_inner<I, E>(
     cfg: &mut Cfg<I, E>,
     source: BlockId,
     target: BlockId,
@@ -49,17 +57,18 @@ fn contract_edge_inner<I, E>(
     if source == target || target == cfg.entry() {
         return false;
     }
-    let source_outgoing: Vec<EdgeId> = cfg.outgoing(source).collect();
-    let target_incoming: Vec<EdgeId> = cfg.incoming(target).collect();
-    if source_outgoing.len() != 1 || target_incoming.len() != 1 {
+    let Some(connecting) = cfg.sole_outgoing(source) else {
         return false;
-    }
-    let connecting = source_outgoing[0];
-    if target_incoming[0] != connecting || cfg.edge(connecting).target() != target {
+    };
+    if cfg.sole_incoming(target) != Some(connecting)
+        || cfg.edge(connecting).target() != target
+        || cfg.edge(connecting).kind().is_exceptional()
+        || !cfg.can_fold_into(source, target)
+    {
         return false;
     }
 
-    let target_label = cfg.block(target).label().map(alloc::string::String::from);
+    let target_label = cfg.block(target).label().map(String::from);
     let target_instructions = core::mem::take(cfg.block_mut(target).instructions_mut());
     cfg.block_mut(source)
         .instructions_mut()
@@ -193,5 +202,22 @@ mod tests {
         assert_eq!(cfg.edge(back).kind(), EdgeKind::Back);
         assert_eq!(cfg.edge(back).weight(), Some(0.875));
         assert_eq!(cfg.edge_count(), 3);
+    }
+
+    #[test]
+    fn contract_keeps_the_label_of_the_absorbed_block_unless_the_source_has_one() {
+        let mut cfg = Cfg::<u32>::new();
+        let entry = cfg.entry();
+        let labeled = cfg.new_block();
+        let after = cfg.new_block();
+        cfg.block_mut(labeled).set_label("loop");
+        cfg.block_mut(after).set_label("exit");
+        cfg.add_edge(entry, labeled, EdgeKind::Fallthrough);
+        cfg.add_edge(labeled, after, EdgeKind::Fallthrough);
+
+        assert!(contract_edge(&mut cfg, entry, labeled));
+        assert_eq!(cfg.block(entry).label(), Some("loop"));
+        assert!(contract_edge(&mut cfg, entry, after));
+        assert_eq!(cfg.block(entry).label(), Some("loop"));
     }
 }

@@ -10,6 +10,7 @@ use crate::graph::edge_view::EdgeRef;
 use crate::graph::store::Graph;
 use crate::region::{Cleanup, Region};
 
+mod anchors;
 mod cleanup;
 mod compact;
 mod mutation;
@@ -100,23 +101,26 @@ pub struct Cfg<I, E = ()> {
 }
 
 impl<I, E> Cfg<I, E> {
-    /// Create an empty CFG with a single entry block.
+    /// Create an empty CFG with a single entry block and a consumer-defined
+    /// edge payload type.
     ///
-    /// This is the primary constructor for ISA frontends that build
-    /// the graph manually (as opposed to [`crate::CfgBuilder::build`] which
-    /// processes a structured instruction stream).
+    /// This is the constructor for frontends that keep format-specific edge
+    /// provenance (see [`Cfg::new`] for the unit-payload form). ISA frontends
+    /// that build the graph by hand, as opposed to
+    /// [`crate::CfgBuilder::build`], which processes a structured instruction
+    /// stream, start here too.
     ///
     /// # Examples
     ///
     /// ```
     /// use cfglib::{Cfg, EdgeKind};
     ///
-    /// let mut cfg = Cfg::<u32>::new();
+    /// let mut cfg = Cfg::<u32, &str>::with_edge_payload();
     /// let entry = cfg.entry();
     /// let b1 = cfg.new_block();
-    /// cfg.add_edge(entry, b1, EdgeKind::Fallthrough);
+    /// let edge = cfg.add_edge_with_payload(entry, b1, EdgeKind::Fallthrough, "next");
     /// assert_eq!(cfg.block_count(), 2);
-    /// assert_eq!(cfg.edge_count(), 1);
+    /// assert_eq!(cfg.edge(edge).payload(), &"next");
     /// ```
     #[must_use]
     pub fn with_edge_payload() -> Self {
@@ -244,6 +248,20 @@ impl<I, E> Cfg<I, E> {
         self.graph.incoming(id)
     }
 
+    /// The only outgoing edge of `id`, when it has exactly one.
+    pub(crate) fn sole_outgoing(&self, id: BlockId) -> Option<EdgeId> {
+        let mut outgoing = self.outgoing(id);
+        let first = outgoing.next()?;
+        outgoing.next().is_none().then_some(first)
+    }
+
+    /// The only incoming edge of `id`, when it has exactly one.
+    pub(crate) fn sole_incoming(&self, id: BlockId) -> Option<EdgeId> {
+        let mut incoming = self.incoming(id);
+        let first = incoming.next()?;
+        incoming.next().is_none().then_some(first)
+    }
+
     /// Successor block ids (allocation-free), retaining parallel entries.
     ///
     /// # Examples
@@ -348,6 +366,19 @@ impl<I> Cfg<I> {
     ///
     /// Use [`Cfg::with_edge_payload`] when edge metadata has a
     /// consumer-defined type.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cfglib::{Cfg, EdgeKind};
+    ///
+    /// let mut cfg = Cfg::<u32>::new();
+    /// let entry = cfg.entry();
+    /// let b1 = cfg.new_block();
+    /// cfg.add_edge(entry, b1, EdgeKind::Fallthrough);
+    /// assert_eq!(cfg.block_count(), 2);
+    /// assert_eq!(cfg.edge_count(), 1);
+    /// ```
     #[must_use]
     pub fn new() -> Self {
         Self::with_edge_payload()
