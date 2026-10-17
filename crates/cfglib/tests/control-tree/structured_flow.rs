@@ -1,7 +1,7 @@
 //! The acyclic shapes a source `if` lowers to: branches, sequences, early
 //! returns, and the blocks that hold nothing.
 
-use cfglib::{Cfg, ControlNode, ControlTree, simplify};
+use cfglib::{Cfg, ControlNode, ControlTree, EdgeKind, simplify};
 
 use crate::builders::{Flow, pseudocode};
 use crate::oracles::{structure_and_check, structure_and_check_covering};
@@ -349,5 +349,32 @@ fn computing_twice_gives_equal_trees() {
     assert_eq!(
         ControlTree::compute(&flow.cfg),
         ControlTree::compute(&flow.cfg)
+    );
+}
+
+#[test]
+fn edge_payloads_do_not_change_the_tree() {
+    // A consumer whose edges carry its own payload structures the same program.
+    let mut with_payload = Cfg::<&'static str, u32>::with_edge_payload();
+    let entry = with_payload.entry();
+    let then_arm = with_payload.new_block();
+    let join = with_payload.new_block();
+    for (block, statement) in [(entry, "x > 0"), (then_arm, "a()"), (join, "return")] {
+        with_payload.block_mut(block).push(statement);
+    }
+    with_payload.add_edge_with_payload(entry, then_arm, EdgeKind::ConditionalTrue, 10);
+    with_payload.add_edge_with_payload(entry, join, EdgeKind::ConditionalFalse, 11);
+    with_payload.add_edge_with_payload(then_arm, join, EdgeKind::Fallthrough, 12);
+
+    let mut plain = Flow::starting_with("x > 0");
+    let plain_entry = plain.entry();
+    let plain_then = plain.stmt("a()");
+    let plain_join = plain.stmt("return");
+    plain.branch(plain_entry, plain_then, plain_join);
+    plain.fall(plain_then, plain_join);
+
+    assert_eq!(
+        ControlTree::compute_with_report(&with_payload),
+        ControlTree::compute_with_report(&plain.cfg)
     );
 }

@@ -251,6 +251,26 @@ fn a_graph_with_no_removed_block_compacts_to_itself() {
     assert_eq!(cfg.to_text(), before.to_text());
 }
 
+#[test]
+fn is_compact_is_true_exactly_when_compaction_would_change_no_identity() {
+    // The documented reading: `is_compact` is true exactly when `compact` would
+    // change nothing, so it must agree with the renumbering `compact` returns.
+    let mut untouched = try_catch(&["log(e)"]).cfg;
+    let mut with_holes = holey().cfg;
+
+    for (name, cfg) in [
+        ("untouched", &mut untouched),
+        ("with holes", &mut with_holes),
+    ] {
+        let predicted = cfg.is_compact();
+
+        let renumbering = cfg.compact();
+
+        assert_eq!(predicted, renumbering.is_identity(), "{name}");
+        assert!(cfg.is_compact(), "{name}: nothing is left to compact");
+    }
+}
+
 /// One graph per reference kind that names a single block, and that block.
 fn single_references() -> Vec<(&'static str, Cfg<Stmt>, BlockId)> {
     let mut graphs = Vec::new();
