@@ -150,7 +150,7 @@ definition-to-reference bindings.
 | Goto wiring | `resolve_jump_edges` + `JumpTargets` (consumer-typed targets: labels, addresses, syntax nodes) |
 | Compressed adjacency | `Cfg` stores its blocks and edges in `Graph`: a compressed base plus an appendable delta, with no per-block adjacency allocation |
 | Edge removal | `remove_edge()` clears the liveness bit of the edge; existing `EdgeId`s stay stable until `compact()` renumbers the survivors |
-| Edge metadata | Stable `EdgeId`, endpoints, `EdgeKind`, optional weight, and a caller-owned payload; `ExceptionFlow<M>` standardises search/unwind phase and execute/search/continue disposition while retaining platform metadata |
+| Edge metadata | Stable `EdgeId`, endpoints, `EdgeKind`, optional weight, and a caller-owned payload; `ExceptionFlow<M>` standardizes search/unwind phase and execute/search/continue disposition while retaining platform metadata |
 | Regions | Try/catch/finally regions with explicit `HandlerBody::Known`/`Unknown` completeness and `HandlerKind` (Catch, CatchAll, Finally, Fault, Filter); `install_clr_region` and `install_seh_region` import normalized platform clauses |
 | Cleanup continuations | `add_continuation` / `set_cleanup_resume` → `Cleanup` (`Continuation` + `CompletionReason`): which route out of a single shared `finally` block a resume edge belongs to |
 | Handler metadata | `HandlerMetadata<M>` side table (`HandlerFilters<F>` / `HandlerTypes<T>`) — consumer-typed filter predicates and CLR caught-type tokens keyed by `HandlerRef`, with no type parameter on `Cfg` |
