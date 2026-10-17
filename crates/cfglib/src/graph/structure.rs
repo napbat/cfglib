@@ -17,6 +17,7 @@ use alloc::vec::Vec;
 
 use super::dominator::DominatorTree;
 use super::edge_view::EdgeView;
+use super::loop_nest::nesting;
 use super::view::{DenseId, GraphView, RootedView};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
@@ -205,21 +206,11 @@ fn loops_from_backs<G: GraphView>(
         });
     }
 
-    // Compute nesting depth in O(L × max_body) instead of O(L²):
-    // Build a map from node → number of loops containing it, then
-    // each loop's depth = (count of its header) − 1 (itself).
-    {
-        let node_count = graph.node_bound();
-        let mut containing: Vec<u32> = alloc::vec![0; node_count];
-        for lp in &loops {
-            for &b in &lp.body {
-                containing[b.index()] += 1;
-            }
-        }
-        for lp in &mut loops {
-            // Every loop's body includes its own header, so subtract 1.
-            lp.depth = (containing[lp.header.index()] - 1) as usize;
-        }
+    // The nesting tree states the depth, so the flat list cannot disagree
+    // with it.
+    let depths = nesting(&loops).depths;
+    for (lp, depth) in loops.iter_mut().zip(depths) {
+        lp.depth = depth;
     }
 
     // Sort by depth (outermost first), then by header.
@@ -559,6 +550,48 @@ mod tests {
         let loops = detect_loops_tagged(&cfg, &dom);
         assert_eq!(loops.len(), 1);
         assert!(loops[0].body.contains(&b2));
+    }
+
+    #[test]
+    fn detected_depth_is_the_depth_in_the_nesting_tree() {
+        let cfg = CfgBuilder::build(vec![
+            MockInst(FlowEffect::LoopOpen, "outer"),
+            MockInst(FlowEffect::LoopOpen, "inner"),
+            ff("body"),
+            MockInst(FlowEffect::ConditionalBreak, "breakc_inner"),
+            MockInst(FlowEffect::LoopClose, "end_inner"),
+            MockInst(FlowEffect::ConditionalBreak, "breakc_outer"),
+            MockInst(FlowEffect::LoopClose, "end_outer"),
+            MockInst(FlowEffect::Return, "ret"),
+        ])
+        .unwrap();
+        let dom = DominatorTree::compute(&cfg);
+        let loops = detect_loops(&cfg, &dom);
+        let tree = crate::graph::loop_nest::LoopNestingTree::compute(&loops);
+        assert_eq!(loops.len(), 2);
+        for (index, lp) in loops.iter().enumerate() {
+            assert_eq!(lp.depth, tree.depth(index), "loop at {:?}", lp.header);
+        }
+    }
+
+    #[test]
+    fn irreducible_loops_over_one_cycle_are_siblings_not_each_others_parents() {
+        // Two entries into a cycle tagged in both directions: two loops, one
+        // body. Neither contains the other, so both are outermost.
+        let mut cfg = Cfg::<u32>::new();
+        let b1 = cfg.new_block();
+        let b2 = cfg.new_block();
+        cfg.add_edge(cfg.entry(), b1, EdgeKind::ConditionalTrue);
+        cfg.add_edge(cfg.entry(), b2, EdgeKind::ConditionalFalse);
+        cfg.add_edge(b1, b2, EdgeKind::Back);
+        cfg.add_edge(b2, b1, EdgeKind::Back);
+
+        let dom = DominatorTree::compute(&cfg);
+        let loops = detect_loops_tagged(&cfg, &dom);
+        assert_eq!(loops.len(), 2);
+        assert!(loops.iter().all(|lp| lp.depth == 0));
+        let tree = crate::graph::loop_nest::LoopNestingTree::compute(&loops);
+        assert_eq!(tree.roots(), [0, 1]);
     }
 
     #[test]
