@@ -26,6 +26,7 @@ mod dead_handlers;
 mod exhaustive;
 mod exit_free;
 mod invariants;
+mod lost_transfers;
 mod non_compact;
 mod predicated;
 mod regions;
@@ -33,6 +34,7 @@ mod semantics;
 mod switches;
 mod traversal;
 mod treating_empty;
+mod try_bodies;
 
 /// `id` and every node below it, in preorder.
 fn subtree(tree: &ControlTree, id: ControlNodeId) -> Vec<ControlNodeId> {
