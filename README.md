@@ -8,7 +8,7 @@ Generic, `no_std` graph and dataflow framework for code intelligence, program an
 
 Small read-only node and edge view contracts let consumer-owned stores and zero-copy filtered views reuse the algorithms. `CfgView` extends them for the instruction-level analyses, so a consumer block store runs the same dataflow as `Cfg`. Every instruction-adjacent axis is consumer-typed. Dataflow variables, constants, expression operators, side-effect vocabularies, branch targets, call targets, and edge payloads all come from the adapter. x86 registers and flags, shader register components, bytecode locals, compiler IR values, and source-language symbols do not need a library-owned numbering scheme. String literals and symbol ids flow through the analyses as naturally as machine words and addresses.
 
-On top of that, cfglib has a compiler middle-end toolkit: dominator trees, renamed SSA construction, location-aware memory SSA, dataflow analyses, value numbering, explicit alias sets, loop transforms, dead-code elimination, partial redundancy elimination, and graph coloring.
+On top of that, cfglib has a compiler middle-end toolkit: dominator trees, renamed SSA construction, location-aware memory SSA, dataflow analyses, value numbering, explicit alias sets, loop transforms, dead-code elimination, redundancy elimination, and graph coloring.
 
 Named transformations compose through `PassPipeline<T, E>`. A pipeline keeps
 the caller's declared order, supports closure-backed or stateful trait passes,
@@ -372,7 +372,7 @@ These analyses take `&G` where `G: CfgView`: `ReachingDefs`, `Liveness`, `DefUse
 |---|---|---|
 | Expression tree recovery | `recover_expressions`, `ExprInstr` (associated `Operator` + `Const`) | Rebuild expression DAGs from flat instructions |
 | Value numbering (local) | `BlockValueNumbers::compute` | Per-block hash-consing |
-| Value numbering (global) | `ValueNumbering::compute`, `ValueNumberInfo` (associated `Operator`) | Dominator-scoped GVN over any operation identity; a child an unwind reaches never reuses what its parent computes or writes from the first throwing instruction on |
+| Value numbering (global) | `ValueNumbering::compute`, `ValueNumberInfo` (associated `Operator`) | Dominator-scoped GVN over any operation identity, sound for variables that are written more than once: a block never reuses an expression over a variable a side path into it rewrites, and a child an unwind reaches never reuses what its parent computes or writes from the first throwing instruction on |
 | Redundancy counting | `ValueNumbering::redundant_count` | From GVN results |
 | Explicit alias sets | `AliasSets::new` / `merge`; `MemoryAlias` trait | Caller-populated union-find classes usable directly as the alias oracle for memory SSA; an unmerged pair is a proof of disjointness |
 | Index-path aliasing | `index_paths_may_overlap` | The `base[i][j]` kernel for alias oracles over indexed storage: unequal arity or unknown components stay conservative, fully known disagreement proves disjointness |
@@ -401,14 +401,14 @@ fallible pass stops execution.
 | Merge blocks | `merge_blocks` | Coalesce single-succ/single-pred chains inside one protected region |
 | Remove empty blocks | `remove_empty_blocks` | Bypass empty fallthrough blocks that no handler or cleanup names |
 | Critical edge splitting | `split_critical_edges`, `split_critical_edges_with` | Insert blocks on multi-succ → multi-pred edges while retaining the original edge identity/payload and mapping both halves |
-| Dead code elimination | `dead_code_elimination[_with_exits]` (instructions), `remove_dead_code[_mapped]` (plus the structure left dead) | Liveness-based; requires `EffectInfo` so side-effecting code is never silently deleted. The `_with_exits` form seeds what leaves each block |
+| Dead code elimination | `dead_code_elimination[_with_exits]` (instructions), `remove_dead_code[_mapped]` (plus the structure left dead) | Needed-set fixpoint over liveness: a dead instruction's reads keep nothing alive, so a chain feeding only dead code goes in one call, across blocks and around loops. Requires `EffectInfo` so side-effecting code is never silently deleted. The `_with_exits` form seeds what leaves each block |
 | Edge contraction | `contract_edge`, `contract_edge_mapped` | Merge two blocks connected by a single edge; mapped form preserves surviving edge identities/payloads. Refuses exception edges and merges across a protection boundary |
 | Node splitting | `Cfg::split_block`, `Cfg::split_block_at_points[_with_payloads]` | Split at one or several validated consumer-selected instruction boundaries; the new blocks stay in the original's regions |
-| Loop rotation | `rotate_loop` | Top-tested → bottom-tested loop form |
-| Loop invariant detection | `find_loop_invariants` | Identify hoistable instructions |
-| Partial redundancy elimination | `PreAnalysis::compute`, `eliminate_pre` | GVN-based PRE |
+| Loop rotation | `rotate_loop` | Top-tested → bottom-tested loop form: the bottom test is a copy of the header (joining its regions) with copies of its edges, and the latch edge is retargeted in place |
+| Loop invariant detection | `find_loop_invariants` | Instructions that define something, have no declared effect, cannot unwind, and read only outer definitions or one invariant loop definition; requires `EffectInfo` |
+| Redundancy elimination | `PreAnalysis::compute`, `eliminate_pre` | Finds the instructions a dominating instruction already computed (GVN) and removes those it can replace soundly, redirecting reads through `CopySource::rewrite_use`; partially redundant computations are left alone |
 | Graph coloring | `interference_graph`, `color_graph` | Interference builder returns a `Graph`; coloring accepts any graph view |
-| Linearization | `linearize`, `Emitter` trait, `BlockOrder` | Re-serialize CFG to a flat stream; emitters speak `BlockId`, naming is theirs |
+| Linearization | `linearize`, `Emitter` trait, `BlockOrder`, `LinearizeError` | Re-serialize CFG to a flat stream; emitters speak `BlockId`, naming is theirs. Exceptional, call, and dispatch edges emit nothing; a conditional edge out of an empty block is an error |
 | Width relaxation | `relax_layout` | The assembler fixed point for symbolic layouts: monotone branch widening against caller-resolved labels, offset-dependent (alignment) widths, converged offsets plus the final label context |
 
 The structural passes (`simplify`, `merge_blocks`, `remove_empty_blocks`,
