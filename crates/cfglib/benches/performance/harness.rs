@@ -1,9 +1,13 @@
-#[cfg(not(cfglib_bench_alloc))]
-use super::Instant;
+use std::alloc::System;
 #[cfg(cfglib_bench_alloc)]
-use super::{AtomicBool, AtomicU64, GlobalAlloc, Layout, Ordering};
-use super::{Duration, System, black_box};
+use std::alloc::{GlobalAlloc, Layout};
 use std::collections::{BTreeMap, BTreeSet};
+use std::hint::black_box;
+#[cfg(cfglib_bench_alloc)]
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
+#[cfg(not(cfglib_bench_alloc))]
+use std::time::Instant;
 
 #[cfg(cfglib_bench_alloc)]
 struct CountingAllocator;
@@ -131,13 +135,20 @@ fn run_iterations<T>(iterations: u64, operation: &mut impl FnMut() -> T) -> Dura
 }
 
 #[cfg(not(cfglib_bench_alloc))]
-// Nanoseconds per operation are intentionally a floating-point statistic; the
-// calibrated iteration count is far below the range where integer precision
-// would affect the printed tenth of a nanosecond.
+const SAMPLE_COUNT: usize = 7;
+
+/// Nanoseconds per operation, a floating-point statistic on purpose: the
+/// printed precision is a tenth of a nanosecond.
+#[cfg(not(cfglib_bench_alloc))]
 #[expect(
     clippy::cast_precision_loss,
-    reason = "benchmark timing statistics tolerate f64 precision loss"
+    reason = "a calibrated iteration count stays far below 2^53, so the conversion is exact"
 )]
+fn nanoseconds_per_operation(elapsed: Duration, iterations: u64) -> f64 {
+    elapsed.as_secs_f64() * 1e9 / iterations as f64
+}
+
+#[cfg(not(cfglib_bench_alloc))]
 pub(super) fn benchmark<T>(name: &str, target: Duration, mut operation: impl FnMut() -> T) {
     let mut iterations = 1_u64;
     loop {
@@ -154,10 +165,9 @@ pub(super) fn benchmark<T>(name: &str, target: Duration, mut operation: impl FnM
             .max(iterations + 1);
     }
 
-    let mut samples = [0.0_f64; 7];
+    let mut samples = [0.0_f64; SAMPLE_COUNT];
     for sample in &mut samples {
-        *sample =
-            run_iterations(iterations, &mut operation).as_secs_f64() * 1e9 / iterations as f64;
+        *sample = nanoseconds_per_operation(run_iterations(iterations, &mut operation), iterations);
     }
     samples.sort_unstable_by(f64::total_cmp);
     let median_ns = samples[samples.len() / 2];
@@ -186,7 +196,7 @@ pub(super) fn configuration_error(message: &str) -> ! {
     std::process::exit(2);
 }
 
-pub(super) fn benchmark_target() -> (u64, Duration) {
+pub(super) fn benchmark_target() -> Duration {
     let target_ms = match std::env::var("CFGLIB_BENCH_MS") {
         Ok(value) => match value.parse::<u64>() {
             Ok(0) => configuration_error("CFGLIB_BENCH_MS must be greater than zero"),
@@ -198,7 +208,7 @@ pub(super) fn benchmark_target() -> (u64, Duration) {
             configuration_error("CFGLIB_BENCH_MS must be valid UTF-8")
         }
     };
-    (target_ms, Duration::from_millis(target_ms))
+    Duration::from_millis(target_ms)
 }
 
 pub(super) fn run_semantic_oracle<T>(operation: &mut impl FnMut() -> T, oracle: impl FnOnce(&T)) {
@@ -217,6 +227,24 @@ pub(super) struct BenchmarkSuite<'filter> {
 
 impl<'filter> BenchmarkSuite<'filter> {
     pub(super) fn new(filter: &'filter str, target: Duration) -> Self {
+        println!("cfglib synthetic benchmark");
+        #[cfg(cfglib_bench_alloc)]
+        {
+            println!(
+                "mode: allocation instrumentation (counting wrapper over System; CPU timing disabled)"
+            );
+            println!(
+                "memory: allocations and requested bytes per operation; peak is incremental live bytes"
+            );
+        }
+        #[cfg(not(cfglib_bench_alloc))]
+        {
+            println!("mode: CPU (direct System global allocator; no counting wrapper)");
+            println!(
+                "timing: median of {SAMPLE_COUNT} samples; target >= {} ms/sample",
+                target.as_millis()
+            );
+        }
         Self {
             filter,
             target,

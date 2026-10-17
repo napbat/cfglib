@@ -1,6 +1,8 @@
-use super::{
-    BTreeMap, BlockId, Cfg, CfgBuilder, ConstantFolder, Direction, EdgeKind, FlowControl,
-    FlowEffect, Graph, InstrInfo, NodeId, NodeProblem, Problem, ValueNumberInfo,
+use std::collections::BTreeMap;
+
+use cfglib::{
+    BlockId, Cfg, CfgBuilder, ConstantFolder, Direction, EdgeKind, FlowControl, FlowEffect, Graph,
+    InstrInfo, NodeId, NodeProblem, Problem, ValueNumberInfo,
 };
 
 pub(super) fn fixture_u32(value: usize) -> u32 {

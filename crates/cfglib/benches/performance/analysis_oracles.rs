@@ -1,10 +1,13 @@
-use super::fixtures::{WIDE_FACT_WORDS, fixture_u32};
-use super::structural_oracles::has_directed_edge;
-use super::{
-    BTreeSet, BlockId, Cfg, CommonAncestor, ConstantInst, DominanceFrontiers, DominatorTree,
-    EdgeStep, Facts, Graph, IntervalAnalysis, NodeFacts, NodeId, PhiPlacements, PostDominatorTree,
-    PostNode, ProgramPoint, SsaForm, SsaValue, TraversalDirection, VecDeque,
+use std::collections::{BTreeSet, VecDeque};
+
+use cfglib::{
+    BlockId, Cfg, CommonAncestor, DominanceFrontiers, DominatorTree, EdgeStep, Facts, Graph,
+    IntervalAnalysis, NodeFacts, NodeId, PhiPlacements, PostDominatorTree, PostNode, ProgramPoint,
+    SsaForm, SsaValue, TraversalDirection,
 };
+
+use super::fixtures::{ConstantInst, WIDE_FACT_WORDS, fixture_u32};
+use super::structural_oracles::has_directed_edge;
 
 pub(super) fn directed_distances(
     graph: &Graph<(), ()>,
