@@ -18,9 +18,8 @@ use smallvec::SmallVec;
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
 use crate::dataflow::{
-    InstrInfo, ProgramPoint, VariableId, departs_before_throws, first_unwind_point,
+    InstrInfo, ProgramPoint, VariableId, departs_before_throws, first_unwind_point, unwind_edges,
 };
-use crate::edge::{EdgeKind, KindedEdge};
 use crate::graph::dominator::DominatorTree;
 
 use super::scratch::SsaScratch;
@@ -298,12 +297,9 @@ where
             if unwound_variable < variable {
                 continue;
             }
-            for edge in cfg.outgoing(*source) {
-                let edge = cfg.edge(edge);
+            for edge in unwind_edges(cfg, *source) {
                 let target = edge.target();
-                if edge.data().kind() != EdgeKind::ExceptionUnwind
-                    || has_phi.is_marked(target.index())
-                {
+                if has_phi.is_marked(target.index()) {
                     continue;
                 }
                 has_phi.mark(target.index());
