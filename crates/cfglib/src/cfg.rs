@@ -13,6 +13,8 @@ use crate::region::{Cleanup, Region};
 mod anchors;
 mod cleanup;
 mod compact;
+#[cfg(feature = "serde")]
+mod document;
 mod mutation;
 mod regions;
 mod subgraph;
@@ -83,10 +85,13 @@ impl core::error::Error for SplitPointError {}
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
     feature = "serde",
-    serde(bound(
-        serialize = "I: serde::Serialize, E: serde::Serialize",
-        deserialize = "I: serde::Deserialize<'de>, E: serde::Deserialize<'de>"
-    ))
+    serde(
+        bound(
+            serialize = "I: serde::Serialize, E: serde::Serialize",
+            deserialize = "I: serde::Deserialize<'de>, E: serde::Deserialize<'de>"
+        ),
+        try_from = "document::CfgDocument<I, E>"
+    )
 )]
 pub struct Cfg<I, E = ()> {
     pub(crate) graph: CfgStore<I, E>,
@@ -96,7 +101,6 @@ pub struct Cfg<I, E = ()> {
     pub(crate) regions: Vec<Region>,
     /// Cleanup records for handlers that continue somewhere once their body
     /// ends (optional; empty unless a frontend records them).
-    #[cfg_attr(feature = "serde", serde(default = "Vec::new"))]
     pub(crate) cleanups: Vec<Cleanup>,
 }
 
