@@ -28,6 +28,7 @@ mod exit_free;
 mod invariants;
 mod predicated;
 mod regions;
+mod semantics;
 mod switches;
 mod traversal;
 mod treating_empty;

@@ -382,13 +382,13 @@ impl<I, E> Structurer<'_, I, E> {
         if is_conditional {
             let node = self.lift_conditional(header, Some(bound));
             body.push(node);
-            if let Some(merge) = self.advance_merge(header, Some(bound)) {
+            if let Some(merge) = self.effective_merge(header, Some(bound)) {
                 body.extend(self.lift_region(merge, Some(bound), stop));
             }
         } else if has_switch {
             let node = self.lift_switch(header, Some(bound));
             body.push(node);
-            if let Some(merge) = self.advance_merge(header, Some(bound)) {
+            if let Some(merge) = self.effective_merge(header, Some(bound)) {
                 body.extend(self.lift_region(merge, Some(bound), stop));
             }
         } else {

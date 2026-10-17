@@ -531,7 +531,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
                 // Resume at the region's own continuation, not the anchor's
                 // merge — they differ whenever the try exits through an
                 // explicit leave.
-                current = continuation.filter(|&next| !self.is_visited(next));
+                current = continuation;
                 continue;
             }
 
@@ -568,12 +568,12 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             BlockFlowKind::Conditional => {
                 let node = self.lift_conditional(block, allowed_blocks);
                 result.push(node);
-                return self.advance_merge(block, allowed_blocks);
+                return self.effective_merge(block, allowed_blocks);
             }
             BlockFlowKind::Switch => {
                 let node = self.lift_switch(block, allowed_blocks);
                 result.push(node);
-                return self.advance_merge(block, allowed_blocks);
+                return self.effective_merge(block, allowed_blocks);
             }
             BlockFlowKind::BackEdge => {
                 self.push_block(result, block);
@@ -725,6 +725,11 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
 
     /// The post-dominator merge of `block`, kept only when it stays inside
     /// the enclosing structural bound.
+    ///
+    /// The merge may be code the walk already emitted: the walk that follows
+    /// the construct resolves it like any other transfer, as a loop's
+    /// `continue` or `break` or an explicit goto, and ends silently only at the
+    /// enclosing construct's own stop block.
     fn effective_merge(
         &self,
         block: BlockId,
@@ -735,17 +740,6 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             PostNode::Exit => None,
         }
         .filter(|&merge| block_is_allowed(allowed_blocks, merge))
-    }
-
-    /// Get the in-bound post-dominator merge point if it hasn't been visited
-    /// yet.
-    fn advance_merge(
-        &self,
-        block: BlockId,
-        allowed_blocks: Option<&BTreeSet<BlockId>>,
-    ) -> Option<BlockId> {
-        self.effective_merge(block, allowed_blocks)
-            .filter(|&merge| !self.is_visited(merge))
     }
 
     /// Lift an if/else conditional starting at `block`.
