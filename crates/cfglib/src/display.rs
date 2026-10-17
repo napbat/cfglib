@@ -128,6 +128,22 @@ impl<'sink> IndentedWriter<'sink> {
         result
     }
 
+    /// Indent one level deeper, with no brace to mark the level.
+    ///
+    /// The open-ended form of [`nested`](Self::nested), for a printer that
+    /// cannot keep its place inside a closure, because it keeps its own stack
+    /// of what is left to write. Pair each call with an
+    /// [`unnest`](Self::unnest).
+    pub const fn nest(&mut self) {
+        self.depth += 1;
+    }
+
+    /// Indent one level less, undoing a [`nest`](Self::nest). The writer
+    /// stays at the outermost level when it is already there.
+    pub const fn unnest(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
+    }
+
     /// Open a block: ` {`, a line break, and one more level of indentation.
     ///
     /// The header is whatever was already written on the line.
@@ -313,5 +329,22 @@ mod tests {
             .unwrap();
         printer.line("outside").unwrap();
         assert_eq!(out, "    inside\n    pending\noutside\n");
+    }
+
+    #[test]
+    fn nest_and_unnest_indent_without_a_brace() {
+        let mut out = String::new();
+        let mut printer = IndentedWriter::new(&mut out);
+        printer.nest();
+        printer.line("inside").unwrap();
+        printer.nest();
+        printer.line("deeper").unwrap();
+        printer.unnest();
+        printer.unnest();
+        printer.line("outside").unwrap();
+        assert_eq!(printer.depth(), 0);
+        printer.unnest();
+        assert_eq!(printer.depth(), 0, "unnest stays at the outermost level");
+        assert_eq!(out, "    inside\n        deeper\noutside\n");
     }
 }
