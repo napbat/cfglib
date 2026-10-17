@@ -626,3 +626,132 @@ fn a_back_tag_leaving_a_cycle_for_a_block_outside_it_is_ignored() {
     assert_eq!(loops.len(), 1);
     assert_eq!(loops[0].body, BTreeSet::from([a, b]));
 }
+
+/// `entry -> exit` is the live program. The dead code is a source `source`
+/// that enters `head`, a loop `head <-> tail` (closed by an ordinary jump, so
+/// nothing but dominance within the dead code says it is one), and a way out
+/// `head -> out`.
+struct DeadLoop {
+    cfg: Cfg<u32>,
+    head: BlockId,
+    tail: BlockId,
+}
+
+fn dead_loop() -> DeadLoop {
+    let mut cfg = Cfg::<u32>::new();
+    let [exit, source, head, tail, out] = [(); 5].map(|()| cfg.new_block());
+    cfg.add_edge(cfg.entry(), exit, EdgeKind::Fallthrough);
+    cfg.add_edge(source, head, EdgeKind::Fallthrough);
+    cfg.add_edge(head, tail, EdgeKind::ConditionalTrue);
+    cfg.add_edge(head, out, EdgeKind::ConditionalFalse);
+    cfg.add_edge(tail, head, EdgeKind::Fallthrough);
+    DeadLoop { cfg, head, tail }
+}
+
+#[test]
+fn without_dead_code_every_loop_is_the_one_detect_loops_tagged_finds() {
+    let mut cfg = Cfg::<u32>::new();
+    let [head, body, exit] = [(); 3].map(|()| cfg.new_block());
+    cfg.add_edge(cfg.entry(), head, EdgeKind::Fallthrough);
+    cfg.add_edge(head, body, EdgeKind::ConditionalTrue);
+    cfg.add_edge(head, exit, EdgeKind::ConditionalFalse);
+    cfg.add_edge(body, head, EdgeKind::Back);
+    let dom = DominatorTree::compute(&cfg);
+
+    assert_eq!(
+        detect_all_loops_tagged(&cfg, &dom),
+        detect_loops_tagged(&cfg, &dom)
+    );
+}
+
+#[test]
+fn dominance_within_dead_code_finds_its_loops() {
+    let DeadLoop { cfg, head, tail } = dead_loop();
+    let dom = DominatorTree::compute(&cfg);
+    assert_eq!(detect_loops_tagged(&cfg, &dom), Vec::new());
+
+    let loops = detect_all_loops_tagged(&cfg, &dom);
+
+    assert_eq!(loops.len(), 1);
+    assert_eq!(loops[0].header, head);
+    assert_eq!(loops[0].latches, BTreeSet::from([tail]));
+    assert_eq!(loops[0].body, BTreeSet::from([head, tail]));
+    assert_eq!(loops[0].depth, 0);
+}
+
+#[test]
+fn dead_self_loops_and_tagged_loops_are_loops_too() {
+    let mut cfg = Cfg::<u32>::new();
+    let [exit, spin, tagged_head, tagged_tail] = [(); 4].map(|()| cfg.new_block());
+    cfg.add_edge(cfg.entry(), exit, EdgeKind::Fallthrough);
+    cfg.add_edge(spin, spin, EdgeKind::ConditionalTrue);
+    cfg.add_edge(tagged_head, tagged_tail, EdgeKind::ConditionalTrue);
+    cfg.add_edge(tagged_tail, tagged_head, EdgeKind::Back);
+    let dom = DominatorTree::compute(&cfg);
+
+    let headers: Vec<BlockId> = detect_all_loops_tagged(&cfg, &dom)
+        .iter()
+        .map(|lp| lp.header)
+        .collect();
+
+    assert_eq!(headers, [spin, tagged_head]);
+}
+
+#[test]
+fn nesting_among_dead_loops_counts_only_dead_loops() {
+    // Dead: source -> outer -> inner <-> work, inner -> outer (a back edge to
+    // outer), outer -> out. Live: a loop of its own, which must not count.
+    let mut cfg = Cfg::<u32>::new();
+    let [head, body, exit, source, outer, inner, work, out] = [(); 8].map(|()| cfg.new_block());
+    cfg.add_edge(cfg.entry(), head, EdgeKind::Fallthrough);
+    cfg.add_edge(head, body, EdgeKind::ConditionalTrue);
+    cfg.add_edge(head, exit, EdgeKind::ConditionalFalse);
+    cfg.add_edge(body, head, EdgeKind::Back);
+    cfg.add_edge(source, outer, EdgeKind::Fallthrough);
+    cfg.add_edge(outer, inner, EdgeKind::ConditionalTrue);
+    cfg.add_edge(outer, out, EdgeKind::ConditionalFalse);
+    cfg.add_edge(inner, work, EdgeKind::ConditionalTrue);
+    cfg.add_edge(work, inner, EdgeKind::Fallthrough);
+    cfg.add_edge(inner, outer, EdgeKind::Fallthrough);
+    let dom = DominatorTree::compute(&cfg);
+
+    let loops = detect_all_loops_tagged(&cfg, &dom);
+
+    let depth_of = |header| {
+        loops
+            .iter()
+            .find(|lp| lp.header == header)
+            .map(|lp| lp.depth)
+    };
+    assert_eq!(loops.len(), 3);
+    assert_eq!(depth_of(head), Some(0));
+    assert_eq!(depth_of(outer), Some(0));
+    assert_eq!(depth_of(inner), Some(1));
+    assert!(
+        loops
+            .windows(2)
+            .all(|pair| (pair[0].depth, pair[0].header) <= (pair[1].depth, pair[1].header)),
+        "outermost first, then by header"
+    );
+}
+
+#[test]
+fn dead_code_that_jumps_into_live_code_neither_joins_nor_closes_its_loops() {
+    // A live loop `head <-> body`, a dead block feeding the body, and a dead
+    // tagged edge into the live head, which closes no cycle.
+    let mut cfg = Cfg::<u32>::new();
+    let [head, body, exit, feeder] = [(); 4].map(|()| cfg.new_block());
+    cfg.add_edge(cfg.entry(), head, EdgeKind::Fallthrough);
+    cfg.add_edge(head, body, EdgeKind::ConditionalTrue);
+    cfg.add_edge(head, exit, EdgeKind::ConditionalFalse);
+    cfg.add_edge(body, head, EdgeKind::Back);
+    cfg.add_edge(feeder, body, EdgeKind::Jump);
+    cfg.add_edge(feeder, head, EdgeKind::Back);
+    let dom = DominatorTree::compute(&cfg);
+
+    let all = detect_all_loops_tagged(&cfg, &dom);
+
+    assert_eq!(all, detect_loops_tagged(&cfg, &dom));
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].body, BTreeSet::from([head, body]));
+}

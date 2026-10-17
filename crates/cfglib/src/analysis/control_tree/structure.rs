@@ -16,7 +16,7 @@ use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::{EdgeId, EdgeKind};
 use crate::graph::dominator::{DominatorTree, PostDominatorTree};
-use crate::graph::structure::{NaturalLoop, detect_loops_tagged};
+use crate::graph::structure::{NaturalLoop, detect_all_loops_tagged};
 use crate::region::Region;
 use roots::VirtualRoot;
 
@@ -314,7 +314,9 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             emptied[block.index()] = true;
         }
         let dom = DominatorTree::compute(cfg);
-        let loops: BTreeMap<BlockId, NaturalLoop> = detect_loops_tagged(cfg, &dom)
+        // The structurer also lays out code the entry cannot reach, so its
+        // loops are those of the live program and of that code alike.
+        let loops: BTreeMap<BlockId, NaturalLoop> = detect_all_loops_tagged(cfg, &dom)
             .into_iter()
             .map(|natural| (natural.header, natural))
             .collect();

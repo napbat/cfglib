@@ -23,6 +23,7 @@ use crate::test_util::{MockInst, ff};
 
 mod dead_code;
 mod dead_handlers;
+mod dead_loops;
 mod exhaustive;
 mod exit_free;
 mod invariants;
