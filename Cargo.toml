@@ -38,3 +38,10 @@ pedantic = { level = "deny", priority = -1 }
 
 [workspace.lints.rustdoc]
 all = { level = "deny", priority = -1 }
+
+# The exhaustive and deep-input tests dominate the suite. At opt-level 0 the
+# two slowest take over 60 s each; at 1 the whole suite runs in about 12 s,
+# which more than repays the longer build. Debug assertions and overflow
+# checks stay on.
+[profile.test]
+opt-level = 1
