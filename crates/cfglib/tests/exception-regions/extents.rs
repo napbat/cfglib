@@ -443,7 +443,7 @@ fn candidates_that_share_a_block_withhold_both_regions() {
         mut cfg,
         a,
         b,
-        blocks: [a0, _, b0, spare],
+        blocks: [a0, a1, b0, spare],
     } = candidates();
 
     let decisions = promote_exclusive_extents(&mut cfg, |handler| {
@@ -452,7 +452,7 @@ fn candidates_that_share_a_block_withhold_both_regions() {
         } else if handler == a[0] {
             BTreeSet::from([a0])
         } else {
-            BTreeSet::from([spare])
+            BTreeSet::from([a1, spare])
         })
     });
 
