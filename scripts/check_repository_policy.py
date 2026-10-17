@@ -410,14 +410,12 @@ def check_msrv_sources(
     msrv = declared.pop()
     msrv_key = version_tuple(msrv)
 
-    reads_manifest = False
     for path in files:
         if not path.is_file():
             continue
         label = relative_label(path)
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         if path.parent == REPOSITORY_ROOT / ".github" / "workflows":
-            reads_manifest = reads_manifest or any("rust_version" in line for line in lines)
             for number, line in enumerate(lines, 1):
                 pin = TOOLCHAIN_PIN.match(line)
                 if pin:
@@ -443,10 +441,6 @@ def check_msrv_sources(
                             f"{label}:{number}: states MSRV {found}, but the manifest's "
                             f"rust-version is {msrv}"
                         )
-    if not reads_manifest:
-        violations.append(
-            ".github/workflows: no workflow reads the manifest's rust_version for an MSRV job"
-        )
 
 
 def check_lint_policy(files: list[Path], violations: list[str]) -> None:

@@ -32,8 +32,9 @@ also build without it. The `serde` feature is additive, so one all-features
 test run covers every line. `cargo-nextest` runs each test in its own process,
 in parallel; it does not run doctests, so `cargo test --doc` runs them. CI
 (`.github/workflows/lint.yml`) runs a `lint` job and a `test` job in parallel.
-The `lint` job also lints the allocation-counting benchmarks, checks the MSRV,
-and checks the `no_std` build for `thumbv7em-none-eabi`. The `test` job also
+The `lint` job also lints the allocation-counting benchmarks and checks the
+`no_std` build for `x86_64-unknown-none`, a target without `std`, so a
+dependency feature that turns `std` on fails the build. The `test` job also
 runs the `control-tree` example.
 
 Also build documentation with warnings denied when public APIs or docs change:
