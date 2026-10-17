@@ -2,8 +2,8 @@
 
 use super::toy::{Block, Effect, Function, Inst, Operator, Root, SLOTS, Toy, whole_places};
 use crate::ir::rtl::{
-    BitSlice, Bits, Control, InstructionBuilder, Raise, ResolvedSelection, RootConstant, RootTable,
-    Selection, SelectionResolution, WriteTarget,
+    BitSlice, Bits, Control, InstructionBuilder, Place, Raise, ResolvedSelection, RootConstant,
+    RootTable, Selection, SelectionResolution, WriteTarget,
 };
 
 fn resolve(function: &Function, entry: &[RootConstant<'_, Toy>]) -> SelectionResolution<Inst> {
@@ -456,4 +456,106 @@ fn entry_constants_name_roots_by_value_and_ignore_unnamed_roots() {
     };
     let resolution = resolve(&function, &[flag, top(&[0b1001])]);
     assert_eq!(resolution.candidate(inst, 1), Some(1));
+}
+
+/// The 32 bits of `Acc` from `offset`.
+fn acc_half(offset: u16) -> Place<Toy> {
+    Place {
+        root: Root::Acc,
+        slice: BitSlice::new(offset, Bits::new(32).unwrap()),
+    }
+}
+
+/// Appends a record that reads the three bits of `Acc` from `offset` as the
+/// index of a read over the slots, and returns it. The index read is the
+/// first statement and the slot read the second.
+fn read_slot_at_acc(function: &mut Function, block: Block, offset: u16) -> Inst {
+    let places = whole_places(&SLOTS);
+    let mut record = function.record_in(block);
+    let index = record.read(Selection::Direct(Place {
+        root: Root::Acc,
+        slice: BitSlice::new(offset, three_bits()),
+    }));
+    record.read(Selection::FiniteIndexed {
+        index,
+        candidates: &places,
+    });
+    record.end(Control::Advance)
+}
+
+#[test]
+fn indexed_writes_into_disjoint_slices_of_one_root_all_take_effect() {
+    let mut function = Function::new();
+    let entry = function.block();
+    let (low, high) = ([acc_half(0)], [acc_half(32)]);
+    let mut record = function.record_in(entry);
+    let index = record.constant_value(0, 3);
+    let one = record.constant_value(1, 32);
+    let two = record.constant_value(2, 32);
+    for (candidates, value) in [(&low, one), (&high, two)] {
+        record.write(
+            WriteTarget::FiniteIndexed {
+                index,
+                candidates,
+                value,
+            },
+            (),
+        );
+    }
+    record.end(Control::Advance);
+    let from_low = read_slot_at_acc(&mut function, entry, 0);
+    let from_high = read_slot_at_acc(&mut function, entry, 32);
+
+    let acc = RootConstant {
+        root: Root::Acc,
+        words: &[0],
+    };
+    let resolution = resolve(&function, &[acc]);
+    assert_eq!(resolution.candidate(from_low, 1), Some(1));
+    assert_eq!(resolution.candidate(from_high, 1), Some(2));
+}
+
+#[test]
+fn an_unknown_indexed_write_keeps_a_root_unknown_through_a_known_one() {
+    let mut function = Function::new();
+    let entry = function.block();
+    // The first write lands in the low half of `Acc` or of `Tmp`, and nothing
+    // says which. The second write is a known one into the high half of `Acc`.
+    let either = [
+        acc_half(0),
+        Place {
+            root: Root::Tmp,
+            slice: BitSlice::new(0, Bits::new(32).unwrap()),
+        },
+    ];
+    let high = [acc_half(32)];
+    let mut record = function.record_in(entry);
+    let unknown = record.nondet(three_bits(), ());
+    let known = record.constant_value(0, 3);
+    let one = record.constant_value(1, 32);
+    let two = record.constant_value(2, 32);
+    record.write(
+        WriteTarget::FiniteIndexed {
+            index: unknown,
+            candidates: &either,
+            value: one,
+        },
+        (),
+    );
+    record.write(
+        WriteTarget::FiniteIndexed {
+            index: known,
+            candidates: &high,
+            value: two,
+        },
+        (),
+    );
+    record.end(Control::Advance);
+    let from_low = read_slot_at_acc(&mut function, entry, 0);
+
+    let acc = RootConstant {
+        root: Root::Acc,
+        words: &[0],
+    };
+    assert_eq!(resolve(&function, &[acc]).candidate(from_low, 1), None);
 }
