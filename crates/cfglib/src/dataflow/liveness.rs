@@ -143,23 +143,36 @@ where
     V::Inst: InstrInfo<Variable = Var>,
     Var: VariableId,
 {
-    let unwinds = first_unwind_point(cfg, block).is_some();
+    let none = BTreeSet::new();
+    let on_unwind = if first_unwind_point(cfg, block).is_some() {
+        successors
+    } else {
+        &none
+    };
     for instruction in cfg.instructions(block).iter().rev() {
-        backward_transfer(&mut live, instruction);
-        if unwinds && instruction.may_unwind() {
-            live.extend(successors.iter().cloned());
-        }
+        step_backward(&mut live, instruction, on_unwind);
     }
     live
 }
 
-/// One instruction's backward step: kill its defs, then gen its uses.
-fn backward_transfer<I: InstrInfo>(live: &mut BTreeSet<I::Variable>, instruction: &I) {
+/// One instruction's backward step, from the variables live after it to the
+/// variables live before it: kill its defs, then gen its uses.
+///
+/// A throwing instruction also keeps `on_unwind` live, because an unwind
+/// leaves before its definitions complete.
+pub(crate) fn step_backward<I: InstrInfo>(
+    live: &mut BTreeSet<I::Variable>,
+    instruction: &I,
+    on_unwind: &BTreeSet<I::Variable>,
+) {
     for variable in instruction.defs() {
         live.remove(variable);
     }
     for variable in instruction.uses() {
         live.insert(variable.clone());
+    }
+    if instruction.may_unwind() {
+        live.extend(on_unwind.iter().cloned());
     }
 }
 
@@ -444,18 +457,9 @@ impl<V: VariableId> Liveness<V> {
         G: CfgView,
         G::Inst: InstrInfo<Variable = V>,
     {
-        let instructions = cfg.instructions(block);
-        let mut sets = alloc::vec![BTreeSet::new(); instructions.len()];
-        let mut live = self.live_out(block).clone();
-        let unwind = self.live_on_unwind(cfg, block);
-        for (index, instruction) in instructions.iter().enumerate().rev() {
-            backward_transfer(&mut live, instruction);
-            if instruction.may_unwind() {
-                live.extend(unwind.iter().cloned());
-            }
-            sets[index].clone_from(&live);
-        }
-        sets
+        let mut points = self.live_points(cfg, block);
+        points.pop();
+        points
     }
 
     /// Variables live immediately **after** each instruction of `block`.
@@ -476,18 +480,30 @@ impl<V: VariableId> Liveness<V> {
         G: CfgView,
         G::Inst: InstrInfo<Variable = V>,
     {
+        let mut points = self.live_points(cfg, block);
+        points.remove(0);
+        points
+    }
+
+    /// The live set at each program point of `block`: element `i` is the set
+    /// just before instruction `i`, and the last element is the set after
+    /// the last instruction. The point between two instructions is both
+    /// the set after one and the set before the next.
+    fn live_points<G>(&self, cfg: &G, block: BlockId) -> alloc::vec::Vec<BTreeSet<V>>
+    where
+        G: CfgView,
+        G::Inst: InstrInfo<Variable = V>,
+    {
         let instructions = cfg.instructions(block);
-        let mut sets = alloc::vec![BTreeSet::new(); instructions.len()];
+        let mut points = alloc::vec![BTreeSet::new(); instructions.len() + 1];
         let mut live = self.live_out(block).clone();
         let unwind = self.live_on_unwind(cfg, block);
+        points[instructions.len()].clone_from(&live);
         for (index, instruction) in instructions.iter().enumerate().rev() {
-            sets[index].clone_from(&live);
-            backward_transfer(&mut live, instruction);
-            if instruction.may_unwind() {
-                live.extend(unwind.iter().cloned());
-            }
+            step_backward(&mut live, instruction, &unwind);
+            points[index].clone_from(&live);
         }
-        sets
+        points
     }
 
     /// Variables an unwind out of `block` can read.
