@@ -316,7 +316,7 @@ fn the_exception_model_reads_one_unwind_edge_per_protected_instruction_and_handl
     assert_eq!(model.eh_edges().len(), 4);
     for edge in model.eh_edges() {
         assert_eq!(edge.kind, EhEdgeKind::Unwind);
-        assert!(edge.is_unwind);
+        assert!(edge.kind.is_unwind());
         let stored = cfg.edge(edge.edge_id);
         assert_eq!((stored.source(), stored.target()), (edge.from, edge.to));
         assert_eq!(stored.kind(), UNWIND);

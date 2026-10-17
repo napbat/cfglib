@@ -244,7 +244,7 @@ fn the_exception_model_reads_a_seh_dispatch_as_handler_resume_continue_and_leave
             (shape.search_outward, EhEdgeKind::Resume),
         ]
     );
-    assert!(model.eh_edges().iter().all(|edge| !edge.is_unwind));
+    assert!(model.eh_edges().iter().all(|edge| !edge.kind.is_unwind()));
     // The route from the handler entry back to the installed handler.
     let route = model.handlers(shape.handler);
     assert_eq!(route.len(), 1);

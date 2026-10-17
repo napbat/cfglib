@@ -307,7 +307,7 @@ fn the_exception_model_classifies_installed_clauses_by_kind_and_routes_back_to_t
     assert_eq!(model.eh_edges().len(), 6);
     for edge in model.eh_edges() {
         assert_eq!(edge.kind, EhEdgeKind::Unwind);
-        assert!(edge.is_unwind);
+        assert!(edge.kind.is_unwind());
         assert_eq!(edge.from, cfg.entry());
         // The model keeps the identity of the lifter's own edge, so the
         // phase and metadata the lifter attached stay reachable.

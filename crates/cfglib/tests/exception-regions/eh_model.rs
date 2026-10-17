@@ -72,8 +72,8 @@ fn handler_and_unwind_edges_make_landing_pads_and_record_who_can_raise_into_them
         (edges[1].edge_id, edges[1].from, edges[1].to, edges[1].kind),
         (unwind_edge, body, unwound, EhEdgeKind::Unwind)
     );
-    assert!(!edges[0].kind.is_unwind() && !edges[0].is_unwind);
-    assert!(edges[1].kind.is_unwind() && edges[1].is_unwind);
+    assert!(!edges[0].kind.is_unwind());
+    assert!(edges[1].kind.is_unwind());
 }
 
 #[test]
