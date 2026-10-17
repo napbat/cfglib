@@ -131,6 +131,8 @@ mod id;
 mod liveness;
 mod relocate;
 mod renumbering;
+#[cfg(feature = "serde")]
+mod validate;
 mod view;
 
 #[cfg(test)]
@@ -188,10 +190,13 @@ fn empty_slice<T>() -> Box<[T]> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
     feature = "serde",
-    serde(bound(
-        serialize = "N: serde::Serialize, E: serde::Serialize",
-        deserialize = "N: serde::Deserialize<'de>, E: serde::Deserialize<'de>"
-    ))
+    serde(
+        bound(
+            serialize = "N: serde::Serialize, E: serde::Serialize",
+            deserialize = "N: serde::Deserialize<'de>, E: serde::Deserialize<'de>"
+        ),
+        try_from = "validate::Stored<N, E, NT>"
+    )
 )]
 pub struct Graph<N, E, NT: IdTag = NodeTag, ET: IdTag = EdgeTag> {
     base_nodes: Box<[N]>,

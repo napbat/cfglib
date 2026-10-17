@@ -66,6 +66,9 @@ use runs::Runs;
 mod format;
 mod runs;
 
+#[cfg(feature = "serde")]
+pub(super) use format::Encoded;
+
 /// Replacement adjacency runs for the nodes whose edges have moved.
 ///
 /// Serializes as two maps from node to run, outgoing then incoming, whatever

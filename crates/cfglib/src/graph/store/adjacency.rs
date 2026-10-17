@@ -195,6 +195,50 @@ impl DeltaChains {
         self.detach_node(node, direction);
     }
 
+    /// Check chains read from outside: that every walk over them reads inside
+    /// the arrays and ends, and that each chain holds only edges whose
+    /// endpoint it belongs to.
+    ///
+    /// `endpoint(edge, chain)` is the node a delta edge is threaded through in
+    /// one of its two chains. An edge is in at most one chain per direction,
+    /// so the walks cost one step per delta edge between them.
+    #[cfg(feature = "serde")]
+    pub(super) fn check(
+        &self,
+        nodes: usize,
+        delta_edges: usize,
+        endpoint: impl Fn(usize, usize) -> usize,
+    ) -> Result<(), &'static str> {
+        if self.last.len() > nodes || self.next.len() != delta_edges {
+            return Err("the adjacency chains do not match the nodes and delta edges");
+        }
+        for chain in 0..2 {
+            let mut seen = vec![false; self.next.len()];
+            for (node, links) in self.last.iter().enumerate() {
+                let last = links[chain];
+                if last == NONE {
+                    continue;
+                }
+                let mut edge = self
+                    .next
+                    .get(last as usize)
+                    .ok_or("an adjacency chain ends outside the delta edges")?[chain];
+                loop {
+                    let slot = edge as usize;
+                    if slot >= seen.len() || seen[slot] || endpoint(slot, chain) != node {
+                        return Err("an adjacency chain is not a ring of the node's own edges");
+                    }
+                    seen[slot] = true;
+                    if edge == last {
+                        break;
+                    }
+                    edge = self.next[slot][chain];
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Drop every chain.
     ///
     /// Both arrays are released rather than cleared: after a compaction the
@@ -614,4 +658,35 @@ pub(super) fn compress<E, NT: IdTag>(
     }
 
     (offsets, adjacency)
+}
+
+/// Check one direction's compressed index read from outside: either the empty
+/// index of a store that has never been compacted, or one run per base node
+/// that together list each base edge once.
+#[cfg(feature = "serde")]
+pub(super) fn check_index(
+    offsets: &[u32],
+    edges: &[u32],
+    base_nodes: usize,
+    base_edges: usize,
+) -> Result<(), &'static str> {
+    if offsets.is_empty() {
+        return if edges.is_empty() && base_nodes == 0 && base_edges == 0 {
+            Ok(())
+        } else {
+            Err("a store with a compressed base has no adjacency index")
+        };
+    }
+    if offsets.len() != base_nodes + 1
+        || edges.len() != base_edges
+        || offsets[0] != 0
+        || offsets[base_nodes] as usize != edges.len()
+        || offsets.windows(2).any(|pair| pair[0] > pair[1])
+    {
+        return Err("the adjacency index does not describe the compressed base");
+    }
+    if edges.iter().any(|&edge| edge as usize >= base_edges) {
+        return Err("the adjacency index names an edge outside the compressed base");
+    }
+    Ok(())
 }
