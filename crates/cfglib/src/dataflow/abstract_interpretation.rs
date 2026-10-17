@@ -107,12 +107,10 @@ where
         None
     }
 
-    /// A reached block that nothing branches to starts from the entry value.
+    /// The entry block starts from the entry value, merged with whatever
+    /// branches back into it.
     fn boundary(&self, cfg: &G, block: BlockId) -> Option<Option<D>> {
-        cfg.incoming(block)
-            .next()
-            .is_none()
-            .then(|| Some(D::entry_value()))
+        (block == cfg.root()).then(|| Some(D::entry_value()))
     }
 
     fn meet(&self, left: &Option<D>, right: &Option<D>) -> Option<D> {
@@ -309,6 +307,20 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn an_entry_that_is_a_branch_target_still_starts_from_the_entry_value() {
+        let mut cfg = Cfg::new();
+        let body = cfg.new_block();
+        cfg.add_edge(cfg.entry(), body, EdgeKind::Fallthrough);
+        cfg.add_edge(body, cfg.entry(), EdgeKind::Back);
+        cfg.block_mut(body).push(df_ff("body"));
+
+        let result: AbstractFacts<Sign> = abstract_interpret(&cfg);
+
+        assert_eq!(result.fact_in(cfg.entry()), Some(&Sign::Zero));
+        assert_eq!(result.fact_in(body), Some(&Sign::Zero));
     }
 
     fn throwing(instruction: DfInst) -> DfInst {
