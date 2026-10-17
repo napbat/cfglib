@@ -25,43 +25,61 @@ pub struct TailCall {
 
 /// Detect potential tail calls heuristically.
 ///
-/// A block is a candidate when its last instruction is a call
-/// ([`Call`](FlowEffect::Call), [`IndirectCall`](FlowEffect::IndirectCall),
-/// or [`ConditionalCall`](FlowEffect::ConditionalCall)) and its only
-/// successor is an exit block (one with no successors) reached by an
-/// ordinary edge that returns at once: the exit block is empty, an implicit
-/// return, or its first instruction past any [`Label`](FlowEffect::Label) or
-/// [`Declaration`](FlowEffect::Declaration) is a [`Return`](FlowEffect::Return).
+/// A call is any of [`Call`](FlowEffect::Call),
+/// [`IndirectCall`](FlowEffect::IndirectCall), or
+/// [`ConditionalCall`](FlowEffect::ConditionalCall). A block holds a
+/// candidate in one of two shapes:
+///
+/// - **Call, then return, in one block.** The block has no successor and
+///   ends in a [`Return`](FlowEffect::Return) instruction directly after a
+///   call; this is what [`CfgBuilder`](crate::CfgBuilder) produces for
+///   `call; ret`. The report names the call.
+/// - **Call ending its block.** The call is the block's last instruction and
+///   its only successor is an exit block (one with no successors) reached by
+///   an ordinary edge that returns at once: the exit block is empty, an
+///   implicit return, or its first instruction past any
+///   [`Label`](FlowEffect::Label) or [`Declaration`](FlowEffect::Declaration)
+///   is a [`Return`](FlowEffect::Return).
+///
 /// An exit block that does other work first, such as using the call's
 /// result, or that raises or terminates instead of returning, is not a
-/// return. A call that can also unwind into a handler has a second successor
-/// and is not a candidate, nor is one whose only successor is an exceptional
-/// edge. For instructions that carry explicit tail-call markers, use
-/// [`detect_explicit_tail_calls`] instead (or in addition).
+/// return. A block with an exceptional edge is never a candidate, since the
+/// call can unwind into a handler that has to run. For instructions that
+/// carry explicit tail-call markers, use [`detect_explicit_tail_calls`]
+/// instead (or in addition).
 #[must_use]
 pub fn detect_tail_calls<G>(cfg: &G) -> Vec<TailCall>
 where
     G: CfgView,
     G::Inst: FlowControl,
 {
+    let is_call = |instruction: &G::Inst| {
+        matches!(
+            instruction.flow_effect(),
+            FlowEffect::Call | FlowEffect::IndirectCall | FlowEffect::ConditionalCall
+        )
+    };
     let mut results = Vec::new();
     for bid in cfg.node_ids() {
-        let mut outgoing = cfg.outgoing(bid);
-        let (Some(edge), None) = (outgoing.next(), outgoing.next()) else {
-            continue;
-        };
         let instructions = cfg.instructions(bid);
-        if !cfg.edge_kind(edge).is_exceptional()
-            && returns_at_once(cfg, cfg.edge(edge).target())
-            && let Some(last) = instructions.last()
-            && matches!(
-                last.flow_effect(),
-                FlowEffect::Call | FlowEffect::IndirectCall | FlowEffect::ConditionalCall
-            )
-        {
+        let mut outgoing = cfg.outgoing(bid);
+        let call_idx = match (outgoing.next(), outgoing.next()) {
+            (None, _) => match instructions {
+                [.., call, last] if is_call(call) && last.flow_effect() == FlowEffect::Return => {
+                    Some(instructions.len() - 2)
+                }
+                _ => None,
+            },
+            (Some(edge), None) => (!cfg.edge_kind(edge).is_exceptional()
+                && returns_at_once(cfg, cfg.edge(edge).target())
+                && instructions.last().is_some_and(is_call))
+            .then(|| instructions.len() - 1),
+            _ => None,
+        };
+        if let Some(inst_idx) = call_idx {
             results.push(TailCall {
                 block: bid,
-                inst_idx: instructions.len() - 1,
+                inst_idx,
                 explicit: false,
             });
         }
@@ -276,6 +294,52 @@ mod tests {
         cfg.block_mut(cfg.entry())
             .instructions_mut()
             .push(df_call("call", "callee", false));
+        cfg.add_edge(cfg.entry(), handler, EdgeKind::ExceptionUnwind);
+
+        assert_eq!(detect_tail_calls(&cfg), []);
+    }
+
+    #[test]
+    fn a_call_followed_by_a_return_in_one_built_block_is_a_tail_call() {
+        // `CfgBuilder` keeps the return in the block that holds the call, so
+        // this block has no successor at all: the canonical `call; ret`.
+        let build = |instructions: alloc::vec::Vec<DfInst>| {
+            crate::builder::CfgBuilder::build(instructions).expect("a flat stream always builds")
+        };
+        let ret = || effect("ret", FlowEffect::Return);
+
+        let cfg = build(alloc::vec![ff("setup"), df_call("call", "f", false), ret()]);
+        assert_eq!(
+            detect_tail_calls(&cfg),
+            [TailCall {
+                block: cfg.entry(),
+                inst_idx: 1,
+                explicit: false,
+            }]
+        );
+
+        let indirect = effect("icall", FlowEffect::IndirectCall);
+        let cfg = build(alloc::vec![indirect, ret()]);
+        assert_eq!(detect_tail_calls(&cfg).len(), 1, "an indirect call too");
+
+        let cfg = build(alloc::vec![df_call("call", "f", false), ff("use"), ret()]);
+        assert_eq!(detect_tail_calls(&cfg), [], "work between call and return");
+
+        let cfg = build(alloc::vec![df_call("call", "f", false), ff("use")]);
+        assert_eq!(detect_tail_calls(&cfg), [], "no return follows the call");
+
+        let cfg = build(alloc::vec![ff("setup"), ret()]);
+        assert_eq!(detect_tail_calls(&cfg), [], "a return with no call");
+    }
+
+    #[test]
+    fn a_call_and_return_block_that_can_unwind_is_not_a_tail_call() {
+        let mut cfg = Cfg::new();
+        let handler = cfg.new_block();
+        cfg.block_mut(cfg.entry()).instructions_mut().extend([
+            df_call("call", "f", false),
+            effect("ret", FlowEffect::Return),
+        ]);
         cfg.add_edge(cfg.entry(), handler, EdgeKind::ExceptionUnwind);
 
         assert_eq!(detect_tail_calls(&cfg), []);
