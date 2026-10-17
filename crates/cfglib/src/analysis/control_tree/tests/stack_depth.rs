@@ -149,6 +149,26 @@ fn straight_chain(length: usize) -> Cfg<DfInst> {
     cfg
 }
 
+/// `while (c0; c1; ...; c(n-1)) { work }`: the test of a loop is a chain of
+/// blocks, one flow successor each, that ends in the branch out of the loop.
+fn loop_test_chain(length: usize) -> Cfg<DfInst> {
+    let mut cfg = Cfg::new();
+    let entry = cfg.entry();
+    fill(&mut cfg, entry);
+    let chain: Vec<BlockId> = (0..length).map(|_| new_block(&mut cfg)).collect();
+    let work = new_block(&mut cfg);
+    let exit = new_block(&mut cfg);
+    cfg.add_edge(entry, chain[0], EdgeKind::Fallthrough);
+    for pair in chain.windows(2) {
+        cfg.add_edge(pair[0], pair[1], EdgeKind::Fallthrough);
+    }
+    let last = chain[length - 1];
+    cfg.add_edge(last, work, EdgeKind::ConditionalTrue);
+    cfg.add_edge(last, exit, EdgeKind::ConditionalFalse);
+    cfg.add_edge(work, chain[0], EdgeKind::Jump);
+    cfg
+}
+
 /// `while (c0) { while (c1) { ... work } x1 } x0`: loop `i` tests in its
 /// header and runs the loop `i + 1` and the block `x(i + 1)` after it.
 fn nested_loops(depth: usize) -> Cfg<DfInst> {
@@ -419,6 +439,27 @@ fn a_hundred_thousand_blocks_in_a_row_structure_on_a_small_stack() {
         });
         assert_eq!(leaves, LINEAR_DEPTH);
         print_shape(straight_chain);
+    });
+}
+
+#[test]
+fn a_hundred_thousand_blocks_in_a_loop_test_structure_on_a_small_stack() {
+    on_small_stack(|| {
+        let cfg = loop_test_chain(LINEAR_DEPTH);
+        let (tree, report, _) = structure_and_read(&cfg);
+        assert!(report.is_fully_structured(), "{report:?}");
+        let tests: Vec<usize> = tree
+            .preorder()
+            .filter_map(|id| match *tree.node(id) {
+                ControlNode::Loop {
+                    kind: LoopKind::While { condition, .. },
+                    ..
+                } => Some(tree.spans(condition).len()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tests, [LINEAR_DEPTH], "one pre-tested loop holds the chain");
+        print_shape(loop_test_chain);
     });
 }
 

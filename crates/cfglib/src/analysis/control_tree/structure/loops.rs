@@ -98,15 +98,14 @@ fn while_chain<I, E>(
             return None;
         };
         let next = *next;
-        if next == header
-            || !natural.body.contains(&next)
-            || chain.contains(&next)
-            || visited[next.index()]
-        {
+        if next == header || !natural.body.contains(&next) || visited[next.index()] {
             // A link already emitted elsewhere would be emitted again as
             // part of the condition.
             return None;
         }
+        // A link that is already in the chain has a second sequential
+        // predecessor, the block that leads back to it, so this count also
+        // keeps a link from entering the chain twice.
         let sequential_predecessors = cfg
             .incoming(next)
             .filter(|&edge| !cfg.edge(edge).kind().is_exceptional())
