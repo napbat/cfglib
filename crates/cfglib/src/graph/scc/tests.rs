@@ -301,6 +301,61 @@ fn condensation_of_tarjan_is_the_condensation_without_its_payloads() {
     }
 }
 
+/// `a <-> b`, a removed slot `c`, and `d -> a`: the slot sits between live
+/// nodes, so every dense table the decompositions build has a hole in it.
+fn with_removed_slot() -> (Graph<(), ()>, [NodeId; 4]) {
+    let mut graph = Graph::<(), ()>::new();
+    let [a, b, c, d] = [(); 4].map(|()| graph.add_node(()));
+    graph.add_edge(a, b, ());
+    graph.add_edge(b, a, ());
+    graph.add_edge(d, a, ());
+    assert!(graph.remove_node(c));
+    (graph, [a, b, c, d])
+}
+
+#[test]
+fn both_algorithms_partition_only_the_live_nodes_around_a_removed_slot() {
+    let (graph, [a, b, c, d]) = with_removed_slot();
+    let expected = BTreeSet::from([BTreeSet::from([a, b]), BTreeSet::from([d])]);
+    for (algorithm, result) in [
+        ("tarjan", tarjan_scc(&graph)),
+        ("kosaraju", kosaraju_scc(&graph)),
+    ] {
+        assert_eq!(partition(&result), expected, "{algorithm}");
+        assert!(
+            result.components().all(|nodes| !nodes.contains(&c)),
+            "{algorithm}"
+        );
+        assert_eq!(result.component_index(a), result.component_index(b));
+        assert_ne!(result.component_index(a), result.component_index(d));
+    }
+}
+
+#[test]
+#[should_panic(expected = "is not a node of the decomposed graph")]
+fn tarjan_component_index_rejects_a_removed_slot() {
+    let (graph, [_, _, c, _]) = with_removed_slot();
+    let _ = tarjan_scc(&graph).component_index(c);
+}
+
+#[test]
+#[should_panic(expected = "is not a node of the decomposed graph")]
+fn kosaraju_component_index_rejects_a_removed_slot() {
+    let (graph, [_, _, c, _]) = with_removed_slot();
+    let _ = kosaraju_scc(&graph).component_index(c);
+}
+
+#[test]
+#[should_panic(expected = "is not a node of the decomposed graph")]
+fn component_of_a_removed_slot_is_not_the_first_component() {
+    // With no live node there is no component 0 to borrow, so the query has
+    // to fail at the slot rather than at an offset table.
+    let mut graph = Graph::<(), ()>::new();
+    let only = graph.add_node(());
+    assert!(graph.remove_node(only));
+    let _ = tarjan_scc(&graph).component(only);
+}
+
 #[test]
 #[should_panic(expected = "the decomposition covers 4 nodes but the graph has 2")]
 fn condensation_of_another_graphs_decomposition_panics() {

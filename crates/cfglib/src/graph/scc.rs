@@ -102,25 +102,35 @@ impl<N: Copy + Ord + fmt::Debug, S: AsRef<[N]>> fmt::Debug for Scc<N, S> {
 /// Every component's nodes sit in one array, component after component, each
 /// run in ascending order, with the offsets where the runs begin. However
 /// many components there are, a decomposition is three allocations.
+///
+/// The tables span the graph's whole node bound, so a slot that holds no node
+/// (one a [`Graph`] removed) belongs to no component. Both algorithms treat it
+/// the same way: [`component_index`](Self::component_index) and
+/// [`component`](Self::component) panic for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SccDecomposition<N> {
     nodes: Vec<N>,
     /// `offsets[i]..offsets[i + 1]` is component `i` within `nodes`.
     offsets: Vec<usize>,
+    /// Each slot's component, [`NO_COMPONENT`] while no component has claimed
+    /// it and for good when the slot holds no node.
     component_of: Vec<usize>,
 }
 
+/// The component of a slot that no component contains.
+const NO_COMPONENT: usize = usize::MAX;
+
 impl<N: DenseId> SccDecomposition<N> {
     /// An empty decomposition with room for `node_bound` nodes, the most any
-    /// graph that size can hold; `component_of` reads `unassigned` until a
-    /// node is placed.
-    fn with_node_bound(node_bound: usize, unassigned: usize) -> Self {
+    /// graph that size can hold; no slot has a component until a node is
+    /// placed.
+    fn with_node_bound(node_bound: usize) -> Self {
         let mut offsets = Vec::with_capacity(node_bound + 1);
         offsets.push(0);
         Self {
             nodes: Vec::with_capacity(node_bound),
             offsets,
-            component_of: vec![unassigned; node_bound],
+            component_of: vec![NO_COMPONENT; node_bound],
         }
     }
 
@@ -138,12 +148,28 @@ impl<N: DenseId> SccDecomposition<N> {
     }
 
     /// Return the component index containing `node`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `node` is a slot that holds no node of the decomposed
+    /// graph, such as one the graph removed, and when it is beyond the graph's
+    /// node bound.
     #[must_use]
     pub fn component_index(&self, node: N) -> usize {
-        self.component_of[node.index()]
+        let index = self.component_of[node.index()];
+        assert!(
+            index != NO_COMPONENT,
+            "node {} is not a node of the decomposed graph",
+            node.index()
+        );
+        index
     }
 
     /// Return the component containing `node`.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the conditions of [`component_index`](Self::component_index).
     #[must_use]
     pub fn component(&self, node: N) -> Scc<N, &[N]> {
         let index = self.component_index(node);
@@ -394,8 +420,7 @@ pub fn tarjan_scc<G: GraphView>(graph: &G) -> SccDecomposition<G::NodeId> {
     let mut on_stack = vec![false; node_count];
     let mut indices = vec![usize::MAX; node_count];
     let mut lowlinks = vec![0_usize; node_count];
-    // Nodes never reached (a removed slot) stay in component 0.
-    let mut result = SccDecomposition::with_node_bound(node_count, 0);
+    let mut result = SccDecomposition::with_node_bound(node_count);
     // Every frame's successors, appended as the frame is pushed and truncated
     // away as it pops. Both are empty again when a root's walk ends, so one
     // allocation covers the whole decomposition rather than one per root.
@@ -566,11 +591,11 @@ pub fn kosaraju_scc<G: GraphView>(graph: &G) -> SccDecomposition<G::NodeId> {
     // is in a source component of the condensation, and every root after it
     // is in a source component of what remains — which is what makes the
     // minting order topological.
-    let mut result = SccDecomposition::with_node_bound(node_count, usize::MAX);
+    let mut result = SccDecomposition::with_node_bound(node_count);
     let mut stack = Vec::new();
 
     for root in finish_order.into_iter().rev() {
-        if result.component_of[root.index()] != usize::MAX {
+        if result.component_of[root.index()] != NO_COMPONENT {
             continue;
         }
 
@@ -580,7 +605,7 @@ pub fn kosaraju_scc<G: GraphView>(graph: &G) -> SccDecomposition<G::NodeId> {
         while let Some(node) = stack.pop() {
             result.nodes.push(node);
             for predecessor in graph.predecessors(node) {
-                if result.component_of[predecessor.index()] == usize::MAX {
+                if result.component_of[predecessor.index()] == NO_COMPONENT {
                     result.component_of[predecessor.index()] = index;
                     stack.push(predecessor);
                 }
