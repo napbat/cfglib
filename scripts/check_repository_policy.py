@@ -46,7 +46,10 @@ KEBAB_CASE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 SNAKE_CASE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 DECORATIVE_DIVIDER = re.compile(r"^\s*//.*[=_─═-]{3,}\s*$")
 CARGO_TARGET_DIRECTORIES = ("benches", "examples", "tests")
-PUBLIC_FUNCTION = re.compile(r"^pub fn\s+([a-z][a-z0-9_]*)\s*(?:<|\()", re.MULTILINE)
+PUBLIC_FUNCTION = re.compile(
+    r"^pub\s+(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+([a-z][a-z0-9_]*)\s*(?:<|\()",
+    re.MULTILINE,
+)
 PUBLIC_USE = re.compile(r"^pub use\s+(.+?);", re.MULTILINE | re.DOTALL)
 BENCHMARK_API_LIST = re.compile(
     r"PUBLIC_API_FUNCTIONS:\s*&\[&str\]\s*=\s*&\[(.*?)\];",
