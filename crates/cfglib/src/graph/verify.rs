@@ -1,18 +1,22 @@
-//! CFG structural verification.
+//! Structural verification of a CFG or of a consumer-owned graph view.
 //!
-//! Validates invariants that should always hold for a well-formed CFG:
-//! entry block exists, adjacency lists are consistent, no out-of-bounds
-//! IDs, and every non-entry reachable block has at least one predecessor.
+//! One definition of the invariants serves both: [`verify_view`] checks the
+//! node-level contract of any rooted view, [`verify_edge_view`] adds the
+//! stable-edge contract on top of it, and [`verify`] is the latter over a
+//! [`Cfg`]. The invariants are an entry that exists, in-bounds
+//! identities, mirrored forward and reverse adjacency, and a predecessor for
+//! every reachable non-entry node.
 
 extern crate alloc;
-use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeId;
+use crate::graph::edge_traverse::EdgeAdjacency;
 use crate::graph::edge_view::EdgeView;
+use crate::graph::traverse::{Incoming, Outgoing, TraversalDirection, reachable};
 use crate::graph::view::{DenseId, RootedView};
 
 /// A single verification failure.
@@ -92,191 +96,6 @@ impl<E> SemanticVerifyReport<E> {
     }
 }
 
-fn verify_edge_endpoints<I, E>(cfg: &Cfg<I, E>, block_bound: usize, errors: &mut Vec<VerifyError>) {
-    for edge in cfg.edges() {
-        if edge.source().index() >= block_bound {
-            errors.push(VerifyError {
-                message: alloc::format!(
-                    "edge {} source {} out of bounds (block_bound={})",
-                    edge.id(),
-                    edge.source(),
-                    block_bound
-                ),
-            });
-        }
-        if edge.target().index() >= block_bound {
-            errors.push(VerifyError {
-                message: alloc::format!(
-                    "edge {} target {} out of bounds (block_bound={})",
-                    edge.id(),
-                    edge.target(),
-                    block_bound
-                ),
-            });
-        }
-    }
-}
-
-/// Name every live edge that its source's successors or its target's
-/// predecessors fail to list.
-///
-/// [`verify_adjacency`] checks the converse, that every listing names an edge
-/// that agrees with it, which a dropped listing cannot violate. It counts the
-/// agreeing listings as it goes, and only a count that differs from the live
-/// edges calls this walk, so a sound CFG never pays for it.
-fn report_unlisted_edges<I, E>(cfg: &Cfg<I, E>, errors: &mut Vec<VerifyError>) {
-    let bound = cfg.edge_bound();
-    let mut successor_listed = alloc::vec![false; bound];
-    let mut predecessor_listed = alloc::vec![false; bound];
-    for block in cfg.block_ids() {
-        for edge in cfg.outgoing(block) {
-            if let Some(listed) = successor_listed.get_mut(edge.index()) {
-                *listed = true;
-            }
-        }
-        for edge in cfg.incoming(block) {
-            if let Some(listed) = predecessor_listed.get_mut(edge.index()) {
-                *listed = true;
-            }
-        }
-    }
-    for edge in cfg.edges() {
-        let index = edge.id().index();
-        if index >= bound {
-            continue;
-        }
-        if !successor_listed[index] {
-            errors.push(VerifyError {
-                message: alloc::format!(
-                    "edge {} is not a successor edge of its source {}",
-                    edge.id(),
-                    edge.source()
-                ),
-            });
-        }
-        if !predecessor_listed[index] {
-            errors.push(VerifyError {
-                message: alloc::format!(
-                    "edge {} is not a predecessor edge of its target {}",
-                    edge.id(),
-                    edge.target()
-                ),
-            });
-        }
-    }
-}
-
-fn verify_adjacency<I, E>(cfg: &Cfg<I, E>, errors: &mut Vec<VerifyError>) {
-    let mut successor_listings = 0;
-    let mut predecessor_listings = 0;
-    for block_id_ in cfg.block_ids() {
-        let block_id = block_id_;
-        for edge_id in cfg.outgoing(block_id) {
-            if edge_id.index() >= cfg.edge_bound() {
-                errors.push(VerifyError {
-                    message: alloc::format!(
-                        "block {block_id} successor edge {edge_id} out of bounds"
-                    ),
-                });
-            } else if cfg.edge(edge_id).source() != block_id {
-                errors.push(VerifyError {
-                    message: alloc::format!(
-                        "block {} lists edge {} as successor but edge source is {}",
-                        block_id,
-                        edge_id,
-                        cfg.edge(edge_id).source()
-                    ),
-                });
-            } else {
-                successor_listings += 1;
-            }
-        }
-        for edge_id in cfg.incoming(block_id) {
-            if edge_id.index() >= cfg.edge_bound() {
-                errors.push(VerifyError {
-                    message: alloc::format!(
-                        "block {block_id} predecessor edge {edge_id} out of bounds"
-                    ),
-                });
-            } else if cfg.edge(edge_id).target() != block_id {
-                errors.push(VerifyError {
-                    message: alloc::format!(
-                        "block {} lists edge {} as predecessor but edge target is {}",
-                        block_id,
-                        edge_id,
-                        cfg.edge(edge_id).target()
-                    ),
-                });
-            } else {
-                predecessor_listings += 1;
-            }
-        }
-    }
-    if successor_listings != cfg.edge_count() || predecessor_listings != cfg.edge_count() {
-        report_unlisted_edges(cfg, errors);
-    }
-}
-
-/// Detects an edge listed twice within one adjacency walk.
-///
-/// Each walk stamps the edges it meets with its own number, so starting the
-/// next walk costs nothing. An identity beyond the edge bound has no stamp
-/// slot and is tracked in `stray` instead.
-struct WalkStamps {
-    stamps: Vec<usize>,
-    stray: BTreeSet<EdgeId>,
-    walk: usize,
-}
-
-impl WalkStamps {
-    fn new(edge_bound: usize) -> Self {
-        Self {
-            stamps: alloc::vec![0; edge_bound],
-            stray: BTreeSet::new(),
-            walk: 0,
-        }
-    }
-
-    fn begin_walk(&mut self) {
-        self.walk += 1;
-        self.stray.clear();
-    }
-
-    /// Records `edge` in the current walk; true when it was already recorded.
-    fn repeats(&mut self, edge: EdgeId) -> bool {
-        match self.stamps.get_mut(edge.index()) {
-            Some(stamp) => core::mem::replace(stamp, self.walk) == self.walk,
-            None => !self.stray.insert(edge),
-        }
-    }
-}
-
-fn verify_unique_adjacency<I, E>(cfg: &Cfg<I, E>, errors: &mut Vec<VerifyError>) {
-    let mut seen = WalkStamps::new(cfg.edge_bound());
-    for block_id in cfg.block_ids() {
-        seen.begin_walk();
-        for edge_id in cfg.outgoing(block_id) {
-            if seen.repeats(edge_id) {
-                errors.push(VerifyError {
-                    message: alloc::format!(
-                        "block {block_id} has duplicate successor edge {edge_id}"
-                    ),
-                });
-            }
-        }
-        seen.begin_walk();
-        for edge_id in cfg.incoming(block_id) {
-            if seen.repeats(edge_id) {
-                errors.push(VerifyError {
-                    message: alloc::format!(
-                        "block {block_id} has duplicate predecessor edge {edge_id}"
-                    ),
-                });
-            }
-        }
-    }
-}
-
 /// A `(source, target)` adjacency entry as plain indices.
 type Pair = (usize, usize);
 
@@ -305,7 +124,7 @@ fn report_adjacency_mismatches(forward: &[Pair], reverse: &[Pair], errors: &mut 
         if mirrored != count {
             errors.push(VerifyError {
                 message: alloc::format!(
-                    "adjacency mismatch: {count} successor edge(s) {source}->{target} but {mirrored} predecessor entrie(s)"
+                    "adjacency mismatch: {count} successor edge(s) {source}->{target} but {mirrored} predecessor entry(ies)"
                 ),
             });
         }
@@ -314,7 +133,7 @@ fn report_adjacency_mismatches(forward: &[Pair], reverse: &[Pair], errors: &mut 
         if mirrored == 0 {
             errors.push(VerifyError {
                 message: alloc::format!(
-                    "adjacency mismatch: {count} predecessor entrie(s) {source}->{target} with no successor edge"
+                    "adjacency mismatch: {count} predecessor entry(ies) {source}->{target} with no successor edge"
                 ),
             });
         }
@@ -323,13 +142,15 @@ fn report_adjacency_mismatches(forward: &[Pair], reverse: &[Pair], errors: &mut 
 
 /// Validate structural invariants of a CFG.
 ///
-/// Checks performed:
-/// 1. Entry block index is within bounds.
-/// 2. Every edge references valid source/target block IDs.
+/// A [`Cfg`] is an edge-aware rooted view of itself, so this is
+/// [`verify_edge_view`] over the entry block: the CFG store and consumer-owned
+/// storage are held to one definition of every invariant, and one set of
+/// messages. Checks performed:
+/// 1. The entry block index is within bounds.
+/// 2. Every live edge references valid source/target block IDs.
 /// 3. Adjacency lists (`succs`/`preds`) are consistent with edges, and every
-///    live edge is listed by both of its endpoints.
+///    live edge is listed exactly once by each of its endpoints.
 /// 4. Every reachable non-entry block has at least one predecessor.
-/// 5. No duplicate edges in adjacency lists.
 ///
 /// Returns a [`VerifyReport`] containing all violations found.
 ///
@@ -347,43 +168,7 @@ fn report_adjacency_mismatches(forward: &[Pair], reverse: &[Pair], errors: &mut 
 /// ```
 #[must_use]
 pub fn verify<I, E>(cfg: &Cfg<I, E>) -> VerifyReport {
-    let mut errors = Vec::new();
-    // Identities, not quantities: removed blocks keep their slots, so every
-    // live index is bounded by `block_bound`, which `block_count` undercuts.
-    let n = cfg.block_bound();
-
-    // 1. Entry in bounds.
-    if cfg.entry().index() >= n {
-        errors.push(VerifyError {
-            message: alloc::format!(
-                "entry block {} out of bounds (block_bound={})",
-                cfg.entry(),
-                n
-            ),
-        });
-        // Can't do much more if entry is invalid.
-        return VerifyReport { errors };
-    }
-
-    verify_edge_endpoints(cfg, n, &mut errors);
-    verify_adjacency(cfg, &mut errors);
-
-    // 4. Every reachable non-entry block has a predecessor.
-    let reachable = cfg.depth_first_preorder();
-    for &bid in &reachable {
-        if bid == cfg.entry() {
-            continue;
-        }
-        if cfg.incoming(bid).next().is_none() {
-            errors.push(VerifyError {
-                message: alloc::format!("reachable block {bid} has no predecessors"),
-            });
-        }
-    }
-
-    verify_unique_adjacency(cfg, &mut errors);
-
-    VerifyReport { errors }
+    verify_edge_view(cfg)
 }
 
 /// Validate structural invariants and consumer semantics in stable order.
@@ -407,13 +192,33 @@ where
     }
 }
 
+fn report_out_of_bounds_neighbor(
+    errors: &mut Vec<VerifyError>,
+    node: usize,
+    role: &str,
+    neighbor: usize,
+    node_bound: usize,
+) {
+    errors.push(VerifyError {
+        message: alloc::format!(
+            "node {node} has {role} {neighbor} out of bounds (node_bound={node_bound})"
+        ),
+    });
+}
+
 /// Validate the [`RootedView`] contract on consumer-owned storage.
 ///
 /// Checks performed:
 /// 1. The root node's index is within `0..node_bound()`.
-/// 2. Forward and reverse adjacency mirror each other with matching
+/// 2. Every node, successor, and predecessor the view yields is within
+///    `0..node_bound()`. An identity beyond the bound is reported where it
+///    appears and left out of the checks below, so an adapter that breaks the
+///    contract gets a report instead of aborting the validator.
+/// 3. Forward and reverse adjacency mirror each other with matching
 ///    multiplicity (every successor entry has a matching predecessor entry).
-/// 3. Every reachable non-root node has at least one predecessor.
+/// 4. Every reachable non-root node has at least one predecessor. This walk
+///    runs only when check 2 found nothing, because it indexes tables of
+///    `node_bound()` entries by those identities.
 ///
 /// This catches adapter bugs when a consumer implements the view traits over
 /// its own graph store — the counterpart of [`verify`], which checks the
@@ -421,13 +226,13 @@ where
 #[must_use]
 pub fn verify_view<G: RootedView>(graph: &G) -> VerifyReport {
     let mut errors = Vec::new();
-    let node_count = graph.node_bound();
+    let node_bound = graph.node_bound();
 
     let root = graph.root();
-    if root.index() >= node_count {
+    if root.index() >= node_bound {
         errors.push(VerifyError {
             message: alloc::format!(
-                "root node index {} out of bounds (node_count={node_count})",
+                "root node index {} out of bounds (node_bound={node_bound})",
                 root.index()
             ),
         });
@@ -435,19 +240,48 @@ pub fn verify_view<G: RootedView>(graph: &G) -> VerifyReport {
     }
 
     // Forward and reverse adjacency must agree as multisets of (source, target).
-    let mut forward: Vec<Pair> = Vec::with_capacity(node_count);
-    let mut reverse: Vec<Pair> = Vec::with_capacity(node_count);
+    let mut forward: Vec<Pair> = Vec::with_capacity(node_bound);
+    let mut reverse: Vec<Pair> = Vec::with_capacity(node_bound);
+    let mut in_bounds = true;
     for node in graph.node_ids() {
-        forward.extend(
-            graph
-                .successors(node)
-                .map(|successor| (node.index(), successor.index())),
-        );
-        reverse.extend(
-            graph
-                .predecessors(node)
-                .map(|predecessor| (predecessor.index(), node.index())),
-        );
+        if node.index() >= node_bound {
+            errors.push(VerifyError {
+                message: alloc::format!(
+                    "node index {} out of bounds (node_bound={node_bound})",
+                    node.index()
+                ),
+            });
+            in_bounds = false;
+            continue;
+        }
+        for successor in graph.successors(node) {
+            if successor.index() < node_bound {
+                forward.push((node.index(), successor.index()));
+            } else {
+                report_out_of_bounds_neighbor(
+                    &mut errors,
+                    node.index(),
+                    "successor",
+                    successor.index(),
+                    node_bound,
+                );
+                in_bounds = false;
+            }
+        }
+        for predecessor in graph.predecessors(node) {
+            if predecessor.index() < node_bound {
+                reverse.push((predecessor.index(), node.index()));
+            } else {
+                report_out_of_bounds_neighbor(
+                    &mut errors,
+                    node.index(),
+                    "predecessor",
+                    predecessor.index(),
+                    node_bound,
+                );
+                in_bounds = false;
+            }
+        }
     }
     forward.sort_unstable();
     reverse.sort_unstable();
@@ -456,22 +290,14 @@ pub fn verify_view<G: RootedView>(graph: &G) -> VerifyReport {
     }
 
     // Every reachable non-root node has a predecessor.
-    let mut visited = alloc::vec![false; node_count];
-    let mut stack = alloc::vec![root];
-    visited[root.index()] = true;
-    while let Some(node) = stack.pop() {
-        for successor in graph.successors(node) {
-            if !visited[successor.index()] {
-                visited[successor.index()] = true;
-                stack.push(successor);
+    if in_bounds {
+        let reached = reachable(graph, [root], TraversalDirection::Outgoing);
+        for node in graph.node_ids() {
+            if reached[node.index()] && node != root && graph.predecessors(node).next().is_none() {
+                errors.push(VerifyError {
+                    message: alloc::format!("reachable node {} has no predecessors", node.index()),
+                });
             }
-        }
-    }
-    for node in graph.node_ids() {
-        if visited[node.index()] && node != root && graph.predecessors(node).next().is_none() {
-            errors.push(VerifyError {
-                message: alloc::format!("reachable node {} has no predecessors", node.index()),
-            });
         }
     }
 
@@ -486,6 +312,65 @@ struct EdgeSlot {
     incoming: usize,
 }
 
+/// How one adjacency direction is named in a report and counted in an
+/// [`EdgeSlot`].
+struct Listing {
+    /// `"outgoing"` or `"incoming"`.
+    adjacency: &'static str,
+    /// The end of an edge that a listing node must be: `"source"` or `"target"`.
+    end: &'static str,
+    count: fn(&mut EdgeSlot) -> &mut usize,
+}
+
+const OUTGOING: Listing = Listing {
+    adjacency: "outgoing",
+    end: "source",
+    count: |slot| &mut slot.outgoing,
+};
+
+const INCOMING: Listing = Listing {
+    adjacency: "incoming",
+    end: "target",
+    count: |slot| &mut slot.incoming,
+};
+
+/// Check the edges `node` lists along `axis`: each must be a live slot, and
+/// must name `node` as its [`Listing::end`].
+fn check_listings<G: EdgeView, A: EdgeAdjacency>(
+    axis: A,
+    listing: &Listing,
+    graph: &G,
+    node: G::NodeId,
+    slots: &mut [EdgeSlot],
+    errors: &mut Vec<VerifyError>,
+) {
+    for edge_id in axis.edges(graph, node) {
+        let index = edge_id.index();
+        let Some(slot) = slots.get_mut(index).filter(|slot| slot.live) else {
+            errors.push(VerifyError {
+                message: alloc::format!(
+                    "node {} has non-live {} edge index {index}",
+                    node.index(),
+                    listing.adjacency
+                ),
+            });
+            continue;
+        };
+        *(listing.count)(slot) += 1;
+        let stored = axis.previous(graph.edge(edge_id));
+        if stored != node {
+            errors.push(VerifyError {
+                message: alloc::format!(
+                    "node {} lists edge index {index}, whose {} is {}",
+                    node.index(),
+                    listing.end,
+                    stored.index()
+                ),
+            });
+        }
+    }
+}
+
 /// Validate the node and stable-edge contracts of an edge-aware rooted view.
 ///
 /// In addition to [`verify_view`], this checks dense edge-slot bounds, unique
@@ -498,6 +383,7 @@ where
     G: EdgeView + RootedView,
 {
     let mut result = verify_view(graph);
+    let node_bound = graph.node_bound();
     let edge_bound = graph.edge_bound();
     let mut slots = alloc::vec![EdgeSlot::default(); edge_bound];
     for edge_id in graph.edge_ids() {
@@ -517,63 +403,34 @@ where
             continue;
         }
         let edge = graph.edge(edge_id);
-        if edge.source().index() >= graph.node_bound()
-            || edge.target().index() >= graph.node_bound()
-        {
+        if edge.source().index() >= node_bound || edge.target().index() >= node_bound {
             result.errors.push(VerifyError {
                 message: alloc::format!(
-                    "edge index {index} has endpoint outside node_count {}",
-                    graph.node_bound()
+                    "edge index {index} has endpoint outside node_bound {node_bound}"
                 ),
             });
         }
     }
 
-    for node in graph.node_ids() {
-        for edge_id in graph.outgoing(node) {
-            let index = edge_id.index();
-            let Some(slot) = slots.get_mut(index).filter(|slot| slot.live) else {
-                result.errors.push(VerifyError {
-                    message: alloc::format!(
-                        "node {} has non-live outgoing edge index {index}",
-                        node.index()
-                    ),
-                });
-                continue;
-            };
-            slot.outgoing += 1;
-            if graph.edge(edge_id).source() != node {
-                result.errors.push(VerifyError {
-                    message: alloc::format!(
-                        "node {} lists edge index {index}, whose source is {}",
-                        node.index(),
-                        graph.edge(edge_id).source().index()
-                    ),
-                });
-            }
-        }
-        for edge_id in graph.incoming(node) {
-            let index = edge_id.index();
-            let Some(slot) = slots.get_mut(index).filter(|slot| slot.live) else {
-                result.errors.push(VerifyError {
-                    message: alloc::format!(
-                        "node {} has non-live incoming edge index {index}",
-                        node.index()
-                    ),
-                });
-                continue;
-            };
-            slot.incoming += 1;
-            if graph.edge(edge_id).target() != node {
-                result.errors.push(VerifyError {
-                    message: alloc::format!(
-                        "node {} lists edge index {index}, whose target is {}",
-                        node.index(),
-                        graph.edge(edge_id).target().index()
-                    ),
-                });
-            }
-        }
+    // A node beyond the bound is already reported by `verify_view`, and asking
+    // the view for its edges would only repeat the contract violation.
+    for node in graph.node_ids().filter(|node| node.index() < node_bound) {
+        check_listings(
+            Outgoing,
+            &OUTGOING,
+            graph,
+            node,
+            &mut slots,
+            &mut result.errors,
+        );
+        check_listings(
+            Incoming,
+            &INCOMING,
+            graph,
+            node,
+            &mut slots,
+            &mut result.errors,
+        );
     }
     for (edge, slot) in slots.iter().enumerate().filter(|(_, slot)| slot.live) {
         let (outgoing, incoming) = (slot.outgoing, slot.incoming);

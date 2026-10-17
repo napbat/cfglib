@@ -474,9 +474,9 @@ fn a_bulk_move_of_nothing_names_no_replacement() {
 fn verify_reports_an_edge_its_endpoint_stopped_listing() {
     // The shape of a dropped listing: the edge is live and its other
     // endpoint still lists it, but one endpoint's chain has forgotten it.
-    for (direction, role) in [
-        (TraversalDirection::Outgoing, "successor"),
-        (TraversalDirection::Incoming, "predecessor"),
+    for (direction, (outgoing, incoming)) in [
+        (TraversalDirection::Outgoing, (0, 1)),
+        (TraversalDirection::Incoming, (1, 0)),
     ] {
         let mut cfg = crate::Cfg::<u32>::new();
         let source = cfg.entry();
@@ -491,12 +491,13 @@ fn verify_reports_an_edge_its_endpoint_stopped_listing() {
         cfg.graph.chains.detach_node(forgetful.index(), direction);
 
         let report = crate::verify(&cfg);
-        assert!(!report.is_ok(), "a dropped {role} listing must be reported");
+        let expected = alloc::format!(
+            "edge index {} appears {outgoing} time(s) in outgoing and {incoming} time(s) in incoming adjacency",
+            edge.index()
+        );
         assert!(
-            report.errors[0]
-                .message
-                .contains(&alloc::format!("edge {edge} is not a {role} edge")),
-            "{:?}",
+            report.errors.iter().any(|error| error.message == expected),
+            "a dropped {direction:?} listing must be reported: {:?}",
             report.errors
         );
     }
