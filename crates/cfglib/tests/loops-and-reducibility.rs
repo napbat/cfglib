@@ -430,3 +430,49 @@ fn splitting_makes_an_irreducible_cfg_reducible() {
     assert!(is_reducible(&cfg, &DominatorTree::compute(&cfg)));
     assert!(verify(&cfg).is_ok());
 }
+
+#[test]
+fn a_back_tag_that_closes_no_cycle_is_not_a_loop() {
+    // `entry -Back-> sink`, and the sink returns.
+    let mut cfg = Cfg::<u32>::new();
+    let sink = cfg.new_block();
+    cfg.add_edge(cfg.entry(), sink, EdgeKind::Back);
+    let dom = DominatorTree::compute(&cfg);
+
+    assert!(detect_loops_tagged(&cfg, &dom).is_empty());
+    assert_eq!(cfg_block_nesting_depths(&cfg), [0, 0]);
+    assert_eq!(CfgMetrics::compute(&cfg).graph.max_nesting_depth, 0);
+}
+
+/// `entry -> {r, q}`, the cycle `q -> w -> s -> {w, q}`, and `r -> s`: a cycle
+/// with two entries (`q` from the entry, `s` from `r`) whose first retreating
+/// edge ends at `w`, in its interior. Splitting one block at a time never
+/// finished on it.
+#[test]
+fn make_reducible_finishes_on_a_cycle_whose_witness_is_not_an_entry() {
+    let mut cfg = Cfg::<u32, Route>::with_edge_payload();
+    let entry = cfg.entry();
+    let [q, w, s, r] = [(); 4].map(|()| cfg.new_block());
+    cfg.add_edge_with_payload(entry, r, EdgeKind::ConditionalTrue, Route::Hot);
+    cfg.add_edge_with_payload(entry, q, EdgeKind::ConditionalFalse, Route::Cold);
+    cfg.add_edge(q, w, EdgeKind::Fallthrough);
+    cfg.add_edge(w, s, EdgeKind::Fallthrough);
+    cfg.add_edge(s, w, EdgeKind::Back);
+    cfg.add_edge(s, q, EdgeKind::Back);
+    cfg.add_edge(r, s, EdgeKind::Fallthrough);
+    assert!(!is_reducible(&cfg, &DominatorTree::compute(&cfg)));
+    let blocks_before = cfg.block_count();
+
+    let duplicated = make_reducible(&mut cfg);
+
+    assert!(duplicated > 0);
+    assert_eq!(cfg.block_count(), blocks_before + duplicated);
+    assert!(is_reducible(&cfg, &DominatorTree::compute(&cfg)));
+    assert!(verify(&cfg).is_ok());
+    // The two edges out of the entry keep their payloads and order.
+    let from_entry: Vec<Route> = cfg
+        .outgoing(entry)
+        .map(|edge| *cfg.edge(edge).payload())
+        .collect();
+    assert_eq!(from_entry, [Route::Hot, Route::Cold]);
+}
