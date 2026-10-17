@@ -11,7 +11,7 @@ use cfglib::{
 };
 
 use crate::machine::{Barrier, Inst, Program, Rng, chain, diamond};
-use crate::oracle::{Def, alias_classes, expand, explore};
+use crate::oracle::{Def, Reaching, alias_classes, expand, explore};
 
 type Memory = MemorySSA<u8, u8, Barrier>;
 
@@ -520,85 +520,15 @@ fn memory_ssa_matches_the_reaching_store_exploration_on_random_programs() {
             _ => &|left, right| left % 2 == right % 2,
         };
         let memory: Memory = MemorySSA::compute(&cfg, &relation);
-        // Only locations that occur take part: a location nobody accesses
-        // cannot bridge two that do.
-        let locations: BTreeSet<u8> = program
-            .code
-            .iter()
-            .enumerate()
-            .filter(|(block, _)| program.is_live(*block))
-            .flat_map(|(_, code)| code.iter().flat_map(|inst| inst.events.iter()))
-            .filter_map(|event| match event {
-                MemoryEvent::Access(access) => Some(*access.location()),
-                MemoryEvent::Fence(_) => None,
-            })
-            .collect();
+        let locations = program.accessed_locations();
         let representative = alias_classes(&locations, relation);
         let reaching = explore(&program, &representative);
 
-        // The classes are exactly the connected components of the relation.
-        for left in &locations {
-            for right in &locations {
-                if let (Some(a), Some(b)) = (memory.class_of(left), memory.class_of(right)) {
-                    assert_eq!(
-                        a == b,
-                        representative[left] == representative[right],
-                        "round {round}"
-                    );
-                }
-            }
-        }
-        for class in memory.classes() {
-            assert!(
-                class.locations().windows(2).all(|pair| pair[0] < pair[1]),
-                "sorted locations"
-            );
-            assert_eq!(memory.class(class.id()), Some(class));
-        }
+        assert_classes_are_alias_components(&memory, &locations, &representative, round);
+        assert_classes_are_sorted_and_addressable(&memory);
 
-        for (read, expected) in &reaching.reads {
-            let actual: Vec<Def<u8>> = memory
-                .reaching_definitions(*read)
-                .into_iter()
-                .map(|definition| match definition {
-                    MemoryDefinition::Event { site } => Def::Write(*site),
-                    MemoryDefinition::LiveIn { class } => {
-                        Def::LiveIn(memory.class(*class).unwrap().locations()[0])
-                    }
-                    MemoryDefinition::Phi { .. } => panic!("phis are expanded"),
-                })
-                .collect();
-            assert_eq!(
-                actual.len(),
-                expected.len(),
-                "no definition is reported twice, round {round}"
-            );
-            assert_eq!(
-                &actual.into_iter().collect::<BTreeSet<_>>(),
-                expected,
-                "reads at {read:?}, round {round}"
-            );
-        }
-        for (write, expected) in &reaching.clobbers {
-            let version = memory.event(*write).unwrap().clobbered_version().unwrap();
-            assert_eq!(
-                &expand(&memory, version),
-                expected,
-                "clobbers at {write:?}, round {round}"
-            );
-            let replaced = memory
-                .clobbered_definition(*write)
-                .expect("a write has a clobbered state");
-            assert_eq!(memory.definition(version), Some(replaced));
-            assert_eq!(
-                memory.transitive_readers(*write),
-                reaching
-                    .transitive_readers(*write)
-                    .into_iter()
-                    .collect::<Vec<_>>(),
-                "transitive readers of {write:?}, round {round}"
-            );
-        }
+        assert_reads_match_exploration(&memory, &reaching, round);
+        assert_clobbers_match_exploration(&memory, &reaching, round);
         assert_users_invert_versions(&memory);
 
         merged_reads += reaching
@@ -627,6 +557,90 @@ fn memory_ssa_matches_the_reaching_store_exploration_on_random_programs() {
     );
     assert!(phi_count >= 20, "memory phis: {phi_count}");
     assert!(handler_phis >= 1, "phis at unwind handlers: {handler_phis}");
+}
+
+/// The classes are exactly the connected components of the alias relation.
+fn assert_classes_are_alias_components(
+    memory: &Memory,
+    locations: &BTreeSet<u8>,
+    representative: &BTreeMap<u8, u8>,
+    round: usize,
+) {
+    for left in locations {
+        for right in locations {
+            if let (Some(a), Some(b)) = (memory.class_of(left), memory.class_of(right)) {
+                assert_eq!(
+                    a == b,
+                    representative[left] == representative[right],
+                    "round {round}"
+                );
+            }
+        }
+    }
+}
+
+/// Each class lists its locations in ascending order and is found by its id.
+fn assert_classes_are_sorted_and_addressable(memory: &Memory) {
+    for class in memory.classes() {
+        assert!(
+            class.locations().windows(2).all(|pair| pair[0] < pair[1]),
+            "sorted locations"
+        );
+        assert_eq!(memory.class(class.id()), Some(class));
+    }
+}
+
+/// Each read sees exactly the definitions the exploration finds reaching it,
+/// none of them twice.
+fn assert_reads_match_exploration(memory: &Memory, reaching: &Reaching<u8>, round: usize) {
+    for (read, expected) in &reaching.reads {
+        let actual: Vec<Def<u8>> = memory
+            .reaching_definitions(*read)
+            .into_iter()
+            .map(|definition| match definition {
+                MemoryDefinition::Event { site } => Def::Write(*site),
+                MemoryDefinition::LiveIn { class } => {
+                    Def::LiveIn(memory.class(*class).unwrap().locations()[0])
+                }
+                MemoryDefinition::Phi { .. } => panic!("phis are expanded"),
+            })
+            .collect();
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "no definition is reported twice, round {round}"
+        );
+        assert_eq!(
+            &actual.into_iter().collect::<BTreeSet<_>>(),
+            expected,
+            "reads at {read:?}, round {round}"
+        );
+    }
+}
+
+/// Each write replaces exactly the definitions the exploration finds, and its
+/// transitive readers are those the exploration finds.
+fn assert_clobbers_match_exploration(memory: &Memory, reaching: &Reaching<u8>, round: usize) {
+    for (write, expected) in &reaching.clobbers {
+        let version = memory.event(*write).unwrap().clobbered_version().unwrap();
+        assert_eq!(
+            &expand(memory, version),
+            expected,
+            "clobbers at {write:?}, round {round}"
+        );
+        let replaced = memory
+            .clobbered_definition(*write)
+            .expect("a write has a clobbered state");
+        assert_eq!(memory.definition(version), Some(replaced));
+        assert_eq!(
+            memory.transitive_readers(*write),
+            reaching
+                .transitive_readers(*write)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            "transitive readers of {write:?}, round {round}"
+        );
+    }
 }
 
 /// The users of a version are exactly the reads of it and the phi operands

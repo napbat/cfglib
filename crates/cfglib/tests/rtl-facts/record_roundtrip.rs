@@ -302,14 +302,24 @@ struct Expected<D: Dialect, V> {
     control: Control<V>,
 }
 
-/// Emits one record with every statement shape, every selection, every write
-/// target, and a multi-way branch, through the builder trait only.
-fn kitchen_sink<D: Target, B: InstructionBuilder<D>>(
-    builder: B,
-) -> Result<Expected<D, B::Value>, B::Error> {
+/// The handles that the writes and the branch of the kitchen sink refer back
+/// to.
+struct SinkHandles<V> {
+    part: V,
+    index: V,
+    picked: V,
+    key: V,
+    element: BitSlice,
+    guard: V,
+}
+
+/// Emits every selection, an operator, an effect, a nondeterministic choice,
+/// and a guarded raise that binds a flag.
+fn sink_reads_and_raise<D: Target, B: InstructionBuilder<D>>(
+    rec: &mut Recording<D, B>,
+) -> SinkHandles<B::Value> {
     let root = D::root_of;
     let width_of = |id: u8| D::root_width(root(id));
-    let mut rec = Recording::new(builder);
 
     let whole = rec.read(Selection::Direct(Place::whole(root(0))), width_of(0));
     let field = Place {
@@ -357,9 +367,26 @@ fn kitchen_sink<D: Target, B: InstructionBuilder<D>>(
         payload: &[choice, loaded.first, whole, wide],
         binds: &[(root(4), flag)],
     });
+    SinkHandles {
+        part,
+        index,
+        picked,
+        key,
+        element,
+        guard,
+    }
+}
+
+/// Emits a root write with a three-span plan, a finite indexed write, and a
+/// sparse indexed write.
+fn sink_writes<D: Target, B: InstructionBuilder<D>>(
+    rec: &mut Recording<D, B>,
+    handles: &SinkHandles<B::Value>,
+) {
+    let root = D::root_of;
 
     // Keep the low byte, replace the middle, take a fresh choice for the rest.
-    let rest = width_of(1).width() - 24;
+    let rest = D::root_width(root(1)).width() - 24;
     let plan = [
         SpanAction {
             span: BitSlice::new(0, bits(8)),
@@ -368,7 +395,7 @@ fn kitchen_sink<D: Target, B: InstructionBuilder<D>>(
         SpanAction {
             span: BitSlice::new(8, bits(16)),
             action: Action::TakeInput {
-                value: part,
+                value: handles.part,
                 offset: 0,
             },
         },
@@ -387,9 +414,9 @@ fn kitchen_sink<D: Target, B: InstructionBuilder<D>>(
     let targets = [Place::whole(root(2)), Place::whole(root(3))];
     rec.write(
         WriteTarget::FiniteIndexed {
-            index,
+            index: handles.index,
             candidates: &targets,
-            value: picked,
+            value: handles.picked,
         },
         D::policy(),
     );
@@ -397,17 +424,27 @@ fn kitchen_sink<D: Target, B: InstructionBuilder<D>>(
     rec.write(
         WriteTarget::SparseIndexed {
             bank: root(9),
-            key,
-            slice: element,
+            key: handles.key,
+            slice: handles.element,
             value: byte,
         },
         D::policy(),
     );
+}
+
+/// Emits one record with every statement shape, every selection, every write
+/// target, and a multi-way branch, through the builder trait only.
+fn kitchen_sink<D: Target, B: InstructionBuilder<D>>(
+    builder: B,
+) -> Result<Expected<D, B::Value>, B::Error> {
+    let mut rec = Recording::<D, B>::new(builder);
+    let handles = sink_reads_and_raise(&mut rec);
+    sink_writes(&mut rec, &handles);
 
     let taken = rec.constant(&[0x1000], bits(32));
     let fallthrough = rec.constant(&[0x1004], bits(32));
     let control = Control::Branch {
-        condition: guard,
+        condition: handles.guard,
         taken,
         not_taken: Some(fallthrough),
     };
@@ -647,6 +684,50 @@ fn raise_with<D: Target, B: InstructionBuilder<D>>(
     });
 }
 
+/// A root write of one root beside an indexed write that can land in it.
+fn root_write_beside_indexed_write<D: Target, B: InstructionBuilder<D>>(builder: &mut B) {
+    let root = D::root_of;
+    let width = D::root_width(root(0)).width();
+    full_plan::<D, B>(builder, 1);
+    let index = builder.constant(&[0], bits(8));
+    let candidates = [Place::whole(root(0)), Place::whole(root(1))];
+    let value = builder.constant(&vec![0; bits(width).words()], bits(width));
+    builder.write(
+        WriteTarget::FiniteIndexed {
+            index,
+            candidates: &candidates,
+            value,
+        },
+        D::policy(),
+    );
+}
+
+/// Two indexed writes of one value whose candidates are disjoint slices of
+/// one root.
+fn indexed_writes_of_disjoint_slices<D: Target, B: InstructionBuilder<D>>(builder: &mut B) {
+    let root = D::root_of;
+    let index = builder.constant(&[0], bits(8));
+    let low = [Place {
+        root: root(0),
+        slice: BitSlice::new(0, bits(16)),
+    }];
+    let high = [Place {
+        root: root(0),
+        slice: BitSlice::new(16, bits(16)),
+    }];
+    let value = builder.constant(&[0], bits(16));
+    for candidates in [&low, &high] {
+        builder.write(
+            WriteTarget::FiniteIndexed {
+                index,
+                candidates,
+                value,
+            },
+            D::policy(),
+        );
+    }
+}
+
 /// Emits the record of `case` and seals it.
 fn produce<D: Target, B: InstructionBuilder<D>>(mut b: B, case: Case) -> Result<(), B::Error> {
     let root = D::root_of;
@@ -683,41 +764,11 @@ fn produce<D: Target, B: InstructionBuilder<D>>(mut b: B, case: Case) -> Result<
             Control::Advance
         }
         Case::RootWriteBesideAnIndexedWriteOfIt => {
-            full_plan::<D, B>(&mut b, 1);
-            let index = b.constant(&[0], bits(8));
-            let candidates = [Place::whole(root(0)), Place::whole(root(1))];
-            let value = b.constant(&vec![0; bits(width(0)).words()], bits(width(0)));
-            b.write(
-                WriteTarget::FiniteIndexed {
-                    index,
-                    candidates: &candidates,
-                    value,
-                },
-                D::policy(),
-            );
+            root_write_beside_indexed_write::<D, B>(&mut b);
             Control::Advance
         }
         Case::IndexedWritesOfDisjointSlices => {
-            let index = b.constant(&[0], bits(8));
-            let low = [Place {
-                root: root(0),
-                slice: BitSlice::new(0, bits(16)),
-            }];
-            let high = [Place {
-                root: root(0),
-                slice: BitSlice::new(16, bits(16)),
-            }];
-            let value = b.constant(&[0], bits(16));
-            for candidates in [&low, &high] {
-                b.write(
-                    WriteTarget::FiniteIndexed {
-                        index,
-                        candidates,
-                        value,
-                    },
-                    D::policy(),
-                );
-            }
+            indexed_writes_of_disjoint_slices::<D, B>(&mut b);
             Control::Advance
         }
         Case::NonBooleanRaiseGuard => {

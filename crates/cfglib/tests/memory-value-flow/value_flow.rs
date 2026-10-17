@@ -14,11 +14,15 @@ use cfglib::{
 };
 
 use crate::machine::{Barrier, Inst, Program, Rng, chain, diamond};
-use crate::oracle::{alias_classes, explore};
+use crate::oracle::{Reaching, alias_classes, explore};
 
 type Memory = MemorySSA<u8, u8, Barrier>;
 type Flow = MemoryValueFlow<u8>;
 type Node = MemoryValueNode<u8>;
+/// The events that store (or load) each ordinary value.
+type ValueSites = BTreeMap<SsaValue<u8>, Vec<MemoryEventSite>>;
+/// For each stored value, the loaded values one hop through memory reaches.
+type Hops<'a> = BTreeMap<&'a SsaValue<u8>, BTreeSet<&'a SsaValue<u8>>>;
 
 fn point(block: usize, inst_idx: usize) -> ProgramPoint {
     ProgramPoint {
@@ -465,83 +469,15 @@ fn memory_carried_reachability_matches_the_reaching_store_exploration_on_random_
         };
         let (ssa, _, flow) = analyze(&cfg, &relation);
 
-        let locations: BTreeSet<u8> = program
-            .code
-            .iter()
-            .enumerate()
-            .filter(|(block, _)| program.is_live(*block))
-            .flat_map(|(_, code)| code.iter().flat_map(|inst| inst.events.iter()))
-            .filter_map(|event| match event {
-                MemoryEvent::Access(access) => Some(*access.location()),
-                MemoryEvent::Fence(_) => None,
-            })
-            .collect();
+        let locations = program.accessed_locations();
         let reaching = explore(&program, &alias_classes(&locations, relation));
 
-        // Which ordinary values each event stores and loads, as SSA values.
-        let mut stored: BTreeMap<SsaValue<u8>, Vec<MemoryEventSite>> = BTreeMap::new();
-        let mut loaded: BTreeMap<SsaValue<u8>, Vec<MemoryEventSite>> = BTreeMap::new();
-        for block in (0..program.blocks).filter(|block| program.is_live(*block)) {
-            for (index, inst) in program.code[block].iter().enumerate() {
-                let annotation = ssa.instruction(point(block, index)).unwrap();
-                for (event_index, event) in inst.events.iter().enumerate() {
-                    let MemoryEvent::Access(access) = event else {
-                        continue;
-                    };
-                    let here = MemoryEventSite::new(point(block, index), event_index);
-                    let find = |values: &[SsaValue<u8>], variable: u8| {
-                        values
-                            .iter()
-                            .find(|candidate| candidate.variable == variable)
-                            .cloned()
-                            .unwrap()
-                    };
-                    for variable in access.value_uses() {
-                        stored
-                            .entry(find(annotation.uses(), *variable))
-                            .or_default()
-                            .push(here);
-                    }
-                    for variable in access.value_defs() {
-                        loaded
-                            .entry(find(annotation.defs(), *variable))
-                            .or_default()
-                            .push(here);
-                    }
-                }
-            }
-        }
-        // One hop through memory: a stored value reaches a loaded value when
-        // a read of it is fed by the write, or when one exchange both stores
-        // the first and loads the second (one event node joins its inputs to
-        // its outputs, although the loaded value is the one observed before
-        // the store commits).
-        let mut hops: BTreeMap<&SsaValue<u8>, BTreeSet<&SsaValue<u8>>> = BTreeMap::new();
-        for (from, writes) in &stored {
-            for (to, reads) in &loaded {
-                let connected = writes.iter().any(|write| {
-                    reads.contains(write)
-                        || reaching
-                            .transitive_readers(*write)
-                            .iter()
-                            .any(|reader| reads.contains(reader))
-                });
-                if connected {
-                    hops.entry(from).or_default().insert(to);
-                }
-            }
-        }
+        let (stored, loaded) = stored_and_loaded_values(&program, &ssa);
+        let hops = memory_hops(&stored, &loaded, &reaching);
         // A loaded value that is stored again carries the dependency on, so
         // reachability is the closure of the hops.
         for from in stored.keys() {
-            let mut reached = BTreeSet::new();
-            let mut pending: Vec<&SsaValue<u8>> =
-                hops.get(from).into_iter().flatten().copied().collect();
-            while let Some(value) = pending.pop() {
-                if reached.insert(value) {
-                    pending.extend(hops.get(value).into_iter().flatten().copied());
-                }
-            }
+            let reached = reachable_through_hops(&hops, from);
             for to in loaded.keys() {
                 if from != to {
                     let expected = reached.contains(to);
@@ -568,6 +504,82 @@ fn memory_carried_reachability_matches_the_reaching_store_exploration_on_random_
         disconnected_pairs >= 20,
         "pairs memory separates: {disconnected_pairs}"
     );
+}
+
+/// Which ordinary values each event stores and loads, as SSA values.
+fn stored_and_loaded_values(program: &Program<u8>, ssa: &SsaForm<u8>) -> (ValueSites, ValueSites) {
+    let mut stored = ValueSites::new();
+    let mut loaded = ValueSites::new();
+    for block in (0..program.blocks).filter(|block| program.is_live(*block)) {
+        for (index, inst) in program.code[block].iter().enumerate() {
+            let annotation = ssa.instruction(point(block, index)).unwrap();
+            for (event_index, event) in inst.events.iter().enumerate() {
+                let MemoryEvent::Access(access) = event else {
+                    continue;
+                };
+                let here = MemoryEventSite::new(point(block, index), event_index);
+                let find = |values: &[SsaValue<u8>], variable: u8| {
+                    values
+                        .iter()
+                        .find(|candidate| candidate.variable == variable)
+                        .cloned()
+                        .unwrap()
+                };
+                for variable in access.value_uses() {
+                    stored
+                        .entry(find(annotation.uses(), *variable))
+                        .or_default()
+                        .push(here);
+                }
+                for variable in access.value_defs() {
+                    loaded
+                        .entry(find(annotation.defs(), *variable))
+                        .or_default()
+                        .push(here);
+                }
+            }
+        }
+    }
+    (stored, loaded)
+}
+
+/// One hop through memory: a stored value reaches a loaded value when a read
+/// of it is fed by the write, or when one exchange both stores the first and
+/// loads the second (one event node joins its inputs to its outputs, although
+/// the loaded value is the one observed before the store commits).
+fn memory_hops<'a>(
+    stored: &'a ValueSites,
+    loaded: &'a ValueSites,
+    reaching: &Reaching<u8>,
+) -> Hops<'a> {
+    let mut hops: Hops<'a> = BTreeMap::new();
+    for (from, writes) in stored {
+        for (to, reads) in loaded {
+            let connected = writes.iter().any(|write| {
+                reads.contains(write)
+                    || reaching
+                        .transitive_readers(*write)
+                        .iter()
+                        .any(|reader| reads.contains(reader))
+            });
+            if connected {
+                hops.entry(from).or_default().insert(to);
+            }
+        }
+    }
+    hops
+}
+
+/// Every value reachable from `from` by following one or more hops.
+fn reachable_through_hops<'a>(hops: &Hops<'a>, from: &SsaValue<u8>) -> BTreeSet<&'a SsaValue<u8>> {
+    let mut reached = BTreeSet::new();
+    let mut pending: Vec<&SsaValue<u8>> = hops.get(from).into_iter().flatten().copied().collect();
+    while let Some(value) = pending.pop() {
+        if reached.insert(value) {
+            pending.extend(hops.get(value).into_iter().flatten().copied());
+        }
+    }
+    reached
 }
 
 #[test]

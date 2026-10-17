@@ -227,8 +227,9 @@ fn unordered(mut observation: Observation) -> Observation {
     observation
 }
 
-fn assert_matches_reference(graph: &Store, reference: &Reference, exact_order: bool) {
-    let live = reference.live_nodes();
+/// The store enumerates exactly the live nodes and edges the reference keeps, and counts and
+/// bounds them the same way.
+fn assert_enumeration_matches_reference(graph: &Store, reference: &Reference, live: &[usize]) {
     assert_eq!(indexes(graph.node_ids().collect()), live);
     assert_eq!(
         graph.edge_ids().map(EdgeId::index).collect::<Vec<_>>(),
@@ -238,7 +239,10 @@ fn assert_matches_reference(graph: &Store, reference: &Reference, exact_order: b
     assert_eq!(graph.node_bound(), reference.node_live.len());
     assert_eq!(graph.edge_count(), reference.live_edges().len());
     assert_eq!(graph.edge_bound(), reference.edges.len());
+}
 
+/// Every live edge joins the reference's endpoints and carries the reference's label.
+fn assert_edges_match_reference(graph: &Store, reference: &Reference) {
     for edge in reference.live_edges() {
         let (source, target) = reference.edges[edge].expect("live");
         let record = graph.edge(EdgeId::from_index(edge));
@@ -251,93 +255,130 @@ fn assert_matches_reference(graph: &Store, reference: &Reference, exact_order: b
             format!("e{}", reference.edge_tag[edge])
         );
     }
+}
 
+/// A live node has the reference's name, adjacency order, and degrees.
+fn assert_node_matches_reference(
+    graph: &Store,
+    reference: &Reference,
+    node: usize,
+    exact_order: bool,
+) {
+    let id = NodeId::from_index(node);
+    assert_eq!(
+        graph.node(id).name,
+        format!("n{}", reference.node_tag[node])
+    );
+    same_sequence(
+        exact_order,
+        indexes(graph.successors(id).collect()),
+        reference.neighbors(node, true),
+    );
+    same_sequence(
+        exact_order,
+        indexes(graph.predecessors(id).collect()),
+        reference.neighbors(node, false),
+    );
+    assert_eq!(
+        graph.out_degree(id),
+        reference.outgoing[node].len(),
+        "out degree of n{node}"
+    );
+    assert_eq!(
+        graph.in_degree(id),
+        reference.incoming[node].len(),
+        "in degree of n{node}"
+    );
+}
+
+/// Breadth-first order, depth-first preorder, and reachability from a live node match the
+/// reference in both directions.
+fn assert_traversals_match_reference(
+    graph: &Store,
+    reference: &Reference,
+    node: usize,
+    exact_order: bool,
+) {
+    let id = NodeId::from_index(node);
+    for forward in [true, false] {
+        let direction = if forward {
+            TraversalDirection::Outgoing
+        } else {
+            TraversalDirection::Incoming
+        };
+        let mut seen = vec![false; reference.node_live.len()];
+        let mut preorder = Vec::new();
+        reference.preorder(node, forward, &mut seen, &mut preorder);
+        let reachable_set = reference.breadth_first(node, forward);
+        same_sequence(
+            exact_order,
+            indexes(breadth_first(graph, id, direction)),
+            reachable_set.clone(),
+        );
+        same_sequence(
+            exact_order,
+            indexes(depth_first_preorder(graph, id, direction)),
+            preorder,
+        );
+        let mut expected = vec![false; reference.node_live.len()];
+        for &member in &reachable_set {
+            expected[member] = true;
+        }
+        assert_eq!(
+            reachable(graph, [id], direction),
+            expected,
+            "reachable from n{node}"
+        );
+    }
+}
+
+/// From a live node, a shortest path exists to exactly the live nodes the reference reaches, has
+/// the reference's length, and follows edges of the reference.
+fn assert_shortest_paths_match_reference(
+    graph: &Store,
+    reference: &Reference,
+    live: &[usize],
+    node: usize,
+) {
+    let id = NodeId::from_index(node);
+    let distances = reference.distances(node);
+    for &target in live {
+        let path = shortest_path(
+            graph,
+            id,
+            NodeId::from_index(target),
+            TraversalDirection::Outgoing,
+        );
+        let Some(expected) = distances[target] else {
+            assert!(path.is_none(), "n{node} cannot reach n{target}");
+            continue;
+        };
+        let path = indexes(path.expect("the reference reaches the target"));
+        assert_eq!(
+            path.len(),
+            expected + 1,
+            "length of the path n{node} to n{target}"
+        );
+        assert_eq!((path[0], path[path.len() - 1]), (node, target));
+        for hop in path.windows(2) {
+            assert!(
+                reference.neighbors(hop[0], true).contains(&hop[1]),
+                "n{} to n{} is not an edge",
+                hop[0],
+                hop[1]
+            );
+        }
+    }
+}
+
+fn assert_matches_reference(graph: &Store, reference: &Reference, exact_order: bool) {
+    let live = reference.live_nodes();
+    assert_enumeration_matches_reference(graph, reference, &live);
+    assert_edges_match_reference(graph, reference);
     for &node in &live {
-        let id = NodeId::from_index(node);
-        assert_eq!(
-            graph.node(id).name,
-            format!("n{}", reference.node_tag[node])
-        );
-        same_sequence(
-            exact_order,
-            indexes(graph.successors(id).collect()),
-            reference.neighbors(node, true),
-        );
-        same_sequence(
-            exact_order,
-            indexes(graph.predecessors(id).collect()),
-            reference.neighbors(node, false),
-        );
-        assert_eq!(
-            graph.out_degree(id),
-            reference.outgoing[node].len(),
-            "out degree of n{node}"
-        );
-        assert_eq!(
-            graph.in_degree(id),
-            reference.incoming[node].len(),
-            "in degree of n{node}"
-        );
-
-        for forward in [true, false] {
-            let direction = if forward {
-                TraversalDirection::Outgoing
-            } else {
-                TraversalDirection::Incoming
-            };
-            let mut seen = vec![false; reference.node_live.len()];
-            let mut preorder = Vec::new();
-            reference.preorder(node, forward, &mut seen, &mut preorder);
-            let reachable_set = reference.breadth_first(node, forward);
-            same_sequence(
-                exact_order,
-                indexes(breadth_first(graph, id, direction)),
-                reachable_set.clone(),
-            );
-            same_sequence(
-                exact_order,
-                indexes(depth_first_preorder(graph, id, direction)),
-                preorder,
-            );
-            let mut expected = vec![false; reference.node_live.len()];
-            for &member in &reachable_set {
-                expected[member] = true;
-            }
-            assert_eq!(
-                reachable(graph, [id], direction),
-                expected,
-                "reachable from n{node}"
-            );
-        }
-
-        let distances = reference.distances(node);
-        for &target in &live {
-            let path = shortest_path(
-                graph,
-                id,
-                NodeId::from_index(target),
-                TraversalDirection::Outgoing,
-            );
-            let Some(expected) = distances[target] else {
-                assert!(path.is_none(), "n{node} cannot reach n{target}");
-                continue;
-            };
-            let path = indexes(path.expect("the reference reaches the target"));
-            assert_eq!(
-                path.len(),
-                expected + 1,
-                "length of the path n{node} to n{target}"
-            );
-            assert_eq!((path[0], path[path.len() - 1]), (node, target));
-            for hop in path.windows(2) {
-                assert!(
-                    reference.neighbors(hop[0], true).contains(&hop[1]),
-                    "n{} to n{} is not an edge",
-                    hop[0],
-                    hop[1]
-                );
-            }
-        }
+        assert_node_matches_reference(graph, reference, node, exact_order);
+        assert_traversals_match_reference(graph, reference, node, exact_order);
+        assert_shortest_paths_match_reference(graph, reference, &live, node);
     }
 }
 

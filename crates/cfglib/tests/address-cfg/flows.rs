@@ -34,11 +34,9 @@ struct Row {
     transfers: Vec<(Option<u32>, EdgeKind, Option<UnresolvedRole>)>,
 }
 
-fn rows() -> Vec<Row> {
-    use EdgeKind::{
-        Call, CallReturn, ConditionalFalse, ConditionalTrue, ExceptionUnwind, Fallthrough, Jump,
-        SwitchCase,
-    };
+/// The rows of the flows that name no direct target, in table order.
+fn targetless_rows() -> Vec<Row> {
+    use EdgeKind::{Call, CallReturn, Fallthrough, Jump};
     vec![
         Row {
             flow: Flow::Next,
@@ -83,6 +81,15 @@ fn rows() -> Vec<Row> {
                 (Some(11), CallReturn, None),
             ],
         },
+    ]
+}
+
+/// The rows of the flows that name one direct target, in table order.
+fn single_target_rows() -> Vec<Row> {
+    use EdgeKind::{
+        Call, CallReturn, ConditionalFalse, ConditionalTrue, ExceptionUnwind, Fallthrough, Jump,
+    };
+    vec![
         Row {
             flow: Flow::Jump { target: 40 },
             ends_block: true,
@@ -128,30 +135,42 @@ fn rows() -> Vec<Row> {
                 (Some(11), Fallthrough, None),
             ],
         },
-        Row {
-            flow: Flow::Switch {
-                default: 50,
-                cases: vec![('a', 60), ('b', 70)],
-            },
-            ends_block: true,
-            continues: false,
-            is_call: false,
-            direct_target: None,
-            transfers: vec![
-                (Some(50), SwitchCase, Some(UnresolvedRole::SwitchDefault)),
-                (
-                    Some(60),
-                    SwitchCase,
-                    Some(UnresolvedRole::SwitchCase { index: 0 }),
-                ),
-                (
-                    Some(70),
-                    SwitchCase,
-                    Some(UnresolvedRole::SwitchCase { index: 1 }),
-                ),
-            ],
-        },
     ]
+}
+
+/// The row of the multi-way switch: a default and two keyed cases.
+fn switch_row() -> Row {
+    use EdgeKind::SwitchCase;
+    Row {
+        flow: Flow::Switch {
+            default: 50,
+            cases: vec![('a', 60), ('b', 70)],
+        },
+        ends_block: true,
+        continues: false,
+        is_call: false,
+        direct_target: None,
+        transfers: vec![
+            (Some(50), SwitchCase, Some(UnresolvedRole::SwitchDefault)),
+            (
+                Some(60),
+                SwitchCase,
+                Some(UnresolvedRole::SwitchCase { index: 0 }),
+            ),
+            (
+                Some(70),
+                SwitchCase,
+                Some(UnresolvedRole::SwitchCase { index: 1 }),
+            ),
+        ],
+    }
+}
+
+fn rows() -> Vec<Row> {
+    let mut rows = targetless_rows();
+    rows.extend(single_target_rows());
+    rows.push(switch_row());
+    rows
 }
 
 #[test]

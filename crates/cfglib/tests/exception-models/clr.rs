@@ -16,43 +16,64 @@ fn clr_handler<T>(entry: BlockId, kind: ClrHandlerKind<T>) -> ClrHandler<T> {
     }
 }
 
-#[test]
-fn clr_clauses_keep_their_kind_and_only_typed_catches_get_a_type_entry() {
-    let mut cfg = LiftedCfg::with_edge_payload();
-    let protected = cfg.entry();
-    let catch_io = cfg.new_block();
-    let catch_all = cfg.new_block();
-    let finally = cfg.new_block();
-    let fault = cfg.new_block();
-    let filter_predicate = cfg.new_block();
-    let filtered = cfg.new_block();
-    let catch_net = cfg.new_block();
-    let mut types = HandlerTypes::new();
+/// The blocks that the clause table of the clause-kind test refers to: the
+/// protected block, the entry of every clause, and the filter's predicate.
+struct ClauseBlocks {
+    protected: BlockId,
+    catch_io: BlockId,
+    catch_all: BlockId,
+    finally: BlockId,
+    fault: BlockId,
+    filter_predicate: BlockId,
+    filtered: BlockId,
+    catch_net: BlockId,
+}
 
-    let region = install_clr_region(
-        &mut cfg,
-        &mut types,
+/// Adds the blocks of the clause table, in the order of its fields.
+fn clause_blocks(cfg: &mut LiftedCfg) -> ClauseBlocks {
+    ClauseBlocks {
+        protected: cfg.entry(),
+        catch_io: cfg.new_block(),
+        catch_all: cfg.new_block(),
+        finally: cfg.new_block(),
+        fault: cfg.new_block(),
+        filter_predicate: cfg.new_block(),
+        filtered: cfg.new_block(),
+        catch_net: cfg.new_block(),
+    }
+}
+
+/// Installs one region with a clause of every kind, in table order, and
+/// returns its id.
+fn install_every_clause_kind(
+    cfg: &mut LiftedCfg,
+    types: &mut HandlerTypes<&'static str>,
+    blocks: &ClauseBlocks,
+) -> RegionId {
+    install_clr_region(
+        cfg,
+        types,
         ClrExceptionRegion {
-            protected_blocks: set(&[protected]),
+            protected_blocks: set(&[blocks.protected]),
             handlers: vec![
                 clr_handler(
-                    catch_io,
+                    blocks.catch_io,
                     ClrHandlerKind::Catch {
                         ty: "System.IO.IOException",
                     },
                 ),
-                clr_handler(catch_all, ClrHandlerKind::CatchAll),
-                clr_handler(finally, ClrHandlerKind::Finally),
-                clr_handler(fault, ClrHandlerKind::Fault),
+                clr_handler(blocks.catch_all, ClrHandlerKind::CatchAll),
+                clr_handler(blocks.finally, ClrHandlerKind::Finally),
+                clr_handler(blocks.fault, ClrHandlerKind::Fault),
                 ClrHandler {
-                    entry: filtered,
+                    entry: blocks.filtered,
                     body: HandlerBody::Unknown,
                     kind: ClrHandlerKind::Filter {
-                        filter_block: filter_predicate,
+                        filter_block: blocks.filter_predicate,
                     },
                 },
                 clr_handler(
-                    catch_net,
+                    blocks.catch_net,
                     ClrHandlerKind::Catch {
                         ty: "System.Net.WebException",
                     },
@@ -60,53 +81,70 @@ fn clr_clauses_keep_their_kind_and_only_typed_catches_get_a_type_entry() {
             ],
             parent: None,
         },
-    );
+    )
+}
 
+/// The installed region has the returned id and protected blocks, and every
+/// clause keeps its native kind.
+fn assert_installed_clauses_keep_their_kind(
+    cfg: &LiftedCfg,
+    region: RegionId,
+    blocks: &ClauseBlocks,
+) {
     assert_eq!(region, RegionId::from_raw(0));
     let installed = cfg
         .region(region)
         .expect("the returned id names the region");
     assert_eq!(installed.id, region);
-    assert_eq!(installed.protected_blocks, set(&[protected]));
+    assert_eq!(installed.protected_blocks, set(&[blocks.protected]));
     assert_eq!(installed.parent, None);
     assert_eq!(
         installed.handlers,
         [
             Handler {
-                entry: catch_io,
-                body: HandlerBody::known([catch_io]),
+                entry: blocks.catch_io,
+                body: HandlerBody::known([blocks.catch_io]),
                 kind: HandlerKind::Catch,
             },
             Handler {
-                entry: catch_all,
-                body: HandlerBody::known([catch_all]),
+                entry: blocks.catch_all,
+                body: HandlerBody::known([blocks.catch_all]),
                 kind: HandlerKind::CatchAll,
             },
             Handler {
-                entry: finally,
-                body: HandlerBody::known([finally]),
+                entry: blocks.finally,
+                body: HandlerBody::known([blocks.finally]),
                 kind: HandlerKind::Finally,
             },
             Handler {
-                entry: fault,
-                body: HandlerBody::known([fault]),
+                entry: blocks.fault,
+                body: HandlerBody::known([blocks.fault]),
                 kind: HandlerKind::Fault,
             },
             Handler {
-                entry: filtered,
+                entry: blocks.filtered,
                 body: HandlerBody::Unknown,
                 kind: HandlerKind::Filter {
-                    filter_block: filter_predicate,
+                    filter_block: blocks.filter_predicate,
                 },
             },
             Handler {
-                entry: catch_net,
-                body: HandlerBody::known([catch_net]),
+                entry: blocks.catch_net,
+                body: HandlerBody::known([blocks.catch_net]),
                 kind: HandlerKind::Catch,
             },
         ]
     );
+}
 
+/// Only the two typed catches have a type entry, and the handler behind a
+/// type token is the clause it names.
+fn assert_only_typed_catches_get_a_type_entry(
+    cfg: &LiftedCfg,
+    types: &HandlerTypes<&'static str>,
+    region: RegionId,
+    catch_net: BlockId,
+) {
     // Type tokens are keyed by the clause's position in the table, not by its
     // position among the typed clauses.
     let io = HandlerRef::new(region, 0);
@@ -128,6 +166,18 @@ fn clr_clauses_keep_their_kind_and_only_typed_catches_get_a_type_entry() {
         cfg.handler(net).map(|handler| handler.entry),
         Some(catch_net)
     );
+}
+
+#[test]
+fn clr_clauses_keep_their_kind_and_only_typed_catches_get_a_type_entry() {
+    let mut cfg = LiftedCfg::with_edge_payload();
+    let blocks = clause_blocks(&mut cfg);
+    let mut types = HandlerTypes::new();
+
+    let region = install_every_clause_kind(&mut cfg, &mut types, &blocks);
+
+    assert_installed_clauses_keep_their_kind(&cfg, region, &blocks);
+    assert_only_typed_catches_get_a_type_entry(&cfg, &types, region, blocks.catch_net);
 
     // Installing only records metadata: no block or edge appears.
     assert_eq!(cfg.block_count(), 8);

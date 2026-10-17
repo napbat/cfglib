@@ -4,8 +4,8 @@
 use std::borrow::Cow;
 
 use cfglib::{
-    BlockId, Cfg, CompletionReason, Continuation, DisplayInstr, EdgeKind, Handler, HandlerBody,
-    HandlerKind, HandlerRef, Region, RegionId,
+    BlockId, Cfg, CompletionReason, Continuation, DisplayInstr, EdgeId, EdgeKind, Handler,
+    HandlerBody, HandlerKind, HandlerRef, Region, RegionId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -64,14 +64,21 @@ pub fn handler(entry: BlockId, kind: HandlerKind, body: HandlerBody) -> Handler 
     Handler { entry, body, kind }
 }
 
-/// A CFG that exercises every piece of state a persisted CFG carries: payload
-/// types of the consumer's own, weighted and parallel edges, nested and
-/// tombstoned regions with every handler kind and body shape, cleanup records
-/// with continuations, a compacted base with removed blocks and edges before
-/// it, and after it a delta with a removed block, a removed edge, and an edge
-/// whose endpoint was redirected.
-pub fn rich_cfg() -> Cfg<Op, Route> {
-    let mut cfg = Cfg::<Op, Route>::with_edge_payload();
+/// The blocks of the base graph that [`rich_cfg`] wires up and annotates in stages.
+struct BaseBlocks {
+    entry: BlockId,
+    header: BlockId,
+    body: BlockId,
+    scratch: BlockId,
+    catch: BlockId,
+    filter: BlockId,
+    cleanup: BlockId,
+    after: BlockId,
+}
+
+/// The base blocks, created in the order of their ids, with the instructions and labels they
+/// carry.
+fn base_blocks(cfg: &mut Cfg<Op, Route>) -> BaseBlocks {
     let entry = cfg.entry();
     let header = cfg.new_block();
     let body = cfg.new_block();
@@ -100,7 +107,31 @@ pub fn rich_cfg() -> Cfg<Op, Route> {
     cfg.block_mut(cleanup).push(Op::Call("close".to_owned()));
     cfg.block_mut(after).set_label("after");
     cfg.block_mut(after).push(Op::Return);
+    BaseBlocks {
+        entry,
+        header,
+        body,
+        scratch,
+        catch,
+        filter,
+        cleanup,
+        after,
+    }
+}
 
+/// The base edges: weighted, parallel, and exceptional ones, with payloads of the consumer's own.
+/// Returns the edge that is removed before compaction.
+fn connect_base_blocks(cfg: &mut Cfg<Op, Route>, blocks: &BaseBlocks) -> EdgeId {
+    let BaseBlocks {
+        entry,
+        header,
+        body,
+        scratch,
+        catch,
+        cleanup,
+        after,
+        ..
+    } = *blocks;
     cfg.add_edge(entry, header, EdgeKind::Fallthrough);
     cfg.add_weighted_edge_with_payload(
         header,
@@ -117,8 +148,20 @@ pub fn rich_cfg() -> Cfg<Op, Route> {
     cfg.add_edge(catch, cleanup, EdgeKind::Fallthrough);
     cfg.add_edge(cleanup, after, EdgeKind::Fallthrough);
     cfg.add_edge(scratch, after, EdgeKind::Jump);
-    let dropped = cfg.add_edge(entry, after, EdgeKind::Jump);
+    cfg.add_edge(entry, after, EdgeKind::Jump)
+}
 
+/// An outer region with every handler kind and body shape, a nested region, and a region that is
+/// removed. Returns the outer region.
+fn add_regions(cfg: &mut Cfg<Op, Route>, blocks: &BaseBlocks) -> RegionId {
+    let BaseBlocks {
+        header,
+        body,
+        catch,
+        filter,
+        cleanup,
+        ..
+    } = *blocks;
     let outer = cfg.add_region(region(
         &[header, body],
         vec![
@@ -147,7 +190,18 @@ pub fn rich_cfg() -> Cfg<Op, Route> {
     ));
     let vanished = cfg.add_region(region(&[header], Vec::new(), None));
     cfg.remove_region(vanished);
+    outer
+}
 
+/// Cleanup records with continuations for the outer region's finally and fault handlers.
+fn record_cleanups(cfg: &mut Cfg<Op, Route>, blocks: &BaseBlocks, outer: RegionId) {
+    let BaseBlocks {
+        header,
+        catch,
+        cleanup,
+        after,
+        ..
+    } = *blocks;
     let finally = HandlerRef::new(outer, 3);
     cfg.set_cleanup_resume(finally, cleanup);
     for (reason, resume) in [
@@ -167,14 +221,12 @@ pub fn rich_cfg() -> Cfg<Op, Route> {
             resume: catch,
         },
     );
+}
 
-    cfg.remove_block(scratch);
-    cfg.remove_edge(dropped);
-    let renumbering = cfg.compact();
-    let header = renumbering.node(header).expect("the header survived");
-    let after = renumbering.node(after).expect("the exit survived");
-    let cleanup = renumbering.node(cleanup).expect("the cleanup survived");
-
+/// The delta after the compacted base: a new block with a weighted edge, a removed block and
+/// edge, and an edge whose source was redirected. The blocks passed in are the base blocks as
+/// numbered after compaction.
+fn add_delta(cfg: &mut Cfg<Op, Route>, header: BlockId, after: BlockId, cleanup: BlockId) {
     let late = cfg.new_block();
     let doomed = cfg.new_block();
     cfg.block_mut(late).set_label("late");
@@ -187,6 +239,33 @@ pub fn rich_cfg() -> Cfg<Op, Route> {
     cfg.remove_block(doomed);
     cfg.remove_edge(withdrawn);
     cfg.redirect_edge_source(moved, after);
+}
+
+/// A CFG that exercises every piece of state a persisted CFG carries: payload
+/// types of the consumer's own, weighted and parallel edges, nested and
+/// tombstoned regions with every handler kind and body shape, cleanup records
+/// with continuations, a compacted base with removed blocks and edges before
+/// it, and after it a delta with a removed block, a removed edge, and an edge
+/// whose endpoint was redirected.
+pub fn rich_cfg() -> Cfg<Op, Route> {
+    let mut cfg = Cfg::<Op, Route>::with_edge_payload();
+    let blocks = base_blocks(&mut cfg);
+    let dropped = connect_base_blocks(&mut cfg, &blocks);
+    let outer = add_regions(&mut cfg, &blocks);
+    record_cleanups(&mut cfg, &blocks, outer);
+
+    cfg.remove_block(blocks.scratch);
+    cfg.remove_edge(dropped);
+    let renumbering = cfg.compact();
+    let header = renumbering
+        .node(blocks.header)
+        .expect("the header survived");
+    let after = renumbering.node(blocks.after).expect("the exit survived");
+    let cleanup = renumbering
+        .node(blocks.cleanup)
+        .expect("the cleanup survived");
+
+    add_delta(&mut cfg, header, after, cleanup);
     cfg
 }
 

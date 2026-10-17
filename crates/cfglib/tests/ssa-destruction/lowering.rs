@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 
 use cfglib::{
-    BasicBlock, BlockId, Cfg, PhiCopy, SsaForm, SsaValue, copies_by_predecessor, eliminate_phis,
-    split_critical_edges,
+    BasicBlock, BlockId, Cfg, PhiCopy, SsaForm, SsaValue, SsaVersion, copies_by_predecessor,
+    eliminate_phis, split_critical_edges,
 };
 
 use crate::machine::{Behavior, Insn, Opcode, Reg, execute, input_vectors};
@@ -53,39 +53,42 @@ pub fn sequence(group: &[&PhiCopy<Reg>], temporary: &SsaValue<Reg>) -> Vec<Insn<
     moves
 }
 
-/// Lower `cfg` to a program over SSA values.
-///
-/// With `propagate_moves`, every `Move` is deleted and its readers (and the
-/// phi copies' sources) read the moved value directly, as an SSA optimizer
-/// does before destruction. That is what makes phis feed each other.
-pub fn lower(
+/// Every `Move`'s destination mapped to its source: what a reader of the
+/// destination reads once the moves are deleted.
+fn forwarded_moves(
     cfg: &Cfg<Insn<Reg>>,
     ssa: &SsaForm<Reg>,
-    propagate_moves: bool,
-    style: Style,
-) -> Cfg<Insn<SsaValue<Reg>>> {
-    let mut forwarded: BTreeMap<SsaValue<Reg>, SsaValue<Reg>> = BTreeMap::new();
-    if propagate_moves {
-        for block in cfg.block_ids() {
-            for (insn, annotation) in cfg
-                .block(block)
-                .instructions()
-                .iter()
-                .zip(&ssa.block(block).instructions)
-            {
-                if insn.opcode == Opcode::Move {
-                    forwarded.insert(annotation.defs()[0].clone(), annotation.uses()[0].clone());
-                }
+) -> BTreeMap<SsaValue<Reg>, SsaValue<Reg>> {
+    let mut forwarded = BTreeMap::new();
+    for block in cfg.block_ids() {
+        for (insn, annotation) in cfg
+            .block(block)
+            .instructions()
+            .iter()
+            .zip(&ssa.block(block).instructions)
+        {
+            if insn.opcode == Opcode::Move {
+                forwarded.insert(annotation.defs()[0].clone(), annotation.uses()[0].clone());
             }
         }
     }
-    let resolve = |mut value: SsaValue<Reg>| {
-        while let Some(next) = forwarded.get(&value) {
-            value = next.clone();
-        }
-        value
-    };
+    forwarded
+}
 
+/// Follow `forwarded` from `value` to the value its readers read.
+fn resolve_forwarded(
+    forwarded: &BTreeMap<SsaValue<Reg>, SsaValue<Reg>>,
+    mut value: SsaValue<Reg>,
+) -> SsaValue<Reg> {
+    while let Some(next) = forwarded.get(&value) {
+        value = next.clone();
+    }
+    value
+}
+
+/// A program with the blocks and edges of `cfg` and no instructions, and the
+/// lowered block each original block became, by block index.
+fn lowered_skeleton(cfg: &Cfg<Insn<Reg>>) -> (Cfg<Insn<SsaValue<Reg>>>, Vec<BlockId>) {
     let mut lowered: Cfg<Insn<SsaValue<Reg>>> = Cfg::new();
     let mut ids = vec![lowered.entry()];
     ids.extend((1..cfg.block_bound()).map(|_| lowered.new_block()));
@@ -96,8 +99,16 @@ pub fn lower(
             edge.kind(),
         );
     }
-    // Where each original instruction index lands once moves are deleted.
-    let mut new_index: BTreeMap<(BlockId, usize), usize> = BTreeMap::new();
+    (lowered, ids)
+}
+
+/// Where each original instruction index lands once moves are deleted: every
+/// instruction, and the end of every block.
+fn surviving_positions(
+    cfg: &Cfg<Insn<Reg>>,
+    propagate_moves: bool,
+) -> BTreeMap<(BlockId, usize), usize> {
+    let mut new_index = BTreeMap::new();
     for block in cfg.block_ids() {
         let mut kept = 0;
         for (index, insn) in cfg.block(block).instructions().iter().enumerate() {
@@ -108,6 +119,21 @@ pub fn lower(
         }
         new_index.insert((block, cfg.block(block).instructions().len()), kept);
     }
+    new_index
+}
+
+/// Push the instructions of `cfg` onto their blocks in `lowered` (`ids` maps
+/// each original block to its lowered one), reading operands from the `ssa`
+/// annotations and resolving uses through `forwarded`. With `propagate_moves`
+/// the moves themselves are dropped.
+fn push_lowered_instructions(
+    cfg: &Cfg<Insn<Reg>>,
+    ssa: &SsaForm<Reg>,
+    propagate_moves: bool,
+    forwarded: &BTreeMap<SsaValue<Reg>, SsaValue<Reg>>,
+    lowered: &mut Cfg<Insn<SsaValue<Reg>>>,
+    ids: &[BlockId],
+) {
     for block in cfg.block_ids() {
         for (insn, annotation) in cfg
             .block(block)
@@ -118,7 +144,12 @@ pub fn lower(
             if propagate_moves && insn.opcode == Opcode::Move {
                 continue;
             }
-            let uses = annotation.uses().iter().cloned().map(&resolve).collect();
+            let uses = annotation
+                .uses()
+                .iter()
+                .cloned()
+                .map(|value| resolve_forwarded(forwarded, value))
+                .collect();
             lowered.block_mut(ids[block.index()]).push(Insn::new(
                 insn.opcode,
                 annotation.defs().to_vec(),
@@ -126,18 +157,53 @@ pub fn lower(
             ));
         }
     }
+}
 
+/// The instructions that carry out one departure's `group` of phi copies in
+/// `style`. A sequenced group takes the next of the fresh temporaries that
+/// `temporaries` counts.
+fn phi_copy_insns(
+    group: &[&PhiCopy<Reg>],
+    style: Style,
+    temporaries: &mut SsaVersion,
+) -> Vec<Insn<SsaValue<Reg>>> {
+    match style {
+        Style::Parallel => vec![Insn::parallel(
+            group.iter().map(|copy| copy.destination.clone()).collect(),
+            group.iter().map(|copy| copy.source.clone()).collect(),
+        )],
+        Style::Sequenced => {
+            *temporaries += 1;
+            sequence(group, &SsaValue::new(Reg("tmp"), *temporaries))
+        }
+        Style::Naive => group
+            .iter()
+            .map(|copy| Insn::mov(copy.destination.clone(), copy.source.clone()))
+            .collect(),
+    }
+}
+
+/// Insert the phi copies of `ssa` into `lowered` in `style`, their sources
+/// resolved through `forwarded`. Each departure's copies go where
+/// `new_index` puts its departure point in the block `ids` maps it to.
+fn place_phi_copies(
+    ssa: &SsaForm<Reg>,
+    forwarded: &BTreeMap<SsaValue<Reg>, SsaValue<Reg>>,
+    new_index: &BTreeMap<(BlockId, usize), usize>,
+    ids: &[BlockId],
+    style: Style,
+    lowered: &mut Cfg<Insn<SsaValue<Reg>>>,
+) {
     let copies: Vec<PhiCopy<Reg>> = eliminate_phis(ssa)
         .into_iter()
         .map(|copy| PhiCopy {
-            source: resolve(copy.source.clone()),
+            source: resolve_forwarded(forwarded, copy.source.clone()),
             ..copy
         })
         .collect();
     let mut temporaries = 0;
     for edge_copies in copies_by_predecessor(&copies).iter().rev() {
         let point = edge_copies.from;
-        let group = &edge_copies.copies;
         let at = new_index[&(point.block, point.inst_idx)];
         let block = lowered
             .block_mut(ids[point.block.index()])
@@ -152,22 +218,31 @@ pub fn lower(
         } else {
             at
         };
-        let insns = match style {
-            Style::Parallel => vec![Insn::parallel(
-                group.iter().map(|copy| copy.destination.clone()).collect(),
-                group.iter().map(|copy| copy.source.clone()).collect(),
-            )],
-            Style::Sequenced => {
-                temporaries += 1;
-                sequence(group, &SsaValue::new(Reg("tmp"), temporaries))
-            }
-            Style::Naive => group
-                .iter()
-                .map(|copy| Insn::mov(copy.destination.clone(), copy.source.clone()))
-                .collect(),
-        };
+        let insns = phi_copy_insns(&edge_copies.copies, style, &mut temporaries);
         block.splice(at..at, insns);
     }
+}
+
+/// Lower `cfg` to a program over SSA values.
+///
+/// With `propagate_moves`, every `Move` is deleted and its readers (and the
+/// phi copies' sources) read the moved value directly, as an SSA optimizer
+/// does before destruction. That is what makes phis feed each other.
+pub fn lower(
+    cfg: &Cfg<Insn<Reg>>,
+    ssa: &SsaForm<Reg>,
+    propagate_moves: bool,
+    style: Style,
+) -> Cfg<Insn<SsaValue<Reg>>> {
+    let forwarded = if propagate_moves {
+        forwarded_moves(cfg, ssa)
+    } else {
+        BTreeMap::new()
+    };
+    let (mut lowered, ids) = lowered_skeleton(cfg);
+    let new_index = surviving_positions(cfg, propagate_moves);
+    push_lowered_instructions(cfg, ssa, propagate_moves, &forwarded, &mut lowered, &ids);
+    place_phi_copies(ssa, &forwarded, &new_index, &ids, style, &mut lowered);
     lowered
 }
 

@@ -218,7 +218,7 @@ fn phi_cfg() -> Cfg<ApiInst> {
     cfg
 }
 
-fn register_analyses(suite: &mut BenchmarkSuite<'_>) {
+fn register_abstract_interpretation(suite: &mut BenchmarkSuite<'_>) {
     let cfg = dataflow_cfg(128, 8);
     benchmark_case!(
         suite,
@@ -230,7 +230,9 @@ fn register_analyses(suite: &mut BenchmarkSuite<'_>) {
             Some(&Seen(true))
         )
     );
+}
 
+fn register_unwind_departures(suite: &mut BenchmarkSuite<'_>) {
     // `entry` throws and unwinds to `handler`, and also falls through.
     let mut unwinding = Cfg::new();
     let handler = unwinding.new_block();
@@ -260,7 +262,9 @@ fn register_analyses(suite: &mut BenchmarkSuite<'_>) {
             assert!(!departures[0], "the normal edge departs after the block");
         }
     );
+}
 
+fn register_copy_and_alias_propagation(suite: &mut BenchmarkSuite<'_>) {
     let copies_fixture = copy_cfg();
     benchmark_case!(
         suite,
@@ -323,7 +327,9 @@ fn register_analyses(suite: &mut BenchmarkSuite<'_>) {
             assert_eq!(stats.aliases_removed, 0);
         }
     );
+}
 
+fn register_phi_elimination(suite: &mut BenchmarkSuite<'_>) {
     let phi_fixture = phi_cfg();
     let dominators = DominatorTree::compute(&phi_fixture);
     let ssa = SsaForm::compute(&phi_fixture, &dominators);
@@ -342,6 +348,13 @@ fn register_analyses(suite: &mut BenchmarkSuite<'_>) {
         || copies_by_predecessor(&copies),
         |groups: &Vec<_>| assert_eq!(groups.len(), 2)
     );
+}
+
+fn register_analyses(suite: &mut BenchmarkSuite<'_>) {
+    register_abstract_interpretation(suite);
+    register_unwind_departures(suite);
+    register_copy_and_alias_propagation(suite);
+    register_phi_elimination(suite);
 }
 
 fn register_cfg_solvers(suite: &mut BenchmarkSuite<'_>) {

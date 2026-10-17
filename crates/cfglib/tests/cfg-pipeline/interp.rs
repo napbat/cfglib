@@ -206,6 +206,44 @@ pub fn run<V: Clone + Ord + Debug>(
 /// What an SSA execution observed: every value each SSA name ever held.
 pub type ObservedValues = BTreeMap<SsaValue<Var>, BTreeSet<i64>>;
 
+/// Record that `name` now holds `value`, and that it held `value` at some
+/// point of the execution.
+fn define(
+    environment: &mut BTreeMap<SsaValue<Var>, i64>,
+    observed: &mut ObservedValues,
+    name: SsaValue<Var>,
+    value: i64,
+) {
+    observed.entry(name.clone()).or_default().insert(value);
+    environment.insert(name, value);
+}
+
+/// The value each phi of `block` takes when control arrives from `departure`,
+/// read from `environment` before any phi result is written. A phi whose
+/// operand holds no value yet takes none. Panics when a phi has no operand
+/// for `departure`.
+fn phi_arrivals(
+    ssa: &SsaForm<Var>,
+    block: BlockId,
+    departure: ProgramPoint,
+    environment: &BTreeMap<SsaValue<Var>, i64>,
+) -> Vec<(SsaValue<Var>, i64)> {
+    ssa.block(block)
+        .phis
+        .iter()
+        .filter_map(|phi| {
+            let (_, operand) = phi
+                .operands()
+                .iter()
+                .find(|(point, _)| *point == departure)
+                .unwrap_or_else(|| panic!("a phi of {block:?} has no operand for {departure}"));
+            environment
+                .get(operand)
+                .map(|value| (phi.result.clone(), *value))
+        })
+        .collect()
+}
+
 /// Run `cfg` through its `SsaForm`: instructions read and write renamed
 /// values, and a phi picks the operand of the departure point control came
 /// from. Returns what the program did and every value each SSA name held.
@@ -221,13 +259,6 @@ pub fn run_ssa(
 ) -> (Outcome, ObservedValues) {
     let mut observed = ObservedValues::new();
     let mut environment: BTreeMap<SsaValue<Var>, i64> = BTreeMap::new();
-    let define = |environment: &mut BTreeMap<_, _>, observed: &mut ObservedValues, name, value| {
-        observed
-            .entry(SsaValue::clone(&name))
-            .or_default()
-            .insert(value);
-        environment.insert(name, value);
-    };
     for (variable, value) in inputs {
         define(
             &mut environment,
@@ -243,24 +274,7 @@ pub fn run_ssa(
     loop {
         if let Some(departure) = arrived_from {
             // Every phi reads its operand before any phi result is written.
-            let arriving: Vec<_> = ssa
-                .block(block)
-                .phis
-                .iter()
-                .filter_map(|phi| {
-                    let (_, operand) = phi
-                        .operands()
-                        .iter()
-                        .find(|(point, _)| *point == departure)
-                        .unwrap_or_else(|| {
-                            panic!("a phi of {block:?} has no operand for {departure}")
-                        });
-                    environment
-                        .get(operand)
-                        .map(|value| (phi.result.clone(), *value))
-                })
-                .collect();
-            for (name, value) in arriving {
+            for (name, value) in phi_arrivals(ssa, block, departure, &environment) {
                 define(&mut environment, &mut observed, name, value);
             }
         }

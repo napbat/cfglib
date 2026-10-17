@@ -2,6 +2,8 @@
 //! list of memory events, and an optional unwind point. Also deterministic
 //! random programs over it, as plain data.
 
+use std::collections::BTreeSet;
+
 use cfglib::{
     Cfg, EdgeKind, InstrInfo, MemoryAccess, MemoryAtomicity, MemoryEvent, MemoryEventInfo,
 };
@@ -239,6 +241,23 @@ fn random_instruction(rng: &mut Rng, unwinds: bool) -> Inst<u8> {
     let mut inst = Inst::new(&uses, &defs, events);
     inst.throws = unwinds && rng.below(4) == 0;
     inst
+}
+
+impl Program<u8> {
+    /// The locations some live instruction accesses. Only these take part in
+    /// the alias classes: a location nobody accesses cannot bridge two that do.
+    pub fn accessed_locations(&self) -> BTreeSet<u8> {
+        self.code
+            .iter()
+            .enumerate()
+            .filter(|(block, _)| self.is_live(*block))
+            .flat_map(|(_, code)| code.iter().flat_map(|inst| inst.events.iter()))
+            .filter_map(|event| match event {
+                MemoryEvent::Access(access) => Some(*access.location()),
+                MemoryEvent::Fence(_) => None,
+            })
+            .collect()
+    }
 }
 
 impl<L: Clone> Program<L> {
