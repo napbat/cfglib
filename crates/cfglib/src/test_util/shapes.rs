@@ -76,9 +76,6 @@ fn chain<I>(length: usize) -> Cfg<I> {
 /// The shared sequence: shapes whose sizes rise and fall, so a scratch reused
 /// down the sequence is exercised while it grows, after it has shrunk, and
 /// against the structures that have no ordinary merge at all.
-///
-/// The entry block is never a branch target, which is the precondition SSA
-/// construction states.
 pub(crate) fn scratch_sequence<I>() -> Vec<Cfg<I>> {
     vec![
         chain(1),
