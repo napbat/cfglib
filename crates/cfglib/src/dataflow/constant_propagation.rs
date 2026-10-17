@@ -35,7 +35,7 @@ pub enum ConstValue<C> {
 }
 
 impl<C: Clone + Eq> ConstValue<C> {
-    /// Meet (join) two lattice values.
+    /// Meet two lattice values.
     ///
     /// - Top ⊓ x = x
     /// - x ⊓ Top = x
