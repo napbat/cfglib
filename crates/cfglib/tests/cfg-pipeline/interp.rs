@@ -219,26 +219,36 @@ fn define(
 }
 
 /// The value each phi of `block` takes when control arrives from `departure`,
-/// read from `environment` before any phi result is written. A phi whose
-/// operand holds no value yet takes none. Panics when a phi has no operand
-/// for `departure`.
+/// or, when `departure` is `None`, when the function starts at `block`. Each
+/// phi reads its input from `environment` before any phi result is written,
+/// and one whose input holds no value yet takes none.
+///
+/// Panics when a phi has no operand for `departure`, or no start value when
+/// the function starts.
 fn phi_arrivals(
     ssa: &SsaForm<Var>,
     block: BlockId,
-    departure: ProgramPoint,
+    departure: Option<ProgramPoint>,
     environment: &BTreeMap<SsaValue<Var>, i64>,
 ) -> Vec<(SsaValue<Var>, i64)> {
     ssa.block(block)
         .phis
         .iter()
         .filter_map(|phi| {
-            let (_, operand) = phi
-                .operands()
-                .iter()
-                .find(|(point, _)| *point == departure)
-                .unwrap_or_else(|| panic!("a phi of {block:?} has no operand for {departure}"));
+            let input = match departure {
+                Some(departure) => phi
+                    .operands()
+                    .iter()
+                    .find(|(point, _)| *point == departure)
+                    .unwrap_or_else(|| panic!("a phi of {block:?} has no operand for {departure}"))
+                    .1
+                    .clone(),
+                None => phi
+                    .start_value()
+                    .unwrap_or_else(|| panic!("a phi of {block:?} has no start value")),
+            };
             environment
-                .get(operand)
+                .get(&input)
                 .map(|value| (phi.result.clone(), *value))
         })
         .collect()
@@ -272,11 +282,10 @@ pub fn run_ssa(
     let mut arrived_from: Option<ProgramPoint> = None;
     let mut fuel = FUEL;
     loop {
-        if let Some(departure) = arrived_from {
-            // Every phi reads its operand before any phi result is written.
-            for (name, value) in phi_arrivals(ssa, block, departure, &environment) {
-                define(&mut environment, &mut observed, name, value);
-            }
+        // Every phi reads its input before any phi result is written. The
+        // first block runs with no departure: the function has just started.
+        for (name, value) in phi_arrivals(ssa, block, arrived_from, &environment) {
+            define(&mut environment, &mut observed, name, value);
         }
         let instructions = cfg.block(block).instructions();
         let annotations = &ssa.block(block).instructions;

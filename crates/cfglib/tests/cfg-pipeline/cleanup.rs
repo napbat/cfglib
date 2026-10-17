@@ -178,6 +178,21 @@ fn copy_propagation_leaves_a_copy_whose_source_the_loop_redefines() {
 }
 
 #[test]
+fn copy_propagation_never_forwards_an_entry_loop_copy_to_the_read_before_it() {
+    // The entry heads the loop and reads `c` before the copy `c = x`. On every
+    // iteration after the first that read sees the copy of the iteration
+    // before, so rewriting it to read `x` would print a different value.
+    let case = program("entry_loop_with_copy");
+    let mut cfg = case.cfg.clone();
+    copy_propagation(&mut cfg);
+
+    let entry = cfg.block(cfg.entry()).instructions();
+    assert_eq!(entry[0].op, Op::Print);
+    assert_eq!(entry[0].uses, [Var("c")]);
+    assert_same_behavior(&case, "copy propagation", &case.cfg, &cfg);
+}
+
+#[test]
 fn alias_propagation_forwards_parallel_copy_pairs_that_copy_propagation_ignores() {
     let case = program("single_definition_parallel_copy");
     let mut copied = case.cfg.clone();

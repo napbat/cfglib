@@ -320,3 +320,35 @@ fn unreachable_blocks_are_reported_and_get_their_own_ssa_roots() {
         "unreachable code does not inherit the entry's live-in"
     );
 }
+
+#[test]
+fn only_the_phis_of_a_branch_target_entry_merge_the_value_the_function_starts_with() {
+    for case in corpus() {
+        let dominators = DominatorTree::compute(&case.cfg);
+        let ssa = SsaForm::compute(&case.cfg, &dominators);
+        let entry = case.cfg.entry();
+        for (block, phi) in ssa.phis() {
+            let live_in = SsaValue::live_in(phi.result.variable);
+            assert_eq!(
+                phi.start_value(),
+                (block == entry).then_some(live_in),
+                "{}: phi of {block:?}",
+                case.name
+            );
+        }
+    }
+
+    let case = program("entry_headed_loop");
+    let ssa = SsaForm::compute(&case.cfg, &DominatorTree::compute(&case.cfg));
+    let merged: BTreeSet<Var> = ssa
+        .block(case.cfg.entry())
+        .phis
+        .iter()
+        .map(|phi| phi.result.variable)
+        .collect();
+    assert_eq!(
+        merged,
+        BTreeSet::from([Var("stop"), Var("k"), Var("one"), Var("i")]),
+        "the entry merges every variable the loop defines"
+    );
+}

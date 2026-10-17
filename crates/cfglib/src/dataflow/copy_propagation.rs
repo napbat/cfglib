@@ -603,6 +603,64 @@ mod tests {
         assert_eq!(insts.last().unwrap().uses[0], 7);
     }
 
+    /// The entry heads a loop (its latch branches back) and holds the copy
+    /// `r1 = r7` of a parameter, with `read_before` reading `r1` ahead of it.
+    /// Returns `(cfg, latch)`; the latch reads `r1` as well.
+    fn entry_loop_copying_a_parameter(read_before: bool) -> (Cfg<DfInst>, BlockId) {
+        let mut cfg: Cfg<DfInst> = Cfg::new();
+        let latch = cfg.new_block();
+        let exit = cfg.new_block();
+        let entry = cfg.entry();
+        if read_before {
+            cfg.block_mut(entry)
+                .instructions_mut()
+                .push(df_use("read before", 1));
+        }
+        cfg.block_mut(entry)
+            .instructions_mut()
+            .extend([df_copy("mov", 1, 7), df_use("read after", 1)]);
+        cfg.block_mut(latch)
+            .instructions_mut()
+            .push(df_use("read in loop", 1));
+        cfg.add_edge(entry, latch, EdgeKind::ConditionalTrue);
+        cfg.add_edge(entry, exit, EdgeKind::ConditionalFalse);
+        cfg.add_edge(latch, entry, EdgeKind::Back);
+        (cfg, latch)
+    }
+
+    #[test]
+    fn a_copy_in_an_entry_that_is_a_branch_target_reaches_the_whole_loop() {
+        // Every iteration re-executes the copy before any read of r1, and r7
+        // is never redefined, so each read may take r7 and the copy goes.
+        let (mut cfg, latch) = entry_loop_copying_a_parameter(false);
+
+        let result = copy_propagation(&mut cfg);
+        assert_eq!(result.uses_rewritten, 2);
+        assert_eq!(result.instructions_removed, 1);
+        let entry = cfg.block(cfg.entry()).instructions();
+        assert_eq!(entry.len(), 1);
+        assert_eq!(entry[0].uses[0], 7);
+        assert_eq!(cfg.block(latch).instructions()[0].uses[0], 7);
+    }
+
+    #[test]
+    fn a_read_before_the_copy_of_an_entry_that_is_a_branch_target_blocks_the_rewrite() {
+        // The first iteration reads r1 as the function received it and every
+        // later one reads the copy, so the copy is not the one value r1 holds
+        // and rewriting any read to r7, or dropping the copy, would change
+        // what the first read sees.
+        let (mut cfg, latch) = entry_loop_copying_a_parameter(true);
+
+        let result = copy_propagation(&mut cfg);
+        assert_eq!((result.uses_rewritten, result.instructions_removed), (0, 0));
+        let entry = cfg.block(cfg.entry()).instructions();
+        assert_eq!(entry.len(), 3, "the copy stays");
+        assert_eq!(entry[0].uses[0], 1);
+        assert_eq!((entry[1].defs[0], entry[1].uses[0]), (1, 7));
+        assert_eq!(entry[2].uses[0], 1);
+        assert_eq!(cfg.block(latch).instructions()[0].uses[0], 1);
+    }
+
     /// `mov rax, rcx; add rax, rdx; ret` in variable form: the result is
     /// a copy of one of the inputs, one instruction inside reads it, and
     /// the place the caller reads back afterwards is the copy's

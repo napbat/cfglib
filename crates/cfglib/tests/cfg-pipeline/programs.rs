@@ -364,6 +364,57 @@ fn unreachable_loop_component() -> Case {
     case("unreachable_loop_component", cfg, &["a"])
 }
 
+/// A loop whose header is the entry block, as a CFG recovered from a
+/// function whose first instruction is a branch target has. The entry prints
+/// the carried value `k` before the body replaces it with a constant, so the
+/// first iteration prints the caller's value and every later one prints 7:
+/// the entry's phi for `k` merges the value the function starts with and
+/// the loop's constant.
+fn entry_headed_loop() -> Case {
+    let mut cfg = Cfg::new();
+    let entry = cfg.entry();
+    let body = cfg.new_block();
+    let exit = cfg.new_block();
+    cfg.block_mut(entry).push(Inst::print("k"));
+    cfg.block_mut(entry).push(Inst::less("stop", "n", "i"));
+    cfg.block_mut(entry).push(Inst::branch("stop"));
+    cfg.block_mut(body).push(Inst::konst("k", 7));
+    cfg.block_mut(body).push(Inst::konst("one", 1));
+    cfg.block_mut(body).push(Inst::add("i", "i", "one"));
+    cfg.block_mut(exit).push(Inst::print("k"));
+    cfg.block_mut(exit).push(Inst::ret("k"));
+    cfg.add_edge(entry, exit, EdgeKind::ConditionalTrue);
+    cfg.add_edge(entry, body, EdgeKind::ConditionalFalse);
+    cfg.add_edge(body, entry, EdgeKind::Back);
+    case("entry_headed_loop", cfg, &["n", "i", "k"])
+}
+
+/// A loop whose header is the entry block and holds a copy `c = x`, with a
+/// read of `c` before it. The body then increments `x`, so on every later
+/// iteration the read at the top of the entry sees the copy from the
+/// iteration before, which no longer equals `x`: the copy does not reach
+/// that read, and a propagation that substituted `x` there would print the
+/// wrong value.
+fn entry_loop_with_copy() -> Case {
+    let mut cfg = Cfg::new();
+    let entry = cfg.entry();
+    let body = cfg.new_block();
+    let exit = cfg.new_block();
+    cfg.block_mut(entry).push(Inst::print("c"));
+    cfg.block_mut(entry).push(Inst::copy("c", "x"));
+    cfg.block_mut(entry).push(Inst::print("c"));
+    cfg.block_mut(entry).push(Inst::less("stop", "n", "i"));
+    cfg.block_mut(entry).push(Inst::branch("stop"));
+    cfg.block_mut(body).push(Inst::konst("one", 1));
+    cfg.block_mut(body).push(Inst::add("x", "x", "one"));
+    cfg.block_mut(body).push(Inst::add("i", "i", "one"));
+    cfg.block_mut(exit).push(Inst::ret("c"));
+    cfg.add_edge(entry, exit, EdgeKind::ConditionalTrue);
+    cfg.add_edge(entry, body, EdgeKind::ConditionalFalse);
+    cfg.add_edge(body, entry, EdgeKind::Back);
+    case("entry_loop_with_copy", cfg, &["n", "i", "x", "c"])
+}
+
 /// Two throwing divisions in one block; the handler prints the variable the
 /// block redefines between them, so it must merge both unwind points.
 fn division_with_handler() -> Case {
@@ -427,6 +478,8 @@ pub fn corpus() -> Vec<Case> {
         unreachable_loop_component(),
         division_with_handler(),
         constant_zero_divisor(),
+        entry_headed_loop(),
+        entry_loop_with_copy(),
     ]
 }
 
