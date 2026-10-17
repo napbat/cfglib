@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use cfglib::{
-    Direction, Graph, GraphView, NodeFacts, NodeId, NodeProblem, SolveConfig, SolveError,
+    Direction, Facts, Graph, GraphView, NodeId, NodeProblem, SolveConfig, SolveError,
     TryNodeProblem, TrySolveError, solve_node_problem, solve_node_problem_from,
     solve_node_problem_from_with_config, solve_node_problem_with_config, try_solve_node_problem,
     try_solve_node_problem_from, try_solve_node_problem_from_with_config,
@@ -130,12 +130,17 @@ fn random_sources(rng: &mut Rng, shape: &Shape) -> Vec<u32> {
         .collect()
 }
 
-fn tainted(facts: &NodeFacts<bool>, shape: &Shape) -> BTreeSet<u32> {
+/// The nodes whose transferred fact is set. Facts are reported in program
+/// order, so what a backward node transfers is its IN fact.
+fn tainted(facts: &Facts<bool>, shape: &Shape, direction: Direction) -> BTreeSet<u32> {
     shape
         .live()
         .into_iter()
         .map(|node| u32::try_from(node).expect("a small graph"))
-        .filter(|node| *facts.fact_out(*node))
+        .filter(|node| match direction {
+            Direction::Forward => *facts.fact_out(*node),
+            Direction::Backward => *facts.fact_in(*node),
+        })
         .collect()
 }
 
@@ -153,7 +158,7 @@ fn taint_over_a_consumer_graph_equals_reachability_from_the_sources() {
             };
             let facts = solve_node_problem(&graph, &problem).unwrap();
             assert_eq!(
-                tainted(&facts, &shape),
+                tainted(&facts, &shape, direction),
                 reach(&shape, &sources, direction),
                 "{direction:?} {shape:?}"
             );
@@ -219,7 +224,7 @@ impl NodeProblem<Graph<(), ()>> for StoreTaint {
 }
 
 #[test]
-fn node_facts_name_the_fact_entering_and_leaving_in_the_analysis_direction() {
+fn node_facts_are_in_program_order_whichever_way_the_analysis_flows() {
     // a -> b -> c, with c a sink; the backward flow runs c, b, a.
     let graph = SymbolGraph {
         alive: vec![true; 3],
@@ -233,13 +238,13 @@ fn node_facts_name_the_fact_entering_and_leaving_in_the_analysis_direction() {
         },
     )
     .unwrap();
-    // c has no successor: it is entered with the boundary fact (false) and
-    // leaves tainted because it is the sink itself.
-    assert!(!*facts.fact_in(2_u32));
-    assert!(*facts.fact_out(2_u32));
-    // b is entered by the fact flowing back from c.
-    assert!(*facts.fact_in(1_u32));
-    assert!(*facts.fact_in(0_u32));
+    // c has no successor: the boundary fact (false) is what follows it, and
+    // it is tainted before it because it is the sink itself.
+    assert!(!*facts.fact_out(2_u32));
+    assert!(*facts.fact_in(2_u32));
+    // What c's fact hands back reaches the end of b and then of a.
+    assert!(*facts.fact_out(1_u32));
+    assert!(*facts.fact_out(0_u32));
 }
 
 #[test]
@@ -257,10 +262,13 @@ fn seeding_a_source_reaches_exactly_what_the_source_reaches() {
         let seeded = solve_node_problem_from(&graph, &problem, &[seed]).unwrap();
         let full = solve_node_problem(&graph, &problem).unwrap();
         assert_eq!(
-            tainted(&seeded, &shape),
+            tainted(&seeded, &shape, Direction::Forward),
             reach(&shape, &[seed], Direction::Forward)
         );
-        assert_eq!(tainted(&seeded, &shape), tainted(&full, &shape));
+        assert_eq!(
+            tainted(&seeded, &shape, Direction::Forward),
+            tainted(&full, &shape, Direction::Forward)
+        );
         // A duplicate seed is queued once.
         let doubled = solve_node_problem_from(&graph, &problem, &[seed, seed]).unwrap();
         assert_eq!(doubled.steps(), seeded.steps());
@@ -389,7 +397,7 @@ impl<G: GraphView<NodeId = u32>> TryNodeProblem<G> for Verifying {
         Ok(false)
     }
 
-    fn meet(&self, a: &bool, b: &bool) -> Result<bool, Rejected> {
+    fn meet(&self, _graph: &G, _node: u32, a: &bool, b: &bool) -> Result<bool, Rejected> {
         Ok(*a || *b)
     }
 

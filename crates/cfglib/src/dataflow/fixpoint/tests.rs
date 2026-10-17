@@ -78,15 +78,21 @@ impl TryProblem<Cfg<DfInst>> for Rejecting {
         Direction::Backward
     }
 
-    fn bottom(&self) -> Self::Fact {
+    fn bottom(&self, _cfg: &Cfg<DfInst>) -> Self::Fact {
         BTreeSet::new()
     }
 
-    fn entry_fact(&self) -> Result<Self::Fact, Self::Error> {
+    fn boundary(&self, _cfg: &Cfg<DfInst>) -> Result<Self::Fact, Self::Error> {
         Ok(BTreeSet::new())
     }
 
-    fn meet(&self, a: &Self::Fact, b: &Self::Fact) -> Result<Self::Fact, Self::Error> {
+    fn meet(
+        &self,
+        _cfg: &Cfg<DfInst>,
+        _block: BlockId,
+        a: &Self::Fact,
+        b: &Self::Fact,
+    ) -> Result<Self::Fact, Self::Error> {
         Ok(a.union(b).copied().collect())
     }
 
@@ -132,11 +138,11 @@ fn backward_solver_propagates_through_disconnected_components() {
             Direction::Backward
         }
 
-        fn bottom(&self) -> Self::Fact {
+        fn bottom(&self, _cfg: &Cfg<()>) -> Self::Fact {
             false
         }
 
-        fn entry_fact(&self) -> Self::Fact {
+        fn boundary(&self, _cfg: &Cfg<()>) -> Self::Fact {
             true
         }
 
@@ -175,11 +181,11 @@ impl Problem<Cfg<()>> for EntryFlows {
         Direction::Forward
     }
 
-    fn bottom(&self) -> Self::Fact {
+    fn bottom(&self, _cfg: &Cfg<()>) -> Self::Fact {
         false
     }
 
-    fn entry_fact(&self) -> Self::Fact {
+    fn boundary(&self, _cfg: &Cfg<()>) -> Self::Fact {
         true
     }
 
@@ -322,4 +328,25 @@ fn a_removed_block_is_never_visited() {
         "the slot of a removed block stays at bottom"
     );
     assert!(facts.fact_in(b).contains(&0));
+}
+
+#[test]
+fn a_direction_follows_edges_the_way_its_facts_flow() {
+    assert_eq!(Direction::Forward.traversal(), TraversalDirection::Outgoing);
+    assert_eq!(
+        Direction::Backward.traversal(),
+        TraversalDirection::Incoming
+    );
+}
+
+#[test]
+fn program_order_puts_what_a_backward_analysis_transfers_at_the_start() {
+    assert_eq!(
+        Direction::Forward.program_order("receives", "transfers"),
+        ("receives", "transfers")
+    );
+    assert_eq!(
+        Direction::Backward.program_order("receives", "transfers"),
+        ("transfers", "receives")
+    );
 }

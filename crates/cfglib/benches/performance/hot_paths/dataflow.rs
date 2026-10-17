@@ -1,9 +1,8 @@
 use std::collections::BTreeSet;
 
 use cfglib::{
-    BlockId, Cfg, ConstValue, ConstantPropagation, DominatorTree, Facts, Graph, NodeFacts,
-    PhiPlacements, SccpAnalysis, SsaForm, SsaValue, ValueNumbering, solve_node_problem,
-    solve_problem,
+    BlockId, Cfg, ConstValue, ConstantPropagation, DominatorTree, Facts, Graph, PhiPlacements,
+    SccpAnalysis, SsaForm, SsaValue, ValueNumbering, solve_node_problem, solve_problem,
 };
 
 use super::NODE_COUNT;
@@ -27,7 +26,7 @@ fn register_fixpoints(suite: &mut BenchmarkSuite<'_>, cfg: &Cfg<u32>, graph: &Gr
             solve_node_problem(graph, &Reachability)
                 .expect("an unbounded solve cannot exceed its step limit")
         },
-        |result: &NodeFacts<bool>| assert_bool_node_facts(result, NODE_COUNT)
+        |result: &Facts<bool>| assert_bool_node_facts(result, NODE_COUNT)
     );
     benchmark_case!(
         suite,
@@ -36,7 +35,7 @@ fn register_fixpoints(suite: &mut BenchmarkSuite<'_>, cfg: &Cfg<u32>, graph: &Gr
             solve_node_problem(&wide_graph, &WideNodeFact)
                 .expect("an unbounded solve cannot exceed its step limit")
         },
-        |result: &NodeFacts<Vec<u64>>| assert_wide_node_facts(result, 1_024)
+        |result: &Facts<Vec<u64>>| assert_wide_node_facts(result, 1_024)
     );
     benchmark_case!(
         suite,

@@ -12,7 +12,7 @@ use crate::dataflow::fixpoint::{
 use crate::dataflow::worklist::Worklist;
 use crate::graph::edge_traverse::EdgeAdjacency;
 use crate::graph::edge_view::{EdgeRef, EdgeView};
-use crate::graph::traverse::{Incoming, Outgoing, TraversalDirection, depth_first_preorder};
+use crate::graph::traverse::{TraversalDirection, by_axis, depth_first_preorder};
 use crate::graph::view::{DenseId, RootedView};
 
 /// A dataflow problem whose transfer can distinguish individual edges.
@@ -172,7 +172,7 @@ pub trait ReachableEdgeProblem<G: EdgeView> {
     /// # Errors
     ///
     /// Returns a consumer error when constructing the entry fact fails.
-    fn entry_fact(&self, graph: &G, node: G::NodeId) -> Result<Option<Self::Fact>, Self::Error>;
+    fn boundary(&self, graph: &G, node: G::NodeId) -> Result<Option<Self::Fact>, Self::Error>;
 
     /// Merges two reached facts at the physical merge point.
     ///
@@ -235,7 +235,7 @@ impl<G: EdgeView, P: ReachableEdgeProblem<G>> TryEdgeProblem<G> for Reachable<P>
     }
 
     fn boundary(&self, graph: &G, node: G::NodeId) -> Result<Option<Self::Fact>, Self::Error> {
-        Ok(self.0.entry_fact(graph, node)?.map(Some))
+        Ok(ReachableEdgeProblem::boundary(&self.0, graph, node)?.map(Some))
     }
 
     fn meet(
@@ -284,23 +284,23 @@ impl<G: EdgeView, P: ReachableEdgeProblem<G>> TryEdgeProblem<G> for Reachable<P>
 /// Node and edge facts at a completed fixpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EdgeFacts<F> {
-    node_input: Vec<F>,
-    node_output: Vec<F>,
+    nodes: Facts<F>,
     edge: Vec<Option<F>>,
-    steps: usize,
 }
 
 impl<F> EdgeFacts<F> {
-    /// Physical input fact for `node`.
+    /// Physical input fact for `node`: the fact at its start in program
+    /// order, whichever way the analysis flows.
     #[must_use]
     pub fn fact_in<N: DenseId>(&self, node: N) -> &F {
-        &self.node_input[node.index()]
+        self.nodes.fact_in(node)
     }
 
-    /// Physical output fact for `node`.
+    /// Physical output fact for `node`: the fact at its end in program
+    /// order.
     #[must_use]
     pub fn fact_out<N: DenseId>(&self, node: N) -> &F {
-        &self.node_output[node.index()]
+        self.nodes.fact_out(node)
     }
 
     /// Fact on a live edge in the solved view, or `None` for a tombstone or an
@@ -319,7 +319,7 @@ impl<F> EdgeFacts<F> {
     /// Number of worklist entries processed.
     #[must_use]
     pub const fn steps(&self) -> usize {
-        self.steps
+        self.nodes.steps()
     }
 
     /// The node facts of a solve over a [`Cfg`](crate::Cfg), as its block
@@ -328,7 +328,7 @@ impl<F> EdgeFacts<F> {
     /// A CFG's nodes are its blocks, indexed alike, so each block keeps its
     /// own physical input and output. The edge facts are dropped.
     pub(crate) fn into_block_facts(self) -> Facts<F> {
-        Facts::from_parts(self.node_input, self.node_output, self.steps)
+        self.nodes
     }
 }
 
@@ -527,7 +527,7 @@ where
 fn try_solve_with_worklist<G, P>(
     graph: &G,
     problem: &P,
-    worklist: Worklist,
+    mut worklist: Worklist,
     config: SolveConfig,
 ) -> Result<EdgeFacts<P::Fact>, TrySolveError<P::Error>>
 where
@@ -542,86 +542,90 @@ where
     let mut solver = Solver {
         graph,
         problem,
-        facts: EdgeFacts {
-            node_input: vec![bottom.clone(); graph.node_bound()],
-            node_output: vec![bottom.clone(); graph.node_bound()],
-            edge,
-            steps: 0,
-        },
+        input: vec![bottom.clone(); graph.node_bound()],
+        output: vec![bottom.clone(); graph.node_bound()],
+        edge,
         bottom,
-        worklist,
     };
 
-    while let Some(node_index) = solver.worklist.pop_first() {
+    let mut steps = 0;
+    while let Some(node_index) = worklist.pop_first() {
         if let Some(limit) = config.max_steps()
-            && solver.facts.steps >= limit
+            && steps >= limit
         {
             return Err(SolveError::StepLimitExceeded {
                 limit,
-                steps: solver.facts.steps,
+                steps,
                 pending_node: node_index,
             }
             .into());
         }
-        solver.facts.steps += 1;
+        steps += 1;
         let node = G::NodeId::from_index(node_index);
-        match problem.direction() {
-            Direction::Forward => solver.visit(node, Incoming, Outgoing),
-            Direction::Backward => solver.visit(node, Outgoing, Incoming),
-        }
+        by_axis!(
+            problem.direction().traversal(),
+            visit_along(&mut solver, &mut worklist, node)
+        )
         .map_err(TrySolveError::Problem)?;
     }
-    Ok(solver.facts)
+    Ok(EdgeFacts {
+        nodes: Facts::new(solver.input, solver.output, steps),
+        edge: solver.edge,
+    })
 }
 
-/// The state of one solve: the facts so far and the nodes still to visit.
+/// The facts of one solve so far, in program order for the nodes.
 struct Solver<'a, G: EdgeView, P: TryEdgeProblem<G>> {
     graph: &'a G,
     problem: &'a P,
     bottom: P::Fact,
-    facts: EdgeFacts<P::Fact>,
-    worklist: Worklist,
+    input: Vec<P::Fact>,
+    output: Vec<P::Fact>,
+    edge: Vec<Option<P::Fact>>,
+}
+
+/// Recomputes `node` from the edges flowing into it against `downstream`, and
+/// re-queues the neighbor of every edge leaving it along `downstream` whose
+/// fact changed.
+fn visit_along<G, P, D>(
+    downstream: D,
+    solver: &mut Solver<'_, G, P>,
+    worklist: &mut Worklist,
+    node: G::NodeId,
+) -> Result<(), P::Error>
+where
+    G: EdgeView,
+    P: TryEdgeProblem<G>,
+    D: EdgeAdjacency,
+    D::Against: EdgeAdjacency,
+{
+    let (graph, problem) = (solver.graph, solver.problem);
+    let flowing_in = solver.meet_edges(node, downstream.against())?;
+    let flowing_out = problem.transfer_node(graph, node, &flowing_in)?;
+    let (input, output) = problem.direction().program_order(flowing_in, flowing_out);
+    solver.input[node.index()] = input;
+    solver.output[node.index()] = output;
+
+    for edge_id in downstream.edges(graph, node) {
+        let edge = graph.edge(edge_id);
+        let new_fact = problem.transfer_edge(
+            graph,
+            edge,
+            &solver.input[node.index()],
+            &solver.output[node.index()],
+        )?;
+        let fact = solver.edge[edge_id.index()]
+            .as_mut()
+            .expect("adjacency contains an edge excluded from the view");
+        if new_fact != *fact {
+            *fact = new_fact;
+            worklist.insert(downstream.next(edge).index());
+        }
+    }
+    Ok(())
 }
 
 impl<G: EdgeView, P: TryEdgeProblem<G>> Solver<'_, G, P> {
-    /// Recomputes `node` from the edges flowing into it along `upstream`, and
-    /// re-queues the neighbor of every edge leaving it along `downstream`
-    /// whose fact changed.
-    fn visit<U: EdgeAdjacency, D: EdgeAdjacency>(
-        &mut self,
-        node: G::NodeId,
-        upstream: U,
-        downstream: D,
-    ) -> Result<(), P::Error> {
-        let (graph, problem) = (self.graph, self.problem);
-        let flowing_in = self.meet_edges(node, upstream)?;
-        let flowing_out = problem.transfer_node(graph, node, &flowing_in)?;
-        let (input, output) = match problem.direction() {
-            Direction::Forward => (flowing_in, flowing_out),
-            Direction::Backward => (flowing_out, flowing_in),
-        };
-        self.facts.node_input[node.index()] = input;
-        self.facts.node_output[node.index()] = output;
-
-        for edge_id in downstream.edges(graph, node) {
-            let edge = graph.edge(edge_id);
-            let new_fact = problem.transfer_edge(
-                graph,
-                edge,
-                &self.facts.node_input[node.index()],
-                &self.facts.node_output[node.index()],
-            )?;
-            let fact = self.facts.edge[edge_id.index()]
-                .as_mut()
-                .expect("adjacency contains an edge excluded from the view");
-            if new_fact != *fact {
-                *fact = new_fact;
-                self.worklist.insert(downstream.next(edge).index());
-            }
-        }
-        Ok(())
-    }
-
     /// The node's boundary fact met with the fact on every edge along
     /// `upstream`, in adjacency order; bottom when there is neither.
     fn meet_edges<U: EdgeAdjacency>(
@@ -631,7 +635,7 @@ impl<G: EdgeView, P: TryEdgeProblem<G>> Solver<'_, G, P> {
     ) -> Result<P::Fact, P::Error> {
         let mut merged = self.problem.boundary(self.graph, node)?;
         for edge in upstream.edges(self.graph, node) {
-            let fact = self.facts.edge[edge.index()]
+            let fact = self.edge[edge.index()]
                 .as_ref()
                 .expect("adjacency contains an edge excluded from the view");
             merged = Some(match merged {

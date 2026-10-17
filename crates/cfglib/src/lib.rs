@@ -281,7 +281,7 @@ pub use dataflow::memory::{
     MemoryValueFlowScratch, MemoryValueNode, MemoryValueRole, index_paths_may_overlap,
 };
 pub use dataflow::node_fixpoint::{
-    NodeFacts, NodeProblem, TryNodeProblem, solve_node_problem, solve_node_problem_from,
+    NodeProblem, TryNodeProblem, solve_node_problem, solve_node_problem_from,
     solve_node_problem_from_with_config, solve_node_problem_with_config, try_solve_node_problem,
     try_solve_node_problem_from, try_solve_node_problem_from_with_config,
     try_solve_node_problem_with_config,

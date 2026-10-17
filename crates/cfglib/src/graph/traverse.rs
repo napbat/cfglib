@@ -58,6 +58,13 @@ pub enum TraversalDirection {
 /// which is why it stays an implementation detail rather than becoming a
 /// second public spelling of a direction consumers already pass.
 pub(crate) trait Adjacency: Copy {
+    /// The axis that walks the same edges the other way.
+    type Against: Adjacency<Against = Self>;
+
+    /// The opposite axis, for a core that reads one axis upstream and the
+    /// other downstream and takes only one of them as its leading argument.
+    fn against(self) -> Self::Against;
+
     /// Iterate `node`'s neighbors along this axis.
     ///
     /// Implementations are inlined into the cores, so the iterator is built
@@ -79,6 +86,13 @@ pub(crate) struct Outgoing;
 pub(crate) struct Incoming;
 
 impl Adjacency for Outgoing {
+    type Against = Incoming;
+
+    #[inline]
+    fn against(self) -> Incoming {
+        Incoming
+    }
+
     #[inline]
     fn neighbors<G: GraphView>(
         self,
@@ -90,6 +104,13 @@ impl Adjacency for Outgoing {
 }
 
 impl Adjacency for Incoming {
+    type Against = Outgoing;
+
+    #[inline]
+    fn against(self) -> Outgoing {
+        Outgoing
+    }
+
     #[inline]
     fn neighbors<G: GraphView>(
         self,

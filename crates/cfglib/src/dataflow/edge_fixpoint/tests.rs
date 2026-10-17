@@ -135,7 +135,7 @@ impl ReachableEdgeProblem<Cfg<(), Route>> for Depths {
         Direction::Forward
     }
 
-    fn entry_fact(
+    fn boundary(
         &self,
         _graph: &Cfg<(), Route>,
         node: BlockId,

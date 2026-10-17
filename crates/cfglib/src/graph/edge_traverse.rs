@@ -10,7 +10,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::edge_view::{EdgeRef, EdgeView};
-use super::traverse::{Incoming, Outgoing, TraversalDirection, by_axis};
+use super::traverse::{Adjacency, Incoming, Outgoing, TraversalDirection, by_axis};
 use super::view::{DenseId, assert_in_bound};
 
 /// An adjacency axis over edges: which edges a node exposes, and which end of
@@ -19,7 +19,7 @@ use super::view::{DenseId, assert_in_bound};
 /// The edge-aware counterpart of [`Adjacency`](super::traverse::Adjacency),
 /// implemented on the same zero-sized axes so one core serves both
 /// directions.
-pub(crate) trait EdgeAdjacency: Copy {
+pub(crate) trait EdgeAdjacency: Adjacency {
     fn edges<G: EdgeView>(self, graph: &G, node: G::NodeId)
     -> impl Iterator<Item = G::EdgeId> + '_;
 
