@@ -61,7 +61,9 @@ pub enum ChildBodyKind {
 /// - A handle that a view yields is below its count. The methods of the view
 ///   panic or return unspecified data for a handle outside the function, as an
 ///   index into a pool does; [`verify`](fn@super::verify) is the check that a
-///   function meets this contract.
+///   function meets this contract. [`recover_structure`](super::recover_structure)
+///   does not rely on it: it checks each handle that it reads and reports one
+///   outside the function as [`RecoverError::Malformed`](super::RecoverError).
 pub trait FunctionView<D: Dialect> {
     /// A statement, dense within the consumer's storage.
     type Stmt: DenseId;
