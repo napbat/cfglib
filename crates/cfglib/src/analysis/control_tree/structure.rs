@@ -873,8 +873,15 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             return Vec::new();
         }
         if !block_is_allowed(allowed_blocks, target) {
+            // Beyond the enclosing bound. When that bound is a loop and the
+            // target is its follow or header, the transfer is a break or a
+            // continue, as it is for the arm of an `if`; anything else is an
+            // explicit jump.
             let mut body = Vec::new();
-            self.push_goto(&mut body, target, GotoReason::BoundaryEscape);
+            match self.resolve_loop_transfer(target) {
+                Some(node) => body.push(node),
+                None => self.push_goto(&mut body, target, GotoReason::BoundaryEscape),
+            }
             return body;
         }
         if !entered {

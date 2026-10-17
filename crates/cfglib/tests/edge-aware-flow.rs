@@ -3,8 +3,7 @@
 use cfglib::{
     Cfg, Direction, DominatorTree, Edge, EdgeId, EdgeKind, EdgeView, FilteredEdges, KeyedGraph,
     NodeId, RootedView, TraversalDirection, TryEdgeProblem, TrySolveError, breadth_first_edges,
-    remove_empty_blocks_mapped, split_node_at_points, try_solve_edge_problem_from,
-    verify_edge_view,
+    remove_empty_blocks_mapped, try_solve_edge_problem_from, verify_edge_view,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,12 +113,9 @@ fn split_redirect_bypass_and_clone_report_metadata_preserving_mappings() {
     cfg.block_mut(entry).instructions_mut().extend([10, 20, 30]);
     let outgoing = cfg.add_edge_with_payload(entry, exit, EdgeKind::Jump, Route::SwitchCase(9));
 
-    let (parts, split) = split_node_at_points(
-        &mut cfg,
-        entry,
-        [(1, Route::Synthetic), (2, Route::Synthetic)],
-    )
-    .unwrap();
+    let (parts, split) = cfg
+        .split_block_at_points_with_payloads(entry, [(1, Route::Synthetic), (2, Route::Synthetic)])
+        .unwrap();
     assert_eq!(split.blocks(entry), Some(parts.as_slice()));
     assert_eq!(split.edges(outgoing), Some([outgoing].as_slice()));
     assert_eq!(cfg.edge(outgoing).source(), parts[2]);

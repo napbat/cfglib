@@ -502,7 +502,7 @@ mod tests {
     use super::*;
     use crate::cfg::Cfg;
     use crate::edge::EdgeKind;
-    use crate::test_util::{VnInst, vn_impure, vn_inst, vn_throwing};
+    use crate::test_util::{VnInst, protected_region, vn_impure, vn_inst, vn_throwing};
 
     #[test]
     fn impure_redefinition_invalidates_value_numbers() {
@@ -648,23 +648,14 @@ mod tests {
         );
     }
 
-    /// `entry → protected`, which falls through to `normal` and unwinds to
-    /// `handler`, numbered with each block's instructions. Returns
-    /// `(numbering, protected, normal, handler)`.
+    /// A protected region (see [`protected_region`]) with `protected`'s
+    /// instructions, and the same `successor_instructions` in `normal` and
+    /// `handler`, numbered. Returns `(numbering, protected, normal, handler)`.
     fn number_protected_region(
         protected_instructions: impl IntoIterator<Item = VnInst>,
         successor_instructions: &[VnInst],
     ) -> (ValueNumbering, BlockId, BlockId, BlockId) {
-        let mut cfg: Cfg<VnInst> = Cfg::new();
-        let protected = cfg.new_block();
-        let normal = cfg.new_block();
-        let handler = cfg.new_block();
-        cfg.add_edge(cfg.entry(), protected, EdgeKind::Fallthrough);
-        cfg.add_edge(protected, normal, EdgeKind::Fallthrough);
-        cfg.add_edge(protected, handler, EdgeKind::ExceptionUnwind);
-        cfg.block_mut(protected)
-            .instructions_mut()
-            .extend(protected_instructions);
+        let (mut cfg, [protected, normal, handler]) = protected_region(protected_instructions);
         for block in [normal, handler] {
             cfg.block_mut(block)
                 .instructions_mut()

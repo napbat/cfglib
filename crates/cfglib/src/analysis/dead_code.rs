@@ -263,8 +263,9 @@ mod tests {
     use super::*;
     use crate::cfg::Cfg;
     use crate::edge::EdgeKind;
-    use crate::flow::FlowEffect;
-    use crate::test_util::{DfInst, TestEffect, df_def, df_impure, df_op, df_use, df_with_effect};
+    use crate::test_util::{
+        DfInst, TestEffect, df_def, df_impure, df_op, df_throwing, df_use, protected_region,
+    };
 
     #[test]
     fn a_dead_definition_is_reported_and_a_live_one_is_not() {
@@ -540,16 +541,9 @@ mod tests {
     /// although nothing reads what it loads.
     #[test]
     fn a_handler_keeps_the_write_before_a_throw_alive() {
-        let mut cfg: Cfg<DfInst> = Cfg::new();
-        let protected = cfg.new_block();
-        let normal = cfg.new_block();
-        let handler = cfg.new_block();
-        cfg.add_edge(cfg.entry(), protected, EdgeKind::Fallthrough);
-        cfg.add_edge(protected, normal, EdgeKind::Fallthrough);
-        cfg.add_edge(protected, handler, EdgeKind::ExceptionUnwind);
-        cfg.block_mut(protected).instructions_mut().extend([
+        let (mut cfg, [protected, _normal, handler]) = protected_region([
             df_def("first", 0),
-            df_with_effect(df_def("load", 7), FlowEffect::MayThrow),
+            df_throwing(df_def("load", 7)),
             df_def("second", 0),
         ]);
         cfg.block_mut(handler).push(df_use("catch", 0));

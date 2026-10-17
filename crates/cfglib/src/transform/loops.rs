@@ -205,12 +205,11 @@ pub fn find_loop_invariants<I: EffectInfo, E>(
 mod tests {
     use super::*;
     use crate::edge::EdgeId;
-    use crate::flow::FlowEffect;
     use crate::graph::dominator::DominatorTree;
     use crate::graph::structure::{detect_loops, detect_loops_tagged};
     use crate::region::{Handler, HandlerKind, Region, RegionId};
     use crate::test_util::{
-        DfInst, TestEffect, df_def, df_ff, df_impure, df_op, df_use, df_with_effect,
+        DfInst, TestEffect, df_def, df_ff, df_impure, df_op, df_throwing, df_use,
     };
 
     /// `entry → header`, a top-tested loop whose body is a chain of
@@ -517,7 +516,7 @@ mod tests {
     fn a_side_effecting_or_throwing_definition_is_not_invariant() {
         let mut load = df_impure("load", TestEffect::MemoryRead);
         load.defs.push(1);
-        let trap = df_with_effect(df_def("div", 2), FlowEffect::MayThrow);
+        let trap = df_throwing(df_def("div", 2));
         let (cfg, _) = loop_over(Vec::new(), instructions([load, trap]));
         assert_eq!(find_loop_invariants(&cfg, &the_loop(&cfg)), []);
     }

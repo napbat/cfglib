@@ -50,16 +50,26 @@ impl<I, E> Cfg<I, E> {
     /// Remove a block and report every identity the removal retired.
     pub fn remove_block_mapped(&mut self, id: BlockId) -> (bool, Rewrite) {
         let mut mapping = Rewrite::new();
+        let removed = self.remove_block_recording(id, &mut mapping);
+        (removed, mapping)
+    }
+
+    /// Remove a block and record the identities it retired in `mapping`.
+    ///
+    /// The block and its edges are recorded as removed, which overwrites any
+    /// earlier entry of `mapping` for them: a pass that only removes blocks,
+    /// and so never maps one identity to another, can record into one
+    /// rewrite directly instead of composing a rewrite per block.
+    pub(crate) fn remove_block_recording(&mut self, id: BlockId, mapping: &mut Rewrite) -> bool {
         if !self.contains_block(id) {
-            return (false, mapping);
+            return false;
         }
         let incident: Vec<EdgeId> = self.outgoing(id).chain(self.incoming(id)).collect();
         for edge in incident {
             mapping.record_edge(edge, []);
         }
-        let removed = self.remove_block(id);
         mapping.record_block(id, []);
-        (removed, mapping)
+        self.remove_block(id)
     }
 
     /// Add a directed edge with the default consumer payload.
@@ -165,6 +175,13 @@ impl<I, E> Cfg<I, E> {
     /// the original block to the new one, and all outgoing edges of
     /// the original block are transferred to the new block.
     ///
+    /// The split does not change what any instruction does, so the new block
+    /// belongs wherever the original did: it joins every region's protected
+    /// set and every known handler body that contains the original, and it
+    /// replaces the original as the block a cleanup resumes from, because it
+    /// now holds the exits. A frontend that wants the boundary to be a
+    /// protection boundary edits the region afterwards.
+    ///
     /// Returns the id of the newly created block.
     ///
     /// # Panics
@@ -208,6 +225,7 @@ impl<I, E> Cfg<I, E> {
         self.block_mut(new_id).instructions = tail_instructions;
 
         self.move_outgoing_edges(id, new_id);
+        self.extend_exception_metadata_to_tail(id, new_id);
 
         let fallthrough =
             self.add_edge_with_payload(id, new_id, EdgeKind::Fallthrough, fallthrough_payload);

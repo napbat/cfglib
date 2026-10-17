@@ -9,9 +9,13 @@ use crate::rewrite::Rewrite;
 
 /// Split every critical edge and return the number split.
 ///
-/// This compatibility entry point is for unit-payload CFGs. The original edge
-/// identity remains on the first half of each split.
-pub fn split_critical_edges<I>(cfg: &mut Cfg<I>) -> usize {
+/// Synthetic edges take the payload's [`Default`]; use
+/// [`split_critical_edges_with`] to choose them. The original edge identity
+/// remains on the first half of each split.
+pub fn split_critical_edges<I, E>(cfg: &mut Cfg<I, E>) -> usize
+where
+    E: Default,
+{
     split_critical_edges_mapped(cfg).0
 }
 
@@ -28,8 +32,13 @@ where
 ///
 /// `payload_for` sees the original stable edge before mutation. The original
 /// edge is redirected to the inserted block without changing its identity,
-/// kind, weight, or payload. Its mapping contains both halves in execution
-/// order; only the second half receives the generated payload.
+/// weight, or payload, and keeps its kind with one exception: a
+/// [`Back`](EdgeKind::Back) edge is the edge that enters a loop header
+/// (`find_back_edges_tagged` reads the tag that way), so the tag moves to the
+/// second half, which is the one that now enters the header, and the first
+/// half becomes [`Unconditional`](EdgeKind::Unconditional). Its mapping
+/// contains both halves in execution order; only the second half receives the
+/// generated payload.
 pub fn split_critical_edges_with<I, E>(
     cfg: &mut Cfg<I, E>,
     mut payload_for: impl FnMut(EdgeId, &Edge<E>) -> E,
@@ -50,18 +59,27 @@ pub fn split_critical_edges_with<I, E>(
 
     let mut mapping = Rewrite::new();
     for &edge in &critical {
-        let (target, payload) = {
+        let (target, kind, payload) = {
             let original = cfg.edge(edge);
-            (original.target(), payload_for(edge, original.data()))
+            (
+                original.target(),
+                original.kind(),
+                payload_for(edge, original.data()),
+            )
         };
         let middle = cfg.new_block();
-        let (_, redirected) = cfg.redirect_edge_target_mapped(edge, middle);
-        mapping.compose(redirected);
-        let fallthrough = cfg.add_edge_with_payload(middle, target, EdgeKind::Fallthrough, payload);
+        cfg.redirect_edge_target(edge, middle);
+        let second_kind = if kind == EdgeKind::Back {
+            cfg.edge_mut(edge).set_kind(EdgeKind::Unconditional);
+            EdgeKind::Back
+        } else {
+            EdgeKind::Fallthrough
+        };
+        let second = cfg.add_edge_with_payload(middle, target, second_kind, payload);
 
-        mapping.record_edge(edge, [edge, fallthrough]);
+        mapping.record_edge(edge, [edge, second]);
         mapping.record_created_block(middle);
-        mapping.record_created_edge(fallthrough);
+        mapping.record_created_edge(second);
     }
     (critical.len(), mapping)
 }
@@ -70,6 +88,7 @@ pub fn split_critical_edges_with<I, E>(
 mod tests {
     use super::*;
     use crate::test_util::{diamond_cfg, ff};
+    use crate::{DominatorTree, detect_loops_tagged};
 
     #[test]
     fn split_critical_edges_on_diamond() {
@@ -124,5 +143,49 @@ mod tests {
         assert_eq!(cfg.edge(original).weight(), Some(0.75));
         assert_eq!(cfg.edge(original).payload(), &"case 7");
         assert_eq!(cfg.edge(replacements[1]).payload(), &"case 7");
+    }
+
+    #[test]
+    fn splitting_a_back_edge_leaves_one_loop_with_its_own_header() {
+        let mut cfg = Cfg::<u32>::new();
+        let entry = cfg.entry();
+        let header = cfg.new_block();
+        let body = cfg.new_block();
+        let exit = cfg.new_block();
+        cfg.add_edge(entry, header, EdgeKind::Fallthrough);
+        cfg.add_edge(header, body, EdgeKind::ConditionalTrue);
+        cfg.add_edge(header, exit, EdgeKind::ConditionalFalse);
+        let back = cfg.add_weighted_edge(body, header, EdgeKind::Back, 0.5);
+        cfg.add_edge(body, exit, EdgeKind::ConditionalFalse);
+
+        let before = detect_loops_tagged(&cfg, &DominatorTree::compute(&cfg));
+        assert_eq!(before.len(), 1);
+        let (count, mapping) = split_critical_edges_mapped(&mut cfg);
+        assert_eq!(count, 3);
+
+        let halves = mapping.edges(back).unwrap();
+        assert_eq!(halves[0], back);
+        assert_eq!(cfg.edge(back).weight(), Some(0.5), "the weight stays put");
+        assert_ne!(cfg.edge(back).kind(), EdgeKind::Back);
+        assert_eq!(cfg.edge(halves[1]).kind(), EdgeKind::Back);
+        assert_eq!(cfg.edge(halves[1]).target(), header);
+        let after = detect_loops_tagged(&cfg, &DominatorTree::compute(&cfg));
+        assert_eq!(after.len(), 1, "{after:?}");
+        assert_eq!(after[0].header, header);
+        assert!(!after[0].body.contains(&entry));
+    }
+
+    #[test]
+    fn critical_edges_split_on_a_cfg_with_edge_payloads() {
+        let mut cfg = Cfg::<(), &'static str>::with_edge_payload();
+        let left = cfg.new_block();
+        let right = cfg.new_block();
+        let other_source = cfg.new_block();
+        cfg.add_edge_with_payload(cfg.entry(), left, EdgeKind::ConditionalTrue, "case");
+        cfg.add_edge_with_payload(cfg.entry(), right, EdgeKind::ConditionalFalse, "default");
+        cfg.add_edge_with_payload(other_source, left, EdgeKind::Jump, "other");
+        // `&str` is `Default`, so synthetic edges carry the empty string.
+        assert_eq!(split_critical_edges(&mut cfg), 1);
+        assert_eq!(cfg.block_count(), 5);
     }
 }

@@ -1,9 +1,8 @@
 //! Exception-handler region model.
 //!
 //! Regions represent protected areas of code (try blocks) and their
-//! associated handlers (catch, finally, fault, filter). This model
-//! is inspired by the CLR / JVM exception metadata and Echo's
-//! `ExceptionHandlerRegion`.
+//! associated handlers (catch, finally, fault, filter). The model follows
+//! the CLR / JVM exception metadata.
 //!
 //! Regions are **optional metadata** on a [`Cfg`] — GPU
 //! shaders and simple ISAs simply leave the region list empty.
@@ -17,21 +16,35 @@
 //! exact — the same convention the source-CFG lowering uses for every
 //! other boundary.
 //!
-//! # v2 (consumer-gated, now driven by a real consumer)
+//! # Block references
 //!
-//! Two needs were deliberately left undesigned until the first source
-//! language with `try` landed: `Finally` continuations that depend on the
-//! entry reason (normal / exceptional / break-out), and handler filters keyed
-//! by consumer types instead of [`HandlerKind::Filter`]'s block reference.
-//! That consumer arrived — a source lowering that puts the protected body in
-//! blocks of its own, runs every non-local transfer (`break`, `continue`,
-//! `return`, `goto`) and every unwind through one shared cleanup block, and
-//! registers a filtered `catch` (C# `when`) as a plain [`HandlerKind::Catch`]
-//! because the predicate sits in the pad rather than in a funclet of its own.
-//! Both shapes are answered here. Handler-body completeness is modeled
-//! independently through [`HandlerBody`]: source and normalized native
-//! frontends can provide an exact block set, while table-driven formats that
-//! encode only a handler entry can say that the remaining extent is unknown.
+//! The metadata names blocks in two ways. A region's protected set and a
+//! handler's known body are *sets*: a block that is removed simply drops out
+//! of them at the next [`Cfg::compact`](crate::Cfg::compact). A handler
+//! entry, a filter block, a cleanup resume point, and a continuation target
+//! are *single references* with no stand-in, so the structural passes
+//! ([`simplify`](crate::simplify), [`merge_blocks`](crate::merge_blocks),
+//! [`remove_empty_blocks`](crate::remove_empty_blocks),
+//! [`remove_unreachable`](crate::remove_unreachable),
+//! [`contract_edge`](crate::contract_edge)) never remove or merge those blocks
+//! away. [`Cfg::split_block`](crate::Cfg::split_block) keeps both kinds true:
+//! the new tail joins every set that held the original.
+//!
+//! # Cleanup and filter data
+//!
+//! Handler-body completeness is modeled through [`HandlerBody`]: source and
+//! normalized native frontends can provide an exact block set, while
+//! table-driven formats that encode only a handler entry can say that the
+//! remaining extent is unknown.
+//!
+//! A source lowering may put the protected body in blocks of its own, run
+//! every non-local transfer (`break`, `continue`, `return`, `goto`) and every
+//! unwind through one shared cleanup block, and register a filtered `catch`
+//! (C# `when`) as a plain [`HandlerKind::Catch`] because the predicate sits in
+//! the pad rather than in a funclet of its own. `Finally` continuations that
+//! depend on the entry reason (normal / exceptional / break-out), and handler
+//! filters keyed by consumer types instead of [`HandlerKind::Filter`]'s block
+//! reference, are answered by two records:
 //!
 //! - [`Cleanup`] records what a cleanup handler does once its body ends: the
 //!   block it resumes from and the [`Continuation`]s it selects among, each
@@ -443,7 +456,7 @@ impl RegionIndex {
     ///
     /// The index is a snapshot: recompute after adding regions or blocks.
     #[must_use]
-    pub fn compute<I>(cfg: &Cfg<I>) -> Self {
+    pub fn compute<I, E>(cfg: &Cfg<I, E>) -> Self {
         let mut innermost = vec![None; cfg.block_bound()];
         for region in cfg.regions() {
             for &block in &region.protected_blocks {
@@ -557,6 +570,22 @@ mod tests {
         assert_eq!(index.protecting(BlockId::from_raw(1)), Some(inner));
         // b3 belongs to no region.
         assert!(index.protecting(b3).is_none());
+    }
+
+    #[test]
+    fn region_index_answers_for_a_cfg_with_edge_payloads() {
+        let mut cfg = Cfg::<u32, &str>::with_edge_payload();
+        let inside = cfg.new_block();
+        let region = cfg.add_region(Region {
+            id: RegionId(0),
+            protected_blocks: [inside].into_iter().collect(),
+            handlers: alloc::vec![],
+            parent: None,
+        });
+
+        let index = RegionIndex::compute(&cfg);
+        assert_eq!(index.protecting(inside), Some(region));
+        assert_eq!(index.protecting(cfg.entry()), None);
     }
 
     /// A CFG with one protected block, one catch pad, and one cleanup — the

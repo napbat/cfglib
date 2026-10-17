@@ -150,7 +150,7 @@ definition-to-reference bindings.
 | Goto wiring | `resolve_jump_edges` + `JumpTargets` (consumer-typed targets: labels, addresses, syntax nodes) |
 | Compressed adjacency | `Cfg` stores its blocks and edges in `Graph`: a compressed base plus an appendable delta, with no per-block adjacency allocation |
 | Edge removal | `remove_edge()` clears the liveness bit of the edge; existing `EdgeId`s stay stable until `compact()` renumbers the survivors |
-| Edge metadata | Stable `EdgeId`, endpoints, `EdgeKind`, optional weight, and a caller-owned payload; `ExceptionFlow<M>` standardises search/unwind phase and execute/search/continue disposition while retaining platform metadata |
+| Edge metadata | Stable `EdgeId`, endpoints, `EdgeKind`, optional weight, and a caller-owned payload; `ExceptionFlow<M>` standardizes search/unwind phase and execute/search/continue disposition while retaining platform metadata |
 | Regions | Try/catch/finally regions with explicit `HandlerBody::Known`/`Unknown` completeness and `HandlerKind` (Catch, CatchAll, Finally, Fault, Filter); `install_clr_region` and `install_seh_region` import normalized platform clauses |
 | Cleanup continuations | `add_continuation` / `set_cleanup_resume` → `Cleanup` (`Continuation` + `CompletionReason`): which route out of a single shared `finally` block a resume edge belongs to |
 | Handler metadata | `HandlerMetadata<M>` side table (`HandlerFilters<F>` / `HandlerTypes<T>`) — consumer-typed filter predicates and CLR caught-type tokens keyed by `HandlerRef`, with no type parameter on `Cfg` |
@@ -381,8 +381,8 @@ These analyses take `&G` where `G: CfgView`: `ReachingDefs`, `Liveness`, `DefUse
 | Purity classification | `cfg_purity`, `block_purity`, `EffectInfo` (associated `Effect`) | Consumer effect vocabularies — machine memory/IO, allocation, panics |
 | Metrics | `GraphMetrics::compute` (any rooted view); `CfgMetrics::compute` | Node/edge counts, cyclomatic complexity, nesting depth, instruction density |
 | Pattern detection | `detect_patterns` (any view), `detect_cfg_patterns` (adds trampolines + arm orientation) | Diamond, chain, self-loop, empty trampoline |
-| Profiling | `CfgProfile::from_edge_weights`, `set_uniform_edge_weights` | Edge-weight-based hot/cold block analysis |
-| Tail call detection | `detect_tail_calls` (heuristic), `detect_explicit_tail_calls` (`CallInfo` markers) | |
+| Profiling | `CfgProfile::from_edge_weights`, `set_uniform_edge_weights` | Edge probabilities propagated from the entry into per-block frequencies (loops solved to a fixpoint), hot/cold block queries |
+| Tail call detection | `detect_tail_calls` (heuristic), `detect_explicit_tail_calls` (`CallInfo` markers) | A call that ends its block and flows into a block that returns at once; explicit markers reported with their position |
 | Switch table recovery | `detect_switch_tables` (`SwitchSource`), `recover_switch_tables` | Consumer-typed targets: addresses, syntax nodes; dispatch → structured switch |
 | Control tree | `ControlTree::compute`, `compute_with_report` (→ `LiftReport`), `compute_predicated[_with_report]`, `compute_with_report_treating_empty` | The structured form of a `Cfg`: `if/else`, pre-tested, post-tested, and endless loops, `switch` with case edges and a default, `try/catch` over declared handler extents, `break`/`continue` (labeled across loops), `goto`/`label`, and guarded runs of predicated instructions. A payload-free fact like `DominatorTree`: a flat arena of `ControlNode`s that name `BlockId`, `EdgeId`, `RegionId`, and `BlockSpan` instruction ranges, so it holds no instruction and never borrows the graph. Merge points are immediate post-dominators; an exit-free region has none. No owned code is dropped — the blocks the entry reaches and the blocks a handler owns, a catch pad no call unwinds into and its extent among them; a protected block the entry cannot reach is dead code — and `LiftReport` lists every goto, swept block, unstructured region, and dangling label |
 | Control tree traversal | `ControlTree::preorder`, `walk` (`ControlVisitor`), `child_bodies`, `for_each_instruction`, `write_pseudocode` / `to_pseudocode` | Non-recursive preorder and enter/leave walks, the child bodies of any node in execution order, every instruction in program-structure order, and indented pseudocode whose instruction text the caller supplies |
@@ -397,19 +397,29 @@ fallible pass stops execution.
 | Transform | Function | Description |
 |---|---|---|
 | Simplify (all-in-one) | `simplify`, `simplify_mapped` | Unreachable removal + block merging + empty bypass until stable; mapped form composes identity changes |
-| Remove unreachable | `remove_unreachable` | DFS reachability pruning |
-| Merge blocks | `merge_blocks` | Coalesce single-succ/single-pred chains |
-| Remove empty blocks | `remove_empty_blocks` | Bypass empty fallthrough blocks |
+| Remove unreachable | `remove_unreachable` | Reachability pruning; blocks named by exception metadata are kept |
+| Merge blocks | `merge_blocks` | Coalesce single-succ/single-pred chains inside one protected region |
+| Remove empty blocks | `remove_empty_blocks` | Bypass empty fallthrough blocks that no handler or cleanup names |
 | Critical edge splitting | `split_critical_edges`, `split_critical_edges_with` | Insert blocks on multi-succ → multi-pred edges while retaining the original edge identity/payload and mapping both halves |
-| Dead code elimination | `dead_code_elimination[_with_exits]` (instructions), `remove_dead_code[_mapped]` (plus the structure left dead) | Liveness-based; requires `EffectInfo` so side-effecting code is never silently deleted. The `_with_exits` form seeds what leaves each block |
-| Edge contraction | `contract_edge`, `contract_edge_mapped` | Merge two blocks connected by a single edge; mapped form preserves surviving edge identities/payloads |
-| Node splitting | `split_node`, `split_node_at_points` | Split at one or several validated consumer-selected instruction boundaries |
-| Loop rotation | `rotate_loop` | Top-tested → bottom-tested loop form: the bottom test is a copy of the header with copies of its edges, and the latch edge is retargeted in place |
+| Dead code elimination | `dead_code_elimination[_with_exits]` (instructions), `remove_dead_code[_mapped]` (plus the structure left dead) | Needed-set fixpoint over liveness: a dead instruction's reads keep nothing alive, so a chain feeding only dead code goes in one call, across blocks and around loops. Requires `EffectInfo` so side-effecting code is never silently deleted. The `_with_exits` form seeds what leaves each block |
+| Edge contraction | `contract_edge`, `contract_edge_mapped` | Merge two blocks connected by a single edge; mapped form preserves surviving edge identities/payloads. Refuses exception edges and merges across a protection boundary |
+| Node splitting | `Cfg::split_block`, `Cfg::split_block_at_points[_with_payloads]` | Split at one or several validated consumer-selected instruction boundaries; the new blocks stay in the original's regions |
+| Loop rotation | `rotate_loop` | Top-tested → bottom-tested loop form: the bottom test is a copy of the header (joining its regions) with copies of its edges, and the latch edge is retargeted in place |
 | Loop invariant detection | `find_loop_invariants` | Instructions that define something, have no declared effect, cannot unwind, and read only outer definitions or one invariant loop definition; requires `EffectInfo` |
 | Redundancy elimination | `PreAnalysis::compute`, `eliminate_pre` | Finds the instructions a dominating instruction already computed (GVN) and removes those it can replace soundly, redirecting reads through `CopySource::rewrite_use`; partially redundant computations are left alone |
 | Graph coloring | `interference_graph`, `color_graph` | Interference builder returns a `Graph`; coloring accepts any graph view |
 | Linearization | `linearize`, `Emitter` trait, `BlockOrder`, `LinearizeError` | Re-serialize CFG to a flat stream; emitters speak `BlockId`, naming is theirs. Exceptional, call, and dispatch edges emit nothing; a conditional edge out of an empty block is an error |
 | Width relaxation | `relax_layout` | The assembler fixed point for symbolic layouts: monotone branch widening against caller-resolved labels, offset-dependent (alignment) widths, converged offsets plus the final label context |
+
+The structural passes (`simplify`, `merge_blocks`, `remove_empty_blocks`,
+`remove_unreachable`, `contract_edge`) keep a CFG's exception metadata true, so
+`Cfg::compact` and `EhModel` stay usable after any sequence of them. A block a
+handler, filter, or cleanup names by a single reference is never removed or
+merged away (`remove_unreachable` treats such blocks as roots), and two blocks
+merge only when the same regions protect both. `Cfg::split_block` is the
+inverse: the new tail joins every region and handler body of the original.
+Call `Cfg::remove_unreachable_regions` first to drop regions nothing can raise
+into together with their handler blocks.
 
 ### Output
 
@@ -572,9 +582,11 @@ by label token, and switch recovery over syntax-node targets.
 Install the git hooks once with `prek install` (or `pre-commit install`); both
 tools read the same `.pre-commit-config.yaml`. Hygiene checks, the repository
 policy script, `cargo fmt`, and pedantic Clippy run at commit time; the full
-test and documentation suites run at push time. CI runs the same gates plus an
-MSRV (1.85) check and a `no_std` target build. The complete gate list and the
-workspace's naming and layout conventions live in `AGENTS.md`.
+test and documentation suites run at push time. CI runs the same gates with
+default features as well, plus an MSRV check against the `rust-version` in
+`Cargo.toml` (the one place the minimum Rust version is written down) and
+`no_std` target builds. The complete gate list and the workspace's naming and
+layout conventions live in `AGENTS.md`.
 
 ## License
 

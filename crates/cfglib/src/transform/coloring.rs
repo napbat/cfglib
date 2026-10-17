@@ -149,8 +149,7 @@ pub fn color_graph<G: GraphView>(graph: &G) -> ColorAssignment<G::NodeId> {
 mod tests {
     use super::*;
     use crate::edge::EdgeKind;
-    use crate::flow::FlowEffect;
-    use crate::test_util::{DfInst, df_def, df_op, df_use, df_with_effect};
+    use crate::test_util::{DfInst, df_def, df_op, df_throwing, df_use};
 
     #[test]
     fn triangle_needs_three_colors() {
@@ -219,7 +218,7 @@ mod tests {
         cfg.block_mut(cfg.entry()).instructions_mut().extend([
             df_def("a", 0),
             df_def("b", 1),
-            df_with_effect(df_use("throw", 1), FlowEffect::MayThrow),
+            df_throwing(df_use("throw", 1)),
         ]);
         cfg.block_mut(handler).push(df_use("catch", 0));
         cfg.add_edge(cfg.entry(), normal, EdgeKind::Fallthrough);

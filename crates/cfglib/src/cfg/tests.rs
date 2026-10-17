@@ -95,6 +95,38 @@ fn split_block_preserves_outgoing_edge_identity_and_metadata() {
 }
 
 #[test]
+fn split_points_are_atomic_and_instruction_neutral() {
+    let mut cfg = Cfg::<_, u8>::with_edge_payload();
+    let entry = cfg.entry();
+    cfg.block_mut(entry)
+        .instructions_mut()
+        .extend(["a", "may_throw", "c"]);
+
+    let error = cfg
+        .split_block_at_points_with_payloads(entry, [(2, 2), (1, 1)])
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        SplitPointError::NotStrictlyIncreasing {
+            previous: 2,
+            point: 1
+        }
+    ));
+    assert_eq!(cfg.block_count(), 1, "validation precedes mutation");
+
+    let (blocks, mapping) = cfg
+        .split_block_at_points_with_payloads(entry, [(1, 10), (2, 20)])
+        .unwrap();
+    assert_eq!(blocks.len(), 3);
+    assert_eq!(cfg.block(blocks[1]).instructions(), &["may_throw"]);
+    assert_eq!(mapping.blocks(entry), Some(blocks.as_slice()));
+    let first_edge = cfg.outgoing(blocks[0]).next().unwrap();
+    let second_edge = cfg.outgoing(blocks[1]).next().unwrap();
+    assert_eq!(cfg.edge(first_edge).payload(), &10);
+    assert_eq!(cfg.edge(second_edge).payload(), &20);
+}
+
+#[test]
 fn redirect_edges_moves_predecessors_in_order() {
     let mut cfg = Cfg::<MockInst>::new();
     let old = cfg.new_block();
@@ -216,4 +248,39 @@ fn exit_blocks_iterator() {
     // b1 has no outgoing edges — it's an exit block.
     let exits: Vec<BlockId> = cfg.exit_blocks().collect();
     assert_eq!(exits, vec![b1]);
+}
+
+#[test]
+fn is_compact_is_true_exactly_when_compaction_changes_no_identity() {
+    let mut cfg = Cfg::<MockInst>::new();
+    let kept = cfg.new_block();
+    let middle = cfg.new_block();
+    let last = cfg.new_block();
+    cfg.add_edge(cfg.entry(), kept, EdgeKind::Fallthrough);
+    let doomed = cfg.add_edge(kept, middle, EdgeKind::Fallthrough);
+    cfg.add_edge(middle, last, EdgeKind::Fallthrough);
+    assert!(cfg.is_compact(), "adding never invalidates an identity");
+
+    // A removed slot below a live one: compaction renumbers.
+    cfg.remove_edge(doomed);
+    cfg.remove_block(middle);
+    let predicted = cfg.is_compact();
+    assert!(!predicted);
+    assert_eq!(cfg.compact().is_identity(), predicted);
+    assert!(cfg.is_compact());
+
+    // A removed trailing slot is still a removed slot: compaction drops it.
+    let trailing = cfg.new_block();
+    cfg.remove_block(trailing);
+    let predicted = cfg.is_compact();
+    assert!(!predicted);
+    assert_eq!(cfg.compact().is_identity(), predicted);
+
+    // Every edge removed: the edge slots are all removed ones.
+    let only = cfg.edges().next().map(|edge| edge.id());
+    cfg.remove_edge(only.expect("the chain kept one edge"));
+    let predicted = cfg.is_compact();
+    assert!(!predicted);
+    assert_eq!(cfg.compact().is_identity(), predicted);
+    assert!(cfg.is_compact());
 }

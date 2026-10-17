@@ -180,20 +180,20 @@
 //!   across the second.
 
 #![no_std]
-#![warn(missing_docs)]
 
 // Golden-file comparison reads the rendered output back from disk, which the
 // crate itself never does.
 #[cfg(test)]
 extern crate std;
 
+/// A count as a ratio operand. Counts of blocks, edges, and instructions stay
+/// far below 2^53, where `f64` is exact.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a count of in-memory items fits f64's 53-bit mantissa"
+)]
 pub(crate) fn usize_to_f64(value: usize) -> f64 {
-    if let Ok(value) = u32::try_from(value) {
-        return f64::from(value);
-    }
-
-    let half = usize_to_f64(value / 2);
-    half * 2.0 + f64::from(u8::from(value & 1 == 1))
+    value as f64
 }
 
 pub mod analysis;
@@ -400,10 +400,7 @@ pub use transform::cleanup::{
     remove_unreachable, remove_unreachable_mapped, simplify, simplify_mapped,
 };
 pub use transform::coloring::{ColorAssignment, color_graph, interference_graph};
-pub use transform::contract::{
-    contract_edge, contract_edge_mapped, split_node, split_node_at_points,
-    split_node_with_payload_mapped,
-};
+pub use transform::contract::{contract_edge, contract_edge_mapped};
 pub use transform::critical::{
     split_critical_edges, split_critical_edges_mapped, split_critical_edges_with,
 };

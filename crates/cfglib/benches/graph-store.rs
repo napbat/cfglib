@@ -145,7 +145,7 @@ fn measure<T>(operation: impl FnOnce() -> T) -> (T, Sample) {
     )
 }
 
-/// A xorshift generator, so both stores see the same graph on every run.
+/// A xorshift generator, so every run sees the same graph.
 struct Rng(u64);
 
 impl Rng {
@@ -162,6 +162,11 @@ impl Rng {
         let bound = u64::try_from(bound).expect("bound fits in u64");
         usize::try_from(self.next_u64() % bound).expect("a value below bound fits in usize")
     }
+}
+
+/// The raw id of the node at `index`.
+fn node(index: usize) -> u32 {
+    u32::try_from(index).expect("node index fits in u32")
 }
 
 const NODES: usize = 1_000_000;
@@ -183,15 +188,15 @@ fn edge_list(rng: &mut Rng) -> Vec<(u32, u32)> {
     let hubs = NODES / HUB_SHARE;
     let mut edges = Vec::with_capacity(EDGES);
     for hub in 0..hubs {
-        let source = u32::try_from(hub * HUB_SHARE).expect("node index fits in u32");
+        let source = node(hub * HUB_SHARE);
         for _ in 0..HUB_DEGREE {
-            let target = u32::try_from(rng.below(NODES)).expect("node index fits in u32");
+            let target = node(rng.below(NODES));
             edges.push((source, target));
         }
     }
     while edges.len() < EDGES {
-        let source = u32::try_from(rng.below(NODES)).expect("node index fits in u32");
-        let target = u32::try_from(rng.below(NODES)).expect("node index fits in u32");
+        let source = node(rng.below(NODES));
+        let target = node(rng.below(NODES));
         edges.push((source, target));
     }
 
@@ -206,8 +211,8 @@ fn edge_list(rng: &mut Rng) -> Vec<(u32, u32)> {
 fn append_list(rng: &mut Rng) -> Vec<(u32, u32)> {
     (0..APPENDS)
         .map(|_| {
-            let source = u32::try_from(rng.below(NODES)).expect("node index fits in u32");
-            let target = u32::try_from(rng.below(NODES)).expect("node index fits in u32");
+            let source = node(rng.below(NODES));
+            let target = node(rng.below(NODES));
             (source, target)
         })
         .collect()
@@ -218,8 +223,8 @@ fn append_list(rng: &mut Rng) -> Vec<(u32, u32)> {
 fn small_edge_list(rng: &mut Rng) -> Vec<(u32, u32)> {
     (0..SMALL_EDGES)
         .map(|_| {
-            let source = u32::try_from(rng.below(SMALL_NODES)).expect("node index fits in u32");
-            let target = u32::try_from(rng.below(SMALL_NODES)).expect("node index fits in u32");
+            let source = node(rng.below(SMALL_NODES));
+            let target = node(rng.below(SMALL_NODES));
             (source, target)
         })
         .collect()
@@ -230,8 +235,8 @@ fn small_edge_list(rng: &mut Rng) -> Vec<(u32, u32)> {
 /// measurement.
 fn build_small(edges: &[(u32, u32)]) -> Graph<u32, ()> {
     let mut graph = Graph::new();
-    for node in 0..SMALL_NODES {
-        graph.add_node(u32::try_from(node).expect("node index fits in u32"));
+    for index in 0..SMALL_NODES {
+        graph.add_node(node(index));
     }
     for &(source, target) in edges {
         graph.add_edge(Id::from_raw(source), Id::from_raw(target), ());
@@ -241,8 +246,8 @@ fn build_small(edges: &[(u32, u32)]) -> Graph<u32, ()> {
 
 fn build_store(edges: &[(u32, u32)]) -> Graph<u32, ()> {
     let mut graph = Graph::with_capacity(NODES, edges.len());
-    for node in 0..NODES {
-        graph.add_node(u32::try_from(node).expect("node index fits in u32"));
+    for index in 0..NODES {
+        graph.add_node(node(index));
     }
     for &(source, target) in edges {
         graph.add_edge(Id::from_raw(source), Id::from_raw(target), ());
@@ -266,7 +271,7 @@ fn milliseconds(nanos: u64) -> String {
     format!("{}.{}", nanos / 1_000_000, (nanos % 1_000_000) / 100_000)
 }
 
-fn report(store: &str, run: &[(&str, Sample)]) {
+fn report(run: &[(&str, Sample)]) {
     for (case, sample) in run {
         if *case == "footprint" && !cfg!(cfglib_bench_alloc) {
             continue;
@@ -274,14 +279,14 @@ fn report(store: &str, run: &[(&str, Sample)]) {
         let millis = milliseconds(sample.nanos);
         if cfg!(cfglib_bench_alloc) {
             println!(
-                "{case:<20} {store:<14} {millis:>10} ms {:>10} allocs {:>13} req {:>13} peak {:>13} resident",
+                "{case:<20} {millis:>10} ms {:>10} allocs {:>13} req {:>13} peak {:>13} resident",
                 sample.allocations,
                 sample.requested_bytes,
                 sample.peak_bytes,
                 sample.resident_bytes
             );
         } else {
-            println!("{case:<20} {store:<14} {millis:>10} ms");
+            println!("{case:<20} {millis:>10} ms");
         }
     }
 }
@@ -385,7 +390,7 @@ fn main() {
     );
 
     let store = fastest((0..REPEATS).map(|_| run_store(&edges, &appends)).collect());
-    report("Graph", &store);
+    report(&store);
 
     let small = small_edge_list(&mut rng);
     println!(
@@ -394,5 +399,5 @@ graph-store: {SMALL_NODES} nodes, {} edges, {SMALL_BUILDS} builds; best of {REPE
         small.len()
     );
     let procedure = fastest((0..REPEATS).map(|_| run_small(&small)).collect());
-    report("Graph", &procedure);
+    report(&procedure);
 }
