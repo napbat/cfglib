@@ -78,7 +78,7 @@ fn the_table_and_the_per_query_frontier_state_one_rule() {
         [head],
         "a loop header is its own frontier"
     );
-    assert!(table.frontier(exit).is_empty());
+    assert_eq!(table.frontier(exit), []);
 }
 
 #[test]
@@ -181,7 +181,7 @@ fn a_frontier_scratch_gives_the_answers_of_a_fresh_one_across_graphs() {
             );
             dominators.iterated_frontier(cfg, &mut shared, [definition], None, &mut reused);
             assert_eq!(reused, fresh);
-            assert!(!reused.is_empty());
+            assert_ne!(reused.len(), 0);
         }
     }
 }

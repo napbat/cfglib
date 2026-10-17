@@ -45,8 +45,8 @@ fn unreachable_code_has_no_loops_however_it_branches() {
     cfg.add_edge(dead_b, dead_a, EdgeKind::Back);
 
     let dom = DominatorTree::compute(&cfg);
-    assert!(find_back_edges(&cfg, &dom).is_empty());
-    assert!(detect_loops_tagged(&cfg, &dom).is_empty());
+    assert_eq!(find_back_edges(&cfg, &dom), Vec::new());
+    assert_eq!(detect_loops_tagged(&cfg, &dom), Vec::new());
     for depths in [block_nesting_depths(&cfg), cfg_block_nesting_depths(&cfg)] {
         assert_eq!(depths, [0; 4]);
     }
@@ -67,7 +67,7 @@ fn a_tagged_irreducible_loop_covers_its_cycle_and_nothing_before_it() {
     cfg.add_edge(y, h, EdgeKind::Back);
 
     let dom = DominatorTree::compute(&cfg);
-    assert!(detect_loops(&cfg, &dom).is_empty());
+    assert_eq!(detect_loops(&cfg, &dom), Vec::new());
     let loops = detect_loops_tagged(&cfg, &dom);
     assert_eq!(loops.len(), 1);
     assert_eq!(loops[0].header, h);
@@ -439,7 +439,7 @@ fn a_back_tag_that_closes_no_cycle_is_not_a_loop() {
     cfg.add_edge(cfg.entry(), sink, EdgeKind::Back);
     let dom = DominatorTree::compute(&cfg);
 
-    assert!(detect_loops_tagged(&cfg, &dom).is_empty());
+    assert_eq!(detect_loops_tagged(&cfg, &dom), Vec::new());
     assert_eq!(cfg_block_nesting_depths(&cfg), [0, 0]);
     assert_eq!(CfgMetrics::compute(&cfg).graph.max_nesting_depth, 0);
 }

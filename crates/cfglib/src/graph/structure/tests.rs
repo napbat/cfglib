@@ -226,9 +226,9 @@ fn unreachable_code_has_no_back_edges() {
     cfg.add_edge(dead_tagged, dead_a, EdgeKind::Back);
 
     let dom = DominatorTree::compute(&cfg);
-    assert!(find_back_edges(&cfg, &dom).is_empty());
-    assert!(find_back_edges_tagged(&cfg, &dom).is_empty());
-    assert!(detect_loops_tagged(&cfg, &dom).is_empty());
+    assert_eq!(find_back_edges(&cfg, &dom), Vec::new());
+    assert_eq!(find_back_edges_tagged(&cfg, &dom), Vec::new());
+    assert_eq!(detect_loops_tagged(&cfg, &dom), Vec::new());
 }
 
 #[test]
@@ -604,8 +604,8 @@ fn a_back_tag_on_an_edge_that_closes_no_cycle_is_not_a_back_edge() {
     cfg.add_edge(cfg.entry(), sink, EdgeKind::Back);
     let dom = DominatorTree::compute(&cfg);
 
-    assert!(find_back_edges_tagged(&cfg, &dom).is_empty());
-    assert!(detect_loops_tagged(&cfg, &dom).is_empty());
+    assert_eq!(find_back_edges_tagged(&cfg, &dom), Vec::new());
+    assert_eq!(detect_loops_tagged(&cfg, &dom), Vec::new());
 }
 
 #[test]

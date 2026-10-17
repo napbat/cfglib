@@ -448,7 +448,10 @@ mod tests {
         let entering = [into_a, into_b][which];
         assert_eq!(cfg.edge(entering).target(), copy);
         assert_eq!(cfg.edge(entering).weight(), entering_before[which]);
-        assert_eq!(*cfg.edge(entering).payload(), Tag(which as u8 + 1));
+        assert_eq!(
+            *cfg.edge(entering).payload(),
+            Tag(u8::try_from(which).expect("two candidates") + 1)
+        );
         assert_eq!(
             cfg.outgoing([a, b][which]).collect::<Vec<_>>(),
             *outgoing,

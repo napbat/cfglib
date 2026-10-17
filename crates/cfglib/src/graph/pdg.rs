@@ -262,7 +262,7 @@ mod tests {
             .edges()
             .filter(|edge| *edge.payload() == DependenceKind::Control)
             .collect();
-        assert!(!control.is_empty());
+        assert_ne!(control.len(), 0);
         for edge in control {
             assert!(
                 matches!(graph.node(edge.source()), DependenceNode::Block(_)),

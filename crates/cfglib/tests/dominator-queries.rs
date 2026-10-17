@@ -61,7 +61,7 @@ fn unreachable_blocks_are_in_no_tree() {
     assert_eq!(dom.level(dead), None);
     assert_eq!(dom.nearest_common_dominator(dead, head), None);
     assert_eq!(dom.nearest_common_dominator_of([dead]), None);
-    assert!(dom.subtree(dead).is_empty());
+    assert_eq!(dom.subtree(dead), []);
     assert_eq!(
         dom.idom(left),
         Some(head),

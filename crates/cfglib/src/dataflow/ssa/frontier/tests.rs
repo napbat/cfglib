@@ -201,10 +201,7 @@ fn dead_code_has_no_frontier_even_when_it_branches_into_live_code() {
     // branches into the entry. A frontier is a property of code that runs.
     let graph = adjacency(4, &[(0, 1), (2, 1), (3, 0)]);
     let table = DominanceFrontiers::compute(&graph, &DominatorTree::compute(&graph));
-    assert_eq!(
-        frontier_indices(&table, 4),
-        [vec![], vec![], vec![], vec![]]
-    );
+    assert_eq!(frontier_indices(&table, 4), vec![Vec::<u32>::new(); 4]);
 }
 
 /// Every digraph on up to four nodes, self-loops included, as a node count
