@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use cfglib::{PhiWebs, SsaForm, SsaValue};
 
 use crate::machine::Reg;
-use crate::programs::{analyze, corpus, dead_phi_diamond};
+use crate::programs::{analyze, corpus, dead_phi_diamond, entry_swap_loop};
 
 fn root(parent: &mut [usize], mut node: usize) -> usize {
     while parent[node] != node {
@@ -55,7 +55,9 @@ fn phi_pairs(
         .flat_map(|(_, phi)| {
             phi.operands()
                 .iter()
-                .map(|(_, operand)| (phi.result.clone(), operand.clone()))
+                .map(|(_, operand)| operand.clone())
+                .chain(phi.start_value())
+                .map(|operand| (phi.result.clone(), operand))
                 .collect::<Vec<_>>()
         })
         .collect()
@@ -80,6 +82,7 @@ fn live_phi_results(ssa: &SsaForm<Reg>) -> BTreeSet<SsaValue<Reg>> {
                 phi.operands()
                     .iter()
                     .map(|(_, value)| value.clone())
+                    .chain(phi.start_value())
                     .collect(),
             )
         })
@@ -130,11 +133,16 @@ fn a_web_index_names_the_web_holding_the_value() {
             }
             for (_, phi) in ssa.phis() {
                 if let Some(&web) = webs.web_of.get(&phi.result) {
-                    for (_, operand) in phi.operands() {
+                    let inputs = phi
+                        .operands()
+                        .iter()
+                        .map(|(_, operand)| operand.clone())
+                        .chain(phi.start_value());
+                    for operand in inputs {
                         assert_eq!(
-                            webs.web_of.get(operand),
+                            webs.web_of.get(&operand),
                             Some(&web),
-                            "{name}: operand of {:?}",
+                            "{name}: input of {:?}",
                             phi.result
                         );
                     }
@@ -179,4 +187,29 @@ fn a_dead_phi_forms_a_web_only_when_dead_phis_are_included() {
     assert!(!live.web_of.contains_key(&dead.result));
     // The live phi of `x` still forms a web of its own.
     assert_eq!(live.webs.len(), 1);
+}
+
+#[test]
+fn a_start_value_is_in_the_web_of_the_phi_it_feeds() {
+    let program = entry_swap_loop();
+    let ssa = analyze(&program.cfg);
+    let entry = program.cfg.entry();
+    let phis = &ssa.block(entry).phis;
+    assert!(!phis.is_empty(), "the entry merges the loop's registers");
+
+    for webs in [PhiWebs::compute(&ssa), PhiWebs::compute_live(&ssa)] {
+        let x = phis
+            .iter()
+            .find(|phi| phi.result.variable == Reg("x"))
+            .expect("the swap merges x at the entry");
+        let web = &webs.webs[webs.web_of[&x.result]];
+        assert!(
+            web.values.contains(&SsaValue::live_in(Reg("x"))),
+            "the register's value at function start is one of its web's values: {web:?}"
+        );
+        assert!(
+            web.values.contains(&x.operands()[0].1),
+            "so is the value the back edge carries"
+        );
+    }
 }

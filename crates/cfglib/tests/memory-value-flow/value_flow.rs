@@ -7,8 +7,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cfglib::{
-    BlockId, Cfg, ConservativeMemoryAlias, DominatorTree, ExactMemoryAlias, MemoryAccess,
-    MemoryEvent, MemoryEventSite, MemorySSA, MemoryValueEdge, MemoryValueFlow,
+    BlockId, Cfg, ConservativeMemoryAlias, DominatorTree, EdgeKind, ExactMemoryAlias, MemoryAccess,
+    MemoryEvent, MemoryEventSite, MemorySsa, MemoryValueEdge, MemoryValueFlow,
     MemoryValueFlowError, MemoryValueFlowScratch, MemoryValueNode, MemoryValueRole, NodeId,
     ProgramPoint, SsaForm, SsaValue,
 };
@@ -16,7 +16,7 @@ use cfglib::{
 use crate::machine::{Barrier, Inst, Program, Rng, chain, diamond};
 use crate::oracle::{Reaching, alias_classes, explore};
 
-type Memory = MemorySSA<u8, u8, Barrier>;
+type Memory = MemorySsa<u8, u8, Barrier>;
 type Flow = MemoryValueFlow<u8>;
 type Node = MemoryValueNode<u8>;
 /// The events that store (or load) each ordinary value.
@@ -40,7 +40,7 @@ fn analyze<A: cfglib::MemoryAlias<u8> + ?Sized>(
     alias: &A,
 ) -> (SsaForm<u8>, Memory, Flow) {
     let ssa = SsaForm::compute(cfg, &DominatorTree::compute(cfg));
-    let memory = MemorySSA::compute(cfg, alias);
+    let memory = MemorySsa::compute(cfg, alias);
     let flow = MemoryValueFlow::compute(&memory, &ssa).expect("a consistent program");
     (ssa, memory, flow)
 }
@@ -73,6 +73,7 @@ fn memory_carries(flow: &Flow, from: NodeId, to: NodeId) -> bool {
             MemoryValueEdge::Store { .. }
                 | MemoryValueEdge::Write { .. }
                 | MemoryValueEdge::MemoryPhi { .. }
+                | MemoryValueEdge::MemoryPhiStart { .. }
                 | MemoryValueEdge::Read { .. }
                 | MemoryValueEdge::Load { .. }
         ) {
@@ -164,6 +165,101 @@ fn a_store_and_a_load_connect_the_stored_value_to_the_loaded_one_through_the_mem
         flow.event_node(site(0, 0)).is_none(),
         "a pure instruction has no event node"
     );
+}
+
+#[test]
+fn the_start_values_of_a_loop_headed_by_the_entry_enter_the_phis_over_start_edges() {
+    // entry (header): v2 = x;   latch: v1 = ...; x = v1; back to the entry.
+    // The entry merges v1, v2, and the state of x with what the function
+    // starts with, which no CFG edge carries.
+    let mut cfg = Cfg::new();
+    let (latch, exit) = (cfg.new_block(), cfg.new_block());
+    let entry = cfg.entry();
+    cfg.add_edge(entry, latch, EdgeKind::ConditionalTrue);
+    cfg.add_edge(entry, exit, EdgeKind::ConditionalFalse);
+    cfg.add_edge(latch, entry, EdgeKind::Back);
+    cfg.block_mut(entry).push(Inst::load(0, 2));
+    cfg.block_mut(latch).push(Inst::compute(1, &[]));
+    cfg.block_mut(latch).push(Inst::store(0, 1));
+    let (_, memory, flow) = analyze(&cfg, &ExactMemoryAlias);
+    let class = memory.class_of(&0).unwrap();
+    let state = |version| MemoryValueNode::Memory(SsaValue::new(class, version));
+    let (load, store) = (site(0, 0), site(1, 1));
+    let end_of_latch = point(1, 2);
+    let at_entry = BlockId::from_index(0);
+
+    assert_eq!(
+        edges(&flow),
+        BTreeSet::from([
+            (
+                value(1, 0),
+                value(1, 1),
+                MemoryValueEdge::ValuePhiStart { block: at_entry }
+            ),
+            (
+                value(2, 0),
+                value(2, 1),
+                MemoryValueEdge::ValuePhiStart { block: at_entry }
+            ),
+            (
+                value(1, 2),
+                value(1, 1),
+                MemoryValueEdge::ValuePhi {
+                    block: at_entry,
+                    predecessor: end_of_latch
+                }
+            ),
+            (
+                value(2, 2),
+                value(2, 1),
+                MemoryValueEdge::ValuePhi {
+                    block: at_entry,
+                    predecessor: end_of_latch
+                }
+            ),
+            (
+                state(0),
+                state(1),
+                MemoryValueEdge::MemoryPhiStart { block: at_entry }
+            ),
+            (
+                state(2),
+                state(1),
+                MemoryValueEdge::MemoryPhi {
+                    block: at_entry,
+                    predecessor: end_of_latch
+                }
+            ),
+            (
+                state(1),
+                MemoryValueNode::Event(load),
+                MemoryValueEdge::Read { site: load }
+            ),
+            (
+                MemoryValueNode::Event(load),
+                value(2, 2),
+                MemoryValueEdge::Load {
+                    site: load,
+                    output_index: 0
+                }
+            ),
+            (
+                value(1, 2),
+                MemoryValueNode::Event(store),
+                MemoryValueEdge::Store {
+                    site: store,
+                    input_index: 0
+                }
+            ),
+            (
+                MemoryValueNode::Event(store),
+                state(2),
+                MemoryValueEdge::Write { site: store }
+            ),
+        ]),
+        "the start values have their own edges, apart from the departures"
+    );
+    assert!(carries(&flow, &SsaValue::new(1, 2), &SsaValue::new(2, 2)));
 }
 
 #[test]
@@ -351,7 +447,7 @@ fn a_declared_variable_the_instruction_does_not_expose_is_a_structured_error() {
     let analyze_one = |inst: Inst<u8>| {
         let cfg = chain(vec![vec![inst]]);
         let ssa = SsaForm::compute(&cfg, &DominatorTree::compute(&cfg));
-        let memory: Memory = MemorySSA::compute(&cfg, &ExactMemoryAlias);
+        let memory: Memory = MemorySsa::compute(&cfg, &ExactMemoryAlias);
         MemoryValueFlow::compute(&memory, &ssa).map(|_| ())
     };
     let here = site(0, 0);
@@ -402,7 +498,7 @@ fn an_ssa_form_that_does_not_describe_the_event_is_reported_by_event() {
         Inst::load(0, 2),
     ]]);
     let small = chain(vec![vec![Inst::<u8>::compute(1, &[])]]);
-    let memory: Memory = MemorySSA::compute(&big, &ExactMemoryAlias);
+    let memory: Memory = MemorySsa::compute(&big, &ExactMemoryAlias);
     let ssa = SsaForm::compute(&small, &DominatorTree::compute(&small));
     assert_eq!(
         MemoryValueFlow::compute(&memory, &ssa).map(|_| ()),
@@ -419,7 +515,7 @@ fn flow_errors_are_ordinary_errors_and_a_scratch_survives_one() {
     );
     let broken = chain(vec![vec![bad]]);
     let ssa = SsaForm::compute(&broken, &DominatorTree::compute(&broken));
-    let memory: Memory = MemorySSA::compute(&broken, &ExactMemoryAlias);
+    let memory: Memory = MemorySsa::compute(&broken, &ExactMemoryAlias);
     let mut scratch = MemoryValueFlowScratch::new();
     let error = MemoryValueFlow::compute_in(&mut scratch, &memory, &ssa)
         .map(|_| ())
@@ -445,7 +541,7 @@ fn flow_errors_are_ordinary_errors_and_a_scratch_survives_one() {
         Inst::load(0, 2),
     ]]);
     let ssa = SsaForm::compute(&good, &DominatorTree::compute(&good));
-    let memory: Memory = MemorySSA::compute(&good, &ExactMemoryAlias);
+    let memory: Memory = MemorySsa::compute(&good, &ExactMemoryAlias);
     let reused = MemoryValueFlow::compute_in(&mut scratch, &memory, &ssa).unwrap();
     assert_eq!(reused, MemoryValueFlow::compute(&memory, &ssa).unwrap());
 }

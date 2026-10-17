@@ -370,12 +370,12 @@ The contract has two rules. `instructions` accepts every identity that `node_ids
 
 The view has no separate exception model. An edge of kind `EdgeKind::ExceptionUnwind` leaves its source block before a throwing instruction. `InstrInfo::may_unwind` marks the throwing instructions of a block. `departs_before_throws` combines the two.
 
-These analyses take `&G` where `G: CfgView`: `ReachingDefs`, `Liveness`, `DefUseChains`, `SsaForm`, `PhiPlacements`, `constant_propagation`, `SccpAnalysis`, `abstract_interpret`, `MemoryTrace`, `MemorySSA`, `DeadCode`, `recover_expressions`, `ValueNumbering`, `BlockValueNumbers`, `cfg_purity`, `CfgMetrics`, `detect_cfg_patterns`, `CfgProfile`, `detect_tail_calls`, and `detect_switch_tables`. The problems `LivenessProblem`, `SeededLivenessProblem`, `ReachingDefsProblem`, and `ConstPropProblem` also run on every `CfgView`. A transform that edits the graph still takes `&mut Cfg`.
+These analyses take `&G` where `G: CfgView`: `ReachingDefs`, `Liveness`, `DefUseChains`, `SsaForm`, `PhiPlacements`, `ConstantPropagation`, `SccpAnalysis`, `AbstractFacts`, `MemoryTrace`, `MemorySsa`, `DeadCode`, `recover_expressions`, `ValueNumbering`, `BlockValueNumbers`, `cfg_purity`, `CfgMetrics`, `detect_cfg_patterns`, `CfgProfile`, `detect_tail_calls`, and `detect_switch_tables`. The problems `LivenessProblem`, `SeededLivenessProblem`, `ReachingDefsProblem`, and `ConstPropProblem` also run on every `CfgView`. A transform that edits the graph still takes `&mut Cfg`.
 
 | Analysis | Function / Type | Description |
 |---|---|---|
-| Generic fixpoint solver | `solve_problem[_from][_with_config]`, `Problem` / `TryProblem` traits | Forward or backward, any lattice type; the block, node, and edge solvers carry the same seeded/bounded/fallible matrix over shared `SolveConfig` and `SolveError`, and run on one worklist; `meet_options` lifts any lattice to `Option<F>` with `None` as unreachable bottom |
-| Node-level fixpoint | `solve_node_problem[_from][_with_config]`, `NodeProblem` / `TryNodeProblem` traits | Per-node facts over any graph view (taint, reachability-with-facts) |
+| Generic fixpoint solver | `solve_problem[_from][_with_config]`, `Problem` / `TryProblem` traits, `Facts` | Forward or backward, any lattice type; the block, node, and edge solvers carry the same seeded/bounded/fallible matrix over shared `SolveConfig` and `SolveError`, run on one worklist, and report node facts in one program-order `Facts` type (a backward node's IN is what its transfer produced); every problem names its starting fact `boundary`; `meet_options` lifts any lattice to `Option<F>` with `None` as unreachable bottom |
+| Node-level fixpoint | `solve_node_problem[_from][_with_config]`, `NodeProblem` / `TryNodeProblem` traits | Per-node `Facts` over any graph view (taint, reachability-with-facts) |
 | Edge-sensitive fixpoint | `solve_edge_problem[_from][_with_config]`, `EdgeProblem` trait | Full or seeded, optionally bounded, per-edge transfer over any edge view; stable id/data plus physical node pre/post states and deterministic bounded-solve errors |
 | Fallible edge-sensitive fixpoint | `try_solve_edge_problem[_from][_with_config]`, `TryEdgeProblem` trait | Preserves consumer boundary, merge, node-transfer, and edge-transfer errors separately from solver limits |
 | Reachability-lifted edge analysis | `Reachable` + `ReachableEdgeProblem` trait | Verification-style analyses over `Option` facts: `None` is unreached bottom, transfers short-circuit, entry facts start the flow, and each edge chooses pre- or post-state (exceptional edges observe the state the node received) |
@@ -383,20 +383,20 @@ These analyses take `&G` where `G: CfgView`: `ReachingDefs`, `Liveness`, `DefUse
 | Reaching definitions | `ReachingDefs::compute` | Which writes reach each point; an `ExceptionUnwind` edge carries only the writes completed before each instruction that `InstrInfo::may_unwind` |
 | Liveness | `Liveness::compute` | Live-in / normal-completion live-out at each block; `live_on_unwind` is what unwind successors read before each throwing instruction; `live_before_instructions` / `live_after_instructions` replay the block transfer for instruction-granular sets (dead-store detection) |
 | Def-use / use-def chains | `DefUseChains::compute` | Bidirectional def↔use links; dead-def detection |
-| SSA construction | `SsaForm::compute` | IDF phi placement plus full dominator-forest renaming, including disconnected handler/dead-code components; each phi operand names its departure point, so an unwind contributes the value before each throwing instruction |
+| SSA construction | `SsaForm::compute` | IDF phi placement plus full dominator-forest renaming, including disconnected handler/dead-code components; each phi operand names its departure point, so an unwind contributes the value before each throwing instruction. An entry block that is a branch target is supported: its phis also merge the value the variable holds when the function starts, reported by `SsaPhi::start_value` apart from the edge operands |
 | Reusable SSA scratch | `SsaForm::compute_in` + `SsaScratch` | The same form with every working buffer caller-owned — frontiers, definition lists, renaming stacks, phi drafts, the walk's own stacks — leaving only the form itself allocated per procedure |
-| Phi placement | `PhiPlacements::compute` | Structural IDF phase for consumers that only need placement |
-| SSA deconstruction | `eliminate_phis`, `copies_by_predecessor` | φ-to-copy lowering |
-| Phi webs | `PhiWebs::compute` | Congruence classes for register coalescing |
-| Constant propagation | `constant_propagation`, `ConstantFolder` (associated `Const`) | Top/Const/Bottom lattice over a consumer constant domain — machine words, strings, bools, float bits; an unwind carries the constants known before each throwing instruction |
-| Sparse conditional constant propagation | `SccpAnalysis::compute` | SSA-based, marks unreachable edges |
-| Copy and value-alias propagation | `copy_propagation[_with_exits]`, `alias_propagation`, `CopySource` trait | Guarded chain resolution and dead transfer removal; pairwise aliases may refine types or metadata without changing runtime values. The `_with_exits` form keeps a copy whose definition is live at an exit — a function whose result is only ever a copy of an input otherwise loses the definition a caller reads back — while still rewriting that copy's readers inside the function. A transfer at or after a throwing instruction never substitutes into code its unwind reaches |
+| Phi placement | `PhiPlacements::compute` | Structural IDF phase for consumers that only need placement; `PhiPlacement::merges_start_value` marks the phis of a branch-target entry |
+| SSA deconstruction | `eliminate_phis`, `copies_by_predecessor` | φ-to-copy lowering; each `PhiCopy::from` is a `PhiCopyOrigin`, either the CFG edge departure the copy runs on or `FunctionStart` for the once-only copy of a start value, which no edge carries |
+| Phi webs | `PhiWebs::compute` | Congruence classes for register coalescing; a start value joins the web of the phi it feeds |
+| Constant propagation | `ConstantPropagation::compute`, `ConstantFolder` (associated `Const`) | Top/Const/Bottom lattice over a consumer constant domain — machine words, strings, bools, float bits; an unwind carries the constants known before each throwing instruction |
+| Sparse conditional constant propagation | `SccpAnalysis::compute` | SSA-based, marks unreachable edges; a start value is always executable and is the live-in seed, or `Bottom` |
+| Copy and value-alias propagation | `copy_propagation[_with_exits]`, `alias_propagation[_with_exits]`, `PropagationStats`, `CopySource` trait | Guarded chain resolution and dead transfer removal; pairwise aliases may refine types or metadata without changing runtime values. The `_with_exits` form keeps a copy whose definition is live at an exit — a function whose result is only ever a copy of an input otherwise loses the definition a caller reads back — while still rewriting that copy's readers inside the function. A transfer at or after a throwing instruction never substitutes into code its unwind reaches |
 | Memory-event trace | `MemoryTrace::compute`, `MemoryEventInfo` trait | Ordered, location-typed reads, writes, read/modify/write accesses, address-variable dependencies, and fences; instruction summaries distinguish separate read+write from compound modification |
-| Reusable memory-SSA scratch | `MemorySSA::compute_in` + `MemorySsaScratch` | The same answer with the event trace, the alias merge, and the shadow CFG's dominator and SSA buffers caller-owned |
-| Memory SSA | `dataflow::memory::MemorySSA::compute`, `MemoryAlias` trait | Event-driven SSA per may-alias location class: loop/branch φ-nodes, reaching writes and clobbers, bidirectional def-use chains, transitive readers, and ordinary-SSA address inputs; an unwind observes the memory state before each throwing instruction |
+| Reusable memory-SSA scratch | `MemorySsa::compute_in` + `MemorySsaScratch` | The same answer with the event trace, the alias merge, and the shadow CFG's dominator and SSA buffers caller-owned |
+| Memory SSA | `dataflow::memory::MemorySsa::compute`, `MemoryAlias` trait | Event-driven SSA per may-alias location class: loop/branch φ-nodes, reaching writes and clobbers, bidirectional def-use chains, transitive readers, and ordinary-SSA address inputs; an unwind observes the memory state before each throwing instruction; an entry block that is a branch target is supported, and its memory phis report the state the function starts with as `MemoryPhi::start_value`, used through `MemoryUse::PhiStart`, apart from the edge operands |
 | Reusable value-flow scratch | `MemoryValueFlow::compute_in` + `MemoryValueFlowScratch` | The same graph with the per-event address/stored/loaded resolution buffers caller-owned |
-| Memory value flow | `dataflow::memory::MemoryValueFlow::compute` | One graph over ordinary SSA values, versioned memory states, and exact events; typed address/store/read/write/load and ordinary/memory-phi edges retain the complete transfer path |
-| Abstract interpretation | `abstract_interpret`, `AbstractDomain` trait | Generic abstract domain framework on the edge-sensitive solver; an unwind carries the state before each throwing instruction |
+| Memory value flow | `dataflow::memory::MemoryValueFlow::compute` | One graph over ordinary SSA values, versioned memory states, and exact events; typed address/store/read/write/load and ordinary/memory-phi edges retain the complete transfer path; the start values of a branch-target entry's phis enter over their own `ValuePhiStart` and `MemoryPhiStart` edges, never as an edge departure |
+| Abstract interpretation | `AbstractFacts::compute`, `AbstractDomain` + `Lattice` traits | Generic abstract domain framework on the edge-sensitive solver; a domain supplies `bottom` and `meet` and a per-instruction transfer; an unwind carries the state before each throwing instruction |
 
 ### Higher-level analyses
 
@@ -502,7 +502,7 @@ InstrInfo<Variable = V>   (optional — native IR variables, defs/uses)
 ├── ValueNumberInfo       (value numbering, PRE — associated Operator)
 └── MemoryEventInfo       (locations, address uses, access kinds, and fences — associated Location, Fence)
 
-MemoryAlias<Location>     (optional may-alias oracle consumed by MemorySSA)
+MemoryAlias<Location>     (optional may-alias oracle consumed by MemorySsa)
 
 DisplayInstr              (rendering only — DOT and text)
 CallInfo                  (call graphs, explicit tail calls — associated Callee)
@@ -528,7 +528,7 @@ The `ir` traits follow the same rule. The consumer implements `ir::rtl::Function
 Directional `MemoryAccess::read`, `write`, and `read_modify_write`
 constructors keep loaded definitions, stored uses, and address uses distinct
 (`MemoryAccess::opaque` covers table-driven kinds with unknown values);
-events also retain exact locations, atomicity, and ordered fences. `MemorySSA`
+events also retain exact locations, atomicity, and ordered fences. `MemorySsa`
 in `dataflow::memory` merges locations through the caller-provided
 `MemoryAlias` relation, then exposes loop-correct reaching definitions,
 clobbered states, users, and transitive readers. `MemoryValueFlow` combines it
@@ -597,7 +597,7 @@ let dominators = DominatorTree::compute(&cfg);
 let ssa = SsaForm::compute(&cfg, &dominators);
 ```
 
-`SsaForm<V>` is a non-mutating view over the source CFG. It stores renamed phi results, operands, instruction uses, and instruction definitions as `SsaValue<V>`, while each `SsaInstruction` keeps a `ProgramPoint` back to the native instruction. Read the lists through `SsaPhi::operands`, `SsaInstruction::uses`, and `SsaInstruction::defs`, which return slices; a record holds a short list inline, so a typical instruction or two-way phi costs no allocation of its own. `PhiPlacement::predecessors` follows the same shape. Version `0` denotes a live-in or otherwise undefined incoming value.
+`SsaForm<V>` is a non-mutating view over the source CFG. It stores renamed phi results, operands, instruction uses, and instruction definitions as `SsaValue<V>`, while each `SsaInstruction` keeps a `ProgramPoint` back to the native instruction. Read the lists through `SsaPhi::operands`, `SsaInstruction::uses`, and `SsaInstruction::defs`, which return slices; a record holds a short list inline, so a typical instruction or two-way phi costs no allocation of its own. `PhiPlacement::predecessors` follows the same shape. Version `0` denotes a live-in or otherwise undefined incoming value. `SsaPhi::operands` lists only the values that arrive along CFG edges, each named by its departure point. A phi in an entry block that is a branch target (a loop whose header is the first instruction) also merges the value the variable holds when the function starts, which no edge carries; read it through `SsaPhi::start_value`, and handle it wherever the operands are consumed, since it arrives once before the entry block runs.
 
 For an IR adapter, implement the `ir::rtl` or `ir::mlil` traits on your own dense storage. Keep every arena, builder, and editing pass in your crate. Call the facts of cfglib on your function view, and apply their answers yourself. A machine-shaped language emits `ir::rtl` records through `InstructionBuilder`. A consumer that builds a block-parameter form from those records uses `ParamPlacement` to find where each root needs a parameter. A variable-shaped language implements `ir::mlil::FunctionView` directly. The consumer writes its own value analyses over that view, because they depend on the semantics of its dialect, and its own passes delete or rewrite instructions.
 

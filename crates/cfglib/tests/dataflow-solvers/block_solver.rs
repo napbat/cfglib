@@ -7,10 +7,10 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use cfglib::{
-    BlockId, Cfg, DenseId, Direction, Problem, RootedView, SolveConfig, SolveError, TryProblem,
-    TrySolveError, meet_options, solve_problem, solve_problem_from, solve_problem_from_with_config,
-    solve_problem_with_config, try_solve_problem, try_solve_problem_from,
-    try_solve_problem_from_with_config, try_solve_problem_with_config,
+    BlockId, Cfg, DenseId, Direction, NodeProblem, Problem, RootedView, SolveConfig, SolveError,
+    TryProblem, TrySolveError, meet_options, solve_node_problem, solve_problem, solve_problem_from,
+    solve_problem_from_with_config, solve_problem_with_config, try_solve_problem,
+    try_solve_problem_from, try_solve_problem_from_with_config, try_solve_problem_with_config,
 };
 
 use crate::graphs::{GenKill, Rng, Shape, intersection, union};
@@ -37,11 +37,11 @@ impl<V: RootedView> Problem<V> for May<'_> {
         self.direction
     }
 
-    fn bottom(&self) -> Self::Fact {
+    fn bottom(&self, _view: &V) -> Self::Fact {
         BTreeSet::new()
     }
 
-    fn entry_fact(&self) -> Self::Fact {
+    fn boundary(&self, _view: &V) -> Self::Fact {
         boundary()
     }
 
@@ -67,11 +67,11 @@ impl<V: RootedView> Problem<V> for Must<'_> {
         Direction::Forward
     }
 
-    fn bottom(&self) -> Self::Fact {
+    fn bottom(&self, _view: &V) -> Self::Fact {
         None
     }
 
-    fn entry_fact(&self) -> Self::Fact {
+    fn boundary(&self, _view: &V) -> Self::Fact {
         Some(boundary())
     }
 
@@ -183,6 +183,87 @@ fn forward_must_analysis_lifted_with_meet_options_matches_the_reference() {
             );
         }
     }
+}
+
+/// The gen/kill problem of [`May`] stated as a node problem over the same CFG.
+struct MayNodes<'a> {
+    effects: &'a GenKill,
+    direction: Direction,
+}
+
+impl NodeProblem<Cfg<()>> for MayNodes<'_> {
+    type Fact = BTreeSet<u8>;
+
+    fn direction(&self) -> Direction {
+        self.direction
+    }
+
+    fn bottom(&self, _graph: &Cfg<()>) -> Self::Fact {
+        BTreeSet::new()
+    }
+
+    fn boundary(&self, _graph: &Cfg<()>) -> Self::Fact {
+        boundary()
+    }
+
+    fn meet(&self, a: &Self::Fact, b: &Self::Fact) -> Self::Fact {
+        union(a, b)
+    }
+
+    fn transfer(&self, _graph: &Cfg<()>, node: BlockId, input: &Self::Fact) -> Self::Fact {
+        self.effects.apply(node.index(), input)
+    }
+}
+
+#[test]
+fn the_block_and_node_solvers_report_the_same_facts_in_program_order() {
+    let mut rng = Rng::new(13);
+    for _ in 0..300 {
+        // Backward, both solvers start from every live block and treat a
+        // block without successors as the boundary, so the whole result is
+        // equal, steps included.
+        let shape = Shape::random(&mut rng, false, false);
+        let effects = GenKill::random(&mut rng, shape.blocks);
+        let cfg = shape.cfg();
+        let direction = Direction::Backward;
+        let by_block = solve_problem(
+            &cfg,
+            &May {
+                effects: &effects,
+                direction,
+            },
+        )
+        .unwrap();
+        let by_node = solve_node_problem(
+            &cfg,
+            &MayNodes {
+                effects: &effects,
+                direction,
+            },
+        )
+        .unwrap();
+        assert_eq!(by_block, by_node, "{shape:?}");
+    }
+    // Forward, on a loop every block of which the entry reaches.
+    let (cfg, effects) = loop_graph();
+    let direction = Direction::Forward;
+    let by_block = solve_problem(
+        &cfg,
+        &May {
+            effects: &effects,
+            direction,
+        },
+    )
+    .unwrap();
+    let by_node = solve_node_problem(
+        &cfg,
+        &MayNodes {
+            effects: &effects,
+            direction,
+        },
+    )
+    .unwrap();
+    assert_eq!(by_block, by_node);
 }
 
 #[test]
@@ -454,18 +535,24 @@ impl<V: RootedView> TryProblem<V> for Fallible<'_> {
         Direction::Forward
     }
 
-    fn bottom(&self) -> Self::Fact {
+    fn bottom(&self, _view: &V) -> Self::Fact {
         BTreeSet::new()
     }
 
-    fn entry_fact(&self) -> Result<Self::Fact, Refusal> {
+    fn boundary(&self, _view: &V) -> Result<Self::Fact, Refusal> {
         match self.refusal {
             Some(Refusal::Entry) => Err(Refusal::Entry),
             _ => Ok(boundary()),
         }
     }
 
-    fn meet(&self, a: &Self::Fact, b: &Self::Fact) -> Result<Self::Fact, Refusal> {
+    fn meet(
+        &self,
+        _view: &V,
+        _block: V::NodeId,
+        a: &Self::Fact,
+        b: &Self::Fact,
+    ) -> Result<Self::Fact, Refusal> {
         match self.refusal {
             Some(Refusal::Meet) => Err(Refusal::Meet),
             _ => Ok(union(a, b)),

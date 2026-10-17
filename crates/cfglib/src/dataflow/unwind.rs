@@ -42,7 +42,7 @@ pub(crate) fn unwind_edges<V: CfgView>(
 /// an unwind out of a block that reports no throwing instruction, departs
 /// after the block's last instruction.
 ///
-/// The rule is the same for memory: [`MemorySSA`](crate::MemorySSA) carries
+/// The rule is the same for memory: [`MemorySsa`](crate::MemorySsa) carries
 /// the memory state before the throwing instruction, so the write of a
 /// faulting instruction never reaches the handler. An adapter models a write
 /// that commits before an unwind as an instruction of its own, ahead of the

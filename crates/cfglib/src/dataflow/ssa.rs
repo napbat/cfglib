@@ -4,8 +4,13 @@
 //! concrete instruction type that a [`CfgView`] holds. An [`InstrInfo`] adapter
 //! supplies its native variable identity, and [`SsaForm::compute`] produces
 //! renamed definitions, uses, and phi operands keyed by [`ProgramPoint`]. The
-//! original
-//! instructions remain untouched and can be recovered from the source CFG.
+//! original instructions remain untouched and can be recovered from the
+//! source CFG.
+//!
+//! A phi merges the value on each CFG edge into its block
+//! ([`SsaPhi::operands`]). A phi in an entry block that is a branch target
+//! also merges the value the variable holds when the function starts
+//! ([`SsaPhi::start_value`]), which no edge carries.
 //!
 //! Construction runs in four phases, one module each: the dominance forest
 //! that gives unreachable code its own roots, the dominance frontier table,
@@ -59,8 +64,9 @@ type Operands<V> = SmallVec<[(ProgramPoint, SsaValue<V>); INLINE_OPERANDS]>;
 /// A source-IR variable qualified by an SSA version.
 ///
 /// Version `0` represents the value entering a dominator-tree root before any
-/// definition in that root's region. Positive versions are produced by phis
-/// and instruction definitions.
+/// definition in that root's region: for the CFG entry, the value the
+/// variable holds when the function starts. Positive versions are produced by
+/// phis and instruction definitions.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SsaValue<V> {
     /// Source-IR variable identity.
@@ -90,16 +96,34 @@ impl<V> SsaValue<V> {
 }
 
 /// A fully renamed SSA phi.
+///
+/// A phi merges two kinds of input, and they are kept apart on purpose:
+///
+/// - the value that arrives along each CFG edge into its block, listed by
+///   [`operands`](Self::operands) and each named by the departure point it
+///   leaves; and
+/// - the value the variable holds when the function starts, which no edge
+///   carries, reported by [`start_value`](Self::start_value).
+///
+/// Only a phi in the CFG entry block has the second input, and only when the
+/// entry is a branch target: a loop whose header is the entry is entered once
+/// from outside the function and then again along its back edges. Every other
+/// phi has no start value, because every way into its block is an edge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SsaPhi<V> {
     /// SSA value defined by the phi.
     pub result: SsaValue<V>,
     operands: Operands<V>,
+    merges_start: bool,
 }
 
 impl<V> SsaPhi<V> {
     /// Incoming values and their departure points in CFG predecessors, in
     /// CFG predecessor order.
+    ///
+    /// These are the edge operands only. A phi in a branch-target entry also
+    /// merges [`start_value`](Self::start_value), which is not listed here
+    /// because it has no departure point.
     ///
     /// An [`ExceptionUnwind`](crate::EdgeKind::ExceptionUnwind) edge
     /// contributes one operand per throwing instruction of its source, named
@@ -110,6 +134,31 @@ impl<V> SsaPhi<V> {
     #[must_use]
     pub fn operands(&self) -> &[(ProgramPoint, SsaValue<V>)] {
         &self.operands
+    }
+
+    /// Whether this phi also merges the value its variable holds when the
+    /// function starts; see [`start_value`](Self::start_value).
+    #[must_use]
+    pub const fn merges_start_value(&self) -> bool {
+        self.merges_start
+    }
+}
+
+impl<V: Clone> SsaPhi<V> {
+    /// The value the variable holds when the function starts: the
+    /// version-zero live-in, or `None` when the phi has no such input.
+    ///
+    /// The input exists exactly when this phi sits in the CFG entry block,
+    /// which is then a branch target. The function begins at the top of the
+    /// entry block without crossing an edge, so no departure point in
+    /// [`operands`](Self::operands) can name this value, and a consumer that
+    /// reads only those operands drops it. It arrives once, before the entry
+    /// block's first instruction; the operands arrive on every later
+    /// iteration.
+    #[must_use]
+    pub fn start_value(&self) -> Option<SsaValue<V>> {
+        self.merges_start
+            .then(|| SsaValue::live_in(self.result.variable.clone()))
     }
 }
 
@@ -277,17 +326,6 @@ impl<V: VariableId> SsaForm<V> {
     }
 }
 
-/// Panics unless `cfg`'s entry has no predecessor, which every SSA
-/// construction entry point requires; see [`SsaForm::compute`].
-pub(crate) fn assert_entry_is_not_a_branch_target<G: CfgView>(cfg: &G) {
-    assert!(
-        cfg.predecessors(cfg.root()).next().is_none(),
-        "SSA construction needs an entry block with no predecessor, but {} is a branch target: \
-         add an empty block that falls through to it and make that block the entry",
-        cfg.root()
-    );
-}
-
 impl<V: VariableId> SsaForm<V> {
     /// Compute a fully renamed SSA view of `cfg`.
     ///
@@ -299,21 +337,21 @@ impl<V: VariableId> SsaForm<V> {
     /// definitions still flow through unreachable handler/dead-code chains
     /// without inheriting values from the ordinary entry component.
     ///
-    /// # Panics
+    /// # An entry that is a branch target
     ///
-    /// Panics when the entry block is a branch target. A phi placed at the
-    /// entry (the entry doubling as a loop header) merges only the values
-    /// that arrive along predecessor edges, and the value entering the
-    /// function has no edge to name, so the version-`0` live-in would be
-    /// dropped from the web without any error. A CFG recovered from an
-    /// address stream (`build_address_cfg`) has this shape when the
-    /// function's first instruction is a branch target.
+    /// The entry block may have predecessors: a loop whose header is the
+    /// entry, which a CFG recovered from an address stream
+    /// ([`build_address_cfg`](crate::build_address_cfg)) has when the
+    /// function's first instruction is a branch target. Each phi placed at
+    /// the entry merges the value on every CFG edge into it, listed by
+    /// [`SsaPhi::operands`], and the value the variable holds when the
+    /// function starts, reported by [`SsaPhi::start_value`]. A read in the
+    /// entry block sees the phi, as in any loop header. A consumer of phi
+    /// operands must handle the start value as well: it has no departure
+    /// point and arrives before the entry block runs, not along an edge.
     ///
-    /// [`insert_preheader`](crate::insert_preheader) cannot repair it, since
-    /// the loop has no predecessor outside it to redirect. Add an empty
-    /// block that falls through to the old entry and make it the entry
-    /// ([`Cfg::set_entry`](crate::Cfg::set_entry)); the old entry is then an
-    /// ordinary loop header and its phi merges the live-in value.
+    /// [`insert_preheader`](crate::insert_preheader) cannot give such a loop
+    /// a preheader, since the loop has no predecessor outside it to redirect.
     #[must_use]
     pub fn compute<G>(cfg: &G, dom: &DominatorTree) -> Self
     where
@@ -328,19 +366,13 @@ impl<V: VariableId> SsaForm<V> {
     ///
     /// This is [`compute`](Self::compute) with the call's buffers taken out of
     /// it. The form it returns is the same one, built by the same code: the
-    /// allocating entry point is this function over a fresh [`SsaScratch`],
-    /// and it has the same panic condition.
-    ///
-    /// # Panics
-    ///
-    /// As [`compute`](Self::compute): when the entry block is a branch target.
+    /// allocating entry point is this function over a fresh [`SsaScratch`].
     #[must_use]
     pub fn compute_in<G>(scratch: &mut SsaScratch<V>, cfg: &G, dom: &DominatorTree) -> Self
     where
         G: CfgView,
         G::Inst: InstrInfo<Variable = V>,
     {
-        assert_entry_is_not_a_branch_target(cfg);
         scratch.reset(cfg.node_bound());
         let complete = forest::complete_dominator_forest(
             &mut scratch.dominators,

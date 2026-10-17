@@ -70,22 +70,18 @@ pub trait CopySource: InstrInfo {
     fn rewrite_use(&mut self, old: &Self::Variable, new: &Self::Variable);
 }
 
-/// Result of copy propagation.
-#[derive(Debug, Clone)]
-pub struct CopyPropagationStats {
+/// What a propagation pass did: the uses it rewrote and the instructions it
+/// removed.
+///
+/// Both [`copy_propagation`] and [`alias_propagation`] report in this one
+/// shape, because both rewrite readers to a source and then remove the
+/// transfers nothing reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PropagationStats {
     /// Number of uses rewritten.
     pub uses_rewritten: usize,
-    /// Number of copy instructions removed.
-    pub copies_removed: usize,
-}
-
-/// Result of pairwise value-alias propagation.
-#[derive(Debug, Clone)]
-pub struct AliasPropagationStats {
-    /// Number of uses rewritten.
-    pub uses_rewritten: usize,
-    /// Number of dead alias instructions removed.
-    pub aliases_removed: usize,
+    /// Number of copy or alias instructions removed.
+    pub instructions_removed: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -303,11 +299,6 @@ fn resolve_chains<V: Clone + Ord>(substitutions: &mut BTreeMap<V, Substitution<V
     }
 }
 
-struct PropagationStats {
-    uses_rewritten: usize,
-    instructions_removed: usize,
-}
-
 fn propagate<I: CopySource + Clone, E>(
     cfg: &mut Cfg<I, E>,
     propagation: Propagation,
@@ -417,7 +408,7 @@ fn propagate<I: CopySource + Clone, E>(
 /// destination therefore keeps reading the value it held before the copy.
 ///
 /// Returns the number of rewrites and removals.
-pub fn copy_propagation<I: CopySource + Clone, E>(cfg: &mut Cfg<I, E>) -> CopyPropagationStats {
+pub fn copy_propagation<I: CopySource + Clone, E>(cfg: &mut Cfg<I, E>) -> PropagationStats {
     copy_propagation_with_exits(cfg, |_| Vec::new())
 }
 
@@ -440,12 +431,8 @@ pub fn copy_propagation<I: CopySource + Clone, E>(cfg: &mut Cfg<I, E>) -> CopyPr
 pub fn copy_propagation_with_exits<I: CopySource + Clone, E>(
     cfg: &mut Cfg<I, E>,
     live_out: impl Fn(BlockId) -> Vec<I::Variable>,
-) -> CopyPropagationStats {
-    let stats = propagate(cfg, Propagation::Copies, live_out);
-    CopyPropagationStats {
-        uses_rewritten: stats.uses_rewritten,
-        copies_removed: stats.instructions_removed,
-    }
+) -> PropagationStats {
+    propagate(cfg, Propagation::Copies, live_out)
 }
 
 /// Propagates runtime-value aliases, including pairwise refinements.
@@ -458,7 +445,7 @@ pub fn copy_propagation_with_exits<I: CopySource + Clone, E>(
 /// of its definitions remain live.
 ///
 /// Returns the number of rewritten uses and removed alias instructions.
-pub fn alias_propagation<I: CopySource + Clone, E>(cfg: &mut Cfg<I, E>) -> AliasPropagationStats {
+pub fn alias_propagation<I: CopySource + Clone, E>(cfg: &mut Cfg<I, E>) -> PropagationStats {
     alias_propagation_with_exits(cfg, |_| Vec::new())
 }
 
@@ -473,12 +460,8 @@ pub fn alias_propagation<I: CopySource + Clone, E>(cfg: &mut Cfg<I, E>) -> Alias
 pub fn alias_propagation_with_exits<I: CopySource + Clone, E>(
     cfg: &mut Cfg<I, E>,
     live_out: impl Fn(BlockId) -> Vec<I::Variable>,
-) -> AliasPropagationStats {
-    let stats = propagate(cfg, Propagation::Aliases, live_out);
-    AliasPropagationStats {
-        uses_rewritten: stats.uses_rewritten,
-        aliases_removed: stats.instructions_removed,
-    }
+) -> PropagationStats {
+    propagate(cfg, Propagation::Aliases, live_out)
 }
 
 #[cfg(test)]
@@ -531,7 +514,7 @@ mod tests {
 
         let result = copy_propagation(&mut cfg);
         assert_eq!(result.uses_rewritten, 1);
-        assert_eq!(result.copies_removed, 1);
+        assert_eq!(result.instructions_removed, 1);
 
         // The use should now reference r0 instead of r1.
         let exit_inst = &cfg.block(exit).instructions()[0];
@@ -571,7 +554,7 @@ mod tests {
 
         let result = copy_propagation(&mut cfg);
         assert_eq!(result.uses_rewritten, 0);
-        assert_eq!(result.copies_removed, 0);
+        assert_eq!(result.instructions_removed, 0);
         let insts = cfg.block(cfg.entry()).instructions();
         assert_eq!(insts.last().unwrap().uses[0], 1);
     }
@@ -615,9 +598,67 @@ mod tests {
 
         let result = copy_propagation(&mut cfg);
         assert_eq!(result.uses_rewritten, 1);
-        assert_eq!(result.copies_removed, 1);
+        assert_eq!(result.instructions_removed, 1);
         let insts = cfg.block(cfg.entry()).instructions();
         assert_eq!(insts.last().unwrap().uses[0], 7);
+    }
+
+    /// The entry heads a loop (its latch branches back) and holds the copy
+    /// `r1 = r7` of a parameter, with `read_before` reading `r1` ahead of it.
+    /// Returns `(cfg, latch)`; the latch reads `r1` as well.
+    fn entry_loop_copying_a_parameter(read_before: bool) -> (Cfg<DfInst>, BlockId) {
+        let mut cfg: Cfg<DfInst> = Cfg::new();
+        let latch = cfg.new_block();
+        let exit = cfg.new_block();
+        let entry = cfg.entry();
+        if read_before {
+            cfg.block_mut(entry)
+                .instructions_mut()
+                .push(df_use("read before", 1));
+        }
+        cfg.block_mut(entry)
+            .instructions_mut()
+            .extend([df_copy("mov", 1, 7), df_use("read after", 1)]);
+        cfg.block_mut(latch)
+            .instructions_mut()
+            .push(df_use("read in loop", 1));
+        cfg.add_edge(entry, latch, EdgeKind::ConditionalTrue);
+        cfg.add_edge(entry, exit, EdgeKind::ConditionalFalse);
+        cfg.add_edge(latch, entry, EdgeKind::Back);
+        (cfg, latch)
+    }
+
+    #[test]
+    fn a_copy_in_an_entry_that_is_a_branch_target_reaches_the_whole_loop() {
+        // Every iteration re-executes the copy before any read of r1, and r7
+        // is never redefined, so each read may take r7 and the copy goes.
+        let (mut cfg, latch) = entry_loop_copying_a_parameter(false);
+
+        let result = copy_propagation(&mut cfg);
+        assert_eq!(result.uses_rewritten, 2);
+        assert_eq!(result.instructions_removed, 1);
+        let entry = cfg.block(cfg.entry()).instructions();
+        assert_eq!(entry.len(), 1);
+        assert_eq!(entry[0].uses[0], 7);
+        assert_eq!(cfg.block(latch).instructions()[0].uses[0], 7);
+    }
+
+    #[test]
+    fn a_read_before_the_copy_of_an_entry_that_is_a_branch_target_blocks_the_rewrite() {
+        // The first iteration reads r1 as the function received it and every
+        // later one reads the copy, so the copy is not the one value r1 holds
+        // and rewriting any read to r7, or dropping the copy, would change
+        // what the first read sees.
+        let (mut cfg, latch) = entry_loop_copying_a_parameter(true);
+
+        let result = copy_propagation(&mut cfg);
+        assert_eq!((result.uses_rewritten, result.instructions_removed), (0, 0));
+        let entry = cfg.block(cfg.entry()).instructions();
+        assert_eq!(entry.len(), 3, "the copy stays");
+        assert_eq!(entry[0].uses[0], 1);
+        assert_eq!((entry[1].defs[0], entry[1].uses[0]), (1, 7));
+        assert_eq!(entry[2].uses[0], 1);
+        assert_eq!(cfg.block(latch).instructions()[0].uses[0], 1);
     }
 
     /// `mov rax, rcx; add rax, rdx; ret` in variable form: the result is
@@ -637,7 +678,7 @@ mod tests {
         let mut cfg = returned_copy_cfg();
         let result = copy_propagation(&mut cfg);
         assert_eq!(result.uses_rewritten, 1);
-        assert_eq!(result.copies_removed, 1);
+        assert_eq!(result.instructions_removed, 1);
         assert_eq!(
             cfg.block(cfg.entry()).instructions().len(),
             1,
@@ -654,7 +695,7 @@ mod tests {
             "the reader inside still reads through to the source"
         );
         assert_eq!(
-            result.copies_removed, 0,
+            result.instructions_removed, 0,
             "the definition the caller reads back stays"
         );
         let instructions = cfg.block(cfg.entry()).instructions();
@@ -670,7 +711,10 @@ mod tests {
         let seeded_result = copy_propagation_with_exits(&mut seeded, |_| Vec::new());
         let plain_result = copy_propagation(&mut plain);
         assert_eq!(seeded_result.uses_rewritten, plain_result.uses_rewritten);
-        assert_eq!(seeded_result.copies_removed, plain_result.copies_removed);
+        assert_eq!(
+            seeded_result.instructions_removed,
+            plain_result.instructions_removed
+        );
     }
 
     /// A function of `copies + readers + 1` instructions: one definition,
@@ -721,7 +765,7 @@ mod tests {
         let mut cfg = copy_chain_cfg(6000, 2000);
         let result = copy_propagation(&mut cfg);
 
-        assert_eq!(result.copies_removed, 6000, "the whole chain goes");
+        assert_eq!(result.instructions_removed, 6000, "the whole chain goes");
         assert_eq!(result.uses_rewritten, 7999);
         let instructions = cfg.block(cfg.entry()).instructions();
         assert_eq!(instructions.len(), 2001, "the definition and its readers");
@@ -738,7 +782,7 @@ mod tests {
         let mut cfg = copy_chain_blocks(512, 8);
         let result = copy_propagation(&mut cfg);
 
-        assert_eq!(result.copies_removed, 4096);
+        assert_eq!(result.instructions_removed, 4096);
         let last = cfg
             .block_ids()
             .last()
@@ -763,7 +807,7 @@ mod tests {
         let result = alias_propagation(&mut cfg);
 
         assert_eq!(result.uses_rewritten, 2);
-        assert_eq!(result.aliases_removed, 1);
+        assert_eq!(result.instructions_removed, 1);
         let instructions = cfg.block(cfg.entry()).instructions();
         assert_eq!(instructions.len(), 1);
         assert_eq!(instructions[0].uses, [7, 8]);
@@ -780,7 +824,10 @@ mod tests {
         let result = alias_propagation_with_exits(&mut cfg, |_| alloc::vec![1]);
 
         assert_eq!(result.uses_rewritten, 2, "the readers still see the source");
-        assert_eq!(result.aliases_removed, 0, "a caller reads the alias back");
+        assert_eq!(
+            result.instructions_removed, 0,
+            "a caller reads the alias back"
+        );
         let instructions = cfg.block(cfg.entry()).instructions();
         assert_eq!(instructions.len(), 2);
         assert_eq!(instructions[0].defs, [1, 2]);
@@ -798,7 +845,7 @@ mod tests {
         let result = alias_propagation(&mut cfg);
 
         assert_eq!(result.uses_rewritten, 0);
-        assert_eq!(result.aliases_removed, 0);
+        assert_eq!(result.instructions_removed, 0);
         let alias = &cfg.block(cfg.entry()).instructions()[0];
         assert_eq!(alias.uses, [0, 1]);
     }
@@ -827,7 +874,7 @@ mod tests {
         let result = copy_propagation(&mut cfg);
 
         assert_eq!(result.uses_rewritten, 0, "the handler reads r1 as it was");
-        assert_eq!(result.copies_removed, 0);
+        assert_eq!(result.instructions_removed, 0);
         assert_eq!(cfg.block(handler).instructions()[0].uses, [1]);
         assert_eq!(cfg.block(normal).instructions()[0].uses, [1]);
     }
@@ -839,7 +886,7 @@ mod tests {
         let result = copy_propagation(&mut cfg);
 
         assert_eq!(result.uses_rewritten, 2);
-        assert_eq!(result.copies_removed, 1);
+        assert_eq!(result.instructions_removed, 1);
         assert_eq!(cfg.block(handler).instructions()[0].uses, [0]);
         assert_eq!(cfg.block(normal).instructions()[0].uses, [0]);
     }

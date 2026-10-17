@@ -1,6 +1,6 @@
 //! The programs the destruction tests lower, and the SSA analysis they share.
 
-use cfglib::{BlockId, Cfg, DominatorTree, EdgeKind, ProgramPoint, SsaForm};
+use cfglib::{BlockId, Cfg, DominatorTree, EdgeKind, PhiCopyOrigin, ProgramPoint, SsaForm};
 
 use crate::machine::{Insn, Reg};
 
@@ -314,12 +314,56 @@ pub fn nested_loops() -> Program {
     }
 }
 
+/// Swaps two registers `n - i + 1` times through a loop whose header is the
+/// entry block: `x`, `y`, and the counter `i` all arrive as inputs, so the
+/// entry's phis merge each input with the value the back edge carries.
+pub fn entry_swap_loop() -> Program {
+    let mut cfg = Cfg::new();
+    let (entry, body, exit) = (cfg.entry(), cfg.new_block(), cfg.new_block());
+    wire(
+        &mut cfg,
+        entry,
+        vec![Insn::slt("stop", "n", "i"), Insn::bnez("stop")],
+    );
+    wire(
+        &mut cfg,
+        body,
+        vec![
+            Insn::mov(Reg("t"), Reg("x")),
+            Insn::mov(Reg("x"), Reg("y")),
+            Insn::mov(Reg("y"), Reg("t")),
+            Insn::li("one", 1),
+            Insn::add("i", "i", "one"),
+        ],
+    );
+    wire(
+        &mut cfg,
+        exit,
+        vec![Insn::out("x"), Insn::out("y"), Insn::ret("i")],
+    );
+    cfg.add_edge(entry, exit, EdgeKind::ConditionalTrue);
+    cfg.add_edge(entry, body, EdgeKind::ConditionalFalse);
+    cfg.add_edge(body, entry, EdgeKind::Back);
+    Program {
+        cfg,
+        inputs: &["n", "i", "x", "y"],
+    }
+}
+
 pub fn analyze(cfg: &Cfg<Insn<Reg>>) -> SsaForm<Reg> {
     SsaForm::compute(cfg, &DominatorTree::compute(cfg))
 }
 
 pub fn departure(block: BlockId, inst_idx: usize) -> ProgramPoint {
     ProgramPoint { block, inst_idx }
+}
+
+/// The departure point of an edge copy's origin.
+pub fn departure_of(origin: PhiCopyOrigin) -> ProgramPoint {
+    let PhiCopyOrigin::Departure(point) = origin else {
+        panic!("an edge copy was expected, not the function-start copy");
+    };
+    point
 }
 
 pub fn corpus() -> Vec<(&'static str, Program)> {
@@ -332,5 +376,6 @@ pub fn corpus() -> Vec<(&'static str, Program)> {
         ("loop_with_early_continue", loop_with_early_continue()),
         ("handler_program", handler_program()),
         ("nested_loops", nested_loops()),
+        ("entry_swap_loop", entry_swap_loop()),
     ]
 }

@@ -18,14 +18,13 @@
 
 extern crate alloc;
 use alloc::vec;
-use alloc::vec::Vec;
 use core::convert::Infallible;
 
 use super::fixpoint::{
     Direction, Facts, SolveConfig, SolveError, TrySolveError, collapse_infallible,
 };
 use super::worklist::Worklist;
-use crate::graph::traverse::{Adjacency, Incoming, Outgoing};
+use crate::graph::traverse::{Adjacency, by_axis};
 use crate::graph::view::{DenseId, GraphView};
 
 /// A node-level dataflow problem over a graph view `G`.
@@ -82,12 +81,18 @@ pub trait TryNodeProblem<G: GraphView> {
     /// Returns a consumer error when constructing the boundary fact fails.
     fn boundary(&self, graph: &G) -> Result<Self::Fact, Self::Error>;
 
-    /// Combine two facts at a join point.
+    /// Combine two facts at the join point `node`.
     ///
     /// # Errors
     ///
     /// Returns a consumer error when the facts are incompatible.
-    fn meet(&self, a: &Self::Fact, b: &Self::Fact) -> Result<Self::Fact, Self::Error>;
+    fn meet(
+        &self,
+        graph: &G,
+        node: G::NodeId,
+        a: &Self::Fact,
+        b: &Self::Fact,
+    ) -> Result<Self::Fact, Self::Error>;
 
     /// The fact leaving `node`, given the met fact entering it.
     ///
@@ -102,48 +107,6 @@ pub trait TryNodeProblem<G: GraphView> {
     ) -> Result<Self::Fact, Self::Error>;
 }
 
-/// The solved per-node facts of a [`NodeProblem`].
-///
-/// Facts follow the analysis direction: [`fact_in`](Self::fact_in) is the met
-/// fact flowing into a node and [`fact_out`](Self::fact_out) the fact it
-/// transfers onward. For a [`Direction::Backward`] problem the node's
-/// `fact_in` is therefore the fact *after* the node in execution order,
-/// where [`Facts`] reports program-order facts.
-#[derive(Debug, Clone)]
-pub struct NodeFacts<F> {
-    input: Vec<F>,
-    output: Vec<F>,
-    steps: usize,
-}
-
-impl<F> NodeFacts<F> {
-    /// The met fact flowing into `node` along the analysis direction.
-    #[must_use]
-    pub fn fact_in<N: DenseId>(&self, node: N) -> &F {
-        &self.input[node.index()]
-    }
-
-    /// The transferred fact leaving `node` along the analysis direction.
-    #[must_use]
-    pub fn fact_out<N: DenseId>(&self, node: N) -> &F {
-        &self.output[node.index()]
-    }
-
-    /// Number of worklist entries processed.
-    #[must_use]
-    pub const fn steps(&self) -> usize {
-        self.steps
-    }
-
-    /// These facts as program-order block facts of a solve in `direction`.
-    pub(crate) fn into_block_facts(self, direction: Direction) -> Facts<F> {
-        match direction {
-            Direction::Forward => Facts::from_parts(self.input, self.output, self.steps),
-            Direction::Backward => Facts::from_parts(self.output, self.input, self.steps),
-        }
-    }
-}
-
 /// Solve a [`NodeProblem`] to fixpoint with a worklist, without a step limit.
 ///
 /// # Errors
@@ -151,7 +114,7 @@ impl<F> NodeFacts<F> {
 /// The unbounded configuration cannot produce a solver-limit error. The
 /// `Result` matches [`solve_node_problem_with_config`] so callers can switch
 /// configurations without changing result handling.
-pub fn solve_node_problem<G, P>(graph: &G, problem: &P) -> Result<NodeFacts<P::Fact>, SolveError>
+pub fn solve_node_problem<G, P>(graph: &G, problem: &P) -> Result<Facts<P::Fact>, SolveError>
 where
     G: GraphView,
     P: NodeProblem<G>,
@@ -176,7 +139,7 @@ where
 /// previous solve: this solves a fresh problem from a subset of entry
 /// points, it does not resume one. A consumer holding previous results
 /// merges them itself, which is why the seeded solve keeps the same
-/// `NodeFacts` shape.
+/// `Facts` shape.
 ///
 /// # Examples
 ///
@@ -233,7 +196,7 @@ pub fn solve_node_problem_from<G, P>(
     graph: &G,
     problem: &P,
     seeds: &[G::NodeId],
-) -> Result<NodeFacts<P::Fact>, SolveError>
+) -> Result<Facts<P::Fact>, SolveError>
 where
     G: GraphView,
     P: NodeProblem<G>,
@@ -251,7 +214,7 @@ pub fn solve_node_problem_with_config<G, P>(
     graph: &G,
     problem: &P,
     config: SolveConfig,
-) -> Result<NodeFacts<P::Fact>, SolveError>
+) -> Result<Facts<P::Fact>, SolveError>
 where
     G: GraphView,
     P: NodeProblem<G>,
@@ -281,7 +244,7 @@ pub fn solve_node_problem_from_with_config<G, P>(
     problem: &P,
     seeds: &[G::NodeId],
     config: SolveConfig,
-) -> Result<NodeFacts<P::Fact>, SolveError>
+) -> Result<Facts<P::Fact>, SolveError>
 where
     G: GraphView,
     P: NodeProblem<G>,
@@ -305,7 +268,7 @@ where
 pub fn try_solve_node_problem<G, P>(
     graph: &G,
     problem: &P,
-) -> Result<NodeFacts<P::Fact>, TrySolveError<P::Error>>
+) -> Result<Facts<P::Fact>, TrySolveError<P::Error>>
 where
     G: GraphView,
     P: TryNodeProblem<G>,
@@ -327,7 +290,7 @@ pub fn try_solve_node_problem_from<G, P>(
     graph: &G,
     problem: &P,
     seeds: &[G::NodeId],
-) -> Result<NodeFacts<P::Fact>, TrySolveError<P::Error>>
+) -> Result<Facts<P::Fact>, TrySolveError<P::Error>>
 where
     G: GraphView,
     P: TryNodeProblem<G>,
@@ -345,7 +308,7 @@ pub fn try_solve_node_problem_with_config<G, P>(
     graph: &G,
     problem: &P,
     config: SolveConfig,
-) -> Result<NodeFacts<P::Fact>, TrySolveError<P::Error>>
+) -> Result<Facts<P::Fact>, TrySolveError<P::Error>>
 where
     G: GraphView,
     P: TryNodeProblem<G>,
@@ -369,7 +332,7 @@ pub fn try_solve_node_problem_from_with_config<G, P>(
     problem: &P,
     seeds: &[G::NodeId],
     config: SolveConfig,
-) -> Result<NodeFacts<P::Fact>, TrySolveError<P::Error>>
+) -> Result<Facts<P::Fact>, TrySolveError<P::Error>>
 where
     G: GraphView,
     P: TryNodeProblem<G>,
@@ -387,36 +350,34 @@ pub(super) fn try_solve_with_worklist<G, P>(
     worklist: Worklist,
     entry: Option<G::NodeId>,
     config: SolveConfig,
-) -> Result<NodeFacts<P::Fact>, TrySolveError<P::Error>>
+) -> Result<Facts<P::Fact>, TrySolveError<P::Error>>
 where
     G: GraphView,
     P: TryNodeProblem<G>,
 {
-    match problem.direction() {
-        Direction::Forward => {
-            try_solve_by_axis(graph, problem, Incoming, Outgoing, worklist, entry, config)
-        }
-        Direction::Backward => {
-            try_solve_by_axis(graph, problem, Outgoing, Incoming, worklist, entry, config)
-        }
-    }
+    by_axis!(
+        problem.direction().traversal(),
+        try_solve_along(graph, problem, worklist, entry, config)
+    )
 }
 
-fn try_solve_by_axis<G, P, U, D>(
+/// The solver core, generic over the axis along which facts flow: facts move
+/// from a node to its neighbors along `downstream`, and a node meets those of
+/// its neighbors along the opposite axis.
+fn try_solve_along<G, P, D>(
+    downstream: D,
     graph: &G,
     problem: &P,
-    upstream: U,
-    downstream: D,
     mut worklist: Worklist,
     entry: Option<G::NodeId>,
     config: SolveConfig,
-) -> Result<NodeFacts<P::Fact>, TrySolveError<P::Error>>
+) -> Result<Facts<P::Fact>, TrySolveError<P::Error>>
 where
     G: GraphView,
     P: TryNodeProblem<G>,
-    U: Adjacency,
     D: Adjacency,
 {
+    let upstream = downstream.against();
     let node_count = graph.node_bound();
     let boundary = problem.boundary(graph).map_err(TrySolveError::Problem)?;
     let mut input = vec![problem.bottom(graph); node_count];
@@ -442,7 +403,7 @@ where
             met = Some(match met {
                 None => output[from.index()].clone(),
                 Some(current) => problem
-                    .meet(&current, &output[from.index()])
+                    .meet(graph, node, &current, &output[from.index()])
                     .map_err(TrySolveError::Problem)?,
             });
         }
@@ -460,11 +421,8 @@ where
         }
     }
 
-    Ok(NodeFacts {
-        input,
-        output,
-        steps,
-    })
+    let (input, output) = problem.direction().program_order(input, output);
+    Ok(Facts::new(input, output, steps))
 }
 
 /// Adapter that runs an infallible [`NodeProblem`] on the fallible solver
@@ -491,7 +449,13 @@ where
         Ok(NodeProblem::boundary(self.0, graph))
     }
 
-    fn meet(&self, a: &Self::Fact, b: &Self::Fact) -> Result<Self::Fact, Self::Error> {
+    fn meet(
+        &self,
+        _graph: &G,
+        _node: G::NodeId,
+        a: &Self::Fact,
+        b: &Self::Fact,
+    ) -> Result<Self::Fact, Self::Error> {
         Ok(NodeProblem::meet(self.0, a, b))
     }
 

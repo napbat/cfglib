@@ -41,11 +41,11 @@ where
         Direction::Backward
     }
 
-    fn bottom(&self) -> Self::Fact {
+    fn bottom(&self, _view: &V) -> Self::Fact {
         BTreeSet::new()
     }
 
-    fn entry_fact(&self) -> Self::Fact {
+    fn boundary(&self, _view: &V) -> Self::Fact {
         // Nothing is live after program exit.
         BTreeSet::new()
     }
@@ -107,11 +107,11 @@ where
         Direction::Backward
     }
 
-    fn bottom(&self) -> Self::Fact {
+    fn bottom(&self, _view: &V) -> Self::Fact {
         BTreeSet::new()
     }
 
-    fn entry_fact(&self) -> Self::Fact {
+    fn boundary(&self, _view: &V) -> Self::Fact {
         // Nothing flows back into a block without successors; whatever
         // leaves the function there arrives as that block's seed.
         BTreeSet::new()
@@ -389,7 +389,7 @@ where
         block_in[index] = universe.set(&live_in[range.clone()]);
         block_out[index] = universe.set(&flowing_out[range]);
     }
-    Facts::from_parts(block_in, block_out, steps)
+    Facts::new(block_in, block_out, steps)
 }
 
 /// Result of a liveness analysis with convenient query methods.

@@ -15,9 +15,9 @@ mod golden;
 use golden::assert_golden;
 
 use cfglib::{
-    Cfg, CfgBuilder, ConstValue, ConstantFolder, DisplayInstr, DominatorTree, EdgeKind, ExprInstr,
-    ExprNode, FlowControl, FlowEffect, InstrInfo, JumpTable, JumpTargets, Liveness, ReachingDefs,
-    SsaForm, constant_propagation, detect_switch_tables, recover_block_expressions,
+    Cfg, CfgBuilder, ConstValue, ConstantFolder, ConstantPropagation, DisplayInstr, DominatorTree,
+    EdgeKind, ExprInstr, ExprNode, FlowControl, FlowEffect, InstrInfo, JumpTable, JumpTargets,
+    Liveness, ReachingDefs, SsaForm, detect_switch_tables, recover_block_expressions,
     recover_switch_tables, resolve_jump_edges, verify,
 };
 
@@ -201,7 +201,7 @@ fn string_and_bool_constants_propagate() {
     ])
     .unwrap();
 
-    let result = constant_propagation(&cfg);
+    let result = ConstantPropagation::compute(&cfg);
     let out = result.fact_out(cfg.entry());
     assert_eq!(
         out.get(&sym("s")),

@@ -1,7 +1,7 @@
 //! Explicit may-alias equivalence classes.
 //!
 //! Consumers can populate [`AliasSets`] from language-specific points-to or
-//! binding information and pass it directly to [`MemorySSA`](crate::MemorySSA).
+//! binding information and pass it directly to [`MemorySsa`](crate::MemorySsa).
 
 extern crate alloc;
 use alloc::collections::BTreeMap;
@@ -15,7 +15,7 @@ use crate::union_find::DisjointSet;
 ///
 /// Equal locations always alias. Unequal locations alias only after they have
 /// been joined with [`AliasSets::merge`], directly or transitively. Passing an
-/// instance to [`MemorySSA`](crate::MemorySSA) therefore promises that every
+/// instance to [`MemorySsa`](crate::MemorySsa) therefore promises that every
 /// unmerged pair is disjoint.
 #[derive(Debug, Clone)]
 pub struct AliasSets<V> {

@@ -133,7 +133,7 @@
 //!   ├─ ValueNumberInfo      (optional — value numbering, Operator)
 //!   └─ MemoryEventInfo      (optional — memory data flow + fences, Location + Fence)
 //!
-//! MemoryAlias<Location>     (optional may-alias oracle consumed by MemorySSA)
+//! MemoryAlias<Location>     (optional may-alias oracle consumed by MemorySsa)
 //!
 //! DisplayInstr              (optional — rendering only: DOT, text)
 //! CallInfo                  (optional — call graphs, Callee)
@@ -141,7 +141,7 @@
 //! ```
 //!
 //! [`MemoryEventInfo`] is the sole instruction-side memory contract.
-//! [`MemorySSA`] merges its reported locations through a caller-owned
+//! [`MemorySsa`] merges its reported locations through a caller-owned
 //! [`MemoryAlias`] relation and provides location-class phis, reaching writes,
 //! clobbers, users, transitive readers, and SSA-resolved address inputs.
 //! [`MemoryValueFlow`] then combines matching ordinary and memory SSA forms in
@@ -249,17 +249,15 @@ pub use builder::address::{
 };
 pub use builder::{BuildError, CfgBuilder, JumpResolution, resolve_jump_edges};
 pub use cfg::{Cfg, CfgEdge, CfgRenumbering, SplitPointError, parse_cfg_text};
-pub use dataflow::abstract_interpretation::{
-    AbstractDomain, AbstractFacts, Lattice, abstract_interpret,
-};
+pub use dataflow::abstract_interpretation::{AbstractDomain, AbstractFacts, Lattice};
 pub use dataflow::bits::DenseBits;
 pub use dataflow::cfg_view::CfgView;
 pub use dataflow::constant_propagation::{
-    ConstFact, ConstPropProblem, ConstValue, ConstantFolder, constant_propagation,
+    ConstFact, ConstPropProblem, ConstValue, ConstantFolder, ConstantPropagation,
 };
 pub use dataflow::copy_propagation::{
-    AliasPairs, AliasPropagationStats, CopyPropagationStats, CopySource, alias_propagation,
-    alias_propagation_with_exits, copy_propagation, copy_propagation_with_exits,
+    AliasPairs, CopySource, PropagationStats, alias_propagation, alias_propagation_with_exits,
+    copy_propagation, copy_propagation_with_exits,
 };
 pub use dataflow::def_use::DefUseChains;
 pub use dataflow::edge_fixpoint::{
@@ -278,12 +276,12 @@ pub use dataflow::instruction::{EffectInfo, InstrInfo, Predicated, VariableId};
 pub use dataflow::liveness::{Liveness, LivenessProblem, SeededLivenessProblem};
 pub use dataflow::memory::{
     ConservativeMemoryAlias, ExactMemoryAlias, MemoryAlias, MemoryClassId, MemoryDefinition,
-    MemoryEventSite, MemoryLocationClass, MemoryPhi, MemorySSA, MemorySSAEvent, MemorySsaScratch,
+    MemoryEventSite, MemoryLocationClass, MemoryPhi, MemorySsa, MemorySsaEvent, MemorySsaScratch,
     MemorySsaValue, MemoryUse, MemoryValueEdge, MemoryValueFlow, MemoryValueFlowError,
     MemoryValueFlowScratch, MemoryValueNode, MemoryValueRole, index_paths_may_overlap,
 };
 pub use dataflow::node_fixpoint::{
-    NodeFacts, NodeProblem, TryNodeProblem, solve_node_problem, solve_node_problem_from,
+    NodeProblem, TryNodeProblem, solve_node_problem, solve_node_problem_from,
     solve_node_problem_from_with_config, solve_node_problem_with_config, try_solve_node_problem,
     try_solve_node_problem_from, try_solve_node_problem_from_with_config,
     try_solve_node_problem_with_config,
@@ -296,7 +294,9 @@ pub use dataflow::ssa::{
     DominanceFrontiers, PhiPlacement, PhiPlacements, SsaBlock, SsaForm, SsaInstruction, SsaPhi,
     SsaScratch, SsaValue, SsaVersion,
 };
-pub use dataflow::ssa_destruction::{PhiCopy, PhiCopyGroup, copies_by_predecessor, eliminate_phis};
+pub use dataflow::ssa_destruction::{
+    PhiCopy, PhiCopyGroup, PhiCopyOrigin, copies_by_predecessor, eliminate_phis,
+};
 pub use dataflow::unwind::departs_before_throws;
 pub use display::{DisplayInstr, IndentedWriter};
 pub use edge::{Edge, EdgeId, EdgeKind, EdgeTag, KindedEdge};

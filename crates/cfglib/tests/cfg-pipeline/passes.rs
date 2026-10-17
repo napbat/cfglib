@@ -5,8 +5,8 @@
 use std::collections::BTreeMap;
 
 use cfglib::{
-    BlockId, Cfg, ConstValue, EdgeKind, FlowEffect, SccpAnalysis, SemanticValidator, SsaForm,
-    SsaValue, copies_by_predecessor, eliminate_phis,
+    BlockId, Cfg, ConstValue, EdgeKind, FlowEffect, PhiCopyOrigin, SccpAnalysis, SemanticValidator,
+    SsaForm, SsaValue, copies_by_predecessor, eliminate_phis,
 };
 
 use crate::interp::Inputs;
@@ -129,20 +129,40 @@ pub fn destruct(cfg: &Cfg<Inst<Var>>, ssa: &SsaForm<Var>) -> Cfg<Inst<SsaValue<V
     let copies = eliminate_phis(ssa);
     // Later departure points first, so an insertion never shifts one still
     // to come.
-    for edge_copies in copies_by_predecessor(&copies).iter().rev() {
-        let (point, group) = (edge_copies.from, &edge_copies.copies);
-        let instructions = lowered
-            .block_mut(ids[point.block.index()])
-            .instructions_mut();
-        assert!(
-            point.inst_idx < instructions.len()
-                || instructions.last().is_none_or(|last| last.op != Op::Branch),
-            "copies at the end of {:?} would run after its branch",
-            point.block
-        );
-        let destinations = group.iter().map(|copy| copy.destination.clone()).collect();
-        let sources = group.iter().map(|copy| copy.source.clone()).collect();
-        instructions.insert(point.inst_idx, Inst::parallel_copy(destinations, sources));
+    for group in copies_by_predecessor(&copies).iter().rev() {
+        let destinations = group
+            .copies
+            .iter()
+            .map(|copy| copy.destination.clone())
+            .collect();
+        let sources = group
+            .copies
+            .iter()
+            .map(|copy| copy.source.clone())
+            .collect();
+        let parallel_copy = Inst::parallel_copy(destinations, sources);
+        match group.from {
+            PhiCopyOrigin::FunctionStart => {
+                // The copies run once, before the entry block, which is a loop
+                // header: a block of their own in front of it.
+                let prologue = lowered.new_block();
+                lowered.add_edge(prologue, ids[group.to_block.index()], EdgeKind::Fallthrough);
+                lowered.set_entry(prologue);
+                lowered.block_mut(prologue).push(parallel_copy);
+            }
+            PhiCopyOrigin::Departure(point) => {
+                let instructions = lowered
+                    .block_mut(ids[point.block.index()])
+                    .instructions_mut();
+                assert!(
+                    point.inst_idx < instructions.len()
+                        || instructions.last().is_none_or(|last| last.op != Op::Branch),
+                    "copies at the end of {:?} would run after its branch",
+                    point.block
+                );
+                instructions.insert(point.inst_idx, parallel_copy);
+            }
+        }
     }
     lowered
 }

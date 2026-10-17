@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 
 use cfglib::{
-    BasicBlock, BlockId, Cfg, PhiCopy, SsaForm, SsaValue, SsaVersion, copies_by_predecessor,
-    eliminate_phis, split_critical_edges,
+    BasicBlock, BlockId, Cfg, EdgeKind, PhiCopy, PhiCopyOrigin, SsaForm, SsaValue, SsaVersion,
+    copies_by_predecessor, eliminate_phis, split_critical_edges,
 };
 
 use crate::machine::{Behavior, Insn, Opcode, Reg, execute, input_vectors};
@@ -20,6 +20,17 @@ pub enum Style {
     Sequenced,
     /// Plain moves in the order the copies were listed: wrong for a cycle.
     Naive,
+}
+
+/// Where the copies that run once, when the function starts, are placed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum StartCopies {
+    /// In a new block in front of the entry, which becomes the entry: the
+    /// copies run once, and no back edge reaches them.
+    InFrontOfEntry,
+    /// At the top of the entry block: wrong when that block is a loop
+    /// header, since every back edge then runs them again.
+    AtTopOfEntry,
 }
 
 /// Order the parallel assignment `group` as plain moves, breaking cycles
@@ -185,13 +196,15 @@ fn phi_copy_insns(
 
 /// Insert the phi copies of `ssa` into `lowered` in `style`, their sources
 /// resolved through `forwarded`. Each departure's copies go where
-/// `new_index` puts its departure point in the block `ids` maps it to.
+/// `new_index` puts its departure point in the block `ids` maps it to, and
+/// the function-start copies go where `start` says.
 fn place_phi_copies(
     ssa: &SsaForm<Reg>,
     forwarded: &BTreeMap<SsaValue<Reg>, SsaValue<Reg>>,
     new_index: &BTreeMap<(BlockId, usize), usize>,
     ids: &[BlockId],
     style: Style,
+    start: StartCopies,
     lowered: &mut Cfg<Insn<SsaValue<Reg>>>,
 ) {
     let copies: Vec<PhiCopy<Reg>> = eliminate_phis(ssa)
@@ -202,24 +215,53 @@ fn place_phi_copies(
         })
         .collect();
     let mut temporaries = 0;
-    for edge_copies in copies_by_predecessor(&copies).iter().rev() {
-        let point = edge_copies.from;
-        let at = new_index[&(point.block, point.inst_idx)];
-        let block = lowered
-            .block_mut(ids[point.block.index()])
-            .instructions_mut();
-        let at = if at == block.len()
-            && block
-                .last()
-                .is_some_and(|last| last.opcode == Opcode::BranchNonZero)
-        {
-            // Copies placed on a branching block run on both arms.
-            at - 1
-        } else {
-            at
-        };
-        let insns = phi_copy_insns(&edge_copies.copies, style, &mut temporaries);
-        block.splice(at..at, insns);
+    for group in copies_by_predecessor(&copies).iter().rev() {
+        let insns = phi_copy_insns(&group.copies, style, &mut temporaries);
+        match group.from {
+            PhiCopyOrigin::FunctionStart => {
+                place_start_copies(lowered, ids[group.to_block.index()], insns, start);
+            }
+            PhiCopyOrigin::Departure(point) => {
+                let at = new_index[&(point.block, point.inst_idx)];
+                let block = lowered
+                    .block_mut(ids[point.block.index()])
+                    .instructions_mut();
+                let at = if at == block.len()
+                    && block
+                        .last()
+                        .is_some_and(|last| last.opcode == Opcode::BranchNonZero)
+                {
+                    // Copies placed on a branching block run on both arms.
+                    at - 1
+                } else {
+                    at
+                };
+                block.splice(at..at, insns);
+            }
+        }
+    }
+}
+
+/// Run `insns` once when the function starts, before `entry` runs.
+fn place_start_copies(
+    lowered: &mut Cfg<Insn<SsaValue<Reg>>>,
+    entry: BlockId,
+    insns: Vec<Insn<SsaValue<Reg>>>,
+    start: StartCopies,
+) {
+    match start {
+        StartCopies::InFrontOfEntry => {
+            let prologue = lowered.new_block();
+            lowered.add_edge(prologue, entry, EdgeKind::Fallthrough);
+            lowered.set_entry(prologue);
+            lowered.block_mut(prologue).instructions_mut().extend(insns);
+        }
+        StartCopies::AtTopOfEntry => {
+            lowered
+                .block_mut(entry)
+                .instructions_mut()
+                .splice(0..0, insns);
+        }
     }
 }
 
@@ -234,6 +276,23 @@ pub fn lower(
     propagate_moves: bool,
     style: Style,
 ) -> Cfg<Insn<SsaValue<Reg>>> {
+    lower_with(
+        cfg,
+        ssa,
+        propagate_moves,
+        style,
+        StartCopies::InFrontOfEntry,
+    )
+}
+
+/// [`lower`] with the function-start copies placed as `start` says.
+pub fn lower_with(
+    cfg: &Cfg<Insn<Reg>>,
+    ssa: &SsaForm<Reg>,
+    propagate_moves: bool,
+    style: Style,
+    start: StartCopies,
+) -> Cfg<Insn<SsaValue<Reg>>> {
     let forwarded = if propagate_moves {
         forwarded_moves(cfg, ssa)
     } else {
@@ -242,7 +301,15 @@ pub fn lower(
     let (mut lowered, ids) = lowered_skeleton(cfg);
     let new_index = surviving_positions(cfg, propagate_moves);
     push_lowered_instructions(cfg, ssa, propagate_moves, &forwarded, &mut lowered, &ids);
-    place_phi_copies(ssa, &forwarded, &new_index, &ids, style, &mut lowered);
+    place_phi_copies(
+        ssa,
+        &forwarded,
+        &new_index,
+        &ids,
+        style,
+        start,
+        &mut lowered,
+    );
     lowered
 }
 

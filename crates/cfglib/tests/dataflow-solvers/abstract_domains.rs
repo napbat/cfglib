@@ -1,7 +1,7 @@
-//! `abstract_interpret` with a parity domain, sound against concrete
+//! `AbstractFacts::compute` with a parity domain, sound against concrete
 //! executions and exact on programs whose parity is known by inspection.
 
-use cfglib::{AbstractDomain, BlockId, Cfg, EdgeKind, InstrInfo, Lattice, abstract_interpret};
+use cfglib::{AbstractDomain, AbstractFacts, BlockId, Cfg, EdgeKind, InstrInfo, Lattice};
 
 use crate::graphs::{Rng, Shape};
 
@@ -51,13 +51,22 @@ fn parity_of(value: i64) -> Parity {
     }
 }
 
+impl Parity {
+    /// The identity of the meet. The solver never asks for it; the lattice
+    /// laws below do.
+    fn top() -> Self {
+        Parity::Unconstrained
+    }
+
+    /// The lattice order, which the laws below check against the meet.
+    fn leq(self, other: Self) -> bool {
+        self == other || self == Parity::Unknown || other == Parity::Unconstrained
+    }
+}
+
 impl Lattice for Parity {
     fn bottom() -> Self {
         Parity::Unknown
-    }
-
-    fn top() -> Self {
-        Parity::Unconstrained
     }
 
     fn meet(&self, other: &Self) -> Self {
@@ -66,10 +75,6 @@ impl Lattice for Parity {
             (a, b) if a == b => *a,
             _ => Parity::Unknown,
         }
-    }
-
-    fn leq(&self, other: &Self) -> bool {
-        self == other || *self == Parity::Unknown || *other == Parity::Unconstrained
     }
 }
 
@@ -108,11 +113,11 @@ fn the_parity_lattice_satisfies_the_meet_semilattice_laws_and_orders_by_meet() {
             Parity::bottom(),
             "bottom absorbs"
         );
-        assert!(Parity::bottom().leq(&a) && a.leq(&Parity::top()));
+        assert!(Parity::bottom().leq(a) && a.leq(Parity::top()));
         for b in ELEMENTS {
             assert_eq!(a.meet(&b), b.meet(&a), "commutative");
             assert_eq!(
-                a.leq(&b),
+                a.leq(b),
                 a.meet(&b) == a,
                 "{a:?} below {b:?} exactly when their meet is {a:?}"
             );
@@ -138,7 +143,7 @@ fn straight_line_code_is_exact_and_each_block_boundary_is_reported() {
         &shape,
         vec![vec![Op::Set(1), Op::Add(1)], vec![Op::Add(3), Op::Double]],
     );
-    let facts = abstract_interpret::<_, Parity>(&cfg);
+    let facts = AbstractFacts::<Parity>::compute(&cfg);
     assert_eq!(
         facts.fact_in(id(0)),
         Some(&Parity::Even),
@@ -178,7 +183,7 @@ fn a_join_of_different_parities_is_unknown_and_of_equal_parities_is_kept() {
         vec![Op::Set(5)],
         vec![],
     ];
-    let facts = abstract_interpret::<_, Parity>(&program(&shape, code));
+    let facts = AbstractFacts::<Parity>::compute(&program(&shape, code));
     assert_eq!(facts.fact_in(id(3)), Some(&Parity::Unknown));
     assert_eq!(facts.fact_in(id(6)), Some(&Parity::Odd));
 }
@@ -188,12 +193,12 @@ fn a_loop_whose_body_preserves_parity_keeps_it_through_the_header() {
     // entry -> head -> body -> head, head -> exit; the body adds 2.
     let shape = Shape::new(4, &[(0, 1), (1, 2), (2, 1), (1, 3)]);
     let code = vec![vec![Op::Set(0)], vec![], vec![Op::Add(2)], vec![]];
-    let facts = abstract_interpret::<_, Parity>(&program(&shape, code));
+    let facts = AbstractFacts::<Parity>::compute(&program(&shape, code));
     assert_eq!(facts.fact_in(id(1)), Some(&Parity::Even));
     assert_eq!(facts.fact_in(id(3)), Some(&Parity::Even));
 
     let flipping = vec![vec![Op::Set(0)], vec![], vec![Op::Add(1)], vec![]];
-    let facts = abstract_interpret::<_, Parity>(&program(&shape, flipping));
+    let facts = AbstractFacts::<Parity>::compute(&program(&shape, flipping));
     assert_eq!(
         facts.fact_in(id(1)),
         Some(&Parity::Unknown),
@@ -208,7 +213,7 @@ fn an_entry_that_heads_a_loop_still_starts_from_the_entry_value() {
     // the back edge's agreeing parity.
     let shape = Shape::new(3, &[(0, 1), (1, 0), (0, 2)]);
     let code = vec![vec![], vec![Op::Add(2)], vec![]];
-    let facts = abstract_interpret::<_, Parity>(&program(&shape, code));
+    let facts = AbstractFacts::<Parity>::compute(&program(&shape, code));
     assert_eq!(facts.fact_in(id(0)), Some(&Parity::Even));
     assert_eq!(facts.fact_in(id(1)), Some(&Parity::Even));
     assert_eq!(facts.fact_in(id(2)), Some(&Parity::Even));
@@ -218,7 +223,7 @@ fn an_entry_that_heads_a_loop_still_starts_from_the_entry_value() {
 fn unreached_blocks_retain_the_bottom_state() {
     let shape = Shape::new(3, &[(0, 1), (2, 1)]);
     let code = vec![vec![Op::Set(1)], vec![], vec![Op::Set(2)]];
-    let facts = abstract_interpret::<_, Parity>(&program(&shape, code));
+    let facts = AbstractFacts::<Parity>::compute(&program(&shape, code));
     assert_eq!(facts.fact_in(id(2)), Some(&Parity::Unknown));
     assert_eq!(facts.fact_out(id(2)), Some(&Parity::Unknown));
     assert_eq!(
@@ -245,7 +250,7 @@ fn an_unwind_edge_carries_the_meet_of_the_states_before_each_throwing_instructio
         vec![],
         vec![],
     ];
-    let facts = abstract_interpret::<_, Parity>(&program(&shape, code));
+    let facts = AbstractFacts::<Parity>::compute(&program(&shape, code));
     assert_eq!(facts.fact_in(id(2)), Some(&Parity::Unknown));
     assert_eq!(facts.fact_in(id(1)), Some(&Parity::Even));
 
@@ -255,7 +260,7 @@ fn an_unwind_edge_carries_the_meet_of_the_states_before_each_throwing_instructio
         vec![],
         vec![],
     ];
-    let facts = abstract_interpret::<_, Parity>(&program(&shape, agreeing));
+    let facts = AbstractFacts::<Parity>::compute(&program(&shape, agreeing));
     assert_eq!(facts.fact_in(id(2)), Some(&Parity::Even));
     assert_eq!(
         facts.fact_in(id(1)),
@@ -328,7 +333,7 @@ fn abstract_states_cover_the_register_in_every_concrete_execution() {
         let shape = Shape::random(&mut rng, false, true);
         let code = (0..shape.blocks).map(|_| random_ops(&mut rng)).collect();
         let cfg = shape.build(code);
-        let facts = abstract_interpret::<_, Parity>(&cfg);
+        let facts = AbstractFacts::<Parity>::compute(&cfg);
         for _ in 0..20 {
             for (block, value) in execute(&cfg, &mut rng) {
                 match facts.fact_in(block) {

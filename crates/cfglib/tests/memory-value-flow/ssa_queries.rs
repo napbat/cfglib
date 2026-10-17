@@ -1,4 +1,4 @@
-//! `MemorySSA`: versions, clobbers, phis at joins, unwind points, fences,
+//! `MemorySsa`: versions, clobbers, phis at joins, unwind points, fences,
 //! atomicity, and its queries, on hand-derived programs and on random ones
 //! against the reaching-store exploration.
 
@@ -6,14 +6,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cfglib::{
     BlockId, Cfg, ConservativeMemoryAlias, EdgeKind, ExactMemoryAlias, MemoryAccess,
-    MemoryAtomicity, MemoryDefinition, MemoryEvent, MemoryEventSite, MemoryOperations, MemorySSA,
+    MemoryAtomicity, MemoryDefinition, MemoryEvent, MemoryEventSite, MemoryOperations, MemorySsa,
     MemoryUse, ProgramPoint, SsaValue,
 };
 
 use crate::machine::{Barrier, Inst, Program, Rng, chain, diamond};
 use crate::oracle::{Def, Reaching, alias_classes, expand, explore};
 
-type Memory = MemorySSA<u8, u8, Barrier>;
+type Memory = MemorySsa<u8, u8, Barrier>;
 
 fn point(block: usize, inst_idx: usize) -> ProgramPoint {
     ProgramPoint {
@@ -27,7 +27,7 @@ fn site(block: usize, inst_idx: usize) -> MemoryEventSite {
 }
 
 fn exact(cfg: &Cfg<Inst<u8>>) -> Memory {
-    MemorySSA::compute(cfg, &ExactMemoryAlias)
+    MemorySsa::compute(cfg, &ExactMemoryAlias)
 }
 
 #[test]
@@ -366,6 +366,96 @@ fn a_throwing_store_does_not_reach_its_own_handler() {
     assert_eq!(phi.operands(), [(point(0, 0), SsaValue::live_in(class))]);
 }
 
+/// The entry heads a loop: it loads location 0, and its latch stores to it
+/// and branches back. Returns the program's blocks as `(cfg, latch)`.
+fn entry_loop() -> (Cfg<Inst<u8>>, usize) {
+    let mut cfg = Cfg::new();
+    let latch = cfg.new_block();
+    let exit = cfg.new_block();
+    let entry = cfg.entry();
+    cfg.add_edge(entry, latch, EdgeKind::ConditionalTrue);
+    cfg.add_edge(entry, exit, EdgeKind::ConditionalFalse);
+    cfg.add_edge(latch, entry, EdgeKind::Back);
+    cfg.block_mut(entry).push(Inst::load(0, 2));
+    cfg.block_mut(latch).push(Inst::store(0, 1));
+    (cfg, latch.index())
+}
+
+#[test]
+fn a_loop_headed_by_the_entry_merges_the_initial_state_with_the_latchs_write() {
+    let (cfg, latch) = entry_loop();
+    let memory = exact(&cfg);
+    let class = memory.class_of(&0).unwrap();
+    let (load, store) = (site(0, 0), site(latch, 0));
+
+    let [phi] = memory.phis() else {
+        panic!("the entry merges the initial state and the latch's write");
+    };
+    assert_eq!(phi.block(), BlockId::from_index(0));
+    let stored = memory.event(store).unwrap().written_version().unwrap();
+    assert_eq!(
+        phi.operands(),
+        [(point(latch, 1), stored.clone())],
+        "the operands are the CFG edges alone"
+    );
+    assert_eq!(phi.start_value(), Some(SsaValue::live_in(class)));
+    assert_eq!(
+        memory.users(&SsaValue::live_in(class)),
+        [MemoryUse::PhiStart {
+            block: BlockId::from_index(0),
+            result: phi.result().clone(),
+        }]
+    );
+
+    assert_eq!(
+        memory.reaching_definition(load),
+        Some(&MemoryDefinition::Phi {
+            block: BlockId::from_index(0),
+            class,
+        })
+    );
+    let reaching = memory.reaching_definitions(load);
+    assert_eq!(reaching.len(), 2);
+    assert!(reaching.contains(&&MemoryDefinition::Event { site: store }));
+    assert!(reaching.contains(&&MemoryDefinition::LiveIn { class }));
+    assert_eq!(memory.transitive_readers(store), [load]);
+}
+
+#[test]
+fn a_store_in_a_looping_entry_clobbers_the_initial_state_and_its_own_earlier_iteration() {
+    // `loop: store x; load x` with the loop at the function's first
+    // instruction. The first iteration replaces the initial state and every
+    // later one replaces the previous iteration's store; the load sees only
+    // the store before it.
+    let mut cfg = Cfg::new();
+    let exit = cfg.new_block();
+    let entry = cfg.entry();
+    cfg.add_edge(entry, entry, EdgeKind::ConditionalTrue);
+    cfg.add_edge(entry, exit, EdgeKind::ConditionalFalse);
+    cfg.block_mut(entry).push(Inst::store(0, 1));
+    cfg.block_mut(entry).push(Inst::load(0, 2));
+    let memory = exact(&cfg);
+    let class = memory.class_of(&0).unwrap();
+    let store = memory.event(site(0, 0)).unwrap();
+
+    assert_eq!(
+        expand(&memory, store.clobbered_version().unwrap()),
+        BTreeSet::from([Def::LiveIn(0), Def::Write(site(0, 0))]),
+        "the initial state, and the store of the previous iteration"
+    );
+    assert_eq!(
+        memory.reaching_definitions(site(0, 1)),
+        [&MemoryDefinition::Event { site: site(0, 0) }]
+    );
+    assert_eq!(
+        memory.clobbered_definition(site(0, 0)),
+        Some(&MemoryDefinition::Phi {
+            block: entry,
+            class
+        })
+    );
+}
+
 #[test]
 fn fences_stay_in_the_event_stream_but_define_nothing() {
     let cfg = chain(vec![vec![
@@ -470,7 +560,7 @@ fn events_are_grouped_by_instruction_and_by_alias_class() {
     );
     assert_eq!(memory.operations_at(point(0, 2)), MemoryOperations::READ);
 
-    let merged: Memory = MemorySSA::compute(&cfg, &ConservativeMemoryAlias);
+    let merged: Memory = MemorySsa::compute(&cfg, &ConservativeMemoryAlias);
     assert_eq!(
         merged.events_for(&0).count(),
         4,
@@ -502,7 +592,7 @@ fn a_removed_block_slot_leaves_the_others_events_and_identities_alone() {
 fn memory_ssa_matches_the_reaching_store_exploration_on_random_programs() {
     let mut rng = Rng::new(61);
     let mut round = 0;
-    let (mut merged_reads, mut phi_count, mut handler_phis) = (0, 0, 0);
+    let (mut merged_reads, mut phi_count, mut handler_phis, mut start_phis) = (0, 0, 0, 0);
     while round < 300 {
         let program = Program::random(&mut rng, true);
         // A phi operand from unreachable code names that code's own states,
@@ -519,7 +609,7 @@ fn memory_ssa_matches_the_reaching_store_exploration_on_random_programs() {
             1 => &|left, right| left.abs_diff(*right) <= 1,
             _ => &|left, right| left % 2 == right % 2,
         };
-        let memory: Memory = MemorySSA::compute(&cfg, &relation);
+        let memory: Memory = MemorySsa::compute(&cfg, &relation);
         let locations = program.accessed_locations();
         let representative = alias_classes(&locations, relation);
         let reaching = explore(&program, &representative);
@@ -537,6 +627,11 @@ fn memory_ssa_matches_the_reaching_store_exploration_on_random_programs() {
             .filter(|defs| defs.len() >= 2)
             .count();
         phi_count += memory.phis().len();
+        start_phis += memory
+            .phis()
+            .iter()
+            .filter(|phi| phi.merges_start_value())
+            .count();
         let handlers: BTreeSet<usize> = program
             .live_edges()
             .into_iter()
@@ -557,6 +652,10 @@ fn memory_ssa_matches_the_reaching_store_exploration_on_random_programs() {
     );
     assert!(phi_count >= 20, "memory phis: {phi_count}");
     assert!(handler_phis >= 1, "phis at unwind handlers: {handler_phis}");
+    assert!(
+        start_phis >= 20,
+        "phis of an entry that is a branch target: {start_phis}"
+    );
 }
 
 /// The classes are exactly the connected components of the alias relation.
@@ -656,6 +755,15 @@ fn assert_users_invert_versions(memory: &Memory) {
         }
     }
     for phi in memory.phis() {
+        if let Some(start) = phi.start_value() {
+            expected
+                .entry(start)
+                .or_default()
+                .push(MemoryUse::PhiStart {
+                    block: phi.block(),
+                    result: phi.result().clone(),
+                });
+        }
         for (predecessor, operand) in phi.operands() {
             expected
                 .entry(operand.clone())

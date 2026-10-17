@@ -10,7 +10,6 @@ mod transform;
 mod traversal;
 
 pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
-    "abstract_interpret",
     "alias_propagation",
     "alias_propagation_with_exits",
     "bind_edge_attributes",
@@ -31,7 +30,6 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "common_ancestors",
     "condensation",
     "condensation_of",
-    "constant_propagation",
     "control_flow_edge_attributes",
     "contract_edge",
     "contract_edge_mapped",
@@ -195,11 +193,6 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         suite,
         "cfg_fixpoint_bool",
         [solve_problem, solve_problem_with_config]
-    );
-    benchmark_coverage!(
-        suite,
-        "cfg_constprop_independent_constants",
-        [constant_propagation]
     );
     benchmark_coverage!(suite, "cfg_clone_merge_linear", [merge_blocks]);
     benchmark_coverage!(suite, "cfg_clone_remove_empty_chain", [remove_empty_blocks]);
