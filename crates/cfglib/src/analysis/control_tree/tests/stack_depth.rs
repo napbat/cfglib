@@ -518,8 +518,8 @@ fn deeply_nested_tries_at_one_anchor_structure_on_a_small_stack() {
         // Every region but the outermost resumes at the block after the
         // region inside it, so its pad leaves the tries around it by a goto to
         // the block they all end at.
-        assert!(report.unstructured_regions.is_empty());
-        assert!(report.unresolved_labels.is_empty());
+        assert_eq!(report.unstructured_regions, []);
+        assert_eq!(report.unresolved_labels, []);
         assert_eq!(report.gotos.len(), TRY_DEPTH - 1);
         let tries = count_nodes(&tree, |node| matches!(node, ControlNode::TryCatch { .. }));
         assert_eq!(tries, TRY_DEPTH);
