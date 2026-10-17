@@ -21,7 +21,7 @@ use crate::graph::view::{GraphView, RootedView};
 /// A [`Cfg`] behind a virtual root, over dense block indices.
 pub(super) struct VirtualRoot<'cfg, I, E> {
     cfg: &'cfg Cfg<I, E>,
-    /// The entry first, then the extra roots in the order given.
+    /// The entry first, then the extra roots in ascending order, each once.
     successors: Vec<u32>,
     /// The index of the virtual root: one past the last block slot.
     root: u32,
@@ -47,6 +47,16 @@ impl<'cfg, I, E> VirtualRoot<'cfg, I, E> {
             successors,
             root,
         }
+    }
+
+    /// Whether the virtual root has an edge to `node`: the entry, or one of
+    /// the extra roots, which `new` stores in ascending order.
+    fn is_named(&self, node: u32) -> bool {
+        let (entry, extra) = self
+            .successors
+            .split_first()
+            .expect("the root always names the entry");
+        node == *entry || extra.binary_search(&node).is_ok()
     }
 }
 
@@ -78,7 +88,7 @@ impl<I, E> GraphView for VirtualRoot<'_, I, E> {
     }
 
     fn predecessors(&self, node: u32) -> impl Iterator<Item = u32> + '_ {
-        let from_root = self.successors.contains(&node).then_some(self.root);
+        let from_root = self.is_named(node).then_some(self.root);
         let blocks = (node != self.root)
             .then(|| self.cfg.predecessors(BlockId::from_raw(node)))
             .into_iter()
@@ -149,5 +159,24 @@ mod tests {
         assert_eq!(view.predecessors(named.raw()).count(), 1);
         assert_eq!(view.predecessors(unnamed.raw()).count(), 0);
         assert_eq!(view.node_bound(), cfg.block_bound() + 1);
+    }
+
+    #[test]
+    fn extra_roots_on_both_sides_of_a_relocated_entry_have_one_edge_each() {
+        let mut cfg = Cfg::<u8>::new();
+        let below = cfg.new_block();
+        let entry = cfg.new_block();
+        let above = cfg.new_block();
+        let unnamed = cfg.new_block();
+        cfg.set_entry(entry);
+
+        let view = VirtualRoot::new(&cfg, [above, below, entry, above]);
+        assert_symmetric(&view);
+        let from_root: Vec<u32> = view.successors(view.root()).collect();
+        assert_eq!(from_root, [entry.raw(), below.raw(), above.raw()]);
+        for named in [below, entry, above] {
+            assert_eq!(view.predecessors(named.raw()).count(), 1);
+        }
+        assert_eq!(view.predecessors(unnamed.raw()).count(), 0);
     }
 }
