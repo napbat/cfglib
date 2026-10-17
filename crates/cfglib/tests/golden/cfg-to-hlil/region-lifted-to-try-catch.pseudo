@@ -1,0 +1,8 @@
+v3 = 9;
+try {
+    v2 = quot(v0, v1);
+    show(v2);
+} catch (...) {
+    show(v3);
+}
+return v2;

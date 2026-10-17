@@ -34,3 +34,4 @@ mod placements;
 mod recovery;
 mod rendering;
 mod verification;
+mod walks;
