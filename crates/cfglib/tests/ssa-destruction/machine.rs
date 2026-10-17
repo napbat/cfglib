@@ -106,7 +106,20 @@ pub struct Behavior {
 }
 
 /// Run `cfg` from its entry; `inputs` are the registers it starts with.
+///
+/// # Panics
+///
+/// Panics when the program does not terminate within the step budget.
 pub fn execute<R: Clone + Ord + Debug>(cfg: &Cfg<Insn<R>>, inputs: &BTreeMap<R, i64>) -> Behavior {
+    try_execute(cfg, inputs).expect("the program does not terminate")
+}
+
+/// Run `cfg` from its entry, or `None` when it has not ended within the step
+/// budget.
+pub fn try_execute<R: Clone + Ord + Debug>(
+    cfg: &Cfg<Insn<R>>,
+    inputs: &BTreeMap<R, i64>,
+) -> Option<Behavior> {
     let mut registers = inputs.clone();
     let mut output = Vec::new();
     let mut block = cfg.entry();
@@ -149,10 +162,10 @@ pub fn execute<R: Clone + Ord + Debug>(cfg: &Cfg<Insn<R>>, inputs: &BTreeMap<R, 
                 (Opcode::BranchNonZero, [condition]) => branch = Some(*condition != 0),
                 (Opcode::Output, [value]) => output.push(*value),
                 (Opcode::Return, [value]) => {
-                    return Behavior {
+                    return Some(Behavior {
                         output,
                         end: End::Returned(*value),
-                    };
+                    });
                 }
                 other => panic!("malformed instruction {other:?}"),
             }
@@ -163,10 +176,10 @@ pub fn execute<R: Clone + Ord + Debug>(cfg: &Cfg<Insn<R>>, inputs: &BTreeMap<R, 
             match unwinds.next() {
                 Some(edge) => edge.target(),
                 None => {
-                    return Behavior {
+                    return Some(Behavior {
                         output,
                         end: End::Trapped,
-                    };
+                    });
                 }
             }
         } else {
@@ -185,17 +198,17 @@ pub fn execute<R: Clone + Ord + Debug>(cfg: &Cfg<Insn<R>>, inputs: &BTreeMap<R, 
                 match normal.next() {
                     Some(edge) => edge.target(),
                     None => {
-                        return Behavior {
+                        return Some(Behavior {
                             output,
                             end: End::FellOff,
-                        };
+                        });
                     }
                 }
             }
         };
         block = next;
     }
-    panic!("the program does not terminate");
+    None
 }
 
 /// Every assignment of the listed registers from a few small values.

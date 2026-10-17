@@ -1,7 +1,10 @@
 //! Phi webs for renamed SSA values.
 //!
 //! Values connected by phis form congruence classes that are useful for copy
-//! coalescing and register allocation.
+//! coalescing and register allocation. A phi's inputs are its edge operands
+//! and, in a branch-target entry, its [start
+//! value](crate::SsaPhi::start_value): the start value joins the web of the
+//! phi's result like any operand.
 
 extern crate alloc;
 use crate::VariableId;
@@ -60,6 +63,8 @@ impl<V: VariableId> PhiWebs<V> {
         let mut live = vec![false; phis.len()];
         // Each phi result is defined once, so each phi is taken off the
         // demand stack at most once and its operands become demanded in turn.
+        // A start value is a live-in, never a phi result, so demanding it
+        // would end at once and the loop leaves it out.
         let mut demanded: Vec<&SsaValue<V>> = ssa
             .blocks()
             .iter()
@@ -88,9 +93,8 @@ impl<V: VariableId> PhiWebs<V> {
         let mut value_to_index = BTreeMap::new();
 
         for phi in phis {
-            for value in
-                core::iter::once(&phi.result).chain(phi.operands().iter().map(|(_, value)| value))
-            {
+            let start = phi.start_value();
+            for value in core::iter::once(&phi.result).chain(inputs(phi, start.as_ref())) {
                 if !value_to_index.contains_key(value) {
                     let index = all_values.len();
                     value_to_index.insert(value.clone(), index);
@@ -102,7 +106,8 @@ impl<V: VariableId> PhiWebs<V> {
         let mut union_find = DisjointSet::new(all_values.len());
         for phi in phis {
             let result_index = value_to_index[&phi.result];
-            for (_, operand) in phi.operands() {
+            let start = phi.start_value();
+            for operand in inputs(phi, start.as_ref()) {
                 union_find.union(result_index, value_to_index[operand]);
             }
         }
@@ -129,6 +134,18 @@ impl<V: VariableId> PhiWebs<V> {
 
         PhiWebs { webs, web_of }
     }
+}
+
+/// Every value that flows into `phi`: its edge operands, then `start`, which
+/// is the phi's [start value](SsaPhi::start_value) that the caller holds.
+///
+/// The web of a phi depends on where a value arrives from only in that it
+/// arrives, so a start value counts like any operand.
+fn inputs<'a, V>(
+    phi: &'a SsaPhi<V>,
+    start: Option<&'a SsaValue<V>>,
+) -> impl Iterator<Item = &'a SsaValue<V>> {
+    phi.operands().iter().map(|(_, value)| value).chain(start)
 }
 
 #[cfg(test)]
@@ -231,11 +248,27 @@ mod tests {
         filled(cfg)
     }
 
+    /// [`nested_loops`] with the outer header as the entry, so the entry's
+    /// phis also merge the value entering the function.
+    fn entry_nested_loops() -> Cfg<DfInst> {
+        let mut cfg = Cfg::<DfInst>::new();
+        let [inner, body, latch, exit] = core::array::from_fn(|_| cfg.new_block());
+        let entry = cfg.entry();
+        cfg.add_edge(entry, inner, EdgeKind::ConditionalTrue);
+        cfg.add_edge(entry, exit, EdgeKind::ConditionalFalse);
+        cfg.add_edge(inner, body, EdgeKind::ConditionalTrue);
+        cfg.add_edge(inner, latch, EdgeKind::ConditionalFalse);
+        cfg.add_edge(body, inner, EdgeKind::Back);
+        cfg.add_edge(latch, entry, EdgeKind::Back);
+        filled(cfg)
+    }
+
     fn family() -> Vec<Cfg<DfInst>> {
         let mut family: Vec<_> = (1..6)
             .map(|regions| filled(crate::test_util::shapes::diamond_chain(regions)))
             .collect();
         family.push(nested_loops());
+        family.push(entry_nested_loops());
         family
     }
 
@@ -272,8 +305,10 @@ mod tests {
             .phis()
             .filter(|(_, phi)| reaches_a_use(ssa, &phi.result))
         {
+            let start = phi.start_value();
             let mut merged: BTreeSet<_> = core::iter::once(phi.result.clone())
                 .chain(phi.operands().iter().map(|(_, value)| value.clone()))
+                .chain(start)
                 .collect();
             webs.retain(|web| {
                 let overlaps = !web.is_disjoint(&merged);
@@ -322,5 +357,58 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The entry loop: the entry reads variable 0 when `reads` and the latch
+    /// redefines it.
+    fn entry_loop(reads: bool) -> Cfg<DfInst> {
+        let mut cfg = Cfg::<DfInst>::new();
+        let [latch, exit] = core::array::from_fn(|_| cfg.new_block());
+        let entry = cfg.entry();
+        cfg.add_edge(entry, latch, EdgeKind::ConditionalTrue);
+        cfg.add_edge(entry, exit, EdgeKind::ConditionalFalse);
+        cfg.add_edge(latch, entry, EdgeKind::Back);
+        if reads {
+            cfg.block_mut(entry).push(df_use("read", 0));
+        }
+        cfg.block_mut(latch).push(df_def("redefine", 0));
+        cfg
+    }
+
+    #[test]
+    fn a_start_value_joins_the_web_of_its_entry_phi() {
+        let cfg = entry_loop(true);
+        let ssa = SsaForm::compute(&cfg, &DominatorTree::compute(&cfg));
+        let phi = &ssa.block(cfg.entry()).phis[0];
+        let expected = BTreeSet::from([
+            phi.result.clone(),
+            phi.operands()[0].1.clone(),
+            SsaValue::live_in(0),
+        ]);
+
+        for webs in [PhiWebs::compute(&ssa), PhiWebs::compute_live(&ssa)] {
+            let [web] = webs.webs.as_slice() else {
+                panic!("one phi, one web: {:?}", webs.webs);
+            };
+            assert_eq!(web.values, expected);
+            assert_eq!(
+                webs.web_of[&SsaValue::live_in(0)],
+                webs.web_of[&phi.result],
+                "the start value is in the web of the phi it feeds"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dead_entry_phi_keeps_its_start_value_out_of_the_live_webs() {
+        let cfg = entry_loop(false);
+        let ssa = SsaForm::compute(&cfg, &DominatorTree::compute(&cfg));
+
+        let all = PhiWebs::compute(&ssa);
+        assert!(all.web_of.contains_key(&SsaValue::live_in(0)));
+        assert!(
+            PhiWebs::compute_live(&ssa).webs.is_empty(),
+            "no instruction reads the phi, so no web is live"
+        );
     }
 }
