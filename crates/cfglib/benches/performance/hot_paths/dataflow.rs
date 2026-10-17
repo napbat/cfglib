@@ -141,7 +141,14 @@ fn register_constants(suite: &mut BenchmarkSuite<'_>) {
         "cfg_constprop_independent_constants",
         || { ConstantPropagation::compute(&constants) },
         |result: &ConstantPropagation<u32, u64>| {
-            assert!(result.fact_in(constants.entry()).is_empty());
+            // Every variable is unknown when the function starts.
+            assert_eq!(result.fact_in(constants.entry()).len(), 1_024);
+            assert!(
+                result
+                    .fact_in(constants.entry())
+                    .values()
+                    .all(|value| *value == ConstValue::Bottom)
+            );
             assert_eq!(result.fact_out(constants.entry()).len(), 1_024);
             for variable in 0..1_024_u32 {
                 assert_eq!(
