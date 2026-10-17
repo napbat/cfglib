@@ -19,8 +19,8 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
-use crate::dataflow::InstrInfo;
 use crate::dataflow::cfg_view::CfgView;
+use crate::dataflow::{InstrInfo, VariableId};
 
 /// A node in an expression tree over variables `V`, operators `Op`, and
 /// constants `C` — all consumer-typed.
@@ -122,7 +122,9 @@ pub struct BlockExprTrees<V, Op, C> {
     /// The block these trees belong to.
     pub block: BlockId,
     /// Expression tree for each root definition: a def NOT inlined into a
-    /// later expression of this block. Inlining is decided by
+    /// later expression of this block, ordered by variable. A variable that
+    /// the block defines more than once has one root per definition that
+    /// nothing absorbed, in definition order. Inlining is decided by
     /// **intra-block** use count alone (this is a per-block recovery with
     /// no cross-block liveness), so a def used once here and again in
     /// another block is inlined and absent from `roots` — consumers
@@ -142,6 +144,11 @@ type TreesOf<I> =
 /// inlining single-use temporaries into their use sites. A variable is a
 /// single-use temporary when the block reads it once across every
 /// instruction's [`uses`](InstrInfo::uses), operand or not.
+///
+/// A definition is inlined only while it still means what it did where it
+/// was made. One that the block overwrites before anything reads it, or
+/// whose operands the block redefines before the reader, stays a root, so a
+/// block that assigns a variable twice has one root per assignment.
 #[must_use]
 pub fn recover_block_expressions<G>(cfg: &G, block: BlockId) -> TreesOf<G::Inst>
 where
@@ -150,64 +157,155 @@ where
 {
     let insts = cfg.instructions(block);
 
-    // Map from variable → the expression that defines it (within this block).
-    let mut variable_expressions = BTreeMap::new();
     let mut use_count = BTreeMap::new();
-
-    // First pass: count intra-block uses.
     for inst in insts {
         for variable in inst.uses() {
-            *use_count.entry(variable.clone()).or_insert(0) += 1;
+            *use_count.entry(variable.clone()).or_insert(0_usize) += 1;
         }
     }
 
-    // Second pass: build expressions.
-    for (idx, inst) in insts.iter().enumerate() {
-        if let Some(c) = inst.as_const() {
-            if let Some(destination) = inst.defs().first() {
-                variable_expressions.insert(destination.clone(), ExprNode::Const(c));
-            }
-        } else if let Some((op, operand_variables)) = inst.as_expr() {
-            let operands: Vec<ExprNode<_, _, _>> = operand_variables
+    let mut recovery = Recovery::new();
+    for (inst_idx, inst) in insts.iter().enumerate() {
+        let defs = inst.defs();
+        let definition = if let Some(constant) = inst.as_const() {
+            Some(Pending {
+                expression: ExprNode::Const(constant),
+                reads: Vec::new(),
+            })
+        } else if let Some((operator, operand_variables)) = inst.as_expr() {
+            let mut reads = Vec::new();
+            let operands = operand_variables
                 .iter()
                 .map(|variable| {
-                    // Inline if this is a single-use temporary defined in this block.
-                    if use_count.get(variable).copied().unwrap_or(0) == 1
-                        && let Some(subexpression) = variable_expressions.remove(variable)
-                    {
-                        return subexpression;
-                    }
-                    ExprNode::Leaf(variable.clone())
+                    let single_use = use_count.get(variable) == Some(&1);
+                    recovery.operand(variable, single_use, &mut reads)
                 })
                 .collect();
+            Some(Pending {
+                expression: ExprNode::Op { operator, operands },
+                reads,
+            })
+        } else {
+            None
+        };
 
-            if let Some(destination) = inst.defs().first() {
-                variable_expressions.insert(
-                    destination.clone(),
-                    ExprNode::Op {
-                        operator: op,
-                        operands,
-                    },
-                );
+        if let Some(definition) = definition {
+            recovery.redefine_all(defs);
+            if let Some(destination) = defs.first() {
+                recovery.pending.insert(destination.clone(), definition);
             }
         } else {
-            // Opaque instruction — keep as-is.
-            for destination in inst.defs() {
-                variable_expressions.insert(
+            // An opaque instruction defines every output as itself.
+            let reads = recovery.reads_of(inst.uses());
+            recovery.redefine_all(defs);
+            for destination in defs {
+                recovery.pending.insert(
                     destination.clone(),
-                    ExprNode::Opaque {
-                        block,
-                        inst_idx: idx,
+                    Pending {
+                        expression: ExprNode::Opaque { block, inst_idx },
+                        reads: reads.clone(),
                     },
                 );
             }
         }
     }
 
-    // Collect roots: everything still in the map was not inlined.
-    let roots = variable_expressions.into_iter().collect();
+    BlockExprTrees {
+        block,
+        roots: recovery.into_roots(),
+    }
+}
 
-    BlockExprTrees { block, roots }
+/// A block-local definition that no later expression has absorbed yet.
+struct Pending<V, Op, C> {
+    expression: ExprNode<V, Op, C>,
+    /// Each variable the expression reads, with how many times the block had
+    /// defined it when the read happened.
+    reads: Vec<(V, usize)>,
+}
+
+/// The state of recovering one block.
+struct Recovery<V, Op, C> {
+    /// The latest definition of each variable, until something absorbs it.
+    pending: BTreeMap<V, Pending<V, Op, C>>,
+    /// Definitions that a later definition of the same variable overwrote
+    /// before anything absorbed them, in the order they were overwritten.
+    overwritten: Vec<(V, ExprNode<V, Op, C>)>,
+    /// How many times the block has defined each variable so far.
+    definition_count: BTreeMap<V, usize>,
+}
+
+impl<V: VariableId, Op, C> Recovery<V, Op, C> {
+    fn new() -> Self {
+        Self {
+            pending: BTreeMap::new(),
+            overwritten: Vec::new(),
+            definition_count: BTreeMap::new(),
+        }
+    }
+
+    fn generation(&self, variable: &V) -> usize {
+        self.definition_count.get(variable).copied().unwrap_or(0)
+    }
+
+    fn reads_of(&self, variables: &[V]) -> Vec<(V, usize)> {
+        variables
+            .iter()
+            .map(|variable| (variable.clone(), self.generation(variable)))
+            .collect()
+    }
+
+    /// The operand for a read of `variable`, recorded in `reads`: the
+    /// pending definition when this is the variable's only read and nothing
+    /// that definition read has been redefined since, else a leaf.
+    fn operand(
+        &mut self,
+        variable: &V,
+        single_use: bool,
+        reads: &mut Vec<(V, usize)>,
+    ) -> ExprNode<V, Op, C> {
+        let absorbable = single_use
+            && self.pending.get(variable).is_some_and(|definition| {
+                definition
+                    .reads
+                    .iter()
+                    .all(|(read, generation)| self.generation(read) == *generation)
+            });
+        if absorbable && let Some(definition) = self.pending.remove(variable) {
+            reads.extend(definition.reads);
+            return definition.expression;
+        }
+        reads.push((variable.clone(), self.generation(variable)));
+        ExprNode::Leaf(variable.clone())
+    }
+
+    /// Record that one instruction defined every variable of `defs`: what
+    /// each held before can no longer be absorbed.
+    fn redefine_all(&mut self, defs: &[V]) {
+        for destination in defs {
+            if let Some(overwritten) = self.pending.remove(destination) {
+                self.overwritten
+                    .push((destination.clone(), overwritten.expression));
+            }
+            *self
+                .definition_count
+                .entry(destination.clone())
+                .or_insert(0) += 1;
+        }
+    }
+
+    /// Every definition nothing absorbed, ordered by variable and, for one
+    /// variable, by definition.
+    fn into_roots(self) -> Vec<(V, ExprNode<V, Op, C>)> {
+        let mut roots = self.overwritten;
+        roots.extend(
+            self.pending
+                .into_iter()
+                .map(|(variable, definition)| (variable, definition.expression)),
+        );
+        roots.sort_by(|left, right| left.0.cmp(&right.0));
+        roots
+    }
 }
 
 /// Recover expression trees for all blocks in the CFG.
@@ -412,6 +510,63 @@ mod tests {
                 (11, op("add", [leaf(3), leaf(10)])),
                 (12, op("probe", [leaf(4)])),
             ]
+        );
+    }
+
+    #[test]
+    fn a_redefined_variable_keeps_its_earlier_definition_as_a_root() {
+        // x = add(r1, r2); x = mul(x, r3); use(x): the first x is read by the
+        // second, which also redefines it, and again by `use`.
+        let roots = recover([
+            operation(10, "add", &[1, 2], &[1, 2]),
+            operation(10, "mul", &[10, 3], &[10, 3]),
+            operation(11, "use", &[10], &[10]),
+        ]);
+        assert_eq!(
+            roots,
+            [
+                (10, op("add", [leaf(1), leaf(2)])),
+                (10, op("mul", [leaf(10), leaf(3)])),
+                (11, op("use", [leaf(10)])),
+            ],
+            "both definitions of x are roots, in definition order"
+        );
+    }
+
+    #[test]
+    fn a_temporary_is_not_inlined_past_a_redefinition_of_its_operand() {
+        // t = add(r1, r2); r1 = neg(r4); u = mul(t, r3): reading r1 inside
+        // `u` would see the new r1, not the one `t` was computed from.
+        let roots = recover([
+            operation(10, "add", &[1, 2], &[1, 2]),
+            operation(1, "neg", &[4], &[4]),
+            operation(11, "mul", &[10, 3], &[10, 3]),
+        ]);
+        assert_eq!(
+            roots,
+            [
+                (1, op("neg", [leaf(4)])),
+                (10, op("add", [leaf(1), leaf(2)])),
+                (11, op("mul", [leaf(10), leaf(3)])),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_temporary_is_inlined_when_its_operands_are_redefined_before_it() {
+        // r1 = neg(r4); t = add(r1, r2); u = mul(t, r3): every read happens
+        // after the definition it names, so the whole chain folds into `u`.
+        let roots = recover([
+            operation(1, "neg", &[4], &[4]),
+            operation(10, "add", &[1, 2], &[1, 2]),
+            operation(11, "mul", &[10, 3], &[10, 3]),
+        ]);
+        assert_eq!(
+            roots,
+            [(
+                11,
+                op("mul", [op("add", [op("neg", [leaf(4)]), leaf(2)]), leaf(3)])
+            )]
         );
     }
 }
