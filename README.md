@@ -567,6 +567,22 @@ the source-language side: interned symbol variables, string/bool constants
 through constant propagation, enum operators in expression trees, goto wiring
 by label token, and switch recovery over syntax-node targets.
 
+Every other target in `crates/cfglib/tests/` pins one public area through the
+crate facade only, the way a consumer calls it, and judges the library against
+a reference written in the test (a brute-force definition, an interpreter run
+before and after a transform, a round-trip law) rather than against the
+library's own logic. A directory target (`tests/<area>/main.rs`) holds the
+larger ones.
+
+| Area | Targets |
+|---|---|
+| Graph store, tables, traversal | `graph-store`, `fanout-tables`, `open-search`, `graph-algorithms`, `tombstones` (every analysis on a store with removed slots, before and after `compact`) |
+| Control flow and exceptions | `control-tree`, `exception-regions`, `exception-models`, `address-cfg` |
+| Dataflow and SSA | `dataflow-solvers`, `memory-value-flow`, `ssa-destruction`, `cfg-pipeline` (build, dominate, SSA, SCCP, copy and dead-code passes, `eliminate_phis`) |
+| Transforms and analyses | `transform-pipeline`, `cfg-analyses` |
+| IR contracts, each over its own toy dialect | `rtl-facts`, `mlil-contract`, `hlil-pipeline`, `cfg-to-hlil` (analysis, structuring, lift) |
+| Formats | `text-dot`, `serde-round-trip` (needs `--features serde`), `no-std-facade` |
+
 ## Development
 
 Install the git hooks once with `prek install` (or `pre-commit install`); both
