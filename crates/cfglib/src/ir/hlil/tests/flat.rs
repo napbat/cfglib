@@ -30,19 +30,10 @@ use crate::{Cfg, verify};
 
 use super::{Imp, Kit, Prim, Sym, Ty};
 
-/// A variable of a flat toy function.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct FlatVar(pub(crate) u32);
-
-impl DenseId for FlatVar {
-    fn from_index(index: usize) -> Self {
-        Self(u32::try_from(index).unwrap())
-    }
-
-    fn index(self) -> usize {
-        usize::try_from(self.0).unwrap()
-    }
-}
+dense_id!(
+    /// A variable of a flat toy function.
+    FlatVar
+);
 
 /// How an instruction touches memory. A toy dialect maps it to its own
 /// effect vocabulary through [`FlatKit::effect`].

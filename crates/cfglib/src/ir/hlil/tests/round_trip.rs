@@ -18,10 +18,11 @@ use crate::ir::hlil::{
 };
 use crate::test_util::golden::assert_golden;
 
+use super::fixtures::structured_counting_loop;
 use super::flat::{FlatKit, ToyEdge, ToyFlat, ToyFlatBuilder};
 use super::flat_fixtures::{counting_loop, dispatch_with_default, guarded_call};
 use super::flat_lift::{boolean, int, lifted};
-use super::{Prim, ToyHlil, ToyHlilBuilder, Ty};
+use super::{Prim, ToyHlilBuilder, Ty};
 
 over_toys!(
     lowering_and_relifting_round_trips_a_while_loop,
@@ -32,39 +33,8 @@ over_toys!(
     an_endless_loop_without_a_body_round_trips,
 );
 
-/// `while (lt(i, n)) { if (lt(i, 100)) { break; } i = add(i, 1); } return i;`
-fn structured_counting_loop<D: FlatKit>() -> ToyHlil<D> {
-    let mut builder = ToyHlilBuilder::<D>::new();
-    let i = builder.int_variable(0);
-    let n = builder.int_variable(0);
-
-    let limit = builder.number(100);
-    let read_i = builder.read(i);
-    let break_condition = builder.call(Prim::LessThan, &[read_i, limit], Ty::Boolean);
-    let break_statement = builder.break_(None);
-    let break_if = builder.if_(break_condition, &[break_statement], &[]);
-
-    let sum_left = builder.read(i);
-    let one = builder.number(1);
-    let sum = builder.call(Prim::Add, &[sum_left, one], Ty::Integer);
-    let assign = builder.store(i, sum);
-
-    let condition_left = builder.read(i);
-    let condition_right = builder.read(n);
-    let condition = builder.call(
-        Prim::LessThan,
-        &[condition_left, condition_right],
-        Ty::Boolean,
-    );
-    let looped = builder.while_(condition, &[break_if, assign]);
-    let result = builder.read(i);
-    let ret = builder.return_(&[result]);
-    builder.set_signature(&[i, n], &[D::ty(Ty::Integer)]);
-    builder.finish(&[looped, ret]).expect("the loop verifies")
-}
-
 fn lowering_and_relifting_round_trips_a_while_loop<D: FlatKit>() {
-    let function = structured_counting_loop::<D>();
+    let (function, _) = structured_counting_loop::<D>();
     let lowered = lower::<D, _, _>(&function, ToyFlatBuilder::<D>::new()).expect("the loop lowers");
     assert!(lowered.function.check().is_ok());
     assert_ne!(lowered.origins, []);

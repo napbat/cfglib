@@ -25,9 +25,10 @@ use crate::ir::hlil::{
 use crate::region::{HandlerBody, HandlerKind as RegionHandlerKind, Region, RegionId};
 use crate::test_util::golden::assert_golden;
 
+use super::fixtures::structured_counting_loop;
 use super::flat::{FlatKit, FlatVar, ToyEdge, ToyFlat, ToyFlatBuilder, ToyForm};
 use super::sketch::{Class, Ex, Hn, Sketch, Sn, cases};
-use super::{ExprId, Kit, Prim, StmtId, ToyHlil, ToyHlilBuilder, Ty, VarId};
+use super::{ExprId, Prim, StmtId, ToyHlil, ToyHlilBuilder, Ty, VarId};
 
 over_toys!(
     every_case_lowers_to_its_golden,
@@ -161,38 +162,8 @@ fn every_case_holds_the_lowering_invariants<D: FlatKit>() {
     }
 }
 
-/// `while (i < n) { if (i < 100) { break; } i = i + 1; } return i;`
-fn counting_loop<D: Kit>() -> (ToyHlil<D>, [StmtId; 5]) {
-    let mut builder = ToyHlilBuilder::<D>::new();
-    let i = builder.int_variable(0);
-    let n = builder.int_variable(1);
-    builder.set_signature(&[i, n], &[D::ty(Ty::Integer)]);
-
-    let read_i = builder.read(i);
-    let limit = builder.number(100);
-    let below_limit = builder.call(Prim::LessThan, &[read_i, limit], Ty::Boolean);
-    let leave = builder.break_(None);
-    let guard = builder.if_(below_limit, &[leave], &[]);
-
-    let read_i = builder.read(i);
-    let one = builder.number(1);
-    let sum = builder.call(Prim::Add, &[read_i, one], Ty::Integer);
-    let step = builder.store(i, sum);
-
-    let read_i = builder.read(i);
-    let read_n = builder.read(n);
-    let condition = builder.call(Prim::LessThan, &[read_i, read_n], Ty::Boolean);
-    let looping = builder.while_(condition, &[guard, step]);
-    let result = builder.read(i);
-    let done = builder.return_(&[result]);
-    let function = builder
-        .finish(&[looping, done])
-        .expect("the function is valid");
-    (function, [looping, guard, leave, step, done])
-}
-
 fn a_while_loop_declares_and_relates_everything<D: FlatKit>() {
-    let (function, [looping, guard, leave, step, done]) = counting_loop::<D>();
+    let (function, [looping, guard, leave, step, done]) = structured_counting_loop::<D>();
     let lowering = lowered(&function);
     let flat = &lowering.function;
     assert!(flat.check().is_ok());

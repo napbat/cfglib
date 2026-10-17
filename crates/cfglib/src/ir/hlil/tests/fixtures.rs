@@ -2,7 +2,38 @@
 
 use crate::ir::hlil::{FunctionBuilder, Handler, HandlerKind, SwitchArm};
 
-use super::{Kit, Prim, ToyHlil, ToyHlilBuilder, Ty};
+use super::{Kit, Prim, StmtId, ToyHlil, ToyHlilBuilder, Ty};
+
+/// `while (i < n) { if (i < 100) { break; } i = i + 1; } return i;` and its
+/// loop, guard, break, step, and return statements.
+pub(crate) fn structured_counting_loop<D: Kit>() -> (ToyHlil<D>, [StmtId; 5]) {
+    let mut builder = ToyHlilBuilder::<D>::new();
+    let i = builder.int_variable(0);
+    let n = builder.int_variable(1);
+    builder.set_signature(&[i, n], &[D::ty(Ty::Integer)]);
+
+    let read_i = builder.read(i);
+    let limit = builder.number(100);
+    let below_limit = builder.call(Prim::LessThan, &[read_i, limit], Ty::Boolean);
+    let leave = builder.break_(None);
+    let guard = builder.if_(below_limit, &[leave], &[]);
+
+    let read_i = builder.read(i);
+    let one = builder.number(1);
+    let sum = builder.call(Prim::Add, &[read_i, one], Ty::Integer);
+    let step = builder.store(i, sum);
+
+    let read_i = builder.read(i);
+    let read_n = builder.read(n);
+    let condition = builder.call(Prim::LessThan, &[read_i, read_n], Ty::Boolean);
+    let looping = builder.while_(condition, &[guard, step]);
+    let result = builder.read(i);
+    let done = builder.return_(&[result]);
+    let function = builder
+        .finish(&[looping, done])
+        .expect("the function is valid");
+    (function, [looping, guard, leave, step, done])
+}
 
 /// `if (v0 < 10) { v0 = v0 + 1; } return v0;`
 pub(crate) fn bump<D: Kit>() -> ToyHlil<D> {
