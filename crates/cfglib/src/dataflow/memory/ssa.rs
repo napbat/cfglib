@@ -507,9 +507,8 @@ where
     pub fn operations_at(&self, point: ProgramPoint) -> MemoryOperations {
         self.events_at(point)
             .iter()
-            .fold(MemoryOperations::NONE, |operations, event| {
-                operations.union(event.operations())
-            })
+            .map(MemorySSAEvent::operations)
+            .collect()
     }
 
     /// Looks up one event by its source identity.

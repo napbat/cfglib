@@ -79,6 +79,15 @@ impl MemoryOperations {
     }
 }
 
+impl FromIterator<Self> for MemoryOperations {
+    /// Combines the properties of every item, the way
+    /// [`union`](Self::union) combines two. An empty iterator yields
+    /// [`NONE`](Self::NONE).
+    fn from_iter<T: IntoIterator<Item = Self>>(operations: T) -> Self {
+        operations.into_iter().fold(Self::NONE, Self::union)
+    }
+}
+
 /// The direction of one access to a memory location.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MemoryAccessKind {
@@ -404,9 +413,8 @@ pub trait MemoryEventInfo: InstrInfo {
     /// [`MemoryOperations::READ_MODIFY_WRITE`].
     fn memory_operations(&self) -> MemoryOperations {
         self.memory_events()
-            .fold(MemoryOperations::NONE, |operations, event| {
-                operations.union(event.operations())
-            })
+            .map(|event| event.operations())
+            .collect()
     }
 }
 
@@ -566,9 +574,8 @@ impl<L, V, F> MemoryTrace<L, V, F> {
     pub fn operations_at(&self, point: ProgramPoint) -> MemoryOperations {
         self.entries_at(point)
             .iter()
-            .fold(MemoryOperations::NONE, |operations, entry| {
-                operations.union(entry.event.operations())
-            })
+            .map(|entry| entry.event.operations())
+            .collect()
     }
 
     /// Fence entries in stable structural order.
