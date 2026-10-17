@@ -213,7 +213,22 @@ impl<I, E> Structurer<'_, I, E> {
             Some(allowed) => natural.body.intersection(allowed).copied().collect(),
         };
 
-        let shape = classify_loop(cfg, natural, header, &self.visited);
+        // The test of a pre- or post-tested loop is consumed by the loop node,
+        // so it has to lie inside the enclosing bound: a test block beyond it
+        // (a protected loop whose latch the try does not protect, a block that
+        // another region claims) would end up inside a construct that does not
+        // own it. The loop is then an endless loop whose exits are transfers.
+        let shape = match classify_loop(cfg, natural, header, &self.visited) {
+            LoopShape::While { ref chain, .. }
+                if !chain.iter().all(|&b| block_is_allowed(allowed_blocks, b)) =>
+            {
+                LoopShape::Endless
+            }
+            LoopShape::DoWhile { latch, .. } if !block_is_allowed(allowed_blocks, latch) => {
+                LoopShape::Endless
+            }
+            shape => shape,
+        };
         let (follow, continue_target) = match &shape {
             LoopShape::While { exit, .. } | LoopShape::SelfLoop { exit, .. } => {
                 (Some(*exit), header)

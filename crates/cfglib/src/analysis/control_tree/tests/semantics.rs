@@ -683,6 +683,85 @@ pub(super) fn assert_raisers_are_covered<I, E>(cfg: &Cfg<I, E>, tree: &ControlTr
     }
 }
 
+/// A try body holds no live code that another region protects and its own
+/// region does not.
+///
+/// Code that no region protects and only the protected body reaches may be
+/// lifted into the try, as a source `try { ...; return x; }` holds the
+/// `return` that the exception table leaves out, so it is not checked. Nor
+/// are handler blocks: a retry loop, whose pad branches back to the protected
+/// header, has the pad as the latch of a loop that the try wraps.
+pub(super) fn assert_try_bodies_keep_to_their_region<I, E>(
+    cfg: &Cfg<I, E>,
+    tree: &ControlTree,
+    context: &str,
+) {
+    if !is_faithful(cfg) {
+        return;
+    }
+    for id in tree.preorder() {
+        let ControlNode::TryCatch {
+            try_body, handlers, ..
+        } = *tree.node(id)
+        else {
+            continue;
+        };
+        let Some(arm) = tree.handlers(handlers).first() else {
+            continue;
+        };
+        let region = cfg
+            .region(arm.handler.region())
+            .expect("a handler arm names a region of the graph");
+        for block in blocks_of_try(tree, try_body) {
+            let protected_elsewhere = cfg
+                .regions()
+                .iter()
+                .any(|other| other.id != region.id && other.protected_blocks.contains(&block));
+            assert!(
+                !protected_elsewhere || region.protected_blocks.contains(&block),
+                "{block} sits in the try of {} but another region protects it in {context}\n{}",
+                region.id,
+                render(tree)
+            );
+        }
+    }
+}
+
+/// The blocks the statements of a try body hold directly: the bodies of
+/// nested try regions count, their handlers do not.
+fn blocks_of_try(tree: &ControlTree, body: ControlBody) -> BTreeSet<BlockId> {
+    let mut blocks = BTreeSet::new();
+    let mut stack: Vec<ControlNodeId> = tree.body(body).to_vec();
+    while let Some(id) = stack.pop() {
+        match *tree.node(id) {
+            ControlNode::Block(span) | ControlNode::Return(span) => {
+                blocks.insert(span.block());
+            }
+            ControlNode::IfThenElse { condition, .. } | ControlNode::Switch { condition, .. } => {
+                blocks.insert(condition.block());
+            }
+            ControlNode::Loop { kind, .. } => match kind {
+                LoopKind::Endless => {}
+                LoopKind::While { condition, .. } => {
+                    blocks.extend(tree.spans(condition).iter().map(|span| span.block()));
+                }
+                LoopKind::DoWhile { latch, .. } => {
+                    blocks.insert(latch.block());
+                }
+            },
+            ControlNode::TryCatch { try_body, .. } => {
+                stack.extend_from_slice(tree.body(try_body));
+                continue;
+            }
+            _ => {}
+        }
+        for child in tree.child_bodies(id) {
+            stack.extend_from_slice(tree.body(child));
+        }
+    }
+    blocks
+}
+
 /// The blocks whose instructions the statements of `body` hold.
 fn blocks_of_body(tree: &ControlTree, body: ControlBody) -> BTreeSet<BlockId> {
     let mut blocks = BTreeSet::new();

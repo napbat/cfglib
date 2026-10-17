@@ -6,6 +6,7 @@
 
 extern crate alloc;
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::rc::Rc;
 use alloc::vec::Vec;
 
 use super::node::{BlockSpan, ControlNode};
@@ -84,6 +85,11 @@ struct Structurer<'cfg, I, E> {
     loop_stack: Vec<LoopContext>,
     /// Regions structured as [`ControlNode::TryCatch`].
     structured_regions: BTreeSet<u32>,
+    /// The blocks no exception region names, as protected code, a handler
+    /// entry, or declared handler extent. Region-claimed code never moves
+    /// across structural boundaries, so code lifted out of its bound is
+    /// bounded to these.
+    unclaimed: Rc<BTreeSet<BlockId>>,
     report: LiftReport,
     tables: Tables,
 }
@@ -143,6 +149,12 @@ impl ControlTree {
     /// Other regions remain ordinary control flow: the structurer does not
     /// guess which blocks belong inside a handler, and does not show protected
     /// code outside the `try` that raises into its handler.
+    ///
+    /// A `try` body holds the protected code of its region. It may also hold
+    /// code that no region names and only the protected body reaches, as a
+    /// source `try { ...; return x; }` holds the `return` that an exception
+    /// table leaves out, but never code that another region protects or
+    /// handles: that code stays outside, behind a goto.
     /// **No owned code is ever dropped** (see below): a transfer refused at a
     /// structural boundary becomes an explicit [`ControlNode::Goto`], and
     /// every owned block the structured walk did not emit (refused targets,
@@ -344,6 +356,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             labeled_blocks: BTreeSet::new(),
             loop_stack: Vec::new(),
             structured_regions: BTreeSet::new(),
+            unclaimed: Rc::new(unclaimed_blocks(cfg)),
             report: LiftReport::default(),
             tables: Tables::new(),
         }
@@ -441,6 +454,11 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             }
         }
         sweep
+    }
+
+    /// Whether an exception region names `block`.
+    fn is_claimed(&self, block: BlockId) -> bool {
+        !self.unclaimed.contains(&block)
     }
 
     fn is_visited(&self, block: BlockId) -> bool {
@@ -548,11 +566,14 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
                 // so this transfer is its only entry, and no exception region
                 // claims it — inlines here instead of degrading to a goto
                 // (javac hoists `break label` bodies out of line like this).
+                // The inlined walk stays within unclaimed code, so it never
+                // pulls another region's blocks into this construct.
                 // Anything else is recorded, never dropped: the jump is
                 // explicit and the completeness sweep emits the target under
                 // the matching label.
-                if cfg.incoming(block).count() == 1 && !region_member(cfg, block) {
-                    result.extend(self.lift_region(block, None, stop));
+                if cfg.incoming(block).count() == 1 && !self.is_claimed(block) {
+                    let bound = Rc::clone(&self.unclaimed);
+                    result.extend(self.lift_region(block, Some(&bound), stop));
                 } else {
                     self.push_goto(&mut result, block, GotoReason::BoundaryEscape);
                 }
@@ -687,7 +708,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
                 result.push(node);
             } else if !self.is_visited(target)
                 && cfg.incoming(target).count() == 1
-                && !region_member(cfg, target)
+                && !self.is_claimed(target)
             {
                 // Exclusively owned jump target — this explicit jump is its
                 // only entry and no exception region claims it (javac jumps
@@ -798,12 +819,15 @@ fn block_is_allowed(allowed_blocks: Option<&BTreeSet<BlockId>>, block: BlockId) 
     allowed_blocks.is_none_or(|blocks| blocks.contains(&block))
 }
 
-/// Whether any exception region names the block — as protected code, a
-/// handler entry, or declared handler extent. Region-claimed code never
-/// moves across structural boundaries.
-fn region_member<I, E>(cfg: &Cfg<I, E>, block: BlockId) -> bool {
-    cfg.regions().iter().any(|region| {
-        region.protected_blocks.contains(&block)
-            || region.handlers.iter().any(|handler| handler.claims(block))
-    })
+/// The blocks no exception region names: neither protected, nor a handler
+/// entry, nor part of a declared handler extent.
+fn unclaimed_blocks<I, E>(cfg: &Cfg<I, E>) -> BTreeSet<BlockId> {
+    cfg.block_ids()
+        .filter(|&block| {
+            !cfg.regions().iter().any(|region| {
+                region.protected_blocks.contains(&block)
+                    || region.handlers.iter().any(|handler| handler.claims(block))
+            })
+        })
+        .collect()
 }

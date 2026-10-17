@@ -396,6 +396,7 @@ pub(super) fn check<I, E>(cfg: &Cfg<I, E>, tree: &ControlTree, report: &LiftRepo
     }
     super::semantics::assert_runs_alike(cfg, tree, report, context);
     super::semantics::assert_raisers_are_covered(cfg, tree, context);
+    super::semantics::assert_try_bodies_keep_to_their_region(cfg, tree, context);
     // A fully structured tree holds no goto.
     assert!(
         !report.is_fully_structured()

@@ -133,9 +133,13 @@ fn complete_handler_bodies(region: &Region) -> Option<Vec<&BTreeSet<BlockId>>> {
 }
 
 /// The region's normal continuation: the unique target of ordinary flow
-/// leaving the region's own blocks — protected and handler alike. `None`
-/// when the exits diverge (or none exist), leaving the walk to its
-/// conservative boundary handling.
+/// leaving the protected blocks. When those have no exit or several, the
+/// unique target of ordinary flow leaving the region's own blocks, protected
+/// and handler alike. `None` when the exits diverge (or none exist), leaving
+/// the walk to its conservative boundary handling.
+///
+/// A handler that leaves elsewhere (a `catch` that breaks or returns through
+/// another path) does not change where the protected code resumes.
 fn region_continuation<I, E>(cfg: &Cfg<I, E>, region: &Region) -> Option<BlockId> {
     let mut inside: BTreeSet<BlockId> = region.protected_blocks.clone();
     for handler in &region.handlers {
@@ -144,18 +148,22 @@ fn region_continuation<I, E>(cfg: &Cfg<I, E>, region: &Region) -> Option<BlockId
             inside.extend(blocks.iter().copied());
         }
     }
-    let mut exits: BTreeSet<BlockId> = BTreeSet::new();
-    for &block in &inside {
-        for target in flow_successors(cfg, block) {
-            if !inside.contains(&target) {
-                exits.insert(target);
-            }
-        }
-    }
-    if exits.len() == 1 {
-        exits.into_iter().next()
-    } else {
-        None
+    let exits_of = |blocks: &mut dyn Iterator<Item = BlockId>| -> BTreeSet<BlockId> {
+        blocks
+            .flat_map(|block| flow_successors(cfg, block))
+            .filter(|target| !inside.contains(target))
+            .collect()
+    };
+    let protected_exits = exits_of(&mut region.protected_blocks.iter().copied());
+    the_only(&protected_exits).or_else(|| the_only(&exits_of(&mut inside.iter().copied())))
+}
+
+/// The one element of `blocks`, if it has exactly one.
+fn the_only(blocks: &BTreeSet<BlockId>) -> Option<BlockId> {
+    let mut blocks = blocks.iter();
+    match (blocks.next(), blocks.next()) {
+        (Some(&only), None) => Some(only),
+        _ => None,
     }
 }
 
