@@ -27,6 +27,13 @@ pub struct DefUseChains {
 impl DefUseChains {
     /// Compute def-use and use-def chains for the given CFG.
     ///
+    /// A block the entry cannot reach receives no definitions from other
+    /// blocks, as in [`ReachingDefs`], so the chains inside such a block are
+    /// the ones between its own instructions: a definition there that no
+    /// later instruction of the same block reads is listed by
+    /// [`dead_defs`](Self::dead_defs), and a use with no earlier definition
+    /// in its own block has no definitions.
+    ///
     /// # Examples
     ///
     /// ```
@@ -138,8 +145,10 @@ mod tests {
     use super::*;
     use crate::block::BlockId;
     use crate::builder::CfgBuilder;
+    use crate::cfg::Cfg;
     use crate::dataflow::DefSite;
-    use crate::test_util::{df_def as def, df_use as use_};
+    use crate::edge::EdgeKind;
+    use crate::test_util::{DfInst, df_def as def, df_use as use_};
     use alloc::vec;
 
     #[test]
@@ -193,5 +202,35 @@ mod tests {
             inst_idx: 0,
         };
         assert_eq!(chains.uses_of(def_site).len(), 2);
+    }
+
+    #[test]
+    fn an_unreachable_block_has_only_its_own_chains() {
+        let mut cfg: Cfg<DfInst> = Cfg::new();
+        let source = cfg.new_block();
+        let reader = cfg.new_block();
+        let alone = cfg.new_block();
+        cfg.add_edge(source, reader, EdgeKind::Fallthrough);
+        cfg.block_mut(source).push(def("def x", 0));
+        cfg.block_mut(reader).push(use_("use x", 0));
+        cfg.block_mut(alone).push(def("def y", 1));
+        cfg.block_mut(alone).push(use_("use y", 1));
+
+        let chains = DefUseChains::compute(&cfg);
+
+        let own = chains.defs_of(UseSite {
+            block: alone,
+            inst_idx: 1,
+        });
+        assert_eq!(own.len(), 1, "a chain inside one unreachable block is kept");
+        let across = chains.defs_of(UseSite {
+            block: reader,
+            inst_idx: 0,
+        });
+        assert!(across.is_empty(), "nothing flows into unreachable code");
+        assert!(chains.dead_defs().contains(&DefSite {
+            block: source,
+            inst_idx: 0,
+        }));
     }
 }
