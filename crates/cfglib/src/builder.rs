@@ -465,7 +465,7 @@ impl CfgBuilder {
     ///     Inst(FlowEffect::Return),
     /// ]).unwrap();
     ///
-    /// assert!(cfg.block_count() >= 4); // entry, then, else, merge
+    /// assert_eq!(cfg.block_count(), 4); // entry, then, else, merge
     /// ```
     pub fn build<I: FlowControl>(
         instructions: impl IntoIterator<Item = I>,

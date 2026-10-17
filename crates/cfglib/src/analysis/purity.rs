@@ -100,7 +100,7 @@ mod tests {
     use super::*;
     use crate::builder::CfgBuilder;
     use crate::flow::FlowEffect;
-    use crate::test_util::{TestEffect, df_impure as impure, df_pure as pure, df_with_effect};
+    use crate::test_util::{TestEffect, df_ff as pure, df_impure as impure, df_with_effect};
     use alloc::vec;
 
     #[test]

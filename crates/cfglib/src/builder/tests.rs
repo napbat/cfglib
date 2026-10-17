@@ -51,6 +51,28 @@ impl JumpTargets for GotoInst {
     }
 }
 
+/// Assert the built graph's blocks (by instruction mnemonic) and edges (as
+/// `(source, target, kind)`), both in creation order.
+fn assert_shape(cfg: &Cfg<MockInst>, blocks: &[&[&str]], edges: &[(usize, usize, EdgeKind)]) {
+    let actual_blocks: Vec<Vec<&str>> = cfg
+        .block_ids()
+        .map(|block| {
+            cfg.block(block)
+                .instructions()
+                .iter()
+                .map(|i| i.1)
+                .collect()
+        })
+        .collect();
+    let expected_blocks: Vec<Vec<&str>> = blocks.iter().map(|block| block.to_vec()).collect();
+    assert_eq!(actual_blocks, expected_blocks, "blocks");
+    let actual_edges: Vec<_> = cfg
+        .edges()
+        .map(|edge| (edge.source().index(), edge.target().index(), edge.kind()))
+        .collect();
+    assert_eq!(actual_edges, edges, "edges");
+}
+
 #[test]
 fn leading_label_and_conditional_continuation_stay_connected() {
     // A label as the first instruction: the (empty) entry must still
@@ -200,7 +222,7 @@ fn single_return() {
 
 #[test]
 fn if_endif_no_else() {
-    // a; if; b; endif; c
+    // a; if; b; endif; c; ret
     let cfg = CfgBuilder::build(vec![
         ff("a"),
         MockInst(FlowEffect::ConditionalOpen, "if"),
@@ -210,12 +232,16 @@ fn if_endif_no_else() {
         MockInst(FlowEffect::Return, "ret"),
     ])
     .unwrap();
-    // bb0: [a, if]
-    // bb1: [b]  (true arm)
-    // bb2: []   (merge — c, ret)
-    assert!(cfg.block_count() >= 3);
-    // Entry has two successors: true arm + false arm (merge).
-    assert_eq!(cfg.outgoing(cfg.entry()).count(), 2);
+    // Without an `else`, the false path goes straight to the merge.
+    assert_shape(
+        &cfg,
+        &[&["a", "if"], &["b"], &["c", "ret"]],
+        &[
+            (0, 1, EdgeKind::ConditionalTrue),
+            (1, 2, EdgeKind::Fallthrough),
+            (0, 2, EdgeKind::ConditionalFalse),
+        ],
+    );
 }
 
 #[test]
@@ -232,12 +258,16 @@ fn if_else_endif() {
         MockInst(FlowEffect::Return, "ret"),
     ])
     .unwrap();
-    // bb0: [a, if] → true(bb1), false(bb2)
-    // bb1: [b]     → merge(bb3)
-    // bb2: [else, c] → merge(bb3)
-    // bb3: [d, ret]
-    assert!(cfg.block_count() >= 4);
-    assert_eq!(cfg.outgoing(cfg.entry()).count(), 2);
+    assert_shape(
+        &cfg,
+        &[&["a", "if"], &["b"], &["else", "c"], &["d", "ret"]],
+        &[
+            (0, 1, EdgeKind::ConditionalTrue),
+            (0, 2, EdgeKind::ConditionalFalse),
+            (1, 3, EdgeKind::Fallthrough),
+            (2, 3, EdgeKind::Fallthrough),
+        ],
+    );
 }
 
 #[test]
@@ -250,10 +280,13 @@ fn simple_loop() {
         MockInst(FlowEffect::Return, "ret"),
     ])
     .unwrap();
-    // bb0: [loop]       → fallthrough to bb1 (header)
-    // bb1: [a]          → back to bb1 (header)
-    // bb2: [ret]        (post-loop, unreachable without break)
-    assert!(cfg.block_count() >= 2);
+    // The header bb1 loops onto itself; the post-loop block bb2 is
+    // unreachable without a break.
+    assert_shape(
+        &cfg,
+        &[&["loop"], &["a"], &["ret"]],
+        &[(0, 1, EdgeKind::Fallthrough), (1, 1, EdgeKind::Back)],
+    );
 }
 
 #[test]
@@ -267,8 +300,17 @@ fn loop_with_break() {
         MockInst(FlowEffect::Return, "ret"),
     ])
     .unwrap();
-    // post-loop block should be reachable from the break.
-    assert!(cfg.block_count() >= 3);
+    // The break reaches the post-loop block bb3. The loop's back edge starts
+    // in bb2, the unreachable code after the break, so the body never repeats.
+    assert_shape(
+        &cfg,
+        &[&["loop"], &["a", "break"], &[], &["ret"]],
+        &[
+            (0, 1, EdgeKind::Fallthrough),
+            (2, 1, EdgeKind::Back),
+            (1, 3, EdgeKind::Unconditional),
+        ],
+    );
 }
 
 #[test]
@@ -283,10 +325,19 @@ fn loop_with_conditional_break() {
         MockInst(FlowEffect::Return, "ret"),
     ])
     .unwrap();
-    // The breakc block should have two successors:
-    // - true → break_block (which goes to post-loop)
-    // - false → continue block (with b)
-    assert!(cfg.block_count() >= 4);
+    // The taken path goes to an empty break block bb2, which leaves for the
+    // post-loop block bb4; the other path continues into `b` and loops.
+    assert_shape(
+        &cfg,
+        &[&["loop"], &["a", "breakc"], &[], &["b"], &["ret"]],
+        &[
+            (0, 1, EdgeKind::Fallthrough),
+            (1, 2, EdgeKind::ConditionalTrue),
+            (1, 3, EdgeKind::ConditionalFalse),
+            (3, 1, EdgeKind::Back),
+            (2, 4, EdgeKind::Unconditional),
+        ],
+    );
 }
 
 #[test]
@@ -365,10 +416,17 @@ fn continue_jumps_to_header() {
         MockInst(FlowEffect::Return, "ret"),
     ])
     .unwrap();
-    // The continue should create a back-edge to the header.
-    let has_back = cfg.edges().any(|e| e.kind() == EdgeKind::Back);
-    assert!(has_back);
-    assert!(cfg.block_count() >= 3);
+    // `continue` closes the header bb1 onto itself; `b` is code after it, and
+    // the loop's own back edge starts there.
+    assert_shape(
+        &cfg,
+        &[&["loop"], &["a", "continue"], &["b"], &["ret"]],
+        &[
+            (0, 1, EdgeKind::Fallthrough),
+            (1, 1, EdgeKind::Back),
+            (2, 1, EdgeKind::Back),
+        ],
+    );
 }
 
 #[test]
@@ -383,12 +441,17 @@ fn conditional_continue() {
         MockInst(FlowEffect::Return, "ret"),
     ])
     .unwrap();
-    // continuec block has two successors: true->header, false->continue
-    let has_cond_true = cfg.edges().any(|e| e.kind() == EdgeKind::ConditionalTrue);
-    let has_cond_false = cfg.edges().any(|e| e.kind() == EdgeKind::ConditionalFalse);
-    assert!(has_cond_true);
-    assert!(has_cond_false);
-    assert!(cfg.block_count() >= 4);
+    // The taken path goes back to the header bb1, the other falls into `b`.
+    assert_shape(
+        &cfg,
+        &[&["loop"], &["a", "continuec"], &["b"], &["ret"]],
+        &[
+            (0, 1, EdgeKind::Fallthrough),
+            (1, 1, EdgeKind::ConditionalTrue),
+            (1, 2, EdgeKind::ConditionalFalse),
+            (2, 1, EdgeKind::Back),
+        ],
+    );
 }
 
 #[test]
@@ -401,12 +464,15 @@ fn conditional_return() {
         MockInst(FlowEffect::Return, "ret"),
     ])
     .unwrap();
-    // retc splits into ret_block (terminal) and cont_block (with b).
-    let has_cond_true = cfg.edges().any(|e| e.kind() == EdgeKind::ConditionalTrue);
-    let has_cond_false = cfg.edges().any(|e| e.kind() == EdgeKind::ConditionalFalse);
-    assert!(has_cond_true);
-    assert!(has_cond_false);
-    assert!(cfg.block_count() >= 3);
+    // retc splits into an empty terminal return block and the continuation.
+    assert_shape(
+        &cfg,
+        &[&["a", "retc"], &[], &["b", "ret"]],
+        &[
+            (0, 1, EdgeKind::ConditionalTrue),
+            (0, 2, EdgeKind::ConditionalFalse),
+        ],
+    );
 }
 
 #[test]
@@ -419,8 +485,9 @@ fn terminate_ends_block() {
         MockInst(FlowEffect::Return, "ret"),
     ])
     .unwrap();
-    // abort terminates the block; b starts a new (unreachable) block.
-    assert!(cfg.block_count() >= 2);
+    // abort ends its block with no successor; b starts a separate block that
+    // nothing reaches.
+    assert_shape(&cfg, &[&["a", "abort"], &["b", "ret"]], &[]);
 }
 
 #[test]
@@ -433,15 +500,17 @@ fn label_splits_block() {
         MockInst(FlowEffect::Return, "ret"),
     ])
     .unwrap();
-    // The label should split into two blocks with a fallthrough edge.
-    assert!(cfg.block_count() >= 2);
-    let has_fallthrough = cfg.edges().any(|e| e.kind() == EdgeKind::Fallthrough);
-    assert!(has_fallthrough);
+    // The label leads a new block that the first one falls into.
+    assert_shape(
+        &cfg,
+        &[&["a"], &["label_0", "b", "ret"]],
+        &[(0, 1, EdgeKind::Fallthrough)],
+    );
 }
 
 #[test]
 fn switch_with_cases() {
-    // switch; a; case; b; case; c; endswitch; d; ret
+    // switch; a; case; b; default; c; endswitch; d; ret
     let cfg = CfgBuilder::build(vec![
         MockInst(FlowEffect::SwitchOpen, "switch"),
         ff("a"),
@@ -454,13 +523,26 @@ fn switch_with_cases() {
         MockInst(FlowEffect::Return, "ret"),
     ])
     .unwrap();
-    // switch block dispatches to multiple case arms.
-    let switch_edges: Vec<_> = cfg
-        .edges()
-        .filter(|e| e.kind() == EdgeKind::SwitchCase)
-        .collect();
-    assert!(switch_edges.len() >= 2); // at least first case + case + default
-    assert!(cfg.block_count() >= 5);
+    // The statements before the first marker are the first arm; every arm
+    // falls through to the merge.
+    assert_shape(
+        &cfg,
+        &[
+            &["switch"],
+            &["a"],
+            &["case", "b"],
+            &["default", "c"],
+            &["d", "ret"],
+        ],
+        &[
+            (0, 1, EdgeKind::SwitchCase),
+            (0, 2, EdgeKind::SwitchCase),
+            (0, 3, EdgeKind::SwitchCase),
+            (1, 4, EdgeKind::Fallthrough),
+            (2, 4, EdgeKind::Fallthrough),
+            (3, 4, EdgeKind::Fallthrough),
+        ],
+    );
 }
 
 #[test]
@@ -477,13 +559,25 @@ fn switch_break_exits_switch() {
         MockInst(FlowEffect::Return, "ret"),
     ])
     .unwrap();
-    // The break should wire to the post-switch merge block.
-    let unconditional_edges: Vec<_> = cfg
-        .edges()
-        .filter(|e| e.kind() == EdgeKind::Unconditional)
-        .collect();
-    assert!(!unconditional_edges.is_empty());
-    assert!(cfg.block_count() >= 4);
+    // The break wires to the post-switch merge, bb4. Block 2, empty and
+    // without predecessors, is the code after the break.
+    assert_shape(
+        &cfg,
+        &[
+            &["switch"],
+            &["a", "break"],
+            &[],
+            &["case", "b"],
+            &["c", "ret"],
+        ],
+        &[
+            (0, 1, EdgeKind::SwitchCase),
+            (0, 3, EdgeKind::SwitchCase),
+            (2, 4, EdgeKind::Fallthrough),
+            (3, 4, EdgeKind::Fallthrough),
+            (1, 4, EdgeKind::Unconditional),
+        ],
+    );
 }
 
 #[test]
@@ -500,9 +594,19 @@ fn nested_if_in_loop() {
         MockInst(FlowEffect::Return, "ret"),
     ])
     .unwrap();
-    assert!(cfg.block_count() >= 5);
-    let has_back = cfg.edges().any(|e| e.kind() == EdgeKind::Back);
-    assert!(has_back);
+    // The loop header bb1 holds the `if`; the merge bb4 closes the loop.
+    assert_shape(
+        &cfg,
+        &[&["loop"], &["if"], &["a"], &["else", "b"], &[], &["ret"]],
+        &[
+            (0, 1, EdgeKind::Fallthrough),
+            (1, 2, EdgeKind::ConditionalTrue),
+            (1, 3, EdgeKind::ConditionalFalse),
+            (2, 4, EdgeKind::Fallthrough),
+            (3, 4, EdgeKind::Fallthrough),
+            (4, 1, EdgeKind::Back),
+        ],
+    );
 }
 
 #[test]
@@ -518,9 +622,30 @@ fn nested_loop_in_if() {
         MockInst(FlowEffect::Return, "ret"),
     ])
     .unwrap();
-    assert!(cfg.block_count() >= 5);
-    let has_back = cfg.edges().any(|e| e.kind() == EdgeKind::Back);
-    assert!(has_back);
+    // bb2 is the loop header, bb3 the break block, bb4 the loop's
+    // continuation, bb5 the post-loop block, and bb6 the merge of the `if`.
+    assert_shape(
+        &cfg,
+        &[
+            &["if"],
+            &["loop"],
+            &["a", "breakc"],
+            &[],
+            &[],
+            &[],
+            &["ret"],
+        ],
+        &[
+            (0, 1, EdgeKind::ConditionalTrue),
+            (1, 2, EdgeKind::Fallthrough),
+            (2, 3, EdgeKind::ConditionalTrue),
+            (2, 4, EdgeKind::ConditionalFalse),
+            (4, 2, EdgeKind::Back),
+            (3, 5, EdgeKind::Unconditional),
+            (5, 6, EdgeKind::Fallthrough),
+            (0, 6, EdgeKind::ConditionalFalse),
+        ],
+    );
 }
 
 #[test]
@@ -539,9 +664,32 @@ fn switch_inside_loop_break_exits_switch() {
         MockInst(FlowEffect::Return, "ret"),
     ])
     .unwrap();
-    // The break inside the switch should exit the switch.
-    // The breakc after endswitch should exit the loop.
-    assert!(cfg.block_count() >= 6);
-    let has_back = cfg.edges().any(|e| e.kind() == EdgeKind::Back);
-    assert!(has_back);
+    // The `break` in the first arm (bb2) reaches the switch merge bb5, which
+    // holds the `breakc`; only that one leaves the loop, for bb8.
+    assert_shape(
+        &cfg,
+        &[
+            &["loop"],
+            &["switch"],
+            &["a", "break"],
+            &[],
+            &["case", "b"],
+            &["breakc"],
+            &[],
+            &[],
+            &["ret"],
+        ],
+        &[
+            (0, 1, EdgeKind::Fallthrough),
+            (1, 2, EdgeKind::SwitchCase),
+            (1, 4, EdgeKind::SwitchCase),
+            (3, 5, EdgeKind::Fallthrough),
+            (4, 5, EdgeKind::Fallthrough),
+            (2, 5, EdgeKind::Unconditional),
+            (5, 6, EdgeKind::ConditionalTrue),
+            (5, 7, EdgeKind::ConditionalFalse),
+            (7, 1, EdgeKind::Back),
+            (6, 8, EdgeKind::Unconditional),
+        ],
+    );
 }
