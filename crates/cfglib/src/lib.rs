@@ -293,7 +293,7 @@ pub use dataflow::ssa::{
     DominanceFrontiers, PhiPlacement, PhiPlacements, SsaBlock, SsaForm, SsaInstruction, SsaPhi,
     SsaScratch, SsaValue, SsaVersion,
 };
-pub use dataflow::ssa_destruction::{PhiCopy, copies_by_predecessor, eliminate_phis};
+pub use dataflow::ssa_destruction::{PhiCopy, PhiCopyGroup, copies_by_predecessor, eliminate_phis};
 pub use dataflow::{DefSite, EffectInfo, InstrInfo, Predicated, ProgramPoint, UseSite, VariableId};
 pub use display::{DisplayInstr, IndentedWriter};
 pub use edge::{Edge, EdgeId, EdgeKind, EdgeTag, KindedEdge};
