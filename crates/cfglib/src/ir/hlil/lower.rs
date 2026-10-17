@@ -41,7 +41,9 @@ pub struct LoweredFunction<F, S, E, V, W> {
     /// The function that the consumer's builder sealed.
     pub function: F,
     /// The structured entity that each appended flat instruction was lowered
-    /// from, in emission order.
+    /// from, in emission order. The rows are not sorted by point;
+    /// [`Correspondence::instructions`](super::Correspondence) is the sorted
+    /// form that a lift returns.
     ///
     /// An operation, a constant, or a copy that evaluates an expression
     /// carries [`Entity::Expression`]. The instruction that finishes a

@@ -517,45 +517,54 @@ fn indexed_writes_into_disjoint_slices_of_one_root_all_take_effect() {
 
 #[test]
 fn an_unknown_indexed_write_keeps_a_root_unknown_through_a_known_one() {
-    let mut function = Function::new();
-    let entry = function.block();
-    // The first write lands in the low half of `Acc` or of `Tmp`, and nothing
-    // says which. The second write is a known one into the high half of `Acc`.
-    let either = [
-        acc_half(0),
-        Place {
-            root: Root::Tmp,
-            slice: BitSlice::new(0, Bits::new(32).unwrap()),
-        },
-    ];
-    let high = [acc_half(32)];
-    let mut record = function.record_in(entry);
-    let unknown = record.nondet(three_bits(), ());
-    let known = record.constant_value(0, 3);
-    let one = record.constant_value(1, 32);
-    let two = record.constant_value(2, 32);
-    record.write(
-        WriteTarget::FiniteIndexed {
+    // The unknown write lands in the low half of `Acc` or of `Tmp`, and
+    // nothing says which. The known write is into the high half of `Acc`.
+    // Neither order of the two may leave the low half of `Acc` known.
+    for unknown_first in [true, false] {
+        let mut function = Function::new();
+        let entry = function.block();
+        let either = [
+            acc_half(0),
+            Place {
+                root: Root::Tmp,
+                slice: BitSlice::new(0, Bits::new(32).unwrap()),
+            },
+        ];
+        let high = [acc_half(32)];
+        let mut record = function.record_in(entry);
+        let unknown = record.nondet(three_bits(), ());
+        let known = record.constant_value(0, 3);
+        let one = record.constant_value(1, 32);
+        let two = record.constant_value(2, 32);
+        let unknown_write = WriteTarget::FiniteIndexed {
             index: unknown,
             candidates: &either,
             value: one,
-        },
-        (),
-    );
-    record.write(
-        WriteTarget::FiniteIndexed {
+        };
+        let known_write = WriteTarget::FiniteIndexed {
             index: known,
             candidates: &high,
             value: two,
-        },
-        (),
-    );
-    record.end(Control::Advance);
-    let from_low = read_slot_at_acc(&mut function, entry, 0);
+        };
+        let writes = if unknown_first {
+            [unknown_write, known_write]
+        } else {
+            [known_write, unknown_write]
+        };
+        for write in writes {
+            record.write(write, ());
+        }
+        record.end(Control::Advance);
+        let from_low = read_slot_at_acc(&mut function, entry, 0);
 
-    let acc = RootConstant {
-        root: Root::Acc,
-        words: &[0],
-    };
-    assert_eq!(resolve(&function, &[acc]).candidate(from_low, 1), None);
+        let acc = RootConstant {
+            root: Root::Acc,
+            words: &[0],
+        };
+        assert_eq!(
+            resolve(&function, &[acc]).candidate(from_low, 1),
+            None,
+            "unknown write first: {unknown_first}"
+        );
+    }
 }

@@ -48,7 +48,7 @@ fn every_statement_shape_renders<D: Kit>() {
 /// The writer keeps its own stack, so an operand chain as deep as generated
 /// code can produce does not overflow the thread's.
 fn a_deep_expression_prints_without_recursion<D: Kit>() {
-    const DEPTH: usize = 20_000;
+    const DEPTH: usize = 50_000;
 
     let mut builder = ToyHlilBuilder::<D>::new();
     let counter = builder.int_variable(0);
