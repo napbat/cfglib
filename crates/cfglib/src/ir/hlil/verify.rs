@@ -7,7 +7,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::fmt;
+use core::{fmt, slice};
 
 use crate::graph::view::DenseId;
 
@@ -116,8 +116,9 @@ where
     verify_expressions(function, &mut check);
     verify_statements(function, &mut check);
     if check.issues.is_empty() {
-        // The context walk recurses through bodies, so it waits until the
-        // flat passes prove that children precede parents.
+        // The context walk follows child bodies, which never ends on a
+        // cycle, so it waits until the flat passes prove that children
+        // precede parents.
         verify_context(function, &mut check);
     }
     if !check.dangling {
@@ -344,6 +345,15 @@ struct Context<'a> {
     defined_labels: BTreeMap<&'a str, u32>,
 }
 
+/// A construct that the walk is inside of, and leaves again once it has
+/// walked every body of it.
+#[derive(Clone, Copy)]
+enum Enclosing {
+    Loop,
+    Switch,
+    Label,
+}
+
 impl Context<'_> {
     fn encloses(&self, label: &str) -> bool {
         self.labels.iter().any(|enclosing| enclosing.name == label)
@@ -353,6 +363,19 @@ impl Context<'_> {
         self.labels
             .iter()
             .any(|enclosing| enclosing.name == label && enclosing.names_loop)
+    }
+
+    fn leave(&mut self, enclosing: Enclosing) {
+        match enclosing {
+            Enclosing::Loop => {
+                self.loop_depth -= 1;
+                self.breakable_depth -= 1;
+            }
+            Enclosing::Switch => self.breakable_depth -= 1,
+            Enclosing::Label => {
+                self.labels.pop();
+            }
+        }
     }
 }
 
@@ -380,6 +403,19 @@ where
     walk_context(function, function.body(), &mut context, check);
 }
 
+/// What the context walk has still to do.
+enum Pending<'a, S> {
+    /// The rest of a body.
+    Body(slice::Iter<'a, S>),
+    /// Leaves the construct once the bodies above it are walked.
+    Leave(Enclosing),
+}
+
+/// Checks `roots` and every statement under them in preorder against the
+/// constructs that enclose each.
+///
+/// The walk keeps its own stack, so the depth of the nesting costs no call
+/// frames.
 fn walk_context<'a, H, F>(
     function: &'a F,
     roots: &'a [F::Stmt],
@@ -389,71 +425,88 @@ fn walk_context<'a, H, F>(
     H: VerifyDialect,
     F: FunctionView<H>,
 {
-    for &statement in roots {
-        let name = Name::statement(statement);
-        match function.stmt(statement) {
-            StmtShape::Break { label: None } if context.breakable_depth == 0 => {
-                check.issue(Untargeted::Break.message(statement));
-            }
-            StmtShape::Break { label: Some(label) } if !context.encloses(label) => {
-                check.issue(Untargeted::BreakUnenclosed(label).message(statement));
-            }
-            StmtShape::Continue { label: None } if context.loop_depth == 0 => {
-                check.issue(Untargeted::Continue.message(statement));
-            }
-            StmtShape::Continue { label: Some(label) } if !context.encloses_loop(label) => {
-                let cause = if context.encloses(label) {
-                    Untargeted::ContinueBlock(label)
-                } else {
-                    Untargeted::ContinueUnenclosed(label)
+    let mut pending = vec![Pending::Body(roots.iter())];
+    while let Some(top) = pending.last_mut() {
+        let statement = match top {
+            Pending::Body(statements) => {
+                let Some(&statement) = statements.next() else {
+                    pending.pop();
+                    continue;
                 };
-                check.issue(cause.message(statement));
+                statement
             }
-            StmtShape::Goto { label } if !context.defined_labels.contains_key(label) => {
-                check.issue(format!("{name} targets undefined label {label}"));
-            }
-            StmtShape::While { .. }
-            | StmtShape::DoWhile { .. }
-            | StmtShape::Loop { .. }
-            | StmtShape::For { .. } => {
-                context.loop_depth += 1;
-                context.breakable_depth += 1;
-                descend(function, statement, context, check);
-                context.loop_depth -= 1;
-                context.breakable_depth -= 1;
+            Pending::Leave(enclosing) => {
+                context.leave(*enclosing);
+                pending.pop();
                 continue;
             }
-            StmtShape::Switch { .. } => {
-                context.breakable_depth += 1;
-                descend(function, statement, context, check);
-                context.breakable_depth -= 1;
-                continue;
-            }
-            StmtShape::Labeled { label, body } => {
-                context.labels.push(EnclosingLabel {
-                    name: label,
-                    names_loop: labeled_loop(function, body).is_some(),
-                });
-                descend(function, statement, context, check);
-                context.labels.pop();
-                continue;
-            }
-            _ => {}
+        };
+        if let Some(enclosing) = check_statement(function, statement, context, check) {
+            pending.push(Pending::Leave(enclosing));
         }
-        descend(function, statement, context, check);
+        let first_body = pending.len();
+        for_each_child_body(function, statement, |body, _| {
+            pending.push(Pending::Body(body.iter()));
+        });
+        // The first body is the next one to walk, so it goes on top.
+        pending[first_body..].reverse();
     }
 }
 
-fn descend<'a, H, F>(
+/// Checks `statement` against what encloses it, and returns the construct
+/// that it opens for its bodies, if any.
+fn check_statement<'a, H, F>(
     function: &'a F,
     statement: F::Stmt,
     context: &mut Context<'a>,
     check: &mut Check,
-) where
+) -> Option<Enclosing>
+where
     H: VerifyDialect,
     F: FunctionView<H>,
 {
-    for_each_child_body(function, statement, |body, _| {
-        walk_context(function, body, context, check);
-    });
+    match function.stmt(statement) {
+        StmtShape::Break { label: None } if context.breakable_depth == 0 => {
+            check.issue(Untargeted::Break.message(statement));
+        }
+        StmtShape::Break { label: Some(label) } if !context.encloses(label) => {
+            check.issue(Untargeted::BreakUnenclosed(label).message(statement));
+        }
+        StmtShape::Continue { label: None } if context.loop_depth == 0 => {
+            check.issue(Untargeted::Continue.message(statement));
+        }
+        StmtShape::Continue { label: Some(label) } if !context.encloses_loop(label) => {
+            let cause = if context.encloses(label) {
+                Untargeted::ContinueBlock(label)
+            } else {
+                Untargeted::ContinueUnenclosed(label)
+            };
+            check.issue(cause.message(statement));
+        }
+        StmtShape::Goto { label } if !context.defined_labels.contains_key(label) => {
+            let name = Name::statement(statement);
+            check.issue(format!("{name} targets undefined label {label}"));
+        }
+        StmtShape::While { .. }
+        | StmtShape::DoWhile { .. }
+        | StmtShape::Loop { .. }
+        | StmtShape::For { .. } => {
+            context.loop_depth += 1;
+            context.breakable_depth += 1;
+            return Some(Enclosing::Loop);
+        }
+        StmtShape::Switch { .. } => {
+            context.breakable_depth += 1;
+            return Some(Enclosing::Switch);
+        }
+        StmtShape::Labeled { label, body } => {
+            context.labels.push(EnclosingLabel {
+                name: label,
+                names_loop: labeled_loop(function, body).is_some(),
+            });
+            return Some(Enclosing::Label);
+        }
+        _ => {}
+    }
+    None
 }

@@ -5,6 +5,7 @@ extern crate alloc;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec;
 use alloc::vec::Vec;
+use core::slice;
 
 use crate::graph::fanout::DenseFanout;
 use crate::graph::view::DenseId;
@@ -45,7 +46,7 @@ impl<S: DenseId, V: DenseId> VariablePlacements<S, V> {
         F: FunctionView<H, Stmt = S, Var = V>,
     {
         let mut placements = vec![None; function.variable_count()];
-        analyze_body(function, function.body(), &mut placements);
+        anchor_variables(function, &mut placements);
         let anchored = placements.iter().enumerate().filter_map(|(index, anchor)| {
             anchor.map(|statement| (statement, V::from_index(index)))
         });
@@ -72,72 +73,146 @@ impl<S: DenseId, V: DenseId> VariablePlacements<S, V> {
     }
 }
 
-/// Anchors the variables inside `body` and returns every variable that
-/// occurs in it.
-fn analyze_body<H, F>(
-    function: &F,
-    body: &[F::Stmt],
-    placements: &mut [Option<F::Stmt>],
-) -> BTreeSet<F::Var>
+/// Anchors the variables of every statement of `function`, the innermost
+/// bodies first.
+///
+/// The analysis keeps its own stack of the statements that it is inside, so
+/// the depth of the nesting costs no call frames. Each frame holds the one
+/// child body that its statement is analyzing, and the frame below receives
+/// the variables of the statement when it is done.
+fn anchor_variables<H, F>(function: &F, placements: &mut [Option<F::Stmt>])
 where
     H: Dialect,
     F: FunctionView<H>,
 {
-    let mut contained = BTreeSet::new();
-    let mut first_statement = BTreeMap::new();
-    for &statement in body {
-        for variable in analyze_statement(function, statement, placements) {
-            if let Some(&first) = first_statement.get(&variable) {
-                place(placements, variable, first);
-            } else {
-                first_statement.insert(variable, statement);
-            }
-            contained.insert(variable);
+    let mut root = BodyFrame::new(function.body());
+    let mut open: Vec<StatementFrame<'_, F::Stmt, F::Var>> = Vec::new();
+    loop {
+        let body = open.last_mut().map_or(&mut root, |frame| &mut frame.body);
+        if let Some(&statement) = body.statements.next() {
+            open.push(StatementFrame::new(function, statement));
+            continue;
         }
+        let Some(mut frame) = open.pop() else {
+            break;
+        };
+        frame.take_in_body();
+        if let Some(next) = frame.bodies.next() {
+            frame.body = BodyFrame::new(next);
+            open.push(frame);
+            continue;
+        }
+        let statement = frame.statement;
+        let variables = frame.finish(placements);
+        let parent = open.last_mut().map_or(&mut root, |frame| &mut frame.body);
+        parent.take_in_statement(statement, variables, placements);
     }
-    contained
 }
 
-/// Anchors the variables of `statement` that no narrower body can hold and
-/// returns every variable that occurs in it.
-fn analyze_statement<H, F>(
-    function: &F,
-    statement: F::Stmt,
-    placements: &mut [Option<F::Stmt>],
-) -> BTreeSet<F::Var>
-where
-    H: Dialect,
-    F: FunctionView<H>,
-{
-    let mut owned = BTreeSet::new();
-    for_each_statement_expression(function, statement, |expression| {
-        collect_expression(function, expression, &mut owned);
-    });
+/// A body whose statements are being analyzed.
+struct BodyFrame<'a, S, V> {
+    statements: slice::Iter<'a, S>,
+    /// Every variable that occurs in the statements analyzed so far.
+    contained: BTreeSet<V>,
+    /// The first statement that each of them occurs in.
+    first_statement: BTreeMap<V, S>,
+}
 
-    // A variable's components are the places it occurs in this statement:
-    // its own operands, and each child body that mentions it.
-    let mut components: BTreeMap<F::Var, usize> =
-        owned.iter().map(|&variable| (variable, 1)).collect();
-    for_each_child_body(function, statement, |body, kind| {
-        let variables = match kind {
-            ChildBodyKind::Lexical => analyze_body(function, body, placements),
-            ChildBodyKind::Clause => {
-                let variables = collect_body(function, body);
-                owned.extend(variables.iter().copied());
-                variables
-            }
-        };
-        for variable in variables {
-            *components.entry(variable).or_default() += 1;
-        }
-    });
-
-    for (&variable, &component_count) in &components {
-        if owned.contains(&variable) || component_count > 1 {
-            place(placements, variable, statement);
+impl<'a, S: DenseId, V: DenseId> BodyFrame<'a, S, V> {
+    fn new(body: &'a [S]) -> Self {
+        Self {
+            statements: body.iter(),
+            contained: BTreeSet::new(),
+            first_statement: BTreeMap::new(),
         }
     }
-    components.into_keys().collect()
+
+    /// Takes in the variables that occur in `statement`, the one just
+    /// analyzed. A variable that a second statement shares cannot anchor in
+    /// either, so it anchors before the first.
+    fn take_in_statement(
+        &mut self,
+        statement: S,
+        variables: BTreeSet<V>,
+        placements: &mut [Option<S>],
+    ) {
+        for variable in variables {
+            if let Some(&first) = self.first_statement.get(&variable) {
+                place(placements, variable, first);
+            } else {
+                self.first_statement.insert(variable, statement);
+            }
+            self.contained.insert(variable);
+        }
+    }
+}
+
+/// A statement whose child bodies are being analyzed.
+struct StatementFrame<'a, S, V> {
+    statement: S,
+    /// The variables that its own operands and its clauses mention. They
+    /// anchor before the statement, since no narrower body holds them.
+    owned: BTreeSet<V>,
+    /// A variable's components are the places it occurs in the statement:
+    /// its own operands, and each child body that mentions it.
+    components: BTreeMap<V, usize>,
+    /// The lexical bodies after the one being analyzed.
+    bodies: vec::IntoIter<&'a [S]>,
+    /// The lexical body being analyzed.
+    body: BodyFrame<'a, S, V>,
+}
+
+impl<'a, S: DenseId, V: DenseId> StatementFrame<'a, S, V> {
+    fn new<H, F>(function: &'a F, statement: S) -> Self
+    where
+        H: Dialect,
+        F: FunctionView<H, Stmt = S, Var = V>,
+    {
+        let mut owned = BTreeSet::new();
+        for_each_statement_expression(function, statement, |expression| {
+            collect_expression(function, expression, &mut owned);
+        });
+        let mut components: BTreeMap<V, usize> =
+            owned.iter().map(|&variable| (variable, 1)).collect();
+        let mut bodies = Vec::new();
+        for_each_child_body(function, statement, |body, kind| match kind {
+            ChildBodyKind::Lexical => bodies.push(body),
+            ChildBodyKind::Clause => {
+                for variable in collect_body(function, body) {
+                    owned.insert(variable);
+                    *components.entry(variable).or_default() += 1;
+                }
+            }
+        });
+        let mut bodies = bodies.into_iter();
+        let body = BodyFrame::new(bodies.next().unwrap_or_default());
+        Self {
+            statement,
+            owned,
+            components,
+            bodies,
+            body,
+        }
+    }
+
+    /// Counts the variables of the lexical body that was just analyzed as
+    /// one more component each.
+    fn take_in_body(&mut self) {
+        for variable in core::mem::take(&mut self.body.contained) {
+            *self.components.entry(variable).or_default() += 1;
+        }
+    }
+
+    /// Anchors the variables that no narrower body can hold, and returns
+    /// every variable that occurs in the statement.
+    fn finish(self, placements: &mut [Option<S>]) -> BTreeSet<V> {
+        for (&variable, &component_count) in &self.components {
+            if self.owned.contains(&variable) || component_count > 1 {
+                place(placements, variable, self.statement);
+            }
+        }
+        self.components.into_keys().collect()
+    }
 }
 
 /// Every variable that `body` reads or writes, nested statements included.
@@ -175,7 +250,10 @@ fn place<S: DenseId, V: DenseId>(placements: &mut [Option<S>], variable: V, stat
 
 #[cfg(test)]
 mod tests {
-    use crate::ir::hlil::tests::{Kit, ToyHlilBuilder, over_toys};
+    use crate::graph::view::DenseId;
+    use crate::ir::hlil::tests::{
+        EVERY_WRAP, Kit, ToyHlilBuilder, VarId, Wrap, nest, on_small_stack, over_toys,
+    };
     use crate::ir::hlil::{FunctionBuilder, VariablePlacements};
 
     over_toys!(
@@ -184,6 +262,7 @@ mod tests {
         loop_local_variable_stays_in_the_loop_body,
         for_clause_variable_anchors_before_the_loop,
         switch_arm_variables_anchor_in_their_arm,
+        a_deep_nest_anchors_without_recursion,
         unreferenced_variables_have_no_anchor,
     );
 
@@ -288,5 +367,32 @@ mod tests {
 
         assert_eq!(placements.placement(unused), None);
         assert_eq!(placements.before(statement), []);
+    }
+
+    /// The analysis keeps its own stack, so statements nested as deep as
+    /// untrusted input can make them do not overflow the thread's.
+    fn a_deep_nest_anchors_without_recursion<D: Kit>() {
+        const DEPTH: usize = 100_000;
+        for wraps in [&[Wrap::If][..], &[Wrap::While], &EVERY_WRAP] {
+            let (root, core, placements) = on_small_stack(|| {
+                let mut builder = ToyHlilBuilder::<D>::new();
+                let shared = builder.int_variable(0);
+                let local = builder.int_variable(1);
+                let value = builder.read(shared);
+                let core = builder.store(local, value);
+                let root = nest(&mut builder, wraps, DEPTH, core);
+                let later = builder.use_of(shared);
+                let function = builder.finish_unchecked(&[root, later]);
+                (root, core, VariablePlacements::compute(&function))
+            });
+            let (shared, local) = (VarId::from_index(0), VarId::from_index(1));
+
+            // `local` stays at the bottom; `shared` is used after the nest,
+            // so it is declared before the whole of it.
+            assert_eq!(placements.placement(local), Some(core), "{wraps:?}");
+            assert_eq!(placements.placement(shared), Some(root), "{wraps:?}");
+            assert_eq!(placements.before(core), [local], "{wraps:?}");
+            assert_eq!(placements.before(root), [shared], "{wraps:?}");
+        }
     }
 }

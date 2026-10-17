@@ -28,7 +28,9 @@ use crate::test_util::golden::assert_golden;
 use super::fixtures::structured_counting_loop;
 use super::flat::{FlatKit, FlatVar, ToyEdge, ToyFlat, ToyFlatBuilder, ToyForm};
 use super::sketch::{Class, Ex, Hn, Sketch, Sn, cases};
-use super::{ExprId, Prim, StmtId, ToyHlil, ToyHlilBuilder, Ty, VarId};
+use super::{
+    ExprId, Prim, StmtId, ToyHlil, ToyHlilBuilder, Ty, VarId, Wrap, nested, on_small_stack,
+};
 
 over_toys!(
     every_case_lowers_to_its_golden,
@@ -41,6 +43,8 @@ over_toys!(
     a_filter_funclet_stays_out_of_the_handler_body,
     a_handler_binding_materializes_the_exception,
     a_deep_expression_lowers_without_recursion,
+    a_deep_nest_lowers_without_recursion,
+    a_deep_try_nest_lowers_without_recursion,
     control_falling_off_the_end_is_rejected,
     transfers_without_a_target_are_rejected,
     ill_formed_statements_are_rejected,
@@ -476,6 +480,55 @@ fn a_deep_expression_lowers_without_recursion<D: FlatKit>() {
         .map(|block| block.instructions().len())
         .sum();
     assert_eq!(instructions, 2 * DEPTH + 1);
+}
+
+/// The lowerer keeps its own stack, so statements nested as deep as untrusted
+/// input can make them do not overflow the thread's.
+fn a_deep_nest_lowers_without_recursion<D: FlatKit>() {
+    const DEPTH: usize = 100_000;
+    // A `try` is left out: it registers a region of every block that it
+    // nests, so nested trys hold a quadratic number of blocks. Their own test
+    // is shallower.
+    let every_wrap = [
+        Wrap::If,
+        Wrap::While,
+        Wrap::Labeled,
+        Wrap::DoWhile,
+        Wrap::Loop,
+        Wrap::For,
+        Wrap::Switch,
+        Wrap::Region,
+    ];
+    for wraps in [&[Wrap::If][..], &[Wrap::While], &every_wrap] {
+        let instructions = on_small_stack(|| {
+            let function = nested::<D>(wraps, DEPTH, ToyHlilBuilder::noop);
+            let flat = lowered(&function).function;
+            flat.cfg
+                .blocks()
+                .map(|block| block.instructions().len())
+                .sum::<usize>()
+        });
+
+        // Every wrap but a label evaluates its own condition, scrutinee, or
+        // region operands and then transfers; the guard around the nest does
+        // too, and the function ends in its return.
+        let labels = (0..DEPTH)
+            .filter(|level| matches!(wraps[level % wraps.len()], Wrap::Labeled))
+            .count();
+        assert_eq!(instructions, 2 * (DEPTH - labels + 1) + 1, "{wraps:?}");
+    }
+}
+
+/// Every `try` registers a region and its handlers, and all of them are
+/// built by one walk that keeps its own stack.
+fn a_deep_try_nest_lowers_without_recursion<D: FlatKit>() {
+    const DEPTH: usize = 1_000;
+    let regions = on_small_stack(|| {
+        let function = nested::<D>(&[Wrap::Try], DEPTH, ToyHlilBuilder::noop);
+        lowered(&function).function.cfg.regions().len()
+    });
+    // The innermost `try` protects nothing, so it has no region.
+    assert_eq!(regions, DEPTH - 1);
 }
 
 fn control_falling_off_the_end_is_rejected<D: FlatKit>() {

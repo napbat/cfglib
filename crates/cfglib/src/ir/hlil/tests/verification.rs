@@ -10,10 +10,15 @@ use crate::ir::hlil::{
     FunctionBuilder, Handler, HandlerKind, SwitchArm, VerificationReport, verify,
 };
 
-use super::{ExprId, Imp, Kit, Prim, StmtId, Sym, ToyHlilBuilder, Ty, VarId};
+use super::{
+    EVERY_WRAP, ExprId, Imp, Kit, Prim, StmtId, Sym, ToyHlilBuilder, Ty, VarId, Wrap, nest, nested,
+    on_small_stack,
+};
 
 over_toys!(
     a_well_formed_function_verifies,
+    a_deep_nest_verifies_without_recursion,
+    a_deep_nest_tracks_its_enclosing_constructs,
     shared_expressions_and_orphans_are_rejected,
     transfers_need_matching_context,
     labels_resolve_by_name,
@@ -351,4 +356,52 @@ fn sym_hook_reports_empty_constants() {
 
     let messages: Vec<&str> = report.issues.iter().map(|issue| &*issue.message).collect();
     assert_eq!(messages, ["e0 is an empty constant"]);
+}
+
+/// The context walk keeps its own stack, so statements nested as deep as
+/// untrusted input can make them do not overflow the thread's.
+fn a_deep_nest_verifies_without_recursion<D: Kit>() {
+    const DEPTH: usize = 100_000;
+    for wraps in [&[Wrap::If][..], &[Wrap::While], &EVERY_WRAP] {
+        let report =
+            on_small_stack(|| verify::<D, _>(&nested::<D>(wraps, DEPTH, ToyHlilBuilder::noop)));
+
+        assert!(report.is_ok(), "{wraps:?}: {report}");
+    }
+}
+
+/// Each loop and switch of a nest counts as enclosing what is inside it, and
+/// stops counting when the walk leaves it again.
+fn a_deep_nest_tracks_its_enclosing_constructs<D: Kit>() {
+    const DEPTH: usize = 100_000;
+    let reports = on_small_stack(|| {
+        let around_a_break = |wraps: &[Wrap]| {
+            let function = nested::<D>(wraps, DEPTH, |builder| builder.break_(None));
+            verify::<D, _>(&function)
+        };
+        let mut builder = ToyHlilBuilder::<D>::new();
+        let core = builder.noop();
+        let loops = nest(&mut builder, &[Wrap::While], DEPTH, core);
+        let stray = builder.break_(None);
+        let after = builder.finish_unchecked(&[loops, stray]);
+        [
+            around_a_break(&[Wrap::While]),
+            around_a_break(&[Wrap::If]),
+            around_a_break(&[Wrap::Switch, Wrap::If]),
+            verify::<D, _>(&after),
+        ]
+    });
+    let [in_loops, under_conditionals, in_a_switch, after_loops] = reports;
+
+    assert!(in_loops.is_ok(), "{in_loops}");
+    assert!(in_a_switch.is_ok(), "{in_a_switch}");
+    for rejected in [under_conditionals, after_loops] {
+        assert_eq!(rejected.issue_count(), 1, "{rejected}");
+        assert!(
+            rejected.issues[0]
+                .message
+                .ends_with("breaks outside any loop or switch"),
+            "{rejected}"
+        );
+    }
 }

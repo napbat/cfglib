@@ -286,11 +286,11 @@ An HLIL function is a pair of trees over declared variables:
 | `lift`, `lift_with_tree`, `lift_trampolines`, `LiftedFunction` | Structure a flat function into a `ControlTree`, inline single-use definitions, and translate it through a `FunctionBuilder`. |
 | `lower`, `LoweredFunction` | Flatten a structured function into blocks and edges, linearize its expression trees into typed temporaries, and register its exception regions. |
 | `Correspondence`, `Correspondence::remap` | The table that names the structured entity carrying each flat instruction and variable, and the move of that table onto a recovered function. |
-| `recover_structure`, `has_recovery_candidates`, `RecoverDialect`, `Recovery` | Rebuild a function with counted loops, conditional selections, and paired regions restored. The dialect claims each recovery through its hooks. |
+| `recover_structure`, `has_recovery_candidates`, `RecoverDialect`, `Recovery` | Rebuild a function with counted loops, conditional selections, and paired regions restored. The dialect claims each recovery through its hooks. Time is linear in the size of the function; the one exception is a nest of regions that all hold one variable, which costs one `RecoverDialect::releases` call per open region. |
 | `verify`, `VerifyDialect`, `VerificationReport` | The structural checks, then the dialect's own. |
 | `pseudocode`, `write_pseudocode`, `Pseudocode` | Indented pseudocode, spelled by the dialect's hooks. |
 | `VariablePlacements` | The narrowest lexical body that holds all occurrences of each variable. |
-| `for_each_child_body`, `for_each_statement_expression`, `visit_statements`, `visit_expression_tree`, `expressions_equal`, `compound_assignment` | The walks over the shapes. None of them recurses on the depth of an expression, and the statement walks keep their own stack. |
+| `for_each_child_body`, `for_each_statement_expression`, `visit_statements`, `visit_expression_tree`, `expressions_equal`, `compound_assignment` | The walks over the shapes. None of them recurses on the depth of an expression or the nesting of statements, and neither do the algorithms above: each keeps its own stack, so memory bounds the depth, not the thread's stack. The structuring step of `lift` has the stack-depth contract of `ControlTree::compute`. |
 
 A function follows these rules:
 
