@@ -1,9 +1,9 @@
-if {
+if (start) {
 } else {
     .bb2:
         work()
 }
-if {
+if (i < n) {
     goto .bb2;
 }
 return

@@ -1,13 +1,11 @@
 //! Dominator and post-dominator trees over graphs, CFGs, and
 //! consumer-defined views.
 
-extern crate alloc;
 use super::*;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
 use crate::graph::store::{Graph, NodeId};
 use crate::test_util::MockInst;
-use alloc::vec;
 
 mod adversarial;
 mod determinism;
@@ -16,6 +14,7 @@ mod exhaustive;
 mod forest;
 mod frontier;
 mod post;
+mod scoped_walk;
 mod support;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -221,38 +220,6 @@ fn nearest_common_dominator_of_skips_unreachable_nodes() {
     );
     assert_eq!(dom.nearest_common_dominator_of([unreachable]), None);
     assert_eq!(dom.nearest_common_dominator_of([]), None);
-}
-
-#[test]
-fn child_links_follow_the_selected_sibling_order() {
-    let mut graph = Graph::<(), ()>::new();
-    let root = graph.add_node(());
-    let first = graph.add_node(());
-    let second = graph.add_node(());
-    let grandchild = graph.add_node(());
-    let unreachable = graph.add_node(());
-    graph.add_edge(root, first, ());
-    graph.add_edge(root, second, ());
-    graph.add_edge(first, grandchild, ());
-
-    let dom = DominatorTree::compute_from(&graph, root);
-    let ascending = dom.child_links(DominatorChildOrder::Ascending);
-    let descending = dom.child_links(DominatorChildOrder::Descending);
-
-    let collect = |links: &DominatorChildLinks<NodeId>, parent| {
-        let mut children = Vec::new();
-        let mut child = links.first_child(parent);
-        while let Some(next) = child {
-            children.push(next);
-            child = links.next_sibling(next);
-        }
-        children
-    };
-
-    assert_eq!(collect(&ascending, root), vec![first, second]);
-    assert_eq!(collect(&descending, root), vec![second, first]);
-    assert_eq!(collect(&ascending, first), vec![grandchild]);
-    assert_eq!(collect(&ascending, unreachable).len(), 0);
 }
 
 #[cfg(target_pointer_width = "64")]

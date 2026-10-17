@@ -100,7 +100,7 @@ fn switch_with_a_default_is_one_dispatch_with_an_arm_per_target_and_its_join() {
     );
     assert_eq!(
         pseudocode(&flow.cfg, &tree),
-        "k = x % 3\nswitch {\n    case {\n        a()\n    }\n    case {\n        b()\n    }\n    case {\n        c()\n    }\n    default {\n        d()\n    }\n}\nreturn\n"
+        "k = x % 3\nswitch (switch k) {\n    case {\n        a()\n    }\n    case {\n        b()\n    }\n    case {\n        c()\n    }\n    default {\n        d()\n    }\n}\nreturn\n"
     );
 }
 
@@ -220,7 +220,7 @@ fn arms_that_return_have_no_merge_and_end_where_they_return() {
     ));
     assert_eq!(
         pseudocode(&flow.cfg, &tree),
-        "switch {\n    case {\n        return 1\n    }\n    case {\n        return 2\n    }\n    default {\n        return 0\n    }\n}\n"
+        "switch (switch k) {\n    case {\n        return 1\n    }\n    case {\n        return 2\n    }\n    default {\n        return 0\n    }\n}\n"
     );
 }
 
@@ -295,7 +295,7 @@ fn case_that_continues_the_loop_is_an_arm_that_ends_at_the_loop_header() {
     );
     assert_eq!(
         pseudocode(&flow.cfg, &tree),
-        "i = 0\nwhile {\n    i < n\n    break if !cond;\n    switch {\n        case {\n        }\n        case {\n            work()\n            continue;\n        }\n        default {\n            rest()\n            continue;\n        }\n    }\n}\nreturn\n"
+        "i = 0\nwhile {\n    i < n\n    break if !cond;\n    switch (switch op[i]) {\n        case {\n        }\n        case {\n            work()\n            continue;\n        }\n        default {\n            rest()\n            continue;\n        }\n    }\n}\nreturn\n"
     );
 }
 
@@ -329,6 +329,6 @@ fn case_arm_that_leaves_the_loop_is_a_break_like_the_same_arm_of_an_if() {
     );
     assert_eq!(
         pseudocode(&flow.cfg, &tree),
-        "i = 0\nwhile {\n    i < n\n    break if !cond;\n    switch {\n        case {\n            break;\n        }\n        case {\n            work()\n            continue;\n        }\n        default {\n            rest()\n            continue;\n        }\n    }\n}\nreturn\n"
+        "i = 0\nwhile {\n    i < n\n    break if !cond;\n    switch (switch op[i]) {\n        case {\n            break;\n        }\n        case {\n            work()\n            continue;\n        }\n        default {\n            rest()\n            continue;\n        }\n    }\n}\nreturn\n"
     );
 }

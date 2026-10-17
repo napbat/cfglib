@@ -336,6 +336,7 @@ pub use graph::horn::HornClauses;
 pub use graph::interval::{Interval, IntervalAnalysis};
 pub use graph::keyed::KeyedGraph;
 pub use graph::label::{Label, bind_label, display_label, no_label};
+pub use graph::loop_forest::{LoopForest, LoopId};
 pub use graph::loop_nest::{LoopNestNode, LoopNestingTree};
 pub use graph::open::{
     FoldEnter, MarkScope, OpenBfsConfig, OpenBfsEvent, OpenDfsConfig, OpenDfsEvent, OpenFold,

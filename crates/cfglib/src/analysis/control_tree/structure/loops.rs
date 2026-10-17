@@ -6,15 +6,21 @@
 //! the loop's sequential continuation.
 
 extern crate alloc;
+use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
+use alloc::rc::Rc;
 use alloc::vec::Vec;
 
-use super::branches::conditional_targets;
-use super::{BlockFlowKind, LoopContext, Structurer, block_is_allowed, branching, flow_successors};
+use super::bound::Bound;
+use super::branches::{Conditional, conditional_targets};
+use super::exits::LoopExits;
+use super::frames::{Frame, Next, Returned};
+use super::walk::RegionWalk;
+use super::{BlockFlowKind, LoopContext, Structurer, branching, flow_successors};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeId;
-use crate::graph::structure::NaturalLoop;
+use crate::graph::loop_forest::{LoopForest, LoopId};
 
 use super::super::node::{ControlNode, LoopKind};
 
@@ -44,13 +50,36 @@ enum LoopShape {
     Endless,
 }
 
+/// One loop of the loop forest.
+#[derive(Clone, Copy)]
+pub(super) struct LoopRef<'a> {
+    pub(super) forest: &'a LoopForest,
+    pub(super) lp: LoopId,
+}
+
+impl<'a> LoopRef<'a> {
+    fn contains(self, block: BlockId) -> bool {
+        self.forest.contains(self.lp, block)
+    }
+
+    /// The latches, lowest block first.
+    fn latches(self) -> &'a [BlockId] {
+        self.forest.latches(self.lp)
+    }
+
+    /// The blocks, in no order.
+    fn body(self) -> impl Iterator<Item = BlockId> + 'a {
+        self.forest.body(self.lp)
+    }
+}
+
 /// Walk the straight-line condition chain from the header: every iteration
 /// runs each link exactly once (one flow successor, and past the header one
 /// flow predecessor), so a loop-exiting conditional at the end makes the
 /// whole chain the pre-test.
 fn while_chain<I, E>(
     cfg: &Cfg<I, E>,
-    natural: &NaturalLoop,
+    natural: LoopRef<'_>,
     header: BlockId,
     visited: &[bool],
 ) -> Option<LoopShape> {
@@ -58,8 +87,8 @@ fn while_chain<I, E>(
     let mut current = header;
     loop {
         if let Some(targets) = conditional_targets(cfg, current) {
-            let true_inside = natural.body.contains(&targets.true_target);
-            let false_inside = natural.body.contains(&targets.false_target);
+            let true_inside = natural.contains(targets.true_target);
+            let false_inside = natural.contains(targets.false_target);
             if true_inside == false_inside {
                 return None;
             }
@@ -94,18 +123,18 @@ fn while_chain<I, E>(
             return None;
         };
         let next = *next;
-        if next == header
-            || !natural.body.contains(&next)
-            || chain.contains(&next)
-            || visited[next.index()]
-        {
+        if next == header || !natural.contains(next) || visited[next.index()] {
             // A link already emitted elsewhere would be emitted again as
             // part of the condition.
             return None;
         }
+        // A link that is already in the chain has a second sequential
+        // predecessor, the block that leads back to it, so this count also
+        // keeps a link from entering the chain twice.
         let sequential_predecessors = cfg
             .incoming(next)
             .filter(|&edge| !cfg.edge(edge).kind().is_exceptional())
+            .take(2)
             .count();
         if sequential_predecessors != 1 {
             return None;
@@ -117,101 +146,261 @@ fn while_chain<I, E>(
 
 fn classify_loop<I, E>(
     cfg: &Cfg<I, E>,
-    natural: &NaturalLoop,
+    natural: LoopRef<'_>,
     header: BlockId,
     visited: &[bool],
 ) -> LoopShape {
     if let Some(shape) = while_chain(cfg, natural, header, visited) {
         return shape;
     }
-    if natural.latches.len() == 1 {
-        let latch = *natural
-            .latches
-            .iter()
-            .next()
-            .expect("a one-element set has a first element");
-        if latch != header
-            && !visited[latch.index()]
-            && let Some(targets) = conditional_targets(cfg, latch)
-        {
-            let true_back = targets.true_target == header;
-            let false_back = targets.false_target == header;
-            if true_back != false_back {
-                let other = if true_back {
-                    targets.false_target
-                } else {
-                    targets.true_target
+    if let &[latch] = natural.latches()
+        && latch != header
+        && !visited[latch.index()]
+        && let Some(targets) = conditional_targets(cfg, latch)
+    {
+        let true_back = targets.true_target == header;
+        let false_back = targets.false_target == header;
+        if true_back != false_back {
+            let other = if true_back {
+                targets.false_target
+            } else {
+                targets.true_target
+            };
+            if !natural.contains(other) {
+                return LoopShape::DoWhile {
+                    latch,
+                    exit: other,
+                    continue_on_true: true_back,
                 };
-                if !natural.body.contains(&other) {
-                    return LoopShape::DoWhile {
-                        latch,
-                        exit: other,
-                        continue_on_true: true_back,
-                    };
-                }
             }
         }
     }
     LoopShape::Endless
 }
 
-/// The deterministic follow of a loop with no recognized test: the first
-/// exit target of sequential flow (any edge but an exception edge, the rule
-/// [`flow_successors`] states) scanning body blocks in identity order,
+/// The follow of a loop with no recognized test, by scanning its blocks: the
+/// first exit target of sequential flow (any edge but an exception edge, the
+/// rule [`flow_successors`] states) scanning body blocks in identity order,
 /// preferring targets inside the enclosing bound.
-fn endless_follow<I, E>(
+///
+/// This costs the size of the loop. It answers the loops that
+/// [`Structurer::endless_follow`] cannot read off the exits table, and is the
+/// definition the table has to agree with.
+///
+/// The body comes in no order, so this keeps the first exit of the lowest
+/// block and the first allowed exit of the lowest block, which is what the
+/// scan in identity order finds.
+pub(super) fn scan_endless_follow<I, E>(
     cfg: &Cfg<I, E>,
-    natural: &NaturalLoop,
+    natural: LoopRef<'_>,
     reachable: &[bool],
-    allowed_blocks: Option<&BTreeSet<BlockId>>,
+    allowed: &Bound,
 ) -> Option<BlockId> {
-    let mut fallback = None;
+    let mut first_exit: Option<(BlockId, BlockId)> = None;
+    let mut first_allowed: Option<(BlockId, BlockId)> = None;
     // The body walk also collects dead code that feeds the loop. Such a block
     // is still the loop's to lift, but an exit only it takes is no exit of a
     // loop the entry runs.
-    for &block in natural.body.iter().filter(|block| reachable[block.index()]) {
+    for block in natural.body().filter(|block| reachable[block.index()]) {
+        let mut seen_exit = false;
         for eid in cfg.outgoing(block) {
             let edge = cfg.edge(eid);
-            if !edge.kind().is_exceptional() && !natural.body.contains(&edge.target()) {
-                if block_is_allowed(allowed_blocks, edge.target()) {
-                    return Some(edge.target());
+            if edge.kind().is_exceptional() || natural.contains(edge.target()) {
+                continue;
+            }
+            if !seen_exit {
+                seen_exit = true;
+                if first_exit.is_none_or(|(lowest, _)| block < lowest) {
+                    first_exit = Some((block, edge.target()));
                 }
-                fallback.get_or_insert(edge.target());
+            }
+            if allowed.contains(edge.target()) {
+                if first_allowed.is_none_or(|(lowest, _)| block < lowest) {
+                    first_allowed = Some((block, edge.target()));
+                }
+                break;
             }
         }
     }
-    fallback
+    first_allowed.or(first_exit).map(|(_, target)| target)
+}
+
+/// The first exit of a loop that the bound admits, read from the blocks of the
+/// set that every admitted block is in instead of from the blocks of the loop:
+/// the edges into those blocks from the loop that the entry reaches, the lowest
+/// source first, then by the place of the edge among its source's edges. This
+/// is what [`scan_endless_follow`] finds, in the cost of the set.
+pub(super) fn first_exit_into<I, E>(
+    cfg: &Cfg<I, E>,
+    natural: LoopRef<'_>,
+    reachable: &[bool],
+    allowed: &Bound,
+    set: &BTreeSet<BlockId>,
+) -> Option<BlockId> {
+    let mut first: Option<(BlockId, usize, BlockId)> = None;
+    for &target in set {
+        if natural.contains(target) || !allowed.contains(target) {
+            continue;
+        }
+        for eid in cfg.incoming(target) {
+            let edge = cfg.edge(eid);
+            let source = edge.source();
+            if edge.kind().is_exceptional()
+                || !reachable[source.index()]
+                || !natural.contains(source)
+            {
+                continue;
+            }
+            let place = cfg
+                .outgoing(source)
+                .position(|other| other == eid)
+                .expect("an edge into a block is an edge out of its source");
+            if first.is_none_or(|(lowest, earliest, _)| (source, place) < (lowest, earliest)) {
+                first = Some((source, place, target));
+            }
+        }
+    }
+    first.map(|(_, _, target)| target)
 }
 
 impl<I, E> Structurer<'_, I, E> {
-    /// Lift the loop anchored at `header` (already visited by the caller) and
-    /// return the lifted node with the loop's sequential continuation.
-    pub(super) fn lift_loop(
-        &mut self,
-        header: BlockId,
-        allowed_blocks: Option<&BTreeSet<BlockId>>,
-    ) -> (ControlNode, Option<BlockId>) {
-        let cfg = self.cfg;
-        let fallback;
-        let natural = if let Some(natural) = self.loops.get(&header) {
-            natural
-        } else {
-            // The classification and the loop map derive from the same back
-            // edges, so a header without a loop is a library bug — degrade
-            // to a single-block loop rather than dropping code.
-            debug_assert!(false, "loop header {header} has no natural loop");
-            fallback = NaturalLoop {
-                header,
-                body: [header].into_iter().collect(),
-                latches: [header].into_iter().collect(),
-                depth: 0,
+    /// The follow of a loop with no recognized test: see
+    /// [`scan_endless_follow`].
+    ///
+    /// A nested loop under a bound that admits everything, or exactly the
+    /// loop around it and what an outer bound admits, reads its follow off the
+    /// exits of the forest, found once for all loops. A loop under a bound
+    /// that ends in a set smaller than the loop reads it from the set. Any
+    /// other loop scans its blocks: an irreducible one, or one under a loop
+    /// bound that is not the loop around it.
+    fn endless_follow(&mut self, natural: LoopRef<'_>, allowed: &Bound) -> Option<BlockId> {
+        let lp = natural.lp;
+        let nested = natural.forest.is_nested(lp);
+        if nested {
+            let (cfg, forest, reachable) = (self.cfg, &self.forest, &self.reachable);
+            let exits = self
+                .exits
+                .get_or_insert_with(|| LoopExits::compute(cfg, forest, reachable));
+            if matches!(allowed, Bound::Whole) {
+                return exits.first(lp);
+            }
+            if let Some((around, rest)) = allowed.within()
+                && natural.forest.enclosing(lp) == Some(around)
+            {
+                return exits
+                    .local(lp)
+                    .iter()
+                    .copied()
+                    .find(|&target| rest.contains(target))
+                    .or_else(|| exits.first(lp));
+            }
+        }
+        if let Some(set) = allowed.root_set()
+            && set.len() < natural.forest.body_len(lp)
+        {
+            if let Some(target) = first_exit_into(self.cfg, natural, &self.reachable, allowed, set)
+            {
+                return Some(target);
+            }
+            // No exit is admitted, so the follow is the first exit of all.
+            return match &self.exits {
+                Some(exits) if nested => exits.first(lp),
+                _ => scan_endless_follow(self.cfg, natural, &self.reachable, &Bound::Whole),
             };
-            &fallback
+        }
+        scan_endless_follow(self.cfg, natural, &self.reachable, allowed)
+    }
+}
+
+/// A natural loop being lifted: the frame of its body, from the loop's
+/// setup until the node is built.
+pub(super) struct LoopBuild {
+    header: BlockId,
+    /// The loop's sequential continuation.
+    follow: Option<BlockId>,
+    /// The loop's blocks within the enclosing bound.
+    bound: Bound,
+    /// The recognized shape; taken when the body is lifted.
+    shape: Option<LoopShape>,
+    /// The kind of the node, known once the shape is lifted.
+    kind: Option<LoopKind>,
+}
+
+/// The body of a post-tested or endless loop, whose header's own
+/// instructions belong inside it: the frame of
+/// [`Structurer::begin_header_body`].
+pub(super) struct HeaderBody {
+    header: BlockId,
+    bound: Bound,
+    stop: Option<BlockId>,
+    body: Vec<ControlNode>,
+    awaiting: HeaderWait,
+}
+
+enum HeaderWait {
+    /// Nothing is lifted yet.
+    Nothing,
+    /// The branch or dispatch at the header.
+    Branch,
+    /// The walk from the merge after the branch.
+    Merge,
+    /// The walk from one of the header's other targets; the rest follow.
+    Target(alloc::vec::IntoIter<BlockId>),
+}
+
+impl<'cfg, I, E> Structurer<'cfg, I, E> {
+    /// Enter a loop: it becomes the innermost, and its continue point and
+    /// follow resolve transfers to it.
+    fn push_loop_context(&mut self, context: LoopContext) {
+        let position = self.loop_stack.len();
+        let follow = context
+            .follow
+            .filter(|&follow| follow != context.continue_target);
+        for target in core::iter::once(context.continue_target).chain(follow) {
+            self.loop_targets.entry(target).or_default().push(position);
+        }
+        self.loop_stack.push(context);
+    }
+
+    /// Leave the innermost loop.
+    fn pop_loop_context(&mut self) -> LoopContext {
+        let context = self
+            .loop_stack
+            .pop()
+            .expect("the loop context pushed at entry is still on the stack");
+        let follow = context
+            .follow
+            .filter(|&follow| follow != context.continue_target);
+        for target in core::iter::once(context.continue_target).chain(follow) {
+            let positions = self
+                .loop_targets
+                .get_mut(&target)
+                .expect("a loop on the stack is registered at its targets");
+            positions.pop();
+            if positions.is_empty() {
+                self.loop_targets.remove(&target);
+            }
+        }
+        context
+    }
+
+    /// Start lifting the loop anchored at `header` (already visited by the
+    /// caller): classify its shape, fix its follow, and enter its context. The
+    /// frame returns the lifted node with the loop's sequential continuation.
+    pub(super) fn begin_loop(&mut self, header: BlockId, allowed: &Bound) -> Frame<'cfg> {
+        let cfg = self.cfg;
+        // The classification and the loops derive from the same back edges, so
+        // a loop header always has its loop.
+        let lp = self
+            .forest
+            .loop_of_header(header)
+            .expect("a block with an incoming back edge heads a loop of the forest");
+        let forest = Rc::clone(&self.forest);
+        let natural = LoopRef {
+            forest: &forest,
+            lp,
         };
-        let bound: BTreeSet<BlockId> = match allowed_blocks {
-            None => natural.body.clone(),
-            Some(allowed) => natural.body.intersection(allowed).copied().collect(),
-        };
+        let bound = allowed.within_loop(&forest, lp);
 
         // The test of a pre- or post-tested loop is consumed by the loop node,
         // so it has to lie inside the enclosing bound: a test block beyond it
@@ -219,14 +408,10 @@ impl<I, E> Structurer<'_, I, E> {
         // another region claims) would end up inside a construct that does not
         // own it. The loop is then an endless loop whose exits are transfers.
         let shape = match classify_loop(cfg, natural, header, &self.visited) {
-            LoopShape::While { ref chain, .. }
-                if !chain.iter().all(|&b| block_is_allowed(allowed_blocks, b)) =>
-            {
+            LoopShape::While { ref chain, .. } if !chain.iter().all(|&b| allowed.contains(b)) => {
                 LoopShape::Endless
             }
-            LoopShape::DoWhile { latch, .. } if !block_is_allowed(allowed_blocks, latch) => {
-                LoopShape::Endless
-            }
+            LoopShape::DoWhile { latch, .. } if !allowed.contains(latch) => LoopShape::Endless,
             shape => shape,
         };
         let (follow, continue_target) = match &shape {
@@ -234,10 +419,7 @@ impl<I, E> Structurer<'_, I, E> {
                 (Some(*exit), header)
             }
             LoopShape::DoWhile { latch, exit, .. } => (Some(*exit), *latch),
-            LoopShape::Endless => (
-                endless_follow(cfg, natural, &self.reachable, allowed_blocks),
-                header,
-            ),
+            LoopShape::Endless => (self.endless_follow(natural, allowed), header),
         };
 
         // A multi-block condition chain belongs to the loop's test, not its
@@ -248,28 +430,95 @@ impl<I, E> Structurer<'_, I, E> {
             }
         }
 
-        self.loop_stack.push(LoopContext {
+        self.push_loop_context(LoopContext {
             header,
             follow,
             continue_target,
             labeled: false,
         });
 
-        let (kind, mut body) = self.lift_shape(header, &bound, shape);
+        Frame::Loop(Box::new(LoopBuild {
+            header,
+            follow,
+            bound,
+            shape: Some(shape),
+            kind: None,
+        }))
+    }
 
+    pub(super) fn step_loop(&mut self, build: &mut LoopBuild, returned: Returned) -> Next<'cfg> {
+        let Some(shape) = build.shape.take() else {
+            return self.finish_loop(build, returned.into_nodes());
+        };
+        // Lift the loop's condition and body per its recognized shape.
+        let header = build.header;
+        let bound = build.bound.clone();
+        match shape {
+            LoopShape::While {
+                chain,
+                body_start,
+                exit_on_true,
+                ..
+            } => {
+                let spans: Vec<_> = chain.iter().map(|&block| self.whole_span(block)).collect();
+                let condition = self.tables.push_spans(spans.into_iter());
+                build.kind = Some(LoopKind::While {
+                    condition,
+                    exit_on_true,
+                });
+                if body_start == header {
+                    // The conditional's in-loop arm re-enters the chain: the
+                    // loop is its own condition.
+                    return self.finish_loop(build, Vec::new());
+                }
+                Next::Call(Frame::Region(RegionWalk::new(body_start, bound, None)))
+            }
+            LoopShape::SelfLoop {
+                continue_on_true, ..
+            } => {
+                build.kind = Some(LoopKind::DoWhile {
+                    latch: self.whole_span(header),
+                    continue_on_true,
+                });
+                self.finish_loop(build, Vec::new())
+            }
+            LoopShape::DoWhile {
+                latch,
+                continue_on_true,
+                ..
+            } => {
+                // The latch is the condition, not part of the body: pre-visit
+                // it so the body walk ends there silently, and transfers to it
+                // resolve as `continue`.
+                self.visit(latch);
+                build.kind = Some(LoopKind::DoWhile {
+                    latch: self.whole_span(latch),
+                    continue_on_true,
+                });
+                Next::Call(Self::header_body(header, &build.bound, Some(latch)))
+            }
+            LoopShape::Endless => {
+                build.kind = Some(LoopKind::Endless);
+                Next::Call(Self::header_body(header, &build.bound, None))
+            }
+        }
+    }
+
+    fn finish_loop(&mut self, build: &mut LoopBuild, mut body: Vec<ControlNode>) -> Next<'cfg> {
         // A trailing plain `continue` at the structural end of the body is
         // the loop's own back edge — implicit in the representation.
         if matches!(body.last(), Some(ControlNode::Continue { label: None })) {
             body.pop();
         }
 
-        let context = self
-            .loop_stack
-            .pop()
-            .expect("the loop context pushed above is still on the stack");
+        let context = self.pop_loop_context();
+        let header = build.header;
         let node = ControlNode::Loop {
             header,
-            kind,
+            kind: build
+                .kind
+                .take()
+                .expect("the shape is lifted before the loop finishes"),
             body: self.tables.seal(body),
         };
         let node = if context.labeled {
@@ -282,119 +531,99 @@ impl<I, E> Structurer<'_, I, E> {
         } else {
             node
         };
-        (node, follow)
+        Next::Return(Returned::Construct {
+            node,
+            next: build.follow,
+        })
     }
 
-    /// Lift the loop's condition and body per its recognized shape.
-    fn lift_shape(
-        &mut self,
-        header: BlockId,
-        bound: &BTreeSet<BlockId>,
-        shape: LoopShape,
-    ) -> (LoopKind, Vec<ControlNode>) {
-        match shape {
-            LoopShape::While {
-                chain,
-                body_start,
-                exit_on_true,
-                ..
-            } => {
-                let spans: Vec<_> = chain.iter().map(|&block| self.whole_span(block)).collect();
-                let condition = self.tables.push_spans(spans.into_iter());
-                let body = if body_start == header {
-                    // The conditional's in-loop arm re-enters the chain: the
-                    // loop is its own condition.
-                    Vec::new()
-                } else {
-                    self.lift_region(body_start, Some(bound), None)
-                };
-                (
-                    LoopKind::While {
-                        condition,
-                        exit_on_true,
-                    },
-                    body,
-                )
-            }
-            LoopShape::SelfLoop {
-                continue_on_true, ..
-            } => (
-                LoopKind::DoWhile {
-                    latch: self.whole_span(header),
-                    continue_on_true,
-                },
-                Vec::new(),
-            ),
-            LoopShape::DoWhile {
-                latch,
-                continue_on_true,
-                ..
-            } => {
-                // The latch is the condition, not part of the body: pre-visit
-                // it so the body walk ends there silently, and transfers to it
-                // resolve as `continue`.
-                self.visit(latch);
-                let body = self.lift_header_body(header, bound, Some(latch));
-                (
-                    LoopKind::DoWhile {
-                        latch: self.whole_span(latch),
-                        continue_on_true,
-                    },
-                    body,
-                )
-            }
-            LoopShape::Endless => (
-                LoopKind::Endless,
-                self.lift_header_body(header, bound, None),
-            ),
-        }
-    }
-
-    /// Lift a loop body whose header's own instructions belong inside it (the
-    /// post-tested and endless shapes): emit the header's structure manually —
-    /// it is already visited — then continue the ordinary walk.
+    /// The frame that lifts the body of a post-tested or endless loop whose
+    /// header's own instructions belong inside it: emit the header's structure
+    /// manually — it is already visited — then continue the ordinary walk.
     ///
     /// A plain header's edge to itself is the loop's own back edge, implicit
     /// in the representation. Any other edge is a transfer the walk resolves,
     /// even when it is the back edge of an enclosing loop: that one is a
     /// `continue` of the enclosing loop, not of this one.
-    fn lift_header_body(
-        &mut self,
-        header: BlockId,
-        bound: &BTreeSet<BlockId>,
-        stop: Option<BlockId>,
-    ) -> Vec<ControlNode> {
-        let cfg = self.cfg;
-        let mut body = Vec::new();
-        let outgoing: Vec<EdgeId> = cfg.outgoing(header).collect();
+    fn header_body(header: BlockId, bound: &Bound, stop: Option<BlockId>) -> Frame<'cfg> {
+        Frame::HeaderBody(HeaderBody {
+            header,
+            bound: bound.clone(),
+            stop,
+            body: Vec::new(),
+            awaiting: HeaderWait::Nothing,
+        })
+    }
 
-        match branching(cfg, &outgoing) {
-            Some(BlockFlowKind::Conditional) => {
-                let node = self.lift_conditional(header, Some(bound));
-                body.push(node);
-                let merge = self.effective_merge(header, Some(bound));
-                if let Some(merge) = self.resume_after(&node, merge) {
-                    body.extend(self.lift_region(merge, Some(bound), stop));
-                }
-            }
-            Some(BlockFlowKind::Switch) => {
-                let node = self.lift_switch(header, Some(bound));
-                body.push(node);
-                let merge = self.effective_merge(header, Some(bound));
-                if let Some(merge) = self.resume_after(&node, merge) {
-                    body.extend(self.lift_region(merge, Some(bound), stop));
-                }
-            }
-            _ => {
-                self.push_block(&mut body, header);
-                for eid in outgoing {
-                    let edge = cfg.edge(eid);
-                    if edge.target() != header && !edge.kind().is_exceptional() {
-                        body.extend(self.lift_region(edge.target(), Some(bound), stop));
+    pub(super) fn step_header_body(
+        &mut self,
+        header_body: &mut HeaderBody,
+        returned: Returned,
+    ) -> Next<'cfg> {
+        let header = header_body.header;
+        let bound = header_body.bound.clone();
+        match core::mem::replace(&mut header_body.awaiting, HeaderWait::Nothing) {
+            HeaderWait::Nothing => {
+                let cfg = self.cfg;
+                let outgoing: Vec<EdgeId> = cfg.outgoing(header).collect();
+                match branching(cfg, &outgoing) {
+                    Some(BlockFlowKind::Conditional) => {
+                        header_body.awaiting = HeaderWait::Branch;
+                        return Next::Call(Frame::Conditional(Conditional::new(header, bound)));
                     }
+                    Some(BlockFlowKind::Switch) => {
+                        header_body.awaiting = HeaderWait::Branch;
+                        return Next::Call(self.begin_switch(header, &bound));
+                    }
+                    _ => {}
                 }
+                self.push_block(&mut header_body.body, header);
+                let targets: Vec<BlockId> = outgoing
+                    .into_iter()
+                    .map(|eid| cfg.edge(eid))
+                    .filter(|edge| edge.target() != header && !edge.kind().is_exceptional())
+                    .map(|edge| edge.target())
+                    .collect();
+                Self::next_target(header_body, targets.into_iter())
+            }
+            HeaderWait::Branch => {
+                let (node, next) = returned.into_construct();
+                header_body.body.push(node);
+                let Some(merge) = next else {
+                    return Next::Return(Returned::Nodes(core::mem::take(&mut header_body.body)));
+                };
+                header_body.awaiting = HeaderWait::Merge;
+                Next::Call(Frame::Region(RegionWalk::new(
+                    merge,
+                    bound,
+                    header_body.stop,
+                )))
+            }
+            HeaderWait::Merge => {
+                header_body.body.extend(returned.into_nodes());
+                Next::Return(Returned::Nodes(core::mem::take(&mut header_body.body)))
+            }
+            HeaderWait::Target(targets) => {
+                header_body.body.extend(returned.into_nodes());
+                Self::next_target(header_body, targets)
             }
         }
-        body
+    }
+
+    /// Lift the walk from the next of the header's other targets, or end the
+    /// body.
+    fn next_target(
+        header_body: &mut HeaderBody,
+        mut targets: alloc::vec::IntoIter<BlockId>,
+    ) -> Next<'cfg> {
+        let Some(target) = targets.next() else {
+            return Next::Return(Returned::Nodes(core::mem::take(&mut header_body.body)));
+        };
+        header_body.awaiting = HeaderWait::Target(targets);
+        Next::Call(Frame::Region(RegionWalk::new(
+            target,
+            header_body.bound.clone(),
+            header_body.stop,
+        )))
     }
 }

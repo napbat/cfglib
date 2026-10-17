@@ -1,8 +1,8 @@
-if {
+if (start) {
     .bb1:
-        if {
+        if (A) {
             .bb2:
-                if {
+                if (B) {
                     goto .bb1;
                 }
         }

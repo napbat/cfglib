@@ -66,11 +66,11 @@ fn treating_a_jump_trampoline_as_empty_structures_it_as_a_plain_break_or_continu
     assert!(report.is_fully_structured(), "{report:?}");
     assert_eq!(
         pseudocode(&flow.cfg, &as_is),
-        "i = 0\nwhile {\n    i < n\n    break if !cond;\n    if {\n        jmp after_loop\n        break;\n    } else {\n        if {\n            jmp loop_top\n            continue;\n        } else {\n            work(i)\n            i += 1\n            continue;\n        }\n    }\n}\nreturn\n"
+        "i = 0\nwhile {\n    i < n\n    break if !cond;\n    if (done(i)) {\n        jmp after_loop\n        break;\n    } else {\n        if (skip(i)) {\n            jmp loop_top\n            continue;\n        } else {\n            work(i)\n            i += 1\n            continue;\n        }\n    }\n}\nreturn\n"
     );
     assert_eq!(
         pseudocode(&flow.cfg, &tree),
-        "i = 0\nwhile {\n    i < n\n    break if !cond;\n    if {\n        break;\n    } else {\n        if {\n            continue;\n        } else {\n            work(i)\n            i += 1\n            continue;\n        }\n    }\n}\nreturn\n"
+        "i = 0\nwhile {\n    i < n\n    break if !cond;\n    if (done(i)) {\n        break;\n    } else {\n        if (skip(i)) {\n            continue;\n        } else {\n            work(i)\n            i += 1\n            continue;\n        }\n    }\n}\nreturn\n"
     );
 }
 
@@ -380,7 +380,7 @@ fn predicated_prefix_of_a_branch_header_is_hoisted_in_front_of_the_branch() {
     assert_eq!(condition.range(), 2..3, "only the branch instruction stays");
     assert_eq!(
         render(&cfg, &tree),
-        "p0 = a < b\n@guarded(c = c + 1) {\n    c = c + 1\n}\nif {\n    hit()\n}\nreturn\n"
+        "p0 = a < b\n@guarded(c = c + 1) {\n    c = c + 1\n}\nif (branch c > 3) {\n    hit()\n}\nreturn\n"
     );
 }
 

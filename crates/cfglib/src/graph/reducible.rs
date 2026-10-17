@@ -20,6 +20,7 @@ use crate::cfg::Cfg;
 use crate::edge::{EdgeId, EdgeKind};
 use crate::graph::dominator::DominatorTree;
 use crate::graph::structure::find_irreducible_entry;
+use crate::graph::traverse::{TraversalDirection, reachable_in};
 
 /// Transform an irreducible CFG into a reducible one by node splitting.
 ///
@@ -73,34 +74,23 @@ struct MultiEntryCycle {
     entries: Vec<BlockId>,
 }
 
-/// The blocks of `cfg` that can be reached from `start` along successors, or
-/// along predecessors when `forward` is false, without entering a block
-/// outside `within`.
+/// The blocks of `cfg` that can be reached from `start` in `direction`
+/// without entering a block outside `within`.
 fn closure<I, E>(
     cfg: &Cfg<I, E>,
     start: impl IntoIterator<Item = BlockId>,
-    forward: bool,
+    direction: TraversalDirection,
     within: &[bool],
 ) -> Vec<bool> {
-    let mut seen = vec![false; cfg.block_bound()];
-    let mut pending = Vec::new();
-    for block in start {
-        if !core::mem::replace(&mut seen[block.index()], true) {
-            pending.push(block);
-        }
-    }
-    while let Some(block) = pending.pop() {
-        let mut admit = |next: BlockId| {
-            if within[next.index()] && !core::mem::replace(&mut seen[next.index()], true) {
-                pending.push(next);
-            }
-        };
-        if forward {
-            cfg.successors(block).for_each(&mut admit);
-        } else {
-            cfg.predecessors(block).for_each(&mut admit);
-        }
-    }
+    let mut seen = Vec::new();
+    reachable_in(
+        cfg,
+        start,
+        direction,
+        Some(within),
+        &mut seen,
+        &mut Vec::new(),
+    );
     seen
 }
 
@@ -124,11 +114,11 @@ fn multi_entry_cycle<I, E>(
 ) -> MultiEntryCycle {
     let mut allowed = vec![true; cfg.block_bound()];
     loop {
-        let ahead = closure(cfg, [witness], true, &allowed);
+        let ahead = closure(cfg, [witness], TraversalDirection::Outgoing, &allowed);
         // Every block on a path back to `witness` from a block it reaches is
         // itself reached from `witness`, so the walk back can stay inside
         // `ahead` instead of visiting everything that merely leads here.
-        let behind = closure(cfg, [witness], false, &ahead);
+        let behind = closure(cfg, [witness], TraversalDirection::Incoming, &ahead);
         let member: Vec<bool> = ahead
             .iter()
             .zip(&behind)
@@ -175,7 +165,7 @@ fn split_cycle<I: Clone, E: Clone>(cfg: &mut Cfg<I, E>, cycle: &MultiEntryCycle)
             .iter()
             .copied()
             .filter(|&entry| entry != header);
-        closure(cfg, others, true, &allowed)
+        closure(cfg, others, TraversalDirection::Outgoing, &allowed)
     };
     let size = |region: &[bool]| region.iter().filter(|&&copied| copied).count();
     let (header, region) = if cycle.entries.contains(&cfg.entry()) {

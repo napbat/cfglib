@@ -14,6 +14,7 @@ pub mod horn;
 pub mod interval;
 pub mod keyed;
 pub mod label;
+pub mod loop_forest;
 pub mod loop_nest;
 pub mod open;
 pub mod pdg;

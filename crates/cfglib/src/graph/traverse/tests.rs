@@ -127,6 +127,98 @@ fn reachable_handles_self_loops() {
     );
 }
 
+#[test]
+fn reachable_in_gives_the_answer_of_reachable_over_reused_buffers() {
+    let (graph, [a, _, c, d]) = reach_fixture();
+    // Buffers left over from a bigger graph and a different walk: the call
+    // clears the one and resizes it to this graph's bound, and empties the
+    // other.
+    let mut visited = vec![true; 9];
+    let mut stack = vec![7, 8];
+    for (seeds, direction) in [
+        (vec![a], TraversalDirection::Outgoing),
+        (vec![c], TraversalDirection::Incoming),
+        (vec![d, a], TraversalDirection::Outgoing),
+        (vec![], TraversalDirection::Incoming),
+    ] {
+        reachable_in(
+            &graph,
+            seeds.iter().copied(),
+            direction,
+            None,
+            &mut visited,
+            &mut stack,
+        );
+        assert_eq!(visited, reachable(&graph, seeds, direction));
+        assert!(stack.is_empty(), "the walk leaves its stack empty");
+    }
+}
+
+#[test]
+fn reachable_in_stays_inside_the_set_it_is_confined_to() {
+    // a -> b -> c -> d, and the confinement leaves `c` out.
+    let mut graph = Graph::<(), ()>::new();
+    let [a, b, c, d] = [(); 4].map(|()| graph.add_node(()));
+    graph.add_edge(a, b, ());
+    graph.add_edge(b, c, ());
+    graph.add_edge(c, d, ());
+    let within = [true, true, false, true];
+    let (mut visited, mut stack) = (Vec::new(), Vec::new());
+
+    reachable_in(
+        &graph,
+        [a],
+        TraversalDirection::Outgoing,
+        Some(&within),
+        &mut visited,
+        &mut stack,
+    );
+    assert_eq!(
+        visited,
+        [true, true, false, false],
+        "the walk cannot pass c"
+    );
+
+    // A seed outside the set is still visited, and walks on into it.
+    reachable_in(
+        &graph,
+        [c],
+        TraversalDirection::Outgoing,
+        Some(&within),
+        &mut visited,
+        &mut stack,
+    );
+    assert_eq!(visited, [false, false, true, true]);
+
+    reachable_in(
+        &graph,
+        [d],
+        TraversalDirection::Incoming,
+        Some(&within),
+        &mut visited,
+        &mut stack,
+    );
+    assert_eq!(
+        visited,
+        [false, false, false, true],
+        "c blocks the way back"
+    );
+}
+
+#[test]
+#[should_panic(expected = "seed node is out of range")]
+fn reachable_in_rejects_a_seed_beyond_the_node_bound() {
+    let (graph, _) = reach_fixture();
+    reachable_in(
+        &graph,
+        [NodeId::from_index(4)],
+        TraversalDirection::Outgoing,
+        None,
+        &mut Vec::new(),
+        &mut Vec::new(),
+    );
+}
+
 /// `root -> mid`, `mid -> left`, `mid -> right`, both legs into `bottom`.
 /// `root` has the smallest id but is the *farther* common ancestor.
 fn diamond() -> (Graph<(), ()>, [NodeId; 5]) {

@@ -24,12 +24,10 @@
 //! successor lists, on dense indices, or on the order of a depth-first search.
 
 extern crate alloc;
-use alloc::vec;
 use alloc::vec::Vec;
-use core::mem;
 
-use crate::graph::dominator::{slot, word};
 use crate::graph::scc::tarjan_scc;
+use crate::graph::traverse::{TraversalDirection, reachable_in};
 use crate::graph::view::{DenseId, GraphView};
 
 /// What the analysis finds and the finished post-dominator tree keeps.
@@ -57,7 +55,7 @@ pub(super) struct CutBuffers {
     /// Whether each block is an entry block of the component being cut.
     entry: Vec<bool>,
     /// Blocks a search has yet to expand.
-    stack: Vec<u32>,
+    stack: Vec<usize>,
 }
 
 impl CutBuffers {
@@ -91,36 +89,34 @@ impl CutBuffers {
 
     /// Mark the blocks `root` reaches.
     fn mark_reachable<G: GraphView>(&mut self, graph: &G, root: G::NodeId) {
-        self.reachable.clear();
-        self.reachable.resize(graph.node_bound(), false);
-        self.reachable[root.index()] = true;
-        self.stack.clear();
-        self.stack.push(word(root.index()));
-        while let Some(block) = self.stack.pop() {
-            for successor in graph.successors(G::NodeId::from_index(slot(block))) {
-                if !mem::replace(&mut self.reachable[successor.index()], true) {
-                    self.stack.push(word(successor.index()));
-                }
-            }
-        }
+        reachable_in(
+            graph,
+            [root],
+            TraversalDirection::Outgoing,
+            None,
+            &mut self.reachable,
+            &mut self.stack,
+        );
     }
 
     /// Mark, among the reachable blocks, those with a path to an exit.
+    ///
+    /// This is the blocks that reach `exits` walking the edges backwards,
+    /// confined to the blocks the entry reaches. The confinement is part of
+    /// the answer: a dead block with an edge into live code reaches an exit
+    /// too, and has no facts, so it must not be marked. It costs the walk
+    /// nothing it needs, because a successor of a live block is live, so a
+    /// path from a live block to an exit never leaves the live blocks.
     fn mark_reaching<G: GraphView>(&mut self, graph: &G, exits: &[G::NodeId]) -> Vec<bool> {
-        let mut reaching = vec![false; self.reachable.len()];
-        self.stack.clear();
-        for exit in exits {
-            reaching[exit.index()] = true;
-            self.stack.push(word(exit.index()));
-        }
-        while let Some(block) = self.stack.pop() {
-            for predecessor in graph.predecessors(G::NodeId::from_index(slot(block))) {
-                let predecessor = predecessor.index();
-                if self.reachable[predecessor] && !mem::replace(&mut reaching[predecessor], true) {
-                    self.stack.push(word(predecessor));
-                }
-            }
-        }
+        let mut reaching = Vec::new();
+        reachable_in(
+            graph,
+            exits.iter().copied(),
+            TraversalDirection::Incoming,
+            Some(&self.reachable),
+            &mut reaching,
+            &mut self.stack,
+        );
         reaching
     }
 

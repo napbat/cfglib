@@ -82,7 +82,7 @@ fn a_dead_catch_pad_inside_a_loop_keeps_its_body() {
     assert_eq!(
         pseudocode(&cfg, &tree),
         "b0\nwhile {\n    b1\n    break if !cond;\n    try {\n        b2\n    } catch {\n        \
-         if {\n            b5\n            goto .bb3;\n        } else {\n            goto .bb3;\n        \
+         if (b4) {\n            b5\n            goto .bb3;\n        } else {\n            goto .bb3;\n        \
          }\n    }\n    .bb3:\n        b3\n}\nb6\n"
     );
     assert!(report.unresolved_labels.is_empty(), "{report:?}");

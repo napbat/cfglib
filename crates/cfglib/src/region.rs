@@ -120,14 +120,10 @@ pub struct Handler {
 }
 
 impl Handler {
-    /// Whether the handler names `block`: its entry, or a block of its known
+    /// The blocks the handler names: its entry, then the blocks of its known
     /// extent. A handler of unknown extent names only its entry.
-    pub(crate) fn claims(&self, block: BlockId) -> bool {
-        self.entry == block
-            || self
-                .body
-                .blocks()
-                .is_some_and(|blocks| blocks.contains(&block))
+    pub(crate) fn claimed_blocks(&self) -> impl Iterator<Item = BlockId> + '_ {
+        core::iter::once(self.entry).chain(self.body.blocks().into_iter().flatten().copied())
     }
 }
 
@@ -735,6 +731,28 @@ mod tests {
             known.blocks().map(BTreeSet::len),
             Some(2),
             "known extents are a deduplicated block set"
+        );
+    }
+
+    #[test]
+    fn a_handler_names_its_entry_and_its_known_extent() {
+        let entry = BlockId::from_raw(1);
+        let extent = |body| Handler {
+            entry,
+            body,
+            kind: HandlerKind::Catch,
+        };
+        let known = extent(HandlerBody::known([entry, BlockId::from_raw(3)]));
+        assert_eq!(
+            known.claimed_blocks().collect::<alloc::vec::Vec<_>>(),
+            [entry, entry, BlockId::from_raw(3)],
+            "the entry, then the extent, which holds the entry again"
+        );
+        let unknown = extent(HandlerBody::unknown());
+        assert_eq!(
+            unknown.claimed_blocks().collect::<alloc::vec::Vec<_>>(),
+            [entry],
+            "a handler of unknown extent names only its entry"
         );
     }
 }

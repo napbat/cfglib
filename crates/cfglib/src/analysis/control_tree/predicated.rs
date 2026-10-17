@@ -2,11 +2,16 @@
 
 extern crate alloc;
 use alloc::vec::Vec;
+use core::slice;
 
-use super::node::{BlockSpan, CatchHandler, ControlBody, ControlNode, ControlNodeId, SwitchCase};
+use super::node::{
+    BlockSpan, CatchHandler, ControlBody, ControlNode, ControlNodeId, ControlRun, LoopKind,
+    SwitchCase,
+};
 use super::report::LiftReport;
-use super::tree::{ControlTree, Tables};
+use super::tree::{ChildBodies, ControlTree, Tables};
 use crate::cfg::Cfg;
+use crate::edge::EdgeId;
 use crate::{InstrInfo, Predicated, ProgramPoint};
 
 /// A maximal run of instructions sharing one predicate.
@@ -52,7 +57,7 @@ impl ControlTree {
             old: &tree,
             new: Tables::new(),
         };
-        let root = regionizer.wrap_node(tree.root());
+        let root = regionizer.wrap_root(tree.root());
         let root = regionizer.finish_root(root);
         (regionizer.new.finish(root), report)
     }
@@ -65,7 +70,61 @@ struct Regionizer<'a, I, E> {
     new: Tables,
 }
 
-impl<I: Predicated, E> Regionizer<'_, I, E> {
+/// What the rewrite keeps while it wraps one body or one node.
+enum Frame<'a> {
+    /// The statements of one old body, wrapped in order into `nodes`.
+    Body {
+        remaining: slice::Iter<'a, ControlNodeId>,
+        nodes: Vec<ControlNode>,
+    },
+    /// The child bodies of one old node.
+    Node(Wrapping<'a>),
+}
+
+/// A node being wrapped, between the bodies of its children.
+struct Wrapping<'a> {
+    /// The node in the old tree.
+    node: ControlNode,
+    /// The old child bodies still to wrap, in execution order.
+    children: ChildBodies<'a>,
+    /// The guarded segments of a branch's header, which come before it.
+    prefix: Vec<ControlNode>,
+    /// The condition that stays in a branch or dispatch.
+    condition: Option<BlockSpan>,
+    /// A loop's kind, with its condition stored in the new tree.
+    kind: Option<LoopKind>,
+    /// The new child bodies so far.
+    bodies: Vec<ControlBody>,
+    /// The new edges of each switch case so far.
+    edges: Vec<ControlRun<EdgeId>>,
+    /// A switch's cases, once stored.
+    cases: Option<ControlRun<SwitchCase>>,
+    /// A try's handlers, once stored.
+    handlers: Option<ControlRun<CatchHandler>>,
+}
+
+/// The start of wrapping a node.
+enum Begun<'a> {
+    Done(ControlNode),
+    Wrapping(Wrapping<'a>),
+}
+
+/// What a finished frame hands to the one below it.
+enum Returned {
+    /// The frame is new.
+    Start,
+    Body(ControlBody),
+    Node(ControlNode),
+}
+
+/// What a node's step asks for.
+enum Step {
+    /// Wrap this old child body next.
+    Wrap(ControlBody),
+    Done(ControlNode),
+}
+
+impl<'a, I: Predicated, E> Regionizer<'a, I, E> {
     /// The root node: a sequence of one statement is that statement.
     fn finish_root(&mut self, root: ControlNode) -> ControlNodeId {
         if let ControlNode::Sequence(body) = root
@@ -76,118 +135,238 @@ impl<I: Predicated, E> Regionizer<'_, I, E> {
         self.new.push_node(root)
     }
 
-    fn wrap_body(&mut self, body: ControlBody) -> ControlBody {
-        let nodes: Vec<ControlNode> = self
-            .old
-            .body(body)
-            .iter()
-            .map(|&id| self.wrap_node(id))
-            .collect();
-        self.new.seal(nodes)
-    }
-
-    fn wrap_node(&mut self, id: ControlNodeId) -> ControlNode {
-        let old = self.old;
-        match *old.node(id) {
-            ControlNode::Block(span) => self.wrap_block_runs(span),
-            ControlNode::Return(span) => self.wrap_return_runs(span),
-            ControlNode::Sequence(body) => ControlNode::Sequence(self.wrap_body(body)),
-            ControlNode::IfThenElse {
-                condition,
-                then_body,
-                else_body,
-            } => {
-                let (prefix, condition) = self.split_header_runs(condition);
-                let node = ControlNode::IfThenElse {
-                    condition,
-                    then_body: self.wrap_body(then_body),
-                    else_body: self.wrap_body(else_body),
-                };
-                self.with_prefix(prefix, node)
+    /// Wrap the node `root` and everything below it.
+    ///
+    /// The tree nests as deeply as the graph did, so the rewrite keeps its
+    /// own stack: a [`Frame::Body`] wraps the statements of one body, and a
+    /// [`Frame::Node`] wraps the child bodies of one node. Each step stores
+    /// into the new arena in the order of its layout (a node's child bodies
+    /// before the node), so a tree with no predicated run is rewritten into
+    /// itself.
+    fn wrap_root(&mut self, root: ControlNodeId) -> ControlNode {
+        let mut stack: Vec<Frame<'a>> = Vec::new();
+        let mut returned = match self.begin_node(root) {
+            Begun::Done(node) => return node,
+            Begun::Wrapping(wrapping) => {
+                stack.push(Frame::Node(wrapping));
+                Returned::Start
             }
-            ControlNode::Loop { header, kind, body } => ControlNode::Loop {
-                header,
-                kind: self.copy_loop_kind(kind),
-                body: self.wrap_body(body),
-            },
-            ControlNode::Switch {
-                condition,
-                cases,
-                default_body,
-                default_edge,
-            } => {
-                let (prefix, condition) = self.split_header_runs(condition);
-                let wrapped: Vec<SwitchCase> = old
-                    .cases(cases)
-                    .iter()
-                    .map(|case| SwitchCase {
-                        block: case.block,
-                        edges: self.new.push_edges(old.edges(case.edges).to_vec()),
-                        body: self.wrap_body(case.body),
-                    })
-                    .collect();
-                let node = ControlNode::Switch {
-                    condition,
-                    cases: self.new.push_cases(wrapped),
-                    default_body: self.wrap_body(default_body),
-                    default_edge,
-                };
-                self.with_prefix(prefix, node)
-            }
-            ControlNode::Label { block, body } => ControlNode::Label {
-                block,
-                body: self.wrap_body(body),
-            },
-            ControlNode::TryCatch {
-                try_body,
-                handlers,
-                finally_body,
-            } => {
-                let try_body = self.wrap_body(try_body);
-                let wrapped: Vec<CatchHandler> = old
-                    .handlers(handlers)
-                    .iter()
-                    .map(|handler| CatchHandler {
-                        body: self.wrap_body(handler.body),
-                        ..*handler
-                    })
-                    .collect();
-                ControlNode::TryCatch {
-                    try_body,
-                    handlers: self.new.push_handlers(wrapped),
-                    finally_body: self.wrap_body(finally_body),
+        };
+        while let Some(frame) = stack.last_mut() {
+            let returned_now = core::mem::replace(&mut returned, Returned::Start);
+            match frame {
+                Frame::Body { remaining, nodes } => {
+                    if let Returned::Node(node) = returned_now {
+                        nodes.push(node);
+                    }
+                    let mut callee = None;
+                    for &id in remaining.by_ref() {
+                        match self.begin_node(id) {
+                            Begun::Done(node) => nodes.push(node),
+                            Begun::Wrapping(wrapping) => {
+                                callee = Some(Frame::Node(wrapping));
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(callee) = callee {
+                        stack.push(callee);
+                    } else {
+                        let body = self.new.seal(core::mem::take(nodes));
+                        stack.pop();
+                        returned = Returned::Body(body);
+                    }
+                }
+                Frame::Node(wrapping) => {
+                    let wrapped = match returned_now {
+                        Returned::Body(body) => Some(body),
+                        Returned::Start | Returned::Node(_) => None,
+                    };
+                    match self.step(wrapping, wrapped) {
+                        Step::Wrap(body) => stack.push(Frame::Body {
+                            remaining: self.old.body(body).iter(),
+                            nodes: Vec::new(),
+                        }),
+                        Step::Done(node) => {
+                            stack.pop();
+                            returned = Returned::Node(node);
+                        }
+                    }
                 }
             }
+        }
+        match returned {
+            Returned::Node(node) => node,
+            Returned::Start | Returned::Body(_) => {
+                unreachable!("the root's node is the last frame to finish")
+            }
+        }
+    }
+
+    /// Start wrapping the node `id`: a node without child bodies is wrapped
+    /// at once, and any other waits for its children.
+    fn begin_node(&mut self, id: ControlNodeId) -> Begun<'a> {
+        let old = self.old;
+        let node = *old.node(id);
+        let mut wrapping = Wrapping {
+            node,
+            children: old.child_bodies(id),
+            prefix: Vec::new(),
+            condition: None,
+            kind: None,
+            bodies: Vec::new(),
+            edges: Vec::new(),
+            cases: None,
+            handlers: None,
+        };
+        match node {
+            ControlNode::Block(span) => Begun::Done(self.wrap_block_runs(span)),
+            ControlNode::Return(span) => Begun::Done(self.wrap_return_runs(span)),
+            leaf @ (ControlNode::Break { .. }
+            | ControlNode::Continue { .. }
+            | ControlNode::Goto { .. }) => Begun::Done(leaf),
+            ControlNode::IfThenElse { condition, .. } | ControlNode::Switch { condition, .. } => {
+                let (prefix, condition) = self.split_header_runs(condition);
+                wrapping.prefix = prefix;
+                wrapping.condition = Some(condition);
+                Begun::Wrapping(wrapping)
+            }
+            ControlNode::Loop { kind, .. } => {
+                wrapping.kind = Some(self.copy_loop_kind(kind));
+                Begun::Wrapping(wrapping)
+            }
+            ControlNode::Sequence(_)
+            | ControlNode::Label { .. }
+            | ControlNode::TryCatch { .. }
+            | ControlNode::Guarded { .. } => Begun::Wrapping(wrapping),
+        }
+    }
+
+    /// Take the wrapped child body `wrapped`, if the last child was wrapped,
+    /// and name the next child body of the node to wrap, or finish the node.
+    fn step(&mut self, wrapping: &mut Wrapping<'a>, wrapped: Option<ControlBody>) -> Step {
+        if let Some(body) = wrapped {
+            wrapping.bodies.push(body);
+        }
+        self.store_before_child(wrapping);
+        match wrapping.children.next() {
+            Some(child) => Step::Wrap(child),
+            None => Step::Done(self.finish_node(wrapping)),
+        }
+    }
+
+    /// Store what the node keeps besides its bodies where the arena layout
+    /// expects it: a switch case's edges before the case's body, the cases
+    /// before the default body, and the handlers before `finally`.
+    fn store_before_child(&mut self, wrapping: &mut Wrapping<'a>) {
+        let old = self.old;
+        let next = wrapping.bodies.len();
+        match wrapping.node {
+            ControlNode::Switch { cases, .. } => {
+                let cases = old.cases(cases);
+                if let Some(case) = cases.get(next) {
+                    let edges = self.new.push_edges(old.edges(case.edges).to_vec());
+                    wrapping.edges.push(edges);
+                } else if next == cases.len() {
+                    let wrapped: Vec<SwitchCase> = cases
+                        .iter()
+                        .zip(&wrapping.edges)
+                        .zip(&wrapping.bodies)
+                        .map(|((case, &edges), &body)| SwitchCase {
+                            block: case.block,
+                            edges,
+                            body,
+                        })
+                        .collect();
+                    wrapping.cases = Some(self.new.push_cases(wrapped));
+                }
+            }
+            ControlNode::TryCatch { handlers, .. } => {
+                let handlers = old.handlers(handlers);
+                if next == handlers.len() + 1 {
+                    let wrapped: Vec<CatchHandler> = handlers
+                        .iter()
+                        .zip(&wrapping.bodies[1..])
+                        .map(|(handler, &body)| CatchHandler { body, ..*handler })
+                        .collect();
+                    wrapping.handlers = Some(self.new.push_handlers(wrapped));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The node with its child bodies wrapped.
+    fn finish_node(&mut self, wrapping: &mut Wrapping<'a>) -> ControlNode {
+        let bodies = &wrapping.bodies;
+        let first = bodies[0];
+        let last = bodies[bodies.len() - 1];
+        match wrapping.node {
+            ControlNode::Sequence(_) => ControlNode::Sequence(first),
+            ControlNode::IfThenElse { .. } => {
+                let node = ControlNode::IfThenElse {
+                    condition: wrapping.condition.expect("a branch keeps its condition"),
+                    then_body: first,
+                    else_body: last,
+                };
+                self.with_prefix(core::mem::take(&mut wrapping.prefix), node)
+            }
+            ControlNode::Loop { header, .. } => ControlNode::Loop {
+                header,
+                kind: wrapping.kind.expect("a loop keeps its kind"),
+                body: first,
+            },
+            ControlNode::Switch { default_edge, .. } => {
+                let node = ControlNode::Switch {
+                    condition: wrapping.condition.expect("a dispatch keeps its condition"),
+                    cases: wrapping
+                        .cases
+                        .expect("the cases are stored before the default"),
+                    default_body: last,
+                    default_edge,
+                };
+                self.with_prefix(core::mem::take(&mut wrapping.prefix), node)
+            }
+            ControlNode::Label { block, .. } => ControlNode::Label { block, body: first },
+            ControlNode::TryCatch { .. } => ControlNode::TryCatch {
+                try_body: first,
+                handlers: wrapping
+                    .handlers
+                    .expect("the handlers are stored before finally"),
+                finally_body: last,
+            },
             ControlNode::Guarded {
                 predicate,
                 when_true,
-                body,
+                ..
             } => ControlNode::Guarded {
                 predicate,
                 when_true,
-                body: self.wrap_body(body),
+                body: first,
             },
-            leaf @ (ControlNode::Break { .. }
+            ControlNode::Block(_)
+            | ControlNode::Return(_)
+            | ControlNode::Break { .. }
             | ControlNode::Continue { .. }
-            | ControlNode::Goto { .. }) => leaf,
+            | ControlNode::Goto { .. } => {
+                unreachable!("a node without child bodies is wrapped at once")
+            }
         }
     }
 
     /// Re-store a loop's condition spans in the new tree.
-    fn copy_loop_kind(&mut self, kind: super::node::LoopKind) -> super::node::LoopKind {
+    fn copy_loop_kind(&mut self, kind: LoopKind) -> LoopKind {
         match kind {
-            super::node::LoopKind::While {
+            LoopKind::While {
                 condition,
                 exit_on_true,
-            } => super::node::LoopKind::While {
+            } => LoopKind::While {
                 condition: self
                     .new
                     .push_spans(self.old.spans(condition).iter().copied()),
                 exit_on_true,
             },
-            other @ (super::node::LoopKind::Endless | super::node::LoopKind::DoWhile { .. }) => {
-                other
-            }
+            other @ (LoopKind::Endless | LoopKind::DoWhile { .. }) => other,
         }
     }
 

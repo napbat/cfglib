@@ -42,7 +42,7 @@ fn if_else_diamond_is_one_branch_with_two_arms_followed_by_its_join() {
     assert_eq!(tail.block(), join);
     assert_eq!(
         pseudocode(&flow.cfg, &tree),
-        "n = len(xs)\nif {\n    y = 1\n} else {\n    y = 2\n}\nreturn y\n"
+        "n = len(xs)\nif (n > 0) {\n    y = 1\n} else {\n    y = 2\n}\nreturn y\n"
     );
 }
 
@@ -73,7 +73,7 @@ fn if_without_else_leaves_the_else_arm_empty() {
     assert!(else_body.is_empty());
     assert_eq!(
         pseudocode(&flow.cfg, &tree),
-        "if {\n    log(x)\n}\nreturn\n"
+        "if (x > 0) {\n    log(x)\n}\nreturn\n"
     );
 }
 
@@ -149,7 +149,7 @@ fn else_if_chain_nests_each_test_in_the_previous_else_arm() {
     assert_eq!(leaf_blocks(&tree, positive_body), [positive]);
     assert_eq!(
         pseudocode(&flow.cfg, &tree),
-        "if {\n    sign = -1\n} else {\n    if {\n        sign = 0\n    } else {\n        sign = 1\n    }\n}\nreturn sign\n"
+        "if (x < 0) {\n    sign = -1\n} else {\n    if (x == 0) {\n        sign = 0\n    } else {\n        sign = 1\n    }\n}\nreturn sign\n"
     );
 }
 
@@ -187,7 +187,7 @@ fn early_return_arm_leaves_no_merge_so_the_rest_moves_into_the_else_arm() {
     assert_eq!(leaf_blocks(&tree, else_body), [work, done]);
     assert_eq!(
         pseudocode(&flow.cfg, &tree),
-        "load(x)\nif {\n    return -1\n} else {\n    y = f(x)\n    return y\n}\n"
+        "load(x)\nif (x < 0) {\n    return -1\n} else {\n    y = f(x)\n    return y\n}\n"
     );
 }
 
@@ -322,7 +322,10 @@ fn simplify_and_compact_keep_the_program_and_the_tree_covers_the_survivors() {
     let (before, report) = structure_and_check(&flow.cfg);
     assert_fully_structured(&before, &report);
     let program = pseudocode(&flow.cfg, &before);
-    assert_eq!(program, "a = 1\nb = 2\nc = 3\nif {\n    p()\n}\nreturn\n");
+    assert_eq!(
+        program,
+        "a = 1\nb = 2\nc = 3\nif (c > 2) {\n    p()\n}\nreturn\n"
+    );
 
     assert!(simplify(&mut flow.cfg) > 0);
     flow.cfg.compact();

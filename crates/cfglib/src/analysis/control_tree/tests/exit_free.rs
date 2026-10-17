@@ -61,7 +61,7 @@ fn a_branch_with_a_spinning_arm_has_no_merge_point() {
     // So the return is the else arm, not code after the branch.
     assert_eq!(
         text(&cfg),
-        "if {\n    loop {\n        b1\n    }\n} else {\n    b2\n}\n"
+        "if (b0) {\n    loop {\n        b1\n    }\n} else {\n    b2\n}\n"
     );
 }
 
@@ -79,7 +79,7 @@ fn an_exit_chain_beside_a_spinning_arm_stays_in_its_arm() {
     ]);
     assert_eq!(
         text(&cfg),
-        "if {\n    loop {\n        b1\n    }\n} else {\n    b2\n    b3\n}\n"
+        "if (b0) {\n    loop {\n        b1\n    }\n} else {\n    b2\n    b3\n}\n"
     );
 }
 
@@ -95,7 +95,7 @@ fn two_spinning_arms_have_no_merge_point() {
     ]);
     assert_eq!(
         text(&cfg),
-        "if {\n    loop {\n        b1\n    }\n} else {\n    loop {\n        b2\n    }\n}\n"
+        "if (b0) {\n    loop {\n        b1\n    }\n} else {\n    loop {\n        b2\n    }\n}\n"
     );
 }
 
@@ -115,7 +115,7 @@ fn a_diamond_inside_an_endless_loop_still_merges() {
     ]);
     assert_eq!(
         text(&cfg),
-        "b0\nloop {\n    if {\n        b2\n    } else {\n        b3\n    }\n    b4\n}\n"
+        "b0\nloop {\n    if (b1) {\n        b2\n    } else {\n        b3\n    }\n    b4\n}\n"
     );
 }
 
@@ -132,7 +132,7 @@ fn a_diamond_before_an_endless_loop_still_merges() {
     ]);
     assert_eq!(
         text(&cfg),
-        "if {\n    b1\n} else {\n    b2\n}\nloop {\n    b3\n}\n"
+        "if (b0) {\n    b1\n} else {\n    b2\n}\nloop {\n    b3\n}\n"
     );
 }
 
@@ -181,6 +181,6 @@ fn arms_that_enter_a_shared_exit_free_loop_keep_the_transfer_explicit() {
     assert_eq!(report.gotos[0].reason, GotoReason::RevisitedTarget);
     assert_eq!(
         pseudocode(&cfg, &tree),
-        "if {\n    loop {\n        b1\n        .bb3:\n            b3\n    }\n} else {\n    b2\n    goto .bb3;\n}\n"
+        "if (b0) {\n    loop {\n        b1\n        .bb3:\n            b3\n    }\n} else {\n    b2\n    goto .bb3;\n}\n"
     );
 }

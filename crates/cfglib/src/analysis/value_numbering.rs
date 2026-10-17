@@ -12,7 +12,6 @@
 
 extern crate alloc;
 use alloc::collections::{BTreeMap, BTreeSet};
-use alloc::vec;
 use alloc::vec::Vec;
 
 use smallvec::SmallVec;
@@ -20,7 +19,7 @@ use smallvec::SmallVec;
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
 use crate::dataflow::unwind::{first_unwind_point, unwind_reach};
-use crate::graph::dominator::{DominatorChildOrder, DominatorTree};
+use crate::graph::dominator::DominatorTree;
 use crate::{InstrInfo, VariableId};
 
 /// A value number — opaque identifier for a computed value.
@@ -248,52 +247,45 @@ impl ValueNumbering {
         G: CfgView,
         G::Inst: ValueNumberInfo,
     {
-        let mut blocks = BTreeMap::new();
-        let mut tables = NumberingTables::new(0);
-        let mut suffixes: BTreeMap<BlockId, UnwindSuffix<_, _>> = BTreeMap::new();
-        let children = dom.child_links(DominatorChildOrder::Ascending);
-        let mut events = vec![GvnEvent::Enter(cfg.root())];
-
-        while let Some(event) = events.pop() {
-            match event {
-                GvnEvent::Enter(block) => {
-                    let mut after_unwind = None;
-                    if let Some(parent) = dom.idom(block)
-                        && let Some(suffix) = suffixes.get_mut(&parent)
-                    {
-                        let reach = suffix
-                            .reach
-                            .get_or_insert_with(|| unwind_reach(cfg, parent));
-                        if reach[block.index()] {
-                            after_unwind = Some(&*suffix);
-                        }
-                    }
-                    let entry = BlockEntry {
-                        after_unwind,
-                        redefined: side_path_definitions(cfg, dom, block),
-                    };
-                    let NumberedBlock { scope, suffix } =
-                        number_block(cfg, block, &entry, &mut tables, &mut blocks);
-                    if let Some(suffix) = suffix {
-                        suffixes.insert(block, suffix);
-                    }
-                    events.push(GvnEvent::Exit(scope));
-                    if let Some(child) = children.first_child(block) {
-                        events.push(GvnEvent::Sibling(child));
+        let mut state = (
+            BTreeMap::new(),
+            NumberingTables::new(0),
+            BTreeMap::<BlockId, UnwindSuffix<_, _>>::new(),
+        );
+        let mut open = Vec::new();
+        dom.scoped_walk(
+            [cfg.root()],
+            &mut state,
+            &mut open,
+            |(blocks, tables, suffixes), block| {
+                let mut after_unwind = None;
+                if let Some(parent) = dom.idom(block)
+                    && let Some(suffix) = suffixes.get_mut(&parent)
+                {
+                    let reach = suffix
+                        .reach
+                        .get_or_insert_with(|| unwind_reach(cfg, parent));
+                    if reach[block.index()] {
+                        after_unwind = Some(&*suffix);
                     }
                 }
-                GvnEvent::Sibling(block) => {
-                    if let Some(sibling) = children.next_sibling(block) {
-                        events.push(GvnEvent::Sibling(sibling));
-                    }
-                    events.push(GvnEvent::Enter(block));
+                let entry = BlockEntry {
+                    after_unwind,
+                    redefined: side_path_definitions(cfg, dom, block),
+                };
+                let NumberedBlock { scope, suffix } =
+                    number_block(cfg, block, &entry, tables, blocks);
+                if let Some(suffix) = suffix {
+                    suffixes.insert(block, suffix);
                 }
-                GvnEvent::Exit(scope) => {
-                    suffixes.remove(&scope.block);
-                    exit_scope(scope, &mut tables);
-                }
-            }
-        }
+                scope
+            },
+            |(_, tables, suffixes), _, scope| {
+                suffixes.remove(&scope.block);
+                exit_scope(scope, tables);
+            },
+        );
+        let (blocks, tables, _) = state;
 
         ValueNumbering {
             blocks,
@@ -334,12 +326,6 @@ struct GvnScope<V, Op> {
 struct NumberedBlock<V, Op> {
     scope: GvnScope<V, Op>,
     suffix: Option<UnwindSuffix<V, Op>>,
-}
-
-enum GvnEvent<V, Op> {
-    Enter(BlockId),
-    Sibling(BlockId),
-    Exit(GvnScope<V, Op>),
 }
 
 /// The variables written by blocks that lie on a path from `block`'s

@@ -10,21 +10,30 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 
 use super::node::{BlockSpan, ControlNode};
-use super::report::{GotoDiagnostic, GotoReason, LiftReport};
+use super::report::LiftReport;
 use super::tree::{ControlTree, Tables};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::{EdgeId, EdgeKind};
 use crate::graph::dominator::{DominatorTree, PostDominatorTree};
-use crate::graph::structure::{NaturalLoop, detect_loops_tagged};
-use crate::region::Region;
+use crate::graph::loop_forest::LoopForest;
+use crate::region::{Handler, Region};
+use bound::Bound;
+use completion::Completion;
+use extent::ExtentWalk;
 use roots::VirtualRoot;
 
+mod bound;
 mod branches;
+mod completion;
+mod exits;
+mod extent;
+mod frames;
 mod labels;
 mod loops;
 mod roots;
 mod try_catch;
+mod walk;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BlockFlowKind {
@@ -60,6 +69,8 @@ struct Structurer<'cfg, I, E> {
     /// The blocks the handlers own: entries, filter funclets, and the blocks
     /// of known extents. Sweep roots.
     handler_roots: Vec<BlockId>,
+    /// The state the walks that order the handler extents share.
+    extents: ExtentWalk,
     /// Dominance-proven and explicitly tagged back-edge endpoint pairs.
     ///
     /// Machine frontends normally describe every native jump as
@@ -67,8 +78,8 @@ struct Structurer<'cfg, I, E> {
     /// structurer recover those loops without requiring frontends to mutate
     /// the lossless native edge classification.
     back_edges: BTreeSet<(BlockId, BlockId)>,
-    /// Natural loops keyed by header, honoring tagged back edges.
-    loops: BTreeMap<BlockId, NaturalLoop>,
+    /// The loops, honoring tagged back edges, nested by the forest.
+    forest: Rc<LoopForest>,
     /// Region anchor (first protected block in reverse postorder) → the
     /// regions anchored there, outermost (largest protected set) first.
     anchors: BTreeMap<BlockId, Vec<&'cfg Region>>,
@@ -83,6 +94,11 @@ struct Structurer<'cfg, I, E> {
     labeled_blocks: BTreeSet<BlockId>,
     /// Enclosing loops, innermost last.
     loop_stack: Vec<LoopContext>,
+    /// For each block an enclosing loop continues or breaks at, the positions
+    /// of those loops in `loop_stack`, innermost last.
+    loop_targets: BTreeMap<BlockId, Vec<usize>>,
+    /// Where each loop is left, found on the first loop that needs it.
+    exits: Option<exits::LoopExits>,
     /// Regions structured as [`ControlNode::TryCatch`].
     structured_regions: BTreeSet<u32>,
     /// The blocks no exception region names, as protected code, a handler
@@ -90,8 +106,16 @@ struct Structurer<'cfg, I, E> {
     /// across structural boundaries, so code lifted out of its bound is
     /// bounded to these.
     unclaimed: Rc<BTreeSet<BlockId>>,
+    /// For each block a handler names, the regions whose handlers do.
+    handler_claims: BTreeMap<BlockId, Vec<u32>>,
+    /// The goto targets the walk had not emitted when the goto was recorded,
+    /// which the sweep emits, lowest block first. A target the walk emits
+    /// later is skipped there: an emitted block stays emitted.
+    unemitted_targets: BTreeSet<BlockId>,
     report: LiftReport,
     tables: Tables,
+    /// Which nodes of `tables` control can never run to the end of.
+    completion: Completion,
 }
 
 impl ControlTree {
@@ -235,13 +259,36 @@ impl ControlTree {
     ///
     /// # Stack depth
     ///
-    /// Structuring recurses once per level of nested construct, and every link
-    /// of an `else if` chain is one more level. The call stack therefore bounds
-    /// the nesting depth of the input (a chain of a thousand links needs more
-    /// than a default test thread's stack in a debug build). The pseudocode
-    /// printer and [`compute_predicated`](Self::compute_predicated) recurse the
-    /// same way; [`preorder`](Self::preorder), [`walk`](Self::walk), and
-    /// [`for_each_instruction`](Self::for_each_instruction) do not.
+    /// Nothing here recurses on the nesting depth of the input, so the depth
+    /// is bounded by memory, not by the call stack. Structuring keeps a stack
+    /// of frames in the heap, one for every nested construct — an `if` arm,
+    /// each link of an `else if` chain, a loop body, a switch arm, a `try`
+    /// body or handler — and places the goto labels with a stack of its own.
+    /// The same holds for [`compute_predicated`](Self::compute_predicated),
+    /// the pseudocode printer ([`write_pseudocode`](Self::write_pseudocode)),
+    /// [`preorder`](Self::preorder), [`walk`](Self::walk), and
+    /// [`for_each_instruction`](Self::for_each_instruction).
+    ///
+    /// Time and memory grow linearly with the nesting of loops, `if`s,
+    /// `switch`es, and labels, and with the number of handlers and the blocks
+    /// they share. A loop's blocks are read from a
+    /// [`LoopForest`](crate::LoopForest), not copied per loop. Where a loop
+    /// with no recognized test is left is found for every loop at once, or
+    /// read from the set of blocks that bounds the loop when that set is
+    /// smaller than the loop. The order of a handler's extent is read from a
+    /// walk that skips the blocks that cannot reach the extent. The exceptions
+    /// are the input's own size and the loops that are not nested properly:
+    ///
+    /// - Each nested `try` region, and each handler with a known extent, names
+    ///   its own set of blocks, so `n` nested regions are an input of size
+    ///   quadratic in `n`, and structuring them costs about that size.
+    /// - A loop with no recognized test that is irreducible (its header does
+    ///   not dominate its latches), or that lies in the bound of a loop that
+    ///   is not the loop around it, scans its blocks for its follow, which
+    ///   costs the size of the loop.
+    ///
+    /// The text of the pseudocode is quadratic in any nesting, since each
+    /// level indents every line it holds.
     ///
     /// # Panics
     ///
@@ -314,13 +361,15 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             emptied[block.index()] = true;
         }
         let dom = DominatorTree::compute(cfg);
-        let loops: BTreeMap<BlockId, NaturalLoop> = detect_loops_tagged(cfg, &dom)
-            .into_iter()
-            .map(|natural| (natural.header, natural))
-            .collect();
-        let back_edges = loops
-            .values()
-            .flat_map(|natural| natural.latches.iter().map(|&latch| (latch, natural.header)))
+        // The structurer also lays out code the entry cannot reach, so its
+        // loops are those of the live program and of that code alike.
+        let forest = Rc::new(LoopForest::compute_all_tagged(cfg, &dom));
+        let back_edges = forest
+            .loops()
+            .flat_map(|lp| {
+                let header = forest.header(lp);
+                forest.latches(lp).iter().map(move |&latch| (latch, header))
+            })
             .collect();
         let mut reachable = alloc::vec![false; cfg.block_bound()];
         for block in cfg.block_ids() {
@@ -331,25 +380,33 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         // exception edge, a filter funclet — and every such block needs merge
         // points too, so the root also precedes each block the entry misses.
         let unreachable = cfg.block_ids().filter(|block| !reachable[block.index()]);
+        let claims = region_claims(cfg);
+        let mut extents = ExtentWalk::default();
         Self {
             cfg,
             pdom: PostDominatorTree::compute(&VirtualRoot::new(cfg, unreachable)),
-            handler_roots: try_catch::handler_roots(cfg, |block| {
+            handler_roots: try_catch::handler_roots(cfg, &mut extents, |block| {
                 !emptied[block.index()] && !cfg.block(block).instructions().is_empty()
             }),
             reachable,
             back_edges,
-            loops,
+            forest,
             anchors: BTreeMap::new(),
             visited: alloc::vec![false; cfg.block_bound()],
             emptied,
             goto_targets: BTreeSet::new(),
             labeled_blocks: BTreeSet::new(),
             loop_stack: Vec::new(),
+            loop_targets: BTreeMap::new(),
+            exits: None,
+            extents,
             structured_regions: BTreeSet::new(),
-            unclaimed: Rc::new(unclaimed_blocks(cfg)),
+            unclaimed: Rc::new(claims.unclaimed),
+            handler_claims: claims.handlers,
+            unemitted_targets: BTreeSet::new(),
             report: LiftReport::default(),
             tables: Tables::new(),
+            completion: Completion::default(),
         }
     }
 
@@ -357,7 +414,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         let cfg = self.cfg;
         let order = cfg.reverse_postorder();
         self.anchors = try_catch::region_anchors(cfg, &order);
-        let mut body = self.lift_region(cfg.entry(), None, None);
+        let mut body = self.lift_region(cfg.entry(), Bound::Whole, None);
 
         // Completeness sweep: emit every block the structured walk refused or
         // never reached, each under its label so the boundary `Goto`s and
@@ -366,19 +423,24 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         // edge or a funclet carries code, though no edge from the entry leads
         // to it.
         let sweep_order = self.sweep_order(&order);
-        while let Some(&pending) = sweep_order.iter().find(|block| !self.is_visited(**block)) {
-            self.sweep(pending, &mut body);
+        // A block that is emitted stays emitted, so the sweep only moves
+        // forward through the order.
+        let mut next = 0;
+        while let Some(offset) = sweep_order[next..]
+            .iter()
+            .position(|&block| !self.is_visited(block))
+        {
+            next += offset;
+            self.sweep(sweep_order[next], &mut body);
         }
         // A goto always finds its label: the target of one that left a handler
         // for code only that handler reaches is swept too, and so is whatever
-        // the sweep then names.
-        while let Some(target) = self
-            .goto_targets
-            .iter()
-            .copied()
-            .find(|&target| !self.is_visited(target))
-        {
-            self.sweep(target, &mut body);
+        // the sweep then names. The targets come lowest block first, and a
+        // sweep may name a lower one.
+        while let Some(target) = self.unemitted_targets.pop_first() {
+            if !self.is_visited(target) {
+                self.sweep(target, &mut body);
+            }
         }
 
         // Exact labeling: wrap the emission of every goto target that has no
@@ -413,7 +475,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
     /// Emit the code at `pending`, which nothing structured reached, under
     /// its label at the end of `body`.
     fn sweep(&mut self, pending: BlockId, body: &mut Vec<ControlNode>) {
-        let pending_body = self.lift_region(pending, None, None);
+        let pending_body = self.lift_region(pending, Bound::Whole, None);
         if pending_body.is_empty() {
             return;
         }
@@ -450,6 +512,12 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
     /// Whether an exception region names `block`.
     fn is_claimed(&self, block: BlockId) -> bool {
         !self.unclaimed.contains(&block)
+    }
+
+    /// Whether control can never reach the end of `node`, a construct whose
+    /// child bodies are stored: see [`Completion`].
+    fn never_completes(&mut self, node: ControlNode) -> bool {
+        self.completion.never_completes(&self.tables, node)
     }
 
     fn is_visited(&self, block: BlockId) -> bool {
@@ -521,264 +589,6 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             result.push(ControlNode::Block(span));
         }
     }
-
-    /// Recursively lift a region starting at `head`.
-    ///
-    /// The walk ends silently at `stop` (a legitimate structural convergence
-    /// point — an arm's merge, a post-tested loop's latch); every other
-    /// transfer that cannot proceed is resolved against the loop stack or made
-    /// explicit as a goto.
-    fn lift_region(
-        &mut self,
-        head: BlockId,
-        allowed_blocks: Option<&BTreeSet<BlockId>>,
-        stop: Option<BlockId>,
-    ) -> Vec<ControlNode> {
-        let cfg = self.cfg;
-        let mut result = Vec::new();
-        let mut current = Some(head);
-
-        while let Some(block) = current {
-            if Some(block) == stop {
-                break;
-            }
-            if let Some(node) = self.resolve_loop_transfer(block) {
-                result.push(node);
-                break;
-            }
-            if self.is_visited(block) {
-                // Convergence is only silent at `stop`; any other transfer
-                // into already-emitted code is a real control transfer.
-                self.push_goto(&mut result, block, GotoReason::RevisitedTarget);
-                break;
-            }
-            if !block_is_allowed(allowed_blocks, block) {
-                // Exclusively owned out-of-bound code — a single predecessor,
-                // so this transfer is its only entry, and no exception region
-                // claims it — inlines here instead of degrading to a goto
-                // (javac hoists `break label` bodies out of line like this).
-                // The inlined walk stays within unclaimed code, so it never
-                // pulls another region's blocks into this construct.
-                // Anything else is recorded, never dropped: the jump is
-                // explicit and the completeness sweep emits the target under
-                // the matching label.
-                if cfg.incoming(block).count() == 1 && !self.is_claimed(block) {
-                    let bound = Rc::clone(&self.unclaimed);
-                    result.extend(self.lift_region(block, Some(&bound), stop));
-                } else {
-                    self.push_goto(&mut result, block, GotoReason::BoundaryEscape);
-                }
-                break;
-            }
-
-            self.visit(block);
-            current = self.lift_entered(block, allowed_blocks, stop, &mut result);
-        }
-
-        result
-    }
-
-    /// Emit an already-visited block: the try region it anchors, or else its
-    /// own classified form. Returns the block flow continues at (if any).
-    ///
-    /// [`lift_region`](Self::lift_region)'s walk and a switch arm, whose entry
-    /// the switch visits ahead of the walk, both enter blocks here, so a
-    /// region anchored at an arm entry is structured like any other.
-    pub(super) fn lift_entered(
-        &mut self,
-        block: BlockId,
-        allowed_blocks: Option<&BTreeSet<BlockId>>,
-        stop: Option<BlockId>,
-        result: &mut Vec<ControlNode>,
-    ) -> Option<BlockId> {
-        if let Some((node, continuation)) = self.lift_try_catch(block, allowed_blocks) {
-            result.push(node);
-            // Resume at the region's own continuation, not the anchor's merge:
-            // they differ whenever the try exits through an explicit leave.
-            return continuation;
-        }
-        self.lift_block(block, allowed_blocks, stop, result)
-    }
-
-    /// Classify one already-visited block, emit its lifted form, and return
-    /// the block sequential flow continues at (if any).
-    ///
-    /// This is the single classification path: [`lift_entered`](Self::lift_entered)
-    /// and the try-body anchor both run it, so a region anchored at a branch,
-    /// dispatch, or loop header keeps its structure inside the enclosing
-    /// construct.
-    fn lift_block(
-        &mut self,
-        block: BlockId,
-        allowed_blocks: Option<&BTreeSet<BlockId>>,
-        stop: Option<BlockId>,
-        result: &mut Vec<ControlNode>,
-    ) -> Option<BlockId> {
-        let cfg = self.cfg;
-        let outgoing: Vec<EdgeId> = cfg.outgoing(block).collect();
-        let flow = self.classify_block(block);
-
-        match flow {
-            BlockFlowKind::LoopHeader => {
-                let (node, follow) = self.lift_loop(block, allowed_blocks);
-                result.push(node);
-                return follow;
-            }
-            BlockFlowKind::Conditional => {
-                let node = self.lift_conditional(block, allowed_blocks);
-                result.push(node);
-                let merge = self.effective_merge(block, allowed_blocks);
-                return self.resume_after(&node, merge);
-            }
-            BlockFlowKind::Switch => {
-                let node = self.lift_switch(block, allowed_blocks);
-                result.push(node);
-                let merge = self.effective_merge(block, allowed_blocks);
-                return self.resume_after(&node, merge);
-            }
-            BlockFlowKind::BackEdge => {
-                self.push_block(result, block);
-                if let Some(target) = self.flow_back_edge_target(block) {
-                    if let Some(node) = self.resolve_loop_transfer(target) {
-                        result.push(node);
-                    } else {
-                        self.push_goto(result, target, GotoReason::RevisitedTarget);
-                    }
-                }
-                return None;
-            }
-            BlockFlowKind::Jump => {
-                return self.lift_jump(block, &outgoing, stop, result);
-            }
-            BlockFlowKind::Linear => {}
-        }
-
-        if outgoing.is_empty() {
-            let span = self.whole_span(block);
-            if !span.is_empty() {
-                result.push(ControlNode::Return(span));
-            }
-            return None;
-        }
-
-        self.push_block(result, block);
-
-        // Advance along the single sequential successor; exception edges are
-        // not sequential flow, so they never block the advance. The walk in
-        // [`lift_region`](Self::lift_region) resolves the target against the
-        // stop block, the loop stack, and the enclosing bound.
-        let flow_succs = flow_successors(cfg, block);
-        if let &[only] = flow_succs.as_slice() {
-            return Some(only);
-        }
-        None
-    }
-
-    /// Emit a block whose flow leaves through explicit jumps, and return the
-    /// block sequential flow continues at (if any).
-    fn lift_jump(
-        &mut self,
-        block: BlockId,
-        outgoing: &[EdgeId],
-        stop: Option<BlockId>,
-        result: &mut Vec<ControlNode>,
-    ) -> Option<BlockId> {
-        let cfg = self.cfg;
-        self.push_block(result, block);
-        for &eid in outgoing {
-            let edge = cfg.edge(eid);
-            if edge.kind() != EdgeKind::Jump {
-                continue;
-            }
-            let target = edge.target();
-            if Some(target) == stop {
-                // The jump lands exactly on the enclosing construct's
-                // convergence point (an arm skipping its sibling to reach the
-                // join): structurally the arm simply ends.
-                continue;
-            }
-            if let Some(node) = self.resolve_loop_transfer(target) {
-                result.push(node);
-            } else if !self.is_visited(target)
-                && cfg.incoming(target).count() == 1
-                && !self.is_claimed(target)
-            {
-                // Exclusively owned jump target — this explicit jump is its
-                // only entry and no exception region claims it (javac jumps
-                // over handler code to reach a join): sequential flow simply
-                // continues there.
-                return Some(target);
-            } else {
-                self.push_goto(result, target, GotoReason::ExplicitJump);
-            }
-        }
-        None
-    }
-
-    /// The ultimate target of a chain of pure jump trampolines: an unemitted,
-    /// instruction-free block with a single unconditional successor forwards
-    /// a resolution unchanged. The HLIL lift empties dialect-declared pure
-    /// transfers in its working view before structuring (javac's `break`
-    /// routes through such blocks); frontends structuring a raw [`Cfg`] whose
-    /// jump encodings occupy an instruction clear them the same way.
-    fn through_trampolines(&self, target: BlockId) -> (BlockId, Vec<BlockId>) {
-        let cfg = self.cfg;
-        let mut hops = Vec::new();
-        let mut current = target;
-        for _ in 0..8 {
-            if self.is_visited(current) || self.instruction_count(current) != 0 {
-                break;
-            }
-            let mut normal = cfg
-                .outgoing(current)
-                .map(|edge| cfg.edge(edge))
-                .filter(|edge| !edge.kind().is_exceptional());
-            let (Some(edge), None) = (normal.next(), normal.next()) else {
-                break;
-            };
-            if edge.kind() != EdgeKind::Jump {
-                break;
-            }
-            hops.push(current);
-            current = edge.target();
-        }
-        (current, hops)
-    }
-
-    /// Resolve a control transfer against the enclosing loops: `continue`
-    /// when it reaches a loop's continue point, `break` when it reaches a
-    /// loop's follow. Inner loops win; resolving against an outer loop labels
-    /// it.
-    fn resolve_loop_transfer(&mut self, target: BlockId) -> Option<ControlNode> {
-        let (target, hops) = self.through_trampolines(target);
-        let position = self.loop_stack.iter().rposition(|context| {
-            context.continue_target == target || context.follow == Some(target)
-        })?;
-        // The consumed trampolines carry no content; the sweep must not
-        // resurrect them as labeled residue.
-        for hop in hops {
-            self.visit(hop);
-        }
-        let innermost = position + 1 == self.loop_stack.len();
-        let label = if innermost {
-            None
-        } else {
-            self.loop_stack[position].labeled = true;
-            Some(self.loop_stack[position].header)
-        };
-        let context = &self.loop_stack[position];
-        Some(if context.continue_target == target {
-            ControlNode::Continue { label }
-        } else {
-            ControlNode::Break { label }
-        })
-    }
-
-    fn push_goto(&mut self, result: &mut Vec<ControlNode>, target: BlockId, reason: GotoReason) {
-        self.goto_targets.insert(target);
-        self.report.gotos.push(GotoDiagnostic { target, reason });
-        result.push(ControlNode::Goto { target });
-    }
 }
 
 fn has_edge_kind<I, E>(cfg: &Cfg<I, E>, edges: &[EdgeId], kind: EdgeKind) -> bool {
@@ -808,19 +618,34 @@ fn flow_successors<I, E>(cfg: &Cfg<I, E>, block: BlockId) -> Vec<BlockId> {
         .collect()
 }
 
-fn block_is_allowed(allowed_blocks: Option<&BTreeSet<BlockId>>, block: BlockId) -> bool {
-    allowed_blocks.is_none_or(|blocks| blocks.contains(&block))
+/// What the exception regions name, read in one pass over them.
+struct Claims {
+    /// The blocks no region names: neither protected, nor a handler entry, nor
+    /// part of a declared handler extent.
+    unclaimed: BTreeSet<BlockId>,
+    /// For each block some handler names (its entry or a block of its known
+    /// extent), the regions whose handlers do, in region order.
+    handlers: BTreeMap<BlockId, Vec<u32>>,
 }
 
-/// The blocks no exception region names: neither protected, nor a handler
-/// entry, nor part of a declared handler extent.
-fn unclaimed_blocks<I, E>(cfg: &Cfg<I, E>) -> BTreeSet<BlockId> {
-    cfg.block_ids()
-        .filter(|&block| {
-            !cfg.regions().iter().any(|region| {
-                region.protected_blocks.contains(&block)
-                    || region.handlers.iter().any(|handler| handler.claims(block))
-            })
-        })
-        .collect()
+fn region_claims<I, E>(cfg: &Cfg<I, E>) -> Claims {
+    let mut claimed: BTreeSet<BlockId> = BTreeSet::new();
+    let mut handlers: BTreeMap<BlockId, Vec<u32>> = BTreeMap::new();
+    for region in cfg.regions() {
+        claimed.extend(region.protected_blocks.iter().copied());
+        for block in region.handlers.iter().flat_map(Handler::claimed_blocks) {
+            claimed.insert(block);
+            let regions = handlers.entry(block).or_default();
+            if regions.last() != Some(&region.id.0) {
+                regions.push(region.id.0);
+            }
+        }
+    }
+    Claims {
+        unclaimed: cfg
+            .block_ids()
+            .filter(|block| !claimed.contains(block))
+            .collect(),
+        handlers,
+    }
 }

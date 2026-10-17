@@ -224,10 +224,10 @@ fn assert_arena_is_a_tree(tree: &ControlTree, context: &str) {
     assert_eq!(balance.entered, preorder, "walk order in {context}");
 }
 
-/// The pseudocode names the instructions in the order the walk visits them,
-/// except that a branch or dispatch prints as its keyword in place of its last
-/// instruction. A guarded region also names its witness once more, so a
-/// predicated tree is not compared.
+/// The pseudocode names every instruction, in the order the walk visits them:
+/// a branch or dispatch prints the instructions that compute its condition
+/// ahead of it and its own test in the header. A guarded region also names its
+/// witness once more, so a predicated tree is not compared.
 fn assert_display_follows_walk<I, E>(cfg: &Cfg<I, E>, tree: &ControlTree, context: &str) {
     if tree
         .preorder()
@@ -235,21 +235,8 @@ fn assert_display_follows_walk<I, E>(cfg: &Cfg<I, E>, tree: &ControlTree, contex
     {
         return;
     }
-    let mut dropped = Vec::new();
-    for id in tree.preorder() {
-        if let ControlNode::IfThenElse { condition, .. } | ControlNode::Switch { condition, .. } =
-            *tree.node(id)
-            && !condition.is_empty()
-        {
-            dropped.push((condition.block(), condition.end() - 1));
-        }
-    }
     let mut walked = Vec::new();
-    tree.for_each_instruction(cfg, |point, _| {
-        if !dropped.contains(&(point.block, point.inst_idx)) {
-            walked.push((point.block, point.inst_idx));
-        }
-    });
+    tree.for_each_instruction(cfg, |point, _| walked.push((point.block, point.inst_idx)));
     let mut printed = Vec::new();
     tree.to_pseudocode(|sink, point| {
         printed.push((point.block, point.inst_idx));

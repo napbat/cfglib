@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 
 use cfglib::{
     CallInfo, Cfg, ConstantFolder, CopySource, DisplayInstr, EdgeKind, EffectInfo, ExprInstr,
-    FlowControl, FlowEffect, InstrInfo, JumpTargets, Predicated, SwitchSource, ValueNumberInfo,
+    FlowControl, FlowEffect, InstrInfo, JumpTargets, Predicated, SwitchSource, SwitchTargets,
+    ValueNumberInfo,
 };
 
 #[derive(Clone, Debug)]
@@ -20,7 +21,7 @@ pub(super) struct ApiInst {
     pub(super) tail_call: bool,
     pub(super) jump_target: Option<u32>,
     pub(super) label: Option<u32>,
-    pub(super) switch_targets: Option<(Vec<u32>, Option<u32>)>,
+    pub(super) switch_targets: Option<SwitchTargets<u32>>,
 }
 
 impl ApiInst {
@@ -187,7 +188,7 @@ impl JumpTargets for ApiInst {
 impl SwitchSource for ApiInst {
     type Target = u32;
 
-    fn switch_targets(&self) -> Option<(Vec<Self::Target>, Option<Self::Target>)> {
+    fn switch_targets(&self) -> Option<SwitchTargets<Self::Target>> {
         self.switch_targets.clone()
     }
 }

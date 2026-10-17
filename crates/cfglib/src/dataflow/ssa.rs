@@ -12,12 +12,13 @@
 //! also merges the value the variable holds when the function starts
 //! ([`SsaPhi::start_value`]), which no edge carries.
 //!
-//! Construction runs in four phases, one module each: the dominance forest
-//! that gives unreachable code its own roots, the dominance frontier table,
-//! phi placement into flat drafts, and the dominator-tree renaming walk that
-//! fills them. Every buffer any of them needs belongs to an [`SsaScratch`],
-//! so a whole-codebase pass builds one form per callable without allocating
-//! one set of working storage per callable.
+//! Construction runs in four phases: the dominance forest that gives
+//! unreachable code its own roots (it lives with the dominator trees), then
+//! one module each for the dominance frontier table, phi placement into flat
+//! drafts, and the dominator-tree renaming walk that fills them. Every buffer
+//! any of them needs belongs to an [`SsaScratch`], so a whole-codebase pass
+//! builds one form per callable without allocating one set of working storage
+//! per callable.
 
 extern crate alloc;
 
@@ -27,10 +28,9 @@ use smallvec::SmallVec;
 
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
-use crate::graph::dominator::DominatorTree;
+use crate::graph::dominator::{DominatorTree, complete_dominator_forest};
 use crate::{InstrInfo, ProgramPoint, VariableId};
 
-mod forest;
 mod frontier;
 mod place;
 mod rename;
@@ -374,12 +374,8 @@ impl<V: VariableId> SsaForm<V> {
         G::Inst: InstrInfo<Variable = V>,
     {
         scratch.reset(cfg.node_bound());
-        let complete = forest::complete_dominator_forest(
-            &mut scratch.dominators,
-            &mut scratch.forest_roots,
-            cfg,
-            dom,
-        );
+        let complete =
+            complete_dominator_forest(&mut scratch.dominators, &mut scratch.forest_roots, cfg, dom);
         let dom = complete.as_ref().unwrap_or(dom);
         place::place_phis(scratch, cfg, dom);
         let mut max_versions = BTreeMap::new();
