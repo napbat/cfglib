@@ -49,14 +49,6 @@ impl<I, E> Cfg<I, E> {
         self.anchors().any(|anchor| anchor == block)
     }
 
-    /// The anchors that name no live block: what makes
-    /// [`compact`](Cfg::compact) panic, and what a well-formed CFG never has.
-    /// Decoding a serialized CFG and verifying one both ask this.
-    pub(crate) fn dangling_anchors(&self) -> impl Iterator<Item = BlockId> + '_ {
-        self.anchors()
-            .filter(|&anchor| !self.contains_block(anchor))
-    }
-
     /// Whether folding `target` into `source` keeps every promise the
     /// exception metadata makes.
     ///
