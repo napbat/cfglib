@@ -31,13 +31,31 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Run Clippy
+      - name: Run Clippy with default features
+        run: >-
+          cargo clippy --workspace --all-targets --
+          -D warnings -D clippy::pedantic
+
+      - name: Run Clippy with all features
         run: >-
           cargo clippy --workspace --all-targets --all-features --
           -D warnings -D clippy::pedantic
 
-      - name: Run tests
+      - name: Run Clippy on the allocation-counting benchmarks
+        env:
+          RUSTFLAGS: --cfg cfglib_bench_alloc
+        run: >-
+          cargo clippy -p cfglib --benches --all-features --
+          -D warnings -D clippy::pedantic
+
+      - name: Run tests with default features
+        run: cargo test --workspace
+
+      - name: Run tests with all features
         run: cargo test --workspace --all-features
+
+      - name: Run examples
+        run: cargo run -p cfglib --example control-tree
 
       - name: Build documentation
         env:
@@ -50,10 +68,17 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
+      - name: Read the MSRV from the workspace manifest
+        id: msrv
+        run: >-
+          echo "version=$(cargo metadata --no-deps --format-version 1
+          | jq -r '.packages[] | select(.name == "cfglib") | .rust_version')"
+          >> "$GITHUB_OUTPUT"
+
       - name: Install MSRV Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.85"
+          toolchain: ${{ steps.msrv.outputs.version }}
 
       - name: Check with MSRV
         run: cargo check --workspace --all-targets --all-features
@@ -69,7 +94,10 @@ jobs:
         with:
           targets: thumbv7em-none-eabi
 
-      - name: Check no_std build
+      - name: Check no_std build with default features
+        run: cargo check -p cfglib --target thumbv7em-none-eabi
+
+      - name: Check no_std build with all features
         run: >-
           cargo check -p cfglib --all-features
           --target thumbv7em-none-eabi

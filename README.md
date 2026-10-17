@@ -582,9 +582,11 @@ by label token, and switch recovery over syntax-node targets.
 Install the git hooks once with `prek install` (or `pre-commit install`); both
 tools read the same `.pre-commit-config.yaml`. Hygiene checks, the repository
 policy script, `cargo fmt`, and pedantic Clippy run at commit time; the full
-test and documentation suites run at push time. CI runs the same gates plus an
-MSRV (1.85) check and a `no_std` target build. The complete gate list and the
-workspace's naming and layout conventions live in `AGENTS.md`.
+test and documentation suites run at push time. CI runs the same gates with
+default features as well, plus an MSRV check against the `rust-version` in
+`Cargo.toml` (the one place the minimum Rust version is written down) and
+`no_std` target builds. The complete gate list and the workspace's naming and
+layout conventions live in `AGENTS.md`.
 
 ## License
 
