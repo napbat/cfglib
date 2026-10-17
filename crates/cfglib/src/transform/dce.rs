@@ -110,9 +110,7 @@ pub fn dead_code_elimination_with_exits<I: crate::dataflow::EffectInfo, E>(
 ///
 /// Panics only if the unbounded fixpoint solve reports a step-limit error,
 /// which the unbounded configuration cannot produce.
-pub fn remove_dead_code<I: crate::dataflow::EffectInfo, E: Clone + Default>(
-    cfg: &mut Cfg<I, E>,
-) -> usize {
+pub fn remove_dead_code<I: crate::dataflow::EffectInfo, E>(cfg: &mut Cfg<I, E>) -> usize {
     remove_dead_code_mapped(cfg).0
 }
 
@@ -127,7 +125,7 @@ pub fn remove_dead_code<I: crate::dataflow::EffectInfo, E: Clone + Default>(
 ///
 /// Panics only if the unbounded fixpoint solve reports a step-limit error,
 /// which the unbounded configuration cannot produce.
-pub fn remove_dead_code_mapped<I: crate::dataflow::EffectInfo, E: Clone + Default>(
+pub fn remove_dead_code_mapped<I: crate::dataflow::EffectInfo, E>(
     cfg: &mut Cfg<I, E>,
 ) -> (usize, crate::rewrite::Rewrite) {
     let mut total = 0;
@@ -223,5 +221,23 @@ mod tests {
         let (total, mapping) = remove_dead_code_mapped(&mut cfg);
         assert_eq!(total, 0);
         assert!(mapping.is_empty());
+    }
+
+    #[test]
+    fn remove_dead_code_needs_nothing_of_the_edge_payload() {
+        // Neither `Clone` nor `Default`: the pass never copies or creates an edge.
+        struct Opaque;
+
+        let mut cfg = Cfg::<DfInst, Opaque>::with_edge_payload();
+        let mid = cfg.new_block();
+        let exit = cfg.new_block();
+        cfg.block_mut(cfg.entry()).push(df_def("keep", 0));
+        cfg.block_mut(mid).push(df_def("dead", 1));
+        cfg.block_mut(exit).push(df_use("use", 0));
+        cfg.add_edge_with_payload(cfg.entry(), mid, EdgeKind::Fallthrough, Opaque);
+        cfg.add_edge_with_payload(mid, exit, EdgeKind::Fallthrough, Opaque);
+
+        assert!(remove_dead_code(&mut cfg) >= 3);
+        assert_eq!(cfg.block(cfg.entry()).instructions().len(), 2);
     }
 }
