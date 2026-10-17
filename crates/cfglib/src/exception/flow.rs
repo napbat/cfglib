@@ -29,11 +29,13 @@ pub enum ExceptionDisposition {
 /// an exception/context identifier, or source provenance without making those
 /// platform types part of cfglib.
 ///
-/// The payload follows the edge's [`EdgeKind`](crate::EdgeKind): an edge whose
-/// kind [`is_exceptional`](crate::EdgeKind::is_exceptional) carries
-/// [`Exceptional`](Self::Exceptional), and every other edge — including
+/// By convention the payload follows the edge's
+/// [`EdgeKind`](crate::EdgeKind): a frontend gives an edge whose kind
+/// [`is_exceptional`](crate::EdgeKind::is_exceptional)
+/// [`Exceptional`](Self::Exceptional) flow, and every other edge — including
 /// [`ExceptionLeave`](crate::EdgeKind::ExceptionLeave), a normal transfer out
-/// of a protected region — carries [`Normal`](Self::Normal).
+/// of a protected region — [`Normal`](Self::Normal) flow. The graph accepts
+/// any pairing and does not check this one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ExceptionFlow<M = ()> {

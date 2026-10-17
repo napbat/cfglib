@@ -51,8 +51,9 @@ impl JumpTargets for GotoInst {
     }
 }
 
-/// Assert the built graph's blocks (by instruction mnemonic) and edges (as
-/// `(source, target, kind)`), both in creation order.
+/// Assert the built graph's blocks (by instruction mnemonic, in creation
+/// order: block identities are observable) and its set of edges (as
+/// `(source, target, kind)`, compared sorted so wiring order is not pinned).
 fn assert_shape(cfg: &Cfg<MockInst>, blocks: &[&[&str]], edges: &[(usize, usize, EdgeKind)]) {
     let actual_blocks: Vec<Vec<&str>> = cfg
         .block_ids()
@@ -66,11 +67,23 @@ fn assert_shape(cfg: &Cfg<MockInst>, blocks: &[&[&str]], edges: &[(usize, usize,
         .collect();
     let expected_blocks: Vec<Vec<&str>> = blocks.iter().map(|block| block.to_vec()).collect();
     assert_eq!(actual_blocks, expected_blocks, "blocks");
-    let actual_edges: Vec<_> = cfg
+    let mut actual_edges: Vec<_> = cfg
         .edges()
-        .map(|edge| (edge.source().index(), edge.target().index(), edge.kind()))
+        .map(|edge| {
+            (
+                edge.source().index(),
+                edge.target().index(),
+                edge.kind() as usize,
+            )
+        })
         .collect();
-    assert_eq!(actual_edges, edges, "edges");
+    let mut expected_edges: Vec<_> = edges
+        .iter()
+        .map(|&(source, target, kind)| (source, target, kind as usize))
+        .collect();
+    actual_edges.sort_unstable();
+    expected_edges.sort_unstable();
+    assert_eq!(actual_edges, expected_edges, "edges");
 }
 
 #[test]
