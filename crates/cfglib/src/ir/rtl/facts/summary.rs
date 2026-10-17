@@ -106,6 +106,9 @@ impl BlockSummary {
 ///   does not read its root. The roots that the bound value reads are
 ///   upward-exposed reads like any other. On the normal path the bound root
 ///   keeps its value.
+/// - A guarded raise does not weaken a kill. An execution that raises commits
+///   nothing of the delta and is not a flow successor, so a kill speaks of
+///   the executions that continue to the successors of the block.
 /// - An instruction that ends with [`Control::Call`] reads and writes every
 ///   root of the table after its own statements, because an unknown callee
 ///   can read and change any of them. The call kills nothing.

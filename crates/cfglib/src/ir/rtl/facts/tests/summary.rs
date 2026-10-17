@@ -114,6 +114,28 @@ fn the_value_of_a_raise_binding_reads_its_own_roots_and_kills_nothing() {
 }
 
 #[test]
+fn a_guarded_raise_does_not_weaken_the_kill_of_a_whole_write() {
+    let mut function = Function::new();
+    let entry = function.block();
+    let mut record = function.record_in(entry);
+    let value = record.constant_value(1, 64);
+    let guard = record.read_whole(Root::Flag);
+    record.raise(Raise {
+        outcome: (),
+        guard: Some(guard),
+        payload: &[],
+        binds: &[],
+    });
+    record.write_whole(Root::Acc, value);
+    record.end(Control::Advance);
+
+    let (reads, writes, kills) = sets(&function, entry);
+    assert_eq!(reads, [Root::Flag]);
+    assert_eq!(writes, [Root::Acc]);
+    assert_eq!(kills, [Root::Acc]);
+}
+
+#[test]
 fn a_whole_write_kills_its_root() {
     let mut function = Function::new();
     let entry = function.block();
