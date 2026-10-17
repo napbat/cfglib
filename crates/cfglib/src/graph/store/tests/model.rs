@@ -14,31 +14,7 @@ use alloc::vec::Vec;
 
 use crate::graph::store::{Graph, Id, NodeTag};
 use crate::graph::traverse::TraversalDirection;
-
-/// A xorshift generator, so the sequence is reproducible without a
-/// dependency and without a table of pre-baked operations.
-struct Rng(u64);
-
-impl Rng {
-    const fn new(seed: u64) -> Self {
-        Self(seed)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut state = self.0;
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        self.0 = state;
-        state
-    }
-
-    /// A value in `0..bound`, which must be nonzero.
-    fn below(&mut self, bound: usize) -> usize {
-        let bound = u64::try_from(bound).expect("bound fits in u64");
-        usize::try_from(self.next_u64() % bound).expect("a value below bound fits in usize")
-    }
-}
+use crate::test_util::rng::Rng;
 
 #[derive(Clone)]
 struct ModelNode {
@@ -403,6 +379,19 @@ struct Exercised {
     moved_adjacencies: usize,
     self_edges: usize,
     parallel_edges: usize,
+    /// Edges appended to a node whose adjacency was already served from an
+    /// overlay run, so the edge lives in the node's delta chain beside it.
+    appended_beside_overlay: usize,
+    /// Relocations that edited the run of a node holding such an appended
+    /// edge, which the run has to take over.
+    relocated_beside_appended: usize,
+    /// Compactions of a store in which some node with an overlay read its
+    /// edges out of identity order.
+    compactions_keeping_overlay_order: usize,
+    /// Compactions of a store in which some node *without* an overlay read
+    /// its edges out of identity order, so the order was carried by a base an
+    /// earlier compaction built.
+    compactions_keeping_base_order: usize,
 }
 
 /// One store, one model, and the generator driving both of them.
@@ -415,7 +404,38 @@ struct Session {
     payloads: u64,
 }
 
+/// The direction a source (`true`) or target (`false`) endpoint is read along.
+const fn direction(outgoing: bool) -> TraversalDirection {
+    if outgoing {
+        TraversalDirection::Outgoing
+    } else {
+        TraversalDirection::Incoming
+    }
+}
+
 impl Session {
+    /// Whether `node` is served from an overlay run along `direction` and also
+    /// lists an edge that is not in that run: one appended since.
+    fn appended_beside_overlay(&self, node: usize, direction: TraversalDirection) -> bool {
+        let Some(run) = self.graph.overlay(node, direction) else {
+            return false;
+        };
+        self.graph
+            .adjacent(node_id(node), direction)
+            .any(|edge| !run.iter().any(|&slot| Id::from_raw(slot) == edge))
+    }
+
+    /// Whether `node` reads its live edges along `direction` in anything but
+    /// ascending identity order, which only a redirect produces.
+    fn reads_out_of_identity_order(&self, node: usize, direction: TraversalDirection) -> bool {
+        let edges: Vec<usize> = self
+            .graph
+            .adjacent(node_id(node), direction)
+            .map(Id::index)
+            .collect();
+        edges.windows(2).any(|pair| pair[0] > pair[1])
+    }
+
     fn new(seed: u64, mix: Mix) -> Self {
         Self {
             rng: Rng::new(seed),
@@ -451,7 +471,7 @@ impl Session {
                 self.remove_edge(step);
             }
             _ if choice < mix.redirect_edge && self.model.live_edge_slots().next().is_some() => {
-                if self.rng.below(4) == 0 {
+                if self.rng.one_in(4) {
                     self.move_adjacency(&live_nodes);
                 } else {
                     self.redirect_edge(&live_nodes, step);
@@ -478,6 +498,15 @@ impl Session {
         if source == target {
             self.exercised.self_edges += 1;
         }
+        self.exercised.appended_beside_overlay += usize::from(
+            self.graph
+                .overlay(source, TraversalDirection::Outgoing)
+                .is_some()
+                || self
+                    .graph
+                    .overlay(target, TraversalDirection::Incoming)
+                    .is_some(),
+        );
         if self
             .model
             .live_edges_of(&self.model.outgoing[source])
@@ -496,8 +525,19 @@ impl Session {
         let live: Vec<usize> = self.model.live_edge_slots().collect();
         let edge = live[self.rng.below(live.len())];
         let endpoint = live_nodes[self.rng.below(live_nodes.len())];
-        let outgoing = self.rng.below(2) == 0;
+        let outgoing = self.rng.one_in(2);
 
+        let record = &self.model.edges[edge];
+        let previous = if outgoing {
+            record.source
+        } else {
+            record.target
+        };
+        self.exercised.relocated_beside_appended += usize::from(
+            previous != endpoint
+                && (self.appended_beside_overlay(previous, direction(outgoing))
+                    || self.appended_beside_overlay(endpoint, direction(outgoing))),
+        );
         let expected = self.model.redirect_edge(edge, endpoint, outgoing);
         let actual = if outgoing {
             self.graph
@@ -519,20 +559,18 @@ impl Session {
     fn move_adjacency(&mut self, live_nodes: &[usize]) {
         let old = live_nodes[self.rng.below(live_nodes.len())];
         let new = live_nodes[self.rng.below(live_nodes.len())];
-        let outgoing = self.rng.below(2) == 0;
+        let outgoing = self.rng.one_in(2);
         if old == new {
             return;
         }
 
+        let beside_appended = self.appended_beside_overlay(old, direction(outgoing))
+            || self.appended_beside_overlay(new, direction(outgoing));
         let moved = self.model.move_adjacency(old, new, outgoing);
-        let direction = if outgoing {
-            TraversalDirection::Outgoing
-        } else {
-            TraversalDirection::Incoming
-        };
         self.graph
-            .move_adjacency(node_id(old), node_id(new), direction);
+            .move_adjacency(node_id(old), node_id(new), direction(outgoing));
         self.exercised.moved_adjacencies += usize::from(moved > 0);
+        self.exercised.relocated_beside_appended += usize::from(moved > 0 && beside_appended);
     }
 
     fn remove_edge(&mut self, step: usize) {
@@ -557,6 +595,20 @@ impl Session {
             .live_nodes()
             .map(|node| self.model.nodes[node].payload)
             .collect();
+        let (mut overlay_order, mut base_order) = (false, false);
+        for node in self.model.live_nodes() {
+            for outgoing in [true, false] {
+                if self.reads_out_of_identity_order(node, direction(outgoing)) {
+                    if self.graph.overlay(node, direction(outgoing)).is_some() {
+                        overlay_order = true;
+                    } else {
+                        base_order = true;
+                    }
+                }
+            }
+        }
+        self.exercised.compactions_keeping_overlay_order += usize::from(overlay_order);
+        self.exercised.compactions_keeping_base_order += usize::from(base_order);
         let (expected_nodes, expected_edges) = self.model.compact();
         let renumbering = self.graph.compact();
         self.exercised.compactions += 1;
@@ -600,6 +652,17 @@ fn run_session(seed: u64, mix: Mix) -> Session {
     session
 }
 
+/// Fail unless a session reached `what` more than `above` times.
+///
+/// Each bound is a fifth of the least count measured over the sessions below,
+/// rounded down: loose enough that another seed passes, tight enough that a
+/// mix which no longer produces the state fails. The balanced mix reaches an
+/// edge appended beside an overlay twice in ten thousand operations, which is
+/// the difference the churn bounds are there to keep.
+fn assert_reached(what: &str, count: usize, above: usize) {
+    assert!(count > above, "{what}: {count}, wanted more than {above}");
+}
+
 #[test]
 fn random_operation_sequences_match_the_reference_model() {
     let session = run_session(0x2545_F491_4F6C_DD1D, BALANCED);
@@ -607,40 +670,27 @@ fn random_operation_sequences_match_the_reference_model() {
     // The comparison above proves little unless the sequence actually
     // reached the states it is meant to cover.
     let exercised = &session.exercised;
-    assert!(
-        exercised.compactions > 100,
-        "compactions: {}",
-        exercised.compactions
+    assert_reached("compactions", exercised.compactions, 100);
+    assert_reached("node removals", exercised.removed_nodes, 100);
+    assert_reached("edge removals", exercised.removed_edges, 100);
+    assert_reached("edge redirections", exercised.redirected_edges, 100);
+    assert_reached("bulk moves", exercised.moved_adjacencies, 100);
+    assert_reached("self edges", exercised.self_edges, 10);
+    assert_reached("parallel edges", exercised.parallel_edges, 10);
+    assert_reached(
+        "edges appended beside an overlay",
+        exercised.appended_beside_overlay,
+        30,
     );
-    assert!(
-        exercised.removed_nodes > 100,
-        "node removals: {}",
-        exercised.removed_nodes
+    assert_reached(
+        "compactions that kept an overlay's order",
+        exercised.compactions_keeping_overlay_order,
+        50,
     );
-    assert!(
-        exercised.removed_edges > 100,
-        "edge removals: {}",
-        exercised.removed_edges
-    );
-    assert!(
-        exercised.redirected_edges > 100,
-        "edge redirections: {}",
-        exercised.redirected_edges
-    );
-    assert!(
-        exercised.moved_adjacencies > 100,
-        "bulk moves: {}",
-        exercised.moved_adjacencies
-    );
-    assert!(
-        exercised.self_edges > 10,
-        "self edges: {}",
-        exercised.self_edges
-    );
-    assert!(
-        exercised.parallel_edges > 10,
-        "parallel edges: {}",
-        exercised.parallel_edges
+    assert_reached(
+        "compactions that kept an order the base carried",
+        exercised.compactions_keeping_base_order,
+        100,
     );
     assert!(
         !session.graph.is_empty(),
@@ -662,20 +712,28 @@ fn relocated_nodes_keep_the_edges_appended_after_their_overlay() {
     ] {
         let session = run_session(seed, CHURN);
         let exercised = &session.exercised;
-        assert!(
-            exercised.redirected_edges > 1_000,
-            "edge redirections: {}",
-            exercised.redirected_edges
+        assert_reached("edge redirections", exercised.redirected_edges, 1_000);
+        assert_reached("bulk moves", exercised.moved_adjacencies, 200);
+        assert_reached("compactions", exercised.compactions, 20);
+        assert_reached(
+            "edges appended beside an overlay",
+            exercised.appended_beside_overlay,
+            600,
         );
-        assert!(
-            exercised.moved_adjacencies > 200,
-            "bulk moves: {}",
-            exercised.moved_adjacencies
+        assert_reached(
+            "relocations of a node holding an appended edge",
+            exercised.relocated_beside_appended,
+            400,
         );
-        assert!(
-            exercised.compactions > 20,
-            "compactions: {}",
-            exercised.compactions
+        assert_reached(
+            "compactions that kept an overlay's order",
+            exercised.compactions_keeping_overlay_order,
+            15,
+        );
+        assert_reached(
+            "compactions that kept an order the base carried",
+            exercised.compactions_keeping_base_order,
+            7,
         );
     }
 }
