@@ -518,6 +518,39 @@ fn an_instruction_wider_than_its_inline_storage_keeps_every_value_in_order() {
 }
 
 #[test]
+fn an_instruction_answers_the_value_it_reads_and_the_value_it_leaves() {
+    // Variable 0 is read, then defined twice; variable 1 is only read, and
+    // variable 2 only defined.
+    let mut cfg = Cfg::<DfInst>::new();
+    let entry = cfg.entry();
+    cfg.block_mut(entry).push(df_def("seed", 0));
+    cfg.block_mut(entry).push(DfInst {
+        uses: vec![0, 1, 0],
+        defs: vec![0, 2, 0],
+        ..df_ff("wide")
+    });
+
+    let form = SsaForm::compute(&cfg, &DominatorTree::compute(&cfg));
+    let wide = form.instruction(departure(entry, 1)).unwrap();
+
+    assert_eq!(wide.use_of(&0), Some(&SsaValue::new(0, 1)));
+    assert_eq!(wide.use_of(&1), Some(&SsaValue::live_in(1)));
+    assert_eq!(wide.use_of(&2), None, "variable 2 is only defined here");
+    assert_eq!(
+        wide.def_of(&0),
+        Some(&SsaValue::new(0, 3)),
+        "the later of two definitions is the one left behind"
+    );
+    assert_eq!(wide.def_of(&2), Some(&SsaValue::new(2, 1)));
+    assert_eq!(wide.def_of(&1), None, "variable 1 is only read here");
+    assert_eq!(
+        &form.value_at(departure(entry, 2), &0),
+        wide.def_of(&0).unwrap(),
+        "the next point reads what the instruction left"
+    );
+}
+
+#[test]
 fn a_phi_wider_than_its_inline_storage_lists_every_departure_in_cfg_order() {
     // Four arms merge, one more operand than a phi record holds inline.
     let mut cfg = Cfg::<DfInst>::new();

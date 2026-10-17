@@ -367,19 +367,8 @@ impl<L, V, F> MemorySSAEvent<L, V, F> {
     where
         V: VariableId,
     {
-        let access = self.access()?;
-        let instruction = ssa.instruction(self.site.point)?;
-        access
-            .address_uses()
-            .iter()
-            .map(|address| {
-                instruction
-                    .uses()
-                    .iter()
-                    .find(|value| &value.variable == address)
-                    .cloned()
-            })
-            .collect()
+        self.access()?
+            .ssa_address_uses(ssa.instruction(self.site.point)?)
     }
 }
 

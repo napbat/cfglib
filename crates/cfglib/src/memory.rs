@@ -18,7 +18,7 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use crate::dataflow::cfg_view::CfgView;
-use crate::{BlockId, InstrInfo, ProgramPoint, SsaForm, SsaValue, VariableId};
+use crate::{BlockId, InstrInfo, ProgramPoint, SsaForm, SsaInstruction, SsaValue, VariableId};
 
 /// Instruction-level summary of reported memory accesses.
 ///
@@ -305,6 +305,23 @@ impl<L, V> MemoryAccess<L, V> {
     }
 }
 
+impl<L, V: VariableId> MemoryAccess<L, V> {
+    /// The values `instruction` reads for this access's address
+    /// dependencies, in declaration order.
+    ///
+    /// `None` when a dependency is absent from the instruction's reported
+    /// uses, which is an adapter contract violation.
+    pub(crate) fn ssa_address_uses(
+        &self,
+        instruction: &SsaInstruction<V>,
+    ) -> Option<Vec<SsaValue<V>>> {
+        self.address_uses
+            .iter()
+            .map(|address| instruction.use_of(address).cloned())
+            .collect()
+    }
+}
+
 /// One memory-relevant event emitted by an instruction.
 ///
 /// Fence payloads retain the consumer's ordering, scope, and execution-barrier
@@ -434,18 +451,7 @@ impl<L, V, F> MemoryTraceEntry<L, V, F> {
         let MemoryEvent::Access(access) = &self.event else {
             return None;
         };
-        let instruction = ssa.instruction(self.point)?;
-        access
-            .address_uses
-            .iter()
-            .map(|address| {
-                instruction
-                    .uses()
-                    .iter()
-                    .find(|value| &value.variable == address)
-                    .cloned()
-            })
-            .collect()
+        access.ssa_address_uses(ssa.instruction(self.point)?)
     }
 }
 

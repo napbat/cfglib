@@ -136,6 +136,33 @@ impl<V> SsaInstruction<V> {
     }
 }
 
+impl<V: PartialEq> SsaInstruction<V> {
+    /// The value this instruction reads for `variable`, or `None` when it
+    /// does not use it.
+    ///
+    /// Every read of one variable in one instruction names the same value,
+    /// because renaming resolves the operands before it pushes the
+    /// instruction's own definitions.
+    #[must_use]
+    pub fn use_of(&self, variable: &V) -> Option<&SsaValue<V>> {
+        self.uses.iter().find(|value| value.variable == *variable)
+    }
+
+    /// The value `variable` holds after this instruction, or `None` when it
+    /// does not define it.
+    ///
+    /// An instruction that defines a variable more than once leaves the last
+    /// definition behind, so that is the one this answers: it is the value a
+    /// later instruction reads.
+    #[must_use]
+    pub fn def_of(&self, variable: &V) -> Option<&SsaValue<V>> {
+        self.defs
+            .iter()
+            .rev()
+            .find(|value| value.variable == *variable)
+    }
+}
+
 /// SSA contents associated with one CFG block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SsaBlock<V> {
@@ -238,13 +265,7 @@ impl<V: VariableId> SsaForm<V> {
         let definition = contents.instructions[..end]
             .iter()
             .rev()
-            .find_map(|instruction| {
-                instruction
-                    .defs
-                    .iter()
-                    .rev()
-                    .find(|value| value.variable == *variable)
-            });
+            .find_map(|instruction| instruction.def_of(variable));
         if let Some(definition) = definition {
             return Some(definition.clone());
         }
