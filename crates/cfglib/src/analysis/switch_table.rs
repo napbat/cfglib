@@ -23,20 +23,34 @@ use crate::cfg::Cfg;
 use crate::dataflow::cfg_view::CfgView;
 use crate::edge::EdgeKind;
 
-/// A recovered multi-way dispatch site over branch-target tokens `T`.
+/// A dispatch table over branch-target tokens `T`: the case targets plus an
+/// optional default target.
+///
+/// This is what an instruction reports about itself
+/// ([`SwitchSource::switch_targets`]) and, with the block that holds the
+/// dispatch, what a [`JumpTable`] records.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct JumpTable<T> {
-    /// The block containing the dispatch.
-    pub block: BlockId,
+pub struct SwitchTargets<T> {
     /// Known case targets (resolved by the consumer).
     pub targets: Vec<T>,
     /// Optional default / fallthrough target.
     pub default_target: Option<T>,
 }
 
-/// A dispatch table: the case targets plus an optional default target.
-pub type SwitchTargets<T> = (Vec<T>, Option<T>);
+/// A recovered multi-way dispatch site over branch-target tokens `T`.
+///
+/// With the `serde` feature the dispatch fields are written beside `block`
+/// (`{"block":..,"targets":..,"default_target":..}`), not nested.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct JumpTable<T> {
+    /// The block containing the dispatch.
+    pub block: BlockId,
+    /// The case targets and the default target of the dispatch.
+    #[cfg_attr(feature = "serde", serde(flatten))]
+    pub dispatch: SwitchTargets<T>,
+}
 
 /// Opt-in: instructions that are multi-way indirect branches with a
 /// statically recoverable target table.
@@ -62,12 +76,11 @@ where
     let mut tables = Vec::new();
     for block_id in cfg.node_ids() {
         if let Some(last) = cfg.instructions(block_id).last()
-            && let Some((targets, default_target)) = last.switch_targets()
+            && let Some(dispatch) = last.switch_targets()
         {
             tables.push(JumpTable {
                 block: block_id,
-                targets,
-                default_target,
+                dispatch,
             });
         }
     }
@@ -115,14 +128,14 @@ pub fn recover_switch_tables<I, T, E: Default>(
 
         let mut case_count = 0;
 
-        for target in &table.targets {
+        for target in &table.dispatch.targets {
             if let Some(target_block) = resolve(target) {
                 cfg.add_edge(table.block, target_block, EdgeKind::SwitchCase);
                 case_count += 1;
             }
         }
 
-        if let Some(default) = &table.default_target
+        if let Some(default) = &table.dispatch.default_target
             && let Some(default_block) = resolve(default)
         {
             cfg.add_edge(table.block, default_block, EdgeKind::Unconditional);
@@ -165,12 +178,16 @@ mod tests {
         let default = cfg.new_block();
         cfg.add_edge(cfg.entry(), case_a, EdgeKind::IndirectJump);
         cfg.block_mut(cfg.entry()).push(TableJump {
-            targets: Some((vec![0x1000, 0x2000], Some(0x3000))),
+            targets: Some(SwitchTargets {
+                targets: vec![0x1000, 0x2000],
+                default_target: Some(0x3000),
+            }),
         });
 
         let tables = detect_switch_tables(&cfg);
         assert_eq!(tables.len(), 1);
-        assert_eq!(tables[0].targets, vec![0x1000, 0x2000]);
+        assert_eq!(tables[0].dispatch.targets, vec![0x1000, 0x2000]);
+        assert_eq!(tables[0].dispatch.default_target, Some(0x3000));
 
         let address_map: BTreeMap<u64, BlockId> =
             [(0x1000, case_a), (0x2000, case_b), (0x3000, default)]
@@ -201,7 +218,10 @@ mod tests {
         cfg.add_edge_with_payload(cfg.entry(), case, EdgeKind::IndirectJump, 1);
         let kept = cfg.add_edge_with_payload(case, other, EdgeKind::Fallthrough, 9);
         cfg.block_mut(cfg.entry()).push(TableJump {
-            targets: Some((vec![0x10], None)),
+            targets: Some(SwitchTargets {
+                targets: vec![0x10],
+                default_target: None,
+            }),
         });
 
         let tables = detect_switch_tables(&cfg);
@@ -237,7 +257,10 @@ mod tests {
             type Target = u32;
 
             fn switch_targets(&self) -> Option<SwitchTargets<u32>> {
-                (!self.case_nodes.is_empty()).then(|| (self.case_nodes.clone(), None))
+                (!self.case_nodes.is_empty()).then(|| SwitchTargets {
+                    targets: self.case_nodes.clone(),
+                    default_target: None,
+                })
             }
         }
 
@@ -252,5 +275,23 @@ mod tests {
             recover_switch_tables(&mut cfg, &tables, |node| (*node == 7).then_some(arm));
         assert_eq!(recovered[0].case_count, 1);
         assert!(cfg.edges().any(|e| e.kind() == EdgeKind::SwitchCase));
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn a_jump_table_keeps_its_flat_document_shape() {
+        extern crate std;
+
+        let table = JumpTable {
+            block: BlockId::from_raw(3),
+            dispatch: SwitchTargets {
+                targets: vec![10_u32, 20],
+                default_target: Some(30),
+            },
+        };
+        let json = serde_json::to_string(&table).expect("serialization cannot fail");
+        assert_eq!(json, r#"{"block":3,"targets":[10,20],"default_target":30}"#);
+        let decoded: JumpTable<u32> = serde_json::from_str(&json).expect("the flat form decodes");
+        assert_eq!(decoded, table);
     }
 }

@@ -17,7 +17,7 @@ use golden::assert_golden;
 use cfglib::{
     Cfg, CfgBuilder, ConstValue, ConstantFolder, DisplayInstr, DominatorTree, EdgeKind, ExprInstr,
     ExprNode, FlowControl, FlowEffect, InstrInfo, JumpTable, JumpTargets, Liveness, ReachingDefs,
-    SsaForm, constant_propagation, detect_switch_tables, recover_block_expressions,
+    SsaForm, SwitchTargets, constant_propagation, detect_switch_tables, recover_block_expressions,
     recover_switch_tables, resolve_jump_edges, verify,
 };
 
@@ -301,8 +301,11 @@ fn switch_recovery_over_cst_node_tokens() {
     impl cfglib::SwitchSource for Dispatch {
         type Target = u32;
 
-        fn switch_targets(&self) -> Option<(Vec<u32>, Option<u32>)> {
-            Some((self.case_nodes.clone(), None))
+        fn switch_targets(&self) -> Option<SwitchTargets<u32>> {
+            Some(SwitchTargets {
+                targets: self.case_nodes.clone(),
+                default_target: None,
+            })
         }
     }
 

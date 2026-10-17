@@ -6,7 +6,7 @@ use std::fmt::{Debug, Display};
 
 use cfglib::{
     DominatorTree, EdgeId, EdgeKind, Graph, HornClauses, JumpTable, KeyedGraph, NodeId, Rooted,
-    recover_switch_tables, tarjan_scc,
+    SwitchTargets, recover_switch_tables, tarjan_scc,
 };
 use serde_json::{Value, json};
 
@@ -406,13 +406,17 @@ fn switch_tables<T: Clone>(first: &[T], default: T) -> Vec<JumpTable<T>> {
     vec![
         JumpTable {
             block: cfglib::BlockId::from_raw(1),
-            targets: first.to_vec(),
-            default_target: Some(default),
+            dispatch: SwitchTargets {
+                targets: first.to_vec(),
+                default_target: Some(default),
+            },
         },
         JumpTable {
             block: cfglib::BlockId::from_raw(2),
-            targets: Vec::new(),
-            default_target: None,
+            dispatch: SwitchTargets {
+                targets: Vec::new(),
+                default_target: None,
+            },
         },
     ]
 }
@@ -470,5 +474,5 @@ fn jump_tables_over_source_level_tokens_round_trip() {
     );
     let decoded: Vec<JumpTable<String>> = round_trip(&tokens);
     assert_eq!(decoded, tokens);
-    assert_eq!(decoded[1].default_target, None);
+    assert_eq!(decoded[1].dispatch.default_target, None);
 }
