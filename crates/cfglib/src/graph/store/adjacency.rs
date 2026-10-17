@@ -242,11 +242,12 @@ struct Axis<'g> {
     chain: usize,
 }
 
-/// Advance one walk to the next live edge, in insertion order.
+/// Advance one walk to the next live edge, in adjacency order.
 ///
-/// Base identities come first in ascending order, then delta identities in
-/// append order. Every base identity is below every delta identity, so the
-/// sequence is exactly the order in which the edges were added.
+/// The compressed run comes first, then the delta identities in append order.
+/// Every base identity is below every delta identity, and a run no edge was
+/// redirected into is ascending, so for such a node the sequence is exactly
+/// the order in which the edges were added.
 ///
 /// `live` is `None` for a store with no removed edges at all, which spares
 /// every scan of a freshly built or freshly compacted store one bitset probe
@@ -378,6 +379,16 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         }
     }
 
+    /// `node`'s compressed run along `direction`, removed edges included.
+    fn base_run(&self, node: usize, direction: TraversalDirection) -> &[u32] {
+        let axis = self.axis(direction);
+        if node + 1 < axis.offsets.len() {
+            &axis.edges[axis.offsets[node] as usize..axis.offsets[node + 1] as usize]
+        } else {
+            &[]
+        }
+    }
+
     /// The live edges of `node`'s compressed run along `direction`, copied
     /// into a new vector with room for one more.
     ///
@@ -386,13 +397,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// redirect is about to append. Only the compressed run is copied; the
     /// node's delta chain is [`DeltaChains::drain_into`]'s.
     pub(super) fn live_base_run(&self, node: Id<NT>, direction: TraversalDirection) -> Vec<u32> {
-        let axis = self.axis(direction);
-        let index = node.index();
-        let run = if index + 1 < axis.offsets.len() {
-            &axis.edges[axis.offsets[index] as usize..axis.offsets[index + 1] as usize]
-        } else {
-            &[]
-        };
+        let run = self.base_run(node.index(), direction);
         let mut copy = Vec::with_capacity(run.len() + 1);
         match self.tombstoned_edges().then_some(&self.live_edges) {
             Some(live) => copy.extend(
@@ -405,7 +410,44 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         copy
     }
 
-    /// Iterate over the live outgoing edges of `node` in insertion order.
+    /// The adjacency along `direction` of every surviving node whose edges do
+    /// not read in ascending identity order, as it reads now, in the
+    /// numbering `node_map` and `edge_map` give.
+    ///
+    /// A redirected edge reads after the edges its node already had, and a
+    /// compaction keeps that order in the base it builds, so a node reads out
+    /// of identity order long after its overlay is gone. Every other run is in
+    /// identity order, which is all that compaction's counting placement
+    /// produces, and compaction restores these from what this returns. The
+    /// delta chain never breaks the order: it holds the newest edges, in the
+    /// order they were added.
+    pub(super) fn reordered_adjacency(
+        &self,
+        direction: TraversalDirection,
+        node_map: &[u32],
+        edge_map: &[u32],
+    ) -> Vec<(u32, Vec<u32>)> {
+        (0..self.node_bound())
+            .filter(|&slot| node_map[slot] != NONE)
+            .filter(|&slot| {
+                let run = self
+                    .overlay(slot, direction)
+                    .unwrap_or_else(|| self.base_run(slot, direction));
+                !run.is_sorted()
+            })
+            .map(|slot| {
+                let run = self
+                    .adjacent(Id::from_index(slot), direction)
+                    .map(|edge| edge_map[edge.index()])
+                    .collect();
+                (node_map[slot], run)
+            })
+            .collect()
+    }
+
+    /// Iterate over the live outgoing edges of `node` in adjacency order: the
+    /// order they were added to the node, so a redirected edge follows the
+    /// edges already there.
     ///
     /// # Panics
     ///
@@ -415,7 +457,9 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         self.adjacent(node, TraversalDirection::Outgoing)
     }
 
-    /// Iterate over the live incoming edges of `node` in insertion order.
+    /// Iterate over the live incoming edges of `node` in adjacency order: the
+    /// order they were added to the node, so a redirected edge follows the
+    /// edges already there.
     ///
     /// # Panics
     ///
@@ -505,7 +549,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     }
 }
 
-/// Live edges adjacent to one node, in insertion order.
+/// Live edges adjacent to one node, in adjacency order.
 ///
 /// Returned by [`Graph::outgoing`] and [`Graph::incoming`]. It is not an
 /// [`ExactSizeIterator`]: the length of a delta chain containing tombstones

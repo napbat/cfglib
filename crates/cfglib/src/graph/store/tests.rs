@@ -548,6 +548,54 @@ fn compacting_an_untouched_store_is_the_identity() {
 }
 
 #[test]
+fn compaction_keeps_the_adjacency_order_a_redirect_produced() {
+    // A redirect appends the edge to its new endpoint's adjacency, so there
+    // the older edge comes second and the order is no longer identity order.
+    for direction in [TraversalDirection::Outgoing, TraversalDirection::Incoming] {
+        let mut graph = Graph::<&'static str, &'static str>::new();
+        let [hub, other, near, far] =
+            ["hub", "other", "near", "far"].map(|payload| graph.add_node(payload));
+        let (moved, resident) = match direction {
+            TraversalDirection::Outgoing => (
+                graph.add_edge(other, near, "moved"),
+                graph.add_edge(hub, far, "resident"),
+            ),
+            TraversalDirection::Incoming => (
+                graph.add_edge(near, other, "moved"),
+                graph.add_edge(far, hub, "resident"),
+            ),
+        };
+        match direction {
+            TraversalDirection::Outgoing => graph.redirect_edge_source(moved, hub),
+            TraversalDirection::Incoming => graph.redirect_edge_target(moved, hub),
+        };
+        assert_eq!(
+            graph.adjacent(hub, direction).collect::<Vec<_>>(),
+            [resident, moved]
+        );
+
+        let renumbering = graph.compact();
+
+        let hub = renumbering.node(hub).expect("hub survives");
+        let expected = [resident, moved].map(|edge| renumbering.edge(edge).expect("edge survives"));
+        assert_eq!(
+            graph.adjacent(hub, direction).collect::<Vec<_>>(),
+            expected,
+            "{direction:?} adjacency order changed across compaction"
+        );
+
+        // The compacted base now holds that order, so the next compaction has
+        // no overlay to read it from.
+        assert!(graph.compact().is_identity());
+        assert_eq!(
+            graph.adjacent(hub, direction).collect::<Vec<_>>(),
+            expected,
+            "{direction:?} adjacency order changed across a second compaction"
+        );
+    }
+}
+
+#[test]
 fn composed_renumberings_match_the_two_compactions_they_describe() {
     let (mut graph, nodes) = diamond();
     graph.remove_node(nodes[0]);

@@ -41,7 +41,9 @@
 //!
 //! Adjacency of a node is its base run followed by its delta chain. Base
 //! identities are all below delta identities and both parts are ordered, so
-//! the concatenation is exactly insertion order, parallel edges included.
+//! the concatenation is exactly insertion order, parallel edges included —
+//! until an edge is redirected to the node, which reads after the edges the
+//! node already had. Compaction keeps whichever order a node reads in.
 //!
 //! ## Cost per node
 //!
@@ -89,7 +91,8 @@
 //!
 //! ## Compaction
 //!
-//! [`compact`](Graph::compact) rebuilds the base from the live entities and
+//! [`compact`](Graph::compact) rebuilds the base from the live entities,
+//! keeping every node's adjacency order, and
 //! returns a [`Renumbering`]: a total old-to-new mapping that
 //! [`compose`](Renumbering::compose)s, so a consumer that skipped several
 //! compactions folds them into one lookup.

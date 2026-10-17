@@ -171,7 +171,8 @@ impl Model {
     }
 
     /// Renumber exactly as the store does: live entries keep their relative
-    /// order, and everything else disappears.
+    /// order, everything else disappears, and each node's adjacency keeps the
+    /// order it read in — which a redirect makes differ from identity order.
     fn compact(&mut self) -> (Vec<Option<usize>>, Vec<Option<usize>>) {
         let mut node_map = vec![None; self.nodes.len()];
         let mut nodes = Vec::new();
@@ -184,23 +185,32 @@ impl Model {
 
         let mut edge_map = vec![None; self.edges.len()];
         let mut edges = Vec::new();
-        let mut outgoing = vec![Vec::new(); nodes.len()];
-        let mut incoming = vec![Vec::new(); nodes.len()];
         for (slot, entry) in self.edges.iter().enumerate() {
             if !entry.live {
                 continue;
             }
-            let source = node_map[entry.source].expect("a live edge has live endpoints");
-            let target = node_map[entry.target].expect("a live edge has live endpoints");
             edge_map[slot] = Some(edges.len());
-            outgoing[source].push(edges.len());
-            incoming[target].push(edges.len());
             edges.push(ModelEdge {
-                source,
-                target,
+                source: node_map[entry.source].expect("a live edge has live endpoints"),
+                target: node_map[entry.target].expect("a live edge has live endpoints"),
                 payload: entry.payload,
                 live: true,
             });
+        }
+
+        let mut outgoing = vec![Vec::new(); nodes.len()];
+        let mut incoming = vec![Vec::new(); nodes.len()];
+        for (slot, node) in node_map.iter().enumerate() {
+            if let Some(node) = *node {
+                outgoing[node] = self.outgoing[slot]
+                    .iter()
+                    .filter_map(|&edge| edge_map[edge])
+                    .collect();
+                incoming[node] = self.incoming[slot]
+                    .iter()
+                    .filter_map(|&edge| edge_map[edge])
+                    .collect();
+            }
         }
 
         self.nodes = nodes;
