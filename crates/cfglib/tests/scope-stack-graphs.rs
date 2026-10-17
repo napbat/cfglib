@@ -2,12 +2,9 @@
 
 use core::cmp::Ordering;
 
-use cfglib::EdgeRef;
-use cfglib::graph::scope::{
-    ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeGraphPathLabel, ScopeGraphQuery, ScopeId,
+use cfglib::{
+    EdgeRef, ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeGraphPathLabel, ScopeGraphQuery, ScopeId,
     ScopePath, ScopeQuery, ScopeResolution, ScopeResolutionConfig, ScopeResolutionIndex,
-};
-use cfglib::graph::stack::{
     StackGraph, StackPartialPathConfig, StackPartialPathDatabase, StackResolution,
     StackResolutionIndex, StackSearchConfig,
 };
