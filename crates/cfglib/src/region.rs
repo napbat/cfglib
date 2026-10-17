@@ -119,6 +119,18 @@ pub struct Handler {
     pub kind: HandlerKind,
 }
 
+impl Handler {
+    /// Whether the handler names `block`: its entry, or a block of its known
+    /// extent. A handler of unknown extent names only its entry.
+    pub(crate) fn claims(&self, block: BlockId) -> bool {
+        self.entry == block
+            || self
+                .body
+                .blocks()
+                .is_some_and(|blocks| blocks.contains(&block))
+    }
+}
+
 /// Completeness of an exception handler's block extent.
 ///
 /// Exception tables commonly identify the protected range and handler entry

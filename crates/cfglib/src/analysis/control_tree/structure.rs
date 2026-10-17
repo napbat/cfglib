@@ -168,14 +168,12 @@ impl ControlTree {
     /// entry --false--> out (returns)
     /// ```
     ///
-    /// Structuring once read a post-dominator tree that left such regions out.
-    /// It made `out` the merge and gave `if { loop { spin } }; out`, and a
-    /// graph with no exit at all took its last-allocated block as the exit.
-    /// The cut changes two things. The exiting arm moves into the `else` arm.
-    /// And a transfer into an exit-free region stays explicit: when two arms
-    /// enter the same exit-free loop, the structurer emits a
-    /// [`ControlNode::Goto`] where the earlier tree ended one arm silently and
-    /// lost its transfer.
+    /// A tree that left such regions out would make `out` the merge and give
+    /// `if { loop { spin } }; out`, and a graph with no exit at all would need
+    /// an arbitrary block as the exit. With the cut, the exiting arm is the
+    /// `else` arm, and a transfer into an exit-free region stays explicit:
+    /// when two arms enter the same exit-free loop, the structurer emits a
+    /// [`ControlNode::Goto`] in the later one instead of ending it silently.
     ///
     /// # Arms that revisit earlier code
     ///
@@ -792,12 +790,6 @@ fn block_is_allowed(allowed_blocks: Option<&BTreeSet<BlockId>>, block: BlockId) 
 fn region_member<I, E>(cfg: &Cfg<I, E>, block: BlockId) -> bool {
     cfg.regions().iter().any(|region| {
         region.protected_blocks.contains(&block)
-            || region.handlers.iter().any(|handler| {
-                handler.entry == block
-                    || handler
-                        .body
-                        .blocks()
-                        .is_some_and(|blocks| blocks.contains(&block))
-            })
+            || region.handlers.iter().any(|handler| handler.claims(block))
     })
 }

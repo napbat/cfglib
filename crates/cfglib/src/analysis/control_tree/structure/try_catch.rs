@@ -305,13 +305,7 @@ impl<I, E> Structurer<'_, I, E> {
         self.cfg.regions().iter().any(|other| {
             other.id != region.id
                 && !self.structured_regions.contains(&other.id.0)
-                && other.handlers.iter().any(|handler| {
-                    handler.entry == block
-                        || handler
-                            .body
-                            .blocks()
-                            .is_some_and(|blocks| blocks.contains(&block))
-                })
+                && other.handlers.iter().any(|handler| handler.claims(block))
         })
     }
 }

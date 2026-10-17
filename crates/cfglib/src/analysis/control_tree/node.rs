@@ -255,9 +255,9 @@ pub enum LoopKind {
 ///
 /// [`Self::kind`] distinguishes catch, catch-all, fault, and filter arms.
 /// Finally handlers have no arm: their bodies are joined into
-/// [`ControlNode::TryCatch::finally_body`]. Consumer handler metadata (catch types, filter predicates, ordering) stays in
-/// consumer-keyed side tables such as
-/// [`HandlerMetadata`](crate::HandlerMetadata), addressed by
+/// [`ControlNode::TryCatch::finally_body`]. Consumer handler metadata (catch
+/// types, filter predicates, ordering) stays in consumer-keyed side tables
+/// such as [`HandlerMetadata`](crate::HandlerMetadata), addressed by
 /// [`Self::handler`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CatchHandler {
@@ -334,11 +334,13 @@ pub enum ControlNode {
         default_edge: Option<EdgeId>,
     },
 
-    /// Break out of a loop or switch.
+    /// Break out of an enclosing loop. A `switch` is not a break target: the
+    /// structurer ends a case arm at the switch's merge, so a `break` always
+    /// leaves a loop, even from inside a case.
     Break {
         /// The header of the enclosing loop being broken, for a multi-level
-        /// break; `None` breaks the innermost loop or switch. The loop is
-        /// wrapped in a [`ControlNode::Label`] for the same block.
+        /// break; `None` breaks the innermost loop. The loop is wrapped in a
+        /// [`ControlNode::Label`] for the same block.
         label: Option<BlockId>,
     },
 
