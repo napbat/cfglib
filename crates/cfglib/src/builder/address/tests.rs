@@ -755,3 +755,61 @@ fn an_indirect_call_kept_as_an_edge_is_an_unresolved_transfer() {
         }]
     );
 }
+
+#[test]
+fn default_options_need_no_default_address_type() {
+    use super::AddressSpace;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    struct Rva(u32);
+
+    impl AddressSpace for Rva {
+        fn distance_from(self, earlier: Self) -> u64 {
+            u64::from(self.0 - earlier.0)
+        }
+    }
+
+    struct Operation {
+        at: Rva,
+        flow: Flow<Rva, ()>,
+    }
+
+    impl AddressInstruction for Operation {
+        type Address = Rva;
+        type CaseKey = ();
+
+        fn address(&self) -> Rva {
+            self.at
+        }
+
+        fn end_address(&self) -> Option<Rva> {
+            self.at.0.checked_add(1).map(Rva)
+        }
+
+        fn flow(&self) -> Flow<Rva, ()> {
+            self.flow.clone()
+        }
+    }
+
+    let options = AddressCfgOptions::<Rva>::default();
+    assert_eq!(options.entry, None);
+    assert_eq!(options.calls, CallPolicy::Edges);
+
+    let graph = build_address_cfg(
+        vec![
+            Operation {
+                at: Rva(0),
+                flow: Flow::Next,
+            },
+            Operation {
+                at: Rva(1),
+                flow: Flow::Return,
+            },
+        ],
+        &[],
+        options,
+        |info| info.kind,
+    )
+    .unwrap();
+    assert_eq!((graph.cfg.block_count(), graph.cfg.edge_count()), (1, 0));
+}

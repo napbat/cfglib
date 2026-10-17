@@ -33,7 +33,7 @@ mod vn_inst;
 
 pub(crate) use dataflow_inst::{
     DfInst, TestEffect, df_call, df_const, df_copy, df_def, df_ff, df_impure, df_op, df_pred,
-    df_pure, df_throwing, df_use, df_with_effect,
+    df_throwing, df_use, df_with_effect,
 };
 pub(crate) use memory_inst::MemInst;
 pub(crate) use mock_inst::{MockInst, diamond_cfg, ff};

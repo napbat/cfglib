@@ -30,9 +30,16 @@ impl<I, E> Structurer<'_, I, E> {
     /// structured anchor — dangling gotos the caller reports.
     ///
     /// A wrapped node is replaced in its parent's body by a
-    /// [`ControlNode::Label`] whose body holds just that node, so no node
-    /// moves and every other handle stays valid.
+    /// [`ControlNode::Label`] whose body holds just that node. The label is
+    /// then renumbered next to the node it wraps, so children keep lower
+    /// handles than their parents; no other handle changes.
     pub(super) fn apply_labels(&mut self, body: ControlBody, pending: &mut BTreeSet<BlockId>) {
+        let first_label = self.tables.node_count();
+        self.wrap_anchors(body, pending);
+        self.tables.settle_labels(first_label);
+    }
+
+    fn wrap_anchors(&mut self, body: ControlBody, pending: &mut BTreeSet<BlockId>) {
         for position in 0..body.len() {
             if pending.is_empty() {
                 return;
@@ -42,7 +49,7 @@ impl<I, E> Structurer<'_, I, E> {
             let wrap = anchor(&node).filter(|block| pending.remove(block));
             let children: Vec<ControlBody> = self.tables.child_bodies(node).collect();
             for child in children {
-                self.apply_labels(child, pending);
+                self.wrap_anchors(child, pending);
             }
             if let Some(block) = wrap {
                 let wrapped = self.label_node(block, id);

@@ -28,7 +28,10 @@ use core::cmp::Ordering;
 /// Disjoint-set forest (union-find) over `0..len` element indices.
 ///
 /// Every element starts in its own singleton set. [`find`](Self::find) uses
-/// path halving, so amortized operations are effectively constant time.
+/// path halving, which keeps trees shallow. With [`union`](Self::union)'s rank
+/// balancing, operations are amortized near-constant time; with
+/// [`union_toward_min`](Self::union_toward_min), which keeps a deterministic
+/// representative instead of balancing, they are amortized logarithmic.
 ///
 /// Use one union strategy per instance: mixing
 /// [`union`](Self::union) and [`union_toward_min`](Self::union_toward_min)
@@ -162,7 +165,7 @@ impl DisjointSet {
 
 #[cfg(test)]
 mod tests {
-    use super::DisjointSet;
+    use super::{DisjointSet, Vec};
 
     #[test]
     fn singletons_are_their_own_representatives() {
@@ -212,5 +215,44 @@ mod tests {
         sets.union_toward_min(2, 3);
         let read_only = sets.clone();
         assert_eq!(read_only.root(3), 2);
+    }
+
+    #[test]
+    fn both_strategies_agree_with_a_naive_partition_for_every_short_sequence() {
+        const LEN: usize = 5;
+        let pairs: Vec<(usize, usize)> = (0..LEN)
+            .flat_map(|left| (0..LEN).map(move |right| (left, right)))
+            .collect();
+        for &first in &pairs {
+            for &second in &pairs {
+                for &third in &pairs {
+                    let mut by_rank = DisjointSet::new(LEN);
+                    let mut toward_min = DisjointSet::new(LEN);
+                    let mut label: Vec<usize> = (0..LEN).collect();
+                    for (left, right) in [first, second, third] {
+                        let merged = label[left] != label[right];
+                        let (from, into) = (label[right], label[left]);
+                        for slot in &mut label {
+                            if *slot == from {
+                                *slot = into;
+                            }
+                        }
+                        assert_eq!(by_rank.union(left, right), merged);
+                        assert_eq!(toward_min.union_toward_min(left, right), merged);
+                    }
+                    for left in 0..LEN {
+                        let class_min = (0..LEN)
+                            .find(|&member| label[member] == label[left])
+                            .expect("every element is in its own class");
+                        assert_eq!(toward_min.find(left), class_min);
+                        for right in 0..LEN {
+                            let same = label[left] == label[right];
+                            assert_eq!(by_rank.find(left) == by_rank.find(right), same);
+                            assert_eq!(toward_min.root(left) == toward_min.root(right), same);
+                        }
+                    }
+                }
+            }
+        }
     }
 }

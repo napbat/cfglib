@@ -132,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn num_sets_correct() {
+    fn set_count_drops_once_per_effective_merge() {
         let mut sets = AliasSets::new();
         sets.insert(0_u16);
         sets.insert(1_u16);
@@ -140,5 +140,20 @@ mod tests {
         assert_eq!(sets.set_count(), 3);
         sets.merge(0, 1);
         assert_eq!(sets.set_count(), 2);
+        sets.merge(1, 0);
+        assert_eq!(sets.set_count(), 2, "the pair is already one set");
+        sets.merge(2, 7);
+        assert_eq!(sets.set_count(), 2, "7 is new and joins the set of 2");
+    }
+
+    #[test]
+    fn merged_locations_share_one_representative() {
+        let mut sets = AliasSets::new();
+        sets.merge(0_u16, 1);
+        sets.merge(1, 2);
+        sets.insert(9);
+        assert_eq!(sets.alias_set(&0), sets.alias_set(&2));
+        assert_ne!(sets.alias_set(&0), sets.alias_set(&9));
+        assert_eq!(sets.alias_set(&5), None);
     }
 }

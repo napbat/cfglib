@@ -7,6 +7,8 @@ use cfglib::ir::rtl::{
 };
 use cfglib::{DenseId, DominatorTree, GraphView, RootedView};
 
+use crate::fixtures::fixture_u32;
+
 /// How many roots the synthetic dialect names.
 const ROOT_COUNT: u8 = 16;
 
@@ -103,8 +105,8 @@ impl SyntheticFunction {
         let mut successors = vec![Vec::new(); block_count];
         let mut predecessors = vec![Vec::new(); block_count];
         let mut flow = |from: usize, to: usize| {
-            successors[from].push(fixture_id(to));
-            predecessors[to].push(fixture_id(from));
+            successors[from].push(fixture_u32(to));
+            predecessors[to].push(fixture_u32(from));
         };
         for block in 0..block_count - 1 {
             flow(block, block + 1);
@@ -118,14 +120,10 @@ impl SyntheticFunction {
         Self {
             successors,
             predecessors,
-            instructions: (0..block_count).map(fixture_id).collect(),
+            instructions: (0..block_count).map(fixture_u32).collect(),
             records: (0..block_count).map(SyntheticRecord::new).collect(),
         }
     }
-}
-
-fn fixture_id(index: usize) -> u32 {
-    u32::try_from(index).expect("fixture index fits in u32")
 }
 
 impl GraphView for SyntheticFunction {
@@ -136,7 +134,7 @@ impl GraphView for SyntheticFunction {
     }
 
     fn node_ids(&self) -> impl Iterator<Item = u32> + '_ {
-        0..fixture_id(self.successors.len())
+        0..fixture_u32(self.successors.len())
     }
 
     fn successors(&self, node: u32) -> impl Iterator<Item = u32> + '_ {

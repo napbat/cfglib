@@ -6,19 +6,21 @@
 
 extern crate alloc;
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::rc::Rc;
 use alloc::vec::Vec;
 
-use super::node::{BlockSpan, ControlNode, SwitchCase};
+use super::node::{BlockSpan, ControlNode};
 use super::report::{GotoDiagnostic, GotoReason, LiftReport};
 use super::tree::{ControlTree, Tables};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::{EdgeId, EdgeKind};
-use crate::graph::dominator::{DominatorTree, PostDominatorTree, PostNode};
+use crate::graph::dominator::{DominatorTree, PostDominatorTree};
 use crate::graph::structure::{NaturalLoop, detect_loops_tagged};
 use crate::region::Region;
 use roots::VirtualRoot;
 
+mod branches;
 mod labels;
 mod loops;
 mod roots;
@@ -83,6 +85,11 @@ struct Structurer<'cfg, I, E> {
     loop_stack: Vec<LoopContext>,
     /// Regions structured as [`ControlNode::TryCatch`].
     structured_regions: BTreeSet<u32>,
+    /// The blocks no exception region names, as protected code, a handler
+    /// entry, or declared handler extent. Region-claimed code never moves
+    /// across structural boundaries, so code lifted out of its bound is
+    /// bounded to these.
+    unclaimed: Rc<BTreeSet<BlockId>>,
     report: LiftReport,
     tables: Tables,
 }
@@ -131,14 +138,23 @@ impl ControlTree {
     /// - Loop transfers: `Break` / `Continue` derived from natural-loop
     ///   membership, labeled when they cross an enclosing loop
     /// - Exception regions: `TryCatch` when every handler has a complete
-    ///   [`HandlerBody`](crate::HandlerBody); multiple `Finally` handlers
-    ///   concatenate in declaration order
+    ///   [`HandlerBody`](crate::HandlerBody) and one `try` can hold the
+    ///   protected code (ordinary flow enters it at its first block only, and
+    ///   none of it is already emitted or outside the enclosing bound);
+    ///   multiple `Finally` handlers concatenate in declaration order
     /// - Unstructured flow: `Label` / `Goto` (for `Jump` edges no loop context
     ///   absorbs, transfers that leave a structural bound, and transfers into
     ///   already-emitted code)
     ///
-    /// Regions with an unknown handler extent remain ordinary control flow;
-    /// the structurer does not guess which blocks belong inside a handler.
+    /// Other regions remain ordinary control flow: the structurer does not
+    /// guess which blocks belong inside a handler, and does not show protected
+    /// code outside the `try` that raises into its handler.
+    ///
+    /// A `try` body holds the protected code of its region. It may also hold
+    /// code that no region names and only the protected body reaches, as a
+    /// source `try { ...; return x; }` holds the `return` that an exception
+    /// table leaves out, but never code that another region protects or
+    /// handles: that code stays outside, behind a goto.
     /// **No owned code is ever dropped** (see below): a transfer refused at a
     /// structural boundary becomes an explicit [`ControlNode::Goto`], and
     /// every owned block the structured walk did not emit (refused targets,
@@ -152,7 +168,7 @@ impl ControlTree {
     ///
     /// A branch or switch rejoins at the immediate post-dominator of its
     /// block, read from a [`PostDominatorTree`]. That tree joins every exit
-    /// to a virtual exit, and [`PostNode::Exit`] means the block has no merge
+    /// to a virtual exit, and [`PostNode::Exit`](crate::PostNode::Exit) means the block has no merge
     /// point: its arms never rejoin, so each runs to its own end.
     ///
     /// A region that no path leaves, such as a server loop or a spin on a
@@ -167,14 +183,12 @@ impl ControlTree {
     /// entry --false--> out (returns)
     /// ```
     ///
-    /// Structuring once read a post-dominator tree that left such regions out.
-    /// It made `out` the merge and gave `if { loop { spin } }; out`, and a
-    /// graph with no exit at all took its last-allocated block as the exit.
-    /// The cut changes two things. The exiting arm moves into the `else` arm.
-    /// And a transfer into an exit-free region stays explicit: when two arms
-    /// enter the same exit-free loop, the structurer emits a
-    /// [`ControlNode::Goto`] where the earlier tree ended one arm silently and
-    /// lost its transfer.
+    /// A tree that left such regions out would make `out` the merge and give
+    /// `if { loop { spin } }; out`, and a graph with no exit at all would need
+    /// an arbitrary block as the exit. With the cut, the exiting arm is the
+    /// `else` arm, and a transfer into an exit-free region stays explicit:
+    /// when two arms enter the same exit-free loop, the structurer emits a
+    /// [`ControlNode::Goto`] in the later one instead of ending it silently.
     ///
     /// # Arms that revisit earlier code
     ///
@@ -219,6 +233,16 @@ impl ControlTree {
     /// their own extent. The tree of a graph that breaks this may hold a block
     /// in two places, since the block is both a handler's and a loop's.
     ///
+    /// # Stack depth
+    ///
+    /// Structuring recurses once per level of nested construct, and every link
+    /// of an `else if` chain is one more level. The call stack therefore bounds
+    /// the nesting depth of the input (a chain of a thousand links needs more
+    /// than a default test thread's stack in a debug build). The pseudocode
+    /// printer and [`compute_predicated`](Self::compute_predicated) recurse the
+    /// same way; [`preorder`](Self::preorder), [`walk`](Self::walk), and
+    /// [`for_each_instruction`](Self::for_each_instruction) do not.
+    ///
     /// # Panics
     ///
     /// Panics (debug) when a [`HandlerBody::Known`](crate::HandlerBody::Known)
@@ -246,8 +270,9 @@ impl ControlTree {
     ///
     /// # Panics
     ///
-    /// Panics when a block of `empty` is not a block of `cfg`, and under the
-    /// conditions of [`compute_with_report`](Self::compute_with_report).
+    /// Panics when a block of `empty` lies beyond `cfg`'s
+    /// [`block_bound`](Cfg::block_bound), and under the conditions of
+    /// [`compute_with_report`](Self::compute_with_report).
     ///
     /// # Examples
     ///
@@ -289,9 +314,18 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             emptied[block.index()] = true;
         }
         let dom = DominatorTree::compute(cfg);
+        // A latch the entry cannot reach never runs, so it is dead code that
+        // feeds a live header, not a back edge of the live program: a block
+        // that returns would otherwise sit in an endless loop. A dead loop (a
+        // header the entry cannot reach either) keeps its latches.
         let loops: BTreeMap<BlockId, NaturalLoop> = detect_loops_tagged(cfg, &dom)
             .into_iter()
-            .map(|natural| (natural.header, natural))
+            .filter_map(|mut natural| {
+                if dom.is_reachable(natural.header) {
+                    natural.latches.retain(|&latch| dom.is_reachable(latch));
+                }
+                (!natural.latches.is_empty()).then_some((natural.header, natural))
+            })
             .collect();
         let back_edges = loops
             .values()
@@ -322,6 +356,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             labeled_blocks: BTreeSet::new(),
             loop_stack: Vec::new(),
             structured_regions: BTreeSet::new(),
+            unclaimed: Rc::new(unclaimed_blocks(cfg)),
             report: LiftReport::default(),
             tables: Tables::new(),
         }
@@ -421,6 +456,11 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         sweep
     }
 
+    /// Whether an exception region names `block`.
+    fn is_claimed(&self, block: BlockId) -> bool {
+        !self.unclaimed.contains(&block)
+    }
+
     fn is_visited(&self, block: BlockId) -> bool {
         self.visited[block.index()]
     }
@@ -434,18 +474,31 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         self.back_edges.contains(&(edge.source(), edge.target()))
     }
 
+    /// The target of the back edge that leaves `block` by sequential flow.
+    ///
+    /// An exception edge is not sequential flow, so a handler entry that
+    /// dominates its protected block does not make that block a latch: the
+    /// block keeps its ordinary successors and the handler arm carries the
+    /// transfer to the header.
+    fn flow_back_edge_target(&self, block: BlockId) -> Option<BlockId> {
+        let cfg = self.cfg;
+        cfg.outgoing(block)
+            .map(|edge| cfg.edge(edge))
+            .find(|edge| {
+                !edge.kind().is_exceptional()
+                    && self.back_edges.contains(&(edge.source(), edge.target()))
+            })
+            .map(|edge| edge.target())
+    }
+
     fn classify_block(&self, block: BlockId) -> BlockFlowKind {
         let cfg = self.cfg;
         let successors: Vec<EdgeId> = cfg.outgoing(block).collect();
         if cfg.incoming(block).any(|edge| self.is_back_edge(edge)) {
             BlockFlowKind::LoopHeader
-        } else if has_edge_kind(cfg, &successors, EdgeKind::ConditionalTrue)
-            && has_edge_kind(cfg, &successors, EdgeKind::ConditionalFalse)
-        {
-            BlockFlowKind::Conditional
-        } else if has_edge_kind(cfg, &successors, EdgeKind::SwitchCase) {
-            BlockFlowKind::Switch
-        } else if successors.iter().any(|&edge| self.is_back_edge(edge)) {
+        } else if let Some(branch) = branching(cfg, &successors) {
+            branch
+        } else if self.flow_back_edge_target(block).is_some() {
             BlockFlowKind::BackEdge
         } else if has_edge_kind(cfg, &successors, EdgeKind::Jump) {
             BlockFlowKind::Jump
@@ -513,11 +566,14 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
                 // so this transfer is its only entry, and no exception region
                 // claims it — inlines here instead of degrading to a goto
                 // (javac hoists `break label` bodies out of line like this).
+                // The inlined walk stays within unclaimed code, so it never
+                // pulls another region's blocks into this construct.
                 // Anything else is recorded, never dropped: the jump is
                 // explicit and the completeness sweep emits the target under
                 // the matching label.
-                if cfg.incoming(block).count() == 1 && !region_member(cfg, block) {
-                    result.extend(self.lift_region(block, None, stop));
+                if cfg.incoming(block).count() == 1 && !self.is_claimed(block) {
+                    let bound = Rc::clone(&self.unclaimed);
+                    result.extend(self.lift_region(block, Some(&bound), stop));
                 } else {
                     self.push_goto(&mut result, block, GotoReason::BoundaryEscape);
                 }
@@ -525,29 +581,41 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             }
 
             self.visit(block);
-
-            if let Some((node, continuation)) = self.lift_try_catch(block, allowed_blocks) {
-                result.push(node);
-                // Resume at the region's own continuation, not the anchor's
-                // merge — they differ whenever the try exits through an
-                // explicit leave.
-                current = continuation.filter(|&next| !self.is_visited(next));
-                continue;
-            }
-
-            current = self.lift_block(block, allowed_blocks, stop, &mut result);
+            current = self.lift_entered(block, allowed_blocks, stop, &mut result);
         }
 
         result
     }
 
+    /// Emit an already-visited block: the try region it anchors, or else its
+    /// own classified form. Returns the block flow continues at (if any).
+    ///
+    /// [`lift_region`](Self::lift_region)'s walk and a switch arm, whose entry
+    /// the switch visits ahead of the walk, both enter blocks here, so a
+    /// region anchored at an arm entry is structured like any other.
+    pub(super) fn lift_entered(
+        &mut self,
+        block: BlockId,
+        allowed_blocks: Option<&BTreeSet<BlockId>>,
+        stop: Option<BlockId>,
+        result: &mut Vec<ControlNode>,
+    ) -> Option<BlockId> {
+        if let Some((node, continuation)) = self.lift_try_catch(block, allowed_blocks) {
+            result.push(node);
+            // Resume at the region's own continuation, not the anchor's merge:
+            // they differ whenever the try exits through an explicit leave.
+            return continuation;
+        }
+        self.lift_block(block, allowed_blocks, stop, result)
+    }
+
     /// Classify one already-visited block, emit its lifted form, and return
     /// the block sequential flow continues at (if any).
     ///
-    /// This is the single classification path: [`lift_region`](Self::lift_region)'s
-    /// walk, the try-body anchor, and switch case arms all run it, so a region
-    /// anchored at a branch, dispatch, or loop header keeps its structure
-    /// inside the enclosing construct.
+    /// This is the single classification path: [`lift_entered`](Self::lift_entered)
+    /// and the try-body anchor both run it, so a region anchored at a branch,
+    /// dispatch, or loop header keeps its structure inside the enclosing
+    /// construct.
     fn lift_block(
         &mut self,
         block: BlockId,
@@ -568,20 +636,16 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             BlockFlowKind::Conditional => {
                 let node = self.lift_conditional(block, allowed_blocks);
                 result.push(node);
-                return self.advance_merge(block, allowed_blocks);
+                return self.effective_merge(block, allowed_blocks);
             }
             BlockFlowKind::Switch => {
                 let node = self.lift_switch(block, allowed_blocks);
                 result.push(node);
-                return self.advance_merge(block, allowed_blocks);
+                return self.effective_merge(block, allowed_blocks);
             }
             BlockFlowKind::BackEdge => {
                 self.push_block(result, block);
-                let target = outgoing
-                    .iter()
-                    .find(|&&edge| self.is_back_edge(edge))
-                    .map(|&edge| cfg.edge(edge).target());
-                if let Some(target) = target {
+                if let Some(target) = self.flow_back_edge_target(block) {
                     if let Some(node) = self.resolve_loop_transfer(target) {
                         result.push(node);
                     } else {
@@ -644,7 +708,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
                 result.push(node);
             } else if !self.is_visited(target)
                 && cfg.incoming(target).count() == 1
-                && !region_member(cfg, target)
+                && !self.is_claimed(target)
             {
                 // Exclusively owned jump target — this explicit jump is its
                 // only entry and no exception region claims it (javac jumps
@@ -722,179 +786,25 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         self.report.gotos.push(GotoDiagnostic { target, reason });
         result.push(ControlNode::Goto { target });
     }
-
-    /// The post-dominator merge of `block`, kept only when it stays inside
-    /// the enclosing structural bound.
-    fn effective_merge(
-        &self,
-        block: BlockId,
-        allowed_blocks: Option<&BTreeSet<BlockId>>,
-    ) -> Option<BlockId> {
-        match self.pdom.ipdom(block.raw())? {
-            PostNode::Node(merge) => Some(BlockId::from_raw(merge)),
-            PostNode::Exit => None,
-        }
-        .filter(|&merge| block_is_allowed(allowed_blocks, merge))
-    }
-
-    /// Get the in-bound post-dominator merge point if it hasn't been visited
-    /// yet.
-    fn advance_merge(
-        &self,
-        block: BlockId,
-        allowed_blocks: Option<&BTreeSet<BlockId>>,
-    ) -> Option<BlockId> {
-        self.effective_merge(block, allowed_blocks)
-            .filter(|&merge| !self.is_visited(merge))
-    }
-
-    /// Lift an if/else conditional starting at `block`.
-    fn lift_conditional(
-        &mut self,
-        block: BlockId,
-        allowed_blocks: Option<&BTreeSet<BlockId>>,
-    ) -> ControlNode {
-        let cfg = self.cfg;
-        let mut true_target = None;
-        let mut false_target = None;
-        for eid in cfg.outgoing(block) {
-            match cfg.edge(eid).kind() {
-                EdgeKind::ConditionalTrue => true_target = Some(cfg.edge(eid).target()),
-                EdgeKind::ConditionalFalse => false_target = Some(cfg.edge(eid).target()),
-                _ => {}
-            }
-        }
-
-        let merge = self.effective_merge(block, allowed_blocks);
-
-        let then_nodes = true_target
-            .map(|target| self.lift_region(target, allowed_blocks, merge))
-            .unwrap_or_default();
-        let else_nodes = false_target
-            .map(|target| self.lift_region(target, allowed_blocks, merge))
-            .unwrap_or_default();
-
-        ControlNode::IfThenElse {
-            condition: self.whole_span(block),
-            then_body: self.tables.seal(then_nodes),
-            else_body: self.tables.seal(else_nodes),
-        }
-    }
-
-    /// Lift a switch starting at `block`.
-    fn lift_switch(
-        &mut self,
-        block: BlockId,
-        allowed_blocks: Option<&BTreeSet<BlockId>>,
-    ) -> ControlNode {
-        let cfg = self.cfg;
-        let merge = self.effective_merge(block, allowed_blocks);
-
-        // Group dispatch edges by target in first-encounter order, and find
-        // the explicit default edge (the sequential non-case successor).
-        let mut case_targets: Vec<BlockId> = Vec::new();
-        let mut case_edges: BTreeMap<BlockId, Vec<EdgeId>> = BTreeMap::new();
-        let mut default_edge = None;
-        let mut default_target = None;
-        for eid in cfg.outgoing(block) {
-            let edge = cfg.edge(eid);
-            match edge.kind() {
-                EdgeKind::SwitchCase => {
-                    let target = edge.target();
-                    let edges = case_edges.entry(target).or_default();
-                    if edges.is_empty() {
-                        case_targets.push(target);
-                    }
-                    edges.push(eid);
-                }
-                EdgeKind::Fallthrough | EdgeKind::Unconditional if default_edge.is_none() => {
-                    default_edge = Some(eid);
-                    default_target = Some(edge.target());
-                }
-                _ => {}
-            }
-        }
-
-        // Pre-visit every arm entry so one arm's walk cannot absorb another's;
-        // an arm-to-arm transfer stays explicit instead. The switch owns only
-        // an entry that nothing emitted or claimed before it: an arm that
-        // targets earlier code (the enclosing loop's header, a shared tail, an
-        // entry a sibling arm already owns) is a transfer, resolved like any
-        // other, never a second copy of the block.
-        let mut owned: BTreeSet<BlockId> = BTreeSet::new();
-        for &target in case_targets.iter().chain(&default_target) {
-            if Some(target) != merge
-                && block_is_allowed(allowed_blocks, target)
-                && !self.is_visited(target)
-            {
-                self.visit(target);
-                owned.insert(target);
-            }
-        }
-
-        let mut cases = Vec::new();
-        for target in case_targets {
-            let edges = case_edges.remove(&target).unwrap_or_default();
-            let entered = owned.remove(&target);
-            let arm = self.lift_switch_arm(target, entered, allowed_blocks, merge);
-            cases.push(SwitchCase {
-                block: target,
-                edges: self.tables.push_edges(edges),
-                body: self.tables.seal(arm),
-            });
-        }
-        let default_nodes = default_target
-            .map(|target| {
-                let entered = owned.remove(&target);
-                self.lift_switch_arm(target, entered, allowed_blocks, merge)
-            })
-            .unwrap_or_default();
-
-        ControlNode::Switch {
-            condition: self.whole_span(block),
-            cases: self.tables.push_cases(cases),
-            default_body: self.tables.seal(default_nodes),
-            default_edge,
-        }
-    }
-
-    /// Lift one switch arm (a case body or the default body) up to the merge.
-    ///
-    /// `entered` says the switch pre-visited the arm entry and owns it.
-    fn lift_switch_arm(
-        &mut self,
-        target: BlockId,
-        entered: bool,
-        allowed_blocks: Option<&BTreeSet<BlockId>>,
-        merge: Option<BlockId>,
-    ) -> Vec<ControlNode> {
-        if Some(target) == merge {
-            // The arm transfers straight to the switch continuation.
-            return Vec::new();
-        }
-        if !block_is_allowed(allowed_blocks, target) {
-            let mut body = Vec::new();
-            self.push_goto(&mut body, target, GotoReason::BoundaryEscape);
-            return body;
-        }
-        if !entered {
-            // Earlier code owns the entry: a continue, a break, or a goto.
-            return self.lift_region(target, allowed_blocks, merge);
-        }
-        // The arm entry was pre-visited above; classify it through the shared
-        // path so branch or loop structure at the arm entry is kept, then
-        // continue the ordinary walk toward the merge.
-        let mut body = Vec::new();
-        let next = self.lift_block(target, allowed_blocks, merge, &mut body);
-        if let Some(next) = next {
-            body.extend(self.lift_region(next, allowed_blocks, merge));
-        }
-        body
-    }
 }
 
 fn has_edge_kind<I, E>(cfg: &Cfg<I, E>, edges: &[EdgeId], kind: EdgeKind) -> bool {
     edges.iter().any(|&edge| cfg.edge(edge).kind() == kind)
+}
+
+/// How a block with outgoing `edges` branches: [`BlockFlowKind::Conditional`]
+/// for a true and a false edge, [`BlockFlowKind::Switch`] for a case edge, and
+/// `None` for a block that does not branch.
+fn branching<I, E>(cfg: &Cfg<I, E>, edges: &[EdgeId]) -> Option<BlockFlowKind> {
+    if has_edge_kind(cfg, edges, EdgeKind::ConditionalTrue)
+        && has_edge_kind(cfg, edges, EdgeKind::ConditionalFalse)
+    {
+        Some(BlockFlowKind::Conditional)
+    } else if has_edge_kind(cfg, edges, EdgeKind::SwitchCase) {
+        Some(BlockFlowKind::Switch)
+    } else {
+        None
+    }
 }
 
 /// Successors reached by sequential control flow, excluding exception edges.
@@ -909,18 +819,15 @@ fn block_is_allowed(allowed_blocks: Option<&BTreeSet<BlockId>>, block: BlockId) 
     allowed_blocks.is_none_or(|blocks| blocks.contains(&block))
 }
 
-/// Whether any exception region names the block — as protected code, a
-/// handler entry, or declared handler extent. Region-claimed code never
-/// moves across structural boundaries.
-fn region_member<I, E>(cfg: &Cfg<I, E>, block: BlockId) -> bool {
-    cfg.regions().iter().any(|region| {
-        region.protected_blocks.contains(&block)
-            || region.handlers.iter().any(|handler| {
-                handler.entry == block
-                    || handler
-                        .body
-                        .blocks()
-                        .is_some_and(|blocks| blocks.contains(&block))
+/// The blocks no exception region names: neither protected, nor a handler
+/// entry, nor part of a declared handler extent.
+fn unclaimed_blocks<I, E>(cfg: &Cfg<I, E>) -> BTreeSet<BlockId> {
+    cfg.block_ids()
+        .filter(|&block| {
+            !cfg.regions().iter().any(|region| {
+                region.protected_blocks.contains(&block)
+                    || region.handlers.iter().any(|handler| handler.claims(block))
             })
-    })
+        })
+        .collect()
 }

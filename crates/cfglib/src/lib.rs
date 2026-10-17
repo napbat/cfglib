@@ -121,7 +121,7 @@
 //!                            `Cfg` implements it, every instruction-level
 //!                            analysis reads it)
 //!
-//! FlowControl               (required only by CfgBuilder)
+//! FlowControl               (required by CfgBuilder and the tail-call detectors)
 //!   └─ JumpTargets          (optional — explicit goto/label wiring, Target)
 //!
 //! InstrInfo<Variable = V>   (optional — native IR variables for dataflow)
@@ -181,20 +181,20 @@
 //!   across the second.
 
 #![no_std]
-#![warn(missing_docs)]
 
 // Golden-file comparison reads the rendered output back from disk, which the
 // crate itself never does.
 #[cfg(test)]
 extern crate std;
 
+/// A count as a ratio operand. Counts of blocks, edges, and instructions stay
+/// far below 2^53, where `f64` is exact.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a count of in-memory items fits f64's 53-bit mantissa"
+)]
 pub(crate) fn usize_to_f64(value: usize) -> f64 {
-    if let Ok(value) = u32::try_from(value) {
-        return f64::from(value);
-    }
-
-    let half = usize_to_f64(value / 2);
-    half * 2.0 + f64::from(u8::from(value & 1 == 1))
+    value as f64
 }
 
 pub mod analysis;
@@ -403,10 +403,7 @@ pub use transform::cleanup::{
     remove_unreachable, remove_unreachable_mapped, simplify, simplify_mapped,
 };
 pub use transform::coloring::{ColorAssignment, color_graph, interference_graph};
-pub use transform::contract::{
-    contract_edge, contract_edge_mapped, split_node, split_node_at_points,
-    split_node_with_payload_mapped,
-};
+pub use transform::contract::{contract_edge, contract_edge_mapped};
 pub use transform::critical::{
     split_critical_edges, split_critical_edges_mapped, split_critical_edges_with,
 };
@@ -415,7 +412,7 @@ pub use transform::dce::{
     remove_dead_code_mapped,
 };
 pub use transform::layout::{RelaxError, relax_layout};
-pub use transform::linearize::{BlockOrder, Emitter, LinearInst, linearize};
+pub use transform::linearize::{BlockOrder, Emitter, LinearInst, LinearizeError, linearize};
 pub use transform::loops::{LoopRotation, find_loop_invariants, rotate_loop};
 pub use transform::pass::{
     Pass, PassChange, PassExecution, PassFailure, PassFn, PassId, PassPipeline, PassReport, pass_fn,

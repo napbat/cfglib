@@ -465,7 +465,7 @@ impl CfgBuilder {
     ///     Inst(FlowEffect::Return),
     /// ]).unwrap();
     ///
-    /// assert!(cfg.block_count() >= 4); // entry, then, else, merge
+    /// assert_eq!(cfg.block_count(), 4); // entry, then, else, merge
     /// ```
     pub fn build<I: FlowControl>(
         instructions: impl IntoIterator<Item = I>,
@@ -478,7 +478,7 @@ impl CfgBuilder {
     }
 
     /// Remove empty blocks at the end that have no predecessors (dead code
-    /// artefacts from the builder).
+    /// artifacts from the builder).
     fn trim_trailing_empty<I>(cfg: &mut Cfg<I>) {
         while let Some(last) = cfg.block_ids().last() {
             if last == cfg.entry()
@@ -510,13 +510,17 @@ pub struct JumpResolution<T> {
 /// instruction's [`JumpTargets::label`] token to its block, then adds an
 /// [`EdgeKind::Jump`] edge for each unconditional jump and an
 /// [`EdgeKind::ConditionalTrue`] edge for each conditional jump's taken path.
+/// The graph can carry any edge payload `E`; each edge the pass adds carries
+/// `E::default()`.
 ///
 /// The pass is idempotent: an edge that already exists with the same
 /// endpoints and kind is not duplicated, so re-running it is safe.
 /// Duplicate label tokens resolve to the LAST block declaring them (later
 /// labels shadow earlier ones); frontends with label scoping enforce
 /// uniqueness before building.
-pub fn resolve_jump_edges<I: JumpTargets>(cfg: &mut Cfg<I>) -> JumpResolution<I::Target> {
+pub fn resolve_jump_edges<I: JumpTargets, E: Default>(
+    cfg: &mut Cfg<I, E>,
+) -> JumpResolution<I::Target> {
     let mut labels: BTreeMap<I::Target, BlockId> = BTreeMap::new();
     for block_id in cfg.block_ids() {
         let block = cfg.block(block_id);

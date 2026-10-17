@@ -46,8 +46,7 @@ pub fn promote_handler_extents<I, E>(cfg: &mut Cfg<I, E>) -> usize {
                 continue;
             }
             let entry = handler.entry;
-            let reachable = entry == cfg.entry() || dominators.idom(entry).is_some();
-            if !reachable {
+            if !dominators.is_reachable(entry) {
                 continue;
             }
             let extent: BTreeSet<BlockId> = block_ids
@@ -179,8 +178,8 @@ pub fn recover_exclusive_extents_with<I, E>(
 
     handlers
         .into_iter()
-        .filter_map(|(handler, entry)| {
-            let from_entry = entry_reachability.get(&entry)?;
+        .map(|(handler, entry)| {
+            let from_entry = &entry_reachability[&entry];
             let blocks: BTreeSet<BlockId> = cfg
                 .block_ids()
                 .filter(|block| {
@@ -230,13 +229,13 @@ pub fn recover_exclusive_extents_with<I, E>(
                 }
             }
 
-            Some(ExclusiveExtent {
+            ExclusiveExtent {
                 handler,
                 entry,
                 blocks,
                 boundary_blocks,
                 issues: issues.into_iter().collect(),
-            })
+            }
         })
         .collect()
 }
@@ -246,7 +245,8 @@ pub fn recover_exclusive_extents_with<I, E>(
 pub enum ExtentPromotionStatus {
     /// Every handler received its unambiguous, non-overlapping body.
     Promoted,
-    /// One handler produced no candidate body.
+    /// One handler produced no candidate body, or a body that leaves out the
+    /// handler's own entry and so cannot be its complete extent.
     AmbiguousExtent {
         /// Handler that prevents promotion of the complete region.
         handler: HandlerRef,
@@ -275,12 +275,12 @@ pub struct ExtentPromotionDecision {
 /// Applies candidate handler bodies atomically per region.
 ///
 /// `candidate` answers each handler's proposed body, or `None` when the
-/// caller judges it ambiguous; the first `None` in a region withholds the
-/// whole region, and a body overlapping any other candidate body — in the
-/// same region or another — withholds both regions, because structured
-/// lifting owns a distinct body per handler arm. Every remaining region has
-/// each handler's body set to [`HandlerBody::Known`]. Decisions come back
-/// in region order.
+/// caller judges it ambiguous. The first `None` in a region, or the first body
+/// that omits its handler's entry, withholds the whole region. A body
+/// overlapping any other candidate body, in the same region or another,
+/// withholds both regions, because structured lifting owns a distinct body per
+/// handler arm. Every remaining region has each handler's body set to
+/// [`HandlerBody::Known`]. Decisions come back in region order.
 ///
 /// Run this on a **derived** graph (a clone lifted for presentation), not
 /// on canonical frontend metadata, and pair it with
@@ -295,13 +295,14 @@ pub fn promote_exclusive_extents<I, E>(
     for region in cfg.regions() {
         let mut handlers = Vec::with_capacity(region.handlers.len());
         let mut ambiguous = None;
-        for index in 0..region.handlers.len() {
+        for (index, stored) in region.handlers.iter().enumerate() {
             let handler = HandlerRef::new(region.id, index);
-            if let Some(blocks) = candidate(handler) {
-                handlers.push((handler, blocks));
-            } else {
-                ambiguous = Some(handler);
-                break;
+            match candidate(handler) {
+                Some(blocks) if blocks.contains(&stored.entry) => handlers.push((handler, blocks)),
+                _ => {
+                    ambiguous = Some(handler);
+                    break;
+                }
             }
         }
         if let Some(handler) = ambiguous {
@@ -590,5 +591,36 @@ mod tests {
         assert_eq!(decisions[0].status, ExtentPromotionStatus::Promoted);
         let expected: BTreeSet<crate::BlockId> = [landing].into_iter().collect();
         assert_eq!(cfg.regions()[0].handlers[0].body.blocks(), Some(&expected));
+    }
+
+    #[test]
+    fn a_candidate_body_without_its_handler_entry_is_not_promoted() {
+        let mut cfg: Cfg<MockInst> = Cfg::new();
+        let protected = cfg.new_block();
+        let landing = cfg.new_block();
+        let tail = cfg.new_block();
+        cfg.block_mut(cfg.entry()).push(ff("entry"));
+        cfg.block_mut(protected).push(ff("try_inst"));
+        cfg.block_mut(landing).push(ff("caught"));
+        cfg.block_mut(tail).push(ff("tail"));
+        cfg.add_edge(cfg.entry(), protected, EdgeKind::Fallthrough);
+        cfg.add_edge(protected, landing, EdgeKind::ExceptionUnwind);
+        cfg.add_edge(landing, tail, EdgeKind::Fallthrough);
+        let region = cfg.add_region(handler_region(0, landing, protected));
+        let handler = HandlerRef::new(region, 0);
+
+        // A body that leaves out the pad is no complete extent: the structurer
+        // treats a known body without its own entry as a frontend bug.
+        for blocks in [BTreeSet::new(), [tail].into_iter().collect()] {
+            let decisions = promote_exclusive_extents(&mut cfg, |_| Some(blocks.clone()));
+            assert_eq!(
+                decisions[0].status,
+                ExtentPromotionStatus::AmbiguousExtent { handler }
+            );
+            assert!(!cfg.regions()[0].handlers[0].body.is_known());
+        }
+        let whole: BTreeSet<crate::BlockId> = [landing, tail].into_iter().collect();
+        let decisions = promote_exclusive_extents(&mut cfg, |_| Some(whole.clone()));
+        assert_eq!(decisions[0].status, ExtentPromotionStatus::Promoted);
     }
 }

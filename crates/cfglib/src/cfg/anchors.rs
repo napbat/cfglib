@@ -51,6 +51,31 @@ impl<I, E> Cfg<I, E> {
         self.anchors()
             .filter(|&anchor| !self.contains_block(anchor))
     }
+
+    /// Whether exception metadata names `block` by a single reference.
+    pub(crate) fn is_anchor(&self, block: BlockId) -> bool {
+        self.anchors().any(|anchor| anchor == block)
+    }
+
+    /// Whether folding `target` into `source` keeps every promise the
+    /// exception metadata makes.
+    ///
+    /// `target` disappears, so no handler, filter, or cleanup may name it, and
+    /// its instructions end up in `source`, so the two must be protected by
+    /// the same regions and belong to the same known handler bodies. A handler
+    /// body of unknown extent claims no particular block.
+    pub(crate) fn can_fold_into(&self, source: BlockId, target: BlockId) -> bool {
+        !self.is_anchor(target)
+            && self.regions.iter().all(|region| {
+                region.protected_blocks.contains(&source)
+                    == region.protected_blocks.contains(&target)
+                    && region.handlers.iter().all(|handler| {
+                        handler.body.blocks().is_none_or(|blocks| {
+                            blocks.contains(&source) == blocks.contains(&target)
+                        })
+                    })
+            })
+    }
 }
 
 #[cfg(test)]
@@ -109,13 +134,13 @@ mod tests {
 
         assert_eq!(cfg.anchors().collect::<Vec<_>>().len(), anchors.len());
         for anchor in anchors {
-            assert!(cfg.anchors().any(|named| named == anchor));
+            assert!(cfg.is_anchor(anchor));
             let mut broken = cfg.clone();
             broken.remove_block(anchor);
             let outcome = std::panic::catch_unwind(move || broken.compact());
             assert!(outcome.is_err(), "compacting survived losing {anchor}");
         }
-        assert!(cfg.anchors().all(|named| named != plain));
+        assert!(!cfg.is_anchor(plain));
         let mut broken = cfg;
         broken.remove_block(plain);
         broken.compact();

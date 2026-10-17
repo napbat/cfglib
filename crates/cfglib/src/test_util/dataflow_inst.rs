@@ -219,11 +219,6 @@ pub fn df_throwing(inst: DfInst) -> DfInst {
     df_with_effect(inst, FlowEffect::MayThrow)
 }
 
-/// Create a pure [`DfInst`] (no side effects, no defs/uses).
-pub fn df_pure(name: &'static str) -> DfInst {
-    df_base(name)
-}
-
 /// Create an impure [`DfInst`] with a single side effect.
 pub fn df_impure(name: &'static str, e: TestEffect) -> DfInst {
     DfInst {

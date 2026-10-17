@@ -5,7 +5,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
 use super::super::node::{CatchHandler, ControlNode};
-use super::{Structurer, flow_successors};
+use super::{Structurer, block_is_allowed, flow_successors};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::graph::traverse::{TraversalDirection, reverse_postorder};
@@ -133,9 +133,13 @@ fn complete_handler_bodies(region: &Region) -> Option<Vec<&BTreeSet<BlockId>>> {
 }
 
 /// The region's normal continuation: the unique target of ordinary flow
-/// leaving the region's own blocks — protected and handler alike. `None`
-/// when the exits diverge (or none exist), leaving the walk to its
-/// conservative boundary handling.
+/// leaving the protected blocks. When those have no exit or several, the
+/// unique target of ordinary flow leaving the region's own blocks, protected
+/// and handler alike. `None` when the exits diverge (or none exist), leaving
+/// the walk to its conservative boundary handling.
+///
+/// A handler that leaves elsewhere (a `catch` that breaks or returns through
+/// another path) does not change where the protected code resumes.
 fn region_continuation<I, E>(cfg: &Cfg<I, E>, region: &Region) -> Option<BlockId> {
     let mut inside: BTreeSet<BlockId> = region.protected_blocks.clone();
     for handler in &region.handlers {
@@ -144,27 +148,66 @@ fn region_continuation<I, E>(cfg: &Cfg<I, E>, region: &Region) -> Option<BlockId
             inside.extend(blocks.iter().copied());
         }
     }
-    let mut exits: BTreeSet<BlockId> = BTreeSet::new();
-    for &block in &inside {
-        for target in flow_successors(cfg, block) {
-            if !inside.contains(&target) {
-                exits.insert(target);
-            }
-        }
-    }
-    if exits.len() == 1 {
-        exits.into_iter().next()
-    } else {
-        None
+    let exits_of = |blocks: &mut dyn Iterator<Item = BlockId>| -> BTreeSet<BlockId> {
+        blocks
+            .flat_map(|block| flow_successors(cfg, block))
+            .filter(|target| !inside.contains(target))
+            .collect()
+    };
+    let protected_exits = exits_of(&mut region.protected_blocks.iter().copied());
+    the_only(&protected_exits).or_else(|| the_only(&exits_of(&mut inside.iter().copied())))
+}
+
+/// The one element of `blocks`, if it has exactly one.
+fn the_only(blocks: &BTreeSet<BlockId>) -> Option<BlockId> {
+    let mut blocks = blocks.iter();
+    match (blocks.next(), blocks.next()) {
+        (Some(&only), None) => Some(only),
+        _ => None,
     }
 }
 
 impl<I, E> Structurer<'_, I, E> {
+    /// Whether one `try` can hold the live protected code of `region`, which
+    /// starts at `anchor`.
+    ///
+    /// A `try` is one construct, entered at one point and nested in what
+    /// encloses it. The region does not fit when live code outside it jumps
+    /// into the middle (a protected range split in two, a pad that retries
+    /// halfway), when part of it was already emitted or claimed (a loop's
+    /// test block), or when part of it lies beyond the enclosing bound. The
+    /// tree would then show that part outside the try, raising into a pad the
+    /// try does not enclose, so the region stays ordinary flow. Dead code
+    /// enters nothing, a block without instructions needs no covering, and
+    /// exception edges are not ordinary flow.
+    fn fits_one_try(
+        &self,
+        region: &Region,
+        anchor: BlockId,
+        allowed_blocks: Option<&BTreeSet<BlockId>>,
+    ) -> bool {
+        let cfg = self.cfg;
+        region
+            .protected_blocks
+            .iter()
+            .filter(|&&block| block != anchor && self.reachable[block.index()])
+            .all(|&block| {
+                let entered_inside = cfg.incoming(block).map(|edge| cfg.edge(edge)).all(|edge| {
+                    edge.kind().is_exceptional()
+                        || !self.reachable[edge.source().index()]
+                        || region.protected_blocks.contains(&edge.source())
+                });
+                let coverable = self.instruction_count(block) == 0
+                    || (!self.is_visited(block) && block_is_allowed(allowed_blocks, block));
+                entered_inside && coverable
+            })
+    }
+
     /// Lift a try/catch region anchored at `block`, if a structurable one
     /// exists.
     ///
     /// Among the regions anchored at `block` (outermost first), the first with
-    /// complete handler extents is structured; regions with unknown extents
+    /// complete handler extents and a single entry is structured; the others
     /// remain ordinary control flow. Bounds intersect with the enclosing
     /// `allowed_blocks`, so a nested region never escapes the extent it was
     /// entered under.
@@ -178,6 +221,7 @@ impl<I, E> Structurer<'_, I, E> {
         let (region, handler_bodies) = candidates
             .iter()
             .filter(|region| !self.structured_regions.contains(&region.id.0))
+            .filter(|region| self.fits_one_try(region, block, allowed_blocks))
             .find_map(|region| complete_handler_bodies(region).map(|bodies| (*region, bodies)))?;
         self.structured_regions.insert(region.id.0);
 
@@ -209,14 +253,12 @@ impl<I, E> Structurer<'_, I, E> {
         let mut try_nodes = Vec::new();
         if let Some((inner, inner_continuation)) = self.lift_try_catch(block, Some(&try_bound)) {
             try_nodes.push(inner);
-            if let Some(next) = inner_continuation.filter(|&next| !self.is_visited(next)) {
+            if let Some(next) = inner_continuation {
                 try_nodes.extend(self.lift_region(next, Some(&try_bound), continuation));
             }
         } else {
             let next = self.lift_block(block, Some(&try_bound), continuation, &mut try_nodes);
-            if let Some(next) = next
-                && !self.is_visited(next)
-            {
+            if let Some(next) = next {
                 try_nodes.extend(self.lift_region(next, Some(&try_bound), continuation));
             }
         }
@@ -307,13 +349,7 @@ impl<I, E> Structurer<'_, I, E> {
         self.cfg.regions().iter().any(|other| {
             other.id != region.id
                 && !self.structured_regions.contains(&other.id.0)
-                && other.handlers.iter().any(|handler| {
-                    handler.entry == block
-                        || handler
-                            .body
-                            .blocks()
-                            .is_some_and(|blocks| blocks.contains(&block))
-                })
+                && other.handlers.iter().any(|handler| handler.claims(block))
         })
     }
 }

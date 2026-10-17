@@ -110,16 +110,12 @@ impl Rewrite {
 
     /// Record a newly allocated block with no old identity.
     pub fn record_created_block(&mut self, block: BlockId) {
-        if !self.created_blocks.contains(&block) {
-            self.created_blocks.push(block);
-        }
+        push_unique(&mut self.created_blocks, block);
     }
 
     /// Record a newly allocated edge with no old identity.
     pub fn record_created_edge(&mut self, edge: EdgeId) {
-        if !self.created_edges.contains(&edge) {
-            self.created_edges.push(edge);
-        }
+        push_unique(&mut self.created_edges, edge);
     }
 
     /// Compose `next`, which ran after this rewrite, into this mapping.
@@ -141,14 +137,10 @@ impl Rewrite {
         self.created_blocks = remap_created(self.created_blocks.drain(..), &self.blocks);
         self.created_edges = remap_created(self.created_edges.drain(..), &self.edges);
         for block in next.created_blocks {
-            if !self.created_blocks.contains(&block) {
-                self.created_blocks.push(block);
-            }
+            push_unique(&mut self.created_blocks, block);
         }
         for edge in next.created_edges {
-            if !self.created_edges.contains(&edge) {
-                self.created_edges.push(edge);
-            }
+            push_unique(&mut self.created_edges, edge);
         }
     }
 
@@ -220,28 +212,35 @@ impl Rewrite {
     }
 }
 
+/// Append `value` unless the run already holds it. Runs are a handful of
+/// replacements, so a scan beats a set.
+fn push_unique<T: Copy + PartialEq>(run: &mut Vec<T>, value: T) {
+    if !run.contains(&value) {
+        run.push(value);
+    }
+}
+
 fn unique<T: Copy + PartialEq>(values: impl IntoIterator<Item = T>) -> Vec<T> {
     let mut result = Vec::new();
     for value in values {
-        if !result.contains(&value) {
-            result.push(value);
-        }
+        push_unique(&mut result, value);
     }
     result
+}
+
+/// What `identity` became under `map`: its recorded replacements, or itself
+/// when `map` does not mention it.
+fn replacements_of<'a, T: Ord>(map: &'a BTreeMap<T, Vec<T>>, identity: &'a T) -> &'a [T] {
+    map.get(identity)
+        .map_or_else(|| core::slice::from_ref(identity), Vec::as_slice)
 }
 
 fn compose_axis<T: Copy + Ord>(current: &mut BTreeMap<T, Vec<T>>, next: &BTreeMap<T, Vec<T>>) {
     for replacements in current.values_mut() {
         let mut composed = Vec::new();
         for replacement in replacements.drain(..) {
-            if let Some(next_replacements) = next.get(&replacement) {
-                for &value in next_replacements {
-                    if !composed.contains(&value) {
-                        composed.push(value);
-                    }
-                }
-            } else if !composed.contains(&replacement) {
-                composed.push(replacement);
+            for &value in replacements_of(next, &replacement) {
+                push_unique(&mut composed, value);
             }
         }
         *replacements = composed;
@@ -254,13 +253,8 @@ fn remap_created<T: Copy + Ord>(
 ) -> Vec<T> {
     let mut remapped = Vec::new();
     for identity in created {
-        let replacements = mappings
-            .get(&identity)
-            .map_or_else(|| core::slice::from_ref(&identity), Vec::as_slice);
-        for &replacement in replacements {
-            if !remapped.contains(&replacement) {
-                remapped.push(replacement);
-            }
+        for &replacement in replacements_of(mappings, &identity) {
+            push_unique(&mut remapped, replacement);
         }
     }
     remapped

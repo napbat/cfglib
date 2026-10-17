@@ -20,6 +20,10 @@ use crate::graph::view::{DenseId, GraphView};
 pub enum CfgPattern<N = BlockId> {
     /// Diamond: entry branches to two arms that reconverge at merge.
     ///
+    /// The entry, both arms, and the merge are four distinct nodes: two
+    /// edges to one arm are not two arms, and a path that returns to the
+    /// entry or ends in an arm is a loop, not a merge.
+    ///
     /// [`detect_patterns`] emits arms in successor order;
     /// [`detect_cfg_patterns`] orients `arms[0]` to the
     /// [`EdgeKind::ConditionalTrue`] side.
@@ -62,16 +66,20 @@ fn sole<T>(mut items: impl Iterator<Item = T>) -> Option<T> {
 /// # Examples
 ///
 /// ```
-/// use cfglib::{Cfg, EdgeKind, detect_patterns};
+/// use cfglib::{Cfg, CfgPattern, EdgeKind, detect_patterns};
 ///
 /// let mut cfg = Cfg::<u32>::new();
-/// let b0 = cfg.entry();
-/// let b1 = cfg.new_block();
-/// cfg.add_edge(b0, b1, EdgeKind::ConditionalTrue);
-/// cfg.add_edge(b0, b1, EdgeKind::ConditionalFalse);
+/// let entry = cfg.entry();
+/// let [left, right, merge] = std::array::from_fn(|_| cfg.new_block());
+/// cfg.add_edge(entry, left, EdgeKind::ConditionalTrue);
+/// cfg.add_edge(entry, right, EdgeKind::ConditionalFalse);
+/// cfg.add_edge(left, merge, EdgeKind::Fallthrough);
+/// cfg.add_edge(right, merge, EdgeKind::Fallthrough);
 ///
-/// let patterns = detect_patterns(&cfg);
-/// // Detects structural patterns like diamond, self-loop, etc.
+/// assert_eq!(
+///     detect_patterns(&cfg),
+///     [CfgPattern::Diamond { entry, arms: [left, right], merge }]
+/// );
 /// ```
 #[must_use]
 pub fn detect_patterns<G: GraphView>(graph: &G) -> Vec<CfgPattern<G::NodeId>> {
@@ -84,10 +92,13 @@ pub fn detect_patterns<G: GraphView>(graph: &G) -> Vec<CfgPattern<G::NodeId>> {
             patterns.push(CfgPattern::SelfLoop { block: bid });
         }
 
-        // Diamond detection: two successors that share a single successor.
+        // Diamond detection: two distinct successors that share a single
+        // successor, which is neither the branching node nor an arm.
         if let [a, b] = succs[..]
+            && a != b
             && let Some(merge) = sole(graph.successors(a))
             && sole(graph.successors(b)) == Some(merge)
+            && ![bid, a, b].contains(&merge)
         {
             patterns.push(CfgPattern::Diamond {
                 entry: bid,
@@ -300,11 +311,6 @@ mod tests {
                 },
                 CfgPattern::SelfLoop { block: n[6] },
                 CfgPattern::SelfLoop { block: n[12] },
-                CfgPattern::Diamond {
-                    entry: n[13],
-                    arms: [n[14], n[14]],
-                    merge: n[15]
-                },
                 CfgPattern::Chain {
                     blocks: alloc::vec![n[0], n[1], n[2], n[3]]
                 },
@@ -316,5 +322,36 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_diamond_has_four_distinct_nodes() {
+        use crate::graph::store::Graph;
+
+        let cases: [(&str, &[(usize, usize)]); 3] = [
+            // A single arm reached by two edges, not two arms.
+            ("parallel edges to one arm", &[(0, 1), (0, 1), (1, 2)]),
+            // Both arms return to the branching node: a loop, not a merge.
+            (
+                "arms return to the entry",
+                &[(0, 1), (0, 2), (1, 0), (2, 0)],
+            ),
+            // One arm is itself the merge: it never reconverges with the other.
+            ("an arm is the merge", &[(0, 1), (0, 2), (1, 1), (2, 1)]),
+        ];
+        for (name, edges) in cases {
+            let mut graph: Graph<(), ()> = Graph::new();
+            let nodes: Vec<_> = (0..3).map(|_| graph.add_node(())).collect();
+            for &(source, target) in edges {
+                graph.add_edge(nodes[source], nodes[target], ());
+            }
+            let patterns = detect_patterns(&graph);
+            assert!(
+                patterns
+                    .iter()
+                    .all(|pattern| !matches!(pattern, CfgPattern::Diamond { .. })),
+                "{name}: no diamond expected in {patterns:?}"
+            );
+        }
     }
 }

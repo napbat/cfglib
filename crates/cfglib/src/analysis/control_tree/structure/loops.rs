@@ -9,35 +9,14 @@ extern crate alloc;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
-use super::{LoopContext, Structurer, block_is_allowed, flow_successors, has_edge_kind};
+use super::branches::conditional_targets;
+use super::{BlockFlowKind, LoopContext, Structurer, block_is_allowed, branching, flow_successors};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::edge::{EdgeId, EdgeKind};
+use crate::edge::EdgeId;
 use crate::graph::structure::NaturalLoop;
 
 use super::super::node::{ControlNode, LoopKind};
-
-/// The two conditional-branch targets of a block, when it ends in one.
-struct ConditionalTargets {
-    true_target: BlockId,
-    false_target: BlockId,
-}
-
-fn conditional_targets<I, E>(cfg: &Cfg<I, E>, block: BlockId) -> Option<ConditionalTargets> {
-    let mut true_target = None;
-    let mut false_target = None;
-    for eid in cfg.outgoing(block) {
-        match cfg.edge(eid).kind() {
-            EdgeKind::ConditionalTrue => true_target = Some(cfg.edge(eid).target()),
-            EdgeKind::ConditionalFalse => false_target = Some(cfg.edge(eid).target()),
-            _ => {}
-        }
-    }
-    Some(ConditionalTargets {
-        true_target: true_target?,
-        false_target: false_target?,
-    })
-}
 
 /// The recognized shape of one natural loop before its body is lifted.
 enum LoopShape {
@@ -177,8 +156,9 @@ fn classify_loop<I, E>(
 }
 
 /// The deterministic follow of a loop with no recognized test: the first
-/// sequential exit target scanning body blocks in identity order, preferring
-/// targets inside the enclosing bound.
+/// exit target of sequential flow (any edge but an exception edge, the rule
+/// [`flow_successors`] states) scanning body blocks in identity order,
+/// preferring targets inside the enclosing bound.
 fn endless_follow<I, E>(
     cfg: &Cfg<I, E>,
     natural: &NaturalLoop,
@@ -192,15 +172,7 @@ fn endless_follow<I, E>(
     for &block in natural.body.iter().filter(|block| reachable[block.index()]) {
         for eid in cfg.outgoing(block) {
             let edge = cfg.edge(eid);
-            let sequential = matches!(
-                edge.kind(),
-                EdgeKind::Fallthrough
-                    | EdgeKind::Unconditional
-                    | EdgeKind::ConditionalTrue
-                    | EdgeKind::ConditionalFalse
-                    | EdgeKind::Jump
-            );
-            if sequential && !natural.body.contains(&edge.target()) {
+            if !edge.kind().is_exceptional() && !natural.body.contains(&edge.target()) {
                 if block_is_allowed(allowed_blocks, edge.target()) {
                     return Some(edge.target());
                 }
@@ -241,7 +213,22 @@ impl<I, E> Structurer<'_, I, E> {
             Some(allowed) => natural.body.intersection(allowed).copied().collect(),
         };
 
-        let shape = classify_loop(cfg, natural, header, &self.visited);
+        // The test of a pre- or post-tested loop is consumed by the loop node,
+        // so it has to lie inside the enclosing bound: a test block beyond it
+        // (a protected loop whose latch the try does not protect, a block that
+        // another region claims) would end up inside a construct that does not
+        // own it. The loop is then an endless loop whose exits are transfers.
+        let shape = match classify_loop(cfg, natural, header, &self.visited) {
+            LoopShape::While { ref chain, .. }
+                if !chain.iter().all(|&b| block_is_allowed(allowed_blocks, b)) =>
+            {
+                LoopShape::Endless
+            }
+            LoopShape::DoWhile { latch, .. } if !block_is_allowed(allowed_blocks, latch) => {
+                LoopShape::Endless
+            }
+            shape => shape,
+        };
         let (follow, continue_target) = match &shape {
             LoopShape::While { exit, .. } | LoopShape::SelfLoop { exit, .. } => {
                 (Some(*exit), header)
@@ -366,6 +353,11 @@ impl<I, E> Structurer<'_, I, E> {
     /// Lift a loop body whose header's own instructions belong inside it (the
     /// post-tested and endless shapes): emit the header's structure manually —
     /// it is already visited — then continue the ordinary walk.
+    ///
+    /// A plain header's edge to itself is the loop's own back edge, implicit
+    /// in the representation. Any other edge is a transfer the walk resolves,
+    /// even when it is the back edge of an enclosing loop: that one is a
+    /// `continue` of the enclosing loop, not of this one.
     fn lift_header_body(
         &mut self,
         header: BlockId,
@@ -375,28 +367,29 @@ impl<I, E> Structurer<'_, I, E> {
         let cfg = self.cfg;
         let mut body = Vec::new();
         let outgoing: Vec<EdgeId> = cfg.outgoing(header).collect();
-        let is_conditional = has_edge_kind(cfg, &outgoing, EdgeKind::ConditionalTrue)
-            && has_edge_kind(cfg, &outgoing, EdgeKind::ConditionalFalse);
-        let has_switch = has_edge_kind(cfg, &outgoing, EdgeKind::SwitchCase);
 
-        if is_conditional {
-            let node = self.lift_conditional(header, Some(bound));
-            body.push(node);
-            if let Some(merge) = self.advance_merge(header, Some(bound)) {
-                body.extend(self.lift_region(merge, Some(bound), stop));
+        match branching(cfg, &outgoing) {
+            Some(BlockFlowKind::Conditional) => {
+                let node = self.lift_conditional(header, Some(bound));
+                body.push(node);
+                if let Some(merge) = self.effective_merge(header, Some(bound)) {
+                    body.extend(self.lift_region(merge, Some(bound), stop));
+                }
             }
-        } else if has_switch {
-            let node = self.lift_switch(header, Some(bound));
-            body.push(node);
-            if let Some(merge) = self.advance_merge(header, Some(bound)) {
-                body.extend(self.lift_region(merge, Some(bound), stop));
+            Some(BlockFlowKind::Switch) => {
+                let node = self.lift_switch(header, Some(bound));
+                body.push(node);
+                if let Some(merge) = self.effective_merge(header, Some(bound)) {
+                    body.extend(self.lift_region(merge, Some(bound), stop));
+                }
             }
-        } else {
-            self.push_block(&mut body, header);
-            for eid in outgoing {
-                let edge = cfg.edge(eid);
-                if !self.is_back_edge(eid) && !edge.kind().is_exceptional() {
-                    body.extend(self.lift_region(edge.target(), Some(bound), stop));
+            _ => {
+                self.push_block(&mut body, header);
+                for eid in outgoing {
+                    let edge = cfg.edge(eid);
+                    if edge.target() != header && !edge.kind().is_exceptional() {
+                        body.extend(self.lift_region(edge.target(), Some(bound), stop));
+                    }
                 }
             }
         }
