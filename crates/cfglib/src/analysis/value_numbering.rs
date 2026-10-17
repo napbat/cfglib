@@ -360,15 +360,22 @@ where
     let Some(parent) = dom.idom(block) else {
         return Vec::new();
     };
+    // Walk backward from `block`, never through `parent`. Allocation-free
+    // when `parent` is the only predecessor, the common case.
     let mut between = BTreeSet::new();
-    let mut pending = vec![block];
-    while let Some(node) = pending.pop() {
+    let mut pending = Vec::new();
+    let mut node = block;
+    loop {
         for predecessor in cfg.predecessors(node) {
             if predecessor != parent && dom.is_reachable(predecessor) && between.insert(predecessor)
             {
                 pending.push(predecessor);
             }
         }
+        let Some(next) = pending.pop() else {
+            break;
+        };
+        node = next;
     }
 
     let mut variables: Vec<_> = between
