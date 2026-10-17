@@ -12,7 +12,7 @@
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::edge::{EdgeId, EdgeKind, KindedEdge};
+use crate::edge::{EdgeId, KindedEdge};
 use crate::graph::edge_view::EdgeView;
 use crate::graph::view::RootedView;
 
@@ -56,15 +56,6 @@ pub trait CfgView:
     ///
     /// Panics when `block` does not belong to this view.
     fn instructions(&self, block: BlockId) -> &[Self::Inst];
-
-    /// Returns the kind of `edge`.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `edge` does not belong to this view.
-    fn edge_kind(&self, edge: EdgeId) -> EdgeKind {
-        self.edge(edge).data().kind()
-    }
 
     /// Returns the branch weight of an edge, if the view has one.
     ///

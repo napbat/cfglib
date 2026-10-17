@@ -16,7 +16,7 @@ use core::ops::Bound;
 use super::cfg_view::CfgView;
 use super::edge_fixpoint::{self, EdgeProblem};
 use super::fixpoint::{Direction, Facts};
-use super::{DefSite, InstrInfo, VariableId, departs_before_throws};
+use super::{DefSite, InstrInfo, VariableId, replay_block, unwind_departure};
 use crate::block::BlockId;
 use crate::graph::edge_view::EdgeRef;
 
@@ -56,9 +56,24 @@ pub(super) fn definitions_of<'set, V: VariableId>(
 }
 
 /// Removes every definition of `variable` from `set`.
-pub(super) fn kill_variable<V: VariableId>(set: &mut BTreeSet<ReachingDef<V>>, variable: &V) {
+fn kill_variable<V: VariableId>(set: &mut BTreeSet<ReachingDef<V>>, variable: &V) {
     set.extract_if(variable_run(variable), |_| true)
         .for_each(drop);
+}
+
+/// Applies the definitions of the instruction at `site` to `set`: every
+/// earlier definition of a variable the instruction defines is killed, then
+/// the instruction's own definitions are generated.
+pub(super) fn define<V: VariableId>(set: &mut BTreeSet<ReachingDef<V>>, site: DefSite, defs: &[V]) {
+    for variable in defs {
+        kill_variable(set, variable);
+    }
+    for variable in defs {
+        set.insert(ReachingDef {
+            variable: variable.clone(),
+            site,
+        });
+    }
 }
 
 /// The reaching definitions problem.
@@ -68,46 +83,6 @@ pub(super) fn kill_variable<V: VariableId>(set: &mut BTreeSet<ReachingDef<V>>, v
 /// reaching the point before each of them, so a throwing instruction's own
 /// definitions and every later one in its block never reach the handler.
 pub struct ReachingDefsProblem;
-
-impl ReachingDefsProblem {
-    /// Replays `block` over the definitions reaching its entry, handing the
-    /// definitions that reach each throwing instruction to `before_unwind`.
-    fn replay<G, Var>(
-        cfg: &G,
-        block: BlockId,
-        input: &BTreeSet<ReachingDef<Var>>,
-        mut before_unwind: impl FnMut(&BTreeSet<ReachingDef<Var>>),
-    ) -> BTreeSet<ReachingDef<Var>>
-    where
-        G: CfgView,
-        G::Inst: InstrInfo<Variable = Var>,
-        Var: VariableId,
-    {
-        let mut reaching = input.clone();
-        for (inst_idx, instruction) in cfg.instructions(block).iter().enumerate() {
-            if instruction.may_unwind() {
-                before_unwind(&reaching);
-            }
-            let defs = instruction.defs();
-            if defs.is_empty() {
-                continue;
-            }
-            let site = DefSite { block, inst_idx };
-            // Kill: remove all previous defs of the same variables.
-            for variable in defs {
-                kill_variable(&mut reaching, variable);
-            }
-            // Gen: add the new defs.
-            for variable in defs {
-                reaching.insert(ReachingDef {
-                    variable: variable.clone(),
-                    site,
-                });
-            }
-        }
-        reaching
-    }
-}
 
 impl<G, Var> EdgeProblem<G> for ReachingDefsProblem
 where
@@ -130,7 +105,15 @@ where
     }
 
     fn transfer_node(&self, cfg: &G, block: BlockId, input: &Self::Fact) -> Self::Fact {
-        Self::replay(cfg, block, input, |_| {})
+        replay_block(
+            cfg,
+            block,
+            input,
+            |reaching, inst_idx, instruction| {
+                define(reaching, DefSite { block, inst_idx }, instruction.defs());
+            },
+            |_| {},
+        )
     }
 
     fn transfer_edge(
@@ -140,14 +123,17 @@ where
         input: &Self::Fact,
         output: &Self::Fact,
     ) -> Self::Fact {
-        if !departs_before_throws(cfg, edge) {
-            return output.clone();
-        }
-        let mut departing = BTreeSet::new();
-        Self::replay(cfg, edge.source(), input, |reaching| {
-            departing.extend(reaching.iter().cloned());
-        });
-        departing
+        let block = edge.source();
+        unwind_departure(
+            cfg,
+            edge,
+            input,
+            |reaching, inst_idx, instruction| {
+                define(reaching, DefSite { block, inst_idx }, instruction.defs());
+            },
+            |earlier, later| EdgeProblem::<G>::meet(self, earlier, later),
+        )
+        .unwrap_or_else(|| output.clone())
     }
 }
 

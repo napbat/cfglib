@@ -8,8 +8,8 @@ use alloc::vec::Vec;
 
 use crate::cfg::Cfg;
 use crate::dataflow::cfg_view::CfgView;
-use crate::dataflow::{InstrInfo, ProgramPoint};
-use crate::edge::EdgeKind;
+use crate::dataflow::{InstrInfo, ProgramPoint, unwind_edges};
+use crate::edge::KindedEdge;
 use crate::memory::{MemoryEvent, MemoryTraceEntry};
 
 use super::scratch::MemorySsaScratch;
@@ -94,16 +94,18 @@ where
     shadow.set_entry(cfg.root());
     for edge in cfg.edge_ids() {
         let endpoints = cfg.edge(edge);
-        shadow.add_edge(endpoints.source(), endpoints.target(), cfg.edge_kind(edge));
+        shadow.add_edge(
+            endpoints.source(),
+            endpoints.target(),
+            endpoints.data().kind(),
+        );
     }
 
     // The trace follows block-allocation, instruction, and event order, so
     // one cursor pairs every source instruction with its events.
     let mut entries = entries.iter().enumerate().peekable();
     for block in cfg.node_ids() {
-        let unwinds_out = cfg
-            .outgoing(block)
-            .any(|edge| cfg.edge_kind(edge) == EdgeKind::ExceptionUnwind);
+        let unwinds_out = unwind_edges(cfg, block).next().is_some();
         for (inst_idx, instruction) in cfg.instructions(block).iter().enumerate() {
             let point = ProgramPoint { block, inst_idx };
             let mut unwinds = unwinds_out && instruction.may_unwind();

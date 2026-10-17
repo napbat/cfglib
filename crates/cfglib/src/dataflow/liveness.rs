@@ -13,9 +13,8 @@ use alloc::vec::Vec;
 
 use super::cfg_view::CfgView;
 use super::fixpoint::{Direction, Facts, Problem};
-use super::{InstrInfo, VariableId, departs_before_throws, first_unwind_point};
+use super::{InstrInfo, VariableId, departs_before_throws, first_unwind_point, is_unwind_edge};
 use crate::block::BlockId;
-use crate::edge::{EdgeKind, KindedEdge};
 
 /// The liveness problem.
 ///
@@ -246,9 +245,7 @@ where
     let mut reads = alloc::vec![0u64; bound * words];
     let mut writes = alloc::vec![0u64; bound * words];
     let mut seeded = alloc::vec![0u64; bound * words];
-    let has_unwind = cfg
-        .edge_ids()
-        .any(|edge| cfg.edge_kind(edge) == EdgeKind::ExceptionUnwind);
+    let has_unwind = cfg.edge_ids().any(|edge| is_unwind_edge(cfg.edge(edge)));
     // Per block, whether an instruction may unwind, and the writes before
     // the first one: the only writes every unwind departure has completed.
     let mut unwinding = alloc::vec![false; if has_unwind { bound } else { 0 }];
@@ -299,10 +296,7 @@ where
         unwind_out.fill(0);
         for edge in cfg.outgoing(block) {
             let edge = cfg.edge(edge);
-            let destination = if has_unwind
-                && unwinding[index]
-                && edge.data().kind() == EdgeKind::ExceptionUnwind
-            {
+            let destination = if has_unwind && unwinding[index] && is_unwind_edge(edge) {
                 &mut unwind_out[..]
             } else {
                 &mut out[..]
@@ -552,6 +546,7 @@ mod tests {
     use crate::builder::CfgBuilder;
     use crate::cfg::Cfg;
     use crate::dataflow::fixpoint;
+    use crate::edge::EdgeKind;
     use crate::flow::FlowEffect;
     use crate::test_util::{df_def as def, df_ff, df_use as use_, df_with_effect};
     use alloc::vec;

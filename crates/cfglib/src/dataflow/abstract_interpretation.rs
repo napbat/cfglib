@@ -14,7 +14,7 @@ use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
 use crate::dataflow::edge_fixpoint::{self, EdgeProblem};
 use crate::dataflow::fixpoint::Direction;
-use crate::dataflow::{InstrInfo, departs_before_throws};
+use crate::dataflow::{InstrInfo, replay_block, unwind_departure};
 use crate::graph::edge_view::EdgeRef;
 
 /// A lattice element for abstract interpretation.
@@ -71,22 +71,12 @@ struct AbstractProblem<D> {
 }
 
 impl<D> AbstractProblem<D> {
-    /// Replays `block` from `input`, handing the state before each throwing
-    /// instruction to `before_unwind`.
-    fn replay<G>(cfg: &G, block: BlockId, input: &D, mut before_unwind: impl FnMut(&D)) -> D
+    /// One instruction's transfer, as a replay step.
+    fn step<I>(state: &mut D, _index: usize, instruction: &I)
     where
-        G: CfgView,
-        G::Inst: InstrInfo,
-        D: AbstractDomain<G::Inst>,
+        D: AbstractDomain<I>,
     {
-        let mut state = input.clone();
-        for inst in cfg.instructions(block) {
-            if inst.may_unwind() {
-                before_unwind(&state);
-            }
-            state = D::transfer(&state, inst);
-        }
-        state
+        *state = D::transfer(state, instruction);
     }
 }
 
@@ -123,7 +113,7 @@ where
     fn transfer_node(&self, cfg: &G, block: BlockId, input: &Option<D>) -> Option<D> {
         input
             .as_ref()
-            .map(|input| Self::replay(cfg, block, input, |_| {}))
+            .map(|input| replay_block(cfg, block, input, Self::step, |_| {}))
     }
 
     fn transfer_edge(
@@ -133,18 +123,14 @@ where
         input: &Option<D>,
         output: &Option<D>,
     ) -> Option<D> {
-        if !departs_before_throws(cfg, edge) {
-            return output.clone();
-        }
-        let input = input.as_ref()?;
-        let mut departing: Option<D> = None;
-        Self::replay(cfg, edge.source(), input, |state| {
-            departing = Some(match departing.take() {
-                None => state.clone(),
-                Some(earlier) => earlier.meet(state),
-            });
-        });
-        Some(departing.expect("an edge departing before throws leaves a block that may unwind"))
+        input
+            .as_ref()
+            .and_then(|input| {
+                unwind_departure(cfg, edge, input, Self::step, |earlier, later| {
+                    earlier.meet(later)
+                })
+            })
+            .map_or_else(|| output.clone(), Some)
     }
 }
 

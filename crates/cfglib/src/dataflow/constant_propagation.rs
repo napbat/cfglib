@@ -19,7 +19,7 @@ use alloc::collections::BTreeMap;
 use super::cfg_view::CfgView;
 use super::edge_fixpoint::{self, EdgeProblem};
 use super::fixpoint::{Direction, Facts};
-use super::{InstrInfo, departs_before_throws};
+use super::{InstrInfo, replay_block, unwind_departure};
 use crate::block::BlockId;
 use crate::graph::edge_view::EdgeRef;
 
@@ -151,6 +151,28 @@ pub trait ConstantFolder: InstrInfo {
     }
 }
 
+/// What one instruction defines, given the constants `known` at its inputs.
+///
+/// The folder answers for one def, but a multi-def instruction redefined its
+/// co-defined variables too: the folded def is [`ConstValue::Const`] and
+/// every other def is [`ConstValue::Bottom`], so no stale constant survives
+/// the instruction. Both constant solvers state this rule here.
+pub(super) fn fold_definitions<'a, I: ConstantFolder>(
+    instruction: &'a I,
+    known: &BTreeMap<I::Variable, I::Const>,
+) -> impl Iterator<Item = (&'a I::Variable, ConstValue<I::Const>)> + use<'a, I> {
+    let folded = instruction.fold_constant(known);
+    instruction.defs().iter().map(move |definition| {
+        let value = match &folded {
+            Some((variable, constant)) if variable == definition => {
+                ConstValue::Const(constant.clone())
+            }
+            _ => ConstValue::Bottom,
+        };
+        (definition, value)
+    })
+}
+
 /// The constant propagation problem.
 ///
 /// A normal edge carries the constants known at its source's end. An edge
@@ -179,20 +201,10 @@ impl ConstPropProblem {
         result
     }
 
-    /// Replays `block` over the constants known at its entry, handing the
-    /// state before each throwing instruction to `before_unwind`.
-    fn replay<G>(
-        cfg: &G,
-        block: BlockId,
-        input: &InstFact<G::Inst>,
-        mut before_unwind: impl FnMut(&InstFact<G::Inst>),
-    ) -> InstFact<G::Inst>
-    where
-        G: CfgView,
-        G::Inst: ConstantFolder,
-    {
-        let mut state = input.clone();
-        let mut known: BTreeMap<_, _> = state
+    /// The step of a replay that starts from the constants `input`, tracking
+    /// the known constants alongside the state.
+    fn step<I: ConstantFolder>(input: &InstFact<I>) -> impl FnMut(&mut InstFact<I>, usize, &I) {
+        let mut known: BTreeMap<_, _> = input
             .iter()
             .filter_map(|(variable, value)| {
                 value
@@ -200,27 +212,15 @@ impl ConstPropProblem {
                     .map(|constant| (variable.clone(), constant.clone()))
             })
             .collect();
-
-        for inst in cfg.instructions(block) {
-            if inst.may_unwind() {
-                before_unwind(&state);
-            }
-            // Try constant folding. The folder answers for ONE def, but a
-            // multi-def instruction redefined its co-defined variables too:
-            // bottom every def first so no stale constant survives, then
-            // record the folded one.
-            let folded = inst.fold_constant(&known);
-            for variable in inst.defs() {
-                state.insert(variable.clone(), ConstValue::Bottom);
-                known.remove(variable);
-            }
-            if let Some((loc, val)) = folded {
-                state.insert(loc.clone(), ConstValue::Const(val.clone()));
-                known.insert(loc, val);
+        move |state, _, instruction| {
+            for (variable, value) in fold_definitions(instruction, &known) {
+                match value.as_const() {
+                    Some(constant) => known.insert(variable.clone(), constant.clone()),
+                    None => known.remove(variable),
+                };
+                state.insert(variable.clone(), value);
             }
         }
-
-        state
     }
 }
 
@@ -244,7 +244,7 @@ where
     }
 
     fn transfer_node(&self, cfg: &G, block: BlockId, input: &Self::Fact) -> Self::Fact {
-        Self::replay(cfg, block, input, |_| {})
+        replay_block(cfg, block, input, Self::step(input), |_| {})
     }
 
     fn transfer_edge(
@@ -254,17 +254,10 @@ where
         input: &Self::Fact,
         output: &Self::Fact,
     ) -> Self::Fact {
-        if !departs_before_throws(cfg, edge) {
-            return output.clone();
-        }
-        let mut departing: Option<Self::Fact> = None;
-        Self::replay(cfg, edge.source(), input, |state| {
-            departing = Some(match departing.take() {
-                None => state.clone(),
-                Some(earlier) => Self::meet_facts::<G::Inst>(&earlier, state),
-            });
-        });
-        departing.expect("an edge departing before throws leaves a block that may unwind")
+        unwind_departure(cfg, edge, input, Self::step(input), |earlier, later| {
+            Self::meet_facts::<G::Inst>(earlier, later)
+        })
+        .unwrap_or_else(|| output.clone())
     }
 }
 

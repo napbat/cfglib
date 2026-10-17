@@ -433,7 +433,12 @@ pub fn try_solve_problem_with_config<V: RootedView, P: TryProblem<V>>(
     problem: &P,
     config: SolveConfig,
 ) -> Result<Facts<P::Fact>, TrySolveError<P::Error>> {
-    try_solve_with_worklist(view, problem, initial_worklist(view, problem.direction()), config)
+    try_solve_with_worklist(
+        view,
+        problem,
+        initial_worklist(view, problem.direction()),
+        config,
+    )
 }
 
 /// Run a fallible fixpoint iteration from `seeds` with a deterministic step

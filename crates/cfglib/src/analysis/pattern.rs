@@ -12,7 +12,7 @@ use smallvec::SmallVec;
 
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
-use crate::edge::EdgeKind;
+use crate::edge::{EdgeKind, KindedEdge};
 use crate::graph::view::{DenseId, GraphView};
 
 /// A recognized structural pattern, over node identity `N`.
@@ -160,7 +160,8 @@ pub fn detect_cfg_patterns<G: CfgView>(cfg: &G) -> Vec<CfgPattern> {
     for pattern in &mut patterns {
         if let CfgPattern::Diamond { entry, arms, .. } = pattern {
             let true_target = cfg.outgoing(*entry).find_map(|eid| {
-                (cfg.edge_kind(eid) == EdgeKind::ConditionalTrue).then(|| cfg.edge(eid).target())
+                let edge = cfg.edge(eid);
+                (edge.data().kind() == EdgeKind::ConditionalTrue).then(|| edge.target())
             });
             if let Some(target) = true_target
                 && arms[1] == target

@@ -11,7 +11,7 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use super::cfg_view::CfgView;
-use super::reaching::{ReachingDef, ReachingDefs, definitions_of, kill_variable};
+use super::reaching::{ReachingDef, ReachingDefs, define, definitions_of};
 use super::{DefSite, InstrInfo, UseSite};
 
 /// Def-use and use-def chain results.
@@ -96,15 +96,7 @@ impl DefUseChains {
                         block,
                         inst_idx: idx,
                     };
-                    for variable in defs {
-                        kill_variable(&mut current_reaching, variable);
-                    }
-                    for variable in defs {
-                        current_reaching.insert(ReachingDef {
-                            variable: variable.clone(),
-                            site: def_site,
-                        });
-                    }
+                    define(&mut current_reaching, def_site, defs);
                     // Ensure the def site exists in the map even if
                     // nothing uses it (dead def).
                     def_use.entry(def_site).or_default();
