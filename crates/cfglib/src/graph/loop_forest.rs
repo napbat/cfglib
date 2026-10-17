@@ -373,6 +373,37 @@ impl<N: DenseId> LoopForest<N> {
         }
     }
 
+    /// Whether every block of `inner` is a block of `outer`. A loop encloses
+    /// itself.
+    ///
+    /// This is exact, which [`parent`](Self::parent) is not: the parent of a
+    /// loop is the smallest larger loop that holds its *header*, and when that
+    /// is an irreducible loop it can hold only part of the loop's blocks.
+    ///
+    /// The answer is constant time when both loops have a header that
+    /// dominates its latches: such loops are properly nested, so one holds the
+    /// other exactly when its run of the forest holds the other's. Otherwise
+    /// the blocks of `inner` are looked up in `outer`, which costs at most the
+    /// size of the smaller of the two, since a larger loop cannot be held by a
+    /// smaller one and that is settled first.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `outer` or `inner` is not a loop of this forest.
+    #[must_use]
+    pub fn encloses(&self, outer: LoopId, inner: LoopId) -> bool {
+        let (outer_record, inner_record) = (self.record(outer), self.record(inner));
+        if outer == inner {
+            return true;
+        }
+        if outer_record.is_nested() && inner_record.is_nested() {
+            return outer_record.first <= inner_record.first
+                && inner_record.last <= outer_record.last;
+        }
+        self.body_len(inner) <= self.body_len(outer)
+            && self.body(inner).all(|block| self.contains(outer, block))
+    }
+
     /// The blocks of `lp`, header included, in no particular order.
     ///
     /// The walk costs the size of the body and allocates nothing.

@@ -5,6 +5,20 @@ use crate::graph::dominator::DominatorTree;
 use crate::test_util::{MockInst, ff};
 use alloc::vec;
 
+/// The loops of all the code, live and dead, from the forest. The tests ask the
+/// forest rather than a function of this module, which has no other reader once
+/// the structurer holds a [`LoopForest`] itself.
+fn detect_all_loops_tagged<G>(
+    graph: &G,
+    dom: &DominatorTree<G::NodeId>,
+) -> Vec<NaturalLoop<G::NodeId>>
+where
+    G: RootedView + EdgeView,
+    G::EdgeData: KindedEdge,
+{
+    LoopForest::compute_all_tagged(graph, dom).natural_loops()
+}
+
 #[test]
 fn no_loops_in_linear_cfg() {
     let cfg = CfgBuilder::build(vec![ff("a"), ff("b"), ff("c")]).unwrap();
