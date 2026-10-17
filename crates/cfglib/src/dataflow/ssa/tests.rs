@@ -355,8 +355,11 @@ fn filled(mut cfg: Cfg<DfInst>) -> Cfg<DfInst> {
 
 #[test]
 fn one_scratch_reused_down_a_sequence_computes_the_allocating_answer() {
+    // The shared sequence has no entry that is a branch target, so the loop
+    // shape rides along: the scratch must also reproduce the start values.
     let sequence: Vec<_> = crate::test_util::shapes::scratch_sequence::<DfInst>()
         .into_iter()
+        .chain([entry_loop().0])
         .map(filled)
         .collect();
     let mut scratch = SsaScratch::new();
@@ -510,24 +513,157 @@ fn entry_loop() -> (Cfg<DfInst>, BlockId) {
 }
 
 #[test]
-#[should_panic(expected = "branch target")]
-fn ssa_construction_rejects_an_entry_that_is_a_branch_target() {
-    let (cfg, _) = entry_loop();
-    drop(SsaForm::compute(&cfg, &DominatorTree::compute(&cfg)));
+fn an_entry_that_is_a_branch_target_merges_the_start_value_with_its_back_edge() {
+    let (cfg, latch) = entry_loop();
+    let dom = DominatorTree::compute(&cfg);
+    let ssa = SsaForm::compute(&cfg, &dom);
+
+    let [phi] = ssa.block(cfg.entry()).phis.as_slice() else {
+        panic!("the entry merges the start value and the latch definition");
+    };
+    assert_eq!(
+        phi.operands(),
+        [(departure(latch, 1), SsaValue::new(0, 2))],
+        "the operands are the CFG edges alone"
+    );
+    assert_eq!(
+        ssa.block(latch).instructions[0].defs(),
+        [SsaValue::new(0, 2)]
+    );
+    assert_eq!(phi.start_value(), Some(SsaValue::live_in(0)));
+    assert!(phi.merges_start_value());
+    assert_eq!(
+        phi.result,
+        SsaValue::new(0, 1),
+        "a fresh version of its own"
+    );
+    assert_eq!(ssa.max_version(&0), 2, "the start value takes no version");
+    assert_eq!(
+        ssa.block(cfg.entry()).instructions[0].uses(),
+        core::slice::from_ref(&phi.result)
+    );
+
+    let placements = PhiPlacements::compute(&cfg, &dom);
+    assert_eq!(placements.len(), 1);
+    let [placement] = placements.at(cfg.entry()) else {
+        panic!("the placement is at the entry");
+    };
+    assert_eq!(placement.predecessors(), [departure(latch, 1)]);
+    assert!(placement.merges_start_value());
 }
 
 #[test]
-#[should_panic(expected = "branch target")]
-fn phi_placement_rejects_an_entry_that_is_a_branch_target() {
-    let (cfg, _) = entry_loop();
-    drop(PhiPlacements::compute(&cfg, &DominatorTree::compute(&cfg)));
+fn only_a_phi_in_the_entry_has_a_start_value() {
+    // The entry heads a loop whose body is a diamond, so the loop body has
+    // phis of its own that merge only edges.
+    let mut cfg = Cfg::<DfInst>::new();
+    let [left, right, merge, exit] = core::array::from_fn(|_| cfg.new_block());
+    let entry = cfg.entry();
+    cfg.add_edge(entry, left, EdgeKind::ConditionalTrue);
+    cfg.add_edge(entry, right, EdgeKind::ConditionalFalse);
+    cfg.add_edge(left, merge, EdgeKind::Fallthrough);
+    cfg.add_edge(right, merge, EdgeKind::Fallthrough);
+    cfg.add_edge(merge, entry, EdgeKind::Back);
+    cfg.add_edge(merge, exit, EdgeKind::ConditionalFalse);
+    cfg.block_mut(entry).push(df_use("read", 0));
+    cfg.block_mut(left).push(df_def("left", 0));
+    cfg.block_mut(right).push(df_def("right", 0));
+    cfg.block_mut(merge).push(df_use("merged", 0));
+
+    let ssa = SsaForm::compute(&cfg, &DominatorTree::compute(&cfg));
+    let at_merge = &ssa.block(merge).phis[0];
+    assert_eq!(at_merge.operands().len(), 2);
+    assert_eq!(at_merge.start_value(), None);
+    assert!(!at_merge.merges_start_value());
+    let [at_entry] = ssa.block(entry).phis.as_slice() else {
+        panic!("the entry merges variable 0");
+    };
+    assert_eq!(
+        at_entry.operands(),
+        [(departure(merge, 1), at_merge.result.clone())]
+    );
+    assert_eq!(at_entry.start_value(), Some(SsaValue::live_in(0)));
+    let with_start: Vec<_> = ssa
+        .phis()
+        .filter(|(_, phi)| phi.merges_start_value())
+        .map(|(block, _)| block)
+        .collect();
+    assert_eq!(with_start, [entry]);
 }
 
 #[test]
-fn a_new_entry_block_restores_the_value_entering_the_function() {
-    // The remedy the panic names: an empty block that falls through to the old
-    // entry. The old entry is then an ordinary loop header, and its phi
-    // merges the live-in value from the new entry with the latch's.
+fn a_variable_the_entry_loop_never_defines_needs_no_phi_and_reads_the_live_in() {
+    let (mut cfg, latch) = entry_loop();
+    cfg.block_mut(cfg.entry()).push(df_use("read untouched", 1));
+    cfg.block_mut(latch).push(df_use("read untouched", 1));
+
+    let ssa = SsaForm::compute(&cfg, &DominatorTree::compute(&cfg));
+    let [only] = ssa.block(cfg.entry()).phis.as_slice() else {
+        panic!("only variable 0 is merged");
+    };
+    assert_eq!(only.result.variable, 0);
+    assert_eq!(
+        ssa.block(cfg.entry()).instructions[1].uses(),
+        [SsaValue::live_in(1)]
+    );
+    assert_eq!(
+        ssa.block(latch).instructions[1].uses(),
+        [SsaValue::live_in(1)]
+    );
+}
+
+#[test]
+fn a_self_looping_entry_merges_its_own_definition_and_the_start_value() {
+    let mut cfg = Cfg::<DfInst>::new();
+    let exit = cfg.new_block();
+    let entry = cfg.entry();
+    cfg.add_edge(entry, entry, EdgeKind::ConditionalTrue);
+    cfg.add_edge(entry, exit, EdgeKind::ConditionalFalse);
+    cfg.block_mut(entry).push(df_use("read", 0));
+    cfg.block_mut(entry).push(df_def("redefine", 0));
+    cfg.block_mut(exit).push(df_use("after", 0));
+
+    let ssa = SsaForm::compute(&cfg, &DominatorTree::compute(&cfg));
+    let [phi] = ssa.block(entry).phis.as_slice() else {
+        panic!("the entry merges the start value and its own definition");
+    };
+    assert_eq!(phi.operands(), [(departure(entry, 2), SsaValue::new(0, 2))]);
+    assert_eq!(phi.start_value(), Some(SsaValue::live_in(0)));
+    assert_eq!(
+        ssa.block(entry).instructions[0].uses(),
+        core::slice::from_ref(&phi.result)
+    );
+    assert_eq!(
+        ssa.block(exit).instructions[0].uses(),
+        [SsaValue::new(0, 2)],
+        "the exit reads what the last iteration defined, not the phi"
+    );
+}
+
+#[test]
+fn value_at_reads_the_entry_phi_inside_and_after_the_loop() {
+    let (cfg, latch) = entry_loop();
+    let ssa = SsaForm::compute(&cfg, &DominatorTree::compute(&cfg));
+    let phi = ssa.block(cfg.entry()).phis[0].result.clone();
+    let exit = BlockId::from_index(2);
+
+    assert_eq!(ssa.value_at(departure(cfg.entry(), 0), &0), phi);
+    assert_eq!(ssa.value_at(departure(latch, 0), &0), phi);
+    assert_eq!(ssa.value_at(departure(latch, 1), &0), SsaValue::new(0, 2));
+    assert_eq!(ssa.value_at(departure(exit, 0), &0), phi);
+    assert_eq!(
+        ssa.value_at(departure(cfg.entry(), 0), &1),
+        SsaValue::live_in(1),
+        "a variable nothing defines is the live-in everywhere"
+    );
+}
+
+#[test]
+fn a_new_entry_block_turns_the_start_value_into_an_edge_operand() {
+    // An empty block in front of the old entry is another way to spell the
+    // same function. The old entry is then an ordinary loop header, and the
+    // value that was its start value arrives from the new entry along a CFG
+    // edge, so the phi carries no start value of its own.
     let (mut cfg, latch) = entry_loop();
     let header = cfg.entry();
     let new_entry = cfg.new_block();
@@ -547,6 +683,7 @@ fn a_new_entry_block_restores_the_value_entering_the_function() {
         ],
         "operands follow the CFG's predecessor order"
     );
+    assert_eq!(phi.start_value(), None);
     assert_eq!(ssa.block(header).instructions[0].uses()[0], phi.result);
 }
 

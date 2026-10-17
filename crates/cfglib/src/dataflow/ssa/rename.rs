@@ -227,7 +227,11 @@ pub(super) fn finish_blocks<V: VariableId>(
                             (predecessor, value)
                         })
                         .collect();
-                    SsaPhi { result, operands }
+                    SsaPhi {
+                        result,
+                        operands,
+                        merges_start: draft.merges_start,
+                    }
                 })
                 .collect();
             SsaBlock {
