@@ -1,5 +1,5 @@
-//! Every instruction-level analysis gives the same answer on a [`CfgView`]
-//! that is not a [`Cfg`].
+//! The instruction-level analyses exercised here give the same answer on a
+//! [`CfgView`] that is not a [`Cfg`].
 //!
 //! The toy view keeps instructions and edges in plain vectors. It shares no
 //! code with the store behind [`Cfg`], so a result that matches the one on
@@ -15,7 +15,7 @@ use crate::analysis::dead_code::DeadCode;
 use crate::analysis::profile::{CfgProfile, set_uniform_edge_weights};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::dataflow::constant_propagation::constant_propagation;
+use crate::dataflow::constant_propagation::ConstantPropagation;
 use crate::dataflow::def_use::DefUseChains;
 use crate::dataflow::fixpoint::solve_problem;
 use crate::dataflow::liveness::{Liveness, LivenessProblem};
@@ -262,8 +262,8 @@ fn ssa_and_constants_match_on_a_view_that_is_not_a_cfg() {
     assert_eq!(actual, expected);
     assert!(actual.phis().count() > 0, "the join needs a phi for r2");
 
-    let expected = constant_propagation(&cfg);
-    let actual = constant_propagation(&toy);
+    let expected = ConstantPropagation::compute(&cfg);
+    let actual = ConstantPropagation::compute(&toy);
     for block in cfg.block_ids() {
         assert_eq!(actual.fact_in(block), expected.fact_in(block));
         assert_eq!(actual.fact_out(block), expected.fact_out(block));

@@ -20,9 +20,17 @@ then run all of these from the workspace root:
 ```text
 python scripts/check_repository_policy.py
 cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings -D clippy::pedantic
 cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
+cargo test --workspace
 cargo test --workspace --all-features
 ```
+
+Both feature sets are gates: code behind `#[cfg(feature = "serde")]` is checked
+only by the all-features run, and code the feature does not touch must also
+build and pass without it. CI (`.github/workflows/lint.yml`) additionally lints
+the allocation-counting benchmarks, runs the `control-tree` example, checks the
+MSRV, and checks the `no_std` build for `thumbv7em-none-eabi`.
 
 Also build documentation with warnings denied when public APIs or docs change:
 
@@ -86,10 +94,12 @@ with `uv run --no-project python scripts/check_repository_policy.py`.
 - Top-level namespace modules (`analysis`, `dataflow`, `graph`, `ir`, `transform`)
   declare `pub mod` children and hoist nothing; the crate root is the single
   flat facade that re-exports every public item, one `pub use` per module,
-  alphabetized. Domain modules with a narrow API (`cfg`, `exception`,
-  `ir::rtl`, `ir::mlil`, `ir::hlil`, and split coordinators such as
-  `graph/search/events`) keep children private and re-export their public
-  surface.
+  alphabetized. `ir` is the one exception: its three levels share names
+  (`Dialect`, `FunctionView`), so the root re-exports none of them and
+  callers write `ir::hlil::FunctionView`. Domain modules with a
+  narrow API (`cfg`, `exception`, `ir::rtl`, `ir::mlil`, `ir::hlil`, and
+  split coordinators such as `graph/search/events`) keep children private
+  and re-export their public surface.
 - Compound words in file and identifier names are underscore-separated and
   spelled in full (`constant_propagation`, `value_numbering`, `call_graph`);
   domain-standard acronyms (`ssa`, `scc`, `sccp`, `dce`, `pre`, `cdg`, `pdg`,
@@ -101,7 +111,7 @@ with `uv run --no-project python scripts/check_repository_policy.py`.
   `interference_graph`).
 - `*Result` names are reserved for types used in `Result` positions; plain
   outputs are named for what they are (`Facts`, `VerifyReport`,
-  `SccpAnalysis`, `CopyPropagationStats`). Error types end in `Error` and
+  `SccpAnalysis`, `PropagationStats`). Error types end in `Error` and
   implement `core::error::Error`.
 - Counting accessors use the `*_count` suffix (`block_count`, `edge_count`,
   `value_count`); do not introduce `num_*` names.
@@ -112,10 +122,14 @@ with `uv run --no-project python scripts/check_repository_policy.py`.
 - Generic pass composition owns only stable identity, declared order, change
   reporting, and fallible execution. Consumers own pass selection, dependency
   order, dialect semantics, and any analysis-cache invalidation policy.
-- Every fixpoint solver carries the identical facility matrix — full solve,
+- Every generic fixpoint solver (`solve_problem`, `solve_node_problem`,
+  `solve_edge_problem`) carries the identical facility matrix — full solve,
   `_from` seeding, `_with_config` bounds, and fallible `try_` counterparts —
   built as a fallible core with infallible wrappers, sharing `SolveConfig`,
-  `SolveError`, and `TrySolveError`.
+  `SolveError`, and `TrySolveError`, and running on one shared worklist. A
+  derived analysis (`Liveness`, `ReachingDefs`, `SccpAnalysis`, ...) wraps a
+  solver unbounded or runs its own convergence loop; it does not grow the
+  matrix.
 - Use American English spelling in identifiers, documentation, and comments
   (`analyze`, `color`, `normalize`, `initialize`).
 - Unit tests live inline in a `#[cfg(test)] mod tests` in the file they test;

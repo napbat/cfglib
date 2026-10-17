@@ -5,9 +5,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::{pseudocode, subtree};
+use crate::ProgramPoint;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::dataflow::ProgramPoint;
 use crate::edge::EdgeKind;
 use crate::flow::FlowEffect;
 use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
@@ -69,6 +69,50 @@ fn children_have_lower_handles_than_their_parent() {
         }
     }
     assert_eq!(tree.node_ids().len(), tree.node_count());
+}
+
+#[test]
+fn a_branch_header_shows_its_test_and_stays_bare_when_the_test_has_no_text() {
+    let cfg = diamond();
+    let tree = ControlTree::compute(&cfg);
+    let silent = tree
+        .to_pseudocode(|sink, point| {
+            let text = cfg.block(point.block).instructions()[point.inst_idx].1;
+            if text == "test" {
+                Ok(())
+            } else {
+                sink.write_str(text)
+            }
+        })
+        .expect("writing to a String cannot fail");
+    assert_eq!(
+        silent,
+        "prefix\nif {\n    then\n} else {\n    else\n}\nmerge\n"
+    );
+}
+
+#[test]
+fn a_switch_header_shows_the_dispatch_instruction() {
+    let mut cfg: Cfg<MockInst> = Cfg::new();
+    let case_a = cfg.new_block();
+    let default_arm = cfg.new_block();
+    let merge = cfg.new_block();
+    cfg.block_mut(cfg.entry()).push(ff("load k"));
+    cfg.block_mut(cfg.entry()).push(ff("dispatch k"));
+    cfg.block_mut(case_a).push(ff("a"));
+    cfg.block_mut(default_arm).push(ff("d"));
+    cfg.block_mut(merge)
+        .push(MockInst(FlowEffect::Return, "after"));
+    cfg.add_edge(cfg.entry(), case_a, EdgeKind::SwitchCase);
+    cfg.add_edge(cfg.entry(), default_arm, EdgeKind::Fallthrough);
+    cfg.add_edge(case_a, merge, EdgeKind::Fallthrough);
+    cfg.add_edge(default_arm, merge, EdgeKind::Fallthrough);
+
+    let tree = ControlTree::compute(&cfg);
+    assert_eq!(
+        pseudocode(&cfg, &tree),
+        "load k\nswitch (dispatch k) {\n    case {\n        a\n    }\n    default {\n        d\n    }\n}\nafter\n"
+    );
 }
 
 #[test]
@@ -360,11 +404,11 @@ fn for_each_instruction_reports_positions() {
 fn pseudocode_prints_structure_with_the_callers_instruction_text() {
     let cfg = diamond();
     let tree = ControlTree::compute(&cfg);
-    // The branch's own instruction ("test") belongs to the header; the lines
-    // before it print ahead of the construct.
+    // The branch's own instruction ("test") is the header's condition; the
+    // lines before it print ahead of the construct.
     assert_eq!(
         pseudocode(&cfg, &tree),
-        "prefix\nif {\n    then\n} else {\n    else\n}\nmerge\n"
+        "prefix\nif (test) {\n    then\n} else {\n    else\n}\nmerge\n"
     );
 }
 

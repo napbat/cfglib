@@ -10,10 +10,11 @@ use alloc::vec::Vec;
 use crate::block::BlockId;
 use crate::edge::{EdgeKind, KindedEdge};
 
-use crate::ir::hlil::{FlatBuilder, Lowered, Occurrence};
+use crate::ir::hlil::{FlatBuilder, Lowered};
 
 use super::flat::{Access, FlatKit, FlatVar, ToyEdge, ToyFlatBuilder, ToyForm, ToyInst};
-use super::{Imp, Kit, Prim, Sym, Ty};
+use super::flat_lift::int;
+use super::{Imp, Prim, Sym, Ty};
 
 over_toys!(
     every_form_is_carried_with_its_flags,
@@ -30,22 +31,9 @@ over_toys!(
     a_builder_can_refuse_what_it_has_no_form_for,
 );
 
-fn occurrence<D: Kit>(variable: FlatVar) -> Occurrence<FlatVar, D::Type> {
-    Occurrence {
-        variable,
-        ty: D::ty(Ty::Integer),
-    }
-}
-
 fn instruction<D: FlatKit>(form: ToyForm<D>, uses: &[FlatVar], defs: &[FlatVar]) -> ToyInst<D> {
-    let uses: Vec<_> = uses
-        .iter()
-        .map(|&variable| occurrence::<D>(variable))
-        .collect();
-    let defs: Vec<_> = defs
-        .iter()
-        .map(|&variable| occurrence::<D>(variable))
-        .collect();
+    let uses: Vec<_> = uses.iter().map(|&variable| int::<D>(variable)).collect();
+    let defs: Vec<_> = defs.iter().map(|&variable| int::<D>(variable)).collect();
     ToyInst::new(form, &uses, &defs)
 }
 
@@ -265,8 +253,8 @@ fn an_unwind_edge_needs_a_thrower<D: FlatKit>() {
 
 fn a_builder_can_refuse_what_it_has_no_form_for<D: FlatKit>() {
     let (mut builder, first, v0) = base::<D>();
-    let uses = [occurrence::<D>(v0)];
-    let defs = [occurrence::<D>(v0)];
+    let uses = [int::<D>(v0)];
+    let defs = [int::<D>(v0)];
     let acquire = D::op(Prim::Acquire);
     let release = D::op(Prim::Release);
     assert!(

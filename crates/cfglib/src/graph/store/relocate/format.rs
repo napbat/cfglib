@@ -10,13 +10,13 @@
 extern crate alloc;
 
 use alloc::collections::BTreeMap;
+use alloc::vec;
 use alloc::vec::Vec;
 
-use serde::de::Deserializer;
 use serde::ser::{SerializeMap, SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
 
-use super::super::adjacency::{MAX_SLOTS, NONE};
+use super::super::adjacency::NONE;
 use super::super::raw_index;
 use super::{Relocations, Runs};
 
@@ -46,49 +46,61 @@ impl Serialize for Relocations {
 }
 
 /// What the encoding contains, before it becomes an index.
+///
+/// It is not an overlay until it has been checked against the store it
+/// belongs to, which the encoding does not describe: see
+/// [`into_relocations`](Self::into_relocations).
 #[derive(Deserialize)]
 #[serde(rename = "Relocations")]
-struct Encoded {
+pub(in crate::graph::store) struct Encoded {
     outgoing: BTreeMap<u32, Vec<u32>>,
     incoming: BTreeMap<u32, Vec<u32>>,
 }
 
-impl Runs {
-    /// The index for `encoded`, sized to its highest node.
+impl Encoded {
+    /// The overlay this encodes, for a store of `node_bound` node slots and
+    /// `edge_bound` edge slots.
     ///
-    /// The encoding does not say how many nodes the store has, and the index
-    /// is allocated from its keys, so a key that cannot name a node, or one
-    /// whose index cannot be allocated, is an error rather than an abort.
-    fn from_encoded<E: serde::de::Error>(encoded: BTreeMap<u32, Vec<u32>>) -> Result<Self, E> {
+    /// The index is allocated from the keys, so a run that belongs to no node
+    /// of the store, or names an edge it does not hold, is an error rather
+    /// than an allocation of the size of whatever the document claims.
+    pub(in crate::graph::store) fn into_relocations(
+        self,
+        node_bound: usize,
+        edge_bound: usize,
+    ) -> Result<Relocations, &'static str> {
+        Ok(Relocations {
+            outgoing: Runs::from_encoded(self.outgoing, node_bound, edge_bound)?,
+            incoming: Runs::from_encoded(self.incoming, node_bound, edge_bound)?,
+        })
+    }
+}
+
+impl Runs {
+    fn from_encoded(
+        encoded: BTreeMap<u32, Vec<u32>>,
+        node_bound: usize,
+        edge_bound: usize,
+    ) -> Result<Self, &'static str> {
         let Some((&highest, _)) = encoded.last_key_value() else {
             return Ok(Self::default());
         };
-        if highest as usize >= MAX_SLOTS {
-            return Err(E::custom(format_args!(
-                "relocated node {highest} is outside the dense identity space"
-            )));
+        if highest as usize >= node_bound {
+            return Err("an overlay run belongs to a node the store does not hold");
         }
-        let bound = highest as usize + 1;
-        let mut index = Vec::new();
-        index
-            .try_reserve_exact(bound)
-            .map_err(|_| E::custom("relocation index does not fit in memory"))?;
-        index.resize(bound, NONE);
+        if encoded
+            .values()
+            .flatten()
+            .any(|&edge| edge as usize >= edge_bound)
+        {
+            return Err("an overlay run names an edge the store does not hold");
+        }
+        let mut index = vec![NONE; highest as usize + 1];
         let mut runs = Vec::with_capacity(encoded.len());
         for (node, run) in encoded {
             index[node as usize] = raw_index(runs.len());
             runs.push(run);
         }
         Ok(Self { index, runs })
-    }
-}
-
-impl<'de> Deserialize<'de> for Relocations {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let Encoded { outgoing, incoming } = Encoded::deserialize(deserializer)?;
-        Ok(Self {
-            outgoing: Runs::from_encoded(outgoing)?,
-            incoming: Runs::from_encoded(incoming)?,
-        })
     }
 }

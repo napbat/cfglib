@@ -154,7 +154,8 @@ pub type MemorySsaValue = SsaValue<MemoryClassId>;
 /// The producer of one memory-SSA value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemoryDefinition {
-    /// Memory state entering a dominator-tree root.
+    /// Memory state entering a dominator-tree root: for the CFG entry, the
+    /// state the function starts with.
     LiveIn {
         /// Location class whose initial state enters the CFG component.
         class: MemoryClassId,
@@ -181,7 +182,7 @@ pub enum MemoryUse {
         /// Event consuming the memory state.
         site: MemoryEventSite,
     },
-    /// One incoming operand of a memory phi.
+    /// One incoming operand of a memory phi that arrives along a CFG edge.
     Phi {
         /// Block containing the phi.
         block: BlockId,
@@ -192,14 +193,29 @@ pub enum MemoryUse {
         /// Memory state produced by the phi.
         result: MemorySsaValue,
     },
+    /// The state the function starts with, as the start value of a memory
+    /// phi in an entry block that is a branch target: the use of the class's
+    /// live-in that no CFG edge carries.
+    PhiStart {
+        /// Block containing the phi, the CFG entry.
+        block: BlockId,
+        /// Memory state produced by the phi.
+        result: MemorySsaValue,
+    },
 }
 
 /// A fully renamed location-class phi.
+///
+/// As an ordinary [`SsaPhi`](crate::SsaPhi), it merges the state that
+/// arrives along each CFG edge into its block ([`operands`](Self::operands)),
+/// and, in an entry block that is a branch target, the state the function
+/// starts with ([`start_value`](Self::start_value)), which no edge carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryPhi {
     block: BlockId,
     result: MemorySsaValue,
     operands: Vec<(ProgramPoint, MemorySsaValue)>,
+    merges_start: bool,
 }
 
 impl MemoryPhi {
@@ -220,15 +236,41 @@ impl MemoryPhi {
     /// An unwind out of a block leaves before each of its throwing source
     /// instructions and carries the memory state before that instruction. A
     /// normal edge leaves at its block's instruction count.
+    ///
+    /// These are the edge operands only; see
+    /// [`start_value`](Self::start_value) for the state that has no
+    /// departure point.
     #[must_use]
     pub fn operands(&self) -> &[(ProgramPoint, MemorySsaValue)] {
         &self.operands
+    }
+
+    /// Whether this phi also merges the state the function starts with; see
+    /// [`start_value`](Self::start_value).
+    #[must_use]
+    pub const fn merges_start_value(&self) -> bool {
+        self.merges_start
+    }
+
+    /// The memory state of the class when the function starts: its
+    /// [`MemoryDefinition::LiveIn`] value, or `None` when the phi has no
+    /// such input.
+    ///
+    /// The input exists exactly when this phi sits in the CFG entry block,
+    /// which is then a branch target. It arrives once, before the entry
+    /// block runs, and so no departure point in
+    /// [`operands`](Self::operands) names it, as for
+    /// [`SsaPhi::start_value`](crate::SsaPhi::start_value).
+    #[must_use]
+    pub fn start_value(&self) -> Option<MemorySsaValue> {
+        self.merges_start
+            .then(|| SsaValue::live_in(self.result.variable))
     }
 }
 
 /// One memory event annotated with its alias class and SSA states.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MemorySSAEvent<L, V, F> {
+pub struct MemorySsaEvent<L, V, F> {
     site: MemoryEventSite,
     event: MemoryEvent<L, V, F>,
     class: Option<MemoryClassId>,
@@ -237,7 +279,7 @@ pub struct MemorySSAEvent<L, V, F> {
     clobbered_version: Option<MemorySsaValue>,
 }
 
-impl<L, V, F> MemorySSAEvent<L, V, F> {
+impl<L, V, F> MemorySsaEvent<L, V, F> {
     /// Source identity of this event.
     #[must_use]
     pub const fn site(&self) -> MemoryEventSite {
@@ -280,7 +322,7 @@ impl<L, V, F> MemorySSAEvent<L, V, F> {
     /// Prior memory state replaced by a write or read/modify/write.
     ///
     /// A blind write structurally clobbers this state but does not semantically
-    /// read it; it therefore does not appear in [`MemorySSA::users`].
+    /// read it; it therefore does not appear in [`MemorySsa::users`].
     #[must_use]
     pub const fn clobbered_version(&self) -> Option<&MemorySsaValue> {
         self.clobbered_version.as_ref()
@@ -367,19 +409,8 @@ impl<L, V, F> MemorySSAEvent<L, V, F> {
     where
         V: VariableId,
     {
-        let access = self.access()?;
-        let instruction = ssa.instruction(self.site.point)?;
-        access
-            .address_uses()
-            .iter()
-            .map(|address| {
-                instruction
-                    .uses()
-                    .iter()
-                    .find(|value| &value.variable == address)
-                    .cloned()
-            })
-            .collect()
+        self.access()?
+            .ssa_address_uses(ssa.instruction(self.site.point)?)
     }
 }
 
@@ -392,19 +423,18 @@ impl<L, V, F> MemorySSAEvent<L, V, F> {
 /// defines a new one, and a read/modify/write does both.
 ///
 /// Events retain their exact reported locations and native address inputs;
-/// [`MemorySSAEvent::ssa_address_uses`] connects those inputs to ordinary SSA.
+/// [`MemorySsaEvent::ssa_address_uses`] connects those inputs to ordinary SSA.
 /// Location precision is therefore defined by the adapter. A whole object or
 /// region remains sound but produces correspondingly conservative def-use
 /// chains.
 ///
 /// Fence events remain ordered and queryable but do not define memory values:
-/// their cross-thread happens-before meaning is consumer-specific. As with
-/// [`SsaForm::compute`], the CFG entry must not be a branch target.
+/// their cross-thread happens-before meaning is consumer-specific.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MemorySSA<L, V, F> {
+pub struct MemorySsa<L, V, F> {
     classes: Vec<MemoryLocationClass<L>>,
     class_by_location: BTreeMap<L, MemoryClassId>,
-    events: Vec<MemorySSAEvent<L, V, F>>,
+    events: Vec<MemorySsaEvent<L, V, F>>,
     event_by_site: BTreeMap<MemoryEventSite, usize>,
     events_by_point: BTreeMap<ProgramPoint, Range<usize>>,
     phis: Vec<MemoryPhi>,
@@ -413,13 +443,18 @@ pub struct MemorySSA<L, V, F> {
     users: BTreeMap<MemorySsaValue, Vec<MemoryUse>>,
 }
 
-impl<L, V, F> MemorySSA<L, V, F>
+impl<L, V, F> MemorySsa<L, V, F>
 where
     L: Clone + Ord,
     V: VariableId,
     F: Clone + Eq,
 {
     /// Computes location-aware memory SSA for `cfg` using `alias`.
+    ///
+    /// An entry block that is a branch target is supported, as it is by
+    /// [`SsaForm::compute`]: each memory phi placed there also merges the
+    /// state the function starts with, reported by
+    /// [`MemoryPhi::start_value`] apart from its edge operands.
     #[must_use]
     pub fn compute<G, A>(cfg: &G, alias: &A) -> Self
     where
@@ -490,13 +525,13 @@ where
 
     /// Every event in stable CFG, instruction, and semantic-event order.
     #[must_use]
-    pub fn events(&self) -> &[MemorySSAEvent<L, V, F>] {
+    pub fn events(&self) -> &[MemorySsaEvent<L, V, F>] {
         &self.events
     }
 
     /// Events emitted by one source instruction.
     #[must_use]
-    pub fn events_at(&self, point: ProgramPoint) -> &[MemorySSAEvent<L, V, F>] {
+    pub fn events_at(&self, point: ProgramPoint) -> &[MemorySsaEvent<L, V, F>] {
         self.events_by_point
             .get(&point)
             .map_or(&[], |range| &self.events[range.clone()])
@@ -506,7 +541,7 @@ where
     pub fn events_for<'a>(
         &'a self,
         location: &'a L,
-    ) -> impl Iterator<Item = &'a MemorySSAEvent<L, V, F>> + 'a {
+    ) -> impl Iterator<Item = &'a MemorySsaEvent<L, V, F>> + 'a {
         let class = self.class_of(location);
         self.events
             .iter()
@@ -518,14 +553,13 @@ where
     pub fn operations_at(&self, point: ProgramPoint) -> MemoryOperations {
         self.events_at(point)
             .iter()
-            .fold(MemoryOperations::NONE, |operations, event| {
-                operations.union(event.operations())
-            })
+            .map(MemorySsaEvent::operations)
+            .collect()
     }
 
     /// Looks up one event by its source identity.
     #[must_use]
-    pub fn event(&self, site: MemoryEventSite) -> Option<&MemorySSAEvent<L, V, F>> {
+    pub fn event(&self, site: MemoryEventSite) -> Option<&MemorySsaEvent<L, V, F>> {
         self.event_by_site
             .get(&site)
             .map(|&index| &self.events[index])
@@ -570,7 +604,7 @@ where
     /// Phi chains are expanded transitively and cycles are visited once.
     #[must_use]
     pub fn reaching_definitions(&self, site: MemoryEventSite) -> Vec<&MemoryDefinition> {
-        let Some(start) = self.event(site).and_then(MemorySSAEvent::read_version) else {
+        let Some(start) = self.event(site).and_then(MemorySsaEvent::read_version) else {
             return Vec::new();
         };
         let mut pending = vec![start.clone()];
@@ -595,6 +629,8 @@ where
                         .rev()
                         .map(|(_, operand)| operand.clone()),
                 );
+                // Popped first, as the function starts before any edge runs.
+                pending.extend(self.phis[phi_index].start_value());
             } else {
                 result.push(definition);
             }
@@ -608,7 +644,7 @@ where
     /// sorted and deduplicated.
     #[must_use]
     pub fn transitive_readers(&self, site: MemoryEventSite) -> Vec<MemoryEventSite> {
-        let Some(start) = self.event(site).and_then(MemorySSAEvent::written_version) else {
+        let Some(start) = self.event(site).and_then(MemorySsaEvent::written_version) else {
             return Vec::new();
         };
         let mut pending = vec![start.clone()];
@@ -625,12 +661,14 @@ where
                         readers.insert(*reader);
                         if let Some(written) = self
                             .event(*reader)
-                            .and_then(MemorySSAEvent::written_version)
+                            .and_then(MemorySsaEvent::written_version)
                         {
                             pending.push(written.clone());
                         }
                     }
-                    MemoryUse::Phi { result, .. } => pending.push(result.clone()),
+                    MemoryUse::Phi { result, .. } | MemoryUse::PhiStart { result, .. } => {
+                        pending.push(result.clone());
+                    }
                 }
             }
         }
@@ -638,22 +676,22 @@ where
     }
 
     /// Events that semantically read memory.
-    pub fn reads(&self) -> impl Iterator<Item = &MemorySSAEvent<L, V, F>> {
+    pub fn reads(&self) -> impl Iterator<Item = &MemorySsaEvent<L, V, F>> {
         self.events.iter().filter(|entry| entry.reads())
     }
 
     /// Events that semantically write memory.
-    pub fn writes(&self) -> impl Iterator<Item = &MemorySSAEvent<L, V, F>> {
+    pub fn writes(&self) -> impl Iterator<Item = &MemorySsaEvent<L, V, F>> {
         self.events.iter().filter(|entry| entry.writes())
     }
 
     /// Compound read/modify/write events.
-    pub fn modifies(&self) -> impl Iterator<Item = &MemorySSAEvent<L, V, F>> {
+    pub fn modifies(&self) -> impl Iterator<Item = &MemorySsaEvent<L, V, F>> {
         self.events.iter().filter(|entry| entry.modifies())
     }
 
     /// Fence events in stable structural order.
-    pub fn fences(&self) -> impl Iterator<Item = &MemorySSAEvent<L, V, F>> {
+    pub fn fences(&self) -> impl Iterator<Item = &MemorySsaEvent<L, V, F>> {
         self.events.iter().filter(|entry| entry.is_fence())
     }
 
@@ -665,37 +703,46 @@ where
         shadow: &Cfg<ShadowInstruction>,
         ssa: &SsaForm<MemoryClassId>,
     ) -> Self {
-        let mut phis = Vec::new();
-        let mut phi_by_result = BTreeMap::new();
-        let mut definitions = BTreeMap::new();
-        let mut users: BTreeMap<MemorySsaValue, Vec<MemoryUse>> = BTreeMap::new();
-        // A shadow departure names a shadow step; consumers know the source
-        // instruction it stands in, or the source block's end.
-        let departure = |point: ProgramPoint| {
-            shadow
-                .block(point.block)
-                .instructions()
-                .get(point.inst_idx)
-                .map_or(
-                    ProgramPoint {
-                        block: point.block,
-                        inst_idx: cfg.instructions(point.block).len(),
-                    },
-                    |step| step.point,
-                )
-        };
-
+        let mut chains = Chains::default();
         for class in &classes {
-            definitions.insert(
+            chains.definitions.insert(
                 SsaValue::live_in(class.id),
                 MemoryDefinition::LiveIn { class: class.id },
             );
         }
+        let (phis, phi_by_result) = Self::phi_table(cfg, shadow, ssa, &mut chains);
+        let EventTable {
+            events,
+            by_site: event_by_site,
+            by_point: events_by_point,
+        } = Self::event_table(trace, shadow, ssa, &mut chains);
+        Self {
+            classes,
+            class_by_location,
+            events,
+            event_by_site,
+            events_by_point,
+            phis,
+            phi_by_result,
+            definitions: chains.definitions,
+            users: chains.users,
+        }
+    }
+
+    /// The renamed phis with their results' producers, and each operand's
+    /// phi use recorded in `chains`.
+    fn phi_table<G: CfgView>(
+        cfg: &G,
+        shadow: &Cfg<ShadowInstruction>,
+        ssa: &SsaForm<MemoryClassId>,
+        chains: &mut Chains,
+    ) -> (Vec<MemoryPhi>, BTreeMap<MemorySsaValue, usize>) {
+        let mut phis = Vec::new();
+        let mut phi_by_result = BTreeMap::new();
         for block in ssa.blocks() {
             for phi in &block.phis {
-                let phi_index = phis.len();
-                phi_by_result.insert(phi.result.clone(), phi_index);
-                definitions.insert(
+                phi_by_result.insert(phi.result.clone(), phis.len());
+                chains.definitions.insert(
                     phi.result.clone(),
                     MemoryDefinition::Phi {
                         block: block.block,
@@ -705,10 +752,21 @@ where
                 let operands: Vec<_> = phi
                     .operands()
                     .iter()
-                    .map(|(point, value)| (departure(*point), value.clone()))
+                    .map(|(point, value)| (source_departure(cfg, shadow, *point), value.clone()))
                     .collect();
+                if let Some(start) = phi.start_value() {
+                    chains
+                        .users
+                        .entry(start)
+                        .or_default()
+                        .push(MemoryUse::PhiStart {
+                            block: block.block,
+                            result: phi.result.clone(),
+                        });
+                }
                 for (predecessor, operand) in &operands {
-                    users
+                    chains
+                        .users
                         .entry(operand.clone())
                         .or_default()
                         .push(MemoryUse::Phi {
@@ -721,13 +779,26 @@ where
                     block: block.block,
                     result: phi.result.clone(),
                     operands,
+                    merges_start: phi.merges_start_value(),
                 });
             }
         }
+        (phis, phi_by_result)
+    }
 
-        let mut events = Vec::new();
-        let mut event_by_site = BTreeMap::new();
-        let mut events_by_point: BTreeMap<ProgramPoint, Range<usize>> = BTreeMap::new();
+    /// The events annotated with the renamed class states of the shadow
+    /// steps that replay them; their producers and readers go to `chains`.
+    fn event_table(
+        trace: &[MemoryTraceEntry<L, V, F>],
+        shadow: &Cfg<ShadowInstruction>,
+        ssa: &SsaForm<MemoryClassId>,
+        chains: &mut Chains,
+    ) -> EventTable<L, V, F> {
+        let mut table = EventTable {
+            events: Vec::new(),
+            by_site: BTreeMap::new(),
+            by_point: BTreeMap::new(),
+        };
         for block in ssa.blocks() {
             let shadow_instructions = shadow.block(block.block).instructions();
             for (instruction_index, renamed) in block.instructions.iter().enumerate() {
@@ -739,7 +810,7 @@ where
                 let output = renamed.defs().first().cloned();
                 let reads = entry.event().reads();
                 let writes = entry.event().writes();
-                let event = MemorySSAEvent {
+                let event = MemorySsaEvent {
                     site: MemoryEventSite::new(entry.point(), entry.event_index()),
                     event: entry.event().clone(),
                     class: source.class,
@@ -754,40 +825,68 @@ where
                         .then(|| input.expect("every memory write must replace its shadow class")),
                 };
                 if let Some(version) = &event.read_version {
-                    users
+                    chains
+                        .users
                         .entry(version.clone())
                         .or_default()
                         .push(MemoryUse::Event { site: event.site });
                 }
                 if let Some(version) = &event.written_version {
-                    definitions.insert(
+                    chains.definitions.insert(
                         version.clone(),
                         MemoryDefinition::Event { site: event.site },
                     );
                 }
 
-                let event_index = events.len();
-                event_by_site.insert(event.site, event_index);
-                events_by_point
+                let event_index = table.events.len();
+                table.by_site.insert(event.site, event_index);
+                table
+                    .by_point
                     .entry(event.site.point)
                     .and_modify(|range| range.end = event_index + 1)
                     .or_insert(event_index..event_index + 1);
-                events.push(event);
+                table.events.push(event);
             }
         }
-
-        Self {
-            classes,
-            class_by_location,
-            events,
-            event_by_site,
-            events_by_point,
-            phis,
-            phi_by_result,
-            definitions,
-            users,
-        }
+        table
     }
+}
+
+/// The producer and consumer tables that the phis and the events both fill.
+#[derive(Default)]
+struct Chains {
+    definitions: BTreeMap<MemorySsaValue, MemoryDefinition>,
+    users: BTreeMap<MemorySsaValue, Vec<MemoryUse>>,
+}
+
+/// Every event of a memory SSA, with the two indexes that find one.
+struct EventTable<L, V, F> {
+    events: Vec<MemorySsaEvent<L, V, F>>,
+    by_site: BTreeMap<MemoryEventSite, usize>,
+    by_point: BTreeMap<ProgramPoint, Range<usize>>,
+}
+
+/// The source point a shadow departure stands for.
+///
+/// A shadow departure names a shadow step; consumers know the source
+/// instruction the step stands in for, or the source block's end when the
+/// departure is past its last step.
+fn source_departure<G: CfgView>(
+    cfg: &G,
+    shadow: &Cfg<ShadowInstruction>,
+    point: ProgramPoint,
+) -> ProgramPoint {
+    shadow
+        .block(point.block)
+        .instructions()
+        .get(point.inst_idx)
+        .map_or(
+            ProgramPoint {
+                block: point.block,
+                inst_idx: cfg.instructions(point.block).len(),
+            },
+            |step| step.point,
+        )
 }
 
 mod scratch;

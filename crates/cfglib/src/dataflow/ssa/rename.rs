@@ -9,25 +9,12 @@ use smallvec::SmallVec;
 
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
-use crate::dataflow::{InstrInfo, ProgramPoint, VariableId};
-use crate::edge::KindedEdge;
-use crate::graph::dominator::{DominatorChildOrder, DominatorTree};
+use crate::dataflow::unwind::unwind_edges;
+use crate::graph::dominator::DominatorTree;
+use crate::{InstrInfo, ProgramPoint, VariableId};
 
 use super::scratch::SsaScratch;
 use super::{SsaBlock, SsaInstruction, SsaPhi, SsaValue, SsaVersion};
-
-/// One step of the iterative dominator-tree walk.
-///
-/// The exit step carries a *count* rather than the variables themselves: every
-/// definition pushed by a block is appended to one shared stack, so unwinding
-/// is popping that many, and the walk allocates no vector per block.
-#[derive(Debug)]
-pub(super) enum RenameEvent {
-    /// Rename this block, then unwind it.
-    Enter(BlockId),
-    /// Pop this many variables from the shared pushed-variable stack.
-    Exit(usize),
-}
 
 pub(super) fn current_value<V: VariableId>(
     variable: &V,
@@ -52,8 +39,10 @@ pub(super) fn fresh_value<V: VariableId>(
 /// Rename `block`: its phis, its instructions, and the operands it supplies to
 /// its successors' phis.
 ///
-/// Returns how many variables were pushed onto the shared stack, which is what
-/// the matching [`RenameEvent::Exit`] unwinds.
+/// Returns how many variables were pushed onto the shared stack, which is
+/// what leaving the block's scope pops. Every definition a block pushes is
+/// appended to one stack, so unwinding is popping a count and the walk
+/// allocates no vector per block.
 fn rename_block<G, V>(
     scratch: &mut SsaScratch<V>,
     cfg: &G,
@@ -88,15 +77,12 @@ where
     block_instructions.reserve_exact(cfg.instructions(block).len());
     for (inst_idx, instruction) in cfg.instructions(block).iter().enumerate() {
         if instruction.may_unwind() {
-            for edge in cfg.outgoing(block) {
-                let edge = cfg.edge(edge);
-                if edge.data().kind() == crate::EdgeKind::ExceptionUnwind {
-                    phis.set_operands(
-                        edge.target(),
-                        ProgramPoint { block, inst_idx },
-                        |variable| current_value(variable, stacks),
-                    );
-                }
+            for edge in unwind_edges(cfg, block) {
+                phis.set_operands(
+                    edge.target(),
+                    ProgramPoint { block, inst_idx },
+                    |variable| current_value(variable, stacks),
+                );
             }
         }
         let uses = instruction
@@ -147,7 +133,13 @@ fn push_value<V: VariableId>(
     stack.push(value);
 }
 
-/// Rename every block reachable from a root of the dominator forest.
+/// Rename every block of the dominator forest, each exactly once.
+///
+/// `dom` has to be a forest that holds every block of `cfg`: the tree of the
+/// entry, plus the trees `complete_dominator_forest` roots at the code the
+/// entry misses. A block in no tree has no span to walk, so it would be
+/// skipped without a word, and its instructions would reach the form
+/// un-renamed; the forest is what rules that out, and it is asserted here.
 pub(super) fn rename<G, V>(
     scratch: &mut SsaScratch<V>,
     cfg: &G,
@@ -158,48 +150,35 @@ pub(super) fn rename<G, V>(
     G::Inst: InstrInfo<Variable = V>,
     V: VariableId,
 {
-    // The event stack consumes siblings in reverse, so descending links
-    // preserve `DominatorTree::children`'s ascending DFS visitation.
-    dom.child_links_in(&mut scratch.children, DominatorChildOrder::Descending);
-    scratch.roots.clear();
-    scratch.roots.push(cfg.root());
-    scratch.roots.extend(
+    debug_assert!(
+        cfg.node_ids().all(|block| dom.is_reachable(block)),
+        "the dominator forest leaves a block out of every tree"
+    );
+    // The entry's tree first, then every other tree of the forest in
+    // ascending root order: the order fixes which block gets which version.
+    let roots = core::iter::once(cfg.root()).chain(
         cfg.node_ids()
             .filter(|&block| block != cfg.root() && dom.idom(block).is_none()),
     );
-
-    for index in 0..scratch.roots.len() {
-        scratch.events.clear();
-        scratch
-            .events
-            .push(RenameEvent::Enter(scratch.roots[index]));
-        while let Some(event) = scratch.events.pop() {
-            match event {
-                RenameEvent::Enter(block) if !scratch.renamed.is_marked(block.index()) => {
-                    scratch.renamed.mark(block.index());
-                    let pushed = rename_block(scratch, cfg, block, max_versions);
-                    scratch.events.push(RenameEvent::Exit(pushed));
-                    let mut child = scratch.children.first_child(block);
-                    while let Some(next) = child {
-                        scratch.events.push(RenameEvent::Enter(next));
-                        child = scratch.children.next_sibling(next);
-                    }
-                }
-                RenameEvent::Enter(_) => {}
-                RenameEvent::Exit(count) => {
-                    for _ in 0..count {
-                        let variable = scratch
-                            .pushed
-                            .pop()
-                            .expect("an unwind pops only what its block pushed");
-                        if let Some(stack) = scratch.stacks.get_mut(&variable) {
-                            stack.pop();
-                        }
-                    }
+    let mut open = core::mem::take(&mut scratch.open);
+    dom.scoped_walk(
+        roots,
+        scratch,
+        &mut open,
+        |scratch, block| rename_block(scratch, cfg, block, max_versions),
+        |scratch, _, pushed| {
+            for _ in 0..pushed {
+                let variable = scratch
+                    .pushed
+                    .pop()
+                    .expect("an unwind pops only what its block pushed");
+                if let Some(stack) = scratch.stacks.get_mut(&variable) {
+                    stack.pop();
                 }
             }
-        }
-    }
+        },
+    );
+    scratch.open = open;
 }
 
 /// Turn the renamed drafts into the finished blocks, in block-identity order.
@@ -230,7 +209,11 @@ pub(super) fn finish_blocks<V: VariableId>(
                             (predecessor, value)
                         })
                         .collect();
-                    SsaPhi { result, operands }
+                    SsaPhi {
+                        result,
+                        operands,
+                        merges_start: draft.merges_start,
+                    }
                 })
                 .collect();
             SsaBlock {

@@ -6,20 +6,33 @@
 //! [`Cfg::contains_block`] answer honestly afterwards. The slots stay
 //! reserved until the caller compacts, which is what keeps the identities in
 //! the returned [`Rewrite`] meaningful.
+//!
+//! The passes also keep the CFG's exception metadata true. A block that a
+//! handler, filter, or cleanup names by a single reference is never removed
+//! or merged away, and blocks are only merged when the same regions protect
+//! both, so [`Cfg::compact`] and [`EhModel`](crate::EhModel) stay usable
+//! after any sequence of them.
 
 extern crate alloc;
-use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
+use crate::graph::traverse::{TraversalDirection, reachable};
 use crate::rewrite::Rewrite;
+use crate::transform::contract::contract_edge_inner;
 
 /// Remove blocks unreachable from the entry block.
 ///
-/// This compatibility entry point returns only the number of blocks removed.
-/// Use [`remove_unreachable_mapped`] when identities matter.
+/// Returns the number of blocks removed. Use [`remove_unreachable_mapped`]
+/// when identities matter.
+///
+/// Blocks that exception metadata names (handler entries, filter blocks,
+/// cleanup resume points and continuation targets) count as roots, along with
+/// everything they reach: a handler no modeled edge enters is still a handler.
+/// Call [`Cfg::remove_unreachable_regions`] first to drop regions that nothing
+/// can raise into, together with their handler blocks.
 pub fn remove_unreachable<I, E>(cfg: &mut Cfg<I, E>) -> usize {
     remove_unreachable_mapped(cfg).0
 }
@@ -27,12 +40,13 @@ pub fn remove_unreachable<I, E>(cfg: &mut Cfg<I, E>) -> usize {
 /// Remove unreachable blocks and report every removed block and edge.
 ///
 /// The removed slots keep their instructions readable until the next
-/// [`Cfg::compact`], so a caller can still inspect what it dropped.
+/// [`Cfg::compact`], so a caller can still inspect what it dropped. Blocks
+/// that exception metadata names are kept, as in [`remove_unreachable`].
 pub fn remove_unreachable_mapped<I, E>(cfg: &mut Cfg<I, E>) -> (usize, Rewrite) {
-    let mut reachable = vec![false; cfg.block_bound()];
-    for block in cfg.depth_first_preorder() {
-        reachable[block.index()] = true;
-    }
+    let roots: Vec<BlockId> = core::iter::once(cfg.entry())
+        .chain(cfg.anchors().filter(|&anchor| cfg.contains_block(anchor)))
+        .collect();
+    let reachable = reachable(&*cfg, roots, TraversalDirection::Outgoing);
 
     let doomed: Vec<BlockId> = cfg
         .block_ids()
@@ -41,24 +55,26 @@ pub fn remove_unreachable_mapped<I, E>(cfg: &mut Cfg<I, E>) -> (usize, Rewrite) 
 
     let mut mapping = Rewrite::new();
     for block in &doomed {
-        let (_, removal) = cfg.remove_block_mapped(*block);
-        mapping.compose(removal);
+        cfg.remove_block_recording(*block, &mut mapping);
     }
     (doomed.len(), mapping)
 }
 
 /// Merge blocks connected by a sole-successor, sole-predecessor edge.
 ///
-/// The entry block is never consumed as a merge target.
+/// Returns the number of merges. Use [`merge_blocks_mapped`] to retain the
+/// identity relationship.
 ///
-/// This compatibility entry point returns only the number of merges. Use
-/// [`merge_blocks_mapped`] to retain the identity relationship.
+/// Each merge is a [`contract_edge`](crate::contract_edge): the entry block is
+/// never consumed as a merge target, an exception edge is never contracted,
+/// and the two blocks must lie in the same protected regions and handler
+/// bodies with no handler, filter, or cleanup naming the block that goes away.
 pub fn merge_blocks<I, E>(cfg: &mut Cfg<I, E>) -> usize {
     merge_blocks_inner(cfg, None)
 }
 
 /// Merge linear blocks while preserving every surviving edge identity and
-/// payload. The entry block is never consumed as a merge target.
+/// payload, under the same rules as [`merge_blocks`].
 pub fn merge_blocks_mapped<I, E>(cfg: &mut Cfg<I, E>) -> (usize, Rewrite) {
     let mut mapping = Rewrite::new();
     let merged = merge_blocks_inner(cfg, Some(&mut mapping));
@@ -72,51 +88,22 @@ fn merge_blocks_inner<I, E>(cfg: &mut Cfg<I, E>, mut mapping: Option<&mut Rewrit
         if !cfg.contains_block(source) {
             continue;
         }
-        while let Some(connecting) = sole_outgoing(cfg, source) {
+        while let Some(connecting) = cfg.sole_outgoing(source) {
             let target = cfg.edge(connecting).target();
-            if target == source || target == cfg.entry() {
+            if !contract_edge_inner(cfg, source, target, mapping.as_deref_mut()) {
                 break;
             }
-            if cfg.incoming(target).count() != 1 {
-                break;
-            }
-
-            let target_instructions = core::mem::take(cfg.block_mut(target).instructions_mut());
-            cfg.block_mut(source)
-                .instructions_mut()
-                .extend(target_instructions);
-
-            cfg.remove_edge(connecting);
-            if let Some(mapping) = mapping.as_deref_mut() {
-                mapping.record_edge(connecting, []);
-            }
-            cfg.move_outgoing_edges(target, source);
-            let moved: Vec<_> = cfg.outgoing(source).collect();
-            cfg.remove_block(target);
-            if let Some(mapping) = mapping.as_deref_mut() {
-                for edge in moved {
-                    mapping.record_edge(edge, [edge]);
-                }
-                mapping.record_block(target, [source]);
-            }
-
             merged += 1;
         }
     }
     merged
 }
 
-/// The only outgoing edge of `block`, when it has exactly one.
-fn sole_outgoing<I, E>(cfg: &Cfg<I, E>, block: BlockId) -> Option<crate::EdgeId> {
-    let mut outgoing = cfg.outgoing(block);
-    let first = outgoing.next()?;
-    outgoing.next().is_none().then_some(first)
-}
-
 /// Bypass empty blocks with one fallthrough-like successor.
 ///
-/// This compatibility entry point returns only the count. Use
-/// [`remove_empty_blocks_mapped`] when clients retain graph identities.
+/// Returns the number of blocks removed. Use [`remove_empty_blocks_mapped`]
+/// when clients retain graph identities. A block that exception metadata
+/// names (a handler entry, filter block, or cleanup block) is never bypassed.
 pub fn remove_empty_blocks<I, E>(cfg: &mut Cfg<I, E>) -> usize {
     remove_empty_blocks_inner(cfg, None)
 }
@@ -135,10 +122,14 @@ fn remove_empty_blocks_inner<I, E>(
     let mut removed = 0;
     let order = cfg.depth_first_preorder();
     for id in order {
-        if id == cfg.entry() || !cfg.contains_block(id) || !cfg.block(id).is_empty() {
+        if id == cfg.entry()
+            || !cfg.contains_block(id)
+            || !cfg.block(id).is_empty()
+            || cfg.is_anchor(id)
+        {
             continue;
         }
-        let Some(outgoing) = sole_outgoing(cfg, id) else {
+        let Some(outgoing) = cfg.sole_outgoing(id) else {
             continue;
         };
         let edge = cfg.edge(outgoing);

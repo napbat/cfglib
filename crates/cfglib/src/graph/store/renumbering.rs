@@ -89,8 +89,10 @@ impl<NT: IdTag, ET: IdTag> Renumbering<NT, ET> {
 
     /// Whether every covered identity kept its number.
     ///
-    /// True exactly when the compaction had nothing to do: no removed entity
-    /// preceded a surviving one in either slot space.
+    /// True exactly when nothing was removed: a removed entity has no new
+    /// number, even when it was the last slot and nothing moved down behind
+    /// it. A compaction that only folded the delta into the base removes
+    /// nothing, and is the identity.
     #[must_use]
     pub fn is_identity(&self) -> bool {
         is_identity_axis(&self.nodes) && is_identity_axis(&self.edges)

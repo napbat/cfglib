@@ -31,20 +31,6 @@ fn diamond() -> (Graph<&'static str, &'static str>, Vec<NodeId>) {
     (graph, nodes)
 }
 
-/// The same shape in the arena store, for view comparisons.
-fn arena_diamond() -> (Graph<&'static str, &'static str>, Vec<crate::NodeId>) {
-    let mut graph = Graph::new();
-    let nodes: Vec<_> = ["entry", "left", "right", "exit"]
-        .into_iter()
-        .map(|payload| graph.add_node(payload))
-        .collect();
-    graph.add_edge(nodes[0], nodes[1], "a");
-    graph.add_edge(nodes[0], nodes[2], "b");
-    graph.add_edge(nodes[1], nodes[3], "c");
-    graph.add_edge(nodes[2], nodes[3], "d");
-    (graph, nodes)
-}
-
 fn indexes<T: Copy, I: IntoIterator<Item = T>>(
     values: I,
     index: impl Fn(T) -> usize,
@@ -474,9 +460,9 @@ fn a_bulk_move_of_nothing_names_no_replacement() {
 fn verify_reports_an_edge_its_endpoint_stopped_listing() {
     // The shape of a dropped listing: the edge is live and its other
     // endpoint still lists it, but one endpoint's chain has forgotten it.
-    for (direction, role) in [
-        (TraversalDirection::Outgoing, "successor"),
-        (TraversalDirection::Incoming, "predecessor"),
+    for (direction, (outgoing, incoming)) in [
+        (TraversalDirection::Outgoing, (0, 1)),
+        (TraversalDirection::Incoming, (1, 0)),
     ] {
         let mut cfg = crate::Cfg::<u32>::new();
         let source = cfg.entry();
@@ -491,12 +477,13 @@ fn verify_reports_an_edge_its_endpoint_stopped_listing() {
         cfg.graph.chains.detach_node(forgetful.index(), direction);
 
         let report = crate::verify(&cfg);
-        assert!(!report.is_ok(), "a dropped {role} listing must be reported");
+        let expected = alloc::format!(
+            "edge index {} appears {outgoing} time(s) in outgoing and {incoming} time(s) in incoming adjacency",
+            edge.index()
+        );
         assert!(
-            report.errors[0]
-                .message
-                .contains(&alloc::format!("edge {edge} is not a {role} edge")),
-            "{:?}",
+            report.errors.iter().any(|error| error.message == expected),
+            "a dropped {direction:?} listing must be reported: {:?}",
             report.errors
         );
     }
@@ -544,6 +531,69 @@ fn compacting_an_untouched_store_is_the_identity() {
     let second = graph.compact();
     assert!(second.is_identity());
     assert!(first.compose(&second).is_identity());
+}
+
+#[test]
+fn compaction_keeps_the_adjacency_order_a_redirect_produced() {
+    // A redirect appends the edge to its new endpoint's adjacency, so there
+    // the older edge comes second and the order is no longer identity order.
+    for direction in [TraversalDirection::Outgoing, TraversalDirection::Incoming] {
+        let mut graph = Graph::<&'static str, &'static str>::new();
+        let [hub, other, near, far] =
+            ["hub", "other", "near", "far"].map(|payload| graph.add_node(payload));
+        let (moved, resident) = match direction {
+            TraversalDirection::Outgoing => (
+                graph.add_edge(other, near, "moved"),
+                graph.add_edge(hub, far, "resident"),
+            ),
+            TraversalDirection::Incoming => (
+                graph.add_edge(near, other, "moved"),
+                graph.add_edge(far, hub, "resident"),
+            ),
+        };
+        match direction {
+            TraversalDirection::Outgoing => graph.redirect_edge_source(moved, hub),
+            TraversalDirection::Incoming => graph.redirect_edge_target(moved, hub),
+        };
+        assert_eq!(
+            graph.adjacent(hub, direction).collect::<Vec<_>>(),
+            [resident, moved]
+        );
+
+        let renumbering = graph.compact();
+
+        let hub = renumbering.node(hub).expect("hub survives");
+        let expected = [resident, moved].map(|edge| renumbering.edge(edge).expect("edge survives"));
+        assert_eq!(
+            graph.adjacent(hub, direction).collect::<Vec<_>>(),
+            expected,
+            "{direction:?} adjacency order changed across compaction"
+        );
+
+        // The compacted base now holds that order, so the next compaction has
+        // no overlay to read it from.
+        assert!(graph.compact().is_identity());
+        assert_eq!(
+            graph.adjacent(hub, direction).collect::<Vec<_>>(),
+            expected,
+            "{direction:?} adjacency order changed across a second compaction"
+        );
+    }
+}
+
+#[test]
+fn only_a_compaction_that_removed_nothing_is_the_identity() {
+    let (mut graph, nodes) = diamond();
+    // Nothing moves down when the last slot goes, yet the slot has no number.
+    graph.remove_node(nodes[3]);
+    let trailing = graph.compact();
+    assert!(!trailing.is_identity());
+    assert_eq!(trailing.node(nodes[3]), None);
+    assert_eq!(trailing.node(nodes[2]), Some(nodes[2]));
+
+    // A compaction that only folds the delta into the base removes nothing.
+    graph.add_node("appended");
+    assert!(graph.compact().is_identity());
 }
 
 #[test]
@@ -664,47 +714,40 @@ fn an_edge_cannot_attach_to_a_removed_node() {
 }
 
 #[test]
-fn the_algorithms_agree_with_the_arena_store() {
-    let (mut store, store_nodes) = diamond();
+fn the_algorithms_agree_whether_the_edges_sit_in_the_delta_or_the_compacted_base() {
+    let (mut base, base_nodes) = diamond();
     // A back edge makes the comparison cover a cycle as well as a diamond.
-    store.add_edge(store_nodes[3], store_nodes[0], "back");
-    store.compact();
-    let (mut arena, arena_nodes) = arena_diamond();
-    arena.add_edge(arena_nodes[3], arena_nodes[0], "back");
+    base.add_edge(base_nodes[3], base_nodes[0], "back");
+    base.compact();
+    let (mut delta, delta_nodes) = diamond();
+    delta.add_edge(delta_nodes[3], delta_nodes[0], "back");
 
-    let store_rooted = Rooted::new(&store, store_nodes[0]);
-    let arena_rooted = Rooted::new(&arena, arena_nodes[0]);
-    let store_dominators = DominatorTree::compute(&store_rooted);
-    let arena_dominators = DominatorTree::compute(&arena_rooted);
-    for (store_node, arena_node) in store_nodes.iter().zip(&arena_nodes) {
+    let base_dominators = DominatorTree::compute(&Rooted::new(&base, base_nodes[0]));
+    let delta_dominators = DominatorTree::compute(&Rooted::new(&delta, delta_nodes[0]));
+    for (base_node, delta_node) in base_nodes.iter().zip(&delta_nodes) {
         assert_eq!(
-            store_dominators.idom(*store_node).map(Id::index),
-            arena_dominators.idom(*arena_node).map(crate::NodeId::index),
-            "immediate dominator of {store_node}"
+            base_dominators.idom(*base_node).map(Id::index),
+            delta_dominators.idom(*delta_node).map(Id::index),
+            "immediate dominator of {base_node}"
         );
     }
 
-    let store_components = tarjan_scc(&store);
-    let arena_components = tarjan_scc(&arena);
-    assert_eq!(
-        store_components
+    let components = |graph: &Graph<&'static str, &'static str>| {
+        tarjan_scc(graph)
             .components()
             .map(|nodes| indexes(nodes.iter().copied(), Id::index))
-            .collect::<Vec<_>>(),
-        arena_components
-            .components()
-            .map(|nodes| indexes(nodes.iter().copied(), crate::NodeId::index))
             .collect::<Vec<_>>()
-    );
+    };
+    assert_eq!(components(&base), components(&delta));
 
     assert_eq!(
         indexes(
-            depth_first_preorder(&store, store_nodes[0], TraversalDirection::Outgoing),
+            depth_first_preorder(&base, base_nodes[0], TraversalDirection::Outgoing),
             Id::index
         ),
         indexes(
-            depth_first_preorder(&arena, arena_nodes[0], TraversalDirection::Outgoing),
-            crate::NodeId::index
+            depth_first_preorder(&delta, delta_nodes[0], TraversalDirection::Outgoing),
+            Id::index
         )
     );
 }

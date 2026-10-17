@@ -28,6 +28,14 @@ pub enum ExceptionDisposition {
 /// edge payload. `M` can retain a CLR clause token, an SEH scope-table record,
 /// an exception/context identifier, or source provenance without making those
 /// platform types part of cfglib.
+///
+/// By convention the payload follows the edge's
+/// [`EdgeKind`](crate::EdgeKind): a frontend gives an edge whose kind
+/// [`is_exceptional`](crate::EdgeKind::is_exceptional)
+/// [`Exceptional`](Self::Exceptional) flow, and every other edge — including
+/// [`ExceptionLeave`](crate::EdgeKind::ExceptionLeave), a normal transfer out
+/// of a protected region — [`Normal`](Self::Normal) flow. The graph accepts
+/// any pairing and does not check this one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ExceptionFlow<M = ()> {

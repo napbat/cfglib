@@ -1,4 +1,4 @@
-//! Exception handling (EH) modelling.
+//! Exception handling (EH) modeling.
 //!
 //! Provides first-class support for EH control flow — landing pads, cleanup
 //! blocks, handler/unwind/leave/resume/continue edges, and stable links back to
@@ -60,7 +60,19 @@ impl EhEdgeKind {
             EdgeKind::ExceptionLeave => Some(Self::Leave),
             EdgeKind::ExceptionResume => Some(Self::Resume),
             EdgeKind::ExceptionContinue => Some(Self::Continue),
-            _ => None,
+            // Listed rather than matched by a wildcard, so a new edge kind has
+            // to say here whether the exception model carries it.
+            EdgeKind::Fallthrough
+            | EdgeKind::ConditionalTrue
+            | EdgeKind::ConditionalFalse
+            | EdgeKind::Unconditional
+            | EdgeKind::Back
+            | EdgeKind::Call
+            | EdgeKind::CallReturn
+            | EdgeKind::SwitchCase
+            | EdgeKind::Jump
+            | EdgeKind::IndirectJump
+            | EdgeKind::IndirectCall => None,
         }
     }
 
@@ -86,10 +98,6 @@ pub struct EhEdge {
     pub to: BlockId,
     /// Precise exception-control transfer kind.
     pub kind: EhEdgeKind,
-    /// Compatibility projection of [`Self::kind`].
-    ///
-    /// This is `true` only for [`EhEdgeKind::Unwind`].
-    pub is_unwind: bool,
 }
 
 /// EH model for a CFG.
@@ -274,6 +282,33 @@ mod tests {
         assert_eq!(model.eh_edges().len(), 1);
         assert_eq!(model.block_kind(handler), EhBlockKind::LandingPad);
         assert!(model.protected_by(handler).contains(&cfg.entry()));
+    }
+
+    #[test]
+    fn edge_order_does_not_decide_the_role_of_a_dispatch_target_that_also_resumes() {
+        // A filter-shaped block: the target of a handler edge and the source
+        // of a resume edge.
+        for dispatch_first in [true, false] {
+            let mut cfg = Cfg::<()>::new();
+            let filter = cfg.new_block();
+            let next = cfg.new_block();
+            if dispatch_first {
+                cfg.add_edge(cfg.entry(), filter, EdgeKind::ExceptionHandler);
+                cfg.add_edge(filter, next, EdgeKind::ExceptionResume);
+            } else {
+                cfg.add_edge(filter, next, EdgeKind::ExceptionResume);
+                cfg.add_edge(cfg.entry(), filter, EdgeKind::ExceptionHandler);
+            }
+
+            let model = EhModel::compute(&cfg);
+            assert_eq!(
+                model.block_kind(filter),
+                EhBlockKind::LandingPad,
+                "dispatch edge first: {dispatch_first}"
+            );
+            assert_eq!(model.landing_pads(), [filter]);
+            assert_eq!(model.resume_blocks(), []);
+        }
     }
 
     #[test]

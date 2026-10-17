@@ -151,8 +151,71 @@ fn overlay_keys_may_arrive_in_any_order() {
 fn an_overlay_key_that_cannot_name_a_node_is_rejected() {
     let error = serde_json::from_str::<Store>(&stored_with_incoming(r#"{"4294967295":[]}"#))
         .expect_err("no node has the last identity");
-    assert!(
-        error.to_string().contains("dense identity space"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("does not hold"), "{error}");
+}
+
+/// A small store in both states: a compacted base plus one appended edge.
+fn base_and_delta_store() -> serde_json::Value {
+    let mut graph = Store::new();
+    let [a, b, c] = ["a", "b", "c"].map(|label| graph.add_node(label.to_string()));
+    graph.add_edge(a, b, 1);
+    graph.add_edge(b, c, 2);
+    graph.compact();
+    graph.add_edge(c, a, 3);
+    serde_json::to_value(&graph).expect("the store serializes")
+}
+
+#[test]
+fn a_document_whose_columns_disagree_is_rejected_not_trusted() {
+    let sound = base_and_delta_store();
+    assert!(serde_json::from_value::<Store>(sound.clone()).is_ok());
+
+    // Each tampering replaces one value, named by its JSON pointer.
+    let tamperings = [
+        (
+            "a live count that lies",
+            "/live_node_count",
+            serde_json::json!(2),
+        ),
+        (
+            "an edge number past the edges",
+            "/out_edges/0",
+            serde_json::json!(9999),
+        ),
+        (
+            "an edge into a missing node",
+            "/base_edges/0/target",
+            serde_json::json!(77),
+        ),
+        (
+            "an index that is too short",
+            "/out_offsets",
+            serde_json::json!([0]),
+        ),
+        (
+            "a chain ending past the delta",
+            "/chains/last/2/0",
+            serde_json::json!(9),
+        ),
+        (
+            "a ring that never returns to its end",
+            "/chains/next/0",
+            serde_json::json!([5, 5]),
+        ),
+        (
+            "adjacency that lists an edge twice",
+            "/in_edges",
+            serde_json::json!([0, 0]),
+        ),
+    ];
+    for (label, pointer, value) in tamperings {
+        let mut document = sound.clone();
+        *document
+            .pointer_mut(pointer)
+            .expect("the encoding has that column") = value;
+        assert!(
+            serde_json::from_value::<Store>(document).is_err(),
+            "{label} must not load"
+        );
+    }
 }

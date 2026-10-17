@@ -1,0 +1,9 @@
+v1 = 0;
+v2 = 0;
+v4 = 1;
+while (less(v1, v0)) {
+    v2 = plus(v2, v1);
+    v1 = plus(v1, v4);
+    show(v2);
+}
+return v2;

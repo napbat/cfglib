@@ -15,9 +15,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
-use crate::graph::search::Visit;
-
-use super::may_expand;
+use crate::graph::search::{Visit, may_expand};
 
 /// Configuration for an [`open_breadth_first_paths`] walk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

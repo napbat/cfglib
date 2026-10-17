@@ -9,7 +9,7 @@ use core::slice;
 
 use super::node::{BlockSpan, ControlNode, ControlNodeId, LoopKind};
 use super::tree::ControlTree;
-use crate::dataflow::ProgramPoint;
+use crate::ProgramPoint;
 use crate::dataflow::cfg_view::CfgView;
 
 /// What [`ControlVisitor::enter`] asks the walk to do with a node's

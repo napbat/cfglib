@@ -7,7 +7,7 @@ use alloc::vec;
 use core::ops::ControlFlow;
 
 use crate::graph::traverse::{Adjacency, TraversalDirection, by_axis};
-use crate::graph::view::{DenseId, GraphView};
+use crate::graph::view::{DenseId, GraphView, assert_in_bound};
 
 /// An event of a [`breadth_first_events`] walk.
 ///
@@ -99,10 +99,7 @@ fn breadth_first_events_from<G: GraphView, A: Adjacency, B>(
     start: G::NodeId,
     mut on_event: impl FnMut(BfsEvent<G::NodeId>) -> ControlFlow<B>,
 ) -> Option<B> {
-    assert!(
-        start.index() < graph.node_bound(),
-        "start node is out of range"
-    );
+    assert_in_bound(graph, start, "start node");
 
     let mut discovered = vec![false; graph.node_bound()];
     let mut queue = VecDeque::new();

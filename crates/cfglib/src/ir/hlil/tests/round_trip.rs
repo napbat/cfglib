@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::string::String;
 
 use crate::BlockId;
-use crate::dataflow::ProgramPoint;
+use crate::ProgramPoint;
 use crate::graph::view::DenseId;
 use crate::ir::hlil::{
     Entity, FlatBuilder, FunctionBuilder, FunctionView, StmtShape, has_recovery_candidates, lower,
@@ -18,10 +18,11 @@ use crate::ir::hlil::{
 };
 use crate::test_util::golden::assert_golden;
 
+use super::fixtures::structured_counting_loop;
 use super::flat::{FlatKit, ToyEdge, ToyFlat, ToyFlatBuilder};
 use super::flat_fixtures::{counting_loop, dispatch_with_default, guarded_call};
 use super::flat_lift::{boolean, int, lifted};
-use super::{Prim, ToyHlil, ToyHlilBuilder, Ty};
+use super::{Prim, ToyHlilBuilder, Ty};
 
 over_toys!(
     lowering_and_relifting_round_trips_a_while_loop,
@@ -29,41 +30,11 @@ over_toys!(
     lowering_registers_declared_exception_regions_and_relifts_them,
     a_lifted_function_survives_lowering_and_lifting_again,
     recovery_composes_with_lifting_and_the_recovered_loop_lowers,
+    an_endless_loop_without_a_body_round_trips,
 );
 
-/// `while (lt(i, n)) { if (lt(i, 100)) { break; } i = add(i, 1); } return i;`
-fn structured_counting_loop<D: FlatKit>() -> ToyHlil<D> {
-    let mut builder = ToyHlilBuilder::<D>::new();
-    let i = builder.int_variable(0);
-    let n = builder.int_variable(0);
-
-    let limit = builder.number(100);
-    let read_i = builder.read(i);
-    let break_condition = builder.call(Prim::LessThan, &[read_i, limit], Ty::Boolean);
-    let break_statement = builder.break_(None);
-    let break_if = builder.if_(break_condition, &[break_statement], &[]);
-
-    let sum_left = builder.read(i);
-    let one = builder.number(1);
-    let sum = builder.call(Prim::Add, &[sum_left, one], Ty::Integer);
-    let assign = builder.store(i, sum);
-
-    let condition_left = builder.read(i);
-    let condition_right = builder.read(n);
-    let condition = builder.call(
-        Prim::LessThan,
-        &[condition_left, condition_right],
-        Ty::Boolean,
-    );
-    let looped = builder.while_(condition, &[break_if, assign]);
-    let result = builder.read(i);
-    let ret = builder.return_(&[result]);
-    builder.set_signature(&[i, n], &[D::ty(Ty::Integer)]);
-    builder.finish(&[looped, ret]).expect("the loop verifies")
-}
-
 fn lowering_and_relifting_round_trips_a_while_loop<D: FlatKit>() {
-    let function = structured_counting_loop::<D>();
+    let (function, _) = structured_counting_loop::<D>();
     let lowered = lower::<D, _, _>(&function, ToyFlatBuilder::<D>::new()).expect("the loop lowers");
     assert!(lowered.function.check().is_ok());
     assert_ne!(lowered.origins, []);
@@ -78,6 +49,25 @@ fn lowering_and_relifting_round_trips_a_while_loop<D: FlatKit>() {
         "hlil/relift-while-loop.pseudo",
         &pseudocode(&relifted.function),
     );
+}
+
+/// `loop { }`: the structure that lifting gives a block that jumps to itself,
+/// and a function that iterates forever, which lowering accepts.
+fn an_endless_loop_without_a_body_round_trips<D: FlatKit>() {
+    let mut builder = ToyHlilBuilder::<D>::new();
+    let spin = builder.loop_(&[]);
+    let function = builder.finish(&[spin]).expect("an empty loop verifies");
+
+    let lowered = lower::<D, _, _>(&function, ToyFlatBuilder::<D>::new())
+        .expect("a function may iterate forever without doing anything");
+    assert!(lowered.function.check().is_ok());
+    let relifted = lifted(&lowered.function);
+    assert!(
+        relifted.report.is_fully_structured(),
+        "{:?}",
+        relifted.report
+    );
+    assert_eq!(pseudocode(&relifted.function), "loop {\n}\n");
 }
 
 fn lowering_and_relifting_round_trips_a_switch<D: FlatKit>() {

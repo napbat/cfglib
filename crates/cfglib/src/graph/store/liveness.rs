@@ -68,6 +68,22 @@ impl LiveSet {
         true
     }
 
+    /// The number of live slots, when this set covers exactly `slots` slots
+    /// in the packed shape [`push_live`](Self::push_live) maintains: as many
+    /// words as the slots need, and no bit set beyond the last slot.
+    #[cfg(feature = "serde")]
+    pub(super) fn count_live(&self, slots: usize) -> Option<usize> {
+        if self.len != slots || self.words.len() != slots.div_ceil(BITS_PER_WORD) {
+            return None;
+        }
+        let tail = slots % BITS_PER_WORD;
+        if tail != 0 && self.words[self.words.len() - 1] >> tail != 0 {
+            return None;
+        }
+        let live: u32 = self.words.iter().map(|word| word.count_ones()).sum();
+        Some(live as usize)
+    }
+
     /// Replace the contents with `slots` live bits, reusing the allocation.
     pub(super) fn reset_all_live(&mut self, slots: usize) {
         self.words.clear();

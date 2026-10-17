@@ -1,0 +1,12 @@
+if (start) {
+    .bb1:
+        if (A) {
+            .bb2:
+                if (B) {
+                    goto .bb1;
+                }
+        }
+} else {
+    goto .bb2;
+}
+return

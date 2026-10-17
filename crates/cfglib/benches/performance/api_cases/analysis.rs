@@ -1,3 +1,4 @@
+use cfglib::SwitchTargets;
 use cfglib::{
     BlockId, Cfg, EdgeKind, FlowEffect, Purity, block_nesting_depths, block_purities, block_purity,
     cfg_block_nesting_depths, cfg_purity, detect_cfg_patterns, detect_explicit_tail_calls,
@@ -29,7 +30,10 @@ fn switch_cfg() -> (Cfg<ApiInst>, Vec<BlockId>) {
     let mut cfg = Cfg::new();
     let targets: Vec<_> = (0..3).map(|_| cfg.new_block()).collect();
     let mut dispatch = ApiInst::control(FlowEffect::IndirectJump);
-    dispatch.switch_targets = Some((vec![0, 1], Some(2)));
+    dispatch.switch_targets = Some(SwitchTargets {
+        targets: vec![0, 1],
+        default_target: Some(2),
+    });
     cfg.block_mut(cfg.entry()).push(dispatch);
     cfg.add_edge(cfg.entry(), targets[0], EdgeKind::IndirectJump);
     (cfg, targets)

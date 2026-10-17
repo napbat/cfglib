@@ -36,6 +36,10 @@ pub struct CallMetadata {
 /// [`CallInfo::callee`] resolves to one of the input keys creates an
 /// inter-procedural edge; calls to unknown targets remain represented in the
 /// source CFG but do not create an edge.
+///
+/// A key is one function. When it is listed more than once it still has one
+/// node, at its first position, and the calls of every CFG listed under it
+/// are edges of that node.
 #[must_use]
 pub fn call_graph<I: CallInfo>(
     functions: &[(I::Callee, &Cfg<I>)],
@@ -77,7 +81,7 @@ pub fn call_graph<I: CallInfo>(
 
 /// Find a function node by its identity.
 #[must_use]
-pub fn find_function<C: Ord>(
+pub fn find_function<C: PartialEq>(
     graph: &Graph<FunctionNode<C>, CallMetadata>,
     id: &C,
 ) -> Option<NodeId> {
@@ -90,8 +94,7 @@ pub fn is_recursive_function<C>(
     graph: &Graph<FunctionNode<C>, CallMetadata>,
     function: NodeId,
 ) -> bool {
-    graph.successors(function).any(|callee| callee == function)
-        || tarjan_scc(graph).component(function).nodes().len() > 1
+    tarjan_scc(graph).component(function).is_cyclic(graph)
 }
 
 /// Compute a per-node summary over a dependency graph in callee-first
@@ -120,10 +123,7 @@ pub fn propagate_summaries<N, E, S: Clone + PartialEq>(
     let components = tarjan_scc(graph);
     // Components arrive in reverse topological order: callees first.
     for component in components.components() {
-        let cyclic = component.len() > 1
-            || component
-                .iter()
-                .any(|&node| graph.successors(node).any(|callee| callee == node));
+        let cyclic = components.component(component[0]).is_cyclic(graph);
         loop {
             let mut changed = false;
             for &node in component {
@@ -165,6 +165,34 @@ mod tests {
     }
 
     #[test]
+    fn a_key_listed_twice_is_one_function_calling_for_both_cfgs() {
+        let calling = |callee: &'static str| {
+            let mut cfg: Cfg<DfInst> = Cfg::new();
+            cfg.block_mut(cfg.entry())
+                .push(df_call("call", callee, false));
+            cfg
+        };
+        let (first, second) = (calling("left"), calling("right"));
+        let mut leaf: Cfg<DfInst> = Cfg::new();
+        leaf.block_mut(leaf.entry()).push(df_ff("ret"));
+
+        let graph = call_graph(&[
+            ("main", &first),
+            ("left", &leaf),
+            ("main", &second),
+            ("right", &leaf),
+        ]);
+
+        assert_eq!(graph.node_count(), 3, "one node per distinct key");
+        let main = find_function(&graph, &"main").unwrap();
+        let callees: Vec<_> = graph
+            .successors(main)
+            .map(|callee| graph.node(callee).id)
+            .collect();
+        assert_eq!(callees, ["left", "right"]);
+    }
+
+    #[test]
     fn topology_and_recursion_use_shared_algorithms() {
         let mut graph = Graph::new();
         let main = graph.add_node(FunctionNode { id: "main" });
@@ -192,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn summaries_propagate_callee_first_and_stabilise_cycles() {
+    fn summaries_propagate_callee_first_and_stabilize_cycles() {
         // main calls a; a and b are mutually recursive; a calls leaf.
         let mut graph = Graph::new();
         let main = graph.add_node(FunctionNode { id: "main" });

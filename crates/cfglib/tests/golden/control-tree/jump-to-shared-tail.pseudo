@@ -1,0 +1,15 @@
+i = 0
+while {
+    i < n
+    break if !cond;
+    if (bad(i)) {
+        cleanup()
+        goto .bb6;
+    } else {
+        i += 1
+        continue;
+    }
+}
+done()
+.bb6:
+    return

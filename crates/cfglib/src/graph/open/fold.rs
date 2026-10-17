@@ -32,9 +32,12 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
+
+use crate::graph::search::may_expand;
+
+use super::marks::Marks;
 
 /// Bounds for one [`open_fold_post_order`] walk.
 #[derive(Debug, Clone, Copy, Default)]
@@ -140,15 +143,15 @@ pub trait OpenFold {
 /// everything its subtree added is dropping the marks past that length. A
 /// mark is only ever set when absent, so the log and the set always hold the
 /// same keys.
-struct Marks<K> {
-    set: BTreeSet<K>,
+struct UndoMarks<K> {
+    set: Marks<K>,
     log: Vec<K>,
 }
 
-impl<K: Clone + Ord> Marks<K> {
-    const fn new() -> Self {
+impl<K: Clone + Ord> UndoMarks<K> {
+    fn new() -> Self {
         Self {
-            set: BTreeSet::new(),
+            set: Marks::new(),
             log: Vec::new(),
         }
     }
@@ -204,7 +207,7 @@ struct Walk<F: OpenFold> {
     pending: Vec<F::Node>,
     /// The buffer `successors` fills, reused for every node.
     scratch: Vec<F::Node>,
-    marks: Marks<F::Mark>,
+    marks: UndoMarks<F::Mark>,
 }
 
 impl<F: OpenFold> Walk<F> {
@@ -318,7 +321,7 @@ pub fn open_fold_post_order<F: OpenFold>(
         stack: Vec::new(),
         pending: Vec::new(),
         scratch: Vec::new(),
-        marks: Marks::new(),
+        marks: UndoMarks::new(),
     };
 
     let root_key = fold.mark(&root);
@@ -369,9 +372,9 @@ pub fn open_fold_post_order<F: OpenFold>(
             walk.marks.truncate(sandbox.with_key);
         }
 
-        let refused_by_depth = config
-            .max_depth
-            .is_some_and(|max_depth| walk.stack.len() > max_depth);
+        // The parent is the top frame, at depth `stack.len() - 1`; its child
+        // is refused exactly when that parent may not expand.
+        let refused_by_depth = !may_expand(config.max_depth, walk.stack.len() - 1);
         let child_key = fold.mark(&child);
         let refused = refused_by_depth
             || child_key

@@ -129,7 +129,7 @@ pub enum CallPolicy {
 }
 
 /// What [`build_address_cfg`] is asked to do beyond the stream itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AddressCfgOptions<A> {
     /// The address the function is entered at.
     ///
@@ -139,6 +139,17 @@ pub struct AddressCfgOptions<A> {
     pub entry: Option<A>,
     /// How calls appear in the graph.
     pub calls: CallPolicy,
+}
+
+/// Enter at the first instruction and keep calls as edges. This needs no
+/// `Default` address type, which a derive would require.
+impl<A> Default for AddressCfgOptions<A> {
+    fn default() -> Self {
+        Self {
+            entry: None,
+            calls: CallPolicy::default(),
+        }
+    }
 }
 
 /// Why leader-based construction rejected the input stream.

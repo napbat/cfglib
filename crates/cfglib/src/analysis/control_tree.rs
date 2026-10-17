@@ -76,7 +76,7 @@
 //!         sink.write_str(cfg.block(point.block).instructions()[point.inst_idx])
 //!     })
 //!     .unwrap();
-//! assert_eq!(text, "if {\n    then\n}\nmerge\n");
+//! assert_eq!(text, "if (test) {\n    then\n}\nmerge\n");
 //! assert!(tree
 //!     .preorder()
 //!     .any(|id| matches!(tree.node(id), ControlNode::IfThenElse { .. })));

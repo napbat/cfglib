@@ -44,8 +44,9 @@
 //! belong to the consumer. [`ir::hlil`] is the structured contract: a
 //! read-only [`ir::hlil::FunctionView`] of statement and expression trees and
 //! a write-only [`ir::hlil::FunctionBuilder`] that the consumer implements,
-//! with verification, pseudocode, declaration placement, and structure
-//! recovery over them. Every IR storage, builder implementation, and editing
+//! with lift and lower between it and a flat variable-based function,
+//! verification, pseudocode, declaration placement, and structure recovery
+//! over them. Every IR storage, builder implementation, and editing
 //! machinery belongs to the consumer; the algorithms here read through the
 //! views, drive the builders, and report facts.
 //! [`ControlTree::compute`] structures a [`Cfg`] into `if / else`, loops,
@@ -120,7 +121,7 @@
 //!                            `Cfg` implements it, every instruction-level
 //!                            analysis reads it)
 //!
-//! FlowControl               (required only by CfgBuilder)
+//! FlowControl               (required by CfgBuilder and the tail-call detectors)
 //!   └─ JumpTargets          (optional — explicit goto/label wiring, Target)
 //!
 //! InstrInfo<Variable = V>   (optional — native IR variables for dataflow)
@@ -132,7 +133,7 @@
 //!   ├─ ValueNumberInfo      (optional — value numbering, Operator)
 //!   └─ MemoryEventInfo      (optional — memory data flow + fences, Location + Fence)
 //!
-//! MemoryAlias<Location>     (optional may-alias oracle consumed by MemorySSA)
+//! MemoryAlias<Location>     (optional may-alias oracle consumed by MemorySsa)
 //!
 //! DisplayInstr              (optional — rendering only: DOT, text)
 //! CallInfo                  (optional — call graphs, Callee)
@@ -140,7 +141,7 @@
 //! ```
 //!
 //! [`MemoryEventInfo`] is the sole instruction-side memory contract.
-//! [`MemorySSA`] merges its reported locations through a caller-owned
+//! [`MemorySsa`] merges its reported locations through a caller-owned
 //! [`MemoryAlias`] relation and provides location-class phis, reaching writes,
 //! clobbers, users, transitive readers, and SSA-resolved address inputs.
 //! [`MemoryValueFlow`] then combines matching ordinary and memory SSA forms in
@@ -180,20 +181,20 @@
 //!   across the second.
 
 #![no_std]
-#![warn(missing_docs)]
 
 // Golden-file comparison reads the rendered output back from disk, which the
 // crate itself never does.
 #[cfg(test)]
 extern crate std;
 
+/// A count as a ratio operand. Counts of blocks, edges, and instructions stay
+/// far below 2^53, where `f64` is exact.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a count of in-memory items fits f64's 53-bit mantissa"
+)]
 pub(crate) fn usize_to_f64(value: usize) -> f64 {
-    if let Ok(value) = u32::try_from(value) {
-        return f64::from(value);
-    }
-
-    let half = usize_to_f64(value / 2);
-    half * 2.0 + f64::from(u8::from(value & 1 == 1))
+    value as f64
 }
 
 pub mod analysis;
@@ -248,16 +249,14 @@ pub use builder::address::{
 };
 pub use builder::{BuildError, CfgBuilder, JumpResolution, resolve_jump_edges};
 pub use cfg::{Cfg, CfgEdge, CfgRenumbering, SplitPointError, parse_cfg_text};
-pub use dataflow::abstract_interpretation::{
-    AbstractDomain, AbstractFacts, Lattice, abstract_interpret,
-};
+pub use dataflow::abstract_interpretation::{AbstractDomain, AbstractFacts, Lattice};
 pub use dataflow::bits::DenseBits;
 pub use dataflow::cfg_view::CfgView;
 pub use dataflow::constant_propagation::{
-    ConstFact, ConstPropProblem, ConstValue, ConstantFolder, constant_propagation,
+    ConstFact, ConstPropProblem, ConstValue, ConstantFolder, ConstantPropagation,
 };
 pub use dataflow::copy_propagation::{
-    AliasPairs, AliasPropagationStats, CopyPropagationStats, CopySource, alias_propagation,
+    AliasPairs, CopySource, PropagationStats, alias_propagation, alias_propagation_with_exits,
     copy_propagation, copy_propagation_with_exits,
 };
 pub use dataflow::def_use::DefUseChains;
@@ -273,28 +272,32 @@ pub use dataflow::fixpoint::{
     try_solve_problem, try_solve_problem_from, try_solve_problem_from_with_config,
     try_solve_problem_with_config,
 };
+pub use dataflow::instruction::{EffectInfo, InstrInfo, Predicated, VariableId};
 pub use dataflow::liveness::{Liveness, LivenessProblem, SeededLivenessProblem};
 pub use dataflow::memory::{
     ConservativeMemoryAlias, ExactMemoryAlias, MemoryAlias, MemoryClassId, MemoryDefinition,
-    MemoryEventSite, MemoryLocationClass, MemoryPhi, MemorySSA, MemorySSAEvent, MemorySsaScratch,
+    MemoryEventSite, MemoryLocationClass, MemoryPhi, MemorySsa, MemorySsaEvent, MemorySsaScratch,
     MemorySsaValue, MemoryUse, MemoryValueEdge, MemoryValueFlow, MemoryValueFlowError,
     MemoryValueFlowScratch, MemoryValueNode, MemoryValueRole, index_paths_may_overlap,
 };
 pub use dataflow::node_fixpoint::{
-    NodeFacts, NodeProblem, TryNodeProblem, solve_node_problem, solve_node_problem_from,
+    NodeProblem, TryNodeProblem, solve_node_problem, solve_node_problem_from,
     solve_node_problem_from_with_config, solve_node_problem_with_config, try_solve_node_problem,
     try_solve_node_problem_from, try_solve_node_problem_from_with_config,
     try_solve_node_problem_with_config,
 };
 pub use dataflow::phi_web::{PhiWeb, PhiWebs};
+pub use dataflow::program_point::{DefSite, ProgramPoint, UseSite};
 pub use dataflow::reaching::{ReachingDef, ReachingDefs, ReachingDefsProblem};
 pub use dataflow::sccp::SccpAnalysis;
 pub use dataflow::ssa::{
     DominanceFrontiers, PhiPlacement, PhiPlacements, SsaBlock, SsaForm, SsaInstruction, SsaPhi,
     SsaScratch, SsaValue, SsaVersion,
 };
-pub use dataflow::ssa_destruction::{PhiCopy, copies_by_predecessor, eliminate_phis};
-pub use dataflow::{DefSite, EffectInfo, InstrInfo, Predicated, ProgramPoint, UseSite, VariableId};
+pub use dataflow::ssa_destruction::{
+    PhiCopy, PhiCopyGroup, PhiCopyOrigin, copies_by_predecessor, eliminate_phis,
+};
+pub use dataflow::unwind::departs_before_throws;
 pub use display::{DisplayInstr, IndentedWriter};
 pub use edge::{Edge, EdgeId, EdgeKind, EdgeTag, KindedEdge};
 pub use exception::{
@@ -333,6 +336,7 @@ pub use graph::horn::HornClauses;
 pub use graph::interval::{Interval, IntervalAnalysis};
 pub use graph::keyed::KeyedGraph;
 pub use graph::label::{Label, bind_label, display_label, no_label};
+pub use graph::loop_forest::{LoopForest, LoopId};
 pub use graph::loop_nest::{LoopNestNode, LoopNestingTree};
 pub use graph::open::{
     FoldEnter, MarkScope, OpenBfsConfig, OpenBfsEvent, OpenDfsConfig, OpenDfsEvent, OpenFold,
@@ -400,10 +404,7 @@ pub use transform::cleanup::{
     remove_unreachable, remove_unreachable_mapped, simplify, simplify_mapped,
 };
 pub use transform::coloring::{ColorAssignment, color_graph, interference_graph};
-pub use transform::contract::{
-    contract_edge, contract_edge_mapped, split_node, split_node_at_points,
-    split_node_with_payload_mapped,
-};
+pub use transform::contract::{contract_edge, contract_edge_mapped};
 pub use transform::critical::{
     split_critical_edges, split_critical_edges_mapped, split_critical_edges_with,
 };
@@ -412,7 +413,7 @@ pub use transform::dce::{
     remove_dead_code_mapped,
 };
 pub use transform::layout::{RelaxError, relax_layout};
-pub use transform::linearize::{BlockOrder, Emitter, LinearInst, linearize};
+pub use transform::linearize::{BlockOrder, Emitter, LinearInst, LinearizeError, linearize};
 pub use transform::loops::{LoopRotation, find_loop_invariants, rotate_loop};
 pub use transform::pass::{
     Pass, PassChange, PassExecution, PassFailure, PassFn, PassId, PassPipeline, PassReport, pass_fn,

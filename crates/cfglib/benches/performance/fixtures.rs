@@ -1,6 +1,8 @@
-use super::{
-    BTreeMap, BlockId, Cfg, CfgBuilder, ConstantFolder, Direction, EdgeKind, FlowControl,
-    FlowEffect, Graph, InstrInfo, NodeId, NodeProblem, Problem, ValueNumberInfo,
+use std::collections::BTreeMap;
+
+use cfglib::{
+    BlockId, Cfg, CfgBuilder, ConstantFolder, Direction, EdgeKind, FlowControl, FlowEffect, Graph,
+    InstrInfo, NodeId, NodeProblem, Problem, ValueNumberInfo,
 };
 
 pub(super) fn fixture_u32(value: usize) -> u32 {
@@ -231,11 +233,11 @@ impl Problem<Cfg<u32>> for CfgReachability {
         Direction::Forward
     }
 
-    fn bottom(&self) -> bool {
+    fn bottom(&self, _graph: &Cfg<u32>) -> bool {
         false
     }
 
-    fn entry_fact(&self) -> bool {
+    fn boundary(&self, _graph: &Cfg<u32>) -> bool {
         true
     }
 
@@ -259,11 +261,11 @@ impl Problem<Cfg<u32>> for WideCfgFact {
         Direction::Forward
     }
 
-    fn bottom(&self) -> Self::Fact {
+    fn bottom(&self, _graph: &Cfg<u32>) -> Self::Fact {
         vec![0; WIDE_FACT_WORDS]
     }
 
-    fn entry_fact(&self) -> Self::Fact {
+    fn boundary(&self, _graph: &Cfg<u32>) -> Self::Fact {
         vec![u64::MAX; WIDE_FACT_WORDS]
     }
 

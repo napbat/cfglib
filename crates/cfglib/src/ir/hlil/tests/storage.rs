@@ -16,24 +16,6 @@ use crate::ir::hlil::{
     VerificationReport, VerifyDialect, verify,
 };
 
-macro_rules! dense_id {
-    ($(#[$meta:meta])* $name:ident) => {
-        $(#[$meta])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub(crate) struct $name(pub(crate) u32);
-
-        impl DenseId for $name {
-            fn from_index(index: usize) -> Self {
-                Self(u32::try_from(index).unwrap())
-            }
-
-            fn index(self) -> usize {
-                usize::try_from(self.0).unwrap()
-            }
-        }
-    };
-}
-
 dense_id!(
     /// A statement of a toy function.
     StmtId

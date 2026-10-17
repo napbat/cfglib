@@ -1,0 +1,13 @@
+begin()
+try {
+    outer_work()
+    try {
+        inner_work()
+    } catch {
+        inner_catch()
+    }
+    after_inner()
+} catch {
+    outer_catch()
+}
+return

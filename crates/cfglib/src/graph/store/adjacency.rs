@@ -195,6 +195,50 @@ impl DeltaChains {
         self.detach_node(node, direction);
     }
 
+    /// Check chains read from outside: that every walk over them reads inside
+    /// the arrays and ends, and that each chain holds only edges whose
+    /// endpoint it belongs to.
+    ///
+    /// `endpoint(edge, chain)` is the node a delta edge is threaded through in
+    /// one of its two chains. An edge is in at most one chain per direction,
+    /// so the walks cost one step per delta edge between them.
+    #[cfg(feature = "serde")]
+    pub(super) fn check(
+        &self,
+        nodes: usize,
+        delta_edges: usize,
+        endpoint: impl Fn(usize, usize) -> usize,
+    ) -> Result<(), &'static str> {
+        if self.last.len() > nodes || self.next.len() != delta_edges {
+            return Err("the adjacency chains do not match the nodes and delta edges");
+        }
+        for chain in 0..2 {
+            let mut seen = vec![false; self.next.len()];
+            for (node, links) in self.last.iter().enumerate() {
+                let last = links[chain];
+                if last == NONE {
+                    continue;
+                }
+                let mut edge = self
+                    .next
+                    .get(last as usize)
+                    .ok_or("an adjacency chain ends outside the delta edges")?[chain];
+                loop {
+                    let slot = edge as usize;
+                    if slot >= seen.len() || seen[slot] || endpoint(slot, chain) != node {
+                        return Err("an adjacency chain is not a ring of the node's own edges");
+                    }
+                    seen[slot] = true;
+                    if edge == last {
+                        break;
+                    }
+                    edge = self.next[slot][chain];
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Drop every chain.
     ///
     /// Both arrays are released rather than cleared: after a compaction the
@@ -242,11 +286,12 @@ struct Axis<'g> {
     chain: usize,
 }
 
-/// Advance one walk to the next live edge, in insertion order.
+/// Advance one walk to the next live edge, in adjacency order.
 ///
-/// Base identities come first in ascending order, then delta identities in
-/// append order. Every base identity is below every delta identity, so the
-/// sequence is exactly the order in which the edges were added.
+/// The compressed run comes first, then the delta identities in append order.
+/// Every base identity is below every delta identity, and a run no edge was
+/// redirected into is ascending, so for such a node the sequence is exactly
+/// the order in which the edges were added.
 ///
 /// `live` is `None` for a store with no removed edges at all, which spares
 /// every scan of a freshly built or freshly compacted store one bitset probe
@@ -335,14 +380,14 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         }
     }
 
-    /// Start a walk over `node`'s live edges along `direction`, in insertion
+    /// Start a walk over `node`'s live edges along `direction`, in adjacency
     /// order.
     ///
-    /// Forced inline, with [`cursor`](Self::cursor) and the iterator layers
-    /// over it, because the hint is not enough here. A walk is built from
-    /// 4- and 8-byte stores, and any copy of it between frames (a returned
-    /// value moved into the consumer's loop variable) reads it back in 16-byte
-    /// pieces. A load that spans several narrower stores cannot be forwarded,
+    /// Forced inline, with [`cursor`](Self::cursor); the stepping layers over
+    /// the walk are plain `#[inline]`. The hint is not enough here. A walk is
+    /// built from 4- and 8-byte stores, and any copy of it between frames (a
+    /// returned value moved into the consumer's loop variable) reads it back
+    /// in 16-byte pieces. A load that spans several narrower stores cannot be forwarded,
     /// so every scan waits for its own start to retire: whether the optimizer
     /// elided the copy depended on the surrounding code, and where it did not
     /// a scan cost 15% to 50% more cycles at the same instruction count.
@@ -378,6 +423,16 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         }
     }
 
+    /// `node`'s compressed run along `direction`, removed edges included.
+    fn base_run(&self, node: usize, direction: TraversalDirection) -> &[u32] {
+        let axis = self.axis(direction);
+        if node + 1 < axis.offsets.len() {
+            &axis.edges[axis.offsets[node] as usize..axis.offsets[node + 1] as usize]
+        } else {
+            &[]
+        }
+    }
+
     /// The live edges of `node`'s compressed run along `direction`, copied
     /// into a new vector with room for one more.
     ///
@@ -386,13 +441,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// redirect is about to append. Only the compressed run is copied; the
     /// node's delta chain is [`DeltaChains::drain_into`]'s.
     pub(super) fn live_base_run(&self, node: Id<NT>, direction: TraversalDirection) -> Vec<u32> {
-        let axis = self.axis(direction);
-        let index = node.index();
-        let run = if index + 1 < axis.offsets.len() {
-            &axis.edges[axis.offsets[index] as usize..axis.offsets[index + 1] as usize]
-        } else {
-            &[]
-        };
+        let run = self.base_run(node.index(), direction);
         let mut copy = Vec::with_capacity(run.len() + 1);
         match self.tombstoned_edges().then_some(&self.live_edges) {
             Some(live) => copy.extend(
@@ -405,7 +454,44 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         copy
     }
 
-    /// Iterate over the live outgoing edges of `node` in insertion order.
+    /// The adjacency along `direction` of every surviving node whose edges do
+    /// not read in ascending identity order, as it reads now, in the
+    /// numbering `node_map` and `edge_map` give.
+    ///
+    /// A redirected edge reads after the edges its node already had, and a
+    /// compaction keeps that order in the base it builds, so a node reads out
+    /// of identity order long after its overlay is gone. Every other run is in
+    /// identity order, which is all that compaction's counting placement
+    /// produces, and compaction restores these from what this returns. The
+    /// delta chain never breaks the order: it holds the newest edges, in the
+    /// order they were added.
+    pub(super) fn reordered_adjacency(
+        &self,
+        direction: TraversalDirection,
+        node_map: &[u32],
+        edge_map: &[u32],
+    ) -> Vec<(u32, Vec<u32>)> {
+        (0..self.node_bound())
+            .filter(|&slot| node_map[slot] != NONE)
+            .filter(|&slot| {
+                let run = self
+                    .overlay(slot, direction)
+                    .unwrap_or_else(|| self.base_run(slot, direction));
+                !run.is_sorted()
+            })
+            .map(|slot| {
+                let run = self
+                    .adjacent(Id::from_index(slot), direction)
+                    .map(|edge| edge_map[edge.index()])
+                    .collect();
+                (node_map[slot], run)
+            })
+            .collect()
+    }
+
+    /// Iterate over the live outgoing edges of `node` in adjacency order: the
+    /// order they were added to the node, so a redirected edge follows the
+    /// edges already there.
     ///
     /// # Panics
     ///
@@ -415,7 +501,9 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         self.adjacent(node, TraversalDirection::Outgoing)
     }
 
-    /// Iterate over the live incoming edges of `node` in insertion order.
+    /// Iterate over the live incoming edges of `node` in adjacency order: the
+    /// order they were added to the node, so a redirected edge follows the
+    /// edges already there.
     ///
     /// # Panics
     ///
@@ -505,7 +593,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     }
 }
 
-/// Live edges adjacent to one node, in insertion order.
+/// Live edges adjacent to one node, in adjacency order.
 ///
 /// Returned by [`Graph::outgoing`] and [`Graph::incoming`]. It is not an
 /// [`ExactSizeIterator`]: the length of a delta chain containing tombstones
@@ -570,4 +658,35 @@ pub(super) fn compress<E, NT: IdTag>(
     }
 
     (offsets, adjacency)
+}
+
+/// Check one direction's compressed index read from outside: either the empty
+/// index of a store that has never been compacted, or one run per base node
+/// that together list each base edge once.
+#[cfg(feature = "serde")]
+pub(super) fn check_index(
+    offsets: &[u32],
+    edges: &[u32],
+    base_nodes: usize,
+    base_edges: usize,
+) -> Result<(), &'static str> {
+    if offsets.is_empty() {
+        return if edges.is_empty() && base_nodes == 0 && base_edges == 0 {
+            Ok(())
+        } else {
+            Err("a store with a compressed base has no adjacency index")
+        };
+    }
+    if offsets.len() != base_nodes + 1
+        || edges.len() != base_edges
+        || offsets[0] != 0
+        || offsets[base_nodes] as usize != edges.len()
+        || offsets.windows(2).any(|pair| pair[0] > pair[1])
+    {
+        return Err("the adjacency index does not describe the compressed base");
+    }
+    if edges.iter().any(|&edge| edge as usize >= base_edges) {
+        return Err("the adjacency index names an edge outside the compressed base");
+    }
+    Ok(())
 }

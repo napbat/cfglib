@@ -470,3 +470,46 @@ fn a_stopped_node_leaves_its_children_to_no_one_else() {
     assert_eq!(fold.entered, [0, 1, 2, 4]);
     assert_eq!(fold.absorbed, [(2, true), (1, true), (4, true)]);
 }
+
+/// Nodes `0..count`, each deriving the next two: a diamond at every step, so
+/// the member at the last node is reached along a Fibonacci number of routes.
+fn skip_chain(count: usize) -> Vec<Vec<usize>> {
+    (0..count)
+        .map(|node| (node + 1..count).take(2).collect())
+        .collect()
+}
+
+#[test]
+fn marks_keep_their_meaning_beyond_a_handful_of_nodes() {
+    // Twelve nodes mark more keys than a small walk holds inline: the shared
+    // scope must still refuse every second route, and the isolated scope must
+    // still release a node's key when it finishes, so a route can fold it again.
+    const COUNT: usize = 12;
+    let rows = skip_chain(COUNT);
+    let bases: Vec<&[usize]> = rows.iter().map(Vec::as_slice).collect();
+    let mut owns: Vec<Option<&'static str>> = (0..COUNT).map(|_| None).collect();
+    owns[COUNT - 1] = Some("member");
+
+    let mut shared = Lookup::new(&bases, &owns, MarkScope::Shared);
+    assert_eq!(
+        open_fold_post_order(&mut shared, 0, OpenFoldConfig::new()),
+        Some("member"),
+    );
+    assert_eq!(shared.folded, (0..COUNT).collect::<Vec<_>>());
+
+    let mut isolated = Lookup::new(&bases, &owns, MarkScope::Isolated);
+    assert_eq!(
+        open_fold_post_order(&mut isolated, 0, OpenFoldConfig::new()),
+        None,
+        "two routes reach the member, so the answer is ambiguous",
+    );
+    let mut folds = [0_usize; COUNT];
+    for &node in &isolated.folded {
+        folds[node] += 1;
+    }
+    let mut routes = [1_usize; COUNT];
+    for node in 2..COUNT {
+        routes[node] = routes[node - 1] + routes[node - 2];
+    }
+    assert_eq!(folds, routes, "each node folds once per route to it");
+}

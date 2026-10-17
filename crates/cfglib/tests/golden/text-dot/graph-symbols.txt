@@ -1,0 +1,11 @@
+n0 mod app
+n1 fn main
+n3 fn load
+n4 type Config
+n0 -> n1 defines
+n0 -> n3 defines
+n0 -> n4 defines
+n1 -> n3 calls
+n1 -> n3 calls
+n3 -> n4 reads
+n1 -> n1 calls

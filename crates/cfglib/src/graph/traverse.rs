@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::graph::view::{DenseId, GraphView};
+use crate::graph::view::{DenseId, GraphView, assert_in_bound};
 
 /// Direction in which a graph traversal follows edges.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +58,13 @@ pub enum TraversalDirection {
 /// which is why it stays an implementation detail rather than becoming a
 /// second public spelling of a direction consumers already pass.
 pub(crate) trait Adjacency: Copy {
+    /// The axis that walks the same edges the other way.
+    type Against: Adjacency<Against = Self>;
+
+    /// The opposite axis, for a core that reads one axis upstream and the
+    /// other downstream and takes only one of them as its leading argument.
+    fn against(self) -> Self::Against;
+
     /// Iterate `node`'s neighbors along this axis.
     ///
     /// Implementations are inlined into the cores, so the iterator is built
@@ -79,6 +86,13 @@ pub(crate) struct Outgoing;
 pub(crate) struct Incoming;
 
 impl Adjacency for Outgoing {
+    type Against = Incoming;
+
+    #[inline]
+    fn against(self) -> Incoming {
+        Incoming
+    }
+
     #[inline]
     fn neighbors<G: GraphView>(
         self,
@@ -90,6 +104,13 @@ impl Adjacency for Outgoing {
 }
 
 impl Adjacency for Incoming {
+    type Against = Outgoing;
+
+    #[inline]
+    fn against(self) -> Outgoing {
+        Outgoing
+    }
+
     #[inline]
     fn neighbors<G: GraphView>(
         self,
@@ -141,10 +162,7 @@ fn preorder_from<G: GraphView, A: Adjacency>(
     graph: &G,
     start: G::NodeId,
 ) -> Vec<G::NodeId> {
-    assert!(
-        start.index() < graph.node_bound(),
-        "start node is out of range"
-    );
+    assert_in_bound(graph, start, "start node");
     let mut visited = vec![false; graph.node_bound()];
     let mut order = Vec::with_capacity(graph.node_bound());
     let mut stack = vec![start];
@@ -188,83 +206,35 @@ fn postorder_from<G: GraphView, A: Adjacency>(
     graph: &G,
     start: G::NodeId,
 ) -> Vec<G::NodeId> {
-    let mut scratch = PostorderScratch::default();
-    postorder_from_in(axis, &mut scratch, graph, start);
-    scratch
-        .order
-        .iter()
-        .copied()
-        .map(G::NodeId::from_index)
-        .collect()
-}
+    assert_in_bound(graph, start, "start node");
+    let mut visited = vec![false; graph.node_bound()];
+    let mut order = Vec::with_capacity(graph.node_bound());
+    // The flag is whether the node's successors have already been pushed, so
+    // the second pop is its postorder position.
+    let mut stack = vec![(start, false)];
+    let mut adjacent = Vec::new();
 
-/// Every buffer a postorder walk fills, owned by the caller.
-///
-/// Nodes are held as the dense indices [`DenseId`] guarantees they are, which
-/// is what keeps the buffers free of a node-id type parameter: one scratch
-/// serves every [`GraphView`], including views whose ids differ from the
-/// graph's own.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct PostorderScratch {
-    /// The answer: nodes in postorder, as dense indices.
-    pub(crate) order: Vec<usize>,
-    /// Whether a node has been entered.
-    visited: Vec<bool>,
-    /// The walk's frontier. The flag is whether the node's successors have
-    /// already been pushed, so the second pop is its postorder position.
-    stack: Vec<(usize, bool)>,
-    /// One expanded node's adjacency, refilled per expansion, because the
-    /// rev-push convention needs it in reverse.
-    adjacent: Vec<usize>,
-}
-
-/// Walk `graph` from `start` in postorder, leaving the answer in
-/// `scratch.order`.
-///
-/// Every buffer is emptied on entry, so a walk never inherits a previous
-/// one's marks or frontier, and none is released, so a scratch reused across
-/// a sequence of graphs allocates only while it is growing to the largest of
-/// them.
-fn postorder_from_in<G: GraphView, A: Adjacency>(
-    axis: A,
-    scratch: &mut PostorderScratch,
-    graph: &G,
-    start: G::NodeId,
-) {
-    assert!(
-        start.index() < graph.node_bound(),
-        "start node is out of range"
-    );
-    scratch.order.clear();
-    scratch.order.reserve(graph.node_bound());
-    scratch.visited.clear();
-    scratch.visited.resize(graph.node_bound(), false);
-    scratch.stack.clear();
-    scratch.stack.push((start.index(), false));
-    scratch.adjacent.clear();
-
-    while let Some((node, processed)) = scratch.stack.pop() {
+    while let Some((node, processed)) = stack.pop() {
         if processed {
-            scratch.order.push(node);
+            order.push(node);
             continue;
         }
-        if scratch.visited[node] {
+        if visited[node.index()] {
             continue;
         }
 
-        scratch.visited[node] = true;
-        scratch.stack.push((node, true));
-        scratch.adjacent.clear();
-        scratch.adjacent.extend(
-            axis.neighbors(graph, G::NodeId::from_index(node))
-                .map(DenseId::index),
-        );
-        for &successor in scratch.adjacent.iter().rev() {
-            if !scratch.visited[successor] {
-                scratch.stack.push((successor, false));
+        visited[node.index()] = true;
+        stack.push((node, true));
+        adjacent.clear();
+        adjacent.extend(axis.neighbors(graph, node));
+        for &successor in adjacent.iter().rev() {
+            if !visited[successor.index()] {
+                stack.push((successor, false));
             }
         }
     }
+
+    order
 }
 
 /// Return reverse postorder from `start`.
@@ -298,10 +268,7 @@ fn breadth_first_from<G: GraphView, A: Adjacency>(
     graph: &G,
     start: G::NodeId,
 ) -> Vec<G::NodeId> {
-    assert!(
-        start.index() < graph.node_bound(),
-        "start node is out of range"
-    );
+    assert_in_bound(graph, start, "start node");
     let mut visited = vec![false; graph.node_bound()];
     let mut order = Vec::with_capacity(graph.node_bound());
     let mut queue = VecDeque::new();
@@ -344,14 +311,8 @@ fn shortest_path_from<G: GraphView, A: Adjacency>(
     start: G::NodeId,
     goal: G::NodeId,
 ) -> Option<Vec<G::NodeId>> {
-    assert!(
-        start.index() < graph.node_bound(),
-        "start node is out of range"
-    );
-    assert!(
-        goal.index() < graph.node_bound(),
-        "goal node is out of range"
-    );
+    assert_in_bound(graph, start, "start node");
+    assert_in_bound(graph, goal, "goal node");
     let mut previous = vec![None; graph.node_bound()];
     let mut visited = vec![false; graph.node_bound()];
     let mut queue = VecDeque::new();
@@ -423,38 +384,73 @@ pub fn reachable<G: GraphView>(
     seeds: impl IntoIterator<Item = G::NodeId>,
     direction: TraversalDirection,
 ) -> Vec<bool> {
-    by_axis!(direction, reachable_from(graph, seeds))
+    let mut visited = Vec::new();
+    reachable_in(graph, seeds, direction, None, &mut visited, &mut Vec::new());
+    visited
 }
 
+/// [`reachable`] over caller-owned buffers, optionally confined to a set of
+/// nodes.
+///
+/// `visited` is cleared and sized to the node bound, then holds the answer.
+/// `stack` is cleared first and left empty. With `within`, a node is
+/// discovered from a visited one only when its entry is `true`, so the walk
+/// stays inside that set; the seeds are visited whether or not they are in
+/// it. The stack holds dense indices, not node ids, so one buffer serves
+/// every node-id type, which is what a scratch that outlives one graph needs.
+///
+/// # Panics
+///
+/// Panics when a seed is not a node in `graph`.
+///
+/// Both functions of the walk are `#[inline]`: left out of line, the shared
+/// instance ran the post-dominator tree's forward walk 2.2 times slower than
+/// the loop it replaced, and compiled into each caller it matches it.
+#[inline]
+pub(crate) fn reachable_in<G: GraphView>(
+    graph: &G,
+    seeds: impl IntoIterator<Item = G::NodeId>,
+    direction: TraversalDirection,
+    within: Option<&[bool]>,
+    visited: &mut Vec<bool>,
+    stack: &mut Vec<usize>,
+) {
+    by_axis!(
+        direction,
+        reachable_from(graph, seeds, within, visited, stack)
+    );
+}
+
+#[inline]
 fn reachable_from<G: GraphView, A: Adjacency>(
     axis: A,
     graph: &G,
     seeds: impl IntoIterator<Item = G::NodeId>,
-) -> Vec<bool> {
-    let mut visited = vec![false; graph.node_bound()];
-    let mut stack = Vec::new();
+    within: Option<&[bool]>,
+    visited: &mut Vec<bool>,
+    stack: &mut Vec<usize>,
+) {
+    visited.clear();
+    visited.resize(graph.node_bound(), false);
+    stack.clear();
 
     for seed in seeds {
-        assert!(
-            seed.index() < graph.node_bound(),
-            "seed node is out of range"
-        );
-        if !visited[seed.index()] {
-            visited[seed.index()] = true;
-            stack.push(seed);
+        assert_in_bound(graph, seed, "seed node");
+        if !core::mem::replace(&mut visited[seed.index()], true) {
+            stack.push(seed.index());
         }
     }
 
-    while let Some(node) = stack.pop() {
-        for next in axis.neighbors(graph, node) {
-            if !visited[next.index()] {
-                visited[next.index()] = true;
+    while let Some(index) = stack.pop() {
+        for next in axis.neighbors(graph, G::NodeId::from_index(index)) {
+            let next = next.index();
+            if within.is_none_or(|within| within[next])
+                && !core::mem::replace(&mut visited[next], true)
+            {
                 stack.push(next);
             }
         }
     }
-
-    visited
 }
 
 /// Hop counts from `start`, using `usize::MAX` for unreachable nodes, while
@@ -524,9 +520,11 @@ fn breadth_first_distances<G: GraphView, A: Adjacency>(
 /// not be a tree or a DAG; cycles terminate the searches like every other
 /// traversal here.
 ///
-/// Both endpoints are at distance 0 from themselves, so `b` is the answer
-/// whenever it is reachable from `a` at all, and `a == b` answers `a`.
-/// Returns `None` when no node is reachable from both.
+/// Both endpoints are at distance 0 from themselves, so each is itself a
+/// candidate: when `b` is reachable from `a`, `b` competes at a combined
+/// distance of the hops from `a` to `b`, and another shared node that is
+/// closer overall beats it. `a == b` answers `a`. Returns `None` when no node
+/// is reachable from both.
 ///
 /// # Determinism
 ///
@@ -596,8 +594,8 @@ fn nearest_meet<G: GraphView, A: Adjacency>(
     a: G::NodeId,
     b: G::NodeId,
 ) -> Option<G::NodeId> {
-    assert!(a.index() < graph.node_bound(), "node `a` is out of range");
-    assert!(b.index() < graph.node_bound(), "node `b` is out of range");
+    assert_in_bound(graph, a, "node `a`");
+    assert_in_bound(graph, b, "node `b`");
     let from_a = breadth_first_distances(axis, graph, a);
     let from_b = breadth_first_distances(axis, graph, b);
 
@@ -726,8 +724,8 @@ fn all_meets<G: GraphView, A: Adjacency>(
     b: G::NodeId,
     max_depth: Option<usize>,
 ) -> Vec<CommonAncestor<G::NodeId>> {
-    assert!(a.index() < graph.node_bound(), "node `a` is out of range");
-    assert!(b.index() < graph.node_bound(), "node `b` is out of range");
+    assert_in_bound(graph, a, "node `a`");
+    assert_in_bound(graph, b, "node `b`");
     let from_a = breadth_first_bounded(axis, graph, a, max_depth);
     let mut order_b = Vec::new();
     let from_b = breadth_first_bounded_with(axis, graph, b, max_depth, |node| {
@@ -751,19 +749,22 @@ fn all_meets<G: GraphView, A: Adjacency>(
         .collect()
 }
 
-/// Return a topological ordering, or `None` when the graph contains a cycle.
+/// Return a topological ordering of the live nodes, or `None` when they
+/// contain a cycle.
 #[must_use]
 pub fn topological_sort<G: GraphView>(graph: &G) -> Option<Vec<G::NodeId>> {
     let mut incoming_counts = vec![0_usize; graph.node_bound()];
+    let mut live = 0;
     for node in graph.node_ids() {
         incoming_counts[node.index()] = graph.predecessors(node).count();
+        live += 1;
     }
 
     let mut queue: VecDeque<G::NodeId> = graph
         .node_ids()
         .filter(|node| incoming_counts[node.index()] == 0)
         .collect();
-    let mut order = Vec::with_capacity(graph.node_bound());
+    let mut order = Vec::with_capacity(live);
 
     while let Some(node) = queue.pop_front() {
         order.push(node);
@@ -776,7 +777,7 @@ pub fn topological_sort<G: GraphView>(graph: &G) -> Option<Vec<G::NodeId>> {
         }
     }
 
-    (order.len() == graph.node_bound()).then_some(order)
+    (order.len() == live).then_some(order)
 }
 
 impl<I, E> Cfg<I, E> {

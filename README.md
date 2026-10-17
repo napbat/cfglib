@@ -8,7 +8,7 @@ Generic, `no_std` graph and dataflow framework for code intelligence, program an
 
 Small read-only node and edge view contracts let consumer-owned stores and zero-copy filtered views reuse the algorithms. `CfgView` extends them for the instruction-level analyses, so a consumer block store runs the same dataflow as `Cfg`. Every instruction-adjacent axis is consumer-typed. Dataflow variables, constants, expression operators, side-effect vocabularies, branch targets, call targets, and edge payloads all come from the adapter. x86 registers and flags, shader register components, bytecode locals, compiler IR values, and source-language symbols do not need a library-owned numbering scheme. String literals and symbol ids flow through the analyses as naturally as machine words and addresses.
 
-On top of that, cfglib has a compiler middle-end toolkit: dominator trees, renamed SSA construction, location-aware memory SSA, dataflow analyses, value numbering, explicit alias sets, loop transforms, dead-code elimination, partial redundancy elimination, and graph coloring.
+On top of that, cfglib has a compiler middle-end toolkit: dominator trees, renamed SSA construction, location-aware memory SSA, dataflow analyses, value numbering, explicit alias sets, loop transforms, dead-code elimination, redundancy elimination, and graph coloring.
 
 Named transformations compose through `PassPipeline<T, E>`. A pipeline keeps
 the caller's declared order, supports closure-backed or stateful trait passes,
@@ -92,7 +92,7 @@ assert_eq!(
 let dominators = DominatorTree::compute(&Rooted::new(&graph, source));
 ```
 
-`Graph` keeps a compressed sparse-row base beside an appendable delta in one type: adding a node or an edge is constant time with no per-node allocation, removal clears a bit in a liveness bitset, `out_degree`/`in_degree` answer from the compressed run's two offsets plus a walk of whatever was appended since, redirecting one endpoint keeps the edge's identity, and `compact()` folds the delta back into the base and hands back a `Renumbering` describing every identity it moved. That is what makes whole-codebase graphs affordable — a million nodes and four million edges build in roughly half the time an arena of per-node adjacency containers takes, without the inline slack and the per-node allocation that arena spends. The module documentation states the design and its costs; `benches/graph-store.rs` measures it.
+`Graph` keeps a compressed sparse-row base beside an appendable delta in one type: adding a node or an edge is constant time with no per-node allocation, removal clears a bit in a liveness bitset, `out_degree`/`in_degree` answer from the compressed run's two offsets plus a walk of whatever was appended since, redirecting one endpoint keeps the edge's identity, and `compact()` folds the delta back into the base and hands back a `Renumbering` describing every identity it moved. That is what makes whole-codebase graphs affordable: a node costs its payload and a bit, with no inline adjacency slack and no per-node allocation, and `benches/graph-store.rs` measures the build, the incremental appends, and the compaction at a million nodes and four million edges. The module documentation states the design and its costs; `benches/graph-store.rs` measures it.
 
 `Fanout<K, V>`, `DenseFanout<V, K>`, and `SortedMap<K, V>` are that compressed base without the edges. They are built-once tables — from pairs or from grouped values, read-only afterwards — holding every key's run of values end to end in one array, keyed by a sparse ordered key, by a dense `0..bound` index (any `DenseId`, so a tagged `Id<T>` keys one directly), or, in the single-value case, by a sparse key to one value. A reverse index from a symbol to its reference sites, a scope to the rows declared in it, or a file to its flow sites is the same shape as adjacency and should cost the same: three allocations for the whole table rather than one per key, `get` returning a slice, `iter()` walking keys ascending, and `heap_bytes()` reporting exactly what the columns hold.
 
@@ -150,7 +150,7 @@ definition-to-reference bindings.
 | Goto wiring | `resolve_jump_edges` + `JumpTargets` (consumer-typed targets: labels, addresses, syntax nodes) |
 | Compressed adjacency | `Cfg` stores its blocks and edges in `Graph`: a compressed base plus an appendable delta, with no per-block adjacency allocation |
 | Edge removal | `remove_edge()` clears the liveness bit of the edge; existing `EdgeId`s stay stable until `compact()` renumbers the survivors |
-| Edge metadata | Stable `EdgeId`, endpoints, `EdgeKind`, optional weight, and a caller-owned payload; `ExceptionFlow<M>` standardises search/unwind phase and execute/search/continue disposition while retaining platform metadata |
+| Edge metadata | Stable `EdgeId`, endpoints, `EdgeKind`, optional weight, and a caller-owned payload; `ExceptionFlow<M>` standardizes search/unwind phase and execute/search/continue disposition while retaining platform metadata |
 | Regions | Try/catch/finally regions with explicit `HandlerBody::Known`/`Unknown` completeness and `HandlerKind` (Catch, CatchAll, Finally, Fault, Filter); `install_clr_region` and `install_seh_region` import normalized platform clauses |
 | Cleanup continuations | `add_continuation` / `set_cleanup_resume` → `Cleanup` (`Continuation` + `CompletionReason`): which route out of a single shared `finally` block a resume edge belongs to |
 | Handler metadata | `HandlerMetadata<M>` side table (`HandlerFilters<F>` / `HandlerTypes<T>`) — consumer-typed filter predicates and CLR caught-type tokens keyed by `HandlerRef`, with no type parameter on `Cfg` |
@@ -170,7 +170,7 @@ A fact is a side table about one state of a function. No algorithm changes the f
 |---|---|---|---|
 | Register transfer (RTL) | `ir::rtl` | `Dialect`, `InstructionBuilder`, `RecordView`, `FunctionView`, `Fold` | `RootTable`, `BlockSummaries`, `RootLiveness`, `ParamPlacement`, `SelectionResolution` |
 | Medium level (MLIL) | `ir::mlil` | `Dialect`, `FunctionView` | Nothing. Value analyses over the view belong to the consumer. |
-| Structured (HLIL) | `ir::hlil` | `Dialect`, `FunctionView`, `FunctionBuilder`, `FlatBuilder`, `FlatFunction`, `LiftInstruction`, `LiftEdge`, `LiftDialect`, `RecoverDialect`, `VerifyDialect`, `Pseudocode` | `lift`, `lower`, `recover_structure`, `VariablePlacements`, `verify`, `pseudocode` |
+| Structured (HLIL) | `ir::hlil` | `Dialect`, `FunctionView`, `FunctionBuilder`, `FlatBuilder`, `FlatFunction`, `LiftInstruction`, `LiftEdge`, `LiftDialect`, `RecoverDialect`, `VerifyDialect`, `Pseudocode` | `lift`, `lift_with_tree`, `lift_trampolines`, `lower`, `recover_structure`, `has_recovery_candidates`, `Correspondence`, `VariablePlacements`, `verify`, `pseudocode`, `write_pseudocode`, and the walks over the shapes |
 
 Every dialect type is plain data that the consumer defines. The traits contain no language, runtime, calling convention, opcode, or source-location type.
 
@@ -268,6 +268,39 @@ A `FunctionView` follows these rules:
 
 `ir::mlil` has no analysis of its own. A consumer that needs use lists, liveness, constant propagation, or dead-instruction marking builds them over `FunctionView`. The dialect of the consumer owns the semantics that those analyses need, such as effects and constant folding.
 
+#### Structured contract (`ir::hlil`)
+
+An HLIL function is a pair of trees over declared variables:
+
+- Statements form trees: assignments, `if`, `while`, `do`/`while`, `loop`, `for`, `switch`, `break` and `continue` (optionally labeled), `return`, labeled groups with `goto`, `try` with handlers and a `finally` body, and a dialect `Region` that wraps a body.
+- Values are typed expression trees of variable reads, dialect constants, and dialect operations.
+- The statement and expression shapes (`StmtShape`, `ExprShape`) are universal and belong to the library. A dialect supplies the operations, constants, value types, and variable metadata.
+- A variable holds differently typed values at different points, so each occurrence carries its own type.
+
+| Item | Description |
+|---|---|
+| `Dialect`, `FunctionView<D>` | The vocabulary of one structured dialect, and the read-only view that lends statements, expressions, switch arms, and handlers as slices from the consumer's dense storage. |
+| `FunctionBuilder<D>` | The write-only protocol that builds a function, children before parents. The consumer seals the function in `finish`. |
+| `FlatFunction`, `LiftInstruction`, `LiftEdge`, `LiftDialect`, `InstructionShape` | The read side of a flat function: the consumer's `Cfg` with a variable table and signature, and what each instruction and edge stands for. |
+| `FlatBuilder`, `Lowered`, `LowerEdge`, `Occurrence`, `VariableOrigin` | The write side of a flat function, in HLIL terms. The builder chooses the flat operation and the `EdgeKind`. |
+| `lift`, `lift_with_tree`, `lift_trampolines`, `LiftedFunction` | Structure a flat function into a `ControlTree`, inline single-use definitions, and translate it through a `FunctionBuilder`. |
+| `lower`, `LoweredFunction` | Flatten a structured function into blocks and edges, linearize its expression trees into typed temporaries, and register its exception regions. |
+| `Correspondence`, `Correspondence::remap` | The table that names the structured entity carrying each flat instruction and variable, and the move of that table onto a recovered function. |
+| `recover_structure`, `has_recovery_candidates`, `RecoverDialect`, `Recovery` | Rebuild a function with counted loops, conditional selections, and paired regions restored. The dialect claims each recovery through its hooks. Time is linear in the size of the function; the one exception is a nest of regions that all hold one variable, which costs one `RecoverDialect::releases` call per open region. |
+| `verify`, `VerifyDialect`, `VerificationReport` | The structural checks, then the dialect's own. |
+| `pseudocode`, `write_pseudocode`, `Pseudocode` | Indented pseudocode, spelled by the dialect's hooks. |
+| `VariablePlacements` | The narrowest lexical body that holds all occurrences of each variable. |
+| `for_each_child_body`, `for_each_statement_expression`, `visit_statements`, `visit_expression_tree`, `expressions_equal`, `compound_assignment` | The walks over the shapes. None of them recurses on the depth of an expression or the nesting of statements, and neither do the algorithms above: each keeps its own stack, so memory bounds the depth, not the thread's stack. The structuring step of `lift` has the stack-depth contract of `ControlTree::compute`. |
+
+A function follows these rules:
+
+- Every statement and expression has exactly one parent, and a child has a lower index than its parent.
+- A `continue` with a label targets a `Labeled` group whose body is exactly one loop, and a `break` or `goto` can target any label.
+- Control that completes must end in a `return` or iterate forever. `lower` rejects a body that falls off the end.
+- A region's operands are evaluated once, on entry, and the end of the region releases the values they had then.
+
+The algorithms compose: lift a flat function, recover its structure, and move the `Correspondence` onto the recovered function with `remap`.
+
 ### Graph algorithms
 
 | Algorithm | Function / Type | Description |
@@ -299,22 +332,23 @@ A `FunctionView` follows these rules:
 | Reusable post-dominator scratch | `PostDominatorTree::compute_in` + `PostDominatorScratch` | The same tree with the call's working buffers caller-owned, parallel to `DominatorScratch` |
 | Dominance frontiers | `DominanceFrontiers::compute`; `frontier` → `&[N]` | Every block's frontier in one flat run table, read back as a slice in ascending order. For SSA φ-placement |
 | Dominator recompute diff | `DominatorTree::compute_with_diff` | Recompute after a graph edit, reporting the nodes whose idom changed |
-| Strongly connected components | `tarjan_scc` → `SccDecomposition<N>`, `condensation` → component DAG of owned `Scc<N>` payloads | Generic iterative Tarjan algorithm, reverse-topological order (leaves first); components are ascending slices of one flat array (`components()`, `component(node)` → `Scc` with `nodes()`, `contains`, `is_singleton`) |
+| Strongly connected components | `tarjan_scc` → `SccDecomposition<N>`, `condensation` → component DAG of owned `Scc<N>` payloads | Generic iterative Tarjan algorithm, reverse-topological order (leaves first); components are ascending slices of one flat array (`components()`, `component(node)` → `Scc` with `nodes()`, `contains`, `is_singleton`, `is_cyclic`); removed node slots belong to no component, and querying one panics |
 | SCC in topological order | `kosaraju_scc` → `SccDecomposition<N>` | The same partition numbered sources first (`index(u) < index(v)` across every edge); the classic deterministic two-pass algorithm, for budgeted forward closures over the condensation |
 | Condensation of a given decomposition | `condensation_of(graph, &SccDecomposition)` → `Graph<(), ()>` | The component DAG whose node index **is** the given decomposition's component index, either algorithm's; deduplicated edges, and in-degrees plus dependents straight off the graph (the one-pass fixpoint shape) |
-| Back-edge detection | `find_back_edges` (dominance, any view), `find_back_edges_tagged` (CFG, honors `Back` tags) | |
-| Natural loop detection | `detect_loops` / `detect_loops_tagged` → `Vec<NaturalLoop<N>>` | Header, body, latches, nesting depth |
-| Loop nesting tree | `LoopNestingTree::compute` | Parent/child loop hierarchy |
+| Back-edge detection | `find_back_edges` (dominance, any view), `find_back_edges_tagged` (CFG, honors `Back` tags) | Edges out of code the root reaches; unreachable code has no back-edges |
+| Natural loop detection | `detect_loops` / `detect_loops_tagged` → `Vec<NaturalLoop<N>>` | Header, body, latches, nesting depth; outermost loops first. A tagged loop on an irreducible graph covers the cycle, not the blocks before it. Each loop owns a set of its blocks, so loops nested `n` deep hold `n²/2` entries between them: for deep nests ask the forest instead |
+| Loop forest | `LoopForest::compute` / `compute_tagged` → `loop_of_header`, `parent`, `depth`, `latches`, `contains`, `encloses`, `innermost`, `enclosing`, `is_nested`, `body`, `node_depths`, `natural_loops` | The same loops in near-linear space and time, whatever the nesting: every block is stored once under its innermost loop, and `contains` and `encloses` are constant time for every loop dominance finds. A tagged loop whose header does not dominate a latch (an irreducible cycle) keeps an explicit set of blocks, costs its own size, and is answered from that set; `encloses` and `enclosing` are exact where `parent` holds only the header. `natural_loops` materializes what `detect_loops*` return, and `CfgMetrics` and `cfg_block_nesting_depths` read the forest directly |
+| Loop nesting tree | `LoopNestingTree::compute` | Parent/child loop hierarchy, and the one statement of nesting depth: `NaturalLoop::depth` is the depth in this tree. Loops over the same body are siblings |
 | Control dependence graph | `control_dependence_graph` → `Graph<N, ()>` | From post-dominator tree, over any view; a block that branches back to itself has the edge to itself |
-| Program dependence graph | `program_dependence_graph` → `Graph<DependenceNode, DependenceKind>` | Control + def-use edges; reverse traversal performs backward slicing |
-| Interval analysis | `IntervalAnalysis::compute` | T1-T2 reduction over rooted views; reducibility test |
-| Reducibility transform | `make_reducible` | Node splitting for irreducible CFGs |
+| Program dependence graph | `program_dependence_graph` → `Graph<DependenceNode, DependenceKind>` | Control edges (from a block's predicate node to what it controls) and data edges (def to use, and a branching block's last instruction into its predicate node); reverse traversal performs backward slicing |
+| Interval analysis | `IntervalAnalysis::compute` → `intervals` | First-level Allen-Cocke interval partition of the code the root reaches; use `is_reducible` for the reducibility test |
+| Reducibility | `is_reducible` (exact test over a dominator tree), `make_reducible` (CFG node splitting) | Irreducible cycles are split until every retreating edge is a back edge |
 | Reverse CFG | `reverse_cfg` | Flip all edges, swap entry/exits |
 | Call graph | `call_graph` + `CallInfo`, `propagate_summaries` (callee-first SCC fixpoint) | Consumer-typed callees; interprocedural summary scaffold |
-| CFG diff | `CfgDiff::compute` | Structural comparison (bindiff-style fingerprinting), no trait bounds |
+| CFG diff | `CfgDiff::compute` | Structural comparison (bindiff-style): blocks are matched by wiring, from the entries along edges of equal kind, over every live block; a matched block reports changed instruction counts and changed edges. Any edge payload, no trait bounds |
 | Exception handling model | `EhModel::compute` | Payload-generic CFG input; stable source `EdgeId`, exact handler/unwind/leave/resume/continue kinds, landing pads, cleanup/resume blocks, handler identities, protected-by mapping, and cleanup continuations |
 | Integrity verification | `verify`, `verify_view`, `verify_edge_view`; `verify_with` + `SemanticValidator` | Structural node/edge-view checks plus deterministic typed consumer hooks for cardinality, ordering, and edge-payload rules |
-| DOT export | `write_dot` / `to_dot` + `DotStyle` (any node- and edge-bearing view); `Cfg::to_dot` (`DisplayInstr`), `Cfg::to_dot_with` (bound-free), `Graph::to_dot` | One writer; the style supplies node labels, edge attributes, graph name, and layout direction. Labels are escaped and left-justified |
+| DOT export | `write_dot` / `to_dot` + `DotStyle` (any node- and edge-bearing view); `Cfg::to_dot` (`DisplayInstr`), `Cfg::to_dot_with` (bound-free), `Graph::to_dot` | One writer; the style supplies node labels, edge attributes, graph name, and layout direction. Labels are escaped and left-justified; the graph name, node prefix, color and style are quoted when DOT requires it, and a NaN or infinite pen width is not written |
 | Text form | `write_text` / `to_text` + `TextStyle`, `parse_text`; `Cfg::to_text`, `parse_cfg_text` | One line per node and per edge, ids are the dense indices. Round trips: write → parse → write is a fixed point, so two graphs compare as text |
 
 ### Dataflow framework
@@ -329,63 +363,62 @@ Instruction-level analyses read the graph through `CfgView`. The graph-shaped so
 |---|---|
 | Supertraits | `RootedView<NodeId = BlockId>` and `EdgeView<EdgeId = EdgeId>`. The edge data implements `KindedEdge`. The root is the entry block. |
 | `Inst`, `instructions` | The instruction type of the blocks, and the instructions of one block in program order. |
-| `edge_kind` | The kind of an edge. The default reads it from the `KindedEdge` data. |
-| `edge_weight` | The branch weight of an edge: a probability or an execution count. The default is `None`, which means that the view has no profile. |
+| `edge_weight` | The branch probability of an edge, in `0.0..=1.0` relative to the other edges leaving its source. The default is `None`, which means that the view has no profile. |
 
 `Cfg` implements `CfgView`, so every caller that holds a `Cfg` keeps working. A consumer with its own block and edge storage implements the trait and runs the same analyses without a conversion. The unit tests of the trait run each analysis on a vector-backed view and compare the answer with the one on a `Cfg`.
 
 The contract has two rules. `instructions` accepts every identity that `node_ids` yields, and it returns the same slice each time. The index of an instruction in that slice is the instruction index of the `ProgramPoint` that an analysis reports.
 
-The view has no separate exception model. An edge of kind `EdgeKind::ExceptionUnwind` leaves its source block before a throwing instruction. `InstrInfo::may_unwind` marks the throwing instructions of a block. `dataflow::departs_before_throws` combines the two.
+The view has no separate exception model. An edge of kind `EdgeKind::ExceptionUnwind` leaves its source block before a throwing instruction. `InstrInfo::may_unwind` marks the throwing instructions of a block. `departs_before_throws` combines the two.
 
-These analyses take `&G` where `G: CfgView`: `ReachingDefs`, `Liveness`, `DefUseChains`, `SsaForm`, `PhiPlacements`, `constant_propagation`, `SccpAnalysis`, `abstract_interpret`, `MemoryTrace`, `MemorySSA`, `DeadCode`, `recover_expressions`, `ValueNumbering`, `BlockValueNumbers`, `cfg_purity`, `CfgMetrics`, `detect_cfg_patterns`, `CfgProfile`, `detect_tail_calls`, and `detect_switch_tables`. The problems `LivenessProblem`, `SeededLivenessProblem`, `ReachingDefsProblem`, and `ConstPropProblem` also run on every `CfgView`. A transform that edits the graph still takes `&mut Cfg`.
+These analyses take `&G` where `G: CfgView`: `ReachingDefs`, `Liveness`, `DefUseChains`, `SsaForm`, `PhiPlacements`, `ConstantPropagation`, `SccpAnalysis`, `AbstractFacts`, `MemoryTrace`, `MemorySsa`, `DeadCode`, `recover_expressions`, `ValueNumbering`, `BlockValueNumbers`, `cfg_purity`, `CfgMetrics`, `detect_cfg_patterns`, `CfgProfile`, `detect_tail_calls`, and `detect_switch_tables`. The problems `LivenessProblem`, `SeededLivenessProblem`, `ReachingDefsProblem`, and `ConstPropProblem` also run on every `CfgView`. A transform that edits the graph still takes `&mut Cfg`.
 
 | Analysis | Function / Type | Description |
 |---|---|---|
-| Generic fixpoint solver | `solve_problem[_from][_with_config]`, `Problem` / `TryProblem` traits | Forward or backward, any lattice type; every solver carries the same seeded/bounded/fallible matrix over shared `SolveConfig` and `SolveError`; `meet_options` lifts any lattice to `Option<F>` with `None` as unreachable bottom |
-| Node-level fixpoint | `solve_node_problem[_from][_with_config]`, `NodeProblem` / `TryNodeProblem` traits | Per-node facts over any graph view (taint, reachability-with-facts) |
-| Edge-sensitive fixpoint | `solve_edge_problem`, `solve_edge_problem_from`, `EdgeProblem` trait | Full or seeded per-edge transfer over any edge view; stable id/data plus physical node pre/post states and deterministic bounded-solve errors |
-| Fallible edge-sensitive fixpoint | `try_solve_edge_problem`, `try_solve_edge_problem_from`, `TryEdgeProblem` trait | Preserves consumer boundary, merge, node-transfer, and edge-transfer errors separately from solver limits |
+| Generic fixpoint solver | `solve_problem[_from][_with_config]`, `Problem` / `TryProblem` traits, `Facts` | Forward or backward, any lattice type; the block, node, and edge solvers carry the same seeded/bounded/fallible matrix over shared `SolveConfig` and `SolveError`, run on one worklist, and report node facts in one program-order `Facts` type (a backward node's IN is what its transfer produced); every problem names its starting fact `boundary`; `meet_options` lifts any lattice to `Option<F>` with `None` as unreachable bottom |
+| Node-level fixpoint | `solve_node_problem[_from][_with_config]`, `NodeProblem` / `TryNodeProblem` traits | Per-node `Facts` over any graph view (taint, reachability-with-facts) |
+| Edge-sensitive fixpoint | `solve_edge_problem[_from][_with_config]`, `EdgeProblem` trait | Full or seeded, optionally bounded, per-edge transfer over any edge view; stable id/data plus physical node pre/post states and deterministic bounded-solve errors |
+| Fallible edge-sensitive fixpoint | `try_solve_edge_problem[_from][_with_config]`, `TryEdgeProblem` trait | Preserves consumer boundary, merge, node-transfer, and edge-transfer errors separately from solver limits |
 | Reachability-lifted edge analysis | `Reachable` + `ReachableEdgeProblem` trait | Verification-style analyses over `Option` facts: `None` is unreached bottom, transfers short-circuit, entry facts start the flow, and each edge chooses pre- or post-state (exceptional edges observe the state the node received) |
-| Dense bit-set facts | `DenseBits` | Set-of-indices lattice element packed 64 per word; `union_with` is the join and reports change for convergence checks; `clear` is a word fill, `words` exposes the packed row, and `ones`/`intersection` step one set index at a time rather than one universe index |
+| Dense bit-set facts | `DenseBits` | Set-of-indices lattice element packed 64 per word; `union_with` is the join and reports change for convergence checks; `remove` and `clear` clear one index or the whole row, `words` exposes the packed row, and `ones`/`intersection` step one set index at a time rather than one universe index |
 | Reaching definitions | `ReachingDefs::compute` | Which writes reach each point; an `ExceptionUnwind` edge carries only the writes completed before each instruction that `InstrInfo::may_unwind` |
 | Liveness | `Liveness::compute` | Live-in / normal-completion live-out at each block; `live_on_unwind` is what unwind successors read before each throwing instruction; `live_before_instructions` / `live_after_instructions` replay the block transfer for instruction-granular sets (dead-store detection) |
 | Def-use / use-def chains | `DefUseChains::compute` | Bidirectional def↔use links; dead-def detection |
-| SSA construction | `SsaForm::compute` | IDF phi placement plus full dominator-forest renaming, including disconnected handler/dead-code components; each phi operand names its departure point, so an unwind contributes the value before each throwing instruction |
+| SSA construction | `SsaForm::compute` | IDF phi placement plus full dominator-forest renaming, including disconnected handler/dead-code components; each phi operand names its departure point, so an unwind contributes the value before each throwing instruction. An entry block that is a branch target is supported: its phis also merge the value the variable holds when the function starts, reported by `SsaPhi::start_value` apart from the edge operands |
 | Reusable SSA scratch | `SsaForm::compute_in` + `SsaScratch` | The same form with every working buffer caller-owned — frontiers, definition lists, renaming stacks, phi drafts, the walk's own stacks — leaving only the form itself allocated per procedure |
-| Phi placement | `PhiPlacements::compute` | Structural IDF phase for consumers that only need placement |
-| SSA deconstruction | `eliminate_phis`, `copies_by_predecessor` | φ-to-copy lowering |
-| Phi webs | `PhiWebs::compute` | Congruence classes for register coalescing |
-| Constant propagation | `constant_propagation`, `ConstantFolder` (associated `Const`) | Top/Const/Bottom lattice over a consumer constant domain — machine words, strings, bools, float bits; an unwind carries the constants known before each throwing instruction |
-| Sparse conditional constant propagation | `SccpAnalysis::compute` | SSA-based, marks unreachable edges |
-| Copy and value-alias propagation | `copy_propagation[_with_exits]`, `alias_propagation`, `CopySource` trait | Guarded chain resolution and dead transfer removal; pairwise aliases may refine types or metadata without changing runtime values. The `_with_exits` form keeps a copy whose definition is live at an exit — a function whose result is only ever a copy of an input otherwise loses the definition a caller reads back — while still rewriting that copy's readers inside the function. A transfer at or after a throwing instruction never substitutes into code its unwind reaches |
+| Phi placement | `PhiPlacements::compute` | Structural IDF phase for consumers that only need placement; `PhiPlacement::merges_start_value` marks the phis of a branch-target entry |
+| SSA deconstruction | `eliminate_phis`, `copies_by_predecessor` | φ-to-copy lowering; each `PhiCopy::from` is a `PhiCopyOrigin`, either the CFG edge departure the copy runs on or `FunctionStart` for the once-only copy of a start value, which no edge carries |
+| Phi webs | `PhiWebs::compute` | Congruence classes for register coalescing; a start value joins the web of the phi it feeds |
+| Constant propagation | `ConstantPropagation::compute`, `ConstantFolder` (associated `Const`) | Top/Const/Bottom lattice over a consumer constant domain — machine words, strings, bools, float bits; an unwind carries the constants known before each throwing instruction |
+| Sparse conditional constant propagation | `SccpAnalysis::compute` | SSA-based, marks unreachable edges; a start value is always executable and is the live-in seed, or `Bottom` |
+| Copy and value-alias propagation | `copy_propagation[_with_exits]`, `alias_propagation[_with_exits]`, `PropagationStats`, `CopySource` trait | Guarded chain resolution and dead transfer removal; pairwise aliases may refine types or metadata without changing runtime values. The `_with_exits` form keeps a copy whose definition is live at an exit — a function whose result is only ever a copy of an input otherwise loses the definition a caller reads back — while still rewriting that copy's readers inside the function. A transfer at or after a throwing instruction never substitutes into code its unwind reaches |
 | Memory-event trace | `MemoryTrace::compute`, `MemoryEventInfo` trait | Ordered, location-typed reads, writes, read/modify/write accesses, address-variable dependencies, and fences; instruction summaries distinguish separate read+write from compound modification |
-| Reusable memory-SSA scratch | `MemorySSA::compute_in` + `MemorySsaScratch` | The same answer with the event trace, the alias merge, and the shadow CFG's dominator and SSA buffers caller-owned |
-| Memory SSA | `dataflow::memory::MemorySSA::compute`, `MemoryAlias` trait | Event-driven SSA per may-alias location class: loop/branch φ-nodes, reaching writes and clobbers, bidirectional def-use chains, transitive readers, and ordinary-SSA address inputs; an unwind observes the memory state before each throwing instruction |
+| Reusable memory-SSA scratch | `MemorySsa::compute_in` + `MemorySsaScratch` | The same answer with the event trace, the alias merge, and the shadow CFG's dominator and SSA buffers caller-owned |
+| Memory SSA | `dataflow::memory::MemorySsa::compute`, `MemoryAlias` trait | Event-driven SSA per may-alias location class: loop/branch φ-nodes, reaching writes and clobbers, bidirectional def-use chains, transitive readers, and ordinary-SSA address inputs; an unwind observes the memory state before each throwing instruction; an entry block that is a branch target is supported, and its memory phis report the state the function starts with as `MemoryPhi::start_value`, used through `MemoryUse::PhiStart`, apart from the edge operands |
 | Reusable value-flow scratch | `MemoryValueFlow::compute_in` + `MemoryValueFlowScratch` | The same graph with the per-event address/stored/loaded resolution buffers caller-owned |
-| Memory value flow | `dataflow::memory::MemoryValueFlow::compute` | One graph over ordinary SSA values, versioned memory states, and exact events; typed address/store/read/write/load and ordinary/memory-phi edges retain the complete transfer path |
-| Abstract interpretation | `abstract_interpret`, `AbstractDomain` trait | Generic abstract domain framework on the edge-sensitive solver; an unwind carries the state before each throwing instruction |
+| Memory value flow | `dataflow::memory::MemoryValueFlow::compute` | One graph over ordinary SSA values, versioned memory states, and exact events; typed address/store/read/write/load and ordinary/memory-phi edges retain the complete transfer path; the start values of a branch-target entry's phis enter over their own `ValuePhiStart` and `MemoryPhiStart` edges, never as an edge departure |
+| Abstract interpretation | `AbstractFacts::compute`, `AbstractDomain` + `Lattice` traits | Generic abstract domain framework on the edge-sensitive solver; a domain supplies `bottom` and `meet` and a per-instruction transfer; an unwind carries the state before each throwing instruction |
 
 ### Higher-level analyses
 
 | Analysis | Function / Type | Description |
 |---|---|---|
-| Expression tree recovery | `recover_expressions`, `ExprInstr` (associated `Operator` + `Const`) | Rebuild expression DAGs from flat instructions |
+| Expression tree recovery | `recover_expressions`, `ExprInstr` (associated `Operator` + `Const`) | Rebuild expression DAGs from flat instructions. A block of chained single-use temporaries recovers to one tree as deep as the block is long, so `ExprNode` drops, clones, compares, prints, and measures (`depth`, `node_count`) without recursion |
 | Value numbering (local) | `BlockValueNumbers::compute` | Per-block hash-consing |
-| Value numbering (global) | `ValueNumbering::compute`, `ValueNumberInfo` (associated `Operator`) | Dominator-scoped GVN over any operation identity; a child an unwind reaches never reuses what its parent computes or writes from the first throwing instruction on |
+| Value numbering (global) | `ValueNumbering::compute`, `ValueNumberInfo` (associated `Operator`) | Dominator-scoped GVN over any operation identity, sound for variables that are written more than once: a block never reuses an expression over a variable a side path into it rewrites, and a child an unwind reaches never reuses what its parent computes or writes from the first throwing instruction on |
 | Redundancy counting | `ValueNumbering::redundant_count` | From GVN results |
 | Explicit alias sets | `AliasSets::new` / `merge`; `MemoryAlias` trait | Caller-populated union-find classes usable directly as the alias oracle for memory SSA; an unmerged pair is a proof of disjointness |
 | Index-path aliasing | `index_paths_may_overlap` | The `base[i][j]` kernel for alias oracles over indexed storage: unequal arity or unknown components stay conservative, fully known disagreement proves disjointness |
 | Exclusive handler extents | `recover_exclusive_extents[_with]`, `promote_exclusive_extents` | Evidence-reporting sibling of `promote_handler_extents`: blocks exclusively reachable from one handler entry along normal edges, boundary and ambiguity issues, and atomic per-region promotion that refuses overlap |
 | Dead code analysis | `DeadCode::compute`, `DeadCode::compute_with_exits` | Liveness-dead instructions (effect-guarded) and unreachable blocks, reported without mutating — the analysis `dead_code_elimination` applies. The seeded form takes what leaves each block (a returned value, storage a caller reads again, state a non-returning exit hands on), which a graph read from the inside cannot state; `SeededLivenessProblem` carries the seed into the solve |
 | Purity classification | `cfg_purity`, `block_purity`, `EffectInfo` (associated `Effect`) | Consumer effect vocabularies — machine memory/IO, allocation, panics |
-| Metrics | `GraphMetrics::compute` (any rooted view); `CfgMetrics::compute` | Node/edge counts, cyclomatic complexity, nesting depth, instruction density |
+| Metrics | `GraphMetrics::compute` (any rooted view); `CfgMetrics::compute` | Live node and edge counts (removed slots are not nodes), cyclomatic complexity, nesting depth (0 for no loops, 1 for one loop), instruction density |
 | Pattern detection | `detect_patterns` (any view), `detect_cfg_patterns` (adds trampolines + arm orientation) | Diamond, chain, self-loop, empty trampoline |
-| Profiling | `CfgProfile::from_edge_weights`, `set_uniform_edge_weights` | Edge-weight-based hot/cold block analysis |
-| Tail call detection | `detect_tail_calls` (heuristic), `detect_explicit_tail_calls` (`CallInfo` markers) | |
+| Profiling | `CfgProfile::from_edge_weights`, `set_uniform_edge_weights` | Edge probabilities propagated from the entry into per-block frequencies (loops solved to a fixpoint), hot/cold block queries |
+| Tail call detection | `detect_tail_calls` (heuristic), `detect_explicit_tail_calls` (`CallInfo` markers) | A call that is followed by a return in its own block, or that ends its block and flows into a block that returns at once; explicit markers reported with their position |
 | Switch table recovery | `detect_switch_tables` (`SwitchSource`), `recover_switch_tables` | Consumer-typed targets: addresses, syntax nodes; dispatch → structured switch |
-| Control tree | `ControlTree::compute`, `compute_with_report` (→ `LiftReport`), `compute_predicated[_with_report]`, `compute_with_report_treating_empty` | The structured form of a `Cfg`: `if/else`, pre-tested, post-tested, and endless loops, `switch` with case edges and a default, `try/catch` over declared handler extents, `break`/`continue` (labeled across loops), `goto`/`label`, and guarded runs of predicated instructions. A payload-free fact like `DominatorTree`: a flat arena of `ControlNode`s that name `BlockId`, `EdgeId`, `RegionId`, and `BlockSpan` instruction ranges, so it holds no instruction and never borrows the graph. Merge points are immediate post-dominators; an exit-free region has none. No owned code is dropped — the blocks the entry reaches and the blocks a handler owns, a catch pad no call unwinds into and its extent among them; a protected block the entry cannot reach is dead code — and `LiftReport` lists every goto, swept block, unstructured region, and dangling label |
-| Control tree traversal | `ControlTree::preorder`, `walk` (`ControlVisitor`), `child_bodies`, `for_each_instruction`, `write_pseudocode` / `to_pseudocode` | Non-recursive preorder and enter/leave walks, the child bodies of any node in execution order, every instruction in program-structure order, and indented pseudocode whose instruction text the caller supplies |
+| Control tree | `ControlTree::compute`, `compute_with_report` (→ `LiftReport`), `compute_predicated[_with_report]`, `compute_with_report_treating_empty` | The structured form of a `Cfg`: `if/else`, pre-tested, post-tested, and endless loops, `switch` with case edges and a default, `try/catch` over declared handler extents, `break`/`continue` (labeled across loops), `goto`/`label`, and guarded runs of predicated instructions. A payload-free fact like `DominatorTree`: a flat arena of `ControlNode`s that name `BlockId`, `EdgeId`, `RegionId`, and `BlockSpan` instruction ranges, so it holds no instruction and never borrows the graph. Merge points are immediate post-dominators; an exit-free region has none. No owned code is dropped — the blocks the entry reaches and the blocks a handler owns, a catch pad no call unwinds into and its extent among them; a protected block the entry cannot reach is dead code — and `LiftReport` lists every goto, swept block, unstructured region, and dangling label. Structuring and regionizing keep their own stacks, so the nesting depth of an input is bounded by memory, not by the call stack |
+| Control tree traversal | `ControlTree::preorder`, `walk` (`ControlVisitor`), `child_bodies`, `for_each_instruction`, `write_pseudocode` / `to_pseudocode` | Non-recursive preorder and enter/leave walks, the child bodies of any node in execution order, every instruction in program-structure order, and indented pseudocode whose instruction text the caller supplies (the printer keeps its own stack too) |
 
 ### Transforms
 
@@ -397,19 +430,29 @@ fallible pass stops execution.
 | Transform | Function | Description |
 |---|---|---|
 | Simplify (all-in-one) | `simplify`, `simplify_mapped` | Unreachable removal + block merging + empty bypass until stable; mapped form composes identity changes |
-| Remove unreachable | `remove_unreachable` | DFS reachability pruning |
-| Merge blocks | `merge_blocks` | Coalesce single-succ/single-pred chains |
-| Remove empty blocks | `remove_empty_blocks` | Bypass empty fallthrough blocks |
+| Remove unreachable | `remove_unreachable` | Reachability pruning; blocks named by exception metadata are kept |
+| Merge blocks | `merge_blocks` | Coalesce single-succ/single-pred chains inside one protected region |
+| Remove empty blocks | `remove_empty_blocks` | Bypass empty fallthrough blocks that no handler or cleanup names |
 | Critical edge splitting | `split_critical_edges`, `split_critical_edges_with` | Insert blocks on multi-succ → multi-pred edges while retaining the original edge identity/payload and mapping both halves |
-| Dead code elimination | `dead_code_elimination[_with_exits]` (instructions), `remove_dead_code[_mapped]` (plus the structure left dead) | Liveness-based; requires `EffectInfo` so side-effecting code is never silently deleted. The `_with_exits` form seeds what leaves each block |
-| Edge contraction | `contract_edge`, `contract_edge_mapped` | Merge two blocks connected by a single edge; mapped form preserves surviving edge identities/payloads |
-| Node splitting | `split_node`, `split_node_at_points` | Split at one or several validated consumer-selected instruction boundaries |
-| Loop rotation | `rotate_loop` | Top-tested → bottom-tested loop form |
-| Loop invariant detection | `find_loop_invariants` | Identify hoistable instructions |
-| Partial redundancy elimination | `PreAnalysis::compute`, `eliminate_pre` | GVN-based PRE |
+| Dead code elimination | `dead_code_elimination[_with_exits]` (instructions), `remove_dead_code[_mapped]` (plus the structure left dead) | Needed-set fixpoint over liveness: a dead instruction's reads keep nothing alive, so a chain feeding only dead code goes in one call, across blocks and around loops. Requires `EffectInfo` so side-effecting code is never silently deleted. The `_with_exits` form seeds what leaves each block |
+| Edge contraction | `contract_edge`, `contract_edge_mapped` | Merge two blocks connected by a single edge; mapped form preserves surviving edge identities/payloads. Refuses exception edges and merges across a protection boundary |
+| Node splitting | `Cfg::split_block`, `Cfg::split_block_at_points[_with_payloads]` | Split at one or several validated consumer-selected instruction boundaries; the new blocks stay in the original's regions |
+| Loop rotation | `rotate_loop` | Top-tested → bottom-tested loop form: the bottom test is a copy of the header (joining its regions) with copies of its edges, and the latch edge is retargeted in place |
+| Loop invariant detection | `find_loop_invariants` | Instructions that define something, have no declared effect, cannot unwind, and read only outer definitions or one invariant loop definition; requires `EffectInfo` |
+| Redundancy elimination | `PreAnalysis::compute`, `eliminate_pre` | Finds the instructions a dominating instruction already computed (GVN) and removes those it can replace soundly, redirecting reads through `CopySource::rewrite_use`; partially redundant computations are left alone |
 | Graph coloring | `interference_graph`, `color_graph` | Interference builder returns a `Graph`; coloring accepts any graph view |
-| Linearization | `linearize`, `Emitter` trait, `BlockOrder` | Re-serialize CFG to a flat stream; emitters speak `BlockId`, naming is theirs |
+| Linearization | `linearize`, `Emitter` trait, `BlockOrder`, `LinearizeError` | Re-serialize CFG to a flat stream; emitters speak `BlockId`, naming is theirs. Exceptional, call, and dispatch edges emit nothing; a conditional edge out of an empty block is an error |
 | Width relaxation | `relax_layout` | The assembler fixed point for symbolic layouts: monotone branch widening against caller-resolved labels, offset-dependent (alignment) widths, converged offsets plus the final label context |
+
+The structural passes (`simplify`, `merge_blocks`, `remove_empty_blocks`,
+`remove_unreachable`, `contract_edge`) keep a CFG's exception metadata true, so
+`Cfg::compact` and `EhModel` stay usable after any sequence of them. A block a
+handler, filter, or cleanup names by a single reference is never removed or
+merged away (`remove_unreachable` treats such blocks as roots), and two blocks
+merge only when the same regions protect both. `Cfg::split_block` is the
+inverse: the new tail joins every region and handler body of the original.
+Call `Cfg::remove_unreachable_regions` first to drop regions nothing can raise
+into together with their handler blocks.
 
 ### Output
 
@@ -420,7 +463,7 @@ which consumer printers can also use.
 | Form | Entry points | Notes |
 |---|---|---|
 | DOT | `write_dot` / `to_dot` over a `DotStyle`; `Cfg::write_dot`, `Cfg::write_dot_with`, `Graph::write_dot` | `DotStyle` carries the node-label hook, the edge-attribute hook (`DotEdgeAttributes`: label, color, style, penwidth), the graph name, the node-identifier prefix, and `DotRankDir`. `control_flow_edge_attributes` is the CFG's kind-to-color mapping; `plain_edge_attributes` decorates nothing |
-| Text | `write_text` / `to_text` over a `TextStyle`, read back by `parse_text`; `Cfg::write_text` / `Cfg::to_text`, read back by `parse_cfg_text` | One fact per line. `n3 label`, `n3 -> n5 label`, `#` comments; a CFG adds `entry bb0`, `bb3:` headers with indented instructions, `bb3 -> bb5 kind`, and `region` / `handler` lines. Escapes are `\\`, `\n`, `\r`, and a leading `\-` |
+| Text | `write_text` / `to_text` over a `TextStyle`, read back by `parse_text`; `Cfg::write_text` / `Cfg::to_text`, read back by `parse_cfg_text` | One fact per line. `n3 label`, `n3 -> n5 label`, `#` comments; a CFG adds `entry bb0`, `bb3:` headers with indented instructions, `bb3 -> bb5 kind`, and `region` / `handler` lines. Escapes are `\\`, `\n`, `\r`, and, on the first character only, `\-`, `\#`, and `\u{20}`-style for whitespace. A document may leave at most 2^20 removed slots (`TextErrorKind::TooManyHoles`). Edges replay in identity order, so the adjacency order a redirect produced is only in the serde form |
 
 Both label hooks are ordinary closures or function items of type
 `Label<Id, Data>`; `no_label` and `display_label` cover the common answers,
@@ -460,7 +503,7 @@ InstrInfo<Variable = V>   (optional — native IR variables, defs/uses)
 ├── ValueNumberInfo       (value numbering, PRE — associated Operator)
 └── MemoryEventInfo       (locations, address uses, access kinds, and fences — associated Location, Fence)
 
-MemoryAlias<Location>     (optional may-alias oracle consumed by MemorySSA)
+MemoryAlias<Location>     (optional may-alias oracle consumed by MemorySsa)
 
 DisplayInstr              (rendering only — DOT and text)
 CallInfo                  (call graphs, explicit tail calls — associated Callee)
@@ -486,7 +529,7 @@ The `ir` traits follow the same rule. The consumer implements `ir::rtl::Function
 Directional `MemoryAccess::read`, `write`, and `read_modify_write`
 constructors keep loaded definitions, stored uses, and address uses distinct
 (`MemoryAccess::opaque` covers table-driven kinds with unknown values);
-events also retain exact locations, atomicity, and ordered fences. `MemorySSA`
+events also retain exact locations, atomicity, and ordered fences. `MemorySsa`
 in `dataflow::memory` merges locations through the caller-provided
 `MemoryAlias` relation, then exposes loop-correct reaching definitions,
 clobbered states, users, and transitive readers. `MemoryValueFlow` combines it
@@ -499,7 +542,7 @@ from an alias oracle promises the locations cannot overlap at runtime;
 
 | Crate | Description |
 |---|---|
-| **cfglib** | Generic graph, CFG, SSA, and dataflow framework with the RTL and MLIL IR trait contracts |
+| **cfglib** | Generic graph, CFG, SSA, and dataflow framework with the RTL, MLIL, and HLIL IR trait contracts |
 
 Adapters live with the language they adapt, next to their decoders and test
 corpora. The SM4/SM5 decompiler is in
@@ -509,8 +552,11 @@ cafe.
 
 A language picks its entry level. A machine-shaped language emits `ir::rtl`
 records through `InstructionBuilder` into its own storage. A variable-shaped
-language implements `ir::mlil::FunctionView` directly. In both cases the
-storage, the builders, and the passes that edit them stay with the language.
+language implements `ir::mlil::FunctionView` directly. A language with source
+structure implements `ir::hlil::FunctionView` and `FunctionBuilder`, and lifts
+and lowers through its flat form with `FlatFunction` and `FlatBuilder`. In
+every case the storage, the builders, and the passes that edit them stay with
+the language.
 cfglib deliberately defines no generic LLIL. Low-level IRs are language-owned,
 and the minimal traits that they share (`FlowControl`, `InstrInfo`, `CfgView`,
 `Cfg`, `SsaForm`) are their common surface.
@@ -552,7 +598,7 @@ let dominators = DominatorTree::compute(&cfg);
 let ssa = SsaForm::compute(&cfg, &dominators);
 ```
 
-`SsaForm<V>` is a non-mutating view over the source CFG. It stores renamed phi results, operands, instruction uses, and instruction definitions as `SsaValue<V>`, while each `SsaInstruction` keeps a `ProgramPoint` back to the native instruction. Read the lists through `SsaPhi::operands`, `SsaInstruction::uses`, and `SsaInstruction::defs`, which return slices; a record holds a short list inline, so a typical instruction or two-way phi costs no allocation of its own. `PhiPlacement::predecessors` follows the same shape. Version `0` denotes a live-in or otherwise undefined incoming value.
+`SsaForm<V>` is a non-mutating view over the source CFG. It stores renamed phi results, operands, instruction uses, and instruction definitions as `SsaValue<V>`, while each `SsaInstruction` keeps a `ProgramPoint` back to the native instruction. Read the lists through `SsaPhi::operands`, `SsaInstruction::uses`, and `SsaInstruction::defs`, which return slices; a record holds a short list inline, so a typical instruction or two-way phi costs no allocation of its own. `PhiPlacement::predecessors` follows the same shape. Version `0` denotes a live-in or otherwise undefined incoming value. `SsaPhi::operands` lists only the values that arrive along CFG edges, each named by its departure point. A phi in an entry block that is a branch target (a loop whose header is the first instruction) also merges the value the variable holds when the function starts, which no edge carries; read it through `SsaPhi::start_value`, and handle it wherever the operands are consumed, since it arrives once before the entry block runs.
 
 For an IR adapter, implement the `ir::rtl` or `ir::mlil` traits on your own dense storage. Keep every arena, builder, and editing pass in your crate. Call the facts of cfglib on your function view, and apply their answers yourself. A machine-shaped language emits `ir::rtl` records through `InstructionBuilder`. A consumer that builds a block-parameter form from those records uses `ParamPlacement` to find where each root needs a parameter. A variable-shaped language implements `ir::mlil::FunctionView` directly. The consumer writes its own value analyses over that view, because they depend on the semantics of its dialect, and its own passes delete or rewrite instructions.
 
@@ -567,14 +613,32 @@ the source-language side: interned symbol variables, string/bool constants
 through constant propagation, enum operators in expression trees, goto wiring
 by label token, and switch recovery over syntax-node targets.
 
+Every other target in `crates/cfglib/tests/` pins one public area through the
+crate facade only, the way a consumer calls it, and judges the library against
+a reference written in the test (a brute-force definition, an interpreter run
+before and after a transform, a round-trip law) rather than against the
+library's own logic. A directory target (`tests/<area>/main.rs`) holds the
+larger ones.
+
+| Area | Targets |
+|---|---|
+| Graph store, tables, traversal | `graph-store`, `fanout-tables`, `open-search`, `graph-algorithms`, `tombstones` (every analysis on a store with removed slots, before and after `compact`) |
+| Control flow and exceptions | `control-tree`, `exception-regions`, `exception-models`, `address-cfg` |
+| Dataflow and SSA | `dataflow-solvers`, `memory-value-flow`, `ssa-destruction`, `cfg-pipeline` (build, dominate, SSA, SCCP, copy and dead-code passes, `eliminate_phis`) |
+| Transforms and analyses | `transform-pipeline`, `cfg-analyses` |
+| IR contracts, each over its own toy dialect | `rtl-facts`, `mlil-contract`, `hlil-pipeline`, `cfg-to-hlil` (analysis, structuring, lift) |
+| Formats | `text-dot`, `serde-round-trip` (needs `--features serde`), `no-std-facade` |
+
 ## Development
 
 Install the git hooks once with `prek install` (or `pre-commit install`); both
 tools read the same `.pre-commit-config.yaml`. Hygiene checks, the repository
 policy script, `cargo fmt`, and pedantic Clippy run at commit time; the full
-test and documentation suites run at push time. CI runs the same gates plus an
-MSRV (1.85) check and a `no_std` target build. The complete gate list and the
-workspace's naming and layout conventions live in `AGENTS.md`.
+test and documentation suites run at push time. CI runs the same gates with
+default features as well, plus an MSRV check against the `rust-version` in
+`Cargo.toml` (the one place the minimum Rust version is written down) and
+`no_std` target builds. The complete gate list and the workspace's naming and
+layout conventions live in `AGENTS.md`.
 
 ## License
 

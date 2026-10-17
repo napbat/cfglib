@@ -1,20 +1,20 @@
 use cfglib::{
-    AbstractDomain, Cfg, Direction, DominatorTree, EdgeProblem, Graph, Lattice, NodeId,
-    SolveConfig, SsaForm, TryEdgeProblem, TryNodeProblem, TryProblem, abstract_interpret,
-    alias_propagation, copies_by_predecessor, copy_propagation, copy_propagation_with_exits,
-    eliminate_phis, index_paths_may_overlap, meet_options, solve_edge_problem,
-    solve_edge_problem_from, solve_edge_problem_from_with_config, solve_edge_problem_with_config,
-    solve_node_problem_from, solve_node_problem_from_with_config, solve_problem_from,
-    solve_problem_from_with_config, try_solve_edge_problem, try_solve_edge_problem_from,
-    try_solve_edge_problem_from_with_config, try_solve_edge_problem_with_config,
-    try_solve_node_problem, try_solve_node_problem_from, try_solve_node_problem_from_with_config,
-    try_solve_node_problem_with_config, try_solve_problem, try_solve_problem_from,
-    try_solve_problem_from_with_config, try_solve_problem_with_config,
+    AbstractDomain, AbstractFacts, Cfg, Direction, DominatorTree, EdgeProblem, FlowEffect, Graph,
+    Lattice, NodeId, SolveConfig, SsaForm, TryEdgeProblem, TryNodeProblem, TryProblem,
+    alias_propagation, alias_propagation_with_exits, copies_by_predecessor, copy_propagation,
+    copy_propagation_with_exits, departs_before_throws, eliminate_phis, index_paths_may_overlap,
+    meet_options, solve_edge_problem, solve_edge_problem_from, solve_edge_problem_from_with_config,
+    solve_edge_problem_with_config, solve_node_problem_from, solve_node_problem_from_with_config,
+    solve_problem_from, solve_problem_from_with_config, try_solve_edge_problem,
+    try_solve_edge_problem_from, try_solve_edge_problem_from_with_config,
+    try_solve_edge_problem_with_config, try_solve_node_problem, try_solve_node_problem_from,
+    try_solve_node_problem_from_with_config, try_solve_node_problem_with_config, try_solve_problem,
+    try_solve_problem_from, try_solve_problem_from_with_config, try_solve_problem_with_config,
 };
 
 use super::BenchmarkSuite;
 use super::fixtures::{ApiInst, dataflow_cfg};
-use crate::fixtures::{CfgReachability, Reachability, branchy_cfg, branchy_graph};
+use crate::fixtures::{CfgReachability, Reachability, branchy_cfg, branchy_graph, fixture_u32};
 use crate::harness::benchmark_case;
 
 const NODE_COUNT: usize = 512;
@@ -27,16 +27,8 @@ impl Lattice for Seen {
         Self(false)
     }
 
-    fn top() -> Self {
-        Self(true)
-    }
-
     fn meet(&self, other: &Self) -> Self {
         Self(self.0 || other.0)
-    }
-
-    fn leq(&self, other: &Self) -> bool {
-        !self.0 || other.0
     }
 }
 
@@ -60,15 +52,21 @@ impl TryProblem<Cfg<u32>> for TryCfgReachability {
         Direction::Forward
     }
 
-    fn bottom(&self) -> Self::Fact {
+    fn bottom(&self, _graph: &Cfg<u32>) -> Self::Fact {
         false
     }
 
-    fn entry_fact(&self) -> Result<Self::Fact, Self::Error> {
+    fn boundary(&self, _graph: &Cfg<u32>) -> Result<Self::Fact, Self::Error> {
         Ok(true)
     }
 
-    fn meet(&self, left: &Self::Fact, right: &Self::Fact) -> Result<Self::Fact, Self::Error> {
+    fn meet(
+        &self,
+        _graph: &Cfg<u32>,
+        _block: cfglib::BlockId,
+        left: &Self::Fact,
+        right: &Self::Fact,
+    ) -> Result<Self::Fact, Self::Error> {
         Ok(*left || *right)
     }
 
@@ -100,7 +98,13 @@ impl TryNodeProblem<Graph<(), ()>> for TryGraphReachability {
         Ok(true)
     }
 
-    fn meet(&self, left: &Self::Fact, right: &Self::Fact) -> Result<Self::Fact, Self::Error> {
+    fn meet(
+        &self,
+        _graph: &Graph<(), ()>,
+        _node: NodeId,
+        left: &Self::Fact,
+        right: &Self::Fact,
+    ) -> Result<Self::Fact, Self::Error> {
         Ok(*left || *right)
     }
 
@@ -218,19 +222,52 @@ fn phi_cfg() -> Cfg<ApiInst> {
     cfg
 }
 
-fn register_analyses(suite: &mut BenchmarkSuite<'_>) {
+fn register_abstract_interpretation(suite: &mut BenchmarkSuite<'_>) {
     let cfg = dataflow_cfg(128, 8);
     benchmark_case!(
         suite,
         "api_abstract_interpret",
-        covers[abstract_interpret],
-        || abstract_interpret::<_, Seen>(&cfg),
+        || AbstractFacts::<Seen>::compute(&cfg),
         |facts| assert_eq!(
             facts.fact_out(cfglib::BlockId::from_index(127)),
             Some(&Seen(true))
         )
     );
+}
 
+fn register_unwind_departures(suite: &mut BenchmarkSuite<'_>) {
+    // `entry` throws and unwinds to `handler`, and also falls through.
+    let mut unwinding = Cfg::new();
+    let handler = unwinding.new_block();
+    let normal = unwinding.new_block();
+    let mut throwing = ApiInst::pure(0, Vec::new());
+    throwing.flow = FlowEffect::MayThrow;
+    unwinding.block_mut(unwinding.entry()).push(throwing);
+    unwinding.add_edge(unwinding.entry(), normal, cfglib::EdgeKind::Fallthrough);
+    unwinding.add_edge(
+        unwinding.entry(),
+        handler,
+        cfglib::EdgeKind::ExceptionUnwind,
+    );
+    benchmark_case!(
+        suite,
+        "api_departs_before_throws",
+        covers[departs_before_throws],
+        || {
+            unwinding
+                .outgoing(unwinding.entry())
+                .map(|edge| departs_before_throws(&unwinding, unwinding.edge(edge)))
+                .collect::<Vec<_>>()
+        },
+        |departures: &Vec<bool>| {
+            assert_eq!(departures.len(), 2);
+            assert!(departures[1], "the unwind edge departs before the throw");
+            assert!(!departures[0], "the normal edge departs after the block");
+        }
+    );
+}
+
+fn register_copy_and_alias_propagation(suite: &mut BenchmarkSuite<'_>) {
     let copies_fixture = copy_cfg();
     benchmark_case!(
         suite,
@@ -243,7 +280,7 @@ fn register_analyses(suite: &mut BenchmarkSuite<'_>) {
         },
         |(_, stats)| {
             assert_eq!(stats.uses_rewritten, 1);
-            assert_eq!(stats.copies_removed, 1);
+            assert_eq!(stats.instructions_removed, 1);
         }
     );
     benchmark_case!(
@@ -259,7 +296,7 @@ fn register_analyses(suite: &mut BenchmarkSuite<'_>) {
         },
         |(_, stats)| {
             assert_eq!(stats.uses_rewritten, 1);
-            assert_eq!(stats.copies_removed, 0);
+            assert_eq!(stats.instructions_removed, 0);
         }
     );
     benchmark_case!(
@@ -273,10 +310,29 @@ fn register_analyses(suite: &mut BenchmarkSuite<'_>) {
         },
         |(_, stats)| {
             assert_eq!(stats.uses_rewritten, 1);
-            assert_eq!(stats.aliases_removed, 1);
+            assert_eq!(stats.instructions_removed, 1);
         }
     );
 
+    benchmark_case!(
+        suite,
+        "api_alias_propagation_with_exits",
+        covers[alias_propagation_with_exits],
+        || {
+            let mut candidate = copies_fixture.clone();
+            // The alias's destination leaves the function, so the rewrite
+            // still happens and the alias stays.
+            let stats = alias_propagation_with_exits(&mut candidate, |_| vec![1]);
+            (candidate, stats)
+        },
+        |(_, stats)| {
+            assert_eq!(stats.uses_rewritten, 1);
+            assert_eq!(stats.instructions_removed, 0);
+        }
+    );
+}
+
+fn register_phi_elimination(suite: &mut BenchmarkSuite<'_>) {
     let phi_fixture = phi_cfg();
     let dominators = DominatorTree::compute(&phi_fixture);
     let ssa = SsaForm::compute(&phi_fixture, &dominators);
@@ -295,6 +351,13 @@ fn register_analyses(suite: &mut BenchmarkSuite<'_>) {
         || copies_by_predecessor(&copies),
         |groups: &Vec<_>| assert_eq!(groups.len(), 2)
     );
+}
+
+fn register_analyses(suite: &mut BenchmarkSuite<'_>) {
+    register_abstract_interpretation(suite);
+    register_unwind_departures(suite);
+    register_copy_and_alias_propagation(suite);
+    register_phi_elimination(suite);
 }
 
 fn register_cfg_solvers(suite: &mut BenchmarkSuite<'_>) {
@@ -436,9 +499,7 @@ const INDEX_PATH_LENGTH: usize = 64;
 const MEET_COUNT: u64 = 1_024;
 
 fn register_lattice_helpers(suite: &mut BenchmarkSuite<'_>) {
-    let left: Vec<u32> = (0..INDEX_PATH_LENGTH)
-        .map(|index| u32::try_from(index).expect("a small index fits in u32"))
-        .collect();
+    let left: Vec<u32> = (0..INDEX_PATH_LENGTH).map(fixture_u32).collect();
     let right = left.clone();
     // A heap fixture the optimizer cannot fold the meet loop away against.
     let facts: Vec<u64> = (0..MEET_COUNT).rev().collect();

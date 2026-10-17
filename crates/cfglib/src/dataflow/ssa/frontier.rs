@@ -5,18 +5,21 @@
 //! one contiguous, ascending run. [`FrontierRuns`] is that table, which an
 //! SSA scratch rebuilds in place for each procedure, and
 //! [`DominanceFrontiers`] is the same table handed to a consumer that asks
-//! for one block's frontier. There is one statement of the rule rather than
-//! two.
+//! for one block's frontier.
 //!
 //! Both read any [`RootedView`], so a [`Cfg`](crate::Cfg) and a
 //! consumer-owned function view share the one algorithm.
 //!
-//! For every reachable block `x`, the frontier is the one that
-//! [`DominatorTree::frontier`] states: block `y` is a member when `x`
-//! dominates a predecessor of `y` and does not strictly dominate `y`. This
-//! includes a tree root that is a branch target, such as an entry with a back
-//! edge into it: the root is in its own frontier and in the frontier of every
-//! block on the path back to it.
+//! The rule itself is the one [`DominatorTree::frontier`] states, which
+//! evaluates it per query where this table walks every join once: block `y`
+//! is in the frontier of `x` when `x` dominates a predecessor of `y` and does
+//! not strictly dominate `y`. This includes a tree root that is a branch
+//! target, such as an entry with a back edge into it: the root is in its own
+//! frontier and in the frontier of every block on the path back to it. A
+//! block outside every tree, such as unreachable code, has an empty frontier,
+//! and an edge from it contributes nothing to the frontier of live code. The
+//! tests check the table against the per-query frontier on every small
+//! digraph.
 
 extern crate alloc;
 
@@ -122,11 +125,17 @@ impl<N: DenseId> FrontierRuns<N> {
         self.starts.clear();
         self.starts.resize(bound + 1, usize::MAX);
         for block in graph.node_ids() {
+            // Unreachable code has no frontier, and an edge out of it adds
+            // none to live code: a runner is always a block the tree holds.
+            if !dom.is_reachable(block) {
+                continue;
+            }
+
             // A frontier block is a join: two incoming paths at least. A tree
             // root has one path that is not an edge, the start of its tree,
             // so one predecessor edge already makes it a join.
-            let tree_root = dom.idom(block).is_none() && dom.is_reachable(block);
-            let joins_at = if tree_root { 1 } else { 2 };
+            let stop = dom.idom(block);
+            let joins_at = if stop.is_none() { 1 } else { 2 };
             if graph.predecessors(block).nth(joins_at - 1).is_none() {
                 continue;
             }
@@ -137,8 +146,10 @@ impl<N: DenseId> FrontierRuns<N> {
             // dominate itself. A runner that an earlier predecessor's walk
             // reached for this block continues exactly as that walk did, so
             // the walk stops there and each pair is emitted once.
-            let stop = (!tree_root).then(|| dom.idom(block).unwrap_or(block));
-            for predecessor in graph.predecessors(block) {
+            for predecessor in graph
+                .predecessors(block)
+                .filter(|&predecessor| dom.is_reachable(predecessor))
+            {
                 let mut runner = predecessor;
                 while Some(runner) != stop && self.starts[runner.index()] != block.index() {
                     self.starts[runner.index()] = block.index();

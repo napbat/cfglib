@@ -2,13 +2,13 @@
 
 extern crate alloc;
 
-use alloc::collections::{BTreeSet, VecDeque};
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
-use crate::graph::search::Visit;
+use crate::graph::search::{Visit, may_expand};
 
-use super::super::may_expand;
+use super::super::marks::Marks;
 
 /// Configuration for an [`open_breadth_first_events`] walk.
 ///
@@ -123,7 +123,7 @@ pub fn open_breadth_first_events<N: Clone + Ord, B>(
     mut successors: impl FnMut(&N, &mut Vec<N>),
     mut on_event: impl FnMut(OpenBfsEvent<'_, N>) -> ControlFlow<B, Visit>,
 ) -> Option<B> {
-    let mut marks = BTreeSet::new();
+    let mut marks = Marks::new();
     let mut queue = VecDeque::new();
 
     for seed in seeds {
@@ -159,7 +159,7 @@ fn discover<N: Clone + Ord, B>(
     node: N,
     depth: usize,
     config: OpenBfsConfig,
-    marks: &mut BTreeSet<N>,
+    marks: &mut Marks<N>,
     queue: &mut VecDeque<(N, usize)>,
     on_event: &mut impl FnMut(OpenBfsEvent<'_, N>) -> ControlFlow<B, Visit>,
 ) -> ControlFlow<B> {

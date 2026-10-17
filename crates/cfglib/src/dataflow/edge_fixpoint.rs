@@ -2,7 +2,6 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::convert::Infallible;
@@ -10,8 +9,11 @@ use core::convert::Infallible;
 use crate::dataflow::fixpoint::{
     Direction, Facts, SolveConfig, SolveError, TrySolveError, collapse_infallible,
 };
+use crate::dataflow::worklist::Worklist;
+use crate::graph::edge_traverse::EdgeAdjacency;
 use crate::graph::edge_view::{EdgeRef, EdgeView};
-use crate::graph::view::DenseId;
+use crate::graph::traverse::{TraversalDirection, by_axis, depth_first_preorder};
+use crate::graph::view::{DenseId, RootedView};
 
 /// A dataflow problem whose transfer can distinguish individual edges.
 ///
@@ -170,7 +172,7 @@ pub trait ReachableEdgeProblem<G: EdgeView> {
     /// # Errors
     ///
     /// Returns a consumer error when constructing the entry fact fails.
-    fn entry_fact(&self, graph: &G, node: G::NodeId) -> Result<Option<Self::Fact>, Self::Error>;
+    fn boundary(&self, graph: &G, node: G::NodeId) -> Result<Option<Self::Fact>, Self::Error>;
 
     /// Merges two reached facts at the physical merge point.
     ///
@@ -233,7 +235,7 @@ impl<G: EdgeView, P: ReachableEdgeProblem<G>> TryEdgeProblem<G> for Reachable<P>
     }
 
     fn boundary(&self, graph: &G, node: G::NodeId) -> Result<Option<Self::Fact>, Self::Error> {
-        Ok(self.0.entry_fact(graph, node)?.map(Some))
+        Ok(ReachableEdgeProblem::boundary(&self.0, graph, node)?.map(Some))
     }
 
     fn meet(
@@ -282,23 +284,23 @@ impl<G: EdgeView, P: ReachableEdgeProblem<G>> TryEdgeProblem<G> for Reachable<P>
 /// Node and edge facts at a completed fixpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EdgeFacts<F> {
-    node_input: Vec<F>,
-    node_output: Vec<F>,
+    nodes: Facts<F>,
     edge: Vec<Option<F>>,
-    steps: usize,
 }
 
 impl<F> EdgeFacts<F> {
-    /// Physical input fact for `node`.
+    /// Physical input fact for `node`: the fact at its start in program
+    /// order, whichever way the analysis flows.
     #[must_use]
     pub fn fact_in<N: DenseId>(&self, node: N) -> &F {
-        &self.node_input[node.index()]
+        self.nodes.fact_in(node)
     }
 
-    /// Physical output fact for `node`.
+    /// Physical output fact for `node`: the fact at its end in program
+    /// order.
     #[must_use]
     pub fn fact_out<N: DenseId>(&self, node: N) -> &F {
-        &self.node_output[node.index()]
+        self.nodes.fact_out(node)
     }
 
     /// Fact on a live edge in the solved view, or `None` for a tombstone or an
@@ -317,7 +319,7 @@ impl<F> EdgeFacts<F> {
     /// Number of worklist entries processed.
     #[must_use]
     pub const fn steps(&self) -> usize {
-        self.steps
+        self.nodes.steps()
     }
 
     /// The node facts of a solve over a [`Cfg`](crate::Cfg), as its block
@@ -326,7 +328,7 @@ impl<F> EdgeFacts<F> {
     /// A CFG's nodes are its blocks, indexed alike, so each block keeps its
     /// own physical input and output. The edge facts are dropped.
     pub(crate) fn into_block_facts(self) -> Facts<F> {
-        Facts::from_parts(self.node_input, self.node_output, self.steps)
+        self.nodes
     }
 }
 
@@ -371,6 +373,22 @@ where
     solve_edge_problem_from_with_config(graph, problem, seeds, SolveConfig::new())
 }
 
+/// Solve an edge-sensitive problem over the blocks reachable from the root of
+/// `graph`, without a step limit.
+///
+/// The block-level analyses that report a fact for every block run on this:
+/// blocks the root cannot reach keep their bottom facts and contribute
+/// nothing to the blocks they branch to.
+pub(super) fn solve_reachable<G, P>(graph: &G, problem: &P) -> EdgeFacts<P::Fact>
+where
+    G: EdgeView + RootedView,
+    P: EdgeProblem<G>,
+{
+    let reachable = depth_first_preorder(graph, graph.root(), TraversalDirection::Outgoing);
+    solve_edge_problem_from(graph, problem, &reachable)
+        .expect("an unbounded solve cannot exceed a step limit")
+}
+
 /// Solve an edge-sensitive problem with deterministic bounded iteration.
 ///
 /// # Errors
@@ -390,7 +408,7 @@ where
     collapse_infallible(try_solve_with_worklist(
         graph,
         &fallible,
-        (0..graph.node_bound()).collect(),
+        Worklist::live(graph),
         config,
     ))
 }
@@ -420,7 +438,7 @@ where
     collapse_infallible(try_solve_with_worklist(
         graph,
         &fallible,
-        seed_worklist(graph, seeds),
+        Worklist::seeded(graph, seeds),
         config,
     ))
 }
@@ -479,7 +497,7 @@ where
     G: EdgeView,
     P: TryEdgeProblem<G>,
 {
-    try_solve_with_worklist(graph, problem, (0..graph.node_bound()).collect(), config)
+    try_solve_with_worklist(graph, problem, Worklist::live(graph), config)
 }
 
 /// Solve a fallible edge-sensitive problem from `seeds` with a deterministic
@@ -503,26 +521,13 @@ where
     G: EdgeView,
     P: TryEdgeProblem<G>,
 {
-    try_solve_with_worklist(graph, problem, seed_worklist(graph, seeds), config)
-}
-
-fn seed_worklist<G: EdgeView>(graph: &G, seeds: &[G::NodeId]) -> BTreeSet<usize> {
-    seeds
-        .iter()
-        .map(|seed| {
-            assert!(
-                seed.index() < graph.node_bound(),
-                "seed node is out of range"
-            );
-            seed.index()
-        })
-        .collect()
+    try_solve_with_worklist(graph, problem, Worklist::seeded(graph, seeds), config)
 }
 
 fn try_solve_with_worklist<G, P>(
     graph: &G,
     problem: &P,
-    mut worklist: BTreeSet<usize>,
+    mut worklist: Worklist,
     config: SolveConfig,
 ) -> Result<EdgeFacts<P::Fact>, TrySolveError<P::Error>>
 where
@@ -530,12 +535,18 @@ where
     P: TryEdgeProblem<G>,
 {
     let bottom = problem.bottom(graph);
-    let mut node_input = vec![bottom.clone(); graph.node_bound()];
-    let mut node_output = vec![bottom.clone(); graph.node_bound()];
     let mut edge = vec![None; graph.edge_bound()];
     for edge_id in graph.edge_ids() {
         edge[edge_id.index()] = Some(bottom.clone());
     }
+    let mut solver = Solver {
+        graph,
+        problem,
+        input: vec![bottom.clone(); graph.node_bound()],
+        output: vec![bottom.clone(); graph.node_bound()],
+        edge,
+        bottom,
+    };
 
     let mut steps = 0;
     while let Some(node_index) = worklist.pop_first() {
@@ -551,185 +562,89 @@ where
         }
         steps += 1;
         let node = G::NodeId::from_index(node_index);
-
-        match problem.direction() {
-            Direction::Forward => try_solve_forward_node(
-                graph,
-                problem,
-                node,
-                &bottom,
-                &mut node_input,
-                &mut node_output,
-                &mut edge,
-                &mut worklist,
-            ),
-            Direction::Backward => try_solve_backward_node(
-                graph,
-                problem,
-                node,
-                &bottom,
-                &mut node_input,
-                &mut node_output,
-                &mut edge,
-                &mut worklist,
-            ),
-        }
+        by_axis!(
+            problem.direction().traversal(),
+            visit_along(&mut solver, &mut worklist, node)
+        )
         .map_err(TrySolveError::Problem)?;
     }
-
     Ok(EdgeFacts {
-        node_input,
-        node_output,
-        edge,
-        steps,
+        nodes: Facts::new(solver.input, solver.output, steps),
+        edge: solver.edge,
     })
 }
 
-fn try_meet_edges<G, P>(
-    graph: &G,
-    problem: &P,
-    node: G::NodeId,
-    bottom: &P::Fact,
-    edge_facts: &[Option<P::Fact>],
-    incoming: bool,
-) -> Result<P::Fact, P::Error>
-where
-    G: EdgeView,
-    P: TryEdgeProblem<G>,
-{
-    let boundary = problem.boundary(graph, node)?;
-    let merged = if incoming {
-        meet_edge_facts(
-            graph,
-            problem,
-            node,
-            boundary,
-            graph.incoming(node),
-            edge_facts,
-        )?
-    } else {
-        meet_edge_facts(
-            graph,
-            problem,
-            node,
-            boundary,
-            graph.outgoing(node),
-            edge_facts,
-        )?
-    };
-    Ok(merged.unwrap_or_else(|| bottom.clone()))
+/// The facts of one solve so far, in program order for the nodes.
+struct Solver<'a, G: EdgeView, P: TryEdgeProblem<G>> {
+    graph: &'a G,
+    problem: &'a P,
+    bottom: P::Fact,
+    input: Vec<P::Fact>,
+    output: Vec<P::Fact>,
+    edge: Vec<Option<P::Fact>>,
 }
 
-fn meet_edge_facts<G, P>(
-    graph: &G,
-    problem: &P,
+/// Recomputes `node` from the edges flowing into it against `downstream`, and
+/// re-queues the neighbor of every edge leaving it along `downstream` whose
+/// fact changed.
+fn visit_along<G, P, D>(
+    downstream: D,
+    solver: &mut Solver<'_, G, P>,
+    worklist: &mut Worklist,
     node: G::NodeId,
-    mut merged: Option<P::Fact>,
-    edges: impl Iterator<Item = G::EdgeId>,
-    edge_facts: &[Option<P::Fact>],
-) -> Result<Option<P::Fact>, P::Error>
-where
-    G: EdgeView,
-    P: TryEdgeProblem<G>,
-{
-    for edge in edges {
-        let fact = edge_facts[edge.index()]
-            .as_ref()
-            .expect("adjacency contains an edge excluded from the view");
-        merged = Some(match merged {
-            Some(current) => problem.meet(graph, node, &current, fact)?,
-            None => fact.clone(),
-        });
-    }
-    Ok(merged)
-}
-
-// The solver's per-node step borrows each state slice separately so the
-// worklist loop can keep disjoint mutable borrows; bundling them into a
-// struct would force the loop to re-borrow the whole solver state.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "internal solver step threads all solver state explicitly"
-)]
-fn try_solve_forward_node<G, P>(
-    graph: &G,
-    problem: &P,
-    node: G::NodeId,
-    bottom: &P::Fact,
-    node_input: &mut [P::Fact],
-    node_output: &mut [P::Fact],
-    edge_facts: &mut [Option<P::Fact>],
-    worklist: &mut BTreeSet<usize>,
 ) -> Result<(), P::Error>
 where
     G: EdgeView,
     P: TryEdgeProblem<G>,
+    D: EdgeAdjacency,
+    D::Against: EdgeAdjacency,
 {
-    let input = try_meet_edges(graph, problem, node, bottom, edge_facts, true)?;
-    let output = problem.transfer_node(graph, node, &input)?;
-    node_input[node.index()] = input;
-    node_output[node.index()] = output;
+    let (graph, problem) = (solver.graph, solver.problem);
+    let flowing_in = solver.meet_edges(node, downstream.against())?;
+    let flowing_out = problem.transfer_node(graph, node, &flowing_in)?;
+    let (input, output) = problem.direction().program_order(flowing_in, flowing_out);
+    solver.input[node.index()] = input;
+    solver.output[node.index()] = output;
 
-    for edge_id in graph.outgoing(node) {
+    for edge_id in downstream.edges(graph, node) {
         let edge = graph.edge(edge_id);
         let new_fact = problem.transfer_edge(
             graph,
             edge,
-            &node_input[node.index()],
-            &node_output[node.index()],
+            &solver.input[node.index()],
+            &solver.output[node.index()],
         )?;
-        let fact = edge_facts[edge_id.index()]
+        let fact = solver.edge[edge_id.index()]
             .as_mut()
             .expect("adjacency contains an edge excluded from the view");
         if new_fact != *fact {
             *fact = new_fact;
-            worklist.insert(edge.target().index());
+            worklist.insert(downstream.next(edge).index());
         }
     }
     Ok(())
 }
 
-// Same disjoint-borrow constraint as `try_solve_forward_node`.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "internal solver step threads all solver state explicitly"
-)]
-fn try_solve_backward_node<G, P>(
-    graph: &G,
-    problem: &P,
-    node: G::NodeId,
-    bottom: &P::Fact,
-    node_input: &mut [P::Fact],
-    node_output: &mut [P::Fact],
-    edge_facts: &mut [Option<P::Fact>],
-    worklist: &mut BTreeSet<usize>,
-) -> Result<(), P::Error>
-where
-    G: EdgeView,
-    P: TryEdgeProblem<G>,
-{
-    let output = try_meet_edges(graph, problem, node, bottom, edge_facts, false)?;
-    let input = problem.transfer_node(graph, node, &output)?;
-    node_output[node.index()] = output;
-    node_input[node.index()] = input;
-
-    for edge_id in graph.incoming(node) {
-        let edge = graph.edge(edge_id);
-        let new_fact = problem.transfer_edge(
-            graph,
-            edge,
-            &node_input[node.index()],
-            &node_output[node.index()],
-        )?;
-        let fact = edge_facts[edge_id.index()]
-            .as_mut()
-            .expect("adjacency contains an edge excluded from the view");
-        if new_fact != *fact {
-            *fact = new_fact;
-            worklist.insert(edge.source().index());
+impl<G: EdgeView, P: TryEdgeProblem<G>> Solver<'_, G, P> {
+    /// The node's boundary fact met with the fact on every edge along
+    /// `upstream`, in adjacency order; bottom when there is neither.
+    fn meet_edges<U: EdgeAdjacency>(
+        &self,
+        node: G::NodeId,
+        upstream: U,
+    ) -> Result<P::Fact, P::Error> {
+        let mut merged = self.problem.boundary(self.graph, node)?;
+        for edge in upstream.edges(self.graph, node) {
+            let fact = self.edge[edge.index()]
+                .as_ref()
+                .expect("adjacency contains an edge excluded from the view");
+            merged = Some(match merged {
+                Some(current) => self.problem.meet(self.graph, node, &current, fact)?,
+                None => fact.clone(),
+            });
         }
+        Ok(merged.unwrap_or_else(|| self.bottom.clone()))
     }
-    Ok(())
 }
 
 struct InfallibleProblem<'problem, P>(&'problem P);

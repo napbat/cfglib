@@ -5,12 +5,13 @@ mod analysis;
 mod dataflow;
 mod fixtures;
 mod graph;
+mod pipeline;
 mod transform;
 mod traversal;
 
 pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
-    "abstract_interpret",
     "alias_propagation",
+    "alias_propagation_with_exits",
     "bind_edge_attributes",
     "bind_label",
     "block_nesting_depths",
@@ -29,7 +30,6 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "common_ancestors",
     "condensation",
     "condensation_of",
-    "constant_propagation",
     "control_flow_edge_attributes",
     "contract_edge",
     "contract_edge_mapped",
@@ -39,6 +39,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "copy_propagation_with_exits",
     "dead_code_elimination",
     "dead_code_elimination_with_exits",
+    "departs_before_throws",
     "depth_first_edges",
     "depth_first_edges_with",
     "depth_first_events",
@@ -85,6 +86,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "open_search",
     "parse_cfg_text",
     "parse_text",
+    "pass_fn",
     "plain_edge_attributes",
     "program_dependence_graph",
     "promote_exclusive_extents",
@@ -130,9 +132,6 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "split_critical_edges",
     "split_critical_edges_mapped",
     "split_critical_edges_with",
-    "split_node",
-    "split_node_at_points",
-    "split_node_with_payload_mapped",
     "tarjan_scc",
     "to_dot",
     "to_text",
@@ -195,11 +194,6 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         "cfg_fixpoint_bool",
         [solve_problem, solve_problem_with_config]
     );
-    benchmark_coverage!(
-        suite,
-        "cfg_constprop_independent_constants",
-        [constant_propagation]
-    );
     benchmark_coverage!(suite, "cfg_clone_merge_linear", [merge_blocks]);
     benchmark_coverage!(suite, "cfg_clone_remove_empty_chain", [remove_empty_blocks]);
     benchmark_coverage!(
@@ -212,6 +206,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     analysis::register(suite);
     dataflow::register(suite);
     graph::register(suite);
+    pipeline::register(suite);
     transform::register(suite);
     traversal::register(suite);
 }

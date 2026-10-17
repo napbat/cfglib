@@ -7,7 +7,9 @@ use alloc::vec::Vec;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeId;
-use crate::{ControlNode, ControlTree, LiftReport, LoopKind};
+use crate::{
+    ControlDescent, ControlNode, ControlNodeId, ControlTree, ControlVisitor, LiftReport, LoopKind,
+};
 
 /// The blocks whose instructions a tree must hold: the blocks the entry
 /// reaches, and the blocks the handlers own — handler entries, filter
@@ -58,7 +60,7 @@ fn allowed_blocks<I, E>(cfg: &Cfg<I, E>, report: &LiftReport) -> Vec<BlockId> {
 }
 
 /// What the entry and `roots` reach over edges of every kind. Sorted.
-fn reach<I, E>(cfg: &Cfg<I, E>, mut stack: Vec<BlockId>) -> Vec<BlockId> {
+pub(super) fn reach<I, E>(cfg: &Cfg<I, E>, mut stack: Vec<BlockId>) -> Vec<BlockId> {
     stack.push(cfg.entry());
     let mut reached = alloc::vec![false; cfg.block_bound()];
     while let Some(block) = stack.pop() {
@@ -86,7 +88,7 @@ fn handler_owned<I, E>(cfg: &Cfg<I, E>) -> Vec<BlockId> {
 
 /// The block sets a handler owns: its entry with its known extent, and its
 /// filter funclet by itself.
-fn handler_sets<I, E>(cfg: &Cfg<I, E>) -> Vec<BTreeSet<BlockId>> {
+pub(super) fn handler_sets<I, E>(cfg: &Cfg<I, E>) -> Vec<BTreeSet<BlockId>> {
     let mut sets = Vec::new();
     for handler in cfg.regions().iter().flat_map(|region| &region.handlers) {
         let mut owned: BTreeSet<BlockId> = [handler.entry].into_iter().collect();
@@ -154,14 +156,104 @@ pub(super) fn describe<I, E>(cfg: &Cfg<I, E>) -> alloc::string::String {
 
 /// The tree as pseudocode with each instruction named by its block, for a
 /// failure message.
-fn render(tree: &ControlTree) -> alloc::string::String {
+pub(super) fn render(tree: &ControlTree) -> alloc::string::String {
     tree.to_pseudocode(|sink, point| write!(sink, "b{}.{}", point.block.index(), point.inst_idx))
         .unwrap_or_default()
 }
 
+/// Records the nodes a walk enters, and checks that every `leave` closes the
+/// innermost open node.
+#[derive(Default)]
+struct Balance {
+    open: Vec<ControlNodeId>,
+    entered: Vec<ControlNodeId>,
+}
+
+impl ControlVisitor for Balance {
+    fn enter(&mut self, _: &ControlTree, node: ControlNodeId) -> ControlDescent {
+        self.open.push(node);
+        self.entered.push(node);
+        ControlDescent::Into
+    }
+
+    fn leave(&mut self, _: &ControlTree, node: ControlNodeId) {
+        assert_eq!(
+            self.open.pop(),
+            Some(node),
+            "leave closes the innermost node"
+        );
+    }
+}
+
+/// The arena holds a tree: every node is reachable from the root exactly
+/// once, each child has a lower handle than its parent, the root has the
+/// highest, and a walk enters and leaves every node in step with the
+/// preorder.
+fn assert_arena_is_a_tree(tree: &ControlTree, context: &str) {
+    let preorder: Vec<ControlNodeId> = tree.preorder().collect();
+    let mut reached: Vec<usize> = preorder.iter().map(|id| id.index()).collect();
+    reached.sort_unstable();
+    assert_eq!(
+        reached,
+        (0..tree.node_count()).collect::<Vec<_>>(),
+        "a node is unreachable or reached twice in {context}\n{}",
+        render(tree)
+    );
+    assert_eq!(
+        tree.root().index() + 1,
+        tree.node_count(),
+        "the root holds the highest handle in {context}"
+    );
+    for id in tree.node_ids() {
+        for body in tree.child_bodies(id) {
+            for &child in tree.body(body) {
+                assert!(
+                    child.index() < id.index(),
+                    "child {child} of {id} is allocated after its parent in {context}\n{}",
+                    render(tree)
+                );
+            }
+        }
+    }
+    let mut balance = Balance::default();
+    tree.walk(&mut balance);
+    assert!(
+        balance.open.is_empty(),
+        "a walk left a node open in {context}"
+    );
+    assert_eq!(balance.entered, preorder, "walk order in {context}");
+}
+
+/// The pseudocode names every instruction, in the order the walk visits them:
+/// a branch or dispatch prints the instructions that compute its condition
+/// ahead of it and its own test in the header. A guarded region also names its
+/// witness once more, so a predicated tree is not compared.
+fn assert_display_follows_walk<I, E>(cfg: &Cfg<I, E>, tree: &ControlTree, context: &str) {
+    if tree
+        .preorder()
+        .any(|id| matches!(tree.node(id), ControlNode::Guarded { .. }))
+    {
+        return;
+    }
+    let mut walked = Vec::new();
+    tree.for_each_instruction(cfg, |point, _| walked.push((point.block, point.inst_idx)));
+    let mut printed = Vec::new();
+    tree.to_pseudocode(|sink, point| {
+        printed.push((point.block, point.inst_idx));
+        sink.write_str("i")
+    })
+    .expect("printing to a string cannot fail");
+    assert_eq!(
+        printed,
+        walked,
+        "the pseudocode and the walk disagree in {context}\n{}",
+        render(tree)
+    );
+}
+
 /// Check the invariants of one graph's tree and report.
 ///
-/// - Every node is reachable from the root exactly once.
+/// - The arena is a tree (see [`assert_arena_is_a_tree`]).
 /// - No instruction appears twice, and the instructions of every owned block
 ///   appear.
 /// - No instruction appears that neither an owned block nor a goto reaches:
@@ -170,9 +262,33 @@ fn render(tree: &ControlTree) -> alloc::string::String {
 /// - Every goto target has one label or is reported as a dangling label, never
 ///   both, and no block is labeled twice.
 /// - Every swept block carries its label.
+/// - The tree executes the instructions in the order the graph does.
 pub(super) fn check<I, E>(cfg: &Cfg<I, E>, tree: &ControlTree, report: &LiftReport, context: &str) {
-    assert_eq!(tree.preorder().count(), tree.node_count(), "{context}");
+    assert_arena_is_a_tree(tree, context);
+    assert_display_follows_walk(cfg, tree, context);
+    assert_instructions_appear_once_and_only_when_allowed(cfg, tree, report, context);
+    let reported = assert_gotos_match_report(tree, report, context);
+    let labels = assert_labels_resolve_gotos(tree, report, &reported, context);
+    assert_dangling_labels_are_justified(cfg, tree, report, &reported, context);
+    for block in &report.swept_blocks {
+        assert!(labels.contains(block), "swept {block} in {context}");
+    }
+    assert_unstructured_regions_have_no_handler_arm(tree, report, context);
+    super::semantics::assert_runs_alike(cfg, tree, report, context);
+    super::semantics::assert_raisers_are_covered(cfg, tree, context);
+    super::semantics::assert_try_bodies_keep_to_their_region(cfg, tree, context);
+    assert_fully_structured_tree_holds_no_goto(tree, report, context);
+}
 
+/// No instruction appears twice, the instructions of every owned block
+/// appear, and no instruction appears that neither an owned block nor a goto
+/// reaches: dead code stays dead.
+fn assert_instructions_appear_once_and_only_when_allowed<I, E>(
+    cfg: &Cfg<I, E>,
+    tree: &ControlTree,
+    report: &LiftReport,
+    context: &str,
+) {
     let instructions = |blocks: Vec<BlockId>| -> Vec<(BlockId, usize)> {
         blocks
             .into_iter()
@@ -207,7 +323,15 @@ pub(super) fn check<I, E>(cfg: &Cfg<I, E>, tree: &ControlTree, report: &LiftRepo
             render(tree)
         );
     }
+}
 
+/// The gotos in the tree are exactly the reported ones. Returns the sorted
+/// goto targets.
+fn assert_gotos_match_report(
+    tree: &ControlTree,
+    report: &LiftReport,
+    context: &str,
+) -> Vec<BlockId> {
     let mut gotos: Vec<BlockId> = tree
         .preorder()
         .filter_map(|id| match *tree.node(id) {
@@ -219,7 +343,17 @@ pub(super) fn check<I, E>(cfg: &Cfg<I, E>, tree: &ControlTree, report: &LiftRepo
     let mut reported: Vec<BlockId> = report.gotos.iter().map(|goto| goto.target).collect();
     reported.sort_unstable();
     assert_eq!(gotos, reported, "gotos of {context}");
+    reported
+}
 
+/// Every goto target (`reported`) has one label or is reported as a dangling
+/// label, never both, and no block is labeled twice. Returns the sorted labels.
+fn assert_labels_resolve_gotos(
+    tree: &ControlTree,
+    report: &LiftReport,
+    reported: &[BlockId],
+    context: &str,
+) -> Vec<BlockId> {
     let mut labels: Vec<BlockId> = tree
         .preorder()
         .filter_map(|id| match *tree.node(id) {
@@ -236,12 +370,24 @@ pub(super) fn check<I, E>(cfg: &Cfg<I, E>, tree: &ControlTree, report: &LiftRepo
         "a block labeled twice in {context}\n{}\n{report:?}",
         render(tree)
     );
-    for target in &reported {
+    for target in reported {
         assert!(
             labels.contains(target) != report.unresolved_labels.contains(target),
             "label of goto {target} in {context}"
         );
     }
+    labels
+}
+
+/// Every dangling label belongs to a goto (`reported`), and the block it
+/// names holds no instructions or is held only as a loop's test.
+fn assert_dangling_labels_are_justified<I, E>(
+    cfg: &Cfg<I, E>,
+    tree: &ControlTree,
+    report: &LiftReport,
+    reported: &[BlockId],
+    context: &str,
+) {
     // A goto to a block with instructions finds its label unless the tree
     // holds that block only as a loop's test. No node stands for an empty
     // block or for a test, so the report lists such a target and the consumer
@@ -269,13 +415,42 @@ pub(super) fn check<I, E>(cfg: &Cfg<I, E>, tree: &ControlTree, report: &LiftRepo
             render(tree)
         );
     }
-    for block in &report.swept_blocks {
-        assert!(labels.contains(block), "swept {block} in {context}");
+}
+
+/// A region the report calls unstructured has no handler arm in the tree.
+fn assert_unstructured_regions_have_no_handler_arm(
+    tree: &ControlTree,
+    report: &LiftReport,
+    context: &str,
+) {
+    for id in tree.preorder() {
+        if let ControlNode::TryCatch { handlers, .. } = *tree.node(id) {
+            for handler in tree.handlers(handlers) {
+                assert!(
+                    !report
+                        .unstructured_regions
+                        .contains(&handler.handler.region()),
+                    "region {} is structured and reported unstructured in {context}\n{}",
+                    handler.handler.region(),
+                    render(tree)
+                );
+            }
+        }
     }
-    assert_eq!(
-        report.is_fully_structured(),
-        report.gotos.is_empty()
-            && report.unstructured_regions.is_empty()
-            && report.unresolved_labels.is_empty()
+}
+
+/// A fully structured tree holds no goto.
+fn assert_fully_structured_tree_holds_no_goto(
+    tree: &ControlTree,
+    report: &LiftReport,
+    context: &str,
+) {
+    assert!(
+        !report.is_fully_structured()
+            || tree
+                .preorder()
+                .all(|id| !matches!(tree.node(id), ControlNode::Goto { .. })),
+        "a fully structured tree holds a goto in {context}\n{}",
+        render(tree)
     );
 }

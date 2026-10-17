@@ -61,7 +61,9 @@ pub enum ChildBodyKind {
 /// - A handle that a view yields is below its count. The methods of the view
 ///   panic or return unspecified data for a handle outside the function, as an
 ///   index into a pool does; [`verify`](fn@super::verify) is the check that a
-///   function meets this contract.
+///   function meets this contract. [`recover_structure`](super::recover_structure)
+///   does not rely on it: it checks each handle that it reads and reports one
+///   outside the function as [`RecoverError::Malformed`](super::RecoverError).
 pub trait FunctionView<D: Dialect> {
     /// A statement, dense within the consumer's storage.
     type Stmt: DenseId;
@@ -253,6 +255,29 @@ pub fn visit_statements<'a, D, F>(
         // The first child body is the next one to run, so it goes on top.
         pending[first_child..].reverse();
     }
+}
+
+/// The loop that a labeled group names: its only statement, when that
+/// statement is a loop. Any other group labels a block.
+///
+/// `verify` and `lower` share this rule, so a label that `lower` resolves as
+/// a loop is one that `verify` accepts as a `continue` target.
+pub(super) fn labeled_loop<D, F>(view: &F, body: &[F::Stmt]) -> Option<F::Stmt>
+where
+    D: Dialect,
+    F: FunctionView<D>,
+{
+    let &[only] = body else {
+        return None;
+    };
+    matches!(
+        view.stmt(only),
+        StmtShape::While { .. }
+            | StmtShape::DoWhile { .. }
+            | StmtShape::Loop { .. }
+            | StmtShape::For { .. }
+    )
+    .then_some(only)
 }
 
 /// Visits the expression tree under `root` in postorder: the operands of an

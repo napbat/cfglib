@@ -1,10 +1,13 @@
-use super::fixtures::{WIDE_FACT_WORDS, fixture_u32};
-use super::structural_oracles::has_directed_edge;
-use super::{
-    BTreeSet, BlockId, Cfg, CommonAncestor, ConstantInst, DominanceFrontiers, DominatorTree,
-    EdgeStep, Facts, Graph, IntervalAnalysis, NodeFacts, NodeId, PhiPlacements, PostDominatorTree,
-    PostNode, ProgramPoint, SsaForm, SsaValue, TraversalDirection, VecDeque,
+use std::collections::{BTreeSet, VecDeque};
+
+use cfglib::{
+    BlockId, Cfg, CommonAncestor, DominanceFrontiers, DominatorTree, EdgeStep, Facts, Graph,
+    IntervalAnalysis, NodeId, PhiPlacements, PostDominatorTree, PostNode, ProgramPoint, SsaForm,
+    SsaValue, TraversalDirection,
 };
+
+use super::fixtures::{ConstantInst, WIDE_FACT_WORDS, fixture_u32};
+use super::structural_oracles::has_directed_edge;
 
 pub(super) fn directed_distances(
     graph: &Graph<(), ()>,
@@ -168,7 +171,7 @@ pub(super) fn assert_branchy_dominators(dominators: &DominatorTree, node_count: 
         } else {
             let parent = ((index - 1) / 2) * 2;
             assert_eq!(dominators.idom(block), Some(BlockId::from_index(parent)));
-            let level = u32::try_from(index.div_ceil(2)).expect("fixture level fits in u32");
+            let level = fixture_u32(index.div_ceil(2));
             assert_eq!(dominators.level(block), Some(level));
         }
     }
@@ -250,10 +253,9 @@ pub(super) fn assert_control_dependence_graph(
 }
 
 pub(super) fn assert_cfg_intervals(result: &IntervalAnalysis, cfg: &Cfg<u32>) {
-    assert_eq!(result.levels.len(), 1);
-    assert_ne!(result.levels[0].len(), 0);
+    assert_ne!(result.intervals.len(), 0);
     let mut assigned = BTreeSet::new();
-    for interval in &result.levels[0] {
+    for interval in &result.intervals {
         assert!(interval.blocks.contains(&interval.header));
         for &block in &interval.blocks {
             assert!(assigned.insert(block), "block appeared in two intervals");
@@ -267,7 +269,6 @@ pub(super) fn assert_cfg_intervals(result: &IntervalAnalysis, cfg: &Cfg<u32>) {
         }
     }
     assert_eq!(assigned.len(), cfg.block_count());
-    assert_eq!(result.is_reducible, result.levels[0].len() <= 1);
 }
 
 pub(super) fn assert_reverse_chain_intervals(
@@ -275,16 +276,14 @@ pub(super) fn assert_reverse_chain_intervals(
     node_count: usize,
     root: NodeId,
 ) {
-    assert_eq!(result.levels.len(), 1);
-    assert_eq!(result.levels[0].len(), 1);
-    assert!(result.is_reducible);
-    let interval = &result.levels[0][0];
+    assert_eq!(result.intervals.len(), 1);
+    let interval = &result.intervals[0];
     assert_eq!(interval.header, root);
     assert_eq!(interval.blocks.len(), node_count);
     assert!((0..node_count).all(|index| interval.blocks.contains(&NodeId::from_index(index))));
 }
 
-pub(super) fn assert_bool_node_facts(facts: &NodeFacts<bool>, node_count: usize) {
+pub(super) fn assert_bool_node_facts(facts: &Facts<bool>, node_count: usize) {
     for index in 0..node_count {
         let node = NodeId::from_index(index);
         assert!(*facts.fact_in(node));
@@ -292,7 +291,7 @@ pub(super) fn assert_bool_node_facts(facts: &NodeFacts<bool>, node_count: usize)
     }
 }
 
-pub(super) fn assert_wide_node_facts(facts: &NodeFacts<Vec<u64>>, node_count: usize) {
+pub(super) fn assert_wide_node_facts(facts: &Facts<Vec<u64>>, node_count: usize) {
     for index in 0..node_count {
         let node = NodeId::from_index(index);
         for fact in [facts.fact_in(node), facts.fact_out(node)] {

@@ -27,6 +27,27 @@ macro_rules! over_toys {
 
 pub(crate) use over_toys;
 
+/// Declares a dense handle of a toy storage, the way a consumer defines its
+/// own.
+macro_rules! dense_id {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub(crate) struct $name(pub(crate) u32);
+
+        impl $crate::graph::view::DenseId for $name {
+            fn from_index(index: usize) -> Self {
+                Self(u32::try_from(index).unwrap())
+            }
+
+            fn index(self) -> usize {
+                usize::try_from(self.0).unwrap()
+            }
+        }
+    };
+}
+
+mod depth;
 mod effects;
 mod fixtures;
 mod flat;
@@ -50,6 +71,7 @@ mod sym;
 mod verification;
 mod walks;
 
+pub(crate) use depth::{EVERY_WRAP, Wrap, nest, nested, on_small_stack};
 pub(crate) use imp::Imp;
 pub(crate) use kit::{Kit, Prim, Ty};
 pub(crate) use storage::{ExprId, StmtId, ToyHlil, ToyHlilBuilder, VarId};

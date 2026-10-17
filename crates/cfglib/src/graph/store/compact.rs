@@ -13,12 +13,12 @@ use core::mem;
 
 use crate::graph::traverse::TraversalDirection;
 
+use super::Graph;
 use super::adjacency::{NONE, compress};
 use super::edge::EdgeRecord;
 use super::id::{Id, IdTag};
 use super::liveness::LiveSet;
 use super::renumbering::Renumbering;
-use super::{Graph, raw_index};
 
 impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// Whether the store is a pure compressed base: no delta, no tombstones.
@@ -44,8 +44,10 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// and identity order all mean the same thing afterwards as before. The
     /// delta is emptied and every tombstone disappears.
     ///
-    /// Costs one pass over the slot space plus two counting passes over the
-    /// live edges, and allocates the new base once.
+    /// Costs one pass over each slot space plus two counting passes over the
+    /// live edges, and allocates the new base once. A node whose adjacency
+    /// reads out of identity order, because an edge was redirected to or from
+    /// it, additionally costs one walk of that adjacency.
     ///
     /// # Examples
     ///
@@ -64,11 +66,23 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// ```
     pub fn compact(&mut self) -> Renumbering<NT, ET> {
         let node_map = surviving_slots(&self.live_nodes, self.node_bound());
+        let edge_map = surviving_slots(&self.live_edges, self.edge_bound());
+        // The counting passes below place every run in identity order, so the
+        // runs that read otherwise are taken now, while the old index is
+        // still there to read them from.
+        let reordered_out =
+            self.reordered_adjacency(TraversalDirection::Outgoing, &node_map, &edge_map);
+        let reordered_in =
+            self.reordered_adjacency(TraversalDirection::Incoming, &node_map, &edge_map);
         let nodes = self.take_live_nodes(&node_map);
-        let (edges, edge_map) = self.take_live_edges(&node_map);
+        let edges = self.take_live_edges(&node_map);
 
-        let (out_offsets, out_edges) = compress(&edges, nodes.len(), TraversalDirection::Outgoing);
-        let (in_offsets, in_edges) = compress(&edges, nodes.len(), TraversalDirection::Incoming);
+        let (out_offsets, mut out_edges) =
+            compress(&edges, nodes.len(), TraversalDirection::Outgoing);
+        let (in_offsets, mut in_edges) =
+            compress(&edges, nodes.len(), TraversalDirection::Incoming);
+        restore_runs(&out_offsets, &mut out_edges, reordered_out);
+        restore_runs(&in_offsets, &mut in_edges, reordered_in);
 
         self.live_node_count = nodes.len();
         self.live_edge_count = edges.len();
@@ -108,10 +122,9 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         nodes
     }
 
-    fn take_live_edges(&mut self, node_map: &[u32]) -> (Vec<EdgeRecord<E, NT>>, Vec<u32>) {
+    fn take_live_edges(&mut self, node_map: &[u32]) -> Vec<EdgeRecord<E, NT>> {
         let base = mem::take(&mut self.base_edges);
         let delta = mem::take(&mut self.delta_edges);
-        let mut edge_map = vec![NONE; base.len() + delta.len()];
         let mut edges = Vec::with_capacity(self.live_edge_count);
         for (slot, mut record) in Vec::from(base).into_iter().chain(delta).enumerate() {
             if !self.live_edges.is_live(slot) {
@@ -119,10 +132,9 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
             }
             record.source = remap_endpoint(node_map, record.source);
             record.target = remap_endpoint(node_map, record.target);
-            edge_map[slot] = raw_index(edges.len());
             edges.push(record);
         }
-        (edges, edge_map)
+        edges
     }
 }
 
@@ -137,6 +149,17 @@ fn surviving_slots(live: &LiveSet, slots: usize) -> Vec<u32> {
         }
     }
     mapping
+}
+
+/// Overwrite the runs of the nodes in `reordered` with the order they read in.
+///
+/// A run holds the same edges whatever their order, so each replacement fills
+/// exactly the slice the counting pass gave its node.
+fn restore_runs(offsets: &[u32], edges: &mut [u32], reordered: Vec<(u32, Vec<u32>)>) {
+    for (node, run) in reordered {
+        let start = offsets[node as usize] as usize;
+        edges[start..start + run.len()].copy_from_slice(&run);
+    }
 }
 
 fn remap_endpoint<NT: IdTag>(node_map: &[u32], old: Id<NT>) -> Id<NT> {

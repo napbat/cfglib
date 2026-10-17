@@ -11,8 +11,8 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+use crate::EffectInfo;
 use crate::block::BlockId;
-use crate::dataflow::EffectInfo;
 use crate::dataflow::cfg_view::CfgView;
 
 /// Purity verdict for a block or CFG, over a consumer effect vocabulary `E`.
@@ -39,7 +39,21 @@ impl<E> Purity<E> {
     }
 }
 
-fn collect_effects<E: Clone + Ord>(mut all: Vec<E>) -> Purity<E> {
+/// The purity of the blocks `blocks` taken together.
+fn purity_of_blocks<G>(
+    cfg: &G,
+    blocks: impl IntoIterator<Item = BlockId>,
+) -> Purity<<G::Inst as EffectInfo>::Effect>
+where
+    G: CfgView,
+    G::Inst: EffectInfo,
+{
+    let mut all = Vec::new();
+    for block in blocks {
+        for inst in cfg.instructions(block) {
+            all.extend_from_slice(inst.effects());
+        }
+    }
     if all.is_empty() {
         Purity::Pure
     } else {
@@ -56,11 +70,7 @@ where
     G: CfgView,
     G::Inst: EffectInfo,
 {
-    let mut all = Vec::new();
-    for inst in cfg.instructions(block) {
-        all.extend_from_slice(inst.effects());
-    }
-    collect_effects(all)
+    purity_of_blocks(cfg, [block])
 }
 
 /// Analyze purity of the entire CFG.
@@ -70,13 +80,7 @@ where
     G: CfgView,
     G::Inst: EffectInfo,
 {
-    let mut all = Vec::new();
-    for block in cfg.node_ids() {
-        for inst in cfg.instructions(block) {
-            all.extend_from_slice(inst.effects());
-        }
-    }
-    collect_effects(all)
+    purity_of_blocks(cfg, cfg.node_ids())
 }
 
 /// Collect per-block purity for every block in the CFG.
@@ -96,7 +100,7 @@ mod tests {
     use super::*;
     use crate::builder::CfgBuilder;
     use crate::flow::FlowEffect;
-    use crate::test_util::{TestEffect, df_impure as impure, df_pure as pure, df_with_effect};
+    use crate::test_util::{TestEffect, df_ff as pure, df_impure as impure, df_with_effect};
     use alloc::vec;
 
     #[test]
@@ -108,31 +112,53 @@ mod tests {
     #[test]
     fn impure_cfg() {
         let cfg = CfgBuilder::build(vec![
+            impure("store", TestEffect::MemoryWrite),
             impure("load", TestEffect::MemoryRead),
             impure("store", TestEffect::MemoryWrite),
         ])
         .unwrap();
-        let p = cfg_purity(&cfg);
-        assert!(p.is_impure());
-        if let Purity::Impure(effs) = p {
-            assert_eq!(effs, vec![TestEffect::MemoryRead, TestEffect::MemoryWrite]);
-        }
+        assert_eq!(
+            cfg_purity(&cfg),
+            Purity::Impure(vec![TestEffect::MemoryRead, TestEffect::MemoryWrite]),
+            "the effects come back sorted and without repeats"
+        );
     }
 
-    #[test]
-    fn mixed_block_purity() {
-        let cfg = CfgBuilder::build(vec![
+    fn mixed_cfg() -> crate::cfg::Cfg<crate::test_util::DfInst> {
+        CfgBuilder::build(vec![
             pure("add"),
             df_with_effect(pure("if"), FlowEffect::ConditionalOpen),
             impure("store", TestEffect::MemoryWrite),
             df_with_effect(pure("else"), FlowEffect::ConditionalAlternate),
-            pure("nop"),
+            impure("load", TestEffect::MemoryRead),
             df_with_effect(pure("endif"), FlowEffect::ConditionalClose),
         ])
-        .unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn mixed_block_purity() {
+        let cfg = mixed_cfg();
         // Entry block (has "add") should be pure.
         assert!(block_purity(&cfg, cfg.entry()).is_pure());
-        // The whole CFG is impure because one branch stores.
-        assert!(cfg_purity(&cfg).is_impure());
+        // The whole CFG is impure because the branches store and load.
+        assert_eq!(
+            cfg_purity(&cfg),
+            Purity::Impure(vec![TestEffect::MemoryRead, TestEffect::MemoryWrite])
+        );
+    }
+
+    #[test]
+    fn cfg_purity_is_the_union_of_its_blocks() {
+        let cfg = mixed_cfg();
+        let mut union = Vec::new();
+        for (_, purity) in block_purities(&cfg) {
+            if let Purity::Impure(effects) = purity {
+                union.extend(effects);
+            }
+        }
+        union.sort();
+        union.dedup();
+        assert_eq!(cfg_purity(&cfg), Purity::Impure(union));
     }
 }

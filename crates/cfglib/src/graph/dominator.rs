@@ -14,9 +14,10 @@
 //!
 //! The work is split by responsibility. `construction` runs the algorithm over
 //! any [`GraphView`], `numbering` numbers a forest from its parent table,
-//! `frontier` answers dominance-frontier queries over the numbered tree, and
-//! `post` builds the post-dominator tree on the first two and answers its
-//! frontier queries with the third. This module holds the tree and its queries.
+//! `forest` extends a tree over the code its root misses, `frontier` answers
+//! dominance-frontier queries over the numbered tree, and `post` builds the
+//! post-dominator tree on the first two and answers its frontier queries with
+//! the last. This module holds the tree and its queries.
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -26,11 +27,13 @@ use core::ops::Range;
 use crate::block::BlockId;
 use crate::graph::view::{DenseId, GraphView, RootedView};
 use construction::ConstructionBuffers;
+pub(crate) use forest::complete_dominator_forest;
 pub use frontier::FrontierScratch;
 use numbering::{Numbered, NumberingBuffers};
 pub use post::{PostDominatorScratch, PostDominatorTree, PostNode};
 
 mod construction;
+mod forest;
 mod frontier;
 #[cfg(test)]
 mod iterative;
@@ -115,55 +118,6 @@ pub struct DominatorTree<N = BlockId> {
     /// The reachable nodes in preorder. The subtree of `b` is
     /// `order[pre[b] ..= last[b]]`.
     order: Vec<N>,
-}
-
-/// Order of siblings in a compact dominator-child linked list.
-#[derive(Clone, Copy)]
-pub(crate) enum DominatorChildOrder {
-    /// Following links visits children by increasing dense node id.
-    Ascending,
-    /// Following links visits children by decreasing dense node id.
-    Descending,
-}
-
-/// Compact, transient child adjacency for whole-tree consumers.
-///
-/// Keeping this separate from [`DominatorTree`] avoids permanently increasing
-/// every tree's memory footprint for the few passes that need repeated child
-/// traversal.
-#[derive(Debug)]
-pub(crate) struct DominatorChildLinks<N> {
-    first_child: Vec<Option<N>>,
-    next_sibling: Vec<Option<N>>,
-}
-
-impl<N> Default for DominatorChildLinks<N> {
-    fn default() -> Self {
-        Self {
-            first_child: Vec::new(),
-            next_sibling: Vec::new(),
-        }
-    }
-}
-
-impl<N: DenseId> DominatorChildLinks<N> {
-    /// Unlink every node and cover `node_count` of them, keeping the arrays.
-    pub(crate) fn reset(&mut self, node_count: usize) {
-        self.first_child.clear();
-        self.first_child.resize(node_count, None);
-        self.next_sibling.clear();
-        self.next_sibling.resize(node_count, None);
-    }
-
-    /// First child of `parent` in the selected order.
-    pub(crate) fn first_child(&self, parent: N) -> Option<N> {
-        self.first_child[parent.index()]
-    }
-
-    /// Next sibling after `child` in the selected order.
-    pub(crate) fn next_sibling(&self, child: N) -> Option<N> {
-        self.next_sibling[child.index()]
-    }
 }
 
 /// Every buffer [`DominatorTree::compute_in`] fills, owned by the caller.
@@ -520,50 +474,50 @@ impl<N: DenseId> DominatorTree<N> {
         slot(self.pre[index])..slot(self.last[index]) + 1
     }
 
-    /// Build compact child adjacency in a caller-selected sibling order.
-    pub(crate) fn child_links(&self, order: DominatorChildOrder) -> DominatorChildLinks<N> {
-        let mut links = DominatorChildLinks::default();
-        self.child_links_in(&mut links, order);
-        links
-    }
-
-    /// Build that adjacency into caller-owned arrays, for a pass that walks
-    /// one tree's children per procedure over a whole codebase.
-    pub(crate) fn child_links_in(
+    /// Walk the trees below `roots` in preorder, giving each node a scope:
+    /// `enter` runs when the walk reaches a node, and `exit` runs once every
+    /// node it dominates has been entered and exited.
+    ///
+    /// This is the explicit-stack walk that a pass over the dominator tree
+    /// with scoped state (a renaming stack, a table of available values) is
+    /// built on, stated once. `enter` returns what `exit` needs to undo it,
+    /// so a scope costs the walk one stack entry and no allocation of its
+    /// own. Roots are walked in the order given and the children of a node in
+    /// ascending dense index, which is the order of
+    /// [`preorder`](Self::preorder); a root that is in no tree has nothing
+    /// to walk and is skipped. A walk does not recurse, so a chain of 10⁵
+    /// nodes costs no more host stack than a diamond.
+    ///
+    /// `state` is handed to both callbacks, so they can share one mutable
+    /// value without two closures borrowing it. `open` holds the scopes
+    /// entered and not yet exited, one per level of the tree at most. It is
+    /// cleared on entry and empty on return, and the caller owns it so a pass
+    /// over many procedures allocates it once.
+    pub(crate) fn scoped_walk<S, T>(
         &self,
-        links: &mut DominatorChildLinks<N>,
-        order: DominatorChildOrder,
+        roots: impl IntoIterator<Item = N>,
+        state: &mut S,
+        open: &mut Vec<(N, T)>,
+        mut enter: impl FnMut(&mut S, N) -> T,
+        mut exit: impl FnMut(&mut S, N, T),
     ) {
-        links.reset(self.idom.len());
-        let DominatorChildLinks {
-            first_child,
-            next_sibling,
-        } = links;
-
-        match order {
-            DominatorChildOrder::Ascending => {
-                for index in (0..self.idom.len()).rev() {
-                    self.prepend_child(index, first_child, next_sibling);
+        open.clear();
+        for root in roots {
+            for position in self.span(root) {
+                // A scope ends where the preorder leaves its subtree.
+                while let Some(&(top, _)) = open.last()
+                    && slot(self.last[top.index()]) < position
+                {
+                    let (node, scope) = open.pop().expect("a scope was just seen on top");
+                    exit(state, node, scope);
                 }
+                let node = self.order[position];
+                let scope = enter(state, node);
+                open.push((node, scope));
             }
-            DominatorChildOrder::Descending => {
-                for index in 0..self.idom.len() {
-                    self.prepend_child(index, first_child, next_sibling);
-                }
+            while let Some((node, scope)) = open.pop() {
+                exit(state, node, scope);
             }
-        }
-    }
-
-    fn prepend_child(
-        &self,
-        index: usize,
-        first_child: &mut [Option<N>],
-        next_sibling: &mut [Option<N>],
-    ) {
-        let child = N::from_index(index);
-        if let Some(parent) = self.idom(child) {
-            next_sibling[index] = first_child[parent.index()];
-            first_child[parent.index()] = Some(child);
         }
     }
 }

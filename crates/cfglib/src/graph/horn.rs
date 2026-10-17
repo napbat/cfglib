@@ -1,7 +1,7 @@
 //! Horn-clause (AND-OR) derivability over dense fact identities.
 //!
 //! [`HornClauses`] answers *which facts are derivable* from rules of the form
-//! `head <- body1 & body2 & ...`. It is the conjunctive generalisation of
+//! `head <- body1 & body2 & ...`. It is the conjunctive generalization of
 //! graph reachability: an ordinary edge has one source, a clause has a **set**
 //! of sources that must **all** hold. Several closures in code intelligence
 //! have exactly that shape — grammar nullability (a symbol is nullable when
@@ -44,6 +44,7 @@ use alloc::vec::Vec;
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(try_from = "stored::Stored"))]
 pub struct HornClauses {
     /// Number of distinct facts; every head and body id is below it.
     fact_count: usize,
@@ -132,6 +133,68 @@ impl HornClauses {
         }
 
         derived
+    }
+}
+
+/// The tables of a [`HornClauses`], as they are written, checked on the way in.
+///
+/// [`HornClauses::derivable`] indexes by every head and decrements a clause
+/// once per body occurrence a fact lists, so a document whose tables disagree
+/// would panic or underflow there instead of at load.
+#[cfg(feature = "serde")]
+mod stored {
+    extern crate alloc;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use super::HornClauses;
+
+    #[derive(serde::Deserialize)]
+    pub struct Stored {
+        fact_count: usize,
+        heads: Vec<usize>,
+        body_lens: Vec<usize>,
+        dependents: Vec<Vec<usize>>,
+    }
+
+    impl TryFrom<Stored> for HornClauses {
+        type Error = &'static str;
+
+        /// Accepts tables that `add_clause` could have produced: one length
+        /// per clause, every head a fact, one dependents row per fact, and
+        /// each clause listed exactly as often as its body is long.
+        fn try_from(stored: Stored) -> Result<Self, Self::Error> {
+            let Stored {
+                fact_count,
+                heads,
+                body_lens,
+                dependents,
+            } = stored;
+            if heads.len() != body_lens.len() {
+                return Err("the clause tables hold different numbers of clauses");
+            }
+            if dependents.len() != fact_count {
+                return Err("the dependents table does not have one row per fact");
+            }
+            if heads.iter().any(|&head| head >= fact_count) {
+                return Err("a clause head is not a fact");
+            }
+            let mut mentions = vec![0_usize; heads.len()];
+            for &clause in dependents.iter().flatten() {
+                *mentions
+                    .get_mut(clause)
+                    .ok_or("a dependents row names a clause that does not exist")? += 1;
+            }
+            if mentions != body_lens {
+                return Err("a clause body disagrees with the facts that list it");
+            }
+            Ok(Self {
+                fact_count,
+                heads,
+                body_lens,
+                dependents,
+            })
+        }
     }
 }
 
@@ -258,5 +321,51 @@ mod tests {
     #[should_panic(expected = "body fact is out of range")]
     fn an_out_of_range_body_fact_panics() {
         HornClauses::new(1).add_clause(0, &[1]);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn a_stored_clause_set_loads_only_when_its_tables_agree() {
+        let mut clauses = HornClauses::new(3);
+        clauses.add_clause(0, &[]);
+        clauses.add_clause(2, &[0, 1, 1]);
+        let sound = serde_json::to_value(&clauses).expect("serializes");
+        let loaded: HornClauses = serde_json::from_value(sound.clone()).expect("loads");
+        assert_eq!(loaded, clauses);
+        assert_eq!(loaded.derivable(), clauses.derivable());
+
+        let tamperings = [
+            ("a head past the facts", "/heads/0", serde_json::json!(7)),
+            (
+                "fewer lengths than clauses",
+                "/body_lens",
+                serde_json::json!([0]),
+            ),
+            (
+                "a row missing for a fact",
+                "/dependents",
+                serde_json::json!([[], []]),
+            ),
+            (
+                "a row naming a missing clause",
+                "/dependents/0",
+                serde_json::json!([5]),
+            ),
+            (
+                "a body longer than its listings",
+                "/body_lens/1",
+                serde_json::json!(4),
+            ),
+        ];
+        for (label, pointer, value) in tamperings {
+            let mut document = sound.clone();
+            *document
+                .pointer_mut(pointer)
+                .expect("the encoding has that table") = value;
+            assert!(
+                serde_json::from_value::<HornClauses>(document).is_err(),
+                "{label} must not load"
+            );
+        }
     }
 }

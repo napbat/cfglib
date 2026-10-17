@@ -17,11 +17,9 @@ use smallvec::SmallVec;
 
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
-use crate::dataflow::{
-    InstrInfo, ProgramPoint, VariableId, departs_before_throws, first_unwind_point,
-};
-use crate::edge::{EdgeKind, KindedEdge};
+use crate::dataflow::unwind::{first_unwind_point, unwind_edges};
 use crate::graph::dominator::DominatorTree;
+use crate::{InstrInfo, ProgramPoint, VariableId, departs_before_throws};
 
 use super::scratch::SsaScratch;
 use super::{INLINE_OPERANDS, SsaValue};
@@ -32,13 +30,30 @@ pub struct PhiPlacement<V> {
     /// The source-IR variable merged by the phi.
     pub variable: V,
     predecessors: SmallVec<[ProgramPoint; INLINE_OPERANDS]>,
+    merges_start: bool,
 }
 
 impl<V> PhiPlacement<V> {
     /// Departure points that contribute operands, in CFG predecessor order.
+    ///
+    /// These are the CFG edges into the block only; see
+    /// [`merges_start_value`](Self::merges_start_value) for the input that
+    /// has no edge.
     #[must_use]
     pub fn predecessors(&self) -> &[ProgramPoint] {
         &self.predecessors
+    }
+
+    /// Whether the phi also merges the value its variable holds when the
+    /// function starts, as [`SsaPhi::merges_start_value`](super::SsaPhi::merges_start_value)
+    /// reports for the renamed phi.
+    ///
+    /// That is the case for every phi placed in the CFG entry block, which is
+    /// then a branch target. The start input has no departure point, so it is
+    /// not among [`predecessors`](Self::predecessors).
+    #[must_use]
+    pub const fn merges_start_value(&self) -> bool {
+        self.merges_start
     }
 }
 
@@ -84,8 +99,10 @@ impl<V: VariableId> PhiPlacements<V> {
     ///
     /// This is the iterated-dominance-frontier phase of SSA construction. Use
     /// [`SsaForm::compute`](super::SsaForm::compute) when renamed definitions
-    /// and operands are also required (and see its precondition: the entry
-    /// block must not be a branch target).
+    /// and operands are also required.
+    /// An entry block that is a branch target is placed like any other loop
+    /// header, and its phis report
+    /// [`merges_start_value`](PhiPlacement::merges_start_value).
     #[must_use]
     pub fn compute<G>(cfg: &G, dom: &DominatorTree) -> Self
     where
@@ -105,6 +122,7 @@ impl<V: VariableId> PhiPlacements<V> {
                     .map(|draft| PhiPlacement {
                         variable: draft.variable.clone(),
                         predecessors: drafts.predecessors(draft).iter().copied().collect(),
+                        merges_start: draft.merges_start,
                     })
                     .collect()
             })
@@ -129,6 +147,9 @@ pub(super) struct PhiDraft<V> {
     pub(super) operands: Range<usize>,
     /// The SSA value the phi defines, assigned when its block is renamed.
     pub(super) result: Option<SsaValue<V>>,
+    /// Whether the phi also merges the value its variable holds when the
+    /// function starts: true for every phi in the CFG entry block.
+    pub(super) merges_start: bool,
 }
 
 /// Every placed phi of one procedure, in flat storage a scratch reuses.
@@ -170,8 +191,14 @@ impl<V: VariableId> PhiDrafts<V> {
 
     /// Record a phi for `variable` at `block`, merging the values that leave
     /// `predecessors`.
+    ///
+    /// A phi in the `entry` block also merges the value the variable holds
+    /// when the function starts. A phi is only placed at a block that some
+    /// edge enters, so an entry that gets one is a branch target, and the
+    /// function's start is the one way into it that no edge names.
     fn place(
         &mut self,
+        entry: BlockId,
         block: BlockId,
         variable: V,
         predecessors: impl Iterator<Item = ProgramPoint>,
@@ -184,6 +211,7 @@ impl<V: VariableId> PhiDrafts<V> {
             variable,
             operands: start..end,
             result: None,
+            merges_start: block == entry,
         });
     }
 
@@ -249,6 +277,7 @@ where
         ..
     } = scratch;
     frontiers.rebuild(cfg, dom);
+    let root = cfg.root();
 
     for block_id in cfg.node_ids() {
         let first_unwind = first_unwind_point(cfg, block_id);
@@ -292,16 +321,13 @@ where
             if unwound_variable < variable {
                 continue;
             }
-            for edge in cfg.outgoing(*source) {
-                let edge = cfg.edge(edge);
+            for edge in unwind_edges(cfg, *source) {
                 let target = edge.target();
-                if edge.data().kind() != EdgeKind::ExceptionUnwind
-                    || has_phi.is_marked(target.index())
-                {
+                if has_phi.is_marked(target.index()) {
                     continue;
                 }
                 has_phi.mark(target.index());
-                phis.place(target, variable.clone(), arrivals(cfg, target));
+                phis.place(root, target, variable.clone(), arrivals(cfg, target));
                 if !placed.is_marked(target.index()) {
                     placed.mark(target.index());
                     worklist.push(target);
@@ -317,6 +343,7 @@ where
                 has_phi.mark(frontier_block.index());
 
                 phis.place(
+                    root,
                     frontier_block,
                     variable.clone(),
                     arrivals(cfg, frontier_block),

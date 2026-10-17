@@ -195,6 +195,15 @@ fn an_entry_with_two_back_edges_is_in_its_own_frontier() {
     );
 }
 
+#[test]
+fn dead_code_has_no_frontier_even_when_it_branches_into_live_code() {
+    // `2` is unreachable and joins live code at `1`; `3` is unreachable and
+    // branches into the entry. A frontier is a property of code that runs.
+    let graph = adjacency(4, &[(0, 1), (2, 1), (3, 0)]);
+    let table = DominanceFrontiers::compute(&graph, &DominatorTree::compute(&graph));
+    assert_eq!(frontier_indices(&table, 4), vec![Vec::<u32>::new(); 4]);
+}
+
 /// Every digraph on up to four nodes, self-loops included, as a node count
 /// and an edge list.
 fn small_digraphs() -> impl Iterator<Item = (u32, Vec<(u32, u32)>)> {
@@ -215,7 +224,8 @@ fn small_digraphs() -> impl Iterator<Item = (u32, Vec<(u32, u32)>)> {
 }
 
 /// Every small digraph: the table agrees with the on-demand frontier for
-/// every reachable node. The two are one rule computed two ways.
+/// every node, an unreachable one included, which has an empty frontier in
+/// both. The two are one rule computed two ways.
 #[test]
 fn the_table_agrees_with_the_on_demand_frontier_on_every_small_digraph() {
     let mut on_demand = Vec::new();
@@ -223,7 +233,7 @@ fn the_table_agrees_with_the_on_demand_frontier_on_every_small_digraph() {
         let graph = adjacency(count as usize, &edges);
         let dominators = DominatorTree::compute(&graph);
         let table = DominanceFrontiers::compute(&graph, &dominators);
-        for node in (0..count).filter(|&node| dominators.is_reachable(node)) {
+        for node in 0..count {
             dominators.frontier(&graph, node, &mut on_demand);
             let expected: BTreeSet<u32> = on_demand.iter().copied().collect();
             assert!(

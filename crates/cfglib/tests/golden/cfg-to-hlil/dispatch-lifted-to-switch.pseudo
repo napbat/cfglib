@@ -1,0 +1,13 @@
+switch (v0) {
+    case 1, 2: {
+        show(v0);
+        v1 = 10;
+    }
+    case 3: {
+        v1 = 30;
+    }
+    default: {
+        v1 = 0;
+    }
+}
+return v1;

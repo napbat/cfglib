@@ -10,10 +10,16 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::edge_view::{EdgeRef, EdgeView};
-use super::traverse::{Incoming, Outgoing, TraversalDirection, by_axis};
-use super::view::DenseId;
+use super::traverse::{Adjacency, Incoming, Outgoing, TraversalDirection, by_axis};
+use super::view::{DenseId, assert_in_bound};
 
-trait EdgeAdjacency: Copy {
+/// An adjacency axis over edges: which edges a node exposes, and which end of
+/// an exposed edge is the neighbor.
+///
+/// The edge-aware counterpart of [`Adjacency`](super::traverse::Adjacency),
+/// implemented on the same zero-sized axes so one core serves both
+/// directions.
+pub(crate) trait EdgeAdjacency: Adjacency {
     fn edges<G: EdgeView>(self, graph: &G, node: G::NodeId)
     -> impl Iterator<Item = G::EdgeId> + '_;
 
@@ -112,10 +118,7 @@ fn breadth_first_edges_from<G: EdgeView, A: EdgeAdjacency>(
     max_depth: Option<usize>,
     mut filter: impl FnMut(EdgeRef<'_, G::NodeId, G::EdgeId, G::EdgeData>) -> bool,
 ) -> Vec<EdgeStep<G::NodeId, G::EdgeId>> {
-    assert!(
-        start.index() < graph.node_bound(),
-        "start node is out of range"
-    );
+    assert_in_bound(graph, start, "start node");
     let mut steps = Vec::new();
     let mut seen_node = vec![false; graph.node_bound()];
     let mut queue = VecDeque::new();
@@ -188,14 +191,11 @@ fn depth_first_edges_from<G: EdgeView, A: EdgeAdjacency>(
     max_depth: Option<usize>,
     mut filter: impl FnMut(EdgeRef<'_, G::NodeId, G::EdgeId, G::EdgeData>) -> bool,
 ) -> Vec<EdgeStep<G::NodeId, G::EdgeId>> {
-    assert!(
-        start.index() < graph.node_bound(),
-        "start node is out of range"
-    );
+    assert_in_bound(graph, start, "start node");
     let mut steps = Vec::new();
     let mut seen_node = vec![false; graph.node_bound()];
     let mut arena = Vec::new();
-    append_adjacency(axis, graph, start, &mut arena);
+    arena.extend(axis.edges(graph, start));
     let mut stack = vec![EdgeDfsFrame {
         depth: 0,
         start: 0,
@@ -231,7 +231,7 @@ fn depth_first_edges_from<G: EdgeView, A: EdgeAdjacency>(
 
         seen_node[next.index()] = true;
         let start = arena.len();
-        append_adjacency(axis, graph, next, &mut arena);
+        arena.extend(axis.edges(graph, next));
         stack.push(EdgeDfsFrame {
             depth: depth + 1,
             start,
@@ -247,15 +247,6 @@ struct EdgeDfsFrame {
     depth: usize,
     start: usize,
     cursor: usize,
-}
-
-fn append_adjacency<G: EdgeView, A: EdgeAdjacency>(
-    axis: A,
-    graph: &G,
-    node: G::NodeId,
-    arena: &mut Vec<G::EdgeId>,
-) {
-    arena.extend(axis.edges(graph, node));
 }
 
 /// The edges of one shortest path through an edge-aware view.
@@ -280,14 +271,8 @@ fn shortest_path_edges_from<G: EdgeView, A: EdgeAdjacency>(
     from: G::NodeId,
     to: G::NodeId,
 ) -> Option<Vec<G::EdgeId>> {
-    assert!(
-        from.index() < graph.node_bound(),
-        "source node is out of range"
-    );
-    assert!(
-        to.index() < graph.node_bound(),
-        "target node is out of range"
-    );
+    assert_in_bound(graph, from, "source node");
+    assert_in_bound(graph, to, "target node");
     if from == to {
         return Some(Vec::new());
     }

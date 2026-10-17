@@ -19,13 +19,18 @@
 //!
 //! Instruction lines are the only indented lines inside a block, and handler
 //! lines the only indented lines inside a region, so the reader never has to
-//! guess what an indented line belongs to. Labels are escaped exactly as the
-//! store's text form escapes them.
+//! guess what an indented line belongs to. Labels and instruction text are
+//! escaped exactly as the store's text form escapes them, so an instruction
+//! that starts with `#` or with whitespace still reads back as that
+//! instruction rather than as a comment, a blank line, or indentation.
 //!
 //! # What it is not
 //!
 //! Edge weights, consumer edge payloads, and cleanup records are not in the
 //! projection; the `serde` representation of the graph is the fidelity path.
+//! So is the order of a block's edges when a transform redirected one: edges
+//! are written, and read back, in identity order, so a redirected edge returns
+//! to the place its identity gives it.
 //! An instruction whose label renders empty is not representable either,
 //! because an empty line carries nothing to read back.
 
@@ -161,28 +166,49 @@ impl<I: DisplayInstr, E> Cfg<I, E> {
         }
 
         for (index, region) in self.regions().iter().enumerate() {
-            write_region(&mut printer, index, region)?;
+            write_region(&mut printer, index, region, &|block| {
+                self.contains_block(block)
+            })?;
         }
         Ok(())
     }
 }
 
-fn write_region(printer: &mut IndentedWriter<'_>, index: usize, region: &Region) -> fmt::Result {
+/// Write one region. A set of blocks lists only the live ones, as
+/// [`compact`](Cfg::compact) would keep: a removed block stays named in a
+/// region until then, and the text form has no slot to put it in.
+fn write_region(
+    printer: &mut IndentedWriter<'_>,
+    index: usize,
+    region: &Region,
+    live: &impl Fn(BlockId) -> bool,
+) -> fmt::Result {
     write!(printer, "region r{index} protected=")?;
-    write_blocks(printer, region.protected_blocks.iter().copied())?;
+    write_blocks(
+        printer,
+        region
+            .protected_blocks
+            .iter()
+            .copied()
+            .filter(|&block| live(block)),
+    )?;
     if let Some(parent) = region.parent {
         write!(printer, " parent=r{}", parent.index())?;
     }
     printer.end_line()?;
     printer.nested(|printer| {
         for handler in &region.handlers {
-            write_handler(printer, handler)?;
+            write_handler(printer, handler, live)?;
         }
         Ok(())
     })
 }
 
-fn write_handler(printer: &mut IndentedWriter<'_>, handler: &Handler) -> fmt::Result {
+fn write_handler(
+    printer: &mut IndentedWriter<'_>,
+    handler: &Handler,
+    live: &impl Fn(BlockId) -> bool,
+) -> fmt::Result {
     printer.indent()?;
     write!(
         printer,
@@ -196,7 +222,7 @@ fn write_handler(printer: &mut IndentedWriter<'_>, handler: &Handler) -> fmt::Re
     printer.write_str(" body=")?;
     match handler.body.blocks() {
         None => printer.write_str("?")?,
-        Some(blocks) => write_blocks(printer, blocks.iter().copied())?,
+        Some(blocks) => write_blocks(printer, blocks.iter().copied().filter(|&block| live(block)))?,
     }
     printer.end_line()
 }

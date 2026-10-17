@@ -63,10 +63,7 @@ impl<'sink> IndentedWriter<'sink> {
     ///
     /// Returns the sink's formatting error if a write fails.
     pub fn indent(&mut self) -> fmt::Result {
-        for _ in 0..self.depth {
-            self.sink.write_str(INDENT)?;
-        }
-        Ok(())
+        write_indent(&mut *self.sink, self.depth)
     }
 
     /// End the current line.
@@ -117,16 +114,34 @@ impl<'sink> IndentedWriter<'sink> {
     /// Write `body` one level deeper, with no brace to mark the level.
     ///
     /// This is what a label's statements are indented by: the nesting is
-    /// real, but there is no block to open.
+    /// real, but there is no block to open. The depth afterwards is the
+    /// depth before, whatever `body` opened or closed.
     ///
     /// # Errors
     ///
     /// Propagates whatever `body` returns.
     pub fn nested(&mut self, body: impl FnOnce(&mut Self) -> fmt::Result) -> fmt::Result {
-        self.depth += 1;
+        let outer = self.depth;
+        self.depth = outer + 1;
         let result = body(self);
-        self.depth -= 1;
+        self.depth = outer;
         result
+    }
+
+    /// Indent one level deeper, with no brace to mark the level.
+    ///
+    /// The open-ended form of [`nested`](Self::nested), for a printer that
+    /// cannot keep its place inside a closure, because it keeps its own stack
+    /// of what is left to write. Pair each call with an
+    /// [`unnest`](Self::unnest).
+    pub const fn nest(&mut self) {
+        self.depth += 1;
+    }
+
+    /// Indent one level less, undoing a [`nest`](Self::nest). The writer
+    /// stays at the outermost level when it is already there.
+    pub const fn unnest(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
     }
 
     /// Open a block: ` {`, a line break, and one more level of indentation.
@@ -165,6 +180,14 @@ impl<'sink> IndentedWriter<'sink> {
     }
 }
 
+/// Write `depth` levels of indentation into `sink`.
+fn write_indent(sink: &mut dyn fmt::Write, depth: usize) -> fmt::Result {
+    for _ in 0..depth {
+        sink.write_str(INDENT)?;
+    }
+    Ok(())
+}
+
 /// A line that indents itself only once something is written to it.
 struct PendingLine<'sink> {
     sink: &'sink mut dyn fmt::Write,
@@ -178,9 +201,7 @@ impl fmt::Write for PendingLine<'_> {
             return Ok(());
         }
         if !self.wrote {
-            for _ in 0..self.indent {
-                self.sink.write_str(INDENT)?;
-            }
+            write_indent(&mut *self.sink, self.indent)?;
             self.wrote = true;
         }
         self.sink.write_str(text)
@@ -282,5 +303,48 @@ mod tests {
         printer.close().unwrap();
         assert_eq!(printer.depth(), 0);
         assert_eq!(out, "}\n");
+    }
+
+    #[test]
+    fn a_close_inside_nested_does_not_leak_a_level_out_of_nested() {
+        let mut out = String::new();
+        let mut printer = IndentedWriter::new(&mut out);
+        printer.nested(IndentedWriter::close).unwrap();
+        assert_eq!(printer.depth(), 0);
+
+        printer.open().unwrap();
+        printer.nested(IndentedWriter::close_inline).unwrap();
+        assert_eq!(printer.depth(), 1, "nested restores the depth it found");
+    }
+
+    #[test]
+    fn nested_indents_by_one_level_and_restores_the_depth() {
+        let mut out = String::new();
+        let mut printer = IndentedWriter::new(&mut out);
+        printer
+            .nested(|printer| {
+                printer.line("inside")?;
+                printer.optional_line(|sink| sink.write_str("pending"))
+            })
+            .unwrap();
+        printer.line("outside").unwrap();
+        assert_eq!(out, "    inside\n    pending\noutside\n");
+    }
+
+    #[test]
+    fn nest_and_unnest_indent_without_a_brace() {
+        let mut out = String::new();
+        let mut printer = IndentedWriter::new(&mut out);
+        printer.nest();
+        printer.line("inside").unwrap();
+        printer.nest();
+        printer.line("deeper").unwrap();
+        printer.unnest();
+        printer.unnest();
+        printer.line("outside").unwrap();
+        assert_eq!(printer.depth(), 0);
+        printer.unnest();
+        assert_eq!(printer.depth(), 0, "unnest stays at the outermost level");
+        assert_eq!(out, "    inside\n        deeper\noutside\n");
     }
 }

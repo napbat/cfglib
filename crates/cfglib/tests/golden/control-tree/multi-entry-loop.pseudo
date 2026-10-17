@@ -1,0 +1,9 @@
+if (start) {
+} else {
+    .bb2:
+        work()
+}
+if (i < n) {
+    goto .bb2;
+}
+return

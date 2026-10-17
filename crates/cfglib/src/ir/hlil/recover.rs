@@ -23,23 +23,26 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
-use core::ops::Range;
 
 use crate::graph::view::DenseId;
 
 use super::builder::FunctionBuilder;
 use super::dialect::{Dialect, RecoverDialect};
 use super::error::RecoverError;
-use super::shape::{ExprShape, Handler, HandlerKind, StmtShape, SwitchArm};
-use super::view::{FunctionView, for_each_child_body};
+use super::shape::{ExprShape, StmtShape};
+use super::view::FunctionView;
 
+mod active;
 mod counted;
 mod region;
 mod select;
+mod subtree;
+mod walk;
+
+use self::active::ActiveRegions;
 
 /// The result of one structure recovery.
 #[derive(Debug, Clone)]
@@ -148,18 +151,23 @@ where
         variables,
         statements: vec![None; source.stmt_count()],
         expressions: vec![None; source.expr_count()],
-        active_regions: Vec::new(),
+        active_regions: ActiveRegions::new(),
         statement_stack: Vec::new(),
         expression_stack: Vec::new(),
+        frames: Vec::new(),
+        ends: Vec::new(),
+        selections: Vec::new(),
+        arms: Vec::new(),
+        numbering: None,
         for_loops: 0,
         selects: 0,
         regions: 0,
         dialect: PhantomData,
     };
-    let body = rebuilder.rebuild_body(source.body())?;
+    rebuilder.rebuild_root(source.body())?;
     let function = rebuilder
         .builder
-        .finish(&rebuilder.statement_stack[body])
+        .finish(&rebuilder.statement_stack)
         .map_err(RecoverError::Builder)?;
     Ok(Recovery {
         function,
@@ -189,40 +197,14 @@ type Recovered<H, B> = Fallible<
     <B as FunctionBuilder<H>>::Error,
 >;
 
-/// One region under construction: its enter operation, the variables that
-/// currently hold the entered object (grown by copies and shrunk by
-/// reassignment, in program order), and the exit statements that its
-/// construct re-owns.
-struct ActiveRegion<Op, V, S> {
-    enter: Op,
-    aliases: BTreeSet<V>,
-    exits: Vec<S>,
-}
-
-/// The class of a handler whose bodies are rebuilt but not yet handed to the
-/// builder.
-enum RebuiltClass {
-    Catch,
-    CatchAll,
-    Fault,
-    Filter(Range<usize>),
-}
-
-/// One handler whose bodies sit on the statement stack.
-struct RebuiltHandler<'a, H: RecoverDialect, V> {
-    class: RebuiltClass,
-    binding: Option<V>,
-    caught_types: &'a [H::Type],
-    body: Range<usize>,
-}
-
 /// The state of one rebuild.
 ///
 /// The rebuilt handles of operands and child statements wait on two stacks
 /// until their parent is built. A parent hands its builder the slice of the
 /// stack that holds its children and then truncates the stack, so a rebuild
 /// allocates for nothing but the source-sized tables and the switches and
-/// tries that it meets.
+/// tries that it meets. The nesting of statements waits on a third stack of
+/// frames, so the depth of a function costs no call frames either.
 struct Rebuilder<'a, H, S, B>
 where
     H: RecoverDialect,
@@ -234,9 +216,22 @@ where
     variables: Vec<B::Var>,
     statements: Vec<Option<B::Stmt>>,
     expressions: Vec<Option<B::Expr>>,
-    active_regions: Vec<ActiveRegion<H::Op, S::Var, S::Stmt>>,
+    active_regions: ActiveRegions<H::Op, S::Var, S::Stmt>,
     statement_stack: Vec<B::Stmt>,
     expression_stack: Vec<B::Expr>,
+    /// The bodies and constructs of the statement walk that are still open.
+    frames: Vec<walk::Frame<'a, H, S, B>>,
+    /// Where on `statement_stack` each finished child body of the open
+    /// constructs ends, in the order that the bodies finished.
+    ends: Vec<usize>,
+    /// The selection diamonds that are being built.
+    selections: Vec<select::OpenSelection<'a, H, S>>,
+    /// What each `if` statement is to a selection, sized when the first is
+    /// asked about.
+    arms: Vec<select::Arm<S::Var>>,
+    /// The statements numbered in visit order, made when a recovery first
+    /// asks what lies below a body.
+    numbering: Option<subtree::Numbering>,
     for_loops: usize,
     selects: usize,
     regions: usize,
@@ -302,25 +297,6 @@ where
         Ok(false)
     }
 
-    /// Whether any statement of the source subtrees under `roots` satisfies
-    /// `predicate`. Nested statements are included, which keeps the checks
-    /// that use this conservative.
-    fn any_statement(
-        &self,
-        roots: &[S::Stmt],
-        mut predicate: impl FnMut(&StmtShape<'a, H, S::Stmt, S::Expr>) -> Fallible<bool, B::Error>,
-    ) -> Fallible<bool, B::Error> {
-        let source: &'a S = self.source;
-        let mut pending = roots.to_vec();
-        while let Some(stmt) = pending.pop() {
-            if predicate(&self.stmt(stmt)?)? {
-                return Ok(true);
-            }
-            for_each_child_body(source, stmt, |body, _| pending.extend(body.iter().copied()));
-        }
-        Ok(false)
-    }
-
     /// Whether one assignment can appear in a source-language expression
     /// clause rather than expanding into a statement sequence.
     fn assignment_is_single_expression(
@@ -338,37 +314,6 @@ where
         Ok(!expands)
     }
 
-    /// Rebuilds the statements of one source body onto the statement stack
-    /// and returns where they sit. The stack holds nothing else above them
-    /// until the caller truncates it.
-    fn rebuild_body(&mut self, ids: &[S::Stmt]) -> Fallible<Range<usize>, B::Error> {
-        let start = self.statement_stack.len();
-        let mut index = 0;
-        while index < ids.len() {
-            if self.suppress_region_exit(ids[index])? {
-                index += 1;
-                continue;
-            }
-            self.track_region_aliases(ids[index])?;
-            if index + 1 < ids.len() {
-                if let Some(region) = self.try_region(ids, index)? {
-                    self.statement_stack.push(region);
-                    index += 2;
-                    continue;
-                }
-                if let Some(counted) = self.try_for(ids, index)? {
-                    self.statement_stack.push(counted);
-                    index += 2;
-                    continue;
-                }
-            }
-            let rebuilt = self.rebuild_statement(ids[index])?;
-            self.statement_stack.push(rebuilt);
-            index += 1;
-        }
-        Ok(start..self.statement_stack.len())
-    }
-
     /// Whether the statement is an exit of a region under construction. The
     /// recovered construct re-owns it.
     fn suppress_region_exit(&mut self, id: S::Stmt) -> Fallible<bool, B::Error> {
@@ -384,11 +329,11 @@ where
         let ExprShape::Variable(released) = self.expr(released)? else {
             return Ok(false);
         };
-        let position = self.active_regions.iter().rposition(|region| {
-            region.aliases.contains(&released) && H::releases(&region.enter, op)
-        });
+        let position = self
+            .active_regions
+            .innermost_releasing(released, |enter| H::releases(enter, op));
         if let Some(position) = position {
-            self.active_regions[position].exits.push(id);
+            self.active_regions.add_exit(position, id);
             return Ok(true);
         }
         Ok(false)
@@ -411,224 +356,8 @@ where
             ExprShape::Variable(source) => Some(source),
             _ => None,
         };
-        for region in &mut self.active_regions {
-            match source {
-                Some(source) if region.aliases.contains(&source) => {
-                    region.aliases.insert(target);
-                }
-                _ => {
-                    region.aliases.remove(&target);
-                }
-            }
-        }
+        self.active_regions.assign(target, source);
         Ok(())
-    }
-
-    fn rebuild_statement(&mut self, id: S::Stmt) -> Fallible<B::Stmt, B::Error> {
-        let shape = self.stmt(id)?;
-        if let StmtShape::If {
-            condition,
-            then_body,
-            else_body,
-        } = shape
-            && let Some(select) = self.try_select(id, condition, then_body, else_body)?
-        {
-            return Ok(select);
-        }
-        let rebuilt = self.rebuild_shape(id)?;
-        self.statements[id.index()] = Some(rebuilt);
-        Ok(rebuilt)
-    }
-
-    fn rebuild_shape(&mut self, id: S::Stmt) -> Fallible<B::Stmt, B::Error> {
-        Ok(match self.stmt(id)? {
-            StmtShape::Expression(expression) => {
-                let expression = self.rebuild_expression(expression)?;
-                self.builder.expression_statement(expression)
-            }
-            StmtShape::Assign { target, value } => {
-                let target = self.rebuild_expression(target)?;
-                let value = self.rebuild_expression(value)?;
-                self.builder.assign(target, value)
-            }
-            StmtShape::If {
-                condition,
-                then_body,
-                else_body,
-            } => {
-                let condition = self.rebuild_expression(condition)?;
-                let then_body = self.rebuild_body(then_body)?;
-                let else_body = self.rebuild_body(else_body)?;
-                let stack = &self.statement_stack;
-                let rebuilt =
-                    self.builder
-                        .if_(condition, &stack[then_body.clone()], &stack[else_body]);
-                self.statement_stack.truncate(then_body.start);
-                rebuilt
-            }
-            StmtShape::While { condition, body } => {
-                let condition = self.rebuild_expression(condition)?;
-                let body = self.rebuild_body(body)?;
-                let rebuilt = self
-                    .builder
-                    .while_(condition, &self.statement_stack[body.clone()]);
-                self.statement_stack.truncate(body.start);
-                rebuilt
-            }
-            StmtShape::DoWhile { body, condition } => {
-                let body = self.rebuild_body(body)?;
-                let condition = self.rebuild_expression(condition)?;
-                let rebuilt = self
-                    .builder
-                    .do_while(&self.statement_stack[body.clone()], condition);
-                self.statement_stack.truncate(body.start);
-                rebuilt
-            }
-            StmtShape::Loop { body } => {
-                let body = self.rebuild_body(body)?;
-                let rebuilt = self.builder.loop_(&self.statement_stack[body.clone()]);
-                self.statement_stack.truncate(body.start);
-                rebuilt
-            }
-            StmtShape::For {
-                initializer,
-                condition,
-                update,
-                body,
-            } => {
-                let initializer = self.rebuild_body(initializer)?;
-                let condition = condition
-                    .map(|condition| self.rebuild_expression(condition))
-                    .transpose()?;
-                let update = self.rebuild_body(update)?;
-                let body = self.rebuild_body(body)?;
-                let stack = &self.statement_stack;
-                let rebuilt = self.builder.for_(
-                    &stack[initializer.clone()],
-                    condition,
-                    &stack[update],
-                    &stack[body],
-                );
-                self.statement_stack.truncate(initializer.start);
-                rebuilt
-            }
-            StmtShape::Switch {
-                scrutinee,
-                default_body,
-            } => self.rebuild_switch(id, scrutinee, default_body)?,
-            StmtShape::Break { label } => self.builder.break_(label),
-            StmtShape::Continue { label } => self.builder.continue_(label),
-            StmtShape::Return { values } => {
-                let start = self.rebuild_operands(values)?;
-                let rebuilt = self.builder.return_(&self.expression_stack[start..]);
-                self.expression_stack.truncate(start);
-                rebuilt
-            }
-            StmtShape::Labeled { label, body } => {
-                let body = self.rebuild_body(body)?;
-                let rebuilt = self
-                    .builder
-                    .labeled(label, &self.statement_stack[body.clone()]);
-                self.statement_stack.truncate(body.start);
-                rebuilt
-            }
-            StmtShape::Goto { label } => self.builder.goto(label),
-            StmtShape::Try { body, finally_body } => self.rebuild_try(id, body, finally_body)?,
-            StmtShape::Region { op, operands, body } => {
-                let start = self.rebuild_operands(operands)?;
-                let body = self.rebuild_body(body)?;
-                let rebuilt = self.builder.region(
-                    op,
-                    &self.expression_stack[start..],
-                    &self.statement_stack[body.clone()],
-                );
-                self.expression_stack.truncate(start);
-                self.statement_stack.truncate(body.start);
-                rebuilt
-            }
-        })
-    }
-
-    fn rebuild_switch(
-        &mut self,
-        id: S::Stmt,
-        scrutinee: S::Expr,
-        default_body: &'a [S::Stmt],
-    ) -> Fallible<B::Stmt, B::Error> {
-        let source: &'a S = self.source;
-        let scrutinee = self.rebuild_expression(scrutinee)?;
-        let first = self.statement_stack.len();
-        let mut arms: Vec<(&'a [H::Constant], Range<usize>)> = Vec::new();
-        for arm in source.switch_arms(id) {
-            let body = self.rebuild_body(arm.body)?;
-            arms.push((arm.values, body));
-        }
-        let default_body = self.rebuild_body(default_body)?;
-        let stack = &self.statement_stack;
-        let arms: Vec<SwitchArm<'_, H, B::Stmt>> = arms
-            .into_iter()
-            .map(|(values, body)| SwitchArm {
-                values,
-                body: &stack[body],
-            })
-            .collect();
-        let rebuilt = self.builder.switch(scrutinee, &arms, &stack[default_body]);
-        self.statement_stack.truncate(first);
-        Ok(rebuilt)
-    }
-
-    fn rebuild_try(
-        &mut self,
-        id: S::Stmt,
-        body: &'a [S::Stmt],
-        finally_body: &'a [S::Stmt],
-    ) -> Fallible<B::Stmt, B::Error> {
-        let source: &'a S = self.source;
-        let first = self.statement_stack.len();
-        let body = self.rebuild_body(body)?;
-        let mut handlers: Vec<RebuiltHandler<'a, H, B::Var>> = Vec::new();
-        for handler in source.handlers(id) {
-            let class = match handler.kind {
-                HandlerKind::Catch => RebuiltClass::Catch,
-                HandlerKind::CatchAll => RebuiltClass::CatchAll,
-                HandlerKind::Fault => RebuiltClass::Fault,
-                HandlerKind::Filter { filter_body } => {
-                    RebuiltClass::Filter(self.rebuild_body(filter_body)?)
-                }
-            };
-            handlers.push(RebuiltHandler {
-                class,
-                binding: handler
-                    .binding
-                    .map(|binding| self.variable(binding))
-                    .transpose()?,
-                caught_types: handler.caught_types,
-                body: self.rebuild_body(handler.body)?,
-            });
-        }
-        let finally_body = self.rebuild_body(finally_body)?;
-        let stack = &self.statement_stack;
-        let handlers: Vec<Handler<'_, H, B::Stmt, B::Var>> = handlers
-            .into_iter()
-            .map(|handler| Handler {
-                kind: match handler.class {
-                    RebuiltClass::Catch => HandlerKind::Catch,
-                    RebuiltClass::CatchAll => HandlerKind::CatchAll,
-                    RebuiltClass::Fault => HandlerKind::Fault,
-                    RebuiltClass::Filter(filter_body) => HandlerKind::Filter {
-                        filter_body: &stack[filter_body],
-                    },
-                },
-                binding: handler.binding,
-                caught_types: handler.caught_types,
-                body: &stack[handler.body],
-            })
-            .collect();
-        let rebuilt = self
-            .builder
-            .try_(&stack[body], &handlers, &stack[finally_body]);
-        self.statement_stack.truncate(first);
-        Ok(rebuilt)
     }
 
     /// Rebuilds each source expression onto the expression stack and returns

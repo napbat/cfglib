@@ -16,10 +16,10 @@ use core::ops::Bound;
 use super::cfg_view::CfgView;
 use super::edge_fixpoint::{self, EdgeProblem};
 use super::fixpoint::{Direction, Facts};
-use super::{DefSite, InstrInfo, VariableId, departs_before_throws};
 use crate::block::BlockId;
+use crate::dataflow::unwind::{replay_block, unwind_departure};
 use crate::graph::edge_view::EdgeRef;
-use crate::graph::traverse::{TraversalDirection, depth_first_preorder};
+use crate::{DefSite, InstrInfo, VariableId};
 
 /// A reaching definition: which IR variable was defined, and where.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -57,9 +57,24 @@ pub(super) fn definitions_of<'set, V: VariableId>(
 }
 
 /// Removes every definition of `variable` from `set`.
-pub(super) fn kill_variable<V: VariableId>(set: &mut BTreeSet<ReachingDef<V>>, variable: &V) {
+fn kill_variable<V: VariableId>(set: &mut BTreeSet<ReachingDef<V>>, variable: &V) {
     set.extract_if(variable_run(variable), |_| true)
         .for_each(drop);
+}
+
+/// Applies the definitions of the instruction at `site` to `set`: every
+/// earlier definition of a variable the instruction defines is killed, then
+/// the instruction's own definitions are generated.
+pub(super) fn define<V: VariableId>(set: &mut BTreeSet<ReachingDef<V>>, site: DefSite, defs: &[V]) {
+    for variable in defs {
+        kill_variable(set, variable);
+    }
+    for variable in defs {
+        set.insert(ReachingDef {
+            variable: variable.clone(),
+            site,
+        });
+    }
 }
 
 /// The reaching definitions problem.
@@ -69,46 +84,6 @@ pub(super) fn kill_variable<V: VariableId>(set: &mut BTreeSet<ReachingDef<V>>, v
 /// reaching the point before each of them, so a throwing instruction's own
 /// definitions and every later one in its block never reach the handler.
 pub struct ReachingDefsProblem;
-
-impl ReachingDefsProblem {
-    /// Replays `block` over the definitions reaching its entry, handing the
-    /// definitions that reach each throwing instruction to `before_unwind`.
-    fn replay<G, Var>(
-        cfg: &G,
-        block: BlockId,
-        input: &BTreeSet<ReachingDef<Var>>,
-        mut before_unwind: impl FnMut(&BTreeSet<ReachingDef<Var>>),
-    ) -> BTreeSet<ReachingDef<Var>>
-    where
-        G: CfgView,
-        G::Inst: InstrInfo<Variable = Var>,
-        Var: VariableId,
-    {
-        let mut reaching = input.clone();
-        for (inst_idx, instruction) in cfg.instructions(block).iter().enumerate() {
-            if instruction.may_unwind() {
-                before_unwind(&reaching);
-            }
-            let defs = instruction.defs();
-            if defs.is_empty() {
-                continue;
-            }
-            let site = DefSite { block, inst_idx };
-            // Kill: remove all previous defs of the same variables.
-            for variable in defs {
-                kill_variable(&mut reaching, variable);
-            }
-            // Gen: add the new defs.
-            for variable in defs {
-                reaching.insert(ReachingDef {
-                    variable: variable.clone(),
-                    site,
-                });
-            }
-        }
-        reaching
-    }
-}
 
 impl<G, Var> EdgeProblem<G> for ReachingDefsProblem
 where
@@ -131,7 +106,15 @@ where
     }
 
     fn transfer_node(&self, cfg: &G, block: BlockId, input: &Self::Fact) -> Self::Fact {
-        Self::replay(cfg, block, input, |_| {})
+        replay_block(
+            cfg,
+            block,
+            input,
+            |reaching, inst_idx, instruction| {
+                define(reaching, DefSite { block, inst_idx }, instruction.defs());
+            },
+            |_| {},
+        )
     }
 
     fn transfer_edge(
@@ -141,14 +124,17 @@ where
         input: &Self::Fact,
         output: &Self::Fact,
     ) -> Self::Fact {
-        if !departs_before_throws(cfg, edge) {
-            return output.clone();
-        }
-        let mut departing = BTreeSet::new();
-        Self::replay(cfg, edge.source(), input, |reaching| {
-            departing.extend(reaching.iter().cloned());
-        });
-        departing
+        let block = edge.source();
+        unwind_departure(
+            cfg,
+            edge,
+            input,
+            |reaching, inst_idx, instruction| {
+                define(reaching, DefSite { block, inst_idx }, instruction.defs());
+            },
+            |earlier, later| EdgeProblem::<G>::meet(self, earlier, later),
+        )
+        .unwrap_or_else(|| output.clone())
     }
 }
 
@@ -189,22 +175,14 @@ impl<V: VariableId> ReachingDefs<V> {
     ///
     /// Blocks unreachable from the entry receive no definitions, and
     /// contribute none to the blocks they branch to.
-    ///
-    /// # Panics
-    ///
-    /// Panics only if the unbounded fixpoint solve reports a step-limit
-    /// error, which the unbounded configuration cannot produce.
     #[must_use]
     pub fn compute<G>(cfg: &G) -> Self
     where
         G: CfgView,
         G::Inst: InstrInfo<Variable = V>,
     {
-        let reachable = depth_first_preorder(cfg, cfg.root(), TraversalDirection::Outgoing);
-        let facts = edge_fixpoint::solve_edge_problem_from(cfg, &ReachingDefsProblem, &reachable)
-            .expect("an unbounded solve cannot exceed a step limit");
         Self {
-            inner: facts.into_block_facts(),
+            inner: edge_fixpoint::solve_reachable(cfg, &ReachingDefsProblem).into_block_facts(),
         }
     }
 
@@ -241,7 +219,8 @@ mod tests {
     use crate::cfg::Cfg;
     use crate::flow::FlowEffect;
     use crate::test_util::{
-        df_def as def, df_ff as ff, df_use as use_, df_with_effect as with_effect,
+        df_def as def, df_ff as ff, df_throwing, df_use as use_, df_with_effect as with_effect,
+        protected_region,
     };
     use alloc::vec;
 
@@ -321,25 +300,16 @@ mod tests {
 
     #[test]
     fn a_handler_receives_only_the_definitions_completed_before_each_throw() {
-        use crate::edge::EdgeKind;
-
         // entry: x = prior
         // protected: x = load (throws); y = 1; call (throws); x = after
         // `protected` falls through to `normal` and unwinds to `handler`.
-        let mut cfg = Cfg::new();
-        let protected = cfg.new_block();
-        let normal = cfg.new_block();
-        let handler = cfg.new_block();
-        cfg.add_edge(cfg.entry(), protected, EdgeKind::Fallthrough);
-        cfg.add_edge(protected, normal, EdgeKind::Fallthrough);
-        cfg.add_edge(protected, handler, EdgeKind::ExceptionUnwind);
-        cfg.block_mut(cfg.entry()).push(def("prior", 0));
-        cfg.block_mut(protected).instructions_mut().extend([
-            with_effect(def("load", 0), FlowEffect::MayThrow),
+        let (mut cfg, [protected, normal, handler]) = protected_region([
+            df_throwing(def("load", 0)),
             def("y", 1),
-            with_effect(ff("call"), FlowEffect::MayThrow),
+            df_throwing(ff("call")),
             def("after", 0),
         ]);
+        cfg.block_mut(cfg.entry()).push(def("prior", 0));
 
         let rd = ReachingDefs::compute(&cfg);
         let at = |block, inst_idx| DefSite { block, inst_idx };
@@ -388,7 +358,7 @@ mod tests {
             at(u32::MAX as usize, 0),
             at(u32::MAX as usize, usize::MAX),
         ];
-        // Neighbouring variables carry the same extreme sites, so a run that
+        // Neighboring variables carry the same extreme sites, so a run that
         // overshot either end would pick them up.
         let mut set: BTreeSet<ReachingDef<u16>> = [0, 1, 2]
             .into_iter()

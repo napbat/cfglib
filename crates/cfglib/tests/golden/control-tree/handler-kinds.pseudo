@@ -1,0 +1,14 @@
+try {
+    risky()
+} catch {
+    on_error(e)
+} filter (.bb4) {
+    on_filtered(e)
+} catch (...) {
+    on_any()
+} fault {
+    rollback()
+}
+return
+.bb4:
+    is_recoverable(e)
