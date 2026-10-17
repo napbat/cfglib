@@ -245,10 +245,11 @@ impl ControlTree {
     /// each link of an `else if` chain, a loop body, a switch arm, a `try`
     /// body or handler — is a frame on a stack in the heap, and so is each
     /// level of the goto-label placement, so the nesting depth of the input is
-    /// bounded by memory, not by the call stack. The pseudocode printer and
-    /// [`compute_predicated`](Self::compute_predicated) still recurse once per
-    /// level; [`preorder`](Self::preorder), [`walk`](Self::walk), and
-    /// [`for_each_instruction`](Self::for_each_instruction) do not.
+    /// bounded by memory, not by the call stack. So is the regionizing of
+    /// [`compute_predicated`](Self::compute_predicated), and so are
+    /// [`preorder`](Self::preorder), [`walk`](Self::walk), and
+    /// [`for_each_instruction`](Self::for_each_instruction). The pseudocode
+    /// printer still recurses once per level.
     ///
     /// # Panics
     ///

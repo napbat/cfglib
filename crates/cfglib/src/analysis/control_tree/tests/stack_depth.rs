@@ -296,7 +296,8 @@ fn count_nodes(tree: &ControlTree, wanted: impl Fn(&ControlNode) -> bool) -> usi
 }
 
 /// Structure `cfg` and read the tree back the ways a consumer does. Returns
-/// the tree, its report, and what the walk counted.
+/// the tree, its report, and what the walk counted. The regionized tree of the
+/// same graph is built and read as well.
 fn structure_and_read(cfg: &Cfg<DfInst>) -> (ControlTree, LiftReport, Census) {
     let (tree, report) = ControlTree::compute_with_report(cfg);
     let census = census(&tree);
@@ -314,6 +315,15 @@ fn structure_and_read(cfg: &Cfg<DfInst>) -> (ControlTree, LiftReport, Census) {
         .map(|block| cfg.block(block).instructions().len())
         .sum();
     assert_eq!(instructions, total, "every instruction once");
+
+    // The same graph regionized: every block holds a predicated instruction,
+    // so a guard wraps its run at every level of the nesting.
+    let (guarded, guarded_report) = ControlTree::compute_predicated_with_report(cfg);
+    assert_eq!(guarded_report, report);
+    assert!(count_nodes(&guarded, |node| matches!(node, ControlNode::Guarded { .. })) > 0);
+    let mut guarded_instructions = 0;
+    guarded.for_each_instruction(cfg, |_, _| guarded_instructions += 1);
+    assert_eq!(guarded_instructions, total, "every instruction once");
     (tree, report, census)
 }
 
