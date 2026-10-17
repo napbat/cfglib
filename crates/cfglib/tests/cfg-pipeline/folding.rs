@@ -181,3 +181,41 @@ fn a_throwing_division_by_a_known_zero_is_never_folded() {
     assert_eq!(outcome.output, [-1]);
     assert_eq!(outcome.termination, Termination::Returned(-1));
 }
+
+#[test]
+fn sccp_with_known_live_ins_folds_the_branch_they_decide() {
+    let case = program("minimum_diamond");
+    let dominators = DominatorTree::compute(&case.cfg);
+    let ssa = SsaForm::compute(&case.cfg, &dominators);
+    let else_arm = block_holding(&case.cfg, Op::Marker);
+    let merge = block_holding(&case.cfg, Op::Print);
+    let [phi] = ssa.block(merge).phis.as_slice() else {
+        panic!("one variable merges at the join");
+    };
+
+    // With nothing known about the inputs both arms are live.
+    let unknown = SccpAnalysis::compute_seeded(&case.cfg, &ssa, &BTreeMap::new());
+    assert!(unknown.reachable_blocks.contains(&else_arm));
+    assert_eq!(unknown.values[&phi.result], ConstValue::Bottom);
+
+    // a = 1 and b = 5 decide `a < b`: only the true arm runs, and the merged
+    // value is the constant that arm copies.
+    let known = BTreeMap::from([(Var("a"), 1), (Var("b"), 5)]);
+    let seeded = SccpAnalysis::compute_seeded(&case.cfg, &ssa, &known);
+    assert!(!seeded.reachable_blocks.contains(&else_arm));
+    assert_eq!(seeded.values[&phi.result], ConstValue::Const(1));
+    assert_eq!(
+        seeded.values[&SsaValue::live_in(Var("a"))],
+        ConstValue::Const(1)
+    );
+
+    // One known input is not enough to decide the comparison.
+    let partial = SccpAnalysis::compute_seeded(&case.cfg, &ssa, &BTreeMap::from([(Var("a"), 1)]));
+    assert!(partial.reachable_blocks.contains(&else_arm));
+
+    // The seeded verdicts are sound for the executions the seeds describe.
+    let inputs = Inputs::from([(Var("a"), 1), (Var("b"), 5)]);
+    let (_, trace) = run(&case.cfg, &inputs);
+    assert!(trace.blocks.is_subset(&seeded.reachable_blocks));
+    assert!(trace.edges.is_subset(&seeded.executable_edges));
+}
