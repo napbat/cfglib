@@ -28,6 +28,9 @@
 //!
 //! Edge weights, consumer edge payloads, and cleanup records are not in the
 //! projection; the `serde` representation of the graph is the fidelity path.
+//! So is the order of a block's edges when a transform redirected one: edges
+//! are written, and read back, in identity order, so a redirected edge returns
+//! to the place its identity gives it.
 //! An instruction whose label renders empty is not representable either,
 //! because an empty line carries nothing to read back.
 

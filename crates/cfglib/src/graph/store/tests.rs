@@ -582,6 +582,21 @@ fn compaction_keeps_the_adjacency_order_a_redirect_produced() {
 }
 
 #[test]
+fn only_a_compaction_that_removed_nothing_is_the_identity() {
+    let (mut graph, nodes) = diamond();
+    // Nothing moves down when the last slot goes, yet the slot has no number.
+    graph.remove_node(nodes[3]);
+    let trailing = graph.compact();
+    assert!(!trailing.is_identity());
+    assert_eq!(trailing.node(nodes[3]), None);
+    assert_eq!(trailing.node(nodes[2]), Some(nodes[2]));
+
+    // A compaction that only folds the delta into the base removes nothing.
+    graph.add_node("appended");
+    assert!(graph.compact().is_identity());
+}
+
+#[test]
 fn composed_renumberings_match_the_two_compactions_they_describe() {
     let (mut graph, nodes) = diamond();
     graph.remove_node(nodes[0]);

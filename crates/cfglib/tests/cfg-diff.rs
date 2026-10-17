@@ -110,3 +110,72 @@ fn the_order_edges_were_added_in_does_not_matter() {
     let diff = CfgDiff::compute(&build(true), &build(false));
     assert!(diff.is_identical(), "{diff:?}");
 }
+
+#[test]
+fn swapping_the_branch_kinds_of_a_conditional_changes_its_edges() {
+    // The same diamond twice, with the arms' kinds exchanged: every block has
+    // the same degrees and the same multiset of out-edge kinds, so only what
+    // each kind reaches tells the two apart.
+    let build = |then_kind: EdgeKind, else_kind: EdgeKind| {
+        let mut cfg = Cfg::<u32>::new();
+        let (then_arm, then_tail, else_arm) = (cfg.new_block(), cfg.new_block(), cfg.new_block());
+        cfg.add_edge(then_arm, then_tail, EdgeKind::Fallthrough);
+        cfg.add_edge(cfg.entry(), then_arm, then_kind);
+        cfg.add_edge(cfg.entry(), else_arm, else_kind);
+        cfg
+    };
+    let straight = build(EdgeKind::ConditionalTrue, EdgeKind::ConditionalFalse);
+    let swapped = build(EdgeKind::ConditionalFalse, EdgeKind::ConditionalTrue);
+
+    let diff = CfgDiff::compute(&straight, &swapped);
+    assert!(!diff.is_identical(), "{diff:?}");
+    let entry = straight.entry();
+    assert!(
+        diff.matched
+            .iter()
+            .any(|pair| pair.left == entry && pair.edges_changed),
+        "the branching block is the one that changed: {diff:?}"
+    );
+}
+
+#[test]
+fn a_copy_built_in_another_block_order_is_identical() {
+    // `entry -> {a, b}`, `a -> c`, `b -> d`, `c -> join`, `d -> join`: the arms
+    // have the same fingerprints, so only following the edges pairs each arm
+    // with its own continuation. The copy creates its blocks in a different
+    // order and adds its edges in another.
+    let build = |order: [usize; 6], reversed_edges: bool| {
+        let mut cfg = Cfg::<u32>::new();
+        let mut ids = vec![cfg.entry()];
+        ids.extend((0..5).map(|_| cfg.new_block()));
+        // `order` says which created block plays which role.
+        let [a, b, c, d, join] = [order[1], order[2], order[3], order[4], order[5]].map(|i| ids[i]);
+        let mut edges = vec![
+            (cfg.entry(), a, EdgeKind::ConditionalTrue),
+            (cfg.entry(), b, EdgeKind::ConditionalFalse),
+            (a, c, EdgeKind::Fallthrough),
+            (b, d, EdgeKind::Fallthrough),
+            (c, join, EdgeKind::Fallthrough),
+            (d, join, EdgeKind::Fallthrough),
+        ];
+        if reversed_edges {
+            edges.reverse();
+        }
+        for (source, target, kind) in edges {
+            cfg.add_edge(source, target, kind);
+        }
+        cfg
+    };
+    let original = build([0, 1, 2, 3, 4, 5], false);
+    let permuted = build([0, 5, 4, 3, 2, 1], true);
+
+    let diff = CfgDiff::compute(&original, &permuted);
+    assert!(diff.is_identical(), "{diff:?}");
+
+    // And a copy that really rewires one arm is not.
+    let mut rewired = build([0, 1, 2, 3, 4, 5], false);
+    let (c, d) = (BlockId::from_index(3), BlockId::from_index(4));
+    let stray = rewired.outgoing(d).next().expect("d leaves");
+    rewired.redirect_edge_target(stray, c);
+    assert!(!CfgDiff::compute(&original, &rewired).is_identical());
+}

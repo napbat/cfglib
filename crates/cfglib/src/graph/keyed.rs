@@ -19,7 +19,7 @@ extern crate alloc;
 use alloc::collections::BTreeMap;
 
 use super::edge_view::{EdgeRef, EdgeView};
-use super::store::{EdgeId, EdgeRecord, Graph, NodeId, Renumbering};
+use super::store::{EdgeId, Graph, NodeId, Renumbering};
 use super::view::{GraphView, NodeView};
 
 /// A directed multigraph keyed by a consumer identity `K`.
@@ -92,24 +92,6 @@ impl<K: Clone + Ord, N, E> KeyedGraph<K, N, E> {
     #[must_use]
     pub const fn graph(&self) -> &Graph<N, E> {
         &self.graph
-    }
-
-    /// Mutably borrow a node payload.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `node` names no slot in this graph.
-    pub fn node_mut(&mut self, node: NodeId) -> &mut N {
-        self.graph.node_mut(node)
-    }
-
-    /// Mutably borrow an edge record, whose payload is the mutable part.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `edge` names no slot in this graph.
-    pub fn edge_mut(&mut self, edge: EdgeId) -> &mut EdgeRecord<E> {
-        self.graph.edge_mut(edge)
     }
 
     /// Remove the node minted for `key`, with every edge that touches it, and

@@ -34,9 +34,10 @@
 //! # What it is not
 //!
 //! This is a projection, not a snapshot: it carries identity, topology, and
-//! whatever the label hooks render. Consumer payloads that are not text
-//! belong in the `serde` representation of the store, which is the fidelity
-//! path.
+//! whatever the label hooks render. Consumer payloads that are not text, and
+//! the adjacency order of a node whose edge was redirected (edges replay in
+//! identity order), belong in the `serde` representation of the store, which
+//! is the fidelity path.
 
 extern crate alloc;
 use alloc::borrow::Cow;

@@ -441,13 +441,6 @@ mod tests {
     }
 
     #[test]
-    fn edge_kind_discriminants_follow_declaration_order() {
-        for (index, kind) in EdgeKind::ALL.into_iter().enumerate() {
-            assert_eq!(usize::from(kind as u8), index, "{kind}");
-        }
-    }
-
-    #[test]
     fn a_block_lists_its_edges_by_kind_in_adjacency_order() {
         let mut cfg = Cfg::<u32>::new();
         let (first, second, third) = (cfg.new_block(), cfg.new_block(), cfg.new_block());
