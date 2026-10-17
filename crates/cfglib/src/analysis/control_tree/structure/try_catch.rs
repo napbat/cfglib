@@ -5,7 +5,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
 use super::super::node::{CatchHandler, ControlNode};
-use super::{Structurer, flow_successors};
+use super::{Structurer, block_is_allowed, flow_successors};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::graph::traverse::{TraversalDirection, reverse_postorder};
@@ -160,11 +160,46 @@ fn region_continuation<I, E>(cfg: &Cfg<I, E>, region: &Region) -> Option<BlockId
 }
 
 impl<I, E> Structurer<'_, I, E> {
+    /// Whether one `try` can hold the live protected code of `region`, which
+    /// starts at `anchor`.
+    ///
+    /// A `try` is one construct, entered at one point and nested in what
+    /// encloses it. The region does not fit when live code outside it jumps
+    /// into the middle (a protected range split in two, a pad that retries
+    /// halfway), when part of it was already emitted or claimed (a loop's
+    /// test block), or when part of it lies beyond the enclosing bound. The
+    /// tree would then show that part outside the try, raising into a pad the
+    /// try does not enclose, so the region stays ordinary flow. Dead code
+    /// enters nothing, a block without instructions needs no covering, and
+    /// exception edges are not ordinary flow.
+    fn fits_one_try(
+        &self,
+        region: &Region,
+        anchor: BlockId,
+        allowed_blocks: Option<&BTreeSet<BlockId>>,
+    ) -> bool {
+        let cfg = self.cfg;
+        region
+            .protected_blocks
+            .iter()
+            .filter(|&&block| block != anchor && self.reachable[block.index()])
+            .all(|&block| {
+                let entered_inside = cfg.incoming(block).map(|edge| cfg.edge(edge)).all(|edge| {
+                    edge.kind().is_exceptional()
+                        || !self.reachable[edge.source().index()]
+                        || region.protected_blocks.contains(&edge.source())
+                });
+                let coverable = self.instruction_count(block) == 0
+                    || (!self.is_visited(block) && block_is_allowed(allowed_blocks, block));
+                entered_inside && coverable
+            })
+    }
+
     /// Lift a try/catch region anchored at `block`, if a structurable one
     /// exists.
     ///
     /// Among the regions anchored at `block` (outermost first), the first with
-    /// complete handler extents is structured; regions with unknown extents
+    /// complete handler extents and a single entry is structured; the others
     /// remain ordinary control flow. Bounds intersect with the enclosing
     /// `allowed_blocks`, so a nested region never escapes the extent it was
     /// entered under.
@@ -178,6 +213,7 @@ impl<I, E> Structurer<'_, I, E> {
         let (region, handler_bodies) = candidates
             .iter()
             .filter(|region| !self.structured_regions.contains(&region.id.0))
+            .filter(|region| self.fits_one_try(region, block, allowed_blocks))
             .find_map(|region| complete_handler_bodies(region).map(|bodies| (*region, bodies)))?;
         self.structured_regions.insert(region.id.0);
 

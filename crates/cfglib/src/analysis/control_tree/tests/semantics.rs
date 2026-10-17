@@ -58,26 +58,32 @@ impl Decisions {
     }
 }
 
-/// The block `block` raises to once its instructions ran: its first exception
-/// edge, when it takes it. A block whose only edges are exceptional always
-/// takes one, since it has nowhere else to go. A block without instructions
-/// never raises, because the tree has no node to raise at.
+/// The block `block` raises to once its instructions ran, when it raises: one
+/// of its exception edges, chosen by the seed and the block. A block whose
+/// only edges are exceptional always raises, since it has nowhere else to go.
+/// A block without instructions never raises, because the tree has no node to
+/// raise at.
 fn raise_target<I, E>(cfg: &Cfg<I, E>, seed: u64, block: BlockId) -> Option<BlockId> {
     if cfg.block(block).instructions().is_empty() {
         return None;
     }
-    let target = cfg
+    let targets: Vec<BlockId> = cfg
         .outgoing(block)
         .map(|edge| cfg.edge(edge))
-        .find(|edge| edge.kind().is_exceptional())
-        .map(|edge| edge.target())?;
+        .filter(|edge| edge.kind().is_exceptional())
+        .map(|edge| edge.target())
+        .collect();
+    if targets.is_empty() {
+        return None;
+    }
     let has_normal_successor = cfg
         .outgoing(block)
         .any(|edge| !cfg.edge(edge).kind().is_exceptional());
     let mut mix =
         Decisions(seed ^ (u64::from(block.raw()) + 1).wrapping_mul(0xD1B5_4A32_D192_ED03));
     mix.choose(2);
-    (!has_normal_successor || mix.choose(2) == 1).then_some(target)
+    let raises = !has_normal_successor || mix.choose(2) == 1;
+    raises.then(|| targets[mix.choose(targets.len())])
 }
 
 /// Whether every reachable edge tagged [`EdgeKind::Back`] goes to a block
@@ -92,6 +98,12 @@ fn back_tags_agree_with_dominance<I, E>(cfg: &Cfg<I, E>) -> bool {
             || !dominators.is_reachable(edge.source())
             || dominators.dominates(edge.target(), edge.source())
     })
+}
+
+/// Whether the tree of `cfg` promises the graph's behavior: the regions keep
+/// their contract and no Back tag asserts a loop that dominance does not.
+fn is_faithful<I, E>(cfg: &Cfg<I, E>) -> bool {
+    back_tags_agree_with_dominance(cfg) && regions_are_well_formed(cfg)
 }
 
 /// Whether the regions keep the contract of
@@ -637,6 +649,70 @@ pub(super) fn assert_runs_alike<I, E>(
     assert_streams_alike(cfg, tree, report, context, STREAM_COUNT);
 }
 
+/// Every block that raises into a handler is inside the try body of the region
+/// that owns it: the tree's `try` covers what the exception edges say it
+/// covers.
+pub(super) fn assert_raisers_are_covered<I, E>(cfg: &Cfg<I, E>, tree: &ControlTree, context: &str) {
+    if !is_faithful(cfg) {
+        return;
+    }
+    let live = reach(cfg, Vec::new());
+    for id in tree.preorder() {
+        let ControlNode::TryCatch {
+            try_body, handlers, ..
+        } = *tree.node(id)
+        else {
+            continue;
+        };
+        let covered = blocks_of_body(tree, try_body);
+        for handler in tree.handlers(handlers) {
+            for &block in &live {
+                let raises_here = cfg.block(block).instructions().len() > 0
+                    && cfg.outgoing(block).any(|edge| {
+                        let edge = cfg.edge(edge);
+                        edge.kind().is_exceptional() && edge.target() == handler.entry
+                    });
+                assert!(
+                    !raises_here || covered.contains(&block),
+                    "{block} raises into {} outside its try in {context}\n{}",
+                    handler.entry,
+                    render(tree)
+                );
+            }
+        }
+    }
+}
+
+/// The blocks whose instructions the statements of `body` hold.
+fn blocks_of_body(tree: &ControlTree, body: ControlBody) -> BTreeSet<BlockId> {
+    let mut blocks = BTreeSet::new();
+    let mut stack: Vec<ControlNodeId> = tree.body(body).to_vec();
+    while let Some(id) = stack.pop() {
+        match *tree.node(id) {
+            ControlNode::Block(span) | ControlNode::Return(span) => {
+                blocks.insert(span.block());
+            }
+            ControlNode::IfThenElse { condition, .. } | ControlNode::Switch { condition, .. } => {
+                blocks.insert(condition.block());
+            }
+            ControlNode::Loop { kind, .. } => match kind {
+                LoopKind::Endless => {}
+                LoopKind::While { condition, .. } => {
+                    blocks.extend(tree.spans(condition).iter().map(|span| span.block()));
+                }
+                LoopKind::DoWhile { latch, .. } => {
+                    blocks.insert(latch.block());
+                }
+            },
+            _ => {}
+        }
+        for child in tree.child_bodies(id) {
+            stack.extend_from_slice(tree.body(child));
+        }
+    }
+    blocks
+}
+
 /// [`assert_runs_alike`] over `streams` streams of decisions, for a graph
 /// whose divergence only some streams reach.
 fn assert_streams_alike<I, E>(
@@ -646,7 +722,7 @@ fn assert_streams_alike<I, E>(
     context: &str,
     streams: u64,
 ) {
-    if !back_tags_agree_with_dominance(cfg) || !regions_are_well_formed(cfg) {
+    if !is_faithful(cfg) {
         return;
     }
     for stream in 1..=streams {

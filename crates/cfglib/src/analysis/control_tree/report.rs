@@ -42,9 +42,11 @@ pub struct LiftReport {
     /// walk: goto targets, handler pads reached only through exception edges,
     /// and code only a handler owns, such as a filter funclet.
     pub swept_blocks: Vec<BlockId>,
-    /// Regions left as ordinary control flow because a handler extent was
-    /// unknown or the region was shadowed by an enclosing structured region
-    /// at the same anchor.
+    /// Regions left as ordinary control flow, so the tree holds no `try` for
+    /// them: a handler extent was unknown, an enclosing structured region at
+    /// the same anchor shadowed the region, or no single `try` could hold its
+    /// protected code (ordinary flow enters it at more than one block, part of
+    /// it is a loop's test block or lies outside the enclosing loop).
     pub unstructured_regions: Vec<RegionId>,
     /// Goto targets whose label could not be attached to any emitted node;
     /// the tree contains a dangling goto and the consumer should fall back.

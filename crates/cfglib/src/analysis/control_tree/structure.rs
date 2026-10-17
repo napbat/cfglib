@@ -132,14 +132,17 @@ impl ControlTree {
     /// - Loop transfers: `Break` / `Continue` derived from natural-loop
     ///   membership, labeled when they cross an enclosing loop
     /// - Exception regions: `TryCatch` when every handler has a complete
-    ///   [`HandlerBody`](crate::HandlerBody); multiple `Finally` handlers
-    ///   concatenate in declaration order
+    ///   [`HandlerBody`](crate::HandlerBody) and one `try` can hold the
+    ///   protected code (ordinary flow enters it at its first block only, and
+    ///   none of it is already emitted or outside the enclosing bound);
+    ///   multiple `Finally` handlers concatenate in declaration order
     /// - Unstructured flow: `Label` / `Goto` (for `Jump` edges no loop context
     ///   absorbs, transfers that leave a structural bound, and transfers into
     ///   already-emitted code)
     ///
-    /// Regions with an unknown handler extent remain ordinary control flow;
-    /// the structurer does not guess which blocks belong inside a handler.
+    /// Other regions remain ordinary control flow: the structurer does not
+    /// guess which blocks belong inside a handler, and does not show protected
+    /// code outside the `try` that raises into its handler.
     /// **No owned code is ever dropped** (see below): a transfer refused at a
     /// structural boundary becomes an explicit [`ControlNode::Goto`], and
     /// every owned block the structured walk did not emit (refused targets,

@@ -354,10 +354,14 @@ pub(super) fn check<I, E>(cfg: &Cfg<I, E>, tree: &ControlTree, report: &LiftRepo
         }
     }
     super::semantics::assert_runs_alike(cfg, tree, report, context);
-    assert_eq!(
-        report.is_fully_structured(),
-        report.gotos.is_empty()
-            && report.unstructured_regions.is_empty()
-            && report.unresolved_labels.is_empty()
+    super::semantics::assert_raisers_are_covered(cfg, tree, context);
+    // A fully structured tree holds no goto.
+    assert!(
+        !report.is_fully_structured()
+            || tree
+                .preorder()
+                .all(|id| !matches!(tree.node(id), ControlNode::Goto { .. })),
+        "a fully structured tree holds a goto in {context}\n{}",
+        render(tree)
     );
 }

@@ -860,3 +860,51 @@ fn a_try_anchored_at_a_switch_case_is_structured_inside_that_case() {
     let (try_body, _, _) = find_try_catch(&tree).expect("the case of p is a try");
     assert!(body_contains_block(&tree, try_body, p));
 }
+
+#[test]
+fn a_region_entered_at_two_blocks_is_not_one_try() {
+    // Both arms of the branch are protected by one region, so ordinary flow
+    // enters its protected code at two blocks. No single `try` holds both
+    // arms: the tree would cover one and leave the other raising into a pad
+    // that its try does not enclose, so the region stays plain flow.
+    let mut cfg: Cfg<MockInst> = Cfg::new();
+    let first = cfg.new_block();
+    let second = cfg.new_block();
+    let handler = cfg.new_block();
+    let merge = cfg.new_block();
+    for (block, name) in [
+        (cfg.entry(), "test"),
+        (first, "first"),
+        (second, "second"),
+        (handler, "caught"),
+        (merge, "after"),
+    ] {
+        cfg.block_mut(block).push(ff(name));
+    }
+    cfg.add_edge(cfg.entry(), first, EdgeKind::ConditionalTrue);
+    cfg.add_edge(cfg.entry(), second, EdgeKind::ConditionalFalse);
+    cfg.add_edge(first, merge, EdgeKind::Fallthrough);
+    cfg.add_edge(second, merge, EdgeKind::Fallthrough);
+    cfg.add_edge(first, handler, EdgeKind::ExceptionHandler);
+    cfg.add_edge(second, handler, EdgeKind::ExceptionHandler);
+    cfg.add_edge(handler, merge, EdgeKind::Fallthrough);
+    let region = cfg.add_region(Region {
+        id: RegionId::from_raw(0),
+        protected_blocks: [first, second].into_iter().collect(),
+        handlers: vec![Handler {
+            entry: handler,
+            body: HandlerBody::known([handler]),
+            kind: HandlerKind::Catch,
+        }],
+        parent: None,
+    });
+
+    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    assert_eq!(report.unstructured_regions, [region], "{tree:?}");
+    assert!(
+        !has_node_kind(&tree, |node| matches!(node, ControlNode::TryCatch { .. })),
+        "{}",
+        pseudocode(&cfg, &tree)
+    );
+    assert!(contains_block(&tree, handler), "the pad is still emitted");
+}
