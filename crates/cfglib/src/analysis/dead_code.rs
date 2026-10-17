@@ -27,9 +27,9 @@ pub struct DeadCode {
     /// [`may_unwind`](crate::InstrInfo::may_unwind), is never listed, and a
     /// dead instruction's uses keep nothing alive, so a chain feeding only a
     /// dead instruction is listed with it. A throwing instruction keeps what
-    /// its unwind successors read live before it. Instructions of
-    /// unreachable blocks are liveness-dead like any other (no live-out ever
-    /// reaches them).
+    /// its unwind successors read live before it. An unreachable block is
+    /// judged by liveness alone, like any other: its definition is listed
+    /// only if nothing reads it, and a read by a reachable block keeps it.
     ///
     /// [`ProgramPoint`] indices are positions, not identities: any
     /// instruction edit invalidates the analysis.
@@ -247,6 +247,22 @@ mod tests {
                 inst_idx: 0,
             }]
         );
+    }
+
+    #[test]
+    fn a_definition_in_an_unreachable_block_stays_live_while_a_reachable_block_reads_it() {
+        let mut cfg: Cfg<DfInst> = Cfg::new();
+        let orphan = cfg.new_block();
+        let reader = cfg.new_block();
+        cfg.block_mut(orphan).push(df_def("stranded", 0));
+        cfg.block_mut(reader).push(df_use("read", 0));
+        cfg.add_edge(cfg.entry(), reader, EdgeKind::Fallthrough);
+        cfg.add_edge(orphan, reader, EdgeKind::Fallthrough);
+
+        let dead = DeadCode::compute(&cfg);
+
+        assert_eq!(dead.unreachable_blocks, alloc::vec![orphan]);
+        assert_eq!(dead.instructions, []);
     }
 
     /// A definition nothing inside the graph reads is dead, and the same
