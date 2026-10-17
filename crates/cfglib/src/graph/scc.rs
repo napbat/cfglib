@@ -65,6 +65,17 @@ impl<N: Copy + Ord, S: AsRef<[N]>> Scc<N, S> {
     pub fn contains(&self, node: N) -> bool {
         self.nodes().binary_search(&node).is_ok()
     }
+
+    /// Return whether this component holds a cycle: it has several nodes, or
+    /// its one node has an edge to itself. `graph` must be the graph the
+    /// component was computed from.
+    #[must_use]
+    pub fn is_cyclic<G>(&self, graph: &G) -> bool
+    where
+        G: GraphView<NodeId = N>,
+    {
+        is_cyclic_component(graph, self.nodes())
+    }
 }
 
 impl<N, S: Clone> Clone for Scc<N, S> {
@@ -175,10 +186,17 @@ impl<N: DenseId> SccDecomposition<N> {
     where
         G: GraphView<NodeId = N>,
     {
-        self.components().all(|component| match *component {
-            [node] => !graph.successors(node).any(|successor| successor == node),
-            _ => false,
-        })
+        self.components()
+            .all(|component| !is_cyclic_component(graph, component))
+    }
+}
+
+/// Whether the nodes of one component hold a cycle: there are several of
+/// them, or the only one has an edge to itself.
+fn is_cyclic_component<G: GraphView>(graph: &G, nodes: &[G::NodeId]) -> bool {
+    match *nodes {
+        [node] => graph.successors(node).any(|successor| successor == node),
+        _ => true,
     }
 }
 

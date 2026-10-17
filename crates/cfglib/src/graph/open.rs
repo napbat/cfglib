@@ -6,7 +6,7 @@
 //! walks have no such graph. An import chase probes a live resolver and mints
 //! the next node from the answer; a re-export chase walks a `(file, name)`
 //! space whose edges are barrel files it has not read yet; an emission walk
-//! interleaves children by source offset as it computes them. Materialising
+//! interleaves children by source offset as it computes them. Materializing
 //! those spaces to walk them is exactly backwards — the walk is what decides
 //! which nodes exist.
 //!
@@ -52,6 +52,7 @@
 mod events;
 mod fold;
 mod follow;
+mod marks;
 mod paths;
 mod search;
 
@@ -63,11 +64,6 @@ pub use fold::{FoldEnter, MarkScope, OpenFold, OpenFoldConfig, open_fold_post_or
 pub use follow::{follow, follow_path};
 pub use paths::{OpenPathsConfig, OpenPathsEvent, open_breadth_first_paths};
 pub use search::{OpenSearchConfig, open_search};
-
-/// Whether a node at `depth` may expand under a `max_depth` bound.
-fn may_expand(max_depth: Option<usize>, depth: usize) -> bool {
-    max_depth.is_none_or(|limit| depth < limit)
-}
 
 #[cfg(test)]
 mod tests;

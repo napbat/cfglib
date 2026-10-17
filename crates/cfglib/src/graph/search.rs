@@ -566,9 +566,12 @@ fn search_in<G: GraphView, B>(
     }
 }
 
-/// Whether a node at `depth` may expand under `config`.
-fn may_expand(config: SearchConfig, depth: usize) -> bool {
-    config.max_depth.is_none_or(|limit| depth < limit)
+/// Whether a node at `depth` may expand under a `max_depth` bound.
+///
+/// The one statement of the rule every search discipline shares, dense and
+/// open: the bound limits expansion, never visiting.
+pub(crate) fn may_expand(max_depth: Option<usize>, depth: usize) -> bool {
+    max_depth.is_none_or(|limit| depth < limit)
 }
 
 fn depth_first_global<G: GraphView, A: Adjacency, B>(
@@ -601,7 +604,7 @@ fn depth_first_global<G: GraphView, A: Adjacency, B>(
             ControlFlow::Continue(Visit::Skip) => continue,
             ControlFlow::Continue(Visit::Descend) => {}
         }
-        if !may_expand(config, depth) {
+        if !may_expand(config.max_depth, depth) {
             continue;
         }
         adjacent.clear();
@@ -655,7 +658,7 @@ fn depth_first_path<G: GraphView, A: Adjacency, B>(
             ControlFlow::Continue(Visit::Skip) => continue,
             ControlFlow::Continue(Visit::Descend) => {}
         }
-        if !may_expand(config, depth) {
+        if !may_expand(config.max_depth, depth) {
             continue;
         }
         adjacent.clear();
@@ -703,7 +706,7 @@ fn breadth_first_global<G: GraphView, A: Adjacency, B>(
             ControlFlow::Continue(Visit::Skip) => continue,
             ControlFlow::Continue(Visit::Descend) => {}
         }
-        if !may_expand(config, depth) {
+        if !may_expand(config.max_depth, depth) {
             continue;
         }
         for next in axis.neighbors(graph, id).map(DenseId::index) {
@@ -719,6 +722,11 @@ fn breadth_first_global<G: GraphView, A: Adjacency, B>(
 
 mod events;
 pub use events::{BfsEvent, DfsEvent, breadth_first_events, depth_first_events};
+
+mod path_budget;
+mod path_frontier;
+pub(crate) use path_budget::PathBudget;
+pub(crate) use path_frontier::PathFrontier;
 
 #[cfg(test)]
 mod tests;

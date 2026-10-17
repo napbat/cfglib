@@ -2,95 +2,14 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use core::mem;
 use core::ops::ControlFlow;
 use smallvec::SmallVec;
 
-use crate::graph::search::{SearchOrder, Visit, VisitedPolicy};
+use crate::graph::search::{SearchOrder, Visit, VisitedPolicy, may_expand};
 
-use super::may_expand;
-
-/// Nodes a walk keeps inline before it allocates: its stack or frontier, and
-/// the marks it has set.
-const INLINE_NODES: usize = 8;
-
-/// The nodes a walk has marked.
-///
-/// The open searches consumers run mostly touch a handful of nodes, where one
-/// linear scan of an inline array costs less than a tree's allocation and
-/// pointer chasing. A walk that outgrows the array moves its marks into a
-/// [`BTreeSet`] once and stays there, so a large walk keeps the logarithmic
-/// lookups the search documents. Both forms answer by the node's `Ord`.
-enum Marks<N> {
-    Few(SmallVec<[N; INLINE_NODES]>),
-    Many(BTreeSet<N>),
-}
-
-/// Marks `node` in the inline list, reporting whether it was unmarked, or hands
-/// `node` back when the list is full.
-fn insert_inline<N: Ord>(nodes: &mut SmallVec<[N; INLINE_NODES]>, node: N) -> Result<bool, N> {
-    if nodes.contains(&node) {
-        Ok(false)
-    } else if nodes.len() < INLINE_NODES {
-        nodes.push(node);
-        Ok(true)
-    } else {
-        Err(node)
-    }
-}
-
-/// The set a full inline list becomes when `node` joins it. Out of line: it
-/// runs once per walk that outgrows the list, and inlining it would bloat
-/// every mark inserted on the hot path.
-#[inline(never)]
-fn spill<N: Ord>(nodes: &mut SmallVec<[N; INLINE_NODES]>, node: N) -> BTreeSet<N> {
-    let mut set: BTreeSet<N> = nodes.drain(..).collect();
-    set.insert(node);
-    set
-}
-
-impl<N: Ord> Marks<N> {
-    fn new() -> Self {
-        Self::Few(SmallVec::new())
-    }
-
-    fn contains(&self, node: &N) -> bool {
-        match self {
-            Self::Few(nodes) => nodes.contains(node),
-            Self::Many(nodes) => nodes.contains(node),
-        }
-    }
-
-    /// Marks `node`, reporting whether it was unmarked.
-    #[inline]
-    fn insert(&mut self, node: N) -> bool {
-        match self {
-            Self::Few(nodes) => match insert_inline(nodes, node) {
-                Ok(inserted) => inserted,
-                Err(node) => {
-                    *self = Self::Many(spill(nodes, node));
-                    true
-                }
-            },
-            Self::Many(nodes) => nodes.insert(node),
-        }
-    }
-
-    fn remove(&mut self, node: &N) {
-        match self {
-            Self::Few(nodes) => {
-                if let Some(at) = nodes.iter().position(|marked| marked == node) {
-                    nodes.swap_remove(at);
-                }
-            }
-            Self::Many(nodes) => {
-                nodes.remove(node);
-            }
-        }
-    }
-}
+use super::marks::{INLINE_NODES, Marks};
 
 /// The discipline an [`open_search`] runs under.
 ///

@@ -98,3 +98,40 @@ fn an_error_names_its_line_and_what_was_wrong() {
         "line 2: node 4 has not been declared"
     );
 }
+
+#[test]
+fn a_label_that_starts_like_other_syntax_is_read_back() {
+    let mut graph = Graph::new();
+    let hash = graph.add_node("#not a comment".to_string());
+    let space = graph.add_node(" leading space".to_string());
+    let tab = graph.add_node("\tleading tab".to_string());
+    let blank = graph.add_node("  ".to_string());
+    graph.add_edge(hash, space, "#x".to_string());
+    graph.add_edge(space, tab, "  indented".to_string());
+    graph.add_edge(tab, blank, "-> not an arrow".to_string());
+
+    let written = graph.to_text();
+    let parsed = parse_text(&written).expect("the writer emits its own grammar");
+
+    for node in graph.node_ids() {
+        assert_eq!(parsed.node(node), graph.node(node), "{node:?}");
+    }
+    for edge in graph.edge_ids() {
+        assert_eq!(parsed.edge(edge).payload(), graph.edge(edge).payload());
+    }
+    assert_eq!(parsed.to_text(), written);
+}
+
+#[test]
+fn a_malformed_code_point_escape_is_rejected() {
+    for text in [
+        "n0 \\u20",
+        "n0 \\u{}",
+        "n0 \\u{zz}",
+        "n0 \\u{110000}",
+        "n0 \\u{20",
+    ] {
+        let error = parse_text(text).expect_err("not a code point escape");
+        assert_eq!(error.kind, TextErrorKind::Escape, "{text}");
+    }
+}

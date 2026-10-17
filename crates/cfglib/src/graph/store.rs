@@ -41,7 +41,9 @@
 //!
 //! Adjacency of a node is its base run followed by its delta chain. Base
 //! identities are all below delta identities and both parts are ordered, so
-//! the concatenation is exactly insertion order, parallel edges included.
+//! the concatenation is exactly insertion order, parallel edges included —
+//! until an edge is redirected to the node, which reads after the edges the
+//! node already had. Compaction keeps whichever order a node reads in.
 //!
 //! ## Cost per node
 //!
@@ -89,7 +91,8 @@
 //!
 //! ## Compaction
 //!
-//! [`compact`](Graph::compact) rebuilds the base from the live entities and
+//! [`compact`](Graph::compact) rebuilds the base from the live entities,
+//! keeping every node's adjacency order, and
 //! returns a [`Renumbering`]: a total old-to-new mapping that
 //! [`compose`](Renumbering::compose)s, so a consumer that skipped several
 //! compactions folds them into one lookup.
@@ -128,6 +131,8 @@ mod id;
 mod liveness;
 mod relocate;
 mod renumbering;
+#[cfg(feature = "serde")]
+mod validate;
 mod view;
 
 #[cfg(test)]
@@ -162,6 +167,13 @@ fn empty_slice<T>() -> Box<[T]> {
 ///
 /// See the [module documentation](self) for the storage design.
 ///
+/// # Equality
+///
+/// `==` compares the representation, not just the graph it describes: a
+/// compacted store and an uncompacted one that hold the same nodes, edges and
+/// adjacency are not equal, because one has a delta and the other has not.
+/// [`compact`](Graph::compact) both sides first to compare content.
+///
 /// # Examples
 ///
 /// ```
@@ -185,10 +197,13 @@ fn empty_slice<T>() -> Box<[T]> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
     feature = "serde",
-    serde(bound(
-        serialize = "N: serde::Serialize, E: serde::Serialize",
-        deserialize = "N: serde::Deserialize<'de>, E: serde::Deserialize<'de>"
-    ))
+    serde(
+        bound(
+            serialize = "N: serde::Serialize, E: serde::Serialize",
+            deserialize = "N: serde::Deserialize<'de>, E: serde::Deserialize<'de>"
+        ),
+        try_from = "validate::Stored<N, E, NT>"
+    )
 )]
 pub struct Graph<N, E, NT: IdTag = NodeTag, ET: IdTag = EdgeTag> {
     base_nodes: Box<[N]>,

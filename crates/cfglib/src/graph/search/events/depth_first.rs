@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
 use crate::graph::traverse::{Adjacency, TraversalDirection, by_axis};
-use crate::graph::view::{DenseId, GraphView};
+use crate::graph::view::{DenseId, GraphView, assert_in_bound};
 
 /// An event of a [`depth_first_events`] walk.
 ///
@@ -145,10 +145,7 @@ fn depth_first_events_from<G: GraphView, A: Adjacency, B>(
     start: G::NodeId,
     mut on_event: impl FnMut(DfsEvent<G::NodeId>) -> ControlFlow<B>,
 ) -> Option<B> {
-    assert!(
-        start.index() < graph.node_bound(),
-        "start node is out of range"
-    );
+    assert_in_bound(graph, start, "start node");
 
     let mut color = vec![Color::White; graph.node_bound()];
     // Every frame's successors, appended as the frame is pushed and truncated

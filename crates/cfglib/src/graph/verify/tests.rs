@@ -296,10 +296,10 @@ fn verify_view_reports_multiplicity_mismatches_in_pair_order() {
     assert_eq!(
         messages(&report),
         [
-            "adjacency mismatch: 2 successor edge(s) 0->1 but 1 predecessor entrie(s)",
-            "adjacency mismatch: 1 successor edge(s) 2->3 but 2 predecessor entrie(s)",
-            "adjacency mismatch: 1 predecessor entrie(s) 0->3 with no successor edge",
-            "adjacency mismatch: 1 predecessor entrie(s) 3->0 with no successor edge",
+            "adjacency mismatch: 2 successor edge(s) 0->1 but 1 predecessor entry(ies)",
+            "adjacency mismatch: 1 successor edge(s) 2->3 but 2 predecessor entry(ies)",
+            "adjacency mismatch: 1 predecessor entry(ies) 0->3 with no successor edge",
+            "adjacency mismatch: 1 predecessor entry(ies) 3->0 with no successor edge",
         ]
     );
 }
@@ -320,9 +320,9 @@ fn verify_edge_view_reports_every_edge_level_defect_in_order() {
     assert_eq!(
         messages(&report),
         [
-            "adjacency mismatch: 1 successor edge(s) 1->0 but 0 predecessor entrie(s)",
+            "adjacency mismatch: 1 successor edge(s) 1->0 but 0 predecessor entry(ies)",
             "edge index 1 appears more than once",
-            "edge index 3 has endpoint outside node_count 3",
+            "edge index 3 has endpoint outside node_bound 3",
             "edge index 8 out of bounds (edge_bound=6)",
             "node 0 has non-live outgoing edge index 4",
             "node 1 lists edge index 2, whose source is 2",
@@ -335,23 +335,6 @@ fn verify_edge_view_reports_every_edge_level_defect_in_order() {
             "edge index 3 appears 0 time(s) in outgoing and 0 time(s) in incoming adjacency",
         ]
     );
-}
-
-#[test]
-fn walk_stamps_report_repeats_within_one_walk_only() {
-    let edge = EdgeId::from_index;
-    let mut seen = WalkStamps::new(2);
-    seen.begin_walk();
-    assert!(!seen.repeats(edge(0)));
-    assert!(seen.repeats(edge(0)));
-    assert!(!seen.repeats(edge(1)));
-    // An identity beyond the bound has no stamp slot but still repeats.
-    assert!(!seen.repeats(edge(9)));
-    assert!(seen.repeats(edge(9)));
-
-    seen.begin_walk();
-    assert!(!seen.repeats(edge(0)));
-    assert!(!seen.repeats(edge(9)));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

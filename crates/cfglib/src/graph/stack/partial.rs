@@ -2,15 +2,17 @@
 
 extern crate alloc;
 
-use alloc::collections::VecDeque;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::graph::search::SearchOrder;
+use crate::graph::search::{PathBudget, PathFrontier, SearchOrder};
 use crate::identity::define_dense_id;
 
 use super::path::{StackPath, StackPathError};
 use super::storage::{StackEdgeId, StackFileId, StackGraph, StackGraphError, StackNodeId};
+
+#[cfg(feature = "serde")]
+mod stored;
 
 define_dense_id! {
     /// Stable identity of a path summary in a [`StackPartialPathDatabase`].
@@ -32,8 +34,14 @@ define_dense_id! {
 /// [`append_to`](Self::append_to) replays those edges against a concrete path,
 /// which enforces the exact stack semantics and keeps summaries independent of
 /// the consumer's symbol representation.
+///
+/// A summary holds at least the edge that reached its end and takes no edge
+/// twice, as extraction guarantees; a deserialized summary is checked for
+/// both. Its identities name the graph it was extracted from, which a
+/// document cannot check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(try_from = "stored::Path"))]
 pub struct StackPartialPath {
     file: StackFileId,
     start: StackNodeId,
@@ -117,6 +125,9 @@ impl StackPartialPath {
     }
 
     /// Whether this summary contains no stored edges.
+    ///
+    /// Always `false`: a summary is recorded after the edge that reached its
+    /// end, and a deserialized one without an edge is rejected.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.edges.is_empty()
@@ -165,6 +176,10 @@ impl StackPartialPathConfig {
         self.max_path_count = Some(max_path_count);
         self
     }
+
+    const fn budget(&self) -> PathBudget {
+        PathBudget::new(self.max_path_length, self.max_path_count)
+    }
 }
 
 impl Default for StackPartialPathConfig {
@@ -198,8 +213,12 @@ impl StackPartialPathStats {
 }
 
 /// All structural path summaries extracted independently for one file.
+///
+/// Every summary belongs to the set's file, and the statistics count exactly
+/// the summaries the set holds; a deserialized set is checked for both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(try_from = "stored::Set"))]
 pub struct StackPartialPathSet {
     file: StackFileId,
     paths: Vec<StackPartialPath>,
@@ -210,7 +229,8 @@ impl StackPartialPathSet {
     /// Extract all productive routes between stitching endpoints in `file`.
     ///
     /// Starts are the root singleton, source references in the file, and its
-    /// exported scopes. A summary is recorded at the root, an exported scope,
+    /// exported scopes, expanded in that order under either
+    /// [`SearchOrder`]. A summary is recorded at the root, an exported scope,
     /// a source definition, or the jump singleton. Exploration also continues
     /// past those endpoints because a definition may be only an intermediate
     /// pop while symbols remain. Only edges belonging to this file are
@@ -234,40 +254,31 @@ impl StackPartialPathSet {
             kind.is_reference() || kind.is_exported_scope()
         }));
 
-        let mut frontier = VecDeque::new();
+        let mut frontier = PathFrontier::new(config.order);
         for start in start_nodes {
-            frontier.push_back(Route {
+            frontier.push(Route {
                 start,
                 current: start,
                 edges: Vec::new(),
             });
         }
         let mut paths = Vec::new();
-        let mut stats = StackPartialPathStats::default();
+        let mut budget = config.budget();
+        let mut cycle_cut_count = 0;
 
-        while let Some(route) = pop_route(&mut frontier, config.order) {
-            if config
-                .max_path_count
-                .is_some_and(|limit| stats.expanded_path_count >= limit)
-            {
-                stats.path_count_limited = true;
+        while let Some(route) = frontier.pop() {
+            if !budget.admit_expansion() {
                 break;
             }
-            stats.expanded_path_count += 1;
-            let at_length_limit = config
-                .max_path_length
-                .is_some_and(|limit| route.edges.len() >= limit);
-            let mut extensions = Vec::new();
             for edge in graph
                 .outgoing(route.current)
                 .filter(|&edge| edge_belongs_to_file(graph, edge, file))
             {
                 if route.edges.contains(&edge) {
-                    stats.cycle_cut_count += 1;
+                    cycle_cut_count += 1;
                     continue;
                 }
-                if at_length_limit {
-                    stats.path_length_limited = true;
+                if !budget.admit_length(route.edges.len() + 1) {
                     continue;
                 }
                 let target = graph.edge(edge).target();
@@ -281,16 +292,21 @@ impl StackPartialPathSet {
                         edges: edges.clone(),
                     });
                 }
-                extensions.push(Route {
+                frontier.push(Route {
                     start: route.start,
                     current: target,
                     edges,
                 });
             }
-            push_routes(&mut frontier, extensions, config.order);
         }
 
-        stats.partial_path_count = paths.len();
+        let stats = StackPartialPathStats {
+            expanded_path_count: budget.expanded_path_count(),
+            partial_path_count: paths.len(),
+            cycle_cut_count,
+            path_length_limited: budget.path_length_limited(),
+            path_count_limited: budget.path_count_limited(),
+        };
         Ok(Self { file, paths, stats })
     }
 
@@ -314,8 +330,17 @@ impl StackPartialPathSet {
 }
 
 /// Incrementally replaceable database of per-file path summaries.
+///
+/// The per-start and per-file tables list every live summary exactly once,
+/// under its own start and file, in installation order, and no tombstone. A
+/// deserialized database is checked for that and for each summary (see
+/// [`StackPartialPath`]). What a database cannot check alone is that its node,
+/// edge, and file identities fit the graph it is used with: a summary whose
+/// edge that graph no longer holds is reported by stitching, as documented
+/// there, so a database is only meaningful beside the graph it was built for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(try_from = "stored::Database"))]
 pub struct StackPartialPathDatabase {
     paths: Vec<Option<StackPartialPath>>,
     paths_by_start: Vec<Vec<StackPartialPathId>>,
@@ -460,18 +485,4 @@ fn edge_belongs_to_file<F, S, N, E>(
 fn is_endpoint<F, S, N, E>(graph: &StackGraph<F, S, N, E>, node: StackNodeId) -> bool {
     let kind = graph.node(node).kind();
     kind.is_root() || kind.is_exported_scope() || kind.is_definition() || kind.is_jump_to_scope()
-}
-
-fn pop_route(frontier: &mut VecDeque<Route>, order: SearchOrder) -> Option<Route> {
-    match order {
-        SearchOrder::BreadthFirst => frontier.pop_front(),
-        SearchOrder::DepthFirst => frontier.pop_back(),
-    }
-}
-
-fn push_routes(frontier: &mut VecDeque<Route>, routes: Vec<Route>, order: SearchOrder) {
-    match order {
-        SearchOrder::BreadthFirst => frontier.extend(routes),
-        SearchOrder::DepthFirst => frontier.extend(routes.into_iter().rev()),
-    }
 }

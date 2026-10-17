@@ -279,21 +279,35 @@ impl<G: NodeView> NodeView for Reversed<'_, G> {
     }
 }
 
+/// Panic unless `node` is below the view's [`node_bound`](GraphView::node_bound),
+/// naming `role` in the message.
+///
+/// The entry check of every walk that takes a node from its caller: a live
+/// node is below the bound, so one that is not is no node of the view, and the
+/// side tables a walk sizes by the bound could not be indexed by it.
+#[track_caller]
+pub(crate) fn assert_in_bound<G: GraphView>(graph: &G, node: G::NodeId, role: &str) {
+    assert!(node.index() < graph.node_bound(), "{role} is out of range");
+}
+
 /// The incoming neighbors of `node` by scanning every node's successors.
 ///
 /// The honest [`GraphView::predecessors`] implementation for a view that
 /// stores only forward adjacency: O(nodes × edges) per query, correct by
 /// construction, and free of a reverse index the consumer never queries.
-/// Views on an algorithm's hot reverse path should maintain real reverse
-/// adjacency instead.
+/// A predecessor is yielded once per successor entry that names `node`, so
+/// parallel edges stay parallel, as the [`GraphView`] contract requires of
+/// reverse adjacency. Views on an algorithm's hot reverse path should
+/// maintain real reverse adjacency instead.
 pub fn scan_predecessors<G: GraphView>(
     graph: &G,
     node: G::NodeId,
 ) -> impl Iterator<Item = G::NodeId> + '_ {
-    graph.node_ids().filter(move |&candidate| {
+    graph.node_ids().flat_map(move |candidate| {
         graph
             .successors(candidate)
-            .any(|successor| successor == node)
+            .filter(move |&successor| successor == node)
+            .map(move |_| candidate)
     })
 }
 
@@ -324,6 +338,26 @@ mod tests {
             assert_eq!(scanned, stored);
         }
         assert!(scan_predecessors(&graph, b).next().is_none());
+    }
+
+    #[test]
+    fn scanning_keeps_parallel_edges_and_self_loops_parallel() {
+        let mut graph = Graph::new();
+        let a = graph.add_node("a");
+        let b = graph.add_node("b");
+        graph.add_edge(a, b, ());
+        graph.add_edge(a, b, ());
+        graph.add_edge(b, b, ());
+        graph.add_edge(b, b, ());
+
+        for node in [a, b] {
+            let mut scanned: Vec<_> = scan_predecessors(&graph, node).collect();
+            let mut stored: Vec<_> = GraphView::predecessors(&graph, node).collect();
+            scanned.sort_unstable();
+            stored.sort_unstable();
+            assert_eq!(scanned, stored);
+        }
+        assert_eq!(scan_predecessors(&graph, b).count(), 4);
     }
 
     #[test]
