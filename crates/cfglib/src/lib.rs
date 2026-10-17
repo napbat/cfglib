@@ -44,8 +44,9 @@
 //! belong to the consumer. [`ir::hlil`] is the structured contract: a
 //! read-only [`ir::hlil::FunctionView`] of statement and expression trees and
 //! a write-only [`ir::hlil::FunctionBuilder`] that the consumer implements,
-//! with verification, pseudocode, declaration placement, and structure
-//! recovery over them. Every IR storage, builder implementation, and editing
+//! with lift and lower between it and a flat variable-based function,
+//! verification, pseudocode, declaration placement, and structure recovery
+//! over them. Every IR storage, builder implementation, and editing
 //! machinery belongs to the consumer; the algorithms here read through the
 //! views, drive the builders, and report facts.
 //! [`ControlTree::compute`] structures a [`Cfg`] into `if / else`, loops,
