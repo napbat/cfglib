@@ -391,6 +391,37 @@ fn self_edge_is_not_a_dag() {
 }
 
 #[test]
+fn a_component_is_cyclic_when_it_has_several_nodes_or_a_self_edge() {
+    // `plain`, `looped -> looped`, and the pair `a <-> b`.
+    let mut graph = Graph::<(), ()>::new();
+    let [plain, looped, a, b] = [(); 4].map(|()| graph.add_node(()));
+    graph.add_edge(looped, looped, ());
+    graph.add_edge(a, b, ());
+    graph.add_edge(b, a, ());
+    graph.add_edge(plain, a, ());
+
+    for result in [tarjan_scc(&graph), kosaraju_scc(&graph)] {
+        assert!(!result.component(plain).is_cyclic(&graph));
+        assert!(result.component(looped).is_cyclic(&graph));
+        assert!(result.component(a).is_cyclic(&graph));
+        assert!(result.component(b).is_cyclic(&graph));
+        assert!(!result.is_dag(&graph));
+    }
+}
+
+#[test]
+fn a_graph_is_a_dag_exactly_when_no_component_is_cyclic() {
+    for (name, graph) in fixtures() {
+        for result in [tarjan_scc(&graph), kosaraju_scc(&graph)] {
+            let any_cyclic = result
+                .components()
+                .any(|nodes| Scc::<_, &[NodeId]>::new(nodes).is_cyclic(&graph));
+            assert_eq!(result.is_dag(&graph), !any_cyclic, "{name}");
+        }
+    }
+}
+
+#[test]
 fn components_are_ascending_runs_of_one_flat_array() {
     for (name, graph) in fixtures() {
         for (algorithm, result) in [

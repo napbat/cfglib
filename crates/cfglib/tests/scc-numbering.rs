@@ -139,3 +139,25 @@ fn a_cfg_with_a_removed_block_decomposes_like_its_compacted_form() {
     let body = renumbering.node(body).expect("body survives");
     assert_eq!(compacted.component(head).nodes(), [head, body]);
 }
+
+#[test]
+fn a_component_reports_whether_it_holds_a_cycle() {
+    // entry -> (a <-> b), and a block that branches back to itself.
+    let mut graph = Graph::<&str, ()>::new();
+    let entry = graph.add_node("entry");
+    let a = graph.add_node("a");
+    let b = graph.add_node("b");
+    let spin = graph.add_node("spin");
+    graph.add_edge(entry, a, ());
+    graph.add_edge(a, b, ());
+    graph.add_edge(b, a, ());
+    graph.add_edge(entry, spin, ());
+    graph.add_edge(spin, spin, ());
+
+    let components = tarjan_scc(&graph);
+
+    assert!(!components.component(entry).is_cyclic(&graph));
+    assert!(components.component(a).is_cyclic(&graph));
+    assert!(components.component(spin).is_cyclic(&graph));
+    assert!(!components.is_dag(&graph));
+}
