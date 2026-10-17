@@ -2,11 +2,10 @@
 
 extern crate alloc;
 
-use alloc::collections::VecDeque;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::graph::search::SearchOrder;
+use crate::graph::search::{PathFrontier, SearchOrder};
 use crate::identity::define_dense_id;
 
 use super::path::{StackPath, StackPathError};
@@ -250,23 +249,18 @@ impl StackPartialPathSet {
             kind.is_reference() || kind.is_exported_scope()
         }));
 
-        let mut frontier = VecDeque::new();
-        push_routes(
-            &mut frontier,
-            start_nodes
-                .into_iter()
-                .map(|start| Route {
-                    start,
-                    current: start,
-                    edges: Vec::new(),
-                })
-                .collect(),
-            config.order,
-        );
+        let mut frontier = PathFrontier::new(config.order);
+        for start in start_nodes {
+            frontier.push(Route {
+                start,
+                current: start,
+                edges: Vec::new(),
+            });
+        }
         let mut paths = Vec::new();
         let mut stats = StackPartialPathStats::default();
 
-        while let Some(route) = pop_route(&mut frontier, config.order) {
+        while let Some(route) = frontier.pop() {
             if config
                 .max_path_count
                 .is_some_and(|limit| stats.expanded_path_count >= limit)
@@ -278,7 +272,6 @@ impl StackPartialPathSet {
             let at_length_limit = config
                 .max_path_length
                 .is_some_and(|limit| route.edges.len() >= limit);
-            let mut extensions = Vec::new();
             for edge in graph
                 .outgoing(route.current)
                 .filter(|&edge| edge_belongs_to_file(graph, edge, file))
@@ -302,13 +295,12 @@ impl StackPartialPathSet {
                         edges: edges.clone(),
                     });
                 }
-                extensions.push(Route {
+                frontier.push(Route {
                     start: route.start,
                     current: target,
                     edges,
                 });
             }
-            push_routes(&mut frontier, extensions, config.order);
         }
 
         stats.partial_path_count = paths.len();
@@ -490,18 +482,4 @@ fn edge_belongs_to_file<F, S, N, E>(
 fn is_endpoint<F, S, N, E>(graph: &StackGraph<F, S, N, E>, node: StackNodeId) -> bool {
     let kind = graph.node(node).kind();
     kind.is_root() || kind.is_exported_scope() || kind.is_definition() || kind.is_jump_to_scope()
-}
-
-fn pop_route(frontier: &mut VecDeque<Route>, order: SearchOrder) -> Option<Route> {
-    match order {
-        SearchOrder::BreadthFirst => frontier.pop_front(),
-        SearchOrder::DepthFirst => frontier.pop_back(),
-    }
-}
-
-fn push_routes(frontier: &mut VecDeque<Route>, routes: Vec<Route>, order: SearchOrder) {
-    match order {
-        SearchOrder::BreadthFirst => frontier.extend(routes),
-        SearchOrder::DepthFirst => frontier.extend(routes.into_iter().rev()),
-    }
 }

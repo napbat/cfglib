@@ -2,10 +2,9 @@
 
 extern crate alloc;
 
-use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
-use crate::graph::search::SearchOrder;
+use crate::graph::search::PathFrontier;
 
 use super::partial::{StackPartialPathDatabase, StackPartialPathId};
 use super::path::{StackPath, StackPathError};
@@ -52,14 +51,15 @@ impl<S: Clone + Eq> StackResolution<S> {
         config: StackSearchConfig,
     ) -> Result<Self, StackPathError> {
         let initial = StackPath::from_reference(graph, reference)?;
-        let mut frontier = VecDeque::from([StitchWork {
+        let mut frontier = PathFrontier::new(config.order);
+        frontier.push(StitchWork {
             path: initial,
             partials: Vec::new(),
-        }]);
+        });
         let mut complete = Vec::new();
         let mut stats = StackSearchStats::default();
 
-        while let Some(work) = pop_work(&mut frontier, config.order) {
+        while let Some(work) = frontier.pop() {
             if config
                 .max_path_count
                 .is_some_and(|limit| stats.expanded_path_count >= limit)
@@ -68,7 +68,6 @@ impl<S: Clone + Eq> StackResolution<S> {
                 break;
             }
             stats.expanded_path_count += 1;
-            let mut extensions = Vec::new();
             for (partial_id, partial) in database.paths_from(work.path.end()) {
                 if work.partials.contains(&partial_id)
                     || partial
@@ -110,12 +109,11 @@ impl<S: Clone + Eq> StackResolution<S> {
                 }
                 let mut partials = work.partials.clone();
                 partials.push(partial_id);
-                extensions.push(StitchWork {
+                frontier.push(StitchWork {
                     path: next,
                     partials,
                 });
             }
-            push_work(&mut frontier, extensions, config.order);
         }
 
         Ok(Self::from_complete(graph, reference, &complete, stats))
@@ -144,25 +142,4 @@ impl<S: Clone + Eq> StackResolutionIndex<S> {
 struct StitchWork<S> {
     path: StackPath<S>,
     partials: Vec<StackPartialPathId>,
-}
-
-fn pop_work<S>(
-    frontier: &mut VecDeque<StitchWork<S>>,
-    order: SearchOrder,
-) -> Option<StitchWork<S>> {
-    match order {
-        SearchOrder::BreadthFirst => frontier.pop_front(),
-        SearchOrder::DepthFirst => frontier.pop_back(),
-    }
-}
-
-fn push_work<S>(
-    frontier: &mut VecDeque<StitchWork<S>>,
-    work: Vec<StitchWork<S>>,
-    order: SearchOrder,
-) {
-    match order {
-        SearchOrder::BreadthFirst => frontier.extend(work),
-        SearchOrder::DepthFirst => frontier.extend(work.into_iter().rev()),
-    }
 }

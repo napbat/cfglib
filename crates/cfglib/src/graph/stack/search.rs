@@ -2,12 +2,12 @@
 
 extern crate alloc;
 
-use alloc::collections::{BTreeSet, VecDeque};
+use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 use smallvec::SmallVec;
 
-use crate::graph::search::SearchOrder;
+use crate::graph::search::{PathFrontier, SearchOrder};
 
 use super::path::{StackPath, StackPathError};
 use super::storage::{StackGraph, StackNodeId};
@@ -186,11 +186,12 @@ impl<S: Clone + Eq> StackResolution<S> {
         config: StackSearchConfig,
     ) -> Result<Self, StackPathError> {
         let initial = StackPath::from_reference(graph, reference)?;
-        let mut frontier = VecDeque::from([initial]);
+        let mut frontier = PathFrontier::new(config.order);
+        frontier.push(initial);
         let mut complete = Vec::new();
         let mut stats = StackSearchStats::default();
 
-        while let Some(path) = pop_frontier(&mut frontier, config.order) {
+        while let Some(path) = frontier.pop() {
             if config
                 .max_path_count
                 .is_some_and(|limit| stats.expanded_path_count >= limit)
@@ -203,7 +204,6 @@ impl<S: Clone + Eq> StackResolution<S> {
             let at_length_limit = config
                 .max_path_length
                 .is_some_and(|limit| path.len() >= limit);
-            let mut extensions = Vec::new();
             for edge in graph.outgoing(path.end()) {
                 if path.contains_edge(edge) {
                     stats.cycle_cut_count += 1;
@@ -229,9 +229,8 @@ impl<S: Clone + Eq> StackResolution<S> {
                         stats.complete_path_count_limited = true;
                     }
                 }
-                extensions.push(next);
+                frontier.push(next);
             }
-            push_extensions(&mut frontier, extensions, config.order);
         }
 
         Ok(Self::from_complete(graph, reference, &complete, stats))
@@ -571,26 +570,5 @@ fn add_reverse_references<S: Clone + Eq>(
                 }
             }
         }
-    }
-}
-
-fn pop_frontier<S>(
-    frontier: &mut VecDeque<StackPath<S>>,
-    order: SearchOrder,
-) -> Option<StackPath<S>> {
-    match order {
-        SearchOrder::BreadthFirst => frontier.pop_front(),
-        SearchOrder::DepthFirst => frontier.pop_back(),
-    }
-}
-
-fn push_extensions<S>(
-    frontier: &mut VecDeque<StackPath<S>>,
-    extensions: Vec<StackPath<S>>,
-    order: SearchOrder,
-) {
-    match order {
-        SearchOrder::BreadthFirst => frontier.extend(extensions),
-        SearchOrder::DepthFirst => frontier.extend(extensions.into_iter().rev()),
     }
 }

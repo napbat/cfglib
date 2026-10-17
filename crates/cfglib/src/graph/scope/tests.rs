@@ -488,6 +488,43 @@ fn configured_bounds_report_possible_truncation() {
 }
 
 #[test]
+fn a_wide_fan_out_is_explored_in_edge_order_at_every_level() {
+    const WIDTH: usize = 100_000;
+    let mut graph = Graph::new();
+    let start = graph.add_scope(PLAIN);
+    let mut leaves = vec![];
+    for _ in 0..WIDTH {
+        let leaf = graph.add_scope(PLAIN);
+        graph.add_edge(start, leaf, Label::Parent);
+        leaves.push(leaf);
+    }
+    let last = *leaves.last().expect("the fan-out has children");
+    let declared = graph.add_datum(last, Relation::Value, declaration("x"));
+    let use_x = graph.add_reference(start, reference("x", Relation::Value));
+
+    let result =
+        ScopeResolution::compute(&graph, use_x, &LexicalQuery, ScopeResolutionConfig::new());
+
+    assert_eq!(result.stats().explored_path_count, WIDTH + 1);
+    assert!(!result.stats().is_truncated());
+    assert_eq!(result.candidates().len(), 1);
+    assert_eq!(result.candidates()[0].datum(), declared);
+    assert_eq!(result.candidates()[0].path().scopes(), [start, last]);
+
+    let limited = ScopeResolution::compute(
+        &graph,
+        use_x,
+        &LexicalQuery,
+        ScopeResolutionConfig::new().with_max_path_count(WIDTH),
+    );
+    assert!(
+        !limited.is_resolved(),
+        "breadth-first spends the bound on earlier siblings before the last child"
+    );
+    assert!(limited.stats().path_count_limited);
+}
+
+#[test]
 fn linear_resolution_matches_general_search_and_rejects_branching() {
     let mut graph = Graph::new();
     let parent = graph.add_scope(PLAIN);

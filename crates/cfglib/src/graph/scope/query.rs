@@ -9,6 +9,7 @@ use core::cmp::Ordering;
 use smallvec::SmallVec;
 
 use crate::graph::edge_view::EdgeRef;
+use crate::graph::search::{PathFrontier, SearchOrder};
 
 use super::storage::{ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeId, ScopeReferenceId};
 
@@ -662,18 +663,14 @@ impl ScopeResolution {
             path: ScopePath::new(input.scope()),
             state: query.initial_state(graph, input),
         };
-        let mut initial = Some(initial);
-        let mut frontier: SmallVec<[Work<P::State>; 4]> = SmallVec::new();
+        // The seed is expanded without touching the frontier, so a query that
+        // never branches allocates no queue.
+        let mut seed = Some(initial);
+        let mut frontier = PathFrontier::new(SearchOrder::BreadthFirst);
         let mut reachable: SmallVec<[ScopeResolutionCandidate; 1]> = SmallVec::new();
         let mut stats = ScopeResolutionStats::default();
 
-        while let Some(work) = initial.take().or_else(|| {
-            if frontier.is_empty() {
-                None
-            } else {
-                Some(frontier.remove(0))
-            }
-        }) {
+        while let Some(work) = seed.take().or_else(|| frontier.pop()) {
             if config
                 .max_path_count
                 .is_some_and(|limit| stats.explored_path_count >= limit)
