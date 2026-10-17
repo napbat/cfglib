@@ -194,8 +194,9 @@ where
             if let Some(destination) = defs.first() {
                 recovery.pending.insert(destination.clone(), definition);
             }
-        } else {
-            // An opaque instruction defines every output as itself.
+        } else if !defs.is_empty() {
+            // An opaque instruction defines every output as itself. One that
+            // defines nothing (a store, a branch) leaves no expression.
             let reads = recovery.reads_of(inst.uses());
             recovery.redefine_all(defs);
             for destination in defs {
