@@ -151,6 +151,10 @@ fn report_adjacency_mismatches(forward: &[Pair], reverse: &[Pair], errors: &mut 
 /// 3. Adjacency lists (`succs`/`preds`) are consistent with edges, and every
 ///    live edge is listed exactly once by each of its endpoints.
 /// 4. Every reachable non-entry block has at least one predecessor.
+/// 5. Every block exception metadata names by a single reference (a handler
+///    entry, a filter block, a cleanup resume point, a continuation target)
+///    is live: the references [`Cfg::compact`] panics on. The entry cannot
+///    be removed, so it is live by construction.
 ///
 /// Returns a [`VerifyReport`] containing all violations found.
 ///
@@ -168,7 +172,13 @@ fn report_adjacency_mismatches(forward: &[Pair], reverse: &[Pair], errors: &mut 
 /// ```
 #[must_use]
 pub fn verify<I, E>(cfg: &Cfg<I, E>) -> VerifyReport {
-    verify_edge_view(cfg)
+    let mut report = verify_edge_view(cfg);
+    report
+        .errors
+        .extend(cfg.dangling_anchors().map(|block| VerifyError {
+            message: alloc::format!("exception metadata names {block}, which is not a live block"),
+        }));
+    report
 }
 
 /// Validate structural invariants and consumer semantics in stable order.

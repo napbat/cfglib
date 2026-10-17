@@ -10,6 +10,7 @@ use crate::graph::edge_view::EdgeRef;
 use crate::graph::store::Graph;
 use crate::region::{Cleanup, Region};
 
+mod anchors;
 mod cleanup;
 mod compact;
 mod mutation;

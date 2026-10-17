@@ -5,7 +5,8 @@
 //! back as a report and never abort the validator.
 
 use cfglib::{
-    EdgeRef, EdgeView, GraphView, RootedView, VerifyReport, verify_edge_view, verify_view,
+    Cfg, EdgeRef, EdgeView, GraphView, Handler, HandlerBody, HandlerKind, Region, RegionId,
+    RootedView, VerifyReport, verify, verify_edge_view, verify_view,
 };
 
 /// A two-node view over explicit tables, rooted at node 0. Each field can be
@@ -117,4 +118,36 @@ fn a_node_beyond_the_node_bound_is_reported_not_indexed() {
 
     assert_reported_once(&verify_view(&adapter));
     assert_reported_once(&verify_edge_view(&adapter));
+}
+
+/// A try body (the entry) with one catch handler on its own block.
+fn catch_cfg() -> (Cfg<u32>, cfglib::BlockId) {
+    let mut cfg = Cfg::<u32>::new();
+    let handler = cfg.new_block();
+    cfg.add_region(Region {
+        id: RegionId::from_raw(0),
+        protected_blocks: [cfg.entry()].into_iter().collect(),
+        handlers: vec![Handler {
+            entry: handler,
+            body: HandlerBody::known([handler]),
+            kind: HandlerKind::Catch,
+        }],
+        parent: None,
+    });
+    (cfg, handler)
+}
+
+#[test]
+fn a_handler_entry_that_was_removed_is_reported_before_compaction_panics() {
+    let (mut cfg, handler) = catch_cfg();
+    assert!(verify(&cfg).is_ok());
+
+    assert!(cfg.remove_block(handler));
+
+    let report = verify(&cfg);
+    assert_eq!(report.error_count(), 1, "{:?}", report.errors);
+    assert_eq!(
+        report.errors[0].message,
+        format!("exception metadata names {handler}, which is not a live block")
+    );
 }
