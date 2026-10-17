@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cfglib::{
     BlockId, Cfg, ConservativeMemoryAlias, DominatorTree, ExactMemoryAlias, MemoryAccess,
-    MemoryEvent, MemoryEventSite, MemorySSA, MemoryValueEdge, MemoryValueFlow,
+    MemoryEvent, MemoryEventSite, MemorySsa, MemoryValueEdge, MemoryValueFlow,
     MemoryValueFlowError, MemoryValueFlowScratch, MemoryValueNode, MemoryValueRole, NodeId,
     ProgramPoint, SsaForm, SsaValue,
 };
@@ -16,7 +16,7 @@ use cfglib::{
 use crate::machine::{Barrier, Inst, Program, Rng, chain, diamond};
 use crate::oracle::{Reaching, alias_classes, explore};
 
-type Memory = MemorySSA<u8, u8, Barrier>;
+type Memory = MemorySsa<u8, u8, Barrier>;
 type Flow = MemoryValueFlow<u8>;
 type Node = MemoryValueNode<u8>;
 /// The events that store (or load) each ordinary value.
@@ -40,7 +40,7 @@ fn analyze<A: cfglib::MemoryAlias<u8> + ?Sized>(
     alias: &A,
 ) -> (SsaForm<u8>, Memory, Flow) {
     let ssa = SsaForm::compute(cfg, &DominatorTree::compute(cfg));
-    let memory = MemorySSA::compute(cfg, alias);
+    let memory = MemorySsa::compute(cfg, alias);
     let flow = MemoryValueFlow::compute(&memory, &ssa).expect("a consistent program");
     (ssa, memory, flow)
 }
@@ -351,7 +351,7 @@ fn a_declared_variable_the_instruction_does_not_expose_is_a_structured_error() {
     let analyze_one = |inst: Inst<u8>| {
         let cfg = chain(vec![vec![inst]]);
         let ssa = SsaForm::compute(&cfg, &DominatorTree::compute(&cfg));
-        let memory: Memory = MemorySSA::compute(&cfg, &ExactMemoryAlias);
+        let memory: Memory = MemorySsa::compute(&cfg, &ExactMemoryAlias);
         MemoryValueFlow::compute(&memory, &ssa).map(|_| ())
     };
     let here = site(0, 0);
@@ -402,7 +402,7 @@ fn an_ssa_form_that_does_not_describe_the_event_is_reported_by_event() {
         Inst::load(0, 2),
     ]]);
     let small = chain(vec![vec![Inst::<u8>::compute(1, &[])]]);
-    let memory: Memory = MemorySSA::compute(&big, &ExactMemoryAlias);
+    let memory: Memory = MemorySsa::compute(&big, &ExactMemoryAlias);
     let ssa = SsaForm::compute(&small, &DominatorTree::compute(&small));
     assert_eq!(
         MemoryValueFlow::compute(&memory, &ssa).map(|_| ()),
@@ -419,7 +419,7 @@ fn flow_errors_are_ordinary_errors_and_a_scratch_survives_one() {
     );
     let broken = chain(vec![vec![bad]]);
     let ssa = SsaForm::compute(&broken, &DominatorTree::compute(&broken));
-    let memory: Memory = MemorySSA::compute(&broken, &ExactMemoryAlias);
+    let memory: Memory = MemorySsa::compute(&broken, &ExactMemoryAlias);
     let mut scratch = MemoryValueFlowScratch::new();
     let error = MemoryValueFlow::compute_in(&mut scratch, &memory, &ssa)
         .map(|_| ())
@@ -445,7 +445,7 @@ fn flow_errors_are_ordinary_errors_and_a_scratch_survives_one() {
         Inst::load(0, 2),
     ]]);
     let ssa = SsaForm::compute(&good, &DominatorTree::compute(&good));
-    let memory: Memory = MemorySSA::compute(&good, &ExactMemoryAlias);
+    let memory: Memory = MemorySsa::compute(&good, &ExactMemoryAlias);
     let reused = MemoryValueFlow::compute_in(&mut scratch, &memory, &ssa).unwrap();
     assert_eq!(reused, MemoryValueFlow::compute(&memory, &ssa).unwrap());
 }

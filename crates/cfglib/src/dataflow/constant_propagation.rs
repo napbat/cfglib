@@ -19,10 +19,10 @@ use alloc::collections::BTreeMap;
 use super::cfg_view::CfgView;
 use super::edge_fixpoint::{self, EdgeProblem};
 use super::fixpoint::{Direction, Facts};
-use crate::InstrInfo;
 use crate::block::BlockId;
 use crate::dataflow::unwind::{replay_block, unwind_departure};
 use crate::graph::edge_view::EdgeRef;
+use crate::{InstrInfo, VariableId};
 
 /// The lattice value for a single variable, over constant domain `C`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -127,7 +127,7 @@ pub trait ConstantFolder: InstrInfo {
     /// The default answers `None`, which leaves every outgoing edge of the
     /// block executable. Only
     /// [`SccpAnalysis`](crate::SccpAnalysis) reads this hook; the
-    /// unconditional [`constant_propagation`] solve ignores it.
+    /// unconditional [`ConstantPropagation`] solve ignores it.
     fn fold_branch(&self, known: &BTreeMap<Self::Variable, Self::Const>) -> Option<bool> {
         let _ = known;
         None
@@ -262,19 +262,43 @@ where
     }
 }
 
-/// Run constant propagation on the CFG.
+/// The constants known at the entry and the exit of every block.
 ///
-/// Blocks unreachable from the entry keep empty facts and contribute
-/// nothing to the blocks they branch to. A block's entry fact meets every
-/// incoming edge, and an unwind edge carries only the constants known
-/// before its source's throwing instructions.
-#[must_use]
-pub fn constant_propagation<G>(cfg: &G) -> Facts<InstFact<G::Inst>>
-where
-    G: CfgView,
-    G::Inst: ConstantFolder,
-{
-    edge_fixpoint::solve_reachable(cfg, &ConstPropProblem).into_block_facts()
+/// Built by [`compute`](Self::compute).
+#[derive(Debug, Clone)]
+pub struct ConstantPropagation<V, C> {
+    inner: Facts<ConstFact<V, C>>,
+}
+
+impl<V: VariableId, C: Clone + Eq> ConstantPropagation<V, C> {
+    /// Run constant propagation on the CFG.
+    ///
+    /// Blocks unreachable from the entry keep empty facts and contribute
+    /// nothing to the blocks they branch to. A block's entry fact meets
+    /// every incoming edge, and an unwind edge carries only the constants
+    /// known before its source's throwing instructions.
+    #[must_use]
+    pub fn compute<G>(cfg: &G) -> Self
+    where
+        G: CfgView,
+        G::Inst: ConstantFolder<Variable = V, Const = C>,
+    {
+        Self {
+            inner: edge_fixpoint::solve_reachable(cfg, &ConstPropProblem).into_block_facts(),
+        }
+    }
+
+    /// The constants known when `block` is entered.
+    #[must_use]
+    pub fn fact_in(&self, block: BlockId) -> &ConstFact<V, C> {
+        self.inner.fact_in(block)
+    }
+
+    /// The constants known after `block` completes normally.
+    #[must_use]
+    pub fn fact_out(&self, block: BlockId) -> &ConstFact<V, C> {
+        self.inner.fact_out(block)
+    }
 }
 
 #[cfg(test)]
@@ -382,7 +406,7 @@ mod tests {
             .push(df_use("use0", 0));
         cfg.add_edge(cfg.entry(), exit, EdgeKind::Fallthrough);
 
-        let result = constant_propagation(&cfg);
+        let result = ConstantPropagation::compute(&cfg);
         let fact_out = result.fact_out(cfg.entry());
         assert_eq!(fact_out.get(&0), Some(&ConstValue::Const(42)));
     }
@@ -402,7 +426,7 @@ mod tests {
             },
         ]);
 
-        let result = constant_propagation(&cfg);
+        let result = ConstantPropagation::compute(&cfg);
         let out = result.fact_out(cfg.entry());
         assert_eq!(out.get(&1), Some(&ConstValue::Const(9)));
         assert_eq!(
@@ -420,7 +444,7 @@ mod tests {
             .instructions_mut()
             .push(df_def("generic_def", 0));
 
-        let result = constant_propagation(&cfg);
+        let result = ConstantPropagation::compute(&cfg);
         let fact_out = result.fact_out(cfg.entry());
         assert_eq!(fact_out.get(&0), Some(&ConstValue::Bottom));
     }
@@ -436,7 +460,7 @@ mod tests {
             ud_inst(&[1], &[3], Fold::Copy(1)),
         ]);
 
-        let result = constant_propagation(&cfg);
+        let result = ConstantPropagation::compute(&cfg);
         let out = result.fact_out(cfg.entry());
         assert_eq!(out.get(&0), Some(&ConstValue::Bottom));
         assert_eq!(out.get(&1), Some(&ConstValue::Const(7)));
@@ -459,7 +483,7 @@ mod tests {
     fn a_handler_sees_the_constant_before_a_faulting_load() {
         let (cfg, normal, handler) = prior_then_region([df_throwing(df_const("load", 0, 2))]);
 
-        let result = constant_propagation(&cfg);
+        let result = ConstantPropagation::compute(&cfg);
         assert_eq!(result.fact_in(handler).get(&0), Some(&ConstValue::Const(1)));
         assert_eq!(result.fact_in(normal).get(&0), Some(&ConstValue::Const(2)));
     }
@@ -473,7 +497,7 @@ mod tests {
             df_const("final value", 0, 3),
         ]);
 
-        let result = constant_propagation(&cfg);
+        let result = ConstantPropagation::compute(&cfg);
         assert_eq!(
             result.fact_in(handler).get(&0),
             Some(&ConstValue::Bottom),

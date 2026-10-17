@@ -12,7 +12,7 @@ use crate::union_find::DisjointSet;
 
 use super::MemoryClassId;
 
-/// Every buffer [`MemorySSA::compute_in`](super::MemorySSA::compute_in)
+/// Every buffer [`MemorySsa::compute_in`](super::MemorySsa::compute_in)
 /// fills, owned by the caller.
 ///
 /// Memory SSA is three analyses in a trench coat: it traces the procedure's
@@ -44,7 +44,7 @@ use super::MemoryClassId;
 /// # Examples
 ///
 /// ```
-/// use cfglib::{Cfg, ExactMemoryAlias, MemorySSA, MemorySsaScratch};
+/// use cfglib::{Cfg, ExactMemoryAlias, MemorySsa, MemorySsaScratch};
 /// # use cfglib::{InstrInfo, MemoryAccess, MemoryEvent, MemoryEventInfo};
 /// # #[derive(Clone)]
 /// # struct Inst(Vec<MemoryEvent<u32, u8, ()>>);
@@ -65,8 +65,8 @@ use super::MemoryClassId;
 ///     .push(Inst(vec![MemoryEvent::Access(MemoryAccess::write(7, [1]))]));
 ///
 /// let mut scratch = MemorySsaScratch::new();
-/// let memory: MemorySSA<u32, u8, ()> =
-///     MemorySSA::compute_in(&mut scratch, &cfg, &ExactMemoryAlias);
+/// let memory: MemorySsa<u32, u8, ()> =
+///     MemorySsa::compute_in(&mut scratch, &cfg, &ExactMemoryAlias);
 /// assert_eq!(memory.events().len(), 1);
 /// ```
 #[derive(Debug)]

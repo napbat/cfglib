@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cfglib::{ConstValue, DominatorTree, SccpAnalysis, SsaForm, SsaValue, constant_propagation};
+use cfglib::{ConstValue, ConstantPropagation, DominatorTree, SccpAnalysis, SsaForm, SsaValue};
 
 use crate::check::{assert_same_behavior, assert_well_formed, block_holding};
 use crate::interp::{Inputs, Termination, input_vectors, run, run_ssa};
@@ -89,7 +89,7 @@ fn sccp_constants_hold_in_every_execution_and_every_executed_value_was_visited()
 #[test]
 fn constant_propagation_facts_hold_at_every_block_boundary_of_every_execution() {
     for case in corpus() {
-        let facts = constant_propagation(&case.cfg);
+        let facts = ConstantPropagation::compute(&case.cfg);
         for inputs in input_vectors(case.inputs) {
             let (_, trace) = run(&case.cfg, &inputs);
             let boundaries = trace

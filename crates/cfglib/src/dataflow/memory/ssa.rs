@@ -228,7 +228,7 @@ impl MemoryPhi {
 
 /// One memory event annotated with its alias class and SSA states.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MemorySSAEvent<L, V, F> {
+pub struct MemorySsaEvent<L, V, F> {
     site: MemoryEventSite,
     event: MemoryEvent<L, V, F>,
     class: Option<MemoryClassId>,
@@ -237,7 +237,7 @@ pub struct MemorySSAEvent<L, V, F> {
     clobbered_version: Option<MemorySsaValue>,
 }
 
-impl<L, V, F> MemorySSAEvent<L, V, F> {
+impl<L, V, F> MemorySsaEvent<L, V, F> {
     /// Source identity of this event.
     #[must_use]
     pub const fn site(&self) -> MemoryEventSite {
@@ -280,7 +280,7 @@ impl<L, V, F> MemorySSAEvent<L, V, F> {
     /// Prior memory state replaced by a write or read/modify/write.
     ///
     /// A blind write structurally clobbers this state but does not semantically
-    /// read it; it therefore does not appear in [`MemorySSA::users`].
+    /// read it; it therefore does not appear in [`MemorySsa::users`].
     #[must_use]
     pub const fn clobbered_version(&self) -> Option<&MemorySsaValue> {
         self.clobbered_version.as_ref()
@@ -381,7 +381,7 @@ impl<L, V, F> MemorySSAEvent<L, V, F> {
 /// defines a new one, and a read/modify/write does both.
 ///
 /// Events retain their exact reported locations and native address inputs;
-/// [`MemorySSAEvent::ssa_address_uses`] connects those inputs to ordinary SSA.
+/// [`MemorySsaEvent::ssa_address_uses`] connects those inputs to ordinary SSA.
 /// Location precision is therefore defined by the adapter. A whole object or
 /// region remains sound but produces correspondingly conservative def-use
 /// chains.
@@ -389,10 +389,10 @@ impl<L, V, F> MemorySSAEvent<L, V, F> {
 /// Fence events remain ordered and queryable but do not define memory values:
 /// their cross-thread happens-before meaning is consumer-specific.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MemorySSA<L, V, F> {
+pub struct MemorySsa<L, V, F> {
     classes: Vec<MemoryLocationClass<L>>,
     class_by_location: BTreeMap<L, MemoryClassId>,
-    events: Vec<MemorySSAEvent<L, V, F>>,
+    events: Vec<MemorySsaEvent<L, V, F>>,
     event_by_site: BTreeMap<MemoryEventSite, usize>,
     events_by_point: BTreeMap<ProgramPoint, Range<usize>>,
     phis: Vec<MemoryPhi>,
@@ -401,7 +401,7 @@ pub struct MemorySSA<L, V, F> {
     users: BTreeMap<MemorySsaValue, Vec<MemoryUse>>,
 }
 
-impl<L, V, F> MemorySSA<L, V, F>
+impl<L, V, F> MemorySsa<L, V, F>
 where
     L: Clone + Ord,
     V: VariableId,
@@ -489,13 +489,13 @@ where
 
     /// Every event in stable CFG, instruction, and semantic-event order.
     #[must_use]
-    pub fn events(&self) -> &[MemorySSAEvent<L, V, F>] {
+    pub fn events(&self) -> &[MemorySsaEvent<L, V, F>] {
         &self.events
     }
 
     /// Events emitted by one source instruction.
     #[must_use]
-    pub fn events_at(&self, point: ProgramPoint) -> &[MemorySSAEvent<L, V, F>] {
+    pub fn events_at(&self, point: ProgramPoint) -> &[MemorySsaEvent<L, V, F>] {
         self.events_by_point
             .get(&point)
             .map_or(&[], |range| &self.events[range.clone()])
@@ -505,7 +505,7 @@ where
     pub fn events_for<'a>(
         &'a self,
         location: &'a L,
-    ) -> impl Iterator<Item = &'a MemorySSAEvent<L, V, F>> + 'a {
+    ) -> impl Iterator<Item = &'a MemorySsaEvent<L, V, F>> + 'a {
         let class = self.class_of(location);
         self.events
             .iter()
@@ -517,13 +517,13 @@ where
     pub fn operations_at(&self, point: ProgramPoint) -> MemoryOperations {
         self.events_at(point)
             .iter()
-            .map(MemorySSAEvent::operations)
+            .map(MemorySsaEvent::operations)
             .collect()
     }
 
     /// Looks up one event by its source identity.
     #[must_use]
-    pub fn event(&self, site: MemoryEventSite) -> Option<&MemorySSAEvent<L, V, F>> {
+    pub fn event(&self, site: MemoryEventSite) -> Option<&MemorySsaEvent<L, V, F>> {
         self.event_by_site
             .get(&site)
             .map(|&index| &self.events[index])
@@ -568,7 +568,7 @@ where
     /// Phi chains are expanded transitively and cycles are visited once.
     #[must_use]
     pub fn reaching_definitions(&self, site: MemoryEventSite) -> Vec<&MemoryDefinition> {
-        let Some(start) = self.event(site).and_then(MemorySSAEvent::read_version) else {
+        let Some(start) = self.event(site).and_then(MemorySsaEvent::read_version) else {
             return Vec::new();
         };
         let mut pending = vec![start.clone()];
@@ -606,7 +606,7 @@ where
     /// sorted and deduplicated.
     #[must_use]
     pub fn transitive_readers(&self, site: MemoryEventSite) -> Vec<MemoryEventSite> {
-        let Some(start) = self.event(site).and_then(MemorySSAEvent::written_version) else {
+        let Some(start) = self.event(site).and_then(MemorySsaEvent::written_version) else {
             return Vec::new();
         };
         let mut pending = vec![start.clone()];
@@ -623,7 +623,7 @@ where
                         readers.insert(*reader);
                         if let Some(written) = self
                             .event(*reader)
-                            .and_then(MemorySSAEvent::written_version)
+                            .and_then(MemorySsaEvent::written_version)
                         {
                             pending.push(written.clone());
                         }
@@ -636,22 +636,22 @@ where
     }
 
     /// Events that semantically read memory.
-    pub fn reads(&self) -> impl Iterator<Item = &MemorySSAEvent<L, V, F>> {
+    pub fn reads(&self) -> impl Iterator<Item = &MemorySsaEvent<L, V, F>> {
         self.events.iter().filter(|entry| entry.reads())
     }
 
     /// Events that semantically write memory.
-    pub fn writes(&self) -> impl Iterator<Item = &MemorySSAEvent<L, V, F>> {
+    pub fn writes(&self) -> impl Iterator<Item = &MemorySsaEvent<L, V, F>> {
         self.events.iter().filter(|entry| entry.writes())
     }
 
     /// Compound read/modify/write events.
-    pub fn modifies(&self) -> impl Iterator<Item = &MemorySSAEvent<L, V, F>> {
+    pub fn modifies(&self) -> impl Iterator<Item = &MemorySsaEvent<L, V, F>> {
         self.events.iter().filter(|entry| entry.modifies())
     }
 
     /// Fence events in stable structural order.
-    pub fn fences(&self) -> impl Iterator<Item = &MemorySSAEvent<L, V, F>> {
+    pub fn fences(&self) -> impl Iterator<Item = &MemorySsaEvent<L, V, F>> {
         self.events.iter().filter(|entry| entry.is_fence())
     }
 
@@ -759,7 +759,7 @@ where
                 let output = renamed.defs().first().cloned();
                 let reads = entry.event().reads();
                 let writes = entry.event().writes();
-                let event = MemorySSAEvent {
+                let event = MemorySsaEvent {
                     site: MemoryEventSite::new(entry.point(), entry.event_index()),
                     event: entry.event().clone(),
                     class: source.class,
@@ -810,7 +810,7 @@ struct Chains {
 
 /// Every event of a memory SSA, with the two indexes that find one.
 struct EventTable<L, V, F> {
-    events: Vec<MemorySSAEvent<L, V, F>>,
+    events: Vec<MemorySsaEvent<L, V, F>>,
     by_site: BTreeMap<MemoryEventSite, usize>,
     by_point: BTreeMap<ProgramPoint, Range<usize>>,
 }

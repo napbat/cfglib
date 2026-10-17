@@ -23,7 +23,7 @@ mod allocation;
 mod fixtures;
 
 use cfglib::{
-    Cfg, DominanceFrontiers, DominatorScratch, DominatorTree, ExactMemoryAlias, MemorySSA,
+    Cfg, DominanceFrontiers, DominatorScratch, DominatorTree, ExactMemoryAlias, MemorySsa,
     MemorySsaScratch, MemoryTrace, MemoryValueFlow, MemoryValueFlowScratch, PhiPlacements, SsaForm,
     SsaScratch, TraversalDirection, reverse_postorder,
 };
@@ -68,7 +68,7 @@ impl Cases<'_> {
         let cfg = &subject.cfg;
         let dominators = DominatorTree::compute(cfg);
         let ssa = SsaForm::compute(cfg, &dominators);
-        let memory: MemorySSA<Slot, u32, ()> = MemorySSA::compute(cfg, &ExactMemoryAlias);
+        let memory: MemorySsa<Slot, u32, ()> = MemorySsa::compute(cfg, &ExactMemoryAlias);
 
         self.run(subject, "reverse-postorder", || {
             reverse_postorder(cfg, cfg.entry(), TraversalDirection::Outgoing)
@@ -93,11 +93,11 @@ impl Cases<'_> {
             MemoryTrace::<Slot, u32, ()>::compute(cfg)
         });
         self.run(subject, "memory-ssa", || {
-            MemorySSA::<Slot, u32, ()>::compute(cfg, &ExactMemoryAlias)
+            MemorySsa::<Slot, u32, ()>::compute(cfg, &ExactMemoryAlias)
         });
         let mut memory_scratch = MemorySsaScratch::new();
         self.run(subject, "memory-ssa-in", || {
-            MemorySSA::<Slot, u32, ()>::compute_in(&mut memory_scratch, cfg, &ExactMemoryAlias)
+            MemorySsa::<Slot, u32, ()>::compute_in(&mut memory_scratch, cfg, &ExactMemoryAlias)
         });
         self.run(subject, "memory-value-flow", || {
             MemoryValueFlow::compute(&memory, &ssa).expect("fixture events match their SSA form")

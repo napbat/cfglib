@@ -111,7 +111,7 @@ with `uv run --no-project python scripts/check_repository_policy.py`.
   `interference_graph`).
 - `*Result` names are reserved for types used in `Result` positions; plain
   outputs are named for what they are (`Facts`, `VerifyReport`,
-  `SccpAnalysis`, `CopyPropagationStats`). Error types end in `Error` and
+  `SccpAnalysis`, `PropagationStats`). Error types end in `Error` and
   implement `core::error::Error`.
 - Counting accessors use the `*_count` suffix (`block_count`, `edge_count`,
   `value_count`); do not introduce `num_*` names.

@@ -3,7 +3,7 @@
 
 use cfglib::{
     BlockId, ConservativeMemoryAlias, ExactMemoryAlias, MemoryAlias, MemoryDefinition,
-    MemoryEventSite, MemorySSA, ProgramPoint, index_paths_may_overlap,
+    MemoryEventSite, MemorySsa, ProgramPoint, index_paths_may_overlap,
 };
 
 use crate::machine::{Barrier, Inst, chain};
@@ -127,7 +127,7 @@ fn an_indexed_oracle_separates_constant_indices_unless_a_dynamic_one_bridges_the
         Inst::store(zero.clone(), 1),
         Inst::load(one.clone(), 2),
     ]]);
-    let memory: MemorySSA<Element, u8, Barrier> = MemorySSA::compute(&separate, &Indexed);
+    let memory: MemorySsa<Element, u8, Barrier> = MemorySsa::compute(&separate, &Indexed);
     assert_eq!(memory.classes().len(), 2);
     assert!(!memory.may_alias(&zero, &one));
     assert_eq!(
@@ -144,7 +144,7 @@ fn an_indexed_oracle_separates_constant_indices_unless_a_dynamic_one_bridges_the
         Inst::load(one.clone(), 2),
         Inst::load(any.clone(), 3),
     ]]);
-    let memory: MemorySSA<Element, u8, Barrier> = MemorySSA::compute(&bridged, &Indexed);
+    let memory: MemorySsa<Element, u8, Barrier> = MemorySsa::compute(&bridged, &Indexed);
     assert_eq!(memory.classes().len(), 1);
     assert!(memory.may_alias(&zero, &one));
     assert_eq!(
@@ -211,7 +211,7 @@ fn a_range_oracle_that_is_not_transitive_is_closed_into_classes() {
         Inst::store(apart, 4),
         Inst::store(other_object, 5),
     ]]);
-    let memory: MemorySSA<Bytes, u8, Barrier> = MemorySSA::compute(&cfg, &Overlapping);
+    let memory: MemorySsa<Bytes, u8, Barrier> = MemorySsa::compute(&cfg, &Overlapping);
     assert!(
         memory.may_alias(&first, &third),
         "closed through the middle range"
@@ -242,12 +242,12 @@ fn the_two_stock_oracles_are_one_class_per_location_and_one_class_overall() {
         Inst::store(1, 2),
         Inst::store(2, 3),
     ]]);
-    let exact: MemorySSA<u8, u8, Barrier> = MemorySSA::compute(&cfg, &ExactMemoryAlias);
+    let exact: MemorySsa<u8, u8, Barrier> = MemorySsa::compute(&cfg, &ExactMemoryAlias);
     assert_eq!(exact.classes().len(), 3);
     assert!(exact.may_alias(&0, &0) && !exact.may_alias(&0, &1));
 
-    let conservative: MemorySSA<u8, u8, Barrier> =
-        MemorySSA::compute(&cfg, &ConservativeMemoryAlias);
+    let conservative: MemorySsa<u8, u8, Barrier> =
+        MemorySsa::compute(&cfg, &ConservativeMemoryAlias);
     assert_eq!(conservative.classes().len(), 1);
     assert_eq!(conservative.classes()[0].locations(), [0, 1, 2]);
     assert!(conservative.may_alias(&0, &2));
@@ -258,7 +258,7 @@ fn an_asymmetric_oracle_is_symmetrized() {
     // The oracle only answers true in one direction; either direction merges.
     let one_way = |left: &u8, right: &u8| *left == 0 && *right == 1;
     let cfg = chain(vec![vec![Inst::store(1_u8, 1), Inst::store(0, 2)]]);
-    let memory: MemorySSA<u8, u8, Barrier> = MemorySSA::compute(&cfg, &one_way);
+    let memory: MemorySsa<u8, u8, Barrier> = MemorySsa::compute(&cfg, &one_way);
     assert!(memory.may_alias(&0, &1));
     assert!(memory.may_alias(&1, &0));
     assert_eq!(memory.classes().len(), 1);

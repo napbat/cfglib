@@ -12,7 +12,7 @@ use std::thread;
 
 use cfglib::{
     Cfg, DominatorScratch, DominatorTree, EdgeKind, ExactMemoryAlias, InstrInfo, MemoryAccess,
-    MemoryEvent, MemoryEventInfo, MemorySSA, MemorySsaScratch, MemoryValueFlow,
+    MemoryEvent, MemoryEventInfo, MemorySsa, MemorySsaScratch, MemoryValueFlow,
     MemoryValueFlowScratch, SsaForm, SsaScratch,
 };
 
@@ -69,7 +69,7 @@ struct FlowScratch {
 struct CallableAnalyses {
     dominators: DominatorTree,
     ssa: SsaForm<u16>,
-    memory: MemorySSA<Slot, u16, ()>,
+    memory: MemorySsa<Slot, u16, ()>,
     value_flow: MemoryValueFlow<u16>,
 }
 
@@ -78,7 +78,7 @@ impl FlowScratch {
     fn visit(&mut self, cfg: &Cfg<Instruction>) -> CallableAnalyses {
         let dominators = DominatorTree::compute_in(&mut self.dominators, cfg);
         let ssa = SsaForm::compute_in(&mut self.ssa, cfg, &dominators);
-        let memory = MemorySSA::compute_in(&mut self.memory, cfg, &ExactMemoryAlias);
+        let memory = MemorySsa::compute_in(&mut self.memory, cfg, &ExactMemoryAlias);
         let value_flow = MemoryValueFlow::compute_in(&mut self.value_flow, &memory, &ssa)
             .expect("the corpus adapter reports only variables its instructions expose");
         CallableAnalyses {
@@ -94,7 +94,7 @@ impl FlowScratch {
 fn allocating(cfg: &Cfg<Instruction>) -> CallableAnalyses {
     let dominators = DominatorTree::compute(cfg);
     let ssa = SsaForm::compute(cfg, &dominators);
-    let memory = MemorySSA::compute(cfg, &ExactMemoryAlias);
+    let memory = MemorySsa::compute(cfg, &ExactMemoryAlias);
     let value_flow = MemoryValueFlow::compute(&memory, &ssa)
         .expect("the corpus adapter reports only variables its instructions expose");
     CallableAnalyses {

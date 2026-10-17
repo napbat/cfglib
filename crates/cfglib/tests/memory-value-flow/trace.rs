@@ -3,7 +3,7 @@
 
 use cfglib::{
     BlockId, Cfg, DominatorTree, EdgeKind, MemoryAccess, MemoryAccessKind, MemoryAlias,
-    MemoryAtomicity, MemoryEvent, MemoryEventInfo, MemoryOperations, MemorySSA, MemoryTrace,
+    MemoryAtomicity, MemoryEvent, MemoryEventInfo, MemoryOperations, MemorySsa, MemoryTrace,
     ProgramPoint, SsaForm, SsaValue,
 };
 
@@ -348,7 +348,7 @@ fn address_dependencies_resolve_to_the_versions_the_instruction_reads() {
     let dominators = DominatorTree::compute(&cfg);
     let ssa = SsaForm::compute(&cfg, &dominators);
     let trace = MemoryTrace::compute(&cfg);
-    let memory: MemorySSA<&str, u8, Barrier> = MemorySSA::compute(&cfg, &cfglib::ExactMemoryAlias);
+    let memory: MemorySsa<&str, u8, Barrier> = MemorySsa::compute(&cfg, &cfglib::ExactMemoryAlias);
 
     let store = point(0, 3);
     let reads = ssa

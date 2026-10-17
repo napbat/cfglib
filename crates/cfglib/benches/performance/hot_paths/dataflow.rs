@@ -1,8 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use cfglib::{
-    BlockId, Cfg, ConstValue, DominatorTree, Facts, Graph, NodeFacts, PhiPlacements, SccpAnalysis,
-    SsaForm, SsaValue, ValueNumbering, constant_propagation, solve_node_problem, solve_problem,
+    BlockId, Cfg, ConstValue, ConstantPropagation, DominatorTree, Facts, Graph, NodeFacts,
+    PhiPlacements, SccpAnalysis, SsaForm, SsaValue, ValueNumbering, solve_node_problem,
+    solve_problem,
 };
 
 use super::NODE_COUNT;
@@ -139,8 +140,8 @@ fn register_constants(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "cfg_constprop_independent_constants",
-        || { constant_propagation(&constants) },
-        |result: &Facts<BTreeMap<u32, ConstValue<u64>>>| {
+        || { ConstantPropagation::compute(&constants) },
+        |result: &ConstantPropagation<u32, u64>| {
             assert!(result.fact_in(constants.entry()).is_empty());
             assert_eq!(result.fact_out(constants.entry()).len(), 1_024);
             for variable in 0..1_024_u32 {

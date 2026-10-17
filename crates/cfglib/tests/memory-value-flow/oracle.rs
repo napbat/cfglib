@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cfglib::{
-    BlockId, EdgeKind, MemoryDefinition, MemoryEvent, MemoryEventSite, MemorySSA, MemorySsaValue,
+    BlockId, EdgeKind, MemoryDefinition, MemoryEvent, MemoryEventSite, MemorySsa, MemorySsaValue,
     ProgramPoint,
 };
 
@@ -168,7 +168,7 @@ impl<L: Clone + Ord> Reaching<L> {
 
 /// The concrete definitions a memory-SSA value can hold: its own producer,
 /// or, for a phi, those of every operand, each followed once.
-pub fn expand<L, V, F>(memory: &MemorySSA<L, V, F>, value: &MemorySsaValue) -> BTreeSet<Def<L>>
+pub fn expand<L, V, F>(memory: &MemorySsa<L, V, F>, value: &MemorySsaValue) -> BTreeSet<Def<L>>
 where
     L: Clone + Ord,
     V: cfglib::VariableId,

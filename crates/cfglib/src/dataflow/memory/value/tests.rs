@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 
 use crate::{
     Cfg, DominatorTree, EdgeKind, ExactMemoryAlias, InstrInfo, MemoryAccess, MemoryEvent,
-    MemoryEventInfo, MemoryEventSite, MemorySSA, ProgramPoint, SsaForm, SsaValue,
+    MemoryEventInfo, MemoryEventSite, MemorySsa, ProgramPoint, SsaForm, SsaValue,
 };
 
 use super::{
@@ -91,12 +91,12 @@ fn analyses(
     cfg: &Cfg<Instruction>,
 ) -> (
     SsaForm<u8>,
-    MemorySSA<Location, u8, Fence>,
+    MemorySsa<Location, u8, Fence>,
     MemoryValueFlow<u8>,
 ) {
     let dominators = DominatorTree::compute(cfg);
     let ssa = SsaForm::compute(cfg, &dominators);
-    let memory = MemorySSA::compute(cfg, &ExactMemoryAlias);
+    let memory = MemorySsa::compute(cfg, &ExactMemoryAlias);
     let flow = MemoryValueFlow::compute(&memory, &ssa).unwrap();
     (ssa, memory, flow)
 }
@@ -475,7 +475,7 @@ fn invalid_event_variables_report_their_semantic_role() {
     ));
     let dominators = DominatorTree::compute(&cfg);
     let ssa = SsaForm::compute(&cfg, &dominators);
-    let memory = MemorySSA::compute(&cfg, &ExactMemoryAlias);
+    let memory = MemorySsa::compute(&cfg, &ExactMemoryAlias);
 
     let Err(error) = MemoryValueFlow::compute(&memory, &ssa) else {
         panic!("the undeclared stored value must be rejected");
@@ -563,7 +563,7 @@ fn one_scratch_reused_down_a_sequence_computes_the_allocating_answer() {
         for cfg in &sequence {
             let dominators = DominatorTree::compute(cfg);
             let ssa = SsaForm::compute(cfg, &dominators);
-            let memory: MemorySSA<Location, u8, Fence> = MemorySSA::compute(cfg, &ExactMemoryAlias);
+            let memory: MemorySsa<Location, u8, Fence> = MemorySsa::compute(cfg, &ExactMemoryAlias);
             assert_eq!(
                 MemoryValueFlow::compute_in(&mut scratch, &memory, &ssa),
                 MemoryValueFlow::compute(&memory, &ssa),
@@ -589,12 +589,12 @@ fn a_reused_scratch_reports_the_same_error_after_a_valid_procedure() {
     let mut scratch = MemoryValueFlowScratch::new();
     let dominators = DominatorTree::compute(&valid);
     let ssa = SsaForm::compute(&valid, &dominators);
-    let memory: MemorySSA<Location, u8, Fence> = MemorySSA::compute(&valid, &ExactMemoryAlias);
+    let memory: MemorySsa<Location, u8, Fence> = MemorySsa::compute(&valid, &ExactMemoryAlias);
     assert!(MemoryValueFlow::compute_in(&mut scratch, &memory, &ssa).is_ok());
 
     let dominators = DominatorTree::compute(&invalid);
     let ssa = SsaForm::compute(&invalid, &dominators);
-    let memory: MemorySSA<Location, u8, Fence> = MemorySSA::compute(&invalid, &ExactMemoryAlias);
+    let memory: MemorySsa<Location, u8, Fence> = MemorySsa::compute(&invalid, &ExactMemoryAlias);
     assert_eq!(
         MemoryValueFlow::compute_in(&mut scratch, &memory, &ssa),
         MemoryValueFlow::compute(&memory, &ssa)
@@ -609,7 +609,7 @@ fn a_reused_scratch_reports_the_same_error_after_a_valid_procedure() {
 
     let dominators = DominatorTree::compute(&valid);
     let ssa = SsaForm::compute(&valid, &dominators);
-    let memory: MemorySSA<Location, u8, Fence> = MemorySSA::compute(&valid, &ExactMemoryAlias);
+    let memory: MemorySsa<Location, u8, Fence> = MemorySsa::compute(&valid, &ExactMemoryAlias);
     assert_eq!(
         MemoryValueFlow::compute_in(&mut scratch, &memory, &ssa),
         MemoryValueFlow::compute(&memory, &ssa)
@@ -628,7 +628,7 @@ fn the_public_accessors_agree_across_a_reused_scratch() {
 
     let dominators = DominatorTree::compute(&cfg);
     let ssa = SsaForm::compute(&cfg, &dominators);
-    let memory: MemorySSA<Location, u8, Fence> = MemorySSA::compute(&cfg, &ExactMemoryAlias);
+    let memory: MemorySsa<Location, u8, Fence> = MemorySsa::compute(&cfg, &ExactMemoryAlias);
     let computed = MemoryValueFlow::compute_in(&mut scratch, &memory, &ssa).unwrap();
     let expected = MemoryValueFlow::compute(&memory, &ssa).unwrap();
 

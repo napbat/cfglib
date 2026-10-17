@@ -11,7 +11,7 @@ use smallvec::SmallVec;
 use crate::memory::MemoryAccess;
 use crate::{BlockId, Graph, NodeId, SsaForm, SsaInstruction, SsaValue, SsaVersion, VariableId};
 
-use super::{MemoryEventSite, MemorySSA, MemorySsaValue};
+use super::{MemoryEventSite, MemorySsa, MemorySsaValue};
 
 /// One node in the combined ordinary-value and memory-state dependency graph.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -241,7 +241,7 @@ fn version_node(
 ///
 /// ```
 /// use cfglib::{
-///     Cfg, DominatorTree, ExactMemoryAlias, MemorySSA, MemoryValueFlow, MemoryValueFlowScratch,
+///     Cfg, DominatorTree, ExactMemoryAlias, MemorySsa, MemoryValueFlow, MemoryValueFlowScratch,
 ///     SsaForm,
 /// };
 /// # use cfglib::{InstrInfo, MemoryAccess, MemoryEvent, MemoryEventInfo};
@@ -266,7 +266,7 @@ fn version_node(
 /// ));
 /// let dominators = DominatorTree::compute(&cfg);
 /// let ssa = SsaForm::compute(&cfg, &dominators);
-/// let memory: MemorySSA<u32, u8, ()> = MemorySSA::compute(&cfg, &ExactMemoryAlias);
+/// let memory: MemorySsa<u32, u8, ()> = MemorySsa::compute(&cfg, &ExactMemoryAlias);
 ///
 /// let mut scratch = MemoryValueFlowScratch::new();
 /// let flow = MemoryValueFlow::compute_in(&mut scratch, &memory, &ssa).unwrap();
@@ -350,7 +350,7 @@ where
     /// instruction's uses, or declares a loaded variable outside its
     /// definitions.
     pub fn compute<L, F>(
-        memory: &MemorySSA<L, V, F>,
+        memory: &MemorySsa<L, V, F>,
         ssa: &SsaForm<V>,
     ) -> Result<Self, MemoryValueFlowError<V>>
     where
@@ -373,7 +373,7 @@ where
     /// The same as [`compute`](Self::compute).
     pub fn compute_in<L, F>(
         scratch: &mut MemoryValueFlowScratch<V>,
-        memory: &MemorySSA<L, V, F>,
+        memory: &MemorySsa<L, V, F>,
         ssa: &SsaForm<V>,
     ) -> Result<Self, MemoryValueFlowError<V>>
     where
@@ -502,7 +502,7 @@ where
 
     /// Adds every memory-state node a phi or a class's live-in makes, and the
     /// phi edges between them.
-    fn add_memory_states<L, F>(&mut self, memory: &MemorySSA<L, V, F>)
+    fn add_memory_states<L, F>(&mut self, memory: &MemorySsa<L, V, F>)
     where
         L: Clone + Ord,
         F: Clone + Eq,
@@ -534,7 +534,7 @@ where
     fn add_events<L, F>(
         &mut self,
         scratch: &mut MemoryValueFlowScratch<V>,
-        memory: &MemorySSA<L, V, F>,
+        memory: &MemorySsa<L, V, F>,
         ssa: &SsaForm<V>,
     ) -> Result<(), MemoryValueFlowError<V>>
     where

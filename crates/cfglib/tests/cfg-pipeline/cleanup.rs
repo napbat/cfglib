@@ -162,7 +162,7 @@ fn copy_propagation_collapses_a_copy_chain_to_its_source() {
     let mut cfg = case.cfg.clone();
     let stats = copy_propagation(&mut cfg);
     assert_eq!(stats.uses_rewritten, 4);
-    assert_eq!(stats.copies_removed, 3);
+    assert_eq!(stats.instructions_removed, 3);
     let entry = cfg.block(cfg.entry()).instructions();
     assert_eq!(entry.last().expect("the return remains").uses, [Var("t")]);
     assert!(entry.iter().all(|inst| inst.op != Op::Copy));
@@ -173,7 +173,7 @@ fn copy_propagation_leaves_a_copy_whose_source_the_loop_redefines() {
     let case = program("loop_carried_copy");
     let mut cfg = case.cfg.clone();
     let stats = copy_propagation(&mut cfg);
-    assert_eq!((stats.uses_rewritten, stats.copies_removed), (0, 0));
+    assert_eq!((stats.uses_rewritten, stats.instructions_removed), (0, 0));
     assert_eq!(cfg, case.cfg);
 }
 
@@ -182,11 +182,11 @@ fn alias_propagation_forwards_parallel_copy_pairs_that_copy_propagation_ignores(
     let case = program("single_definition_parallel_copy");
     let mut copied = case.cfg.clone();
     let stats = copy_propagation(&mut copied);
-    assert_eq!((stats.uses_rewritten, stats.copies_removed), (0, 0));
+    assert_eq!((stats.uses_rewritten, stats.instructions_removed), (0, 0));
 
     let mut aliased = case.cfg.clone();
     let stats = alias_propagation(&mut aliased);
-    assert_eq!((stats.uses_rewritten, stats.aliases_removed), (2, 1));
+    assert_eq!((stats.uses_rewritten, stats.instructions_removed), (2, 1));
     let entry = aliased.block(aliased.entry()).instructions();
     assert_eq!(entry[0].op, Op::Add);
     assert_eq!(entry[0].uses, [Var("a"), Var("b")]);
@@ -198,7 +198,7 @@ fn copy_propagation_forwards_a_copy_to_both_arms_of_a_diamond_and_past_the_join(
     let mut cfg = case.cfg.clone();
     let stats = copy_propagation(&mut cfg);
     // The four readers of `v` are the comparison, both arms, and the return.
-    assert_eq!((stats.uses_rewritten, stats.copies_removed), (4, 1));
+    assert_eq!((stats.uses_rewritten, stats.instructions_removed), (4, 1));
     assert!(
         cfg.blocks()
             .flat_map(BasicBlock::instructions)
@@ -212,7 +212,7 @@ fn copy_propagation_forwards_a_copy_of_an_input_into_a_loop() {
     let case = program("input_copy_read_in_loop");
     let mut cfg = case.cfg.clone();
     let stats = copy_propagation(&mut cfg);
-    assert_eq!((stats.uses_rewritten, stats.copies_removed), (1, 1));
+    assert_eq!((stats.uses_rewritten, stats.instructions_removed), (1, 1));
     assert!(
         cfg.blocks()
             .flat_map(BasicBlock::instructions)
@@ -228,11 +228,14 @@ fn copy_propagation_with_exits_keeps_a_copy_whose_destination_leaves_the_functio
     let mut handed_on = cfg.clone();
 
     let stats = copy_propagation(&mut cfg);
-    assert_eq!(stats.copies_removed, 1, "nothing inside reads the copy");
+    assert_eq!(
+        stats.instructions_removed, 1,
+        "nothing inside reads the copy"
+    );
 
     let stats = copy_propagation_with_exits(&mut handed_on, |_| vec![Var("result")]);
     assert_eq!(
-        stats.copies_removed, 0,
+        stats.instructions_removed, 0,
         "the caller reads it after the return"
     );
     assert_eq!(handed_on.block(handed_on.entry()).instructions().len(), 1);

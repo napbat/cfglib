@@ -1,4 +1,4 @@
-//! `MemorySSA`: versions, clobbers, phis at joins, unwind points, fences,
+//! `MemorySsa`: versions, clobbers, phis at joins, unwind points, fences,
 //! atomicity, and its queries, on hand-derived programs and on random ones
 //! against the reaching-store exploration.
 
@@ -6,14 +6,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cfglib::{
     BlockId, Cfg, ConservativeMemoryAlias, EdgeKind, ExactMemoryAlias, MemoryAccess,
-    MemoryAtomicity, MemoryDefinition, MemoryEvent, MemoryEventSite, MemoryOperations, MemorySSA,
+    MemoryAtomicity, MemoryDefinition, MemoryEvent, MemoryEventSite, MemoryOperations, MemorySsa,
     MemoryUse, ProgramPoint, SsaValue,
 };
 
 use crate::machine::{Barrier, Inst, Program, Rng, chain, diamond};
 use crate::oracle::{Def, Reaching, alias_classes, expand, explore};
 
-type Memory = MemorySSA<u8, u8, Barrier>;
+type Memory = MemorySsa<u8, u8, Barrier>;
 
 fn point(block: usize, inst_idx: usize) -> ProgramPoint {
     ProgramPoint {
@@ -27,7 +27,7 @@ fn site(block: usize, inst_idx: usize) -> MemoryEventSite {
 }
 
 fn exact(cfg: &Cfg<Inst<u8>>) -> Memory {
-    MemorySSA::compute(cfg, &ExactMemoryAlias)
+    MemorySsa::compute(cfg, &ExactMemoryAlias)
 }
 
 #[test]
@@ -470,7 +470,7 @@ fn events_are_grouped_by_instruction_and_by_alias_class() {
     );
     assert_eq!(memory.operations_at(point(0, 2)), MemoryOperations::READ);
 
-    let merged: Memory = MemorySSA::compute(&cfg, &ConservativeMemoryAlias);
+    let merged: Memory = MemorySsa::compute(&cfg, &ConservativeMemoryAlias);
     assert_eq!(
         merged.events_for(&0).count(),
         4,
@@ -519,7 +519,7 @@ fn memory_ssa_matches_the_reaching_store_exploration_on_random_programs() {
             1 => &|left, right| left.abs_diff(*right) <= 1,
             _ => &|left, right| left % 2 == right % 2,
         };
-        let memory: Memory = MemorySSA::compute(&cfg, &relation);
+        let memory: Memory = MemorySsa::compute(&cfg, &relation);
         let locations = program.accessed_locations();
         let representative = alias_classes(&locations, relation);
         let reaching = explore(&program, &representative);

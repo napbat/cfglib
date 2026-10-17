@@ -419,7 +419,7 @@ mod tests {
     use super::*;
 
     use crate::cfg::Cfg;
-    use crate::dataflow::constant_propagation::constant_propagation;
+    use crate::dataflow::constant_propagation::ConstantPropagation;
     use crate::flow::FlowEffect;
     use crate::graph::dominator::DominatorTree;
     use crate::test_util::{DfInst, df_const, df_def, df_ff, df_pred, df_use, df_with_effect};
@@ -515,7 +515,7 @@ mod tests {
     #[test]
     fn the_dense_solver_meets_through_the_same_hook() {
         let (cfg, merge) = signed_merge();
-        let result = constant_propagation(&cfg);
+        let result = ConstantPropagation::compute(&cfg);
 
         assert_eq!(
             result.fact_in(merge).get(&0),

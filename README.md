@@ -370,7 +370,7 @@ The contract has two rules. `instructions` accepts every identity that `node_ids
 
 The view has no separate exception model. An edge of kind `EdgeKind::ExceptionUnwind` leaves its source block before a throwing instruction. `InstrInfo::may_unwind` marks the throwing instructions of a block. `departs_before_throws` combines the two.
 
-These analyses take `&G` where `G: CfgView`: `ReachingDefs`, `Liveness`, `DefUseChains`, `SsaForm`, `PhiPlacements`, `constant_propagation`, `SccpAnalysis`, `abstract_interpret`, `MemoryTrace`, `MemorySSA`, `DeadCode`, `recover_expressions`, `ValueNumbering`, `BlockValueNumbers`, `cfg_purity`, `CfgMetrics`, `detect_cfg_patterns`, `CfgProfile`, `detect_tail_calls`, and `detect_switch_tables`. The problems `LivenessProblem`, `SeededLivenessProblem`, `ReachingDefsProblem`, and `ConstPropProblem` also run on every `CfgView`. A transform that edits the graph still takes `&mut Cfg`.
+These analyses take `&G` where `G: CfgView`: `ReachingDefs`, `Liveness`, `DefUseChains`, `SsaForm`, `PhiPlacements`, `ConstantPropagation`, `SccpAnalysis`, `AbstractFacts`, `MemoryTrace`, `MemorySsa`, `DeadCode`, `recover_expressions`, `ValueNumbering`, `BlockValueNumbers`, `cfg_purity`, `CfgMetrics`, `detect_cfg_patterns`, `CfgProfile`, `detect_tail_calls`, and `detect_switch_tables`. The problems `LivenessProblem`, `SeededLivenessProblem`, `ReachingDefsProblem`, and `ConstPropProblem` also run on every `CfgView`. A transform that edits the graph still takes `&mut Cfg`.
 
 | Analysis | Function / Type | Description |
 |---|---|---|
@@ -388,15 +388,15 @@ These analyses take `&G` where `G: CfgView`: `ReachingDefs`, `Liveness`, `DefUse
 | Phi placement | `PhiPlacements::compute` | Structural IDF phase for consumers that only need placement |
 | SSA deconstruction | `eliminate_phis`, `copies_by_predecessor` | φ-to-copy lowering |
 | Phi webs | `PhiWebs::compute` | Congruence classes for register coalescing |
-| Constant propagation | `constant_propagation`, `ConstantFolder` (associated `Const`) | Top/Const/Bottom lattice over a consumer constant domain — machine words, strings, bools, float bits; an unwind carries the constants known before each throwing instruction |
+| Constant propagation | `ConstantPropagation::compute`, `ConstantFolder` (associated `Const`) | Top/Const/Bottom lattice over a consumer constant domain — machine words, strings, bools, float bits; an unwind carries the constants known before each throwing instruction |
 | Sparse conditional constant propagation | `SccpAnalysis::compute` | SSA-based, marks unreachable edges |
-| Copy and value-alias propagation | `copy_propagation[_with_exits]`, `alias_propagation`, `CopySource` trait | Guarded chain resolution and dead transfer removal; pairwise aliases may refine types or metadata without changing runtime values. The `_with_exits` form keeps a copy whose definition is live at an exit — a function whose result is only ever a copy of an input otherwise loses the definition a caller reads back — while still rewriting that copy's readers inside the function. A transfer at or after a throwing instruction never substitutes into code its unwind reaches |
+| Copy and value-alias propagation | `copy_propagation[_with_exits]`, `alias_propagation[_with_exits]`, `PropagationStats`, `CopySource` trait | Guarded chain resolution and dead transfer removal; pairwise aliases may refine types or metadata without changing runtime values. The `_with_exits` form keeps a copy whose definition is live at an exit — a function whose result is only ever a copy of an input otherwise loses the definition a caller reads back — while still rewriting that copy's readers inside the function. A transfer at or after a throwing instruction never substitutes into code its unwind reaches |
 | Memory-event trace | `MemoryTrace::compute`, `MemoryEventInfo` trait | Ordered, location-typed reads, writes, read/modify/write accesses, address-variable dependencies, and fences; instruction summaries distinguish separate read+write from compound modification |
-| Reusable memory-SSA scratch | `MemorySSA::compute_in` + `MemorySsaScratch` | The same answer with the event trace, the alias merge, and the shadow CFG's dominator and SSA buffers caller-owned |
-| Memory SSA | `dataflow::memory::MemorySSA::compute`, `MemoryAlias` trait | Event-driven SSA per may-alias location class: loop/branch φ-nodes, reaching writes and clobbers, bidirectional def-use chains, transitive readers, and ordinary-SSA address inputs; an unwind observes the memory state before each throwing instruction |
+| Reusable memory-SSA scratch | `MemorySsa::compute_in` + `MemorySsaScratch` | The same answer with the event trace, the alias merge, and the shadow CFG's dominator and SSA buffers caller-owned |
+| Memory SSA | `dataflow::memory::MemorySsa::compute`, `MemoryAlias` trait | Event-driven SSA per may-alias location class: loop/branch φ-nodes, reaching writes and clobbers, bidirectional def-use chains, transitive readers, and ordinary-SSA address inputs; an unwind observes the memory state before each throwing instruction |
 | Reusable value-flow scratch | `MemoryValueFlow::compute_in` + `MemoryValueFlowScratch` | The same graph with the per-event address/stored/loaded resolution buffers caller-owned |
 | Memory value flow | `dataflow::memory::MemoryValueFlow::compute` | One graph over ordinary SSA values, versioned memory states, and exact events; typed address/store/read/write/load and ordinary/memory-phi edges retain the complete transfer path |
-| Abstract interpretation | `abstract_interpret`, `AbstractDomain` trait | Generic abstract domain framework on the edge-sensitive solver; an unwind carries the state before each throwing instruction |
+| Abstract interpretation | `AbstractFacts::compute`, `AbstractDomain` + `Lattice` traits | Generic abstract domain framework on the edge-sensitive solver; a domain supplies `bottom` and `meet` and a per-instruction transfer; an unwind carries the state before each throwing instruction |
 
 ### Higher-level analyses
 
@@ -502,7 +502,7 @@ InstrInfo<Variable = V>   (optional — native IR variables, defs/uses)
 ├── ValueNumberInfo       (value numbering, PRE — associated Operator)
 └── MemoryEventInfo       (locations, address uses, access kinds, and fences — associated Location, Fence)
 
-MemoryAlias<Location>     (optional may-alias oracle consumed by MemorySSA)
+MemoryAlias<Location>     (optional may-alias oracle consumed by MemorySsa)
 
 DisplayInstr              (rendering only — DOT and text)
 CallInfo                  (call graphs, explicit tail calls — associated Callee)
@@ -528,7 +528,7 @@ The `ir` traits follow the same rule. The consumer implements `ir::rtl::Function
 Directional `MemoryAccess::read`, `write`, and `read_modify_write`
 constructors keep loaded definitions, stored uses, and address uses distinct
 (`MemoryAccess::opaque` covers table-driven kinds with unknown values);
-events also retain exact locations, atomicity, and ordered fences. `MemorySSA`
+events also retain exact locations, atomicity, and ordered fences. `MemorySsa`
 in `dataflow::memory` merges locations through the caller-provided
 `MemoryAlias` relation, then exposes loop-correct reaching definitions,
 clobbered states, users, and transitive readers. `MemoryValueFlow` combines it

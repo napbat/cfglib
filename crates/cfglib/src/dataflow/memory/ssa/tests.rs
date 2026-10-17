@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use crate::test_util::{MemInst, protected_region};
 use crate::{
     Cfg, DominatorTree, EdgeKind, ExactMemoryAlias, MemoryAccess, MemoryAccessKind,
-    MemoryDefinition, MemoryEvent, MemoryEventSite, MemorySSA, MemorySSAEvent, MemorySsaScratch,
+    MemoryDefinition, MemoryEvent, MemoryEventSite, MemorySsa, MemorySsaEvent, MemorySsaScratch,
     MemoryUse, ProgramPoint, SsaForm,
 };
 
@@ -74,7 +74,7 @@ fn blind_writes_clobber_without_becoming_semantic_readers() {
         Instruction::access(Location::A, MemoryAccessKind::Write),
         Instruction::access(Location::A, MemoryAccessKind::Read),
     ]);
-    let memory = MemorySSA::compute(&cfg, &ExactMemoryAlias);
+    let memory = MemorySsa::compute(&cfg, &ExactMemoryAlias);
     let block = cfg.entry();
     let first_write = site(block, 0);
     let first_read = site(block, 1);
@@ -96,7 +96,7 @@ fn blind_writes_clobber_without_becoming_semantic_readers() {
 
     let first_version = memory
         .event(first_write)
-        .and_then(MemorySSAEvent::written_version)
+        .and_then(MemorySsaEvent::written_version)
         .unwrap();
     assert_eq!(
         memory.users(first_version),
@@ -111,7 +111,7 @@ fn exact_locations_have_independent_live_in_states() {
         Instruction::access(Location::A, MemoryAccessKind::Write),
         Instruction::access(Location::B, MemoryAccessKind::Read),
     ]);
-    let memory = MemorySSA::compute(&cfg, &ExactMemoryAlias);
+    let memory = MemorySsa::compute(&cfg, &ExactMemoryAlias);
     let read = site(cfg.entry(), 1);
 
     let Some(MemoryDefinition::LiveIn { class }) = memory.reaching_definition(read) else {
@@ -134,7 +134,7 @@ fn caller_alias_relation_is_symmetrized_and_closed_transitively() {
             (Location::A, Location::B) | (Location::B, Location::C)
         )
     };
-    let memory = MemorySSA::compute(&cfg, &alias);
+    let memory = MemorySsa::compute(&cfg, &alias);
 
     assert_eq!(memory.classes().len(), 1);
     assert!(memory.may_alias(&Location::A, &Location::C));
@@ -164,7 +164,7 @@ fn branch_merge_expands_memory_phi_to_both_writes() {
     cfg.block_mut(merge)
         .push(Instruction::access(Location::A, MemoryAccessKind::Read));
 
-    let memory = MemorySSA::compute(&cfg, &ExactMemoryAlias);
+    let memory = MemorySsa::compute(&cfg, &ExactMemoryAlias);
     let read = site(merge, 0);
     assert!(matches!(
         memory.reaching_definition(read),
@@ -198,7 +198,7 @@ fn loop_header_phi_retains_live_in_and_backedge_write() {
     cfg.block_mut(body)
         .push(Instruction::access(Location::A, MemoryAccessKind::Write));
 
-    let memory = MemorySSA::compute(&cfg, &ExactMemoryAlias);
+    let memory = MemorySsa::compute(&cfg, &ExactMemoryAlias);
     let definitions = memory.reaching_definitions(site(header, 0));
     assert_eq!(definitions.len(), 2);
     assert!(definitions.iter().any(|definition| matches!(
@@ -220,7 +220,7 @@ fn read_modify_write_links_both_sides_of_the_data_flow() {
         Instruction::access(Location::A, MemoryAccessKind::ReadModifyWrite),
         Instruction::access(Location::A, MemoryAccessKind::Read),
     ]);
-    let memory = MemorySSA::compute(&cfg, &ExactMemoryAlias);
+    let memory = MemorySsa::compute(&cfg, &ExactMemoryAlias);
     let block = cfg.entry();
     let write = site(block, 0);
     let modify = site(block, 1);
@@ -247,7 +247,7 @@ fn event_order_and_fences_remain_visible_without_changing_memory_state() {
         memory_access(Location::A, Vec::new(), MemoryAccessKind::Read),
     ]);
     let cfg = linear_cfg([instruction]);
-    let memory = MemorySSA::compute(&cfg, &ExactMemoryAlias);
+    let memory = MemorySsa::compute(&cfg, &ExactMemoryAlias);
     let point = ProgramPoint {
         block: cfg.entry(),
         inst_idx: 0,
@@ -282,7 +282,7 @@ fn address_dependencies_resolve_to_ordinary_ssa_values() {
     let cfg = linear_cfg([Instruction::plain(Vec::new(), vec![7]), read]);
     let dominators = DominatorTree::compute(&cfg);
     let values = SsaForm::compute(&cfg, &dominators);
-    let memory = MemorySSA::compute(&cfg, &ExactMemoryAlias);
+    let memory = MemorySsa::compute(&cfg, &ExactMemoryAlias);
     let event = memory.event(site(cfg.entry(), 1)).unwrap();
 
     assert_eq!(event.location(), Some(&Location::A));
@@ -330,11 +330,11 @@ fn one_scratch_reused_down_a_sequence_computes_the_allocating_answer() {
     // already at the sequence's high-water mark.
     for _ in 0..2 {
         for cfg in &sequence {
-            let computed: MemorySSA<Location, u8, Fence> =
-                MemorySSA::compute_in(&mut scratch, cfg, &ExactMemoryAlias);
+            let computed: MemorySsa<Location, u8, Fence> =
+                MemorySsa::compute_in(&mut scratch, cfg, &ExactMemoryAlias);
             assert_eq!(
                 computed,
-                MemorySSA::compute(cfg, &ExactMemoryAlias),
+                MemorySsa::compute(cfg, &ExactMemoryAlias),
                 "{} blocks",
                 cfg.block_count()
             );
@@ -348,12 +348,12 @@ fn a_reused_scratch_survives_a_large_procedure_before_a_small_one() {
     let small = with_memory(crate::test_util::shapes::diamond_chain::<Instruction>(1));
     let mut scratch = MemorySsaScratch::new();
 
-    let first: MemorySSA<Location, u8, Fence> =
-        MemorySSA::compute_in(&mut scratch, &large, &ExactMemoryAlias);
-    assert_eq!(first, MemorySSA::compute(&large, &ExactMemoryAlias));
-    let second: MemorySSA<Location, u8, Fence> =
-        MemorySSA::compute_in(&mut scratch, &small, &ExactMemoryAlias);
-    assert_eq!(second, MemorySSA::compute(&small, &ExactMemoryAlias));
+    let first: MemorySsa<Location, u8, Fence> =
+        MemorySsa::compute_in(&mut scratch, &large, &ExactMemoryAlias);
+    assert_eq!(first, MemorySsa::compute(&large, &ExactMemoryAlias));
+    let second: MemorySsa<Location, u8, Fence> =
+        MemorySsa::compute_in(&mut scratch, &small, &ExactMemoryAlias);
+    assert_eq!(second, MemorySsa::compute(&small, &ExactMemoryAlias));
 }
 
 #[test]
@@ -368,12 +368,12 @@ fn a_reused_scratch_crosses_procedures_with_disjoint_locations() {
 
     let mut scratch = MemorySsaScratch::new();
     for cfg in [&first, &second, &first] {
-        let computed: MemorySSA<Location, u8, Fence> =
-            MemorySSA::compute_in(&mut scratch, cfg, &ExactMemoryAlias);
-        assert_eq!(computed, MemorySSA::compute(cfg, &ExactMemoryAlias));
+        let computed: MemorySsa<Location, u8, Fence> =
+            MemorySsa::compute_in(&mut scratch, cfg, &ExactMemoryAlias);
+        assert_eq!(computed, MemorySsa::compute(cfg, &ExactMemoryAlias));
     }
-    let only_b: MemorySSA<Location, u8, Fence> =
-        MemorySSA::compute_in(&mut scratch, &second, &ExactMemoryAlias);
+    let only_b: MemorySsa<Location, u8, Fence> =
+        MemorySsa::compute_in(&mut scratch, &second, &ExactMemoryAlias);
     assert_eq!(only_b.classes().len(), 1);
     assert_eq!(only_b.class_of(&Location::A), None);
 }
@@ -384,14 +384,14 @@ fn the_public_accessors_agree_element_by_element_across_a_reused_scratch() {
     // way a consumer reads it, so the proof does not rest on the derive.
     let cfg = with_memory(crate::test_util::shapes::diamond_chain::<Instruction>(3));
     let mut scratch = MemorySsaScratch::new();
-    drop(MemorySSA::<Location, u8, Fence>::compute_in(
+    drop(MemorySsa::<Location, u8, Fence>::compute_in(
         &mut scratch,
         &with_memory(crate::test_util::shapes::diamond_chain::<Instruction>(12)),
         &ExactMemoryAlias,
     ));
-    let computed: MemorySSA<Location, u8, Fence> =
-        MemorySSA::compute_in(&mut scratch, &cfg, &ExactMemoryAlias);
-    let expected: MemorySSA<Location, u8, Fence> = MemorySSA::compute(&cfg, &ExactMemoryAlias);
+    let computed: MemorySsa<Location, u8, Fence> =
+        MemorySsa::compute_in(&mut scratch, &cfg, &ExactMemoryAlias);
+    let expected: MemorySsa<Location, u8, Fence> = MemorySsa::compute(&cfg, &ExactMemoryAlias);
 
     assert_eq!(computed.classes(), expected.classes());
     assert_eq!(computed.phis(), expected.phis());
@@ -453,7 +453,7 @@ fn a_handler_reads_the_memory_state_before_each_throwing_instruction() {
     cfg.block_mut(handler)
         .push(Instruction::access(Location::A, MemoryAccessKind::Read));
 
-    let memory = MemorySSA::compute(&cfg, &ExactMemoryAlias);
+    let memory = MemorySsa::compute(&cfg, &ExactMemoryAlias);
     assert_eq!(
         memory.reaching_definition(site(normal, 0)),
         Some(&MemoryDefinition::Event {
@@ -523,5 +523,5 @@ fn memory_ssa_rejects_an_entry_that_is_a_branch_target() {
     cfg.block_mut(latch)
         .push(Instruction::access(Location::A, MemoryAccessKind::Write));
 
-    drop(MemorySSA::compute(&cfg, &ExactMemoryAlias));
+    drop(MemorySsa::compute(&cfg, &ExactMemoryAlias));
 }

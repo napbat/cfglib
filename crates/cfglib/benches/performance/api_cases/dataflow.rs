@@ -1,6 +1,6 @@
 use cfglib::{
-    AbstractDomain, Cfg, Direction, DominatorTree, EdgeProblem, FlowEffect, Graph, Lattice, NodeId,
-    SolveConfig, SsaForm, TryEdgeProblem, TryNodeProblem, TryProblem, abstract_interpret,
+    AbstractDomain, AbstractFacts, Cfg, Direction, DominatorTree, EdgeProblem, FlowEffect, Graph,
+    Lattice, NodeId, SolveConfig, SsaForm, TryEdgeProblem, TryNodeProblem, TryProblem,
     alias_propagation, alias_propagation_with_exits, copies_by_predecessor, copy_propagation,
     copy_propagation_with_exits, departs_before_throws, eliminate_phis, index_paths_may_overlap,
     meet_options, solve_edge_problem, solve_edge_problem_from, solve_edge_problem_from_with_config,
@@ -27,16 +27,8 @@ impl Lattice for Seen {
         Self(false)
     }
 
-    fn top() -> Self {
-        Self(true)
-    }
-
     fn meet(&self, other: &Self) -> Self {
         Self(self.0 || other.0)
-    }
-
-    fn leq(&self, other: &Self) -> bool {
-        !self.0 || other.0
     }
 }
 
@@ -223,8 +215,7 @@ fn register_abstract_interpretation(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_abstract_interpret",
-        covers[abstract_interpret],
-        || abstract_interpret::<_, Seen>(&cfg),
+        || AbstractFacts::<Seen>::compute(&cfg),
         |facts| assert_eq!(
             facts.fact_out(cfglib::BlockId::from_index(127)),
             Some(&Seen(true))
@@ -277,7 +268,7 @@ fn register_copy_and_alias_propagation(suite: &mut BenchmarkSuite<'_>) {
         },
         |(_, stats)| {
             assert_eq!(stats.uses_rewritten, 1);
-            assert_eq!(stats.copies_removed, 1);
+            assert_eq!(stats.instructions_removed, 1);
         }
     );
     benchmark_case!(
@@ -293,7 +284,7 @@ fn register_copy_and_alias_propagation(suite: &mut BenchmarkSuite<'_>) {
         },
         |(_, stats)| {
             assert_eq!(stats.uses_rewritten, 1);
-            assert_eq!(stats.copies_removed, 0);
+            assert_eq!(stats.instructions_removed, 0);
         }
     );
     benchmark_case!(
@@ -307,7 +298,7 @@ fn register_copy_and_alias_propagation(suite: &mut BenchmarkSuite<'_>) {
         },
         |(_, stats)| {
             assert_eq!(stats.uses_rewritten, 1);
-            assert_eq!(stats.aliases_removed, 1);
+            assert_eq!(stats.instructions_removed, 1);
         }
     );
 
@@ -324,7 +315,7 @@ fn register_copy_and_alias_propagation(suite: &mut BenchmarkSuite<'_>) {
         },
         |(_, stats)| {
             assert_eq!(stats.uses_rewritten, 1);
-            assert_eq!(stats.aliases_removed, 0);
+            assert_eq!(stats.instructions_removed, 0);
         }
     );
 }

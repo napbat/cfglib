@@ -19,16 +19,15 @@ use crate::dataflow::unwind::{replay_block, unwind_departure};
 use crate::graph::edge_view::EdgeRef;
 
 /// A lattice element for abstract interpretation.
+///
+/// The solver needs only the element that stands for an unreached block and
+/// the meet that merges two reached states, so those are the whole contract.
 pub trait Lattice: Clone + PartialEq {
     /// Bottom element (least precise / most conservative).
     fn bottom() -> Self;
-    /// Top element (most precise / most optimistic).
-    fn top() -> Self;
     /// Meet (greatest lower bound) of two elements.
     #[must_use]
     fn meet(&self, other: &Self) -> Self;
-    /// Returns `true` if `self ⊑ other` in the lattice ordering.
-    fn leq(&self, other: &Self) -> bool;
 }
 
 /// An abstract domain defines how instructions transform lattice values.
@@ -135,44 +134,47 @@ where
     }
 }
 
-/// Run abstract interpretation over a CFG.
-///
-/// Forward analysis on the edge-sensitive solver. The abstract domain `D`
-/// determines both the lattice and the per-instruction transfer function.
-/// Blocks reached from the entry are solved; the others keep the bottom
-/// state. An [`ExceptionUnwind`](crate::EdgeKind::ExceptionUnwind) edge
-/// carries the meet of the states before each instruction of its source
-/// that [`may_unwind`](InstrInfo::may_unwind), so a throwing instruction's
-/// own effect and every later one in its block never reach the handler.
-#[must_use]
-pub fn abstract_interpret<G, D>(cfg: &G) -> AbstractFacts<D>
-where
-    G: CfgView,
-    G::Inst: InstrInfo,
-    D: AbstractDomain<G::Inst>,
-{
-    let problem = AbstractProblem::<D> {
-        _marker: core::marker::PhantomData,
-    };
-    let result = edge_fixpoint::solve_reachable(cfg, &problem);
+impl<D> AbstractFacts<D> {
+    /// Run abstract interpretation over a CFG.
+    ///
+    /// Forward analysis on the edge-sensitive solver. The abstract domain `D`
+    /// determines both the lattice and the per-instruction transfer function.
+    /// Blocks reached from the entry are solved; the others keep the bottom
+    /// state. An [`ExceptionUnwind`](crate::EdgeKind::ExceptionUnwind) edge
+    /// carries the meet of the states before each instruction of its source
+    /// that [`may_unwind`](InstrInfo::may_unwind), so a throwing
+    /// instruction's own effect and every later one in its block never reach
+    /// the handler.
+    #[must_use]
+    pub fn compute<G>(cfg: &G) -> Self
+    where
+        G: CfgView,
+        G::Inst: InstrInfo,
+        D: AbstractDomain<G::Inst>,
+    {
+        let problem = AbstractProblem::<D> {
+            _marker: core::marker::PhantomData,
+        };
+        let result = edge_fixpoint::solve_reachable(cfg, &problem);
 
-    // Convert Vec-indexed results to BTreeMap-keyed results.
-    let mut block_in = BTreeMap::new();
-    let mut block_out = BTreeMap::new();
-    for block_id in cfg.node_ids() {
-        block_in.insert(
-            block_id,
-            result.fact_in(block_id).clone().unwrap_or_else(D::bottom),
-        );
-        block_out.insert(
-            block_id,
-            result.fact_out(block_id).clone().unwrap_or_else(D::bottom),
-        );
-    }
+        // Convert Vec-indexed results to BTreeMap-keyed results.
+        let mut block_in = BTreeMap::new();
+        let mut block_out = BTreeMap::new();
+        for block_id in cfg.node_ids() {
+            block_in.insert(
+                block_id,
+                result.fact_in(block_id).clone().unwrap_or_else(D::bottom),
+            );
+            block_out.insert(
+                block_id,
+                result.fact_out(block_id).clone().unwrap_or_else(D::bottom),
+            );
+        }
 
-    AbstractFacts {
-        block_in,
-        block_out,
+        Self {
+            block_in,
+            block_out,
+        }
     }
 }
 
@@ -197,25 +199,12 @@ mod tests {
         fn bottom() -> Self {
             Sign::Bottom
         }
-        fn top() -> Self {
-            Sign::Top
-        }
         fn meet(&self, other: &Self) -> Self {
             match (self, other) {
                 (Sign::Top, x) | (x, Sign::Top) => x.clone(),
                 (a, b) if a == b => a.clone(),
                 _ => Sign::Bottom,
             }
-        }
-        fn leq(&self, other: &Self) -> bool {
-            matches!(
-                (self, other),
-                (Sign::Bottom, _)
-                    | (_, Sign::Top)
-                    | (Sign::Neg, Sign::Neg)
-                    | (Sign::Zero, Sign::Zero)
-                    | (Sign::Pos, Sign::Pos)
-            )
         }
     }
 
@@ -242,7 +231,7 @@ mod tests {
     fn sign_lattice_basics() {
         assert_eq!(Sign::Top.meet(&Sign::Neg), Sign::Neg);
         assert_eq!(Sign::Neg.meet(&Sign::Pos), Sign::Bottom);
-        assert!(Sign::Bottom.leq(&Sign::Top));
+        assert_eq!(Sign::Top.meet(&Sign::Top), Sign::Top);
     }
 
     #[test]
@@ -254,7 +243,7 @@ mod tests {
             .push(df_ff("a"));
         cfg.block_mut(b).instructions_mut().push(df_ff("b"));
         cfg.add_edge(cfg.entry(), b, EdgeKind::Fallthrough);
-        let result: AbstractFacts<Sign> = abstract_interpret(&cfg);
+        let result = AbstractFacts::<Sign>::compute(&cfg);
         // Entry block out should be present and equal to entry value
         // (identity transfer).
         assert_eq!(result.fact_out(cfg.entry()), Some(&Sign::Zero));
@@ -275,7 +264,7 @@ mod tests {
             if connect_other {
                 cfg.add_edge(cfg.entry(), other, EdgeKind::Fallthrough);
             }
-            let result: AbstractFacts<Sign> = abstract_interpret(&cfg);
+            let result = AbstractFacts::<Sign>::compute(&cfg);
             assert_eq!(
                 result.fact_in(joined),
                 Some(if connect_other {
@@ -303,7 +292,7 @@ mod tests {
         cfg.add_edge(body, cfg.entry(), EdgeKind::Back);
         cfg.block_mut(body).push(df_ff("body"));
 
-        let result: AbstractFacts<Sign> = abstract_interpret(&cfg);
+        let result = AbstractFacts::<Sign>::compute(&cfg);
 
         assert_eq!(result.fact_in(cfg.entry()), Some(&Sign::Zero));
         assert_eq!(result.fact_in(body), Some(&Sign::Zero));
@@ -317,7 +306,7 @@ mod tests {
     ) -> (AbstractFacts<Sign>, BlockId, BlockId) {
         let (mut cfg, [_, normal, handler]) = protected_region(instructions);
         cfg.block_mut(cfg.entry()).push(df_const("prior", 0, 3));
-        (abstract_interpret(&cfg), normal, handler)
+        (AbstractFacts::compute(&cfg), normal, handler)
     }
 
     #[test]

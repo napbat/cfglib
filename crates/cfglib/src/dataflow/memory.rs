@@ -1,6 +1,6 @@
 //! Memory-state and memory-carried value data flow.
 //!
-//! [`MemorySSA`] constructs versioned state for consumer-defined memory
+//! [`MemorySsa`] constructs versioned state for consumer-defined memory
 //! locations. [`MemoryValueFlow`] connects ordinary SSA values to those states
 //! through exact, ordered memory events.
 
@@ -9,7 +9,7 @@ mod value;
 
 pub use ssa::{
     ConservativeMemoryAlias, ExactMemoryAlias, MemoryAlias, MemoryClassId, MemoryDefinition,
-    MemoryEventSite, MemoryLocationClass, MemoryPhi, MemorySSA, MemorySSAEvent, MemorySsaScratch,
+    MemoryEventSite, MemoryLocationClass, MemoryPhi, MemorySsa, MemorySsaEvent, MemorySsaScratch,
     MemorySsaValue, MemoryUse, index_paths_may_overlap,
 };
 pub use value::{
