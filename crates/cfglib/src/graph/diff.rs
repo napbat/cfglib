@@ -1,8 +1,8 @@
 //! Structural comparison of two CFGs (bindiff-style).
 //!
-//! Compares two CFGs by topology, block counts, edge patterns, and
-//! instruction counts.  Produces a [`CfgDiff`] summary describing
-//! the structural differences.
+//! Matches the blocks of two CFGs by how they are wired and compares each
+//! matched pair: block counts, edge patterns, and instruction counts.
+//! Produces a [`CfgDiff`] summary describing the structural differences.
 //!
 //! This is intentionally a *structural* comparison — it compares the
 //! shape of the graph, not the semantics of individual instructions.
@@ -10,12 +10,11 @@
 //! depends on the concrete instruction type.
 
 extern crate alloc;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::edge::EdgeKind;
 
 /// Per-block structural fingerprint used for matching.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -30,6 +29,19 @@ pub struct BlockFingerprint {
     pub out_edge_discriminants: Vec<u8>,
 }
 
+impl BlockFingerprint {
+    /// What two blocks must share to be matched: how they are wired, not how
+    /// long they are. A block that only gained or lost instructions is the
+    /// same block, changed.
+    fn shape(&self) -> (usize, usize, &[u8]) {
+        (
+            self.out_degree,
+            self.in_degree,
+            &self.out_edge_discriminants,
+        )
+    }
+}
+
 /// A matched pair of blocks between two CFGs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockMatch {
@@ -39,16 +51,24 @@ pub struct BlockMatch {
     pub right: BlockId,
     /// Whether instruction counts differ.
     pub instruction_count_changed: bool,
+    /// Whether the outgoing edges differ: the left block's edges must reach
+    /// the right counterparts of the same blocks, kind for kind, as the right
+    /// block's edges do. An edge into a block that has no counterpart differs.
+    pub edges_changed: bool,
 }
 
 /// Summary of structural differences between two CFGs.
+///
+/// Every live block takes part, reachable from the entry or not: the counts
+/// below, the matches, and the unmatched lists all describe the same set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CfgDiff {
-    /// Blocks matched between left and right CFGs.
+    /// Blocks matched between left and right CFGs, in ascending order of the
+    /// left block.
     pub matched: Vec<BlockMatch>,
-    /// Blocks only in the left (old) CFG — removed.
+    /// Blocks only in the left (old) CFG — removed, in ascending order.
     pub left_only: Vec<BlockId>,
-    /// Blocks only in the right (new) CFG — added.
+    /// Blocks only in the right (new) CFG — added, in ascending order.
     pub right_only: Vec<BlockId>,
     /// Number of blocks in left CFG.
     pub left_block_count: usize,
@@ -61,14 +81,17 @@ pub struct CfgDiff {
 }
 
 impl CfgDiff {
-    /// True when the two CFGs are structurally identical.
+    /// True when the two CFGs are structurally identical: every block has a
+    /// counterpart with the same instruction count, and every block's edges
+    /// reach the counterparts of the same blocks, kind for kind.
     #[must_use]
     pub fn is_identical(&self) -> bool {
         self.left_only.is_empty()
             && self.right_only.is_empty()
-            && self.matched.iter().all(|m| !m.instruction_count_changed)
-            && self.left_block_count == self.right_block_count
-            && self.left_edge_count == self.right_edge_count
+            && self
+                .matched
+                .iter()
+                .all(|pair| !pair.instruction_count_changed && !pair.edges_changed)
     }
 
     /// Fraction of blocks successfully matched (0.0–1.0).
@@ -82,148 +105,254 @@ impl CfgDiff {
     }
 }
 
-/// Map an `EdgeKind` to a stable discriminant byte.
-fn edge_kind_discriminant(k: EdgeKind) -> u8 {
-    match k {
-        EdgeKind::Fallthrough => 0,
-        EdgeKind::ConditionalTrue => 1,
-        EdgeKind::ConditionalFalse => 2,
-        EdgeKind::Unconditional => 3,
-        EdgeKind::Back => 4,
-        EdgeKind::Call => 5,
-        EdgeKind::CallReturn => 6,
-        EdgeKind::SwitchCase => 7,
-        EdgeKind::Jump => 8,
-        EdgeKind::IndirectJump => 9,
-        EdgeKind::IndirectCall => 10,
-        EdgeKind::ExceptionHandler => 11,
-        EdgeKind::ExceptionUnwind => 12,
-        EdgeKind::ExceptionLeave => 13,
-        EdgeKind::ExceptionResume => 14,
-        EdgeKind::ExceptionContinue => 15,
+/// What the matcher knows about one block.
+struct BlockFacts {
+    fingerprint: BlockFingerprint,
+    /// The outgoing `(kind discriminant, target)` pairs, grouped by kind with
+    /// each group in adjacency order.
+    out_edges: Vec<(u8, BlockId)>,
+}
+
+/// One CFG, as the matcher sees it.
+struct Side {
+    entry: BlockId,
+    blocks: BTreeMap<BlockId, BlockFacts>,
+}
+
+impl Side {
+    fn new<I>(cfg: &Cfg<I>) -> Self {
+        let blocks = cfg
+            .block_ids()
+            .map(|block| {
+                let mut out_edges: Vec<(u8, BlockId)> = cfg
+                    .outgoing(block)
+                    .map(|edge| {
+                        let edge = cfg.edge(edge);
+                        // The discriminant is declaration order, which is
+                        // what `EdgeKind::ALL` lists.
+                        (edge.kind() as u8, edge.target())
+                    })
+                    .collect();
+                // A stable sort keeps adjacency order within one kind.
+                out_edges.sort_by_key(|&(kind, _)| kind);
+                let fingerprint = BlockFingerprint {
+                    instruction_count: cfg.block(block).instructions().len(),
+                    out_degree: out_edges.len(),
+                    in_degree: cfg.incoming(block).count(),
+                    out_edge_discriminants: out_edges.iter().map(|&(kind, _)| kind).collect(),
+                };
+                (
+                    block,
+                    BlockFacts {
+                        fingerprint,
+                        out_edges,
+                    },
+                )
+            })
+            .collect();
+        Self {
+            entry: cfg.entry(),
+            blocks,
+        }
+    }
+
+    fn facts(&self, block: BlockId) -> &BlockFacts {
+        &self.blocks[&block]
     }
 }
 
-/// Compute a structural fingerprint for a block.
-fn fingerprint<I>(cfg: &Cfg<I>, block: BlockId) -> BlockFingerprint {
-    let mut discs: Vec<u8> = cfg
-        .outgoing(block)
-        .map(|eid| edge_kind_discriminant(cfg.edge(eid).kind()))
-        .collect();
-    discs.sort_unstable();
+/// A partial one-to-one pairing of the blocks of two CFGs.
+#[derive(Default)]
+struct Matching {
+    right_of: BTreeMap<BlockId, BlockId>,
+    left_of: BTreeMap<BlockId, BlockId>,
+}
 
-    BlockFingerprint {
-        instruction_count: cfg.block(block).instructions().len(),
-        out_degree: cfg.outgoing(block).count(),
-        in_degree: cfg.incoming(block).count(),
-        out_edge_discriminants: discs,
+impl Matching {
+    fn pair(&mut self, left: BlockId, right: BlockId) {
+        self.right_of.insert(left, right);
+        self.left_of.insert(right, left);
+    }
+
+    fn both_free(&self, left: BlockId, right: BlockId) -> bool {
+        !self.right_of.contains_key(&left) && !self.left_of.contains_key(&right)
+    }
+}
+
+/// Whether `left`'s edges reach the counterparts of the blocks `right`'s
+/// edges reach, kind for kind.
+fn edges_preserved(left: &BlockFacts, right: &BlockFacts, matching: &Matching) -> bool {
+    let mut mapped = Vec::with_capacity(left.out_edges.len());
+    for &(kind, target) in &left.out_edges {
+        let Some(&counterpart) = matching.right_of.get(&target) else {
+            return false;
+        };
+        mapped.push((kind, counterpart));
+    }
+    mapped.sort_unstable();
+    let mut expected = right.out_edges.clone();
+    expected.sort_unstable();
+    mapped == expected
+}
+
+/// Extends `matching` along the edges of the pairs in `pending`.
+///
+/// The edges two matched blocks have of one kind are paired in adjacency
+/// order, and the targets of a pair join the matching when they are free and
+/// wired alike. Each new pair is queued, so the walk follows the matching out
+/// from where it started.
+fn follow_edges(
+    left: &Side,
+    right: &Side,
+    matching: &mut Matching,
+    pending: &mut VecDeque<(BlockId, BlockId)>,
+) {
+    while let Some((left_block, right_block)) = pending.pop_front() {
+        let left_edges = &left.facts(left_block).out_edges;
+        let right_edges = &right.facts(right_block).out_edges;
+        let mut right_groups = right_edges.chunk_by(|a, b| a.0 == b.0).peekable();
+        for left_group in left_edges.chunk_by(|a, b| a.0 == b.0) {
+            let kind = left_group[0].0;
+            while right_groups.next_if(|group| group[0].0 < kind).is_some() {}
+            let Some(right_group) = right_groups.next_if(|group| group[0].0 == kind) else {
+                continue;
+            };
+            for (&(_, left_target), &(_, right_target)) in left_group.iter().zip(right_group) {
+                if matching.both_free(left_target, right_target)
+                    && left.facts(left_target).fingerprint.shape()
+                        == right.facts(right_target).fingerprint.shape()
+                {
+                    matching.pair(left_target, right_target);
+                    pending.push_back((left_target, right_target));
+                }
+            }
+        }
     }
 }
 
 impl CfgDiff {
     /// Compare two CFGs structurally.
     ///
-    /// Uses a greedy fingerprint-based matching algorithm:
-    /// 1. Compute structural fingerprints for all reachable blocks.
-    /// 2. Match entry blocks first (anchoring).
-    /// 3. Greedily match remaining blocks by identical fingerprints,
-    ///    preferring blocks whose predecessors/successors are already matched.
+    /// Every live block takes part, whether the entry reaches it or not. The
+    /// matching is built in three steps:
+    /// 1. The entry blocks are paired, whatever their wiring.
+    /// 2. The matching is extended along edges: the targets of the edges two
+    ///    matched blocks have of one kind are paired when they have the same
+    ///    number of predecessors and successors and the same edge kinds.
+    /// 3. Each left block still unmatched takes the first free right block
+    ///    with the same wiring (preferring one with the same instruction
+    ///    count), and the matching is extended along edges from that pair.
     ///
-    /// # Example
+    /// A matched pair whose instruction counts or edges differ is reported as
+    /// changed rather than as an unmatched pair of blocks, and
+    /// [`is_identical`](Self::is_identical) is false for it. Edges of one kind
+    /// are paired in adjacency order, so a block with several edges of a kind
+    /// whose targets are only distinguished by their position can be reported
+    /// as changed when the other CFG lists them in another order.
     ///
-    /// ```ignore
-    /// let diff = CfgDiff::compute(&old_cfg, &new_cfg);
-    /// if diff.is_identical() {
-    ///     println!("CFGs are structurally identical");
-    /// } else {
-    ///     println!("Match ratio: {:.0}%", diff.match_ratio() * 100.0);
-    /// }
+    /// # Examples
+    ///
+    /// ```
+    /// use cfglib::{Cfg, CfgDiff, EdgeKind};
+    ///
+    /// // `entry -> body -> exit`, numbered in two different orders.
+    /// let mut old = Cfg::<u32>::new();
+    /// let (body, exit) = (old.new_block(), old.new_block());
+    /// old.add_edge(old.entry(), body, EdgeKind::Fallthrough);
+    /// old.add_edge(body, exit, EdgeKind::Fallthrough);
+    ///
+    /// let mut new = Cfg::<u32>::new();
+    /// let (exit, body) = (new.new_block(), new.new_block());
+    /// new.add_edge(new.entry(), body, EdgeKind::Fallthrough);
+    /// new.add_edge(body, exit, EdgeKind::Fallthrough);
+    ///
+    /// let diff = CfgDiff::compute(&old, &new);
+    /// assert!(diff.is_identical());
+    /// assert!((diff.match_ratio() - 1.0).abs() < f64::EPSILON);
+    ///
+    /// // A block that gains a successor is no longer the same shape.
+    /// let extra = new.new_block();
+    /// new.add_edge(exit, extra, EdgeKind::Fallthrough);
+    /// let diff = CfgDiff::compute(&old, &new);
+    /// assert!(!diff.is_identical());
+    /// assert_eq!(diff.right_only.len(), 1);
     /// ```
     #[must_use]
     pub fn compute<I, I2>(left: &Cfg<I>, right: &Cfg<I2>) -> Self {
-        let left_blocks = left.depth_first_preorder();
-        let right_blocks = right.depth_first_preorder();
+        let (left_side, right_side) = (Side::new(left), Side::new(right));
+        let mut matching = Matching::default();
+        let mut pending = VecDeque::new();
 
-        let left_fps: BTreeMap<BlockId, BlockFingerprint> = left_blocks
-            .iter()
-            .map(|&b| (b, fingerprint(left, b)))
-            .collect();
-        let right_fps: BTreeMap<BlockId, BlockFingerprint> = right_blocks
-            .iter()
-            .map(|&b| (b, fingerprint(right, b)))
-            .collect();
+        matching.pair(left_side.entry, right_side.entry);
+        pending.push_back((left_side.entry, right_side.entry));
+        follow_edges(&left_side, &right_side, &mut matching, &mut pending);
 
-        let mut matched = Vec::new();
-        let mut left_matched = alloc::collections::BTreeSet::new();
-        let mut right_matched = alloc::collections::BTreeSet::new();
-
-        // Phase 1: anchor on entry blocks.
-        let left_entry_fp = left_fps.get(&left.entry());
-        let right_entry_fp = right_fps.get(&right.entry());
-        if left_entry_fp == right_entry_fp {
-            let ic_changed = left.block(left.entry()).instructions().len()
-                != right.block(right.entry()).instructions().len();
-            matched.push(BlockMatch {
-                left: left.entry(),
-                right: right.entry(),
-                instruction_count_changed: ic_changed,
-            });
-            left_matched.insert(left.entry());
-            right_matched.insert(right.entry());
-        }
-
-        // Phase 2: greedy matching by fingerprint.
-        // Build index: fingerprint → unmatched right blocks.
-        let mut fp_to_right: BTreeMap<BlockFingerprint, Vec<BlockId>> = BTreeMap::new();
-        for &rb in &right_blocks {
-            if !right_matched.contains(&rb) {
-                let fp = right_fps[&rb].clone();
-                fp_to_right.entry(fp).or_default().push(rb);
+        let mut free_by_shape: BTreeMap<(usize, usize, &[u8]), Vec<BlockId>> = BTreeMap::new();
+        for (&block, facts) in &right_side.blocks {
+            if !matching.left_of.contains_key(&block) {
+                free_by_shape
+                    .entry(facts.fingerprint.shape())
+                    .or_default()
+                    .push(block);
             }
         }
-
-        for &lb in &left_blocks {
-            if left_matched.contains(&lb) {
+        for (&block, facts) in &left_side.blocks {
+            if matching.right_of.contains_key(&block) {
                 continue;
             }
-            let fp = &left_fps[&lb];
-            if let Some(candidates) = fp_to_right.get_mut(fp)
-                && let Some(pos) = candidates.iter().position(|rb| !right_matched.contains(rb))
-            {
-                let rb = candidates.remove(pos);
-                let ic_changed =
-                    left.block(lb).instructions().len() != right.block(rb).instructions().len();
-                matched.push(BlockMatch {
-                    left: lb,
-                    right: rb,
-                    instruction_count_changed: ic_changed,
-                });
-                left_matched.insert(lb);
-                right_matched.insert(rb);
-            }
+            let Some(candidates) = free_by_shape.get_mut(&facts.fingerprint.shape()) else {
+                continue;
+            };
+            // The walks above may have claimed some since the index was built.
+            candidates.retain(|candidate| !matching.left_of.contains_key(candidate));
+            let same_length = candidates.iter().position(|&candidate| {
+                right_side.facts(candidate).fingerprint.instruction_count
+                    == facts.fingerprint.instruction_count
+            });
+            let Some(position) = same_length.or_else(|| (!candidates.is_empty()).then_some(0))
+            else {
+                continue;
+            };
+            let counterpart = candidates.remove(position);
+            matching.pair(block, counterpart);
+            pending.push_back((block, counterpart));
+            follow_edges(&left_side, &right_side, &mut matching, &mut pending);
         }
 
-        let left_only: Vec<BlockId> = left_blocks
-            .into_iter()
-            .filter(|b| !left_matched.contains(b))
+        let matched = left_side
+            .blocks
+            .iter()
+            .filter_map(|(&block, facts)| {
+                let counterpart = *matching.right_of.get(&block)?;
+                let other = right_side.facts(counterpart);
+                Some(BlockMatch {
+                    left: block,
+                    right: counterpart,
+                    instruction_count_changed: facts.fingerprint.instruction_count
+                        != other.fingerprint.instruction_count,
+                    edges_changed: !edges_preserved(facts, other, &matching),
+                })
+            })
             .collect();
-        let right_only: Vec<BlockId> = right_blocks
-            .into_iter()
-            .filter(|b| !right_matched.contains(b))
-            .collect();
-
-        // Count live edges.
-        let left_edge_count = left.edges().count();
-        let right_edge_count = right.edges().count();
 
         CfgDiff {
             matched,
-            left_only,
-            right_only,
+            left_only: left_side
+                .blocks
+                .keys()
+                .filter(|block| !matching.right_of.contains_key(block))
+                .copied()
+                .collect(),
+            right_only: right_side
+                .blocks
+                .keys()
+                .filter(|block| !matching.left_of.contains_key(block))
+                .copied()
+                .collect(),
             left_block_count: left.block_count(),
             right_block_count: right.block_count(),
-            left_edge_count,
-            right_edge_count,
+            left_edge_count: left.edge_count(),
+            right_edge_count: right.edge_count(),
         }
     }
 }
@@ -231,6 +360,7 @@ impl CfgDiff {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::edge::EdgeKind;
     use crate::test_util::ff;
 
     #[test]
@@ -308,5 +438,26 @@ mod tests {
         let diff = CfgDiff::compute(&a, &b);
         assert!(diff.match_ratio() > 0.0);
         assert!(diff.match_ratio() <= 1.0);
+    }
+
+    #[test]
+    fn edge_kind_discriminants_follow_declaration_order() {
+        for (index, kind) in EdgeKind::ALL.into_iter().enumerate() {
+            assert_eq!(usize::from(kind as u8), index, "{kind}");
+        }
+    }
+
+    #[test]
+    fn a_block_lists_its_edges_by_kind_in_adjacency_order() {
+        let mut cfg = Cfg::<u32>::new();
+        let (first, second, third) = (cfg.new_block(), cfg.new_block(), cfg.new_block());
+        cfg.add_edge(cfg.entry(), first, EdgeKind::Back);
+        cfg.add_edge(cfg.entry(), second, EdgeKind::Fallthrough);
+        cfg.add_edge(cfg.entry(), third, EdgeKind::Back);
+
+        let side = Side::new(&cfg);
+        let facts = side.facts(cfg.entry());
+        assert_eq!(facts.fingerprint.out_edge_discriminants, [0, 4, 4]);
+        assert_eq!(facts.out_edges, [(0, second), (4, first), (4, third)]);
     }
 }
