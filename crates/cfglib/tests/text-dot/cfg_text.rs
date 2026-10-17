@@ -152,6 +152,58 @@ fn parallel_edges_keep_their_count_kinds_and_order() {
 }
 
 #[test]
+fn crlf_line_endings_comments_and_blank_lines_are_not_content() {
+    let unix = "entry bb0\nbb0:\n    a = 1\nbb1: exit\n    return\nbb0 -> bb1 fallthrough\n";
+    let noisy = "# dumped by a tool\r\n\r\nentry bb0\r\nbb0:\r\n    a = 1\r\n\r\n# between blocks\r\n\
+                 bb1: exit\r\n    return\r\nbb0 -> bb1 fallthrough\r\n";
+    let expected = parse(unix).expect("valid text");
+    let parsed = parse(noisy).expect("valid text with CRLF line endings");
+    assert_eq!(shape(&parsed), shape(&expected));
+    assert_eq!(parsed.to_text(), unix);
+}
+
+#[test]
+fn a_region_that_still_names_a_removed_block_is_written_without_it() {
+    // A region's block sets may list blocks removed since the region was
+    // added: compaction drops them, so the set means its live members.
+    let mut cfg = Cfg::<Line>::new();
+    let entry = cfg.entry();
+    let body = cfg.new_block();
+    let doomed = cfg.new_block();
+    let landing = cfg.new_block();
+    let stray = cfg.new_block();
+    cfg.add_edge(entry, body, EdgeKind::Fallthrough);
+    cfg.add_region(region(
+        &[entry, body, doomed],
+        vec![handler(
+            landing,
+            HandlerKind::Catch,
+            HandlerBody::known([landing, stray]),
+        )],
+        None,
+    ));
+    cfg.remove_block(doomed);
+    cfg.remove_block(stray);
+
+    let parsed = parse(&cfg.to_text())
+        .expect("the text of a CFG with a removed block in a region is still the grammar");
+    let live = |blocks: &std::collections::BTreeSet<BlockId>| {
+        blocks
+            .iter()
+            .copied()
+            .filter(|&block| cfg.contains_block(block))
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let region = &cfg.regions()[0];
+    let reread = &parsed.regions()[0];
+    assert_eq!(reread.protected_blocks, live(&region.protected_blocks));
+    assert_eq!(
+        reread.handlers[0].body.blocks().cloned(),
+        region.handlers[0].body.blocks().map(live)
+    );
+}
+
+#[test]
 fn an_entry_other_than_the_first_block_is_reproduced() {
     let mut cfg = Cfg::<Line>::new();
     let first = cfg.entry();
