@@ -4,8 +4,8 @@
 use std::collections::BTreeSet;
 
 use cfglib::{
-    BlockId, Cfg, DominanceFrontiers, DominatorTree, EdgeKind, FrontierScratch, NodeId,
-    PostDominatorTree, control_dependence_graph,
+    BlockId, Cfg, DominanceFrontiers, DominatorTree, EdgeKind, FrontierScratch, InstrInfo, NodeId,
+    PostDominatorTree, SsaForm, control_dependence_graph,
 };
 
 /// `entry -> head`, a diamond `head -> {left, right} -> join`, the back edge
@@ -239,4 +239,80 @@ fn the_post_dominance_frontier_lists_the_branches_that_decide_a_block() {
         &mut decided,
     );
     assert_eq!(decided, [head]);
+}
+
+/// An instruction that reads and writes named values.
+struct Step {
+    reads: &'static [&'static str],
+    writes: &'static [&'static str],
+}
+
+impl InstrInfo for Step {
+    type Variable = &'static str;
+
+    fn uses(&self) -> &[Self::Variable] {
+        self.reads
+    }
+
+    fn defs(&self) -> &[Self::Variable] {
+        self.writes
+    }
+}
+
+#[test]
+fn ssa_places_phis_where_the_iterated_frontier_of_the_definitions_says() {
+    // `x` is written in one arm of the diamond and read after the loop. Its
+    // phis belong at the join, which the arm's frontier names, and at the
+    // loop header, which the join's frontier names in turn.
+    let DiamondLoop {
+        cfg,
+        head,
+        left,
+        join,
+        exit,
+        ..
+    } = diamond_loop();
+    let mut steps = Cfg::<Step>::new();
+    let mut blocks = vec![steps.entry()];
+    blocks.extend((1..cfg.block_count()).map(|_| steps.new_block()));
+    for edge in cfg.edges() {
+        steps.add_edge(
+            blocks[edge.source().index()],
+            blocks[edge.target().index()],
+            edge.kind(),
+        );
+    }
+    steps.block_mut(blocks[left.index()]).push(Step {
+        reads: &[],
+        writes: &["x"],
+    });
+    steps.block_mut(blocks[exit.index()]).push(Step {
+        reads: &["x"],
+        writes: &[],
+    });
+
+    let dominators = DominatorTree::compute(&steps);
+    let mut placed_by_frontier = Vec::new();
+    dominators.iterated_frontier(
+        &steps,
+        &mut FrontierScratch::new(),
+        [blocks[left.index()]],
+        None,
+        &mut placed_by_frontier,
+    );
+    let ssa = SsaForm::compute(&steps, &dominators);
+    let phi_blocks: BTreeSet<BlockId> = ssa
+        .phis()
+        .filter(|(_, phi)| phi.result.variable == "x")
+        .map(|(block, _)| block)
+        .collect();
+
+    assert_eq!(
+        phi_blocks,
+        placed_by_frontier.into_iter().collect::<BTreeSet<_>>()
+    );
+    assert_eq!(
+        phi_blocks,
+        BTreeSet::from([blocks[join.index()], blocks[head.index()]])
+    );
 }
