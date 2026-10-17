@@ -90,15 +90,15 @@ fn closure<I, E>(
         }
     }
     while let Some(block) = pending.pop() {
-        let next: SmallVec<[BlockId; 4]> = if forward {
-            cfg.successors(block).collect()
-        } else {
-            cfg.predecessors(block).collect()
-        };
-        for block in next {
-            if within[block.index()] && !core::mem::replace(&mut seen[block.index()], true) {
-                pending.push(block);
+        let mut admit = |next: BlockId| {
+            if within[next.index()] && !core::mem::replace(&mut seen[next.index()], true) {
+                pending.push(next);
             }
+        };
+        if forward {
+            cfg.successors(block).for_each(&mut admit);
+        } else {
+            cfg.predecessors(block).for_each(&mut admit);
         }
     }
     seen
@@ -125,7 +125,10 @@ fn multi_entry_cycle<I, E>(
     let mut allowed = vec![true; cfg.block_bound()];
     loop {
         let ahead = closure(cfg, [witness], true, &allowed);
-        let behind = closure(cfg, [witness], false, &allowed);
+        // Every block on a path back to `witness` from a block it reaches is
+        // itself reached from `witness`, so the walk back can stay inside
+        // `ahead` instead of visiting everything that merely leads here.
+        let behind = closure(cfg, [witness], false, &ahead);
         let member: Vec<bool> = ahead
             .iter()
             .zip(&behind)
@@ -503,57 +506,89 @@ mod tests {
         exhaustive.chain(random)
     }
 
+    /// Make one digraph reducible and check the result without reading the
+    /// production cycle logic. Returns whether the digraph was irreducible.
+    fn check_digraph(count: usize, edges: &[(usize, usize)]) -> bool {
+        // Block `i` holds the instruction `i`, which a copy repeats, so a
+        // block's instruction names the original it stands for.
+        let mut cfg = Cfg::<u32>::new();
+        let mut blocks = alloc::vec![cfg.entry()];
+        blocks.extend((1..count).map(|_| cfg.new_block()));
+        for (index, &block) in blocks.iter().enumerate() {
+            cfg.block_mut(block)
+                .instructions_mut()
+                .push(u32::try_from(index).expect("a test index fits in u32"));
+        }
+        for &(from, to) in edges {
+            cfg.add_edge(blocks[from], blocks[to], EdgeKind::Fallthrough);
+        }
+        let was_reducible = is_reducible(&cfg, &DominatorTree::compute(&cfg));
+        let original_blocks = cfg.block_count();
+        let label = alloc::format!("{count} nodes {edges:?}");
+
+        let duplicated = make_reducible(&mut cfg);
+
+        assert!(is_reducible(&cfg, &DominatorTree::compute(&cfg)), "{label}");
+        assert_eq!(cfg.block_count(), original_blocks + duplicated, "{label}");
+        assert_eq!(duplicated == 0, was_reducible, "{label}");
+
+        // The new graph covers the old one: mapping each block to the
+        // original it stands for sends the outgoing edges of every block,
+        // as a multiset, onto those of its original, so every path of the
+        // original is a path of the result and the other way round.
+        let origin = |block: BlockId| cfg.block(block).instructions()[0] as usize;
+        for block in cfg.block_ids() {
+            let mut now: Vec<usize> = cfg.successors(block).map(origin).collect();
+            let mut then: Vec<usize> = edges
+                .iter()
+                .filter(|&&(from, _)| from == origin(block))
+                .map(|&(_, to)| to)
+                .collect();
+            now.sort_unstable();
+            then.sort_unstable();
+            assert_eq!(
+                now,
+                then,
+                "successors of a copy of {}: {label}",
+                origin(block)
+            );
+        }
+        assert_eq!(origin(cfg.entry()), 0, "{label}");
+        !was_reducible
+    }
+
     #[test]
     fn the_result_is_reducible_and_covers_the_original_on_every_small_digraph() {
-        let mut irreducible = 0_usize;
-        for (count, edges) in digraphs() {
-            // Block `i` holds the instruction `i`, which a copy repeats, so a
-            // block's instruction names the original it stands for.
-            let mut cfg = Cfg::<u32>::new();
-            let mut blocks = alloc::vec![cfg.entry()];
-            blocks.extend((1..count).map(|_| cfg.new_block()));
-            for (index, &block) in blocks.iter().enumerate() {
-                cfg.block_mut(block)
-                    .instructions_mut()
-                    .push(u32::try_from(index).expect("a test index fits in u32"));
-            }
-            for &(from, to) in &edges {
-                cfg.add_edge(blocks[from], blocks[to], EdgeKind::Fallthrough);
-            }
-            let was_reducible = is_reducible(&cfg, &DominatorTree::compute(&cfg));
-            let original_blocks = cfg.block_count();
-            let label = alloc::format!("{count} nodes {edges:?}");
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
 
-            let duplicated = make_reducible(&mut cfg);
-
-            assert!(is_reducible(&cfg, &DominatorTree::compute(&cfg)), "{label}");
-            assert_eq!(cfg.block_count(), original_blocks + duplicated, "{label}");
-            assert_eq!(duplicated == 0, was_reducible, "{label}");
-            irreducible += usize::from(!was_reducible);
-
-            // The new graph covers the old one: mapping each block to the
-            // original it stands for sends the outgoing edges of every block,
-            // as a multiset, onto those of its original, so every path of the
-            // original is a path of the result and the other way round.
-            let origin = |block: BlockId| cfg.block(block).instructions()[0] as usize;
-            for block in cfg.block_ids() {
-                let mut now: Vec<usize> = cfg.successors(block).map(origin).collect();
-                let mut then: Vec<usize> = edges
-                    .iter()
-                    .filter(|&&(from, _)| from == origin(block))
-                    .map(|&(_, to)| to)
-                    .collect();
-                now.sort_unstable();
-                then.sort_unstable();
-                assert_eq!(
-                    now,
-                    then,
-                    "successors of a copy of {}: {label}",
-                    origin(block)
-                );
+        // Not returning is the failure this guards against, so the sweep runs
+        // on a worker that the test stops waiting for, naming the digraph it
+        // was stuck on, instead of hanging the whole run.
+        let position = Arc::new(AtomicUsize::new(0));
+        let progress = Arc::clone(&position);
+        let worker = std::thread::spawn(move || {
+            let mut irreducible = 0_usize;
+            for (index, (count, edges)) in digraphs().enumerate() {
+                progress.store(index, Ordering::Relaxed);
+                irreducible += usize::from(check_digraph(count, &edges));
             }
-            assert_eq!(origin(cfg.entry()), 0, "{label}");
+            irreducible
+        });
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while !worker.is_finished() {
+            let stuck = position.load(Ordering::Relaxed);
+            assert!(
+                Instant::now() < deadline,
+                "make_reducible did not return on digraph {stuck}: {:?}",
+                digraphs().nth(stuck)
+            );
+            std::thread::sleep(Duration::from_millis(10));
         }
+        let irreducible = worker
+            .join()
+            .unwrap_or_else(|failure| std::panic::resume_unwind(failure));
         assert!(
             irreducible > 1_000,
             "only {irreducible} irreducible digraphs"
