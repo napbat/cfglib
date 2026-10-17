@@ -14,7 +14,7 @@ use cfglib::{
 
 use super::BenchmarkSuite;
 use super::fixtures::{ApiInst, dataflow_cfg};
-use crate::fixtures::{CfgReachability, Reachability, branchy_cfg, branchy_graph};
+use crate::fixtures::{CfgReachability, Reachability, branchy_cfg, branchy_graph, fixture_u32};
 use crate::harness::benchmark_case;
 
 const NODE_COUNT: usize = 512;
@@ -436,9 +436,7 @@ const INDEX_PATH_LENGTH: usize = 64;
 const MEET_COUNT: u64 = 1_024;
 
 fn register_lattice_helpers(suite: &mut BenchmarkSuite<'_>) {
-    let left: Vec<u32> = (0..INDEX_PATH_LENGTH)
-        .map(|index| u32::try_from(index).expect("a small index fits in u32"))
-        .collect();
+    let left: Vec<u32> = (0..INDEX_PATH_LENGTH).map(fixture_u32).collect();
     let right = left.clone();
     // A heap fixture the optimizer cannot fold the meet loop away against.
     let facts: Vec<u64> = (0..MEET_COUNT).rev().collect();

@@ -249,3 +249,38 @@ fn exit_blocks_iterator() {
     let exits: Vec<BlockId> = cfg.exit_blocks().collect();
     assert_eq!(exits, vec![b1]);
 }
+
+#[test]
+fn is_compact_is_true_exactly_when_compaction_changes_no_identity() {
+    let mut cfg = Cfg::<MockInst>::new();
+    let kept = cfg.new_block();
+    let middle = cfg.new_block();
+    let last = cfg.new_block();
+    cfg.add_edge(cfg.entry(), kept, EdgeKind::Fallthrough);
+    let doomed = cfg.add_edge(kept, middle, EdgeKind::Fallthrough);
+    cfg.add_edge(middle, last, EdgeKind::Fallthrough);
+    assert!(cfg.is_compact(), "adding never invalidates an identity");
+
+    // A removed slot below a live one: compaction renumbers.
+    cfg.remove_edge(doomed);
+    cfg.remove_block(middle);
+    let predicted = cfg.is_compact();
+    assert!(!predicted);
+    assert_eq!(cfg.compact().is_identity(), predicted);
+    assert!(cfg.is_compact());
+
+    // A removed trailing slot is still a removed slot: compaction drops it.
+    let trailing = cfg.new_block();
+    cfg.remove_block(trailing);
+    let predicted = cfg.is_compact();
+    assert!(!predicted);
+    assert_eq!(cfg.compact().is_identity(), predicted);
+
+    // Every edge removed: the edge slots are all removed ones.
+    let only = cfg.edges().next().map(|edge| edge.id());
+    cfg.remove_edge(only.expect("the chain kept one edge"));
+    let predicted = cfg.is_compact();
+    assert!(!predicted);
+    assert_eq!(cfg.compact().is_identity(), predicted);
+    assert!(cfg.is_compact());
+}

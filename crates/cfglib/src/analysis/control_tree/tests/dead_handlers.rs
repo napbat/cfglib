@@ -15,6 +15,7 @@ use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
 use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
+use crate::test_util::rng::Rng;
 use crate::test_util::{DfInst, MockInst, ff};
 use crate::{ControlTree, GotoReason};
 use EdgeKind::{Back, ConditionalFalse, ConditionalTrue, Fallthrough};
@@ -478,31 +479,11 @@ fn every_small_graph_with_a_handler_keeps_every_owned_block() {
     });
 }
 
-/// A small deterministic generator, so a failing graph replays.
-struct Random(u64);
-
-impl Random {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 >> 12;
-        self.0 ^= self.0 << 25;
-        self.0 ^= self.0 >> 27;
-        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-
-    fn below(&mut self, bound: usize) -> usize {
-        usize::try_from(self.next() % bound as u64).expect("a value below a usize bound")
-    }
-
-    fn chance(&mut self, percent: usize) -> bool {
-        self.below(100) < percent
-    }
-}
-
 /// A graph of five to nine blocks with one or two regions whose pads are
 /// often dead, so pads and their extents land inside loops, branches, and
 /// each other. Only a pad's own extent and exception edges enter it. A block
 /// is empty with `empty_percent` chance.
-fn random_graph_with_regions(random: &mut Random, empty_percent: usize) -> Cfg<DfInst> {
+fn random_graph_with_regions(random: &mut Rng, empty_percent: usize) -> Cfg<DfInst> {
     let count = 5 + random.below(5);
     let mut cfg: Cfg<DfInst> = Cfg::new();
     let ids: Vec<BlockId> = core::iter::once(cfg.entry())
@@ -545,7 +526,7 @@ fn random_graph_with_regions(random: &mut Random, empty_percent: usize) -> Cfg<D
         if outside.is_empty() {
             continue;
         }
-        let pick = |random: &mut Random| outside[random.below(outside.len())];
+        let pick = |random: &mut Rng| outside[random.below(outside.len())];
         let handlers = (0..=random.below(2))
             .map(|_| {
                 let entry = pick(random);
@@ -589,7 +570,7 @@ fn random_graph_with_regions(random: &mut Random, empty_percent: usize) -> Cfg<D
 
 #[test]
 fn random_graphs_with_handlers_keep_every_owned_block() {
-    let mut random = Random(0x9E37_79B9_7F4A_7C15);
+    let mut random = Rng::new(0x9E37_79B9_7F4A_7C15);
     for sample in 0..40_000 {
         let cfg = random_graph_with_regions(&mut random, 0);
         let (tree, report) = ControlTree::compute_with_report(&cfg);
@@ -607,7 +588,7 @@ fn random_graphs_with_handlers_and_empty_blocks_keep_every_label() {
     // Gotos to an empty block dangle by design, and the report lists them;
     // every other label resolves. Treating the empty blocks as empty is the
     // same as clearing them.
-    let mut random = Random(0xD1B5_4A32_D192_ED03);
+    let mut random = Rng::new(0xD1B5_4A32_D192_ED03);
     for sample in 0..40_000 {
         let mut cfg = random_graph_with_regions(&mut random, 30);
         let context = alloc::format!("sample {sample}: {}", describe(&cfg));

@@ -86,7 +86,9 @@ pub struct SwitchRecovery {
 /// Reconstruct switch tables from detected jump-table patterns.
 ///
 /// This function rewires the CFG, so it takes a [`Cfg`] and not a
-/// [`CfgView`].
+/// [`CfgView`]. The graph can carry any edge payload `E`; the edges the
+/// function adds carry `E::default()`, and edges it does not remove keep
+/// their payload.
 ///
 /// For each [`JumpTable`], removes the existing `IndirectJump` edge(s) from
 /// the block and replaces them with `SwitchCase` edges to each resolved
@@ -95,8 +97,8 @@ pub struct SwitchRecovery {
 /// The `resolve` function maps target tokens to block IDs — the consumer
 /// provides it because token-to-block mapping is frontend-specific (an
 /// address-to-block map for binaries, a CST-node-to-block map for source).
-pub fn recover_switch_tables<I, T>(
-    cfg: &mut Cfg<I>,
+pub fn recover_switch_tables<I, T, E: Default>(
+    cfg: &mut Cfg<I, E>,
     tables: &[JumpTable<T>],
     mut resolve: impl FnMut(&T) -> Option<BlockId>,
 ) -> Vec<SwitchRecovery> {
@@ -144,13 +146,13 @@ mod tests {
     /// A machine-flavoured terminator: an indirect jump through a table of
     /// raw addresses.
     struct TableJump {
-        targets: Option<(Vec<u64>, Option<u64>)>,
+        targets: Option<SwitchTargets<u64>>,
     }
 
     impl SwitchSource for TableJump {
         type Target = u64;
 
-        fn switch_targets(&self) -> Option<(Vec<u64>, Option<u64>)> {
+        fn switch_targets(&self) -> Option<SwitchTargets<u64>> {
             self.targets.clone()
         }
     }
@@ -178,19 +180,49 @@ mod tests {
             recover_switch_tables(&mut cfg, &tables, |addr| address_map.get(addr).copied());
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].case_count, 2);
-        // The IndirectJump edge is gone; SwitchCase + default edges exist.
-        assert!(cfg.edges().all(|e| e.kind() != EdgeKind::IndirectJump));
+        // The IndirectJump edge is gone; the cases and the default replace it.
         assert_eq!(
             cfg.edges()
-                .filter(|e| e.kind() == EdgeKind::SwitchCase)
-                .count(),
-            2
+                .map(|edge| (edge.kind(), edge.target()))
+                .collect::<Vec<_>>(),
+            [
+                (EdgeKind::SwitchCase, case_a),
+                (EdgeKind::SwitchCase, case_b),
+                (EdgeKind::Unconditional, default),
+            ]
+        );
+    }
+
+    #[test]
+    fn recovery_works_on_graphs_with_an_edge_payload() {
+        let mut cfg = Cfg::<TableJump, u8>::with_edge_payload();
+        let case = cfg.new_block();
+        let other = cfg.new_block();
+        cfg.add_edge_with_payload(cfg.entry(), case, EdgeKind::IndirectJump, 1);
+        let kept = cfg.add_edge_with_payload(case, other, EdgeKind::Fallthrough, 9);
+        cfg.block_mut(cfg.entry()).push(TableJump {
+            targets: Some((vec![0x10], None)),
+        });
+
+        let tables = detect_switch_tables(&cfg);
+        let recovered = recover_switch_tables(&mut cfg, &tables, |address| {
+            (*address == 0x10).then_some(case)
+        });
+
+        assert_eq!(recovered[0].case_count, 1);
+        let case_edge = cfg
+            .edges()
+            .find(|edge| edge.kind() == EdgeKind::SwitchCase)
+            .expect("the resolved case is wired");
+        assert_eq!(
+            case_edge.payload(),
+            &0,
+            "an added edge has the default payload"
         );
         assert_eq!(
-            cfg.edges()
-                .filter(|e| e.kind() == EdgeKind::Unconditional)
-                .count(),
-            1
+            cfg.edge(kept).payload(),
+            &9,
+            "an unrelated edge keeps its payload"
         );
     }
 
@@ -204,7 +236,7 @@ mod tests {
         impl SwitchSource for ComputedGoto {
             type Target = u32;
 
-            fn switch_targets(&self) -> Option<(Vec<u32>, Option<u32>)> {
+            fn switch_targets(&self) -> Option<SwitchTargets<u32>> {
                 (!self.case_nodes.is_empty()).then(|| (self.case_nodes.clone(), None))
             }
         }

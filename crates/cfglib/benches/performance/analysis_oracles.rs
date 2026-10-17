@@ -1,10 +1,13 @@
-use super::fixtures::{WIDE_FACT_WORDS, fixture_u32};
-use super::structural_oracles::has_directed_edge;
-use super::{
-    BTreeSet, BlockId, Cfg, CommonAncestor, ConstantInst, DominanceFrontiers, DominatorTree,
-    EdgeStep, Facts, Graph, IntervalAnalysis, NodeFacts, NodeId, PhiPlacements, PostDominatorTree,
-    PostNode, ProgramPoint, SsaForm, SsaValue, TraversalDirection, VecDeque,
+use std::collections::{BTreeSet, VecDeque};
+
+use cfglib::{
+    BlockId, Cfg, CommonAncestor, DominanceFrontiers, DominatorTree, EdgeStep, Facts, Graph,
+    IntervalAnalysis, NodeFacts, NodeId, PhiPlacements, PostDominatorTree, PostNode, ProgramPoint,
+    SsaForm, SsaValue, TraversalDirection,
 };
+
+use super::fixtures::{ConstantInst, WIDE_FACT_WORDS, fixture_u32};
+use super::structural_oracles::has_directed_edge;
 
 pub(super) fn directed_distances(
     graph: &Graph<(), ()>,
@@ -168,7 +171,7 @@ pub(super) fn assert_branchy_dominators(dominators: &DominatorTree, node_count: 
         } else {
             let parent = ((index - 1) / 2) * 2;
             assert_eq!(dominators.idom(block), Some(BlockId::from_index(parent)));
-            let level = u32::try_from(index.div_ceil(2)).expect("fixture level fits in u32");
+            let level = fixture_u32(index.div_ceil(2));
             assert_eq!(dominators.level(block), Some(level));
         }
     }

@@ -15,6 +15,7 @@ use cfglib::{
 };
 
 use super::BenchmarkSuite;
+use crate::fixtures::fixture_u32;
 use crate::harness::benchmark_case;
 
 /// Keys of the dense fan-out tables.
@@ -42,12 +43,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
 /// way a reference index is recorded.
 fn fanout_pairs() -> Vec<(usize, u32)> {
     (0..FANOUT_KEYS * FANOUT_FAN)
-        .map(|index| {
-            (
-                index * 7_919 % FANOUT_KEYS,
-                u32::try_from(index).expect("fixture index fits u32"),
-            )
-        })
+        .map(|index| (index * 7_919 % FANOUT_KEYS, fixture_u32(index)))
         .collect()
 }
 
@@ -81,9 +77,11 @@ fn register_fanout(suite: &mut BenchmarkSuite<'_>) {
         suite,
         "fanout_dense_from_grouped",
         || {
-            DenseFanout::<u32>::from_grouped((0..FANOUT_KEYS).map(|key| {
-                (0..key % (2 * FANOUT_FAN)).map(move |slot| u32::try_from(key + slot).unwrap_or(0))
-            }))
+            DenseFanout::<u32>::from_grouped(
+                (0..FANOUT_KEYS).map(|key| {
+                    (0..key % (2 * FANOUT_FAN)).map(move |slot| fixture_u32(key + slot))
+                }),
+            )
         },
         |built: &DenseFanout<u32>| {
             assert_eq!(built.bound(), FANOUT_KEYS);
@@ -127,7 +125,7 @@ fn register_small_walks(suite: &mut BenchmarkSuite<'_>) {
             || {
                 let mut visited = 0_usize;
                 for walk in 0..WALKS {
-                    let base = u32::try_from(walk).unwrap_or(0) * 16;
+                    let base = fixture_u32(walk) * 16;
                     let stopped = open_search(
                         [(base, 0), (base + 8, 0)],
                         OpenSearchConfig::new(order),
@@ -236,7 +234,7 @@ fn stack_graph() -> (Stack, Vec<(StackNodeId, StackNodeId)>) {
     let file = graph.add_file(());
     let mut bindings = Vec::with_capacity(STACK_REFERENCES);
     for index in 0..STACK_REFERENCES {
-        let symbol = u32::try_from(index).expect("fixture symbol fits u32");
+        let symbol = fixture_u32(index);
         let reference = graph
             .add_push_symbol_node(file, symbol, true, ())
             .expect("known file");

@@ -1,12 +1,14 @@
 # Performance benchmark
 
 `performance/main.rs` is the crate root for a dependency-free synthetic
-benchmark; its support modules live beside it. The harness has separate CPU
-and allocation builds so allocator instrumentation cannot perturb timing
-results.
+benchmark. It registers the original hot-path cases (`performance/hot_paths/`)
+and the facade API cases (`performance/api_cases/`) into one
+`BenchmarkSuite`; the harness, fixtures, and oracles live beside it. The
+harness has separate CPU and allocation builds so allocator instrumentation
+cannot perturb timing results.
 
-The latest local comparison and its measurement limits are recorded in
-[RESULTS.md](RESULTS.md).
+[RESULTS.md](RESULTS.md) is a dated record of one optimization session and its
+measurement limits, not a description of the current tree.
 
 `graph-store.rs` is a separate, self-contained target measuring `Graph` at
 the two scales it exists for. The first table is symbol-graph scale: one
@@ -20,6 +22,16 @@ convention, prints one line per case, and takes the fastest of five runs.
 The large table is sensitive to whatever else the machine is doing; pin the
 process to one core and raise its priority before comparing two revisions of
 it. The procedure-scale table is stable without that.
+
+`analysis-scratch/main.rs` is a third self-contained target. It reports what
+one callable's flow build allocates, phase by phase (reverse postorder, the
+dominator tree, dominance frontiers, phi placement, SSA, the memory trace,
+memory SSA, and memory-carried value flow), on a chain of if/else diamonds at
+three procedure sizes, and what each scratch-taking entry point costs once its
+working storage is warm. The CPU build prints best-of-seven nanoseconds per
+call; the allocation build prints allocations and requested bytes per call. An
+optional argument filters by substring of a `phase/size` name such as
+`ssa-form-in/large`.
 
 ## Adding a benchmark
 
@@ -43,15 +55,16 @@ rejects duplicate case names, duplicate API assignments, unknown API names,
 filters that select nothing, and any public facade function without coverage.
 The operation's oracle always runs before measurement.
 
-API-focused cases are split by responsibility under
+Hot-path cases belong in the `performance/hot_paths/` module that owns their
+responsibility. API-focused cases are split by responsibility under
 `performance/api_cases/`; reusable instruction and graph fixtures live in
 their sibling fixture modules. Add a focused case to the appropriate module
-instead of extending `main.rs`. The `PUBLIC_API_FUNCTIONS` inventory covers
-all 139 root-level free functions re-exported by `lib.rs`; the repository
-policy check derives that set from the facade and fails if the inventory is
-stale. Constructors, accessors, and associated analysis entry points are
-exercised by the workloads but are not individually timed as facade
-functions.
+instead of extending `main.rs`. The `PUBLIC_API_FUNCTIONS` inventory lists
+every root-level free function re-exported by `lib.rs`; the repository policy
+check derives that set from the facade and fails if the inventory is stale,
+and the last line of a run (`coverage:`) prints the current counts.
+Constructors, accessors, and associated analysis entry points are exercised by
+the workloads but are not individually timed as facade functions.
 
 `api_cases/traversal.rs` holds the small-run shapes that the 1,024-node chains
 of `graph.rs` hide behind per-step costs: many short chases and searches, a

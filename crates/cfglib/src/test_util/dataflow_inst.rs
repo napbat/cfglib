@@ -214,9 +214,9 @@ pub fn df_with_effect(mut inst: DfInst, effect: FlowEffect) -> DfInst {
     inst
 }
 
-/// Create a pure [`DfInst`] (no side effects, no defs/uses).
-pub fn df_pure(name: &'static str) -> DfInst {
-    df_base(name)
+/// Make `inst` an instruction that may unwind, as a call does.
+pub fn df_throwing(inst: DfInst) -> DfInst {
+    df_with_effect(inst, FlowEffect::MayThrow)
 }
 
 /// Create an impure [`DfInst`] with a single side effect.
