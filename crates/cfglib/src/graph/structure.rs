@@ -16,9 +16,9 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
-use super::dominator::{DominatorScratch, DominatorTree, complete_dominator_forest};
-use super::edge_view::{EdgeView, FilteredEdges};
-use super::loop_nest::nesting;
+use super::dominator::DominatorTree;
+use super::edge_view::EdgeView;
+use super::loop_forest::LoopForest;
 use super::scc::tarjan_scc;
 use super::search::{DfsEvent, depth_first_events};
 use super::traverse::TraversalDirection;
@@ -146,97 +146,6 @@ where
     backs
 }
 
-/// Compute the merged natural loop body for every back-edge to one header.
-///
-/// The body is the set of reachable nodes that can reach any latch without
-/// going through `header`, plus `header` itself. A single multi-source
-/// reverse walk computes the same union without revisiting a shared body for
-/// every latch.
-///
-/// When the header dominates every latch, that walk cannot leave the region
-/// the header dominates. A tagged latch the header does not dominate (an
-/// irreducible cycle) lets the walk run on to blocks that merely lead to the
-/// cycle, such as the entry, so the body is cut down to the walked blocks the
-/// header reaches: the blocks on a path from the header to a latch.
-fn loop_body_for<G: GraphView>(
-    graph: &G,
-    dom: &DominatorTree<G::NodeId>,
-    header: G::NodeId,
-    latches: &[G::NodeId],
-) -> BTreeSet<G::NodeId> {
-    let mut body = BTreeSet::new();
-    body.insert(header);
-    let mut stack = Vec::new();
-    for &latch in latches {
-        if body.insert(latch) {
-            stack.push(latch);
-        }
-    }
-    while let Some(n) = stack.pop() {
-        for p in graph.predecessors(n).filter(|&p| dom.is_reachable(p)) {
-            if !body.contains(&p) {
-                body.insert(p);
-                stack.push(p);
-            }
-        }
-    }
-
-    if latches.iter().all(|&latch| dom.dominates(header, latch)) {
-        return body;
-    }
-    let mut cycle = BTreeSet::from([header]);
-    cycle.extend(latches.iter().copied());
-    stack.push(header);
-    while let Some(n) = stack.pop() {
-        for s in graph.successors(n) {
-            if body.contains(&s) && cycle.insert(s) {
-                stack.push(s);
-            }
-        }
-    }
-    cycle
-}
-
-/// Build merged, depth-annotated loops from a set of back-edges.
-fn loops_from_backs<G: GraphView>(
-    graph: &G,
-    dom: &DominatorTree<G::NodeId>,
-    backs: &[BackEdge<G::NodeId>],
-) -> Vec<NaturalLoop<G::NodeId>> {
-    if backs.is_empty() {
-        return Vec::new();
-    }
-
-    // Group back-edges by header.
-    let mut header_map: alloc::collections::BTreeMap<G::NodeId, Vec<G::NodeId>> =
-        alloc::collections::BTreeMap::new();
-    for be in backs {
-        header_map.entry(be.header).or_default().push(be.tail);
-    }
-
-    let mut loops: Vec<NaturalLoop<G::NodeId>> = Vec::new();
-    for (header, latches) in &header_map {
-        let body = loop_body_for(graph, dom, *header, latches);
-        loops.push(NaturalLoop {
-            header: *header,
-            body,
-            latches: latches.iter().copied().collect(),
-            depth: 0, // filled in below
-        });
-    }
-
-    // The nesting tree states the depth, so the flat list cannot disagree
-    // with it.
-    let depths = nesting(&loops).depths;
-    for (lp, depth) in loops.iter_mut().zip(depths) {
-        lp.depth = depth;
-    }
-
-    // Sort by depth (outermost first), then by header.
-    loops.sort_by(|a, b| a.depth.cmp(&b.depth).then(a.header.cmp(&b.header)));
-    loops
-}
-
 /// Detect all natural loops in a graph view.
 ///
 /// Loops sharing the same header are merged into a single
@@ -273,7 +182,7 @@ pub fn detect_loops<G: GraphView>(
     graph: &G,
     dom: &DominatorTree<G::NodeId>,
 ) -> Vec<NaturalLoop<G::NodeId>> {
-    loops_from_backs(graph, dom, &find_back_edges(graph, dom))
+    LoopForest::compute(graph, dom).natural_loops()
 }
 
 /// Detect natural loops in an edge view, honoring explicit
@@ -287,26 +196,14 @@ where
     G: EdgeView,
     G::EdgeData: KindedEdge,
 {
-    loops_from_backs(graph, dom, &find_back_edges_tagged(graph, dom))
+    LoopForest::compute_tagged(graph, dom).natural_loops()
 }
 
 /// Detect the natural loops of all the code, tagged, including the code the
-/// root does not reach.
-///
-/// [`detect_loops_tagged`] finds the loops of the program the root runs, and a
-/// consumer that also lays out the code the root misses (a handler pad no
-/// exception edge leads to, a filter funclet) wants the loops inside that code
-/// too: a loop there is as much a loop as one in live code. Those come from
-/// dominance within the dead code. [`complete_dominator_forest`] roots a tree
-/// at each source component of it, and the detection runs over the edges
-/// between dead blocks alone, so no live block takes part. That restriction is
-/// what keeps the answers apart: the forest is a whole-graph answer in which
-/// dead code that jumps into a live block takes the root away from it, and an
-/// edge from dead code into live code closes no cycle of either.
-///
-/// The result is the loops of [`detect_loops_tagged`], unchanged, then those of
-/// the dead code, in order of depth, then header. A dead loop is nested only in
-/// dead loops.
+/// root does not reach: the loops of [`detect_loops_tagged`], unchanged, then
+/// those of the dead code, in order of depth, then header. A dead loop is
+/// nested only in dead loops. [`LoopForest::compute_all_tagged`] says why the
+/// dead code's loops are exact.
 pub(crate) fn detect_all_loops_tagged<G>(
     graph: &G,
     dom: &DominatorTree<G::NodeId>,
@@ -315,20 +212,7 @@ where
     G: RootedView + EdgeView,
     G::EdgeData: KindedEdge,
 {
-    let mut loops = detect_loops_tagged(graph, dom);
-    let mut roots = Vec::new();
-    let Some(forest) =
-        complete_dominator_forest(&mut DominatorScratch::new(), &mut roots, graph, dom)
-    else {
-        return loops;
-    };
-    let dead = FilteredEdges::new(graph, |edge: G::EdgeId, _: &G::EdgeData| {
-        let edge = graph.edge(edge);
-        !dom.is_reachable(edge.source()) && !dom.is_reachable(edge.target())
-    });
-    loops.extend(detect_loops_tagged(&dead, &forest));
-    loops.sort_by(|a, b| a.depth.cmp(&b.depth).then(a.header.cmp(&b.header)));
-    loops
+    LoopForest::compute_all_tagged(graph, dom).natural_loops()
 }
 
 /// Whether the graph is reducible.

@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 
 use crate::dataflow::cfg_view::CfgView;
 use crate::graph::dominator::DominatorTree;
-use crate::graph::structure::{NaturalLoop, detect_loops, detect_loops_tagged};
+use crate::graph::loop_forest::LoopForest;
 use crate::graph::view::{DenseId, RootedView};
 
 /// Topology-level metrics for any rooted graph view.
@@ -42,8 +42,8 @@ pub struct GraphMetrics {
 /// Instruction-aware metrics for a [`CfgView`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct CfgMetrics {
-    /// Topology metrics (loop depth honors [`EdgeKind::Back`] tags via
-    /// [`detect_loops_tagged`]).
+    /// Topology metrics (loop depth honors [`EdgeKind::Back`] tags, as
+    /// [`LoopForest::compute_tagged`] does).
     ///
     /// [`EdgeKind::Back`]: crate::EdgeKind::Back
     pub graph: GraphMetrics,
@@ -120,7 +120,7 @@ impl GraphMetrics {
         let mut metrics = topology(graph);
         if metrics.edge_count > 0 {
             let dom = DominatorTree::compute(graph);
-            metrics.max_nesting_depth = max_nesting_depth(&detect_loops(graph, &dom));
+            metrics.max_nesting_depth = LoopForest::compute(graph, &dom).max_nesting_depth();
         }
         metrics
     }
@@ -155,7 +155,7 @@ impl CfgMetrics {
         // second).
         if graph.edge_count > 0 {
             let dom = DominatorTree::compute(cfg);
-            graph.max_nesting_depth = max_nesting_depth(&detect_loops_tagged(cfg, &dom));
+            graph.max_nesting_depth = LoopForest::compute_tagged(cfg, &dom).max_nesting_depth();
         }
 
         let instruction_count: usize = cfg.node_ids().map(|b| cfg.instructions(b).len()).sum();
@@ -183,9 +183,8 @@ impl CfgMetrics {
 /// [`CfgMetrics::compute`] does.
 #[must_use]
 pub fn block_nesting_depths<G: RootedView>(graph: &G) -> Vec<usize> {
-    let n = graph.node_bound();
     let dom = DominatorTree::compute(graph);
-    depths_of(n, &detect_loops(graph, &dom))
+    LoopForest::compute(graph, &dom).node_depths()
 }
 
 /// Compute the nesting depth of each block of a [`CfgView`], honoring
@@ -195,28 +194,7 @@ pub fn block_nesting_depths<G: RootedView>(graph: &G) -> Vec<usize> {
 #[must_use]
 pub fn cfg_block_nesting_depths<G: CfgView>(cfg: &G) -> Vec<usize> {
     let dom = DominatorTree::compute(cfg);
-    depths_of(cfg.node_bound(), &detect_loops_tagged(cfg, &dom))
-}
-
-/// The depth of the deepest loop of `loops`, counted from 1: the depth of
-/// the most deeply nested node, 0 without loops. Detection already stated
-/// each loop's nesting depth, so this reads it back instead of counting
-/// again.
-fn max_nesting_depth<N>(loops: &[NaturalLoop<N>]) -> usize {
-    loops.iter().map(|lp| lp.depth + 1).max().unwrap_or(0)
-}
-
-fn depths_of<N: DenseId>(n: usize, loops: &[NaturalLoop<N>]) -> Vec<usize> {
-    let mut depths = vec![0usize; n];
-    for lp in loops {
-        for &node in &lp.body {
-            if node.index() < n {
-                let depth = &mut depths[node.index()];
-                *depth = (*depth).max(lp.depth + 1);
-            }
-        }
-    }
-    depths
+    LoopForest::compute_tagged(cfg, &dom).node_depths()
 }
 
 #[cfg(test)]

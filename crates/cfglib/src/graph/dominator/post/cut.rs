@@ -103,9 +103,10 @@ impl CutBuffers {
     ///
     /// This is the blocks that reach `exits` walking the edges backwards,
     /// confined to the blocks the entry reaches. The confinement is part of
-    /// the answer, not a shortcut: a dead block with an edge into live code
-    /// reaches an exit too, and has no facts. The walk cannot leave the live
-    /// blocks and come back, since a live block has no dead predecessor.
+    /// the answer: a dead block with an edge into live code reaches an exit
+    /// too, and has no facts, so it must not be marked. It costs the walk
+    /// nothing it needs, because a successor of a live block is live, so a
+    /// path from a live block to an exit never leaves the live blocks.
     fn mark_reaching<G: GraphView>(&mut self, graph: &G, exits: &[G::NodeId]) -> Vec<bool> {
         let mut reaching = Vec::new();
         reachable_in(
