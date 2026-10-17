@@ -9,7 +9,7 @@ use cfglib::{
     promote_handler_extents, remove_dead_code, remove_dead_code_mapped, remove_empty_blocks_mapped,
     remove_unreachable, remove_unreachable_mapped, resolve_jump_edges, rotate_loop, simplify,
     simplify_mapped, split_critical_edges, split_critical_edges_mapped, split_critical_edges_with,
-    split_node, split_node_at_points, split_node_with_payload_mapped, verify,
+    verify,
 };
 use cfglib::{
     ExclusiveExtent, ExtentPromotionDecision, HandlerRef, RelaxError, promote_exclusive_extents,
@@ -221,12 +221,11 @@ fn register_node_edits(suite: &mut BenchmarkSuite<'_>) {
     let split = dataflow_cfg(1, 8);
     benchmark_case!(
         suite,
-        "api_split_node",
-        covers[split_node],
+        "cfg_split_block",
         || {
             let mut candidate = split.clone();
             let entry = candidate.entry();
-            let new_block = split_node(&mut candidate, entry, 4);
+            let new_block = candidate.split_block(entry, 4);
             (candidate, new_block)
         },
         |(candidate, _)| {
@@ -236,12 +235,11 @@ fn register_node_edits(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "api_split_node_with_payload_mapped",
-        covers[split_node_with_payload_mapped],
+        "cfg_split_block_with_payload_mapped",
         || {
             let mut candidate = split.clone();
             let entry = candidate.entry();
-            let result = split_node_with_payload_mapped(&mut candidate, entry, 4, ());
+            let result = candidate.split_block_with_payload_mapped(entry, 4, ());
             (candidate, result)
         },
         |(candidate, _)| {
@@ -251,12 +249,11 @@ fn register_node_edits(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "api_split_node_at_points",
-        covers[split_node_at_points],
+        "cfg_split_block_at_points",
         || {
             let mut candidate = split.clone();
             let entry = candidate.entry();
-            let result = split_node_at_points(&mut candidate, entry, [(2, ()), (5, ())]);
+            let result = candidate.split_block_at_points_with_payloads(entry, [(2, ()), (5, ())]);
             (candidate, result)
         },
         |(candidate, result)| {

@@ -95,6 +95,38 @@ fn split_block_preserves_outgoing_edge_identity_and_metadata() {
 }
 
 #[test]
+fn split_points_are_atomic_and_instruction_neutral() {
+    let mut cfg = Cfg::<_, u8>::with_edge_payload();
+    let entry = cfg.entry();
+    cfg.block_mut(entry)
+        .instructions_mut()
+        .extend(["a", "may_throw", "c"]);
+
+    let error = cfg
+        .split_block_at_points_with_payloads(entry, [(2, 2), (1, 1)])
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        SplitPointError::NotStrictlyIncreasing {
+            previous: 2,
+            point: 1
+        }
+    ));
+    assert_eq!(cfg.block_count(), 1, "validation precedes mutation");
+
+    let (blocks, mapping) = cfg
+        .split_block_at_points_with_payloads(entry, [(1, 10), (2, 20)])
+        .unwrap();
+    assert_eq!(blocks.len(), 3);
+    assert_eq!(cfg.block(blocks[1]).instructions(), &["may_throw"]);
+    assert_eq!(mapping.blocks(entry), Some(blocks.as_slice()));
+    let first_edge = cfg.outgoing(blocks[0]).next().unwrap();
+    let second_edge = cfg.outgoing(blocks[1]).next().unwrap();
+    assert_eq!(cfg.edge(first_edge).payload(), &10);
+    assert_eq!(cfg.edge(second_edge).payload(), &20);
+}
+
+#[test]
 fn redirect_edges_moves_predecessors_in_order() {
     let mut cfg = Cfg::<MockInst>::new();
     let old = cfg.new_block();

@@ -1,11 +1,11 @@
-//! Edge contraction and instruction-neutral node splitting.
+//! Edge contraction: folding one block into the block that leads to it.
 
 extern crate alloc;
 
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
-use crate::cfg::{Cfg, SplitPointError};
+use crate::cfg::Cfg;
 use crate::edge::EdgeId;
 use crate::rewrite::Rewrite;
 
@@ -84,42 +84,6 @@ fn contract_edge_inner<I, E>(
         mapping.record_block(target, [source]);
     }
     true
-}
-
-/// Split a block at one instruction index with a default edge payload.
-pub fn split_node<I, E>(cfg: &mut Cfg<I, E>, block: BlockId, at: usize) -> BlockId
-where
-    E: Default,
-{
-    cfg.split_block(block, at)
-}
-
-/// Split a block at one instruction index and return its rewrite mapping.
-pub fn split_node_with_payload_mapped<I, E>(
-    cfg: &mut Cfg<I, E>,
-    block: BlockId,
-    at: usize,
-    payload: E,
-) -> (BlockId, Rewrite) {
-    cfg.split_block_with_payload_mapped(block, at, payload)
-}
-
-/// Split a block at several original instruction boundaries.
-///
-/// This frontend-neutral primitive is suitable for materializing individual
-/// throwing instructions, invoke sites, or any other consumer-selected
-/// program points without encoding instruction semantics in cfglib.
-///
-/// # Errors
-///
-/// Returns [`SplitPointError`] when a point is out of bounds or the points are
-/// not strictly increasing.
-pub fn split_node_at_points<I, E>(
-    cfg: &mut Cfg<I, E>,
-    block: BlockId,
-    points: impl IntoIterator<Item = (usize, E)>,
-) -> Result<(alloc::vec::Vec<BlockId>, Rewrite), SplitPointError> {
-    cfg.split_block_at_points_with_payloads(block, points)
 }
 
 #[cfg(test)]
@@ -229,33 +193,5 @@ mod tests {
         assert_eq!(cfg.edge(back).kind(), EdgeKind::Back);
         assert_eq!(cfg.edge(back).weight(), Some(0.875));
         assert_eq!(cfg.edge_count(), 3);
-    }
-
-    #[test]
-    fn split_points_are_atomic_and_instruction_neutral() {
-        let mut cfg = Cfg::<_, u8>::with_edge_payload();
-        let entry = cfg.entry();
-        cfg.block_mut(entry)
-            .instructions_mut()
-            .extend([ff("a"), ff("may_throw"), ff("c")]);
-
-        let error = split_node_at_points(&mut cfg, entry, [(2, 2), (1, 1)]).unwrap_err();
-        assert!(matches!(
-            error,
-            SplitPointError::NotStrictlyIncreasing {
-                previous: 2,
-                point: 1
-            }
-        ));
-        assert_eq!(cfg.block_count(), 1, "validation precedes mutation");
-
-        let (blocks, mapping) = split_node_at_points(&mut cfg, entry, [(1, 10), (2, 20)]).unwrap();
-        assert_eq!(blocks.len(), 3);
-        assert_eq!(cfg.block(blocks[1]).instructions()[0].1, "may_throw");
-        assert_eq!(mapping.blocks(entry), Some(blocks.as_slice()));
-        let first_edge = cfg.outgoing(blocks[0]).next().unwrap();
-        let second_edge = cfg.outgoing(blocks[1]).next().unwrap();
-        assert_eq!(cfg.edge(first_edge).payload(), &10);
-        assert_eq!(cfg.edge(second_edge).payload(), &20);
     }
 }

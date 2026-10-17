@@ -400,10 +400,7 @@ pub use transform::cleanup::{
     remove_unreachable, remove_unreachable_mapped, simplify, simplify_mapped,
 };
 pub use transform::coloring::{ColorAssignment, color_graph, interference_graph};
-pub use transform::contract::{
-    contract_edge, contract_edge_mapped, split_node, split_node_at_points,
-    split_node_with_payload_mapped,
-};
+pub use transform::contract::{contract_edge, contract_edge_mapped};
 pub use transform::critical::{
     split_critical_edges, split_critical_edges_mapped, split_critical_edges_with,
 };

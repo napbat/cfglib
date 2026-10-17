@@ -403,7 +403,7 @@ fallible pass stops execution.
 | Critical edge splitting | `split_critical_edges`, `split_critical_edges_with` | Insert blocks on multi-succ → multi-pred edges while retaining the original edge identity/payload and mapping both halves |
 | Dead code elimination | `dead_code_elimination[_with_exits]` (instructions), `remove_dead_code[_mapped]` (plus the structure left dead) | Liveness-based; requires `EffectInfo` so side-effecting code is never silently deleted. The `_with_exits` form seeds what leaves each block |
 | Edge contraction | `contract_edge`, `contract_edge_mapped` | Merge two blocks connected by a single edge; mapped form preserves surviving edge identities/payloads |
-| Node splitting | `split_node`, `split_node_at_points` | Split at one or several validated consumer-selected instruction boundaries |
+| Node splitting | `Cfg::split_block`, `Cfg::split_block_at_points[_with_payloads]` | Split at one or several validated consumer-selected instruction boundaries |
 | Loop rotation | `rotate_loop` | Top-tested → bottom-tested loop form |
 | Loop invariant detection | `find_loop_invariants` | Identify hoistable instructions |
 | Partial redundancy elimination | `PreAnalysis::compute`, `eliminate_pre` | GVN-based PRE |
