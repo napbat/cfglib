@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 use smallvec::SmallVec;
 
 use crate::block::BlockId;
+use crate::graph::traverse::{TraversalDirection, reachable};
 use crate::graph::view::{DenseId, RootedView};
 
 /// One interval in the source graph's first-level partition.
@@ -25,21 +26,16 @@ pub struct Interval<N = BlockId> {
 
 /// Result of the source graph's first-level interval analysis.
 ///
-/// The public `levels` shape is retained for compatibility, but the current
-/// implementation always populates only `levels[0]`, the intervals of the
-/// original graph. It does not compute subsequent derived-graph levels.
+/// The analysis computes only the partition of the original graph. It does
+/// not derive successive graphs from the intervals, so it cannot say whether
+/// a graph is reducible, and a graph with several intervals may be either.
+/// [`is_reducible`](crate::graph::structure::is_reducible) is the answer to
+/// that question.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntervalAnalysis<N = BlockId> {
-    /// Interval partitions by level; currently only the source partition at
-    /// `levels[0]` is populated.
-    pub levels: Vec<Vec<Interval<N>>>,
-    /// Whether the first partition contains at most one interval.
-    ///
-    /// This is sufficient to establish reducibility, but `false` is not a
-    /// complete irreducibility result because derived levels are not computed.
-    /// Use [`is_reducible`](crate::graph::structure::is_reducible) for the full
-    /// graph property.
-    pub is_reducible: bool,
+    /// The intervals of the nodes the root reaches, each node in exactly one,
+    /// starting with the interval of the root.
+    pub intervals: Vec<Interval<N>>,
 }
 
 /// Compute the source graph's first-level intervals.
@@ -163,9 +159,18 @@ where
     // the current interval. Assigned nodes use a sentinel because their count
     // is never consulted again. This single table replaces separate assigned,
     // in-interval, total-predecessor, and inside-predecessor tables.
+    //
+    // Only predecessors the root reaches are counted: a block that never runs
+    // cannot be in an interval, so it must not keep a live block out of one.
+    let live = reachable(graph, [graph.root()], TraversalDirection::Outgoing);
     let mut remaining_predecessors = alloc::vec![C::from_usize(0); graph.node_bound()];
     for node in graph.node_ids() {
-        remaining_predecessors[node.index()] = C::from_usize(graph.predecessors(node).count());
+        remaining_predecessors[node.index()] = C::from_usize(
+            graph
+                .predecessors(node)
+                .filter(|predecessor| live[predecessor.index()])
+                .count(),
+        );
     }
     let mut headers = alloc::vec![graph.root()];
     let mut worklist: SmallVec<[G::NodeId; 4]> = SmallVec::new();
@@ -227,45 +232,34 @@ where
     intervals
 }
 
-/// Perform interval analysis on a rooted graph view.
-///
-/// Computes the Allen-Cocke interval partition of the source graph. The
-/// returned [`IntervalAnalysis`] contains only this first level; no derived
-/// graph iteration is performed. Consequently, `is_reducible == false` means
-/// only that the first partition did not collapse to one interval, not that the
-/// graph has been proven irreducible.
-///
-/// # Examples
-///
-/// ```
-/// use cfglib::{Cfg, EdgeKind, IntervalAnalysis};
-///
-/// let mut cfg = Cfg::<u32>::new();
-/// let b1 = cfg.new_block();
-/// cfg.add_edge(cfg.entry(), b1, EdgeKind::Fallthrough);
-///
-/// let result = IntervalAnalysis::compute(&cfg);
-/// assert!(result.is_reducible);
-/// ```
 impl<N: DenseId> IntervalAnalysis<N> {
     /// Compute the source graph's first-level interval partition.
+    ///
+    /// Computes the Allen-Cocke interval partition of the source graph; no
+    /// derived graph iteration is performed. Blocks the root does not reach
+    /// belong to no interval, and an edge out of one does not count against
+    /// the block it enters.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cfglib::{Cfg, EdgeKind, IntervalAnalysis};
+    ///
+    /// let mut cfg = Cfg::<u32>::new();
+    /// let b1 = cfg.new_block();
+    /// cfg.add_edge(cfg.entry(), b1, EdgeKind::Fallthrough);
+    ///
+    /// let result = IntervalAnalysis::compute(&cfg);
+    /// assert_eq!(result.intervals.len(), 1);
+    /// assert!(result.intervals[0].blocks.contains(&b1));
+    /// ```
     #[must_use]
     pub fn compute<G>(graph: &G) -> Self
     where
         G: RootedView<NodeId = N>,
     {
-        let mut levels = Vec::new();
-
-        let intervals = compute_intervals_from_graph(graph);
-        let interval_count = intervals.len();
-        levels.push(intervals);
-
-        // A single first-level interval is sufficient to establish
-        // reducibility. Use `structure::is_reducible` when a complete
-        // Boolean answer is needed.
         Self {
-            is_reducible: interval_count <= 1,
-            levels,
+            intervals: compute_intervals_from_graph(graph),
         }
     }
 }
@@ -316,31 +310,26 @@ mod tests {
     fn single_block_is_one_interval() {
         let cfg = CfgBuilder::build(vec![ff("a")]).unwrap();
         let result = IntervalAnalysis::compute(&cfg);
-        assert_eq!(result.levels.len(), 1);
-        assert_eq!(result.levels[0].len(), 1);
-        assert!(result.is_reducible);
+        assert_eq!(result.intervals.len(), 1);
     }
 
     #[test]
-    fn empty_view_has_one_empty_level() {
+    fn empty_view_has_no_intervals() {
         let graph = Graph::<(), ()>::new();
         let view = Rooted::new(&graph, NodeId::from_index(0));
 
         let result = IntervalAnalysis::compute(&view);
 
-        assert_eq!(result.levels, vec![Vec::new()]);
-        assert!(result.is_reducible);
+        assert_eq!(result.intervals, Vec::new());
     }
 
     #[test]
     fn linear_cfg_is_one_interval() {
         let cfg = CfgBuilder::build(vec![ff("a"), ff("b"), ff("c")]).unwrap();
         let result = IntervalAnalysis::compute(&cfg);
-        assert_eq!(result.levels.len(), 1);
         // All blocks should be in a single interval since each block
         // has only one predecessor from within the interval.
-        assert_eq!(result.levels[0].len(), 1);
-        assert!(result.is_reducible);
+        assert_eq!(result.intervals.len(), 1);
     }
 
     #[test]
@@ -357,8 +346,7 @@ mod tests {
         cfg.add_edge(b2, b3, crate::edge::EdgeKind::Fallthrough);
 
         let result = IntervalAnalysis::compute(&cfg);
-        assert_eq!(result.levels.len(), 1);
-        assert_ne!(result.levels[0].len(), 0);
+        assert_ne!(result.intervals.len(), 0);
     }
 
     #[test]
@@ -371,8 +359,7 @@ mod tests {
         ])
         .unwrap();
         let result = IntervalAnalysis::compute(&cfg);
-        assert_eq!(result.levels.len(), 1);
-        assert_ne!(result.levels[0].len(), 0);
+        assert_ne!(result.intervals.len(), 0);
     }
 
     #[test]
@@ -385,9 +372,9 @@ mod tests {
 
         let result = IntervalAnalysis::compute(&Rooted::new(&graph, nodes[7]));
 
-        assert_eq!(result.levels[0].len(), 1);
+        assert_eq!(result.intervals.len(), 1);
         assert_eq!(
-            result.levels[0][0]
+            result.intervals[0]
                 .blocks
                 .iter()
                 .map(|node| node.index())
@@ -409,9 +396,9 @@ mod tests {
 
         let result = IntervalAnalysis::compute(&view);
 
-        assert_eq!(result.levels[0].len(), 1);
+        assert_eq!(result.intervals.len(), 1);
         assert_eq!(
-            result.levels[0][0]
+            result.intervals[0]
                 .blocks
                 .iter()
                 .copied()
@@ -431,9 +418,9 @@ mod tests {
 
         let result = IntervalAnalysis::compute(&Rooted::new(&graph, root));
 
-        assert_eq!(result.levels[0].len(), 1);
-        assert_eq!(result.levels[0][0].blocks.len(), 2);
-        assert!(result.levels[0][0].blocks.contains(&child));
+        assert_eq!(result.intervals.len(), 1);
+        assert_eq!(result.intervals[0].blocks.len(), 2);
+        assert!(result.intervals[0].blocks.contains(&child));
     }
 
     #[test]
@@ -475,12 +462,12 @@ mod tests {
 
         let result = IntervalAnalysis::compute(&Rooted::new(&graph, root));
 
-        assert_eq!(result.levels[0].len(), 2);
-        assert_eq!(result.levels[0][0].header, root);
-        assert_eq!(result.levels[0][0].blocks.len(), 1);
-        assert_eq!(result.levels[0][1].header, loop_header);
+        assert_eq!(result.intervals.len(), 2);
+        assert_eq!(result.intervals[0].header, root);
+        assert_eq!(result.intervals[0].blocks.len(), 1);
+        assert_eq!(result.intervals[1].header, loop_header);
         assert_eq!(
-            result.levels[0][1]
+            result.intervals[1]
                 .blocks
                 .iter()
                 .copied()
@@ -501,11 +488,58 @@ mod tests {
 
         let result = IntervalAnalysis::compute(&Rooted::new(&graph, root));
 
-        assert_eq!(result.levels[0].len(), 1);
-        assert_eq!(result.levels[0][0].blocks.len(), 2);
-        assert!(result.levels[0][0].blocks.contains(&root));
-        assert!(result.levels[0][0].blocks.contains(&reachable));
-        assert!(!result.levels[0][0].blocks.contains(&unreachable));
-        assert!(!result.levels[0][0].blocks.contains(&unreachable_successor));
+        assert_eq!(result.intervals.len(), 1);
+        assert_eq!(result.intervals[0].blocks.len(), 2);
+        assert!(result.intervals[0].blocks.contains(&root));
+        assert!(result.intervals[0].blocks.contains(&reachable));
+        assert!(!result.intervals[0].blocks.contains(&unreachable));
+        assert!(!result.intervals[0].blocks.contains(&unreachable_successor));
+    }
+
+    #[test]
+    fn a_dead_predecessor_does_not_split_an_interval() {
+        // `dead` never runs, so it cannot be the second predecessor that
+        // keeps `join` out of the root's interval.
+        let mut graph = Graph::<(), ()>::new();
+        let root = graph.add_node(());
+        let join = graph.add_node(());
+        let dead = graph.add_node(());
+        graph.add_edge(root, join, ());
+        graph.add_edge(dead, join, ());
+
+        let result = IntervalAnalysis::compute(&Rooted::new(&graph, root));
+
+        assert_eq!(result.intervals.len(), 1);
+        assert_eq!(
+            result.intervals[0].blocks,
+            BTreeSet::from([root, join]),
+            "the dead block is in no interval"
+        );
+    }
+
+    #[test]
+    fn dead_code_that_branches_into_a_live_diamond_leaves_it_whole() {
+        // root -> {left, right} -> merge, with a dead block into both the
+        // merge and the left arm.
+        let mut graph = Graph::<(), ()>::new();
+        let [root, left, right, merge, dead] = [(); 5].map(|()| graph.add_node(()));
+        for (from, to) in [
+            (root, left),
+            (root, right),
+            (left, merge),
+            (right, merge),
+            (dead, merge),
+            (dead, left),
+        ] {
+            graph.add_edge(from, to, ());
+        }
+
+        let result = IntervalAnalysis::compute(&Rooted::new(&graph, root));
+
+        assert_eq!(result.intervals.len(), 1);
+        assert_eq!(
+            result.intervals[0].blocks,
+            BTreeSet::from([root, left, right, merge])
+        );
     }
 }

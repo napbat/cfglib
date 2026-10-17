@@ -4,9 +4,10 @@
 use std::collections::BTreeSet;
 
 use cfglib::{
-    BlockId, Cfg, CfgMetrics, DominatorTree, EdgeKind, GraphMetrics, LoopNestingTree,
-    block_nesting_depths, canonicalize_loops, cfg_block_nesting_depths, detect_loops,
-    detect_loops_tagged, find_back_edges, insert_preheader, loop_exit_blocks, verify,
+    BlockId, Cfg, CfgMetrics, DominatorTree, EdgeKind, GraphMetrics, IntervalAnalysis,
+    LoopNestingTree, block_nesting_depths, canonicalize_loops, cfg_block_nesting_depths,
+    detect_loops, detect_loops_tagged, find_back_edges, insert_preheader, is_reducible,
+    loop_exit_blocks, make_reducible, verify,
 };
 
 fn set(blocks: impl IntoIterator<Item = BlockId>) -> BTreeSet<BlockId> {
@@ -365,5 +366,67 @@ fn canonicalized_nested_loops_report_current_bodies_and_exits() {
             .expect("every header here is entered from outside");
         assert_eq!(cfg.successors(preheader).collect::<Vec<_>>(), [now.header]);
     }
+    assert!(verify(&cfg).is_ok());
+}
+
+#[test]
+fn intervals_partition_the_blocks_the_entry_reaches() {
+    // entry -> header <-> body -> exit, and a dead block into the exit.
+    let mut cfg = Cfg::<u32>::new();
+    let [header, body, exit, dead] = [(); 4].map(|()| cfg.new_block());
+    cfg.add_edge(cfg.entry(), header, EdgeKind::Fallthrough);
+    cfg.add_edge(header, body, EdgeKind::ConditionalTrue);
+    cfg.add_edge(body, header, EdgeKind::Back);
+    cfg.add_edge(header, exit, EdgeKind::ConditionalFalse);
+    cfg.add_edge(dead, exit, EdgeKind::Fallthrough);
+
+    let analysis = IntervalAnalysis::compute(&cfg);
+
+    let covered: BTreeSet<BlockId> = analysis
+        .intervals
+        .iter()
+        .flat_map(|interval| interval.blocks.iter().copied())
+        .collect();
+    assert_eq!(covered, set([cfg.entry(), header, body, exit]));
+    assert_eq!(
+        analysis
+            .intervals
+            .iter()
+            .map(|i| i.blocks.len())
+            .sum::<usize>(),
+        covered.len(),
+        "no block is in two intervals"
+    );
+    assert_eq!(analysis.intervals[0].header, cfg.entry());
+}
+
+#[test]
+fn a_dead_block_does_not_split_an_interval() {
+    let mut cfg = Cfg::<u32>::new();
+    let [join, dead] = [(); 2].map(|()| cfg.new_block());
+    cfg.add_edge(cfg.entry(), join, EdgeKind::Fallthrough);
+    cfg.add_edge(dead, join, EdgeKind::Fallthrough);
+
+    let analysis = IntervalAnalysis::compute(&cfg);
+
+    assert_eq!(analysis.intervals.len(), 1);
+    assert_eq!(analysis.intervals[0].blocks, set([cfg.entry(), join]));
+}
+
+#[test]
+fn splitting_makes_an_irreducible_cfg_reducible() {
+    // entry -> {a, b}, a <-> b: a cycle with two entries.
+    let mut cfg = Cfg::<u32>::new();
+    let [a, b] = [(); 2].map(|()| cfg.new_block());
+    cfg.add_edge(cfg.entry(), a, EdgeKind::ConditionalTrue);
+    cfg.add_edge(cfg.entry(), b, EdgeKind::ConditionalFalse);
+    cfg.add_edge(a, b, EdgeKind::Fallthrough);
+    cfg.add_edge(b, a, EdgeKind::Fallthrough);
+    assert!(!is_reducible(&cfg, &DominatorTree::compute(&cfg)));
+
+    let split = make_reducible(&mut cfg);
+
+    assert!(split > 0);
+    assert!(is_reducible(&cfg, &DominatorTree::compute(&cfg)));
     assert!(verify(&cfg).is_ok());
 }

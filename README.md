@@ -302,12 +302,12 @@ A `FunctionView` follows these rules:
 | Strongly connected components | `tarjan_scc` → `SccDecomposition<N>`, `condensation` → component DAG of owned `Scc<N>` payloads | Generic iterative Tarjan algorithm, reverse-topological order (leaves first); components are ascending slices of one flat array (`components()`, `component(node)` → `Scc` with `nodes()`, `contains`, `is_singleton`) |
 | SCC in topological order | `kosaraju_scc` → `SccDecomposition<N>` | The same partition numbered sources first (`index(u) < index(v)` across every edge); the classic deterministic two-pass algorithm, for budgeted forward closures over the condensation |
 | Condensation of a given decomposition | `condensation_of(graph, &SccDecomposition)` → `Graph<(), ()>` | The component DAG whose node index **is** the given decomposition's component index, either algorithm's; deduplicated edges, and in-degrees plus dependents straight off the graph (the one-pass fixpoint shape) |
-| Back-edge detection | `find_back_edges` (dominance, any view), `find_back_edges_tagged` (CFG, honors `Back` tags) | |
-| Natural loop detection | `detect_loops` / `detect_loops_tagged` → `Vec<NaturalLoop<N>>` | Header, body, latches, nesting depth |
-| Loop nesting tree | `LoopNestingTree::compute` | Parent/child loop hierarchy |
+| Back-edge detection | `find_back_edges` (dominance, any view), `find_back_edges_tagged` (CFG, honors `Back` tags) | Edges out of code the root reaches; unreachable code has no back-edges |
+| Natural loop detection | `detect_loops` / `detect_loops_tagged` → `Vec<NaturalLoop<N>>` | Header, body, latches, nesting depth; outermost loops first. A tagged loop on an irreducible graph covers the cycle, not the blocks before it |
+| Loop nesting tree | `LoopNestingTree::compute` | Parent/child loop hierarchy, and the one statement of nesting depth: `NaturalLoop::depth` is the depth in this tree. Loops over the same body are siblings |
 | Control dependence graph | `control_dependence_graph` → `Graph<N, ()>` | From post-dominator tree, over any view; a block that branches back to itself has the edge to itself |
 | Program dependence graph | `program_dependence_graph` → `Graph<DependenceNode, DependenceKind>` | Control + def-use edges; reverse traversal performs backward slicing |
-| Interval analysis | `IntervalAnalysis::compute` | T1-T2 reduction over rooted views; reducibility test |
+| Interval analysis | `IntervalAnalysis::compute` → `intervals` | First-level Allen-Cocke interval partition of the code the root reaches; use `is_reducible` for the reducibility test |
 | Reducibility transform | `make_reducible` | Node splitting for irreducible CFGs |
 | Reverse CFG | `reverse_cfg` | Flip all edges, swap entry/exits |
 | Call graph | `call_graph` + `CallInfo`, `propagate_summaries` (callee-first SCC fixpoint) | Consumer-typed callees; interprocedural summary scaffold |
