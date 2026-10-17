@@ -326,17 +326,6 @@ impl<V: VariableId> SsaForm<V> {
     }
 }
 
-/// Panics unless `cfg`'s entry has no predecessor, which every SSA
-/// construction entry point requires; see [`SsaForm::compute`].
-pub(crate) fn assert_entry_is_not_a_branch_target<G: CfgView>(cfg: &G) {
-    assert!(
-        cfg.predecessors(cfg.root()).next().is_none(),
-        "SSA construction needs an entry block with no predecessor, but {} is a branch target: \
-         add an empty block that falls through to it and make that block the entry",
-        cfg.root()
-    );
-}
-
 impl<V: VariableId> SsaForm<V> {
     /// Compute a fully renamed SSA view of `cfg`.
     ///

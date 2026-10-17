@@ -145,6 +145,28 @@ fn callable(regions: usize) -> Cfg<Instruction> {
     cfg
 }
 
+/// A callable whose entry is a loop header: it loads a slot and reads a
+/// register, and its latch redefines the register, stores the slot, and
+/// branches back. Every phi at the entry merges the value the function starts
+/// with.
+fn entry_loop() -> Cfg<Instruction> {
+    let mut cfg = Cfg::new();
+    let latch = cfg.new_block();
+    let exit = cfg.new_block();
+    let entry = cfg.entry();
+    cfg.add_edge(entry, latch, EdgeKind::ConditionalTrue);
+    cfg.add_edge(entry, exit, EdgeKind::ConditionalFalse);
+    cfg.add_edge(latch, entry, EdgeKind::Back);
+    cfg.block_mut(entry).push(load(Slot::Global, 5, 6));
+    cfg.block_mut(latch).push(Instruction {
+        uses: Vec::new(),
+        defs: vec![5],
+        events: Vec::new(),
+    });
+    cfg.block_mut(latch).push(store(Slot::Global, 5));
+    cfg
+}
+
 fn load(slot: Slot, address: u16, into: u16) -> Instruction {
     Instruction {
         uses: vec![address],
@@ -170,6 +192,7 @@ fn one_worker_scratch_analyzes_a_whole_slice_of_the_corpus() {
     let corpus: Vec<_> = [1, 9, 2, 30, 1, 5, 17, 1]
         .into_iter()
         .map(callable)
+        .chain([entry_loop()])
         .collect();
 
     let mut scratch = FlowScratch::default();

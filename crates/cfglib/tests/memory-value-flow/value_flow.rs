@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cfglib::{
-    BlockId, Cfg, ConservativeMemoryAlias, DominatorTree, ExactMemoryAlias, MemoryAccess,
+    BlockId, Cfg, ConservativeMemoryAlias, DominatorTree, EdgeKind, ExactMemoryAlias, MemoryAccess,
     MemoryEvent, MemoryEventSite, MemorySsa, MemoryValueEdge, MemoryValueFlow,
     MemoryValueFlowError, MemoryValueFlowScratch, MemoryValueNode, MemoryValueRole, NodeId,
     ProgramPoint, SsaForm, SsaValue,
@@ -73,6 +73,7 @@ fn memory_carries(flow: &Flow, from: NodeId, to: NodeId) -> bool {
             MemoryValueEdge::Store { .. }
                 | MemoryValueEdge::Write { .. }
                 | MemoryValueEdge::MemoryPhi { .. }
+                | MemoryValueEdge::MemoryPhiStart { .. }
                 | MemoryValueEdge::Read { .. }
                 | MemoryValueEdge::Load { .. }
         ) {
@@ -164,6 +165,101 @@ fn a_store_and_a_load_connect_the_stored_value_to_the_loaded_one_through_the_mem
         flow.event_node(site(0, 0)).is_none(),
         "a pure instruction has no event node"
     );
+}
+
+#[test]
+fn the_start_values_of_a_loop_headed_by_the_entry_enter_the_phis_over_start_edges() {
+    // entry (header): v2 = x;   latch: v1 = ...; x = v1; back to the entry.
+    // The entry merges v1, v2, and the state of x with what the function
+    // starts with, which no CFG edge carries.
+    let mut cfg = Cfg::new();
+    let (latch, exit) = (cfg.new_block(), cfg.new_block());
+    let entry = cfg.entry();
+    cfg.add_edge(entry, latch, EdgeKind::ConditionalTrue);
+    cfg.add_edge(entry, exit, EdgeKind::ConditionalFalse);
+    cfg.add_edge(latch, entry, EdgeKind::Back);
+    cfg.block_mut(entry).push(Inst::load(0, 2));
+    cfg.block_mut(latch).push(Inst::compute(1, &[]));
+    cfg.block_mut(latch).push(Inst::store(0, 1));
+    let (_, memory, flow) = analyze(&cfg, &ExactMemoryAlias);
+    let class = memory.class_of(&0).unwrap();
+    let state = |version| MemoryValueNode::Memory(SsaValue::new(class, version));
+    let (load, store) = (site(0, 0), site(1, 1));
+    let end_of_latch = point(1, 2);
+    let at_entry = BlockId::from_index(0);
+
+    assert_eq!(
+        edges(&flow),
+        BTreeSet::from([
+            (
+                value(1, 0),
+                value(1, 1),
+                MemoryValueEdge::ValuePhiStart { block: at_entry }
+            ),
+            (
+                value(2, 0),
+                value(2, 1),
+                MemoryValueEdge::ValuePhiStart { block: at_entry }
+            ),
+            (
+                value(1, 2),
+                value(1, 1),
+                MemoryValueEdge::ValuePhi {
+                    block: at_entry,
+                    predecessor: end_of_latch
+                }
+            ),
+            (
+                value(2, 2),
+                value(2, 1),
+                MemoryValueEdge::ValuePhi {
+                    block: at_entry,
+                    predecessor: end_of_latch
+                }
+            ),
+            (
+                state(0),
+                state(1),
+                MemoryValueEdge::MemoryPhiStart { block: at_entry }
+            ),
+            (
+                state(2),
+                state(1),
+                MemoryValueEdge::MemoryPhi {
+                    block: at_entry,
+                    predecessor: end_of_latch
+                }
+            ),
+            (
+                state(1),
+                MemoryValueNode::Event(load),
+                MemoryValueEdge::Read { site: load }
+            ),
+            (
+                MemoryValueNode::Event(load),
+                value(2, 2),
+                MemoryValueEdge::Load {
+                    site: load,
+                    output_index: 0
+                }
+            ),
+            (
+                value(1, 2),
+                MemoryValueNode::Event(store),
+                MemoryValueEdge::Store {
+                    site: store,
+                    input_index: 0
+                }
+            ),
+            (
+                MemoryValueNode::Event(store),
+                state(2),
+                MemoryValueEdge::Write { site: store }
+            ),
+        ]),
+        "the start values have their own edges, apart from the departures"
+    );
+    assert!(carries(&flow, &SsaValue::new(1, 2), &SsaValue::new(2, 2)));
 }
 
 #[test]

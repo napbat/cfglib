@@ -177,20 +177,20 @@ pub const VARIABLES: u8 = 4;
 pub const LOCATIONS: u8 = 5;
 
 impl Program<u8> {
-    /// A random program whose entry has no predecessor, as SSA requires.
+    /// A random program. Its entry is a branch target whenever some edge
+    /// happens to lead back to it, so memory SSA meets the loop-headed entry
+    /// as often as any other loop.
     pub fn random(rng: &mut Rng, unwinds: bool) -> Self {
         let blocks = 2 + rng.below(6);
         let mut edges = Vec::new();
         for _ in 0..blocks + rng.below(blocks) {
             let (source, target) = (rng.below(blocks), rng.below(blocks));
-            if target != 0 {
-                let kind = if unwinds && rng.below(4) == 0 {
-                    EdgeKind::ExceptionUnwind
-                } else {
-                    EdgeKind::Fallthrough
-                };
-                edges.push((source, target, kind));
-            }
+            let kind = if unwinds && rng.below(4) == 0 {
+                EdgeKind::ExceptionUnwind
+            } else {
+                EdgeKind::Fallthrough
+            };
+            edges.push((source, target, kind));
         }
         let hole = (rng.below(4) == 0).then(|| 1 + rng.below(blocks - 1));
         let code = (0..blocks)

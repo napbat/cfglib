@@ -154,7 +154,8 @@ pub type MemorySsaValue = SsaValue<MemoryClassId>;
 /// The producer of one memory-SSA value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemoryDefinition {
-    /// Memory state entering a dominator-tree root.
+    /// Memory state entering a dominator-tree root: for the CFG entry, the
+    /// state the function starts with.
     LiveIn {
         /// Location class whose initial state enters the CFG component.
         class: MemoryClassId,
@@ -181,7 +182,7 @@ pub enum MemoryUse {
         /// Event consuming the memory state.
         site: MemoryEventSite,
     },
-    /// One incoming operand of a memory phi.
+    /// One incoming operand of a memory phi that arrives along a CFG edge.
     Phi {
         /// Block containing the phi.
         block: BlockId,
@@ -192,14 +193,29 @@ pub enum MemoryUse {
         /// Memory state produced by the phi.
         result: MemorySsaValue,
     },
+    /// The state the function starts with, as the start value of a memory
+    /// phi in an entry block that is a branch target: the use of the class's
+    /// live-in that no CFG edge carries.
+    PhiStart {
+        /// Block containing the phi, the CFG entry.
+        block: BlockId,
+        /// Memory state produced by the phi.
+        result: MemorySsaValue,
+    },
 }
 
 /// A fully renamed location-class phi.
+///
+/// As an ordinary [`SsaPhi`](crate::SsaPhi), it merges the state that
+/// arrives along each CFG edge into its block ([`operands`](Self::operands)),
+/// and, in an entry block that is a branch target, the state the function
+/// starts with ([`start_value`](Self::start_value)), which no edge carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryPhi {
     block: BlockId,
     result: MemorySsaValue,
     operands: Vec<(ProgramPoint, MemorySsaValue)>,
+    merges_start: bool,
 }
 
 impl MemoryPhi {
@@ -220,9 +236,35 @@ impl MemoryPhi {
     /// An unwind out of a block leaves before each of its throwing source
     /// instructions and carries the memory state before that instruction. A
     /// normal edge leaves at its block's instruction count.
+    ///
+    /// These are the edge operands only; see
+    /// [`start_value`](Self::start_value) for the state that has no
+    /// departure point.
     #[must_use]
     pub fn operands(&self) -> &[(ProgramPoint, MemorySsaValue)] {
         &self.operands
+    }
+
+    /// Whether this phi also merges the state the function starts with; see
+    /// [`start_value`](Self::start_value).
+    #[must_use]
+    pub const fn merges_start_value(&self) -> bool {
+        self.merges_start
+    }
+
+    /// The memory state of the class when the function starts: its
+    /// [`MemoryDefinition::LiveIn`] value, or `None` when the phi has no
+    /// such input.
+    ///
+    /// The input exists exactly when this phi sits in the CFG entry block,
+    /// which is then a branch target. It arrives once, before the entry
+    /// block runs, and so no departure point in
+    /// [`operands`](Self::operands) names it, as for
+    /// [`SsaPhi::start_value`](crate::SsaPhi::start_value).
+    #[must_use]
+    pub fn start_value(&self) -> Option<MemorySsaValue> {
+        self.merges_start
+            .then(|| SsaValue::live_in(self.result.variable))
     }
 }
 
@@ -409,11 +451,10 @@ where
 {
     /// Computes location-aware memory SSA for `cfg` using `alias`.
     ///
-    /// # Panics
-    ///
-    /// Panics when the CFG entry is a branch target, for the reason and with
-    /// the remedy given at [`SsaForm::compute`]: the state entering the
-    /// function would be dropped from the memory phi at the entry.
+    /// An entry block that is a branch target is supported, as it is by
+    /// [`SsaForm::compute`]: each memory phi placed there also merges the
+    /// state the function starts with, reported by
+    /// [`MemoryPhi::start_value`] apart from its edge operands.
     #[must_use]
     pub fn compute<G, A>(cfg: &G, alias: &A) -> Self
     where
@@ -431,10 +472,6 @@ where
     /// buffers of the shadow CFG the analysis runs over. The answer is the
     /// same one, built by the same code — the allocating entry point is this
     /// function over a fresh [`MemorySsaScratch`].
-    ///
-    /// # Panics
-    ///
-    /// As [`compute`](Self::compute): when the entry block is a branch target.
     #[must_use]
     pub fn compute_in<G, A>(scratch: &mut MemorySsaScratch<L, V, F>, cfg: &G, alias: &A) -> Self
     where
@@ -442,7 +479,6 @@ where
         G::Inst: MemoryEventInfo<Location = L, Fence = F> + InstrInfo<Variable = V>,
         A: MemoryAlias<L> + ?Sized,
     {
-        crate::dataflow::ssa::assert_entry_is_not_a_branch_target(cfg);
         scratch.reset();
         scratch.trace.rebuild(cfg);
         let (classes, class_by_location) = build_location_classes(scratch, alias);
@@ -593,6 +629,8 @@ where
                         .rev()
                         .map(|(_, operand)| operand.clone()),
                 );
+                // Popped first, as the function starts before any edge runs.
+                pending.extend(self.phis[phi_index].start_value());
             } else {
                 result.push(definition);
             }
@@ -628,7 +666,9 @@ where
                             pending.push(written.clone());
                         }
                     }
-                    MemoryUse::Phi { result, .. } => pending.push(result.clone()),
+                    MemoryUse::Phi { result, .. } | MemoryUse::PhiStart { result, .. } => {
+                        pending.push(result.clone());
+                    }
                 }
             }
         }
@@ -714,6 +754,16 @@ where
                     .iter()
                     .map(|(point, value)| (source_departure(cfg, shadow, *point), value.clone()))
                     .collect();
+                if let Some(start) = phi.start_value() {
+                    chains
+                        .users
+                        .entry(start)
+                        .or_default()
+                        .push(MemoryUse::PhiStart {
+                            block: block.block,
+                            result: phi.result.clone(),
+                        });
+                }
                 for (predecessor, operand) in &operands {
                     chains
                         .users
@@ -729,6 +779,7 @@ where
                     block: block.block,
                     result: phi.result.clone(),
                     operands,
+                    merges_start: phi.merges_start_value(),
                 });
             }
         }

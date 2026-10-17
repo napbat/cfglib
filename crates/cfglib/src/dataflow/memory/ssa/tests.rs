@@ -321,8 +321,11 @@ fn with_memory(mut cfg: Cfg<Instruction>) -> Cfg<Instruction> {
 
 #[test]
 fn one_scratch_reused_down_a_sequence_computes_the_allocating_answer() {
+    // The shared sequence has no entry that is a branch target, so the loop
+    // shape rides along: the scratch must also reproduce the start states.
     let sequence: Vec<_> = crate::test_util::shapes::scratch_sequence::<Instruction>()
         .into_iter()
+        .chain([entry_loop().0])
         .map(with_memory)
         .collect();
     let mut scratch = MemorySsaScratch::new();
@@ -511,17 +514,115 @@ fn a_handler_reads_the_memory_state_before_each_throwing_instruction() {
     );
 }
 
-#[test]
-#[should_panic(expected = "branch target")]
-fn memory_ssa_rejects_an_entry_that_is_a_branch_target() {
+/// The entry heads a loop: it reads `A`, and its latch writes `A` and branches
+/// back. Returns `(cfg, latch)`.
+fn entry_loop() -> (Cfg<Instruction>, crate::BlockId) {
     let mut cfg = Cfg::<Instruction>::new();
     let latch = cfg.new_block();
-    cfg.add_edge(cfg.entry(), latch, EdgeKind::Fallthrough);
+    let exit = cfg.new_block();
+    cfg.add_edge(cfg.entry(), latch, EdgeKind::ConditionalTrue);
+    cfg.add_edge(cfg.entry(), exit, EdgeKind::ConditionalFalse);
     cfg.add_edge(latch, cfg.entry(), EdgeKind::Back);
     cfg.block_mut(cfg.entry())
         .push(Instruction::access(Location::A, MemoryAccessKind::Read));
     cfg.block_mut(latch)
         .push(Instruction::access(Location::A, MemoryAccessKind::Write));
+    (cfg, latch)
+}
 
-    drop(MemorySsa::compute(&cfg, &ExactMemoryAlias));
+#[test]
+fn an_entry_that_is_a_branch_target_merges_the_start_state_with_its_back_edge() {
+    let (cfg, latch) = entry_loop();
+    let entry = cfg.entry();
+    let memory = MemorySsa::compute(&cfg, &ExactMemoryAlias);
+    let class = memory.class_of(&Location::A).unwrap();
+    let write = site(latch, 0);
+    let read = site(entry, 0);
+
+    let [phi] = memory.phis() else {
+        panic!("the entry merges the start state and the latch's write");
+    };
+    assert_eq!(phi.block(), entry);
+    assert_eq!(
+        phi.operands(),
+        [(
+            ProgramPoint {
+                block: latch,
+                inst_idx: 1,
+            },
+            memory
+                .event(write)
+                .and_then(MemorySsaEvent::written_version)
+                .unwrap()
+                .clone(),
+        )],
+        "the operands are the CFG edges alone"
+    );
+    let start = phi.start_value().expect("the entry's phi merges the start");
+    assert!(phi.merges_start_value());
+    assert_eq!(start, crate::SsaValue::live_in(class));
+    assert_eq!(
+        memory.definition(&start),
+        Some(&MemoryDefinition::LiveIn { class })
+    );
+    assert_eq!(
+        memory.users(&start),
+        [MemoryUse::PhiStart {
+            block: entry,
+            result: phi.result().clone(),
+        }],
+        "the live-in feeds the phi through its start use, and nothing else"
+    );
+
+    assert_eq!(
+        memory.reaching_definition(read),
+        Some(&MemoryDefinition::Phi {
+            block: entry,
+            class
+        })
+    );
+    let reaching = memory.reaching_definitions(read);
+    assert_eq!(reaching.len(), 2);
+    assert!(reaching.contains(&&MemoryDefinition::LiveIn { class }));
+    assert!(reaching.contains(&&MemoryDefinition::Event { site: write }));
+    assert_eq!(memory.transitive_readers(write), [read]);
+}
+
+#[test]
+fn only_the_memory_phi_of_the_entry_merges_a_start_state() {
+    // A loop headed by the entry whose body is a diamond, so the loop body
+    // has a memory phi of its own that merges edges only.
+    let mut cfg = Cfg::<Instruction>::new();
+    let [left, right, merge, exit] = core::array::from_fn(|_| cfg.new_block());
+    let entry = cfg.entry();
+    cfg.add_edge(entry, left, EdgeKind::ConditionalTrue);
+    cfg.add_edge(entry, right, EdgeKind::ConditionalFalse);
+    cfg.add_edge(left, merge, EdgeKind::Fallthrough);
+    cfg.add_edge(right, merge, EdgeKind::Fallthrough);
+    cfg.add_edge(merge, entry, EdgeKind::Back);
+    cfg.add_edge(merge, exit, EdgeKind::ConditionalFalse);
+    cfg.block_mut(entry)
+        .push(Instruction::access(Location::A, MemoryAccessKind::Read));
+    cfg.block_mut(left)
+        .push(Instruction::access(Location::A, MemoryAccessKind::Write));
+    cfg.block_mut(right)
+        .push(Instruction::access(Location::A, MemoryAccessKind::Write));
+    cfg.block_mut(merge)
+        .push(Instruction::access(Location::A, MemoryAccessKind::Read));
+
+    let memory = MemorySsa::compute(&cfg, &ExactMemoryAlias);
+    let with_start: Vec<_> = memory
+        .phis()
+        .iter()
+        .filter(|phi| phi.merges_start_value())
+        .map(crate::MemoryPhi::block)
+        .collect();
+    assert_eq!(with_start, [entry]);
+    let at_merge = memory
+        .phis()
+        .iter()
+        .find(|phi| phi.block() == merge)
+        .expect("the diamond merges the two writes");
+    assert_eq!(at_merge.operands().len(), 2);
+    assert_eq!(at_merge.start_value(), None);
 }

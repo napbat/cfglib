@@ -199,6 +199,7 @@ where
                     .find(|phi| *phi.result() == current)
                     .expect("a phi value has its phi");
                 pending.extend(phi.operands().iter().map(|(_, operand)| operand.clone()));
+                pending.extend(phi.start_value());
             }
         }
     }

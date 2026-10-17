@@ -33,13 +33,22 @@ pub enum MemoryValueEdge {
         /// Source instruction performing the transfer.
         point: crate::ProgramPoint,
     },
-    /// One incoming ordinary value flows into an ordinary SSA phi.
+    /// One incoming ordinary value flows into an ordinary SSA phi along a CFG
+    /// edge.
     ValuePhi {
         /// Block containing the phi.
         block: BlockId,
         /// Departure point supplying this operand, as in
         /// [`SsaPhi::operands`](crate::SsaPhi::operands).
         predecessor: crate::ProgramPoint,
+    },
+    /// The value an ordinary variable holds when the function starts flows
+    /// into its ordinary SSA phi in the entry block, as in
+    /// [`SsaPhi::start_value`](crate::SsaPhi::start_value). No CFG edge
+    /// carries it, so it has no departure point.
+    ValuePhiStart {
+        /// Block containing the phi, the CFG entry.
+        block: BlockId,
     },
     /// An ordinary SSA value selects an event's binding or sub-location.
     Address {
@@ -72,13 +81,21 @@ pub enum MemoryValueEdge {
         /// Position in [`MemoryAccess::value_defs`](crate::MemoryAccess::value_defs).
         output_index: usize,
     },
-    /// One incoming memory state flows into a memory phi.
+    /// One incoming memory state flows into a memory phi along a CFG edge.
     MemoryPhi {
         /// Block containing the phi.
         block: BlockId,
         /// Departure point supplying this operand, as in
         /// [`MemoryPhi::operands`](crate::MemoryPhi::operands).
         predecessor: crate::ProgramPoint,
+    },
+    /// The memory state the function starts with flows into the class's
+    /// memory phi in the entry block, as in
+    /// [`MemoryPhi::start_value`](crate::MemoryPhi::start_value). No CFG edge
+    /// carries it, so it has no departure point.
+    MemoryPhiStart {
+        /// Block containing the phi, the CFG entry.
+        block: BlockId,
     },
 }
 
@@ -464,6 +481,14 @@ where
         for block in ssa.blocks() {
             for phi in &block.phis {
                 let target = self.intern_value(&phi.result);
+                if let Some(start) = phi.start_value() {
+                    let source = self.intern_value(&start);
+                    self.graph.add_edge(
+                        source,
+                        target,
+                        MemoryValueEdge::ValuePhiStart { block: block.block },
+                    );
+                }
                 for (predecessor, operand) in phi.operands() {
                     let source = self.intern_value(operand);
                     self.graph.add_edge(
@@ -512,6 +537,14 @@ where
         }
         for phi in memory.phis() {
             let target = self.intern_memory(phi.result());
+            if let Some(start) = phi.start_value() {
+                let source = self.intern_memory(&start);
+                self.graph.add_edge(
+                    source,
+                    target,
+                    MemoryValueEdge::MemoryPhiStart { block: phi.block() },
+                );
+            }
             for (predecessor, operand) in phi.operands() {
                 let source = self.intern_memory(operand);
                 self.graph.add_edge(

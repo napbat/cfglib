@@ -394,6 +394,109 @@ fn merge_states_flow_through_memory_phis() {
     ));
 }
 
+/// The entry heads a loop. It reads register 5 and loads from memory, and the
+/// latch redefines register 5, stores it, and branches back. Returns
+/// `(cfg, latch)`.
+fn entry_loop() -> (Cfg<Instruction>, crate::BlockId) {
+    let mut cfg = Cfg::new();
+    let latch = cfg.new_block();
+    let exit = cfg.new_block();
+    let entry = cfg.entry();
+    cfg.add_edge(entry, latch, EdgeKind::ConditionalTrue);
+    cfg.add_edge(entry, exit, EdgeKind::ConditionalFalse);
+    cfg.add_edge(latch, entry, EdgeKind::Back);
+    cfg.block_mut(entry).push(Instruction::plain([5], [6]));
+    cfg.block_mut(entry).push(Instruction::access(
+        [],
+        [1],
+        MemoryAccess::read(Location::Value, [1]),
+    ));
+    cfg.block_mut(latch).push(Instruction::plain([], [5]));
+    cfg.block_mut(latch).push(Instruction::access(
+        [5],
+        [],
+        MemoryAccess::write(Location::Value, [5]),
+    ));
+    (cfg, latch)
+}
+
+#[test]
+fn the_start_states_of_an_entry_that_is_a_branch_target_enter_the_phis_over_their_own_edges() {
+    let (cfg, latch) = entry_loop();
+    let entry = cfg.entry();
+    let (ssa, memory, flow) = analyses(&cfg);
+    let end_of_latch = ProgramPoint {
+        block: latch,
+        inst_idx: 2,
+    };
+
+    let [memory_phi] = memory.phis() else {
+        panic!("the entry merges the location's state");
+    };
+    let start = memory_phi
+        .start_value()
+        .expect("the entry's phi merges the start");
+    let written = memory
+        .event(site(latch, 1))
+        .and_then(crate::MemorySsaEvent::written_version)
+        .unwrap();
+    let result = flow.memory_node(memory_phi.result()).unwrap();
+    assert!(has_edge(
+        &flow,
+        flow.memory_node(&start).unwrap(),
+        result,
+        MemoryValueEdge::MemoryPhiStart { block: entry }
+    ));
+    assert!(has_edge(
+        &flow,
+        flow.memory_node(written).unwrap(),
+        result,
+        MemoryValueEdge::MemoryPhi {
+            block: entry,
+            predecessor: end_of_latch,
+        }
+    ));
+
+    let ordinary = ssa
+        .block(entry)
+        .phis
+        .iter()
+        .find(|phi| phi.result.variable == 5)
+        .expect("the latch redefines register 5");
+    let target = flow.value_node(&ordinary.result).unwrap();
+    assert!(has_edge(
+        &flow,
+        flow.value_node(&SsaValue::live_in(5)).unwrap(),
+        target,
+        MemoryValueEdge::ValuePhiStart { block: entry }
+    ));
+    assert!(has_edge(
+        &flow,
+        flow.value_node(&ordinary.operands()[0].1).unwrap(),
+        target,
+        MemoryValueEdge::ValuePhi {
+            block: entry,
+            predecessor: end_of_latch,
+        }
+    ));
+
+    let starts: Vec<_> = flow
+        .graph()
+        .edges()
+        .filter_map(|edge| match edge.payload() {
+            MemoryValueEdge::ValuePhiStart { block }
+            | MemoryValueEdge::MemoryPhiStart { block } => Some(*block),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        starts.len(),
+        ssa.block(entry).phis.len() + memory.phis().len(),
+        "one start edge per phi of the entry"
+    );
+    assert!(starts.iter().all(|&block| block == entry));
+}
+
 #[test]
 fn memory_value_edges_preserve_operand_order_and_repetition() {
     let mut cfg = Cfg::new();
@@ -554,8 +657,11 @@ fn with_value_flow(mut cfg: Cfg<Instruction>) -> Cfg<Instruction> {
 
 #[test]
 fn one_scratch_reused_down_a_sequence_computes_the_allocating_answer() {
+    // The shared sequence has no entry that is a branch target, so the loop
+    // shape rides along: the scratch must also reproduce the start edges.
     let sequence: Vec<_> = crate::test_util::shapes::scratch_sequence::<Instruction>()
         .into_iter()
+        .chain([entry_loop().0])
         .map(with_value_flow)
         .collect();
     let mut scratch = MemoryValueFlowScratch::new();
