@@ -77,7 +77,7 @@ pub fn call_graph<I: CallInfo>(
 
 /// Find a function node by its identity.
 #[must_use]
-pub fn find_function<C: Ord>(
+pub fn find_function<C: PartialEq>(
     graph: &Graph<FunctionNode<C>, CallMetadata>,
     id: &C,
 ) -> Option<NodeId> {
@@ -90,8 +90,7 @@ pub fn is_recursive_function<C>(
     graph: &Graph<FunctionNode<C>, CallMetadata>,
     function: NodeId,
 ) -> bool {
-    graph.successors(function).any(|callee| callee == function)
-        || tarjan_scc(graph).component(function).nodes().len() > 1
+    tarjan_scc(graph).component(function).is_cyclic(graph)
 }
 
 /// Compute a per-node summary over a dependency graph in callee-first
@@ -120,10 +119,7 @@ pub fn propagate_summaries<N, E, S: Clone + PartialEq>(
     let components = tarjan_scc(graph);
     // Components arrive in reverse topological order: callees first.
     for component in components.components() {
-        let cyclic = component.len() > 1
-            || component
-                .iter()
-                .any(|&node| graph.successors(node).any(|callee| callee == node));
+        let cyclic = components.component(component[0]).is_cyclic(graph);
         loop {
             let mut changed = false;
             for &node in component {
