@@ -380,8 +380,7 @@ impl<S: Clone + Eq> StackResolutionIndex<S> {
     #[must_use]
     pub fn compute<F, N, E>(graph: &StackGraph<F, S, N, E>, config: StackSearchConfig) -> Self {
         let resolutions = graph
-            .node_ids()
-            .filter(|&node| graph.node(node).kind().is_reference())
+            .reference_nodes()
             .map(|reference| StackResolution::compute(graph, reference, config))
             .collect();
         Self::from_resolutions(graph, resolutions)
@@ -397,8 +396,7 @@ impl<S: Clone + Eq> StackResolutionIndex<S> {
         config: StackSearchConfig,
     ) -> Result<Self, StackLinearResolutionError> {
         let resolutions = graph
-            .node_ids()
-            .filter(|&node| graph.node(node).kind().is_reference())
+            .reference_nodes()
             .map(|reference| StackResolution::try_compute_linear(graph, reference, config))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self::from_resolutions(graph, resolutions))
@@ -466,10 +464,7 @@ impl StackReverseIndex {
         config: StackSearchConfig,
     ) -> Self {
         let mut index = Self::empty(graph);
-        for reference in graph
-            .node_ids()
-            .filter(|&node| graph.node(node).kind().is_reference())
-        {
+        for reference in graph.reference_nodes() {
             let resolution = StackResolution::compute(graph, reference, config);
             index.add_resolution(&resolution);
         }
@@ -487,10 +482,7 @@ impl StackReverseIndex {
         config: StackSearchConfig,
     ) -> Result<Self, StackLinearResolutionError> {
         let mut index = Self::empty(graph);
-        for reference in graph
-            .node_ids()
-            .filter(|&node| graph.node(node).kind().is_reference())
-        {
+        for reference in graph.reference_nodes() {
             let resolution = StackResolution::try_compute_linear(graph, reference, config)?;
             index.add_resolution(&resolution);
         }

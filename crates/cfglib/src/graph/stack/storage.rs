@@ -645,6 +645,13 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
         self.graph.node_ids()
     }
 
+    /// Iterate over every source reference node in node order: the seeds of
+    /// a whole-graph resolution.
+    pub(super) fn reference_nodes(&self) -> impl Iterator<Item = StackNodeId> + '_ {
+        self.node_ids()
+            .filter(|&node| self.node(node).kind().is_reference())
+    }
+
     /// Iterate over every live edge identity in insertion order.
     pub fn edge_ids(&self) -> impl Iterator<Item = StackEdgeId> + '_ {
         self.graph.edge_ids()
