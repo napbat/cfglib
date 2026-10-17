@@ -183,3 +183,46 @@ fn an_instruction_is_read_back_whatever_its_first_character() {
     );
     assert_eq!(parsed.to_text(), written);
 }
+
+#[test]
+fn a_region_that_still_names_a_removed_block_is_written_without_it() {
+    let mut cfg = Cfg::<Line>::new();
+    let body = cfg.new_block();
+    let doomed = cfg.new_block();
+    let landing = cfg.new_block();
+    let stray = cfg.new_block();
+    cfg.add_region(Region {
+        id: RegionId::from_raw(0),
+        protected_blocks: [cfg.entry(), body, doomed].into_iter().collect(),
+        handlers: alloc::vec![Handler {
+            entry: landing,
+            body: HandlerBody::known([landing, stray]),
+            kind: HandlerKind::Catch,
+        }],
+        parent: None,
+    });
+    cfg.remove_block(doomed);
+    cfg.remove_block(stray);
+
+    let written = cfg.to_text();
+    let parsed = parse(&written).expect("a region lists only blocks the text declares");
+
+    let mut compacted = cfg.clone();
+    compacted.compact();
+    let region = |cfg: &Cfg<Line>| cfg.regions()[0].clone();
+    // Compaction renumbers; the text form keeps the numbers, holes and all.
+    assert_eq!(
+        region(&parsed).protected_blocks,
+        [cfg.entry(), body].into_iter().collect()
+    );
+    assert_eq!(
+        region(&parsed).handlers[0].body,
+        HandlerBody::known([landing])
+    );
+    assert_eq!(
+        region(&compacted).protected_blocks.len(),
+        region(&parsed).protected_blocks.len(),
+        "the text form keeps what compaction keeps"
+    );
+    assert_eq!(parsed.to_text(), written);
+}
