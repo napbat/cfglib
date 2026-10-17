@@ -450,6 +450,7 @@ fn flow_errors_are_ordinary_errors_and_a_scratch_survives_one() {
 fn memory_carried_reachability_matches_the_reaching_store_exploration_on_random_programs() {
     let mut rng = Rng::new(71);
     let mut checked = 0;
+    let (mut connected_pairs, mut disconnected_pairs) = (0, 0);
     while checked < 250 {
         let program = Program::random(&mut rng, true);
         if !program.every_live_block_is_reachable() {
@@ -543,13 +544,65 @@ fn memory_carried_reachability_matches_the_reaching_store_exploration_on_random_
             }
             for to in loaded.keys() {
                 if from != to {
+                    let expected = reached.contains(to);
                     assert_eq!(
                         carries(&flow, from, to),
-                        reached.contains(to),
+                        expected,
                         "{from:?} to {to:?} in round {checked}"
                     );
+                    if expected {
+                        connected_pairs += 1;
+                    } else {
+                        disconnected_pairs += 1;
+                    }
                 }
             }
         }
     }
+    // Both outcomes must occur often, or the comparison proves nothing.
+    assert!(
+        connected_pairs >= 20,
+        "pairs memory connects: {connected_pairs}"
+    );
+    assert!(
+        disconnected_pairs >= 20,
+        "pairs memory separates: {disconnected_pairs}"
+    );
+}
+
+#[test]
+fn a_loaded_value_stored_again_carries_the_first_store_through_a_chain_of_exchanges() {
+    // v1 = ...; v2 = exchange(a, v1); v3 = exchange(b, v2); v4 = b
+    // v1 enters location a and the exchange hands back the old value v2,
+    // which the second exchange stores into b, where v4 reads it. The path
+    // from v1 to v4 crosses the loaded value v2 and two memory states: a
+    // reachability that looked only one store-to-load hop ahead would miss it.
+    let cfg = chain(vec![vec![
+        Inst::compute(1, &[]),
+        Inst::exchange(0, 1, 2),
+        Inst::exchange(1, 2, 3),
+        Inst::load(1, 4),
+    ]]);
+    let (_, _, flow) = analyze(&cfg, &ExactMemoryAlias);
+    let v = |variable, version| SsaValue::new(variable, version);
+    assert!(
+        carries(&flow, &v(1, 1), &v(2, 1)),
+        "one exchange stores v1 and loads v2"
+    );
+    assert!(
+        carries(&flow, &v(2, 1), &v(3, 1)),
+        "the second exchange stores v2 and loads v3"
+    );
+    assert!(
+        carries(&flow, &v(2, 1), &v(4, 1)),
+        "v2 is stored into b, which v4 reads"
+    );
+    assert!(
+        carries(&flow, &v(1, 1), &v(4, 1)),
+        "v1 reaches v4 through the value v2"
+    );
+    // Nothing flows backward: v3 and v4 are only loaded, never stored.
+    assert!(!carries(&flow, &v(3, 1), &v(4, 1)));
+    assert!(!carries(&flow, &v(4, 1), &v(1, 1)));
+    assert!(!carries(&flow, &v(2, 1), &v(1, 1)));
 }

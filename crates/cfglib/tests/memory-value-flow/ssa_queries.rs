@@ -502,6 +502,7 @@ fn a_removed_block_slot_leaves_the_others_events_and_identities_alone() {
 fn memory_ssa_matches_the_reaching_store_exploration_on_random_programs() {
     let mut rng = Rng::new(61);
     let mut round = 0;
+    let (mut merged_reads, mut phi_count, mut handler_phis) = (0, 0, 0);
     while round < 300 {
         let program = Program::random(&mut rng, true);
         // A phi operand from unreachable code names that code's own states,
@@ -599,7 +600,33 @@ fn memory_ssa_matches_the_reaching_store_exploration_on_random_programs() {
             );
         }
         assert_users_invert_versions(&memory);
+
+        merged_reads += reaching
+            .reads
+            .values()
+            .filter(|defs| defs.len() >= 2)
+            .count();
+        phi_count += memory.phis().len();
+        let handlers: BTreeSet<usize> = program
+            .live_edges()
+            .into_iter()
+            .filter(|(_, _, kind)| *kind == EdgeKind::ExceptionUnwind)
+            .map(|(_, target, _)| target)
+            .collect();
+        handler_phis += memory
+            .phis()
+            .iter()
+            .filter(|phi| handlers.contains(&phi.block().index()))
+            .count();
     }
+    // A generator that never produced a merge, a phi, or a phi at a handler
+    // would let every comparison above pass without exercising it.
+    assert!(
+        merged_reads >= 20,
+        "reads with several reaching writes: {merged_reads}"
+    );
+    assert!(phi_count >= 20, "memory phis: {phi_count}");
+    assert!(handler_phis >= 1, "phis at unwind handlers: {handler_phis}");
 }
 
 /// The users of a version are exactly the reads of it and the phi operands

@@ -560,7 +560,7 @@ fn a_refusal_in_code_the_solve_never_visits_is_not_raised() {
 }
 
 #[test]
-fn the_boundary_fact_is_asked_for_only_by_blocks_with_nothing_upstream() {
+fn a_fallible_problem_is_asked_for_its_entry_fact_when_the_root_is_seeded() {
     let shape = Shape::new(3, &[(0, 1), (1, 2)]);
     let effects = GenKill::with_gen(3, &[]);
     let cfg = shape.cfg();
@@ -568,12 +568,49 @@ fn the_boundary_fact_is_asked_for_only_by_blocks_with_nothing_upstream() {
         effects: &effects,
         refusal: Some(Refusal::Entry),
     };
-    // Seeded at a block that has a predecessor: no boundary fact needed.
-    assert!(try_solve_problem_from(&cfg, &problem, &[id(1)]).is_ok());
     assert_eq!(
         try_solve_problem_from(&cfg, &problem, &[id(0)]).unwrap_err(),
         TrySolveError::Problem(Refusal::Entry)
     );
+}
+
+#[test]
+fn a_seeded_root_starts_with_the_entry_fact_and_a_seeded_inner_block_never_does() {
+    // entry (gens 1) -> a (gens 2) -> b. The entry fact is the distinguishable
+    // mark `BOUNDARY_MARK`, which no block generates.
+    let shape = Shape::new(3, &[(0, 1), (1, 2)]);
+    let effects = GenKill::with_gen(3, &[(0, 1), (1, 2)]);
+    let cfg = shape.cfg();
+    let problem = May {
+        effects: &effects,
+        direction: Direction::Forward,
+    };
+
+    let from_root = solve_problem_from(&cfg, &problem, &[id(0)]).unwrap();
+    assert_eq!(from_root.fact_in(id(0)), &BTreeSet::from([BOUNDARY_MARK]));
+    assert_eq!(
+        from_root.fact_in(id(2)),
+        &BTreeSet::from([BOUNDARY_MARK, 1, 2]),
+        "the entry fact travels with what the blocks generate"
+    );
+
+    // Seeded at a block that has a predecessor, the input is the meet of the
+    // predecessors' outputs. The predecessor was never visited, so that is
+    // bottom: the entry fact does not appear anywhere.
+    let from_inner = solve_problem_from(&cfg, &problem, &[id(1)]).unwrap();
+    assert_eq!(from_inner.fact_in(id(1)), &BTreeSet::new());
+    assert_eq!(from_inner.fact_out(id(1)), &BTreeSet::from([2]));
+    assert_eq!(from_inner.fact_in(id(2)), &BTreeSet::from([2]));
+    for block in shape.live() {
+        assert!(!from_inner.fact_in(id(block)).contains(&BOUNDARY_MARK));
+        assert!(!from_inner.fact_out(id(block)).contains(&BOUNDARY_MARK));
+    }
+    assert_eq!(
+        from_inner.fact_in(id(0)),
+        &BTreeSet::new(),
+        "an unvisited block stays at bottom"
+    );
+    assert_eq!(from_inner.fact_out(id(0)), &BTreeSet::new());
 }
 
 #[test]
