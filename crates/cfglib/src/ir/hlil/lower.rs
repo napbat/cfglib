@@ -30,6 +30,7 @@ use crate::block::BlockId;
 use crate::graph::view::DenseId;
 
 mod control;
+mod exception;
 
 use super::flat_builder::{FlatBuilder, LowerEdge, Lowered, Occurrence, VariableOrigin};
 use super::view::visit_expression_tree;
