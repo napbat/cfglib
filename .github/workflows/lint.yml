@@ -80,7 +80,11 @@ jobs:
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
 
+      # rust-toolchain.toml selects stable for local work, and a toolchain
+      # file outranks rustup's default, so name the MSRV toolchain explicitly.
       - name: Check with MSRV
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.msrv.outputs.version }}
         run: cargo check --workspace --all-targets --all-features
 
   no-std:
