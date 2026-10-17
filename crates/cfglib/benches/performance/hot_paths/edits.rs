@@ -220,8 +220,8 @@ fn register_irreducible(suite: &mut BenchmarkSuite<'_>) {
             (cloned, splits)
         },
         |(result, splits): &(Cfg<u32>, usize)| {
-            assert_eq!(*splits, 511);
-            assert_irreducible_fixture(result, 512, 512, 511);
+            assert_eq!(*splits, 1);
+            assert_irreducible_fixture(result, 512, 512, 1);
         }
     );
     benchmark_case!(

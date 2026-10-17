@@ -487,40 +487,57 @@ pub(super) fn assert_irreducible_fixture(
 
     let cycle_entry = BlockId::from_raw(2);
     if expected_splits > 0 {
-        assert_eq!(expected_splits, cycle_nodes - 1);
-        let first_copy = BlockId::from_index(original_blocks);
-        for index in 0..external_entries {
-            let external = BlockId::from_index(1 + cycle_nodes + index);
-            let outgoing: Vec<_> = cfg.outgoing(external).collect();
-            assert_eq!(outgoing.len(), 1);
-            let edge = cfg.edge(outgoing[0]);
-            assert_eq!(edge.target(), first_copy);
-            assert_eq!(edge.kind(), EdgeKind::Unconditional);
-            assert!(edge.weight().is_none());
-        }
-        assert_eq!(cfg.incoming(cycle_entry).count(), 1);
-        for split_index in 0..expected_splits {
-            let original = BlockId::from_index(2 + split_index);
-            let copy = BlockId::from_index(original_blocks + split_index);
-            let original_outgoing: Vec<_> = cfg.outgoing(original).collect();
-            let copied_outgoing: Vec<_> = cfg.outgoing(copy).collect();
-            assert_eq!(original_outgoing.len(), 1);
-            assert_eq!(copied_outgoing.len(), 1);
-            let original_edge = cfg.edge(original_outgoing[0]);
-            let copied_edge = cfg.edge(copied_outgoing[0]);
-            let expected_target = if split_index + 1 < expected_splits {
-                BlockId::from_index(original_blocks + split_index + 1)
-            } else {
-                BlockId::from_index(1)
-            };
-            assert_eq!(copied_edge.source(), copy);
-            assert_eq!(copied_edge.target(), expected_target);
-            assert_eq!(copied_edge.kind(), original_edge.kind());
-            assert_eq!(
-                copied_edge.weight().map(f64::to_bits),
-                original_edge.weight().map(f64::to_bits)
+        // The cycle has two entries, the first block (from the function entry)
+        // and the second (from every external). Splitting copies the smaller
+        // region, which keeps the other entry as the cycle's only header.
+        assert_eq!(expected_splits, 1);
+        let copy = BlockId::from_index(original_blocks);
+        let copied_outgoing: Vec<_> = cfg.outgoing(copy).collect();
+        assert_eq!(copied_outgoing.len(), 1);
+        let copied_edge = cfg.edge(copied_outgoing[0]);
+        assert_eq!(copied_edge.source(), copy);
+        assert!(copied_edge.weight().is_none());
+        assert_eq!(copied_edge.id().index(), original_edges);
+
+        if cycle_nodes == 2 {
+            // The copy of the second block replaces it as every external's
+            // target and closes the cycle on the first block.
+            for index in 0..external_entries {
+                let external = BlockId::from_index(1 + cycle_nodes + index);
+                let outgoing: Vec<_> = cfg.outgoing(external).collect();
+                assert_eq!(outgoing.len(), 1);
+                let edge = cfg.edge(outgoing[0]);
+                assert_eq!(edge.target(), copy);
+                assert_eq!(edge.kind(), EdgeKind::Unconditional);
+                assert!(edge.weight().is_none());
+            }
+            assert_eq!(cfg.incoming(cycle_entry).count(), 1);
+            assert_eq!(copied_edge.target(), BlockId::from_index(1));
+            assert_eq!(copied_edge.kind(), EdgeKind::Back);
+        } else {
+            // The copy of the first block takes over the function entry's edge
+            // into the cycle and falls into the second block, which stays the
+            // header every external still enters.
+            let entry_edge = cfg.edge(
+                cfg.outgoing(cfg.entry())
+                    .next()
+                    .expect("the entry keeps its edge into the cycle"),
             );
-            assert_eq!(copied_edge.id().index(), original_edges + split_index);
+            assert_eq!(entry_edge.target(), copy);
+            assert_eq!(entry_edge.kind(), EdgeKind::ConditionalTrue);
+            assert_eq!(cfg.predecessors(copy).collect::<Vec<_>>(), [cfg.entry()]);
+            assert_eq!(copied_edge.target(), cycle_entry);
+            assert_eq!(copied_edge.kind(), EdgeKind::Fallthrough);
+            for index in 0..external_entries {
+                let external = BlockId::from_index(1 + cycle_nodes + index);
+                let outgoing: Vec<_> = cfg.outgoing(external).collect();
+                assert_eq!(outgoing.len(), 1);
+                let edge = cfg.edge(outgoing[0]);
+                assert_eq!(edge.target(), cycle_entry);
+                assert_eq!(edge.kind(), EdgeKind::Unconditional);
+                assert!(edge.weight().is_none());
+            }
+            assert_eq!(cfg.incoming(cycle_entry).count(), external_entries + 2);
         }
     } else {
         assert_eq!(cfg.incoming(cycle_entry).count(), external_entries + 1);
