@@ -482,14 +482,17 @@ def check_spelling(files: list[Path], violations: list[str]) -> None:
             or path == Path(__file__).resolve()
         ):
             continue
-        text = path.read_text(encoding="utf-8", errors="replace")
-        for number, line in enumerate(text.splitlines(), 1):
-            match = BRITISH_SPELLING.search(line)
-            if match:
-                violations.append(
-                    f"{relative_label(path)}:{number}: British spelling `{match.group(0)}`; "
-                    "use American English"
-                )
+        found: dict[str, int] = {}
+        for number, line in enumerate(
+            path.read_text(encoding="utf-8", errors="replace").splitlines(), 1
+        ):
+            for match in BRITISH_SPELLING.finditer(line):
+                found.setdefault(match.group(0).casefold(), number)
+        if found:
+            words = ", ".join(f"`{word}` (line {number})" for word, number in found.items())
+            violations.append(
+                f"{relative_label(path)}: British spelling {words}; use American English"
+            )
 
 
 def module_source(parent: Path, name: str) -> str:
