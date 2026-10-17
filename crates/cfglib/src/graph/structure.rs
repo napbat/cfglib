@@ -16,8 +16,8 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
-use super::dominator::DominatorTree;
-use super::edge_view::EdgeView;
+use super::dominator::{DominatorScratch, DominatorTree, complete_dominator_forest};
+use super::edge_view::{EdgeView, FilteredEdges};
 use super::loop_nest::nesting;
 use super::scc::tarjan_scc;
 use super::search::{DfsEvent, depth_first_events};
@@ -288,6 +288,47 @@ where
     G::EdgeData: KindedEdge,
 {
     loops_from_backs(graph, dom, &find_back_edges_tagged(graph, dom))
+}
+
+/// Detect the natural loops of all the code, tagged, including the code the
+/// root does not reach.
+///
+/// [`detect_loops_tagged`] finds the loops of the program the root runs, and a
+/// consumer that also lays out the code the root misses (a handler pad no
+/// exception edge leads to, a filter funclet) wants the loops inside that code
+/// too: a loop there is as much a loop as one in live code. Those come from
+/// dominance within the dead code. [`complete_dominator_forest`] roots a tree
+/// at each source component of it, and the detection runs over the edges
+/// between dead blocks alone, so no live block takes part. That restriction is
+/// what keeps the answers apart: the forest is a whole-graph answer in which
+/// dead code that jumps into a live block takes the root away from it, and an
+/// edge from dead code into live code closes no cycle of either.
+///
+/// The result is the loops of [`detect_loops_tagged`], unchanged, then those of
+/// the dead code, in order of depth, then header. A dead loop is nested only in
+/// dead loops.
+pub(crate) fn detect_all_loops_tagged<G>(
+    graph: &G,
+    dom: &DominatorTree<G::NodeId>,
+) -> Vec<NaturalLoop<G::NodeId>>
+where
+    G: RootedView + EdgeView,
+    G::EdgeData: KindedEdge,
+{
+    let mut loops = detect_loops_tagged(graph, dom);
+    let mut roots = Vec::new();
+    let Some(forest) =
+        complete_dominator_forest(&mut DominatorScratch::new(), &mut roots, graph, dom)
+    else {
+        return loops;
+    };
+    let dead = FilteredEdges::new(graph, |edge: G::EdgeId, _: &G::EdgeData| {
+        let edge = graph.edge(edge);
+        !dom.is_reachable(edge.source()) && !dom.is_reachable(edge.target())
+    });
+    loops.extend(detect_loops_tagged(&dead, &forest));
+    loops.sort_by(|a, b| a.depth.cmp(&b.depth).then(a.header.cmp(&b.header)));
+    loops
 }
 
 /// Whether the graph is reducible.

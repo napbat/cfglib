@@ -9,7 +9,7 @@ use crate::graph::dominator::DominatorTree;
 /// A forest over eight nodes. Node 0 and node 7 are in no tree. Node 2 roots a
 /// tree and so does node 5, whose children 1 and 4 have smaller indices than
 /// its own, and 4 has the child 3.
-fn two_trees() -> DominatorTree<u32> {
+pub(super) fn two_trees() -> DominatorTree<u32> {
     let parents = [None, Some(5), None, Some(4), Some(5), None, Some(2), None];
     let reachable = [false, true, true, true, true, true, true, false];
     DominatorTree::from_forest_parts(&parents, &reachable)

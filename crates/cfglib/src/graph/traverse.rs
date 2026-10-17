@@ -363,35 +363,73 @@ pub fn reachable<G: GraphView>(
     seeds: impl IntoIterator<Item = G::NodeId>,
     direction: TraversalDirection,
 ) -> Vec<bool> {
-    by_axis!(direction, reachable_from(graph, seeds))
+    let mut visited = Vec::new();
+    reachable_in(graph, seeds, direction, None, &mut visited, &mut Vec::new());
+    visited
 }
 
+/// [`reachable`] over caller-owned buffers, optionally confined to a set of
+/// nodes.
+///
+/// `visited` is cleared and sized to the node bound, then holds the answer.
+/// `stack` is cleared first and left empty. With `within`, a node is
+/// discovered from a visited one only when its entry is `true`, so the walk
+/// stays inside that set; the seeds are visited whether or not they are in
+/// it. The stack holds dense indices, not node ids, so one buffer serves
+/// every node-id type, which is what a scratch that outlives one graph needs.
+///
+/// # Panics
+///
+/// Panics when a seed is not a node in `graph`.
+///
+/// Both functions of the walk are `#[inline]`: left out of line, the shared
+/// instance ran the post-dominator tree's forward walk 2.2 times slower than
+/// the loop it replaced, and compiled into each caller it matches it.
+#[inline]
+pub(crate) fn reachable_in<G: GraphView>(
+    graph: &G,
+    seeds: impl IntoIterator<Item = G::NodeId>,
+    direction: TraversalDirection,
+    within: Option<&[bool]>,
+    visited: &mut Vec<bool>,
+    stack: &mut Vec<usize>,
+) {
+    by_axis!(
+        direction,
+        reachable_from(graph, seeds, within, visited, stack)
+    );
+}
+
+#[inline]
 fn reachable_from<G: GraphView, A: Adjacency>(
     axis: A,
     graph: &G,
     seeds: impl IntoIterator<Item = G::NodeId>,
-) -> Vec<bool> {
-    let mut visited = vec![false; graph.node_bound()];
-    let mut stack = Vec::new();
+    within: Option<&[bool]>,
+    visited: &mut Vec<bool>,
+    stack: &mut Vec<usize>,
+) {
+    visited.clear();
+    visited.resize(graph.node_bound(), false);
+    stack.clear();
 
     for seed in seeds {
         assert_in_bound(graph, seed, "seed node");
-        if !visited[seed.index()] {
-            visited[seed.index()] = true;
-            stack.push(seed);
+        if !core::mem::replace(&mut visited[seed.index()], true) {
+            stack.push(seed.index());
         }
     }
 
-    while let Some(node) = stack.pop() {
-        for next in axis.neighbors(graph, node) {
-            if !visited[next.index()] {
-                visited[next.index()] = true;
+    while let Some(index) = stack.pop() {
+        for next in axis.neighbors(graph, G::NodeId::from_index(index)) {
+            let next = next.index();
+            if within.is_none_or(|within| within[next])
+                && !core::mem::replace(&mut visited[next], true)
+            {
                 stack.push(next);
             }
         }
     }
-
-    visited
 }
 
 /// Hop counts from `start`, using `usize::MAX` for unreachable nodes, while

@@ -3,10 +3,10 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+use super::super::{DominatorScratch, DominatorTree};
 use super::complete_dominator_forest;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::graph::dominator::{DominatorScratch, DominatorTree};
 use crate::test_util::MockInst;
 
 #[test]
