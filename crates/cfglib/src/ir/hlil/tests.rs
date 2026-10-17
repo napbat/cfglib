@@ -47,6 +47,7 @@ macro_rules! dense_id {
     };
 }
 
+mod depth;
 mod effects;
 mod fixtures;
 mod flat;
@@ -70,6 +71,7 @@ mod sym;
 mod verification;
 mod walks;
 
+pub(crate) use depth::{EVERY_WRAP, Wrap, nest, nested, on_small_stack};
 pub(crate) use imp::Imp;
 pub(crate) use kit::{Kit, Prim, Ty};
 pub(crate) use storage::{ExprId, StmtId, ToyHlil, ToyHlilBuilder, VarId};
