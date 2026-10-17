@@ -8,7 +8,7 @@ use crate::graph::search::PathFrontier;
 
 use super::partial::{StackPartialPathDatabase, StackPartialPathId};
 use super::path::{StackPath, StackPathError};
-use super::search::{StackResolution, StackResolutionIndex, StackSearchConfig, StackSearchStats};
+use super::search::{SearchState, StackResolution, StackResolutionIndex, StackSearchConfig};
 use super::storage::{StackGraph, StackNodeId};
 
 impl<S: Clone + Eq> StackResolution<S> {
@@ -56,18 +56,12 @@ impl<S: Clone + Eq> StackResolution<S> {
             path: initial,
             partials: Vec::new(),
         });
-        let mut complete = Vec::new();
-        let mut stats = StackSearchStats::default();
+        let mut state = SearchState::new(config);
 
         while let Some(work) = frontier.pop() {
-            if config
-                .max_path_count
-                .is_some_and(|limit| stats.expanded_path_count >= limit)
-            {
-                stats.path_count_limited = true;
+            if !state.budget.admit_expansion() {
                 break;
             }
-            stats.expanded_path_count += 1;
             for (partial_id, partial) in database.paths_from(work.path.end()) {
                 if work.partials.contains(&partial_id)
                     || partial
@@ -75,14 +69,10 @@ impl<S: Clone + Eq> StackResolution<S> {
                         .iter()
                         .any(|&edge| work.path.contains_edge(edge))
                 {
-                    stats.cycle_cut_count += 1;
+                    state.cycle_cut_count += 1;
                     continue;
                 }
-                if config
-                    .max_path_length
-                    .is_some_and(|limit| work.path.len() + partial.len() > limit)
-                {
-                    stats.path_length_limited = true;
+                if !state.budget.admit_length(work.path.len() + partial.len()) {
                     continue;
                 }
                 let mut next = work.path.clone();
@@ -93,19 +83,11 @@ impl<S: Clone + Eq> StackResolution<S> {
                     ) {
                         return Err(error);
                     }
-                    stats.rejected_extension_count += 1;
+                    state.rejected_extension_count += 1;
                     continue;
                 }
                 if next.is_complete(graph) {
-                    stats.complete_path_count += 1;
-                    if config
-                        .max_complete_path_count
-                        .is_none_or(|limit| complete.len() < limit)
-                    {
-                        complete.push(next.clone());
-                    } else {
-                        stats.complete_path_count_limited = true;
-                    }
+                    state.record_complete(&next);
                 }
                 let mut partials = work.partials.clone();
                 partials.push(partial_id);
@@ -116,7 +98,7 @@ impl<S: Clone + Eq> StackResolution<S> {
             }
         }
 
-        Ok(Self::from_complete(graph, reference, &complete, stats))
+        Ok(state.finish(graph, reference))
     }
 }
 

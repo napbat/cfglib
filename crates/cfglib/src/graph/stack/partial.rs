@@ -5,7 +5,7 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::graph::search::{PathFrontier, SearchOrder};
+use crate::graph::search::{PathBudget, PathFrontier, SearchOrder};
 use crate::identity::define_dense_id;
 
 use super::path::{StackPath, StackPathError};
@@ -176,6 +176,10 @@ impl StackPartialPathConfig {
         self.max_path_count = Some(max_path_count);
         self
     }
+
+    const fn budget(&self) -> PathBudget {
+        PathBudget::new(self.max_path_length, self.max_path_count)
+    }
 }
 
 impl Default for StackPartialPathConfig {
@@ -258,30 +262,22 @@ impl StackPartialPathSet {
             });
         }
         let mut paths = Vec::new();
-        let mut stats = StackPartialPathStats::default();
+        let mut budget = config.budget();
+        let mut cycle_cut_count = 0;
 
         while let Some(route) = frontier.pop() {
-            if config
-                .max_path_count
-                .is_some_and(|limit| stats.expanded_path_count >= limit)
-            {
-                stats.path_count_limited = true;
+            if !budget.admit_expansion() {
                 break;
             }
-            stats.expanded_path_count += 1;
-            let at_length_limit = config
-                .max_path_length
-                .is_some_and(|limit| route.edges.len() >= limit);
             for edge in graph
                 .outgoing(route.current)
                 .filter(|&edge| edge_belongs_to_file(graph, edge, file))
             {
                 if route.edges.contains(&edge) {
-                    stats.cycle_cut_count += 1;
+                    cycle_cut_count += 1;
                     continue;
                 }
-                if at_length_limit {
-                    stats.path_length_limited = true;
+                if !budget.admit_length(route.edges.len() + 1) {
                     continue;
                 }
                 let target = graph.edge(edge).target();
@@ -303,7 +299,13 @@ impl StackPartialPathSet {
             }
         }
 
-        stats.partial_path_count = paths.len();
+        let stats = StackPartialPathStats {
+            expanded_path_count: budget.expanded_path_count(),
+            partial_path_count: paths.len(),
+            cycle_cut_count,
+            path_length_limited: budget.path_length_limited(),
+            path_count_limited: budget.path_count_limited(),
+        };
         Ok(Self { file, paths, stats })
     }
 

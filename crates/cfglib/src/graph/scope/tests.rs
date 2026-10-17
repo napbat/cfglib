@@ -573,6 +573,51 @@ fn linear_resolution_matches_general_search_and_rejects_branching() {
 }
 
 #[test]
+fn linear_resolution_reports_exactly_what_general_search_does_under_every_bound() {
+    let mut graph = Graph::new();
+    let scopes: vec::Vec<_> = (0..4).map(|_| graph.add_scope(PLAIN)).collect();
+    for pair in scopes.windows(2) {
+        graph.add_edge(pair[0], pair[1], Label::Parent);
+    }
+    for (scope, name) in scopes.iter().zip(["a", "b", "c", "d"]) {
+        graph.add_datum(*scope, Relation::Value, declaration(name));
+    }
+    let everything = Reference {
+        name: "",
+        relation: Relation::Value,
+        start: u32::MAX,
+        name_match: NameMatch::Prefix,
+    };
+    let use_all = graph.add_reference(scopes[0], everything);
+    let unbounded =
+        ScopeResolution::compute(&graph, use_all, &LexicalQuery, ScopeResolutionConfig::new());
+    assert_eq!(
+        unbounded.candidates().len(),
+        4,
+        "the chain has four answers"
+    );
+
+    let limits = [None, Some(0), Some(1), Some(2), Some(3), Some(4), Some(5)];
+    let mut truncations = [false; 2];
+    for max_path_length in limits {
+        for max_path_count in limits {
+            let config = ScopeResolutionConfig {
+                max_path_length,
+                max_path_count,
+            };
+            let general = ScopeResolution::compute(&graph, use_all, &LexicalQuery, config);
+            let linear =
+                ScopeResolution::try_compute_linear(&graph, use_all, &LexicalQuery, config)
+                    .expect("the chain never branches");
+            assert_eq!(linear, general, "{config:?}");
+            truncations[0] |= general.stats().path_length_limited;
+            truncations[1] |= general.stats().path_count_limited;
+        }
+    }
+    assert_eq!(truncations, [true; 2], "the sweep hits both bounds");
+}
+
+#[test]
 fn query_owned_candidate_index_avoids_unrelated_scope_data() {
     let mut graph = Graph::new();
     let scope = graph.add_scope(PLAIN);

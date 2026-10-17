@@ -9,7 +9,7 @@ use core::cmp::Ordering;
 use smallvec::SmallVec;
 
 use crate::graph::edge_view::EdgeRef;
-use crate::graph::search::{PathFrontier, SearchOrder};
+use crate::graph::search::{PathBudget, PathFrontier, SearchOrder};
 
 use super::storage::{ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeId, ScopeReferenceId};
 
@@ -366,6 +366,10 @@ impl ScopeResolutionConfig {
         self.max_path_count = Some(max_path_count);
         self
     }
+
+    const fn budget(&self) -> PathBudget {
+        PathBudget::new(self.max_path_length, self.max_path_count)
+    }
 }
 
 /// One visible resolution path from a reference to relation-tagged data.
@@ -437,6 +441,15 @@ impl core::fmt::Display for ScopeLinearResolutionError {
 impl core::error::Error for ScopeLinearResolutionError {}
 
 impl ScopeResolutionStats {
+    const fn from_budget(budget: &PathBudget, reachable_candidate_count: usize) -> Self {
+        Self {
+            explored_path_count: budget.expanded_path_count(),
+            reachable_candidate_count,
+            path_length_limited: budget.path_length_limited(),
+            path_count_limited: budget.path_count_limited(),
+        }
+    }
+
     /// Whether configured bounds may have omitted a candidate.
     #[must_use]
     pub const fn is_truncated(&self) -> bool {
@@ -578,18 +591,9 @@ impl ScopeResolution {
         let mut path = ScopePath::new(input.scope());
         let mut state = query.initial_state(graph, input);
         let mut reachable: SmallVec<[ScopeResolutionCandidate; 1]> = SmallVec::new();
-        let mut resolution_stats = ScopeResolutionStats::default();
+        let mut budget = config.budget();
 
-        loop {
-            if config
-                .max_path_count
-                .is_some_and(|limit| resolution_stats.explored_path_count >= limit)
-            {
-                resolution_stats.path_count_limited = true;
-                break;
-            }
-            resolution_stats.explored_path_count += 1;
-
+        while budget.admit_expansion() {
             let mut accepted = None;
             let mut multiple_candidates = false;
             query.visit_accepted_data(graph, input, &path, &state, &mut |datum| {
@@ -611,9 +615,6 @@ impl ScopeResolution {
                 break;
             }
 
-            let at_length_limit = config
-                .max_path_length
-                .is_some_and(|limit| path.len() >= limit);
             let mut next = None;
             for edge_id in graph.outgoing(path.end()) {
                 let edge = graph.edge(edge_id);
@@ -623,8 +624,7 @@ impl ScopeResolution {
                 let Some(next_state) = query.step(graph, input, &path, &state, edge) else {
                     continue;
                 };
-                if at_length_limit {
-                    resolution_stats.path_length_limited = true;
+                if !budget.admit_length(path.len() + 1) {
                     continue;
                 }
                 if next.is_some() {
@@ -640,7 +640,7 @@ impl ScopeResolution {
             state = next_state;
         }
 
-        resolution_stats.reachable_candidate_count = reachable.len();
+        let resolution_stats = ScopeResolutionStats::from_budget(&budget, reachable.len());
         Ok(Self::from_reachable(
             graph,
             input,
@@ -667,18 +667,13 @@ impl ScopeResolution {
         // never branches allocates no queue.
         let mut seed = Some(initial);
         let mut frontier = PathFrontier::new(SearchOrder::BreadthFirst);
+        let mut budget = config.budget();
         let mut reachable: SmallVec<[ScopeResolutionCandidate; 1]> = SmallVec::new();
-        let mut stats = ScopeResolutionStats::default();
 
         while let Some(work) = seed.take().or_else(|| frontier.pop()) {
-            if config
-                .max_path_count
-                .is_some_and(|limit| stats.explored_path_count >= limit)
-            {
-                stats.path_count_limited = true;
+            if !budget.admit_expansion() {
                 break;
             }
-            stats.explored_path_count += 1;
 
             let reachable_before = reachable.len();
             query.visit_accepted_data(graph, input, &work.path, &work.state, &mut |datum| {
@@ -698,9 +693,6 @@ impl ScopeResolution {
                 continue;
             }
 
-            let at_length_limit = config
-                .max_path_length
-                .is_some_and(|limit| work.path.len() >= limit);
             for edge_id in graph.outgoing(work.path.end()) {
                 let edge = graph.edge(edge_id);
                 if work.path.contains_scope(edge.target()) {
@@ -710,8 +702,7 @@ impl ScopeResolution {
                 else {
                     continue;
                 };
-                if at_length_limit {
-                    stats.path_length_limited = true;
+                if !budget.admit_length(work.path.len() + 1) {
                     continue;
                 }
                 frontier.push(Work {
@@ -721,7 +712,7 @@ impl ScopeResolution {
             }
         }
 
-        stats.reachable_candidate_count = reachable.len();
+        let stats = ScopeResolutionStats::from_budget(&budget, reachable.len());
         Self::from_reachable(graph, input, query, reachable, stats)
     }
 

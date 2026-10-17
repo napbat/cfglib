@@ -723,7 +723,9 @@ fn breadth_first_global<G: GraphView, A: Adjacency, B>(
 mod events;
 pub use events::{BfsEvent, DfsEvent, breadth_first_events, depth_first_events};
 
+mod path_budget;
 mod path_frontier;
+pub(crate) use path_budget::PathBudget;
 pub(crate) use path_frontier::PathFrontier;
 
 #[cfg(test)]

@@ -7,7 +7,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use smallvec::SmallVec;
 
-use crate::graph::search::{PathFrontier, SearchOrder};
+use crate::graph::search::{PathBudget, PathFrontier, SearchOrder};
 
 use super::path::{StackPath, StackPathError};
 use super::storage::{StackGraph, StackNodeId};
@@ -63,6 +63,11 @@ impl StackSearchConfig {
     pub const fn with_max_complete_path_count(mut self, max_complete_path_count: usize) -> Self {
         self.max_complete_path_count = Some(max_complete_path_count);
         self
+    }
+
+    const fn budget(&self) -> PathBudget {
+        PathBudget::new(self.max_path_length, self.max_path_count)
+            .with_max_complete_path_count(self.max_complete_path_count)
     }
 }
 
@@ -188,52 +193,33 @@ impl<S: Clone + Eq> StackResolution<S> {
         let initial = StackPath::from_reference(graph, reference)?;
         let mut frontier = PathFrontier::new(config.order);
         frontier.push(initial);
-        let mut complete = Vec::new();
-        let mut stats = StackSearchStats::default();
+        let mut state = SearchState::new(config);
 
         while let Some(path) = frontier.pop() {
-            if config
-                .max_path_count
-                .is_some_and(|limit| stats.expanded_path_count >= limit)
-            {
-                stats.path_count_limited = true;
+            if !state.budget.admit_expansion() {
                 break;
             }
-            stats.expanded_path_count += 1;
-
-            let at_length_limit = config
-                .max_path_length
-                .is_some_and(|limit| path.len() >= limit);
             for edge in graph.outgoing(path.end()) {
                 if path.contains_edge(edge) {
-                    stats.cycle_cut_count += 1;
+                    state.cycle_cut_count += 1;
                     continue;
                 }
-                if at_length_limit {
-                    stats.path_length_limited = true;
+                if !state.budget.admit_length(path.len() + 1) {
                     continue;
                 }
                 let mut next = path.clone();
                 if next.append(graph, edge).is_err() {
-                    stats.rejected_extension_count += 1;
+                    state.rejected_extension_count += 1;
                     continue;
                 }
                 if next.is_complete(graph) {
-                    stats.complete_path_count += 1;
-                    if config
-                        .max_complete_path_count
-                        .is_none_or(|limit| complete.len() < limit)
-                    {
-                        complete.push(next.clone());
-                    } else {
-                        stats.complete_path_count_limited = true;
-                    }
+                    state.record_complete(&next);
                 }
                 frontier.push(next);
             }
         }
 
-        Ok(Self::from_complete(graph, reference, &complete, stats))
+        Ok(state.finish(graph, reference))
     }
 
     /// Resolve a reference whose well-formed path has at most one viable
@@ -254,21 +240,9 @@ impl<S: Clone + Eq> StackResolution<S> {
         config: StackSearchConfig,
     ) -> Result<Self, StackLinearResolutionError> {
         let mut path = StackPath::from_reference(graph, reference)?;
-        let mut complete: SmallVec<[StackPath<S>; 1]> = SmallVec::new();
-        let mut stats = StackSearchStats::default();
+        let mut state = SearchState::new(config);
 
-        loop {
-            if config
-                .max_path_count
-                .is_some_and(|limit| stats.expanded_path_count >= limit)
-            {
-                stats.path_count_limited = true;
-                break;
-            }
-            stats.expanded_path_count += 1;
-            let at_length_limit = config
-                .max_path_length
-                .is_some_and(|limit| path.len() >= limit);
+        while state.budget.admit_expansion() {
             let mut next = None;
             let end = path.end();
             let mut edges = graph.outgoing(end).peekable();
@@ -280,11 +254,10 @@ impl<S: Clone + Eq> StackResolution<S> {
                     unreachable!("the prefix is held until the last outgoing edge consumes it")
                 };
                 if current.contains_edge(edge) {
-                    stats.cycle_cut_count += 1;
+                    state.cycle_cut_count += 1;
                     continue;
                 }
-                if at_length_limit {
-                    stats.path_length_limited = true;
+                if !state.budget.admit_length(current.len() + 1) {
                     continue;
                 }
                 let base = if edges.peek().is_some() {
@@ -296,22 +269,14 @@ impl<S: Clone + Eq> StackResolution<S> {
                     prefix
                 };
                 let Ok(candidate) = base.append_owned(graph, edge) else {
-                    stats.rejected_extension_count += 1;
+                    state.rejected_extension_count += 1;
                     continue;
                 };
                 if next.is_some() {
                     return Err(StackLinearResolutionError::MultipleEdges { node: end });
                 }
                 if candidate.is_complete(graph) {
-                    stats.complete_path_count += 1;
-                    if config
-                        .max_complete_path_count
-                        .is_none_or(|limit| complete.len() < limit)
-                    {
-                        complete.push(candidate.clone());
-                    } else {
-                        stats.complete_path_count_limited = true;
-                    }
+                    state.record_complete(&candidate);
                 }
                 next = Some(candidate);
             }
@@ -321,14 +286,7 @@ impl<S: Clone + Eq> StackResolution<S> {
             path = candidate;
         }
 
-        if complete.len() <= 1 {
-            return Ok(Self {
-                reference,
-                paths: complete,
-                stats,
-            });
-        }
-        Ok(Self::from_complete(graph, reference, &complete, stats))
+        Ok(state.finish(graph, reference))
     }
 
     /// The source reference node.
@@ -371,16 +329,23 @@ impl<S: Clone + Eq> StackResolution<S> {
         self.target_count() > 1
     }
 
-    pub(super) fn from_complete<F, N, E>(
+    fn from_complete<F, N, E>(
         graph: &StackGraph<F, S, N, E>,
         reference: StackNodeId,
-        complete: &[StackPath<S>],
+        complete: SmallVec<[StackPath<S>; 1]>,
         stats: StackSearchStats,
     ) -> Self {
+        if complete.len() < 2 {
+            return Self {
+                reference,
+                paths: complete,
+                stats,
+            };
+        }
         let mut unique: SmallVec<[StackPath<S>; 1]> = SmallVec::new();
         for path in complete {
-            if !unique.contains(path) {
-                unique.push(path.clone());
+            if !unique.contains(&path) {
+                unique.push(path);
             }
         }
         let paths: SmallVec<[StackPath<S>; 1]> = unique
@@ -570,5 +535,52 @@ fn add_reverse_references<S: Clone + Eq>(
                 }
             }
         }
+    }
+}
+
+/// Work accounting and complete-path retention shared by the direct, linear,
+/// and stitched resolutions, so that all three bound and report a search
+/// identically.
+pub(super) struct SearchState<S> {
+    pub(super) budget: PathBudget,
+    pub(super) cycle_cut_count: usize,
+    pub(super) rejected_extension_count: usize,
+    complete: SmallVec<[StackPath<S>; 1]>,
+}
+
+impl<S: Clone + Eq> SearchState<S> {
+    pub(super) fn new(config: StackSearchConfig) -> Self {
+        Self {
+            budget: config.budget(),
+            cycle_cut_count: 0,
+            rejected_extension_count: 0,
+            complete: SmallVec::new(),
+        }
+    }
+
+    /// Count a complete path just found and retain a copy unless the
+    /// retention bound refuses it.
+    pub(super) fn record_complete(&mut self, path: &StackPath<S>) {
+        if self.budget.admit_complete(self.complete.len()) {
+            self.complete.push(path.clone());
+        }
+    }
+
+    /// Filter the retained paths by precedence and report the search.
+    pub(super) fn finish<F, N, E>(
+        self,
+        graph: &StackGraph<F, S, N, E>,
+        reference: StackNodeId,
+    ) -> StackResolution<S> {
+        let stats = StackSearchStats {
+            expanded_path_count: self.budget.expanded_path_count(),
+            complete_path_count: self.budget.complete_path_count(),
+            rejected_extension_count: self.rejected_extension_count,
+            cycle_cut_count: self.cycle_cut_count,
+            path_length_limited: self.budget.path_length_limited(),
+            path_count_limited: self.budget.path_count_limited(),
+            complete_path_count_limited: self.budget.complete_path_count_limited(),
+        };
+        StackResolution::from_complete(graph, reference, self.complete, stats)
     }
 }
