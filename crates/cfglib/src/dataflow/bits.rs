@@ -278,7 +278,7 @@ mod tests {
         assert!(bits.remove(64));
         assert!(!bits.remove(64), "a second remove is a no-op");
         assert!(!bits.get(64));
-        assert!(bits.get(65), "the neighbouring bit is untouched");
+        assert!(bits.get(65), "the neighboring bit is untouched");
         assert_eq!(bits.ones().collect::<Vec<_>>(), [65]);
     }
 

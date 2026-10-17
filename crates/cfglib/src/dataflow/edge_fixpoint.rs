@@ -585,7 +585,7 @@ struct Solver<'a, G: EdgeView, P: TryEdgeProblem<G>> {
 
 impl<G: EdgeView, P: TryEdgeProblem<G>> Solver<'_, G, P> {
     /// Recomputes `node` from the edges flowing into it along `upstream`, and
-    /// re-queues the neighbour of every edge leaving it along `downstream`
+    /// re-queues the neighbor of every edge leaving it along `downstream`
     /// whose fact changed.
     fn visit<U: EdgeAdjacency, D: EdgeAdjacency>(
         &mut self,

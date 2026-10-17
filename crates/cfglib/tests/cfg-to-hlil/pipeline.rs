@@ -1,5 +1,5 @@
 //! The whole chain of a decompiler front end, stage by stage: build a `Cfg`,
-//! analyse it (dominators, post-dominators, SSA, SCCP, control dependence,
+//! analyze it (dominators, post-dominators, SSA, SCCP, control dependence,
 //! def-use), cut away what the analyses prove dead, structure what is left
 //! with `ControlTree`, lift it to the structured IR, verify it, and compare
 //! what the programs observe at every stage.

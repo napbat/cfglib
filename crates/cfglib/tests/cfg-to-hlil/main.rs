@@ -1,5 +1,5 @@
 //! The cross-module pipeline of a source-language frontend (symtree-ir
-//! shaped): build a `Cfg` of statements, analyse it, structure it with
+//! shaped): build a `Cfg` of statements, analyze it, structure it with
 //! `ControlTree::compute_with_report`, and lift it to the structured IR with
 //! `lift_with_tree`, verify, and print.
 //!

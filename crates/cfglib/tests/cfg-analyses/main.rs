@@ -3,7 +3,7 @@
 //! recovery, pattern detection, loop depths, interval partitions) over a toy
 //! three-address statement language with named locals.
 //!
-//! Every analysis is judged by hand-labelled fixtures or by a brute-force
+//! Every analysis is judged by hand-labeled fixtures or by a brute-force
 //! reference written in the test: closure of merges, symbolic expression
 //! trees, flow equations, definition-level dominance, textbook intervals.
 

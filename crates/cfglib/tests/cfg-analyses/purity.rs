@@ -1,4 +1,4 @@
-//! Purity verdicts against hand-labelled effects.
+//! Purity verdicts against hand-labeled effects.
 
 use std::collections::BTreeSet;
 
@@ -7,7 +7,7 @@ use cfglib::{BlockId, Cfg, EdgeKind, Purity, block_purities, block_purity, cfg_p
 use crate::random::Rng;
 use crate::stmt::{Effect, Route, Stmt, block, link};
 
-struct Labelled {
+struct Labeled {
     cfg: Cfg<Stmt, Route>,
     pure_entry: BlockId,
     stores: BlockId,
@@ -17,7 +17,7 @@ struct Labelled {
 
 /// Four blocks in a chain with known effect sets: none, {Memory, Output}
 /// (Memory declared twice), {Output, Network}, and an empty block.
-fn labelled() -> Labelled {
+fn labeled() -> Labeled {
     let mut cfg = Cfg::<Stmt, Route>::with_edge_payload();
     let pure_entry = cfg.entry();
     for statement in [
@@ -46,7 +46,7 @@ fn labelled() -> Labelled {
     link(&mut cfg, pure_entry, stores, EdgeKind::Fallthrough);
     link(&mut cfg, stores, network, EdgeKind::Fallthrough);
     link(&mut cfg, network, empty, EdgeKind::Fallthrough);
-    Labelled {
+    Labeled {
         cfg,
         pure_entry,
         stores,
@@ -57,13 +57,13 @@ fn labelled() -> Labelled {
 
 #[test]
 fn a_block_is_pure_exactly_when_nothing_in_it_declares_an_effect() {
-    let Labelled {
+    let Labeled {
         cfg,
         pure_entry,
         stores,
         network,
         empty,
-    } = labelled();
+    } = labeled();
 
     assert_eq!(block_purity(&cfg, pure_entry), Purity::Pure);
     assert_eq!(
@@ -80,12 +80,12 @@ fn a_block_is_pure_exactly_when_nothing_in_it_declares_an_effect() {
 
 #[test]
 fn impure_blocks_report_each_effect_once_in_the_vocabulary_order() {
-    let Labelled {
+    let Labeled {
         cfg,
         stores,
         network,
         ..
-    } = labelled();
+    } = labeled();
 
     assert_eq!(
         block_purity(&cfg, stores),
@@ -101,7 +101,7 @@ fn impure_blocks_report_each_effect_once_in_the_vocabulary_order() {
 
 #[test]
 fn the_graph_is_impure_with_the_union_of_every_blocks_effects() {
-    let Labelled { cfg, .. } = labelled();
+    let Labeled { cfg, .. } = labeled();
 
     assert_eq!(
         cfg_purity(&cfg),
@@ -111,12 +111,12 @@ fn the_graph_is_impure_with_the_union_of_every_blocks_effects() {
 
 #[test]
 fn removing_the_impure_blocks_makes_the_graph_pure_again() {
-    let Labelled {
+    let Labeled {
         mut cfg,
         stores,
         network,
         ..
-    } = labelled();
+    } = labeled();
 
     cfg.remove_block(network);
     assert_eq!(
@@ -130,13 +130,13 @@ fn removing_the_impure_blocks_makes_the_graph_pure_again() {
 
 #[test]
 fn per_block_verdicts_come_in_allocation_order_and_skip_removed_blocks() {
-    let Labelled {
+    let Labeled {
         mut cfg,
         pure_entry,
         stores,
         network,
         empty,
-    } = labelled();
+    } = labeled();
 
     assert_eq!(
         block_purities(&cfg),

@@ -508,7 +508,7 @@ fn each_malformed_cfg_line_is_reported_with_its_number_and_kind() {
             TextErrorKind::UnknownNode { index: 7 },
         ),
         (
-            "entry bb0\nbb0:\nregion r0 colour=red\n",
+            "entry bb0\nbb0:\nregion r0 color=red\n",
             3,
             TextErrorKind::Region,
         ),
