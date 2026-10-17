@@ -31,20 +31,6 @@ fn diamond() -> (Graph<&'static str, &'static str>, Vec<NodeId>) {
     (graph, nodes)
 }
 
-/// The same shape in the arena store, for view comparisons.
-fn arena_diamond() -> (Graph<&'static str, &'static str>, Vec<crate::NodeId>) {
-    let mut graph = Graph::new();
-    let nodes: Vec<_> = ["entry", "left", "right", "exit"]
-        .into_iter()
-        .map(|payload| graph.add_node(payload))
-        .collect();
-    graph.add_edge(nodes[0], nodes[1], "a");
-    graph.add_edge(nodes[0], nodes[2], "b");
-    graph.add_edge(nodes[1], nodes[3], "c");
-    graph.add_edge(nodes[2], nodes[3], "d");
-    (graph, nodes)
-}
-
 fn indexes<T: Copy, I: IntoIterator<Item = T>>(
     values: I,
     index: impl Fn(T) -> usize,
@@ -713,47 +699,40 @@ fn an_edge_cannot_attach_to_a_removed_node() {
 }
 
 #[test]
-fn the_algorithms_agree_with_the_arena_store() {
-    let (mut store, store_nodes) = diamond();
+fn the_algorithms_agree_whether_the_edges_sit_in_the_delta_or_the_compacted_base() {
+    let (mut base, base_nodes) = diamond();
     // A back edge makes the comparison cover a cycle as well as a diamond.
-    store.add_edge(store_nodes[3], store_nodes[0], "back");
-    store.compact();
-    let (mut arena, arena_nodes) = arena_diamond();
-    arena.add_edge(arena_nodes[3], arena_nodes[0], "back");
+    base.add_edge(base_nodes[3], base_nodes[0], "back");
+    base.compact();
+    let (mut delta, delta_nodes) = diamond();
+    delta.add_edge(delta_nodes[3], delta_nodes[0], "back");
 
-    let store_rooted = Rooted::new(&store, store_nodes[0]);
-    let arena_rooted = Rooted::new(&arena, arena_nodes[0]);
-    let store_dominators = DominatorTree::compute(&store_rooted);
-    let arena_dominators = DominatorTree::compute(&arena_rooted);
-    for (store_node, arena_node) in store_nodes.iter().zip(&arena_nodes) {
+    let base_dominators = DominatorTree::compute(&Rooted::new(&base, base_nodes[0]));
+    let delta_dominators = DominatorTree::compute(&Rooted::new(&delta, delta_nodes[0]));
+    for (base_node, delta_node) in base_nodes.iter().zip(&delta_nodes) {
         assert_eq!(
-            store_dominators.idom(*store_node).map(Id::index),
-            arena_dominators.idom(*arena_node).map(crate::NodeId::index),
-            "immediate dominator of {store_node}"
+            base_dominators.idom(*base_node).map(Id::index),
+            delta_dominators.idom(*delta_node).map(Id::index),
+            "immediate dominator of {base_node}"
         );
     }
 
-    let store_components = tarjan_scc(&store);
-    let arena_components = tarjan_scc(&arena);
-    assert_eq!(
-        store_components
+    let components = |graph: &Graph<&'static str, &'static str>| {
+        tarjan_scc(graph)
             .components()
             .map(|nodes| indexes(nodes.iter().copied(), Id::index))
-            .collect::<Vec<_>>(),
-        arena_components
-            .components()
-            .map(|nodes| indexes(nodes.iter().copied(), crate::NodeId::index))
             .collect::<Vec<_>>()
-    );
+    };
+    assert_eq!(components(&base), components(&delta));
 
     assert_eq!(
         indexes(
-            depth_first_preorder(&store, store_nodes[0], TraversalDirection::Outgoing),
+            depth_first_preorder(&base, base_nodes[0], TraversalDirection::Outgoing),
             Id::index
         ),
         indexes(
-            depth_first_preorder(&arena, arena_nodes[0], TraversalDirection::Outgoing),
-            crate::NodeId::index
+            depth_first_preorder(&delta, delta_nodes[0], TraversalDirection::Outgoing),
+            Id::index
         )
     );
 }
