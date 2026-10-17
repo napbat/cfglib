@@ -5,7 +5,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use crate::dataflow::InstrInfo;
+use crate::InstrInfo;
 use crate::memory::{MemoryEvent, MemoryEventInfo};
 
 /// A mock instruction with ordinary data flow (`u8` variables) plus an

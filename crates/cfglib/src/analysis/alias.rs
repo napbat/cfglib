@@ -7,7 +7,7 @@ extern crate alloc;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use crate::dataflow::VariableId;
+use crate::VariableId;
 use crate::dataflow::memory::MemoryAlias;
 use crate::union_find::DisjointSet;
 

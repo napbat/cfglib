@@ -11,8 +11,8 @@ use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
 use crate::dataflow::constant_propagation::{ConstValue, ConstantFolder, fold_definitions};
 use crate::dataflow::ssa::{SsaForm, SsaInstruction, SsaValue};
-use crate::dataflow::{InstrInfo, ProgramPoint, VariableId, departs_before_throws};
 use crate::edge::{EdgeId, EdgeKind, KindedEdge};
+use crate::{InstrInfo, ProgramPoint, VariableId, departs_before_throws};
 
 /// Result of SCCP analysis.
 #[derive(Debug, Clone)]

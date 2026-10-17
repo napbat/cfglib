@@ -7,9 +7,9 @@ use alloc::vec::Vec;
 
 use crate::analysis::expr::ExprInstr;
 use crate::dataflow::copy_propagation::CopySource;
-use crate::dataflow::{EffectInfo, InstrInfo};
 use crate::display::DisplayInstr;
 use crate::flow::{FlowControl, FlowEffect};
+use crate::{EffectInfo, InstrInfo};
 
 /// Test-local side-effect vocabulary (the library imposes none).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -115,7 +115,7 @@ impl ExprInstr for DfInst {
     }
 }
 
-impl crate::dataflow::Predicated for DfInst {
+impl crate::Predicated for DfInst {
     fn predicate(&self) -> Option<(u16, bool)> {
         self.pred
     }
@@ -174,7 +174,7 @@ fn df_base(name: &'static str) -> DfInst {
 }
 
 /// Create a [`DfInst`] predicated on `(variable, polarity)`. Per the
-/// [`Predicated`](crate::dataflow::Predicated) contract, the predicate
+/// [`Predicated`](crate::Predicated) contract, the predicate
 /// variable is also a use. As the last instruction of a block it is also
 /// the block's conditional terminator, so
 /// [`ConstantFolder::fold_branch`](crate::ConstantFolder::fold_branch)

@@ -13,7 +13,7 @@
 //! through that point, so it is correct only when the edge is the sole way
 //! out of the point. That fails when the departure block has another
 //! successor while the target has other predecessors (a critical edge), and
-//! for an [unwind](crate::dataflow::departs_before_throws) departure, which sits
+//! for an [unwind](crate::departs_before_throws) departure, which sits
 //! before a throwing instruction inside a block that the normal path
 //! continues through. The consumer must give such an edge a block of its own,
 //! or otherwise place the copy so that it runs only when the edge is taken,
@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 
 use crate::block::BlockId;
 use crate::dataflow::ssa::{SsaForm, SsaValue};
-use crate::dataflow::{ProgramPoint, VariableId};
+use crate::{ProgramPoint, VariableId};
 
 /// A copy to be materialized on a specific CFG edge.
 ///

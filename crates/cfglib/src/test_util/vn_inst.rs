@@ -4,8 +4,8 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
+use crate::InstrInfo;
 use crate::analysis::value_numbering::ValueNumberInfo;
-use crate::dataflow::InstrInfo;
 use crate::flow::{FlowControl, FlowEffect};
 
 /// A mock instruction carrying an operator identity for value numbering:

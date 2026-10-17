@@ -273,6 +273,7 @@ pub use dataflow::fixpoint::{
     try_solve_problem, try_solve_problem_from, try_solve_problem_from_with_config,
     try_solve_problem_with_config,
 };
+pub use dataflow::instruction::{EffectInfo, InstrInfo, Predicated, VariableId};
 pub use dataflow::liveness::{Liveness, LivenessProblem, SeededLivenessProblem};
 pub use dataflow::memory::{
     ConservativeMemoryAlias, ExactMemoryAlias, MemoryAlias, MemoryClassId, MemoryDefinition,
@@ -287,6 +288,7 @@ pub use dataflow::node_fixpoint::{
     try_solve_node_problem_with_config,
 };
 pub use dataflow::phi_web::{PhiWeb, PhiWebs};
+pub use dataflow::program_point::{DefSite, ProgramPoint, UseSite};
 pub use dataflow::reaching::{ReachingDef, ReachingDefs, ReachingDefsProblem};
 pub use dataflow::sccp::SccpAnalysis;
 pub use dataflow::ssa::{
@@ -294,7 +296,7 @@ pub use dataflow::ssa::{
     SsaScratch, SsaValue, SsaVersion,
 };
 pub use dataflow::ssa_destruction::{PhiCopy, PhiCopyGroup, copies_by_predecessor, eliminate_phis};
-pub use dataflow::{DefSite, EffectInfo, InstrInfo, Predicated, ProgramPoint, UseSite, VariableId};
+pub use dataflow::unwind::departs_before_throws;
 pub use display::{DisplayInstr, IndentedWriter};
 pub use edge::{Edge, EdgeId, EdgeKind, EdgeTag, KindedEdge};
 pub use exception::{

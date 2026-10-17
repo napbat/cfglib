@@ -96,7 +96,7 @@ impl TryProblem<Cfg<DfInst>> for Rejecting {
         block: BlockId,
         input: &Self::Fact,
     ) -> Result<Self::Fact, Self::Error> {
-        use crate::dataflow::InstrInfo;
+        use crate::InstrInfo;
         for inst in cfg.block(block).instructions() {
             if inst.defs().contains(&7) {
                 return Err("variable 7 is reserved");

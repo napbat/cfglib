@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 
 use super::cfg_view::CfgView;
 use super::reaching::{ReachingDef, ReachingDefs, define, definitions_of};
-use super::{DefSite, InstrInfo, UseSite};
+use crate::{DefSite, InstrInfo, UseSite};
 
 /// Def-use and use-def chain results.
 #[derive(Debug, Clone)]
@@ -143,10 +143,10 @@ impl DefUseChains {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DefSite;
     use crate::block::BlockId;
     use crate::builder::CfgBuilder;
     use crate::cfg::Cfg;
-    use crate::dataflow::DefSite;
     use crate::edge::EdgeKind;
     use crate::test_util::{DfInst, df_def as def, df_use as use_};
     use alloc::vec;

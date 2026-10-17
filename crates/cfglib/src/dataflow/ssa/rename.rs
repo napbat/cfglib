@@ -9,8 +9,9 @@ use smallvec::SmallVec;
 
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
-use crate::dataflow::{InstrInfo, ProgramPoint, VariableId, unwind_edges};
+use crate::dataflow::unwind::unwind_edges;
 use crate::graph::dominator::{DominatorChildOrder, DominatorTree};
+use crate::{InstrInfo, ProgramPoint, VariableId};
 
 use super::scratch::SsaScratch;
 use super::{SsaBlock, SsaInstruction, SsaPhi, SsaValue, SsaVersion};

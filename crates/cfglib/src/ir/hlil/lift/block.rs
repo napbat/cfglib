@@ -14,8 +14,8 @@ use alloc::vec::Vec;
 use core::mem;
 
 use crate::block::BlockId;
-use crate::dataflow::{InstrInfo, ProgramPoint};
 use crate::graph::view::DenseId;
+use crate::{InstrInfo, ProgramPoint};
 
 use super::super::builder::FunctionBuilder;
 use super::super::dialect::{Dialect, LiftDialect};

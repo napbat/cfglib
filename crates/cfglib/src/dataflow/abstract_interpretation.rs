@@ -10,11 +10,12 @@
 extern crate alloc;
 use alloc::collections::BTreeMap;
 
+use crate::InstrInfo;
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
 use crate::dataflow::edge_fixpoint::{self, EdgeProblem};
 use crate::dataflow::fixpoint::Direction;
-use crate::dataflow::{InstrInfo, replay_block, unwind_departure};
+use crate::dataflow::unwind::{replay_block, unwind_departure};
 use crate::graph::edge_view::EdgeRef;
 
 /// A lattice element for abstract interpretation.

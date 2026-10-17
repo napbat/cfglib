@@ -14,8 +14,8 @@ use alloc::vec::Vec;
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
 use crate::dataflow::liveness::Liveness;
-use crate::dataflow::{EffectInfo, InstrInfo, ProgramPoint};
 use crate::graph::traverse::{TraversalDirection, reachable};
+use crate::{EffectInfo, InstrInfo, ProgramPoint};
 
 /// Everything dead in a CFG, found without mutating it.
 #[derive(Debug, Clone, PartialEq, Eq)]

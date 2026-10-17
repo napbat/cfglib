@@ -6,9 +6,9 @@ use alloc::vec::Vec;
 
 use crate::cfg::Cfg;
 use crate::dataflow::liveness::Liveness;
-use crate::dataflow::{InstrInfo, VariableId};
 use crate::graph::store::Graph;
 use crate::graph::view::GraphView;
+use crate::{InstrInfo, VariableId};
 
 fn connect<V: VariableId>(adjacency: &mut BTreeMap<V, BTreeSet<V>>, left: &V, right: &V) {
     adjacency.entry(left.clone()).or_default();

@@ -8,9 +8,10 @@ use alloc::vec::Vec;
 
 use crate::cfg::Cfg;
 use crate::dataflow::cfg_view::CfgView;
-use crate::dataflow::{InstrInfo, ProgramPoint, unwind_edges};
+use crate::dataflow::unwind::unwind_edges;
 use crate::edge::KindedEdge;
 use crate::memory::{MemoryEvent, MemoryTraceEntry};
+use crate::{InstrInfo, ProgramPoint};
 
 use super::scratch::MemorySsaScratch;
 use super::{MemoryAlias, MemoryClassId, MemoryLocationClass};

@@ -5,9 +5,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::{pseudocode, subtree};
+use crate::ProgramPoint;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::dataflow::ProgramPoint;
 use crate::edge::EdgeKind;
 use crate::flow::FlowEffect;
 use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};

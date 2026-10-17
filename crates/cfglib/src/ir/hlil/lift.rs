@@ -24,9 +24,9 @@ use core::marker::PhantomData;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::dataflow::{InstrInfo, ProgramPoint};
 use crate::graph::view::DenseId;
 use crate::{ControlTree, LiftReport, Liveness};
+use crate::{InstrInfo, ProgramPoint};
 
 use super::builder::FunctionBuilder;
 use super::correspondence::Correspondence;

@@ -19,8 +19,9 @@ use alloc::collections::BTreeMap;
 use super::cfg_view::CfgView;
 use super::edge_fixpoint::{self, EdgeProblem};
 use super::fixpoint::{Direction, Facts};
-use super::{InstrInfo, replay_block, unwind_departure};
+use crate::InstrInfo;
 use crate::block::BlockId;
+use crate::dataflow::unwind::{replay_block, unwind_departure};
 use crate::graph::edge_view::EdgeRef;
 
 /// The lattice value for a single variable, over constant domain `C`.

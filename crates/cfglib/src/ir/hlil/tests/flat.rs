@@ -17,8 +17,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::{self, Write};
 
+use crate::ProgramPoint;
 use crate::block::BlockId;
-use crate::dataflow::ProgramPoint;
 use crate::edge::{EdgeId, EdgeKind, KindedEdge};
 use crate::graph::view::DenseId;
 use crate::ir::hlil::{

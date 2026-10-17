@@ -32,10 +32,10 @@ use crate::graph::view::RootedView;
 /// - An edge of kind [`EdgeKind::ExceptionUnwind`](crate::EdgeKind::ExceptionUnwind)
 ///   leaves its source block before a throwing instruction. An edge of kind
 ///   [`EdgeKind::ExceptionHandler`](crate::EdgeKind::ExceptionHandler) enters a handler.
-/// - [`InstrInfo::may_unwind`](super::InstrInfo::may_unwind) marks the
+/// - [`InstrInfo::may_unwind`](crate::InstrInfo::may_unwind) marks the
 ///   throwing instructions of a block.
 ///
-/// [`departs_before_throws`](super::departs_before_throws) combines the two.
+/// [`departs_before_throws`](crate::departs_before_throws) combines the two.
 ///
 /// # Contract
 ///
@@ -43,7 +43,7 @@ use crate::graph::view::RootedView;
 ///   [`node_ids`](crate::GraphView::node_ids) yields. It returns the same
 ///   slice each time.
 /// - The index of an instruction in the slice is the instruction index of
-///   the [`ProgramPoint`](super::ProgramPoint) that an analysis reports.
+///   the [`ProgramPoint`](crate::ProgramPoint) that an analysis reports.
 pub trait CfgView:
     RootedView<NodeId = BlockId> + EdgeView<EdgeId = EdgeId, EdgeData: KindedEdge>
 {

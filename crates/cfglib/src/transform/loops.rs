@@ -7,9 +7,9 @@ extern crate alloc;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
+use crate::InstrInfo;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::dataflow::InstrInfo;
 use crate::edge::EdgeKind;
 use crate::graph::structure::NaturalLoop;
 

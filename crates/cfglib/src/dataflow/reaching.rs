@@ -16,9 +16,10 @@ use core::ops::Bound;
 use super::cfg_view::CfgView;
 use super::edge_fixpoint::{self, EdgeProblem};
 use super::fixpoint::{Direction, Facts};
-use super::{DefSite, InstrInfo, VariableId, replay_block, unwind_departure};
 use crate::block::BlockId;
+use crate::dataflow::unwind::{replay_block, unwind_departure};
 use crate::graph::edge_view::EdgeRef;
+use crate::{DefSite, InstrInfo, VariableId};
 
 /// A reaching definition: which IR variable was defined, and where.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

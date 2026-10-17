@@ -18,8 +18,8 @@ extern crate alloc;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
+use crate::InstrInfo;
 use crate::block::BlockId;
-use crate::dataflow::InstrInfo;
 use crate::dataflow::cfg_view::CfgView;
 
 /// A node in an expression tree over variables `V`, operators `Op`, and

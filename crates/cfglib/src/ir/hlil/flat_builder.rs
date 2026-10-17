@@ -14,8 +14,8 @@
 //! the transfer ([`LowerEdge`]), and the builder chooses the payload and the
 //! [`EdgeKind`](crate::EdgeKind).
 
+use crate::ProgramPoint;
 use crate::block::BlockId;
-use crate::dataflow::ProgramPoint;
 use crate::edge::EdgeId;
 use crate::graph::view::DenseId;
 use crate::region::{Region, RegionId};

@@ -22,8 +22,8 @@ use smallvec::SmallVec;
 
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
-use crate::dataflow::{InstrInfo, ProgramPoint, VariableId};
 use crate::graph::dominator::DominatorTree;
+use crate::{InstrInfo, ProgramPoint, VariableId};
 
 mod forest;
 mod frontier;

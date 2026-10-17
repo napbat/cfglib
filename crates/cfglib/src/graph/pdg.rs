@@ -12,10 +12,10 @@ use alloc::vec::Vec;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::dataflow::def_use::DefUseChains;
-use crate::dataflow::{InstrInfo, ProgramPoint};
 use crate::graph::cdg::control_dependence_graph;
 use crate::graph::dominator::PostDominatorTree;
 use crate::graph::store::{Graph, NodeId};
+use crate::{InstrInfo, ProgramPoint};
 
 /// A node in a program-dependence graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

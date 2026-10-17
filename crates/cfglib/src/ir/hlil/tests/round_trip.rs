@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::string::String;
 
 use crate::BlockId;
-use crate::dataflow::ProgramPoint;
+use crate::ProgramPoint;
 use crate::graph::view::DenseId;
 use crate::ir::hlil::{
     Entity, FlatBuilder, FunctionBuilder, FunctionView, StmtShape, has_recovery_candidates, lower,

@@ -10,8 +10,8 @@ use core::hash::{Hash, Hasher};
 use core::marker::PhantomData;
 use core::ops::Range;
 
+use crate::ProgramPoint;
 use crate::block::BlockId;
-use crate::dataflow::ProgramPoint;
 use crate::dataflow::cfg_view::CfgView;
 use crate::edge::EdgeId;
 use crate::graph::view::DenseId;

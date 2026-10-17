@@ -6,7 +6,7 @@ use alloc::string::ToString;
 use alloc::vec;
 
 use crate::BlockId;
-use crate::dataflow::ProgramPoint;
+use crate::ProgramPoint;
 use crate::graph::view::DenseId;
 use crate::ir::hlil::{
     Correspondence, Entity, FunctionBuilder, FunctionView, Handler, HandlerKind, RecoverError,

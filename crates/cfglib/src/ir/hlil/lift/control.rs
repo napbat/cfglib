@@ -13,8 +13,8 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::ProgramPoint;
 use crate::block::BlockId;
-use crate::dataflow::ProgramPoint;
 use crate::graph::view::DenseId;
 use crate::region;
 use crate::{

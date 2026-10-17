@@ -4,7 +4,7 @@
 //! coalescing and register allocation.
 
 extern crate alloc;
-use crate::dataflow::VariableId;
+use crate::VariableId;
 use crate::dataflow::ssa::{SsaForm, SsaInstruction, SsaPhi, SsaValue};
 use crate::union_find::DisjointSet;
 use alloc::collections::{BTreeMap, BTreeSet};

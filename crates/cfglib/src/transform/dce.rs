@@ -50,7 +50,7 @@ use crate::cfg::Cfg;
 ///
 /// Panics only if the unbounded fixpoint solve reports a step-limit error,
 /// which the unbounded configuration cannot produce.
-pub fn dead_code_elimination<I: crate::dataflow::EffectInfo, E>(cfg: &mut Cfg<I, E>) -> usize {
+pub fn dead_code_elimination<I: crate::EffectInfo, E>(cfg: &mut Cfg<I, E>) -> usize {
     dead_code_elimination_with_exits(cfg, |_| Vec::new())
 }
 
@@ -68,7 +68,7 @@ pub fn dead_code_elimination<I: crate::dataflow::EffectInfo, E>(cfg: &mut Cfg<I,
 ///
 /// Panics only if the unbounded fixpoint solve reports a step-limit error,
 /// which the unbounded configuration cannot produce.
-pub fn dead_code_elimination_with_exits<I: crate::dataflow::EffectInfo, E>(
+pub fn dead_code_elimination_with_exits<I: crate::EffectInfo, E>(
     cfg: &mut Cfg<I, E>,
     live_out: impl Fn(BlockId) -> Vec<I::Variable>,
 ) -> usize {
@@ -110,9 +110,7 @@ pub fn dead_code_elimination_with_exits<I: crate::dataflow::EffectInfo, E>(
 ///
 /// Panics only if the unbounded fixpoint solve reports a step-limit error,
 /// which the unbounded configuration cannot produce.
-pub fn remove_dead_code<I: crate::dataflow::EffectInfo, E: Clone + Default>(
-    cfg: &mut Cfg<I, E>,
-) -> usize {
+pub fn remove_dead_code<I: crate::EffectInfo, E: Clone + Default>(cfg: &mut Cfg<I, E>) -> usize {
     remove_dead_code_mapped(cfg).0
 }
 
@@ -127,7 +125,7 @@ pub fn remove_dead_code<I: crate::dataflow::EffectInfo, E: Clone + Default>(
 ///
 /// Panics only if the unbounded fixpoint solve reports a step-limit error,
 /// which the unbounded configuration cannot produce.
-pub fn remove_dead_code_mapped<I: crate::dataflow::EffectInfo, E: Clone + Default>(
+pub fn remove_dead_code_mapped<I: crate::EffectInfo, E: Clone + Default>(
     cfg: &mut Cfg<I, E>,
 ) -> (usize, crate::rewrite::Rewrite) {
     let mut total = 0;

@@ -15,8 +15,9 @@ use core::ops::Range;
 use super::bits::{bit_slot, ones_of};
 use super::cfg_view::CfgView;
 use super::fixpoint::{Direction, Facts, Problem};
-use super::{InstrInfo, VariableId, departs_before_throws, first_unwind_point, is_unwind_edge};
 use crate::block::BlockId;
+use crate::dataflow::unwind::{first_unwind_point, is_unwind_edge};
+use crate::{InstrInfo, VariableId, departs_before_throws};
 
 /// The liveness problem.
 ///

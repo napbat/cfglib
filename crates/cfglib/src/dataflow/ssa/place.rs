@@ -17,10 +17,9 @@ use smallvec::SmallVec;
 
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
-use crate::dataflow::{
-    InstrInfo, ProgramPoint, VariableId, departs_before_throws, first_unwind_point, unwind_edges,
-};
+use crate::dataflow::unwind::{first_unwind_point, unwind_edges};
 use crate::graph::dominator::DominatorTree;
+use crate::{InstrInfo, ProgramPoint, VariableId, departs_before_throws};
 
 use super::scratch::SsaScratch;
 use super::{INLINE_OPERANDS, SsaValue};

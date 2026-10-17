@@ -24,10 +24,11 @@ use alloc::vec::Vec;
 
 use super::cfg_view::CfgView;
 use super::liveness::Liveness;
-use super::{InstrInfo, ProgramPoint, VariableId, first_unwind_point, unwind_reach};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
+use crate::dataflow::unwind::{first_unwind_point, unwind_reach};
 use crate::graph::dominator::DominatorTree;
+use crate::{InstrInfo, ProgramPoint, VariableId};
 
 /// Borrowed pairwise alias definitions and their corresponding value sources.
 pub type AliasPairs<'a, V> = (&'a [V], &'a [V]);
@@ -96,7 +97,7 @@ enum Propagation {
 #[derive(Clone)]
 struct Substitution<V> {
     source: V,
-    definition: super::ProgramPoint,
+    definition: crate::ProgramPoint,
 }
 
 fn pairs<I: CopySource>(
@@ -329,7 +330,7 @@ fn propagate<I: CopySource + Clone, E>(
     let mut candidates: BTreeSet<I::Variable> = BTreeSet::new();
     for &bid in &block_ids {
         for (inst_idx, inst) in cfg.block_mut(bid).instructions_mut().iter_mut().enumerate() {
-            let point = super::ProgramPoint {
+            let point = crate::ProgramPoint {
                 block: bid,
                 inst_idx,
             };
