@@ -32,9 +32,10 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
+
+use super::marks::Marks;
 
 /// Bounds for one [`open_fold_post_order`] walk.
 #[derive(Debug, Clone, Copy, Default)]
@@ -140,15 +141,15 @@ pub trait OpenFold {
 /// everything its subtree added is dropping the marks past that length. A
 /// mark is only ever set when absent, so the log and the set always hold the
 /// same keys.
-struct Marks<K> {
-    set: BTreeSet<K>,
+struct UndoMarks<K> {
+    set: Marks<K>,
     log: Vec<K>,
 }
 
-impl<K: Clone + Ord> Marks<K> {
-    const fn new() -> Self {
+impl<K: Clone + Ord> UndoMarks<K> {
+    fn new() -> Self {
         Self {
-            set: BTreeSet::new(),
+            set: Marks::new(),
             log: Vec::new(),
         }
     }
@@ -204,7 +205,7 @@ struct Walk<F: OpenFold> {
     pending: Vec<F::Node>,
     /// The buffer `successors` fills, reused for every node.
     scratch: Vec<F::Node>,
-    marks: Marks<F::Mark>,
+    marks: UndoMarks<F::Mark>,
 }
 
 impl<F: OpenFold> Walk<F> {
@@ -318,7 +319,7 @@ pub fn open_fold_post_order<F: OpenFold>(
         stack: Vec::new(),
         pending: Vec::new(),
         scratch: Vec::new(),
-        marks: Marks::new(),
+        marks: UndoMarks::new(),
     };
 
     let root_key = fold.mark(&root);

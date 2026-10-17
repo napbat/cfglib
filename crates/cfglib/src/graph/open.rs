@@ -52,6 +52,7 @@
 mod events;
 mod fold;
 mod follow;
+mod marks;
 mod paths;
 mod search;
 

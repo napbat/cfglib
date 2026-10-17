@@ -2,12 +2,12 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
 use crate::graph::search::{Visit, VisitedPolicy};
 
+use super::super::marks::Marks;
 use super::super::may_expand;
 
 /// The discipline an [`open_depth_first_events`] walk runs under.
@@ -242,7 +242,7 @@ pub fn open_depth_first_events<N: Clone + Ord, B>(
     mut successors: impl FnMut(&N, &mut Vec<N>),
     mut on_event: impl FnMut(OpenDfsEvent<'_, N>) -> ControlFlow<B, Visit>,
 ) -> Option<B> {
-    let mut marks: BTreeSet<N> = BTreeSet::new();
+    let mut marks = Marks::new();
     let mut stack: Vec<OpenDfsFrame<N>> = Vec::new();
     // Every frame's successors, appended as the frame is pushed and truncated
     // away as it pops, plus the buffer the closure writes into — which has to
