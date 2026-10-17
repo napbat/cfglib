@@ -308,25 +308,56 @@ fn a_decoded_keyed_graph_keeps_minting_dense_ids_in_the_same_order() {
     );
 }
 
+/// The document of the dependency graph with its key table edited by `edit`.
+/// A swap of two keys cannot be detected (a node carries no key of its own
+/// unless the consumer made it self-keyed), so only disagreements about which
+/// nodes exist are in scope.
+fn load_with_key_table(
+    edit: impl FnOnce(&mut serde_json::Map<String, Value>),
+) -> Result<KeyedGraph<String, String, u32>, serde_json::Error> {
+    let mut value = document(&dependency_graph());
+    edit(
+        value["ids"]
+            .as_object_mut()
+            .expect("the key table is a map"),
+    );
+    load(value)
+}
+
 #[test]
-fn a_key_table_that_disagrees_with_its_graph_is_rejected() {
-    let original = dependency_graph();
-    let value = document(&original);
+fn a_key_naming_a_node_the_graph_does_not_have_is_rejected() {
+    let loaded = load_with_key_table(|table| {
+        table.insert("pkg::a".to_owned(), json!(99));
+    });
+    assert!(
+        loaded.is_err(),
+        "a key naming node 99 of a 4-node graph loaded"
+    );
+}
 
-    // Two keys swap the nodes they name.
-    let mut swapped = value.clone();
-    let table = swapped["ids"]
-        .as_object_mut()
-        .expect("the key table is a map");
-    let (first, second) = (table["pkg::a"].clone(), table["pkg::b"].clone());
-    table["pkg::a"] = second;
-    table["pkg::b"] = first;
-    assert!(load::<KeyedGraph<String, String, u32>>(swapped).is_err());
+#[test]
+fn two_keys_naming_one_node_are_rejected() {
+    let loaded = load_with_key_table(|table| {
+        let shared = table["pkg::a"].clone();
+        table.insert("pkg::b".to_owned(), shared);
+    });
+    assert!(loaded.is_err(), "two keys naming one node loaded");
+}
 
-    // A key names a node the graph does not have.
-    let mut dangling = value;
-    dangling["ids"]["pkg::a"] = json!(99);
-    assert!(load::<KeyedGraph<String, String, u32>>(dangling).is_err());
+#[test]
+fn a_key_table_with_fewer_keys_than_live_nodes_is_rejected() {
+    let loaded = load_with_key_table(|table| {
+        table.remove("pkg::d");
+    });
+    assert!(loaded.is_err(), "a node with no key loaded");
+}
+
+#[test]
+fn a_key_table_with_more_keys_than_live_nodes_is_rejected() {
+    let loaded = load_with_key_table(|table| {
+        table.insert("pkg::extra".to_owned(), json!(0));
+    });
+    assert!(loaded.is_err(), "five keys for four nodes loaded");
 }
 
 /// Grammar nullability over four symbols, the way a grammar tool would
