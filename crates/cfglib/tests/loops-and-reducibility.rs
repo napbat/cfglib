@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 
 use cfglib::{
     BlockId, Cfg, CfgMetrics, DominatorTree, EdgeKind, GraphMetrics, LoopNestingTree,
-    block_nesting_depths, cfg_block_nesting_depths, detect_loops, detect_loops_tagged,
-    find_back_edges,
+    block_nesting_depths, canonicalize_loops, cfg_block_nesting_depths, detect_loops,
+    detect_loops_tagged, find_back_edges, insert_preheader, loop_exit_blocks, verify,
 };
 
 fn set(blocks: impl IntoIterator<Item = BlockId>) -> BTreeSet<BlockId> {
@@ -219,4 +219,151 @@ fn metrics_count_live_blocks_whether_or_not_the_store_was_compacted() {
 
     cfg.compact();
     assert_eq!(CfgMetrics::compute(&cfg), before);
+}
+
+/// A route label an edge-aware consumer hangs on its edges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Route {
+    #[default]
+    Plain,
+    Hot,
+    Cold,
+}
+
+#[test]
+fn a_preheader_takes_over_the_entering_edges_with_their_identity_and_payload() {
+    // entry -> header twice over, a hot weighted conditional arm and a cold
+    // one through `side`, and the exit `header -> done`.
+    let mut cfg = Cfg::<u32, Route>::with_edge_payload();
+    let entry = cfg.entry();
+    let [header, body, side, done] = [(); 4].map(|()| cfg.new_block());
+    let hot = cfg.add_weighted_edge_with_payload(
+        entry,
+        header,
+        EdgeKind::ConditionalTrue,
+        0.8,
+        Route::Hot,
+    );
+    let to_done = cfg.add_edge(entry, done, EdgeKind::ConditionalFalse);
+    let to_side = cfg.add_edge(entry, side, EdgeKind::SwitchCase);
+    let cold = cfg.add_edge_with_payload(side, header, EdgeKind::Fallthrough, Route::Cold);
+    cfg.add_edge(header, body, EdgeKind::ConditionalTrue);
+    cfg.add_edge(body, header, EdgeKind::Back);
+    cfg.add_edge(header, done, EdgeKind::ConditionalFalse);
+
+    let before: Vec<_> = cfg.outgoing(entry).collect();
+    let dom = DominatorTree::compute(&cfg);
+    let lp = detect_loops(&cfg, &dom).remove(0);
+    let preheader = insert_preheader(&mut cfg, &lp).expect("two entries need a preheader");
+
+    assert_eq!(before, [hot, to_done, to_side]);
+    assert_eq!(
+        cfg.outgoing(entry).collect::<Vec<_>>(),
+        before,
+        "the entry's arms keep their order"
+    );
+    assert_eq!(cfg.edge(hot).target(), preheader);
+    assert_eq!(cfg.edge(hot).weight(), Some(0.8));
+    assert_eq!(*cfg.edge(hot).payload(), Route::Hot);
+    assert_eq!(cfg.edge(cold).target(), preheader);
+    assert_eq!(*cfg.edge(cold).payload(), Route::Cold);
+    assert_eq!(cfg.successors(preheader).collect::<Vec<_>>(), [header]);
+    assert!(verify(&cfg).is_ok());
+}
+
+#[test]
+fn canonicalizing_gives_every_entered_loop_a_dedicated_preheader() {
+    // The loop is entered from a block that also branches around it.
+    let mut cfg = Cfg::<u32>::new();
+    let [header, body, exit] = [(); 3].map(|()| cfg.new_block());
+    cfg.add_edge(cfg.entry(), header, EdgeKind::ConditionalTrue);
+    cfg.add_edge(cfg.entry(), exit, EdgeKind::ConditionalFalse);
+    cfg.add_edge(header, body, EdgeKind::ConditionalTrue);
+    cfg.add_edge(body, header, EdgeKind::Back);
+    cfg.add_edge(header, exit, EdgeKind::ConditionalFalse);
+    let dom = DominatorTree::compute(&cfg);
+
+    let canonical = canonicalize_loops(&mut cfg, &dom);
+
+    assert_eq!(canonical.len(), 1);
+    let preheader = canonical[0]
+        .preheader
+        .expect("the loop is entered from outside");
+    assert_eq!(cfg.successors(preheader).collect::<Vec<_>>(), [header]);
+    assert_eq!(canonical[0].exits, set([exit]));
+    assert!(verify(&cfg).is_ok());
+
+    // Canonical form is stable: the same loop, and nothing left to insert.
+    let dom = DominatorTree::compute(&cfg);
+    let again = canonicalize_loops(&mut cfg, &dom);
+    assert_eq!(again.len(), 1);
+    assert_eq!(again[0].preheader, Some(preheader));
+    assert_eq!(again[0].natural_loop.body, canonical[0].natural_loop.body);
+}
+
+#[test]
+fn a_loop_headed_by_the_entry_has_no_preheader() {
+    let mut cfg = Cfg::<u32>::new();
+    let [body, exit] = [(); 2].map(|()| cfg.new_block());
+    cfg.add_edge(cfg.entry(), body, EdgeKind::ConditionalTrue);
+    cfg.add_edge(body, cfg.entry(), EdgeKind::Back);
+    cfg.add_edge(cfg.entry(), exit, EdgeKind::ConditionalFalse);
+    let dom = DominatorTree::compute(&cfg);
+
+    let canonical = canonicalize_loops(&mut cfg, &dom);
+
+    assert_eq!(canonical.len(), 1);
+    assert_eq!(canonical[0].preheader, None);
+    assert_eq!(cfg.block_count(), 3);
+}
+
+#[test]
+fn canonicalized_nested_loops_report_current_bodies_and_exits() {
+    // outer -> {inner, side}, side -> inner: the inner header has two entries,
+    // and its preheader lies inside the outer loop. A second loop follows the
+    // first, entered from the first loop's exit and from the entry.
+    let mut cfg = Cfg::<u32>::new();
+    let [outer, inner, side, work, next, next_body, done] = [(); 7].map(|()| cfg.new_block());
+    cfg.add_edge(cfg.entry(), outer, EdgeKind::ConditionalTrue);
+    cfg.add_edge(cfg.entry(), next, EdgeKind::ConditionalFalse);
+    cfg.add_edge(outer, inner, EdgeKind::ConditionalTrue);
+    cfg.add_edge(outer, side, EdgeKind::SwitchCase);
+    cfg.add_edge(outer, next, EdgeKind::ConditionalFalse);
+    cfg.add_edge(side, inner, EdgeKind::Fallthrough);
+    cfg.add_edge(inner, work, EdgeKind::ConditionalTrue);
+    cfg.add_edge(work, inner, EdgeKind::Back);
+    cfg.add_edge(inner, outer, EdgeKind::Back);
+    cfg.add_edge(next, next_body, EdgeKind::ConditionalTrue);
+    cfg.add_edge(next_body, next, EdgeKind::Back);
+    cfg.add_edge(next, done, EdgeKind::ConditionalFalse);
+    let dom = DominatorTree::compute(&cfg);
+
+    let canonical = canonicalize_loops(&mut cfg, &dom);
+
+    // What canonicalization reports is what detection finds afterwards.
+    let dom = DominatorTree::compute(&cfg);
+    let detected = detect_loops_tagged(&cfg, &dom);
+    assert_eq!(canonical.len(), detected.len());
+    for report in &canonical {
+        let now = detected
+            .iter()
+            .find(|lp| lp.header == report.natural_loop.header)
+            .expect("the loop is still there");
+        assert_eq!(
+            report.natural_loop.body, now.body,
+            "body of {:?}",
+            now.header
+        );
+        assert_eq!(
+            report.exits,
+            loop_exit_blocks(&cfg, now),
+            "exits of {:?}",
+            now.header
+        );
+        let preheader = report
+            .preheader
+            .expect("every header here is entered from outside");
+        assert_eq!(cfg.successors(preheader).collect::<Vec<_>>(), [now.header]);
+    }
+    assert!(verify(&cfg).is_ok());
 }
