@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 use smallvec::SmallVec;
 
 use crate::block::BlockId;
+use crate::graph::traverse::{TraversalDirection, reachable};
 use crate::graph::view::{DenseId, RootedView};
 
 /// One interval in the source graph's first-level partition.
@@ -25,21 +26,16 @@ pub struct Interval<N = BlockId> {
 
 /// Result of the source graph's first-level interval analysis.
 ///
-/// The public `levels` shape is retained for compatibility, but the current
-/// implementation always populates only `levels[0]`, the intervals of the
-/// original graph. It does not compute subsequent derived-graph levels.
+/// The analysis computes only the partition of the original graph. It does
+/// not derive successive graphs from the intervals, so it cannot say whether
+/// a graph is reducible, and a graph with several intervals may be either.
+/// [`is_reducible`](crate::graph::structure::is_reducible) is the answer to
+/// that question.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntervalAnalysis<N = BlockId> {
-    /// Interval partitions by level; currently only the source partition at
-    /// `levels[0]` is populated.
-    pub levels: Vec<Vec<Interval<N>>>,
-    /// Whether the first partition contains at most one interval.
-    ///
-    /// This is sufficient to establish reducibility, but `false` is not a
-    /// complete irreducibility result because derived levels are not computed.
-    /// Use [`is_reducible`](crate::graph::structure::is_reducible) for the full
-    /// graph property.
-    pub is_reducible: bool,
+    /// The intervals of the nodes the root reaches, each node in exactly one,
+    /// starting with the interval of the root.
+    pub intervals: Vec<Interval<N>>,
 }
 
 /// Compute the source graph's first-level intervals.
@@ -52,132 +48,34 @@ fn compute_intervals_from_graph<G: RootedView>(graph: &G) -> Vec<Interval<G::Nod
         return Vec::new();
     }
 
-    let max_predecessors = graph
-        .node_ids()
-        .map(|node| graph.predecessors(node).count())
-        .max()
-        .unwrap_or(0);
-
-    if max_predecessors < usize::from(u8::MAX) {
-        compute_intervals_with_count::<G, u8>(graph)
-    } else if max_predecessors < usize::from(u16::MAX) {
-        compute_intervals_with_count::<G, u16>(graph)
-    } else if max_predecessors < u32::MAX as usize {
-        compute_intervals_with_count::<G, u32>(graph)
-    } else {
-        compute_intervals_with_count::<G, WideCount>(graph)
-    }
-}
-
-trait IntervalCount: Copy {
-    fn from_usize(count: usize) -> Self;
-    fn is_assigned(self) -> bool;
-    fn mark_assigned(&mut self);
-    fn decrement(&mut self) -> bool;
-    fn restore(&mut self);
-}
-
-macro_rules! impl_interval_count {
-    ($count:ty) => {
-        impl IntervalCount for $count {
-            fn from_usize(count: usize) -> Self {
-                match Self::try_from(count) {
-                    Ok(count) => count,
-                    Err(_) => unreachable!("predecessor count width was selected incorrectly"),
-                }
-            }
-
-            fn is_assigned(self) -> bool {
-                self == Self::MAX
-            }
-
-            fn mark_assigned(&mut self) {
-                *self = Self::MAX;
-            }
-
-            fn decrement(&mut self) -> bool {
-                if self.is_assigned() || *self == 0 {
-                    return false;
-                }
-                *self -= 1;
-                *self == 0
-            }
-
-            fn restore(&mut self) {
-                if !self.is_assigned() {
-                    *self += 1;
-                }
-            }
-        }
-    };
-}
-
-impl_interval_count!(u8);
-impl_interval_count!(u16);
-impl_interval_count!(u32);
-
-#[derive(Clone, Copy)]
-struct WideCount {
-    remaining: usize,
-    assigned: bool,
-}
-
-impl IntervalCount for WideCount {
-    fn from_usize(remaining: usize) -> Self {
-        Self {
-            remaining,
-            assigned: false,
-        }
-    }
-
-    fn is_assigned(self) -> bool {
-        self.assigned
-    }
-
-    fn mark_assigned(&mut self) {
-        self.assigned = true;
-    }
-
-    fn decrement(&mut self) -> bool {
-        if self.assigned || self.remaining == 0 {
-            return false;
-        }
-        self.remaining -= 1;
-        self.remaining == 0
-    }
-
-    fn restore(&mut self) {
-        if !self.assigned {
-            self.remaining += 1;
-        }
-    }
-}
-
-fn compute_intervals_with_count<G, C>(graph: &G) -> Vec<Interval<G::NodeId>>
-where
-    G: RootedView,
-    C: IntervalCount,
-{
     let mut intervals = Vec::new();
-    // Unassigned nodes store the number of predecessors not yet admitted to
-    // the current interval. Assigned nodes use a sentinel because their count
-    // is never consulted again. This single table replaces separate assigned,
-    // in-interval, total-predecessor, and inside-predecessor tables.
-    let mut remaining_predecessors = alloc::vec![C::from_usize(0); graph.node_bound()];
+    // An unassigned node counts the predecessors not yet admitted to the
+    // current interval, and an assigned node's count is never read again.
+    // These two tables replace separate in-interval, total-predecessor, and
+    // inside-predecessor tables.
+    //
+    // Only predecessors the root reaches are counted: a block that never runs
+    // cannot be in an interval, so it must not keep a live block out of one.
+    let live = reachable(graph, [graph.root()], TraversalDirection::Outgoing);
+    let mut remaining = alloc::vec![0_usize; graph.node_bound()];
     for node in graph.node_ids() {
-        remaining_predecessors[node.index()] = C::from_usize(graph.predecessors(node).count());
+        remaining[node.index()] = graph
+            .predecessors(node)
+            .filter(|predecessor| live[predecessor.index()])
+            .count();
     }
+    let mut assigned = alloc::vec![false; graph.node_bound()];
     let mut headers = alloc::vec![graph.root()];
     let mut worklist: SmallVec<[G::NodeId; 4]> = SmallVec::new();
     let mut successors: SmallVec<[G::NodeId; 4]> = SmallVec::new();
 
     while let Some(h) = headers.pop() {
-        if remaining_predecessors[h.index()].is_assigned() {
+        if assigned[h.index()] {
             continue;
         }
         let mut interval = BTreeSet::new();
         interval.insert(h);
-        remaining_predecessors[h.index()].mark_assigned();
+        assigned[h.index()] = true;
 
         // Grow the interval from newly admitted nodes. Every outgoing edge
         // accounts for one predecessor now inside the interval; reaching zero
@@ -188,9 +86,16 @@ where
         worklist.push(h);
         while let Some(block) = worklist.pop() {
             for successor in graph.successors(block) {
-                let remaining = &mut remaining_predecessors[successor.index()];
-                if remaining.decrement() {
-                    remaining.mark_assigned();
+                let index = successor.index();
+                // A count of zero on an unassigned node means an edge the
+                // count never saw, from a view whose successors and
+                // predecessors disagree; it admits nothing.
+                if assigned[index] || remaining[index] == 0 {
+                    continue;
+                }
+                remaining[index] -= 1;
+                if remaining[index] == 0 {
+                    assigned[index] = true;
                     interval.insert(successor);
                     worklist.push(successor);
                 }
@@ -204,15 +109,16 @@ where
             successors.extend(graph.successors(b));
             // Counts for nodes outside the completed interval are reused by
             // the next header. Restore every decrement contributed by this
-            // interval; admitted nodes keep the sentinel permanently.
+            // interval; admitted nodes are assigned and keep no count.
             for &successor in &successors {
-                let remaining = &mut remaining_predecessors[successor.index()];
-                remaining.restore();
+                if !assigned[successor.index()] {
+                    remaining[successor.index()] += 1;
+                }
             }
             successors.sort_unstable();
             successors.dedup();
             for &s in &successors {
-                if !remaining_predecessors[s.index()].is_assigned() {
+                if !assigned[s.index()] {
                     headers.push(s);
                 }
             }
@@ -227,45 +133,34 @@ where
     intervals
 }
 
-/// Perform interval analysis on a rooted graph view.
-///
-/// Computes the Allen-Cocke interval partition of the source graph. The
-/// returned [`IntervalAnalysis`] contains only this first level; no derived
-/// graph iteration is performed. Consequently, `is_reducible == false` means
-/// only that the first partition did not collapse to one interval, not that the
-/// graph has been proven irreducible.
-///
-/// # Examples
-///
-/// ```
-/// use cfglib::{Cfg, EdgeKind, IntervalAnalysis};
-///
-/// let mut cfg = Cfg::<u32>::new();
-/// let b1 = cfg.new_block();
-/// cfg.add_edge(cfg.entry(), b1, EdgeKind::Fallthrough);
-///
-/// let result = IntervalAnalysis::compute(&cfg);
-/// assert!(result.is_reducible);
-/// ```
 impl<N: DenseId> IntervalAnalysis<N> {
     /// Compute the source graph's first-level interval partition.
+    ///
+    /// Computes the Allen-Cocke interval partition of the source graph; no
+    /// derived graph iteration is performed. Blocks the root does not reach
+    /// belong to no interval, and an edge out of one does not count against
+    /// the block it enters.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cfglib::{Cfg, EdgeKind, IntervalAnalysis};
+    ///
+    /// let mut cfg = Cfg::<u32>::new();
+    /// let b1 = cfg.new_block();
+    /// cfg.add_edge(cfg.entry(), b1, EdgeKind::Fallthrough);
+    ///
+    /// let result = IntervalAnalysis::compute(&cfg);
+    /// assert_eq!(result.intervals.len(), 1);
+    /// assert!(result.intervals[0].blocks.contains(&b1));
+    /// ```
     #[must_use]
     pub fn compute<G>(graph: &G) -> Self
     where
         G: RootedView<NodeId = N>,
     {
-        let mut levels = Vec::new();
-
-        let intervals = compute_intervals_from_graph(graph);
-        let interval_count = intervals.len();
-        levels.push(intervals);
-
-        // A single first-level interval is sufficient to establish
-        // reducibility. Use `structure::is_reducible` when a complete
-        // Boolean answer is needed.
         Self {
-            is_reducible: interval_count <= 1,
-            levels,
+            intervals: compute_intervals_from_graph(graph),
         }
     }
 }
@@ -277,6 +172,7 @@ mod tests {
     use crate::flow::FlowEffect;
     use crate::test_util::{MockInst, ff};
     use crate::{DenseId, Graph, GraphView, NodeId, Rooted, RootedView};
+    use alloc::format;
     use alloc::vec;
 
     struct ReverseNodeIds<'g> {
@@ -316,31 +212,26 @@ mod tests {
     fn single_block_is_one_interval() {
         let cfg = CfgBuilder::build(vec![ff("a")]).unwrap();
         let result = IntervalAnalysis::compute(&cfg);
-        assert_eq!(result.levels.len(), 1);
-        assert_eq!(result.levels[0].len(), 1);
-        assert!(result.is_reducible);
+        assert_eq!(result.intervals.len(), 1);
     }
 
     #[test]
-    fn empty_view_has_one_empty_level() {
+    fn empty_view_has_no_intervals() {
         let graph = Graph::<(), ()>::new();
         let view = Rooted::new(&graph, NodeId::from_index(0));
 
         let result = IntervalAnalysis::compute(&view);
 
-        assert_eq!(result.levels, vec![Vec::new()]);
-        assert!(result.is_reducible);
+        assert_eq!(result.intervals, Vec::new());
     }
 
     #[test]
     fn linear_cfg_is_one_interval() {
         let cfg = CfgBuilder::build(vec![ff("a"), ff("b"), ff("c")]).unwrap();
         let result = IntervalAnalysis::compute(&cfg);
-        assert_eq!(result.levels.len(), 1);
         // All blocks should be in a single interval since each block
         // has only one predecessor from within the interval.
-        assert_eq!(result.levels[0].len(), 1);
-        assert!(result.is_reducible);
+        assert_eq!(result.intervals.len(), 1);
     }
 
     #[test]
@@ -357,8 +248,7 @@ mod tests {
         cfg.add_edge(b2, b3, crate::edge::EdgeKind::Fallthrough);
 
         let result = IntervalAnalysis::compute(&cfg);
-        assert_eq!(result.levels.len(), 1);
-        assert_ne!(result.levels[0].len(), 0);
+        assert_ne!(result.intervals.len(), 0);
     }
 
     #[test]
@@ -371,8 +261,7 @@ mod tests {
         ])
         .unwrap();
         let result = IntervalAnalysis::compute(&cfg);
-        assert_eq!(result.levels.len(), 1);
-        assert_ne!(result.levels[0].len(), 0);
+        assert_ne!(result.intervals.len(), 0);
     }
 
     #[test]
@@ -385,9 +274,9 @@ mod tests {
 
         let result = IntervalAnalysis::compute(&Rooted::new(&graph, nodes[7]));
 
-        assert_eq!(result.levels[0].len(), 1);
+        assert_eq!(result.intervals.len(), 1);
         assert_eq!(
-            result.levels[0][0]
+            result.intervals[0]
                 .blocks
                 .iter()
                 .map(|node| node.index())
@@ -409,9 +298,9 @@ mod tests {
 
         let result = IntervalAnalysis::compute(&view);
 
-        assert_eq!(result.levels[0].len(), 1);
+        assert_eq!(result.intervals.len(), 1);
         assert_eq!(
-            result.levels[0][0]
+            result.intervals[0]
                 .blocks
                 .iter()
                 .copied()
@@ -431,36 +320,9 @@ mod tests {
 
         let result = IntervalAnalysis::compute(&Rooted::new(&graph, root));
 
-        assert_eq!(result.levels[0].len(), 1);
-        assert_eq!(result.levels[0][0].blocks.len(), 2);
-        assert!(result.levels[0][0].blocks.contains(&child));
-    }
-
-    #[test]
-    fn wider_counts_keep_real_values_distinct_from_assignment() {
-        let u32_start = usize::from(u16::MAX);
-        let mut compact = <u32 as IntervalCount>::from_usize(u32_start);
-        assert!(!compact.is_assigned());
-        assert!(!compact.decrement());
-        assert_eq!(compact, u32::from(u16::MAX) - 1);
-        compact.restore();
-        assert_eq!(compact, u32::from(u16::MAX));
-        compact.mark_assigned();
-        assert!(compact.is_assigned());
-        assert!(!compact.decrement());
-        assert_eq!(compact, u32::MAX);
-
-        let wide_start = u32::MAX as usize;
-        let mut wide = WideCount::from_usize(wide_start);
-        assert!(!wide.is_assigned());
-        assert!(!wide.decrement());
-        assert_eq!(wide.remaining, wide_start - 1);
-        wide.restore();
-        assert_eq!(wide.remaining, wide_start);
-        wide.mark_assigned();
-        assert!(wide.is_assigned());
-        assert!(!wide.decrement());
-        assert_eq!(wide.remaining, wide_start);
+        assert_eq!(result.intervals.len(), 1);
+        assert_eq!(result.intervals[0].blocks.len(), 2);
+        assert!(result.intervals[0].blocks.contains(&child));
     }
 
     #[test]
@@ -475,12 +337,12 @@ mod tests {
 
         let result = IntervalAnalysis::compute(&Rooted::new(&graph, root));
 
-        assert_eq!(result.levels[0].len(), 2);
-        assert_eq!(result.levels[0][0].header, root);
-        assert_eq!(result.levels[0][0].blocks.len(), 1);
-        assert_eq!(result.levels[0][1].header, loop_header);
+        assert_eq!(result.intervals.len(), 2);
+        assert_eq!(result.intervals[0].header, root);
+        assert_eq!(result.intervals[0].blocks.len(), 1);
+        assert_eq!(result.intervals[1].header, loop_header);
         assert_eq!(
-            result.levels[0][1]
+            result.intervals[1]
                 .blocks
                 .iter()
                 .copied()
@@ -501,11 +363,128 @@ mod tests {
 
         let result = IntervalAnalysis::compute(&Rooted::new(&graph, root));
 
-        assert_eq!(result.levels[0].len(), 1);
-        assert_eq!(result.levels[0][0].blocks.len(), 2);
-        assert!(result.levels[0][0].blocks.contains(&root));
-        assert!(result.levels[0][0].blocks.contains(&reachable));
-        assert!(!result.levels[0][0].blocks.contains(&unreachable));
-        assert!(!result.levels[0][0].blocks.contains(&unreachable_successor));
+        assert_eq!(result.intervals.len(), 1);
+        assert_eq!(result.intervals[0].blocks.len(), 2);
+        assert!(result.intervals[0].blocks.contains(&root));
+        assert!(result.intervals[0].blocks.contains(&reachable));
+        assert!(!result.intervals[0].blocks.contains(&unreachable));
+        assert!(!result.intervals[0].blocks.contains(&unreachable_successor));
+    }
+
+    #[test]
+    fn a_dead_predecessor_does_not_split_an_interval() {
+        // `dead` never runs, so it cannot be the second predecessor that
+        // keeps `join` out of the root's interval.
+        let mut graph = Graph::<(), ()>::new();
+        let root = graph.add_node(());
+        let join = graph.add_node(());
+        let dead = graph.add_node(());
+        graph.add_edge(root, join, ());
+        graph.add_edge(dead, join, ());
+
+        let result = IntervalAnalysis::compute(&Rooted::new(&graph, root));
+
+        assert_eq!(result.intervals.len(), 1);
+        assert_eq!(
+            result.intervals[0].blocks,
+            BTreeSet::from([root, join]),
+            "the dead block is in no interval"
+        );
+    }
+
+    #[test]
+    fn dead_code_that_branches_into_a_live_diamond_leaves_it_whole() {
+        // root -> {left, right} -> merge, with a dead block into both the
+        // merge and the left arm.
+        let mut graph = Graph::<(), ()>::new();
+        let [root, left, right, merge, dead] = [(); 5].map(|()| graph.add_node(()));
+        for (from, to) in [
+            (root, left),
+            (root, right),
+            (left, merge),
+            (right, merge),
+            (dead, merge),
+            (dead, left),
+        ] {
+            graph.add_edge(from, to, ());
+        }
+
+        let result = IntervalAnalysis::compute(&Rooted::new(&graph, root));
+
+        assert_eq!(result.intervals.len(), 1);
+        assert_eq!(
+            result.intervals[0].blocks,
+            BTreeSet::from([root, left, right, merge])
+        );
+    }
+
+    /// The Allen-Cocke definition, checked on every digraph of up to four
+    /// nodes: the intervals partition the nodes the root reaches, the first
+    /// is the root's, each header dominates its interval, every other member
+    /// has all its reachable predecessors inside, and no node of a later
+    /// interval could have been absorbed.
+    #[test]
+    fn intervals_satisfy_the_definition_on_every_small_digraph() {
+        use crate::DominatorTree;
+
+        for count in 1..=4_usize {
+            let pairs: Vec<(usize, usize)> = (0..count)
+                .flat_map(|from| (0..count).map(move |to| (from, to)))
+                .collect();
+            for mask in 0..1_u32 << pairs.len() {
+                let mut graph = Graph::<(), ()>::new();
+                let nodes: Vec<NodeId> = (0..count).map(|_| graph.add_node(())).collect();
+                for (bit, &(from, to)) in pairs.iter().enumerate() {
+                    if mask & (1 << bit) != 0 {
+                        graph.add_edge(nodes[from], nodes[to], ());
+                    }
+                }
+                let view = Rooted::new(&graph, nodes[0]);
+                let dom = DominatorTree::compute(&view);
+                let result = IntervalAnalysis::compute(&view);
+                let live = |node: NodeId| dom.is_reachable(node);
+                let label = format!("{count} nodes, edge mask {mask:#b}");
+
+                let mut seen = BTreeSet::new();
+                for (position, interval) in result.intervals.iter().enumerate() {
+                    for &block in &interval.blocks {
+                        assert!(seen.insert(block), "{label}: {block:?} in two intervals");
+                        assert!(dom.dominates(interval.header, block), "{label}");
+                        if block != interval.header {
+                            assert!(
+                                graph
+                                    .predecessors(block)
+                                    .filter(|&before| live(before))
+                                    .all(|before| interval.blocks.contains(&before)),
+                                "{label}: {block:?} has a predecessor outside its interval"
+                            );
+                        }
+                    }
+                    // Nothing in a later interval had every predecessor in this
+                    // one, or it would have been absorbed.
+                    for later in &result.intervals[position + 1..] {
+                        for &outside in &later.blocks {
+                            let absorbable = graph
+                                .predecessors(outside)
+                                .filter(|&before| live(before))
+                                .all(|before| interval.blocks.contains(&before));
+                            assert!(!absorbable, "{label}: {outside:?} should have joined");
+                        }
+                    }
+                }
+                assert_eq!(
+                    seen,
+                    nodes
+                        .iter()
+                        .copied()
+                        .filter(|&n| live(n))
+                        .collect::<BTreeSet<_>>(),
+                    "{label}"
+                );
+                if count > 0 {
+                    assert_eq!(result.intervals[0].header, nodes[0], "{label}");
+                }
+            }
+        }
     }
 }

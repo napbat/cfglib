@@ -250,10 +250,9 @@ pub(super) fn assert_control_dependence_graph(
 }
 
 pub(super) fn assert_cfg_intervals(result: &IntervalAnalysis, cfg: &Cfg<u32>) {
-    assert_eq!(result.levels.len(), 1);
-    assert_ne!(result.levels[0].len(), 0);
+    assert_ne!(result.intervals.len(), 0);
     let mut assigned = BTreeSet::new();
-    for interval in &result.levels[0] {
+    for interval in &result.intervals {
         assert!(interval.blocks.contains(&interval.header));
         for &block in &interval.blocks {
             assert!(assigned.insert(block), "block appeared in two intervals");
@@ -267,7 +266,6 @@ pub(super) fn assert_cfg_intervals(result: &IntervalAnalysis, cfg: &Cfg<u32>) {
         }
     }
     assert_eq!(assigned.len(), cfg.block_count());
-    assert_eq!(result.is_reducible, result.levels[0].len() <= 1);
 }
 
 pub(super) fn assert_reverse_chain_intervals(
@@ -275,10 +273,8 @@ pub(super) fn assert_reverse_chain_intervals(
     node_count: usize,
     root: NodeId,
 ) {
-    assert_eq!(result.levels.len(), 1);
-    assert_eq!(result.levels[0].len(), 1);
-    assert!(result.is_reducible);
-    let interval = &result.levels[0][0];
+    assert_eq!(result.intervals.len(), 1);
+    let interval = &result.intervals[0];
     assert_eq!(interval.header, root);
     assert_eq!(interval.blocks.len(), node_count);
     assert!((0..node_count).all(|index| interval.blocks.contains(&NodeId::from_index(index))));

@@ -12,6 +12,8 @@
 //!   the test module's location and fence vocabularies.
 //! - [`shapes`] — block-and-edge shapes shared by the reusable-scratch
 //!   differential tests.
+//! - [`golden`] — exact-output comparison against `tests/golden` files.
+//! - [`rng`] — a seeded generator for reproducible randomized tests.
 //!
 //! `DfInst` implements **all** instruction traits (`FlowControl`,
 //! `DisplayInstr`, `InstrInfo`, `EffectInfo`, `Predicated`, `CopySource`,
@@ -22,6 +24,7 @@ mod dataflow_inst;
 pub(crate) mod golden;
 mod memory_inst;
 mod mock_inst;
+pub(crate) mod rng;
 pub(crate) mod shapes;
 mod ud_inst;
 mod vn_inst;

@@ -14,10 +14,15 @@
 extern crate alloc;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
+use core::ops::ControlFlow;
 
 use super::dominator::DominatorTree;
 use super::edge_view::EdgeView;
-use super::view::{DenseId, GraphView, RootedView};
+use super::loop_nest::nesting;
+use super::scc::tarjan_scc;
+use super::search::{DfsEvent, depth_first_events};
+use super::traverse::TraversalDirection;
+use super::view::{GraphView, RootedView};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::{EdgeKind, KindedEdge};
@@ -25,7 +30,10 @@ use crate::edge::{EdgeKind, KindedEdge};
 /// A natural loop over node identity `N`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NaturalLoop<N = BlockId> {
-    /// The loop header (entry point, dominates all other nodes).
+    /// The loop header, the node the back-edges return to.
+    ///
+    /// Dominance-based detection gives a header that dominates the whole
+    /// body. A tagged loop on an irreducible graph need not have one.
     pub header: N,
     /// All nodes in the loop body (including the header).
     pub body: BTreeSet<N>,
@@ -48,9 +56,11 @@ pub struct BackEdge<N = BlockId> {
 /// their source).
 ///
 /// The result is deduplicated: parallel edges between the same pair
-/// appear once. For [`Cfg`]s whose builders also tag explicit
-/// [`EdgeKind::Back`] edges, [`find_back_edges_tagged`] additionally
-/// honors the tags.
+/// appear once. Only code the root reaches has back-edges: a block
+/// dominates itself whether or not it runs, so unreachable code is skipped
+/// rather than reported as loops. For [`Cfg`]s whose builders also tag
+/// explicit [`EdgeKind::Back`] edges, [`find_back_edges_tagged`]
+/// additionally honors the tags.
 ///
 /// # Examples
 ///
@@ -75,7 +85,7 @@ pub fn find_back_edges<G: GraphView>(
     dom: &DominatorTree<G::NodeId>,
 ) -> Vec<BackEdge<G::NodeId>> {
     let mut backs = Vec::new();
-    for node in graph.node_ids() {
+    for node in graph.node_ids().filter(|&node| dom.is_reachable(node)) {
         for successor in graph.successors(node) {
             if dom.dominates(successor, node) {
                 backs.push(BackEdge {
@@ -95,7 +105,10 @@ pub fn find_back_edges<G: GraphView>(
 /// The union of [`find_back_edges`]'s dominance-based detection and the
 /// builder's tags. The tags matter on irreducible machine CFGs where a
 /// frontend knows an edge is a loop back-edge even though dominance cannot
-/// prove it.
+/// prove it. A tag on an edge out of unreachable code is ignored, as
+/// dominance is, and so is a tag on an edge that lies on no cycle: a header
+/// that cannot reach the tail has no loop around it, whatever the edge is
+/// called.
 #[must_use]
 pub fn find_back_edges_tagged<G>(
     graph: &G,
@@ -105,14 +118,27 @@ where
     G: EdgeView,
     G::EdgeData: KindedEdge,
 {
-    let mut backs = find_back_edges(graph, dom);
+    let dominance = find_back_edges(graph, dom);
+    let mut backs = dominance.clone();
+    let mut components = None;
     for edge in graph.edge_ids() {
         let edge = graph.edge(edge);
-        if edge.data().kind() == EdgeKind::Back {
-            backs.push(BackEdge {
-                tail: edge.source(),
-                header: edge.target(),
-            });
+        if edge.data().kind() != EdgeKind::Back || !dom.is_reachable(edge.source()) {
+            continue;
+        }
+        let tagged = BackEdge {
+            tail: edge.source(),
+            header: edge.target(),
+        };
+        // A dominance back edge closes a cycle by definition. A tag must be
+        // on one too, which holds when both ends are in one strongly
+        // connected component.
+        let on_a_cycle = dominance.binary_search(&tagged).is_ok() || {
+            let components = components.get_or_insert_with(|| tarjan_scc(graph));
+            components.component_index(tagged.tail) == components.component_index(tagged.header)
+        };
+        if on_a_cycle {
+            backs.push(tagged);
         }
     }
     backs.sort();
@@ -122,11 +148,19 @@ where
 
 /// Compute the merged natural loop body for every back-edge to one header.
 ///
-/// The body is the set of nodes that can reach any latch without going
-/// through `header`, plus `header` itself. A single multi-source reverse walk
-/// computes the same union without revisiting a shared body for every latch.
+/// The body is the set of reachable nodes that can reach any latch without
+/// going through `header`, plus `header` itself. A single multi-source
+/// reverse walk computes the same union without revisiting a shared body for
+/// every latch.
+///
+/// When the header dominates every latch, that walk cannot leave the region
+/// the header dominates. A tagged latch the header does not dominate (an
+/// irreducible cycle) lets the walk run on to blocks that merely lead to the
+/// cycle, such as the entry, so the body is cut down to the walked blocks the
+/// header reaches: the blocks on a path from the header to a latch.
 fn loop_body_for<G: GraphView>(
     graph: &G,
+    dom: &DominatorTree<G::NodeId>,
     header: G::NodeId,
     latches: &[G::NodeId],
 ) -> BTreeSet<G::NodeId> {
@@ -139,19 +173,34 @@ fn loop_body_for<G: GraphView>(
         }
     }
     while let Some(n) = stack.pop() {
-        for p in graph.predecessors(n) {
+        for p in graph.predecessors(n).filter(|&p| dom.is_reachable(p)) {
             if !body.contains(&p) {
                 body.insert(p);
                 stack.push(p);
             }
         }
     }
-    body
+
+    if latches.iter().all(|&latch| dom.dominates(header, latch)) {
+        return body;
+    }
+    let mut cycle = BTreeSet::from([header]);
+    cycle.extend(latches.iter().copied());
+    stack.push(header);
+    while let Some(n) = stack.pop() {
+        for s in graph.successors(n) {
+            if body.contains(&s) && cycle.insert(s) {
+                stack.push(s);
+            }
+        }
+    }
+    cycle
 }
 
 /// Build merged, depth-annotated loops from a set of back-edges.
 fn loops_from_backs<G: GraphView>(
     graph: &G,
+    dom: &DominatorTree<G::NodeId>,
     backs: &[BackEdge<G::NodeId>],
 ) -> Vec<NaturalLoop<G::NodeId>> {
     if backs.is_empty() {
@@ -167,7 +216,7 @@ fn loops_from_backs<G: GraphView>(
 
     let mut loops: Vec<NaturalLoop<G::NodeId>> = Vec::new();
     for (header, latches) in &header_map {
-        let body = loop_body_for(graph, *header, latches);
+        let body = loop_body_for(graph, dom, *header, latches);
         loops.push(NaturalLoop {
             header: *header,
             body,
@@ -176,21 +225,11 @@ fn loops_from_backs<G: GraphView>(
         });
     }
 
-    // Compute nesting depth in O(L × max_body) instead of O(L²):
-    // Build a map from node → number of loops containing it, then
-    // each loop's depth = (count of its header) − 1 (itself).
-    {
-        let node_count = graph.node_bound();
-        let mut containing: Vec<u32> = alloc::vec![0; node_count];
-        for lp in &loops {
-            for &b in &lp.body {
-                containing[b.index()] += 1;
-            }
-        }
-        for lp in &mut loops {
-            // Every loop's body includes its own header, so subtract 1.
-            lp.depth = (containing[lp.header.index()] - 1) as usize;
-        }
+    // The nesting tree states the depth, so the flat list cannot disagree
+    // with it.
+    let depths = nesting(&loops).depths;
+    for (lp, depth) in loops.iter_mut().zip(depths) {
+        lp.depth = depth;
     }
 
     // Sort by depth (outermost first), then by header.
@@ -234,7 +273,7 @@ pub fn detect_loops<G: GraphView>(
     graph: &G,
     dom: &DominatorTree<G::NodeId>,
 ) -> Vec<NaturalLoop<G::NodeId>> {
-    loops_from_backs(graph, &find_back_edges(graph, dom))
+    loops_from_backs(graph, dom, &find_back_edges(graph, dom))
 }
 
 /// Detect natural loops in an edge view, honoring explicit
@@ -248,7 +287,7 @@ where
     G: EdgeView,
     G::EdgeData: KindedEdge,
 {
-    loops_from_backs(graph, &find_back_edges_tagged(graph, dom))
+    loops_from_backs(graph, dom, &find_back_edges_tagged(graph, dom))
 }
 
 /// Whether the graph is reducible.
@@ -257,9 +296,8 @@ where
 /// that dominates all other nodes in that cycle. Equivalently, every
 /// retreating edge in a DFS is a back-edge (target dominates source).
 ///
-/// The DFS runs from the view's root; any edge to a gray (in-progress)
-/// node whose target does not dominate the source witnesses an
-/// irreducible cycle.
+/// The DFS runs from the view's root; any [`DfsEvent::BackEdge`] whose
+/// target does not dominate its source witnesses an irreducible cycle.
 #[must_use]
 pub fn is_reducible<G: RootedView>(graph: &G, dom: &DominatorTree<G::NodeId>) -> bool {
     find_irreducible_entry(graph, dom).is_none()
@@ -274,51 +312,35 @@ pub(crate) fn find_irreducible_entry<G: RootedView>(
     graph: &G,
     dom: &DominatorTree<G::NodeId>,
 ) -> Option<G::NodeId> {
-    const WHITE: u8 = 0;
-    const GRAY: u8 = 1;
-    const BLACK: u8 = 2;
-
-    let n = graph.node_bound();
-    if n == 0 {
+    if graph.node_bound() == 0 {
         return None;
     }
-
-    let mut color = alloc::vec![WHITE; n];
-    let mut stack: Vec<(G::NodeId, bool)> = alloc::vec![(graph.root(), false)];
-
-    while let Some((node, processed)) = stack.pop() {
-        if processed {
-            color[node.index()] = BLACK;
-            continue;
-        }
-        if color[node.index()] != WHITE {
-            continue;
-        }
-        color[node.index()] = GRAY;
-        stack.push((node, true));
-
-        for succ in graph.successors(node) {
-            match color[succ.index()] {
-                WHITE => stack.push((succ, false)),
-                GRAY
-                    // Retreating edge — must be a natural back-edge.
-                    if !dom.dominates(succ, node) => {
-                        return Some(succ);
-                    }
-                _ => {} // Cross/forward edge — fine.
+    depth_first_events(
+        graph,
+        graph.root(),
+        TraversalDirection::Outgoing,
+        |event| match event {
+            DfsEvent::BackEdge(tail, header) if !dom.dominates(header, tail) => {
+                ControlFlow::Break(header)
             }
-        }
-    }
-    None
+            _ => ControlFlow::Continue(()),
+        },
+    )
 }
 
 /// Information about a canonicalized loop.
 #[derive(Debug, Clone)]
 pub struct CanonicalLoop {
-    /// The original natural loop.
+    /// The natural loop. Its body includes the preheaders
+    /// [`canonicalize_loops`] inserted for the loops nested in it.
     pub natural_loop: NaturalLoop,
-    /// The preheader block (newly inserted).
-    pub preheader: BlockId,
+    /// The loop's preheader: the one block outside the loop that enters the
+    /// header, whose only successor is the header.
+    ///
+    /// `None` when the header has no predecessor outside the loop, which is
+    /// the case for a loop headed by the entry block: the entry cannot gain
+    /// a predecessor, so no preheader can be put before it.
+    pub preheader: Option<BlockId>,
     /// Exit blocks — blocks outside the loop that are targets of edges
     /// from inside the loop.
     pub exits: BTreeSet<BlockId>,
@@ -330,9 +352,15 @@ pub struct CanonicalLoop {
 /// non-backedge predecessor of the loop header. This simplifies
 /// many loop transformations (LICM, unrolling, etc.).
 ///
-/// Returns the `BlockId` of the new preheader, or `None` if a
-/// preheader was not needed (single non-backedge predecessor).
-pub fn insert_preheader<I: Clone>(cfg: &mut Cfg<I>, lp: &NaturalLoop) -> Option<BlockId> {
+/// The header's edges from outside the loop are redirected to the preheader
+/// in place: each keeps its identity, kind, weight and payload, and its
+/// position among its source's outgoing edges, so a branch keeps its arm
+/// order. The preheader reaches the header by a new fallthrough edge.
+///
+/// Returns the `BlockId` of the new preheader, or `None` if the header is
+/// already canonical: it has no predecessor outside the loop, or exactly one
+/// whose only successor is the header.
+pub fn insert_preheader<I, E: Default>(cfg: &mut Cfg<I, E>, lp: &NaturalLoop) -> Option<BlockId> {
     // Collect non-backedge predecessors of the header.
     let outside_preds: Vec<crate::edge::EdgeId> = cfg
         .incoming(lp.header)
@@ -342,19 +370,15 @@ pub fn insert_preheader<I: Clone>(cfg: &mut Cfg<I>, lp: &NaturalLoop) -> Option<
         })
         .collect();
 
-    if outside_preds.len() <= 1 {
-        return None; // already canonical
+    match outside_preds.as_slice() {
+        [] => return None,
+        &[only] if cfg.outgoing(cfg.edge(only).source()).nth(1).is_none() => return None,
+        _ => {}
     }
 
     let preheader = cfg.new_block();
-
-    // Redirect all outside predecessor edges to target the preheader.
-    for eid in &outside_preds {
-        let edge = cfg.edge(*eid);
-        let src = edge.source();
-        let kind = edge.kind();
-        cfg.remove_edge(*eid);
-        cfg.add_edge(src, preheader, kind);
+    for eid in outside_preds {
+        cfg.redirect_edge_target(eid, preheader);
     }
 
     // Add fallthrough from preheader to the header.
@@ -386,220 +410,56 @@ pub fn loop_exit_blocks<G: GraphView>(
 /// Canonicalize all loops: insert preheaders and identify exits.
 ///
 /// Uses [`detect_loops_tagged`], so explicit [`EdgeKind::Back`] tags are
-/// honored.
-pub fn canonicalize_loops<I: Clone>(cfg: &mut Cfg<I>, dom: &DominatorTree) -> Vec<CanonicalLoop> {
-    let loops = detect_loops_tagged(cfg, dom);
-    let mut result = Vec::new();
+/// honored. Loops come outermost first, as detection orders them, each with
+/// the preheader [`insert_preheader`] puts before it. A preheader that sits on
+/// the paths through a loop nested in another is part of the outer loop's
+/// body, and exits are read once every preheader is in, so an edge that leaves
+/// one loop for the preheader of the next ends at the preheader.
+///
+/// `dom` is the dominator tree of `cfg` as it was passed in, and the inserted
+/// blocks are not in it: compute it again before relying on it.
+pub fn canonicalize_loops<I, E: Default>(
+    cfg: &mut Cfg<I, E>,
+    dom: &DominatorTree,
+) -> Vec<CanonicalLoop> {
+    let mut loops = detect_loops_tagged(cfg, dom);
+    let mut preheaders = Vec::with_capacity(loops.len());
 
-    for lp in loops {
-        let exits = loop_exit_blocks(cfg, &lp);
-        let preheader = insert_preheader(cfg, &lp).unwrap_or_else(|| {
-            // No new preheader needed; use the single outside pred.
-            let outside: Vec<BlockId> = cfg
-                .predecessors(lp.header)
-                .filter(|p| !lp.body.contains(p))
-                .collect();
-            outside.into_iter().next().unwrap_or(lp.header)
-        });
-
-        result.push(CanonicalLoop {
-            natural_loop: lp,
-            preheader,
-            exits,
-        });
+    for index in 0..loops.len() {
+        let header = loops[index].header;
+        let inserted = insert_preheader(cfg, &loops[index]);
+        if let Some(preheader) = inserted {
+            // The new block is reached from the sources of the redirected
+            // edges and reaches the header, so it lies on a cycle of every
+            // other loop that holds both the header and one of those sources.
+            let sources: Vec<BlockId> = cfg.predecessors(preheader).collect();
+            for (other_index, other) in loops.iter_mut().enumerate() {
+                if other_index != index
+                    && other.body.contains(&header)
+                    && sources.iter().any(|source| other.body.contains(source))
+                {
+                    other.body.insert(preheader);
+                }
+            }
+        }
+        // Without an insertion the header has no outside predecessor, or one
+        // that is already the preheader.
+        preheaders.push(inserted.or_else(|| {
+            cfg.predecessors(header)
+                .find(|block| !loops[index].body.contains(block))
+        }));
     }
 
-    result
+    loops
+        .into_iter()
+        .zip(preheaders)
+        .map(|(natural_loop, preheader)| CanonicalLoop {
+            exits: loop_exit_blocks(cfg, &natural_loop),
+            natural_loop,
+            preheader,
+        })
+        .collect()
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::builder::CfgBuilder;
-    use crate::flow::FlowEffect;
-    use crate::graph::dominator::DominatorTree;
-    use crate::test_util::{MockInst, ff};
-    use alloc::vec;
-
-    #[test]
-    fn no_loops_in_linear_cfg() {
-        let cfg = CfgBuilder::build(vec![ff("a"), ff("b"), ff("c")]).unwrap();
-        let dom = DominatorTree::compute(&cfg);
-        let loops = detect_loops(&cfg, &dom);
-        assert_eq!(loops.len(), 0);
-    }
-
-    #[test]
-    fn simple_loop_detected() {
-        let cfg = CfgBuilder::build(vec![
-            MockInst(FlowEffect::LoopOpen, "loop"),
-            ff("body"),
-            MockInst(FlowEffect::LoopClose, "endloop"),
-            MockInst(FlowEffect::Return, "ret"),
-        ])
-        .unwrap();
-        let dom = DominatorTree::compute(&cfg);
-        let loops = detect_loops(&cfg, &dom);
-        assert_eq!(loops.len(), 1);
-        assert!(!loops[0].body.is_empty(), "loop body is non-empty");
-    }
-
-    #[test]
-    fn loops_with_one_header_merge_every_latch_body() {
-        let mut cfg = Cfg::<MockInst>::new();
-        let header = cfg.entry();
-        let left_body = cfg.new_block();
-        let left_latch = cfg.new_block();
-        let right_body = cfg.new_block();
-        let right_latch = cfg.new_block();
-        let exit = cfg.new_block();
-
-        cfg.add_edge(header, left_body, EdgeKind::ConditionalTrue);
-        cfg.add_edge(header, right_body, EdgeKind::ConditionalFalse);
-        cfg.add_edge(header, exit, EdgeKind::SwitchCase);
-        cfg.add_edge(left_body, left_latch, EdgeKind::Fallthrough);
-        cfg.add_edge(left_latch, header, EdgeKind::Back);
-        cfg.add_edge(right_body, right_latch, EdgeKind::Fallthrough);
-        cfg.add_edge(right_latch, header, EdgeKind::Back);
-
-        let dom = DominatorTree::compute(&cfg);
-        let loops = detect_loops(&cfg, &dom);
-
-        assert_eq!(loops.len(), 1);
-        assert_eq!(loops[0].header, header);
-        assert_eq!(loops[0].latches, BTreeSet::from([left_latch, right_latch]));
-        assert_eq!(
-            loops[0].body,
-            BTreeSet::from([header, left_body, left_latch, right_body, right_latch])
-        );
-        assert_eq!(loops[0].depth, 0);
-    }
-
-    #[test]
-    fn nested_loops_have_depth() {
-        let cfg = CfgBuilder::build(vec![
-            MockInst(FlowEffect::LoopOpen, "outer"),
-            MockInst(FlowEffect::LoopOpen, "inner"),
-            ff("body"),
-            MockInst(FlowEffect::ConditionalBreak, "breakc_inner"),
-            MockInst(FlowEffect::LoopClose, "end_inner"),
-            MockInst(FlowEffect::ConditionalBreak, "breakc_outer"),
-            MockInst(FlowEffect::LoopClose, "end_outer"),
-            MockInst(FlowEffect::Return, "ret"),
-        ])
-        .unwrap();
-        let dom = DominatorTree::compute(&cfg);
-        let loops = detect_loops(&cfg, &dom);
-        assert_eq!(loops.len(), 2);
-        // Outermost first (depth 0), inner second (depth 1).
-        assert_eq!(loops[0].depth, 0);
-        assert_eq!(loops[1].depth, 1);
-    }
-
-    #[test]
-    fn loop_with_break_still_detected() {
-        let cfg = CfgBuilder::build(vec![
-            MockInst(FlowEffect::LoopOpen, "loop"),
-            MockInst(FlowEffect::ConditionalBreak, "breakc"),
-            ff("body"),
-            MockInst(FlowEffect::LoopClose, "endloop"),
-        ])
-        .unwrap();
-        let dom = DominatorTree::compute(&cfg);
-        let loops = detect_loops(&cfg, &dom);
-        assert_eq!(loops.len(), 1);
-    }
-
-    #[test]
-    fn tagged_back_edge_survives_without_dominance() {
-        // Two entries into a tagged cycle: dominance alone cannot prove
-        // b1 → b2 is a loop, but the builder tag says it is.
-        let mut cfg = Cfg::<MockInst>::new();
-        let b1 = cfg.new_block();
-        let b2 = cfg.new_block();
-        cfg.add_edge(cfg.entry(), b1, EdgeKind::ConditionalTrue);
-        cfg.add_edge(cfg.entry(), b2, EdgeKind::ConditionalFalse);
-        cfg.add_edge(b1, b2, EdgeKind::Fallthrough);
-        cfg.add_edge(b2, b1, EdgeKind::Back);
-
-        let dom = DominatorTree::compute(&cfg);
-        assert_eq!(find_back_edges(&cfg, &dom).len(), 0);
-        let tagged = find_back_edges_tagged(&cfg, &dom);
-        assert_eq!(tagged.len(), 1);
-        assert_eq!(tagged[0].header, b1);
-        let loops = detect_loops_tagged(&cfg, &dom);
-        assert_eq!(loops.len(), 1);
-        assert!(loops[0].body.contains(&b2));
-    }
-
-    #[test]
-    fn linear_cfg_is_reducible() {
-        let cfg = CfgBuilder::build(vec![ff("a"), ff("b")]).unwrap();
-        let dom = DominatorTree::compute(&cfg);
-        assert!(is_reducible(&cfg, &dom));
-    }
-
-    #[test]
-    fn loop_cfg_is_reducible() {
-        let cfg = CfgBuilder::build(vec![
-            MockInst(FlowEffect::LoopOpen, "loop"),
-            ff("body"),
-            MockInst(FlowEffect::LoopClose, "endloop"),
-        ])
-        .unwrap();
-        let dom = DominatorTree::compute(&cfg);
-        assert!(is_reducible(&cfg, &dom));
-    }
-
-    #[test]
-    fn if_else_no_loops() {
-        let cfg = CfgBuilder::build(vec![
-            MockInst(FlowEffect::ConditionalOpen, "if"),
-            ff("then"),
-            MockInst(FlowEffect::ConditionalAlternate, "else"),
-            ff("else_body"),
-            MockInst(FlowEffect::ConditionalClose, "endif"),
-        ])
-        .unwrap();
-        let dom = DominatorTree::compute(&cfg);
-        let loops = detect_loops(&cfg, &dom);
-        assert_eq!(loops.len(), 0);
-        assert!(is_reducible(&cfg, &dom));
-    }
-
-    #[test]
-    fn loop_exit_blocks_found() {
-        let cfg = CfgBuilder::build(vec![
-            MockInst(FlowEffect::LoopOpen, "loop"),
-            MockInst(FlowEffect::ConditionalBreak, "breakc"),
-            ff("body"),
-            MockInst(FlowEffect::LoopClose, "endloop"),
-            MockInst(FlowEffect::Return, "ret"),
-        ])
-        .unwrap();
-        let dom = DominatorTree::compute(&cfg);
-        let loops = detect_loops(&cfg, &dom);
-        assert_ne!(loops.len(), 0);
-        let exits = loop_exit_blocks(&cfg, &loops[0]);
-        assert!(
-            !exits.is_empty(),
-            "loop should have at least one exit block"
-        );
-    }
-
-    #[test]
-    fn canonicalize_loops_adds_exits() {
-        let mut cfg = CfgBuilder::build(vec![
-            MockInst(FlowEffect::LoopOpen, "loop"),
-            MockInst(FlowEffect::ConditionalBreak, "breakc"),
-            ff("body"),
-            MockInst(FlowEffect::LoopClose, "endloop"),
-            MockInst(FlowEffect::Return, "ret"),
-        ])
-        .unwrap();
-        let dom = DominatorTree::compute(&cfg);
-        let canonical = canonicalize_loops(&mut cfg, &dom);
-        assert!(!canonical.is_empty());
-        assert!(!canonical[0].exits.is_empty());
-    }
-}
+mod tests;

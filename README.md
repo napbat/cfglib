@@ -299,16 +299,16 @@ A `FunctionView` follows these rules:
 | Reusable post-dominator scratch | `PostDominatorTree::compute_in` + `PostDominatorScratch` | The same tree with the call's working buffers caller-owned, parallel to `DominatorScratch` |
 | Dominance frontiers | `DominanceFrontiers::compute`; `frontier` → `&[N]` | Every block's frontier in one flat run table, read back as a slice in ascending order. For SSA φ-placement |
 | Dominator recompute diff | `DominatorTree::compute_with_diff` | Recompute after a graph edit, reporting the nodes whose idom changed |
-| Strongly connected components | `tarjan_scc` → `SccDecomposition<N>`, `condensation` → component DAG of owned `Scc<N>` payloads | Generic iterative Tarjan algorithm, reverse-topological order (leaves first); components are ascending slices of one flat array (`components()`, `component(node)` → `Scc` with `nodes()`, `contains`, `is_singleton`) |
+| Strongly connected components | `tarjan_scc` → `SccDecomposition<N>`, `condensation` → component DAG of owned `Scc<N>` payloads | Generic iterative Tarjan algorithm, reverse-topological order (leaves first); components are ascending slices of one flat array (`components()`, `component(node)` → `Scc` with `nodes()`, `contains`, `is_singleton`, `is_cyclic`); removed node slots belong to no component, and querying one panics |
 | SCC in topological order | `kosaraju_scc` → `SccDecomposition<N>` | The same partition numbered sources first (`index(u) < index(v)` across every edge); the classic deterministic two-pass algorithm, for budgeted forward closures over the condensation |
 | Condensation of a given decomposition | `condensation_of(graph, &SccDecomposition)` → `Graph<(), ()>` | The component DAG whose node index **is** the given decomposition's component index, either algorithm's; deduplicated edges, and in-degrees plus dependents straight off the graph (the one-pass fixpoint shape) |
-| Back-edge detection | `find_back_edges` (dominance, any view), `find_back_edges_tagged` (CFG, honors `Back` tags) | |
-| Natural loop detection | `detect_loops` / `detect_loops_tagged` → `Vec<NaturalLoop<N>>` | Header, body, latches, nesting depth |
-| Loop nesting tree | `LoopNestingTree::compute` | Parent/child loop hierarchy |
+| Back-edge detection | `find_back_edges` (dominance, any view), `find_back_edges_tagged` (CFG, honors `Back` tags) | Edges out of code the root reaches; unreachable code has no back-edges |
+| Natural loop detection | `detect_loops` / `detect_loops_tagged` → `Vec<NaturalLoop<N>>` | Header, body, latches, nesting depth; outermost loops first. A tagged loop on an irreducible graph covers the cycle, not the blocks before it |
+| Loop nesting tree | `LoopNestingTree::compute` | Parent/child loop hierarchy, and the one statement of nesting depth: `NaturalLoop::depth` is the depth in this tree. Loops over the same body are siblings |
 | Control dependence graph | `control_dependence_graph` → `Graph<N, ()>` | From post-dominator tree, over any view; a block that branches back to itself has the edge to itself |
-| Program dependence graph | `program_dependence_graph` → `Graph<DependenceNode, DependenceKind>` | Control + def-use edges; reverse traversal performs backward slicing |
-| Interval analysis | `IntervalAnalysis::compute` | T1-T2 reduction over rooted views; reducibility test |
-| Reducibility transform | `make_reducible` | Node splitting for irreducible CFGs |
+| Program dependence graph | `program_dependence_graph` → `Graph<DependenceNode, DependenceKind>` | Control edges (from a block's predicate node to what it controls) and data edges (def to use, and a branching block's last instruction into its predicate node); reverse traversal performs backward slicing |
+| Interval analysis | `IntervalAnalysis::compute` → `intervals` | First-level Allen-Cocke interval partition of the code the root reaches; use `is_reducible` for the reducibility test |
+| Reducibility | `is_reducible` (exact test over a dominator tree), `make_reducible` (CFG node splitting) | Irreducible cycles are split until every retreating edge is a back edge |
 | Reverse CFG | `reverse_cfg` | Flip all edges, swap entry/exits |
 | Call graph | `call_graph` + `CallInfo`, `propagate_summaries` (callee-first SCC fixpoint) | Consumer-typed callees; interprocedural summary scaffold |
 | CFG diff | `CfgDiff::compute` | Structural comparison (bindiff-style): blocks are matched by wiring, from the entries along edges of equal kind, over every live block; a matched block reports changed instruction counts and changed edges. Any edge payload, no trait bounds |
@@ -379,7 +379,7 @@ These analyses take `&G` where `G: CfgView`: `ReachingDefs`, `Liveness`, `DefUse
 | Exclusive handler extents | `recover_exclusive_extents[_with]`, `promote_exclusive_extents` | Evidence-reporting sibling of `promote_handler_extents`: blocks exclusively reachable from one handler entry along normal edges, boundary and ambiguity issues, and atomic per-region promotion that refuses overlap |
 | Dead code analysis | `DeadCode::compute`, `DeadCode::compute_with_exits` | Liveness-dead instructions (effect-guarded) and unreachable blocks, reported without mutating — the analysis `dead_code_elimination` applies. The seeded form takes what leaves each block (a returned value, storage a caller reads again, state a non-returning exit hands on), which a graph read from the inside cannot state; `SeededLivenessProblem` carries the seed into the solve |
 | Purity classification | `cfg_purity`, `block_purity`, `EffectInfo` (associated `Effect`) | Consumer effect vocabularies — machine memory/IO, allocation, panics |
-| Metrics | `GraphMetrics::compute` (any rooted view); `CfgMetrics::compute` | Node/edge counts, cyclomatic complexity, nesting depth, instruction density |
+| Metrics | `GraphMetrics::compute` (any rooted view); `CfgMetrics::compute` | Live node and edge counts (removed slots are not nodes), cyclomatic complexity, nesting depth (0 for no loops, 1 for one loop), instruction density |
 | Pattern detection | `detect_patterns` (any view), `detect_cfg_patterns` (adds trampolines + arm orientation) | Diamond, chain, self-loop, empty trampoline |
 | Profiling | `CfgProfile::from_edge_weights`, `set_uniform_edge_weights` | Edge-weight-based hot/cold block analysis |
 | Tail call detection | `detect_tail_calls` (heuristic), `detect_explicit_tail_calls` (`CallInfo` markers) | |

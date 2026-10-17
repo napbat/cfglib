@@ -10,7 +10,6 @@ use crate::graph::dominator::tests::support::{EdgeList, Family, Recipe, Rng, nod
 use crate::graph::dominator::{
     DominatorTree, FrontierScratch, PostDominatorScratch, PostDominatorTree, PostNode,
 };
-use crate::graph::traverse::{TraversalDirection, depth_first_preorder};
 use crate::graph::view::GraphView;
 
 /// The family a seed selects.
@@ -87,12 +86,23 @@ fn the_random_graphs_reach_exits_cuts_and_both() {
     assert!(with_both >= 30, "only {with_both} have both");
 }
 
-/// The blocks `edges` reach from node 0, by a search that shares no code with
-/// the tree.
+/// The blocks `edges` reach from node 0, by a search over the raw edge list
+/// that shares no code with the tree or with the library's traversals.
 fn reachable_from_entry(edges: &EdgeList) -> Vec<bool> {
+    let mut successors = alloc::vec![Vec::new(); edges.node_count];
+    for &(from, to) in &edges.edges {
+        successors[from as usize].push(to as usize);
+    }
     let mut reachable = alloc::vec![false; edges.node_count];
-    for block in depth_first_preorder(&edges.graph(), 0, TraversalDirection::Outgoing) {
-        reachable[block as usize] = true;
+    reachable[0] = true;
+    let mut pending = alloc::vec![0_usize];
+    while let Some(block) = pending.pop() {
+        for &next in &successors[block] {
+            if !reachable[next] {
+                reachable[next] = true;
+                pending.push(next);
+            }
+        }
     }
     reachable
 }
@@ -122,7 +132,10 @@ fn large_graphs_match_the_iterative_oracle_on_the_augmented_graph() {
 
             // The augmented reverse graph, written out as an edge list: the
             // reverse of every edge that starts at a reachable block, and an
-            // edge from the virtual exit to every exit and cut root.
+            // edge from the virtual exit to every exit and cut root. The exits
+            // are checked against the reachable set above and the cuts against
+            // the brute-force reference in the small-graph tests, so only the
+            // tree built on top of them is under test here.
             let virtual_exit = node(edges.node_count);
             let mut augmented: Vec<(u32, u32)> = edges
                 .edges

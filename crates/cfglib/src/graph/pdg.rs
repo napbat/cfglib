@@ -32,9 +32,12 @@ pub enum DependenceNode {
 /// Relation carried by a program-dependence edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DependenceKind {
-    /// The source predicate determines whether the target executes.
+    /// The source predicate determines whether the target executes. Every
+    /// control edge starts at a [`DependenceNode::Block`].
     Control,
-    /// The target reads a value defined by the source instruction.
+    /// The target reads a value defined by the source instruction. This
+    /// includes the edge from the last instruction of a controlling block to
+    /// that block's predicate node, which reads the value the branch tests.
     Data,
 }
 
@@ -44,8 +47,8 @@ pub enum DependenceKind {
 /// computes a backward slice, while forward traversal computes affected code.
 /// Every CFG block receives a synthetic predicate node, and every instruction
 /// receives an instruction node. For non-empty controlling blocks, the last
-/// instruction feeds the synthetic predicate so a backward slice can continue
-/// through values used by the branch.
+/// instruction feeds the synthetic predicate through a data edge, so a
+/// backward slice can continue through values used by the branch.
 #[must_use]
 pub fn program_dependence_graph<I: InstrInfo>(
     cfg: &Cfg<I>,
@@ -99,12 +102,15 @@ pub fn program_dependence_graph<I: InstrInfo>(
         }
     }
 
+    // The predicate of a controlling block reads what the block's last
+    // instruction produced for its branch, which is a value flowing in, not
+    // control flowing out.
     for controller in controllers {
         let Some(controller_node) = block_nodes[controller.index()] else {
             continue;
         };
         if let Some(&predicate) = instruction_nodes[controller.index()].last() {
-            graph.add_edge(predicate, controller_node, DependenceKind::Control);
+            graph.add_edge(predicate, controller_node, DependenceKind::Data);
         }
     }
 
@@ -221,16 +227,84 @@ mod tests {
                 inst_idx: 0,
             }),
         );
-        let controls = |source: NodeId, target: NodeId| {
+        let has_edge = |source: NodeId, target: NodeId, kind: DependenceKind| {
             graph.edges().any(|edge| {
-                edge.source() == source
-                    && edge.target() == target
-                    && *edge.payload() == DependenceKind::Control
+                edge.source() == source && edge.target() == target && *edge.payload() == kind
             })
         };
+        let controls = |source, target| has_edge(source, target, DependenceKind::Control);
+        let feeds = |source, target| has_edge(source, target, DependenceKind::Data);
 
         assert!(controls(predicate, predicate));
         assert!(controls(predicate, instruction));
-        assert!(controls(instruction, predicate));
+        assert!(
+            !controls(instruction, predicate),
+            "an instruction does not control its predicate"
+        );
+        assert!(feeds(instruction, predicate));
+    }
+
+    #[test]
+    fn every_control_edge_starts_at_a_predicate() {
+        let mut cfg: Cfg<DfInst> = Cfg::new();
+        let [left, right, merge] = [(); 3].map(|()| cfg.new_block());
+        cfg.block_mut(cfg.entry()).push(df_def("branch", 0));
+        cfg.block_mut(left).push(df_def("left", 1));
+        cfg.block_mut(merge).push(df_use("use", 1));
+        cfg.add_edge(cfg.entry(), left, EdgeKind::ConditionalTrue);
+        cfg.add_edge(cfg.entry(), right, EdgeKind::ConditionalFalse);
+        cfg.add_edge(left, merge, EdgeKind::Fallthrough);
+        cfg.add_edge(right, merge, EdgeKind::Fallthrough);
+
+        let graph = program_dependence_graph(&cfg);
+
+        let control: Vec<_> = graph
+            .edges()
+            .filter(|edge| *edge.payload() == DependenceKind::Control)
+            .collect();
+        assert_ne!(control.len(), 0);
+        for edge in control {
+            assert!(
+                matches!(graph.node(edge.source()), DependenceNode::Block(_)),
+                "control edge from {:?}",
+                graph.node(edge.source())
+            );
+        }
+    }
+
+    #[test]
+    fn a_data_slice_from_a_predicate_reaches_the_values_its_branch_tests() {
+        let mut cfg: Cfg<DfInst> = Cfg::new();
+        let [then_block, else_block] = [(); 2].map(|()| cfg.new_block());
+        cfg.block_mut(cfg.entry()).push(df_def("operand", 0));
+        cfg.block_mut(cfg.entry()).push(df_use("test", 0));
+        cfg.add_edge(cfg.entry(), then_block, EdgeKind::ConditionalTrue);
+        cfg.add_edge(cfg.entry(), else_block, EdgeKind::ConditionalFalse);
+
+        let graph = program_dependence_graph(&cfg);
+        let point = |inst_idx| {
+            find_node(
+                &graph,
+                DependenceNode::Instruction(ProgramPoint {
+                    block: cfg.entry(),
+                    inst_idx,
+                }),
+            )
+        };
+        let mut slice = BTreeSet::from([find_node(&graph, DependenceNode::Block(cfg.entry()))]);
+        let mut pending: Vec<_> = slice.iter().copied().collect();
+        while let Some(node) = pending.pop() {
+            for edge in graph.edges() {
+                if edge.target() == node
+                    && *edge.payload() == DependenceKind::Data
+                    && slice.insert(edge.source())
+                {
+                    pending.push(edge.source());
+                }
+            }
+        }
+
+        assert!(slice.contains(&point(1)), "the instruction that tests");
+        assert!(slice.contains(&point(0)), "the definition it tests");
     }
 }
