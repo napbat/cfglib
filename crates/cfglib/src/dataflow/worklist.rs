@@ -1,6 +1,6 @@
 //! The worklist behind every fixpoint solver.
 
-use super::bits::DenseBits;
+use super::bits::{DenseBits, bit_slot};
 use crate::graph::view::{DenseId, GraphView};
 
 /// A deduplicating queue of dense node indices, popped lowest first.
@@ -65,7 +65,7 @@ impl Worklist {
 
     /// Queues `index` unless it is already queued.
     pub(super) fn insert(&mut self, index: usize) {
-        self.cursor = self.cursor.min(index / 64);
+        self.cursor = self.cursor.min(bit_slot(index).0);
         self.queued.insert(index);
     }
 

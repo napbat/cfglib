@@ -337,8 +337,10 @@ pub enum UnresolvedRole {
 impl<T, K> Transfer<'_, T, K> {
     /// The role this transfer reports when its target is not recovered.
     ///
-    /// A continuation and an unwind always target a recovered operation,
-    /// so they have no unresolved form and return `None`.
+    /// A continuation and an unwind never report an unresolved target, so
+    /// they return `None`: a continuation whose next position is not a
+    /// recovered operation is dropped without a report, and an unwind is
+    /// wired by the exception model, not by an operation's flow.
     #[must_use]
     pub const fn unresolved_role(&self) -> Option<UnresolvedRole> {
         let role = match (&self.role, self.target.is_some()) {
@@ -394,6 +396,67 @@ mod tests {
 
     fn transfers(flow: &Flow<u32, char>) -> Vec<Transfer<'_, u32, char>> {
         flow.transfers(10, Some(11)).collect()
+    }
+
+    /// `continues`, `is_call`, `direct_target` and `ends_block` are
+    /// hand-written lists over the variants. The transfers an operation makes
+    /// are the statement of what it does, so every list must agree with them.
+    #[test]
+    fn the_flow_predicates_agree_with_the_transfers_of_every_variant() {
+        let flows: [Flow<u32, char>; 11] = [
+            Flow::Next,
+            Flow::Return,
+            Flow::Throw,
+            Flow::Indirect,
+            Flow::IndirectCall,
+            Flow::Jump { target: 1 },
+            Flow::Conditional { target: 1 },
+            Flow::Call { target: 1 },
+            Flow::Exceptional { target: 1 },
+            Flow::Switch {
+                default: 1,
+                cases: vec![],
+            },
+            Flow::Switch {
+                default: 1,
+                cases: vec![('a', 2), ('b', 3)],
+            },
+        ];
+        let is_continuation = |role: &EdgeRole<'_, u32, char>| {
+            matches!(
+                role,
+                EdgeRole::Sequential
+                    | EdgeRole::CallContinuation { .. }
+                    | EdgeRole::ConditionalFallThrough
+            )
+        };
+        for flow in &flows {
+            let made = transfers(flow);
+            assert_eq!(
+                flow.continues(),
+                made.iter().any(|transfer| is_continuation(&transfer.role)),
+                "{flow:?} continues"
+            );
+            assert_eq!(
+                flow.is_call(),
+                made.iter().any(|transfer| transfer.role.is_call()),
+                "{flow:?} is a call"
+            );
+            let named = made
+                .iter()
+                .filter(|transfer| transfer.target.is_some() && !is_continuation(&transfer.role))
+                .count();
+            assert_eq!(
+                flow.direct_target().is_some(),
+                named == 1 && !matches!(flow, Flow::Switch { .. }),
+                "{flow:?} names one target"
+            );
+            assert_eq!(
+                flow.ends_block(),
+                !matches!(flow, Flow::Next),
+                "{flow:?} ends its block"
+            );
+        }
     }
 
     #[test]

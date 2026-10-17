@@ -346,4 +346,48 @@ mod tests {
         right.insert(2);
         assert_eq!(left, right);
     }
+
+    #[test]
+    fn the_last_index_of_a_universe_lands_in_the_last_word_with_no_bits_above() {
+        for len in [1_usize, 63, 64, 65, 128, 129] {
+            let mut bits = DenseBits::new(len);
+            assert!(bits.insert(len - 1));
+            assert_eq!(bits.words().len(), len.div_ceil(64), "len {len}");
+            assert_eq!(bits.count_ones(), 1, "len {len}");
+            assert_eq!(bits.ones().collect::<Vec<_>>(), [len - 1], "len {len}");
+            let used = len % 64;
+            if used != 0 {
+                assert_eq!(bits.words()[len / 64] >> used, 0, "len {len}");
+            }
+            assert!(bits.remove(len - 1));
+            assert!(bits.words().iter().all(|&word| word == 0), "len {len}");
+        }
+        let empty = DenseBits::new(0);
+        assert!(empty.words().is_empty());
+        assert!(empty.ones().next().is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "outside universe")]
+    fn reading_outside_the_universe_panics() {
+        let _ = DenseBits::new(65).get(65);
+    }
+
+    #[test]
+    #[should_panic(expected = "outside universe")]
+    fn inserting_outside_the_universe_panics() {
+        let _ = DenseBits::new(64).insert(64);
+    }
+
+    #[test]
+    #[should_panic(expected = "outside universe")]
+    fn removing_outside_the_universe_panics() {
+        let _ = DenseBits::new(3).remove(3);
+    }
+
+    #[test]
+    #[should_panic(expected = "unioned sets must share one universe")]
+    fn unioning_different_universes_panics() {
+        let _ = DenseBits::new(70).union_with(&DenseBits::new(71));
+    }
 }
