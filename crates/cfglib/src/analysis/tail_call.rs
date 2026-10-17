@@ -17,8 +17,8 @@ use crate::flow::{CallInfo, FlowControl, FlowEffect};
 pub struct TailCall {
     /// The block containing the tail call.
     pub block: BlockId,
-    /// Index of the call instruction within the block (if identifiable).
-    pub inst_idx: Option<usize>,
+    /// Index of the call instruction within the block.
+    pub inst_idx: usize,
     /// Whether this was explicitly marked via [`CallInfo::is_tail_call`].
     pub explicit: bool,
 }
@@ -52,10 +52,9 @@ where
                 FlowEffect::Call | FlowEffect::ConditionalCall
             )
         {
-            let idx = instructions.len().saturating_sub(1);
             results.push(TailCall {
                 block: bid,
-                inst_idx: Some(idx),
+                inst_idx: instructions.len() - 1,
                 explicit: false,
             });
         }
@@ -81,7 +80,7 @@ where
             if instruction.is_tail_call() {
                 results.push(TailCall {
                     block: block_id,
-                    inst_idx: Some(idx),
+                    inst_idx: idx,
                     explicit: true,
                 });
             }
@@ -95,7 +94,7 @@ mod tests {
     use super::*;
     use crate::cfg::Cfg;
     use crate::edge::EdgeKind;
-    use crate::test_util::{df_call, ff};
+    use crate::test_util::{DfInst, df_call, df_ff as ff};
 
     #[test]
     fn explicit_tail_call_detected() {
@@ -105,9 +104,59 @@ mod tests {
             .push(df_call("call", "foo", true));
 
         let tails = detect_explicit_tail_calls(&cfg);
-        assert_eq!(tails.len(), 1);
-        assert!(tails[0].explicit);
-        assert_eq!(tails[0].inst_idx, Some(0));
+        assert_eq!(
+            tails,
+            [TailCall {
+                block: cfg.entry(),
+                inst_idx: 0,
+                explicit: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn explicit_tail_calls_name_every_marked_instruction_with_or_without_a_callee() {
+        let mut cfg = Cfg::new();
+        let other = cfg.new_block();
+        let indirect = DfInst {
+            callee: None,
+            ..df_call("call", "unused", true)
+        };
+        cfg.block_mut(cfg.entry()).instructions_mut().extend([
+            df_call("call", "plain", false),
+            df_call("call", "tail", true),
+            ff("after"),
+        ]);
+        cfg.block_mut(other).instructions_mut().push(indirect);
+
+        let tails = detect_explicit_tail_calls(&cfg);
+        assert_eq!(
+            tails
+                .iter()
+                .map(|tail| (tail.block, tail.inst_idx, tail.explicit))
+                .collect::<Vec<_>>(),
+            [(cfg.entry(), 1, true), (other, 0, true)]
+        );
+    }
+
+    #[test]
+    fn a_call_that_ends_its_block_and_flows_into_the_exit_is_a_tail_call() {
+        let mut cfg = Cfg::new();
+        let exit = cfg.new_block();
+        cfg.block_mut(cfg.entry())
+            .instructions_mut()
+            .extend([ff("setup"), df_call("call", "callee", false)]);
+        cfg.block_mut(exit).instructions_mut().push(ff("ret"));
+        cfg.add_edge(cfg.entry(), exit, EdgeKind::Fallthrough);
+
+        assert_eq!(
+            detect_tail_calls(&cfg),
+            [TailCall {
+                block: cfg.entry(),
+                inst_idx: 1,
+                explicit: false,
+            }]
+        );
     }
 
     #[test]
@@ -120,5 +169,50 @@ mod tests {
 
         let tails = detect_tail_calls(&cfg);
         assert_eq!(tails, [] as [crate::analysis::tail_call::TailCall; 0]);
+    }
+
+    #[test]
+    fn a_call_that_work_follows_is_not_a_tail_call() {
+        // The call is not the block's last instruction.
+        let mut not_last = Cfg::new();
+        let exit = not_last.new_block();
+        not_last
+            .block_mut(not_last.entry())
+            .instructions_mut()
+            .extend([df_call("call", "callee", false), ff("cleanup")]);
+        not_last.add_edge(not_last.entry(), exit, EdgeKind::Fallthrough);
+        assert!(detect_tail_calls(&not_last).is_empty());
+
+        // The call's successor is not the exit: the function goes on.
+        let mut continues = Cfg::new();
+        let next = continues.new_block();
+        let exit = continues.new_block();
+        continues
+            .block_mut(continues.entry())
+            .instructions_mut()
+            .push(df_call("call", "callee", false));
+        continues
+            .block_mut(next)
+            .instructions_mut()
+            .push(ff("more"));
+        continues.add_edge(continues.entry(), next, EdgeKind::Fallthrough);
+        continues.add_edge(next, exit, EdgeKind::Fallthrough);
+        assert!(detect_tail_calls(&continues).is_empty());
+    }
+
+    #[test]
+    fn a_call_guarded_by_a_handler_is_not_a_tail_call() {
+        // The call returns normally to the exit but can also unwind into a
+        // handler, which has to run: two successors.
+        let mut cfg = Cfg::new();
+        let exit = cfg.new_block();
+        let handler = cfg.new_block();
+        cfg.block_mut(cfg.entry())
+            .instructions_mut()
+            .push(df_call("call", "callee", false));
+        cfg.add_edge(cfg.entry(), exit, EdgeKind::Fallthrough);
+        cfg.add_edge(cfg.entry(), handler, EdgeKind::ExceptionUnwind);
+
+        assert!(detect_tail_calls(&cfg).is_empty());
     }
 }
