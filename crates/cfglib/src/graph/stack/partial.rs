@@ -251,13 +251,18 @@ impl StackPartialPathSet {
         }));
 
         let mut frontier = VecDeque::new();
-        for start in start_nodes {
-            frontier.push_back(Route {
-                start,
-                current: start,
-                edges: Vec::new(),
-            });
-        }
+        push_routes(
+            &mut frontier,
+            start_nodes
+                .into_iter()
+                .map(|start| Route {
+                    start,
+                    current: start,
+                    edges: Vec::new(),
+                })
+                .collect(),
+            config.order,
+        );
         let mut paths = Vec::new();
         let mut stats = StackPartialPathStats::default();
 
