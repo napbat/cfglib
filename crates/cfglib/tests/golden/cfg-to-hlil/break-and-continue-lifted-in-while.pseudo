@@ -1,0 +1,18 @@
+v1 = 0;
+v2 = 1;
+v3 = 2;
+v4 = 4;
+while (less(v1, v0)) {
+    v1 = plus(v1, v2);
+    if (less(v1, v3)) {
+        continue;
+    } else {
+        if (less(v1, v4)) {
+            show(v1);
+            continue;
+        } else {
+            break;
+        }
+    }
+}
+return v1;

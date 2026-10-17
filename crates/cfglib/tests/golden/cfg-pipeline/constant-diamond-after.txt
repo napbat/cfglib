@@ -1,0 +1,6 @@
+entry bb0
+bb0:
+    nop
+    z = 7
+    print z
+    return z

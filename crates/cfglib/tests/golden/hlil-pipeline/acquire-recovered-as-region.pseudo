@@ -1,0 +1,4 @@
+@guard(v0) {
+    emit(div(10, v0));
+}
+return 0;

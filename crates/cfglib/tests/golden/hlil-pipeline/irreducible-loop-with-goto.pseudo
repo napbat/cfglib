@@ -1,0 +1,15 @@
+v2 = 0;
+v3 = 0;
+if (lt(v0, 0)) {
+} else {
+    .bb2: {
+        v3 = add(v3, 1);
+    }
+}
+v3 = add(v3, 10);
+v2 = add(v2, 1);
+if (ge(v2, v1)) {
+} else {
+    goto .bb2;
+}
+return v3;

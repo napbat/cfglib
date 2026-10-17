@@ -1,0 +1,19 @@
+entry bb0
+bb0:
+    setup()
+bb1:
+    risky()
+bb2:
+    log(e)
+bb3:
+    return
+bb4:
+    cleanup()
+bb0 -> bb1 fallthrough
+bb1 -> bb3 fallthrough
+bb1 -> bb2 unwind
+bb2 -> bb3 fallthrough
+bb2 -> bb4 fallthrough
+region r0 protected=bb1
+    handler catch entry=bb2 body=bb2
+    handler finally entry=bb4 body=bb4

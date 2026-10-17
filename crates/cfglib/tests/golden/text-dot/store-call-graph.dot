@@ -1,0 +1,12 @@
+digraph calls {
+    rankdir=LR;
+    node [shape=box fontname="monospace" fontsize=10];
+    edge [fontname="monospace" fontsize=9];
+    fn0 [label="main\lentry point\l"];
+    fn1 [label="parse \"input\"\l"];
+    fn2 [label="C:\\temp\\lib\l"];
+    fn3;
+    fn0 -> fn1 [label="x3"];
+    fn1 -> fn2 [color=purple style=dashed label="via vtable"];
+    fn2 -> fn3 [color=blue style=bold penwidth=2.5];
+}

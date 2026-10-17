@@ -1,0 +1,13 @@
+digraph cfg {
+    rankdir=TB;
+    node [shape=box fontname="monospace" fontsize=10];
+    edge [fontname="monospace" fontsize=9];
+    bb0 [label="bb0\li = 0\l"];
+    bb1 [label="header:\lbb1\li < n\l"];
+    bb2 [label="bb2\li = i + 1\l"];
+    bb3 [label="bb3\lreturn i\l"];
+    bb0 -> bb1 [color=black style=solid];
+    bb1 -> bb2 [color=green4 style=solid label="T (0.90)" penwidth=3.7];
+    bb1 -> bb3 [color=red style=solid label="F (0.10)" penwidth=1.3];
+    bb2 -> bb1 [color=blue style=dashed label="back (1.00)" penwidth=4.0];
+}

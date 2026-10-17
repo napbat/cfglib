@@ -1,0 +1,18 @@
+entry bb0
+bb0:
+    c.1 = a.0 < b.0
+    branch c.1
+bb1:
+    m.1 = a.0
+    (m.3) = (m.1)
+bb2:
+    nop
+    m.2 = b.0
+    (m.3) = (m.2)
+bb3:
+    print m.3
+    return m.3
+bb0 -> bb1 true
+bb0 -> bb2 false
+bb1 -> bb3 fallthrough
+bb2 -> bb3 fallthrough

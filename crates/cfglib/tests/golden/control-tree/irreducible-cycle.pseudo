@@ -1,0 +1,12 @@
+if {
+    .bb1:
+        if {
+            .bb2:
+                if {
+                    goto .bb1;
+                }
+        }
+} else {
+    goto .bb2;
+}
+return

@@ -1,0 +1,13 @@
+v2 = 0;
+v3 = 1;
+if (less(v0, 0)) {
+} else {
+    .bb1: {
+        show(v2);
+    }
+}
+v2 = plus(v2, v3);
+if (less(v2, v1)) {
+    goto .bb1;
+}
+return v2;
