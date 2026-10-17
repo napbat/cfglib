@@ -39,6 +39,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "copy_propagation_with_exits",
     "dead_code_elimination",
     "dead_code_elimination_with_exits",
+    "departs_before_throws",
     "depth_first_edges",
     "depth_first_edges_with",
     "depth_first_events",

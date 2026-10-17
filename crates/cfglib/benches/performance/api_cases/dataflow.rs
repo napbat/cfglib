@@ -1,15 +1,15 @@
 use cfglib::{
-    AbstractDomain, Cfg, Direction, DominatorTree, EdgeProblem, Graph, Lattice, NodeId,
+    AbstractDomain, Cfg, Direction, DominatorTree, EdgeProblem, FlowEffect, Graph, Lattice, NodeId,
     SolveConfig, SsaForm, TryEdgeProblem, TryNodeProblem, TryProblem, abstract_interpret,
     alias_propagation, copies_by_predecessor, copy_propagation, copy_propagation_with_exits,
-    eliminate_phis, index_paths_may_overlap, meet_options, solve_edge_problem,
-    solve_edge_problem_from, solve_edge_problem_from_with_config, solve_edge_problem_with_config,
-    solve_node_problem_from, solve_node_problem_from_with_config, solve_problem_from,
-    solve_problem_from_with_config, try_solve_edge_problem, try_solve_edge_problem_from,
-    try_solve_edge_problem_from_with_config, try_solve_edge_problem_with_config,
-    try_solve_node_problem, try_solve_node_problem_from, try_solve_node_problem_from_with_config,
-    try_solve_node_problem_with_config, try_solve_problem, try_solve_problem_from,
-    try_solve_problem_from_with_config, try_solve_problem_with_config,
+    departs_before_throws, eliminate_phis, index_paths_may_overlap, meet_options,
+    solve_edge_problem, solve_edge_problem_from, solve_edge_problem_from_with_config,
+    solve_edge_problem_with_config, solve_node_problem_from, solve_node_problem_from_with_config,
+    solve_problem_from, solve_problem_from_with_config, try_solve_edge_problem,
+    try_solve_edge_problem_from, try_solve_edge_problem_from_with_config,
+    try_solve_edge_problem_with_config, try_solve_node_problem, try_solve_node_problem_from,
+    try_solve_node_problem_from_with_config, try_solve_node_problem_with_config, try_solve_problem,
+    try_solve_problem_from, try_solve_problem_from_with_config, try_solve_problem_with_config,
 };
 
 use super::BenchmarkSuite;
@@ -229,6 +229,36 @@ fn register_analyses(suite: &mut BenchmarkSuite<'_>) {
             facts.fact_out(cfglib::BlockId::from_index(127)),
             Some(&Seen(true))
         )
+    );
+
+    // `entry` throws and unwinds to `handler`, and also falls through.
+    let mut unwinding = Cfg::new();
+    let handler = unwinding.new_block();
+    let normal = unwinding.new_block();
+    let mut throwing = ApiInst::pure(0, Vec::new());
+    throwing.flow = FlowEffect::MayThrow;
+    unwinding.block_mut(unwinding.entry()).push(throwing);
+    unwinding.add_edge(unwinding.entry(), normal, cfglib::EdgeKind::Fallthrough);
+    unwinding.add_edge(
+        unwinding.entry(),
+        handler,
+        cfglib::EdgeKind::ExceptionUnwind,
+    );
+    benchmark_case!(
+        suite,
+        "api_departs_before_throws",
+        covers[departs_before_throws],
+        || {
+            unwinding
+                .outgoing(unwinding.entry())
+                .map(|edge| departs_before_throws(&unwinding, unwinding.edge(edge)))
+                .collect::<Vec<_>>()
+        },
+        |departures: &Vec<bool>| {
+            assert_eq!(departures.len(), 2);
+            assert!(departures[1], "the unwind edge departs before the throw");
+            assert!(!departures[0], "the normal edge departs after the block");
+        }
     );
 
     let copies_fixture = copy_cfg();
