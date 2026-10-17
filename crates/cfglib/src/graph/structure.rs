@@ -25,7 +25,10 @@ use crate::edge::{EdgeKind, KindedEdge};
 /// A natural loop over node identity `N`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NaturalLoop<N = BlockId> {
-    /// The loop header (entry point, dominates all other nodes).
+    /// The loop header, the node the back-edges return to.
+    ///
+    /// Dominance-based detection gives a header that dominates the whole
+    /// body. A tagged loop on an irreducible graph need not have one.
     pub header: N,
     /// All nodes in the loop body (including the header).
     pub body: BTreeSet<N>,
@@ -48,9 +51,11 @@ pub struct BackEdge<N = BlockId> {
 /// their source).
 ///
 /// The result is deduplicated: parallel edges between the same pair
-/// appear once. For [`Cfg`]s whose builders also tag explicit
-/// [`EdgeKind::Back`] edges, [`find_back_edges_tagged`] additionally
-/// honors the tags.
+/// appear once. Only code the root reaches has back-edges: a block
+/// dominates itself whether or not it runs, so unreachable code is skipped
+/// rather than reported as loops. For [`Cfg`]s whose builders also tag
+/// explicit [`EdgeKind::Back`] edges, [`find_back_edges_tagged`]
+/// additionally honors the tags.
 ///
 /// # Examples
 ///
@@ -75,7 +80,7 @@ pub fn find_back_edges<G: GraphView>(
     dom: &DominatorTree<G::NodeId>,
 ) -> Vec<BackEdge<G::NodeId>> {
     let mut backs = Vec::new();
-    for node in graph.node_ids() {
+    for node in graph.node_ids().filter(|&node| dom.is_reachable(node)) {
         for successor in graph.successors(node) {
             if dom.dominates(successor, node) {
                 backs.push(BackEdge {
@@ -95,7 +100,8 @@ pub fn find_back_edges<G: GraphView>(
 /// The union of [`find_back_edges`]'s dominance-based detection and the
 /// builder's tags. The tags matter on irreducible machine CFGs where a
 /// frontend knows an edge is a loop back-edge even though dominance cannot
-/// prove it.
+/// prove it. A tag on an edge out of unreachable code is ignored, as
+/// dominance is.
 #[must_use]
 pub fn find_back_edges_tagged<G>(
     graph: &G,
@@ -108,7 +114,7 @@ where
     let mut backs = find_back_edges(graph, dom);
     for edge in graph.edge_ids() {
         let edge = graph.edge(edge);
-        if edge.data().kind() == EdgeKind::Back {
+        if edge.data().kind() == EdgeKind::Back && dom.is_reachable(edge.source()) {
             backs.push(BackEdge {
                 tail: edge.source(),
                 header: edge.target(),
@@ -122,11 +128,19 @@ where
 
 /// Compute the merged natural loop body for every back-edge to one header.
 ///
-/// The body is the set of nodes that can reach any latch without going
-/// through `header`, plus `header` itself. A single multi-source reverse walk
-/// computes the same union without revisiting a shared body for every latch.
+/// The body is the set of reachable nodes that can reach any latch without
+/// going through `header`, plus `header` itself. A single multi-source
+/// reverse walk computes the same union without revisiting a shared body for
+/// every latch.
+///
+/// When the header dominates every latch, that walk cannot leave the region
+/// the header dominates. A tagged latch the header does not dominate (an
+/// irreducible cycle) lets the walk run on to blocks that merely lead to the
+/// cycle, such as the entry, so the body is cut down to the walked blocks the
+/// header reaches: the blocks on a path from the header to a latch.
 fn loop_body_for<G: GraphView>(
     graph: &G,
+    dom: &DominatorTree<G::NodeId>,
     header: G::NodeId,
     latches: &[G::NodeId],
 ) -> BTreeSet<G::NodeId> {
@@ -139,19 +153,34 @@ fn loop_body_for<G: GraphView>(
         }
     }
     while let Some(n) = stack.pop() {
-        for p in graph.predecessors(n) {
+        for p in graph.predecessors(n).filter(|&p| dom.is_reachable(p)) {
             if !body.contains(&p) {
                 body.insert(p);
                 stack.push(p);
             }
         }
     }
-    body
+
+    if latches.iter().all(|&latch| dom.dominates(header, latch)) {
+        return body;
+    }
+    let mut cycle = BTreeSet::from([header]);
+    cycle.extend(latches.iter().copied());
+    stack.push(header);
+    while let Some(n) = stack.pop() {
+        for s in graph.successors(n) {
+            if body.contains(&s) && cycle.insert(s) {
+                stack.push(s);
+            }
+        }
+    }
+    cycle
 }
 
 /// Build merged, depth-annotated loops from a set of back-edges.
 fn loops_from_backs<G: GraphView>(
     graph: &G,
+    dom: &DominatorTree<G::NodeId>,
     backs: &[BackEdge<G::NodeId>],
 ) -> Vec<NaturalLoop<G::NodeId>> {
     if backs.is_empty() {
@@ -167,7 +196,7 @@ fn loops_from_backs<G: GraphView>(
 
     let mut loops: Vec<NaturalLoop<G::NodeId>> = Vec::new();
     for (header, latches) in &header_map {
-        let body = loop_body_for(graph, *header, latches);
+        let body = loop_body_for(graph, dom, *header, latches);
         loops.push(NaturalLoop {
             header: *header,
             body,
@@ -234,7 +263,7 @@ pub fn detect_loops<G: GraphView>(
     graph: &G,
     dom: &DominatorTree<G::NodeId>,
 ) -> Vec<NaturalLoop<G::NodeId>> {
-    loops_from_backs(graph, &find_back_edges(graph, dom))
+    loops_from_backs(graph, dom, &find_back_edges(graph, dom))
 }
 
 /// Detect natural loops in an edge view, honoring explicit
@@ -248,7 +277,7 @@ where
     G: EdgeView,
     G::EdgeData: KindedEdge,
 {
-    loops_from_backs(graph, &find_back_edges_tagged(graph, dom))
+    loops_from_backs(graph, dom, &find_back_edges_tagged(graph, dom))
 }
 
 /// Whether the graph is reducible.
@@ -530,6 +559,79 @@ mod tests {
         let loops = detect_loops_tagged(&cfg, &dom);
         assert_eq!(loops.len(), 1);
         assert!(loops[0].body.contains(&b2));
+    }
+
+    #[test]
+    fn tagged_irreducible_loop_body_stays_inside_the_cycle() {
+        // entry → {b1, b2} and a tagged b1 ↔ b2: the entry reaches the latch
+        // without passing the header, but it is not part of the cycle.
+        let mut cfg = Cfg::<u32>::new();
+        let b1 = cfg.new_block();
+        let b2 = cfg.new_block();
+        cfg.add_edge(cfg.entry(), b1, EdgeKind::ConditionalTrue);
+        cfg.add_edge(cfg.entry(), b2, EdgeKind::ConditionalFalse);
+        cfg.add_edge(b1, b2, EdgeKind::Back);
+        cfg.add_edge(b2, b1, EdgeKind::Back);
+
+        let dom = DominatorTree::compute(&cfg);
+        let loops = detect_loops_tagged(&cfg, &dom);
+        assert_eq!(loops.len(), 2);
+        for lp in &loops {
+            assert_eq!(lp.body, BTreeSet::from([b1, b2]), "header {:?}", lp.header);
+        }
+    }
+
+    #[test]
+    fn tagged_irreducible_loop_keeps_every_block_of_the_cycle() {
+        // entry → {h, y}, h → x → y → h, with y → h tagged: the cycle is
+        // h, x, y even though h dominates neither x nor y.
+        let mut cfg = Cfg::<u32>::new();
+        let [h, x, y] = [(); 3].map(|()| cfg.new_block());
+        cfg.add_edge(cfg.entry(), h, EdgeKind::ConditionalTrue);
+        cfg.add_edge(cfg.entry(), y, EdgeKind::ConditionalFalse);
+        cfg.add_edge(h, x, EdgeKind::Fallthrough);
+        cfg.add_edge(x, y, EdgeKind::Fallthrough);
+        cfg.add_edge(y, h, EdgeKind::Back);
+
+        let dom = DominatorTree::compute(&cfg);
+        let loops = detect_loops_tagged(&cfg, &dom);
+        assert_eq!(loops.len(), 1);
+        assert_eq!(loops[0].header, h);
+        assert_eq!(loops[0].body, BTreeSet::from([h, x, y]));
+    }
+
+    #[test]
+    fn dead_predecessors_are_not_part_of_a_loop_body() {
+        let mut cfg = Cfg::<u32>::new();
+        let [header, body, dead] = [(); 3].map(|()| cfg.new_block());
+        cfg.add_edge(cfg.entry(), header, EdgeKind::Fallthrough);
+        cfg.add_edge(header, body, EdgeKind::Fallthrough);
+        cfg.add_edge(body, header, EdgeKind::Back);
+        cfg.add_edge(dead, body, EdgeKind::Fallthrough);
+
+        let dom = DominatorTree::compute(&cfg);
+        for loops in [detect_loops(&cfg, &dom), detect_loops_tagged(&cfg, &dom)] {
+            assert_eq!(loops.len(), 1);
+            assert_eq!(loops[0].body, BTreeSet::from([header, body]));
+        }
+    }
+
+    #[test]
+    fn unreachable_code_has_no_back_edges() {
+        // A block that branches to itself is dominated by itself, but the
+        // entry never reaches it, so it is no more a loop than the
+        // unreachable two-cycle beside it.
+        let mut cfg = Cfg::<u32>::new();
+        let [dead_self, dead_a, dead_b, dead_tagged] = [(); 4].map(|()| cfg.new_block());
+        cfg.add_edge(dead_self, dead_self, EdgeKind::ConditionalTrue);
+        cfg.add_edge(dead_a, dead_b, EdgeKind::Fallthrough);
+        cfg.add_edge(dead_b, dead_a, EdgeKind::Fallthrough);
+        cfg.add_edge(dead_tagged, dead_a, EdgeKind::Back);
+
+        let dom = DominatorTree::compute(&cfg);
+        assert!(find_back_edges(&cfg, &dom).is_empty());
+        assert!(find_back_edges_tagged(&cfg, &dom).is_empty());
+        assert!(detect_loops_tagged(&cfg, &dom).is_empty());
     }
 
     #[test]
