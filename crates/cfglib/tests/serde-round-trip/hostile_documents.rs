@@ -171,6 +171,30 @@ fn a_cfg_whose_handler_names_a_block_it_does_not_have_is_rejected() {
     );
 }
 
+#[test]
+fn a_cfg_whose_cleanup_lists_one_route_twice_is_rejected() {
+    let mut edited = document(&rich_cfg());
+    let record = edited["cleanups"]
+        .as_array_mut()
+        .and_then(|records| {
+            records.iter_mut().find(|record| {
+                record["continuations"]
+                    .as_array()
+                    .is_some_and(|c| !c.is_empty())
+            })
+        })
+        .expect("the fixture records a route");
+    let routes = record["continuations"]
+        .as_array_mut()
+        .expect("the routes are a sequence");
+    let route = routes[0].clone();
+    routes.push(route);
+    assert!(
+        load::<Cfg<Op, Route>>(edited).is_err(),
+        "a route listed twice was accepted; the cleanup would report two paths"
+    );
+}
+
 /// The documented outcome for an inconsistent store document: rejected, or
 /// loaded into a store whose own answers agree with each other. A store that
 /// loads and then panics or contradicts itself is the failure.

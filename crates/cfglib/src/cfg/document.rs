@@ -8,10 +8,11 @@
 //! a panic at first use.
 
 extern crate alloc;
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
-use crate::region::{Cleanup, HandlerRef, Region, RegionId};
+use crate::region::{Cleanup, Continuation, HandlerRef, Region, RegionId};
 
 use super::{Cfg, CfgStore};
 
@@ -47,6 +48,9 @@ pub(super) enum DocumentError {
     CleanupHandlerMissing(HandlerRef),
     /// A region names a parent that is not a region of the graph.
     ParentMissing(RegionId),
+    /// A cleanup record lists one route twice. [`Cleanup::continuations`] holds
+    /// each route once, so the second copy would be reported as a second path.
+    ContinuationRepeated(HandlerRef, Continuation),
 }
 
 impl core::fmt::Display for DocumentError {
@@ -76,6 +80,11 @@ impl core::fmt::Display for DocumentError {
                     "a region names parent {parent}, which does not exist"
                 )
             }
+            Self::ContinuationRepeated(handler, continuation) => write!(
+                formatter,
+                "the cleanup of handler {handler} lists the route {:?} to {} twice",
+                continuation.reason, continuation.resume
+            ),
         }
     }
 }
@@ -96,15 +105,16 @@ impl<I, E> TryFrom<CfgDocument<I, E>> for Cfg<I, E> {
         if let Some(anchor) = cfg.dangling_anchors().next() {
             return Err(DocumentError::AnchorNotLive(anchor));
         }
-        cfg.check_region_identities()?;
+        cfg.check_regions_and_cleanups()?;
         Ok(cfg)
     }
 }
 
 impl<I, E> Cfg<I, E> {
     /// Regions are addressed by position, cleanups by handler, and nesting by
-    /// parent identity: each of those references must resolve.
-    fn check_region_identities(&self) -> Result<(), DocumentError> {
+    /// parent identity: each of those references must resolve. A cleanup also
+    /// holds each of its routes once.
+    fn check_regions_and_cleanups(&self) -> Result<(), DocumentError> {
         for (index, region) in self.regions.iter().enumerate() {
             if region.id.index() != index {
                 return Err(DocumentError::RegionIdMismatch {
@@ -118,14 +128,20 @@ impl<I, E> Cfg<I, E> {
                 return Err(DocumentError::ParentMissing(parent));
             }
         }
-        match self
-            .cleanups
-            .iter()
-            .find(|cleanup| self.handler(cleanup.handler).is_none())
-        {
-            Some(cleanup) => Err(DocumentError::CleanupHandlerMissing(cleanup.handler)),
-            None => Ok(()),
+        for cleanup in &self.cleanups {
+            if self.handler(cleanup.handler).is_none() {
+                return Err(DocumentError::CleanupHandlerMissing(cleanup.handler));
+            }
+            let mut routes = BTreeSet::new();
+            if let Some(&route) = cleanup
+                .continuations
+                .iter()
+                .find(|&&route| !routes.insert(route))
+            {
+                return Err(DocumentError::ContinuationRepeated(cleanup.handler, route));
+            }
         }
+        Ok(())
     }
 }
 
@@ -225,6 +241,37 @@ mod tests {
         document["cleanups"][0]["handler"]["handler"] = json!(9);
         let error = decode(&document).unwrap_err();
         assert!(error.to_string().contains("cleanup"), "{error}");
+    }
+
+    #[test]
+    fn a_cleanup_listing_one_route_twice_is_rejected() {
+        use crate::region::{CompletionReason, Continuation};
+
+        let mut cfg = protected_cfg();
+        let handler = HandlerRef::new(RegionId::from_raw(0), 0);
+        let entry = cfg.entry();
+        for reason in [CompletionReason::Normal, CompletionReason::Return] {
+            cfg.add_continuation(
+                handler,
+                Continuation {
+                    reason,
+                    resume: entry,
+                },
+            );
+        }
+        let mut document = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(
+            decode(&document).unwrap(),
+            cfg,
+            "two distinct routes are valid as written"
+        );
+        let routes = document["cleanups"][0]["continuations"]
+            .as_array_mut()
+            .unwrap();
+        let first = routes[0].clone();
+        routes.push(first);
+        let error = decode(&document).unwrap_err();
+        assert!(error.to_string().contains("twice"), "{error}");
     }
 
     #[test]
