@@ -13,7 +13,13 @@ use super::edge_view::{EdgeRef, EdgeView};
 use super::traverse::{Incoming, Outgoing, TraversalDirection, by_axis};
 use super::view::DenseId;
 
-trait EdgeAdjacency: Copy {
+/// An adjacency axis over edges: which edges a node exposes, and which end of
+/// an exposed edge is the neighbour.
+///
+/// The edge-aware counterpart of [`Adjacency`](super::traverse::Adjacency),
+/// implemented on the same zero-sized axes so one core serves both
+/// directions.
+pub(crate) trait EdgeAdjacency: Copy {
     fn edges<G: EdgeView>(self, graph: &G, node: G::NodeId)
     -> impl Iterator<Item = G::EdgeId> + '_;
 
@@ -195,7 +201,7 @@ fn depth_first_edges_from<G: EdgeView, A: EdgeAdjacency>(
     let mut steps = Vec::new();
     let mut seen_node = vec![false; graph.node_bound()];
     let mut arena = Vec::new();
-    append_adjacency(axis, graph, start, &mut arena);
+    arena.extend(axis.edges(graph, start));
     let mut stack = vec![EdgeDfsFrame {
         depth: 0,
         start: 0,
@@ -231,7 +237,7 @@ fn depth_first_edges_from<G: EdgeView, A: EdgeAdjacency>(
 
         seen_node[next.index()] = true;
         let start = arena.len();
-        append_adjacency(axis, graph, next, &mut arena);
+        arena.extend(axis.edges(graph, next));
         stack.push(EdgeDfsFrame {
             depth: depth + 1,
             start,
@@ -247,15 +253,6 @@ struct EdgeDfsFrame {
     depth: usize,
     start: usize,
     cursor: usize,
-}
-
-fn append_adjacency<G: EdgeView, A: EdgeAdjacency>(
-    axis: A,
-    graph: &G,
-    node: G::NodeId,
-    arena: &mut Vec<G::EdgeId>,
-) {
-    arena.extend(axis.edges(graph, node));
 }
 
 /// The edges of one shortest path through an edge-aware view.
