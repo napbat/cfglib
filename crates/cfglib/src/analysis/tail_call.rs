@@ -28,12 +28,16 @@ pub struct TailCall {
 /// A block is a candidate when its last instruction is a call
 /// ([`Call`](FlowEffect::Call), [`IndirectCall`](FlowEffect::IndirectCall),
 /// or [`ConditionalCall`](FlowEffect::ConditionalCall)) and its only
-/// successor is an exit block (one with no successors, where the function
-/// returns) reached by an ordinary edge. A call that can also unwind into a
-/// handler has a second successor and is not a candidate, nor is one whose
-/// only successor is an exceptional edge. For instructions that carry
-/// explicit tail-call markers, use [`detect_explicit_tail_calls`] instead
-/// (or in addition).
+/// successor is an exit block (one with no successors) reached by an
+/// ordinary edge that returns at once: the exit block is empty, an implicit
+/// return, or its first instruction past any [`Label`](FlowEffect::Label) or
+/// [`Declaration`](FlowEffect::Declaration) is a [`Return`](FlowEffect::Return).
+/// An exit block that does other work first, such as using the call's
+/// result, or that raises or terminates instead of returning, is not a
+/// return. A call that can also unwind into a handler has a second successor
+/// and is not a candidate, nor is one whose only successor is an exceptional
+/// edge. For instructions that carry explicit tail-call markers, use
+/// [`detect_explicit_tail_calls`] instead (or in addition).
 #[must_use]
 pub fn detect_tail_calls<G>(cfg: &G) -> Vec<TailCall>
 where
@@ -48,7 +52,7 @@ where
         };
         let instructions = cfg.instructions(bid);
         if !cfg.edge_kind(edge).is_exceptional()
-            && cfg.outgoing(cfg.edge(edge).target()).next().is_none()
+            && returns_at_once(cfg, cfg.edge(edge).target())
             && let Some(last) = instructions.last()
             && matches!(
                 last.flow_effect(),
@@ -64,6 +68,22 @@ where
     }
 
     results
+}
+
+/// Whether `block` has no successors and returns at once: it is empty, or
+/// its first instruction that does something is a return.
+fn returns_at_once<G>(cfg: &G, block: BlockId) -> bool
+where
+    G: CfgView,
+    G::Inst: FlowControl,
+{
+    cfg.outgoing(block).next().is_none()
+        && cfg
+            .instructions(block)
+            .iter()
+            .map(FlowControl::flow_effect)
+            .find(|effect| !matches!(effect, FlowEffect::Label | FlowEffect::Declaration))
+            .is_none_or(|effect| effect == FlowEffect::Return)
 }
 
 /// Detect call instructions explicitly marked as tail calls.
@@ -150,7 +170,9 @@ mod tests {
         cfg.block_mut(cfg.entry())
             .instructions_mut()
             .extend([ff("setup"), df_call("call", "callee", false)]);
-        cfg.block_mut(exit).instructions_mut().push(ff("ret"));
+        cfg.block_mut(exit)
+            .instructions_mut()
+            .push(df_with_effect(ff("ret"), FlowEffect::Return));
         cfg.add_edge(cfg.entry(), exit, EdgeKind::Fallthrough);
 
         assert_eq!(
@@ -257,5 +279,68 @@ mod tests {
         cfg.add_edge(cfg.entry(), handler, EdgeKind::ExceptionUnwind);
 
         assert!(detect_tail_calls(&cfg).is_empty());
+    }
+
+    fn effect(name: &'static str, effect: FlowEffect) -> DfInst {
+        df_with_effect(ff(name), effect)
+    }
+
+    /// A CFG whose entry ends in a call that falls into one exit block
+    /// holding `exit`.
+    fn call_into(exit: impl IntoIterator<Item = DfInst>) -> Cfg<DfInst> {
+        let mut cfg = Cfg::new();
+        let exit_block = cfg.new_block();
+        cfg.block_mut(cfg.entry())
+            .instructions_mut()
+            .push(df_call("call", "callee", false));
+        cfg.block_mut(exit_block).instructions_mut().extend(exit);
+        cfg.add_edge(cfg.entry(), exit_block, EdgeKind::Fallthrough);
+        cfg
+    }
+
+    #[test]
+    fn an_exit_block_that_returns_at_once_makes_the_call_a_tail_call() {
+        let ret = || effect("ret", FlowEffect::Return);
+        let cases = [
+            ("an empty exit is an implicit return", alloc::vec![]),
+            ("an explicit return", alloc::vec![ret()]),
+            (
+                "labels and declarations do no work",
+                alloc::vec![
+                    effect("label", FlowEffect::Label),
+                    effect("dcl", FlowEffect::Declaration),
+                    ret(),
+                ],
+            ),
+        ];
+        for (name, exit) in cases {
+            assert_eq!(detect_tail_calls(&call_into(exit)).len(), 1, "{name}");
+        }
+    }
+
+    #[test]
+    fn an_exit_block_that_does_work_or_does_not_return_is_not_a_tail_call() {
+        let ret = || effect("ret", FlowEffect::Return);
+        let cases = [
+            (
+                "the call's result is used before the return",
+                alloc::vec![ff("add"), ret()],
+            ),
+            (
+                "the exit raises instead of returning",
+                alloc::vec![effect("raise", FlowEffect::MayThrow)],
+            ),
+            (
+                "the exit terminates the invocation",
+                alloc::vec![effect("abort", FlowEffect::Terminate)],
+            ),
+            (
+                "only a conditional return",
+                alloc::vec![effect("retc", FlowEffect::ConditionalReturn)],
+            ),
+        ];
+        for (name, exit) in cases {
+            assert!(detect_tail_calls(&call_into(exit)).is_empty(), "{name}");
+        }
     }
 }
