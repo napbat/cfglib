@@ -103,7 +103,7 @@ pub struct ColorAssignment<N> {
     /// Assigned color for each node.
     pub assignment: BTreeMap<N, usize>,
     /// Number of colors used.
-    pub num_colors: usize,
+    pub color_count: usize,
 }
 
 /// Greedily color a directed graph as an undirected conflict relation.
@@ -127,7 +127,7 @@ pub fn color_graph<G: GraphView>(graph: &G) -> ColorAssignment<G::NodeId> {
     nodes.sort_by_key(|node| neighbors[node].len());
 
     let mut assignment = BTreeMap::new();
-    let mut num_colors = 0;
+    let mut color_count = 0;
     for node in nodes {
         let used_colors: BTreeSet<_> = neighbors[&node]
             .iter()
@@ -142,12 +142,12 @@ pub fn color_graph<G: GraphView>(graph: &G) -> ColorAssignment<G::NodeId> {
             }
         }
         assignment.insert(node, color);
-        num_colors = num_colors.max(color + 1);
+        color_count = color_count.max(color + 1);
     }
 
     ColorAssignment {
         assignment,
-        num_colors,
+        color_count,
     }
 }
 
@@ -168,7 +168,7 @@ mod tests {
         graph.add_edge(second, third, ());
 
         let result = color_graph(&graph);
-        assert_eq!(result.num_colors, 3);
+        assert_eq!(result.color_count, 3);
         assert_ne!(result.assignment[&first], result.assignment[&second]);
         assert_ne!(result.assignment[&first], result.assignment[&third]);
         assert_ne!(result.assignment[&second], result.assignment[&third]);
@@ -179,13 +179,13 @@ mod tests {
         let mut graph = Graph::<(), ()>::new();
         graph.add_node(());
         graph.add_node(());
-        assert_eq!(color_graph(&graph).num_colors, 1);
+        assert_eq!(color_graph(&graph).color_count, 1);
     }
 
     #[test]
     fn empty_graph_uses_no_colors() {
         let graph = Graph::<(), ()>::new();
-        assert_eq!(color_graph(&graph).num_colors, 0);
+        assert_eq!(color_graph(&graph).color_count, 0);
     }
 
     #[test]
