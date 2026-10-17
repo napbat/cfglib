@@ -2,13 +2,12 @@
 
 extern crate alloc;
 use alloc::string::String;
-use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
 use crate::edge::EdgeKind;
 use crate::graph::text::{
-    TextError, TextErrorKind, parse_index, significant_lines, split_tokens, unescape,
+    Slots, TextError, TextErrorKind, parse_index, significant_lines, split_tokens, unescape,
 };
 use crate::region::{Handler, Region, RegionId};
 
@@ -23,7 +22,8 @@ use super::{HandlerShape, parse_handler_body};
 /// message explaining why the line is not one.
 ///
 /// Block indices are reproduced exactly, holes included, so the graph round
-/// trips: writing the result again yields the input.
+/// trips: writing the result again yields the input. At most 2²⁰ holes are
+/// recreated; a document that leaves more is rejected rather than allocated.
 ///
 /// # Errors
 ///
@@ -49,8 +49,7 @@ pub fn parse_cfg_text<I>(
 ) -> Result<Cfg<I>, TextError> {
     let mut reader = Reader {
         cfg: Cfg::new(),
-        declared: vec![false],
-        next: 0,
+        slots: Slots::with_undeclared_slot(),
         entry: None,
         context: Context::Nothing,
         pending: None,
@@ -69,10 +68,8 @@ enum Context {
 
 struct Reader<I> {
     cfg: Cfg<I>,
-    /// Whether each block slot was declared, rather than filling a hole.
-    declared: Vec<bool>,
-    /// The lowest index a block header may still declare.
-    next: usize,
+    /// The block slots a header has declared, and the holes between them.
+    slots: Slots,
     entry: Option<usize>,
     context: Context,
     pending: Option<Region>,
@@ -141,24 +138,14 @@ impl<I> Reader<I> {
     }
 
     fn declare_block(&mut self, index: usize, label: String, line: usize) -> Result<(), TextError> {
-        if index < self.next {
-            return Err(TextError::new(
-                line,
-                TextErrorKind::NodeOrder {
-                    expected: self.next,
-                },
-            ));
-        }
-        while self.declared.len() <= index {
+        let before = self.slots.declare(index, line)?;
+        for _ in before..=index {
             self.cfg.new_block();
-            self.declared.push(false);
         }
         let block = BlockId::from_index(index);
         if !label.is_empty() {
             self.cfg.block_mut(block).set_label(label);
         }
-        self.declared[index] = true;
-        self.next = index + 1;
         self.context = Context::Block(block);
         Ok(())
     }
@@ -260,20 +247,16 @@ impl<I> Reader<I> {
     }
 
     fn live_block(&self, index: usize, line: usize) -> Result<BlockId, TextError> {
-        if self.declared.get(index).copied() == Some(true) {
-            return Ok(BlockId::from_index(index));
-        }
-        Err(TextError::new(line, TextErrorKind::UnknownNode { index }))
+        self.slots.check_live(index, line)?;
+        Ok(BlockId::from_index(index))
     }
 
     fn finish(mut self) -> Result<Cfg<I>, TextError> {
         let entry = self.entry.unwrap_or(0);
         let block = self.live_block(entry, 0)?;
         self.cfg.set_entry(block);
-        for index in 0..self.declared.len() {
-            if !self.declared[index] {
-                self.cfg.remove_block(BlockId::from_index(index));
-            }
+        for index in self.slots.holes() {
+            self.cfg.remove_block(BlockId::from_index(index));
         }
         Ok(self.cfg)
     }

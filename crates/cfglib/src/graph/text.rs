@@ -18,8 +18,10 @@
 //!
 //! Node lines declare dense indices in ascending order; a gap is a node the
 //! store has removed, and the parser reproduces the hole so indices keep
-//! their meaning. Edge lines follow the store's insertion order, which is
-//! the order the parser replays them in.
+//! their meaning. A document may leave at most 2²⁰ holes, because a hole
+//! costs a slot and not a line: a longer gap is
+//! [`TextErrorKind::TooManyHoles`], not an allocation. Edge lines follow the
+//! store's insertion order, which is the order the parser replays them in.
 //!
 //! A label is escaped so it cannot be mistaken for structure: `\\` is a
 //! backslash, `\n` a line break, and `\r` a carriage return. The first
@@ -90,6 +92,14 @@ pub enum TextErrorKind {
     Escape,
     /// An exception-region line was malformed.
     Region,
+    /// The document leaves more removed slots than a reader will recreate.
+    ///
+    /// Removed slots cost a slot and not a line, so one short index could
+    /// otherwise ask for billions of them.
+    TooManyHoles {
+        /// The most removed slots a reader recreates.
+        limit: usize,
+    },
     /// The caller's instruction parser rejected the line.
     Instruction(String),
 }
@@ -109,6 +119,9 @@ impl fmt::Display for TextError {
             TextErrorKind::EdgeKind => formatter.write_str("unknown edge kind"),
             TextErrorKind::Escape => formatter.write_str("malformed escape sequence"),
             TextErrorKind::Region => formatter.write_str("malformed region"),
+            TextErrorKind::TooManyHoles { limit } => {
+                write!(formatter, "more than {limit} removed slots")
+            }
             TextErrorKind::Instruction(message) => {
                 write!(formatter, "instruction: {message}")
             }
@@ -304,6 +317,94 @@ fn code_point(characters: &mut core::str::Chars<'_>) -> Option<char> {
         return None;
     }
     char::from_u32(value)
+}
+
+/// How many removed slots one text document may ask a reader to recreate.
+///
+/// A removed slot costs a slot and not a line, so without a bound a short
+/// document naming `n4294967294` would ask for four billion of them. The live
+/// entities are bounded by the text itself; this bounds the rest.
+pub(crate) const MAX_HOLES: usize = 1 << 20;
+
+/// The slots a text document has declared so far, and which are holes.
+///
+/// A line declares one slot by its dense index, in ascending order, and every
+/// slot below it that no line declared is a hole: an entity the writer's store
+/// had removed. Both readers keep this table, so the order rule and the bound
+/// on holes are stated once.
+pub(crate) struct Slots {
+    declared: Vec<bool>,
+    next: usize,
+    holes: usize,
+}
+
+impl Slots {
+    pub(crate) const fn new() -> Self {
+        Self {
+            declared: Vec::new(),
+            next: 0,
+            holes: 0,
+        }
+    }
+
+    /// A table that already holds one slot no line has declared, which is the
+    /// entry block a new CFG starts with.
+    pub(crate) fn with_undeclared_slot() -> Self {
+        Self {
+            declared: alloc::vec![false],
+            next: 0,
+            holes: 1,
+        }
+    }
+
+    /// Declare slot `index` and return how many slots the table held before,
+    /// so the caller can create every slot from there up to `index`.
+    pub(crate) fn declare(&mut self, index: usize, line: usize) -> Result<usize, TextError> {
+        if index < self.next {
+            return Err(TextError::new(
+                line,
+                TextErrorKind::NodeOrder {
+                    expected: self.next,
+                },
+            ));
+        }
+        let before = self.declared.len();
+        let gap = index.saturating_sub(before);
+        if self.holes.saturating_add(gap) > MAX_HOLES {
+            return Err(TextError::new(
+                line,
+                TextErrorKind::TooManyHoles { limit: MAX_HOLES },
+            ));
+        }
+        if index < before {
+            // The one slot a table can start with and a line later declares.
+            self.holes -= 1;
+            self.declared[index] = true;
+        } else {
+            self.declared.resize(index, false);
+            self.declared.push(true);
+            self.holes += gap;
+        }
+        self.next = index + 1;
+        Ok(before)
+    }
+
+    /// Whether a line declared slot `index`, which is what an edge or a region
+    /// may name.
+    pub(crate) fn check_live(&self, index: usize, line: usize) -> Result<(), TextError> {
+        if self.declared.get(index).copied() == Some(true) {
+            return Ok(());
+        }
+        Err(TextError::new(line, TextErrorKind::UnknownNode { index }))
+    }
+
+    /// The slots no line declared, in ascending order.
+    pub(crate) fn holes(&self) -> impl Iterator<Item = usize> + '_ {
+        self.declared
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &declared)| (!declared).then_some(index))
+    }
 }
 
 /// The dense index named by `token`, which must be `prefix` then digits.
