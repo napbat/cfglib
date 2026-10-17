@@ -84,14 +84,20 @@ impl<V: VariableId> PhiPlacements<V> {
     ///
     /// This is the iterated-dominance-frontier phase of SSA construction. Use
     /// [`SsaForm::compute`](super::SsaForm::compute) when renamed definitions
-    /// and operands are also required (and see its precondition: the entry
-    /// block must not be a branch target).
+    /// and operands are also required.
+    ///
+    /// # Panics
+    ///
+    /// As [`SsaForm::compute`](super::SsaForm::compute): when the entry block
+    /// is a branch target. A phi placed there has no departure point for the
+    /// value entering the function.
     #[must_use]
     pub fn compute<G>(cfg: &G, dom: &DominatorTree) -> Self
     where
         G: CfgView,
         G::Inst: InstrInfo<Variable = V>,
     {
+        super::assert_entry_is_not_a_branch_target(cfg);
         let mut scratch = SsaScratch::new();
         scratch.reset_placement(cfg.node_bound());
         place_phis(&mut scratch, cfg, dom);

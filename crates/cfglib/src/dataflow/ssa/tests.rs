@@ -517,6 +517,62 @@ fn an_instruction_wider_than_its_inline_storage_keeps_every_value_in_order() {
     assert_eq!(form.max_version(&1), 3);
 }
 
+/// The entry doubles as a loop header: it reads variable 0, and its latch
+/// redefines it and branches back.
+fn entry_loop() -> (Cfg<DfInst>, BlockId) {
+    let mut cfg = Cfg::<DfInst>::new();
+    let latch = cfg.new_block();
+    let exit = cfg.new_block();
+    let entry = cfg.entry();
+    cfg.add_edge(entry, latch, EdgeKind::ConditionalTrue);
+    cfg.add_edge(entry, exit, EdgeKind::ConditionalFalse);
+    cfg.add_edge(latch, entry, EdgeKind::Back);
+    cfg.block_mut(entry).push(df_use("read", 0));
+    cfg.block_mut(latch).push(df_def("redefine", 0));
+    (cfg, latch)
+}
+
+#[test]
+#[should_panic(expected = "branch target")]
+fn ssa_construction_rejects_an_entry_that_is_a_branch_target() {
+    let (cfg, _) = entry_loop();
+    drop(SsaForm::compute(&cfg, &DominatorTree::compute(&cfg)));
+}
+
+#[test]
+#[should_panic(expected = "branch target")]
+fn phi_placement_rejects_an_entry_that_is_a_branch_target() {
+    let (cfg, _) = entry_loop();
+    drop(PhiPlacements::compute(&cfg, &DominatorTree::compute(&cfg)));
+}
+
+#[test]
+fn a_new_entry_block_restores_the_value_entering_the_function() {
+    // The remedy the panic names: an empty block that falls through to the old
+    // entry. The old entry is then an ordinary loop header, and its phi
+    // merges the live-in value from the new entry with the latch's.
+    let (mut cfg, latch) = entry_loop();
+    let header = cfg.entry();
+    let new_entry = cfg.new_block();
+    cfg.add_edge(new_entry, header, EdgeKind::Fallthrough);
+    cfg.set_entry(new_entry);
+
+    let ssa = SsaForm::compute(&cfg, &DominatorTree::compute(&cfg));
+    let [phi] = ssa.block(header).phis.as_slice() else {
+        panic!("the header merges the live-in and the latch definition");
+    };
+    let defined = ssa.block(latch).instructions[0].defs()[0].clone();
+    assert_eq!(
+        phi.operands(),
+        [
+            (departure(latch, 1), defined),
+            (departure(new_entry, 0), SsaValue::live_in(0)),
+        ],
+        "operands follow the CFG's predecessor order"
+    );
+    assert_eq!(ssa.block(header).instructions[0].uses()[0], phi.result);
+}
+
 #[test]
 fn an_instruction_answers_the_value_it_reads_and_the_value_it_leaves() {
     // Variable 0 is read, then defined twice; variable 1 is only read, and

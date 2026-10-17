@@ -387,8 +387,7 @@ impl<L, V, F> MemorySSAEvent<L, V, F> {
 /// chains.
 ///
 /// Fence events remain ordered and queryable but do not define memory values:
-/// their cross-thread happens-before meaning is consumer-specific. As with
-/// [`SsaForm::compute`], the CFG entry must not be a branch target.
+/// their cross-thread happens-before meaning is consumer-specific.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemorySSA<L, V, F> {
     classes: Vec<MemoryLocationClass<L>>,
@@ -409,6 +408,12 @@ where
     F: Clone + Eq,
 {
     /// Computes location-aware memory SSA for `cfg` using `alias`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the CFG entry is a branch target, for the reason and with
+    /// the remedy given at [`SsaForm::compute`]: the state entering the
+    /// function would be dropped from the memory phi at the entry.
     #[must_use]
     pub fn compute<G, A>(cfg: &G, alias: &A) -> Self
     where
@@ -426,6 +431,10 @@ where
     /// buffers of the shadow CFG the analysis runs over. The answer is the
     /// same one, built by the same code — the allocating entry point is this
     /// function over a fresh [`MemorySsaScratch`].
+    ///
+    /// # Panics
+    ///
+    /// As [`compute`](Self::compute): when the entry block is a branch target.
     #[must_use]
     pub fn compute_in<G, A>(scratch: &mut MemorySsaScratch<L, V, F>, cfg: &G, alias: &A) -> Self
     where
@@ -433,6 +442,7 @@ where
         G::Inst: MemoryEventInfo<Location = L, Fence = F> + InstrInfo<Variable = V>,
         A: MemoryAlias<L> + ?Sized,
     {
+        crate::dataflow::ssa::assert_entry_is_not_a_branch_target(cfg);
         scratch.reset();
         scratch.trace.rebuild(cfg);
         let (classes, class_by_location) = build_location_classes(scratch, alias);

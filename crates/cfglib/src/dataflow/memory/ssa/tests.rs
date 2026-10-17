@@ -517,3 +517,18 @@ fn a_handler_reads_the_memory_state_before_each_throwing_instruction() {
         "no unwind observes the final store"
     );
 }
+
+#[test]
+#[should_panic(expected = "branch target")]
+fn memory_ssa_rejects_an_entry_that_is_a_branch_target() {
+    let mut cfg = Cfg::<Instruction>::new();
+    let latch = cfg.new_block();
+    cfg.add_edge(cfg.entry(), latch, EdgeKind::Fallthrough);
+    cfg.add_edge(latch, cfg.entry(), EdgeKind::Back);
+    cfg.block_mut(cfg.entry())
+        .push(Instruction::access(Location::A, MemoryAccessKind::Read));
+    cfg.block_mut(latch)
+        .push(Instruction::access(Location::A, MemoryAccessKind::Write));
+
+    drop(MemorySSA::compute(&cfg, &ExactMemoryAlias));
+}
