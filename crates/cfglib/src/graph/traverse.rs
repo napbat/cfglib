@@ -524,9 +524,11 @@ fn breadth_first_distances<G: GraphView, A: Adjacency>(
 /// not be a tree or a DAG; cycles terminate the searches like every other
 /// traversal here.
 ///
-/// Both endpoints are at distance 0 from themselves, so `b` is the answer
-/// whenever it is reachable from `a` at all, and `a == b` answers `a`.
-/// Returns `None` when no node is reachable from both.
+/// Both endpoints are at distance 0 from themselves, so each is itself a
+/// candidate: when `b` is reachable from `a`, `b` competes at a combined
+/// distance of the hops from `a` to `b`, and another shared node that is
+/// closer overall beats it. `a == b` answers `a`. Returns `None` when no node
+/// is reachable from both.
 ///
 /// # Determinism
 ///
