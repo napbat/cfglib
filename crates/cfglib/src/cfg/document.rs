@@ -67,7 +67,7 @@ impl<I, E> TryFrom<CfgDocument<I, E>> for Cfg<I, E> {
         if !cfg.contains_block(cfg.entry) {
             return Err(DocumentError::EntryNotLive(cfg.entry));
         }
-        if let Some(anchor) = cfg.anchors().find(|&anchor| !cfg.contains_block(anchor)) {
+        if let Some(anchor) = cfg.dangling_anchors().next() {
             return Err(DocumentError::AnchorNotLive(anchor));
         }
         Ok(cfg)
