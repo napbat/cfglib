@@ -118,8 +118,10 @@ impl EdgeKind {
     /// sequentially.
     ///
     /// [`ExceptionLeave`](Self::ExceptionLeave) is a normal transfer out
-    /// of a protected region, so it stays sequential. The same split decides
-    /// the [`ExceptionFlow`](crate::ExceptionFlow) payload an edge carries.
+    /// of a protected region, so it stays sequential. A frontend that
+    /// attaches an [`ExceptionFlow`](crate::ExceptionFlow) payload is
+    /// expected to make it [`Exceptional`](crate::ExceptionFlow::Exceptional)
+    /// for exactly these kinds; the graph does not check the pairing.
     #[must_use]
     pub const fn is_exceptional(self) -> bool {
         matches!(

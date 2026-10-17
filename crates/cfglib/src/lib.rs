@@ -120,7 +120,7 @@
 //!                            `Cfg` implements it, every instruction-level
 //!                            analysis reads it)
 //!
-//! FlowControl               (required only by CfgBuilder)
+//! FlowControl               (required by CfgBuilder and the tail-call detectors)
 //!   └─ JumpTargets          (optional — explicit goto/label wiring, Target)
 //!
 //! InstrInfo<Variable = V>   (optional — native IR variables for dataflow)
@@ -409,7 +409,7 @@ pub use transform::dce::{
     remove_dead_code_mapped,
 };
 pub use transform::layout::{RelaxError, relax_layout};
-pub use transform::linearize::{BlockOrder, Emitter, LinearInst, linearize};
+pub use transform::linearize::{BlockOrder, Emitter, LinearInst, LinearizeError, linearize};
 pub use transform::loops::{LoopRotation, find_loop_invariants, rotate_loop};
 pub use transform::pass::{
     Pass, PassChange, PassExecution, PassFailure, PassFn, PassId, PassPipeline, PassReport, pass_fn,
