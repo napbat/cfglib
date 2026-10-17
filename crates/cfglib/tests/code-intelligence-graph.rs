@@ -198,8 +198,8 @@ fn widened_algorithms_run_on_rooted_consumer_views() {
     assert_eq!(metrics.node_count, 5);
     assert_eq!(metrics.edge_count, 6);
     assert_eq!(metrics.reachable_node_count, 5);
-    // A single un-nested loop has depth 0 (depth counts enclosing loops).
-    assert_eq!(metrics.max_nesting_depth, 0);
+    // One loop that contains no other is depth 1; depth 0 means no loops.
+    assert_eq!(metrics.max_nesting_depth, 1);
 
     let dominators = DominatorTree::compute(&rooted);
     let loops = detect_loops(&rooted, &dominators);
