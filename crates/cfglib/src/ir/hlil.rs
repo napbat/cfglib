@@ -60,14 +60,28 @@
 //!
 //! # Depth
 //!
-//! The depth of an expression tree costs no call frames in any algorithm: a
-//! chain of operands as deep as generated code produces is walked, lowered,
-//! recovered, and printed on a stack of the algorithm's own. Statements nest
-//! as deep as the program text does, and [`verify`], [`lift`](fn@lift),
-//! [`lower`](fn@lower), [`recover_structure`], [`pseudocode`], and
-//! [`VariablePlacements`] recurse once per level of that nesting. The walks
-//! over statements, [`visit_statements`] and [`for_each_child_body`], do not
-//! recurse.
+//! No algorithm of this module spends a call frame on the depth of a
+//! function, neither on an expression tree nor on the nesting of statements.
+//! A chain of operands and a nest of statements as deep as generated code or
+//! untrusted input produces is lowered, recovered, verified, printed, and
+//! placed on a stack of the algorithm's own, and [`lift`](fn@lift) translates
+//! its control tree the same way, so memory bounds the depth and the stack of
+//! the thread does not. The walks over statements, [`visit_statements`] and
+//! [`for_each_child_body`], do not recurse either. The stack depth that
+//! structuring the flat function into that tree needs is the contract of
+//! [`ControlTree::compute`](crate::ControlTree::compute).
+//!
+//! [`recover_structure`] takes time linear in the size of the function, so a
+//! deep nest costs no more than a wide one. The one exception is a nest of
+//! regions that all hold the same variable: pairing an exit with its enter
+//! asks the dialect's [`RecoverDialect::releases`] once for each open region
+//! that holds the variable, so such a nest is quadratic in its depth.
+//!
+//! Two other costs also grow faster than the size of the function, and a deep
+//! nest exposes them. [`pseudocode`] indents every line by the level it sits
+//! at, so the text of a nest is quadratic in its depth. [`lower`](fn@lower)
+//! registers one region per `try`, and each holds every block under it, so a
+//! nest of `try` statements is quadratic in size.
 
 mod builder;
 mod correspondence;
