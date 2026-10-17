@@ -463,7 +463,12 @@ fn register_frontend_utilities(suite: &mut BenchmarkSuite<'_>) {
         "api_linearize",
         covers[linearize],
         || linearize(&cfg, BlockOrder::ReversePostorder, &ApiEmitter),
-        |instructions: &Vec<_>| assert!(instructions.len() >= 64 * 4)
+        |linearized: &Result<Vec<_>, _>| {
+            let instructions = linearized
+                .as_ref()
+                .expect("the fixture CFG has an instruction in every block that branches");
+            assert!(instructions.len() >= 64 * 4);
+        }
     );
 
     let jumps = jump_cfg();
