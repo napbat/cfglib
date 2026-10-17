@@ -5,7 +5,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
 use crate::cfg::Cfg;
-use crate::dataflow::liveness::Liveness;
+use crate::dataflow::liveness::{Liveness, step_backward};
 use crate::dataflow::{InstrInfo, VariableId};
 use crate::graph::store::Graph;
 use crate::graph::view::GraphView;
@@ -66,13 +66,7 @@ where
                     connect(&mut adjacency, definition, variable);
                 }
             }
-            for definition in &definitions {
-                active.remove(definition);
-            }
-            active.extend(instruction.uses().iter().cloned());
-            if instruction.may_unwind() {
-                active.extend(unwind.iter().cloned());
-            }
+            step_backward(&mut active, instruction, &unwind);
             connect_clique(&mut adjacency, &active);
         }
     }
@@ -154,8 +148,9 @@ pub fn color_graph<G: GraphView>(graph: &G) -> ColorAssignment<G::NodeId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dataflow::liveness::Liveness;
-    use crate::test_util::df_op;
+    use crate::edge::EdgeKind;
+    use crate::flow::FlowEffect;
+    use crate::test_util::{DfInst, df_def, df_op, df_use, df_with_effect};
 
     #[test]
     fn triangle_needs_three_colors() {
@@ -212,5 +207,34 @@ mod tests {
                 || graph.predecessors(left).any(|node| node == right)
         );
         assert_ne!(result.assignment[&left], result.assignment[&right]);
+    }
+
+    #[test]
+    fn a_value_only_a_handler_reads_interferes_with_what_a_throw_still_needs() {
+        // entry: a = ..; b = ..; throw(b). Nothing on the normal path reads
+        // `a`, but the handler does, so `a` must not share a slot with `b`.
+        let mut cfg: Cfg<DfInst> = Cfg::new();
+        let normal = cfg.new_block();
+        let handler = cfg.new_block();
+        cfg.block_mut(cfg.entry()).instructions_mut().extend([
+            df_def("a", 0),
+            df_def("b", 1),
+            df_with_effect(df_use("throw", 1), FlowEffect::MayThrow),
+        ]);
+        cfg.block_mut(handler).push(df_use("catch", 0));
+        cfg.add_edge(cfg.entry(), normal, EdgeKind::Fallthrough);
+        cfg.add_edge(cfg.entry(), handler, EdgeKind::ExceptionUnwind);
+        let live = Liveness::compute(&cfg);
+
+        let graph = interference_graph(&cfg, &live);
+        let coloring = color_graph(&graph);
+        let node = |variable: u16| {
+            graph
+                .node_ids()
+                .find(|&node| *graph.node(node) == variable)
+                .expect("both variables appear in the graph")
+        };
+
+        assert_ne!(coloring.assignment[&node(0)], coloring.assignment[&node(1)]);
     }
 }

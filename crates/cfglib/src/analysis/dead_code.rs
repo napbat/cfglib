@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
-use crate::dataflow::liveness::Liveness;
+use crate::dataflow::liveness::{Liveness, step_backward};
 use crate::dataflow::{EffectInfo, InstrInfo, ProgramPoint};
 use crate::graph::traverse::{TraversalDirection, reachable};
 
@@ -137,18 +137,13 @@ impl DeadCode {
                 let defs_live = inst.defs().iter().any(|def| live.contains(def));
 
                 if !has_side_effect && !inst.defs().is_empty() && !defs_live {
+                    // Unlike the liveness step, a dead instruction is skipped
+                    // whole: its uses keep nothing alive, so the chain that
+                    // feeds only it is found dead in the same pass.
                     dead.push(index);
                     continue;
                 }
-                for def in inst.defs() {
-                    live.remove(def);
-                }
-                for used in inst.uses() {
-                    live.insert(used.clone());
-                }
-                if inst.may_unwind() {
-                    live.extend(unwind.iter().cloned());
-                }
+                step_backward(&mut live, inst, &unwind);
             }
 
             instructions.extend(dead.into_iter().rev().map(|inst_idx| ProgramPoint {
