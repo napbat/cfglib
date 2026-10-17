@@ -24,7 +24,6 @@ use super::invariants::{handler_sets, reach, render};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::{EdgeId, EdgeKind};
-use crate::graph::dominator::DominatorTree;
 use crate::{
     BlockSpan, ControlBody, ControlNode, ControlNodeId, ControlTree, LiftReport, LoopKind,
 };
@@ -79,26 +78,6 @@ fn raise_target<I, E>(cfg: &Cfg<I, E>, seed: u64, block: BlockId) -> Option<Bloc
     mix.choose(2);
     let raises = !has_normal_successor || mix.choose(2) == 1;
     raises.then(|| targets[mix.choose(targets.len())])
-}
-
-/// Whether every reachable edge tagged [`EdgeKind::Back`] goes to a block
-/// that dominates its source, as dominance alone would find. A tag on any other
-/// edge asserts a loop the graph does not hold (a forward edge, an edge into the
-/// middle of a cycle), and the tree of such a graph has no graph to match.
-fn back_tags_agree_with_dominance<I, E>(cfg: &Cfg<I, E>) -> bool {
-    let dominators = DominatorTree::compute(cfg);
-    cfg.edge_ids().all(|edge| {
-        let edge = cfg.edge(edge);
-        edge.kind() != EdgeKind::Back
-            || !dominators.is_reachable(edge.source())
-            || dominators.dominates(edge.target(), edge.source())
-    })
-}
-
-/// Whether the tree of `cfg` promises the graph's behavior: the regions keep
-/// their contract and no Back tag asserts a loop that dominance does not.
-fn is_faithful<I, E>(cfg: &Cfg<I, E>) -> bool {
-    back_tags_agree_with_dominance(cfg) && regions_are_well_formed(cfg)
 }
 
 /// Whether the regions keep the contract of
@@ -648,7 +627,7 @@ pub(super) fn assert_runs_alike<I, E>(
 /// that owns it: the tree's `try` covers what the exception edges say it
 /// covers.
 pub(super) fn assert_raisers_are_covered<I, E>(cfg: &Cfg<I, E>, tree: &ControlTree, context: &str) {
-    if !is_faithful(cfg) {
+    if !regions_are_well_formed(cfg) {
         return;
     }
     let live = reach(cfg, Vec::new());
@@ -691,7 +670,7 @@ pub(super) fn assert_try_bodies_keep_to_their_region<I, E>(
     tree: &ControlTree,
     context: &str,
 ) {
-    if !is_faithful(cfg) {
+    if !regions_are_well_formed(cfg) {
         return;
     }
     for id in tree.preorder() {
@@ -796,7 +775,7 @@ pub(super) fn assert_streams_alike<I, E>(
     context: &str,
     streams: u64,
 ) {
-    if !is_faithful(cfg) {
+    if !regions_are_well_formed(cfg) {
         return;
     }
     for stream in 1..=streams {

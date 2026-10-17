@@ -186,9 +186,11 @@ impl Tables {
     }
 
     /// Whether control can never reach the end of `node`: every path through
-    /// it ends in a `break`, `continue`, `goto`, or return.
+    /// it ends in a `break`, `continue`, or return.
     ///
-    /// The answer is conservative. A loop, which may run on or be left through
+    /// The answer is conservative. A `goto` does not count: its label may sit
+    /// later in the same construct (a pad's code that another arm of the same
+    /// handler jumps to), and control then runs on to the end of it. A loop, which may run on or be left through
     /// a `break` of its own, and a node with a body that is empty or ends in
     /// plain code, can complete. So can a try: a handler body may end in dead
     /// code of its extent after the flow the handler really has, so only the
@@ -200,10 +202,9 @@ impl Tables {
                 .is_some_and(|&last| self.never_completes(*self.node(last)))
         };
         match node {
-            ControlNode::Break { .. }
-            | ControlNode::Continue { .. }
-            | ControlNode::Goto { .. }
-            | ControlNode::Return(_) => true,
+            ControlNode::Break { .. } | ControlNode::Continue { .. } | ControlNode::Return(_) => {
+                true
+            }
             ControlNode::Sequence(body)
             | ControlNode::Label { body, .. }
             | ControlNode::Guarded { body, .. } => body_never_completes(body),
@@ -223,9 +224,10 @@ impl Tables {
                         .iter()
                         .all(|case| body_never_completes(case.body))
             }
-            ControlNode::Block(_) | ControlNode::Loop { .. } | ControlNode::TryCatch { .. } => {
-                false
-            }
+            ControlNode::Block(_)
+            | ControlNode::Goto { .. }
+            | ControlNode::Loop { .. }
+            | ControlNode::TryCatch { .. } => false,
         }
     }
 

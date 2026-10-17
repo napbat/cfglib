@@ -63,8 +63,8 @@ impl<I, E> Structurer<'_, I, E> {
     ///
     /// A merge that was already emitted is a transfer (a `continue`, a
     /// `break`, or a goto), unless no path reaches the end of `node`: when
-    /// every arm already ends in a transfer, one more after the construct
-    /// would be dead code.
+    /// every arm already ends in a `break`, `continue`, or return, one more
+    /// after the construct would be dead code.
     pub(super) fn resume_after(
         &self,
         node: &ControlNode,

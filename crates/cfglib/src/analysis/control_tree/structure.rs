@@ -314,18 +314,9 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             emptied[block.index()] = true;
         }
         let dom = DominatorTree::compute(cfg);
-        // A latch the entry cannot reach never runs, so it is dead code that
-        // feeds a live header, not a back edge of the live program: a block
-        // that returns would otherwise sit in an endless loop. A dead loop (a
-        // header the entry cannot reach either) keeps its latches.
         let loops: BTreeMap<BlockId, NaturalLoop> = detect_loops_tagged(cfg, &dom)
             .into_iter()
-            .filter_map(|mut natural| {
-                if dom.is_reachable(natural.header) {
-                    natural.latches.retain(|&latch| dom.is_reachable(latch));
-                }
-                (!natural.latches.is_empty()).then_some((natural.header, natural))
-            })
+            .map(|natural| (natural.header, natural))
             .collect();
         let back_edges = loops
             .values()
