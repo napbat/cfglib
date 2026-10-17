@@ -156,7 +156,7 @@ impl ControlTree {
     ///
     /// A branch or switch rejoins at the immediate post-dominator of its
     /// block, read from a [`PostDominatorTree`]. That tree joins every exit
-    /// to a virtual exit, and [`PostNode::Exit`] means the block has no merge
+    /// to a virtual exit, and [`PostNode::Exit`](crate::PostNode::Exit) means the block has no merge
     /// point: its arms never rejoin, so each runs to its own end.
     ///
     /// A region that no path leaves, such as a server loop or a spin on a
@@ -248,8 +248,9 @@ impl ControlTree {
     ///
     /// # Panics
     ///
-    /// Panics when a block of `empty` is not a block of `cfg`, and under the
-    /// conditions of [`compute_with_report`](Self::compute_with_report).
+    /// Panics when a block of `empty` lies beyond `cfg`'s
+    /// [`block_bound`](Cfg::block_bound), and under the conditions of
+    /// [`compute_with_report`](Self::compute_with_report).
     ///
     /// # Examples
     ///

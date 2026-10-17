@@ -26,6 +26,7 @@ mod dead_handlers;
 mod exhaustive;
 mod exit_free;
 mod invariants;
+mod non_compact;
 mod predicated;
 mod regions;
 mod semantics;
