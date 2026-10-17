@@ -6,7 +6,7 @@
 //! walks have no such graph. An import chase probes a live resolver and mints
 //! the next node from the answer; a re-export chase walks a `(file, name)`
 //! space whose edges are barrel files it has not read yet; an emission walk
-//! interleaves children by source offset as it computes them. Materialising
+//! interleaves children by source offset as it computes them. Materializing
 //! those spaces to walk them is exactly backwards — the walk is what decides
 //! which nodes exist.
 //!

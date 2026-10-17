@@ -1,7 +1,7 @@
 //! Horn-clause (AND-OR) derivability over dense fact identities.
 //!
 //! [`HornClauses`] answers *which facts are derivable* from rules of the form
-//! `head <- body1 & body2 & ...`. It is the conjunctive generalisation of
+//! `head <- body1 & body2 & ...`. It is the conjunctive generalization of
 //! graph reachability: an ordinary edge has one source, a clause has a **set**
 //! of sources that must **all** hold. Several closures in code intelligence
 //! have exactly that shape — grammar nullability (a symbol is nullable when

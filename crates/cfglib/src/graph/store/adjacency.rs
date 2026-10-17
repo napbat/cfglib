@@ -336,14 +336,14 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         }
     }
 
-    /// Start a walk over `node`'s live edges along `direction`, in insertion
+    /// Start a walk over `node`'s live edges along `direction`, in adjacency
     /// order.
     ///
-    /// Forced inline, with [`cursor`](Self::cursor) and the iterator layers
-    /// over it, because the hint is not enough here. A walk is built from
-    /// 4- and 8-byte stores, and any copy of it between frames (a returned
-    /// value moved into the consumer's loop variable) reads it back in 16-byte
-    /// pieces. A load that spans several narrower stores cannot be forwarded,
+    /// Forced inline, with [`cursor`](Self::cursor); the stepping layers over
+    /// the walk are plain `#[inline]`. The hint is not enough here. A walk is
+    /// built from 4- and 8-byte stores, and any copy of it between frames (a
+    /// returned value moved into the consumer's loop variable) reads it back
+    /// in 16-byte pieces. A load that spans several narrower stores cannot be forwarded,
     /// so every scan waits for its own start to retire: whether the optimizer
     /// elided the copy depended on the surrounding code, and where it did not
     /// a scan cost 15% to 50% more cycles at the same instruction count.

@@ -14,7 +14,7 @@ use super::traverse::{Incoming, Outgoing, TraversalDirection, by_axis};
 use super::view::DenseId;
 
 /// An adjacency axis over edges: which edges a node exposes, and which end of
-/// an exposed edge is the neighbour.
+/// an exposed edge is the neighbor.
 ///
 /// The edge-aware counterpart of [`Adjacency`](super::traverse::Adjacency),
 /// implemented on the same zero-sized axes so one core serves both

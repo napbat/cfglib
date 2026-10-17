@@ -1,4 +1,4 @@
-//! Exception handling (EH) modelling.
+//! Exception handling (EH) modeling.
 //!
 //! Provides first-class support for EH control flow — landing pads, cleanup
 //! blocks, handler/unwind/leave/resume/continue edges, and stable links back to
