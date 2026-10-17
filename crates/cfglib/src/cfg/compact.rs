@@ -16,12 +16,16 @@ use super::Cfg;
 pub type CfgRenumbering = Renumbering<BlockTag, EdgeTag>;
 
 impl<I, E> Cfg<I, E> {
-    /// Whether every block and edge slot holds a live entity.
+    /// Whether [`compact`](Self::compact) would renumber nothing: no block or
+    /// edge slot has been removed, so every slot holds a live entity.
     ///
-    /// True exactly when [`compact`](Self::compact) would change nothing.
+    /// A CFG that was only ever added to is compact, however it was built.
+    /// Unlike [`Graph::is_compact`](crate::Graph::is_compact), which asks
+    /// whether the store is a pure compressed base, this asks what a consumer
+    /// holding identities needs to know: whether they stay valid.
     #[must_use]
     pub fn is_compact(&self) -> bool {
-        self.graph.is_compact()
+        self.block_count() == self.block_bound() && self.edge_count() == self.edge_bound()
     }
 
     /// Renumber the surviving blocks and edges densely and report the change.
