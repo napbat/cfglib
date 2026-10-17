@@ -224,6 +224,46 @@ fn assert_arena_is_a_tree(tree: &ControlTree, context: &str) {
     assert_eq!(balance.entered, preorder, "walk order in {context}");
 }
 
+/// The pseudocode names the instructions in the order the walk visits them,
+/// except that a branch or dispatch prints as its keyword in place of its last
+/// instruction. A guarded region also names its witness once more, so a
+/// predicated tree is not compared.
+fn assert_display_follows_walk<I, E>(cfg: &Cfg<I, E>, tree: &ControlTree, context: &str) {
+    if tree
+        .preorder()
+        .any(|id| matches!(tree.node(id), ControlNode::Guarded { .. }))
+    {
+        return;
+    }
+    let mut dropped = Vec::new();
+    for id in tree.preorder() {
+        if let ControlNode::IfThenElse { condition, .. } | ControlNode::Switch { condition, .. } =
+            *tree.node(id)
+            && !condition.is_empty()
+        {
+            dropped.push((condition.block(), condition.end() - 1));
+        }
+    }
+    let mut walked = Vec::new();
+    tree.for_each_instruction(cfg, |point, _| {
+        if !dropped.contains(&(point.block, point.inst_idx)) {
+            walked.push((point.block, point.inst_idx));
+        }
+    });
+    let mut printed = Vec::new();
+    tree.to_pseudocode(|sink, point| {
+        printed.push((point.block, point.inst_idx));
+        sink.write_str("i")
+    })
+    .expect("printing to a string cannot fail");
+    assert_eq!(
+        printed,
+        walked,
+        "the pseudocode and the walk disagree in {context}\n{}",
+        render(tree)
+    );
+}
+
 /// Check the invariants of one graph's tree and report.
 ///
 /// - The arena is a tree (see [`assert_arena_is_a_tree`]).
@@ -238,6 +278,7 @@ fn assert_arena_is_a_tree(tree: &ControlTree, context: &str) {
 /// - The tree executes the instructions in the order the graph does.
 pub(super) fn check<I, E>(cfg: &Cfg<I, E>, tree: &ControlTree, report: &LiftReport, context: &str) {
     assert_arena_is_a_tree(tree, context);
+    assert_display_follows_walk(cfg, tree, context);
 
     let instructions = |blocks: Vec<BlockId>| -> Vec<(BlockId, usize)> {
         blocks
