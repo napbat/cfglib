@@ -1,12 +1,14 @@
 signature (v0) returns 1
 v0 source
 v1 temporary
+v2 temporary
 bb0
   -> bb1 Entry
 bb1
-  enter@acquire(v0)
+  v1 = copy(v0)
+  enter@acquire(v1)
   call(v0) !
-  v1 = const 1
-  v0 = add(v0, v1)
-  exit@acquire(v0)
+  v2 = const 1
+  v0 = add(v0, v2)
+  exit@acquire(v1)
   return(v0)

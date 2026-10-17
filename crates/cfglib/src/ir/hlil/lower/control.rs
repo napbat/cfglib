@@ -604,8 +604,29 @@ where
         operands: &[S::Expr],
         body: &'a [S::Stmt],
     ) -> Result<(), LowerError<B::Error>> {
-        let uses = self.flatten_all(operands)?;
         let origin = Entity::Statement(stmt);
+        // The operands are evaluated once, on entry, and the exit releases
+        // what they held then. A tree flattens into temporaries that nothing
+        // else writes, but a bare variable read would alias a variable that
+        // the body may reassign, so it is copied first.
+        let mut uses = Vec::with_capacity(operands.len());
+        for &operand in operands {
+            self.flatten_onto(operand, &mut uses)?;
+            if matches!(self.source.expr(operand), ExprShape::Variable(_)) {
+                let read = uses.pop().expect("flattening leaves the operand's value");
+                let held = Occurrence {
+                    variable: self.temporary(&read.ty),
+                    ty: read.ty.clone(),
+                };
+                self.emit(
+                    Lowered::Copy,
+                    &[read],
+                    core::slice::from_ref(&held),
+                    Entity::Expression(operand),
+                )?;
+                uses.push(held);
+            }
+        }
         self.emit(Lowered::RegionEnter(op), &uses, &[], origin)?;
         self.lower_body(body)?;
         self.emit(Lowered::RegionExit(op), &uses, &[], origin)

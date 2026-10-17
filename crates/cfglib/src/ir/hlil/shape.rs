@@ -208,7 +208,10 @@ pub enum StmtShape<'a, D: Dialect, S, E> {
     Region {
         /// The consumer-defined region operation.
         op: &'a D::Op,
-        /// The operand expressions, such as the monitor or the resource.
+        /// The operand expressions, such as the monitor or the resource. They
+        /// are evaluated once, on entry, and the end of the region releases
+        /// the values they had then, even when the body reassigns a variable
+        /// that an operand reads.
         operands: &'a [E],
         /// The wrapped statements.
         body: &'a [S],

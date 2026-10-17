@@ -34,6 +34,7 @@ over_toys!(
     every_case_holds_the_lowering_invariants,
     a_while_loop_declares_and_relates_everything,
     a_do_while_is_entered_where_its_body_begins,
+    a_region_exits_the_object_it_entered,
     a_try_registers_its_region_and_unwind_edges,
     nested_trys_unwind_to_every_enclosing_handler,
     a_filter_funclet_stays_out_of_the_handler_body,
@@ -258,6 +259,36 @@ bb4
     // An operation that evaluates an expression carries the expression.
     assert!(matches!(origin(1, 0), Some(Entity::Expression(_))));
     assert!(matches!(origin(2, 0), Some(Entity::Expression(_))));
+}
+
+/// `acquire(v0) { call(v0); v0 = v0 + 1; }`: the exit releases the object
+/// that the enter acquired, so the variable that holds it is not written
+/// between the two.
+fn a_region_exits_the_object_it_entered<D: FlatKit>() {
+    let (_, lowering) = case::<D>("acquire-region");
+    let flat = &lowering.function;
+    let instructions: Vec<_> = flat
+        .cfg
+        .block_ids()
+        .flat_map(|block| flat.cfg.block(block).instructions().iter())
+        .collect();
+    let position = |wanted: fn(&ToyForm<D>) -> bool| {
+        instructions
+            .iter()
+            .position(|instruction| wanted(&instruction.form))
+            .expect("the region has both halves")
+    };
+    let enter = position(|form| matches!(form, ToyForm::RegionEnter(_)));
+    let exit = position(|form| matches!(form, ToyForm::RegionExit(_)));
+    assert_eq!(instructions[enter].uses, instructions[exit].uses);
+    for instruction in &instructions[enter + 1..exit] {
+        for entered in &instructions[enter].uses {
+            assert!(
+                !instruction.defs.contains(entered),
+                "the body writes {entered:?}, which the exit releases"
+            );
+        }
+    }
 }
 
 fn a_do_while_is_entered_where_its_body_begins<D: FlatKit>() {

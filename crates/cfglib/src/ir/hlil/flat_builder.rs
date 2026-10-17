@@ -70,7 +70,9 @@ pub enum Lowered<'a, H: Dialect> {
     /// A builder with no caught-exception form returns an error.
     CaughtException,
     /// The enter half of one dialect region statement, over the uses that
-    /// the statement's operands flatten to. No definitions.
+    /// the statement's operands flatten to. Lowering copies an operand that
+    /// is a bare variable read into a temporary first, so no use is a
+    /// variable that the region's body writes. No definitions.
     ///
     /// A builder with no enter/exit protocol for the operation returns an
     /// error.
