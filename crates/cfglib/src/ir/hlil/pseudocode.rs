@@ -7,12 +7,13 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::{self, Write as _};
 use core::marker::PhantomData;
+use core::slice;
 
 use crate::display::IndentedWriter;
 
 use super::dialect::Pseudocode;
 use super::name::Name;
-use super::shape::{ExprShape, HandlerKind, StmtShape};
+use super::shape::{ExprShape, Handler, HandlerKind, StmtShape};
 use super::view::FunctionView;
 
 /// Returns the body of `function` as indented pseudocode.
@@ -68,6 +69,39 @@ struct Printer<'a, H: Pseudocode, F: FunctionView<H>> {
 /// The operand lists of the operations being written, innermost last, each
 /// with the position of its next operand.
 type OpenOperands<'a, E> = Vec<(&'a [E], usize)>;
+
+/// What the printer has still to write: the rest of a body, or the text that
+/// follows a child body or sits between two.
+enum Pending<'a, H: Pseudocode, F: FunctionView<H>> {
+    /// The rest of a body.
+    Body(slice::Iter<'a, F::Stmt>),
+    /// `}` and the end of the line.
+    Close,
+    /// `} else {`
+    Otherwise,
+    /// `} while (condition);`
+    DoWhileEnd(F::Expr),
+    /// The line of a `for` between its two clauses.
+    ForCondition(Option<F::Expr>),
+    /// The end of the clauses of a `for`, and the opening of its body.
+    ForBody,
+    /// The header of a `case` arm.
+    Case(&'a [H::Constant]),
+    /// The header of the `default` arm.
+    Default,
+    /// A handler of a `try`.
+    Handler(Handler<'a, H, F::Stmt, F::Var>),
+    /// `} finally {`
+    Finally,
+}
+
+/// Schedules `steps`, given in the order they run: the first is on top of
+/// `pending`, so it runs next.
+fn schedule<T>(pending: &mut Vec<T>, steps: impl IntoIterator<Item = T>) {
+    let first = pending.len();
+    pending.extend(steps);
+    pending[first..].reverse();
+}
 
 impl<'a, H: Pseudocode, F: FunctionView<H>> Printer<'a, H, F> {
     fn write_expression(&self, sink: &mut dyn fmt::Write, expr: F::Expr) -> fmt::Result {
@@ -127,9 +161,73 @@ impl<'a, H: Pseudocode, F: FunctionView<H>> Printer<'a, H, F> {
         Ok(())
     }
 
-    fn write_body(&self, printer: &mut IndentedWriter<'_>, body: &[F::Stmt]) -> fmt::Result {
-        for &statement in body {
-            self.write_statement(printer, statement)?;
+    /// Writes `body` and everything nested in it.
+    ///
+    /// The depth of the nesting costs no call frames: what a statement has
+    /// still to write after its bodies, or between them, waits in `pending`
+    /// instead.
+    fn write_body(&self, printer: &mut IndentedWriter<'_>, body: &'a [F::Stmt]) -> fmt::Result {
+        let mut pending = vec![Pending::Body(body.iter())];
+        while let Some(step) = pending.pop() {
+            match step {
+                Pending::Body(mut statements) => {
+                    if let Some(&statement) = statements.next() {
+                        pending.push(Pending::Body(statements));
+                        self.write_statement(printer, statement, &mut pending)?;
+                    }
+                }
+                Pending::Close => printer.close()?,
+                Pending::Otherwise => {
+                    printer.close_inline()?;
+                    printer.write_str(" else")?;
+                    printer.open()?;
+                }
+                Pending::DoWhileEnd(condition) => {
+                    printer.close_inline()?;
+                    printer.write_str(" while (")?;
+                    self.write_expression(printer, condition)?;
+                    printer.write_str(");")?;
+                    printer.end_line()?;
+                }
+                Pending::ForCondition(condition) => {
+                    printer.indent()?;
+                    printer.write_str("; ")?;
+                    if let Some(condition) = condition {
+                        self.write_expression(printer, condition)?;
+                    }
+                    printer.write_str(" ;")?;
+                    printer.end_line()?;
+                }
+                Pending::ForBody => {
+                    printer.unnest();
+                    printer.indent()?;
+                    printer.write_str(")")?;
+                    printer.open()?;
+                }
+                Pending::Case(values) => {
+                    printer.indent()?;
+                    printer.write_str("case ")?;
+                    for (position, value) in values.iter().enumerate() {
+                        if position != 0 {
+                            printer.write_str(", ")?;
+                        }
+                        write!(printer, "{}", ConstantDisplay::<H>(value))?;
+                    }
+                    printer.write_str(":")?;
+                    printer.open()?;
+                }
+                Pending::Default => {
+                    printer.indent()?;
+                    printer.write_str("default:")?;
+                    printer.open()?;
+                }
+                Pending::Handler(handler) => Self::write_handler(printer, &handler, &mut pending)?,
+                Pending::Finally => {
+                    printer.close_inline()?;
+                    printer.write_str(" finally")?;
+                    printer.open()?;
+                }
+            }
         }
         Ok(())
     }
@@ -148,7 +246,132 @@ impl<'a, H: Pseudocode, F: FunctionView<H>> Printer<'a, H, F> {
         printer.open()
     }
 
-    fn write_statement(&self, printer: &mut IndentedWriter<'_>, stmt: F::Stmt) -> fmt::Result {
+    /// Opens the block of a statement with no header but `text`, and
+    /// schedules its body and the end of the block.
+    fn open_body(
+        printer: &mut IndentedWriter<'_>,
+        text: &str,
+        body: &'a [F::Stmt],
+        pending: &mut Vec<Pending<'a, H, F>>,
+    ) -> fmt::Result {
+        printer.write_str(text)?;
+        printer.open()?;
+        schedule(pending, [Pending::Body(body.iter()), Pending::Close]);
+        Ok(())
+    }
+
+    fn write_if(
+        &self,
+        printer: &mut IndentedWriter<'_>,
+        condition: F::Expr,
+        then_body: &'a [F::Stmt],
+        else_body: &'a [F::Stmt],
+        pending: &mut Vec<Pending<'a, H, F>>,
+    ) -> fmt::Result {
+        self.open_conditional(printer, "if", condition)?;
+        let otherwise = (!else_body.is_empty())
+            .then(|| [Pending::Otherwise, Pending::Body(else_body.iter())])
+            .into_iter()
+            .flatten();
+        schedule(
+            pending,
+            [Pending::Body(then_body.iter())]
+                .into_iter()
+                .chain(otherwise)
+                .chain([Pending::Close]),
+        );
+        Ok(())
+    }
+
+    fn write_for(
+        printer: &mut IndentedWriter<'_>,
+        initializer: &'a [F::Stmt],
+        condition: Option<F::Expr>,
+        update: &'a [F::Stmt],
+        body: &'a [F::Stmt],
+        pending: &mut Vec<Pending<'a, H, F>>,
+    ) -> fmt::Result {
+        printer.write_str("for (")?;
+        printer.end_line()?;
+        printer.nest();
+        schedule(
+            pending,
+            [
+                Pending::Body(initializer.iter()),
+                Pending::ForCondition(condition),
+                Pending::Body(update.iter()),
+                Pending::ForBody,
+                Pending::Body(body.iter()),
+                Pending::Close,
+            ],
+        );
+        Ok(())
+    }
+
+    fn write_switch(
+        &self,
+        printer: &mut IndentedWriter<'_>,
+        stmt: F::Stmt,
+        scrutinee: F::Expr,
+        default_body: &'a [F::Stmt],
+        pending: &mut Vec<Pending<'a, H, F>>,
+    ) -> fmt::Result {
+        self.open_conditional(printer, "switch", scrutinee)?;
+        let arms = self.function.switch_arms(stmt).flat_map(|arm| {
+            [
+                Pending::Case(arm.values),
+                Pending::Body(arm.body.iter()),
+                Pending::Close,
+            ]
+        });
+        let default = (!default_body.is_empty())
+            .then(|| {
+                [
+                    Pending::Default,
+                    Pending::Body(default_body.iter()),
+                    Pending::Close,
+                ]
+            })
+            .into_iter()
+            .flatten();
+        schedule(pending, arms.chain(default).chain([Pending::Close]));
+        Ok(())
+    }
+
+    fn write_try(
+        &self,
+        printer: &mut IndentedWriter<'_>,
+        stmt: F::Stmt,
+        body: &'a [F::Stmt],
+        finally_body: &'a [F::Stmt],
+        pending: &mut Vec<Pending<'a, H, F>>,
+    ) -> fmt::Result {
+        printer.write_str("try")?;
+        printer.open()?;
+        let handlers = self.function.handlers(stmt).map(Pending::Handler);
+        let finally = (!finally_body.is_empty())
+            .then(|| [Pending::Finally, Pending::Body(finally_body.iter())])
+            .into_iter()
+            .flatten();
+        schedule(
+            pending,
+            [Pending::Body(body.iter())]
+                .into_iter()
+                .chain(handlers)
+                .chain(finally)
+                .chain([Pending::Close]),
+        );
+        Ok(())
+    }
+
+    /// Writes the first line of `stmt`, up to what its child bodies write,
+    /// and schedules the rest.
+    fn write_statement(
+        &self,
+        printer: &mut IndentedWriter<'_>,
+        stmt: F::Stmt,
+        pending: &mut Vec<Pending<'a, H, F>>,
+    ) -> fmt::Result {
         printer.indent()?;
         match self.function.stmt(stmt) {
             StmtShape::Expression(expression) => {
@@ -167,29 +390,32 @@ impl<'a, H: Pseudocode, F: FunctionView<H>> Printer<'a, H, F> {
                 condition,
                 then_body,
                 else_body,
-            } => self.write_if(printer, condition, then_body, else_body),
+            } => self.write_if(printer, condition, then_body, else_body, pending),
             StmtShape::While { condition, body } => {
                 self.open_conditional(printer, "while", condition)?;
-                self.write_body(printer, body)?;
-                printer.close()
+                schedule(pending, [Pending::Body(body.iter()), Pending::Close]);
+                Ok(())
             }
-            StmtShape::DoWhile { body, condition } => self.write_do_while(printer, body, condition),
-            StmtShape::Loop { body } => {
-                printer.write_str("loop")?;
+            StmtShape::DoWhile { body, condition } => {
+                printer.write_str("do")?;
                 printer.open()?;
-                self.write_body(printer, body)?;
-                printer.close()
+                schedule(
+                    pending,
+                    [Pending::Body(body.iter()), Pending::DoWhileEnd(condition)],
+                );
+                Ok(())
             }
+            StmtShape::Loop { body } => Self::open_body(printer, "loop", body, pending),
             StmtShape::For {
                 initializer,
                 condition,
                 update,
                 body,
-            } => self.write_for(printer, initializer, condition, update, body),
+            } => Self::write_for(printer, initializer, condition, update, body, pending),
             StmtShape::Switch {
                 scrutinee,
                 default_body,
-            } => self.write_switch(printer, stmt, scrutinee, default_body),
+            } => self.write_switch(printer, stmt, scrutinee, default_body, pending),
             StmtShape::Break { label } => write_transfer(printer, "break", label),
             StmtShape::Continue { label } => write_transfer(printer, "continue", label),
             StmtShape::Return { values } => {
@@ -203,10 +429,7 @@ impl<'a, H: Pseudocode, F: FunctionView<H>> Printer<'a, H, F> {
             }
             StmtShape::Labeled { label, body } => {
                 printer.write_str(label)?;
-                printer.write_str(":")?;
-                printer.open()?;
-                self.write_body(printer, body)?;
-                printer.close()
+                Self::open_body(printer, ":", body, pending)
             }
             StmtShape::Goto { label } => {
                 printer.write_str("goto ")?;
@@ -215,158 +438,59 @@ impl<'a, H: Pseudocode, F: FunctionView<H>> Printer<'a, H, F> {
                 printer.end_line()
             }
             StmtShape::Try { body, finally_body } => {
-                self.write_try(printer, stmt, body, finally_body)
+                self.write_try(printer, stmt, body, finally_body, pending)
             }
             StmtShape::Region { op, operands, body } => {
                 printer.write_str("@")?;
                 printer.write_str(H::mnemonic(op))?;
                 self.write_operands(printer, operands)?;
                 printer.open()?;
-                self.write_body(printer, body)?;
-                printer.close()
+                schedule(pending, [Pending::Body(body.iter()), Pending::Close]);
+                Ok(())
             }
         }
     }
 
-    fn write_if(
-        &self,
+    /// Writes the header of `handler` and schedules its bodies.
+    fn write_handler(
         printer: &mut IndentedWriter<'_>,
-        condition: F::Expr,
-        then_body: &[F::Stmt],
-        else_body: &[F::Stmt],
+        handler: &Handler<'a, H, F::Stmt, F::Var>,
+        pending: &mut Vec<Pending<'a, H, F>>,
     ) -> fmt::Result {
-        self.open_conditional(printer, "if", condition)?;
-        self.write_body(printer, then_body)?;
-        if !else_body.is_empty() {
-            printer.close_inline()?;
-            printer.write_str(" else")?;
-            printer.open()?;
-            self.write_body(printer, else_body)?;
-        }
-        printer.close()
-    }
-
-    fn write_do_while(
-        &self,
-        printer: &mut IndentedWriter<'_>,
-        body: &[F::Stmt],
-        condition: F::Expr,
-    ) -> fmt::Result {
-        printer.write_str("do")?;
-        printer.open()?;
-        self.write_body(printer, body)?;
         printer.close_inline()?;
-        printer.write_str(" while (")?;
-        self.write_expression(printer, condition)?;
-        printer.write_str(");")?;
-        printer.end_line()
-    }
-
-    fn write_for(
-        &self,
-        printer: &mut IndentedWriter<'_>,
-        initializer: &[F::Stmt],
-        condition: Option<F::Expr>,
-        update: &[F::Stmt],
-        body: &[F::Stmt],
-    ) -> fmt::Result {
-        printer.write_str("for (")?;
-        printer.end_line()?;
-        printer.nested(|printer| {
-            self.write_body(printer, initializer)?;
-            printer.indent()?;
-            printer.write_str("; ")?;
-            if let Some(condition) = condition {
-                self.write_expression(printer, condition)?;
-            }
-            printer.write_str(" ;")?;
-            printer.end_line()?;
-            self.write_body(printer, update)
+        printer.write_str(match handler.kind {
+            HandlerKind::Catch => " catch (",
+            HandlerKind::CatchAll => " catch (...",
+            HandlerKind::Fault => " fault (",
+            HandlerKind::Filter { .. } => " filter (",
         })?;
-        printer.indent()?;
+        for (position, caught) in handler.caught_types.iter().enumerate() {
+            if position != 0 {
+                printer.write_str(" | ")?;
+            }
+            write!(printer, "{caught:?}")?;
+        }
         printer.write_str(")")?;
+        if let Some(binding) = handler.binding {
+            write!(printer, " {}", Name::variable(binding))?;
+        }
         printer.open()?;
-        self.write_body(printer, body)?;
-        printer.close()
-    }
-
-    fn write_switch(
-        &self,
-        printer: &mut IndentedWriter<'_>,
-        stmt: F::Stmt,
-        scrutinee: F::Expr,
-        default_body: &[F::Stmt],
-    ) -> fmt::Result {
-        self.open_conditional(printer, "switch", scrutinee)?;
-        for arm in self.function.switch_arms(stmt) {
+        if let HandlerKind::Filter { filter_body } = handler.kind {
             printer.indent()?;
-            printer.write_str("case ")?;
-            for (position, value) in arm.values.iter().enumerate() {
-                if position != 0 {
-                    printer.write_str(", ")?;
-                }
-                write!(printer, "{}", ConstantDisplay::<H>(value))?;
-            }
-            printer.write_str(":")?;
+            printer.write_str("when")?;
             printer.open()?;
-            self.write_body(printer, arm.body)?;
-            printer.close()?;
+            schedule(
+                pending,
+                [
+                    Pending::Body(filter_body.iter()),
+                    Pending::Close,
+                    Pending::Body(handler.body.iter()),
+                ],
+            );
+        } else {
+            schedule(pending, [Pending::Body(handler.body.iter())]);
         }
-        if !default_body.is_empty() {
-            printer.indent()?;
-            printer.write_str("default:")?;
-            printer.open()?;
-            self.write_body(printer, default_body)?;
-            printer.close()?;
-        }
-        printer.close()
-    }
-
-    fn write_try(
-        &self,
-        printer: &mut IndentedWriter<'_>,
-        stmt: F::Stmt,
-        body: &[F::Stmt],
-        finally_body: &[F::Stmt],
-    ) -> fmt::Result {
-        printer.write_str("try")?;
-        printer.open()?;
-        self.write_body(printer, body)?;
-        for handler in self.function.handlers(stmt) {
-            printer.close_inline()?;
-            printer.write_str(match handler.kind {
-                HandlerKind::Catch => " catch (",
-                HandlerKind::CatchAll => " catch (...",
-                HandlerKind::Fault => " fault (",
-                HandlerKind::Filter { .. } => " filter (",
-            })?;
-            for (position, caught) in handler.caught_types.iter().enumerate() {
-                if position != 0 {
-                    printer.write_str(" | ")?;
-                }
-                write!(printer, "{caught:?}")?;
-            }
-            printer.write_str(")")?;
-            if let Some(binding) = handler.binding {
-                write!(printer, " {}", Name::variable(binding))?;
-            }
-            printer.open()?;
-            if let HandlerKind::Filter { filter_body } = handler.kind {
-                printer.indent()?;
-                printer.write_str("when")?;
-                printer.open()?;
-                self.write_body(printer, filter_body)?;
-                printer.close()?;
-            }
-            self.write_body(printer, handler.body)?;
-        }
-        if !finally_body.is_empty() {
-            printer.close_inline()?;
-            printer.write_str(" finally")?;
-            printer.open()?;
-            self.write_body(printer, finally_body)?;
-        }
-        printer.close()
+        Ok(())
     }
 }
 
