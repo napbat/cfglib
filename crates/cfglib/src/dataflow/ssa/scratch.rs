@@ -6,14 +6,13 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
-use crate::graph::dominator::{DominatorChildLinks, DominatorScratch};
+use crate::graph::dominator::DominatorScratch;
 use crate::graph::epoch::EpochMarks;
 
 use super::SsaInstruction;
 use super::SsaValue;
 use super::frontier::FrontierRuns;
 use super::place::PhiDrafts;
-use super::rename::RenameEvent;
 
 /// Every buffer [`SsaForm::compute_in`](super::SsaForm::compute_in) fills,
 /// owned by the caller.
@@ -107,14 +106,9 @@ pub struct SsaScratch<V> {
     /// Every variable pushed by a block still on the walk, so unwinding is a
     /// count rather than a vector per block.
     pub(super) pushed: Vec<V>,
-    /// Blocks the renaming walk has already entered.
-    pub(super) renamed: EpochMarks,
-    /// Dominator-tree child adjacency, in descending sibling order.
-    pub(super) children: DominatorChildLinks<BlockId>,
-    /// The roots the renaming walk starts from.
-    pub(super) roots: Vec<BlockId>,
-    /// The renaming walk's own frontier.
-    pub(super) events: Vec<RenameEvent>,
+    /// The blocks the renaming walk has entered and not left, each with how
+    /// many variables it pushed.
+    pub(super) open: Vec<(BlockId, usize)>,
 }
 
 impl<V> Default for SsaScratch<V> {
@@ -134,10 +128,7 @@ impl<V> Default for SsaScratch<V> {
             stacks: BTreeMap::new(),
             value_pool: Vec::new(),
             pushed: Vec::new(),
-            renamed: EpochMarks::default(),
-            children: DominatorChildLinks::default(),
-            roots: Vec::new(),
-            events: Vec::new(),
+            open: Vec::new(),
         }
     }
 }
@@ -186,8 +177,6 @@ impl<V: crate::VariableId> SsaScratch<V> {
             stack.clear();
             self.value_pool.push(stack);
         }
-        self.renamed.grow_to(block_bound);
-        self.renamed.reset();
         if self.instructions.len() < block_bound {
             self.instructions.resize_with(block_bound, Vec::new);
         }
@@ -195,8 +184,6 @@ impl<V: crate::VariableId> SsaScratch<V> {
             block.clear();
         }
         self.pushed.clear();
-        self.children.reset(block_bound);
-        self.roots.clear();
-        self.events.clear();
+        self.open.clear();
     }
 }
