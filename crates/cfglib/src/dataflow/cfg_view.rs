@@ -59,8 +59,10 @@ pub trait CfgView:
 
     /// Returns the branch weight of an edge, if the view has one.
     ///
-    /// A weight is a branch probability or an execution count. The default
-    /// answers `None`, which means that the view carries no profile.
+    /// A weight is a branch probability in `0.0..=1.0`: the likelihood that
+    /// control takes the edge, relative to the other edges leaving its
+    /// source. The default answers `None`, which means that the view carries
+    /// no profile.
     ///
     /// # Panics
     ///

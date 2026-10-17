@@ -95,6 +95,11 @@ pub trait InstrInfo {
     /// definitions. Adapters with exceptional control flow must report every
     /// possible unwind point: a block with an unwind successor and no such
     /// instruction is treated as unwinding after its last instruction.
+    ///
+    /// The analyses read only this method. The
+    /// [`FlowEffect::MayThrow`](crate::FlowEffect::MayThrow) classification
+    /// the CFG builder sees is separate, so an adapter that classifies a
+    /// throwing instruction reports it here as well.
     fn may_unwind(&self) -> bool {
         false
     }

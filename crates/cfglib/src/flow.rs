@@ -85,7 +85,8 @@ pub enum FlowEffect {
     Terminate,
     /// A label/target that can be jumped to.
     Label,
-    /// Declaration or metadata — skipped by the builder.
+    /// Declaration or metadata — stored in the current block like a plain
+    /// instruction, with no effect on control flow.
     Declaration,
 
     /// Unconditional explicit jump: a source `goto`, a machine `jmp`/`b`.
@@ -109,6 +110,14 @@ pub enum FlowEffect {
     IndirectCall,
     /// Instruction that may throw or trap: a source throwing expression or
     /// `raise`, a machine trapping `div` / `int 3`.
+    ///
+    /// The builder **stores** this instruction in the current block like a
+    /// fallthrough one: it ends no block and wires no edge. Exceptional
+    /// control flow is the consumer's to wire as
+    /// [`ExceptionUnwind`](crate::EdgeKind::ExceptionUnwind) edges, and the
+    /// data-flow analyses learn which instructions throw from
+    /// [`InstrInfo::may_unwind`](crate::InstrInfo::may_unwind), never from
+    /// this classification, so an adapter reports both.
     MayThrow,
 }
 
