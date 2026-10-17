@@ -248,11 +248,6 @@ where
         body: &'a [S::Stmt],
         label: Option<&'a str>,
     ) -> Result<(), LowerError<B::Error>> {
-        if body.is_empty() {
-            return Err(LowerError::Unsupported(
-                "an endless loop with an empty body has no flat form".into(),
-            ));
-        }
         self.seal(LowerEdge::Fallthrough);
         self.adopt_forward_gotos(label);
         let header = self.block();

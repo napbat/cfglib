@@ -578,12 +578,6 @@ fn transfers_without_a_target_are_rejected<D: FlatKit>() {
 
 fn ill_formed_statements_are_rejected<D: FlatKit>() {
     let call = || Ex::Apply(Prim::Call, Ty::Void, Vec::new());
-    let error = unchecked_failure::<D>(vec![Sn::Loop(Vec::new())]);
-    assert!(
-        error.contains("an endless loop with an empty body"),
-        "{error}"
-    );
-
     // `1 = 2` has no `Sn` spelling, so the toy builder is driven directly.
     let mut builder = ToyHlilBuilder::<D>::new();
     let target = builder.number(1);

@@ -65,6 +65,12 @@ pub enum HandlerKind<'a, S> {
     /// Runs on exceptional entry only.
     Fault,
     /// A predicate decides whether this handler accepts the exception.
+    ///
+    /// [`lift`](fn@super::lift) does not structure the predicate funclet: a
+    /// lifted filter handler has an empty `filter_body`, and the funclet's
+    /// blocks follow the function as a labeled group that nothing targets.
+    /// [`lower`](fn@super::lower) needs the body, so it rejects an empty one;
+    /// a consumer that lowers a lifted function restores the predicate first.
     Filter {
         /// The statements that evaluate the predicate.
         filter_body: &'a [S],

@@ -67,12 +67,13 @@ pub struct LoweredFunction<F, S, E, V, W> {
 /// # Errors
 ///
 /// Returns [`LowerError::Unsupported`] when a statement has no flat
-/// translation: control falling off the end of the function, an endless loop
-/// with an empty body, a `break`, `continue`, or `goto` with no matching
-/// target, an assignment into a constant place, a handler binding with no
-/// declared type, or a filter handler with an empty filter body or one that
-/// does not end in a terminator. Returns [`LowerError::Builder`] when the
-/// consumer's builder refuses an instruction or the sealed function.
+/// translation: control falling off the end of the function, a `break`,
+/// `continue`, or `goto` with no matching target, a `continue` to a label
+/// that does not name a loop, an assignment into a constant place, a handler
+/// binding with no declared type, or a filter handler with an empty filter
+/// body or one that does not end in a terminator. Returns
+/// [`LowerError::Builder`] when the consumer's builder refuses an instruction
+/// or the sealed function.
 pub fn lower<H, S, B>(source: &S, mut builder: B) -> Lowering<H, S, B>
 where
     H: Dialect,

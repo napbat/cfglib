@@ -29,6 +29,7 @@ over_toys!(
     lowering_registers_declared_exception_regions_and_relifts_them,
     a_lifted_function_survives_lowering_and_lifting_again,
     recovery_composes_with_lifting_and_the_recovered_loop_lowers,
+    an_endless_loop_without_a_body_round_trips,
 );
 
 /// `while (lt(i, n)) { if (lt(i, 100)) { break; } i = add(i, 1); } return i;`
@@ -78,6 +79,25 @@ fn lowering_and_relifting_round_trips_a_while_loop<D: FlatKit>() {
         "hlil/relift-while-loop.pseudo",
         &pseudocode(&relifted.function),
     );
+}
+
+/// `loop { }`: the structure that lifting gives a block that jumps to itself,
+/// and a function that iterates forever, which lowering accepts.
+fn an_endless_loop_without_a_body_round_trips<D: FlatKit>() {
+    let mut builder = ToyHlilBuilder::<D>::new();
+    let spin = builder.loop_(&[]);
+    let function = builder.finish(&[spin]).expect("an empty loop verifies");
+
+    let lowered = lower::<D, _, _>(&function, ToyFlatBuilder::<D>::new())
+        .expect("a function may iterate forever without doing anything");
+    assert!(lowered.function.check().is_ok());
+    let relifted = lifted(&lowered.function);
+    assert!(
+        relifted.report.is_fully_structured(),
+        "{:?}",
+        relifted.report
+    );
+    assert_eq!(pseudocode(&relifted.function), "loop {\n}\n");
 }
 
 fn lowering_and_relifting_round_trips_a_switch<D: FlatKit>() {
