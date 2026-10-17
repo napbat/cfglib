@@ -604,7 +604,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             result.push(node);
             // Resume at the region's own continuation, not the anchor's merge:
             // they differ whenever the try exits through an explicit leave.
-            return continuation;
+            return self.resume_after(&node, continuation);
         }
         self.lift_block(block, allowed_blocks, stop, result)
     }
@@ -636,12 +636,14 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             BlockFlowKind::Conditional => {
                 let node = self.lift_conditional(block, allowed_blocks);
                 result.push(node);
-                return self.effective_merge(block, allowed_blocks);
+                let merge = self.effective_merge(block, allowed_blocks);
+                return self.resume_after(&node, merge);
             }
             BlockFlowKind::Switch => {
                 let node = self.lift_switch(block, allowed_blocks);
                 result.push(node);
-                return self.effective_merge(block, allowed_blocks);
+                let merge = self.effective_merge(block, allowed_blocks);
+                return self.resume_after(&node, merge);
             }
             BlockFlowKind::BackEdge => {
                 self.push_block(result, block);

@@ -58,6 +58,21 @@ impl<I, E> Structurer<'_, I, E> {
         .filter(|&merge| block_is_allowed(allowed_blocks, merge))
     }
 
+    /// The block the walk resumes at after `node`, a construct whose merge is
+    /// `merge`.
+    ///
+    /// A merge that was already emitted is a transfer (a `continue`, a
+    /// `break`, or a goto), unless no path reaches the end of `node`: when
+    /// every arm already ends in a transfer, one more after the construct
+    /// would be dead code.
+    pub(super) fn resume_after(
+        &self,
+        node: &ControlNode,
+        merge: Option<BlockId>,
+    ) -> Option<BlockId> {
+        merge.filter(|&next| !(self.is_visited(next) && self.tables.never_completes(*node)))
+    }
+
     /// Lift an if/else conditional starting at `block`.
     pub(super) fn lift_conditional(
         &mut self,

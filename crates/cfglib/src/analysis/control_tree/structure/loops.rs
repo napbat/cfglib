@@ -372,14 +372,16 @@ impl<I, E> Structurer<'_, I, E> {
             Some(BlockFlowKind::Conditional) => {
                 let node = self.lift_conditional(header, Some(bound));
                 body.push(node);
-                if let Some(merge) = self.effective_merge(header, Some(bound)) {
+                let merge = self.effective_merge(header, Some(bound));
+                if let Some(merge) = self.resume_after(&node, merge) {
                     body.extend(self.lift_region(merge, Some(bound), stop));
                 }
             }
             Some(BlockFlowKind::Switch) => {
                 let node = self.lift_switch(header, Some(bound));
                 body.push(node);
-                if let Some(merge) = self.effective_merge(header, Some(bound)) {
+                let merge = self.effective_merge(header, Some(bound));
+                if let Some(merge) = self.resume_after(&node, merge) {
                     body.extend(self.lift_region(merge, Some(bound), stop));
                 }
             }

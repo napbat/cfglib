@@ -185,6 +185,58 @@ impl Tables {
         self.handlers.get(run)
     }
 
+    /// Whether control can never reach the end of `node`: every path through
+    /// it ends in a `break`, `continue`, `goto`, or return.
+    ///
+    /// The answer is conservative. A loop, which may run on or be left through
+    /// a `break` of its own, and a node with a body that is empty or ends in
+    /// plain code, can complete.
+    pub(super) fn never_completes(&self, node: ControlNode) -> bool {
+        let body_never_completes = |body: ControlBody| {
+            self.body(body)
+                .last()
+                .is_some_and(|&last| self.never_completes(*self.node(last)))
+        };
+        match node {
+            ControlNode::Break { .. }
+            | ControlNode::Continue { .. }
+            | ControlNode::Goto { .. }
+            | ControlNode::Return(_) => true,
+            ControlNode::Sequence(body)
+            | ControlNode::Label { body, .. }
+            | ControlNode::Guarded { body, .. } => body_never_completes(body),
+            ControlNode::IfThenElse {
+                then_body,
+                else_body,
+                ..
+            } => body_never_completes(then_body) && body_never_completes(else_body),
+            ControlNode::Switch {
+                cases,
+                default_body,
+                ..
+            } => {
+                body_never_completes(default_body)
+                    && self
+                        .cases(cases)
+                        .iter()
+                        .all(|case| body_never_completes(case.body))
+            }
+            ControlNode::TryCatch {
+                try_body,
+                handlers,
+                finally_body,
+            } => {
+                body_never_completes(try_body)
+                    && self
+                        .handlers(handlers)
+                        .iter()
+                        .all(|handler| body_never_completes(handler.body))
+                    && (finally_body.is_empty() || body_never_completes(finally_body))
+            }
+            ControlNode::Block(_) | ControlNode::Loop { .. } => false,
+        }
+    }
+
     pub(super) fn child_bodies(&self, node: ControlNode) -> ChildBodies<'_> {
         ChildBodies {
             tables: self,

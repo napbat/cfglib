@@ -253,7 +253,7 @@ impl<I, E> Structurer<'_, I, E> {
         let mut try_nodes = Vec::new();
         if let Some((inner, inner_continuation)) = self.lift_try_catch(block, Some(&try_bound)) {
             try_nodes.push(inner);
-            if let Some(next) = inner_continuation {
+            if let Some(next) = self.resume_after(&inner, inner_continuation) {
                 try_nodes.extend(self.lift_region(next, Some(&try_bound), continuation));
             }
         } else {

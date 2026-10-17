@@ -1,15 +1,17 @@
-//! Transfers the structurer once lost, found by running each graph against
-//! its tree.
+//! Transfers the structurer once lost, or repeated after a construct that had
+//! already transferred, found by running each graph against its tree.
 
 extern crate alloc;
 
 use super::exhaustive::{Terminator, graph, unpredicated};
 use super::invariants::{check, render};
+use super::pseudocode;
 use super::semantics::assert_streams_alike;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
 use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
+use crate::test_util::{MockInst, ff};
 use crate::{ControlNode, ControlTree};
 
 /// How many streams a hand-built graph is compared under.
@@ -140,4 +142,108 @@ fn a_retry_loop_that_leaves_through_the_enclosing_loops_back_edge_continues_it()
         parent: None,
     });
     check_equivalent(&cfg, "retry loop inside a while loop");
+}
+
+/// Whether a statement of some body is a branch or dispatch directly followed
+/// by a `continue` or `break`.
+fn has_transfer_after_a_branch(tree: &ControlTree) -> bool {
+    tree.node_ids().any(|id| {
+        tree.child_bodies(id).any(|body| {
+            tree.body(body).windows(2).any(|pair| {
+                matches!(
+                    tree.node(pair[0]),
+                    ControlNode::IfThenElse { .. } | ControlNode::Switch { .. }
+                ) && matches!(
+                    tree.node(pair[1]),
+                    ControlNode::Continue { .. } | ControlNode::Break { .. }
+                )
+            })
+        })
+    })
+}
+
+#[test]
+fn no_transfer_repeats_after_a_branch_whose_arms_all_transfer() {
+    // while (i < n) { if (done) { jmp exit } else if (skip) { jmp top } else { work; jmp top } }
+    // The inner branch's arms both end in a back edge, so the walk has already
+    // transferred control when it reaches the header they merge at.
+    let mut cfg: Cfg<MockInst> = Cfg::new();
+    let [header, done, leave, skip, again, work, exit] = [(); 7].map(|()| cfg.new_block());
+    for (block, name) in [
+        (cfg.entry(), "init"),
+        (header, "i < n"),
+        (done, "done"),
+        (leave, "jmp exit"),
+        (skip, "skip"),
+        (again, "jmp top"),
+        (work, "work"),
+        (exit, "return"),
+    ] {
+        cfg.block_mut(block).push(ff(name));
+    }
+    cfg.add_edge(cfg.entry(), header, EdgeKind::Fallthrough);
+    cfg.add_edge(header, done, EdgeKind::ConditionalTrue);
+    cfg.add_edge(header, exit, EdgeKind::ConditionalFalse);
+    cfg.add_edge(done, leave, EdgeKind::ConditionalTrue);
+    cfg.add_edge(done, skip, EdgeKind::ConditionalFalse);
+    cfg.add_edge(leave, exit, EdgeKind::Jump);
+    cfg.add_edge(skip, again, EdgeKind::ConditionalTrue);
+    cfg.add_edge(skip, work, EdgeKind::ConditionalFalse);
+    cfg.add_edge(again, header, EdgeKind::Jump);
+    cfg.add_edge(work, header, EdgeKind::Jump);
+
+    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    check(&cfg, &tree, &report, "branches that all transfer");
+    assert!(report.is_fully_structured(), "{report:?}");
+    assert!(
+        !has_transfer_after_a_branch(&tree),
+        "{}",
+        pseudocode(&cfg, &tree)
+    );
+}
+
+#[test]
+fn no_goto_follows_a_try_whose_paths_all_return() {
+    // try { if (a < 0) return 0; emit(10 / a); return 1 } catch { return 7 }:
+    // the code after the throwing block is unprotected, and only the try
+    // reaches it, so the try holds it. Every path through the try returns, so
+    // the walk has nothing to resume at.
+    let mut cfg: Cfg<MockInst> = Cfg::new();
+    let [test, early, work, tail, pad] = [(); 5].map(|()| cfg.new_block());
+    for (block, name) in [
+        (cfg.entry(), "enter"),
+        (test, "a < 0"),
+        (early, "return 0"),
+        (work, "emit"),
+        (tail, "return 1"),
+        (pad, "return 7"),
+    ] {
+        cfg.block_mut(block).push(ff(name));
+    }
+    cfg.add_edge(cfg.entry(), test, EdgeKind::Fallthrough);
+    cfg.add_edge(test, early, EdgeKind::ConditionalTrue);
+    cfg.add_edge(test, work, EdgeKind::ConditionalFalse);
+    cfg.add_edge(work, tail, EdgeKind::Fallthrough);
+    cfg.add_edge(work, pad, EdgeKind::ExceptionUnwind);
+    cfg.add_region(Region {
+        id: RegionId::from_raw(0),
+        protected_blocks: [test, early, work].into_iter().collect(),
+        handlers: alloc::vec![Handler {
+            entry: pad,
+            body: HandlerBody::known([pad]),
+            kind: HandlerKind::CatchAll,
+        }],
+        parent: None,
+    });
+
+    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    check(&cfg, &tree, &report, "a try whose paths all return");
+    assert!(report.is_fully_structured(), "{report:?}");
+    assert!(
+        !tree
+            .preorder()
+            .any(|id| matches!(tree.node(id), ControlNode::Goto { .. })),
+        "{}",
+        pseudocode(&cfg, &tree)
+    );
 }
