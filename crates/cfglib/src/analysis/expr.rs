@@ -14,6 +14,9 @@
 //! instruction maps to an expression operator, and the framework
 //! builds expression DAGs per block using def-use chains.
 
+mod node;
+pub use node::ExprNode;
+
 extern crate alloc;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -21,68 +24,6 @@ use alloc::vec::Vec;
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
 use crate::{InstrInfo, VariableId};
-
-/// A node in an expression tree over variables `V`, operators `Op`, and
-/// constants `C` — all consumer-typed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExprNode<V, Op, C> {
-    /// A leaf source-IR variable.
-    Leaf(V),
-    /// An operation with a consumer operator identity and operand
-    /// sub-expressions.
-    Op {
-        /// The operator (a mnemonic enum, an opcode, an interned symbol).
-        operator: Op,
-        /// The operands, each an expression sub-tree.
-        operands: Vec<ExprNode<V, Op, C>>,
-    },
-    /// A constant value.
-    Const(C),
-    /// An opaque instruction that couldn't be decomposed further.
-    /// Contains the instruction index within the block.
-    Opaque {
-        /// Block containing the instruction.
-        block: BlockId,
-        /// Index of the instruction.
-        inst_idx: usize,
-    },
-}
-
-impl<V, Op, C> ExprNode<V, Op, C> {
-    /// Whether this is a leaf node.
-    #[must_use]
-    pub fn is_leaf(&self) -> bool {
-        matches!(self, ExprNode::Leaf(_))
-    }
-
-    /// Whether this is a compound operation.
-    #[must_use]
-    pub fn is_op(&self) -> bool {
-        matches!(self, ExprNode::Op { .. })
-    }
-
-    /// Depth of the expression tree.
-    #[must_use]
-    pub fn depth(&self) -> usize {
-        match self {
-            ExprNode::Leaf(_) | ExprNode::Const(_) | ExprNode::Opaque { .. } => 1,
-            ExprNode::Op { operands, .. } => {
-                1 + operands.iter().map(ExprNode::depth).max().unwrap_or(0)
-            }
-        }
-    }
-
-    /// Count total nodes in the expression tree.
-    #[must_use]
-    pub fn node_count(&self) -> usize {
-        match self {
-            ExprNode::Leaf(_) | ExprNode::Const(_) | ExprNode::Opaque { .. } => 1,
-            ExprNode::Op { operands, .. } => {
-                1 + operands.iter().map(ExprNode::node_count).sum::<usize>()
-            }
-        }
-    }
-}
 
 /// Trait for instructions that can be decomposed into expression operators.
 ///

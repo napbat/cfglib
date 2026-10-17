@@ -403,7 +403,7 @@ These analyses take `&G` where `G: CfgView`: `ReachingDefs`, `Liveness`, `DefUse
 
 | Analysis | Function / Type | Description |
 |---|---|---|
-| Expression tree recovery | `recover_expressions`, `ExprInstr` (associated `Operator` + `Const`) | Rebuild expression DAGs from flat instructions |
+| Expression tree recovery | `recover_expressions`, `ExprInstr` (associated `Operator` + `Const`) | Rebuild expression DAGs from flat instructions. A block of chained single-use temporaries recovers to one tree as deep as the block is long, so `ExprNode` drops, clones, compares, prints, and measures (`depth`, `node_count`) without recursion |
 | Value numbering (local) | `BlockValueNumbers::compute` | Per-block hash-consing |
 | Value numbering (global) | `ValueNumbering::compute`, `ValueNumberInfo` (associated `Operator`) | Dominator-scoped GVN over any operation identity, sound for variables that are written more than once: a block never reuses an expression over a variable a side path into it rewrites, and a child an unwind reaches never reuses what its parent computes or writes from the first throwing instruction on |
 | Redundancy counting | `ValueNumbering::redundant_count` | From GVN results |
