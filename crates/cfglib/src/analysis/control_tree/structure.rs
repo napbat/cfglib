@@ -25,6 +25,7 @@ use roots::VirtualRoot;
 mod bound;
 mod branches;
 mod completion;
+mod exits;
 mod frames;
 mod labels;
 mod loops;
@@ -92,6 +93,8 @@ struct Structurer<'cfg, I, E> {
     /// For each block an enclosing loop continues or breaks at, the positions
     /// of those loops in `loop_stack`, innermost last.
     loop_targets: BTreeMap<BlockId, Vec<usize>>,
+    /// Where each loop is left, found on the first loop that needs it.
+    exits: Option<exits::LoopExits>,
     /// Regions structured as [`ControlNode::TryCatch`].
     structured_regions: BTreeSet<u32>,
     /// The blocks no exception region names, as protected code, a handler
@@ -264,15 +267,19 @@ impl ControlTree {
     ///
     /// Time and memory grow linearly with the nesting of loops, `if`s,
     /// `switch`es, and labels: a loop's blocks are read from a
-    /// [`LoopForest`](crate::LoopForest), not copied per loop. The exceptions
-    /// are the input's own size and two scans:
+    /// [`LoopForest`](crate::LoopForest), not copied per loop, and where a
+    /// loop with no recognized test is left is found for every loop at once,
+    /// or read from the set of blocks that bounds the loop when that set is
+    /// smaller than the loop. The exceptions are the input's own size and the
+    /// loops that are not nested properly:
     ///
     /// - Each nested `try` region names its own set of protected blocks, so
     ///   `n` nested regions are an input of size quadratic in `n`, and
     ///   structuring them costs about that size.
-    /// - A loop with no recognized test (an endless loop) scans its blocks for
-    ///   its follow, so `n` loops of that kind nested in each other cost time
-    ///   quadratic in `n`.
+    /// - A loop with no recognized test that is irreducible (its header does
+    ///   not dominate its latches), or that lies in the bound of a loop that
+    ///   is not the loop around it, scans its blocks for its follow, which
+    ///   costs the size of the loop.
     ///
     /// The text of the pseudocode is quadratic in any nesting, since each
     /// level indents every line it holds.
@@ -384,6 +391,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             labeled_blocks: BTreeSet::new(),
             loop_stack: Vec::new(),
             loop_targets: BTreeMap::new(),
+            exits: None,
             structured_regions: BTreeSet::new(),
             unclaimed: Rc::new(claims.unclaimed),
             handler_claims: claims.handlers,

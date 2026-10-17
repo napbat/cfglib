@@ -58,6 +58,28 @@ impl Bound {
             .collect()
     }
 
+    /// The loop of a loop bound and the bound it was entered under: the
+    /// blocks admitted are those of the loop that the other bound admits.
+    pub(super) fn within(&self) -> Option<(LoopId, &Self)> {
+        match self {
+            Self::Loop(within) => Some((within.lp, &within.outer)),
+            Self::Whole | Self::Set(_) => None,
+        }
+    }
+
+    /// The set that ends the chain of bounds, when it ends in one: every block
+    /// the bound admits is in it.
+    pub(super) fn root_set(&self) -> Option<&BTreeSet<BlockId>> {
+        let mut bound = self;
+        loop {
+            match bound {
+                Self::Whole => return None,
+                Self::Set(blocks) => return Some(blocks),
+                Self::Loop(within) => bound = &within.outer,
+            }
+        }
+    }
+
     /// The bound inside the loop `lp`: the blocks of the loop that this bound
     /// admits.
     ///

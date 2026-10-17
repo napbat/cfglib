@@ -7,10 +7,9 @@
 //! left without its block.
 
 extern crate alloc;
-extern crate std;
 use alloc::vec::Vec;
-use std::thread;
 
+use super::small_stack::on_small_stack;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
@@ -27,27 +26,22 @@ fn new_block(cfg: &mut Cfg<DfInst>) -> BlockId {
     block
 }
 
-/// Structure `cfg` on a thread and check that every instruction is in the tree
-/// once. Returns the report.
+/// Structure `cfg` on a small stack and check that every instruction is in the
+/// tree once. Returns the report.
 fn structure_and_cover(build: fn(usize) -> Cfg<DfInst>) -> LiftReport {
-    thread::Builder::new()
-        .stack_size(256 * 1024)
-        .spawn(move || {
-            let cfg = build(BLOCKS);
-            let (tree, report) = ControlTree::compute_with_report(&cfg);
-            let mut seen = 0;
-            tree.for_each_instruction(&cfg, |_, _| seen += 1);
-            let total: usize = cfg
-                .block_ids()
-                .map(|block| cfg.block(block).instructions().len())
-                .sum();
-            assert_eq!(seen, total, "every instruction once");
-            assert_eq!(report.unresolved_labels, []);
-            report
-        })
-        .expect("a thread can be spawned")
-        .join()
-        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    on_small_stack(move || {
+        let cfg = build(BLOCKS);
+        let (tree, report) = ControlTree::compute_with_report(&cfg);
+        let mut seen = 0;
+        tree.for_each_instruction(&cfg, |_, _| seen += 1);
+        let total: usize = cfg
+            .block_ids()
+            .map(|block| cfg.block(block).instructions().len())
+            .sum();
+        assert_eq!(seen, total, "every instruction once");
+        assert_eq!(report.unresolved_labels, []);
+        report
+    })
 }
 
 /// A switch whose `count` arms each jump to one shared block that the switch
@@ -117,6 +111,47 @@ fn dead_pads(count: usize) -> Cfg<DfInst> {
     cfg
 }
 
+/// `count` endless loops nested in each other, each with its header protected
+/// by a region of its own (one block, one catch pad that jumps to the way out
+/// of the function): the regions are as many as the loops, and each loop sits
+/// in the body of a `try` that holds one block of it.
+fn endless_loops_each_in_a_try(count: usize) -> Cfg<DfInst> {
+    let mut cfg = Cfg::new();
+    let entry = cfg.entry();
+    cfg.block_mut(entry).push(df_ff("start"));
+    let headers: Vec<BlockId> = (0..count).map(|_| new_block(&mut cfg)).collect();
+    let tests: Vec<BlockId> = (0..count).map(|_| new_block(&mut cfg)).collect();
+    let latches: Vec<BlockId> = (0..count).map(|_| new_block(&mut cfg)).collect();
+    let out = new_block(&mut cfg);
+    cfg.add_edge(entry, headers[0], EdgeKind::Fallthrough);
+    for index in 0..count {
+        if let Some(&inner) = headers.get(index + 1) {
+            cfg.add_edge(headers[index], inner, EdgeKind::Fallthrough);
+        }
+        let leave = if index == 0 { out } else { tests[index - 1] };
+        cfg.add_edge(tests[index], leave, EdgeKind::ConditionalTrue);
+        cfg.add_edge(tests[index], latches[index], EdgeKind::ConditionalFalse);
+        cfg.add_edge(latches[index], headers[index], EdgeKind::Jump);
+    }
+    cfg.add_edge(headers[count - 1], tests[count - 1], EdgeKind::Fallthrough);
+    for &header in &headers {
+        let pad = new_block(&mut cfg);
+        cfg.add_edge(header, pad, EdgeKind::ExceptionHandler);
+        cfg.add_edge(pad, out, EdgeKind::Jump);
+        cfg.add_region(Region {
+            id: RegionId::from_raw(0),
+            protected_blocks: [header].into_iter().collect(),
+            handlers: alloc::vec![Handler {
+                entry: pad,
+                body: HandlerBody::known([pad]),
+                kind: HandlerKind::Catch,
+            }],
+            parent: None,
+        });
+    }
+    cfg
+}
+
 #[test]
 fn a_hundred_thousand_jumps_into_one_block_structure_in_linear_time() {
     let report = structure_and_cover(jumps_into_one_block);
@@ -146,4 +181,10 @@ fn a_hundred_thousand_dead_pads_and_their_gotos_are_emitted_in_linear_time() {
         "the dead blocks are swept: {}",
         report.swept_blocks.len()
     );
+}
+
+#[test]
+fn a_hundred_thousand_nested_endless_loops_each_in_a_try_are_followed_in_linear_time() {
+    let report = structure_and_cover(endless_loops_each_in_a_try);
+    assert_eq!(report.unstructured_regions, []);
 }
