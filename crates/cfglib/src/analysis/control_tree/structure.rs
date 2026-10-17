@@ -604,7 +604,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             result.push(node);
             // Resume at the region's own continuation, not the anchor's merge:
             // they differ whenever the try exits through an explicit leave.
-            return self.resume_after(&node, continuation);
+            return continuation;
         }
         self.lift_block(block, allowed_blocks, stop, result)
     }

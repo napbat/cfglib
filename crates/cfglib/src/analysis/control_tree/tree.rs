@@ -190,7 +190,9 @@ impl Tables {
     ///
     /// The answer is conservative. A loop, which may run on or be left through
     /// a `break` of its own, and a node with a body that is empty or ends in
-    /// plain code, can complete.
+    /// plain code, can complete. So can a try: a handler body may end in dead
+    /// code of its extent after the flow the handler really has, so only the
+    /// walk that builds the try can say how its handlers end.
     pub(super) fn never_completes(&self, node: ControlNode) -> bool {
         let body_never_completes = |body: ControlBody| {
             self.body(body)
@@ -221,19 +223,9 @@ impl Tables {
                         .iter()
                         .all(|case| body_never_completes(case.body))
             }
-            ControlNode::TryCatch {
-                try_body,
-                handlers,
-                finally_body,
-            } => {
-                body_never_completes(try_body)
-                    && self
-                        .handlers(handlers)
-                        .iter()
-                        .all(|handler| body_never_completes(handler.body))
-                    && (finally_body.is_empty() || body_never_completes(finally_body))
+            ControlNode::Block(_) | ControlNode::Loop { .. } | ControlNode::TryCatch { .. } => {
+                false
             }
-            ControlNode::Block(_) | ControlNode::Loop { .. } => false,
         }
     }
 

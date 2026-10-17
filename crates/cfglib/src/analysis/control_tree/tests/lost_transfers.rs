@@ -247,3 +247,48 @@ fn no_goto_follows_a_try_whose_paths_all_return() {
         pseudocode(&cfg, &tree)
     );
 }
+
+#[test]
+fn a_dead_extent_tail_does_not_make_a_catch_that_resumes_look_like_it_transfers() {
+    // The try body ends in gotos on every path, and the catch pad b9 jumps to
+    // b5, the region's continuation, so it ends there silently. Dead blocks of
+    // the catch extent (b2, b3) follow the pad's code and end in gotos, but
+    // the pad's own flow still reaches the end of the try: the walk has to
+    // resume at b5, which the try body already emitted, instead of dropping
+    // the transfer because the last statement of the handler is a goto.
+    let mut cfg: Cfg<MockInst> = Cfg::new();
+    let blocks: alloc::vec::Vec<BlockId> = core::iter::once(cfg.entry())
+        .chain((1..10).map(|_| cfg.new_block()))
+        .collect();
+    for (index, &block) in blocks.iter().enumerate() {
+        let name: &'static str = alloc::string::String::leak(alloc::format!("b{index}"));
+        cfg.block_mut(block).push(ff(name));
+    }
+    for (from, to, kind) in [
+        (0, 6, EdgeKind::ConditionalTrue),
+        (0, 1, EdgeKind::ConditionalFalse),
+        (0, 9, EdgeKind::ExceptionHandler),
+        (1, 6, EdgeKind::ConditionalTrue),
+        (1, 5, EdgeKind::ConditionalFalse),
+        (2, 4, EdgeKind::ConditionalTrue),
+        (2, 8, EdgeKind::ConditionalFalse),
+        (3, 4, EdgeKind::ConditionalTrue),
+        (3, 4, EdgeKind::ConditionalFalse),
+        (5, 4, EdgeKind::Jump),
+        (6, 5, EdgeKind::Jump),
+        (9, 5, EdgeKind::Jump),
+    ] {
+        cfg.add_edge(blocks[from], blocks[to], kind);
+    }
+    cfg.add_region(Region {
+        id: RegionId::from_raw(0),
+        protected_blocks: [blocks[0]].into_iter().collect(),
+        handlers: alloc::vec![Handler {
+            entry: blocks[9],
+            body: HandlerBody::known([blocks[2], blocks[3], blocks[9]]),
+            kind: HandlerKind::Catch,
+        }],
+        parent: None,
+    });
+    check_equivalent(&cfg, "catch that resumes after a dead extent tail");
+}

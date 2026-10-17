@@ -253,7 +253,7 @@ impl<I, E> Structurer<'_, I, E> {
         let mut try_nodes = Vec::new();
         if let Some((inner, inner_continuation)) = self.lift_try_catch(block, Some(&try_bound)) {
             try_nodes.push(inner);
-            if let Some(next) = self.resume_after(&inner, inner_continuation) {
+            if let Some(next) = inner_continuation {
                 try_nodes.extend(self.lift_region(next, Some(&try_bound), continuation));
             }
         } else {
@@ -271,8 +271,17 @@ impl<I, E> Structurer<'_, I, E> {
             }
         }
 
-        let (handlers, finally_nodes) =
+        let (handlers, finally_nodes, handlers_transfer) =
             self.lift_handlers(region, handler_bodies, allowed_blocks, continuation);
+
+        // A region whose body and handlers all end in a transfer has no end to
+        // resume at: the walk has nothing to continue with when the
+        // continuation was already emitted.
+        let body_transfers = try_nodes
+            .last()
+            .is_some_and(|node| self.tables.never_completes(*node));
+        let resume = continuation
+            .filter(|&next| !(self.is_visited(next) && body_transfers && handlers_transfer));
 
         Some((
             ControlNode::TryCatch {
@@ -280,20 +289,24 @@ impl<I, E> Structurer<'_, I, E> {
                 handlers: self.tables.push_handlers(handlers),
                 finally_body: self.tables.seal(finally_nodes),
             },
-            continuation,
+            resume,
         ))
     }
 
+    /// Lift the handler arms of `region`. The last answer says whether every
+    /// handler's own flow, which is what ends before its dead extent tail
+    /// follows, ends in a transfer.
     fn lift_handlers(
         &mut self,
         region: &Region,
         handler_bodies: Vec<&BTreeSet<BlockId>>,
         allowed_blocks: Option<&BTreeSet<BlockId>>,
         continuation: Option<BlockId>,
-    ) -> (Vec<CatchHandler>, Vec<ControlNode>) {
+    ) -> (Vec<CatchHandler>, Vec<ControlNode>, bool) {
         let cfg = self.cfg;
         let mut handlers = Vec::new();
         let mut finally_nodes = Vec::new();
+        let mut all_transfer = true;
         for ((index, handler), handler_blocks) in
             region.handlers.iter().enumerate().zip(handler_bodies)
         {
@@ -311,6 +324,9 @@ impl<I, E> Structurer<'_, I, E> {
                     .filter(|block| !self.reachable[block.index()]),
             );
             let mut nodes = self.lift_region(handler.entry, Some(&handler_bound), continuation);
+            all_transfer &= nodes
+                .last()
+                .is_some_and(|node| self.tables.never_completes(*node));
             // The walk ends where the pad's flow splits without a branch (a
             // suspension with an exit and a resume edge). The rest of the
             // extent that the entry cannot reach follows in flow order; a
@@ -339,7 +355,7 @@ impl<I, E> Structurer<'_, I, E> {
                 });
             }
         }
-        (handlers, finally_nodes)
+        (handlers, finally_nodes, all_transfer)
     }
 
     /// Whether `block` is a pad, or in the extent, of a handler of a region
