@@ -29,6 +29,11 @@ pub(crate) fn run_flat(code: &Code, inputs: &[i64]) -> Outcome {
     let mut machine = Machine::new();
     let mut block = code.first_block();
     let end = loop {
+        // An empty block costs a step too, so a block that jumps to itself
+        // runs out of fuel.
+        if !machine.tick() {
+            break End::Diverged;
+        }
         match run_block(code, block, &mut registers, &mut machine) {
             Ok(Exit::Next(next)) => block = next,
             Ok(Exit::Return(values)) => break End::Returned(values),

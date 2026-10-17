@@ -389,6 +389,10 @@ impl<'f, F: FunctionView<Calc>> Interpreter<'f, F> {
         // A jump into the body resumes mid-iteration: no test first.
         let mut resuming = seek.is_some();
         loop {
+            // An empty body costs a step too, so `loop {}` runs out of fuel.
+            if !self.machine.tick() {
+                return Err(Flow::Halt);
+            }
             if !shape.post_tested
                 && !resuming
                 && let Some(condition) = shape.condition

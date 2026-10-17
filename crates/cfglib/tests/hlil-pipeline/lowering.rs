@@ -13,10 +13,10 @@ use crate::dialect::{Calc, Lit, Local, Op, Ty};
 use crate::flat::{CodeBuilder, CodeError, Form};
 use crate::flat_run::run_flat;
 use crate::machine::{End, Event};
-use crate::pipeline::{lowered, structured};
+use crate::pipeline::{lifted, lowered, structured};
 use crate::programs;
 use crate::source::{Program, S, add, int, ret, set, var};
-use crate::structured::{Builder, ExprNode, Function, StmtId, StmtNode};
+use crate::structured::{Builder, ExprId, ExprNode, Function, StmtId, StmtNode, VarId};
 use crate::structured_run::{preorder, run_structured};
 
 #[test]
@@ -99,6 +99,39 @@ fn form_name(form: &Form) -> &'static str {
     }
 }
 
+/// Checks that the `Copy` at `point` is the snapshot of a region operand: the
+/// operand expression belongs to a `Region` statement, the copy reads the
+/// live variable into a temporary, and the region's exit releases the
+/// temporary, not the live variable.
+fn assert_region_operand_copy(
+    function: &Function,
+    lowered: &crate::pipeline::Lowered,
+    point: ProgramPoint,
+    operand: ExprId,
+    variable: VarId,
+) {
+    let region = preorder(function)
+        .into_iter()
+        .find(|&stmt| {
+            matches!(&function.stmts[stmt.index()],
+                StmtNode::Region { operands, .. } if operands.contains(&operand))
+        })
+        .unwrap_or_else(|| panic!("the copy at {point} does not come from a region operand"));
+    let copy = lowered.function.instruction(point);
+    let temporary = copy.defs[0];
+    assert!(lowered.function.locals[temporary.index()].temporary);
+    assert_eq!(copy.uses, [lowered.variables[variable.index()]]);
+    let exits: Vec<&crate::flat::Instr> = lowered
+        .origins
+        .iter()
+        .filter(|&&(_, entity)| entity == Entity::Statement(region))
+        .map(|&(at, _)| lowered.function.instruction(at))
+        .filter(|instruction| matches!(instruction.form, Form::Exit(_)))
+        .collect();
+    assert_eq!(exits.len(), 1, "one region has one exit");
+    assert_eq!(exits[0].uses, [temporary], "the exit releases the copy");
+}
+
 #[test]
 fn a_statement_owns_the_instruction_that_finishes_it() {
     for case in programs::all() {
@@ -118,6 +151,11 @@ fn a_statement_owns_the_instruction_that_finishes_it() {
                 Entity::Expression(expr) => match (&function.exprs[expr.index()].node, form) {
                     (ExprNode::Op { op, .. }, Form::Apply(applied)) => assert_eq!(op, applied),
                     (ExprNode::Const(literal), Form::Const(made)) => assert_eq!(literal, made),
+                    // A region's bare-variable operand is copied once so that
+                    // the exit releases the object the enter acquired.
+                    (ExprNode::Var(variable), Form::Copy) => {
+                        assert_region_operand_copy(&function, &lowered, point, expr, *variable);
+                    }
                     (node, form) => panic!("{}: {node:?} lowered to {form:?}", case.program.name),
                 },
                 Entity::Variable(_) => panic!("lowering never names a variable as an origin"),
@@ -282,7 +320,7 @@ fn lowering_refuses_control_that_falls_off_the_end() {
 }
 
 #[test]
-fn lowering_accepts_an_endless_loop_and_refuses_an_empty_one() {
+fn an_endless_loop_lowers_even_without_a_statement() {
     let spin = Program::new(
         "spins",
         &["a"],
@@ -293,10 +331,29 @@ fn lowering_accepts_an_endless_loop_and_refuses_an_empty_one() {
         .unwrap_or_else(|error| panic!("{error}"))
         .function;
     assert_eq!(run_flat(&code, &[0]).end, End::Diverged);
+
+    // An empty `loop {}` lowers to a header that jumps to itself, so it
+    // diverges like the loop with a body.
     let empty = Program::new("empty_spin", &[], &[], vec![S::Loop(vec![])]);
-    let error = lower::<Calc, _, _>(&structured(&empty), CodeBuilder::new())
-        .expect_err("an endless loop with no statement has no block");
-    assert!(matches!(error, LowerError::Unsupported(_)), "{error}");
+    let source = structured(&empty);
+    let code = lower::<Calc, _, _>(&source, CodeBuilder::new())
+        .unwrap_or_else(|error| panic!("{error}"))
+        .function;
+    assert_eq!(run_flat(&code, &[]).end, End::Diverged);
+    assert_eq!(run_structured(&source, &[]).end, End::Diverged);
+
+    // The empty loop lifts back to an endless loop with no statement, and
+    // the lifted function verifies.
+    let lifted = lifted(&code).function;
+    assert!(verify::<Calc, _>(&lifted).is_ok());
+    let [only] = lifted.body.as_slice() else {
+        panic!("the function is one statement, got {:?}", lifted.body);
+    };
+    assert_eq!(
+        lifted.stmts[only.index()],
+        StmtNode::Loop { body: Vec::new() }
+    );
+    assert_eq!(run_structured(&lifted, &[]).end, End::Diverged);
 }
 
 /// Compiles `program` through an unchecked builder: a function that `verify`
