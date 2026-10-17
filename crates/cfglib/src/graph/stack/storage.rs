@@ -9,6 +9,9 @@ use crate::graph::edge_view::{EdgeRef, EdgeView};
 use crate::graph::store::{Graph, Id, IdTag};
 use crate::graph::view::GraphView;
 
+#[cfg(feature = "serde")]
+mod stored;
+
 /// Tag marking an identity that addresses a stack-graph file partition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StackFileTag;
@@ -279,8 +282,27 @@ impl core::error::Error for StackGraphError {}
 /// file or touch the root singleton; cross-file resolution therefore occurs by
 /// joining paths at the root rather than by baking project knowledge into a
 /// file's subgraph.
+///
+/// A deserialized graph is checked before it is returned, against every rule
+/// the builders enforce: the two singletons, one file and one payload for each
+/// other node (retired nodes included), the per-file node lists, the exported
+/// scope of each scoped push, and the edges. A document that breaks one is
+/// rejected, because queries index the node and file tables by those
+/// identities.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "serde",
+    serde(
+        bound(
+            serialize = "F: serde::Serialize, S: serde::Serialize, N: serde::Serialize, \
+                         E: serde::Serialize",
+            deserialize = "F: serde::Deserialize<'de>, S: serde::Deserialize<'de>, \
+                           N: serde::Deserialize<'de>, E: serde::Deserialize<'de>"
+        ),
+        try_from = "stored::Stored<F, S, N, E>"
+    )
+)]
 pub struct StackGraph<F = (), S = (), N = (), E = ()> {
     graph: StackStore<S, N, E>,
     files: Vec<F>,
@@ -394,10 +416,7 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
         payload: N,
     ) -> Result<StackNodeId, StackGraphError> {
         self.require_file(file)?;
-        self.require_exported_scope(scope)?;
-        if self.node(scope).file() != Some(file) {
-            return Err(StackGraphError::ScopeFromOtherFile { file, scope });
-        }
+        require_attachable_scope(file, scope, self.require_node(scope)?)?;
         self.add_local_node(
             file,
             StackNodeKind::PushScopedSymbol {
@@ -479,14 +498,7 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
     ) -> Result<StackEdgeId, StackGraphError> {
         let source_node = self.require_node(source)?;
         let target_node = self.require_node(target)?;
-        if source_node.kind().is_jump_to_scope() {
-            return Err(StackGraphError::EdgeFromJumpToScope);
-        }
-        if let (Some(source_file), Some(target_file)) = (source_node.file(), target_node.file())
-            && source_file != target_file
-        {
-            return Err(StackGraphError::CrossFileEdge { source, target });
-        }
+        require_joinable(source, source_node, target, target_node)?;
         Ok(self.graph.add_edge(
             source,
             target,
@@ -710,14 +722,44 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
             Err(StackGraphError::UnknownNode(node))
         }
     }
+}
 
-    fn require_exported_scope(&self, scope: StackNodeId) -> Result<(), StackGraphError> {
-        if self.require_node(scope)?.kind().is_exported_scope() {
-            Ok(())
-        } else {
-            Err(StackGraphError::ScopeNotExported(scope))
-        }
+/// The rule a scoped push obeys: the scope `node` it names is an exported
+/// scope of the push's own `file`.
+///
+/// Whether `node` is still live is the caller's question; a retired push still
+/// names the scope it was built with.
+fn require_attachable_scope<S, N>(
+    file: StackFileId,
+    scope: StackNodeId,
+    node: &StackNode<S, N>,
+) -> Result<(), StackGraphError> {
+    if !node.kind().is_exported_scope() {
+        return Err(StackGraphError::ScopeNotExported(scope));
     }
+    if node.file() != Some(file) {
+        return Err(StackGraphError::ScopeFromOtherFile { file, scope });
+    }
+    Ok(())
+}
+
+/// The rule an edge obeys: it does not leave the jump-to-scope singleton and
+/// does not join two different files directly.
+fn require_joinable<S, N>(
+    source: StackNodeId,
+    source_node: &StackNode<S, N>,
+    target: StackNodeId,
+    target_node: &StackNode<S, N>,
+) -> Result<(), StackGraphError> {
+    if source_node.kind().is_jump_to_scope() {
+        return Err(StackGraphError::EdgeFromJumpToScope);
+    }
+    if let (Some(source_file), Some(target_file)) = (source_node.file(), target_node.file())
+        && source_file != target_file
+    {
+        return Err(StackGraphError::CrossFileEdge { source, target });
+    }
+    Ok(())
 }
 
 impl<F, S, N, E> Default for StackGraph<F, S, N, E> {
