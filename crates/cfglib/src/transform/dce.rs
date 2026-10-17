@@ -46,11 +46,6 @@ use crate::cfg::Cfg;
 /// let removed = dead_code_elimination(&mut cfg);
 /// assert_eq!(removed, 1);
 /// ```
-///
-/// # Panics
-///
-/// Panics only if the unbounded fixpoint solve reports a step-limit error,
-/// which the unbounded configuration cannot produce.
 pub fn dead_code_elimination<I: crate::dataflow::EffectInfo, E>(cfg: &mut Cfg<I, E>) -> usize {
     dead_code_elimination_with_exits(cfg, |_| Vec::new())
 }
@@ -64,11 +59,6 @@ pub fn dead_code_elimination<I: crate::dataflow::EffectInfo, E>(cfg: &mut Cfg<I,
 /// with no successors and hands back an empty vector everywhere else.
 ///
 /// Returns the number of instructions removed.
-///
-/// # Panics
-///
-/// Panics only if the unbounded fixpoint solve reports a step-limit error,
-/// which the unbounded configuration cannot produce.
 pub fn dead_code_elimination_with_exits<I: crate::dataflow::EffectInfo, E>(
     cfg: &mut Cfg<I, E>,
     live_out: impl Fn(BlockId) -> Vec<I::Variable>,
@@ -106,11 +96,6 @@ pub fn dead_code_elimination_with_exits<I: crate::dataflow::EffectInfo, E>(
 /// composed identity mapping.
 ///
 /// Returns the total number of instructions, blocks, and edges affected.
-///
-/// # Panics
-///
-/// Panics only if the unbounded fixpoint solve reports a step-limit error,
-/// which the unbounded configuration cannot produce.
 pub fn remove_dead_code<I: crate::dataflow::EffectInfo, E>(cfg: &mut Cfg<I, E>) -> usize {
     remove_dead_code_mapped(cfg).0
 }
@@ -121,11 +106,6 @@ pub fn remove_dead_code<I: crate::dataflow::EffectInfo, E>(cfg: &mut Cfg<I, E>) 
 /// Instruction indices are positions, not identities, so the map covers the
 /// block and edge identity changes only — exactly as
 /// [`simplify_mapped`](crate::simplify_mapped) reports them.
-///
-/// # Panics
-///
-/// Panics only if the unbounded fixpoint solve reports a step-limit error,
-/// which the unbounded configuration cannot produce.
 pub fn remove_dead_code_mapped<I: crate::dataflow::EffectInfo, E>(
     cfg: &mut Cfg<I, E>,
 ) -> (usize, crate::rewrite::Rewrite) {
@@ -148,7 +128,7 @@ pub fn remove_dead_code_mapped<I: crate::dataflow::EffectInfo, E>(
 mod tests {
     use super::*;
     use crate::edge::EdgeKind;
-    use crate::test_util::{DfInst, df_def, df_use};
+    use crate::test_util::{DfInst, df_def, df_op, df_use};
 
     #[test]
     fn dead_code_elimination_removes_unused_def() {
@@ -169,6 +149,23 @@ mod tests {
         assert_eq!(removed, 1, "should remove the dead def of loc0");
         assert_eq!(cfg.block(cfg.entry()).instructions().len(), 1);
         assert_eq!(cfg.block(cfg.entry()).instructions()[0].name, "live_def");
+    }
+
+    #[test]
+    fn one_elimination_removes_a_dead_chain_that_spans_blocks() {
+        let mut cfg: Cfg<DfInst> = Cfg::new();
+        let second = cfg.new_block();
+        let third = cfg.new_block();
+        cfg.block_mut(cfg.entry())
+            .push(df_op("a", "add", 10, &[0, 2]));
+        cfg.block_mut(second).push(df_op("b", "add", 11, &[10, 10]));
+        cfg.block_mut(third).push(df_op("c", "add", 12, &[11, 11]));
+        cfg.block_mut(third).push(df_use("print", 0));
+        cfg.add_edge(cfg.entry(), second, EdgeKind::Fallthrough);
+        cfg.add_edge(second, third, EdgeKind::Fallthrough);
+
+        assert_eq!(dead_code_elimination(&mut cfg), 3);
+        assert_eq!(cfg.block(third).instructions().len(), 1);
     }
 
     #[test]
