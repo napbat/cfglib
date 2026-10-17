@@ -125,27 +125,69 @@ fn block_depths_count_the_natural_loops_containing_each_block() {
     assert!(looping > 40, "only {looping} of the graphs had a loop");
 }
 
+/// Whether every back edge the builder tagged closes onto a header that
+/// dominates its tail: the only case with a textbook natural loop.
+fn tags_are_natural(shape: &Shape) -> bool {
+    shape
+        .tagged
+        .iter()
+        .all(|&(tail, header)| dominates(&shape.successors, header, tail))
+}
+
 #[test]
-fn tagged_depths_also_count_the_loops_a_builder_marked_back_edge_closes() {
-    let mut differing = 0;
+fn tags_on_natural_back_edges_add_nothing_to_the_dominance_loops() {
+    let mut natural = 0;
+    for seed in 0..150 {
+        let shape = random_shape(seed);
+        if !tags_are_natural(&shape) {
+            continue;
+        }
+        natural += 1;
+        let tagged = cfg_block_nesting_depths(&shape.cfg);
+        assert_eq!(tagged, loop_counts(&shape, true), "seed {seed}");
+        assert_eq!(
+            tagged,
+            block_nesting_depths(&shape.cfg),
+            "seed {seed}: dominance already finds these loops"
+        );
+    }
+    assert!(natural > 20, "only {natural} graphs had natural tags only");
+}
+
+#[test]
+fn a_tagged_edge_into_a_non_dominating_header_still_puts_both_ends_inside_a_loop() {
+    let mut irreducible = 0;
     for seed in 0..150 {
         let shape = random_shape(seed);
         let tagged = cfg_block_nesting_depths(&shape.cfg);
-        assert_eq!(tagged, loop_counts(&shape, true), "seed {seed}");
-        let untagged = block_nesting_depths(&shape.cfg);
-        assert!(
-            tagged
-                .iter()
-                .zip(&untagged)
-                .all(|(with, without)| with >= without),
-            "seed {seed}: tags only add loops"
-        );
-        differing += usize::from(tagged != untagged);
+        for &(tail, header) in &shape.tagged {
+            assert!(tagged[header] >= 1, "seed {seed}: header bb{header}");
+            assert!(tagged[tail] >= 1, "seed {seed}: latch bb{tail}");
+        }
+        irreducible += usize::from(!tags_are_natural(&shape));
     }
     assert!(
-        differing > 5,
-        "no random graph had an irreducible tagged edge: {differing}"
+        irreducible > 5,
+        "no random graph had an irreducible tagged edge: {irreducible}"
     );
+}
+
+#[test]
+fn under_dominance_the_entry_block_is_inside_only_the_loop_it_heads() {
+    for seed in 0..150 {
+        let shape = random_shape(seed);
+        let size = shape.successors.len();
+        let entry_heads_a_loop = (0..size).any(|tail| {
+            shape.successors[tail].contains(&0) && dominates(&shape.successors, 0, tail)
+        });
+        // Loops with one header merge, so the entry heads at most one.
+        let allowed = usize::from(entry_heads_a_loop);
+
+        assert!(
+            block_nesting_depths(&shape.cfg)[0] <= allowed,
+            "seed {seed}: the entry dominates every block, so no other header can enclose it"
+        );
+    }
 }
 
 #[test]
