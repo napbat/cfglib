@@ -1,4 +1,5 @@
 use super::*;
+use crate::graph::edge_view::FilteredEdges;
 use crate::{BlockId, Cfg, Edge, EdgeKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -262,4 +263,204 @@ fn a_removed_seed_panics() {
     let removed = cfg.new_block();
     assert!(cfg.remove_block(removed));
     let _ = solve_edge_problem_from(&cfg, &EveryNodeIsBoundary, &[removed]);
+}
+
+/// `entry` fans out to a normal target, two handlers and an unwind target.
+fn routed_cfg() -> (Cfg<(), Route>, BlockId) {
+    let mut cfg = Cfg::<(), Route>::with_edge_payload();
+    let entry = cfg.entry();
+    let routes = [
+        (EdgeKind::Fallthrough, Route::Normal),
+        (EdgeKind::ExceptionHandler, Route::Handler(0)),
+        (EdgeKind::ExceptionHandler, Route::Handler(1)),
+        (EdgeKind::ExceptionUnwind, Route::Unwind),
+    ];
+    for (kind, route) in routes {
+        let target = cfg.new_block();
+        cfg.add_edge_with_payload(entry, target, kind, route);
+    }
+    (cfg, entry)
+}
+
+fn solver_error<F>(result: Result<F, TrySolveError<Infallible>>) -> SolveError {
+    match result {
+        Err(TrySolveError::Solver(error)) => error,
+        Err(TrySolveError::Problem(never)) => match never {},
+        Ok(_) => panic!("the solve stayed within its step limit"),
+    }
+}
+
+#[test]
+fn every_entry_point_of_the_matrix_reaches_the_same_fixpoint() {
+    let (cfg, entry) = routed_cfg();
+    let problem = PreAndPost { entry };
+    let infallible = InfallibleProblem(&problem);
+    let all: Vec<BlockId> = cfg.block_ids().collect();
+    let config = SolveConfig::new();
+    let full = solve_edge_problem(&cfg, &problem).unwrap();
+
+    assert_eq!(
+        solve_edge_problem_with_config(&cfg, &problem, config).unwrap(),
+        full
+    );
+    assert_eq!(solve_edge_problem_from(&cfg, &problem, &all).unwrap(), full);
+    assert_eq!(
+        solve_edge_problem_from_with_config(&cfg, &problem, &all, config).unwrap(),
+        full
+    );
+    assert_eq!(try_solve_edge_problem(&cfg, &infallible).unwrap(), full);
+    assert_eq!(
+        try_solve_edge_problem_with_config(&cfg, &infallible, config).unwrap(),
+        full
+    );
+    assert_eq!(
+        try_solve_edge_problem_from(&cfg, &infallible, &all).unwrap(),
+        full
+    );
+    assert_eq!(
+        try_solve_edge_problem_from_with_config(&cfg, &infallible, &all, config).unwrap(),
+        full
+    );
+}
+
+#[test]
+fn every_entry_point_of_the_matrix_enforces_the_step_limit() {
+    let (cfg, entry) = routed_cfg();
+    let problem = PreAndPost { entry };
+    let infallible = InfallibleProblem(&problem);
+    let all: Vec<BlockId> = cfg.block_ids().collect();
+    let steps = solve_edge_problem(&cfg, &problem).unwrap().steps();
+    let exact = SolveConfig::with_step_limit(steps);
+    let short = SolveConfig::with_step_limit(steps - 1);
+
+    assert!(solve_edge_problem_with_config(&cfg, &problem, exact).is_ok());
+    assert!(solve_edge_problem_from_with_config(&cfg, &problem, &all, exact).is_ok());
+    assert!(try_solve_edge_problem_with_config(&cfg, &infallible, exact).is_ok());
+    assert!(try_solve_edge_problem_from_with_config(&cfg, &infallible, &all, exact).is_ok());
+
+    let errors = [
+        solve_edge_problem_with_config(&cfg, &problem, short).unwrap_err(),
+        solve_edge_problem_from_with_config(&cfg, &problem, &all, short).unwrap_err(),
+        solver_error(try_solve_edge_problem_with_config(&cfg, &infallible, short)),
+        solver_error(try_solve_edge_problem_from_with_config(
+            &cfg,
+            &infallible,
+            &all,
+            short,
+        )),
+    ];
+    let SolveError::StepLimitExceeded {
+        limit, steps: done, ..
+    } = errors[0];
+    assert_eq!((limit, done), (steps - 1, steps - 1));
+    for error in errors {
+        assert_eq!(error, errors[0], "every path reports the same pending node");
+    }
+}
+
+/// Marks the first node and passes the mark along every edge.
+struct MarkFirstForward;
+
+impl<G: EdgeView> EdgeProblem<G> for MarkFirstForward {
+    type Fact = u8;
+
+    fn direction(&self) -> Direction {
+        Direction::Forward
+    }
+
+    fn bottom(&self, _graph: &G) -> Self::Fact {
+        0
+    }
+
+    fn boundary(&self, _graph: &G, node: G::NodeId) -> Option<Self::Fact> {
+        (node.index() == 0).then_some(1)
+    }
+
+    fn meet(&self, left: &Self::Fact, right: &Self::Fact) -> Self::Fact {
+        left | right
+    }
+
+    fn transfer_node(&self, _graph: &G, _node: G::NodeId, input: &Self::Fact) -> Self::Fact {
+        *input
+    }
+}
+
+/// Marks every node without an outgoing edge and passes the mark back along
+/// every edge.
+struct MarkExitsBackward;
+
+impl<G: EdgeView> EdgeProblem<G> for MarkExitsBackward {
+    type Fact = u8;
+
+    fn direction(&self) -> Direction {
+        Direction::Backward
+    }
+
+    fn bottom(&self, _graph: &G) -> Self::Fact {
+        0
+    }
+
+    fn boundary(&self, graph: &G, node: G::NodeId) -> Option<Self::Fact> {
+        graph.outgoing(node).next().is_none().then_some(1)
+    }
+
+    fn meet(&self, left: &Self::Fact, right: &Self::Fact) -> Self::Fact {
+        left | right
+    }
+
+    fn transfer_node(&self, _graph: &G, _node: G::NodeId, input: &Self::Fact) -> Self::Fact {
+        *input
+    }
+}
+
+#[test]
+fn a_backward_solve_carries_the_exit_mark_to_every_ancestor() {
+    let mut cfg = Cfg::<(), Route>::with_edge_payload();
+    let middle = cfg.new_block();
+    let exit = cfg.new_block();
+    let island = cfg.new_block();
+    let first =
+        cfg.add_edge_with_payload(cfg.entry(), middle, EdgeKind::Fallthrough, Route::Normal);
+    let second = cfg.add_edge_with_payload(middle, exit, EdgeKind::Fallthrough, Route::Normal);
+
+    let full = solve_edge_problem(&cfg, &MarkExitsBackward).unwrap();
+    for block in [cfg.entry(), middle, exit, island] {
+        assert_eq!(full.fact_in(block), &1, "{block}");
+        assert_eq!(full.fact_out(block), &1, "{block}");
+    }
+    assert_eq!(full.fact_on(first), Some(&1));
+    assert_eq!(full.fact_on(second), Some(&1));
+
+    // Seeding the exit alone carries the change up through its ancestors
+    // and never visits the island.
+    let from_exit = solve_edge_problem_from(&cfg, &MarkExitsBackward, &[exit]).unwrap();
+    assert_eq!(from_exit.fact_in(cfg.entry()), &1);
+    assert_eq!(from_exit.fact_in(island), &0);
+    assert_eq!(from_exit.steps(), 3);
+}
+
+#[test]
+fn a_filtered_view_solves_without_its_excluded_edges() {
+    let mut cfg = Cfg::<(), Route>::with_edge_payload();
+    let kept_target = cfg.new_block();
+    let cut_target = cfg.new_block();
+    let kept = cfg.add_edge_with_payload(
+        cfg.entry(),
+        kept_target,
+        EdgeKind::Fallthrough,
+        Route::Normal,
+    );
+    let cut = cfg.add_edge_with_payload(
+        cfg.entry(),
+        cut_target,
+        EdgeKind::Fallthrough,
+        Route::Normal,
+    );
+    let view = FilteredEdges::new(&cfg, |edge: crate::EdgeId, _: &Edge<Route>| edge != cut);
+
+    let facts = solve_edge_problem(&view, &MarkFirstForward).unwrap();
+    assert_eq!(facts.fact_in(kept_target), &1);
+    assert_eq!(facts.fact_in(cut_target), &0, "its only edge is excluded");
+    assert_eq!(facts.fact_on(kept), Some(&1));
+    assert_eq!(facts.fact_on(cut), None, "an excluded edge carries no fact");
 }

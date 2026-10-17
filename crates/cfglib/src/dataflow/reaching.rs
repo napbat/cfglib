@@ -365,7 +365,7 @@ mod tests {
             at(u32::MAX as usize, 0),
             at(u32::MAX as usize, usize::MAX),
         ];
-        // Neighbouring variables carry the same extreme sites, so a run that
+        // Neighboring variables carry the same extreme sites, so a run that
         // overshot either end would pick them up.
         let mut set: BTreeSet<ReachingDef<u16>> = [0, 1, 2]
             .into_iter()

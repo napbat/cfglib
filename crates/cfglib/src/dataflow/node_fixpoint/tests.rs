@@ -273,3 +273,85 @@ fn a_removed_seed_panics() {
     assert!(graph.remove_node(island));
     let _ = solve_node_problem_from(&graph, &Taint::forward(alloc::vec![]), &[island]);
 }
+
+fn assert_same_facts(
+    graph: &Graph<&'static str, ()>,
+    expected: &NodeFacts<bool>,
+    actual: &NodeFacts<bool>,
+) {
+    assert_eq!(actual.steps(), expected.steps());
+    for node in graph.node_ids() {
+        assert_eq!(actual.fact_in(node), expected.fact_in(node));
+        assert_eq!(actual.fact_out(node), expected.fact_out(node));
+    }
+}
+
+fn solver_error<F>(result: Result<F, TrySolveError<Infallible>>) -> SolveError {
+    match result {
+        Err(TrySolveError::Solver(error)) => error,
+        Err(TrySolveError::Problem(never)) => match never {},
+        Ok(_) => panic!("the solve stayed within its step limit"),
+    }
+}
+
+#[test]
+fn every_entry_point_of_the_matrix_reaches_the_same_fixpoint() {
+    let (graph, [source, ..]) = flow_fixture();
+    let problem = Taint::forward(alloc::vec![source]);
+    let infallible = InfallibleNodeProblem(&problem);
+    let all: alloc::vec::Vec<NodeId> = graph.node_ids().collect();
+    let config = SolveConfig::new();
+    let full = solve_node_problem(&graph, &problem).unwrap();
+
+    let variants = [
+        solve_node_problem_with_config(&graph, &problem, config).unwrap(),
+        solve_node_problem_from(&graph, &problem, &all).unwrap(),
+        solve_node_problem_from_with_config(&graph, &problem, &all, config).unwrap(),
+        try_solve_node_problem(&graph, &infallible).unwrap(),
+        try_solve_node_problem_with_config(&graph, &infallible, config).unwrap(),
+        try_solve_node_problem_from(&graph, &infallible, &all).unwrap(),
+        try_solve_node_problem_from_with_config(&graph, &infallible, &all, config).unwrap(),
+    ];
+    for variant in &variants {
+        assert_same_facts(&graph, &full, variant);
+    }
+}
+
+#[test]
+fn every_entry_point_of_the_matrix_enforces_the_step_limit() {
+    let (graph, [source, ..]) = flow_fixture();
+    let problem = Taint::forward(alloc::vec![source]);
+    let infallible = InfallibleNodeProblem(&problem);
+    let all: alloc::vec::Vec<NodeId> = graph.node_ids().collect();
+    let steps = solve_node_problem(&graph, &problem).unwrap().steps();
+    let exact = SolveConfig::with_step_limit(steps);
+    let short = SolveConfig::with_step_limit(steps - 1);
+
+    assert!(solve_node_problem_with_config(&graph, &problem, exact).is_ok());
+    assert!(solve_node_problem_from_with_config(&graph, &problem, &all, exact).is_ok());
+    assert!(try_solve_node_problem_with_config(&graph, &infallible, exact).is_ok());
+    assert!(try_solve_node_problem_from_with_config(&graph, &infallible, &all, exact).is_ok());
+
+    let errors = [
+        solve_node_problem_with_config(&graph, &problem, short).unwrap_err(),
+        solve_node_problem_from_with_config(&graph, &problem, &all, short).unwrap_err(),
+        solver_error(try_solve_node_problem_with_config(
+            &graph,
+            &infallible,
+            short,
+        )),
+        solver_error(try_solve_node_problem_from_with_config(
+            &graph,
+            &infallible,
+            &all,
+            short,
+        )),
+    ];
+    let SolveError::StepLimitExceeded {
+        limit, steps: done, ..
+    } = errors[0];
+    assert_eq!((limit, done), (steps - 1, steps - 1));
+    for error in errors {
+        assert_eq!(error, errors[0], "every path reports the same pending node");
+    }
+}

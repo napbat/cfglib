@@ -1,6 +1,6 @@
 //! Abstract interpretation framework.
 //!
-//! Generalises the fixpoint engine to work over arbitrary lattices,
+//! Generalizes the fixpoint engine to work over arbitrary lattices,
 //! enabling interval analysis, sign analysis, taint tracking, etc.
 //!
 //! Internally delegates to the [edge-sensitive solver](super::edge_fixpoint),
