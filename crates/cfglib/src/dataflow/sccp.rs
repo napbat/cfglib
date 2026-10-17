@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
-use crate::dataflow::constant_propagation::{ConstValue, ConstantFolder};
+use crate::dataflow::constant_propagation::{ConstValue, ConstantFolder, fold_definitions};
 use crate::dataflow::ssa::{SsaForm, SsaInstruction, SsaValue};
 use crate::dataflow::{InstrInfo, VariableId};
 use crate::edge::{EdgeKind, KindedEdge};
@@ -55,9 +55,11 @@ fn is_below<I: ConstantFolder>(lower: &ConstValue<I::Const>, upper: &ConstValue<
     }
 }
 
+/// Meet `candidate` into the value of `value`, recording in `changed` that
+/// the value moved down the lattice.
 fn update_value<I: ConstantFolder>(
     values: &mut BTreeMap<SsaValue<I::Variable>, ConstValue<I::Const>>,
-    worklist: &mut Vec<SsaValue<I::Variable>>,
+    changed: &mut bool,
     value: &SsaValue<I::Variable>,
     candidate: ConstValue<I::Const>,
 ) {
@@ -69,7 +71,7 @@ fn update_value<I: ConstantFolder>(
     );
     if next != previous {
         values.insert(value.clone(), next);
-        worklist.push(value.clone());
+        *changed = true;
     }
 }
 
@@ -97,7 +99,7 @@ fn evaluate_block<G, I>(
     ssa: &SsaForm<I::Variable>,
     block: BlockId,
     values: &mut BTreeMap<SsaValue<I::Variable>, ConstValue<I::Const>>,
-    worklist: &mut Vec<SsaValue<I::Variable>>,
+    changed: &mut bool,
 ) where
     G: CfgView<Inst = I>,
     I: ConstantFolder,
@@ -108,26 +110,11 @@ fn evaluate_block<G, I>(
         .zip(&ssa.block(block).instructions)
     {
         let known = known_constants(annotation, values);
-
-        if let Some((variable, constant)) = instruction.fold_constant(&known) {
-            // The folder answers for ONE def; every co-defined variable of a
-            // multi-def instruction was still redefined and must bottom.
-            for definition in annotation.defs() {
-                if definition.variable == variable {
-                    update_value::<I>(
-                        values,
-                        worklist,
-                        definition,
-                        ConstValue::Const(constant.clone()),
-                    );
-                } else {
-                    update_value::<I>(values, worklist, definition, ConstValue::Bottom);
-                }
-            }
-        } else {
-            for definition in annotation.defs() {
-                update_value::<I>(values, worklist, definition, ConstValue::Bottom);
-            }
+        // The renamer gives each source definition one SSA definition, in
+        // the same order, so the two sequences zip.
+        for ((_, value), definition) in fold_definitions(instruction, &known).zip(annotation.defs())
+        {
+            update_value::<I>(values, changed, definition, value);
         }
     }
 }
@@ -189,15 +176,16 @@ fn activate_successors<G, I>(
 }
 
 /// Re-meet every phi of `block` over its currently executable incoming
-/// edges. Called when an edge activates AND from the value-worklist drain:
-/// a phi whose operand lowers after all its edges are already executable
-/// must be re-evaluated, or it keeps a stale over-optimistic constant.
+/// edges. Called when an edge activates AND from the rescan after a value
+/// lowers: a phi whose operand lowers after all its edges are already
+/// executable must be re-evaluated, or it keeps a stale over-optimistic
+/// constant.
 fn evaluate_phis<I: ConstantFolder>(
     ssa: &SsaForm<I::Variable>,
     block: BlockId,
     executable_edges: &BTreeSet<(BlockId, BlockId)>,
     values: &mut BTreeMap<SsaValue<I::Variable>, ConstValue<I::Const>>,
-    worklist: &mut Vec<SsaValue<I::Variable>>,
+    changed: &mut bool,
 ) {
     for phi in &ssa.block(block).phis {
         let mut candidate = ConstValue::Top;
@@ -206,7 +194,7 @@ fn evaluate_phis<I: ConstantFolder>(
                 candidate = candidate.meet_with(lattice_of(values, operand), I::meet_constants);
             }
         }
-        update_value::<I>(values, worklist, &phi.result, candidate);
+        update_value::<I>(values, changed, &phi.result, candidate);
     }
 }
 
@@ -271,10 +259,10 @@ impl<V: VariableId, C: Clone + Eq> SccpAnalysis<V, C> {
         let mut executable_edges = BTreeSet::new();
         let mut reachable_blocks = BTreeSet::new();
         let mut cfg_worklist = Vec::new();
-        let mut ssa_worklist = Vec::new();
+        let mut changed = false;
 
         reachable_blocks.insert(cfg.root());
-        evaluate_block(cfg, ssa, cfg.root(), &mut values, &mut ssa_worklist);
+        evaluate_block(cfg, ssa, cfg.root(), &mut values, &mut changed);
         activate_successors(
             cfg,
             ssa,
@@ -284,23 +272,17 @@ impl<V: VariableId, C: Clone + Eq> SccpAnalysis<V, C> {
             &mut cfg_worklist,
         );
 
-        while !cfg_worklist.is_empty() || !ssa_worklist.is_empty() {
+        while !cfg_worklist.is_empty() || changed {
             while let Some((source, target)) = cfg_worklist.pop() {
                 if !executable_edges.insert((source, target)) {
                     continue;
                 }
 
                 let newly_reachable = reachable_blocks.insert(target);
-                evaluate_phis::<G::Inst>(
-                    ssa,
-                    target,
-                    &executable_edges,
-                    &mut values,
-                    &mut ssa_worklist,
-                );
+                evaluate_phis::<G::Inst>(ssa, target, &executable_edges, &mut values, &mut changed);
 
                 if newly_reachable {
-                    evaluate_block(cfg, ssa, target, &mut values, &mut ssa_worklist);
+                    evaluate_block(cfg, ssa, target, &mut values, &mut changed);
                     activate_successors(
                         cfg,
                         ssa,
@@ -312,24 +294,25 @@ impl<V: VariableId, C: Clone + Eq> SccpAnalysis<V, C> {
                 }
             }
 
-            // Re-evaluate once per batch of lowered values. The value identity
-            // is not yet used to target a consumer, so K entries must not
-            // trigger K identical whole-program scans. Changes found during a
-            // scan form the next batch, which still handles phis whose operands
-            // lower after all incoming edges activated. Each scan also
-            // re-derives branch edges, so a predicate that lowers here
-            // activates the arm its earlier constant had withheld.
-            while !ssa_worklist.is_empty() {
-                ssa_worklist.clear();
+            // Rescan every reachable block once per batch of lowered values.
+            // The scan finds its dependents by re-evaluating each block, not
+            // from a per-value users index, so it runs once per batch rather
+            // than once per lowered value. Changes found during a scan form
+            // the next batch, which still handles phis whose operands lower
+            // after all incoming edges activated. Each scan also re-derives
+            // branch edges, so a predicate that lowers here activates the
+            // arm its earlier constant had withheld.
+            while changed {
+                changed = false;
                 for &block in &reachable_blocks {
                     evaluate_phis::<G::Inst>(
                         ssa,
                         block,
                         &executable_edges,
                         &mut values,
-                        &mut ssa_worklist,
+                        &mut changed,
                     );
-                    evaluate_block(cfg, ssa, block, &mut values, &mut ssa_worklist);
+                    evaluate_block(cfg, ssa, block, &mut values, &mut changed);
                     activate_successors(
                         cfg,
                         ssa,
@@ -357,7 +340,7 @@ mod tests {
     use crate::cfg::Cfg;
     use crate::dataflow::constant_propagation::constant_propagation;
     use crate::graph::dominator::DominatorTree;
-    use crate::test_util::{DfInst, df_const, df_def, df_pred, df_use};
+    use crate::test_util::{DfInst, df_const, df_def, df_ff, df_pred, df_use};
 
     /// A test constant domain whose meet is not equality: two exact values
     /// of the same sign keep that sign instead of dropping to bottom.
@@ -509,6 +492,25 @@ mod tests {
     }
 
     #[test]
+    fn a_folded_multi_definition_bottoms_the_co_defined_values() {
+        // The folder answers for the first definition only. The second one
+        // was redefined too, so it cannot keep a constant.
+        let mut cfg = Cfg::<DfInst>::new();
+        cfg.block_mut(cfg.entry()).push(DfInst {
+            defs: alloc::vec![0, 1],
+            constant: Some(3),
+            ..df_ff("pair")
+        });
+        let dom = DominatorTree::compute(&cfg);
+        let ssa = SsaForm::compute(&cfg, &dom);
+        let defs = ssa.block(cfg.entry()).instructions[0].defs();
+        let result = SccpAnalysis::compute(&cfg, &ssa);
+
+        assert_eq!(result.values[&defs[0]], ConstValue::Const(3));
+        assert_eq!(result.values[&defs[1]], ConstValue::Bottom);
+    }
+
+    #[test]
     fn unreachable_block_is_excluded() {
         let mut cfg = Cfg::<DfInst>::new();
         let reachable = cfg.new_block();
@@ -609,7 +611,7 @@ mod tests {
         cfg.block_mut(body).push(DfInst {
             defs: alloc::vec![0],
             uses: alloc::vec![0, 1],
-            ..crate::test_util::df_ff("x_varies")
+            ..df_ff("x_varies")
         });
         cfg.block_mut(exit).push(df_use("after", 0));
         cfg.add_edge(cfg.entry(), header, EdgeKind::Fallthrough);
@@ -754,7 +756,7 @@ mod tests {
         cfg.block_mut(body).push(DfInst {
             defs: alloc::vec![0],
             uses: alloc::vec![0, 1],
-            ..crate::test_util::df_ff("x_varies")
+            ..df_ff("x_varies")
         });
         cfg.block_mut(exit).push(df_use("after", 0));
         cfg.add_edge(cfg.entry(), header, EdgeKind::Fallthrough);
