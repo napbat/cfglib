@@ -866,4 +866,30 @@ mod tests {
         );
         assert!(live.live_before_instructions(&cfg, protected)[0].is_empty());
     }
+
+    /// `LivenessProblem` documents itself as sound but coarser than
+    /// `Liveness` where unwinds are involved: a throw keeps everything live
+    /// after the block live before it. So every variable `Liveness` finds
+    /// live is live in the problem's facts, and the problem finds more where
+    /// a throw precedes the write that the normal path reads.
+    #[test]
+    fn the_block_problem_over_approximates_the_unwind_aware_liveness() {
+        let (mut cfg, [protected, normal, handler]) = protected_region([call(), def("result", 0)]);
+        cfg.block_mut(normal).push(use_("success", 0));
+        cfg.block_mut(handler).push(use_("catch", 1));
+
+        let precise = Liveness::compute(&cfg);
+        let coarse = fixpoint::solve_problem(&cfg, &LivenessProblem).unwrap();
+        for block in cfg.block_ids() {
+            assert!(
+                precise.live_in(block).is_subset(coarse.fact_in(block)),
+                "{block}: the problem must not miss a variable Liveness keeps"
+            );
+        }
+        assert!(!precise.is_live_in(&0, protected));
+        assert!(
+            coarse.fact_in(protected).contains(&0),
+            "the throw before the write keeps the normal read live in the coarse problem"
+        );
+    }
 }
