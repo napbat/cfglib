@@ -12,6 +12,7 @@
 //!   the test module's location and fence vocabularies.
 //! - [`shapes`] — block-and-edge shapes shared by the reusable-scratch
 //!   differential tests.
+//! - [`protected_region`] — one block that can unwind into a handler.
 //!
 //! `DfInst` implements **all** instruction traits (`FlowControl`,
 //! `DisplayInstr`, `InstrInfo`, `EffectInfo`, `Predicated`, `CopySource`,
@@ -22,15 +23,17 @@ mod dataflow_inst;
 pub(crate) mod golden;
 mod memory_inst;
 mod mock_inst;
+mod protected;
 pub(crate) mod shapes;
 mod ud_inst;
 mod vn_inst;
 
 pub(crate) use dataflow_inst::{
     DfInst, TestEffect, df_call, df_const, df_copy, df_def, df_ff, df_impure, df_op, df_pred,
-    df_pure, df_use, df_with_effect,
+    df_pure, df_throwing, df_use, df_with_effect,
 };
 pub(crate) use memory_inst::MemInst;
 pub(crate) use mock_inst::{MockInst, diamond_cfg, ff};
+pub(crate) use protected::protected_region;
 pub(crate) use ud_inst::{UdInst, ud_inst};
 pub(crate) use vn_inst::{VnInst, vn_impure, vn_inst, vn_throwing};
