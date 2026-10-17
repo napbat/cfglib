@@ -1,11 +1,10 @@
 //! Cleanup passes: simplify, merge, empty-block bypass, unreachable removal,
-//! edge contraction, and node splitting.
+//! edge contraction, and block splitting.
 
 use cfglib::{
     Cfg, EdgeKind, SplitPointError, contract_edge, contract_edge_mapped, merge_blocks,
     merge_blocks_mapped, remove_empty_blocks, remove_empty_blocks_mapped, remove_unreachable,
-    remove_unreachable_mapped, simplify, simplify_mapped, split_node, split_node_at_points,
-    split_node_with_payload_mapped,
+    remove_unreachable_mapped, simplify, simplify_mapped,
 };
 
 use crate::oracles::{
@@ -401,16 +400,16 @@ fn block_with_exits<E: Payload>() -> (Cfg<Inst, E>, cfglib::BlockId, [cfglib::Ed
 fn split_points_case<E: Payload>() {
     let (mut cfg, block, exits) = block_with_exits::<E>();
     let original: Vec<Inst> = cfg.block(block).instructions().to_vec();
-    let (parts, rewrite) = split_node_at_points(
-        &mut cfg,
-        block,
-        [
-            (0, E::tagged(100)),
-            (2, E::tagged(101)),
-            (5, E::tagged(102)),
-        ],
-    )
-    .expect("strictly increasing in-bounds points");
+    let (parts, rewrite) = cfg
+        .split_block_at_points_with_payloads(
+            block,
+            [
+                (0, E::tagged(100)),
+                (2, E::tagged(101)),
+                (5, E::tagged(102)),
+            ],
+        )
+        .expect("strictly increasing in-bounds points");
 
     assert_eq!(parts.len(), 4);
     assert_eq!(parts[0], block);
@@ -462,13 +461,13 @@ fn split_points_case<E: Payload>() {
 }
 
 #[test]
-fn split_node_at_points_partitions_a_block_and_hands_its_exits_to_the_last_part() {
+fn splitting_at_points_partitions_a_block_and_hands_its_exits_to_the_last_part() {
     split_points_case::<()>();
     split_points_case::<Route>();
 }
 
 #[test]
-fn split_node_at_points_rejects_bad_points_before_touching_the_graph() {
+fn splitting_at_bad_points_is_rejected_before_touching_the_graph() {
     let (mut cfg, block, _) = block_with_exits::<Route>();
     let before = cfg.clone();
     let points = |points: &[usize]| {
@@ -479,21 +478,24 @@ fn split_node_at_points_rejects_bad_points_before_touching_the_graph() {
     };
 
     assert_eq!(
-        split_node_at_points(&mut cfg, block, points(&[1, 6])).unwrap_err(),
+        cfg.split_block_at_points_with_payloads(block, points(&[1, 6]))
+            .unwrap_err(),
         SplitPointError::OutOfBounds {
             point: 6,
             instruction_count: 5
         }
     );
     assert_eq!(
-        split_node_at_points(&mut cfg, block, points(&[3, 3])).unwrap_err(),
+        cfg.split_block_at_points_with_payloads(block, points(&[3, 3]))
+            .unwrap_err(),
         SplitPointError::NotStrictlyIncreasing {
             previous: 3,
             point: 3
         }
     );
     assert_eq!(
-        split_node_at_points(&mut cfg, block, points(&[4, 2])).unwrap_err(),
+        cfg.split_block_at_points_with_payloads(block, points(&[4, 2]))
+            .unwrap_err(),
         SplitPointError::NotStrictlyIncreasing {
             previous: 4,
             point: 2
@@ -507,7 +509,7 @@ fn split_everywhere_case<E: Payload>(seed: u64) {
     for block in before.block_ids() {
         for at in 0..=before.block(block).instructions().len() {
             let mut cfg = before.clone();
-            let tail = split_node(&mut cfg, block, at);
+            let tail = cfg.split_block(block, at);
             let context = format!("seed {seed}, {block} at {at}");
             assert_valid(&cfg, &context);
             assert_same_behavior(&before, &cfg, &context);
@@ -526,7 +528,7 @@ fn split_everywhere_case<E: Payload>(seed: u64) {
 }
 
 #[test]
-fn split_node_preserves_behavior_at_every_instruction_boundary() {
+fn splitting_preserves_behavior_at_every_instruction_boundary() {
     for seed in 0..12 {
         split_everywhere_case::<()>(seed);
         split_everywhere_case::<Route>(seed);
@@ -534,9 +536,9 @@ fn split_node_preserves_behavior_at_every_instruction_boundary() {
 }
 
 #[test]
-fn split_node_with_payload_mapped_reports_the_new_tail_and_edge() {
+fn a_mapped_split_reports_the_new_tail_and_edge() {
     let (mut cfg, block, exits) = block_with_exits::<Route>();
-    let (tail, rewrite) = split_node_with_payload_mapped(&mut cfg, block, 3, Route::Tagged(77));
+    let (tail, rewrite) = cfg.split_block_with_payload_mapped(block, 3, Route::Tagged(77));
 
     assert_eq!(rewrite.blocks(block), Some([block, tail].as_slice()));
     assert_eq!(rewrite.created_blocks(), [tail]);

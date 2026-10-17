@@ -8,10 +8,26 @@ use cfglib::{BlockId, BlockOrder, Cfg, EdgeKind, LinearInst, linearize};
 use crate::programs::{Rng, random_program};
 use crate::toy::{Builder, INPUTS, Inst, Kind, OBSERVED, ToyEmitter, run, run_linear};
 
-/// The one place that calls the linearizer, so a signature change touches a
-/// single line.
+/// A linearizer's answer, whether or not linearizing can fail.
+pub trait Stream {
+    fn stream(self) -> Vec<LinearInst<Inst>>;
+}
+
+impl Stream for Vec<LinearInst<Inst>> {
+    fn stream(self) -> Self {
+        self
+    }
+}
+
+impl<E: std::fmt::Debug> Stream for Result<Vec<LinearInst<Inst>>, E> {
+    fn stream(self) -> Vec<LinearInst<Inst>> {
+        self.expect("every toy block that branches has an instruction to branch on")
+    }
+}
+
+/// The one place that calls the linearizer.
 pub fn linearized(cfg: &Cfg<Inst>, order: BlockOrder) -> Vec<LinearInst<Inst>> {
-    linearize(cfg, order, &ToyEmitter)
+    linearize(cfg, order, &ToyEmitter).stream()
 }
 
 fn layout_of(stream: &[LinearInst<Inst>]) -> Vec<BlockId> {
