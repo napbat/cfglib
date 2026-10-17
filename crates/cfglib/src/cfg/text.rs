@@ -19,8 +19,10 @@
 //!
 //! Instruction lines are the only indented lines inside a block, and handler
 //! lines the only indented lines inside a region, so the reader never has to
-//! guess what an indented line belongs to. Labels are escaped exactly as the
-//! store's text form escapes them.
+//! guess what an indented line belongs to. Labels and instruction text are
+//! escaped exactly as the store's text form escapes them, so an instruction
+//! that starts with `#` or with whitespace still reads back as that
+//! instruction rather than as a comment, a blank line, or indentation.
 //!
 //! # What it is not
 //!

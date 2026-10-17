@@ -22,8 +22,12 @@
 //! the order the parser replays them in.
 //!
 //! A label is escaped so it cannot be mistaken for structure: `\\` is a
-//! backslash, `\n` a line break, and `\-` a leading hyphen — the one
-//! character that could otherwise let a node label read as an arrow.
+//! backslash, `\n` a line break, and `\r` a carriage return. The first
+//! character of a label is escaped further when it could be read as
+//! something else: `\-` for a hyphen (a node label could otherwise read as an
+//! arrow), `\#` for a number sign (a line could otherwise read as a comment),
+//! and `\u{20}`, with the code point in hexadecimal, for whitespace (a line
+//! could otherwise read as blank or as indentation).
 //!
 //! # What it is not
 //!
@@ -241,7 +245,13 @@ impl fmt::Write for EscapingSink<'_> {
                 '\\' => self.sink.write_str("\\\\")?,
                 '\n' => self.sink.write_str("\\n")?,
                 '\r' => self.sink.write_str("\\r")?,
-                '-' if self.at_start => self.sink.write_str("\\-")?,
+                '-' | '#' if self.at_start => {
+                    self.sink.write_char('\\')?;
+                    self.sink.write_char(ch)?;
+                }
+                _ if self.at_start && ch.is_whitespace() => {
+                    write!(self.sink, "\\u{{{:x}}}", u32::from(ch))?;
+                }
                 _ => self.sink.write_char(ch)?,
             }
             self.at_start = false;
@@ -263,11 +273,37 @@ pub(crate) fn unescape(label: &str, line: usize) -> Result<String, TextError> {
             Some('\\') => out.push('\\'),
             Some('n') => out.push('\n'),
             Some('r') => out.push('\r'),
-            Some('-') => out.push('-'),
+            Some(escaped @ ('-' | '#')) => out.push(escaped),
+            Some('u') => out.push(
+                code_point(&mut characters)
+                    .ok_or_else(|| TextError::new(line, TextErrorKind::Escape))?,
+            ),
             _ => return Err(TextError::new(line, TextErrorKind::Escape)),
         }
     }
     Ok(out)
+}
+
+/// The code point of a `\u{…}` escape, whose `\u` has been read.
+fn code_point(characters: &mut core::str::Chars<'_>) -> Option<char> {
+    if characters.next()? != '{' {
+        return None;
+    }
+    let mut value = 0_u32;
+    let mut digits = 0;
+    loop {
+        match characters.next()? {
+            '}' => break,
+            digit => {
+                value = value.checked_mul(16)?.checked_add(digit.to_digit(16)?)?;
+                digits += 1;
+            }
+        }
+    }
+    if digits == 0 {
+        return None;
+    }
+    char::from_u32(value)
 }
 
 /// The dense index named by `token`, which must be `prefix` then digits.

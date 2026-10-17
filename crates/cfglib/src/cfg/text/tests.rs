@@ -10,6 +10,8 @@ use crate::edge::EdgeKind;
 use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
 use crate::test_util::golden::assert_golden;
 
+use crate::TextError;
+
 use super::parse_cfg_text;
 
 /// The instruction the CFG text form round trips: its own line, verbatim.
@@ -22,12 +24,9 @@ impl DisplayInstr for Line {
     }
 }
 
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "parse_cfg_text takes a fallible parser; this one cannot fail"
-)]
-fn instruction(line: &str) -> Result<Line, String> {
-    Ok(Line(line.to_string()))
+/// Read a CFG whose instructions are their own lines.
+fn parse(text: &str) -> Result<Cfg<Line>, TextError> {
+    parse_cfg_text(text, |line| Ok(Line(line.to_string())))
 }
 
 /// A CFG with a removed block, a labeled block, every edge shape the form
@@ -86,7 +85,7 @@ fn a_cfg_writes_blocks_edges_and_regions() {
 #[test]
 fn writing_parsing_and_writing_again_is_a_fixed_point() {
     let once = protected_cfg().to_text();
-    let twice = parse_cfg_text(&once, instruction)
+    let twice = parse(&once)
         .expect("the writer emits its own grammar")
         .to_text();
     assert_eq!(once, twice);
@@ -95,7 +94,7 @@ fn writing_parsing_and_writing_again_is_a_fixed_point() {
 #[test]
 fn parsing_reproduces_identity_topology_labels_and_regions() {
     let original = protected_cfg();
-    let parsed = parse_cfg_text(&original.to_text(), instruction).expect("its own grammar");
+    let parsed = parse(&original.to_text()).expect("its own grammar");
 
     assert_eq!(parsed.entry(), original.entry());
     assert_eq!(parsed.block_count(), original.block_count());
@@ -125,14 +124,13 @@ fn parsing_reproduces_identity_topology_labels_and_regions() {
 
 #[test]
 fn a_parsed_entry_may_be_any_declared_block() {
-    let cfg = parse_cfg_text("entry bb1\nbb0:\nbb1:\nbb1 -> bb0 jump\n", instruction)
-        .expect("valid text");
+    let cfg = parse("entry bb1\nbb0:\nbb1:\nbb1 -> bb0 jump\n").expect("valid text");
     assert_eq!(cfg.entry(), BlockId::from_index(1));
 }
 
 #[test]
 fn an_unknown_edge_kind_is_rejected() {
-    let error = parse_cfg_text("entry bb0\nbb0:\nbb1:\nbb0 -> bb1 sideways\n", instruction)
+    let error = parse("entry bb0\nbb0:\nbb1:\nbb0 -> bb1 sideways\n")
         .expect_err("there is no sideways edge");
     assert_eq!(error.line, 4);
     assert_eq!(error.kind, crate::TextErrorKind::EdgeKind);
@@ -140,8 +138,7 @@ fn an_unknown_edge_kind_is_rejected() {
 
 #[test]
 fn an_instruction_outside_a_block_is_rejected() {
-    let error = parse_cfg_text("entry bb0\n    stray\nbb0:\n", instruction)
-        .expect_err("nothing owns that line");
+    let error = parse("entry bb0\n    stray\nbb0:\n").expect_err("nothing owns that line");
     assert_eq!(error.line, 2);
     assert_eq!(error.kind, crate::TextErrorKind::Unrecognized);
 }
@@ -156,4 +153,33 @@ fn a_rejected_instruction_reports_the_consumers_reason() {
         error.kind,
         crate::TextErrorKind::Instruction("nope is not an instruction".to_string())
     );
+}
+
+#[test]
+fn an_instruction_is_read_back_whatever_its_first_character() {
+    // Each of these would read as something else on its own line: a comment,
+    // a blank line, an edge, or plain indentation.
+    let texts = [
+        "#pragma once",
+        "    x = 1",
+        "\ty = 2",
+        "  ",
+        "-> bb1 true",
+        "\u{20}literal",
+        "\u{a0}",
+        "\\u{20} is a spelled-out escape",
+    ];
+    let mut cfg = Cfg::<Line>::new();
+    let entry = cfg.entry();
+    for text in texts {
+        cfg.block_mut(entry).push(Line(text.to_string()));
+    }
+
+    let written = cfg.to_text();
+    let parsed = parse(&written).expect("the writer emits its own grammar");
+    assert_eq!(
+        parsed.block(parsed.entry()).instructions(),
+        cfg.block(entry).instructions()
+    );
+    assert_eq!(parsed.to_text(), written);
 }
