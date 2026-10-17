@@ -97,7 +97,14 @@ pub trait ExprInstr: InstrInfo {
     type Const: Clone + Eq;
 
     /// If this instruction can be represented as an expression,
-    /// return the operator and the list of operand variables.
+    /// return the operator and the operand variables, in operand order.
+    ///
+    /// The slice is the expression's operand list: the recovered tree has
+    /// exactly these operands, in this order. Each operand must also be one
+    /// of [`uses`](InstrInfo::uses). The instruction may read more than it
+    /// takes as operands (a flags register, an implicit input); those reads
+    /// stay out of the tree, and a block-local definition feeding one stays
+    /// a root of its block.
     ///
     /// Return `None` for instructions that can't be decomposed
     /// (side-effecting, control flow, etc.).
@@ -132,7 +139,9 @@ type TreesOf<I> =
 /// Recover expression trees for a single block.
 ///
 /// Walks the block's instructions and builds expression trees by
-/// inlining single-use temporaries into their use sites.
+/// inlining single-use temporaries into their use sites. A variable is a
+/// single-use temporary when the block reads it once across every
+/// instruction's [`uses`](InstrInfo::uses), operand or not.
 #[must_use]
 pub fn recover_block_expressions<G>(cfg: &G, block: BlockId) -> TreesOf<G::Inst>
 where
@@ -158,9 +167,8 @@ where
             if let Some(destination) = inst.defs().first() {
                 variable_expressions.insert(destination.clone(), ExprNode::Const(c));
             }
-        } else if let Some((op, _operand_locs)) = inst.as_expr() {
-            let operands: Vec<ExprNode<_, _, _>> = inst
-                .uses()
+        } else if let Some((op, operand_variables)) = inst.as_expr() {
+            let operands: Vec<ExprNode<_, _, _>> = operand_variables
                 .iter()
                 .map(|variable| {
                     // Inline if this is a single-use temporary defined in this block.
@@ -289,19 +297,121 @@ mod tests {
         ]);
 
         let trees = recover_block_expressions(&cfg, cfg.entry());
-        // t0 has 2 uses, so it stays as a root. t1 and t2 also root.
-        assert_eq!(trees.roots.len(), 3);
-        // Both t1 and t2 should reference t0 as a Leaf, not inline it.
-        for (_, expr) in &trees.roots {
-            if let ExprNode::Op { operands, .. } = expr {
-                for op in operands {
-                    if let ExprNode::Leaf(loc) = op
-                        && *loc == 10
-                    {
-                        // Good — t0 is a leaf, not inlined.
-                    }
-                }
-            }
+        // t0 is read twice, so it stays a root and both readers keep it as a
+        // leaf instead of inlining it.
+        assert_eq!(
+            trees.roots,
+            [
+                (10, op("mul", [leaf(1), leaf(2)])),
+                (11, op("add", [leaf(0), leaf(10)])),
+                (12, op("sub", [leaf(10), leaf(3)])),
+            ]
+        );
+    }
+
+    /// An operation whose reads can exceed its expression operands.
+    struct Operation {
+        operator: &'static str,
+        operands: Vec<u16>,
+        reads: Vec<u16>,
+        defs: Vec<u16>,
+    }
+
+    /// `dest = operator(operands)`, reading exactly `reads`.
+    fn operation(dest: u16, operator: &'static str, operands: &[u16], reads: &[u16]) -> Operation {
+        Operation {
+            operator,
+            operands: operands.to_vec(),
+            reads: reads.to_vec(),
+            defs: alloc::vec![dest],
         }
+    }
+
+    impl InstrInfo for Operation {
+        type Variable = u16;
+
+        fn uses(&self) -> &[u16] {
+            &self.reads
+        }
+
+        fn defs(&self) -> &[u16] {
+            &self.defs
+        }
+    }
+
+    impl ExprInstr for Operation {
+        type Operator = &'static str;
+        type Const = i64;
+
+        fn as_expr(&self) -> Option<(&'static str, &[u16])> {
+            Some((self.operator, &self.operands))
+        }
+    }
+
+    fn leaf(variable: u16) -> ExprNode<u16, &'static str, i64> {
+        ExprNode::Leaf(variable)
+    }
+
+    fn op<const N: usize>(
+        operator: &'static str,
+        operands: [ExprNode<u16, &'static str, i64>; N],
+    ) -> ExprNode<u16, &'static str, i64> {
+        ExprNode::Op {
+            operator,
+            operands: operands.into(),
+        }
+    }
+
+    fn recover(
+        operations: impl IntoIterator<Item = Operation>,
+    ) -> Vec<(u16, ExprNode<u16, &'static str, i64>)> {
+        let mut cfg: Cfg<Operation> = Cfg::new();
+        cfg.block_mut(cfg.entry())
+            .instructions_mut()
+            .extend(operations);
+        recover_block_expressions(&cfg, cfg.entry()).roots
+    }
+
+    #[test]
+    fn a_read_that_is_not_an_operand_stays_out_of_the_tree() {
+        // flags = cmp(r1, r2); t = add(r1), which also reads the flags.
+        let roots = recover([
+            operation(9, "cmp", &[1, 2], &[1, 2]),
+            operation(10, "add", &[1], &[1, 9]),
+        ]);
+        assert_eq!(
+            roots,
+            [
+                (9, op("cmp", [leaf(1), leaf(2)])),
+                (10, op("add", [leaf(1)])),
+            ],
+            "the flags definition is read once but is not an operand, so it stays a root"
+        );
+    }
+
+    #[test]
+    fn operands_keep_the_order_the_instruction_reports() {
+        // The reads are listed in a different order than the operands.
+        let roots = recover([operation(10, "sub", &[1, 2], &[2, 1])]);
+        assert_eq!(roots, [(10, op("sub", [leaf(1), leaf(2)]))]);
+    }
+
+    #[test]
+    fn a_temporary_read_by_a_non_operand_is_not_a_single_use() {
+        // t0 feeds `add` as an operand and `probe` as an implicit read: two
+        // readers, so it must stay materialized.
+        let roots = recover([
+            operation(10, "mul", &[1, 2], &[1, 2]),
+            operation(11, "add", &[3, 10], &[3, 10]),
+            operation(12, "probe", &[4], &[4, 10]),
+        ]);
+        assert_eq!(
+            roots,
+            [
+                (10, op("mul", [leaf(1), leaf(2)])),
+                (11, op("add", [leaf(3), leaf(10)])),
+                (12, op("probe", [leaf(4)])),
+            ]
+        );
     }
 }
