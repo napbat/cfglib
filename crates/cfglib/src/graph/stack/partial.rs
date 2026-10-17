@@ -229,7 +229,8 @@ impl StackPartialPathSet {
     /// Extract all productive routes between stitching endpoints in `file`.
     ///
     /// Starts are the root singleton, source references in the file, and its
-    /// exported scopes. A summary is recorded at the root, an exported scope,
+    /// exported scopes, expanded in that order under either
+    /// [`SearchOrder`]. A summary is recorded at the root, an exported scope,
     /// a source definition, or the jump singleton. Exploration also continues
     /// past those endpoints because a definition may be only an intermediate
     /// pop while symbols remain. Only edges belonging to this file are
