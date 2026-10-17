@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
 use super::dominator::{DominatorScratch, DominatorTree, complete_dominator_forest};
-use super::edge_view::{EdgeView, FilteredEdges};
+use super::edge_view::EdgeView;
 use super::loop_nest::nesting;
 use super::scc::tarjan_scc;
 use super::search::{DfsEvent, depth_first_events};
@@ -297,12 +297,19 @@ where
 /// consumer that also lays out the code the root misses (a handler pad no
 /// exception edge leads to, a filter funclet) wants the loops inside that code
 /// too: a loop there is as much a loop as one in live code. Those come from
-/// dominance within the dead code. [`complete_dominator_forest`] roots a tree
-/// at each source component of it, and the detection runs over the edges
-/// between dead blocks alone, so no live block takes part. That restriction is
-/// what keeps the answers apart: the forest is a whole-graph answer in which
-/// dead code that jumps into a live block takes the root away from it, and an
-/// edge from dead code into live code closes no cycle of either.
+/// dominance within the dead code, which [`complete_dominator_forest`]
+/// provides by rooting a tree at each source component of it.
+///
+/// The forest is a whole-graph answer, so the loops it gives for live headers
+/// are not the live program's: dead code that jumps into a live block takes
+/// the root away from it as dominator. Only the loops whose header the root
+/// misses are kept from it, and those are exact. A live block never has a dead
+/// successor, so a cycle of dead blocks, every tail of a back edge to a dead
+/// header, and every block that reaches such a tail without passing the
+/// header, are all dead, whatever the dead code feeds into. A forest loop with
+/// a live header never holds a dead block either, since a live header cannot
+/// dominate a block that dead code also enters, so no dead loop is counted
+/// inside a live one.
 ///
 /// The result is the loops of [`detect_loops_tagged`], unchanged, then those of
 /// the dead code, in order of depth, then header. A dead loop is nested only in
@@ -322,11 +329,11 @@ where
     else {
         return loops;
     };
-    let dead = FilteredEdges::new(graph, |edge: G::EdgeId, _: &G::EdgeData| {
-        let edge = graph.edge(edge);
-        !dom.is_reachable(edge.source()) && !dom.is_reachable(edge.target())
-    });
-    loops.extend(detect_loops_tagged(&dead, &forest));
+    loops.extend(
+        detect_loops_tagged(graph, &forest)
+            .into_iter()
+            .filter(|dead| !dom.is_reachable(dead.header)),
+    );
     loops.sort_by(|a, b| a.depth.cmp(&b.depth).then(a.header.cmp(&b.header)));
     loops
 }
