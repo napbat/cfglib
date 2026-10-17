@@ -20,9 +20,17 @@ then run all of these from the workspace root:
 ```text
 python scripts/check_repository_policy.py
 cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings -D clippy::pedantic
 cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
+cargo test --workspace
 cargo test --workspace --all-features
 ```
+
+Both feature sets are gates: code behind `#[cfg(feature = "serde")]` is checked
+only by the all-features run, and code the feature does not touch must also
+build and pass without it. CI (`.github/workflows/lint.yml`) additionally lints
+the allocation-counting benchmarks, runs the `control-tree` example, checks the
+MSRV, and checks the `no_std` build for `thumbv7em-none-eabi`.
 
 Also build documentation with warnings denied when public APIs or docs change:
 
