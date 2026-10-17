@@ -314,41 +314,97 @@ fn brute_force_liveness<E>(
     }
 }
 
-/// What iterated classic dead-code removal leaves of the reachable blocks:
-/// repeat "drop a pure instruction none of whose results is live afterwards"
-/// on the recomputed liveness until nothing is left to drop. The result of
-/// the unique least fixpoint, so it does not depend on removal order.
-pub fn classic_dead_code_survivors<E: Clone>(cfg: &Cfg<Inst, E>) -> BTreeMap<String, usize> {
-    let reachable = reachable_blocks(cfg);
-    let mut work = cfg.clone();
-    for block in cfg.block_ids().filter(|block| !reachable.contains(block)) {
-        work.block_mut(block).instructions_mut().clear();
-    }
+type Site = (BlockId, usize);
+
+/// Where each register's value at the start of every reachable block was
+/// last written, over the reachable blocks only, by explicit forward fixed
+/// point. Independent of the library's `ReachingDefs`.
+fn reaching_at_block_starts<E>(
+    cfg: &Cfg<Inst, E>,
+    reachable: &BTreeSet<BlockId>,
+) -> BTreeMap<BlockId, BTreeSet<(Reg, Site)>> {
+    let mut start: BTreeMap<BlockId, BTreeSet<(Reg, Site)>> = reachable
+        .iter()
+        .map(|&block| (block, BTreeSet::new()))
+        .collect();
     loop {
-        let live_out = brute_force_live_out(&work);
         let mut changed = false;
-        for &block in &reachable {
-            let mut live = live_out[&block].clone();
-            let mut kept = Vec::new();
-            for inst in work.block(block).instructions().iter().rev() {
-                let removable = inst.effects().is_empty()
-                    && !inst.defs().is_empty()
-                    && inst.defs().iter().all(|def| !live.contains(def));
-                if removable {
-                    changed = true;
-                    continue;
+        for &block in reachable {
+            let mut here = start[&block].clone();
+            for (index, inst) in cfg.block(block).instructions().iter().enumerate() {
+                for &def in inst.defs() {
+                    here.retain(|&(register, _)| register != def);
+                    here.insert((def, (block, index)));
                 }
-                for def in inst.defs() {
-                    live.remove(def);
-                }
-                live.extend(inst.uses().iter().copied());
-                kept.push(inst.clone());
             }
-            kept.reverse();
-            *work.block_mut(block).instructions_mut() = kept;
+            for successor in cfg.successors(block) {
+                let target = start
+                    .get_mut(&successor)
+                    .expect("successors of reachable blocks are reachable");
+                let before = target.len();
+                target.extend(here.iter().copied());
+                changed |= target.len() != before;
+            }
         }
         if !changed {
-            return instruction_multiset(&work, &reachable);
+            return start;
         }
     }
+}
+
+/// The instructions a program needs: those with a declared effect, plus,
+/// transitively, every instruction whose definition reaches a read by a
+/// needed instruction. The least fixed point, so a value that only feeds a
+/// dead instruction, or only its own loop-carried update, is not needed.
+/// Only reachable blocks take part.
+pub fn needed_instructions<E>(cfg: &Cfg<Inst, E>) -> BTreeSet<Site> {
+    let reachable = reachable_blocks(cfg);
+    let starts = reaching_at_block_starts(cfg, &reachable);
+    let mut needed: BTreeSet<Site> = reachable
+        .iter()
+        .flat_map(|&block| {
+            cfg.block(block)
+                .instructions()
+                .iter()
+                .enumerate()
+                .filter(|(_, inst)| !inst.effects().is_empty())
+                .map(move |(index, _)| (block, index))
+        })
+        .collect();
+    let mut pending: Vec<Site> = needed.iter().copied().collect();
+    while let Some((block, index)) = pending.pop() {
+        let mut reaching = starts[&block].clone();
+        for (earlier, inst) in cfg
+            .block(block)
+            .instructions()
+            .iter()
+            .enumerate()
+            .take(index)
+        {
+            for &def in inst.defs() {
+                reaching.retain(|&(register, _)| register != def);
+                reaching.insert((def, (block, earlier)));
+            }
+        }
+        for &used in cfg.block(block).instructions()[index].uses() {
+            for &(register, site) in &reaching {
+                if register == used && needed.insert(site) {
+                    pending.push(site);
+                }
+            }
+        }
+    }
+    needed
+}
+
+/// The instructions of the reachable blocks that survive removing everything
+/// not needed, as a multiset.
+pub fn needed_instruction_multiset<E>(cfg: &Cfg<Inst, E>) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for (block, index) in needed_instructions(cfg) {
+        *counts
+            .entry(format!("{:?}", cfg.block(block).instructions()[index]))
+            .or_default() += 1;
+    }
+    counts
 }

@@ -8,8 +8,8 @@ use cfglib::{
 
 use crate::oracles::{
     Placement, assert_fully_simplified, assert_rewrite_accounts_for_identities,
-    assert_surviving_edges_unchanged, assert_valid, classic_dead_code_survivors,
-    instruction_multiset, live_blocks,
+    assert_surviving_edges_unchanged, assert_valid, instruction_multiset, live_blocks,
+    needed_instruction_multiset,
 };
 use crate::programs::random_program;
 use crate::toy::{Builder, Inst, OBSERVED, Payload, Route, assert_same_behavior_observing, run};
@@ -68,6 +68,33 @@ fn dead_code_elimination_removes_a_chain_that_spans_blocks_in_one_call() {
         cfg.block(last).instructions(),
         [Inst::print(0), Inst::ret()]
     );
+}
+
+fn exactness_case<E: Payload>(seed: u64) {
+    let before = random_program::<E>(seed, false);
+    let mut cfg = before.clone();
+    let removed = dead_code_elimination(&mut cfg);
+    let context = format!("seed {seed}");
+
+    let needed = needed_instruction_multiset(&before);
+    assert_eq!(
+        instruction_multiset(&cfg, &live_blocks(&cfg)),
+        needed,
+        "{context}: one call leaves exactly what the program needs"
+    );
+    assert_eq!(
+        instruction_count(&before) - removed,
+        needed.values().sum::<usize>(),
+        "{context}: and counts what it removed"
+    );
+}
+
+#[test]
+fn one_elimination_call_removes_exactly_the_instructions_nobody_needs() {
+    for seed in 0..SEEDS {
+        exactness_case::<()>(seed);
+        exactness_case::<Route>(seed);
+    }
 }
 
 fn elimination_case<E: Payload>(seed: u64) {
@@ -182,8 +209,8 @@ fn fixpoint_case<E: Payload>(seed: u64) {
     assert_same_behavior_observing(&before, &cfg, &[], &context);
     assert_eq!(
         instruction_multiset(&cfg, &live_blocks(&cfg)),
-        classic_dead_code_survivors(&before),
-        "{context}: exactly the instructions that classic iterated DCE keeps survive"
+        needed_instruction_multiset(&before),
+        "{context}: exactly the needed instructions survive"
     );
     assert_fully_simplified(&cfg, &context);
 
