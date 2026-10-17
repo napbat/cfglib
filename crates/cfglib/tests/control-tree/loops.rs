@@ -395,7 +395,7 @@ fn multi_level_break_labels_the_outer_loop_and_names_it() {
         [ControlNode::Loop { header, .. }] if header == outer
     ));
     assert_golden(
-        "control-tree/multi_level_break.pseudo",
+        "control-tree/multi-level-break.pseudo",
         &pseudocode(&flow.cfg, &tree),
     );
 }

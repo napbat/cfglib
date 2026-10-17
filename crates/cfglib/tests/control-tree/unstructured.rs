@@ -43,7 +43,7 @@ fn irreducible_cycle_has_no_loop_and_every_goto_revisits_a_block() {
     assert_eq!(targets, [a, b]);
     assert_eq!(report.unresolved_labels, []);
     assert_golden(
-        "control-tree/irreducible_cycle.pseudo",
+        "control-tree/irreducible-cycle.pseudo",
         &pseudocode(&flow.cfg, &tree),
     );
 }
@@ -76,7 +76,7 @@ fn loop_entered_in_its_body_is_irreducible_and_reported_as_gotos() {
     );
     assert_eq!(label_blocks_in_tree(&tree), [x]);
     assert_golden(
-        "control-tree/multi_entry_loop.pseudo",
+        "control-tree/multi-entry-loop.pseudo",
         &pseudocode(&flow.cfg, &tree),
     );
 }
@@ -109,7 +109,7 @@ fn jump_out_of_a_loop_to_a_shared_tail_is_an_explicit_jump() {
         "the walk reaches the tail itself"
     );
     assert_golden(
-        "control-tree/jump_to_shared_tail.pseudo",
+        "control-tree/jump-to-shared-tail.pseudo",
         &pseudocode(&flow.cfg, &tree),
     );
 }
@@ -144,7 +144,7 @@ fn conditional_exit_to_a_shared_block_leaves_the_loop_bound() {
     assert_eq!(label_blocks_in_tree(&tree), [fail]);
     assert_eq!(report.unresolved_labels, []);
     assert_golden(
-        "control-tree/loop_exit_to_shared_block.pseudo",
+        "control-tree/loop-exit-to-shared-block.pseudo",
         &pseudocode(&flow.cfg, &tree),
     );
 }

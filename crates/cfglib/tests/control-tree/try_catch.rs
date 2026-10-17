@@ -3,7 +3,9 @@
 
 use std::collections::BTreeSet;
 
-use cfglib::{BlockId, ControlNode, EdgeKind, HandlerKind, HandlerRef, promote_handler_extents};
+use cfglib::{
+    BlockId, ControlNode, EdgeKind, GotoReason, HandlerKind, HandlerRef, promote_handler_extents,
+};
 
 use crate::builders::{Flow, handler, handler_over, pseudocode, try_catch_finally};
 use crate::coverage::{blocks_under, reachable_blocks};
@@ -172,7 +174,7 @@ fn handler_kinds_keep_their_declaration_order_and_their_text() {
         "the funclet is swept: {report:?}"
     );
     assert_golden(
-        "control-tree/handler_kinds.pseudo",
+        "control-tree/handler-kinds.pseudo",
         &pseudocode(&flow.cfg, &tree),
     );
 }
@@ -275,14 +277,15 @@ fn nested_regions_nest_their_try_catch_nodes_and_keep_exception_edges_inside() {
         "the inner catch body is inside the outer try"
     );
     assert_golden(
-        "control-tree/nested_try.pseudo",
+        "control-tree/nested-try.pseudo",
         &pseudocode(&flow.cfg, &tree),
     );
 }
 
 #[test]
-fn protected_block_that_returns_is_one_leaf_of_the_try_body() {
-    // The block returns, yet keeps its exception edge to the pad.
+fn protected_block_that_returns_is_a_block_leaf_since_its_exception_edge_is_a_successor() {
+    // `Return` is a block without successors; this block returns yet keeps its
+    // exception edge to the pad, so the tree holds it as a plain `Block` leaf.
     let mut flow = Flow::starting_with("open()");
     let body = flow.stmt("return read()");
     let pad = flow.stmt("log(e)");
@@ -301,11 +304,86 @@ fn protected_block_that_returns_is_one_leaf_of_the_try_body() {
     else {
         unreachable!("first_try returns a try/catch");
     };
-    assert_eq!(blocks_under(&tree, try_body), BTreeSet::from([body]));
+    assert!(matches!(
+        body_nodes(&tree, try_body)[..],
+        [ControlNode::Block(span)] if span.block() == body
+    ));
     let [arm] = tree.handlers(handlers) else {
         panic!("one catch arm");
     };
     assert_eq!(blocks_under(&tree, arm.body), BTreeSet::from([pad]));
+}
+
+#[test]
+fn catch_arm_that_returns_ends_in_a_return_leaf() {
+    let mut flow = Flow::starting_with("risky()");
+    let pad = flow.stmt("return -1");
+    let after = flow.stmt("return 0");
+    let entry = flow.entry();
+    flow.fall(entry, after);
+    flow.edge(entry, pad, EdgeKind::ExceptionHandler);
+    flow.region(&[entry], vec![handler(pad, HandlerKind::Catch)]);
+
+    let (tree, report) = structure_and_check(&flow.cfg);
+    assert_fully_structured(&tree, &report);
+
+    let ControlNode::TryCatch { handlers, .. } = first_try(&tree) else {
+        unreachable!("first_try returns a try/catch");
+    };
+    let [arm] = tree.handlers(handlers) else {
+        panic!("one catch arm");
+    };
+    assert!(matches!(
+        body_nodes(&tree, arm.body)[..],
+        [ControlNode::Return(span)] if span.block() == pad
+    ));
+}
+
+#[test]
+fn shared_cleanup_entered_by_ordinary_flow_leaves_the_handler_extent_and_is_reported() {
+    // The lowering symtree emits for try/catch/finally: one cleanup block that
+    // the protected body and the catch pad both enter by ordinary flow. The
+    // structurer documents that a region is well formed only when ordinary flow
+    // enters a handler from its own extent, so each of those transfers is a
+    // goto out of the structural bound, and the report says so.
+    let mut flow = Flow::starting_with("open()");
+    let body = flow.stmt("work()");
+    let pad = flow.stmt("recover()");
+    let cleanup = flow.stmt("close()");
+    let after = flow.stmt("return");
+    flow.fall(flow.entry(), body);
+    flow.fall(body, cleanup);
+    flow.edge(body, pad, EdgeKind::ExceptionHandler);
+    flow.edge(body, cleanup, EdgeKind::ExceptionUnwind);
+    flow.fall(pad, cleanup);
+    flow.fall(cleanup, after);
+    flow.region(
+        &[body],
+        vec![
+            handler(pad, HandlerKind::Catch),
+            handler(cleanup, HandlerKind::Finally),
+        ],
+    );
+
+    // The partition and the implied-flow oracles still hold: the tree stays
+    // faithful to the graph, it only cannot express the flow structurally.
+    let (tree, report) = structure_and_check(&flow.cfg);
+
+    assert!(!report.is_fully_structured());
+    assert_eq!(
+        report
+            .gotos
+            .iter()
+            .map(|goto| goto.reason)
+            .collect::<Vec<_>>(),
+        [GotoReason::BoundaryEscape, GotoReason::BoundaryEscape]
+    );
+    assert!(report.gotos.iter().all(|goto| goto.target == cleanup));
+    assert_eq!(report.unresolved_labels, []);
+    assert_eq!(
+        nodes_where(&tree, |node| matches!(node, ControlNode::TryCatch { .. })).len(),
+        1
+    );
 }
 
 #[test]

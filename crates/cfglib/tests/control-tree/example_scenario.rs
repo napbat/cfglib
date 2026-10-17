@@ -58,7 +58,7 @@ fn the_example_prints_the_pseudocode_of_its_source() {
         })
         .expect("writing to a String cannot fail");
 
-    assert_golden("control-tree/while_if_else.pseudo", &pseudocode);
+    assert_golden("control-tree/while-if-else.pseudo", &pseudocode);
 }
 
 #[test]

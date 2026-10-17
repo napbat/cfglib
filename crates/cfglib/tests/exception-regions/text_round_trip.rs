@@ -145,7 +145,7 @@ fn a_try_catch_prints_as_the_documented_text_form() {
         .push(handler(end, HandlerKind::Finally, &[end]));
 
     assert_golden(
-        "exception-regions/try_catch_finally.txt",
+        "exception-regions/try-catch-finally.txt",
         &fixture.cfg.to_text(),
     );
 }

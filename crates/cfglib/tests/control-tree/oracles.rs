@@ -2,7 +2,9 @@
 
 use std::collections::BTreeSet;
 
-use cfglib::{BlockId, Cfg, ControlNode, ControlTree, DominatorTree, LiftReport, detect_loops};
+use cfglib::{
+    BlockId, Cfg, ControlNode, ControlTree, DominatorTree, LiftReport, detect_loops_tagged,
+};
 
 use crate::coverage::{
     assert_each_block_in_exactly_one_leaf, assert_instruction_walk_is_a_partition,
@@ -73,7 +75,8 @@ pub fn structure_and_check_dangling(cfg: &Cfg<&'static str>) -> (ControlTree, Li
 
 /// [`structure_and_check_covering`] for a graph whose covered blocks are the
 /// ones the entry reaches, and whose loops are the natural loops a dominator
-/// tree proves: the tree holds one `Loop` node per header.
+/// tree proves, honoring explicit `Back` tags as the structurer does: the tree
+/// holds one `Loop` node per header.
 pub fn structure_and_check(cfg: &Cfg<&'static str>) -> (ControlTree, LiftReport) {
     let (tree, report) = structure_and_check_covering(cfg, &reachable_blocks(cfg));
     let mut headers: Vec<BlockId> = tree
@@ -83,7 +86,7 @@ pub fn structure_and_check(cfg: &Cfg<&'static str>) -> (ControlTree, LiftReport)
             _ => None,
         })
         .collect();
-    let mut natural: Vec<BlockId> = detect_loops(cfg, &DominatorTree::compute(cfg))
+    let mut natural: Vec<BlockId> = detect_loops_tagged(cfg, &DominatorTree::compute(cfg))
         .into_iter()
         .map(|natural| natural.header)
         .collect();

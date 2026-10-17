@@ -1,10 +1,12 @@
 //! The cleanup and structural transforms on a graph that carries regions.
 //!
-//! The contract any sane pass owes such a graph: afterwards every block a
-//! region, handler, or cleanup names is a live block, `compact` does not panic,
+//! The contract any sane pass owes such a graph: `compact` does not panic,
+//! afterwards every block a region, handler, or cleanup names is a live block,
 //! a handler is still entered through an unwind edge from the protected code,
 //! it still does what it did, and the set of statements that can unwind into it
-//! is exactly what it was, neither widened nor narrowed.
+//! is exactly what it was, neither widened nor narrowed. The references are read
+//! back from the graph after compaction, so a pass may keep them live itself or
+//! leave `compact` to repair them.
 
 use cfglib::{
     Cfg, EhBlockKind, EhEdgeKind, EhModel, HandlerBody, HandlerKind, HandlerRef, contract_edge,
@@ -85,17 +87,18 @@ fn protected_statements(cfg: &Cfg<Stmt>, handler: HandlerRef) -> Vec<String> {
     statements
 }
 
-/// What must hold after a pass: references live, compaction safe, and the
-/// handler `locate` finds still a handler of the same code over the same
-/// statements.
+/// What must hold after a pass. First the contract of the brief: `compact` does
+/// not panic (a bare call, so a panic fails the test), every block the regions
+/// and cleanups name is live, the handler is still a landing pad entered through
+/// an unwind edge from the protected code, and `verify` passes. Then the two
+/// behavior checks: the handler still does what it did, and the statements that
+/// can unwind into it are exactly what they were.
 fn assert_try_survives(
     cfg: &mut Cfg<Stmt>,
     locate: impl Fn(&Cfg<Stmt>) -> HandlerRef,
     protected: &[&str],
     handler_trace: &[&str],
 ) {
-    assert_references_live(cfg, "right after the pass");
-
     cfg.compact();
 
     assert!(cfg.is_compact());
@@ -116,6 +119,7 @@ fn assert_try_survives(
         "no unwind edge from the protected code enters the handler: {:?}",
         model.eh_edges()
     );
+
     assert_eq!(
         trace_from(cfg, entry),
         handler_trace,

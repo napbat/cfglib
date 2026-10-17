@@ -268,7 +268,7 @@ fn guarded_runs_wrap_each_predicated_run_and_keep_the_final_run_a_return() {
         matches!(statements[3], ControlNode::Return(span) if span.range() == (3..4)),
         "the final unpredicated run keeps its Return"
     );
-    assert_golden("control-tree/wave_select.pseudo", &render(&cfg, &tree));
+    assert_golden("control-tree/wave-select.pseudo", &render(&cfg, &tree));
 }
 
 #[test]
