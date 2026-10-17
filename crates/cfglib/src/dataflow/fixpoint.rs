@@ -4,7 +4,7 @@
 //! algorithm that iterates until the solution stabilizes.
 //!
 //! The crate's three generic solvers — this one, the node-level
-//! [`node_fixpoint`](super::node_fixpoint), and the edge-sensitive
+//! [`node_fixpoint`], and the edge-sensitive
 //! [`edge_fixpoint`](super::edge_fixpoint) — carry the same facility matrix:
 //! a full solve, a seeded solve (`_from`), a deterministically bounded solve
 //! (`_with_config`), and fallible `try_` counterparts, all sharing

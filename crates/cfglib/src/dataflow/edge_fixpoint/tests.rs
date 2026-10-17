@@ -283,10 +283,10 @@ fn routed_cfg() -> (Cfg<(), Route>, BlockId) {
 }
 
 fn solver_error<F>(result: Result<F, TrySolveError<Infallible>>) -> SolveError {
-    match result {
-        Err(TrySolveError::Solver(error)) => error,
-        Err(TrySolveError::Problem(never)) => match never {},
-        Ok(_) => panic!("the solve stayed within its step limit"),
+    match result.err() {
+        Some(TrySolveError::Solver(error)) => error,
+        Some(TrySolveError::Problem(never)) => match never {},
+        None => panic!("the solve stayed within its step limit"),
     }
 }
 

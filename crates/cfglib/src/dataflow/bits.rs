@@ -363,7 +363,7 @@ mod tests {
             assert!(bits.words().iter().all(|&word| word == 0), "len {len}");
         }
         let empty = DenseBits::new(0);
-        assert!(empty.words().is_empty());
+        assert_eq!(empty.words().len(), 0);
         assert!(empty.ones().next().is_none());
     }
 

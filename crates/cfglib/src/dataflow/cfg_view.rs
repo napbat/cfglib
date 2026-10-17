@@ -4,7 +4,7 @@
 //! [`CfgView`] is the one trait the instruction-level algorithms take. It
 //! joins the graph views of the crate with the facts that an
 //! instruction-level algorithm needs and a graph view does not give: the
-//! ordered instructions of each block, the [`EdgeKind`] of each edge, and
+//! ordered instructions of each block, the [`EdgeKind`](crate::EdgeKind) of each edge, and
 //! the optional branch weight of each edge.
 //! [`Cfg`] implements it, so every caller that holds a [`Cfg`] keeps working.
 //! A consumer with its own storage implements it to run the same algorithms
@@ -29,9 +29,9 @@ use crate::graph::view::RootedView;
 /// The view has no separate exception model. An analysis finds the
 /// exception-region information in two places:
 ///
-/// - An edge of kind [`EdgeKind::ExceptionUnwind`] leaves its source block
-///   before a throwing instruction. An edge of kind
-///   [`EdgeKind::ExceptionHandler`] enters a handler.
+/// - An edge of kind [`EdgeKind::ExceptionUnwind`](crate::EdgeKind::ExceptionUnwind)
+///   leaves its source block before a throwing instruction. An edge of kind
+///   [`EdgeKind::ExceptionHandler`](crate::EdgeKind::ExceptionHandler) enters a handler.
 /// - [`InstrInfo::may_unwind`](super::InstrInfo::may_unwind) marks the
 ///   throwing instructions of a block.
 ///
