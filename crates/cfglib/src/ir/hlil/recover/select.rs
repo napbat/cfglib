@@ -56,12 +56,35 @@ where
         Ok(None)
     }
 
+    /// The shape of the only statement of the arm `ids`, or `None` when the
+    /// arm holds anything else.
+    fn sole_statement(
+        &self,
+        ids: &[S::Stmt],
+    ) -> Fallible<Option<StmtShape<'a, H, S::Stmt, S::Expr>>, B::Error> {
+        match *ids {
+            [only] => self.stmt(only).map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    /// The same for an arm that the shape checks have validated, which holds
+    /// exactly one statement.
+    fn validated_arm(
+        &self,
+        ids: &[S::Stmt],
+    ) -> Fallible<StmtShape<'a, H, S::Stmt, S::Expr>, B::Error> {
+        self.sole_statement(ids)?.ok_or_else(|| {
+            RecoverError::Malformed("a validated selection arm is a single statement".into())
+        })
+    }
+
     /// The variable the then-arm chain assigns, when there is one.
     fn assigned_target(&self, ids: &[S::Stmt]) -> Fallible<Option<S::Var>, B::Error> {
-        let &[only] = ids else {
+        let Some(shape) = self.sole_statement(ids)? else {
             return Ok(None);
         };
-        match self.stmt(only)? {
+        match shape {
             StmtShape::Assign { target, .. } => Ok(match self.expr(target)? {
                 ExprShape::Variable(variable) => Some(variable),
                 _ => None,
@@ -73,12 +96,7 @@ where
 
     /// The variable and occurrence type of the leftmost assignment.
     fn selection_target_node(&self, ids: &[S::Stmt]) -> Fallible<(S::Var, &'a H::Type), B::Error> {
-        let &[only] = ids else {
-            return Err(RecoverError::Malformed(
-                "a validated selection arm is a single statement".into(),
-            ));
-        };
-        match self.stmt(only)? {
+        match self.validated_arm(ids)? {
             StmtShape::Assign { target, .. } => {
                 let ExprShape::Variable(variable) = self.expr(target)? else {
                     return Err(RecoverError::Malformed(
@@ -98,10 +116,10 @@ where
     /// Whether one arm is a single-expression assignment of `target`, or a
     /// nested diamond of such arms.
     fn assigns_shape(&self, ids: &[S::Stmt], target: S::Var) -> Fallible<bool, B::Error> {
-        let &[only] = ids else {
+        let Some(shape) = self.sole_statement(ids)? else {
             return Ok(false);
         };
-        match self.stmt(only)? {
+        match shape {
             StmtShape::Assign {
                 target: assigned,
                 value,
@@ -125,10 +143,10 @@ where
 
     /// Whether one arm returns a single value, or nests such diamonds.
     fn returns_shape(&self, ids: &[S::Stmt]) -> Fallible<bool, B::Error> {
-        let &[only] = ids else {
+        let Some(shape) = self.sole_statement(ids)? else {
             return Ok(false);
         };
-        match self.stmt(only)? {
+        match shape {
             StmtShape::Return { values } => Ok(values.len() == 1),
             StmtShape::If {
                 then_body,
@@ -141,12 +159,7 @@ where
 
     /// Builds the selection expression for one validated assigning arm.
     fn arm_value(&mut self, ids: &[S::Stmt], target: S::Var) -> Fallible<B::Expr, B::Error> {
-        let &[only] = ids else {
-            return Err(RecoverError::Malformed(
-                "a validated selection arm is a single statement".into(),
-            ));
-        };
-        match self.stmt(only)? {
+        match self.validated_arm(ids)? {
             StmtShape::Assign { value, .. } => self.rebuild_expression(value),
             StmtShape::If {
                 condition,
@@ -179,12 +192,7 @@ where
     /// Builds the selection expression for one validated returning arm and
     /// returns it with the type of its value.
     fn return_value(&mut self, ids: &[S::Stmt]) -> Fallible<(B::Expr, &'a H::Type), B::Error> {
-        let &[only] = ids else {
-            return Err(RecoverError::Malformed(
-                "a validated selection arm is a single statement".into(),
-            ));
-        };
-        match self.stmt(only)? {
+        match self.validated_arm(ids)? {
             StmtShape::Return { values } => {
                 let &[value] = values else {
                     return Err(RecoverError::Malformed(
