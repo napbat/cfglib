@@ -120,7 +120,7 @@ struct Side {
 }
 
 impl Side {
-    fn new<I>(cfg: &Cfg<I>) -> Self {
+    fn new<I, E>(cfg: &Cfg<I, E>) -> Self {
         let blocks = cfg
             .block_ids()
             .map(|block| {
@@ -278,7 +278,7 @@ impl CfgDiff {
     /// assert_eq!(diff.right_only.len(), 1);
     /// ```
     #[must_use]
-    pub fn compute<I, I2>(left: &Cfg<I>, right: &Cfg<I2>) -> Self {
+    pub fn compute<I, E, I2, E2>(left: &Cfg<I, E>, right: &Cfg<I2, E2>) -> Self {
         let (left_side, right_side) = (Side::new(left), Side::new(right));
         let mut matching = Matching::default();
         let mut pending = VecDeque::new();

@@ -179,3 +179,24 @@ fn a_copy_built_in_another_block_order_is_identical() {
     rewired.redirect_edge_target(stray, c);
     assert!(!CfgDiff::compute(&original, &rewired).is_identical());
 }
+
+#[test]
+fn cfgs_carrying_edge_payloads_are_compared_by_their_wiring() {
+    // The payload is the consumer's, so two CFGs that differ only in it, or in
+    // its type, are the same shape.
+    let build = |label: &'static str| {
+        let mut cfg = Cfg::<u32, &str>::with_edge_payload();
+        let exit = cfg.new_block();
+        cfg.add_edge_with_payload(cfg.entry(), exit, EdgeKind::Fallthrough, label);
+        cfg
+    };
+    let mut other = Cfg::<u32, u64>::with_edge_payload();
+    let exit = other.new_block();
+    other.add_edge_with_payload(other.entry(), exit, EdgeKind::Fallthrough, 9);
+
+    assert!(CfgDiff::compute(&build("a"), &build("b")).is_identical());
+    assert!(CfgDiff::compute(&build("a"), &other).is_identical());
+
+    other.add_edge_with_payload(exit, exit, EdgeKind::Back, 9);
+    assert!(!CfgDiff::compute(&build("a"), &other).is_identical());
+}
