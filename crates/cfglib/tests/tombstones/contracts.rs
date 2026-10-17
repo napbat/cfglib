@@ -70,6 +70,33 @@ fn a_removed_block_leaves_iteration_but_stays_readable_until_compaction() {
 }
 
 #[test]
+fn a_compaction_is_the_identity_exactly_when_nothing_was_removed() {
+    let mut untouched = Cfg::<u32>::new();
+    let kept = untouched.new_block();
+    untouched.add_edge(untouched.entry(), kept, EdgeKind::Fallthrough);
+    let renumbering = untouched.compact();
+    assert!(renumbering.is_identity(), "nothing was removed");
+    assert_eq!(renumbering.node(kept), Some(kept));
+
+    let mut trailing = Cfg::<u32>::new();
+    let kept = trailing.new_block();
+    let last = trailing.new_block();
+    trailing.add_edge(trailing.entry(), kept, EdgeKind::Fallthrough);
+    assert!(trailing.remove_block(last));
+    let renumbering = trailing.compact();
+    assert_eq!(
+        renumbering.node(kept),
+        Some(kept),
+        "every survivor kept its number"
+    );
+    assert_eq!(renumbering.node(last), None);
+    assert!(
+        !renumbering.is_identity(),
+        "a removed block is not mapped to itself, so the numbering is not the identity"
+    );
+}
+
+#[test]
 fn compaction_numbers_survivors_densely_in_their_old_order() {
     for seed in SEEDS {
         let realized = Realizations::of_topology(Topology::random(seed, GENERAL))
@@ -114,15 +141,9 @@ fn compaction_numbers_survivors_densely_in_their_old_order() {
         }
         assert_eq!(realized.cfg_renumbering.node_bound(), topology.slots);
         assert_eq!(realized.cfg_renumbering.edge_bound(), topology.edges.len());
-        let nothing_moved = live.iter().enumerate().all(|(rank, &slot)| rank == slot)
-            && live_edges
-                .iter()
-                .enumerate()
-                .all(|(rank, &edge)| rank == edge);
-        assert_eq!(
-            realized.cfg_renumbering.is_identity(),
-            nothing_moved,
-            "seed {seed}"
+        assert!(
+            !realized.cfg_renumbering.is_identity() && !realized.graph_renumbering.is_identity(),
+            "seed {seed}: every generated topology removes a node, so no numbering is the identity"
         );
 
         let compacted = &realized.cfg_compacted;
