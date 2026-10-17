@@ -137,11 +137,12 @@ impl<'a, I: Predicated, E> Regionizer<'a, I, E> {
 
     /// Wrap the node `root` and everything below it.
     ///
-    /// The old tree nests as deeply as the graph did, so the rewrite keeps its
+    /// The tree nests as deeply as the graph did, so the rewrite keeps its
     /// own stack: a [`Frame::Body`] wraps the statements of one body, and a
     /// [`Frame::Node`] wraps the child bodies of one node. Each step stores
-    /// what the recursive rewrite stored at the same point, in the same order,
-    /// so a tree with no predicated run is rewritten into itself.
+    /// into the new arena in the order of its layout (a node's child bodies
+    /// before the node), so a tree with no predicated run is rewritten into
+    /// itself.
     fn wrap_root(&mut self, root: ControlNodeId) -> ControlNode {
         let mut stack: Vec<Frame<'a>> = Vec::new();
         let mut returned = match self.begin_node(root) {
@@ -254,9 +255,9 @@ impl<'a, I: Predicated, E> Regionizer<'a, I, E> {
         }
     }
 
-    /// Store what the node keeps besides its bodies, in the order the
-    /// recursive rewrite did: a switch case's edges before the case's body,
-    /// the cases before the default body, and the handlers before `finally`.
+    /// Store what the node keeps besides its bodies where the arena layout
+    /// expects it: a switch case's edges before the case's body, the cases
+    /// before the default body, and the handlers before `finally`.
     fn store_before_child(&mut self, wrapping: &mut Wrapping<'a>) {
         let old = self.old;
         let next = wrapping.bodies.len();

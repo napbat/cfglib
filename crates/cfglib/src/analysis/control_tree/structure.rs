@@ -17,7 +17,7 @@ use crate::cfg::Cfg;
 use crate::edge::{EdgeId, EdgeKind};
 use crate::graph::dominator::{DominatorTree, PostDominatorTree};
 use crate::graph::structure::{NaturalLoop, detect_all_loops_tagged};
-use crate::region::Region;
+use crate::region::{Handler, Region};
 use completion::Completion;
 use roots::VirtualRoot;
 
@@ -94,6 +94,12 @@ struct Structurer<'cfg, I, E> {
     /// across structural boundaries, so code lifted out of its bound is
     /// bounded to these.
     unclaimed: Rc<BTreeSet<BlockId>>,
+    /// For each block a handler names, the regions whose handlers do.
+    handler_claims: BTreeMap<BlockId, Vec<u32>>,
+    /// The goto targets the walk had not emitted when the goto was recorded,
+    /// which the sweep emits, lowest block first. A target the walk emits
+    /// later is skipped there: an emitted block stays emitted.
+    unemitted_targets: BTreeSet<BlockId>,
     report: LiftReport,
     tables: Tables,
     /// Which nodes of `tables` control can never run to the end of.
@@ -347,6 +353,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         // exception edge, a filter funclet — and every such block needs merge
         // points too, so the root also precedes each block the entry misses.
         let unreachable = cfg.block_ids().filter(|block| !reachable[block.index()]);
+        let claims = region_claims(cfg);
         Self {
             cfg,
             pdom: PostDominatorTree::compute(&VirtualRoot::new(cfg, unreachable)),
@@ -363,7 +370,9 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             labeled_blocks: BTreeSet::new(),
             loop_stack: Vec::new(),
             structured_regions: BTreeSet::new(),
-            unclaimed: Rc::new(unclaimed_blocks(cfg)),
+            unclaimed: Rc::new(claims.unclaimed),
+            handler_claims: claims.handlers,
+            unemitted_targets: BTreeSet::new(),
             report: LiftReport::default(),
             tables: Tables::new(),
             completion: Completion::default(),
@@ -383,19 +392,24 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         // edge or a funclet carries code, though no edge from the entry leads
         // to it.
         let sweep_order = self.sweep_order(&order);
-        while let Some(&pending) = sweep_order.iter().find(|block| !self.is_visited(**block)) {
-            self.sweep(pending, &mut body);
+        // A block that is emitted stays emitted, so the sweep only moves
+        // forward through the order.
+        let mut next = 0;
+        while let Some(offset) = sweep_order[next..]
+            .iter()
+            .position(|&block| !self.is_visited(block))
+        {
+            next += offset;
+            self.sweep(sweep_order[next], &mut body);
         }
         // A goto always finds its label: the target of one that left a handler
         // for code only that handler reaches is swept too, and so is whatever
-        // the sweep then names.
-        while let Some(target) = self
-            .goto_targets
-            .iter()
-            .copied()
-            .find(|&target| !self.is_visited(target))
-        {
-            self.sweep(target, &mut body);
+        // the sweep then names. The targets come lowest block first, and a
+        // sweep may name a lower one.
+        while let Some(target) = self.unemitted_targets.pop_first() {
+            if !self.is_visited(target) {
+                self.sweep(target, &mut body);
+            }
         }
 
         // Exact labeling: wrap the emission of every goto target that has no
@@ -577,15 +591,34 @@ fn block_is_allowed(allowed_blocks: Option<&BTreeSet<BlockId>>, block: BlockId) 
     allowed_blocks.is_none_or(|blocks| blocks.contains(&block))
 }
 
-/// The blocks no exception region names: neither protected, nor a handler
-/// entry, nor part of a declared handler extent.
-fn unclaimed_blocks<I, E>(cfg: &Cfg<I, E>) -> BTreeSet<BlockId> {
-    cfg.block_ids()
-        .filter(|&block| {
-            !cfg.regions().iter().any(|region| {
-                region.protected_blocks.contains(&block)
-                    || region.handlers.iter().any(|handler| handler.claims(block))
-            })
-        })
-        .collect()
+/// What the exception regions name, read in one pass over them.
+struct Claims {
+    /// The blocks no region names: neither protected, nor a handler entry, nor
+    /// part of a declared handler extent.
+    unclaimed: BTreeSet<BlockId>,
+    /// For each block some handler names (its entry or a block of its known
+    /// extent), the regions whose handlers do, in region order.
+    handlers: BTreeMap<BlockId, Vec<u32>>,
+}
+
+fn region_claims<I, E>(cfg: &Cfg<I, E>) -> Claims {
+    let mut claimed: BTreeSet<BlockId> = BTreeSet::new();
+    let mut handlers: BTreeMap<BlockId, Vec<u32>> = BTreeMap::new();
+    for region in cfg.regions() {
+        claimed.extend(region.protected_blocks.iter().copied());
+        for block in region.handlers.iter().flat_map(Handler::claimed_blocks) {
+            claimed.insert(block);
+            let regions = handlers.entry(block).or_default();
+            if regions.last() != Some(&region.id.0) {
+                regions.push(region.id.0);
+            }
+        }
+    }
+    Claims {
+        unclaimed: cfg
+            .block_ids()
+            .filter(|block| !claimed.contains(block))
+            .collect(),
+        handlers,
+    }
 }

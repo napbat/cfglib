@@ -8,8 +8,8 @@
 //! frame until it needs a nested construct, and answers [`Next::Call`] with
 //! the frame for it; [`Structurer::run_frame`] keeps the frames in a vector
 //! and resumes the one below with the [`Returned`] value of the one that
-//! finished. Every step does what the recursive walk did at the same point,
-//! in the same order, so the arena the tree lands in is the same.
+//! finished. Each step stores into the arena in the order of its layout (a
+//! node's children before the node), whatever the order of the frames.
 
 extern crate alloc;
 use alloc::boxed::Box;

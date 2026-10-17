@@ -109,6 +109,7 @@ fn while_chain<I, E>(
         let sequential_predecessors = cfg
             .incoming(next)
             .filter(|&edge| !cfg.edge(edge).kind().is_exceptional())
+            .take(2)
             .count();
         if sequential_predecessors != 1 {
             return None;

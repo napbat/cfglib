@@ -97,7 +97,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
                 // Anything else is recorded, never dropped: the jump is
                 // explicit and the completeness sweep emits the target under
                 // the matching label.
-                if cfg.incoming(block).count() == 1 && !self.is_claimed(block) {
+                if cfg.incoming(block).take(2).count() == 1 && !self.is_claimed(block) {
                     walk.awaiting = Awaiting::Inline;
                     let bound = Some(Rc::clone(&self.unclaimed));
                     return Next::Call(Frame::Region(RegionWalk::new(block, bound, walk.stop)));
@@ -228,7 +228,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             if let Some(node) = self.resolve_loop_transfer(target) {
                 result.push(node);
             } else if !self.is_visited(target)
-                && cfg.incoming(target).count() == 1
+                && cfg.incoming(target).take(2).count() == 1
                 && !self.is_claimed(target)
             {
                 // Exclusively owned jump target — this explicit jump is its
@@ -311,6 +311,9 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         reason: GotoReason,
     ) {
         self.goto_targets.insert(target);
+        if !self.is_visited(target) {
+            self.unemitted_targets.insert(target);
+        }
         self.report.gotos.push(GotoDiagnostic { target, reason });
         result.push(ControlNode::Goto { target });
     }

@@ -568,10 +568,10 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
     /// other than `region` that the walk has not structured yet. That region
     /// lifts the block when it reaches the region's anchor.
     fn awaits_its_handler(&self, region: &Region, block: BlockId) -> bool {
-        self.cfg.regions().iter().any(|other| {
-            other.id != region.id
-                && !self.structured_regions.contains(&other.id.0)
-                && other.handlers.iter().any(|handler| handler.claims(block))
+        self.handler_claims.get(&block).is_some_and(|regions| {
+            regions
+                .iter()
+                .any(|&other| other != region.id.0 && !self.structured_regions.contains(&other))
         })
     }
 }

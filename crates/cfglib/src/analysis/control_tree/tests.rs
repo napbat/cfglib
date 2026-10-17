@@ -28,6 +28,7 @@ mod exhaustive;
 mod exit_free;
 mod invariants;
 mod lost_transfers;
+mod many_blocks;
 mod non_compact;
 mod predicated;
 mod regions;
