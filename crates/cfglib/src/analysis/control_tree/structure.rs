@@ -20,11 +20,14 @@ use crate::graph::loop_forest::LoopForest;
 use crate::region::{Handler, Region};
 use bound::Bound;
 use completion::Completion;
+use extent::ExtentWalk;
 use roots::VirtualRoot;
 
 mod bound;
 mod branches;
 mod completion;
+mod exits;
+mod extent;
 mod frames;
 mod labels;
 mod loops;
@@ -66,6 +69,8 @@ struct Structurer<'cfg, I, E> {
     /// The blocks the handlers own: entries, filter funclets, and the blocks
     /// of known extents. Sweep roots.
     handler_roots: Vec<BlockId>,
+    /// The state the walks that order the handler extents share.
+    extents: ExtentWalk,
     /// Dominance-proven and explicitly tagged back-edge endpoint pairs.
     ///
     /// Machine frontends normally describe every native jump as
@@ -92,6 +97,8 @@ struct Structurer<'cfg, I, E> {
     /// For each block an enclosing loop continues or breaks at, the positions
     /// of those loops in `loop_stack`, innermost last.
     loop_targets: BTreeMap<BlockId, Vec<usize>>,
+    /// Where each loop is left, found on the first loop that needs it.
+    exits: Option<exits::LoopExits>,
     /// Regions structured as [`ControlNode::TryCatch`].
     structured_regions: BTreeSet<u32>,
     /// The blocks no exception region names, as protected code, a handler
@@ -263,16 +270,22 @@ impl ControlTree {
     /// [`for_each_instruction`](Self::for_each_instruction).
     ///
     /// Time and memory grow linearly with the nesting of loops, `if`s,
-    /// `switch`es, and labels: a loop's blocks are read from a
-    /// [`LoopForest`](crate::LoopForest), not copied per loop. The exceptions
-    /// are the input's own size and two scans:
+    /// `switch`es, and labels, and with the number of handlers and the blocks
+    /// they share. A loop's blocks are read from a
+    /// [`LoopForest`](crate::LoopForest), not copied per loop. Where a loop
+    /// with no recognized test is left is found for every loop at once, or
+    /// read from the set of blocks that bounds the loop when that set is
+    /// smaller than the loop. The order of a handler's extent is read from a
+    /// walk that skips the blocks that cannot reach the extent. The exceptions
+    /// are the input's own size and the loops that are not nested properly:
     ///
-    /// - Each nested `try` region names its own set of protected blocks, so
-    ///   `n` nested regions are an input of size quadratic in `n`, and
-    ///   structuring them costs about that size.
-    /// - A loop with no recognized test (an endless loop) scans its blocks for
-    ///   its follow, so `n` loops of that kind nested in each other cost time
-    ///   quadratic in `n`.
+    /// - Each nested `try` region, and each handler with a known extent, names
+    ///   its own set of blocks, so `n` nested regions are an input of size
+    ///   quadratic in `n`, and structuring them costs about that size.
+    /// - A loop with no recognized test that is irreducible (its header does
+    ///   not dominate its latches), or that lies in the bound of a loop that
+    ///   is not the loop around it, scans its blocks for its follow, which
+    ///   costs the size of the loop.
     ///
     /// The text of the pseudocode is quadratic in any nesting, since each
     /// level indents every line it holds.
@@ -368,10 +381,11 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         // points too, so the root also precedes each block the entry misses.
         let unreachable = cfg.block_ids().filter(|block| !reachable[block.index()]);
         let claims = region_claims(cfg);
+        let mut extents = ExtentWalk::default();
         Self {
             cfg,
             pdom: PostDominatorTree::compute(&VirtualRoot::new(cfg, unreachable)),
-            handler_roots: try_catch::handler_roots(cfg, |block| {
+            handler_roots: try_catch::handler_roots(cfg, &mut extents, |block| {
                 !emptied[block.index()] && !cfg.block(block).instructions().is_empty()
             }),
             reachable,
@@ -384,6 +398,8 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             labeled_blocks: BTreeSet::new(),
             loop_stack: Vec::new(),
             loop_targets: BTreeMap::new(),
+            exits: None,
+            extents,
             structured_regions: BTreeSet::new(),
             unclaimed: Rc::new(claims.unclaimed),
             handler_claims: claims.handlers,

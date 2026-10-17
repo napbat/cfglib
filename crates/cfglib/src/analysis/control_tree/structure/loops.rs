@@ -7,11 +7,13 @@
 
 extern crate alloc;
 use alloc::boxed::Box;
+use alloc::collections::BTreeSet;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 
 use super::bound::Bound;
 use super::branches::{Conditional, conditional_targets};
+use super::exits::LoopExits;
 use super::frames::{Frame, Next, Returned};
 use super::walk::RegionWalk;
 use super::{BlockFlowKind, LoopContext, Structurer, branching, flow_successors};
@@ -50,9 +52,9 @@ enum LoopShape {
 
 /// One loop of the loop forest.
 #[derive(Clone, Copy)]
-struct LoopRef<'a> {
-    forest: &'a LoopForest,
-    lp: LoopId,
+pub(super) struct LoopRef<'a> {
+    pub(super) forest: &'a LoopForest,
+    pub(super) lp: LoopId,
 }
 
 impl<'a> LoopRef<'a> {
@@ -176,15 +178,19 @@ fn classify_loop<I, E>(
     LoopShape::Endless
 }
 
-/// The deterministic follow of a loop with no recognized test: the first
-/// exit target of sequential flow (any edge but an exception edge, the rule
-/// [`flow_successors`] states) scanning body blocks in identity order,
+/// The follow of a loop with no recognized test, by scanning its blocks: the
+/// first exit target of sequential flow (any edge but an exception edge, the
+/// rule [`flow_successors`] states) scanning body blocks in identity order,
 /// preferring targets inside the enclosing bound.
+///
+/// This costs the size of the loop. It answers the loops that
+/// [`Structurer::endless_follow`] cannot read off the exits table, and is the
+/// definition the table has to agree with.
 ///
 /// The body comes in no order, so this keeps the first exit of the lowest
 /// block and the first allowed exit of the lowest block, which is what the
 /// scan in identity order finds.
-fn endless_follow<I, E>(
+pub(super) fn scan_endless_follow<I, E>(
     cfg: &Cfg<I, E>,
     natural: LoopRef<'_>,
     reachable: &[bool],
@@ -217,6 +223,93 @@ fn endless_follow<I, E>(
         }
     }
     first_allowed.or(first_exit).map(|(_, target)| target)
+}
+
+/// The first exit of a loop that the bound admits, read from the blocks of the
+/// set that every admitted block is in instead of from the blocks of the loop:
+/// the edges into those blocks from the loop that the entry reaches, the lowest
+/// source first, then by the place of the edge among its source's edges. This
+/// is what [`scan_endless_follow`] finds, in the cost of the set.
+pub(super) fn first_exit_into<I, E>(
+    cfg: &Cfg<I, E>,
+    natural: LoopRef<'_>,
+    reachable: &[bool],
+    allowed: &Bound,
+    set: &BTreeSet<BlockId>,
+) -> Option<BlockId> {
+    let mut first: Option<(BlockId, usize, BlockId)> = None;
+    for &target in set {
+        if natural.contains(target) || !allowed.contains(target) {
+            continue;
+        }
+        for eid in cfg.incoming(target) {
+            let edge = cfg.edge(eid);
+            let source = edge.source();
+            if edge.kind().is_exceptional()
+                || !reachable[source.index()]
+                || !natural.contains(source)
+            {
+                continue;
+            }
+            let place = cfg
+                .outgoing(source)
+                .position(|other| other == eid)
+                .expect("an edge into a block is an edge out of its source");
+            if first.is_none_or(|(lowest, earliest, _)| (source, place) < (lowest, earliest)) {
+                first = Some((source, place, target));
+            }
+        }
+    }
+    first.map(|(_, _, target)| target)
+}
+
+impl<I, E> Structurer<'_, I, E> {
+    /// The follow of a loop with no recognized test: see
+    /// [`scan_endless_follow`].
+    ///
+    /// A nested loop under a bound that admits everything, or exactly the
+    /// loop around it and what an outer bound admits, reads its follow off the
+    /// exits of the forest, found once for all loops. A loop under a bound
+    /// that ends in a set smaller than the loop reads it from the set. Any
+    /// other loop scans its blocks: an irreducible one, or one under a loop
+    /// bound that is not the loop around it.
+    fn endless_follow(&mut self, natural: LoopRef<'_>, allowed: &Bound) -> Option<BlockId> {
+        let lp = natural.lp;
+        let nested = natural.forest.is_nested(lp);
+        if nested {
+            let (cfg, forest, reachable) = (self.cfg, &self.forest, &self.reachable);
+            let exits = self
+                .exits
+                .get_or_insert_with(|| LoopExits::compute(cfg, forest, reachable));
+            if matches!(allowed, Bound::Whole) {
+                return exits.first(lp);
+            }
+            if let Some((around, rest)) = allowed.within()
+                && natural.forest.enclosing(lp) == Some(around)
+            {
+                return exits
+                    .local(lp)
+                    .iter()
+                    .copied()
+                    .find(|&target| rest.contains(target))
+                    .or_else(|| exits.first(lp));
+            }
+        }
+        if let Some(set) = allowed.root_set()
+            && set.len() < natural.forest.body_len(lp)
+        {
+            if let Some(target) = first_exit_into(self.cfg, natural, &self.reachable, allowed, set)
+            {
+                return Some(target);
+            }
+            // No exit is admitted, so the follow is the first exit of all.
+            return match &self.exits {
+                Some(exits) if nested => exits.first(lp),
+                _ => scan_endless_follow(self.cfg, natural, &self.reachable, &Bound::Whole),
+            };
+        }
+        scan_endless_follow(self.cfg, natural, &self.reachable, allowed)
+    }
 }
 
 /// A natural loop being lifted: the frame of its body, from the loop's
@@ -326,10 +419,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
                 (Some(*exit), header)
             }
             LoopShape::DoWhile { latch, exit, .. } => (Some(*exit), *latch),
-            LoopShape::Endless => (
-                endless_follow(cfg, natural, &self.reachable, allowed),
-                header,
-            ),
+            LoopShape::Endless => (self.endless_follow(natural, allowed), header),
         };
 
         // A multi-block condition chain belongs to the loop's test, not its

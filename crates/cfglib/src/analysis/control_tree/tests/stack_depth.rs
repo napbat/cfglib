@@ -19,8 +19,8 @@ extern crate alloc;
 extern crate std;
 use alloc::vec::Vec;
 use core::fmt;
-use std::thread;
 
+use super::small_stack::on_small_stack;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::display::DisplayInstr;
@@ -31,8 +31,6 @@ use crate::{
     ControlDescent, ControlNode, ControlNodeId, ControlTree, ControlVisitor, LiftReport, LoopKind,
 };
 
-const SMALL_STACK: usize = 256 * 1024;
-
 /// Levels of a nesting whose graph and tree are linear in their depth.
 const LINEAR_DEPTH: usize = 100_000;
 /// Levels of nested `try` regions: every region holds its own set of protected
@@ -41,18 +39,6 @@ const TRY_DEPTH: usize = 1_000;
 /// Levels of a linear nesting that is printed: the text is quadratic in the
 /// depth, since each line is indented by its level.
 const PRINTED_DEPTH: usize = 3_000;
-
-/// Run `work` on a thread whose stack is [`SMALL_STACK`], and rethrow its
-/// panic.
-fn on_small_stack(work: impl FnOnce() + Send + 'static) {
-    let worker = thread::Builder::new()
-        .stack_size(SMALL_STACK)
-        .spawn(work)
-        .expect("a thread with a small stack can be spawned");
-    if let Err(panic) = worker.join() {
-        std::panic::resume_unwind(panic);
-    }
-}
 
 /// A block that holds one plain and one predicated instruction, so the
 /// regionizer has a guard to wrap at every level.
@@ -183,6 +169,30 @@ fn nested_loops(depth: usize) -> Cfg<DfInst> {
         }
     }
     cfg.add_edge(work, headers[depth - 1], EdgeKind::Jump);
+    cfg
+}
+
+/// `for (;;) { for (;;) { ... } if (c1) break; } if (c0) break;`, `depth` loops
+/// deep, with no test at the head of any: loop `i` has the header `h(i)` and
+/// leaves, at its test `c(i)`, to the test of the loop around it, `c(i - 1)`
+/// (the outermost leaves the function).
+fn nested_endless_loops(depth: usize) -> Cfg<DfInst> {
+    let mut cfg = Cfg::new();
+    let headers: Vec<BlockId> = (0..depth).map(|_| new_block(&mut cfg)).collect();
+    let tests: Vec<BlockId> = (0..depth).map(|_| new_block(&mut cfg)).collect();
+    let latches: Vec<BlockId> = (0..depth).map(|_| new_block(&mut cfg)).collect();
+    let out = new_block(&mut cfg);
+    cfg.add_edge(cfg.entry(), headers[0], EdgeKind::Fallthrough);
+    for index in 0..depth {
+        if let Some(&inner) = headers.get(index + 1) {
+            cfg.add_edge(headers[index], inner, EdgeKind::Fallthrough);
+        }
+        let leave = if index == 0 { out } else { tests[index - 1] };
+        cfg.add_edge(tests[index], leave, EdgeKind::ConditionalTrue);
+        cfg.add_edge(tests[index], latches[index], EdgeKind::ConditionalFalse);
+        cfg.add_edge(latches[index], headers[index], EdgeKind::Jump);
+    }
+    cfg.add_edge(headers[depth - 1], tests[depth - 1], EdgeKind::Fallthrough);
     cfg
 }
 
@@ -476,6 +486,31 @@ fn deeply_nested_loops_structure_on_a_small_stack() {
         assert_eq!(whiles, LINEAR_DEPTH);
         assert!(census.deepest > LINEAR_DEPTH);
         print_shape(nested_loops);
+    });
+}
+
+#[test]
+fn a_hundred_thousand_nested_endless_loops_structure_on_a_small_stack() {
+    on_small_stack(|| {
+        let cfg = nested_endless_loops(LINEAR_DEPTH);
+        let (tree, report, census) = structure_and_read(&cfg);
+        assert!(report.is_fully_structured(), "{report:?}");
+        let endless = count_nodes(&tree, |node| {
+            matches!(
+                node,
+                ControlNode::Loop {
+                    kind: LoopKind::Endless,
+                    ..
+                }
+            )
+        });
+        // The innermost loop has its test at its head, so it is pre-tested;
+        // every loop around it has none.
+        assert_eq!(endless, LINEAR_DEPTH - 1);
+        let loops = count_nodes(&tree, |node| matches!(node, ControlNode::Loop { .. }));
+        assert_eq!(loops, LINEAR_DEPTH);
+        assert!(census.deepest > LINEAR_DEPTH);
+        print_shape(nested_endless_loops);
     });
 }
 
