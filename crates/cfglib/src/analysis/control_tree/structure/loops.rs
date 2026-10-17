@@ -6,10 +6,14 @@
 //! the loop's sequential continuation.
 
 extern crate alloc;
+use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
+use alloc::rc::Rc;
 use alloc::vec::Vec;
 
-use super::branches::conditional_targets;
+use super::branches::{Conditional, conditional_targets};
+use super::frames::{Bound, Frame, Next, Returned};
+use super::walk::RegionWalk;
 use super::{BlockFlowKind, LoopContext, Structurer, block_is_allowed, branching, flow_successors};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
@@ -183,15 +187,49 @@ fn endless_follow<I, E>(
     fallback
 }
 
-impl<I, E> Structurer<'_, I, E> {
-    /// Lift the loop anchored at `header` (already visited by the caller) and
-    /// return the lifted node with the loop's sequential continuation.
-    pub(super) fn lift_loop(
-        &mut self,
-        header: BlockId,
-        allowed_blocks: Option<&BTreeSet<BlockId>>,
-    ) -> (ControlNode, Option<BlockId>) {
+/// A natural loop being lifted: the frame of its body, from the loop's
+/// setup until the node is built.
+pub(super) struct LoopBuild {
+    header: BlockId,
+    /// The loop's sequential continuation.
+    follow: Option<BlockId>,
+    /// The natural loop's blocks within the enclosing bound.
+    bound: Rc<BTreeSet<BlockId>>,
+    /// The recognized shape; taken when the body is lifted.
+    shape: Option<LoopShape>,
+    /// The kind of the node, known once the shape is lifted.
+    kind: Option<LoopKind>,
+}
+
+/// The body of a post-tested or endless loop, whose header's own
+/// instructions belong inside it: the frame of
+/// [`Structurer::begin_header_body`].
+pub(super) struct HeaderBody {
+    header: BlockId,
+    bound: Rc<BTreeSet<BlockId>>,
+    stop: Option<BlockId>,
+    body: Vec<ControlNode>,
+    awaiting: HeaderWait,
+}
+
+enum HeaderWait {
+    /// Nothing is lifted yet.
+    Nothing,
+    /// The branch or dispatch at the header.
+    Branch,
+    /// The walk from the merge after the branch.
+    Merge,
+    /// The walk from one of the header's other targets; the rest follow.
+    Target(alloc::vec::IntoIter<BlockId>),
+}
+
+impl<'cfg, I, E> Structurer<'cfg, I, E> {
+    /// Start lifting the loop anchored at `header` (already visited by the
+    /// caller): classify its shape, fix its follow, and enter its context. The
+    /// frame returns the lifted node with the loop's sequential continuation.
+    pub(super) fn begin_loop(&mut self, header: BlockId, allowed: &Bound) -> Frame<'cfg> {
         let cfg = self.cfg;
+        let allowed_blocks = allowed.as_deref();
         let fallback;
         let natural = if let Some(natural) = self.loops.get(&header) {
             natural
@@ -255,8 +293,74 @@ impl<I, E> Structurer<'_, I, E> {
             labeled: false,
         });
 
-        let (kind, mut body) = self.lift_shape(header, &bound, shape);
+        Frame::Loop(Box::new(LoopBuild {
+            header,
+            follow,
+            bound: Rc::new(bound),
+            shape: Some(shape),
+            kind: None,
+        }))
+    }
 
+    pub(super) fn step_loop(&mut self, build: &mut LoopBuild, returned: Returned) -> Next<'cfg> {
+        let Some(shape) = build.shape.take() else {
+            return self.finish_loop(build, returned.into_nodes());
+        };
+        // Lift the loop's condition and body per its recognized shape.
+        let header = build.header;
+        let bound = Some(Rc::clone(&build.bound));
+        match shape {
+            LoopShape::While {
+                chain,
+                body_start,
+                exit_on_true,
+                ..
+            } => {
+                let spans: Vec<_> = chain.iter().map(|&block| self.whole_span(block)).collect();
+                let condition = self.tables.push_spans(spans.into_iter());
+                build.kind = Some(LoopKind::While {
+                    condition,
+                    exit_on_true,
+                });
+                if body_start == header {
+                    // The conditional's in-loop arm re-enters the chain: the
+                    // loop is its own condition.
+                    return self.finish_loop(build, Vec::new());
+                }
+                Next::Call(Frame::Region(RegionWalk::new(body_start, bound, None)))
+            }
+            LoopShape::SelfLoop {
+                continue_on_true, ..
+            } => {
+                build.kind = Some(LoopKind::DoWhile {
+                    latch: self.whole_span(header),
+                    continue_on_true,
+                });
+                self.finish_loop(build, Vec::new())
+            }
+            LoopShape::DoWhile {
+                latch,
+                continue_on_true,
+                ..
+            } => {
+                // The latch is the condition, not part of the body: pre-visit
+                // it so the body walk ends there silently, and transfers to it
+                // resolve as `continue`.
+                self.visit(latch);
+                build.kind = Some(LoopKind::DoWhile {
+                    latch: self.whole_span(latch),
+                    continue_on_true,
+                });
+                Next::Call(Self::header_body(header, &build.bound, Some(latch)))
+            }
+            LoopShape::Endless => {
+                build.kind = Some(LoopKind::Endless);
+                Next::Call(Self::header_body(header, &build.bound, None))
+            }
+        }
+    }
+
+    fn finish_loop(&mut self, build: &mut LoopBuild, mut body: Vec<ControlNode>) -> Next<'cfg> {
         // A trailing plain `continue` at the structural end of the body is
         // the loop's own back edge — implicit in the representation.
         if matches!(body.last(), Some(ControlNode::Continue { label: None })) {
@@ -267,9 +371,13 @@ impl<I, E> Structurer<'_, I, E> {
             .loop_stack
             .pop()
             .expect("the loop context pushed above is still on the stack");
+        let header = build.header;
         let node = ControlNode::Loop {
             header,
-            kind,
+            kind: build
+                .kind
+                .take()
+                .expect("the shape is lifted before the loop finishes"),
             body: self.tables.seal(body),
         };
         let node = if context.labeled {
@@ -282,119 +390,103 @@ impl<I, E> Structurer<'_, I, E> {
         } else {
             node
         };
-        (node, follow)
+        Next::Return(Returned::Construct {
+            node,
+            next: build.follow,
+        })
     }
 
-    /// Lift the loop's condition and body per its recognized shape.
-    fn lift_shape(
-        &mut self,
-        header: BlockId,
-        bound: &BTreeSet<BlockId>,
-        shape: LoopShape,
-    ) -> (LoopKind, Vec<ControlNode>) {
-        match shape {
-            LoopShape::While {
-                chain,
-                body_start,
-                exit_on_true,
-                ..
-            } => {
-                let spans: Vec<_> = chain.iter().map(|&block| self.whole_span(block)).collect();
-                let condition = self.tables.push_spans(spans.into_iter());
-                let body = if body_start == header {
-                    // The conditional's in-loop arm re-enters the chain: the
-                    // loop is its own condition.
-                    Vec::new()
-                } else {
-                    self.lift_region(body_start, Some(bound), None)
-                };
-                (
-                    LoopKind::While {
-                        condition,
-                        exit_on_true,
-                    },
-                    body,
-                )
-            }
-            LoopShape::SelfLoop {
-                continue_on_true, ..
-            } => (
-                LoopKind::DoWhile {
-                    latch: self.whole_span(header),
-                    continue_on_true,
-                },
-                Vec::new(),
-            ),
-            LoopShape::DoWhile {
-                latch,
-                continue_on_true,
-                ..
-            } => {
-                // The latch is the condition, not part of the body: pre-visit
-                // it so the body walk ends there silently, and transfers to it
-                // resolve as `continue`.
-                self.visit(latch);
-                let body = self.lift_header_body(header, bound, Some(latch));
-                (
-                    LoopKind::DoWhile {
-                        latch: self.whole_span(latch),
-                        continue_on_true,
-                    },
-                    body,
-                )
-            }
-            LoopShape::Endless => (
-                LoopKind::Endless,
-                self.lift_header_body(header, bound, None),
-            ),
-        }
-    }
-
-    /// Lift a loop body whose header's own instructions belong inside it (the
-    /// post-tested and endless shapes): emit the header's structure manually —
-    /// it is already visited — then continue the ordinary walk.
+    /// The frame that lifts the body of a post-tested or endless loop whose
+    /// header's own instructions belong inside it: emit the header's structure
+    /// manually — it is already visited — then continue the ordinary walk.
     ///
     /// A plain header's edge to itself is the loop's own back edge, implicit
     /// in the representation. Any other edge is a transfer the walk resolves,
     /// even when it is the back edge of an enclosing loop: that one is a
     /// `continue` of the enclosing loop, not of this one.
-    fn lift_header_body(
-        &mut self,
+    fn header_body(
         header: BlockId,
-        bound: &BTreeSet<BlockId>,
+        bound: &Rc<BTreeSet<BlockId>>,
         stop: Option<BlockId>,
-    ) -> Vec<ControlNode> {
-        let cfg = self.cfg;
-        let mut body = Vec::new();
-        let outgoing: Vec<EdgeId> = cfg.outgoing(header).collect();
+    ) -> Frame<'cfg> {
+        Frame::HeaderBody(HeaderBody {
+            header,
+            bound: Rc::clone(bound),
+            stop,
+            body: Vec::new(),
+            awaiting: HeaderWait::Nothing,
+        })
+    }
 
-        match branching(cfg, &outgoing) {
-            Some(BlockFlowKind::Conditional) => {
-                let node = self.lift_conditional(header, Some(bound));
-                body.push(node);
-                let merge = self.effective_merge(header, Some(bound));
-                if let Some(merge) = self.resume_after(&node, merge) {
-                    body.extend(self.lift_region(merge, Some(bound), stop));
-                }
-            }
-            Some(BlockFlowKind::Switch) => {
-                let node = self.lift_switch(header, Some(bound));
-                body.push(node);
-                let merge = self.effective_merge(header, Some(bound));
-                if let Some(merge) = self.resume_after(&node, merge) {
-                    body.extend(self.lift_region(merge, Some(bound), stop));
-                }
-            }
-            _ => {
-                self.push_block(&mut body, header);
-                for eid in outgoing {
-                    let edge = cfg.edge(eid);
-                    if edge.target() != header && !edge.kind().is_exceptional() {
-                        body.extend(self.lift_region(edge.target(), Some(bound), stop));
+    pub(super) fn step_header_body(
+        &mut self,
+        header_body: &mut HeaderBody,
+        returned: Returned,
+    ) -> Next<'cfg> {
+        let header = header_body.header;
+        let bound = Some(Rc::clone(&header_body.bound));
+        match core::mem::replace(&mut header_body.awaiting, HeaderWait::Nothing) {
+            HeaderWait::Nothing => {
+                let cfg = self.cfg;
+                let outgoing: Vec<EdgeId> = cfg.outgoing(header).collect();
+                match branching(cfg, &outgoing) {
+                    Some(BlockFlowKind::Conditional) => {
+                        header_body.awaiting = HeaderWait::Branch;
+                        return Next::Call(Frame::Conditional(Conditional::new(header, bound)));
                     }
+                    Some(BlockFlowKind::Switch) => {
+                        header_body.awaiting = HeaderWait::Branch;
+                        return Next::Call(self.begin_switch(header, &bound));
+                    }
+                    _ => {}
                 }
+                self.push_block(&mut header_body.body, header);
+                let targets: Vec<BlockId> = outgoing
+                    .into_iter()
+                    .map(|eid| cfg.edge(eid))
+                    .filter(|edge| edge.target() != header && !edge.kind().is_exceptional())
+                    .map(|edge| edge.target())
+                    .collect();
+                Self::next_target(header_body, targets.into_iter())
+            }
+            HeaderWait::Branch => {
+                let (node, next) = returned.into_construct();
+                header_body.body.push(node);
+                let Some(merge) = next else {
+                    return Next::Return(Returned::Nodes(core::mem::take(&mut header_body.body)));
+                };
+                header_body.awaiting = HeaderWait::Merge;
+                Next::Call(Frame::Region(RegionWalk::new(
+                    merge,
+                    bound,
+                    header_body.stop,
+                )))
+            }
+            HeaderWait::Merge => {
+                header_body.body.extend(returned.into_nodes());
+                Next::Return(Returned::Nodes(core::mem::take(&mut header_body.body)))
+            }
+            HeaderWait::Target(targets) => {
+                header_body.body.extend(returned.into_nodes());
+                Self::next_target(header_body, targets)
             }
         }
-        body
+    }
+
+    /// Lift the walk from the next of the header's other targets, or end the
+    /// body.
+    fn next_target(
+        header_body: &mut HeaderBody,
+        mut targets: alloc::vec::IntoIter<BlockId>,
+    ) -> Next<'cfg> {
+        let Some(target) = targets.next() else {
+            return Next::Return(Returned::Nodes(core::mem::take(&mut header_body.body)));
+        };
+        header_body.awaiting = HeaderWait::Target(targets);
+        Next::Call(Frame::Region(RegionWalk::new(
+            target,
+            Some(Rc::clone(&header_body.bound)),
+            header_body.stop,
+        )))
     }
 }

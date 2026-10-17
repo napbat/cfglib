@@ -185,52 +185,6 @@ impl Tables {
         self.handlers.get(run)
     }
 
-    /// Whether control can never reach the end of `node`: every path through
-    /// it ends in a `break`, `continue`, or return.
-    ///
-    /// The answer is conservative. A `goto` does not count: its label may sit
-    /// later in the same construct (a pad's code that another arm of the same
-    /// handler jumps to), and control then runs on to the end of it. A loop, which may run on or be left through
-    /// a `break` of its own, and a node with a body that is empty or ends in
-    /// plain code, can complete. So can a try: a handler body may end in dead
-    /// code of its extent after the flow the handler really has, so only the
-    /// walk that builds the try can say how its handlers end.
-    pub(super) fn never_completes(&self, node: ControlNode) -> bool {
-        let body_never_completes = |body: ControlBody| {
-            self.body(body)
-                .last()
-                .is_some_and(|&last| self.never_completes(*self.node(last)))
-        };
-        match node {
-            ControlNode::Break { .. } | ControlNode::Continue { .. } | ControlNode::Return(_) => {
-                true
-            }
-            ControlNode::Sequence(body)
-            | ControlNode::Label { body, .. }
-            | ControlNode::Guarded { body, .. } => body_never_completes(body),
-            ControlNode::IfThenElse {
-                then_body,
-                else_body,
-                ..
-            } => body_never_completes(then_body) && body_never_completes(else_body),
-            ControlNode::Switch {
-                cases,
-                default_body,
-                ..
-            } => {
-                body_never_completes(default_body)
-                    && self
-                        .cases(cases)
-                        .iter()
-                        .all(|case| body_never_completes(case.body))
-            }
-            ControlNode::Block(_)
-            | ControlNode::Goto { .. }
-            | ControlNode::Loop { .. }
-            | ControlNode::TryCatch { .. } => false,
-        }
-    }
-
     pub(super) fn child_bodies(&self, node: ControlNode) -> ChildBodies<'_> {
         ChildBodies {
             tables: self,

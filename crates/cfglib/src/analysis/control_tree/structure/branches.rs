@@ -2,11 +2,14 @@
 //! arms that run up to it.
 
 extern crate alloc;
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
 use super::super::node::{ControlNode, SwitchCase};
 use super::super::report::GotoReason;
+use super::frames::{Bound, Frame, Next, Returned};
+use super::walk::{Lifted, RegionWalk};
 use super::{Structurer, block_is_allowed};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
@@ -38,7 +41,86 @@ pub(super) fn conditional_targets<I, E>(
     })
 }
 
-impl<I, E> Structurer<'_, I, E> {
+/// An if/else conditional being lifted: the frame that lifts both arms.
+pub(super) struct Conditional {
+    block: BlockId,
+    allowed: Bound,
+    merge: Option<BlockId>,
+    arm: ConditionalArm,
+}
+
+enum ConditionalArm {
+    /// Nothing is lifted yet.
+    Start,
+    /// The `then` arm is being lifted; the `else` arm's entry follows.
+    Then { false_target: BlockId },
+    /// The `else` arm is being lifted; the `then` arm's statements are done.
+    Else { then_nodes: Vec<ControlNode> },
+}
+
+impl Conditional {
+    /// The frame that lifts the conditional at `block`, within `allowed`.
+    pub(super) const fn new(block: BlockId, allowed: Bound) -> Self {
+        Self {
+            block,
+            allowed,
+            merge: None,
+            arm: ConditionalArm::Start,
+        }
+    }
+}
+
+/// A switch being lifted: the frame that lifts each arm in dispatch order.
+pub(super) struct Switch {
+    block: BlockId,
+    allowed: Bound,
+    merge: Option<BlockId>,
+    /// The case arms lifted so far.
+    cases: Vec<SwitchCase>,
+    /// The case targets still to lift, in first-encounter order.
+    pending: alloc::vec::IntoIter<BlockId>,
+    case_edges: BTreeMap<BlockId, Vec<EdgeId>>,
+    /// The arm entries the switch pre-visited and owns.
+    owned: BTreeSet<BlockId>,
+    default_target: Option<BlockId>,
+    default_edge: Option<EdgeId>,
+    arm: SwitchWait,
+}
+
+enum SwitchWait {
+    /// No arm is being lifted.
+    Idle,
+    /// The case arm at `target` with the dispatch `edges` is being lifted.
+    Case {
+        target: BlockId,
+        edges: Vec<EdgeId>,
+    },
+    Default,
+}
+
+/// One switch arm (a case body or the default body), lifted up to the merge.
+pub(super) struct SwitchArm {
+    target: BlockId,
+    /// The switch pre-visited the arm entry and owns it.
+    entered: bool,
+    allowed: Bound,
+    merge: Option<BlockId>,
+    body: Vec<ControlNode>,
+    awaiting: ArmWait,
+}
+
+enum ArmWait {
+    Nothing,
+    /// An arm whose entry earlier code owns is one walk: its statements are
+    /// the arm.
+    Walk,
+    /// The construct at the arm entry.
+    Construct,
+    /// The walk after the arm entry, toward the merge.
+    Rest,
+}
+
+impl<'cfg, I, E> Structurer<'cfg, I, E> {
     /// The post-dominator merge of `block`, kept only when it stays inside
     /// the enclosing structural bound.
     ///
@@ -66,41 +148,69 @@ impl<I, E> Structurer<'_, I, E> {
     /// every arm already ends in a `break`, `continue`, or return, one more
     /// after the construct would be dead code.
     pub(super) fn resume_after(
-        &self,
+        &mut self,
         node: &ControlNode,
         merge: Option<BlockId>,
     ) -> Option<BlockId> {
-        merge.filter(|&next| !(self.is_visited(next) && self.tables.never_completes(*node)))
+        merge.filter(|&next| !(self.is_visited(next) && self.never_completes(*node)))
     }
 
-    /// Lift an if/else conditional starting at `block`.
-    pub(super) fn lift_conditional(
+    /// The construct a branch or dispatch at `block` returns, with the block
+    /// the walk goes on at after it: the merge, when the construct can reach
+    /// it.
+    fn finish_branch(&mut self, block: BlockId, allowed: &Bound, node: ControlNode) -> Next<'cfg> {
+        let merge = self.effective_merge(block, allowed.as_deref());
+        let next = self.resume_after(&node, merge);
+        Next::Return(Returned::Construct { node, next })
+    }
+
+    pub(super) fn step_conditional(
         &mut self,
-        block: BlockId,
-        allowed_blocks: Option<&BTreeSet<BlockId>>,
-    ) -> ControlNode {
-        let targets = conditional_targets(self.cfg, block)
-            .expect("a block classified as a conditional has a true and a false edge");
-        let merge = self.effective_merge(block, allowed_blocks);
-
-        let then_nodes = self.lift_region(targets.true_target, allowed_blocks, merge);
-        let else_nodes = self.lift_region(targets.false_target, allowed_blocks, merge);
-
-        ControlNode::IfThenElse {
-            condition: self.whole_span(block),
-            then_body: self.tables.seal(then_nodes),
-            else_body: self.tables.seal(else_nodes),
+        conditional: &mut Conditional,
+        returned: Returned,
+    ) -> Next<'cfg> {
+        let block = conditional.block;
+        match core::mem::replace(&mut conditional.arm, ConditionalArm::Start) {
+            ConditionalArm::Start => {
+                let targets = conditional_targets(self.cfg, block)
+                    .expect("a block classified as a conditional has a true and a false edge");
+                conditional.merge = self.effective_merge(block, conditional.allowed.as_deref());
+                conditional.arm = ConditionalArm::Then {
+                    false_target: targets.false_target,
+                };
+                Next::Call(Frame::Region(RegionWalk::new(
+                    targets.true_target,
+                    conditional.allowed.clone(),
+                    conditional.merge,
+                )))
+            }
+            ConditionalArm::Then { false_target } => {
+                conditional.arm = ConditionalArm::Else {
+                    then_nodes: returned.into_nodes(),
+                };
+                Next::Call(Frame::Region(RegionWalk::new(
+                    false_target,
+                    conditional.allowed.clone(),
+                    conditional.merge,
+                )))
+            }
+            ConditionalArm::Else { then_nodes } => {
+                let else_nodes = returned.into_nodes();
+                let node = ControlNode::IfThenElse {
+                    condition: self.whole_span(block),
+                    then_body: self.tables.seal(then_nodes),
+                    else_body: self.tables.seal(else_nodes),
+                };
+                let allowed = conditional.allowed.clone();
+                self.finish_branch(block, &allowed, node)
+            }
         }
     }
 
-    /// Lift a switch starting at `block`.
-    pub(super) fn lift_switch(
-        &mut self,
-        block: BlockId,
-        allowed_blocks: Option<&BTreeSet<BlockId>>,
-    ) -> ControlNode {
+    /// Start lifting the switch at `block`.
+    pub(super) fn begin_switch(&mut self, block: BlockId, allowed: &Bound) -> Frame<'cfg> {
         let cfg = self.cfg;
-        let merge = self.effective_merge(block, allowed_blocks);
+        let merge = self.effective_merge(block, allowed.as_deref());
 
         // Group dispatch edges by target in first-encounter order, and find
         // the explicit default edge (the sequential non-case successor).
@@ -136,7 +246,7 @@ impl<I, E> Structurer<'_, I, E> {
         let mut owned: BTreeSet<BlockId> = BTreeSet::new();
         for &target in case_targets.iter().chain(&default_target) {
             if Some(target) != merge
-                && block_is_allowed(allowed_blocks, target)
+                && block_is_allowed(allowed.as_deref(), target)
                 && !self.is_visited(target)
             {
                 self.visit(target);
@@ -144,47 +254,104 @@ impl<I, E> Structurer<'_, I, E> {
             }
         }
 
-        let mut cases = Vec::new();
-        for target in case_targets {
-            let edges = case_edges.remove(&target).unwrap_or_default();
-            let entered = owned.remove(&target);
-            let arm = self.lift_switch_arm(target, entered, allowed_blocks, merge);
-            cases.push(SwitchCase {
-                block: target,
-                edges: self.tables.push_edges(edges),
-                body: self.tables.seal(arm),
-            });
-        }
-        let default_nodes = default_target
-            .map(|target| {
-                let entered = owned.remove(&target);
-                self.lift_switch_arm(target, entered, allowed_blocks, merge)
-            })
-            .unwrap_or_default();
+        Frame::Switch(Box::new(Switch {
+            block,
+            allowed: allowed.clone(),
+            merge,
+            cases: Vec::new(),
+            pending: case_targets.into_iter(),
+            case_edges,
+            owned,
+            default_target,
+            default_edge,
+            arm: SwitchWait::Idle,
+        }))
+    }
 
-        ControlNode::Switch {
-            condition: self.whole_span(block),
+    pub(super) fn step_switch(&mut self, switch: &mut Switch, returned: Returned) -> Next<'cfg> {
+        match core::mem::replace(&mut switch.arm, SwitchWait::Idle) {
+            SwitchWait::Idle => {}
+            SwitchWait::Case { target, edges } => {
+                let arm = returned.into_nodes();
+                switch.cases.push(SwitchCase {
+                    block: target,
+                    edges: self.tables.push_edges(edges),
+                    body: self.tables.seal(arm),
+                });
+            }
+            SwitchWait::Default => {
+                let default_nodes = returned.into_nodes();
+                return self.finish_switch(switch, default_nodes);
+            }
+        }
+        if let Some(target) = switch.pending.next() {
+            let edges = switch.case_edges.remove(&target).unwrap_or_default();
+            let entered = switch.owned.remove(&target);
+            switch.arm = SwitchWait::Case { target, edges };
+            return Next::Call(Self::switch_arm(switch, target, entered));
+        }
+        let Some(target) = switch.default_target else {
+            return self.finish_switch(switch, Vec::new());
+        };
+        let entered = switch.owned.remove(&target);
+        switch.arm = SwitchWait::Default;
+        Next::Call(Self::switch_arm(switch, target, entered))
+    }
+
+    fn switch_arm(switch: &Switch, target: BlockId, entered: bool) -> Frame<'cfg> {
+        Frame::SwitchArm(SwitchArm {
+            target,
+            entered,
+            allowed: switch.allowed.clone(),
+            merge: switch.merge,
+            body: Vec::new(),
+            awaiting: ArmWait::Nothing,
+        })
+    }
+
+    fn finish_switch(
+        &mut self,
+        switch: &mut Switch,
+        default_nodes: Vec<ControlNode>,
+    ) -> Next<'cfg> {
+        let cases = core::mem::take(&mut switch.cases);
+        let node = ControlNode::Switch {
+            condition: self.whole_span(switch.block),
             cases: self.tables.push_cases(cases),
             default_body: self.tables.seal(default_nodes),
-            default_edge,
+            default_edge: switch.default_edge,
+        };
+        let allowed = switch.allowed.clone();
+        self.finish_branch(switch.block, &allowed, node)
+    }
+
+    pub(super) fn step_switch_arm(
+        &mut self,
+        arm: &mut SwitchArm,
+        returned: Returned,
+    ) -> Next<'cfg> {
+        match core::mem::replace(&mut arm.awaiting, ArmWait::Nothing) {
+            ArmWait::Nothing => self.start_switch_arm(arm),
+            ArmWait::Walk => Next::Return(returned),
+            ArmWait::Construct => {
+                let (node, next) = returned.into_construct();
+                arm.body.push(node);
+                Self::continue_switch_arm(arm, next)
+            }
+            ArmWait::Rest => {
+                arm.body.extend(returned.into_nodes());
+                Next::Return(Returned::Nodes(core::mem::take(&mut arm.body)))
+            }
         }
     }
 
-    /// Lift one switch arm (a case body or the default body) up to the merge.
-    ///
-    /// `entered` says the switch pre-visited the arm entry and owns it.
-    fn lift_switch_arm(
-        &mut self,
-        target: BlockId,
-        entered: bool,
-        allowed_blocks: Option<&BTreeSet<BlockId>>,
-        merge: Option<BlockId>,
-    ) -> Vec<ControlNode> {
-        if Some(target) == merge {
+    fn start_switch_arm(&mut self, arm: &mut SwitchArm) -> Next<'cfg> {
+        let target = arm.target;
+        if Some(target) == arm.merge {
             // The arm transfers straight to the switch continuation.
-            return Vec::new();
+            return Next::Return(Returned::Nodes(Vec::new()));
         }
-        if !block_is_allowed(allowed_blocks, target) {
+        if !block_is_allowed(arm.allowed.as_deref(), target) {
             // Beyond the enclosing bound. When that bound is a loop and the
             // target is its follow or header, the transfer is a break or a
             // continue, as it is for the arm of an `if`; anything else is an
@@ -194,20 +361,39 @@ impl<I, E> Structurer<'_, I, E> {
                 Some(node) => body.push(node),
                 None => self.push_goto(&mut body, target, GotoReason::BoundaryEscape),
             }
-            return body;
+            return Next::Return(Returned::Nodes(body));
         }
-        if !entered {
+        if !arm.entered {
             // Earlier code owns the entry: a continue, a break, or a goto.
-            return self.lift_region(target, allowed_blocks, merge);
+            arm.awaiting = ArmWait::Walk;
+            return Next::Call(Frame::Region(RegionWalk::new(
+                target,
+                arm.allowed.clone(),
+                arm.merge,
+            )));
         }
-        // The arm entry was pre-visited above; enter it through the shared
-        // path so a try region, branch, or loop at the arm entry keeps its
-        // structure, then continue the ordinary walk toward the merge.
-        let mut body = Vec::new();
-        let next = self.lift_entered(target, allowed_blocks, merge, &mut body);
-        if let Some(next) = next {
-            body.extend(self.lift_region(next, allowed_blocks, merge));
+        // The arm entry was pre-visited by the switch; enter it through the
+        // shared path so a try region, branch, or loop at the arm entry keeps
+        // its structure, then continue the ordinary walk toward the merge.
+        match self.lift_entered(target, &arm.allowed, arm.merge, &mut arm.body) {
+            Lifted::Next(next) => Self::continue_switch_arm(arm, next),
+            Lifted::Construct(frame) => {
+                arm.awaiting = ArmWait::Construct;
+                Next::Call(frame)
+            }
         }
-        body
+    }
+
+    /// Go on with the arm at `next`, the block after its entry.
+    fn continue_switch_arm(arm: &mut SwitchArm, next: Option<BlockId>) -> Next<'cfg> {
+        let Some(next) = next else {
+            return Next::Return(Returned::Nodes(core::mem::take(&mut arm.body)));
+        };
+        arm.awaiting = ArmWait::Rest;
+        Next::Call(Frame::Region(RegionWalk::new(
+            next,
+            arm.allowed.clone(),
+            arm.merge,
+        )))
     }
 }

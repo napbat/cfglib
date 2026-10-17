@@ -32,6 +32,7 @@ mod non_compact;
 mod predicated;
 mod regions;
 mod semantics;
+mod stack_depth;
 mod switches;
 mod traversal;
 mod treating_empty;
