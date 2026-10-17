@@ -13,6 +13,10 @@ use super::{
     StmtShape,
 };
 
+/// The shape of the statement of a selection arm.
+type ArmShape<'a, H, S> =
+    StmtShape<'a, H, <S as FunctionView<H>>::Stmt, <S as FunctionView<H>>::Expr>;
+
 impl<'a, H, S, B> Rebuilder<'a, H, S, B>
 where
     H: RecoverDialect,
@@ -58,10 +62,7 @@ where
 
     /// The shape of the only statement of the arm `ids`, or `None` when the
     /// arm holds anything else.
-    fn sole_statement(
-        &self,
-        ids: &[S::Stmt],
-    ) -> Fallible<Option<StmtShape<'a, H, S::Stmt, S::Expr>>, B::Error> {
+    fn sole_statement(&self, ids: &[S::Stmt]) -> Fallible<Option<ArmShape<'a, H, S>>, B::Error> {
         match *ids {
             [only] => self.stmt(only).map(Some),
             _ => Ok(None),
@@ -70,10 +71,7 @@ where
 
     /// The same for an arm that the shape checks have validated, which holds
     /// exactly one statement.
-    fn validated_arm(
-        &self,
-        ids: &[S::Stmt],
-    ) -> Fallible<StmtShape<'a, H, S::Stmt, S::Expr>, B::Error> {
+    fn validated_arm(&self, ids: &[S::Stmt]) -> Fallible<ArmShape<'a, H, S>, B::Error> {
         self.sole_statement(ids)?.ok_or_else(|| {
             RecoverError::Malformed("a validated selection arm is a single statement".into())
         })
