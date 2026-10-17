@@ -167,6 +167,13 @@ fn empty_slice<T>() -> Box<[T]> {
 ///
 /// See the [module documentation](self) for the storage design.
 ///
+/// # Equality
+///
+/// `==` compares the representation, not just the graph it describes: a
+/// compacted store and an uncompacted one that hold the same nodes, edges and
+/// adjacency are not equal, because one has a delta and the other has not.
+/// [`compact`](Graph::compact) both sides first to compare content.
+///
 /// # Examples
 ///
 /// ```

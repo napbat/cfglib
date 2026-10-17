@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 
 use super::edge_view::{EdgeRef, EdgeView};
 use super::traverse::{Incoming, Outgoing, TraversalDirection, by_axis};
-use super::view::DenseId;
+use super::view::{DenseId, assert_in_bound};
 
 /// An adjacency axis over edges: which edges a node exposes, and which end of
 /// an exposed edge is the neighbor.
@@ -118,10 +118,7 @@ fn breadth_first_edges_from<G: EdgeView, A: EdgeAdjacency>(
     max_depth: Option<usize>,
     mut filter: impl FnMut(EdgeRef<'_, G::NodeId, G::EdgeId, G::EdgeData>) -> bool,
 ) -> Vec<EdgeStep<G::NodeId, G::EdgeId>> {
-    assert!(
-        start.index() < graph.node_bound(),
-        "start node is out of range"
-    );
+    assert_in_bound(graph, start, "start node");
     let mut steps = Vec::new();
     let mut seen_node = vec![false; graph.node_bound()];
     let mut queue = VecDeque::new();
@@ -194,10 +191,7 @@ fn depth_first_edges_from<G: EdgeView, A: EdgeAdjacency>(
     max_depth: Option<usize>,
     mut filter: impl FnMut(EdgeRef<'_, G::NodeId, G::EdgeId, G::EdgeData>) -> bool,
 ) -> Vec<EdgeStep<G::NodeId, G::EdgeId>> {
-    assert!(
-        start.index() < graph.node_bound(),
-        "start node is out of range"
-    );
+    assert_in_bound(graph, start, "start node");
     let mut steps = Vec::new();
     let mut seen_node = vec![false; graph.node_bound()];
     let mut arena = Vec::new();
@@ -277,14 +271,8 @@ fn shortest_path_edges_from<G: EdgeView, A: EdgeAdjacency>(
     from: G::NodeId,
     to: G::NodeId,
 ) -> Option<Vec<G::EdgeId>> {
-    assert!(
-        from.index() < graph.node_bound(),
-        "source node is out of range"
-    );
-    assert!(
-        to.index() < graph.node_bound(),
-        "target node is out of range"
-    );
+    assert_in_bound(graph, from, "source node");
+    assert_in_bound(graph, to, "target node");
     if from == to {
         return Some(Vec::new());
     }

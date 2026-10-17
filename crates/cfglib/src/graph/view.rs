@@ -279,6 +279,17 @@ impl<G: NodeView> NodeView for Reversed<'_, G> {
     }
 }
 
+/// Panic unless `node` is below the view's [`node_bound`](GraphView::node_bound),
+/// naming `role` in the message.
+///
+/// The entry check of every walk that takes a node from its caller: a live
+/// node is below the bound, so one that is not is no node of the view, and the
+/// side tables a walk sizes by the bound could not be indexed by it.
+#[track_caller]
+pub(crate) fn assert_in_bound<G: GraphView>(graph: &G, node: G::NodeId, role: &str) {
+    assert!(node.index() < graph.node_bound(), "{role} is out of range");
+}
+
 /// The incoming neighbors of `node` by scanning every node's successors.
 ///
 /// The honest [`GraphView::predecessors`] implementation for a view that

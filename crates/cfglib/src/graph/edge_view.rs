@@ -32,13 +32,15 @@ impl<'g, N: Copy, E: Copy, D: ?Sized> EdgeRef<'g, N, E, D> {
         self.id
     }
 
-    /// The stored source node, independent of traversal direction.
+    /// The edge's source as this view presents it: the stored source, or the
+    /// stored target when the view is [`Reversed`].
     #[must_use]
     pub const fn source(&self) -> N {
         self.source
     }
 
-    /// The stored target node, independent of traversal direction.
+    /// The edge's target as this view presents it: the stored target, or the
+    /// stored source when the view is [`Reversed`].
     #[must_use]
     pub const fn target(&self) -> N {
         self.target
