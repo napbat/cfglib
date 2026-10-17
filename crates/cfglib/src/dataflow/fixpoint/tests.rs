@@ -60,7 +60,7 @@ fn step_limit_reports_the_pending_block() {
 }
 
 #[test]
-#[should_panic(expected = "seed block is out of range")]
+#[should_panic(expected = "seed node is out of range")]
 fn an_out_of_range_seed_panics() {
     let (cfg, _, _) = liveness_fixture();
     let beyond = BlockId::from_index(cfg.block_bound());
@@ -163,4 +163,43 @@ fn backward_solver_propagates_through_disconnected_components() {
     assert!(*facts.fact_out(disconnected_predecessor));
     assert!(*facts.fact_in(disconnected_exit));
     assert!(*facts.fact_out(disconnected_exit));
+}
+
+/// `true` exactly where flow from the entry fact arrives.
+struct EntryFlows;
+
+impl Problem<Cfg<()>> for EntryFlows {
+    type Fact = bool;
+
+    fn direction(&self) -> Direction {
+        Direction::Forward
+    }
+
+    fn bottom(&self) -> Self::Fact {
+        false
+    }
+
+    fn entry_fact(&self) -> Self::Fact {
+        true
+    }
+
+    fn meet(&self, a: &Self::Fact, b: &Self::Fact) -> Self::Fact {
+        *a || *b
+    }
+
+    fn transfer(&self, _cfg: &Cfg<()>, _block: BlockId, input: &Self::Fact) -> Self::Fact {
+        *input
+    }
+}
+
+#[test]
+fn a_forward_entry_that_is_a_branch_target_still_receives_the_entry_fact() {
+    let mut cfg = Cfg::new();
+    let body = cfg.new_block();
+    cfg.add_edge(cfg.entry(), body, EdgeKind::Fallthrough);
+    cfg.add_edge(body, cfg.entry(), EdgeKind::Back);
+
+    let facts = solve_problem(&cfg, &EntryFlows).unwrap();
+    assert!(*facts.fact_in(cfg.entry()));
+    assert!(*facts.fact_in(body));
 }

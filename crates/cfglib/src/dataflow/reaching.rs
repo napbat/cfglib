@@ -19,7 +19,6 @@ use super::fixpoint::{Direction, Facts};
 use super::{DefSite, InstrInfo, VariableId, departs_before_throws};
 use crate::block::BlockId;
 use crate::graph::edge_view::EdgeRef;
-use crate::graph::traverse::{TraversalDirection, depth_first_preorder};
 
 /// A reaching definition: which IR variable was defined, and where.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -189,22 +188,14 @@ impl<V: VariableId> ReachingDefs<V> {
     ///
     /// Blocks unreachable from the entry receive no definitions, and
     /// contribute none to the blocks they branch to.
-    ///
-    /// # Panics
-    ///
-    /// Panics only if the unbounded fixpoint solve reports a step-limit
-    /// error, which the unbounded configuration cannot produce.
     #[must_use]
     pub fn compute<G>(cfg: &G) -> Self
     where
         G: CfgView,
         G::Inst: InstrInfo<Variable = V>,
     {
-        let reachable = depth_first_preorder(cfg, cfg.root(), TraversalDirection::Outgoing);
-        let facts = edge_fixpoint::solve_edge_problem_from(cfg, &ReachingDefsProblem, &reachable)
-            .expect("an unbounded solve cannot exceed a step limit");
         Self {
-            inner: facts.into_block_facts(),
+            inner: edge_fixpoint::solve_reachable(cfg, &ReachingDefsProblem).into_block_facts(),
         }
     }
 

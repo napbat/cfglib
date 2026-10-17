@@ -22,7 +22,6 @@ use super::fixpoint::{Direction, Facts};
 use super::{InstrInfo, departs_before_throws};
 use crate::block::BlockId;
 use crate::graph::edge_view::EdgeRef;
-use crate::graph::traverse::{TraversalDirection, depth_first_preorder};
 
 /// The lattice value for a single variable, over constant domain `C`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -275,21 +274,13 @@ where
 /// nothing to the blocks they branch to. A block's entry fact meets every
 /// incoming edge, and an unwind edge carries only the constants known
 /// before its source's throwing instructions.
-///
-/// # Panics
-///
-/// Panics only if the unbounded fixpoint solve reports a step-limit error,
-/// which the unbounded configuration cannot produce.
 #[must_use]
 pub fn constant_propagation<G>(cfg: &G) -> Facts<InstFact<G::Inst>>
 where
     G: CfgView,
     G::Inst: ConstantFolder,
 {
-    let reachable = depth_first_preorder(cfg, cfg.root(), TraversalDirection::Outgoing);
-    edge_fixpoint::solve_edge_problem_from(cfg, &ConstPropProblem, &reachable)
-        .expect("an unbounded solve cannot exceed a step limit")
-        .into_block_facts()
+    edge_fixpoint::solve_reachable(cfg, &ConstPropProblem).into_block_facts()
 }
 
 #[cfg(test)]

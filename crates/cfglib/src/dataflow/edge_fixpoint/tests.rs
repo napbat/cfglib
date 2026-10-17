@@ -207,3 +207,59 @@ fn reachable_lifting_short_circuits_and_observes_pre_states() {
     );
     assert_eq!(facts.fact_out(unreached), &None);
 }
+
+/// Every node is a boundary, so a visited node is marked.
+struct EveryNodeIsBoundary;
+
+impl EdgeProblem<Cfg<(), Route>> for EveryNodeIsBoundary {
+    type Fact = u8;
+
+    fn direction(&self) -> Direction {
+        Direction::Forward
+    }
+
+    fn bottom(&self, _graph: &Cfg<(), Route>) -> Self::Fact {
+        0
+    }
+
+    fn boundary(&self, _graph: &Cfg<(), Route>, _node: BlockId) -> Option<Self::Fact> {
+        Some(1)
+    }
+
+    fn meet(&self, left: &Self::Fact, right: &Self::Fact) -> Self::Fact {
+        left | right
+    }
+
+    fn transfer_node(
+        &self,
+        _graph: &Cfg<(), Route>,
+        _node: BlockId,
+        input: &Self::Fact,
+    ) -> Self::Fact {
+        *input
+    }
+}
+
+#[test]
+fn a_removed_block_is_never_visited() {
+    let mut cfg = Cfg::<(), Route>::with_edge_payload();
+    let removed = cfg.new_block();
+    assert!(cfg.remove_block(removed));
+
+    let facts = solve_edge_problem(&cfg, &EveryNodeIsBoundary).unwrap();
+    assert_eq!(facts.steps(), cfg.block_count());
+    assert_eq!(
+        facts.fact_in(removed),
+        &0,
+        "a removed block's slot stays at bottom"
+    );
+}
+
+#[test]
+#[should_panic(expected = "seed node is out of range")]
+fn a_removed_seed_panics() {
+    let mut cfg = Cfg::<(), Route>::with_edge_payload();
+    let removed = cfg.new_block();
+    assert!(cfg.remove_block(removed));
+    let _ = solve_edge_problem_from(&cfg, &EveryNodeIsBoundary, &[removed]);
+}

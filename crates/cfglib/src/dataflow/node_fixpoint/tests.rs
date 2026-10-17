@@ -252,3 +252,24 @@ fn a_fallible_seeded_solve_avoids_unreached_nodes() {
     assert!(*facts.fact_out(b));
     assert!(!*facts.fact_out(clean));
 }
+
+#[test]
+fn a_removed_node_is_never_visited() {
+    let (mut graph, [_, _, _, _, island]) = flow_fixture();
+    assert!(graph.remove_node(island));
+
+    let facts = solve_node_problem(&graph, &Taint::forward(alloc::vec![island])).unwrap();
+    assert_eq!(facts.steps(), graph.node_count());
+    assert!(
+        !*facts.fact_out(island),
+        "a removed node's slot stays at bottom"
+    );
+}
+
+#[test]
+#[should_panic(expected = "seed node is out of range")]
+fn a_removed_seed_panics() {
+    let (mut graph, [_, _, _, _, island]) = flow_fixture();
+    assert!(graph.remove_node(island));
+    let _ = solve_node_problem_from(&graph, &Taint::forward(alloc::vec![]), &[island]);
+}

@@ -63,12 +63,8 @@ impl DenseBits {
     /// Panics when `index` is outside the universe.
     #[must_use]
     pub fn get(&self, index: usize) -> bool {
-        assert!(
-            index < self.len,
-            "index {index} outside universe {}",
-            self.len
-        );
-        self.words[index / 64] & (1 << (index % 64)) != 0
+        let (word, bit) = self.slot(index);
+        self.words[word] & bit != 0
     }
 
     /// Inserts `index`, returning whether it was newly set.
@@ -77,16 +73,32 @@ impl DenseBits {
     ///
     /// Panics when `index` is outside the universe.
     pub fn insert(&mut self, index: usize) -> bool {
+        let (word, bit) = self.slot(index);
+        let newly = self.words[word] & bit == 0;
+        self.words[word] |= bit;
+        newly
+    }
+
+    /// Removes `index`, returning whether it had been set.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `index` is outside the universe.
+    pub fn remove(&mut self, index: usize) -> bool {
+        let (word, bit) = self.slot(index);
+        let was_set = self.words[word] & bit != 0;
+        self.words[word] &= !bit;
+        was_set
+    }
+
+    /// The word holding `index` and the mask of its bit within that word.
+    fn slot(&self, index: usize) -> (usize, u64) {
         assert!(
             index < self.len,
             "index {index} outside universe {}",
             self.len
         );
-        let word = &mut self.words[index / 64];
-        let bit = 1 << (index % 64);
-        let newly = *word & bit == 0;
-        *word |= bit;
-        newly
+        (index / 64, 1 << (index % 64))
     }
 
     /// Unions `other` into this set, returning whether anything changed.
@@ -242,6 +254,18 @@ mod tests {
         assert!(left.union_with(&right));
         assert!(!left.union_with(&right));
         assert_eq!(left.ones().collect::<Vec<_>>(), [1, 9]);
+    }
+
+    #[test]
+    fn remove_clears_one_index_and_reports_whether_it_was_set() {
+        let mut bits = DenseBits::new(130);
+        bits.insert(64);
+        bits.insert(65);
+        assert!(bits.remove(64));
+        assert!(!bits.remove(64), "a second remove is a no-op");
+        assert!(!bits.get(64));
+        assert!(bits.get(65), "the neighbouring bit is untouched");
+        assert_eq!(bits.ones().collect::<Vec<_>>(), [65]);
     }
 
     #[test]

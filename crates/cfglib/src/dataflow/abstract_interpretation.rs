@@ -16,7 +16,6 @@ use crate::dataflow::edge_fixpoint::{self, EdgeProblem};
 use crate::dataflow::fixpoint::Direction;
 use crate::dataflow::{InstrInfo, departs_before_throws};
 use crate::graph::edge_view::EdgeRef;
-use crate::graph::traverse::{TraversalDirection, depth_first_preorder};
 
 /// A lattice element for abstract interpretation.
 pub trait Lattice: Clone + PartialEq {
@@ -160,11 +159,6 @@ where
 /// carries the meet of the states before each instruction of its source
 /// that [`may_unwind`](InstrInfo::may_unwind), so a throwing instruction's
 /// own effect and every later one in its block never reach the handler.
-///
-/// # Panics
-///
-/// Panics only if the unbounded fixpoint solve reports a step-limit error,
-/// which the unbounded configuration cannot produce.
 #[must_use]
 pub fn abstract_interpret<G, D>(cfg: &G) -> AbstractFacts<D>
 where
@@ -175,9 +169,7 @@ where
     let problem = AbstractProblem::<D> {
         _marker: core::marker::PhantomData,
     };
-    let reachable = depth_first_preorder(cfg, cfg.root(), TraversalDirection::Outgoing);
-    let result = edge_fixpoint::solve_edge_problem_from(cfg, &problem, &reachable)
-        .expect("an unbounded solve cannot exceed a step limit");
+    let result = edge_fixpoint::solve_reachable(cfg, &problem);
 
     // Convert Vec-indexed results to BTreeMap-keyed results.
     let mut block_in = BTreeMap::new();

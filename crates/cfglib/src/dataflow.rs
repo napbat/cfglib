@@ -39,6 +39,7 @@ pub mod reaching;
 pub mod sccp;
 pub mod ssa;
 pub mod ssa_destruction;
+mod worklist;
 
 extern crate alloc;
 use alloc::vec::Vec;
