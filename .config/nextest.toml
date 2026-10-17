@@ -1,0 +1,6 @@
+# cargo-nextest runs each test in its own process, in parallel across all
+# test binaries. It does not run doctests: run `cargo test --doc` for those.
+
+[profile.ci]
+# Report every failure in one run instead of stopping at the first.
+fail-fast = false

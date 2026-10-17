@@ -41,16 +41,16 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
-      - id: cargo-test
-        name: cargo test
-        entry: cargo test --workspace
+      - id: cargo-nextest
+        name: cargo nextest
+        entry: cargo nextest run --workspace --all-features
         language: system
         pass_filenames: false
         always_run: true
         stages: [pre-push]
-      - id: cargo-test-all-features
-        name: cargo test (all features)
-        entry: cargo test --workspace --all-features
+      - id: cargo-doctest
+        name: cargo test (doctests)
+        entry: cargo test --workspace --all-features --doc
         language: system
         pass_filenames: false
         always_run: true
