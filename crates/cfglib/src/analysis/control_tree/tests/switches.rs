@@ -1,4 +1,5 @@
-//! Switch arms that transfer control out of the enclosing loop.
+//! Switch arms that transfer control: out of the enclosing loop, or into a
+//! sibling arm that a goto label has to wrap.
 
 use super::{has_node_kind, pseudocode};
 use crate::cfg::Cfg;
@@ -49,4 +50,48 @@ fn case_arm_that_leaves_the_loop_is_a_break_like_the_same_arm_of_an_if() {
         .filter(|&id| matches!(tree.node(id), ControlNode::Break { label: None }))
         .count();
     assert_eq!(breaks, 1, "{}", pseudocode(&cfg, &tree));
+}
+
+/// A switch whose first case falls into the second: the second arm is reached
+/// twice, so its emission is wrapped in a goto label.
+fn switch_with_case_fallthrough() -> Cfg<MockInst> {
+    let mut cfg: Cfg<MockInst> = Cfg::new();
+    let first = cfg.new_block();
+    let second = cfg.new_block();
+    let default_arm = cfg.new_block();
+    let join = cfg.new_block();
+    cfg.block_mut(cfg.entry()).push(ff("switch k"));
+    cfg.block_mut(first).push(ff("a()"));
+    cfg.block_mut(second).push(ff("b()"));
+    cfg.block_mut(default_arm).push(ff("d()"));
+    cfg.block_mut(join)
+        .push(MockInst(FlowEffect::Return, "return"));
+    cfg.add_edge(cfg.entry(), first, EdgeKind::SwitchCase);
+    cfg.add_edge(cfg.entry(), second, EdgeKind::SwitchCase);
+    cfg.add_edge(cfg.entry(), default_arm, EdgeKind::Fallthrough);
+    cfg.add_edge(first, second, EdgeKind::Fallthrough);
+    cfg.add_edge(second, join, EdgeKind::Fallthrough);
+    cfg.add_edge(default_arm, join, EdgeKind::Fallthrough);
+    cfg
+}
+
+#[test]
+fn children_are_allocated_before_their_parents_when_goto_labels_are_applied() {
+    let cfg = switch_with_case_fallthrough();
+    let tree = ControlTree::compute(&cfg);
+
+    assert!(
+        has_node_kind(&tree, |node| matches!(node, ControlNode::Label { .. })),
+        "the case fallthrough needs a label: {}",
+        pseudocode(&cfg, &tree)
+    );
+    assert_eq!(tree.root().index(), tree.node_count() - 1);
+    for id in tree.node_ids() {
+        for body in tree.child_bodies(id) {
+            for &child in tree.body(body) {
+                assert!(child < id, "{child} should precede its parent {id}");
+            }
+        }
+    }
+    assert_eq!(tree.preorder().count(), tree.node_count());
 }

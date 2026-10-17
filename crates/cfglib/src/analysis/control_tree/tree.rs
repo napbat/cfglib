@@ -82,6 +82,51 @@ impl Tables {
         id
     }
 
+    /// The number of nodes allocated so far.
+    pub(super) const fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Restore children-before-parents order after labels wrapped existing
+    /// nodes.
+    ///
+    /// Every node from `first_label` on is a [`ControlNode::Label`] that
+    /// wraps one earlier node and took the place of it in the body of its
+    /// parent. Allocated last it would outrank that parent, so each label is
+    /// renumbered to sit immediately after the node it wraps. Every other node
+    /// keeps its relative order, and the labels' handles are the only ones
+    /// that change hands.
+    pub(super) fn settle_labels(&mut self, first_label: usize) {
+        if first_label == self.nodes.len() {
+            return;
+        }
+        // (position, is a label, old handle): a label sorts straight after its
+        // wrapped node and before everything allocated after that node.
+        let mut order: Vec<(usize, bool, usize)> = Vec::with_capacity(self.nodes.len());
+        for (index, &node) in self.nodes.iter().enumerate() {
+            if index < first_label {
+                order.push((index, false, index));
+            } else {
+                let body = self
+                    .child_bodies(node)
+                    .next()
+                    .expect("a label wraps exactly one node");
+                order.push((self.bodies.get(body)[0].index(), true, index));
+            }
+        }
+        order.sort_unstable();
+
+        let mut renumbered = alloc::vec![0; order.len()];
+        for (new, &(_, _, old)) in order.iter().enumerate() {
+            renumbered[old] = new;
+        }
+        let old_nodes = core::mem::take(&mut self.nodes);
+        self.nodes = order.iter().map(|&(_, _, old)| old_nodes[old]).collect();
+        for child in &mut self.bodies.items {
+            *child = ControlNodeId::from_index(renumbered[child.index()]);
+        }
+    }
+
     /// Store `nodes` as one body, giving each node its handle.
     pub(super) fn seal(&mut self, nodes: Vec<ControlNode>) -> ControlBody {
         let ids: Vec<ControlNodeId> = nodes.into_iter().map(|node| self.push_node(node)).collect();
