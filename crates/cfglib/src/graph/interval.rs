@@ -48,141 +48,34 @@ fn compute_intervals_from_graph<G: RootedView>(graph: &G) -> Vec<Interval<G::Nod
         return Vec::new();
     }
 
-    let max_predecessors = graph
-        .node_ids()
-        .map(|node| graph.predecessors(node).count())
-        .max()
-        .unwrap_or(0);
-
-    if max_predecessors < usize::from(u8::MAX) {
-        compute_intervals_with_count::<G, u8>(graph)
-    } else if max_predecessors < usize::from(u16::MAX) {
-        compute_intervals_with_count::<G, u16>(graph)
-    } else if max_predecessors < u32::MAX as usize {
-        compute_intervals_with_count::<G, u32>(graph)
-    } else {
-        compute_intervals_with_count::<G, WideCount>(graph)
-    }
-}
-
-trait IntervalCount: Copy {
-    fn from_usize(count: usize) -> Self;
-    fn is_assigned(self) -> bool;
-    fn mark_assigned(&mut self);
-    fn decrement(&mut self) -> bool;
-    fn restore(&mut self);
-}
-
-macro_rules! impl_interval_count {
-    ($count:ty) => {
-        impl IntervalCount for $count {
-            fn from_usize(count: usize) -> Self {
-                match Self::try_from(count) {
-                    Ok(count) => count,
-                    Err(_) => unreachable!("predecessor count width was selected incorrectly"),
-                }
-            }
-
-            fn is_assigned(self) -> bool {
-                self == Self::MAX
-            }
-
-            fn mark_assigned(&mut self) {
-                *self = Self::MAX;
-            }
-
-            fn decrement(&mut self) -> bool {
-                if self.is_assigned() || *self == 0 {
-                    return false;
-                }
-                *self -= 1;
-                *self == 0
-            }
-
-            fn restore(&mut self) {
-                if !self.is_assigned() {
-                    *self += 1;
-                }
-            }
-        }
-    };
-}
-
-impl_interval_count!(u8);
-impl_interval_count!(u16);
-impl_interval_count!(u32);
-
-#[derive(Clone, Copy)]
-struct WideCount {
-    remaining: usize,
-    assigned: bool,
-}
-
-impl IntervalCount for WideCount {
-    fn from_usize(remaining: usize) -> Self {
-        Self {
-            remaining,
-            assigned: false,
-        }
-    }
-
-    fn is_assigned(self) -> bool {
-        self.assigned
-    }
-
-    fn mark_assigned(&mut self) {
-        self.assigned = true;
-    }
-
-    fn decrement(&mut self) -> bool {
-        if self.assigned || self.remaining == 0 {
-            return false;
-        }
-        self.remaining -= 1;
-        self.remaining == 0
-    }
-
-    fn restore(&mut self) {
-        if !self.assigned {
-            self.remaining += 1;
-        }
-    }
-}
-
-fn compute_intervals_with_count<G, C>(graph: &G) -> Vec<Interval<G::NodeId>>
-where
-    G: RootedView,
-    C: IntervalCount,
-{
     let mut intervals = Vec::new();
-    // Unassigned nodes store the number of predecessors not yet admitted to
-    // the current interval. Assigned nodes use a sentinel because their count
-    // is never consulted again. This single table replaces separate assigned,
-    // in-interval, total-predecessor, and inside-predecessor tables.
+    // An unassigned node counts the predecessors not yet admitted to the
+    // current interval, and an assigned node's count is never read again.
+    // These two tables replace separate in-interval, total-predecessor, and
+    // inside-predecessor tables.
     //
     // Only predecessors the root reaches are counted: a block that never runs
     // cannot be in an interval, so it must not keep a live block out of one.
     let live = reachable(graph, [graph.root()], TraversalDirection::Outgoing);
-    let mut remaining_predecessors = alloc::vec![C::from_usize(0); graph.node_bound()];
+    let mut remaining = alloc::vec![0_usize; graph.node_bound()];
     for node in graph.node_ids() {
-        remaining_predecessors[node.index()] = C::from_usize(
-            graph
-                .predecessors(node)
-                .filter(|predecessor| live[predecessor.index()])
-                .count(),
-        );
+        remaining[node.index()] = graph
+            .predecessors(node)
+            .filter(|predecessor| live[predecessor.index()])
+            .count();
     }
+    let mut assigned = alloc::vec![false; graph.node_bound()];
     let mut headers = alloc::vec![graph.root()];
     let mut worklist: SmallVec<[G::NodeId; 4]> = SmallVec::new();
     let mut successors: SmallVec<[G::NodeId; 4]> = SmallVec::new();
 
     while let Some(h) = headers.pop() {
-        if remaining_predecessors[h.index()].is_assigned() {
+        if assigned[h.index()] {
             continue;
         }
         let mut interval = BTreeSet::new();
         interval.insert(h);
-        remaining_predecessors[h.index()].mark_assigned();
+        assigned[h.index()] = true;
 
         // Grow the interval from newly admitted nodes. Every outgoing edge
         // accounts for one predecessor now inside the interval; reaching zero
@@ -193,9 +86,16 @@ where
         worklist.push(h);
         while let Some(block) = worklist.pop() {
             for successor in graph.successors(block) {
-                let remaining = &mut remaining_predecessors[successor.index()];
-                if remaining.decrement() {
-                    remaining.mark_assigned();
+                let index = successor.index();
+                // A count of zero on an unassigned node means an edge the
+                // count never saw, from a view whose successors and
+                // predecessors disagree; it admits nothing.
+                if assigned[index] || remaining[index] == 0 {
+                    continue;
+                }
+                remaining[index] -= 1;
+                if remaining[index] == 0 {
+                    assigned[index] = true;
                     interval.insert(successor);
                     worklist.push(successor);
                 }
@@ -209,15 +109,16 @@ where
             successors.extend(graph.successors(b));
             // Counts for nodes outside the completed interval are reused by
             // the next header. Restore every decrement contributed by this
-            // interval; admitted nodes keep the sentinel permanently.
+            // interval; admitted nodes are assigned and keep no count.
             for &successor in &successors {
-                let remaining = &mut remaining_predecessors[successor.index()];
-                remaining.restore();
+                if !assigned[successor.index()] {
+                    remaining[successor.index()] += 1;
+                }
             }
             successors.sort_unstable();
             successors.dedup();
             for &s in &successors {
-                if !remaining_predecessors[s.index()].is_assigned() {
+                if !assigned[s.index()] {
                     headers.push(s);
                 }
             }
@@ -271,6 +172,7 @@ mod tests {
     use crate::flow::FlowEffect;
     use crate::test_util::{MockInst, ff};
     use crate::{DenseId, Graph, GraphView, NodeId, Rooted, RootedView};
+    use alloc::format;
     use alloc::vec;
 
     struct ReverseNodeIds<'g> {
@@ -424,33 +326,6 @@ mod tests {
     }
 
     #[test]
-    fn wider_counts_keep_real_values_distinct_from_assignment() {
-        let u32_start = usize::from(u16::MAX);
-        let mut compact = <u32 as IntervalCount>::from_usize(u32_start);
-        assert!(!compact.is_assigned());
-        assert!(!compact.decrement());
-        assert_eq!(compact, u32::from(u16::MAX) - 1);
-        compact.restore();
-        assert_eq!(compact, u32::from(u16::MAX));
-        compact.mark_assigned();
-        assert!(compact.is_assigned());
-        assert!(!compact.decrement());
-        assert_eq!(compact, u32::MAX);
-
-        let wide_start = u32::MAX as usize;
-        let mut wide = WideCount::from_usize(wide_start);
-        assert!(!wide.is_assigned());
-        assert!(!wide.decrement());
-        assert_eq!(wide.remaining, wide_start - 1);
-        wide.restore();
-        assert_eq!(wide.remaining, wide_start);
-        wide.mark_assigned();
-        assert!(wide.is_assigned());
-        assert!(!wide.decrement());
-        assert_eq!(wide.remaining, wide_start);
-    }
-
-    #[test]
     fn non_header_self_loop_starts_a_new_interval() {
         let mut graph = Graph::<(), ()>::new();
         let root = graph.add_node(());
@@ -541,5 +416,75 @@ mod tests {
             result.intervals[0].blocks,
             BTreeSet::from([root, left, right, merge])
         );
+    }
+
+    /// The Allen-Cocke definition, checked on every digraph of up to four
+    /// nodes: the intervals partition the nodes the root reaches, the first
+    /// is the root's, each header dominates its interval, every other member
+    /// has all its reachable predecessors inside, and no node of a later
+    /// interval could have been absorbed.
+    #[test]
+    fn intervals_satisfy_the_definition_on_every_small_digraph() {
+        use crate::DominatorTree;
+
+        for count in 1..=4_usize {
+            let pairs: Vec<(usize, usize)> = (0..count)
+                .flat_map(|from| (0..count).map(move |to| (from, to)))
+                .collect();
+            for mask in 0..1_u32 << pairs.len() {
+                let mut graph = Graph::<(), ()>::new();
+                let nodes: Vec<NodeId> = (0..count).map(|_| graph.add_node(())).collect();
+                for (bit, &(from, to)) in pairs.iter().enumerate() {
+                    if mask & (1 << bit) != 0 {
+                        graph.add_edge(nodes[from], nodes[to], ());
+                    }
+                }
+                let view = Rooted::new(&graph, nodes[0]);
+                let dom = DominatorTree::compute(&view);
+                let result = IntervalAnalysis::compute(&view);
+                let live = |node: NodeId| dom.is_reachable(node);
+                let label = format!("{count} nodes, edge mask {mask:#b}");
+
+                let mut seen = BTreeSet::new();
+                for (position, interval) in result.intervals.iter().enumerate() {
+                    for &block in &interval.blocks {
+                        assert!(seen.insert(block), "{label}: {block:?} in two intervals");
+                        assert!(dom.dominates(interval.header, block), "{label}");
+                        if block != interval.header {
+                            assert!(
+                                graph
+                                    .predecessors(block)
+                                    .filter(|&before| live(before))
+                                    .all(|before| interval.blocks.contains(&before)),
+                                "{label}: {block:?} has a predecessor outside its interval"
+                            );
+                        }
+                    }
+                    // Nothing in a later interval had every predecessor in this
+                    // one, or it would have been absorbed.
+                    for later in &result.intervals[position + 1..] {
+                        for &outside in &later.blocks {
+                            let absorbable = graph
+                                .predecessors(outside)
+                                .filter(|&before| live(before))
+                                .all(|before| interval.blocks.contains(&before));
+                            assert!(!absorbable, "{label}: {outside:?} should have joined");
+                        }
+                    }
+                }
+                assert_eq!(
+                    seen,
+                    nodes
+                        .iter()
+                        .copied()
+                        .filter(|&n| live(n))
+                        .collect::<BTreeSet<_>>(),
+                    "{label}"
+                );
+                if count > 0 {
+                    assert_eq!(result.intervals[0].header, nodes[0], "{label}");
+                }
+            }
+        }
     }
 }
