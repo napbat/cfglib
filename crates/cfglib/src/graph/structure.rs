@@ -14,11 +14,14 @@
 extern crate alloc;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
+use core::ops::ControlFlow;
 
 use super::dominator::DominatorTree;
 use super::edge_view::EdgeView;
 use super::loop_nest::nesting;
-use super::view::{DenseId, GraphView, RootedView};
+use super::search::{DfsEvent, depth_first_events};
+use super::traverse::TraversalDirection;
+use super::view::{GraphView, RootedView};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::{EdgeKind, KindedEdge};
@@ -277,9 +280,8 @@ where
 /// that dominates all other nodes in that cycle. Equivalently, every
 /// retreating edge in a DFS is a back-edge (target dominates source).
 ///
-/// The DFS runs from the view's root; any edge to a gray (in-progress)
-/// node whose target does not dominate the source witnesses an
-/// irreducible cycle.
+/// The DFS runs from the view's root; any [`DfsEvent::BackEdge`] whose
+/// target does not dominate its source witnesses an irreducible cycle.
 #[must_use]
 pub fn is_reducible<G: RootedView>(graph: &G, dom: &DominatorTree<G::NodeId>) -> bool {
     find_irreducible_entry(graph, dom).is_none()
@@ -294,42 +296,20 @@ pub(crate) fn find_irreducible_entry<G: RootedView>(
     graph: &G,
     dom: &DominatorTree<G::NodeId>,
 ) -> Option<G::NodeId> {
-    const WHITE: u8 = 0;
-    const GRAY: u8 = 1;
-    const BLACK: u8 = 2;
-
-    let n = graph.node_bound();
-    if n == 0 {
+    if graph.node_bound() == 0 {
         return None;
     }
-
-    let mut color = alloc::vec![WHITE; n];
-    let mut stack: Vec<(G::NodeId, bool)> = alloc::vec![(graph.root(), false)];
-
-    while let Some((node, processed)) = stack.pop() {
-        if processed {
-            color[node.index()] = BLACK;
-            continue;
-        }
-        if color[node.index()] != WHITE {
-            continue;
-        }
-        color[node.index()] = GRAY;
-        stack.push((node, true));
-
-        for succ in graph.successors(node) {
-            match color[succ.index()] {
-                WHITE => stack.push((succ, false)),
-                GRAY
-                    // Retreating edge — must be a natural back-edge.
-                    if !dom.dominates(succ, node) => {
-                        return Some(succ);
-                    }
-                _ => {} // Cross/forward edge — fine.
+    depth_first_events(
+        graph,
+        graph.root(),
+        TraversalDirection::Outgoing,
+        |event| match event {
+            DfsEvent::BackEdge(tail, header) if !dom.dominates(header, tail) => {
+                ControlFlow::Break(header)
             }
-        }
-    }
-    None
+            _ => ControlFlow::Continue(()),
+        },
+    )
 }
 
 /// Information about a canonicalized loop.

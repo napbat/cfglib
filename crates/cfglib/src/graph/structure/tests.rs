@@ -526,3 +526,72 @@ fn exits_are_reported_after_every_preheader_exists() {
         .expect("the second loop has two entries");
     assert_eq!(first.exits, BTreeSet::from([second_preheader]));
 }
+
+/// A cycle that survives removing every edge whose target dominates its
+/// source is a cycle no node dominates: the graph is irreducible exactly
+/// then. The check shares nothing with the walk `is_reducible` runs.
+fn has_cycle_without_back_edges(
+    count: usize,
+    edges: &[(usize, usize)],
+    dom: &DominatorTree<crate::graph::store::NodeId>,
+) -> bool {
+    use crate::graph::store::NodeId;
+
+    let mut reach = alloc::vec![alloc::vec![false; count]; count];
+    for &(from, to) in edges {
+        let (from, to) = (NodeId::from_index(from), NodeId::from_index(to));
+        if dom.is_reachable(from) && !dom.dominates(to, from) {
+            reach[from.index()][to.index()] = true;
+        }
+    }
+    for via in 0..count {
+        for from in 0..count {
+            for to in 0..count {
+                reach[from][to] |= reach[from][via] && reach[via][to];
+            }
+        }
+    }
+    (0..count).any(|node| reach[node][node])
+}
+
+#[test]
+fn reducibility_is_acyclicity_without_back_edges_on_every_small_digraph() {
+    use crate::graph::store::{Graph, NodeId};
+    use crate::graph::view::Rooted;
+
+    let mut irreducible = 0_usize;
+    for count in 1..=4_usize {
+        let pairs: Vec<(usize, usize)> = (0..count)
+            .flat_map(|from| (0..count).map(move |to| (from, to)))
+            .collect();
+        for mask in 0..1_u32 << pairs.len() {
+            let edges: Vec<(usize, usize)> = pairs
+                .iter()
+                .enumerate()
+                .filter(|&(bit, _)| mask & (1 << bit) != 0)
+                .map(|(_, &pair)| pair)
+                .collect();
+            let mut graph = Graph::<(), ()>::new();
+            for _ in 0..count {
+                graph.add_node(());
+            }
+            for &(from, to) in &edges {
+                graph.add_edge(NodeId::from_index(from), NodeId::from_index(to), ());
+            }
+            let view = Rooted::new(&graph, NodeId::from_index(0));
+            let dom = DominatorTree::compute(&view);
+
+            let expected = !has_cycle_without_back_edges(count, &edges, &dom);
+            assert_eq!(
+                is_reducible(&view, &dom),
+                expected,
+                "{count} nodes {edges:?}"
+            );
+            irreducible += usize::from(!expected);
+        }
+    }
+    assert!(
+        irreducible > 0,
+        "the enumeration must reach irreducible graphs"
+    );
+}

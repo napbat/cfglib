@@ -163,7 +163,32 @@ mod tests {
     }
 
     #[test]
-    fn multiple_splits_recompute_the_next_irreducible_entry() {
+    fn every_irreducible_entry_is_split_in_turn() {
+        // Two independent two-entry cycles: whichever the search meets first,
+        // fixing it leaves the other, so the next round has to find it again.
+        let mut cfg: Cfg<()> = Cfg::new();
+        let entry = cfg.entry();
+        for _ in 0..2 {
+            let [a, b] = [(); 2].map(|()| cfg.new_block());
+            cfg.add_edge(entry, a, EdgeKind::ConditionalTrue);
+            cfg.add_edge(entry, b, EdgeKind::ConditionalFalse);
+            cfg.add_edge(a, b, EdgeKind::Fallthrough);
+            cfg.add_edge(b, a, EdgeKind::Fallthrough);
+        }
+        let before = DominatorTree::compute(&cfg);
+        assert!(!is_reducible(&cfg, &before));
+        let original_blocks = cfg.block_count();
+
+        let splits = make_reducible(&mut cfg);
+
+        assert!(splits >= 2, "each cycle needs a split, got {splits}");
+        assert_eq!(cfg.block_count(), original_blocks + splits);
+        let after = DominatorTree::compute(&cfg);
+        assert!(is_reducible(&cfg, &after));
+    }
+
+    #[test]
+    fn a_cycle_entered_in_its_middle_is_made_reducible() {
         let mut cfg: Cfg<()> = Cfg::new();
         let cycle: Vec<_> = (0..4).map(|_| cfg.new_block()).collect();
         let external = cfg.new_block();
@@ -180,52 +205,62 @@ mod tests {
         assert!(!is_reducible(&cfg, &before));
         let original_blocks = cfg.block_count();
 
-        assert_eq!(make_reducible(&mut cfg), 3);
-        assert_eq!(cfg.block_count(), original_blocks + 3);
+        let splits = make_reducible(&mut cfg);
+
+        assert!(splits >= 1);
+        assert_eq!(cfg.block_count(), original_blocks + splits);
         let after = DominatorTree::compute(&cfg);
         assert!(is_reducible(&cfg, &after));
     }
 
     #[test]
     fn splitting_preserves_outgoing_edge_metadata_and_order() {
+        // entry -> {a, b} and a <-> b, every edge weighted and each cycle block
+        // also leaving to `exit`, so whichever block the search picks has two
+        // outgoing edges to clone and an entering edge to redirect.
         let mut cfg = Cfg::new();
         let a = cfg.new_block();
         let b = cfg.new_block();
         let exit = cfg.new_block();
-        cfg.block_mut(cfg.entry())
-            .instructions_mut()
-            .push(ff("entry"));
-        cfg.block_mut(a).instructions_mut().push(ff("a"));
-        cfg.block_mut(b).instructions_mut().push(ff("b"));
-        cfg.block_mut(exit).instructions_mut().push(ff("exit"));
+        for (block, name) in [(cfg.entry(), "entry"), (a, "a"), (b, "b"), (exit, "exit")] {
+            cfg.block_mut(block).instructions_mut().push(ff(name));
+        }
 
-        cfg.add_edge(cfg.entry(), a, EdgeKind::ConditionalTrue);
-        let redirected = cfg.add_weighted_edge(cfg.entry(), b, EdgeKind::ConditionalFalse, 0.125);
-        cfg.add_edge(a, b, EdgeKind::Fallthrough);
-        let back = cfg.add_weighted_edge(b, a, EdgeKind::Back, 0.75);
-        let leave = cfg.add_weighted_edge(b, exit, EdgeKind::SwitchCase, 0.25);
+        let into_a = cfg.add_weighted_edge(cfg.entry(), a, EdgeKind::ConditionalTrue, 0.375);
+        let into_b = cfg.add_weighted_edge(cfg.entry(), b, EdgeKind::ConditionalFalse, 0.125);
+        cfg.add_weighted_edge(a, b, EdgeKind::Fallthrough, 0.5);
+        cfg.add_weighted_edge(a, exit, EdgeKind::SwitchCase, 0.625);
+        cfg.add_weighted_edge(b, a, EdgeKind::Back, 0.75);
+        cfg.add_weighted_edge(b, exit, EdgeKind::SwitchCase, 0.25);
         let original_block_bound = cfg.block_bound();
 
         let dom = DominatorTree::compute(&cfg);
-        assert_eq!(find_irreducible_entry(&cfg, &dom), Some(b));
+        let target = find_irreducible_entry(&cfg, &dom).expect("the cycle has two entries");
+        let entering = if target == a { into_a } else { into_b };
+        let outgoing: Vec<_> = cfg.outgoing(target).collect();
+        let signature = |cfg: &Cfg<crate::test_util::MockInst>, edge| {
+            let edge = cfg.edge(edge);
+            (edge.target(), edge.kind(), edge.weight())
+        };
+        let expected: Vec<_> = outgoing.iter().map(|&edge| signature(&cfg, edge)).collect();
+        let entering_weight = cfg.edge(entering).weight();
         assert_eq!(make_reducible(&mut cfg), 1);
 
         let copy = BlockId::from_index(original_block_bound);
-        assert_eq!(cfg.edge(redirected).target(), copy);
-        assert_eq!(cfg.edge(redirected).weight(), Some(0.125));
-        assert_eq!(cfg.outgoing(b).collect::<Vec<_>>(), &[back, leave]);
+        assert_eq!(cfg.edge(entering).target(), copy);
+        assert_eq!(cfg.edge(entering).weight(), entering_weight);
+        assert_eq!(
+            cfg.outgoing(target).collect::<Vec<_>>(),
+            outgoing,
+            "the original keeps its edges and their order"
+        );
 
         let copied: Vec<_> = cfg.outgoing(copy).collect();
-        assert_eq!(copied.len(), 2);
-        assert_ne!(copied[0], back);
-        assert_ne!(copied[1], leave);
-        assert_eq!(cfg.edge(copied[0]).source(), copy);
-        assert_eq!(cfg.edge(copied[0]).target(), a);
-        assert_eq!(cfg.edge(copied[0]).kind(), EdgeKind::Back);
-        assert_eq!(cfg.edge(copied[0]).weight(), Some(0.75));
-        assert_eq!(cfg.edge(copied[1]).source(), copy);
-        assert_eq!(cfg.edge(copied[1]).target(), exit);
-        assert_eq!(cfg.edge(copied[1]).kind(), EdgeKind::SwitchCase);
-        assert_eq!(cfg.edge(copied[1]).weight(), Some(0.25));
+        assert_eq!(copied.len(), outgoing.len());
+        for ((&copied, &original), expected) in copied.iter().zip(&outgoing).zip(&expected) {
+            assert_ne!(copied, original);
+            assert_eq!(cfg.edge(copied).source(), copy);
+            assert_eq!(&signature(&cfg, copied), expected);
+        }
     }
 }
