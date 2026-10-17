@@ -197,6 +197,17 @@ fn assert_forest_matches(cfg: &Cfg<u32>, forest: &LoopForest, oracle: &[NaturalL
             );
         }
     }
+    for (outer_index, outer) in by_header.iter().enumerate() {
+        for (inner_index, inner) in by_header.iter().enumerate() {
+            assert_eq!(
+                forest.encloses(LoopId(word(outer_index)), LoopId(word(inner_index))),
+                inner.body.is_subset(&outer.body),
+                "{label}: the loop of {:?} encloses the loop of {:?}",
+                outer.header,
+                inner.header
+            );
+        }
+    }
     for block in 0..bound {
         let block = BlockId::from_index(block);
         if !oracle.iter().any(|lp| lp.header == block) {
@@ -479,4 +490,44 @@ fn a_block_is_as_deep_as_the_deepest_loop_around_it_not_its_innermost() {
         outer_is_deeper,
         "the graph no longer has the shape under test"
     );
+}
+
+/// The parent of a loop is the smallest larger loop that holds its header,
+/// which is not the same as holding the loop: with an irreducible loop in the
+/// nest the parent can hold only the header. `encloses` is the exact question,
+/// and over every pair of loops it matches the subset of the oracle's bodies
+/// (checked for every graph above). Found by search, 137,051 in 2,000,000
+/// random graphs; this is the smallest.
+#[test]
+fn a_parent_can_hold_the_header_of_a_loop_without_enclosing_it() {
+    use EdgeKind::{Back, Fallthrough};
+    let cfg = graph_of(
+        4,
+        &[
+            (1, 2, Back),
+            (3, 0, Fallthrough),
+            (0, 2, Fallthrough),
+            (2, 3, Back),
+            (2, 1, Back),
+        ],
+    );
+    check_all_three(&cfg, "inexact parent");
+
+    let dom = DominatorTree::compute(&cfg);
+    let forest = LoopForest::compute_tagged(&cfg, &dom);
+    assert!(forest.loops().any(|lp| forest.is_explicit(lp)));
+    let (parent, child) = forest
+        .loops()
+        .find_map(|lp| {
+            let parent = forest.parent(lp)?;
+            (!forest.encloses(parent, lp)).then_some((parent, lp))
+        })
+        .expect("the graph no longer has the shape under test");
+    assert!(forest.contains(parent, forest.header(child)));
+    assert!(
+        forest
+            .body(child)
+            .any(|block| !forest.contains(parent, block))
+    );
+    assert!(forest.encloses(child, child), "a loop encloses itself");
 }

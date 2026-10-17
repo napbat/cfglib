@@ -106,6 +106,15 @@ fn the_forest_states_what_the_flat_loops_and_the_nesting_tree_state() {
     assert!(!forest.contains(outer_loop, exit));
     assert!(!forest.contains(again_loop, outer));
     assert!(forest.contains(again_loop, again_body));
+    assert!(forest.encloses(outer_loop, middle_loop));
+    assert!(forest.encloses(outer_loop, inner_loop));
+    assert!(
+        forest.encloses(middle_loop, middle_loop),
+        "a loop encloses itself"
+    );
+    assert!(!forest.encloses(inner_loop, middle_loop));
+    assert!(!forest.encloses(outer_loop, again_loop));
+    assert!(!forest.encloses(again_loop, outer_loop));
 
     // The nesting tree of the flat loops agrees loop for loop.
     let flat = forest.natural_loops();
@@ -192,6 +201,8 @@ fn a_hundred_thousand_nested_loops_are_found_and_measured() {
     assert_eq!(forest.depth(innermost), depth - 1);
     assert_eq!(forest.body_len(outermost), 2 * depth);
     assert!(forest.contains(outermost, latches[depth - 1]));
+    assert!(forest.encloses(outermost, innermost));
+    assert!(!forest.encloses(innermost, outermost));
     assert!(!forest.contains(outermost, exit));
 
     // The metrics read the forest too, so they scale with it.
