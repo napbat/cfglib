@@ -814,3 +814,49 @@ fn try_anchored_at_a_loop_header_keeps_the_loop() {
         "the loop body stays inside the try: {tree:?}"
     );
 }
+
+#[test]
+fn a_try_anchored_at_a_switch_case_is_structured_inside_that_case() {
+    // b0 dispatches to the cases p and q, which rejoin at m. p is protected
+    // and its pad h rejoins at m too: the case arm of p is the try.
+    let mut cfg: Cfg<MockInst> = Cfg::new();
+    let p = cfg.new_block();
+    let q = cfg.new_block();
+    let handler = cfg.new_block();
+    let merge = cfg.new_block();
+    for (block, name) in [
+        (cfg.entry(), "dispatch"),
+        (p, "protected"),
+        (q, "other"),
+        (handler, "caught"),
+        (merge, "after"),
+    ] {
+        cfg.block_mut(block).push(ff(name));
+    }
+    cfg.add_edge(cfg.entry(), p, EdgeKind::SwitchCase);
+    cfg.add_edge(cfg.entry(), q, EdgeKind::SwitchCase);
+    cfg.add_edge(p, merge, EdgeKind::Fallthrough);
+    cfg.add_edge(q, merge, EdgeKind::Fallthrough);
+    cfg.add_edge(p, handler, EdgeKind::ExceptionHandler);
+    cfg.add_edge(handler, merge, EdgeKind::Fallthrough);
+    cfg.add_region(Region {
+        id: RegionId::from_raw(0),
+        protected_blocks: [p].into_iter().collect(),
+        handlers: vec![Handler {
+            entry: handler,
+            body: HandlerBody::known([handler]),
+            kind: HandlerKind::Catch,
+        }],
+        parent: None,
+    });
+
+    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    assert_eq!(
+        report.unstructured_regions,
+        [],
+        "the region has a known extent: {}",
+        pseudocode(&cfg, &tree)
+    );
+    let (try_body, _, _) = find_try_catch(&tree).expect("the case of p is a try");
+    assert!(body_contains_block(&tree, try_body, p));
+}

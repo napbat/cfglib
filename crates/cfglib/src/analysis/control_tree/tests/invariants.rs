@@ -338,6 +338,21 @@ pub(super) fn check<I, E>(cfg: &Cfg<I, E>, tree: &ControlTree, report: &LiftRepo
     for block in &report.swept_blocks {
         assert!(labels.contains(block), "swept {block} in {context}");
     }
+    // A region the report calls unstructured has no handler arm in the tree.
+    for id in tree.preorder() {
+        if let ControlNode::TryCatch { handlers, .. } = *tree.node(id) {
+            for handler in tree.handlers(handlers) {
+                assert!(
+                    !report
+                        .unstructured_regions
+                        .contains(&handler.handler.region()),
+                    "region {} is structured and reported unstructured in {context}\n{}",
+                    handler.handler.region(),
+                    render(tree)
+                );
+            }
+        }
+    }
     super::semantics::assert_runs_alike(cfg, tree, report, context);
     assert_eq!(
         report.is_fully_structured(),

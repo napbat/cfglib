@@ -548,29 +548,41 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             }
 
             self.visit(block);
-
-            if let Some((node, continuation)) = self.lift_try_catch(block, allowed_blocks) {
-                result.push(node);
-                // Resume at the region's own continuation, not the anchor's
-                // merge — they differ whenever the try exits through an
-                // explicit leave.
-                current = continuation;
-                continue;
-            }
-
-            current = self.lift_block(block, allowed_blocks, stop, &mut result);
+            current = self.lift_entered(block, allowed_blocks, stop, &mut result);
         }
 
         result
     }
 
+    /// Emit an already-visited block: the try region it anchors, or else its
+    /// own classified form. Returns the block flow continues at (if any).
+    ///
+    /// [`lift_region`](Self::lift_region)'s walk and a switch arm, whose entry
+    /// the switch visits ahead of the walk, both enter blocks here, so a
+    /// region anchored at an arm entry is structured like any other.
+    pub(super) fn lift_entered(
+        &mut self,
+        block: BlockId,
+        allowed_blocks: Option<&BTreeSet<BlockId>>,
+        stop: Option<BlockId>,
+        result: &mut Vec<ControlNode>,
+    ) -> Option<BlockId> {
+        if let Some((node, continuation)) = self.lift_try_catch(block, allowed_blocks) {
+            result.push(node);
+            // Resume at the region's own continuation, not the anchor's merge:
+            // they differ whenever the try exits through an explicit leave.
+            return continuation;
+        }
+        self.lift_block(block, allowed_blocks, stop, result)
+    }
+
     /// Classify one already-visited block, emit its lifted form, and return
     /// the block sequential flow continues at (if any).
     ///
-    /// This is the single classification path: [`lift_region`](Self::lift_region)'s
-    /// walk, the try-body anchor, and switch case arms all run it, so a region
-    /// anchored at a branch, dispatch, or loop header keeps its structure
-    /// inside the enclosing construct.
+    /// This is the single classification path: [`lift_entered`](Self::lift_entered)
+    /// and the try-body anchor both run it, so a region anchored at a branch,
+    /// dispatch, or loop header keeps its structure inside the enclosing
+    /// construct.
     fn lift_block(
         &mut self,
         block: BlockId,

@@ -185,11 +185,11 @@ impl<I, E> Structurer<'_, I, E> {
             // Earlier code owns the entry: a continue, a break, or a goto.
             return self.lift_region(target, allowed_blocks, merge);
         }
-        // The arm entry was pre-visited above; classify it through the shared
-        // path so branch or loop structure at the arm entry is kept, then
-        // continue the ordinary walk toward the merge.
+        // The arm entry was pre-visited above; enter it through the shared
+        // path so a try region, branch, or loop at the arm entry keeps its
+        // structure, then continue the ordinary walk toward the merge.
         let mut body = Vec::new();
-        let next = self.lift_block(target, allowed_blocks, merge, &mut body);
+        let next = self.lift_entered(target, allowed_blocks, merge, &mut body);
         if let Some(next) = next {
             body.extend(self.lift_region(next, allowed_blocks, merge));
         }
