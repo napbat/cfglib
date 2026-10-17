@@ -159,6 +159,30 @@ fn resolve_reports_unresolved_and_is_idempotent() {
 }
 
 #[test]
+fn resolve_wires_jumps_in_a_graph_with_an_edge_payload() {
+    use crate::exception::ExceptionFlow;
+
+    let mut cfg = Cfg::<GotoInst, ExceptionFlow<u8>>::with_edge_payload();
+    let target = cfg.new_block();
+    cfg.block_mut(cfg.entry()).push(goto("end"));
+    cfg.block_mut(target).push(label("end"));
+
+    let first = resolve_jump_edges(&mut cfg);
+    assert_eq!(first.resolved, 1);
+    let jump = cfg
+        .edges()
+        .find(|edge| edge.kind() == EdgeKind::Jump)
+        .expect("the goto's edge is wired");
+    assert_eq!((jump.source(), jump.target()), (cfg.entry(), target));
+    assert_eq!(
+        jump.payload(),
+        &ExceptionFlow::default(),
+        "a wired edge carries the default payload"
+    );
+    assert_eq!(resolve_jump_edges(&mut cfg).resolved, 0);
+}
+
+#[test]
 fn linear_block() {
     let cfg = CfgBuilder::build(vec![ff("a"), ff("b"), ff("c")]).unwrap();
     assert_eq!(cfg.block_count(), 1);

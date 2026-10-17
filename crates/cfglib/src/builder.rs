@@ -510,13 +510,17 @@ pub struct JumpResolution<T> {
 /// instruction's [`JumpTargets::label`] token to its block, then adds an
 /// [`EdgeKind::Jump`] edge for each unconditional jump and an
 /// [`EdgeKind::ConditionalTrue`] edge for each conditional jump's taken path.
+/// The graph can carry any edge payload `E`; each edge the pass adds carries
+/// `E::default()`.
 ///
 /// The pass is idempotent: an edge that already exists with the same
 /// endpoints and kind is not duplicated, so re-running it is safe.
 /// Duplicate label tokens resolve to the LAST block declaring them (later
 /// labels shadow earlier ones); frontends with label scoping enforce
 /// uniqueness before building.
-pub fn resolve_jump_edges<I: JumpTargets>(cfg: &mut Cfg<I>) -> JumpResolution<I::Target> {
+pub fn resolve_jump_edges<I: JumpTargets, E: Default>(
+    cfg: &mut Cfg<I, E>,
+) -> JumpResolution<I::Target> {
     let mut labels: BTreeMap<I::Target, BlockId> = BTreeMap::new();
     for block_id in cfg.block_ids() {
         let block = cfg.block(block_id);
