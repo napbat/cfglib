@@ -111,6 +111,76 @@ fn dead_pads(count: usize) -> Cfg<DfInst> {
     cfg
 }
 
+/// `count` regions, each protecting one block of a chain, each with a catch pad
+/// that no call unwinds into but the protected block. A pad's extent is the pad
+/// alone, and every pad jumps to the first block of one shared tail of `count`
+/// blocks: the code after the `try`.
+fn pads_sharing_a_tail(count: usize) -> Cfg<DfInst> {
+    let mut cfg = Cfg::new();
+    let entry = cfg.entry();
+    cfg.block_mut(entry).push(df_ff("start"));
+    let chain: Vec<BlockId> = (0..count).map(|_| new_block(&mut cfg)).collect();
+    let tail: Vec<BlockId> = (0..count).map(|_| new_block(&mut cfg)).collect();
+    cfg.add_edge(entry, chain[0], EdgeKind::Fallthrough);
+    for pair in chain.windows(2) {
+        cfg.add_edge(pair[0], pair[1], EdgeKind::Fallthrough);
+    }
+    cfg.add_edge(chain[count - 1], tail[0], EdgeKind::Fallthrough);
+    for pair in tail.windows(2) {
+        cfg.add_edge(pair[0], pair[1], EdgeKind::Fallthrough);
+    }
+    for &protected in &chain {
+        let pad = new_block(&mut cfg);
+        cfg.add_edge(protected, pad, EdgeKind::ExceptionHandler);
+        cfg.add_edge(pad, tail[0], EdgeKind::Jump);
+        cfg.add_region(Region {
+            id: RegionId::from_raw(0),
+            protected_blocks: [protected].into_iter().collect(),
+            handlers: alloc::vec![Handler {
+                entry: pad,
+                body: HandlerBody::known([pad]),
+                kind: HandlerKind::Catch,
+            }],
+            parent: None,
+        });
+    }
+    cfg
+}
+
+/// One region with `count` handlers, each a pad that jumps to the first block
+/// of one shared tail of `count` blocks.
+fn many_handlers(count: usize) -> Cfg<DfInst> {
+    let mut cfg = Cfg::new();
+    let entry = cfg.entry();
+    cfg.block_mut(entry).push(df_ff("start"));
+    let protected = new_block(&mut cfg);
+    let tail: Vec<BlockId> = (0..count).map(|_| new_block(&mut cfg)).collect();
+    cfg.add_edge(entry, protected, EdgeKind::Fallthrough);
+    cfg.add_edge(protected, tail[0], EdgeKind::Fallthrough);
+    for pair in tail.windows(2) {
+        cfg.add_edge(pair[0], pair[1], EdgeKind::Fallthrough);
+    }
+    let handlers = (0..count)
+        .map(|_| {
+            let pad = new_block(&mut cfg);
+            cfg.add_edge(protected, pad, EdgeKind::ExceptionHandler);
+            cfg.add_edge(pad, tail[0], EdgeKind::Jump);
+            Handler {
+                entry: pad,
+                body: HandlerBody::known([pad]),
+                kind: HandlerKind::Catch,
+            }
+        })
+        .collect();
+    cfg.add_region(Region {
+        id: RegionId::from_raw(0),
+        protected_blocks: [protected].into_iter().collect(),
+        handlers,
+        parent: None,
+    });
+    cfg
+}
+
 /// `count` endless loops nested in each other, each with its header protected
 /// by a region of its own (one block, one catch pad that jumps to the way out
 /// of the function): the regions are as many as the loops, and each loop sits
@@ -181,6 +251,18 @@ fn a_hundred_thousand_dead_pads_and_their_gotos_are_emitted_in_linear_time() {
         "the dead blocks are swept: {}",
         report.swept_blocks.len()
     );
+}
+
+#[test]
+fn a_hundred_thousand_pads_sharing_a_tail_are_ordered_in_linear_time() {
+    let report = structure_and_cover(pads_sharing_a_tail);
+    assert_eq!(report.unstructured_regions, []);
+}
+
+#[test]
+fn a_hundred_thousand_handlers_of_one_region_are_ordered_in_linear_time() {
+    let report = structure_and_cover(many_handlers);
+    assert_eq!(report.unstructured_regions, []);
 }
 
 #[test]

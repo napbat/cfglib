@@ -8,12 +8,12 @@ use alloc::vec::Vec;
 
 use super::super::node::{CatchHandler, ControlNode};
 use super::bound::Bound;
+use super::extent::ExtentWalk;
 use super::frames::{Frame, Next, Returned};
 use super::walk::{Lifted, RegionWalk};
 use super::{Structurer, flow_successors};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::graph::traverse::{TraversalDirection, reverse_postorder};
 use crate::region::{Handler, HandlerKind, HandlerRef, Region};
 
 /// Group regions by anchor — their first protected block in reverse
@@ -54,13 +54,14 @@ pub(super) fn region_anchors<'c, I, E>(
 /// cannot reach is dead code.
 pub(super) fn handler_roots<I, E>(
     cfg: &Cfg<I, E>,
+    walk: &mut ExtentWalk,
     carries_code: impl Fn(BlockId) -> bool,
 ) -> Vec<BlockId> {
     let mut listed: BTreeSet<BlockId> = BTreeSet::new();
     let mut roots = Vec::new();
     for region in cfg.regions() {
         for handler in &region.handlers {
-            for block in handler_blocks_in_order(cfg, handler, &carries_code) {
+            for block in handler_blocks_in_order(cfg, handler, walk, &carries_code) {
                 if listed.insert(block) {
                     roots.push(block);
                 }
@@ -80,6 +81,7 @@ pub(super) fn handler_roots<I, E>(
 fn handler_blocks_in_order<I, E>(
     cfg: &Cfg<I, E>,
     handler: &Handler,
+    walk: &mut ExtentWalk,
     carries_code: &impl Fn(BlockId) -> bool,
 ) -> Vec<BlockId> {
     let mut listed: BTreeSet<BlockId> = BTreeSet::new();
@@ -91,7 +93,7 @@ fn handler_blocks_in_order<I, E>(
         blocks.push(filter_block);
     }
     if let Some(extent) = handler.body.blocks() {
-        let flow = reverse_postorder(cfg, handler.entry, TraversalDirection::Outgoing);
+        let flow = walk.reverse_postorder_of(cfg, handler.entry, extent);
         for block in flow.into_iter().chain(extent.iter().copied()) {
             if extent.contains(&block) && carries_code(block) && listed.insert(block) {
                 blocks.push(block);
@@ -463,10 +465,12 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
                 // emitted it, and a pad of a nested region waits for that
                 // region.
                 let handler = &state.region.handlers[state.index];
-                state.extent = handler_blocks_in_order(self.cfg, handler, &|block| {
+                let mut walk = core::mem::take(&mut self.extents);
+                state.extent = handler_blocks_in_order(self.cfg, handler, &mut walk, &|block| {
                     self.instruction_count(block) > 0
                 })
                 .into_iter();
+                self.extents = walk;
                 self.lift_handler_extent(state)
             }
             HandlerWait::Extent => {
