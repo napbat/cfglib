@@ -20,7 +20,7 @@ use crate::graph::view::DenseId;
 use crate::ir::hlil::{
     Appended, Entity, FlatBuilder, FunctionBuilder, FunctionView, LowerEdge, LowerError, Lowered,
     LoweredFunction, Occurrence, StmtShape, VariableOrigin, VerificationIssue, VerificationReport,
-    lower,
+    lower, verify,
 };
 use crate::region::{HandlerBody, HandlerKind as RegionHandlerKind, Region, RegionId};
 use crate::test_util::golden::assert_golden;
@@ -536,39 +536,41 @@ fn control_falling_off_the_end_is_rejected<D: FlatKit>() {
 }
 
 fn transfers_without_a_target_are_rejected<D: FlatKit>() {
-    // `verify` finds these, so the checked builder would refuse them.
-    let cases: [(Vec<Sn>, &str); 7] = [
-        (
-            vec![Sn::Break(None)],
-            "breaks outside any enclosing construct",
-        ),
-        (
-            vec![Sn::Continue(None)],
-            "continues outside any enclosing construct",
-        ),
+    // `verify` and `lower` reject each statement in the same words, so the
+    // checked builder refuses what lowering cannot translate.
+    let cases: [(Vec<Sn>, &str); 6] = [
+        (vec![Sn::Break(None)], "s0 breaks outside any loop or switch"),
+        (vec![Sn::Continue(None)], "s0 continues outside any loop"),
         (
             vec![Sn::Break(Some("nowhere"))],
-            "breaks unenclosing label nowhere",
+            "s0 breaks unenclosing label nowhere",
         ),
         (
             vec![Sn::Continue(Some("nowhere"))],
-            "continues unenclosing label nowhere",
+            "s0 continues unenclosing label nowhere",
         ),
-        (vec![Sn::Goto("nowhere")], "goto targets the label nowhere"),
         // A labeled block is no continue target, and a plain break skips it.
         (
             vec![Sn::Labeled("block", vec![Sn::Continue(Some("block"))])],
-            "continues unenclosing label block",
+            "s0 continues label block, which labels a block and not a loop",
         ),
         (
             vec![Sn::Labeled("block", vec![Sn::Break(None)])],
-            "breaks outside any enclosing construct",
+            "s0 breaks outside any loop or switch",
         ),
     ];
     for (body, expected) in cases {
-        let error = unchecked_failure::<D>(body);
+        let function = sketch(0, &[], body).build_unchecked::<D>();
+        let report = verify::<D, _>(&function);
+        assert!(
+            report.issues.iter().any(|issue| issue.message == expected),
+            "{expected}: {report}"
+        );
+        let error = failure(&function);
         assert!(error.contains(expected), "{expected}: {error}");
     }
+    let error = unchecked_failure::<D>(vec![Sn::Goto("nowhere")]);
+    assert!(error.contains("goto targets the label nowhere"), "{error}");
 }
 
 fn ill_formed_statements_are_rejected<D: FlatKit>() {

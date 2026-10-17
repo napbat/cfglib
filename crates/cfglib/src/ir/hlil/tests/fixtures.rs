@@ -49,14 +49,15 @@ pub(crate) fn every_statement_shape<D: Kit>() -> ToyHlil<D> {
     let leave = builder.break_(None);
     let unconditional = builder.for_(&[], None, &[], &[leave]);
 
-    // outer: { do { continue outer; } while (not(v1)); loop { break outer; } }
-    let again = builder.continue_(Some("outer"));
+    // outer: { inner: do { continue inner; } while (not(v1)); loop { break outer; } }
+    let again = builder.continue_(Some("inner"));
     let flag = builder.read(bound);
     let negated = builder.call(Prim::Not, &[flag], Ty::Boolean);
     let tested_last = builder.do_while(&[again], negated);
+    let inner = builder.labeled("inner", &[tested_last]);
     let escape = builder.break_(Some("outer"));
     let spinning = builder.loop_(&[escape]);
-    let outer = builder.labeled("outer", &[tested_last, spinning]);
+    let outer = builder.labeled("outer", &[inner, spinning]);
 
     // switch (v0) { case 1, 2: call(v0); case 3: ; default: goto done; }
     let scrutinee = builder.read(index);

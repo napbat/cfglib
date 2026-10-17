@@ -255,6 +255,29 @@ pub fn visit_statements<'a, D, F>(
     }
 }
 
+/// The loop that a labeled group names: its only statement, when that
+/// statement is a loop. Any other group labels a block.
+///
+/// `verify` and `lower` share this rule, so a label that `lower` resolves as
+/// a loop is one that `verify` accepts as a `continue` target.
+pub(super) fn labeled_loop<D, F>(view: &F, body: &[F::Stmt]) -> Option<F::Stmt>
+where
+    D: Dialect,
+    F: FunctionView<D>,
+{
+    let &[only] = body else {
+        return None;
+    };
+    matches!(
+        view.stmt(only),
+        StmtShape::While { .. }
+            | StmtShape::DoWhile { .. }
+            | StmtShape::Loop { .. }
+            | StmtShape::For { .. }
+    )
+    .then_some(only)
+}
+
 /// Visits the expression tree under `root` in postorder: the operands of an
 /// operation before the operation.
 ///

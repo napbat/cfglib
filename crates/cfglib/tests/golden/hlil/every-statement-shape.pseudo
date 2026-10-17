@@ -11,9 +11,11 @@ for (
     break;
 }
 outer: {
-    do {
-        continue outer;
-    } while (not(v1));
+    inner: {
+        do {
+            continue inner;
+        } while (not(v1));
+    }
     loop {
         break outer;
     }

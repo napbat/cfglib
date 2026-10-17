@@ -70,6 +70,7 @@ mod placement;
 mod pseudocode;
 mod recover;
 mod shape;
+mod transfer;
 mod verify;
 mod view;
 
