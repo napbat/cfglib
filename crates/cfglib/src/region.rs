@@ -134,7 +134,9 @@ pub struct Handler {
 pub enum HandlerBody {
     /// Only the handler entry is known; the complete body extent is not.
     Unknown,
-    /// The complete set of blocks belonging to the handler.
+    /// The complete set of blocks belonging to the handler, which includes
+    /// the handler's own entry. [`ControlTree`](crate::ControlTree) treats a
+    /// set without it as a frontend bug.
     Known(BTreeSet<BlockId>),
 }
 
