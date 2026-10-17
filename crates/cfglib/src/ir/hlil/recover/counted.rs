@@ -5,17 +5,20 @@
 
 use crate::graph::view::DenseId;
 
+use super::walk::{Kind, Open};
 use super::{
     ExprShape, Fallible, FunctionBuilder, FunctionView, Rebuilder, RecoverDialect, StmtShape,
 };
 
-impl<H, S, B> Rebuilder<'_, H, S, B>
+impl<'a, H, S, B> Rebuilder<'a, H, S, B>
 where
     H: RecoverDialect,
     S: FunctionView<H>,
     B: FunctionBuilder<H>,
 {
-    /// Recovers `ids[index]; ids[index + 1]` as one `for` statement.
+    /// Opens `ids[index]; ids[index + 1]` as one `for` statement, or returns
+    /// `None` when they are not a counted loop. The `for` is a statement once
+    /// its body has been rebuilt.
     ///
     /// The transformation is exact only when no `continue` reaches the loop:
     /// [`For`](StmtShape::For) runs its update on `continue`, while the
@@ -24,7 +27,7 @@ where
         &mut self,
         ids: &[S::Stmt],
         index: usize,
-    ) -> Fallible<Option<B::Stmt>, B::Error> {
+    ) -> Fallible<Option<Open<'a, H, S, B>>, B::Error> {
         let init = ids[index];
         let loop_id = ids[index + 1];
         let StmtShape::Assign { target, value } = self.stmt(init)? else {
@@ -64,21 +67,16 @@ where
             return Ok(None);
         }
 
-        let first = self.statement_stack.len();
-        let initializer = self.rebuild_statement(init)?;
+        let initializer = self.rebuild_assign(target, value)?;
+        self.statements[init.index()] = Some(initializer);
         let condition = self.rebuild_expression(condition)?;
-        let body = self.rebuild_body(rest)?;
-        let update = self.rebuild_statement(update)?;
-        let counted = self.builder.for_(
-            &[initializer],
-            Some(condition),
-            &[update],
-            &self.statement_stack[body],
-        );
-        self.statement_stack.truncate(first);
-        self.statements[loop_id.index()] = Some(counted);
-        self.for_loops += 1;
-        Ok(Some(counted))
+        Ok(Some(self.open(Kind::Counted {
+            loop_id,
+            initializer,
+            condition,
+            update: (update, update_target, update_value),
+            body: rest,
+        })))
     }
 
     /// Whether any node of the source expression tree reads the variable.

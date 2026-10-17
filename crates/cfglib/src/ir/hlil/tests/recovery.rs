@@ -16,7 +16,10 @@ use crate::ir::hlil::{
 use crate::test_util::golden::assert_golden;
 
 use super::fixtures::every_statement_shape;
-use super::{ExprId, Imp, Kit, Prim, StmtId, ToyHlil, ToyHlilBuilder, Ty, VarId};
+use super::{
+    EVERY_WRAP, ExprId, Imp, Kit, Prim, StmtId, ToyHlil, ToyHlilBuilder, Ty, VarId, Wrap, nested,
+    on_small_stack,
+};
 
 over_toys!(
     counted_loop_recovers_as_for,
@@ -36,6 +39,9 @@ over_toys!(
     candidates_are_the_shapes_recovery_starts_from,
     remap_follows_entities_to_their_copies,
     deep_expression_trees_rebuild_without_recursion,
+    deeply_nested_statements_recover_without_recursion,
+    a_deep_chain_of_diamonds_recovers_as_one_selection_without_recursion,
+    deeply_nested_counted_loops_and_regions_recover_without_recursion,
 );
 
 fn recovered<D: Kit>(function: &ToyHlil<D>) -> Recovery<ToyHlil<D>, StmtId, ExprId, VarId> {
@@ -584,6 +590,153 @@ fn deep_expression_trees_rebuild_without_recursion<D: Kit>() {
     let mut visited = 0;
     visit_expression_tree(&recovery.function, rebuilt, &mut |_| visited += 1);
     assert_eq!(visited, 2 * DEPTH + 1);
+}
+
+/// The statement walk keeps its own stack, so a function nested as deep as
+/// untrusted input can make it is rebuilt on a thread whose stack could not
+/// hold a frame per level, with every statement and expression copied.
+fn deeply_nested_statements_recover_without_recursion<D: Kit>() {
+    const DEPTH: usize = 100_000;
+
+    for wraps in [&[Wrap::If, Wrap::While][..], &[Wrap::While], &EVERY_WRAP] {
+        let (recoveries, same_size, all_copied) = on_small_stack(|| {
+            let function = nested::<D>(wraps, DEPTH, ToyHlilBuilder::noop);
+            let recovery = recover_structure(&function, ToyHlilBuilder::<D>::new())
+                .expect("a deep nest recovers");
+            (
+                [recovery.for_loops, recovery.selects, recovery.regions],
+                recovery.function.stmt_count() == function.stmt_count()
+                    && recovery.function.expr_count() == function.expr_count(),
+                recovery.statements.iter().all(Option::is_some)
+                    && recovery.expressions.iter().all(Option::is_some),
+            )
+        });
+
+        assert_eq!(recoveries, [0, 0, 0], "{wraps:?}");
+        assert!(same_size, "{wraps:?}");
+        assert!(all_copied, "{wraps:?}");
+    }
+}
+
+/// `depth` diamonds nested in their then-arms, each with the arm that `leaf`
+/// builds as its else-arm, around one more such arm.
+fn diamond_chain<D: Kit>(
+    depth: usize,
+    leaf: fn(&mut ToyHlilBuilder<D>, VarId) -> StmtId,
+) -> ToyHlil<D> {
+    let mut builder = ToyHlilBuilder::<D>::new();
+    let out = builder.int_variable(0);
+    let mut inner = leaf(&mut builder, out);
+    for _ in 0..depth {
+        let otherwise = leaf(&mut builder, out);
+        let condition = builder.condition();
+        inner = builder.if_(condition, &[inner], &[otherwise]);
+    }
+    builder.finish_unchecked(&[inner])
+}
+
+/// Every walk over the diamonds of a selection, the checks that the diamond
+/// is one and the build of its expression, keeps its own stack.
+fn a_deep_chain_of_diamonds_recovers_as_one_selection_without_recursion<D: Kit>() {
+    const DEPTH: usize = 100_000;
+
+    let leaves: [fn(&mut ToyHlilBuilder<D>, VarId) -> StmtId; 2] = [
+        |builder, out| {
+            let value = builder.number(1);
+            builder.store(out, value)
+        },
+        |builder, _| {
+            let value = builder.number(1);
+            builder.return_(&[value])
+        },
+    ];
+    for leaf in leaves {
+        let (selects, statements, all_mapped) = on_small_stack(|| {
+            let function = diamond_chain::<D>(DEPTH, leaf);
+            let recovery = recover_structure(&function, ToyHlilBuilder::<D>::new())
+                .expect("a deep chain recovers");
+            (
+                recovery.selects,
+                recovery.function.stmt_count(),
+                recovery.statements.iter().all(Option::is_some),
+            )
+        });
+
+        assert_eq!(selects, 1);
+        assert_eq!(statements, 1, "the whole chain is one statement");
+        assert!(all_mapped, "every diamond and arm maps onto it");
+    }
+}
+
+/// `depth` counted loops, each in the body of the one outside it:
+/// `v1 = 0; while (v1 < v0) { <inner>; v1 = v1 + 1; }`.
+fn counted_nest<D: Kit>(depth: usize) -> ToyHlil<D> {
+    let mut builder = ToyHlilBuilder::<D>::new();
+    let bound = builder.int_variable(0);
+    let index = builder.int_variable(1);
+    let mut body = vec![builder.noop()];
+    for _ in 0..depth {
+        let zero = builder.number(0);
+        let init = builder.store(index, zero);
+        let read_index = builder.read(index);
+        let read_bound = builder.read(bound);
+        let condition = builder.call(Prim::LessThan, &[read_index, read_bound], Ty::Boolean);
+        let update_value = counting_update(&mut builder, index, UpdateForm::Add);
+        body.push(builder.store(index, update_value));
+        let looped = builder.while_(condition, &body);
+        body = vec![init, looped];
+    }
+    builder.finish_unchecked(&body)
+}
+
+/// `depth` guarded regions, each in the guarded body of the one outside it:
+/// `acquire(v0); try { <inner>; release(v0) } catch-any { release(v0);
+/// throw(caught) }`.
+fn guarded_nest<D: Kit>(depth: usize) -> ToyHlil<D> {
+    let mut builder = ToyHlilBuilder::<D>::new();
+    let lock = builder.int_variable(0);
+    let mut body = vec![builder.noop()];
+    for _ in 0..depth {
+        let subject = builder.read(lock);
+        let enter = builder.effect(Prim::Acquire, &[subject]);
+        let exit_subject = builder.read(lock);
+        body.push(builder.effect(Prim::Release, &[exit_subject]));
+        let cleanup_subject = builder.read(lock);
+        let cleanup_call = builder.call(Prim::Release, &[cleanup_subject], Ty::Void);
+        let cleanup_exit = builder.expression_statement(cleanup_call);
+        let caught = builder.call(Prim::Caught, &[], Ty::Integer);
+        let rethrow_call = builder.call(Prim::Throw, &[caught], Ty::Void);
+        let rethrow = builder.expression_statement(rethrow_call);
+        let handler = Handler {
+            kind: HandlerKind::CatchAll,
+            binding: None,
+            caught_types: &[],
+            body: &[cleanup_exit, rethrow],
+        };
+        let guarded = builder.try_(&body, &[handler], &[]);
+        body = vec![enter, guarded];
+    }
+    builder.finish_unchecked(&body)
+}
+
+/// The recoveries that rebuild a pair of statements into one construct keep
+/// their own frames as well. Each level reads its whole subtree to decide
+/// whether to recover, which bounds the depth of this nest.
+fn deeply_nested_counted_loops_and_regions_recover_without_recursion<D: Kit>() {
+    const DEPTH: usize = 2_000;
+
+    let counts = on_small_stack(|| {
+        let counted = recovered(&counted_nest::<D>(DEPTH));
+        let guarded = recovered(&guarded_nest::<D>(DEPTH));
+        [
+            counted.for_loops,
+            counted.regions,
+            guarded.for_loops,
+            guarded.regions,
+        ]
+    });
+
+    assert_eq!(counts, [DEPTH, 0, 0, DEPTH]);
 }
 
 #[test]

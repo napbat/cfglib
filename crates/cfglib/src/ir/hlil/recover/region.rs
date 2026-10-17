@@ -9,27 +9,30 @@ extern crate alloc;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
+use super::walk::{Kind, Open};
 use super::{
-    ActiveRegion, ExprShape, Fallible, FunctionBuilder, FunctionView, HandlerKind, Rebuilder,
-    RecoverDialect, StmtShape,
+    ActiveRegion, ExprShape, Fallible, FunctionBuilder, FunctionView, Rebuilder, RecoverDialect,
+    StmtShape,
 };
-use crate::graph::view::DenseId;
+use crate::ir::hlil::HandlerKind;
 
-impl<H, S, B> Rebuilder<'_, H, S, B>
+impl<'a, H, S, B> Rebuilder<'a, H, S, B>
 where
     H: RecoverDialect,
     S: FunctionView<H>,
     B: FunctionBuilder<H>,
 {
-    /// Recovers `ids[index]; ids[index + 1]` as one region statement.
+    /// Opens `ids[index]; ids[index + 1]` as one region statement, or
+    /// returns `None` when they are not a region. The region is a statement
+    /// once its body has been rebuilt.
     pub(super) fn try_region(
         &mut self,
         ids: &[S::Stmt],
         index: usize,
-    ) -> Fallible<Option<B::Stmt>, B::Error> {
+    ) -> Fallible<Option<Open<'a, H, S, B>>, B::Error> {
         let enter_id = ids[index];
         let guarded_id = ids[index + 1];
-        let source = self.source;
+        let source: &'a S = self.source;
         let StmtShape::Expression(enter_expression) = self.stmt(enter_id)? else {
             return Ok(None);
         };
@@ -74,35 +77,20 @@ where
             return Ok(None);
         }
 
-        let first = self.statement_stack.len();
         let subject = self.rebuild_expression(subject)?;
         self.active_regions.push(ActiveRegion {
             enter: enter.clone(),
             aliases: BTreeSet::from([entered, released]),
             exits: Vec::new(),
         });
-        let rebuilt_body = self.rebuild_body(body);
-        let active = self
-            .active_regions
-            .pop()
-            .expect("the region pushed above is still active");
-        let rebuilt_body = rebuilt_body?;
-        let region =
-            self.builder
-                .region(&region_op, &[subject], &self.statement_stack[rebuilt_body]);
-        self.statement_stack.truncate(first);
-        // The construct re-owns the enter, the cleanup, and every suppressed
-        // exit.
-        self.statements[enter_id.index()] = Some(region);
-        self.statements[guarded_id.index()] = Some(region);
-        for &cleanup in handler.body {
-            self.statements[cleanup.index()] = Some(region);
-        }
-        for exit in active.exits {
-            self.statements[exit.index()] = Some(region);
-        }
-        self.regions += 1;
-        Ok(Some(region))
+        Ok(Some(self.open(Kind::Guarded {
+            enter_id,
+            guarded_id,
+            cleanup: handler.body,
+            subject,
+            region_op,
+            body,
+        })))
     }
 
     /// The variable that the cleanup handler releases before it rethrows the
