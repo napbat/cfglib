@@ -274,9 +274,9 @@ impl<I, E> Structurer<'_, I, E> {
         let (handlers, finally_nodes, handlers_transfer) =
             self.lift_handlers(region, handler_bodies, allowed_blocks, continuation);
 
-        // A region whose body and handlers all end in a transfer has no end to
-        // resume at: the walk has nothing to continue with when the
-        // continuation was already emitted.
+        // A region whose body and handlers all end in a `break`, `continue`,
+        // or return has no end to resume at: the walk has nothing to continue
+        // with when the continuation was already emitted.
         let body_transfers = try_nodes
             .last()
             .is_some_and(|node| self.tables.never_completes(*node));
@@ -295,7 +295,7 @@ impl<I, E> Structurer<'_, I, E> {
 
     /// Lift the handler arms of `region`. The last answer says whether every
     /// handler's own flow, which is what ends before its dead extent tail
-    /// follows, ends in a transfer.
+    /// follows, ends in a `break`, `continue`, or return.
     fn lift_handlers(
         &mut self,
         region: &Region,

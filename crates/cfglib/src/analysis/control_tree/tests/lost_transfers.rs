@@ -292,3 +292,49 @@ fn a_dead_extent_tail_does_not_make_a_catch_that_resumes_look_like_it_transfers(
     });
     check_equivalent(&cfg, "catch that resumes after a dead extent tail");
 }
+
+#[test]
+fn a_goto_into_the_same_handler_does_not_end_the_try() {
+    // The catch pad b6 branches by gotos, and one of them targets b7, which the
+    // walk emits later inside the same handler, after the dead extent block b1
+    // and its successor b3. Control re-enters the handler at b7's label, runs
+    // to the end of the try, and must resume at b2, the region's continuation
+    // that the walk already emitted: a goto does not end the try.
+    let mut cfg: Cfg<MockInst> = Cfg::new();
+    let blocks: alloc::vec::Vec<BlockId> = core::iter::once(cfg.entry())
+        .chain((1..9).map(|_| cfg.new_block()))
+        .collect();
+    for (index, &block) in blocks.iter().enumerate() {
+        let name: &'static str = alloc::string::String::leak(alloc::format!("b{index}"));
+        cfg.block_mut(block).push(ff(name));
+    }
+    for (from, to, kind) in [
+        (0, 4, EdgeKind::ConditionalTrue),
+        (0, 8, EdgeKind::ConditionalFalse),
+        (1, 3, EdgeKind::Fallthrough),
+        (3, 2, EdgeKind::ConditionalTrue),
+        (3, 7, EdgeKind::ConditionalFalse),
+        (4, 5, EdgeKind::Jump),
+        (5, 0, EdgeKind::ConditionalTrue),
+        (5, 2, EdgeKind::ConditionalFalse),
+        (5, 6, EdgeKind::ExceptionHandler),
+        (6, 8, EdgeKind::ConditionalTrue),
+        (6, 7, EdgeKind::ConditionalFalse),
+        (7, 2, EdgeKind::ConditionalFalse),
+        (8, 0, EdgeKind::ConditionalTrue),
+        (8, 7, EdgeKind::ConditionalFalse),
+    ] {
+        cfg.add_edge(blocks[from], blocks[to], kind);
+    }
+    cfg.add_region(Region {
+        id: RegionId::from_raw(0),
+        protected_blocks: [blocks[5]].into_iter().collect(),
+        handlers: alloc::vec![Handler {
+            entry: blocks[6],
+            body: HandlerBody::known([blocks[1], blocks[6]]),
+            kind: HandlerKind::CatchAll,
+        }],
+        parent: None,
+    });
+    check_equivalent(&cfg, "goto into the same handler");
+}
