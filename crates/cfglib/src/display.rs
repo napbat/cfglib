@@ -63,10 +63,7 @@ impl<'sink> IndentedWriter<'sink> {
     ///
     /// Returns the sink's formatting error if a write fails.
     pub fn indent(&mut self) -> fmt::Result {
-        for _ in 0..self.depth {
-            self.sink.write_str(INDENT)?;
-        }
-        Ok(())
+        write_indent(&mut *self.sink, self.depth)
     }
 
     /// End the current line.
@@ -117,15 +114,17 @@ impl<'sink> IndentedWriter<'sink> {
     /// Write `body` one level deeper, with no brace to mark the level.
     ///
     /// This is what a label's statements are indented by: the nesting is
-    /// real, but there is no block to open.
+    /// real, but there is no block to open. The depth afterwards is the
+    /// depth before, whatever `body` opened or closed.
     ///
     /// # Errors
     ///
     /// Propagates whatever `body` returns.
     pub fn nested(&mut self, body: impl FnOnce(&mut Self) -> fmt::Result) -> fmt::Result {
-        self.depth += 1;
+        let outer = self.depth;
+        self.depth = outer + 1;
         let result = body(self);
-        self.depth -= 1;
+        self.depth = outer;
         result
     }
 
@@ -165,6 +164,14 @@ impl<'sink> IndentedWriter<'sink> {
     }
 }
 
+/// Write `depth` levels of indentation into `sink`.
+fn write_indent(sink: &mut dyn fmt::Write, depth: usize) -> fmt::Result {
+    for _ in 0..depth {
+        sink.write_str(INDENT)?;
+    }
+    Ok(())
+}
+
 /// A line that indents itself only once something is written to it.
 struct PendingLine<'sink> {
     sink: &'sink mut dyn fmt::Write,
@@ -178,9 +185,7 @@ impl fmt::Write for PendingLine<'_> {
             return Ok(());
         }
         if !self.wrote {
-            for _ in 0..self.indent {
-                self.sink.write_str(INDENT)?;
-            }
+            write_indent(&mut *self.sink, self.indent)?;
             self.wrote = true;
         }
         self.sink.write_str(text)
@@ -282,5 +287,31 @@ mod tests {
         printer.close().unwrap();
         assert_eq!(printer.depth(), 0);
         assert_eq!(out, "}\n");
+    }
+
+    #[test]
+    fn a_close_inside_nested_does_not_leak_a_level_out_of_nested() {
+        let mut out = String::new();
+        let mut printer = IndentedWriter::new(&mut out);
+        printer.nested(|printer| printer.close()).unwrap();
+        assert_eq!(printer.depth(), 0);
+
+        printer.open().unwrap();
+        printer.nested(|printer| printer.close_inline()).unwrap();
+        assert_eq!(printer.depth(), 1, "nested restores the depth it found");
+    }
+
+    #[test]
+    fn nested_indents_by_one_level_and_restores_the_depth() {
+        let mut out = String::new();
+        let mut printer = IndentedWriter::new(&mut out);
+        printer
+            .nested(|printer| {
+                printer.line("inside")?;
+                printer.optional_line(|sink| sink.write_str("pending"))
+            })
+            .unwrap();
+        printer.line("outside").unwrap();
+        assert_eq!(out, "    inside\n    pending\noutside\n");
     }
 }
