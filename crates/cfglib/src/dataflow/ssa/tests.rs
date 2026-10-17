@@ -232,6 +232,51 @@ fn unreachable_block_is_still_annotated() {
     assert_eq!(ssa.block(unreachable).instructions[0].defs()[0].variable, 3);
 }
 
+/// Every block of a forest is renamed once: the entry is a root and so are the
+/// source blocks of dead code, each root's tree is walked once, and no block is
+/// skipped. Renaming a block twice would double its instructions and skip
+/// versions, and skipping one would leave its definitions un-renamed.
+#[test]
+fn a_forest_of_roots_renames_every_block_exactly_once() {
+    // Live: entry -> join. Dead: a source, a loop `top <-> side` it enters, and
+    // a block that feeds the live join (so the join is a root of its own).
+    let mut cfg = Cfg::<DfInst>::new();
+    let [join, source, top, side, feeder] = [(); 5].map(|()| cfg.new_block());
+    cfg.add_edge(cfg.entry(), join, EdgeKind::Fallthrough);
+    cfg.add_edge(source, top, EdgeKind::Fallthrough);
+    cfg.add_edge(top, side, EdgeKind::ConditionalTrue);
+    cfg.add_edge(side, top, EdgeKind::Fallthrough);
+    cfg.add_edge(feeder, join, EdgeKind::Fallthrough);
+    let blocks: Vec<BlockId> = cfg.block_ids().collect();
+    for &block in &blocks {
+        cfg.block_mut(block).push(df_use("read", 0));
+        cfg.block_mut(block).push(df_def("write", 0));
+    }
+    let dom = DominatorTree::compute(&cfg);
+
+    let ssa = SsaForm::compute(&cfg, &dom);
+
+    let mut versions = Vec::new();
+    for &block in &blocks {
+        let renamed = ssa.block(block);
+        assert_eq!(renamed.instructions.len(), 2, "{block:?} renamed once");
+        versions.extend(
+            renamed.instructions[1]
+                .defs()
+                .iter()
+                .map(|value| value.version),
+        );
+        versions.extend(renamed.phis.iter().map(|phi| phi.result.version));
+    }
+    versions.sort_unstable();
+    let expected: Vec<SsaVersion> = (1..=ssa.max_version(&0)).collect();
+    assert_eq!(
+        versions, expected,
+        "one fresh version per definition and phi"
+    );
+    assert_eq!(versions.len(), blocks.len() + ssa.phis().count());
+}
+
 #[test]
 fn disconnected_definition_reaches_its_component_successor() {
     let mut cfg = Cfg::<DfInst>::new();
