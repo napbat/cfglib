@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use std::path::{Path, PathBuf};
 
 use crate::graph::store::NodeId;
+use crate::test_util::rng::Rng;
 
 use super::{DenseFanout, Fanout, SortedMap};
 
@@ -186,12 +187,11 @@ fn a_dense_table_matches_naive_grouping_with_empty_keys_everywhere() {
     // close the key space; the arrival order of each key's values is the
     // order of a plain per-key push.
     let bound = 9;
-    let mut state = 0x2545_f491_u32;
+    let mut rng = Rng::new(0x2545_f491);
     let mut pairs = Vec::new();
     let mut naive = vec![Vec::new(); bound];
     for value in 0..200_u32 {
-        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        let key = [1_usize, 2, 5, 6, 7][(state >> 16) as usize % 5];
+        let key = [1_usize, 2, 5, 6, 7][rng.below(5)];
         pairs.push((key, value));
         naive[key].push(value);
     }

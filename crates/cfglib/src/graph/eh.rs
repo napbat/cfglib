@@ -60,7 +60,19 @@ impl EhEdgeKind {
             EdgeKind::ExceptionLeave => Some(Self::Leave),
             EdgeKind::ExceptionResume => Some(Self::Resume),
             EdgeKind::ExceptionContinue => Some(Self::Continue),
-            _ => None,
+            // Listed rather than matched by a wildcard, so a new edge kind has
+            // to say here whether the exception model carries it.
+            EdgeKind::Fallthrough
+            | EdgeKind::ConditionalTrue
+            | EdgeKind::ConditionalFalse
+            | EdgeKind::Unconditional
+            | EdgeKind::Back
+            | EdgeKind::Call
+            | EdgeKind::CallReturn
+            | EdgeKind::SwitchCase
+            | EdgeKind::Jump
+            | EdgeKind::IndirectJump
+            | EdgeKind::IndirectCall => None,
         }
     }
 
