@@ -14,9 +14,10 @@
 //!
 //! The work is split by responsibility. `construction` runs the algorithm over
 //! any [`GraphView`], `numbering` numbers a forest from its parent table,
-//! `frontier` answers dominance-frontier queries over the numbered tree, and
-//! `post` builds the post-dominator tree on the first two and answers its
-//! frontier queries with the third. This module holds the tree and its queries.
+//! `forest` extends a tree over the code its root misses, `frontier` answers
+//! dominance-frontier queries over the numbered tree, and `post` builds the
+//! post-dominator tree on the first two and answers its frontier queries with
+//! the last. This module holds the tree and its queries.
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -26,11 +27,13 @@ use core::ops::Range;
 use crate::block::BlockId;
 use crate::graph::view::{DenseId, GraphView, RootedView};
 use construction::ConstructionBuffers;
+pub(crate) use forest::complete_dominator_forest;
 pub use frontier::FrontierScratch;
 use numbering::{Numbered, NumberingBuffers};
 pub use post::{PostDominatorScratch, PostDominatorTree, PostNode};
 
 mod construction;
+mod forest;
 mod frontier;
 #[cfg(test)]
 mod iterative;
