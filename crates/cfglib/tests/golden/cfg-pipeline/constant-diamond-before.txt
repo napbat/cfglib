@@ -1,0 +1,18 @@
+entry bb0
+bb0:
+    x = 3
+    y = 4
+    c = x < y
+    branch c
+bb1:
+    z = x + y
+bb2:
+    nop
+    z = x * y
+bb3:
+    print z
+    return z
+bb0 -> bb1 true
+bb0 -> bb2 false
+bb1 -> bb3 fallthrough
+bb2 -> bb3 fallthrough
