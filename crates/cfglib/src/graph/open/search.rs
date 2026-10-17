@@ -7,10 +7,9 @@ use core::mem;
 use core::ops::ControlFlow;
 use smallvec::SmallVec;
 
-use crate::graph::search::{SearchOrder, Visit, VisitedPolicy};
+use crate::graph::search::{SearchOrder, Visit, VisitedPolicy, may_expand};
 
 use super::marks::{INLINE_NODES, Marks};
-use super::may_expand;
 
 /// The discipline an [`open_search`] runs under.
 ///

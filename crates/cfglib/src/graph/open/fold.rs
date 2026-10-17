@@ -35,6 +35,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
+use crate::graph::search::may_expand;
+
 use super::marks::Marks;
 
 /// Bounds for one [`open_fold_post_order`] walk.
@@ -370,9 +372,9 @@ pub fn open_fold_post_order<F: OpenFold>(
             walk.marks.truncate(sandbox.with_key);
         }
 
-        let refused_by_depth = config
-            .max_depth
-            .is_some_and(|max_depth| walk.stack.len() > max_depth);
+        // The parent is the top frame, at depth `stack.len() - 1`; its child
+        // is refused exactly when that parent may not expand.
+        let refused_by_depth = !may_expand(config.max_depth, walk.stack.len() - 1);
         let child_key = fold.mark(&child);
         let refused = refused_by_depth
             || child_key

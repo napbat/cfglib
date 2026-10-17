@@ -5,10 +5,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
-use crate::graph::search::{Visit, VisitedPolicy};
+use crate::graph::search::{Visit, VisitedPolicy, may_expand};
 
 use super::super::marks::Marks;
-use super::super::may_expand;
 
 /// The discipline an [`open_depth_first_events`] walk runs under.
 ///

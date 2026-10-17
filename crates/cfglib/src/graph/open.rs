@@ -65,10 +65,5 @@ pub use follow::{follow, follow_path};
 pub use paths::{OpenPathsConfig, OpenPathsEvent, open_breadth_first_paths};
 pub use search::{OpenSearchConfig, open_search};
 
-/// Whether a node at `depth` may expand under a `max_depth` bound.
-fn may_expand(max_depth: Option<usize>, depth: usize) -> bool {
-    max_depth.is_none_or(|limit| depth < limit)
-}
-
 #[cfg(test)]
 mod tests;

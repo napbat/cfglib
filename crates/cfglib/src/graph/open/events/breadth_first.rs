@@ -6,10 +6,9 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
-use crate::graph::search::Visit;
+use crate::graph::search::{Visit, may_expand};
 
 use super::super::marks::Marks;
-use super::super::may_expand;
 
 /// Configuration for an [`open_breadth_first_events`] walk.
 ///
