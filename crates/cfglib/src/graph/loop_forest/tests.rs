@@ -208,6 +208,7 @@ fn assert_forest_matches(cfg: &Cfg<u32>, forest: &LoopForest, oracle: &[NaturalL
             );
         }
     }
+    assert_nesting_getters(forest, bound, label);
     for block in 0..bound {
         let block = BlockId::from_index(block);
         if !oracle.iter().any(|lp| lp.header == block) {
@@ -327,7 +328,7 @@ fn random_graphs_with_dead_code_and_tags_have_the_loops_of_the_oracle() {
 
         let dom = DominatorTree::compute(&cfg);
         let forest = LoopForest::compute_all_tagged(&cfg, &dom);
-        irreducible += usize::from(forest.loops().any(|lp| forest.is_explicit(lp)));
+        irreducible += usize::from(forest.loops().any(|lp| !forest.is_nested(lp)));
         dead_loops += usize::from(
             forest
                 .loops()
@@ -432,7 +433,7 @@ fn an_irreducible_loop_is_answered_from_its_own_blocks() {
     let cycle = forest
         .loop_of_header(a)
         .expect("the tag makes `a` a header");
-    assert!(forest.is_explicit(cycle));
+    assert!(!forest.is_nested(cycle));
     assert_eq!(
         forest.body(cycle).collect::<BTreeSet<_>>(),
         BTreeSet::from([a, b])
@@ -515,7 +516,7 @@ fn a_parent_can_hold_the_header_of_a_loop_without_enclosing_it() {
 
     let dom = DominatorTree::compute(&cfg);
     let forest = LoopForest::compute_tagged(&cfg, &dom);
-    assert!(forest.loops().any(|lp| forest.is_explicit(lp)));
+    assert!(forest.loops().any(|lp| !forest.is_nested(lp)));
     let (parent, child) = forest
         .loops()
         .find_map(|lp| {
@@ -530,4 +531,115 @@ fn a_parent_can_hold_the_header_of_a_loop_without_enclosing_it() {
             .any(|block| !forest.contains(parent, block))
     );
     assert!(forest.encloses(child, child), "a loop encloses itself");
+}
+
+/// `innermost`, `enclosing` and `is_nested` against the bodies `contains`
+/// already ties to the oracle: the loops a block is in, among the properly
+/// nested ones, are the chain of `enclosing` from `innermost`, smallest first.
+fn assert_nesting_getters(forest: &LoopForest, bound: usize, label: &str) {
+    for block in 0..bound + 2 {
+        let block = BlockId::from_index(block);
+        let smallest = forest
+            .loops()
+            .filter(|&lp| forest.is_nested(lp) && forest.contains(lp, block))
+            .min_by_key(|&lp| forest.body_len(lp));
+        assert_eq!(
+            forest.innermost(block),
+            smallest,
+            "{label}: innermost of {block:?}"
+        );
+
+        let mut chain = BTreeSet::new();
+        let mut at = forest.innermost(block);
+        while let Some(lp) = at {
+            assert!(chain.insert(lp), "{label}: the enclosing chain cycles");
+            at = forest.enclosing(lp);
+        }
+        let held: BTreeSet<LoopId> = forest
+            .loops()
+            .filter(|&lp| forest.is_nested(lp) && forest.contains(lp, block))
+            .collect();
+        assert_eq!(chain, held, "{label}: the chain from {block:?}");
+    }
+    for lp in forest.loops() {
+        match forest.enclosing(lp) {
+            None => {
+                let around = forest
+                    .loops()
+                    .filter(|&other| other != lp && forest.is_nested(other));
+                assert!(
+                    !forest.is_nested(lp)
+                        || around.into_iter().all(|other| !forest.encloses(other, lp)),
+                    "{label}: a nested loop with no enclosing loop is enclosed"
+                );
+            }
+            Some(around) => {
+                assert!(forest.is_nested(lp) && forest.is_nested(around), "{label}");
+                assert!(forest.encloses(around, lp) && around != lp, "{label}");
+                let tighter = forest.loops().any(|other| {
+                    other != lp
+                        && other != around
+                        && forest.is_nested(other)
+                        && forest.encloses(other, lp)
+                        && forest.encloses(around, other)
+                });
+                assert!(!tighter, "{label}: a nested loop lies between");
+            }
+        }
+    }
+}
+
+/// A forest with an irreducible loop in it, beside and inside properly nested
+/// ones: the getters name the nested loops, and an explicit loop is none of them.
+#[test]
+fn the_nesting_getters_name_only_the_properly_nested_loops() {
+    use EdgeKind::{Back, ConditionalTrue, Fallthrough};
+    // entry -> outer; outer -> inner; inner <-> body; inner -> outer (back);
+    // and, past outer, two entries into one cycle `left`/`right` (irreducible).
+    let cfg = graph_of(
+        8,
+        &[
+            (0, 1, Fallthrough),
+            (1, 2, ConditionalTrue),
+            (2, 3, ConditionalTrue),
+            (3, 2, Back),
+            (2, 1, Back),
+            (1, 4, Fallthrough),
+            (4, 5, ConditionalTrue),
+            (4, 6, Fallthrough),
+            (5, 6, Fallthrough),
+            (6, 5, Back),
+            (6, 7, Fallthrough),
+        ],
+    );
+    check_all_three(&cfg, "getters");
+    let dom = DominatorTree::compute(&cfg);
+    let forest = LoopForest::compute_tagged(&cfg, &dom);
+    let [outer, inner, left] = [1, 2, 5].map(|index| {
+        forest
+            .loop_of_header(BlockId::from_index(index))
+            .expect("a header")
+    });
+
+    assert!(forest.is_nested(outer) && forest.is_nested(inner));
+    assert!(
+        !forest.is_nested(left),
+        "two entries make the cycle irreducible"
+    );
+    assert_eq!(forest.enclosing(inner), Some(outer));
+    assert_eq!(forest.enclosing(outer), None);
+    assert_eq!(forest.enclosing(left), None, "an explicit loop names none");
+    assert_eq!(forest.innermost(BlockId::from_index(3)), Some(inner));
+    assert_eq!(forest.innermost(BlockId::from_index(1)), Some(outer));
+    assert_eq!(forest.innermost(BlockId::from_index(0)), None);
+    assert_eq!(
+        forest.innermost(BlockId::from_index(6)),
+        None,
+        "held only by the explicit loop"
+    );
+    assert_eq!(
+        forest.innermost(BlockId::from_index(99)),
+        None,
+        "beyond the bound"
+    );
 }
