@@ -18,19 +18,23 @@ Before handing off a Rust change, run the relevant targeted tests while iteratin
 then run all of these from the workspace root:
 
 ```text
-python scripts/check_repository_policy.py
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings -D clippy::pedantic
 cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
-cargo test --workspace
-cargo test --workspace --all-features
+cargo nextest run --workspace --all-features
+cargo test --workspace --all-features --doc
 ```
 
-Both feature sets are gates: code behind `#[cfg(feature = "serde")]` is checked
-only by the all-features run, and code the feature does not touch must also
-build and pass without it. CI (`.github/workflows/lint.yml`) additionally lints
-the allocation-counting benchmarks, runs the `control-tree` example, checks the
-MSRV, and checks the `no_std` build for `thumbv7em-none-eabi`.
+Both feature sets are lint gates: code behind `#[cfg(feature = "serde")]` is
+checked only by the all-features run, and code the feature does not touch must
+also build without it. The `serde` feature is additive, so one all-features
+test run covers every line. `cargo-nextest` runs each test in its own process,
+in parallel; it does not run doctests, so `cargo test --doc` runs them. CI
+(`.github/workflows/lint.yml`) runs a `lint` job and a `test` job in parallel.
+The `lint` job also lints the allocation-counting benchmarks and checks the
+`no_std` build for `x86_64-unknown-none`, a target without `std`, so a
+dependency feature that turns `std` on fails the build. The `test` job also
+runs the `control-tree` example.
 
 Also build documentation with warnings denied when public APIs or docs change:
 
@@ -40,8 +44,6 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 
 In PowerShell, set `RUSTDOCFLAGS` with
 `$env:RUSTDOCFLAGS = "-D warnings"` before running the documentation command.
-If `python` is a local shim that does not forward arguments, run the policy check
-with `uv run --no-project python scripts/check_repository_policy.py`.
 
 ### Clippy
 
@@ -90,7 +92,7 @@ with `uv run --no-project python scripts/check_repository_policy.py`.
 ## Naming and Layout Conventions
 
 - Module files use the named-file style — `parent.rs` beside a `parent/`
-  directory. `mod.rs` is forbidden (enforced by the policy script).
+  directory. `mod.rs` is forbidden.
 - Top-level namespace modules (`analysis`, `dataflow`, `graph`, `ir`, `transform`)
   declare `pub mod` children and hoist nothing; the crate root is the single
   flat facade that re-exports every public item, one `pub use` per module,

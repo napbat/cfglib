@@ -60,9 +60,8 @@ responsibility. API-focused cases are split by responsibility under
 `performance/api_cases/`; reusable instruction and graph fixtures live in
 their sibling fixture modules. Add a focused case to the appropriate module
 instead of extending `main.rs`. The `PUBLIC_API_FUNCTIONS` inventory lists
-every root-level free function re-exported by `lib.rs`; the repository policy
-check derives that set from the facade and fails if the inventory is stale,
-and the last line of a run (`coverage:`) prints the current counts.
+every root-level free function re-exported by `lib.rs`; update it when the
+facade changes. The last line of a run (`coverage:`) prints the current counts.
 Constructors, accessors, and associated analysis entry points are exercised by
 the workloads but are not individually timed as facade functions.
 

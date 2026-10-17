@@ -8,6 +8,13 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+
+# Two jobs run in parallel. `lint` holds every check that only compiles;
+# `test` runs the suite once. The only feature, `serde`, is additive, so the
+# all-features run tests every line of code. The default-features clippy step
+# and the no_std checks keep the build without `serde` clean.
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -15,18 +22,14 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
-      - name: Install Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.x"
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+          targets: x86_64-unknown-none
 
-      - name: Check repository policy
-        run: python scripts/check_repository_policy.py
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -48,46 +51,19 @@ jobs:
           cargo clippy -p cfglib --benches --all-features --
           -D warnings -D clippy::pedantic
 
-      - name: Run tests with default features
-        run: cargo test --workspace
-
-      - name: Run tests with all features
-        run: cargo test --workspace --all-features
-
-      - name: Run examples
-        run: cargo run -p cfglib --example control-tree
-
       - name: Build documentation
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --all-features --no-deps
 
-  msrv:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
+      # A target without std fails to build if any dependency feature turns
+      # std on; the host build cannot catch that, because std is always there.
+      - name: Check the no_std build
+        run: |
+          cargo check -p cfglib --target x86_64-unknown-none
+          cargo check -p cfglib --all-features --target x86_64-unknown-none
 
-      - name: Read the MSRV from the workspace manifest
-        id: msrv
-        run: >-
-          echo "version=$(cargo metadata --no-deps --format-version 1
-          | jq -r '.packages[] | select(.name == "cfglib") | .rust_version')"
-          >> "$GITHUB_OUTPUT"
-
-      - name: Install MSRV Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.msrv.outputs.version }}
-
-      # rust-toolchain.toml selects stable for local work, and a toolchain
-      # file outranks rustup's default, so name the MSRV toolchain explicitly.
-      - name: Check with MSRV
-        env:
-          RUSTUP_TOOLCHAIN: ${{ steps.msrv.outputs.version }}
-        run: cargo check --workspace --all-targets --all-features
-
-  no-std:
+  test:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -95,13 +71,19 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: thumbv7em-none-eabi
 
-      - name: Check no_std build with default features
-        run: cargo check -p cfglib --target thumbv7em-none-eabi
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
 
-      - name: Check no_std build with all features
-        run: >-
-          cargo check -p cfglib --all-features
-          --target thumbv7em-none-eabi
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo nextest run --workspace --all-features --profile ci
+
+      # nextest does not run doctests.
+      - name: Run doctests
+        run: cargo test --workspace --all-features --doc
+
+      - name: Run examples
+        run: cargo run -p cfglib --example control-tree

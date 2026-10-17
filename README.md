@@ -632,13 +632,14 @@ larger ones.
 ## Development
 
 Install the git hooks once with `prek install` (or `pre-commit install`); both
-tools read the same `.pre-commit-config.yaml`. Hygiene checks, the repository
-policy script, `cargo fmt`, and pedantic Clippy run at commit time; the full
-test and documentation suites run at push time. CI runs the same gates with
-default features as well, plus an MSRV check against the `rust-version` in
-`Cargo.toml` (the one place the minimum Rust version is written down) and
-`no_std` target builds. The complete gate list and the workspace's naming and
-layout conventions live in `AGENTS.md`.
+tools read the same `.pre-commit-config.yaml`. The test hooks need
+`cargo-nextest` (`cargo install cargo-nextest --locked`). Hygiene checks,
+`cargo fmt`, and pedantic Clippy run at commit time;
+the test suite (`cargo nextest run` plus `cargo test --doc` for doctests) and
+the documentation build run at push time. CI runs the same gates in two
+parallel jobs, plus a `no_std` build for `x86_64-unknown-none`. The complete
+gate list and the workspace's naming and layout conventions live in
+`AGENTS.md`.
 
 ## License
 
