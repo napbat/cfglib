@@ -78,8 +78,14 @@ pub enum FlowEffect {
     /// Conditional return.
     ConditionalReturn,
     /// Unconditional call to a label/address.
+    ///
+    /// The builder **stores** this instruction in the current block: it ends
+    /// no block and wires no edge, so a call and the instructions after it
+    /// stay in one block. The same holds for [`ConditionalCall`](Self::ConditionalCall)
+    /// and [`IndirectCall`](Self::IndirectCall). A stream that needs a call to
+    /// end its block uses the address builder and [`Flow::Call`].
     Call,
-    /// Conditional call.
+    /// Conditional call. Stored like [`Call`](Self::Call).
     ConditionalCall,
     /// Terminates execution of the current invocation (e.g. `discard`).
     Terminate,

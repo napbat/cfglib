@@ -1,5 +1,5 @@
-//! Every instruction-level analysis gives the same answer on a [`CfgView`]
-//! that is not a [`Cfg`].
+//! The instruction-level analyses exercised here give the same answer on a
+//! [`CfgView`] that is not a [`Cfg`].
 //!
 //! The toy view keeps instructions and edges in plain vectors. It shares no
 //! code with the store behind [`Cfg`], so a result that matches the one on
