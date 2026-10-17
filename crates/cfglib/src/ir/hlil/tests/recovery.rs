@@ -1,9 +1,7 @@
 //! Structure recovery over the toy dialects.
 
 extern crate alloc;
-
-use alloc::string::ToString;
-use alloc::vec;
+extern crate std;
 
 use crate::BlockId;
 use crate::ProgramPoint;
@@ -14,6 +12,10 @@ use crate::ir::hlil::{
     visit_expression_tree,
 };
 use crate::test_util::golden::assert_golden;
+use alloc::string::ToString;
+use alloc::vec;
+use core::time::Duration;
+use std::time::Instant;
 
 use super::fixtures::every_statement_shape;
 use super::{
@@ -41,7 +43,10 @@ over_toys!(
     deep_expression_trees_rebuild_without_recursion,
     deeply_nested_statements_recover_without_recursion,
     a_deep_chain_of_diamonds_recovers_as_one_selection_without_recursion,
-    deeply_nested_counted_loops_and_regions_recover_without_recursion,
+    deeply_nested_counted_loops_recover_without_recursion,
+    deeply_nested_regions_recover_without_recursion,
+    nested_regions_on_one_variable_recover_without_recursion,
+    many_regions_over_copied_views_recover_in_one_body,
 );
 
 fn recovered<D: Kit>(function: &ToyHlil<D>) -> Recovery<ToyHlil<D>, StmtId, ExprId, VarId> {
@@ -592,25 +597,56 @@ fn deep_expression_trees_rebuild_without_recursion<D: Kit>() {
     assert_eq!(visited, 2 * DEPTH + 1);
 }
 
+/// What a recovery of a deep nest may take. A recovery that is linear in the
+/// size of the function takes a fraction of a second at the depths below,
+/// with two orders of magnitude to spare, and one that is quadratic in the
+/// depth takes many minutes.
+const LINEAR_TIME_LIMIT: Duration = Duration::from_secs(30);
+
+/// Recovers the function that `build` makes on a thread whose stack could
+/// not hold a frame per level, and returns what `summarize` makes of the
+/// function and its recovery. The recovery fails if it takes longer than a
+/// linear one can.
+fn recovered_on_a_small_stack<D: Kit, T: Send>(
+    build: impl FnOnce() -> ToyHlil<D> + Send,
+    summarize: impl FnOnce(&ToyHlil<D>, &Recovery<ToyHlil<D>, StmtId, ExprId, VarId>) -> T + Send,
+) -> T {
+    on_small_stack(|| {
+        let function = build();
+        let started = Instant::now();
+        let recovery = recovered(&function);
+        let elapsed = started.elapsed();
+        assert!(elapsed < LINEAR_TIME_LIMIT, "the recovery took {elapsed:?}");
+        summarize(&function, &recovery)
+    })
+}
+
 /// The statement walk keeps its own stack, so a function nested as deep as
 /// untrusted input can make it is rebuilt on a thread whose stack could not
-/// hold a frame per level, with every statement and expression copied.
+/// hold a frame per level, with every statement and expression copied. The
+/// checks for a selection read each statement of a nest once, however many
+/// levels ask.
 fn deeply_nested_statements_recover_without_recursion<D: Kit>() {
     const DEPTH: usize = 100_000;
 
-    for wraps in [&[Wrap::If, Wrap::While][..], &[Wrap::While], &EVERY_WRAP] {
-        let (recoveries, same_size, all_copied) = on_small_stack(|| {
-            let function = nested::<D>(wraps, DEPTH, ToyHlilBuilder::noop);
-            let recovery = recover_structure(&function, ToyHlilBuilder::<D>::new())
-                .expect("a deep nest recovers");
-            (
-                [recovery.for_loops, recovery.selects, recovery.regions],
-                recovery.function.stmt_count() == function.stmt_count()
-                    && recovery.function.expr_count() == function.expr_count(),
-                recovery.statements.iter().all(Option::is_some)
-                    && recovery.expressions.iter().all(Option::is_some),
-            )
-        });
+    for wraps in [
+        &[Wrap::If][..],
+        &[Wrap::If, Wrap::While],
+        &[Wrap::While],
+        &EVERY_WRAP,
+    ] {
+        let (recoveries, same_size, all_copied) = recovered_on_a_small_stack::<D, _>(
+            || nested::<D>(wraps, DEPTH, ToyHlilBuilder::noop),
+            |function, recovery| {
+                (
+                    [recovery.for_loops, recovery.selects, recovery.regions],
+                    recovery.function.stmt_count() == function.stmt_count()
+                        && recovery.function.expr_count() == function.expr_count(),
+                    recovery.statements.iter().all(Option::is_some)
+                        && recovery.expressions.iter().all(Option::is_some),
+                )
+            },
+        );
 
         assert_eq!(recoveries, [0, 0, 0], "{wraps:?}");
         assert!(same_size, "{wraps:?}");
@@ -651,16 +687,16 @@ fn a_deep_chain_of_diamonds_recovers_as_one_selection_without_recursion<D: Kit>(
         },
     ];
     for leaf in leaves {
-        let (selects, statements, all_mapped) = on_small_stack(|| {
-            let function = diamond_chain::<D>(DEPTH, leaf);
-            let recovery = recover_structure(&function, ToyHlilBuilder::<D>::new())
-                .expect("a deep chain recovers");
-            (
-                recovery.selects,
-                recovery.function.stmt_count(),
-                recovery.statements.iter().all(Option::is_some),
-            )
-        });
+        let (selects, statements, all_mapped) = recovered_on_a_small_stack::<D, _>(
+            || diamond_chain::<D>(DEPTH, leaf),
+            |_, recovery| {
+                (
+                    recovery.selects,
+                    recovery.function.stmt_count(),
+                    recovery.statements.iter().all(Option::is_some),
+                )
+            },
+        );
 
         assert_eq!(selects, 1);
         assert_eq!(statements, 1, "the whole chain is one statement");
@@ -690,13 +726,19 @@ fn counted_nest<D: Kit>(depth: usize) -> ToyHlil<D> {
 }
 
 /// `depth` guarded regions, each in the guarded body of the one outside it:
-/// `acquire(v0); try { <inner>; release(v0) } catch-any { release(v0);
-/// throw(caught) }`.
-fn guarded_nest<D: Kit>(depth: usize) -> ToyHlil<D> {
+/// `acquire(l); try { <inner>; release(l) } catch-any { release(l);
+/// throw(caught) }`, where `l` is one variable for every level when `shared`
+/// and the level's own variable otherwise.
+fn guarded_nest<D: Kit>(depth: usize, shared: bool) -> ToyHlil<D> {
     let mut builder = ToyHlilBuilder::<D>::new();
-    let lock = builder.int_variable(0);
+    let shared_lock = builder.int_variable(0);
     let mut body = vec![builder.noop()];
     for _ in 0..depth {
+        let lock = if shared {
+            shared_lock
+        } else {
+            builder.int_variable(0)
+        };
         let subject = builder.read(lock);
         let enter = builder.effect(Prim::Acquire, &[subject]);
         let exit_subject = builder.read(lock);
@@ -719,24 +761,94 @@ fn guarded_nest<D: Kit>(depth: usize) -> ToyHlil<D> {
     builder.finish_unchecked(&body)
 }
 
-/// The recoveries that rebuild a pair of statements into one construct keep
-/// their own frames as well. Each level reads its whole subtree to decide
-/// whether to recover, which bounds the depth of this nest.
-fn deeply_nested_counted_loops_and_regions_recover_without_recursion<D: Kit>() {
+/// The recovery that rebuilds an initializer and a loop into a `for` keeps
+/// its own frame as well, and decides whether to recover from what the loop
+/// body contains without reading the body again at every level.
+fn deeply_nested_counted_loops_recover_without_recursion<D: Kit>() {
+    const DEPTH: usize = 100_000;
+
+    let for_loops = recovered_on_a_small_stack::<D, _>(
+        || counted_nest::<D>(DEPTH),
+        |_, recovery| recovery.for_loops,
+    );
+
+    assert_eq!(for_loops, DEPTH);
+}
+
+/// The recovery that rebuilds an enter and its `try` into a region keeps its
+/// own frame too, and decides whether to recover from what the guarded body
+/// assigns without reading the body again at every level. A statement costs
+/// the open regions that hold the variable that it names, so a nest with a
+/// variable per region is linear.
+fn deeply_nested_regions_recover_without_recursion<D: Kit>() {
+    const DEPTH: usize = 100_000;
+
+    let regions = recovered_on_a_small_stack::<D, _>(
+        || guarded_nest::<D>(DEPTH, false),
+        |_, recovery| recovery.regions,
+    );
+
+    assert_eq!(regions, DEPTH);
+}
+
+/// Every statement that names the shared variable asks the dialect, once for
+/// each open region, whether that region releases it, so a nest on one
+/// variable costs a call per pair of region and statement and is shallower.
+fn nested_regions_on_one_variable_recover_without_recursion<D: Kit>() {
     const DEPTH: usize = 2_000;
 
-    let counts = on_small_stack(|| {
-        let counted = recovered(&counted_nest::<D>(DEPTH));
-        let guarded = recovered(&guarded_nest::<D>(DEPTH));
-        [
-            counted.for_loops,
-            counted.regions,
-            guarded.for_loops,
-            guarded.regions,
-        ]
-    });
+    let regions = recovered_on_a_small_stack::<D, _>(
+        || guarded_nest::<D>(DEPTH, true),
+        |_, recovery| recovery.regions,
+    );
 
-    assert_eq!(counts, [DEPTH, 0, 0, DEPTH]);
+    assert_eq!(regions, DEPTH);
+}
+
+/// `count` regions one after another in one body, each over its own lock and
+/// guarded through a copy of it: `view = lock; acquire(lock); try {
+/// release(view) } catch-any { release(view); throw(caught) }`.
+fn copied_regions<D: Kit>(count: usize) -> ToyHlil<D> {
+    let mut builder = ToyHlilBuilder::<D>::new();
+    let mut body = vec![];
+    for _ in 0..count {
+        let lock = builder.int_variable(0);
+        let view = builder.int_variable(1);
+        let source = builder.read(lock);
+        body.push(builder.store(view, source));
+        let subject = builder.read(lock);
+        body.push(builder.effect(Prim::Acquire, &[subject]));
+        let exit_subject = builder.read(view);
+        let exit = builder.effect(Prim::Release, &[exit_subject]);
+        let cleanup_subject = builder.read(view);
+        let cleanup_call = builder.call(Prim::Release, &[cleanup_subject], Ty::Void);
+        let cleanup_exit = builder.expression_statement(cleanup_call);
+        let caught = builder.call(Prim::Caught, &[], Ty::Integer);
+        let rethrow_call = builder.call(Prim::Throw, &[caught], Ty::Void);
+        let rethrow = builder.expression_statement(rethrow_call);
+        let handler = Handler {
+            kind: HandlerKind::CatchAll,
+            binding: None,
+            caught_types: &[],
+            body: &[cleanup_exit, rethrow],
+        };
+        body.push(builder.try_(&[exit], &[handler], &[]));
+    }
+    builder.finish_unchecked(&body)
+}
+
+/// A region whose released view is a copy of the entered object needs the
+/// copy among the statements before it, which each region of a body reads
+/// from one scan of the statements before it and not from a scan of its own.
+fn many_regions_over_copied_views_recover_in_one_body<D: Kit>() {
+    const COUNT: usize = 100_000;
+
+    let regions = recovered_on_a_small_stack::<D, _>(
+        || copied_regions::<D>(COUNT),
+        |_, recovery| recovery.regions,
+    );
+
+    assert_eq!(regions, COUNT);
 }
 
 #[test]

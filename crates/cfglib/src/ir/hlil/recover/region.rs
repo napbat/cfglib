@@ -7,14 +7,29 @@
 extern crate alloc;
 
 use alloc::collections::BTreeSet;
-use alloc::vec::Vec;
 
+use super::super::shape::HandlerKind;
 use super::walk::{Kind, Open};
 use super::{
-    ActiveRegion, ExprShape, Fallible, FunctionBuilder, FunctionView, Rebuilder, RecoverDialect,
-    StmtShape,
+    ExprShape, Fallible, FunctionBuilder, FunctionView, Rebuilder, RecoverDialect, StmtShape,
 };
-use crate::ir::hlil::HandlerKind;
+
+/// The variable copies among the leading statements of a body, `target =
+/// value` as the pair `(target, value)`: those of the first `scanned`
+/// statements.
+pub(super) struct Copies<V> {
+    scanned: usize,
+    pairs: BTreeSet<(V, V)>,
+}
+
+impl<V: Ord> Copies<V> {
+    pub(super) const fn new() -> Self {
+        Self {
+            scanned: 0,
+            pairs: BTreeSet::new(),
+        }
+    }
+}
 
 impl<'a, H, S, B> Rebuilder<'a, H, S, B>
 where
@@ -29,6 +44,7 @@ where
         &mut self,
         ids: &[S::Stmt],
         index: usize,
+        copies: &mut Copies<S::Var>,
     ) -> Fallible<Option<Open<'a, H, S, B>>, B::Error> {
         let enter_id = ids[index];
         let guarded_id = ids[index + 1];
@@ -67,7 +83,7 @@ where
         };
         // The released view must provably hold the entered object: the same
         // variable, or one copied from the other beforehand.
-        if released != entered && !self.copies_link(&ids[..index], entered, released)? {
+        if released != entered && !self.copies_link(ids, index, copies, entered, released)? {
             return Ok(None);
         }
         // Neither view may be reassigned inside the guarded body.
@@ -78,11 +94,7 @@ where
         }
 
         let subject = self.rebuild_expression(subject)?;
-        self.active_regions.push(ActiveRegion {
-            enter: enter.clone(),
-            aliases: BTreeSet::from([entered, released]),
-            exits: Vec::new(),
-        });
+        self.active_regions.push(enter.clone(), entered, released);
         Ok(Some(self.open(Kind::Guarded {
             enter_id,
             guarded_id,
@@ -161,41 +173,29 @@ where
         })
     }
 
-    /// Whether the preceding statements copy one variable into the other.
+    /// Whether the statements before `index` copy one variable into the
+    /// other. The copies of a body are read once, however many regions of
+    /// the body ask.
     fn copies_link(
         &self,
-        preceding: &[S::Stmt],
+        ids: &[S::Stmt],
+        index: usize,
+        copies: &mut Copies<S::Var>,
         first: S::Var,
         second: S::Var,
     ) -> Fallible<bool, B::Error> {
-        for &id in preceding {
+        while copies.scanned < index {
+            let id = ids[copies.scanned];
+            copies.scanned += 1;
             let StmtShape::Assign { target, value } = self.stmt(id)? else {
                 continue;
             };
-            let ExprShape::Variable(target) = self.expr(target)? else {
-                continue;
-            };
-            let ExprShape::Variable(value) = self.expr(value)? else {
-                continue;
-            };
-            let pair = (target, value);
-            if pair == (first, second) || pair == (second, first) {
-                return Ok(true);
+            if let ExprShape::Variable(target) = self.expr(target)?
+                && let ExprShape::Variable(value) = self.expr(value)?
+            {
+                copies.pairs.insert((target, value));
             }
         }
-        Ok(false)
-    }
-
-    /// Whether any statement of the source subtree assigns the variable.
-    fn assigns_variable(&self, ids: &[S::Stmt], variable: S::Var) -> Fallible<bool, B::Error> {
-        self.any_statement(ids, |shape| {
-            let StmtShape::Assign { target, .. } = shape else {
-                return Ok(false);
-            };
-            Ok(matches!(
-                self.expr(*target)?,
-                ExprShape::Variable(assigned) if assigned == variable
-            ))
-        })
+        Ok(copies.pairs.contains(&(first, second)) || copies.pairs.contains(&(second, first)))
     }
 }

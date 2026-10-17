@@ -17,6 +17,7 @@ use alloc::vec::Vec;
 use crate::graph::view::DenseId;
 
 use super::super::shape::{Handler, HandlerKind, SwitchArm};
+use super::region::Copies;
 use super::{Fallible, FunctionBuilder, FunctionView, Rebuilder, RecoverDialect, StmtShape};
 
 /// One step of the rebuild that waits for the frames above it.
@@ -26,8 +27,13 @@ where
     S: FunctionView<H>,
     B: FunctionBuilder<H>,
 {
-    /// The statements `ids[index..]` of one body.
-    Body { ids: &'a [S::Stmt], index: usize },
+    /// The statements `ids[index..]` of one body, with the variable copies
+    /// among the statements before `index`.
+    Body {
+        ids: &'a [S::Stmt],
+        index: usize,
+        copies: Copies<S::Var>,
+    },
     /// A construct that waits for its child bodies.
     Open(Open<'a, H, S, B>),
 }
@@ -157,16 +163,21 @@ where
     /// Rebuilds the statements of `ids` onto the statement stack, where they
     /// stay.
     pub(super) fn rebuild_root(&mut self, ids: &'a [S::Stmt]) -> Fallible<(), B::Error> {
-        self.frames.push(Frame::Body { ids, index: 0 });
+        self.frames.push(Frame::Body {
+            ids,
+            index: 0,
+            copies: Copies::new(),
+        });
         while let Some(frame) = self.frames.pop() {
             match frame {
-                Frame::Body { ids, index } => self.step_body(ids, index)?,
+                Frame::Body { ids, index, copies } => self.step_body(ids, index, copies)?,
                 Frame::Open(mut open) => {
                     if let Some(body) = self.next_body(&mut open)? {
                         self.frames.push(Frame::Open(open));
                         self.frames.push(Frame::Body {
                             ids: body,
                             index: 0,
+                            copies: Copies::new(),
                         });
                     } else {
                         self.finish(open)?;
@@ -180,7 +191,12 @@ where
     /// Rebuilds the statements of one body from `index` on, up to the first
     /// construct that has bodies of its own. That construct becomes a frame
     /// above the rest of this body.
-    fn step_body(&mut self, ids: &'a [S::Stmt], mut index: usize) -> Fallible<(), B::Error> {
+    fn step_body(
+        &mut self,
+        ids: &'a [S::Stmt],
+        mut index: usize,
+        mut copies: Copies<S::Var>,
+    ) -> Fallible<(), B::Error> {
         while index < ids.len() {
             let id = ids[index];
             if self.suppress_region_exit(id)? {
@@ -189,7 +205,7 @@ where
             }
             self.track_region_aliases(id)?;
             let paired = if index + 1 < ids.len() {
-                match self.try_region(ids, index)? {
+                match self.try_region(ids, index, &mut copies)? {
                     Some(open) => Some(open),
                     None => self.try_for(ids, index)?,
                 }
@@ -204,7 +220,7 @@ where
                 self.open_statement(id)?
             };
             if let Some(open) = opened {
-                self.frames.push(Frame::Body { ids, index });
+                self.frames.push(Frame::Body { ids, index, copies });
                 self.frames.push(Frame::Open(open));
                 return Ok(());
             }

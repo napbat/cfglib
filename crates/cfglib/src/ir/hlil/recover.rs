@@ -23,7 +23,6 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
@@ -34,12 +33,16 @@ use super::builder::FunctionBuilder;
 use super::dialect::{Dialect, RecoverDialect};
 use super::error::RecoverError;
 use super::shape::{ExprShape, StmtShape};
-use super::view::{FunctionView, for_each_child_body};
+use super::view::FunctionView;
 
+mod active;
 mod counted;
 mod region;
 mod select;
+mod subtree;
 mod walk;
+
+use self::active::ActiveRegions;
 
 /// The result of one structure recovery.
 #[derive(Debug, Clone)]
@@ -148,12 +151,14 @@ where
         variables,
         statements: vec![None; source.stmt_count()],
         expressions: vec![None; source.expr_count()],
-        active_regions: Vec::new(),
+        active_regions: ActiveRegions::new(),
         statement_stack: Vec::new(),
         expression_stack: Vec::new(),
         frames: Vec::new(),
         ends: Vec::new(),
         selections: Vec::new(),
+        arms: Vec::new(),
+        numbering: None,
         for_loops: 0,
         selects: 0,
         regions: 0,
@@ -192,16 +197,6 @@ type Recovered<H, B> = Fallible<
     <B as FunctionBuilder<H>>::Error,
 >;
 
-/// One region under construction: its enter operation, the variables that
-/// currently hold the entered object (grown by copies and shrunk by
-/// reassignment, in program order), and the exit statements that its
-/// construct re-owns.
-struct ActiveRegion<Op, V, S> {
-    enter: Op,
-    aliases: BTreeSet<V>,
-    exits: Vec<S>,
-}
-
 /// The state of one rebuild.
 ///
 /// The rebuilt handles of operands and child statements wait on two stacks
@@ -221,7 +216,7 @@ where
     variables: Vec<B::Var>,
     statements: Vec<Option<B::Stmt>>,
     expressions: Vec<Option<B::Expr>>,
-    active_regions: Vec<ActiveRegion<H::Op, S::Var, S::Stmt>>,
+    active_regions: ActiveRegions<H::Op, S::Var, S::Stmt>,
     statement_stack: Vec<B::Stmt>,
     expression_stack: Vec<B::Expr>,
     /// The bodies and constructs of the statement walk that are still open.
@@ -231,6 +226,12 @@ where
     ends: Vec<usize>,
     /// The selection diamonds that are being built.
     selections: Vec<select::OpenSelection<'a, H, S>>,
+    /// What each `if` statement is to a selection, sized when the first is
+    /// asked about.
+    arms: Vec<select::Arm<S::Var>>,
+    /// The statements numbered in visit order, made when a recovery first
+    /// asks what lies below a body.
+    numbering: Option<subtree::Numbering>,
     for_loops: usize,
     selects: usize,
     regions: usize,
@@ -296,25 +297,6 @@ where
         Ok(false)
     }
 
-    /// Whether any statement of the source subtrees under `roots` satisfies
-    /// `predicate`. Nested statements are included, which keeps the checks
-    /// that use this conservative.
-    fn any_statement(
-        &self,
-        roots: &[S::Stmt],
-        mut predicate: impl FnMut(&StmtShape<'a, H, S::Stmt, S::Expr>) -> Fallible<bool, B::Error>,
-    ) -> Fallible<bool, B::Error> {
-        let source: &'a S = self.source;
-        let mut pending = roots.to_vec();
-        while let Some(stmt) = pending.pop() {
-            if predicate(&self.stmt(stmt)?)? {
-                return Ok(true);
-            }
-            for_each_child_body(source, stmt, |body, _| pending.extend(body.iter().copied()));
-        }
-        Ok(false)
-    }
-
     /// Whether one assignment can appear in a source-language expression
     /// clause rather than expanding into a statement sequence.
     fn assignment_is_single_expression(
@@ -347,11 +329,11 @@ where
         let ExprShape::Variable(released) = self.expr(released)? else {
             return Ok(false);
         };
-        let position = self.active_regions.iter().rposition(|region| {
-            region.aliases.contains(&released) && H::releases(&region.enter, op)
-        });
+        let position = self
+            .active_regions
+            .innermost_releasing(released, |enter| H::releases(enter, op));
         if let Some(position) = position {
-            self.active_regions[position].exits.push(id);
+            self.active_regions.add_exit(position, id);
             return Ok(true);
         }
         Ok(false)
@@ -374,16 +356,7 @@ where
             ExprShape::Variable(source) => Some(source),
             _ => None,
         };
-        for region in &mut self.active_regions {
-            match source {
-                Some(source) if region.aliases.contains(&source) => {
-                    region.aliases.insert(target);
-                }
-                _ => {
-                    region.aliases.remove(&target);
-                }
-            }
-        }
+        self.active_regions.assign(target, source);
         Ok(())
     }
 

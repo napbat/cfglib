@@ -3,10 +3,13 @@
 //! exactly one arm, the source shape of `?:` and if-expressions.
 //!
 //! Every walk over the nested diamonds keeps its own stack, so a chain of
-//! nested diamonds as deep as generated code can produce costs no call frames.
+//! nested diamonds as deep as generated code can produce costs no call frames,
+//! and the kind of each diamond is kept, so the chain costs each of its
+//! statements one read however many of its levels ask.
 
 extern crate alloc;
 
+use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::graph::view::DenseId;
@@ -19,6 +22,20 @@ use super::{
 /// The shape of the statement of a selection arm.
 type ArmShape<'a, H, S> =
     StmtShape<'a, H, <S as FunctionView<H>>::Stmt, <S as FunctionView<H>>::Expr>;
+
+/// What the sole statement of an arm is to a selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Arm<V> {
+    /// Not looked at yet.
+    Unknown,
+    /// Neither of the two.
+    Neither,
+    /// A single-expression assignment of the variable, or a diamond whose
+    /// every arm is one.
+    Assigns(V),
+    /// A return of one value, or a diamond whose every arm is one.
+    Returns,
+}
 
 /// What the leaves of a selection do with their value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,29 +98,28 @@ where
         if H::select().is_none() {
             return Ok(None);
         }
-        if let Some(target) = self.assigned_target(then_body)?
-            && self.assigns_shape(then_body, target)?
-            && self.assigns_shape(else_body, target)?
-        {
-            // Validated: build the selection tree and the single assign.
-            let (value, value_type) =
-                self.build_selection(Leaves::Assign, condition, then_body, else_body)?;
-            let variable = self.variable(target)?;
-            let new_target = self.builder.read_variable(variable, value_type);
-            let assign = self.builder.assign(new_target, value);
-            self.map_selection(if_id, then_body, else_body, assign)?;
-            self.selects += 1;
-            return Ok(Some(assign));
+        match (self.arm_kind(then_body)?, self.arm_kind(else_body)?) {
+            (Arm::Assigns(target), Arm::Assigns(other)) if target == other => {
+                // Validated: build the selection tree and the single assign.
+                let (value, value_type) =
+                    self.build_selection(Leaves::Assign, condition, then_body, else_body)?;
+                let variable = self.variable(target)?;
+                let new_target = self.builder.read_variable(variable, value_type);
+                let assign = self.builder.assign(new_target, value);
+                self.map_selection(if_id, then_body, else_body, assign)?;
+                self.selects += 1;
+                Ok(Some(assign))
+            }
+            (Arm::Returns, Arm::Returns) => {
+                let (value, _) =
+                    self.build_selection(Leaves::Return, condition, then_body, else_body)?;
+                let statement = self.builder.return_(&[value]);
+                self.map_selection(if_id, then_body, else_body, statement)?;
+                self.selects += 1;
+                Ok(Some(statement))
+            }
+            _ => Ok(None),
         }
-        if self.returns_shape(then_body)? && self.returns_shape(else_body)? {
-            let (value, _) =
-                self.build_selection(Leaves::Return, condition, then_body, else_body)?;
-            let statement = self.builder.return_(&[value]);
-            self.map_selection(if_id, then_body, else_body, statement)?;
-            self.selects += 1;
-            return Ok(Some(statement));
-        }
-        Ok(None)
     }
 
     /// The shape of the only statement of the arm `ids`, or `None` when the
@@ -123,88 +139,98 @@ where
         })
     }
 
-    /// The variable the then-arm chain assigns, when there is one.
-    fn assigned_target(&self, ids: &[S::Stmt]) -> Fallible<Option<S::Var>, B::Error> {
-        let mut arm = ids;
-        loop {
-            match self.sole_statement(arm)? {
-                Some(StmtShape::Assign { target, .. }) => {
-                    return Ok(match self.expr(target)? {
-                        ExprShape::Variable(variable) => Some(variable),
-                        _ => None,
-                    });
-                }
-                Some(StmtShape::If { then_body, .. }) => arm = then_body,
-                _ => return Ok(None),
-            }
+    /// What the arm `ids` is to a selection: a single statement that is a
+    /// single-expression assignment, a single-value return, or a diamond of
+    /// them.
+    fn arm_kind(&mut self, ids: &[S::Stmt]) -> Fallible<Arm<S::Var>, B::Error> {
+        let &[only] = ids else {
+            return Ok(Arm::Neither);
+        };
+        match self.stmt(only)? {
+            StmtShape::If {
+                then_body,
+                else_body,
+                ..
+            } => self.diamond_kind(only, then_body, else_body),
+            leaf => self.leaf_kind(&leaf),
         }
     }
 
-    /// Whether every arm of the diamond chain `ids` is a single-expression
-    /// assignment of `target`.
-    fn assigns_shape(&self, ids: &[S::Stmt], target: S::Var) -> Fallible<bool, B::Error> {
-        let mut else_arms: Vec<&'a [S::Stmt]> = Vec::new();
-        let mut arm = ids;
-        loop {
-            match self.sole_statement(arm)? {
-                Some(StmtShape::Assign {
-                    target: assigned,
-                    value,
-                }) => {
-                    let ExprShape::Variable(variable) = self.expr(assigned)? else {
-                        return Ok(false);
-                    };
-                    if variable != target
-                        || !self.assignment_is_single_expression(assigned, value)?
+    /// What a statement that is not an `if` is to a selection.
+    fn leaf_kind(&self, shape: &ArmShape<'a, H, S>) -> Fallible<Arm<S::Var>, B::Error> {
+        Ok(match *shape {
+            StmtShape::Assign { target, value } => match self.expr(target)? {
+                ExprShape::Variable(variable)
+                    if self.assignment_is_single_expression(target, value)? =>
+                {
+                    Arm::Assigns(variable)
+                }
+                _ => Arm::Neither,
+            },
+            StmtShape::Return { values } if values.len() == 1 => Arm::Returns,
+            _ => Arm::Neither,
+        })
+    }
+
+    /// What the `if` statement `root` is to a selection: every arm of the
+    /// diamond assigns one variable, or every arm returns a value.
+    ///
+    /// The kind of a diamond follows from the kinds of its arms and is kept
+    /// for the statement, so the levels of a chain of nested diamonds that ask
+    /// in turn do not read the levels below them again.
+    fn diamond_kind(
+        &mut self,
+        root: S::Stmt,
+        then_body: &'a [S::Stmt],
+        else_body: &'a [S::Stmt],
+    ) -> Fallible<Arm<S::Var>, B::Error> {
+        if self.arms.is_empty() {
+            self.arms = vec![Arm::Unknown; self.source.stmt_count()];
+        }
+        if self.arms[root.index()] != Arm::Unknown {
+            return Ok(self.arms[root.index()]);
+        }
+        let mut pending = Vec::from([(root, then_body, else_body)]);
+        while let Some(&(id, then_body, else_body)) = pending.last() {
+            if self.arms[id.index()] != Arm::Unknown {
+                pending.pop();
+                continue;
+            }
+            let mut kinds = [Arm::Neither; 2];
+            let mut waiting = false;
+            for (kind, body) in kinds.iter_mut().zip([then_body, else_body]) {
+                let &[only] = body else {
+                    continue;
+                };
+                match self.stmt(only)? {
+                    StmtShape::If {
+                        then_body,
+                        else_body,
+                        ..
+                    } => match self.arms[only.index()] {
+                        Arm::Unknown => {
+                            pending.push((only, then_body, else_body));
+                            waiting = true;
+                        }
+                        known => *kind = known,
+                    },
+                    leaf => *kind = self.leaf_kind(&leaf)?,
+                }
+            }
+            if !waiting {
+                self.arms[id.index()] = match kinds {
+                    [Arm::Assigns(then_target), Arm::Assigns(else_target)]
+                        if then_target == else_target =>
                     {
-                        return Ok(false);
+                        Arm::Assigns(then_target)
                     }
-                }
-                Some(StmtShape::If {
-                    then_body,
-                    else_body,
-                    ..
-                }) => {
-                    else_arms.push(else_body);
-                    arm = then_body;
-                    continue;
-                }
-                _ => return Ok(false),
+                    [Arm::Returns, Arm::Returns] => Arm::Returns,
+                    _ => Arm::Neither,
+                };
+                pending.pop();
             }
-            let Some(next) = else_arms.pop() else {
-                return Ok(true);
-            };
-            arm = next;
         }
-    }
-
-    /// Whether every arm of the diamond chain `ids` returns a single value.
-    fn returns_shape(&self, ids: &[S::Stmt]) -> Fallible<bool, B::Error> {
-        let mut else_arms: Vec<&'a [S::Stmt]> = Vec::new();
-        let mut arm = ids;
-        loop {
-            match self.sole_statement(arm)? {
-                Some(StmtShape::Return { values }) => {
-                    if values.len() != 1 {
-                        return Ok(false);
-                    }
-                }
-                Some(StmtShape::If {
-                    then_body,
-                    else_body,
-                    ..
-                }) => {
-                    else_arms.push(else_body);
-                    arm = then_body;
-                    continue;
-                }
-                _ => return Ok(false),
-            }
-            let Some(next) = else_arms.pop() else {
-                return Ok(true);
-            };
-            arm = next;
-        }
+        Ok(self.arms[root.index()])
     }
 
     /// Builds the selection expression of a validated diamond and returns it

@@ -86,10 +86,4 @@ where
             |shape| matches!(shape, ExprShape::Variable(read) if *read == variable),
         )
     }
-
-    /// Whether any statement of the source subtree is a `continue`. Nested
-    /// loops are included, which keeps the check conservative.
-    fn contains_continue(&self, ids: &[S::Stmt]) -> Fallible<bool, B::Error> {
-        self.any_statement(ids, |shape| Ok(matches!(shape, StmtShape::Continue { .. })))
-    }
 }
