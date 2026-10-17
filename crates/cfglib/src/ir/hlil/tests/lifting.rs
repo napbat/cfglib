@@ -5,8 +5,10 @@
 //! edge, so a pass over both covers both conventions.
 
 extern crate alloc;
+extern crate std;
 
 use alloc::string::ToString;
+use std::thread;
 
 use crate::ProgramPoint;
 use crate::graph::view::DenseId;
@@ -15,14 +17,15 @@ use crate::ir::hlil::{
     lift_with_tree, pseudocode, verify,
 };
 use crate::test_util::golden::assert_golden;
-use crate::{BlockId, ControlTree, EdgeKind};
+use crate::{BlockId, ControlTree, EdgeKind, LiftReport};
 
 use super::flat::{FlatKit, FlatVar, ToyEdge, ToyFlat, ToyFlatBuilder, ToyForm};
 use super::flat_fixtures::{
-    claimed_trampoline_loop, counting_loop, dispatch_with_default, guarded_call,
+    claimed_trampoline_loop, counting_loop, dispatch_with_default, guarded_call, nested_ifs,
+    nested_loops,
 };
 use super::flat_lift::{boolean, int, lifted, lifted_text};
-use super::{Imp, Prim, ToyHlilBuilder};
+use super::{Imp, Prim, ToyHlil, ToyHlilBuilder, on_small_stack};
 
 over_toys!(
     lift_recovers_a_while_loop_with_inlined_expressions,
@@ -43,6 +46,8 @@ over_toys!(
     a_branch_where_none_is_expected_is_rejected,
     a_copy_needs_exactly_one_use,
     a_store_needs_its_value_and_no_definition,
+    deeply_nested_ifs_lift_without_recursion,
+    deeply_nested_loops_lift_without_recursion,
 );
 
 fn lift_recovers_a_while_loop_with_inlined_expressions<D: FlatKit>() {
@@ -485,4 +490,94 @@ fn a_builder_that_refuses_the_function_reports_its_error() {
         panic!("the lift itself succeeded");
     };
     assert!(report.to_string().contains("non-integer"), "{report}");
+}
+
+/// The stack that the structurer needs for a nest of 100,000 levels, which
+/// recurses on each. The structurer is not the walk under test.
+const STRUCTURER_STACK_BYTES: usize = 512 * 1024 * 1024;
+
+/// The control tree of `source`, computed the way [`lift`] does, on a stack
+/// that holds the structurer's own recursion.
+fn structured_on_a_roomy_stack<D: FlatKit>(source: &ToyFlat<D>) -> (ControlTree, LiftReport)
+where
+    ToyFlat<D>: Sync,
+{
+    thread::scope(|scope| {
+        thread::Builder::new()
+            .stack_size(STRUCTURER_STACK_BYTES)
+            .spawn_scoped(scope, || {
+                let trampolines = lift_trampolines::<D, _>(source);
+                ControlTree::compute_with_report_treating_empty(&source.cfg, &trampolines)
+            })
+            .expect("a thread spawns")
+            .join()
+            .expect("the structurer finishes")
+    })
+}
+
+/// How many `if` or `while` statements wrap one another from the top of the
+/// function down, each as the first statement of the one outside it.
+fn nesting_depth<D: FlatKit>(function: &ToyHlil<D>) -> usize {
+    let mut depth = 0;
+    let mut body = function.body();
+    while let Some(&first) = body.first() {
+        match function.stmt(first) {
+            StmtShape::If {
+                then_body: inner, ..
+            }
+            | StmtShape::While { body: inner, .. } => {
+                depth += 1;
+                body = inner;
+            }
+            _ => break,
+        }
+    }
+    depth
+}
+
+/// Lifts `source`, a nest of `depth` compound statements around one
+/// assignment, on a thread whose stack could not hold a frame per level.
+fn lifts_a_deep_nest_on_a_small_stack<D: FlatKit>(source: &ToyFlat<D>, depth: usize)
+where
+    ToyFlat<D>: Sync,
+{
+    let (tree, report) = structured_on_a_roomy_stack(source);
+
+    let (nested, statements) = on_small_stack(|| {
+        let lifted = lift_with_tree::<D, _, _>(
+            source,
+            &tree,
+            &report,
+            ToyHlilBuilder::<D>::new(),
+            LiftMetadata::Preserve,
+        )
+        .expect("a deep nest lifts");
+        (
+            nesting_depth(&lifted.function),
+            lifted.function.stmt_count(),
+        )
+    });
+
+    assert_eq!(nested, depth);
+    // The compound statements, the assignment inside them, and the return.
+    assert_eq!(statements, depth + 2);
+}
+
+fn deeply_nested_ifs_lift_without_recursion<D: FlatKit>()
+where
+    ToyFlat<D>: Sync,
+{
+    const DEPTH: usize = 100_000;
+    lifts_a_deep_nest_on_a_small_stack(&nested_ifs::<D>(DEPTH), DEPTH);
+}
+
+fn deeply_nested_loops_lift_without_recursion<D: FlatKit>()
+where
+    ToyFlat<D>: Sync,
+{
+    // The structurer's loop analysis grows faster than linearly with the
+    // nest, which bounds the depth: this one still needs several times the
+    // stack of the thread that lifts it.
+    const DEPTH: usize = 1_000;
+    lifts_a_deep_nest_on_a_small_stack(&nested_loops::<D>(DEPTH), DEPTH);
 }

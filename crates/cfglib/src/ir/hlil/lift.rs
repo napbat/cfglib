@@ -40,6 +40,7 @@ mod control;
 mod plan;
 mod scratch;
 
+use self::control::Walk;
 use self::scratch::Slot;
 
 /// The result of lifting one flat function.
@@ -159,11 +160,11 @@ where
     B: FunctionBuilder<H>,
 {
     let mut lifter = Lifter::<H, X, B>::new(source, tree, builder, metadata);
-    let mut body = Vec::new();
-    lifter
-        .translate_node(tree.root(), &mut body)
-        .map_err(LiftError::Unsupported)?;
-    let function = lifter.builder.finish(&body).map_err(LiftError::Builder)?;
+    lifter.translate_tree().map_err(LiftError::Unsupported)?;
+    let function = lifter
+        .builder
+        .finish(&lifter.walk.statements)
+        .map_err(LiftError::Builder)?;
     Ok(LiftedFunction {
         function,
         report: report.clone(),
@@ -230,6 +231,7 @@ where
     rows: BTreeMap<ProgramPoint, Carrier<H, B>>,
     metadata: LiftMetadata,
     contexts: Vec<Context>,
+    walk: Walk<'a, H, X, B>,
     /// Reused by the emission of an expression tree.
     values: Vec<B::Expr>,
     work: Vec<(Slot, bool)>,
@@ -262,6 +264,7 @@ where
             rows: BTreeMap::new(),
             metadata,
             contexts: Vec::new(),
+            walk: Walk::new(),
             values: Vec::new(),
             work: Vec::new(),
             dialect: PhantomData,
