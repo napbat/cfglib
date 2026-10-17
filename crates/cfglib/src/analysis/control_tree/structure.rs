@@ -17,11 +17,11 @@ use crate::cfg::Cfg;
 use crate::edge::{EdgeId, EdgeKind};
 use crate::graph::dominator::{DominatorTree, PostDominatorTree};
 use crate::graph::loop_forest::LoopForest;
+use crate::graph::virtual_root::VirtualRoot;
 use crate::region::{Handler, Region};
 use bound::Bound;
 use completion::Completion;
 use extent::ExtentWalk;
-use roots::VirtualRoot;
 
 mod bound;
 mod branches;
@@ -31,7 +31,6 @@ mod extent;
 mod frames;
 mod labels;
 mod loops;
-mod roots;
 mod try_catch;
 mod walk;
 
@@ -63,7 +62,7 @@ struct Structurer<'cfg, I, E> {
     cfg: &'cfg Cfg<I, E>,
     /// Post-dominators over dense block indices, rooted at a virtual block
     /// that also precedes the region metadata blocks the entry cannot reach.
-    pdom: PostDominatorTree<u32>,
+    pdom: PostDominatorTree<usize>,
     /// Whether the entry reaches each block, by dense index.
     reachable: Vec<bool>,
     /// The blocks the handlers own: entries, filter funclets, and the blocks
@@ -379,12 +378,16 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         // structurer emits code the entry cannot reach — a handler pad with no
         // exception edge, a filter funclet — and every such block needs merge
         // points too, so the root also precedes each block the entry misses.
-        let unreachable = cfg.block_ids().filter(|block| !reachable[block.index()]);
+        let mut roots: Vec<BlockId> = core::iter::once(cfg.entry())
+            .chain(cfg.block_ids().filter(|block| !reachable[block.index()]))
+            .collect();
+        roots.sort_unstable();
+        roots.dedup();
         let claims = region_claims(cfg);
         let mut extents = ExtentWalk::default();
         Self {
             cfg,
-            pdom: PostDominatorTree::compute(&VirtualRoot::new(cfg, unreachable)),
+            pdom: PostDominatorTree::compute(&VirtualRoot::new(cfg, &roots)),
             handler_roots: try_catch::handler_roots(cfg, &mut extents, |block| {
                 !emptied[block.index()] && !cfg.block(block).instructions().is_empty()
             }),

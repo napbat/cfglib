@@ -31,3 +31,4 @@ pub mod text;
 pub mod traverse;
 pub mod verify;
 pub mod view;
+pub(crate) mod virtual_root;

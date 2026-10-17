@@ -130,8 +130,8 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
     /// `continue` or `break` or an explicit goto, and ends silently only at the
     /// enclosing construct's own stop block.
     pub(super) fn effective_merge(&self, block: BlockId, allowed: &Bound) -> Option<BlockId> {
-        match self.pdom.ipdom(block.raw())? {
-            PostNode::Node(merge) => Some(BlockId::from_raw(merge)),
+        match self.pdom.ipdom(block.index())? {
+            PostNode::Node(merge) => Some(BlockId::from_index(merge)),
             PostNode::Exit => None,
         }
         .filter(|&merge| allowed.contains(merge))

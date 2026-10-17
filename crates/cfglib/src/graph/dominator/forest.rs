@@ -20,75 +20,11 @@ use alloc::vec::Vec;
 
 use super::{DominatorScratch, DominatorTree};
 use crate::graph::scc::kosaraju_scc;
-use crate::graph::view::{DenseId, GraphView, RootedView};
+use crate::graph::view::{DenseId, RootedView};
+use crate::graph::virtual_root::VirtualRoot;
 
 #[cfg(test)]
 mod tests;
-
-/// Whole-graph dominance view with a private virtual root connected to the
-/// ordinary root and every source SCC of otherwise unreachable code.
-///
-/// Nodes are dense indices, with the virtual root one past the graph's bound.
-struct ForestView<'a, G: GraphView> {
-    graph: &'a G,
-    roots: &'a [G::NodeId],
-}
-
-impl<G: GraphView> ForestView<'_, G> {
-    fn virtual_root(&self) -> usize {
-        self.graph.node_bound()
-    }
-}
-
-impl<G: GraphView> GraphView for ForestView<'_, G> {
-    type NodeId = usize;
-
-    fn node_bound(&self) -> usize {
-        self.graph.node_bound() + 1
-    }
-
-    fn node_ids(&self) -> impl Iterator<Item = Self::NodeId> + '_ {
-        self.graph
-            .node_ids()
-            .map(DenseId::index)
-            .chain(core::iter::once(self.virtual_root()))
-    }
-
-    fn successors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
-        let original_bound = self.graph.node_bound();
-        let original = (node < original_bound).then(|| G::NodeId::from_index(node));
-        (node == original_bound)
-            .then_some(self.roots)
-            .into_iter()
-            .flatten()
-            .copied()
-            .map(DenseId::index)
-            .chain(
-                original
-                    .into_iter()
-                    .flat_map(|block| self.graph.successors(block).map(DenseId::index)),
-            )
-    }
-
-    fn predecessors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
-        let original_bound = self.graph.node_bound();
-        let original = (node < original_bound).then(|| G::NodeId::from_index(node));
-        let virtual_predecessor = original
-            .filter(|block| self.roots.binary_search(block).is_ok())
-            .map(|_| original_bound);
-        virtual_predecessor.into_iter().chain(
-            original
-                .into_iter()
-                .flat_map(|block| self.graph.predecessors(block).map(DenseId::index)),
-        )
-    }
-}
-
-impl<G: GraphView> RootedView for ForestView<'_, G> {
-    fn root(&self) -> Self::NodeId {
-        self.virtual_root()
-    }
-}
 
 /// Extends the dominator tree of a rooted graph into a forest that also covers
 /// the code the root does not reach, giving each source component of that code
@@ -140,7 +76,7 @@ pub(crate) fn complete_dominator_forest<G: RootedView>(
     roots.sort_unstable();
     roots.dedup();
 
-    let view = ForestView { graph, roots };
+    let view = VirtualRoot::new(graph, roots);
     let complete = DominatorTree::<usize>::compute_in(scratch, &view);
     let original_bound = graph.node_bound();
     let idom: Vec<Option<G::NodeId>> = (0..original_bound)
