@@ -1,5 +1,5 @@
-//! Graphs, a seeded generator, and a brute-force reference shared by the
-//! dominator tests.
+//! Graphs and a brute-force reference shared by the dominator tests, with the
+//! seeded generator they draw their graphs from.
 
 extern crate alloc;
 use alloc::vec;
@@ -8,48 +8,11 @@ use alloc::vec::Vec;
 use crate::graph::dominator::DominatorTree;
 use crate::graph::view::{GraphView, RootedView};
 
+pub(super) use crate::test_util::rng::Rng;
+
 /// The node with dense index `index`.
 pub(super) fn node(index: usize) -> u32 {
     u32::try_from(index).expect("test node index fits in u32")
-}
-
-/// A xorshift generator, so a failing graph reproduces from its seed without
-/// a dependency.
-pub(super) struct Rng(u64);
-
-impl Rng {
-    /// A generator whose sequence is a pure function of `seed`.
-    pub(super) const fn new(seed: u64) -> Self {
-        Self(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut state = self.0;
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        self.0 = state;
-        state
-    }
-
-    /// A value in `0..bound`, which must be nonzero.
-    pub(super) fn below(&mut self, bound: usize) -> usize {
-        let bound = u64::try_from(bound).expect("bound fits in u64");
-        usize::try_from(self.next_u64() % bound).expect("a value below bound fits in usize")
-    }
-
-    /// Whether a draw lands in one of `outcomes` equally likely buckets.
-    pub(super) fn one_in(&mut self, outcomes: usize) -> bool {
-        self.below(outcomes) == 0
-    }
-
-    /// Put `items` in a uniformly random order.
-    pub(super) fn shuffle<T>(&mut self, items: &mut [T]) {
-        for end in (1..items.len()).rev() {
-            let other = self.below(end + 1);
-            items.swap(end, other);
-        }
-    }
 }
 
 /// A directed multigraph, as a node count and an edge list.
