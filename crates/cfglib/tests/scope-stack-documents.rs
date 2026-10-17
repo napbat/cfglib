@@ -482,3 +482,205 @@ mod stack_graph {
         );
     }
 }
+
+mod partial_paths {
+    use super::*;
+    use cfglib::{StackFileId, StackPartialPath, StackPartialPathSet};
+
+    /// The summaries of [`stack`] after its consumer file was extracted
+    /// again, so that the slots of the first extraction are tombstones.
+    ///
+    /// Summary numbers, which the tamperings below write as JSON pointers:
+    /// 0 and 1 vacant, 2 root to the provider's scope, 3 that scope to the
+    /// definition, 4 root to the definition through both, 5 the consumer's
+    /// scope to the root, and 6 the reference to the jump-to-scope node.
+    /// Summaries 5 and 6 are the consumer file's, listed under file 0; the
+    /// rest are file 1's. The start table has a row for each of the ten
+    /// nodes, and the file table one for each of the three files.
+    fn database(graph: &Stack, consumer: StackFileId) -> StackPartialPathDatabase {
+        let config = StackPartialPathConfig::new();
+        let mut database = StackPartialPathDatabase::compute(graph, config);
+        database
+            .replace_file(graph, consumer, config)
+            .expect("known file");
+        database
+    }
+
+    fn consumer_file(graph: &Stack, nodes: &Nodes) -> StackFileId {
+        graph.node(nodes.reference).file().expect("in a file")
+    }
+
+    #[test]
+    fn a_sound_database_loads_and_stitches_like_the_original() {
+        let (graph, nodes) = stack();
+        let consumer = consumer_file(&graph, &nodes);
+        let original = database(&graph, consumer);
+        let document = serde_json::to_value(&original).expect("serializes");
+
+        let mut loaded: StackPartialPathDatabase =
+            serde_json::from_value(document).expect("a sound document loads");
+
+        assert_eq!(loaded, original);
+        assert_eq!(loaded.path_slot_count(), 7);
+        assert_eq!(loaded.path_count(), 5);
+        let direct = StackResolution::compute(&graph, nodes.reference, StackSearchConfig::new());
+        let stitched = StackResolution::compute_from_partials(
+            &graph,
+            &loaded,
+            nodes.reference,
+            StackSearchConfig::new(),
+        );
+        assert_eq!(stitched.paths(), direct.paths());
+        assert_eq!(direct.paths()[0].end(), nodes.definition);
+
+        // Extracting a file again reads and rewrites every table.
+        let mut replaced = original;
+        for database in [&mut loaded, &mut replaced] {
+            database
+                .replace_file(&graph, consumer, StackPartialPathConfig::new())
+                .expect("known file");
+        }
+        assert_eq!(loaded, replaced);
+    }
+
+    #[test]
+    fn a_database_whose_tables_disagree_is_rejected() {
+        let (graph, nodes) = stack();
+        let consumer = consumer_file(&graph, &nodes);
+        let sound = serde_json::to_value(database(&graph, consumer)).expect("serializes");
+
+        assert_rejected::<StackPartialPathDatabase>(
+            &sound,
+            &[
+                (
+                    "a summary listed under another start",
+                    &[
+                        ("/paths_by_start/4", json!([5])),
+                        ("/paths_by_start/5", json!([6])),
+                    ],
+                ),
+                (
+                    "a summary listed under another file",
+                    &[("/paths_by_file", json!([[5], [2, 3, 4, 6], []]))],
+                ),
+                (
+                    "a summary no start lists",
+                    &[("/paths_by_start/4", json!([]))],
+                ),
+                (
+                    "a summary no file lists",
+                    &[("/paths_by_file/0", json!([5]))],
+                ),
+                (
+                    "a vacant slot still listed under a start",
+                    &[("/paths_by_start/1", json!([1]))],
+                ),
+                (
+                    "a vacant slot still listed under a file",
+                    &[("/paths_by_file/2", json!([0]))],
+                ),
+                (
+                    "a start list naming a summary that does not exist",
+                    &[("/paths_by_start/1", json!([99]))],
+                ),
+                (
+                    "a file list naming a summary that does not exist",
+                    &[("/paths_by_file/2", json!([99]))],
+                ),
+                (
+                    "a summary listed twice under its start",
+                    &[("/paths_by_start/0", json!([2, 4, 4]))],
+                ),
+                (
+                    "a summary listed twice under its file",
+                    &[("/paths_by_file/1", json!([2, 2, 3, 4]))],
+                ),
+                (
+                    "summaries listed out of installation order under a start",
+                    &[("/paths_by_start/0", json!([4, 2]))],
+                ),
+                (
+                    "summaries listed out of installation order under a file",
+                    &[("/paths_by_file/1", json!([4, 3, 2]))],
+                ),
+                (
+                    "a start table that stops before a summary's start",
+                    &[("/paths_by_start", json!([[2, 4], [], [], [], [6], [5]]))],
+                ),
+                (
+                    "a file table that stops before a summary's file",
+                    &[("/paths_by_file", json!([[5, 6]]))],
+                ),
+                (
+                    "a summary starting past the start table",
+                    &[("/paths/5/start", json!(99))],
+                ),
+                (
+                    "a summary of a file past the file table",
+                    &[("/paths/2/file", json!(9))],
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_summary_without_edges_or_with_a_repeated_edge_is_rejected() {
+        let (graph, nodes) = stack();
+        let consumer = consumer_file(&graph, &nodes);
+        let sound = serde_json::to_value(database(&graph, consumer)).expect("serializes");
+        assert_rejected::<StackPartialPathDatabase>(
+            &sound,
+            &[
+                ("a summary with no edge", &[("/paths/5/edges", json!([]))]),
+                (
+                    "a summary that takes an edge twice",
+                    &[("/paths/6/edges", json!([0, 0, 1, 2]))],
+                ),
+            ],
+        );
+
+        let set = StackPartialPathSet::compute(&graph, consumer, StackPartialPathConfig::new())
+            .expect("known file");
+        let path = serde_json::to_value(&set.paths()[1]).expect("serializes");
+        let loaded: StackPartialPath =
+            serde_json::from_value(path.clone()).expect("a sound path loads");
+        assert_eq!(&loaded, &set.paths()[1]);
+        assert_rejected::<StackPartialPath>(
+            &path,
+            &[
+                ("a path with no edge", &[("/edges", json!([]))]),
+                (
+                    "a path that takes an edge twice",
+                    &[("/edges", json!([0, 1, 1, 2]))],
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_summary_set_whose_counts_disagree_is_rejected() {
+        let (graph, nodes) = stack();
+        let consumer = consumer_file(&graph, &nodes);
+        let set = StackPartialPathSet::compute(&graph, consumer, StackPartialPathConfig::new())
+            .expect("known file");
+        let sound = serde_json::to_value(&set).expect("serializes");
+        let loaded: StackPartialPathSet =
+            serde_json::from_value(sound.clone()).expect("a sound set loads");
+        assert_eq!(loaded, set);
+
+        assert_rejected::<StackPartialPathSet>(
+            &sound,
+            &[
+                (
+                    "stats counting summaries the set does not hold",
+                    &[("/stats/partial_path_count", json!(3))],
+                ),
+                (
+                    "a summary of another file than the set",
+                    &[("/paths/0/file", json!(1))],
+                ),
+                ("a summary with no edge", &[("/paths/0/edges", json!([]))]),
+            ],
+        );
+    }
+}

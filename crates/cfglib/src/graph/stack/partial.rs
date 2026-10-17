@@ -12,6 +12,9 @@ use crate::identity::define_dense_id;
 use super::path::{StackPath, StackPathError};
 use super::storage::{StackEdgeId, StackFileId, StackGraph, StackGraphError, StackNodeId};
 
+#[cfg(feature = "serde")]
+mod stored;
+
 define_dense_id! {
     /// Stable identity of a path summary in a [`StackPartialPathDatabase`].
     #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -32,8 +35,14 @@ define_dense_id! {
 /// [`append_to`](Self::append_to) replays those edges against a concrete path,
 /// which enforces the exact stack semantics and keeps summaries independent of
 /// the consumer's symbol representation.
+///
+/// A summary holds at least the edge that reached its end and takes no edge
+/// twice, as extraction guarantees; a deserialized summary is checked for
+/// both. Its identities name the graph it was extracted from, which a
+/// document cannot check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(try_from = "stored::Path"))]
 pub struct StackPartialPath {
     file: StackFileId,
     start: StackNodeId,
@@ -117,6 +126,9 @@ impl StackPartialPath {
     }
 
     /// Whether this summary contains no stored edges.
+    ///
+    /// Always `false`: a summary is recorded after the edge that reached its
+    /// end, and a deserialized one without an edge is rejected.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.edges.is_empty()
@@ -198,8 +210,12 @@ impl StackPartialPathStats {
 }
 
 /// All structural path summaries extracted independently for one file.
+///
+/// Every summary belongs to the set's file, and the statistics count exactly
+/// the summaries the set holds; a deserialized set is checked for both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(try_from = "stored::Set"))]
 pub struct StackPartialPathSet {
     file: StackFileId,
     paths: Vec<StackPartialPath>,
@@ -314,8 +330,17 @@ impl StackPartialPathSet {
 }
 
 /// Incrementally replaceable database of per-file path summaries.
+///
+/// The per-start and per-file tables list every live summary exactly once,
+/// under its own start and file, in installation order, and no tombstone. A
+/// deserialized database is checked for that and for each summary (see
+/// [`StackPartialPath`]). What a database cannot check alone is that its node,
+/// edge, and file identities fit the graph it is used with: a summary whose
+/// edge that graph no longer holds is reported by stitching, as documented
+/// there, so a database is only meaningful beside the graph it was built for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(try_from = "stored::Database"))]
 pub struct StackPartialPathDatabase {
     paths: Vec<Option<StackPartialPath>>,
     paths_by_start: Vec<Vec<StackPartialPathId>>,
