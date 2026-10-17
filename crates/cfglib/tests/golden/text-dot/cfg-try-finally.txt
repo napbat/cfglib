@@ -1,0 +1,22 @@
+entry bb0
+bb0:
+    x = open()
+bb1: try body
+    use(x)
+bb3: catch
+    log(e)
+bb4: finally
+    close(x)
+bb5: after
+    result = x
+bb6: exit
+    return
+bb0 -> bb1 fallthrough
+bb1 -> bb4 leave
+bb1 -> bb3 unwind
+bb3 -> bb4 fallthrough
+bb4 -> bb5 fallthrough
+bb4 -> bb6 jump
+region r0 protected=bb1
+    handler catch entry=bb3 body=bb3
+    handler finally entry=bb4 body=bb4

@@ -1,0 +1,101 @@
+{
+  "graph": {
+    "base_nodes": [],
+    "base_edges": [],
+    "out_offsets": [],
+    "out_edges": [],
+    "in_offsets": [],
+    "in_edges": [],
+    "delta_nodes": [
+      {
+        "instructions": [
+          "x = f()"
+        ],
+        "label": null
+      },
+      {
+        "instructions": [],
+        "label": "cleanup"
+      }
+    ],
+    "delta_edges": [
+      {
+        "source": 0,
+        "target": 1,
+        "payload": {
+          "kind": "ExceptionUnwind",
+          "weight": null,
+          "payload": null
+        }
+      }
+    ],
+    "chains": {
+      "last": [
+        [
+          0,
+          4294967295
+        ],
+        [
+          4294967295,
+          0
+        ]
+      ],
+      "next": [
+        [
+          0,
+          0
+        ]
+      ]
+    },
+    "live_nodes": {
+      "words": [
+        3
+      ],
+      "len": 2
+    },
+    "live_edges": {
+      "words": [
+        1
+      ],
+      "len": 1
+    },
+    "live_node_count": 2,
+    "live_edge_count": 1
+  },
+  "entry": 0,
+  "regions": [
+    {
+      "id": 0,
+      "protected_blocks": [
+        0
+      ],
+      "handlers": [
+        {
+          "entry": 1,
+          "body": {
+            "Known": [
+              1
+            ]
+          },
+          "kind": "Finally"
+        }
+      ],
+      "parent": null
+    }
+  ],
+  "cleanups": [
+    {
+      "handler": {
+        "region": 0,
+        "handler": 0
+      },
+      "resume_from": 1,
+      "continuations": [
+        {
+          "reason": "Normal",
+          "resume": 1
+        }
+      ]
+    }
+  ]
+}

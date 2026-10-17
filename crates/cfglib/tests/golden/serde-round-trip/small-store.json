@@ -1,0 +1,75 @@
+{
+  "base_nodes": [
+    "a",
+    "b"
+  ],
+  "base_edges": [
+    {
+      "source": 0,
+      "target": 1,
+      "payload": 1
+    }
+  ],
+  "out_offsets": [
+    0,
+    1,
+    1
+  ],
+  "out_edges": [
+    0
+  ],
+  "in_offsets": [
+    0,
+    0,
+    1
+  ],
+  "in_edges": [
+    0
+  ],
+  "delta_nodes": [
+    "c"
+  ],
+  "delta_edges": [
+    {
+      "source": 1,
+      "target": 2,
+      "payload": 2
+    }
+  ],
+  "chains": {
+    "last": [
+      [
+        4294967295,
+        4294967295
+      ],
+      [
+        0,
+        4294967295
+      ],
+      [
+        4294967295,
+        0
+      ]
+    ],
+    "next": [
+      [
+        0,
+        0
+      ]
+    ]
+  },
+  "live_nodes": {
+    "words": [
+      7
+    ],
+    "len": 3
+  },
+  "live_edges": {
+    "words": [
+      2
+    ],
+    "len": 2
+  },
+  "live_node_count": 3,
+  "live_edge_count": 1
+}
