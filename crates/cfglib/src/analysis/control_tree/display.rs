@@ -2,6 +2,7 @@
 
 extern crate alloc;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt::{self, Write as _};
 
 use super::node::{BlockSpan, ControlBody, ControlNode, ControlNodeId, LoopKind};
@@ -71,7 +72,7 @@ impl ControlTree {
             tree: self,
             write_instruction,
         }
-        .write_node(&mut IndentedWriter::new(sink), self.root())
+        .write_tree(&mut IndentedWriter::new(sink), self.root())
     }
 }
 
@@ -80,18 +81,34 @@ struct Printer<'tree, F> {
     write_instruction: F,
 }
 
+/// What the printer still has to write.
+enum Print {
+    /// A statement.
+    Node(ControlNodeId),
+    /// The `}` that ends a block.
+    Close,
+    /// The `} else {` between the arms of an `if`.
+    Else,
+    /// The `} catch {` (or `fault`, `filter`) that opens a handler's body.
+    Handler(HandlerKind),
+    /// The `} finally {` that opens a `try`'s `finally` body.
+    Finally,
+    /// The `case {` or `default {` that opens a switch arm.
+    Arm(&'static str),
+    /// The latch of a post-tested loop, and the `} while (...)` that ends it.
+    LoopTest {
+        latch: BlockSpan,
+        continue_on_true: bool,
+    },
+    /// The end of the statements a label indents.
+    Unnest,
+}
+
 impl<F: FnMut(&mut dyn fmt::Write, ProgramPoint) -> fmt::Result> Printer<'_, F> {
     fn write_span(&mut self, out: &mut IndentedWriter<'_>, span: BlockSpan) -> fmt::Result {
         for point in span.points() {
             let write_instruction = &mut self.write_instruction;
             out.optional_line(|line| write_instruction(line, point))?;
-        }
-        Ok(())
-    }
-
-    fn write_nodes(&mut self, out: &mut IndentedWriter<'_>, body: ControlBody) -> fmt::Result {
-        for &id in self.tree.body(body) {
-            self.write_node(out, id)?;
         }
         Ok(())
     }
@@ -124,23 +141,173 @@ impl<F: FnMut(&mut dyn fmt::Write, ProgramPoint) -> fmt::Result> Printer<'_, F> 
         Ok(())
     }
 
-    fn write_if_then_else(
+    /// Write the tree below `root`. Nesting is as deep as the tree, so the
+    /// printer keeps a stack of what is left to write instead of recursing.
+    fn write_tree(&mut self, out: &mut IndentedWriter<'_>, root: ControlNodeId) -> fmt::Result {
+        let mut pending = alloc::vec![Print::Node(root)];
+        while let Some(action) = pending.pop() {
+            match action {
+                Print::Node(id) => self.write_node(out, id, &mut pending)?,
+                Print::Close => out.close()?,
+                Print::Else => {
+                    out.close_inline()?;
+                    out.write_str(" else")?;
+                    out.open()?;
+                }
+                Print::Handler(kind) => {
+                    out.close_inline()?;
+                    match kind {
+                        HandlerKind::Catch => out.write_str(" catch")?,
+                        HandlerKind::CatchAll => out.write_str(" catch (...)")?,
+                        HandlerKind::Finally => out.write_str(" finally")?,
+                        HandlerKind::Fault => out.write_str(" fault")?,
+                        HandlerKind::Filter { filter_block } => {
+                            write!(out, " filter ({})", Label(filter_block))?;
+                        }
+                    }
+                    out.open()?;
+                }
+                Print::Finally => {
+                    out.close_inline()?;
+                    out.write_str(" finally")?;
+                    out.open()?;
+                }
+                Print::Arm(keyword) => {
+                    out.indent()?;
+                    out.write_str(keyword)?;
+                    out.open()?;
+                }
+                Print::LoopTest {
+                    latch,
+                    continue_on_true,
+                } => {
+                    self.write_span(out, latch)?;
+                    out.close_inline()?;
+                    out.write_str(if continue_on_true {
+                        " while (cond)"
+                    } else {
+                        " while (!cond)"
+                    })?;
+                    out.end_line()?;
+                }
+                Print::Unnest => out.unnest(),
+            }
+        }
+        Ok(())
+    }
+
+    /// Queue the statements of `body`, the first to be written first.
+    fn queue_body(&self, pending: &mut Vec<Print>, body: ControlBody) {
+        pending.extend(self.tree.body(body).iter().rev().map(|&id| Print::Node(id)));
+    }
+
+    /// Write what opens the node `id`, and queue the rest of it: its child
+    /// bodies and the text between and after them. A queued entry is written
+    /// after everything queued above it.
+    fn write_node(
         &mut self,
         out: &mut IndentedWriter<'_>,
-        condition: BlockSpan,
-        then_body: ControlBody,
-        else_body: ControlBody,
+        id: ControlNodeId,
+        pending: &mut Vec<Print>,
     ) -> fmt::Result {
-        self.write_branch_header(out, "if", condition)?;
-        out.open()?;
-        self.write_nodes(out, then_body)?;
-        if !else_body.is_empty() {
-            out.close_inline()?;
-            out.write_str(" else")?;
-            out.open()?;
-            self.write_nodes(out, else_body)?;
+        let tree = self.tree;
+        match *tree.node(id) {
+            ControlNode::Block(span) | ControlNode::Return(span) => self.write_span(out, span),
+            ControlNode::Sequence(body) => {
+                self.queue_body(pending, body);
+                Ok(())
+            }
+            ControlNode::IfThenElse {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                self.write_branch_header(out, "if", condition)?;
+                out.open()?;
+                pending.push(Print::Close);
+                if !else_body.is_empty() {
+                    self.queue_body(pending, else_body);
+                    pending.push(Print::Else);
+                }
+                self.queue_body(pending, then_body);
+                Ok(())
+            }
+            ControlNode::Loop { kind, body, .. } => self.write_loop(out, kind, body, pending),
+            ControlNode::Switch {
+                condition,
+                cases,
+                default_body,
+                ..
+            } => {
+                self.write_branch_header(out, "switch", condition)?;
+                out.open()?;
+                pending.push(Print::Close);
+                if !default_body.is_empty() {
+                    pending.push(Print::Close);
+                    self.queue_body(pending, default_body);
+                    pending.push(Print::Arm("default"));
+                }
+                for case in tree.cases(cases).iter().rev() {
+                    pending.push(Print::Close);
+                    self.queue_body(pending, case.body);
+                    pending.push(Print::Arm("case"));
+                }
+                Ok(())
+            }
+            ControlNode::Break { label } => write_transfer(out, "break", label),
+            ControlNode::Continue { label } => write_transfer(out, "continue", label),
+            ControlNode::Label { block, body } => {
+                out.indent()?;
+                write!(out, "{}:", Label(block))?;
+                out.end_line()?;
+                out.nest();
+                pending.push(Print::Unnest);
+                self.queue_body(pending, body);
+                Ok(())
+            }
+            ControlNode::Goto { target } => {
+                out.indent()?;
+                write!(out, "goto {};", Label(target))?;
+                out.end_line()
+            }
+            ControlNode::TryCatch {
+                try_body,
+                handlers,
+                finally_body,
+            } => {
+                out.indent()?;
+                out.write_str("try")?;
+                out.open()?;
+                pending.push(Print::Close);
+                if !finally_body.is_empty() {
+                    self.queue_body(pending, finally_body);
+                    pending.push(Print::Finally);
+                }
+                for handler in tree.handlers(handlers).iter().rev() {
+                    self.queue_body(pending, handler.body);
+                    pending.push(Print::Handler(handler.kind));
+                }
+                self.queue_body(pending, try_body);
+                Ok(())
+            }
+            ControlNode::Guarded {
+                predicate,
+                when_true,
+                body,
+            } => {
+                out.indent()?;
+                out.write_str("@guarded(")?;
+                if !when_true {
+                    out.write_str("!")?;
+                }
+                (self.write_instruction)(out, predicate)?;
+                out.write_str(")")?;
+                out.open()?;
+                pending.push(Print::Close);
+                self.queue_body(pending, body);
+                Ok(())
+            }
         }
-        out.close()
     }
 
     fn write_loop(
@@ -148,14 +315,14 @@ impl<F: FnMut(&mut dyn fmt::Write, ProgramPoint) -> fmt::Result> Printer<'_, F> 
         out: &mut IndentedWriter<'_>,
         kind: LoopKind,
         body: ControlBody,
+        pending: &mut Vec<Print>,
     ) -> fmt::Result {
         match kind {
             LoopKind::Endless => {
                 out.indent()?;
                 out.write_str("loop")?;
                 out.open()?;
-                self.write_nodes(out, body)?;
-                out.close()
+                pending.push(Print::Close);
             }
             LoopKind::While {
                 condition,
@@ -172,8 +339,7 @@ impl<F: FnMut(&mut dyn fmt::Write, ProgramPoint) -> fmt::Result> Printer<'_, F> 
                 } else {
                     "break if !cond;"
                 })?;
-                self.write_nodes(out, body)?;
-                out.close()
+                pending.push(Print::Close);
             }
             LoopKind::DoWhile {
                 latch,
@@ -182,136 +348,14 @@ impl<F: FnMut(&mut dyn fmt::Write, ProgramPoint) -> fmt::Result> Printer<'_, F> 
                 out.indent()?;
                 out.write_str("do")?;
                 out.open()?;
-                self.write_nodes(out, body)?;
-                self.write_span(out, latch)?;
-                out.close_inline()?;
-                out.write_str(if continue_on_true {
-                    " while (cond)"
-                } else {
-                    " while (!cond)"
-                })?;
-                out.end_line()
+                pending.push(Print::LoopTest {
+                    latch,
+                    continue_on_true,
+                });
             }
         }
-    }
-
-    fn write_switch(
-        &mut self,
-        out: &mut IndentedWriter<'_>,
-        condition: BlockSpan,
-        cases: &[super::node::SwitchCase],
-        default_body: ControlBody,
-    ) -> fmt::Result {
-        self.write_branch_header(out, "switch", condition)?;
-        out.open()?;
-        for case in cases {
-            out.indent()?;
-            out.write_str("case")?;
-            out.open()?;
-            self.write_nodes(out, case.body)?;
-            out.close()?;
-        }
-        if !default_body.is_empty() {
-            out.indent()?;
-            out.write_str("default")?;
-            out.open()?;
-            self.write_nodes(out, default_body)?;
-            out.close()?;
-        }
-        out.close()
-    }
-
-    fn write_try_catch(
-        &mut self,
-        out: &mut IndentedWriter<'_>,
-        try_body: ControlBody,
-        handlers: &[super::node::CatchHandler],
-        finally_body: ControlBody,
-    ) -> fmt::Result {
-        out.indent()?;
-        out.write_str("try")?;
-        out.open()?;
-        self.write_nodes(out, try_body)?;
-        for handler in handlers {
-            out.close_inline()?;
-            match handler.kind {
-                HandlerKind::Catch => out.write_str(" catch")?,
-                HandlerKind::CatchAll => out.write_str(" catch (...)")?,
-                HandlerKind::Finally => out.write_str(" finally")?,
-                HandlerKind::Fault => out.write_str(" fault")?,
-                HandlerKind::Filter { filter_block } => {
-                    write!(out, " filter ({})", Label(filter_block))?;
-                }
-            }
-            out.open()?;
-            self.write_nodes(out, handler.body)?;
-        }
-        if !finally_body.is_empty() {
-            out.close_inline()?;
-            out.write_str(" finally")?;
-            out.open()?;
-            self.write_nodes(out, finally_body)?;
-        }
-        out.close()
-    }
-
-    fn write_node(&mut self, out: &mut IndentedWriter<'_>, id: ControlNodeId) -> fmt::Result {
-        match *self.tree.node(id) {
-            ControlNode::Block(span) | ControlNode::Return(span) => self.write_span(out, span),
-            ControlNode::Sequence(body) => self.write_nodes(out, body),
-            ControlNode::IfThenElse {
-                condition,
-                then_body,
-                else_body,
-            } => self.write_if_then_else(out, condition, then_body, else_body),
-            ControlNode::Loop { kind, body, .. } => self.write_loop(out, kind, body),
-            ControlNode::Switch {
-                condition,
-                cases,
-                default_body,
-                ..
-            } => {
-                let tree = self.tree;
-                self.write_switch(out, condition, tree.cases(cases), default_body)
-            }
-            ControlNode::Break { label } => write_transfer(out, "break", label),
-            ControlNode::Continue { label } => write_transfer(out, "continue", label),
-            ControlNode::Label { block, body } => {
-                out.indent()?;
-                write!(out, "{}:", Label(block))?;
-                out.end_line()?;
-                out.nested(|out| self.write_nodes(out, body))
-            }
-            ControlNode::Goto { target } => {
-                out.indent()?;
-                write!(out, "goto {};", Label(target))?;
-                out.end_line()
-            }
-            ControlNode::TryCatch {
-                try_body,
-                handlers,
-                finally_body,
-            } => {
-                let tree = self.tree;
-                self.write_try_catch(out, try_body, tree.handlers(handlers), finally_body)
-            }
-            ControlNode::Guarded {
-                predicate,
-                when_true,
-                body,
-            } => {
-                out.indent()?;
-                out.write_str("@guarded(")?;
-                if !when_true {
-                    out.write_str("!")?;
-                }
-                (self.write_instruction)(out, predicate)?;
-                out.write_str(")")?;
-                out.open()?;
-                self.write_nodes(out, body)?;
-                out.close()
-            }
-        }
+        self.queue_body(pending, body);
+        Ok(())
     }
 }
 

@@ -241,15 +241,21 @@ impl ControlTree {
     ///
     /// # Stack depth
     ///
-    /// Structuring does not recurse. Every nested construct — an `if` arm,
+    /// Nothing here recurses on the nesting depth of the input, so the depth
+    /// is bounded by memory, not by the call stack. Structuring keeps a stack
+    /// of frames in the heap, one for every nested construct — an `if` arm,
     /// each link of an `else if` chain, a loop body, a switch arm, a `try`
-    /// body or handler — is a frame on a stack in the heap, and so is each
-    /// level of the goto-label placement, so the nesting depth of the input is
-    /// bounded by memory, not by the call stack. So is the regionizing of
-    /// [`compute_predicated`](Self::compute_predicated), and so are
+    /// body or handler — and places the goto labels with a stack of its own.
+    /// The same holds for [`compute_predicated`](Self::compute_predicated),
+    /// the pseudocode printer ([`write_pseudocode`](Self::write_pseudocode)),
     /// [`preorder`](Self::preorder), [`walk`](Self::walk), and
-    /// [`for_each_instruction`](Self::for_each_instruction). The pseudocode
-    /// printer still recurses once per level.
+    /// [`for_each_instruction`](Self::for_each_instruction).
+    ///
+    /// Each nested loop and each nested `try` region holds a set of blocks (a
+    /// natural loop's body, a region's protected blocks), so a nesting of `n`
+    /// of either costs time and memory quadratic in `n`, already in the graph
+    /// before the structurer reads it. The text of the pseudocode is quadratic
+    /// in any nesting too, since each level indents every line it holds.
     ///
     /// # Panics
     ///

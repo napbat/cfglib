@@ -2,24 +2,29 @@
 //!
 //! A decompiler feeds the structurer untrusted binaries, so the nesting depth
 //! of the input must not be bounded by the call stack. Every test builds its
-//! graph and runs the structurer and the readers of the tree on a thread with
-//! a 256 KiB stack, far less than the frames of one recursive call per level
-//! take at these depths: an overflow aborts the test binary.
+//! graph and runs the structurer and the readers of the tree (the regionizer,
+//! the walk, the printer) on a thread with a 256 KiB stack, far less than the
+//! frames of one recursive call per level take at these depths: an overflow
+//! aborts the test binary.
 //!
 //! The depths differ by what the input size allows. A straight chain, the
 //! nested `if`s, `switch`es, and goto labels are linear in their depth, so
 //! they run at 100,000 levels. The protected sets of nested `try` regions and
 //! the bodies of nested loops are sets of blocks, so a graph of that depth is
 //! quadratic in its depth before the structurer reads it; those tests use the
-//! largest depth that finishes in about a second.
+//! largest depth that finishes in about a second. The printer's output is
+//! quadratic in any nesting, since each level indents every line: the linear
+//! shapes are printed at 3,000 levels, and the loops and tries as they are.
 
 extern crate alloc;
 extern crate std;
 use alloc::vec::Vec;
+use core::fmt;
 use std::thread;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
+use crate::display::DisplayInstr;
 use crate::edge::EdgeKind;
 use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
 use crate::test_util::{DfInst, df_ff, df_pred};
@@ -38,6 +43,9 @@ const LOOP_DEPTH: usize = 600;
 /// Levels of nested `try` regions: every region holds its own set of protected
 /// blocks.
 const TRY_DEPTH: usize = 1_000;
+/// Levels of a linear nesting that is printed: the text is quadratic in the
+/// depth, since each line is indented by its level.
+const PRINTED_DEPTH: usize = 3_000;
 
 /// Run `work` on a thread whose stack is [`SMALL_STACK`], and rethrow its
 /// panic.
@@ -295,6 +303,38 @@ fn count_nodes(tree: &ControlTree, wanted: impl Fn(&ControlNode) -> bool) -> usi
     tree.preorder().filter(|&id| wanted(tree.node(id))).count()
 }
 
+/// A sink that keeps only how many lines were written.
+struct Lines(usize);
+
+impl fmt::Write for Lines {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        self.0 += text.matches('\n').count();
+        Ok(())
+    }
+}
+
+/// The number of lines of the pseudocode of `tree`, the tree of `cfg`.
+fn printed_lines(cfg: &Cfg<DfInst>, tree: &ControlTree) -> usize {
+    let mut lines = Lines(0);
+    tree.write_pseudocode(&mut lines, |sink, point| {
+        cfg.block(point.block).instructions()[point.inst_idx].write_mnemonic(sink)
+    })
+    .expect("a line counter does not fail");
+    lines.0
+}
+
+/// Print a tree of `levels` nested levels: at least a line per level.
+fn assert_prints_a_line_per_level(cfg: &Cfg<DfInst>, tree: &ControlTree, levels: usize) {
+    assert!(printed_lines(cfg, tree) >= levels);
+}
+
+/// Print the tree of the same shape at [`PRINTED_DEPTH`] levels.
+fn print_shape(build: fn(usize) -> Cfg<DfInst>) {
+    let cfg = build(PRINTED_DEPTH);
+    let tree = ControlTree::compute(&cfg);
+    assert_prints_a_line_per_level(&cfg, &tree, PRINTED_DEPTH);
+}
+
 /// Structure `cfg` and read the tree back the ways a consumer does. Returns
 /// the tree, its report, and what the walk counted. The regionized tree of the
 /// same graph is built and read as well.
@@ -336,6 +376,7 @@ fn a_hundred_thousand_nested_then_arms_structure_on_a_small_stack() {
         let ifs = count_nodes(&tree, |node| matches!(node, ControlNode::IfThenElse { .. }));
         assert_eq!(ifs, LINEAR_DEPTH);
         assert!(census.deepest > LINEAR_DEPTH);
+        print_shape(nested_then_arms);
     });
 }
 
@@ -348,6 +389,7 @@ fn a_hundred_thousand_else_ifs_structure_on_a_small_stack() {
         let ifs = count_nodes(&tree, |node| matches!(node, ControlNode::IfThenElse { .. }));
         assert_eq!(ifs, LINEAR_DEPTH);
         assert!(census.deepest > LINEAR_DEPTH);
+        print_shape(else_if_chain);
     });
 }
 
@@ -362,6 +404,7 @@ fn a_hundred_thousand_ifs_closed_by_a_loop_structure_on_a_small_stack() {
         let loops = count_nodes(&tree, |node| matches!(node, ControlNode::Loop { .. }));
         assert_eq!(loops, 1);
         assert!(census.deepest > LINEAR_DEPTH);
+        print_shape(ifs_closed_by_a_loop);
     });
 }
 
@@ -375,6 +418,7 @@ fn a_hundred_thousand_blocks_in_a_row_structure_on_a_small_stack() {
             matches!(node, ControlNode::Block(_) | ControlNode::Return(_))
         });
         assert_eq!(leaves, LINEAR_DEPTH);
+        print_shape(straight_chain);
     });
 }
 
@@ -395,6 +439,7 @@ fn deeply_nested_loops_structure_on_a_small_stack() {
         });
         assert_eq!(whiles, LOOP_DEPTH);
         assert!(census.deepest > LOOP_DEPTH);
+        assert_prints_a_line_per_level(&cfg, &tree, LOOP_DEPTH);
     });
 }
 
@@ -407,6 +452,7 @@ fn deeply_nested_switches_structure_on_a_small_stack() {
         let switches = count_nodes(&tree, |node| matches!(node, ControlNode::Switch { .. }));
         assert_eq!(switches, LINEAR_DEPTH);
         assert!(census.deepest > LINEAR_DEPTH);
+        print_shape(nested_switches);
     });
 }
 
@@ -419,6 +465,7 @@ fn deeply_nested_tries_structure_on_a_small_stack() {
         let tries = count_nodes(&tree, |node| matches!(node, ControlNode::TryCatch { .. }));
         assert_eq!(tries, TRY_DEPTH);
         assert!(census.deepest > TRY_DEPTH);
+        assert_prints_a_line_per_level(&cfg, &tree, TRY_DEPTH);
     });
 }
 
@@ -436,6 +483,7 @@ fn deeply_nested_tries_at_one_anchor_structure_on_a_small_stack() {
         let tries = count_nodes(&tree, |node| matches!(node, ControlNode::TryCatch { .. }));
         assert_eq!(tries, TRY_DEPTH);
         assert!(census.deepest > TRY_DEPTH);
+        assert_prints_a_line_per_level(&cfg, &tree, TRY_DEPTH);
     });
 }
 
@@ -448,5 +496,6 @@ fn deeply_nested_goto_labels_structure_on_a_small_stack() {
         let labels = count_nodes(&tree, |node| matches!(node, ControlNode::Label { .. }));
         assert_eq!(labels, LINEAR_DEPTH);
         assert!(census.deepest > LINEAR_DEPTH);
+        print_shape(nested_goto_labels);
     });
 }
