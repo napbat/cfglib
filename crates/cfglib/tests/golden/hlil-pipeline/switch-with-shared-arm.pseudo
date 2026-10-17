@@ -1,0 +1,14 @@
+switch (v0) {
+    case 1, 2: {
+        emit(10);
+        v1 = 1;
+    }
+    case 3: {
+        emit(30);
+        v1 = 3;
+    }
+    default: {
+        v1 = sub(0, 1);
+    }
+}
+return v1;

@@ -1,0 +1,2 @@
+v2 = pick(lt(v0, v1), v0, v1);
+return v2;
