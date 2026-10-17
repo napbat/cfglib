@@ -282,6 +282,45 @@ impl<N: DenseId> LoopForest<N> {
             .map(|index| LoopId(word(index)))
     }
 
+    /// The innermost properly nested loop `block` is in, `None` for a block in
+    /// none, or beyond the node bound of the graph.
+    ///
+    /// A loop that is not [`is_nested`](Self::is_nested) never answers: a block
+    /// held only by such a loop is in no properly nested loop.
+    #[must_use]
+    pub fn innermost(&self, block: N) -> Option<LoopId> {
+        match self.innermost.get(block.index()).copied() {
+            None | Some(NONE) => None,
+            Some(held) => Some(LoopId(held)),
+        }
+    }
+
+    /// The properly nested loop directly around the blocks of `lp`, `None` for
+    /// an outermost one and for a loop that is not [`is_nested`](Self::is_nested).
+    ///
+    /// This is the nesting of the bodies, which differs from
+    /// [`parent`](Self::parent) when an irreducible loop lies between.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `lp` is not a loop of this forest.
+    #[must_use]
+    pub fn enclosing(&self, lp: LoopId) -> Option<LoopId> {
+        let enclosing = self.record(lp).enclosing;
+        (enclosing != NONE).then_some(LoopId(enclosing))
+    }
+
+    /// Whether the header of `lp` dominates its latches, so that its body is the
+    /// blocks of its subtree of the forest, rather than an explicit set.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `lp` is not a loop of this forest.
+    #[must_use]
+    pub fn is_nested(&self, lp: LoopId) -> bool {
+        self.record(lp).is_nested()
+    }
+
     /// The header of `lp`.
     ///
     /// # Panics
@@ -476,12 +515,6 @@ impl<N: DenseId> LoopForest<N> {
         let start = slot(self.member_starts[slot(record.first)]);
         let end = slot(self.member_starts[slot(record.last) + 1]);
         &self.members[start..end]
-    }
-
-    /// Whether `lp` is kept as an explicit set of blocks.
-    #[cfg(test)]
-    fn is_explicit(&self, lp: LoopId) -> bool {
-        !self.record(lp).is_nested()
     }
 }
 
