@@ -8,17 +8,18 @@ extern crate alloc;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
-use super::node::{BlockSpan, ControlNode, SwitchCase};
+use super::node::{BlockSpan, ControlNode};
 use super::report::{GotoDiagnostic, GotoReason, LiftReport};
 use super::tree::{ControlTree, Tables};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::{EdgeId, EdgeKind};
-use crate::graph::dominator::{DominatorTree, PostDominatorTree, PostNode};
+use crate::graph::dominator::{DominatorTree, PostDominatorTree};
 use crate::graph::structure::{NaturalLoop, detect_loops_tagged};
 use crate::region::Region;
 use roots::VirtualRoot;
 
+mod branches;
 mod labels;
 mod loops;
 mod roots;
@@ -289,9 +290,18 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             emptied[block.index()] = true;
         }
         let dom = DominatorTree::compute(cfg);
+        // A latch the entry cannot reach never runs, so it is dead code that
+        // feeds a live header, not a back edge of the live program: a block
+        // that returns would otherwise sit in an endless loop. A dead loop (a
+        // header the entry cannot reach either) keeps its latches.
         let loops: BTreeMap<BlockId, NaturalLoop> = detect_loops_tagged(cfg, &dom)
             .into_iter()
-            .map(|natural| (natural.header, natural))
+            .filter_map(|mut natural| {
+                if dom.is_reachable(natural.header) {
+                    natural.latches.retain(|&latch| dom.is_reachable(latch));
+                }
+                (!natural.latches.is_empty()).then_some((natural.header, natural))
+            })
             .collect();
         let back_edges = loops
             .values()
@@ -434,18 +444,31 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         self.back_edges.contains(&(edge.source(), edge.target()))
     }
 
+    /// The target of the back edge that leaves `block` by sequential flow.
+    ///
+    /// An exception edge is not sequential flow, so a handler entry that
+    /// dominates its protected block does not make that block a latch: the
+    /// block keeps its ordinary successors and the handler arm carries the
+    /// transfer to the header.
+    fn flow_back_edge_target(&self, block: BlockId) -> Option<BlockId> {
+        let cfg = self.cfg;
+        cfg.outgoing(block)
+            .map(|edge| cfg.edge(edge))
+            .find(|edge| {
+                !edge.kind().is_exceptional()
+                    && self.back_edges.contains(&(edge.source(), edge.target()))
+            })
+            .map(|edge| edge.target())
+    }
+
     fn classify_block(&self, block: BlockId) -> BlockFlowKind {
         let cfg = self.cfg;
         let successors: Vec<EdgeId> = cfg.outgoing(block).collect();
         if cfg.incoming(block).any(|edge| self.is_back_edge(edge)) {
             BlockFlowKind::LoopHeader
-        } else if has_edge_kind(cfg, &successors, EdgeKind::ConditionalTrue)
-            && has_edge_kind(cfg, &successors, EdgeKind::ConditionalFalse)
-        {
-            BlockFlowKind::Conditional
-        } else if has_edge_kind(cfg, &successors, EdgeKind::SwitchCase) {
-            BlockFlowKind::Switch
-        } else if successors.iter().any(|&edge| self.is_back_edge(edge)) {
+        } else if let Some(branch) = branching(cfg, &successors) {
+            branch
+        } else if self.flow_back_edge_target(block).is_some() {
             BlockFlowKind::BackEdge
         } else if has_edge_kind(cfg, &successors, EdgeKind::Jump) {
             BlockFlowKind::Jump
@@ -577,11 +600,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             }
             BlockFlowKind::BackEdge => {
                 self.push_block(result, block);
-                let target = outgoing
-                    .iter()
-                    .find(|&&edge| self.is_back_edge(edge))
-                    .map(|&edge| cfg.edge(edge).target());
-                if let Some(target) = target {
+                if let Some(target) = self.flow_back_edge_target(block) {
                     if let Some(node) = self.resolve_loop_transfer(target) {
                         result.push(node);
                     } else {
@@ -722,180 +741,25 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         self.report.gotos.push(GotoDiagnostic { target, reason });
         result.push(ControlNode::Goto { target });
     }
-
-    /// The post-dominator merge of `block`, kept only when it stays inside
-    /// the enclosing structural bound.
-    ///
-    /// The merge may be code the walk already emitted: the walk that follows
-    /// the construct resolves it like any other transfer, as a loop's
-    /// `continue` or `break` or an explicit goto, and ends silently only at the
-    /// enclosing construct's own stop block.
-    fn effective_merge(
-        &self,
-        block: BlockId,
-        allowed_blocks: Option<&BTreeSet<BlockId>>,
-    ) -> Option<BlockId> {
-        match self.pdom.ipdom(block.raw())? {
-            PostNode::Node(merge) => Some(BlockId::from_raw(merge)),
-            PostNode::Exit => None,
-        }
-        .filter(|&merge| block_is_allowed(allowed_blocks, merge))
-    }
-
-    /// Lift an if/else conditional starting at `block`.
-    fn lift_conditional(
-        &mut self,
-        block: BlockId,
-        allowed_blocks: Option<&BTreeSet<BlockId>>,
-    ) -> ControlNode {
-        let cfg = self.cfg;
-        let mut true_target = None;
-        let mut false_target = None;
-        for eid in cfg.outgoing(block) {
-            match cfg.edge(eid).kind() {
-                EdgeKind::ConditionalTrue => true_target = Some(cfg.edge(eid).target()),
-                EdgeKind::ConditionalFalse => false_target = Some(cfg.edge(eid).target()),
-                _ => {}
-            }
-        }
-
-        let merge = self.effective_merge(block, allowed_blocks);
-
-        let then_nodes = true_target
-            .map(|target| self.lift_region(target, allowed_blocks, merge))
-            .unwrap_or_default();
-        let else_nodes = false_target
-            .map(|target| self.lift_region(target, allowed_blocks, merge))
-            .unwrap_or_default();
-
-        ControlNode::IfThenElse {
-            condition: self.whole_span(block),
-            then_body: self.tables.seal(then_nodes),
-            else_body: self.tables.seal(else_nodes),
-        }
-    }
-
-    /// Lift a switch starting at `block`.
-    fn lift_switch(
-        &mut self,
-        block: BlockId,
-        allowed_blocks: Option<&BTreeSet<BlockId>>,
-    ) -> ControlNode {
-        let cfg = self.cfg;
-        let merge = self.effective_merge(block, allowed_blocks);
-
-        // Group dispatch edges by target in first-encounter order, and find
-        // the explicit default edge (the sequential non-case successor).
-        let mut case_targets: Vec<BlockId> = Vec::new();
-        let mut case_edges: BTreeMap<BlockId, Vec<EdgeId>> = BTreeMap::new();
-        let mut default_edge = None;
-        let mut default_target = None;
-        for eid in cfg.outgoing(block) {
-            let edge = cfg.edge(eid);
-            match edge.kind() {
-                EdgeKind::SwitchCase => {
-                    let target = edge.target();
-                    let edges = case_edges.entry(target).or_default();
-                    if edges.is_empty() {
-                        case_targets.push(target);
-                    }
-                    edges.push(eid);
-                }
-                EdgeKind::Fallthrough | EdgeKind::Unconditional if default_edge.is_none() => {
-                    default_edge = Some(eid);
-                    default_target = Some(edge.target());
-                }
-                _ => {}
-            }
-        }
-
-        // Pre-visit every arm entry so one arm's walk cannot absorb another's;
-        // an arm-to-arm transfer stays explicit instead. The switch owns only
-        // an entry that nothing emitted or claimed before it: an arm that
-        // targets earlier code (the enclosing loop's header, a shared tail, an
-        // entry a sibling arm already owns) is a transfer, resolved like any
-        // other, never a second copy of the block.
-        let mut owned: BTreeSet<BlockId> = BTreeSet::new();
-        for &target in case_targets.iter().chain(&default_target) {
-            if Some(target) != merge
-                && block_is_allowed(allowed_blocks, target)
-                && !self.is_visited(target)
-            {
-                self.visit(target);
-                owned.insert(target);
-            }
-        }
-
-        let mut cases = Vec::new();
-        for target in case_targets {
-            let edges = case_edges.remove(&target).unwrap_or_default();
-            let entered = owned.remove(&target);
-            let arm = self.lift_switch_arm(target, entered, allowed_blocks, merge);
-            cases.push(SwitchCase {
-                block: target,
-                edges: self.tables.push_edges(edges),
-                body: self.tables.seal(arm),
-            });
-        }
-        let default_nodes = default_target
-            .map(|target| {
-                let entered = owned.remove(&target);
-                self.lift_switch_arm(target, entered, allowed_blocks, merge)
-            })
-            .unwrap_or_default();
-
-        ControlNode::Switch {
-            condition: self.whole_span(block),
-            cases: self.tables.push_cases(cases),
-            default_body: self.tables.seal(default_nodes),
-            default_edge,
-        }
-    }
-
-    /// Lift one switch arm (a case body or the default body) up to the merge.
-    ///
-    /// `entered` says the switch pre-visited the arm entry and owns it.
-    fn lift_switch_arm(
-        &mut self,
-        target: BlockId,
-        entered: bool,
-        allowed_blocks: Option<&BTreeSet<BlockId>>,
-        merge: Option<BlockId>,
-    ) -> Vec<ControlNode> {
-        if Some(target) == merge {
-            // The arm transfers straight to the switch continuation.
-            return Vec::new();
-        }
-        if !block_is_allowed(allowed_blocks, target) {
-            // Beyond the enclosing bound. When that bound is a loop and the
-            // target is its follow or header, the transfer is a break or a
-            // continue, as it is for the arm of an `if`; anything else is an
-            // explicit jump.
-            let mut body = Vec::new();
-            match self.resolve_loop_transfer(target) {
-                Some(node) => body.push(node),
-                None => self.push_goto(&mut body, target, GotoReason::BoundaryEscape),
-            }
-            return body;
-        }
-        if !entered {
-            // Earlier code owns the entry: a continue, a break, or a goto.
-            return self.lift_region(target, allowed_blocks, merge);
-        }
-        // The arm entry was pre-visited above; classify it through the shared
-        // path so branch or loop structure at the arm entry is kept, then
-        // continue the ordinary walk toward the merge.
-        let mut body = Vec::new();
-        let next = self.lift_block(target, allowed_blocks, merge, &mut body);
-        if let Some(next) = next {
-            body.extend(self.lift_region(next, allowed_blocks, merge));
-        }
-        body
-    }
 }
 
 fn has_edge_kind<I, E>(cfg: &Cfg<I, E>, edges: &[EdgeId], kind: EdgeKind) -> bool {
     edges.iter().any(|&edge| cfg.edge(edge).kind() == kind)
+}
+
+/// How a block with outgoing `edges` branches: [`BlockFlowKind::Conditional`]
+/// for a true and a false edge, [`BlockFlowKind::Switch`] for a case edge, and
+/// `None` for a block that does not branch.
+fn branching<I, E>(cfg: &Cfg<I, E>, edges: &[EdgeId]) -> Option<BlockFlowKind> {
+    if has_edge_kind(cfg, edges, EdgeKind::ConditionalTrue)
+        && has_edge_kind(cfg, edges, EdgeKind::ConditionalFalse)
+    {
+        Some(BlockFlowKind::Conditional)
+    } else if has_edge_kind(cfg, edges, EdgeKind::SwitchCase) {
+        Some(BlockFlowKind::Switch)
+    } else {
+        None
+    }
 }
 
 /// Successors reached by sequential control flow, excluding exception edges.
