@@ -207,7 +207,7 @@ mod tests {
             .instructions_mut()
             .extend([df_call("call", "callee", false), ff("cleanup")]);
         not_last.add_edge(not_last.entry(), exit, EdgeKind::Fallthrough);
-        assert!(detect_tail_calls(&not_last).is_empty());
+        assert_eq!(detect_tail_calls(&not_last), []);
 
         // The call's successor is not the exit: the function goes on.
         let mut continues = Cfg::new();
@@ -223,7 +223,7 @@ mod tests {
             .push(ff("more"));
         continues.add_edge(continues.entry(), next, EdgeKind::Fallthrough);
         continues.add_edge(next, exit, EdgeKind::Fallthrough);
-        assert!(detect_tail_calls(&continues).is_empty());
+        assert_eq!(detect_tail_calls(&continues), []);
     }
 
     #[test]
@@ -239,7 +239,7 @@ mod tests {
         cfg.add_edge(cfg.entry(), exit, EdgeKind::Fallthrough);
         cfg.add_edge(cfg.entry(), handler, EdgeKind::ExceptionUnwind);
 
-        assert!(detect_tail_calls(&cfg).is_empty());
+        assert_eq!(detect_tail_calls(&cfg), []);
     }
 
     #[test]
@@ -278,7 +278,7 @@ mod tests {
             .push(df_call("call", "callee", false));
         cfg.add_edge(cfg.entry(), handler, EdgeKind::ExceptionUnwind);
 
-        assert!(detect_tail_calls(&cfg).is_empty());
+        assert_eq!(detect_tail_calls(&cfg), []);
     }
 
     fn effect(name: &'static str, effect: FlowEffect) -> DfInst {

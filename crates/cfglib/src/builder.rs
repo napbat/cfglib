@@ -478,7 +478,7 @@ impl CfgBuilder {
     }
 
     /// Remove empty blocks at the end that have no predecessors (dead code
-    /// artefacts from the builder).
+    /// artifacts from the builder).
     fn trim_trailing_empty<I>(cfg: &mut Cfg<I>) {
         while let Some(last) = cfg.block_ids().last() {
             if last == cfg.entry()

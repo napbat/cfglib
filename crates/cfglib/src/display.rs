@@ -293,11 +293,11 @@ mod tests {
     fn a_close_inside_nested_does_not_leak_a_level_out_of_nested() {
         let mut out = String::new();
         let mut printer = IndentedWriter::new(&mut out);
-        printer.nested(|printer| printer.close()).unwrap();
+        printer.nested(IndentedWriter::close).unwrap();
         assert_eq!(printer.depth(), 0);
 
         printer.open().unwrap();
-        printer.nested(|printer| printer.close_inline()).unwrap();
+        printer.nested(IndentedWriter::close_inline).unwrap();
         assert_eq!(printer.depth(), 1, "nested restores the depth it found");
     }
 
