@@ -14,6 +14,12 @@ use crate::toy::{Builder, INPUTS, Inst, Payload, Reg, Route, run};
 
 const SEEDS: u64 = 80;
 
+/// The number of colors an assignment reports having used. The one place the
+/// result's count field is named.
+fn color_count<N>(colors: &ColorAssignment<N>) -> usize {
+    colors.num_colors
+}
+
 /// Pairs of registers a textbook interference graph connects: two registers
 /// live at the same point, or a register written while another is live after
 /// the write (even when the written value is itself never read).
@@ -125,7 +131,7 @@ fn a_chain_of_two_operands_interferes_only_where_both_are_live() {
         "the sum may share a register with either operand"
     );
     let colors = color_graph(&graph);
-    assert_eq!(colors.num_colors, 2);
+    assert_eq!(color_count(&colors), 2);
 }
 
 fn assert_proper<G: GraphView>(graph: &G, colors: &ColorAssignment<G::NodeId>, context: &str) {
@@ -150,7 +156,7 @@ fn assert_proper<G: GraphView>(graph: &G, colors: &ColorAssignment<G::NodeId>, c
     );
     let used: BTreeSet<usize> = colors.assignment.values().copied().collect();
     assert_eq!(
-        colors.num_colors,
+        color_count(colors),
         used.len(),
         "{context}: the count is the colors used"
     );
@@ -172,7 +178,7 @@ fn assert_proper<G: GraphView>(graph: &G, colors: &ColorAssignment<G::NodeId>, c
         .max()
         .unwrap_or(0);
     assert!(
-        colors.num_colors <= max_degree + 1,
+        color_count(colors) <= max_degree + 1,
         "{context}: greedy needs at most degree + 1 colors"
     );
 }
@@ -214,7 +220,7 @@ fn allocating_one_register_per_color_preserves_the_program_output() {
                 (*graph.node(node), color)
             })
             .collect();
-        shared += colors.len() - coloring.num_colors;
+        shared += colors.len() - color_count(&coloring);
         let allocated = rename_by_color(&cfg, &colors);
         let read_before_written = &brute_force_live_in(&cfg)[&cfg.entry()];
 
@@ -253,19 +259,23 @@ fn colorings_of_known_graphs_use_the_forced_number_of_colors() {
         .flat_map(|left| (left + 1..5).map(move |right| (left, right)))
         .collect();
     let (clique, _) = graph_of(5, &complete);
-    assert_eq!(color_graph(&clique).num_colors, 5, "K5 needs five colors");
+    assert_eq!(
+        color_count(&color_graph(&clique)),
+        5,
+        "K5 needs five colors"
+    );
 
     let (independent, _) = graph_of(4, &[]);
-    assert_eq!(color_graph(&independent).num_colors, 1);
+    assert_eq!(color_count(&color_graph(&independent)), 1);
 
     let (empty, _) = graph_of(0, &[]);
     let nothing = color_graph(&empty);
-    assert_eq!((nothing.num_colors, nothing.assignment.len()), (0, 0));
+    assert_eq!((color_count(&nothing), nothing.assignment.len()), (0, 0));
 
     let odd_cycle: Vec<(usize, usize)> = (0..5).map(|node| (node, (node + 1) % 5)).collect();
     let (pentagon, _) = graph_of(5, &odd_cycle);
     assert_eq!(
-        color_graph(&pentagon).num_colors,
+        color_count(&color_graph(&pentagon)),
         3,
         "an odd cycle needs exactly three"
     );
@@ -280,7 +290,8 @@ fn edge_direction_parallel_edges_and_self_loops_do_not_change_the_conflicts() {
     assert_ne!(colors.assignment[&ids[0]], colors.assignment[&ids[1]]);
     assert_ne!(colors.assignment[&ids[1]], colors.assignment[&ids[2]]);
     assert_eq!(
-        colors.num_colors, 2,
+        color_count(&colors),
+        2,
         "node 2 may reuse node 0's color despite its self-loop"
     );
     assert_proper(&graph, &colors, "mixed edges");
@@ -295,7 +306,7 @@ fn removed_nodes_are_not_colored_and_their_edges_do_not_constrain() {
     assert!(!colors.assignment.contains_key(&ids[2]));
     assert_eq!(colors.assignment.len(), 3);
     assert_proper(&graph, &colors, "after node removal");
-    assert_eq!(colors.num_colors, 2, "0-1 and 3-0 remain: a path");
+    assert_eq!(color_count(&colors), 2, "0-1 and 3-0 remain: a path");
 }
 
 #[test]
