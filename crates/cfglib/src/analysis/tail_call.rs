@@ -25,10 +25,15 @@ pub struct TailCall {
 
 /// Detect potential tail calls heuristically.
 ///
-/// A block is a candidate when its only successor is an exit block (return)
-/// and its last instruction is a call. For instructions that carry explicit
-/// tail-call markers, use [`detect_explicit_tail_calls`] instead (or in
-/// addition).
+/// A block is a candidate when its last instruction is a call
+/// ([`Call`](FlowEffect::Call), [`IndirectCall`](FlowEffect::IndirectCall),
+/// or [`ConditionalCall`](FlowEffect::ConditionalCall)) and its only
+/// successor is an exit block (one with no successors, where the function
+/// returns) reached by an ordinary edge. A call that can also unwind into a
+/// handler has a second successor and is not a candidate, nor is one whose
+/// only successor is an exceptional edge. For instructions that carry
+/// explicit tail-call markers, use [`detect_explicit_tail_calls`] instead
+/// (or in addition).
 #[must_use]
 pub fn detect_tail_calls<G>(cfg: &G) -> Vec<TailCall>
 where
@@ -36,20 +41,18 @@ where
     G::Inst: FlowControl,
 {
     let mut results = Vec::new();
-    let exit_blocks: alloc::collections::BTreeSet<BlockId> = cfg
-        .node_ids()
-        .filter(|&block| cfg.outgoing(block).next().is_none())
-        .collect();
-
     for bid in cfg.node_ids() {
+        let mut outgoing = cfg.outgoing(bid);
+        let (Some(edge), None) = (outgoing.next(), outgoing.next()) else {
+            continue;
+        };
         let instructions = cfg.instructions(bid);
-        let succs: Vec<BlockId> = cfg.successors(bid).collect();
-        if succs.len() == 1
-            && exit_blocks.contains(&succs[0])
+        if !cfg.edge_kind(edge).is_exceptional()
+            && cfg.outgoing(cfg.edge(edge).target()).next().is_none()
             && let Some(last) = instructions.last()
             && matches!(
                 last.flow_effect(),
-                FlowEffect::Call | FlowEffect::ConditionalCall
+                FlowEffect::Call | FlowEffect::IndirectCall | FlowEffect::ConditionalCall
             )
         {
             results.push(TailCall {
@@ -94,7 +97,8 @@ mod tests {
     use super::*;
     use crate::cfg::Cfg;
     use crate::edge::EdgeKind;
-    use crate::test_util::{DfInst, df_call, df_ff as ff};
+    use crate::flow::FlowEffect;
+    use crate::test_util::{DfInst, df_call, df_ff as ff, df_with_effect};
 
     #[test]
     fn explicit_tail_call_detected() {
@@ -211,6 +215,45 @@ mod tests {
             .instructions_mut()
             .push(df_call("call", "callee", false));
         cfg.add_edge(cfg.entry(), exit, EdgeKind::Fallthrough);
+        cfg.add_edge(cfg.entry(), handler, EdgeKind::ExceptionUnwind);
+
+        assert!(detect_tail_calls(&cfg).is_empty());
+    }
+
+    #[test]
+    fn every_kind_of_call_in_tail_position_is_a_candidate() {
+        for effect in [
+            FlowEffect::Call,
+            FlowEffect::IndirectCall,
+            FlowEffect::ConditionalCall,
+        ] {
+            let mut cfg = Cfg::new();
+            let exit = cfg.new_block();
+            cfg.block_mut(cfg.entry())
+                .instructions_mut()
+                .push(df_with_effect(ff("call"), effect));
+            cfg.add_edge(cfg.entry(), exit, EdgeKind::Fallthrough);
+
+            assert_eq!(
+                detect_tail_calls(&cfg)
+                    .iter()
+                    .map(|tail| tail.block)
+                    .collect::<Vec<_>>(),
+                [cfg.entry()],
+                "{effect:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unwind_edge_is_not_a_return_path() {
+        // The call's only successor is a handler with no successors of its
+        // own: control leaves by unwinding, not by returning.
+        let mut cfg = Cfg::new();
+        let handler = cfg.new_block();
+        cfg.block_mut(cfg.entry())
+            .instructions_mut()
+            .push(df_call("call", "callee", false));
         cfg.add_edge(cfg.entry(), handler, EdgeKind::ExceptionUnwind);
 
         assert!(detect_tail_calls(&cfg).is_empty());
