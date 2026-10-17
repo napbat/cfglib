@@ -10,6 +10,9 @@ use crate::graph::store::{Graph, Id, IdTag};
 use crate::graph::view::GraphView;
 use crate::identity::define_dense_id;
 
+#[cfg(feature = "serde")]
+mod stored;
+
 /// Tag marking an identity that addresses a scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ScopeTag;
@@ -170,8 +173,27 @@ impl<Q> ScopeReference<Q> {
 /// data becomes reachable. Their labels remain entirely consumer-defined.
 /// Data carry a separate relation tag so one graph can hold value, type,
 /// member, label, macro, or other namespaces without parallel graph stores.
+///
+/// A deserialized graph is checked before it is returned: its per-scope data and
+/// reference lists must be exactly the data and references that name each
+/// scope, in identity order, as [`add_datum`](Self::add_datum) and
+/// [`add_reference`](Self::add_reference) keep them. A document whose tables
+/// disagree is rejected, because every query reads through those lists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "serde",
+    serde(
+        bound(
+            serialize = "S: serde::Serialize, L: serde::Serialize, R: serde::Serialize, \
+                         D: serde::Serialize, Q: serde::Serialize",
+            deserialize = "S: serde::Deserialize<'de>, L: serde::Deserialize<'de>, \
+                           R: serde::Deserialize<'de>, D: serde::Deserialize<'de>, \
+                           Q: serde::Deserialize<'de>"
+        ),
+        try_from = "stored::Stored<S, L, R, D, Q>"
+    )
+)]
 pub struct ScopeGraph<S = (), L = (), R = (), D = (), Q = ()> {
     graph: ScopeStore<S, L>,
     data: Vec<ScopeDatum<R, D>>,
