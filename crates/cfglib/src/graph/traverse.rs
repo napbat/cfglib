@@ -751,19 +751,22 @@ fn all_meets<G: GraphView, A: Adjacency>(
         .collect()
 }
 
-/// Return a topological ordering, or `None` when the graph contains a cycle.
+/// Return a topological ordering of the live nodes, or `None` when they
+/// contain a cycle.
 #[must_use]
 pub fn topological_sort<G: GraphView>(graph: &G) -> Option<Vec<G::NodeId>> {
     let mut incoming_counts = vec![0_usize; graph.node_bound()];
+    let mut live = 0;
     for node in graph.node_ids() {
         incoming_counts[node.index()] = graph.predecessors(node).count();
+        live += 1;
     }
 
     let mut queue: VecDeque<G::NodeId> = graph
         .node_ids()
         .filter(|node| incoming_counts[node.index()] == 0)
         .collect();
-    let mut order = Vec::with_capacity(graph.node_bound());
+    let mut order = Vec::with_capacity(live);
 
     while let Some(node) = queue.pop_front() {
         order.push(node);
@@ -776,7 +779,7 @@ pub fn topological_sort<G: GraphView>(graph: &G) -> Option<Vec<G::NodeId>> {
         }
     }
 
-    (order.len() == graph.node_bound()).then_some(order)
+    (order.len() == live).then_some(order)
 }
 
 impl<I, E> Cfg<I, E> {
