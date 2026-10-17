@@ -17,6 +17,7 @@ over_toys!(
     shared_expressions_and_orphans_are_rejected,
     transfers_need_matching_context,
     labels_resolve_by_name,
+    a_continue_needs_a_label_that_names_a_loop,
     children_must_precede_their_parents,
     assignment_targets_are_never_constants,
     switch_arms_need_case_values,
@@ -148,6 +149,44 @@ fn labels_resolve_by_name<D: Kit>() {
     );
     assert!(
         message.contains("s1 continues unenclosing label elsewhere"),
+        "{message}"
+    );
+}
+
+fn a_continue_needs_a_label_that_names_a_loop<D: Kit>() {
+    // `outer: while (true) { inner: { continue outer; } }`: the loop is the
+    // whole body of `outer`, and the `continue` leaves a nested block.
+    let mut builder = ToyHlilBuilder::<D>::new();
+    let next = builder.continue_(Some("outer"));
+    let inner = builder.labeled("inner", &[next]);
+    let condition = builder.condition();
+    let looped = builder.while_(condition, &[inner]);
+    let outer = builder.labeled("outer", &[looped]);
+    let function = builder.finish(&[outer]).unwrap();
+    assert!(verify::<D, _>(&function).is_ok());
+
+    // `block: { continue block; }`: the label encloses the statement but
+    // labels a block.
+    let mut builder = ToyHlilBuilder::<D>::new();
+    let skip = builder.continue_(Some("block"));
+    let block = builder.labeled("block", &[skip]);
+    let message = rejection(builder, &[block]).to_string();
+    assert!(
+        message.contains("s0 continues label block, which labels a block and not a loop"),
+        "{message}"
+    );
+
+    // `outer: { effect; while (true) { continue outer; } }`: a label over
+    // more than the loop labels a block.
+    let mut builder = ToyHlilBuilder::<D>::new();
+    let effect = builder.noop();
+    let next = builder.continue_(Some("outer"));
+    let condition = builder.condition();
+    let looped = builder.while_(condition, &[next]);
+    let outer = builder.labeled("outer", &[effect, looped]);
+    let message = rejection(builder, &[outer]).to_string();
+    assert!(
+        message.contains("continues label outer, which labels a block and not a loop"),
         "{message}"
     );
 }

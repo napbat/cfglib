@@ -20,20 +20,22 @@ use crate::graph::view::DenseId;
 use crate::ir::hlil::{
     Appended, Entity, FlatBuilder, FunctionBuilder, FunctionView, LowerEdge, LowerError, Lowered,
     LoweredFunction, Occurrence, StmtShape, VariableOrigin, VerificationIssue, VerificationReport,
-    lower,
+    lower, verify,
 };
 use crate::region::{HandlerBody, HandlerKind as RegionHandlerKind, Region, RegionId};
 use crate::test_util::golden::assert_golden;
 
+use super::fixtures::structured_counting_loop;
 use super::flat::{FlatKit, FlatVar, ToyEdge, ToyFlat, ToyFlatBuilder, ToyForm};
 use super::sketch::{Class, Ex, Hn, Sketch, Sn, cases};
-use super::{ExprId, Kit, Prim, StmtId, ToyHlil, ToyHlilBuilder, Ty, VarId};
+use super::{ExprId, Prim, StmtId, ToyHlil, ToyHlilBuilder, Ty, VarId};
 
 over_toys!(
     every_case_lowers_to_its_golden,
     every_case_holds_the_lowering_invariants,
     a_while_loop_declares_and_relates_everything,
     a_do_while_is_entered_where_its_body_begins,
+    a_region_exits_the_object_it_entered,
     a_try_registers_its_region_and_unwind_edges,
     nested_trys_unwind_to_every_enclosing_handler,
     a_filter_funclet_stays_out_of_the_handler_body,
@@ -160,38 +162,8 @@ fn every_case_holds_the_lowering_invariants<D: FlatKit>() {
     }
 }
 
-/// `while (i < n) { if (i < 100) { break; } i = i + 1; } return i;`
-fn counting_loop<D: Kit>() -> (ToyHlil<D>, [StmtId; 5]) {
-    let mut builder = ToyHlilBuilder::<D>::new();
-    let i = builder.int_variable(0);
-    let n = builder.int_variable(1);
-    builder.set_signature(&[i, n], &[D::ty(Ty::Integer)]);
-
-    let read_i = builder.read(i);
-    let limit = builder.number(100);
-    let below_limit = builder.call(Prim::LessThan, &[read_i, limit], Ty::Boolean);
-    let leave = builder.break_(None);
-    let guard = builder.if_(below_limit, &[leave], &[]);
-
-    let read_i = builder.read(i);
-    let one = builder.number(1);
-    let sum = builder.call(Prim::Add, &[read_i, one], Ty::Integer);
-    let step = builder.store(i, sum);
-
-    let read_i = builder.read(i);
-    let read_n = builder.read(n);
-    let condition = builder.call(Prim::LessThan, &[read_i, read_n], Ty::Boolean);
-    let looping = builder.while_(condition, &[guard, step]);
-    let result = builder.read(i);
-    let done = builder.return_(&[result]);
-    let function = builder
-        .finish(&[looping, done])
-        .expect("the function is valid");
-    (function, [looping, guard, leave, step, done])
-}
-
 fn a_while_loop_declares_and_relates_everything<D: FlatKit>() {
-    let (function, [looping, guard, leave, step, done]) = counting_loop::<D>();
+    let (function, [looping, guard, leave, step, done]) = structured_counting_loop::<D>();
     let lowering = lowered(&function);
     let flat = &lowering.function;
     assert!(flat.check().is_ok());
@@ -258,6 +230,36 @@ bb4
     // An operation that evaluates an expression carries the expression.
     assert!(matches!(origin(1, 0), Some(Entity::Expression(_))));
     assert!(matches!(origin(2, 0), Some(Entity::Expression(_))));
+}
+
+/// `acquire(v0) { call(v0); v0 = v0 + 1; }`: the exit releases the object
+/// that the enter acquired, so the variable that holds it is not written
+/// between the two.
+fn a_region_exits_the_object_it_entered<D: FlatKit>() {
+    let (_, lowering) = case::<D>("acquire-region");
+    let flat = &lowering.function;
+    let instructions: Vec<_> = flat
+        .cfg
+        .block_ids()
+        .flat_map(|block| flat.cfg.block(block).instructions().iter())
+        .collect();
+    let position = |wanted: fn(&ToyForm<D>) -> bool| {
+        instructions
+            .iter()
+            .position(|instruction| wanted(&instruction.form))
+            .expect("the region has both halves")
+    };
+    let enter = position(|form| matches!(form, ToyForm::RegionEnter(_)));
+    let exit = position(|form| matches!(form, ToyForm::RegionExit(_)));
+    assert_eq!(instructions[enter].uses, instructions[exit].uses);
+    for instruction in &instructions[enter + 1..exit] {
+        for entered in &instructions[enter].uses {
+            assert!(
+                !instruction.defs.contains(entered),
+                "the body writes {entered:?}, which the exit releases"
+            );
+        }
+    }
 }
 
 fn a_do_while_is_entered_where_its_body_begins<D: FlatKit>() {
@@ -505,49 +507,48 @@ fn control_falling_off_the_end_is_rejected<D: FlatKit>() {
 }
 
 fn transfers_without_a_target_are_rejected<D: FlatKit>() {
-    // `verify` finds these, so the checked builder would refuse them.
-    let cases: [(Vec<Sn>, &str); 7] = [
+    // `verify` and `lower` reject each statement in the same words, so the
+    // checked builder refuses what lowering cannot translate.
+    let cases: [(Vec<Sn>, &str); 6] = [
         (
             vec![Sn::Break(None)],
-            "breaks outside any enclosing construct",
+            "s0 breaks outside any loop or switch",
         ),
-        (
-            vec![Sn::Continue(None)],
-            "continues outside any enclosing construct",
-        ),
+        (vec![Sn::Continue(None)], "s0 continues outside any loop"),
         (
             vec![Sn::Break(Some("nowhere"))],
-            "breaks unenclosing label nowhere",
+            "s0 breaks unenclosing label nowhere",
         ),
         (
             vec![Sn::Continue(Some("nowhere"))],
-            "continues unenclosing label nowhere",
+            "s0 continues unenclosing label nowhere",
         ),
-        (vec![Sn::Goto("nowhere")], "goto targets the label nowhere"),
         // A labeled block is no continue target, and a plain break skips it.
         (
             vec![Sn::Labeled("block", vec![Sn::Continue(Some("block"))])],
-            "continues unenclosing label block",
+            "s0 continues label block, which labels a block and not a loop",
         ),
         (
             vec![Sn::Labeled("block", vec![Sn::Break(None)])],
-            "breaks outside any enclosing construct",
+            "s0 breaks outside any loop or switch",
         ),
     ];
     for (body, expected) in cases {
-        let error = unchecked_failure::<D>(body);
+        let function = sketch(0, &[], body).build_unchecked::<D>();
+        let report = verify::<D, _>(&function);
+        assert!(
+            report.issues.iter().any(|issue| issue.message == expected),
+            "{expected}: {report}"
+        );
+        let error = failure(&function);
         assert!(error.contains(expected), "{expected}: {error}");
     }
+    let error = unchecked_failure::<D>(vec![Sn::Goto("nowhere")]);
+    assert!(error.contains("goto targets the label nowhere"), "{error}");
 }
 
 fn ill_formed_statements_are_rejected<D: FlatKit>() {
     let call = || Ex::Apply(Prim::Call, Ty::Void, Vec::new());
-    let error = unchecked_failure::<D>(vec![Sn::Loop(Vec::new())]);
-    assert!(
-        error.contains("an endless loop with an empty body"),
-        "{error}"
-    );
-
     // `1 = 2` has no `Sn` spelling, so the toy builder is driven directly.
     let mut builder = ToyHlilBuilder::<D>::new();
     let target = builder.number(1);

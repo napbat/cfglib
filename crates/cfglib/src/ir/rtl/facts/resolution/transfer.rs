@@ -260,6 +260,25 @@ impl<'a, D: Fold, F: FunctionView<D>> Transfer<'a, D, F> {
         Some(words)
     }
 
+    /// Returns the value of the root `root` once the writes staged so far have
+    /// taken effect, when it is known.
+    ///
+    /// Two writes of one record can land in disjoint slices of one root. Each
+    /// builds on what the earlier ones staged, so the later write does not
+    /// restore the bits that the earlier one changed, and a root that an
+    /// earlier write left unknown stays unknown.
+    fn staged<'s>(&'s self, state: &'s ConstState, root: usize) -> Option<&'s [u64]> {
+        match self
+            .pending
+            .iter()
+            .rev()
+            .find(|&&(staged, _)| staged == root)
+        {
+            Some((_, value)) => value.as_deref(),
+            None => state.get(root),
+        }
+    }
+
     /// Returns the new value of the root of `place` after a write of `value`
     /// into `place`, when `value` is a constant and the write either covers
     /// the whole root or the root is a known constant.
@@ -272,7 +291,7 @@ impl<'a, D: Fold, F: FunctionView<D>> Transfer<'a, D, F> {
     ) -> Option<Box<[u64]>> {
         let input = self.values.get(value.index(), record.width(value))?;
         let root_width = D::root_width(place.root);
-        let mut words = match state.get(self.roots.index_of_named(place.root)) {
+        let mut words = match self.staged(state, self.roots.index_of_named(place.root)) {
             Some(before) => Box::<[u64]>::from(before),
             None if place.slice == BitSlice::whole(root_width) => {
                 vec![0; root_width.words()].into_boxed_slice()

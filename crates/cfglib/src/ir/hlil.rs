@@ -7,7 +7,7 @@
 //! universal and owned by the library ([`StmtShape`], [`ExprShape`]). A
 //! consumer-defined [`Dialect`] supplies everything semantic: the operations,
 //! the constants, the value types, and the metadata of a variable. The
-//! neutrality contract is the one of [`ir::mlil`](crate::ir::mlil).
+//! neutrality contract is the one of [`ir`](crate::ir).
 //!
 //! The consumer owns the storage. It implements [`FunctionView`] on its dense
 //! statement, expression, and variable arenas, and the view lends the shapes
@@ -48,14 +48,26 @@
 //! - [`recover_structure`] rebuilds a function through a builder with counted
 //!   loops, conditional selections, and paired regions restored, steered by
 //!   the dialect's [`RecoverDialect`] hooks;
-//! - [`for_each_child_body`], [`visit_statements`], [`visit_expression_tree`],
-//!   [`expressions_equal`], and [`compound_assignment`] are the walks that
-//!   every consumer of the shapes needs.
+//! - [`for_each_child_body`], [`for_each_statement_expression`],
+//!   [`visit_statements`], [`visit_expression_tree`], [`expressions_equal`],
+//!   and [`compound_assignment`] are the walks that every consumer of the
+//!   shapes needs.
 //!
 //! The algorithms compose. A caller lifts a flat function, recovers the
 //! structure of the lifted function when [`has_recovery_candidates`] finds
 //! something to recover, and moves the [`Correspondence`] along with
 //! [`Correspondence::remap`].
+//!
+//! # Depth
+//!
+//! The depth of an expression tree costs no call frames in any algorithm: a
+//! chain of operands as deep as generated code produces is walked, lowered,
+//! recovered, and printed on a stack of the algorithm's own. Statements nest
+//! as deep as the program text does, and [`verify`], [`lift`](fn@lift),
+//! [`lower`](fn@lower), [`recover_structure`], [`pseudocode`], and
+//! [`VariablePlacements`] recurse once per level of that nesting. The walks
+//! over statements, [`visit_statements`] and [`for_each_child_body`], do not
+//! recurse.
 
 mod builder;
 mod correspondence;
@@ -70,6 +82,7 @@ mod placement;
 mod pseudocode;
 mod recover;
 mod shape;
+mod transfer;
 mod verify;
 mod view;
 

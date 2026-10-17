@@ -170,7 +170,7 @@ A fact is a side table about one state of a function. No algorithm changes the f
 |---|---|---|---|
 | Register transfer (RTL) | `ir::rtl` | `Dialect`, `InstructionBuilder`, `RecordView`, `FunctionView`, `Fold` | `RootTable`, `BlockSummaries`, `RootLiveness`, `ParamPlacement`, `SelectionResolution` |
 | Medium level (MLIL) | `ir::mlil` | `Dialect`, `FunctionView` | Nothing. Value analyses over the view belong to the consumer. |
-| Structured (HLIL) | `ir::hlil` | `Dialect`, `FunctionView`, `FunctionBuilder`, `FlatBuilder`, `FlatFunction`, `LiftInstruction`, `LiftEdge`, `LiftDialect`, `RecoverDialect`, `VerifyDialect`, `Pseudocode` | `lift`, `lower`, `recover_structure`, `VariablePlacements`, `verify`, `pseudocode` |
+| Structured (HLIL) | `ir::hlil` | `Dialect`, `FunctionView`, `FunctionBuilder`, `FlatBuilder`, `FlatFunction`, `LiftInstruction`, `LiftEdge`, `LiftDialect`, `RecoverDialect`, `VerifyDialect`, `Pseudocode` | `lift`, `lift_with_tree`, `lift_trampolines`, `lower`, `recover_structure`, `has_recovery_candidates`, `Correspondence`, `VariablePlacements`, `verify`, `pseudocode`, `write_pseudocode`, and the walks over the shapes |
 
 Every dialect type is plain data that the consumer defines. The traits contain no language, runtime, calling convention, opcode, or source-location type.
 
@@ -267,6 +267,39 @@ A `FunctionView` follows these rules:
 - An identity below a bound that the view does not yield is a removed entity.
 
 `ir::mlil` has no analysis of its own. A consumer that needs use lists, liveness, constant propagation, or dead-instruction marking builds them over `FunctionView`. The dialect of the consumer owns the semantics that those analyses need, such as effects and constant folding.
+
+#### Structured contract (`ir::hlil`)
+
+An HLIL function is a pair of trees over declared variables:
+
+- Statements form trees: assignments, `if`, `while`, `do`/`while`, `loop`, `for`, `switch`, `break` and `continue` (optionally labeled), `return`, labeled groups with `goto`, `try` with handlers and a `finally` body, and a dialect `Region` that wraps a body.
+- Values are typed expression trees of variable reads, dialect constants, and dialect operations.
+- The statement and expression shapes (`StmtShape`, `ExprShape`) are universal and belong to the library. A dialect supplies the operations, constants, value types, and variable metadata.
+- A variable holds differently typed values at different points, so each occurrence carries its own type.
+
+| Item | Description |
+|---|---|
+| `Dialect`, `FunctionView<D>` | The vocabulary of one structured dialect, and the read-only view that lends statements, expressions, switch arms, and handlers as slices from the consumer's dense storage. |
+| `FunctionBuilder<D>` | The write-only protocol that builds a function, children before parents. The consumer seals the function in `finish`. |
+| `FlatFunction`, `LiftInstruction`, `LiftEdge`, `LiftDialect`, `InstructionShape` | The read side of a flat function: the consumer's `Cfg` with a variable table and signature, and what each instruction and edge stands for. |
+| `FlatBuilder`, `Lowered`, `LowerEdge`, `Occurrence`, `VariableOrigin` | The write side of a flat function, in HLIL terms. The builder chooses the flat operation and the `EdgeKind`. |
+| `lift`, `lift_with_tree`, `lift_trampolines`, `LiftedFunction` | Structure a flat function into a `ControlTree`, inline single-use definitions, and translate it through a `FunctionBuilder`. |
+| `lower`, `LoweredFunction` | Flatten a structured function into blocks and edges, linearize its expression trees into typed temporaries, and register its exception regions. |
+| `Correspondence`, `Correspondence::remap` | The table that names the structured entity carrying each flat instruction and variable, and the move of that table onto a recovered function. |
+| `recover_structure`, `has_recovery_candidates`, `RecoverDialect`, `Recovery` | Rebuild a function with counted loops, conditional selections, and paired regions restored. The dialect claims each recovery through its hooks. |
+| `verify`, `VerifyDialect`, `VerificationReport` | The structural checks, then the dialect's own. |
+| `pseudocode`, `write_pseudocode`, `Pseudocode` | Indented pseudocode, spelled by the dialect's hooks. |
+| `VariablePlacements` | The narrowest lexical body that holds all occurrences of each variable. |
+| `for_each_child_body`, `for_each_statement_expression`, `visit_statements`, `visit_expression_tree`, `expressions_equal`, `compound_assignment` | The walks over the shapes. None of them recurses on the depth of an expression, and the statement walks keep their own stack. |
+
+A function follows these rules:
+
+- Every statement and expression has exactly one parent, and a child has a lower index than its parent.
+- A `continue` with a label targets a `Labeled` group whose body is exactly one loop, and a `break` or `goto` can target any label.
+- Control that completes must end in a `return` or iterate forever. `lower` rejects a body that falls off the end.
+- A region's operands are evaluated once, on entry, and the end of the region releases the values they had then.
+
+The algorithms compose: lift a flat function, recover its structure, and move the `Correspondence` onto the recovered function with `remap`.
 
 ### Graph algorithms
 
@@ -499,7 +532,7 @@ from an alias oracle promises the locations cannot overlap at runtime;
 
 | Crate | Description |
 |---|---|
-| **cfglib** | Generic graph, CFG, SSA, and dataflow framework with the RTL and MLIL IR trait contracts |
+| **cfglib** | Generic graph, CFG, SSA, and dataflow framework with the RTL, MLIL, and HLIL IR trait contracts |
 
 Adapters live with the language they adapt, next to their decoders and test
 corpora. The SM4/SM5 decompiler is in
@@ -509,8 +542,11 @@ cafe.
 
 A language picks its entry level. A machine-shaped language emits `ir::rtl`
 records through `InstructionBuilder` into its own storage. A variable-shaped
-language implements `ir::mlil::FunctionView` directly. In both cases the
-storage, the builders, and the passes that edit them stay with the language.
+language implements `ir::mlil::FunctionView` directly. A language with source
+structure implements `ir::hlil::FunctionView` and `FunctionBuilder`, and lifts
+and lowers through its flat form with `FlatFunction` and `FlatBuilder`. In
+every case the storage, the builders, and the passes that edit them stay with
+the language.
 cfglib deliberately defines no generic LLIL. Low-level IRs are language-owned,
 and the minimal traits that they share (`FlowControl`, `InstrInfo`, `CfgView`,
 `Cfg`, `SsaForm`) are their common surface.

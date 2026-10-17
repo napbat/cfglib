@@ -2,6 +2,7 @@
 
 extern crate alloc;
 
+use alloc::format;
 use alloc::string::String;
 
 use crate::ir::hlil::{FunctionBuilder, Handler, HandlerKind, pseudocode, write_pseudocode};
@@ -14,6 +15,7 @@ over_toys!(
     builder_constructs_verifies_and_renders,
     every_statement_shape_renders,
     pseudocode_writes_into_any_sink,
+    a_deep_expression_prints_without_recursion,
 );
 
 fn builder_constructs_verifies_and_renders<D: Kit>() {
@@ -41,6 +43,29 @@ fn every_statement_shape_renders<D: Kit>() {
         "hlil/every-statement-shape.pseudo",
         &pseudocode::<D, _>(&function),
     );
+}
+
+/// The writer keeps its own stack, so an operand chain as deep as generated
+/// code can produce does not overflow the thread's.
+fn a_deep_expression_prints_without_recursion<D: Kit>() {
+    const DEPTH: usize = 50_000;
+
+    let mut builder = ToyHlilBuilder::<D>::new();
+    let counter = builder.int_variable(0);
+    let mut sum = builder.read(counter);
+    for _ in 0..DEPTH {
+        let one = builder.number(1);
+        sum = builder.call(Prim::Add, &[sum, one], Ty::Integer);
+    }
+    let statement = builder.expression_statement(sum);
+    let function = builder
+        .finish(&[statement])
+        .expect("a deep chain is well formed");
+
+    let text = pseudocode::<D, _>(&function);
+
+    assert!(text.starts_with(&"add(".repeat(DEPTH)));
+    assert!(text.ends_with(&format!("v0{};\n", ", 1)".repeat(DEPTH))));
 }
 
 #[test]

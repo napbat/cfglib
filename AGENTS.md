@@ -86,10 +86,12 @@ with `uv run --no-project python scripts/check_repository_policy.py`.
 - Top-level namespace modules (`analysis`, `dataflow`, `graph`, `ir`, `transform`)
   declare `pub mod` children and hoist nothing; the crate root is the single
   flat facade that re-exports every public item, one `pub use` per module,
-  alphabetized. Domain modules with a narrow API (`cfg`, `exception`,
-  `ir::rtl`, `ir::mlil`, `ir::hlil`, and split coordinators such as
-  `graph/search/events`) keep children private and re-export their public
-  surface.
+  alphabetized. `ir` is the one exception: its three levels share names
+  (`Dialect`, `FunctionView`), so the root re-exports none of them and
+  callers write `ir::hlil::FunctionView`. Domain modules with a
+  narrow API (`cfg`, `exception`, `ir::rtl`, `ir::mlil`, `ir::hlil`, and
+  split coordinators such as `graph/search/events`) keep children private
+  and re-export their public surface.
 - Compound words in file and identifier names are underscore-separated and
   spelled in full (`constant_propagation`, `value_numbering`, `call_graph`);
   domain-standard acronyms (`ssa`, `scc`, `sccp`, `dce`, `pre`, `cdg`, `pdg`,

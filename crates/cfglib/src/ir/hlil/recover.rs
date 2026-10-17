@@ -455,17 +455,7 @@ where
                 condition,
                 then_body,
                 else_body,
-            } => {
-                let condition = self.rebuild_expression(condition)?;
-                let then_body = self.rebuild_body(then_body)?;
-                let else_body = self.rebuild_body(else_body)?;
-                let stack = &self.statement_stack;
-                let rebuilt =
-                    self.builder
-                        .if_(condition, &stack[then_body.clone()], &stack[else_body]);
-                self.statement_stack.truncate(then_body.start);
-                rebuilt
-            }
+            } => self.rebuild_if(condition, then_body, else_body)?,
             StmtShape::While { condition, body } => {
                 let condition = self.rebuild_expression(condition)?;
                 let body = self.rebuild_body(body)?;
@@ -495,23 +485,7 @@ where
                 condition,
                 update,
                 body,
-            } => {
-                let initializer = self.rebuild_body(initializer)?;
-                let condition = condition
-                    .map(|condition| self.rebuild_expression(condition))
-                    .transpose()?;
-                let update = self.rebuild_body(update)?;
-                let body = self.rebuild_body(body)?;
-                let stack = &self.statement_stack;
-                let rebuilt = self.builder.for_(
-                    &stack[initializer.clone()],
-                    condition,
-                    &stack[update],
-                    &stack[body],
-                );
-                self.statement_stack.truncate(initializer.start);
-                rebuilt
-            }
+            } => self.rebuild_for(initializer, condition, update, body)?,
             StmtShape::Switch {
                 scrutinee,
                 default_body,
@@ -547,6 +521,47 @@ where
                 rebuilt
             }
         })
+    }
+
+    fn rebuild_if(
+        &mut self,
+        condition: S::Expr,
+        then_body: &'a [S::Stmt],
+        else_body: &'a [S::Stmt],
+    ) -> Fallible<B::Stmt, B::Error> {
+        let condition = self.rebuild_expression(condition)?;
+        let then_body = self.rebuild_body(then_body)?;
+        let else_body = self.rebuild_body(else_body)?;
+        let stack = &self.statement_stack;
+        let rebuilt = self
+            .builder
+            .if_(condition, &stack[then_body.clone()], &stack[else_body]);
+        self.statement_stack.truncate(then_body.start);
+        Ok(rebuilt)
+    }
+
+    fn rebuild_for(
+        &mut self,
+        initializer: &'a [S::Stmt],
+        condition: Option<S::Expr>,
+        update: &'a [S::Stmt],
+        body: &'a [S::Stmt],
+    ) -> Fallible<B::Stmt, B::Error> {
+        let initializer = self.rebuild_body(initializer)?;
+        let condition = condition
+            .map(|condition| self.rebuild_expression(condition))
+            .transpose()?;
+        let update = self.rebuild_body(update)?;
+        let body = self.rebuild_body(body)?;
+        let stack = &self.statement_stack;
+        let rebuilt = self.builder.for_(
+            &stack[initializer.clone()],
+            condition,
+            &stack[update],
+            &stack[body],
+        );
+        self.statement_stack.truncate(initializer.start);
+        Ok(rebuilt)
     }
 
     fn rebuild_switch(

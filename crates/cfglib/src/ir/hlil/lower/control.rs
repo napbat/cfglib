@@ -9,7 +9,6 @@ extern crate alloc;
 
 use alloc::collections::BTreeSet;
 use alloc::format;
-use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
@@ -18,6 +17,8 @@ use crate::region::{self, RegionId};
 
 use super::super::flat_builder::{FlatBuilder, LowerEdge, Lowered, Occurrence};
 use super::super::name::Name;
+use super::super::transfer::Untargeted;
+use super::super::view::labeled_loop;
 use super::super::{
     Dialect, Entity, ExprShape, FunctionView, Handler, HandlerKind, LowerError, StmtShape,
 };
@@ -45,17 +46,10 @@ where
                 then_body,
                 else_body,
             } => self.lower_if(stmt, condition, then_body, else_body),
-            StmtShape::While { condition, body } => self.lower_while(stmt, condition, body, None),
-            StmtShape::DoWhile { body, condition } => {
-                self.lower_do_while(stmt, condition, body, None)
-            }
-            StmtShape::Loop { body } => self.lower_loop(body, None),
-            StmtShape::For {
-                initializer,
-                condition,
-                update,
-                body,
-            } => self.lower_for(stmt, initializer, condition, update, body, None),
+            StmtShape::While { .. }
+            | StmtShape::DoWhile { .. }
+            | StmtShape::Loop { .. }
+            | StmtShape::For { .. } => self.lower_loop_statement(stmt, None),
             StmtShape::Switch {
                 scrutinee,
                 default_body,
@@ -241,10 +235,8 @@ where
         self.register_loop_label(label, entry);
 
         self.current = Some(latch);
-        let condition = self.flatten(condition)?;
-        self.emit(Lowered::Branch, &[condition], &[], Entity::Statement(stmt))?;
+        self.emit_branch(stmt, condition)?;
         self.builder.add_edge(latch, entry, LowerEdge::True);
-        self.current = None;
 
         self.pending = frame.break_sources;
         self.pending.push((latch, LowerEdge::False));
@@ -256,11 +248,6 @@ where
         body: &'a [S::Stmt],
         label: Option<&'a str>,
     ) -> Result<(), LowerError<B::Error>> {
-        if body.is_empty() {
-            return Err(LowerError::Unsupported(
-                "an endless loop with an empty body has no flat form".into(),
-            ));
-        }
         self.seal(LowerEdge::Fallthrough);
         self.adopt_forward_gotos(label);
         let header = self.block();
@@ -372,9 +359,8 @@ where
             Some(label) => frame.label == Some(label),
             None => !matches!(frame.kind, FrameKind::Block),
         }) else {
-            return Err(LowerError::Unsupported(transfer_error(
-                "break", stmt, label,
-            )));
+            let cause = label.map_or(Untargeted::Break, Untargeted::BreakUnenclosed);
+            return Err(LowerError::Unsupported(cause.message(stmt)));
         };
         frame.break_sources.extend(sources);
         Ok(())
@@ -389,21 +375,48 @@ where
         if sources.is_empty() {
             return Ok(());
         }
-        let target = self
-            .frames
-            .iter()
-            .rev()
-            .find_map(|frame| match frame.kind {
-                FrameKind::Loop { continue_target } if label.is_none() || frame.label == label => {
-                    Some(continue_target)
+        let Some(target) = self.frames.iter().rev().find_map(|frame| match frame.kind {
+            FrameKind::Loop { continue_target } if label.is_none() || frame.label == label => {
+                Some(continue_target)
+            }
+            _ => None,
+        }) else {
+            let cause = match label {
+                None => Untargeted::Continue,
+                Some(label) if self.frames.iter().any(|frame| frame.label == Some(label)) => {
+                    Untargeted::ContinueBlock(label)
                 }
-                _ => None,
-            })
-            .ok_or_else(|| LowerError::Unsupported(transfer_error("continue", stmt, label)))?;
+                Some(label) => Untargeted::ContinueUnenclosed(label),
+            };
+            return Err(LowerError::Unsupported(cause.message(stmt)));
+        };
         for (from, role) in sources {
             self.builder.add_edge(from, target, role);
         }
         Ok(())
+    }
+
+    /// Lowers the loop `stmt`, which `label` names when the loop is the only
+    /// statement of a labeled group.
+    fn lower_loop_statement(
+        &mut self,
+        stmt: S::Stmt,
+        label: Option<&'a str>,
+    ) -> Result<(), LowerError<B::Error>> {
+        match self.source.stmt(stmt) {
+            StmtShape::While { condition, body } => self.lower_while(stmt, condition, body, label),
+            StmtShape::DoWhile { body, condition } => {
+                self.lower_do_while(stmt, condition, body, label)
+            }
+            StmtShape::Loop { body } => self.lower_loop(body, label),
+            StmtShape::For {
+                initializer,
+                condition,
+                update,
+                body,
+            } => self.lower_for(stmt, initializer, condition, update, body, label),
+            _ => unreachable!("only a loop statement is lowered as a loop"),
+        }
     }
 
     fn lower_labeled(
@@ -411,26 +424,8 @@ where
         label: &'a str,
         body: &'a [S::Stmt],
     ) -> Result<(), LowerError<B::Error>> {
-        // A label wrapping exactly one loop names that loop directly, so
-        // labeled breaks and continues resolve on the loop's own frame.
-        if let [only] = *body {
-            let label = Some(label);
-            match self.source.stmt(only) {
-                StmtShape::While { condition, body } => {
-                    return self.lower_while(only, condition, body, label);
-                }
-                StmtShape::DoWhile { body, condition } => {
-                    return self.lower_do_while(only, condition, body, label);
-                }
-                StmtShape::Loop { body } => return self.lower_loop(body, label),
-                StmtShape::For {
-                    initializer,
-                    condition,
-                    update,
-                    body,
-                } => return self.lower_for(only, initializer, condition, update, body, label),
-                _ => {}
-            }
+        if let Some(only) = labeled_loop::<H, S>(self.source, body) {
+            return self.lower_loop_statement(only, Some(label));
         }
         self.seal(LowerEdge::Fallthrough);
         self.adopt_forward_gotos(Some(label));
@@ -604,22 +599,31 @@ where
         operands: &[S::Expr],
         body: &'a [S::Stmt],
     ) -> Result<(), LowerError<B::Error>> {
-        let uses = self.flatten_all(operands)?;
         let origin = Entity::Statement(stmt);
+        // The operands are evaluated once, on entry, and the exit releases
+        // what they held then. A tree flattens into temporaries that nothing
+        // else writes, but a bare variable read would alias a variable that
+        // the body may reassign, so it is copied first.
+        let mut uses = Vec::with_capacity(operands.len());
+        for &operand in operands {
+            self.flatten_onto(operand, &mut uses)?;
+            if matches!(self.source.expr(operand), ExprShape::Variable(_)) {
+                let read = uses.pop().expect("flattening leaves the operand's value");
+                let held = Occurrence {
+                    variable: self.temporary(&read.ty),
+                    ty: read.ty.clone(),
+                };
+                self.emit(
+                    Lowered::Copy,
+                    &[read],
+                    core::slice::from_ref(&held),
+                    Entity::Expression(operand),
+                )?;
+                uses.push(held);
+            }
+        }
         self.emit(Lowered::RegionEnter(op), &uses, &[], origin)?;
         self.lower_body(body)?;
         self.emit(Lowered::RegionExit(op), &uses, &[], origin)
-    }
-}
-
-fn transfer_error(
-    keyword: &str,
-    stmt: impl crate::graph::view::DenseId,
-    label: Option<&str>,
-) -> String {
-    let stmt = Name::statement(stmt);
-    match label {
-        Some(label) => format!("{stmt} {keyword}s unenclosing label {label}"),
-        None => format!("{stmt} {keyword}s outside any enclosing construct"),
     }
 }

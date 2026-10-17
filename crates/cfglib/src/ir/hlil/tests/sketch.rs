@@ -127,12 +127,14 @@ fn then_return(variables: u8, parameters: &[u8], statement: Sn) -> Sketch {
 /// golden file.
 pub(crate) fn cases() -> Vec<Case> {
     let mut cases = loops();
+    cases.extend(loop_transfers());
     cases.extend(branches());
+    cases.extend(blocks());
     cases.extend(exceptions());
     cases
 }
 
-/// Every loop form, its transfers, and the labels that name them.
+/// Every loop form.
 fn loops() -> Vec<Case> {
     vec![
         (
@@ -222,6 +224,13 @@ fn loops() -> Vec<Case> {
                 ]),
             ),
         ),
+    ]
+}
+
+/// The labels that name loops, and the transfers inside nested loops and
+/// switches.
+fn loop_transfers() -> Vec<Case> {
+    vec![
         (
             "labeled-loops",
             then_return(
@@ -272,8 +281,7 @@ fn loops() -> Vec<Case> {
     ]
 }
 
-/// Branches and joins, the transfers that are no loop's, and the forms of
-/// straight-line code.
+/// Branches and joins, and gotos in both directions.
 fn branches() -> Vec<Case> {
     vec![
         (
@@ -341,6 +349,13 @@ fn branches() -> Vec<Case> {
                 ],
             ),
         ),
+    ]
+}
+
+/// Labeled blocks, the forms of straight-line code, and a region that wraps a
+/// body.
+fn blocks() -> Vec<Case> {
+    vec![
         (
             "labeled-block-break",
             then_return(
@@ -387,11 +402,23 @@ fn branches() -> Vec<Case> {
                 ],
             ),
         ),
+        (
+            "acquire-region",
+            then_return(
+                1,
+                &[0],
+                Sn::Region(
+                    Prim::Acquire,
+                    vec![var(0)],
+                    vec![effect(vec![var(0)]), Sn::Assign(0, add(var(0), num(1)))],
+                ),
+            ),
+        ),
     ]
 }
 
-/// Protected regions: handlers of every class, a finally clause, nesting, a
-/// filter funclet, and a paired region.
+/// Protected regions: handlers of every class, a finally clause, nesting, and
+/// a filter funclet.
 fn exceptions() -> Vec<Case> {
     let catch_all = |body: Vec<Sn>| Hn {
         class: Class::CatchAll,
@@ -480,18 +507,6 @@ fn exceptions() -> Vec<Case> {
                     ),
                     Sn::Return(vec![var(0)]),
                 ],
-            ),
-        ),
-        (
-            "acquire-region",
-            then_return(
-                1,
-                &[0],
-                Sn::Region(
-                    Prim::Acquire,
-                    vec![var(0)],
-                    vec![effect(vec![var(0)]), Sn::Assign(0, add(var(0), num(1)))],
-                ),
             ),
         ),
     ]

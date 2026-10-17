@@ -65,6 +65,12 @@ pub enum HandlerKind<'a, S> {
     /// Runs on exceptional entry only.
     Fault,
     /// A predicate decides whether this handler accepts the exception.
+    ///
+    /// [`lift`](fn@super::lift) does not structure the predicate funclet: a
+    /// lifted filter handler has an empty `filter_body`, and the funclet's
+    /// blocks follow the function as a labeled group that nothing targets.
+    /// [`lower`](fn@super::lower) needs the body, so it rejects an empty one;
+    /// a consumer that lowers a lifted function restores the predicate first.
     Filter {
         /// The statements that evaluate the predicate.
         filter_body: &'a [S],
@@ -164,7 +170,8 @@ pub enum StmtShape<'a, D: Dialect, S, E> {
     },
 
     /// Continues the innermost enclosing loop, or the enclosing labeled loop
-    /// that `label` names.
+    /// that `label` names. A label names a loop only when it is the label of a
+    /// [`Labeled`](Self::Labeled) statement whose body is exactly that loop.
     Continue {
         /// The named enclosing loop. `None` continues the innermost loop.
         label: Option<&'a str>,
@@ -178,6 +185,10 @@ pub enum StmtShape<'a, D: Dialect, S, E> {
 
     /// A labeled statement group: the target of [`Goto`](Self::Goto) and of a
     /// labeled [`Break`](Self::Break) or [`Continue`](Self::Continue).
+    ///
+    /// A group whose body is exactly one loop statement labels that loop.
+    /// Every other group labels a block, which a `break` or `goto` can
+    /// target but a `continue` cannot.
     Labeled {
         /// The unique label name.
         label: &'a str,
@@ -208,7 +219,10 @@ pub enum StmtShape<'a, D: Dialect, S, E> {
     Region {
         /// The consumer-defined region operation.
         op: &'a D::Op,
-        /// The operand expressions, such as the monitor or the resource.
+        /// The operand expressions, such as the monitor or the resource. They
+        /// are evaluated once, on entry, and the end of the region releases
+        /// the values they had then, even when the body reassigns a variable
+        /// that an operand reads.
         operands: &'a [E],
         /// The wrapped statements.
         body: &'a [S],

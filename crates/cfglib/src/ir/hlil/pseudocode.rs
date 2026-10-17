@@ -3,6 +3,8 @@
 extern crate alloc;
 
 use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
 use core::fmt::{self, Write as _};
 use core::marker::PhantomData;
 
@@ -63,28 +65,66 @@ struct Printer<'a, H: Pseudocode, F: FunctionView<H>> {
     dialect: PhantomData<H>,
 }
 
-impl<H: Pseudocode, F: FunctionView<H>> Printer<'_, H, F> {
+/// The operand lists of the operations being written, innermost last, each
+/// with the position of its next operand.
+type OpenOperands<'a, E> = Vec<(&'a [E], usize)>;
+
+impl<'a, H: Pseudocode, F: FunctionView<H>> Printer<'a, H, F> {
     fn write_expression(&self, sink: &mut dyn fmt::Write, expr: F::Expr) -> fmt::Result {
+        let mut open = Vec::new();
+        self.begin_expression(sink, expr, &mut open)?;
+        self.write_open_operands(sink, open)
+    }
+
+    /// Writes `(a, b, c)`.
+    fn write_operands(&self, sink: &mut dyn fmt::Write, operands: &'a [F::Expr]) -> fmt::Result {
+        sink.write_str("(")?;
+        self.write_open_operands(sink, vec![(operands, 0)])
+    }
+
+    /// Writes a variable or a constant whole, or the mnemonic and the opening
+    /// parenthesis of an operation, which leaves its operands in `open`.
+    fn begin_expression(
+        &self,
+        sink: &mut dyn fmt::Write,
+        expr: F::Expr,
+        open: &mut OpenOperands<'a, F::Expr>,
+    ) -> fmt::Result {
         match self.function.expr(expr) {
             ExprShape::Variable(variable) => write!(sink, "{}", Name::variable(variable)),
             ExprShape::Constant(constant) => write!(sink, "{}", ConstantDisplay::<H>(constant)),
             ExprShape::Operation { op, operands } => {
                 sink.write_str(H::mnemonic(op))?;
-                self.write_operands(sink, operands)
+                sink.write_str("(")?;
+                open.push((operands, 0));
+                Ok(())
             }
         }
     }
 
-    /// Writes `(a, b, c)`.
-    fn write_operands(&self, sink: &mut dyn fmt::Write, operands: &[F::Expr]) -> fmt::Result {
-        sink.write_str("(")?;
-        for (position, &operand) in operands.iter().enumerate() {
-            if position != 0 {
+    /// Writes the rest of every open operand list, with its closing
+    /// parenthesis.
+    ///
+    /// The depth of an expression costs no call frames: the lists wait in
+    /// `open` instead.
+    fn write_open_operands(
+        &self,
+        sink: &mut dyn fmt::Write,
+        mut open: OpenOperands<'a, F::Expr>,
+    ) -> fmt::Result {
+        while let Some((operands, next)) = open.last_mut() {
+            let Some(&operand) = operands.get(*next) else {
+                open.pop();
+                sink.write_str(")")?;
+                continue;
+            };
+            if *next != 0 {
                 sink.write_str(", ")?;
             }
-            self.write_expression(sink, operand)?;
+            *next += 1;
+            self.begin_expression(sink, operand, &mut open)?;
         }
-        sink.write_str(")")
+        Ok(())
     }
 
     fn write_body(&self, printer: &mut IndentedWriter<'_>, body: &[F::Stmt]) -> fmt::Result {

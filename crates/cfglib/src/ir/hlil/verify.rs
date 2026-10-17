@@ -14,8 +14,10 @@ use crate::graph::view::DenseId;
 use super::dialect::VerifyDialect;
 use super::name::Name;
 use super::shape::{ExprShape, StmtShape};
+use super::transfer::Untargeted;
 use super::view::{
-    FunctionView, for_each_child_body, for_each_statement_expression, visit_statements,
+    FunctionView, for_each_child_body, for_each_statement_expression, labeled_loop,
+    visit_statements,
 };
 
 /// One independently actionable verification failure.
@@ -93,8 +95,9 @@ impl core::error::Error for VerificationReport {}
 /// - every expression and every statement has exactly one parent;
 /// - no assignment targets a constant, no switch arm lacks case values, and no
 ///   handler binds an undeclared variable;
-/// - `break` and `continue` have an enclosing target, and every label is
-///   defined once and every `goto` finds its label.
+/// - `break` and `continue` have an enclosing target, a labeled `continue`
+///   names a loop (see [`StmtShape::Labeled`]), and every label is defined
+///   once and every `goto` finds its label.
 ///
 /// The enclosing-target checks need a function without cycles, so they run
 /// only when the other structural checks found nothing. The hook of the
@@ -221,8 +224,9 @@ where
     for (index, count) in references.into_iter().enumerate() {
         if count != 1 {
             check.issue(format!(
-                "expression e{index} is referenced {count} times; every occurrence \
-                 is one tree node with exactly one parent"
+                "expression {} is referenced {count} times; every occurrence \
+                 is one tree node with exactly one parent",
+                Name::expression(F::Expr::from_index(index))
             ));
         }
     }
@@ -271,8 +275,9 @@ where
     for (index, count) in references.into_iter().enumerate() {
         if count != 1 {
             check.issue(format!(
-                "statement s{index} is referenced {count} times; the statement tree \
-                 is rooted at the body with exactly one parent per statement"
+                "statement {} is referenced {count} times; the statement tree \
+                 is rooted at the body with exactly one parent per statement",
+                Name::statement(F::Stmt::from_index(index))
             ));
         }
     }
@@ -322,14 +327,33 @@ where
     }
 }
 
+/// An enclosing `Labeled` statement.
+struct EnclosingLabel<'a> {
+    name: &'a str,
+    /// Whether the label names the loop that it wraps.
+    names_loop: bool,
+}
+
 /// The enclosing constructs of the statement under the walk.
 struct Context<'a> {
     loop_depth: usize,
     breakable_depth: usize,
-    labels: Vec<&'a str>,
+    labels: Vec<EnclosingLabel<'a>>,
     /// How many `Labeled` statements define each name. Collected before the
     /// walk so a forward `goto` finds its label.
     defined_labels: BTreeMap<&'a str, u32>,
+}
+
+impl Context<'_> {
+    fn encloses(&self, label: &str) -> bool {
+        self.labels.iter().any(|enclosing| enclosing.name == label)
+    }
+
+    fn encloses_loop(&self, label: &str) -> bool {
+        self.labels
+            .iter()
+            .any(|enclosing| enclosing.name == label && enclosing.names_loop)
+    }
 }
 
 fn verify_context<H, F>(function: &F, check: &mut Check)
@@ -369,16 +393,21 @@ fn walk_context<'a, H, F>(
         let name = Name::statement(statement);
         match function.stmt(statement) {
             StmtShape::Break { label: None } if context.breakable_depth == 0 => {
-                check.issue(format!("{name} breaks outside any loop or switch"));
+                check.issue(Untargeted::Break.message(statement));
             }
-            StmtShape::Break { label: Some(label) } if !context.labels.contains(&label) => {
-                check.issue(format!("{name} breaks unenclosing label {label}"));
+            StmtShape::Break { label: Some(label) } if !context.encloses(label) => {
+                check.issue(Untargeted::BreakUnenclosed(label).message(statement));
             }
             StmtShape::Continue { label: None } if context.loop_depth == 0 => {
-                check.issue(format!("{name} continues outside any loop"));
+                check.issue(Untargeted::Continue.message(statement));
             }
-            StmtShape::Continue { label: Some(label) } if !context.labels.contains(&label) => {
-                check.issue(format!("{name} continues unenclosing label {label}"));
+            StmtShape::Continue { label: Some(label) } if !context.encloses_loop(label) => {
+                let cause = if context.encloses(label) {
+                    Untargeted::ContinueBlock(label)
+                } else {
+                    Untargeted::ContinueUnenclosed(label)
+                };
+                check.issue(cause.message(statement));
             }
             StmtShape::Goto { label } if !context.defined_labels.contains_key(label) => {
                 check.issue(format!("{name} targets undefined label {label}"));
@@ -400,8 +429,11 @@ fn walk_context<'a, H, F>(
                 context.breakable_depth -= 1;
                 continue;
             }
-            StmtShape::Labeled { label, .. } => {
-                context.labels.push(label);
+            StmtShape::Labeled { label, body } => {
+                context.labels.push(EnclosingLabel {
+                    name: label,
+                    names_loop: labeled_loop(function, body).is_some(),
+                });
                 descend(function, statement, context, check);
                 context.labels.pop();
                 continue;

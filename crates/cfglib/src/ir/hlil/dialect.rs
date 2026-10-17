@@ -66,8 +66,18 @@ pub trait VerifyDialect: Dialect {
 /// exceptional cleanup handler.
 /// [`recover_structure`](super::recover_structure) restores those shapes.
 ///
-/// Every hook defaults to "not claimed", so a dialect opts into each recovery
-/// independently.
+/// A dialect opts into the recoveries that need a hook, and the defaults say
+/// no: [`select`](Self::select) and [`region_enter`](Self::region_enter) are
+/// `None`, which leaves conditional-expression and region recovery off.
+/// Region recovery also has to recognize the cleanup handler, so a dialect
+/// that claims a region overrides [`releases`](Self::releases),
+/// [`is_throw`](Self::is_throw), and
+/// [`is_exception_materialization`](Self::is_exception_materialization) too;
+/// their `false` defaults leave every cleanup unrecognized and the `try` as
+/// it is. Counted-loop recovery has no hook to claim. The two
+/// `single_expression_*` predicates default to `true`, which restricts
+/// nothing: they only keep an assignment that must expand into several
+/// statements out of a `for` clause or a selection.
 pub trait RecoverDialect: Dialect {
     /// The operation that selects between two values by a condition, applied
     /// as `select(condition, when_true, when_false)` with exactly one arm
