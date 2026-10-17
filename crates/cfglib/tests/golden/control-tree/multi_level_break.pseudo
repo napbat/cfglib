@@ -1,0 +1,19 @@
+i = 0
+.bb1:
+    while {
+        i < n
+        break if !cond;
+        j = 0
+        while {
+            j < m
+            break if !cond;
+            if {
+                break .bb1;
+            } else {
+                j += 1
+                continue;
+            }
+        }
+        i += 1
+    }
+return

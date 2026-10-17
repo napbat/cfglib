@@ -1,0 +1,9 @@
+if {
+} else {
+    .bb2:
+        work()
+}
+if {
+    goto .bb2;
+}
+return
