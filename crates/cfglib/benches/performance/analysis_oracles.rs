@@ -2,8 +2,8 @@ use std::collections::{BTreeSet, VecDeque};
 
 use cfglib::{
     BlockId, Cfg, CommonAncestor, DominanceFrontiers, DominatorTree, EdgeStep, Facts, Graph,
-    IntervalAnalysis, NodeFacts, NodeId, PhiPlacements, PostDominatorTree, PostNode, ProgramPoint,
-    SsaForm, SsaValue, TraversalDirection,
+    IntervalAnalysis, NodeId, PhiPlacements, PostDominatorTree, PostNode, ProgramPoint, SsaForm,
+    SsaValue, TraversalDirection,
 };
 
 use super::fixtures::{ConstantInst, WIDE_FACT_WORDS, fixture_u32};
@@ -283,7 +283,7 @@ pub(super) fn assert_reverse_chain_intervals(
     assert!((0..node_count).all(|index| interval.blocks.contains(&NodeId::from_index(index))));
 }
 
-pub(super) fn assert_bool_node_facts(facts: &NodeFacts<bool>, node_count: usize) {
+pub(super) fn assert_bool_node_facts(facts: &Facts<bool>, node_count: usize) {
     for index in 0..node_count {
         let node = NodeId::from_index(index);
         assert!(*facts.fact_in(node));
@@ -291,7 +291,7 @@ pub(super) fn assert_bool_node_facts(facts: &NodeFacts<bool>, node_count: usize)
     }
 }
 
-pub(super) fn assert_wide_node_facts(facts: &NodeFacts<Vec<u64>>, node_count: usize) {
+pub(super) fn assert_wide_node_facts(facts: &Facts<Vec<u64>>, node_count: usize) {
     for index in 0..node_count {
         let node = NodeId::from_index(index);
         for fact in [facts.fact_in(node), facts.fact_out(node)] {

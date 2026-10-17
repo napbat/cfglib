@@ -52,15 +52,21 @@ impl TryProblem<Cfg<u32>> for TryCfgReachability {
         Direction::Forward
     }
 
-    fn bottom(&self) -> Self::Fact {
+    fn bottom(&self, _graph: &Cfg<u32>) -> Self::Fact {
         false
     }
 
-    fn entry_fact(&self) -> Result<Self::Fact, Self::Error> {
+    fn boundary(&self, _graph: &Cfg<u32>) -> Result<Self::Fact, Self::Error> {
         Ok(true)
     }
 
-    fn meet(&self, left: &Self::Fact, right: &Self::Fact) -> Result<Self::Fact, Self::Error> {
+    fn meet(
+        &self,
+        _graph: &Cfg<u32>,
+        _block: cfglib::BlockId,
+        left: &Self::Fact,
+        right: &Self::Fact,
+    ) -> Result<Self::Fact, Self::Error> {
         Ok(*left || *right)
     }
 
@@ -92,7 +98,13 @@ impl TryNodeProblem<Graph<(), ()>> for TryGraphReachability {
         Ok(true)
     }
 
-    fn meet(&self, left: &Self::Fact, right: &Self::Fact) -> Result<Self::Fact, Self::Error> {
+    fn meet(
+        &self,
+        _graph: &Graph<(), ()>,
+        _node: NodeId,
+        left: &Self::Fact,
+        right: &Self::Fact,
+    ) -> Result<Self::Fact, Self::Error> {
         Ok(*left || *right)
     }
 

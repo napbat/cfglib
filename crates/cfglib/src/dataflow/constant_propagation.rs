@@ -176,6 +176,9 @@ pub(super) fn fold_definitions<'a, I: ConstantFolder>(
 
 /// The constant propagation problem.
 ///
+/// Every variable of the function is unknown when the entry block starts, so a
+/// read before any definition is never a constant.
+///
 /// A normal edge carries the constants known at its source's end. An edge
 /// that leaves before throwing instructions carries the meet of the
 /// constants known before each of them, so a throwing instruction's own
@@ -238,6 +241,20 @@ where
 
     fn bottom(&self, _cfg: &G) -> Self::Fact {
         BTreeMap::new()
+    }
+
+    /// The entry starts with every variable of the function unknown: a read
+    /// before any definition sees what the caller left there. Without this,
+    /// an absent variable is `Top` and a loop header would take the constant
+    /// a back edge carries as its value on the first trip too.
+    fn boundary(&self, cfg: &G, block: BlockId) -> Option<Self::Fact> {
+        (block == cfg.root()).then(|| {
+            cfg.node_ids()
+                .flat_map(|block| cfg.instructions(block))
+                .flat_map(|instruction| instruction.uses().iter().chain(instruction.defs()))
+                .map(|variable| (variable.clone(), ConstValue::Bottom))
+                .collect()
+        })
     }
 
     fn meet(&self, left: &Self::Fact, right: &Self::Fact) -> Self::Fact {
@@ -504,5 +521,28 @@ mod tests {
             "the first call observes 1 and the second observes 2"
         );
         assert_eq!(result.fact_in(normal).get(&0), Some(&ConstValue::Const(3)));
+    }
+
+    #[test]
+    fn a_variable_read_before_any_definition_is_unknown_around_a_loop() {
+        // entry -> header (reads v0) -> body (v0 = 7) -> header; header -> exit.
+        // The first trip reads whatever the caller passed in v0, so the
+        // header cannot claim v0 is 7 even though the back edge carries 7.
+        let mut cfg: Cfg<DfInst> = Cfg::new();
+        let header = cfg.new_block();
+        let body = cfg.new_block();
+        let exit = cfg.new_block();
+        cfg.block_mut(header).push(df_use("read", 0));
+        cfg.block_mut(body).push(df_const("set", 0, 7));
+        cfg.add_edge(cfg.entry(), header, EdgeKind::Fallthrough);
+        cfg.add_edge(header, body, EdgeKind::ConditionalTrue);
+        cfg.add_edge(header, exit, EdgeKind::ConditionalFalse);
+        cfg.add_edge(body, header, EdgeKind::Back);
+
+        let result = ConstantPropagation::compute(&cfg);
+
+        assert_eq!(result.fact_in(header).get(&0), Some(&ConstValue::Bottom));
+        assert_eq!(result.fact_in(exit).get(&0), Some(&ConstValue::Bottom));
+        assert_eq!(result.fact_out(body).get(&0), Some(&ConstValue::Const(7)));
     }
 }

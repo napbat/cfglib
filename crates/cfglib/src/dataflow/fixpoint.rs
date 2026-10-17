@@ -9,7 +9,28 @@
 //! a full solve, a seeded solve (`_from`), a deterministically bounded solve
 //! (`_with_config`), and fallible `try_` counterparts, all sharing
 //! [`SolveConfig`], [`SolveError`], and [`TrySolveError`]. This one runs
-//! per-block facts on the node solver's core.
+//! per-block facts on the node solver's core, and the node solver and this
+//! one report their facts in the same [`Facts`] type.
+//!
+//! # One vocabulary for the three problem families
+//!
+//! Every problem names its starting fact `boundary`, its unreached or
+//! initial fact `bottom`, and its direction [`Direction`]. Two shapes of
+//! `boundary` exist, for one reason:
+//!
+//! - [`Problem`] and [`NodeProblem`](super::node_fixpoint::NodeProblem)
+//!   return one fact, and the *solver* decides which nodes receive it: a
+//!   node with no upstream neighbor along the analysis direction, and for
+//!   [`Problem`] also the root of a forward solve. A block or node graph has
+//!   a structural boundary, so naming the nodes would only restate it.
+//! - [`EdgeProblem`](super::edge_fixpoint::EdgeProblem) returns an optional
+//!   fact *per node*, and the *problem* decides which nodes get one, merged
+//!   with whatever flows in. Exceptional-edge analyses seed handler entries,
+//!   coroutine resumptions, and several roots, none of which is structural.
+//!
+//! A fallible problem's `meet` also receives the view and the merge point,
+//! so an error can name where two facts disagreed; an infallible `meet` is
+//! a pure lattice operation and receives only the two facts.
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -27,6 +48,36 @@ pub enum Direction {
     Forward,
     /// Backward: information flows from successors to predecessors.
     Backward,
+}
+
+impl Direction {
+    /// The direction in which the solver follows edges to carry a fact from
+    /// a node to the nodes that consume it.
+    ///
+    /// A forward analysis carries facts along outgoing edges, a backward
+    /// analysis along incoming ones. Every solver derives its adjacency
+    /// from this one conversion.
+    #[must_use]
+    pub const fn traversal(self) -> TraversalDirection {
+        match self {
+            Self::Forward => TraversalDirection::Outgoing,
+            Self::Backward => TraversalDirection::Incoming,
+        }
+    }
+
+    /// Orders what a node receives and what it transfers by program order.
+    ///
+    /// A forward analysis receives its fact at the node's start and transfers
+    /// it to the node's end, so `entering` is the input and `leaving` the
+    /// output. A backward analysis receives at the end and transfers to the
+    /// start, so they swap. [`Facts`] reports program order whichever way
+    /// the analysis flows.
+    pub(crate) const fn program_order<T>(self, entering: T, leaving: T) -> (T, T) {
+        match self {
+            Self::Forward => (entering, leaving),
+            Self::Backward => (leaving, entering),
+        }
+    }
 }
 
 /// Deterministic solver limits, shared by every fixpoint solver.
@@ -151,7 +202,10 @@ pub trait Problem<V: RootedView> {
     fn direction(&self) -> Direction;
 
     /// Initial (bottom) value for each block.
-    fn bottom(&self) -> Self::Fact;
+    ///
+    /// The view is given so a fact whose size depends on the graph, such as
+    /// a [`DenseBits`](super::bits::DenseBits) over its blocks, can be built.
+    fn bottom(&self, view: &V) -> Self::Fact;
 
     /// The fact entering the analysis boundary.
     ///
@@ -160,7 +214,7 @@ pub trait Problem<V: RootedView> {
     /// starts every block without successors with it. A seeded solve also
     /// gives it to a seeded block with no upstream in the analysis
     /// direction.
-    fn entry_fact(&self) -> Self::Fact;
+    fn boundary(&self, view: &V) -> Self::Fact;
 
     /// Meet/join operator: merge information from multiple paths.
     fn meet(&self, a: &Self::Fact, b: &Self::Fact) -> Self::Fact;
@@ -188,21 +242,28 @@ pub trait TryProblem<V: RootedView> {
     fn direction(&self) -> Direction;
 
     /// Initial (bottom) value for each block.
-    fn bottom(&self) -> Self::Fact;
+    fn bottom(&self, view: &V) -> Self::Fact;
 
-    /// The fact entering the analysis boundary, as [`Problem::entry_fact`].
+    /// The fact entering the analysis boundary, as [`Problem::boundary`].
     ///
     /// # Errors
     ///
     /// Returns a consumer error when constructing the boundary fact fails.
-    fn entry_fact(&self) -> Result<Self::Fact, Self::Error>;
+    fn boundary(&self, view: &V) -> Result<Self::Fact, Self::Error>;
 
-    /// Meet/join operator: merge information from multiple paths.
+    /// Meet/join operator: merge information from multiple paths into
+    /// `block`.
     ///
     /// # Errors
     ///
     /// Returns a consumer error when the facts are incompatible.
-    fn meet(&self, a: &Self::Fact, b: &Self::Fact) -> Result<Self::Fact, Self::Error>;
+    fn meet(
+        &self,
+        view: &V,
+        block: V::NodeId,
+        a: &Self::Fact,
+        b: &Self::Fact,
+    ) -> Result<Self::Fact, Self::Error>;
 
     /// Transfer function: given the incoming fact for a block, compute
     /// the outgoing fact after the block's instructions are applied.
@@ -218,30 +279,34 @@ pub trait TryProblem<V: RootedView> {
     ) -> Result<Self::Fact, Self::Error>;
 }
 
-/// Per-block facts computed by a fixpoint solve, in program order: the IN fact
-/// is the fact at a block's start and the OUT fact the fact at its end,
+/// Per-node facts computed by a fixpoint solve, in program order: the IN fact
+/// is the fact at a node's start and the OUT fact the fact at its end,
 /// whichever way the analysis flows.
-#[derive(Debug, Clone)]
+///
+/// The block, node and edge solvers all report their node facts in this one
+/// type. For a backward analysis the IN fact is therefore what the node's
+/// transfer produced and the OUT fact what the node's successors handed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Facts<F> {
-    /// The IN fact for each block (indexed by `DenseId::index()`).
-    block_in: Vec<F>,
-    /// The OUT fact for each block (indexed by `DenseId::index()`).
-    block_out: Vec<F>,
+    /// The IN fact for each node (indexed by `DenseId::index()`).
+    input: Vec<F>,
+    /// The OUT fact for each node (indexed by `DenseId::index()`).
+    output: Vec<F>,
     /// Number of worklist entries processed.
     steps: usize,
 }
 
 impl<F> Facts<F> {
-    /// Get the IN fact for a block.
+    /// Get the IN fact for a node.
     #[must_use]
-    pub fn fact_in<N: DenseId>(&self, block: N) -> &F {
-        &self.block_in[block.index()]
+    pub fn fact_in<N: DenseId>(&self, node: N) -> &F {
+        &self.input[node.index()]
     }
 
-    /// Get the OUT fact for a block.
+    /// Get the OUT fact for a node.
     #[must_use]
-    pub fn fact_out<N: DenseId>(&self, block: N) -> &F {
-        &self.block_out[block.index()]
+    pub fn fact_out<N: DenseId>(&self, node: N) -> &F {
+        &self.output[node.index()]
     }
 
     /// Number of worklist entries processed.
@@ -250,14 +315,12 @@ impl<F> Facts<F> {
         self.steps
     }
 
-    /// Creates the facts of a solve that a specialized solver performed.
-    ///
-    /// `block_in` and `block_out` are indexed by `DenseId::index()` up to
-    /// the node bound of the graph, as the generic solver indexes them.
-    pub(crate) const fn from_parts(block_in: Vec<F>, block_out: Vec<F>, steps: usize) -> Self {
+    /// Creates the facts of a solve, from vectors indexed by
+    /// `DenseId::index()` up to the node bound of the graph.
+    pub(crate) const fn new(input: Vec<F>, output: Vec<F>, steps: usize) -> Self {
         Self {
-            block_in,
-            block_out,
+            input,
+            output,
             steps,
         }
     }
@@ -467,7 +530,7 @@ fn initial_worklist<V: RootedView>(view: &V, direction: Direction) -> Worklist {
     match direction {
         Direction::Forward => Worklist::of(
             view.node_bound(),
-            depth_first_preorder(view, view.root(), TraversalDirection::Outgoing)
+            depth_first_preorder(view, view.root(), direction.traversal())
                 .into_iter()
                 .map(DenseId::index),
         ),
@@ -484,7 +547,6 @@ fn try_solve_with_worklist<V: RootedView, P: TryProblem<V>>(
     let direction = problem.direction();
     let entry = matches!(direction, Direction::Forward).then(|| view.root());
     node_fixpoint::try_solve_with_worklist(view, &BlockProblem(problem), worklist, entry, config)
-        .map(|facts| facts.into_block_facts(direction))
 }
 
 /// Adapter that runs a [`TryProblem`] on the node solver's core.
@@ -498,16 +560,22 @@ impl<V: RootedView, P: TryProblem<V>> TryNodeProblem<V> for BlockProblem<'_, P> 
         TryProblem::direction(self.0)
     }
 
-    fn bottom(&self, _view: &V) -> Self::Fact {
-        TryProblem::bottom(self.0)
+    fn bottom(&self, view: &V) -> Self::Fact {
+        TryProblem::bottom(self.0, view)
     }
 
-    fn boundary(&self, _view: &V) -> Result<Self::Fact, Self::Error> {
-        TryProblem::entry_fact(self.0)
+    fn boundary(&self, view: &V) -> Result<Self::Fact, Self::Error> {
+        TryProblem::boundary(self.0, view)
     }
 
-    fn meet(&self, a: &Self::Fact, b: &Self::Fact) -> Result<Self::Fact, Self::Error> {
-        TryProblem::meet(self.0, a, b)
+    fn meet(
+        &self,
+        view: &V,
+        block: V::NodeId,
+        a: &Self::Fact,
+        b: &Self::Fact,
+    ) -> Result<Self::Fact, Self::Error> {
+        TryProblem::meet(self.0, view, block, a, b)
     }
 
     fn transfer(
@@ -531,15 +599,21 @@ impl<V: RootedView, P: Problem<V>> TryProblem<V> for InfallibleProblem<'_, P> {
         Problem::direction(self.0)
     }
 
-    fn bottom(&self) -> Self::Fact {
-        Problem::bottom(self.0)
+    fn bottom(&self, view: &V) -> Self::Fact {
+        Problem::bottom(self.0, view)
     }
 
-    fn entry_fact(&self) -> Result<Self::Fact, Self::Error> {
-        Ok(Problem::entry_fact(self.0))
+    fn boundary(&self, view: &V) -> Result<Self::Fact, Self::Error> {
+        Ok(Problem::boundary(self.0, view))
     }
 
-    fn meet(&self, a: &Self::Fact, b: &Self::Fact) -> Result<Self::Fact, Self::Error> {
+    fn meet(
+        &self,
+        _view: &V,
+        _block: V::NodeId,
+        a: &Self::Fact,
+        b: &Self::Fact,
+    ) -> Result<Self::Fact, Self::Error> {
         Ok(Problem::meet(self.0, a, b))
     }
 

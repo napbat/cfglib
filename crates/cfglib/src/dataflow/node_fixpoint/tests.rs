@@ -203,7 +203,13 @@ impl<E> TryNodeProblem<Graph<&'static str, E>> for Guarded {
         Ok(false)
     }
 
-    fn meet(&self, a: &bool, b: &bool) -> Result<bool, Self::Error> {
+    fn meet(
+        &self,
+        _graph: &Graph<&'static str, E>,
+        _node: NodeId,
+        a: &bool,
+        b: &bool,
+    ) -> Result<bool, Self::Error> {
         Ok(*a || *b)
     }
 
@@ -276,8 +282,8 @@ fn a_removed_seed_panics() {
 
 fn assert_same_facts(
     graph: &Graph<&'static str, ()>,
-    expected: &NodeFacts<bool>,
-    actual: &NodeFacts<bool>,
+    expected: &Facts<bool>,
+    actual: &Facts<bool>,
 ) {
     assert_eq!(actual.steps(), expected.steps());
     for node in graph.node_ids() {

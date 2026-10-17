@@ -430,7 +430,7 @@ impl ReachableEdgeProblem<Cfg<()>> for Depth {
         Direction::Forward
     }
 
-    fn entry_fact(&self, _graph: &Cfg<()>, node: BlockId) -> Result<Option<i32>, Mismatch> {
+    fn boundary(&self, _graph: &Cfg<()>, node: BlockId) -> Result<Option<i32>, Mismatch> {
         Ok((node.index() == 0).then_some(0))
     }
 
