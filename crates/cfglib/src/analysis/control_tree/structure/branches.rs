@@ -8,9 +8,10 @@ use alloc::vec::Vec;
 
 use super::super::node::{ControlNode, SwitchCase};
 use super::super::report::GotoReason;
-use super::frames::{Bound, Frame, Next, Returned};
+use super::Structurer;
+use super::bound::Bound;
+use super::frames::{Frame, Next, Returned};
 use super::walk::{Lifted, RegionWalk};
-use super::{Structurer, block_is_allowed};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::{EdgeId, EdgeKind};
@@ -128,16 +129,12 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
     /// the construct resolves it like any other transfer, as a loop's
     /// `continue` or `break` or an explicit goto, and ends silently only at the
     /// enclosing construct's own stop block.
-    pub(super) fn effective_merge(
-        &self,
-        block: BlockId,
-        allowed_blocks: Option<&BTreeSet<BlockId>>,
-    ) -> Option<BlockId> {
+    pub(super) fn effective_merge(&self, block: BlockId, allowed: &Bound) -> Option<BlockId> {
         match self.pdom.ipdom(block.raw())? {
             PostNode::Node(merge) => Some(BlockId::from_raw(merge)),
             PostNode::Exit => None,
         }
-        .filter(|&merge| block_is_allowed(allowed_blocks, merge))
+        .filter(|&merge| allowed.contains(merge))
     }
 
     /// The block the walk resumes at after `node`, a construct whose merge is
@@ -159,7 +156,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
     /// the walk goes on at after it: the merge, when the construct can reach
     /// it.
     fn finish_branch(&mut self, block: BlockId, allowed: &Bound, node: ControlNode) -> Next<'cfg> {
-        let merge = self.effective_merge(block, allowed.as_deref());
+        let merge = self.effective_merge(block, allowed);
         let next = self.resume_after(&node, merge);
         Next::Return(Returned::Construct { node, next })
     }
@@ -174,7 +171,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             ConditionalArm::Start => {
                 let targets = conditional_targets(self.cfg, block)
                     .expect("a block classified as a conditional has a true and a false edge");
-                conditional.merge = self.effective_merge(block, conditional.allowed.as_deref());
+                conditional.merge = self.effective_merge(block, &conditional.allowed);
                 conditional.arm = ConditionalArm::Then {
                     false_target: targets.false_target,
                 };
@@ -210,7 +207,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
     /// Start lifting the switch at `block`.
     pub(super) fn begin_switch(&mut self, block: BlockId, allowed: &Bound) -> Frame<'cfg> {
         let cfg = self.cfg;
-        let merge = self.effective_merge(block, allowed.as_deref());
+        let merge = self.effective_merge(block, allowed);
 
         // Group dispatch edges by target in first-encounter order, and find
         // the explicit default edge (the sequential non-case successor).
@@ -245,10 +242,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         // other, never a second copy of the block.
         let mut owned: BTreeSet<BlockId> = BTreeSet::new();
         for &target in case_targets.iter().chain(&default_target) {
-            if Some(target) != merge
-                && block_is_allowed(allowed.as_deref(), target)
-                && !self.is_visited(target)
-            {
+            if Some(target) != merge && allowed.contains(target) && !self.is_visited(target) {
                 self.visit(target);
                 owned.insert(target);
             }
@@ -351,7 +345,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             // The arm transfers straight to the switch continuation.
             return Next::Return(Returned::Nodes(Vec::new()));
         }
-        if !block_is_allowed(arm.allowed.as_deref(), target) {
+        if !arm.allowed.contains(target) {
             // Beyond the enclosing bound. When that bound is a loop and the
             // target is its follow or header, the transfer is a break or a
             // continue, as it is for the arm of an `if`; anything else is an

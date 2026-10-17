@@ -199,22 +199,6 @@ where
     LoopForest::compute_tagged(graph, dom).natural_loops()
 }
 
-/// Detect the natural loops of all the code, tagged, including the code the
-/// root does not reach: the loops of [`detect_loops_tagged`], unchanged, then
-/// those of the dead code, in order of depth, then header. A dead loop is
-/// nested only in dead loops. [`LoopForest::compute_all_tagged`] says why the
-/// dead code's loops are exact.
-pub(crate) fn detect_all_loops_tagged<G>(
-    graph: &G,
-    dom: &DominatorTree<G::NodeId>,
-) -> Vec<NaturalLoop<G::NodeId>>
-where
-    G: RootedView + EdgeView,
-    G::EdgeData: KindedEdge,
-{
-    LoopForest::compute_all_tagged(graph, dom).natural_loops()
-}
-
 /// Whether the graph is reducible.
 ///
 /// A graph is **reducible** if and only if every cycle contains a node

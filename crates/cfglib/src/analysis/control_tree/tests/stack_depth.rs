@@ -7,14 +7,13 @@
 //! frames of one recursive call per level take at these depths: an overflow
 //! aborts the test binary.
 //!
-//! The depths differ by what the input size allows. A straight chain, the
-//! nested `if`s, `switch`es, and goto labels are linear in their depth, so
-//! they run at 100,000 levels. The protected sets of nested `try` regions and
-//! the bodies of nested loops are sets of blocks, so a graph of that depth is
-//! quadratic in its depth before the structurer reads it; those tests use the
-//! largest depth that finishes in about a second. The printer's output is
-//! quadratic in any nesting, since each level indents every line: the linear
-//! shapes are printed at 3,000 levels, and the loops and tries as they are.
+//! A straight chain, nested `if`s, loops, `switch`es, and goto labels run at
+//! 100,000 levels. The protected sets of nested `try` regions are part of the
+//! input, one set per region, so a graph of that depth is quadratic in its
+//! depth before the structurer reads it; those tests use the largest depth
+//! that finishes in about a second. The printer's output is quadratic in any
+//! nesting, since each level indents every line: the shapes are printed at
+//! 3,000 levels, and the tries as they are.
 
 extern crate alloc;
 extern crate std;
@@ -36,12 +35,8 @@ const SMALL_STACK: usize = 256 * 1024;
 
 /// Levels of a nesting whose graph and tree are linear in their depth.
 const LINEAR_DEPTH: usize = 100_000;
-/// Levels of nested loops: every loop holds its own set of blocks, so the
-/// natural loops of the graph are quadratic in the depth, and the loop
-/// detection alone takes seconds at a few thousand levels.
-const LOOP_DEPTH: usize = 600;
 /// Levels of nested `try` regions: every region holds its own set of protected
-/// blocks.
+/// blocks, which the input names, so the input is quadratic in the depth.
 const TRY_DEPTH: usize = 1_000;
 /// Levels of a linear nesting that is printed: the text is quadratic in the
 /// depth, since each line is indented by its level.
@@ -466,7 +461,7 @@ fn a_hundred_thousand_blocks_in_a_loop_test_structure_on_a_small_stack() {
 #[test]
 fn deeply_nested_loops_structure_on_a_small_stack() {
     on_small_stack(|| {
-        let cfg = nested_loops(LOOP_DEPTH);
+        let cfg = nested_loops(LINEAR_DEPTH);
         let (tree, report, census) = structure_and_read(&cfg);
         assert!(report.is_fully_structured(), "{report:?}");
         let whiles = count_nodes(&tree, |node| {
@@ -478,9 +473,9 @@ fn deeply_nested_loops_structure_on_a_small_stack() {
                 }
             )
         });
-        assert_eq!(whiles, LOOP_DEPTH);
-        assert!(census.deepest > LOOP_DEPTH);
-        assert_prints_a_line_per_level(&cfg, &tree, LOOP_DEPTH);
+        assert_eq!(whiles, LINEAR_DEPTH);
+        assert!(census.deepest > LINEAR_DEPTH);
+        print_shape(nested_loops);
     });
 }
 

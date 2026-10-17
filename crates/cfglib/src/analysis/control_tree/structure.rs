@@ -16,11 +16,13 @@ use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::{EdgeId, EdgeKind};
 use crate::graph::dominator::{DominatorTree, PostDominatorTree};
-use crate::graph::structure::{NaturalLoop, detect_all_loops_tagged};
+use crate::graph::loop_forest::LoopForest;
 use crate::region::{Handler, Region};
+use bound::Bound;
 use completion::Completion;
 use roots::VirtualRoot;
 
+mod bound;
 mod branches;
 mod completion;
 mod frames;
@@ -71,8 +73,8 @@ struct Structurer<'cfg, I, E> {
     /// structurer recover those loops without requiring frontends to mutate
     /// the lossless native edge classification.
     back_edges: BTreeSet<(BlockId, BlockId)>,
-    /// Natural loops keyed by header, honoring tagged back edges.
-    loops: BTreeMap<BlockId, NaturalLoop>,
+    /// The loops, honoring tagged back edges, nested by the forest.
+    forest: Rc<LoopForest>,
     /// Region anchor (first protected block in reverse postorder) → the
     /// regions anchored there, outermost (largest protected set) first.
     anchors: BTreeMap<BlockId, Vec<&'cfg Region>>,
@@ -87,6 +89,9 @@ struct Structurer<'cfg, I, E> {
     labeled_blocks: BTreeSet<BlockId>,
     /// Enclosing loops, innermost last.
     loop_stack: Vec<LoopContext>,
+    /// For each block an enclosing loop continues or breaks at, the positions
+    /// of those loops in `loop_stack`, innermost last.
+    loop_targets: BTreeMap<BlockId, Vec<usize>>,
     /// Regions structured as [`ControlNode::TryCatch`].
     structured_regions: BTreeSet<u32>,
     /// The blocks no exception region names, as protected code, a handler
@@ -257,11 +262,20 @@ impl ControlTree {
     /// [`preorder`](Self::preorder), [`walk`](Self::walk), and
     /// [`for_each_instruction`](Self::for_each_instruction).
     ///
-    /// Each nested loop and each nested `try` region holds a set of blocks (a
-    /// natural loop's body, a region's protected blocks), so a nesting of `n`
-    /// of either costs time and memory quadratic in `n`, already in the graph
-    /// before the structurer reads it. The text of the pseudocode is quadratic
-    /// in any nesting too, since each level indents every line it holds.
+    /// Time and memory grow linearly with the nesting of loops, `if`s,
+    /// `switch`es, and labels: a loop's blocks are read from a
+    /// [`LoopForest`](crate::LoopForest), not copied per loop. The exceptions
+    /// are the input's own size and two scans:
+    ///
+    /// - Each nested `try` region names its own set of protected blocks, so
+    ///   `n` nested regions are an input of size quadratic in `n`, and
+    ///   structuring them costs about that size.
+    /// - A loop with no recognized test (an endless loop) scans its blocks for
+    ///   its follow, so `n` loops of that kind nested in each other cost time
+    ///   quadratic in `n`.
+    ///
+    /// The text of the pseudocode is quadratic in any nesting, since each
+    /// level indents every line it holds.
     ///
     /// # Panics
     ///
@@ -336,13 +350,13 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         let dom = DominatorTree::compute(cfg);
         // The structurer also lays out code the entry cannot reach, so its
         // loops are those of the live program and of that code alike.
-        let loops: BTreeMap<BlockId, NaturalLoop> = detect_all_loops_tagged(cfg, &dom)
-            .into_iter()
-            .map(|natural| (natural.header, natural))
-            .collect();
-        let back_edges = loops
-            .values()
-            .flat_map(|natural| natural.latches.iter().map(|&latch| (latch, natural.header)))
+        let forest = Rc::new(LoopForest::compute_all_tagged(cfg, &dom));
+        let back_edges = forest
+            .loops()
+            .flat_map(|lp| {
+                let header = forest.header(lp);
+                forest.latches(lp).iter().map(move |&latch| (latch, header))
+            })
             .collect();
         let mut reachable = alloc::vec![false; cfg.block_bound()];
         for block in cfg.block_ids() {
@@ -362,13 +376,14 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             }),
             reachable,
             back_edges,
-            loops,
+            forest,
             anchors: BTreeMap::new(),
             visited: alloc::vec![false; cfg.block_bound()],
             emptied,
             goto_targets: BTreeSet::new(),
             labeled_blocks: BTreeSet::new(),
             loop_stack: Vec::new(),
+            loop_targets: BTreeMap::new(),
             structured_regions: BTreeSet::new(),
             unclaimed: Rc::new(claims.unclaimed),
             handler_claims: claims.handlers,
@@ -383,7 +398,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         let cfg = self.cfg;
         let order = cfg.reverse_postorder();
         self.anchors = try_catch::region_anchors(cfg, &order);
-        let mut body = self.lift_region(cfg.entry(), None, None);
+        let mut body = self.lift_region(cfg.entry(), Bound::Whole, None);
 
         // Completeness sweep: emit every block the structured walk refused or
         // never reached, each under its label so the boundary `Goto`s and
@@ -444,7 +459,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
     /// Emit the code at `pending`, which nothing structured reached, under
     /// its label at the end of `body`.
     fn sweep(&mut self, pending: BlockId, body: &mut Vec<ControlNode>) {
-        let pending_body = self.lift_region(pending, None, None);
+        let pending_body = self.lift_region(pending, Bound::Whole, None);
         if pending_body.is_empty() {
             return;
         }
@@ -585,10 +600,6 @@ fn flow_successors<I, E>(cfg: &Cfg<I, E>, block: BlockId) -> Vec<BlockId> {
         .filter(|&edge| !cfg.edge(edge).kind().is_exceptional())
         .map(|edge| cfg.edge(edge).target())
         .collect()
-}
-
-fn block_is_allowed(allowed_blocks: Option<&BTreeSet<BlockId>>, block: BlockId) -> bool {
-    allowed_blocks.is_none_or(|blocks| blocks.contains(&block))
 }
 
 /// What the exception regions name, read in one pass over them.

@@ -7,9 +7,10 @@ use alloc::vec::Vec;
 
 use super::super::node::ControlNode;
 use super::super::report::{GotoDiagnostic, GotoReason};
+use super::bound::Bound;
 use super::branches::Conditional;
-use super::frames::{Bound, Frame, Next, Returned};
-use super::{BlockFlowKind, Structurer, block_is_allowed, flow_successors};
+use super::frames::{Frame, Next, Returned};
+use super::{BlockFlowKind, Structurer, flow_successors};
 use crate::block::BlockId;
 use crate::edge::{EdgeId, EdgeKind};
 
@@ -87,7 +88,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
                 self.push_goto(&mut walk.result, block, GotoReason::RevisitedTarget);
                 break;
             }
-            if !block_is_allowed(walk.allowed.as_deref(), block) {
+            if !walk.allowed.contains(block) {
                 // Exclusively owned out-of-bound code — a single predecessor,
                 // so this transfer is its only entry, and no exception region
                 // claims it — inlines here instead of degrading to a goto
@@ -99,7 +100,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
                 // the matching label.
                 if cfg.incoming(block).take(2).count() == 1 && !self.is_claimed(block) {
                     walk.awaiting = Awaiting::Inline;
-                    let bound = Some(Rc::clone(&self.unclaimed));
+                    let bound = Bound::Set(Rc::clone(&self.unclaimed));
                     return Next::Call(Frame::Region(RegionWalk::new(block, bound, walk.stop)));
                 }
                 self.push_goto(&mut walk.result, block, GotoReason::BoundaryEscape);
@@ -281,9 +282,12 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
     /// it.
     pub(super) fn resolve_loop_transfer(&mut self, target: BlockId) -> Option<ControlNode> {
         let (target, hops) = self.through_trampolines(target);
-        let position = self.loop_stack.iter().rposition(|context| {
-            context.continue_target == target || context.follow == Some(target)
-        })?;
+        // The innermost loop that names the target: the last position pushed
+        // for it, since the loops leave in the order they entered.
+        let position = self
+            .loop_targets
+            .get(&target)
+            .and_then(|positions| positions.last().copied())?;
         // The consumed trampolines carry no content; the sweep must not
         // resurrect them as labeled residue.
         for hop in hops {
