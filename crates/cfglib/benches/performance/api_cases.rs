@@ -11,6 +11,7 @@ mod traversal;
 pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "abstract_interpret",
     "alias_propagation",
+    "alias_propagation_with_exits",
     "bind_edge_attributes",
     "bind_label",
     "block_nesting_depths",

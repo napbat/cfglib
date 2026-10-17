@@ -1,9 +1,9 @@
 use cfglib::{
     AbstractDomain, Cfg, Direction, DominatorTree, EdgeProblem, FlowEffect, Graph, Lattice, NodeId,
     SolveConfig, SsaForm, TryEdgeProblem, TryNodeProblem, TryProblem, abstract_interpret,
-    alias_propagation, copies_by_predecessor, copy_propagation, copy_propagation_with_exits,
-    departs_before_throws, eliminate_phis, index_paths_may_overlap, meet_options,
-    solve_edge_problem, solve_edge_problem_from, solve_edge_problem_from_with_config,
+    alias_propagation, alias_propagation_with_exits, copies_by_predecessor, copy_propagation,
+    copy_propagation_with_exits, departs_before_throws, eliminate_phis, index_paths_may_overlap,
+    meet_options, solve_edge_problem, solve_edge_problem_from, solve_edge_problem_from_with_config,
     solve_edge_problem_with_config, solve_node_problem_from, solve_node_problem_from_with_config,
     solve_problem_from, solve_problem_from_with_config, try_solve_edge_problem,
     try_solve_edge_problem_from, try_solve_edge_problem_from_with_config,
@@ -304,6 +304,23 @@ fn register_analyses(suite: &mut BenchmarkSuite<'_>) {
         |(_, stats)| {
             assert_eq!(stats.uses_rewritten, 1);
             assert_eq!(stats.aliases_removed, 1);
+        }
+    );
+
+    benchmark_case!(
+        suite,
+        "api_alias_propagation_with_exits",
+        covers[alias_propagation_with_exits],
+        || {
+            let mut candidate = copies_fixture.clone();
+            // The alias's destination leaves the function, so the rewrite
+            // still happens and the alias stays.
+            let stats = alias_propagation_with_exits(&mut candidate, |_| vec![1]);
+            (candidate, stats)
+        },
+        |(_, stats)| {
+            assert_eq!(stats.uses_rewritten, 1);
+            assert_eq!(stats.aliases_removed, 0);
         }
     );
 
