@@ -13,6 +13,7 @@ use crate::dataflow::def_use::DefUseChains;
 use crate::dataflow::{EffectInfo, ProgramPoint};
 use crate::edge::{EdgeId, EdgeKind};
 use crate::graph::structure::NaturalLoop;
+use crate::region::HandlerBody;
 
 /// Result of loop rotation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,7 +96,9 @@ pub fn rotate_loop<I: Clone, E: Clone>(
 }
 
 /// A new block holding a copy of `block`'s instructions and of its outgoing
-/// edges, in the same order with kind, weight, and payload retained.
+/// edges, in the same order with kind, weight, and payload retained. The copy
+/// is protected by the regions that protect `block` and belongs to the
+/// handler bodies `block` belongs to.
 fn duplicate_block<I: Clone, E: Clone>(cfg: &mut Cfg<I, E>, block: BlockId) -> BlockId {
     let copy = cfg.new_block();
     let instructions = cfg.block(block).instructions().to_vec();
@@ -115,6 +118,18 @@ fn duplicate_block<I: Clone, E: Clone>(cfg: &mut Cfg<I, E>, block: BlockId) -> B
     for (target, kind, weight, payload) in outgoing {
         let edge = cfg.add_edge_with_payload(copy, target, kind, payload);
         cfg.edge_mut(edge).set_weight(weight);
+    }
+    for region in &mut cfg.regions {
+        if region.protected_blocks.contains(&block) {
+            region.protected_blocks.insert(copy);
+        }
+        for handler in &mut region.handlers {
+            if let HandlerBody::Known(blocks) = &mut handler.body
+                && blocks.contains(&block)
+            {
+                blocks.insert(copy);
+            }
+        }
     }
     copy
 }
@@ -193,6 +208,7 @@ mod tests {
     use crate::flow::FlowEffect;
     use crate::graph::dominator::DominatorTree;
     use crate::graph::structure::{detect_loops, detect_loops_tagged};
+    use crate::region::{Handler, HandlerKind, Region, RegionId};
     use crate::test_util::{
         DfInst, TestEffect, df_def, df_ff, df_impure, df_op, df_use, df_with_effect,
     };
@@ -374,6 +390,37 @@ mod tests {
         let lp = the_loop(&cfg);
 
         assert_eq!(rotate_loop(&mut cfg, &lp), None);
+    }
+
+    #[test]
+    fn the_bottom_test_joins_the_regions_and_handler_bodies_of_the_header() {
+        let CountingLoop {
+            mut cfg,
+            header,
+            first,
+            ..
+        } = counting_loop(1);
+        let catch = cfg.new_block();
+        let region = cfg.add_region(Region {
+            id: RegionId::from_index(0),
+            protected_blocks: BTreeSet::from([header, first]),
+            handlers: Vec::from([Handler {
+                entry: catch,
+                body: HandlerBody::Known(BTreeSet::from([catch, header])),
+                kind: HandlerKind::Catch,
+            }]),
+            parent: None,
+        });
+        let lp = the_loop(&cfg);
+
+        let rotation = rotate_loop(&mut cfg, &lp).expect("a top-tested loop rotates");
+
+        let region = cfg.region(region).expect("rotation keeps the region");
+        assert!(region.protected_blocks.contains(&rotation.bottom_test));
+        let HandlerBody::Known(body) = &region.handlers[0].body else {
+            panic!("the handler body stays known");
+        };
+        assert!(body.contains(&rotation.bottom_test));
     }
 
     #[test]
