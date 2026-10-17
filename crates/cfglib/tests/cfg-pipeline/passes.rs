@@ -69,8 +69,7 @@ fn fold_decided_branch(cfg: &mut Cfg<Inst<Var>>, block: BlockId, sccp: &SccpAnal
     if taken.2 == untaken.2 {
         return;
     }
-    let executable =
-        |(_, _, target): (_, _, BlockId)| sccp.executable_edges.contains(&(block, target));
+    let executable = |(edge, _, _): (_, _, BlockId)| sccp.executable_edges.contains(&edge);
     let (survivor, withheld) = match (executable(taken), executable(untaken)) {
         (true, false) => (taken, untaken),
         (false, true) => (untaken, taken),
@@ -130,7 +129,8 @@ pub fn destruct(cfg: &Cfg<Inst<Var>>, ssa: &SsaForm<Var>) -> Cfg<Inst<SsaValue<V
     let copies = eliminate_phis(ssa);
     // Later departure points first, so an insertion never shifts one still
     // to come.
-    for (point, group) in copies_by_predecessor(&copies).iter().rev() {
+    for edge_copies in copies_by_predecessor(&copies).iter().rev() {
+        let (point, group) = (edge_copies.from, &edge_copies.copies);
         let instructions = lowered
             .block_mut(ids[point.block.index()])
             .instructions_mut();

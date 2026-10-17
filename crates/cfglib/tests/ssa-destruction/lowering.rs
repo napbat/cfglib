@@ -135,7 +135,9 @@ pub fn lower(
         })
         .collect();
     let mut temporaries = 0;
-    for (point, group) in copies_by_predecessor(&copies).iter().rev() {
+    for edge_copies in copies_by_predecessor(&copies).iter().rev() {
+        let point = edge_copies.from;
+        let group = &edge_copies.copies;
         let at = new_index[&(point.block, point.inst_idx)];
         let block = lowered
             .block_mut(ids[point.block.index()])

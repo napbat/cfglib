@@ -7,6 +7,7 @@ use cfglib::{ConstValue, DominatorTree, SccpAnalysis, SsaForm, SsaValue, constan
 
 use crate::check::{assert_same_behavior, assert_well_formed, block_holding};
 use crate::interp::{Inputs, Termination, input_vectors, run, run_ssa};
+use crate::oracle::endpoints;
 use crate::passes::fold_with_sccp;
 use crate::programs::{corpus, program};
 use crate::toy::{Op, Var};
@@ -24,7 +25,8 @@ fn sccp_never_declares_an_executed_block_or_edge_dead() {
                 case.name
             );
         }
-        for (source, _) in &sccp.executable_edges {
+        let executable = endpoints(&case.cfg, &sccp.executable_edges);
+        for (source, _) in &executable {
             assert!(
                 sccp.reachable_blocks.contains(source),
                 "{}: edge from dead {source:?}",
@@ -39,7 +41,7 @@ fn sccp_never_declares_an_executed_block_or_edge_dead() {
                 case.name
             );
             assert!(
-                trace.edges.is_subset(&sccp.executable_edges),
+                trace.edges.is_subset(&executable),
                 "{}: {inputs:?} takes an edge SCCP calls unexecutable",
                 case.name
             );
@@ -139,7 +141,7 @@ fn sccp_proves_the_constant_diamond_and_prunes_its_untaken_arm() {
     let taken = block_holding(&case.cfg, Op::Add);
     assert!(sccp.reachable_blocks.contains(&taken));
     assert!(!sccp.reachable_blocks.contains(&untaken));
-    assert!(!sccp.executable_edges.contains(&(case.cfg.entry(), untaken)));
+    assert!(!endpoints(&case.cfg, &sccp.executable_edges).contains(&(case.cfg.entry(), untaken)));
 
     let merge = block_holding(&case.cfg, Op::Print);
     let [phi] = ssa.block(merge).phis.as_slice() else {
@@ -217,5 +219,9 @@ fn sccp_with_known_live_ins_folds_the_branch_they_decide() {
     let inputs = Inputs::from([(Var("a"), 1), (Var("b"), 5)]);
     let (_, trace) = run(&case.cfg, &inputs);
     assert!(trace.blocks.is_subset(&seeded.reachable_blocks));
-    assert!(trace.edges.is_subset(&seeded.executable_edges));
+    assert!(
+        trace
+            .edges
+            .is_subset(&endpoints(&case.cfg, &seeded.executable_edges))
+    );
 }

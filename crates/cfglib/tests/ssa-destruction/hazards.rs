@@ -123,7 +123,7 @@ fn unwind_edge_copies_depart_before_each_throwing_instruction() {
 
     // One parallel group per throwing instruction, none at the block end.
     let groups = copies_by_predecessor(&copies);
-    let points: BTreeSet<_> = groups.iter().map(|(point, _)| *point).collect();
+    let points: BTreeSet<_> = groups.iter().map(|group| group.from).collect();
     assert_eq!(
         points,
         BTreeSet::from([departure(entry, 1), departure(entry, 3)])

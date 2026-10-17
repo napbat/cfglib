@@ -79,7 +79,8 @@ fn textbook(successors: &[Vec<usize>]) -> BTreeSet<(usize, BTreeSet<usize>)> {
 }
 
 fn reported(analysis: &IntervalAnalysis) -> BTreeSet<(usize, BTreeSet<usize>)> {
-    analysis.levels[0]
+    analysis
+        .intervals
         .iter()
         .map(|interval| {
             (
@@ -96,11 +97,6 @@ fn the_first_level_partition_is_the_textbook_one() {
         let (cfg, successors) = random_graph(seed);
         let analysis = IntervalAnalysis::compute(&cfg);
 
-        assert_eq!(
-            analysis.levels.len(),
-            1,
-            "seed {seed}: only the source partition is computed"
-        );
         let intervals = reported(&analysis);
         assert_eq!(intervals, textbook(&successors), "seed {seed}");
 
@@ -118,7 +114,6 @@ fn the_first_level_partition_is_the_textbook_one() {
             successors.len(),
             "seed {seed}: and in only one"
         );
-        assert_eq!(analysis.is_reducible, intervals.len() <= 1, "seed {seed}");
     }
 }
 
@@ -127,7 +122,7 @@ fn a_single_interval_is_enough_to_prove_reducibility() {
     let mut single = 0;
     for seed in 0..200 {
         let (cfg, _) = random_graph(seed);
-        if IntervalAnalysis::compute(&cfg).is_reducible {
+        if IntervalAnalysis::compute(&cfg).intervals.len() == 1 {
             single += 1;
             assert!(
                 is_reducible(&cfg, &DominatorTree::compute(&cfg)),
@@ -162,8 +157,8 @@ fn a_reducible_loop_can_still_split_into_several_first_level_intervals() {
         "the loop header has a predecessor outside the entry's interval"
     );
     assert!(
-        !analysis.is_reducible,
-        "false is not a proof of irreducibility"
+        analysis.intervals.len() > 1,
+        "several intervals do not prove irreducibility"
     );
     assert!(
         is_reducible(&cfg, &DominatorTree::compute(&cfg)),
@@ -184,10 +179,9 @@ fn a_cycle_with_two_entries_is_not_collapsed() {
     let analysis = IntervalAnalysis::compute(&cfg);
 
     assert_eq!(
-        analysis.levels[0].len(),
+        analysis.intervals.len(),
         3,
         "the entry and each cycle node head their own interval"
     );
-    assert!(!analysis.is_reducible);
     assert!(!is_reducible(&cfg, &DominatorTree::compute(&cfg)));
 }

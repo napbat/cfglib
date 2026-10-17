@@ -5,9 +5,18 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cfglib::{BlockId, Cfg, EdgeKind, ProgramPoint, SsaForm, SsaValue};
+use cfglib::{BlockId, Cfg, EdgeId, EdgeKind, ProgramPoint, SsaForm, SsaValue};
 
 use crate::toy::{Inst, Var};
+
+/// The `(source, target)` blocks of each edge in `edges`, which is what an
+/// execution trace observes.
+pub fn endpoints<I>(cfg: &Cfg<I>, edges: &BTreeSet<EdgeId>) -> BTreeSet<(BlockId, BlockId)> {
+    edges
+        .iter()
+        .map(|&edge| (cfg.edge(edge).source(), cfg.edge(edge).target()))
+        .collect()
+}
 
 /// The blocks reachable from the entry without passing through `avoided`.
 fn reachable_avoiding<I>(cfg: &Cfg<I>, avoided: Option<BlockId>) -> BTreeSet<BlockId> {

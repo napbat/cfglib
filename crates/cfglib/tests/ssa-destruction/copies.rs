@@ -61,15 +61,16 @@ fn copies_of_one_departure_point_form_one_group_across_all_phis_of_the_join() {
 
     let groups = copies_by_predecessor(&copies);
     assert_eq!(groups.len(), 2);
-    for (point, group) in &groups {
+    for edge in &groups {
+        let (point, group) = (edge.from, &edge.copies);
         assert_eq!(group.len(), 2, "both phis copy at {point}");
-        assert!(group.iter().all(|copy| copy.from == *point));
+        assert!(group.iter().all(|copy| copy.from == point));
         let destinations: BTreeSet<_> =
             group.iter().map(|copy| copy.destination.variable).collect();
         assert_eq!(destinations, BTreeSet::from([Reg("x"), Reg("y")]));
     }
     // Grouping neither loses nor invents copies.
-    let regrouped: usize = groups.iter().map(|(_, group)| group.len()).sum();
+    let regrouped: usize = groups.iter().map(|group| group.copies.len()).sum();
     assert_eq!(regrouped, copies.len());
 }
 
@@ -86,7 +87,8 @@ fn every_copy_group_after_critical_edge_splitting_leaves_a_block_with_one_succes
         let mut cfg = program.cfg;
         split_critical_edges(&mut cfg);
         let ssa = analyze(&cfg);
-        for (point, _) in copies_by_predecessor(&eliminate_phis(&ssa)) {
+        for edge in copies_by_predecessor(&eliminate_phis(&ssa)) {
+            let point = edge.from;
             assert_eq!(
                 cfg.successors(point.block).count(),
                 1,
@@ -103,7 +105,7 @@ fn a_critical_edge_into_a_phi_block_is_why_splitting_is_needed() {
     let ssa = analyze(&cfg);
     let branching: Vec<BlockId> = copies_by_predecessor(&eliminate_phis(&ssa))
         .into_iter()
-        .map(|(point, _)| point.block)
+        .map(|edge| edge.from.block)
         .filter(|block| cfg.successors(*block).count() > 1)
         .collect();
     assert_eq!(

@@ -17,7 +17,7 @@ const SEEDS: u64 = 80;
 /// The number of colors an assignment reports having used. The one place the
 /// result's count field is named.
 fn color_count<N>(colors: &ColorAssignment<N>) -> usize {
-    colors.num_colors
+    colors.color_count
 }
 
 /// Pairs of registers a textbook interference graph connects: two registers

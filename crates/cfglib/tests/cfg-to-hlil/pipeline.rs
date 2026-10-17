@@ -191,9 +191,7 @@ fn run_pipeline(source: &Source) -> Pipeline {
         .edges()
         .filter(|edge| {
             sccp.reachable_blocks.contains(&edge.source())
-                && !sccp
-                    .executable_edges
-                    .contains(&(edge.source(), edge.target()))
+                && !sccp.executable_edges.contains(&edge.id())
         })
         .map(|edge| edge.id())
         .collect();

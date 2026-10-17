@@ -224,9 +224,10 @@ fn hoisting_the_reported_invariants_into_a_preheader_keeps_the_behavior() {
         remaining.remove(index);
     }
     *cfg.block_mut(body).instructions_mut() = remaining;
-    cfg.block_mut(only.preheader)
-        .instructions_mut()
-        .extend(hoisted);
+    let preheader = only
+        .preheader
+        .expect("a loop entered from outside has a preheader");
+    cfg.block_mut(preheader).instructions_mut().extend(hoisted);
 
     assert_valid(&cfg, "after hoisting");
     assert_same_behavior(&before, &cfg, "loop-invariant code motion");
@@ -376,7 +377,10 @@ fn canonicalization_gives_every_loop_one_outside_entry_and_reports_its_exits() {
             .predecessors(lp.header)
             .filter(|predecessor| !lp.body.contains(predecessor))
             .collect();
-        assert_eq!(outside, [loop_info.preheader], "loop at {}", lp.header);
+        let preheader = loop_info
+            .preheader
+            .expect("a loop below the entry has a preheader");
+        assert_eq!(outside, [preheader], "loop at {}", lp.header);
         let brute_force: BTreeSet<BlockId> = lp
             .body
             .iter()
@@ -392,7 +396,11 @@ fn canonicalization_gives_every_loop_one_outside_entry_and_reports_its_exits() {
     }
     let preheaders: BTreeSet<BlockId> = canonical
         .iter()
-        .map(|loop_info| loop_info.preheader)
+        .map(|loop_info| {
+            loop_info
+                .preheader
+                .expect("a loop below the entry has a preheader")
+        })
         .collect();
     assert_eq!(preheaders.len(), 2, "loops do not share a preheader");
     assert_valid(&cfg, "canonical loops");
