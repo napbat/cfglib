@@ -98,7 +98,7 @@ impl DenseBits {
             "index {index} outside universe {}",
             self.len
         );
-        (index / 64, 1 << (index % 64))
+        bit_slot(index)
     }
 
     /// Unions `other` into this set, returning whether anything changed.
@@ -156,7 +156,7 @@ impl DenseBits {
     /// One step per *set* index, not one per index in the universe: an empty
     /// word is skipped whole.
     pub fn ones(&self) -> impl Iterator<Item = usize> + '_ {
-        WordOnes::new(self.words.iter().copied())
+        ones_of(&self.words)
     }
 
     /// The indices in both sets, in ascending order.
@@ -179,6 +179,20 @@ impl DenseBits {
                 .map(|(&left, &right)| left & right),
         )
     }
+}
+
+/// The word that holds `index` and the mask of its bit within that word.
+///
+/// This is the packing every bit row in the crate shares: 64 indices per
+/// word, least-significant bit first. A caller that keeps its rows in one
+/// flat `u64` buffer instead of in [`DenseBits`] reads it from here.
+pub(super) const fn bit_slot(index: usize) -> (usize, u64) {
+    (index / 64, 1 << (index % 64))
+}
+
+/// The set indices of the packed `words`, in ascending order.
+pub(super) fn ones_of(words: &[u64]) -> impl Iterator<Item = usize> + '_ {
+    WordOnes::new(words.iter().copied())
 }
 
 /// The set indices of a word sequence, in ascending order.

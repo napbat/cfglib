@@ -10,7 +10,9 @@
 extern crate alloc;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
+use core::ops::Range;
 
+use super::bits::{bit_slot, ones_of};
 use super::cfg_view::CfgView;
 use super::fixpoint::{Direction, Facts, Problem};
 use super::{InstrInfo, VariableId, departs_before_throws, first_unwind_point, is_unwind_edge};
@@ -182,33 +184,123 @@ struct Universe<V> {
 }
 
 impl<V: Ord + Clone> Universe<V> {
+    /// The variables that `cfg` reads or writes, and those of `seeds`.
+    fn of<G>(cfg: &G, seeds: &[Vec<V>]) -> Self
+    where
+        G: CfgView,
+        G::Inst: InstrInfo<Variable = V>,
+    {
+        let mut variables: Vec<V> = seeds.iter().flatten().cloned().collect();
+        for block in cfg.node_ids() {
+            for instruction in cfg.instructions(block) {
+                variables.extend(instruction.uses().iter().cloned());
+                variables.extend(instruction.defs().iter().cloned());
+            }
+        }
+        variables.sort();
+        variables.dedup();
+        Self { variables }
+    }
+
+    /// The words of one row.
+    fn words(&self) -> usize {
+        self.variables.len().div_ceil(64)
+    }
+
     /// Sets the bit of `variable` in `row`.
     fn insert(&self, row: &mut [u64], variable: &V) {
         if let Ok(index) = self.variables.binary_search(variable) {
-            row[index / 64] |= 1 << (index % 64);
+            let (word, bit) = bit_slot(index);
+            row[word] |= bit;
         }
     }
 
     /// Clears the bit of `variable` in `row`.
     fn remove(&self, row: &mut [u64], variable: &V) {
         if let Ok(index) = self.variables.binary_search(variable) {
-            row[index / 64] &= !(1 << (index % 64));
+            let (word, bit) = bit_slot(index);
+            row[word] &= !bit;
         }
     }
 
     /// Returns the variables of `row`.
     fn set(&self, row: &[u64]) -> BTreeSet<V> {
-        let mut set = BTreeSet::new();
-        for (word_index, &word) in row.iter().enumerate() {
-            let mut bits = word;
-            while bits != 0 {
-                let bit = bits.trailing_zeros() as usize;
-                set.insert(self.variables[word_index * 64 + bit].clone());
-                bits &= bits - 1;
+        ones_of(row)
+            .map(|index| self.variables[index].clone())
+            .collect()
+    }
+}
+
+/// What each block does to liveness, one bit row per block in a flat buffer.
+struct BlockRows {
+    /// The words of one row.
+    words: usize,
+    /// The upward-exposed reads of each block.
+    reads: Vec<u64>,
+    /// The writes of each block.
+    writes: Vec<u64>,
+    /// The seed of each block.
+    seeded: Vec<u64>,
+    /// Per block, whether an instruction may unwind. Empty when no edge of
+    /// the graph unwinds.
+    unwinding: Vec<bool>,
+    /// Per block, the writes before the first possible unwind: the only
+    /// writes every unwind departure has completed. Empty when no edge of
+    /// the graph unwinds.
+    before_unwind: Vec<u64>,
+}
+
+impl BlockRows {
+    fn of<G, Var>(cfg: &G, universe: &Universe<Var>, seeds: &[Vec<Var>], has_unwind: bool) -> Self
+    where
+        G: CfgView,
+        G::Inst: InstrInfo<Variable = Var>,
+        Var: VariableId,
+    {
+        let bound = cfg.node_bound();
+        let words = universe.words();
+        let mut rows = Self {
+            words,
+            reads: alloc::vec![0; bound * words],
+            writes: alloc::vec![0; bound * words],
+            seeded: alloc::vec![0; bound * words],
+            unwinding: alloc::vec![false; if has_unwind { bound } else { 0 }],
+            before_unwind: alloc::vec![0; if has_unwind { bound * words } else { 0 }],
+        };
+        for block in cfg.node_ids() {
+            let index = block.index();
+            let range = row(words, index);
+            for variable in &seeds[index] {
+                universe.insert(&mut rows.seeded[range.clone()], variable);
+            }
+            if has_unwind {
+                for instruction in cfg.instructions(block) {
+                    if instruction.may_unwind() {
+                        rows.unwinding[index] = true;
+                        break;
+                    }
+                    for variable in instruction.defs() {
+                        universe.insert(&mut rows.before_unwind[range.clone()], variable);
+                    }
+                }
+            }
+            for instruction in cfg.instructions(block).iter().rev() {
+                for variable in instruction.defs() {
+                    universe.remove(&mut rows.reads[range.clone()], variable);
+                    universe.insert(&mut rows.writes[range.clone()], variable);
+                }
+                for variable in instruction.uses() {
+                    universe.insert(&mut rows.reads[range.clone()], variable);
+                }
             }
         }
-        set
+        rows
     }
+}
+
+/// The words of `block`'s row in a flat buffer of rows `words` long.
+fn row(words: usize, block: usize) -> Range<usize> {
+    block * words..(block + 1) * words
 }
 
 /// Solves liveness and returns the facts of every block, with the seed of a
@@ -225,57 +317,13 @@ where
 {
     let bound = cfg.node_bound();
     let mut seeds: Vec<Vec<Var>> = alloc::vec![Vec::new(); bound];
-    let mut variables = Vec::new();
     for block in cfg.node_ids() {
-        let seed = live_out(block);
-        variables.extend(seed.iter().cloned());
-        seeds[block.index()] = seed;
-        for instruction in cfg.instructions(block) {
-            variables.extend(instruction.uses().iter().cloned());
-            variables.extend(instruction.defs().iter().cloned());
-        }
+        seeds[block.index()] = live_out(block);
     }
-    variables.sort();
-    variables.dedup();
-    let words = variables.len().div_ceil(64);
-    let universe = Universe { variables };
-    let row = |block: usize| block * words..(block + 1) * words;
-
-    // The upward-exposed reads, the writes, and the seed of each block.
-    let mut reads = alloc::vec![0u64; bound * words];
-    let mut writes = alloc::vec![0u64; bound * words];
-    let mut seeded = alloc::vec![0u64; bound * words];
+    let universe = Universe::of(cfg, &seeds);
     let has_unwind = cfg.edge_ids().any(|edge| is_unwind_edge(cfg.edge(edge)));
-    // Per block, whether an instruction may unwind, and the writes before
-    // the first one: the only writes every unwind departure has completed.
-    let mut unwinding = alloc::vec![false; if has_unwind { bound } else { 0 }];
-    let mut before_unwind = alloc::vec![0u64; if has_unwind { bound * words } else { 0 }];
-    for block in cfg.node_ids() {
-        let index = block.index();
-        for variable in &seeds[index] {
-            universe.insert(&mut seeded[row(index)], variable);
-        }
-        if has_unwind {
-            for instruction in cfg.instructions(block) {
-                if instruction.may_unwind() {
-                    unwinding[index] = true;
-                    break;
-                }
-                for variable in instruction.defs() {
-                    universe.insert(&mut before_unwind[row(index)], variable);
-                }
-            }
-        }
-        for instruction in cfg.instructions(block).iter().rev() {
-            for variable in instruction.defs() {
-                universe.remove(&mut reads[row(index)], variable);
-                universe.insert(&mut writes[row(index)], variable);
-            }
-            for variable in instruction.uses() {
-                universe.insert(&mut reads[row(index)], variable);
-            }
-        }
-    }
+    let rows = BlockRows::of(cfg, &universe, &seeds, has_unwind);
+    let words = rows.words;
 
     let mut live_in = alloc::vec![0u64; bound * words];
     let mut flowing_out = alloc::vec![0u64; bound * words];
@@ -291,32 +339,32 @@ where
         steps += 1;
         let index = block.index();
         queued[index] = false;
-        let out = &mut flowing_out[row(index)];
+        let out = &mut flowing_out[row(words, index)];
         out.fill(0);
         unwind_out.fill(0);
         for edge in cfg.outgoing(block) {
             let edge = cfg.edge(edge);
-            let destination = if has_unwind && unwinding[index] && is_unwind_edge(edge) {
+            let destination = if has_unwind && rows.unwinding[index] && is_unwind_edge(edge) {
                 &mut unwind_out[..]
             } else {
                 &mut out[..]
             };
             for (word, from) in destination
                 .iter_mut()
-                .zip(&live_in[row(edge.target().index())])
+                .zip(&live_in[row(words, edge.target().index())])
             {
                 *word |= *from;
             }
         }
         for (position, word) in next.iter_mut().enumerate() {
             let at = index * words + position;
-            *word = ((out[position] | seeded[at]) & !writes[at]) | reads[at];
+            *word = ((out[position] | rows.seeded[at]) & !rows.writes[at]) | rows.reads[at];
             if has_unwind {
-                *word |= unwind_out[position] & !before_unwind[at];
+                *word |= unwind_out[position] & !rows.before_unwind[at];
             }
         }
-        if next[..] != live_in[row(index)] {
-            live_in[row(index)].copy_from_slice(&next);
+        if next[..] != live_in[row(words, index)] {
+            live_in[row(words, index)].copy_from_slice(&next);
             for predecessor in cfg.predecessors(block) {
                 if !queued[predecessor.index()] {
                     queued[predecessor.index()] = true;
@@ -330,11 +378,15 @@ where
     let mut block_out = alloc::vec![BTreeSet::new(); bound];
     for block in cfg.node_ids() {
         let index = block.index();
-        for (word, seed) in flowing_out[row(index)].iter_mut().zip(&seeded[row(index)]) {
+        let range = row(words, index);
+        for (word, seed) in flowing_out[range.clone()]
+            .iter_mut()
+            .zip(&rows.seeded[range.clone()])
+        {
             *word |= *seed;
         }
-        block_in[index] = universe.set(&live_in[row(index)]);
-        block_out[index] = universe.set(&flowing_out[row(index)]);
+        block_in[index] = universe.set(&live_in[range.clone()]);
+        block_out[index] = universe.set(&flowing_out[range]);
     }
     Facts::from_parts(block_in, block_out, steps)
 }
