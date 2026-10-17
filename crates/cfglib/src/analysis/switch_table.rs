@@ -40,15 +40,15 @@ pub struct SwitchTargets<T> {
 
 /// A recovered multi-way dispatch site over branch-target tokens `T`.
 ///
-/// With the `serde` feature the dispatch fields are written beside `block`
-/// (`{"block":..,"targets":..,"default_target":..}`), not nested.
+/// With the `serde` feature the dispatch is a nested object
+/// (`{"block":..,"dispatch":{"targets":..,"default_target":..}}`), which every
+/// serde format, self-describing or not, can read back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct JumpTable<T> {
     /// The block containing the dispatch.
     pub block: BlockId,
     /// The case targets and the default target of the dispatch.
-    #[cfg_attr(feature = "serde", serde(flatten))]
     pub dispatch: SwitchTargets<T>,
 }
 
@@ -279,7 +279,7 @@ mod tests {
 
     #[cfg(feature = "serde")]
     #[test]
-    fn a_jump_table_keeps_its_flat_document_shape() {
+    fn a_jump_table_document_nests_its_dispatch() {
         extern crate std;
 
         let table = JumpTable {
@@ -290,8 +290,11 @@ mod tests {
             },
         };
         let json = serde_json::to_string(&table).expect("serialization cannot fail");
-        assert_eq!(json, r#"{"block":3,"targets":[10,20],"default_target":30}"#);
-        let decoded: JumpTable<u32> = serde_json::from_str(&json).expect("the flat form decodes");
+        assert_eq!(
+            json,
+            r#"{"block":3,"dispatch":{"targets":[10,20],"default_target":30}}"#
+        );
+        let decoded: JumpTable<u32> = serde_json::from_str(&json).expect("the nested form decodes");
         assert_eq!(decoded, table);
     }
 }
