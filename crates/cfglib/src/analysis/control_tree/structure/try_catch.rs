@@ -7,25 +7,14 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 
 use super::super::node::{CatchHandler, ControlNode};
-use super::frames::{Bound, Frame, Next, Returned};
+use super::bound::Bound;
+use super::frames::{Frame, Next, Returned};
 use super::walk::{Lifted, RegionWalk};
-use super::{Structurer, block_is_allowed, flow_successors};
+use super::{Structurer, flow_successors};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::graph::traverse::{TraversalDirection, reverse_postorder};
 use crate::region::{Handler, HandlerKind, HandlerRef, Region};
-
-/// The blocks of `inner` also admitted by the enclosing bound, so a nested
-/// region never escapes the extent it was entered under.
-fn intersect_bounds(
-    outer: Option<&BTreeSet<BlockId>>,
-    inner: &BTreeSet<BlockId>,
-) -> BTreeSet<BlockId> {
-    match outer {
-        None => inner.clone(),
-        Some(outer) => inner.intersection(outer).copied().collect(),
-    }
-}
 
 /// Group regions by anchor — their first protected block in reverse
 /// postorder, i.e. the region's entry in flow order rather than by block id.
@@ -183,7 +172,7 @@ pub(super) struct TryBuild<'cfg> {
     /// stop there silently, since the region's `leave` is implicit.
     continuation: Option<BlockId>,
     /// The protected blocks within the enclosing bound.
-    try_bound: Rc<BTreeSet<BlockId>>,
+    try_bound: Bound,
     try_nodes: Vec<ControlNode>,
     awaiting: TryWait,
 }
@@ -221,7 +210,7 @@ pub(super) struct Handlers<'cfg> {
     /// The handler being lifted.
     index: usize,
     /// The blocks the handler in flight may emit.
-    bound: Rc<BTreeSet<BlockId>>,
+    bound: Bound,
     /// The statements of the handler in flight.
     nodes: Vec<ControlNode>,
     /// The blocks of the handler in flight's extent still to lift.
@@ -255,12 +244,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
     /// try does not enclose, so the region stays ordinary flow. Dead code
     /// enters nothing, a block without instructions needs no covering, and
     /// exception edges are not ordinary flow.
-    fn fits_one_try(
-        &self,
-        region: &Region,
-        anchor: BlockId,
-        allowed_blocks: Option<&BTreeSet<BlockId>>,
-    ) -> bool {
+    fn fits_one_try(&self, region: &Region, anchor: BlockId, allowed: &Bound) -> bool {
         let cfg = self.cfg;
         region
             .protected_blocks
@@ -273,7 +257,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
                         || region.protected_blocks.contains(&edge.source())
                 });
                 let coverable = self.instruction_count(block) == 0
-                    || (!self.is_visited(block) && block_is_allowed(allowed_blocks, block));
+                    || (!self.is_visited(block) && allowed.contains(block));
                 entered_inside && coverable
             })
     }
@@ -292,7 +276,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         let (region, handler_bodies) = candidates
             .iter()
             .filter(|region| !self.structured_regions.contains(&region.id.0))
-            .filter(|region| self.fits_one_try(region, block, allowed.as_deref()))
+            .filter(|region| self.fits_one_try(region, block, allowed))
             .find_map(|&region| complete_handler_bodies(region).map(|bodies| (region, bodies)))?;
         self.structured_regions.insert(region.id.0);
 
@@ -302,23 +286,19 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         // `leave` is implicit, not a goto — and the enclosing walk resumes
         // there after the structured node.
         let continuation = region_continuation(cfg, region).or_else(|| {
-            self.effective_merge(block, allowed.as_deref())
-                .filter(|merge| {
-                    !region.protected_blocks.contains(merge)
-                        && region.handlers.iter().all(|handler| {
-                            handler.entry != *merge
-                                && handler
-                                    .body
-                                    .blocks()
-                                    .is_none_or(|blocks| !blocks.contains(merge))
-                        })
-                })
+            self.effective_merge(block, allowed).filter(|merge| {
+                !region.protected_blocks.contains(merge)
+                    && region.handlers.iter().all(|handler| {
+                        handler.entry != *merge
+                            && handler
+                                .body
+                                .blocks()
+                                .is_none_or(|blocks| !blocks.contains(merge))
+                    })
+            })
         });
 
-        let try_bound = Rc::new(intersect_bounds(
-            allowed.as_deref(),
-            &region.protected_blocks,
-        ));
+        let try_bound = Bound::Set(Rc::new(allowed.blocks_within(&region.protected_blocks)));
         Some(Frame::Try(Box::new(TryBuild {
             region,
             handler_bodies,
@@ -361,7 +341,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
     /// anchor goes through the shared classification path, so an anchor that
     /// is itself a branch, dispatch, or loop header keeps its structure.
     fn start_try_body(&mut self, build: &mut TryBuild<'cfg>) -> Next<'cfg> {
-        let bound = Some(Rc::clone(&build.try_bound));
+        let bound = build.try_bound.clone();
         if let Some(inner) = self.select_try(build.block, &bound) {
             build.awaiting = TryWait::Inner;
             return Next::Call(inner);
@@ -392,7 +372,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         build.awaiting = TryWait::Walk;
         Next::Call(Frame::Region(RegionWalk::new(
             next,
-            Some(Rc::clone(&build.try_bound)),
+            build.try_bound.clone(),
             build.continuation,
         )))
     }
@@ -417,7 +397,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
                 build.awaiting = TryWait::Successor(successors);
                 return Next::Call(Frame::Region(RegionWalk::new(
                     succ,
-                    Some(Rc::clone(&build.try_bound)),
+                    build.try_bound.clone(),
                     build.continuation,
                 )));
             }
@@ -429,7 +409,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             allowed: build.allowed.clone(),
             continuation: build.continuation,
             index: 0,
-            bound: Rc::new(BTreeSet::new()),
+            bound: Bound::Whole,
             nodes: Vec::new(),
             extent: Vec::new().into_iter(),
             catches: Vec::new(),
@@ -511,7 +491,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         // cannot reach: they are the handler's own dead code, and only a
         // block that feeds an enclosing loop is in that loop's bound.
         let handler_blocks = state.handler_bodies[state.index];
-        let mut bound = intersect_bounds(state.allowed.as_deref(), handler_blocks);
+        let mut bound = state.allowed.blocks_within(handler_blocks);
         bound.insert(handler.entry);
         bound.extend(
             handler_blocks
@@ -519,11 +499,11 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
                 .copied()
                 .filter(|block| !self.reachable[block.index()]),
         );
-        state.bound = Rc::new(bound);
+        state.bound = Bound::Set(Rc::new(bound));
         state.awaiting = HandlerWait::Entry;
         Next::Call(Frame::Region(RegionWalk::new(
             handler.entry,
-            Some(Rc::clone(&state.bound)),
+            state.bound.clone(),
             state.continuation,
         )))
     }
@@ -543,7 +523,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             state.awaiting = HandlerWait::Extent;
             return Next::Call(Frame::Region(RegionWalk::new(
                 block,
-                Some(Rc::clone(&state.bound)),
+                state.bound.clone(),
                 state.continuation,
             )));
         }

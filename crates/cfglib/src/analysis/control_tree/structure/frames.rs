@@ -13,21 +13,16 @@
 
 extern crate alloc;
 use alloc::boxed::Box;
-use alloc::collections::BTreeSet;
-use alloc::rc::Rc;
 use alloc::vec::Vec;
 
 use super::super::node::ControlNode;
 use super::Structurer;
+use super::bound::Bound;
 use super::branches::{Conditional, Switch, SwitchArm};
 use super::loops::{HeaderBody, LoopBuild};
 use super::try_catch::{HandlerArms, Handlers, TryBuild};
 use super::walk::RegionWalk;
 use crate::block::BlockId;
-
-/// The blocks a walk may emit: the enclosing structural bound, or `None` for
-/// every block. Frames share a bound, so it is reference counted.
-pub(super) type Bound = Option<Rc<BTreeSet<BlockId>>>;
 
 /// One construct being structured, with the state of its walk.
 pub(super) enum Frame<'cfg> {
