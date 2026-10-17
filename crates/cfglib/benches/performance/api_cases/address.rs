@@ -4,6 +4,7 @@ use cfglib::{
 };
 
 use super::BenchmarkSuite;
+use crate::fixtures::fixture_u32;
 use crate::harness::benchmark_case;
 
 const INSTRUCTION_COUNT: usize = 4_096;
@@ -39,7 +40,7 @@ impl AddressInstruction for Inst {
 fn fixture() -> (Vec<Inst>, Vec<AddressHandler<u32>>) {
     let instructions = (0..INSTRUCTION_COUNT)
         .map(|position| Inst {
-            address: u32::try_from(position).expect("fixture address fits"),
+            address: fixture_u32(position),
             flow: if position + 1 == INSTRUCTION_COUNT {
                 Flow::Return
             } else {
@@ -49,10 +50,10 @@ fn fixture() -> (Vec<Inst>, Vec<AddressHandler<u32>>) {
         .collect();
     let handlers = (0..HANDLER_COUNT)
         .map(|position| {
-            let start = u32::try_from(position * 12).expect("fixture range fits");
+            let start = fixture_u32(position * 12);
             AddressHandler {
                 protected: start..start + 8,
-                entry: u32::try_from(INSTRUCTION_COUNT - 1).expect("fixture entry fits"),
+                entry: fixture_u32(INSTRUCTION_COUNT - 1),
                 kind: HandlerKind::CatchAll,
             }
         })
@@ -86,7 +87,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         .unwrap(),
         assert_graph,
     );
-    let entry = u32::try_from(INSTRUCTION_COUNT / 2).expect("fixture entry fits");
+    let entry = fixture_u32(INSTRUCTION_COUNT / 2);
     benchmark_case!(
         suite,
         "address_cfg_explicit_entry",

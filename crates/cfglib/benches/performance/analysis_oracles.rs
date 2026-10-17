@@ -171,7 +171,7 @@ pub(super) fn assert_branchy_dominators(dominators: &DominatorTree, node_count: 
         } else {
             let parent = ((index - 1) / 2) * 2;
             assert_eq!(dominators.idom(block), Some(BlockId::from_index(parent)));
-            let level = u32::try_from(index.div_ceil(2)).expect("fixture level fits in u32");
+            let level = fixture_u32(index.div_ceil(2));
             assert_eq!(dominators.level(block), Some(level));
         }
     }

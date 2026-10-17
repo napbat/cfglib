@@ -15,6 +15,7 @@ use cfglib::{
 };
 
 use super::BenchmarkSuite;
+use crate::fixtures::fixture_u32;
 use crate::harness::benchmark_case;
 
 /// Keys of the dense fan-out tables.
@@ -42,12 +43,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
 /// way a reference index is recorded.
 fn fanout_pairs() -> Vec<(usize, u32)> {
     (0..FANOUT_KEYS * FANOUT_FAN)
-        .map(|index| {
-            (
-                index * 7_919 % FANOUT_KEYS,
-                u32::try_from(index).expect("fixture index fits u32"),
-            )
-        })
+        .map(|index| (index * 7_919 % FANOUT_KEYS, fixture_u32(index)))
         .collect()
 }
 
@@ -236,7 +232,7 @@ fn stack_graph() -> (Stack, Vec<(StackNodeId, StackNodeId)>) {
     let file = graph.add_file(());
     let mut bindings = Vec::with_capacity(STACK_REFERENCES);
     for index in 0..STACK_REFERENCES {
-        let symbol = u32::try_from(index).expect("fixture symbol fits u32");
+        let symbol = fixture_u32(index);
         let reference = graph
             .add_push_symbol_node(file, symbol, true, ())
             .expect("known file");

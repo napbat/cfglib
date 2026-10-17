@@ -23,7 +23,7 @@ use cfglib::{
 };
 
 use super::BenchmarkSuite;
-use crate::fixtures::{branchy_cfg, branchy_graph, independent_constants};
+use crate::fixtures::{branchy_cfg, branchy_graph, fixture_u32, independent_constants};
 use crate::harness::benchmark_case;
 
 const NODE_COUNT: usize = 1_024;
@@ -89,8 +89,7 @@ fn call_cfgs(function_count: usize) -> Vec<Cfg<CallInst>> {
     (0..function_count)
         .map(|index| {
             let mut cfg = Cfg::new();
-            let callee = u32::try_from((index + 1) % function_count)
-                .expect("benchmark function index must fit in u32");
+            let callee = fixture_u32((index + 1) % function_count);
             cfg.block_mut(cfg.entry()).push(CallInst(Some(callee)));
             cfg
         })
@@ -607,12 +606,7 @@ fn register_call_graph(suite: &mut BenchmarkSuite<'_>) {
     let functions: Vec<_> = cfgs
         .iter()
         .enumerate()
-        .map(|(index, cfg)| {
-            (
-                u32::try_from(index).expect("benchmark function index must fit in u32"),
-                cfg,
-            )
-        })
+        .map(|(index, cfg)| (fixture_u32(index), cfg))
         .collect();
     let graph = call_graph(&functions);
     let first = cfglib::NodeId::from_raw(0);
