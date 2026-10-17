@@ -221,6 +221,16 @@ impl ControlTree {
     /// their own extent. The tree of a graph that breaks this may hold a block
     /// in two places, since the block is both a handler's and a loop's.
     ///
+    /// # Stack depth
+    ///
+    /// Structuring recurses once per level of nested construct, and every link
+    /// of an `else if` chain is one more level. The call stack therefore bounds
+    /// the nesting depth of the input (a chain of a thousand links needs more
+    /// than a default test thread's stack in a debug build). The pseudocode
+    /// printer and [`compute_predicated`](Self::compute_predicated) recurse the
+    /// same way; [`preorder`](Self::preorder), [`walk`](Self::walk), and
+    /// [`for_each_instruction`](Self::for_each_instruction) do not.
+    ///
     /// # Panics
     ///
     /// Panics (debug) when a [`HandlerBody::Known`](crate::HandlerBody::Known)

@@ -556,7 +556,7 @@ impl<I, E> TreeRun<'_, I, E> {
                 }
             }
             ControlNode::Goto { target } => {
-                self.jump(&[Wanted::Label(target)], Ending::Dangling)?
+                self.jump(&[Wanted::Label(target)], Ending::Dangling)?;
             }
         }
         Ok(Flow::Next)
@@ -667,7 +667,7 @@ pub(super) fn assert_raisers_are_covered<I, E>(cfg: &Cfg<I, E>, tree: &ControlTr
         let covered = blocks_of_body(tree, try_body);
         for handler in tree.handlers(handlers) {
             for &block in &live {
-                let raises_here = cfg.block(block).instructions().len() > 0
+                let raises_here = !cfg.block(block).instructions().is_empty()
                     && cfg.outgoing(block).any(|edge| {
                         let edge = cfg.edge(edge);
                         edge.kind().is_exceptional() && edge.target() == handler.entry
