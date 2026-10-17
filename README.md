@@ -306,7 +306,7 @@ A `FunctionView` follows these rules:
 | Natural loop detection | `detect_loops` / `detect_loops_tagged` → `Vec<NaturalLoop<N>>` | Header, body, latches, nesting depth; outermost loops first. A tagged loop on an irreducible graph covers the cycle, not the blocks before it |
 | Loop nesting tree | `LoopNestingTree::compute` | Parent/child loop hierarchy, and the one statement of nesting depth: `NaturalLoop::depth` is the depth in this tree. Loops over the same body are siblings |
 | Control dependence graph | `control_dependence_graph` → `Graph<N, ()>` | From post-dominator tree, over any view; a block that branches back to itself has the edge to itself |
-| Program dependence graph | `program_dependence_graph` → `Graph<DependenceNode, DependenceKind>` | Control + def-use edges; reverse traversal performs backward slicing |
+| Program dependence graph | `program_dependence_graph` → `Graph<DependenceNode, DependenceKind>` | Control edges (from a block's predicate node to what it controls) and data edges (def to use, and a branching block's last instruction into its predicate node); reverse traversal performs backward slicing |
 | Interval analysis | `IntervalAnalysis::compute` → `intervals` | First-level Allen-Cocke interval partition of the code the root reaches; use `is_reducible` for the reducibility test |
 | Reducibility transform | `make_reducible` | Node splitting for irreducible CFGs |
 | Reverse CFG | `reverse_cfg` | Flip all edges, swap entry/exits |
