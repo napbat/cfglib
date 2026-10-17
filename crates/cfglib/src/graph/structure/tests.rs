@@ -755,3 +755,106 @@ fn dead_code_that_jumps_into_live_code_neither_joins_nor_closes_its_loops() {
     assert_eq!(all.len(), 1);
     assert_eq!(all[0].body, BTreeSet::from([head, body]));
 }
+
+#[test]
+fn a_dead_loop_that_feeds_a_live_loops_body_stays_apart_from_it() {
+    // Live: entry -> head <-> body (the back edge tagged), head -> exit. Dead:
+    // `source -> top <-> side`, and `side` jumps into the live body, which
+    // takes the entry away from `body` as dominator in the whole-graph forest.
+    let mut cfg = Cfg::<u32>::new();
+    let [head, body, exit, source, top, side] = [(); 6].map(|()| cfg.new_block());
+    cfg.add_edge(cfg.entry(), head, EdgeKind::Fallthrough);
+    cfg.add_edge(head, body, EdgeKind::ConditionalTrue);
+    cfg.add_edge(head, exit, EdgeKind::ConditionalFalse);
+    cfg.add_edge(body, head, EdgeKind::Back);
+    cfg.add_edge(source, top, EdgeKind::Fallthrough);
+    cfg.add_edge(top, side, EdgeKind::ConditionalTrue);
+    cfg.add_edge(side, top, EdgeKind::Fallthrough);
+    cfg.add_edge(side, body, EdgeKind::Jump);
+    let dom = DominatorTree::compute(&cfg);
+
+    let loops = detect_all_loops_tagged(&cfg, &dom);
+
+    let find = |header| loops.iter().find(|lp| lp.header == header);
+    let live = find(head).expect("the live loop is still found");
+    assert_eq!(live.body, BTreeSet::from([head, body]));
+    assert_eq!(live.depth, 0);
+    let dead = find(top).expect("the dead loop is found");
+    assert_eq!(dead.body, BTreeSet::from([top, side]));
+    assert_eq!(dead.latches, BTreeSet::from([side]));
+    assert_eq!(dead.depth, 0, "the live loop does not contain it");
+    assert_eq!(loops.len(), 2);
+}
+
+/// On random graphs with dead code, loops of every closing style and edges
+/// from dead code into live code: the live loops are exactly those of
+/// [`detect_loops_tagged`]; a dead loop's header, latches and body are all dead
+/// blocks; and a dead loop's depth counts the dead loops around it and no live
+/// one.
+#[test]
+fn the_loops_of_dead_code_hold_only_dead_blocks_on_random_graphs() {
+    let kinds = [
+        EdgeKind::Fallthrough,
+        EdgeKind::Back,
+        EdgeKind::ConditionalTrue,
+        EdgeKind::Jump,
+        EdgeKind::Back,
+    ];
+    let mut with_a_dead_loop = 0;
+    for seed in 0..4_000_u64 {
+        let mut rng = crate::test_util::rng::Rng::new(seed);
+        let count = 4 + rng.below(9);
+        let mut cfg = Cfg::<u32>::new();
+        let mut blocks = vec![cfg.entry()];
+        blocks.extend((1..count).map(|_| cfg.new_block()));
+        for _ in 0..count + rng.below(count * 2) {
+            let (from, to) = (rng.below(count), rng.below(count));
+            cfg.add_edge(blocks[from], blocks[to], kinds[rng.below(kinds.len())]);
+        }
+        let dom = DominatorTree::compute(&cfg);
+        let all = detect_all_loops_tagged(&cfg, &dom);
+        let label = alloc::format!("seed {seed}");
+
+        let live: Vec<_> = all
+            .iter()
+            .filter(|lp| dom.is_reachable(lp.header))
+            .cloned()
+            .collect();
+        assert_eq!(live, detect_loops_tagged(&cfg, &dom), "{label}");
+
+        let dead: Vec<_> = all
+            .iter()
+            .filter(|lp| !dom.is_reachable(lp.header))
+            .cloned()
+            .collect();
+        with_a_dead_loop += usize::from(!dead.is_empty());
+        for lp in &dead {
+            assert!(
+                lp.body.iter().all(|&block| !dom.is_reachable(block)),
+                "{label}"
+            );
+            assert!(
+                lp.latches.iter().all(|&block| !dom.is_reachable(block)),
+                "{label}"
+            );
+        }
+        // `nesting` breaks a tie between equally large enclosing loops by list
+        // order, and detection lists loops by header.
+        let mut by_header = dead.clone();
+        by_header.sort_by_key(|lp| lp.header);
+        let depths = crate::graph::loop_nest::nesting(&by_header).depths;
+        for (lp, depth) in by_header.iter().zip(depths) {
+            let listed = dead.iter().find(|other| other.header == lp.header);
+            assert_eq!(
+                listed.map(|other| other.depth),
+                Some(depth),
+                "dead loop at {:?}, {label}",
+                lp.header
+            );
+        }
+    }
+    assert!(
+        with_a_dead_loop > 1_000,
+        "only {with_a_dead_loop} graphs had a dead loop"
+    );
+}

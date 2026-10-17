@@ -133,7 +133,13 @@ fn push_value<V: VariableId>(
     stack.push(value);
 }
 
-/// Rename every block reachable from a root of the dominator forest.
+/// Rename every block of the dominator forest, each exactly once.
+///
+/// `dom` has to be a forest that holds every block of `cfg`: the tree of the
+/// entry, plus the trees `complete_dominator_forest` roots at the code the
+/// entry misses. A block in no tree has no span to walk, so it would be
+/// skipped without a word, and its instructions would reach the form
+/// un-renamed; the forest is what rules that out, and it is asserted here.
 pub(super) fn rename<G, V>(
     scratch: &mut SsaScratch<V>,
     cfg: &G,
@@ -144,6 +150,10 @@ pub(super) fn rename<G, V>(
     G::Inst: InstrInfo<Variable = V>,
     V: VariableId,
 {
+    debug_assert!(
+        cfg.node_ids().all(|block| dom.is_reachable(block)),
+        "the dominator forest leaves a block out of every tree"
+    );
     // The entry's tree first, then every other tree of the forest in
     // ascending root order: the order fixes which block gets which version.
     let roots = core::iter::once(cfg.root()).chain(
