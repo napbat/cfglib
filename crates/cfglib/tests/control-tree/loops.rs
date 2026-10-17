@@ -315,7 +315,7 @@ fn break_and_continue_resolve_against_the_loop_instead_of_becoming_gotos() {
     );
     assert_eq!(
         pseudocode(&flow.cfg, &tree),
-        "i = 0\nwhile {\n    i < n\n    break if !cond;\n    if {\n        continue;\n    } else {\n        if {\n            break;\n        } else {\n            work(i)\n            continue;\n        }\n    }\n}\nreturn\n"
+        "i = 0\nwhile {\n    i < n\n    break if !cond;\n    if (skip(i)) {\n        continue;\n    } else {\n        if (done(i)) {\n            break;\n        } else {\n            work(i)\n            continue;\n        }\n    }\n}\nreturn\n"
     );
 }
 

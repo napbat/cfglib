@@ -550,7 +550,7 @@ fn lift_if_no_else() {
         ff("c"),
         MockInst(FlowEffect::Return, "ret"),
     ]);
-    assert!(p.contains("if {"), "should have if: {p}");
+    assert!(p.contains("if ("), "should have if: {p}");
     assert!(p.contains('b'), "then body should contain b: {p}");
     assert!(p.contains('c'), "post-merge should contain c: {p}");
 }
@@ -567,7 +567,7 @@ fn lift_if_else() {
         ff("merge"),
         MockInst(FlowEffect::Return, "ret"),
     ]);
-    assert!(p.contains("if {"), "should have if: {p}");
+    assert!(p.contains("if ("), "should have if: {p}");
     assert!(p.contains("then_inst"), "then arm: {p}");
     assert!(
         p.contains("else_inst") || p.contains("} else {"),
@@ -617,7 +617,7 @@ fn lift_switch() {
         ff("after"),
         MockInst(FlowEffect::Return, "ret"),
     ]);
-    assert!(p.contains("switch {"), "should have switch: {p}");
+    assert!(p.contains("switch ("), "should have switch: {p}");
     assert!(p.contains("case {"), "should have case: {p}");
     assert!(p.contains("arm0"), "{p}");
     assert!(p.contains("arm1"), "{p}");
@@ -636,7 +636,7 @@ fn lift_if_in_loop() {
         MockInst(FlowEffect::LoopClose, "endloop"),
         MockInst(FlowEffect::Return, "ret"),
     ]);
-    assert!(p.contains("if {"), "should have if inside loop: {p}");
+    assert!(p.contains("if ("), "should have if inside loop: {p}");
     assert!(p.contains("then"), "{p}");
 }
 
@@ -651,7 +651,7 @@ fn lift_loop_in_if() {
         MockInst(FlowEffect::ConditionalClose, "endif"),
         MockInst(FlowEffect::Return, "ret"),
     ]);
-    let has_if = p.contains("if {");
+    let has_if = p.contains("if (");
     let has_loop = p.contains("loop {") || p.contains("while {") || p.contains("do {");
     assert!(has_if || has_loop, "should have nested structure: {p}");
 }

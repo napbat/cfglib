@@ -643,7 +643,7 @@ fn a_branch_inside_a_filter_funclet_merges_like_reachable_code() {
     let text = pseudocode(&cfg, &tree);
     assert!(
         text.contains(
-            ".bb3:\n    if {\n        arm_a\n    } else {\n        arm_b\n    }\n    join\n"
+            ".bb3:\n    if (filter_test) {\n        arm_a\n    } else {\n        arm_b\n    }\n    join\n"
         ),
         "{text}"
     );

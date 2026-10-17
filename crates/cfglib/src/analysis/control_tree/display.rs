@@ -17,7 +17,10 @@ impl ControlTree {
     /// The tree holds no instruction, so the caller prints them:
     /// `write_instruction` writes the text of the instruction at a
     /// [`ProgramPoint`] into the sink it is given, and writes nothing for an
-    /// instruction that has no text. Each non-empty text is one line.
+    /// instruction that has no text. Each non-empty text is one line, except
+    /// that the last instruction of a branch or dispatch block, its test, is
+    /// the condition in the header of the `if` or `switch` it opens
+    /// (`if (test) {`); a test with no text leaves the header bare.
     ///
     /// # Errors
     ///
@@ -93,18 +96,30 @@ impl<F: FnMut(&mut dyn fmt::Write, ProgramPoint) -> fmt::Result> Printer<'_, F> 
         Ok(())
     }
 
-    /// Write the instructions that compute a condition, keeping the last one —
-    /// the test itself — for the construct's own header.
-    fn write_condition_prefix(
+    /// Write the line that opens a branching construct: the instructions that
+    /// compute the condition ahead of it, then `keyword` followed by the text
+    /// of the last instruction — the test itself — in parentheses. An empty
+    /// test text leaves the keyword bare.
+    fn write_branch_header(
         &mut self,
         out: &mut IndentedWriter<'_>,
+        keyword: &str,
         condition: BlockSpan,
     ) -> fmt::Result {
-        if condition.len() > 1 {
-            self.write_span(
-                out,
-                BlockSpan::new(condition.block(), condition.start(), condition.end() - 1),
-            )?;
+        let Some(test_point) = condition.points().last() else {
+            out.indent()?;
+            return out.write_str(keyword);
+        };
+        self.write_span(
+            out,
+            BlockSpan::new(condition.block(), condition.start(), condition.end() - 1),
+        )?;
+        let mut test = String::new();
+        (self.write_instruction)(&mut test, test_point)?;
+        out.indent()?;
+        out.write_str(keyword)?;
+        if !test.is_empty() {
+            write!(out, " ({test})")?;
         }
         Ok(())
     }
@@ -116,9 +131,7 @@ impl<F: FnMut(&mut dyn fmt::Write, ProgramPoint) -> fmt::Result> Printer<'_, F> 
         then_body: ControlBody,
         else_body: ControlBody,
     ) -> fmt::Result {
-        self.write_condition_prefix(out, condition)?;
-        out.indent()?;
-        out.write_str("if")?;
+        self.write_branch_header(out, "if", condition)?;
         out.open()?;
         self.write_nodes(out, then_body)?;
         if !else_body.is_empty() {
@@ -189,9 +202,7 @@ impl<F: FnMut(&mut dyn fmt::Write, ProgramPoint) -> fmt::Result> Printer<'_, F> 
         cases: &[super::node::SwitchCase],
         default_body: ControlBody,
     ) -> fmt::Result {
-        self.write_condition_prefix(out, condition)?;
-        out.indent()?;
-        out.write_str("switch")?;
+        self.write_branch_header(out, "switch", condition)?;
         out.open()?;
         for case in cases {
             out.indent()?;

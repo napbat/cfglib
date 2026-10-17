@@ -7,7 +7,7 @@ i = 0
         while {
             j < m
             break if !cond;
-            if {
+            if (found(i, j)) {
                 break .bb1;
             } else {
                 j += 1

@@ -2,10 +2,10 @@ i = 0
 while {
     i < n
     break if !cond;
-    if {
+    if (bad_a(i)) {
         goto .bb6;
     } else {
-        if {
+        if (bad_b(i)) {
             goto .bb6;
         } else {
             i += 1

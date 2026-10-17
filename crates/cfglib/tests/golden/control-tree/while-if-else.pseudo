@@ -2,7 +2,7 @@ total = 0
 while {
     i < n
     break if !cond;
-    if {
+    if (odd(i)) {
         total += i
     } else {
         total -= 1
