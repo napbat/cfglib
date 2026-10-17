@@ -539,7 +539,10 @@ fn transfers_without_a_target_are_rejected<D: FlatKit>() {
     // `verify` and `lower` reject each statement in the same words, so the
     // checked builder refuses what lowering cannot translate.
     let cases: [(Vec<Sn>, &str); 6] = [
-        (vec![Sn::Break(None)], "s0 breaks outside any loop or switch"),
+        (
+            vec![Sn::Break(None)],
+            "s0 breaks outside any loop or switch",
+        ),
         (vec![Sn::Continue(None)], "s0 continues outside any loop"),
         (
             vec![Sn::Break(Some("nowhere"))],

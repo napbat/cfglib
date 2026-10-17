@@ -380,17 +380,12 @@ where
         if sources.is_empty() {
             return Ok(());
         }
-        let Some(target) = self
-            .frames
-            .iter()
-            .rev()
-            .find_map(|frame| match frame.kind {
-                FrameKind::Loop { continue_target } if label.is_none() || frame.label == label => {
-                    Some(continue_target)
-                }
-                _ => None,
-            })
-        else {
+        let Some(target) = self.frames.iter().rev().find_map(|frame| match frame.kind {
+            FrameKind::Loop { continue_target } if label.is_none() || frame.label == label => {
+                Some(continue_target)
+            }
+            _ => None,
+        }) else {
             let cause = match label {
                 None => Untargeted::Continue,
                 Some(label) if self.frames.iter().any(|frame| frame.label == Some(label)) => {

@@ -268,7 +268,12 @@ impl<'a, D: Fold, F: FunctionView<D>> Transfer<'a, D, F> {
     /// restore the bits that the earlier one changed, and a root that an
     /// earlier write left unknown stays unknown.
     fn staged<'s>(&'s self, state: &'s ConstState, root: usize) -> Option<&'s [u64]> {
-        match self.pending.iter().rev().find(|&&(staged, _)| staged == root) {
+        match self
+            .pending
+            .iter()
+            .rev()
+            .find(|&&(staged, _)| staged == root)
+        {
             Some((_, value)) => value.as_deref(),
             None => state.get(root),
         }
