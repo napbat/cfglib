@@ -5,7 +5,7 @@ extern crate alloc;
 
 use alloc::vec;
 
-use crate::dataflow::ProgramPoint;
+use crate::ProgramPoint;
 use crate::ir::hlil::{Entity, FlatBuilder, FunctionView, StmtShape, verify};
 use crate::region::{Handler as RegionHandler, HandlerBody, HandlerKind, Region, RegionId};
 use crate::test_util::golden::assert_golden;

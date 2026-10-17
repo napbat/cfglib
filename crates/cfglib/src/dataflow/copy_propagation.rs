@@ -24,10 +24,11 @@ use alloc::vec::Vec;
 
 use super::cfg_view::CfgView;
 use super::liveness::Liveness;
-use super::{InstrInfo, ProgramPoint, VariableId, first_unwind_point, unwind_reach};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
+use crate::dataflow::unwind::{first_unwind_point, unwind_reach};
 use crate::graph::dominator::DominatorTree;
+use crate::{InstrInfo, ProgramPoint, VariableId};
 
 /// Borrowed pairwise alias definitions and their corresponding value sources.
 pub type AliasPairs<'a, V> = (&'a [V], &'a [V]);
@@ -96,7 +97,7 @@ enum Propagation {
 #[derive(Clone)]
 struct Substitution<V> {
     source: V,
-    definition: super::ProgramPoint,
+    definition: crate::ProgramPoint,
 }
 
 fn pairs<I: CopySource>(
@@ -329,7 +330,7 @@ fn propagate<I: CopySource + Clone, E>(
     let mut candidates: BTreeSet<I::Variable> = BTreeSet::new();
     for &bid in &block_ids {
         for (inst_idx, inst) in cfg.block_mut(bid).instructions_mut().iter_mut().enumerate() {
-            let point = super::ProgramPoint {
+            let point = crate::ProgramPoint {
                 block: bid,
                 inst_idx,
             };
@@ -458,7 +459,22 @@ pub fn copy_propagation_with_exits<I: CopySource + Clone, E>(
 ///
 /// Returns the number of rewritten uses and removed alias instructions.
 pub fn alias_propagation<I: CopySource + Clone, E>(cfg: &mut Cfg<I, E>) -> AliasPropagationStats {
-    let stats = propagate(cfg, Propagation::Aliases, |_| Vec::new());
+    alias_propagation_with_exits(cfg, |_| Vec::new())
+}
+
+/// [`alias_propagation`] told what leaves each block.
+///
+/// The counterpart of [`copy_propagation_with_exits`]: `live_out` names what
+/// outlives the graph in a block, and an alias instruction with a definition
+/// live there is never removed, though the uses inside the function are still
+/// rewritten to their sources.
+///
+/// Returns the number of rewritten uses and removed alias instructions.
+pub fn alias_propagation_with_exits<I: CopySource + Clone, E>(
+    cfg: &mut Cfg<I, E>,
+    live_out: impl Fn(BlockId) -> Vec<I::Variable>,
+) -> AliasPropagationStats {
+    let stats = propagate(cfg, Propagation::Aliases, live_out);
     AliasPropagationStats {
         uses_rewritten: stats.uses_rewritten,
         aliases_removed: stats.instructions_removed,
@@ -470,9 +486,8 @@ mod tests {
     use super::*;
     use crate::cfg::Cfg;
     use crate::edge::EdgeKind;
-    use crate::flow::FlowEffect;
     use crate::test_util::{
-        DfInst, UdInst, df_copy, df_def, df_ff, df_use, df_with_effect, ud_inst,
+        DfInst, UdInst, df_copy, df_def, df_ff, df_throwing, df_use, protected_region, ud_inst,
     };
 
     /// Whether the mock instruction is a pairwise alias set.
@@ -755,6 +770,24 @@ mod tests {
     }
 
     #[test]
+    fn an_alias_an_exit_observes_keeps_its_instruction() {
+        let mut cfg: Cfg<AliasInst> = Cfg::new();
+        cfg.block_mut(cfg.entry()).instructions_mut().extend([
+            ud_inst(&[7, 8], &[1, 2], IsAlias(true)),
+            ud_inst(&[1, 2], &[], IsAlias(false)),
+        ]);
+
+        let result = alias_propagation_with_exits(&mut cfg, |_| alloc::vec![1]);
+
+        assert_eq!(result.uses_rewritten, 2, "the readers still see the source");
+        assert_eq!(result.aliases_removed, 0, "a caller reads the alias back");
+        let instructions = cfg.block(cfg.entry()).instructions();
+        assert_eq!(instructions.len(), 2);
+        assert_eq!(instructions[0].defs, [1, 2]);
+        assert_eq!(instructions[1].uses, [7, 8]);
+    }
+
+    #[test]
     fn pairwise_aliases_preserve_same_instruction_pre_state_reads() {
         let mut cfg: Cfg<AliasInst> = Cfg::new();
         cfg.block_mut(cfg.entry()).instructions_mut().extend([
@@ -776,24 +809,15 @@ mod tests {
     fn protected_copy(
         instructions: impl IntoIterator<Item = DfInst>,
     ) -> (Cfg<DfInst>, BlockId, BlockId) {
-        let mut cfg: Cfg<DfInst> = Cfg::new();
-        let protected = cfg.new_block();
-        let normal = cfg.new_block();
-        let handler = cfg.new_block();
-        cfg.add_edge(cfg.entry(), protected, EdgeKind::Fallthrough);
-        cfg.add_edge(protected, normal, EdgeKind::Fallthrough);
-        cfg.add_edge(protected, handler, EdgeKind::ExceptionUnwind);
+        let (mut cfg, [_, normal, handler]) = protected_region(instructions);
         cfg.block_mut(cfg.entry()).push(df_def("def_r0", 0));
-        cfg.block_mut(protected)
-            .instructions_mut()
-            .extend(instructions);
         cfg.block_mut(normal).push(df_use("success", 1));
         cfg.block_mut(handler).push(df_use("catch", 1));
         (cfg, normal, handler)
     }
 
     fn call() -> DfInst {
-        df_with_effect(df_ff("call"), FlowEffect::MayThrow)
+        df_throwing(df_ff("call"))
     }
 
     #[test]

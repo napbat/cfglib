@@ -4,7 +4,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use crate::dataflow::InstrInfo;
+use crate::InstrInfo;
 
 /// A mock instruction carrying only uses, defs, and a test-specific
 /// payload `P`. Test modules attach their own semantics by implementing

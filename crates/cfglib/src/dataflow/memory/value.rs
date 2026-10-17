@@ -9,7 +9,7 @@ use core::fmt;
 use smallvec::SmallVec;
 
 use crate::memory::MemoryAccess;
-use crate::{BlockId, Graph, NodeId, SsaForm, SsaValue, SsaVersion, VariableId};
+use crate::{BlockId, Graph, NodeId, SsaForm, SsaInstruction, SsaValue, SsaVersion, VariableId};
 
 use super::{MemoryEventSite, MemorySSA, MemorySsaValue};
 
@@ -308,24 +308,31 @@ impl<V: VariableId> MemoryValueFlowScratch<V> {
     fn resolve<L>(
         &mut self,
         site: MemoryEventSite,
-        instruction: &crate::SsaInstruction<V>,
+        instruction: &SsaInstruction<V>,
         access: &MemoryAccess<L, V>,
     ) -> Result<(), MemoryValueFlowError<V>> {
-        resolve_uses(
+        let used = |variable: &V| instruction.use_of(variable);
+        resolve_into(
             &mut self.addresses,
             site,
-            instruction,
             access.address_uses(),
             MemoryValueRole::Address,
+            used,
         )?;
-        resolve_uses(
+        resolve_into(
             &mut self.stored,
             site,
-            instruction,
             access.value_uses(),
             MemoryValueRole::Stored,
+            used,
         )?;
-        resolve_defs(&mut self.loaded, site, instruction, access.value_defs())
+        resolve_into(
+            &mut self.loaded,
+            site,
+            access.value_defs(),
+            MemoryValueRole::Loaded,
+            |variable| instruction.def_of(variable),
+        )
     }
 }
 
@@ -588,52 +595,26 @@ where
     }
 }
 
-/// Resolve declared use variables into `buffer`, replacing its contents.
-fn resolve_uses<V: VariableId>(
+/// Resolve declared variables into `buffer`, replacing its contents.
+///
+/// `lookup` names each variable's value on the side of the instruction its
+/// `role` requires: [`SsaInstruction::use_of`] for operands the event reads,
+/// [`SsaInstruction::def_of`] for the definitions it loads into.
+fn resolve_into<'a, V: VariableId + 'a>(
     buffer: &mut Vec<SsaValue<V>>,
     site: MemoryEventSite,
-    instruction: &crate::SsaInstruction<V>,
     variables: &[V],
     role: MemoryValueRole,
+    lookup: impl Fn(&V) -> Option<&'a SsaValue<V>>,
 ) -> Result<(), MemoryValueFlowError<V>> {
     buffer.clear();
     for variable in variables {
-        let value = instruction
-            .uses()
-            .iter()
-            .find(|value| value.variable == *variable)
-            .cloned()
-            .ok_or_else(|| MemoryValueFlowError::MissingVariable {
-                site,
-                variable: variable.clone(),
-                role,
-            })?;
-        buffer.push(value);
-    }
-    Ok(())
-}
-
-/// Resolve declared definition variables into `buffer`, replacing its
-/// contents.
-fn resolve_defs<V: VariableId>(
-    buffer: &mut Vec<SsaValue<V>>,
-    site: MemoryEventSite,
-    instruction: &crate::SsaInstruction<V>,
-    variables: &[V],
-) -> Result<(), MemoryValueFlowError<V>> {
-    buffer.clear();
-    for variable in variables {
-        let value = instruction
-            .defs()
-            .iter()
-            .find(|value| value.variable == *variable)
-            .cloned()
-            .ok_or_else(|| MemoryValueFlowError::MissingVariable {
-                site,
-                variable: variable.clone(),
-                role: MemoryValueRole::Loaded,
-            })?;
-        buffer.push(value);
+        let value = lookup(variable).ok_or_else(|| MemoryValueFlowError::MissingVariable {
+            site,
+            variable: variable.clone(),
+            role,
+        })?;
+        buffer.push(value.clone());
     }
     Ok(())
 }

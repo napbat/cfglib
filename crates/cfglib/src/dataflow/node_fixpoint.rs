@@ -17,12 +17,14 @@
 //! [`TryNodeProblem`].
 
 extern crate alloc;
-use alloc::collections::VecDeque;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::convert::Infallible;
 
-use super::fixpoint::{Direction, SolveConfig, SolveError, TrySolveError, collapse_infallible};
+use super::fixpoint::{
+    Direction, Facts, SolveConfig, SolveError, TrySolveError, collapse_infallible,
+};
+use super::worklist::Worklist;
 use crate::graph::traverse::{Adjacency, Incoming, Outgoing};
 use crate::graph::view::{DenseId, GraphView};
 
@@ -101,6 +103,12 @@ pub trait TryNodeProblem<G: GraphView> {
 }
 
 /// The solved per-node facts of a [`NodeProblem`].
+///
+/// Facts follow the analysis direction: [`fact_in`](Self::fact_in) is the met
+/// fact flowing into a node and [`fact_out`](Self::fact_out) the fact it
+/// transfers onward. For a [`Direction::Backward`] problem the node's
+/// `fact_in` is therefore the fact *after* the node in execution order,
+/// where [`Facts`] reports program-order facts.
 #[derive(Debug, Clone)]
 pub struct NodeFacts<F> {
     input: Vec<F>,
@@ -109,13 +117,13 @@ pub struct NodeFacts<F> {
 }
 
 impl<F> NodeFacts<F> {
-    /// The met fact entering `node`.
+    /// The met fact flowing into `node` along the analysis direction.
     #[must_use]
     pub fn fact_in<N: DenseId>(&self, node: N) -> &F {
         &self.input[node.index()]
     }
 
-    /// The transferred fact leaving `node`.
+    /// The transferred fact leaving `node` along the analysis direction.
     #[must_use]
     pub fn fact_out<N: DenseId>(&self, node: N) -> &F {
         &self.output[node.index()]
@@ -125,6 +133,14 @@ impl<F> NodeFacts<F> {
     #[must_use]
     pub const fn steps(&self) -> usize {
         self.steps
+    }
+
+    /// These facts as program-order block facts of a solve in `direction`.
+    pub(crate) fn into_block_facts(self, direction: Direction) -> Facts<F> {
+        match direction {
+            Direction::Forward => Facts::from_parts(self.input, self.output, self.steps),
+            Direction::Backward => Facts::from_parts(self.output, self.input, self.steps),
+        }
     }
 }
 
@@ -244,7 +260,8 @@ where
     collapse_infallible(try_solve_with_worklist(
         graph,
         &fallible,
-        NodeWorklist::all(graph.node_bound()),
+        Worklist::live(graph),
+        None,
         config,
     ))
 }
@@ -273,7 +290,8 @@ where
     collapse_infallible(try_solve_with_worklist(
         graph,
         &fallible,
-        seed_worklist(graph, seeds),
+        Worklist::seeded(graph, seeds),
+        None,
         config,
     ))
 }
@@ -332,12 +350,7 @@ where
     G: GraphView,
     P: TryNodeProblem<G>,
 {
-    try_solve_with_worklist(
-        graph,
-        problem,
-        NodeWorklist::all(graph.node_bound()),
-        config,
-    )
+    try_solve_with_worklist(graph, problem, Worklist::live(graph), None, config)
 }
 
 /// Solve a fallible [`TryNodeProblem`] from `seeds` with a deterministic step
@@ -361,69 +374,18 @@ where
     G: GraphView,
     P: TryNodeProblem<G>,
 {
-    try_solve_with_worklist(graph, problem, seed_worklist(graph, seeds), config)
-}
-
-fn seed_worklist<G: GraphView>(graph: &G, seeds: &[G::NodeId]) -> NodeWorklist {
-    let mut nodes: Vec<_> = seeds
-        .iter()
-        .map(|seed| {
-            assert!(
-                seed.index() < graph.node_bound(),
-                "seed node is out of range"
-            );
-            seed.index()
-        })
-        .collect();
-    nodes.sort_unstable();
-    nodes.dedup();
-    NodeWorklist::from_sorted(nodes, graph.node_bound())
-}
-
-struct NodeWorklist {
-    queue: VecDeque<usize>,
-    queued: Vec<bool>,
-}
-
-impl NodeWorklist {
-    fn all(node_count: usize) -> Self {
-        Self {
-            queue: (0..node_count).collect(),
-            queued: vec![true; node_count],
-        }
-    }
-
-    fn from_sorted(nodes: Vec<usize>, node_count: usize) -> Self {
-        let mut queued = vec![false; node_count];
-        for &node in &nodes {
-            queued[node] = true;
-        }
-        Self {
-            queue: nodes.into_iter().collect(),
-            queued,
-        }
-    }
-
-    fn pop(&mut self) -> Option<usize> {
-        let node = self.queue.pop_front()?;
-        self.queued[node] = false;
-        Some(node)
-    }
-
-    fn insert(&mut self, node: usize) {
-        if !self.queued[node] {
-            self.queued[node] = true;
-            self.queue.push_back(node);
-        }
-    }
+    try_solve_with_worklist(graph, problem, Worklist::seeded(graph, seeds), None, config)
 }
 
 /// The worklist solver every entry point runs, differing only in which nodes
-/// start queued.
-fn try_solve_with_worklist<G, P>(
+/// start queued and in `entry`, a node that receives the boundary fact in
+/// front of its upstream flow even when it has upstream neighbors — the
+/// root of a rooted view that something branches back to.
+pub(super) fn try_solve_with_worklist<G, P>(
     graph: &G,
     problem: &P,
-    worklist: NodeWorklist,
+    worklist: Worklist,
+    entry: Option<G::NodeId>,
     config: SolveConfig,
 ) -> Result<NodeFacts<P::Fact>, TrySolveError<P::Error>>
 where
@@ -432,10 +394,10 @@ where
 {
     match problem.direction() {
         Direction::Forward => {
-            try_solve_by_axis(graph, problem, Incoming, Outgoing, worklist, config)
+            try_solve_by_axis(graph, problem, Incoming, Outgoing, worklist, entry, config)
         }
         Direction::Backward => {
-            try_solve_by_axis(graph, problem, Outgoing, Incoming, worklist, config)
+            try_solve_by_axis(graph, problem, Outgoing, Incoming, worklist, entry, config)
         }
     }
 }
@@ -445,7 +407,8 @@ fn try_solve_by_axis<G, P, U, D>(
     problem: &P,
     upstream: U,
     downstream: D,
-    mut worklist: NodeWorklist,
+    mut worklist: Worklist,
+    entry: Option<G::NodeId>,
     config: SolveConfig,
 ) -> Result<NodeFacts<P::Fact>, TrySolveError<P::Error>>
 where
@@ -460,7 +423,7 @@ where
     let mut output = vec![problem.bottom(graph); node_count];
 
     let mut steps = 0;
-    while let Some(node_index) = worklist.pop() {
+    while let Some(node_index) = worklist.pop_first() {
         if let Some(limit) = config.max_steps()
             && steps >= limit
         {
@@ -474,18 +437,16 @@ where
         steps += 1;
         let node = G::NodeId::from_index(node_index);
 
-        let mut neighbors = upstream.neighbors(graph, node);
-        let met = if let Some(first) = neighbors.next() {
-            let mut current = output[first.index()].clone();
-            for from in neighbors {
-                current = problem
+        let mut met = (entry == Some(node)).then(|| boundary.clone());
+        for from in upstream.neighbors(graph, node) {
+            met = Some(match met {
+                None => output[from.index()].clone(),
+                Some(current) => problem
                     .meet(&current, &output[from.index()])
-                    .map_err(TrySolveError::Problem)?;
-            }
-            current
-        } else {
-            boundary.clone()
-        };
+                    .map_err(TrySolveError::Problem)?,
+            });
+        }
+        let met = met.unwrap_or_else(|| boundary.clone());
 
         let transferred = problem
             .transfer(graph, node, &met)

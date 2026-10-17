@@ -7,9 +7,9 @@
 //! what each of them stands for in HLIL terms.
 
 use crate::cfg::Cfg;
-use crate::dataflow::{EffectInfo, InstrInfo};
 use crate::flow::FlowControl;
 use crate::graph::view::DenseId;
+use crate::{EffectInfo, InstrInfo};
 
 use super::dialect::LiftDialect;
 

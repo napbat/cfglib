@@ -22,8 +22,8 @@ use smallvec::SmallVec;
 
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
-use crate::dataflow::{InstrInfo, ProgramPoint, VariableId};
 use crate::graph::dominator::DominatorTree;
+use crate::{InstrInfo, ProgramPoint, VariableId};
 
 mod forest;
 mod frontier;
@@ -136,6 +136,33 @@ impl<V> SsaInstruction<V> {
     }
 }
 
+impl<V: PartialEq> SsaInstruction<V> {
+    /// The value this instruction reads for `variable`, or `None` when it
+    /// does not use it.
+    ///
+    /// Every read of one variable in one instruction names the same value,
+    /// because renaming resolves the operands before it pushes the
+    /// instruction's own definitions.
+    #[must_use]
+    pub fn use_of(&self, variable: &V) -> Option<&SsaValue<V>> {
+        self.uses.iter().find(|value| value.variable == *variable)
+    }
+
+    /// The value `variable` holds after this instruction, or `None` when it
+    /// does not define it.
+    ///
+    /// An instruction that defines a variable more than once leaves the last
+    /// definition behind, so that is the one this answers: it is the value a
+    /// later instruction reads.
+    #[must_use]
+    pub fn def_of(&self, variable: &V) -> Option<&SsaValue<V>> {
+        self.defs
+            .iter()
+            .rev()
+            .find(|value| value.variable == *variable)
+    }
+}
+
 /// SSA contents associated with one CFG block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SsaBlock<V> {
@@ -238,13 +265,7 @@ impl<V: VariableId> SsaForm<V> {
         let definition = contents.instructions[..end]
             .iter()
             .rev()
-            .find_map(|instruction| {
-                instruction
-                    .defs
-                    .iter()
-                    .rev()
-                    .find(|value| value.variable == *variable)
-            });
+            .find_map(|instruction| instruction.def_of(variable));
         if let Some(definition) = definition {
             return Some(definition.clone());
         }
@@ -254,6 +275,17 @@ impl<V: VariableId> SsaForm<V> {
             .find(|phi| phi.result.variable == *variable)
             .map(|phi| phi.result.clone())
     }
+}
+
+/// Panics unless `cfg`'s entry has no predecessor, which every SSA
+/// construction entry point requires; see [`SsaForm::compute`].
+pub(crate) fn assert_entry_is_not_a_branch_target<G: CfgView>(cfg: &G) {
+    assert!(
+        cfg.predecessors(cfg.root()).next().is_none(),
+        "SSA construction needs an entry block with no predecessor, but {} is a branch target: \
+         add an empty block that falls through to it and make that block the entry",
+        cfg.root()
+    );
 }
 
 impl<V: VariableId> SsaForm<V> {
@@ -267,16 +299,21 @@ impl<V: VariableId> SsaForm<V> {
     /// definitions still flow through unreachable handler/dead-code chains
     /// without inheriting values from the ordinary entry component.
     ///
-    /// # Precondition
+    /// # Panics
     ///
-    /// The entry block must not be a branch target. Phi operands come from
-    /// predecessor edges, so a phi placed AT the entry (entry doubling as a
-    /// loop header) has no operand for the version-`0` live-in value and the
-    /// value entering the function is dropped from the web. Every builder in
-    /// this workspace guarantees the property; direct constructions that
-    /// branch to the entry should canonicalize first
-    /// ([`insert_preheader`](crate::insert_preheader) /
-    /// [`split_block`](crate::Cfg::split_block)).
+    /// Panics when the entry block is a branch target. A phi placed at the
+    /// entry (the entry doubling as a loop header) merges only the values
+    /// that arrive along predecessor edges, and the value entering the
+    /// function has no edge to name, so the version-`0` live-in would be
+    /// dropped from the web without any error. A CFG recovered from an
+    /// address stream (`build_address_cfg`) has this shape when the
+    /// function's first instruction is a branch target.
+    ///
+    /// [`insert_preheader`](crate::insert_preheader) cannot repair it, since
+    /// the loop has no predecessor outside it to redirect. Add an empty
+    /// block that falls through to the old entry and make it the entry
+    /// ([`Cfg::set_entry`](crate::Cfg::set_entry)); the old entry is then an
+    /// ordinary loop header and its phi merges the live-in value.
     #[must_use]
     pub fn compute<G>(cfg: &G, dom: &DominatorTree) -> Self
     where
@@ -292,13 +329,18 @@ impl<V: VariableId> SsaForm<V> {
     /// This is [`compute`](Self::compute) with the call's buffers taken out of
     /// it. The form it returns is the same one, built by the same code: the
     /// allocating entry point is this function over a fresh [`SsaScratch`],
-    /// and it keeps the same precondition.
+    /// and it has the same panic condition.
+    ///
+    /// # Panics
+    ///
+    /// As [`compute`](Self::compute): when the entry block is a branch target.
     #[must_use]
     pub fn compute_in<G>(scratch: &mut SsaScratch<V>, cfg: &G, dom: &DominatorTree) -> Self
     where
         G: CfgView,
         G::Inst: InstrInfo<Variable = V>,
     {
+        assert_entry_is_not_a_branch_target(cfg);
         scratch.reset(cfg.node_bound());
         let complete = forest::complete_dominator_forest(
             &mut scratch.dominators,

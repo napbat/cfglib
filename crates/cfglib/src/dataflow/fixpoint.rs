@@ -3,19 +3,20 @@
 //! Supports both **forward** and **backward** analyses via a worklist
 //! algorithm that iterates until the solution stabilizes.
 //!
-//! Every solver in the crate carries the same facility matrix: a full solve,
-//! a seeded solve (`_from`), a deterministically bounded solve
-//! (`_with_config`), and fallible `try_` counterparts — all sharing
-//! [`SolveConfig`], [`SolveError`], and [`TrySolveError`]. The node-level
-//! counterpart lives in [`node_fixpoint`](super::node_fixpoint) and the
-//! edge-sensitive counterpart in [`edge_fixpoint`](super::edge_fixpoint).
+//! The crate's three generic solvers — this one, the node-level
+//! [`node_fixpoint`], and the edge-sensitive
+//! [`edge_fixpoint`](super::edge_fixpoint) — carry the same facility matrix:
+//! a full solve, a seeded solve (`_from`), a deterministically bounded solve
+//! (`_with_config`), and fallible `try_` counterparts, all sharing
+//! [`SolveConfig`], [`SolveError`], and [`TrySolveError`]. This one runs
+//! per-block facts on the node solver's core.
 
 extern crate alloc;
-use alloc::collections::BTreeSet;
-use alloc::vec;
 use alloc::vec::Vec;
 use core::convert::Infallible;
 
+use super::node_fixpoint::{self, TryNodeProblem};
+use super::worklist::Worklist;
 use crate::graph::traverse::{TraversalDirection, depth_first_preorder};
 use crate::graph::view::{DenseId, RootedView};
 
@@ -152,7 +153,13 @@ pub trait Problem<V: RootedView> {
     /// Initial (bottom) value for each block.
     fn bottom(&self) -> Self::Fact;
 
-    /// Initial value for the entry (forward) or each exit (backward) block.
+    /// The fact entering the analysis boundary.
+    ///
+    /// A forward analysis starts the root with it, merged with whatever
+    /// flows back into a root that is a branch target. A backward analysis
+    /// starts every block without successors with it. A seeded solve also
+    /// gives it to a seeded block with no upstream in the analysis
+    /// direction.
     fn entry_fact(&self) -> Self::Fact;
 
     /// Meet/join operator: merge information from multiple paths.
@@ -183,7 +190,7 @@ pub trait TryProblem<V: RootedView> {
     /// Initial (bottom) value for each block.
     fn bottom(&self) -> Self::Fact;
 
-    /// Initial value for the entry (forward) or each exit (backward) block.
+    /// The fact entering the analysis boundary, as [`Problem::entry_fact`].
     ///
     /// # Errors
     ///
@@ -211,7 +218,9 @@ pub trait TryProblem<V: RootedView> {
     ) -> Result<Self::Fact, Self::Error>;
 }
 
-/// Per-block facts computed by a fixpoint solve.
+/// Per-block facts computed by a fixpoint solve, in program order: the IN fact
+/// is the fact at a block's start and the OUT fact the fact at its end,
+/// whichever way the analysis flows.
 #[derive(Debug, Clone)]
 pub struct Facts<F> {
     /// The IN fact for each block (indexed by `DenseId::index()`).
@@ -324,7 +333,7 @@ pub fn solve_problem<V: RootedView, P: Problem<V>>(
 ///
 /// # Panics
 ///
-/// Panics when a seed is not a block in `cfg`.
+/// Panics when a seed is not a live node of `view`.
 ///
 /// # Errors
 ///
@@ -352,7 +361,7 @@ pub fn solve_problem_with_config<V: RootedView, P: Problem<V>>(
     collapse_infallible(try_solve_with_worklist(
         view,
         &fallible,
-        reachable_worklist(view, &fallible),
+        initial_worklist(view, Problem::direction(problem)),
         config,
     ))
 }
@@ -361,7 +370,7 @@ pub fn solve_problem_with_config<V: RootedView, P: Problem<V>>(
 ///
 /// # Panics
 ///
-/// Panics when a seed is not a block in `cfg`.
+/// Panics when a seed is not a live node of `view`.
 ///
 /// # Errors
 ///
@@ -377,7 +386,7 @@ pub fn solve_problem_from_with_config<V: RootedView, P: Problem<V>>(
     collapse_infallible(try_solve_with_worklist(
         view,
         &fallible,
-        seed_worklist(view, seeds),
+        Worklist::seeded(view, seeds),
         config,
     ))
 }
@@ -399,7 +408,7 @@ pub fn try_solve_problem<V: RootedView, P: TryProblem<V>>(
 ///
 /// # Panics
 ///
-/// Panics when a seed is not a block in `cfg`.
+/// Panics when a seed is not a live node of `view`.
 ///
 /// # Errors
 ///
@@ -424,7 +433,12 @@ pub fn try_solve_problem_with_config<V: RootedView, P: TryProblem<V>>(
     problem: &P,
     config: SolveConfig,
 ) -> Result<Facts<P::Fact>, TrySolveError<P::Error>> {
-    try_solve_with_worklist(view, problem, reachable_worklist(view, problem), config)
+    try_solve_with_worklist(
+        view,
+        problem,
+        initial_worklist(view, problem.direction()),
+        config,
+    )
 }
 
 /// Run a fallible fixpoint iteration from `seeds` with a deterministic step
@@ -432,7 +446,7 @@ pub fn try_solve_problem_with_config<V: RootedView, P: TryProblem<V>>(
 ///
 /// # Panics
 ///
-/// Panics when a seed is not a block in `cfg`.
+/// Panics when a seed is not a live node of `view`.
 ///
 /// # Errors
 ///
@@ -444,129 +458,66 @@ pub fn try_solve_problem_from_with_config<V: RootedView, P: TryProblem<V>>(
     seeds: &[V::NodeId],
     config: SolveConfig,
 ) -> Result<Facts<P::Fact>, TrySolveError<P::Error>> {
-    try_solve_with_worklist(view, problem, seed_worklist(view, seeds), config)
+    try_solve_with_worklist(view, problem, Worklist::seeded(view, seeds), config)
 }
 
-/// Blocks eligible for the initial worklist, as dense indices.
-fn reachable_worklist<V: RootedView, P: TryProblem<V>>(view: &V, problem: &P) -> BTreeSet<usize> {
-    match problem.direction() {
-        Direction::Forward => depth_first_preorder(view, view.root(), TraversalDirection::Outgoing)
-            .into_iter()
-            .map(DenseId::index)
-            .collect(),
-        Direction::Backward => view.node_ids().map(DenseId::index).collect(),
+/// The blocks the full solve starts from: those reachable from the root going
+/// forward, every block going backward.
+fn initial_worklist<V: RootedView>(view: &V, direction: Direction) -> Worklist {
+    match direction {
+        Direction::Forward => Worklist::of(
+            view.node_bound(),
+            depth_first_preorder(view, view.root(), TraversalDirection::Outgoing)
+                .into_iter()
+                .map(DenseId::index),
+        ),
+        Direction::Backward => Worklist::live(view),
     }
-}
-
-fn seed_worklist<V: RootedView>(view: &V, seeds: &[V::NodeId]) -> BTreeSet<usize> {
-    let mut live = vec![false; view.node_bound()];
-    for block in view.node_ids() {
-        live[block.index()] = true;
-    }
-    seeds
-        .iter()
-        .map(|seed| {
-            assert!(
-                live.get(seed.index()).copied().unwrap_or(false),
-                "seed block is out of range"
-            );
-            seed.index()
-        })
-        .collect()
 }
 
 fn try_solve_with_worklist<V: RootedView, P: TryProblem<V>>(
     view: &V,
     problem: &P,
-    mut worklist: BTreeSet<usize>,
+    worklist: Worklist,
     config: SolveConfig,
 ) -> Result<Facts<P::Fact>, TrySolveError<P::Error>> {
-    // Block-indexed side tables: sized by the identity bound, never by the
-    // live count, so a removed block's slot still has a well-defined fact.
-    let n = view.node_bound();
-    let bottom = problem.bottom();
-    let forward = matches!(problem.direction(), Direction::Forward);
+    let direction = problem.direction();
+    let entry = matches!(direction, Direction::Forward).then(|| view.root());
+    node_fixpoint::try_solve_with_worklist(view, &BlockProblem(problem), worklist, entry, config)
+        .map(|facts| facts.into_block_facts(direction))
+}
 
-    let mut block_in: Vec<P::Fact> = vec![bottom.clone(); n];
-    let mut block_out: Vec<P::Fact> = vec![bottom; n];
+/// Adapter that runs a [`TryProblem`] on the node solver's core.
+struct BlockProblem<'p, P>(&'p P);
 
-    let mut steps = 0;
-    while let Some(block_index) = worklist.pop_first() {
-        if let Some(limit) = config.max_steps
-            && steps >= limit
-        {
-            return Err(SolveError::StepLimitExceeded {
-                limit,
-                steps,
-                pending_node: block_index,
-            }
-            .into());
-        }
-        steps += 1;
-        let block = V::NodeId::from_index(block_index);
+impl<V: RootedView, P: TryProblem<V>> TryNodeProblem<V> for BlockProblem<'_, P> {
+    type Fact = P::Fact;
+    type Error = P::Error;
 
-        // Meet over the upstream facts in the analysis direction; a block
-        // with no upstream receives the problem's entry fact.
-        let merged = if forward {
-            let mut upstream = view.predecessors(block);
-            match upstream.next() {
-                None => problem.entry_fact().map_err(TrySolveError::Problem)?,
-                Some(first) => {
-                    let mut met = block_out[first.index()].clone();
-                    for from in upstream {
-                        met = problem
-                            .meet(&met, &block_out[from.index()])
-                            .map_err(TrySolveError::Problem)?;
-                    }
-                    met
-                }
-            }
-        } else {
-            let mut upstream = view.successors(block);
-            match upstream.next() {
-                None => problem.entry_fact().map_err(TrySolveError::Problem)?,
-                Some(first) => {
-                    let mut met = block_in[first.index()].clone();
-                    for from in upstream {
-                        met = problem
-                            .meet(&met, &block_in[from.index()])
-                            .map_err(TrySolveError::Problem)?;
-                    }
-                    met
-                }
-            }
-        };
-
-        if forward {
-            block_in[block.index()] = merged;
-            let new_out = problem
-                .transfer(view, block, &block_in[block.index()])
-                .map_err(TrySolveError::Problem)?;
-            if new_out != block_out[block.index()] {
-                block_out[block.index()] = new_out;
-                for downstream in view.successors(block) {
-                    worklist.insert(downstream.index());
-                }
-            }
-        } else {
-            block_out[block.index()] = merged;
-            let new_in = problem
-                .transfer(view, block, &block_out[block.index()])
-                .map_err(TrySolveError::Problem)?;
-            if new_in != block_in[block.index()] {
-                block_in[block.index()] = new_in;
-                for downstream in view.predecessors(block) {
-                    worklist.insert(downstream.index());
-                }
-            }
-        }
+    fn direction(&self) -> Direction {
+        TryProblem::direction(self.0)
     }
 
-    Ok(Facts {
-        block_in,
-        block_out,
-        steps,
-    })
+    fn bottom(&self, _view: &V) -> Self::Fact {
+        TryProblem::bottom(self.0)
+    }
+
+    fn boundary(&self, _view: &V) -> Result<Self::Fact, Self::Error> {
+        TryProblem::entry_fact(self.0)
+    }
+
+    fn meet(&self, a: &Self::Fact, b: &Self::Fact) -> Result<Self::Fact, Self::Error> {
+        TryProblem::meet(self.0, a, b)
+    }
+
+    fn transfer(
+        &self,
+        view: &V,
+        block: V::NodeId,
+        input: &Self::Fact,
+    ) -> Result<Self::Fact, Self::Error> {
+        TryProblem::transfer(self.0, view, block, input)
+    }
 }
 
 /// Adapter that runs an infallible [`Problem`] on the fallible solver core.

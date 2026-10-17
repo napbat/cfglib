@@ -3,7 +3,7 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::test_util::MemInst;
+use crate::test_util::{MemInst, protected_region};
 use crate::{
     Cfg, DominatorTree, EdgeKind, ExactMemoryAlias, MemoryAccess, MemoryAccessKind,
     MemoryDefinition, MemoryEvent, MemoryEventSite, MemorySSA, MemorySSAEvent, MemorySsaScratch,
@@ -441,20 +441,13 @@ fn the_public_accessors_agree_element_by_element_across_a_reused_scratch() {
 /// to `normal` and unwinds to `handler`, and both read A.
 #[test]
 fn a_handler_reads_the_memory_state_before_each_throwing_instruction() {
-    let mut cfg = Cfg::<Instruction>::new();
-    let protected = cfg.new_block();
-    let normal = cfg.new_block();
-    let handler = cfg.new_block();
-    cfg.add_edge(cfg.entry(), protected, EdgeKind::Fallthrough);
-    cfg.add_edge(protected, normal, EdgeKind::Fallthrough);
-    cfg.add_edge(protected, handler, EdgeKind::ExceptionUnwind);
-    cfg.block_mut(cfg.entry())
-        .push(Instruction::access(Location::A, MemoryAccessKind::Write));
-    cfg.block_mut(protected).instructions_mut().extend([
+    let (mut cfg, [protected, normal, handler]) = protected_region([
         Instruction::access(Location::A, MemoryAccessKind::Write).unwinding(),
         Instruction::plain(Vec::new(), Vec::new()).unwinding(),
         Instruction::access(Location::A, MemoryAccessKind::Write),
     ]);
+    cfg.block_mut(cfg.entry())
+        .push(Instruction::access(Location::A, MemoryAccessKind::Write));
     cfg.block_mut(normal)
         .push(Instruction::access(Location::A, MemoryAccessKind::Read));
     cfg.block_mut(handler)
@@ -516,4 +509,19 @@ fn a_handler_reads_the_memory_state_before_each_throwing_instruction() {
         [site(normal, 0)],
         "no unwind observes the final store"
     );
+}
+
+#[test]
+#[should_panic(expected = "branch target")]
+fn memory_ssa_rejects_an_entry_that_is_a_branch_target() {
+    let mut cfg = Cfg::<Instruction>::new();
+    let latch = cfg.new_block();
+    cfg.add_edge(cfg.entry(), latch, EdgeKind::Fallthrough);
+    cfg.add_edge(latch, cfg.entry(), EdgeKind::Back);
+    cfg.block_mut(cfg.entry())
+        .push(Instruction::access(Location::A, MemoryAccessKind::Read));
+    cfg.block_mut(latch)
+        .push(Instruction::access(Location::A, MemoryAccessKind::Write));
+
+    drop(MemorySSA::compute(&cfg, &ExactMemoryAlias));
 }

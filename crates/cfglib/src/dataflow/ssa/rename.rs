@@ -9,9 +9,9 @@ use smallvec::SmallVec;
 
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
-use crate::dataflow::{InstrInfo, ProgramPoint, VariableId};
-use crate::edge::KindedEdge;
+use crate::dataflow::unwind::unwind_edges;
 use crate::graph::dominator::{DominatorChildOrder, DominatorTree};
+use crate::{InstrInfo, ProgramPoint, VariableId};
 
 use super::scratch::SsaScratch;
 use super::{SsaBlock, SsaInstruction, SsaPhi, SsaValue, SsaVersion};
@@ -88,15 +88,12 @@ where
     block_instructions.reserve_exact(cfg.instructions(block).len());
     for (inst_idx, instruction) in cfg.instructions(block).iter().enumerate() {
         if instruction.may_unwind() {
-            for edge in cfg.outgoing(block) {
-                let edge = cfg.edge(edge);
-                if edge.data().kind() == crate::EdgeKind::ExceptionUnwind {
-                    phis.set_operands(
-                        edge.target(),
-                        ProgramPoint { block, inst_idx },
-                        |variable| current_value(variable, stacks),
-                    );
-                }
+            for edge in unwind_edges(cfg, block) {
+                phis.set_operands(
+                    edge.target(),
+                    ProgramPoint { block, inst_idx },
+                    |variable| current_value(variable, stacks),
+                );
             }
         }
         let uses = instruction

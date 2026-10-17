@@ -10,9 +10,10 @@ use alloc::vec::Vec;
 
 use smallvec::SmallVec;
 
+use crate::InstrInfo;
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
-use crate::dataflow::{InstrInfo, first_unwind_point, unwind_reach};
+use crate::dataflow::unwind::{first_unwind_point, unwind_reach};
 use crate::graph::dominator::{DominatorChildOrder, DominatorTree};
 
 /// A value number — opaque identifier for a computed value.

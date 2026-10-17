@@ -8,7 +8,7 @@ extern crate alloc;
 
 use alloc::string::ToString;
 
-use crate::dataflow::ProgramPoint;
+use crate::ProgramPoint;
 use crate::graph::view::DenseId;
 use crate::ir::hlil::{
     Entity, FlatBuilder, FunctionView, LiftError, LiftMetadata, StmtShape, lift, lift_trampolines,

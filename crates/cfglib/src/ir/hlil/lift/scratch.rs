@@ -13,7 +13,7 @@ use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::dataflow::ProgramPoint;
+use crate::ProgramPoint;
 
 use super::super::dialect::Dialect;
 

@@ -362,25 +362,24 @@ Instruction-level analyses read the graph through `CfgView`. The graph-shaped so
 |---|---|
 | Supertraits | `RootedView<NodeId = BlockId>` and `EdgeView<EdgeId = EdgeId>`. The edge data implements `KindedEdge`. The root is the entry block. |
 | `Inst`, `instructions` | The instruction type of the blocks, and the instructions of one block in program order. |
-| `edge_kind` | The kind of an edge. The default reads it from the `KindedEdge` data. |
-| `edge_weight` | The branch weight of an edge: a probability or an execution count. The default is `None`, which means that the view has no profile. |
+| `edge_weight` | The branch weight of an edge: a probability in `0.0..=1.0`, relative to the other edges leaving its source. The default is `None`, which means that the view has no profile. |
 
 `Cfg` implements `CfgView`, so every caller that holds a `Cfg` keeps working. A consumer with its own block and edge storage implements the trait and runs the same analyses without a conversion. The unit tests of the trait run each analysis on a vector-backed view and compare the answer with the one on a `Cfg`.
 
 The contract has two rules. `instructions` accepts every identity that `node_ids` yields, and it returns the same slice each time. The index of an instruction in that slice is the instruction index of the `ProgramPoint` that an analysis reports.
 
-The view has no separate exception model. An edge of kind `EdgeKind::ExceptionUnwind` leaves its source block before a throwing instruction. `InstrInfo::may_unwind` marks the throwing instructions of a block. `dataflow::departs_before_throws` combines the two.
+The view has no separate exception model. An edge of kind `EdgeKind::ExceptionUnwind` leaves its source block before a throwing instruction. `InstrInfo::may_unwind` marks the throwing instructions of a block. `departs_before_throws` combines the two.
 
 These analyses take `&G` where `G: CfgView`: `ReachingDefs`, `Liveness`, `DefUseChains`, `SsaForm`, `PhiPlacements`, `constant_propagation`, `SccpAnalysis`, `abstract_interpret`, `MemoryTrace`, `MemorySSA`, `DeadCode`, `recover_expressions`, `ValueNumbering`, `BlockValueNumbers`, `cfg_purity`, `CfgMetrics`, `detect_cfg_patterns`, `CfgProfile`, `detect_tail_calls`, and `detect_switch_tables`. The problems `LivenessProblem`, `SeededLivenessProblem`, `ReachingDefsProblem`, and `ConstPropProblem` also run on every `CfgView`. A transform that edits the graph still takes `&mut Cfg`.
 
 | Analysis | Function / Type | Description |
 |---|---|---|
-| Generic fixpoint solver | `solve_problem[_from][_with_config]`, `Problem` / `TryProblem` traits | Forward or backward, any lattice type; every solver carries the same seeded/bounded/fallible matrix over shared `SolveConfig` and `SolveError`; `meet_options` lifts any lattice to `Option<F>` with `None` as unreachable bottom |
+| Generic fixpoint solver | `solve_problem[_from][_with_config]`, `Problem` / `TryProblem` traits | Forward or backward, any lattice type; the block, node, and edge solvers carry the same seeded/bounded/fallible matrix over shared `SolveConfig` and `SolveError`, and run on one worklist; `meet_options` lifts any lattice to `Option<F>` with `None` as unreachable bottom |
 | Node-level fixpoint | `solve_node_problem[_from][_with_config]`, `NodeProblem` / `TryNodeProblem` traits | Per-node facts over any graph view (taint, reachability-with-facts) |
-| Edge-sensitive fixpoint | `solve_edge_problem`, `solve_edge_problem_from`, `EdgeProblem` trait | Full or seeded per-edge transfer over any edge view; stable id/data plus physical node pre/post states and deterministic bounded-solve errors |
-| Fallible edge-sensitive fixpoint | `try_solve_edge_problem`, `try_solve_edge_problem_from`, `TryEdgeProblem` trait | Preserves consumer boundary, merge, node-transfer, and edge-transfer errors separately from solver limits |
+| Edge-sensitive fixpoint | `solve_edge_problem[_from][_with_config]`, `EdgeProblem` trait | Full or seeded, optionally bounded, per-edge transfer over any edge view; stable id/data plus physical node pre/post states and deterministic bounded-solve errors |
+| Fallible edge-sensitive fixpoint | `try_solve_edge_problem[_from][_with_config]`, `TryEdgeProblem` trait | Preserves consumer boundary, merge, node-transfer, and edge-transfer errors separately from solver limits |
 | Reachability-lifted edge analysis | `Reachable` + `ReachableEdgeProblem` trait | Verification-style analyses over `Option` facts: `None` is unreached bottom, transfers short-circuit, entry facts start the flow, and each edge chooses pre- or post-state (exceptional edges observe the state the node received) |
-| Dense bit-set facts | `DenseBits` | Set-of-indices lattice element packed 64 per word; `union_with` is the join and reports change for convergence checks; `clear` is a word fill, `words` exposes the packed row, and `ones`/`intersection` step one set index at a time rather than one universe index |
+| Dense bit-set facts | `DenseBits` | Set-of-indices lattice element packed 64 per word; `union_with` is the join and reports change for convergence checks; `remove` and `clear` clear one index or the whole row, `words` exposes the packed row, and `ones`/`intersection` step one set index at a time rather than one universe index |
 | Reaching definitions | `ReachingDefs::compute` | Which writes reach each point; an `ExceptionUnwind` edge carries only the writes completed before each instruction that `InstrInfo::may_unwind` |
 | Liveness | `Liveness::compute` | Live-in / normal-completion live-out at each block; `live_on_unwind` is what unwind successors read before each throwing instruction; `live_before_instructions` / `live_after_instructions` replay the block transfer for instruction-granular sets (dead-store detection) |
 | Def-use / use-def chains | `DefUseChains::compute` | Bidirectional def↔use links; dead-def detection |

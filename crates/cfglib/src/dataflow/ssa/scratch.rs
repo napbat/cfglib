@@ -142,7 +142,7 @@ impl<V> Default for SsaScratch<V> {
     }
 }
 
-impl<V: crate::dataflow::VariableId> SsaScratch<V> {
+impl<V: crate::VariableId> SsaScratch<V> {
     /// Scratch holding nothing yet.
     ///
     /// Every buffer is sized by the first procedure it sees, so there is no

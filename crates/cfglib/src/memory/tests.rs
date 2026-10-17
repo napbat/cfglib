@@ -217,3 +217,24 @@ fn point_lookup_and_fence_query_are_exact() {
     assert_eq!(trace.fences().count(), 1);
     assert!(!trace.is_empty());
 }
+
+#[test]
+fn operations_collect_to_the_union_of_their_properties() {
+    let collected = |operations: &[MemoryOperations]| -> MemoryOperations {
+        operations.iter().copied().collect()
+    };
+
+    assert_eq!(collected(&[]), MemoryOperations::NONE);
+    assert_eq!(
+        collected(&[MemoryOperations::READ, MemoryOperations::WRITE]),
+        MemoryOperations::READ_WRITE
+    );
+    assert_eq!(
+        collected(&[MemoryOperations::READ, MemoryOperations::READ_MODIFY_WRITE]),
+        MemoryOperations::READ_MODIFY_WRITE
+    );
+    assert_eq!(
+        collected(&[MemoryOperations::NONE, MemoryOperations::NONE]),
+        MemoryOperations::NONE
+    );
+}

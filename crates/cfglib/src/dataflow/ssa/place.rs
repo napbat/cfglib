@@ -17,11 +17,9 @@ use smallvec::SmallVec;
 
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
-use crate::dataflow::{
-    InstrInfo, ProgramPoint, VariableId, departs_before_throws, first_unwind_point,
-};
-use crate::edge::{EdgeKind, KindedEdge};
+use crate::dataflow::unwind::{first_unwind_point, unwind_edges};
 use crate::graph::dominator::DominatorTree;
+use crate::{InstrInfo, ProgramPoint, VariableId, departs_before_throws};
 
 use super::scratch::SsaScratch;
 use super::{INLINE_OPERANDS, SsaValue};
@@ -84,14 +82,20 @@ impl<V: VariableId> PhiPlacements<V> {
     ///
     /// This is the iterated-dominance-frontier phase of SSA construction. Use
     /// [`SsaForm::compute`](super::SsaForm::compute) when renamed definitions
-    /// and operands are also required (and see its precondition: the entry
-    /// block must not be a branch target).
+    /// and operands are also required.
+    ///
+    /// # Panics
+    ///
+    /// As [`SsaForm::compute`](super::SsaForm::compute): when the entry block
+    /// is a branch target. A phi placed there has no departure point for the
+    /// value entering the function.
     #[must_use]
     pub fn compute<G>(cfg: &G, dom: &DominatorTree) -> Self
     where
         G: CfgView,
         G::Inst: InstrInfo<Variable = V>,
     {
+        super::assert_entry_is_not_a_branch_target(cfg);
         let mut scratch = SsaScratch::new();
         scratch.reset_placement(cfg.node_bound());
         place_phis(&mut scratch, cfg, dom);
@@ -292,12 +296,9 @@ where
             if unwound_variable < variable {
                 continue;
             }
-            for edge in cfg.outgoing(*source) {
-                let edge = cfg.edge(edge);
+            for edge in unwind_edges(cfg, *source) {
                 let target = edge.target();
-                if edge.data().kind() != EdgeKind::ExceptionUnwind
-                    || has_phi.is_marked(target.index())
-                {
+                if has_phi.is_marked(target.index()) {
                     continue;
                 }
                 has_phi.mark(target.index());

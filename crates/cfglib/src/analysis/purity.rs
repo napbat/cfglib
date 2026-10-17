@@ -11,8 +11,8 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+use crate::EffectInfo;
 use crate::block::BlockId;
-use crate::dataflow::EffectInfo;
 use crate::dataflow::cfg_view::CfgView;
 
 /// Purity verdict for a block or CFG, over a consumer effect vocabulary `E`.

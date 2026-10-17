@@ -6,8 +6,8 @@ use core::fmt::{self, Write as _};
 
 use super::node::{BlockSpan, ControlBody, ControlNode, ControlNodeId, LoopKind};
 use super::tree::ControlTree;
+use crate::ProgramPoint;
 use crate::block::BlockId;
-use crate::dataflow::ProgramPoint;
 use crate::display::IndentedWriter;
 use crate::region::HandlerKind;
 

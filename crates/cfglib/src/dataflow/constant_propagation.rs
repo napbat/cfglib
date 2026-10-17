@@ -19,10 +19,10 @@ use alloc::collections::BTreeMap;
 use super::cfg_view::CfgView;
 use super::edge_fixpoint::{self, EdgeProblem};
 use super::fixpoint::{Direction, Facts};
-use super::{InstrInfo, departs_before_throws};
+use crate::InstrInfo;
 use crate::block::BlockId;
+use crate::dataflow::unwind::{replay_block, unwind_departure};
 use crate::graph::edge_view::EdgeRef;
-use crate::graph::traverse::{TraversalDirection, depth_first_preorder};
 
 /// The lattice value for a single variable, over constant domain `C`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -36,7 +36,7 @@ pub enum ConstValue<C> {
 }
 
 impl<C: Clone + Eq> ConstValue<C> {
-    /// Meet (join) two lattice values.
+    /// Meet two lattice values.
     ///
     /// - Top ⊓ x = x
     /// - x ⊓ Top = x
@@ -152,6 +152,28 @@ pub trait ConstantFolder: InstrInfo {
     }
 }
 
+/// What one instruction defines, given the constants `known` at its inputs.
+///
+/// The folder answers for one def, but a multi-def instruction redefined its
+/// co-defined variables too: the folded def is [`ConstValue::Const`] and
+/// every other def is [`ConstValue::Bottom`], so no stale constant survives
+/// the instruction. Both constant solvers state this rule here.
+pub(super) fn fold_definitions<'a, I: ConstantFolder>(
+    instruction: &'a I,
+    known: &BTreeMap<I::Variable, I::Const>,
+) -> impl Iterator<Item = (&'a I::Variable, ConstValue<I::Const>)> + use<'a, I> {
+    let folded = instruction.fold_constant(known);
+    instruction.defs().iter().map(move |definition| {
+        let value = match &folded {
+            Some((variable, constant)) if variable == definition => {
+                ConstValue::Const(constant.clone())
+            }
+            _ => ConstValue::Bottom,
+        };
+        (definition, value)
+    })
+}
+
 /// The constant propagation problem.
 ///
 /// A normal edge carries the constants known at its source's end. An edge
@@ -180,20 +202,10 @@ impl ConstPropProblem {
         result
     }
 
-    /// Replays `block` over the constants known at its entry, handing the
-    /// state before each throwing instruction to `before_unwind`.
-    fn replay<G>(
-        cfg: &G,
-        block: BlockId,
-        input: &InstFact<G::Inst>,
-        mut before_unwind: impl FnMut(&InstFact<G::Inst>),
-    ) -> InstFact<G::Inst>
-    where
-        G: CfgView,
-        G::Inst: ConstantFolder,
-    {
-        let mut state = input.clone();
-        let mut known: BTreeMap<_, _> = state
+    /// The step of a replay that starts from the constants `input`, tracking
+    /// the known constants alongside the state.
+    fn step<I: ConstantFolder>(input: &InstFact<I>) -> impl FnMut(&mut InstFact<I>, usize, &I) {
+        let mut known: BTreeMap<_, _> = input
             .iter()
             .filter_map(|(variable, value)| {
                 value
@@ -201,27 +213,15 @@ impl ConstPropProblem {
                     .map(|constant| (variable.clone(), constant.clone()))
             })
             .collect();
-
-        for inst in cfg.instructions(block) {
-            if inst.may_unwind() {
-                before_unwind(&state);
-            }
-            // Try constant folding. The folder answers for ONE def, but a
-            // multi-def instruction redefined its co-defined variables too:
-            // bottom every def first so no stale constant survives, then
-            // record the folded one.
-            let folded = inst.fold_constant(&known);
-            for variable in inst.defs() {
-                state.insert(variable.clone(), ConstValue::Bottom);
-                known.remove(variable);
-            }
-            if let Some((loc, val)) = folded {
-                state.insert(loc.clone(), ConstValue::Const(val.clone()));
-                known.insert(loc, val);
+        move |state, _, instruction| {
+            for (variable, value) in fold_definitions(instruction, &known) {
+                match value.as_const() {
+                    Some(constant) => known.insert(variable.clone(), constant.clone()),
+                    None => known.remove(variable),
+                };
+                state.insert(variable.clone(), value);
             }
         }
-
-        state
     }
 }
 
@@ -245,7 +245,7 @@ where
     }
 
     fn transfer_node(&self, cfg: &G, block: BlockId, input: &Self::Fact) -> Self::Fact {
-        Self::replay(cfg, block, input, |_| {})
+        replay_block(cfg, block, input, Self::step(input), |_| {})
     }
 
     fn transfer_edge(
@@ -255,17 +255,10 @@ where
         input: &Self::Fact,
         output: &Self::Fact,
     ) -> Self::Fact {
-        if !departs_before_throws(cfg, edge) {
-            return output.clone();
-        }
-        let mut departing: Option<Self::Fact> = None;
-        Self::replay(cfg, edge.source(), input, |state| {
-            departing = Some(match departing.take() {
-                None => state.clone(),
-                Some(earlier) => Self::meet_facts::<G::Inst>(&earlier, state),
-            });
-        });
-        departing.expect("an edge departing before throws leaves a block that may unwind")
+        unwind_departure(cfg, edge, input, Self::step(input), |earlier, later| {
+            Self::meet_facts::<G::Inst>(earlier, later)
+        })
+        .unwrap_or_else(|| output.clone())
     }
 }
 
@@ -275,21 +268,13 @@ where
 /// nothing to the blocks they branch to. A block's entry fact meets every
 /// incoming edge, and an unwind edge carries only the constants known
 /// before its source's throwing instructions.
-///
-/// # Panics
-///
-/// Panics only if the unbounded fixpoint solve reports a step-limit error,
-/// which the unbounded configuration cannot produce.
 #[must_use]
 pub fn constant_propagation<G>(cfg: &G) -> Facts<InstFact<G::Inst>>
 where
     G: CfgView,
     G::Inst: ConstantFolder,
 {
-    let reachable = depth_first_preorder(cfg, cfg.root(), TraversalDirection::Outgoing);
-    edge_fixpoint::solve_edge_problem_from(cfg, &ConstPropProblem, &reachable)
-        .expect("an unbounded solve cannot exceed a step limit")
-        .into_block_facts()
+    edge_fixpoint::solve_reachable(cfg, &ConstPropProblem).into_block_facts()
 }
 
 #[cfg(test)]
@@ -297,9 +282,8 @@ mod tests {
     use super::*;
     use crate::cfg::Cfg;
     use crate::edge::EdgeKind;
-    use crate::flow::FlowEffect;
     use crate::test_util::{
-        DfInst, UdInst, df_const, df_def, df_ff, df_use, df_with_effect, ud_inst,
+        DfInst, UdInst, df_const, df_def, df_ff, df_throwing, df_use, protected_region, ud_inst,
     };
 
     #[derive(Debug, Clone, Copy)]
@@ -460,33 +444,20 @@ mod tests {
         assert_eq!(out.get(&3), Some(&ConstValue::Const(7)));
     }
 
-    fn throwing(instruction: DfInst) -> DfInst {
-        df_with_effect(instruction, FlowEffect::MayThrow)
-    }
-
     /// `entry: x = 1`, then `protected` holding `instructions`, which falls
     /// through to `normal` and unwinds to `handler`. Returns
     /// `(cfg, normal, handler)`.
-    fn protected_region(
+    fn prior_then_region(
         instructions: impl IntoIterator<Item = DfInst>,
     ) -> (Cfg<DfInst>, BlockId, BlockId) {
-        let mut cfg = Cfg::new();
-        let protected = cfg.new_block();
-        let normal = cfg.new_block();
-        let handler = cfg.new_block();
-        cfg.add_edge(cfg.entry(), protected, EdgeKind::Fallthrough);
-        cfg.add_edge(protected, normal, EdgeKind::Fallthrough);
-        cfg.add_edge(protected, handler, EdgeKind::ExceptionUnwind);
+        let (mut cfg, [_, normal, handler]) = protected_region(instructions);
         cfg.block_mut(cfg.entry()).push(df_const("prior", 0, 1));
-        cfg.block_mut(protected)
-            .instructions_mut()
-            .extend(instructions);
         (cfg, normal, handler)
     }
 
     #[test]
     fn a_handler_sees_the_constant_before_a_faulting_load() {
-        let (cfg, normal, handler) = protected_region([throwing(df_const("load", 0, 2))]);
+        let (cfg, normal, handler) = prior_then_region([df_throwing(df_const("load", 0, 2))]);
 
         let result = constant_propagation(&cfg);
         assert_eq!(result.fact_in(handler).get(&0), Some(&ConstValue::Const(1)));
@@ -495,10 +466,10 @@ mod tests {
 
     #[test]
     fn a_handler_meets_the_constants_each_throw_observes() {
-        let (cfg, normal, handler) = protected_region([
-            throwing(df_ff("first call")),
+        let (cfg, normal, handler) = prior_then_region([
+            df_throwing(df_ff("first call")),
             df_const("second value", 0, 2),
-            throwing(df_ff("second call")),
+            df_throwing(df_ff("second call")),
             df_const("final value", 0, 3),
         ]);
 

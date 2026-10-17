@@ -9,18 +9,25 @@ use alloc::vec::Vec;
 
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
-use crate::dataflow::constant_propagation::{ConstValue, ConstantFolder};
+use crate::dataflow::constant_propagation::{ConstValue, ConstantFolder, fold_definitions};
 use crate::dataflow::ssa::{SsaForm, SsaInstruction, SsaValue};
-use crate::dataflow::{InstrInfo, VariableId};
-use crate::edge::{EdgeKind, KindedEdge};
+use crate::edge::{EdgeId, EdgeKind, KindedEdge};
+use crate::{InstrInfo, ProgramPoint, VariableId, departs_before_throws};
 
 /// Result of SCCP analysis.
 #[derive(Debug, Clone)]
 pub struct SccpAnalysis<V, C> {
     /// Lattice value computed for each renamed SSA value.
     pub values: BTreeMap<SsaValue<V>, ConstValue<C>>,
-    /// CFG edges proven executable.
-    pub executable_edges: BTreeSet<(BlockId, BlockId)>,
+    /// CFG edges proven executable, by edge identity.
+    ///
+    /// Edges that join the same pair of blocks are judged apart. A branch arm
+    /// the predicate withheld stays out of the set while a parallel edge, or
+    /// an unwind into the same block, is in it. A phi operand arrives along
+    /// the executable edge it departs on;
+    /// [`operand_is_executable`](Self::operand_is_executable) asks exactly
+    /// that.
+    pub executable_edges: BTreeSet<EdgeId>,
     /// CFG blocks proven reachable.
     pub reachable_blocks: BTreeSet<BlockId>,
 }
@@ -55,9 +62,11 @@ fn is_below<I: ConstantFolder>(lower: &ConstValue<I::Const>, upper: &ConstValue<
     }
 }
 
+/// Meet `candidate` into the value of `value`, recording in `changed` that
+/// the value moved down the lattice.
 fn update_value<I: ConstantFolder>(
     values: &mut BTreeMap<SsaValue<I::Variable>, ConstValue<I::Const>>,
-    worklist: &mut Vec<SsaValue<I::Variable>>,
+    changed: &mut bool,
     value: &SsaValue<I::Variable>,
     candidate: ConstValue<I::Const>,
 ) {
@@ -69,7 +78,7 @@ fn update_value<I: ConstantFolder>(
     );
     if next != previous {
         values.insert(value.clone(), next);
-        worklist.push(value.clone());
+        *changed = true;
     }
 }
 
@@ -97,7 +106,7 @@ fn evaluate_block<G, I>(
     ssa: &SsaForm<I::Variable>,
     block: BlockId,
     values: &mut BTreeMap<SsaValue<I::Variable>, ConstValue<I::Const>>,
-    worklist: &mut Vec<SsaValue<I::Variable>>,
+    changed: &mut bool,
 ) where
     G: CfgView<Inst = I>,
     I: ConstantFolder,
@@ -108,26 +117,11 @@ fn evaluate_block<G, I>(
         .zip(&ssa.block(block).instructions)
     {
         let known = known_constants(annotation, values);
-
-        if let Some((variable, constant)) = instruction.fold_constant(&known) {
-            // The folder answers for ONE def; every co-defined variable of a
-            // multi-def instruction was still redefined and must bottom.
-            for definition in annotation.defs() {
-                if definition.variable == variable {
-                    update_value::<I>(
-                        values,
-                        worklist,
-                        definition,
-                        ConstValue::Const(constant.clone()),
-                    );
-                } else {
-                    update_value::<I>(values, worklist, definition, ConstValue::Bottom);
-                }
-            }
-        } else {
-            for definition in annotation.defs() {
-                update_value::<I>(values, worklist, definition, ConstValue::Bottom);
-            }
+        // The renamer gives each source definition one SSA definition, in
+        // the same order, so the two sequences zip.
+        for ((_, value), definition) in fold_definitions(instruction, &known).zip(annotation.defs())
+        {
+            update_value::<I>(values, changed, definition, value);
         }
     }
 }
@@ -169,8 +163,8 @@ fn activate_successors<G, I>(
     ssa: &SsaForm<I::Variable>,
     block: BlockId,
     values: &BTreeMap<SsaValue<I::Variable>, ConstValue<I::Const>>,
-    executable: &BTreeSet<(BlockId, BlockId)>,
-    worklist: &mut Vec<(BlockId, BlockId)>,
+    executable: &BTreeSet<EdgeId>,
+    worklist: &mut Vec<EdgeId>,
 ) where
     G: CfgView<Inst = I>,
     I: ConstantFolder,
@@ -182,31 +176,74 @@ fn activate_successors<G, I>(
     };
     for id in cfg.outgoing(block) {
         let edge = cfg.edge(id);
-        if Some(edge.data().kind()) != withheld && !executable.contains(&(block, edge.target())) {
-            worklist.push((block, edge.target()));
+        if Some(edge.data().kind()) != withheld && !executable.contains(&id) {
+            worklist.push(id);
         }
     }
 }
 
-/// Re-meet every phi of `block` over its currently executable incoming
-/// edges. Called when an edge activates AND from the value-worklist drain:
-/// a phi whose operand lowers after all its edges are already executable
-/// must be re-evaluated, or it keeps a stale over-optimistic constant.
-fn evaluate_phis<I: ConstantFolder>(
+/// What the phi operands of one edge have in common: the block they leave
+/// and whether they leave before that block's end.
+///
+/// An edge that [departs before throws](departs_before_throws) delivers the
+/// state before each throwing instruction, so each of its operands is named
+/// by an instruction index inside the block. Every other edge delivers one
+/// operand, named by the block's instruction count. An operand and its edge
+/// therefore agree on this pair, and two edges between the same blocks agree
+/// on it only when they depart the same way.
+type Departure = (BlockId, bool);
+
+/// The [`Departure`] shared by the operands that `edge` delivers.
+fn edge_departure<G>(cfg: &G, edge: EdgeId) -> Departure
+where
+    G: CfgView,
+    G::Inst: InstrInfo,
+{
+    let edge = cfg.edge(edge);
+    (edge.source(), departs_before_throws(cfg, edge))
+}
+
+/// The [`Departure`] of the edge that delivers the operand named by `point`.
+fn operand_departure<G: CfgView>(cfg: &G, point: ProgramPoint) -> Departure {
+    (
+        point.block,
+        point.inst_idx < cfg.instructions(point.block).len(),
+    )
+}
+
+/// Re-meet every phi of `block` over the operands that arrive along its
+/// currently executable incoming edges. Called when an edge activates AND
+/// from the rescan after a value lowers: a phi whose operand lowers after
+/// all its edges are already executable must be re-evaluated, or it keeps a
+/// stale over-optimistic constant.
+fn evaluate_phis<G, I>(
+    cfg: &G,
     ssa: &SsaForm<I::Variable>,
     block: BlockId,
-    executable_edges: &BTreeSet<(BlockId, BlockId)>,
+    executable: &BTreeSet<EdgeId>,
     values: &mut BTreeMap<SsaValue<I::Variable>, ConstValue<I::Const>>,
-    worklist: &mut Vec<SsaValue<I::Variable>>,
-) {
-    for phi in &ssa.block(block).phis {
+    changed: &mut bool,
+) where
+    G: CfgView<Inst = I>,
+    I: ConstantFolder,
+{
+    let phis = &ssa.block(block).phis;
+    if phis.is_empty() {
+        return;
+    }
+    let arriving: BTreeSet<Departure> = cfg
+        .incoming(block)
+        .filter(|edge| executable.contains(edge))
+        .map(|edge| edge_departure(cfg, edge))
+        .collect();
+    for phi in phis {
         let mut candidate = ConstValue::Top;
-        for (predecessor, operand) in phi.operands() {
-            if executable_edges.contains(&(predecessor.block, block)) {
+        for (departure, operand) in phi.operands() {
+            if arriving.contains(&operand_departure(cfg, *departure)) {
                 candidate = candidate.meet_with(lattice_of(values, operand), I::meet_constants);
             }
         }
-        update_value::<I>(values, worklist, &phi.result, candidate);
+        update_value::<I>(values, changed, &phi.result, candidate);
     }
 }
 
@@ -271,10 +308,10 @@ impl<V: VariableId, C: Clone + Eq> SccpAnalysis<V, C> {
         let mut executable_edges = BTreeSet::new();
         let mut reachable_blocks = BTreeSet::new();
         let mut cfg_worklist = Vec::new();
-        let mut ssa_worklist = Vec::new();
+        let mut changed = false;
 
         reachable_blocks.insert(cfg.root());
-        evaluate_block(cfg, ssa, cfg.root(), &mut values, &mut ssa_worklist);
+        evaluate_block(cfg, ssa, cfg.root(), &mut values, &mut changed);
         activate_successors(
             cfg,
             ssa,
@@ -284,23 +321,25 @@ impl<V: VariableId, C: Clone + Eq> SccpAnalysis<V, C> {
             &mut cfg_worklist,
         );
 
-        while !cfg_worklist.is_empty() || !ssa_worklist.is_empty() {
-            while let Some((source, target)) = cfg_worklist.pop() {
-                if !executable_edges.insert((source, target)) {
+        while !cfg_worklist.is_empty() || changed {
+            while let Some(edge) = cfg_worklist.pop() {
+                if !executable_edges.insert(edge) {
                     continue;
                 }
 
+                let target = cfg.edge(edge).target();
                 let newly_reachable = reachable_blocks.insert(target);
-                evaluate_phis::<G::Inst>(
+                evaluate_phis(
+                    cfg,
                     ssa,
                     target,
                     &executable_edges,
                     &mut values,
-                    &mut ssa_worklist,
+                    &mut changed,
                 );
 
                 if newly_reachable {
-                    evaluate_block(cfg, ssa, target, &mut values, &mut ssa_worklist);
+                    evaluate_block(cfg, ssa, target, &mut values, &mut changed);
                     activate_successors(
                         cfg,
                         ssa,
@@ -312,24 +351,26 @@ impl<V: VariableId, C: Clone + Eq> SccpAnalysis<V, C> {
                 }
             }
 
-            // Re-evaluate once per batch of lowered values. The value identity
-            // is not yet used to target a consumer, so K entries must not
-            // trigger K identical whole-program scans. Changes found during a
-            // scan form the next batch, which still handles phis whose operands
-            // lower after all incoming edges activated. Each scan also
-            // re-derives branch edges, so a predicate that lowers here
-            // activates the arm its earlier constant had withheld.
-            while !ssa_worklist.is_empty() {
-                ssa_worklist.clear();
+            // Rescan every reachable block once per batch of lowered values.
+            // The scan finds its dependents by re-evaluating each block, not
+            // from a per-value users index, so it runs once per batch rather
+            // than once per lowered value. Changes found during a scan form
+            // the next batch, which still handles phis whose operands lower
+            // after all incoming edges activated. Each scan also re-derives
+            // branch edges, so a predicate that lowers here activates the
+            // arm its earlier constant had withheld.
+            while changed {
+                changed = false;
                 for &block in &reachable_blocks {
-                    evaluate_phis::<G::Inst>(
+                    evaluate_phis(
+                        cfg,
                         ssa,
                         block,
                         &executable_edges,
                         &mut values,
-                        &mut ssa_worklist,
+                        &mut changed,
                     );
-                    evaluate_block(cfg, ssa, block, &mut values, &mut ssa_worklist);
+                    evaluate_block(cfg, ssa, block, &mut values, &mut changed);
                     activate_successors(
                         cfg,
                         ssa,
@@ -348,6 +389,29 @@ impl<V: VariableId, C: Clone + Eq> SccpAnalysis<V, C> {
             reachable_blocks,
         }
     }
+
+    /// Whether the phi operand that departs `departure` reaches `block` along
+    /// an executable edge.
+    ///
+    /// `departure` is the [`ProgramPoint`] that
+    /// [`SsaPhi::operands`](crate::SsaPhi::operands) names for the operand.
+    /// Two edges can join the same blocks and still depart differently: an
+    /// unwind carries the state before a throwing instruction, a branch arm
+    /// the state at the end of its source. An operand arrives only along an
+    /// executable edge of its own kind of departure, so a withheld arm does
+    /// not feed a phi that an executable unwind into the same block reaches.
+    /// The solve applies this test to every phi.
+    #[must_use]
+    pub fn operand_is_executable<G>(&self, cfg: &G, departure: ProgramPoint, block: BlockId) -> bool
+    where
+        G: CfgView,
+        G::Inst: InstrInfo,
+    {
+        let wanted = operand_departure(cfg, departure);
+        cfg.incoming(block).any(|edge| {
+            self.executable_edges.contains(&edge) && edge_departure(cfg, edge) == wanted
+        })
+    }
 }
 
 #[cfg(test)]
@@ -356,8 +420,9 @@ mod tests {
 
     use crate::cfg::Cfg;
     use crate::dataflow::constant_propagation::constant_propagation;
+    use crate::flow::FlowEffect;
     use crate::graph::dominator::DominatorTree;
-    use crate::test_util::{DfInst, df_const, df_def, df_pred, df_use};
+    use crate::test_util::{DfInst, df_const, df_def, df_ff, df_pred, df_use, df_with_effect};
 
     /// A test constant domain whose meet is not equality: two exact values
     /// of the same sign keep that sign instead of dropping to bottom.
@@ -481,6 +546,21 @@ mod tests {
         SccpAnalysis::compute(cfg, &ssa)
     }
 
+    /// Whether the only edge from `source` to `target` is executable.
+    fn is_executable(
+        cfg: &Cfg<DfInst>,
+        result: &SccpAnalysis<u16, i64>,
+        source: BlockId,
+        target: BlockId,
+    ) -> bool {
+        let mut edges = cfg
+            .outgoing(source)
+            .filter(|&edge| cfg.edge(edge).target() == target);
+        let edge = edges.next().expect("the fixture connects the blocks");
+        assert!(edges.next().is_none(), "the fixture connects them once");
+        result.executable_edges.contains(&edge)
+    }
+
     #[test]
     fn entry_is_reachable() {
         let cfg = Cfg::<DfInst>::new();
@@ -506,6 +586,25 @@ mod tests {
         let definition = ssa.block(cfg.entry()).instructions[0].defs()[0].clone();
         let result = SccpAnalysis::compute(&cfg, &ssa);
         assert_eq!(result.values[&definition], ConstValue::Const(42));
+    }
+
+    #[test]
+    fn a_folded_multi_definition_bottoms_the_co_defined_values() {
+        // The folder answers for the first definition only. The second one
+        // was redefined too, so it cannot keep a constant.
+        let mut cfg = Cfg::<DfInst>::new();
+        cfg.block_mut(cfg.entry()).push(DfInst {
+            defs: alloc::vec![0, 1],
+            constant: Some(3),
+            ..df_ff("pair")
+        });
+        let dom = DominatorTree::compute(&cfg);
+        let ssa = SsaForm::compute(&cfg, &dom);
+        let defs = ssa.block(cfg.entry()).instructions[0].defs();
+        let result = SccpAnalysis::compute(&cfg, &ssa);
+
+        assert_eq!(result.values[&defs[0]], ConstValue::Const(3));
+        assert_eq!(result.values[&defs[1]], ConstValue::Bottom);
     }
 
     #[test]
@@ -539,8 +638,8 @@ mod tests {
         let (taken, not_taken) = constant_branch(&mut cfg, 1);
         let result = analyze(&cfg);
 
-        assert!(result.executable_edges.contains(&(cfg.entry(), taken)));
-        assert!(!result.executable_edges.contains(&(cfg.entry(), not_taken)));
+        assert!(is_executable(&cfg, &result, cfg.entry(), taken));
+        assert!(!is_executable(&cfg, &result, cfg.entry(), not_taken));
         assert!(result.reachable_blocks.contains(&taken));
         assert!(
             !result.reachable_blocks.contains(&not_taken),
@@ -554,8 +653,8 @@ mod tests {
         let (taken, not_taken) = constant_branch(&mut cfg, 0);
         let result = analyze(&cfg);
 
-        assert!(result.executable_edges.contains(&(cfg.entry(), not_taken)));
-        assert!(!result.executable_edges.contains(&(cfg.entry(), taken)));
+        assert!(is_executable(&cfg, &result, cfg.entry(), not_taken));
+        assert!(!is_executable(&cfg, &result, cfg.entry(), taken));
         assert!(result.reachable_blocks.contains(&not_taken));
         assert!(
             !result.reachable_blocks.contains(&taken),
@@ -573,10 +672,126 @@ mod tests {
         cfg.add_edge(cfg.entry(), handler, EdgeKind::ExceptionUnwind);
         let result = analyze(&cfg);
 
-        assert!(result.executable_edges.contains(&(cfg.entry(), handler)));
+        assert!(is_executable(&cfg, &result, cfg.entry(), handler));
         assert!(result.reachable_blocks.contains(&handler));
         assert!(!result.reachable_blocks.contains(&not_taken));
         assert!(result.reachable_blocks.contains(&taken));
+    }
+
+    /// A block whose conditional arm and unwind both reach `target`.
+    struct UnwindBesideArm {
+        cfg: Cfg<DfInst>,
+        target: BlockId,
+        /// The `ConditionalTrue` edge into `target`.
+        arm: EdgeId,
+        /// The `ExceptionUnwind` edge into `target`.
+        unwind: EdgeId,
+    }
+
+    /// `entry` holds `x = 5`, `condition` (variable 0), a throwing `x = 7`,
+    /// and a branch on variable 0 that goes to `target` when true. An unwind
+    /// out of `entry` reaches `target` as well, so the phi of `x` at `target`
+    /// merges the 7 that the arm carries with the 5 that the unwind carries
+    /// from before the throwing store.
+    fn unwind_beside_an_arm(condition: DfInst) -> UnwindBesideArm {
+        let mut cfg = Cfg::<DfInst>::new();
+        let target = cfg.new_block();
+        let other = cfg.new_block();
+        cfg.block_mut(cfg.entry()).instructions_mut().extend([
+            df_const("x5", 1, 5),
+            condition,
+            df_with_effect(df_const("x7", 1, 7), FlowEffect::MayThrow),
+            df_pred("branch", 0, true),
+        ]);
+        cfg.block_mut(target).push(df_use("use_x", 1));
+        let arm = cfg.add_edge(cfg.entry(), target, EdgeKind::ConditionalTrue);
+        cfg.add_edge(cfg.entry(), other, EdgeKind::ConditionalFalse);
+        let unwind = cfg.add_edge(cfg.entry(), target, EdgeKind::ExceptionUnwind);
+        UnwindBesideArm {
+            cfg,
+            target,
+            arm,
+            unwind,
+        }
+    }
+
+    #[test]
+    fn a_withheld_arm_does_not_feed_a_phi_the_unwind_reaches() {
+        // The predicate proves the false arm, so the true arm never runs.
+        // The unwind into the same block carries the value before the
+        // throwing store (5); the store's own 7 only travels along the
+        // withheld arm and must not reach the phi.
+        let fixture = unwind_beside_an_arm(df_const("condition", 0, 0));
+        let cfg = &fixture.cfg;
+        let dom = DominatorTree::compute(cfg);
+        let ssa = SsaForm::compute(cfg, &dom);
+        let result = SccpAnalysis::compute(cfg, &ssa);
+
+        let phi = &ssa.block(fixture.target).phis[0];
+        assert_eq!(phi.operands().len(), 2, "one operand per departure");
+        assert_eq!(
+            result.values.get(&phi.result),
+            Some(&ConstValue::Const(5)),
+            "only the unwind edge into the block is executable"
+        );
+    }
+
+    #[test]
+    fn a_withheld_arm_and_an_unwind_into_one_block_are_judged_apart() {
+        let fixture = unwind_beside_an_arm(df_const("condition", 0, 0));
+        let cfg = &fixture.cfg;
+        let result = analyze(cfg);
+
+        assert!(!result.executable_edges.contains(&fixture.arm));
+        assert!(result.executable_edges.contains(&fixture.unwind));
+
+        // The arm departs at the end of `entry`, the unwind before its
+        // throwing store at index 2.
+        let at_end = ProgramPoint {
+            block: cfg.entry(),
+            inst_idx: cfg.instructions(cfg.entry()).len(),
+        };
+        let before_store = ProgramPoint {
+            block: cfg.entry(),
+            inst_idx: 2,
+        };
+        assert!(!result.operand_is_executable(cfg, at_end, fixture.target));
+        assert!(result.operand_is_executable(cfg, before_store, fixture.target));
+    }
+
+    #[test]
+    fn an_undecided_arm_and_an_unwind_into_one_block_both_feed_the_phi() {
+        // Nothing proves the condition, so both edges are executable and the
+        // phi merges the 7 with the 5.
+        let fixture = unwind_beside_an_arm(df_def("condition", 0));
+        let cfg = &fixture.cfg;
+        let dom = DominatorTree::compute(cfg);
+        let ssa = SsaForm::compute(cfg, &dom);
+        let result = SccpAnalysis::compute(cfg, &ssa);
+
+        assert!(result.executable_edges.contains(&fixture.arm));
+        assert!(result.executable_edges.contains(&fixture.unwind));
+        let phi = &ssa.block(fixture.target).phis[0];
+        assert_eq!(result.values.get(&phi.result), Some(&ConstValue::Bottom));
+        for &(departure, _) in phi.operands() {
+            assert!(result.operand_is_executable(cfg, departure, fixture.target));
+        }
+    }
+
+    #[test]
+    fn a_decided_branch_withholds_one_of_two_arms_into_the_same_block() {
+        // Both arms reach `target`, but only the proven one is executable.
+        let mut cfg = Cfg::<DfInst>::new();
+        let target = cfg.new_block();
+        cfg.block_mut(cfg.entry()).push(df_const("condition", 0, 1));
+        cfg.block_mut(cfg.entry()).push(df_pred("branch", 0, true));
+        let when_true = cfg.add_edge(cfg.entry(), target, EdgeKind::ConditionalTrue);
+        let when_false = cfg.add_edge(cfg.entry(), target, EdgeKind::ConditionalFalse);
+        let result = analyze(&cfg);
+
+        assert!(result.executable_edges.contains(&when_true));
+        assert!(!result.executable_edges.contains(&when_false));
+        assert!(result.reachable_blocks.contains(&target));
     }
 
     #[test]
@@ -591,8 +806,8 @@ mod tests {
         cfg.add_edge(cfg.entry(), not_taken, EdgeKind::ConditionalFalse);
         let result = analyze(&cfg);
 
-        assert!(result.executable_edges.contains(&(cfg.entry(), taken)));
-        assert!(result.executable_edges.contains(&(cfg.entry(), not_taken)));
+        assert!(is_executable(&cfg, &result, cfg.entry(), taken));
+        assert!(is_executable(&cfg, &result, cfg.entry(), not_taken));
     }
 
     #[test]
@@ -609,7 +824,7 @@ mod tests {
         cfg.block_mut(body).push(DfInst {
             defs: alloc::vec![0],
             uses: alloc::vec![0, 1],
-            ..crate::test_util::df_ff("x_varies")
+            ..df_ff("x_varies")
         });
         cfg.block_mut(exit).push(df_use("after", 0));
         cfg.add_edge(cfg.entry(), header, EdgeKind::Fallthrough);
@@ -618,9 +833,9 @@ mod tests {
         cfg.add_edge(body, header, EdgeKind::Back);
         let result = analyze(&cfg);
 
-        assert!(result.executable_edges.contains(&(header, body)));
+        assert!(is_executable(&cfg, &result, header, body));
         assert!(
-            result.executable_edges.contains(&(header, exit)),
+            is_executable(&cfg, &result, header, exit),
             "a predicate that lowers to Bottom must activate the withheld arm"
         );
         assert!(result.reachable_blocks.contains(&exit));
@@ -677,8 +892,8 @@ mod tests {
             result.values.get(&SsaValue::live_in(0)),
             Some(&ConstValue::Const(1))
         );
-        assert!(result.executable_edges.contains(&(cfg.entry(), taken)));
-        assert!(!result.executable_edges.contains(&(cfg.entry(), not_taken)));
+        assert!(is_executable(&cfg, &result, cfg.entry(), taken));
+        assert!(!is_executable(&cfg, &result, cfg.entry(), not_taken));
         assert!(!result.reachable_blocks.contains(&not_taken));
     }
 
@@ -735,8 +950,8 @@ mod tests {
             lattice_of(&result.values, &SsaValue::live_in(1)),
             ConstValue::<i64>::Bottom
         );
-        assert!(result.executable_edges.contains(&(cfg.entry(), taken)));
-        assert!(result.executable_edges.contains(&(cfg.entry(), not_taken)));
+        assert!(is_executable(&cfg, &result, cfg.entry(), taken));
+        assert!(is_executable(&cfg, &result, cfg.entry(), not_taken));
     }
 
     #[test]
@@ -754,7 +969,7 @@ mod tests {
         cfg.block_mut(body).push(DfInst {
             defs: alloc::vec![0],
             uses: alloc::vec![0, 1],
-            ..crate::test_util::df_ff("x_varies")
+            ..df_ff("x_varies")
         });
         cfg.block_mut(exit).push(df_use("after", 0));
         cfg.add_edge(cfg.entry(), header, EdgeKind::Fallthrough);

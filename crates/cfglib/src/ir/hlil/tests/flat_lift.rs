@@ -13,7 +13,6 @@ use alloc::vec::Vec;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::dataflow::{EffectInfo, InstrInfo};
 use crate::edge::EdgeId;
 use crate::flow::{FlowControl, FlowEffect};
 use crate::graph::view::DenseId;
@@ -21,6 +20,7 @@ use crate::ir::hlil::{
     FlatBuilder, FlatFunction, InstructionShape, LiftDialect, LiftEdge, LiftInstruction,
     LiftMetadata, LiftedFunction, Occurrence, lift, pseudocode, verify,
 };
+use crate::{EffectInfo, InstrInfo};
 
 use super::flat::{Access, FlatKit, FlatVar, ToyEdge, ToyFlat, ToyFlatBuilder, ToyForm, ToyInst};
 use super::imp::{ImpOp, ImpType};

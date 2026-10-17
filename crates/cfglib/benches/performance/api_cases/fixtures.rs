@@ -76,6 +76,10 @@ impl InstrInfo for ApiInst {
     fn defs(&self) -> &[Self::Variable] {
         &self.defs
     }
+
+    fn may_unwind(&self) -> bool {
+        self.flow == FlowEffect::MayThrow
+    }
 }
 
 impl EffectInfo for ApiInst {

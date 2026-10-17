@@ -5,25 +5,8 @@ use super::*;
 use crate::builder::CfgBuilder;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::flow::FlowEffect;
-use crate::test_util::{DfInst, df_def, df_ff, df_use, df_with_effect};
+use crate::test_util::{DfInst, df_def, df_ff, df_throwing, df_use, protected_region};
 use alloc::vec;
-
-fn throwing(instruction: DfInst) -> DfInst {
-    df_with_effect(instruction, FlowEffect::MayThrow)
-}
-
-/// `entry → protected`, which falls through to `normal` and unwinds to
-/// `handler`. Returns `(protected, normal, handler)`.
-fn protected_region(cfg: &mut Cfg<DfInst>) -> (BlockId, BlockId, BlockId) {
-    let protected = cfg.new_block();
-    let normal = cfg.new_block();
-    let handler = cfg.new_block();
-    cfg.add_edge(cfg.entry(), protected, EdgeKind::Fallthrough);
-    cfg.add_edge(protected, normal, EdgeKind::Fallthrough);
-    cfg.add_edge(protected, handler, EdgeKind::ExceptionUnwind);
-    (protected, normal, handler)
-}
 
 fn departure(block: BlockId, inst_idx: usize) -> ProgramPoint {
     ProgramPoint { block, inst_idx }
@@ -31,10 +14,9 @@ fn departure(block: BlockId, inst_idx: usize) -> ProgramPoint {
 
 #[test]
 fn a_handler_reads_the_definition_before_the_faulting_instruction() {
-    let mut cfg = Cfg::<DfInst>::new();
-    let (protected, normal, handler) = protected_region(&mut cfg);
+    let (mut cfg, [protected, normal, handler]) =
+        protected_region([df_throwing(df_def("load", 0))]);
     cfg.block_mut(cfg.entry()).push(df_def("prior", 0));
-    cfg.block_mut(protected).push(throwing(df_def("load", 0)));
     cfg.block_mut(normal).push(df_use("success", 0));
     cfg.block_mut(handler).push(df_use("catch", 0));
 
@@ -56,12 +38,9 @@ fn a_handler_reads_the_definition_before_the_faulting_instruction() {
 
 #[test]
 fn multiple_unwind_points_keep_their_distinct_completed_definitions() {
-    let mut cfg = Cfg::<DfInst>::new();
-    let (protected, normal, handler) = protected_region(&mut cfg);
+    let (mut cfg, [protected, normal, handler]) =
+        protected_region(["first load", "second load"].map(|name| df_throwing(df_def(name, 0))));
     cfg.block_mut(cfg.entry()).push(df_def("prior", 0));
-    for name in ["first load", "second load"] {
-        cfg.block_mut(protected).push(throwing(df_def(name, 0)));
-    }
     cfg.block_mut(handler).push(df_use("caught", 0));
     cfg.block_mut(normal).push(df_use("completed", 0));
 
@@ -91,10 +70,8 @@ fn multiple_unwind_points_keep_their_distinct_completed_definitions() {
 
 #[test]
 fn a_definition_before_every_throw_reaches_the_handler_without_a_phi() {
-    let mut cfg = Cfg::<DfInst>::new();
-    let (protected, normal, handler) = protected_region(&mut cfg);
-    cfg.block_mut(protected).push(df_def("completed", 0));
-    cfg.block_mut(protected).push(throwing(df_ff("call")));
+    let (mut cfg, [protected, normal, handler]) =
+        protected_region([df_def("completed", 0), df_throwing(df_ff("call"))]);
     cfg.block_mut(normal).push(df_use("success", 0));
     cfg.block_mut(handler).push(df_use("catch", 0));
 
@@ -110,14 +87,14 @@ fn a_definition_before_every_throw_reaches_the_handler_without_a_phi() {
 
 #[test]
 fn a_join_of_normal_and_unwind_paths_merges_their_distinct_values() {
-    let mut cfg = Cfg::<DfInst>::new();
-    let (protected, normal, handler) = protected_region(&mut cfg);
+    let (mut cfg, [protected, normal, handler]) = protected_region([
+        df_def("before call", 0),
+        df_throwing(df_ff("call")),
+        df_def("after call", 0),
+    ]);
     let join = cfg.new_block();
     cfg.add_edge(normal, join, EdgeKind::Fallthrough);
     cfg.add_edge(handler, join, EdgeKind::Fallthrough);
-    cfg.block_mut(protected).push(df_def("before call", 0));
-    cfg.block_mut(protected).push(throwing(df_ff("call")));
-    cfg.block_mut(protected).push(df_def("after call", 0));
     cfg.block_mut(join).push(df_use("merged", 0));
 
     let ssa = SsaForm::compute(&cfg, &DominatorTree::compute(&cfg));
@@ -515,6 +492,95 @@ fn an_instruction_wider_than_its_inline_storage_keeps_every_value_in_order() {
         ]
     );
     assert_eq!(form.max_version(&1), 3);
+}
+
+/// The entry doubles as a loop header: it reads variable 0, and its latch
+/// redefines it and branches back.
+fn entry_loop() -> (Cfg<DfInst>, BlockId) {
+    let mut cfg = Cfg::<DfInst>::new();
+    let latch = cfg.new_block();
+    let exit = cfg.new_block();
+    let entry = cfg.entry();
+    cfg.add_edge(entry, latch, EdgeKind::ConditionalTrue);
+    cfg.add_edge(entry, exit, EdgeKind::ConditionalFalse);
+    cfg.add_edge(latch, entry, EdgeKind::Back);
+    cfg.block_mut(entry).push(df_use("read", 0));
+    cfg.block_mut(latch).push(df_def("redefine", 0));
+    (cfg, latch)
+}
+
+#[test]
+#[should_panic(expected = "branch target")]
+fn ssa_construction_rejects_an_entry_that_is_a_branch_target() {
+    let (cfg, _) = entry_loop();
+    drop(SsaForm::compute(&cfg, &DominatorTree::compute(&cfg)));
+}
+
+#[test]
+#[should_panic(expected = "branch target")]
+fn phi_placement_rejects_an_entry_that_is_a_branch_target() {
+    let (cfg, _) = entry_loop();
+    drop(PhiPlacements::compute(&cfg, &DominatorTree::compute(&cfg)));
+}
+
+#[test]
+fn a_new_entry_block_restores_the_value_entering_the_function() {
+    // The remedy the panic names: an empty block that falls through to the old
+    // entry. The old entry is then an ordinary loop header, and its phi
+    // merges the live-in value from the new entry with the latch's.
+    let (mut cfg, latch) = entry_loop();
+    let header = cfg.entry();
+    let new_entry = cfg.new_block();
+    cfg.add_edge(new_entry, header, EdgeKind::Fallthrough);
+    cfg.set_entry(new_entry);
+
+    let ssa = SsaForm::compute(&cfg, &DominatorTree::compute(&cfg));
+    let [phi] = ssa.block(header).phis.as_slice() else {
+        panic!("the header merges the live-in and the latch definition");
+    };
+    let defined = ssa.block(latch).instructions[0].defs()[0].clone();
+    assert_eq!(
+        phi.operands(),
+        [
+            (departure(latch, 1), defined),
+            (departure(new_entry, 0), SsaValue::live_in(0)),
+        ],
+        "operands follow the CFG's predecessor order"
+    );
+    assert_eq!(ssa.block(header).instructions[0].uses()[0], phi.result);
+}
+
+#[test]
+fn an_instruction_answers_the_value_it_reads_and_the_value_it_leaves() {
+    // Variable 0 is read, then defined twice; variable 1 is only read, and
+    // variable 2 only defined.
+    let mut cfg = Cfg::<DfInst>::new();
+    let entry = cfg.entry();
+    cfg.block_mut(entry).push(df_def("seed", 0));
+    cfg.block_mut(entry).push(DfInst {
+        uses: vec![0, 1, 0],
+        defs: vec![0, 2, 0],
+        ..df_ff("wide")
+    });
+
+    let form = SsaForm::compute(&cfg, &DominatorTree::compute(&cfg));
+    let wide = form.instruction(departure(entry, 1)).unwrap();
+
+    assert_eq!(wide.use_of(&0), Some(&SsaValue::new(0, 1)));
+    assert_eq!(wide.use_of(&1), Some(&SsaValue::live_in(1)));
+    assert_eq!(wide.use_of(&2), None, "variable 2 is only defined here");
+    assert_eq!(
+        wide.def_of(&0),
+        Some(&SsaValue::new(0, 3)),
+        "the later of two definitions is the one left behind"
+    );
+    assert_eq!(wide.def_of(&2), Some(&SsaValue::new(2, 1)));
+    assert_eq!(wide.def_of(&1), None, "variable 1 is only read here");
+    assert_eq!(
+        &form.value_at(departure(entry, 2), &0),
+        wide.def_of(&0).unwrap(),
+        "the next point reads what the instruction left"
+    );
 }
 
 #[test]

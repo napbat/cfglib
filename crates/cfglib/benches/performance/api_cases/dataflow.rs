@@ -1,15 +1,15 @@
 use cfglib::{
-    AbstractDomain, Cfg, Direction, DominatorTree, EdgeProblem, Graph, Lattice, NodeId,
+    AbstractDomain, Cfg, Direction, DominatorTree, EdgeProblem, FlowEffect, Graph, Lattice, NodeId,
     SolveConfig, SsaForm, TryEdgeProblem, TryNodeProblem, TryProblem, abstract_interpret,
-    alias_propagation, copies_by_predecessor, copy_propagation, copy_propagation_with_exits,
-    eliminate_phis, index_paths_may_overlap, meet_options, solve_edge_problem,
-    solve_edge_problem_from, solve_edge_problem_from_with_config, solve_edge_problem_with_config,
-    solve_node_problem_from, solve_node_problem_from_with_config, solve_problem_from,
-    solve_problem_from_with_config, try_solve_edge_problem, try_solve_edge_problem_from,
-    try_solve_edge_problem_from_with_config, try_solve_edge_problem_with_config,
-    try_solve_node_problem, try_solve_node_problem_from, try_solve_node_problem_from_with_config,
-    try_solve_node_problem_with_config, try_solve_problem, try_solve_problem_from,
-    try_solve_problem_from_with_config, try_solve_problem_with_config,
+    alias_propagation, alias_propagation_with_exits, copies_by_predecessor, copy_propagation,
+    copy_propagation_with_exits, departs_before_throws, eliminate_phis, index_paths_may_overlap,
+    meet_options, solve_edge_problem, solve_edge_problem_from, solve_edge_problem_from_with_config,
+    solve_edge_problem_with_config, solve_node_problem_from, solve_node_problem_from_with_config,
+    solve_problem_from, solve_problem_from_with_config, try_solve_edge_problem,
+    try_solve_edge_problem_from, try_solve_edge_problem_from_with_config,
+    try_solve_edge_problem_with_config, try_solve_node_problem, try_solve_node_problem_from,
+    try_solve_node_problem_from_with_config, try_solve_node_problem_with_config, try_solve_problem,
+    try_solve_problem_from, try_solve_problem_from_with_config, try_solve_problem_with_config,
 };
 
 use super::BenchmarkSuite;
@@ -231,6 +231,36 @@ fn register_analyses(suite: &mut BenchmarkSuite<'_>) {
         )
     );
 
+    // `entry` throws and unwinds to `handler`, and also falls through.
+    let mut unwinding = Cfg::new();
+    let handler = unwinding.new_block();
+    let normal = unwinding.new_block();
+    let mut throwing = ApiInst::pure(0, Vec::new());
+    throwing.flow = FlowEffect::MayThrow;
+    unwinding.block_mut(unwinding.entry()).push(throwing);
+    unwinding.add_edge(unwinding.entry(), normal, cfglib::EdgeKind::Fallthrough);
+    unwinding.add_edge(
+        unwinding.entry(),
+        handler,
+        cfglib::EdgeKind::ExceptionUnwind,
+    );
+    benchmark_case!(
+        suite,
+        "api_departs_before_throws",
+        covers[departs_before_throws],
+        || {
+            unwinding
+                .outgoing(unwinding.entry())
+                .map(|edge| departs_before_throws(&unwinding, unwinding.edge(edge)))
+                .collect::<Vec<_>>()
+        },
+        |departures: &Vec<bool>| {
+            assert_eq!(departures.len(), 2);
+            assert!(departures[1], "the unwind edge departs before the throw");
+            assert!(!departures[0], "the normal edge departs after the block");
+        }
+    );
+
     let copies_fixture = copy_cfg();
     benchmark_case!(
         suite,
@@ -274,6 +304,23 @@ fn register_analyses(suite: &mut BenchmarkSuite<'_>) {
         |(_, stats)| {
             assert_eq!(stats.uses_rewritten, 1);
             assert_eq!(stats.aliases_removed, 1);
+        }
+    );
+
+    benchmark_case!(
+        suite,
+        "api_alias_propagation_with_exits",
+        covers[alias_propagation_with_exits],
+        || {
+            let mut candidate = copies_fixture.clone();
+            // The alias's destination leaves the function, so the rewrite
+            // still happens and the alias stays.
+            let stats = alias_propagation_with_exits(&mut candidate, |_| vec![1]);
+            (candidate, stats)
+        },
+        |(_, stats)| {
+            assert_eq!(stats.uses_rewritten, 1);
+            assert_eq!(stats.aliases_removed, 0);
         }
     );
 

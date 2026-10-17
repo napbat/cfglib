@@ -367,19 +367,8 @@ impl<L, V, F> MemorySSAEvent<L, V, F> {
     where
         V: VariableId,
     {
-        let access = self.access()?;
-        let instruction = ssa.instruction(self.site.point)?;
-        access
-            .address_uses()
-            .iter()
-            .map(|address| {
-                instruction
-                    .uses()
-                    .iter()
-                    .find(|value| &value.variable == address)
-                    .cloned()
-            })
-            .collect()
+        self.access()?
+            .ssa_address_uses(ssa.instruction(self.site.point)?)
     }
 }
 
@@ -398,8 +387,7 @@ impl<L, V, F> MemorySSAEvent<L, V, F> {
 /// chains.
 ///
 /// Fence events remain ordered and queryable but do not define memory values:
-/// their cross-thread happens-before meaning is consumer-specific. As with
-/// [`SsaForm::compute`], the CFG entry must not be a branch target.
+/// their cross-thread happens-before meaning is consumer-specific.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemorySSA<L, V, F> {
     classes: Vec<MemoryLocationClass<L>>,
@@ -420,6 +408,12 @@ where
     F: Clone + Eq,
 {
     /// Computes location-aware memory SSA for `cfg` using `alias`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the CFG entry is a branch target, for the reason and with
+    /// the remedy given at [`SsaForm::compute`]: the state entering the
+    /// function would be dropped from the memory phi at the entry.
     #[must_use]
     pub fn compute<G, A>(cfg: &G, alias: &A) -> Self
     where
@@ -437,6 +431,10 @@ where
     /// buffers of the shadow CFG the analysis runs over. The answer is the
     /// same one, built by the same code — the allocating entry point is this
     /// function over a fresh [`MemorySsaScratch`].
+    ///
+    /// # Panics
+    ///
+    /// As [`compute`](Self::compute): when the entry block is a branch target.
     #[must_use]
     pub fn compute_in<G, A>(scratch: &mut MemorySsaScratch<L, V, F>, cfg: &G, alias: &A) -> Self
     where
@@ -444,6 +442,7 @@ where
         G::Inst: MemoryEventInfo<Location = L, Fence = F> + InstrInfo<Variable = V>,
         A: MemoryAlias<L> + ?Sized,
     {
+        crate::dataflow::ssa::assert_entry_is_not_a_branch_target(cfg);
         scratch.reset();
         scratch.trace.rebuild(cfg);
         let (classes, class_by_location) = build_location_classes(scratch, alias);
@@ -518,9 +517,8 @@ where
     pub fn operations_at(&self, point: ProgramPoint) -> MemoryOperations {
         self.events_at(point)
             .iter()
-            .fold(MemoryOperations::NONE, |operations, event| {
-                operations.union(event.operations())
-            })
+            .map(MemorySSAEvent::operations)
+            .collect()
     }
 
     /// Looks up one event by its source identity.
@@ -665,37 +663,46 @@ where
         shadow: &Cfg<ShadowInstruction>,
         ssa: &SsaForm<MemoryClassId>,
     ) -> Self {
-        let mut phis = Vec::new();
-        let mut phi_by_result = BTreeMap::new();
-        let mut definitions = BTreeMap::new();
-        let mut users: BTreeMap<MemorySsaValue, Vec<MemoryUse>> = BTreeMap::new();
-        // A shadow departure names a shadow step; consumers know the source
-        // instruction it stands in, or the source block's end.
-        let departure = |point: ProgramPoint| {
-            shadow
-                .block(point.block)
-                .instructions()
-                .get(point.inst_idx)
-                .map_or(
-                    ProgramPoint {
-                        block: point.block,
-                        inst_idx: cfg.instructions(point.block).len(),
-                    },
-                    |step| step.point,
-                )
-        };
-
+        let mut chains = Chains::default();
         for class in &classes {
-            definitions.insert(
+            chains.definitions.insert(
                 SsaValue::live_in(class.id),
                 MemoryDefinition::LiveIn { class: class.id },
             );
         }
+        let (phis, phi_by_result) = Self::phi_table(cfg, shadow, ssa, &mut chains);
+        let EventTable {
+            events,
+            by_site: event_by_site,
+            by_point: events_by_point,
+        } = Self::event_table(trace, shadow, ssa, &mut chains);
+        Self {
+            classes,
+            class_by_location,
+            events,
+            event_by_site,
+            events_by_point,
+            phis,
+            phi_by_result,
+            definitions: chains.definitions,
+            users: chains.users,
+        }
+    }
+
+    /// The renamed phis with their results' producers, and each operand's
+    /// phi use recorded in `chains`.
+    fn phi_table<G: CfgView>(
+        cfg: &G,
+        shadow: &Cfg<ShadowInstruction>,
+        ssa: &SsaForm<MemoryClassId>,
+        chains: &mut Chains,
+    ) -> (Vec<MemoryPhi>, BTreeMap<MemorySsaValue, usize>) {
+        let mut phis = Vec::new();
+        let mut phi_by_result = BTreeMap::new();
         for block in ssa.blocks() {
             for phi in &block.phis {
-                let phi_index = phis.len();
-                phi_by_result.insert(phi.result.clone(), phi_index);
-                definitions.insert(
+                phi_by_result.insert(phi.result.clone(), phis.len());
+                chains.definitions.insert(
                     phi.result.clone(),
                     MemoryDefinition::Phi {
                         block: block.block,
@@ -705,10 +712,11 @@ where
                 let operands: Vec<_> = phi
                     .operands()
                     .iter()
-                    .map(|(point, value)| (departure(*point), value.clone()))
+                    .map(|(point, value)| (source_departure(cfg, shadow, *point), value.clone()))
                     .collect();
                 for (predecessor, operand) in &operands {
-                    users
+                    chains
+                        .users
                         .entry(operand.clone())
                         .or_default()
                         .push(MemoryUse::Phi {
@@ -724,10 +732,22 @@ where
                 });
             }
         }
+        (phis, phi_by_result)
+    }
 
-        let mut events = Vec::new();
-        let mut event_by_site = BTreeMap::new();
-        let mut events_by_point: BTreeMap<ProgramPoint, Range<usize>> = BTreeMap::new();
+    /// The events annotated with the renamed class states of the shadow
+    /// steps that replay them; their producers and readers go to `chains`.
+    fn event_table(
+        trace: &[MemoryTraceEntry<L, V, F>],
+        shadow: &Cfg<ShadowInstruction>,
+        ssa: &SsaForm<MemoryClassId>,
+        chains: &mut Chains,
+    ) -> EventTable<L, V, F> {
+        let mut table = EventTable {
+            events: Vec::new(),
+            by_site: BTreeMap::new(),
+            by_point: BTreeMap::new(),
+        };
         for block in ssa.blocks() {
             let shadow_instructions = shadow.block(block.block).instructions();
             for (instruction_index, renamed) in block.instructions.iter().enumerate() {
@@ -754,40 +774,68 @@ where
                         .then(|| input.expect("every memory write must replace its shadow class")),
                 };
                 if let Some(version) = &event.read_version {
-                    users
+                    chains
+                        .users
                         .entry(version.clone())
                         .or_default()
                         .push(MemoryUse::Event { site: event.site });
                 }
                 if let Some(version) = &event.written_version {
-                    definitions.insert(
+                    chains.definitions.insert(
                         version.clone(),
                         MemoryDefinition::Event { site: event.site },
                     );
                 }
 
-                let event_index = events.len();
-                event_by_site.insert(event.site, event_index);
-                events_by_point
+                let event_index = table.events.len();
+                table.by_site.insert(event.site, event_index);
+                table
+                    .by_point
                     .entry(event.site.point)
                     .and_modify(|range| range.end = event_index + 1)
                     .or_insert(event_index..event_index + 1);
-                events.push(event);
+                table.events.push(event);
             }
         }
-
-        Self {
-            classes,
-            class_by_location,
-            events,
-            event_by_site,
-            events_by_point,
-            phis,
-            phi_by_result,
-            definitions,
-            users,
-        }
+        table
     }
+}
+
+/// The producer and consumer tables that the phis and the events both fill.
+#[derive(Default)]
+struct Chains {
+    definitions: BTreeMap<MemorySsaValue, MemoryDefinition>,
+    users: BTreeMap<MemorySsaValue, Vec<MemoryUse>>,
+}
+
+/// Every event of a memory SSA, with the two indexes that find one.
+struct EventTable<L, V, F> {
+    events: Vec<MemorySSAEvent<L, V, F>>,
+    by_site: BTreeMap<MemoryEventSite, usize>,
+    by_point: BTreeMap<ProgramPoint, Range<usize>>,
+}
+
+/// The source point a shadow departure stands for.
+///
+/// A shadow departure names a shadow step; consumers know the source
+/// instruction the step stands in for, or the source block's end when the
+/// departure is past its last step.
+fn source_departure<G: CfgView>(
+    cfg: &G,
+    shadow: &Cfg<ShadowInstruction>,
+    point: ProgramPoint,
+) -> ProgramPoint {
+    shadow
+        .block(point.block)
+        .instructions()
+        .get(point.inst_idx)
+        .map_or(
+            ProgramPoint {
+                block: point.block,
+                inst_idx: cfg.instructions(point.block).len(),
+            },
+            |step| step.point,
+        )
 }
 
 mod scratch;

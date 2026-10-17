@@ -7,7 +7,7 @@ use super::node::{BlockSpan, CatchHandler, ControlBody, ControlNode, ControlNode
 use super::report::LiftReport;
 use super::tree::{ControlTree, Tables};
 use crate::cfg::Cfg;
-use crate::dataflow::{InstrInfo, Predicated, ProgramPoint};
+use crate::{InstrInfo, Predicated, ProgramPoint};
 
 /// A maximal run of instructions sharing one predicate.
 struct PredicateRun<I: InstrInfo> {

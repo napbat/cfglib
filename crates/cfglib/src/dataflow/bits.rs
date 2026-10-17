@@ -63,12 +63,8 @@ impl DenseBits {
     /// Panics when `index` is outside the universe.
     #[must_use]
     pub fn get(&self, index: usize) -> bool {
-        assert!(
-            index < self.len,
-            "index {index} outside universe {}",
-            self.len
-        );
-        self.words[index / 64] & (1 << (index % 64)) != 0
+        let (word, bit) = self.slot(index);
+        self.words[word] & bit != 0
     }
 
     /// Inserts `index`, returning whether it was newly set.
@@ -77,16 +73,32 @@ impl DenseBits {
     ///
     /// Panics when `index` is outside the universe.
     pub fn insert(&mut self, index: usize) -> bool {
+        let (word, bit) = self.slot(index);
+        let newly = self.words[word] & bit == 0;
+        self.words[word] |= bit;
+        newly
+    }
+
+    /// Removes `index`, returning whether it had been set.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `index` is outside the universe.
+    pub fn remove(&mut self, index: usize) -> bool {
+        let (word, bit) = self.slot(index);
+        let was_set = self.words[word] & bit != 0;
+        self.words[word] &= !bit;
+        was_set
+    }
+
+    /// The word holding `index` and the mask of its bit within that word.
+    fn slot(&self, index: usize) -> (usize, u64) {
         assert!(
             index < self.len,
             "index {index} outside universe {}",
             self.len
         );
-        let word = &mut self.words[index / 64];
-        let bit = 1 << (index % 64);
-        let newly = *word & bit == 0;
-        *word |= bit;
-        newly
+        bit_slot(index)
     }
 
     /// Unions `other` into this set, returning whether anything changed.
@@ -144,7 +156,7 @@ impl DenseBits {
     /// One step per *set* index, not one per index in the universe: an empty
     /// word is skipped whole.
     pub fn ones(&self) -> impl Iterator<Item = usize> + '_ {
-        WordOnes::new(self.words.iter().copied())
+        ones_of(&self.words)
     }
 
     /// The indices in both sets, in ascending order.
@@ -167,6 +179,20 @@ impl DenseBits {
                 .map(|(&left, &right)| left & right),
         )
     }
+}
+
+/// The word that holds `index` and the mask of its bit within that word.
+///
+/// This is the packing every bit row in the crate shares: 64 indices per
+/// word, least-significant bit first. A caller that keeps its rows in one
+/// flat `u64` buffer instead of in [`DenseBits`] reads it from here.
+pub(super) const fn bit_slot(index: usize) -> (usize, u64) {
+    (index / 64, 1 << (index % 64))
+}
+
+/// The set indices of the packed `words`, in ascending order.
+pub(super) fn ones_of(words: &[u64]) -> impl Iterator<Item = usize> + '_ {
+    WordOnes::new(words.iter().copied())
 }
 
 /// The set indices of a word sequence, in ascending order.
@@ -245,6 +271,18 @@ mod tests {
     }
 
     #[test]
+    fn remove_clears_one_index_and_reports_whether_it_was_set() {
+        let mut bits = DenseBits::new(130);
+        bits.insert(64);
+        bits.insert(65);
+        assert!(bits.remove(64));
+        assert!(!bits.remove(64), "a second remove is a no-op");
+        assert!(!bits.get(64));
+        assert!(bits.get(65), "the neighbouring bit is untouched");
+        assert_eq!(bits.ones().collect::<Vec<_>>(), [65]);
+    }
+
+    #[test]
     fn clear_empties_the_set_and_keeps_the_universe() {
         let mut bits = DenseBits::new(130);
         bits.insert(0);
@@ -307,5 +345,49 @@ mod tests {
         assert_ne!(left, right);
         right.insert(2);
         assert_eq!(left, right);
+    }
+
+    #[test]
+    fn the_last_index_of_a_universe_lands_in_the_last_word_with_no_bits_above() {
+        for len in [1_usize, 63, 64, 65, 128, 129] {
+            let mut bits = DenseBits::new(len);
+            assert!(bits.insert(len - 1));
+            assert_eq!(bits.words().len(), len.div_ceil(64), "len {len}");
+            assert_eq!(bits.count_ones(), 1, "len {len}");
+            assert_eq!(bits.ones().collect::<Vec<_>>(), [len - 1], "len {len}");
+            let used = len % 64;
+            if used != 0 {
+                assert_eq!(bits.words()[len / 64] >> used, 0, "len {len}");
+            }
+            assert!(bits.remove(len - 1));
+            assert!(bits.words().iter().all(|&word| word == 0), "len {len}");
+        }
+        let empty = DenseBits::new(0);
+        assert_eq!(empty.words().len(), 0);
+        assert!(empty.ones().next().is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "outside universe")]
+    fn reading_outside_the_universe_panics() {
+        let _ = DenseBits::new(65).get(65);
+    }
+
+    #[test]
+    #[should_panic(expected = "outside universe")]
+    fn inserting_outside_the_universe_panics() {
+        let _ = DenseBits::new(64).insert(64);
+    }
+
+    #[test]
+    #[should_panic(expected = "outside universe")]
+    fn removing_outside_the_universe_panics() {
+        let _ = DenseBits::new(3).remove(3);
+    }
+
+    #[test]
+    #[should_panic(expected = "unioned sets must share one universe")]
+    fn unioning_different_universes_panics() {
+        let _ = DenseBits::new(70).union_with(&DenseBits::new(71));
     }
 }

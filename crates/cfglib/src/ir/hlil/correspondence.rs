@@ -4,7 +4,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use crate::dataflow::ProgramPoint;
+use crate::ProgramPoint;
 use crate::graph::view::DenseId;
 
 use super::recover::Recovery;

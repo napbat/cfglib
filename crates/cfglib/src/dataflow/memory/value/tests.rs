@@ -491,6 +491,38 @@ fn invalid_event_variables_report_their_semantic_role() {
 }
 
 #[test]
+fn a_loaded_variable_defined_twice_resolves_to_the_value_later_readers_see() {
+    // One instruction defines variable 2 twice; the load declares variable 2.
+    // The memory value must reach the definition that survives, because that
+    // is the one a later use reads.
+    let mut cfg = Cfg::new();
+    let block = cfg.entry();
+    cfg.block_mut(block).push(Instruction::access(
+        [],
+        [2, 2],
+        MemoryAccess::read(Location::Value, [2]),
+    ));
+    cfg.block_mut(block).push(Instruction::plain([2], [3]));
+
+    let (ssa, _, flow) = analyses(&cfg);
+    let load = ssa.instruction(site(block, 0).point()).unwrap();
+    let [_overwritten, surviving] = load.defs() else {
+        panic!("the load defines variable 2 twice");
+    };
+    let reader = ssa.instruction(site(block, 1).point()).unwrap();
+    assert_eq!(&reader.uses()[0], surviving);
+    assert!(has_edge(
+        &flow,
+        flow.event_node(site(block, 0)).unwrap(),
+        flow.value_node(surviving).unwrap(),
+        MemoryValueEdge::Load {
+            site: site(block, 0),
+            output_index: 0,
+        }
+    ));
+}
+
+#[test]
 fn fences_remain_explicit_without_claiming_value_dependencies() {
     let mut cfg = Cfg::new();
     cfg.block_mut(cfg.entry()).push(Instruction::fence());

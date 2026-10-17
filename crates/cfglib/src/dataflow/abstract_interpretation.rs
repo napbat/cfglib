@@ -1,6 +1,6 @@
 //! Abstract interpretation framework.
 //!
-//! Generalises the fixpoint engine to work over arbitrary lattices,
+//! Generalizes the fixpoint engine to work over arbitrary lattices,
 //! enabling interval analysis, sign analysis, taint tracking, etc.
 //!
 //! Internally delegates to the [edge-sensitive solver](super::edge_fixpoint),
@@ -10,13 +10,13 @@
 extern crate alloc;
 use alloc::collections::BTreeMap;
 
+use crate::InstrInfo;
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
 use crate::dataflow::edge_fixpoint::{self, EdgeProblem};
 use crate::dataflow::fixpoint::Direction;
-use crate::dataflow::{InstrInfo, departs_before_throws};
+use crate::dataflow::unwind::{replay_block, unwind_departure};
 use crate::graph::edge_view::EdgeRef;
-use crate::graph::traverse::{TraversalDirection, depth_first_preorder};
 
 /// A lattice element for abstract interpretation.
 pub trait Lattice: Clone + PartialEq {
@@ -72,22 +72,12 @@ struct AbstractProblem<D> {
 }
 
 impl<D> AbstractProblem<D> {
-    /// Replays `block` from `input`, handing the state before each throwing
-    /// instruction to `before_unwind`.
-    fn replay<G>(cfg: &G, block: BlockId, input: &D, mut before_unwind: impl FnMut(&D)) -> D
+    /// One instruction's transfer, as a replay step.
+    fn step<I>(state: &mut D, _index: usize, instruction: &I)
     where
-        G: CfgView,
-        G::Inst: InstrInfo,
-        D: AbstractDomain<G::Inst>,
+        D: AbstractDomain<I>,
     {
-        let mut state = input.clone();
-        for inst in cfg.instructions(block) {
-            if inst.may_unwind() {
-                before_unwind(&state);
-            }
-            state = D::transfer(&state, inst);
-        }
-        state
+        *state = D::transfer(state, instruction);
     }
 }
 
@@ -108,12 +98,10 @@ where
         None
     }
 
-    /// A reached block that nothing branches to starts from the entry value.
+    /// The entry block starts from the entry value, merged with whatever
+    /// branches back into it.
     fn boundary(&self, cfg: &G, block: BlockId) -> Option<Option<D>> {
-        cfg.incoming(block)
-            .next()
-            .is_none()
-            .then(|| Some(D::entry_value()))
+        (block == cfg.root()).then(|| Some(D::entry_value()))
     }
 
     fn meet(&self, left: &Option<D>, right: &Option<D>) -> Option<D> {
@@ -126,7 +114,7 @@ where
     fn transfer_node(&self, cfg: &G, block: BlockId, input: &Option<D>) -> Option<D> {
         input
             .as_ref()
-            .map(|input| Self::replay(cfg, block, input, |_| {}))
+            .map(|input| replay_block(cfg, block, input, Self::step, |_| {}))
     }
 
     fn transfer_edge(
@@ -136,18 +124,14 @@ where
         input: &Option<D>,
         output: &Option<D>,
     ) -> Option<D> {
-        if !departs_before_throws(cfg, edge) {
-            return output.clone();
-        }
-        let input = input.as_ref()?;
-        let mut departing: Option<D> = None;
-        Self::replay(cfg, edge.source(), input, |state| {
-            departing = Some(match departing.take() {
-                None => state.clone(),
-                Some(earlier) => earlier.meet(state),
-            });
-        });
-        Some(departing.expect("an edge departing before throws leaves a block that may unwind"))
+        input
+            .as_ref()
+            .and_then(|input| {
+                unwind_departure(cfg, edge, input, Self::step, |earlier, later| {
+                    earlier.meet(later)
+                })
+            })
+            .map_or_else(|| output.clone(), Some)
     }
 }
 
@@ -160,11 +144,6 @@ where
 /// carries the meet of the states before each instruction of its source
 /// that [`may_unwind`](InstrInfo::may_unwind), so a throwing instruction's
 /// own effect and every later one in its block never reach the handler.
-///
-/// # Panics
-///
-/// Panics only if the unbounded fixpoint solve reports a step-limit error,
-/// which the unbounded configuration cannot produce.
 #[must_use]
 pub fn abstract_interpret<G, D>(cfg: &G) -> AbstractFacts<D>
 where
@@ -175,9 +154,7 @@ where
     let problem = AbstractProblem::<D> {
         _marker: core::marker::PhantomData,
     };
-    let reachable = depth_first_preorder(cfg, cfg.root(), TraversalDirection::Outgoing);
-    let result = edge_fixpoint::solve_edge_problem_from(cfg, &problem, &reachable)
-        .expect("an unbounded solve cannot exceed a step limit");
+    let result = edge_fixpoint::solve_reachable(cfg, &problem);
 
     // Convert Vec-indexed results to BTreeMap-keyed results.
     let mut block_in = BTreeMap::new();
@@ -204,8 +181,7 @@ mod tests {
     use super::*;
     use crate::cfg::Cfg;
     use crate::edge::EdgeKind;
-    use crate::flow::FlowEffect;
-    use crate::test_util::{DfInst, df_const, df_ff, df_with_effect};
+    use crate::test_util::{DfInst, df_const, df_ff, df_throwing, protected_region};
 
     /// A trivial sign lattice: Bottom < Neg/Zero/Pos < Top.
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,33 +295,34 @@ mod tests {
         }
     }
 
-    fn throwing(instruction: DfInst) -> DfInst {
-        df_with_effect(instruction, FlowEffect::MayThrow)
+    #[test]
+    fn an_entry_that_is_a_branch_target_still_starts_from_the_entry_value() {
+        let mut cfg = Cfg::new();
+        let body = cfg.new_block();
+        cfg.add_edge(cfg.entry(), body, EdgeKind::Fallthrough);
+        cfg.add_edge(body, cfg.entry(), EdgeKind::Back);
+        cfg.block_mut(body).push(df_ff("body"));
+
+        let result: AbstractFacts<Sign> = abstract_interpret(&cfg);
+
+        assert_eq!(result.fact_in(cfg.entry()), Some(&Sign::Zero));
+        assert_eq!(result.fact_in(body), Some(&Sign::Zero));
     }
 
     /// `entry: x = 3`, then `protected` holding `instructions`, which falls
     /// through to `normal` and unwinds to `handler`. Returns
     /// `(facts, normal, handler)`.
-    fn protected_region(
+    fn prior_then_region(
         instructions: impl IntoIterator<Item = DfInst>,
     ) -> (AbstractFacts<Sign>, BlockId, BlockId) {
-        let mut cfg = Cfg::new();
-        let protected = cfg.new_block();
-        let normal = cfg.new_block();
-        let handler = cfg.new_block();
-        cfg.add_edge(cfg.entry(), protected, EdgeKind::Fallthrough);
-        cfg.add_edge(protected, normal, EdgeKind::Fallthrough);
-        cfg.add_edge(protected, handler, EdgeKind::ExceptionUnwind);
+        let (mut cfg, [_, normal, handler]) = protected_region(instructions);
         cfg.block_mut(cfg.entry()).push(df_const("prior", 0, 3));
-        cfg.block_mut(protected)
-            .instructions_mut()
-            .extend(instructions);
         (abstract_interpret(&cfg), normal, handler)
     }
 
     #[test]
     fn a_handler_sees_the_state_before_a_faulting_write() {
-        let (facts, normal, handler) = protected_region([throwing(df_const("load", 0, -2))]);
+        let (facts, normal, handler) = prior_then_region([df_throwing(df_const("load", 0, -2))]);
 
         assert_eq!(facts.fact_in(handler), Some(&Sign::Pos));
         assert_eq!(facts.fact_in(normal), Some(&Sign::Neg));
@@ -353,10 +330,10 @@ mod tests {
 
     #[test]
     fn a_handler_meets_the_state_each_throw_observes() {
-        let (facts, normal, handler) = protected_region([
-            throwing(df_ff("first call")),
+        let (facts, normal, handler) = prior_then_region([
+            df_throwing(df_ff("first call")),
             df_const("negative", 0, -2),
-            throwing(df_ff("second call")),
+            df_throwing(df_ff("second call")),
             df_const("zero", 0, 0),
         ]);
 
