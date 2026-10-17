@@ -308,7 +308,7 @@ A `FunctionView` follows these rules:
 | Control dependence graph | `control_dependence_graph` → `Graph<N, ()>` | From post-dominator tree, over any view; a block that branches back to itself has the edge to itself |
 | Program dependence graph | `program_dependence_graph` → `Graph<DependenceNode, DependenceKind>` | Control edges (from a block's predicate node to what it controls) and data edges (def to use, and a branching block's last instruction into its predicate node); reverse traversal performs backward slicing |
 | Interval analysis | `IntervalAnalysis::compute` → `intervals` | First-level Allen-Cocke interval partition of the code the root reaches; use `is_reducible` for the reducibility test |
-| Reducibility transform | `make_reducible` | Node splitting for irreducible CFGs |
+| Reducibility | `is_reducible` (exact test over a dominator tree), `make_reducible` (CFG node splitting) | Irreducible cycles are split until every retreating edge is a back edge |
 | Reverse CFG | `reverse_cfg` | Flip all edges, swap entry/exits |
 | Call graph | `call_graph` + `CallInfo`, `propagate_summaries` (callee-first SCC fixpoint) | Consumer-typed callees; interprocedural summary scaffold |
 | CFG diff | `CfgDiff::compute` | Structural comparison (bindiff-style fingerprinting), no trait bounds |
@@ -379,7 +379,7 @@ These analyses take `&G` where `G: CfgView`: `ReachingDefs`, `Liveness`, `DefUse
 | Exclusive handler extents | `recover_exclusive_extents[_with]`, `promote_exclusive_extents` | Evidence-reporting sibling of `promote_handler_extents`: blocks exclusively reachable from one handler entry along normal edges, boundary and ambiguity issues, and atomic per-region promotion that refuses overlap |
 | Dead code analysis | `DeadCode::compute`, `DeadCode::compute_with_exits` | Liveness-dead instructions (effect-guarded) and unreachable blocks, reported without mutating — the analysis `dead_code_elimination` applies. The seeded form takes what leaves each block (a returned value, storage a caller reads again, state a non-returning exit hands on), which a graph read from the inside cannot state; `SeededLivenessProblem` carries the seed into the solve |
 | Purity classification | `cfg_purity`, `block_purity`, `EffectInfo` (associated `Effect`) | Consumer effect vocabularies — machine memory/IO, allocation, panics |
-| Metrics | `GraphMetrics::compute` (any rooted view); `CfgMetrics::compute` | Node/edge counts, cyclomatic complexity, nesting depth, instruction density |
+| Metrics | `GraphMetrics::compute` (any rooted view); `CfgMetrics::compute` | Live node and edge counts (removed slots are not nodes), cyclomatic complexity, nesting depth (0 for no loops, 1 for one loop), instruction density |
 | Pattern detection | `detect_patterns` (any view), `detect_cfg_patterns` (adds trampolines + arm orientation) | Diamond, chain, self-loop, empty trampoline |
 | Profiling | `CfgProfile::from_edge_weights`, `set_uniform_edge_weights` | Edge-weight-based hot/cold block analysis |
 | Tail call detection | `detect_tail_calls` (heuristic), `detect_explicit_tail_calls` (`CallInfo` markers) | |
