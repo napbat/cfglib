@@ -181,8 +181,7 @@ mod tests {
     use super::*;
     use crate::cfg::Cfg;
     use crate::edge::EdgeKind;
-    use crate::flow::FlowEffect;
-    use crate::test_util::{DfInst, df_const, df_ff, df_with_effect};
+    use crate::test_util::{DfInst, df_const, df_ff, df_throwing, protected_region};
 
     /// A trivial sign lattice: Bottom < Neg/Zero/Pos < Top.
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -310,33 +309,20 @@ mod tests {
         assert_eq!(result.fact_in(body), Some(&Sign::Zero));
     }
 
-    fn throwing(instruction: DfInst) -> DfInst {
-        df_with_effect(instruction, FlowEffect::MayThrow)
-    }
-
     /// `entry: x = 3`, then `protected` holding `instructions`, which falls
     /// through to `normal` and unwinds to `handler`. Returns
     /// `(facts, normal, handler)`.
-    fn protected_region(
+    fn prior_then_region(
         instructions: impl IntoIterator<Item = DfInst>,
     ) -> (AbstractFacts<Sign>, BlockId, BlockId) {
-        let mut cfg = Cfg::new();
-        let protected = cfg.new_block();
-        let normal = cfg.new_block();
-        let handler = cfg.new_block();
-        cfg.add_edge(cfg.entry(), protected, EdgeKind::Fallthrough);
-        cfg.add_edge(protected, normal, EdgeKind::Fallthrough);
-        cfg.add_edge(protected, handler, EdgeKind::ExceptionUnwind);
+        let (mut cfg, [_, normal, handler]) = protected_region(instructions);
         cfg.block_mut(cfg.entry()).push(df_const("prior", 0, 3));
-        cfg.block_mut(protected)
-            .instructions_mut()
-            .extend(instructions);
         (abstract_interpret(&cfg), normal, handler)
     }
 
     #[test]
     fn a_handler_sees_the_state_before_a_faulting_write() {
-        let (facts, normal, handler) = protected_region([throwing(df_const("load", 0, -2))]);
+        let (facts, normal, handler) = prior_then_region([df_throwing(df_const("load", 0, -2))]);
 
         assert_eq!(facts.fact_in(handler), Some(&Sign::Pos));
         assert_eq!(facts.fact_in(normal), Some(&Sign::Neg));
@@ -344,10 +330,10 @@ mod tests {
 
     #[test]
     fn a_handler_meets_the_state_each_throw_observes() {
-        let (facts, normal, handler) = protected_region([
-            throwing(df_ff("first call")),
+        let (facts, normal, handler) = prior_then_region([
+            df_throwing(df_ff("first call")),
             df_const("negative", 0, -2),
-            throwing(df_ff("second call")),
+            df_throwing(df_ff("second call")),
             df_const("zero", 0, 0),
         ]);
 

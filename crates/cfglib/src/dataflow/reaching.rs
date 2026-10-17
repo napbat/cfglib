@@ -219,7 +219,8 @@ mod tests {
     use crate::cfg::Cfg;
     use crate::flow::FlowEffect;
     use crate::test_util::{
-        df_def as def, df_ff as ff, df_use as use_, df_with_effect as with_effect,
+        df_def as def, df_ff as ff, df_throwing, df_use as use_, df_with_effect as with_effect,
+        protected_region,
     };
     use alloc::vec;
 
@@ -299,25 +300,16 @@ mod tests {
 
     #[test]
     fn a_handler_receives_only_the_definitions_completed_before_each_throw() {
-        use crate::edge::EdgeKind;
-
         // entry: x = prior
         // protected: x = load (throws); y = 1; call (throws); x = after
         // `protected` falls through to `normal` and unwinds to `handler`.
-        let mut cfg = Cfg::new();
-        let protected = cfg.new_block();
-        let normal = cfg.new_block();
-        let handler = cfg.new_block();
-        cfg.add_edge(cfg.entry(), protected, EdgeKind::Fallthrough);
-        cfg.add_edge(protected, normal, EdgeKind::Fallthrough);
-        cfg.add_edge(protected, handler, EdgeKind::ExceptionUnwind);
-        cfg.block_mut(cfg.entry()).push(def("prior", 0));
-        cfg.block_mut(protected).instructions_mut().extend([
-            with_effect(def("load", 0), FlowEffect::MayThrow),
+        let (mut cfg, [protected, normal, handler]) = protected_region([
+            df_throwing(def("load", 0)),
             def("y", 1),
-            with_effect(ff("call"), FlowEffect::MayThrow),
+            df_throwing(ff("call")),
             def("after", 0),
         ]);
+        cfg.block_mut(cfg.entry()).push(def("prior", 0));
 
         let rd = ReachingDefs::compute(&cfg);
         let at = |block, inst_idx| DefSite { block, inst_idx };

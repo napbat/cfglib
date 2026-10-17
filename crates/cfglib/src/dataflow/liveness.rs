@@ -599,9 +599,10 @@ mod tests {
     use crate::builder::CfgBuilder;
     use crate::cfg::Cfg;
     use crate::dataflow::fixpoint;
-    use crate::edge::EdgeKind;
     use crate::flow::FlowEffect;
-    use crate::test_util::{df_def as def, df_ff, df_use as use_, df_with_effect};
+    use crate::test_util::{
+        df_def as def, df_ff, df_throwing, df_use as use_, df_with_effect, protected_region,
+    };
     use alloc::vec;
 
     #[test]
@@ -805,26 +806,8 @@ mod tests {
         );
     }
 
-    /// `entry → protected`, which falls through to `normal` and unwinds to
-    /// `handler`, with `instructions` in `protected`.
-    fn protected_region(
-        instructions: impl IntoIterator<Item = crate::test_util::DfInst>,
-    ) -> (Cfg<crate::test_util::DfInst>, [BlockId; 3]) {
-        let mut cfg = Cfg::new();
-        let protected = cfg.new_block();
-        let normal = cfg.new_block();
-        let handler = cfg.new_block();
-        cfg.add_edge(cfg.entry(), protected, EdgeKind::Fallthrough);
-        cfg.add_edge(protected, normal, EdgeKind::Fallthrough);
-        cfg.add_edge(protected, handler, EdgeKind::ExceptionUnwind);
-        cfg.block_mut(protected)
-            .instructions_mut()
-            .extend(instructions);
-        (cfg, [protected, normal, handler])
-    }
-
     fn call() -> crate::test_util::DfInst {
-        df_with_effect(df_ff("call"), FlowEffect::MayThrow)
+        df_throwing(df_ff("call"))
     }
 
     #[test]

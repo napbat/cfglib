@@ -282,9 +282,8 @@ mod tests {
     use super::*;
     use crate::cfg::Cfg;
     use crate::edge::EdgeKind;
-    use crate::flow::FlowEffect;
     use crate::test_util::{
-        DfInst, UdInst, df_const, df_def, df_ff, df_use, df_with_effect, ud_inst,
+        DfInst, UdInst, df_const, df_def, df_ff, df_throwing, df_use, protected_region, ud_inst,
     };
 
     #[derive(Debug, Clone, Copy)]
@@ -445,33 +444,20 @@ mod tests {
         assert_eq!(out.get(&3), Some(&ConstValue::Const(7)));
     }
 
-    fn throwing(instruction: DfInst) -> DfInst {
-        df_with_effect(instruction, FlowEffect::MayThrow)
-    }
-
     /// `entry: x = 1`, then `protected` holding `instructions`, which falls
     /// through to `normal` and unwinds to `handler`. Returns
     /// `(cfg, normal, handler)`.
-    fn protected_region(
+    fn prior_then_region(
         instructions: impl IntoIterator<Item = DfInst>,
     ) -> (Cfg<DfInst>, BlockId, BlockId) {
-        let mut cfg = Cfg::new();
-        let protected = cfg.new_block();
-        let normal = cfg.new_block();
-        let handler = cfg.new_block();
-        cfg.add_edge(cfg.entry(), protected, EdgeKind::Fallthrough);
-        cfg.add_edge(protected, normal, EdgeKind::Fallthrough);
-        cfg.add_edge(protected, handler, EdgeKind::ExceptionUnwind);
+        let (mut cfg, [_, normal, handler]) = protected_region(instructions);
         cfg.block_mut(cfg.entry()).push(df_const("prior", 0, 1));
-        cfg.block_mut(protected)
-            .instructions_mut()
-            .extend(instructions);
         (cfg, normal, handler)
     }
 
     #[test]
     fn a_handler_sees_the_constant_before_a_faulting_load() {
-        let (cfg, normal, handler) = protected_region([throwing(df_const("load", 0, 2))]);
+        let (cfg, normal, handler) = prior_then_region([df_throwing(df_const("load", 0, 2))]);
 
         let result = constant_propagation(&cfg);
         assert_eq!(result.fact_in(handler).get(&0), Some(&ConstValue::Const(1)));
@@ -480,10 +466,10 @@ mod tests {
 
     #[test]
     fn a_handler_meets_the_constants_each_throw_observes() {
-        let (cfg, normal, handler) = protected_region([
-            throwing(df_ff("first call")),
+        let (cfg, normal, handler) = prior_then_region([
+            df_throwing(df_ff("first call")),
             df_const("second value", 0, 2),
-            throwing(df_ff("second call")),
+            df_throwing(df_ff("second call")),
             df_const("final value", 0, 3),
         ]);
 

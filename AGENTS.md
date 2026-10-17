@@ -112,10 +112,14 @@ with `uv run --no-project python scripts/check_repository_policy.py`.
 - Generic pass composition owns only stable identity, declared order, change
   reporting, and fallible execution. Consumers own pass selection, dependency
   order, dialect semantics, and any analysis-cache invalidation policy.
-- Every fixpoint solver carries the identical facility matrix — full solve,
+- Every generic fixpoint solver (`solve_problem`, `solve_node_problem`,
+  `solve_edge_problem`) carries the identical facility matrix — full solve,
   `_from` seeding, `_with_config` bounds, and fallible `try_` counterparts —
   built as a fallible core with infallible wrappers, sharing `SolveConfig`,
-  `SolveError`, and `TrySolveError`.
+  `SolveError`, and `TrySolveError`, and running on one shared worklist. A
+  derived analysis (`Liveness`, `ReachingDefs`, `SccpAnalysis`, ...) wraps a
+  solver unbounded or runs its own convergence loop; it does not grow the
+  matrix.
 - Use American English spelling in identifiers, documentation, and comments
   (`analyze`, `color`, `normalize`, `initialize`).
 - Unit tests live inline in a `#[cfg(test)] mod tests` in the file they test;
