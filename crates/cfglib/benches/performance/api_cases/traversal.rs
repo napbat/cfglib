@@ -77,9 +77,11 @@ fn register_fanout(suite: &mut BenchmarkSuite<'_>) {
         suite,
         "fanout_dense_from_grouped",
         || {
-            DenseFanout::<u32>::from_grouped((0..FANOUT_KEYS).map(|key| {
-                (0..key % (2 * FANOUT_FAN)).map(move |slot| u32::try_from(key + slot).unwrap_or(0))
-            }))
+            DenseFanout::<u32>::from_grouped(
+                (0..FANOUT_KEYS).map(|key| {
+                    (0..key % (2 * FANOUT_FAN)).map(move |slot| fixture_u32(key + slot))
+                }),
+            )
         },
         |built: &DenseFanout<u32>| {
             assert_eq!(built.bound(), FANOUT_KEYS);
@@ -123,7 +125,7 @@ fn register_small_walks(suite: &mut BenchmarkSuite<'_>) {
             || {
                 let mut visited = 0_usize;
                 for walk in 0..WALKS {
-                    let base = u32::try_from(walk).unwrap_or(0) * 16;
+                    let base = fixture_u32(walk) * 16;
                     let stopped = open_search(
                         [(base, 0), (base + 8, 0)],
                         OpenSearchConfig::new(order),

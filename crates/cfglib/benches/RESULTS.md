@@ -3,10 +3,9 @@
 Measured on Windows on 2026-08-24, starting from revision `43d3f07`. These are
 synthetic regression fixtures, not claims about every consumer workload. This
 file is a dated record of that session, not a description of the current tree:
-later changes have moved the numbers (the allocation counts of several cases
-below are different today), and the harness's `coverage:` line, not this page,
-states how many cases and facade functions a run covers. Rerun the commands in
-[README.md](README.md) for current figures.
+later changes have moved the numbers, and the harness's `coverage:` line, not
+this page, states how many cases and facade functions a run covers. Rerun the
+commands in [README.md](README.md) for current figures.
 
 ## Screening comparison
 
@@ -50,30 +49,11 @@ every root-facade free function. The allocation-instrumented build also
 completed every case and verified that each measured operation returned to its
 starting live-byte baseline.
 
-Selected results from that facade run are below. CPU values are medians of
-seven samples with a 25 ms minimum per sample. Allocation values are one
-steady-state operation after warm-up. Mutation cases include fixture cloning.
-
-| Case | CPU (ns/op) | Allocations | Requested bytes |
-| --- | ---: | ---: | ---: |
-| `api_recover_expressions` | 142,807.1 | 2,529 | 207,104 |
-| `api_abstract_interpret` | 7,216.8 | 66 | 7,304 |
-| `api_copy_propagation` | 1,221.6 | 35 | 4,593 |
-| `api_try_solve_problem` | 13,910.6 | 63 | 23,128 |
-| `api_solve_edge_problem` | 35,191.1 | 1,104 | 17,921 |
-| `api_search` | 4,120.3 | 11 | 36,808 |
-| `api_search_with_scratch` | 3,453.2 | 0 | 0 |
-| `api_open_breadth_first_paths` | 231,399.1 | 2,049 | 12,578,960 |
-| `api_kosaraju_scc` | 34,976.3 | 623 | 163,856 |
-| `api_program_dependence_graph` | 965,648.3 | 1,582 | 410,770 |
-| `api_verify_edge_view` | 524,693.6 | 1,310 | 270,388 |
-| `api_merge_blocks_mapped` | 52,619.0 | 864 | 77,364 |
-| `api_dead_code_elimination` | 78,912.0 | 1,304 | 145,600 |
-| `api_interference_graph` | 139,325.0 | 1,229 | 116,192 |
-| `api_linearize` | 21,609.6 | 600 | 207,896 |
-
 The zero-allocation reusable-scratch search is a useful harness sanity check:
-the corresponding allocating `search` entry point reports 11 allocations on
-the same 1,024-node workload. Use the commands in [README.md](README.md) to
+`api_search_with_scratch` reports no allocations where the allocating
+`api_search` entry point reports 11 on the same 1,024-node workload, which
+holds in the current tree. Use the commands in [README.md](README.md) to
 reproduce either mode; pinning an otherwise-idle machine and increasing the
-target duration is recommended before making small-factor decisions.
+target duration is recommended before making small-factor decisions. The
+per-case figures of that run are not kept here, because the allocation counts
+of most cases have moved since.

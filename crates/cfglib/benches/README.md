@@ -7,8 +7,8 @@ and the facade API cases (`performance/api_cases/`) into one
 harness has separate CPU and allocation builds so allocator instrumentation
 cannot perturb timing results.
 
-The latest local comparison and its measurement limits are recorded in
-[RESULTS.md](RESULTS.md).
+[RESULTS.md](RESULTS.md) is a dated record of one optimization session and its
+measurement limits, not a description of the current tree.
 
 `graph-store.rs` is a separate, self-contained target measuring `Graph` at
 the two scales it exists for. The first table is symbol-graph scale: one
