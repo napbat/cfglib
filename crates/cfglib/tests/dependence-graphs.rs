@@ -4,9 +4,9 @@
 use std::collections::BTreeSet;
 
 use cfglib::{
-    BlockId, Cfg, DependenceKind, DependenceNode, EdgeKind, InstrInfo, NodeId, PostDominatorTree,
-    ProgramPoint, TraversalDirection, control_dependence_graph, depth_first_preorder,
-    program_dependence_graph,
+    BlockId, Cfg, DependenceKind, DependenceNode, EdgeKind, InstrInfo, NodeId,
+    PostDominatorScratch, PostDominatorTree, PostNode, ProgramPoint, TraversalDirection,
+    control_dependence_graph, depth_first_preorder, program_dependence_graph,
 };
 
 /// A three-address operation over named virtual registers.
@@ -232,4 +232,64 @@ fn a_removed_block_leaves_no_dependence_nodes() {
             .node_ids()
             .any(|node| *graph.node(node) == point(else_block, 0))
     );
+}
+
+/// `entry` branches to two blocks that each return, and a third branch spins
+/// forever.
+fn two_returns_and_a_spin() -> (Cfg<Op>, [BlockId; 4]) {
+    let mut cfg = Cfg::<Op>::new();
+    let entry = cfg.entry();
+    let [ret_a, ret_b, spin] = [(); 3].map(|()| cfg.new_block());
+    cfg.add_edge(entry, ret_a, EdgeKind::ConditionalTrue);
+    cfg.add_edge(entry, ret_b, EdgeKind::ConditionalFalse);
+    cfg.add_edge(entry, spin, EdgeKind::SwitchCase);
+    cfg.add_edge(spin, spin, EdgeKind::Unconditional);
+    (cfg, [entry, ret_a, ret_b, spin])
+}
+
+#[test]
+fn a_post_dominator_scratch_answers_like_a_fresh_tree_across_procedures() {
+    let procedures = [
+        branch().cfg,
+        two_returns_and_a_spin().0,
+        Cfg::<Op>::new(),
+        branch().cfg,
+    ];
+    let mut scratch = PostDominatorScratch::new();
+    for (index, cfg) in procedures.iter().enumerate() {
+        let reused = PostDominatorTree::compute_in(&mut scratch, cfg);
+        assert_eq!(reused, PostDominatorTree::compute(cfg), "procedure {index}");
+    }
+}
+
+#[test]
+fn several_exits_and_a_spin_meet_at_the_virtual_exit() {
+    let (cfg, [entry, ret_a, ret_b, spin]) = two_returns_and_a_spin();
+    let post = PostDominatorTree::compute(&cfg);
+
+    assert_eq!(post.exits(), [ret_a, ret_b]);
+    assert_eq!(post.cut_roots(), [spin], "the spin gets a path out");
+    assert!(post.reaches_exit(ret_a));
+    assert!(!post.reaches_exit(spin));
+    assert_eq!(post.ipdom(entry), Some(PostNode::Exit));
+    assert_eq!(
+        post.nearest_common_post_dominator(ret_a, ret_b),
+        Some(PostNode::Exit)
+    );
+    assert_eq!(
+        post.nearest_common_post_dominator(ret_a, ret_a),
+        Some(PostNode::Node(ret_a))
+    );
+    assert_eq!(
+        post.children(PostNode::Exit).collect::<Vec<_>>(),
+        [entry, ret_a, ret_b, spin]
+    );
+
+    // Each arm is decided at the entry, and so is the spin.
+    let dependences = control_dependence_graph(&cfg, &post);
+    let controlled: BTreeSet<BlockId> = dependences
+        .successors(NodeId::from_index(entry.index()))
+        .map(|node| dependences[node])
+        .collect();
+    assert_eq!(controlled, BTreeSet::from([ret_a, ret_b, spin]));
 }
