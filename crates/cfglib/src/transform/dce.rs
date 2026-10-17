@@ -2,7 +2,8 @@
 //!
 //! Applies [`DeadCode`]: the analysis decides what is dead, and this pass
 //! removes it. Instructions with side effects (non-empty
-//! [`EffectInfo::effects`](crate::EffectInfo::effects)) are never removed —
+//! [`EffectInfo::effects`](crate::EffectInfo::effects)) and instructions that
+//! [may unwind](crate::InstrInfo::may_unwind) are never removed —
 //! requiring [`EffectInfo`](crate::EffectInfo) is deliberate: a consumer
 //! must state an effect vocabulary before this pass will delete anything,
 //! which prevents silently removing side-effecting statements.
