@@ -95,3 +95,37 @@ fn children_are_allocated_before_their_parents_when_goto_labels_are_applied() {
     }
     assert_eq!(tree.preorder().count(), tree.node_count());
 }
+
+#[test]
+fn a_case_that_leaves_an_endless_loop_is_a_break() {
+    // `for (;;) switch (op) { case 0: leave; case 1: work(); default: rest(); }`:
+    // no test heads the loop, so its only exit is the dispatch edge of case 0.
+    let mut cfg: Cfg<MockInst> = Cfg::new();
+    let dispatch = cfg.new_block();
+    let exit = cfg.new_block();
+    let work = cfg.new_block();
+    let rest = cfg.new_block();
+    cfg.block_mut(cfg.entry()).push(ff("start"));
+    cfg.block_mut(dispatch).push(ff("switch op"));
+    cfg.block_mut(exit)
+        .push(MockInst(FlowEffect::Return, "return"));
+    cfg.block_mut(work).push(ff("work()"));
+    cfg.block_mut(rest).push(ff("rest()"));
+    cfg.add_edge(cfg.entry(), dispatch, EdgeKind::Fallthrough);
+    cfg.add_edge(dispatch, exit, EdgeKind::SwitchCase);
+    cfg.add_edge(dispatch, work, EdgeKind::SwitchCase);
+    cfg.add_edge(dispatch, rest, EdgeKind::Fallthrough);
+    cfg.add_edge(work, dispatch, EdgeKind::Jump);
+    cfg.add_edge(rest, dispatch, EdgeKind::Jump);
+
+    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    assert!(
+        report.is_fully_structured(),
+        "{report:?}\n{}",
+        pseudocode(&cfg, &tree)
+    );
+    assert!(has_node_kind(&tree, |node| matches!(
+        node,
+        ControlNode::Break { label: None }
+    )));
+}

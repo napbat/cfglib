@@ -13,7 +13,7 @@ use super::branches::conditional_targets;
 use super::{BlockFlowKind, LoopContext, Structurer, block_is_allowed, branching, flow_successors};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::edge::{EdgeId, EdgeKind};
+use crate::edge::EdgeId;
 use crate::graph::structure::NaturalLoop;
 
 use super::super::node::{ControlNode, LoopKind};
@@ -156,8 +156,9 @@ fn classify_loop<I, E>(
 }
 
 /// The deterministic follow of a loop with no recognized test: the first
-/// sequential exit target scanning body blocks in identity order, preferring
-/// targets inside the enclosing bound.
+/// exit target of sequential flow (any edge but an exception edge, the rule
+/// [`flow_successors`] states) scanning body blocks in identity order,
+/// preferring targets inside the enclosing bound.
 fn endless_follow<I, E>(
     cfg: &Cfg<I, E>,
     natural: &NaturalLoop,
@@ -171,15 +172,7 @@ fn endless_follow<I, E>(
     for &block in natural.body.iter().filter(|block| reachable[block.index()]) {
         for eid in cfg.outgoing(block) {
             let edge = cfg.edge(eid);
-            let sequential = matches!(
-                edge.kind(),
-                EdgeKind::Fallthrough
-                    | EdgeKind::Unconditional
-                    | EdgeKind::ConditionalTrue
-                    | EdgeKind::ConditionalFalse
-                    | EdgeKind::Jump
-            );
-            if sequential && !natural.body.contains(&edge.target()) {
+            if !edge.kind().is_exceptional() && !natural.body.contains(&edge.target()) {
                 if block_is_allowed(allowed_blocks, edge.target()) {
                     return Some(edge.target());
                 }
