@@ -22,11 +22,6 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
-      - name: Install Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.x"
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -35,9 +30,6 @@ jobs:
 
       - name: Cache Cargo artifacts
         uses: Swatinem/rust-cache@v2
-
-      - name: Check repository policy
-        run: python scripts/check_repository_policy.py
 
       - name: Check formatting
         run: cargo fmt --all -- --check

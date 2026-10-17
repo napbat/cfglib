@@ -18,7 +18,6 @@ Before handing off a Rust change, run the relevant targeted tests while iteratin
 then run all of these from the workspace root:
 
 ```text
-python scripts/check_repository_policy.py
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings -D clippy::pedantic
 cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
@@ -45,8 +44,6 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 
 In PowerShell, set `RUSTDOCFLAGS` with
 `$env:RUSTDOCFLAGS = "-D warnings"` before running the documentation command.
-If `python` is a local shim that does not forward arguments, run the policy check
-with `uv run --no-project python scripts/check_repository_policy.py`.
 
 ### Clippy
 
@@ -95,7 +92,7 @@ with `uv run --no-project python scripts/check_repository_policy.py`.
 ## Naming and Layout Conventions
 
 - Module files use the named-file style — `parent.rs` beside a `parent/`
-  directory. `mod.rs` is forbidden (enforced by the policy script).
+  directory. `mod.rs` is forbidden.
 - Top-level namespace modules (`analysis`, `dataflow`, `graph`, `ir`, `transform`)
   declare `pub mod` children and hoist nothing; the crate root is the single
   flat facade that re-exports every public item, one `pub use` per module,

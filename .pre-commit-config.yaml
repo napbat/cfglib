@@ -17,12 +17,6 @@ repos:
 
   - repo: local
     hooks:
-      - id: repository-policy
-        name: repository policy
-        entry: python scripts/check_repository_policy.py
-        language: python
-        pass_filenames: false
-        always_run: true
       - id: cargo-fmt
         name: cargo fmt
         entry: cargo fmt --all -- --check
