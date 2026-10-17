@@ -595,3 +595,34 @@ fn reducibility_is_acyclicity_without_back_edges_on_every_small_digraph() {
         "the enumeration must reach irreducible graphs"
     );
 }
+
+#[test]
+fn a_back_tag_on_an_edge_that_closes_no_cycle_is_not_a_back_edge() {
+    // `entry -Back-> sink`: the sink returns, so it cannot reach its tail.
+    let mut cfg = Cfg::<u32>::new();
+    let sink = cfg.new_block();
+    cfg.add_edge(cfg.entry(), sink, EdgeKind::Back);
+    let dom = DominatorTree::compute(&cfg);
+
+    assert!(find_back_edges_tagged(&cfg, &dom).is_empty());
+    assert!(detect_loops_tagged(&cfg, &dom).is_empty());
+}
+
+#[test]
+fn a_back_tag_leaving_a_cycle_for_a_block_outside_it_is_ignored() {
+    // `entry -> a <-> b`, and a tag on `b -> exit`, which leaves the cycle.
+    let mut cfg = Cfg::<u32>::new();
+    let [a, b, exit] = [(); 3].map(|()| cfg.new_block());
+    cfg.add_edge(cfg.entry(), a, EdgeKind::Fallthrough);
+    cfg.add_edge(a, b, EdgeKind::ConditionalTrue);
+    cfg.add_edge(b, a, EdgeKind::Back);
+    cfg.add_edge(b, exit, EdgeKind::Back);
+    let dom = DominatorTree::compute(&cfg);
+
+    let backs = find_back_edges_tagged(&cfg, &dom);
+
+    assert_eq!(backs, [BackEdge { tail: b, header: a }]);
+    let loops = detect_loops_tagged(&cfg, &dom);
+    assert_eq!(loops.len(), 1);
+    assert_eq!(loops[0].body, BTreeSet::from([a, b]));
+}

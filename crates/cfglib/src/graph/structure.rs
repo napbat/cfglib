@@ -19,6 +19,7 @@ use core::ops::ControlFlow;
 use super::dominator::DominatorTree;
 use super::edge_view::EdgeView;
 use super::loop_nest::nesting;
+use super::scc::tarjan_scc;
 use super::search::{DfsEvent, depth_first_events};
 use super::traverse::TraversalDirection;
 use super::view::{GraphView, RootedView};
@@ -105,7 +106,9 @@ pub fn find_back_edges<G: GraphView>(
 /// builder's tags. The tags matter on irreducible machine CFGs where a
 /// frontend knows an edge is a loop back-edge even though dominance cannot
 /// prove it. A tag on an edge out of unreachable code is ignored, as
-/// dominance is.
+/// dominance is, and so is a tag on an edge that lies on no cycle: a header
+/// that cannot reach the tail has no loop around it, whatever the edge is
+/// called.
 #[must_use]
 pub fn find_back_edges_tagged<G>(
     graph: &G,
@@ -115,14 +118,27 @@ where
     G: EdgeView,
     G::EdgeData: KindedEdge,
 {
-    let mut backs = find_back_edges(graph, dom);
+    let dominance = find_back_edges(graph, dom);
+    let mut backs = dominance.clone();
+    let mut components = None;
     for edge in graph.edge_ids() {
         let edge = graph.edge(edge);
-        if edge.data().kind() == EdgeKind::Back && dom.is_reachable(edge.source()) {
-            backs.push(BackEdge {
-                tail: edge.source(),
-                header: edge.target(),
-            });
+        if edge.data().kind() != EdgeKind::Back || !dom.is_reachable(edge.source()) {
+            continue;
+        }
+        let tagged = BackEdge {
+            tail: edge.source(),
+            header: edge.target(),
+        };
+        // A dominance back edge closes a cycle by definition. A tag must be
+        // on one too, which holds when both ends are in one strongly
+        // connected component.
+        let on_a_cycle = dominance.binary_search(&tagged).is_ok() || {
+            let components = components.get_or_insert_with(|| tarjan_scc(graph));
+            components.component_index(tagged.tail) == components.component_index(tagged.header)
+        };
+        if on_a_cycle {
+            backs.push(tagged);
         }
     }
     backs.sort();
