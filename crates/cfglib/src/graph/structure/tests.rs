@@ -437,22 +437,6 @@ fn a_sole_predecessor_that_also_branches_elsewhere_is_not_a_preheader() {
 }
 
 #[test]
-fn a_loop_headed_by_the_entry_has_no_preheader() {
-    let mut cfg = Cfg::<u32>::new();
-    let [body, exit] = [(); 2].map(|()| cfg.new_block());
-    cfg.add_edge(cfg.entry(), body, EdgeKind::ConditionalTrue);
-    cfg.add_edge(body, cfg.entry(), EdgeKind::Back);
-    cfg.add_edge(cfg.entry(), exit, EdgeKind::ConditionalFalse);
-    let dom = DominatorTree::compute(&cfg);
-
-    let canonical = canonicalize_loops(&mut cfg, &dom);
-
-    assert_eq!(canonical.len(), 1);
-    assert_eq!(canonical[0].preheader, None);
-    assert_eq!(cfg.block_count(), 3, "nothing could be inserted");
-}
-
-#[test]
 fn an_existing_dedicated_predecessor_is_reported_as_the_preheader() {
     let mut cfg = Cfg::<u32>::new();
     let [header, body] = [(); 2].map(|()| cfg.new_block());

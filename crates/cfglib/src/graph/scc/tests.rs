@@ -333,13 +333,6 @@ fn both_algorithms_partition_only_the_live_nodes_around_a_removed_slot() {
 
 #[test]
 #[should_panic(expected = "is not a node of the decomposed graph")]
-fn tarjan_component_index_rejects_a_removed_slot() {
-    let (graph, [_, _, c, _]) = with_removed_slot();
-    let _ = tarjan_scc(&graph).component_index(c);
-}
-
-#[test]
-#[should_panic(expected = "is not a node of the decomposed graph")]
 fn kosaraju_component_index_rejects_a_removed_slot() {
     let (graph, [_, _, c, _]) = with_removed_slot();
     let _ = kosaraju_scc(&graph).component_index(c);

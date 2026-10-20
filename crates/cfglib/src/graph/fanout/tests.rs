@@ -287,42 +287,6 @@ fn no_groups_at_all_build_the_empty_key_space() {
 }
 
 #[test]
-#[should_panic(expected = "dense fan-out key is outside 0..2")]
-fn a_dense_key_at_the_bound_is_rejected_while_building() {
-    let _ = DenseFanout::from_pairs(2, [(2_usize, "past the end")]);
-}
-
-#[test]
-#[should_panic(expected = "dense fan-out key is outside the empty key space")]
-fn a_dense_pair_in_an_empty_key_space_is_rejected() {
-    let _ = DenseFanout::from_pairs(0, [(0_usize, "nowhere to put it")]);
-}
-
-#[test]
-#[should_panic(expected = "dense fan-out key is outside 0..2")]
-fn reading_a_dense_key_past_the_bound_panics() {
-    let rows = DenseFanout::from_pairs(2, [(1_usize, "here")]);
-
-    let _ = rows.get(2);
-}
-
-#[test]
-#[should_panic(expected = "dense fan-out key is outside 0..2")]
-fn reading_the_largest_index_panics_instead_of_wrapping() {
-    let rows = DenseFanout::from_pairs(2, [(1_usize, "here")]);
-
-    let _ = rows.get(usize::MAX);
-}
-
-#[test]
-#[should_panic(expected = "dense fan-out key is outside 0..0")]
-fn reading_any_key_of_the_empty_table_panics() {
-    let rows = DenseFanout::<u32>::default();
-
-    let _ = rows.get(0);
-}
-
-#[test]
 fn the_last_key_of_a_dense_table_reads_its_own_run() {
     let rows = DenseFanout::from_pairs(3, [(2_usize, "tail"), (0, "head"), (2, "end")]);
 

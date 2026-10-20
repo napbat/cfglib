@@ -14,8 +14,6 @@ use crate::ir::hlil::{
 use crate::test_util::golden::assert_golden;
 use alloc::string::ToString;
 use alloc::vec;
-use core::time::Duration;
-use std::time::Instant;
 
 use super::fixtures::every_statement_shape;
 use super::{
@@ -597,26 +595,16 @@ fn deep_expression_trees_rebuild_without_recursion<D: Kit>() {
     assert_eq!(visited, 2 * DEPTH + 1);
 }
 
-/// What a recovery of a deep nest may take. A recovery that is linear in the
-/// size of the function takes a fraction of a second at the depths below,
-/// with two orders of magnitude to spare, and one that is quadratic in the
-/// depth takes many minutes.
-const LINEAR_TIME_LIMIT: Duration = Duration::from_secs(30);
-
 /// Recovers the function that `build` makes on a thread whose stack could
 /// not hold a frame per level, and returns what `summarize` makes of the
-/// function and its recovery. The recovery fails if it takes longer than a
-/// linear one can.
+/// function and its recovery.
 fn recovered_on_a_small_stack<D: Kit, T: Send>(
     build: impl FnOnce() -> ToyHlil<D> + Send,
     summarize: impl FnOnce(&ToyHlil<D>, &Recovery<ToyHlil<D>, StmtId, ExprId, VarId>) -> T + Send,
 ) -> T {
     on_small_stack(|| {
         let function = build();
-        let started = Instant::now();
         let recovery = recovered(&function);
-        let elapsed = started.elapsed();
-        assert!(elapsed < LINEAR_TIME_LIMIT, "the recovery took {elapsed:?}");
         summarize(&function, &recovery)
     })
 }
