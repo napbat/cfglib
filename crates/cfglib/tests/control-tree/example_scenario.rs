@@ -1,6 +1,7 @@
 //! The scenario of `examples/control-tree.rs`, as a test: a machine-shaped
 //! `while` loop with an `if / else` in its body. Cargo builds the example under
-//! `cargo test` but never runs it, so its assertion guards nothing; this does.
+//! `cargo nextest run` but never runs it, so its assertion guards nothing; this
+//! does.
 
 use cfglib::{Cfg, ControlNode, ControlTree, EdgeKind};
 
