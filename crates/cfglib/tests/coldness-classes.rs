@@ -283,6 +283,17 @@ fn a_node_whose_records_all_lead_to_never_is_never_unless_it_ends() {
 
     let ending = silent.clone().ending(0);
     assert_eq!(ending.compute(), [Rare, Never]);
+
+    // The same rule away from the entry: node 1 leads only to the `Never`
+    // node 2, and the entry stays `Normal` through node 3.
+    let inner = Toy::new(4)
+        .record(0, 1, Normal)
+        .record(0, 3, Normal)
+        .record(1, 2, Normal)
+        .seeded(2, Never)
+        .finish();
+    assert_eq!(inner.compute(), [Normal, Never, Never, Normal]);
+    assert_eq!(inner.ending(1).compute(), [Normal, Rare, Never, Normal]);
 }
 
 #[test]
