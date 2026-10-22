@@ -2,6 +2,7 @@
 
 pub mod call_graph;
 pub mod cdg;
+pub mod coldness;
 pub mod diff;
 pub mod dominator;
 pub mod dot;

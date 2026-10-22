@@ -176,8 +176,7 @@ pub struct Edge<E = ()> {
     ///
     /// When set, this is the likelihood of this edge being taken relative to
     /// the other outgoing edges of the same source block.
-    /// [`CfgProfile`](crate::CfgProfile) propagates it into block
-    /// frequencies, and DOT output uses it for visual emphasis.
+    /// DOT output uses it for visual emphasis.
     pub(crate) weight: Option<f64>,
     /// Consumer-defined metadata.
     pub(crate) payload: E,

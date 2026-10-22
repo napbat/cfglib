@@ -3,12 +3,12 @@ use cfglib::{
     BlockId, Cfg, EdgeKind, FlowEffect, Purity, block_nesting_depths, block_purities, block_purity,
     cfg_block_nesting_depths, cfg_purity, detect_cfg_patterns, detect_explicit_tail_calls,
     detect_patterns, detect_switch_tables, detect_tail_calls, recover_block_expressions,
-    recover_expressions, recover_switch_tables, set_uniform_edge_weights, verify,
+    recover_expressions, recover_switch_tables, verify,
 };
 
 use super::BenchmarkSuite;
 use super::fixtures::{ApiInst, dataflow_cfg};
-use crate::fixtures::{branchy_cfg, linear_cfg};
+use crate::fixtures::linear_cfg;
 use crate::harness::benchmark_case;
 
 const BLOCK_COUNT: usize = 256;
@@ -175,28 +175,9 @@ fn register_switch_and_calls(suite: &mut BenchmarkSuite<'_>) {
     );
 }
 
-fn register_profile(suite: &mut BenchmarkSuite<'_>) {
-    let cfg = branchy_cfg(BLOCK_COUNT);
-    benchmark_case!(
-        suite,
-        "api_set_uniform_edge_weights",
-        covers[set_uniform_edge_weights],
-        || {
-            let mut candidate = cfg.clone();
-            set_uniform_edge_weights(&mut candidate);
-            candidate
-        },
-        |candidate| {
-            assert!(verify(candidate).is_ok());
-            assert!(candidate.edges().all(|edge| edge.weight().is_some()));
-        }
-    );
-}
-
 pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     register_metrics_and_patterns(suite);
     register_purity(suite);
     register_expressions(suite);
     register_switch_and_calls(suite);
-    register_profile(suite);
 }
