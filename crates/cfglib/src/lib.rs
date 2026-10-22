@@ -232,7 +232,6 @@ pub use analysis::metrics::{
     CfgMetrics, GraphMetrics, block_nesting_depths, cfg_block_nesting_depths,
 };
 pub use analysis::pattern::{CfgPattern, detect_cfg_patterns, detect_patterns};
-pub use analysis::profile::{CfgProfile, set_uniform_edge_weights};
 pub use analysis::purity::{Purity, block_purities, block_purity, cfg_purity};
 pub use analysis::switch_table::{
     JumpTable, SwitchRecovery, SwitchSource, SwitchTargets, detect_switch_tables,
@@ -315,6 +314,7 @@ pub use graph::call_graph::{
     propagate_summaries,
 };
 pub use graph::cdg::control_dependence_graph;
+pub use graph::coldness::{ColdClass, ColdnessClasses, ColdnessGraph};
 pub use graph::diff::{BlockFingerprint, BlockMatch, CfgDiff};
 pub use graph::dominator::{
     DominatorScratch, DominatorTree, FrontierScratch, PostDominatorScratch, PostDominatorTree,

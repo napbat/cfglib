@@ -112,7 +112,6 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "search",
     "search_with_marks",
     "search_with_scratch",
-    "set_uniform_edge_weights",
     "shortest_path",
     "shortest_path_edges",
     "simplify",

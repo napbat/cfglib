@@ -12,7 +12,6 @@ use alloc::vec::Vec;
 
 use super::CfgView;
 use crate::analysis::dead_code::DeadCode;
-use crate::analysis::profile::{CfgProfile, set_uniform_edge_weights};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::dataflow::constant_propagation::ConstantPropagation;
@@ -275,16 +274,4 @@ fn dead_code_matches_on_a_view_that_is_not_a_cfg() {
     let cfg = fixture();
     let toy = ToyView::copy_of(&cfg);
     assert_eq!(DeadCode::compute(&toy), DeadCode::compute(&cfg));
-}
-
-#[test]
-fn profiles_come_from_the_weights_that_the_view_reports() {
-    let mut cfg = fixture();
-    set_uniform_edge_weights(&mut cfg);
-    let toy = ToyView::copy_of(&cfg);
-    let expected = CfgProfile::from_edge_weights(&cfg);
-    let actual = CfgProfile::from_edge_weights(&toy);
-    assert_eq!(actual.edge_weights, expected.edge_weights);
-    assert_eq!(actual.block_weights, expected.block_weights);
-    assert!(!actual.edge_weights.is_empty());
 }
