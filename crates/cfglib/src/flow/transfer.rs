@@ -35,6 +35,9 @@ pub enum Flow<T, K> {
     Throw,
     /// Transfers to a target the operation does not name.
     Indirect,
+    /// Transfers to a target the operation does not name when taken.
+    /// Otherwise, continues at the next position.
+    ConditionalIndirect,
     /// Calls a target the operation does not name, then continues at the
     /// next position.
     IndirectCall,
@@ -65,6 +68,20 @@ pub enum Flow<T, K> {
         /// Exceptional or alternate-path target.
         target: T,
     },
+    /// Raises a trap: a fault, an interrupt, a system call, or a
+    /// breakpoint.
+    ///
+    /// The operation does not state where control goes. The platform does
+    /// (an interrupt vector, a system-call handler, an exception
+    /// dispatcher), and so does whether control comes back. The flow
+    /// therefore has no continuation; its one transfer is computed.
+    Trap,
+    /// Raises a trap when its condition holds. Otherwise, continues at the
+    /// next position.
+    ///
+    /// The trap's destination is a platform fact, as for
+    /// [`Trap`](Self::Trap); the continuation is a fact of the operation.
+    ConditionalTrap,
     /// Multi-way dispatch over keyed cases with a default.
     Switch {
         /// Target when no case matches.
@@ -93,8 +110,10 @@ impl<T, K> Flow<T, K> {
             Self::Next
                 | Self::IndirectCall
                 | Self::Conditional { .. }
+                | Self::ConditionalIndirect
                 | Self::Call { .. }
                 | Self::Exceptional { .. }
+                | Self::ConditionalTrap
         )
     }
 
@@ -122,7 +141,10 @@ impl<T, K> Flow<T, K> {
             | Self::Return
             | Self::Throw
             | Self::Indirect
+            | Self::ConditionalIndirect
             | Self::IndirectCall
+            | Self::Trap
+            | Self::ConditionalTrap
             | Self::Switch { .. } => None,
         }
     }
@@ -172,7 +194,8 @@ pub enum EdgeRole<'k, T, K> {
         /// Position of the calling operation.
         call_site: T,
     },
-    /// Exceptional or alternate transfer the operation names directly.
+    /// Exceptional or alternate transfer the operation states: a named
+    /// target, or a trap whose destination the platform states.
     Exceptional,
     /// Exceptional transfer from a protected operation to a handler.
     Unwind {
@@ -248,7 +271,7 @@ impl<'f, T: Copy, K> Transfers<'f, T, K> {
             call_site: self.source,
         };
         match (self.flow, index) {
-            (Flow::Next, 0) | (Flow::Exceptional { .. }, 1) => {
+            (Flow::Next, 0) | (Flow::Exceptional { .. } | Flow::ConditionalTrap, 1) => {
                 self.continuation(EdgeRole::Sequential)
             }
             (Flow::Indirect, 0) => Some(computed(EdgeRole::Jump)),
@@ -258,9 +281,13 @@ impl<'f, T: Copy, K> Transfers<'f, T, K> {
             (Flow::Conditional { target }, 0) => {
                 Some(Self::named(*target, EdgeRole::ConditionalTaken))
             }
-            (Flow::Conditional { .. }, 1) => self.continuation(EdgeRole::ConditionalFallThrough),
+            (Flow::ConditionalIndirect, 0) => Some(computed(EdgeRole::ConditionalTaken)),
+            (Flow::Conditional { .. } | Flow::ConditionalIndirect, 1) => {
+                self.continuation(EdgeRole::ConditionalFallThrough)
+            }
             (Flow::Call { target }, 0) => Some(Self::named(*target, EdgeRole::Call)),
             (Flow::Exceptional { target }, 0) => Some(Self::named(*target, EdgeRole::Exceptional)),
+            (Flow::Trap | Flow::ConditionalTrap, 0) => Some(computed(EdgeRole::Exceptional)),
             (Flow::Switch { default, .. }, 0) => {
                 Some(Self::named(*default, EdgeRole::SwitchDefault))
             }
@@ -300,11 +327,13 @@ impl<T, K> Transfers<'_, T, K> {
     fn slot_count(&self) -> usize {
         match self.flow {
             Flow::Return | Flow::Throw => 0,
-            Flow::Next | Flow::Indirect | Flow::Jump { .. } => 1,
+            Flow::Next | Flow::Indirect | Flow::Jump { .. } | Flow::Trap => 1,
             Flow::IndirectCall
             | Flow::Conditional { .. }
+            | Flow::ConditionalIndirect
             | Flow::Call { .. }
-            | Flow::Exceptional { .. } => 2,
+            | Flow::Exceptional { .. }
+            | Flow::ConditionalTrap => 2,
             Flow::Switch { cases, .. } => cases.len() + 1,
         }
     }
@@ -319,6 +348,8 @@ pub enum UnresolvedRole {
     IndirectCall,
     /// Taken path of a conditional branch.
     ConditionalTaken,
+    /// Computed taken path of a conditional branch.
+    ConditionalIndirect,
     /// Direct unconditional jump.
     Jump,
     /// Switch default destination.
@@ -332,6 +363,8 @@ pub enum UnresolvedRole {
     Call,
     /// Exceptional or alternate target the operation names.
     Exceptional,
+    /// A trap whose destination the platform states.
+    Trap,
 }
 
 impl<T, K> Transfer<'_, T, K> {
@@ -346,6 +379,7 @@ impl<T, K> Transfer<'_, T, K> {
         let role = match (&self.role, self.target.is_some()) {
             (EdgeRole::Jump, false) => UnresolvedRole::Indirect,
             (EdgeRole::Call, false) => UnresolvedRole::IndirectCall,
+            (EdgeRole::ConditionalTaken, false) => UnresolvedRole::ConditionalIndirect,
             (EdgeRole::ConditionalTaken, true) => UnresolvedRole::ConditionalTaken,
             (EdgeRole::Jump, true) => UnresolvedRole::Jump,
             (EdgeRole::SwitchDefault, true) => UnresolvedRole::SwitchDefault,
@@ -354,6 +388,7 @@ impl<T, K> Transfer<'_, T, K> {
             }
             (EdgeRole::Call, true) => UnresolvedRole::Call,
             (EdgeRole::Exceptional, true) => UnresolvedRole::Exceptional,
+            (EdgeRole::Exceptional, false) => UnresolvedRole::Trap,
             _ => return None,
         };
         Some(role)
@@ -403,7 +438,7 @@ mod tests {
     /// are the statement of what it does, so every list must agree with them.
     #[test]
     fn the_flow_predicates_agree_with_the_transfers_of_every_variant() {
-        let flows: [Flow<u32, char>; 11] = [
+        let flows: [Flow<u32, char>; 14] = [
             Flow::Next,
             Flow::Return,
             Flow::Throw,
@@ -413,6 +448,9 @@ mod tests {
             Flow::Conditional { target: 1 },
             Flow::Call { target: 1 },
             Flow::Exceptional { target: 1 },
+            Flow::ConditionalIndirect,
+            Flow::Trap,
+            Flow::ConditionalTrap,
             Flow::Switch {
                 default: 1,
                 cases: vec![],
@@ -503,6 +541,47 @@ mod tests {
         assert_eq!(all[1].role, EdgeRole::CallContinuation { call_site: 10 });
         assert_eq!(all[1].unresolved_role(), None);
         assert!(call.is_call());
+    }
+
+    #[test]
+    fn a_conditional_computed_transfer_keeps_its_fall_through() {
+        let flow: Flow<u32, char> = Flow::ConditionalIndirect;
+        let all = transfers(&flow);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].target, None);
+        assert_eq!(all[0].role, EdgeRole::ConditionalTaken);
+        assert_eq!(
+            all[0].unresolved_role(),
+            Some(UnresolvedRole::ConditionalIndirect)
+        );
+        assert_eq!(all[1].target, Some(11));
+        assert_eq!(all[1].role, EdgeRole::ConditionalFallThrough);
+        assert_eq!(all[1].unresolved_role(), None);
+    }
+
+    #[test]
+    fn a_trap_reports_its_platform_destination_and_continues_only_when_conditional() {
+        let trap: Flow<u32, char> = Flow::Trap;
+        assert_eq!(
+            transfers(&trap),
+            vec![Transfer {
+                target: None,
+                role: EdgeRole::Exceptional
+            }]
+        );
+        assert_eq!(
+            transfers(&trap)[0].unresolved_role(),
+            Some(UnresolvedRole::Trap)
+        );
+        assert_eq!(transfers(&trap)[0].role.kind(), EdgeKind::ExceptionUnwind);
+
+        let conditional: Flow<u32, char> = Flow::ConditionalTrap;
+        let all = transfers(&conditional);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].target, None);
+        assert_eq!(all[0].unresolved_role(), Some(UnresolvedRole::Trap));
+        assert_eq!(all[1].target, Some(11));
+        assert_eq!(all[1].role, EdgeRole::Sequential);
     }
 
     #[test]

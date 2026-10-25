@@ -36,7 +36,9 @@ struct Row {
 
 /// The rows of the flows that name no direct target, in table order.
 fn targetless_rows() -> Vec<Row> {
-    use EdgeKind::{Call, CallReturn, Fallthrough, Jump};
+    use EdgeKind::{
+        Call, CallReturn, ConditionalFalse, ConditionalTrue, ExceptionUnwind, Fallthrough, Jump,
+    };
     vec![
         Row {
             flow: Flow::Next,
@@ -71,6 +73,21 @@ fn targetless_rows() -> Vec<Row> {
             transfers: vec![(None, Jump, Some(UnresolvedRole::Indirect))],
         },
         Row {
+            flow: Flow::ConditionalIndirect,
+            ends_block: true,
+            continues: true,
+            is_call: false,
+            direct_target: None,
+            transfers: vec![
+                (
+                    None,
+                    ConditionalTrue,
+                    Some(UnresolvedRole::ConditionalIndirect),
+                ),
+                (Some(11), ConditionalFalse, None),
+            ],
+        },
+        Row {
             flow: Flow::IndirectCall,
             ends_block: true,
             continues: true,
@@ -79,6 +96,25 @@ fn targetless_rows() -> Vec<Row> {
             transfers: vec![
                 (None, Call, Some(UnresolvedRole::IndirectCall)),
                 (Some(11), CallReturn, None),
+            ],
+        },
+        Row {
+            flow: Flow::Trap,
+            ends_block: true,
+            continues: false,
+            is_call: false,
+            direct_target: None,
+            transfers: vec![(None, ExceptionUnwind, Some(UnresolvedRole::Trap))],
+        },
+        Row {
+            flow: Flow::ConditionalTrap,
+            ends_block: true,
+            continues: true,
+            is_call: false,
+            direct_target: None,
+            transfers: vec![
+                (None, ExceptionUnwind, Some(UnresolvedRole::Trap)),
+                (Some(11), Fallthrough, None),
             ],
         },
     ]

@@ -615,6 +615,52 @@ fn indirect_and_missing_exceptional_exits_are_explicit() {
 }
 
 #[test]
+fn computed_conditional_and_trap_exits_keep_only_their_stated_continuations() {
+    // 0: conditional computed jump; 1: conditional trap; 2: trap; 3: return
+    let graph = build_address_cfg(
+        vec![
+            inst(0, Flow::ConditionalIndirect),
+            inst(1, Flow::ConditionalTrap),
+            inst(2, Flow::Trap),
+            inst(3, Flow::Return),
+        ],
+        &[],
+        AddressCfgOptions::default(),
+        payload,
+    )
+    .unwrap();
+
+    assert_eq!(
+        graph.unresolved_transfers,
+        vec![
+            UnresolvedTransfer {
+                source: 0,
+                target: None,
+                role: UnresolvedRole::ConditionalIndirect,
+            },
+            UnresolvedTransfer {
+                source: 1,
+                target: None,
+                role: UnresolvedRole::Trap,
+            },
+            UnresolvedTransfer {
+                source: 2,
+                target: None,
+                role: UnresolvedRole::Trap,
+            },
+        ]
+    );
+    let edges: Vec<_> = graph.cfg.edges().map(|edge| *edge.payload()).collect();
+    assert_eq!(
+        edges,
+        vec![
+            (0, 1, EdgeKind::ConditionalFalse, "fall"),
+            (1, 2, EdgeKind::Fallthrough, "seq"),
+        ]
+    );
+}
+
+#[test]
 fn a_range_ending_at_code_end_needs_no_end_instruction() {
     let instructions = vec![inst(0, Flow::Next), inst(1, Flow::Return)];
     let handlers = [AddressHandler {

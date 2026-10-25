@@ -132,7 +132,14 @@ fn expected_leaders<I: Isa>(built: &Built<I>) -> BTreeSet<usize> {
                     mark(&mut leaders, *target);
                 }
             }
-            Flow::Next | Flow::Return | Flow::Throw | Flow::Indirect | Flow::IndirectCall => {}
+            Flow::Next
+            | Flow::Return
+            | Flow::Throw
+            | Flow::Indirect
+            | Flow::ConditionalIndirect
+            | Flow::IndirectCall
+            | Flow::Trap
+            | Flow::ConditionalTrap => {}
         }
         if matches!(flow, Flow::Exceptional { .. }) {
             leaders.insert(position);
