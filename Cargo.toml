@@ -13,7 +13,6 @@ keywords = ["graphs", "control-flow", "compiler", "code-intelligence", "dataflow
 categories = ["compilers", "no-std"]
 
 [workspace.dependencies]
-cfglib = { version = "0.1.0", path = "crates/cfglib" }
 serde = { version = "1.0.228", default-features = false, features = ["derive", "alloc"] }
 smallvec = { version = "1.15.1", default-features = false }
 
@@ -39,9 +38,6 @@ pedantic = { level = "deny", priority = -1 }
 [workspace.lints.rustdoc]
 all = { level = "deny", priority = -1 }
 
-# The exhaustive and deep-input tests dominate the suite. At opt-level 0 the
-# two slowest take over 60 s each; at 1 the whole suite runs in about 12 s,
-# which more than repays the longer build. Debug assertions and overflow
-# checks stay on.
+# Opt-level 1 cuts the exhaustive and deep-input tests from minutes to seconds.
 [profile.test]
 opt-level = 1
