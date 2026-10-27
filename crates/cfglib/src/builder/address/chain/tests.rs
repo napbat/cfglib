@@ -159,3 +159,36 @@ fn a_chain_with_an_unknown_handler_or_a_missing_entry_is_an_error() {
         Err(AddressBuildError::MissingChainEntry { address: 99 })
     );
 }
+
+#[test]
+fn a_chain_makes_each_return_a_block_of_its_own() {
+    let chains = [HandlerChain {
+        handler: 0,
+        then: vec![30],
+    }];
+    let with_chain = build_address_cfg_with_chains(
+        chain_stream(),
+        &chain_handlers(),
+        &chains,
+        AddressCfgOptions::default(),
+        payload,
+    )
+    .unwrap();
+    let without_chain = build_address_cfg(
+        chain_stream(),
+        &chain_handlers(),
+        AddressCfgOptions::default(),
+        payload,
+    )
+    .unwrap();
+
+    let held = |graph: &AddressGraph<Inst, Payload>| {
+        graph
+            .cfg
+            .block(graph.instruction_blocks[&11])
+            .instructions()
+            .len()
+    };
+    assert_eq!(held(&with_chain), 1);
+    assert_eq!(held(&without_chain), 2);
+}

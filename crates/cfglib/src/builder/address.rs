@@ -334,9 +334,13 @@ pub fn build_address_cfg<I: AddressInstruction, E>(
 /// the unwinder enters after its entry. The graph gets an
 /// [`EdgeRole::Resume`] edge from each return of a funclet to the next step:
 /// the next funclet, or after the last one the catch handlers of the same
-/// protected range. The entry of each listed funclet leads a block. The
-/// protected instructions keep their [`EdgeRole::Unwind`] edge to the first
-/// funclet only.
+/// protected range. The entry of each listed funclet leads a block, and when
+/// any chain exists each return instruction leads a block of its own, so a
+/// `Resume` edge leaves a block that holds only the return.
+///
+/// The protected instructions keep an [`EdgeRole::Unwind`] edge to each
+/// handler of the table. A caller that wants a funclet entered only through
+/// its chain leaves it out of the table.
 ///
 /// # Errors
 ///
@@ -375,7 +379,7 @@ pub fn build_address_cfg_with_chains<I: AddressInstruction, E>(
         &mut leaders,
     );
     let handler_index = validate_handlers(handlers, code_end, &addresses, &mut leaders)?;
-    validate_chains(chains, handlers.len(), &addresses, &mut leaders)?;
+    validate_chains::<I>(chains, handlers.len(), &addresses, &transfers, &mut leaders)?;
     let calls = match options.calls {
         CallPolicy::Edges => Vec::new(),
         CallPolicy::Flatten => collect_call_sites::<I>(&addresses, &transfers),

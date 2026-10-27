@@ -13,7 +13,7 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use super::{
-    AddressBuildError, AddressEdgeInfo, AddressHandler, AddressInstruction, AddressSpace,
+    AddressBuildError, AddressEdgeInfo, AddressHandler, AddressInstruction, AddressTransfers,
     HandlerIndex,
 };
 use crate::block::BlockId;
@@ -42,13 +42,15 @@ pub struct HandlerChain<A> {
     pub then: Vec<A>,
 }
 
-/// Checks the chains and marks the entry of each funclet as a leader.
-pub(super) fn validate_chains<A: AddressSpace>(
-    chains: &[HandlerChain<A>],
+/// Checks the chains, marks the entry of each funclet as a leader and, when a
+/// chain exists, marks each return as a leader.
+pub(super) fn validate_chains<I: AddressInstruction>(
+    chains: &[HandlerChain<I::Address>],
     handler_count: usize,
-    addresses: &[A],
+    addresses: &[I::Address],
+    transfers: &AddressTransfers<I>,
     leaders: &mut [bool],
-) -> Result<(), AddressBuildError<A>> {
+) -> Result<(), AddressBuildError<I::Address>> {
     for chain in chains {
         if chain.handler >= handler_count {
             return Err(AddressBuildError::UnknownChainHandler {
@@ -60,6 +62,13 @@ pub(super) fn validate_chains<A: AddressSpace>(
                 .binary_search(&address)
                 .map_err(|_| AddressBuildError::MissingChainEntry { address })?;
             leaders[position] = true;
+        }
+    }
+    if !chains.is_empty() {
+        for (position, flow) in transfers {
+            if matches!(flow, Flow::Return) {
+                leaders[*position] = true;
+            }
         }
     }
     Ok(())
