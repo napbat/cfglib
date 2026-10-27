@@ -185,3 +185,6 @@ fn returns<I: AddressInstruction, E>(
     }
     found.into_iter().collect()
 }
+
+#[cfg(test)]
+mod tests;
