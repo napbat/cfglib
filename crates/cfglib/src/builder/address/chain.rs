@@ -102,6 +102,7 @@ pub(super) fn add_chain_edges<I: AddressInstruction, E>(
                 .chain(chain.then.iter().map(|&address| entry_block(address)))
         })
         .collect();
+    let mut added = BTreeSet::new();
     for chain in chains {
         let handler = &handlers[chain.handler];
         let mut steps: Vec<(I::Address, BlockId)> = Vec::with_capacity(chain.then.len() + 1);
@@ -147,6 +148,9 @@ pub(super) fn add_chain_edges<I: AddressInstruction, E>(
                     .expect("a block holds an instruction")
                     .address();
                 for &(target_address, target) in &targets {
+                    if !added.insert((source, target)) {
+                        continue;
+                    }
                     let payload = edge_payload(AddressEdgeInfo {
                         source: source_address,
                         target: target_address,

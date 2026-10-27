@@ -337,6 +337,7 @@ pub fn build_address_cfg<I: AddressInstruction, E>(
 /// protected range. The entry of each listed funclet leads a block, and when
 /// any chain exists each return instruction leads a block of its own, so a
 /// `Resume` edge leaves a block that holds only the return.
+/// Two chains that lead from one return to one block add one edge.
 ///
 /// The protected instructions keep an [`EdgeRole::Unwind`] edge to each
 /// handler of the table. A caller that wants a funclet entered only through

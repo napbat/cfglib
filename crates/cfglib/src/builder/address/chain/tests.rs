@@ -192,3 +192,49 @@ fn a_chain_makes_each_return_a_block_of_its_own() {
     assert_eq!(held(&with_chain), 1);
     assert_eq!(held(&without_chain), 2);
 }
+
+#[test]
+fn two_chains_that_share_a_funclet_add_one_resume_edge_for_each_pair() {
+    // Two runs of one protected range give two handlers that enter the same
+    // funclets.
+    let handlers = [
+        AddressHandler {
+            protected: 0..1,
+            entry: 10,
+            kind: HandlerKind::Finally,
+        },
+        AddressHandler {
+            protected: 1..2,
+            entry: 10,
+            kind: HandlerKind::Finally,
+        },
+    ];
+    let chains = [
+        HandlerChain {
+            handler: 0,
+            then: vec![30],
+        },
+        HandlerChain {
+            handler: 1,
+            then: vec![30],
+        },
+    ];
+    let instructions = vec![
+        inst(0, Flow::Next),
+        inst(1, Flow::Next),
+        inst(2, Flow::Return),
+        inst(10, Flow::Return),
+        inst(30, Flow::Return),
+    ];
+
+    let graph = build_address_cfg_with_chains(
+        instructions,
+        &handlers,
+        &chains,
+        AddressCfgOptions::default(),
+        payload,
+    )
+    .unwrap();
+
+    assert_eq!(resume_edges(&graph), [(10, 30)]);
+}
