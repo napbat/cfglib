@@ -34,6 +34,11 @@ use crate::edge::EdgeKind;
 use crate::flow::{CallSite, EdgeRole, Flow, Transfer, UnresolvedTransfer};
 use crate::region::{Handler, HandlerBody, HandlerKind, HandlerRef, Region, RegionId};
 
+mod chain;
+
+pub use chain::HandlerChain;
+use chain::{add_chain_edges, validate_chains};
+
 /// A code address: totally ordered, with a numeric distance for range spans.
 pub trait AddressSpace: Copy + Ord {
     /// The non-negative distance from `earlier` to `self`.
@@ -199,6 +204,16 @@ pub enum AddressBuildError<A> {
         /// The invalid entry address.
         address: A,
     },
+    /// A chain names no handler of the handler table.
+    UnknownChainHandler {
+        /// The position that the chain names.
+        handler: usize,
+    },
+    /// A funclet entry of a chain is not an instruction start.
+    MissingChainEntry {
+        /// The invalid entry address.
+        address: A,
+    },
 }
 
 impl<A: fmt::Display> fmt::Display for AddressBuildError<A> {
@@ -233,6 +248,14 @@ impl<A: fmt::Display> fmt::Display for AddressBuildError<A> {
             Self::MissingHandlerEntry { address } => write!(
                 formatter,
                 "handler entry {address} is not an instruction start"
+            ),
+            Self::UnknownChainHandler { handler } => write!(
+                formatter,
+                "handler chain names handler {handler}, which the handler table lacks"
+            ),
+            Self::MissingChainEntry { address } => write!(
+                formatter,
+                "funclet entry {address} of a handler chain is not an instruction start"
             ),
         }
     }
@@ -300,6 +323,32 @@ pub fn build_address_cfg<I: AddressInstruction, E>(
     instructions: Vec<I>,
     handlers: &[AddressHandler<I::Address>],
     options: AddressCfgOptions<I::Address>,
+    edge_payload: impl FnMut(AddressEdgeInfo<'_, I::Address, I::CaseKey>) -> E,
+) -> Result<AddressGraph<I, E>, AddressBuildError<I::Address>> {
+    build_address_cfg_with_chains(instructions, handlers, &[], options, edge_payload)
+}
+
+/// Builds a CFG like [`build_address_cfg`], with ordered funclet chains.
+///
+/// Each [`HandlerChain`] names a handler of the table and the funclets that
+/// the unwinder enters after its entry. The graph gets an
+/// [`EdgeRole::Resume`] edge from each return of a funclet to the next step:
+/// the next funclet, or after the last one the catch handlers of the same
+/// protected range. The entry of each listed funclet leads a block. The
+/// protected instructions keep their [`EdgeRole::Unwind`] edge to the first
+/// funclet only.
+///
+/// # Errors
+///
+/// Returns the errors of [`build_address_cfg`], and an
+/// [`AddressBuildError::UnknownChainHandler`] when a chain names no handler
+/// of the table, and an [`AddressBuildError::MissingChainEntry`] when a funclet
+/// entry is not an instruction start.
+pub fn build_address_cfg_with_chains<I: AddressInstruction, E>(
+    instructions: Vec<I>,
+    handlers: &[AddressHandler<I::Address>],
+    chains: &[HandlerChain<I::Address>],
+    options: AddressCfgOptions<I::Address>,
     mut edge_payload: impl FnMut(AddressEdgeInfo<'_, I::Address, I::CaseKey>) -> E,
 ) -> Result<AddressGraph<I, E>, AddressBuildError<I::Address>> {
     let (addresses, transfers, code_end) = inspect_instructions(&instructions)?;
@@ -326,6 +375,7 @@ pub fn build_address_cfg<I: AddressInstruction, E>(
         &mut leaders,
     );
     let handler_index = validate_handlers(handlers, code_end, &addresses, &mut leaders)?;
+    validate_chains(chains, handlers.len(), &addresses, &mut leaders)?;
     let calls = match options.calls {
         CallPolicy::Edges => Vec::new(),
         CallPolicy::Flatten => collect_call_sites::<I>(&addresses, &transfers),
@@ -353,6 +403,15 @@ pub fn build_address_cfg<I: AddressInstruction, E>(
         &mut cfg,
         handlers,
         &handler_index,
+        &addresses,
+        &blocks_by_instruction,
+        &mut edge_payload,
+    );
+    add_chain_edges(
+        &mut cfg,
+        handlers,
+        &handler_index,
+        chains,
         &addresses,
         &blocks_by_instruction,
         &mut edge_payload,

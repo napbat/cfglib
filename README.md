@@ -159,6 +159,7 @@ definition-to-reference bindings.
 | Block splitting | `split_block()`, mapped payload-aware variants, and validated multi-point splitting with automatic stable edge transfer |
 | `serde` feature | Optional serialization support |
 | Leader-based construction | `build_address_cfg` with `AddressCfgOptions` / `CallPolicy`, the `AddressInstruction` / `AddressSpace` traits, `Flow`, and `AddressHandler`. Machine/bytecode streams: caller-selected function entry; calls kept as edges or flattened into reported call sites; leaders at targets, after terminators, at exceptional instructions, and at exception boundaries; known successors retained beside explicit unresolved transfers; typed normal, instruction-exceptional, and unwind edges through a consumer payload hook, every kind chosen by `EdgeRole::kind`; nested regions registered enclosing-first with parents wired |
+| Handler funclet chains | `build_address_cfg_with_chains` with `HandlerChain`: a handler states the funclets that the unwinder enters after its entry, in order. The return of each funclet is an `EdgeRole::Resume` edge to the next funclet, and the return of the last funclet is an edge to the catch handlers of the same protected range. A return keeps its block end, so the path that propagates the exception stays |
 
 ### IR trait contracts (`ir`)
 
