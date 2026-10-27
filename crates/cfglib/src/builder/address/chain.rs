@@ -30,10 +30,11 @@ use crate::region::HandlerKind;
 ///
 /// Each return of a funclet is an edge to the entry of the next funclet.
 /// Each return of the last funclet is an edge to the entry of each catch
-/// handler of the same protected range ([`HandlerKind::Catch`],
-/// [`HandlerKind::CatchAll`] and [`HandlerKind::Filter`]). A return still
-/// ends its block, so the graph also keeps the path on which the unwinder
-/// propagates the exception out of the function.
+/// handler whose protected range overlaps the protected range of the first
+/// handler ([`HandlerKind::Catch`], [`HandlerKind::CatchAll`] and
+/// [`HandlerKind::Filter`]). A return still ends its block, so the graph also
+/// keeps the path on which the unwinder propagates the exception out of the
+/// function.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandlerChain<A> {
     /// Position in the handler table of the handler that starts the chain.
@@ -124,7 +125,8 @@ pub(super) fn add_chain_edges<I: AddressInstruction, E>(
                     .iter()
                     .enumerate()
                     .filter(|(_, other)| {
-                        other.protected == handler.protected
+                        other.protected.start < handler.protected.end
+                            && handler.protected.start < other.protected.end
                             && matches!(
                                 other.kind,
                                 HandlerKind::Catch

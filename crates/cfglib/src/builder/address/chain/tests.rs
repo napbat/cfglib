@@ -238,3 +238,49 @@ fn two_chains_that_share_a_funclet_add_one_resume_edge_for_each_pair() {
 
     assert_eq!(resume_edges(&graph), [(10, 30)]);
 }
+
+#[test]
+fn the_last_funclet_enters_the_catch_handlers_whose_range_overlaps_its_own() {
+    let instructions = vec![
+        inst(0, Flow::Next),
+        inst(1, Flow::Next),
+        inst(2, Flow::Return),
+        inst(10, Flow::Return),
+        inst(20, Flow::Return),
+        inst(40, Flow::Return),
+    ];
+    let handlers = [
+        AddressHandler {
+            protected: 0..1,
+            entry: 10,
+            kind: HandlerKind::Finally,
+        },
+        // Overlaps the range of the cleanup, and is wider than it.
+        AddressHandler {
+            protected: 0..2,
+            entry: 20,
+            kind: HandlerKind::Catch,
+        },
+        // Protects another instruction.
+        AddressHandler {
+            protected: 1..2,
+            entry: 40,
+            kind: HandlerKind::Catch,
+        },
+    ];
+    let chains = [HandlerChain {
+        handler: 0,
+        then: Vec::new(),
+    }];
+
+    let graph = build_address_cfg_with_chains(
+        instructions,
+        &handlers,
+        &chains,
+        AddressCfgOptions::default(),
+        payload,
+    )
+    .unwrap();
+
+    assert_eq!(resume_edges(&graph), [(10, 20)]);
+}
