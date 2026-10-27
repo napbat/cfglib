@@ -332,9 +332,9 @@ pub fn build_address_cfg<I: AddressInstruction, E>(
 ///
 /// Each [`HandlerChain`] names a handler of the table and the funclets that
 /// the unwinder enters after its entry. The graph gets an
-/// [`EdgeRole::Resume`] edge from each return of a funclet to the next step:
-/// the next funclet, or after the last one the catch handlers whose protected
-/// range overlaps that of the first handler. The entry of each listed funclet
+/// [`EdgeRole::Resume`] edge from each return of a funclet to the next
+/// funclet, and to each catch handler whose protected range overlaps that of
+/// the first handler. The entry of each listed funclet
 /// leads a block, and when any chain exists each return instruction leads a
 /// block of its own, so a `Resume` edge leaves a block that holds only the
 /// return.

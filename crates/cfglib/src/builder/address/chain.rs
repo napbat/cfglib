@@ -28,13 +28,15 @@ use crate::region::HandlerKind;
 /// [`then`](Self::then) lists the entries of the funclets that follow, in the
 /// order in which the unwinder enters them.
 ///
-/// Each return of a funclet is an edge to the entry of the next funclet.
-/// Each return of the last funclet is an edge to the entry of each catch
-/// handler whose protected range overlaps the protected range of the first
-/// handler ([`HandlerKind::Catch`], [`HandlerKind::CatchAll`] and
-/// [`HandlerKind::Filter`]). A return still ends its block, so the graph also
-/// keeps the path on which the unwinder propagates the exception out of the
-/// function.
+/// Each return of a funclet is an edge to the entry of the next funclet. Each
+/// return of a funclet, the last one included, is also an edge to the entry of
+/// each catch handler whose protected range overlaps the protected range of
+/// the first handler ([`HandlerKind::Catch`], [`HandlerKind::CatchAll`] and
+/// [`HandlerKind::Filter`]). The catch can follow any funclet, because the
+/// unwinder runs the funclets down to the state that the try block owns, and
+/// the later funclets of the chain can belong to an outer scope. A return
+/// still ends its block, so the graph also keeps the path on which the
+/// unwinder propagates the exception out of the function.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandlerChain<A> {
     /// Position in the handler table of the handler that starts the chain.
@@ -118,9 +120,11 @@ pub(super) fn add_chain_edges<I: AddressInstruction, E>(
                 .map(|&address| (address, entry_block(address))),
         );
         for (position, &(_, block)) in steps.iter().enumerate() {
-            let targets: Vec<(I::Address, BlockId)> = if let Some(&next) = steps.get(position + 1) {
-                Vec::from([next])
-            } else {
+            // A catch can follow any funclet: the runtime stops the chain at
+            // the funclet that is the last one that the try block owns.
+            let mut targets: Vec<(I::Address, BlockId)> =
+                steps.get(position + 1).copied().into_iter().collect();
+            targets.extend(
                 handlers
                     .iter()
                     .enumerate()
@@ -139,9 +143,8 @@ pub(super) fn add_chain_edges<I: AddressInstruction, E>(
                             other.entry,
                             blocks_by_instruction[handler_index.entries[index]],
                         )
-                    })
-                    .collect()
-            };
+                    }),
+            );
             for source in returns(cfg, block, &funclet_blocks) {
                 let source_address = cfg
                     .block(source)

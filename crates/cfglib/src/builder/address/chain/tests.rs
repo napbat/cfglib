@@ -71,8 +71,10 @@ fn the_return_of_each_funclet_enters_the_next_funclet_and_the_last_enters_the_ca
     .unwrap();
 
     // The protected instruction keeps its unwind edges to the first funclet
-    // and to the catch handler. The returns chain the funclets.
-    assert_eq!(resume_edges(&graph), [(11, 30), (31, 20)]);
+    // and to the catch handler. The returns chain the funclets, and the
+    // catch follows each funclet: the second one can belong to an outer
+    // scope, which the runtime does not run before the catch.
+    assert_eq!(resume_edges(&graph), [(11, 20), (11, 30), (31, 20)]);
     let mut unwinds: Vec<_> = graph
         .cfg
         .edges()
