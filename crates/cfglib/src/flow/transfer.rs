@@ -202,6 +202,13 @@ pub enum EdgeRole<'k, T, K> {
         /// Index of the handler-table entry selecting this edge.
         handler: usize,
     },
+    /// Return of a funclet to the unwinder, which enters the next step of a
+    /// handler chain: the next funclet, or after the last one the catch
+    /// handlers of the region.
+    Resume {
+        /// Index of the handler-table entry whose chain this edge continues.
+        handler: usize,
+    },
 }
 
 impl<T, K> EdgeRole<'_, T, K> {
@@ -216,7 +223,9 @@ impl<T, K> EdgeRole<'_, T, K> {
             Self::SwitchDefault | Self::SwitchCase { .. } => EdgeKind::SwitchCase,
             Self::Call => EdgeKind::Call,
             Self::CallContinuation { .. } => EdgeKind::CallReturn,
-            Self::Exceptional | Self::Unwind { .. } => EdgeKind::ExceptionUnwind,
+            Self::Exceptional | Self::Unwind { .. } | Self::Resume { .. } => {
+                EdgeKind::ExceptionUnwind
+            }
         }
     }
 

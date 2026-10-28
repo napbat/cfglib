@@ -16,14 +16,14 @@ use super::{
 use crate::flow::{CallSite, EdgeRole, Flow, UnresolvedRole, UnresolvedTransfer};
 
 #[derive(Debug, Clone)]
-struct Inst {
+pub(super) struct Inst {
     address: u32,
     size: u32,
     flow: Flow<u32, i32>,
     throws: bool,
 }
 
-fn inst(address: u32, flow: Flow<u32, i32>) -> Inst {
+pub(super) fn inst(address: u32, flow: Flow<u32, i32>) -> Inst {
     Inst {
         address,
         size: 1,
@@ -63,7 +63,9 @@ fn sized_inst(address: u32, size: u32, flow: Flow<u32, i32>) -> Inst {
 }
 
 /// Records `(source, target, kind, role tag)` per edge.
-fn payload(info: super::AddressEdgeInfo<'_, u32, i32>) -> (u32, u32, EdgeKind, &'static str) {
+pub(super) fn payload(
+    info: super::AddressEdgeInfo<'_, u32, i32>,
+) -> (u32, u32, EdgeKind, &'static str) {
     let role = match info.role {
         EdgeRole::Sequential => "seq",
         EdgeRole::ConditionalTaken => "taken",
@@ -75,6 +77,7 @@ fn payload(info: super::AddressEdgeInfo<'_, u32, i32>) -> (u32, u32, EdgeKind, &
         EdgeRole::CallContinuation { .. } => "cont",
         EdgeRole::Exceptional => "exceptional",
         EdgeRole::Unwind { .. } => "unwind",
+        EdgeRole::Resume { .. } => "resume",
     };
     (info.source, info.target, info.kind, role)
 }
