@@ -196,6 +196,52 @@ fn a_chain_makes_each_return_a_block_of_its_own() {
 }
 
 #[test]
+fn a_funclet_that_ends_in_a_tail_jump_enters_the_next_step() {
+    // The first funclet adjusts a value and jumps to code outside the stream.
+    // The jump is a tail call: the callee returns to the runtime. The second
+    // funclet jumps into the stream, so it is no tail call.
+    let instructions = vec![
+        inst(0, Flow::Next),
+        inst(1, Flow::Return),
+        inst(10, Flow::Next),
+        inst(11, Flow::Jump { target: 999 }),
+        inst(30, Flow::Conditional { target: 32 }),
+        inst(31, Flow::Return),
+        inst(32, Flow::Jump { target: 31 }),
+    ];
+    let handlers = [AddressHandler {
+        protected: 0..1,
+        entry: 10,
+        kind: HandlerKind::Finally,
+    }];
+    let chains = [HandlerChain {
+        handler: 0,
+        then: vec![30],
+    }];
+
+    let graph = build_address_cfg_with_chains(
+        instructions,
+        &handlers,
+        &chains,
+        AddressCfgOptions::default(),
+        payload,
+    )
+    .unwrap();
+
+    // The tail jump at 11 enters the funclet at 30, and the return at 31
+    // leaves. The jump at 32 has an edge, so it ends no funclet.
+    assert_eq!(resume_edges(&graph), [(11, 30)]);
+    assert_eq!(
+        graph
+            .cfg
+            .block(graph.instruction_blocks[&11])
+            .instructions()
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn two_chains_that_share_a_funclet_add_one_resume_edge_for_each_pair() {
     // Two runs of one protected range give two handlers that enter the same
     // funclets.
