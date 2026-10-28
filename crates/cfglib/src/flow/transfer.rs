@@ -202,12 +202,13 @@ pub enum EdgeRole<'k, T, K> {
         /// Index of the handler-table entry selecting this edge.
         handler: usize,
     },
-    /// Return of a funclet to the unwinder, which enters the next step of a
-    /// handler chain: the next funclet, or after the last one the catch
-    /// handlers of the region.
-    Resume {
-        /// Index of the handler-table entry whose chain this edge continues.
-        handler: usize,
+    /// Exceptional transfer on one way that the runtime takes after a
+    /// protected operation throws: an edge from the protected operation, or
+    /// from the return of a funclet, to the next funclet instance or to a
+    /// handler block, or back to the protected operation itself.
+    Route {
+        /// Index of the first route that states the edge.
+        route: usize,
     },
 }
 
@@ -223,7 +224,7 @@ impl<T, K> EdgeRole<'_, T, K> {
             Self::SwitchDefault | Self::SwitchCase { .. } => EdgeKind::SwitchCase,
             Self::Call => EdgeKind::Call,
             Self::CallContinuation { .. } => EdgeKind::CallReturn,
-            Self::Exceptional | Self::Unwind { .. } | Self::Resume { .. } => {
+            Self::Exceptional | Self::Unwind { .. } | Self::Route { .. } => {
                 EdgeKind::ExceptionUnwind
             }
         }

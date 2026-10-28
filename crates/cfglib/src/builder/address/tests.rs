@@ -62,6 +62,16 @@ fn sized_inst(address: u32, size: u32, flow: Flow<u32, i32>) -> Inst {
     }
 }
 
+/// An instruction that cannot throw: it keeps no exception edge.
+pub(super) fn quiet_inst(address: u32, flow: Flow<u32, i32>) -> Inst {
+    Inst {
+        address,
+        size: 1,
+        flow,
+        throws: false,
+    }
+}
+
 /// Records `(source, target, kind, role tag)` per edge.
 pub(super) fn payload(
     info: super::AddressEdgeInfo<'_, u32, i32>,
@@ -77,7 +87,7 @@ pub(super) fn payload(
         EdgeRole::CallContinuation { .. } => "cont",
         EdgeRole::Exceptional => "exceptional",
         EdgeRole::Unwind { .. } => "unwind",
-        EdgeRole::Resume { .. } => "resume",
+        EdgeRole::Route { .. } => "route",
     };
     (info.source, info.target, info.kind, role)
 }

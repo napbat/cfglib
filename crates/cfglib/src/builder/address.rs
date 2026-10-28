@@ -18,6 +18,12 @@
 //! [`AddressInstruction`]; edge payloads are consumer-built from an
 //! [`AddressEdgeInfo`] description, so exact source coordinates, case keys,
 //! and handler identities survive into the caller's own edge type.
+//!
+//! A runtime does not take every handler of the table when an instruction
+//! throws. [`build_address_cfg_with_routes`] takes the exact ways instead, as
+//! [`UnwindRoute`] values, and [`AddressGraph::add_unwind_routes`] adds them
+//! as edges, with one instance of each funclet for each context that enters
+//! it.
 
 extern crate alloc;
 
@@ -34,10 +40,10 @@ use crate::edge::EdgeKind;
 use crate::flow::{CallSite, EdgeRole, Flow, Transfer, UnresolvedTransfer};
 use crate::region::{Handler, HandlerBody, HandlerKind, HandlerRef, Region, RegionId};
 
-mod chain;
+mod route;
 
-pub use chain::HandlerChain;
-use chain::{add_chain_edges, validate_chains};
+pub use route::{HopEnd, UnwindEnd, UnwindHop, UnwindPath, UnwindRoute, UnwindStep};
+use route::{range_positions, validate_routes};
 
 /// A code address: totally ordered, with a numeric distance for range spans.
 pub trait AddressSpace: Copy + Ord {
@@ -204,15 +210,24 @@ pub enum AddressBuildError<A> {
         /// The invalid entry address.
         address: A,
     },
-    /// A chain names no handler of the handler table.
-    UnknownChainHandler {
-        /// The position that the chain names.
-        handler: usize,
-    },
-    /// A funclet entry of a chain is not an instruction start.
-    MissingChainEntry {
-        /// The invalid entry address.
+    /// An address that a route names is not an instruction start: a funclet
+    /// entry or a handler.
+    MissingRouteEntry {
+        /// The invalid address.
         address: A,
+    },
+    /// An address that a route names does not start its block: a protected
+    /// instruction, a funclet entry or a handler. Only a graph that
+    /// [`build_address_cfg_with_routes`] built has a leader at each of them.
+    RouteAddressNotBlockStart {
+        /// The address that is inside a block.
+        address: A,
+    },
+    /// A path of a route has a funclet step and ends with
+    /// [`UnwindEnd::Resume`].
+    ResumeAfterFunclet {
+        /// The position of the route.
+        route: usize,
     },
 }
 
@@ -249,13 +264,17 @@ impl<A: fmt::Display> fmt::Display for AddressBuildError<A> {
                 formatter,
                 "handler entry {address} is not an instruction start"
             ),
-            Self::UnknownChainHandler { handler } => write!(
+            Self::MissingRouteEntry { address } => write!(
                 formatter,
-                "handler chain names handler {handler}, which the handler table lacks"
+                "address {address} that a route names is not an instruction start"
             ),
-            Self::MissingChainEntry { address } => write!(
+            Self::RouteAddressNotBlockStart { address } => write!(
                 formatter,
-                "funclet entry {address} of a handler chain is not an instruction start"
+                "address {address} that a route names does not start its block"
+            ),
+            Self::ResumeAfterFunclet { route } => write!(
+                formatter,
+                "route {route} has a path with a funclet step and a resume end"
             ),
         }
     }
@@ -325,35 +344,50 @@ pub fn build_address_cfg<I: AddressInstruction, E>(
     options: AddressCfgOptions<I::Address>,
     edge_payload: impl FnMut(AddressEdgeInfo<'_, I::Address, I::CaseKey>) -> E,
 ) -> Result<AddressGraph<I, E>, AddressBuildError<I::Address>> {
-    build_address_cfg_with_chains(instructions, handlers, &[], options, edge_payload)
+    build_address_graph(instructions, handlers, None, options, edge_payload)
 }
 
-/// Builds a CFG like [`build_address_cfg`], with ordered funclet chains.
+/// Builds a CFG like [`build_address_cfg`], with exact unwind routes.
 ///
-/// Each [`HandlerChain`] names a handler of the table and the funclets that
-/// the unwinder enters after its entry. The graph gets an
-/// [`EdgeRole::Resume`] edge from each return of a funclet to the next
-/// funclet, and to each catch handler whose protected range overlaps that of
-/// the first handler. The entry of each listed funclet
-/// leads a block, and when any chain exists each return instruction leads a
-/// block of its own, so a `Resume` edge leaves a block that holds only the
-/// return.
-/// Two chains that lead from one return to one block add one edge.
+/// The graph gets no edge from the handler table, and no edge from a route:
+/// the table only gives the validation, the leaders and the regions, as in
+/// [`build_address_cfg`]. Each [`UnwindRoute`] states the ways that the
+/// runtime takes when an instruction of its range throws. Call
+/// [`AddressGraph::add_unwind_routes`] after the last edit of the graph to add
+/// the edges of the routes.
 ///
-/// The protected instructions keep an [`EdgeRole::Unwind`] edge to each
-/// handler of the table. A caller that wants a funclet entered only through
-/// its chain leaves it out of the table.
+/// Each instruction of a protected range leads a block of its own, and so
+/// does each funclet entry and each handler that a route names. When any route
+/// exists, each instruction that can end a funclet leads a block of its own: a
+/// return, and a jump to code that the stream lacks (a tail jump). An unwind
+/// edge then leaves a block that holds only that instruction.
 ///
 /// # Errors
 ///
-/// Returns the errors of [`build_address_cfg`], and an
-/// [`AddressBuildError::UnknownChainHandler`] when a chain names no handler
-/// of the table, and an [`AddressBuildError::MissingChainEntry`] when a funclet
-/// entry is not an instruction start.
-pub fn build_address_cfg_with_chains<I: AddressInstruction, E>(
+/// Returns the errors of [`build_address_cfg`], the range errors of
+/// [`AddressBuildError::EmptyProtectedRange`],
+/// [`AddressBuildError::MissingRangeStart`] and
+/// [`AddressBuildError::MissingRangeEnd`] for a protected range of a route,
+/// an [`AddressBuildError::MissingRouteEntry`] when a funclet entry or a
+/// handler of a path is not an instruction start, and an
+/// [`AddressBuildError::ResumeAfterFunclet`] when a path has a funclet step
+/// and ends with [`UnwindEnd::Resume`].
+pub fn build_address_cfg_with_routes<I: AddressInstruction, E>(
     instructions: Vec<I>,
     handlers: &[AddressHandler<I::Address>],
-    chains: &[HandlerChain<I::Address>],
+    routes: &[UnwindRoute<I::Address>],
+    options: AddressCfgOptions<I::Address>,
+    edge_payload: impl FnMut(AddressEdgeInfo<'_, I::Address, I::CaseKey>) -> E,
+) -> Result<AddressGraph<I, E>, AddressBuildError<I::Address>> {
+    build_address_graph(instructions, handlers, Some(routes), options, edge_payload)
+}
+
+/// Builds the graph for both entry points. The handler table gives edges when
+/// no routes are given, and only validation, leaders and regions otherwise.
+fn build_address_graph<I: AddressInstruction, E>(
+    instructions: Vec<I>,
+    handlers: &[AddressHandler<I::Address>],
+    routes: Option<&[UnwindRoute<I::Address>]>,
     options: AddressCfgOptions<I::Address>,
     mut edge_payload: impl FnMut(AddressEdgeInfo<'_, I::Address, I::CaseKey>) -> E,
 ) -> Result<AddressGraph<I, E>, AddressBuildError<I::Address>> {
@@ -381,7 +415,9 @@ pub fn build_address_cfg_with_chains<I: AddressInstruction, E>(
         &mut leaders,
     );
     let handler_index = validate_handlers(handlers, code_end, &addresses, &mut leaders)?;
-    validate_chains::<I>(chains, handlers.len(), &addresses, &transfers, &mut leaders)?;
+    if let Some(routes) = routes {
+        validate_routes::<I>(routes, code_end, &addresses, &transfers, &mut leaders)?;
+    }
     let calls = match options.calls {
         CallPolicy::Edges => Vec::new(),
         CallPolicy::Flatten => collect_call_sites::<I>(&addresses, &transfers),
@@ -405,23 +441,16 @@ pub fn build_address_cfg_with_chains<I: AddressInstruction, E>(
         options.calls,
         &mut edge_payload,
     );
-    add_exception_edges(
-        &mut cfg,
-        handlers,
-        &handler_index,
-        &addresses,
-        &blocks_by_instruction,
-        &mut edge_payload,
-    );
-    add_chain_edges(
-        &mut cfg,
-        handlers,
-        &handler_index,
-        chains,
-        &addresses,
-        &blocks_by_instruction,
-        &mut edge_payload,
-    );
+    if routes.is_none() {
+        add_exception_edges(
+            &mut cfg,
+            handlers,
+            &handler_index,
+            &addresses,
+            &blocks_by_instruction,
+            &mut edge_payload,
+        );
+    }
     let handler_refs = add_regions(&mut cfg, handlers, &handler_index, &blocks_by_instruction);
 
     Ok(AddressGraph {
@@ -569,21 +598,8 @@ fn validate_handlers<A: AddressSpace>(
     let mut range_starts = vec![0usize; addresses.len() + 1];
     let mut range_ends = vec![0usize; addresses.len() + 1];
     for handler in handlers {
-        let (start, end) = (handler.protected.start, handler.protected.end);
-        if end <= start {
-            return Err(AddressBuildError::EmptyProtectedRange { start, end });
-        }
-        let start_position = addresses
-            .binary_search(&start)
-            .map_err(|_| AddressBuildError::MissingRangeStart { address: start })?;
-        let at_code_end = code_end.is_some_and(|code_end| end == code_end);
-        let end_position = if at_code_end {
-            addresses.len()
-        } else {
-            addresses
-                .binary_search(&end)
-                .map_err(|_| AddressBuildError::MissingRangeEnd { address: end })?
-        };
+        let positions = range_positions(&handler.protected, code_end, addresses)?;
+        let (start_position, end_position) = (positions.start, positions.end);
         let entry_position = addresses.binary_search(&handler.entry).map_err(|_| {
             AddressBuildError::MissingHandlerEntry {
                 address: handler.entry,
