@@ -28,8 +28,11 @@ use crate::region::HandlerKind;
 /// [`then`](Self::then) lists the entries of the funclets that follow, in the
 /// order in which the unwinder enters them.
 ///
-/// Each return of a funclet is an edge to the entry of the next funclet. Each
-/// return of a funclet, the last one included, is also an edge to the entry of
+/// Each return of a funclet is an edge to the entry of the next funclet. A
+/// tail jump is a return too: a funclet that ends with a jump to code that the
+/// stream lacks hands control to that code, and the code returns to the
+/// runtime for the funclet. Each return of a funclet, the last one included,
+/// is also an edge to the entry of
 /// each catch handler whose protected range overlaps the protected range of
 /// the first handler ([`HandlerKind::Catch`], [`HandlerKind::CatchAll`] and
 /// [`HandlerKind::Filter`]). The catch can follow any funclet, because the
@@ -69,7 +72,7 @@ pub(super) fn validate_chains<I: AddressInstruction>(
     }
     if !chains.is_empty() {
         for (position, flow) in transfers {
-            if matches!(flow, Flow::Return) {
+            if ends_funclet::<I>(flow, addresses) {
                 leaders[*position] = true;
             }
         }
@@ -171,7 +174,22 @@ pub(super) fn add_chain_edges<I: AddressInstruction, E>(
     }
 }
 
-/// Returns the blocks that end a funclet with a return, in block order.
+/// Tests whether `flow` can end a funclet: a return, or a jump to code that
+/// the stream does not hold. The jump is a tail call, so the callee returns to
+/// the runtime for the funclet.
+fn ends_funclet<I: AddressInstruction>(
+    flow: &Flow<I::Address, I::CaseKey>,
+    addresses: &[I::Address],
+) -> bool {
+    match flow {
+        Flow::Return => true,
+        Flow::Jump { target } => addresses.binary_search(target).is_err(),
+        _ => false,
+    }
+}
+
+/// Returns the blocks that end a funclet with a return or a tail jump, in
+/// block order.
 fn returns<I: AddressInstruction, E>(
     cfg: &Cfg<I, E>,
     entry: BlockId,
@@ -185,7 +203,17 @@ fn returns<I: AddressInstruction, E>(
             .block(block)
             .instructions()
             .last()
-            .is_some_and(|instruction| matches!(instruction.flow(), Flow::Return));
+            .is_some_and(|instruction| match instruction.flow() {
+                Flow::Return => true,
+                // A jump that has no edge leaves the function: a tail call.
+                Flow::Jump { .. } => cfg.outgoing(block).all(|edge| {
+                    matches!(
+                        cfg.edge(edge).data().kind(),
+                        EdgeKind::ExceptionUnwind | EdgeKind::Call
+                    )
+                }),
+                _ => false,
+            });
         if returns {
             found.insert(block);
         }
