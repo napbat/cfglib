@@ -166,7 +166,7 @@ fn kind_of(role: Role) -> EdgeKind {
         Role::Default | Role::Case { .. } => EdgeKind::SwitchCase,
         Role::Call => EdgeKind::Call,
         Role::Continuation { .. } => EdgeKind::CallReturn,
-        Role::Exceptional | Role::Unwind { .. } | Role::Resume { .. } => EdgeKind::ExceptionUnwind,
+        Role::Exceptional | Role::Unwind { .. } | Role::Route { .. } => EdgeKind::ExceptionUnwind,
     }
 }
 
