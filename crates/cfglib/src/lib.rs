@@ -244,8 +244,9 @@ pub use analysis::value_numbering::{
 pub use block::{BasicBlock, BlockId, BlockTag};
 pub use builder::address::{
     AddressBuildError, AddressCfgOptions, AddressEdgeInfo, AddressGraph, AddressHandler,
-    AddressInstruction, AddressSpace, CallPolicy, HopEnd, UnwindEnd, UnwindHop, UnwindPath,
-    UnwindRoute, UnwindStep, build_address_cfg, build_address_cfg_with_routes,
+    AddressInstruction, AddressSpace, CallPolicy, HopEnd, StatedEdge, StatedEdges, UnwindEnd,
+    UnwindHop, UnwindPath, UnwindRoute, UnwindStep, build_address_cfg,
+    build_address_cfg_from_edges, build_address_cfg_with_routes,
 };
 pub use builder::{BuildError, CfgBuilder, JumpResolution, resolve_jump_edges};
 pub use cfg::{Cfg, CfgEdge, CfgRenumbering, SplitPointError, parse_cfg_text};

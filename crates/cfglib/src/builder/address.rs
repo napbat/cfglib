@@ -24,6 +24,13 @@
 //! [`UnwindRoute`] values, and [`AddressGraph::add_unwind_routes`] adds them
 //! as edges, with one instance of each funclet for each context that enters
 //! it.
+//!
+//! A caller that already decided the control flow of the stream, such as a
+//! recovery that knows which transfers it followed and why it followed no
+//! other, states the normal edges of the instructions that end its paths.
+//! [`build_address_cfg_from_edges`] then takes the normal edges from those
+//! statements and not from each [`Flow`], and every other instruction
+//! continues at its end address.
 
 extern crate alloc;
 
@@ -37,10 +44,15 @@ use core::ops::Range;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::flow::{CallSite, EdgeRole, Flow, Transfer, UnresolvedTransfer};
+use crate::flow::{CallSite, EdgeRole, Flow, UnresolvedTransfer};
 use crate::region::{Handler, HandlerBody, HandlerKind, HandlerRef, Region, RegionId};
 
+mod edges;
+mod leaders;
 mod route;
+
+use edges::{Normal, add_exception_edges, add_normal_edges};
+use leaders::{collect_flow_leaders, collect_stated_leaders};
 
 pub use route::{HopEnd, UnwindEnd, UnwindHop, UnwindPath, UnwindRoute, UnwindStep};
 use route::{range_positions, validate_routes};
@@ -121,6 +133,23 @@ pub struct AddressEdgeInfo<'k, A, K> {
     /// Why the edge exists.
     pub role: EdgeRole<'k, A, K>,
 }
+
+/// One normal edge that a caller states for an instruction that ends a path
+/// ([`build_address_cfg_from_edges`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatedEdge<A, E> {
+    /// The address of the instruction that the edge enters.
+    pub target: A,
+    /// The structural kind that the graph registers the edge under.
+    pub kind: EdgeKind,
+    /// The consumer's payload of the edge.
+    pub payload: E,
+}
+
+/// The normal edges that a caller states for
+/// [`build_address_cfg_from_edges`], by the address of the instruction that
+/// they leave.
+pub type StatedEdges<A, E> = BTreeMap<A, Vec<StatedEdge<A, E>>>;
 
 /// How the built graph treats a call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -229,6 +258,32 @@ pub enum AddressBuildError<A> {
         /// The position of the route.
         route: usize,
     },
+    /// A source of stated edges is not an instruction start.
+    MissingStatedSource {
+        /// The address that starts no instruction.
+        address: A,
+    },
+    /// A stated edge enters an address that is not an instruction start.
+    MissingStatedTarget {
+        /// The address of the instruction that the edge leaves.
+        source: A,
+        /// The target that starts no instruction.
+        target: A,
+    },
+    /// An instruction has no stated edges, but its flow transfers other than
+    /// by its continuation and its call.
+    UnstatedTransfer {
+        /// The address of the instruction.
+        address: A,
+    },
+    /// An instruction without stated edges continues at an address that is
+    /// not an instruction start.
+    MissingContinuation {
+        /// The address of the instruction.
+        source: A,
+        /// The continuation that starts no instruction.
+        target: A,
+    },
 }
 
 impl<A: fmt::Display> fmt::Display for AddressBuildError<A> {
@@ -275,6 +330,22 @@ impl<A: fmt::Display> fmt::Display for AddressBuildError<A> {
             Self::ResumeAfterFunclet { route } => write!(
                 formatter,
                 "route {route} has a path with a funclet step and a resume end"
+            ),
+            Self::MissingStatedSource { address } => write!(
+                formatter,
+                "stated edges leave {address}, which is not an instruction start"
+            ),
+            Self::MissingStatedTarget { source, target } => write!(
+                formatter,
+                "a stated edge of {source} enters {target}, which is not an instruction start"
+            ),
+            Self::UnstatedTransfer { address } => write!(
+                formatter,
+                "the instruction at {address} transfers control, but no edge is stated for it"
+            ),
+            Self::MissingContinuation { source, target } => write!(
+                formatter,
+                "the instruction at {source} continues at {target}, which is not an instruction start"
             ),
         }
     }
@@ -344,7 +415,14 @@ pub fn build_address_cfg<I: AddressInstruction, E>(
     options: AddressCfgOptions<I::Address>,
     edge_payload: impl FnMut(AddressEdgeInfo<'_, I::Address, I::CaseKey>) -> E,
 ) -> Result<AddressGraph<I, E>, AddressBuildError<I::Address>> {
-    build_address_graph(instructions, handlers, None, options, edge_payload)
+    build_address_graph(
+        instructions,
+        handlers,
+        None,
+        options,
+        Normal::Flow,
+        edge_payload,
+    )
 }
 
 /// Builds a CFG like [`build_address_cfg`], with exact unwind routes.
@@ -379,16 +457,75 @@ pub fn build_address_cfg_with_routes<I: AddressInstruction, E>(
     options: AddressCfgOptions<I::Address>,
     edge_payload: impl FnMut(AddressEdgeInfo<'_, I::Address, I::CaseKey>) -> E,
 ) -> Result<AddressGraph<I, E>, AddressBuildError<I::Address>> {
-    build_address_graph(instructions, handlers, Some(routes), options, edge_payload)
+    build_address_graph(
+        instructions,
+        handlers,
+        Some(routes),
+        options,
+        Normal::Flow,
+        edge_payload,
+    )
 }
 
-/// Builds the graph for both entry points. The handler table gives edges when
-/// no routes are given, and only validation, leaders and regions otherwise.
+/// Builds a CFG like [`build_address_cfg_with_routes`], with the normal
+/// edges that the caller states.
+///
+/// `edges` holds, by the address of each instruction that ends a path, the
+/// normal edges that leave that instruction. The graph takes the normal
+/// edges of such an instruction from `edges` only, not from its [`Flow`]: a
+/// caller can state a continuation that the flow does not have, such as the
+/// return of a trap, and can leave out a transfer of the flow, such as the
+/// continuation of a call that never returns. An empty list states that no
+/// normal edge leaves the instruction. The caller builds the payload of each
+/// stated edge, and `edge_payload` builds the payload of each other edge.
+///
+/// Each other instruction continues at its end address. Its flow can only
+/// continue (`Next`) or call: a call keeps the edges and the leaders that
+/// `options` gives it, as in [`build_address_cfg`].
+///
+/// The flow of each instruction still decides what the build reads of its
+/// kind: an exceptional instruction leads its own block, and a return or a
+/// tail jump can end a funclet of a route. The handler table and the routes
+/// work as in [`build_address_cfg_with_routes`].
+///
+/// # Errors
+///
+/// Returns the errors of [`build_address_cfg_with_routes`], and these:
+/// [`AddressBuildError::MissingStatedSource`] when a key of `edges` is not
+/// an instruction start, [`AddressBuildError::MissingStatedTarget`] when a
+/// stated target is not an instruction start,
+/// [`AddressBuildError::UnstatedTransfer`] when an instruction without
+/// stated edges transfers other than by its continuation and its call, and
+/// [`AddressBuildError::MissingContinuation`] when such an instruction
+/// continues at an address that is not an instruction start.
+pub fn build_address_cfg_from_edges<I: AddressInstruction, E>(
+    instructions: Vec<I>,
+    edges: StatedEdges<I::Address, E>,
+    handlers: &[AddressHandler<I::Address>],
+    routes: &[UnwindRoute<I::Address>],
+    options: AddressCfgOptions<I::Address>,
+    edge_payload: impl FnMut(AddressEdgeInfo<'_, I::Address, I::CaseKey>) -> E,
+) -> Result<AddressGraph<I, E>, AddressBuildError<I::Address>> {
+    build_address_graph(
+        instructions,
+        handlers,
+        Some(routes),
+        options,
+        Normal::Stated(edges),
+        edge_payload,
+    )
+}
+
+/// Builds the graph for every entry point. The handler table gives edges
+/// when no routes are given, and only validation, leaders and regions
+/// otherwise. `normal` gives the normal edges: the flow of each instruction,
+/// or the edges that the caller states.
 fn build_address_graph<I: AddressInstruction, E>(
     instructions: Vec<I>,
     handlers: &[AddressHandler<I::Address>],
     routes: Option<&[UnwindRoute<I::Address>]>,
     options: AddressCfgOptions<I::Address>,
+    normal: Normal<I::Address, E>,
     mut edge_payload: impl FnMut(AddressEdgeInfo<'_, I::Address, I::CaseKey>) -> E,
 ) -> Result<AddressGraph<I, E>, AddressBuildError<I::Address>> {
     let (addresses, transfers, code_end) = inspect_instructions(&instructions)?;
@@ -407,13 +544,22 @@ fn build_address_graph<I: AddressInstruction, E>(
     if let Some(position) = entry_position {
         leaders[position] = true;
     }
-    collect_flow_leaders(
-        &instructions,
-        &addresses,
-        &transfers,
-        options.calls,
-        &mut leaders,
-    );
+    match &normal {
+        Normal::Flow => collect_flow_leaders(
+            &instructions,
+            &addresses,
+            &transfers,
+            options.calls,
+            &mut leaders,
+        ),
+        Normal::Stated(stated) => collect_stated_leaders(
+            &instructions,
+            &addresses,
+            stated,
+            options.calls,
+            &mut leaders,
+        )?,
+    }
     let handler_index = validate_handlers(handlers, code_end, &addresses, &mut leaders)?;
     if let Some(routes) = routes {
         validate_routes::<I>(routes, code_end, &addresses, &transfers, &mut leaders)?;
@@ -439,8 +585,9 @@ fn build_address_graph<I: AddressInstruction, E>(
         &blocks_by_instruction,
         &terminators,
         options.calls,
+        normal,
         &mut edge_payload,
-    );
+    )?;
     if routes.is_none() {
         add_exception_edges(
             &mut cfg,
@@ -515,52 +662,6 @@ fn ends_block<A, K>(flow: &Flow<A, K>, policy: CallPolicy) -> bool {
     flow.ends_block() && !(policy == CallPolicy::Flatten && flow.is_call())
 }
 
-fn collect_flow_leaders<I: AddressInstruction>(
-    instructions: &[I],
-    addresses: &[I::Address],
-    transfers: &AddressTransfers<I>,
-    policy: CallPolicy,
-    leaders: &mut [bool],
-) {
-    for position in 0..addresses.len() {
-        let end = instructions[position]
-            .end_address()
-            .expect("validated instruction end");
-        let next = addresses.get(position + 1);
-        let continues_to_next = next.is_some_and(|next| end == *next);
-        if !continues_to_next {
-            if next.is_some() {
-                leaders[position + 1] = true;
-            }
-            mark_target(addresses, end, leaders);
-        }
-    }
-
-    for &(position, ref flow) in transfers {
-        if !ends_block(flow, policy) {
-            // A flattened call is an operation of its block: neither its
-            // callee nor its continuation leads anything.
-            continue;
-        }
-        let end = instructions[position]
-            .end_address()
-            .expect("validated instruction end");
-        for transfer in flow.transfers(addresses[position], Some(end)) {
-            if let Some(target) = transfer.target {
-                mark_target(addresses, target, leaders);
-            }
-        }
-        if matches!(flow, Flow::Exceptional { .. }) {
-            // The exceptional edge must be exact to this instruction: an IR
-            // built on the graph gives it to one throwing statement.
-            leaders[position] = true;
-        }
-        if position + 1 < addresses.len() {
-            leaders[position + 1] = true;
-        }
-    }
-}
-
 /// Every call site in address order, for a graph that flattens calls.
 fn collect_call_sites<I: AddressInstruction>(
     addresses: &[I::Address],
@@ -574,12 +675,6 @@ fn collect_call_sites<I: AddressInstruction>(
             target: flow.direct_target(),
         })
         .collect()
-}
-
-fn mark_target<A: AddressSpace>(addresses: &[A], target: A, leaders: &mut [bool]) {
-    if let Ok(position) = addresses.binary_search(&target) {
-        leaders[position] = true;
-    }
 }
 
 struct HandlerIndex {
@@ -666,159 +761,6 @@ fn populate_blocks<I: AddressInstruction, E>(
         instruction_blocks,
         blocks_by_instruction,
         terminators,
-    }
-}
-
-fn add_normal_edges<I: AddressInstruction, E, F>(
-    cfg: &mut Cfg<I, E>,
-    addresses: &[I::Address],
-    transfers: &AddressTransfers<I>,
-    blocks_by_instruction: &[BlockId],
-    terminators: &[(BlockId, usize)],
-    policy: CallPolicy,
-    edge_payload: &mut F,
-) -> Vec<UnresolvedTransfer<I::Address>>
-where
-    F: for<'k> FnMut(AddressEdgeInfo<'k, I::Address, I::CaseKey>) -> E,
-{
-    let mut emitter = AddressEdgeEmitter {
-        cfg,
-        addresses,
-        blocks_by_instruction,
-        policy,
-        edge_payload,
-        unresolved: Vec::new(),
-    };
-    for &(block, position) in terminators {
-        let flow = transfers
-            .binary_search_by_key(&position, |(position, _)| *position)
-            .ok()
-            .map(|transfer| &transfers[transfer].1);
-        emitter.emit(block, position, flow);
-    }
-    emitter.unresolved
-}
-
-struct AddressEdgeEmitter<'a, I: AddressInstruction, E, F> {
-    cfg: &'a mut Cfg<I, E>,
-    addresses: &'a [I::Address],
-    blocks_by_instruction: &'a [BlockId],
-    policy: CallPolicy,
-    edge_payload: &'a mut F,
-    unresolved: Vec<UnresolvedTransfer<I::Address>>,
-}
-
-impl<I: AddressInstruction, E, F> AddressEdgeEmitter<'_, I, E, F>
-where
-    F: for<'k> FnMut(AddressEdgeInfo<'k, I::Address, I::CaseKey>) -> E,
-{
-    /// Adds the edges that leave `block`, whose last instruction sits at
-    /// `position` and transfers by `flow`.
-    ///
-    /// A block whose last instruction has no transfer of its own ended at a
-    /// leader, so it continues sequentially. The continuation is the
-    /// instruction at the block's last end address, which can differ from
-    /// the next instruction in the stream when paths overlap.
-    fn emit(
-        &mut self,
-        block: BlockId,
-        position: usize,
-        flow: Option<&Flow<I::Address, I::CaseKey>>,
-    ) {
-        let source = self.addresses[position];
-        let end = self
-            .cfg
-            .block(block)
-            .instructions()
-            .last()
-            .and_then(AddressInstruction::end_address)
-            .expect("validated block terminator end");
-        let Some(flow) = flow.filter(|flow| ends_block(flow, self.policy)) else {
-            self.add_transfer(
-                block,
-                source,
-                Transfer {
-                    target: Some(end),
-                    role: EdgeRole::Sequential,
-                },
-            );
-            return;
-        };
-        for transfer in flow.transfers(source, Some(end)) {
-            self.add_transfer(block, source, transfer);
-        }
-    }
-
-    fn add_transfer(
-        &mut self,
-        block: BlockId,
-        source: I::Address,
-        transfer: Transfer<'_, I::Address, I::CaseKey>,
-    ) {
-        let Some(target) = transfer.target else {
-            if let Some(role) = transfer.unresolved_role() {
-                self.unresolved.push(UnresolvedTransfer {
-                    source,
-                    target: None,
-                    role,
-                });
-            }
-            return;
-        };
-        let Ok(target_position) = self.addresses.binary_search(&target) else {
-            if let Some(role) = transfer.unresolved_role() {
-                self.unresolved.push(UnresolvedTransfer {
-                    source,
-                    target: Some(target),
-                    role,
-                });
-            }
-            return;
-        };
-        let kind = transfer.role.kind();
-        let payload = (self.edge_payload)(AddressEdgeInfo {
-            source,
-            target,
-            kind,
-            role: transfer.role,
-        });
-        self.cfg.add_edge_with_payload(
-            block,
-            self.blocks_by_instruction[target_position],
-            kind,
-            payload,
-        );
-    }
-}
-
-fn add_exception_edges<I: AddressInstruction, E>(
-    cfg: &mut Cfg<I, E>,
-    handlers: &[AddressHandler<I::Address>],
-    handler_index: &HandlerIndex,
-    addresses: &[I::Address],
-    blocks_by_instruction: &[BlockId],
-    edge_payload: &mut impl FnMut(AddressEdgeInfo<'_, I::Address, I::CaseKey>) -> E,
-) {
-    for (index, handler) in handlers.iter().enumerate() {
-        let target = blocks_by_instruction[handler_index.entries[index]];
-        for position in handler_index.ranges[index].clone() {
-            let source = blocks_by_instruction[position];
-            let instruction = cfg
-                .block(source)
-                .instructions()
-                .first()
-                .expect("a protected instruction leads its block");
-            debug_assert!(instruction.address() == addresses[position]);
-            if instruction.retains_exception_edge() {
-                let payload = edge_payload(AddressEdgeInfo {
-                    source: addresses[position],
-                    target: handler.entry,
-                    kind: EdgeKind::ExceptionUnwind,
-                    role: EdgeRole::Unwind { handler: index },
-                });
-                cfg.add_edge_with_payload(source, target, EdgeKind::ExceptionUnwind, payload);
-            }
-        }
     }
 }
 
