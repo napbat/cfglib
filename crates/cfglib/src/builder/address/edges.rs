@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use super::{
     AddressBuildError, AddressEdgeInfo, AddressHandler, AddressInstruction, AddressTransfers,
-    CallPolicy, HandlerIndex, StatedEdge, StatedEdges, ends_block,
+    CallPolicy, GivenEdge, GivenEdges, HandlerIndex, ends_block,
 };
 use crate::block::BlockId;
 use crate::cfg::Cfg;
@@ -18,17 +18,17 @@ use crate::flow::{EdgeRole, Flow, Transfer, UnresolvedTransfer};
 pub(super) enum Normal<A, E> {
     /// The flow of each instruction.
     Flow,
-    /// The edges that the caller states for the instructions in the map.
+    /// The edges that the caller gives for the instructions in the map.
     /// Each other instruction continues at its end address.
-    Stated(StatedEdges<A, E>),
+    Given(GivenEdges<A, E>),
 }
 
 /// Adds the normal edges of each block end in `terminators`.
 ///
 /// # Errors
 ///
-/// With stated edges, returns [`AddressBuildError::MissingContinuation`] when
-/// an instruction without stated edges continues at an address that starts
+/// With given edges, returns [`AddressBuildError::MissingContinuation`] when
+/// an instruction without given edges continues at an address that starts
 /// no instruction.
 #[expect(
     clippy::too_many_arguments,
@@ -55,15 +55,15 @@ where
         edge_payload,
         unresolved: Vec::new(),
     };
-    let mut stated = match normal {
+    let mut given = match normal {
         Normal::Flow => None,
-        Normal::Stated(stated) => Some(stated),
+        Normal::Given(given) => Some(given),
     };
     for &(block, position) in terminators {
         let source = addresses[position];
-        if let Some(edges) = stated.as_mut().and_then(|stated| stated.remove(&source)) {
+        if let Some(edges) = given.as_mut().and_then(|given| given.remove(&source)) {
             for edge in edges {
-                emitter.add_stated(block, edge);
+                emitter.add_given(block, edge);
             }
             continue;
         }
@@ -71,7 +71,7 @@ where
             .binary_search_by_key(&position, |(position, _)| *position)
             .ok()
             .map(|transfer| &transfers[transfer].1);
-        emitter.emit(block, position, flow, stated.is_some())?;
+        emitter.emit(block, position, flow, given.is_some())?;
     }
     Ok(emitter.unresolved)
 }
@@ -161,13 +161,13 @@ where
         Ok(())
     }
 
-    /// Adds the stated `edge` that leaves `block`. The leaders checked that
+    /// Adds the given `edge` that leaves `block`. The leaders checked that
     /// its target starts an instruction.
-    fn add_stated(&mut self, block: BlockId, edge: StatedEdge<I::Address, E>) {
+    fn add_given(&mut self, block: BlockId, edge: GivenEdge<I::Address, E>) {
         let target = self
             .addresses
             .binary_search(&edge.target)
-            .expect("a stated target is an instruction start");
+            .expect("a given target is an instruction start");
         self.cfg.add_edge_with_payload(
             block,
             self.blocks_by_instruction[target],

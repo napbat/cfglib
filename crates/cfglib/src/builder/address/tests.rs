@@ -1,6 +1,7 @@
 extern crate alloc;
 extern crate std;
 
+use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 use std::cell::Cell;
@@ -11,7 +12,8 @@ use crate::{EdgeKind, HandlerBody};
 
 use super::{
     AddressBuildError, AddressCfgOptions, AddressHandler, AddressInstruction, CallPolicy,
-    build_address_cfg,
+    GivenEdge, UnwindEnd, UnwindPath, UnwindRoute, build_address_cfg,
+    build_address_cfg_from_given_edges,
 };
 use crate::flow::{CallSite, EdgeRole, Flow, UnresolvedRole, UnresolvedTransfer};
 
@@ -416,20 +418,69 @@ fn instruction_flow_is_classified_once() {
     }
 
     let calls = Rc::new(Cell::new(0));
-    let instructions = [
-        inst(0, Flow::Conditional { target: 2 }),
-        inst(1, Flow::Next),
-        inst(2, Flow::Return),
-    ]
-    .into_iter()
-    .map(|inner| CountedInst {
-        inner,
-        calls: Rc::clone(&calls),
-    })
-    .collect();
+    let counted = |flows: Vec<Flow<u32, i32>>| -> Vec<CountedInst> {
+        flows
+            .into_iter()
+            .zip(0..)
+            .map(|(flow, address)| CountedInst {
+                inner: inst(address, flow),
+                calls: Rc::clone(&calls),
+            })
+            .collect()
+    };
 
+    let instructions = counted(vec![
+        Flow::Conditional { target: 2 },
+        Flow::Next,
+        Flow::Return,
+    ]);
     build_address_cfg(instructions, &[], AddressCfgOptions::default(), |_| ()).unwrap();
     assert_eq!(calls.get(), 3, "each instruction is classified once");
+
+    // With given edges: an instruction with given edges, a call and a plain
+    // operation without them, and a route that reads the flows for the ends
+    // of funclets.
+    calls.set(0);
+    let instructions = counted(vec![
+        Flow::Conditional { target: 3 },
+        Flow::Call { target: 9 },
+        Flow::Next,
+        Flow::Return,
+        Flow::Return,
+    ]);
+    let given = BTreeMap::from([
+        (
+            0,
+            vec![GivenEdge {
+                target: 3,
+                kind: EdgeKind::Jump,
+                payload: (),
+            }],
+        ),
+        (3, Vec::new()),
+        (4, Vec::new()),
+    ]);
+    let routes = [UnwindRoute {
+        protected: 1..2,
+        paths: vec![UnwindPath {
+            steps: Vec::new(),
+            end: UnwindEnd::Handler(4),
+        }],
+    }];
+    build_address_cfg_from_given_edges(
+        instructions,
+        given,
+        &[],
+        &routes,
+        AddressCfgOptions::default(),
+        |_| (),
+    )
+    .unwrap();
+    assert_eq!(
+        calls.get(),
+        5,
+        "with given edges, each instruction is classified once"
+    );
 }
 
 #[test]

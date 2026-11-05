@@ -27,10 +27,10 @@
 //!
 //! A caller that already decided the control flow of the stream, such as a
 //! recovery that knows which transfers it followed and why it followed no
-//! other, states the normal edges of the instructions that end its paths.
-//! [`build_address_cfg_from_edges`] then takes the normal edges from those
-//! statements and not from each [`Flow`], and every other instruction
-//! continues at its end address.
+//! other, gives the normal edges of the instructions that end its paths.
+//! [`build_address_cfg_from_given_edges`] then takes the normal edges of
+//! those instructions from the given edges and not from their [`Flow`], and
+//! every other instruction continues at its end address.
 
 extern crate alloc;
 
@@ -52,7 +52,7 @@ mod leaders;
 mod route;
 
 use edges::{Normal, add_exception_edges, add_normal_edges};
-use leaders::{collect_flow_leaders, collect_stated_leaders};
+use leaders::{collect_flow_leaders, collect_given_leaders};
 
 pub use route::{HopEnd, UnwindEnd, UnwindHop, UnwindPath, UnwindRoute, UnwindStep};
 use route::{range_positions, validate_routes};
@@ -134,22 +134,25 @@ pub struct AddressEdgeInfo<'k, A, K> {
     pub role: EdgeRole<'k, A, K>,
 }
 
-/// One normal edge that a caller states for an instruction that ends a path
-/// ([`build_address_cfg_from_edges`]).
+/// One normal edge that a caller gives for an instruction that ends a path
+/// ([`build_address_cfg_from_given_edges`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StatedEdge<A, E> {
+pub struct GivenEdge<A, E> {
     /// The address of the instruction that the edge enters.
     pub target: A,
     /// The structural kind that the graph registers the edge under.
+    ///
+    /// The caller chooses the kind. The builder does not check it against
+    /// the flow of the instruction.
     pub kind: EdgeKind,
     /// The consumer's payload of the edge.
     pub payload: E,
 }
 
-/// The normal edges that a caller states for
-/// [`build_address_cfg_from_edges`], by the address of the instruction that
-/// they leave.
-pub type StatedEdges<A, E> = BTreeMap<A, Vec<StatedEdge<A, E>>>;
+/// The normal edges that a caller gives to
+/// [`build_address_cfg_from_given_edges`], by the address of the instruction
+/// that they leave.
+pub type GivenEdges<A, E> = BTreeMap<A, Vec<GivenEdge<A, E>>>;
 
 /// How the built graph treats a call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -165,6 +168,11 @@ pub enum CallPolicy {
     ///
     /// This is the intraprocedural view a function-local recovery wants: an
     /// edge into the callee would fuse two functions' graphs.
+    ///
+    /// [`build_address_cfg_from_given_edges`] applies this policy only to a
+    /// call without given edges. A call with given edges ends its block, and
+    /// only its given edges leave it. [`AddressGraph::calls`] still reports
+    /// it.
     Flatten,
 }
 
@@ -258,25 +266,25 @@ pub enum AddressBuildError<A> {
         /// The position of the route.
         route: usize,
     },
-    /// A source of stated edges is not an instruction start.
-    MissingStatedSource {
+    /// A source of given edges is not an instruction start.
+    MissingGivenSource {
         /// The address that starts no instruction.
         address: A,
     },
-    /// A stated edge enters an address that is not an instruction start.
-    MissingStatedTarget {
+    /// A given edge enters an address that is not an instruction start.
+    MissingGivenTarget {
         /// The address of the instruction that the edge leaves.
         source: A,
         /// The target that starts no instruction.
         target: A,
     },
-    /// An instruction has no stated edges, but its flow transfers other than
+    /// An instruction has no given edges, but its flow transfers other than
     /// by its continuation and its call.
-    UnstatedTransfer {
+    TransferWithoutGivenEdges {
         /// The address of the instruction.
         address: A,
     },
-    /// An instruction without stated edges continues at an address that is
+    /// An instruction without given edges continues at an address that is
     /// not an instruction start.
     MissingContinuation {
         /// The address of the instruction.
@@ -331,17 +339,17 @@ impl<A: fmt::Display> fmt::Display for AddressBuildError<A> {
                 formatter,
                 "route {route} has a path with a funclet step and a resume end"
             ),
-            Self::MissingStatedSource { address } => write!(
+            Self::MissingGivenSource { address } => write!(
                 formatter,
-                "stated edges leave {address}, which is not an instruction start"
+                "given edges leave {address}, which is not an instruction start"
             ),
-            Self::MissingStatedTarget { source, target } => write!(
+            Self::MissingGivenTarget { source, target } => write!(
                 formatter,
-                "a stated edge of {source} enters {target}, which is not an instruction start"
+                "a given edge of {source} enters {target}, which is not an instruction start"
             ),
-            Self::UnstatedTransfer { address } => write!(
+            Self::TransferWithoutGivenEdges { address } => write!(
                 formatter,
-                "the instruction at {address} transfers control, but no edge is stated for it"
+                "the instruction at {address} transfers control, but no edge is given for it"
             ),
             Self::MissingContinuation { source, target } => write!(
                 formatter,
@@ -367,6 +375,11 @@ pub struct AddressGraph<I: AddressInstruction, E> {
     /// These are explicit precision results, not build failures. A conditional
     /// or call with an unresolved direct target still keeps its local
     /// continuation, and a switch keeps every destination that did resolve.
+    ///
+    /// Only the edges that the build takes from a [`Flow`] report here. Under
+    /// [`build_address_cfg_from_given_edges`], a given edge always enters an
+    /// instruction, so an instruction with given edges reports nothing, and
+    /// only a call without given edges can report its callee.
     pub unresolved_transfers: Vec<UnresolvedTransfer<I::Address>>,
     /// Every call site, in address order, when calls are flattened.
     ///
@@ -468,20 +481,28 @@ pub fn build_address_cfg_with_routes<I: AddressInstruction, E>(
 }
 
 /// Builds a CFG like [`build_address_cfg_with_routes`], with the normal
-/// edges that the caller states.
+/// edges that the caller gives.
 ///
 /// `edges` holds, by the address of each instruction that ends a path, the
 /// normal edges that leave that instruction. The graph takes the normal
 /// edges of such an instruction from `edges` only, not from its [`Flow`]: a
-/// caller can state a continuation that the flow does not have, such as the
+/// caller can give a continuation that the flow does not have, such as the
 /// return of a trap, and can leave out a transfer of the flow, such as the
-/// continuation of a call that never returns. An empty list states that no
-/// normal edge leaves the instruction. The caller builds the payload of each
-/// stated edge, and `edge_payload` builds the payload of each other edge.
+/// continuation of a call that never returns. An empty list gives no normal
+/// edge to the instruction. The caller builds the payload of each given
+/// edge, and `edge_payload` builds the payload of each other edge.
+///
+/// [`GivenEdge::kind`] is the caller's choice. The builder registers each
+/// given edge under that kind and does not check it against the flow of the
+/// instruction.
 ///
 /// Each other instruction continues at its end address. Its flow can only
 /// continue (`Next`) or call: a call keeps the edges and the leaders that
-/// `options` gives it, as in [`build_address_cfg`].
+/// `options` gives it, as in [`build_address_cfg`]. Under
+/// [`CallPolicy::Edges`], a call without given edges thus takes the call
+/// edge and the continuation edge of its flow. The builder cannot detect a
+/// caller that did not give the edges of a call that never returns: the
+/// graph then holds the continuation of that call.
 ///
 /// The flow of each instruction still decides what the build reads of its
 /// kind: an exceptional instruction leads its own block, and a return or a
@@ -491,16 +512,16 @@ pub fn build_address_cfg_with_routes<I: AddressInstruction, E>(
 /// # Errors
 ///
 /// Returns the errors of [`build_address_cfg_with_routes`], and these:
-/// [`AddressBuildError::MissingStatedSource`] when a key of `edges` is not
-/// an instruction start, [`AddressBuildError::MissingStatedTarget`] when a
-/// stated target is not an instruction start,
-/// [`AddressBuildError::UnstatedTransfer`] when an instruction without
-/// stated edges transfers other than by its continuation and its call, and
-/// [`AddressBuildError::MissingContinuation`] when such an instruction
-/// continues at an address that is not an instruction start.
-pub fn build_address_cfg_from_edges<I: AddressInstruction, E>(
+/// [`AddressBuildError::MissingGivenSource`] when a key of `edges` is not
+/// an instruction start, [`AddressBuildError::MissingGivenTarget`] when a
+/// given target is not an instruction start,
+/// [`AddressBuildError::TransferWithoutGivenEdges`] when an instruction
+/// without given edges transfers other than by its continuation and its
+/// call, and [`AddressBuildError::MissingContinuation`] when such an
+/// instruction continues at an address that is not an instruction start.
+pub fn build_address_cfg_from_given_edges<I: AddressInstruction, E>(
     instructions: Vec<I>,
-    edges: StatedEdges<I::Address, E>,
+    edges: GivenEdges<I::Address, E>,
     handlers: &[AddressHandler<I::Address>],
     routes: &[UnwindRoute<I::Address>],
     options: AddressCfgOptions<I::Address>,
@@ -511,7 +532,7 @@ pub fn build_address_cfg_from_edges<I: AddressInstruction, E>(
         handlers,
         Some(routes),
         options,
-        Normal::Stated(edges),
+        Normal::Given(edges),
         edge_payload,
     )
 }
@@ -519,7 +540,7 @@ pub fn build_address_cfg_from_edges<I: AddressInstruction, E>(
 /// Builds the graph for every entry point. The handler table gives edges
 /// when no routes are given, and only validation, leaders and regions
 /// otherwise. `normal` gives the normal edges: the flow of each instruction,
-/// or the edges that the caller states.
+/// or the edges that the caller gives.
 fn build_address_graph<I: AddressInstruction, E>(
     instructions: Vec<I>,
     handlers: &[AddressHandler<I::Address>],
@@ -552,10 +573,11 @@ fn build_address_graph<I: AddressInstruction, E>(
             options.calls,
             &mut leaders,
         ),
-        Normal::Stated(stated) => collect_stated_leaders(
+        Normal::Given(given) => collect_given_leaders(
             &instructions,
             &addresses,
-            stated,
+            &transfers,
+            given,
             options.calls,
             &mut leaders,
         )?,
