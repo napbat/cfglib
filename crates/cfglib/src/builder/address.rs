@@ -488,8 +488,8 @@ pub fn build_address_cfg_with_routes<I: AddressInstruction, E>(
 /// edges of such an instruction from `edges` only, not from its [`Flow`]: a
 /// caller can give a continuation that the flow does not have, such as the
 /// return of a trap, and can leave out a transfer of the flow, such as the
-/// continuation of a call that never returns. An empty list gives no normal
-/// edge to the instruction. The caller builds the payload of each given
+/// continuation of a call that never returns. With an empty list, no normal
+/// edge leaves the instruction. The caller builds the payload of each given
 /// edge, and `edge_payload` builds the payload of each other edge.
 ///
 /// [`GivenEdge::kind`] is the caller's choice. The builder registers each
@@ -498,9 +498,10 @@ pub fn build_address_cfg_with_routes<I: AddressInstruction, E>(
 ///
 /// Each other instruction continues at its end address. Its flow can only
 /// continue (`Next`) or call: a call keeps the edges and the leaders that
-/// `options` gives it, as in [`build_address_cfg`]. Under
-/// [`CallPolicy::Edges`], a call without given edges thus takes the call
-/// edge and the continuation edge of its flow. The builder cannot detect a
+/// `options` gives it, as in [`build_address_cfg`]. A call without given
+/// edges thus takes the edges of its flow: the call edge and the
+/// continuation edge under [`CallPolicy::Edges`], and the sequential
+/// continuation under [`CallPolicy::Flatten`]. The builder cannot detect a
 /// caller that did not give the edges of a call that never returns: the
 /// graph then holds the continuation of that call.
 ///

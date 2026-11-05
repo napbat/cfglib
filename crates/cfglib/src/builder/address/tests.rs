@@ -437,9 +437,9 @@ fn instruction_flow_is_classified_once() {
     build_address_cfg(instructions, &[], AddressCfgOptions::default(), |_| ()).unwrap();
     assert_eq!(calls.get(), 3, "each instruction is classified once");
 
-    // With given edges: an instruction with given edges, a call and a plain
-    // operation without them, and a route that reads the flows for the ends
-    // of funclets.
+    // With given edges: a branch and a plain operation with given edges, a
+    // call without them, and a route, whose check reads the ends of funclets
+    // from the classified flows.
     calls.set(0);
     let instructions = counted(vec![
         Flow::Conditional { target: 3 },
@@ -454,6 +454,14 @@ fn instruction_flow_is_classified_once() {
             vec![GivenEdge {
                 target: 3,
                 kind: EdgeKind::Jump,
+                payload: (),
+            }],
+        ),
+        (
+            2,
+            vec![GivenEdge {
+                target: 3,
+                kind: EdgeKind::Fallthrough,
                 payload: (),
             }],
         ),
