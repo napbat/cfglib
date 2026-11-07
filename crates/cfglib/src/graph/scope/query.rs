@@ -11,6 +11,7 @@ use smallvec::SmallVec;
 use crate::graph::edge_view::EdgeRef;
 use crate::graph::search::{PathBudget, PathFrontier, SearchOrder};
 
+use super::cursor::ScopeCursor;
 use super::storage::{ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeId, ScopeReferenceId};
 
 /// Borrowed input for one stored or ephemeral scope-graph query.
@@ -162,6 +163,12 @@ impl ScopePath {
     #[must_use]
     pub fn contains_scope(&self, scope: ScopeId) -> bool {
         self.scopes.contains(&scope)
+    }
+
+    /// The endpoints and length of this path.
+    #[must_use]
+    pub fn cursor(&self) -> ScopeCursor {
+        ScopeCursor::new(self.start(), self.end(), self.len())
     }
 }
 
@@ -367,7 +374,7 @@ impl ScopeResolutionConfig {
         self
     }
 
-    const fn budget(&self) -> PathBudget {
+    pub(super) const fn budget(&self) -> PathBudget {
         PathBudget::new(self.max_path_length, self.max_path_count)
     }
 }
@@ -441,7 +448,7 @@ impl core::fmt::Display for ScopeLinearResolutionError {
 impl core::error::Error for ScopeLinearResolutionError {}
 
 impl ScopeResolutionStats {
-    const fn from_budget(budget: &PathBudget, reachable_candidate_count: usize) -> Self {
+    pub(super) const fn from_budget(budget: &PathBudget, reachable_candidate_count: usize) -> Self {
         Self {
             explored_path_count: budget.expanded_path_count(),
             reachable_candidate_count,

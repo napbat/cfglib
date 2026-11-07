@@ -118,6 +118,13 @@ Paths are cycle-free, deterministic, and optionally bounded; truncated results
 report which bound was reached. Scope storage supports `serde` when the feature
 is enabled.
 
+A `ScopeCursorQuery` is a query whose hooks see only a `ScopeCursor` (the
+start, end and length of a path), never the stored path, and it runs under
+every resolver above. When every edge the query admits points upward, to a
+scope with a smaller index, `ScopeFirstResolution::try_compute` follows the
+one path such a query admits and returns its first accepted datum in
+`O(depth)` hook calls with no cycle check and no allocation.
+
 ### Stack graphs
 
 `graph::stack::StackGraph<F, S, N, E>` implements the standard root,
