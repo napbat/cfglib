@@ -33,6 +33,7 @@ mod many_blocks;
 mod non_compact;
 mod predicated;
 mod regions;
+mod rejoining_arms;
 mod semantics;
 mod small_stack;
 mod stack_depth;

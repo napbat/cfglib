@@ -162,6 +162,35 @@ fn the_only(blocks: &BTreeSet<BlockId>) -> Option<BlockId> {
     }
 }
 
+/// The entry of `region`'s first finally handler, when ordinary flow from
+/// the protected code or another handler of the region runs into it.
+///
+/// A lowering that keeps one copy of a `finally` body leads every path that
+/// completes the protected code or a catch arm into it, and leads the end of
+/// the finally on to the code after the region. That flow is the `try`
+/// completing normally, which runs the finally, not a jump into it.
+fn entered_finally<I, E>(cfg: &Cfg<I, E>, region: &Region) -> Option<BlockId> {
+    let finally = region
+        .handlers
+        .iter()
+        .find(|handler| handler.kind == HandlerKind::Finally)?;
+    let in_region = |block: BlockId| {
+        region.protected_blocks.contains(&block)
+            || region.handlers.iter().any(|handler| {
+                handler.entry != finally.entry
+                    && (handler.entry == block
+                        || handler
+                            .body
+                            .blocks()
+                            .is_some_and(|blocks| blocks.contains(&block)))
+            })
+    };
+    cfg.incoming(finally.entry)
+        .map(|edge| cfg.edge(edge))
+        .any(|edge| !edge.kind().is_exceptional() && in_region(edge.source()))
+        .then_some(finally.entry)
+}
+
 /// A try region being lifted: the frame that lifts its body, then hands the
 /// handlers to a [`Handlers`] frame.
 pub(super) struct TryBuild<'cfg> {
@@ -173,6 +202,9 @@ pub(super) struct TryBuild<'cfg> {
     /// Where ordinary flow reconverges after the region: the walks inside
     /// stop there silently, since the region's `leave` is implicit.
     continuation: Option<BlockId>,
+    /// Where the try body and the catch arms end silently: the entry of the
+    /// finally that ordinary flow runs into, or else `continuation`.
+    body_end: Option<BlockId>,
     /// The protected blocks within the enclosing bound.
     try_bound: Bound,
     try_nodes: Vec<ControlNode>,
@@ -209,6 +241,8 @@ pub(super) struct Handlers<'cfg> {
     handler_bodies: Vec<&'cfg BTreeSet<BlockId>>,
     allowed: Bound,
     continuation: Option<BlockId>,
+    /// Where the catch arms end silently: see [`TryBuild::body_end`].
+    body_end: Option<BlockId>,
     /// The handler being lifted.
     index: usize,
     /// The blocks the handler in flight may emit.
@@ -299,6 +333,10 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
                     })
             })
         });
+        // The try body and the catch arms complete into the finally that
+        // ordinary flow enters: the finally runs as the try completes, and
+        // goes on at the continuation.
+        let body_end = entered_finally(cfg, region).or(continuation);
 
         let try_bound = Bound::Set(Rc::new(allowed.blocks_within(&region.protected_blocks)));
         Some(Frame::Try(Box::new(TryBuild {
@@ -307,6 +345,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             block,
             allowed: allowed.clone(),
             continuation,
+            body_end,
             try_bound,
             try_nodes: Vec::new(),
             awaiting: TryWait::Nothing,
@@ -348,12 +387,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             build.awaiting = TryWait::Inner;
             return Next::Call(inner);
         }
-        match self.lift_block(
-            build.block,
-            &bound,
-            build.continuation,
-            &mut build.try_nodes,
-        ) {
+        match self.lift_block(build.block, &bound, build.body_end, &mut build.try_nodes) {
             Lifted::Next(next) => self.continue_try_body(build, next),
             Lifted::Construct(frame) => {
                 build.awaiting = TryWait::Anchor;
@@ -375,7 +409,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         Next::Call(Frame::Region(RegionWalk::new(
             next,
             build.try_bound.clone(),
-            build.continuation,
+            build.body_end,
         )))
     }
 
@@ -400,7 +434,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
                 return Next::Call(Frame::Region(RegionWalk::new(
                     succ,
                     build.try_bound.clone(),
-                    build.continuation,
+                    build.body_end,
                 )));
             }
         }
@@ -410,6 +444,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             handler_bodies: core::mem::take(&mut build.handler_bodies),
             allowed: build.allowed.clone(),
             continuation: build.continuation,
+            body_end: build.body_end,
             index: 0,
             bound: Bound::Whole,
             nodes: Vec::new(),
@@ -508,7 +543,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         Next::Call(Frame::Region(RegionWalk::new(
             handler.entry,
             state.bound.clone(),
-            state.continuation,
+            state.handler_end(),
         )))
     }
 
@@ -528,7 +563,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             return Next::Call(Frame::Region(RegionWalk::new(
                 block,
                 state.bound.clone(),
-                state.continuation,
+                state.handler_end(),
             )));
         }
         let handler = &region.handlers[state.index];
@@ -557,5 +592,18 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
                 .iter()
                 .any(|&other| other != region.id.0 && !self.structured_regions.contains(&other))
         })
+    }
+}
+
+impl Handlers<'_> {
+    /// Where the walks of the handler in flight end silently: a finally goes
+    /// on at the region's continuation, and any other handler completes into
+    /// the finally, as the try body does.
+    fn handler_end(&self) -> Option<BlockId> {
+        if self.region.handlers[self.index].kind == HandlerKind::Finally {
+            self.continuation
+        } else {
+            self.body_end
+        }
     }
 }

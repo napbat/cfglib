@@ -48,6 +48,8 @@ struct Reader<'tree, T> {
     tree: &'tree ControlTree,
     /// Blocks that end the function: a `Block` leaf of one flows nowhere.
     ends_function: T,
+    /// Blocks that ordinary flow enters.
+    entered: BTreeSet<BlockId>,
     flow: ImpliedFlow,
     loops: Vec<LoopFrame>,
 }
@@ -142,13 +144,24 @@ impl<T: Fn(BlockId) -> bool> Reader<'_, T> {
                 handlers,
                 finally_body,
             } => {
-                // The graph enters a handler through exception edges only, and
-                // the protected body and each handler end at the continuation.
-                self.body(finally_body, next);
+                // The graph enters a handler through exception edges only.
+                // The protected body and each handler complete into a
+                // finally that ordinary flow enters, as a lowering with one
+                // copy of the finally emits it, and otherwise end at the
+                // continuation, past a finally only exceptions run.
+                let finally_entry = self.body(finally_body, next);
+                let completion = if finally_entry
+                    .block
+                    .is_some_and(|block| self.entered.contains(&block))
+                {
+                    finally_entry
+                } else {
+                    next
+                };
                 for handler in tree.handlers(handlers) {
-                    self.body(handler.body, next);
+                    self.body(handler.body, completion);
                 }
-                self.body(try_body, next)
+                self.body(try_body, completion)
             }
         }
     }
@@ -224,11 +237,17 @@ impl<T: Fn(BlockId) -> bool> Reader<'_, T> {
 
 /// Reconstruct the normal edges a tree implies. `ends_function` names the blocks
 /// with no normal successor, which a `Block` leaf cannot tell apart from one
-/// that continues.
-pub fn implied_flow(tree: &ControlTree, ends_function: impl Fn(BlockId) -> bool) -> ImpliedFlow {
+/// that continues, and `entered` the blocks that ordinary flow enters, which
+/// tells a finally the `try` completes into from one only exceptions run.
+pub fn implied_flow(
+    tree: &ControlTree,
+    ends_function: impl Fn(BlockId) -> bool,
+    entered: BTreeSet<BlockId>,
+) -> ImpliedFlow {
     let mut reader = Reader {
         tree,
         ends_function,
+        entered,
         flow: ImpliedFlow {
             structural: BTreeSet::new(),
             through_gotos: BTreeSet::new(),
@@ -289,10 +308,17 @@ pub fn assert_flow_matches_graph_with<I, E>(
     covered: &BTreeSet<BlockId>,
     hollow: &impl Fn(BlockId) -> bool,
 ) {
-    let implied = implied_flow(tree, |block| {
-        cfg.outgoing(block)
-            .all(|edge| cfg.edge(edge).kind().is_exceptional())
-    });
+    let implied = implied_flow(
+        tree,
+        |block| {
+            cfg.outgoing(block)
+                .all(|edge| cfg.edge(edge).kind().is_exceptional())
+        },
+        normal_edges(cfg)
+            .into_iter()
+            .map(|(_, target)| target)
+            .collect(),
+    );
     // Code the tree drops, such as an unreachable block, takes its edges along.
     let real: BTreeSet<(BlockId, BlockId)> = normal_edges(cfg)
         .into_iter()

@@ -251,7 +251,11 @@ fn fallthrough_between_cases_is_a_reported_goto_to_the_next_arm() {
     assert_eq!(report.unresolved_labels, []);
 
     // The goto carries exactly the one edge the structure cannot express.
-    let implied = implied_flow(&tree, |block| flow.cfg.outgoing(block).next().is_none());
+    let implied = implied_flow(
+        &tree,
+        |block| flow.cfg.outgoing(block).next().is_none(),
+        BTreeSet::new(),
+    );
     assert_eq!(implied.through_gotos, BTreeSet::from([(first, second)]));
     let mut structural_edges = normal_edges(&flow.cfg);
     structural_edges.remove(&(first, second));
