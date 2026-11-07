@@ -51,11 +51,30 @@ struct LoopContext {
     header: BlockId,
     /// Block a `break` transfers to, when the loop has a recognized follow.
     follow: Option<BlockId>,
+    /// The block that `follow` leads to through blocks without code, when
+    /// that is another block: the follow does nothing on the way, so a
+    /// transfer there leaves the loop as a `break` does.
+    follow_lands_at: Option<BlockId>,
     /// Block a `continue` transfers to: the header, or a post-tested loop's
     /// condition latch.
     continue_target: BlockId,
     /// Set when a labeled break or continue named this loop.
     labeled: bool,
+}
+
+impl LoopContext {
+    /// The blocks a transfer to resolves against this loop: the continue
+    /// target, then the follow and the block it lands at when they are not
+    /// the continue target.
+    fn targets(&self) -> impl Iterator<Item = BlockId> {
+        let continue_target = self.continue_target;
+        core::iter::once(continue_target).chain(
+            self.follow
+                .into_iter()
+                .chain(self.follow_lands_at)
+                .filter(move |&target| target != continue_target),
+        )
+    }
 }
 
 /// The working state of one structuring run.
@@ -263,7 +282,12 @@ impl ControlTree {
     /// only passes flow on to one successor emits nothing, so no label could
     /// name it. A transfer into it is a transfer to that successor: the walk
     /// goes on there whether the block was already passed or lies beyond the
-    /// bound, and a goto names the block that carries code.
+    /// bound, and a goto names the block that carries code. A loop whose
+    /// follow is such a block leaves at the block the follow leads to as
+    /// well: a transfer there from inside the loop is a `break`, so the
+    /// latch of an outer `for` that a `continue outer` and the end of the
+    /// inner loop both reach, past a block without code, runs once after
+    /// the inner loop.
     ///
     /// # Arms that revisit earlier code
     ///
