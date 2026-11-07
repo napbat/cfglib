@@ -155,6 +155,10 @@
 //! [`EdgeProblem`] its edge-sensitive counterpart (run by
 //! [`solve_edge_problem`]), [`TryEdgeProblem`] the error-preserving edge
 //! variant, and [`Emitter`] the trait for linearization output.
+//! [`wave_fixpoint`] and [`ordered_fixpoint`] drive fixpoints whose facts
+//! and units the consumer owns, with no graph view: parallel waves through a
+//! [`WaveExecutor`] with a static reader index, and ordered sweeps whose
+//! evaluations report the slots they read through a [`SlotAccess`].
 //!
 //! # Contracts
 //!
@@ -291,6 +295,10 @@ pub use dataflow::phi_web::{PhiWeb, PhiWebs};
 pub use dataflow::program_point::{DefSite, ProgramPoint, UseSite};
 pub use dataflow::reaching::{ReachingDef, ReachingDefs, ReachingDefsProblem};
 pub use dataflow::sccp::SccpAnalysis;
+pub use dataflow::slot_fixpoint::{
+    SequentialExecutor, SlotAccess, SlotFixpointReport, WaveExecutor, WaveRequeue,
+    ordered_fixpoint, wave_fixpoint,
+};
 pub use dataflow::ssa::{
     DominanceFrontiers, PhiPlacement, PhiPlacements, SsaBlock, SsaForm, SsaInstruction, SsaPhi,
     SsaScratch, SsaValue, SsaVersion,

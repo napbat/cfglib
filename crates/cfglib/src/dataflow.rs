@@ -12,7 +12,9 @@
 //! The [`node_fixpoint`] module is the graph-shaped counterpart, solving
 //! per-node fact problems over any
 //! [`GraphView`](crate::GraphView) (taint or reachability
-//! over a value-flow graph, closure over an import graph).
+//! over a value-flow graph, closure over an import graph). The
+//! [`slot_fixpoint`] drivers schedule caller-owned units over caller-owned
+//! keyed slots, re-running a unit only when a slot it read changed.
 //!
 //! # Usage
 //!
@@ -39,6 +41,7 @@ pub mod phi_web;
 pub mod program_point;
 pub mod reaching;
 pub mod sccp;
+pub mod slot_fixpoint;
 pub mod ssa;
 pub mod ssa_destruction;
 pub mod unwind;
