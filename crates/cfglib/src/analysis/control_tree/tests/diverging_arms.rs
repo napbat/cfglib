@@ -233,7 +233,9 @@ fn an_arm_converges_through_a_block_without_code_another_arm_passed() {
 }
 
 /// A goto that a block without code would take names the block that it
-/// leads to, which carries a label, never the block itself.
+/// leads to, which carries a label, never the block itself. The arms cross:
+/// both reach `tail` through the block without code and both reach `c`, so
+/// neither is where they rejoin, and the second arm reaches each by a goto.
 #[test]
 fn a_goto_through_a_block_without_code_names_the_block_it_leads_to() {
     let mut cfg: Cfg<MockInst> = Cfg::new();
@@ -252,7 +254,8 @@ fn a_goto_through_a_block_without_code_names_the_block_it_leads_to() {
     cfg.block_mut(c).push(MockInst(FlowEffect::Return, "c"));
     cfg.add_edge(cfg.entry(), a, EdgeKind::ConditionalTrue);
     cfg.add_edge(cfg.entry(), second_test, EdgeKind::ConditionalFalse);
-    cfg.add_edge(a, empty, EdgeKind::Fallthrough);
+    cfg.add_edge(a, empty, EdgeKind::ConditionalTrue);
+    cfg.add_edge(a, c, EdgeKind::ConditionalFalse);
     cfg.add_edge(empty, tail, EdgeKind::Fallthrough);
     cfg.add_edge(second_test, b, EdgeKind::ConditionalTrue);
     cfg.add_edge(second_test, c, EdgeKind::ConditionalFalse);
@@ -262,10 +265,16 @@ fn a_goto_through_a_block_without_code_names_the_block_it_leads_to() {
     let text = pseudocode(&cfg, &tree);
     assert_eq!(
         report.gotos,
-        [GotoDiagnostic {
-            target: tail,
-            reason: GotoReason::RevisitedTarget,
-        }],
+        [
+            GotoDiagnostic {
+                target: tail,
+                reason: GotoReason::RevisitedTarget,
+            },
+            GotoDiagnostic {
+                target: c,
+                reason: GotoReason::RevisitedTarget,
+            }
+        ],
         "{text}"
     );
     assert!(report.unresolved_labels.is_empty(), "{report:?}\n{text}");

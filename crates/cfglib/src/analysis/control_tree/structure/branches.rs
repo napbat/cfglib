@@ -154,7 +154,8 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
     /// Where the arms of the branch or dispatch at `block` rejoin, in a walk
     /// within `allowed` that ends at `stop`, and where the walk goes on after
     /// the construct: the in-bound post-dominator merge, or else the block
-    /// where the arms that reach `stop` rejoin while another arm diverges
+    /// where the arms that reach `stop`, or the exits of a walk without a
+    /// stop that two or more arms reach, rejoin while another arm diverges
     /// (see [`rejoin`](Self::rejoin)).
     ///
     /// Without either merge, the arms end silently at `stop`, and the
@@ -170,7 +171,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         stop: Option<BlockId>,
     ) -> Option<BlockId> {
         self.effective_merge(block, allowed)
-            .or_else(|| stop.and_then(|stop| self.rejoin(block, allowed, stop)))
+            .or_else(|| self.rejoin(block, allowed, stop))
     }
 
     /// The block the walk resumes at after `node`, a construct whose merge is
