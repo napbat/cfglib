@@ -74,6 +74,9 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             }
         }
         let cfg = self.cfg;
+        // Blocks passed through since the walk last entered one: more than
+        // there are blocks means a cycle of blocks without code.
+        let mut passed = 0;
         while let Some(block) = walk.current {
             if Some(block) == walk.stop {
                 break;
@@ -84,7 +87,13 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             }
             if self.is_visited(block) {
                 // Convergence is only silent at `stop`; any other transfer
-                // into already-emitted code is a real control transfer.
+                // into already-emitted code is a real control transfer. A
+                // block without code emitted nothing, so no label could name
+                // it: flow goes on where it leads.
+                if let Some(next) = self.pass_through(block, &mut passed) {
+                    walk.current = Some(next);
+                    continue;
+                }
                 self.push_goto(&mut walk.result, block, GotoReason::RevisitedTarget);
                 break;
             }
@@ -97,15 +106,21 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
                 // pulls another region's blocks into this construct.
                 // Anything else is recorded, never dropped: the jump is
                 // explicit and the completeness sweep emits the target under
-                // the matching label.
+                // the matching label. A block without code is left for the
+                // walk that owns it, and flow goes on where it leads.
                 if cfg.incoming(block).take(2).count() == 1 && !self.is_claimed(block) {
                     walk.awaiting = Awaiting::Inline;
                     let bound = Bound::Set(Rc::clone(&self.unclaimed));
                     return Next::Call(Frame::Region(RegionWalk::new(block, bound, walk.stop)));
                 }
+                if let Some(next) = self.pass_through(block, &mut passed) {
+                    walk.current = Some(next);
+                    continue;
+                }
                 self.push_goto(&mut walk.result, block, GotoReason::BoundaryEscape);
                 break;
             }
+            passed = 0;
 
             self.visit(block);
             match self.lift_entered(block, &walk.allowed, walk.stop, &mut walk.result) {
@@ -117,6 +132,32 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             }
         }
         Next::Return(Returned::Nodes(core::mem::take(&mut walk.result)))
+    }
+
+    /// The block that flow reaches through `block` when `block` holds no
+    /// code, has one sequential successor, and is neither a loop's header
+    /// or latch nor a try's anchor; `passed` counts the blocks a walk passed
+    /// through in a row.
+    ///
+    /// Such a block emits nothing, so a goto to it would name a label that no
+    /// statement carries. A transfer into it is a transfer to its successor,
+    /// whether the walk that owns it already passed it or has yet to.
+    pub(super) fn pass_through(&self, block: BlockId, passed: &mut usize) -> Option<BlockId> {
+        if self.instruction_count(block) != 0
+            || *passed >= self.cfg.block_bound()
+            || self.anchors.contains_key(&block)
+            || !matches!(
+                self.classify_block(block),
+                BlockFlowKind::Linear | BlockFlowKind::Jump
+            )
+        {
+            return None;
+        }
+        let &[next] = flow_successors(self.cfg, block).as_slice() else {
+            return None;
+        };
+        *passed += 1;
+        Some(next)
     }
 
     /// Enter an already-visited block: the try region it anchors, or else its
@@ -159,11 +200,11 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
                 return Lifted::Construct(self.begin_loop(block, allowed));
             }
             BlockFlowKind::Conditional => {
-                let conditional = Conditional::new(block, allowed.clone());
+                let conditional = Conditional::new(block, allowed.clone(), stop);
                 return Lifted::Construct(Frame::Conditional(conditional));
             }
             BlockFlowKind::Switch => {
-                return Lifted::Construct(self.begin_switch(block, allowed));
+                return Lifted::Construct(self.begin_switch(block, allowed, stop));
             }
             BlockFlowKind::BackEdge => {
                 self.push_block(result, block);

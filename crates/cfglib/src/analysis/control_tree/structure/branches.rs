@@ -46,6 +46,12 @@ pub(super) fn conditional_targets<I, E>(
 pub(super) struct Conditional {
     block: BlockId,
     allowed: Bound,
+    /// The stop of the walk that entered the conditional.
+    stop: Option<BlockId>,
+    /// Where the arms rejoin and the walk goes on: see
+    /// [`Structurer::branch_merge`].
+    follow: Option<BlockId>,
+    /// Where both arms end silently: the merge, or else `stop`.
     merge: Option<BlockId>,
     arm: ConditionalArm,
 }
@@ -60,11 +66,14 @@ enum ConditionalArm {
 }
 
 impl Conditional {
-    /// The frame that lifts the conditional at `block`, within `allowed`.
-    pub(super) const fn new(block: BlockId, allowed: Bound) -> Self {
+    /// The frame that lifts the conditional at `block`, within `allowed`, in
+    /// a walk that ends at `stop`.
+    pub(super) const fn new(block: BlockId, allowed: Bound, stop: Option<BlockId>) -> Self {
         Self {
             block,
             allowed,
+            stop,
+            follow: None,
             merge: None,
             arm: ConditionalArm::Start,
         }
@@ -75,6 +84,11 @@ impl Conditional {
 pub(super) struct Switch {
     block: BlockId,
     allowed: Bound,
+    /// Where the arms rejoin and the walk goes on: see
+    /// [`Structurer::branch_merge`].
+    follow: Option<BlockId>,
+    /// Where every arm ends silently: the merge, or else the stop of the
+    /// walk that entered the switch.
     merge: Option<BlockId>,
     /// The case arms lifted so far.
     cases: Vec<SwitchCase>,
@@ -137,6 +151,29 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         .filter(|&merge| allowed.contains(merge))
     }
 
+    /// Where the arms of the branch or dispatch at `block` rejoin, in a walk
+    /// within `allowed` that ends at `stop`, and where the walk goes on after
+    /// the construct: the in-bound post-dominator merge, or else the block
+    /// where the arms that reach `stop`, or the exits of a walk without a
+    /// stop that two or more arms reach, rejoin while another arm diverges
+    /// (see [`rejoin`](Self::rejoin)).
+    ///
+    /// Without either merge, the arms end silently at `stop`, and the
+    /// construct is the last statement of the enclosing walk
+    /// ([`resume_after`](Self::resume_after) has nothing to resume at). An arm
+    /// that reaches that walk's stop, such as the arm of a handler that
+    /// completes it while the other arm rethrows, runs off the end of the
+    /// construct and so off the end of the walk: it simply ends.
+    fn branch_merge(
+        &mut self,
+        block: BlockId,
+        allowed: &Bound,
+        stop: Option<BlockId>,
+    ) -> Option<BlockId> {
+        self.effective_merge(block, allowed)
+            .or_else(|| self.rejoin(block, allowed, stop))
+    }
+
     /// The block the walk resumes at after `node`, a construct whose merge is
     /// `merge`.
     ///
@@ -152,12 +189,11 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         merge.filter(|&next| !(self.is_visited(next) && self.never_completes(*node)))
     }
 
-    /// The construct a branch or dispatch at `block` returns, with the block
-    /// the walk goes on at after it: the merge, when the construct can reach
+    /// The construct a branch or dispatch returns, with the block the walk
+    /// goes on at after it: its merge `follow`, when the construct can reach
     /// it.
-    fn finish_branch(&mut self, block: BlockId, allowed: &Bound, node: ControlNode) -> Next<'cfg> {
-        let merge = self.effective_merge(block, allowed);
-        let next = self.resume_after(&node, merge);
+    fn finish_branch(&mut self, follow: Option<BlockId>, node: ControlNode) -> Next<'cfg> {
+        let next = self.resume_after(&node, follow);
         Next::Return(Returned::Construct { node, next })
     }
 
@@ -171,7 +207,9 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             ConditionalArm::Start => {
                 let targets = conditional_targets(self.cfg, block)
                     .expect("a block classified as a conditional has a true and a false edge");
-                conditional.merge = self.effective_merge(block, &conditional.allowed);
+                conditional.follow =
+                    self.branch_merge(block, &conditional.allowed, conditional.stop);
+                conditional.merge = conditional.follow.or(conditional.stop);
                 conditional.arm = ConditionalArm::Then {
                     false_target: targets.false_target,
                 };
@@ -198,16 +236,22 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
                     then_body: self.tables.seal(then_nodes),
                     else_body: self.tables.seal(else_nodes),
                 };
-                let allowed = conditional.allowed.clone();
-                self.finish_branch(block, &allowed, node)
+                self.finish_branch(conditional.follow, node)
             }
         }
     }
 
-    /// Start lifting the switch at `block`.
-    pub(super) fn begin_switch(&mut self, block: BlockId, allowed: &Bound) -> Frame<'cfg> {
+    /// Start lifting the switch at `block`, in a walk within `allowed` that
+    /// ends at `stop`.
+    pub(super) fn begin_switch(
+        &mut self,
+        block: BlockId,
+        allowed: &Bound,
+        stop: Option<BlockId>,
+    ) -> Frame<'cfg> {
         let cfg = self.cfg;
-        let merge = self.effective_merge(block, allowed);
+        let follow = self.branch_merge(block, allowed, stop);
+        let merge = follow.or(stop);
 
         // Group dispatch edges by target in first-encounter order, and find
         // the explicit default edge (the sequential non-case successor).
@@ -251,6 +295,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         Frame::Switch(Box::new(Switch {
             block,
             allowed: allowed.clone(),
+            follow,
             merge,
             cases: Vec::new(),
             pending: case_targets.into_iter(),
@@ -315,8 +360,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             default_body: self.tables.seal(default_nodes),
             default_edge: switch.default_edge,
         };
-        let allowed = switch.allowed.clone();
-        self.finish_branch(switch.block, &allowed, node)
+        self.finish_branch(switch.follow, node)
     }
 
     pub(super) fn step_switch_arm(
