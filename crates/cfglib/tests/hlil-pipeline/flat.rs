@@ -5,8 +5,8 @@
 use std::fmt;
 
 use cfglib::ir::hlil::{
-    Appended, FlatBuilder, FlatFunction, InstructionShape, LiftEdge, LiftInstruction, LowerEdge,
-    Lowered, Occurrence, VariableOrigin,
+    Appended, FlatBuilder, FlatFunction, InstructionShape, LiftEdge, LiftInstruction, LiftOperands,
+    LowerEdge, Lowered, Occurrence, VariableOrigin,
 };
 use cfglib::{
     BlockId, Cfg, EdgeId, EdgeKind, EffectInfo, FlowControl, FlowEffect, Id, IdTag, InstrInfo,
@@ -190,20 +190,23 @@ impl LiftInstruction<Calc> for Instr {
         }
     }
 
-    fn use_types(&self) -> &[Ty] {
-        &self.use_types
-    }
-
-    fn def_types(&self) -> &[Ty] {
-        &self.def_types
-    }
-
     fn previous_value_operand(&self) -> Option<usize> {
         self.previous_value
     }
 
     fn materialize_value(&self) -> bool {
         self.materialize
+    }
+}
+
+/// An instruction owns its operands, so its context is the unit one.
+impl LiftOperands<Calc, Instr> for () {
+    fn use_types<'a>(&'a self, instruction: &'a Instr) -> &'a [Ty] {
+        &instruction.use_types
+    }
+
+    fn def_types<'a>(&'a self, instruction: &'a Instr) -> &'a [Ty] {
+        &instruction.def_types
     }
 }
 
@@ -230,9 +233,14 @@ impl FlatFunction<Calc> for Code {
     type Var = Reg;
     type Inst = Instr;
     type Edge = Link;
+    type Operands = ();
 
     fn cfg(&self) -> &Cfg<Instr, Link> {
         &self.cfg
+    }
+
+    fn operands(&self) -> &() {
+        &()
     }
 
     fn variable_count(&self) -> usize {

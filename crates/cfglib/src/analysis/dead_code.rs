@@ -14,10 +14,12 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
-use crate::dataflow::cfg_view::CfgView;
+use crate::dataflow::cfg_view::{CfgView, OperandView};
 use crate::dataflow::liveness::step_backward;
+use crate::dataflow::unwind::departs_before_throws_with;
 use crate::graph::traverse::{TraversalDirection, reachable};
-use crate::{EffectInfo, InstrInfo, ProgramPoint, VariableId, departs_before_throws};
+use crate::graph::view::{GraphView, RootedView};
+use crate::{EffectOperands, InstrOperands, ProgramPoint};
 
 /// Everything dead in a CFG, found without mutating it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,15 +56,17 @@ impl DeadCode {
     /// something inside reads it. [`compute_with_exits`](Self::compute_with_exits)
     /// is the same analysis told what leaves.
     ///
-    /// Requiring [`EffectInfo`] is deliberate, exactly as in
-    /// [`dead_code_elimination`](crate::dead_code_elimination): a consumer
+    /// Requiring [`EffectInfo`](crate::EffectInfo) is deliberate, exactly as
+    /// in [`dead_code_elimination`](crate::dead_code_elimination): a consumer
     /// must state an effect vocabulary before anything is called dead, which
     /// prevents silently classifying side-effecting statements as removable.
+    /// A [`WithOperands`](crate::WithOperands) states it through a context
+    /// that implements [`EffectOperands`].
     #[must_use]
-    pub fn compute<G>(cfg: &G) -> Self
+    pub fn compute<S>(cfg: &S) -> Self
     where
-        G: CfgView,
-        G::Inst: EffectInfo,
+        S: OperandView,
+        S::Operands: EffectOperands<S::Inst>,
     {
         Self::compute_with_exits(cfg, |_| Vec::new())
     }
@@ -78,13 +82,10 @@ impl DeadCode {
     /// them. A caller normally answers for the blocks with no successors
     /// and hands back an empty vector everywhere else.
     #[must_use]
-    pub fn compute_with_exits<G>(
-        cfg: &G,
-        live_out: impl Fn(BlockId) -> Vec<<G::Inst as InstrInfo>::Variable>,
-    ) -> Self
+    pub fn compute_with_exits<S>(cfg: &S, live_out: impl Fn(BlockId) -> Vec<S::Variable>) -> Self
     where
-        G: CfgView,
-        G::Inst: EffectInfo,
+        S: OperandView,
+        S::Operands: EffectOperands<S::Inst>,
     {
         Self::compute_with_roots(cfg, live_out, |_, _| false)
     }
@@ -96,15 +97,16 @@ impl DeadCode {
     /// useful when a consumer observes a definition through metadata rather
     /// than an explicit variable read.
     #[must_use]
-    pub fn compute_with_roots<G>(
-        cfg: &G,
-        live_out: impl Fn(BlockId) -> Vec<<G::Inst as InstrInfo>::Variable>,
-        observed: impl Fn(ProgramPoint, &G::Inst) -> bool,
+    pub fn compute_with_roots<S>(
+        cfg: &S,
+        live_out: impl Fn(BlockId) -> Vec<S::Variable>,
+        observed: impl Fn(ProgramPoint, &S::Inst) -> bool,
     ) -> Self
     where
-        G: CfgView,
-        G::Inst: EffectInfo,
+        S: OperandView,
+        S::Operands: EffectOperands<S::Inst>,
     {
+        let (operands, cfg) = (cfg.operands(), cfg.view());
         let bound = cfg.node_bound();
         let mut seeds = vec![Vec::new(); bound];
         let mut forced = vec![Vec::new(); bound];
@@ -115,22 +117,30 @@ impl DeadCode {
                 .iter()
                 .enumerate()
                 .map(|(inst_idx, inst)| {
-                    !inst.effects().is_empty()
-                        || inst.may_unwind()
+                    !operands.effects(inst).is_empty()
+                        || operands.may_unwind(inst)
                         || observed(ProgramPoint { block, inst_idx }, inst)
                 })
                 .collect();
         }
-        let live_in = needed_live_in(cfg, &seeds, &forced);
+        let live_in = needed_live_in(cfg, operands, &seeds, &forced);
 
         let mut instructions = Vec::new();
         for block in cfg.node_ids() {
             let index = block.index();
-            let (mut live, unwind) = exits_of(cfg, block, &live_in, &seeds[index]);
+            let (mut live, unwind) = exits_of(cfg, operands, block, &live_in, &seeds[index]);
             let mut dead = Vec::new();
-            replay(cfg, block, &forced[index], &mut live, &unwind, |inst_idx| {
-                dead.push(inst_idx);
-            });
+            replay(
+                cfg,
+                operands,
+                block,
+                &forced[index],
+                &mut live,
+                &unwind,
+                |inst_idx| {
+                    dead.push(inst_idx);
+                },
+            );
             instructions.extend(
                 dead.into_iter()
                     .rev()
@@ -160,23 +170,23 @@ impl DeadCode {
 /// What is live at the end of `block` once only needed instructions read
 /// anything: the seed joined with the live-in sets of the normal successors,
 /// and, separately, what an unwind out of the block reads.
-fn exits_of<G, V>(
+fn exits_of<G, O>(
     cfg: &G,
+    operands: &O,
     block: BlockId,
-    live_in: &[BTreeSet<V>],
-    seed: &[V],
-) -> (BTreeSet<V>, BTreeSet<V>)
+    live_in: &[BTreeSet<O::Variable>],
+    seed: &[O::Variable],
+) -> (BTreeSet<O::Variable>, BTreeSet<O::Variable>)
 where
     G: CfgView,
-    G::Inst: InstrInfo<Variable = V>,
-    V: VariableId,
+    O: InstrOperands<G::Inst>,
 {
-    let mut out: BTreeSet<V> = seed.iter().cloned().collect();
+    let mut out: BTreeSet<O::Variable> = seed.iter().cloned().collect();
     let mut unwind = BTreeSet::new();
     for edge in cfg.outgoing(block) {
         let edge = cfg.edge(edge);
         let reads = live_in[edge.target().index()].iter().cloned();
-        if departs_before_throws(cfg, edge) {
+        if departs_before_throws_with(cfg, operands, edge) {
             unwind.extend(reads);
         } else {
             out.extend(reads);
@@ -192,24 +202,23 @@ where
 /// then takes the ordinary liveness step. Any other instruction is dead and
 /// is reported to `dead`, last instruction first. It takes no step, so its
 /// reads keep nothing alive: the chain that feeds only it dies with it.
-fn replay<G, V>(
+fn replay<G, O>(
     cfg: &G,
+    operands: &O,
     block: BlockId,
     forced: &[bool],
-    live: &mut BTreeSet<V>,
-    unwind: &BTreeSet<V>,
+    live: &mut BTreeSet<O::Variable>,
+    unwind: &BTreeSet<O::Variable>,
     mut dead: impl FnMut(usize),
 ) where
     G: CfgView,
-    G::Inst: InstrInfo<Variable = V>,
-    V: VariableId,
+    O: InstrOperands<G::Inst>,
 {
     for (index, inst) in cfg.instructions(block).iter().enumerate().rev() {
-        let needed = forced[index]
-            || inst.defs().is_empty()
-            || inst.defs().iter().any(|def| live.contains(def));
+        let defs = operands.defs(inst);
+        let needed = forced[index] || defs.is_empty() || defs.iter().any(|def| live.contains(def));
         if needed {
-            step_backward(live, inst, unwind);
+            step_backward(operands, live, inst, unwind);
         } else {
             dead(index);
         }
@@ -224,14 +233,18 @@ fn replay<G, V>(
 /// live-in sets start empty and grow only through needed instructions, so
 /// neither does. `forced` states, per block and instruction, which
 /// instructions are needed whatever is live.
-fn needed_live_in<G, V>(cfg: &G, seeds: &[Vec<V>], forced: &[Vec<bool>]) -> Vec<BTreeSet<V>>
+fn needed_live_in<G, O>(
+    cfg: &G,
+    operands: &O,
+    seeds: &[Vec<O::Variable>],
+    forced: &[Vec<bool>],
+) -> Vec<BTreeSet<O::Variable>>
 where
     G: CfgView,
-    G::Inst: InstrInfo<Variable = V>,
-    V: VariableId,
+    O: InstrOperands<G::Inst>,
 {
     let bound = cfg.node_bound();
-    let mut live_in: Vec<BTreeSet<V>> = vec![BTreeSet::new(); bound];
+    let mut live_in: Vec<BTreeSet<O::Variable>> = vec![BTreeSet::new(); bound];
     let mut queued = vec![false; bound];
     let mut worklist: Vec<BlockId> = cfg.node_ids().collect();
     for block in &worklist {
@@ -240,8 +253,16 @@ where
     while let Some(block) = worklist.pop() {
         let index = block.index();
         queued[index] = false;
-        let (mut live, unwind) = exits_of(cfg, block, &live_in, &seeds[index]);
-        replay(cfg, block, &forced[index], &mut live, &unwind, |_| {});
+        let (mut live, unwind) = exits_of(cfg, operands, block, &live_in, &seeds[index]);
+        replay(
+            cfg,
+            operands,
+            block,
+            &forced[index],
+            &mut live,
+            &unwind,
+            |_| {},
+        );
         // The transfer is monotone, so this union only ever adds what the
         // replay found; it also guarantees the loop ends.
         let before = live_in[index].len();

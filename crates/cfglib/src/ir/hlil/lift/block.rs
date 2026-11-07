@@ -15,11 +15,11 @@ use core::mem;
 
 use crate::block::BlockId;
 use crate::graph::view::DenseId;
-use crate::{InstrInfo, ProgramPoint};
+use crate::{InstrOperands, ProgramPoint};
 
 use super::super::builder::FunctionBuilder;
 use super::super::dialect::{Dialect, LiftDialect};
-use super::super::flat::{FlatFunction, InstructionShape, LiftInstruction};
+use super::super::flat::{FlatFunction, InstructionShape, LiftInstruction, LiftOperands};
 use super::super::view::Entity;
 use super::plan::{Shape, UnwindReads, classify, plan_inlining, retained_positions};
 use super::scratch::{PendingKind, Scratch, Slot};
@@ -70,11 +70,18 @@ struct ListState<H: Dialect, V, S> {
 impl<H: LiftDialect, V: DenseId, S> ListState<H, V, S> {
     /// The expression of use position `operand` of `instruction`: the tree of
     /// the inlined definition, or a fresh typed read of the variable.
-    fn operand<I>(&mut self, position: usize, operand: usize, instruction: &I) -> Slot
+    fn operand<I, O>(
+        &mut self,
+        operands: &O,
+        position: usize,
+        operand: usize,
+        instruction: &I,
+    ) -> Slot
     where
-        I: LiftInstruction<H> + InstrInfo<Variable = V>,
+        I: LiftInstruction<H>,
+        O: LiftOperands<H, I, Variable = V>,
     {
-        let variable = instruction.uses()[operand];
+        let variable = operands.uses(instruction)[operand];
         if let Some(&candidate) = self
             .by_consumer
             .get(&position)
@@ -83,34 +90,62 @@ impl<H: LiftDialect, V: DenseId, S> ListState<H, V, S> {
         {
             return slot;
         }
-        let ty = instruction
-            .use_types()
+        let ty = operands
+            .use_types(instruction)
             .get(operand)
             .cloned()
             .unwrap_or_else(H::void_type);
         self.scratch.variable(variable, ty)
     }
 
-    fn operands<I>(&mut self, position: usize, instruction: &I) -> Vec<Slot>
+    fn operands<I, O>(&mut self, operands: &O, position: usize, instruction: &I) -> Vec<Slot>
     where
-        I: LiftInstruction<H> + InstrInfo<Variable = V>,
+        I: LiftInstruction<H>,
+        O: LiftOperands<H, I, Variable = V>,
     {
-        (0..instruction.uses().len())
-            .map(|operand| self.operand(position, operand, instruction))
+        (0..operands.uses(instruction).len())
+            .map(|operand| self.operand(operands, position, operand, instruction))
             .collect()
     }
 }
 
-fn require_single_definition<H, I>(point: ProgramPoint, instruction: &I) -> Fallible<()>
+fn require_single_definition<H, I, O>(
+    operands: &O,
+    point: ProgramPoint,
+    instruction: &I,
+) -> Fallible<()>
 where
     H: LiftDialect,
-    I: LiftInstruction<H>,
+    O: LiftOperands<H, I>,
 {
-    if instruction.defs().len() == 1 {
+    if operands.defs(instruction).len() == 1 {
         Ok(())
     } else {
         Err(format!("instruction {point} defines more than one result"))
     }
+}
+
+/// Per consumer position, the variable that each inlined definition feeds it
+/// and the position of that definition.
+fn consumers<H, I, O>(
+    operands: &O,
+    instructions: &[&I],
+    inline_at: &[Option<usize>],
+) -> BTreeMap<usize, BTreeMap<O::Variable, usize>>
+where
+    H: LiftDialect,
+    O: LiftOperands<H, I>,
+{
+    let mut by_consumer: BTreeMap<usize, BTreeMap<O::Variable, usize>> = BTreeMap::new();
+    for (candidate, consumer) in inline_at.iter().enumerate() {
+        if let Some(consumer) = consumer {
+            by_consumer
+                .entry(*consumer)
+                .or_default()
+                .insert(operands.defs(instructions[candidate])[0], candidate);
+        }
+    }
+    by_consumer
 }
 
 impl<'a, H, X, B> Lifter<'a, H, X, B>
@@ -126,11 +161,13 @@ where
         let blocks = entries
             .iter()
             .map(|&(point, instruction)| {
-                if !instruction.may_throw() {
+                if !self.operands.may_throw(instruction) {
                     return None;
                 }
-                live.entry(point.block)
-                    .or_insert_with(|| self.liveness.live_on_unwind(self.cfg, point.block));
+                live.entry(point.block).or_insert_with(|| {
+                    self.liveness
+                        .live_on_unwind_with(self.cfg, self.operands, point.block)
+                });
                 Some(point.block)
             })
             .collect();
@@ -148,27 +185,27 @@ where
         entries: &[Entry<'a, X::Inst>],
         expect: Expect,
     ) -> Translated<H, X, B> {
+        let operands = self.operands;
         let instructions: Vec<&X::Inst> = entries
             .iter()
             .map(|&(_, instruction)| instruction)
             .collect();
         let shapes: Vec<Shape<H>> = instructions
             .iter()
-            .map(|&instruction| classify::<H, _>(instruction))
+            .map(|&instruction| classify::<H, _, _>(operands, instruction))
             .collect();
         let unwind = self.unwind_reads(entries);
         let live_out = self.liveness.live_out(block);
-        let retained = retained_positions::<H, _>(&instructions, live_out, &unwind);
-        let inline_at = plan_inlining::<H, _>(&instructions, &shapes, live_out, &unwind, &retained);
-        let mut by_consumer: BTreeMap<usize, BTreeMap<X::Var, usize>> = BTreeMap::new();
-        for (candidate, consumer) in inline_at.iter().enumerate() {
-            if let Some(consumer) = consumer {
-                by_consumer
-                    .entry(*consumer)
-                    .or_default()
-                    .insert(instructions[candidate].defs()[0], candidate);
-            }
-        }
+        let retained = retained_positions::<H, _, _>(operands, &instructions, live_out, &unwind);
+        let inline_at = plan_inlining::<H, _, _>(
+            operands,
+            &instructions,
+            &shapes,
+            live_out,
+            &unwind,
+            &retained,
+        );
+        let by_consumer = consumers(operands, &instructions, &inline_at);
         let mut state = ListState {
             inline_at,
             by_consumer,
@@ -191,20 +228,20 @@ where
             match &shapes[position] {
                 InstructionShape::ControlFlow => {}
                 InstructionShape::Constant(constant) => {
-                    if instruction.defs().is_empty() {
+                    if operands.defs(instruction).is_empty() {
                         continue;
                     }
-                    require_single_definition::<H, _>(point, instruction)?;
-                    let ty = instruction.def_types()[0].clone();
+                    require_single_definition::<H, _, _>(operands, point, instruction)?;
+                    let ty = operands.def_types(instruction)[0].clone();
                     let slot = state.scratch.constant(constant.clone(), ty);
                     self.finish_value(position, point, instruction, slot, &mut state);
                 }
                 InstructionShape::Copy => {
-                    require_single_definition::<H, _>(point, instruction)?;
-                    if instruction.uses().len() != 1 {
+                    require_single_definition::<H, _, _>(operands, point, instruction)?;
+                    if operands.uses(instruction).len() != 1 {
                         return Err(format!("copy {point} does not have exactly one use"));
                     }
-                    let value = state.operand(position, 0, instruction);
+                    let value = state.operand(operands, position, 0, instruction);
                     self.finish_value(position, point, instruction, value, &mut state);
                 }
                 InstructionShape::Operation(op) => {
@@ -220,6 +257,7 @@ where
                 | InstructionShape::BranchOperation(_)
                 | InstructionShape::Switch => {
                     end = Some(Self::terminator_value(
+                        operands,
                         position,
                         point,
                         instruction,
@@ -229,7 +267,7 @@ where
                     )?);
                 }
                 InstructionShape::Return => {
-                    let slots = state.operands(position, instruction);
+                    let slots = state.operands(operands, position, instruction);
                     let values: Vec<B::Expr> = slots
                         .into_iter()
                         .map(|slot| self.emit(&state.scratch, slot))
@@ -258,12 +296,11 @@ where
         op: &H::Op,
         state: &mut ListState<H, X::Var, B::Stmt>,
     ) -> Fallible<()> {
-        let operands = state.operands(position, instruction);
-        match instruction.defs().len() {
+        let operands = self.operands;
+        let slots = state.operands(operands, position, instruction);
+        match operands.defs(instruction).len() {
             0 => {
-                let slot = state
-                    .scratch
-                    .operation(op.clone(), operands, H::void_type());
+                let slot = state.scratch.operation(op.clone(), slots, H::void_type());
                 let expression = self.emit(&state.scratch, slot);
                 let statement = self.builder.expression_statement(expression);
                 self.record(point, Entity::Statement(statement));
@@ -271,8 +308,8 @@ where
                 Ok(())
             }
             1 => {
-                let ty = instruction.def_types()[0].clone();
-                let slot = state.scratch.operation(op.clone(), operands, ty);
+                let ty = operands.def_types(instruction)[0].clone();
+                let slot = state.scratch.operation(op.clone(), slots, ty);
                 self.finish_value(position, point, instruction, slot, state);
                 Ok(())
             }
@@ -283,6 +320,7 @@ where
     /// Builds the condition or scrutinee value that ends a branch or dispatch
     /// list, and takes the scratch arena that holds it.
     fn terminator_value(
+        operands: &X::Operands,
         position: usize,
         point: ProgramPoint,
         instruction: &X::Inst,
@@ -304,15 +342,13 @@ where
             // The fused condition applies the operation to every use. An
             // empty use list is legal when the operation embeds its whole
             // condition (a constant or a memory read).
-            let operands = state.operands(position, instruction);
-            state
-                .scratch
-                .operation(op.clone(), operands, H::void_type())
+            let slots = state.operands(operands, position, instruction);
+            state.scratch.operation(op.clone(), slots, H::void_type())
         } else {
-            if instruction.uses().is_empty() {
+            if operands.uses(instruction).is_empty() {
                 return Err(format!("branch {point} has no condition operand"));
             }
-            state.operand(position, 0, instruction)
+            state.operand(operands, position, 0, instruction)
         };
         Ok(ListEnd {
             scratch: mem::replace(&mut state.scratch, Scratch::new()),
@@ -332,13 +368,14 @@ where
         instruction: &X::Inst,
         state: &mut ListState<H, X::Var, B::Stmt>,
     ) -> Fallible<()> {
-        if instruction.uses().len() != instruction.defs().len() {
+        let operands = self.operands;
+        let written = operands.defs(instruction);
+        if operands.uses(instruction).len() != written.len() {
             return Err(format!(
                 "parallel copy {point} does not pair uses with definitions"
             ));
         }
-        let slots = state.operands(position, instruction);
-        let written = instruction.defs();
+        let slots = state.operands(operands, position, instruction);
         let direct = slots.iter().enumerate().all(|(index, &slot)| {
             let mut reads = BTreeSet::new();
             state.scratch.collect_reads(slot, &mut reads);
@@ -353,7 +390,7 @@ where
                 .collect()
         } else {
             let mut staged = Vec::with_capacity(slots.len());
-            for (slot, ty) in slots.into_iter().zip(instruction.use_types()) {
+            for (slot, ty) in slots.into_iter().zip(operands.use_types(instruction)) {
                 let Some(metadata) = H::temporary_variable(ty) else {
                     return Err(format!(
                         "overlapping parallel copy {point} needs a temporary variable"
@@ -368,7 +405,10 @@ where
             staged
         };
         let mut first_statement = None;
-        for ((value, &variable), ty) in values.into_iter().zip(written).zip(instruction.def_types())
+        for ((value, &variable), ty) in values
+            .into_iter()
+            .zip(written)
+            .zip(operands.def_types(instruction))
         {
             let target = self
                 .builder
@@ -393,13 +433,14 @@ where
         location: &H::Op,
         state: &mut ListState<H, X::Var, B::Stmt>,
     ) -> Fallible<()> {
-        if !instruction.defs().is_empty() {
+        let operands = self.operands;
+        if !operands.defs(instruction).is_empty() {
             return Err(format!("store {point} also defines variables"));
         }
-        if instruction.uses().is_empty() {
+        if operands.uses(instruction).is_empty() {
             return Err(format!("store {point} has no stored value"));
         }
-        let mut operands = state.operands(position, instruction);
+        let mut operands = state.operands(operands, position, instruction);
         let value = operands.pop().expect("a store carries its value last");
         let ty = state.scratch.node(value).ty.clone();
         let place = state.scratch.operation(location.clone(), operands, ty);
@@ -428,8 +469,9 @@ where
             state.built[position] = Some(slot);
             return;
         }
-        let variable = instruction.defs()[0];
-        let ty = &instruction.def_types()[0];
+        let operands = self.operands;
+        let variable = operands.defs(instruction)[0];
+        let ty = &operands.def_types(instruction)[0];
         let value = self.emit(&state.scratch, slot);
         let target = self
             .builder

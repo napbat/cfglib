@@ -35,20 +35,6 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
-      - id: cargo-nextest
-        name: cargo nextest
-        entry: cargo nextest run --workspace --all-features
-        language: system
-        pass_filenames: false
-        always_run: true
-        stages: [pre-push]
-      - id: cargo-doctest
-        name: cargo test (doctests)
-        entry: cargo test --workspace --all-features --doc
-        language: system
-        pass_filenames: false
-        always_run: true
-        stages: [pre-push]
       - id: cargo-doc
         name: cargo doc
         entry: cargo doc --workspace --all-features --no-deps

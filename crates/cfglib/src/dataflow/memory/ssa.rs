@@ -7,11 +7,11 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use crate::dataflow::cfg_view::CfgView;
-use crate::{BlockId, Cfg, DominatorTree, InstrInfo, ProgramPoint, SsaForm, SsaValue, VariableId};
+use crate::dataflow::cfg_view::{CfgView, OperandView};
+use crate::{BlockId, Cfg, DominatorTree, ProgramPoint, SsaForm, SsaValue, VariableId};
 
 use crate::memory::{
-    MemoryAccess, MemoryAccessKind, MemoryAtomicity, MemoryEvent, MemoryEventInfo,
+    MemoryAccess, MemoryAccessKind, MemoryAtomicity, MemoryEvent, MemoryEventOperands,
     MemoryOperations, MemoryTraceEntry,
 };
 
@@ -403,7 +403,8 @@ impl<L, V, F> MemorySsaEvent<L, V, F> {
     /// Resolves the access's address inputs to their reaching SSA versions.
     ///
     /// `ssa` must describe the same source CFG. Returns `None` for a fence, a
-    /// mismatched form, or a violated [`MemoryEventInfo`] address-use contract.
+    /// mismatched form, or a violated [`MemoryEventInfo`](crate::MemoryEventInfo)
+    /// address-use contract.
     #[must_use]
     pub fn ssa_address_uses(&self, ssa: &SsaForm<V>) -> Option<Vec<SsaValue<V>>>
     where
@@ -451,15 +452,20 @@ where
 {
     /// Computes location-aware memory SSA for `cfg` using `alias`.
     ///
+    /// `cfg` is a [`CfgView`] whose instructions implement
+    /// [`MemoryEventInfo`](crate::MemoryEventInfo), or a
+    /// [`WithOperands`](crate::WithOperands) whose context implements
+    /// [`MemoryEventOperands`].
+    ///
     /// An entry block that is a branch target is supported, as it is by
     /// [`SsaForm::compute`]: each memory phi placed there also merges the
     /// state the function starts with, reported by
     /// [`MemoryPhi::start_value`] apart from its edge operands.
     #[must_use]
-    pub fn compute<G, A>(cfg: &G, alias: &A) -> Self
+    pub fn compute<S, A>(cfg: &S, alias: &A) -> Self
     where
-        G: CfgView,
-        G::Inst: MemoryEventInfo<Location = L, Fence = F> + InstrInfo<Variable = V>,
+        S: OperandView<Variable = V>,
+        S::Operands: MemoryEventOperands<S::Inst, Location = L, Fence = F>,
         A: MemoryAlias<L> + ?Sized,
     {
         Self::compute_in(&mut MemorySsaScratch::new(), cfg, alias)
@@ -473,16 +479,17 @@ where
     /// same one, built by the same code — the allocating entry point is this
     /// function over a fresh [`MemorySsaScratch`].
     #[must_use]
-    pub fn compute_in<G, A>(scratch: &mut MemorySsaScratch<L, V, F>, cfg: &G, alias: &A) -> Self
+    pub fn compute_in<S, A>(scratch: &mut MemorySsaScratch<L, V, F>, cfg: &S, alias: &A) -> Self
     where
-        G: CfgView,
-        G::Inst: MemoryEventInfo<Location = L, Fence = F> + InstrInfo<Variable = V>,
+        S: OperandView<Variable = V>,
+        S::Operands: MemoryEventOperands<S::Inst, Location = L, Fence = F>,
         A: MemoryAlias<L> + ?Sized,
     {
+        let (operands, cfg) = (cfg.operands(), cfg.view());
         scratch.reset();
-        scratch.trace.rebuild(cfg);
+        scratch.trace.rebuild(cfg, operands);
         let (classes, class_by_location) = build_location_classes(scratch, alias);
-        let shadow = build_shadow_cfg(cfg, scratch.trace.entries(), &class_by_location);
+        let shadow = build_shadow_cfg(cfg, operands, scratch.trace.entries(), &class_by_location);
         let dominators = DominatorTree::compute_in(&mut scratch.dominators, &shadow);
         let ssa = SsaForm::compute_in(&mut scratch.ssa, &shadow, &dominators);
         Self::from_shadow_ssa(

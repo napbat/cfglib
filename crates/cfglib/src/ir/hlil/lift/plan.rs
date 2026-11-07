@@ -22,7 +22,7 @@ use crate::block::BlockId;
 use crate::flow::FlowEffect;
 
 use super::super::dialect::{Dialect, LiftDialect};
-use super::super::flat::{InstructionShape, LiftInstruction};
+use super::super::flat::{InstructionShape, LiftInstruction, LiftOperands};
 
 /// The shape of one instruction as the plan and the emitters read it.
 pub(super) type Shape<H> = InstructionShape<<H as Dialect>::Op, <H as Dialect>::Constant>;
@@ -30,10 +30,15 @@ pub(super) type Shape<H> = InstructionShape<<H as Dialect>::Op, <H as Dialect>::
 /// The shape that the lift acts on. A parallel move of exactly one pair is a
 /// plain copy, so it takes part in expression inlining (type-refinement
 /// pairs, the lone commit of a phi copy).
-pub(super) fn classify<H: LiftDialect, I: LiftInstruction<H>>(instruction: &I) -> Shape<H> {
+pub(super) fn classify<H, I, O>(operands: &O, instruction: &I) -> Shape<H>
+where
+    H: LiftDialect,
+    I: LiftInstruction<H>,
+    O: LiftOperands<H, I>,
+{
     match instruction.lift() {
         InstructionShape::ParallelCopy
-            if instruction.uses().len() == 1 && instruction.defs().len() == 1 =>
+            if operands.uses(instruction).len() == 1 && operands.defs(instruction).len() == 1 =>
         {
             InstructionShape::Copy
         }
@@ -92,30 +97,34 @@ impl<V: Ord> UnwindReads<V> {
 /// dead-value pruning. A backward liveness walk removes the pure fallthrough
 /// definitions whose results cannot reach a retained instruction, an unwind
 /// successor, or another block.
-pub(super) fn retained_positions<H: LiftDialect, I: LiftInstruction<H>>(
+pub(super) fn retained_positions<H, I, O>(
+    operands: &O,
     instructions: &[&I],
-    live_out: &BTreeSet<I::Variable>,
-    unwind: &UnwindReads<I::Variable>,
-) -> Vec<bool> {
+    live_out: &BTreeSet<O::Variable>,
+    unwind: &UnwindReads<O::Variable>,
+) -> Vec<bool>
+where
+    H: LiftDialect,
+    I: LiftInstruction<H>,
+    O: LiftOperands<H, I>,
+{
     let mut live = live_out.clone();
     let mut retained = vec![true; instructions.len()];
-    for (position, instruction) in instructions.iter().enumerate().rev() {
-        let dead_value = !instruction.defs().is_empty()
-            && instruction
-                .defs()
-                .iter()
-                .all(|variable| !live.contains(variable))
-            && instruction.effects().is_empty()
-            && !instruction.may_throw()
+    for (position, &instruction) in instructions.iter().enumerate().rev() {
+        let defs = operands.defs(instruction);
+        let dead_value = !defs.is_empty()
+            && defs.iter().all(|variable| !live.contains(variable))
+            && operands.effects(instruction).is_empty()
+            && !operands.may_throw(instruction)
             && instruction.flow_effect() == FlowEffect::Fallthrough;
         if dead_value {
             retained[position] = false;
             continue;
         }
-        for definition in instruction.defs() {
+        for definition in defs {
             live.remove(definition);
         }
-        live.extend(instruction.uses().iter().copied());
+        live.extend(operands.uses(instruction).iter().copied());
         if let Some(reads) = unwind.at(position) {
             live.extend(reads.iter().copied());
         }
@@ -153,13 +162,19 @@ impl<H: LiftDialect, V> CandidateFacts<H, V> {
 /// the next redefinition of the variable, and dead beyond the list unless it
 /// is redefined inside it. An unwind successor that reads the value before a
 /// throwing instruction counts as a use that cannot inline.
-fn single_use_positions<H: LiftDialect, I: LiftInstruction<H>>(
+fn single_use_positions<H, I, O>(
+    operands: &O,
     instructions: &[&I],
     shapes: &[Shape<H>],
-    live_out: &BTreeSet<I::Variable>,
-    unwind: &UnwindReads<I::Variable>,
+    live_out: &BTreeSet<O::Variable>,
+    unwind: &UnwindReads<O::Variable>,
     retained: &[bool],
-) -> Vec<Option<usize>> {
+) -> Vec<Option<usize>>
+where
+    H: LiftDialect,
+    I: LiftInstruction<H>,
+    O: LiftOperands<H, I>,
+{
     struct PendingUse {
         definition: usize,
         occurrences: usize,
@@ -167,15 +182,15 @@ fn single_use_positions<H: LiftDialect, I: LiftInstruction<H>>(
     }
 
     let mut viable: Vec<Option<usize>> = vec![None; instructions.len()];
-    let mut active: BTreeMap<I::Variable, PendingUse> = BTreeMap::new();
-    for (position, instruction) in instructions.iter().enumerate() {
+    let mut active: BTreeMap<O::Variable, PendingUse> = BTreeMap::new();
+    for (position, &instruction) in instructions.iter().enumerate() {
         if !retained[position] {
             continue;
         }
 
         // Reads precede writes. This keeps the segment semantics of a
         // read-modify-write instruction while it visits each operand once.
-        for variable in instruction.uses() {
+        for variable in operands.uses(instruction) {
             if let Some(pending) = active.get_mut(variable) {
                 pending.occurrences = pending.occurrences.saturating_add(1);
                 pending.use_position.get_or_insert(position);
@@ -187,7 +202,8 @@ fn single_use_positions<H: LiftDialect, I: LiftInstruction<H>>(
                 pending.occurrences = pending.occurrences.saturating_add(1);
             }
         }
-        for variable in instruction.defs() {
+        let defs = operands.defs(instruction);
+        for variable in defs {
             if let Some(pending) = active.remove(variable)
                 && pending.occurrences == 1
             {
@@ -196,13 +212,13 @@ fn single_use_positions<H: LiftDialect, I: LiftInstruction<H>>(
         }
 
         if is_value_shape::<H>(&shapes[position])
-            && instruction.defs().len() == 1
+            && defs.len() == 1
             && instruction.previous_value_operand().is_none()
         {
             // A read-modify-write definition merges with the prior state: it
             // is not a pure value and never inlines forward.
             active.insert(
-                instruction.defs()[0],
+                defs[0],
                 PendingUse {
                     definition: position,
                     occurrences: 0,
@@ -220,22 +236,29 @@ fn single_use_positions<H: LiftDialect, I: LiftInstruction<H>>(
 }
 
 /// Decides, per definition, the consumer that it inlines into, if any.
-pub(super) fn plan_inlining<H: LiftDialect, I: LiftInstruction<H>>(
+pub(super) fn plan_inlining<H, I, O>(
+    operands: &O,
     instructions: &[&I],
     shapes: &[Shape<H>],
-    live_out: &BTreeSet<I::Variable>,
-    unwind: &UnwindReads<I::Variable>,
+    live_out: &BTreeSet<O::Variable>,
+    unwind: &UnwindReads<O::Variable>,
     retained: &[bool],
-) -> Vec<Option<usize>> {
+) -> Vec<Option<usize>>
+where
+    H: LiftDialect,
+    I: LiftInstruction<H>,
+    O: LiftOperands<H, I>,
+{
     let length = instructions.len();
-    let viable = single_use_positions::<H, I>(instructions, shapes, live_out, unwind, retained);
+    let viable =
+        single_use_positions::<H, I, O>(operands, instructions, shapes, live_out, unwind, retained);
 
     // The order-safety walk over the movable candidates.
     let mut inline_at: Vec<Option<usize>> = vec![None; length];
-    let mut facts: Vec<Option<CandidateFacts<H, I::Variable>>> =
+    let mut facts: Vec<Option<CandidateFacts<H, O::Variable>>> =
         (0..length).map(|_| None).collect();
-    let mut active: BTreeMap<I::Variable, usize> = BTreeMap::new();
-    for (position, instruction) in instructions.iter().enumerate() {
+    let mut active: BTreeMap<O::Variable, usize> = BTreeMap::new();
+    for (position, &instruction) in instructions.iter().enumerate() {
         if !retained[position] {
             continue;
         }
@@ -245,7 +268,7 @@ pub(super) fn plan_inlining<H: LiftDialect, I: LiftInstruction<H>>(
         // operands evaluate left to right.
         let mut consumed: Vec<usize> = Vec::new();
         let mut last_effectful: Option<usize> = None;
-        for (operand, variable) in instruction.uses().iter().enumerate() {
+        for (operand, variable) in operands.uses(instruction).iter().enumerate() {
             if !use_is_consumed::<H>(&shapes[position], operand)
                 || instruction.previous_value_operand() == Some(operand)
             {
@@ -274,14 +297,17 @@ pub(super) fn plan_inlining<H: LiftDialect, I: LiftInstruction<H>>(
         }
         // An effectful or throwing instruction bars every candidate that the
         // dialect does not declare to commute with it.
-        if !instruction.effects().is_empty() || instruction.may_throw() {
+        let effects = operands.effects(instruction);
+        let throws = operands.may_throw(instruction);
+        if !effects.is_empty() || throws {
             active.retain(|_, &mut candidate| {
-                facts[candidate].as_ref().is_some_and(|f| {
-                    f.commutes_with(instruction.effects(), instruction.may_throw())
-                })
+                facts[candidate]
+                    .as_ref()
+                    .is_some_and(|f| f.commutes_with(effects, throws))
             });
         }
-        for defined in instruction.defs() {
+        let defs = operands.defs(instruction);
+        for defined in defs {
             active.remove(defined);
             // A candidate that reads the redefined variable can no longer
             // move past this point.
@@ -293,13 +319,13 @@ pub(super) fn plan_inlining<H: LiftDialect, I: LiftInstruction<H>>(
         }
         if viable[position].is_some() && !instruction.materialize_value() {
             let mut reads = BTreeSet::new();
-            let mut effects = instruction.effects().to_vec();
-            let mut may_throw = instruction.may_throw();
-            for variable in instruction.uses() {
+            let mut effects = effects.to_vec();
+            let mut may_throw = throws;
+            for variable in operands.uses(instruction) {
                 let inlined = consumed
                     .iter()
                     .copied()
-                    .find(|&candidate| instructions[candidate].defs()[0] == *variable);
+                    .find(|&candidate| operands.defs(instructions[candidate])[0] == *variable);
                 if let Some(candidate) = inlined {
                     if let Some(f) = facts[candidate].as_ref() {
                         reads.extend(f.reads.iter().copied());
@@ -317,7 +343,7 @@ pub(super) fn plan_inlining<H: LiftDialect, I: LiftInstruction<H>>(
                 effects,
                 may_throw,
             });
-            active.insert(instruction.defs()[0], position);
+            active.insert(defs[0], position);
         }
     }
     inline_at

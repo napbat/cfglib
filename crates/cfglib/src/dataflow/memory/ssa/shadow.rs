@@ -11,7 +11,7 @@ use crate::dataflow::cfg_view::CfgView;
 use crate::dataflow::unwind::unwind_edges;
 use crate::edge::KindedEdge;
 use crate::memory::{MemoryEvent, MemoryTraceEntry};
-use crate::{InstrInfo, ProgramPoint};
+use crate::{InstrInfo, InstrOperands, ProgramPoint};
 
 use super::scratch::MemorySsaScratch;
 use super::{MemoryAlias, MemoryClassId, MemoryLocationClass};
@@ -77,14 +77,15 @@ impl InstrInfo for ShadowInstruction {
 /// when it reports no event, so an unwind out of the shadow carries the
 /// memory state before that instruction exactly as it does for ordinary
 /// variables.
-pub(super) fn build_shadow_cfg<G, L, V, F>(
+pub(super) fn build_shadow_cfg<G, O, L, V, F>(
     cfg: &G,
+    operands: &O,
     entries: &[MemoryTraceEntry<L, V, F>],
     class_by_location: &BTreeMap<L, MemoryClassId>,
 ) -> Cfg<ShadowInstruction>
 where
     G: CfgView,
-    G::Inst: InstrInfo,
+    O: InstrOperands<G::Inst>,
     L: Ord,
 {
     let mut shadow = Cfg::new();
@@ -109,7 +110,7 @@ where
         let unwinds_out = unwind_edges(cfg, block).next().is_some();
         for (inst_idx, instruction) in cfg.instructions(block).iter().enumerate() {
             let point = ProgramPoint { block, inst_idx };
-            let mut unwinds = unwinds_out && instruction.may_unwind();
+            let mut unwinds = unwinds_out && operands.may_unwind(instruction);
             while let Some((trace_index, entry)) =
                 entries.next_if(|(_, entry)| entry.point() == point)
             {

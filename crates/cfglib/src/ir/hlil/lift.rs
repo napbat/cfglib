@@ -15,7 +15,7 @@
 //! lift call the builder, children first.
 
 extern crate alloc;
-
+use alloc::borrow::Cow;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
@@ -25,14 +25,14 @@ use core::marker::PhantomData;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::graph::view::DenseId;
-use crate::{ControlTree, LiftReport, Liveness};
-use crate::{InstrInfo, ProgramPoint};
+use crate::{ControlTree, LiftReport, Liveness, WithOperands};
+use crate::{InstrOperands, ProgramPoint};
 
 use super::builder::FunctionBuilder;
 use super::correspondence::Correspondence;
 use super::dialect::LiftDialect;
 use super::error::LiftError;
-use super::flat::{FlatFunction, InstructionShape, LiftInstruction};
+use super::flat::{FlatFunction, InstructionShape, LiftInstruction, LiftOperands};
 use super::view::Entity;
 
 mod block;
@@ -192,13 +192,14 @@ where
     X: FlatFunction<H>,
 {
     let cfg = source.cfg();
+    let operands = source.operands();
     cfg.block_ids()
         .filter(|&block| {
             let instructions = cfg.block(block).instructions();
             !instructions.is_empty()
                 && instructions.iter().all(|instruction| {
-                    instruction.defs().is_empty()
-                        && !instruction.may_throw()
+                    operands.defs(instruction).is_empty()
+                        && !operands.may_throw(instruction)
                         && matches!(instruction.lift(), InstructionShape::ControlFlow)
                 })
         })
@@ -220,7 +221,10 @@ where
     X: FlatFunction<H>,
     B: FunctionBuilder<H>,
 {
+    source: &'a X,
     cfg: &'a Cfg<X::Inst, X::Edge>,
+    /// The context that answers for the operands of `cfg`'s instructions.
+    operands: &'a X::Operands,
     tree: &'a ControlTree,
     builder: B,
     /// The structured variable of each flat variable, by flat index.
@@ -255,12 +259,15 @@ where
             .collect();
         builder.set_signature(&parameters, source.returns());
         let cfg = source.cfg();
+        let operands = source.operands();
         Self {
+            source,
             cfg,
+            operands,
             tree,
             builder,
             variables,
-            liveness: Liveness::compute(cfg),
+            liveness: Liveness::compute(&WithOperands::new(cfg, operands)),
             rows: BTreeMap::new(),
             metadata,
             contexts: Vec::new(),
@@ -278,13 +285,13 @@ where
         }
     }
 
-    /// The name of the label or goto target at `block`: its authored label,
-    /// or `.bb{index}` when it has none. An empty label is an absent one.
+    /// The name of the label or goto target at `block`: the name its flat
+    /// function gives it, or `.bb{index}` when it has none. An empty name is
+    /// an absent one.
     fn block_label(&self, block: BlockId) -> String {
-        self.cfg
-            .block(block)
-            .label()
+        self.source
+            .block_label(block)
             .filter(|label| !label.is_empty())
-            .map_or_else(|| format!(".bb{}", block.index()), String::from)
+            .map_or_else(|| format!(".bb{}", block.index()), Cow::into_owned)
     }
 }

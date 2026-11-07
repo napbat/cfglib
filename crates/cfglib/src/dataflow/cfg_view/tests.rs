@@ -27,6 +27,8 @@ use crate::graph::edge_view::{EdgeRef, EdgeView};
 use crate::graph::view::{GraphView, RootedView};
 use crate::test_util::{DfInst, df_const, df_def, df_use, df_with_effect};
 
+mod operands;
+
 /// One edge of the toy storage.
 #[derive(Debug)]
 struct ToyEdge {

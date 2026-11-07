@@ -13,13 +13,17 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use core::ops::Bound;
 
-use super::cfg_view::CfgView;
+use super::cfg_view::{CfgView, OperandView};
 use super::edge_fixpoint::{self, EdgeProblem};
 use super::fixpoint::{Direction, Facts};
 use crate::block::BlockId;
 use crate::dataflow::unwind::{replay_block, unwind_departure};
 use crate::graph::edge_view::EdgeRef;
-use crate::{DefSite, InstrInfo, VariableId};
+use crate::{DefSite, InstrInfo, InstrOperands, VariableId};
+
+mod dense;
+
+pub use dense::DenseReachingDefs;
 
 /// A reaching definition: which IR variable was defined, and where.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -97,6 +101,43 @@ where
         Direction::Forward
     }
 
+    fn bottom(&self, cfg: &G) -> Self::Fact {
+        ReachingThrough(&()).bottom(cfg)
+    }
+
+    fn meet(&self, left: &Self::Fact, right: &Self::Fact) -> Self::Fact {
+        EdgeProblem::<G>::meet(&ReachingThrough(&()), left, right)
+    }
+
+    fn transfer_node(&self, cfg: &G, block: BlockId, input: &Self::Fact) -> Self::Fact {
+        ReachingThrough(&()).transfer_node(cfg, block, input)
+    }
+
+    fn transfer_edge(
+        &self,
+        cfg: &G,
+        edge: EdgeRef<'_, BlockId, G::EdgeId, G::EdgeData>,
+        input: &Self::Fact,
+        output: &Self::Fact,
+    ) -> Self::Fact {
+        ReachingThrough(&()).transfer_edge(cfg, edge, input, output)
+    }
+}
+
+/// [`ReachingDefsProblem`] with the operands read through a context.
+struct ReachingThrough<'o, O>(&'o O);
+
+impl<G, O> EdgeProblem<G> for ReachingThrough<'_, O>
+where
+    G: CfgView,
+    O: InstrOperands<G::Inst>,
+{
+    type Fact = BTreeSet<ReachingDef<O::Variable>>;
+
+    fn direction(&self) -> Direction {
+        Direction::Forward
+    }
+
     fn bottom(&self, _cfg: &G) -> Self::Fact {
         BTreeSet::new()
     }
@@ -106,12 +147,18 @@ where
     }
 
     fn transfer_node(&self, cfg: &G, block: BlockId, input: &Self::Fact) -> Self::Fact {
+        let operands = self.0;
         replay_block(
             cfg,
+            operands,
             block,
             input,
             |reaching, inst_idx, instruction| {
-                define(reaching, DefSite { block, inst_idx }, instruction.defs());
+                define(
+                    reaching,
+                    DefSite { block, inst_idx },
+                    operands.defs(instruction),
+                );
             },
             |_| {},
         )
@@ -124,13 +171,19 @@ where
         input: &Self::Fact,
         output: &Self::Fact,
     ) -> Self::Fact {
+        let operands = self.0;
         let block = edge.source();
         unwind_departure(
             cfg,
+            operands,
             edge,
             input,
             |reaching, inst_idx, instruction| {
-                define(reaching, DefSite { block, inst_idx }, instruction.defs());
+                define(
+                    reaching,
+                    DefSite { block, inst_idx },
+                    operands.defs(instruction),
+                );
             },
             |earlier, later| EdgeProblem::<G>::meet(self, earlier, later),
         )
@@ -139,6 +192,9 @@ where
 }
 
 /// Result of a reaching definitions analysis with convenient query methods.
+///
+/// Each block's facts are a `BTreeSet`. [`DenseReachingDefs`] gives the same
+/// answers with each block's facts as a bit row instead.
 ///
 /// # Examples
 ///
@@ -173,16 +229,18 @@ pub struct ReachingDefs<V> {
 impl<V: VariableId> ReachingDefs<V> {
     /// Run reaching definitions on the given CFG.
     ///
-    /// Blocks unreachable from the entry receive no definitions, and
-    /// contribute none to the blocks they branch to.
+    /// `cfg` is a [`CfgView`] whose instructions implement [`InstrInfo`], or a
+    /// [`WithOperands`](crate::WithOperands) that reads them through a
+    /// context. Blocks unreachable from the entry receive no definitions,
+    /// and contribute none to the blocks they branch to.
     #[must_use]
-    pub fn compute<G>(cfg: &G) -> Self
+    pub fn compute<S>(cfg: &S) -> Self
     where
-        G: CfgView,
-        G::Inst: InstrInfo<Variable = V>,
+        S: OperandView<Variable = V>,
     {
+        let problem = ReachingThrough(cfg.operands());
         Self {
-            inner: edge_fixpoint::solve_reachable(cfg, &ReachingDefsProblem).into_block_facts(),
+            inner: edge_fixpoint::solve_reachable(cfg.view(), &problem).into_block_facts(),
         }
     }
 

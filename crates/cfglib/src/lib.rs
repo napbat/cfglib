@@ -24,7 +24,9 @@
 //! [`graph::scope::ScopeGraphQuery`] supplies
 //! the path automaton, matching, label/data specificity, or a full path order;
 //! the same resolver handles stored references and ephemeral completion
-//! requests and builds forward/reverse binding indexes.
+//! requests and builds forward/reverse binding indexes; a
+//! [`graph::scope::ScopeCursorQuery`] that only climbs to enclosing scopes
+//! resolves its first candidate without storing the path.
 //! [`graph::stack::StackGraph`] provides the complementary file-incremental
 //! model with the standard root, scope, symbol push/pop, scoped-symbol,
 //! drop-scopes, and jump-to-scope nodes. It supports concrete direct paths,
@@ -155,6 +157,10 @@
 //! [`EdgeProblem`] its edge-sensitive counterpart (run by
 //! [`solve_edge_problem`]), [`TryEdgeProblem`] the error-preserving edge
 //! variant, and [`Emitter`] the trait for linearization output.
+//! [`wave_fixpoint`] and [`ordered_fixpoint`] drive fixpoints whose facts
+//! and units the consumer owns, with no graph view: parallel waves through a
+//! [`WaveExecutor`] with a static reader index, and ordered sweeps whose
+//! evaluations report the slots they read through a [`SlotAccess`].
 //!
 //! # Contracts
 //!
@@ -251,8 +257,8 @@ pub use builder::address::{
 pub use builder::{BuildError, CfgBuilder, JumpResolution, resolve_jump_edges};
 pub use cfg::{Cfg, CfgEdge, CfgRenumbering, SplitPointError, parse_cfg_text};
 pub use dataflow::abstract_interpretation::{AbstractDomain, AbstractFacts, Lattice};
-pub use dataflow::bits::DenseBits;
-pub use dataflow::cfg_view::CfgView;
+pub use dataflow::bits::{DenseBits, DenseRow};
+pub use dataflow::cfg_view::{CfgView, OperandView, WithOperands};
 pub use dataflow::constant_propagation::{
     ConstFact, ConstPropProblem, ConstValue, ConstantFolder, ConstantPropagation,
 };
@@ -273,8 +279,10 @@ pub use dataflow::fixpoint::{
     try_solve_problem, try_solve_problem_from, try_solve_problem_from_with_config,
     try_solve_problem_with_config,
 };
-pub use dataflow::instruction::{EffectInfo, InstrInfo, Predicated, VariableId};
-pub use dataflow::liveness::{Liveness, LivenessProblem, SeededLivenessProblem};
+pub use dataflow::instruction::{
+    EffectInfo, EffectOperands, InstrInfo, InstrOperands, Predicated, VariableId,
+};
+pub use dataflow::liveness::{DenseLiveness, Liveness, LivenessProblem, SeededLivenessProblem};
 pub use dataflow::memory::{
     ConservativeMemoryAlias, ExactMemoryAlias, MemoryAlias, MemoryClassId, MemoryDefinition,
     MemoryEventSite, MemoryLocationClass, MemoryPhi, MemorySsa, MemorySsaEvent, MemorySsaScratch,
@@ -289,11 +297,15 @@ pub use dataflow::node_fixpoint::{
 };
 pub use dataflow::phi_web::{PhiWeb, PhiWebs};
 pub use dataflow::program_point::{DefSite, ProgramPoint, UseSite};
-pub use dataflow::reaching::{ReachingDef, ReachingDefs, ReachingDefsProblem};
+pub use dataflow::reaching::{DenseReachingDefs, ReachingDef, ReachingDefs, ReachingDefsProblem};
 pub use dataflow::sccp::SccpAnalysis;
+pub use dataflow::slot_fixpoint::{
+    SequentialExecutor, SlotAccess, SlotFixpointReport, WaveExecutor, WaveRequeue,
+    ordered_fixpoint, wave_fixpoint,
+};
 pub use dataflow::ssa::{
     DominanceFrontiers, PhiPlacement, PhiPlacements, SsaBlock, SsaForm, SsaInstruction, SsaPhi,
-    SsaScratch, SsaValue, SsaVersion,
+    SsaPruning, SsaScratch, SsaValue, SsaVersion,
 };
 pub use dataflow::ssa_destruction::{
     PhiCopy, PhiCopyGroup, PhiCopyOrigin, copies_by_predecessor, eliminate_phis,
@@ -354,7 +366,8 @@ pub use graph::scc::{
     Scc, SccDecomposition, condensation, condensation_of, kosaraju_scc, tarjan_scc,
 };
 pub use graph::scope::{
-    Scope, ScopeDatum, ScopeDatumId, ScopeEdgeId, ScopeEdgeTag, ScopeGraph, ScopeGraphPathLabel,
+    Scope, ScopeCursor, ScopeCursorQuery, ScopeDatum, ScopeDatumId, ScopeEdgeId, ScopeEdgeTag,
+    ScopeFirstResolution, ScopeFirstResolutionError, ScopeGraph, ScopeGraphPathLabel,
     ScopeGraphQuery, ScopeId, ScopeLinearResolutionError, ScopePath, ScopeQuery, ScopeReference,
     ScopeReferenceId, ScopeResolution, ScopeResolutionCandidate, ScopeResolutionConfig,
     ScopeResolutionIndex, ScopeResolutionStats, ScopeTag,
@@ -391,7 +404,7 @@ pub use graph::view::{
 };
 pub use memory::{
     MemoryAccess, MemoryAccessKind, MemoryAtomicity, MemoryEvent, MemoryEventInfo,
-    MemoryOperations, MemoryTrace, MemoryTraceEntry,
+    MemoryEventOperands, MemoryOperations, MemoryTrace, MemoryTraceEntry,
 };
 pub use region::{
     Cleanup, CompletionReason, Continuation, ExclusiveExtent, ExtentIssue, ExtentPromotionDecision,
@@ -411,8 +424,8 @@ pub use transform::critical::{
     split_critical_edges, split_critical_edges_mapped, split_critical_edges_with,
 };
 pub use transform::dce::{
-    dead_code_elimination, dead_code_elimination_with_exits, remove_dead_code,
-    remove_dead_code_mapped,
+    dead_code_elimination, dead_code_elimination_with_exits, dead_code_elimination_with_operands,
+    remove_dead_code, remove_dead_code_mapped,
 };
 pub use transform::layout::{RelaxError, relax_layout};
 pub use transform::linearize::{BlockOrder, Emitter, LinearInst, LinearizeError, linearize};

@@ -113,7 +113,7 @@ where
     fn transfer_node(&self, cfg: &G, block: BlockId, input: &Option<D>) -> Option<D> {
         input
             .as_ref()
-            .map(|input| replay_block(cfg, block, input, Self::step, |_| {}))
+            .map(|input| replay_block(cfg, &(), block, input, Self::step, |_| {}))
     }
 
     fn transfer_edge(
@@ -126,7 +126,7 @@ where
         input
             .as_ref()
             .and_then(|input| {
-                unwind_departure(cfg, edge, input, Self::step, |earlier, later| {
+                unwind_departure(cfg, &(), edge, input, Self::step, |earlier, later| {
                     earlier.meet(later)
                 })
             })
