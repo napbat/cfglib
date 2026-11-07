@@ -21,6 +21,7 @@ use crate::dataflow::unwind::{first_unwind_point, unwind_edges};
 use crate::graph::dominator::DominatorTree;
 use crate::{InstrInfo, ProgramPoint, VariableId, departs_before_throws};
 
+use super::prune::{SsaPruning, mark_live_blocks, run_of};
 use super::scratch::SsaScratch;
 use super::{INLINE_OPERANDS, SsaValue};
 
@@ -95,7 +96,7 @@ impl<V> PhiPlacements<V> {
 }
 
 impl<V: VariableId> PhiPlacements<V> {
-    /// Place phis for every variable defined in the CFG.
+    /// Place phis for every variable defined in the CFG (minimal SSA).
     ///
     /// This is the iterated-dominance-frontier phase of SSA construction. Use
     /// [`SsaForm::compute`](super::SsaForm::compute) when renamed definitions
@@ -109,9 +110,23 @@ impl<V: VariableId> PhiPlacements<V> {
         G: CfgView,
         G::Inst: InstrInfo<Variable = V>,
     {
+        Self::compute_with_pruning(cfg, dom, SsaPruning::Minimal)
+    }
+
+    /// Place the phis that `pruning` keeps.
+    ///
+    /// This is the placement
+    /// [`SsaForm::compute_with_pruning`](super::SsaForm::compute_with_pruning)
+    /// renames. [`SsaPruning::Minimal`] gives [`compute`](Self::compute).
+    #[must_use]
+    pub fn compute_with_pruning<G>(cfg: &G, dom: &DominatorTree, pruning: SsaPruning) -> Self
+    where
+        G: CfgView,
+        G::Inst: InstrInfo<Variable = V>,
+    {
         let mut scratch = SsaScratch::new();
         scratch.reset_placement(cfg.node_bound());
-        place_phis(&mut scratch, cfg, dom);
+        place_phis(&mut scratch, cfg, dom, pruning);
 
         let drafts = &scratch.phis;
         let placements = (0..cfg.node_bound())
@@ -253,23 +268,37 @@ impl<V: VariableId> PhiDrafts<V> {
 }
 
 /// Place a phi for every variable at every iterated dominance frontier of its
-/// definitions, leaving the result in `scratch.phis`.
+/// definitions that `pruning` keeps, leaving the result in `scratch.phis`.
 ///
 /// A block can dominate its unwind successor while a definition it makes
 /// at or after its first throwing instruction does not reach that
 /// successor. Such a definition also places a phi at the unwind successor,
 /// whose operands name the value before each throwing instruction.
-pub(super) fn place_phis<G, V>(scratch: &mut SsaScratch<V>, cfg: &G, dom: &DominatorTree)
-where
+///
+/// A pruned form skips a variable no block reads before writing it, and
+/// [`SsaPruning::Pruned`] also skips a block the variable is dead on entry
+/// to. A skipped block is not a definition of the variable either, so the
+/// frontier walk does not continue from it: every path out of it writes the
+/// variable before reading it, and each such write places its own phis.
+pub(super) fn place_phis<G, V>(
+    scratch: &mut SsaScratch<V>,
+    cfg: &G,
+    dom: &DominatorTree,
+    pruning: SsaPruning,
+) where
     G: CfgView,
     G::Inst: InstrInfo<Variable = V>,
     V: VariableId,
 {
+    scan_instructions(scratch, cfg, pruning);
     let SsaScratch {
         frontiers,
         definition_blocks,
-        block_pool,
         unwound_definitions,
+        upward_exposed,
+        definitions_before_throw,
+        throwing,
+        live,
         has_phi,
         placed,
         worklist,
@@ -279,51 +308,40 @@ where
     frontiers.rebuild(cfg, dom);
     let root = cfg.root();
 
-    for block_id in cfg.node_ids() {
-        let first_unwind = first_unwind_point(cfg, block_id);
-        for (index, instruction) in cfg.instructions(block_id).iter().enumerate() {
-            for variable in instruction.defs() {
-                let blocks = match definition_blocks.entry(variable.clone()) {
-                    Entry::Vacant(slot) => slot.insert(block_pool.pop().unwrap_or_default()),
-                    Entry::Occupied(slot) => slot.into_mut(),
-                };
-                if blocks.last().copied() != Some(block_id) {
-                    blocks.push(block_id);
-                }
-                if first_unwind.is_some_and(|first| index >= first) {
-                    unwound_definitions.push((variable.clone(), block_id));
-                }
-            }
-        }
-    }
-    unwound_definitions.sort_unstable();
-    unwound_definitions.dedup();
-
-    let mut unwound = 0;
+    let (mut unwound, mut exposed, mut before_throw) = (0, 0, 0);
     for (variable, definitions) in definition_blocks.iter_mut() {
+        let unwound_sources = run_of(unwound_definitions, &mut unwound, variable);
+        let reads = run_of(upward_exposed, &mut exposed, variable);
+        let writes_before_throw = run_of(definitions_before_throw, &mut before_throw, variable);
+        if pruning != SsaPruning::Minimal && reads.is_empty() {
+            continue;
+        }
         has_phi.reset();
         placed.reset();
         for &block in definitions.iter() {
             placed.mark(block.index());
         }
+        if pruning == SsaPruning::Pruned {
+            mark_live_blocks(
+                cfg,
+                reads.iter().map(|&(_, block)| block),
+                placed,
+                throwing,
+                writes_before_throw,
+                live,
+                worklist,
+            );
+        }
+        let keeps = |block: BlockId| pruning != SsaPruning::Pruned || live.is_marked(block.index());
         // The definition list is moved rather than copied, so the vector it
         // leaves behind stays in the map and is recycled by the next reset.
         worklist.clear();
         worklist.append(definitions);
 
-        // Both lists ascend by variable, so one cursor walks the unwound
-        // definitions alongside the map.
-        while let Some((unwound_variable, source)) = unwound_definitions.get(unwound) {
-            if unwound_variable > variable {
-                break;
-            }
-            unwound += 1;
-            if unwound_variable < variable {
-                continue;
-            }
+        for (_, source) in unwound_sources {
             for edge in unwind_edges(cfg, *source) {
                 let target = edge.target();
-                if has_phi.is_marked(target.index()) {
+                if has_phi.is_marked(target.index()) || !keeps(target) {
                     continue;
                 }
                 has_phi.mark(target.index());
@@ -337,7 +355,7 @@ where
 
         while let Some(block) = worklist.pop() {
             for &frontier_block in frontiers.frontier(block) {
-                if has_phi.is_marked(frontier_block.index()) {
+                if has_phi.is_marked(frontier_block.index()) || !keeps(frontier_block) {
                     continue;
                 }
                 has_phi.mark(frontier_block.index());
@@ -354,6 +372,75 @@ where
                 }
             }
         }
+    }
+}
+
+/// Record, from one pass over the instructions, every list placement reads:
+/// each variable's defining blocks, the definitions an unwind can miss, and
+/// for a pruned form the reads before any write in their block, the writes
+/// before a block's first unwind point and the blocks that can unwind. Every
+/// list of pairs is left sorted.
+fn scan_instructions<G, V>(scratch: &mut SsaScratch<V>, cfg: &G, pruning: SsaPruning)
+where
+    G: CfgView,
+    G::Inst: InstrInfo<Variable = V>,
+    V: VariableId,
+{
+    let SsaScratch {
+        definition_blocks,
+        block_pool,
+        unwound_definitions,
+        upward_exposed,
+        definitions_before_throw,
+        throwing,
+        ..
+    } = scratch;
+    for block_id in cfg.node_ids() {
+        let first_unwind = first_unwind_point(cfg, block_id);
+        if pruning == SsaPruning::Pruned && first_unwind.is_some() {
+            throwing.mark(block_id.index());
+        }
+        for (index, instruction) in cfg.instructions(block_id).iter().enumerate() {
+            if pruning != SsaPruning::Minimal {
+                // An instruction reads its operands before it writes, so a
+                // read is upward-exposed unless an earlier instruction of
+                // this block wrote the variable.
+                for variable in instruction.uses() {
+                    let written_here = definition_blocks
+                        .get(variable)
+                        .is_some_and(|blocks| blocks.last() == Some(&block_id));
+                    if !written_here {
+                        upward_exposed.push((variable.clone(), block_id));
+                    }
+                }
+            }
+            for variable in instruction.defs() {
+                let blocks = match definition_blocks.entry(variable.clone()) {
+                    Entry::Vacant(slot) => slot.insert(block_pool.pop().unwrap_or_default()),
+                    Entry::Occupied(slot) => slot.into_mut(),
+                };
+                if blocks.last().copied() != Some(block_id) {
+                    blocks.push(block_id);
+                }
+                match first_unwind {
+                    Some(first) if index >= first => {
+                        unwound_definitions.push((variable.clone(), block_id));
+                    }
+                    Some(_) if pruning == SsaPruning::Pruned => {
+                        definitions_before_throw.push((variable.clone(), block_id));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    for sorted in [
+        unwound_definitions,
+        upward_exposed,
+        definitions_before_throw,
+    ] {
+        sorted.sort_unstable();
+        sorted.dedup();
     }
 }
 

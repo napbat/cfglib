@@ -12,6 +12,11 @@
 //! also merges the value the variable holds when the function starts
 //! ([`SsaPhi::start_value`]), which no edge carries.
 //!
+//! [`SsaForm::compute`] builds minimal SSA. [`SsaForm::compute_with_pruning`]
+//! leaves out the phis no instruction reads ([`SsaPruning`]), which is what
+//! keeps a function with wide joins and many short-lived variables from
+//! paying a phi operand per variable and join predecessor.
+//!
 //! Construction runs in four phases: the dominance forest that gives
 //! unreachable code its own roots (it lives with the dominator trees), then
 //! one module each for the dominance frontier table, phi placement into flat
@@ -33,11 +38,13 @@ use crate::{InstrInfo, ProgramPoint, VariableId};
 
 mod frontier;
 mod place;
+mod prune;
 mod rename;
 mod scratch;
 
 pub use frontier::DominanceFrontiers;
 pub use place::{PhiPlacement, PhiPlacements};
+pub use prune::SsaPruning;
 pub use scratch::SsaScratch;
 
 /// A per-variable SSA version number.
@@ -293,6 +300,12 @@ impl<V: VariableId> SsaForm<V> {
     /// 4. the version-zero live-in, when no dominator defines `variable`.
     ///
     /// A `point` outside the form answers with the live-in.
+    ///
+    /// A form built with an [`SsaPruning`] other than
+    /// [`Minimal`](SsaPruning::Minimal) answers the same definition wherever
+    /// `variable` is live at `point`. Where it is dead, the phi that would
+    /// have merged it may be missing, and the answer is the nearest
+    /// dominating definition.
     #[must_use]
     pub fn value_at(&self, point: ProgramPoint, variable: &V) -> SsaValue<V> {
         let mut block = Some(point.block);
@@ -327,7 +340,11 @@ impl<V: VariableId> SsaForm<V> {
 }
 
 impl<V: VariableId> SsaForm<V> {
-    /// Compute a fully renamed SSA view of `cfg`.
+    /// Compute a fully renamed, minimal SSA view of `cfg`.
+    ///
+    /// This places [`SsaPruning::Minimal`] phis; see
+    /// [`compute_with_pruning`](Self::compute_with_pruning) for the forms that
+    /// leave out phis no instruction reads.
     ///
     /// The algorithm performs phi placement followed by classic dominator-tree
     /// renaming. It is iterative rather than recursive, so deeply nested control
@@ -373,11 +390,48 @@ impl<V: VariableId> SsaForm<V> {
         G: CfgView,
         G::Inst: InstrInfo<Variable = V>,
     {
+        Self::compute_with_pruning_in(scratch, cfg, dom, SsaPruning::Minimal)
+    }
+
+    /// Compute a fully renamed SSA view of `cfg` with the phis `pruning`
+    /// keeps.
+    ///
+    /// Every instruction operand and every kept phi operand names the same
+    /// definition as in [`compute`](Self::compute): the same instruction
+    /// definition, the same phi, or the version-zero live-in. Only the
+    /// version numbers differ, because the phis left out consume none. So a
+    /// consumer that reads values through instruction operands and phis gets
+    /// the same answers from a smaller form, and pays nothing for a variable
+    /// that is dead at a join. [`SsaPruning::Minimal`] gives
+    /// [`compute`](Self::compute) itself.
+    #[must_use]
+    pub fn compute_with_pruning<G>(cfg: &G, dom: &DominatorTree, pruning: SsaPruning) -> Self
+    where
+        G: CfgView,
+        G::Inst: InstrInfo<Variable = V>,
+    {
+        Self::compute_with_pruning_in(&mut SsaScratch::new(), cfg, dom, pruning)
+    }
+
+    /// [`compute_with_pruning`](Self::compute_with_pruning) over
+    /// caller-owned working storage, as [`compute_in`](Self::compute_in) is
+    /// to [`compute`](Self::compute).
+    #[must_use]
+    pub fn compute_with_pruning_in<G>(
+        scratch: &mut SsaScratch<V>,
+        cfg: &G,
+        dom: &DominatorTree,
+        pruning: SsaPruning,
+    ) -> Self
+    where
+        G: CfgView,
+        G::Inst: InstrInfo<Variable = V>,
+    {
         scratch.reset(cfg.node_bound());
         let complete =
             complete_dominator_forest(&mut scratch.dominators, &mut scratch.forest_roots, cfg, dom);
         let dom = complete.as_ref().unwrap_or(dom);
-        place::place_phis(scratch, cfg, dom);
+        place::place_phis(scratch, cfg, dom, pruning);
         let mut max_versions = BTreeMap::new();
         rename::rename(scratch, cfg, dom, &mut max_versions);
         let blocks = rename::finish_blocks(scratch, cfg.node_bound(), &mut max_versions);

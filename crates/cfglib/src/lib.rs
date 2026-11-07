@@ -293,7 +293,7 @@ pub use dataflow::reaching::{ReachingDef, ReachingDefs, ReachingDefsProblem};
 pub use dataflow::sccp::SccpAnalysis;
 pub use dataflow::ssa::{
     DominanceFrontiers, PhiPlacement, PhiPlacements, SsaBlock, SsaForm, SsaInstruction, SsaPhi,
-    SsaScratch, SsaValue, SsaVersion,
+    SsaPruning, SsaScratch, SsaValue, SsaVersion,
 };
 pub use dataflow::ssa_destruction::{
     PhiCopy, PhiCopyGroup, PhiCopyOrigin, copies_by_predecessor, eliminate_phis,
