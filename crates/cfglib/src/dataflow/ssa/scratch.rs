@@ -88,6 +88,19 @@ pub struct SsaScratch<V> {
     /// block's first unwind point, sorted, so an unwind out of the block can
     /// miss it.
     pub(super) unwound_definitions: Vec<(V, BlockId)>,
+    /// Every `(variable, block)` whose block reads the variable before
+    /// writing it, sorted. Filled only for a pruned form.
+    pub(super) upward_exposed: Vec<(V, BlockId)>,
+    /// Every `(variable, block)` whose block writes the variable before its
+    /// first unwind point, sorted, so an unwind out of the block never
+    /// carries an earlier value. Filled only for
+    /// [`SsaPruning::Pruned`](super::SsaPruning::Pruned).
+    pub(super) definitions_before_throw: Vec<(V, BlockId)>,
+    /// Blocks with an unwind point. Marked only for
+    /// [`SsaPruning::Pruned`](super::SsaPruning::Pruned).
+    pub(super) throwing: EpochMarks,
+    /// Blocks the variable being placed is live on entry to.
+    pub(super) live: EpochMarks,
     /// Blocks that already carry a phi for the variable being placed.
     pub(super) has_phi: EpochMarks,
     /// Blocks already on the placement worklist for that variable.
@@ -120,6 +133,10 @@ impl<V> Default for SsaScratch<V> {
             definition_blocks: BTreeMap::new(),
             block_pool: Vec::new(),
             unwound_definitions: Vec::new(),
+            upward_exposed: Vec::new(),
+            definitions_before_throw: Vec::new(),
+            throwing: EpochMarks::default(),
+            live: EpochMarks::default(),
             has_phi: EpochMarks::default(),
             placed: EpochMarks::default(),
             worklist: Vec::new(),
@@ -163,7 +180,14 @@ impl<V: crate::VariableId> SsaScratch<V> {
             self.block_pool.push(blocks);
         }
         self.unwound_definitions.clear();
-        for marks in [&mut self.has_phi, &mut self.placed] {
+        self.upward_exposed.clear();
+        self.definitions_before_throw.clear();
+        for marks in [
+            &mut self.has_phi,
+            &mut self.placed,
+            &mut self.throwing,
+            &mut self.live,
+        ] {
             marks.grow_to(block_bound);
             marks.reset();
         }
