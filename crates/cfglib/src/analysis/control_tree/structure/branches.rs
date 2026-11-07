@@ -46,6 +46,9 @@ pub(super) fn conditional_targets<I, E>(
 pub(super) struct Conditional {
     block: BlockId,
     allowed: Bound,
+    /// The stop of the walk that entered the conditional.
+    stop: Option<BlockId>,
+    /// Where both arms end silently: see [`Structurer::arm_stop`].
     merge: Option<BlockId>,
     arm: ConditionalArm,
 }
@@ -60,11 +63,13 @@ enum ConditionalArm {
 }
 
 impl Conditional {
-    /// The frame that lifts the conditional at `block`, within `allowed`.
-    pub(super) const fn new(block: BlockId, allowed: Bound) -> Self {
+    /// The frame that lifts the conditional at `block`, within `allowed`, in
+    /// a walk that ends at `stop`.
+    pub(super) const fn new(block: BlockId, allowed: Bound, stop: Option<BlockId>) -> Self {
         Self {
             block,
             allowed,
+            stop,
             merge: None,
             arm: ConditionalArm::Start,
         }
@@ -75,6 +80,7 @@ impl Conditional {
 pub(super) struct Switch {
     block: BlockId,
     allowed: Bound,
+    /// Where every arm ends silently: see [`Structurer::arm_stop`].
     merge: Option<BlockId>,
     /// The case arms lifted so far.
     cases: Vec<SwitchCase>,
@@ -137,6 +143,18 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         .filter(|&merge| allowed.contains(merge))
     }
 
+    /// Where the arms of the branch or dispatch at `block` end silently, in
+    /// a walk within `allowed` that ends at `stop`: the merge, or else `stop`.
+    ///
+    /// Without an in-bound merge, the construct is the last statement of the
+    /// enclosing walk ([`resume_after`](Self::resume_after) has nothing to
+    /// resume at). An arm that reaches that walk's stop, such as the arm of a
+    /// handler that completes it while the other arm rethrows, runs off the
+    /// end of the construct and so off the end of the walk: it simply ends.
+    fn arm_stop(&self, block: BlockId, allowed: &Bound, stop: Option<BlockId>) -> Option<BlockId> {
+        self.effective_merge(block, allowed).or(stop)
+    }
+
     /// The block the walk resumes at after `node`, a construct whose merge is
     /// `merge`.
     ///
@@ -171,7 +189,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             ConditionalArm::Start => {
                 let targets = conditional_targets(self.cfg, block)
                     .expect("a block classified as a conditional has a true and a false edge");
-                conditional.merge = self.effective_merge(block, &conditional.allowed);
+                conditional.merge = self.arm_stop(block, &conditional.allowed, conditional.stop);
                 conditional.arm = ConditionalArm::Then {
                     false_target: targets.false_target,
                 };
@@ -204,10 +222,16 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         }
     }
 
-    /// Start lifting the switch at `block`.
-    pub(super) fn begin_switch(&mut self, block: BlockId, allowed: &Bound) -> Frame<'cfg> {
+    /// Start lifting the switch at `block`, in a walk within `allowed` that
+    /// ends at `stop`.
+    pub(super) fn begin_switch(
+        &mut self,
+        block: BlockId,
+        allowed: &Bound,
+        stop: Option<BlockId>,
+    ) -> Frame<'cfg> {
         let cfg = self.cfg;
-        let merge = self.effective_merge(block, allowed);
+        let merge = self.arm_stop(block, allowed, stop);
 
         // Group dispatch edges by target in first-encounter order, and find
         // the explicit default edge (the sequential non-case successor).

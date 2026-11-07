@@ -11,13 +11,13 @@ use alloc::vec::Vec;
 use super::exhaustive::{Terminator, for_each_graph, graph, terminators, unpredicated};
 use super::invariants::{check, describe, isolate_handlers, owned_blocks};
 use super::pseudocode;
+use crate::ControlTree;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
 use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
 use crate::test_util::rng::Rng;
 use crate::test_util::{DfInst, MockInst, ff};
-use crate::{ControlTree, GotoReason};
 use EdgeKind::{Back, ConditionalFalse, ConditionalTrue, Fallthrough};
 
 const NAMES: [&str; 9] = ["b0", "b1", "b2", "b3", "b4", "b5", "b6", "b7", "b8"];
@@ -79,22 +79,15 @@ fn a_dead_catch_pad_inside_a_loop_keeps_its_body() {
     let cfg = dead_pad(true);
     let (tree, report) = ControlTree::compute_with_report(&cfg);
     check(&cfg, &tree, &report, "dead pad in a loop");
+    // The pad's tail reaches the try's continuation, the loop's latch, and
+    // so does the pad's false arm: both simply end the handler.
     assert_eq!(
         pseudocode(&cfg, &tree),
         "b0\nwhile {\n    b1\n    break if !cond;\n    try {\n        b2\n    } catch {\n        \
-         if (b4) {\n            b5\n            goto .bb3;\n        } else {\n            goto .bb3;\n        \
-         }\n    }\n    .bb3:\n        b3\n}\nb6\n"
+         if (b4) {\n            b5\n        }\n    }\n    b3\n}\nb6\n"
     );
-    assert!(report.unresolved_labels.is_empty(), "{report:?}");
+    assert!(report.is_fully_structured(), "{report:?}");
     assert!(report.swept_blocks.is_empty(), "{report:?}");
-    assert!(report.unstructured_regions.is_empty(), "{report:?}");
-    // The pad's tail reaches the loop's latch from outside the handler extent.
-    assert!(
-        report
-            .gotos
-            .iter()
-            .all(|goto| goto.reason == GotoReason::BoundaryEscape)
-    );
 }
 
 #[test]
@@ -105,7 +98,7 @@ fn a_dead_catch_pad_is_structured_the_same_in_and_out_of_a_loop() {
         let tree = ControlTree::compute(&cfg);
         let text = pseudocode(&cfg, &tree);
         let start = text.find("catch {").expect("a catch handler");
-        let end = text.find(".bb3:").expect("the latch label");
+        let end = text.find("b3\n").expect("the try's continuation");
         alloc::string::String::from(text[start..end].trim_start())
     };
     assert_eq!(handler_text(true), handler_text(false));
