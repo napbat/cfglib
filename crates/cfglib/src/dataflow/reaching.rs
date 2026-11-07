@@ -21,6 +21,10 @@ use crate::dataflow::unwind::{replay_block, unwind_departure};
 use crate::graph::edge_view::EdgeRef;
 use crate::{DefSite, InstrInfo, VariableId};
 
+mod dense;
+
+pub use dense::DenseReachingDefs;
+
 /// A reaching definition: which IR variable was defined, and where.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ReachingDef<V> {
@@ -139,6 +143,9 @@ where
 }
 
 /// Result of a reaching definitions analysis with convenient query methods.
+///
+/// Each block's facts are a `BTreeSet`. [`DenseReachingDefs`] gives the same
+/// answers with each block's facts as a bit row instead.
 ///
 /// # Examples
 ///
