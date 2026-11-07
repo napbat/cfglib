@@ -35,7 +35,10 @@ fn region(
 }
 
 /// New blocks, one per mnemonic, each holding that one instruction.
-fn blocks<const N: usize>(cfg: &mut Cfg<MockInst>, names: [&'static str; N]) -> [BlockId; N] {
+pub(super) fn blocks<const N: usize>(
+    cfg: &mut Cfg<MockInst>,
+    names: [&'static str; N],
+) -> [BlockId; N] {
     names.map(|name| {
         let block = cfg.new_block();
         cfg.block_mut(block).push(ff(name));
@@ -44,7 +47,7 @@ fn blocks<const N: usize>(cfg: &mut Cfg<MockInst>, names: [&'static str; N]) -> 
 }
 
 /// The structured text of `cfg`, which must structure without a goto.
-fn structured(cfg: &Cfg<MockInst>) -> alloc::string::String {
+pub(super) fn structured(cfg: &Cfg<MockInst>) -> alloc::string::String {
     let (tree, report) = ControlTree::compute_with_report(cfg);
     let text = pseudocode(cfg, &tree);
     assert!(report.is_fully_structured(), "{report:?}\n{text}");

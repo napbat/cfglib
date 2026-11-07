@@ -21,6 +21,7 @@ use crate::edge::EdgeKind;
 use crate::flow::FlowEffect;
 use crate::test_util::{MockInst, ff};
 
+mod arms_beside_an_exit;
 mod dead_code;
 mod dead_handlers;
 mod dead_loops;
@@ -812,13 +813,16 @@ fn lift_jump_to_the_merge_converges_silently() {
 
 #[test]
 fn lift_jump_target_gets_label() {
-    // The jump crosses into a sibling arm's interior with no shared merge
-    // (both tails return), so it stays an explicit labeled goto.
+    // The jump crosses into a sibling arm's interior, short of the merge
+    // that both tails reach, so it stays an explicit labeled goto. (When
+    // both tails return instead, the arms rejoin at the jump target beside
+    // the arm that returns: `arms_beside_an_exit`.)
     let mut cfg: Cfg<MockInst> = Cfg::new();
     let jumper = cfg.new_block(); // 1
     let normal = cfg.new_block(); // 2
     let target = cfg.new_block(); // 3
     let other = cfg.new_block(); // 4
+    let end = cfg.new_block(); // 5
     cfg.block_mut(cfg.entry())
         .instructions_mut()
         .push(ff("entry"));
@@ -826,12 +830,15 @@ fn lift_jump_target_gets_label() {
     cfg.block_mut(normal).instructions_mut().push(ff("normal"));
     cfg.block_mut(target).instructions_mut().push(ff("dst"));
     cfg.block_mut(other).instructions_mut().push(ff("other"));
+    cfg.block_mut(end).instructions_mut().push(ff("end"));
 
     cfg.add_edge(cfg.entry(), jumper, EdgeKind::ConditionalTrue);
     cfg.add_edge(cfg.entry(), normal, EdgeKind::ConditionalFalse);
     cfg.add_edge(jumper, target, EdgeKind::Jump);
     cfg.add_edge(normal, target, EdgeKind::ConditionalTrue);
     cfg.add_edge(normal, other, EdgeKind::ConditionalFalse);
+    cfg.add_edge(target, end, EdgeKind::Fallthrough);
+    cfg.add_edge(other, end, EdgeKind::Fallthrough);
 
     let (tree, report) = ControlTree::compute_with_report(&cfg);
     assert!(
