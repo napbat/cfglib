@@ -31,6 +31,7 @@ mod extent;
 mod frames;
 mod labels;
 mod loops;
+mod rejoin;
 mod try_catch;
 mod walk;
 
@@ -111,6 +112,9 @@ struct Structurer<'cfg, I, E> {
     /// which the sweep emits, lowest block first. A target the walk emits
     /// later is skipped there: an emitted block stays emitted.
     unemitted_targets: BTreeSet<BlockId>,
+    /// Where the arms of a branch beside a diverging arm rejoin, for the
+    /// last stop that needed it.
+    rejoins: rejoin::Rejoins,
     report: LiftReport,
     tables: Tables,
     /// Which nodes of `tables` control can never run to the end of.
@@ -164,7 +168,11 @@ impl ControlTree {
     ///   [`HandlerBody`](crate::HandlerBody) and one `try` can hold the
     ///   protected code (ordinary flow enters it at its first block only, and
     ///   none of it is already emitted or outside the enclosing bound);
-    ///   multiple `Finally` handlers concatenate in declaration order
+    ///   multiple `Finally` handlers concatenate in declaration order. When
+    ///   ordinary flow from the protected code or a catch arm runs into the
+    ///   region's first finally, as a lowering that keeps one copy of the
+    ///   finally emits it, the `try` body and the catch arms end at its entry:
+    ///   that flow is the `try` completing, which runs the finally
     /// - Unstructured flow: `Label` / `Goto` (for `Jump` edges no loop context
     ///   absorbs, transfers that leave a structural bound, and transfers into
     ///   already-emitted code)
@@ -199,6 +207,21 @@ impl ControlTree {
     /// that construct goes on ends there: a handler arm that completes the
     /// handler while the other arm rethrows falls out of the handler, and
     /// needs no goto.
+    ///
+    /// A diverging arm alone does not stop the other arms from rejoining.
+    /// When a branch without a merge point lies in a walk that ends at a
+    /// stop, such as the continuation of a `try` for a branch in a handler,
+    /// and two or more of its arms reach that stop, those arms rejoin at the
+    /// immediate post-dominator of the branch in the code that runs up to the
+    /// stop, with the arms that never reach it left out:
+    ///
+    /// ```text
+    /// catch { if (a) { x } else if (b) { y } else { throw }; z }
+    /// ```
+    ///
+    /// rejoins at `z`, and the walk goes on there after the branch. A branch
+    /// with only one arm that reaches the stop has no such merge: that arm
+    /// runs on to the stop inside the branch.
     ///
     /// A region that no path leaves, such as a server loop or a spin on a
     /// failed check, has no exit to post-dominate, so the tree cuts it: it
@@ -267,8 +290,10 @@ impl ControlTree {
     ///
     /// A region is well formed when its handlers' entries and extents are not
     /// among its protected blocks and ordinary flow enters them only from
-    /// their own extent. The tree of a graph that breaks this may hold a block
-    /// in two places, since the block is both a handler's and a loop's.
+    /// their own extent, or enters the region's first finally from the
+    /// protected code or another handler of the region. The tree of a graph
+    /// that breaks this may hold a block in two places, since the block is
+    /// both a handler's and a loop's.
     ///
     /// # Stack depth
     ///
@@ -299,6 +324,11 @@ impl ControlTree {
     ///   not dominate its latches), or that lies in the bound of a loop that
     ///   is not the loop around it, scans its blocks for its follow, which
     ///   costs the size of the loop.
+    /// - A branch without a merge point beside a diverging arm finds where
+    ///   its other arms rejoin from the post-dominators of the code still to
+    ///   emit up to its walk's stop. Those are kept for the last stop that
+    ///   needed them, so a chain of branches toward one stop reads that code
+    ///   once, and each switch to another stop reads the code up to it again.
     ///
     /// The text of the pseudocode is quadratic in any nesting, since each
     /// level indents every line it holds.
@@ -421,6 +451,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             unclaimed: Rc::new(claims.unclaimed),
             handler_claims: claims.handlers,
             unemitted_targets: BTreeSet::new(),
+            rejoins: rejoin::Rejoins::default(),
             report: LiftReport::default(),
             tables: Tables::new(),
             completion: Completion::default(),
