@@ -353,10 +353,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
     /// follow resolve transfers to it.
     fn push_loop_context(&mut self, context: LoopContext) {
         let position = self.loop_stack.len();
-        let follow = context
-            .follow
-            .filter(|&follow| follow != context.continue_target);
-        for target in core::iter::once(context.continue_target).chain(follow) {
+        for target in context.targets() {
             self.loop_targets.entry(target).or_default().push(position);
         }
         self.loop_stack.push(context);
@@ -368,10 +365,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             .loop_stack
             .pop()
             .expect("the loop context pushed at entry is still on the stack");
-        let follow = context
-            .follow
-            .filter(|&follow| follow != context.continue_target);
-        for target in core::iter::once(context.continue_target).chain(follow) {
+        for target in context.targets() {
             let positions = self
                 .loop_targets
                 .get_mut(&target)
@@ -382,6 +376,18 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             }
         }
         context
+    }
+
+    /// The block that flow entering `follow` reaches through blocks without
+    /// code (see [`pass_through`](Self::pass_through)), when that is another
+    /// block.
+    fn follow_lands_at(&self, follow: BlockId) -> Option<BlockId> {
+        let mut passed = 0;
+        let mut current = follow;
+        while let Some(next) = self.pass_through(current, &mut passed) {
+            current = next;
+        }
+        (current != follow).then_some(current)
     }
 
     /// Start lifting the loop anchored at `header` (already visited by the
@@ -433,6 +439,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         self.push_loop_context(LoopContext {
             header,
             follow,
+            follow_lands_at: follow.and_then(|follow| self.follow_lands_at(follow)),
             continue_target,
             labeled: false,
         });

@@ -29,6 +29,7 @@ mod diverging_arms;
 mod exhaustive;
 mod exit_free;
 mod invariants;
+mod loop_body_merges;
 mod lost_transfers;
 mod many_blocks;
 mod non_compact;
