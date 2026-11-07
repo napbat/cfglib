@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 
 use super::{
     body_contains_block, body_subtree, contains_block, find_try_catch, find_try_handlers,
-    has_goto_to, has_node_kind, leaf_block, pseudocode,
+    has_node_kind, leaf_block, pseudocode,
 };
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
@@ -288,8 +288,10 @@ fn conditional_leaving_a_region_records_the_exit() {
     }
 }
 
+/// A case that leaves the region for its continuation, the only place the
+/// region's code goes on at, ends the switch and so the try body.
 #[test]
-fn switch_case_leaving_a_region_stays_as_a_goto() {
+fn switch_case_leaving_a_region_ends_at_its_continuation() {
     let mut cfg: Cfg<MockInst> = Cfg::new();
     let t0 = cfg.new_block();
     let selector = cfg.new_block();
@@ -319,15 +321,17 @@ fn switch_case_leaving_a_region_stays_as_a_goto() {
         parent: None,
     });
 
-    let tree = ControlTree::compute(&cfg);
+    let (tree, report) = ControlTree::compute_with_report(&cfg);
     let case_count = tree.preorder().find_map(|id| match *tree.node(id) {
         ControlNode::Switch { cases, .. } => Some(tree.cases(cases).len()),
         _ => None,
     });
     assert_eq!(case_count, Some(2), "both cases survive: {tree:?}");
+    assert!(report.is_fully_structured(), "{report:?}");
+    let (try_body, _, _) = find_try_catch(&tree).expect("the region is a try");
     assert!(
-        has_goto_to(&tree, case_out),
-        "the out-of-region case is an explicit jump: {tree:?}"
+        !body_contains_block(&tree, try_body, case_out),
+        "the out-of-region case body follows the try: {tree:?}"
     );
     assert!(
         contains_block(&tree, case_out),

@@ -192,7 +192,13 @@ impl ControlTree {
     /// A branch or switch rejoins at the immediate post-dominator of its
     /// block, read from a [`PostDominatorTree`]. That tree joins every exit
     /// to a virtual exit, and [`PostNode::Exit`](crate::PostNode::Exit) means the block has no merge
-    /// point: its arms never rejoin, so each runs to its own end.
+    /// point: its arms never rejoin, so each runs to its own end. A merge
+    /// beyond the enclosing construct, such as the code after a `try` for a
+    /// branch in a handler, is no merge point either. Such a branch is the
+    /// last statement of what holds it, so an arm that reaches the block where
+    /// that construct goes on ends there: a handler arm that completes the
+    /// handler while the other arm rethrows falls out of the handler, and
+    /// needs no goto.
     ///
     /// A region that no path leaves, such as a server loop or a spin on a
     /// failed check, has no exit to post-dominate, so the tree cuts it: it
@@ -212,6 +218,14 @@ impl ControlTree {
     /// `else` arm, and a transfer into an exit-free region stays explicit:
     /// when two arms enter the same exit-free loop, the structurer emits a
     /// [`ControlNode::Goto`] in the later one instead of ending it silently.
+    ///
+    /// # Blocks without code
+    ///
+    /// A block without instructions (or one the caller treats as empty) that
+    /// only passes flow on to one successor emits nothing, so no label could
+    /// name it. A transfer into it is a transfer to that successor: the walk
+    /// goes on there whether the block was already passed or lies beyond the
+    /// bound, and a goto names the block that carries code.
     ///
     /// # Arms that revisit earlier code
     ///
