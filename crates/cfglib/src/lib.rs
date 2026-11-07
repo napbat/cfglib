@@ -24,7 +24,9 @@
 //! [`graph::scope::ScopeGraphQuery`] supplies
 //! the path automaton, matching, label/data specificity, or a full path order;
 //! the same resolver handles stored references and ephemeral completion
-//! requests and builds forward/reverse binding indexes.
+//! requests and builds forward/reverse binding indexes; a
+//! [`graph::scope::ScopeCursorQuery`] that only climbs to enclosing scopes
+//! resolves its first candidate without storing the path.
 //! [`graph::stack::StackGraph`] provides the complementary file-incremental
 //! model with the standard root, scope, symbol push/pop, scoped-symbol,
 //! drop-scopes, and jump-to-scope nodes. It supports concrete direct paths,
@@ -354,7 +356,8 @@ pub use graph::scc::{
     Scc, SccDecomposition, condensation, condensation_of, kosaraju_scc, tarjan_scc,
 };
 pub use graph::scope::{
-    Scope, ScopeDatum, ScopeDatumId, ScopeEdgeId, ScopeEdgeTag, ScopeGraph, ScopeGraphPathLabel,
+    Scope, ScopeCursor, ScopeCursorQuery, ScopeDatum, ScopeDatumId, ScopeEdgeId, ScopeEdgeTag,
+    ScopeFirstResolution, ScopeFirstResolutionError, ScopeGraph, ScopeGraphPathLabel,
     ScopeGraphQuery, ScopeId, ScopeLinearResolutionError, ScopePath, ScopeQuery, ScopeReference,
     ScopeReferenceId, ScopeResolution, ScopeResolutionCandidate, ScopeResolutionConfig,
     ScopeResolutionIndex, ScopeResolutionStats, ScopeTag,
