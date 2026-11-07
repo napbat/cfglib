@@ -442,22 +442,27 @@ fn pseudocode_prints_each_loop_shape() {
 
 #[test]
 fn pseudocode_names_labels_and_gotos_by_block() {
-    // A jump into a sibling arm's interior stays an explicit labeled goto.
+    // A jump into a sibling arm's interior, short of the merge that both
+    // tails reach, stays an explicit labeled goto.
     let mut cfg: Cfg<MockInst> = Cfg::new();
     let jumper = cfg.new_block();
     let normal = cfg.new_block();
     let target = cfg.new_block();
     let other = cfg.new_block();
+    let end = cfg.new_block();
     cfg.block_mut(cfg.entry()).push(ff("entry"));
     cfg.block_mut(jumper).push(ff("jumper"));
     cfg.block_mut(normal).push(ff("normal"));
     cfg.block_mut(target).push(ff("dst"));
     cfg.block_mut(other).push(ff("other"));
+    cfg.block_mut(end).push(ff("end"));
     cfg.add_edge(cfg.entry(), jumper, EdgeKind::ConditionalTrue);
     cfg.add_edge(cfg.entry(), normal, EdgeKind::ConditionalFalse);
     cfg.add_edge(jumper, target, EdgeKind::Jump);
     cfg.add_edge(normal, target, EdgeKind::ConditionalTrue);
     cfg.add_edge(normal, other, EdgeKind::ConditionalFalse);
+    cfg.add_edge(target, end, EdgeKind::Fallthrough);
+    cfg.add_edge(other, end, EdgeKind::Fallthrough);
 
     let tree = ControlTree::compute(&cfg);
     let text = pseudocode(&cfg, &tree);

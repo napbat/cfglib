@@ -223,6 +223,21 @@ impl ControlTree {
     /// with only one arm that reaches the stop has no such merge: that arm
     /// runs on to the stop inside the branch.
     ///
+    /// A walk without a stop, such as the body of a function outside any
+    /// `try` or of a loop, ends at the exits of its code: the blocks that
+    /// leave the function, and those whose every step is a transfer, such as
+    /// the latch of the loop whose body the walk is. The graph does not tell
+    /// the `throw` beside the join from the `return` after it, but the arms
+    /// do: the exits that two or more arms of the branch reach end the walk,
+    /// and an exit that one arm alone reaches is that arm diverging, so
+    ///
+    /// ```text
+    /// switch (k) { case 1: p; break; case 2: q; break; default: throw; } z; return
+    /// ```
+    ///
+    /// rejoins at `z` as well. A branch whose arms share no exit, such as
+    /// `if (a) { return } z`, keeps its form.
+    ///
     /// A region that no path leaves, such as a server loop or a spin on a
     /// failed check, has no exit to post-dominate, so the tree cuts it: it
     /// joins the blocks that close the region's loops to the virtual exit.
@@ -329,6 +344,10 @@ impl ControlTree {
     ///   emit up to its walk's stop. Those are kept for the last stop that
     ///   needed them, so a chain of branches toward one stop reads that code
     ///   once, and each switch to another stop reads the code up to it again.
+    ///   In a walk without a stop, the exits that end the code depend on the
+    ///   branch, so each such branch reads the code it reaches: a chain of `n`
+    ///   guards such as `if (a) { return }` costs `n` times the code after
+    ///   them.
     ///
     /// The text of the pseudocode is quadratic in any nesting, since each
     /// level indents every line it holds.

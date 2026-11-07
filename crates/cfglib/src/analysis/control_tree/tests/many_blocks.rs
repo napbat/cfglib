@@ -45,8 +45,31 @@ fn structure_and_cover(build: fn(usize) -> Cfg<DfInst>) -> LiftReport {
 }
 
 /// A switch whose `count` arms each jump to one shared block that the switch
-/// has no merge at, so every arm names a block with `count` predecessors.
+/// has no merge at, so every arm names a block with `count` predecessors. The
+/// shared block and the default go on at one tail, which is the merge: were
+/// the default to leave the function instead, the arms would rejoin at the
+/// shared block beside it and jump nowhere.
 fn jumps_into_one_block(count: usize) -> Cfg<DfInst> {
+    let mut cfg = Cfg::new();
+    let dispatch = cfg.entry();
+    cfg.block_mut(dispatch).push(df_ff("switch"));
+    let shared = new_block(&mut cfg);
+    let other = new_block(&mut cfg);
+    let tail = new_block(&mut cfg);
+    for _ in 0..count {
+        let arm = new_block(&mut cfg);
+        cfg.add_edge(dispatch, arm, EdgeKind::SwitchCase);
+        cfg.add_edge(arm, shared, EdgeKind::Jump);
+    }
+    cfg.add_edge(dispatch, other, EdgeKind::Fallthrough);
+    cfg.add_edge(shared, tail, EdgeKind::Fallthrough);
+    cfg.add_edge(other, tail, EdgeKind::Fallthrough);
+    cfg
+}
+
+/// A switch whose `count` arms each jump to one shared block while its
+/// default leaves the function: the arms rejoin at the shared block.
+fn arms_beside_a_diverging_default(count: usize) -> Cfg<DfInst> {
     let mut cfg = Cfg::new();
     let dispatch = cfg.entry();
     cfg.block_mut(dispatch).push(df_ff("switch"));
@@ -230,6 +253,12 @@ fn a_hundred_thousand_jumps_into_one_block_structure_in_linear_time() {
         "the arms jump by goto: {}",
         report.gotos.len()
     );
+}
+
+#[test]
+fn a_hundred_thousand_arms_rejoin_beside_a_diverging_default_in_linear_time() {
+    let report = structure_and_cover(arms_beside_a_diverging_default);
+    assert!(report.is_fully_structured(), "{:?}", report.gotos.first());
 }
 
 #[test]
