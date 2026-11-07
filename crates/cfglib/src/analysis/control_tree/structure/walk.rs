@@ -142,7 +142,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
     /// Such a block emits nothing, so a goto to it would name a label that no
     /// statement carries. A transfer into it is a transfer to its successor,
     /// whether the walk that owns it already passed it or has yet to.
-    fn pass_through(&self, block: BlockId, passed: &mut usize) -> Option<BlockId> {
+    pub(super) fn pass_through(&self, block: BlockId, passed: &mut usize) -> Option<BlockId> {
         if self.instruction_count(block) != 0
             || *passed >= self.cfg.block_bound()
             || self.anchors.contains_key(&block)
