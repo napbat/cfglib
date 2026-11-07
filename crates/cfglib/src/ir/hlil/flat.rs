@@ -2,14 +2,20 @@
 //!
 //! A flat function is a [`Cfg`] of instructions that read and write numbered
 //! variables. The consumer owns the storage. [`FlatFunction`] lends out the
-//! graph, the variable table, and the signature, and the instruction and edge
-//! types of the graph implement [`LiftInstruction`] and [`LiftEdge`] to say
-//! what each of them stands for in HLIL terms.
+//! graph, the operand context, the variable table, the signature and the
+//! block labels. The instruction and edge types of the graph implement
+//! [`LiftInstruction`] and [`LiftEdge`] to say what each of them stands for
+//! in HLIL terms, and the operand context implements [`LiftOperands`] to say
+//! what each instruction reads, writes and does.
 
+extern crate alloc;
+use alloc::borrow::Cow;
+
+use crate::EffectOperands;
+use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::flow::FlowControl;
 use crate::graph::view::DenseId;
-use crate::{EffectInfo, InstrInfo};
 
 use super::dialect::LiftDialect;
 
@@ -61,29 +67,13 @@ pub enum InstructionShape<Op, Constant> {
 
 /// An instruction of a flat function: an operation over variables.
 ///
-/// [`InstrInfo`] supplies the variables that it reads and writes and its
-/// unwind points, [`EffectInfo`] its effects, and [`FlowControl`] its flow
-/// classification. This trait adds what only HLIL needs.
-pub trait LiftInstruction<H: LiftDialect>:
-    InstrInfo<Variable: DenseId> + EffectInfo<Effect = H::Effect> + FlowControl
-{
+/// [`FlowControl`] supplies its flow classification. This trait adds what
+/// only HLIL needs and the instruction can answer alone. What it reads,
+/// writes and does comes from the [`LiftOperands`] context of its function.
+pub trait LiftInstruction<H: LiftDialect>: FlowControl {
     /// Classifies this instruction. The lift calls it once per instruction
     /// per translation.
     fn lift(&self) -> InstructionShape<H::Op, H::Constant>;
-
-    /// The type of each use occurrence, parallel to [`uses`](InstrInfo::uses).
-    fn use_types(&self) -> &[H::Type];
-
-    /// The type of each definition, parallel to [`defs`](InstrInfo::defs).
-    fn def_types(&self) -> &[H::Type];
-
-    /// Whether execution may transfer exceptionally at this instruction.
-    ///
-    /// The default is [`InstrInfo::may_unwind`]. Override it only when an
-    /// instruction can throw without being an unwind point of the graph.
-    fn may_throw(&self) -> bool {
-        self.may_unwind()
-    }
 
     /// The use position that reads the previous value of the destination, for
     /// operations that define only part of their storage under a
@@ -108,6 +98,36 @@ pub trait LiftInstruction<H: LiftDialect>:
     }
 }
 
+/// What the lift reads of an instruction through the context of its flat
+/// function.
+///
+/// [`InstrOperands`](crate::InstrOperands) supplies the variables that it reads and writes and its
+/// unwind points, and [`EffectOperands`] its effects. This trait adds the
+/// types of those variables and whether the instruction may throw. A
+/// consumer whose instructions own their operands implements it for `()`,
+/// which already reads [`InstrInfo`](crate::InstrInfo) and
+/// [`EffectInfo`](crate::EffectInfo) instructions.
+pub trait LiftOperands<H: LiftDialect, I>:
+    EffectOperands<I, Variable: DenseId, Effect = H::Effect>
+{
+    /// The type of each use occurrence, parallel to
+    /// [`uses`](crate::InstrOperands::uses).
+    fn use_types<'a>(&'a self, instruction: &'a I) -> &'a [H::Type];
+
+    /// The type of each definition, parallel to
+    /// [`defs`](crate::InstrOperands::defs).
+    fn def_types<'a>(&'a self, instruction: &'a I) -> &'a [H::Type];
+
+    /// Whether execution may transfer exceptionally at `instruction`.
+    ///
+    /// The default is [`InstrOperands::may_unwind`](crate::InstrOperands::may_unwind).
+    /// Override it only when an
+    /// instruction can throw without being an unwind point of the graph.
+    fn may_throw(&self, instruction: &I) -> bool {
+        self.may_unwind(instruction)
+    }
+}
+
 /// An edge payload of a flat function.
 ///
 /// The graph stores the [`EdgeKind`](crate::EdgeKind) of an edge beside its
@@ -121,18 +141,23 @@ pub trait LiftEdge<H: LiftDialect> {
     fn case_values(&self) -> &[H::Constant];
 }
 
-/// The flat function that is lifted: a [`Cfg`] with its variable table and
-/// signature.
+/// The flat function that is lifted: a [`Cfg`] with the context of its
+/// operands, its variable table, its signature and its block labels.
 pub trait FlatFunction<H: LiftDialect> {
     /// The dense variable identity of the flat function.
     type Var: DenseId;
     /// The instruction type of the graph.
-    type Inst: LiftInstruction<H> + InstrInfo<Variable = Self::Var>;
+    type Inst: LiftInstruction<H>;
     /// The edge payload type of the graph.
     type Edge: LiftEdge<H>;
+    /// The context that answers for the operands of the instructions.
+    type Operands: LiftOperands<H, Self::Inst, Variable = Self::Var>;
 
-    /// The blocks, instructions, edges, regions, and block labels.
+    /// The blocks, instructions, edges and regions.
     fn cfg(&self) -> &Cfg<Self::Inst, Self::Edge>;
+
+    /// The context that answers for the operands of the instructions.
+    fn operands(&self) -> &Self::Operands;
 
     /// The exclusive bound of the variable indices.
     fn variable_count(&self) -> usize;
@@ -145,4 +170,15 @@ pub trait FlatFunction<H: LiftDialect> {
 
     /// The types of the returned values, in order.
     fn returns(&self) -> &[H::Type];
+
+    /// The name of `block` where the lift needs one: a label, a `goto`
+    /// target, or a labeled `break` or `continue`.
+    ///
+    /// The default is the label stored in the block. A function whose names
+    /// derive from something it already holds answers here instead, so its
+    /// blocks store none. An absent or empty name makes the lift name the
+    /// block `.bb{index}`.
+    fn block_label(&self, block: BlockId) -> Option<Cow<'_, str>> {
+        self.cfg().block(block).label().map(Cow::Borrowed)
+    }
 }

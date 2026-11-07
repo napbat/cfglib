@@ -4,11 +4,11 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use super::cfg_view::CfgView;
-use super::instruction::InstrInfo;
+use super::cfg_view::{CfgView, OperandView};
+use super::instruction::InstrOperands;
 use crate::block::BlockId;
 use crate::edge::{EdgeKind, KindedEdge};
-use crate::graph::edge_view::{EdgeRef, FilteredEdges};
+use crate::graph::edge_view::{EdgeRef, EdgeView, FilteredEdges};
 use crate::graph::traverse::{TraversalDirection, reachable};
 
 /// Whether `edge` is an [`ExceptionUnwind`](crate::EdgeKind::ExceptionUnwind)
@@ -37,10 +37,10 @@ pub(crate) fn unwind_edges<V: CfgView>(
 ///
 /// An [`ExceptionUnwind`](crate::EdgeKind::ExceptionUnwind) edge departs
 /// immediately before every source instruction that
-/// [`may_unwind`](InstrInfo::may_unwind), so it carries the state before that
-/// instruction rather than the block's completed state. Every other edge, and
-/// an unwind out of a block that reports no throwing instruction, departs
-/// after the block's last instruction.
+/// [`may_unwind`](InstrOperands::may_unwind), so it carries the state before
+/// that instruction rather than the block's completed state. Every other
+/// edge, and an unwind out of a block that reports no throwing instruction,
+/// departs after the block's last instruction.
 ///
 /// The rule is the same for memory: [`MemorySsa`](crate::MemorySsa) carries
 /// the memory state before the throwing instruction, so the write of a
@@ -48,19 +48,28 @@ pub(crate) fn unwind_edges<V: CfgView>(
 /// that commits before an unwind as an instruction of its own, ahead of the
 /// throwing one.
 #[must_use]
-pub fn departs_before_throws<V>(
+pub fn departs_before_throws<S: OperandView>(
+    cfg: &S,
+    edge: EdgeRef<'_, BlockId, <S::View as EdgeView>::EdgeId, <S::View as EdgeView>::EdgeData>,
+) -> bool {
+    departs_before_throws_with(cfg.view(), cfg.operands(), edge)
+}
+
+/// [`departs_before_throws`] over a view and its operand context.
+pub(crate) fn departs_before_throws_with<V, O>(
     view: &V,
+    operands: &O,
     edge: EdgeRef<'_, BlockId, V::EdgeId, V::EdgeData>,
 ) -> bool
 where
     V: CfgView,
-    V::Inst: InstrInfo,
+    O: InstrOperands<V::Inst>,
 {
     is_unwind_edge(edge)
         && view
             .instructions(edge.source())
             .iter()
-            .any(InstrInfo::may_unwind)
+            .any(|instruction| operands.may_unwind(instruction))
 }
 
 /// The first instruction of `block` before which an unwind can leave it.
@@ -68,15 +77,15 @@ where
 /// `None` when no edge out of `block` [departs before a throwing
 /// instruction](departs_before_throws). Every definition at or after the
 /// answer may be missing on the unwind path.
-pub(crate) fn first_unwind_point<V>(view: &V, block: BlockId) -> Option<usize>
+pub(crate) fn first_unwind_point<V, O>(view: &V, operands: &O, block: BlockId) -> Option<usize>
 where
     V: CfgView,
-    V::Inst: InstrInfo,
+    O: InstrOperands<V::Inst>,
 {
     unwind_edges(view, block).next()?;
     view.instructions(block)
         .iter()
-        .position(InstrInfo::may_unwind)
+        .position(|instruction| operands.may_unwind(instruction))
 }
 
 /// Per block, whether an unwind out of `block` reaches it without entering
@@ -105,10 +114,11 @@ pub(crate) fn unwind_reach<V: CfgView>(view: &V, block: BlockId) -> Vec<bool> {
 /// instruction in program order.
 ///
 /// `before_unwind` sees the state before every instruction that
-/// [may unwind](InstrInfo::may_unwind), which is the state an unwind leaving
-/// there carries. Returns the state after the last instruction.
-pub(crate) fn replay_block<G, S>(
+/// [may unwind](InstrOperands::may_unwind), which is the state an unwind
+/// leaving there carries. Returns the state after the last instruction.
+pub(crate) fn replay_block<G, O, S>(
     cfg: &G,
+    operands: &O,
     block: BlockId,
     input: &S,
     mut step: impl FnMut(&mut S, usize, &G::Inst),
@@ -116,12 +126,12 @@ pub(crate) fn replay_block<G, S>(
 ) -> S
 where
     G: CfgView,
-    G::Inst: InstrInfo,
+    O: InstrOperands<G::Inst>,
     S: Clone,
 {
     let mut state = input.clone();
     for (index, instruction) in cfg.instructions(block).iter().enumerate() {
-        if instruction.may_unwind() {
+        if operands.may_unwind(instruction) {
             before_unwind(&state);
         }
         step(&mut state, index, instruction);
@@ -134,8 +144,9 @@ where
 /// produced before each throwing instruction, replaying the source from
 /// `input`. `None` when the edge departs after the block, which carries the
 /// block's completed state instead.
-pub(crate) fn unwind_departure<G, S>(
+pub(crate) fn unwind_departure<G, O, S>(
     cfg: &G,
+    operands: &O,
     edge: EdgeRef<'_, BlockId, G::EdgeId, G::EdgeData>,
     input: &S,
     step: impl FnMut(&mut S, usize, &G::Inst),
@@ -143,14 +154,14 @@ pub(crate) fn unwind_departure<G, S>(
 ) -> Option<S>
 where
     G: CfgView,
-    G::Inst: InstrInfo,
+    O: InstrOperands<G::Inst>,
     S: Clone,
 {
-    if !departs_before_throws(cfg, edge) {
+    if !departs_before_throws_with(cfg, operands, edge) {
         return None;
     }
     let mut departing: Option<S> = None;
-    replay_block(cfg, edge.source(), input, step, |state| {
+    replay_block(cfg, operands, edge.source(), input, step, |state| {
         departing = Some(match departing.take() {
             None => state.clone(),
             Some(earlier) => join(&earlier, state),

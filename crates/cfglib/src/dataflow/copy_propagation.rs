@@ -136,7 +136,7 @@ where
         let dominators = DominatorTree::compute(cfg);
         let mut first_unwind = alloc::vec![None; cfg.node_bound()];
         for block in cfg.node_ids() {
-            first_unwind[block.index()] = first_unwind_point(cfg, block);
+            first_unwind[block.index()] = first_unwind_point(cfg, &(), block);
         }
         Self {
             cfg,

@@ -15,6 +15,7 @@ use crate::cfg::Cfg;
 use crate::edge::{EdgeId, KindedEdge};
 use crate::graph::edge_view::EdgeView;
 use crate::graph::view::RootedView;
+use crate::{InstrInfo, InstrOperands, VariableId};
 
 /// A rooted graph of blocks that hold ordered instructions and have typed
 /// edges.
@@ -32,7 +33,7 @@ use crate::graph::view::RootedView;
 /// - An edge of kind [`EdgeKind::ExceptionUnwind`](crate::EdgeKind::ExceptionUnwind)
 ///   leaves its source block before a throwing instruction. An edge of kind
 ///   [`EdgeKind::ExceptionHandler`](crate::EdgeKind::ExceptionHandler) enters a handler.
-/// - [`InstrInfo::may_unwind`](crate::InstrInfo::may_unwind) marks the
+/// - [`InstrInfo::may_unwind`] marks the
 ///   throwing instructions of a block.
 ///
 /// [`departs_before_throws`](crate::departs_before_throws) combines the two.
@@ -81,6 +82,90 @@ impl<I, E> CfgView for Cfg<I, E> {
 
     fn edge_weight(&self, edge: EdgeId) -> Option<f64> {
         self.edge(edge).weight()
+    }
+}
+
+/// A [`CfgView`] together with the context that its instructions' operands
+/// are read through.
+///
+/// The analyses that read the variables of instructions (liveness, reaching
+/// definitions, SSA, memory SSA, dead-code analysis) take one. A view whose
+/// instructions implement [`InstrInfo`] is one by itself, read through the
+/// unit context, so every caller that passes a [`Cfg`] keeps working.
+/// [`WithOperands`] pairs a view with the [`InstrOperands`] context of
+/// instructions that store their operands outside themselves.
+pub trait OperandView {
+    /// The instruction type of the view.
+    type Inst;
+    /// The variable identity of the instructions.
+    type Variable: VariableId;
+    /// The view whose blocks hold the instructions.
+    type View: CfgView<Inst = Self::Inst>;
+    /// The context that answers for the operands of the instructions.
+    type Operands: InstrOperands<Self::Inst, Variable = Self::Variable>;
+
+    /// Returns the view whose blocks hold the instructions.
+    fn view(&self) -> &Self::View;
+
+    /// Returns the context that answers for the operands.
+    fn operands(&self) -> &Self::Operands;
+}
+
+impl<G> OperandView for G
+where
+    G: CfgView,
+    G::Inst: InstrInfo,
+{
+    type Inst = G::Inst;
+    type Variable = <G::Inst as InstrInfo>::Variable;
+    type View = G;
+    type Operands = ();
+
+    fn view(&self) -> &G {
+        self
+    }
+
+    fn operands(&self) -> &() {
+        &()
+    }
+}
+
+/// A [`CfgView`] paired with the [`InstrOperands`] context that its
+/// instructions' operands are read through.
+///
+/// This is the [`OperandView`] of instructions that do not implement
+/// [`InstrInfo`]: an instruction that stores runs of a pool its function
+/// owns hands the analyses the pool here instead of holding a pointer to it.
+#[derive(Debug)]
+pub struct WithOperands<'a, G, O> {
+    view: &'a G,
+    operands: &'a O,
+}
+
+impl<'a, G, O> WithOperands<'a, G, O> {
+    /// Pairs `view` with the context that answers for its operands.
+    #[must_use]
+    pub const fn new(view: &'a G, operands: &'a O) -> Self {
+        Self { view, operands }
+    }
+}
+
+impl<G, O> OperandView for WithOperands<'_, G, O>
+where
+    G: CfgView,
+    O: InstrOperands<G::Inst>,
+{
+    type Inst = G::Inst;
+    type Variable = O::Variable;
+    type View = G;
+    type Operands = O;
+
+    fn view(&self) -> &G {
+        self.view
+    }
+
+    fn operands(&self) -> &O {
+        self.operands
     }
 }
 

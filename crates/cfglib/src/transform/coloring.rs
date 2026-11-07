@@ -66,7 +66,7 @@ where
                     connect(&mut adjacency, definition, variable);
                 }
             }
-            step_backward(&mut active, instruction, &unwind);
+            step_backward(&(), &mut active, instruction, &unwind);
             connect_clique(&mut adjacency, &active);
         }
     }

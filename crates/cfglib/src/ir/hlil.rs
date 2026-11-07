@@ -24,10 +24,12 @@
 //! and the [`EdgeKind`](crate::EdgeKind).
 //!
 //! A flat function is read through [`FlatFunction`]: the consumer's
-//! [`Cfg`](crate::Cfg) with its variable table and signature. The instruction
-//! type of the graph implements [`LiftInstruction`] and the edge payload
-//! [`LiftEdge`] to say what each of them stands for ([`InstructionShape`]),
-//! and the marker's [`LiftDialect`] holds the policy that has no subject.
+//! [`Cfg`](crate::Cfg) with its operand context, variable table, signature and
+//! block names. The instruction type of the graph implements
+//! [`LiftInstruction`] and the edge payload [`LiftEdge`] to say what each of
+//! them stands for ([`InstructionShape`]), the operand context implements
+//! [`LiftOperands`] to say what each instruction reads and writes, and the
+//! marker's [`LiftDialect`] holds the policy that has no subject.
 //!
 //! The generic algorithms:
 //!
@@ -104,7 +106,7 @@ pub use builder::FunctionBuilder;
 pub use correspondence::Correspondence;
 pub use dialect::{Dialect, LiftDialect, Pseudocode, RecoverDialect, VerifyDialect};
 pub use error::{LiftError, LowerError, RecoverError};
-pub use flat::{FlatFunction, InstructionShape, LiftEdge, LiftInstruction};
+pub use flat::{FlatFunction, InstructionShape, LiftEdge, LiftInstruction, LiftOperands};
 pub use flat_builder::{Appended, FlatBuilder, LowerEdge, Lowered, Occurrence, VariableOrigin};
 pub use lift::{LiftMetadata, LiftedFunction, lift, lift_trampolines, lift_with_tree};
 pub use lower::{LoweredFunction, lower};

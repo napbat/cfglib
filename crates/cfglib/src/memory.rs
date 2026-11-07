@@ -1,6 +1,7 @@
 //! Language-independent memory events and static CFG traces.
 //!
-//! Instructions opt in through [`MemoryEventInfo`]. The common event shape
+//! Instructions opt in through [`MemoryEventInfo`], or through a context with
+//! [`MemoryEventOperands`]. The common event shape
 //! distinguishes reads, writes, compound read/modify/write operations,
 //! address-variable dependencies, atomicity, and fences. Locations and fence
 //! details remain consumer-owned: an ISA can retain address spaces and
@@ -17,8 +18,10 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use crate::dataflow::cfg_view::CfgView;
-use crate::{BlockId, InstrInfo, ProgramPoint, SsaForm, SsaInstruction, SsaValue, VariableId};
+use crate::dataflow::cfg_view::{CfgView, OperandView};
+use crate::{
+    BlockId, InstrInfo, InstrOperands, ProgramPoint, SsaForm, SsaInstruction, SsaValue, VariableId,
+};
 
 /// Instruction-level summary of reported memory accesses.
 ///
@@ -418,6 +421,37 @@ pub trait MemoryEventInfo: InstrInfo {
     }
 }
 
+/// The context-carrying form of [`MemoryEventInfo`]: the memory events of an
+/// instruction, read through a context that owns its operands.
+///
+/// The events follow every rule of [`MemoryEventInfo`], with
+/// [`InstrOperands::uses`] in place of [`InstrInfo::uses`]. `()` is the
+/// context of an instruction that implements [`MemoryEventInfo`].
+pub trait MemoryEventOperands<I>: InstrOperands<I> {
+    /// Consumer-defined location or conservative alias region.
+    type Location: Clone + Ord;
+    /// Consumer-defined fence details, such as ordering and visibility scope.
+    type Fence: Clone + Eq;
+
+    /// Returns the memory events of `instruction` in semantic order.
+    fn memory_events<'a>(
+        &'a self,
+        instruction: &'a I,
+    ) -> impl Iterator<Item = MemoryEvent<Self::Location, Self::Variable, Self::Fence>> + 'a;
+}
+
+impl<I: MemoryEventInfo> MemoryEventOperands<I> for () {
+    type Location = I::Location;
+    type Fence = I::Fence;
+
+    fn memory_events<'a>(
+        &'a self,
+        instruction: &'a I,
+    ) -> impl Iterator<Item = MemoryEvent<Self::Location, Self::Variable, Self::Fence>> + 'a {
+        instruction.memory_events()
+    }
+}
+
 /// One event in a [`MemoryTrace`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryTraceEntry<L, V, F> {
@@ -477,14 +511,18 @@ pub struct MemoryTrace<L, V, F> {
 
 impl<L, V, F> MemoryTrace<L, V, F> {
     /// Builds a static memory-event trace for `cfg`.
+    ///
+    /// `cfg` is a [`CfgView`] whose instructions implement
+    /// [`MemoryEventInfo`], or a [`WithOperands`](crate::WithOperands) whose
+    /// context implements [`MemoryEventOperands`].
     #[must_use]
-    pub fn compute<G>(cfg: &G) -> Self
+    pub fn compute<S>(cfg: &S) -> Self
     where
-        G: CfgView,
-        G::Inst: MemoryEventInfo<Location = L, Fence = F> + InstrInfo<Variable = V>,
+        S: OperandView<Variable = V>,
+        S::Operands: MemoryEventOperands<S::Inst, Location = L, Fence = F>,
     {
         let mut trace = Self::empty();
-        trace.rebuild(cfg);
+        trace.rebuild(cfg.view(), cfg.operands());
         trace
     }
 
@@ -500,10 +538,10 @@ impl<L, V, F> MemoryTrace<L, V, F> {
     ///
     /// This is [`compute`](Self::compute) for a caller that holds one trace
     /// across a whole codebase rather than building one per procedure.
-    pub(crate) fn rebuild<G>(&mut self, cfg: &G)
+    pub(crate) fn rebuild<G, O>(&mut self, cfg: &G, operands: &O)
     where
         G: CfgView,
-        G::Inst: MemoryEventInfo<Location = L, Fence = F> + InstrInfo<Variable = V>,
+        O: MemoryEventOperands<G::Inst, Variable = V, Location = L, Fence = F>,
     {
         self.entries.clear();
         self.by_point.clear();
@@ -516,16 +554,13 @@ impl<L, V, F> MemoryTrace<L, V, F> {
                 };
                 let start = self.entries.len();
                 self.entries
-                    .extend(
-                        instruction
-                            .memory_events()
-                            .enumerate()
-                            .map(|(event_index, event)| MemoryTraceEntry {
-                                point,
-                                event_index,
-                                event,
-                            }),
-                    );
+                    .extend(operands.memory_events(instruction).enumerate().map(
+                        |(event_index, event)| MemoryTraceEntry {
+                            point,
+                            event_index,
+                            event,
+                        },
+                    ));
                 if self.entries.len() != start {
                     self.by_point.insert(point, start..self.entries.len());
                 }

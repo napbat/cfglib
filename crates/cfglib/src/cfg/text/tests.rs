@@ -2,6 +2,7 @@ extern crate alloc;
 
 use alloc::borrow::Cow;
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
@@ -225,4 +226,61 @@ fn a_region_that_still_names_a_removed_block_is_written_without_it() {
         "the text form keeps what compaction keeps"
     );
     assert_eq!(parsed.to_text(), written);
+}
+
+#[test]
+fn instructions_and_block_names_read_through_a_context_render_as_stored_ones() {
+    let stored = protected_cfg();
+    // The same graph whose instructions are indices into a table it does not
+    // hold and whose blocks store no label.
+    let mut table: Vec<&str> = Vec::new();
+    let mut indexed = Cfg::<usize>::new();
+    for block in stored.block_ids().skip(1) {
+        while indexed.block_bound() <= block.index() {
+            indexed.new_block();
+        }
+        for line in stored.block(block).instructions() {
+            table.push(&line.0);
+            indexed.block_mut(block).push(table.len() - 1);
+        }
+    }
+    for line in stored.block(stored.entry()).instructions() {
+        table.push(&line.0);
+        indexed.block_mut(indexed.entry()).push(table.len() - 1);
+    }
+    for block in indexed.block_ids().collect::<Vec<_>>() {
+        if !stored.contains_block(block) {
+            indexed.remove_block(block);
+        }
+    }
+    for edge in stored.edge_ids() {
+        let edge = stored.edge(edge);
+        indexed.add_edge(edge.source(), edge.target(), edge.kind());
+    }
+    for region in stored.regions() {
+        indexed.add_region(region.clone());
+    }
+    assert!(
+        indexed
+            .block_ids()
+            .all(|block| indexed.block(block).label().is_none())
+    );
+
+    let written = indexed.to_text_with(
+        |&index, sink| sink.write_str(table[index]),
+        |block| stored.block(block).label().map(Cow::Borrowed),
+    );
+    assert_eq!(written, stored.to_text());
+
+    let derived = indexed.to_text_with(
+        |&index, sink| sink.write_str(table[index]),
+        |block| Some(Cow::Owned(alloc::format!("named_{}", block.index()))),
+    );
+    let parsed = parse(&derived).expect("derived names read back");
+    for block in parsed.block_ids() {
+        assert_eq!(
+            parsed.block(block).label(),
+            Some(alloc::format!("named_{}", block.index()).as_str())
+        );
+    }
 }

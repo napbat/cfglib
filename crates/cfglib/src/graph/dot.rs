@@ -485,13 +485,9 @@ impl<I, E> Cfg<I, E> {
         sink: &mut dyn fmt::Write,
         label: impl Fn(&I) -> Cow<'_, str>,
     ) -> fmt::Result {
-        let style = DotStyle::new(
-            block_label(label),
-            control_flow_edge_attributes as DotEdgeStyle<EdgeId, Edge<E>>,
-        )
-        .named("cfg")
-        .node_prefix("bb");
-        write_dot(self, sink, &style)
+        self.write_dot_named(sink, label, |block| {
+            self.block(block).label().map(Cow::Borrowed)
+        })
     }
 
     /// Produce the DOT representation as a [`String`] using a caller-supplied
@@ -507,17 +503,63 @@ impl<I, E> Cfg<I, E> {
             .expect("writing DOT to a String cannot fail");
         out
     }
+
+    /// Write the CFG in DOT format using a caller-supplied instruction label
+    /// and block name.
+    ///
+    /// [`write_dot_with`](Self::write_dot_with) with `name` in place of the
+    /// stored [`label`](crate::BasicBlock::label) of each block, for blocks
+    /// whose names derive from a context they do not hold. `None` leaves a
+    /// block unnamed. Both are escaped before embedding.
+    ///
+    /// # Errors
+    ///
+    /// Returns the sink's formatting error if a write fails.
+    pub fn write_dot_named<'n>(
+        &self,
+        sink: &mut dyn fmt::Write,
+        label: impl Fn(&I) -> Cow<'_, str>,
+        name: impl Fn(BlockId) -> Option<Cow<'n, str>>,
+    ) -> fmt::Result {
+        let style = DotStyle::new(
+            block_label(label, name),
+            control_flow_edge_attributes as DotEdgeStyle<EdgeId, Edge<E>>,
+        )
+        .named("cfg")
+        .node_prefix("bb");
+        write_dot(self, sink, &style)
+    }
+
+    /// Produce the DOT representation as a [`String`] using a caller-supplied
+    /// instruction label and block name, as
+    /// [`write_dot_named`](Self::write_dot_named) writes it.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if writing to an in-memory [`String`] unexpectedly fails.
+    #[must_use]
+    pub fn to_dot_named<'n>(
+        &self,
+        label: impl Fn(&I) -> Cow<'_, str>,
+        name: impl Fn(BlockId) -> Option<Cow<'n, str>>,
+    ) -> String {
+        let mut out = String::new();
+        self.write_dot_named(&mut out, label, name)
+            .expect("writing DOT to a String cannot fail");
+        out
+    }
 }
 
-/// The node label of a control-flow graph: the block's own name, its
-/// identity, and one line per instruction.
-fn block_label<I>(
+/// The node label of a control-flow graph: the block's name, its identity,
+/// and one line per instruction.
+fn block_label<'n, I>(
     label: impl Fn(&I) -> Cow<'_, str>,
+    name: impl Fn(BlockId) -> Option<Cow<'n, str>>,
 ) -> impl for<'b> Fn(BlockId, &'b BasicBlock<I>) -> Cow<'b, str> {
     bind_label::<BlockId, BasicBlock<I>, _>(move |id, block| {
         let mut text = String::new();
-        if let Some(name) = block.label() {
-            text.push_str(name);
+        if let Some(name) = name(id) {
+            text.push_str(&name);
             text.push_str(":\n");
         }
         let _ = write!(text, "{id}");
