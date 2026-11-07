@@ -3,9 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use cfglib::{
-    BlockId, ControlNode, EdgeKind, GotoReason, HandlerKind, HandlerRef, promote_handler_extents,
-};
+use cfglib::{BlockId, ControlNode, EdgeKind, HandlerKind, HandlerRef, promote_handler_extents};
 
 use crate::builders::{Flow, handler, handler_over, pseudocode, try_catch_finally};
 use crate::coverage::{blocks_under, reachable_blocks};
@@ -340,12 +338,12 @@ fn catch_arm_that_returns_ends_in_a_return_leaf() {
 }
 
 #[test]
-fn shared_cleanup_entered_by_ordinary_flow_leaves_the_handler_extent_and_is_reported() {
+fn shared_cleanup_entered_by_ordinary_flow_is_the_finally_the_try_completes_into() {
     // The lowering symtree emits for try/catch/finally: one cleanup block that
-    // the protected body and the catch pad both enter by ordinary flow. The
-    // structurer documents that a region is well formed only when ordinary flow
-    // enters a handler from its own extent, so each of those transfers is a
-    // goto out of the structural bound, and the report says so.
+    // the protected body and the catch pad both enter by ordinary flow, and
+    // that goes on to the code after the region. Completing the body or the
+    // catch runs the finally, so both end silently at its entry, and the
+    // cleanup is the finally body: no goto enters it.
     let mut flow = Flow::starting_with("open()");
     let body = flow.stmt("work()");
     let pad = flow.stmt("recover()");
@@ -365,24 +363,11 @@ fn shared_cleanup_entered_by_ordinary_flow_leaves_the_handler_extent_and_is_repo
         ],
     );
 
-    // The partition and the implied-flow oracles still hold: the tree stays
-    // faithful to the graph, it only cannot express the flow structurally.
     let (tree, report) = structure_and_check(&flow.cfg);
-
-    assert!(!report.is_fully_structured());
+    assert_fully_structured(&tree, &report);
     assert_eq!(
-        report
-            .gotos
-            .iter()
-            .map(|goto| goto.reason)
-            .collect::<Vec<_>>(),
-        [GotoReason::BoundaryEscape, GotoReason::BoundaryEscape]
-    );
-    assert!(report.gotos.iter().all(|goto| goto.target == cleanup));
-    assert_eq!(report.unresolved_labels, []);
-    assert_eq!(
-        nodes_where(&tree, |node| matches!(node, ControlNode::TryCatch { .. })).len(),
-        1
+        pseudocode(&flow.cfg, &tree),
+        "open()\ntry {\n    work()\n} catch {\n    recover()\n} finally {\n    close()\n}\nreturn\n"
     );
 }
 

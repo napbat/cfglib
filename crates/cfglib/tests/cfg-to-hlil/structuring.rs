@@ -373,18 +373,39 @@ fn an_irreducible_loop_falls_back_to_a_goto_and_keeps_its_behavior() {
 }
 
 #[test]
-fn a_goto_whose_label_found_no_node_is_reported_and_the_function_it_would_give_is_refused() {
+fn a_goto_through_a_head_without_code_names_the_block_it_leads_to_and_lifts() {
+    // The loop's head holds no code, so no label can name it: the goto into
+    // the cycle names the block the head leads to, and the lift keeps its
+    // behavior instead of refusing a label that nothing defines.
     let fixture = graphs::irreducible_loop_with_an_empty_head();
-    let (_, report) = structure(&fixture.source);
-    assert!(!report.is_fully_structured());
-    assert!(!report.unresolved_labels.is_empty(), "{report:?}");
     let (tree, report) = structure(&fixture.source);
-    let error = lift_tree(&fixture.source, &tree, &report)
-        .expect_err("a goto to a label that nothing defines");
-    let LiftError::Builder(rejected) = &error else {
-        panic!("the builder refuses the dangling goto, got {error}");
-    };
-    assert!(!rejected.is_ok());
+    assert!(!report.is_fully_structured());
+    assert_eq!(report.unresolved_labels, [], "{report:?}");
+    assert!(
+        report
+            .gotos
+            .iter()
+            .all(|goto| goto.reason == GotoReason::RevisitedTarget
+                && !fixture
+                    .source
+                    .cfg
+                    .block(goto.target)
+                    .instructions()
+                    .is_empty()),
+        "{report:?}"
+    );
+    let function = lift_tree(&fixture.source, &tree, &report)
+        .expect("every goto names a label")
+        .function;
+    assert!(verify::<Tiny, _>(&function).is_ok());
+    let source = &fixture.source;
+    for input in &fixture.inputs {
+        assert_eq!(
+            run_hlil(&function, input),
+            run_cfg(&source.cfg, source.names.len(), &source.parameters, input),
+            "{input:?}"
+        );
+    }
 }
 
 fn assert_lifted_text(fixture: &Fixture, golden: &str) {
