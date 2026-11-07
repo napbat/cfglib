@@ -569,11 +569,12 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
                 match branching(cfg, &outgoing) {
                     Some(BlockFlowKind::Conditional) => {
                         header_body.awaiting = HeaderWait::Branch;
-                        return Next::Call(Frame::Conditional(Conditional::new(header, bound)));
+                        let conditional = Conditional::new(header, bound, header_body.stop);
+                        return Next::Call(Frame::Conditional(conditional));
                     }
                     Some(BlockFlowKind::Switch) => {
                         header_body.awaiting = HeaderWait::Branch;
-                        return Next::Call(self.begin_switch(header, &bound));
+                        return Next::Call(self.begin_switch(header, &bound, header_body.stop));
                     }
                     _ => {}
                 }
