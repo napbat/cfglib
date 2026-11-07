@@ -9,16 +9,18 @@
 
 extern crate alloc;
 
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use core::ops::Range;
 
 use super::fixture;
 use crate::analysis::dead_code::DeadCode;
 use crate::cfg::Cfg;
+use crate::dataflow::bits::DenseRow;
 use crate::dataflow::cfg_view::WithOperands;
-use crate::dataflow::liveness::Liveness;
+use crate::dataflow::liveness::{DenseLiveness, Liveness};
 use crate::dataflow::memory::{ExactMemoryAlias, MemorySsa};
-use crate::dataflow::reaching::ReachingDefs;
+use crate::dataflow::reaching::{DenseReachingDefs, ReachingDefs};
 use crate::dataflow::ssa::{PhiPlacements, SsaForm, SsaPruning};
 use crate::edge::EdgeKind;
 use crate::flow::FlowEffect;
@@ -197,6 +199,57 @@ fn reaching_definitions_read_operands_through_a_context() {
         assert_eq!(actual.reaching_in(block), expected.reaching_in(block));
         assert_eq!(actual.reaching_out(block), expected.reaching_out(block));
     }
+}
+
+#[test]
+fn dense_results_read_operands_through_a_context() {
+    let cfg = fixture();
+    let (rows, pool) = pooled_data_flow(&cfg);
+    let view = WithOperands::new(&rows, &pool);
+    // The handler has no successor, so seeding it exercises the seeded solve
+    // that both liveness results share.
+    let exits = |block| {
+        if cfg.successors(block).next().is_none() {
+            alloc::vec![0]
+        } else {
+            Vec::new()
+        }
+    };
+
+    let live = DenseLiveness::compute_with_exits(&view, exits);
+    assert_eq!(live, DenseLiveness::compute_with_exits(&cfg, exits));
+    let sets = Liveness::compute_with_exits(&view, exits);
+    let variables = |row: DenseRow<'_>| -> BTreeSet<u16> {
+        row.ones().map(|index| *live.variable(index)).collect()
+    };
+    for block in cfg.block_ids() {
+        assert_eq!(variables(live.live_in(block)), *sets.live_in(block));
+        assert_eq!(variables(live.live_out(block)), *sets.live_out(block));
+    }
+    assert_eq!(DenseLiveness::compute(&view), DenseLiveness::compute(&cfg));
+
+    let reaching = DenseReachingDefs::compute(&view);
+    assert_eq!(reaching, DenseReachingDefs::compute(&cfg));
+    let sets = ReachingDefs::compute(&view);
+    let definitions = |row: DenseRow<'_>| -> BTreeSet<_> {
+        row.ones()
+            .map(|index| reaching.definition(index).clone())
+            .collect()
+    };
+    for block in cfg.block_ids() {
+        assert_eq!(
+            definitions(reaching.reaching_in(block)),
+            *sets.reaching_in(block)
+        );
+        assert_eq!(
+            definitions(reaching.reaching_out(block)),
+            *sets.reaching_out(block)
+        );
+    }
+    assert!(
+        live.is_live_in(&1, rows.entry()),
+        "the handler's read of r1 reaches the entry through the context"
+    );
 }
 
 #[test]

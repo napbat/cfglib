@@ -5,12 +5,14 @@
 //! changed-tracking union. [`DenseBits`] is that row packed 64 indices per
 //! word: `Clone + PartialEq` so it drops into any solver's `Fact`, with
 //! [`union_with`](DenseBits::union_with) as the join and its change report
-//! driving fixpoint convergence checks.
+//! driving fixpoint convergence checks. [`DenseRow`] borrows one such row out
+//! of an analysis that keeps the rows of every block in one buffer.
 
 extern crate alloc;
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::ops::Range;
 
 /// A fixed-universe set of dense indices, packed 64 per word.
 ///
@@ -41,6 +43,15 @@ impl DenseBits {
         Self {
             words: vec![0; len.div_ceil(64)],
             len,
+        }
+    }
+
+    /// The set borrowed as a [`DenseRow`].
+    #[must_use]
+    pub fn row(&self) -> DenseRow<'_> {
+        DenseRow {
+            words: &self.words,
+            len: self.len,
         }
     }
 
@@ -110,9 +121,23 @@ impl DenseBits {
     ///
     /// Panics when the universes differ.
     pub fn union_with(&mut self, other: &Self) -> bool {
+        self.union_with_row(other.row())
+    }
+
+    /// Unions the borrowed row `other` into this set, returning whether
+    /// anything changed.
+    ///
+    /// [`union_with`](Self::union_with) for a row that an analysis keeps in a
+    /// flat buffer; into a [`clear`](Self::clear)ed set it is a copy that
+    /// allocates nothing.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the universes differ.
+    pub fn union_with_row(&mut self, other: DenseRow<'_>) -> bool {
         assert_eq!(self.len, other.len, "unioned sets must share one universe");
         let mut changed = false;
-        for (word, &other_word) in self.words.iter_mut().zip(&other.words) {
+        for (word, &other_word) in self.words.iter_mut().zip(other.words) {
             let merged = *word | other_word;
             changed |= merged != *word;
             *word = merged;
@@ -181,6 +206,83 @@ impl DenseBits {
     }
 }
 
+/// A borrowed set of dense indices, in the packing of [`DenseBits`].
+///
+/// An analysis that keeps the facts of every block in one flat buffer of
+/// rows hands out each row as this, so its result holds no allocation for
+/// each block and reading a fact allocates nothing. [`DenseBits::row`]
+/// borrows an owned set the same way, and
+/// [`DenseBits::union_with_row`] copies a row into a reusable set.
+///
+/// Equality is set equality over the same universe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DenseRow<'a> {
+    words: &'a [u64],
+    len: usize,
+}
+
+impl<'a> DenseRow<'a> {
+    /// The row over the universe `0..len` whose packed words are `words`.
+    ///
+    /// The caller keeps the bits above `len` in the last word clear.
+    pub(super) fn from_words(len: usize, words: &'a [u64]) -> Self {
+        debug_assert_eq!(words.len(), len.div_ceil(64), "a row of the universe");
+        debug_assert!(
+            len.is_multiple_of(64) || words.last().is_none_or(|&word| word >> (len % 64) == 0),
+            "no bit above the universe"
+        );
+        Self { words, len }
+    }
+
+    /// The universe size of the row.
+    #[must_use]
+    pub const fn len(self) -> usize {
+        self.len
+    }
+
+    /// Whether the universe is empty.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.len == 0
+    }
+
+    /// Whether `index` is in the row.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `index` is outside the universe.
+    #[must_use]
+    pub fn get(self, index: usize) -> bool {
+        assert!(
+            index < self.len,
+            "index {index} outside universe {}",
+            self.len
+        );
+        let (word, bit) = bit_slot(index);
+        self.words[word] & bit != 0
+    }
+
+    /// The packed words, as [`DenseBits::words`] lays them out.
+    #[must_use]
+    pub const fn words(self) -> &'a [u64] {
+        self.words
+    }
+
+    /// The number of indices in the row.
+    #[must_use]
+    pub fn count_ones(self) -> usize {
+        self.words
+            .iter()
+            .map(|word| word.count_ones() as usize)
+            .sum()
+    }
+
+    /// The row's indices in ascending order, one step per set index.
+    pub fn ones(self) -> impl Iterator<Item = usize> + 'a {
+        ones_of(self.words)
+    }
+}
+
 /// The word that holds `index` and the mask of its bit within that word.
 ///
 /// This is the packing every bit row in the crate shares: 64 indices per
@@ -193,6 +295,79 @@ pub(super) const fn bit_slot(index: usize) -> (usize, u64) {
 /// The set indices of the packed `words`, in ascending order.
 pub(super) fn ones_of(words: &[u64]) -> impl Iterator<Item = usize> + '_ {
     WordOnes::new(words.iter().copied())
+}
+
+/// The words of row `row` in a flat buffer of rows `words` long.
+pub(super) const fn flat_row(words: usize, row: usize) -> Range<usize> {
+    row * words..(row + 1) * words
+}
+
+/// The rows of a solve kept as one flat buffer, one row per slot, every row
+/// over one universe, so a result holds one allocation however many slots it
+/// has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct FlatRows {
+    /// The universe of every row.
+    len: usize,
+    /// The number of rows.
+    count: usize,
+    /// The rows, `len.div_ceil(64)` words each, bits above `len` clear.
+    buffer: Vec<u64>,
+}
+
+impl FlatRows {
+    /// The `count` rows over `0..len` that `buffer` holds back to back.
+    pub(super) fn new(len: usize, count: usize, buffer: Vec<u64>) -> Self {
+        debug_assert_eq!(buffer.len(), count * len.div_ceil(64), "count rows");
+        Self { len, count, buffer }
+    }
+
+    /// Row `index`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `index` is not below the row count.
+    pub(super) fn row(&self, index: usize) -> DenseRow<'_> {
+        assert!(
+            index < self.count,
+            "row {index} outside {} rows",
+            self.count
+        );
+        DenseRow::from_words(
+            self.len,
+            &self.buffer[flat_row(self.len.div_ceil(64), index)],
+        )
+    }
+}
+
+/// Sets every index of `range` in the packed `words`.
+pub(super) fn set_range(words: &mut [u64], range: Range<usize>) {
+    for (word, mask) in range_masks(range) {
+        words[word] |= mask;
+    }
+}
+
+/// Clears every index of `range` in the packed `words`.
+pub(super) fn clear_range(words: &mut [u64], range: Range<usize>) {
+    for (word, mask) in range_masks(range) {
+        words[word] &= !mask;
+    }
+}
+
+/// Each word that `range` touches, with the mask of the indices of `range` in
+/// that word, so a run of indices costs one operation per word.
+fn range_masks(range: Range<usize>) -> impl Iterator<Item = (usize, u64)> {
+    let Range { start, end } = range;
+    let touched = if start < end {
+        start / 64..end.div_ceil(64)
+    } else {
+        0..0
+    };
+    touched.map(move |word| {
+        let low = start.saturating_sub(word * 64);
+        let high = (end - word * 64).min(64);
+        (word, (u64::MAX >> (64 - (high - low))) << low)
+    })
 }
 
 /// The set indices of a word sequence, in ascending order.
@@ -242,7 +417,83 @@ mod tests {
 
     use alloc::vec::Vec;
 
-    use super::DenseBits;
+    use super::{DenseBits, DenseRow, clear_range, flat_row, set_range};
+
+    /// Every range over a three-word row, the empty ones and those that start
+    /// or end on a word boundary included.
+    #[test]
+    fn a_range_sets_and_clears_exactly_its_indices() {
+        let len = 150;
+        let mut full = DenseBits::new(len);
+        for index in 0..len {
+            full.insert(index);
+        }
+        for start in 0..=len {
+            for end in start..=len {
+                let mut words = alloc::vec![0; 3];
+                set_range(&mut words, start..end);
+                let set = DenseRow::from_words(len, &words);
+                assert_eq!(
+                    set.ones().collect::<Vec<_>>(),
+                    (start..end).collect::<Vec<_>>()
+                );
+
+                let mut words = full.words().to_vec();
+                clear_range(&mut words, start..end);
+                let cleared = DenseRow::from_words(len, &words);
+                let kept: Vec<usize> = (0..start).chain(end..len).collect();
+                assert_eq!(cleared.ones().collect::<Vec<_>>(), kept, "{start}..{end}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_flat_row_is_the_words_of_one_row() {
+        assert_eq!(flat_row(3, 0), 0..3);
+        assert_eq!(flat_row(3, 2), 6..9);
+        assert_eq!(flat_row(0, 5), 0..0, "an empty universe has empty rows");
+    }
+
+    #[test]
+    fn a_row_reads_like_the_set_it_borrows() {
+        let mut bits = DenseBits::new(130);
+        for index in [0, 63, 64, 129] {
+            bits.insert(index);
+        }
+        let row = bits.row();
+        assert_eq!(row.len(), 130);
+        assert!(!row.is_empty());
+        assert_eq!(row.words(), bits.words());
+        assert_eq!(row.count_ones(), 4);
+        assert_eq!(row.ones().collect::<Vec<_>>(), [0, 63, 64, 129]);
+        assert!(row.get(64));
+        assert!(!row.get(65));
+        assert_eq!(row, DenseRow::from_words(130, &[1 | (1 << 63), 1, 2]));
+    }
+
+    #[test]
+    fn a_row_unions_into_a_cleared_set_as_a_copy() {
+        let words = [0b1010, 1 << 5];
+        let row = DenseRow::from_words(70, &words);
+        let mut bits = DenseBits::new(70);
+        bits.insert(0);
+        bits.clear();
+        assert!(bits.union_with_row(row));
+        assert_eq!(bits.row(), row);
+        assert!(!bits.union_with_row(row), "a second union changes nothing");
+    }
+
+    #[test]
+    #[should_panic(expected = "outside universe")]
+    fn reading_a_row_outside_its_universe_panics() {
+        let _ = DenseRow::from_words(65, &[0, 0]).get(65);
+    }
+
+    #[test]
+    #[should_panic(expected = "unioned sets must share one universe")]
+    fn unioning_a_row_of_another_universe_panics() {
+        let _ = DenseBits::new(70).union_with_row(DenseRow::from_words(64, &[0]));
+    }
 
     #[test]
     fn insert_get_and_count_agree() {

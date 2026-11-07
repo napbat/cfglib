@@ -12,6 +12,7 @@
 mod abstract_domains;
 mod analysis_oracles;
 mod block_solver;
+mod dense_analyses;
 mod edge_solver;
 mod graphs;
 mod instruction_analyses;

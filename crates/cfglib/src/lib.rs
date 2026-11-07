@@ -257,7 +257,7 @@ pub use builder::address::{
 pub use builder::{BuildError, CfgBuilder, JumpResolution, resolve_jump_edges};
 pub use cfg::{Cfg, CfgEdge, CfgRenumbering, SplitPointError, parse_cfg_text};
 pub use dataflow::abstract_interpretation::{AbstractDomain, AbstractFacts, Lattice};
-pub use dataflow::bits::DenseBits;
+pub use dataflow::bits::{DenseBits, DenseRow};
 pub use dataflow::cfg_view::{CfgView, OperandView, WithOperands};
 pub use dataflow::constant_propagation::{
     ConstFact, ConstPropProblem, ConstValue, ConstantFolder, ConstantPropagation,
@@ -282,7 +282,7 @@ pub use dataflow::fixpoint::{
 pub use dataflow::instruction::{
     EffectInfo, EffectOperands, InstrInfo, InstrOperands, Predicated, VariableId,
 };
-pub use dataflow::liveness::{Liveness, LivenessProblem, SeededLivenessProblem};
+pub use dataflow::liveness::{DenseLiveness, Liveness, LivenessProblem, SeededLivenessProblem};
 pub use dataflow::memory::{
     ConservativeMemoryAlias, ExactMemoryAlias, MemoryAlias, MemoryClassId, MemoryDefinition,
     MemoryEventSite, MemoryLocationClass, MemoryPhi, MemorySsa, MemorySsaEvent, MemorySsaScratch,
@@ -297,7 +297,7 @@ pub use dataflow::node_fixpoint::{
 };
 pub use dataflow::phi_web::{PhiWeb, PhiWebs};
 pub use dataflow::program_point::{DefSite, ProgramPoint, UseSite};
-pub use dataflow::reaching::{ReachingDef, ReachingDefs, ReachingDefsProblem};
+pub use dataflow::reaching::{DenseReachingDefs, ReachingDef, ReachingDefs, ReachingDefsProblem};
 pub use dataflow::sccp::SccpAnalysis;
 pub use dataflow::slot_fixpoint::{
     SequentialExecutor, SlotAccess, SlotFixpointReport, WaveExecutor, WaveRequeue,
