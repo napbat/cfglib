@@ -262,7 +262,7 @@ where
     }
 
     fn transfer_node(&self, cfg: &G, block: BlockId, input: &Self::Fact) -> Self::Fact {
-        replay_block(cfg, block, input, Self::step(input), |_| {})
+        replay_block(cfg, &(), block, input, Self::step(input), |_| {})
     }
 
     fn transfer_edge(
@@ -272,9 +272,14 @@ where
         input: &Self::Fact,
         output: &Self::Fact,
     ) -> Self::Fact {
-        unwind_departure(cfg, edge, input, Self::step(input), |earlier, later| {
-            Self::meet_facts::<G::Inst>(earlier, later)
-        })
+        unwind_departure(
+            cfg,
+            &(),
+            edge,
+            input,
+            Self::step(input),
+            Self::meet_facts::<G::Inst>,
+        )
         .unwrap_or_else(|| output.clone())
     }
 }

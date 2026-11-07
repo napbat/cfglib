@@ -414,7 +414,7 @@ where
         tables.redefine(variable, &mut saving);
     }
 
-    let first_unwind = first_unwind_point(cfg, bid);
+    let first_unwind = first_unwind_point(cfg, &(), bid);
     let mut suffix = first_unwind.map(|_| UnwindSuffix {
         variables: Vec::new(),
         expressions: Vec::new(),

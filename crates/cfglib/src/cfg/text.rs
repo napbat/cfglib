@@ -35,6 +35,7 @@
 //! because an empty line carries nothing to read back.
 
 extern crate alloc;
+use alloc::borrow::Cow;
 use alloc::string::String;
 use core::fmt::{self, Write as _};
 
@@ -134,20 +135,67 @@ impl<I: DisplayInstr, E> Cfg<I, E> {
     ///
     /// Returns the sink's formatting error if a write fails.
     pub fn write_text(&self, sink: &mut dyn fmt::Write) -> fmt::Result {
+        self.write_text_with(
+            sink,
+            |instruction, line| instruction.write_mnemonic(line),
+            |block| self.block(block).label().map(Cow::Borrowed),
+        )
+    }
+}
+
+impl<I, E> Cfg<I, E> {
+    /// Render this CFG in the line-oriented text form, with caller-supplied
+    /// instruction text and block names.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if writing to an in-memory [`String`] unexpectedly fails.
+    #[must_use]
+    pub fn to_text_with<'n>(
+        &self,
+        mnemonic: impl Fn(&I, &mut dyn fmt::Write) -> fmt::Result,
+        name: impl Fn(BlockId) -> Option<Cow<'n, str>>,
+    ) -> String {
+        let mut out = String::new();
+        self.write_text_with(&mut out, mnemonic, name)
+            .expect("writing text to a String cannot fail");
+        out
+    }
+
+    /// Write this CFG in the line-oriented text form, with caller-supplied
+    /// instruction text and block names.
+    ///
+    /// This is the bound-free form of [`write_text`](Self::write_text), for
+    /// instructions and blocks that are named through a context they do not
+    /// hold: `mnemonic` writes one instruction as
+    /// [`DisplayInstr::write_mnemonic`] would, and `name` names a block or
+    /// answers `None` for an unnamed one, in place of its stored
+    /// [`label`](crate::BasicBlock::label). Both are escaped as the stored
+    /// forms are.
+    ///
+    /// # Errors
+    ///
+    /// Returns the sink's formatting error if a write fails.
+    pub fn write_text_with<'n>(
+        &self,
+        sink: &mut dyn fmt::Write,
+        mnemonic: impl Fn(&I, &mut dyn fmt::Write) -> fmt::Result,
+        name: impl Fn(BlockId) -> Option<Cow<'n, str>>,
+    ) -> fmt::Result {
         let mut printer = IndentedWriter::new(sink);
         writeln!(printer, "entry {}", self.entry())?;
 
         for id in self.block_ids() {
             let block = self.block(id);
             write!(printer, "{id}:")?;
-            if let Some(name) = block.label() {
-                write_label(&mut printer, name)?;
+            if let Some(name) = name(id) {
+                write_label(&mut printer, &name)?;
             }
             printer.end_line()?;
             printer.nested(|printer| {
                 for instruction in block.instructions() {
                     printer.optional_line(|line| {
-                        instruction.write_mnemonic(&mut EscapingSink::new(line))
+                        mnemonic(instruction, &mut EscapingSink::new(line))
                     })?;
                 }
                 Ok(())

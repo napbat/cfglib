@@ -15,6 +15,8 @@ use alloc::vec::Vec;
 use crate::analysis::dead_code::DeadCode;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
+use crate::dataflow::cfg_view::WithOperands;
+use crate::{EffectOperands, ProgramPoint};
 
 /// Dead code elimination: remove instructions whose definitions
 /// are never used.
@@ -64,10 +66,32 @@ pub fn dead_code_elimination_with_exits<I: crate::EffectInfo, E>(
     live_out: impl Fn(BlockId) -> Vec<I::Variable>,
 ) -> usize {
     let dead = DeadCode::compute_with_exits(cfg, live_out);
-    let removed = dead.instructions.len();
+    remove_instructions(cfg, &dead.instructions)
+}
 
+/// [`dead_code_elimination_with_exits`] over instructions whose operands and
+/// effects `operands` answers for.
+///
+/// The context reads the instructions that stay as before: removing an
+/// instruction takes it out of its block and leaves the context alone.
+///
+/// Returns the number of instructions removed.
+pub fn dead_code_elimination_with_operands<I, E, O>(
+    cfg: &mut Cfg<I, E>,
+    operands: &O,
+    live_out: impl Fn(BlockId) -> Vec<O::Variable>,
+) -> usize
+where
+    O: EffectOperands<I>,
+{
+    let dead = DeadCode::compute_with_exits(&WithOperands::new(cfg, operands), live_out);
+    remove_instructions(cfg, &dead.instructions)
+}
+
+/// Removes the instructions at `points` and returns how many it removed.
+fn remove_instructions<I, E>(cfg: &mut Cfg<I, E>, points: &[ProgramPoint]) -> usize {
     let mut per_block: BTreeMap<BlockId, BTreeSet<usize>> = BTreeMap::new();
-    for point in &dead.instructions {
+    for point in points {
         per_block
             .entry(point.block)
             .or_default()
@@ -81,8 +105,7 @@ pub fn dead_code_elimination_with_exits<I: crate::EffectInfo, E>(
             keep
         });
     }
-
-    removed
+    points.len()
 }
 
 /// Dead code elimination including the structure left dead: interleave

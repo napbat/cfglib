@@ -1,3 +1,7 @@
+extern crate alloc;
+
+use alloc::borrow::Cow;
+
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
 use crate::graph::store::Graph;
@@ -74,4 +78,35 @@ fn the_plain_style_draws_topology_only() {
             .rankdir(DotRankDir::LeftToRight),
     );
     assert_golden("dot/store-topology-only.dot", &dot);
+}
+
+/// The mnemonic of a mock instruction, read without a trait.
+fn mnemonic(instruction: &MockInst) -> Cow<'_, str> {
+    Cow::Borrowed(instruction.1)
+}
+
+#[test]
+fn a_block_name_read_through_a_context_replaces_the_stored_label() {
+    let mut cfg = Cfg::new();
+    let second = cfg.new_block();
+    cfg.block_mut(cfg.entry()).set_label("stored");
+    cfg.block_mut(cfg.entry()).push(ff("entry_inst"));
+    cfg.block_mut(second).push(ff("second_inst"));
+    cfg.add_edge(cfg.entry(), second, EdgeKind::Fallthrough);
+
+    let stored = cfg.to_dot_with(mnemonic);
+    assert!(stored.contains("stored:\\l"), "{stored}");
+
+    let derived = cfg.to_dot_named(mnemonic, |block| {
+        (block == second).then(|| Cow::Owned(alloc::format!("derived_{}", block.index())))
+    });
+    assert!(!derived.contains("stored"), "{derived}");
+    assert!(derived.contains("derived_1:\\l"), "{derived}");
+    assert_eq!(
+        cfg.to_dot_named(mnemonic, |block| cfg
+            .block(block)
+            .label()
+            .map(Cow::Borrowed)),
+        stored
+    );
 }

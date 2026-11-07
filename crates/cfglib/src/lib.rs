@@ -258,7 +258,7 @@ pub use builder::{BuildError, CfgBuilder, JumpResolution, resolve_jump_edges};
 pub use cfg::{Cfg, CfgEdge, CfgRenumbering, SplitPointError, parse_cfg_text};
 pub use dataflow::abstract_interpretation::{AbstractDomain, AbstractFacts, Lattice};
 pub use dataflow::bits::DenseBits;
-pub use dataflow::cfg_view::CfgView;
+pub use dataflow::cfg_view::{CfgView, OperandView, WithOperands};
 pub use dataflow::constant_propagation::{
     ConstFact, ConstPropProblem, ConstValue, ConstantFolder, ConstantPropagation,
 };
@@ -279,7 +279,9 @@ pub use dataflow::fixpoint::{
     try_solve_problem, try_solve_problem_from, try_solve_problem_from_with_config,
     try_solve_problem_with_config,
 };
-pub use dataflow::instruction::{EffectInfo, InstrInfo, Predicated, VariableId};
+pub use dataflow::instruction::{
+    EffectInfo, EffectOperands, InstrInfo, InstrOperands, Predicated, VariableId,
+};
 pub use dataflow::liveness::{Liveness, LivenessProblem, SeededLivenessProblem};
 pub use dataflow::memory::{
     ConservativeMemoryAlias, ExactMemoryAlias, MemoryAlias, MemoryClassId, MemoryDefinition,
@@ -402,7 +404,7 @@ pub use graph::view::{
 };
 pub use memory::{
     MemoryAccess, MemoryAccessKind, MemoryAtomicity, MemoryEvent, MemoryEventInfo,
-    MemoryOperations, MemoryTrace, MemoryTraceEntry,
+    MemoryEventOperands, MemoryOperations, MemoryTrace, MemoryTraceEntry,
 };
 pub use region::{
     Cleanup, CompletionReason, Continuation, ExclusiveExtent, ExtentIssue, ExtentPromotionDecision,
@@ -422,8 +424,8 @@ pub use transform::critical::{
     split_critical_edges, split_critical_edges_mapped, split_critical_edges_with,
 };
 pub use transform::dce::{
-    dead_code_elimination, dead_code_elimination_with_exits, remove_dead_code,
-    remove_dead_code_mapped,
+    dead_code_elimination, dead_code_elimination_with_exits, dead_code_elimination_with_operands,
+    remove_dead_code, remove_dead_code_mapped,
 };
 pub use transform::layout::{RelaxError, relax_layout};
 pub use transform::linearize::{BlockOrder, Emitter, LinearInst, LinearizeError, linearize};

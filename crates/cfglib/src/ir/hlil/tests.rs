@@ -53,6 +53,7 @@ mod fixtures;
 mod flat;
 mod flat_fixtures;
 mod flat_lift;
+mod flat_operands;
 mod flat_storage;
 mod fused;
 mod generated;

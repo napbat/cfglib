@@ -2,6 +2,7 @@
 //! entry point and a single exit point.
 
 extern crate alloc;
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -38,7 +39,15 @@ pub struct BasicBlock<I> {
     /// Instructions in program order.
     pub(crate) instructions: Vec<I>,
     /// Optional human-readable label (e.g. from a `label` instruction).
-    pub(crate) label: Option<String>,
+    ///
+    /// A boxed `str` rather than a `String`: a label is never grown in place,
+    /// so it carries no capacity, and an unlabeled block is 8 bytes smaller.
+    /// A consumer whose names derive from something else stores none and
+    /// names its blocks where they are read (the HLIL lift's
+    /// [`FlatFunction::block_label`](crate::ir::hlil::FlatFunction::block_label),
+    /// [`Cfg::write_text_with`](crate::Cfg::write_text_with),
+    /// [`Cfg::write_dot_named`](crate::Cfg::write_dot_named)).
+    pub(crate) label: Option<Box<str>>,
 }
 
 impl<I> BasicBlock<I> {
@@ -89,7 +98,7 @@ impl<I> BasicBlock<I> {
     /// Set or replace the block's human-readable label.
     #[inline]
     pub fn set_label(&mut self, label: impl Into<String>) {
-        self.label = Some(label.into());
+        self.label = Some(label.into().into_boxed_str());
     }
 }
 

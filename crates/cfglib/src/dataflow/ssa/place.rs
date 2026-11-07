@@ -16,10 +16,11 @@ use core::ops::Range;
 use smallvec::SmallVec;
 
 use crate::block::BlockId;
-use crate::dataflow::cfg_view::CfgView;
-use crate::dataflow::unwind::{first_unwind_point, unwind_edges};
+use crate::dataflow::cfg_view::{CfgView, OperandView};
+use crate::dataflow::unwind::{departs_before_throws_with, first_unwind_point, unwind_edges};
 use crate::graph::dominator::DominatorTree;
-use crate::{InstrInfo, ProgramPoint, VariableId, departs_before_throws};
+use crate::graph::view::GraphView;
+use crate::{InstrOperands, ProgramPoint, VariableId};
 
 use super::prune::{SsaPruning, mark_live_blocks, run_of};
 use super::scratch::SsaScratch;
@@ -104,11 +105,15 @@ impl<V: VariableId> PhiPlacements<V> {
     /// An entry block that is a branch target is placed like any other loop
     /// header, and its phis report
     /// [`merges_start_value`](PhiPlacement::merges_start_value).
+    ///
+    /// `cfg` is a [`CfgView`] whose instructions implement
+    /// [`InstrInfo`](crate::InstrInfo), or a
+    /// [`WithOperands`](crate::WithOperands) that reads them through a
+    /// context.
     #[must_use]
-    pub fn compute<G>(cfg: &G, dom: &DominatorTree) -> Self
+    pub fn compute<S>(cfg: &S, dom: &DominatorTree) -> Self
     where
-        G: CfgView,
-        G::Inst: InstrInfo<Variable = V>,
+        S: OperandView<Variable = V>,
     {
         Self::compute_with_pruning(cfg, dom, SsaPruning::Minimal)
     }
@@ -118,15 +123,16 @@ impl<V: VariableId> PhiPlacements<V> {
     /// This is the placement
     /// [`SsaForm::compute_with_pruning`](super::SsaForm::compute_with_pruning)
     /// renames. [`SsaPruning::Minimal`] gives [`compute`](Self::compute).
+    /// `cfg` supplies its operands as it does to [`compute`](Self::compute).
     #[must_use]
-    pub fn compute_with_pruning<G>(cfg: &G, dom: &DominatorTree, pruning: SsaPruning) -> Self
+    pub fn compute_with_pruning<S>(cfg: &S, dom: &DominatorTree, pruning: SsaPruning) -> Self
     where
-        G: CfgView,
-        G::Inst: InstrInfo<Variable = V>,
+        S: OperandView<Variable = V>,
     {
+        let (operands, cfg) = (cfg.operands(), cfg.view());
         let mut scratch = SsaScratch::new();
         scratch.reset_placement(cfg.node_bound());
-        place_phis(&mut scratch, cfg, dom, pruning);
+        place_phis(&mut scratch, cfg, operands, dom, pruning);
 
         let drafts = &scratch.phis;
         let placements = (0..cfg.node_bound())
@@ -280,17 +286,18 @@ impl<V: VariableId> PhiDrafts<V> {
 /// to. A skipped block is not a definition of the variable either, so the
 /// frontier walk does not continue from it: every path out of it writes the
 /// variable before reading it, and each such write places its own phis.
-pub(super) fn place_phis<G, V>(
+pub(super) fn place_phis<G, O, V>(
     scratch: &mut SsaScratch<V>,
     cfg: &G,
+    operands: &O,
     dom: &DominatorTree,
     pruning: SsaPruning,
 ) where
     G: CfgView,
-    G::Inst: InstrInfo<Variable = V>,
+    O: InstrOperands<G::Inst, Variable = V>,
     V: VariableId,
 {
-    scan_instructions(scratch, cfg, pruning);
+    scan_instructions(scratch, cfg, operands, pruning);
     let SsaScratch {
         frontiers,
         definition_blocks,
@@ -345,7 +352,12 @@ pub(super) fn place_phis<G, V>(
                     continue;
                 }
                 has_phi.mark(target.index());
-                phis.place(root, target, variable.clone(), arrivals(cfg, target));
+                phis.place(
+                    root,
+                    target,
+                    variable.clone(),
+                    arrivals(cfg, operands, target),
+                );
                 if !placed.is_marked(target.index()) {
                     placed.mark(target.index());
                     worklist.push(target);
@@ -364,7 +376,7 @@ pub(super) fn place_phis<G, V>(
                     root,
                     frontier_block,
                     variable.clone(),
-                    arrivals(cfg, frontier_block),
+                    arrivals(cfg, operands, frontier_block),
                 );
                 if !placed.is_marked(frontier_block.index()) {
                     placed.mark(frontier_block.index());
@@ -379,11 +391,15 @@ pub(super) fn place_phis<G, V>(
 /// each variable's defining blocks, the definitions an unwind can miss, and
 /// for a pruned form the reads before any write in their block, the writes
 /// before a block's first unwind point and the blocks that can unwind. Every
-/// list of pairs is left sorted.
-fn scan_instructions<G, V>(scratch: &mut SsaScratch<V>, cfg: &G, pruning: SsaPruning)
-where
+/// operand is read through `operands`. Every list of pairs is left sorted.
+fn scan_instructions<G, O, V>(
+    scratch: &mut SsaScratch<V>,
+    cfg: &G,
+    operands: &O,
+    pruning: SsaPruning,
+) where
     G: CfgView,
-    G::Inst: InstrInfo<Variable = V>,
+    O: InstrOperands<G::Inst, Variable = V>,
     V: VariableId,
 {
     let SsaScratch {
@@ -396,7 +412,7 @@ where
         ..
     } = scratch;
     for block_id in cfg.node_ids() {
-        let first_unwind = first_unwind_point(cfg, block_id);
+        let first_unwind = first_unwind_point(cfg, operands, block_id);
         if pruning == SsaPruning::Pruned && first_unwind.is_some() {
             throwing.mark(block_id.index());
         }
@@ -405,7 +421,7 @@ where
                 // An instruction reads its operands before it writes, so a
                 // read is upward-exposed unless an earlier instruction of
                 // this block wrote the variable.
-                for variable in instruction.uses() {
+                for variable in operands.uses(instruction) {
                     let written_here = definition_blocks
                         .get(variable)
                         .is_some_and(|blocks| blocks.last() == Some(&block_id));
@@ -414,7 +430,7 @@ where
                     }
                 }
             }
-            for variable in instruction.defs() {
+            for variable in operands.defs(instruction) {
                 let blocks = match definition_blocks.entry(variable.clone()) {
                     Entry::Vacant(slot) => slot.insert(block_pool.pop().unwrap_or_default()),
                     Entry::Occupied(slot) => slot.into_mut(),
@@ -448,22 +464,29 @@ where
 ///
 /// A normal edge departs at its source's end, named by the source's
 /// instruction count. An edge that [departs before
-/// throws](departs_before_throws) contributes one departure before each of
-/// its source's throwing instructions.
-fn arrivals<G>(cfg: &G, block: BlockId) -> impl Iterator<Item = ProgramPoint> + '_
+/// throws](crate::departs_before_throws) contributes one departure before
+/// each of its source's throwing instructions.
+fn arrivals<'a, G, O>(
+    cfg: &'a G,
+    operands: &'a O,
+    block: BlockId,
+) -> impl Iterator<Item = ProgramPoint> + 'a
 where
     G: CfgView,
-    G::Inst: InstrInfo,
+    O: InstrOperands<G::Inst>,
 {
     cfg.incoming(block).flat_map(move |edge| {
         let edge = cfg.edge(edge);
         let source = edge.source();
         let instructions = cfg.instructions(source);
-        let before_throws = departs_before_throws(cfg, edge);
+        let before_throws = departs_before_throws_with(cfg, operands, edge);
         let end = instructions.len();
         (if before_throws { 0 } else { end }..=end)
             .filter(move |&index| {
-                !before_throws || instructions.get(index).is_some_and(InstrInfo::may_unwind)
+                !before_throws
+                    || instructions
+                        .get(index)
+                        .is_some_and(|instruction| operands.may_unwind(instruction))
             })
             .map(move |inst_idx| ProgramPoint {
                 block: source,

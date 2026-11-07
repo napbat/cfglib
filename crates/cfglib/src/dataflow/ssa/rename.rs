@@ -11,7 +11,7 @@ use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
 use crate::dataflow::unwind::unwind_edges;
 use crate::graph::dominator::DominatorTree;
-use crate::{InstrInfo, ProgramPoint, VariableId};
+use crate::{InstrOperands, ProgramPoint, VariableId};
 
 use super::scratch::SsaScratch;
 use super::{SsaBlock, SsaInstruction, SsaPhi, SsaValue, SsaVersion};
@@ -43,15 +43,16 @@ pub(super) fn fresh_value<V: VariableId>(
 /// what leaving the block's scope pops. Every definition a block pushes is
 /// appended to one stack, so unwinding is popping a count and the walk
 /// allocates no vector per block.
-fn rename_block<G, V>(
+fn rename_block<G, O, V>(
     scratch: &mut SsaScratch<V>,
     cfg: &G,
+    operands: &O,
     block: BlockId,
     max_versions: &mut BTreeMap<V, SsaVersion>,
 ) -> usize
 where
     G: CfgView,
-    G::Inst: InstrInfo<Variable = V>,
+    O: InstrOperands<G::Inst, Variable = V>,
     V: VariableId,
 {
     let SsaScratch {
@@ -76,7 +77,7 @@ where
     // rather than to the allocator's minimum growth step.
     block_instructions.reserve_exact(cfg.instructions(block).len());
     for (inst_idx, instruction) in cfg.instructions(block).iter().enumerate() {
-        if instruction.may_unwind() {
+        if operands.may_unwind(instruction) {
             for edge in unwind_edges(cfg, block) {
                 phis.set_operands(
                     edge.target(),
@@ -85,13 +86,13 @@ where
                 );
             }
         }
-        let uses = instruction
-            .uses()
+        let uses = operands
+            .uses(instruction)
             .iter()
             .map(|variable| current_value(variable, stacks))
             .collect();
         let mut defs = SmallVec::new();
-        for variable in instruction.defs() {
+        for variable in operands.defs(instruction) {
             let value = fresh_value(variable, max_versions);
             push_value(stacks, value_pool, variable, value.clone());
             pushed.push(variable.clone());
@@ -140,14 +141,15 @@ fn push_value<V: VariableId>(
 /// entry misses. A block in no tree has no span to walk, so it would be
 /// skipped without a word, and its instructions would reach the form
 /// un-renamed; the forest is what rules that out, and it is asserted here.
-pub(super) fn rename<G, V>(
+pub(super) fn rename<G, O, V>(
     scratch: &mut SsaScratch<V>,
     cfg: &G,
+    operands: &O,
     dom: &DominatorTree,
     max_versions: &mut BTreeMap<V, SsaVersion>,
 ) where
     G: CfgView,
-    G::Inst: InstrInfo<Variable = V>,
+    O: InstrOperands<G::Inst, Variable = V>,
     V: VariableId,
 {
     debug_assert!(
@@ -165,7 +167,7 @@ pub(super) fn rename<G, V>(
         roots,
         scratch,
         &mut open,
-        |scratch, block| rename_block(scratch, cfg, block, max_versions),
+        |scratch, block| rename_block(scratch, cfg, operands, block, max_versions),
         |scratch, _, pushed| {
             for _ in 0..pushed {
                 let variable = scratch

@@ -7,7 +7,7 @@
 
 use cfglib::ir::hlil::{
     Dialect, FlatFunction, FunctionView, InstructionShape, LiftDialect, LiftEdge, LiftInstruction,
-    Pseudocode, VerificationIssue, VerifyDialect,
+    LiftOperands, Pseudocode, VerificationIssue, VerifyDialect,
 };
 use cfglib::{Cfg, EdgeKind, EffectInfo, FlowControl, FlowEffect, InstrInfo, KindedEdge};
 
@@ -211,13 +211,16 @@ impl LiftInstruction<Tiny> for Stmt {
             Form::Ret => InstructionShape::Return,
         }
     }
+}
 
-    fn use_types(&self) -> &[()] {
-        &UNITS[..self.uses.len()]
+/// A statement owns its operands, so its context is the unit one.
+impl LiftOperands<Tiny, Stmt> for () {
+    fn use_types<'a>(&'a self, statement: &'a Stmt) -> &'a [()] {
+        &UNITS[..statement.uses.len()]
     }
 
-    fn def_types(&self) -> &[()] {
-        &UNITS[..self.defs.len()]
+    fn def_types<'a>(&'a self, statement: &'a Stmt) -> &'a [()] {
+        &UNITS[..statement.defs.len()]
     }
 }
 
@@ -266,9 +269,14 @@ impl FlatFunction<Tiny> for Source {
     type Var = usize;
     type Inst = Stmt;
     type Edge = Link;
+    type Operands = ();
 
     fn cfg(&self) -> &Cfg<Stmt, Link> {
         &self.cfg
+    }
+
+    fn operands(&self) -> &() {
+        &()
     }
 
     fn variable_count(&self) -> usize {

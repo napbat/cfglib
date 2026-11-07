@@ -18,7 +18,7 @@ use crate::flow::{FlowControl, FlowEffect};
 use crate::graph::view::DenseId;
 use crate::ir::hlil::{
     FlatBuilder, FlatFunction, InstructionShape, LiftDialect, LiftEdge, LiftInstruction,
-    LiftMetadata, LiftedFunction, Occurrence, lift, pseudocode, verify,
+    LiftMetadata, LiftOperands, LiftedFunction, Occurrence, lift, pseudocode, verify,
 };
 use crate::{EffectInfo, InstrInfo};
 
@@ -152,20 +152,23 @@ impl<D: FlatKit> LiftInstruction<D> for ToyInst<D> {
         }
     }
 
-    fn use_types(&self) -> &[D::Type] {
-        &self.use_types
-    }
-
-    fn def_types(&self) -> &[D::Type] {
-        &self.def_types
-    }
-
     fn previous_value_operand(&self) -> Option<usize> {
         self.previous_value
     }
 
     fn materialize_value(&self) -> bool {
         self.materialize
+    }
+}
+
+/// The toy instruction owns its operands, so its context is the unit one.
+impl<D: FlatKit> LiftOperands<D, ToyInst<D>> for () {
+    fn use_types<'a>(&'a self, instruction: &'a ToyInst<D>) -> &'a [D::Type] {
+        &instruction.use_types
+    }
+
+    fn def_types<'a>(&'a self, instruction: &'a ToyInst<D>) -> &'a [D::Type] {
+        &instruction.def_types
     }
 }
 
@@ -182,9 +185,14 @@ impl<D: FlatKit> FlatFunction<D> for ToyFlat<D> {
     type Var = FlatVar;
     type Inst = ToyInst<D>;
     type Edge = ToyEdge<D>;
+    type Operands = ();
 
     fn cfg(&self) -> &Cfg<ToyInst<D>, ToyEdge<D>> {
         &self.cfg
+    }
+
+    fn operands(&self) -> &() {
+        &()
     }
 
     fn variable_count(&self) -> usize {

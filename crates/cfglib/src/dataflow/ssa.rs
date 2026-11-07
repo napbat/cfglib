@@ -1,11 +1,12 @@
 //! Generic Static Single Assignment (SSA) construction.
 //!
 //! The SSA representation is independent of an instruction set and of the
-//! concrete instruction type that a [`CfgView`] holds. An [`InstrInfo`] adapter
-//! supplies its native variable identity, and [`SsaForm::compute`] produces
-//! renamed definitions, uses, and phi operands keyed by [`ProgramPoint`]. The
-//! original instructions remain untouched and can be recovered from the
-//! source CFG.
+//! concrete instruction type that a [`CfgView`](crate::CfgView) holds. An
+//! [`InstrInfo`](crate::InstrInfo) adapter, or an
+//! [`InstrOperands`](crate::InstrOperands) context, supplies its native
+//! variable identity, and [`SsaForm::compute`] produces renamed definitions,
+//! uses, and phi operands keyed by [`ProgramPoint`]. The original instructions
+//! remain untouched and can be recovered from the source CFG.
 //!
 //! A phi merges the value on each CFG edge into its block
 //! ([`SsaPhi::operands`]). A phi in an entry block that is a branch target
@@ -32,9 +33,10 @@ use alloc::vec::Vec;
 use smallvec::SmallVec;
 
 use crate::block::BlockId;
-use crate::dataflow::cfg_view::CfgView;
+use crate::dataflow::cfg_view::OperandView;
 use crate::graph::dominator::{DominatorTree, complete_dominator_forest};
-use crate::{InstrInfo, ProgramPoint, VariableId};
+use crate::graph::view::GraphView;
+use crate::{ProgramPoint, VariableId};
 
 mod frontier;
 mod place;
@@ -369,11 +371,17 @@ impl<V: VariableId> SsaForm<V> {
     ///
     /// [`insert_preheader`](crate::insert_preheader) cannot give such a loop
     /// a preheader, since the loop has no predecessor outside it to redirect.
+    ///
+    /// # Operands
+    ///
+    /// `cfg` is a [`CfgView`](crate::CfgView) whose instructions implement
+    /// [`InstrInfo`](crate::InstrInfo), or a
+    /// [`WithOperands`](crate::WithOperands) that reads them through a
+    /// context.
     #[must_use]
-    pub fn compute<G>(cfg: &G, dom: &DominatorTree) -> Self
+    pub fn compute<S>(cfg: &S, dom: &DominatorTree) -> Self
     where
-        G: CfgView,
-        G::Inst: InstrInfo<Variable = V>,
+        S: OperandView<Variable = V>,
     {
         Self::compute_in(&mut SsaScratch::new(), cfg, dom)
     }
@@ -385,10 +393,9 @@ impl<V: VariableId> SsaForm<V> {
     /// it. The form it returns is the same one, built by the same code: the
     /// allocating entry point is this function over a fresh [`SsaScratch`].
     #[must_use]
-    pub fn compute_in<G>(scratch: &mut SsaScratch<V>, cfg: &G, dom: &DominatorTree) -> Self
+    pub fn compute_in<S>(scratch: &mut SsaScratch<V>, cfg: &S, dom: &DominatorTree) -> Self
     where
-        G: CfgView,
-        G::Inst: InstrInfo<Variable = V>,
+        S: OperandView<Variable = V>,
     {
         Self::compute_with_pruning_in(scratch, cfg, dom, SsaPruning::Minimal)
     }
@@ -404,11 +411,13 @@ impl<V: VariableId> SsaForm<V> {
     /// the same answers from a smaller form, and pays nothing for a variable
     /// that is dead at a join. [`SsaPruning::Minimal`] gives
     /// [`compute`](Self::compute) itself.
+    ///
+    /// `cfg` supplies its operands as it does to [`compute`](Self::compute),
+    /// and the liveness that prunes phis reads them through the same context.
     #[must_use]
-    pub fn compute_with_pruning<G>(cfg: &G, dom: &DominatorTree, pruning: SsaPruning) -> Self
+    pub fn compute_with_pruning<S>(cfg: &S, dom: &DominatorTree, pruning: SsaPruning) -> Self
     where
-        G: CfgView,
-        G::Inst: InstrInfo<Variable = V>,
+        S: OperandView<Variable = V>,
     {
         Self::compute_with_pruning_in(&mut SsaScratch::new(), cfg, dom, pruning)
     }
@@ -417,23 +426,23 @@ impl<V: VariableId> SsaForm<V> {
     /// caller-owned working storage, as [`compute_in`](Self::compute_in) is
     /// to [`compute`](Self::compute).
     #[must_use]
-    pub fn compute_with_pruning_in<G>(
+    pub fn compute_with_pruning_in<S>(
         scratch: &mut SsaScratch<V>,
-        cfg: &G,
+        cfg: &S,
         dom: &DominatorTree,
         pruning: SsaPruning,
     ) -> Self
     where
-        G: CfgView,
-        G::Inst: InstrInfo<Variable = V>,
+        S: OperandView<Variable = V>,
     {
+        let (operands, cfg) = (cfg.operands(), cfg.view());
         scratch.reset(cfg.node_bound());
         let complete =
             complete_dominator_forest(&mut scratch.dominators, &mut scratch.forest_roots, cfg, dom);
         let dom = complete.as_ref().unwrap_or(dom);
-        place::place_phis(scratch, cfg, dom, pruning);
+        place::place_phis(scratch, cfg, operands, dom, pruning);
         let mut max_versions = BTreeMap::new();
-        rename::rename(scratch, cfg, dom, &mut max_versions);
+        rename::rename(scratch, cfg, operands, dom, &mut max_versions);
         let blocks = rename::finish_blocks(scratch, cfg.node_bound(), &mut max_versions);
         let idom = (0..cfg.node_bound())
             .map(|index| dom.idom(BlockId::from_index(index)))
