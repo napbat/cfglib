@@ -1,4 +1,4 @@
 [tools]
 rust = "stable"
-prek = "0.5.2"
-"cargo:cargo-nextest" = "0.9.137"
+prek = "latest"
+"cargo:cargo-nextest" = "latest"
