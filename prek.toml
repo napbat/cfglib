@@ -1,0 +1,62 @@
+minimum_prek_version = "0.4.14"
+default_install_hook_types = ["pre-push"]
+
+[[repos]]
+repo = "local"
+
+[[repos.hooks]]
+id = "cargo-fmt"
+name = "cargo fmt --all -- --check"
+entry = "cargo fmt --all -- --check"
+language = "system"
+pass_filenames = false
+always_run = true
+stages = ["pre-push"]
+
+[[repos.hooks]]
+id = "cargo-clippy"
+name = "cargo clippy --workspace --all-targets"
+entry = "cargo clippy --workspace --all-targets -- -D warnings"
+language = "system"
+pass_filenames = false
+always_run = true
+stages = ["pre-push"]
+
+[[repos.hooks]]
+id = "cargo-clippy-all-features"
+name = "cargo clippy --workspace --all-targets --all-features"
+entry = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+language = "system"
+pass_filenames = false
+always_run = true
+stages = ["pre-push"]
+
+[[repos]]
+repo = "builtin"
+
+[[repos.hooks]]
+id = "trailing-whitespace"
+stages = ["pre-push"]
+
+[[repos.hooks]]
+id = "end-of-file-fixer"
+stages = ["pre-push"]
+
+[[repos.hooks]]
+id = "mixed-line-ending"
+args = ["--fix=lf"]
+stages = ["pre-push"]
+
+[[repos.hooks]]
+id = "check-yaml"
+stages = ["pre-push"]
+
+[[repos.hooks]]
+id = "check-toml"
+stages = ["pre-push"]
+
+# Nothing is staged at push time: check every file that the pushed commits change.
+[[repos.hooks]]
+id = "check-added-large-files"
+args = ["--enforce-all"]
+stages = ["pre-push"]

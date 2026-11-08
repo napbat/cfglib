@@ -1,2 +1,4 @@
 [tools]
-rust = "latest"
+rust = "stable"
+prek = "latest"
+"cargo:cargo-nextest" = "latest"
