@@ -633,15 +633,14 @@ larger ones.
 
 ## Development
 
-Install the git hooks once with `prek install` (or `pre-commit install`); both
-tools read the same `.pre-commit-config.yaml`. The test hooks need
-`cargo-nextest` (`cargo install cargo-nextest --locked`). Hygiene checks,
-`cargo fmt`, and pedantic Clippy run at commit time;
-the test suite (`cargo nextest run` plus `cargo test --doc` for doctests) and
-the documentation build run at push time. CI runs the same gates in two
-parallel jobs, plus a `no_std` build for `x86_64-unknown-none`. The complete
-gate list and the workspace's naming and layout conventions live in
-`AGENTS.md`.
+`mise install` provides the toolchain, prek and nextest. The git hooks live in
+`prek.toml`; install them once with `prek install`. They run at push time only:
+hygiene checks, `cargo fmt --check`, and Clippy with default and with all
+features. They do not run the tests, the doctests or the documentation build:
+every gate in `AGENTS.md` must still pass before a change is complete. CI runs
+those gates in two parallel jobs, plus a `no_std` build for
+`x86_64-unknown-none`. `AGENTS.md` also holds the workspace's naming and layout
+conventions.
 
 ## License
 

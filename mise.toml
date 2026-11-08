@@ -1,2 +1,4 @@
 [tools]
-rust = "latest"
+rust = "stable"
+prek = "0.5.2"
+"cargo:cargo-nextest" = "0.9.137"
