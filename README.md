@@ -633,14 +633,12 @@ larger ones.
 
 ## Development
 
-`mise install` provides the toolchain, prek and nextest. The git hooks live in
-`prek.toml`; install them once with `prek install`. They run at push time only:
-hygiene checks, `cargo fmt --check`, and Clippy with default and with all
-features. They do not run the tests, the doctests or the documentation build:
-every gate in `AGENTS.md` must still pass before a change is complete. CI runs
-those gates in two parallel jobs, plus a `no_std` build for
-`x86_64-unknown-none`. `AGENTS.md` also holds the workspace's naming and layout
-conventions.
+`mise install` provides the toolchain, prek and nextest; `mise run ci` runs
+every check; `prek install` installs the pre-push hooks (fmt, clippy, file
+hygiene). The hooks live in `prek.toml` and run at push time only: every gate
+in `AGENTS.md` must still pass before a change is complete. CI runs those gates
+in two parallel jobs, plus a `no_std` build for `x86_64-unknown-none`.
+`AGENTS.md` also holds the workspace's naming and layout conventions.
 
 ## License
 
