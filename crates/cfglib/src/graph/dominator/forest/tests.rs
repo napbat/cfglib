@@ -4,7 +4,6 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use super::super::{DominatorScratch, DominatorTree};
-use super::complete_dominator_forest;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
 use crate::test_util::MockInst;
@@ -30,9 +29,9 @@ fn unreachable_code_gets_numbered_trees_of_its_own() {
     assert!(!dominators.is_reachable(spin_a));
 
     let mut roots = Vec::new();
-    let forest =
-        complete_dominator_forest(&mut DominatorScratch::new(), &mut roots, &cfg, &dominators)
-            .expect("unreachable blocks call for a forest");
+    let forest = dominators
+        .complete_forest_in(&mut DominatorScratch::new(), &mut roots, &cfg)
+        .expect("unreachable blocks call for a forest");
 
     // The entry, one block of the loop, and the unreachable source start trees.
     assert_eq!(roots.len(), 3);
@@ -75,11 +74,6 @@ fn a_cfg_the_entry_reaches_entirely_needs_no_forest() {
     let next = cfg.new_block();
     cfg.add_edge(cfg.entry(), next, EdgeKind::Fallthrough);
     let dominators = DominatorTree::compute(&cfg);
-    let forest = complete_dominator_forest(
-        &mut DominatorScratch::new(),
-        &mut Vec::new(),
-        &cfg,
-        &dominators,
-    );
+    let forest = dominators.complete_forest_in(&mut DominatorScratch::new(), &mut Vec::new(), &cfg);
     assert!(forest.is_none());
 }

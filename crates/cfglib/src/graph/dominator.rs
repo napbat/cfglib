@@ -28,7 +28,6 @@ use core::ops::Range;
 use crate::block::BlockId;
 use crate::graph::view::{DenseId, GraphView, RootedView};
 use construction::ConstructionBuffers;
-pub(crate) use forest::complete_dominator_forest;
 pub use frontier::FrontierScratch;
 pub use frontier_table::DominanceFrontiers;
 use numbering::{Numbered, NumberingBuffers};

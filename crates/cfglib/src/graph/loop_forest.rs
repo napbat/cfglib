@@ -33,7 +33,7 @@ use alloc::vec::Vec;
 use core::cmp::Reverse;
 use smallvec::SmallVec;
 
-use super::dominator::{DominatorScratch, DominatorTree, complete_dominator_forest};
+use super::dominator::{DominatorScratch, DominatorTree};
 use super::edge_view::EdgeView;
 use super::structure::{BackEdge, NaturalLoop, find_back_edges, find_back_edges_tagged};
 use super::view::{DenseId, GraphView, RootedView};
@@ -219,7 +219,7 @@ impl<N: DenseId> LoopForest<N> {
     /// handler pad no exception edge leads to, a filter funclet) wants the
     /// loops inside that code too: a loop there is as much a loop as one in live
     /// code. Those come from dominance within the dead code, which
-    /// [`complete_dominator_forest`] provides by rooting a tree at each source
+    /// [`DominatorTree::complete_forest_in`] provides by rooting a tree at each source
     /// component of it.
     ///
     /// The forest of dominators is a whole-graph answer, so the loops it gives
@@ -242,7 +242,7 @@ impl<N: DenseId> LoopForest<N> {
         };
         let mut roots = Vec::new();
         let Some(forest) =
-            complete_dominator_forest(&mut DominatorScratch::new(), &mut roots, graph, dominators)
+            dominators.complete_forest_in(&mut DominatorScratch::new(), &mut roots, graph)
         else {
             return build(graph, &[live]);
         };

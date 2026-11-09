@@ -241,6 +241,10 @@ pub use dataflow::node_fixpoint::{
     try_solve_node_problem_with_config,
 };
 pub use dataflow::program_point::{DefSite, ProgramPoint, UseSite};
+pub use dataflow::slot_fixpoint::{
+    SequentialExecutor, SlotAccess, SlotFixpointStats, WaveExecutor, WaveRequeue, ordered_fixpoint,
+    wave_fixpoint,
+};
 pub use display::{DisplayInstr, IndentedWriter};
 pub use edge::{Edge, EdgeId, EdgeKind, EdgeTag, KindedEdge};
 pub use exception::{
@@ -295,7 +299,8 @@ pub use graph::scc::{
     Scc, SccDecomposition, condensation, condensation_of, kosaraju_scc, tarjan_scc,
 };
 pub use graph::scope::{
-    Scope, ScopeDatum, ScopeDatumId, ScopeEdgeId, ScopeEdgeTag, ScopeGraph, ScopeGraphPathLabel,
+    Scope, ScopeCursor, ScopeCursorQuery, ScopeDatum, ScopeDatumId, ScopeEdgeId, ScopeEdgeTag,
+    ScopeFirstResolution, ScopeFirstResolutionError, ScopeGraph, ScopeGraphPathLabel,
     ScopeGraphQuery, ScopeId, ScopeLinearResolutionError, ScopePath, ScopeQuery, ScopeReference,
     ScopeReferenceId, ScopeResolution, ScopeResolutionCandidate, ScopeResolutionConfig,
     ScopeResolutionIndex, ScopeResolutionStats, ScopeTag,

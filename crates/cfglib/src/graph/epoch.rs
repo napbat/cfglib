@@ -52,6 +52,16 @@ use alloc::vec::Vec;
 /// that a marks buffer never silently reallocates in the middle of the pass it
 /// exists to keep allocation-free. A buffer **larger** than the graph is fine,
 /// which is how one buffer covers a set of graphs — size it by the largest.
+/// A scratch that meets graphs one at a time calls
+/// [`grow_to`](Self::grow_to) and [`reset`](Self::reset) on entry instead,
+/// so the buffer grows only between passes.
+///
+/// # Marking by hand
+///
+/// A pass that walks on its own, such as a worklist over a graph, uses the
+/// same buffer through [`mark`](Self::mark) and
+/// [`is_marked`](Self::is_marked), and clears it with [`reset`](Self::reset)
+/// between two walks.
 ///
 /// # Examples
 ///
@@ -101,8 +111,20 @@ impl EpochMarks {
     /// Clear every mark in O(1) by moving to a fresh epoch.
     ///
     /// The buffer is only walked when the epoch would wrap, which needs
-    /// `u32::MAX` searches over one buffer.
-    pub(crate) fn reset(&mut self) {
+    /// `u32::MAX` resets of one buffer.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cfglib::EpochMarks;
+    ///
+    /// let mut marks = EpochMarks::new(4);
+    /// marks.mark(2);
+    /// assert!(marks.is_marked(2));
+    /// marks.reset();
+    /// assert!(!marks.is_marked(2));
+    /// ```
+    pub fn reset(&mut self) {
         if self.epoch == u32::MAX {
             self.stamps.fill(0);
             self.epoch = 1;
@@ -117,20 +139,44 @@ impl EpochMarks {
     /// never marks a node. This is what a reusable scratch does on entry,
     /// which is a different moment from the one the fixed capacity above
     /// protects: the size is settled before the pass starts rather than
-    /// changing under it.
-    pub(crate) fn grow_to(&mut self, node_count: usize) {
+    /// changing under it. A buffer that already covers `node_count` nodes is
+    /// left as it is.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cfglib::EpochMarks;
+    ///
+    /// let mut marks = EpochMarks::default();
+    /// marks.grow_to(8);
+    /// assert_eq!(marks.capacity(), 8);
+    /// marks.mark(7);
+    /// marks.grow_to(4);
+    /// assert_eq!(marks.capacity(), 8);
+    /// assert!(marks.is_marked(7));
+    /// ```
+    pub fn grow_to(&mut self, node_count: usize) {
         if self.stamps.len() < node_count {
             self.stamps.resize(node_count, 0);
         }
     }
 
     /// Whether `index` is marked in the current epoch.
-    pub(crate) fn is_marked(&self, index: usize) -> bool {
+    ///
+    /// # Panics
+    ///
+    /// Panics when `index` is not below [`capacity`](Self::capacity).
+    #[must_use]
+    pub fn is_marked(&self, index: usize) -> bool {
         self.stamps[index] == self.epoch
     }
 
     /// Mark `index` for the current epoch.
-    pub(crate) fn mark(&mut self, index: usize) {
+    ///
+    /// # Panics
+    ///
+    /// Panics when `index` is not below [`capacity`](Self::capacity).
+    pub fn mark(&mut self, index: usize) {
         self.stamps[index] = self.epoch;
     }
 
@@ -271,7 +317,44 @@ mod tests {
 
     use alloc::vec::Vec;
 
-    use super::EpochSet;
+    use super::{EpochMarks, EpochSet};
+
+    #[test]
+    fn marks_clear_on_reset_and_on_an_epoch_wrap() {
+        let mut marks = EpochMarks::new(4);
+        marks.mark(1);
+        assert!(marks.is_marked(1));
+        assert!(!marks.is_marked(0));
+        marks.reset();
+        assert!(!marks.is_marked(1));
+
+        marks.mark(3);
+        marks.epoch = u32::MAX;
+        marks.mark(2);
+        marks.reset();
+        assert_eq!(marks.epoch, 1, "a wrap starts again at the first epoch");
+        assert!((0..4).all(|index| !marks.is_marked(index)));
+    }
+
+    #[test]
+    fn growing_keeps_the_marks_and_never_marks_a_new_node() {
+        let mut marks = EpochMarks::default();
+        assert_eq!(marks.capacity(), 0);
+        marks.grow_to(3);
+        marks.mark(2);
+        marks.grow_to(6);
+        assert_eq!(marks.capacity(), 6);
+        assert!(marks.is_marked(2));
+        assert!((3..6).all(|index| !marks.is_marked(index)));
+        marks.grow_to(1);
+        assert_eq!(marks.capacity(), 6, "growing never shrinks");
+    }
+
+    #[test]
+    #[should_panic(expected = "index out of bounds")]
+    fn marking_beyond_the_capacity_panics() {
+        EpochMarks::new(2).mark(2);
+    }
 
     #[test]
     fn insert_reports_novelty_and_contains_agrees() {

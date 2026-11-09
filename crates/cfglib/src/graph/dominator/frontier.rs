@@ -42,8 +42,9 @@ use super::{ABSENT, DominatorTree, slot, word};
 use crate::graph::epoch::EpochMarks;
 use crate::graph::view::{DenseId, GraphView};
 
-/// Every buffer [`DominatorTree::iterated_frontier`] fills, owned by the
-/// caller.
+/// Every buffer [`DominatorTree::iterated_frontier`] and
+/// [`DominanceFrontiers::iterated_frontier`](super::DominanceFrontiers::iterated_frontier)
+/// fill, owned by the caller.
 ///
 /// A pass that places phi functions asks for one iterated frontier per
 /// variable, and most variables are written in a handful of blocks. At that
@@ -53,9 +54,9 @@ use crate::graph::view::{DenseId, GraphView};
 /// per-query clearing of the flags is a bump of an epoch rather than a pass over
 /// the graph.
 ///
-/// Hand one scratch to every [`iterated_frontier`](DominatorTree::iterated_frontier)
-/// of the pass. The buffers grow to the largest graph the pass meets and are
-/// then reused by every graph after it, so a query allocates nothing once the
+/// Hand one scratch to every iterated-frontier query of the pass, of either
+/// kind. The buffers grow to the largest graph the pass meets and are then
+/// reused by every graph after it, so a query allocates nothing once the
 /// scratch has seen a graph that size.
 ///
 /// # One scratch, any graph
@@ -100,14 +101,16 @@ use crate::graph::view::{DenseId, GraphView};
 pub struct FrontierScratch {
     /// Nodes that are, or have been, a root of the search: the definitions,
     /// and every node added to the answer. A queued node is walked once.
-    queued: EpochMarks,
+    pub(super) queued: EpochMarks,
     /// Nodes already judged as candidates for the answer, whether the live-in
     /// test took them or not, so a node is judged once per query.
-    judged: EpochMarks,
+    pub(super) judged: EpochMarks,
     /// The first root waiting at each level, [`ABSENT`] when none waits.
     bucket_head: Vec<u32>,
     /// The root after each queued node in its level's bucket.
     bucket_next: Vec<u32>,
+    /// The queued nodes that a walk over a frontier table has yet to visit.
+    pub(super) pending: Vec<u32>,
 }
 
 impl FrontierScratch {
@@ -124,7 +127,7 @@ impl FrontierScratch {
     ///
     /// This is a correctness step, not only hygiene: nothing a previous query
     /// left behind, including one that panicked, may reach this one's answer.
-    fn begin(&mut self, node_bound: usize) {
+    pub(super) fn begin(&mut self, node_bound: usize) {
         for marks in [&mut self.queued, &mut self.judged] {
             marks.grow_to(node_bound);
             marks.reset();
@@ -133,6 +136,7 @@ impl FrontierScratch {
             self.bucket_next.resize(node_bound, ABSENT);
         }
         self.bucket_head.clear();
+        self.pending.clear();
     }
 
     /// Queue `node`, of tree level `level`, as a root to walk, unless it has
@@ -259,6 +263,11 @@ impl<N: DenseId> DominatorTree<N> {
     /// root. Every node and edge is visited at most once, so the cost is
     /// O(n + m) plus the sort of the answer, and a call allocates nothing once
     /// `scratch` and `out` have grown to the size the graph needs.
+    ///
+    /// A graph that takes many queries, or queries whose definitions sit high
+    /// in the tree, reads the same answer faster off a
+    /// [`DominanceFrontiers`](super::DominanceFrontiers) table with
+    /// [`DominanceFrontiers::iterated_frontier`](super::DominanceFrontiers::iterated_frontier).
     ///
     /// # Panics
     ///

@@ -4,7 +4,7 @@
 //! block)` pairs, and grouping them by runner makes every block's frontier
 //! one contiguous, ascending run. [`FrontierRuns`] is that table, and
 //! [`DominanceFrontiers`] hands it to a consumer that asks for one block's
-//! frontier.
+//! frontier, or for the iterated frontier of a set of blocks.
 //!
 //! Both read any [`RootedView`], so a [`Cfg`](crate::Cfg) and a
 //! consumer-owned function view share the one algorithm.
@@ -24,6 +24,8 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
+use super::frontier::FrontierScratch;
+use super::word;
 use crate::block::BlockId;
 use crate::graph::dominator::DominatorTree;
 use crate::graph::view::{DenseId, RootedView};
@@ -65,6 +67,41 @@ impl<N: DenseId> DominanceFrontiers<N> {
         Self { runs }
     }
 
+    /// Recompute the table for `graph` under `dom` in the storage of this
+    /// table.
+    ///
+    /// The result equals [`compute`](Self::compute) of the same graph and
+    /// tree. The buffers of the table, and the pair list of the walk, stay
+    /// from one call to the next, so a pass that recomputes the frontiers of
+    /// each procedure into one table allocates only while the table grows to
+    /// the largest procedure.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cfglib::{Cfg, DominanceFrontiers, DominatorTree, EdgeKind};
+    ///
+    /// let mut cfg = Cfg::<u32>::new();
+    /// let entry = cfg.entry();
+    /// let left = cfg.new_block();
+    /// let merge = cfg.new_block();
+    /// cfg.add_edge(entry, left, EdgeKind::ConditionalTrue);
+    /// cfg.add_edge(entry, merge, EdgeKind::ConditionalFalse);
+    /// cfg.add_edge(left, merge, EdgeKind::Fallthrough);
+    /// let dominators = DominatorTree::compute(&cfg);
+    ///
+    /// let mut frontiers = DominanceFrontiers::default();
+    /// frontiers.recompute(&cfg, &dominators);
+    /// assert_eq!(frontiers.frontier(left), [merge]);
+    /// assert!(frontiers.frontier(entry).is_empty());
+    /// ```
+    pub fn recompute<G>(&mut self, graph: &G, dom: &DominatorTree<N>)
+    where
+        G: RootedView<NodeId = N>,
+    {
+        self.runs.rebuild(graph, dom);
+    }
+
     /// Return the dominance frontier of `block`, in ascending order.
     ///
     /// # Panics
@@ -74,6 +111,109 @@ impl<N: DenseId> DominanceFrontiers<N> {
     #[must_use]
     pub fn frontier(&self, block: N) -> &[N] {
         self.runs.frontier(block)
+    }
+
+    /// Collect the iterated dominance frontier of `defs` into `out`, read off
+    /// this table.
+    ///
+    /// The answer is the one [`DominatorTree::iterated_frontier`] gives for
+    /// the tree and graph that computed the table, with the same `live_in`
+    /// rule: a node is added, and its own frontier explored, only when
+    /// `live_in` accepts it, a definition is a root of the search whether
+    /// `live_in` accepts it or not, and each node is offered to `live_in` at
+    /// most once per call. A definition outside every tree has an empty
+    /// frontier, so it adds nothing. `out` is cleared first and receives each
+    /// member once, in ascending order.
+    ///
+    /// # Choosing between the two queries
+    ///
+    /// This query visits only the frontiers of the definitions and of the
+    /// nodes it adds, so its cost is the size of those frontiers, but the
+    /// table costs one pass over the graph to build, and its size can be
+    /// quadratic in the node count. [`DominatorTree::iterated_frontier`] needs
+    /// no table, but each query scans the dominator subtree of each
+    /// definition, which is the whole tree once a definition is a tree root.
+    /// Build the table for a graph that takes many queries, such as one query
+    /// for each variable or each register of a function, and above all when
+    /// a definition sits high in the tree. Use the tree for a few queries.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a definition is not below the node bound of the view that
+    /// computed the table.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cfglib::{Cfg, DominanceFrontiers, DominatorTree, EdgeKind, FrontierScratch};
+    ///
+    /// let mut cfg = Cfg::<u32>::new();
+    /// let entry = cfg.entry();
+    /// let head = cfg.new_block();
+    /// let body = cfg.new_block();
+    /// let exit = cfg.new_block();
+    /// cfg.add_edge(entry, head, EdgeKind::Fallthrough);
+    /// cfg.add_edge(head, body, EdgeKind::ConditionalTrue);
+    /// cfg.add_edge(head, exit, EdgeKind::ConditionalFalse);
+    /// cfg.add_edge(body, head, EdgeKind::Back);
+    /// let dominators = DominatorTree::compute(&cfg);
+    /// let frontiers = DominanceFrontiers::compute(&cfg, &dominators);
+    ///
+    /// // The entry defines the variable and the loop body writes it again.
+    /// let mut scratch = FrontierScratch::new();
+    /// let mut placed = Vec::new();
+    /// frontiers.iterated_frontier(&mut scratch, [entry, body], None, &mut placed);
+    /// assert_eq!(placed, [head]);
+    ///
+    /// // Pruned by liveness: the variable is dead on entry to the header.
+    /// let live_in = |block| block != head;
+    /// frontiers.iterated_frontier(&mut scratch, [entry, body], Some(&live_in), &mut placed);
+    /// assert!(placed.is_empty());
+    /// ```
+    pub fn iterated_frontier(
+        &self,
+        scratch: &mut FrontierScratch,
+        defs: impl IntoIterator<Item = N>,
+        live_in: Option<&dyn Fn(N) -> bool>,
+        out: &mut Vec<N>,
+    ) {
+        out.clear();
+        scratch.begin(self.runs.starts.len().saturating_sub(1));
+        for def in defs {
+            let index = def.index();
+            if !scratch.queued.is_marked(index) {
+                scratch.queued.mark(index);
+                scratch.pending.push(word(index));
+            }
+        }
+        while let Some(node) = scratch.pending.pop() {
+            for &member in self.frontier(N::from_index(node as usize)) {
+                let index = member.index();
+                if scratch.judged.is_marked(index) {
+                    continue;
+                }
+                scratch.judged.mark(index);
+                if live_in.is_some_and(|accepts| !accepts(member)) {
+                    continue;
+                }
+                out.push(member);
+                if !scratch.queued.is_marked(index) {
+                    scratch.queued.mark(index);
+                    scratch.pending.push(word(index));
+                }
+            }
+        }
+        out.sort_unstable();
+    }
+}
+
+impl<N> Default for DominanceFrontiers<N> {
+    /// The table of the empty graph, which allocates nothing. It holds no
+    /// frontier until [`recompute`](DominanceFrontiers::recompute) fills it.
+    fn default() -> Self {
+        Self {
+            runs: FrontierRuns::default(),
+        }
     }
 }
 

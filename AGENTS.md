@@ -87,6 +87,9 @@ Follow the Cargo package layout:
   infallible wrappers, on one shared worklist, with `SolveConfig`, `SolveError` and
   `TrySolveError`. A derived analysis wraps a solver or runs its own loop. It does not add to
   the set.
+- The slot fixpoint drivers (`ordered_fixpoint`, `wave_fixpoint`) are schedulers over keyed
+  slots that the caller owns. They have no graph and no problem trait, so they are not in the
+  solver set above.
 - Give sibling implementations parallel module paths and names (`breadth_first.rs`,
   `depth_first.rs`) behind one small coordinator module.
 - Return structured errors. Do not panic in a public API unless the panic is documented.

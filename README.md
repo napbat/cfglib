@@ -118,6 +118,12 @@ Paths are cycle-free, deterministic, and optionally bounded; truncated results
 report which bound was reached. Scope storage supports `serde` when the feature
 is enabled.
 
+`ScopeFirstResolution::try_compute` follows the one upward path that a
+`ScopeCursorQuery` admits and stops at the first accepted datum. Its hooks see
+a `ScopeCursor` (the start, the end, and the length of a path) instead of a
+stored path, so a walk of `D` scopes costs `O(D)` hook calls and allocates
+nothing. `ScopeCursor::of_path` lets one policy type serve both query forms.
+
 ### Stack graphs
 
 `graph::stack::StackGraph<F, S, N, E>` implements the standard root,
@@ -176,7 +182,7 @@ A fact is a side table about one state of a function. No algorithm changes the f
 
 Every dialect type is plain data that the consumer defines. The traits contain no language, runtime, calling convention, opcode, or source-location type.
 
-cfglib no longer holds IR storage or IR algorithms. The removal covers the RTL, MLIL, and HLIL function types and builder implementations, tail duplication, the shared vocabulary trait, the provenance map, the facts over an RTL function (root table, block summaries, and the rest, now in `il::root_facts`), and the value analyses over MLIL (use index, liveness, constant propagation, and dead-instruction marking). A consumer that needs one of them keeps it in its own crate; the `il` crate holds them for its IR.
+cfglib no longer holds IR storage or IR algorithms. The removal covers the RTL, MLIL, and HLIL function types and builder implementations, tail duplication, the shared vocabulary trait, the provenance map, the facts over an RTL function (root table, block summaries, and the rest, now in `il::rtl::facts`), and the value analyses over MLIL (use index, liveness, constant propagation, and dead-instruction marking). A consumer that needs one of them keeps it in its own crate; the `il` crate holds them for its IR.
 
 #### Register-transfer contract (`ir::rtl`)
 
@@ -274,7 +280,7 @@ The algorithms over this contract (lift from a flat function, lowering, structur
 | DFS / BFS | `depth_first_preorder`, `depth_first_postorder`, `breadth_first`, and matching `Cfg` methods | Direction-selectable traversals over `GraphView` |
 | Edge-aware traversal | `breadth_first_edges[_with]`, `depth_first_edges[_with]`, `shortest_path_edges`, `EdgeStep` | Every distinct edge once, with identity and endpoints, over any edge view; parallel edges stay distinct |
 | Configurable search | `search` + `SearchConfig` (order, visited policy, direction, depth bound) | First-match, pruning (`Visit::Skip`), early exit (`ControlFlow::Break`), and backtracking as configuration; `VisitedPolicy::Path` un-marks on unwind so every route to a node is reported |
-| Reusable search marks | `search_with_marks` + `EpochMarks` | The same search with its visited marks in a caller-owned epoch-stamped buffer: a per-root pass allocates marks once instead of an O(node count) buffer per root, and each search still starts from a clean set (epoch bump, O(1)) |
+| Reusable search marks | `search_with_marks` + `EpochMarks` (`mark`, `is_marked`, `reset`, `grow_to`) | The same search with its visited marks in a caller-owned epoch-stamped buffer: a per-root pass allocates marks once instead of an O(node count) buffer per root, and each search still starts from a clean set (epoch bump, O(1)). A hand-written walk marks and resets the same buffer directly |
 | Readable dense set | `EpochSet` | The same epoch stamp with its members kept: constant-time `insert`/`contains`, a constant-time `clear`, and `ones` in one pass over the answer rather than the universe (insertion order, not ascending) |
 | Reusable search scratch | `search_with_scratch` + `SearchScratch` | The same search with the marks *and* the call's own buffers — seeds, frontier, adjacency — caller-owned, for a pass whose searches are small enough that the call is the cost; marks and buffers both reset on entry |
 | Disjoint sets | `DisjointSet` (`union` by rank, `union_toward_min` for deterministic minimum representatives, growable via `push`, `reset` to reuse the storage) | A union-find, usable directly by consumers |
@@ -294,9 +300,10 @@ The algorithms over this contract (lift from a flat function, lowering, structur
 | Topological sort | `topological_sort` | Stable ordering or cycle detection |
 | Dominator tree | `DominatorTree::compute` (rooted views), `compute_from` (explicit root) | Simple Lengauer-Tarjan over any graph view, O(m log n) with explicit stacks. The tree is numbered once in preorder, so `dominates` is O(1) and `subtree`, `preorder`, `level`, `children`, and `nearest_common_dominator` need no extra tables |
 | Reusable dominator scratch | `DominatorTree::compute_in`, `compute_from_in` + `DominatorScratch` | The same tree with the call's working buffers caller-owned, for a pass computing one tree per procedure over a codebase; the scratch holds dense indices, so one instance serves every graph and node-id type |
+| Dominator forest | `DominatorTree::complete_forest_in` + `DominatorScratch` | Extends a tree over the code its root misses: each source component of unreachable code roots a tree of its own, and every frontier query reads the forest like a tree. `None`, at the cost of one scan, when the root reaches every node |
 | Post-dominator tree | `PostDominatorTree::compute` (rooted views) → `PostDominatorTree<N>`, `PostNode` | Over a virtual exit that every exit joins. Exit-free regions are cut at the blocks closing each loop, so every reachable block has facts independent of successor order. `post_dominates` is O(1); `ipdom`, `nearest_common_post_dominator`, `exits`, `cut_roots`, `reaches_exit`, `subtree`, `children`, `frontier` (the control-dependence sources of a block), and `control_dependents` (the blocks control dependent on one arm) answer from the one numbered tree |
 | Reusable post-dominator scratch | `PostDominatorTree::compute_in` + `PostDominatorScratch` | The same tree with the call's working buffers caller-owned, parallel to `DominatorScratch` |
-| Dominance frontiers | `DominanceFrontiers::compute`; `frontier` → `&[N]` | Every block's frontier in one flat run table, read back as a slice in ascending order. For SSA φ-placement |
+| Dominance frontiers | `DominanceFrontiers::compute`, `recompute` (into the same storage); `frontier` → `&[N]`; `iterated_frontier` + `FrontierScratch` | Every block's frontier in one flat run table, read back as a slice in ascending order. `iterated_frontier` closes a set of definitions under the table, with an optional live-in filter, for SSA φ-placement with many queries per graph; `DominatorTree::iterated_frontier` answers the same query without a table, for a few queries |
 | Dominator recompute diff | `DominatorTree::compute_with_diff` | Recompute after a graph edit, reporting the nodes whose idom changed |
 | Strongly connected components | `tarjan_scc` → `SccDecomposition<N>`, `condensation` → component DAG of owned `Scc<N>` payloads | Generic iterative Tarjan algorithm, reverse-topological order (leaves first); components are ascending slices of one flat array (`components()`, `component(node)` → `Scc` with `nodes()`, `contains`, `is_singleton`, `is_cyclic`); removed node slots belong to no component, and querying one panics |
 | SCC in topological order | `kosaraju_scc` → `SccDecomposition<N>` | The same partition numbered sources first (`index(u) < index(v)` across every edge); the classic deterministic two-pass algorithm, for budgeted forward closures over the condensation |
@@ -343,6 +350,7 @@ These analyses take `&G` where `G: CfgView`: `CfgMetrics` and `detect_cfg_patter
 |---|---|---|
 | Generic fixpoint solver | `solve_problem[_from][_with_config]`, `Problem` / `TryProblem` traits, `Facts` | Forward or backward, any lattice type; the block, node, and edge solvers carry the same seeded/bounded/fallible matrix over shared `SolveConfig` and `SolveError`, run on one worklist, and report node facts in one program-order `Facts` type (a backward node's IN is what its transfer produced); every problem names its starting fact `boundary`; `meet_options` lifts any lattice to `Option<F>` with `None` as unreachable bottom |
 | Node-level fixpoint | `solve_node_problem[_from][_with_config]`, `NodeProblem` / `TryNodeProblem` traits | Per-node `Facts` over any graph view (taint, reachability-with-facts) |
+| Slot fixpoint drivers | `wave_fixpoint` (`WaveExecutor`, `SequentialExecutor`, `WaveRequeue`), `ordered_fixpoint` (`SlotAccess`), `SlotFixpointStats` | Schedule units over slots that the caller owns, without a graph view or a problem trait: waves evaluated against the facts known before the wave and merged in group order, or ordered (Gauss-Seidel) sweeps whose evaluations record the slots that they read |
 | Edge-sensitive fixpoint | `solve_edge_problem[_from][_with_config]`, `EdgeProblem` trait | Full or seeded, optionally bounded, per-edge transfer over any edge view; stable id/data plus physical node pre/post states and deterministic bounded-solve errors |
 | Fallible edge-sensitive fixpoint | `try_solve_edge_problem[_from][_with_config]`, `TryEdgeProblem` trait | Preserves consumer boundary, merge, node-transfer, and edge-transfer errors separately from solver limits |
 | Reachability-lifted edge analysis | `Reachable` + `ReachableEdgeProblem` trait | Verification-style analyses over `Option` facts: `None` is unreached bottom, transfers short-circuit, entry facts start the flow, and each edge chooses pre- or post-state (exceptional edges observe the state the node received) |
@@ -518,7 +526,7 @@ let dominators = DominatorTree::compute(&cfg);
 
 SSA construction over the same `InstrInfo` adapter lives in the `il` crate.
 
-For an IR adapter, implement the `ir::rtl` or `ir::mlil` traits on your own dense storage. Keep every arena, builder, and editing pass in your crate. Run the graph algorithms of cfglib (dominators, post-dominators, loops, and the rest) on your function view, and apply their answers yourself; the facts over an RTL function, such as the root table and block summaries, are in `il::root_facts`. A machine-shaped language emits `ir::rtl` records through `InstructionBuilder`. A variable-shaped language implements `ir::mlil::FunctionView` directly. The consumer writes its own value analyses over that view, because they depend on the semantics of its dialect, and its own passes delete or rewrite instructions.
+For an IR adapter, implement the `ir::rtl` or `ir::mlil` traits on your own dense storage. Keep every arena, builder, and editing pass in your crate. Run the graph algorithms of cfglib (dominators, post-dominators, loops, and the rest) on your function view, and apply their answers yourself; the facts over an RTL function, such as the root table and block summaries, are in `il::rtl::facts`. A machine-shaped language emits `ir::rtl` records through `InstructionBuilder`. A variable-shaped language implements `ir::mlil::FunctionView` directly. The consumer writes its own value analyses over that view, because they depend on the semantics of its dialect, and its own passes delete or rewrite instructions.
 
 The concrete shader-bytecode adapter (the d3dasm decompiler's `cfg`
 module) derives native register-component identities from decoded masks
