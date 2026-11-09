@@ -23,16 +23,6 @@ The large table is sensitive to whatever else the machine is doing; pin the
 process to one core and raise its priority before comparing two revisions of
 it. The procedure-scale table is stable without that.
 
-`analysis-scratch/main.rs` is a third self-contained target. It reports what
-one callable's flow build allocates, phase by phase (reverse postorder, the
-dominator tree, dominance frontiers, phi placement, SSA, the memory trace,
-memory SSA, and memory-carried value flow), on a chain of if/else diamonds at
-three procedure sizes, and what each scratch-taking entry point costs once its
-working storage is warm. The CPU build prints best-of-seven nanoseconds per
-call; the allocation build prints allocations and requested bytes per call. An
-optional argument filters by substring of a `phase/size` name such as
-`ssa-form-in/large`.
-
 ## Adding a benchmark
 
 Every case is registered through `benchmark_case!`, which keeps the operation,
@@ -70,12 +60,6 @@ of `graph.rs` hide behind per-step costs: many short chases and searches, a
 dense fan-out read once per parser step, layered route and fold walks, and a
 linear stack reverse index. Cases there that time a method or constructor name
 no facade function.
-
-`performance/rtl_placement.rs` holds the one fixture that is not a `Cfg` or a
-`Graph`: a synthetic register-transfer function, the consumer-owned view that
-`ir::rtl` facts read, with the oracle behind `rtl_param_placement`. The case
-times `ParamPlacement::compute` alone, with the dominator tree, frontiers,
-summaries, and liveness built before timing.
 
 ## CPU timing
 

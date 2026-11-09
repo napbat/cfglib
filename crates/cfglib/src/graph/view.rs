@@ -1,7 +1,7 @@
 //! Read-only graph view traits consumed by the generic algorithms.
 //!
 //! [`GraphView`] abstracts forward and reverse adjacency over dense node
-//! identities, so traversals, SCC computation, dominance, and coloring run on
+//! identities, so traversals, SCC computation, and dominance run on
 //! [`Graph`](crate::Graph), [`Cfg`](crate::Cfg), or consumer-owned storage
 //! without migration. [`NodeView`] adds access to graph-owned node payloads,
 //! [`EdgeView`](super::edge_view::EdgeView) adds edge identity and data, and

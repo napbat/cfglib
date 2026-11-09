@@ -30,8 +30,7 @@ pub type BlockId = Id<BlockTag>;
 /// [`Cfg::block`](crate::Cfg::block) resolves.
 ///
 /// Predication (ARM IT blocks, GPU wave predication, CMOV sequences) is not
-/// block state: instructions declare their guards through
-/// [`Predicated`](crate::Predicated).
+/// block state: a guard belongs to the instruction payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BasicBlock<I> {

@@ -33,7 +33,6 @@ mod loop_body_merges;
 mod lost_transfers;
 mod many_blocks;
 mod non_compact;
-mod predicated;
 mod regions;
 mod rejoining_arms;
 mod semantics;

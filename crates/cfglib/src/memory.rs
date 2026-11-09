@@ -1,4 +1,4 @@
-//! Language-independent memory events and static CFG traces.
+//! Language-independent memory events.
 //!
 //! Instructions opt in through [`MemoryEventInfo`]. The common event shape
 //! distinguishes reads, writes, compound read/modify/write operations,
@@ -7,18 +7,14 @@
 //! hardware scopes while a source language can use fields, objects, and
 //! language-level ordering domains.
 //!
-//! Derived memory SSA and combined value flow live in
-//! [`crate::dataflow::memory`]; this module owns only the semantic event
-//! vocabulary and static event trace.
+//! This module owns only the semantic event vocabulary. Memory SSA, event
+//! traces and combined value flow live in the `il` crate.
 
 extern crate alloc;
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use core::ops::Range;
 
-use crate::dataflow::cfg_view::CfgView;
-use crate::{BlockId, InstrInfo, ProgramPoint, SsaForm, SsaInstruction, SsaValue, VariableId};
+use crate::InstrInfo;
 
 /// Instruction-level summary of reported memory accesses.
 ///
@@ -314,23 +310,6 @@ impl<L, V> MemoryAccess<L, V> {
     }
 }
 
-impl<L, V: VariableId> MemoryAccess<L, V> {
-    /// The values `instruction` reads for this access's address
-    /// dependencies, in declaration order.
-    ///
-    /// `None` when a dependency is absent from the instruction's reported
-    /// uses, which is an adapter contract violation.
-    pub(crate) fn ssa_address_uses(
-        &self,
-        instruction: &SsaInstruction<V>,
-    ) -> Option<Vec<SsaValue<V>>> {
-        self.address_uses
-            .iter()
-            .map(|address| instruction.use_of(address).cloned())
-            .collect()
-    }
-}
-
 /// One memory-relevant event emitted by an instruction.
 ///
 /// Fence payloads retain the consumer's ordering, scope, and execution-barrier
@@ -415,178 +394,6 @@ pub trait MemoryEventInfo: InstrInfo {
         self.memory_events()
             .map(|event| event.operations())
             .collect()
-    }
-}
-
-/// One event in a [`MemoryTrace`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MemoryTraceEntry<L, V, F> {
-    point: ProgramPoint,
-    event_index: usize,
-    event: MemoryEvent<L, V, F>,
-}
-
-impl<L, V, F> MemoryTraceEntry<L, V, F> {
-    /// The instruction that emitted this event.
-    #[must_use]
-    pub const fn point(&self) -> ProgramPoint {
-        self.point
-    }
-
-    /// The event's zero-based position within its instruction.
-    #[must_use]
-    pub const fn event_index(&self) -> usize {
-        self.event_index
-    }
-
-    /// The emitted memory event.
-    #[must_use]
-    pub const fn event(&self) -> &MemoryEvent<L, V, F> {
-        &self.event
-    }
-
-    /// Resolves this access's address dependencies to their SSA versions.
-    ///
-    /// `ssa` must have been computed from the same CFG as the trace. Returns
-    /// `None` for a fence, a mismatched SSA form, or an adapter contract
-    /// violation where an address dependency is absent from the instruction's
-    /// reported uses.
-    #[must_use]
-    pub fn ssa_address_uses(&self, ssa: &SsaForm<V>) -> Option<Vec<SsaValue<V>>>
-    where
-        V: VariableId,
-    {
-        let MemoryEvent::Access(access) = &self.event else {
-            return None;
-        };
-        access.ssa_address_uses(ssa.instruction(self.point)?)
-    }
-}
-
-/// A static index of every memory event in a CFG.
-///
-/// Entries follow stable CFG block-allocation order, instruction order within
-/// each block, and adapter-declared event order within each instruction. This
-/// is not one runtime order across mutually exclusive branches; CFG edges
-/// still determine which block sequences can execute.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MemoryTrace<L, V, F> {
-    entries: Vec<MemoryTraceEntry<L, V, F>>,
-    by_point: BTreeMap<ProgramPoint, Range<usize>>,
-}
-
-impl<L, V, F> MemoryTrace<L, V, F> {
-    /// Builds a static memory-event trace for `cfg`.
-    #[must_use]
-    pub fn compute<G>(cfg: &G) -> Self
-    where
-        G: CfgView,
-        G::Inst: MemoryEventInfo<Location = L, Fence = F> + InstrInfo<Variable = V>,
-    {
-        let mut trace = Self::empty();
-        trace.rebuild(cfg);
-        trace
-    }
-
-    /// A trace of nothing, for a consumer that fills it per procedure.
-    pub(crate) fn empty() -> Self {
-        Self {
-            entries: Vec::new(),
-            by_point: BTreeMap::new(),
-        }
-    }
-
-    /// Replace the trace's contents with `cfg`'s, keeping the entry buffer.
-    ///
-    /// This is [`compute`](Self::compute) for a caller that holds one trace
-    /// across a whole codebase rather than building one per procedure.
-    pub(crate) fn rebuild<G>(&mut self, cfg: &G)
-    where
-        G: CfgView,
-        G::Inst: MemoryEventInfo<Location = L, Fence = F> + InstrInfo<Variable = V>,
-    {
-        self.entries.clear();
-        self.by_point.clear();
-
-        for block_id in cfg.node_ids() {
-            for (inst_idx, instruction) in cfg.instructions(block_id).iter().enumerate() {
-                let point = ProgramPoint {
-                    block: block_id,
-                    inst_idx,
-                };
-                let start = self.entries.len();
-                self.entries
-                    .extend(
-                        instruction
-                            .memory_events()
-                            .enumerate()
-                            .map(|(event_index, event)| MemoryTraceEntry {
-                                point,
-                                event_index,
-                                event,
-                            }),
-                    );
-                if self.entries.len() != start {
-                    self.by_point.insert(point, start..self.entries.len());
-                }
-            }
-        }
-    }
-
-    /// Every event in stable structural order.
-    #[must_use]
-    pub fn entries(&self) -> &[MemoryTraceEntry<L, V, F>] {
-        &self.entries
-    }
-
-    /// Events emitted by one instruction, or an empty slice when it emits none.
-    #[must_use]
-    pub fn entries_at(&self, point: ProgramPoint) -> &[MemoryTraceEntry<L, V, F>] {
-        self.by_point
-            .get(&point)
-            .map_or(&[], |range| &self.entries[range.clone()])
-    }
-
-    /// Events in one block, preserving their instruction and event order.
-    pub fn entries_in(&self, block: BlockId) -> impl Iterator<Item = &MemoryTraceEntry<L, V, F>> {
-        self.entries
-            .iter()
-            .filter(move |entry| entry.point.block == block)
-    }
-
-    /// Entries that read memory; read/modify/write entries appear here once.
-    pub fn reads(&self) -> impl Iterator<Item = &MemoryTraceEntry<L, V, F>> {
-        self.entries.iter().filter(|entry| entry.event.reads())
-    }
-
-    /// Entries that write memory; read/modify/write entries appear here once.
-    pub fn writes(&self) -> impl Iterator<Item = &MemoryTraceEntry<L, V, F>> {
-        self.entries.iter().filter(|entry| entry.event.writes())
-    }
-
-    /// Compound read/modify/write entries in stable structural order.
-    pub fn modifies(&self) -> impl Iterator<Item = &MemoryTraceEntry<L, V, F>> {
-        self.entries.iter().filter(|entry| entry.event.modifies())
-    }
-
-    /// Summarizes the memory accesses emitted by one instruction.
-    #[must_use]
-    pub fn operations_at(&self, point: ProgramPoint) -> MemoryOperations {
-        self.entries_at(point)
-            .iter()
-            .map(|entry| entry.event.operations())
-            .collect()
-    }
-
-    /// Fence entries in stable structural order.
-    pub fn fences(&self) -> impl Iterator<Item = &MemoryTraceEntry<L, V, F>> {
-        self.entries.iter().filter(|entry| entry.event.is_fence())
-    }
-
-    /// Whether the CFG contains no reported memory events.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
     }
 }
 

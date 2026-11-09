@@ -20,12 +20,13 @@ use core::fmt::Write as _;
 
 use cfglib::{
     BlockId, BuildError, Cfg, CfgBuilder, ClrExceptionRegion, ClrHandler, ClrHandlerKind,
-    ControlNode, ControlTree, DenseBits, DenseFanout, DisplayInstr, DominatorTree, EdgeKind,
-    EhModel, Fanout, FlowControl, FlowEffect, Graph, Handler, HandlerBody, HandlerKind,
-    HandlerTypes, HornClauses, InstrInfo, KeyedGraph, Liveness, NodeId, PostDominatorTree,
-    SortedMap, SsaForm, StackGraphError, TextError, TraversalDirection, VectoredExceptionModel,
+    ControlNode, ControlTree, DenseBits, DenseFanout, Direction, DisplayInstr, DominatorTree,
+    EdgeKind, EhModel, Fanout, FlowControl, FlowEffect, Graph, Handler, HandlerBody, HandlerKind,
+    HandlerTypes, HornClauses, InstrInfo, KeyedGraph, NodeId, PostDominatorTree, Problem,
+    SortedMap, StackGraphError, TextError, TraversalDirection, VectoredExceptionModel,
     VectoredHandlerKind, VectoredHandlerOrder, breadth_first, install_clr_region, parse_cfg_text,
-    parse_text, remove_unreachable, shortest_path, simplify, tarjan_scc, topological_sort, verify,
+    parse_text, remove_unreachable, shortest_path, simplify, solve_problem, tarjan_scc,
+    topological_sort, verify,
 };
 
 /// An instruction a consumer owns: its text, and the variables it reads and
@@ -129,26 +130,53 @@ fn the_text_form_is_an_alloc_string_that_parses_back() {
     assert!(cfg.to_dot().contains("digraph cfg"));
 }
 
+/// Live variables, as a consumer writes them with owned names.
+struct Live;
+
+impl Problem<Cfg<Statement>> for Live {
+    type Fact = BTreeSet<String>;
+
+    fn direction(&self) -> Direction {
+        Direction::Backward
+    }
+
+    fn bottom(&self, _cfg: &Cfg<Statement>) -> Self::Fact {
+        BTreeSet::new()
+    }
+
+    fn boundary(&self, _cfg: &Cfg<Statement>) -> Self::Fact {
+        BTreeSet::new()
+    }
+
+    fn meet(&self, a: &Self::Fact, b: &Self::Fact) -> Self::Fact {
+        a.union(b).cloned().collect()
+    }
+
+    fn transfer(&self, cfg: &Cfg<Statement>, block: BlockId, live: &Self::Fact) -> Self::Fact {
+        let mut live = live.clone();
+        for statement in cfg.block(block).instructions().iter().rev() {
+            for def in statement.defs() {
+                live.remove(def);
+            }
+            live.extend(statement.uses().iter().cloned());
+        }
+        live
+    }
+}
+
 #[test]
-fn ssa_and_liveness_run_over_owned_string_variables() {
+fn a_fixpoint_problem_runs_over_owned_string_variables() {
     let (cfg, [entry, then_block, else_block, merge]) = diamond();
-    let dominators = DominatorTree::compute(&cfg);
-    let ssa = SsaForm::compute(&cfg, &dominators);
+    let facts = solve_problem(&cfg, &Live).expect("the unbounded solve has no step limit");
 
-    let phi = &ssa.block(merge).phis[0];
-    assert_eq!(phi.result.variable, "x");
-    assert_eq!(phi.operands().len(), 2);
-    assert_ne!(phi.operands()[0].1, phi.operands()[1].1);
-
-    let liveness = Liveness::compute(&cfg);
-    let at_merge: &BTreeSet<String> = liveness.live_in(merge);
+    let at_merge: &BTreeSet<String> = facts.fact_in(merge);
     assert_eq!(
         at_merge.iter().map(String::as_str).collect::<Vec<_>>(),
         ["x"]
     );
-    assert!(liveness.is_live_out(&"x".to_string(), then_block));
-    assert!(liveness.is_live_in(&"c".to_string(), entry));
-    assert!(!liveness.is_live_in(&"x".to_string(), else_block));
+    assert!(facts.fact_out(then_block).contains("x"));
+    assert!(facts.fact_in(entry).contains("c"));
+    assert!(!facts.fact_in(else_block).contains("x"));
 }
 
 #[test]

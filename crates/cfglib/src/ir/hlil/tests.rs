@@ -25,8 +25,6 @@ macro_rules! over_toys {
     };
 }
 
-pub(crate) use over_toys;
-
 /// Declares a dense handle of a toy storage, the way a consumer defines its
 /// own.
 macro_rules! dense_id {
@@ -47,32 +45,13 @@ macro_rules! dense_id {
     };
 }
 
-mod depth;
-mod effects;
-mod fixtures;
-mod flat;
-mod flat_fixtures;
-mod flat_lift;
-mod flat_storage;
-mod fused;
-mod generated;
 mod imp;
 mod kit;
-mod lifting;
-mod lowering;
-mod recovery;
-mod rendering;
-mod round_trip;
-mod sketch;
-mod sketch_build;
 mod storage;
-mod structuring;
 mod sym;
-mod verification;
 mod walks;
 
-pub(crate) use depth::{EVERY_WRAP, Wrap, nest, nested, on_small_stack};
 pub(crate) use imp::Imp;
 pub(crate) use kit::{Kit, Prim, Ty};
-pub(crate) use storage::{ExprId, StmtId, ToyHlil, ToyHlilBuilder, VarId};
+pub(crate) use storage::{StmtId, ToyHlil, ToyHlilBuilder};
 pub(crate) use sym::Sym;

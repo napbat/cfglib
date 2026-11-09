@@ -6,58 +6,18 @@ use alloc::vec::Vec;
 
 use crate::ir::hlil::{
     ChildBodyKind, FunctionBuilder, FunctionView, Handler, HandlerKind, SwitchArm,
-    compound_assignment, expressions_equal, for_each_child_body, for_each_statement_expression,
-    visit_expression_tree, visit_statements,
+    for_each_child_body, for_each_statement_expression, visit_expression_tree, visit_statements,
 };
 
 use super::{Kit, Prim, StmtId, ToyHlil, ToyHlilBuilder, Ty};
 
 over_toys!(
-    compound_assignments_are_recognized_structurally,
     statement_visiting_follows_for_execution_order,
     child_bodies_report_roles_in_execution_order,
     statement_expressions_are_the_direct_operands,
     expression_trees_visit_operands_before_parents,
     deep_expression_trees_do_not_recurse,
 );
-
-fn compound_assignments_are_recognized_structurally<D: Kit>() {
-    let mut builder = ToyHlilBuilder::<D>::new();
-    let counter = builder.int_variable(0);
-    let other = builder.int_variable(1);
-
-    let read = builder.read(counter);
-    let one = builder.number(1);
-    let sum = builder.call(Prim::Add, &[read, one], Ty::Integer);
-    let target = builder.read(counter);
-    let compound = builder.assign(target, sum);
-
-    // The same shape assigning into a different variable is not compound.
-    let read_counter = builder.read(counter);
-    let two = builder.number(2);
-    let plain_sum = builder.call(Prim::Add, &[read_counter, two], Ty::Integer);
-    let other_target = builder.read(other);
-    let plain = builder.assign(other_target, plain_sum);
-    let expression = builder.noop();
-    let function = builder.finish(&[compound, plain, expression]).unwrap();
-
-    let (op, operand) = compound_assignment(&function, compound)
-        .expect("counter = counter + 1 is a compound assignment");
-    assert_eq!(*op, D::op(Prim::Add));
-    assert_eq!(operand, one);
-    assert!(
-        compound_assignment(&function, plain).is_none(),
-        "the first operand reads a different variable than the target"
-    );
-    assert!(
-        compound_assignment(&function, expression).is_none(),
-        "an expression statement is not an assignment"
-    );
-
-    assert!(expressions_equal(&function, read, target));
-    assert!(!expressions_equal(&function, read, other_target));
-    assert!(!expressions_equal(&function, sum, plain_sum));
-}
 
 /// A `for` statement with one statement per section.
 fn for_loop<D: Kit>() -> (ToyHlil<D>, [StmtId; 4]) {
@@ -258,7 +218,6 @@ fn deep_expression_trees_do_not_recurse<D: Kit>() {
         .finish(&[first_statement, second_statement])
         .expect("a deep chain is well formed");
 
-    assert!(expressions_equal(&function, first, second));
     let mut visited = 0;
     visit_expression_tree(&function, first, &mut |_| visited += 1);
     assert_eq!(visited, 2 * DEPTH + 1);

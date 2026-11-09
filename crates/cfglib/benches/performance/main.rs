@@ -5,7 +5,6 @@ mod api_cases;
 mod fixtures;
 mod harness;
 mod hot_paths;
-mod rtl_placement;
 mod structural_oracles;
 
 use harness::{BenchmarkSuite, benchmark_target};

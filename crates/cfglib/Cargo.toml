@@ -32,7 +32,3 @@ harness = false
 [[bench]]
 name = "graph-store"
 harness = false
-
-[[bench]]
-name = "analysis-scratch"
-harness = false

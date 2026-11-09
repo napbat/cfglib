@@ -13,8 +13,9 @@ use super::shape::{ExprShape, Handler, HandlerKind, StmtShape, SwitchArm};
 /// One entity of a structured function, named by a handle.
 ///
 /// The three type parameters are the statement, expression, and variable
-/// handles of one storage. A table that relates two functions, such as the
-/// flat function and the lifted one, keys its rows with this type.
+/// handles of one storage. A table that relates two functions, such as a
+/// flat function and the structured function lifted from it, keys its rows
+/// with this type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Entity<S, E, V> {
     /// A structured statement.
@@ -56,14 +57,11 @@ pub enum ChildBodyKind {
 ///   one body is free.
 /// - Every index below a `*_count` is live. The view has no removed slots: a
 ///   rewrite builds a new function through a
-///   [`FunctionBuilder`](super::FunctionBuilder) instead of editing this one,
-///   as [`recover_structure`](super::recover_structure) does.
+///   [`FunctionBuilder`](super::FunctionBuilder) instead of editing this one.
 /// - A handle that a view yields is below its count. The methods of the view
 ///   panic or return unspecified data for a handle outside the function, as an
-///   index into a pool does; [`verify`](fn@super::verify) is the check that a
-///   function meets this contract. [`recover_structure`](super::recover_structure)
-///   does not rely on it: it checks each handle that it reads and reports one
-///   outside the function as [`RecoverError::Malformed`](super::RecoverError).
+///   index into a pool does. A reader that does not trust its input checks
+///   each handle against the counts before it reads it.
 pub trait FunctionView<D: Dialect> {
     /// A statement, dense within the consumer's storage.
     type Stmt: DenseId;
@@ -257,29 +255,6 @@ pub fn visit_statements<'a, D, F>(
     }
 }
 
-/// The loop that a labeled group names: its only statement, when that
-/// statement is a loop. Any other group labels a block.
-///
-/// `verify` and `lower` share this rule, so a label that `lower` resolves as
-/// a loop is one that `verify` accepts as a `continue` target.
-pub(super) fn labeled_loop<D, F>(view: &F, body: &[F::Stmt]) -> Option<F::Stmt>
-where
-    D: Dialect,
-    F: FunctionView<D>,
-{
-    let &[only] = body else {
-        return None;
-    };
-    matches!(
-        view.stmt(only),
-        StmtShape::While { .. }
-            | StmtShape::DoWhile { .. }
-            | StmtShape::Loop { .. }
-            | StmtShape::For { .. }
-    )
-    .then_some(only)
-}
-
 /// Visits the expression tree under `root` in postorder: the operands of an
 /// operation before the operation.
 ///
@@ -304,70 +279,4 @@ where
             pending.pop();
         }
     }
-}
-
-/// Returns whether two expression trees are structurally identical: the same
-/// variable reads, equal constants, and equal operations over pairwise
-/// identical operands.
-///
-/// The types of the occurrences are not compared.
-#[must_use]
-pub fn expressions_equal<D, F>(view: &F, left: F::Expr, right: F::Expr) -> bool
-where
-    D: Dialect,
-    F: FunctionView<D>,
-{
-    let mut pending = vec![(left, right)];
-    while let Some((left, right)) = pending.pop() {
-        match (view.expr(left), view.expr(right)) {
-            (ExprShape::Variable(left), ExprShape::Variable(right)) if left == right => {}
-            (ExprShape::Constant(left), ExprShape::Constant(right)) if left == right => {}
-            (
-                ExprShape::Operation {
-                    op: left_op,
-                    operands: left_operands,
-                },
-                ExprShape::Operation {
-                    op: right_op,
-                    operands: right_operands,
-                },
-            ) if left_op == right_op && left_operands.len() == right_operands.len() => {
-                pending.extend(
-                    left_operands
-                        .iter()
-                        .copied()
-                        .zip(right_operands.iter().copied()),
-                );
-            }
-            _ => return false,
-        }
-    }
-    true
-}
-
-/// Returns the compound form of the assignment `stmt`, when it has one: the
-/// operation and the second operand of `target = op(target, operand)`.
-///
-/// An assignment qualifies when its value is a binary operation whose first
-/// operand is structurally identical to the target. A renderer spells the
-/// result `target op= operand` with the dialect's compound spelling. Whether a
-/// commutative operation with the target second also qualifies stays the
-/// caller's judgment. Deciding by structure, never by comparing rendered text,
-/// keeps the answer immune to parenthesization and casts.
-#[must_use]
-pub fn compound_assignment<D, F>(view: &F, stmt: F::Stmt) -> Option<(&D::Op, F::Expr)>
-where
-    D: Dialect,
-    F: FunctionView<D>,
-{
-    let StmtShape::Assign { target, value } = view.stmt(stmt) else {
-        return None;
-    };
-    let ExprShape::Operation { op, operands } = view.expr(value) else {
-        return None;
-    };
-    let &[first, operand] = operands else {
-        return None;
-    };
-    expressions_equal(view, first, target).then_some((op, operand))
 }

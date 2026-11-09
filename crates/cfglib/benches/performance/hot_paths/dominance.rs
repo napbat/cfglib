@@ -1,4 +1,3 @@
-use cfglib::ir::rtl::{BlockSummaries, ParamPlacement, RootLiveness, RootTable};
 use cfglib::{
     BlockId, Cfg, DominanceFrontiers, DominatorTree, Graph, PostDominatorTree, PostNode,
     control_dependence_graph,
@@ -11,7 +10,6 @@ use crate::analysis_oracles::{
 };
 use crate::fixtures::{linear_cfg, many_exit_cfg};
 use crate::harness::{BenchmarkSuite, benchmark_case};
-use crate::rtl_placement::{SyntheticFunction, assert_param_placement};
 
 fn register_dominators(suite: &mut BenchmarkSuite<'_>, cfg: &Cfg<u32>) {
     let cfg_dominators = DominatorTree::compute(cfg);
@@ -75,38 +73,7 @@ fn register_post_dominators(suite: &mut BenchmarkSuite<'_>, cfg: &Cfg<u32>) {
     );
 }
 
-fn register_rtl(suite: &mut BenchmarkSuite<'_>) {
-    let rtl = SyntheticFunction::new(NODE_COUNT);
-    let rtl_roots = RootTable::collect(&rtl);
-    let rtl_summaries = BlockSummaries::compute(&rtl, &rtl_roots);
-    let rtl_liveness = RootLiveness::compute(&rtl, &rtl_roots, &rtl_summaries);
-    let rtl_dominators = DominatorTree::compute(&rtl);
-    let rtl_frontiers = DominanceFrontiers::compute(&rtl, &rtl_dominators);
-    benchmark_case!(
-        suite,
-        "rtl_param_placement",
-        || {
-            ParamPlacement::compute(
-                &rtl,
-                &rtl_dominators,
-                &rtl_frontiers,
-                &rtl_roots,
-                &rtl_summaries,
-                &rtl_liveness,
-            )
-        },
-        |result: &ParamPlacement<_>| assert_param_placement(
-            result,
-            &rtl,
-            &rtl_dominators,
-            &rtl_roots,
-            &rtl_liveness,
-        )
-    );
-}
-
 pub(super) fn register(suite: &mut BenchmarkSuite<'_>, cfg: &Cfg<u32>) {
     register_dominators(suite, cfg);
     register_post_dominators(suite, cfg);
-    register_rtl(suite);
 }

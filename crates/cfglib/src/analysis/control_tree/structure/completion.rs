@@ -54,9 +54,9 @@ impl Completion {
             ControlNode::Break { .. } | ControlNode::Continue { .. } | ControlNode::Return(_) => {
                 true
             }
-            ControlNode::Sequence(body)
-            | ControlNode::Label { body, .. }
-            | ControlNode::Guarded { body, .. } => body_never_completes(body),
+            ControlNode::Sequence(body) | ControlNode::Label { body, .. } => {
+                body_never_completes(body)
+            }
             ControlNode::IfThenElse {
                 then_body,
                 else_body,

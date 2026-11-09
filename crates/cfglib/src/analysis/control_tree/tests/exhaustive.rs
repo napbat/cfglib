@@ -15,7 +15,7 @@ use crate::ControlTree;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::test_util::{DfInst, df_ff, df_pred};
+use crate::test_util::{DfInst, df_ff};
 
 /// How one block ends.
 #[derive(Clone, Copy, Debug)]
@@ -70,24 +70,15 @@ pub(super) fn terminators(count: usize, kinds: &[EdgeKind], switches: bool) -> V
     all
 }
 
-/// The graph of `terminators`, block `b` holding `instructions[b]` instructions
-/// under `predicate`.
-pub(super) fn graph(
-    terminators: &[Terminator],
-    instructions: &[usize],
-    predicate: fn(usize, usize) -> Option<(u16, bool)>,
-) -> Cfg<DfInst> {
+/// The graph of `terminators`, block `b` holding `instructions[b]` instructions.
+pub(super) fn graph(terminators: &[Terminator], instructions: &[usize]) -> Cfg<DfInst> {
     let count = terminators.len();
     let mut cfg: Cfg<DfInst> = Cfg::new();
     let mut blocks = vec![cfg.entry()];
     blocks.extend((1..count).map(|_| cfg.new_block()));
     for (block, &length) in instructions.iter().enumerate() {
-        for index in 0..length {
-            let inst = match predicate(block, index) {
-                Some((variable, when_true)) => df_pred("p", variable, when_true),
-                None => df_ff("i"),
-            };
-            cfg.block_mut(blocks[block]).push(inst);
+        for _ in 0..length {
+            cfg.block_mut(blocks[block]).push(df_ff("i"));
         }
     }
     for (block, terminator) in terminators.iter().enumerate() {
@@ -96,15 +87,6 @@ pub(super) fn graph(
         }
     }
     cfg
-}
-
-pub(super) fn unpredicated(_: usize, _: usize) -> Option<(u16, bool)> {
-    None
-}
-
-/// Alternating polarity on the first two instructions of odd blocks.
-fn alternating(block: usize, index: usize) -> Option<(u16, bool)> {
-    (block % 2 == 1).then_some((1, index == 0))
 }
 
 /// Call `visit` with every assignment of a terminator to each of `count`
@@ -145,7 +127,7 @@ fn every_graph_of_up_to_three_blocks_is_covered_exactly_once() {
     for count in 1..=3 {
         let all = terminators(count, &ONE_SUCCESSOR, true);
         for_each_graph(count, &all, |picked| {
-            let cfg = graph(picked, &vec![1; count], unpredicated);
+            let cfg = graph(picked, &vec![1; count]);
             let (tree, report) = ControlTree::compute_with_report(&cfg);
             check(&cfg, &tree, &report, &alloc::format!("{picked:?}"));
         });
@@ -156,7 +138,7 @@ fn every_graph_of_up_to_three_blocks_is_covered_exactly_once() {
 fn every_graph_of_four_blocks_is_covered_exactly_once() {
     let all = terminators(4, &[EdgeKind::Fallthrough, EdgeKind::Jump], false);
     for_each_graph(4, &all, |picked| {
-        let cfg = graph(picked, &[1; 4], unpredicated);
+        let cfg = graph(picked, &[1; 4]);
         let (tree, report) = ControlTree::compute_with_report(&cfg);
         check(&cfg, &tree, &report, &alloc::format!("{picked:?}"));
     });
@@ -192,7 +174,7 @@ fn blocks_without_instructions_are_covered_too() {
         let all = terminators(count, kinds, switches);
         for_each_length(count, most, |lengths| {
             for_each_graph(count, &all, |picked| {
-                let cfg = graph(picked, lengths, unpredicated);
+                let cfg = graph(picked, lengths);
                 let (tree, report) = ControlTree::compute_with_report(&cfg);
                 check(
                     &cfg,
@@ -206,36 +188,16 @@ fn blocks_without_instructions_are_covered_too() {
 }
 
 #[test]
-fn predicated_trees_cover_every_instruction_exactly_once() {
-    for (count, switches) in [(1, true), (2, true), (3, false)] {
-        let all = terminators(count, &[EdgeKind::Fallthrough, EdgeKind::Jump], switches);
-        for_each_graph(count, &all, |picked| {
-            let cfg = graph(picked, &vec![2; count], alternating);
-            let (tree, report) = ControlTree::compute_predicated_with_report(&cfg);
-            check(&cfg, &tree, &report, &alloc::format!("{picked:?}"));
-            // Regionizing changes no control structure, so the report is the
-            // plain structure's report.
-            assert_eq!(
-                report,
-                ControlTree::compute_with_report(&cfg).1,
-                "{picked:?}"
-            );
-            assert_eq!(tree, ControlTree::compute_predicated(&cfg), "{picked:?}");
-        });
-    }
-}
-
-#[test]
 fn treating_blocks_as_empty_is_the_same_as_clearing_them() {
     for (count, switches) in [(1, true), (2, true), (3, false)] {
         let all = terminators(count, &[EdgeKind::Fallthrough, EdgeKind::Jump], switches);
         for_each_graph(count, &all, |picked| {
             for emptied in 0..(1_u32 << count) {
-                let full = graph(picked, &vec![1; count], unpredicated);
+                let full = graph(picked, &vec![1; count]);
                 let lengths: Vec<usize> = (0..count)
                     .map(|block| usize::from(emptied & (1 << block) == 0))
                     .collect();
-                let cleared = graph(picked, &lengths, unpredicated);
+                let cleared = graph(picked, &lengths);
                 let blocks: Vec<BlockId> = (0..count)
                     .filter(|block| emptied & (1 << block) != 0)
                     .map(BlockId::from_index)

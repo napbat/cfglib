@@ -474,7 +474,6 @@ impl<I, E> TreeRun<'_, I, E> {
             }
             ControlNode::Sequence(body)
             | ControlNode::Label { body, .. }
-            | ControlNode::Guarded { body, .. }
             | ControlNode::TryCatch { try_body: body, .. } => self.push_body(body),
             ControlNode::IfThenElse {
                 condition,

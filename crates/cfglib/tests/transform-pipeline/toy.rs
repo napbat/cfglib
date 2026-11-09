@@ -5,10 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use cfglib::{
-    BlockId, Cfg, CopySource, EdgeId, EdgeKind, EffectInfo, Emitter, InstrInfo, LinearInst,
-    ValueNumberInfo,
-};
+use cfglib::{BlockId, Cfg, EdgeId, EdgeKind, EffectInfo, Emitter, InstrInfo, LinearInst};
 
 pub type Reg = u8;
 
@@ -110,16 +107,6 @@ impl Inst {
     pub fn operands(&self) -> &[Reg] {
         &self.uses
     }
-
-    /// The same instruction with every register renamed.
-    pub fn renamed(&self, mut rename: impl FnMut(Reg) -> Reg) -> Self {
-        Self {
-            kind: self.kind,
-            uses: self.uses.iter().map(|&register| rename(register)).collect(),
-            defs: self.defs.iter().map(|&register| rename(register)).collect(),
-            effects: self.effects.clone(),
-        }
-    }
 }
 
 impl InstrInfo for Inst {
@@ -139,32 +126,6 @@ impl EffectInfo for Inst {
 
     fn effects(&self) -> &[Effect] {
         &self.effects
-    }
-}
-
-impl ValueNumberInfo for Inst {
-    type Operator = Kind;
-
-    fn operator(&self) -> Kind {
-        self.kind
-    }
-
-    fn is_pure(&self) -> bool {
-        self.effects.is_empty()
-    }
-}
-
-impl CopySource for Inst {
-    fn as_copy(&self) -> Option<(Reg, Reg)> {
-        (self.kind == Kind::Move).then(|| (self.defs[0], self.uses[0]))
-    }
-
-    fn rewrite_use(&mut self, old: &Reg, new: &Reg) {
-        for used in &mut self.uses {
-            if used == old {
-                *used = *new;
-            }
-        }
     }
 }
 

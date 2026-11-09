@@ -26,7 +26,6 @@
 mod bits;
 mod builder;
 mod dialect;
-mod facts;
 mod fold;
 mod statement;
 mod view;
@@ -34,10 +33,6 @@ mod view;
 pub use bits::{BitSlice, Bits};
 pub use builder::InstructionBuilder;
 pub use dialect::{Dialect, Place};
-pub use facts::{
-    BlockSummaries, BlockSummary, ExitSeed, ParamPlacement, ResolvedSelection, RootConstant,
-    RootLiveness, RootTable, SelectionResolution,
-};
 pub use fold::{ConstBits, Fold};
 pub use statement::{
     Action, Control, Raise, Selection, SpanAction, Statement, ValueRange, WriteTarget,

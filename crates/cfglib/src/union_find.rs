@@ -1,8 +1,8 @@
 //! Disjoint-set forest over dense indices.
 //!
 //! [`DisjointSet`] backs equivalence-class construction wherever elements
-//! already carry dense `usize` identities: phi webs and may-alias location
-//! classes both reduce to it. Two union strategies are offered
+//! already carry dense `usize` identities, such as may-alias location
+//! classes. Two union strategies are offered
 //! because consumers disagree on what the surviving representative means:
 //! [`union`](DisjointSet::union) balances by rank and leaves the
 //! representative unspecified, while
@@ -57,7 +57,7 @@ impl DisjointSet {
     /// This is [`new`](Self::new) for a caller that solves one merge problem
     /// per procedure over a whole codebase and does not want two allocations
     /// per procedure for it.
-    pub(crate) fn reset(&mut self, len: usize) {
+    pub fn reset(&mut self, len: usize) {
         self.parent.clear();
         self.parent.extend(0..len);
         self.rank.clear();

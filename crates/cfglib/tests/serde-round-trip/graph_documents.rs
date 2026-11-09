@@ -1,16 +1,11 @@
 //! The store and the structures built on it, persisted by an indexer between
-//! runs: `Graph`, `KeyedGraph`, `HornClauses`, and recovered `JumpTable`s.
+//! runs: `Graph`, `KeyedGraph`, and `HornClauses`.
 
-use std::collections::BTreeMap;
 use std::fmt::{Debug, Display};
 
-use cfglib::{
-    DominatorTree, EdgeId, EdgeKind, Graph, HornClauses, JumpTable, KeyedGraph, NodeId, Rooted,
-    SwitchTargets, recover_switch_tables, tarjan_scc,
-};
+use cfglib::{DominatorTree, EdgeId, Graph, HornClauses, KeyedGraph, NodeId, Rooted, tarjan_scc};
 use serde_json::{Value, json};
 
-use crate::consumer::Op;
 use crate::golden::assert_golden;
 use crate::json::{decode, document, encode, load, round_trip};
 
@@ -400,79 +395,4 @@ fn cyclic_support_with_no_axiom_stays_underivable_after_a_round_trip() {
     clauses.add_clause(1, &[0]);
     let decoded: HornClauses = round_trip(&clauses);
     assert_eq!(decoded.derivable(), [false, false]);
-}
-
-fn switch_tables<T: Clone>(first: &[T], default: T) -> Vec<JumpTable<T>> {
-    vec![
-        JumpTable {
-            block: cfglib::BlockId::from_raw(1),
-            dispatch: SwitchTargets {
-                targets: first.to_vec(),
-                default_target: Some(default),
-            },
-        },
-        JumpTable {
-            block: cfglib::BlockId::from_raw(2),
-            dispatch: SwitchTargets {
-                targets: Vec::new(),
-                default_target: None,
-            },
-        },
-    ]
-}
-
-/// A CFG whose blocks 1 and 2 end in an indirect jump, as discovery leaves
-/// it before the tables are resolved.
-fn unresolved_dispatch() -> cfglib::Cfg<Op> {
-    let mut cfg = cfglib::Cfg::<Op>::new();
-    let dispatch = cfg.new_block();
-    let empty_dispatch = cfg.new_block();
-    let [first, second, third, fallback] = [(); 4].map(|()| cfg.new_block());
-    cfg.add_edge(cfg.entry(), dispatch, EdgeKind::Fallthrough);
-    cfg.add_edge(dispatch, first, EdgeKind::IndirectJump);
-    cfg.add_edge(empty_dispatch, second, EdgeKind::IndirectJump);
-    cfg.add_edge(dispatch, third, EdgeKind::IndirectJump);
-    cfg.add_edge(dispatch, fallback, EdgeKind::Fallthrough);
-    cfg
-}
-
-#[test]
-fn persisted_jump_tables_rewire_a_cfg_like_the_originals() {
-    let addresses = switch_tables(&[0x1000_u64, 0x1010, 0x1020], 0x1030);
-    let decoded: Vec<JumpTable<u64>> = round_trip(&addresses);
-    assert_eq!(decoded, addresses);
-
-    // Blocks 3.. are the case targets, by address.
-    let by_address: BTreeMap<u64, _> = [0x1000_u64, 0x1010, 0x1020, 0x1030]
-        .into_iter()
-        .zip((3..).map(cfglib::BlockId::from_raw))
-        .collect();
-    let mut original_cfg = unresolved_dispatch();
-    let mut decoded_cfg = unresolved_dispatch();
-    let from_original = recover_switch_tables(&mut original_cfg, &addresses, |address| {
-        by_address.get(address).copied()
-    });
-    let from_decoded = recover_switch_tables(&mut decoded_cfg, &decoded, |address| {
-        by_address.get(address).copied()
-    });
-
-    let summary = |recovery: &[cfglib::SwitchRecovery]| {
-        recovery
-            .iter()
-            .map(|each| (each.block, each.case_count))
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(summary(&from_decoded), summary(&from_original));
-    assert_eq!(decoded_cfg, original_cfg);
-}
-
-#[test]
-fn jump_tables_over_source_level_tokens_round_trip() {
-    let tokens = switch_tables(
-        &["case_a".to_owned(), "case_b".to_owned()],
-        "default".to_owned(),
-    );
-    let decoded: Vec<JumpTable<String>> = round_trip(&tokens);
-    assert_eq!(decoded, tokens);
-    assert_eq!(decoded[1].dispatch.default_target, None);
 }

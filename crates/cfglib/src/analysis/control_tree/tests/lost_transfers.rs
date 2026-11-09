@@ -3,7 +3,7 @@
 
 extern crate alloc;
 
-use super::exhaustive::{Terminator, graph, unpredicated};
+use super::exhaustive::{Terminator, graph};
 use super::invariants::{check, render};
 use super::pseudocode;
 use super::semantics::assert_streams_alike;
@@ -37,7 +37,6 @@ fn an_inner_branch_that_merges_at_the_loop_header_continues_the_loop() {
             Terminator::Exit,
         ],
         &[1; 4],
-        unpredicated,
     );
     check_equivalent(&cfg, "branch merging at the header inside an arm");
 }
@@ -57,7 +56,6 @@ fn a_swept_branch_that_merges_at_emitted_code_transfers_there() {
             Terminator::Exit,
         ],
         &[1; 3],
-        unpredicated,
     );
     check_equivalent(&cfg, "swept branch merging at emitted code");
 }
@@ -69,7 +67,6 @@ fn a_back_edge_from_dead_code_does_not_loop_the_live_program() {
     let cfg = graph(
         &[Terminator::Exit, Terminator::One(0, EdgeKind::Back)],
         &[1; 2],
-        unpredicated,
     );
     let (tree, report) = ControlTree::compute_with_report(&cfg);
     check(&cfg, &tree, &report, "dead back edge");
@@ -95,7 +92,6 @@ fn a_handler_entry_that_dominates_its_protected_blocks_does_not_cut_their_flow()
             Terminator::Exit,
         ],
         &[1; 3],
-        unpredicated,
     );
     let [b0, b1, b2] = [0, 1, 2].map(BlockId::from_index);
     cfg.add_edge(b1, b0, EdgeKind::ExceptionHandler);
@@ -127,7 +123,6 @@ fn a_retry_loop_that_leaves_through_the_enclosing_loops_back_edge_continues_it()
             Terminator::Exit,
         ],
         &[1; 4],
-        unpredicated,
     );
     let [b1, b2] = [1, 2].map(BlockId::from_index);
     cfg.add_edge(b1, b2, EdgeKind::ExceptionHandler);

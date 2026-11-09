@@ -36,13 +36,9 @@
 //!
 //! # Variants
 //!
-//! [`ControlTree::compute_predicated`] also splits blocks into runs that share
-//! a [`Predicated`](crate::Predicated) guard and wraps each guarded run in a
-//! [`ControlNode::Guarded`]; a block then appears in several [`BlockSpan`]s.
 //! [`ControlTree::compute_with_report_treating_empty`] structures the graph as
 //! if some blocks held no instructions, for a lifter that has already decided
-//! that a block's only instruction is a transfer the structure expresses. Both
-//! have a `_with_report` form.
+//! that a block's only instruction is a transfer the structure expresses.
 //!
 //! # Merge points
 //!
@@ -84,7 +80,6 @@
 
 mod display;
 mod node;
-mod predicated;
 mod report;
 mod structure;
 mod tree;

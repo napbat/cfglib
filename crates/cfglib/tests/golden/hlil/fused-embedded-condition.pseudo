@@ -1,4 +1,0 @@
-if (below()) {
-    call(1);
-}
-return;

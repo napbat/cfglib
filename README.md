@@ -4,11 +4,11 @@ Generic, `no_std` graph and dataflow framework for code intelligence, program an
 
 `cfglib` has purpose-built storage for arbitrary directed relations, language-parametric scope graphs, file-incremental stack graphs, and `Cfg<I, E = ()>` graphs. A `Cfg` has basic blocks, typed control-flow edges, caller-owned edge metadata, and exception regions.
 
-`cfglib::ir` holds IR traits and the generic algorithms over them. `ir::rtl` is the register-transfer contract. `ir::mlil` is the read-only view contract of a flat function in static single assignment form with block parameters. `ir::hlil` is the structured contract: a read-only view of statement and expression trees, a builder trait that the consumer implements, and the lift, lower, and recovery algorithms that drive it. The consumer owns every IR storage, builder implementation, and editing pass. The consumer also owns the value analyses over an MLIL function. The generic algorithms read the IR through views and return facts. An algorithm that creates IR drives a builder trait that the consumer implements. No algorithm changes the function that it reads.
+`cfglib::ir` holds IR traits. `ir::rtl` is the register-transfer contract. `ir::mlil` is the read-only view contract of a flat function in static single assignment form with block parameters. `ir::hlil` is the structured contract: a read-only view of statement and expression trees, a builder trait that the consumer implements, and the walks over the shapes. The consumer owns every IR storage, builder implementation, editing pass, and IR algorithm (lifting, lowering, verification, value analyses, and the facts over an RTL function). The RTL and MLIL views are rooted graph views, so the graph algorithms of cfglib run on them and return facts about the graph.
 
-Small read-only node and edge view contracts let consumer-owned stores and zero-copy filtered views reuse the algorithms. `CfgView` extends them for the instruction-level analyses, so a consumer block store runs the same dataflow as `Cfg`. Every instruction-adjacent axis is consumer-typed. Dataflow variables, constants, expression operators, side-effect vocabularies, branch targets, call targets, and edge payloads all come from the adapter. x86 registers and flags, shader register components, bytecode locals, compiler IR values, and source-language symbols do not need a library-owned numbering scheme. String literals and symbol ids flow through the analyses as naturally as machine words and addresses.
+Small read-only node and edge view contracts let consumer-owned stores and zero-copy filtered views reuse the algorithms. `CfgView` extends them for the instruction-level analyses of a consumer, so the generic solvers run the same way over a consumer block store as over `Cfg`. Every instruction-adjacent axis is consumer-typed. Dataflow variables, constants, expression operators, side-effect vocabularies, branch targets, call targets, and edge payloads all come from the adapter. x86 registers and flags, shader register components, bytecode locals, compiler IR values, and source-language symbols do not need a library-owned numbering scheme. String literals and symbol ids flow through the solvers as naturally as machine words and addresses.
 
-On top of that, cfglib has a compiler middle-end toolkit: dominator trees, renamed SSA construction, location-aware memory SSA, dataflow analyses, value numbering, explicit alias sets, loop transforms, dead-code elimination, redundancy elimination, and graph coloring.
+On top of that, cfglib has a compiler middle-end toolkit: dominator trees, dominance frontiers, and generic dataflow solvers. Instruction-level analyses such as reaching definitions, SSA construction, and memory SSA live in the `il` crate.
 
 Named transformations compose through `PassPipeline<T, E>`. A pipeline keeps
 the caller's declared order, supports closure-backed or stateful trait passes,
@@ -27,7 +27,7 @@ No trait is required to build, verify, analyze, or render a CFG. Source
 frontends translate their syntax trees straight into blocks:
 
 ```rust
-use cfglib::{Cfg, DominatorTree, EdgeKind, ReachingDefs, verify};
+use cfglib::{Cfg, DominatorTree, EdgeKind, PostDominatorTree, verify};
 
 let mut cfg = Cfg::<Stmt>::new();
 let then_block = cfg.new_block();
@@ -40,7 +40,7 @@ cfg.add_edge(then_block, merge, EdgeKind::Fallthrough);
 
 assert!(verify(&cfg).is_ok());
 let dominators = DominatorTree::compute(&cfg);
-let reaching = ReachingDefs::compute(&cfg); // needs InstrInfo on Stmt
+let post_dominators = PostDominatorTree::compute(&cfg);
 ```
 
 ### Builder construction (structured instruction streams)
@@ -164,19 +164,19 @@ definition-to-reference bindings.
 
 ### IR trait contracts (`ir`)
 
-`cfglib::ir` holds IR traits and the generic algorithms over them. It has no IR storage, no builder implementation, and no editing code. The consumer owns the dense arenas, builds its own records, and applies every change. The generic algorithms read the IR through views and return facts.
+`cfglib::ir` holds IR traits. It has no IR storage, no builder implementation, no editing code, and no algorithm that reads the operands, values, or effects of instructions. The consumer owns the dense arenas, builds its own records, applies every change, and owns its IR algorithms. The graph algorithms of cfglib read the RTL and MLIL views as graphs and return facts.
 
-A fact is a side table about one state of a function. No algorithm changes the function that it reads. After an edit, the consumer computes the facts again. A root liveness table is a fact, and cfglib stores no liveness inside a function. An algorithm that creates a function does so only through a consumer-implemented builder trait, and the consumer owns the storage behind it.
+A fact is a side table about one state of a function. No algorithm changes the function that it reads. After an edit, the consumer computes the facts again. cfglib stores no fact inside a function.
 
 | Level | Module | The consumer implements | cfglib provides |
 |---|---|---|---|
-| Register transfer (RTL) | `ir::rtl` | `Dialect`, `InstructionBuilder`, `RecordView`, `FunctionView`, `Fold` | `RootTable`, `BlockSummaries`, `RootLiveness`, `ParamPlacement`, `SelectionResolution` |
+| Register transfer (RTL) | `ir::rtl` | `Dialect`, `InstructionBuilder`, `RecordView`, `FunctionView`, `Fold` | Nothing. The facts over an RTL function belong to the consumer. |
 | Medium level (MLIL) | `ir::mlil` | `Dialect`, `FunctionView` | Nothing. Value analyses over the view belong to the consumer. |
-| Structured (HLIL) | `ir::hlil` | `Dialect`, `FunctionView`, `FunctionBuilder`, `FlatBuilder`, `FlatFunction`, `LiftInstruction`, `LiftEdge`, `LiftDialect`, `RecoverDialect`, `VerifyDialect`, `Pseudocode` | `lift`, `lift_with_tree`, `lift_trampolines`, `lower`, `recover_structure`, `has_recovery_candidates`, `Correspondence`, `VariablePlacements`, `verify`, `pseudocode`, `write_pseudocode`, and the walks over the shapes |
+| Structured (HLIL) | `ir::hlil` | `Dialect`, `FunctionView`, `FunctionBuilder` | The walks over the shapes |
 
 Every dialect type is plain data that the consumer defines. The traits contain no language, runtime, calling convention, opcode, or source-location type.
 
-cfglib no longer holds IR storage. The removal covers the RTL, MLIL, and HLIL function types and builder implementations, tail duplication, the shared vocabulary trait, the provenance map, and the value analyses over MLIL (use index, liveness, constant propagation, and dead-instruction marking). A consumer that needs one of them keeps it in its own crate. Lift and lower between a variable-based flat IR and HLIL are generic algorithms over consumer-implemented builder traits.
+cfglib no longer holds IR storage or IR algorithms. The removal covers the RTL, MLIL, and HLIL function types and builder implementations, tail duplication, the shared vocabulary trait, the provenance map, the facts over an RTL function (root table, block summaries, and the rest, now in `il::root_facts`), and the value analyses over MLIL (use index, liveness, constant propagation, and dead-instruction marking). A consumer that needs one of them keeps it in its own crate; the `il` crate holds them for its IR.
 
 #### Register-transfer contract (`ir::rtl`)
 
@@ -215,34 +215,6 @@ The builder takes these plain-data types, and a record yields them. Every slice 
 - A guard or condition has type `Bits::BOOL`.
 - An unconditional `Raise` is followed by `Control::Terminating`, and no statement follows it. The record holds no write: the delta of such a record never commits.
 - The bindings of one `Raise` name each root once. Each bound value has the width of its root.
-
-#### RTL facts
-
-Every RTL fact is a side table. The algorithms read the function through `FunctionView` and never change it. The facts build on each other in the order of this table. A bit set in a fact holds dense indices of one `RootTable`, so the facts of one function share the table of that function.
-
-| Fact | Entry point | Description |
-|---|---|---|
-| Root table | `RootTable::collect` | The roots that the function names, in ascending order. A raise binding names its root. The position of a root is its dense index. |
-| Block summaries | `BlockSummaries::compute`; `BlockSummaries::block` → `BlockSummary` | Per block: `reads_before_write`, `writes`, and `kills`. A root is a whole unit here. A partial write reads its root and writes it. An indexed or sparse write is a may-write and never kills. A raise binding is not a write, and it does not read its root. |
-| Root liveness | `RootLiveness::compute`, `RootLiveness::compute_seeded` with `ExitSeed`; `live_in`, `live_out` | Whole-root liveness. `compute` makes every named root live after each exit block. `compute_seeded` calls a closure for each exit block, and the closure states the live roots through `ExitSeed::insert` or `ExitSeed::insert_all`. |
-| Parameter placement | `ParamPlacement::compute`; `roots_at`, `param_count` | The roots that need a block parameter at each block: the pruned iterated dominance frontier of the blocks that write the root. The call takes the `DominatorTree`, the `DominanceFrontiers`, the root table, the summaries, and the liveness. |
-| Selection resolution | `SelectionResolution::compute` with `RootConstant` entry values; `candidate`, `resolved` → `ResolvedSelection` | The indexed reads and writes whose index is a constant. The analysis follows root constants across blocks and evaluates the index with `Fold`. After a call, every root is unknown. |
-
-```rust
-use cfglib::ir::rtl::{BlockSummaries, ParamPlacement, RootLiveness, RootTable};
-use cfglib::{DominanceFrontiers, DominatorTree};
-
-// `function` implements `ir::rtl::FunctionView<D>`.
-let roots = RootTable::collect(&function);
-let summaries = BlockSummaries::compute(&function, &roots);
-let liveness = RootLiveness::compute(&function, &roots, &summaries);
-let dominators = DominatorTree::compute(&function);
-let frontiers = DominanceFrontiers::compute(&function, &dominators);
-let placement = ParamPlacement::compute(
-    &function, &dominators, &frontiers, &roots, &summaries, &liveness,
-);
-let needed_at_join = placement.roots_at(join);
-```
 
 #### Medium-level contract (`ir::mlil`)
 
@@ -283,25 +255,17 @@ An HLIL function is a pair of trees over declared variables:
 |---|---|
 | `Dialect`, `FunctionView<D>` | The vocabulary of one structured dialect, and the read-only view that lends statements, expressions, switch arms, and handlers as slices from the consumer's dense storage. |
 | `FunctionBuilder<D>` | The write-only protocol that builds a function, children before parents. The consumer seals the function in `finish`. |
-| `FlatFunction`, `LiftInstruction`, `LiftEdge`, `LiftDialect`, `InstructionShape` | The read side of a flat function: the consumer's `Cfg` with a variable table and signature, and what each instruction and edge stands for. |
-| `FlatBuilder`, `Lowered`, `LowerEdge`, `Occurrence`, `VariableOrigin` | The write side of a flat function, in HLIL terms. The builder chooses the flat operation and the `EdgeKind`. |
-| `lift`, `lift_with_tree`, `lift_trampolines`, `LiftedFunction` | Structure a flat function into a `ControlTree`, inline single-use definitions, and translate it through a `FunctionBuilder`. |
-| `lower`, `LoweredFunction` | Flatten a structured function into blocks and edges, linearize its expression trees into typed temporaries, and register its exception regions. |
-| `Correspondence`, `Correspondence::remap` | The table that names the structured entity carrying each flat instruction and variable, and the move of that table onto a recovered function. |
-| `recover_structure`, `has_recovery_candidates`, `RecoverDialect`, `Recovery` | Rebuild a function with counted loops, conditional selections, and paired regions restored. The dialect claims each recovery through its hooks. Time is linear in the size of the function; the one exception is a nest of regions that all hold one variable, which costs one `RecoverDialect::releases` call per open region. |
-| `verify`, `VerifyDialect`, `VerificationReport` | The structural checks, then the dialect's own. |
-| `pseudocode`, `write_pseudocode`, `Pseudocode` | Indented pseudocode, spelled by the dialect's hooks. |
-| `VariablePlacements` | The narrowest lexical body that holds all occurrences of each variable. |
-| `for_each_child_body`, `for_each_statement_expression`, `visit_statements`, `visit_expression_tree`, `expressions_equal`, `compound_assignment` | The walks over the shapes. None of them recurses on the depth of an expression or the nesting of statements, and neither do the algorithms above: each keeps its own stack, so memory bounds the depth, not the thread's stack. The structuring step of `lift` has the stack-depth contract of `ControlTree::compute`. |
+| `Entity`, `ChildBodyKind`, `StmtShape`, `ExprShape`, `SwitchArm`, `Handler`, `HandlerKind` | The shapes that the view lends, the role of a child body, and the name of one statement, expression, or variable. |
+| `for_each_child_body`, `for_each_statement_expression`, `visit_statements`, `visit_expression_tree`, `expressions_equal`, `compound_assignment` | The walks over the shapes. `for_each_child_body`, `visit_statements`, and `visit_expression_tree` keep their own stack, so memory bounds the depth, not the thread's stack. |
 
 A function follows these rules:
 
 - Every statement and expression has exactly one parent, and a child has a lower index than its parent.
 - A `continue` with a label targets a `Labeled` group whose body is exactly one loop, and a `break` or `goto` can target any label.
-- Control that completes must end in a `return` or iterate forever. `lower` rejects a body that falls off the end.
+- Control that completes must end in a `return` or iterate forever.
 - A region's operands are evaluated once, on entry, and the end of the region releases the values they had then.
 
-The algorithms compose: lift a flat function, recover its structure, and move the `Correspondence` onto the recovered function with `remap`.
+The algorithms over this contract (lift from a flat function, lowering, structure recovery, verification, pseudocode, and declaration placement) belong to the consumers of the contract, not to cfglib.
 
 ### Graph algorithms
 
@@ -313,7 +277,7 @@ The algorithms compose: lift a flat function, recover its structure, and move th
 | Reusable search marks | `search_with_marks` + `EpochMarks` | The same search with its visited marks in a caller-owned epoch-stamped buffer: a per-root pass allocates marks once instead of an O(node count) buffer per root, and each search still starts from a clean set (epoch bump, O(1)) |
 | Readable dense set | `EpochSet` | The same epoch stamp with its members kept: constant-time `insert`/`contains`, a constant-time `clear`, and `ones` in one pass over the answer rather than the universe (insertion order, not ascending) |
 | Reusable search scratch | `search_with_scratch` + `SearchScratch` | The same search with the marks *and* the call's own buffers — seeds, frontier, adjacency — caller-owned, for a pass whose searches are small enough that the call is the cost; marks and buffers both reset on entry |
-| Disjoint sets | `DisjointSet` (`union` by rank, `union_toward_min` for deterministic minimum representatives, growable via `push`) | The union-find backing phi webs and may-alias location classes, usable directly by consumers |
+| Disjoint sets | `DisjointSet` (`union` by rank, `union_toward_min` for deterministic minimum representatives, growable via `push`, `reset` to reuse the storage) | A union-find, usable directly by consumers |
 | Open post-order fold | `open_fold_post_order` + `OpenFold` trait (`FoldEnter::Leaf`/`Fold`, `MarkScope::Shared`/`Isolated`) | Child-answers-to-parent folding over a lazily discovered space: caller-keyed cycle guard (nodes need no `Ord`), per-node mark scoping (exact per-path marking or persistent pruning), early exit, depth bound — C++-style member lookup and type-algebra evaluators without hand-written frame stacks |
 | Forward-only view support | `scan_predecessors` | The honest O(nodes × edges) `predecessors` for views that store only successors, replacing per-consumer scan stubs |
 | Traversal events | `breadth_first_events` → `BfsEvent`; `depth_first_events` → `DfsEvent` | Breadth-first discovery with tree/non-tree edges, or depth-first discover/tree/back/forward-or-cross/finish events in pinned order |
@@ -343,7 +307,6 @@ The algorithms compose: lift a flat function, recover its structure, and move th
 | Loop nesting tree | `LoopNestingTree::compute` | Parent/child loop hierarchy, and the one statement of nesting depth: `NaturalLoop::depth` is the depth in this tree. Loops over the same body are siblings |
 | Coldness classes | `ColdnessClasses::compute` over a `ColdnessGraph` → `class`, `record` (`ColdClass`: `Never < Rare < Normal`) | The greatest assignment of three classes under a seed per node, a cap per successor record, and the rule that a node is no hotter than the hottest record it can take or that can reach it. O(n + m) with per-node counters and an explicit queue; independent of node and record order. The graph supplies the records in both directions, so a consumer serves it from its own adjacency tables |
 | Control dependence graph | `control_dependence_graph` → `Graph<N, ()>` | From post-dominator tree, over any view; a block that branches back to itself has the edge to itself |
-| Program dependence graph | `program_dependence_graph` → `Graph<DependenceNode, DependenceKind>` | Control edges (from a block's predicate node to what it controls) and data edges (def to use, and a branching block's last instruction into its predicate node); reverse traversal performs backward slicing |
 | Interval analysis | `IntervalAnalysis::compute` → `intervals` | First-level Allen-Cocke interval partition of the code the root reaches; use `is_reducible` for the reducibility test |
 | Reducibility | `is_reducible` (exact test over a dominator tree), `make_reducible` (CFG node splitting) | Irreducible cycles are split until every retreating edge is a back edge |
 | Reverse CFG | `reverse_cfg` | Flip all edges, swap entry/exits |
@@ -360,7 +323,7 @@ Instruction-level analyses read the graph through `CfgView`. The graph-shaped so
 
 #### Instruction-level view (`CfgView`)
 
-`CfgView` is the one read-only trait that the instruction-level algorithms take. It joins the graph views with the facts that these algorithms need and a graph view does not give: the ordered instructions of each block, the `EdgeKind` of each edge, and the optional branch weight of each edge.
+`CfgView` is the one read-only trait that the instruction-level algorithms of a consumer, and the CFG analyses of cfglib, take. It joins the graph views with the facts that these algorithms need and a graph view does not give: the ordered instructions of each block, the `EdgeKind` of each edge, and the optional branch weight of each edge.
 
 | Part | Description |
 |---|---|
@@ -368,13 +331,13 @@ Instruction-level analyses read the graph through `CfgView`. The graph-shaped so
 | `Inst`, `instructions` | The instruction type of the blocks, and the instructions of one block in program order. |
 | `edge_weight` | The branch probability of an edge, in `0.0..=1.0` relative to the other edges leaving its source. The default is `None`, which means that the view has no profile. |
 
-`Cfg` implements `CfgView`, so every caller that holds a `Cfg` keeps working. A consumer with its own block and edge storage implements the trait and runs the same analyses without a conversion. The unit tests of the trait run each analysis on a vector-backed view and compare the answer with the one on a `Cfg`.
+`Cfg` implements `CfgView`, so every caller that holds a `Cfg` keeps working. A consumer with its own block and edge storage implements the trait and runs the same analyses without a conversion. The unit tests of the trait run the block fixpoint solver on a vector-backed view and compare the answer with the one on a `Cfg`.
 
 The contract has two rules. `instructions` accepts every identity that `node_ids` yields, and it returns the same slice each time. The index of an instruction in that slice is the instruction index of the `ProgramPoint` that an analysis reports.
 
-The view has no separate exception model. An edge of kind `EdgeKind::ExceptionUnwind` leaves its source block before a throwing instruction. `InstrInfo::may_unwind` marks the throwing instructions of a block. `departs_before_throws` combines the two.
+The view has no separate exception model. An edge of kind `EdgeKind::ExceptionUnwind` leaves its source block before a throwing instruction. `InstrInfo::may_unwind` marks the throwing instructions of a block.
 
-These analyses take `&G` where `G: CfgView`: `ReachingDefs`, `Liveness`, `DefUseChains`, `SsaForm`, `PhiPlacements`, `ConstantPropagation`, `SccpAnalysis`, `AbstractFacts`, `MemoryTrace`, `MemorySsa`, `DeadCode`, `recover_expressions`, `ValueNumbering`, `BlockValueNumbers`, `cfg_purity`, `CfgMetrics`, `detect_cfg_patterns`, `detect_tail_calls`, and `detect_switch_tables`. The problems `LivenessProblem`, `SeededLivenessProblem`, `ReachingDefsProblem`, and `ConstPropProblem` also run on every `CfgView`. A transform that edits the graph still takes `&mut Cfg`.
+These analyses take `&G` where `G: CfgView`: `CfgMetrics` and `detect_cfg_patterns`, and every `Problem` solved by `solve_problem`. A transform that edits the graph still takes `&mut Cfg`. Live variables, reaching definitions, SSA construction, memory SSA, and memory value flow are in the `il` crate.
 
 | Analysis | Function / Type | Description |
 |---|---|---|
@@ -384,42 +347,15 @@ These analyses take `&G` where `G: CfgView`: `ReachingDefs`, `Liveness`, `DefUse
 | Fallible edge-sensitive fixpoint | `try_solve_edge_problem[_from][_with_config]`, `TryEdgeProblem` trait | Preserves consumer boundary, merge, node-transfer, and edge-transfer errors separately from solver limits |
 | Reachability-lifted edge analysis | `Reachable` + `ReachableEdgeProblem` trait | Verification-style analyses over `Option` facts: `None` is unreached bottom, transfers short-circuit, entry facts start the flow, and each edge chooses pre- or post-state (exceptional edges observe the state the node received) |
 | Dense bit-set facts | `DenseBits` | Set-of-indices lattice element packed 64 per word; `union_with` is the join and reports change for convergence checks; `remove` and `clear` clear one index or the whole row, `words` exposes the packed row, and `ones`/`intersection` step one set index at a time rather than one universe index |
-| Reaching definitions | `ReachingDefs::compute` | Which writes reach each point; an `ExceptionUnwind` edge carries only the writes completed before each instruction that `InstrInfo::may_unwind` |
-| Liveness | `Liveness::compute` | Live-in / normal-completion live-out at each block; `live_on_unwind` is what unwind successors read before each throwing instruction; `live_before_instructions` / `live_after_instructions` replay the block transfer for instruction-granular sets (dead-store detection) |
-| Def-use / use-def chains | `DefUseChains::compute` | Bidirectional def↔use links; dead-def detection |
-| SSA construction | `SsaForm::compute` | IDF phi placement plus full dominator-forest renaming, including disconnected handler/dead-code components; each phi operand names its departure point, so an unwind contributes the value before each throwing instruction. An entry block that is a branch target is supported: its phis also merge the value the variable holds when the function starts, reported by `SsaPhi::start_value` apart from the edge operands |
-| Reusable SSA scratch | `SsaForm::compute_in` + `SsaScratch` | The same form with every working buffer caller-owned — frontiers, definition lists, renaming stacks, phi drafts, the walk's own stacks — leaving only the form itself allocated per procedure |
-| Phi placement | `PhiPlacements::compute` | Structural IDF phase for consumers that only need placement; `PhiPlacement::merges_start_value` marks the phis of a branch-target entry |
-| SSA deconstruction | `eliminate_phis`, `copies_by_predecessor` | φ-to-copy lowering; each `PhiCopy::from` is a `PhiCopyOrigin`, either the CFG edge departure the copy runs on or `FunctionStart` for the once-only copy of a start value, which no edge carries |
-| Phi webs | `PhiWebs::compute` | Congruence classes for register coalescing; a start value joins the web of the phi it feeds |
-| Constant propagation | `ConstantPropagation::compute`, `ConstantFolder` (associated `Const`) | Top/Const/Bottom lattice over a consumer constant domain — machine words, strings, bools, float bits; an unwind carries the constants known before each throwing instruction |
-| Sparse conditional constant propagation | `SccpAnalysis::compute` | SSA-based, marks unreachable edges; a start value is always executable and is the live-in seed, or `Bottom` |
-| Copy and value-alias propagation | `copy_propagation[_with_exits]`, `alias_propagation[_with_exits]`, `PropagationStats`, `CopySource` trait | Guarded chain resolution and dead transfer removal; pairwise aliases may refine types or metadata without changing runtime values. The `_with_exits` form keeps a copy whose definition is live at an exit — a function whose result is only ever a copy of an input otherwise loses the definition a caller reads back — while still rewriting that copy's readers inside the function. A transfer at or after a throwing instruction never substitutes into code its unwind reaches |
-| Memory-event trace | `MemoryTrace::compute`, `MemoryEventInfo` trait | Ordered, location-typed reads, writes, read/modify/write accesses, address-variable dependencies, and fences; instruction summaries distinguish separate read+write from compound modification |
-| Reusable memory-SSA scratch | `MemorySsa::compute_in` + `MemorySsaScratch` | The same answer with the event trace, the alias merge, and the shadow CFG's dominator and SSA buffers caller-owned |
-| Memory SSA | `dataflow::memory::MemorySsa::compute`, `MemoryAlias` trait | Event-driven SSA per may-alias location class: loop/branch φ-nodes, reaching writes and clobbers, bidirectional def-use chains, transitive readers, and ordinary-SSA address inputs; an unwind observes the memory state before each throwing instruction; an entry block that is a branch target is supported, and its memory phis report the state the function starts with as `MemoryPhi::start_value`, used through `MemoryUse::PhiStart`, apart from the edge operands |
-| Reusable value-flow scratch | `MemoryValueFlow::compute_in` + `MemoryValueFlowScratch` | The same graph with the per-event address/stored/loaded resolution buffers caller-owned |
-| Memory value flow | `dataflow::memory::MemoryValueFlow::compute` | One graph over ordinary SSA values, versioned memory states, and exact events; typed address/store/read/write/load and ordinary/memory-phi edges retain the complete transfer path; the start values of a branch-target entry's phis enter over their own `ValuePhiStart` and `MemoryPhiStart` edges, never as an edge departure |
-| Abstract interpretation | `AbstractFacts::compute`, `AbstractDomain` + `Lattice` traits | Generic abstract domain framework on the edge-sensitive solver; a domain supplies `bottom` and `meet` and a per-instruction transfer; an unwind carries the state before each throwing instruction |
 
 ### Higher-level analyses
 
 | Analysis | Function / Type | Description |
 |---|---|---|
-| Expression tree recovery | `recover_expressions`, `ExprInstr` (associated `Operator` + `Const`) | Rebuild expression DAGs from flat instructions. A block of chained single-use temporaries recovers to one tree as deep as the block is long, so `ExprNode` drops, clones, compares, prints, and measures (`depth`, `node_count`) without recursion |
-| Value numbering (local) | `BlockValueNumbers::compute` | Per-block hash-consing |
-| Value numbering (global) | `ValueNumbering::compute`, `ValueNumberInfo` (associated `Operator`) | Dominator-scoped GVN over any operation identity, sound for variables that are written more than once: a block never reuses an expression over a variable a side path into it rewrites, and a child an unwind reaches never reuses what its parent computes or writes from the first throwing instruction on |
-| Redundancy counting | `ValueNumbering::redundant_count` | From GVN results |
-| Explicit alias sets | `AliasSets::new` / `merge`; `MemoryAlias` trait | Caller-populated union-find classes usable directly as the alias oracle for memory SSA; an unmerged pair is a proof of disjointness |
-| Index-path aliasing | `index_paths_may_overlap` | The `base[i][j]` kernel for alias oracles over indexed storage: unequal arity or unknown components stay conservative, fully known disagreement proves disjointness |
 | Exclusive handler extents | `recover_exclusive_extents[_with]`, `promote_exclusive_extents` | Evidence-reporting sibling of `promote_handler_extents`: blocks exclusively reachable from one handler entry along normal edges, boundary and ambiguity issues, and atomic per-region promotion that refuses overlap |
-| Dead code analysis | `DeadCode::compute`, `DeadCode::compute_with_exits` | Liveness-dead instructions (effect-guarded) and unreachable blocks, reported without mutating — the analysis `dead_code_elimination` applies. The seeded form takes what leaves each block (a returned value, storage a caller reads again, state a non-returning exit hands on), which a graph read from the inside cannot state; `SeededLivenessProblem` carries the seed into the solve |
-| Purity classification | `cfg_purity`, `block_purity`, `EffectInfo` (associated `Effect`) | Consumer effect vocabularies — machine memory/IO, allocation, panics |
 | Metrics | `GraphMetrics::compute` (any rooted view); `CfgMetrics::compute` | Live node and edge counts (removed slots are not nodes), cyclomatic complexity, nesting depth (0 for no loops, 1 for one loop), instruction density |
 | Pattern detection | `detect_patterns` (any view), `detect_cfg_patterns` (adds trampolines + arm orientation) | Diamond, chain, self-loop, empty trampoline |
-| Tail call detection | `detect_tail_calls` (heuristic), `detect_explicit_tail_calls` (`CallInfo` markers) | A call that is followed by a return in its own block, or that ends its block and flows into a block that returns at once; explicit markers reported with their position |
-| Switch table recovery | `detect_switch_tables` (`SwitchSource`), `recover_switch_tables` | Consumer-typed targets: addresses, syntax nodes; dispatch → structured switch |
-| Control tree | `ControlTree::compute`, `compute_with_report` (→ `LiftReport`), `compute_predicated[_with_report]`, `compute_with_report_treating_empty` | The structured form of a `Cfg`: `if/else`, pre-tested, post-tested, and endless loops, `switch` with case edges and a default, `try/catch` over declared handler extents, `break`/`continue` (labeled across loops), `goto`/`label`, and guarded runs of predicated instructions. A payload-free fact like `DominatorTree`: a flat arena of `ControlNode`s that name `BlockId`, `EdgeId`, `RegionId`, and `BlockSpan` instruction ranges, so it holds no instruction and never borrows the graph. Merge points are immediate post-dominators; an exit-free region has none. Beside an arm that throws or returns, the arms that complete rejoin where they meet: before the stop of the walk that holds the branch, or, in a walk without one, before the exits that two or more arms reach. No owned code is dropped — the blocks the entry reaches and the blocks a handler owns, a catch pad no call unwinds into and its extent among them; a protected block the entry cannot reach is dead code — and `LiftReport` lists every goto, swept block, unstructured region, and dangling label. Structuring and regionizing keep their own stacks, so the nesting depth of an input is bounded by memory, not by the call stack |
+| Control tree | `ControlTree::compute`, `compute_with_report` (→ `LiftReport`), `compute_with_report_treating_empty` | The structured form of a `Cfg`: `if/else`, pre-tested, post-tested, and endless loops, `switch` with case edges and a default, `try/catch` over declared handler extents, `break`/`continue` (labeled across loops), and `goto`/`label`. A payload-free fact like `DominatorTree`: a flat arena of `ControlNode`s that name `BlockId`, `EdgeId`, `RegionId`, and `BlockSpan` instruction ranges, so it holds no instruction and never borrows the graph. Merge points are immediate post-dominators; an exit-free region has none. Beside an arm that throws or returns, the arms that complete rejoin where they meet: before the stop of the walk that holds the branch, or, in a walk without one, before the exits that two or more arms reach. No owned code is dropped — the blocks the entry reaches and the blocks a handler owns, a catch pad no call unwinds into and its extent among them; a protected block the entry cannot reach is dead code — and `LiftReport` lists every goto, swept block, unstructured region, and dangling label. Structuring keeps its own stacks, so the nesting depth of an input is bounded by memory, not by the call stack |
 | Control tree traversal | `ControlTree::preorder`, `walk` (`ControlVisitor`), `child_bodies`, `for_each_instruction`, `write_pseudocode` / `to_pseudocode` | Non-recursive preorder and enter/leave walks, the child bodies of any node in execution order, every instruction in program-structure order, and indented pseudocode whose instruction text the caller supplies (the printer keeps its own stack too) |
 
 ### Transforms
@@ -436,13 +372,8 @@ fallible pass stops execution.
 | Merge blocks | `merge_blocks` | Coalesce single-succ/single-pred chains inside one protected region |
 | Remove empty blocks | `remove_empty_blocks` | Bypass empty fallthrough blocks that no handler or cleanup names |
 | Critical edge splitting | `split_critical_edges`, `split_critical_edges_with` | Insert blocks on multi-succ → multi-pred edges while retaining the original edge identity/payload and mapping both halves |
-| Dead code elimination | `dead_code_elimination[_with_exits]` (instructions), `remove_dead_code[_mapped]` (plus the structure left dead) | Needed-set fixpoint over liveness: a dead instruction's reads keep nothing alive, so a chain feeding only dead code goes in one call, across blocks and around loops. Requires `EffectInfo` so side-effecting code is never silently deleted. The `_with_exits` form seeds what leaves each block |
 | Edge contraction | `contract_edge`, `contract_edge_mapped` | Merge two blocks connected by a single edge; mapped form preserves surviving edge identities/payloads. Refuses exception edges and merges across a protection boundary |
 | Node splitting | `Cfg::split_block`, `Cfg::split_block_at_points[_with_payloads]` | Split at one or several validated consumer-selected instruction boundaries; the new blocks stay in the original's regions |
-| Loop rotation | `rotate_loop` | Top-tested → bottom-tested loop form: the bottom test is a copy of the header (joining its regions) with copies of its edges, and the latch edge is retargeted in place |
-| Loop invariant detection | `find_loop_invariants` | Instructions that define something, have no declared effect, cannot unwind, and read only outer definitions or one invariant loop definition; requires `EffectInfo` |
-| Redundancy elimination | `PreAnalysis::compute`, `eliminate_pre` | Finds the instructions a dominating instruction already computed (GVN) and removes those it can replace soundly, redirecting reads through `CopySource::rewrite_use`; partially redundant computations are left alone |
-| Graph coloring | `interference_graph`, `color_graph` | Interference builder returns a `Graph`; coloring accepts any graph view |
 | Linearization | `linearize`, `Emitter` trait, `BlockOrder`, `LinearizeError` | Re-serialize CFG to a flat stream; emitters speak `BlockId`, naming is theirs. Exceptional, call, and dispatch edges emit nothing; a conditional edge out of an empty block is an error |
 | Width relaxation | `relax_layout` | The assembler fixed point for symbolic layouts: monotone branch widening against caller-resolved labels, offset-dependent (alignment) widths, converged offsets plus the final label context |
 
@@ -497,19 +428,11 @@ FlowControl               (required only by CfgBuilder)
 └── JumpTargets           (goto/label wiring — associated Target)
 
 InstrInfo<Variable = V>   (optional — native IR variables, defs/uses)
-├── EffectInfo            (purity, DCE — associated Effect)
-├── Predicated            (guard variable of a guarded instruction)
-├── CopySource            (copy propagation)
-├── ConstantFolder        (constant propagation, SCCP — associated Const)
-├── ExprInstr             (expression trees — associated Operator, Const)
-├── ValueNumberInfo       (value numbering, PRE — associated Operator)
+├── EffectInfo            (associated Effect)
 └── MemoryEventInfo       (locations, address uses, access kinds, and fences — associated Location, Fence)
 
-MemoryAlias<Location>     (optional may-alias oracle consumed by MemorySsa)
-
 DisplayInstr              (rendering only — DOT and text)
-CallInfo                  (call graphs, explicit tail calls — associated Callee)
-SwitchSource              (switch table recovery — associated Target)
+CallInfo                  (call graphs — associated Callee)
 
 ir::rtl::Dialect          (instruction-set vocabulary — Root, Operator, EffectOp,
 │                          WritePolicy, Outcome, NondetDomain)
@@ -531,20 +454,15 @@ The `ir` traits follow the same rule. The consumer implements `ir::rtl::Function
 Directional `MemoryAccess::read`, `write`, and `read_modify_write`
 constructors keep loaded definitions, stored uses, and address uses distinct
 (`MemoryAccess::opaque` covers table-driven kinds with unknown values);
-events also retain exact locations, atomicity, and ordered fences. `MemorySsa`
-in `dataflow::memory` merges locations through the caller-provided
-`MemoryAlias` relation, then exposes loop-correct reaching definitions,
-clobbered states, users, and transitive readers. `MemoryValueFlow` combines it
-with the matching ordinary `SsaForm`, making
-`value -> store -> memory state -> load -> value` explicit. Returning `false`
-from an alias oracle promises the locations cannot overlap at runtime;
-`ConservativeMemoryAlias` is the safe fallback when that cannot be proven.
+events also retain exact locations, atomicity, and ordered fences. cfglib owns
+this vocabulary only: memory SSA, alias oracles, and memory value flow over it
+live in the `il` crate.
 
 ## Workspace
 
 | Crate | Description |
 |---|---|
-| **cfglib** | Generic graph, CFG, SSA, and dataflow framework with the RTL, MLIL, and HLIL IR trait contracts |
+| **cfglib** | Generic graph, CFG, and dataflow framework with the RTL, MLIL, and HLIL IR trait contracts |
 
 Adapters live with the language they adapt, next to their decoders and test
 corpora. The SM4/SM5 decompiler is in
@@ -555,19 +473,18 @@ cafe.
 A language picks its entry level. A machine-shaped language emits `ir::rtl`
 records through `InstructionBuilder` into its own storage. A variable-shaped
 language implements `ir::mlil::FunctionView` directly. A language with source
-structure implements `ir::hlil::FunctionView` and `FunctionBuilder`, and lifts
-and lowers through its flat form with `FlatFunction` and `FlatBuilder`. In
+structure implements `ir::hlil::FunctionView` and `FunctionBuilder`. In
 every case the storage, the builders, and the passes that edit them stay with
 the language.
 cfglib deliberately defines no generic LLIL. Low-level IRs are language-owned,
 and the minimal traits that they share (`FlowControl`, `InstrInfo`, `CfgView`,
-`Cfg`, `SsaForm`) are their common surface.
+`Cfg`) are their common surface.
 
 ## Adapting a language, IR, or existing graph
 
 For symbol, reference, value-flow, type-relation, import, or grammar graphs, store domain objects directly in `Graph<N, E>`, or in `KeyedGraph<K, N, E>` when the domain identities are sparse keys. Projects that already own adjacency lists can instead implement `GraphView` for their store, then use traversal, shortest-path, topological-sort, SCC, dominance, loop-detection, metrics, and pattern algorithms without migrating their data. Dense `u32` and `usize` handles work directly; custom handles implement `DenseId`.
 
-For a control-flow and SSA adapter:
+For a control-flow adapter:
 
 1. Build `Cfg<I>` directly with `new_block()` / `add_edge()`, or use `Cfg<I, E>::with_edge_payload()` plus `add_edge_with_payload()` when branch labels, handler order, continuation/call-site identity, or source locations must survive. Structured unit-payload streams can instead implement `FlowControl` and use `CfgBuilder::build()`. A consumer with its own block and edge storage implements `CfgView` instead of building a `Cfg`.
 2. Optionally implement `InstrInfo` with a native `Variable` identity (and its sub-traits) for dataflow analyses.
@@ -578,7 +495,7 @@ For a control-flow and SSA adapter:
 The variable type only needs `Clone + Ord` — never `Copy`, never numeric. It can be an architecture enum such as `Register(Rax)` / `Flag(Zero)`, a shader structure such as `(register file, index, component)`, an interned source symbol, or an existing IR value handle. Adapters decide the atomic aliasing unit; for overlapping resources such as x86 subregisters, expose canonical units or every affected unit.
 
 ```rust
-use cfglib::{Cfg, DominatorTree, InstrInfo, SsaForm};
+use cfglib::{Cfg, DominatorTree, InstrInfo};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum X86Variable { Register(u8), Flag(u8), StackSlot(i32) }
@@ -597,12 +514,11 @@ impl InstrInfo for X86Instruction {
 
 let cfg = Cfg::<X86Instruction>::new();
 let dominators = DominatorTree::compute(&cfg);
-let ssa = SsaForm::compute(&cfg, &dominators);
 ```
 
-`SsaForm<V>` is a non-mutating view over the source CFG. It stores renamed phi results, operands, instruction uses, and instruction definitions as `SsaValue<V>`, while each `SsaInstruction` keeps a `ProgramPoint` back to the native instruction. Read the lists through `SsaPhi::operands`, `SsaInstruction::uses`, and `SsaInstruction::defs`, which return slices; a record holds a short list inline, so a typical instruction or two-way phi costs no allocation of its own. `PhiPlacement::predecessors` follows the same shape. Version `0` denotes a live-in or otherwise undefined incoming value. `SsaPhi::operands` lists only the values that arrive along CFG edges, each named by its departure point. A phi in an entry block that is a branch target (a loop whose header is the first instruction) also merges the value the variable holds when the function starts, which no edge carries; read it through `SsaPhi::start_value`, and handle it wherever the operands are consumed, since it arrives once before the entry block runs.
+SSA construction over the same `InstrInfo` adapter lives in the `il` crate.
 
-For an IR adapter, implement the `ir::rtl` or `ir::mlil` traits on your own dense storage. Keep every arena, builder, and editing pass in your crate. Call the facts of cfglib on your function view, and apply their answers yourself. A machine-shaped language emits `ir::rtl` records through `InstructionBuilder`. A consumer that builds a block-parameter form from those records uses `ParamPlacement` to find where each root needs a parameter. A variable-shaped language implements `ir::mlil::FunctionView` directly. The consumer writes its own value analyses over that view, because they depend on the semantics of its dialect, and its own passes delete or rewrite instructions.
+For an IR adapter, implement the `ir::rtl` or `ir::mlil` traits on your own dense storage. Keep every arena, builder, and editing pass in your crate. Run the graph algorithms of cfglib (dominators, post-dominators, loops, and the rest) on your function view, and apply their answers yourself; the facts over an RTL function, such as the root table and block summaries, are in `il::root_facts`. A machine-shaped language emits `ir::rtl` records through `InstructionBuilder`. A variable-shaped language implements `ir::mlil::FunctionView` directly. The consumer writes its own value analyses over that view, because they depend on the semantics of its dialect, and its own passes delete or rewrite instructions.
 
 The concrete shader-bytecode adapter (the d3dasm decompiler's `cfg`
 module) derives native register-component identities from decoded masks
@@ -611,9 +527,8 @@ and UAV read-modify-write operations, and reports observable shader effects
 through its own effect vocabulary.
 
 The `tests/source-cfg.rs` integration test is the executable specification of
-the source-language side: interned symbol variables, string/bool constants
-through constant propagation, enum operators in expression trees, goto wiring
-by label token, and switch recovery over syntax-node targets.
+the source-language side: interned symbol variables, dominators, rendering,
+and goto wiring by label token.
 
 Every other target in `crates/cfglib/tests/` pins one public area through the
 crate facade only, the way a consumer calls it, and judges the library against
@@ -626,9 +541,9 @@ larger ones.
 |---|---|
 | Graph store, tables, traversal | `graph-store`, `fanout-tables`, `open-search`, `graph-algorithms`, `tombstones` (every analysis on a store with removed slots, before and after `compact`) |
 | Control flow and exceptions | `control-tree`, `exception-regions`, `exception-models`, `address-cfg` |
-| Dataflow and SSA | `dataflow-solvers`, `memory-value-flow`, `ssa-destruction`, `cfg-pipeline` (build, dominate, SSA, SCCP, copy and dead-code passes, `eliminate_phis`) |
+| Dataflow | `dataflow-solvers` |
 | Transforms and analyses | `transform-pipeline`, `cfg-analyses` |
-| IR contracts, each over its own toy dialect | `rtl-facts`, `mlil-contract`, `hlil-pipeline`, `cfg-to-hlil` (analysis, structuring, lift) |
+| IR contracts, each over its own toy dialect | `rtl-contract`, `mlil-contract` |
 | Formats | `text-dot`, `serde-round-trip` (needs `--features serde`), `no-std-facade` |
 
 ## Development

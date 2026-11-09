@@ -1,10 +1,11 @@
-//! Intermediate-representation traits and the generic algorithms over them.
+//! Intermediate-representation traits and vocabulary.
 //!
 //! This module defines contracts. It holds no IR storage, no builder
-//! implementation, and no editing machinery: a consumer owns those and
-//! implements the traits here on its own dense storage. Where an algorithm
-//! creates a function, it drives a builder trait that the consumer
-//! implements, and the consumer's builder seals the function.
+//! implementation, no editing machinery, and no algorithm over the contents
+//! of an instruction: a consumer owns those and implements the traits here
+//! on its own dense storage. A producer that creates a function drives a
+//! builder trait that the consumer implements, and the consumer's builder
+//! seals the function.
 //!
 //! - [`rtl`] is the register-transfer level. Instruction semantics describe one
 //!   atomic state update through the write-only
@@ -18,16 +19,13 @@
 //! - [`hlil`] is the structured level: statement and expression trees read
 //!   through a [`FunctionView`](hlil::FunctionView) and built through a
 //!   write-only [`FunctionBuilder`](hlil::FunctionBuilder) that the consumer
-//!   implements. Generic algorithms lift a flat function into it, lower it
-//!   back, recover source structure, verify, print, and place declarations;
-//!   the module lists them. The consumer stores the function.
+//!   implements, with the walks that every reader of the shapes needs. The
+//!   consumer stores the function.
 //!
-//! Every level is language-neutral. The library defines the shapes, the
-//! traits, and the generic algorithms, and names no language, runtime, ABI, or
-//! instruction set: a consumer-defined `Dialect` of each level supplies the
-//! vocabulary, as plain data that the consumer's storage holds. The generic
-//! algorithms read through the views and report facts. An algorithm never
-//! edits the function it reads, and the consumer applies every change.
+//! Every level is language-neutral. The library defines the shapes and the
+//! traits, and names no language, runtime, ABI, or instruction set: a
+//! consumer-defined `Dialect` of each level supplies the vocabulary, as plain
+//! data that the consumer's storage holds.
 
 pub mod hlil;
 pub mod mlil;

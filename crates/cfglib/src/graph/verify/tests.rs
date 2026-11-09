@@ -71,8 +71,7 @@ fn merging_a_linear_chain_leaves_one_verifiable_block() {
 
 #[test]
 fn a_diamond_missing_an_arm_survives_every_whole_graph_analysis() {
-    use crate::dataflow::liveness::LivenessProblem;
-    use crate::test_util::{DfInst, df_def, df_use};
+    use crate::test_util::{DfInst, LiveVariables, df_def, df_use};
 
     let mut cfg: Cfg<DfInst> = Cfg::new();
     let left = cfg.new_block();
@@ -115,17 +114,22 @@ fn a_diamond_missing_an_arm_survives_every_whole_graph_analysis() {
     );
     assert_eq!(post_dominators.exits(), [merge]);
 
-    let facts = crate::solve_problem(&cfg, &LivenessProblem).expect("liveness solves");
+    let facts = crate::solve_problem(&cfg, &LiveVariables).expect("liveness solves");
     assert!(facts.fact_in(merge).contains(&0));
     assert!(
         facts.fact_in(left).is_empty(),
         "a retired slot keeps the bottom fact"
     );
 
-    let ssa = crate::SsaForm::compute(&cfg, &dominators);
-    assert_eq!(ssa.blocks().len(), cfg.block_bound());
-    assert_eq!(ssa.block(merge).instructions.len(), 1);
-    assert_eq!(ssa.block(left).instructions.len(), 0);
+    let frontiers = crate::DominanceFrontiers::compute(&cfg, &dominators);
+    assert!(
+        frontiers.frontier(right).is_empty(),
+        "the surviving arm dominates the merge"
+    );
+    assert!(
+        frontiers.frontier(left).is_empty(),
+        "a retired slot has an empty frontier"
+    );
 
     let reversed = crate::reverse_cfg(&cfg);
     let reversed_report = verify(&reversed);

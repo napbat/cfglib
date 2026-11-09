@@ -341,8 +341,8 @@ impl ControlTree {
     /// of frames in the heap, one for every nested construct — an `if` arm,
     /// each link of an `else if` chain, a loop body, a switch arm, a `try`
     /// body or handler — and places the goto labels with a stack of its own.
-    /// The same holds for [`compute_predicated`](Self::compute_predicated),
-    /// the pseudocode printer ([`write_pseudocode`](Self::write_pseudocode)),
+    /// The same holds for the pseudocode printer
+    /// ([`write_pseudocode`](Self::write_pseudocode)),
     /// [`preorder`](Self::preorder), [`walk`](Self::walk), and
     /// [`for_each_instruction`](Self::for_each_instruction).
     ///

@@ -226,15 +226,8 @@ fn assert_arena_is_a_tree(tree: &ControlTree, context: &str) {
 
 /// The pseudocode names every instruction, in the order the walk visits them:
 /// a branch or dispatch prints the instructions that compute its condition
-/// ahead of it and its own test in the header. A guarded region also names its
-/// witness once more, so a predicated tree is not compared.
+/// ahead of it and its own test in the header.
 fn assert_display_follows_walk<I, E>(cfg: &Cfg<I, E>, tree: &ControlTree, context: &str) {
-    if tree
-        .preorder()
-        .any(|id| matches!(tree.node(id), ControlNode::Guarded { .. }))
-    {
-        return;
-    }
     let mut walked = Vec::new();
     tree.for_each_instruction(cfg, |point, _| walked.push((point.block, point.inst_idx)));
     let mut printed = Vec::new();

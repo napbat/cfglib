@@ -2,11 +2,10 @@ use std::collections::{BTreeSet, VecDeque};
 
 use cfglib::{
     BlockId, Cfg, CommonAncestor, DominanceFrontiers, DominatorTree, EdgeStep, Facts, Graph,
-    IntervalAnalysis, NodeId, PhiPlacements, PostDominatorTree, PostNode, ProgramPoint, SsaForm,
-    SsaValue, TraversalDirection,
+    IntervalAnalysis, NodeId, PostDominatorTree, PostNode, TraversalDirection,
 };
 
-use super::fixtures::{ConstantInst, WIDE_FACT_WORDS, fixture_u32};
+use super::fixtures::{WIDE_FACT_WORDS, fixture_u32};
 use super::structural_oracles::has_directed_edge;
 
 pub(super) fn directed_distances(
@@ -316,109 +315,5 @@ pub(super) fn assert_wide_cfg_facts(facts: &Facts<Vec<u64>>, block_count: usize)
             assert_eq!(fact.len(), WIDE_FACT_WORDS);
             assert!(fact.iter().all(|&word| word == u64::MAX));
         }
-    }
-}
-
-pub(super) fn assert_linear_ssa(ssa: &SsaForm<u32>, block_count: usize) {
-    assert_eq!(ssa.blocks().len(), block_count);
-    assert_eq!(ssa.phis().count(), 0);
-    for index in 0..block_count {
-        let block = BlockId::from_index(index);
-        let ssa_block = ssa.block(block);
-        assert_eq!(ssa_block.block, block);
-        assert_eq!(ssa_block.phis.len(), 0);
-        assert_eq!(ssa_block.instructions.len(), 1);
-        let instruction = &ssa_block.instructions[0];
-        assert_eq!(instruction.point, ProgramPoint { block, inst_idx: 0 });
-        assert_eq!(instruction.uses().len(), 0);
-        assert_eq!(instruction.defs(), [SsaValue::new(0, index + 1)]);
-    }
-    assert_eq!(ssa.max_version(&0), block_count);
-}
-
-pub(super) fn assert_phi_placements(
-    placements: &PhiPlacements<u32>,
-    layer_count: usize,
-    variable_count: usize,
-) {
-    assert_eq!(placements.len(), layer_count * variable_count);
-    for layer in 0..layer_count {
-        let left = BlockId::from_index(3 * layer + 1);
-        let right = BlockId::from_index(3 * layer + 2);
-        let merge = BlockId::from_index(3 * layer + 3);
-        let at_merge = placements.at(merge);
-        assert_eq!(at_merge.len(), variable_count);
-        for (variable, placement) in at_merge.iter().enumerate() {
-            assert_eq!(placement.variable, fixture_u32(variable));
-            assert_eq!(
-                placement.predecessors(),
-                [left, right].map(|block| ProgramPoint {
-                    block,
-                    inst_idx: variable_count,
-                })
-            );
-        }
-    }
-    for index in 0..=3 * layer_count {
-        if index % 3 != 0 || index == 0 {
-            assert_eq!(placements.at(BlockId::from_index(index)).len(), 0);
-        }
-    }
-}
-
-pub(super) fn assert_phi_ssa(
-    ssa: &SsaForm<u32>,
-    source: &Cfg<ConstantInst>,
-    layer_count: usize,
-    variable_count: usize,
-) {
-    assert_eq!(ssa.blocks().len(), source.block_bound());
-    assert_eq!(ssa.phis().count(), layer_count * variable_count);
-    let mut definitions = BTreeSet::new();
-    for block_id in source.block_ids() {
-        let block = source.block(block_id);
-        let ssa_block = ssa.block(block_id);
-        assert_eq!(ssa_block.block, block_id);
-        assert_eq!(ssa_block.instructions.len(), block.instructions().len());
-        for (index, annotation) in ssa_block.instructions.iter().enumerate() {
-            assert_eq!(
-                annotation.point,
-                ProgramPoint {
-                    block: block_id,
-                    inst_idx: index
-                }
-            );
-            assert_eq!(annotation.uses().len(), 0);
-            assert_eq!(annotation.defs().len(), 1);
-            assert!(annotation.defs()[0].version > 0);
-            assert!(definitions.insert(annotation.defs()[0].clone()));
-        }
-        for phi in &ssa_block.phis {
-            assert!(phi.result.version > 0);
-            assert!(definitions.insert(phi.result.clone()));
-            assert_eq!(phi.operands().len(), source.incoming(block_id).count());
-            assert_eq!(
-                phi.operands()
-                    .iter()
-                    .map(|(point, _)| *point)
-                    .collect::<Vec<_>>(),
-                source
-                    .predecessors(block_id)
-                    .map(|block| ProgramPoint {
-                        block,
-                        inst_idx: source.block(block).instructions().len(),
-                    })
-                    .collect::<Vec<_>>()
-            );
-            assert!(
-                phi.operands()
-                    .iter()
-                    .all(|(_, value)| value.variable == phi.result.variable)
-            );
-        }
-    }
-    assert_eq!(definitions.len(), layer_count * variable_count * 3);
-    for variable in 0..fixture_u32(variable_count) {
-        assert_eq!(ssa.max_version(&variable), layer_count * 3);
     }
 }

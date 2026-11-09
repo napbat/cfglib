@@ -26,7 +26,7 @@ use crate::graph::view::RootedView;
 ///
 /// # Exception regions
 ///
-/// The view has no separate exception model. An analysis finds the
+/// The view has no separate exception model. A consumer's analysis finds the
 /// exception-region information in two places:
 ///
 /// - An edge of kind [`EdgeKind::ExceptionUnwind`](crate::EdgeKind::ExceptionUnwind)
@@ -35,7 +35,8 @@ use crate::graph::view::RootedView;
 /// - [`InstrInfo::may_unwind`](crate::InstrInfo::may_unwind) marks the
 ///   throwing instructions of a block.
 ///
-/// [`departs_before_throws`](crate::departs_before_throws) combines the two.
+/// An unwind edge out of a block with a throwing instruction carries the state
+/// before that instruction; every other edge carries the completed block.
 ///
 /// # Contract
 ///

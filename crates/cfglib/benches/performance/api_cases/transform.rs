@@ -1,15 +1,12 @@
 use std::collections::BTreeSet;
 
 use cfglib::{
-    BlockId, BlockOrder, Cfg, ClrExceptionRegion, ClrHandler, ClrHandlerKind, DominatorTree,
-    EdgeKind, Emitter, FlowEffect, HandlerBody, HandlerTypes, Liveness, SehExceptionRegion,
-    SehHandler, SehHandlerKind, color_graph, contract_edge_mapped, dead_code_elimination,
-    dead_code_elimination_with_exits, detect_loops_tagged, eliminate_pre, find_loop_invariants,
-    install_clr_region, install_seh_region, interference_graph, linearize, merge_blocks_mapped,
-    promote_handler_extents, remove_dead_code, remove_dead_code_mapped, remove_empty_blocks_mapped,
-    remove_unreachable, remove_unreachable_mapped, resolve_jump_edges, rotate_loop, simplify,
-    simplify_mapped, split_critical_edges, split_critical_edges_mapped, split_critical_edges_with,
-    verify,
+    BlockId, BlockOrder, Cfg, ClrExceptionRegion, ClrHandler, ClrHandlerKind, EdgeKind, Emitter,
+    FlowEffect, HandlerBody, HandlerTypes, SehExceptionRegion, SehHandler, SehHandlerKind,
+    contract_edge_mapped, install_clr_region, install_seh_region, linearize, merge_blocks_mapped,
+    promote_handler_extents, remove_empty_blocks_mapped, remove_unreachable,
+    remove_unreachable_mapped, resolve_jump_edges, simplify, simplify_mapped, split_critical_edges,
+    split_critical_edges_mapped, split_critical_edges_with, verify,
 };
 use cfglib::{
     ExclusiveExtent, ExtentPromotionDecision, HandlerRef, RelaxError, promote_exclusive_extents,
@@ -63,32 +60,6 @@ fn critical_cfg() -> Cfg<ApiInst> {
     cfg.add_edge(cfg.entry(), side, EdgeKind::ConditionalTrue);
     cfg.add_edge(cfg.entry(), merge, EdgeKind::ConditionalFalse);
     cfg.add_edge(side, merge, EdgeKind::Fallthrough);
-    cfg
-}
-
-fn loop_cfg() -> Cfg<ApiInst> {
-    let mut cfg = Cfg::new();
-    let header = cfg.new_block();
-    let body = cfg.new_block();
-    let exit = cfg.new_block();
-    cfg.block_mut(cfg.entry()).push(ApiInst::constant(0, 1));
-    cfg.block_mut(header).push(ApiInst::pure(1, vec![0]));
-    cfg.block_mut(body).push(ApiInst::pure(2, vec![0]));
-    cfg.add_edge(cfg.entry(), header, EdgeKind::Fallthrough);
-    cfg.add_edge(header, body, EdgeKind::ConditionalTrue);
-    cfg.add_edge(header, exit, EdgeKind::ConditionalFalse);
-    cfg.add_edge(body, header, EdgeKind::Back);
-    cfg
-}
-
-fn redundant_cfg() -> Cfg<ApiInst> {
-    let mut cfg = Cfg::new();
-    cfg.block_mut(cfg.entry()).push(ApiInst::constant(0, 1));
-    cfg.block_mut(cfg.entry()).push(ApiInst::constant(1, 2));
-    cfg.block_mut(cfg.entry())
-        .push(ApiInst::pure(2, vec![0, 1]));
-    cfg.block_mut(cfg.entry())
-        .push(ApiInst::pure(3, vec![0, 1]));
     cfg
 }
 
@@ -310,149 +281,6 @@ fn register_critical_edges(suite: &mut BenchmarkSuite<'_>) {
     );
 }
 
-fn register_dead_code_transforms(suite: &mut BenchmarkSuite<'_>) {
-    let cfg = dataflow_cfg(64, 8);
-    let exit = cfg
-        .block_ids()
-        .last()
-        .expect("the dataflow fixture allocates blocks");
-    let escaping: Vec<u32> = cfg
-        .block(exit)
-        .instructions()
-        .last()
-        .map(|instruction| instruction.defs.clone())
-        .unwrap_or_default();
-    benchmark_case!(
-        suite,
-        "api_dead_code_elimination",
-        covers[dead_code_elimination],
-        || {
-            let mut candidate = cfg.clone();
-            let removed = dead_code_elimination(&mut candidate);
-            (candidate, removed)
-        },
-        |(candidate, removed)| {
-            assert!(*removed > 0);
-            assert!(verify(candidate).is_ok());
-        }
-    );
-    benchmark_case!(
-        suite,
-        "api_dead_code_elimination_with_exits",
-        covers[dead_code_elimination_with_exits],
-        || {
-            let mut candidate = cfg.clone();
-            let removed = dead_code_elimination_with_exits(&mut candidate, |block| {
-                if block == exit {
-                    escaping.clone()
-                } else {
-                    Vec::new()
-                }
-            });
-            (candidate, removed)
-        },
-        |(candidate, removed)| {
-            assert!(*removed > 0);
-            assert!(verify(candidate).is_ok());
-        }
-    );
-    benchmark_case!(
-        suite,
-        "api_remove_dead_code",
-        covers[remove_dead_code],
-        || {
-            let mut candidate = cfg.clone();
-            let removed = remove_dead_code(&mut candidate);
-            (candidate, removed)
-        },
-        |(candidate, removed)| {
-            assert!(*removed > 0);
-            assert!(verify(candidate).is_ok());
-        }
-    );
-    benchmark_case!(
-        suite,
-        "api_remove_dead_code_mapped",
-        covers[remove_dead_code_mapped],
-        || {
-            let mut candidate = cfg.clone();
-            let result = remove_dead_code_mapped(&mut candidate);
-            (candidate, result)
-        },
-        |(candidate, (removed, _))| {
-            assert!(*removed > 0);
-            assert!(verify(candidate).is_ok());
-        }
-    );
-}
-
-fn register_dataflow_transforms(suite: &mut BenchmarkSuite<'_>) {
-    let cfg = dataflow_cfg(64, 8);
-    let live = Liveness::compute(&cfg);
-    let conflicts = interference_graph(&cfg, &live);
-    benchmark_case!(
-        suite,
-        "api_interference_graph",
-        covers[interference_graph],
-        || interference_graph(&cfg, &live),
-        |graph| assert!(graph.node_count() > 0)
-    );
-    benchmark_case!(
-        suite,
-        "api_color_graph",
-        covers[color_graph],
-        || color_graph(&conflicts),
-        |colors| assert_eq!(colors.assignment.len(), conflicts.node_count())
-    );
-
-    let redundant = redundant_cfg();
-    let dominators = DominatorTree::compute(&redundant);
-    benchmark_case!(
-        suite,
-        "api_eliminate_pre",
-        covers[eliminate_pre],
-        || {
-            let mut candidate = redundant.clone();
-            let eliminated = eliminate_pre(&mut candidate, &dominators);
-            (candidate, eliminated)
-        },
-        |(candidate, eliminated)| {
-            assert!(*eliminated > 0);
-            assert!(verify(candidate).is_ok());
-        }
-    );
-}
-
-fn register_loops(suite: &mut BenchmarkSuite<'_>) {
-    let cfg = loop_cfg();
-    let dominators = DominatorTree::compute(&cfg);
-    let natural_loop = detect_loops_tagged(&cfg, &dominators)
-        .into_iter()
-        .next()
-        .expect("loop benchmark fixture must contain a loop");
-    benchmark_case!(
-        suite,
-        "api_find_loop_invariants",
-        covers[find_loop_invariants],
-        || find_loop_invariants(&cfg, &natural_loop),
-        |invariants: &Vec<_>| assert_ne!(invariants.as_slice(), [])
-    );
-    benchmark_case!(
-        suite,
-        "api_rotate_loop",
-        covers[rotate_loop],
-        || {
-            let mut candidate = cfg.clone();
-            let rotation = rotate_loop(&mut candidate, &natural_loop);
-            (candidate, rotation)
-        },
-        |(candidate, rotation)| {
-            assert!(rotation.is_some());
-            assert!(verify(candidate).is_ok());
-        }
-    );
-}
-
 fn register_frontend_utilities(suite: &mut BenchmarkSuite<'_>) {
     let cfg = dataflow_cfg(64, 4);
     benchmark_case!(
@@ -668,9 +496,6 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     register_layout(suite);
     register_node_edits(suite);
     register_critical_edges(suite);
-    register_dead_code_transforms(suite);
-    register_dataflow_transforms(suite);
-    register_loops(suite);
     register_frontend_utilities(suite);
     register_exception_regions(suite);
 }

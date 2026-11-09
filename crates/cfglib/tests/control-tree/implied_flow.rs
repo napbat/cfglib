@@ -95,9 +95,7 @@ impl<T: Fn(BlockId) -> bool> Reader<'_, T> {
                 Entry::at(span.block())
             }
             ControlNode::Return(span) => Entry::at(span.block()),
-            ControlNode::Sequence(body)
-            | ControlNode::Label { body, .. }
-            | ControlNode::Guarded { body, .. } => self.body(body, next),
+            ControlNode::Sequence(body) | ControlNode::Label { body, .. } => self.body(body, next),
             ControlNode::IfThenElse {
                 condition,
                 then_body,

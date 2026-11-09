@@ -193,8 +193,7 @@ fn child_bodies_follow_the_documented_order_for_every_node_kind() {
                 | ControlNode::Goto { .. } => vec![],
                 ControlNode::Sequence(body)
                 | ControlNode::Loop { body, .. }
-                | ControlNode::Label { body, .. }
-                | ControlNode::Guarded { body, .. } => vec![body],
+                | ControlNode::Label { body, .. } => vec![body],
                 ControlNode::IfThenElse {
                     then_body,
                     else_body,

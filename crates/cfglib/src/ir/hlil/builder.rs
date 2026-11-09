@@ -9,8 +9,8 @@ use super::view::FunctionView;
 
 /// Builds a structured function bottom-up in consumer-owned storage.
 ///
-/// An algorithm such as [`recover_structure`](super::recover_structure) calls
-/// the methods in construction order and ends with [`finish`](Self::finish).
+/// A producer, such as a lowering from source or a lift from a flat function,
+/// calls the methods in construction order and ends with [`finish`](Self::finish).
 /// Each call appends one variable, expression, or statement and returns its
 /// handle. The protocol offers no way to read a node back or to change one. An
 /// algorithm that needs to inspect or simplify what it is about to emit does
@@ -31,7 +31,7 @@ use super::view::FunctionView;
 ///   that names the variable it returns.
 ///
 /// The consumer checks the contract when the function is sealed and reports a
-/// violation through [`Self::Error`]. Calling [`verify`](fn@super::verify) in
+/// violation through [`Self::Error`]. A structural verification in
 /// [`finish`](Self::finish) checks all of it.
 pub trait FunctionBuilder<D: Dialect> {
     /// A statement handle, dense within the function being built.

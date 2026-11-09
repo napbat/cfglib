@@ -290,23 +290,6 @@ impl<F: FnMut(&mut dyn fmt::Write, ProgramPoint) -> fmt::Result> Printer<'_, F> 
                 self.queue_body(pending, try_body);
                 Ok(())
             }
-            ControlNode::Guarded {
-                predicate,
-                when_true,
-                body,
-            } => {
-                out.indent()?;
-                out.write_str("@guarded(")?;
-                if !when_true {
-                    out.write_str("!")?;
-                }
-                (self.write_instruction)(out, predicate)?;
-                out.write_str(")")?;
-                out.open()?;
-                pending.push(Print::Close);
-                self.queue_body(pending, body);
-                Ok(())
-            }
         }
     }
 

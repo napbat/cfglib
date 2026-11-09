@@ -11,10 +11,10 @@ fn five_statement_block() -> (Cfg<Stmt, Route>, cfglib::BlockId, cfglib::EdgeId)
         &mut cfg,
         entry,
         [
-            Stmt::constant("a", 1),
-            Stmt::constant("b", 2),
-            Stmt::add("c", "a", "b"),
-            Stmt::multiply("d", "c", "c"),
+            Stmt::compute("a", &[]),
+            Stmt::compute("b", &[]),
+            Stmt::compute("c", &["a", "b"]),
+            Stmt::compute("d", &["c", "c"]),
             Stmt::effect(&[crate::stmt::Effect::Output], &["d"]),
         ],
     );

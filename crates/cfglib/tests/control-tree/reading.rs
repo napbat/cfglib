@@ -45,7 +45,6 @@ pub fn kind_name(node: &ControlNode) -> &'static str {
         ControlNode::Label { .. } => "label",
         ControlNode::Goto { .. } => "goto",
         ControlNode::TryCatch { .. } => "try",
-        ControlNode::Guarded { .. } => "guarded",
     }
 }
 

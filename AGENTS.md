@@ -44,13 +44,22 @@ Follow the Cargo package layout:
 ## IR boundary
 
 - Keep `ir::rtl`, `ir::mlil` and `ir::hlil` language-neutral and trait-only.
-- The library owns the IR traits and the generic algorithms that read through them.
+- The library owns the IR traits and the vocabulary that more than one storage or consumer
+  shares: the dialect, view and builder traits, the instruction and memory-event traits, and the
+  block, edge, region and handler identities.
+- The library owns the graph algorithms, the generic fixpoint solvers, the transforms of the
+  CFG shape and the generic `Cfg` container. A graph algorithm reads the shape of a graph
+  (blocks, edges and instruction counts). It can also read the control-flow classification of
+  an instruction through the shared traits (`FlowControl`, `CallInfo`, `AddressInstruction`),
+  because that classification makes the graph. A renderer (DOT, text, control-tree
+  pseudocode) takes the text of an instruction from the caller (`DisplayInstr`).
+- Do not add an IR algorithm. An IR algorithm reads the operands, values, effects or
+  operations of instructions: dataflow over instructions, SSA construction, memory SSA,
+  lifting, lowering, and the verification or printing of IR. The consumer that owns the IR
+  owns these algorithms and the hook traits that only they use.
 - The consumer owns all IR storage, builders and editing. Its dialect owns operations, roots,
   constants, value types, variable metadata, effects, edge payloads, outcomes and constant
   folding.
-- An algorithm can make a new function only through a consumer builder trait
-  (`ir::hlil::FunctionBuilder`, `ir::hlil::FlatBuilder`). It seals the function only through
-  `finish`, and it reads its input only through view traits. It never edits its input.
 - Do not add IR storage, or a language-, VM-, ABI- or ISA-specific variant, to a generic layer.
 - Keep the crate `no_std` with `alloc`. Add a dependency only if it supports `no_std`.
 
@@ -62,8 +71,8 @@ Follow the Cargo package layout:
   levels share names (`ir::hlil::FunctionView`).
 - A domain module with a narrow API (`cfg`, `exception`, `ir::rtl`, `ir::mlil`, `ir::hlil`)
   keeps its children private and re-exports its public items.
-- Spell compound names in full with underscores (`constant_propagation`). Keep the standard
-  acronyms (`ssa`, `scc`, `sccp`, `dce`, `pre`, `cdg`, `pdg`, `eh`, `seh`, `veh`, `clr`, `expr`).
+- Spell compound names in full with underscores (`control_dependence`). Keep the standard
+  acronyms (`scc`, `cdg`, `eh`, `seh`, `veh`, `clr`).
 - Make a derived analysis with `Type::compute`. Use `build` only for a fallible builder
   (`CfgBuilder::build`). Give a function that returns a graph a noun name (`call_graph`).
 - Use a `*Result` name only for a type in a `Result` position. Give each error type a name that

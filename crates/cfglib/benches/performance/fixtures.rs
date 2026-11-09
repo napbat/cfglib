@@ -1,16 +1,10 @@
-use std::collections::BTreeMap;
-
 use cfglib::{
-    BlockId, Cfg, CfgBuilder, ConstantFolder, Direction, EdgeKind, FlowControl, FlowEffect, Graph,
-    InstrInfo, NodeId, NodeProblem, Problem, ValueNumberInfo,
+    BlockId, Cfg, CfgBuilder, Direction, EdgeKind, FlowControl, FlowEffect, Graph, NodeId,
+    NodeProblem, Problem,
 };
 
 pub(super) fn fixture_u32(value: usize) -> u32 {
     u32::try_from(value).expect("benchmark fixture index must fit in u32")
-}
-
-fn fixture_u64(value: usize) -> u64 {
-    u64::try_from(value).expect("benchmark fixture index must fit in u64")
 }
 
 pub(super) fn fixture_f64(value: usize) -> f64 {
@@ -304,99 +298,6 @@ impl NodeProblem<Graph<(), ()>> for WideNodeFact {
     }
 }
 
-pub(super) struct ConstantInst {
-    defs: Vec<u32>,
-    uses: Vec<u32>,
-    value: u64,
-}
-
-impl InstrInfo for ConstantInst {
-    type Variable = u32;
-
-    fn uses(&self) -> &[u32] {
-        &self.uses
-    }
-
-    fn defs(&self) -> &[u32] {
-        &self.defs
-    }
-}
-
-impl ConstantFolder for ConstantInst {
-    type Const = u64;
-
-    fn fold_constant(&self, _known: &BTreeMap<u32, u64>) -> Option<(u32, u64)> {
-        Some((self.defs[0], self.value))
-    }
-}
-
-impl ValueNumberInfo for ConstantInst {
-    type Operator = u64;
-
-    fn operator(&self) -> u64 {
-        self.value
-    }
-
-    fn is_pure(&self) -> bool {
-        true
-    }
-}
-
-pub(super) fn independent_constants(instruction_count: usize) -> Cfg<ConstantInst> {
-    let mut cfg = Cfg::new();
-    for variable in 0..fixture_u32(instruction_count) {
-        cfg.block_mut(cfg.entry()).push(ConstantInst {
-            defs: vec![variable],
-            uses: Vec::new(),
-            value: u64::from(variable),
-        });
-    }
-    cfg
-}
-
-pub(super) fn linear_constants(block_count: usize) -> Cfg<ConstantInst> {
-    let mut cfg = Cfg::new();
-    let mut block = cfg.entry();
-    for index in 0..block_count {
-        cfg.block_mut(block).push(ConstantInst {
-            defs: vec![0],
-            uses: Vec::new(),
-            value: fixture_u64(index),
-        });
-        if index + 1 < block_count {
-            let next = cfg.new_block();
-            cfg.add_edge(block, next, EdgeKind::Fallthrough);
-            block = next;
-        }
-    }
-    cfg
-}
-
-pub(super) fn phi_storm_cfg(layer_count: usize, variable_count: usize) -> Cfg<ConstantInst> {
-    let mut cfg = Cfg::new();
-    let mut branch = cfg.entry();
-    for layer in 0..layer_count {
-        let left = cfg.new_block();
-        let right = cfg.new_block();
-        let merge = cfg.new_block();
-        cfg.add_edge(branch, left, EdgeKind::ConditionalTrue);
-        cfg.add_edge(branch, right, EdgeKind::ConditionalFalse);
-        cfg.add_edge(left, merge, EdgeKind::Fallthrough);
-        cfg.add_edge(right, merge, EdgeKind::Fallthrough);
-        for variable in 0..fixture_u32(variable_count) {
-            for block in [left, right] {
-                cfg.block_mut(block).push(ConstantInst {
-                    defs: vec![variable],
-                    uses: Vec::new(),
-                    value: (fixture_u64(layer) << 32) | u64::from(variable),
-                });
-            }
-        }
-        branch = merge;
-    }
-    cfg
-}
-
 #[derive(Clone, Copy)]
 pub(super) struct BuilderInst(pub(super) FlowEffect);
 
@@ -456,35 +357,4 @@ pub(super) fn build_eight_case_switch_chain(region_count: usize) -> Cfg<BuilderI
         })
     }))
     .expect("synthetic switches are balanced")
-}
-
-/// A chain of `live` blocks plus `groups` unreachable regions that each jump
-/// into it: even groups are one block, odd groups a three-block cycle that
-/// leaves from its middle block. Every block defines variable zero, so the
-/// regions are source components of unreachable code with definitions that
-/// flow into live blocks. The CFG has `live + 2 * groups` blocks.
-pub(super) fn unreachable_constants(live: usize, groups: usize) -> Cfg<ConstantInst> {
-    assert!(live > 1);
-    let mut cfg = linear_constants(live);
-    for group in 0..groups {
-        let size = if group % 2 == 0 { 1 } else { 3 };
-        let blocks: Vec<BlockId> = (0..size).map(|_| cfg.new_block()).collect();
-        for (offset, &block) in blocks.iter().enumerate() {
-            cfg.block_mut(block).push(ConstantInst {
-                defs: vec![0],
-                uses: Vec::new(),
-                value: fixture_u64(group * 4 + offset),
-            });
-        }
-        let target = BlockId::from_index(1 + group % (live - 1));
-        if size == 1 {
-            cfg.add_edge(blocks[0], target, EdgeKind::Fallthrough);
-        } else {
-            cfg.add_edge(blocks[0], blocks[1], EdgeKind::Fallthrough);
-            cfg.add_edge(blocks[1], blocks[2], EdgeKind::ConditionalTrue);
-            cfg.add_edge(blocks[1], target, EdgeKind::ConditionalFalse);
-            cfg.add_edge(blocks[2], blocks[0], EdgeKind::Back);
-        }
-    }
-    cfg
 }

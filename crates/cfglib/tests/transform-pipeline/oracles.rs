@@ -5,11 +5,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cfglib::{
-    BlockId, Cfg, CfgRenumbering, EdgeId, EdgeKind, EffectInfo, InstrInfo, Rewrite, verify,
-};
+use cfglib::{BlockId, Cfg, CfgRenumbering, EdgeId, EdgeKind, Rewrite, verify};
 
-use crate::toy::{Inst, Payload, Reg};
+use crate::toy::{Inst, Payload};
 
 pub fn assert_valid<E>(cfg: &Cfg<Inst, E>, context: &str) {
     let report = verify(cfg);
@@ -264,147 +262,6 @@ pub fn instruction_multiset<E>(
         for inst in cfg.block(block).instructions() {
             *counts.entry(format!("{inst:?}")).or_default() += 1;
         }
-    }
-    counts
-}
-
-/// Variables live at the end of each block, by backward fixed point over the
-/// explicit successor lists. Independent of the library's `Liveness`.
-pub fn brute_force_live_out<E>(cfg: &Cfg<Inst, E>) -> BTreeMap<BlockId, BTreeSet<Reg>> {
-    brute_force_liveness(cfg).1
-}
-
-/// Variables live at the start of each block; see [`brute_force_live_out`].
-pub fn brute_force_live_in<E>(cfg: &Cfg<Inst, E>) -> BTreeMap<BlockId, BTreeSet<Reg>> {
-    brute_force_liveness(cfg).0
-}
-
-fn brute_force_liveness<E>(
-    cfg: &Cfg<Inst, E>,
-) -> (
-    BTreeMap<BlockId, BTreeSet<Reg>>,
-    BTreeMap<BlockId, BTreeSet<Reg>>,
-) {
-    let mut live_in: BTreeMap<BlockId, BTreeSet<Reg>> = cfg
-        .block_ids()
-        .map(|block| (block, BTreeSet::new()))
-        .collect();
-    let mut live_out = live_in.clone();
-    loop {
-        let mut changed = false;
-        for block in cfg.block_ids().collect::<Vec<_>>().into_iter().rev() {
-            let out: BTreeSet<Reg> = cfg
-                .successors(block)
-                .flat_map(|successor| live_in[&successor].iter().copied())
-                .collect();
-            let mut live = out.clone();
-            for inst in cfg.block(block).instructions().iter().rev() {
-                for def in inst.defs() {
-                    live.remove(def);
-                }
-                live.extend(inst.uses().iter().copied());
-            }
-            let previous_out = live_out.insert(block, out.clone());
-            let previous_in = live_in.insert(block, live.clone());
-            changed |= previous_out != Some(out) || previous_in != Some(live);
-        }
-        if !changed {
-            return (live_in, live_out);
-        }
-    }
-}
-
-type Site = (BlockId, usize);
-
-/// Where each register's value at the start of every reachable block was
-/// last written, over the reachable blocks only, by explicit forward fixed
-/// point. Independent of the library's `ReachingDefs`.
-fn reaching_at_block_starts<E>(
-    cfg: &Cfg<Inst, E>,
-    reachable: &BTreeSet<BlockId>,
-) -> BTreeMap<BlockId, BTreeSet<(Reg, Site)>> {
-    let mut start: BTreeMap<BlockId, BTreeSet<(Reg, Site)>> = reachable
-        .iter()
-        .map(|&block| (block, BTreeSet::new()))
-        .collect();
-    loop {
-        let mut changed = false;
-        for &block in reachable {
-            let mut here = start[&block].clone();
-            for (index, inst) in cfg.block(block).instructions().iter().enumerate() {
-                for &def in inst.defs() {
-                    here.retain(|&(register, _)| register != def);
-                    here.insert((def, (block, index)));
-                }
-            }
-            for successor in cfg.successors(block) {
-                let target = start
-                    .get_mut(&successor)
-                    .expect("successors of reachable blocks are reachable");
-                let before = target.len();
-                target.extend(here.iter().copied());
-                changed |= target.len() != before;
-            }
-        }
-        if !changed {
-            return start;
-        }
-    }
-}
-
-/// The instructions a program needs: those with a declared effect, plus,
-/// transitively, every instruction whose definition reaches a read by a
-/// needed instruction. The least fixed point, so a value that only feeds a
-/// dead instruction, or only its own loop-carried update, is not needed.
-/// Only reachable blocks take part.
-pub fn needed_instructions<E>(cfg: &Cfg<Inst, E>) -> BTreeSet<Site> {
-    let reachable = reachable_blocks(cfg);
-    let starts = reaching_at_block_starts(cfg, &reachable);
-    let mut needed: BTreeSet<Site> = reachable
-        .iter()
-        .flat_map(|&block| {
-            cfg.block(block)
-                .instructions()
-                .iter()
-                .enumerate()
-                .filter(|(_, inst)| !inst.effects().is_empty())
-                .map(move |(index, _)| (block, index))
-        })
-        .collect();
-    let mut pending: Vec<Site> = needed.iter().copied().collect();
-    while let Some((block, index)) = pending.pop() {
-        let mut reaching = starts[&block].clone();
-        for (earlier, inst) in cfg
-            .block(block)
-            .instructions()
-            .iter()
-            .enumerate()
-            .take(index)
-        {
-            for &def in inst.defs() {
-                reaching.retain(|&(register, _)| register != def);
-                reaching.insert((def, (block, earlier)));
-            }
-        }
-        for &used in cfg.block(block).instructions()[index].uses() {
-            for &(register, site) in &reaching {
-                if register == used && needed.insert(site) {
-                    pending.push(site);
-                }
-            }
-        }
-    }
-    needed
-}
-
-/// The instructions of the reachable blocks that survive removing everything
-/// not needed, as a multiset.
-pub fn needed_instruction_multiset<E>(cfg: &Cfg<Inst, E>) -> BTreeMap<String, usize> {
-    let mut counts = BTreeMap::new();
-    for (block, index) in needed_instructions(cfg) {
-        *counts
-            .entry(format!("{:?}", cfg.block(block).instructions()[index]))
-            .or_default() += 1;
     }
     counts
 }

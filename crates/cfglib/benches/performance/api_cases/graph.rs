@@ -11,10 +11,10 @@ use cfglib::{
     detect_loops_tagged, find_back_edges_tagged, find_function, follow, follow_path,
     insert_preheader, is_recursive_function, is_reducible, kosaraju_scc, loop_exit_blocks,
     min_label_relaxation, open_breadth_first_events, open_breadth_first_paths,
-    open_depth_first_events, open_fold_post_order, open_search, program_dependence_graph,
-    propagate_summaries, reachable, reverse_cfg, reverse_postorder, scan_predecessors, search,
-    search_with_marks, search_with_scratch, to_dot, to_text, topological_sort, verify,
-    verify_edge_view, verify_view, verify_with, write_dot, write_text,
+    open_depth_first_events, open_fold_post_order, open_search, propagate_summaries, reachable,
+    reverse_cfg, reverse_postorder, scan_predecessors, search, search_with_marks,
+    search_with_scratch, to_dot, to_text, topological_sort, verify, verify_edge_view, verify_view,
+    verify_with, write_dot, write_text,
 };
 use cfglib::{
     DotEdgeAttributes, DotStyle, EdgeId, TextStyle, bind_edge_attributes, bind_label,
@@ -23,7 +23,7 @@ use cfglib::{
 };
 
 use super::BenchmarkSuite;
-use crate::fixtures::{branchy_cfg, branchy_graph, fixture_u32, independent_constants};
+use crate::fixtures::{branchy_cfg, branchy_graph, fixture_u32};
 use crate::harness::benchmark_case;
 
 const NODE_COUNT: usize = 1_024;
@@ -469,13 +469,6 @@ fn register_cfg_graphs(suite: &mut BenchmarkSuite<'_>) {
         covers[reverse_cfg],
         || reverse_cfg(&cfg),
         |reversed| assert!(verify(reversed).is_ok())
-    );
-    benchmark_case!(
-        suite,
-        "api_program_dependence_graph",
-        covers[program_dependence_graph],
-        || program_dependence_graph(&independent_constants(NODE_COUNT)),
-        |result| assert_eq!(result.node_count(), NODE_COUNT + 1)
     );
     benchmark_case!(
         suite,

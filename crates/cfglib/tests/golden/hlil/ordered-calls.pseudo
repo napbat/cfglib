@@ -1,4 +1,0 @@
-v1 = call();
-v2 = call(v1);
-v3 = call(v1);
-return v2;

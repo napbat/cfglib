@@ -1,4 +1,0 @@
-if (lt(v0, 10)) {
-    v0 = add(v0, 1);
-}
-return v0;

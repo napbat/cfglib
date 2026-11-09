@@ -8,7 +8,7 @@ use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::exhaustive::{Terminator, for_each_graph, graph, terminators, unpredicated};
+use super::exhaustive::{Terminator, for_each_graph, graph, terminators};
 use super::invariants::{check, describe, isolate_handlers, owned_blocks};
 use super::pseudocode;
 use crate::ControlTree;
@@ -438,7 +438,7 @@ fn every_small_graph_with_a_handler_keeps_every_owned_block() {
                         .collect();
                     for live in [false, true] {
                         let build = |lengths: &[usize]| {
-                            let mut cfg = graph(picked, lengths, unpredicated);
+                            let mut cfg = graph(picked, lengths);
                             with_region(&mut cfg, protected, handler, &extent, live);
                             isolate_handlers(&mut cfg);
                             cfg

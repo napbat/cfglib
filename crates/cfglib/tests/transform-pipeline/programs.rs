@@ -46,8 +46,6 @@ struct Generator<E: Payload> {
     /// counter, the loop bound, or a constant the generator relies on.
     writable: Vec<Reg>,
     next_temporary: Reg,
-    /// Generate no loops, and never assign a register twice.
-    single_assignment: bool,
 }
 
 impl<E: Payload> Generator<E> {
@@ -67,7 +65,7 @@ impl<E: Payload> Generator<E> {
     }
 
     fn destination(&mut self) -> Reg {
-        if self.single_assignment || self.rng.percent(65) {
+        if self.rng.percent(65) {
             let register = self.fresh();
             self.readable.push(register);
             self.writable.push(register);
@@ -111,7 +109,7 @@ impl<E: Payload> Generator<E> {
                     block
                 }
                 70..=84 if depth < 3 => self.conditional(block, depth),
-                85..=94 if depth < 2 && !self.single_assignment => self.counted_loop(block, depth),
+                85..=94 if depth < 2 => self.counted_loop(block, depth),
                 _ if self.rng.percent(50) => self.trampoline(block),
                 _ => block,
             };
@@ -195,16 +193,6 @@ impl<E: Payload> Generator<E> {
 /// A random terminating program. Registers 0 through 3 are inputs; with
 /// `orphans`, unreachable blocks that feed live blocks are added as well.
 pub fn random_program<E: Payload>(seed: u64, orphans: bool) -> Cfg<Inst, E> {
-    generate(seed, orphans, false)
-}
-
-/// A random loop-free program in which every register is assigned at most
-/// once, so a register's value has one well-defined expression tree.
-pub fn random_single_assignment_program<E: Payload>(seed: u64) -> Cfg<Inst, E> {
-    generate(seed, false, true)
-}
-
-fn generate<E: Payload>(seed: u64, orphans: bool, single_assignment: bool) -> Cfg<Inst, E> {
     let mut builder = Builder::<E>::new();
     let entry = builder.entry();
     builder.push(entry, Inst::constant(ONE, 1));
@@ -215,7 +203,6 @@ fn generate<E: Payload>(seed: u64, orphans: bool, single_assignment: bool) -> Cf
         readable: vec![0, BOUND, ONE, ZERO, DATA[0], DATA[1]],
         writable: DATA.to_vec(),
         next_temporary: FIRST_TEMPORARY,
-        single_assignment,
     };
     let statements = 4 + generator.rng.below(8);
     let last = generator.statements(entry, 0, statements);

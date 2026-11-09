@@ -1,3 +1,0 @@
-v1 = add(v0, v0);
-v2 = call(v0, v1);
-return v2;

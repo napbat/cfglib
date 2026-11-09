@@ -287,7 +287,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
 
     /// The ultimate target of a chain of pure jump trampolines: an unemitted,
     /// instruction-free block with a single unconditional successor forwards
-    /// a resolution unchanged. The HLIL lift empties dialect-declared pure
+    /// a resolution unchanged. A lift into HLIL empties dialect-declared pure
     /// transfers in its working view before structuring (javac's `break`
     /// routes through such blocks); frontends structuring a raw [`Cfg`] whose
     /// jump encodings occupy an instruction clear them the same way.

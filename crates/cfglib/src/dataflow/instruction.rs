@@ -1,6 +1,6 @@
-//! The instruction-side contract of the data-flow analyses: which variables
-//! an instruction reads and writes, and the opt-in predicate and effect
-//! extensions.
+//! The instruction-side contract that a consumer's data-flow analyses read:
+//! which variables an instruction reads and writes, whether it may unwind,
+//! and the opt-in effect extension.
 
 /// An IR-defined identity that participates in data-flow analysis.
 ///
@@ -47,7 +47,7 @@ pub trait InstrInfo {
     /// possible unwind point: a block with an unwind successor and no such
     /// instruction is treated as unwinding after its last instruction.
     ///
-    /// The analyses read only this method. The
+    /// A consumer's analyses read only this method. The
     /// [`FlowEffect::MayThrow`](crate::FlowEffect::MayThrow) classification
     /// the CFG builder sees is separate, so an adapter that classifies a
     /// throwing instruction reports it here as well.
@@ -56,33 +56,13 @@ pub trait InstrInfo {
     }
 }
 
-/// Opt-in: instructions whose execution is predicated on a condition
-/// variable (ARM IT blocks, GPU wave predication, x86 CMOV, guarded
-/// statements).
-///
-/// The predicate is expressed in the consumer's own variable domain.
-///
-/// # Contract
-///
-/// The predicate variable is a READ: it **must also appear in
-/// [`uses`](InstrInfo::uses)**. The dataflow analyses consult only
-/// `uses`/`defs` — an adapter that reports the guard here but omits it
-/// from `uses` will see liveness call the predicate's definition dead and
-/// dead-code elimination delete it while the guard still names it.
-pub trait Predicated: InstrInfo {
-    /// The guarding variable and the polarity under which the instruction
-    /// executes. `None` for unconditionally executed instructions.
-    fn predicate(&self) -> Option<(Self::Variable, bool)>;
-}
-
 /// Opt-in: instructions that declare side effects beyond their def/use sets.
 ///
 /// The effect vocabulary is consumer-typed — machine memory and I/O for a
 /// binary adapter, GC allocation / panics / channel sends for a source
-/// language — the library imposes none. Purity analysis and dead-code
-/// elimination consume this trait; requiring it there means a consumer must
-/// state an effect vocabulary before code with possible side effects can be
-/// classified or deleted.
+/// language — the library imposes none. A consumer's dead-code pass can
+/// require it so that a consumer states an effect vocabulary before code
+/// with possible side effects can be deleted.
 pub trait EffectInfo: InstrInfo {
     /// Consumer effect vocabulary.
     type Effect: Clone + Ord;

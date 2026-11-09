@@ -23,9 +23,6 @@ as approximate. Mutation timings include the fixture clone named by each case.
 | `cfg_interval_analysis` | 45,103,800 | 137,013 | 329.19x |
 | `directed_interval_reverse_id_chain` | 851,031,600 | 110,340 | 7,712.81x |
 | `directed_node_fixpoint_bool` | 444,833 | 21,611 | 20.58x |
-| `cfg_sccp_independent_constants` | 20,204,000 | 53,414 | 378.26x |
-| `cfg_build_ssa_linear` | 2,427,100 | 240,663 | 10.09x |
-| `cfg_constprop_independent_constants` | 3,752,000 | 72,567 | 51.70x |
 | `directed_breadth_first_edges` | 100,560 | 14,963 | 6.72x |
 | `directed_shortest_path_edges` | 99,655 | 15,906 | 6.27x |
 | `cfg_clone_merge_linear` | 131,924,300 | 110,867 | 1,189.94x |
@@ -35,9 +32,7 @@ as approximate. Mutation timings include the fixture clone named by each case.
 | `cfg_clone_merge_weighted_high_fan_out` | 218,995,500 | 12,593 | 17,390.26x |
 | `cfg_clone_make_reducible_large` | 44,566,300 | 12,070,300 | 3.69x |
 
-The starting global-value-numbering fixture overflowed the Windows stack on a
-2,048-block dominator chain; the iterative implementation completes it. The
-starting weighted reducibility transformation also failed its semantic oracle
+The starting weighted reducibility transformation failed its semantic oracle
 because copied outgoing edges lost their weights; the optimized version retains
 edge kind, weight, identity rules, and adjacency order.
 

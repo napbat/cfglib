@@ -6,8 +6,8 @@
 
 use cfglib::{
     BasicBlock, Cfg, ClrExceptionRegion, Edge, ExceptionFlow, Graph, HandlerMetadata, HornClauses,
-    JumpTable, KeyedGraph, Region, ScopeGraph, SehExceptionRegion, SehRegistrationChain,
-    StackGraph, StackPartialPathDatabase, VectoredExceptionModel,
+    KeyedGraph, Region, ScopeGraph, SehExceptionRegion, SehRegistrationChain, StackGraph,
+    StackPartialPathDatabase, VectoredExceptionModel,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -61,7 +61,6 @@ fn every_document_type_rejects_text_that_is_not_one_of_its_values() {
     assert_rejects_garbage::<StackGraph<String, String, String, String>>("StackGraph");
     assert_rejects_garbage::<StackPartialPathDatabase>("StackPartialPathDatabase");
     assert_rejects_garbage::<HornClauses>("HornClauses");
-    assert_rejects_garbage::<JumpTable<u64>>("JumpTable");
     assert_rejects_garbage::<VectoredExceptionModel<String>>("VectoredExceptionModel");
     assert_rejects_garbage::<SehRegistrationChain<u32, u64>>("SehRegistrationChain");
     assert_rejects_garbage::<SehExceptionRegion>("SehExceptionRegion");

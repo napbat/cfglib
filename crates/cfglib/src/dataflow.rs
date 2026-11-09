@@ -1,11 +1,10 @@
 //! Data flow analysis framework.
 //!
-//! Provides generic infrastructure for computing data flow properties
-//! over any [`CfgView`](cfg_view::CfgView):
+//! Provides generic fixpoint solvers over any
+//! [`CfgView`](cfg_view::CfgView):
 //!
-//! - **Reaching definitions** — which writes can reach a given point
-//! - **Liveness** — which variables are live at each point
-//! - **Def-use / use-def chains** — linking writers to readers
+//! - [`fixpoint`] — block-level problems, forward or backward
+//! - [`edge_fixpoint`] — problems whose facts differ per outgoing edge
 //!
 //! [`CfgView`](cfg_view::CfgView) is the one read-only trait that the
 //! instruction-level machinery reads, and [`Cfg`](crate::Cfg) implements it.
@@ -17,29 +16,19 @@
 //! # Usage
 //!
 //! Implement [`InstrInfo`](instruction::InstrInfo) for your instruction type to declare which
-//! IR variables each instruction reads from and writes to, then run any
-//! of the provided analyses. The [`MemoryEventInfo`](crate::MemoryEventInfo)
-//! extension adds ordered memory data flow and an instruction-level
+//! IR variables each instruction reads from and writes to, then state a
+//! problem over them. The [`MemoryEventInfo`](crate::MemoryEventInfo)
+//! extension declares ordered memory events and an instruction-level
 //! read/modify/write summary. Variables and memory locations are supplied by
 //! the IR adapter; the framework does not impose a numbering scheme.
+//! Instruction-level analyses such as liveness, reaching definitions, SSA
+//! and memory SSA live in the `il` crate.
 
-pub mod abstract_interpretation;
 pub mod bits;
 pub mod cfg_view;
-pub mod constant_propagation;
-pub mod copy_propagation;
-pub mod def_use;
 pub mod edge_fixpoint;
 pub mod fixpoint;
 pub mod instruction;
-pub mod liveness;
-pub mod memory;
 pub mod node_fixpoint;
-pub mod phi_web;
 pub mod program_point;
-pub mod reaching;
-pub mod sccp;
-pub mod ssa;
-pub mod ssa_destruction;
-pub mod unwind;
 mod worklist;

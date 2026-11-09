@@ -5,23 +5,12 @@ extern crate alloc;
 use alloc::borrow::Cow;
 use alloc::vec::Vec;
 
-use crate::analysis::expr::ExprInstr;
-use crate::dataflow::copy_propagation::CopySource;
+use crate::InstrInfo;
 use crate::display::DisplayInstr;
 use crate::flow::{FlowControl, FlowEffect};
-use crate::{EffectInfo, InstrInfo};
 
-/// Test-local side-effect vocabulary (the library imposes none).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum TestEffect {
-    /// Reads from memory / global state.
-    MemoryRead,
-    /// Writes to memory / global state.
-    MemoryWrite,
-}
-
-/// A mock instruction that carries control-flow, data-flow, and
-/// optional higher-level semantics (copy, expression, constant).
+/// A mock instruction that carries control-flow, data-flow, and call
+/// semantics.
 ///
 /// Used across all analysis and transform test modules.
 #[derive(Debug, Clone)]
@@ -34,21 +23,10 @@ pub struct DfInst {
     pub uses: Vec<u16>,
     /// Variables written by this instruction.
     pub defs: Vec<u16>,
-    /// Side effects (memory, I/O, etc.).
-    pub side_effects: Vec<TestEffect>,
-    /// If `true`, this instruction is a simple copy (`defs[0] := uses[0]`).
-    pub is_copy: bool,
-    /// Expression operator name (e.g. `"add"`, `"mul"`). `None` for
-    /// instructions that can't be decomposed into expressions.
-    pub op: Option<&'static str>,
-    /// If set, this instruction loads a constant value.
-    pub constant: Option<i64>,
     /// If set, this instruction calls the named function.
     pub callee: Option<&'static str>,
     /// Whether this call is a tail call.
     pub tail: bool,
-    /// If set, this instruction executes only under `(variable, polarity)`.
-    pub pred: Option<(u16, bool)>,
 }
 
 impl FlowControl for DfInst {
@@ -78,49 +56,6 @@ impl InstrInfo for DfInst {
     }
 }
 
-impl EffectInfo for DfInst {
-    type Effect = TestEffect;
-
-    fn effects(&self) -> &[TestEffect] {
-        &self.side_effects
-    }
-}
-
-impl CopySource for DfInst {
-    fn as_copy(&self) -> Option<(u16, u16)> {
-        if self.is_copy && self.defs.len() == 1 && self.uses.len() == 1 {
-            Some((self.defs[0], self.uses[0]))
-        } else {
-            None
-        }
-    }
-    fn rewrite_use(&mut self, old: &u16, new: &u16) {
-        for u in &mut self.uses {
-            if u == old {
-                *u = *new;
-            }
-        }
-    }
-}
-
-impl ExprInstr for DfInst {
-    type Operator = &'static str;
-    type Const = i64;
-
-    fn as_expr(&self) -> Option<(&'static str, &[u16])> {
-        self.op.map(|op| (op, self.uses.as_slice()))
-    }
-    fn as_const(&self) -> Option<i64> {
-        self.constant
-    }
-}
-
-impl crate::Predicated for DfInst {
-    fn predicate(&self) -> Option<(u16, bool)> {
-        self.pred
-    }
-}
-
 impl crate::flow::CallInfo for DfInst {
     type Callee = &'static str;
 
@@ -133,57 +68,15 @@ impl crate::flow::CallInfo for DfInst {
     }
 }
 
-impl crate::dataflow::constant_propagation::ConstantFolder for DfInst {
-    type Const = i64;
-
-    fn fold_constant(&self, _known: &alloc::collections::BTreeMap<u16, i64>) -> Option<(u16, i64)> {
-        // If this instruction is a constant load, report it.
-        if let Some(val) = self.constant
-            && let Some(&dst) = self.defs.first()
-        {
-            return Some((dst, val));
-        }
-        None
-    }
-
-    fn fold_branch(&self, known: &alloc::collections::BTreeMap<u16, i64>) -> Option<bool> {
-        // A predicated instruction stands for the block's conditional
-        // terminator: it branches when the predicate variable matches the
-        // recorded polarity, and a non-zero value is the true condition.
-        let (variable, when_true) = self.pred?;
-        let value = known.get(&variable)?;
-        Some((*value != 0) == when_true)
-    }
-}
-
-/// Default fields for a `DfInst` (no copy, no expr, no constant).
+/// Default fields for a `DfInst` (no defs, uses, effects, or callee).
 fn df_base(name: &'static str) -> DfInst {
     DfInst {
         effect: FlowEffect::Fallthrough,
         name,
         uses: Vec::new(),
         defs: Vec::new(),
-        side_effects: Vec::new(),
-        is_copy: false,
-        op: None,
-        constant: None,
         callee: None,
         tail: false,
-        pred: None,
-    }
-}
-
-/// Create a [`DfInst`] predicated on `(variable, polarity)`. Per the
-/// [`Predicated`](crate::Predicated) contract, the predicate
-/// variable is also a use. As the last instruction of a block it is also
-/// the block's conditional terminator, so
-/// [`ConstantFolder::fold_branch`](crate::ConstantFolder::fold_branch)
-/// decides the same condition.
-pub fn df_pred(name: &'static str, variable: u16, when_true: bool) -> DfInst {
-    DfInst {
-        pred: Some((variable, when_true)),
-        uses: alloc::vec![variable],
-        ..df_base(name)
     }
 }
 
@@ -217,43 +110,6 @@ pub fn df_with_effect(mut inst: DfInst, effect: FlowEffect) -> DfInst {
 /// Make `inst` an instruction that may unwind, as a call does.
 pub fn df_throwing(inst: DfInst) -> DfInst {
     df_with_effect(inst, FlowEffect::MayThrow)
-}
-
-/// Create an impure [`DfInst`] with a single side effect.
-pub fn df_impure(name: &'static str, e: TestEffect) -> DfInst {
-    DfInst {
-        side_effects: alloc::vec![e],
-        ..df_base(name)
-    }
-}
-
-/// Create a copy instruction (`dst := src`).
-pub fn df_copy(name: &'static str, dst: u16, src: u16) -> DfInst {
-    DfInst {
-        defs: alloc::vec![dst],
-        uses: alloc::vec![src],
-        is_copy: true,
-        ..df_base(name)
-    }
-}
-
-/// Create an expression instruction (`dst = op(srcs...)`).
-pub fn df_op(name: &'static str, op: &'static str, dst: u16, srcs: &[u16]) -> DfInst {
-    DfInst {
-        defs: alloc::vec![dst],
-        uses: srcs.to_vec(),
-        op: Some(op),
-        ..df_base(name)
-    }
-}
-
-/// Create a constant-load instruction (`dst = constant`).
-pub fn df_const(name: &'static str, dst: u16, val: i64) -> DfInst {
-    DfInst {
-        defs: alloc::vec![dst],
-        constant: Some(val),
-        ..df_base(name)
-    }
 }
 
 /// Create a call instruction targeting `callee`.

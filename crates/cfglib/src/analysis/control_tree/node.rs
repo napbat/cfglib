@@ -126,13 +126,11 @@ impl<T> fmt::Debug for ControlRun<T> {
 /// A half-open range of the instructions of one block.
 ///
 /// This is the only way a tree names instructions. [`ControlTree::compute`]
-/// produces whole-block spans; [`ControlTree::compute_predicated`] splits a
-/// block into several spans when its instructions carry different
-/// predicates. Indices are positions in the block's instruction slice, the
-/// same positions as [`ProgramPoint::inst_idx`].
+/// and its variants produce whole-block spans. Indices are positions in the
+/// block's instruction slice, the same positions as
+/// [`ProgramPoint::inst_idx`].
 ///
 /// [`ControlTree::compute`]: super::ControlTree::compute
-/// [`ControlTree::compute_predicated`]: super::ControlTree::compute_predicated
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockSpan {
     block: BlockId,
@@ -378,20 +376,5 @@ pub enum ControlNode {
         handlers: ControlRun<CatchHandler>,
         /// Finally body (empty if no finally).
         finally_body: ControlBody,
-    },
-
-    /// A predicated/guarded region — executes only when a condition
-    /// holds (ARM IT blocks, GPU wave predication, CMOV). Only
-    /// [`ControlTree::compute_predicated`](super::ControlTree::compute_predicated)
-    /// produces it.
-    Guarded {
-        /// The first instruction of the guarded run, a witness carrying the
-        /// guard: its [`Predicated::predicate`](crate::Predicated::predicate)
-        /// names the condition variable, and its rendering labels the region.
-        predicate: ProgramPoint,
-        /// Whether the body executes when the predicate is *true*.
-        when_true: bool,
-        /// The guarded body.
-        body: ControlBody,
     },
 }

@@ -12,8 +12,8 @@ use crate::dataflow::fixpoint::{
 use crate::dataflow::worklist::Worklist;
 use crate::graph::edge_traverse::EdgeAdjacency;
 use crate::graph::edge_view::{EdgeRef, EdgeView};
-use crate::graph::traverse::{TraversalDirection, by_axis, depth_first_preorder};
-use crate::graph::view::{DenseId, RootedView};
+use crate::graph::traverse::by_axis;
+use crate::graph::view::DenseId;
 
 /// A dataflow problem whose transfer can distinguish individual edges.
 ///
@@ -321,15 +321,6 @@ impl<F> EdgeFacts<F> {
     pub const fn steps(&self) -> usize {
         self.nodes.steps()
     }
-
-    /// The node facts of a solve over a [`Cfg`](crate::Cfg), as its block
-    /// facts.
-    ///
-    /// A CFG's nodes are its blocks, indexed alike, so each block keeps its
-    /// own physical input and output. The edge facts are dropped.
-    pub(crate) fn into_block_facts(self) -> Facts<F> {
-        self.nodes
-    }
 }
 
 /// Solve an edge-sensitive problem to a fixpoint without a step limit.
@@ -371,22 +362,6 @@ where
     P: EdgeProblem<G>,
 {
     solve_edge_problem_from_with_config(graph, problem, seeds, SolveConfig::new())
-}
-
-/// Solve an edge-sensitive problem over the blocks reachable from the root of
-/// `graph`, without a step limit.
-///
-/// The block-level analyses that report a fact for every block run on this:
-/// blocks the root cannot reach keep their bottom facts and contribute
-/// nothing to the blocks they branch to.
-pub(super) fn solve_reachable<G, P>(graph: &G, problem: &P) -> EdgeFacts<P::Fact>
-where
-    G: EdgeView + RootedView,
-    P: EdgeProblem<G>,
-{
-    let reachable = depth_first_preorder(graph, graph.root(), TraversalDirection::Outgoing);
-    solve_edge_problem_from(graph, problem, &reachable)
-        .expect("an unbounded solve cannot exceed a step limit")
 }
 
 /// Solve an edge-sensitive problem with deterministic bounded iteration.

@@ -203,10 +203,7 @@ fn node_body_count(tables: &Tables, node: ControlNode) -> usize {
         | ControlNode::Continue { .. }
         | ControlNode::Return(_)
         | ControlNode::Goto { .. } => 0,
-        ControlNode::Sequence(_)
-        | ControlNode::Loop { .. }
-        | ControlNode::Label { .. }
-        | ControlNode::Guarded { .. } => 1,
+        ControlNode::Sequence(_) | ControlNode::Loop { .. } | ControlNode::Label { .. } => 1,
         ControlNode::IfThenElse { .. } => 2,
         ControlNode::Switch { cases, .. } => cases.len() + 1,
         ControlNode::TryCatch { handlers, .. } => tables.handlers(handlers).len() + 2,
@@ -366,8 +363,7 @@ impl ChildBodies<'_> {
         match self.node {
             ControlNode::Sequence(body)
             | ControlNode::Loop { body, .. }
-            | ControlNode::Label { body, .. }
-            | ControlNode::Guarded { body, .. } => body,
+            | ControlNode::Label { body, .. } => body,
             ControlNode::IfThenElse {
                 then_body,
                 else_body,

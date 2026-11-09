@@ -35,7 +35,7 @@
 //! instruction-adjacent axis — variables, constants, operators, effects,
 //! branch targets, callees — is consumer-typed rather than imposed by the
 //! library.
-//! [`ir`] holds the IR traits and the generic algorithms over them.
+//! [`ir`] holds the IR traits and vocabulary.
 //! [`ir::rtl`] is the register-transfer contract: a write-only
 //! [`ir::rtl::InstructionBuilder`] through which instruction semantics
 //! describe one atomic state update, and read-only views over the sealed
@@ -44,11 +44,9 @@
 //! belong to the consumer. [`ir::hlil`] is the structured contract: a
 //! read-only [`ir::hlil::FunctionView`] of statement and expression trees and
 //! a write-only [`ir::hlil::FunctionBuilder`] that the consumer implements,
-//! with lift and lower between it and a flat variable-based function,
-//! verification, pseudocode, declaration placement, and structure recovery
-//! over them. Every IR storage, builder implementation, and editing
-//! machinery belongs to the consumer; the algorithms here read through the
-//! views, drive the builders, and report facts.
+//! with the walks over its shapes. Every IR storage, builder implementation,
+//! editing machinery, and algorithm over the contents of an instruction
+//! belongs to the consumer.
 //! [`ControlTree::compute`] structures a [`Cfg`] into `if / else`, loops,
 //! `switch`, `try / catch`, and `goto` form. The tree is a fact about the graph
 //! in the way [`DominatorTree`] is: a flat arena of nodes that name blocks,
@@ -121,32 +119,19 @@
 //!                            `Cfg` implements it, every instruction-level
 //!                            analysis reads it)
 //!
-//! FlowControl               (required by CfgBuilder and the tail-call detectors)
+//! FlowControl               (required by CfgBuilder)
 //!   └─ JumpTargets          (optional — explicit goto/label wiring, Target)
 //!
 //! InstrInfo<Variable = V>   (optional — native IR variables for dataflow)
-//!   ├─ EffectInfo           (optional — side effects, Effect; purity + DCE)
-//!   ├─ Predicated           (optional — guarded execution)
-//!   ├─ CopySource           (optional — copy propagation)
-//!   ├─ ConstantFolder       (optional — constant propagation, Const)
-//!   ├─ ExprInstr            (optional — expression trees, Operator + Const)
-//!   ├─ ValueNumberInfo      (optional — value numbering, Operator)
+//!   ├─ EffectInfo           (optional — side effects, Effect)
 //!   └─ MemoryEventInfo      (optional — memory data flow + fences, Location + Fence)
-//!
-//! MemoryAlias<Location>     (optional may-alias oracle consumed by MemorySsa)
 //!
 //! DisplayInstr              (optional — rendering only: DOT, text)
 //! CallInfo                  (optional — call graphs, Callee)
-//! SwitchSource              (optional — switch table recovery, Target)
 //! ```
 //!
-//! [`MemoryEventInfo`] is the sole instruction-side memory contract.
-//! [`MemorySsa`] merges its reported locations through a caller-owned
-//! [`MemoryAlias`] relation and provides location-class phis, reaching writes,
-//! clobbers, users, transitive readers, and SSA-resolved address inputs.
-//! [`MemoryValueFlow`] then combines matching ordinary and memory SSA forms in
-//! one dependency graph whose typed edges distinguish addresses, stored and
-//! loaded values, state reads/writes, and ordinary/memory phis.
+//! [`MemoryEventInfo`] is the sole instruction-side memory contract. Memory
+//! SSA and memory-carried value flow over it live in the `il` crate.
 //!
 //! Additionally, [`Problem`] is the trait for pluggable instruction-level
 //! dataflow analyses over any rooted view (run by [`solve_problem`]),
@@ -159,9 +144,7 @@
 //! # Contracts
 //!
 //! - Blocks may be empty, may lack explicit terminator instructions, and
-//!   unreachable blocks are legal (dead code after a return/goto). SSA treats
-//!   disconnected source components as independent dominator-forest roots, so
-//!   their internal def-use flow remains intact without inheriting entry state.
+//!   unreachable blocks are legal (dead code after a return/goto).
 //! - [`Cfg::blocks`] iterates live blocks in allocation order and
 //!   [`Cfg::edges`] live edges in insertion order; both orders are stable and
 //!   part of the API. A removed block or edge is skipped, keeps its slot, and
@@ -218,29 +201,15 @@ pub mod union_find;
 #[cfg(test)]
 pub(crate) mod test_util;
 
-pub use analysis::alias::AliasSets;
 pub use analysis::control_tree::{
     BlockSpan, CatchHandler, ChildBodies, ControlBody, ControlDescent, ControlNode, ControlNodeId,
     ControlRun, ControlTree, ControlVisitor, GotoDiagnostic, GotoReason, LiftReport, LoopKind,
     Preorder, SwitchCase,
 };
-pub use analysis::dead_code::DeadCode;
-pub use analysis::expr::{
-    BlockExprTrees, ExprInstr, ExprNode, recover_block_expressions, recover_expressions,
-};
 pub use analysis::metrics::{
     CfgMetrics, GraphMetrics, block_nesting_depths, cfg_block_nesting_depths,
 };
 pub use analysis::pattern::{CfgPattern, detect_cfg_patterns, detect_patterns};
-pub use analysis::purity::{Purity, block_purities, block_purity, cfg_purity};
-pub use analysis::switch_table::{
-    JumpTable, SwitchRecovery, SwitchSource, SwitchTargets, detect_switch_tables,
-    recover_switch_tables,
-};
-pub use analysis::tail_call::{TailCall, detect_explicit_tail_calls, detect_tail_calls};
-pub use analysis::value_numbering::{
-    BlockValueNumbers, ValueNumber, ValueNumberInfo, ValueNumbering,
-};
 pub use block::{BasicBlock, BlockId, BlockTag};
 pub use builder::address::{
     AddressBuildError, AddressCfgOptions, AddressEdgeInfo, AddressGraph, AddressHandler,
@@ -250,17 +219,8 @@ pub use builder::address::{
 };
 pub use builder::{BuildError, CfgBuilder, JumpResolution, resolve_jump_edges};
 pub use cfg::{Cfg, CfgEdge, CfgRenumbering, SplitPointError, parse_cfg_text};
-pub use dataflow::abstract_interpretation::{AbstractDomain, AbstractFacts, Lattice};
 pub use dataflow::bits::DenseBits;
 pub use dataflow::cfg_view::CfgView;
-pub use dataflow::constant_propagation::{
-    ConstFact, ConstPropProblem, ConstValue, ConstantFolder, ConstantPropagation,
-};
-pub use dataflow::copy_propagation::{
-    AliasPairs, CopySource, PropagationStats, alias_propagation, alias_propagation_with_exits,
-    copy_propagation, copy_propagation_with_exits,
-};
-pub use dataflow::def_use::DefUseChains;
 pub use dataflow::edge_fixpoint::{
     EdgeFacts, EdgeProblem, Reachable, ReachableEdgeProblem, TryEdgeProblem, solve_edge_problem,
     solve_edge_problem_from, solve_edge_problem_from_with_config, solve_edge_problem_with_config,
@@ -273,32 +233,14 @@ pub use dataflow::fixpoint::{
     try_solve_problem, try_solve_problem_from, try_solve_problem_from_with_config,
     try_solve_problem_with_config,
 };
-pub use dataflow::instruction::{EffectInfo, InstrInfo, Predicated, VariableId};
-pub use dataflow::liveness::{Liveness, LivenessProblem, SeededLivenessProblem};
-pub use dataflow::memory::{
-    ConservativeMemoryAlias, ExactMemoryAlias, MemoryAlias, MemoryClassId, MemoryDefinition,
-    MemoryEventSite, MemoryLocationClass, MemoryPhi, MemorySsa, MemorySsaEvent, MemorySsaScratch,
-    MemorySsaValue, MemoryUse, MemoryValueEdge, MemoryValueFlow, MemoryValueFlowError,
-    MemoryValueFlowScratch, MemoryValueNode, MemoryValueRole, index_paths_may_overlap,
-};
+pub use dataflow::instruction::{EffectInfo, InstrInfo, VariableId};
 pub use dataflow::node_fixpoint::{
     NodeProblem, TryNodeProblem, solve_node_problem, solve_node_problem_from,
     solve_node_problem_from_with_config, solve_node_problem_with_config, try_solve_node_problem,
     try_solve_node_problem_from, try_solve_node_problem_from_with_config,
     try_solve_node_problem_with_config,
 };
-pub use dataflow::phi_web::{PhiWeb, PhiWebs};
 pub use dataflow::program_point::{DefSite, ProgramPoint, UseSite};
-pub use dataflow::reaching::{ReachingDef, ReachingDefs, ReachingDefsProblem};
-pub use dataflow::sccp::SccpAnalysis;
-pub use dataflow::ssa::{
-    DominanceFrontiers, PhiPlacement, PhiPlacements, SsaBlock, SsaForm, SsaInstruction, SsaPhi,
-    SsaScratch, SsaValue, SsaVersion,
-};
-pub use dataflow::ssa_destruction::{
-    PhiCopy, PhiCopyGroup, PhiCopyOrigin, copies_by_predecessor, eliminate_phis,
-};
-pub use dataflow::unwind::departs_before_throws;
 pub use display::{DisplayInstr, IndentedWriter};
 pub use edge::{Edge, EdgeId, EdgeKind, EdgeTag, KindedEdge};
 pub use exception::{
@@ -319,8 +261,8 @@ pub use graph::cdg::control_dependence_graph;
 pub use graph::coldness::{ColdClass, ColdnessClasses, ColdnessGraph};
 pub use graph::diff::{BlockFingerprint, BlockMatch, CfgDiff};
 pub use graph::dominator::{
-    DominatorScratch, DominatorTree, FrontierScratch, PostDominatorScratch, PostDominatorTree,
-    PostNode,
+    DominanceFrontiers, DominatorScratch, DominatorTree, FrontierScratch, PostDominatorScratch,
+    PostDominatorTree, PostNode,
 };
 pub use graph::dot::{
     DotEdgeAttributes, DotEdgeStyle, DotRankDir, DotStyle, bind_edge_attributes,
@@ -346,7 +288,6 @@ pub use graph::open::{
     open_breadth_first_events, open_breadth_first_paths, open_depth_first_events,
     open_fold_post_order, open_search,
 };
-pub use graph::pdg::{DependenceKind, DependenceNode, program_dependence_graph};
 pub use graph::reducible::make_reducible;
 pub use graph::relax::min_label_relaxation;
 pub use graph::reverse::reverse_cfg;
@@ -390,8 +331,7 @@ pub use graph::view::{
     DenseId, GraphView, NodeView, Reversed, Rooted, RootedView, scan_predecessors,
 };
 pub use memory::{
-    MemoryAccess, MemoryAccessKind, MemoryAtomicity, MemoryEvent, MemoryEventInfo,
-    MemoryOperations, MemoryTrace, MemoryTraceEntry,
+    MemoryAccess, MemoryAccessKind, MemoryAtomicity, MemoryEvent, MemoryEventInfo, MemoryOperations,
 };
 pub use region::{
     Cleanup, CompletionReason, Continuation, ExclusiveExtent, ExtentIssue, ExtentPromotionDecision,
@@ -405,20 +345,13 @@ pub use transform::cleanup::{
     merge_blocks, merge_blocks_mapped, remove_empty_blocks, remove_empty_blocks_mapped,
     remove_unreachable, remove_unreachable_mapped, simplify, simplify_mapped,
 };
-pub use transform::coloring::{ColorAssignment, color_graph, interference_graph};
 pub use transform::contract::{contract_edge, contract_edge_mapped};
 pub use transform::critical::{
     split_critical_edges, split_critical_edges_mapped, split_critical_edges_with,
 };
-pub use transform::dce::{
-    dead_code_elimination, dead_code_elimination_with_exits, remove_dead_code,
-    remove_dead_code_mapped,
-};
 pub use transform::layout::{RelaxError, relax_layout};
 pub use transform::linearize::{BlockOrder, Emitter, LinearInst, LinearizeError, linearize};
-pub use transform::loops::{LoopRotation, find_loop_invariants, rotate_loop};
 pub use transform::pass::{
     Pass, PassChange, PassExecution, PassFailure, PassFn, PassId, PassPipeline, PassReport, pass_fn,
 };
-pub use transform::pre::{PreAnalysis, eliminate_pre};
 pub use union_find::DisjointSet;

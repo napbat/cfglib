@@ -99,8 +99,7 @@ pub fn assert_each_block_in_exactly_one_leaf<I, E>(
 }
 
 /// The instruction-level partition: the spans naming a block are disjoint and
-/// tile `0..len` of its instructions exactly. A predicated tree splits a block
-/// into several spans, so this is the property that survives it.
+/// tile `0..len` of its instructions exactly.
 pub fn assert_spans_tile_each_block<I, E>(
     cfg: &Cfg<I, E>,
     tree: &ControlTree,

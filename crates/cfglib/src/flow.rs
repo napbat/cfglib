@@ -121,7 +121,7 @@ pub enum FlowEffect {
     /// fallthrough one: it ends no block and wires no edge. Exceptional
     /// control flow is the consumer's to wire as
     /// [`ExceptionUnwind`](crate::EdgeKind::ExceptionUnwind) edges, and the
-    /// data-flow analyses learn which instructions throw from
+    /// consumer's data-flow analyses learn which instructions throw from
     /// [`InstrInfo::may_unwind`](crate::InstrInfo::may_unwind), never from
     /// this classification, so an adapter reports both.
     MayThrow,

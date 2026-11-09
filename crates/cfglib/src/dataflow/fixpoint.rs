@@ -357,27 +357,44 @@ pub fn meet_options<F: Clone>(
 ///
 /// # Examples
 ///
-/// [`LivenessProblem`](crate::dataflow::liveness::LivenessProblem) is a
-/// concrete problem. Analyses whose exceptional edges carry their own facts,
-/// such as [`ReachingDefs`](crate::dataflow::reaching::ReachingDefs), run on
-/// the [edge-sensitive solver](crate::dataflow::edge_fixpoint) instead.
+/// A problem names its direction, its lattice and its transfer. This one
+/// marks the blocks that flow from the entry reaches. Analyses whose
+/// exceptional edges carry their own facts run on the
+/// [edge-sensitive solver](crate::dataflow::edge_fixpoint) instead.
 ///
 /// ```
-/// # use cfglib::{Cfg, EdgeKind, InstrInfo};
-/// # #[derive(Debug, Clone)]
-/// # struct Inst { uses: Vec<u16>, defs: Vec<u16> }
-/// # impl InstrInfo for Inst {
-/// #     type Variable = u16;
-/// #     fn uses(&self) -> &[u16] { &self.uses }
-/// #     fn defs(&self) -> &[u16] { &self.defs }
-/// # }
-/// use cfglib::{LivenessProblem, solve_problem};
+/// use cfglib::{BlockId, Cfg, Direction, EdgeKind, Problem, solve_problem};
 ///
-/// let mut cfg = Cfg::<Inst>::new();
-/// cfg.block_mut(cfg.entry()).push(Inst { uses: vec![], defs: vec![0] });
+/// struct Reached;
 ///
-/// let facts = solve_problem(&cfg, &LivenessProblem).unwrap();
-/// assert!(facts.fact_in(cfg.entry()).is_empty()); // r0 defined, not used
+/// impl Problem<Cfg<()>> for Reached {
+///     type Fact = bool;
+///
+///     fn direction(&self) -> Direction {
+///         Direction::Forward
+///     }
+///     fn bottom(&self, _cfg: &Cfg<()>) -> bool {
+///         false
+///     }
+///     fn boundary(&self, _cfg: &Cfg<()>) -> bool {
+///         true
+///     }
+///     fn meet(&self, a: &bool, b: &bool) -> bool {
+///         *a || *b
+///     }
+///     fn transfer(&self, _cfg: &Cfg<()>, _block: BlockId, input: &bool) -> bool {
+///         *input
+///     }
+/// }
+///
+/// let mut cfg = Cfg::<()>::new();
+/// let body = cfg.new_block();
+/// let orphan = cfg.new_block();
+/// cfg.add_edge(cfg.entry(), body, EdgeKind::Fallthrough);
+///
+/// let facts = solve_problem(&cfg, &Reached).unwrap();
+/// assert!(*facts.fact_out(body));
+/// assert!(!*facts.fact_out(orphan));
 /// ```
 pub fn solve_problem<V: RootedView, P: Problem<V>>(
     view: &V,

@@ -1,8 +1,0 @@
-p0 = lane < 8
-@guarded(y = a) {
-    y = a
-}
-@guarded(!y = b) {
-    y = b
-}
-store y

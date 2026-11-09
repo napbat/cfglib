@@ -7,9 +7,9 @@ use std::collections::BTreeSet;
 use std::convert::Infallible;
 
 use cfglib::{
-    BlockId, Cfg, Pass, PassChange, PassId, PassPipeline, SemanticValidator, dead_code_elimination,
-    merge_blocks, pass_fn, remove_dead_code, remove_empty_blocks, remove_unreachable, simplify,
-    split_critical_edges, split_critical_edges_mapped, verify_with,
+    BlockId, Cfg, Pass, PassChange, PassId, PassPipeline, SemanticValidator, merge_blocks, pass_fn,
+    remove_empty_blocks, remove_unreachable, simplify, split_critical_edges,
+    split_critical_edges_mapped, verify_with,
 };
 
 use crate::oracles::{assert_surviving_payloads_unchanged, assert_valid, critical_edges};
@@ -103,7 +103,7 @@ fn a_cleanup_pipeline_runs_in_schedule_order_and_reports_each_pass_honestly() {
             remove_empty_blocks(cfg)
         }));
         pipeline.push(transform("cleanup.merge", &log, merge_blocks));
-        pipeline.push(transform("dce", &log, dead_code_elimination));
+        pipeline.push(transform("cleanup.simplify", &log, simplify));
         pipeline.push(transform("ssa.split-critical", &log, |cfg| {
             split_critical_edges(cfg)
         }));
@@ -291,13 +291,15 @@ fn repeating_an_identity_expresses_a_fixpoint_schedule_that_ends_unchanged() {
         let mut cfg = before.clone();
         let mut pipeline = PassPipeline::<Cfg<Inst>, Rejected>::new();
         for _ in 0..6 {
-            pipeline.push(transform("dce", &log, dead_code_elimination));
-            pipeline.push(transform("simplify", &log, simplify));
+            pipeline.push(transform("unreachable", &log, |cfg| {
+                remove_unreachable(cfg)
+            }));
+            pipeline.push(transform("merge", &log, merge_blocks));
         }
         let ids: Vec<&str> = pipeline.ids().map(PassId::as_str).collect();
         assert_eq!(
             ids[..4],
-            ["dce", "simplify", "dce", "simplify"],
+            ["unreachable", "merge", "unreachable", "merge"],
             "duplicates are kept in order"
         );
         let report = pipeline.run(&mut cfg).unwrap();
@@ -309,7 +311,7 @@ fn repeating_an_identity_expresses_a_fixpoint_schedule_that_ends_unchanged() {
         {
             converged += 1;
             let mut expected = before.clone();
-            remove_dead_code(&mut expected);
+            while remove_unreachable(&mut expected) + merge_blocks(&mut expected) > 0 {}
             assert_eq!(
                 cfg, expected,
                 "seed {seed}: same operations in the same order"
@@ -411,7 +413,9 @@ fn pass_identities_and_changes_have_the_documented_conversions() {
 
 fn payload_pipeline(log: &Log) -> PassPipeline<'_, Cfg<Inst, Route>, Rejected> {
     let mut pipeline = PassPipeline::new();
-    pipeline.push(transform("dce", log, dead_code_elimination));
+    pipeline.push(transform("cleanup.remove-empty", log, |cfg| {
+        remove_empty_blocks(cfg)
+    }));
     pipeline.push(transform("cleanup.simplify", log, simplify));
     pipeline.push(transform("ssa.split-critical", log, |cfg| {
         split_critical_edges_mapped(cfg).0

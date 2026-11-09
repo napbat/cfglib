@@ -18,7 +18,6 @@ pub mod label;
 pub mod loop_forest;
 pub mod loop_nest;
 pub mod open;
-pub mod pdg;
 pub mod reducible;
 pub mod relax;
 pub mod reverse;

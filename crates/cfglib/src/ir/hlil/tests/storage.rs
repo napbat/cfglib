@@ -9,11 +9,11 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::convert::Infallible;
 
 use crate::graph::view::DenseId;
 use crate::ir::hlil::{
     Dialect, ExprShape, FunctionBuilder, FunctionView, Handler, HandlerKind, StmtShape, SwitchArm,
-    VerificationReport, VerifyDialect, verify,
 };
 
 dense_id!(
@@ -272,18 +272,15 @@ impl<D: Dialect> FunctionView<D> for ToyHlil<D> {
     }
 }
 
-/// Builds a [`ToyHlil`] bottom-up and verifies it when it is sealed.
+/// Builds a [`ToyHlil`] bottom-up.
 ///
-/// The builder is write-only. A handle is a plain index, so nothing stops a
-/// test from using one twice or from inventing one; [`finish`] reports such a
-/// function through [`verify`].
-///
-/// [`finish`]: FunctionBuilder::finish
+/// The builder is write-only. A handle is a plain index, and the builder does
+/// not check that a test uses each handle one time.
 pub(crate) struct ToyHlilBuilder<D: Dialect> {
     function: ToyHlil<D>,
 }
 
-impl<D: VerifyDialect> ToyHlilBuilder<D> {
+impl<D: Dialect> ToyHlilBuilder<D> {
     /// Creates an empty builder.
     pub(crate) const fn new() -> Self {
         Self {
@@ -321,12 +318,12 @@ impl<D: VerifyDialect> ToyHlilBuilder<D> {
     }
 }
 
-impl<D: VerifyDialect> FunctionBuilder<D> for ToyHlilBuilder<D> {
+impl<D: Dialect> FunctionBuilder<D> for ToyHlilBuilder<D> {
     type Stmt = StmtId;
     type Expr = ExprId;
     type Var = VarId;
     type Function = ToyHlil<D>;
-    type Error = VerificationReport;
+    type Error = Infallible;
 
     fn declare_variable(
         &mut self,
@@ -492,13 +489,7 @@ impl<D: VerifyDialect> FunctionBuilder<D> for ToyHlilBuilder<D> {
         })
     }
 
-    fn finish(self, body: &[StmtId]) -> Result<ToyHlil<D>, VerificationReport> {
-        let function = self.finish_unchecked(body);
-        let report = verify::<D, _>(&function);
-        if report.is_ok() {
-            Ok(function)
-        } else {
-            Err(report)
-        }
+    fn finish(self, body: &[StmtId]) -> Result<ToyHlil<D>, Infallible> {
+        Ok(self.finish_unchecked(body))
     }
 }

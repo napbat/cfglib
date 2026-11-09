@@ -1,7 +1,8 @@
-//! The flow build symtree runs over a whole codebase, as one worker owns it.
+//! The graph analyses a flow build runs over a whole codebase, as one worker
+//! owns them.
 //!
 //! A worker thread is handed a slice of the corpus and visits one callable at
-//! a time. The four analyses it runs per callable each take a scratch, so the
+//! a time. The three analyses it runs per callable each take a scratch, so the
 //! worker holds one bundle of them for its whole slice: the scratches grow to
 //! the largest callable the worker meets and every callable after that one is
 //! analyzed without allocating working storage at all. This test is that
@@ -11,110 +12,83 @@
 use std::thread;
 
 use cfglib::{
-    Cfg, DominatorScratch, DominatorTree, EdgeKind, ExactMemoryAlias, InstrInfo, MemoryAccess,
-    MemoryEvent, MemoryEventInfo, MemorySsa, MemorySsaScratch, MemoryValueFlow,
-    MemoryValueFlowScratch, SsaForm, SsaScratch,
+    BlockId, Cfg, DominatorScratch, DominatorTree, EdgeKind, FrontierScratch, PostDominatorScratch,
+    PostDominatorTree,
 };
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum Slot {
-    Local(u8),
-    Global,
-}
-
-#[derive(Debug, Clone)]
-struct Instruction {
-    uses: Vec<u16>,
-    defs: Vec<u16>,
-    events: Vec<MemoryEvent<Slot, u16, ()>>,
-}
-
-impl InstrInfo for Instruction {
-    type Variable = u16;
-
-    fn uses(&self) -> &[Self::Variable] {
-        &self.uses
-    }
-
-    fn defs(&self) -> &[Self::Variable] {
-        &self.defs
-    }
-}
-
-impl MemoryEventInfo for Instruction {
-    type Location = Slot;
-    type Fence = ();
-
-    fn memory_events(
-        &self,
-    ) -> impl Iterator<Item = MemoryEvent<Self::Location, Self::Variable, Self::Fence>> {
-        self.events.iter().cloned()
-    }
-}
 
 /// Everything one worker thread keeps between callables.
 ///
 /// This is the shape a consumer wants: one value per worker, created once,
 /// passed to each analysis by `&mut`, and never reset by the caller — every
-/// `compute_in` clears what it is about to use.
+/// `compute_in` and every frontier query clears what it is about to use.
 #[derive(Default)]
 struct FlowScratch {
     dominators: DominatorScratch,
-    ssa: SsaScratch<u16>,
-    memory: MemorySsaScratch<Slot, u16, ()>,
-    value_flow: MemoryValueFlowScratch<u16>,
+    post_dominators: PostDominatorScratch,
+    frontier: FrontierScratch,
 }
 
-/// The four results one callable's flow build produces.
+/// The results one callable's flow build produces.
 struct CallableAnalyses {
     dominators: DominatorTree,
-    ssa: SsaForm<u16>,
-    memory: MemorySsa<Slot, u16, ()>,
-    value_flow: MemoryValueFlow<u16>,
+    post_dominators: PostDominatorTree,
+    /// The iterated dominance frontier of every block that writes.
+    merges: Vec<BlockId>,
 }
 
 impl FlowScratch {
     /// Build one callable's flow, reusing every buffer from the last one.
-    fn visit(&mut self, cfg: &Cfg<Instruction>) -> CallableAnalyses {
+    fn visit(&mut self, cfg: &Cfg<bool>) -> CallableAnalyses {
         let dominators = DominatorTree::compute_in(&mut self.dominators, cfg);
-        let ssa = SsaForm::compute_in(&mut self.ssa, cfg, &dominators);
-        let memory = MemorySsa::compute_in(&mut self.memory, cfg, &ExactMemoryAlias);
-        let value_flow = MemoryValueFlow::compute_in(&mut self.value_flow, &memory, &ssa)
-            .expect("the corpus adapter reports only variables its instructions expose");
+        let post_dominators = PostDominatorTree::compute_in(&mut self.post_dominators, cfg);
+        let mut merges = Vec::new();
+        dominators.iterated_frontier(cfg, &mut self.frontier, writers(cfg), None, &mut merges);
         CallableAnalyses {
             dominators,
-            ssa,
-            memory,
-            value_flow,
+            post_dominators,
+            merges,
         }
     }
 }
 
 /// The same build with no scratch at all, which is what it has to match.
-fn allocating(cfg: &Cfg<Instruction>) -> CallableAnalyses {
+fn allocating(cfg: &Cfg<bool>) -> CallableAnalyses {
     let dominators = DominatorTree::compute(cfg);
-    let ssa = SsaForm::compute(cfg, &dominators);
-    let memory = MemorySsa::compute(cfg, &ExactMemoryAlias);
-    let value_flow = MemoryValueFlow::compute(&memory, &ssa)
-        .expect("the corpus adapter reports only variables its instructions expose");
+    let post_dominators = PostDominatorTree::compute(cfg);
+    let mut merges = Vec::new();
+    dominators.iterated_frontier(
+        cfg,
+        &mut FrontierScratch::new(),
+        writers(cfg),
+        None,
+        &mut merges,
+    );
     CallableAnalyses {
         dominators,
-        ssa,
-        memory,
-        value_flow,
+        post_dominators,
+        merges,
     }
+}
+
+/// The blocks whose instruction is a write (`true`).
+fn writers(cfg: &Cfg<bool>) -> Vec<BlockId> {
+    cfg.block_ids()
+        .filter(|&block| cfg.block(block).instructions().contains(&true))
+        .collect()
 }
 
 fn assert_same(computed: &CallableAnalyses, expected: &CallableAnalyses, label: &str) {
     assert_eq!(computed.dominators, expected.dominators, "{label}");
-    assert_eq!(computed.ssa, expected.ssa, "{label}");
-    assert_eq!(computed.memory, expected.memory, "{label}");
-    assert_eq!(computed.value_flow, expected.value_flow, "{label}");
+    assert_eq!(
+        computed.post_dominators, expected.post_dominators,
+        "{label}"
+    );
+    assert_eq!(computed.merges, expected.merges, "{label}");
 }
 
-/// A callable of `regions` if/else diamonds, with register data flow, a
-/// stack slot per region, and one global every region touches.
-fn callable(regions: usize) -> Cfg<Instruction> {
+/// A callable of `regions` if/else diamonds. Every third region writes in
+/// both arms, the others only in the then arm.
+fn callable(regions: usize) -> Cfg<bool> {
     let mut cfg = Cfg::new();
     let mut current = cfg.entry();
     for index in 0..regions {
@@ -125,31 +99,17 @@ fn callable(regions: usize) -> Cfg<Instruction> {
         cfg.add_edge(current, else_block, EdgeKind::ConditionalFalse);
         cfg.add_edge(then_block, merge, EdgeKind::Fallthrough);
         cfg.add_edge(else_block, merge, EdgeKind::Fallthrough);
-
-        let base = u16::try_from(index % 5).expect("a small index fits in u16") * 4;
-        let slot = Slot::Local(u8::try_from(index % 3).expect("a small index fits in u8"));
-        cfg.block_mut(current)
-            .push(load(slot.clone(), base, base + 1));
-        cfg.block_mut(then_block)
-            .push(store(slot.clone(), base + 1));
-        cfg.block_mut(else_block)
-            .push(store(Slot::Global, base + 1));
-        cfg.block_mut(merge).push(load(slot, base, base + 2));
-        cfg.block_mut(merge).push(Instruction {
-            uses: vec![base + 2],
-            defs: vec![base + 3],
-            events: Vec::new(),
-        });
+        cfg.block_mut(then_block).push(true);
+        cfg.block_mut(else_block).push(index % 3 == 0);
+        cfg.block_mut(merge).push(false);
         current = merge;
     }
     cfg
 }
 
-/// A callable whose entry is a loop header: it loads a slot and reads a
-/// register, and its latch redefines the register, stores the slot, and
-/// branches back. Every phi at the entry merges the value the function starts
-/// with.
-fn entry_loop() -> Cfg<Instruction> {
+/// A callable whose entry is a loop header: its latch writes and branches
+/// back, so the entry is a merge of its own.
+fn entry_loop() -> Cfg<bool> {
     let mut cfg = Cfg::new();
     let latch = cfg.new_block();
     let exit = cfg.new_block();
@@ -157,32 +117,9 @@ fn entry_loop() -> Cfg<Instruction> {
     cfg.add_edge(entry, latch, EdgeKind::ConditionalTrue);
     cfg.add_edge(entry, exit, EdgeKind::ConditionalFalse);
     cfg.add_edge(latch, entry, EdgeKind::Back);
-    cfg.block_mut(entry).push(load(Slot::Global, 5, 6));
-    cfg.block_mut(latch).push(Instruction {
-        uses: Vec::new(),
-        defs: vec![5],
-        events: Vec::new(),
-    });
-    cfg.block_mut(latch).push(store(Slot::Global, 5));
+    cfg.block_mut(entry).push(false);
+    cfg.block_mut(latch).push(true);
     cfg
-}
-
-fn load(slot: Slot, address: u16, into: u16) -> Instruction {
-    Instruction {
-        uses: vec![address],
-        defs: vec![into],
-        events: vec![MemoryEvent::Access(
-            MemoryAccess::read(slot, [into]).with_address_uses([address]),
-        )],
-    }
-}
-
-fn store(slot: Slot, value: u16) -> Instruction {
-    Instruction {
-        uses: vec![value],
-        defs: Vec::new(),
-        events: vec![MemoryEvent::Access(MemoryAccess::write(slot, [value]))],
-    }
 }
 
 #[test]
@@ -207,6 +144,8 @@ fn one_worker_scratch_analyzes_a_whole_slice_of_the_corpus() {
             );
         }
     }
+    let looped = scratch.visit(&entry_loop());
+    assert_eq!(looped.merges, [entry_loop().entry()]);
 }
 
 #[test]

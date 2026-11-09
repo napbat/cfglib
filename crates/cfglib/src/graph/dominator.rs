@@ -15,9 +15,10 @@
 //! The work is split by responsibility. `construction` runs the algorithm over
 //! any [`GraphView`], `numbering` numbers a forest from its parent table,
 //! `forest` extends a tree over the code its root misses, `frontier` answers
-//! dominance-frontier queries over the numbered tree, and `post` builds the
+//! dominance-frontier queries over the numbered tree, `frontier_table`
+//! computes the frontier of every node at once, and `post` builds the
 //! post-dominator tree on the first two and answers its frontier queries with
-//! the last. This module holds the tree and its queries.
+//! `frontier`. This module holds the tree and its queries.
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -29,12 +30,14 @@ use crate::graph::view::{DenseId, GraphView, RootedView};
 use construction::ConstructionBuffers;
 pub(crate) use forest::complete_dominator_forest;
 pub use frontier::FrontierScratch;
+pub use frontier_table::DominanceFrontiers;
 use numbering::{Numbered, NumberingBuffers};
 pub use post::{PostDominatorScratch, PostDominatorTree, PostNode};
 
 mod construction;
 mod forest;
 mod frontier;
+mod frontier_table;
 #[cfg(test)]
 mod iterative;
 mod numbering;
@@ -472,52 +475,5 @@ impl<N: DenseId> DominatorTree<N> {
             return 0..0;
         }
         slot(self.pre[index])..slot(self.last[index]) + 1
-    }
-
-    /// Walk the trees below `roots` in preorder, giving each node a scope:
-    /// `enter` runs when the walk reaches a node, and `exit` runs once every
-    /// node it dominates has been entered and exited.
-    ///
-    /// This is the explicit-stack walk that a pass over the dominator tree
-    /// with scoped state (a renaming stack, a table of available values) is
-    /// built on, stated once. `enter` returns what `exit` needs to undo it,
-    /// so a scope costs the walk one stack entry and no allocation of its
-    /// own. Roots are walked in the order given and the children of a node in
-    /// ascending dense index, which is the order of
-    /// [`preorder`](Self::preorder); a root that is in no tree has nothing
-    /// to walk and is skipped. A walk does not recurse, so a chain of 10⁵
-    /// nodes costs no more host stack than a diamond.
-    ///
-    /// `state` is handed to both callbacks, so they can share one mutable
-    /// value without two closures borrowing it. `open` holds the scopes
-    /// entered and not yet exited, one per level of the tree at most. It is
-    /// cleared on entry and empty on return, and the caller owns it so a pass
-    /// over many procedures allocates it once.
-    pub(crate) fn scoped_walk<S, T>(
-        &self,
-        roots: impl IntoIterator<Item = N>,
-        state: &mut S,
-        open: &mut Vec<(N, T)>,
-        mut enter: impl FnMut(&mut S, N) -> T,
-        mut exit: impl FnMut(&mut S, N, T),
-    ) {
-        open.clear();
-        for root in roots {
-            for position in self.span(root) {
-                // A scope ends where the preorder leaves its subtree.
-                while let Some(&(top, _)) = open.last()
-                    && slot(self.last[top.index()]) < position
-                {
-                    let (node, scope) = open.pop().expect("a scope was just seen on top");
-                    exit(state, node, scope);
-                }
-                let node = self.order[position];
-                let scope = enter(state, node);
-                open.push((node, scope));
-            }
-            while let Some((node, scope)) = open.pop() {
-                exit(state, node, scope);
-            }
-        }
     }
 }

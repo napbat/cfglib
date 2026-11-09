@@ -26,7 +26,7 @@ use crate::cfg::Cfg;
 use crate::display::DisplayInstr;
 use crate::edge::EdgeKind;
 use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
-use crate::test_util::{DfInst, df_ff, df_pred};
+use crate::test_util::{DfInst, df_ff};
 use crate::{
     ControlDescent, ControlNode, ControlNodeId, ControlTree, ControlVisitor, LiftReport, LoopKind,
 };
@@ -40,8 +40,7 @@ const TRY_DEPTH: usize = 1_000;
 /// depth, since each line is indented by its level.
 const PRINTED_DEPTH: usize = 3_000;
 
-/// A block that holds one plain and one predicated instruction, so the
-/// regionizer has a guard to wrap at every level.
+/// A block that holds two plain instructions.
 fn new_block(cfg: &mut Cfg<DfInst>) -> BlockId {
     let block = cfg.new_block();
     fill(cfg, block);
@@ -50,7 +49,7 @@ fn new_block(cfg: &mut Cfg<DfInst>) -> BlockId {
 
 fn fill(cfg: &mut Cfg<DfInst>, block: BlockId) {
     cfg.block_mut(block).push(df_ff("work"));
-    cfg.block_mut(block).push(df_pred("guarded", 7, true));
+    cfg.block_mut(block).push(df_ff("more"));
 }
 
 /// `count` blocks in a row, the entry first, each held by [`fill`].
@@ -380,15 +379,6 @@ fn structure_and_read(cfg: &Cfg<DfInst>) -> (ControlTree, LiftReport, Census) {
         .map(|block| cfg.block(block).instructions().len())
         .sum();
     assert_eq!(instructions, total, "every instruction once");
-
-    // The same graph regionized: every block holds a predicated instruction,
-    // so a guard wraps its run at every level of the nesting.
-    let (guarded, guarded_report) = ControlTree::compute_predicated_with_report(cfg);
-    assert_eq!(guarded_report, report);
-    assert!(count_nodes(&guarded, |node| matches!(node, ControlNode::Guarded { .. })) > 0);
-    let mut guarded_instructions = 0;
-    guarded.for_each_instruction(cfg, |_, _| guarded_instructions += 1);
-    assert_eq!(guarded_instructions, total, "every instruction once");
     (tree, report, census)
 }
 

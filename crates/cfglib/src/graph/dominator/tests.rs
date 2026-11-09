@@ -13,8 +13,8 @@ mod differential;
 mod exhaustive;
 mod forest;
 mod frontier;
+mod frontier_table;
 mod post;
-mod scoped_walk;
 mod support;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

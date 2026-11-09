@@ -4,7 +4,7 @@
 //! dialects. The dialects represent every vocabulary differently, so a body
 //! that passes on both cannot depend on one representation.
 
-use crate::ir::hlil::{FunctionBuilder, Pseudocode, RecoverDialect, VerifyDialect};
+use crate::ir::hlil::{Dialect, FunctionBuilder};
 
 use super::storage::{ExprId, StmtId, ToyHlilBuilder, VarId};
 
@@ -13,18 +13,7 @@ use super::storage::{ExprId, StmtId, ToyHlilBuilder, VarId};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Prim {
     Add,
-    LessThan,
-    Below,
     Not,
-    Load,
-    Deref,
-    Call,
-    Acquire,
-    Release,
-    Caught,
-    Throw,
-    /// An operation whose source spelling expands into multiple statements.
-    Expanded,
 }
 
 /// The value types that the shared test bodies use.
@@ -32,11 +21,10 @@ pub(crate) enum Prim {
 pub(crate) enum Ty {
     Integer,
     Boolean,
-    Void,
 }
 
 /// A toy dialect that the shared test bodies run over.
-pub(crate) trait Kit: VerifyDialect + Pseudocode + RecoverDialect {
+pub(crate) trait Kit: Dialect {
     /// The type that a test names by `ty`.
     fn ty(ty: Ty) -> Self::Type;
 
@@ -71,24 +59,6 @@ impl<D: Kit> ToyHlilBuilder<D> {
     /// Applies `prim` to `operands`, producing a value of type `ty`.
     pub(crate) fn call(&mut self, prim: Prim, operands: &[ExprId], ty: Ty) -> ExprId {
         self.apply(&D::op(prim), operands, &D::ty(ty))
-    }
-
-    /// `variable = value;`
-    pub(crate) fn store(&mut self, variable: VarId, value: ExprId) -> StmtId {
-        let target = self.read(variable);
-        self.assign(target, value)
-    }
-
-    /// `prim(operands);` as an expression statement.
-    pub(crate) fn effect(&mut self, prim: Prim, operands: &[ExprId]) -> StmtId {
-        let call = self.call(prim, operands, Ty::Void);
-        self.expression_statement(call)
-    }
-
-    /// An expression statement that reads `variable`.
-    pub(crate) fn use_of(&mut self, variable: VarId) -> StmtId {
-        let read = self.read(variable);
-        self.expression_statement(read)
     }
 
     /// An expression statement that evaluates a constant.

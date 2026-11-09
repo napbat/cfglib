@@ -10,8 +10,7 @@
 
 use cfglib::{
     Cfg, EhBlockKind, EhEdgeKind, EhModel, HandlerBody, HandlerKind, HandlerRef, contract_edge,
-    dead_code_elimination, merge_blocks, remove_dead_code, remove_empty_blocks, remove_unreachable,
-    simplify, split_critical_edges, verify,
+    merge_blocks, remove_empty_blocks, remove_unreachable, simplify, split_critical_edges, verify,
 };
 
 use crate::shapes::{
@@ -259,32 +258,19 @@ fn remove_unreachable_keeps_the_handler_that_can_be_entered_when_its_sibling_can
 }
 
 #[test]
-fn remove_dead_code_keeps_a_catch_pad_whose_only_statements_were_dead() {
-    // The pad computes a value nothing reads: it is dead, so the pass empties
-    // the pad and then simplifies. The handler must outlive its body.
-    let Try {
-        mut cfg, region, ..
-    } = try_catch_with(vec![Stmt::text("unused = 1").defining("unused")]);
-
-    let removed = remove_dead_code(&mut cfg);
-
-    assert!(removed > 0, "the dead statement goes");
-    assert_try_survives(&mut cfg, first_handler(region), &["risky()"], &["return"]);
-}
-
-#[test]
-fn dead_code_elimination_alone_leaves_the_emptied_pad_in_place() {
+fn simplify_keeps_a_catch_pad_whose_statements_were_removed() {
+    // A client pass removed the only statement of the pad; simplify then
+    // runs over the emptied pad. The handler must outlive its body.
     let Try {
         mut cfg,
         pad,
         region,
         ..
     } = try_catch_with(vec![Stmt::text("unused = 1").defining("unused")]);
+    cfg.block_mut(pad).instructions_mut().clear();
 
-    let removed = dead_code_elimination(&mut cfg);
+    simplify(&mut cfg);
 
-    assert_eq!(removed, 1);
-    assert_eq!(cfg.block(pad).instructions(), []);
     assert_try_survives(&mut cfg, first_handler(region), &["risky()"], &["return"]);
 }
 
