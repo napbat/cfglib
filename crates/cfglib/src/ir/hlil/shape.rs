@@ -7,6 +7,8 @@
 //! without rebuilding them.
 
 use super::dialect::Dialect;
+use crate::block::BlockId;
+use crate::region;
 
 /// The shape of one expression node.
 ///
@@ -69,6 +71,66 @@ pub enum HandlerKind<'a, S> {
         /// The statements that evaluate the predicate.
         filter_body: &'a [S],
     },
+}
+
+impl<'a, S> HandlerKind<'a, S> {
+    /// Returns the same kind with the filter body that `filter_body` gives.
+    ///
+    /// `filter_body` runs only for a [`Filter`](Self::Filter), with the
+    /// filter body of `self`. The other kinds carry no body and stay the
+    /// same. A rebuild of a function uses this to put the handles of the new
+    /// function into the kind.
+    pub fn with_filter_body<'b, T>(
+        self,
+        filter_body: impl FnOnce(&'a [S]) -> &'b [T],
+    ) -> HandlerKind<'b, T> {
+        match self {
+            Self::Catch => HandlerKind::Catch,
+            Self::CatchAll => HandlerKind::CatchAll,
+            Self::Fault => HandlerKind::Fault,
+            Self::Filter { filter_body: body } => HandlerKind::Filter {
+                filter_body: filter_body(body),
+            },
+        }
+    }
+
+    /// Returns the region kind of this kind.
+    ///
+    /// `filter_block` runs only for a [`Filter`](Self::Filter), with its
+    /// filter body. It returns the block that holds the predicate of the
+    /// region handler.
+    pub fn to_region(self, filter_block: impl FnOnce(&'a [S]) -> BlockId) -> region::HandlerKind {
+        match self {
+            Self::Catch => region::HandlerKind::Catch,
+            Self::CatchAll => region::HandlerKind::CatchAll,
+            Self::Fault => region::HandlerKind::Fault,
+            Self::Filter { filter_body } => region::HandlerKind::Filter {
+                filter_block: filter_block(filter_body),
+            },
+        }
+    }
+
+    /// Returns the kind of a region handler, or `None` for a
+    /// [`Finally`](region::HandlerKind::Finally) handler. A structured `try`
+    /// holds its finally statements in its finally body, not in a handler.
+    ///
+    /// `filter_body` runs only for a
+    /// [`Filter`](region::HandlerKind::Filter), with its filter block. It
+    /// returns the statements of the predicate.
+    pub fn from_region(
+        kind: region::HandlerKind,
+        filter_body: impl FnOnce(BlockId) -> &'a [S],
+    ) -> Option<Self> {
+        Some(match kind {
+            region::HandlerKind::Catch => Self::Catch,
+            region::HandlerKind::CatchAll => Self::CatchAll,
+            region::HandlerKind::Fault => Self::Fault,
+            region::HandlerKind::Filter { filter_block } => Self::Filter {
+                filter_body: filter_body(filter_block),
+            },
+            region::HandlerKind::Finally => return None,
+        })
+    }
 }
 
 /// The shape of one statement.

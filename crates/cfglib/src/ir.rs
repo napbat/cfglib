@@ -21,6 +21,10 @@
 //!   write-only [`FunctionBuilder`](hlil::FunctionBuilder) that the consumer
 //!   implements, with the walks that every reader of the shapes needs. The
 //!   consumer stores the function.
+//! - [`vocabulary`] holds what the levels of one consumer share: the
+//!   [`Vocabulary`](vocabulary::Vocabulary) of value types, effects, source
+//!   coordinates, and variable metadata, and the
+//!   [`Variable`](vocabulary::Variable) record over it.
 //!
 //! Every level is language-neutral. The library defines the shapes and the
 //! traits, and names no language, runtime, ABI, or instruction set: a
@@ -30,3 +34,4 @@
 pub mod hlil;
 pub mod mlil;
 pub mod rtl;
+pub mod vocabulary;
