@@ -198,6 +198,11 @@ impl<'a, D: Dialect, V: DenseId, X: Copy> Defs<'a, D, V, X> {
         }
     }
 
+    /// Returns the position of the last effect that [`Self::define`] saw.
+    pub(super) fn last_effect(&self) -> u32 {
+        self.effects - 1
+    }
+
     /// Recognizes a conditional write of one span of `root`.
     ///
     /// The span starts at bit `span_offset` of the root and receives the bits

@@ -32,12 +32,14 @@ mod defs;
 mod dialect;
 mod exprs;
 mod summarizer;
+mod tree;
 mod vocabulary;
 
 pub use captured::{Captured, CapturedValue};
 pub use dialect::{AccessShape, DialectEffects, SelectShape};
 pub use exprs::{Expr, ExprId, Exprs, Opaque};
 pub use summarizer::{RtlEffect, Summarizer};
+pub use tree::{StatementTree, TreeItem, TreeNode, TreeNodeId, TreeSpan, TreeSpanValue};
 pub use vocabulary::{
     Access, Address, Effect, Exit, RaiseOrigin, Raised, StateTouch, Touch, Write, WriteKind,
 };
