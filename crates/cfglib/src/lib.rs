@@ -254,9 +254,10 @@ pub use dataflow::slot_fixpoint::{
 pub use display::{DisplayInstr, IndentedWriter};
 pub use edge::{Edge, EdgeId, EdgeKind, EdgeTag, KindedEdge};
 pub use effects::{
-    Access, AccessShape, Address, Captured, CapturedValue, DialectEffects, Effect, Exit, Expr,
-    ExprId, Exprs, Opaque, RaiseOrigin, Raised, RtlEffect, SelectShape, StateTouch, StatementTree,
-    Summarizer, Touch, TreeItem, TreeNode, TreeNodeId, TreeSpan, TreeSpanValue, Write, WriteKind,
+    Access, AccessShape, Address, CaptureBuilder, Captured, CapturedValue, DialectEffects, Effect,
+    Exit, Expr, ExprId, Exprs, Opaque, RaiseOrigin, Raised, RtlEffect, SelectShape, StateTouch,
+    StatementTree, Summarizer, Touch, TreeItem, TreeNode, TreeNodeId, TreeSpan, TreeSpanValue,
+    Write, WriteKind,
 };
 pub use exception::{
     ClrExceptionRegion, ClrHandler, ClrHandlerKind, ExceptionDisposition, ExceptionFlow,

@@ -7,7 +7,8 @@ use alloc::vec::Vec;
 
 use crate::graph::view::DenseId;
 use crate::ir::rtl::{
-    Action, BitSlice, Bits, Control, Dialect, Place, RecordView, Selection, Statement, WriteTarget,
+    Action, BitSlice, Bits, Control, Dialect, Place, RecordView, Selection, Statement, ValueRange,
+    WriteTarget,
 };
 
 use super::defs::Defs;
@@ -695,10 +696,7 @@ impl<'a, D: Dialect, V: DenseId> Build<'a, D, V> {
                 operator,
                 args,
             } => {
-                let args = Run::push(
-                    &mut self.tree.refs,
-                    args.iter().map(|&arg| self.defs.slot(arg).extra),
-                );
+                let args = self.refs(args.iter().copied());
                 for (result, value) in (0..).zip(results.iter()) {
                     let width = self.defs.slot(value).width;
                     self.add_node(
@@ -722,43 +720,10 @@ impl<'a, D: Dialect, V: DenseId> Build<'a, D, V> {
                 operation,
                 args,
                 outcomes,
-            } => {
-                let ordinal = self.defs.last_effect();
-                for (result, value) in (0..).zip(results.iter()) {
-                    let width = self.defs.slot(value).width;
-                    self.add_node(
-                        value,
-                        NodeData::Effect {
-                            ordinal,
-                            result,
-                            width,
-                        },
-                    );
-                }
-                let args = Run::push(
-                    &mut self.tree.refs,
-                    args.iter().map(|&arg| self.defs.slot(arg).extra),
-                );
-                let results = Run::push(
-                    &mut self.tree.refs,
-                    results.iter().map(|value| self.defs.slot(value).extra),
-                );
-                self.tree.items.push(ItemData::Effect {
-                    operation,
-                    args,
-                    results,
-                    outcomes,
-                });
-            }
+            } => self.effect(results, operation, args, outcomes),
             Statement::Raise(raise) => {
                 let guard = raise.guard.map(|guard| self.node(guard));
-                let payload = Run::push(
-                    &mut self.tree.refs,
-                    raise
-                        .payload
-                        .iter()
-                        .map(|&value| self.defs.slot(value).extra),
-                );
+                let payload = self.refs(raise.payload.iter().copied());
                 let binds = Run::push(
                     &mut self.tree.binds,
                     raise
@@ -778,6 +743,45 @@ impl<'a, D: Dialect, V: DenseId> Build<'a, D, V> {
                 self.tree.items.push(item);
             }
         }
+    }
+
+    /// Adds the nodes of the results of one effect and its item.
+    fn effect(
+        &mut self,
+        results: ValueRange<V>,
+        operation: &'a D::EffectOp,
+        args: &'a [V],
+        outcomes: &'a [D::Outcome],
+    ) {
+        let ordinal = self.defs.last_effect();
+        for (result, value) in (0..).zip(results.iter()) {
+            let width = self.defs.slot(value).width;
+            self.add_node(
+                value,
+                NodeData::Effect {
+                    ordinal,
+                    result,
+                    width,
+                },
+            );
+        }
+        let args = self.refs(args.iter().copied());
+        let results = self.refs(results.iter());
+        self.tree.items.push(ItemData::Effect {
+            operation,
+            args,
+            results,
+            outcomes,
+        });
+    }
+
+    /// Adds the nodes of `values` to the reference pool.
+    fn refs(&mut self, values: impl IntoIterator<Item = V>) -> Run {
+        let defs = &self.defs;
+        Run::push(
+            &mut self.tree.refs,
+            values.into_iter().map(|value| defs.slot(value).extra),
+        )
     }
 
     fn add_node(&mut self, value: V, node: NodeData<'a, D>) {

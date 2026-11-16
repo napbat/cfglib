@@ -149,7 +149,7 @@ fn render(tree: &StatementTree<'_, Wren>) -> Vec<String> {
 
 /// Captures one instruction and renders its tree.
 fn lines_of(
-    emit: impl FnOnce(&mut &mut cfglib::Captured<Wren>) -> Control<CapturedValue>,
+    emit: impl FnOnce(&mut cfglib::CaptureBuilder<'_, Wren>) -> Control<CapturedValue>,
 ) -> Vec<String> {
     let captured = capture(emit);
     render(&StatementTree::compute_record(&WrenEffects, &captured))

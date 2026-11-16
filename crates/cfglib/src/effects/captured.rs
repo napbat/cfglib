@@ -123,17 +123,18 @@ enum Stored<D: Dialect> {
 
 /// The statements of one instruction as owned data.
 ///
-/// `&mut Captured` implements [`InstructionBuilder`], so instruction
-/// semantics can emit into it as into any storage. The capture keeps the
-/// values with their widths, the statements in the order of emission, and the
-/// control boundary. It checks no rule of the builder contract, and it holds
-/// one instruction only. An indexed read without a candidate has no width, so
-/// the capture panics at such a read. [`Captured::clear`] empties it for the next
-/// instruction and keeps its buffers.
+/// [`Captured::begin`] returns a [`CaptureBuilder`] that implements
+/// [`InstructionBuilder`], so instruction semantics can emit into the capture
+/// as into any storage. The capture keeps the values with their widths, the
+/// statements in the order of emission, and the control boundary. It checks
+/// no rule of the builder contract, and it holds one instruction only. An
+/// indexed read without a candidate has no width, so the capture panics at
+/// such a read.
 ///
 /// The capture implements [`RecordView`], so the
-/// [`Summarizer`](super::Summarizer) and the [`StatementTree`](super::StatementTree) read it as
-/// they read a sealed record.
+/// [`Summarizer`](super::Summarizer) and the
+/// [`StatementTree`](super::StatementTree) read it as they read a sealed
+/// record.
 #[derive(Debug, Clone)]
 pub struct Captured<D: Dialect> {
     widths: Vec<Bits>,
@@ -174,9 +175,11 @@ impl<D: Dialect> Captured<D> {
         }
     }
 
-    /// Removes every statement, value, and the control boundary. The buffers
-    /// keep their capacity.
-    pub fn clear(&mut self) {
+    /// Empties the capture and returns the builder of its next instruction.
+    ///
+    /// The buffers keep their capacity, so one capture serves many
+    /// instructions without new allocations.
+    pub fn begin(&mut self) -> CaptureBuilder<'_, D> {
         self.widths.clear();
         self.statements.clear();
         self.args.clear();
@@ -188,6 +191,7 @@ impl<D: Dialect> Captured<D> {
         self.outcomes.clear();
         self.binds.clear();
         self.control = None;
+        CaptureBuilder { captured: self }
     }
 
     /// Returns how many values the statements define.
@@ -331,7 +335,17 @@ impl<D: Dialect> Captured<D> {
     }
 }
 
-impl<D: Dialect> InstructionBuilder<D> for &mut Captured<D> {
+/// The builder of one [`Captured`] instruction, which
+/// [`Captured::begin`] returns.
+///
+/// [`finish`](InstructionBuilder::finish) stores the control boundary. The
+/// builder checks no rule of the builder contract.
+#[derive(Debug)]
+pub struct CaptureBuilder<'c, D: Dialect> {
+    captured: &'c mut Captured<D>,
+}
+
+impl<D: Dialect> InstructionBuilder<D> for CaptureBuilder<'_, D> {
     type Value = CapturedValue;
     type Error = Infallible;
 
@@ -346,22 +360,24 @@ impl<D: Dialect> InstructionBuilder<D> for &mut Captured<D> {
                     .width,
                 StoredSource::Finite {
                     index,
-                    candidates: Run::push(&mut self.places, candidates),
+                    candidates: Run::push(&mut self.captured.places, candidates),
                 },
             ),
             Selection::SparseIndexed { bank, key, slice } => {
                 (slice.width, StoredSource::Sparse { bank, key, slice })
             }
         };
-        let result = self.fresh(&[width]).first;
-        self.statements.push(Stored::Read { result, source });
+        let result = self.captured.fresh(&[width]).first;
+        self.captured
+            .statements
+            .push(Stored::Read { result, source });
         result
     }
 
     fn constant(&mut self, words: &[u64], width: Bits) -> CapturedValue {
-        let result = self.fresh(&[width]).first;
-        let words = Run::push(&mut self.words, words);
-        self.statements.push(Stored::Constant {
+        let result = self.captured.fresh(&[width]).first;
+        let words = Run::push(&mut self.captured.words, words);
+        self.captured.statements.push(Stored::Constant {
             result,
             words,
             width,
@@ -375,20 +391,20 @@ impl<D: Dialect> InstructionBuilder<D> for &mut Captured<D> {
         args: &[CapturedValue],
         results: &[Bits],
     ) -> ValueRange<CapturedValue> {
-        let range = self.fresh(results);
-        let args = Run::push(&mut self.args, args);
-        self.operators.push(operator.clone());
-        self.statements.push(Stored::Apply {
+        let range = self.captured.fresh(results);
+        let args = Run::push(&mut self.captured.args, args);
+        self.captured.operators.push(operator.clone());
+        self.captured.statements.push(Stored::Apply {
             results: range,
-            operator: self.operators.len() - 1,
+            operator: self.captured.operators.len() - 1,
             args,
         });
         range
     }
 
     fn nondet(&mut self, width: Bits, domain: D::NondetDomain) -> CapturedValue {
-        let result = self.fresh(&[width]).first;
-        self.statements.push(Stored::Nondet {
+        let result = self.captured.fresh(&[width]).first;
+        self.captured.statements.push(Stored::Nondet {
             result,
             width,
             domain,
@@ -403,13 +419,13 @@ impl<D: Dialect> InstructionBuilder<D> for &mut Captured<D> {
         results: &[Bits],
         outcomes: &[D::Outcome],
     ) -> ValueRange<CapturedValue> {
-        let range = self.fresh(results);
-        let args = Run::push(&mut self.args, args);
-        let outcomes = Run::push(&mut self.outcomes, outcomes);
-        self.operations.push(operation.clone());
-        self.statements.push(Stored::Effect {
+        let range = self.captured.fresh(results);
+        let args = Run::push(&mut self.captured.args, args);
+        let outcomes = Run::push(&mut self.captured.outcomes, outcomes);
+        self.captured.operations.push(operation.clone());
+        self.captured.statements.push(Stored::Effect {
             results: range,
-            operation: self.operations.len() - 1,
+            operation: self.captured.operations.len() - 1,
             args,
             outcomes,
         });
@@ -417,9 +433,9 @@ impl<D: Dialect> InstructionBuilder<D> for &mut Captured<D> {
     }
 
     fn raise(&mut self, raise: Raise<'_, D, CapturedValue>) {
-        let payload = Run::push(&mut self.args, raise.payload);
-        let binds = Run::push(&mut self.binds, raise.binds);
-        self.statements.push(Stored::Raise {
+        let payload = Run::push(&mut self.captured.args, raise.payload);
+        let binds = Run::push(&mut self.captured.binds, raise.binds);
+        self.captured.statements.push(Stored::Raise {
             outcome: raise.outcome,
             guard: raise.guard,
             payload,
@@ -431,7 +447,7 @@ impl<D: Dialect> InstructionBuilder<D> for &mut Captured<D> {
         let target = match target {
             WriteTarget::Root { root, plan } => StoredTarget::Root {
                 root,
-                plan: Run::push(&mut self.plans, plan),
+                plan: Run::push(&mut self.captured.plans, plan),
             },
             WriteTarget::FiniteIndexed {
                 index,
@@ -439,7 +455,7 @@ impl<D: Dialect> InstructionBuilder<D> for &mut Captured<D> {
                 value,
             } => StoredTarget::Finite {
                 index,
-                candidates: Run::push(&mut self.places, candidates),
+                candidates: Run::push(&mut self.captured.places, candidates),
                 value,
             },
             WriteTarget::SparseIndexed {
@@ -454,12 +470,14 @@ impl<D: Dialect> InstructionBuilder<D> for &mut Captured<D> {
                 value,
             },
         };
-        self.statements.push(Stored::Write { target, policy });
+        self.captured
+            .statements
+            .push(Stored::Write { target, policy });
     }
 
     /// Stores the control boundary. The capture is then finished.
     fn finish(self, control: Control<CapturedValue>) -> Result<(), Infallible> {
-        self.control = Some(control);
+        self.captured.control = Some(control);
         Ok(())
     }
 }

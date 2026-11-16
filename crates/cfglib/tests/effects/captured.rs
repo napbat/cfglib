@@ -4,7 +4,7 @@ use cfglib::ir::rtl::{
     BitSlice, Bits, Control, InstructionBuilder, Place, Raise, RecordView, Selection, Statement,
     ValueRange, WriteTarget,
 };
-use cfglib::{Captured, CapturedValue, DenseId};
+use cfglib::{CaptureBuilder, Captured, CapturedValue, DenseId};
 
 use crate::wren::{Eff, Fault, Op, Policy, Reg, Undef, Wren, bits, capture, constant, take};
 
@@ -12,57 +12,60 @@ fn value(index: usize) -> CapturedValue {
     CapturedValue::from_index(index)
 }
 
+/// Emits one statement of each kind and jumps to the indexed read.
+fn emit_every_statement(
+    b: &mut CaptureBuilder<'_, Wren>,
+    candidates: &[Place<Wren>; 2],
+) -> Control<CapturedValue> {
+    let index = b.read(Selection::Direct(Place::whole(Reg::Z)));
+    let slot = b.read(Selection::FiniteIndexed { index, candidates });
+    let element = b.read(Selection::SparseIndexed {
+        bank: Reg::Bank,
+        key: slot,
+        slice: BitSlice::new(8, bits(8)),
+    });
+    let wide = b.constant(&[1, 2], bits(128));
+    let pair = b.apply(&Op::DivMod, &[slot, element], &[bits(16), bits(16)]);
+    let undef = b.nondet(Bits::BOOL, Undef::Flags);
+    let loaded = b.effect(&Eff::LoadIf, &[undef, slot], &[bits(8)], &[Fault::Page]);
+    b.raise(Raise {
+        outcome: Fault::Divide,
+        guard: Some(undef),
+        payload: &[pair.first],
+        binds: &[(Reg::C, undef)],
+    });
+    b.write(
+        WriteTarget::Root {
+            root: Reg::Slot(2),
+            plan: &[take(0, 16, pair.first, 0)],
+        },
+        Policy::Zero,
+    );
+    b.write(
+        WriteTarget::FiniteIndexed {
+            index,
+            candidates,
+            value: slot,
+        },
+        Policy::Merge,
+    );
+    b.write(
+        WriteTarget::SparseIndexed {
+            bank: Reg::Bank,
+            key: slot,
+            slice: BitSlice::new(0, bits(8)),
+            value: loaded.first,
+        },
+        Policy::Merge,
+    );
+    let _ = wide;
+    Control::Jump { target: slot }
+}
+
 #[test]
 fn a_capture_gives_back_every_statement_with_dense_values() {
     let candidates = [Place::whole(Reg::Slot(0)), Place::whole(Reg::Slot(1))];
-    let captured = capture(|b| {
-        let index = b.read(Selection::Direct(Place::whole(Reg::Z)));
-        let slot = b.read(Selection::FiniteIndexed {
-            index,
-            candidates: &candidates,
-        });
-        let element = b.read(Selection::SparseIndexed {
-            bank: Reg::Bank,
-            key: slot,
-            slice: BitSlice::new(8, bits(8)),
-        });
-        let wide = b.constant(&[1, 2], bits(128));
-        let pair = b.apply(&Op::DivMod, &[slot, element], &[bits(16), bits(16)]);
-        let undef = b.nondet(Bits::BOOL, Undef::Flags);
-        let loaded = b.effect(&Eff::LoadIf, &[undef, slot], &[bits(8)], &[Fault::Page]);
-        b.raise(Raise {
-            outcome: Fault::Divide,
-            guard: Some(undef),
-            payload: &[pair.first],
-            binds: &[(Reg::C, undef)],
-        });
-        b.write(
-            WriteTarget::Root {
-                root: Reg::Slot(2),
-                plan: &[take(0, 16, pair.first, 0)],
-            },
-            Policy::Zero,
-        );
-        b.write(
-            WriteTarget::FiniteIndexed {
-                index,
-                candidates: &candidates,
-                value: slot,
-            },
-            Policy::Merge,
-        );
-        b.write(
-            WriteTarget::SparseIndexed {
-                bank: Reg::Bank,
-                key: slot,
-                slice: BitSlice::new(0, bits(8)),
-                value: loaded.first,
-            },
-            Policy::Merge,
-        );
-        let _ = wide;
-        Control::Jump { target: slot }
-    });
+    let captured = capture(|b| emit_every_statement(b, &candidates));
 
     let plan = [take(0, 16, value(4), 0)];
     let expected = [
@@ -163,26 +166,24 @@ fn a_capture_gives_back_every_statement_with_dense_values() {
 }
 
 #[test]
-fn clear_starts_a_new_instruction_with_values_from_zero() {
+fn begin_starts_a_new_instruction_with_values_from_zero() {
     let mut captured = Captured::<Wren>::new();
-    {
-        let mut builder = &mut captured;
-        let a = constant(&mut builder, 1, 32);
-        let b = constant(&mut builder, 2, 32);
-        builder.apply(&Op::Add, &[a, b], &[bits(32)]);
-        builder
-            .finish(Control::Advance)
-            .expect("a capture accepts every record");
-    }
+    let mut builder = captured.begin();
+    let a = constant(&mut builder, 1, 32);
+    let b = constant(&mut builder, 2, 32);
+    builder.apply(&Op::Add, &[a, b], &[bits(32)]);
+    builder
+        .finish(Control::Advance)
+        .expect("a capture accepts every record");
     assert_eq!(captured.value_count(), 3);
     assert_eq!(captured.finished_control(), Some(Control::Advance));
 
-    captured.clear();
+    let _ = captured.begin();
     assert_eq!(captured.value_count(), 0);
     assert_eq!(captured.statement_count(), 0);
     assert_eq!(captured.finished_control(), None);
 
-    let mut builder = &mut captured;
+    let mut builder = captured.begin();
     let first = builder.read(Selection::Direct(Place::whole(Reg::A)));
     builder
         .finish(Control::Return { target: first })

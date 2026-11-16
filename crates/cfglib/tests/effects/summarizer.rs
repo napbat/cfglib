@@ -5,8 +5,8 @@ use cfglib::ir::rtl::{
     ValueRange, WriteTarget,
 };
 use cfglib::{
-    Access, Address, Exit, Expr, MemoryAccessKind, MemoryAtomicity, Opaque, RaiseOrigin, Raised,
-    StateTouch, Summarizer, Touch, Write, WriteKind,
+    Access, Address, CaptureBuilder, CapturedValue, Exit, Expr, MemoryAccessKind, MemoryAtomicity,
+    Opaque, RaiseOrigin, Raised, StateTouch, Summarizer, Touch, Write, WriteKind,
 };
 
 use crate::wren::{
@@ -52,8 +52,8 @@ fn every_read_is_upward_exposed_and_one_root_is_listed_once() {
     assert_eq!(effect.writes, [write(Reg::A, 0, 16, WriteKind::Always)]);
     assert_eq!(effect.exit, Exit::Next);
     assert!(!effect.nondeterministic);
-    assert!(effect.memory.is_empty());
-    assert!(effect.raises.is_empty());
+    assert_eq!(effect.memory, []);
+    assert_eq!(effect.raises, []);
     assert!(effect.exprs.is_empty());
 }
 
@@ -184,7 +184,7 @@ fn a_nondeterministic_span_is_an_undefined_write() {
         ]
     );
     assert!(effect.nondeterministic);
-    assert!(effect.reads.is_empty());
+    assert_eq!(effect.reads, []);
 }
 
 #[test]
@@ -581,42 +581,49 @@ fn a_value_that_two_rules_need_has_one_expression() {
     );
 }
 
+/// Emits a conditional load, a select of the old value, an indexed read,
+/// a raise on a choice, and a branch.
+fn emit_mixed(
+    b: &mut CaptureBuilder<'_, Wren>,
+    candidates: &[Place<Wren>; 2],
+) -> Control<CapturedValue> {
+    let flag = b.read(Selection::Direct(Place::whole(Reg::Z)));
+    let base = b.read(Selection::Direct(Place::whole(Reg::A)));
+    let old = b.read(Selection::Direct(Place::whole(Reg::B)));
+    let slot = b.read(Selection::FiniteIndexed {
+        index: flag,
+        candidates,
+    });
+    let four = constant(b, 4, 32);
+    let address = b.apply(&Op::Add, &[base, four], &[bits(32)]).first;
+    let loaded = b
+        .effect(&Eff::LoadIf, &[flag, address], &[bits(32)], &[Fault::Page])
+        .first;
+    let chosen = b
+        .apply(&Op::Select, &[flag, loaded, old], &[bits(32)])
+        .first;
+    let undef = b.nondet(Bits::BOOL, Undef::Flags);
+    b.raise(Raise {
+        outcome: Fault::Divide,
+        guard: Some(undef),
+        payload: &[slot],
+        binds: &[],
+    });
+    write_whole(b, Reg::B, chosen);
+    write_plan(b, Reg::A, &[take(0, 16, address, 0), undefined(16, 16)]);
+    Control::Branch {
+        condition: flag,
+        taken: address,
+        not_taken: None,
+    }
+}
+
 /// The statements of one instruction, written as plain data with value
 /// handles from 1000, and the same instruction emitted into a capture.
 #[test]
 fn a_capture_and_the_same_statements_from_another_source_give_one_effect() {
     let candidates = [Place::whole(Reg::Slot(2)), Place::whole(Reg::Slot(3))];
-    let captured = capture(|b| {
-        let flag = b.read(Selection::Direct(Place::whole(Reg::Z)));
-        let base = b.read(Selection::Direct(Place::whole(Reg::A)));
-        let old = b.read(Selection::Direct(Place::whole(Reg::B)));
-        let slot = b.read(Selection::FiniteIndexed {
-            index: flag,
-            candidates: &candidates,
-        });
-        let four = constant(b, 4, 32);
-        let address = b.apply(&Op::Add, &[base, four], &[bits(32)]).first;
-        let loaded = b
-            .effect(&Eff::LoadIf, &[flag, address], &[bits(32)], &[Fault::Page])
-            .first;
-        let chosen = b
-            .apply(&Op::Select, &[flag, loaded, old], &[bits(32)])
-            .first;
-        let undef = b.nondet(Bits::BOOL, Undef::Flags);
-        b.raise(Raise {
-            outcome: Fault::Divide,
-            guard: Some(undef),
-            payload: &[slot],
-            binds: &[],
-        });
-        write_whole(b, Reg::B, chosen);
-        write_plan(b, Reg::A, &[take(0, 16, address, 0), undefined(16, 16)]);
-        Control::Branch {
-            condition: flag,
-            taken: address,
-            not_taken: None,
-        }
-    });
+    let captured = capture(|b| emit_mixed(b, &candidates));
 
     let v = |index: usize| 1000 + index;
     let four = [4_u64];
@@ -709,21 +716,23 @@ fn a_capture_and_the_same_statements_from_another_source_give_one_effect() {
     let direct = summarizer.summarize(statements, control, width);
     let from_capture = summarizer.summarize_record(&captured);
     assert_eq!(direct, from_capture);
+}
+
+#[test]
+fn the_mixed_instruction_has_a_conditional_an_assigned_and_an_undefined_write() {
+    let candidates = [Place::whole(Reg::Slot(2)), Place::whole(Reg::Slot(3))];
+    let effect = effect_of(|b| emit_mixed(b, &candidates));
+    let flag = effect.raises[0].guard.expect("the load is guarded by Z");
     assert_eq!(
-        from_capture.writes,
+        effect.writes,
         [
-            write(
-                Reg::B,
-                0,
-                32,
-                WriteKind::Conditional(from_capture.raises[0].guard.unwrap())
-            ),
+            write(Reg::B, 0, 32, WriteKind::Conditional(flag)),
             write(Reg::A, 0, 16, WriteKind::Always),
             write(Reg::A, 16, 16, WriteKind::Undefined),
         ]
     );
-    assert!(from_capture.nondeterministic);
-    assert_eq!(from_capture.exit, Exit::Branch);
+    assert!(effect.nondeterministic);
+    assert_eq!(effect.exit, Exit::Branch);
 }
 
 #[test]

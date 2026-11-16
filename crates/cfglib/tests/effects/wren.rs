@@ -4,8 +4,8 @@ use cfglib::ir::rtl::{
     Action, BitSlice, Bits, Control, Dialect, InstructionBuilder, Place, SpanAction, WriteTarget,
 };
 use cfglib::{
-    AccessShape, Captured, CapturedValue, DialectEffects, MemoryAccessKind, MemoryAtomicity,
-    RtlEffect, SelectShape, StateTouch, Summarizer,
+    AccessShape, CaptureBuilder, Captured, CapturedValue, DialectEffects, MemoryAccessKind,
+    MemoryAtomicity, RtlEffect, SelectShape, StateTouch, Summarizer,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -251,10 +251,10 @@ pub fn constant<B: InstructionBuilder<Wren>>(builder: &mut B, value: u64, width:
 
 /// Captures the instruction that `emit` produces.
 pub fn capture(
-    emit: impl FnOnce(&mut &mut Captured<Wren>) -> Control<CapturedValue>,
+    emit: impl FnOnce(&mut CaptureBuilder<'_, Wren>) -> Control<CapturedValue>,
 ) -> Captured<Wren> {
     let mut captured = Captured::new();
-    let mut builder = &mut captured;
+    let mut builder = captured.begin();
     let control = emit(&mut builder);
     builder
         .finish(control)
@@ -264,7 +264,7 @@ pub fn capture(
 
 /// Captures the instruction that `emit` produces and summarizes it.
 pub fn effect_of(
-    emit: impl FnOnce(&mut &mut Captured<Wren>) -> Control<CapturedValue>,
+    emit: impl FnOnce(&mut CaptureBuilder<'_, Wren>) -> Control<CapturedValue>,
 ) -> RtlEffect<Wren, WrenEffects> {
     Summarizer::new(&WrenEffects).summarize_record(&capture(emit))
 }

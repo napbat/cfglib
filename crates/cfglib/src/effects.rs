@@ -15,8 +15,9 @@
 //!   instruction and a sealed record of a consumer get one set of rules.
 //! - [`StatementTree`] turns the same statements into expression trees, the
 //!   generic part of a readable and exact view.
-//! - [`Captured`] keeps the statements of one instruction as owned data. It
-//!   implements [`InstructionBuilder`](crate::ir::rtl::InstructionBuilder), so
+//! - [`Captured`] keeps the statements of one instruction as owned data. Its
+//!   [`CaptureBuilder`] implements
+//!   [`InstructionBuilder`](crate::ir::rtl::InstructionBuilder), so
 //!   instruction semantics emit into it without a consumer storage.
 //! - [`DialectEffects`] is the only knowledge that a dialect supplies: the
 //!   memory access of each effect operation, the state of an intrinsic, the
@@ -35,7 +36,7 @@ mod summarizer;
 mod tree;
 mod vocabulary;
 
-pub use captured::{Captured, CapturedValue};
+pub use captured::{CaptureBuilder, Captured, CapturedValue};
 pub use dialect::{AccessShape, DialectEffects, SelectShape};
 pub use exprs::{Expr, ExprId, Exprs, Opaque};
 pub use summarizer::{RtlEffect, Summarizer};
