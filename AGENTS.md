@@ -60,6 +60,10 @@ Follow the Cargo package layout:
 - The consumer owns all IR storage, builders and editing. Its dialect owns operations, roots,
   constants, value types, variable metadata, effects, edge payloads, outcomes and constant
   folding.
+- `effects` is the one exception to the rule on IR algorithms. It holds the shared effect
+  vocabulary, the summarizer of RTL statements, the capture of one instruction and the statement
+  tree, because every level and every consumer must compute effects with one set of rules. Keep
+  it free of instruction-set names, and store no more than one instruction there.
 - Do not add IR storage, or a language-, VM-, ABI- or ISA-specific variant, to a generic layer.
 - Keep the crate `no_std` with `alloc`. Add a dependency only if it supports `no_std`.
 

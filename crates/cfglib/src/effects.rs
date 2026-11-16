@@ -28,13 +28,16 @@
 //! the same rules, and a producer must capture semantics without a consumer.
 
 mod captured;
+mod defs;
 mod dialect;
 mod exprs;
+mod summarizer;
 mod vocabulary;
 
 pub use captured::{Captured, CapturedValue};
 pub use dialect::{AccessShape, DialectEffects, SelectShape};
 pub use exprs::{Expr, ExprId, Exprs, Opaque};
+pub use summarizer::{RtlEffect, Summarizer};
 pub use vocabulary::{
     Access, Address, Effect, Exit, RaiseOrigin, Raised, StateTouch, Touch, Write, WriteKind,
 };
