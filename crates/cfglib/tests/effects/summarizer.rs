@@ -10,7 +10,7 @@ use cfglib::{
 };
 
 use crate::wren::{
-    Eff, Fault, Op, Policy, Reg, Space, Undef, Wren, WrenEffects, bits, capture, constant,
+    BASE, Eff, Fault, Op, Policy, Reg, Space, Undef, Wren, WrenEffects, bits, capture, constant,
     effect_of, keep, part, take, undefined, write_plan, write_whole,
 };
 
@@ -741,4 +741,20 @@ fn a_record_with_no_statement_has_an_empty_effect() {
     assert!(effect.reads.is_empty() && effect.writes.is_empty());
     assert_eq!(effect.exit, Exit::Next);
     assert_eq!(effect.intrinsic_state, StateTouch::Preserved);
+}
+
+#[test]
+fn an_operator_that_the_dialect_knows_as_a_number_is_a_constant() {
+    let effect = effect_of(|b| {
+        let base = b.apply(&Op::Base, &[], &[bits(32)]).first;
+        b.effect(&Eff::Load(Space::Data), &[base], &[bits(8)], &[]);
+        Control::Advance
+    });
+    assert_eq!(
+        effect.exprs.get(effect.memory[0].location.address),
+        Expr::Const {
+            words: &[BASE],
+            width: bits(32)
+        }
+    );
 }

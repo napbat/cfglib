@@ -43,7 +43,13 @@ pub enum Op {
     Mux,
     /// Two results: the quotient and the remainder.
     DivMod,
+    /// No operand: the base of the module, which the reader places at
+    /// [`BASE`].
+    Base,
 }
+
+/// Where the reader of a Wren instruction places the module.
+pub const BASE: u64 = 0x1000;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Space {
@@ -188,7 +194,12 @@ impl DialectEffects<Wren> for WrenEffects {
             Op::Select => "select",
             Op::Mux => "mux",
             Op::DivMod => "divmod",
+            Op::Base => "base",
         }
+    }
+
+    fn constant(&self, operator: &Op) -> Option<u64> {
+        matches!(operator, Op::Base).then_some(BASE)
     }
 }
 

@@ -360,6 +360,13 @@ impl<'a, D: Dialect, C: DialectEffects<D>, V: DenseId> Run<'a, '_, D, C, V> {
                 }
                 Def::Apply {
                     operator,
+                    args: [],
+                    result: 0,
+                } if let Some(word) = self.dialect.constant(operator) => {
+                    self.effect.exprs.constant(&[word], slot.width)
+                }
+                Def::Apply {
+                    operator,
                     args,
                     result,
                 } => {

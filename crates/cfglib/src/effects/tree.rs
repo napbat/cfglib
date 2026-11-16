@@ -216,6 +216,12 @@ enum NodeData<'a, D: Dialect> {
         words: &'a [u64],
         width: Bits,
     },
+    /// An operator that the dialect knows as a number
+    /// ([`DialectEffects::constant`]): the number is `numbers[at]`.
+    Number {
+        at: u32,
+        width: Bits,
+    },
     Apply {
         operator: &'a D::Operator,
         args: Run,
@@ -318,6 +324,8 @@ impl<D: Dialect> Copy for ItemData<'_, D> {}
 pub struct StatementTree<'a, D: Dialect> {
     nodes: Vec<NodeData<'a, D>>,
     refs: Vec<TreeNodeId>,
+    /// The numbers of the [`NodeData::Number`] nodes.
+    numbers: Vec<u64>,
     binds: Vec<(D::Root, TreeNodeId)>,
     spans: Vec<TreeSpan<D>>,
     items: Vec<ItemData<'a, D>>,
@@ -364,6 +372,7 @@ impl<'a, D: Dialect> StatementTree<'a, D> {
             tree: Self {
                 nodes: Vec::new(),
                 refs: Vec::new(),
+                numbers: Vec::new(),
                 binds: Vec::new(),
                 spans: Vec::new(),
                 items: Vec::new(),
@@ -398,6 +407,10 @@ impl<'a, D: Dialect> StatementTree<'a, D> {
         match self.nodes[id.index()] {
             NodeData::Read(selection) => TreeNode::Read(selection),
             NodeData::Const { words, width } => TreeNode::Const { words, width },
+            NodeData::Number { at, width } => TreeNode::Const {
+                words: core::slice::from_ref(&self.numbers[at as usize]),
+                width,
+            },
             NodeData::Apply {
                 operator,
                 args,
@@ -580,6 +593,7 @@ impl<'a, D: Dialect> StatementTree<'a, D> {
             NodeData::Apply { args, .. } => args.get(&self.refs).iter().copied().for_each(visit),
             NodeData::Read(Selection::Direct(_))
             | NodeData::Const { .. }
+            | NodeData::Number { .. }
             | NodeData::Nondet { .. }
             | NodeData::Effect { .. } => {}
         }
@@ -691,6 +705,21 @@ impl<'a, D: Dialect, V: DenseId> Build<'a, D, V> {
                 words,
                 width,
             } => self.add_node(result, NodeData::Const { words, width }),
+            Statement::Apply {
+                results:
+                    ValueRange {
+                        first: value,
+                        len: 1,
+                    },
+                operator,
+                args: [],
+            } if let Some(number) = dialect.constant(operator) => {
+                let at = u32::try_from(self.tree.numbers.len())
+                    .expect("a tree holds fewer than 2^32 numbers");
+                self.tree.numbers.push(number);
+                let width = self.defs.slot(value).width;
+                self.add_node(value, NodeData::Number { at, width });
+            }
             Statement::Apply {
                 results,
                 operator,

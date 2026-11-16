@@ -368,3 +368,15 @@ fn indexed_writes_and_a_branch_render_their_trees() {
         ]
     );
 }
+
+#[test]
+fn an_operator_that_the_dialect_knows_as_a_number_is_a_constant() {
+    let lines = lines_of(|b| {
+        let a = b.read(Selection::Direct(Place::whole(Reg::A)));
+        let base = b.apply(&Op::Base, &[], &[bits(32)]).first;
+        let sum = b.apply(&Op::Add, &[a, base], &[bits(32)]).first;
+        write_whole(b, Reg::A, sum);
+        Control::Advance
+    });
+    assert_eq!(lines, ["A = add(A, 4096)", "next"]);
+}

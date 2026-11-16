@@ -93,4 +93,15 @@ pub trait DialectEffects<D: Dialect> {
 
     /// Returns the name of `operator`, for expressions.
     fn operator_name(&self, operator: &D::Operator) -> &'static str;
+
+    /// Returns the number that `operator` stands for, when it takes no
+    /// operand and the reader knows its value, such as a value that moves
+    /// with its module after the reader has placed the module. The
+    /// summarizer shows the operator as a constant of this value.
+    ///
+    /// The default is `None`: the operator stays an operator.
+    fn constant(&self, operator: &D::Operator) -> Option<u64> {
+        let _ = operator;
+        None
+    }
 }
