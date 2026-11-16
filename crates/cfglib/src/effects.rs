@@ -27,9 +27,11 @@
 //! shared vocabulary: each level and each consumer must compute effects with
 //! the same rules, and a producer must capture semantics without a consumer.
 
+mod dialect;
 mod exprs;
 mod vocabulary;
 
+pub use dialect::{AccessShape, DialectEffects, SelectShape};
 pub use exprs::{Expr, ExprId, Exprs, Opaque};
 pub use vocabulary::{
     Access, Address, Effect, Exit, RaiseOrigin, Raised, StateTouch, Touch, Write, WriteKind,
