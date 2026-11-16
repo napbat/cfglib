@@ -187,6 +187,7 @@ pub mod cfg;
 pub mod dataflow;
 pub mod display;
 pub mod edge;
+pub mod effects;
 pub mod exception;
 pub mod flow;
 pub mod graph;
@@ -247,6 +248,10 @@ pub use dataflow::slot_fixpoint::{
 };
 pub use display::{DisplayInstr, IndentedWriter};
 pub use edge::{Edge, EdgeId, EdgeKind, EdgeTag, KindedEdge};
+pub use effects::{
+    Access, Address, Effect, Exit, Expr, ExprId, Exprs, Opaque, RaiseOrigin, Raised, StateTouch,
+    Touch, Write, WriteKind,
+};
 pub use exception::{
     ClrExceptionRegion, ClrHandler, ClrHandlerKind, ExceptionDisposition, ExceptionFlow,
     ExceptionPhase, SehExceptionRegion, SehHandler, SehHandlerKind, SehRegistration,
