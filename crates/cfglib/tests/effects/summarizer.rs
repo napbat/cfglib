@@ -453,6 +453,32 @@ fn each_control_boundary_gives_its_exit() {
 }
 
 #[test]
+fn each_exit_has_a_name() {
+    let names = [
+        Exit::Next,
+        Exit::Jump,
+        Exit::Branch,
+        Exit::Call,
+        Exit::Return,
+        Exit::Dispatch,
+        Exit::Terminating,
+    ]
+    .map(|exit| exit.to_string());
+    assert_eq!(
+        names,
+        [
+            "next",
+            "jump",
+            "branch",
+            "call",
+            "return",
+            "dispatch",
+            "terminating"
+        ]
+    );
+}
+
+#[test]
 fn a_call_lists_its_reads_and_writes_and_follows_no_callee() {
     let effect = effect_of(|b| {
         let target = b.read(Selection::Direct(Place::whole(Reg::A)));

@@ -3,6 +3,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use core::fmt;
 
 use crate::ir::rtl::{BitSlice, Control};
 use crate::memory::{MemoryAccessKind, MemoryAtomicity};
@@ -160,6 +161,11 @@ impl StateTouch {
 
 /// How control leaves an instruction: the kind of its [`Control`], without
 /// its values.
+///
+/// A record ends in a [`Control`], and its kind is an `Exit`. A decoded
+/// instruction states its transfer as a [`Flow`](crate::Flow) instead. A
+/// consumer that checks a sealed record against the decoded flow compares
+/// two exits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Exit {
     /// Execution continues at the next instruction.
@@ -189,5 +195,19 @@ impl<V> From<Control<V>> for Exit {
             Control::Dispatch { .. } => Self::Dispatch,
             Control::Terminating => Self::Terminating,
         }
+    }
+}
+
+impl fmt::Display for Exit {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Next => "next",
+            Self::Jump => "jump",
+            Self::Branch => "branch",
+            Self::Call => "call",
+            Self::Return => "return",
+            Self::Dispatch => "dispatch",
+            Self::Terminating => "terminating",
+        })
     }
 }
