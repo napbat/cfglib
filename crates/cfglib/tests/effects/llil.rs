@@ -47,12 +47,16 @@ struct MoveSemantics;
 impl Semantics for MoveSemantics {
     type Instruction = Move;
     type Rtl = Wren;
+    /// The number of translations that used the scratch.
+    type Scratch = u32;
 
-    fn translate<B: InstructionBuilder<Wren>>(
+    fn translate_in<B: InstructionBuilder<Wren>>(
         &self,
+        scratch: &mut u32,
         instruction: &Move,
         mut builder: B,
     ) -> Result<(), TranslateError<B::Error>> {
+        *scratch += 1;
         if !instruction.modeled {
             return Err(TranslateError::Unsupported);
         }
@@ -81,6 +85,23 @@ fn an_instruction_states_its_encoding_and_its_flow() {
     assert_eq!(instruction.bytes(), &[0x8b, 0xd8]);
     assert_eq!(instruction.end_address(), Some(0x12));
     assert_eq!(instruction.flow(), Flow::Next);
+}
+
+#[test]
+fn translate_in_keeps_the_scratch_of_the_caller() {
+    let instruction = Move {
+        address: 0x10,
+        bytes: [0x8b, 0xd8],
+        modeled: true,
+    };
+    let mut scratch = 0;
+    let mut captured = Captured::<Wren>::new();
+    for _ in 0..2 {
+        MoveSemantics
+            .translate_in(&mut scratch, &instruction, captured.begin())
+            .expect("the move has semantics");
+    }
+    assert_eq!(scratch, 2);
 }
 
 #[test]

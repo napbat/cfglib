@@ -102,7 +102,16 @@ pub trait Semantics {
     /// The register-transfer dialect of the records.
     type Rtl: rtl::Dialect;
 
-    /// Emits the record of one instruction and seals it.
+    /// The work buffers of one translation.
+    ///
+    /// A caller that translates many instructions keeps one scratch and gives
+    /// it to [`translate_in`](Self::translate_in) for each instruction, so the
+    /// buffers of one instruction serve the next one. Semantics that need no
+    /// buffers use `()`.
+    type Scratch: Default;
+
+    /// Emits the record of one instruction and seals it, with the buffers of
+    /// `scratch`.
     ///
     /// One instruction is one atomic state update. Every read observes the
     /// state before the instruction, and the writes take effect together at
@@ -112,17 +121,36 @@ pub trait Semantics {
     /// agree with the [`Flow`](crate::Flow) of the instruction. The consumer
     /// checks that agreement when it seals the record.
     ///
+    /// The record does not depend on the earlier contents of `scratch`, and
+    /// `scratch` stays usable after an error.
+    ///
     /// # Errors
     ///
     /// Returns [`TranslateError`] when the instruction set has no faithful
     /// translation, or when the consumer refuses to seal the record. After
     /// an error the builder is dropped without `finish`, and the consumer
     /// discards the partial record.
+    fn translate_in<B: InstructionBuilder<Self::Rtl>>(
+        &self,
+        scratch: &mut Self::Scratch,
+        instruction: &Self::Instruction,
+        builder: B,
+    ) -> Result<(), TranslateError<B::Error>>;
+
+    /// Emits the record of one instruction and seals it, as
+    /// [`translate_in`](Self::translate_in) does with a new scratch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TranslateError`] as [`translate_in`](Self::translate_in)
+    /// does.
     fn translate<B: InstructionBuilder<Self::Rtl>>(
         &self,
         instruction: &Self::Instruction,
         builder: B,
-    ) -> Result<(), TranslateError<B::Error>>;
+    ) -> Result<(), TranslateError<B::Error>> {
+        self.translate_in(&mut Self::Scratch::default(), instruction, builder)
+    }
 
     /// Captures the record of one instruction into `captured`, as owned data
     /// with no consumer storage.
