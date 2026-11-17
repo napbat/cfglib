@@ -43,7 +43,7 @@ Follow the Cargo package layout:
 
 ## IR boundary
 
-- Keep `ir::rtl`, `ir::mlil` and `ir::hlil` language-neutral and trait-only.
+- Keep `ir::llil`, `ir::rtl`, `ir::mlil` and `ir::hlil` language-neutral and trait-only.
 - The library owns the IR traits and the vocabulary that more than one storage or consumer
   shares: the dialect, view and builder traits, the instruction and memory-event traits, and the
   block, edge, region and handler identities.
@@ -73,7 +73,7 @@ Follow the Cargo package layout:
   children and re-export nothing. The crate root re-exports every public item, one `pub use`
   for each module, in alphabetical order. The root re-exports nothing from `ir`, because its
   levels share names (`ir::hlil::FunctionView`).
-- A domain module with a narrow API (`cfg`, `exception`, `ir::rtl`, `ir::mlil`, `ir::hlil`)
+- A domain module with a narrow API (`cfg`, `exception`, `ir::llil`, `ir::rtl`, `ir::mlil`, `ir::hlil`)
   keeps its children private and re-exports its public items.
 - Spell compound names in full with underscores (`control_dependence`). Keep the standard
   acronyms (`scc`, `cdg`, `eh`, `seh`, `veh`, `clr`).

@@ -7,6 +7,12 @@
 //! builder trait that the consumer implements, and the consumer's builder
 //! seals the function.
 //!
+//! - [`llil`] is the low level: one instruction in the literal form of its
+//!   instruction set, with its semantics. It is an edit surface: an edit
+//!   changes the form and the operands of an
+//!   [`Instruction`](llil::Instruction). Its
+//!   [`Semantics`](llil::Semantics) emit the register-transfer record of
+//!   the instruction.
 //! - [`rtl`] is the register-transfer level. Instruction semantics describe one
 //!   atomic state update through the write-only
 //!   [`InstructionBuilder`](rtl::InstructionBuilder). Analyses read sealed
@@ -32,6 +38,7 @@
 //! data that the consumer's storage holds.
 
 pub mod hlil;
+pub mod llil;
 pub mod mlil;
 pub mod rtl;
 pub mod vocabulary;

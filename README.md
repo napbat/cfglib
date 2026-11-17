@@ -176,6 +176,7 @@ A fact is a side table about one state of a function. No algorithm changes the f
 
 | Level | Module | The consumer implements | cfglib provides |
 |---|---|---|---|
+| Low level (LLIL), editable | `ir::llil` | `Instruction` (address, length, bytes and `Flow` of one instruction in the literal form of its instruction set), `Semantics` | `Semantics::capture`, the capture of one record into `effects::Captured` |
 | Register transfer (RTL) | `ir::rtl` | `Dialect`, `InstructionBuilder`, `RecordView`, `FunctionView`, `Fold` | Nothing. The facts over an RTL function belong to the consumer. |
 | Medium level (MLIL) | `ir::mlil` | `Dialect`, `FunctionView` | Nothing. Value analyses over the view belong to the consumer. |
 | Structured (HLIL) | `ir::hlil` | `Dialect`, `FunctionView`, `FunctionBuilder` | The walks over the shapes |
@@ -441,6 +442,10 @@ InstrInfo<Variable = V>   (optional — native IR variables, defs/uses)
 
 DisplayInstr              (rendering only — DOT and text)
 CallInfo                  (call graphs — associated Callee)
+
+ir::llil::Instruction     (AddressInstruction + length and bytes of one
+                           instruction in its literal form)
+ir::llil::Semantics       (emits or captures the RTL record of one instruction)
 
 ir::rtl::Dialect          (instruction-set vocabulary — Root, Operator, EffectOp,
 │                          WritePolicy, Outcome, NondetDomain)

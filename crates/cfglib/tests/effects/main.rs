@@ -7,6 +7,7 @@
 //! not `Copy`, so the algorithms only borrow them.
 
 mod captured;
+mod llil;
 mod summarizer;
 mod tree;
 mod wren;
