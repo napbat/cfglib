@@ -76,8 +76,9 @@ pub struct ScopeGraphChanges {
 pub struct ScopeIndexUpdate {
     /// The number of references the update resolved again.
     pub resolved_count: usize,
-    /// The references whose resolution changed, ascending; a reference the
-    /// index had not seen counts as changed.
+    /// The references whose resolution changed, ascending. A resolution
+    /// compares whole, statistics included; a reference the index had not
+    /// seen counts as changed.
     pub changed: Vec<ScopeReferenceId>,
 }
 
@@ -157,7 +158,9 @@ impl ScopeResolutionIndex {
     ///
     /// An index that holds no record of what its resolutions read, such as
     /// one from [`compute_cached`](Self::compute_cached), resolves every
-    /// reference on its first update and records them from then on.
+    /// reference on its first update and records them from then on. The two
+    /// forms count their work differently, so that first update can report a
+    /// reference as changed whose candidates stayed the same.
     ///
     /// # Panics
     ///
