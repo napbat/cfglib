@@ -139,10 +139,11 @@ struct Front<I> {
 
 /// The best join of the two searches found so far: an edge from `ahead`,
 /// reached by the forward search, to `behind`, reached by the backward search,
-/// and the link that names it.
+/// and the link that names it. The length is a `usize`: two depths below a
+/// `u32` bound can sum past it.
 #[derive(Debug, Clone, Copy)]
 struct Meet {
-    length: u32,
+    length: usize,
     ahead: usize,
     behind: usize,
     link: u32,
@@ -188,7 +189,9 @@ where
     // one. A search that runs out has examined every edge it can reach, which
     // includes the edge into the other endpoint on every path.
     loop {
-        if best.is_some_and(|meet| meet.length <= ahead_front.depth + behind_front.depth) {
+        if best
+            .is_some_and(|meet| meet.length <= slot(ahead_front.depth) + slot(behind_front.depth))
+        {
             break;
         }
         let examined = if forward_turn {
@@ -227,7 +230,7 @@ fn examine<I: Iterator<Item = (usize, u32)>>(
     loop {
         if let Some((next, link)) = front.neighbors.next() {
             if let Some(remaining) = other.depth_of(next) {
-                let length = front.depth + 1 + remaining;
+                let length = slot(front.depth) + 1 + slot(remaining);
                 if best.is_none_or(|meet| length < meet.length) {
                     let (ahead, behind) = if forward {
                         (front.node, next)
@@ -396,7 +399,7 @@ fn node_path_from<G: GraphView, A: Adjacency>(
         against,
     )?;
     let [ahead, behind] = &scratch.sides;
-    let mut path = Vec::with_capacity(slot(meet.length) + 1);
+    let mut path = Vec::with_capacity(meet.length + 1);
     let mut node = meet.ahead;
     path.push(node);
     while node != start {
@@ -493,7 +496,7 @@ where
     )?;
     let [ahead, behind] = &scratch.sides;
     let edge = |link: u32| G::EdgeId::from_index(slot(link));
-    let mut path = Vec::with_capacity(slot(meet.length));
+    let mut path = Vec::with_capacity(meet.length);
     let mut node = meet.ahead;
     while node != from {
         let link = ahead.link[node];
