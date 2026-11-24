@@ -154,10 +154,11 @@ pub trait Emitter<I> {
     ///
     /// [`linearize`] asks for it when the
     /// [`ConditionalTrue`](EdgeKind::ConditionalTrue) target of a block is
-    /// the next block and the layout target is not. One inverted branch to
-    /// the layout target then replaces the branch to the next block and the
-    /// jump to the layout target. `condition` is the last instruction of the
-    /// block, as for [`emit_conditional_branch`](Self::emit_conditional_branch).
+    /// the next block and the layout target is not, after it emitted the
+    /// branch to the next block. One inverted branch to the layout target
+    /// then replaces that branch and the jump to the layout target.
+    /// `condition` is the last instruction of the block, as for
+    /// [`emit_conditional_branch`](Self::emit_conditional_branch).
     ///
     /// The default answers `None`, which keeps the branch and the jump.
     fn emit_inverted_conditional_branch(&self, _condition: &I, _target: BlockId) -> Option<I> {
@@ -171,7 +172,8 @@ pub trait Emitter<I> {
     /// jump kind ([`Unconditional`](EdgeKind::Unconditional),
     /// [`Back`](EdgeKind::Back), [`Jump`](EdgeKind::Jump),
     /// [`ExceptionLeave`](EdgeKind::ExceptionLeave)) whose target is the
-    /// next block. The default answers `false`, which emits every such jump.
+    /// next block. `linearize` asks once per call. The default answers
+    /// `false`, which emits every such jump.
     fn elides_jump_to_next(&self) -> bool {
         false
     }
@@ -208,6 +210,7 @@ pub fn linearize<I: Clone, E>(
         BlockOrder::Custom(ids) => ids,
     };
 
+    let elide_jumps = emitter.elides_jump_to_next();
     let mut out: Vec<LinearInst<I>> = Vec::new();
     for (pos, &id) in sorted.iter().enumerate() {
         if let Some(marker) = emitter.emit_block_start(id) {
@@ -220,7 +223,8 @@ pub fn linearize<I: Clone, E>(
                 index,
             });
         }
-        emit_transfers(cfg, id, sorted.get(pos + 1).copied(), emitter, &mut out)?;
+        let next = sorted.get(pos + 1).copied();
+        emit_transfers(cfg, id, next, emitter, elide_jumps, &mut out)?;
     }
     Ok(out)
 }
@@ -264,45 +268,51 @@ fn emit_transfers<I: Clone, E>(
     id: BlockId,
     next_in_layout: Option<BlockId>,
     emitter: &dyn Emitter<I>,
+    elide_jumps: bool,
     out: &mut Vec<LinearInst<I>>,
 ) -> Result<(), LinearizeError> {
-    let edges = || cfg.outgoing(id).map(|edge| cfg.edge(edge));
-    // The first layout edge names the fallthrough target. It needs a jump
-    // unless it is next, or an inverted branch reaches it.
-    let mut layout_jump = edges()
-        .find(|edge| matches!(transfer(edge.kind()), Transfer::Layout))
-        .map(|edge| edge.target())
-        .filter(|&target| next_in_layout != Some(target));
-    for edge in edges() {
+    let mut layout_target = None;
+    // The first branch to the next block: its place in `out` and its
+    // condition, for an inverted branch to replace.
+    let mut branch_to_next = None;
+    for edge in cfg.outgoing(id).map(|edge| cfg.edge(edge)) {
         match transfer(edge.kind()) {
-            Transfer::Layout | Transfer::Implicit => {}
+            Transfer::Layout => {
+                layout_target.get_or_insert(edge.target());
+            }
             Transfer::Branch => {
                 let condition = cfg
                     .block(id)
                     .instructions()
                     .last()
                     .ok_or(LinearizeError::MissingCondition { block: id })?;
-                let inverted = layout_jump
-                    .filter(|_| next_in_layout == Some(edge.target()))
-                    .and_then(|layout| emitter.emit_inverted_conditional_branch(condition, layout));
-                let branch = if let Some(inverted) = inverted {
-                    layout_jump = None;
-                    inverted
-                } else {
-                    emitter.emit_conditional_branch(condition, edge.target())
-                };
+                if branch_to_next.is_none() && next_in_layout == Some(edge.target()) {
+                    branch_to_next = Some((out.len(), condition));
+                }
+                let branch = emitter.emit_conditional_branch(condition, edge.target());
                 out.push(LinearInst::synthetic(branch, id));
             }
             Transfer::Jump => {
-                if !(emitter.elides_jump_to_next() && next_in_layout == Some(edge.target())) {
+                if !(elide_jumps && next_in_layout == Some(edge.target())) {
                     out.push(LinearInst::synthetic(emitter.emit_jump(edge.target()), id));
                 }
             }
+            Transfer::Implicit => {}
         }
     }
 
-    if let Some(target) = layout_jump {
-        out.push(LinearInst::synthetic(emitter.emit_jump(target), id));
+    // A jump only when the layout successor is not the fallthrough target,
+    // unless one inverted branch to it replaces the branch to the next block.
+    if let Some(target) = layout_target
+        && next_in_layout != Some(target)
+    {
+        if let Some((position, condition)) = branch_to_next
+            && let Some(inverted) = emitter.emit_inverted_conditional_branch(condition, target)
+        {
+            out[position].inst = inverted;
+        } else {
+            out.push(LinearInst::synthetic(emitter.emit_jump(target), id));
+        }
     }
     Ok(())
 }
