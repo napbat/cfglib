@@ -9,6 +9,7 @@ mod feedback;
 mod fixtures;
 mod frequency;
 mod graph;
+mod path_expr;
 mod pipeline;
 mod program_structure;
 mod reach_index;
@@ -60,6 +61,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "insert_preheader",
     "install_clr_region",
     "install_seh_region",
+    "interpret",
     "promote_handler_extents",
     "is_recursive_function",
     "is_reducible",
@@ -85,6 +87,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "parse_cfg_text",
     "parse_text",
     "pass_fn",
+    "path_expressions",
     "plain_edge_attributes",
     "promote_exclusive_extents",
     "propagate_summaries",
@@ -217,6 +220,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     feedback::register(suite);
     frequency::register(suite);
     graph::register(suite);
+    path_expr::register(suite);
     pipeline::register(suite);
     program_structure::register(suite);
     reach_index::register(suite);

@@ -317,6 +317,10 @@ pub use graph::open::{
     open_breadth_first_paths, open_depth_first_events, open_fold_fixpoint, open_fold_post_order,
     open_fold_post_order_memoized, open_search,
 };
+pub use graph::path_expr::{
+    GenKill, GenKillAlgebra, PathAlgebra, PathExprArena, PathExprId, PathExprNode, PathExpressions,
+    interpret, path_expressions,
+};
 pub use graph::program_structure::{
     CycleEquivalence, ProgramStructureTree, SeseEdge, SeseRegionId,
 };
