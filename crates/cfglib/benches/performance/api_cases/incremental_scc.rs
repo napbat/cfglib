@@ -43,9 +43,9 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     let calls = call_graph(&functions);
     let mut draws = Draws(1);
     let call_batches = batches(calls.edge_count(), || {
-        let caller = draws.below(CALL_FUNCTIONS);
-        let callee = draws.below(CALL_FUNCTIONS);
-        (NodeId::from_index(caller), NodeId::from_index(callee))
+        let source = draws.below(CALL_FUNCTIONS);
+        let target = draws.below(CALL_FUNCTIONS);
+        (NodeId::from_index(source), NodeId::from_index(target))
     });
     let call = CallMetadata {
         is_tail_call: false,

@@ -208,7 +208,7 @@ fn random_edit(
             components.insert_edge(graph, source, target)
         }
         1 => {
-            let batch: Vec<_> = (0..1 + rng.below(4))
+            let batch: Vec<_> = (0..=rng.below(4))
                 .map(|_| random_edge(rng, graph, live))
                 .collect();
             components.insert_edges(graph, &batch)
@@ -345,7 +345,7 @@ fn an_edge_that_agrees_with_the_order_reads_no_adjacency() {
             components.insert_edge(&recording, source, target),
             SccChange::default()
         );
-        assert!(recording.take().is_empty());
+        assert_eq!(recording.take(), Vec::<NodeId>::new());
     }
     // A removal between two components reads nothing either.
     let edge = graph
@@ -358,7 +358,7 @@ fn an_edge_that_agrees_with_the_order_reads_no_adjacency() {
         components.remove_edge(&recording, node(3), node(4)),
         SccChange::default()
     );
-    assert!(recording.take().is_empty());
+    assert_eq!(recording.take(), Vec::<NodeId>::new());
     assert_current(&graph, &components);
 }
 
@@ -410,7 +410,7 @@ fn an_edge_against_the_order_reads_only_its_window() {
     graph.add_edge(node(4), node(1), ());
     let recording = Recording::new(&graph);
     let change = components.insert_edge(&recording, node(4), node(1));
-    assert!(change.merged.is_empty());
+    assert_eq!(change.merged, Vec::<usize>::new());
     let read: BTreeSet<_> = recording.take().into_iter().collect();
     assert_eq!(read, BTreeSet::from([1, 3, 5].map(node)));
     assert!(read.is_subset(&span));
@@ -479,7 +479,7 @@ fn a_split_lays_the_parts_out_in_topological_order() {
     graph.remove_edge(back);
     let change = components.remove_edge(&graph, node(2), node(0));
     assert_eq!(change.split, [0, 1, 2]);
-    assert!(change.merged.is_empty());
+    assert_eq!(change.merged, Vec::<usize>::new());
     assert_eq!(
         [0, 1, 2, 3, 4].map(|id| components.position(id)),
         [1, 2, 3, 0, 4]
