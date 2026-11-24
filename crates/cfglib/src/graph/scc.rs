@@ -13,6 +13,10 @@
 //! numbers the DAG's nodes exactly as that decomposition numbers its
 //! components, so a sources-first pass keeps its numbering all the way through
 //! to the graph it walks.
+//!
+//! Within a component, [`strong_cuts`] and [`strong_cuts_of`] find the nodes
+//! and edges it depends on to stay strongly connected: its strong
+//! articulation points and strong bridges.
 
 extern crate alloc;
 use alloc::boxed::Box;
@@ -24,6 +28,9 @@ use core::marker::PhantomData;
 
 use crate::graph::store::{Graph, NodeId};
 use crate::graph::view::{DenseId, GraphView};
+pub use strong_cuts::{StrongCutScratch, StrongCuts, strong_cuts, strong_cuts_of};
+
+mod strong_cuts;
 
 /// A maximal set of mutually reachable nodes, in ascending order.
 ///

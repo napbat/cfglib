@@ -130,6 +130,8 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "split_critical_edges",
     "split_critical_edges_mapped",
     "split_critical_edges_with",
+    "strong_cuts",
+    "strong_cuts_of",
     "tarjan_scc",
     "to_dot",
     "to_text",
