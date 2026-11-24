@@ -72,6 +72,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "plain_edge_attributes",
     "promote_exclusive_extents",
     "propagate_summaries",
+    "propagate_summaries_widened",
     "reachable",
     "recover_exclusive_extents",
     "recover_exclusive_extents_with",

@@ -273,6 +273,8 @@ pub fn recursive_functions<N, E>(graph: &Graph<N, E>) -> Vec<bool> {
 /// function with every callee already final; recursive components iterate
 /// until their summaries stabilize, so `compute` must be monotone over a
 /// finite-height summary domain for termination.
+/// [`propagate_summaries_widened`] runs the same schedule with a widening
+/// hook, for summary domains of infinite height.
 ///
 /// Inside a recursive component, `compute` runs once for every member, callees
 /// first along a depth-first postorder of the component, and then again only
@@ -288,7 +290,85 @@ pub fn recursive_functions<N, E>(graph: &Graph<N, E>) -> Vec<bool> {
 pub fn propagate_summaries<N, E, S: Clone + PartialEq>(
     graph: &Graph<N, E>,
     bottom: &S,
+    compute: impl FnMut(&Graph<N, E>, NodeId, &[S]) -> S,
+) -> Vec<S> {
+    propagate(graph, bottom, compute, None::<fn(NodeId, &S, &S) -> S>)
+}
+
+/// Compute per-node summaries as [`propagate_summaries`] does, and widen at
+/// the functions that cut the recursion, so that summary domains of infinite
+/// height (intervals, stack depths, argument ranges) converge too.
+///
+/// The schedule is the one of [`propagate_summaries`]. Inside a recursive
+/// component, a widening point is a member that reads a callee of its own
+/// component that does not run before it in the callee-first order: a later
+/// member, or itself through a self-call. A cycle cannot run strictly
+/// callee-first all the way around, so every cycle of the component holds a
+/// widening point: the points form a feedback vertex set of the component.
+///
+/// When `compute` changes the summary of a widening point, the summary stored
+/// is `widen(node, previous, computed)`, not `computed`; `previous` is
+/// `bottom` the first time. A summary that `widen` leaves at `previous` does
+/// not count as changed. Every other function, and every function outside a
+/// recursive component, stores what `compute` returns.
+///
+/// The iteration terminates when `widen` is a widening operator: whatever
+/// summaries `compute` returns, the summaries stored at one widening point
+/// stop changing after finitely many steps. When `widen` also returns an upper
+/// bound of its two summaries and `compute` is monotone, every returned summary
+/// is at least what `compute` derives from the returned summaries of the
+/// function's callees: a sound over-approximation of the least fixpoint. A
+/// `widen` that returns `computed` makes this function
+/// [`propagate_summaries`], call for call.
+///
+/// # Examples
+///
+/// The deepest stack a call reaches is the function's frame plus the deepest
+/// stack of its callees. Recursion makes that grow forever; the widening
+/// sends a depth that grows again to `u32::MAX`, unbounded.
+///
+/// ```
+/// use cfglib::{Graph, propagate_summaries_widened};
+///
+/// // Frame sizes: main → even ⇄ odd, and even → leaf.
+/// let mut graph = Graph::<u32, ()>::new();
+/// let [main, even, odd, leaf] = [16, 32, 32, 8].map(|frame| graph.add_node(frame));
+/// for (caller, callee) in [(main, even), (even, odd), (odd, even), (even, leaf)] {
+///     graph.add_edge(caller, callee, ());
+/// }
+///
+/// let depths = propagate_summaries_widened(
+///     &graph,
+///     &None,
+///     |graph, node, depths: &[Option<u32>]| {
+///         let deepest = graph.successors(node).filter_map(|callee| depths[callee.index()]);
+///         Some(graph.node(node).saturating_add(deepest.max().unwrap_or(0)))
+///     },
+///     |_, previous, computed| match (*previous, *computed) {
+///         (Some(previous), Some(computed)) if computed > previous => Some(u32::MAX),
+///         (previous, computed) => previous.max(computed),
+///     },
+/// );
+/// assert_eq!(depths[leaf.index()], Some(8));
+/// assert_eq!(depths[main.index()], Some(u32::MAX));
+/// ```
+#[must_use]
+pub fn propagate_summaries_widened<N, E, S: Clone + PartialEq>(
+    graph: &Graph<N, E>,
+    bottom: &S,
+    compute: impl FnMut(&Graph<N, E>, NodeId, &[S]) -> S,
+    widen: impl FnMut(NodeId, &S, &S) -> S,
+) -> Vec<S> {
+    propagate(graph, bottom, compute, Some(widen))
+}
+
+/// The schedule of [`propagate_summaries`], with `widen` applied at the
+/// widening points of [`propagate_summaries_widened`] when it is given.
+fn propagate<N, E, S: Clone + PartialEq>(
+    graph: &Graph<N, E>,
+    bottom: &S,
     mut compute: impl FnMut(&Graph<N, E>, NodeId, &[S]) -> S,
+    mut widen: Option<impl FnMut(NodeId, &S, &S) -> S>,
 ) -> Vec<S> {
     let mut summaries = alloc::vec![bottom.clone(); graph.node_bound()];
     let components = tarjan_scc(graph);
@@ -298,6 +378,7 @@ pub fn propagate_summaries<N, E, S: Clone + PartialEq>(
     let mut order: Vec<NodeId> = Vec::new();
     let mut walk = Vec::new();
     let mut queued: Vec<bool> = Vec::new();
+    let mut widens: Vec<bool> = Vec::new();
     let mut pending: BinaryHeap<Reverse<usize>> = BinaryHeap::new();
     // Components arrive in reverse topological order: callees first.
     for (component_index, component) in components.components().enumerate() {
@@ -335,6 +416,18 @@ pub fn propagate_summaries<N, E, S: Clone + PartialEq>(
                 }
             }
         }
+        // A member widens when it reads a member of the component ranked no
+        // earlier than itself. Ranks cannot fall all the way around a cycle,
+        // so every cycle has such a call edge.
+        if widen.is_some() {
+            widens.clear();
+            widens.extend(order.iter().enumerate().map(|(position, &node)| {
+                graph.successors(node).any(|callee| {
+                    components.component_index(callee) == component_index
+                        && rank[callee.index()] >= position
+                })
+            }));
+        }
         // Every member starts queued; a change queues the member's callers
         // inside the component, and the lowest rank runs first.
         queued.clear();
@@ -344,9 +437,17 @@ pub fn propagate_summaries<N, E, S: Clone + PartialEq>(
         while let Some(Reverse(position)) = pending.pop() {
             queued[position] = false;
             let node = order[position];
-            let updated = compute(graph, node, &summaries);
+            let mut updated = compute(graph, node, &summaries);
             if updated == summaries[node.index()] {
                 continue;
+            }
+            if let Some(widen) = widen.as_mut()
+                && widens[position]
+            {
+                updated = widen(node, &summaries[node.index()], &updated);
+                if updated == summaries[node.index()] {
+                    continue;
+                }
             }
             summaries[node.index()] = updated;
             for caller in graph.predecessors(node) {
@@ -366,6 +467,7 @@ pub fn propagate_summaries<N, E, S: Clone + PartialEq>(
 mod tests {
     use super::*;
     use crate::graph::traverse::topological_sort;
+    use crate::test_util::rng::Rng;
     use crate::test_util::{DfInst, df_call, df_ff};
     use alloc::vec;
 
@@ -579,39 +681,137 @@ mod tests {
         summaries
     }
 
+    /// A random graph of at most 24 nodes with parallel edges, self-calls,
+    /// recursive clusters and removed slots.
+    fn random_graph(rng: &mut Rng) -> Graph<(), ()> {
+        let node_count = 1 + rng.below(24);
+        let mut graph = Graph::<(), ()>::new();
+        let nodes: Vec<NodeId> = (0..node_count).map(|_| graph.add_node(())).collect();
+        for _ in 0..rng.below(3 * node_count + 1) {
+            graph.add_edge(
+                nodes[rng.below(node_count)],
+                nodes[rng.below(node_count)],
+                (),
+            );
+        }
+        for &node in &nodes {
+            if rng.one_in(8) {
+                graph.remove_node(node);
+            }
+        }
+        graph
+    }
+
+    /// The ids a function reaches, modulo 64: a monotone summary of finite
+    /// height whose first `compute` always changes `0`.
+    fn reached_ids(graph: &Graph<(), ()>, node: NodeId, summaries: &[u64]) -> u64 {
+        graph
+            .successors(node)
+            .fold(1_u64 << (node.index() % 64), |mask, callee| {
+                mask | summaries[callee.index()]
+            })
+    }
+
     /// Random graphs with self-calls, recursive clusters and removed slots,
     /// under a monotone finite-height summary (the reached ids modulo 64): the
     /// worklist reaches the round-robin fixpoint exactly.
     #[test]
     fn the_worklist_reaches_the_round_robin_fixpoint() {
-        let mut rng = crate::test_util::rng::Rng::new(93);
-        let reach = |graph: &Graph<(), ()>, node: NodeId, summaries: &[u64]| {
-            graph
-                .successors(node)
-                .fold(1_u64 << (node.index() % 64), |mask, callee| {
-                    mask | summaries[callee.index()]
-                })
-        };
+        let mut rng = Rng::new(93);
         for _ in 0..300 {
-            let node_count = 1 + rng.below(24);
-            let mut graph = Graph::<(), ()>::new();
-            let nodes: Vec<NodeId> = (0..node_count).map(|_| graph.add_node(())).collect();
-            for _ in 0..rng.below(3 * node_count + 1) {
-                graph.add_edge(
-                    nodes[rng.below(node_count)],
-                    nodes[rng.below(node_count)],
-                    (),
-                );
-            }
-            for &node in &nodes {
-                if rng.one_in(8) {
-                    graph.remove_node(node);
-                }
-            }
+            let graph = random_graph(&mut rng);
             assert_eq!(
-                propagate_summaries(&graph, &0, reach),
-                round_robin(&graph, &0, reach)
+                propagate_summaries(&graph, &0, reached_ids),
+                round_robin(&graph, &0, reached_ids)
             );
         }
+    }
+
+    /// Every first `compute` changes a summary, so `widen` sees every widening
+    /// point. The points are recursive functions and cut every cycle, and a
+    /// `widen` that keeps the computed summary changes neither the result nor
+    /// the `compute` calls of `propagate_summaries`.
+    #[test]
+    fn the_widening_points_cut_every_cycle() {
+        let mut rng = Rng::new(9_393);
+        for _ in 0..300 {
+            let graph = random_graph(&mut rng);
+            let mut plain_calls = 0_usize;
+            let plain = propagate_summaries(&graph, &0, |graph, node, summaries| {
+                plain_calls += 1;
+                reached_ids(graph, node, summaries)
+            });
+            let mut widened_calls = 0_usize;
+            let mut points = vec![false; graph.node_bound()];
+            let widened = propagate_summaries_widened(
+                &graph,
+                &0,
+                |graph, node, summaries| {
+                    widened_calls += 1;
+                    reached_ids(graph, node, summaries)
+                },
+                |node, previous, computed| {
+                    assert_ne!(previous, computed, "`widen` runs on a change only");
+                    points[node.index()] = true;
+                    *computed
+                },
+            );
+            assert_eq!(widened, plain);
+            assert_eq!(widened_calls, plain_calls);
+
+            let recursive = recursive_functions(&graph);
+            let mut cut = graph.clone();
+            for node in graph.node_ids() {
+                if points[node.index()] {
+                    assert!(recursive[node.index()], "a widening point is recursive");
+                    cut.remove_node(node);
+                }
+            }
+            assert!(
+                !recursive_functions(&cut).contains(&true),
+                "removing the widening points leaves no cycle"
+            );
+        }
+    }
+
+    /// The deepest stack over a ring of one-byte frames grows forever. The
+    /// only widening point is the member whose call closes the ring in the
+    /// callee-first order, and the depths settle in about two passes.
+    #[test]
+    fn a_recursive_ring_widens_at_one_member() {
+        const MEMBERS: usize = 1_000;
+        let mut graph = Graph::<(), ()>::new();
+        let members: Vec<NodeId> = (0..MEMBERS).map(|_| graph.add_node(())).collect();
+        for (index, &caller) in members.iter().enumerate() {
+            graph.add_edge(caller, members[(index + 1) % MEMBERS], ());
+        }
+        let mut calls = 0_usize;
+        let mut widened = Vec::new();
+        let depths = propagate_summaries_widened(
+            &graph,
+            &None,
+            |graph, node, depths: &[Option<u64>]| {
+                calls += 1;
+                let deepest = graph
+                    .successors(node)
+                    .filter_map(|callee| depths[callee.index()])
+                    .max();
+                Some(deepest.unwrap_or(0).saturating_add(1))
+            },
+            |node, previous, computed| {
+                widened.push(node);
+                match (*previous, *computed) {
+                    (Some(previous), Some(computed)) if computed > previous => Some(u64::MAX),
+                    (previous, computed) => previous.max(computed),
+                }
+            },
+        );
+        assert!(depths.iter().all(|&depth| depth == Some(u64::MAX)));
+        assert_eq!(
+            widened,
+            [members[MEMBERS - 1]; 2],
+            "set from bottom once, then sent to unbounded"
+        );
+        assert!(calls <= 3 * MEMBERS, "{calls} transfers");
     }
 }

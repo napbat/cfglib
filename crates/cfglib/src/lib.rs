@@ -271,7 +271,7 @@ pub use flow::{
 };
 pub use graph::call_graph::{
     CallMetadata, FunctionIndex, FunctionNode, call_graph, call_graph_indexed, find_function,
-    is_recursive_function, propagate_summaries, recursive_functions,
+    is_recursive_function, propagate_summaries, propagate_summaries_widened, recursive_functions,
 };
 pub use graph::cdg::control_dependence_graph;
 pub use graph::coldness::{ColdClass, ColdnessClasses, ColdnessGraph};

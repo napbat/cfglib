@@ -1,13 +1,13 @@
 //! `call_graph`, `call_graph_indexed`, `FunctionIndex`, `find_function`,
-//! `is_recursive_function`, `recursive_functions` and `propagate_summaries` over a
-//! multi-function program.
+//! `is_recursive_function`, `recursive_functions`, `propagate_summaries` and
+//! `propagate_summaries_widened` over a multi-function program.
 
 use std::collections::BTreeSet;
 
 use cfglib::{
     BasicBlock, CallInfo, CallMetadata, Cfg, EdgeKind, FunctionIndex, FunctionNode, Graph, NodeId,
     call_graph, call_graph_indexed, find_function, is_recursive_function, propagate_summaries,
-    recursive_functions,
+    propagate_summaries_widened, recursive_functions,
 };
 
 use crate::Lcg;
@@ -510,6 +510,87 @@ fn recursive_functions_settle_on_a_summary_that_no_longer_changes() {
     for plain in ["main", "lex", "cleanup", "legacy", "helper"] {
         let node = find_function(&graph, &plain).expect("present");
         assert_eq!(calls[node.index()], 1, "{plain} is not on a cycle");
+    }
+}
+
+/// Frame sizes in bytes, in the order of `NAMES`.
+const FRAMES: [u64; 8] = [64, 48, 16, 96, 32, 8, 24, 40];
+
+/// The deepest stack a call reaches: the function's frame plus the deepest stack of its
+/// callees, where a callee not computed yet (`None`) adds nothing. `u64::MAX` is unbounded.
+fn deepest_stack(
+    graph: &Graph<FunctionNode<&'static str>, CallMetadata>,
+    node: NodeId,
+    depths: &[Option<u64>],
+) -> u64 {
+    let deepest = graph
+        .successors(node)
+        .filter_map(|callee| depths[callee.index()])
+        .max();
+    FRAMES[node.index()].saturating_add(deepest.unwrap_or(0))
+}
+
+/// The stack depth of a recursive function grows with every turn of the recursion, so
+/// without widening the iteration still climbs after any budget. Widening at the recursion
+/// boundaries ends it: the recursive functions and their callers are unbounded, every other
+/// function is exact, and no function's depth is below what its callees' depths give.
+#[test]
+fn stack_depths_climb_forever_over_recursion_and_converge_when_widened() {
+    const BUDGET: usize = 10_000;
+    let program = program();
+    let graph = build(&program);
+
+    let mut calls = 0;
+    let _ = propagate_summaries(&graph, &None::<u64>, |graph, node, depths| {
+        calls += 1;
+        if calls > BUDGET {
+            // Past the budget, freeze every summary so that the run ends.
+            return depths[node.index()];
+        }
+        Some(deepest_stack(graph, node, depths))
+    });
+    assert!(
+        calls > BUDGET,
+        "unwidened, the depths still change after {BUDGET} computes"
+    );
+
+    let mut calls = 0;
+    let depths = propagate_summaries_widened(
+        &graph,
+        &None,
+        |graph, node, depths| {
+            calls += 1;
+            Some(deepest_stack(graph, node, depths))
+        },
+        // Interval widening on the upper end: a depth that grows again is unbounded.
+        |_, previous, computed| match (*previous, *computed) {
+            (Some(previous), Some(computed)) if computed > previous => Some(u64::MAX),
+            (previous, computed) => previous.max(computed),
+        },
+    );
+    assert!(calls <= 2 * NAMES.len(), "{calls} computes");
+    let unbounded = u64::MAX;
+    assert_eq!(
+        depths,
+        [
+            unbounded,
+            unbounded,
+            16,
+            unbounded,
+            unbounded,
+            8,
+            24,
+            40 + 16
+        ]
+        .map(Some),
+        "{NAMES:?}"
+    );
+    for node in graph.node_ids() {
+        assert!(
+            Some(deepest_stack(&graph, node, &depths)) <= depths[node.index()],
+            "{} bounds what its callees give",
+            name(&graph, node)
+        );
     }
 }
 
