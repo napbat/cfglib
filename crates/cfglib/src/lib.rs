@@ -310,6 +310,7 @@ pub use graph::keyed::KeyedGraph;
 pub use graph::label::{Label, bind_label, display_label, no_label};
 pub use graph::loop_forest::{LoopForest, LoopId};
 pub use graph::loop_nest::{LoopNestNode, LoopNestingTree};
+pub use graph::network_flow::{ArcId, FlowError, FlowNetwork, FlowSolution};
 pub use graph::open::{
     FoldEnter, MarkScope, OpenBfsConfig, OpenBfsEvent, OpenDfsConfig, OpenDfsEvent,
     OpenFixpointConfig, OpenFixpointError, OpenFold, OpenFoldConfig, OpenPathsConfig,
@@ -321,6 +322,7 @@ pub use graph::path_expr::{
     GenKill, GenKillAlgebra, PathAlgebra, PathExprArena, PathExprId, PathExprNode, PathExpressions,
     interpret, path_expressions,
 };
+pub use graph::profile_inference::{InferenceCosts, InferredCounts};
 pub use graph::program_structure::{
     CycleEquivalence, ProgramStructureTree, SeseEdge, SeseRegionId,
 };
