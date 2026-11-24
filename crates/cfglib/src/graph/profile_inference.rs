@@ -77,13 +77,14 @@ use crate::edge::EdgeId;
 /// The capacity of an arc that any amount may take.
 const UNBOUNDED: i64 = i64::MAX;
 
-/// The price of one unit of deviation from an estimate.
+/// The price of one unit of deviation from an estimate. Neither price may be
+/// negative: a negative price would reward running a count without bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InferenceCosts {
     /// The cost of each unit that a count runs above its estimate.
-    pub increase: u32,
+    pub increase: i64,
     /// The cost of each unit that a count runs below its estimate.
-    pub decrease: u32,
+    pub decrease: i64,
 }
 
 /// Block and edge counts that conserve flow, inferred from estimates.
@@ -111,7 +112,7 @@ pub struct InferenceCosts {
 ///     |block| (block == cfg.entry() || block == join).then_some(1_000),
 ///     |_| None,
 ///     |edge| cfg.edge(edge).weight().and_then(Probability::from_f64),
-///     InferenceCosts { increase: 1, decrease: 1 },
+///     &InferenceCosts { increase: 1, decrease: 1 },
 /// )?;
 /// assert_eq!(counts.block(left), 300);
 /// assert_eq!(counts.edge(to_left), 300);
@@ -140,17 +141,26 @@ impl<N: DenseId, E: DenseId> InferredCounts<N, E> {
     ///
     /// [`FlowError::Overflow`] when an estimate exceeds `i64::MAX`, or when a
     /// total cost or count exceeds the range of [`FlowNetwork`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when [`InferenceCosts::increase`] or
+    /// [`InferenceCosts::decrease`] is negative.
     pub fn compute<G>(
         graph: &G,
         is_exit: impl Fn(N) -> bool,
         block_estimate: impl Fn(N) -> Option<u64>,
         edge_estimate: impl Fn(E) -> Option<u64>,
         branch_prior: impl Fn(E) -> Option<Probability>,
-        costs: InferenceCosts,
+        costs: &InferenceCosts,
     ) -> Result<Self, FlowError>
     where
         G: RootedView<NodeId = N> + EdgeView<EdgeId = E>,
     {
+        assert!(
+            costs.increase >= 0 && costs.decrease >= 0,
+            "an inference cost is negative"
+        );
         let mut model = Model::new(graph.node_bound(), graph.edge_bound());
         for node in graph.node_ids() {
             let slot = node.index();
@@ -273,7 +283,7 @@ impl Model {
         tail: usize,
         head: usize,
         estimate: Option<u64>,
-        costs: InferenceCosts,
+        costs: &InferenceCosts,
     ) -> Result<usize, FlowError> {
         let first = self.network.arc_count();
         match estimate {
@@ -283,11 +293,9 @@ impl Model {
             Some(estimate) => {
                 let estimate = i64::try_from(estimate).map_err(|_| FlowError::Overflow)?;
                 if estimate > 0 {
-                    self.network
-                        .add_arc(tail, head, estimate, -i64::from(costs.decrease));
+                    self.network.add_arc(tail, head, estimate, -costs.decrease);
                 }
-                self.network
-                    .add_arc(tail, head, UNBOUNDED, i64::from(costs.increase));
+                self.network.add_arc(tail, head, UNBOUNDED, costs.increase);
             }
         }
         self.counts.push(Count {

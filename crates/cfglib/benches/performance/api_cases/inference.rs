@@ -47,7 +47,7 @@ macro_rules! infer_counts_case {
                 |block| estimate[block.index()],
                 |_| None,
                 |edge| cfg.edge(edge).weight().and_then(Probability::from_f64),
-                InferenceCosts {
+                &InferenceCosts {
                     increase: 1,
                     decrease: 1,
                 },
