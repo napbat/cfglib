@@ -293,7 +293,7 @@ The algorithms over this contract (lift from a flat function, lowering, structur
 | Open-graph route enumeration | `open_breadth_first_paths` → `OpenPathsEvent` | Simple routes shortest-first over a lazily discovered space — no global marks, per-route cycle guard; exponential worst case, so bound with depth, `Skip`, or `Break` |
 | Alias chase | `follow`, `follow_path` | Out-degree ≤ 1 chase with a hop bound and a full-path cycle guard; the chain, or just its end |
 | Shortest path | `shortest_path` (nodes), `shortest_path_edges` (edge witness) | Forward or reverse unweighted witness path |
-| Minimum-label relaxation | `min_label_relaxation` | Edge-defined label transfer to a minimum fixpoint; nodes re-expand when their label improves |
+| Minimum-label relaxation | `min_label_relaxation` | Edge-defined label transfer to a minimum fixpoint, expanded smallest label first; nodes re-expand when their label improves, and with extensive transfers (nonnegative costs) each node expands once, O((m + s) log(m + s)) |
 | Multi-source reachability | `reachable` | Dense `Vec<bool>` from a seed set, forward or reverse; order-insensitive |
 | Nearest common ancestor | `nearest_common_ancestor` | Bidirectional BFS meet of two nodes; smallest combined distance, ties by smallest node id |
 | All common ancestors | `common_ancestors` → `Vec<CommonAncestor>` | Every shared node with both hop counts, depth-bounded, in `b`'s BFS discovery order — the consumer-rankable form (MRO linearization, overload preference) |

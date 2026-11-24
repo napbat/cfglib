@@ -6,7 +6,9 @@
 //! than by the destination node.
 
 extern crate alloc;
+use alloc::collections::BinaryHeap;
 use alloc::vec::Vec;
+use core::cmp::Reverse;
 
 use super::store::{EdgeRecord, Graph, NodeId};
 use super::traverse::TraversalDirection;
@@ -26,6 +28,16 @@ use super::traverse::TraversalDirection;
 /// smaller input label cannot lose a candidate or produce a larger candidate
 /// than a larger input label. The reachable label space must also have no
 /// infinite strictly descending chain so the worklist terminates.
+///
+/// # Complexity
+///
+/// Pending candidates are expanded smallest label first, ties to the smaller
+/// node index. When every transfer is extensive (`relax(e, l)` is `None` or at
+/// least `l`, such as nonnegative edge costs added to a distance), the first
+/// candidate a node expands already carries its final label, so each node
+/// expands at most once: at most one `relax` call per edge and
+/// O((m + s) log(m + s)) time for `m` edges and `s` seeds. A transfer that can
+/// lower a label still reaches the same fixpoint but has no such bound.
 ///
 /// # Panics
 ///
@@ -63,10 +75,15 @@ where
     L: Ord,
 {
     let mut labels: Vec<Option<L>> = (0..graph.node_bound()).map(|_| None).collect();
-    let mut worklist: Vec<(NodeId, L)> = seeds.into_iter().collect();
+    // A min-heap of pending candidates, smallest label first and ties to the
+    // smaller node, so the expansion order is fixed by the labels alone.
+    let mut worklist: BinaryHeap<Reverse<(L, NodeId)>> = seeds
+        .into_iter()
+        .map(|(node, label)| Reverse((label, node)))
+        .collect();
     let forward = matches!(direction, TraversalDirection::Outgoing);
 
-    while let Some((node, candidate)) = worklist.pop() {
+    while let Some(Reverse((candidate, node))) = worklist.pop() {
         assert!(node.index() < labels.len(), "seed node is out of range");
         if labels[node.index()]
             .as_ref()
@@ -91,7 +108,14 @@ where
                 } else {
                     edge.source()
                 };
-                worklist.push((far, candidate));
+                // A candidate no smaller than the known label would be
+                // discarded when popped; leaving it out keeps the heap small.
+                if labels[far.index()]
+                    .as_ref()
+                    .is_none_or(|known| &candidate < known)
+                {
+                    worklist.push(Reverse((candidate, far)));
+                }
             }
         }
     }
@@ -189,5 +213,89 @@ mod tests {
             TraversalDirection::Outgoing,
             |_, label| Some(*label),
         );
+    }
+
+    /// `k` if/else diamonds whose costlier arm is added second, the edge order
+    /// that made the former last-in-first-out worklist relabel the whole
+    /// downstream of every arm: 2^(k+2) - 4 transfers.
+    #[test]
+    fn a_diamond_chain_calls_the_transfer_once_per_edge() {
+        const DIAMONDS: u32 = 20;
+        let mut graph = Graph::<(), u64>::new();
+        let start = graph.add_node(());
+        let mut spine = start;
+        for i in 0..DIAMONDS {
+            let cheap = graph.add_node(());
+            let costly = graph.add_node(());
+            let next = graph.add_node(());
+            graph.add_edge(spine, cheap, 0);
+            graph.add_edge(spine, costly, 1 << (DIAMONDS - i));
+            graph.add_edge(cheap, next, 0);
+            graph.add_edge(costly, next, 0);
+            spine = next;
+        }
+        let mut calls = 0_usize;
+        let labels = min_label_relaxation(
+            &graph,
+            [(start, 0_u64)],
+            TraversalDirection::Outgoing,
+            |edge, label| {
+                calls += 1;
+                label.checked_add(*edge.payload())
+            },
+        );
+        assert_eq!(labels[spine.index()], Some(0));
+        assert!(calls <= graph.edge_count(), "{calls} transfers");
+    }
+
+    /// Nonnegative random weights on random graphs with cycles, in both
+    /// directions, against Bellman-Ford: the same labels, and at most one
+    /// transfer per edge.
+    #[test]
+    fn extensive_transfers_match_bellman_ford_and_expand_each_node_once() {
+        let mut rng = crate::test_util::rng::Rng::new(70);
+        for _ in 0..200 {
+            let node_count = 1 + rng.below(12);
+            let mut graph = Graph::<(), u64>::new();
+            let nodes: Vec<_> = (0..node_count).map(|_| graph.add_node(())).collect();
+            let mut edges = Vec::new();
+            for _ in 0..rng.below(3 * node_count + 1) {
+                let (source, target) = (rng.below(node_count), rng.below(node_count));
+                let weight = rng.below(10) as u64;
+                graph.add_edge(nodes[source], nodes[target], weight);
+                edges.push((source, target, weight));
+            }
+            for direction in [TraversalDirection::Outgoing, TraversalDirection::Incoming] {
+                let seed = rng.below(node_count);
+                let mut expected = alloc::vec![None; node_count];
+                expected[seed] = Some(0_u64);
+                for _ in 0..node_count {
+                    for &(source, target, weight) in &edges {
+                        let (near, far) = match direction {
+                            TraversalDirection::Outgoing => (source, target),
+                            TraversalDirection::Incoming => (target, source),
+                        };
+                        if let Some(label) = expected[near] {
+                            let candidate = label + weight;
+                            if expected[far].is_none_or(|known| candidate < known) {
+                                expected[far] = Some(candidate);
+                            }
+                        }
+                    }
+                }
+                let mut calls = 0_usize;
+                let labels = min_label_relaxation(
+                    &graph,
+                    [(nodes[seed], 0_u64)],
+                    direction,
+                    |edge, label| {
+                        calls += 1;
+                        label.checked_add(*edge.payload())
+                    },
+                );
+                assert_eq!(labels, expected);
+                assert!(calls <= graph.edge_count());
+            }
+        }
     }
 }
