@@ -51,6 +51,31 @@ fn every_multigraph_of_up_to_three_nodes_matches_the_definitions() {
     }
 }
 
+#[test]
+fn every_digraph_of_five_nodes_without_self_loops_matches_the_definitions() {
+    // The smaller sweeps and the random multigraphs cover self-loops; leaving
+    // them out keeps this sweep to 2^20 graphs.
+    let pairs: Vec<(usize, usize)> = (0..5)
+        .flat_map(|from| {
+            (0..5)
+                .filter(move |&to| to != from)
+                .map(move |to| (from, to))
+        })
+        .collect();
+    let mut edges = Vec::with_capacity(pairs.len());
+    for mask in 0_u32..1 << pairs.len() {
+        edges.clear();
+        edges.extend(
+            pairs
+                .iter()
+                .enumerate()
+                .filter(|&(bit, _)| mask & (1 << bit) != 0)
+                .map(|(_, &pair)| pair),
+        );
+        assert_matches_reference(&build(5, &edges).0);
+    }
+}
+
 /// A random multigraph over `node_count` nodes, self-loops included.
 fn random_edges(rng: &mut Rng, node_count: usize, edge_count: usize) -> Vec<(usize, usize)> {
     (0..edge_count)

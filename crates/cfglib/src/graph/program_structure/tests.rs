@@ -260,6 +260,33 @@ fn a_self_loop_is_a_class_of_its_own() {
 }
 
 #[test]
+fn a_block_reached_past_the_exit_edge_is_not_in_the_region() {
+    // 0 -> 3 -> 2 -> 4 -> 0 loops forever but for 2 -> 1, and 1 only spins,
+    // so the cut makes 1 the way out. Block 4 is dominated by 0 -> 3 and
+    // post-dominated by 3 -> 2, yet it is entered over 2 -> 4, outside the
+    // region those two edges bound: the region is block 3 alone.
+    let (cfg, blocks, edges) = build(
+        5,
+        &[
+            (3, 3),
+            (0, 3),
+            (3, 2),
+            (4, 0),
+            (2, 4),
+            (0, 0),
+            (1, 1),
+            (2, 1),
+            (4, 0),
+        ],
+    );
+    let tree = ProgramStructureTree::compute(&cfg);
+    let region = region_between(&tree, SeseEdge::Edge(edges[1]), SeseEdge::Edge(edges[2]));
+    assert_eq!(tree.blocks(region), [blocks[3]]);
+    assert!(!tree.contains(region, blocks[4]));
+    assert_matches_reference(&cfg);
+}
+
+#[test]
 fn unreachable_and_removed_code_is_in_no_region() {
     // entry -> a -> exit; dead -> a; a removed block and a removed edge.
     let (mut cfg, blocks, edges) = build(5, &[(0, 1), (1, 2), (3, 1), (0, 2), (4, 2)]);
