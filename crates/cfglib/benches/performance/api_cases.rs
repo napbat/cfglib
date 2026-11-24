@@ -76,6 +76,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "linearize",
     "loop_exit_blocks",
     "make_reducible",
+    "make_reducible_with_dispatch",
     "meet_options",
     "merge_blocks",
     "merge_blocks_mapped",

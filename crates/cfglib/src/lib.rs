@@ -327,7 +327,9 @@ pub use graph::program_structure::{
     CycleEquivalence, ProgramStructureTree, SeseEdge, SeseRegionId,
 };
 pub use graph::reach_index::{ReachIndex, ReachIndexConfig, ReachScratch};
-pub use graph::reducible::make_reducible;
+pub use graph::reducible::{
+    DispatchBuilder, DispatchReport, make_reducible, make_reducible_with_dispatch,
+};
 pub use graph::relax::min_label_relaxation;
 pub use graph::reverse::reverse_cfg;
 pub use graph::scc::{
