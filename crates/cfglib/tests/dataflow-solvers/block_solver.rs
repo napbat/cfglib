@@ -7,16 +7,16 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use cfglib::{
-    BlockId, Cfg, DenseId, Direction, IterationOrder, NodeProblem, Problem, RootedView,
-    SolveConfig, SolveError, TryProblem, TrySolveError, meet_options, solve_node_problem,
-    solve_node_problem_with_config, solve_problem, solve_problem_from,
+    BlockId, Cfg, DenseId, Direction, EdgeKind, IterationOrder, NodeProblem, Problem, ResumeMode,
+    RootedView, SolveConfig, SolveError, TryProblem, TrySolveError, meet_options, resume_problem,
+    solve_node_problem, solve_node_problem_with_config, solve_problem, solve_problem_from,
     solve_problem_from_with_config, solve_problem_with_config, stream_node_problem, stream_problem,
     try_solve_problem, try_solve_problem_from, try_solve_problem_from_with_config,
     try_solve_problem_with_config,
 };
 
 use crate::graphs::{
-    GenKill, ORDERS, Rng, Shape, assert_same_facts, assert_streams_like, intersection, union,
+    Edit, GenKill, ORDERS, Rng, Shape, assert_same_facts, assert_streams_like, intersection, union,
 };
 use crate::lifted::Lifted;
 use crate::reference::round_robin;
@@ -860,6 +860,69 @@ fn a_stream_visits_every_reached_block_once_with_the_facts_of_the_solve() {
                     stream_node_problem(&cfg, &Lifted(&nodes), config, visit).unwrap()
                 };
                 assert_streams_like(&facts, every, stream, &what);
+            }
+        }
+    }
+}
+
+/// After a random edit — an added or removed edge, or new effects for one
+/// block — resuming from the previous facts gives the facts of a fresh solve
+/// of the edited graph, forward and backward, for a may and a must problem,
+/// in the index and the weak topological order. When the edit only adds an
+/// edge to a forward may problem, its facts can only grow, and growing gives
+/// them too; backward, an added edge takes the boundary fact from a block
+/// that had no successor, so facts can shrink.
+#[test]
+fn a_resume_after_an_edit_equals_a_fresh_solve_of_the_edited_graph() {
+    let mut rng = Rng::new(18);
+    let kinds = [EdgeKind::Fallthrough, EdgeKind::ConditionalTrue];
+    for round in 0..300 {
+        for direction in [Direction::Forward, Direction::Backward] {
+            let only_grow = round % 2 == 0;
+            let shape = Shape::random(&mut rng, false, false);
+            let mut effects = GenKill::random(&mut rng, shape.blocks);
+            let mut cfg = shape.cfg();
+            let before = solve_problem(
+                &cfg,
+                &May {
+                    effects: &effects,
+                    direction,
+                },
+            )
+            .unwrap();
+            let must_before = solve_problem(&cfg, &Must { effects: &effects }).unwrap();
+            let edit = Edit::random(&mut rng, &mut cfg, &mut effects, &shape, &kinds, only_grow);
+            let changed = [edit.changed(direction)];
+            let must_changed = [edit.changed(Direction::Forward)];
+            let may = May {
+                effects: &effects,
+                direction,
+            };
+            let must = Must { effects: &effects };
+            let fresh = solve_problem(&cfg, &may).unwrap();
+            let must_fresh = solve_problem(&cfg, &must).unwrap();
+            let modes: &[ResumeMode] = if only_grow && direction == Direction::Forward {
+                &[ResumeMode::Reset, ResumeMode::Grow]
+            } else {
+                &[ResumeMode::Reset]
+            };
+            let blocks = || shape.live().into_iter().map(id);
+            for order in [IterationOrder::Index, IterationOrder::WeakTopological] {
+                let config = SolveConfig::new().with_order(order);
+                for &mode in modes {
+                    let what =
+                        format!("{mode:?} {order:?} {direction:?} after {edit:?}, {shape:?}");
+                    let previous = before.clone();
+                    let resumed =
+                        resume_problem(&cfg, &Lifted(&may), previous, &changed, mode, config);
+                    assert_same_facts(&resumed.unwrap(), &fresh, blocks(), &what);
+                }
+                let what = format!("must {order:?} after {edit:?}, {shape:?}");
+                let previous = must_before.clone();
+                let reset = ResumeMode::Reset;
+                let resumed =
+                    resume_problem(&cfg, &Lifted(&must), previous, &must_changed, reset, config);
+                assert_same_facts(&resumed.unwrap(), &must_fresh, blocks(), &what);
             }
         }
     }

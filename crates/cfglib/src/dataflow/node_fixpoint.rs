@@ -267,9 +267,10 @@ where
 ///
 /// The facts of unvisited nodes are `bottom`, not stale values from a
 /// previous solve: this solves a fresh problem from a subset of entry
-/// points, it does not resume one. A consumer holding previous results
-/// merges them itself, which is why the seeded solve keeps the same
-/// `Facts` shape.
+/// points, it does not resume one, so facts downstream of the seeds miss
+/// what flows in from the nodes it never visits. To re-solve after an edit
+/// from the facts of the solve before it, use
+/// [`resume_node_problem`](crate::resume_node_problem).
 ///
 /// # Examples
 ///
@@ -505,11 +506,31 @@ where
     D: Adjacency,
 {
     let node_count = graph.node_bound();
-    let every = |_: Option<&WeakTopologicalOrder<G::NodeId>>| Dense {
+    let every = || Dense {
         input: vec![problem.bottom(graph); node_count],
         output: vec![problem.bottom(graph); node_count],
     };
-    let (facts, steps) = solve_along(downstream, graph, problem, worklist, entry, config, every)?;
+    solve_dense(downstream, graph, problem, worklist, entry, config, every)
+}
+
+/// The solver core over every fact, from the facts in flow order that
+/// `facts` builds, reported in program order.
+pub(super) fn solve_dense<G, P, D>(
+    downstream: D,
+    graph: &G,
+    problem: &P,
+    worklist: Worklist,
+    entry: Option<G::NodeId>,
+    config: SolveConfig,
+    facts: impl FnOnce() -> Dense<P::Fact>,
+) -> Result<Facts<P::Fact>, TrySolveError<P::Error>>
+where
+    G: GraphView,
+    P: TryNodeProblem<G>,
+    D: Adjacency,
+{
+    let store = |_: Option<&WeakTopologicalOrder<G::NodeId>>| facts();
+    let (facts, steps) = solve_along(downstream, graph, problem, worklist, entry, config, store)?;
     let (input, output) = problem.direction().program_order(facts.input, facts.output);
     Ok(Facts::new(input, output, steps))
 }
@@ -537,10 +558,10 @@ pub(super) trait NodeStore<N, F> {
     fn finish(&mut self, order: &WeakTopologicalOrder<N>, end: usize);
 }
 
-/// Every node's facts, for a solve that returns them all.
-struct Dense<F> {
-    input: Vec<F>,
-    output: Vec<F>,
+/// Every node's facts in flow order, for a solve that returns them all.
+pub(super) struct Dense<F> {
+    pub(super) input: Vec<F>,
+    pub(super) output: Vec<F>,
 }
 
 impl<N, F> NodeStore<N, F> for Dense<F> {

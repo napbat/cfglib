@@ -539,6 +539,11 @@ impl<F> Facts<F> {
             steps,
         }
     }
+
+    /// The IN and OUT vectors, for a solve that resumes from them.
+    pub(crate) fn into_parts(self) -> (Vec<F>, Vec<F>) {
+        (self.input, self.output)
+    }
 }
 
 /// Meets two optional facts, treating `None` as unreachable bottom.
@@ -624,7 +629,9 @@ pub fn solve_problem<V: RootedView, P: Problem<V>>(
 /// transfers reach — are ever visited, so an incremental or dirty-region
 /// analysis pays for the part of the CFG its change actually reaches. A block
 /// with no upstream in the analysis direction receives the problem's entry
-/// fact when visited; unvisited blocks stay at `bottom`.
+/// fact when visited; unvisited blocks stay at `bottom`. To re-solve after
+/// an edit from the facts of the solve before it, use
+/// [`resume_problem`](crate::resume_problem).
 ///
 /// # Panics
 ///

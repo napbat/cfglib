@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 use std::fmt::Debug;
 
-use cfglib::{Cfg, DenseId, EdgeKind, Facts, IterationOrder, SolveStats};
+use cfglib::{BlockId, Cfg, DenseId, Direction, EdgeKind, Facts, IterationOrder, SolveStats};
 
 /// A xorshift generator: the same seed gives the same graphs everywhere.
 pub struct Rng(u64);
@@ -203,6 +203,75 @@ impl GenKill {
             .chain(&self.generated[block])
             .copied()
             .collect()
+    }
+
+    /// Draws new gen and kill sets for `block`, as an edit of its code.
+    pub fn redraw(&mut self, rng: &mut Rng, block: usize) {
+        let mut draw = || (0..6_u8).filter(|_| rng.below(4) == 0).collect();
+        self.generated[block] = draw();
+        self.killed[block] = draw();
+    }
+}
+
+/// One random edit of a control-flow graph, as an editor makes it.
+#[derive(Debug, Clone, Copy)]
+pub enum Edit {
+    /// An edge added from the first block to the second.
+    Added(usize, usize),
+    /// The edge from the first block to the second removed.
+    Removed(usize, usize),
+    /// New effects for one block.
+    Redrawn(usize),
+}
+
+impl Edit {
+    /// Applies a random edit to `cfg` and `effects`: an added edge of a
+    /// random kind among `kinds`, or, unless `only_grow`, also a removed edge
+    /// or new effects for a block.
+    pub fn random(
+        rng: &mut Rng,
+        cfg: &mut Cfg<()>,
+        effects: &mut GenKill,
+        shape: &Shape,
+        kinds: &[EdgeKind],
+        only_grow: bool,
+    ) -> Self {
+        let live = shape.live();
+        let edges: Vec<_> = cfg
+            .edges()
+            .map(|edge| (edge.id(), edge.source().index(), edge.target().index()))
+            .collect();
+        let choice = if only_grow { 0 } else { rng.below(3) };
+        if choice == 1 && !edges.is_empty() {
+            let (edge, source, target) = edges[rng.below(edges.len())];
+            assert!(cfg.remove_edge(edge));
+            return Self::Removed(source, target);
+        }
+        if choice == 2 {
+            let block = live[rng.below(live.len())];
+            effects.redraw(rng, block);
+            return Self::Redrawn(block);
+        }
+        let source = live[rng.below(live.len())];
+        let target = live[rng.below(live.len())];
+        let kind = kinds[rng.below(kinds.len())];
+        cfg.add_edge(
+            BlockId::from_index(source),
+            BlockId::from_index(target),
+            kind,
+        );
+        Self::Added(source, target)
+    }
+
+    /// The block whose transfer, boundary or upstream edges along
+    /// `direction` the edit changed.
+    pub fn changed(self, direction: Direction) -> BlockId {
+        let block = match (self, direction) {
+            (Self::Added(_, target) | Self::Removed(_, target), Direction::Forward) => target,
+            (Self::Added(source, _) | Self::Removed(source, _), Direction::Backward) => source,
+            (Self::Redrawn(block), _) => block,
+        };
+        BlockId::from_index(block)
     }
 }
 

@@ -152,7 +152,10 @@
 //! and widen at its heads, so infinite-height lattices converge.
 //! [`stream_problem`], [`stream_node_problem`] and [`stream_edge_problem`]
 //! run that solve and hand each node's facts out once they are final, instead
-//! of keeping every fact until the end.
+//! of keeping every fact until the end. [`resume_problem`],
+//! [`resume_node_problem`] and [`resume_edge_problem`] re-solve after an edit
+//! from the facts of the solve before it, and [`OrderedFixpoint`] keeps the
+//! reads of the ordered slot driver between runs.
 //!
 //! # Contracts
 //!
@@ -256,9 +259,10 @@ pub use dataflow::node_fixpoint::{
     try_solve_node_problem_with_config,
 };
 pub use dataflow::program_point::{DefSite, ProgramPoint, UseSite};
+pub use dataflow::resume::{ResumeMode, resume_edge_problem, resume_node_problem, resume_problem};
 pub use dataflow::slot_fixpoint::{
-    SequentialExecutor, SlotAccess, SlotFixpointStats, WaveExecutor, WaveRequeue, ordered_fixpoint,
-    wave_fixpoint,
+    OrderedFixpoint, SequentialExecutor, SlotAccess, SlotFixpointStats, WaveExecutor, WaveRequeue,
+    ordered_fixpoint, wave_fixpoint,
 };
 pub use dataflow::stream::{SolveStats, stream_edge_problem, stream_node_problem, stream_problem};
 pub use display::{DisplayInstr, IndentedWriter};

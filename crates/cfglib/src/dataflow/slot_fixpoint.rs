@@ -22,7 +22,8 @@
 //!   order, so a later evaluation of a sweep sees a slot that an earlier one
 //!   changed (Gauss-Seidel order). Each evaluation records the slots that it
 //!   read in a [`SlotAccess`], so the dependencies can change from one
-//!   evaluation to the next.
+//!   evaluation to the next. An [`OrderedFixpoint`] keeps those reads between
+//!   runs, so a run after an edit evaluates only the units that it affects.
 //!
 //! Both drivers stop when no unit is left to run. Each one returns its
 //! rounds and evaluations in a [`SlotFixpointStats`].
@@ -33,7 +34,7 @@ mod wave;
 #[cfg(test)]
 mod tests;
 
-pub use ordered::{SlotAccess, ordered_fixpoint};
+pub use ordered::{OrderedFixpoint, SlotAccess, ordered_fixpoint};
 pub use wave::{SequentialExecutor, WaveExecutor, WaveRequeue, wave_fixpoint};
 
 /// What a slot fixpoint did: its rounds, its evaluations, and whether it

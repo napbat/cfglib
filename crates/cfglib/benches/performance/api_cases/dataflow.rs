@@ -1,15 +1,16 @@
 use cfglib::{
-    Cfg, Direction, EdgeProblem, Facts, Graph, IterationOrder, NodeId, NodeProblem, SolveConfig,
-    SolveError, SolveStats, TraversalDirection, TryEdgeProblem, TryNodeProblem, TryProblem,
-    TrySolveError, WeakTopologicalOrder, meet_options, solve_edge_problem, solve_edge_problem_from,
-    solve_edge_problem_from_with_config, solve_edge_problem_with_config, solve_node_problem,
-    solve_node_problem_from, solve_node_problem_from_with_config, solve_node_problem_with_config,
-    solve_problem_from, solve_problem_from_with_config, stream_edge_problem, stream_node_problem,
-    stream_problem, try_solve_edge_problem, try_solve_edge_problem_from,
-    try_solve_edge_problem_from_with_config, try_solve_edge_problem_with_config,
-    try_solve_node_problem, try_solve_node_problem_from, try_solve_node_problem_from_with_config,
-    try_solve_node_problem_with_config, try_solve_problem, try_solve_problem_from,
-    try_solve_problem_from_with_config, try_solve_problem_with_config,
+    Cfg, Direction, EdgeFacts, EdgeProblem, Facts, Graph, IterationOrder, NodeId, NodeProblem,
+    ResumeMode, SolveConfig, SolveError, SolveStats, TraversalDirection, TryEdgeProblem,
+    TryNodeProblem, TryProblem, TrySolveError, WeakTopologicalOrder, meet_options,
+    resume_edge_problem, resume_node_problem, resume_problem, solve_edge_problem,
+    solve_edge_problem_from, solve_edge_problem_from_with_config, solve_edge_problem_with_config,
+    solve_node_problem, solve_node_problem_from, solve_node_problem_from_with_config,
+    solve_node_problem_with_config, solve_problem_from, solve_problem_from_with_config,
+    stream_edge_problem, stream_node_problem, stream_problem, try_solve_edge_problem,
+    try_solve_edge_problem_from, try_solve_edge_problem_from_with_config,
+    try_solve_edge_problem_with_config, try_solve_node_problem, try_solve_node_problem_from,
+    try_solve_node_problem_from_with_config, try_solve_node_problem_with_config, try_solve_problem,
+    try_solve_problem_from, try_solve_problem_from_with_config, try_solve_problem_with_config,
 };
 
 use super::BenchmarkSuite;
@@ -556,6 +557,92 @@ fn register_streams(suite: &mut BenchmarkSuite<'_>) {
     );
 }
 
+/// Nodes in the chain whose tail a resume re-solves.
+const RESUME_NODE_COUNT: usize = 100_000;
+
+/// Nodes at the end of the chain that the edit reaches.
+const RESUME_REGION: usize = 100;
+
+fn register_resumes(suite: &mut BenchmarkSuite<'_>) {
+    let mut chain = Graph::with_capacity(RESUME_NODE_COUNT, RESUME_NODE_COUNT - 1);
+    let nodes: Vec<NodeId> = (0..RESUME_NODE_COUNT).map(|_| chain.add_node(())).collect();
+    for pair in nodes.windows(2) {
+        chain.add_edge(pair[0], pair[1], ());
+    }
+    let solved = try_solve_node_problem(&chain, &TryGraphReachability).expect("a solve converges");
+    let changed = [nodes[RESUME_NODE_COUNT - RESUME_REGION]];
+    let last = nodes[RESUME_NODE_COUNT - 1];
+    let reset = ResumeMode::Reset;
+    let config = SolveConfig::new();
+    benchmark_case!(
+        suite,
+        "api_resume_node_problem",
+        covers[resume_node_problem],
+        || {
+            let previous = solved.clone();
+            resume_node_problem(
+                &chain,
+                &TryGraphReachability,
+                previous,
+                &changed,
+                reset,
+                config,
+            )
+        },
+        |resumed: &Result<Facts<bool>, TrySolveError<()>>| {
+            let resumed = resumed.as_ref().expect("a resume converges");
+            assert!(*resumed.fact_out(last));
+            assert_eq!(resumed.steps(), RESUME_REGION);
+            // The steps go next to the time: the full solve takes one per
+            // node, the resume one per node of the region.
+            println!(
+                "{:<36} {:>12} steps  full solve {}",
+                "api_resume_node_problem",
+                resumed.steps(),
+                solved.steps()
+            );
+        }
+    );
+
+    let cfg = branchy_cfg(NODE_COUNT);
+    let solved_cfg = try_solve_problem(&cfg, &TryCfgReachability).expect("a solve converges");
+    let block = [cfg
+        .block_ids()
+        .nth(NODE_COUNT - 16)
+        .expect("the fixture has the block")];
+    benchmark_case!(
+        suite,
+        "api_resume_problem",
+        covers[resume_problem],
+        || {
+            let previous = solved_cfg.clone();
+            resume_problem(&cfg, &TryCfgReachability, previous, &block, reset, config)
+        },
+        |resumed: &Result<Facts<bool>, TrySolveError<()>>| {
+            let resumed = resumed.as_ref().expect("a resume converges");
+            assert!(cfg.block_ids().all(|id| *resumed.fact_out(id)));
+        }
+    );
+
+    let graph = branchy_graph(NODE_COUNT);
+    let solved_graph =
+        try_solve_edge_problem(&graph, &TryEdgeReachability).expect("a solve converges");
+    let node = [NodeId::from_raw(fixture_u32(NODE_COUNT - 16))];
+    benchmark_case!(
+        suite,
+        "api_resume_edge_problem",
+        covers[resume_edge_problem],
+        || {
+            let previous = solved_graph.clone();
+            resume_edge_problem(&graph, &TryEdgeReachability, previous, &node, reset, config)
+        },
+        |resumed: &Result<EdgeFacts<bool>, TrySolveError<()>>| {
+            let resumed = resumed.as_ref().expect("a resume converges");
+            assert!(graph.node_ids().all(|id| *resumed.fact_out(id)));
+        }
+    );
+}
+
 pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     register_lattice_helpers(suite);
     register_cfg_solvers(suite);
@@ -563,4 +650,5 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     register_edge_solvers(suite);
     register_iteration_orders(suite);
     register_streams(suite);
+    register_resumes(suite);
 }

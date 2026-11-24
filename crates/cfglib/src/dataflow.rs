@@ -15,7 +15,9 @@
 //! The [`slot_fixpoint`] module schedules units over slots that the caller
 //! owns, for a fixpoint that has no graph view and no problem trait. The
 //! [`stream`] module runs the solvers' fallible problems and hands each
-//! node's facts out as soon as they are final, instead of keeping them all.
+//! node's facts out as soon as they are final, instead of keeping them all,
+//! and the [`resume`] module re-solves after an edit from the facts of the
+//! solve before it.
 //!
 //! # Usage
 //!
@@ -35,6 +37,7 @@ pub mod fixpoint;
 pub mod instruction;
 pub mod node_fixpoint;
 pub mod program_point;
+pub mod resume;
 mod schedule;
 pub mod slot_fixpoint;
 pub mod stream;
