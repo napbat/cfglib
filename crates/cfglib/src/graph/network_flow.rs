@@ -346,8 +346,9 @@ impl FlowNetwork {
         &self.out[self.first[node]..self.first[node + 1]]
     }
 
-    /// Dinic's algorithm, stopped once the flow reaches `limit`.
-    fn max_flow_up_to(&mut self, source: usize, sink: usize, limit: i64) -> i64 {
+    /// Dinic's algorithm, stopped once the flow reaches `limit`: every phase
+    /// adds at least one unit, so a limit of `k` costs at most `k` phases.
+    pub(crate) fn max_flow_up_to(&mut self, source: usize, sink: usize, limit: i64) -> i64 {
         self.check_terminals(source, sink);
         self.reset();
         self.build_adjacency();
@@ -374,6 +375,16 @@ impl FlowNetwork {
             }
         }
         total
+    }
+
+    /// The nodes that `source` reaches over arcs with residual capacity in
+    /// the flow of the last solve. After a maximum flow they are the source
+    /// side of the minimum cut closest to the source, which every maximum flow
+    /// gives alike.
+    pub(crate) fn residual_reachable(&self, source: usize) -> Vec<bool> {
+        let mut level = vec![usize::MAX; self.nodes];
+        self.levels(source, source, &mut level, &mut VecDeque::new());
+        level.into_iter().map(|level| level != usize::MAX).collect()
     }
 
     /// Number the nodes by their distance from `source` over arcs with

@@ -299,6 +299,7 @@ pub use graph::call_graph::{
 };
 pub use graph::cdg::control_dependence_graph;
 pub use graph::coldness::{ColdClass, ColdnessClasses, ColdnessGraph};
+pub use graph::cut::{EdgeCut, VertexCut, edge_disjoint_paths, min_edge_cut, min_vertex_cut};
 pub use graph::diff::{
     BlockFingerprint, BlockHashes, BlockMatch, CascadeDiff, CfgDiff, MatchLevel, RegionDiff,
     RegionMatch,

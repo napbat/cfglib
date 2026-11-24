@@ -4,6 +4,7 @@ pub mod bidirectional;
 pub mod call_graph;
 pub mod cdg;
 pub mod coldness;
+pub mod cut;
 pub mod diff;
 pub mod dominator;
 pub mod dot;
