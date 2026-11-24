@@ -100,8 +100,8 @@ fn loop_counts(shape: &Shape, honor_tags: bool) -> Vec<usize> {
             .filter(|&tail| body.insert(tail))
             .collect();
         while let Some(current) = pending.pop() {
-            for predecessor in 0..size {
-                if shape.successors[predecessor].contains(&current) && body.insert(predecessor) {
+            for (predecessor, successors) in shape.successors.iter().enumerate() {
+                if successors.contains(&current) && body.insert(predecessor) {
                     pending.push(predecessor);
                 }
             }
