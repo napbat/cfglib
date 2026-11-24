@@ -9,6 +9,7 @@
 
 extern crate alloc;
 use alloc::collections::BTreeMap;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::cfg::Cfg;
@@ -89,12 +90,38 @@ pub fn find_function<C: PartialEq>(
 }
 
 /// Return whether a function is directly or mutually recursive.
+///
+/// A function is recursive when it calls itself or one of its callees reaches
+/// it again. The answer is a walk from the function's callees that stops when
+/// it returns to the function, so it costs the part of the call graph the
+/// function reaches, not the whole graph. A consumer that classifies every
+/// function of a large graph whose functions reach most of it should run one
+/// [`tarjan_scc`] and ask each component [`Scc::is_cyclic`](crate::Scc::is_cyclic).
+///
+/// # Panics
+///
+/// Panics when `function` is not a node of `graph`.
 #[must_use]
 pub fn is_recursive_function<C>(
     graph: &Graph<FunctionNode<C>, CallMetadata>,
     function: NodeId,
 ) -> bool {
-    tarjan_scc(graph).component(function).is_cyclic(graph)
+    assert!(
+        graph.contains_node(function),
+        "node {} is not a node of the call graph",
+        function.index()
+    );
+    let mut visited = vec![false; graph.node_bound()];
+    let mut pending: Vec<NodeId> = graph.successors(function).collect();
+    while let Some(node) = pending.pop() {
+        if node == function {
+            return true;
+        }
+        if !core::mem::replace(&mut visited[node.index()], true) {
+            pending.extend(graph.successors(node));
+        }
+    }
+    false
 }
 
 /// Compute a per-node summary over a dependency graph in callee-first
@@ -253,5 +280,56 @@ mod tests {
         assert_eq!(names(main), ["a", "b", "leaf"].into_iter().collect());
         assert_eq!(names(a), ["a", "b", "leaf"].into_iter().collect());
         assert_eq!(names(b), ["a", "b", "leaf"].into_iter().collect());
+    }
+
+    /// The walk stops at the function, ignores cycles it never re-enters, and
+    /// answers for every function what the function's component answers.
+    #[test]
+    fn recursion_matches_the_strong_components() {
+        let mut graph = Graph::new();
+        let call = || CallMetadata {
+            is_tail_call: false,
+        };
+        let ids = ["main", "a", "b", "leaf", "loop", "self", "dead"];
+        let nodes: Vec<_> = ids
+            .iter()
+            .map(|&id| graph.add_node(FunctionNode { id }))
+            .collect();
+        let [main, a, b, leaf, looping, selfish, dead] = nodes[..] else {
+            unreachable!("seven functions");
+        };
+        for (caller, callee) in [
+            (main, a),
+            (a, b),
+            (b, a),
+            (a, leaf),
+            (main, looping),
+            (looping, selfish),
+            (selfish, selfish),
+            (dead, main),
+        ] {
+            graph.add_edge(caller, callee, call());
+        }
+        let components = tarjan_scc(&graph);
+        for node in graph.node_ids() {
+            assert_eq!(
+                is_recursive_function(&graph, node),
+                components.component(node).is_cyclic(&graph),
+                "{}",
+                graph.node(node).id
+            );
+        }
+        assert!(!is_recursive_function(&graph, main));
+        assert!(!is_recursive_function(&graph, looping));
+        assert!(is_recursive_function(&graph, selfish));
+    }
+
+    #[test]
+    #[should_panic(expected = "is not a node of the call graph")]
+    fn a_removed_function_is_rejected() {
+        let mut graph = Graph::<FunctionNode<&str>, CallMetadata>::new();
+        let gone = graph.add_node(FunctionNode { id: "gone" });
+        graph.remove_node(gone);
+        let _ = is_recursive_function(&graph, gone);
     }
 }
