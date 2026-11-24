@@ -292,6 +292,7 @@ pub use graph::edge_view::{EdgeRef, EdgeView, FilteredEdges};
 pub use graph::eh::{EhBlockKind, EhEdge, EhEdgeKind, EhModel};
 pub use graph::epoch::{EpochMarks, EpochSet};
 pub use graph::fanout::{DenseFanout, Fanout, SortedMap};
+pub use graph::feedback::{FeedbackConfig, feedback_arc_set, linear_arrangement};
 pub use graph::horn::HornClauses;
 pub use graph::interval::{Interval, IntervalAnalysis};
 pub use graph::keyed::KeyedGraph;
