@@ -51,6 +51,15 @@
 //! member lookup costs one fold per class instead of one per route, as long
 //! as the answer of a node does not depend on the route to it.
 //!
+//! [`open_fold_fixpoint`] is the driver for a cyclic space whose answers
+//! must travel around a cycle, such as the names a module exports through
+//! `export *` cycles. The other drivers refuse a node that is still open on
+//! the route, so on a cycle they return an answer that depends on where the
+//! walk entered it and can miss what comes back around. The fixpoint driver
+//! keeps one answer per mark, finds the cycles of marked nodes as it walks,
+//! and re-folds each cycle until its answers are stable. It needs monotone
+//! hooks (or a round limit) and a mark on every node of a cycle.
+//!
 //! [`follow`] and [`follow_path`] are the degenerate case that shows up just
 //! as often: an out-degree ≤ 1 chase (import alias to import alias, symlink to
 //! symlink, type alias to type alias) which needs a hop bound and a cycle
@@ -68,8 +77,8 @@ pub use events::{
     open_depth_first_events,
 };
 pub use fold::{
-    FoldEnter, MarkScope, OpenFold, OpenFoldConfig, open_fold_post_order,
-    open_fold_post_order_memoized,
+    FoldEnter, MarkScope, OpenFixpointConfig, OpenFixpointError, OpenFold, OpenFoldConfig,
+    open_fold_fixpoint, open_fold_post_order, open_fold_post_order_memoized,
 };
 pub use follow::{follow, follow_path};
 pub use paths::{OpenPathsConfig, OpenPathsEvent, open_breadth_first_paths};

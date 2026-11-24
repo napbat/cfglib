@@ -41,6 +41,15 @@
 //! in [`OpenFold::absorb`]. A node whose subtree refused a node that is still
 //! open on the current route (a cycle) has an answer that depends on where
 //! the walk entered the cycle, so the driver does not cache that answer.
+//!
+//! [`open_fold_fixpoint`] is the driver for a space whose cycles carry
+//! answers around: the names a module exports through `export *` cycles, or
+//! the members visible through cyclic includes. Refusing a node that is still
+//! open makes each answer on a cycle depend on where the walk entered it, and
+//! loses what a value brings back around the cycle. The fixpoint driver
+//! keeps one answer per mark, finds the cycles of marked nodes with Tarjan's
+//! lowlinks as it walks, and re-folds each cycle until a round changes
+//! nothing, so monotone hooks reach the least fixpoint from any root.
 
 extern crate alloc;
 
@@ -51,8 +60,10 @@ use crate::graph::search::may_expand;
 
 use super::marks::Marks;
 
+mod fixpoint;
 mod memoized;
 
+pub use fixpoint::{OpenFixpointConfig, OpenFixpointError, open_fold_fixpoint};
 pub use memoized::open_fold_post_order_memoized;
 
 /// Bounds for one [`open_fold_post_order`] or
@@ -111,8 +122,9 @@ pub enum FoldEnter<T, C> {
 
 /// One post-order fold over an open node space.
 ///
-/// Implementations are driven by [`open_fold_post_order`]; see the module
-/// documentation for which hook owns which decision.
+/// Implementations are driven by [`open_fold_post_order`],
+/// [`open_fold_post_order_memoized`] or [`open_fold_fixpoint`]; see the
+/// module documentation for which hook owns which decision.
 pub trait OpenFold {
     /// The node vocabulary — often a computed value, not a stored graph node.
     type Node;
