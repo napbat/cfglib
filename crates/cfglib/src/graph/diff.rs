@@ -1,13 +1,20 @@
 //! Structural comparison of two CFGs (bindiff-style).
 //!
-//! Matches the blocks of two CFGs by how they are wired and compares each
-//! matched pair: block counts, edge patterns, and instruction counts.
-//! Produces a [`CfgDiff`] summary describing the structural differences.
+//! Matches the blocks of two CFGs and compares each matched pair: block
+//! counts, edge patterns, and instruction counts. Produces a [`CfgDiff`]
+//! summary describing the structural differences.
 //!
-//! This is intentionally a *structural* comparison — it compares the
-//! shape of the graph, not the semantics of individual instructions.
-//! Instruction-level comparison is left to the consumer since it
-//! depends on the concrete instruction type.
+//! [`CfgDiff::compute`] is a *structural* comparison: it matches blocks by
+//! how they are wired and reads no instruction, only how many a block
+//! holds. [`CascadeDiff::compute`] also matches by content, through hashes
+//! the consumer computes for each block, because reading instructions and
+//! operands is the consumer's. The [`BlockHashes`] contract has two hashes:
+//! `strict` changes when any instruction changes, and `loose` survives
+//! operand and register changes. The cascade pairs blocks by a sequence of
+//! keys, the strongest first: the entries; `full`, the strict hash together
+//! with the loose hashes around the block; `strict`; `loose`; and last the
+//! wiring that `CfgDiff::compute` matches by. Each pair reports the
+//! [`MatchLevel`] it was matched at.
 
 extern crate alloc;
 use alloc::collections::{BTreeMap, VecDeque};
@@ -15,6 +22,10 @@ use alloc::vec::Vec;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
+
+pub use cascade::{BlockHashes, CascadeDiff, MatchLevel};
+
+mod cascade;
 
 /// Per-block structural fingerprint used for matching.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -222,17 +233,23 @@ fn edges_preserved(left: &BlockFacts, right: &BlockFacts, matching: &Matching) -
     mapped == expected
 }
 
+/// Whether two blocks are wired alike: the same shape.
+fn same_shape(left: &Side, right: &Side, left_block: BlockId, right_block: BlockId) -> bool {
+    left.facts(left_block).fingerprint.shape() == right.facts(right_block).fingerprint.shape()
+}
+
 /// Extends `matching` along the edges of the pairs in `pending`.
 ///
 /// The edges two matched blocks have of one kind are paired in adjacency
 /// order, and the targets of a pair join the matching when they are free and
-/// wired alike. Each new pair is queued, so the walk follows the matching out
-/// from where it started.
+/// `accepts` them. Each new pair is queued, so the walk follows the matching
+/// out from where it started.
 fn follow_edges(
     left: &Side,
     right: &Side,
     matching: &mut Matching,
     pending: &mut VecDeque<(BlockId, BlockId)>,
+    accepts: impl Fn(BlockId, BlockId) -> bool,
 ) {
     while let Some((left_block, right_block)) = pending.pop_front() {
         let left_edges = &left.facts(left_block).out_edges;
@@ -246,8 +263,7 @@ fn follow_edges(
             };
             for (&(_, left_target), &(_, right_target)) in left_group.iter().zip(right_group) {
                 if matching.both_free(left_target, right_target)
-                    && left.facts(left_target).fingerprint.shape()
-                        == right.facts(right_target).fingerprint.shape()
+                    && accepts(left_target, right_target)
                 {
                     matching.pair(left_target, right_target);
                     pending.push_back((left_target, right_target));
@@ -313,10 +329,18 @@ impl CfgDiff {
         let (left_side, right_side) = (Side::new(left), Side::new(right));
         let mut matching = Matching::default();
         let mut pending = VecDeque::new();
+        let wired_alike =
+            |left_block, right_block| same_shape(&left_side, &right_side, left_block, right_block);
 
         matching.pair(left_side.entry, right_side.entry);
         pending.push_back((left_side.entry, right_side.entry));
-        follow_edges(&left_side, &right_side, &mut matching, &mut pending);
+        follow_edges(
+            &left_side,
+            &right_side,
+            &mut matching,
+            &mut pending,
+            wired_alike,
+        );
 
         // Two indexes of the right blocks still free: by shape, and by shape
         // and instruction count. The walks below claim blocks from both, which
@@ -354,9 +378,26 @@ impl CfgDiff {
             };
             matching.pair(block, counterpart);
             pending.push_back((block, counterpart));
-            follow_edges(&left_side, &right_side, &mut matching, &mut pending);
+            follow_edges(
+                &left_side,
+                &right_side,
+                &mut matching,
+                &mut pending,
+                wired_alike,
+            );
         }
 
+        Self::from_matching(left, right, &left_side, &right_side, &matching)
+    }
+
+    /// The differences `matching` leaves between `left` and `right`.
+    fn from_matching<I, E, I2, E2>(
+        left: &Cfg<I, E>,
+        right: &Cfg<I2, E2>,
+        left_side: &Side,
+        right_side: &Side,
+        matching: &Matching,
+    ) -> Self {
         let matched = left_side
             .blocks
             .iter()
@@ -368,7 +409,7 @@ impl CfgDiff {
                     right: counterpart,
                     instruction_count_changed: facts.fingerprint.instruction_count
                         != other.fingerprint.instruction_count,
-                    edges_changed: !edges_preserved(facts, other, &matching),
+                    edges_changed: !edges_preserved(facts, other, matching),
                 })
             })
             .collect();
