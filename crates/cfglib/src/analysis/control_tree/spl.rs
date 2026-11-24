@@ -220,12 +220,12 @@ impl core::error::Error for SplError {}
 /// into a path decomposition of the graph whose width is at most `2·d + 1`,
 /// where `d` is the [`nesting_depth`](Self::nesting_depth): the deepest chain
 /// of nested `Parallel` and `Loop` nodes. A straight line has width 1 and an
-/// `if / else` diamond width 2. Conrado, Goharshady and Lam ("The Bounded
-/// Pathwidth of Control-Flow Graphs", OOPSLA 2023) bound the pathwidth of a
-/// program by twice its nesting depth; the bound here comes from the same
-/// idea, driven by the decomposition rather than by source syntax: each
-/// nested construct keeps its entry or branch block and the block its
-/// statements fall to in every bag inside it.
+/// `if / else` diamond width 2. The bound is this construction's own: each
+/// nested construct keeps its entry or branch block, and the block its
+/// statements fall to, in every bag inside it. Conrado, Goharshady and Lam
+/// ("The Bounded Pathwidth of Control-Flow Graphs", OOPSLA 2023) bound the
+/// pathwidth of structured programs by their nesting depth; this does not
+/// claim their constant.
 ///
 /// # Examples
 ///

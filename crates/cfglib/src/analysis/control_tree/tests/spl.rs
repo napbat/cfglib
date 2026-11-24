@@ -93,8 +93,10 @@ fn names(tree: &ControlTree, block: BlockId) -> bool {
 /// the decomposition's to find. An exit without code inside a loop or one arm
 /// of a branch is an early return, as a `Return` there is, and a block
 /// without code that two constructs enter, such as a tail two arms at
-/// different depths share, has no place.
-fn check<I>(cfg: &Cfg<I>, context: &str) -> bool {
+/// different depths share, has no place. Either is accepted only when
+/// `refused_with_code`, the same graph with code in every block, has no
+/// decomposition either: there the tree shows the goto or the return.
+fn check<I>(cfg: &Cfg<I>, refused_with_code: &dyn Fn() -> bool, context: &str) -> bool {
     let tree = ControlTree::compute(cfg);
     match (expected(cfg, &tree), tree.spl_decomposition(cfg)) {
         (None, Ok(spl)) => {
@@ -111,6 +113,7 @@ fn check<I>(cfg: &Cfg<I>, context: &str) -> bool {
                 cfg.outgoing(exit).next().is_none(),
                 "{context}: {exit} exits"
             );
+            assert!(refused_with_code(), "{context}: decomposes with code");
             false
         }
         (None, Err(SplError::UnplacedBlock(block))) => {
@@ -123,6 +126,7 @@ fn check<I>(cfg: &Cfg<I>, context: &str) -> bool {
                 cfg.incoming(block).nth(1).is_some(),
                 "{context}: two edges enter {block}"
             );
+            assert!(refused_with_code(), "{context}: decomposes with code");
             false
         }
         // Which of several exits is early depends on the decomposition.
@@ -151,7 +155,14 @@ fn check_every_graph(count: usize, kinds: &[EdgeKind], switches: bool, most: usi
     loop {
         for_each_graph(count, &all, |picked: &[Terminator]| {
             let cfg = graph(picked, &lengths);
-            if check(&cfg, &format!("{picked:?} with {lengths:?} instructions")) {
+            let refused_with_code = || {
+                let full = graph(picked, &vec![1; count]);
+                ControlTree::compute(&full)
+                    .spl_decomposition(&full)
+                    .is_err()
+            };
+            let context = format!("{picked:?} with {lengths:?} instructions");
+            if check(&cfg, &refused_with_code, &context) {
                 decomposed += 1;
             }
         });
@@ -494,6 +505,54 @@ fn two_exit_blocks_have_no_decomposition() {
 fn a_block_the_entry_does_not_reach_has_no_leaf() {
     let (cfg, blocks) = build(3, &[(0, 1, FALL), (2, 1, FALL)]);
     assert_eq!(obstacle(&cfg), SplError::UnplacedBlock(blocks[2]));
+}
+
+/// The result for `edges` with no code in `empty`, and with code everywhere.
+fn with_and_without_code(
+    count: usize,
+    edges: &[(usize, usize, EdgeKind)],
+    empty: &[usize],
+) -> (Result<(), SplError>, Result<(), SplError>, Vec<BlockId>) {
+    let (full, blocks) = build(count, edges);
+    let mut emptied = full.clone();
+    for &block in empty {
+        emptied.block_mut(blocks[block]).instructions_mut().clear();
+    }
+    let decompose = |cfg: &Cfg<&'static str>| {
+        let tree = ControlTree::compute(cfg);
+        assert_eq!(expected(cfg, &tree), None, "the tree has no obstacle");
+        tree.spl_decomposition(cfg).map(|_| ())
+    };
+    let with_code = ControlTree::compute(&full)
+        .spl_decomposition(&full)
+        .map(|_| ());
+    (decompose(&emptied), with_code, blocks)
+}
+
+#[test]
+fn an_empty_tail_two_depths_share_has_no_place() {
+    // if (a) { if (b) { tail } } else { tail }; exit, with `tail` empty: the
+    // tree passes through it, but the grammar needs it in two arms.
+    let (emptied, with_code, blocks) = with_and_without_code(
+        4,
+        &[(0, 1, T), (0, 2, F), (1, 2, T), (1, 3, F), (2, 3, FALL)],
+        &[2],
+    );
+    assert_eq!(emptied, Err(SplError::UnplacedBlock(blocks[2])));
+    assert!(with_code.is_err(), "with code, the tree has a goto");
+}
+
+#[test]
+fn an_empty_exit_inside_a_loop_is_an_early_return() {
+    // while (a) { if (b) continue; return; } spin forever, with the return
+    // empty: the tree has no `Return`, but the exit is inside the loop.
+    let (emptied, with_code, blocks) = with_and_without_code(
+        4,
+        &[(0, 1, T), (0, 2, F), (1, 0, T), (1, 3, F), (2, 2, FALL)],
+        &[0, 1, 2, 3],
+    );
+    assert_eq!(emptied, Err(SplError::EarlyReturn(blocks[3])));
+    assert_eq!(with_code, Err(SplError::EarlyReturn(blocks[3])));
 }
 
 #[test]
