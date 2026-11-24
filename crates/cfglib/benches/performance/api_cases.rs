@@ -6,6 +6,7 @@ mod dataflow;
 mod fixtures;
 mod graph;
 mod pipeline;
+mod reach_index;
 mod relaxation;
 mod transform;
 mod traversal;
@@ -180,6 +181,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     dataflow::register(suite);
     graph::register(suite);
     pipeline::register(suite);
+    reach_index::register(suite);
     relaxation::register(suite);
     transform::register(suite);
     traversal::register(suite);
