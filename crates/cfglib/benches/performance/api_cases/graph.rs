@@ -17,9 +17,9 @@ use cfglib::{
     verify_with, write_dot, write_text,
 };
 use cfglib::{
-    DotEdgeAttributes, DotStyle, EdgeId, TextStyle, bind_edge_attributes, bind_label,
-    control_flow_edge_attributes, display_label, no_label, parse_cfg_text, parse_text,
-    plain_edge_attributes,
+    DotEdgeAttributes, DotStyle, EdgeId, FunctionIndex, TextStyle, bind_edge_attributes,
+    bind_label, call_graph_indexed, control_flow_edge_attributes, display_label, no_label,
+    parse_cfg_text, parse_text, plain_edge_attributes, recursive_functions,
 };
 
 use super::BenchmarkSuite;
@@ -605,6 +605,7 @@ fn register_call_graph(suite: &mut BenchmarkSuite<'_>) {
         .collect();
     let graph = call_graph(&functions);
     let first = cfglib::NodeId::from_raw(0);
+    let index = FunctionIndex::compute(&graph);
 
     benchmark_case!(
         suite,
@@ -618,9 +619,25 @@ fn register_call_graph(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
+        "api_call_graph_indexed",
+        covers[call_graph_indexed],
+        || call_graph_indexed(&functions),
+        |(result, index)| {
+            assert_eq!(result.node_count(), functions.len());
+            assert_eq!(index.get(&128_u32), Some(cfglib::NodeId::from_index(128)));
+        }
+    );
+    benchmark_case!(
+        suite,
         "api_find_function",
         covers[find_function],
         || find_function(&graph, &128_u32),
+        |result| assert_eq!(*result, Some(cfglib::NodeId::from_index(128)))
+    );
+    benchmark_case!(
+        suite,
+        "api_function_index_get",
+        || index.get(&128_u32),
         |result| assert_eq!(*result, Some(cfglib::NodeId::from_index(128)))
     );
     benchmark_case!(
@@ -630,7 +647,9 @@ fn register_call_graph(suite: &mut BenchmarkSuite<'_>) {
         || is_recursive_function(&graph, first),
         |recursive| assert!(*recursive)
     );
+}
 
+fn register_call_tree(suite: &mut BenchmarkSuite<'_>) {
     // A call tree in which every 64th function calls back its caller: the
     // per-function loop a consumer runs to mark the recursive functions.
     let tree_cfgs = call_tree_cfgs(2_048);
@@ -654,6 +673,13 @@ fn register_call_graph(suite: &mut BenchmarkSuite<'_>) {
             .count(),
         |count: &usize| assert_eq!(*count, recursive)
     );
+    benchmark_case!(
+        suite,
+        "api_recursive_functions",
+        covers[recursive_functions],
+        || recursive_functions(&tree),
+        |marked: &Vec<bool>| assert_eq!(marked.iter().filter(|&&marked| marked).count(), recursive)
+    );
 
     // Each function's summary is the set of `id % 64` over everything it
     // reaches: a finite-height domain that every recursive cluster of the
@@ -674,7 +700,9 @@ fn register_call_graph(suite: &mut BenchmarkSuite<'_>) {
         || propagate_summaries(&tree, &0, reach_mask),
         |masks: &Vec<u64>| assert_eq!(*masks, tree_masks)
     );
+}
 
+fn register_recursive_ring(suite: &mut BenchmarkSuite<'_>) {
     // One ring of mutually recursive functions whose last member holds the
     // only seed, so the seed has to travel against the id order.
     let mut ring = Graph::<(), ()>::new();
@@ -793,5 +821,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     register_cfg_graphs(suite);
     register_output_formats(suite);
     register_call_graph(suite);
+    register_call_tree(suite);
+    register_recursive_ring(suite);
     register_loop_structure(suite);
 }

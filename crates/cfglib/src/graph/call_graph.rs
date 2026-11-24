@@ -24,6 +24,9 @@ const UNSEEN: usize = usize::MAX;
 /// A function on the walk that places its component's members.
 const OPEN: usize = usize::MAX - 1;
 
+/// The graph [`call_graph`] builds: functions as nodes, calls as edges.
+type FunctionGraph<C> = Graph<FunctionNode<C>, CallMetadata>;
+
 /// Payload of a function node in a call graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionNode<C> {
@@ -38,6 +41,59 @@ pub struct CallMetadata {
     pub is_tail_call: bool,
 }
 
+/// The function nodes of a call graph by identity, for repeated lookups.
+///
+/// [`find_function`] scans the graph on every call. The index answers the
+/// same question in O(log n) after one O(n log n) pass, and
+/// [`call_graph_indexed`] returns the index that building the graph makes
+/// anyway. The index is a snapshot: it does not see nodes added to or removed
+/// from the graph after it was computed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionIndex<C> {
+    by_key: BTreeMap<C, NodeId>,
+}
+
+impl<C: Ord + Clone> FunctionIndex<C> {
+    /// Index the function nodes of `graph` by identity, in O(n log n).
+    ///
+    /// When several nodes carry one identity, the node with the lowest index
+    /// wins, as it does for [`find_function`]. A graph that [`call_graph`]
+    /// builds has one node per key, at the key's first position.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cfglib::{CallMetadata, FunctionIndex, FunctionNode, Graph, find_function};
+    ///
+    /// let mut graph = Graph::<FunctionNode<&str>, CallMetadata>::new();
+    /// let main = graph.add_node(FunctionNode { id: "main" });
+    /// let helper = graph.add_node(FunctionNode { id: "helper" });
+    /// graph.add_edge(main, helper, CallMetadata { is_tail_call: false });
+    ///
+    /// let index = FunctionIndex::compute(&graph);
+    /// assert_eq!(index.get(&"helper"), Some(helper));
+    /// assert_eq!(index.get(&"missing"), None);
+    /// assert_eq!(index.get(&"main"), find_function(&graph, &"main"));
+    /// ```
+    #[must_use]
+    pub fn compute(graph: &Graph<FunctionNode<C>, CallMetadata>) -> Self {
+        let mut by_key = BTreeMap::new();
+        for node in graph.node_ids() {
+            by_key.entry(graph.node(node).id.clone()).or_insert(node);
+        }
+        Self { by_key }
+    }
+}
+
+impl<C: Ord> FunctionIndex<C> {
+    /// Return the node of the function `id`, or `None` when no function has
+    /// that identity, in O(log n).
+    #[must_use]
+    pub fn get(&self, id: &C) -> Option<NodeId> {
+        self.by_key.get(id).copied()
+    }
+}
+
 /// Build a call graph by scanning the instructions of a set of keyed CFGs.
 ///
 /// Nodes are emitted in input order. Every instruction whose
@@ -48,10 +104,57 @@ pub struct CallMetadata {
 /// A key is one function. When it is listed more than once it still has one
 /// node, at its first position, and the calls of every CFG listed under it
 /// are edges of that node.
+///
+/// [`call_graph_indexed`] also returns the index of the functions by key.
 #[must_use]
 pub fn call_graph<I: CallInfo>(
     functions: &[(I::Callee, &Cfg<I>)],
 ) -> Graph<FunctionNode<I::Callee>, CallMetadata> {
+    call_graph_indexed(functions).0
+}
+
+/// Build a call graph as [`call_graph`] does, together with the index of its
+/// functions by key.
+///
+/// Resolving the calls needs that index, so returning it costs nothing more.
+/// It equals [`FunctionIndex::compute`] on the returned graph: a key listed
+/// more than once maps to its one node, at its first position.
+///
+/// # Examples
+///
+/// ```
+/// use cfglib::{CallInfo, Cfg, call_graph_indexed, recursive_functions};
+///
+/// /// A call to a named function, or plain work.
+/// struct Op(Option<&'static str>);
+///
+/// impl CallInfo for Op {
+///     type Callee = &'static str;
+///
+///     fn callee(&self) -> Option<&'static str> {
+///         self.0
+///     }
+/// }
+///
+/// let calling = |callee| {
+///     let mut cfg = Cfg::new();
+///     cfg.block_mut(cfg.entry()).push(Op(callee));
+///     cfg
+/// };
+/// let (main, even, odd) = (calling(Some("even")), calling(Some("odd")), calling(Some("even")));
+///
+/// let (graph, index) = call_graph_indexed(&[("main", &main), ("even", &even), ("odd", &odd)]);
+/// let [main, even, odd] = ["main", "even", "odd"].map(|key| index.get(&key).unwrap());
+/// assert!(graph.successors(main).eq([even]));
+///
+/// let recursive = recursive_functions(&graph);
+/// assert!(!recursive[main.index()]);
+/// assert!(recursive[even.index()] && recursive[odd.index()]);
+/// ```
+#[must_use]
+pub fn call_graph_indexed<I: CallInfo>(
+    functions: &[(I::Callee, &Cfg<I>)],
+) -> (FunctionGraph<I::Callee>, FunctionIndex<I::Callee>) {
     let mut graph = Graph::with_capacity(functions.len(), functions.len());
     let mut key_to_id = BTreeMap::new();
 
@@ -84,10 +187,15 @@ pub fn call_graph<I: CallInfo>(
         }
     }
 
-    graph
+    (graph, FunctionIndex { by_key: key_to_id })
 }
 
 /// Find a function node by its identity.
+///
+/// The answer is a scan of the nodes in index order, O(n) per call, that
+/// returns the first node with identity `id`. A consumer that resolves many
+/// keys should compute a [`FunctionIndex`] once, or keep the one
+/// [`call_graph_indexed`] returns.
 #[must_use]
 pub fn find_function<C: PartialEq>(
     graph: &Graph<FunctionNode<C>, CallMetadata>,
@@ -101,9 +209,9 @@ pub fn find_function<C: PartialEq>(
 /// A function is recursive when it calls itself or one of its callees reaches
 /// it again. The answer is a walk from the function's callees that stops when
 /// it returns to the function, so it costs the part of the call graph the
-/// function reaches, not the whole graph. A consumer that classifies every
-/// function of a large graph whose functions reach most of it should run one
-/// [`tarjan_scc`] and ask each component [`Scc::is_cyclic`](crate::Scc::is_cyclic).
+/// function reaches: O(n + m) per call when that is most of the graph. A
+/// consumer that classifies every function should call
+/// [`recursive_functions`] once, which answers for all of them in O(n + m).
 ///
 /// # Panics
 ///
@@ -129,6 +237,30 @@ pub fn is_recursive_function<C>(
         }
     }
     false
+}
+
+/// Return for every node whether it is directly or mutually recursive.
+///
+/// The answer for all nodes comes from one [`tarjan_scc`] pass, O(n + m): a
+/// node is recursive when its strong component has several nodes or its one
+/// node calls itself, so entry `f` equals [`is_recursive_function`] for every
+/// live node `f`.
+///
+/// The vector is indexed by [`NodeId::index`] and sized by the graph's node
+/// *bound*; a removed node's slot is `false`. Generic over any [`Graph`], like
+/// [`propagate_summaries`].
+#[must_use]
+pub fn recursive_functions<N, E>(graph: &Graph<N, E>) -> Vec<bool> {
+    let mut recursive = vec![false; graph.node_bound()];
+    let components = tarjan_scc(graph);
+    for component in components.components() {
+        if components.component(component[0]).is_cyclic(graph) {
+            for &node in component {
+                recursive[node.index()] = true;
+            }
+        }
+    }
+    recursive
 }
 
 /// Compute a per-node summary over a dependency graph in callee-first

@@ -1,11 +1,13 @@
-//! `call_graph`, `find_function`, `is_recursive_function` and `propagate_summaries` over a
+//! `call_graph`, `call_graph_indexed`, `FunctionIndex`, `find_function`,
+//! `is_recursive_function`, `recursive_functions` and `propagate_summaries` over a
 //! multi-function program.
 
 use std::collections::BTreeSet;
 
 use cfglib::{
-    BasicBlock, CallInfo, CallMetadata, Cfg, EdgeKind, FunctionNode, Graph, NodeId, call_graph,
-    find_function, is_recursive_function, propagate_summaries,
+    BasicBlock, CallInfo, CallMetadata, Cfg, EdgeKind, FunctionIndex, FunctionNode, Graph, NodeId,
+    call_graph, call_graph_indexed, find_function, is_recursive_function, propagate_summaries,
+    recursive_functions,
 };
 
 use crate::Lcg;
@@ -151,6 +153,72 @@ fn finding_a_function_returns_its_node_or_nothing() {
     );
 }
 
+/// Every key a lookup can meet: each function, a callee outside the program, and a key the
+/// input lists twice.
+#[test]
+fn the_function_index_answers_what_find_function_answers() {
+    let program = program();
+    let again = function(&[Op::Call("helper")], &[], &[]);
+    let mut inputs: Vec<(&'static str, &Cfg<Op>)> =
+        program.iter().map(|(name, cfg)| (*name, cfg)).collect();
+    inputs.insert(3, ("parse", &again));
+    inputs.push(("parse", &again));
+
+    let (graph, index) = call_graph_indexed(&inputs);
+    assert_eq!(
+        index,
+        FunctionIndex::compute(&graph),
+        "the index the construction returns is the index of its graph"
+    );
+    let shape = |graph: &Graph<FunctionNode<&'static str>, CallMetadata>| {
+        let nodes: Vec<&str> = graph.nodes().map(|node| node.id).collect();
+        let edges: Vec<(NodeId, NodeId, bool)> = graph
+            .edges()
+            .map(|edge| (edge.source(), edge.target(), edge.payload().is_tail_call))
+            .collect();
+        (nodes, edges)
+    };
+    assert_eq!(
+        shape(&graph),
+        shape(&call_graph(&inputs)),
+        "the graph is the one `call_graph` builds"
+    );
+
+    for key in NAMES.iter().chain(&["missing"]) {
+        assert_eq!(index.get(key), find_function(&graph, key), "{key}");
+    }
+    assert_eq!(
+        index.get(&"parse").map(NodeId::index),
+        Some(1),
+        "a key listed three times keeps its first position"
+    );
+    assert_eq!(index.get(&"missing"), None);
+}
+
+/// A graph built by hand can repeat an identity and lose nodes: the lowest live node wins, as
+/// it does for the scan.
+#[test]
+fn the_function_index_keeps_the_lowest_live_node_of_a_repeated_identity() {
+    let mut graph = Graph::<FunctionNode<usize>, CallMetadata>::new();
+    let nodes: Vec<NodeId> = [3, 1, 3, 2, 1, 3]
+        .into_iter()
+        .map(|id| graph.add_node(FunctionNode { id }))
+        .collect();
+    graph.remove_node(nodes[0]);
+    graph.remove_node(nodes[3]);
+
+    let index = FunctionIndex::compute(&graph);
+    for key in 0..=4 {
+        assert_eq!(index.get(&key), find_function(&graph, &key), "key {key}");
+    }
+    assert_eq!(index.get(&3), Some(nodes[2]));
+    assert_eq!(index.get(&1), Some(nodes[1]));
+    assert_eq!(index.get(&2), None, "the only node of 2 is removed");
+
+    let empty = Graph::<FunctionNode<usize>, CallMetadata>::new();
+    assert_eq!(FunctionIndex::compute(&empty).get(&0), None);
+}
+
 /// Reachability from a function's callees back to itself, by plain search over the edge list.
 fn recursive_by_search(edges: &[(usize, usize)], nodes: usize, function: usize) -> bool {
     let mut seen = vec![false; nodes];
@@ -201,6 +269,94 @@ fn recursion_agrees_with_a_search_on_random_call_graphs() {
                 is_recursive_function(&graph, NodeId::from_index(function)),
                 recursive_by_search(&digraph.edges, 18, function),
                 "seed {seed}, function {function}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_batch_classification_marks_the_self_call_and_the_cycle() {
+    let program = program();
+    let graph = build(&program);
+    let recursive = recursive_functions(&graph);
+    assert_eq!(recursive.len(), graph.node_bound());
+    let marked: Vec<&str> = NAMES
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &name)| recursive[index].then_some(name))
+        .collect();
+    assert_eq!(marked, ["parse", "render", "layout"]);
+    assert_eq!(
+        recursive_functions(&Graph::<(), ()>::new()),
+        Vec::<bool>::new()
+    );
+}
+
+/// Random call graphs with parallel edges, self-calls, repeated identities and removed slots:
+/// the batch forms answer what the per-function queries answer, and the classification agrees
+/// with a search over the live edges.
+#[test]
+fn the_batch_forms_match_the_per_function_queries_on_random_call_graphs() {
+    for seed in 1..=60 {
+        let mut rng = Lcg(seed);
+        let nodes = 1 + rng.below(24);
+        let edges = rng.below(2 * nodes + 1);
+        let digraph = Digraph::random(&mut rng, nodes, edges);
+        let mut graph = Graph::new();
+        let ids: Vec<NodeId> = (0..nodes)
+            .map(|_| {
+                graph.add_node(FunctionNode {
+                    id: rng.below(nodes),
+                })
+            })
+            .collect();
+        for &(caller, callee) in &digraph.edges {
+            graph.add_edge(
+                ids[caller],
+                ids[callee],
+                CallMetadata {
+                    is_tail_call: false,
+                },
+            );
+        }
+        let removed: Vec<bool> = (0..nodes).map(|_| rng.below(6) == 0).collect();
+        for (function, &node) in ids.iter().enumerate() {
+            if removed[function] {
+                graph.remove_node(node);
+            }
+        }
+        let live_edges: Vec<(usize, usize)> = digraph
+            .edges
+            .iter()
+            .copied()
+            .filter(|&(caller, callee)| !removed[caller] && !removed[callee])
+            .collect();
+
+        let recursive = recursive_functions(&graph);
+        assert_eq!(recursive.len(), graph.node_bound(), "seed {seed}");
+        for (function, &node) in ids.iter().enumerate() {
+            if removed[function] {
+                assert!(!recursive[function], "seed {seed}, removed {function}");
+                continue;
+            }
+            assert_eq!(
+                recursive[function],
+                is_recursive_function(&graph, node),
+                "seed {seed}, function {function}"
+            );
+            assert_eq!(
+                recursive[function],
+                recursive_by_search(&live_edges, nodes, function),
+                "seed {seed}, function {function}"
+            );
+        }
+
+        let index = FunctionIndex::compute(&graph);
+        for key in 0..=nodes {
+            assert_eq!(
+                index.get(&key),
+                find_function(&graph, &key),
+                "seed {seed}, key {key}"
             );
         }
     }
