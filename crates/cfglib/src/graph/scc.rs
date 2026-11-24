@@ -17,6 +17,15 @@
 //! Within a component, [`strong_cuts`] and [`strong_cuts_of`] find the nodes
 //! and edges it depends on to stay strongly connected: its strong
 //! articulation points and strong bridges.
+//!
+//! A graph that is edited between queries keeps its components current in an
+//! [`IncrementalScc`] instead of decomposing again. Seeded from
+//! [`kosaraju_scc`], it repairs the partition and a sources-first order of it
+//! when told of an added or removed edge: an edge that agrees with the order
+//! costs O(1), one that runs against it searches only the components between
+//! its ends, and a removal re-splits only the component that held the edge.
+//! Each update returns an [`SccChange`] naming the components it merged or
+//! split and the stretch of the order it rewrote.
 
 extern crate alloc;
 use alloc::boxed::Box;
@@ -28,8 +37,10 @@ use core::marker::PhantomData;
 
 use crate::graph::store::{Graph, NodeId};
 use crate::graph::view::{DenseId, GraphView};
+pub use incremental::{IncrementalScc, SccChange};
 pub use strong_cuts::{StrongCutScratch, StrongCuts, strong_cuts, strong_cuts_of};
 
+mod incremental;
 mod strong_cuts;
 
 /// A maximal set of mutually reachable nodes, in ascending order.
@@ -328,7 +339,8 @@ fn is_cyclic_component<G: GraphView>(graph: &G, nodes: &[G::NodeId]) -> bool {
     }
 }
 
-/// One frame of the explicit depth-first stack both decompositions walk on.
+/// One frame of the explicit depth-first stack every walk of this module runs
+/// on: both decompositions and the [`IncrementalScc`] repairs.
 ///
 /// A frame's successors live in the walk's single arena rather than in a `Vec`
 /// of its own: frames are pushed and popped strictly last in, first out, so
@@ -340,6 +352,7 @@ fn is_cyclic_component<G: GraphView>(graph: &G, nodes: &[G::NodeId]) -> bool {
 /// the frame is handed the same successors, in the same adjacency order, read
 /// left to right by the same advancing cursor. Only where they are stored
 /// changes.
+#[derive(Debug, Clone)]
 struct SccFrame<N> {
     node: N,
     /// Where this frame's successors start in the arena; the pop truncates to
@@ -350,7 +363,8 @@ struct SccFrame<N> {
     /// top frame's region runs to the end.
     cursor: usize,
     /// Whether no successor has yet shown this node a lower index, so it is
-    /// still the root of its component. Only [`tarjan_scc`] reads it.
+    /// still the root of its component. Only the Tarjan walks read it:
+    /// [`tarjan_scc`] and the [`IncrementalScc`] repairs.
     root: bool,
 }
 

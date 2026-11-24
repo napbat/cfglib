@@ -329,8 +329,8 @@ pub use graph::reducible::make_reducible;
 pub use graph::relax::min_label_relaxation;
 pub use graph::reverse::reverse_cfg;
 pub use graph::scc::{
-    Scc, SccDecomposition, StrongCutScratch, StrongCuts, condensation, condensation_of,
-    kosaraju_scc, strong_cuts, strong_cuts_of, tarjan_scc,
+    IncrementalScc, Scc, SccChange, SccDecomposition, StrongCutScratch, StrongCuts, condensation,
+    condensation_of, kosaraju_scc, strong_cuts, strong_cuts_of, tarjan_scc,
 };
 pub use graph::scope::{
     Scope, ScopeCursor, ScopeCursorQuery, ScopeDatum, ScopeDatumId, ScopeEdgeId, ScopeEdgeTag,
