@@ -4,6 +4,10 @@
 //! associated handlers (catch, finally, fault, filter). The model follows
 //! the CLR / JVM exception metadata.
 //!
+//! These regions are declared by the consumer. The single-entry single-exit
+//! regions that the shape of the graph has are a different thing:
+//! [`ProgramStructureTree`](crate::ProgramStructureTree) computes those.
+//!
 //! Regions are **optional metadata** on a [`Cfg`] — GPU
 //! shaders and simple ISAs simply leave the region list empty.
 //!

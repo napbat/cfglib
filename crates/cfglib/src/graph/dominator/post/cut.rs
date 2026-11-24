@@ -31,14 +31,14 @@ use crate::graph::traverse::{TraversalDirection, reachable_in};
 use crate::graph::view::{DenseId, GraphView};
 
 /// What the analysis finds and the finished post-dominator tree keeps.
-pub(super) struct ExitStructure<N> {
+pub(crate) struct ExitStructure<N> {
     /// Whether each block reaches an exit, `false` for a block the entry
     /// misses.
-    pub(super) reaches_exit: Vec<bool>,
+    pub(crate) reaches_exit: Vec<bool>,
     /// The reachable blocks without successors, in ascending dense index.
-    pub(super) exits: Vec<N>,
+    pub(crate) exits: Vec<N>,
     /// The blocks the cut joins to the virtual exit, in ascending dense index.
-    pub(super) cut_roots: Vec<N>,
+    pub(crate) cut_roots: Vec<N>,
 }
 
 /// Every buffer the analysis fills, owned by the caller.
@@ -46,9 +46,9 @@ pub(super) struct ExitStructure<N> {
 /// The two tables the augmented graph reads stay here after the analysis, so
 /// the construction that follows needs no copy of them.
 #[derive(Debug, Clone, Default)]
-pub(super) struct CutBuffers {
+pub(crate) struct CutBuffers {
     /// Whether the entry reaches each block.
-    pub(super) reachable: Vec<bool>,
+    pub(crate) reachable: Vec<bool>,
     /// Whether each block has an edge to the virtual exit, which holds for an
     /// exit and for a cut root.
     pub(super) exit_edge: Vec<bool>,
@@ -61,7 +61,7 @@ pub(super) struct CutBuffers {
 impl CutBuffers {
     /// Find the exits, the blocks that reach them, and the cut of the part of
     /// `graph` that `root` reaches.
-    pub(super) fn analyze<G: GraphView>(
+    pub(crate) fn analyze<G: GraphView>(
         &mut self,
         graph: &G,
         root: G::NodeId,

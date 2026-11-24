@@ -23,6 +23,7 @@ pub mod label;
 pub mod loop_forest;
 pub mod loop_nest;
 pub mod open;
+pub mod program_structure;
 pub mod reach_index;
 pub mod reducible;
 pub mod relax;
