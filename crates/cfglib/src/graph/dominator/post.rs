@@ -24,6 +24,7 @@ use cut::{CutBuffers, ExitStructure};
 
 mod augmented;
 mod cut;
+mod edge_dominance;
 
 /// A node of a post-dominator tree: a block of the graph, or the virtual exit
 /// that every exit joins.
