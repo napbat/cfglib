@@ -178,6 +178,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "verify_edge_view",
     "verify_view",
     "verify_with",
+    "weak_control_closure",
     "wl_colors",
     "write_dot",
     "write_text",

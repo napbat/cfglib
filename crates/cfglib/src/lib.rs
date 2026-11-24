@@ -298,7 +298,8 @@ pub use graph::call_graph::{
     propagate_summaries_widened, recursive_functions,
 };
 pub use graph::cdg::{
-    NonterminationScratch, control_dependence_graph, nontermination_sensitive_controllers,
+    ControlClosureScratch, NonterminationScratch, control_dependence_graph,
+    nontermination_sensitive_controllers, weak_control_closure,
 };
 pub use graph::coldness::{ColdClass, ColdnessClasses, ColdnessGraph};
 pub use graph::cut::{EdgeCut, VertexCut, edge_disjoint_paths, min_edge_cut, min_vertex_cut};

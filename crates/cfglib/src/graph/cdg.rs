@@ -16,6 +16,10 @@
 //! [`nontermination_sensitive_controllers`] gives the third reading, which
 //! needs no post-dominator tree: a branch controls a block when one arm must
 //! reach it and the other may avoid it, by leaving or by looping forever.
+//!
+//! [`weak_control_closure`] closes a set of blocks under control the way
+//! slicing needs it, again without a tree: it adds every block that decides
+//! which block of the set comes next (Danicic et al.).
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -25,8 +29,10 @@ use crate::graph::epoch::EpochMarks;
 use crate::graph::store::Graph;
 use crate::graph::view::{DenseId, GraphView};
 pub use nontermination::{NonterminationScratch, nontermination_sensitive_controllers};
+pub use weak_closure::{ControlClosureScratch, weak_control_closure};
 
 mod nontermination;
+mod weak_closure;
 
 /// Compute control dependences from a graph view and its post-dominator
 /// tree.
