@@ -12,14 +12,16 @@
 //! The key table and the graph describe the same nodes, so the wrapper never
 //! hands out `&mut Graph`: a removal or a compaction through it would leave
 //! the table naming removed nodes or, after a renumbering, the wrong ones.
-//! [`remove_node`](KeyedGraph::remove_node) and
-//! [`compact`](KeyedGraph::compact) keep the table in step instead.
+//! [`remove_node`](KeyedGraph::remove_node),
+//! [`compact`](KeyedGraph::compact) and
+//! [`compact_ordered`](KeyedGraph::compact_ordered) keep the table in step
+//! instead.
 
 extern crate alloc;
 use alloc::collections::BTreeMap;
 
 use super::edge_view::{EdgeRef, EdgeView};
-use super::store::{EdgeId, Graph, NodeId, Renumbering};
+use super::store::{EdgeId, Graph, NodeId, NodeOrder, Renumbering};
 use super::view::{GraphView, NodeView};
 
 /// A directed multigraph keyed by a consumer identity `K`.
@@ -114,6 +116,28 @@ impl<K: Clone + Ord, N, E> KeyedGraph<K, N, E> {
     /// [`Renumbering`] also reports for ids held elsewhere.
     pub fn compact(&mut self) -> Renumbering {
         let renumbering = self.graph.compact();
+        self.renumber_keys(&renumbering);
+        renumbering
+    }
+
+    /// Compact the graph with its nodes numbered in `order`, and renumber
+    /// the key table with it.
+    ///
+    /// The key table follows [`Graph::compact_ordered`] as
+    /// [`compact`](Self::compact) follows [`Graph::compact`]: afterwards every
+    /// key names the node it named before, under its new identity.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the conditions of [`Graph::compact_ordered`], before
+    /// anything changes.
+    pub fn compact_ordered(&mut self, order: NodeOrder<'_>) -> Renumbering {
+        let renumbering = self.graph.compact_ordered(order);
+        self.renumber_keys(&renumbering);
+        renumbering
+    }
+
+    fn renumber_keys(&mut self, renumbering: &Renumbering) {
         // Every key names a live node and compaction keeps every live node,
         // so nothing is dropped here; a key that named a removed node could
         // not be renumbered, and has no node to name.
@@ -123,7 +147,6 @@ impl<K: Clone + Ord, N, E> KeyedGraph<K, N, E> {
                 true
             })
         });
-        renumbering
     }
 
     /// Iterate over the minted keys and their dense ids.
@@ -254,6 +277,7 @@ mod tests {
     use crate::graph::scc::tarjan_scc;
     use alloc::string::String;
     use alloc::string::ToString;
+    use alloc::vec::Vec;
 
     #[test]
     fn self_keyed_interning_is_idempotent() {
@@ -319,6 +343,33 @@ mod tests {
         assert_eq!(graph.node_id(&"b"), renumbering.node(b));
         assert_eq!(graph.node_id(&"c"), renumbering.node(c));
         assert!(graph.graph().is_compact());
+        for (key, node) in graph.keys() {
+            assert_eq!(graph.graph().node(node), key);
+        }
+    }
+
+    #[test]
+    fn ordered_compaction_renumbers_the_key_table_with_the_graph() {
+        let mut graph: KeyedGraph<&str, &str, ()> = KeyedGraph::new();
+        let a = graph.ensure_node(&"a", || "a");
+        let b = graph.ensure_node(&"b", || "b");
+        let c = graph.ensure_node(&"c", || "c");
+        let d = graph.ensure_node(&"d", || "d");
+        graph.add_edge(d, c, ());
+        graph.add_edge(c, b, ());
+        graph.remove_node(&"a");
+
+        let renumbering = graph.compact_ordered(NodeOrder::ReversePostorder(&[d]));
+
+        assert_eq!(renumbering.node(a), None);
+        for (key, old) in [("b", b), ("c", c), ("d", d)] {
+            assert_eq!(graph.node_id(&key), renumbering.node(old));
+        }
+        assert!(graph.graph().is_compact());
+        assert_eq!(
+            graph.graph().nodes().copied().collect::<Vec<_>>(),
+            ["d", "c", "b"]
+        );
         for (key, node) in graph.keys() {
             assert_eq!(graph.graph().node(node), key);
         }
