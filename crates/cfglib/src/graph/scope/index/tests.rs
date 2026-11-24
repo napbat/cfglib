@@ -190,14 +190,21 @@ fn updates_match_a_fresh_index_after_random_edits() {
             1 => ScopeResolutionConfig::new().with_max_path_count(1 + random.below(4)),
             _ => ScopeResolutionConfig::new().with_max_path_length(random.below(3)),
         };
-        let mut index = ScopeResolutionIndex::compute(&graph, &Lookup, config);
+        // A plain index records nothing, so its first update resolves every
+        // reference and records them; a tracked one is incremental at once.
+        let mut index = if random.one_in(4) {
+            ScopeResolutionIndex::compute(&graph, &Lookup, config)
+        } else {
+            ScopeResolutionIndex::compute_tracked(&graph, &Lookup, config)
+        };
         for _ in 0..12 {
             let changes = edit(&mut graph, &mut random);
             let before = index.clone();
             let update = index.update(&graph, &Lookup, config, &changes);
             let fresh = ScopeResolutionIndex::compute(&graph, &Lookup, config);
             assert_eq!(index, fresh, "{graph:?} {changes:?}");
-            assert_eq!(index.reads, fresh.reads, "{graph:?} {changes:?}");
+            let tracked = ScopeResolutionIndex::compute_tracked(&graph, &Lookup, config);
+            assert_eq!(index.reads, tracked.reads, "{graph:?} {changes:?}");
             assert_eq!(update.changed, differing(&before, &fresh));
             assert!(update.resolved_count >= update.changed.len());
             assert!(update.resolved_count <= graph.reference_count());
@@ -231,7 +238,7 @@ fn blocks(count: usize) -> (Graph, Vec<ScopeId>, Vec<ScopeId>) {
 fn a_datum_in_a_leaf_scope_resolves_only_its_readers_again() {
     let (mut graph, _, modules) = blocks(6);
     let config = ScopeResolutionConfig::new();
-    let mut index = ScopeResolutionIndex::compute(&graph, &Lookup, config);
+    let mut index = ScopeResolutionIndex::compute_tracked(&graph, &Lookup, config);
     // Only the innermost block imports the innermost module.
     let datum = graph.add_datum(modules[5], (), 5);
     let changes = ScopeGraphChanges {
@@ -266,6 +273,41 @@ fn a_datum_in_a_leaf_scope_resolves_only_its_readers_again() {
     // Nothing reported, nothing resolved.
     let update = index.update(&graph, &Lookup, config, &ScopeGraphChanges::default());
     assert_eq!(update, ScopeIndexUpdate::default());
+}
+
+#[test]
+fn a_plain_index_records_nothing_until_its_first_update() {
+    let (mut graph, blocks, _) = blocks(4);
+    let config = ScopeResolutionConfig::new();
+    let mut index = ScopeResolutionIndex::compute(&graph, &Lookup, config);
+    assert!(index.reads.is_none());
+    assert_eq!(
+        index,
+        ScopeResolutionIndex::compute_tracked(&graph, &Lookup, config)
+    );
+
+    // The first update has no record to go by: it resolves every reference.
+    graph.add_datum(blocks[3], (), 3);
+    let changes = ScopeGraphChanges {
+        scopes: vec![blocks[3]],
+        references: Vec::new(),
+    };
+    let update = index.update(&graph, &Lookup, config, &changes);
+    assert_eq!(update.resolved_count, 4);
+    assert_eq!(update.changed, [ScopeReferenceId::from_index(3)]);
+    assert_eq!(
+        index,
+        ScopeResolutionIndex::compute(&graph, &Lookup, config)
+    );
+
+    // From then on it updates incrementally.
+    graph.add_datum(blocks[3], (), 0);
+    let update = index.update(&graph, &Lookup, config, &changes);
+    assert_eq!(update.resolved_count, 1);
+    assert_eq!(
+        index,
+        ScopeResolutionIndex::compute(&graph, &Lookup, config)
+    );
 }
 
 /// The same policy, path-free, for the cached index.

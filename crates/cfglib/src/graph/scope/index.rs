@@ -3,7 +3,7 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::mem;
@@ -20,11 +20,11 @@ mod tests;
 
 /// Resolution results for every stored reference, plus a reverse index.
 ///
-/// An index from [`compute`](Self::compute) also records, for each
-/// reference, the scopes its resolution read, so [`update`](Self::update)
-/// can re-resolve only the references that an edit can affect. Two indexes
-/// are equal when their resolutions and reverse indexes are; the recorded
-/// scopes take no part.
+/// An index from [`compute_tracked`](Self::compute_tracked) also records,
+/// for each reference, the scopes its resolution read, so
+/// [`update`](Self::update) can re-resolve only the references that an edit
+/// can affect. Two indexes are equal when their resolutions and reverse
+/// indexes are; the recorded scopes take no part.
 #[derive(Debug, Clone)]
 pub struct ScopeResolutionIndex {
     resolutions: Vec<ScopeResolution>,
@@ -84,8 +84,37 @@ pub struct ScopeIndexUpdate {
 
 impl ScopeResolutionIndex {
     /// Resolve every reference in identity order and build the reverse index.
+    ///
+    /// The index records nothing of what the resolutions read, so its first
+    /// [`update`](Self::update) resolves every reference.
+    /// [`compute_tracked`](Self::compute_tracked) builds the same index with
+    /// that record, for updates that are incremental from the start.
     #[must_use]
     pub fn compute<S, L, R, D, Q, P>(
+        graph: &ScopeGraph<S, L, R, D, Q>,
+        query: &P,
+        config: ScopeResolutionConfig,
+    ) -> Self
+    where
+        P: ScopeGraphQuery<S, L, R, D, Q>,
+    {
+        let resolutions = graph
+            .reference_ids()
+            .map(|reference| ScopeResolution::compute(graph, reference, query, config))
+            .collect();
+        Self::from_resolutions(graph, resolutions)
+    }
+
+    /// Resolves every reference as [`compute`](Self::compute) does, and also
+    /// records the scopes each resolution read: the ends of the path prefixes
+    /// it expanded.
+    ///
+    /// With that record, [`update`](Self::update) re-resolves only the
+    /// references that read a changed scope. The record costs memory in
+    /// proportion to the scopes each resolution read, at most the prefixes it
+    /// expanded. The index is equal to the one `compute` builds.
+    #[must_use]
+    pub fn compute_tracked<S, L, R, D, Q, P>(
         graph: &ScopeGraph<S, L, R, D, Q>,
         query: &P,
         config: ScopeResolutionConfig,
@@ -125,8 +154,11 @@ impl ScopeResolutionIndex {
     ) -> Self {
         let mut references_by_datum = vec![Vec::new(); graph.datum_count()];
         for (reference, resolution) in graph.reference_ids().zip(&resolutions) {
-            for datum in sorted_visible_data(resolution) {
-                references_by_datum[datum.index()].push(reference);
+            let mut seen = BTreeSet::new();
+            for candidate in resolution.candidates() {
+                if seen.insert(candidate.datum()) {
+                    references_by_datum[candidate.datum().index()].push(reference);
+                }
             }
         }
         Self {
@@ -152,14 +184,13 @@ impl ScopeResolutionIndex {
     /// An update costs the resolution of the affected references, a table
     /// over the scopes, and the reader and reference lists that an affected
     /// reference joins or leaves: an edit that changes no reference's read
-    /// scopes or visible data patches no list. Recording costs memory in
-    /// proportion to the scopes each resolution read, at most the path
-    /// prefixes it expanded.
+    /// scopes or visible data patches no list.
     ///
-    /// An index that holds no record of what its resolutions read, such as
-    /// one from [`compute_cached`](Self::compute_cached), resolves every
-    /// reference on its first update and records them from then on. The two
-    /// forms count their work differently, so that first update can report a
+    /// An index that holds no record of what its resolutions read, one from
+    /// [`compute`](Self::compute) or [`compute_cached`](Self::compute_cached),
+    /// resolves every reference on its first update and records them from
+    /// then on, as [`compute_tracked`](Self::compute_tracked) does. The cached
+    /// form counts its work differently, so that first update can report a
     /// reference as changed whose candidates stayed the same.
     ///
     /// # Panics
@@ -232,7 +263,7 @@ impl ScopeResolutionIndex {
     /// let inside = graph.add_reference(function, "x");
     /// let outside = graph.add_reference(other, "x");
     /// let config = ScopeResolutionConfig::new();
-    /// let mut index = ScopeResolutionIndex::compute(&graph, &Lexical, config);
+    /// let mut index = ScopeResolutionIndex::compute_tracked(&graph, &Lexical, config);
     /// assert_eq!(index.references_to(global), [inside, outside]);
     ///
     /// // A local `x` in the function shadows the global one there. Only the

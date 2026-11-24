@@ -3,11 +3,12 @@
 //!
 //! The lexical chain is the shape of a source file: references in nested
 //! blocks climb the same parents and imports, which `compute` walks once per
-//! reference and `compute_cached` once per scope. An edit of one leaf scope
-//! there is read by the references of one block, which `update` resolves
-//! again. The stacked inheritance diamonds reach one member along `2^d`
-//! equally specific paths, every one of which both resolvers keep, so their
-//! cost grows with that output.
+//! reference and `compute_cached` once per scope; `compute_tracked` walks it
+//! as `compute` does and records what each reference read. An edit of one
+//! leaf scope there is read by the references of one block, which `update`
+//! resolves again. The stacked inheritance diamonds reach one member along
+//! `2^d` equally specific paths, every one of which both resolvers keep, so
+//! their cost grows with that output.
 
 use std::cmp::Ordering;
 
@@ -230,10 +231,16 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         || ScopeResolutionIndex::compute_cached(&chain, &Lexical, config),
         |index| assert_chain_resolved(&chain, index)
     );
+    benchmark_case!(
+        suite,
+        "scope_index_tracked_lexical_chain",
+        || ScopeResolutionIndex::compute_tracked(&chain, &Lexical, config),
+        |index| assert_chain_resolved(&chain, index)
+    );
     // One new datum in the innermost module: only the references of the
     // innermost block read it. Every run repeats the same update, which
     // resolves them again and changes nothing after the first.
-    let mut index = ScopeResolutionIndex::compute(&chain, &Lexical, config);
+    let mut index = ScopeResolutionIndex::compute_tracked(&chain, &Lexical, config);
     let mut edited = chain.clone();
     edited.add_datum(leaf, (), 2 * LEVELS);
     let changes = ScopeGraphChanges {
