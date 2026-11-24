@@ -7,6 +7,7 @@ mod dataflow;
 mod dyck;
 mod feedback;
 mod fixtures;
+mod frequency;
 mod graph;
 mod pipeline;
 mod relaxation;
@@ -199,6 +200,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     dataflow::register(suite);
     dyck::register(suite);
     feedback::register(suite);
+    frequency::register(suite);
     graph::register(suite);
     pipeline::register(suite);
     relaxation::register(suite);

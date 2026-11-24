@@ -14,6 +14,7 @@ pub mod epoch;
 pub mod fanout;
 pub mod feedback;
 pub mod fingerprint;
+pub mod frequency;
 pub mod horn;
 pub mod interval;
 pub mod keyed;
