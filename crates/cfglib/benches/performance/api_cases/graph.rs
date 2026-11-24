@@ -628,6 +628,52 @@ fn register_call_graph(suite: &mut BenchmarkSuite<'_>) {
         || is_recursive_function(&graph, first),
         |recursive| assert!(*recursive)
     );
+
+    // A call tree in which every 64th function calls back its caller: the
+    // per-function loop a consumer runs to mark the recursive functions.
+    let tree_cfgs = call_tree_cfgs(2_048);
+    let tree_functions: Vec<_> = tree_cfgs
+        .iter()
+        .enumerate()
+        .map(|(index, cfg)| (fixture_u32(index), cfg))
+        .collect();
+    let tree = call_graph(&tree_functions);
+    let components = kosaraju_scc(&tree);
+    let recursive = tree
+        .node_ids()
+        .filter(|&function| components.component(function).is_cyclic(&tree))
+        .count();
+    benchmark_case!(
+        suite,
+        "call_tree_is_recursive_every_function",
+        || tree
+            .node_ids()
+            .filter(|&function| is_recursive_function(&tree, function))
+            .count(),
+        |count: &usize| assert_eq!(*count, recursive)
+    );
+}
+
+/// Function `i` calls `2i + 1` and `2i + 2`; every 64th function also calls
+/// its caller back.
+fn call_tree_cfgs(function_count: usize) -> Vec<Cfg<CallInst>> {
+    (0..function_count)
+        .map(|index| {
+            let mut cfg = Cfg::new();
+            let entry = cfg.entry();
+            for callee in [2 * index + 1, 2 * index + 2] {
+                if callee < function_count {
+                    cfg.block_mut(entry)
+                        .push(CallInst(Some(fixture_u32(callee))));
+                }
+            }
+            if index > 0 && index % 64 == 0 {
+                cfg.block_mut(entry)
+                    .push(CallInst(Some(fixture_u32((index - 1) / 2))));
+            }
+            cfg
+        })
+        .collect()
 }
 
 fn register_loop_structure(suite: &mut BenchmarkSuite<'_>) {
