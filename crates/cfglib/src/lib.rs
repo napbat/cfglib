@@ -297,7 +297,9 @@ pub use graph::call_graph::{
     is_recursive_function, propagate_summaries, propagate_summaries_narrowed,
     propagate_summaries_widened, recursive_functions,
 };
-pub use graph::cdg::control_dependence_graph;
+pub use graph::cdg::{
+    NonterminationScratch, control_dependence_graph, nontermination_sensitive_controllers,
+};
 pub use graph::coldness::{ColdClass, ColdnessClasses, ColdnessGraph};
 pub use graph::cut::{EdgeCut, VertexCut, edge_disjoint_paths, min_edge_cut, min_vertex_cut};
 pub use graph::diff::{
@@ -306,7 +308,8 @@ pub use graph::diff::{
 };
 pub use graph::dominator::{
     CertificateError, DominanceFrontiers, DominatorScratch, DominatorTree, DominatorUpdate,
-    FrontierScratch, LowHighOrder, PostDominatorScratch, PostDominatorTree, PostNode,
+    ExitPolicy, FrontierScratch, LowHighOrder, PostDominatorScratch, PostDominatorTree, PostNode,
+    SinkId,
 };
 pub use graph::dot::{
     DotEdgeAttributes, DotEdgeStyle, DotRankDir, DotStyle, bind_edge_attributes,

@@ -8,6 +8,14 @@
 //! `A -> T` when `B` post-dominates `T` and does not strictly post-dominate
 //! `A`. A block that branches back to itself is therefore control dependent
 //! on itself.
+//!
+//! In a region that no exit follows, post-dominance needs a convention, and
+//! the relation follows the one its tree was built under (see
+//! [`ExitPolicy`](crate::ExitPolicy)): relative to the cut by default, or
+//! nontermination-insensitive with every exit-free sink as one class.
+//! [`nontermination_sensitive_controllers`] gives the third reading, which
+//! needs no post-dominator tree: a branch controls a block when one arm must
+//! reach it and the other may avoid it, by leaving or by looping forever.
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -16,6 +24,9 @@ use crate::graph::dominator::PostDominatorTree;
 use crate::graph::epoch::EpochMarks;
 use crate::graph::store::Graph;
 use crate::graph::view::{DenseId, GraphView};
+pub use nontermination::{NonterminationScratch, nontermination_sensitive_controllers};
+
+mod nontermination;
 
 /// Compute control dependences from a graph view and its post-dominator
 /// tree.
@@ -26,6 +37,15 @@ use crate::graph::view::{DenseId, GraphView};
 /// blocks of [`PostDominatorTree::control_dependents`], and an arm that
 /// leads back to `A` itself gives the edge `A -> A`. Parallel records
 /// contribute one edge, and a block the entry cannot reach has none.
+///
+/// The tree decides what an exit-free region gives. Under the default
+/// [`ExitPolicy::CutLoops`](crate::ExitPolicy::CutLoops) the blocks that close
+/// such a loop control it. Under
+/// [`ExitPolicy::SinkComponents`](crate::ExitPolicy::SinkComponents) no arm
+/// inside a sink class makes an edge, a class that depends contributes an
+/// edge to each of its blocks, and the result is the nontermination-insensitive
+/// control dependence of Hecker et al.: `A -> B` when `A` has one successor
+/// that `B` post-dominates and one it does not, under sink post-dominance.
 ///
 /// Returned nodes are allocated in source dense-index order, so a source node
 /// and its graph node have the same dense index even when the view overrides

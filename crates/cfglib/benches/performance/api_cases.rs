@@ -3,6 +3,7 @@ use super::harness::{BenchmarkSuite, benchmark_coverage};
 mod address;
 mod analysis;
 mod block_order;
+mod control_dependence;
 mod cut;
 mod dataflow;
 mod decomposition;
@@ -91,6 +92,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "multiset_fingerprint",
     "nearest_common_ancestor",
     "no_label",
+    "nontermination_sensitive_controllers",
     "open_breadth_first_events",
     "open_breadth_first_paths",
     "open_depth_first_events",
@@ -240,6 +242,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
 
     analysis::register(suite);
     block_order::register(suite);
+    control_dependence::register(suite);
     cut::register(suite);
     dataflow::register(suite);
     decomposition::register(suite);

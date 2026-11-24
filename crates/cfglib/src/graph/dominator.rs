@@ -52,7 +52,7 @@ pub use incremental::DominatorUpdate;
 use incremental::UpdateBuffers;
 use numbering::{Numbered, NumberingBuffers};
 pub(crate) use post::CutBuffers;
-pub use post::{PostDominatorScratch, PostDominatorTree, PostNode};
+pub use post::{ExitPolicy, PostDominatorScratch, PostDominatorTree, PostNode, SinkId};
 
 mod certificate;
 mod construction;
