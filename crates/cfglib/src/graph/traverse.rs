@@ -498,16 +498,6 @@ fn breadth_first_bounded_with<G: GraphView, A: Adjacency>(
     distances
 }
 
-/// Hop counts from `start` to every node reachable along `axis`, using
-/// `usize::MAX` for unreachable nodes. `start` itself is at distance 0.
-fn breadth_first_distances<G: GraphView, A: Adjacency>(
-    axis: A,
-    graph: &G,
-    start: G::NodeId,
-) -> Vec<usize> {
-    breadth_first_bounded(axis, graph, start, None)
-}
-
 /// Return the nearest node reachable from both `a` and `b` by walking
 /// `direction` edges — the meeting point of two outward searches.
 ///
@@ -539,6 +529,15 @@ fn breadth_first_distances<G: GraphView, A: Adjacency>(
 /// asks [`common_ancestors`] for every shared node with both distances and
 /// applies its own rank; this function is that generalization ranked the one
 /// way a tuple can express.
+///
+/// # Cost
+///
+/// The two breadth-first searches advance one level at a time, the shallower
+/// one first, and stop as soon as both have reached the best combined
+/// distance found: no node they have not seen could beat or tie it. A meet
+/// at combined distance `d` therefore costs the nodes within `d` hops of
+/// either endpoint, not everything both can reach. Each call still allocates
+/// two distance tables of `node_bound` entries.
 ///
 /// # Examples
 ///
@@ -596,22 +595,95 @@ fn nearest_meet<G: GraphView, A: Adjacency>(
 ) -> Option<G::NodeId> {
     assert_in_bound(graph, a, "node `a`");
     assert_in_bound(graph, b, "node `b`");
-    let from_a = breadth_first_distances(axis, graph, a);
-    let from_b = breadth_first_distances(axis, graph, b);
-
+    let mut sides = [MeetSide::new(graph, a), MeetSide::new(graph, b)];
     // `min` over `(combined distance, node id)` *is* the documented
-    // tie-break: node ids are dense and ordered, so the tuple ordering
-    // ranks by distance and settles ties on the smaller id.
-    graph
-        .node_ids()
-        .filter_map(|node| {
-            let reached_from_a = from_a[node.index()];
-            let reached_from_b = from_b[node.index()];
-            (reached_from_a != usize::MAX && reached_from_b != usize::MAX)
-                .then(|| (reached_from_a + reached_from_b, node))
-        })
-        .min()
-        .map(|(_, node)| node)
+    // tie-break: node ids are dense and ordered, so the tuple ordering ranks
+    // by distance and settles ties on the smaller id.
+    let mut best = (a == b).then_some((0, a));
+
+    // Each step finishes one more breadth-first level of the side whose
+    // radius is smaller. A node joins the candidates when the second search
+    // reaches it, with both of its distances exact. Every node whose combined
+    // distance is at most `d` lies within `d` of both endpoints, so once both
+    // radii reach the best combined distance found, every node that could
+    // beat it or tie it has been seen, and the answer is final.
+    loop {
+        if best.is_some_and(|(distance, _)| sides[0].radius.min(sides[1].radius) >= distance) {
+            break;
+        }
+        let side = match (sides[0].done(), sides[1].done()) {
+            (true, true) => break,
+            (false, true) => 0,
+            (true, false) => 1,
+            (false, false) => usize::from(sides[1].radius < sides[0].radius),
+        };
+        let [first, second] = &mut sides;
+        let (this, other) = if side == 0 {
+            (first, &*second)
+        } else {
+            (second, &*first)
+        };
+        this.expand(axis, graph, |node, distance| {
+            let from_other = other.distances[node.index()];
+            if from_other != usize::MAX {
+                let candidate = (distance + from_other, node);
+                best = Some(best.map_or(candidate, |known| known.min(candidate)));
+            }
+        });
+    }
+    best.map(|(_, node)| node)
+}
+
+/// One endpoint's breadth-first search in [`nearest_meet`], advanced a whole
+/// level at a time.
+struct MeetSide<N> {
+    distances: Vec<usize>,
+    frontier: Vec<N>,
+    /// Every node within this many hops is in `distances`; `usize::MAX` once
+    /// the search has reached everything it can.
+    radius: usize,
+}
+
+impl<N: DenseId> MeetSide<N> {
+    fn new<G: GraphView<NodeId = N>>(graph: &G, start: N) -> Self {
+        let mut distances = vec![usize::MAX; graph.node_bound()];
+        distances[start.index()] = 0;
+        Self {
+            distances,
+            frontier: vec![start],
+            radius: 0,
+        }
+    }
+
+    fn done(&self) -> bool {
+        self.radius == usize::MAX
+    }
+
+    /// Discovers the next level, reporting each new node with its distance.
+    fn expand<G: GraphView<NodeId = N>, A: Adjacency>(
+        &mut self,
+        axis: A,
+        graph: &G,
+        mut discovered: impl FnMut(N, usize),
+    ) {
+        let distance = self.radius + 1;
+        let mut next = Vec::new();
+        for &node in &self.frontier {
+            for neighbor in axis.neighbors(graph, node) {
+                if self.distances[neighbor.index()] == usize::MAX {
+                    self.distances[neighbor.index()] = distance;
+                    discovered(neighbor, distance);
+                    next.push(neighbor);
+                }
+            }
+        }
+        self.frontier = next;
+        self.radius = if self.frontier.is_empty() {
+            usize::MAX
+        } else {
+            distance
+        };
+    }
 }
 
 /// A node reachable from both endpoints of a [`common_ancestors`] query,
