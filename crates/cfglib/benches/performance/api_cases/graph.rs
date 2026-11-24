@@ -27,6 +27,8 @@ use crate::fixtures::{branchy_cfg, branchy_graph, fixture_u32};
 use crate::harness::benchmark_case;
 
 const NODE_COUNT: usize = 1_024;
+/// Functions in the mutually recursive ring of the summary case.
+const RING_FUNCTIONS: usize = 1_000;
 
 #[derive(Clone, Copy)]
 struct CallInst(Option<u32>);
@@ -651,6 +653,45 @@ fn register_call_graph(suite: &mut BenchmarkSuite<'_>) {
             .filter(|&function| is_recursive_function(&tree, function))
             .count(),
         |count: &usize| assert_eq!(*count, recursive)
+    );
+
+    // Each function's summary is the set of `id % 64` over everything it
+    // reaches: a finite-height domain that every recursive cluster of the
+    // call tree has to iterate.
+    let reach_mask = |graph: &cfglib::Graph<cfglib::FunctionNode<u32>, cfglib::CallMetadata>,
+                      node: cfglib::NodeId,
+                      summaries: &[u64]| {
+        graph
+            .successors(node)
+            .fold(1_u64 << (node.index() % 64), |mask, callee| {
+                mask | summaries[callee.index()]
+            })
+    };
+    let tree_masks = propagate_summaries(&tree, &0, reach_mask);
+    benchmark_case!(
+        suite,
+        "call_tree_propagate_summaries",
+        || propagate_summaries(&tree, &0, reach_mask),
+        |masks: &Vec<u64>| assert_eq!(*masks, tree_masks)
+    );
+
+    // One ring of mutually recursive functions whose last member holds the
+    // only seed, so the seed has to travel against the id order.
+    let mut ring = Graph::<(), ()>::new();
+    let members: Vec<_> = (0..RING_FUNCTIONS).map(|_| ring.add_node(())).collect();
+    for (index, &caller) in members.iter().enumerate() {
+        ring.add_edge(caller, members[(index + 1) % RING_FUNCTIONS], ());
+    }
+    benchmark_case!(
+        suite,
+        "ring_propagate_summaries_seed_at_last",
+        || propagate_summaries(&ring, &false, |graph, node, summaries| {
+            node.index() + 1 == RING_FUNCTIONS
+                || graph
+                    .successors(node)
+                    .any(|callee| summaries[callee.index()])
+        }),
+        |summaries: &Vec<bool>| assert!(summaries.iter().all(|summary| *summary))
     );
 }
 

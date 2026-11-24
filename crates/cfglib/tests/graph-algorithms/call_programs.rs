@@ -316,7 +316,7 @@ fn an_acyclic_program_computes_each_function_once_after_its_callees_are_final() 
 }
 
 #[test]
-fn recursive_functions_are_recomputed_until_their_summary_stops_changing() {
+fn recursive_functions_settle_on_a_summary_that_no_longer_changes() {
     let program = program();
     let graph = build(&program);
     let mut calls = [0; 8];
@@ -324,21 +324,31 @@ fn recursive_functions_are_recomputed_until_their_summary_stops_changing() {
         .iter()
         .map(|(_, cfg)| intrinsic_effects(cfg))
         .collect();
-    let summaries = propagate_summaries(&graph, &BTreeSet::new(), |graph, node, summaries| {
-        calls[node.index()] += 1;
+    let compute = |graph: &Graph<FunctionNode<&str>, CallMetadata>,
+                   node: NodeId,
+                   summaries: &[BTreeSet<&'static str>]| {
         let mut effects = intrinsic[node.index()].clone();
         for callee in graph.successors(node) {
             effects.extend(summaries[callee.index()].iter().copied());
         }
         effects
+    };
+    let summaries = propagate_summaries(&graph, &BTreeSet::new(), |graph, node, summaries| {
+        calls[node.index()] += 1;
+        compute(graph, node, summaries)
     });
+    // A recursive cluster is iterated, so one of its members runs again once
+    // a callee it read has changed; every member ends on a summary that
+    // computing it once more would not change.
+    let cluster = ["render", "layout"].map(|name| find_function(&graph, &name).expect("present"));
+    assert!(cluster.iter().any(|node| calls[node.index()] >= 2));
     for recursive in ["parse", "render", "layout"] {
         let node = find_function(&graph, &recursive).expect("present");
         assert!(!summaries[node.index()].is_empty());
-        assert!(
-            calls[node.index()] >= 2,
-            "{recursive}: computed {} time(s)",
-            calls[node.index()]
+        assert_eq!(
+            compute(&graph, node, &summaries),
+            summaries[node.index()],
+            "{recursive} is stable"
         );
     }
     for plain in ["main", "lex", "cleanup", "legacy", "helper"] {
