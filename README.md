@@ -124,6 +124,23 @@ a `ScopeCursor` (the start, the end, and the length of a path) instead of a
 stored path, so a walk of `D` scopes costs `O(D)` hook calls and allocates
 nothing. `ScopeCursor::of_path` lets one policy type serve both query forms.
 
+`ScopeResolutionIndex::compute_cached` resolves every reference through one
+`ScopeEnvironmentCache` under a `ScopeEnvironmentQuery`, the memo-safe query
+form. Its hooks see the scope where a path ends and the path-language state
+there, never the path or the reference, and a key projects each datum to what
+shadowing and lookup compare (typically its name). The environment of a scope
+in a state (every visible datum by key, with its path, after lexicographic
+label-word shadowing within each key) is then the same for every reference,
+so it is computed once and the references of a block share the walk up their
+parents and imports. On a graph without cycles each reference sees the data
+that `compute` shows with the same hooks. Scopes on a cycle (found once with
+`tarjan_scc`) are resolved anew on each reach under a (scope, state) path
+guard and not cached, so a path language that comes back to a scope in
+another state can reach data that `compute`'s scope guard cuts off. Policies
+that need the whole path, such as accessibility, stay `ScopeGraphQuery`s or
+run afterwards on the stored candidate paths. The cache trades memory for
+time: it holds every key of every environment it computed.
+
 ### Stack graphs
 
 `graph::stack::StackGraph<F, S, N, E>` implements the standard root,

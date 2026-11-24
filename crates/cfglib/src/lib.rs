@@ -27,6 +27,9 @@
 //! the path automaton, matching, label/data specificity, or a full path order;
 //! the same resolver handles stored references and ephemeral completion
 //! requests and builds forward/reverse binding indexes.
+//! [`graph::scope::ScopeEnvironmentQuery`] is the path-free form whose
+//! per-scope environments [`ScopeResolutionIndex::compute_cached`] computes
+//! once and shares across references.
 //! [`graph::stack::StackGraph`] provides the complementary file-incremental
 //! model with the standard root, scope, symbol push/pop, scoped-symbol,
 //! drop-scopes, and jump-to-scope nodes. It supports concrete direct paths,
@@ -350,10 +353,11 @@ pub use graph::scc::{
 };
 pub use graph::scope::{
     Scope, ScopeCursor, ScopeCursorQuery, ScopeDatum, ScopeDatumId, ScopeEdgeId, ScopeEdgeTag,
-    ScopeFirstResolution, ScopeFirstResolutionError, ScopeGraph, ScopeGraphPathLabel,
-    ScopeGraphQuery, ScopeId, ScopeLinearResolutionError, ScopePath, ScopeQuery, ScopeReference,
-    ScopeReferenceId, ScopeResolution, ScopeResolutionCandidate, ScopeResolutionConfig,
-    ScopeResolutionIndex, ScopeResolutionStats, ScopeTag,
+    ScopeEnvironmentCache, ScopeEnvironmentQuery, ScopeFirstResolution, ScopeFirstResolutionError,
+    ScopeGraph, ScopeGraphPathLabel, ScopeGraphQuery, ScopeId, ScopeLinearResolutionError,
+    ScopePath, ScopeQuery, ScopeReference, ScopeReferenceId, ScopeResolution,
+    ScopeResolutionCandidate, ScopeResolutionConfig, ScopeResolutionIndex, ScopeResolutionStats,
+    ScopeTag,
 };
 pub use graph::search::{
     BfsEvent, DfsEvent, SearchConfig, SearchOrder, SearchScratch, Visit, VisitedPolicy,
