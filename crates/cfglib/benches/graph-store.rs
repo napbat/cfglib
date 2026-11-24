@@ -12,10 +12,31 @@
 //! $env:RUSTFLAGS = "--cfg cfglib_bench_alloc"; cargo bench -p cfglib --bench graph-store
 //! ```
 //!
-//! The store is built from one shuffled edge list, so no phase sees the
-//! grouped-by-source arrival order a compressed index would find unfairly
-//! easy, and the degree distribution is skewed the way a real symbol graph's
-//! is: one percent of the nodes carry a hundred edges each.
+//! The large table runs three inputs, each in two arrival orders:
+//!
+//! - `uniform`: uniform random endpoints, and one percent of the nodes carry
+//!   a hundred edges each. No numbering of such a graph has more locality
+//!   than another, so it is the worst case, and no reordering can help it.
+//! - `structured`: procedures laid out one after another, each a flow graph
+//!   in the order a builder creates its blocks (fall-through, forward
+//!   branches, loop latches), plus calls to procedure entries, half of them
+//!   to the one procedure in a hundred that is a hub. Nearby ids are nearby
+//!   code, as in a graph built function by function.
+//! - `structured_relabeled`: the same edges under a random permutation of
+//!   the node ids, so its locality is known and recoverable.
+//!
+//! `grouped` arrival feeds each source's edges together, as a consumer that
+//! builds one function or one file at a time does; `shuffled` feeds one
+//! shuffled list, so no phase sees an arrival order a compressed index would
+//! find easy. Successor and predecessor scans are both timed, since the
+//! dominator, post-dominator, SCC and backward solvers all walk predecessors.
+//!
+//! Each input's locality is reported as its neighbor-to-neighbor average ID
+//! distance (N2N AID, Koohi Esfahani, Kilpatrick and Vandierendonck, IISWC
+//! 2021): for a node, the gaps between its consecutive neighbor ids in
+//! ascending order, summed and divided by its degree, averaged here over the
+//! nodes with two or more neighbors, for successors and predecessors. Lower
+//! is more local. It depends on the numbering, not on the arrival order.
 
 use std::alloc::System;
 #[cfg(cfglib_bench_alloc)]
@@ -175,6 +196,13 @@ const EDGES: usize = 4_000_000;
 const HUB_SHARE: usize = 100;
 const HUB_DEGREE: usize = 100;
 const APPENDS: usize = 100_000;
+/// Blocks of one procedure of the structured input: `PROCEDURE_MIN` plus up
+/// to `PROCEDURE_SPREAD - 1` more.
+const PROCEDURE_MIN: usize = 4;
+const PROCEDURE_SPREAD: usize = 60;
+/// The farthest a forward branch and a loop latch reach inside a procedure.
+const BRANCH_REACH: usize = 7;
+const LATCH_REACH: usize = 8;
 
 /// The other scale the same store has to serve: one procedure's flow graph,
 /// built and thrown away. Nothing here is large enough to miss cache, so the
@@ -216,6 +244,136 @@ fn append_list(rng: &mut Rng) -> Vec<(u32, u32)> {
             (source, target)
         })
         .collect()
+}
+
+/// Procedures laid out one after another until [`NODES`] blocks exist, each
+/// numbered in the order a builder creates its blocks.
+///
+/// Every block falls through to the next one of its procedure; three blocks
+/// in ten also branch forward, one in ten closes a loop back to an earlier
+/// block, and one in two calls a procedure entry. Half of the calls go to
+/// the one procedure in a hundred that is a hub, the rest to any procedure.
+/// The list is grouped by source, in block order.
+fn structured_edge_list(rng: &mut Rng) -> Vec<(u32, u32)> {
+    let mut procedures = Vec::new();
+    let mut laid_out = 0;
+    while laid_out < NODES {
+        let size = (PROCEDURE_MIN + rng.below(PROCEDURE_SPREAD)).min(NODES - laid_out);
+        procedures.push((laid_out, size));
+        laid_out += size;
+    }
+    let hubs: Vec<usize> = procedures
+        .iter()
+        .step_by(HUB_SHARE)
+        .map(|&(entry, _)| entry)
+        .collect();
+
+    let mut edges = Vec::new();
+    for &(entry, size) in &procedures {
+        for offset in 0..size {
+            let block = entry + offset;
+            let ahead = size - offset - 1;
+            if ahead >= 1 {
+                edges.push((node(block), node(block + 1)));
+            }
+            if ahead >= 2 && rng.below(10) < 3 {
+                let reach = 2 + rng.below(ahead.min(BRANCH_REACH) - 1);
+                edges.push((node(block), node(block + reach)));
+            }
+            if offset >= 1 && rng.below(10) == 0 {
+                let reach = 1 + rng.below(offset.min(LATCH_REACH));
+                edges.push((node(block), node(block - reach)));
+            }
+            if rng.below(2) == 0 {
+                let callee = if rng.below(2) == 0 {
+                    hubs[rng.below(hubs.len())]
+                } else {
+                    procedures[rng.below(procedures.len())].0
+                };
+                edges.push((node(block), node(callee)));
+            }
+        }
+    }
+    edges
+}
+
+/// `edges` under a random permutation of the node ids.
+fn relabeled(edges: &[(u32, u32)], rng: &mut Rng) -> Vec<(u32, u32)> {
+    let mut label: Vec<u32> = (0..NODES).map(node).collect();
+    shuffle(&mut label, rng);
+    edges
+        .iter()
+        .map(|&(source, target)| (label[source as usize], label[target as usize]))
+        .collect()
+}
+
+fn shuffle<T>(items: &mut [T], rng: &mut Rng) {
+    for index in (1..items.len()).rev() {
+        items.swap(index, rng.below(index + 1));
+    }
+}
+
+/// The order a configuration feeds its edges to the store.
+#[derive(Clone, Copy)]
+enum Arrival {
+    /// Each source's edges together, in their original order.
+    Grouped,
+    /// One shuffled list.
+    Shuffled,
+}
+
+impl Arrival {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Grouped => "grouped",
+            Self::Shuffled => "shuffled",
+        }
+    }
+
+    fn arrange(self, edges: &[(u32, u32)], rng: &mut Rng) -> Vec<(u32, u32)> {
+        let mut arranged = edges.to_vec();
+        match self {
+            // A stable sort keeps each source's edges in their order.
+            Self::Grouped => arranged.sort_by_key(|&(source, _)| source),
+            Self::Shuffled => shuffle(&mut arranged, rng),
+        }
+        arranged
+    }
+}
+
+/// The mean N2N AID of `edges` in thousandths, over the nodes with two or
+/// more neighbors, of each node's successors (`outgoing`) or predecessors.
+fn n2n_aid_milli(edges: &[(u32, u32)], outgoing: bool) -> u64 {
+    let mut pairs: Vec<(u32, u32)> = edges
+        .iter()
+        .map(|&(source, target)| {
+            if outgoing {
+                (source, target)
+            } else {
+                (target, source)
+            }
+        })
+        .collect();
+    pairs.sort_unstable();
+    let (mut total, mut counted) = (0_u128, 0_u128);
+    for run in pairs.chunk_by(|left, right| left.0 == right.0) {
+        if run.len() < 2 {
+            continue;
+        }
+        let gaps: u128 = run
+            .windows(2)
+            .map(|pair| u128::from(pair[1].1 - pair[0].1))
+            .sum();
+        let degree = u128::try_from(run.len()).expect("a degree fits in u128");
+        total += gaps * 1_000 / degree;
+        counted += 1;
+    }
+    u64::try_from(total / counted.max(1)).expect("a mean id distance fits in u64")
+}
+
+/// Thousandths to one decimal place, in integers.
+fn thousandths(milli: u64) -> String {
+    format!("{}.{}", milli / 1_000, (milli % 1_000) / 100)
 }
 
 /// A procedure-sized edge list, reused by every repetition so the two small
@@ -260,6 +418,25 @@ fn scan_store(graph: &Graph<u32, ()>) -> usize {
     for node in graph.node_ids() {
         for successor in graph.successors(node) {
             total = total.wrapping_add(successor.index());
+        }
+    }
+    total
+}
+
+/// Read the payload of every node's successors (`outgoing`) or predecessors,
+/// the way an analysis reads its neighbors' facts: the numbering of the
+/// graph decides how scattered those reads are.
+fn walk_neighbors(graph: &Graph<u32, ()>, outgoing: bool) -> usize {
+    let mut total = 0_usize;
+    for node in graph.node_ids() {
+        if outgoing {
+            for successor in graph.successors(node) {
+                total = total.wrapping_add(*graph.node(successor) as usize);
+            }
+        } else {
+            for predecessor in graph.predecessors(node) {
+                total = total.wrapping_add(*graph.node(predecessor) as usize);
+            }
         }
     }
     total
@@ -320,14 +497,16 @@ fn run_store(edges: &[(u32, u32)], appends: &[(u32, u32)]) -> Vec<(&'static str,
     // reports the store's footprint, not the store plus a report the caller
     // may or may not keep.
     let ((), first_compaction) = measure(|| drop(graph.compact()));
-    let (total, scan) = measure(|| scan_store(&graph));
+    let (total, scan) = measure(|| walk_neighbors(&graph, true));
     assert!(total > 0, "the scan must observe the whole graph");
+    let (reverse_total, reverse_scan) = measure(|| walk_neighbors(&graph, false));
+    assert!(reverse_total > 0, "the scan must observe the whole graph");
 
     let (_, incremental) = measure(|| {
         for &(source, target) in appends {
             graph.add_edge(Id::from_raw(source), Id::from_raw(target), ());
         }
-        scan_store(&graph)
+        walk_neighbors(&graph, true)
     });
 
     let ((), compaction) = measure(|| drop(graph.compact()));
@@ -337,6 +516,7 @@ fn run_store(edges: &[(u32, u32)], appends: &[(u32, u32)]) -> Vec<(&'static str,
         ("build", build),
         ("compact_after_build", first_compaction),
         ("successor_scan", scan),
+        ("predecessor_scan", reverse_scan),
         ("append_and_scan", incremental),
         ("compact", compaction),
         ("footprint", footprint(teardown)),
@@ -376,23 +556,62 @@ const REPEATS: usize = 5;
 
 fn main() {
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-    let edges = edge_list(&mut rng);
+    let uniform = edge_list(&mut rng);
     let appends = append_list(&mut rng);
+    let small = small_edge_list(&mut rng);
+    // The structured inputs draw from their own generator, so the uniform
+    // and procedure-scale inputs stay the ones earlier runs measured.
+    let mut structure_rng = Rng(0xD1B5_4A32_D192_ED03);
+    let structured = structured_edge_list(&mut structure_rng);
+    let structured_relabeled = relabeled(&structured, &mut structure_rng);
+    let inputs = [
+        ("uniform", &uniform),
+        ("structured", &structured),
+        ("structured_relabeled", &structured_relabeled),
+    ];
 
     let mode = if cfg!(cfglib_bench_alloc) {
         "allocation (timings are perturbed by the counting allocator)"
     } else {
         "cpu"
     };
+
     println!(
-        "graph-store: {NODES} nodes, {} edges, {APPENDS} appends; best of {REPEATS}; mode: {mode}",
-        edges.len()
+        "locality: N2N AID, mean over the nodes with two or more neighbors; lower is more local"
+    );
+    let mut locality = Vec::new();
+    for (name, edges) in inputs {
+        let (successors, predecessors) = (n2n_aid_milli(edges, true), n2n_aid_milli(edges, false));
+        println!(
+            "{name:<20} {:>12} successors {:>12} predecessors",
+            thousandths(successors),
+            thousandths(predecessors)
+        );
+        locality.push((successors, predecessors));
+    }
+    assert!(
+        locality[2].0 > locality[1].0 && locality[2].1 > locality[1].1,
+        "relabeling must lose the structured input's locality, or there is nothing to recover"
     );
 
-    let store = fastest((0..REPEATS).map(|_| run_store(&edges, &appends)).collect());
-    report(&store);
+    for (name, edges) in inputs {
+        for arrival in [Arrival::Shuffled, Arrival::Grouped] {
+            let arranged = arrival.arrange(edges, &mut rng);
+            println!(
+                "
+graph-store {name}, {} arrival: {NODES} nodes, {} edges, {APPENDS} appends; best of {REPEATS}; mode: {mode}",
+                arrival.name(),
+                arranged.len()
+            );
+            let store = fastest(
+                (0..REPEATS)
+                    .map(|_| run_store(&arranged, &appends))
+                    .collect(),
+            );
+            report(&store);
+        }
+    }
 
-    let small = small_edge_list(&mut rng);
     println!(
         "
 graph-store: {SMALL_NODES} nodes, {} edges, {SMALL_BUILDS} builds; best of {REPEATS}; mode: {mode}",
