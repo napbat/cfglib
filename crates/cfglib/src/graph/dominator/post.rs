@@ -570,12 +570,31 @@ impl<N: DenseId> PostDominatorTree<N> {
     /// assert_eq!(post.control_dependents(head, head).collect::<Vec<_>>(), [head]);
     /// assert_eq!(post.control_dependents(head, exit).count(), 0);
     /// ```
+    #[inline]
     pub fn control_dependents(&self, from: N, to: N) -> impl Iterator<Item = N> + '_ {
-        let inside = self.share_class(from, to);
-        let (from, to) = (self.canonical(from), self.canonical(to));
+        if self.has_sink_classes() {
+            Dependents::Classes(self.class_dependents(from, to))
+        } else {
+            Dependents::Blocks(self.tree_dependents(from, to))
+        }
+    }
+
+    /// Whether the tree has sink classes, which only
+    /// [`ExitPolicy::SinkComponents`] builds.
+    pub(crate) fn has_sink_classes(&self) -> bool {
+        !self.class_members.is_empty()
+    }
+
+    /// [`control_dependents`](Self::control_dependents) for a tree without
+    /// sink classes: the walk from `to` up to the immediate post-dominator of
+    /// `from`, which is left out.
+    ///
+    /// Callers that ask for many arms of one tree check
+    /// [`has_sink_classes`](Self::has_sink_classes) once and walk with this,
+    /// so a tree of the cut pays nothing for the classes it does not have.
+    pub(crate) fn tree_dependents(&self, from: N, to: N) -> impl Iterator<Item = N> + '_ {
         let stop = self.ipdom(from);
-        let below_stop = !inside
-            && self.contains(to)
+        let below_stop = self.contains(to)
             && match stop {
                 None => false,
                 Some(PostNode::Exit) => true,
@@ -589,13 +608,19 @@ impl<N: DenseId> PostDominatorTree<N> {
                 _ => None,
             }
         })
-        .flat_map(move |node| {
-            let class = self.named_class(node);
-            class
-                .iter()
-                .copied()
-                .chain(class.is_empty().then_some(node))
-        })
+    }
+
+    /// [`control_dependents`](Self::control_dependents) for a tree with sink
+    /// classes: nothing for an arm inside one class, and otherwise the walk
+    /// between the classes of its ends, each class expanded into its blocks.
+    fn class_dependents(&self, from: N, to: N) -> ClassWalk<'_, N, impl Iterator<Item = N> + '_> {
+        let walk = (!self.share_class(from, to))
+            .then(|| self.tree_dependents(self.canonical(from), self.canonical(to)));
+        ClassWalk {
+            tree: self,
+            walk,
+            class: &[],
+        }
     }
 
     /// Collect the control-dependence sources of `block` into `out`.
@@ -738,4 +763,63 @@ impl<N: DenseId> PostDominatorTree<N> {
 /// The node an optional parent names: `None` is the virtual exit.
 fn lift<N>(parent: Option<N>) -> PostNode<N> {
     parent.map_or(PostNode::Exit, PostNode::Node)
+}
+
+/// The dependents of one arm, as [`PostDominatorTree::control_dependents`]
+/// chooses them once per call.
+enum Dependents<B, C> {
+    /// The walk of a tree without classes.
+    Blocks(B),
+    /// The walk of a tree with classes.
+    Classes(C),
+}
+
+impl<N, B, C> Iterator for Dependents<B, C>
+where
+    B: Iterator<Item = N>,
+    C: Iterator<Item = N>,
+{
+    type Item = N;
+
+    #[inline]
+    fn next(&mut self) -> Option<N> {
+        match self {
+            Self::Blocks(blocks) => blocks.next(),
+            Self::Classes(classes) => classes.next(),
+        }
+    }
+
+    #[inline]
+    fn fold<A, F: FnMut(A, N) -> A>(self, init: A, step: F) -> A {
+        match self {
+            Self::Blocks(blocks) => blocks.fold(init, step),
+            Self::Classes(classes) => classes.fold(init, step),
+        }
+    }
+}
+
+/// A walk up the tree with each node that names a sink class expanded into
+/// the class's blocks; no walk at all for an arm inside one class.
+struct ClassWalk<'a, N, W> {
+    tree: &'a PostDominatorTree<N>,
+    walk: Option<W>,
+    /// The blocks of the class being expanded that are still to come.
+    class: &'a [N],
+}
+
+impl<N: DenseId, W: Iterator<Item = N>> Iterator for ClassWalk<'_, N, W> {
+    type Item = N;
+
+    fn next(&mut self) -> Option<N> {
+        if let [first, rest @ ..] = self.class {
+            self.class = rest;
+            return Some(*first);
+        }
+        let node = self.walk.as_mut()?.next()?;
+        if let [first, rest @ ..] = self.tree.named_class(node) {
+            self.class = rest;
+            return Some(*first);
+        }
+        Some(node)
+    }
 }

@@ -109,6 +109,30 @@ pub fn control_dependence_graph<G: GraphView>(
     source: &G,
     post_dominators: &PostDominatorTree<G::NodeId>,
 ) -> Graph<G::NodeId, ()> {
+    // A tree of the cut has no sink classes, so each arm is the plain walk;
+    // choosing it once here keeps that walk inline in the loop.
+    if post_dominators.has_sink_classes() {
+        collect_dependences(source, post_dominators, |from, to| {
+            post_dominators.control_dependents(from, to)
+        })
+    } else {
+        collect_dependences(source, post_dominators, |from, to| {
+            post_dominators.tree_dependents(from, to)
+        })
+    }
+}
+
+/// The control dependence graph of `source`, with `dependents_of` giving
+/// the blocks that depend on each arm.
+fn collect_dependences<G, I>(
+    source: &G,
+    post_dominators: &PostDominatorTree<G::NodeId>,
+    dependents_of: impl Fn(G::NodeId, G::NodeId) -> I,
+) -> Graph<G::NodeId, ()>
+where
+    G: GraphView,
+    I: Iterator<Item = G::NodeId>,
+{
     let mut graph = Graph::with_capacity(source.node_bound(), source.node_bound());
     let nodes: Vec<_> = (0..source.node_bound())
         .map(G::NodeId::from_index)
@@ -133,7 +157,7 @@ pub fn control_dependence_graph<G: GraphView>(
         seen_dependents.reset();
         dependents.clear();
         for target in source.successors(controller) {
-            for dependent in post_dominators.control_dependents(controller, target) {
+            for dependent in dependents_of(controller, target) {
                 if !seen_dependents.is_marked(dependent.index()) {
                     seen_dependents.mark(dependent.index());
                     dependents.push(dependent);
