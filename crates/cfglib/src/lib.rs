@@ -270,8 +270,8 @@ pub use flow::{
     UnresolvedRole, UnresolvedTransfer,
 };
 pub use graph::call_graph::{
-    CallMetadata, FunctionNode, call_graph, find_function, is_recursive_function,
-    propagate_summaries,
+    CallMetadata, FunctionIndex, FunctionNode, call_graph, call_graph_indexed, find_function,
+    is_recursive_function, propagate_summaries, recursive_functions,
 };
 pub use graph::cdg::control_dependence_graph;
 pub use graph::coldness::{ColdClass, ColdnessClasses, ColdnessGraph};
