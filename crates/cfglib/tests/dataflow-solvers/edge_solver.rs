@@ -7,14 +7,15 @@ use std::fmt;
 
 use cfglib::{
     BlockId, Cfg, Direction, Edge, EdgeFacts, EdgeId, EdgeKind, EdgeProblem, EdgeRef, EdgeView,
-    FilteredEdges, KindedEdge, Reachable, ReachableEdgeProblem, SolveConfig, SolveError,
-    TrySolveError, solve_edge_problem, solve_edge_problem_from,
-    solve_edge_problem_from_with_config, solve_edge_problem_with_config, try_solve_edge_problem,
-    try_solve_edge_problem_from, try_solve_edge_problem_from_with_config,
+    FilteredEdges, IterationOrder, KindedEdge, Reachable, ReachableEdgeProblem, SolveConfig,
+    SolveError, TrySolveError, solve_edge_problem, solve_edge_problem_from,
+    solve_edge_problem_from_with_config, solve_edge_problem_with_config, stream_edge_problem,
+    try_solve_edge_problem, try_solve_edge_problem_from, try_solve_edge_problem_from_with_config,
     try_solve_edge_problem_with_config,
 };
 
 use crate::graphs::{GenKill, ORDERS, Rng, Shape, union};
+use crate::lifted::Lifted;
 use crate::reference::edge_round_robin;
 
 const BOUNDARY_MARK: u8 = 6;
@@ -640,6 +641,43 @@ fn every_iteration_order_reaches_the_facts_of_the_index_order() {
                         solve_edge_problem_from_with_config(&cfg, &problem, &seeds, config);
                     assert_same_edge_facts(&ordered.unwrap(), &seeded, &shape, &what);
                 }
+            }
+        }
+    }
+}
+
+/// A stream of an edge problem visits every live node exactly once, with
+/// the node facts and in the steps of the solve that keeps every node and
+/// edge fact, unwind edges and holes included, forward and backward.
+#[test]
+fn a_stream_visits_every_live_node_once_with_the_facts_of_the_solve() {
+    let mut rng = Rng::new(35);
+    for _ in 0..300 {
+        for direction in [Direction::Forward, Direction::Backward] {
+            let shape = Shape::random(&mut rng, false, true);
+            let effects = GenKill::random(&mut rng, shape.blocks);
+            let cfg = shape.cfg();
+            let problem = Labels {
+                effects: &effects,
+                direction,
+            };
+            for passes in [0, 2] {
+                let config = SolveConfig::new()
+                    .with_order(IterationOrder::WeakTopological)
+                    .with_narrowing_passes(passes);
+                let what = format!("{direction:?} with {passes} passes, {shape:?}");
+                let facts = solve_edge_problem_with_config(&cfg, &problem, config).unwrap();
+                let mut visited = Vec::new();
+                let stats =
+                    stream_edge_problem(&cfg, &Lifted(&problem), config, |node, input, output| {
+                        assert_eq!(input, facts.fact_in(node), "IN of {node:?}: {what}");
+                        assert_eq!(output, facts.fact_out(node), "OUT of {node:?}: {what}");
+                        visited.push(node.index());
+                    })
+                    .unwrap();
+                assert_eq!(stats.steps(), facts.steps(), "steps: {what}");
+                visited.sort_unstable();
+                assert_eq!(visited, shape.live(), "visits: {what}");
             }
         }
     }

@@ -6,14 +6,15 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use cfglib::{
-    Direction, Facts, Graph, GraphView, NodeId, NodeProblem, SolveConfig, SolveError,
-    TryNodeProblem, TrySolveError, solve_node_problem, solve_node_problem_from,
-    solve_node_problem_from_with_config, solve_node_problem_with_config, try_solve_node_problem,
-    try_solve_node_problem_from, try_solve_node_problem_from_with_config,
+    Direction, Facts, Graph, GraphView, IterationOrder, NodeId, NodeProblem, SolveConfig,
+    SolveError, TryNodeProblem, TrySolveError, solve_node_problem, solve_node_problem_from,
+    solve_node_problem_from_with_config, solve_node_problem_with_config, stream_node_problem,
+    try_solve_node_problem, try_solve_node_problem_from, try_solve_node_problem_from_with_config,
     try_solve_node_problem_with_config,
 };
 
-use crate::graphs::{ORDERS, Rng, Shape, assert_same_facts};
+use crate::graphs::{ORDERS, Rng, Shape, assert_same_facts, assert_streams_like};
+use crate::lifted::Lifted;
 
 /// A consumer's symbol graph: dense `u32` ids, forward and reverse adjacency,
 /// and a slot that was retired without renumbering its neighbors.
@@ -546,6 +547,45 @@ fn every_iteration_order_reaches_the_facts_of_the_index_order() {
                     let ordered = try_solve_node_problem_with_config(&graph, &verifying, config);
                     assert_same_facts(&ordered.unwrap(), &forward, graph.node_ids(), &what);
                 }
+            }
+        }
+    }
+}
+
+/// A stream over a consumer view with a retired slot visits every live node
+/// exactly once, with the facts and in the steps of the solve that keeps
+/// them, forward and backward, infallible and fallible.
+#[test]
+fn a_stream_visits_every_live_node_once_with_the_facts_of_the_solve() {
+    let mut rng = Rng::new(24);
+    for _ in 0..300 {
+        for direction in [Direction::Forward, Direction::Backward] {
+            let shape = Shape::random(&mut rng, false, false);
+            let graph = SymbolGraph::from_shape(&shape);
+            let sources = random_sources(&mut rng, &shape);
+            let problem = Taint {
+                sources: sources.clone(),
+                direction,
+            };
+            let verifying = Verifying {
+                sources,
+                rejected: None,
+            };
+            for passes in [0, 2] {
+                let config = SolveConfig::new()
+                    .with_order(IterationOrder::WeakTopological)
+                    .with_narrowing_passes(passes);
+                let what = format!("{direction:?} with {passes} passes, {shape:?}");
+                let facts = solve_node_problem_with_config(&graph, &problem, config).unwrap();
+                let stream = |visit: &mut dyn FnMut(u32, &bool, &bool)| {
+                    stream_node_problem(&graph, &Lifted(&problem), config, visit).unwrap()
+                };
+                assert_streams_like(&facts, graph.node_ids(), stream, &what);
+                let facts = try_solve_node_problem_with_config(&graph, &verifying, config).unwrap();
+                let stream = |visit: &mut dyn FnMut(u32, &bool, &bool)| {
+                    stream_node_problem(&graph, &verifying, config, visit).unwrap()
+                };
+                assert_streams_like(&facts, graph.node_ids(), stream, &what);
             }
         }
     }

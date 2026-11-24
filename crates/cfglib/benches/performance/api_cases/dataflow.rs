@@ -1,18 +1,19 @@
 use cfglib::{
     Cfg, Direction, EdgeProblem, Facts, Graph, IterationOrder, NodeId, NodeProblem, SolveConfig,
-    SolveError, TraversalDirection, TryEdgeProblem, TryNodeProblem, TryProblem,
-    WeakTopologicalOrder, meet_options, solve_edge_problem, solve_edge_problem_from,
+    SolveError, SolveStats, TraversalDirection, TryEdgeProblem, TryNodeProblem, TryProblem,
+    TrySolveError, WeakTopologicalOrder, meet_options, solve_edge_problem, solve_edge_problem_from,
     solve_edge_problem_from_with_config, solve_edge_problem_with_config, solve_node_problem,
     solve_node_problem_from, solve_node_problem_from_with_config, solve_node_problem_with_config,
-    solve_problem_from, solve_problem_from_with_config, try_solve_edge_problem,
-    try_solve_edge_problem_from, try_solve_edge_problem_from_with_config,
-    try_solve_edge_problem_with_config, try_solve_node_problem, try_solve_node_problem_from,
-    try_solve_node_problem_from_with_config, try_solve_node_problem_with_config, try_solve_problem,
-    try_solve_problem_from, try_solve_problem_from_with_config, try_solve_problem_with_config,
+    solve_problem_from, solve_problem_from_with_config, stream_edge_problem, stream_node_problem,
+    stream_problem, try_solve_edge_problem, try_solve_edge_problem_from,
+    try_solve_edge_problem_from_with_config, try_solve_edge_problem_with_config,
+    try_solve_node_problem, try_solve_node_problem_from, try_solve_node_problem_from_with_config,
+    try_solve_node_problem_with_config, try_solve_problem, try_solve_problem_from,
+    try_solve_problem_from_with_config, try_solve_problem_with_config,
 };
 
 use super::BenchmarkSuite;
-use crate::fixtures::{CfgReachability, Reachability, branchy_cfg, branchy_graph};
+use crate::fixtures::{CfgReachability, Reachability, branchy_cfg, branchy_graph, fixture_u32};
 use crate::harness::benchmark_case;
 
 const NODE_COUNT: usize = 512;
@@ -441,10 +442,125 @@ fn register_iteration_orders(suite: &mut BenchmarkSuite<'_>) {
     );
 }
 
+impl TryNodeProblem<Graph<(), ()>> for Definitions {
+    type Fact = u64;
+    type Error = ();
+
+    fn direction(&self) -> Direction {
+        Direction::Forward
+    }
+
+    fn bottom(&self, _graph: &Graph<(), ()>) -> u64 {
+        0
+    }
+
+    fn boundary(&self, _graph: &Graph<(), ()>) -> Result<u64, ()> {
+        Ok(0)
+    }
+
+    fn meet(&self, _: &Graph<(), ()>, _: NodeId, left: &u64, right: &u64) -> Result<u64, ()> {
+        Ok(left | right)
+    }
+
+    fn transfer(&self, _: &Graph<(), ()>, node: NodeId, input: &u64) -> Result<u64, ()> {
+        Ok(input | 1 << (node.index() % 64))
+    }
+}
+
+/// Nodes in the loop nest that the node stream solves.
+const STREAM_NODE_COUNT: usize = 100_000;
+
+/// What a stream run hands back to its oracle: its stats, how many nodes it
+/// visited, and every OUT fact folded into one word.
+type Streamed = Result<(SolveStats, usize, u64), TrySolveError<()>>;
+
+fn register_streams(suite: &mut BenchmarkSuite<'_>) {
+    let (nest, _) = permuted_loop_nest(STREAM_NODE_COUNT);
+    let weak_topological = SolveConfig::new().with_order(IterationOrder::WeakTopological);
+    let kept = try_solve_node_problem_with_config(&nest, &Definitions, weak_topological)
+        .expect("an unbounded solve converges");
+    let folded = nest.node_ids().fold(0, |folded, node| {
+        folded ^ kept.fact_out(node).rotate_left(fixture_u32(node.index()))
+    });
+    benchmark_case!(
+        suite,
+        "api_stream_node_problem",
+        covers[stream_node_problem],
+        || {
+            let (mut visited, mut fold) = (0, 0_u64);
+            let config = SolveConfig::new();
+            stream_node_problem(&nest, &Definitions, config, |node, _, out| {
+                visited += 1;
+                fold ^= out.rotate_left(fixture_u32(node.index()));
+            })
+            .map(|stats| (stats, visited, fold))
+        },
+        |streamed: &Streamed| {
+            let (stats, visited, fold) = streamed.as_ref().expect("the stream converges");
+            assert_eq!((*visited, *fold), (STREAM_NODE_COUNT, folded));
+            assert_eq!(stats.steps(), kept.steps());
+            // Peak memory goes next to the time: it is what a stream saves.
+            println!(
+                "{:<36} {:>12} peak live facts  solve keeps {}",
+                "api_stream_node_problem",
+                stats.peak_live_facts(),
+                2 * STREAM_NODE_COUNT
+            );
+        }
+    );
+
+    let cfg = branchy_cfg(NODE_COUNT);
+    benchmark_case!(
+        suite,
+        "api_stream_problem",
+        covers[stream_problem],
+        || {
+            let mut visited = 0;
+            stream_problem(
+                &cfg,
+                &TryCfgReachability,
+                SolveConfig::new(),
+                |_, _, out| {
+                    visited += usize::from(*out);
+                },
+            )
+            .map(|stats| (stats, visited, 0))
+        },
+        |streamed: &Streamed| {
+            let (_, visited, _) = streamed.as_ref().expect("the stream converges");
+            assert_eq!(*visited, NODE_COUNT);
+        }
+    );
+
+    let graph = branchy_graph(NODE_COUNT);
+    benchmark_case!(
+        suite,
+        "api_stream_edge_problem",
+        covers[stream_edge_problem],
+        || {
+            let mut visited = 0;
+            stream_edge_problem(
+                &graph,
+                &TryEdgeReachability,
+                SolveConfig::new(),
+                |_, _, out| {
+                    visited += usize::from(*out);
+                },
+            )
+            .map(|stats| (stats, visited, 0))
+        },
+        |streamed: &Streamed| {
+            let (_, visited, _) = streamed.as_ref().expect("the stream converges");
+            assert_eq!(*visited, NODE_COUNT);
+        }
+    );
+}
+
 pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     register_lattice_helpers(suite);
     register_cfg_solvers(suite);
     register_node_solvers(suite);
     register_edge_solvers(suite);
     register_iteration_orders(suite);
+    register_streams(suite);
 }

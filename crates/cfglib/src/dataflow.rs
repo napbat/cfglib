@@ -13,7 +13,9 @@
 //! [`GraphView`](crate::GraphView) (taint or reachability
 //! over a value-flow graph, closure over an import graph).
 //! The [`slot_fixpoint`] module schedules units over slots that the caller
-//! owns, for a fixpoint that has no graph view and no problem trait.
+//! owns, for a fixpoint that has no graph view and no problem trait. The
+//! [`stream`] module runs the solvers' fallible problems and hands each
+//! node's facts out as soon as they are final, instead of keeping them all.
 //!
 //! # Usage
 //!
@@ -35,4 +37,5 @@ pub mod node_fixpoint;
 pub mod program_point;
 mod schedule;
 pub mod slot_fixpoint;
+pub mod stream;
 mod worklist;

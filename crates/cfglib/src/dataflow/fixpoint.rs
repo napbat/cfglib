@@ -19,6 +19,13 @@
 //! afterwards, through the `widen` and `narrow` methods that every problem
 //! trait carries with defaults that change nothing.
 //!
+//! Every solver returns all its facts, two per node and one per edge for the
+//! edge solver, so it holds them all until it returns. A consumer that reads
+//! each node's facts once — to check a property, report a diagnostic, or copy
+//! a projection into its own table — and whose facts are large prefers the
+//! [`stream`](super::stream) of the same solve, which hands each node out
+//! once its facts are final and frees them as soon as nothing reads them.
+//!
 //! # One vocabulary for the three problem families
 //!
 //! Every problem names its starting fact `boundary`, its unreached or
@@ -751,7 +758,7 @@ pub fn try_solve_problem_from_with_config<V: RootedView, P: TryProblem<V>>(
 
 /// The blocks the full solve starts from: those reachable from the root going
 /// forward, every block going backward.
-fn initial_worklist<V: RootedView>(view: &V, direction: Direction) -> Worklist {
+pub(super) fn initial_worklist<V: RootedView>(view: &V, direction: Direction) -> Worklist {
     match direction {
         Direction::Forward => Worklist::of(
             view.node_bound(),
@@ -775,7 +782,7 @@ fn try_solve_with_worklist<V: RootedView, P: TryProblem<V>>(
 }
 
 /// Adapter that runs a [`TryProblem`] on the node solver's core.
-struct BlockProblem<'p, P>(&'p P);
+pub(super) struct BlockProblem<'p, P>(pub(super) &'p P);
 
 impl<V: RootedView, P: TryProblem<V>> TryNodeProblem<V> for BlockProblem<'_, P> {
     type Fact = P::Fact;

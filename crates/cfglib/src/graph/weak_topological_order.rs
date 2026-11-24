@@ -190,6 +190,22 @@ impl<N: DenseId> WeakTopologicalOrder<N> {
         }
         top..as_usize(self.component_end[top]).max(top + 1)
     }
+
+    /// For each position, the end of the outermost element that holds it.
+    ///
+    /// The outermost elements partition the order into consecutive runs, so
+    /// one pass finds them all.
+    pub(crate) fn outermost_ends(&self) -> Vec<u32> {
+        let mut ends = Vec::with_capacity(self.order.len());
+        let mut end = 0;
+        for position in 0..self.order.len() {
+            if position >= end {
+                end = self.outermost(position).end;
+            }
+            ends.push(as_u32(end));
+        }
+        ends
+    }
 }
 
 /// The depth-first forest that a weak topological order is built from.
