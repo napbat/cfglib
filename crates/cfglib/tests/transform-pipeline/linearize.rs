@@ -2,11 +2,15 @@
 //! jumps a layout needs.
 
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 
 use cfglib::{BlockId, BlockOrder, Cfg, EdgeKind, LinearInst, linearize};
 
+use crate::golden::assert_golden;
 use crate::programs::{Rng, random_program};
-use crate::toy::{Builder, INPUTS, Inst, Kind, OBSERVED, ToyEmitter, run, run_linear};
+use crate::toy::{
+    Builder, FoldingEmitter, INPUTS, Inst, Kind, OBSERVED, ToyEmitter, run, run_linear,
+};
 
 /// A linearizer's answer, whether or not linearizing can fail.
 pub trait Stream {
@@ -202,6 +206,122 @@ fn any_caller_chosen_order_still_runs_like_the_cfg_by_adding_jumps() {
         assert_stream_follows_the_cfg(&cfg, &stream, &live, &context);
         assert_stream_runs_like_the_cfg(&cfg, &stream, &context);
     }
+}
+
+/// Renders a stream one block per line: the label, the indices of the
+/// block's own instructions, then its synthetic transfers.
+fn render(stream: &[LinearInst<Inst>]) -> String {
+    let mut text = String::new();
+    for entry in stream {
+        let synthetic = entry.index == usize::MAX;
+        match entry.inst.kind {
+            Kind::Label(block) => {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                write!(text, "L{block}:")
+            }
+            Kind::Jump(block) if synthetic => write!(text, " jmp L{block}"),
+            Kind::BranchIf(block) if synthetic => write!(text, " bnz L{block}"),
+            _ => write!(text, " {}", entry.index),
+        }
+        .expect("writing to a string cannot fail");
+    }
+    text
+}
+
+#[test]
+fn an_emitter_with_the_default_hooks_produces_the_recorded_streams() {
+    let mut text = String::new();
+    for seed in 0..8 {
+        let cfg = random_program::<()>(seed, true);
+        let orders = [
+            ("reverse postorder", BlockOrder::ReversePostorder),
+            ("allocation order", BlockOrder::AllocationOrder),
+            ("shuffled", BlockOrder::Custom(shuffled_order(&cfg, seed))),
+        ];
+        for (name, order) in orders {
+            writeln!(text, "# seed {seed}, {name}").expect("writing to a string cannot fail");
+            text.push_str(&render(&linearized(&cfg, order)));
+            text.push('\n');
+        }
+    }
+    assert_golden("linearize/default-emitter.txt", &text);
+}
+
+/// The transfers that `block` owes under [`FoldingEmitter`], by the
+/// document of the hooks: the default transfers without the jumps to
+/// `next`, and one inverted branch to the layout target in place of a
+/// branch to `next` and a jump.
+fn folded_transfers(cfg: &Cfg<Inst>, block: BlockId, next: Option<BlockId>) -> Vec<Kind> {
+    let edges: Vec<(EdgeKind, BlockId)> = cfg
+        .outgoing(block)
+        .map(|edge| (cfg.edge(edge).kind(), cfg.edge(edge).target()))
+        .collect();
+    let mut layout_jump = edges
+        .iter()
+        .find(|&&(kind, _)| is_fallthrough(kind))
+        .map(|&(_, target)| target)
+        .filter(|&target| next != Some(target));
+    let mut transfers = Vec::new();
+    for &(kind, target) in &edges {
+        if kind == EdgeKind::ConditionalTrue {
+            match layout_jump {
+                Some(layout) if next == Some(target) => {
+                    transfers.push(Kind::BranchUnless(layout.index()));
+                    layout_jump = None;
+                }
+                _ => transfers.push(Kind::BranchIf(target.index())),
+            }
+        } else if !is_fallthrough(kind) && next != Some(target) {
+            transfers.push(Kind::Jump(target.index()));
+        }
+    }
+    transfers.extend(layout_jump.map(|target| Kind::Jump(target.index())));
+    transfers
+}
+
+fn synthetic_transfers(stream: &[LinearInst<Inst>], block: BlockId) -> Vec<Kind> {
+    stream
+        .iter()
+        .filter(|entry| entry.block == block && entry.index == usize::MAX)
+        .map(|entry| entry.inst.kind)
+        .filter(|kind| !matches!(kind, Kind::Label(_)))
+        .collect()
+}
+
+#[test]
+fn a_folding_emitter_inverts_branches_and_drops_jumps_to_the_next_block() {
+    let mut inverted = 0;
+    for seed in 0..60 {
+        let cfg = random_program::<()>(seed, true);
+        for order in [cfg.reverse_postorder(), shuffled_order(&cfg, seed)] {
+            let context = format!("seed {seed}, order {order:?}");
+            let stream =
+                linearize(&cfg, BlockOrder::Custom(order.clone()), &FoldingEmitter).stream();
+            let default = linearized(&cfg, BlockOrder::Custom(order.clone()));
+
+            assert_eq!(layout_of(&stream), order, "{context}");
+            for (index, &block) in order.iter().enumerate() {
+                let transfers = synthetic_transfers(&stream, block);
+                assert_eq!(
+                    transfers,
+                    folded_transfers(&cfg, block, order.get(index + 1).copied()),
+                    "{context}: transfers of {block}"
+                );
+                assert!(
+                    transfers.len() <= synthetic_transfers(&default, block).len(),
+                    "{context}: {block} gains a transfer"
+                );
+                inverted += transfers
+                    .iter()
+                    .filter(|kind| matches!(kind, Kind::BranchUnless(_)))
+                    .count();
+            }
+            assert_stream_runs_like_the_cfg(&cfg, &stream, &context);
+        }
+    }
+    assert!(inverted > 0, "some layout puts a true target next");
 }
 
 #[test]

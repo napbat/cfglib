@@ -8,6 +8,10 @@
 //! both `Cfg<Inst>` and `Cfg<Inst, Route>`, the way a consumer that keeps edge
 //! payloads would call them.
 
+/// The package's golden-file comparison, shared with the unit tests.
+#[path = "../../src/test_util/golden.rs"]
+mod golden;
+
 mod cleanup;
 mod critical_edges;
 mod linearize;

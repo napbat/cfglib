@@ -41,11 +41,13 @@ pub enum Kind {
     Branch,
     /// Ends the program; an operand, when present, is printed first.
     Return,
-    /// The next three exist only in linearized streams. They carry the index
+    /// The next four exist only in linearized streams. They carry the index
     /// of the block they name.
     Label(usize),
     Jump(usize),
     BranchIf(usize),
+    /// Taken when its operand is zero: the inverse of `BranchIf`.
+    BranchUnless(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -275,7 +277,7 @@ impl Machine {
                 return Ok(Flow::Halt);
             }
             Kind::Branch => self.flag = Some(self.read(inst.uses[0])?),
-            Kind::Label(_) | Kind::Jump(_) | Kind::BranchIf(_) => {}
+            Kind::Label(_) | Kind::Jump(_) | Kind::BranchIf(_) | Kind::BranchUnless(_) => {}
         }
         Ok(Flow::Next)
     }
@@ -360,6 +362,11 @@ pub fn run_linear(
                     position = target(block)?;
                 }
             }
+            Kind::BranchUnless(block) => {
+                if machine.read(entry.inst.uses[0])? == 0 {
+                    position = target(block)?;
+                }
+            }
             _ => {
                 if machine.execute(&entry.inst)? == Flow::Halt {
                     break;
@@ -394,6 +401,37 @@ impl Emitter<Inst> for ToyEmitter {
             &[],
             &[Effect::Control],
         ))
+    }
+}
+
+/// [`ToyEmitter`] with both optional hooks: it inverts every branch and
+/// elides every jump to the next block.
+pub struct FoldingEmitter;
+
+impl Emitter<Inst> for FoldingEmitter {
+    fn emit_jump(&self, target: BlockId) -> Inst {
+        ToyEmitter.emit_jump(target)
+    }
+
+    fn emit_conditional_branch(&self, condition: &Inst, target: BlockId) -> Inst {
+        ToyEmitter.emit_conditional_branch(condition, target)
+    }
+
+    fn emit_block_start(&self, block: BlockId) -> Option<Inst> {
+        ToyEmitter.emit_block_start(block)
+    }
+
+    fn emit_inverted_conditional_branch(&self, condition: &Inst, target: BlockId) -> Option<Inst> {
+        Some(Inst::new(
+            Kind::BranchUnless(target.index()),
+            condition.operands(),
+            &[],
+            &[Effect::Control],
+        ))
+    }
+
+    fn elides_jump_to_next(&self) -> bool {
+        true
     }
 }
 

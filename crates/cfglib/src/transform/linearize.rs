@@ -17,10 +17,16 @@
 //!   [`CallReturn`](EdgeKind::CallReturn) are satisfied by layout
 //!   adjacency and cost a jump only when the target is not next.
 //! - [`ConditionalTrue`](EdgeKind::ConditionalTrue) is a conditional branch
-//!   on the block's last instruction.
+//!   on the block's last instruction. When its target is the next block and
+//!   the layout target is not, an emitter that
+//!   [inverts the condition](Emitter::emit_inverted_conditional_branch)
+//!   replaces the branch and the jump to the layout target with one inverted
+//!   branch to the layout target.
 //! - [`Unconditional`](EdgeKind::Unconditional),
 //!   [`Back`](EdgeKind::Back), [`Jump`](EdgeKind::Jump), and
-//!   [`ExceptionLeave`](EdgeKind::ExceptionLeave) are jumps.
+//!   [`ExceptionLeave`](EdgeKind::ExceptionLeave) are jumps. An emitter that
+//!   [elides jumps to the next block](Emitter::elides_jump_to_next) omits
+//!   the jump whose target is next.
 //! - [`SwitchCase`](EdgeKind::SwitchCase) and
 //!   [`IndirectJump`](EdgeKind::IndirectJump) name the targets of the
 //!   block's own dispatching instruction, which the stream already holds, so
@@ -37,6 +43,20 @@
 //! part as its own [`BlockOrder::Custom`] gives one stream per section. The
 //! last block of a part has no next block, so a layout edge that leaves the
 //! part gets an explicit jump, and each stream can be placed anywhere.
+//!
+//! # Profile-guided order
+//!
+//! [`ext_tsp_order`](crate::ext_tsp_order) places blocks to maximize the
+//! Ext-TSP score of a profile: an edge earns its full count when its target
+//! follows its source and it can fall through, and a part of it when the
+//! target is a short jump away. An edge can fall through when the stream
+//! needs no transfer for it while its target is next: the layout kinds
+//! always, `ConditionalTrue` when the emitter inverts the block's condition,
+//! and the jump kinds when the emitter elides jumps to the next block.
+//! [`cfg_ext_tsp_order`](crate::cfg_ext_tsp_order) derives that rule from
+//! the emitter, and its result goes to [`linearize`] as a
+//! [`BlockOrder::Custom`]. To split the function as well, pass the order to
+//! [`hot_cold_order`](crate::hot_cold_order) as its base.
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -44,7 +64,8 @@ use core::fmt;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::edge::EdgeKind;
+use crate::dataflow::cfg_view::CfgView;
+use crate::edge::{EdgeId, EdgeKind, KindedEdge};
 
 /// How to order blocks in the output stream.
 #[derive(Debug, Clone)]
@@ -126,6 +147,34 @@ pub trait Emitter<I> {
     /// Emit a marker naming `block`, or `None` when the target form needs
     /// no explicit labels (source code, structured IRs).
     fn emit_block_start(&self, block: BlockId) -> Option<I>;
+
+    /// Emit a conditional branch to `target` that is taken when the
+    /// condition of `condition` is false, or `None` when the target form
+    /// cannot invert that condition.
+    ///
+    /// [`linearize`] asks for it when the
+    /// [`ConditionalTrue`](EdgeKind::ConditionalTrue) target of a block is
+    /// the next block and the layout target is not. One inverted branch to
+    /// the layout target then replaces the branch to the next block and the
+    /// jump to the layout target. `condition` is the last instruction of the
+    /// block, as for [`emit_conditional_branch`](Self::emit_conditional_branch).
+    ///
+    /// The default answers `None`, which keeps the branch and the jump.
+    fn emit_inverted_conditional_branch(&self, _condition: &I, _target: BlockId) -> Option<I> {
+        None
+    }
+
+    /// Whether a jump to the block placed right after its source may be
+    /// omitted.
+    ///
+    /// When it answers `true`, [`linearize`] emits nothing for an edge of a
+    /// jump kind ([`Unconditional`](EdgeKind::Unconditional),
+    /// [`Back`](EdgeKind::Back), [`Jump`](EdgeKind::Jump),
+    /// [`ExceptionLeave`](EdgeKind::ExceptionLeave)) whose target is the
+    /// next block. The default answers `false`, which emits every such jump.
+    fn elides_jump_to_next(&self) -> bool {
+        false
+    }
 }
 
 /// Linearize a CFG into a flat instruction stream.
@@ -138,7 +187,9 @@ pub trait Emitter<I> {
 /// 2. Emits the block's instructions in order.
 /// 3. Emits the explicit jumps and branches its outgoing edges ask for (see
 ///    the [module documentation](self)), including a jump for a fallthrough
-///    edge whose target is not the next block in the layout.
+///    edge whose target is not the next block in the layout. The optional
+///    [`Emitter`] hooks can invert a branch or omit a jump to the next
+///    block; an emitter that keeps their defaults gets every branch and jump.
 ///
 /// Returns the instruction stream as a `Vec<LinearInst<I>>`.
 ///
@@ -215,35 +266,78 @@ fn emit_transfers<I: Clone, E>(
     emitter: &dyn Emitter<I>,
     out: &mut Vec<LinearInst<I>>,
 ) -> Result<(), LinearizeError> {
-    let mut layout_target = None;
-    for edge in cfg.outgoing(id).map(|edge| cfg.edge(edge)) {
+    let edges = || cfg.outgoing(id).map(|edge| cfg.edge(edge));
+    // The first layout edge names the fallthrough target. It needs a jump
+    // unless it is next, or an inverted branch reaches it.
+    let mut layout_jump = edges()
+        .find(|edge| matches!(transfer(edge.kind()), Transfer::Layout))
+        .map(|edge| edge.target())
+        .filter(|&target| next_in_layout != Some(target));
+    for edge in edges() {
         match transfer(edge.kind()) {
-            Transfer::Layout => {
-                layout_target.get_or_insert(edge.target());
-            }
+            Transfer::Layout | Transfer::Implicit => {}
             Transfer::Branch => {
                 let condition = cfg
                     .block(id)
                     .instructions()
                     .last()
                     .ok_or(LinearizeError::MissingCondition { block: id })?;
-                let branch = emitter.emit_conditional_branch(condition, edge.target());
+                let inverted = layout_jump
+                    .filter(|_| next_in_layout == Some(edge.target()))
+                    .and_then(|layout| emitter.emit_inverted_conditional_branch(condition, layout));
+                let branch = if let Some(inverted) = inverted {
+                    layout_jump = None;
+                    inverted
+                } else {
+                    emitter.emit_conditional_branch(condition, edge.target())
+                };
                 out.push(LinearInst::synthetic(branch, id));
             }
             Transfer::Jump => {
-                out.push(LinearInst::synthetic(emitter.emit_jump(edge.target()), id));
+                if !(emitter.elides_jump_to_next() && next_in_layout == Some(edge.target())) {
+                    out.push(LinearInst::synthetic(emitter.emit_jump(edge.target()), id));
+                }
             }
-            Transfer::Implicit => {}
         }
     }
 
-    // A jump only when the layout successor is not the fallthrough target.
-    if let Some(target) = layout_target
-        && next_in_layout != Some(target)
-    {
+    if let Some(target) = layout_jump {
         out.push(LinearInst::synthetic(emitter.emit_jump(target), id));
     }
     Ok(())
+}
+
+/// Whether [`linearize`] under `emitter` emits no transfer for `edge` when
+/// the target of the edge is the next block: the rule that a profile-guided
+/// order scores fallthroughs by.
+pub(crate) fn falls_through<G: CfgView>(
+    cfg: &G,
+    edge: EdgeId,
+    emitter: &dyn Emitter<G::Inst>,
+) -> bool {
+    let edge = cfg.edge(edge);
+    match transfer(edge.data().kind()) {
+        Transfer::Layout => true,
+        Transfer::Jump => emitter.elides_jump_to_next(),
+        Transfer::Implicit => false,
+        Transfer::Branch => {
+            let source = edge.source();
+            let layout = cfg
+                .outgoing(source)
+                .map(|other| cfg.edge(other))
+                .find(|other| matches!(transfer(other.data().kind()), Transfer::Layout))
+                .map(|other| other.target());
+            match (cfg.instructions(source).last(), layout) {
+                (Some(condition), Some(layout)) => {
+                    layout != edge.target()
+                        && emitter
+                            .emit_inverted_conditional_branch(condition, layout)
+                            .is_some()
+                }
+                _ => false,
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -435,5 +529,132 @@ mod tests {
             allocation_order(&cfg),
             ["label", "cmp", "branch", "jump", "label", "jump", "label"]
         );
+    }
+
+    /// An emitter that inverts every condition and elides jumps to the next
+    /// block, and otherwise emits what [`TestEmitter`] does.
+    struct FoldingEmitter;
+
+    impl Emitter<MockInst> for FoldingEmitter {
+        fn emit_jump(&self, target: BlockId) -> MockInst {
+            TestEmitter.emit_jump(target)
+        }
+        fn emit_conditional_branch(&self, condition: &MockInst, target: BlockId) -> MockInst {
+            TestEmitter.emit_conditional_branch(condition, target)
+        }
+        fn emit_block_start(&self, block: BlockId) -> Option<MockInst> {
+            TestEmitter.emit_block_start(block)
+        }
+        fn emit_inverted_conditional_branch(
+            &self,
+            _condition: &MockInst,
+            _target: BlockId,
+        ) -> Option<MockInst> {
+            Some(MockInst(crate::flow::FlowEffect::Fallthrough, "branch-not"))
+        }
+        fn elides_jump_to_next(&self) -> bool {
+            true
+        }
+    }
+
+    /// The entry branches to `[then, else]` on its true and false edges.
+    fn two_way() -> (Cfg<MockInst>, [BlockId; 2]) {
+        let mut cfg = Cfg::new();
+        let arms = [cfg.new_block(), cfg.new_block()];
+        cfg.block_mut(cfg.entry()).push(ff("cmp"));
+        cfg.block_mut(arms[0]).push(ff("then"));
+        cfg.block_mut(arms[1]).push(ff("else"));
+        cfg.add_edge(cfg.entry(), arms[0], EdgeKind::ConditionalTrue);
+        cfg.add_edge(cfg.entry(), arms[1], EdgeKind::ConditionalFalse);
+        (cfg, arms)
+    }
+
+    fn folded(cfg: &Cfg<MockInst>, order: Vec<BlockId>) -> Vec<&'static str> {
+        mnemonics(&linearize(cfg, BlockOrder::Custom(order), &FoldingEmitter).unwrap())
+    }
+
+    #[test]
+    fn an_inverted_branch_replaces_the_branch_and_the_jump_when_the_true_target_is_next() {
+        let (cfg, [then_arm, else_arm]) = two_way();
+        let order = vec![cfg.entry(), then_arm, else_arm];
+        assert_eq!(
+            mnemonics(&linear(&cfg, BlockOrder::Custom(order.clone()))),
+            [
+                "label", "cmp", "branch", "jump", "label", "then", "label", "else"
+            ],
+            "the default emitter keeps today's two transfers"
+        );
+        assert_eq!(
+            folded(&cfg, order),
+            [
+                "label",
+                "cmp",
+                "branch-not",
+                "label",
+                "then",
+                "label",
+                "else"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_branch_is_not_inverted_unless_only_the_true_target_is_next() {
+        let (cfg, [then_arm, else_arm]) = two_way();
+        assert_eq!(
+            folded(&cfg, vec![cfg.entry(), else_arm, then_arm]),
+            ["label", "cmp", "branch", "label", "else", "label", "then"],
+            "the false target is next"
+        );
+        assert_eq!(
+            folded(&cfg, vec![cfg.entry()]),
+            ["label", "cmp", "branch", "jump"],
+            "neither target is next"
+        );
+    }
+
+    #[test]
+    fn an_eliding_emitter_omits_only_the_jump_to_the_next_block() {
+        let mut cfg = Cfg::new();
+        let [next, far] = [cfg.new_block(), cfg.new_block()];
+        cfg.add_edge(cfg.entry(), next, EdgeKind::Unconditional);
+        cfg.add_edge(next, far, EdgeKind::Back);
+        let order = vec![cfg.entry(), next];
+        assert_eq!(
+            mnemonics(&linear(&cfg, BlockOrder::Custom(order.clone()))),
+            ["label", "jump", "label", "jump"]
+        );
+        assert_eq!(folded(&cfg, order), ["label", "label", "jump"]);
+    }
+
+    #[test]
+    fn an_edge_falls_through_when_its_jump_to_the_next_block_is_not_emitted() {
+        let (mut cfg, [then_arm, else_arm]) = two_way();
+        let edge = |cfg: &Cfg<MockInst>, source, kind| {
+            cfg.outgoing(source)
+                .find(|&edge| cfg.edge(edge).kind() == kind)
+                .expect("the block has an edge of that kind")
+        };
+        let true_edge = edge(&cfg, cfg.entry(), EdgeKind::ConditionalTrue);
+        let false_edge = edge(&cfg, cfg.entry(), EdgeKind::ConditionalFalse);
+        let jump = cfg.add_edge(then_arm, else_arm, EdgeKind::Jump);
+        let case = cfg.add_edge(else_arm, then_arm, EdgeKind::SwitchCase);
+        let lone = cfg.new_block();
+        cfg.block_mut(lone).push(ff("cmp"));
+        cfg.add_edge(lone, then_arm, EdgeKind::ConditionalTrue);
+        let lone_true = edge(&cfg, lone, EdgeKind::ConditionalTrue);
+
+        for emitter in [&TestEmitter as &dyn Emitter<MockInst>, &FoldingEmitter] {
+            assert!(falls_through(&cfg, false_edge, emitter));
+            assert!(!falls_through(&cfg, case, emitter), "a dispatch is taken");
+            assert!(
+                !falls_through(&cfg, lone_true, emitter),
+                "no layout target to invert to"
+            );
+        }
+        assert!(!falls_through(&cfg, true_edge, &TestEmitter));
+        assert!(!falls_through(&cfg, jump, &TestEmitter));
+        assert!(falls_through(&cfg, true_edge, &FoldingEmitter));
+        assert!(falls_through(&cfg, jump, &FoldingEmitter));
     }
 }

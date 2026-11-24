@@ -1,0 +1,426 @@
+# seed 0, reverse postorder
+L0: 0 1 2 3 4 5
+L1: 0 1 bnz L2
+L3: 0 1 2 bnz L4
+L12: 0 1 bnz L13 jmp L14
+L13: 0 1 bnz L15
+L17: jmp L16
+L15:
+L16: 0
+L14: 0 1 jmp L5
+L4: 0
+L6: 0 1 bnz L7
+L8: 0 1
+L9: 0 1 bnz L10
+L11:
+L5: 0 1 2 bnz L18
+L20: 0 1
+L21: 0 1 bnz L22
+L23: jmp L19
+L22: 0 1 2 3 jmp L21
+L18:
+L19: 0 1 bnz L24 jmp L25
+L24:
+L25: 0 1 2
+L10: 0 1 2 jmp L9
+L7: 0 jmp L6
+L2: 0 1 2 jmp L1
+# seed 0, allocation order
+L0: 0 1 2 3 4 5
+L1: 0 1 bnz L2 jmp L3
+L2: 0 1 2 jmp L1
+L3: 0 1 2 bnz L4 jmp L12
+L4: 0 jmp L6
+L5: 0 1 2 bnz L18 jmp L20
+L6: 0 1 bnz L7 jmp L8
+L7: 0 jmp L6
+L8: 0 1
+L9: 0 1 bnz L10 jmp L11
+L10: 0 1 2 jmp L9
+L11: jmp L5
+L12: 0 1 bnz L13 jmp L14
+L13: 0 1 bnz L15 jmp L17
+L14: 0 1 jmp L5
+L15:
+L16: 0 jmp L14
+L17: jmp L16
+L18:
+L19: 0 1 bnz L24 jmp L25
+L20: 0 1
+L21: 0 1 bnz L22 jmp L23
+L22: 0 1 2 3 jmp L21
+L23: jmp L19
+L24:
+L25: 0 1 2
+L26: 0 jmp L5
+# seed 0, shuffled
+L0: 0 1 2 3 4 5 jmp L1
+L26: 0
+L5: 0 1 2 bnz L18 jmp L20
+L16: 0 jmp L14
+L22: 0 1 2 3 jmp L21
+L10: 0 1 2 jmp L9
+L4: 0 jmp L6
+L17: jmp L16
+L23: jmp L19
+L25: 0 1 2
+L11: jmp L5
+L7: 0 jmp L6
+L19: 0 1 bnz L24 jmp L25
+L20: 0 1 jmp L21
+L13: 0 1 bnz L15 jmp L17
+L24: jmp L25
+L15: jmp L16
+L6: 0 1 bnz L7 jmp L8
+L3: 0 1 2 bnz L4 jmp L12
+L2: 0 1 2 jmp L1
+L21: 0 1 bnz L22 jmp L23
+L14: 0 1 jmp L5
+L9: 0 1 bnz L10 jmp L11
+L1: 0 1 bnz L2 jmp L3
+L8: 0 1 jmp L9
+L18: jmp L19
+L12: 0 1 bnz L13 jmp L14
+# seed 1, reverse postorder
+L0: 0 1 2
+L1: 0 1 bnz L2
+L3: 0 1 2 bnz L4
+L6: 0 jmp L5
+L4:
+L5: 0 1 bnz L7
+L9: 0 1 bnz L10
+L12: 0 1 jmp L11
+L10: 0 1
+L11: jmp L8
+L7: 0
+L8: 0 1 2 3 4
+L2: 0 jmp L1
+# seed 1, allocation order
+L0: 0 1 2
+L1: 0 1 bnz L2 jmp L3
+L2: 0 jmp L1
+L3: 0 1 2 bnz L4 jmp L6
+L4:
+L5: 0 1 bnz L7 jmp L9
+L6: 0 jmp L5
+L7: 0
+L8: 0 1 2 3 4
+L9: 0 1 bnz L10 jmp L12
+L10: 0 1
+L11: jmp L8
+L12: 0 1 jmp L11
+L13: 0 jmp L6
+# seed 1, shuffled
+L0: 0 1 2
+L1: 0 1 bnz L2 jmp L3
+L5: 0 1 bnz L7 jmp L9
+L4: jmp L5
+L2: 0 jmp L1
+L6: 0 jmp L5
+L10: 0 1 jmp L11
+L9: 0 1 bnz L10 jmp L12
+L7: 0 jmp L8
+L3: 0 1 2 bnz L4 jmp L6
+L13: 0 jmp L6
+L11: jmp L8
+L12: 0 1 jmp L11
+L8: 0 1 2 3 4
+# seed 2, reverse postorder
+L0: 0 1 2 3 bnz L1
+L3: 0 jmp L2
+L1: 0 1
+L2: 0
+L4: 0 1 bnz L5
+L6:
+L7: 0 1 bnz L8 jmp L9
+L8:
+L9: 0 1 2 3 4 bnz L10 jmp L11
+L10: 0
+L12:
+L11: 0 1 2
+L5: 0 jmp L4
+# seed 2, allocation order
+L0: 0 1 2 3 bnz L1 jmp L3
+L1: 0 1
+L2: 0 jmp L4
+L3: 0 jmp L2
+L4: 0 1 bnz L5 jmp L6
+L5: 0 jmp L4
+L6:
+L7: 0 1 bnz L8 jmp L9
+L8:
+L9: 0 1 2 3 4 bnz L10 jmp L11
+L10: 0 jmp L12
+L11: 0 1 2
+L12: jmp L11
+L13: 0 jmp L6
+# seed 2, shuffled
+L0: 0 1 2 3 bnz L1 jmp L3
+L1: 0 1 jmp L2
+L12: jmp L11
+L3: 0 jmp L2
+L7: 0 1 bnz L8
+L9: 0 1 2 3 4 bnz L10 jmp L11
+L10: 0 jmp L12
+L6: jmp L7
+L5: 0 jmp L4
+L2: 0 jmp L4
+L13: 0 jmp L6
+L4: 0 1 bnz L5 jmp L6
+L11: 0 1 2
+L8: jmp L9
+# seed 3, reverse postorder
+L0: 0 1 2 3 4 5 6
+L1: 0 1 bnz L2
+L3: 0 1 2 3
+L2: 0 1 2 3 jmp L1
+# seed 3, allocation order
+L0: 0 1 2 3 4 5 6
+L1: 0 1 bnz L2 jmp L3
+L2: 0 1 2 3 jmp L1
+L3: 0 1 2 3
+L4: 0 jmp L1
+L5: 0 jmp L0
+# seed 3, shuffled
+L0: 0 1 2 3 4 5 6
+L1: 0 1 bnz L2 jmp L3
+L2: 0 1 2 3 jmp L1
+L3: 0 1 2 3
+L4: 0 jmp L1
+L5: 0 jmp L0
+# seed 4, reverse postorder
+L0: 0 1 2
+L1: 0 1 bnz L2
+L3: 0 1 2 bnz L4 jmp L5
+L4: 0 1 bnz L6
+L8: 0 jmp L7
+L6:
+L7:
+L5: 0
+L9: 0 1 bnz L10
+L11: 0 1 2 bnz L12 jmp L13
+L12:
+L13: 0 1 2
+L10: 0 1 jmp L9
+L2: 0 1 2 jmp L1
+# seed 4, allocation order
+L0: 0 1 2
+L1: 0 1 bnz L2 jmp L3
+L2: 0 1 2 jmp L1
+L3: 0 1 2 bnz L4 jmp L5
+L4: 0 1 bnz L6 jmp L8
+L5: 0 jmp L9
+L6:
+L7: jmp L5
+L8: 0 jmp L7
+L9: 0 1 bnz L10 jmp L11
+L10: 0 1 jmp L9
+L11: 0 1 2 bnz L12 jmp L13
+L12:
+L13: 0 1 2
+L14: 0 jmp L12
+L15: 0 jmp L12
+# seed 4, shuffled
+L0: 0 1 2
+L1: 0 1 bnz L2 jmp L3
+L8: 0 jmp L7
+L13: 0 1 2
+L7: jmp L5
+L11: 0 1 2 bnz L12 jmp L13
+L5: 0 jmp L9
+L14: 0 jmp L12
+L4: 0 1 bnz L6 jmp L8
+L15: 0 jmp L12
+L2: 0 1 2 jmp L1
+L3: 0 1 2 bnz L4 jmp L5
+L6: jmp L7
+L10: 0 1 jmp L9
+L9: 0 1 bnz L10 jmp L11
+L12: jmp L13
+# seed 5, reverse postorder
+L0: 0 1 2 3 4 5 bnz L1
+L21: jmp L2
+L1: 0 1 bnz L3
+L10: 0 jmp L4
+L3: 0 1 bnz L5 jmp L6
+L5: 0
+L7:
+L6: 0 1 bnz L8 jmp L9
+L8: 0
+L9: 0
+L4: 0 1 bnz L11
+L16: 0 1 2 bnz L17 jmp L18
+L17:
+L18: jmp L12
+L11: 0 1 bnz L13
+L15: 0 1 2 jmp L14
+L13:
+L14:
+L12: 0 1 bnz L19 jmp L20
+L19:
+L20:
+L2: 0 1 bnz L22 jmp L23
+L22: 0 1 bnz L24 jmp L25
+L24: 0 1
+L25:
+L23: 0 1
+L26: 0 1 bnz L27
+L28: 0 1 2
+L27: 0 1 2 jmp L26
+# seed 5, allocation order
+L0: 0 1 2 3 4 5 bnz L1 jmp L21
+L1: 0 1 bnz L3 jmp L10
+L2: 0 1 bnz L22 jmp L23
+L3: 0 1 bnz L5 jmp L6
+L4: 0 1 bnz L11 jmp L16
+L5: 0 jmp L7
+L6: 0 1 bnz L8 jmp L9
+L7: jmp L6
+L8: 0
+L9: 0 jmp L4
+L10: 0 jmp L4
+L11: 0 1 bnz L13 jmp L15
+L12: 0 1 bnz L19 jmp L20
+L13:
+L14: jmp L12
+L15: 0 1 2 jmp L14
+L16: 0 1 2 bnz L17 jmp L18
+L17:
+L18: jmp L12
+L19:
+L20: jmp L2
+L21: jmp L2
+L22: 0 1 bnz L24 jmp L25
+L23: 0 1 jmp L26
+L24: 0 1
+L25: jmp L23
+L26: 0 1 bnz L27 jmp L28
+L27: 0 1 2 jmp L26
+L28: 0 1 2
+L29: 0 jmp L15
+# seed 5, shuffled
+L0: 0 1 2 3 4 5 bnz L1 jmp L21
+L7: jmp L6
+L11: 0 1 bnz L13 jmp L15
+L13: jmp L14
+L3: 0 1 bnz L5 jmp L6
+L8: 0 jmp L9
+L6: 0 1 bnz L8 jmp L9
+L18: jmp L12
+L4: 0 1 bnz L11 jmp L16
+L14: jmp L12
+L26: 0 1 bnz L27 jmp L28
+L20: jmp L2
+L24: 0 1 jmp L25
+L1: 0 1 bnz L3 jmp L10
+L21: jmp L2
+L15: 0 1 2 jmp L14
+L12: 0 1 bnz L19 jmp L20
+L22: 0 1 bnz L24 jmp L25
+L9: 0 jmp L4
+L28: 0 1 2
+L25: jmp L23
+L19: jmp L20
+L5: 0 jmp L7
+L17: jmp L18
+L27: 0 1 2 jmp L26
+L23: 0 1 jmp L26
+L29: 0 jmp L15
+L16: 0 1 2 bnz L17 jmp L18
+L10: 0 jmp L4
+L2: 0 1 bnz L22 jmp L23
+# seed 6, reverse postorder
+L0: 0 1 2 3 4 bnz L1
+L6: 0 1
+L7: 0 1 bnz L8
+L9: 0 jmp L2
+L8: 0 jmp L7
+L1: 0 1 2 3 bnz L3
+L5: 0 1 jmp L4
+L3: 0
+L4:
+L2: 0 1 2 bnz L10 jmp L11
+L10: 0 1 2 bnz L12 jmp L13
+L12: 0 1 bnz L14
+L16: jmp L15
+L14: 0
+L15: 0
+L13: 0
+L11: 0 1 bnz L17
+L19: 0 1 2 bnz L20
+L22: 0 jmp L21
+L20: 0 1 2
+L21: jmp L18
+L17:
+L18: 0
+L23: 0 1 bnz L24
+L25: 0 1 2 3 4 5 6
+L24: 0 jmp L23
+# seed 6, allocation order
+L0: 0 1 2 3 4 bnz L1 jmp L6
+L1: 0 1 2 3 bnz L3 jmp L5
+L2: 0 1 2 bnz L10 jmp L11
+L3: 0
+L4: jmp L2
+L5: 0 1 jmp L4
+L6: 0 1
+L7: 0 1 bnz L8 jmp L9
+L8: 0 jmp L7
+L9: 0 jmp L2
+L10: 0 1 2 bnz L12 jmp L13
+L11: 0 1 bnz L17 jmp L19
+L12: 0 1 bnz L14 jmp L16
+L13: 0 jmp L11
+L14: 0
+L15: 0 jmp L13
+L16: jmp L15
+L17:
+L18: 0 jmp L23
+L19: 0 1 2 bnz L20 jmp L22
+L20: 0 1 2
+L21: jmp L18
+L22: 0 jmp L21
+L23: 0 1 bnz L24 jmp L25
+L24: 0 jmp L23
+L25: 0 1 2 3 4 5 6
+L26: 0 jmp L13
+L27: 0 jmp L22
+# seed 6, shuffled
+L0: 0 1 2 3 4 bnz L1 jmp L6
+L27: 0 jmp L22
+L19: 0 1 2 bnz L20 jmp L22
+L9: 0 jmp L2
+L25: 0 1 2 3 4 5 6
+L24: 0 jmp L23
+L3: 0 jmp L4
+L12: 0 1 bnz L14 jmp L16
+L7: 0 1 bnz L8 jmp L9
+L8: 0 jmp L7
+L4: jmp L2
+L22: 0 jmp L21
+L6: 0 1 jmp L7
+L1: 0 1 2 3 bnz L3 jmp L5
+L13: 0 jmp L11
+L23: 0 1 bnz L24 jmp L25
+L2: 0 1 2 bnz L10 jmp L11
+L10: 0 1 2 bnz L12 jmp L13
+L18: 0 jmp L23
+L11: 0 1 bnz L17 jmp L19
+L17: jmp L18
+L16: jmp L15
+L14: 0 jmp L15
+L5: 0 1 jmp L4
+L26: 0 jmp L13
+L21: jmp L18
+L20: 0 1 2 jmp L21
+L15: 0 jmp L13
+# seed 7, reverse postorder
+L0: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+# seed 7, allocation order
+L0: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+L1: 0 jmp L0
+L2: 0 jmp L0
+# seed 7, shuffled
+L0: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
+L1: 0 jmp L0
+L2: 0 jmp L0
