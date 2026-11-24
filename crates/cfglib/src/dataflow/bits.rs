@@ -130,6 +130,17 @@ impl DenseBits {
         self.words.fill(0);
     }
 
+    /// Widens the universe to `0..len`, keeping every member; the new indices
+    /// start absent. A `len` at or below the current universe changes nothing.
+    pub(crate) fn grow(&mut self, len: usize) {
+        if len > self.len {
+            // The bits above the old universe are zero, so the old last word
+            // carries over unchanged.
+            self.words.resize(len.div_ceil(64), 0);
+            self.len = len;
+        }
+    }
+
     /// The packed words, 64 indices each, least-significant bit first.
     ///
     /// Exposed so a consumer can run its own word-parallel operation over a

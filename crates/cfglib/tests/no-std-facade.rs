@@ -303,6 +303,10 @@ fn keyed_graphs_fanouts_and_clause_sets_use_alloc_collections() {
     clauses.add_clause(0, &[1]);
     clauses.add_clause(1, &[]);
     assert_eq!(clauses.derivable(), [true, true, false]);
+    let mut saturation = clauses.saturate();
+    clauses.add_clause(2, &[0, 1]);
+    let newly: Vec<usize> = saturation.update(&clauses);
+    assert_eq!(newly, [2]);
 }
 
 /// A structured instruction stream a consumer's decoder produces.
