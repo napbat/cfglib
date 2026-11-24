@@ -14,16 +14,27 @@
 //! item (never shrink it back), so each iteration either widens something
 //! or converges. Widths may depend on the item's own offset (alignment
 //! padding), which is why offsets are recomputed from scratch each round.
+//!
+//! [`relax_spans`] is the incremental form for items whose only dependency
+//! is the displacement to one other item ([`SpanItem`]): a round re-checks
+//! only the spans over an item whose width changed. It also relaxes from the
+//! other side ([`RelaxMode::Shrink`]): every item starts long and shrinks
+//! where a shorter form reaches, as a linker does.
 
 extern crate alloc;
 
 use alloc::vec::Vec;
 use core::fmt;
 
-/// Why one [`relax_layout`] run failed.
+pub use spans::{RelaxMode, SpanItem, relax_spans};
+
+mod spans;
+
+/// Why one [`relax_layout`] or [`relax_spans`] run failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelaxError<E> {
-    /// The layout's total length overflowed `usize`.
+    /// The layout's total length overflowed `usize`, or a displacement of
+    /// [`relax_spans`] overflowed `isize`.
     Overflow,
     /// A caller hook failed.
     Item(E),
@@ -53,6 +64,15 @@ impl<E: fmt::Debug + fmt::Display> core::error::Error for RelaxError<E> {}
 ///
 /// `widen` must be monotone: a widened item may never report a smaller
 /// width later, or the loop need not terminate.
+///
+/// # Cost
+///
+/// Each iteration calls `width` and `widen` once per item and `prepare`
+/// once, and the loop runs until an iteration widens nothing. A cascade in
+/// which each widening pushes one more span out of range takes one
+/// iteration per widening: O(n²) calls for `n` items. When every item
+/// depends on one displacement at most, [`relax_spans`] reaches the same
+/// fixed point and re-checks only the spans that a width change moved.
 ///
 /// # Errors
 ///

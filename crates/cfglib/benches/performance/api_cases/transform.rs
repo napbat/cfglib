@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::convert::Infallible;
 
 use cfglib::{
     BlockId, BlockOrder, Cfg, ClrExceptionRegion, ClrHandler, ClrHandlerKind, EdgeKind, Emitter,
@@ -10,8 +11,9 @@ use cfglib::{
 };
 use cfglib::{
     DispatchBuilder, DispatchReport, DominatorTree, ExclusiveExtent, ExtentPromotionDecision,
-    HandlerRef, RelaxError, is_reducible, make_reducible, make_reducible_with_dispatch,
-    promote_exclusive_extents, recover_exclusive_extents, relax_layout,
+    HandlerRef, RelaxError, RelaxMode, SpanItem, is_reducible, make_reducible,
+    make_reducible_with_dispatch, promote_exclusive_extents, recover_exclusive_extents,
+    relax_layout, relax_spans,
 };
 
 use super::BenchmarkSuite;
@@ -542,6 +544,115 @@ fn register_layout(suite: &mut BenchmarkSuite<'_>) {
             assert!(*total >= BLOCK_COUNT);
         }
     );
+
+    let short_chain = cascade(10_000, RelaxMode::Grow);
+    benchmark_case!(
+        suite,
+        "api_relax_spans_cascade_grow_10k",
+        covers[relax_spans],
+        || relax_cascade(&short_chain, RelaxMode::Grow),
+        |result: &CascadeResult| check_cascade(result, 10_000, RelaxMode::Grow)
+    );
+    let large_short_chain = cascade(100_000, RelaxMode::Grow);
+    benchmark_case!(
+        suite,
+        "api_relax_spans_cascade_grow_100k",
+        || relax_cascade(&large_short_chain, RelaxMode::Grow),
+        |result: &CascadeResult| check_cascade(result, 100_000, RelaxMode::Grow)
+    );
+    let long_chain = cascade(10_000, RelaxMode::Shrink);
+    benchmark_case!(
+        suite,
+        "api_relax_spans_cascade_shrink_10k",
+        || relax_cascade(&long_chain, RelaxMode::Shrink),
+        |result: &CascadeResult| check_cascade(result, 10_000, RelaxMode::Shrink)
+    );
+    let large_long_chain = cascade(100_000, RelaxMode::Shrink);
+    benchmark_case!(
+        suite,
+        "api_relax_spans_cascade_shrink_100k",
+        || relax_cascade(&large_long_chain, RelaxMode::Shrink),
+        |result: &CascadeResult| check_cascade(result, 100_000, RelaxMode::Shrink)
+    );
+}
+
+type CascadeResult = Result<(Vec<usize>, usize), RelaxError<Infallible>>;
+
+/// A branch to the item after next, 2 bytes short and 5 bytes long, whose
+/// short form reaches 3 bytes past its own end; or a tail of padding.
+#[derive(Clone)]
+enum CascadeItem {
+    Branch { target: usize, long: bool },
+    Tail(usize),
+}
+
+impl SpanItem for CascadeItem {
+    fn width(&self, _offset: usize) -> usize {
+        match *self {
+            Self::Branch { long: false, .. } => 2,
+            Self::Branch { long: true, .. } => 5,
+            Self::Tail(width) => width,
+        }
+    }
+
+    fn span_target(&self) -> Option<usize> {
+        match *self {
+            Self::Branch { target, .. } => Some(target),
+            Self::Tail(_) => None,
+        }
+    }
+
+    fn is_aligned(&self) -> bool {
+        false
+    }
+
+    fn refit(&mut self, displacement: isize, mode: RelaxMode) -> bool {
+        let width = isize::try_from(self.width(0)).expect("an item width fits isize");
+        let Self::Branch { long, .. } = self else {
+            return false;
+        };
+        let reaches_short = displacement - width <= 3;
+        let refit = match mode {
+            RelaxMode::Grow => !*long && !reaches_short,
+            RelaxMode::Shrink => *long && reaches_short,
+        };
+        *long ^= refit;
+        refit
+    }
+}
+
+/// `count` branches, each over the next one, so each needs its long form
+/// exactly when the next one is long. The tail makes the last branch long
+/// when growing and short when shrinking, and the change then runs back
+/// through the whole chain one branch per round.
+fn cascade(count: usize, mode: RelaxMode) -> Vec<CascadeItem> {
+    let (long, tail) = match mode {
+        RelaxMode::Grow => (false, 100),
+        RelaxMode::Shrink => (true, 1),
+    };
+    let mut items: Vec<CascadeItem> = (0..count)
+        .map(|index| CascadeItem::Branch {
+            target: index + 2,
+            long,
+        })
+        .collect();
+    items.push(CascadeItem::Tail(tail));
+    items
+}
+
+fn relax_cascade(items: &[CascadeItem], mode: RelaxMode) -> CascadeResult {
+    let mut candidate = items.to_vec();
+    relax_spans(&mut candidate, mode)
+}
+
+fn check_cascade(result: &CascadeResult, count: usize, mode: RelaxMode) {
+    let (offsets, total) = result.as_ref().expect("the cascade fits the address space");
+    assert_eq!(offsets.len(), count + 1);
+    let expected = match mode {
+        RelaxMode::Grow => 5 * count + 100,
+        RelaxMode::Shrink => 2 * count + 1,
+    };
+    assert_eq!(*total, expected, "every branch changed form");
 }
 
 /// Node splitting against dispatch on the complete digraph: splitting copies
