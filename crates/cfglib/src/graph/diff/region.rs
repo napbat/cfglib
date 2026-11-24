@@ -615,10 +615,17 @@ mod tests {
     #[test]
     fn identical_and_renumbered_copies_pair_one_to_one_like_cfg_diff() {
         let mut rng = Rng::new(46);
+        // Chains of several blocks, whose members the alignment must pair
+        // one to one rather than as a group.
+        let mut long_chains = 0;
         for _ in 0..200 {
             let seed = rng.below(1 << 20) as u64;
             let original = random_cfg(&mut Rng::new(seed), None);
             let renumbered = random_cfg(&mut Rng::new(seed), Some(&mut rng));
+            long_chains += chains_of(&original)
+                .iter()
+                .filter(|chain| chain.len() > 1)
+                .count();
             for copy in [&original, &renumbered] {
                 let diff = RegionDiff::compute(&original, copy);
                 assert!(diff.left_only.is_empty() && diff.right_only.is_empty());
@@ -639,6 +646,7 @@ mod tests {
                 assert_eq!(pairs, matched);
             }
         }
+        assert!(long_chains > 100, "{long_chains} chains of several blocks");
     }
 
     /// Merges `next` into `block`, which links to it: `next`'s
