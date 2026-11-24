@@ -1,7 +1,10 @@
 use super::*;
 use crate::edge::EdgeKind;
+use crate::graph::scc::tarjan_scc;
 use crate::graph::store::{Graph, NodeId};
 use crate::test_util::ff;
+use crate::test_util::rng::Rng;
+use alloc::collections::BTreeSet;
 use alloc::vec;
 
 #[test]
@@ -520,4 +523,111 @@ fn topological_sort_rejects_cycles() {
     assert_eq!(topological_sort(&graph), Some(vec![left, right]));
     graph.add_edge(right, left, ());
     assert!(topological_sort(&graph).is_none());
+}
+
+/// A random multigraph of up to a dozen slots, about one in six of them
+/// removed again. Half the graphs only have edges from a lower slot to a
+/// higher one or to itself, so acyclic graphs are as common as cyclic ones;
+/// self-loops and parallel edges occur in both halves.
+fn random_graph(rng: &mut Rng) -> Graph<(), ()> {
+    let node_count = 1 + rng.below(12);
+    let forward_only = rng.one_in(2);
+    let mut graph = Graph::new();
+    let nodes: Vec<NodeId> = (0..node_count).map(|_| graph.add_node(())).collect();
+    for _ in 0..rng.below(2 * node_count) {
+        let (mut source, mut target) = (rng.below(node_count), rng.below(node_count));
+        if forward_only && source > target {
+            (source, target) = (target, source);
+        }
+        if forward_only && source == target && !rng.one_in(8) {
+            continue;
+        }
+        graph.add_edge(nodes[source], nodes[target], ());
+    }
+    for &node in &nodes {
+        if rng.one_in(6) {
+            graph.remove_node(node);
+        }
+    }
+    graph
+}
+
+/// Asserts that `cycle` is a cycle of `graph` in successor order, the last
+/// node back to the first, with no node twice.
+fn assert_cycle(graph: &Graph<(), ()>, cycle: &[NodeId]) {
+    assert!(!cycle.is_empty());
+    let distinct: BTreeSet<NodeId> = cycle.iter().copied().collect();
+    assert_eq!(distinct.len(), cycle.len(), "{cycle:?} repeats a node");
+    for (position, &node) in cycle.iter().enumerate() {
+        let next = cycle[(position + 1) % cycle.len()];
+        assert!(
+            graph.successors(node).any(|successor| successor == next),
+            "{cycle:?}: {node:?} -> {next:?} is no edge"
+        );
+    }
+}
+
+#[test]
+fn topological_sort_or_cycle_sorts_exactly_the_acyclic_graphs() {
+    let (mut sorted, mut cyclic) = (0, 0);
+    for seed in 0..800 {
+        let graph = random_graph(&mut Rng::new(seed));
+        let components = tarjan_scc(&graph);
+        let result = topological_sort_or_cycle(&graph);
+        match &result {
+            Ok(order) => {
+                sorted += 1;
+                assert!(components.is_dag(&graph), "seed {seed}");
+                assert_eq!(Some(order), topological_sort(&graph).as_ref());
+            }
+            Err(cycle) => {
+                cyclic += 1;
+                assert!(!components.is_dag(&graph), "seed {seed}");
+                assert_eq!(topological_sort(&graph), None);
+                assert_cycle(&graph, cycle);
+                assert_eq!(cycle.first(), cycle.iter().min(), "starts at its smallest");
+                let component = components.component(cycle[0]);
+                assert!(component.is_cyclic(&graph));
+                assert!(cycle.iter().all(|&node| component.contains(node)));
+            }
+        }
+        let rebuilt = random_graph(&mut Rng::new(seed));
+        assert_eq!(topological_sort_or_cycle(&rebuilt), result, "seed {seed}");
+    }
+    assert!(
+        sorted > 200 && cyclic > 200,
+        "{sorted} sorted, {cyclic} cyclic"
+    );
+}
+
+#[test]
+fn topological_sort_or_cycle_of_an_empty_graph_is_an_empty_order() {
+    let mut graph = Graph::<(), ()>::new();
+    assert_eq!(topological_sort_or_cycle(&graph), Ok(Vec::new()));
+    let removed = graph.add_node(());
+    graph.remove_node(removed);
+    assert_eq!(topological_sort_or_cycle(&graph), Ok(Vec::new()));
+}
+
+#[test]
+fn topological_sort_or_cycle_names_a_self_loop_as_a_one_node_cycle() {
+    let mut graph = Graph::<(), ()>::new();
+    let [a, b] = [(); 2].map(|()| graph.add_node(()));
+    graph.add_edge(a, b, ());
+    graph.add_edge(b, b, ());
+    graph.add_edge(b, b, ());
+    assert_eq!(topological_sort_or_cycle(&graph), Err(vec![b]));
+}
+
+#[test]
+fn the_cycle_witness_leaves_out_the_nodes_the_cycle_only_reaches() {
+    // A removed slot, then `d` which only the cycle `a <-> b` reaches: the
+    // walk starts at `d`, the smallest unsorted node, and cuts it off again.
+    let mut graph = Graph::<(), ()>::new();
+    let [removed, d, a, b] = [(); 4].map(|()| graph.add_node(()));
+    graph.remove_node(removed);
+    graph.add_edge(a, b, ());
+    graph.add_edge(b, a, ());
+    graph.add_edge(b, d, ());
+    assert_eq!(topological_sort_or_cycle(&graph), Err(vec![a, b]));
 }

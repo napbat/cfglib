@@ -597,3 +597,91 @@ fn the_single_array_walk_decomposes_like_the_classic_one() {
         assert_eq!(tarjan_scc(&graph), classic_tarjan(&graph));
     }
 }
+
+/// Hops from `start` to `goal` along successors, by a plain breadth-first
+/// walk over the whole graph.
+fn hops(graph: &Graph<(), ()>, start: NodeId, goal: NodeId) -> Option<usize> {
+    let mut distance = vec![usize::MAX; graph.node_bound()];
+    distance[start.index()] = 0;
+    let mut queue = VecDeque::from([start]);
+    while let Some(node) = queue.pop_front() {
+        if node == goal {
+            return Some(distance[node.index()]);
+        }
+        for successor in graph.successors(node) {
+            if distance[successor.index()] == usize::MAX {
+                distance[successor.index()] = distance[node.index()] + 1;
+                queue.push_back(successor);
+            }
+        }
+    }
+    None
+}
+
+/// Checks `cycle_through` for every live node of random multigraphs with
+/// self-loops, parallel edges and removed slots: the cycle starts at the node,
+/// closes, repeats no node, stays in the node's component, and is as short as
+/// the shortest way back from one of the node's successors.
+#[test]
+fn cycle_through_is_a_shortest_cycle_inside_the_component() {
+    let mut rng = crate::test_util::rng::Rng::new(68);
+    let mut found = 0;
+    for _ in 0..300 {
+        let node_count = 1 + rng.below(14);
+        let mut graph = Graph::<(), ()>::new();
+        let nodes: Vec<NodeId> = (0..node_count).map(|_| graph.add_node(())).collect();
+        for _ in 0..rng.below(2 * node_count + 1) {
+            graph.add_edge(
+                nodes[rng.below(node_count)],
+                nodes[rng.below(node_count)],
+                (),
+            );
+        }
+        for &node in &nodes {
+            if rng.one_in(6) {
+                graph.remove_node(node);
+            }
+        }
+        let (sources_first, leaves_first) = (kosaraju_scc(&graph), tarjan_scc(&graph));
+        for node in graph.node_ids() {
+            let shortest = graph
+                .successors(node)
+                .filter_map(|successor| hops(&graph, successor, node))
+                .min()
+                .map(|back| back + 1);
+            let cycle = sources_first.cycle_through(&graph, node);
+            assert_eq!(cycle, leaves_first.cycle_through(&graph, node));
+            assert_eq!(cycle.as_ref().map(Vec::len), shortest, "{node:?}");
+            let Some(cycle) = cycle else { continue };
+            found += 1;
+            assert_eq!(cycle[0], node);
+            assert_eq!(cycle.iter().collect::<BTreeSet<_>>().len(), cycle.len());
+            let component = sources_first.component(node);
+            for (position, &member) in cycle.iter().enumerate() {
+                assert!(component.contains(member));
+                let next = cycle[(position + 1) % cycle.len()];
+                assert!(graph.successors(member).any(|successor| successor == next));
+            }
+        }
+    }
+    assert!(found > 300, "only {found} nodes lie on a cycle");
+}
+
+#[test]
+fn cycle_through_a_self_loop_is_the_node_alone() {
+    let mut graph = Graph::<(), ()>::new();
+    let [a, b] = [(); 2].map(|()| graph.add_node(()));
+    graph.add_edge(a, b, ());
+    graph.add_edge(b, b, ());
+    graph.add_edge(b, b, ());
+    let components = kosaraju_scc(&graph);
+    assert_eq!(components.cycle_through(&graph, b), Some(vec![b]));
+    assert_eq!(components.cycle_through(&graph, a), None);
+}
+
+#[test]
+#[should_panic(expected = "is not a node of the decomposed graph")]
+fn cycle_through_rejects_a_removed_slot() {
+    let (graph, [_, _, c, _]) = with_removed_slot();
+    let _ = kosaraju_scc(&graph).cycle_through(&graph, c);
+}
