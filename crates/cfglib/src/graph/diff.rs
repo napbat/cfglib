@@ -15,6 +15,13 @@
 //! with the loose hashes around the block; `strict`; `loose`; and last the
 //! wiring that `CfgDiff::compute` matches by. Each pair reports the
 //! [`MatchLevel`] it was matched at.
+//!
+//! Both pair blocks one to one. [`RegionDiff::compute`] reports n:m
+//! correspondences, for a block split in two or two blocks merged into one.
+//! It contracts each CFG's maximal chains (blocks joined by an only
+//! out-edge that is an only in-edge) and matches the chains by wiring like
+//! `CfgDiff::compute`. Then it aligns the members of each matched pair of
+//! chains by their instruction counts.
 
 extern crate alloc;
 use alloc::collections::{BTreeMap, VecDeque};
@@ -24,8 +31,10 @@ use crate::block::BlockId;
 use crate::cfg::Cfg;
 
 pub use cascade::{BlockHashes, CascadeDiff, MatchLevel};
+pub use region::{RegionDiff, RegionMatch};
 
 mod cascade;
+mod region;
 
 /// Per-block structural fingerprint used for matching.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
