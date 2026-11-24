@@ -18,19 +18,100 @@
 
 extern crate alloc;
 use alloc::vec;
+use alloc::vec::Vec;
 use core::convert::Infallible;
 
+use super::bits::DenseBits;
 use super::fixpoint::{
     Direction, Facts, SolveConfig, SolveError, TrySolveError, collapse_infallible,
 };
+use super::schedule::{Bound, Changed, Leaving, Sweep, schedule};
 use super::worklist::Worklist;
 use crate::graph::traverse::{Adjacency, by_axis};
 use crate::graph::view::{DenseId, GraphView};
 
 /// A node-level dataflow problem over a graph view `G`.
 ///
-/// Termination requires the usual contract: `meet` and `transfer` monotone
-/// over a finite-height fact lattice.
+/// # Termination
+///
+/// In [`IterationOrder::Index`](crate::IterationOrder::Index) and
+/// [`IterationOrder::ReversePostorder`](crate::IterationOrder::ReversePostorder),
+/// termination requires the usual contract: `meet` and `transfer` monotone
+/// over a finite-height fact lattice. In
+/// [`IterationOrder::WeakTopological`](crate::IterationOrder::WeakTopological)
+/// the solver widens at the head of every loop with [`widen`](Self::widen),
+/// so a monotone problem over an infinite-height lattice terminates too, and
+/// [narrowing passes](SolveConfig::with_narrowing_passes) can then win back
+/// precision with [`narrow`](Self::narrow). The defaults of both leave the
+/// facts unchanged.
+///
+/// # Examples
+///
+/// An interval counter `i = 0; loop { i += 1 }` climbs forever without
+/// widening; widening at the loop head jumps to the unbounded interval.
+///
+/// ```
+/// use cfglib::{
+///     Direction, Graph, IterationOrder, NodeId, NodeProblem, SolveConfig, meet_options,
+///     solve_node_problem_with_config,
+/// };
+///
+/// /// `None` is unreached, `(low, high)` an interval; `u32::MAX` is unbounded.
+/// struct Counter {
+///     init: NodeId,
+///     step: NodeId,
+/// }
+///
+/// type Range = Option<(u32, u32)>;
+///
+/// impl NodeProblem<Graph<(), ()>> for Counter {
+///     type Fact = Range;
+///     fn direction(&self) -> Direction {
+///         Direction::Forward
+///     }
+///     fn bottom(&self, _: &Graph<(), ()>) -> Range {
+///         None
+///     }
+///     fn boundary(&self, _: &Graph<(), ()>) -> Range {
+///         None
+///     }
+///     fn meet(&self, a: &Range, b: &Range) -> Range {
+///         meet_options(a, b, |a, b| (a.0.min(b.0), a.1.max(b.1)))
+///     }
+///     fn transfer(&self, _: &Graph<(), ()>, node: NodeId, input: &Range) -> Range {
+///         if node == self.init {
+///             Some((0, 0))
+///         } else if node == self.step {
+///             input.map(|(low, high)| (low + 1, high.saturating_add(1)))
+///         } else {
+///             *input
+///         }
+///     }
+///     fn widen(&self, previous: &Range, next: &Range) -> Range {
+///         match (previous, next) {
+///             (Some((low, high)), Some((next_low, next_high))) => Some((
+///                 if next_low < low { 0 } else { *low },
+///                 if next_high > high { u32::MAX } else { *high },
+///             )),
+///             _ => *next,
+///         }
+///     }
+/// }
+///
+/// let mut graph = Graph::<(), ()>::new();
+/// let [init, head, step] = [(); 3].map(|()| graph.add_node(()));
+/// graph.add_edge(init, head, ());
+/// graph.add_edge(head, step, ());
+/// graph.add_edge(step, head, ());
+/// let counter = Counter { init, step };
+///
+/// let bounded = SolveConfig::with_step_limit(1_000);
+/// assert!(solve_node_problem_with_config(&graph, &counter, bounded).is_err());
+///
+/// let widened = bounded.with_order(IterationOrder::WeakTopological);
+/// let facts = solve_node_problem_with_config(&graph, &counter, widened).unwrap();
+/// assert_eq!(*facts.fact_in(head), Some((0, u32::MAX)));
+/// ```
 pub trait NodeProblem<G: GraphView> {
     /// The per-node dataflow fact.
     type Fact: Clone + PartialEq;
@@ -51,6 +132,21 @@ pub trait NodeProblem<G: GraphView> {
 
     /// The fact leaving `node`, given the met fact entering it.
     fn transfer(&self, graph: &G, node: G::NodeId, input: &Self::Fact) -> Self::Fact;
+
+    /// Widens at a loop head, as [`Problem::widen`](super::fixpoint::Problem::widen).
+    ///
+    /// The default returns `next`, which is no widening.
+    fn widen(&self, _previous: &Self::Fact, next: &Self::Fact) -> Self::Fact {
+        next.clone()
+    }
+
+    /// Narrows at a loop head, as
+    /// [`Problem::narrow`](super::fixpoint::Problem::narrow).
+    ///
+    /// The default returns `next`, a plain descending step.
+    fn narrow(&self, _previous: &Self::Fact, next: &Self::Fact) -> Self::Fact {
+        next.clone()
+    }
 }
 
 /// A fallible node-level dataflow problem over a graph view `G`.
@@ -58,7 +154,8 @@ pub trait NodeProblem<G: GraphView> {
 /// This is the error-preserving counterpart of [`NodeProblem`], for
 /// verification and abstract interpretation where a boundary, merge, or
 /// transfer can reject the input graph. The solver reports those consumer
-/// errors separately from its own configured step limit.
+/// errors separately from its own configured step limit. Termination follows
+/// the rules of [`NodeProblem`].
 pub trait TryNodeProblem<G: GraphView> {
     /// The per-node dataflow fact.
     type Fact: Clone + PartialEq;
@@ -105,6 +202,38 @@ pub trait TryNodeProblem<G: GraphView> {
         node: G::NodeId,
         input: &Self::Fact,
     ) -> Result<Self::Fact, Self::Error>;
+
+    /// Widens at the loop head `node`, as
+    /// [`Problem::widen`](super::fixpoint::Problem::widen).
+    ///
+    /// # Errors
+    ///
+    /// Returns a consumer error when the facts are incompatible.
+    fn widen(
+        &self,
+        _graph: &G,
+        _node: G::NodeId,
+        _previous: &Self::Fact,
+        next: &Self::Fact,
+    ) -> Result<Self::Fact, Self::Error> {
+        Ok(next.clone())
+    }
+
+    /// Narrows at the loop head `node`, as
+    /// [`Problem::narrow`](super::fixpoint::Problem::narrow).
+    ///
+    /// # Errors
+    ///
+    /// Returns a consumer error when the facts are incompatible.
+    fn narrow(
+        &self,
+        _graph: &G,
+        _node: G::NodeId,
+        _previous: &Self::Fact,
+        next: &Self::Fact,
+    ) -> Result<Self::Fact, Self::Error> {
+        Ok(next.clone())
+    }
 }
 
 /// Solve a [`NodeProblem`] to fixpoint with a worklist, without a step limit.
@@ -377,52 +506,146 @@ where
     P: TryNodeProblem<G>,
     D: Adjacency,
 {
-    let upstream = downstream.against();
     let node_count = graph.node_bound();
-    let boundary = problem.boundary(graph).map_err(TrySolveError::Problem)?;
-    let mut input = vec![problem.bottom(graph); node_count];
-    let mut output = vec![problem.bottom(graph); node_count];
+    let mut solver = Solver {
+        graph,
+        problem,
+        downstream,
+        entry,
+        boundary: problem.boundary(graph).map_err(TrySolveError::Problem)?,
+        input: vec![problem.bottom(graph); node_count],
+        output: vec![problem.bottom(graph); node_count],
+    };
+    let direction = problem.direction();
+    let order = schedule(
+        graph,
+        &mut worklist,
+        entry,
+        direction.traversal(),
+        config.order(),
+    );
+    let narrowing = order.as_ref().filter(|_| config.narrowing_passes() > 0);
+    let mut leaving = narrowing.map(Leaving::new);
+    let mut visited = narrowing.map(|_| DenseBits::new(node_count));
 
     let mut steps = 0;
-    while let Some(node_index) = worklist.pop_first() {
-        if let Some(limit) = config.max_steps()
-            && steps >= limit
+    loop {
+        let popped = worklist.pop_first();
+        if let (Some(order), Some(visited)) = (narrowing, &visited)
+            && let Some(component) = leaving.as_mut().and_then(|leaving| leaving.leave(popped))
         {
-            return Err(SolveError::StepLimitExceeded {
-                limit,
-                steps,
-                pending_node: node_index,
+            if let Some(node_index) = popped {
+                worklist.insert(node_index);
             }
-            .into());
+            let sweep = Sweep {
+                order,
+                component,
+                visited,
+            };
+            solver.narrow(&sweep, &mut worklist, config, &mut steps)?;
+            continue;
         }
-        steps += 1;
+        let Some(node_index) = popped else {
+            break;
+        };
+        config.count_step(&mut steps, node_index)?;
         let node = G::NodeId::from_index(node_index);
-
-        let mut met = (entry == Some(node)).then(|| boundary.clone());
-        for from in upstream.neighbors(graph, node) {
-            met = Some(match met {
-                None => output[from.index()].clone(),
-                Some(current) => problem
-                    .meet(graph, node, &current, &output[from.index()])
-                    .map_err(TrySolveError::Problem)?,
-            });
-        }
-        let met = met.unwrap_or_else(|| boundary.clone());
-
-        let transferred = problem
-            .transfer(graph, node, &met)
+        let widen = order.as_ref().is_some_and(|order| order.is_head(node));
+        let changed = solver
+            .visit(node, widen.then_some(Bound::Widen))
             .map_err(TrySolveError::Problem)?;
-        input[node_index] = met;
-        if transferred != output[node_index] {
-            output[node_index] = transferred;
+        if let Some(visited) = &mut visited {
+            visited.insert(node_index);
+        }
+        if changed.output {
             for next in downstream.neighbors(graph, node) {
                 worklist.insert(next.index());
             }
         }
     }
 
-    let (input, output) = problem.direction().program_order(input, output);
+    let (input, output) = direction.program_order(solver.input, solver.output);
     Ok(Facts::new(input, output, steps))
+}
+
+/// The facts of one solve so far, in flow order: `input` is what flows into
+/// a node and `output` what its transfer produced.
+struct Solver<'a, G: GraphView, P: TryNodeProblem<G>, D> {
+    graph: &'a G,
+    problem: &'a P,
+    downstream: D,
+    entry: Option<G::NodeId>,
+    boundary: P::Fact,
+    input: Vec<P::Fact>,
+    output: Vec<P::Fact>,
+}
+
+impl<G: GraphView, P: TryNodeProblem<G>, D: Adjacency> Solver<'_, G, P, D> {
+    /// Recomputes `node` from its upstream neighbors' outputs. With a
+    /// `bound`, a fact flowing in that differs from the one the node holds is
+    /// widened or narrowed against it first.
+    fn visit(&mut self, node: G::NodeId, bound: Option<Bound>) -> Result<Changed, P::Error> {
+        let (graph, problem) = (self.graph, self.problem);
+        let index = node.index();
+        let mut met = (self.entry == Some(node)).then(|| self.boundary.clone());
+        for from in self.downstream.against().neighbors(graph, node) {
+            met = Some(match met {
+                None => self.output[from.index()].clone(),
+                Some(current) => problem.meet(graph, node, &current, &self.output[from.index()])?,
+            });
+        }
+        let mut met = met.unwrap_or_else(|| self.boundary.clone());
+        let mut bounded = false;
+        if let Some(bound) = bound {
+            let held = &self.input[index];
+            if met != *held {
+                met = match bound {
+                    Bound::Widen => problem.widen(graph, node, held, &met)?,
+                    Bound::Narrow => problem.narrow(graph, node, held, &met)?,
+                };
+                bounded = met != *held;
+            }
+        }
+        let transferred = problem.transfer(graph, node, &met)?;
+        self.input[index] = met;
+        let output = transferred != self.output[index];
+        if output {
+            self.output[index] = transferred;
+        }
+        Ok(Changed { bounded, output })
+    }
+
+    /// Runs the descending passes over a component the solve has left: each
+    /// node of it that the solve visited, once per pass in order, narrowing
+    /// at heads, until a pass changes nothing or the configured passes are
+    /// spent. A changed output re-queues only the nodes past the component,
+    /// so nothing in it widens again.
+    fn narrow(
+        &mut self,
+        sweep: &Sweep<'_, G::NodeId>,
+        worklist: &mut Worklist,
+        config: SolveConfig,
+        steps: &mut usize,
+    ) -> Result<(), TrySolveError<P::Error>> {
+        for _ in 0..config.narrowing_passes() {
+            let mut changed = false;
+            for node in sweep.nodes() {
+                config.count_step(steps, node.index())?;
+                let bound = sweep.order.is_head(node).then_some(Bound::Narrow);
+                let visit = self.visit(node, bound).map_err(TrySolveError::Problem)?;
+                changed |= visit.bounded || visit.output;
+                if visit.output {
+                    for next in self.downstream.neighbors(self.graph, node) {
+                        worklist.insert_from(next.index(), sweep.component.end);
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Adapter that runs an infallible [`NodeProblem`] on the fallible solver
@@ -466,6 +689,26 @@ where
         input: &Self::Fact,
     ) -> Result<Self::Fact, Self::Error> {
         Ok(NodeProblem::transfer(self.0, graph, node, input))
+    }
+
+    fn widen(
+        &self,
+        _graph: &G,
+        _node: G::NodeId,
+        previous: &Self::Fact,
+        next: &Self::Fact,
+    ) -> Result<Self::Fact, Self::Error> {
+        Ok(NodeProblem::widen(self.0, previous, next))
+    }
+
+    fn narrow(
+        &self,
+        _graph: &G,
+        _node: G::NodeId,
+        previous: &Self::Fact,
+        next: &Self::Fact,
+    ) -> Result<Self::Fact, Self::Error> {
+        Ok(NodeProblem::narrow(self.0, previous, next))
     }
 }
 

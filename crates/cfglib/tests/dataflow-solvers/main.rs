@@ -5,10 +5,12 @@
 //! graph) drive them. The oracles are naive round-robin fixpoint solvers that
 //! read adjacency from the test's own graph data. Random graphs are generated
 //! deterministically and include unreachable blocks, removed block slots, and
-//! unwind edges.
+//! unwind edges. Every iteration order is checked against the index order,
+//! and an interval domain checks widening and narrowing.
 
 mod block_solver;
 mod edge_solver;
 mod graphs;
 mod node_solver;
 mod reference;
+mod widening;

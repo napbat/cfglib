@@ -1,5 +1,9 @@
 //! The worklist behind every fixpoint solver.
 
+extern crate alloc;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use super::bits::{DenseBits, bit_slot};
 use crate::graph::view::{DenseId, GraphView};
 
@@ -10,10 +14,41 @@ use crate::graph::view::{DenseId, GraphView};
 /// index pops first, which is program order for a CFG whose blocks were
 /// created in order and keeps every solve deterministic. The queue is a bit
 /// row, so queuing allocates nothing.
+///
+/// A [`schedule`]d worklist keeps the bit row but indexes it by each node's
+/// position in an iteration order, so the node earliest in that order pops
+/// first.
 pub(super) struct Worklist {
     queued: DenseBits,
     /// Words below this index hold no queued node.
     cursor: usize,
+    ranking: Option<Ranking>,
+}
+
+/// An iteration order as two tables: node to position and position to node.
+struct Ranking {
+    /// Per dense node index: its position, `u32::MAX` outside the order.
+    position: Vec<u32>,
+    /// Per position: the dense node index there.
+    node: Vec<u32>,
+}
+
+impl Ranking {
+    fn of<N: DenseId>(bound: usize, order: impl ExactSizeIterator<Item = N>) -> Self {
+        let mut ranking = Self {
+            position: vec![u32::MAX; bound],
+            node: Vec::with_capacity(order.len()),
+        };
+        for (position, node) in order.enumerate() {
+            ranking.position[node.index()] = to_u32(position);
+            ranking.node.push(to_u32(node.index()));
+        }
+        ranking
+    }
+}
+
+fn to_u32(value: usize) -> u32 {
+    u32::try_from(value).expect("an iteration order holds fewer than u32::MAX nodes")
 }
 
 impl Worklist {
@@ -22,6 +57,7 @@ impl Worklist {
         Self {
             queued: DenseBits::new(bound),
             cursor: 0,
+            ranking: None,
         }
     }
 
@@ -64,23 +100,90 @@ impl Worklist {
     }
 
     /// Queues `index` unless it is already queued.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the iteration order of a scheduled worklist does not cover
+    /// `index`.
     pub(super) fn insert(&mut self, index: usize) {
-        self.cursor = self.cursor.min(bit_slot(index).0);
-        self.queued.insert(index);
+        let slot = self.slot(index);
+        self.queue(slot);
     }
 
-    /// Removes and returns the lowest queued index.
+    /// Queues `index` unless it is already queued or comes before position
+    /// `floor` of the iteration order.
+    pub(super) fn insert_from(&mut self, index: usize, floor: usize) {
+        let slot = self.slot(index);
+        if slot >= floor {
+            self.queue(slot);
+        }
+    }
+
+    /// Where `index` sits in the bit row: its position in the iteration
+    /// order of a scheduled worklist, and the index itself otherwise.
+    fn slot(&self, index: usize) -> usize {
+        match &self.ranking {
+            None => index,
+            Some(ranking) => {
+                let position = ranking.position[index];
+                assert!(
+                    position != u32::MAX,
+                    "the iteration order covers every node a solve queues"
+                );
+                position as usize
+            }
+        }
+    }
+
+    fn queue(&mut self, slot: usize) {
+        self.cursor = self.cursor.min(bit_slot(slot).0);
+        self.queued.insert(slot);
+    }
+
+    /// Removes and returns the queued node that comes first: the lowest
+    /// index, or the earliest position of a scheduled worklist.
     pub(super) fn pop_first(&mut self) -> Option<usize> {
         let words = self.queued.words();
         while let Some(&word) = words.get(self.cursor) {
             if word != 0 {
-                let index = self.cursor * 64 + word.trailing_zeros() as usize;
-                self.queued.remove(index);
-                return Some(index);
+                let slot = self.cursor * 64 + word.trailing_zeros() as usize;
+                self.queued.remove(slot);
+                return Some(match &self.ranking {
+                    None => slot,
+                    Some(ranking) => ranking.node[slot] as usize,
+                });
             }
             self.cursor += 1;
         }
         None
+    }
+
+    /// Whether `index` is queued, before the worklist is ranked.
+    pub(super) fn contains(&self, index: usize) -> bool {
+        debug_assert!(self.ranking.is_none(), "only an unranked row holds indices");
+        self.queued.get(index)
+    }
+
+    /// The queued indices, ascending, before the worklist is ranked.
+    pub(super) fn queued(&self) -> impl Iterator<Item = usize> + '_ {
+        debug_assert!(self.ranking.is_none(), "only an unranked row holds indices");
+        self.queued.ones()
+    }
+
+    /// Re-queues every queued node by its position in `order`, and pops in
+    /// that order from now on.
+    pub(super) fn rank_by<N: DenseId>(
+        &mut self,
+        bound: usize,
+        order: impl ExactSizeIterator<Item = N>,
+    ) {
+        let ranking = Ranking::of(bound, order);
+        let queued = core::mem::replace(&mut self.queued, DenseBits::new(ranking.node.len()));
+        self.cursor = 0;
+        self.ranking = Some(ranking);
+        for index in queued.ones() {
+            self.insert(index);
+        }
     }
 }
 
@@ -157,5 +260,25 @@ mod tests {
         let node = graph.add_node(());
         assert!(graph.remove_node(node));
         let _ = Worklist::seeded(&graph, &[node]);
+    }
+
+    #[test]
+    fn a_ranked_worklist_pops_by_position_and_requeues_what_it_held() {
+        let mut worklist = Worklist::of(200, [3, 130, 64]);
+        // The order 130, 7, 64, 3, 199: positions 0 to 4.
+        worklist.rank_by(200, [130_usize, 7, 64, 3, 199].into_iter());
+        assert_eq!(worklist.pop_first(), Some(130));
+        worklist.insert(199);
+        worklist.insert(7);
+        worklist.insert(7);
+        assert_eq!(drain(worklist), [7, 64, 3, 199]);
+    }
+
+    #[test]
+    #[should_panic(expected = "the iteration order covers every node a solve queues")]
+    fn queuing_a_node_outside_the_order_panics() {
+        let mut worklist = Worklist::new(10);
+        worklist.rank_by(10, [4_usize, 2].into_iter());
+        worklist.insert(5);
     }
 }

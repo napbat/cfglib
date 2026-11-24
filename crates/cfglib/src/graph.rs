@@ -32,3 +32,4 @@ pub mod traverse;
 pub mod verify;
 pub mod view;
 pub(crate) mod virtual_root;
+pub mod weak_topological_order;
