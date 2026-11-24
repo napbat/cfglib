@@ -17,11 +17,11 @@
 //! them ([`EliminationHeuristic::MinFill`]), ties broken by the smallest
 //! dense index. Eliminating a node makes its neighbors a clique and emits the
 //! bag of the node and its neighbors, whose parent is the bag of the neighbor
-//! eliminated next. The heuristics carry no guarantee on the width; Thorup
+//! eliminated next. The heuristics carry no guarantee on the width. Thorup
 //! ("All Structured Programs Have Small Tree Width and Good Register
 //! Allocation", Information and Computation, 1998) shows that structured
-//! programs have small treewidth, and on control-flow graphs both heuristics
-//! usually find a width close to it.
+//! programs have small treewidth; how close the heuristics come to it on
+//! real control-flow graphs has not been measured here.
 
 extern crate alloc;
 use alloc::collections::BTreeSet;
