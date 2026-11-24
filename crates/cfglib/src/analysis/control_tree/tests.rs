@@ -37,6 +37,7 @@ mod regions;
 mod rejoining_arms;
 mod semantics;
 mod small_stack;
+mod spl;
 mod stack_depth;
 mod switches;
 mod traversal;
