@@ -13,8 +13,9 @@
 //! [`make_reducible_with_dispatch`] copies nothing. It enters every
 //! irreducible cycle through one new hub block that branches on a selector
 //! value, which a new block on each edge into the cycle's entries sets, with
-//! code a [`DispatchBuilder`] supplies. It grows linearly where splitting can
-//! grow exponentially, at the price of selector code instead of copies.
+//! code a [`DispatchBuilder`] supplies. It grows polynomially, by at most the
+//! edges times the irreducible nesting depth, where splitting can grow
+//! exponentially, at the price of selector code instead of copies.
 
 extern crate alloc;
 use alloc::vec;
