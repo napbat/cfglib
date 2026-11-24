@@ -8,6 +8,7 @@ use crate::graph::store::{Graph, NodeId};
 use crate::test_util::MockInst;
 
 mod adversarial;
+mod certificate;
 mod determinism;
 mod differential;
 mod edge_dominance;

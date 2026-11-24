@@ -1,6 +1,8 @@
 //! Simple Lengauer-Tarjan against the iterative oracle on random graphs.
 
-use super::support::{Family, Recipe, Rng, assert_forest_invariants, node, random_graph};
+use super::support::{
+    Family, Recipe, Rng, assert_certified, assert_forest_invariants, node, random_graph,
+};
 use crate::graph::dominator::{DominatorScratch, DominatorTree};
 use crate::graph::structure::is_reducible;
 use crate::graph::view::GraphView;
@@ -47,6 +49,7 @@ fn slt_matches_the_iterative_oracle_on_random_graphs() {
             let oracle = DominatorTree::compute_iterative(&graph, root);
             assert!(tree == oracle, "{recipe:?} seed {seed} root {root}");
             assert_forest_invariants(&tree, graph.node_bound());
+            assert_certified(&tree, &graph, root, &mut scratch);
         }
     }
 }

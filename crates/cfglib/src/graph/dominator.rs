@@ -12,8 +12,18 @@
 //! depends only on the set of dominator pairs, never on the order of successor
 //! lists or on how many parallel edges join two nodes.
 //!
+//! A tree can come with a certificate. [`DominatorTree::compute_certified_in`]
+//! also returns a [`LowHighOrder`], built in linear time from what the
+//! construction already computes, and [`DominatorTree::verify_certificate`]
+//! checks in O(n + m) that a tree is the dominator tree of a graph, given
+//! such an order: a tree that is not is rejected with any certificate. The
+//! certified construction costs about twice the plain one, and the check
+//! about as much as the plain one. Debug builds check every tree they build
+//! this way.
+//!
 //! The work is split by responsibility. `construction` runs the algorithm over
-//! any [`GraphView`], `numbering` numbers a forest from its parent table,
+//! any [`GraphView`] and builds a low-high order from it, `certificate` checks
+//! a tree against one, `numbering` numbers a forest from its parent table,
 //! `forest` extends a tree over the code its root misses, `frontier` answers
 //! dominance-frontier queries over the numbered tree, `frontier_table`
 //! computes the frontier of every node at once, `edge_dominance` answers
@@ -28,13 +38,15 @@ use core::ops::Range;
 
 use crate::block::BlockId;
 use crate::graph::view::{DenseId, GraphView, RootedView};
-use construction::ConstructionBuffers;
+pub use certificate::{CertificateError, LowHighOrder};
+use construction::{ConstructionBuffers, LowHighBuffers};
 pub use frontier::FrontierScratch;
 pub use frontier_table::DominanceFrontiers;
 use numbering::{Numbered, NumberingBuffers};
 pub(crate) use post::CutBuffers;
 pub use post::{PostDominatorScratch, PostDominatorTree, PostNode};
 
+mod certificate;
 mod construction;
 mod edge_dominance;
 mod forest;
@@ -175,6 +187,8 @@ pub struct DominatorScratch {
     construction: ConstructionBuffers,
     /// The sibling chains the preorder numbering walks.
     numbering: NumberingBuffers,
+    /// The tables a low-high order is built in, when one is asked for.
+    low_high: LowHighBuffers,
 }
 
 impl DominatorScratch {
@@ -315,6 +329,9 @@ impl<N: DenseId> DominatorTree<N> {
     /// This is [`compute_from`](Self::compute_from) with the call's buffers
     /// taken out of it; see [`DominatorScratch`].
     ///
+    /// Debug builds also build a low-high order and check the tree against
+    /// it with [`verify_certificate`](Self::verify_certificate).
+    ///
     /// # Panics
     ///
     /// Panics under the conditions of [`compute`](Self::compute).
@@ -323,24 +340,16 @@ impl<N: DenseId> DominatorTree<N> {
     where
         G: GraphView<NodeId = N>,
     {
-        check_bound(graph.node_bound());
-        assert!(
-            root.index() < graph.node_bound(),
-            "dominator root is not a node of the graph"
-        );
-        let idom = scratch
-            .construction
-            .immediate_dominators(graph, root.index());
-        let numbered =
-            scratch
-                .numbering
-                .number(&idom, &[word(root.index())], scratch.construction.reached());
-        let tree = Self::from_numbered(idom, numbered);
-        debug_assert!(
-            tree.satisfies_parent_property(graph),
-            "an edge ends at a node whose immediate dominator is not an ancestor of its tail"
-        );
-        tree
+        if cfg!(debug_assertions) {
+            let (tree, certificate) = Self::compute_certified_in(scratch, graph, root);
+            debug_assert_eq!(
+                tree.verify_certificate(graph, root, &certificate),
+                Ok(()),
+                "the construction built a tree its own certificate rejects"
+            );
+            return tree;
+        }
+        Self::construct(scratch, graph, root, None)
     }
 
     /// Return the immediate dominator of `node`, or `None` for a root and for

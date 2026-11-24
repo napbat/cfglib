@@ -4,6 +4,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+use super::certificate::assert_post_certified;
 use super::reference::{PostReference, assert_contract, assert_frontiers, assert_matches};
 use crate::graph::dominator::tests::determinism::with_extra_copies;
 use crate::graph::dominator::tests::support::{EdgeList, Family, Recipe, Rng, node, random_graph};
@@ -53,6 +54,7 @@ fn random_graphs_match_the_definition() {
         let post = PostDominatorTree::compute_in(&mut scratch, &graph);
         let reference = PostReference::new(&graph);
         assert_matches(&post, &reference, &(recipe, seed));
+        assert_post_certified(&post, &graph, &mut scratch);
         assert_contract(&post, &reference, &(recipe, seed));
 
         let sets: Vec<Vec<usize>> = (0..12)
@@ -122,6 +124,7 @@ fn large_graphs_match_the_iterative_oracle_on_the_augmented_graph() {
             let edges = random_graph(&mut rng, recipe);
             let graph = edges.graph();
             let post = PostDominatorTree::compute(&graph);
+            assert_post_certified(&post, &graph, &mut PostDominatorScratch::new());
             let reachable = reachable_from_entry(&edges);
 
             let exits: Vec<u32> = (0..edges.node_count)

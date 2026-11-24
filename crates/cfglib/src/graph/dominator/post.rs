@@ -16,14 +16,16 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use super::frontier::FrontierScratch;
-use super::{ABSENT, DominatorScratch, DominatorTree, slot, word};
+use super::{ABSENT, DominatorScratch, DominatorTree, LowHighOrder, slot, word};
 use crate::block::BlockId;
 use crate::graph::view::{DenseId, GraphView, Reversed, RootedView};
 use augmented::AugmentedReverse;
+use certificate::without_virtual_exit;
 pub(crate) use cut::CutBuffers;
 use cut::ExitStructure;
 
 mod augmented;
+mod certificate;
 mod cut;
 mod edge_dominance;
 
@@ -224,11 +226,35 @@ impl<N: DenseId> PostDominatorTree<N> {
     /// allocating entry point is this function over a fresh
     /// [`PostDominatorScratch`].
     ///
+    /// Debug builds also build a low-high order and check the tree against
+    /// it with [`verify_certificate`](Self::verify_certificate).
+    ///
     /// # Panics
     ///
     /// Panics under the conditions of [`compute`](Self::compute).
     #[must_use]
     pub fn compute_in<G>(scratch: &mut PostDominatorScratch, graph: &G) -> Self
+    where
+        G: RootedView<NodeId = N>,
+    {
+        if cfg!(debug_assertions) {
+            let (tree, certificate) = Self::compute_certified_in(scratch, graph);
+            debug_assert_eq!(
+                tree.verify_certificate(graph, &certificate),
+                Ok(()),
+                "the construction built a tree its own certificate rejects"
+            );
+            return tree;
+        }
+        Self::construct(scratch, graph, None)
+    }
+
+    /// Build the tree, and fill `certificate` when one is asked for.
+    fn construct<G>(
+        scratch: &mut PostDominatorScratch,
+        graph: &G,
+        certificate: Option<&mut LowHighOrder<N>>,
+    ) -> Self
     where
         G: RootedView<NodeId = N>,
     {
@@ -248,16 +274,33 @@ impl<N: DenseId> PostDominatorTree<N> {
         let PostDominatorScratch { dominators, cut } = scratch;
         let structure = cut.analyze(graph, root);
         let augmented = AugmentedReverse::new(graph, cut, &structure);
-        let mut parent = dominators
-            .construction
-            .immediate_dominators(&augmented, bound);
+        let mut parent =
+            dominators
+                .construction
+                .immediate_dominators(&augmented, bound, certificate.is_some());
         // The virtual exit is reached and is not a block.
         let reached = dominators.construction.reached() - 1;
+        let virtual_exit = word(bound);
+        if let Some(certificate) = certificate {
+            // The order is built on the whole tree, the virtual exit at its
+            // root, and then read without it.
+            let whole = dominators
+                .numbering
+                .number::<usize>(&parent, &[virtual_exit], reached + 1);
+            let mut with_exit = LowHighOrder::empty();
+            dominators.construction.low_high_order(
+                &augmented,
+                &parent,
+                &whole,
+                &mut dominators.low_high,
+                &mut with_exit,
+            );
+            *certificate = without_virtual_exit(&with_exit, bound);
+        }
 
         // The virtual exit is the last index and has no parent, so dropping it
         // leaves a table over the blocks. Its children become the roots.
         parent.truncate(bound);
-        let virtual_exit = word(bound);
         let mut roots = Vec::new();
         for (block, up) in parent.iter_mut().enumerate() {
             if *up == virtual_exit {
@@ -277,34 +320,12 @@ impl<N: DenseId> PostDominatorTree<N> {
             exits,
             cut_roots,
         } = structure;
-        let tree = Self {
+        Self {
             tree: DominatorTree::from_numbered(parent, numbered),
             reaches_exit,
             exits,
             cut_roots,
-        };
-        debug_assert!(
-            tree.satisfies_parent_property(graph),
-            "an edge ends at a block that its tail's immediate post-dominator does not post-dominate"
-        );
-        tree
-    }
-
-    /// Whether the parent property holds on `graph`: every edge out of a
-    /// block in the tree ends at a block that the tail's immediate
-    /// post-dominator post-dominates, unless that is the virtual exit.
-    ///
-    /// The check costs one interval test per edge and backs the debug
-    /// assertion that follows every construction.
-    fn satisfies_parent_property<G: GraphView<NodeId = N>>(&self, graph: &G) -> bool {
-        self.preorder().iter().all(|&tail| {
-            let Some(PostNode::Node(parent)) = self.ipdom(tail) else {
-                return true;
-            };
-            graph
-                .successors(tail)
-                .all(|head| self.post_dominates(parent, head))
-        })
+        }
     }
 
     /// Return whether `block` is in the tree, which means the entry reaches

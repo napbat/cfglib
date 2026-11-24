@@ -3,7 +3,9 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use super::support::{EdgeList, Reference, assert_forest_invariants, for_each_multigraph, node};
+use super::support::{
+    EdgeList, Reference, assert_certified, assert_forest_invariants, for_each_multigraph, node,
+};
 use crate::graph::dominator::{DominatorScratch, DominatorTree};
 use crate::graph::view::GraphView;
 
@@ -14,6 +16,7 @@ fn check_against_definition(edges: &EdgeList, scratch: &mut DominatorScratch) {
     let reference = Reference::new(&graph, 0);
     let count = edges.node_count;
     assert_forest_invariants(&tree, count);
+    assert_certified(&tree, &graph, 0, scratch);
     assert_eq!(
         tree,
         DominatorTree::compute_iterative(&graph, 0),
