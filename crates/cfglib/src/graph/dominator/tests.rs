@@ -16,6 +16,7 @@ mod exhaustive;
 mod forest;
 mod frontier;
 mod frontier_table;
+mod incremental;
 mod post;
 mod support;
 

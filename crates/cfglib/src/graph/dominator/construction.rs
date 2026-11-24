@@ -98,6 +98,17 @@ impl ConstructionBuffers {
         root: usize,
         record: bool,
     ) -> Vec<u32> {
+        self.run(graph, root, record);
+        let mut idom = vec![ABSENT; graph.node_bound()];
+        for (node, parent) in self.reached_parents() {
+            idom[node] = parent;
+        }
+        idom
+    }
+
+    /// Find the immediate dominator of every node `root` reaches in `graph`,
+    /// to be read back with [`reached_parents`](Self::reached_parents).
+    pub(super) fn run<G: GraphView>(&mut self, graph: &G, root: usize, record: bool) {
         self.record = record;
         self.search(graph, root);
         let reached = self.vertex.len();
@@ -105,15 +116,22 @@ impl ConstructionBuffers {
         for node in (1..reached).rev() {
             self.process(graph, node);
         }
-
-        let mut idom = vec![ABSENT; graph.node_bound()];
         for node in 1..reached {
             if self.dominator[node] != self.semi[node] {
                 self.dominator[node] = self.dominator[slot(self.dominator[node])];
             }
-            idom[slot(self.vertex[node])] = self.vertex[slot(self.dominator[node])];
         }
-        idom
+    }
+
+    /// Each node the last [`run`](Self::run) reached other than its root, as
+    /// a dense index, with its immediate dominator.
+    pub(super) fn reached_parents(&self) -> impl Iterator<Item = (usize, u32)> + '_ {
+        (1..self.vertex.len()).map(|node| {
+            (
+                slot(self.vertex[node]),
+                self.vertex[slot(self.dominator[node])],
+            )
+        })
     }
 
     /// Number the nodes reachable from `root` in depth-first preorder.
