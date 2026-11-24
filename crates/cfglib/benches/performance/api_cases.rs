@@ -8,6 +8,7 @@ mod fixtures;
 mod graph;
 mod pipeline;
 mod relaxation;
+mod summaries;
 mod transform;
 mod traversal;
 
@@ -188,6 +189,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     graph::register(suite);
     pipeline::register(suite);
     relaxation::register(suite);
+    summaries::register(suite);
     transform::register(suite);
     traversal::register(suite);
 }
