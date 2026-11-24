@@ -71,10 +71,12 @@ impl FeedbackConfig {
 /// cyclic component is ordered by the Eades–Lin–Smyth heuristic over the
 /// edges inside it, self-loops aside: repeatedly peel a sink to the tail of
 /// the component's run, else a source to its head, else the node whose
-/// out-degree minus in-degree is largest to its head. Each node it takes
-/// that way has at least as many edges to the nodes still left as from
-/// them, so at most half of the component's edges, self-loops aside, point
-/// backward.
+/// out-degree minus in-degree is largest to its head. Every edge between a
+/// peeled sink or source and the nodes still left points forward, since a
+/// sink ends after them and a source starts before them. The degree
+/// differences of the nodes left sum to zero, so the node taken by the
+/// largest one has at least as many edges to them as from them. So at most
+/// half of the component's edges, self-loops aside, point backward.
 ///
 /// Edges are counted as [`successors`](GraphView::successors) yields them, so
 /// parallel edges count once each. The run is O(n + m) for `n` slots and `m`
