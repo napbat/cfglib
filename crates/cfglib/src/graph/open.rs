@@ -44,6 +44,13 @@
 //! ([`MarkScope::Isolated`]), so both per-path ambiguity detection and
 //! prune-on-revisit evaluators fold without hand-written frame stacks.
 //!
+//! [`open_fold_post_order_memoized`] is the third choice for a node reached
+//! again: a node with an [`OpenFold::memo_key`] is folded once, and every
+//! later route absorbs its finished answer. A diamond's base is folded once
+//! but still reaches the fold along both routes, so the ambiguity check of a
+//! member lookup costs one fold per class instead of one per route, as long
+//! as the answer of a node does not depend on the route to it.
+//!
 //! [`follow`] and [`follow_path`] are the degenerate case that shows up just
 //! as often: an out-degree ≤ 1 chase (import alias to import alias, symlink to
 //! symlink, type alias to type alias) which needs a hop bound and a cycle
@@ -60,7 +67,10 @@ pub use events::{
     OpenBfsConfig, OpenBfsEvent, OpenDfsConfig, OpenDfsEvent, open_breadth_first_events,
     open_depth_first_events,
 };
-pub use fold::{FoldEnter, MarkScope, OpenFold, OpenFoldConfig, open_fold_post_order};
+pub use fold::{
+    FoldEnter, MarkScope, OpenFold, OpenFoldConfig, open_fold_post_order,
+    open_fold_post_order_memoized,
+};
 pub use follow::{follow, follow_path};
 pub use paths::{OpenPathsConfig, OpenPathsEvent, open_breadth_first_paths};
 pub use search::{OpenSearchConfig, open_search};

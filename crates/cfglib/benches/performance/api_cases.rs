@@ -64,6 +64,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "open_breadth_first_paths",
     "open_depth_first_events",
     "open_fold_post_order",
+    "open_fold_post_order_memoized",
     "open_search",
     "parse_cfg_text",
     "parse_text",
