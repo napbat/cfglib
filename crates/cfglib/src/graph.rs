@@ -6,6 +6,7 @@ pub mod coldness;
 pub mod diff;
 pub mod dominator;
 pub mod dot;
+pub mod dyck;
 pub mod edge_traverse;
 pub mod edge_view;
 pub mod eh;

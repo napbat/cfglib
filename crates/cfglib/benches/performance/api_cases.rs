@@ -4,6 +4,7 @@ mod address;
 mod analysis;
 mod block_order;
 mod dataflow;
+mod dyck;
 mod feedback;
 mod fixtures;
 mod graph;
@@ -14,6 +15,7 @@ mod transform;
 mod traversal;
 
 pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
+    "bidirected_dyck_classes",
     "bind_edge_attributes",
     "bind_label",
     "block_nesting_depths",
@@ -195,6 +197,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     analysis::register(suite);
     block_order::register(suite);
     dataflow::register(suite);
+    dyck::register(suite);
     feedback::register(suite);
     graph::register(suite);
     pipeline::register(suite);
