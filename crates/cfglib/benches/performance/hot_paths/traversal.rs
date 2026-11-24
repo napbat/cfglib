@@ -9,8 +9,12 @@ use crate::analysis_oracles::{
     assert_common_ancestor_results, assert_edge_path, assert_edge_traversal, assert_node_path,
     directed_distances, reference_cfg_breadth_first, reference_cfg_preorder,
 };
+use crate::fixtures::branchy_graph;
 use crate::harness::{BenchmarkSuite, benchmark_case};
 use crate::structural_oracles::assert_dense_permutation;
+
+/// Nodes of the branchy graph behind the large meet cases.
+const LARGE_NODE_COUNT: usize = 1 << 16;
 
 fn register_cfg_walks(suite: &mut BenchmarkSuite<'_>, cfg: &Cfg<u32>) {
     benchmark_case!(
@@ -80,6 +84,16 @@ fn register_graph_walks(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(), ()>) {
     );
 }
 
+/// The meet `nearest_common_ancestor` must return, from two full searches.
+fn expected_meet(graph: &Graph<(), ()>, a: NodeId, b: NodeId) -> Option<NodeId> {
+    let (from_a, _) = directed_distances(graph, a, TraversalDirection::Incoming);
+    let (from_b, _) = directed_distances(graph, b, TraversalDirection::Incoming);
+    graph
+        .node_ids()
+        .filter(|node| from_a[node.index()] != usize::MAX && from_b[node.index()] != usize::MAX)
+        .min_by_key(|node| (from_a[node.index()] + from_b[node.index()], node.index()))
+}
+
 fn register_ancestors(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(), ()>) {
     benchmark_case!(
         suite,
@@ -92,19 +106,38 @@ fn register_ancestors(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(), ()>) {
                 TraversalDirection::Incoming,
             )
         },
-        |result: &Option<NodeId>| {
-            let a = NodeId::from_index(NODE_COUNT - 1);
-            let b = NodeId::from_index(NODE_COUNT - 2);
-            let (from_a, _) = directed_distances(graph, a, TraversalDirection::Incoming);
-            let (from_b, _) = directed_distances(graph, b, TraversalDirection::Incoming);
-            let expected = graph
-                .node_ids()
-                .filter(|node| {
-                    from_a[node.index()] != usize::MAX && from_b[node.index()] != usize::MAX
-                })
-                .min_by_key(|node| (from_a[node.index()] + from_b[node.index()], node.index()));
-            assert_eq!(*result, expected);
-        }
+        |result: &Option<NodeId>| assert_eq!(
+            *result,
+            expected_meet(
+                graph,
+                NodeId::from_index(NODE_COUNT - 1),
+                NodeId::from_index(NODE_COUNT - 2)
+            )
+        )
+    );
+    // Two endpoints whose meet is near, and two whose meet is about a hundred
+    // hops away, in a graph in which every node reaches both.
+    let large = branchy_graph(LARGE_NODE_COUNT);
+    let a = NodeId::from_index(LARGE_NODE_COUNT - 1);
+    let (near, far) = (
+        NodeId::from_index(LARGE_NODE_COUNT - 2),
+        NodeId::from_index(LARGE_NODE_COUNT - 201),
+    );
+    let (near_meet, far_meet) = (
+        expected_meet(&large, a, near),
+        expected_meet(&large, a, far),
+    );
+    benchmark_case!(
+        suite,
+        "directed_nearest_common_ancestor_large_near",
+        || nearest_common_ancestor(&large, a, near, TraversalDirection::Incoming),
+        |result: &Option<NodeId>| assert_eq!(*result, near_meet)
+    );
+    benchmark_case!(
+        suite,
+        "directed_nearest_common_ancestor_large_far",
+        || nearest_common_ancestor(&large, a, far, TraversalDirection::Incoming),
+        |result: &Option<NodeId>| assert_eq!(*result, far_meet)
     );
     benchmark_case!(
         suite,
