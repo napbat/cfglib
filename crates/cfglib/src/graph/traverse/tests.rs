@@ -555,7 +555,7 @@ fn random_graph(rng: &mut Rng) -> Graph<(), ()> {
 /// Asserts that `cycle` is a cycle of `graph` in successor order, the last
 /// node back to the first, with no node twice.
 fn assert_cycle(graph: &Graph<(), ()>, cycle: &[NodeId]) {
-    assert!(!cycle.is_empty());
+    assert_ne!(cycle, []);
     let distinct: BTreeSet<NodeId> = cycle.iter().copied().collect();
     assert_eq!(distinct.len(), cycle.len(), "{cycle:?} repeats a node");
     for (position, &node) in cycle.iter().enumerate() {

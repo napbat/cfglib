@@ -835,18 +835,23 @@ pub fn topological_sort<G: GraphView>(graph: &G) -> Option<Vec<G::NodeId>> {
 /// Return a topological ordering of the live nodes, or one directed cycle
 /// among them as the witness that there is none.
 ///
-/// `Ok` holds exactly the order [`topological_sort`] returns. `Err` holds a
-/// cycle in successor order, starting at its smallest node and not repeating
-/// it at the end: each node has an edge to the next, and the last node has an
-/// edge to the first. No node repeats, so the nodes lie in one strongly
-/// connected component; a node with an edge to itself is a one-node cycle.
+/// `Ok` holds exactly the order [`topological_sort`] returns. The witness
+/// costs no second pass: O(n + m) in all.
 ///
-/// The witness costs no second pass: O(n + m) in all. Kahn's algorithm leaves
-/// unsorted exactly the nodes on or after a cycle, each with an unsorted
-/// predecessor. A walk from the smallest of them, stepping to the first
-/// unsorted predecessor in [`predecessors`](GraphView::predecessors) order,
-/// steps on some node twice, and the steps in between, reversed, are the
-/// cycle. It is deterministic but not necessarily the shortest:
+/// # Errors
+///
+/// Returns `Err` with a cycle when the live nodes contain one. The cycle is in
+/// successor order, starting at its smallest node and not repeating it at the
+/// end: each node has an edge to the next, and the last node has an edge to
+/// the first. No node repeats, so the nodes lie in one strongly connected
+/// component; a node with an edge to itself is a one-node cycle.
+///
+/// Kahn's algorithm leaves unsorted exactly the nodes on or after a cycle,
+/// each with an unsorted predecessor. A walk from the smallest of them,
+/// stepping to the first unsorted predecessor in
+/// [`predecessors`](GraphView::predecessors) order, steps on some node twice,
+/// and the steps in between, reversed, are the cycle. It is deterministic but
+/// not necessarily the shortest:
 /// [`SccDecomposition::cycle_through`](crate::SccDecomposition::cycle_through)
 /// gives a shortest cycle through a chosen node.
 ///
@@ -868,7 +873,6 @@ pub fn topological_sort<G: GraphView>(graph: &G) -> Option<Vec<G::NodeId>> {
 /// graph.add_edge(base, ui, ());
 /// assert_eq!(topological_sort_or_cycle(&graph), Err(vec![ui, base]));
 /// ```
-#[must_use]
 pub fn topological_sort_or_cycle<G: GraphView>(
     graph: &G,
 ) -> Result<Vec<G::NodeId>, Vec<G::NodeId>> {

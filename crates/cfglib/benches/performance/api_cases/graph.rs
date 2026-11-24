@@ -432,7 +432,7 @@ fn register_graph_algorithms(suite: &mut BenchmarkSuite<'_>) {
             let cycle = result
                 .as_ref()
                 .expect_err("the branchy graph's back edges close cycles");
-            assert!(!cycle.is_empty());
+            assert_ne!(*cycle, []);
             for (position, &node) in cycle.iter().enumerate() {
                 let next = cycle[(position + 1) % cycle.len()];
                 assert!(GraphView::successors(&graph, node).any(|successor| successor == next));

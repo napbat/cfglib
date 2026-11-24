@@ -237,8 +237,8 @@ impl<N: DenseId> SccDecomposition<N> {
     ///
     /// No table spans the graph: a node is found by its position in the
     /// component's ascending run, so a component of `n_c` nodes whose nodes
-    /// have `m_c` successors in all costs O((n_c + m_c) log n_c), however large
-    /// the graph.
+    /// have `m_c` successors in all costs O((`n_c` + `m_c`) log `n_c`),
+    /// however large the graph.
     ///
     /// # Panics
     ///
