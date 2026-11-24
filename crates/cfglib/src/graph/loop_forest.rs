@@ -24,6 +24,11 @@
 //! answered from that set. The cost of such a loop is its own size, so a graph
 //! with many of them still costs what [`detect_loops_tagged`] costs for them.
 //!
+//! [`LoopForest::compute_cycles`] needs no tag to find an irreducible cycle: it
+//! builds Havlak's cycle nesting forest, whose cycles are properly nested by
+//! definition, so every one of them, irreducible or not, lives in the forest
+//! and is answered in constant time.
+//!
 //! [`detect_loops_tagged`]: crate::detect_loops_tagged
 
 extern crate alloc;
@@ -39,6 +44,9 @@ use super::structure::{BackEdge, NaturalLoop, find_back_edges, find_back_edges_t
 use super::view::{DenseId, GraphView, RootedView};
 use crate::block::BlockId;
 use crate::edge::KindedEdge;
+
+mod cycles;
+mod placement;
 
 /// No loop, in a table of loop indices.
 const NONE: u32 = u32::MAX;
@@ -60,9 +68,9 @@ impl LoopId {
 /// The loops of a graph, stored once per block.
 ///
 /// See the [module documentation](self) for what the representation buys. A
-/// loop is named by a [`LoopId`] and has a header, latches, a body, and a
-/// depth: the number of loops it is nested in, where one loop is nested in
-/// another when the other is the smallest loop with a strictly larger body
+/// loop is named by a [`LoopId`] and has a header, latches, entries, a body,
+/// and a depth: the number of loops it is nested in, where one loop is nested
+/// in another when the other is the smallest loop with a strictly larger body
 /// that contains its header. That is the rule of
 /// [`LoopNestingTree`](crate::LoopNestingTree) and of
 /// [`NaturalLoop::depth`].
@@ -106,6 +114,14 @@ pub struct LoopForest<N = BlockId> {
     /// The tails of the back edges into each header, ascending, one run per
     /// loop, in the order of `loops`.
     latches: Vec<N>,
+    /// The entries other than the header of every loop that is not nested,
+    /// ascending, one run per such loop, in the order of `loops`.
+    entries: Vec<N>,
+    /// The outermost nested loop each block enters other than at its header,
+    /// [`NONE`] for a block that enters none. Indexed by dense node index, and
+    /// empty when no nested loop has such an entry. A block enters every loop
+    /// that holds it and lies inside that one, but the one it heads.
+    entered: Vec<u32>,
     /// The blocks of every loop whose header does not dominate each of its
     /// latches, in the order of those loops.
     explicit: Vec<BTreeSet<N>>,
@@ -129,6 +145,13 @@ struct LoopRecord {
     latch_start: u32,
     /// Where they end.
     latch_end: u32,
+    /// Where the loop's entries other than its header start in
+    /// [`LoopForest::entries`], for a loop that is not nested.
+    entry_start: u32,
+    /// Where they end.
+    entry_end: u32,
+    /// The number of the loop's entries, its header included.
+    entry_count: u32,
     /// The index in [`LoopForest::explicit`] of the loop's blocks, [`NONE`] for
     /// a properly nested loop, whose body is the blocks of its subtree.
     explicit: u32,
@@ -299,7 +322,7 @@ impl<N: DenseId> LoopForest<N> {
     /// an outermost one and for a loop that is not [`is_nested`](Self::is_nested).
     ///
     /// This is the nesting of the bodies, which differs from
-    /// [`parent`](Self::parent) when an irreducible loop lies between.
+    /// [`parent`](Self::parent) when a loop that is not nested lies between.
     ///
     /// # Panics
     ///
@@ -310,8 +333,12 @@ impl<N: DenseId> LoopForest<N> {
         (enclosing != NONE).then_some(LoopId(enclosing))
     }
 
-    /// Whether the header of `lp` dominates its latches, so that its body is the
-    /// blocks of its subtree of the forest, rather than an explicit set.
+    /// Whether `lp` is properly nested with the other loops, so that its body is
+    /// the blocks of its subtree of the forest, rather than an explicit set.
+    ///
+    /// Every loop of [`compute_cycles`](Self::compute_cycles) is nested, and so
+    /// is every loop of the other constructors whose header dominates its
+    /// latches.
     ///
     /// # Panics
     ///
@@ -340,6 +367,69 @@ impl<N: DenseId> LoopForest<N> {
     pub fn latches(&self, lp: LoopId) -> &[N] {
         let record = self.record(lp);
         &self.latches[slot(record.latch_start)..slot(record.latch_end)]
+    }
+
+    /// The entries of `lp`: its header first, then, ascending, every other
+    /// block of it that control enters from outside it, which is a block with
+    /// a predecessor outside it that the root reaches, or the root itself.
+    ///
+    /// A loop whose header dominates its latches has no entry but its header.
+    /// An irreducible loop has more: a tagged loop of
+    /// [`compute_tagged`](Self::compute_tagged) whose header does not dominate
+    /// a latch, or a cycle of [`compute_cycles`](Self::compute_cycles) that can
+    /// be entered at a block other than the one the walk reached first.
+    ///
+    /// A loop with one entry answers at once. The others of a cycle are found
+    /// in its body, at the cost of its size: a block shared by deeply nested
+    /// cycles can enter every one of them, so the forest stores what each
+    /// block enters only once, and [`entry_count`](Self::entry_count) and
+    /// [`is_irreducible`](Self::is_irreducible) are constant time instead.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `lp` is not a loop of this forest.
+    #[must_use]
+    pub fn entries(&self, lp: LoopId) -> Vec<N> {
+        let record = self.record(lp);
+        let header = self.header(lp);
+        let mut entries = Vec::with_capacity(slot(record.entry_count));
+        entries.push(header);
+        if record.entry_count == 1 {
+            return entries;
+        }
+        if record.is_nested() {
+            entries.extend(self.run(record).iter().copied().filter(|&block| {
+                block != header
+                    && self.entered.get(block.index()).is_some_and(|&outermost| {
+                        outermost != NONE && self.encloses(LoopId(outermost), lp)
+                    })
+            }));
+            entries[1..].sort_unstable();
+        } else {
+            entries
+                .extend_from_slice(&self.entries[slot(record.entry_start)..slot(record.entry_end)]);
+        }
+        entries
+    }
+
+    /// The number of [entries](Self::entries) of `lp`, its header included.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `lp` is not a loop of this forest.
+    #[must_use]
+    pub fn entry_count(&self, lp: LoopId) -> usize {
+        slot(self.record(lp).entry_count)
+    }
+
+    /// Whether `lp` has more than one [entry](Self::entries).
+    ///
+    /// # Panics
+    ///
+    /// Panics when `lp` is not a loop of this forest.
+    #[must_use]
+    pub fn is_irreducible(&self, lp: LoopId) -> bool {
+        self.record(lp).entry_count > 1
     }
 
     /// The loop `lp` is nested in: the smallest loop with a strictly larger
@@ -392,9 +482,9 @@ impl<N: DenseId> LoopForest<N> {
 
     /// Whether `block` is in `lp`.
     ///
-    /// This is constant time for a loop whose header dominates its latches,
-    /// which is every loop dominance finds, and a set lookup for the others.
-    /// A block beyond the node bound of the graph is in no loop.
+    /// This is constant time for a [nested](Self::is_nested) loop, which is
+    /// every loop dominance finds and every cycle, and a set lookup for the
+    /// others. A block beyond the node bound of the graph is in no loop.
     ///
     /// # Panics
     ///
@@ -417,11 +507,12 @@ impl<N: DenseId> LoopForest<N> {
     ///
     /// This is exact, which [`parent`](Self::parent) is not: the parent of a
     /// loop is the smallest larger loop that holds its *header*, and when that
-    /// is an irreducible loop it can hold only part of the loop's blocks.
+    /// is a loop that is not nested it can hold only part of the loop's
+    /// blocks.
     ///
-    /// The answer is constant time when both loops have a header that
-    /// dominates its latches: such loops are properly nested, so one holds the
-    /// other exactly when its run of the forest holds the other's. Otherwise
+    /// The answer is constant time when both loops are
+    /// [nested](Self::is_nested): one holds the other exactly when its run of
+    /// the forest holds the other's. Otherwise
     /// the blocks of `inner` are looked up in `outer`, which costs at most the
     /// size of the smaller of the two, since a larger loop cannot be held by a
     /// smaller one and that is settled first.
@@ -623,6 +714,8 @@ impl<N: DenseId> LoopForest<N> {
             loops: Vec::new(),
             headers: Vec::new(),
             latches: Vec::with_capacity(edges.len()),
+            entries: Vec::new(),
+            entered: Vec::new(),
             explicit: Vec::new(),
             innermost: Vec::new(),
             members: Vec::new(),
@@ -639,21 +732,35 @@ impl<N: DenseId> LoopForest<N> {
             forest.latches.extend(run.iter().map(|edge| edge.1));
             let dominators = families[family].dominators;
             let blocks = &forest.latches[start..];
+            // A block of a loop whose header dominates its latches is dominated
+            // by the header, so the root is not in the loop unless it is the
+            // header, and every predecessor the root reaches is in the loop:
+            // the header is the only entry.
+            let entry_start = forest.entries.len();
             let explicit = if blocks
                 .iter()
                 .all(|&latch| dominators.dominates(header, latch))
             {
                 NONE
             } else {
-                forest
-                    .explicit
-                    .push(explicit_body(graph, dominators, header, blocks));
+                let body = explicit_body(graph, dominators, header, blocks);
+                forest.entries.extend(body.iter().copied().filter(|&block| {
+                    block != header
+                        && (dominators.idom(block).is_none()
+                            || graph.predecessors(block).any(|before| {
+                                dominators.is_reachable(before) && !body.contains(&before)
+                            }))
+                }));
+                forest.explicit.push(body);
                 word(forest.explicit.len() - 1)
             };
             forest.headers.push(header);
             forest.loops.push(LoopRecord {
                 latch_start: word(start),
                 latch_end: word(forest.latches.len()),
+                entry_start: word(entry_start),
+                entry_end: word(forest.entries.len()),
+                entry_count: word(forest.entries.len() - entry_start + 1),
                 explicit,
                 family: word(family),
                 parent: NONE,
@@ -738,153 +845,6 @@ impl<N: DenseId> LoopForest<N> {
             }
         }
         self.innermost = innermost;
-    }
-
-    /// A preorder numbering of the properly nested loops that gives each loop's
-    /// subtree a run of positions. Children come before parents in `order`, so
-    /// the sizes add up in it and the positions are handed out in its reverse.
-    fn number_subtrees(&mut self, order: &[usize]) {
-        let mut subtree: SmallVec<[u32; 8]> = SmallVec::from_elem(1, self.loops.len());
-        for &k in order {
-            let up = self.loops[k].enclosing;
-            if up != NONE {
-                subtree[slot(up)] += subtree[k];
-            }
-        }
-        let mut next: SmallVec<[u32; 8]> = SmallVec::from_elem(0, self.loops.len());
-        let mut next_outermost = 0_u32;
-        for &k in order.iter().rev() {
-            let up = self.loops[k].enclosing;
-            let cursor = if up == NONE {
-                &mut next_outermost
-            } else {
-                &mut next[slot(up)]
-            };
-            let first = *cursor;
-            *cursor += subtree[k];
-            next[k] = first + 1;
-            self.loops[k].first = first;
-            self.loops[k].last = first + subtree[k] - 1;
-        }
-        self.member_starts = vec![0; slot(next_outermost) + 1];
-    }
-
-    /// The blocks of each position, as one run apiece, in ascending order.
-    /// `member_starts` holds the number of positions plus one zeros.
-    fn group_members(&mut self) {
-        let positions = self.member_starts.len() - 1;
-        for &held in self.innermost.iter().filter(|&&held| held != NONE) {
-            self.member_starts[slot(self.loops[slot(held)].first)] += 1;
-        }
-        let mut total = 0;
-        for count in &mut self.member_starts[..positions] {
-            total += *count;
-            *count = total;
-        }
-        self.member_starts[positions] = total;
-        self.members = vec![N::from_index(0); slot(total)];
-        for (node, &held) in self.innermost.iter().enumerate().rev() {
-            if held != NONE {
-                let end = &mut self.member_starts[slot(self.loops[slot(held)].first)];
-                *end -= 1;
-                self.members[slot(*end)] = N::from_index(node);
-            }
-        }
-    }
-}
-
-impl<N: DenseId> LoopForest<N> {
-    /// Work out the nesting rule's parent and depth of every loop, and the
-    /// greatest depth along each properly nested loop's chain of enclosing
-    /// loops. `order` is the properly nested loops, innermost first.
-    ///
-    /// The parent of a loop is the smallest loop with a strictly larger body
-    /// that contains its header, the one with the lowest header among equals.
-    /// Among the properly nested loops alone, that is the loop directly around
-    /// it, so a forest of them needs no search.
-    fn nest(&mut self, order: &[usize]) {
-        if self.explicit.is_empty() {
-            for record in &mut self.loops {
-                record.parent = record.enclosing;
-            }
-            self.assign_depths(order.iter().rev().copied());
-        } else {
-            let (parents, outermost_first) = self.parents_among_explicit_loops();
-            for (record, parent) in self.loops.iter_mut().zip(parents) {
-                record.parent = parent;
-            }
-            self.assign_depths(outermost_first.into_iter());
-        }
-
-        for &k in order.iter().rev() {
-            let around = self.loops[k].enclosing;
-            let outer = if around == NONE {
-                0
-            } else {
-                self.loops[slot(around)].deepest
-            };
-            self.loops[k].deepest = self.loops[k].depth.max(outer);
-        }
-    }
-
-    /// Give every loop the depth below its parent, handing out loops
-    /// `outermost_first` so that a parent has its depth before its children.
-    fn assign_depths(&mut self, outermost_first: impl Iterator<Item = usize>) {
-        for k in outermost_first {
-            self.loops[k].depth = match self.loops[k].parent {
-                NONE => 0,
-                parent => self.loops[slot(parent)].depth + 1,
-            };
-        }
-    }
-
-    /// The parent of every loop, found by the rule when explicit loops may be
-    /// the smallest enclosing one, and the loops largest first.
-    ///
-    /// The properly nested loops that contain a header are a chain, nearest
-    /// first, and their bodies grow along it, so the first one larger than the
-    /// loop is the best of them. An explicit loop is found by asking each one.
-    fn parents_among_explicit_loops(&self) -> (Vec<u32>, Vec<usize>) {
-        let sizes: Vec<usize> = self.loops().map(|lp| self.body_len(lp)).collect();
-        let explicit: Vec<usize> = (0..self.loops.len())
-            .filter(|&k| !self.loops[k].is_nested())
-            .collect();
-
-        let parents = (0..self.loops.len())
-            .map(|k| {
-                let header = self.headers[k];
-                let mut best: Option<(usize, N, usize)> = None;
-                let mut consider = |candidate: usize| {
-                    let key = (sizes[candidate], self.headers[candidate]);
-                    if best.is_none_or(|(size, header, _)| key < (size, header)) {
-                        best = Some((key.0, key.1, candidate));
-                    }
-                };
-                let mut chain = self.innermost[header.index()];
-                while chain != NONE {
-                    let candidate = slot(chain);
-                    if sizes[candidate] > sizes[k] {
-                        consider(candidate);
-                        break;
-                    }
-                    chain = self.loops[candidate].enclosing;
-                }
-                for &candidate in &explicit {
-                    if candidate != k
-                        && sizes[candidate] > sizes[k]
-                        && self.contains(LoopId(word(candidate)), header)
-                    {
-                        consider(candidate);
-                    }
-                }
-                best.map_or(NONE, |(_, _, candidate)| word(candidate))
-            })
-            .collect();
-
-        // A parent's body is strictly larger than its child's.
-        let mut largest_first: Vec<usize> = (0..self.loops.len()).collect();
-        largest_first.sort_unstable_by_key(|&k| Reverse(sizes[k]));
-        (parents, largest_first)
     }
 }
 
