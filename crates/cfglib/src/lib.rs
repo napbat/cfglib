@@ -358,6 +358,7 @@ pub use region::{
     recover_exclusive_extents_with,
 };
 pub use rewrite::Rewrite;
+pub use transform::block_order::{SplitOrder, hot_cold_order};
 pub use transform::cleanup::{
     merge_blocks, merge_blocks_mapped, remove_empty_blocks, remove_empty_blocks_mapped,
     remove_unreachable, remove_unreachable_mapped, simplify, simplify_mapped,
