@@ -17,7 +17,8 @@
 //! [`stream`] module runs the solvers' fallible problems and hands each
 //! node's facts out as soon as they are final, instead of keeping them all,
 //! and the [`resume`] module re-solves after an edit from the facts of the
-//! solve before it.
+//! solve before it. The [`ifds`] module solves interprocedural,
+//! context-sensitive problems over a consumer supergraph by IFDS tabulation.
 //!
 //! # Usage
 //!
@@ -34,6 +35,7 @@ pub mod bits;
 pub mod cfg_view;
 pub mod edge_fixpoint;
 pub mod fixpoint;
+pub mod ifds;
 pub mod instruction;
 pub mod node_fixpoint;
 pub mod program_point;

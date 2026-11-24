@@ -19,14 +19,14 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use cfglib::{
-    BlockId, BuildError, Cfg, CfgBuilder, ClrExceptionRegion, ClrHandler, ClrHandlerKind,
-    ControlNode, ControlTree, DenseBits, DenseFanout, Direction, DisplayInstr, DominatorTree,
-    EdgeKind, EhModel, Fanout, FlowControl, FlowEffect, Graph, Handler, HandlerBody, HandlerKind,
-    HandlerTypes, HornClauses, InstrInfo, KeyedGraph, NodeId, PostDominatorTree, Problem,
-    SortedMap, StackGraphError, TextError, TraversalDirection, VectoredExceptionModel,
-    VectoredHandlerKind, VectoredHandlerOrder, breadth_first, install_clr_region, parse_cfg_text,
-    parse_text, remove_unreachable, shortest_path, simplify, solve_problem, tarjan_scc,
-    topological_sort, verify,
+    BlockId, BuildError, CallInfo, Cfg, CfgBuilder, CfgSupergraph, ClrExceptionRegion, ClrHandler,
+    ClrHandlerKind, ControlNode, ControlTree, DenseBits, DenseFanout, Direction, DisplayInstr,
+    DominatorTree, EdgeKind, EhModel, Fanout, FlowControl, FlowEffect, Graph, Handler, HandlerBody,
+    HandlerKind, HandlerTypes, HornClauses, IfdsConfig, IfdsProblem, InstrInfo, KeyedGraph, NodeId,
+    PostDominatorTree, Problem, SortedMap, StackGraphError, Supergraph, TextError,
+    TraversalDirection, VectoredExceptionModel, VectoredHandlerKind, VectoredHandlerOrder,
+    breadth_first, install_clr_region, parse_cfg_text, parse_text, remove_unreachable,
+    shortest_path, simplify, solve_ifds, solve_problem, tarjan_scc, topological_sort, verify,
 };
 
 /// An instruction a consumer owns: its text, and the variables it reads and
@@ -446,4 +446,61 @@ fn rtl_value_types_are_plain_core_types() {
     let mut description = String::new();
     write!(description, "{word:?}").expect("a String never fails");
     assert!(description.contains("32"), "{description}");
+}
+
+/// An instruction that works or calls a function by its owned name.
+#[derive(Debug)]
+enum CallOp {
+    Work,
+    Call(String),
+}
+
+impl CallInfo for CallOp {
+    type Callee = String;
+
+    fn callee(&self) -> Option<String> {
+        match self {
+            Self::Call(name) => Some(name.clone()),
+            Self::Work => None,
+        }
+    }
+}
+
+/// Where the zero fact reaches: interprocedural reachability.
+struct Reaches;
+
+impl IfdsProblem<CfgSupergraph<'_, Cfg<CallOp>>> for Reaches {
+    fn fact_bound(&self) -> usize {
+        1
+    }
+
+    fn normal(&self, _: usize, _: usize, _: u32, _: &mut Vec<u32>) {}
+
+    fn call(&self, _: usize, _: usize, _: u32, _: &mut Vec<u32>) {}
+
+    fn ret(&self, _: usize, _: usize, _: usize, _: usize, _: u32, _: &mut Vec<u32>) {}
+
+    fn call_to_return(&self, _: usize, _: usize, _: u32, _: &mut Vec<u32>) {}
+}
+
+#[test]
+fn an_interprocedural_solve_runs_over_keyed_cfgs_named_by_owned_strings() {
+    let mut main = Cfg::<CallOp>::new();
+    main.block_mut(main.entry())
+        .push(CallOp::Call("helper".to_string()));
+    let mut helper = Cfg::<CallOp>::new();
+    helper.block_mut(helper.entry()).push(CallOp::Work);
+    let unused = Cfg::<CallOp>::new();
+    let functions = [
+        ("main".to_string(), &main),
+        ("helper".to_string(), &helper),
+        ("unused".to_string(), &unused),
+    ];
+    let graph = CfgSupergraph::new(&functions);
+    let results = solve_ifds(&graph, &Reaches, &[(graph.start(0), 0)], IfdsConfig::new())
+        .expect("an unbounded solve");
+    let reached: Vec<usize> = (0..graph.node_bound())
+        .filter(|&node| results.holds(node, 0))
+        .collect();
+    assert_eq!(reached, [0, 1, 2, 3]);
 }

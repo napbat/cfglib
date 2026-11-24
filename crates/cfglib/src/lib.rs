@@ -254,6 +254,9 @@ pub use dataflow::fixpoint::{
     solve_problem_with_config, try_solve_problem, try_solve_problem_from,
     try_solve_problem_from_with_config, try_solve_problem_with_config,
 };
+pub use dataflow::ifds::{
+    CfgSupergraph, IfdsConfig, IfdsProblem, IfdsResults, Supergraph, solve_ifds,
+};
 pub use dataflow::instruction::{EffectInfo, InstrInfo, VariableId};
 pub use dataflow::node_fixpoint::{
     NodeProblem, TryNodeProblem, solve_node_problem, solve_node_problem_from,
