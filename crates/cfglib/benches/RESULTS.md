@@ -6,7 +6,8 @@ file is a dated record of that session, not a description of the current tree:
 later changes have moved the numbers, and the harness's `coverage:` line, not
 this page, states how many cases and facade functions a run covers. Rerun the
 commands in [README.md](README.md) for current figures. The graph-store
-baseline at the end is a later session with its own date and revision.
+baseline and the ordered-compaction record at the end are later sessions, each
+with its own date and revision.
 
 ## Screening comparison
 
@@ -107,3 +108,57 @@ What the inputs separate:
   ids beside the edge ids) against: a gain should appear on
   `structured_relabeled` and on predecessor walks, and the uniform rows bound
   its worst case.
+
+## Ordered compaction
+
+Measured on Linux on 2026-11-24 on revision `e570e9c`, the commit that added
+`compact_ordered`, plus the benchmark rows that came with this record, on the
+same machine, pinned to one core. Each figure is the fastest of five
+repetitions within a run and of three runs. Other processes kept the load
+average between 29 and 66 of 32 hardware threads, and one of the three runs
+read up to 3× slower throughout, so read the ratios inside one table. The
+searches start from the nodes with no predecessor, which are found before the
+clock starts.
+
+Locality of each numbering of `structured_relabeled`, as N2N AID for
+successors / predecessors; lower is more local. The `structured` input it was
+shuffled from reads 107,466.8 / 8,324.4.
+
+| Order | Shuffled arrival | Grouped arrival |
+| --- | ---: | ---: |
+| `compact` | 165,740.4 / 160,311.5 | 165,740.4 / 160,311.5 |
+| `first_touch` | 191,955.7 / 151,207.0 | 173,006.5 / 148,394.6 |
+| `breadth_first` | 150,257.7 / 42,096.5 | 150,256.2 / 42,091.1 |
+| `reverse_postorder` | 131,304.2 / 12,696.5 | 139,466.5 / 21,651.8 |
+
+One million nodes, 1,849,803 edges (milliseconds):
+
+| Arrival | Order | `compaction` | `successor_scan` | `predecessor_scan` | `tarjan_scc` |
+| --- | --- | ---: | ---: | ---: | ---: |
+| shuffled | `compact` | 20.9 | 22.1 | 16.1 | 159.3 |
+| shuffled | `first_touch` | 40.8 | 20.2 | 15.3 | 143.3 |
+| shuffled | `breadth_first` | 152.5 | 17.5 | 13.8 | 126.4 |
+| shuffled | `reverse_postorder` | 200.2 | 18.8 | 14.1 | 68.5 |
+| grouped | `compact` | 19.7 | 13.6 | 18.4 | 162.6 |
+| grouped | `first_touch` | 42.7 | 20.6 | 15.0 | 147.0 |
+| grouped | `breadth_first` | 137.9 | 16.5 | 13.3 | 136.2 |
+| grouped | `reverse_postorder` | 194.2 | 19.2 | 13.7 | 72.8 |
+
+What the orders buy on this input:
+
+- Reverse postorder recovers most of the predecessor locality the shuffle
+  took, and halves `tarjan_scc` under both arrivals. Breadth-first recovers
+  less and gains less.
+- Predecessor walks are 12 to 28% faster under the two searches and 5 to
+  18% faster under first touch.
+- Successor walks are 9 to 21% faster under shuffled arrival, but 21 to
+  51% slower under grouped arrival. Grouped arrival had laid each node's
+  outgoing edge records out together in the old node order. Only nodes move,
+  so a walk in the new order visits those runs out of order; neighbor ids
+  beside the edge ids (#87) would remove that load.
+- The searches cost 7× (breadth-first) and 10× (reverse postorder) a plain
+  compaction, because they walk a freshly built store's delta chains in a
+  scattered order. First touch costs 2×.
+- First touch is the weakest order here: neither arrival gives it a
+  meaningful edge order to follow, since one is random and the other is
+  sorted by the shuffled ids.

@@ -103,7 +103,11 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// [`BreadthFirst`](NodeOrder::BreadthFirst) and
     /// [`ReversePostorder`](NodeOrder::ReversePostorder), and one pass over
     /// the order for [`Explicit`](NodeOrder::Explicit). The payloads move
-    /// into their new places by swaps, one per payload at most.
+    /// into their new places by swaps, one per payload at most. A search
+    /// reads the adjacency in the order it discovers nodes, which is the
+    /// scattered order this compaction exists to repair: on a million-node
+    /// graph with shuffled identities, `benches/graph-store.rs` measures a
+    /// search compaction at several times a plain one.
     ///
     /// # Panics
     ///

@@ -27,12 +27,16 @@ and one shuffled list):
 
 Before the tables, the run prints each input's locality as its
 neighbor-to-neighbor average ID distance (N2N AID) for successors and
-predecessors, and asserts that relabeling made it worse. The last table is
-procedure scale: five hundred nodes and fifteen hundred edges built without a
-stated capacity and thrown away, a thousand times over, where the whole
-measurement is the fixed per-append cost rather than the memory system. It
-follows the same two-build convention, prints one line per case, and takes
-the fastest of five runs.
+predecessors, and asserts that relabeling made it worse. Each
+`structured_relabeled` table is followed by an ordered-compaction table: the
+same arrival compacted by `compact()` and by `compact_ordered` in each root or
+edge order, with the locality of the numbering, both walks and `tarjan_scc`
+over it, so the `compact` rows are the before and the ordered rows the
+after. The last table is procedure scale: five hundred nodes and fifteen
+hundred edges built without a stated capacity and thrown away, a thousand
+times over, where the whole measurement is the fixed per-append cost rather
+than the memory system. It follows the same two-build convention, prints one
+line per case, and takes the fastest of five runs.
 
 The large tables are sensitive to whatever else the machine is doing; pin the
 process to one core and raise its priority before comparing two revisions of
