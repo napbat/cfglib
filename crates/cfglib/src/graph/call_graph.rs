@@ -8,14 +8,21 @@
 //! names), never a library-owned string.
 
 extern crate alloc;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BinaryHeap};
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cmp::Reverse;
 
 use crate::cfg::Cfg;
 use crate::flow::CallInfo;
 use crate::graph::scc::tarjan_scc;
 use crate::graph::store::{Graph, NodeId};
+
+/// A function [`propagate_summaries`] has not yet placed in its component's
+/// callee-first order.
+const UNSEEN: usize = usize::MAX;
+/// A function on the walk that places its component's members.
+const OPEN: usize = usize::MAX - 1;
 
 /// Payload of a function node in a call graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,6 +142,11 @@ pub fn is_recursive_function<C>(
 /// until their summaries stabilize, so `compute` must be monotone over a
 /// finite-height summary domain for termination.
 ///
+/// Inside a recursive component, `compute` runs once for every member, callees
+/// first along a depth-first postorder of the component, and then again only
+/// for the callers of a member whose summary changed. A summary therefore
+/// crosses one call edge per `compute`, not one per pass over the component.
+///
 /// The returned vector is indexed by [`NodeId::index`] and sized by the
 /// graph's node *bound*, so a removed node keeps `bottom` in its slot.
 ///
@@ -148,20 +160,70 @@ pub fn propagate_summaries<N, E, S: Clone + PartialEq>(
 ) -> Vec<S> {
     let mut summaries = alloc::vec![bottom.clone(); graph.node_bound()];
     let components = tarjan_scc(graph);
+    // Each member's position in its component's callee-first order.
+    let mut rank = alloc::vec![UNSEEN; graph.node_bound()];
+    // Scratch reused by every recursive component.
+    let mut order: Vec<NodeId> = Vec::new();
+    let mut walk = Vec::new();
+    let mut queued: Vec<bool> = Vec::new();
+    let mut pending: BinaryHeap<Reverse<usize>> = BinaryHeap::new();
     // Components arrive in reverse topological order: callees first.
-    for component in components.components() {
-        let cyclic = components.component(component[0]).is_cyclic(graph);
-        loop {
-            let mut changed = false;
-            for &node in component {
-                let updated = compute(graph, node, &summaries);
-                if updated != summaries[node.index()] {
-                    summaries[node.index()] = updated;
-                    changed = true;
+    for (component_index, component) in components.components().enumerate() {
+        if !components.component(component[0]).is_cyclic(graph) {
+            let node = component[0];
+            summaries[node.index()] = compute(graph, node, &summaries);
+            continue;
+        }
+        // Depth-first postorder over the component's own call edges, from
+        // each member in ascending order: a callee comes before its callers
+        // except along the edges that close a cycle.
+        order.clear();
+        for &start in component {
+            if rank[start.index()] != UNSEEN {
+                continue;
+            }
+            rank[start.index()] = OPEN;
+            walk.push((start, graph.successors(start)));
+            while let Some((node, callees)) = walk.last_mut() {
+                let node = *node;
+                match callees.next() {
+                    Some(callee)
+                        if rank[callee.index()] == UNSEEN
+                            && components.component_index(callee) == component_index =>
+                    {
+                        rank[callee.index()] = OPEN;
+                        walk.push((callee, graph.successors(callee)));
+                    }
+                    Some(_) => {}
+                    None => {
+                        rank[node.index()] = order.len();
+                        order.push(node);
+                        walk.pop();
+                    }
                 }
             }
-            if !cyclic || !changed {
-                break;
+        }
+        // Every member starts queued; a change queues the member's callers
+        // inside the component, and the lowest rank runs first.
+        queued.clear();
+        queued.resize(order.len(), true);
+        pending.clear();
+        pending.extend((0..order.len()).map(Reverse));
+        while let Some(Reverse(position)) = pending.pop() {
+            queued[position] = false;
+            let node = order[position];
+            let updated = compute(graph, node, &summaries);
+            if updated == summaries[node.index()] {
+                continue;
+            }
+            summaries[node.index()] = updated;
+            for caller in graph.predecessors(node) {
+                if components.component_index(caller) == component_index {
+                    let caller_rank = rank[caller.index()];
+                    if !core::mem::replace(&mut queued[caller_rank], true) {
+                        pending.push(Reverse(caller_rank));
+                    }
+                }
             }
         }
     }
@@ -331,5 +393,93 @@ mod tests {
         let gone = graph.add_node(FunctionNode { id: "gone" });
         graph.remove_node(gone);
         let _ = is_recursive_function(&graph, gone);
+    }
+
+    /// A ring whose only seed sits at its last member, against the id order:
+    /// the former round-robin schedule ran one pass over the ring per call
+    /// edge the seed had to cross, about k² transfers.
+    #[test]
+    fn a_seed_crosses_a_recursive_ring_in_one_transfer_per_member() {
+        const MEMBERS: usize = 1_000;
+        let mut graph = Graph::<(), ()>::new();
+        let members: Vec<NodeId> = (0..MEMBERS).map(|_| graph.add_node(())).collect();
+        for (index, &caller) in members.iter().enumerate() {
+            graph.add_edge(caller, members[(index + 1) % MEMBERS], ());
+        }
+        let mut calls = 0_usize;
+        let summaries = propagate_summaries(&graph, &false, |graph, node, summaries| {
+            calls += 1;
+            node.index() + 1 == MEMBERS
+                || graph
+                    .successors(node)
+                    .any(|callee| summaries[callee.index()])
+        });
+        assert!(summaries.iter().all(|&summary| summary));
+        assert!(calls <= 3 * MEMBERS, "{calls} transfers");
+    }
+
+    /// The schedule `propagate_summaries` ran before the worklist: every
+    /// member of a recursive component again, in ascending order, until a
+    /// whole pass changes nothing.
+    fn round_robin<S: Clone + PartialEq>(
+        graph: &Graph<(), ()>,
+        bottom: &S,
+        mut compute: impl FnMut(&Graph<(), ()>, NodeId, &[S]) -> S,
+    ) -> Vec<S> {
+        let mut summaries = vec![bottom.clone(); graph.node_bound()];
+        let components = tarjan_scc(graph);
+        for component in components.components() {
+            let cyclic = components.component(component[0]).is_cyclic(graph);
+            loop {
+                let mut changed = false;
+                for &node in component {
+                    let updated = compute(graph, node, &summaries);
+                    if updated != summaries[node.index()] {
+                        summaries[node.index()] = updated;
+                        changed = true;
+                    }
+                }
+                if !cyclic || !changed {
+                    break;
+                }
+            }
+        }
+        summaries
+    }
+
+    /// Random graphs with self-calls, recursive clusters and removed slots,
+    /// under a monotone finite-height summary (the reached ids modulo 64): the
+    /// worklist reaches the round-robin fixpoint exactly.
+    #[test]
+    fn the_worklist_reaches_the_round_robin_fixpoint() {
+        let mut rng = crate::test_util::rng::Rng::new(93);
+        let reach = |graph: &Graph<(), ()>, node: NodeId, summaries: &[u64]| {
+            graph
+                .successors(node)
+                .fold(1_u64 << (node.index() % 64), |mask, callee| {
+                    mask | summaries[callee.index()]
+                })
+        };
+        for _ in 0..300 {
+            let node_count = 1 + rng.below(24);
+            let mut graph = Graph::<(), ()>::new();
+            let nodes: Vec<NodeId> = (0..node_count).map(|_| graph.add_node(())).collect();
+            for _ in 0..rng.below(3 * node_count + 1) {
+                graph.add_edge(
+                    nodes[rng.below(node_count)],
+                    nodes[rng.below(node_count)],
+                    (),
+                );
+            }
+            for &node in &nodes {
+                if rng.one_in(8) {
+                    graph.remove_node(node);
+                }
+            }
+            assert_eq!(
+                propagate_summaries(&graph, &0, reach),
+                round_robin(&graph, &0, reach)
+            );
+        }
     }
 }
