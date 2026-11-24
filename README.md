@@ -118,6 +118,16 @@ Paths are cycle-free, deterministic, and optionally bounded; truncated results
 report which bound was reached. Scope storage supports `serde` when the feature
 is enabled.
 
+`ScopeResolutionIndex::compute` also records the scopes each resolution read:
+the ends of the path prefixes it expanded. After the graph is edited in place,
+`ScopeResolutionIndex::update` takes a `ScopeGraphChanges` (the scopes whose
+payload, data, outgoing edges or edge labels changed, and the references added
+or edited), re-resolves only the references that read a changed scope, and
+patches the reverse index; the result equals a fresh `compute`, and a
+`ScopeIndexUpdate` reports how many references it resolved and which ones
+changed. This holds when the query's hooks read only the scopes on the path and
+the query input, as the `ScopeGraphQuery` documentation spells out.
+
 `ScopeFirstResolution::try_compute` follows the one upward path that a
 `ScopeCursorQuery` admits and stops at the first accepted datum. Its hooks see
 a `ScopeCursor` (the start, the end, and the length of a path) instead of a

@@ -1,16 +1,15 @@
-//! Generic scope-graph resolution and reverse indexing.
+//! Generic scope-graph resolution of one query.
 
 extern crate alloc;
 
 use alloc::collections::BTreeSet;
-use alloc::vec;
-use alloc::vec::Vec;
 use core::cmp::Ordering;
 use smallvec::SmallVec;
 
 use crate::graph::edge_view::EdgeRef;
 use crate::graph::search::{PathBudget, PathFrontier, SearchOrder};
 
+use super::index::ScopeReads;
 use super::storage::{ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeId, ScopeReferenceId};
 
 /// Borrowed input for one stored or ephemeral scope-graph query.
@@ -186,6 +185,19 @@ impl ScopePath {
 /// edge has been traversed, a redirect target is being sought, or an
 /// accessibility boundary has been crossed. Returning `None` from `step`
 /// rejects that edge and its descendants.
+///
+/// # Incremental updates
+///
+/// [`ScopeResolutionIndex::update`](super::ScopeResolutionIndex::update)
+/// re-resolves only the references whose resolution read a changed scope. A
+/// resolution reads the scopes at the ends of the path prefixes it expands:
+/// their payloads, their data, and their outgoing edges with the edges'
+/// labels and targets. The hooks (`step`, `accepts`, `shadows` and the rest)
+/// may read those scopes and the query input, and nothing else of the graph;
+/// for example, `step` may not read the payload or the data of an edge's
+/// target, which the path has not reached yet. A policy that reads more must
+/// report the scopes it read as changed too, or the update can keep a stale
+/// resolution.
 pub trait ScopeGraphQuery<S, L, R, D, Q> {
     /// Consumer-owned path-language state.
     type State: Clone;
@@ -501,6 +513,7 @@ impl ScopeResolution {
             &ScopeQuery::from_reference(graph, reference),
             query,
             config,
+            None,
         )
     }
 
@@ -525,7 +538,7 @@ impl ScopeResolution {
         P: ScopeGraphQuery<S, L, R, D, Q>,
     {
         let _ = graph.scope(scope);
-        Self::compute_query(graph, &ScopeQuery::new(scope, data), query, config)
+        Self::compute_query(graph, &ScopeQuery::new(scope, data), query, config, None)
     }
 
     /// Resolve one stored reference whose policy admits at most one candidate
@@ -659,11 +672,15 @@ impl ScopeResolution {
         ))
     }
 
-    fn compute_query<S, L, R, D, Q, P>(
+    /// Resolves `input` by breadth-first search. With `reads`, records the
+    /// scope at the end of each prefix the search expands: the scopes whose
+    /// data and outgoing edges the resolution read.
+    pub(super) fn compute_query<S, L, R, D, Q, P>(
         graph: &ScopeGraph<S, L, R, D, Q>,
         input: &ScopeQuery<'_, Q>,
         query: &P,
         config: ScopeResolutionConfig,
+        mut reads: Option<&mut ScopeReads>,
     ) -> Self
     where
         P: ScopeGraphQuery<S, L, R, D, Q>,
@@ -682,6 +699,9 @@ impl ScopeResolution {
         while let Some(work) = seed.take().or_else(|| frontier.pop()) {
             if !budget.admit_expansion() {
                 break;
+            }
+            if let Some(reads) = reads.as_deref_mut() {
+                reads.read(work.path.end());
             }
 
             let reachable_before = reachable.len();
@@ -797,82 +817,6 @@ impl ScopeResolution {
     #[must_use]
     pub fn is_ambiguous(&self) -> bool {
         self.target_count() > 1
-    }
-}
-
-/// Resolution results for every stored reference, plus a reverse index.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScopeResolutionIndex {
-    resolutions: Vec<ScopeResolution>,
-    references_by_datum: Vec<Vec<ScopeReferenceId>>,
-}
-
-impl ScopeResolutionIndex {
-    /// Resolve every reference in identity order and build the reverse index.
-    #[must_use]
-    pub fn compute<S, L, R, D, Q, P>(
-        graph: &ScopeGraph<S, L, R, D, Q>,
-        query: &P,
-        config: ScopeResolutionConfig,
-    ) -> Self
-    where
-        P: ScopeGraphQuery<S, L, R, D, Q>,
-    {
-        let resolutions = graph
-            .reference_ids()
-            .map(|reference| ScopeResolution::compute(graph, reference, query, config))
-            .collect();
-        Self::from_resolutions(graph, resolutions)
-    }
-
-    /// Builds the reverse index over `resolutions`, one per reference of
-    /// `graph` in identity order.
-    pub(super) fn from_resolutions<S, L, R, D, Q>(
-        graph: &ScopeGraph<S, L, R, D, Q>,
-        resolutions: Vec<ScopeResolution>,
-    ) -> Self {
-        let mut references_by_datum = vec![Vec::new(); graph.datum_count()];
-        for (reference, resolution) in graph.reference_ids().zip(&resolutions) {
-            let mut seen = BTreeSet::new();
-            for candidate in resolution.candidates() {
-                if seen.insert(candidate.datum()) {
-                    references_by_datum[candidate.datum().index()].push(reference);
-                }
-            }
-        }
-        Self {
-            resolutions,
-            references_by_datum,
-        }
-    }
-
-    /// Borrow one reference's resolution.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `reference` was not present in the resolved graph.
-    #[must_use]
-    pub fn resolution(&self, reference: ScopeReferenceId) -> &ScopeResolution {
-        &self.resolutions[reference.index()]
-    }
-
-    /// References with a visible path to `datum`, in reference identity order.
-    ///
-    /// Each reference occurs at most once even when it has several visible
-    /// paths to the same datum.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `datum` was not present in the resolved graph.
-    #[must_use]
-    pub fn references_to(&self, datum: ScopeDatumId) -> &[ScopeReferenceId] {
-        &self.references_by_datum[datum.index()]
-    }
-
-    /// Results in reference identity order.
-    #[must_use]
-    pub fn resolutions(&self) -> &[ScopeResolution] {
-        &self.resolutions
     }
 }
 

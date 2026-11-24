@@ -85,8 +85,9 @@ method or constructor name no facade function.
 
 `api_cases/scope.rs` compares `ScopeResolutionIndex::compute` with
 `compute_cached` on ten thousand references in a hundred nested blocks with an
-import each, and on stacked inheritance diamonds. These cases time methods and
-name no facade function.
+import each, and on stacked inheritance diamonds, and times `update` after one
+new datum in a leaf scope of the blocks. These cases time methods and name no
+facade function.
 
 ## CPU timing
 

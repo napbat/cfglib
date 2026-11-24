@@ -354,10 +354,10 @@ pub use graph::scc::{
 pub use graph::scope::{
     Scope, ScopeCursor, ScopeCursorQuery, ScopeDatum, ScopeDatumId, ScopeEdgeId, ScopeEdgeTag,
     ScopeEnvironmentCache, ScopeEnvironmentQuery, ScopeFirstResolution, ScopeFirstResolutionError,
-    ScopeGraph, ScopeGraphPathLabel, ScopeGraphQuery, ScopeId, ScopeLinearResolutionError,
-    ScopePath, ScopeQuery, ScopeReference, ScopeReferenceId, ScopeResolution,
-    ScopeResolutionCandidate, ScopeResolutionConfig, ScopeResolutionIndex, ScopeResolutionStats,
-    ScopeTag,
+    ScopeGraph, ScopeGraphChanges, ScopeGraphPathLabel, ScopeGraphQuery, ScopeId, ScopeIndexUpdate,
+    ScopeLinearResolutionError, ScopePath, ScopeQuery, ScopeReference, ScopeReferenceId,
+    ScopeResolution, ScopeResolutionCandidate, ScopeResolutionConfig, ScopeResolutionIndex,
+    ScopeResolutionStats, ScopeTag,
 };
 pub use graph::search::{
     BfsEvent, DfsEvent, SearchConfig, SearchOrder, SearchScratch, Visit, VisitedPolicy,
