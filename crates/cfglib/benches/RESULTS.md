@@ -5,7 +5,8 @@ synthetic regression fixtures, not claims about every consumer workload. This
 file is a dated record of that session, not a description of the current tree:
 later changes have moved the numbers, and the harness's `coverage:` line, not
 this page, states how many cases and facade functions a run covers. Rerun the
-commands in [README.md](README.md) for current figures.
+commands in [README.md](README.md) for current figures. The graph-store
+baseline at the end is a later session with its own date and revision.
 
 ## Screening comparison
 
@@ -52,3 +53,57 @@ reproduce either mode; pinning an otherwise-idle machine and increasing the
 target duration is recommended before making small-factor decisions. The
 per-case figures of that run are not kept here, because the allocation counts
 of most cases have moved since.
+
+## Graph-store baseline
+
+Measured on Linux on 2026-11-24 at revision `94ca44a`, the commit that added
+the structured inputs, on an AMD Ryzen AI MAX+ 395. Each figure is the
+fastest of five repetitions within a run and of three runs, pinned to one
+core. Other processes kept the load average between 6 and 17 of 32 hardware
+threads, and the uniform rows moved by up to 2× between runs, so read the
+ratios inside one table rather than the absolute values. There is no earlier
+record of this target to compare with.
+
+Locality of each input, as N2N AID; lower is more local:
+
+| Input | Successors | Predecessors |
+| --- | ---: | ---: |
+| `uniform` | 151,584.3 | 143,726.3 |
+| `structured` | 107,466.8 | 8,324.4 |
+| `structured_relabeled` | 165,740.4 | 160,311.5 |
+
+The structured input's successor distance is high because half of its blocks
+call a procedure entry anywhere in the graph; its predecessors are mostly
+the blocks just before them.
+
+One million nodes, 100,000 appends (milliseconds):
+
+| Input | Arrival | `build` | `compact_after_build` | `successor_scan` | `predecessor_scan` | `append_and_scan` | `compact` |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `uniform` | shuffled | 151.4 | 56.7 | 102.1 | 98.0 | 109.3 | 69.6 |
+| `uniform` | grouped | 170.1 | 46.5 | 20.2 | 100.3 | 24.9 | 62.9 |
+| `structured` | shuffled | 53.4 | 27.6 | 26.4 | 23.6 | 40.5 | 33.6 |
+| `structured` | grouped | 28.5 | 20.4 | 13.2 | 18.9 | 16.8 | 28.7 |
+| `structured_relabeled` | shuffled | 46.8 | 27.2 | 33.4 | 18.3 | 42.0 | 35.2 |
+| `structured_relabeled` | grouped | 43.5 | 22.8 | 13.6 | 29.1 | 17.5 | 30.3 |
+
+The procedure-scale table read 13.4 ms for `build_scan` and 20.7 ms for
+`build_compact_scan`.
+
+What the inputs separate:
+
+- Arrival order dominates successor scans. Grouped arrival puts a node's
+  edge records next to each other, so walking successors costs a fifth of
+  the shuffled walk on `uniform` and half on `structured`. On `uniform` the
+  predecessor walk stays scattered whatever the arrival, because a node's
+  incoming edges come from everywhere.
+- Numbering shows where the edge records are already in order. With
+  grouped arrival, relabeling the structured input slows the predecessor
+  walk by 1.5× and the build by 1.5×, while the successor walk, whose
+  neighbor payload reads are dominated by far calls on both inputs, barely
+  moves. Under shuffled arrival the scattered edge-record loads hide the
+  numbering: the two structured inputs traded places between runs.
+- These are the rows to judge #86 (ordered compaction) and #87 (neighbor
+  ids beside the edge ids) against: a gain should appear on
+  `structured_relabeled` and on predecessor walks, and the uniform rows bound
+  its worst case.

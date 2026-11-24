@@ -11,17 +11,34 @@ cannot perturb timing results.
 measurement limits, not a description of the current tree.
 
 `graph-store.rs` is a separate, self-contained target measuring `Graph` at
-the two scales it exists for. The first table is symbol-graph scale: one
-million nodes, four million skewed-degree edges, a hundred thousand
-incremental appends, and compaction. The second is procedure scale: five
-hundred nodes and fifteen hundred edges built without a stated capacity and
-thrown away, a thousand times over, where the whole measurement is the fixed
-per-append cost rather than the memory system. It follows the same two-build
-convention, prints one line per case, and takes the fastest of five runs.
+the two scales it exists for. The large tables are symbol-graph scale: one
+million nodes, a hundred thousand incremental appends, and compaction, with
+successor and predecessor walks that read each neighbor's payload. They run
+three inputs, each fed in two arrival orders (each source's edges together,
+and one shuffled list):
 
-The large table is sensitive to whatever else the machine is doing; pin the
+- `uniform`: four million edges with uniform random endpoints, one percent
+  of the nodes carrying a hundred each. No node numbering helps it.
+- `structured`: about 1.85 million edges of procedures laid out one after
+  another (fall-through, forward branches, loop latches, calls with hub
+  callees), numbered in the order a builder creates their blocks.
+- `structured_relabeled`: the same edges under a random permutation of the
+  node ids, whose lost locality a reordering could recover.
+
+Before the tables, the run prints each input's locality as its
+neighbor-to-neighbor average ID distance (N2N AID) for successors and
+predecessors, and asserts that relabeling made it worse. The last table is
+procedure scale: five hundred nodes and fifteen hundred edges built without a
+stated capacity and thrown away, a thousand times over, where the whole
+measurement is the fixed per-append cost rather than the memory system. It
+follows the same two-build convention, prints one line per case, and takes
+the fastest of five runs.
+
+The large tables are sensitive to whatever else the machine is doing; pin the
 process to one core and raise its priority before comparing two revisions of
-it. The procedure-scale table is stable without that.
+them. Judge a change to node order or adjacency layout on the structured
+inputs: the uniform rows show its worst case, not its gain. The
+procedure-scale table is stable without that.
 
 ## Adding a benchmark
 
