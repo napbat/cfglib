@@ -7,6 +7,12 @@
 //! which is what makes the form testable: a graph written through any view
 //! is read back into one comparable value.
 //!
+//! The ids are the store's numbering, so two isomorphic graphs numbered
+//! differently print differently. For text that does not depend on the
+//! numbering, renumber the nodes in [`canonical_order`](crate::canonical_order)
+//! before writing; for a key, [`canonical_hash`](crate::canonical_hash) hashes
+//! the graph in that order directly.
+//!
 //! # Grammar
 //!
 //! ```text

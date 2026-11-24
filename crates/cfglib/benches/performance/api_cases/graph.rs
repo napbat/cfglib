@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::ops::ControlFlow;
 
+use cfglib::{BlockId, canonical_hash, canonical_order, multiset_fingerprint, wl_colors};
 use cfglib::{
     CallInfo, Cfg, DominatorTree, EdgeKind, EpochMarks, FoldEnter, Graph, GraphView, MarkScope,
     NodeId, OpenBfsConfig, OpenDfsConfig, OpenFold, OpenFoldConfig, OpenPathsConfig,
@@ -30,6 +31,8 @@ use crate::harness::benchmark_case;
 const NODE_COUNT: usize = 1_024;
 /// Functions in the mutually recursive ring of the summary case.
 const RING_FUNCTIONS: usize = 1_000;
+/// Blocks of the CFG the fingerprint cases hash.
+const FINGERPRINT_BLOCKS: usize = 10_000;
 
 #[derive(Clone, Copy)]
 struct CallInst(Option<u32>);
@@ -861,6 +864,84 @@ fn register_loop_structure(suite: &mut BenchmarkSuite<'_>) {
     );
 }
 
+/// `cfg`'s edge kinds as keys.
+fn kind_key(cfg: &Cfg<u32>) -> impl Fn(EdgeId) -> u64 + '_ {
+    |edge| cfg[edge].kind() as u64
+}
+
+/// The wiring of `branchy_cfg(block_count)` with every block but the entry
+/// numbered in reverse, and the block that plays the part of each block of
+/// the original, by its index.
+fn renumbered_branchy_cfg(block_count: usize) -> (Cfg<u32>, Vec<BlockId>) {
+    let mut cfg = Cfg::new();
+    let mut blocks: Vec<BlockId> = (1..block_count).map(|_| cfg.new_block()).collect();
+    blocks.push(cfg.entry());
+    blocks.reverse();
+    let edges = branchy_cfg(block_count);
+    for edge in edges.edge_ids() {
+        let edge = edges.edge(edge);
+        cfg.add_edge(
+            blocks[edge.source().index()],
+            blocks[edge.target().index()],
+            edge.data().kind(),
+        );
+    }
+    (cfg, blocks)
+}
+
+fn register_fingerprints(suite: &mut BenchmarkSuite<'_>) {
+    // Each oracle checks the measured call against the same call on a
+    // renumbered copy, which the fingerprints must not see.
+    let cfg = branchy_cfg(FINGERPRINT_BLOCKS);
+    let (copy, part) = renumbered_branchy_cfg(FINGERPRINT_BLOCKS);
+    let copied_colors = wl_colors(&copy, 3, |_| 0, kind_key(&copy));
+    let copied_fingerprint = multiset_fingerprint(copied_colors.iter().copied());
+    let copied_order = canonical_order(&copy, kind_key(&copy));
+    let copied_hash = canonical_hash(&copy, |_| 0, kind_key(&copy));
+    let colors = wl_colors(&cfg, 3, |_| 0, kind_key(&cfg));
+
+    benchmark_case!(
+        suite,
+        "api_wl_colors",
+        covers[wl_colors],
+        || wl_colors(&cfg, 3, |_| 0, kind_key(&cfg)),
+        |colors: &Vec<u64>| {
+            for (index, color) in colors.iter().enumerate() {
+                assert_eq!(*color, copied_colors[part[index].index()]);
+            }
+        }
+    );
+    benchmark_case!(
+        suite,
+        "api_multiset_fingerprint",
+        covers[multiset_fingerprint],
+        || multiset_fingerprint(colors.iter().copied()),
+        |fingerprint: &u64| assert_eq!(*fingerprint, copied_fingerprint)
+    );
+    benchmark_case!(
+        suite,
+        "api_canonical_order",
+        covers[canonical_order],
+        || canonical_order(&cfg, kind_key(&cfg)),
+        |order: &Vec<BlockId>| {
+            assert_eq!(order.len(), FINGERPRINT_BLOCKS);
+            assert!(
+                order
+                    .iter()
+                    .map(|block| part[block.index()])
+                    .eq(copied_order.iter().copied())
+            );
+        }
+    );
+    benchmark_case!(
+        suite,
+        "api_canonical_hash",
+        covers[canonical_hash],
+        || canonical_hash(&cfg, |_| 0, kind_key(&cfg)),
+        |hash: &u64| assert_eq!(*hash, copied_hash)
+    );
+}
+
 pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     register_dense_traversals(suite);
     register_dense_searches(suite);
@@ -873,4 +954,5 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     register_call_tree(suite);
     register_recursive_ring(suite);
     register_loop_structure(suite);
+    register_fingerprints(suite);
 }
