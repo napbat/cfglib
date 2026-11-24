@@ -25,10 +25,11 @@ use super::bits::DenseBits;
 use super::fixpoint::{
     Direction, Facts, SolveConfig, SolveError, TrySolveError, collapse_infallible,
 };
-use super::schedule::{Bound, Changed, Leaving, Sweep, schedule};
-use super::worklist::Worklist;
+use super::schedule::{Bound, Changed, Leaving, Mode, Ordered, Plain, Schedule, Sweep, schedule};
+use super::worklist::{Queue, Ranked, Worklist};
 use crate::graph::traverse::{Adjacency, by_axis};
 use crate::graph::view::{DenseId, GraphView};
+use crate::graph::weak_topological_order::WeakTopologicalOrder;
 
 /// A node-level dataflow problem over a graph view `G`.
 ///
@@ -497,7 +498,7 @@ fn try_solve_along<G, P, D>(
     downstream: D,
     graph: &G,
     problem: &P,
-    mut worklist: Worklist,
+    worklist: Worklist,
     entry: Option<G::NodeId>,
     config: SolveConfig,
 ) -> Result<Facts<P::Fact>, TrySolveError<P::Error>>
@@ -517,53 +518,17 @@ where
         output: vec![problem.bottom(graph); node_count],
     };
     let direction = problem.direction();
-    let order = schedule(
+    let steps = match schedule(
         graph,
-        &mut worklist,
+        worklist,
         entry,
         direction.traversal(),
         config.order(),
-    );
-    let narrowing = order.as_ref().filter(|_| config.narrowing_passes() > 0);
-    let mut leaving = narrowing.map(Leaving::new);
-    let mut visited = narrowing.map(|_| DenseBits::new(node_count));
-
-    let mut steps = 0;
-    loop {
-        let popped = worklist.pop_first();
-        if let (Some(order), Some(visited)) = (narrowing, &visited)
-            && let Some(component) = leaving.as_mut().and_then(|leaving| leaving.leave(popped))
-        {
-            if let Some(node_index) = popped {
-                worklist.insert(node_index);
-            }
-            let sweep = Sweep {
-                order,
-                component,
-                visited,
-            };
-            solver.narrow(&sweep, &mut worklist, config, &mut steps)?;
-            continue;
-        }
-        let Some(node_index) = popped else {
-            break;
-        };
-        config.count_step(&mut steps, node_index)?;
-        let node = G::NodeId::from_index(node_index);
-        let widen = order.as_ref().is_some_and(|order| order.is_head(node));
-        let changed = solver
-            .visit(node, widen.then_some(Bound::Widen))
-            .map_err(TrySolveError::Problem)?;
-        if let Some(visited) = &mut visited {
-            visited.insert(node_index);
-        }
-        if changed.output {
-            for next in downstream.neighbors(graph, node) {
-                worklist.insert(next.index());
-            }
-        }
-    }
-
+    ) {
+        Schedule::Index(mut worklist) => solver.solve_plain(&mut worklist, config)?,
+        Schedule::Ranked(mut ranked) => solver.solve_plain(&mut ranked, config)?,
+        Schedule::Weak(mut ranked, order) => solver.solve_ordered(&mut ranked, &order, config)?,
+    };
     let (input, output) = direction.program_order(solver.input, solver.output);
     Ok(Facts::new(input, output, steps))
 }
@@ -581,10 +546,87 @@ struct Solver<'a, G: GraphView, P: TryNodeProblem<G>, D> {
 }
 
 impl<G: GraphView, P: TryNodeProblem<G>, D: Adjacency> Solver<'_, G, P, D> {
-    /// Recomputes `node` from its upstream neighbors' outputs. With a
-    /// `bound`, a fact flowing in that differs from the one the node holds is
-    /// widened or narrowed against it first.
-    fn visit(&mut self, node: G::NodeId, bound: Option<Bound>) -> Result<Changed, P::Error> {
+    /// The worklist loop of a solve that never bounds a fact: the index or
+    /// reverse-postorder order.
+    fn solve_plain(
+        &mut self,
+        queue: &mut impl Queue,
+        config: SolveConfig,
+    ) -> Result<usize, TrySolveError<P::Error>> {
+        let mut steps = 0;
+        while let Some(node_index) = queue.pop() {
+            config.count_step(&mut steps, node_index)?;
+            let node = G::NodeId::from_index(node_index);
+            let changed = self
+                .visit(Plain, node, None)
+                .map_err(TrySolveError::Problem)?;
+            if changed.output {
+                for next in self.downstream.neighbors(self.graph, node) {
+                    queue.push(next.index());
+                }
+            }
+        }
+        Ok(steps)
+    }
+
+    /// The worklist loop of a solve in a weak topological order: it widens
+    /// at heads, and narrows each outermost component once it has left it.
+    fn solve_ordered(
+        &mut self,
+        queue: &mut Ranked,
+        order: &WeakTopologicalOrder<G::NodeId>,
+        config: SolveConfig,
+    ) -> Result<usize, TrySolveError<P::Error>> {
+        let narrowing = config.narrowing_passes() > 0;
+        let mut leaving = narrowing.then(|| Leaving::new(order));
+        let mut visited = narrowing.then(|| DenseBits::new(self.graph.node_bound()));
+        let mut steps = 0;
+        loop {
+            let popped = queue.pop();
+            if let Some(visited) = &visited
+                && let Some(component) = leaving.as_mut().and_then(|leaving| leaving.leave(popped))
+            {
+                if let Some(node_index) = popped {
+                    queue.push(node_index);
+                }
+                let sweep = Sweep {
+                    order,
+                    component,
+                    visited,
+                };
+                self.narrow(&sweep, queue, config, &mut steps)?;
+                continue;
+            }
+            let Some(node_index) = popped else {
+                break;
+            };
+            config.count_step(&mut steps, node_index)?;
+            let node = G::NodeId::from_index(node_index);
+            let bound = order.is_head(node).then_some(Bound::Widen);
+            let changed = self
+                .visit(Ordered, node, bound)
+                .map_err(TrySolveError::Problem)?;
+            if let Some(visited) = &mut visited {
+                visited.insert(node_index);
+            }
+            if changed.output {
+                for next in self.downstream.neighbors(self.graph, node) {
+                    queue.push(next.index());
+                }
+            }
+        }
+        Ok(steps)
+    }
+
+    /// Recomputes `node` from its upstream neighbors' outputs. In
+    /// [`Ordered`] mode, a `bound` widens or narrows a fact flowing in that
+    /// differs from the one the node holds.
+    fn visit<M: Mode>(
+        &mut self,
+        _mode: M,
+        node: G::NodeId,
+        bound: Option<Bound>,
+    ) -> Result<Changed, P::Error> {
         let (graph, problem) = (self.graph, self.problem);
         let index = node.index();
         let mut met = (self.entry == Some(node)).then(|| self.boundary.clone());
@@ -596,7 +638,9 @@ impl<G: GraphView, P: TryNodeProblem<G>, D: Adjacency> Solver<'_, G, P, D> {
         }
         let mut met = met.unwrap_or_else(|| self.boundary.clone());
         let mut bounded = false;
-        if let Some(bound) = bound {
+        if M::ORDERED
+            && let Some(bound) = bound
+        {
             let held = &self.input[index];
             if met != *held {
                 met = match bound {
@@ -623,7 +667,7 @@ impl<G: GraphView, P: TryNodeProblem<G>, D: Adjacency> Solver<'_, G, P, D> {
     fn narrow(
         &mut self,
         sweep: &Sweep<'_, G::NodeId>,
-        worklist: &mut Worklist,
+        queue: &mut Ranked,
         config: SolveConfig,
         steps: &mut usize,
     ) -> Result<(), TrySolveError<P::Error>> {
@@ -632,11 +676,13 @@ impl<G: GraphView, P: TryNodeProblem<G>, D: Adjacency> Solver<'_, G, P, D> {
             for node in sweep.nodes() {
                 config.count_step(steps, node.index())?;
                 let bound = sweep.order.is_head(node).then_some(Bound::Narrow);
-                let visit = self.visit(node, bound).map_err(TrySolveError::Problem)?;
+                let visit = self
+                    .visit(Ordered, node, bound)
+                    .map_err(TrySolveError::Problem)?;
                 changed |= visit.bounded || visit.output;
                 if visit.output {
                     for next in self.downstream.neighbors(self.graph, node) {
-                        worklist.insert_from(next.index(), sweep.component.end);
+                        queue.push_from(next.index(), sweep.component.end);
                     }
                 }
             }

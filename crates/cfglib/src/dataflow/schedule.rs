@@ -7,7 +7,7 @@ use core::ops::Range;
 
 use super::bits::DenseBits;
 use super::fixpoint::IterationOrder;
-use super::worklist::Worklist;
+use super::worklist::{Ranked, Worklist};
 use crate::graph::traverse::TraversalDirection;
 use crate::graph::view::{DenseId, GraphView};
 use crate::graph::weak_topological_order::{WeakTopologicalOrder, depth_first_forest};
@@ -27,6 +27,32 @@ pub(super) enum Bound {
 pub(super) struct Changed {
     pub(super) bounded: bool,
     pub(super) output: bool,
+}
+
+/// How a solver core runs, as a type, so that the core that never bounds or
+/// narrows compiles without any of it: [`Plain`] for an index or
+/// reverse-postorder solve, [`Ordered`] for a solve in a weak topological
+/// order.
+pub(super) trait Mode: Copy {
+    /// Whether the solve widens and narrows at heads and requeues only past
+    /// the component it narrows.
+    const ORDERED: bool;
+}
+
+/// The mode of a solve that never bounds a fact.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Plain;
+
+impl Mode for Plain {
+    const ORDERED: bool = false;
+}
+
+/// The mode of a solve in a weak topological order.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Ordered;
+
+impl Mode for Ordered {
+    const ORDERED: bool = true;
 }
 
 /// The outermost component that a solve in the weak topological order is
@@ -92,24 +118,34 @@ impl<N: DenseId> Sweep<'_, N> {
     }
 }
 
-/// Puts `worklist` in the iteration order that `order` selects, and returns
-/// the weak topological order that the solve widens and narrows by.
+/// The queue a solve runs on, in the iteration order that its config selects.
+pub(super) enum Schedule<N> {
+    /// Index order: the worklist as the entry point built it.
+    Index(Worklist),
+    /// Reverse postorder: a ranked queue, with nothing to bound.
+    Ranked(Ranked),
+    /// A weak topological order: a ranked queue, and the order the solve
+    /// widens and narrows by.
+    Weak(Ranked, WeakTopologicalOrder<N>),
+}
+
+/// Puts `worklist` in the iteration order that `order` selects.
 ///
 /// The order walks along `direction`, first from `entry` when it is queued,
 /// then from every queued node with no upstream neighbor, then from the
 /// lowest-index queued node it has not reached, until every queued node is
 /// ordered. It covers exactly what a solve can queue: the queued nodes and
-/// everything they reach. [`IterationOrder::Index`] leaves the worklist as it
+/// everything they reach. [`IterationOrder::Index`] keeps the worklist as it
 /// is.
 pub(super) fn schedule<G: GraphView>(
     graph: &G,
-    worklist: &mut Worklist,
+    worklist: Worklist,
     entry: Option<G::NodeId>,
     direction: TraversalDirection,
     order: IterationOrder,
-) -> Option<WeakTopologicalOrder<G::NodeId>> {
+) -> Schedule<G::NodeId> {
     if order == IterationOrder::Index {
-        return None;
+        return Schedule::Index(worklist);
     }
     let entry = entry.filter(|node| worklist.contains(node.index()));
     let queued: Vec<G::NodeId> = worklist.queued().map(G::NodeId::from_index).collect();
@@ -124,10 +160,10 @@ pub(super) fn schedule<G: GraphView>(
     let bound = graph.node_bound();
     if order == IterationOrder::ReversePostorder {
         let forest = depth_first_forest(graph, roots, direction);
-        worklist.rank_by(bound, forest.reverse_postorder::<G::NodeId>());
-        return None;
+        let ranked = Ranked::new(&worklist, bound, forest.reverse_postorder::<G::NodeId>());
+        return Schedule::Ranked(ranked);
     }
     let order = WeakTopologicalOrder::from_roots(graph, roots, direction);
-    worklist.rank_by(bound, order.order().iter().copied());
-    Some(order)
+    let ranked = Ranked::new(&worklist, bound, order.order().iter().copied());
+    Schedule::Weak(ranked, order)
 }

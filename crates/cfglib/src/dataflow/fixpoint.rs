@@ -217,10 +217,15 @@ impl SolveConfig {
 
     /// Counts one more processed node against the step limit.
     ///
+    /// It runs once per step of every solve, inside solver cores that the
+    /// caller's crate instantiates, so it is inline: without the attribute,
+    /// every step would pay a call across crates for one comparison.
+    ///
     /// # Errors
     ///
     /// Returns [`SolveError::StepLimitExceeded`], naming `pending_node`, when
     /// `steps` already reached the limit.
+    #[inline]
     pub(crate) fn count_step(
         self,
         steps: &mut usize,
