@@ -19,7 +19,8 @@ use cfglib::{
 use cfglib::{
     DotEdgeAttributes, DotStyle, EdgeId, FunctionIndex, TextStyle, bind_edge_attributes,
     bind_label, call_graph_indexed, control_flow_edge_attributes, display_label, no_label,
-    parse_cfg_text, parse_text, plain_edge_attributes, recursive_functions,
+    parse_cfg_text, parse_text, plain_edge_attributes, propagate_summaries_widened,
+    recursive_functions,
 };
 
 use super::BenchmarkSuite;
@@ -720,6 +721,38 @@ fn register_recursive_ring(suite: &mut BenchmarkSuite<'_>) {
                     .any(|callee| summaries[callee.index()])
         }),
         |summaries: &Vec<bool>| assert!(summaries.iter().all(|summary| *summary))
+    );
+    // The deepest stack over the same ring grows forever. Widening at the
+    // member that closes the ring makes every depth unbounded in about two
+    // passes; the oracle bounds the `compute` calls the case returns.
+    benchmark_case!(
+        suite,
+        "api_propagate_summaries_widened",
+        covers[propagate_summaries_widened],
+        || {
+            let mut calls = 0_usize;
+            let depths = propagate_summaries_widened(
+                &ring,
+                &None,
+                |graph, node, depths: &[Option<u32>]| {
+                    calls += 1;
+                    let deepest = graph
+                        .successors(node)
+                        .filter_map(|callee| depths[callee.index()])
+                        .max();
+                    Some(deepest.unwrap_or(0).saturating_add(1))
+                },
+                |_, previous, computed| match (*previous, *computed) {
+                    (Some(previous), Some(computed)) if computed > previous => Some(u32::MAX),
+                    (previous, computed) => previous.max(computed),
+                },
+            );
+            (depths, calls)
+        },
+        |(depths, calls): &(Vec<Option<u32>>, usize)| {
+            assert!(depths.iter().all(|depth| *depth == Some(u32::MAX)));
+            assert!(*calls <= 3 * RING_FUNCTIONS, "{calls} compute calls");
+        }
     );
 }
 
