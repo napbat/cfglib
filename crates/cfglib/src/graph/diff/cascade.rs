@@ -5,7 +5,7 @@ use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{CfgDiff, Matching, Side, follow_edges, same_shape};
+use super::{BlockMatch, CfgDiff, Matching, Side, follow_edges};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::graph::fingerprint::{Mixer, wl_colors};
@@ -141,71 +141,16 @@ impl CascadeDiff {
         left_hashes: impl FnMut(BlockId, &[I]) -> BlockHashes,
         right_hashes: impl FnMut(BlockId, &[I2]) -> BlockHashes,
     ) -> Self {
-        let (left_side, right_side) = (Side::new(left), Side::new(right));
-        let left_keys = Keys::new(left, &left_side, left_hashes);
-        let right_keys = Keys::new(right, &right_side, right_hashes);
-        let mut matching = Matching::default();
-        let mut pending = VecDeque::new();
-        matching.pair(left_side.entry, right_side.entry);
-        pending.push_back((left_side.entry, right_side.entry));
-
-        let wired_alike_or_same_content = |left_block: BlockId, right_block: BlockId| {
-            same_shape(&left_side, &right_side, left_block, right_block)
-                || left_keys.strict(left_block) == right_keys.strict(right_block)
-        };
-        let walk = |matching: &mut Matching, pending: &mut VecDeque<_>| {
-            follow_edges(
-                &left_side,
-                &right_side,
-                matching,
-                pending,
-                wired_alike_or_same_content,
-            );
-        };
+        let (diff, (left_keys, right_keys, by_shape)) =
+            CfgDiff::compute_by(left, right, |left_side, right_side| {
+                let left_keys = Keys::new(left, left_side, left_hashes);
+                let right_keys = Keys::new(right, right_side, right_hashes);
+                let (matching, by_shape) =
+                    match_by_cascade((left_side, right_side), (&left_keys, &right_keys));
+                (matching, (left_keys, right_keys, by_shape))
+            });
         let keys = (&left_keys, &right_keys);
-        pair_nearest(keys, &mut matching, &mut pending, |keys, block| {
-            keys.full[block.index()]
-        });
-        walk(&mut matching, &mut pending);
-        pair_nearest(keys, &mut matching, &mut pending, Keys::strict);
-        walk(&mut matching, &mut pending);
-        pair_nearest(keys, &mut matching, &mut pending, |keys, block| {
-            keys.hashes[block.index()].loose
-        });
-        walk(&mut matching, &mut pending);
-        pair_nearest_with(
-            keys,
-            &mut matching,
-            &mut pending,
-            |block| left_side.facts(block).fingerprint.shape(),
-            |block| right_side.facts(block).fingerprint.shape(),
-        );
-        let by_shape: BTreeSet<BlockId> = pending.iter().map(|&(block, _)| block).collect();
-        walk(&mut matching, &mut pending);
-
-        let diff = CfgDiff::from_matching(left, right, &left_side, &right_side, &matching);
-        let levels = diff
-            .matched
-            .iter()
-            .map(|pair| {
-                let (ours, theirs) = (pair.left.index(), pair.right.index());
-                let (our_hashes, their_hashes) =
-                    (left_keys.hashes[ours], right_keys.hashes[theirs]);
-                if pair.left == left_side.entry {
-                    MatchLevel::Entry
-                } else if left_keys.full[ours] == right_keys.full[theirs] {
-                    MatchLevel::Full
-                } else if our_hashes.strict == their_hashes.strict {
-                    MatchLevel::Strict
-                } else if our_hashes.loose == their_hashes.loose {
-                    MatchLevel::Loose
-                } else if by_shape.contains(&pair.left) {
-                    MatchLevel::Shape
-                } else {
-                    MatchLevel::Walk
-                }
-            })
-            .collect();
+        let levels = match_levels(&diff.matched, left.entry(), keys, &by_shape);
         Self { diff, levels }
     }
 
@@ -240,6 +185,81 @@ impl CascadeDiff {
             .ok()?;
         Some(self.levels[index])
     }
+}
+
+/// The cascade's matching, and the left blocks the shape level paired.
+fn match_by_cascade(
+    (left_side, right_side): (&Side, &Side),
+    keys: (&Keys, &Keys),
+) -> (Matching, BTreeSet<BlockId>) {
+    let (left_keys, right_keys) = keys;
+    let mut matching = Matching::default();
+    let mut pending = VecDeque::new();
+    matching.pair(left_side.entry, right_side.entry);
+    pending.push_back((left_side.entry, right_side.entry));
+
+    let same_content = |left_block: BlockId, right_block: BlockId| {
+        left_keys.strict(left_block) == right_keys.strict(right_block)
+    };
+    let walk = |matching: &mut Matching, pending: &mut VecDeque<_>| {
+        follow_edges(
+            left_side,
+            right_side,
+            matching,
+            pending,
+            Some(&same_content),
+        );
+    };
+    pair_nearest(keys, &mut matching, &mut pending, |keys, block| {
+        keys.full[block.index()]
+    });
+    walk(&mut matching, &mut pending);
+    pair_nearest(keys, &mut matching, &mut pending, Keys::strict);
+    walk(&mut matching, &mut pending);
+    pair_nearest(keys, &mut matching, &mut pending, |keys, block| {
+        keys.hashes[block.index()].loose
+    });
+    walk(&mut matching, &mut pending);
+    pair_nearest_with(
+        keys,
+        &mut matching,
+        &mut pending,
+        |block| left_side.facts(block).fingerprint.shape(),
+        |block| right_side.facts(block).fingerprint.shape(),
+    );
+    let by_shape: BTreeSet<BlockId> = pending.iter().map(|&(block, _)| block).collect();
+    walk(&mut matching, &mut pending);
+    (matching, by_shape)
+}
+
+/// The level of each pair of `matched`: the entry pair's, else the first key
+/// of the cascade the two blocks share, else the step that paired them.
+fn match_levels(
+    matched: &[BlockMatch],
+    entry: BlockId,
+    (left_keys, right_keys): (&Keys, &Keys),
+    by_shape: &BTreeSet<BlockId>,
+) -> Vec<MatchLevel> {
+    matched
+        .iter()
+        .map(|pair| {
+            let (ours, theirs) = (pair.left.index(), pair.right.index());
+            let (our_hashes, their_hashes) = (left_keys.hashes[ours], right_keys.hashes[theirs]);
+            if pair.left == entry {
+                MatchLevel::Entry
+            } else if left_keys.full[ours] == right_keys.full[theirs] {
+                MatchLevel::Full
+            } else if our_hashes.strict == their_hashes.strict {
+                MatchLevel::Strict
+            } else if our_hashes.loose == their_hashes.loose {
+                MatchLevel::Loose
+            } else if by_shape.contains(&pair.left) {
+                MatchLevel::Shape
+            } else {
+                MatchLevel::Walk
+            }
+        })
+        .collect()
 }
 
 /// What the cascade knows about the blocks of one CFG, by block index.

@@ -233,23 +233,21 @@ fn edges_preserved(left: &BlockFacts, right: &BlockFacts, matching: &Matching) -
     mapped == expected
 }
 
-/// Whether two blocks are wired alike: the same shape.
-fn same_shape(left: &Side, right: &Side, left_block: BlockId, right_block: BlockId) -> bool {
-    left.facts(left_block).fingerprint.shape() == right.facts(right_block).fingerprint.shape()
-}
-
 /// Extends `matching` along the edges of the pairs in `pending`.
 ///
 /// The edges two matched blocks have of one kind are paired in adjacency
 /// order, and the targets of a pair join the matching when they are free and
-/// `accepts` them. Each new pair is queued, so the walk follows the matching
-/// out from where it started.
+/// wired alike, or when `also_accepts` takes them. Each new pair is queued,
+/// so the walk follows the matching out from where it started.
+///
+/// The walk is not generic, so it is compiled, with the lookups it inlines,
+/// in this crate and not in each caller's instance of a `compute`.
 fn follow_edges(
     left: &Side,
     right: &Side,
     matching: &mut Matching,
     pending: &mut VecDeque<(BlockId, BlockId)>,
-    accepts: impl Fn(BlockId, BlockId) -> bool,
+    also_accepts: Option<&dyn Fn(BlockId, BlockId) -> bool>,
 ) {
     while let Some((left_block, right_block)) = pending.pop_front() {
         let left_edges = &left.facts(left_block).out_edges;
@@ -263,7 +261,9 @@ fn follow_edges(
             };
             for (&(_, left_target), &(_, right_target)) in left_group.iter().zip(right_group) {
                 if matching.both_free(left_target, right_target)
-                    && accepts(left_target, right_target)
+                    && (left.facts(left_target).fingerprint.shape()
+                        == right.facts(right_target).fingerprint.shape()
+                        || also_accepts.is_some_and(|accepts| accepts(left_target, right_target)))
                 {
                     matching.pair(left_target, right_target);
                     pending.push_back((left_target, right_target));
@@ -271,6 +271,62 @@ fn follow_edges(
             }
         }
     }
+}
+
+/// The matching [`CfgDiff::compute`] builds by wiring alone: the entries,
+/// the walk from them, and the shape fallback with a walk from each pair it
+/// adds.
+///
+/// Inline, so it compiles into each instance of `compute` like the body of
+/// `compute` it was taken from; the walk it calls stays compiled here.
+#[inline]
+fn match_by_wiring(left_side: &Side, right_side: &Side) -> Matching {
+    let mut matching = Matching::default();
+    let mut pending = VecDeque::new();
+
+    matching.pair(left_side.entry, right_side.entry);
+    pending.push_back((left_side.entry, right_side.entry));
+    follow_edges(left_side, right_side, &mut matching, &mut pending, None);
+
+    // Two indexes of the right blocks still free: by shape, and by shape and
+    // instruction count. The walks below claim blocks from both, which their
+    // cursors skip, so no left block rescans a bucket.
+    let mut free_by_shape: BTreeMap<Shape<'_>, Bucket> = BTreeMap::new();
+    let mut free_by_shape_and_length: BTreeMap<(Shape<'_>, usize), Bucket> = BTreeMap::new();
+    for (&block, facts) in &right_side.blocks {
+        if !matching.left_of.contains_key(&block) {
+            let shape = facts.fingerprint.shape();
+            free_by_shape.entry(shape).or_default().blocks.push(block);
+            free_by_shape_and_length
+                .entry((shape, facts.fingerprint.instruction_count))
+                .or_default()
+                .blocks
+                .push(block);
+        }
+    }
+    for (&block, facts) in &left_side.blocks {
+        if matching.right_of.contains_key(&block) {
+            continue;
+        }
+        let shape = facts.fingerprint.shape();
+        // The first free block of the shape with the same instruction count,
+        // else the first free block of the shape.
+        let counterpart = free_by_shape_and_length
+            .get_mut(&(shape, facts.fingerprint.instruction_count))
+            .and_then(|bucket| bucket.first_free(&matching))
+            .or_else(|| {
+                free_by_shape
+                    .get_mut(&shape)
+                    .and_then(|bucket| bucket.first_free(&matching))
+            });
+        let Some(counterpart) = counterpart else {
+            continue;
+        };
+        matching.pair(block, counterpart);
+        pending.push_back((block, counterpart));
+        follow_edges(left_side, right_side, &mut matching, &mut pending, None);
+    }
+    matching
 }
 
 impl CfgDiff {
@@ -326,78 +382,27 @@ impl CfgDiff {
     /// ```
     #[must_use]
     pub fn compute<I, E, I2, E2>(left: &Cfg<I, E>, right: &Cfg<I2, E2>) -> Self {
-        let (left_side, right_side) = (Side::new(left), Side::new(right));
-        let mut matching = Matching::default();
-        let mut pending = VecDeque::new();
-        let wired_alike =
-            |left_block, right_block| same_shape(&left_side, &right_side, left_block, right_block);
-
-        matching.pair(left_side.entry, right_side.entry);
-        pending.push_back((left_side.entry, right_side.entry));
-        follow_edges(
-            &left_side,
-            &right_side,
-            &mut matching,
-            &mut pending,
-            wired_alike,
-        );
-
-        // Two indexes of the right blocks still free: by shape, and by shape
-        // and instruction count. The walks below claim blocks from both, which
-        // their cursors skip, so no left block rescans a bucket.
-        let mut free_by_shape: BTreeMap<Shape<'_>, Bucket> = BTreeMap::new();
-        let mut free_by_shape_and_length: BTreeMap<(Shape<'_>, usize), Bucket> = BTreeMap::new();
-        for (&block, facts) in &right_side.blocks {
-            if !matching.left_of.contains_key(&block) {
-                let shape = facts.fingerprint.shape();
-                free_by_shape.entry(shape).or_default().blocks.push(block);
-                free_by_shape_and_length
-                    .entry((shape, facts.fingerprint.instruction_count))
-                    .or_default()
-                    .blocks
-                    .push(block);
-            }
-        }
-        for (&block, facts) in &left_side.blocks {
-            if matching.right_of.contains_key(&block) {
-                continue;
-            }
-            let shape = facts.fingerprint.shape();
-            // The first free block of the shape with the same instruction
-            // count, else the first free block of the shape.
-            let counterpart = free_by_shape_and_length
-                .get_mut(&(shape, facts.fingerprint.instruction_count))
-                .and_then(|bucket| bucket.first_free(&matching))
-                .or_else(|| {
-                    free_by_shape
-                        .get_mut(&shape)
-                        .and_then(|bucket| bucket.first_free(&matching))
-                });
-            let Some(counterpart) = counterpart else {
-                continue;
-            };
-            matching.pair(block, counterpart);
-            pending.push_back((block, counterpart));
-            follow_edges(
-                &left_side,
-                &right_side,
-                &mut matching,
-                &mut pending,
-                wired_alike,
-            );
-        }
-
-        Self::from_matching(left, right, &left_side, &right_side, &matching)
+        Self::compute_by(left, right, |left_side, right_side| {
+            (match_by_wiring(left_side, right_side), ())
+        })
+        .0
     }
 
-    /// The differences `matching` leaves between `left` and `right`.
-    fn from_matching<I, E, I2, E2>(
+    /// Compares `left` and `right` through the matching `pair_blocks` builds
+    /// over their sides, and returns whatever else `pair_blocks` returns.
+    ///
+    /// The sides, the matching and the report are made in one function, as
+    /// `compute` made them before the cascade shared the report: a separate
+    /// report function took `compute` about 5% more time, its lookups no
+    /// longer inlined alike.
+    fn compute_by<I, E, I2, E2, R>(
         left: &Cfg<I, E>,
         right: &Cfg<I2, E2>,
-        left_side: &Side,
-        right_side: &Side,
-        matching: &Matching,
-    ) -> Self {
+        pair_blocks: impl FnOnce(&Side, &Side) -> (Matching, R),
+    ) -> (Self, R) {
+        let (left_side, right_side) = (Side::new(left), Side::new(right));
+        let (matching, extra) = pair_blocks(&left_side, &right_side);
+
         let matched = left_side
             .blocks
             .iter()
@@ -409,12 +414,12 @@ impl CfgDiff {
                     right: counterpart,
                     instruction_count_changed: facts.fingerprint.instruction_count
                         != other.fingerprint.instruction_count,
-                    edges_changed: !edges_preserved(facts, other, matching),
+                    edges_changed: !edges_preserved(facts, other, &matching),
                 })
             })
             .collect();
 
-        CfgDiff {
+        let diff = CfgDiff {
             matched,
             left_only: left_side
                 .blocks
@@ -432,7 +437,8 @@ impl CfgDiff {
             right_block_count: right.block_count(),
             left_edge_count: left.edge_count(),
             right_edge_count: right.edge_count(),
-        }
+        };
+        (diff, extra)
     }
 }
 
