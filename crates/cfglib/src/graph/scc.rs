@@ -247,6 +247,9 @@ struct SccFrame<N> {
     /// successors are exhausted when it reaches the arena's length, since the
     /// top frame's region runs to the end.
     cursor: usize,
+    /// Whether no successor has yet shown this node a lower index, so it is
+    /// still the root of its component. Only [`tarjan_scc`] reads it.
+    root: bool,
 }
 
 /// Push the frame for `node`, taking its successors onto the arena's tail.
@@ -262,6 +265,7 @@ fn enter<G: GraphView>(
         node,
         start,
         cursor: start,
+        root: true,
     });
 }
 
@@ -430,15 +434,33 @@ pub fn condensation_of<G: GraphView>(
 /// One pass, `O(V + E)`, and the right default. [`kosaraju_scc`] computes the
 /// same partition with the opposite numbering (sources first) for consumers
 /// that must process a component before its successors.
+///
+/// Beside the result, the walk keeps one word per node, which becomes the
+/// result's component table, plus its stacks: Pearce's space-efficient form
+/// of the algorithm, in place of the index, low-link and on-stack arrays.
 #[must_use]
 pub fn tarjan_scc<G: GraphView>(graph: &G) -> SccDecomposition<G::NodeId> {
     let node_count = graph.node_bound();
-    let mut next_index = 0_usize;
-    let mut stack = Vec::new();
-    let mut on_stack = vec![false; node_count];
-    let mut indices = vec![usize::MAX; node_count];
-    let mut lowlinks = vec![0_usize; node_count];
-    let mut result = SccDecomposition::with_node_bound(node_count);
+    // Pearce's single array ("A space-efficient algorithm for finding strongly
+    // connected components", IPL 2016) in place of Tarjan's index, low-link
+    // and on-stack arrays, and it becomes the result's `component_of`:
+    // - 0 is a node not yet visited;
+    // - `1..next_index` is a node still waiting for its component, holding
+    //   the lowest index it has seen;
+    // - above `next_component` is a finished node's component, counted down
+    //   from `node_count`.
+    // The waiting nodes hold exactly the indices `1..next_index`, because a
+    // component takes the most recently visited of them and gives its indices
+    // back, so every waiting index stays below every component number and one
+    // `<` tells a waiting node from a finished one.
+    let mut rindex = vec![0_usize; node_count];
+    let mut next_index = 1_usize;
+    let mut next_component = node_count;
+    // The finished nodes that were not the root of their component, waiting
+    // for that root to finish.
+    let mut waiting: Vec<G::NodeId> = Vec::new();
+    let mut nodes = Vec::with_capacity(node_count);
+    let mut offsets = vec![0];
     // Every frame's successors, appended as the frame is pushed and truncated
     // away as it pops. Both are empty again when a root's walk ends, so one
     // allocation covers the whole decomposition rather than one per root.
@@ -446,15 +468,11 @@ pub fn tarjan_scc<G: GraphView>(graph: &G) -> SccDecomposition<G::NodeId> {
     let mut calls: Vec<SccFrame<G::NodeId>> = Vec::new();
 
     for start in graph.node_ids() {
-        if indices[start.index()] != usize::MAX {
+        if rindex[start.index()] != 0 {
             continue;
         }
-
-        indices[start.index()] = next_index;
-        lowlinks[start.index()] = next_index;
+        rindex[start.index()] = next_index;
         next_index += 1;
-        stack.push(start);
-        on_stack[start.index()] = true;
         enter(graph, start, &mut arena, &mut calls);
 
         // Read frames through `last_mut` and copy the Copy fields out; the
@@ -464,43 +482,67 @@ pub fn tarjan_scc<G: GraphView>(graph: &G) -> SccDecomposition<G::NodeId> {
             if frame.cursor < arena.len() {
                 let successor = arena[frame.cursor];
                 frame.cursor += 1;
-
-                if indices[successor.index()] == usize::MAX {
-                    indices[successor.index()] = next_index;
-                    lowlinks[successor.index()] = next_index;
+                if rindex[successor.index()] == 0 {
+                    rindex[successor.index()] = next_index;
                     next_index += 1;
-                    stack.push(successor);
-                    on_stack[successor.index()] = true;
                     enter(graph, successor, &mut arena, &mut calls);
-                } else if on_stack[successor.index()] {
-                    lowlinks[node.index()] = lowlinks[node.index()].min(indices[successor.index()]);
+                } else if rindex[successor.index()] < rindex[node.index()] {
+                    rindex[node.index()] = rindex[successor.index()];
+                    frame.root = false;
                 }
                 continue;
             }
 
-            if lowlinks[node.index()] == indices[node.index()] {
-                let component_index = result.len();
-                while let Some(member) = stack.pop() {
-                    on_stack[member.index()] = false;
-                    result.component_of[member.index()] = component_index;
-                    result.nodes.push(member);
-                    if member == node {
-                        break;
-                    }
-                }
-                result.close_component();
-            }
-
             let Some(finished) = calls.pop() else { break };
             arena.truncate(finished.start);
-            if let Some(parent) = calls.last() {
-                lowlinks[parent.node.index()] =
-                    lowlinks[parent.node.index()].min(lowlinks[node.index()]);
+            if finished.root {
+                // The root has the component's lowest index. Its members are
+                // the waiting nodes that hold an index no lower; they come off
+                // in reverse finish order, which along a path is visit order,
+                // so a cycle entered at its lowest id is ascending already.
+                let first = nodes.len();
+                let root_index = rindex[node.index()];
+                rindex[node.index()] = next_component;
+                nodes.push(node);
+                while let Some(&member) = waiting.last() {
+                    if rindex[member.index()] < root_index {
+                        break;
+                    }
+                    waiting.pop();
+                    rindex[member.index()] = next_component;
+                    nodes.push(member);
+                }
+                next_index -= nodes.len() - first;
+                next_component -= 1;
+                nodes[first..].sort_unstable();
+                offsets.push(nodes.len());
+            } else {
+                waiting.push(node);
+            }
+            if let Some(parent) = calls.last_mut()
+                && rindex[node.index()] < rindex[parent.node.index()]
+            {
+                rindex[parent.node.index()] = rindex[node.index()];
+                parent.root = false;
             }
         }
     }
 
-    result
+    // Component numbers count down from `node_count` in completion order;
+    // the decomposition numbers them up from 0 in the same order. A slot the
+    // walk never reached holds no node.
+    for slot in &mut rindex {
+        *slot = if *slot == 0 {
+            NO_COMPONENT
+        } else {
+            node_count - *slot
+        };
+    }
+    SccDecomposition {
+        nodes,
+        offsets,
+        component_of: rindex,
+    }
 }
 
 /// Compute strongly connected components with Kosaraju's algorithm, numbering

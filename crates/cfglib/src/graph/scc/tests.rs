@@ -511,3 +511,89 @@ fn component_views_compare_and_print_by_their_nodes() {
     assert_eq!(owned.clone(), owned);
     assert_eq!(owned.nodes(), cycle.nodes());
 }
+
+/// Tarjan's algorithm with its separate index, low-link and on-stack arrays,
+/// as `tarjan_scc` ran before it moved to Pearce's single array: the oracle
+/// for the numbering, which both must give in the same completion order.
+fn classic_tarjan(graph: &Graph<(), ()>) -> SccDecomposition<NodeId> {
+    let node_count = graph.node_bound();
+    let mut next_index = 0_usize;
+    let mut stack = Vec::new();
+    let mut on_stack = vec![false; node_count];
+    let mut indices = vec![usize::MAX; node_count];
+    let mut lowlinks = vec![0_usize; node_count];
+    let mut result = SccDecomposition::with_node_bound(node_count);
+    let mut calls: Vec<(NodeId, Vec<NodeId>, usize)> = Vec::new();
+    for start in graph.node_ids() {
+        if indices[start.index()] != usize::MAX {
+            continue;
+        }
+        indices[start.index()] = next_index;
+        lowlinks[start.index()] = next_index;
+        next_index += 1;
+        stack.push(start);
+        on_stack[start.index()] = true;
+        calls.push((start, graph.successors(start).collect(), 0));
+        while let Some((node, successors, cursor)) = calls.last_mut() {
+            let node = *node;
+            if let Some(&successor) = successors.get(*cursor) {
+                *cursor += 1;
+                if indices[successor.index()] == usize::MAX {
+                    indices[successor.index()] = next_index;
+                    lowlinks[successor.index()] = next_index;
+                    next_index += 1;
+                    stack.push(successor);
+                    on_stack[successor.index()] = true;
+                    calls.push((successor, graph.successors(successor).collect(), 0));
+                } else if on_stack[successor.index()] {
+                    lowlinks[node.index()] = lowlinks[node.index()].min(indices[successor.index()]);
+                }
+                continue;
+            }
+            if lowlinks[node.index()] == indices[node.index()] {
+                let component_index = result.len();
+                while let Some(member) = stack.pop() {
+                    on_stack[member.index()] = false;
+                    result.component_of[member.index()] = component_index;
+                    result.nodes.push(member);
+                    if member == node {
+                        break;
+                    }
+                }
+                result.close_component();
+            }
+            calls.pop();
+            if let Some((parent, _, _)) = calls.last() {
+                lowlinks[parent.index()] = lowlinks[parent.index()].min(lowlinks[node.index()]);
+            }
+        }
+    }
+    result
+}
+
+/// Random graphs with self-loops, parallel edges and removed slots: the
+/// single-array walk returns the classic walk's decomposition, field for
+/// field, so the numbering, the ascending slices and the slots that hold no
+/// node are all unchanged.
+#[test]
+fn the_single_array_walk_decomposes_like_the_classic_one() {
+    let mut rng = crate::test_util::rng::Rng::new(69);
+    for _ in 0..500 {
+        let node_count = 1 + rng.below(16);
+        let mut graph = Graph::<(), ()>::new();
+        let nodes: Vec<NodeId> = (0..node_count).map(|_| graph.add_node(())).collect();
+        for _ in 0..rng.below(3 * node_count + 1) {
+            graph.add_edge(
+                nodes[rng.below(node_count)],
+                nodes[rng.below(node_count)],
+                (),
+            );
+        }
+        for &node in &nodes {
+            if rng.one_in(6) {
+                graph.remove_node(node);
+            }
+        }
+        assert_eq!(tarjan_scc(&graph), classic_tarjan(&graph));
+    }
+}
