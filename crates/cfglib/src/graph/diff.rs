@@ -33,7 +33,7 @@ impl BlockFingerprint {
     /// What two blocks must share to be matched: how they are wired, not how
     /// long they are. A block that only gained or lost instructions is the
     /// same block, changed.
-    fn shape(&self) -> (usize, usize, &[u8]) {
+    fn shape(&self) -> Shape<'_> {
         (
             self.out_degree,
             self.in_degree,
@@ -41,6 +41,9 @@ impl BlockFingerprint {
         )
     }
 }
+
+/// A block's out-degree, in-degree, and the kinds of its out-edges.
+type Shape<'a> = (usize, usize, &'a [u8]);
 
 /// A matched pair of blocks between two CFGs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,6 +182,30 @@ impl Matching {
     }
 }
 
+/// The right blocks of one shape that were free when the fallback began,
+/// ascending, with a cursor before the first one that may still be free.
+///
+/// A block the matching claims is skipped when the cursor reaches it, so each
+/// block is passed at most once however many left blocks ask the bucket.
+#[derive(Default)]
+struct Bucket {
+    blocks: Vec<BlockId>,
+    cursor: usize,
+}
+
+impl Bucket {
+    /// The first block at or after the cursor that `matching` leaves free.
+    fn first_free(&mut self, matching: &Matching) -> Option<BlockId> {
+        while let Some(&block) = self.blocks.get(self.cursor) {
+            if !matching.left_of.contains_key(&block) {
+                return Some(block);
+            }
+            self.cursor += 1;
+        }
+        None
+    }
+}
+
 /// Whether `left`'s edges reach the counterparts of the blocks `right`'s
 /// edges reach, kind for kind.
 fn edges_preserved(left: &BlockFacts, right: &BlockFacts, matching: &Matching) -> bool {
@@ -250,6 +277,10 @@ impl CfgDiff {
     /// whose targets are only distinguished by their position can be reported
     /// as changed when the other CFG lists them in another order.
     ///
+    /// The comparison takes O((n + m) log(n + m)) time for `n` blocks and `m`
+    /// edges: step 3 keeps a cursor in each shape bucket, so however many
+    /// left blocks of one shape fall back, no bucket is scanned twice.
+    ///
     /// # Examples
     ///
     /// ```
@@ -287,12 +318,19 @@ impl CfgDiff {
         pending.push_back((left_side.entry, right_side.entry));
         follow_edges(&left_side, &right_side, &mut matching, &mut pending);
 
-        let mut free_by_shape: BTreeMap<(usize, usize, &[u8]), Vec<BlockId>> = BTreeMap::new();
+        // Two indexes of the right blocks still free: by shape, and by shape
+        // and instruction count. The walks below claim blocks from both, which
+        // their cursors skip, so no left block rescans a bucket.
+        let mut free_by_shape: BTreeMap<Shape<'_>, Bucket> = BTreeMap::new();
+        let mut free_by_shape_and_length: BTreeMap<(Shape<'_>, usize), Bucket> = BTreeMap::new();
         for (&block, facts) in &right_side.blocks {
             if !matching.left_of.contains_key(&block) {
-                free_by_shape
-                    .entry(facts.fingerprint.shape())
+                let shape = facts.fingerprint.shape();
+                free_by_shape.entry(shape).or_default().blocks.push(block);
+                free_by_shape_and_length
+                    .entry((shape, facts.fingerprint.instruction_count))
                     .or_default()
+                    .blocks
                     .push(block);
             }
         }
@@ -300,20 +338,20 @@ impl CfgDiff {
             if matching.right_of.contains_key(&block) {
                 continue;
             }
-            let Some(candidates) = free_by_shape.get_mut(&facts.fingerprint.shape()) else {
+            let shape = facts.fingerprint.shape();
+            // The first free block of the shape with the same instruction
+            // count, else the first free block of the shape.
+            let counterpart = free_by_shape_and_length
+                .get_mut(&(shape, facts.fingerprint.instruction_count))
+                .and_then(|bucket| bucket.first_free(&matching))
+                .or_else(|| {
+                    free_by_shape
+                        .get_mut(&shape)
+                        .and_then(|bucket| bucket.first_free(&matching))
+                });
+            let Some(counterpart) = counterpart else {
                 continue;
             };
-            // The walks above may have claimed some since the index was built.
-            candidates.retain(|candidate| !matching.left_of.contains_key(candidate));
-            let same_length = candidates.iter().position(|&candidate| {
-                right_side.facts(candidate).fingerprint.instruction_count
-                    == facts.fingerprint.instruction_count
-            });
-            let Some(position) = same_length.or_else(|| (!candidates.is_empty()).then_some(0))
-            else {
-                continue;
-            };
-            let counterpart = candidates.remove(position);
             matching.pair(block, counterpart);
             pending.push_back((block, counterpart));
             follow_edges(&left_side, &right_side, &mut matching, &mut pending);
@@ -452,5 +490,79 @@ mod tests {
         let facts = side.facts(cfg.entry());
         assert_eq!(facts.fingerprint.out_edge_discriminants, [0, 4, 4]);
         assert_eq!(facts.out_edges, [(0, second), (4, first), (4, third)]);
+    }
+
+    /// The fallback pairs each orphan with the first free block of its shape
+    /// that has its instruction count, and otherwise with the first free
+    /// block of its shape, in ascending order on both sides.
+    #[test]
+    fn the_fallback_prefers_the_same_length_and_then_the_lowest_free_block() {
+        let orphans = |lengths: &[usize]| {
+            let mut cfg = Cfg::new();
+            let blocks: Vec<BlockId> = lengths
+                .iter()
+                .map(|&length| {
+                    let block = cfg.new_block();
+                    for _ in 0..length {
+                        cfg.block_mut(block).instructions_mut().push(ff("op"));
+                    }
+                    block
+                })
+                .collect();
+            (cfg, blocks)
+        };
+        let (left, l) = orphans(&[2, 1, 2, 5]);
+        let (right, r) = orphans(&[1, 2, 3, 2, 4]);
+        let diff = CfgDiff::compute(&left, &right);
+        let right_of = |block| {
+            diff.matched
+                .iter()
+                .find(|pair| pair.left == block)
+                .map(|pair| pair.right)
+        };
+        assert_eq!(
+            right_of(l[0]),
+            Some(r[1]),
+            "the first two-instruction block"
+        );
+        assert_eq!(right_of(l[1]), Some(r[0]), "the one-instruction block");
+        assert_eq!(right_of(l[2]), Some(r[3]), "the next two-instruction block");
+        assert_eq!(right_of(l[3]), Some(r[2]), "no five: the lowest block left");
+        assert_eq!(diff.right_only, [r[4]]);
+    }
+
+    /// A switch that gained a case: the dispatch and the join change shape,
+    /// so every case block reaches the fallback from one shape bucket. The
+    /// cases still pair in ascending order, and the new one is right-only.
+    #[test]
+    fn every_case_of_a_grown_switch_pairs_through_one_bucket() {
+        const CASES: usize = 20_000;
+        let switch = |cases: usize| {
+            let mut cfg = Cfg::<u32>::new();
+            let dispatch = cfg.new_block();
+            let join = cfg.new_block();
+            cfg.add_edge(cfg.entry(), dispatch, EdgeKind::Fallthrough);
+            let cases: Vec<BlockId> = (0..cases)
+                .map(|_| {
+                    let case = cfg.new_block();
+                    cfg.add_edge(dispatch, case, EdgeKind::SwitchCase);
+                    cfg.add_edge(case, join, EdgeKind::Fallthrough);
+                    case
+                })
+                .collect();
+            (cfg, cases)
+        };
+        let ((old, old_cases), (new, new_cases)) = (switch(CASES), switch(CASES + 1));
+        let diff = CfgDiff::compute(&old, &new);
+        assert_eq!(diff.matched.len(), CASES + 1, "the entry and every case");
+        let pairs: BTreeMap<BlockId, BlockId> = diff
+            .matched
+            .iter()
+            .map(|pair| (pair.left, pair.right))
+            .collect();
+        for (old_case, new_case) in old_cases.iter().zip(&new_cases) {
+            assert_eq!(pairs.get(old_case), Some(new_case));
+        }
+        assert!(diff.right_only.contains(&new_cases[CASES]));
     }
 }
