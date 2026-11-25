@@ -285,6 +285,7 @@ pub use graph::dot::{
     DotEdgeAttributes, DotEdgeStyle, DotRankDir, DotStyle, bind_edge_attributes,
     control_flow_edge_attributes, plain_edge_attributes, to_dot, write_dot,
 };
+pub use graph::dyck::{BidirectedDyck, bidirected_dyck_classes};
 pub use graph::edge_traverse::{
     EdgeStep, breadth_first_edges, breadth_first_edges_with, depth_first_edges,
     depth_first_edges_with, shortest_path_edges,
