@@ -10,6 +10,7 @@ mod fixtures;
 mod frequency;
 mod graph;
 mod incremental_scc;
+mod inference;
 mod path_expr;
 mod pipeline;
 mod program_structure;
@@ -228,6 +229,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     frequency::register(suite);
     graph::register(suite);
     incremental_scc::register(suite);
+    inference::register(suite);
     path_expr::register(suite);
     pipeline::register(suite);
     program_structure::register(suite);

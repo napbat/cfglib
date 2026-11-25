@@ -14,7 +14,7 @@ const GROUP_BLOCKS: usize = 42;
 /// branches 60/40 into a diamond whose join returns to the header nine times
 /// in ten; each group of eight loops sits in an outer loop that returns half
 /// the time.
-fn looped_cfg(block_count: usize) -> Cfg<u32> {
+pub(super) fn looped_cfg(block_count: usize) -> Cfg<u32> {
     let mut cfg = Cfg::new();
     let mut previous = cfg.entry();
     for _ in 0..block_count.div_ceil(GROUP_BLOCKS) {
