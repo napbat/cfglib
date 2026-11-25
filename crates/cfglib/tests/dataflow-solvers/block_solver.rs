@@ -7,14 +7,18 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use cfglib::{
-    BlockId, Cfg, DenseId, Direction, NodeProblem, Problem, RootedView, SolveConfig, SolveError,
-    TryProblem, TrySolveError, meet_options, solve_node_problem, solve_node_problem_with_config,
-    solve_problem, solve_problem_from, solve_problem_from_with_config, solve_problem_with_config,
+    BlockId, Cfg, DenseId, Direction, IterationOrder, NodeProblem, Problem, RootedView,
+    SolveConfig, SolveError, TryProblem, TrySolveError, meet_options, solve_node_problem,
+    solve_node_problem_with_config, solve_problem, solve_problem_from,
+    solve_problem_from_with_config, solve_problem_with_config, stream_node_problem, stream_problem,
     try_solve_problem, try_solve_problem_from, try_solve_problem_from_with_config,
     try_solve_problem_with_config,
 };
 
-use crate::graphs::{GenKill, ORDERS, Rng, Shape, assert_same_facts, intersection, union};
+use crate::graphs::{
+    GenKill, ORDERS, Rng, Shape, assert_same_facts, assert_streams_like, intersection, union,
+};
+use crate::lifted::Lifted;
 use crate::reference::round_robin;
 
 /// The fact an analysis starts a boundary block with; no block generates or
@@ -806,6 +810,56 @@ fn every_iteration_order_reaches_the_facts_of_the_index_order() {
                         assert_same_facts(&ordered.unwrap(), &full, blocks(), &what);
                     }
                 }
+            }
+        }
+    }
+}
+
+/// A stream visits every block the solve reaches exactly once, with the
+/// facts and in the steps of the solve in the weak topological order that
+/// keeps every fact, forward and backward, with and without narrowing
+/// passes; the same problem stated over nodes streams the same way.
+#[test]
+fn a_stream_visits_every_reached_block_once_with_the_facts_of_the_solve() {
+    let mut rng = Rng::new(17);
+    for _ in 0..200 {
+        for direction in [Direction::Forward, Direction::Backward] {
+            let shape = Shape::random(&mut rng, false, false);
+            let effects = GenKill::random(&mut rng, shape.blocks);
+            let cfg = shape.cfg();
+            let reached = || domain(&shape, direction).into_iter().map(id);
+            let may = May {
+                effects: &effects,
+                direction,
+            };
+            let must = Must { effects: &effects };
+            let nodes = MayNodes {
+                effects: &effects,
+                direction,
+            };
+            for passes in [0, 2] {
+                let config = SolveConfig::new()
+                    .with_order(IterationOrder::WeakTopological)
+                    .with_narrowing_passes(passes);
+                let what = format!("{direction:?} with {passes} passes, {shape:?}");
+                let facts = solve_problem_with_config(&cfg, &may, config).unwrap();
+                let stream = |visit: &mut dyn FnMut(BlockId, &_, &_)| {
+                    stream_problem(&cfg, &Lifted(&may), config, visit).unwrap()
+                };
+                assert_streams_like(&facts, reached(), stream, &what);
+                if direction == Direction::Forward {
+                    let facts = solve_problem_with_config(&cfg, &must, config).unwrap();
+                    let stream = |visit: &mut dyn FnMut(BlockId, &_, &_)| {
+                        stream_problem(&cfg, &Lifted(&must), config, visit).unwrap()
+                    };
+                    assert_streams_like(&facts, reached(), stream, &what);
+                }
+                let facts = solve_node_problem_with_config(&cfg, &nodes, config).unwrap();
+                let every = shape.live().into_iter().map(id);
+                let stream = |visit: &mut dyn FnMut(BlockId, &_, &_)| {
+                    stream_node_problem(&cfg, &Lifted(&nodes), config, visit).unwrap()
+                };
+                assert_streams_like(&facts, every, stream, &what);
             }
         }
     }

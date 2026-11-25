@@ -150,6 +150,9 @@
 //! [`SolveConfig`] selects the [`IterationOrder`] of every solver; in
 //! [`IterationOrder::WeakTopological`] they follow a [`WeakTopologicalOrder`]
 //! and widen at its heads, so infinite-height lattices converge.
+//! [`stream_problem`], [`stream_node_problem`] and [`stream_edge_problem`]
+//! run that solve and hand each node's facts out once they are final, instead
+//! of keeping every fact until the end.
 //!
 //! # Contracts
 //!
@@ -257,6 +260,7 @@ pub use dataflow::slot_fixpoint::{
     SequentialExecutor, SlotAccess, SlotFixpointStats, WaveExecutor, WaveRequeue, ordered_fixpoint,
     wave_fixpoint,
 };
+pub use dataflow::stream::{SolveStats, stream_edge_problem, stream_node_problem, stream_problem};
 pub use display::{DisplayInstr, IndentedWriter};
 pub use edge::{Edge, EdgeId, EdgeKind, EdgeTag, KindedEdge};
 pub use effects::{

@@ -6,11 +6,14 @@
 //! read adjacency from the test's own graph data. Random graphs are generated
 //! deterministically and include unreachable blocks, removed block slots, and
 //! unwind edges. Every iteration order is checked against the index order,
-//! and an interval domain checks widening and narrowing.
+//! an interval domain checks widening and narrowing, and every stream is
+//! checked against the solve that keeps its facts.
 
 mod block_solver;
 mod edge_solver;
 mod graphs;
+mod lifted;
 mod node_solver;
 mod reference;
+mod streaming;
 mod widening;

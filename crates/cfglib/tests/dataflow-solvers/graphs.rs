@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 use std::fmt::Debug;
 
-use cfglib::{Cfg, DenseId, EdgeKind, Facts, IterationOrder};
+use cfglib::{Cfg, DenseId, EdgeKind, Facts, IterationOrder, SolveStats};
 
 /// A xorshift generator: the same seed gives the same graphs everywhere.
 pub struct Rng(u64);
@@ -243,4 +243,25 @@ pub fn assert_same_facts<N: DenseId, F: PartialEq + Debug>(
             "OUT of {node:?}: {what}"
         );
     }
+}
+
+/// Runs `stream` with a visitor and asserts that it visits exactly `nodes`,
+/// once each, with the facts of `expected`, in as many steps.
+pub fn assert_streams_like<N: DenseId, F: PartialEq + Debug>(
+    expected: &Facts<F>,
+    nodes: impl IntoIterator<Item = N>,
+    stream: impl FnOnce(&mut dyn FnMut(N, &F, &F)) -> SolveStats,
+    what: &str,
+) {
+    let mut visited = Vec::new();
+    let stats = stream(&mut |node, input, output| {
+        assert_eq!(input, expected.fact_in(node), "IN of {node:?}: {what}");
+        assert_eq!(output, expected.fact_out(node), "OUT of {node:?}: {what}");
+        visited.push(node);
+    });
+    assert_eq!(stats.steps(), expected.steps(), "steps: {what}");
+    visited.sort_unstable();
+    let mut nodes: Vec<N> = nodes.into_iter().collect();
+    nodes.sort_unstable();
+    assert_eq!(visited, nodes, "visits: {what}");
 }

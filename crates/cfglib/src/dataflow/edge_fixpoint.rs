@@ -6,6 +6,11 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::convert::Infallible;
 
+mod store;
+
+use store::Dense;
+pub(super) use store::EdgeStore;
+
 use crate::dataflow::bits::DenseBits;
 use crate::dataflow::fixpoint::{
     Direction, Facts, SolveConfig, SolveError, TrySolveError, collapse_infallible,
@@ -577,39 +582,61 @@ where
     G: EdgeView,
     P: TryEdgeProblem<G>,
 {
-    let bottom = problem.bottom(graph);
-    let mut edge = vec![None; graph.edge_bound()];
-    for edge_id in graph.edge_ids() {
-        edge[edge_id.index()] = Some(bottom.clone());
-    }
-    let mut solver = Solver {
-        graph,
-        problem,
-        input: vec![bottom.clone(); graph.node_bound()],
-        output: vec![bottom.clone(); graph.node_bound()],
-        edge,
-        bottom,
+    let every = |_: Option<&WeakTopologicalOrder<G::NodeId>>| {
+        let bottom = problem.bottom(graph);
+        let mut edge = vec![None; graph.edge_bound()];
+        for edge_id in graph.edge_ids() {
+            edge[edge_id.index()] = Some(bottom.clone());
+        }
+        Dense {
+            input: vec![bottom.clone(); graph.node_bound()],
+            output: vec![bottom.clone(); graph.node_bound()],
+            edge,
+            bottom,
+        }
     };
-    let traversal = problem.direction().traversal();
-    let steps = match schedule(graph, worklist, None, traversal, config.order()) {
-        Schedule::Index(mut worklist) => solver.solve_plain(&mut worklist, config)?,
-        Schedule::Ranked(mut ranked) => solver.solve_plain(&mut ranked, config)?,
-        Schedule::Weak(mut ranked, order) => solver.solve_ordered(&mut ranked, &order, config)?,
-    };
+    let (facts, steps) = solve_edges(graph, problem, worklist, config, every)?;
     Ok(EdgeFacts {
-        nodes: Facts::new(solver.input, solver.output, steps),
-        edge: solver.edge,
+        nodes: Facts::new(facts.input, facts.output, steps),
+        edge: facts.edge,
     })
 }
 
-/// The facts of one solve so far, in program order for the nodes.
-struct Solver<'a, G: EdgeView, P: TryEdgeProblem<G>> {
+/// The edge solver core over the facts that `store` builds once the
+/// iteration order is known; the store comes back with the number of steps
+/// taken.
+pub(super) fn solve_edges<G, P, S>(
+    graph: &G,
+    problem: &P,
+    worklist: Worklist,
+    config: SolveConfig,
+    store: impl FnOnce(Option<&WeakTopologicalOrder<G::NodeId>>) -> S,
+) -> Result<(S, usize), TrySolveError<P::Error>>
+where
+    G: EdgeView,
+    P: TryEdgeProblem<G>,
+    S: EdgeStore<G::NodeId, P::Fact>,
+{
+    let traversal = problem.direction().traversal();
+    let solver = |order| Solver {
+        graph,
+        problem,
+        store: store(order),
+    };
+    match schedule(graph, worklist, None, traversal, config.order()) {
+        Schedule::Index(mut worklist) => solver(None).solve_plain(&mut worklist, config),
+        Schedule::Ranked(mut ranked) => solver(None).solve_plain(&mut ranked, config),
+        Schedule::Weak(mut ranked, order) => {
+            solver(Some(&order)).solve_ordered(&mut ranked, &order, config)
+        }
+    }
+}
+
+/// One solve in progress.
+struct Solver<'a, G, P, S> {
     graph: &'a G,
     problem: &'a P,
-    bottom: P::Fact,
-    input: Vec<P::Fact>,
-    output: Vec<P::Fact>,
-    edge: Vec<Option<P::Fact>>,
+    store: S,
 }
 
 /// Recomputes `node` from the edges flowing into it against `downstream`, and
@@ -617,9 +644,9 @@ struct Solver<'a, G: EdgeView, P: TryEdgeProblem<G>> {
 /// fact changed. In [`Ordered`] mode, a `bound` widens or narrows a fact
 /// flowing in that differs from the one the node holds, and a neighbor
 /// before position `floor` of the iteration order is not re-queued.
-fn visit_along<G, P, D, M, Q>(
+fn visit_along<G, P, S, D, M, Q>(
     downstream: D,
-    solver: &mut Solver<'_, G, P>,
+    solver: &mut Solver<'_, G, P, S>,
     _mode: M,
     queue: &mut Q,
     floor: usize,
@@ -629,6 +656,7 @@ fn visit_along<G, P, D, M, Q>(
 where
     G: EdgeView,
     P: TryEdgeProblem<G>,
+    S: EdgeStore<G::NodeId, P::Fact>,
     D: EdgeAdjacency,
     D::Against: EdgeAdjacency,
     M: Mode,
@@ -636,13 +664,14 @@ where
 {
     let (graph, problem) = (solver.graph, solver.problem);
     let direction = problem.direction();
+    let index = node.index();
     let mut flowing_in = solver.meet_edges(node, downstream.against())?;
     let mut bounded = false;
     if M::ORDERED
         && let Some(bound) = bound
     {
         let (held, _) =
-            direction.program_order(&solver.input[node.index()], &solver.output[node.index()]);
+            direction.program_order(solver.store.input(index), solver.store.output(index));
         if flowing_in != *held {
             flowing_in = match bound {
                 Bound::Widen => problem.widen(graph, node, held, &flowing_in)?,
@@ -653,8 +682,7 @@ where
     }
     let flowing_out = problem.transfer_node(graph, node, &flowing_in)?;
     let (input, output) = direction.program_order(flowing_in, flowing_out);
-    solver.input[node.index()] = input;
-    solver.output[node.index()] = output;
+    solver.store.set_node(index, input, output);
 
     let mut edges_changed = false;
     for edge_id in downstream.edges(graph, node) {
@@ -662,14 +690,10 @@ where
         let new_fact = problem.transfer_edge(
             graph,
             edge,
-            &solver.input[node.index()],
-            &solver.output[node.index()],
+            solver.store.input(index),
+            solver.store.output(index),
         )?;
-        let fact = solver.edge[edge_id.index()]
-            .as_mut()
-            .expect("adjacency contains an edge excluded from the view");
-        if new_fact != *fact {
-            *fact = new_fact;
+        if solver.store.update_edge(edge_id.index(), new_fact) {
             let next = downstream.next(edge).index();
             if M::ORDERED {
                 queue.push_from(next, floor);
@@ -685,7 +709,12 @@ where
     })
 }
 
-impl<G: EdgeView, P: TryEdgeProblem<G>> Solver<'_, G, P> {
+impl<G, P, S> Solver<'_, G, P, S>
+where
+    G: EdgeView,
+    P: TryEdgeProblem<G>,
+    S: EdgeStore<G::NodeId, P::Fact>,
+{
     /// The node's boundary fact met with the fact on every edge along
     /// `upstream`, in adjacency order; bottom when there is neither.
     fn meet_edges<U: EdgeAdjacency>(
@@ -695,66 +724,72 @@ impl<G: EdgeView, P: TryEdgeProblem<G>> Solver<'_, G, P> {
     ) -> Result<P::Fact, P::Error> {
         let mut merged = self.problem.boundary(self.graph, node)?;
         for edge in upstream.edges(self.graph, node) {
-            let fact = self.edge[edge.index()]
-                .as_ref()
-                .expect("adjacency contains an edge excluded from the view");
+            let fact = self.store.edge(edge.index());
             merged = Some(match merged {
                 Some(current) => self.problem.meet(self.graph, node, &current, fact)?,
                 None => fact.clone(),
             });
         }
-        Ok(merged.unwrap_or_else(|| self.bottom.clone()))
+        Ok(merged.unwrap_or_else(|| self.store.bottom().clone()))
     }
 
     /// The worklist loop of a solve that never bounds a fact: the index or
-    /// reverse-postorder order.
+    /// reverse-postorder order. A solve whose store finishes elements runs
+    /// in a weak topological order, so none comes here.
     fn solve_plain(
-        &mut self,
+        mut self,
         queue: &mut impl Queue,
         config: SolveConfig,
-    ) -> Result<usize, TrySolveError<P::Error>> {
+    ) -> Result<(S, usize), TrySolveError<P::Error>> {
         let traversal = self.problem.direction().traversal();
         let mut steps = 0;
         while let Some(node_index) = queue.pop() {
             config.count_step(&mut steps, node_index)?;
             let node = G::NodeId::from_index(node_index);
-            by_axis!(traversal, visit_along(self, Plain, queue, 0, node, None))
-                .map_err(TrySolveError::Problem)?;
+            by_axis!(
+                traversal,
+                visit_along(&mut self, Plain, queue, 0, node, None)
+            )
+            .map_err(TrySolveError::Problem)?;
         }
-        Ok(steps)
+        Ok((self.store, steps))
     }
 
     /// The worklist loop of a solve in a weak topological order: it widens
-    /// at heads, and narrows each outermost component once it has left it.
+    /// at heads, narrows each outermost component once it has left it, and
+    /// finishes each outermost element in the store as it leaves it.
     ///
     /// Out of line, so that the default solve's entry point holds only the
     /// plain loop.
     #[inline(never)]
     fn solve_ordered(
-        &mut self,
+        mut self,
         queue: &mut Ranked,
         order: &WeakTopologicalOrder<G::NodeId>,
         config: SolveConfig,
-    ) -> Result<usize, TrySolveError<P::Error>> {
+    ) -> Result<(S, usize), TrySolveError<P::Error>> {
         let traversal = self.problem.direction().traversal();
         let narrowing = config.narrowing_passes() > 0;
-        let mut leaving = narrowing.then(|| Leaving::new(order));
+        let mut leaving = (S::FINISHES || narrowing).then(|| Leaving::new(order, S::FINISHES));
         let mut visited = narrowing.then(|| DenseBits::new(self.graph.node_bound()));
         let mut steps = 0;
         loop {
             let popped = queue.pop();
-            if let Some(visited) = &visited
-                && let Some(component) = leaving.as_mut().and_then(|leaving| leaving.leave(popped))
-            {
+            if let Some(element) = leaving.as_mut().and_then(|leaving| leaving.leave(popped)) {
                 if let Some(node_index) = popped {
                     queue.push(node_index);
                 }
-                let sweep = Sweep {
-                    order,
-                    component,
-                    visited,
-                };
-                self.narrow(&sweep, queue, config, &mut steps)?;
+                if let Some(visited) = &visited
+                    && order.heads_at(element.start)
+                {
+                    let sweep = Sweep {
+                        order,
+                        component: element.clone(),
+                        visited,
+                    };
+                    self.narrow(&sweep, queue, config, &mut steps)?;
+                }
+                self.store.finish(order, element.end);
                 continue;
             }
             let Some(node_index) = popped else {
@@ -763,13 +798,19 @@ impl<G: EdgeView, P: TryEdgeProblem<G>> Solver<'_, G, P> {
             config.count_step(&mut steps, node_index)?;
             let node = G::NodeId::from_index(node_index);
             let bound = order.is_head(node).then_some(Bound::Widen);
-            by_axis!(traversal, visit_along(self, Ordered, queue, 0, node, bound))
-                .map_err(TrySolveError::Problem)?;
+            by_axis!(
+                traversal,
+                visit_along(&mut self, Ordered, queue, 0, node, bound)
+            )
+            .map_err(TrySolveError::Problem)?;
             if let Some(visited) = &mut visited {
                 visited.insert(node_index);
             }
         }
-        Ok(steps)
+        if S::FINISHES {
+            self.store.finish(order, order.order().len());
+        }
+        Ok((self.store, steps))
     }
 
     /// Runs the descending passes over a component the solve has left: each
