@@ -302,8 +302,15 @@ struct Axis<'g> {
 /// inliner's own threshold: leaving the decision open costs a whole-codebase
 /// successor scan about twice its time as soon as the body grows, which is
 /// the cliff the [relocation module](super::relocate) describes from the
-/// other side.
-#[inline]
+/// other side. A hint is not enough either: whether the inliner takes it
+/// depends on how many other walks the caller's crate instantiates next to a
+/// scan, so code that adds walks elsewhere can leave the step out of line in
+/// a scan it never touched.
+#[inline(always)]
+#[expect(
+    clippy::inline_always,
+    reason = "a hint leaves the step out of line once the caller's crate walks the graph from enough places"
+)]
 fn advance(
     cursor: &mut AdjacencyCursor,
     axis: &Axis<'_>,
