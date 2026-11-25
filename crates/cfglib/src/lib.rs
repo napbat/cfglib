@@ -215,7 +215,8 @@ pub(crate) mod test_util;
 pub use analysis::control_tree::{
     BlockSpan, CatchHandler, ChildBodies, ControlBody, ControlDescent, ControlNode, ControlNodeId,
     ControlRun, ControlTree, ControlVisitor, GotoDiagnostic, GotoReason, LiftReport, LoopKind,
-    Preorder, SwitchCase,
+    PathDecomposition, Preorder, SplDecomposition, SplError, SplNode, SplNodeId, SplRun,
+    SwitchCase,
 };
 pub use analysis::metrics::{
     CfgMetrics, GraphMetrics, block_nesting_depths, cfg_block_nesting_depths,

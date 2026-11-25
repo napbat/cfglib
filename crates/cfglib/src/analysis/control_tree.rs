@@ -40,6 +40,14 @@
 //! if some blocks held no instructions, for a lifter that has already decided
 //! that a block's only instruction is a transfer the structure expresses.
 //!
+//! # Decomposition
+//!
+//! [`ControlTree::spl_decomposition`] turns a tree without gotos, labels,
+//! `try` regions, multi-level jumps and early returns into a
+//! [`SplDecomposition`]: the parse tree of the graph's blocks under the
+//! grammar of structured goto-free programs, for dynamic programs that run
+//! over it, with a [`PathDecomposition`] of bounded width.
+//!
 //! # Merge points
 //!
 //! A branch or switch rejoins at the immediate post-dominator of its block. A
@@ -81,6 +89,7 @@
 mod display;
 mod node;
 mod report;
+mod spl;
 mod structure;
 mod tree;
 mod walk;
@@ -93,5 +102,6 @@ pub use node::{
     SwitchCase,
 };
 pub use report::{GotoDiagnostic, GotoReason, LiftReport};
+pub use spl::{PathDecomposition, SplDecomposition, SplError, SplNode, SplNodeId, SplRun};
 pub use tree::{ChildBodies, ControlTree};
 pub use walk::{ControlDescent, ControlVisitor, Preorder};
