@@ -16,7 +16,7 @@
 
 extern crate alloc;
 use alloc::boxed::Box;
-use alloc::collections::BTreeSet;
+use alloc::collections::{BTreeSet, VecDeque};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
@@ -214,6 +214,101 @@ impl<N: DenseId> SccDecomposition<N> {
     {
         self.components()
             .all(|component| !is_cyclic_component(graph, component))
+    }
+
+    /// Return a shortest cycle through `node`, or `None` when `node` lies on
+    /// none.
+    ///
+    /// The cycle is in successor order, starts at `node`, and does not repeat
+    /// it at the end: each node has an edge to the next, and the last node has
+    /// an edge back to `node`. Every cycle through `node` stays inside its
+    /// component, so a node of a larger component always lies on one, and a
+    /// node alone in its component only through an edge to itself, which is
+    /// the one-node cycle `[node]`.
+    ///
+    /// The search is breadth-first from `node` along successors in adjacency
+    /// order, confined to the component, and stops at the first node with an
+    /// edge back to `node`. The cycle's length is therefore one more than the
+    /// fewest hops from a successor of `node` back to it, and the same graph
+    /// gives the same cycle. [`topological_sort_or_cycle`](crate::topological_sort_or_cycle)
+    /// names some cycle of a graph without a decomposition.
+    ///
+    /// # Cost
+    ///
+    /// No table spans the graph: a node is found by its position in the
+    /// component's ascending run, so a component of `n_c` nodes whose nodes
+    /// have `m_c` successors in all costs O((`n_c` + `m_c`) log `n_c`),
+    /// however large the graph.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the conditions of
+    /// [`component_index`](Self::component_index). `graph` must be the graph
+    /// this decomposition was computed from.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cfglib::{Graph, kosaraju_scc};
+    ///
+    /// // `a -> b -> c -> a` with a shortcut `b -> a`, and `c -> d` out of it.
+    /// let mut graph = Graph::<(), ()>::new();
+    /// let [a, b, c, d] = [(); 4].map(|()| graph.add_node(()));
+    /// graph.add_edge(a, b, ());
+    /// graph.add_edge(b, c, ());
+    /// graph.add_edge(c, a, ());
+    /// graph.add_edge(b, a, ());
+    /// graph.add_edge(c, d, ());
+    ///
+    /// let components = kosaraju_scc(&graph);
+    /// assert_eq!(components.cycle_through(&graph, a), Some(vec![a, b]));
+    /// assert_eq!(components.cycle_through(&graph, c), Some(vec![c, a, b]));
+    /// // `d` is alone in its component and has no edge to itself.
+    /// assert_eq!(components.cycle_through(&graph, d), None);
+    /// ```
+    #[must_use]
+    pub fn cycle_through<G>(&self, graph: &G, node: N) -> Option<Vec<N>>
+    where
+        G: GraphView<NodeId = N>,
+    {
+        /// The parent of a member the search has not reached.
+        const UNREACHED: usize = usize::MAX;
+        let component = self.component_index(node);
+        let members = &self.nodes[self.offsets[component]..self.offsets[component + 1]];
+        let position = |member: N| {
+            members
+                .binary_search(&member)
+                .expect("a node of a component is in the component's run")
+        };
+        // Each member's breadth-first parent, by position in `members`. The
+        // root is its own parent, which also marks it reached.
+        let root = position(node);
+        let mut parent = vec![UNREACHED; members.len()];
+        parent[root] = root;
+        let mut queue = VecDeque::from([root]);
+        while let Some(current) = queue.pop_front() {
+            for successor in graph.successors(members[current]) {
+                if successor == node {
+                    let mut cycle = vec![members[current]];
+                    let mut step = current;
+                    while step != root {
+                        step = parent[step];
+                        cycle.push(members[step]);
+                    }
+                    cycle.reverse();
+                    return Some(cycle);
+                }
+                if self.component_of[successor.index()] != component {
+                    continue;
+                }
+                let next = position(successor);
+                if parent[next] == UNREACHED {
+                    parent[next] = current;
+                    queue.push_back(next);
+                }
+            }
+        }
+        None
     }
 }
 

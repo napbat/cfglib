@@ -823,6 +823,9 @@ fn all_meets<G: GraphView, A: Adjacency>(
 
 /// Return a topological ordering of the live nodes, or `None` when they
 /// contain a cycle.
+///
+/// [`topological_sort_or_cycle`] returns the same order, and in place of
+/// `None` one cycle as the witness.
 #[must_use]
 pub fn topological_sort<G: GraphView>(graph: &G) -> Option<Vec<G::NodeId>> {
     let mut incoming_counts = vec![0_usize; graph.node_bound()];
@@ -885,6 +888,9 @@ impl<I, E> Cfg<I, E> {
         crate::graph::traverse::reverse_postorder(self, self.entry(), TraversalDirection::Outgoing)
     }
 }
+
+mod cycle_witness;
+pub use cycle_witness::topological_sort_or_cycle;
 
 #[cfg(test)]
 mod tests;

@@ -340,7 +340,7 @@ pub use graph::text::{TextError, TextErrorKind, TextStyle, parse_text, to_text, 
 pub use graph::traverse::{
     CommonAncestor, TraversalDirection, breadth_first, common_ancestors, depth_first_postorder,
     depth_first_preorder, nearest_common_ancestor, reachable, reverse_postorder, shortest_path,
-    topological_sort,
+    topological_sort, topological_sort_or_cycle,
 };
 pub use graph::verify::{
     SemanticValidator, SemanticVerifyReport, VerifyError, VerifyReport, verify, verify_edge_view,

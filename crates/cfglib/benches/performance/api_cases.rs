@@ -119,6 +119,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "to_dot",
     "to_text",
     "topological_sort",
+    "topological_sort_or_cycle",
     "try_solve_edge_problem",
     "try_solve_edge_problem_from",
     "try_solve_edge_problem_from_with_config",

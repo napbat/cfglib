@@ -13,8 +13,8 @@ use cfglib::{
     min_label_relaxation, open_breadth_first_events, open_breadth_first_paths,
     open_depth_first_events, open_fold_post_order, open_search, propagate_summaries, reachable,
     reverse_cfg, reverse_postorder, scan_predecessors, search, search_with_marks,
-    search_with_scratch, to_dot, to_text, topological_sort, verify, verify_edge_view, verify_view,
-    verify_with, write_dot, write_text,
+    search_with_scratch, to_dot, to_text, topological_sort, topological_sort_or_cycle, verify,
+    verify_edge_view, verify_view, verify_with, write_dot, write_text,
 };
 use cfglib::{
     DotEdgeAttributes, DotStyle, EdgeId, FunctionIndex, TextStyle, bind_edge_attributes,
@@ -422,6 +422,22 @@ fn register_graph_algorithms(suite: &mut BenchmarkSuite<'_>) {
         covers[topological_sort],
         || topological_sort(&dag),
         |order: &Option<Vec<_>>| assert_eq!(order.as_ref().map(Vec::len), Some(NODE_COUNT))
+    );
+    benchmark_case!(
+        suite,
+        "api_topological_sort_or_cycle",
+        covers[topological_sort_or_cycle],
+        || topological_sort_or_cycle(&graph),
+        |result: &Result<Vec<NodeId>, Vec<NodeId>>| {
+            let cycle = result
+                .as_ref()
+                .expect_err("the branchy graph's back edges close cycles");
+            assert_ne!(*cycle, []);
+            for (position, &node) in cycle.iter().enumerate() {
+                let next = cycle[(position + 1) % cycle.len()];
+                assert!(GraphView::successors(&graph, node).any(|successor| successor == next));
+            }
+        }
     );
     benchmark_case!(
         suite,
