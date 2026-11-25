@@ -311,10 +311,11 @@ pub use graph::label::{Label, bind_label, display_label, no_label};
 pub use graph::loop_forest::{LoopForest, LoopId};
 pub use graph::loop_nest::{LoopNestNode, LoopNestingTree};
 pub use graph::open::{
-    FoldEnter, MarkScope, OpenBfsConfig, OpenBfsEvent, OpenDfsConfig, OpenDfsEvent, OpenFold,
-    OpenFoldConfig, OpenPathsConfig, OpenPathsEvent, OpenSearchConfig, follow, follow_path,
-    open_breadth_first_events, open_breadth_first_paths, open_depth_first_events,
-    open_fold_post_order, open_fold_post_order_memoized, open_search,
+    FoldEnter, MarkScope, OpenBfsConfig, OpenBfsEvent, OpenDfsConfig, OpenDfsEvent,
+    OpenFixpointConfig, OpenFixpointError, OpenFold, OpenFoldConfig, OpenPathsConfig,
+    OpenPathsEvent, OpenSearchConfig, follow, follow_path, open_breadth_first_events,
+    open_breadth_first_paths, open_depth_first_events, open_fold_fixpoint, open_fold_post_order,
+    open_fold_post_order_memoized, open_search,
 };
 pub use graph::program_structure::{
     CycleEquivalence, ProgramStructureTree, SeseEdge, SeseRegionId,

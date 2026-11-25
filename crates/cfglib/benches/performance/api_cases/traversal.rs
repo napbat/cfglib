@@ -9,9 +9,10 @@
 use std::ops::ControlFlow;
 
 use cfglib::{
-    DenseFanout, FoldEnter, MarkScope, OpenFold, OpenFoldConfig, OpenPathsConfig, OpenSearchConfig,
-    SearchOrder, StackGraph, StackNodeId, StackReverseIndex, StackSearchConfig, Visit, follow,
-    open_breadth_first_paths, open_fold_post_order, open_fold_post_order_memoized, open_search,
+    DenseFanout, FoldEnter, MarkScope, OpenFixpointConfig, OpenFold, OpenFoldConfig,
+    OpenPathsConfig, OpenSearchConfig, SearchOrder, StackGraph, StackNodeId, StackReverseIndex,
+    StackSearchConfig, Visit, follow, open_breadth_first_paths, open_fold_fixpoint,
+    open_fold_post_order, open_fold_post_order_memoized, open_search,
 };
 
 use super::BenchmarkSuite;
@@ -31,6 +32,8 @@ const WIDTH: usize = 2;
 /// Stacked diamonds of the fold comparison: `2^DIAMONDS` routes reach the
 /// bottom.
 const DIAMONDS: usize = 16;
+/// Modules of the re-export ring of the fixpoint case.
+const RING: u32 = 64;
 /// References, scope hops per reference, and decoy edges of the stack graph.
 const STACK_REFERENCES: usize = 256;
 const STACK_HOPS: usize = 12;
@@ -239,6 +242,62 @@ fn register_layered(suite: &mut BenchmarkSuite<'_>) {
         || open_fold_post_order_memoized(&mut DiamondRoutes, 0_usize, OpenFoldConfig::new()),
         |routes: &Option<usize>| assert_eq!(*routes, Some(1 << DIAMONDS))
     );
+    // The fixpoint driver memoizes every marked node, so it walks the
+    // diamonds as the memoized driver does.
+    benchmark_case!(
+        suite,
+        "open_fold_fixpoint_diamonds",
+        || open_fold_fixpoint(&mut DiamondRoutes, 0_usize, OpenFixpointConfig::new()),
+        |routes: &Result<_, _>| assert_eq!(*routes, Ok(Some(1 << DIAMONDS)))
+    );
+    benchmark_case!(
+        suite,
+        "open_fold_fixpoint_export_ring",
+        covers[open_fold_fixpoint],
+        || open_fold_fixpoint(&mut ExportRing, 0_u32, OpenFixpointConfig::new()),
+        |names: &Result<_, _>| assert_eq!(*names, Ok(Some(u64::MAX)))
+    );
+}
+
+/// `RING` modules in a ring: each exports its own name, one bit, and
+/// re-exports all of the next one, so every module exports every name. The
+/// whole ring is one cycle, which the fixpoint driver re-folds twice.
+struct ExportRing;
+
+impl OpenFold for ExportRing {
+    type Node = u32;
+    type Mark = u32;
+    type Value = u64;
+    type Accumulator = u64;
+
+    fn successors(&mut self, module: &u32, out: &mut Vec<u32>) {
+        out.push((module + 1) % RING);
+    }
+
+    fn mark(&mut self, module: &u32) -> Option<u32> {
+        Some(*module)
+    }
+
+    fn enter(&mut self, module: &u32) -> FoldEnter<u64, u64> {
+        FoldEnter::Fold {
+            accumulator: 1 << module,
+            marks: MarkScope::Shared,
+        }
+    }
+
+    fn absorb(
+        &mut self,
+        accumulator: &mut u64,
+        _module: &u32,
+        value: Option<u64>,
+    ) -> ControlFlow<()> {
+        *accumulator |= value.unwrap_or_default();
+        ControlFlow::Continue(())
+    }
+
+    fn finish(&mut self, _module: &u32, accumulator: u64) -> Option<u64> {
+        Some(accumulator)
+    }
 }
 
 /// The bases of `node` in `DIAMONDS` stacked diamonds: the top `3 * level`

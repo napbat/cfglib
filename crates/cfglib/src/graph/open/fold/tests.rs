@@ -735,10 +735,10 @@ fn memoized_respects_the_depth_bound() {
 /// order. Some nodes answer as leaves, some stop after a child, some have no
 /// mark (and so no memo key), and some answer nothing. On a graph without
 /// cycles every answer is a function of the node alone, whatever the route.
-struct Digest<'a> {
-    children: &'a [Vec<usize>],
-    unmarked: &'a [bool],
-    entered: Vec<usize>,
+pub(super) struct Digest<'a> {
+    pub(super) children: &'a [Vec<usize>],
+    pub(super) unmarked: &'a [bool],
+    pub(super) entered: Vec<usize>,
 }
 
 impl OpenFold for Digest<'_> {
@@ -795,7 +795,7 @@ impl OpenFold for Digest<'_> {
 
 /// A random graph of up to twelve nodes whose edges all point to a later
 /// node, with parallel edges, and the nodes that have no mark.
-fn random_dag(random: &mut Rng) -> (Vec<Vec<usize>>, Vec<bool>) {
+pub(super) fn random_dag(random: &mut Rng) -> (Vec<Vec<usize>>, Vec<bool>) {
     let count = 1 + random.below(12);
     let children = (0..count)
         .map(|node| {

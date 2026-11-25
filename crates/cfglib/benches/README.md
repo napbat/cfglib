@@ -78,9 +78,10 @@ the workloads but are not individually timed as facade functions.
 
 `api_cases/traversal.rs` holds the small-run shapes that the 1,024-node chains
 of `graph.rs` hide behind per-step costs: many short chases and searches, a
-dense fan-out read once per parser step, layered route and fold walks, plain
-and memoized folds over stacked diamonds, and a linear stack reverse index.
-Cases there that time a method or constructor name no facade function.
+dense fan-out read once per parser step, layered route and fold walks, plain,
+memoized and fixpoint folds over stacked diamonds, a fixpoint fold over a
+re-export ring, and a linear stack reverse index. Cases there that time a
+method or constructor name no facade function.
 
 ## CPU timing
 
