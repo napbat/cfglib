@@ -11,27 +11,32 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::support::{EdgeList, assert_forest_invariants, node};
-use crate::graph::dominator::DominatorTree;
+use super::support::{EdgeList, assert_certified, assert_forest_invariants, node};
+use crate::graph::dominator::{DominatorScratch, DominatorTree};
 
-/// The dominator tree of `edges` from node 0, checked against `parent`.
+/// The dominator tree of `edges` from node 0, checked against `parent` and
+/// certified.
 fn assert_tree(edges: &EdgeList, parent: impl Fn(u32) -> Option<u32>) -> DominatorTree<u32> {
-    let tree = DominatorTree::compute_from(&edges.graph(), 0);
+    let graph = edges.graph();
+    let tree = DominatorTree::compute_from(&graph, 0);
     for member in 0..node(edges.node_count) {
         assert_eq!(tree.idom(member), parent(member), "node {member}");
     }
     assert_forest_invariants(&tree, edges.node_count);
+    assert_certified(&tree, &graph, 0, &mut DominatorScratch::new());
     tree
 }
 
-/// `edges` agree with the iterative oracle too.
+/// `edges` agree with the iterative oracle too, and are certified.
 fn assert_matches_oracle(edges: &EdgeList) {
     let graph = edges.graph();
+    let tree = DominatorTree::compute_from(&graph, 0);
     assert!(
-        DominatorTree::compute_from(&graph, 0) == DominatorTree::compute_iterative(&graph, 0),
+        tree == DominatorTree::compute_iterative(&graph, 0),
         "{} nodes",
         edges.node_count
     );
+    assert_certified(&tree, &graph, 0, &mut DominatorScratch::new());
 }
 
 /// A path through `count` nodes.

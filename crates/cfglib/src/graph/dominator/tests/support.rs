@@ -5,7 +5,7 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::graph::dominator::DominatorTree;
+use crate::graph::dominator::{DominatorScratch, DominatorTree};
 use crate::graph::view::{GraphView, RootedView};
 
 pub(super) use crate::test_util::rng::Rng;
@@ -13,6 +13,22 @@ pub(super) use crate::test_util::rng::Rng;
 /// The node with dense index `index`.
 pub(super) fn node(index: usize) -> u32 {
     u32::try_from(index).expect("test node index fits in u32")
+}
+
+/// Check that the certified construction builds `tree`, the tree of `graph`
+/// from `root`, and that its certificate is accepted.
+pub(super) fn assert_certified(
+    tree: &DominatorTree<u32>,
+    graph: &Digraph,
+    root: u32,
+    scratch: &mut DominatorScratch,
+) {
+    let (certified, certificate) = DominatorTree::compute_certified_in(scratch, graph, root);
+    assert!(&certified == tree, "the certified tree differs");
+    assert_eq!(
+        certified.verify_certificate(graph, root, &certificate),
+        Ok(())
+    );
 }
 
 /// A directed multigraph, as a node count and an edge list.

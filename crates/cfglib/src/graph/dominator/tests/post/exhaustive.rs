@@ -1,5 +1,6 @@
 //! Every small digraph against the definition of post-dominance.
 
+use super::certificate::assert_post_certified;
 use super::reference::{
     PostReference, all_subsets, assert_contract, assert_frontiers, assert_matches, blocks,
     post_node,
@@ -21,6 +22,7 @@ fn check_against_definition(edges: &EdgeList, scratches: &mut Scratches) {
     let reference = PostReference::new(&graph);
     let sets = all_subsets(edges.node_count);
     assert_matches(&post, &reference, edges);
+    assert_post_certified(&post, &graph, &mut scratches.post);
     assert_contract(&post, &reference, edges);
     assert_frontiers(
         &post,

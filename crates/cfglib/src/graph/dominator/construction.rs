@@ -13,6 +13,14 @@
 //!
 //! Every table below is indexed by depth-first number, except `number`, which
 //! maps a dense node index to its depth-first number.
+//!
+//! On request the run also keeps what a low-high order needs (see
+//! `low_high`): for each node, the predecessor that last attained its
+//! semidominator, and its relative dominator. Path compression breaks ties
+//! between equal semidominators toward the node nearest the root, so the
+//! relative dominator is the one Georgiadis and Tarjan define, the smallest
+//! node of least semidominator. Any node of least semidominator gives the
+//! same immediate dominators, so the tie rule changes nothing else.
 
 extern crate alloc;
 use alloc::vec;
@@ -20,6 +28,10 @@ use alloc::vec::Vec;
 
 use super::{ABSENT, DominatorTree, slot, word};
 use crate::graph::view::{DenseId, GraphView};
+
+mod low_high;
+
+pub(super) use low_high::LowHighBuffers;
 
 /// A node the depth-first search still has to number, and the depth-first
 /// number of the node that reached it.
@@ -54,6 +66,17 @@ pub(super) struct ConstructionBuffers {
     pending: Vec<Pending>,
     /// The path path compression is flattening.
     path: Vec<u32>,
+    /// Whether the run keeps `best` and `relative`.
+    record: bool,
+    /// The predecessor of each node that attains its semidominator, as a
+    /// depth-first number: the last node of a semidominator path. Kept only
+    /// when recording.
+    best: Vec<u32>,
+    /// The relative dominator of each node: the node of least semidominator
+    /// on the search-tree path below its semidominator, the smallest on a
+    /// tie, and the node itself when its semidominator is its parent. Kept
+    /// only when recording.
+    relative: Vec<u32>,
 }
 
 impl ConstructionBuffers {
@@ -66,11 +89,16 @@ impl ConstructionBuffers {
     /// The parent table of the dominator tree of `graph` from `root`, indexed
     /// by dense node index, with [`ABSENT`] for the root and for every node
     /// the root does not reach.
+    ///
+    /// With `record`, the run also keeps the tables a low-high order is built
+    /// from.
     pub(super) fn immediate_dominators<G: GraphView>(
         &mut self,
         graph: &G,
         root: usize,
+        record: bool,
     ) -> Vec<u32> {
+        self.record = record;
         self.search(graph, root);
         let reached = self.vertex.len();
         self.prepare(reached);
@@ -142,21 +170,34 @@ impl ConstructionBuffers {
         self.bucket_head.resize(reached, ABSENT);
         self.bucket_next.clear();
         self.bucket_next.resize(reached, ABSENT);
+        if self.record {
+            self.best.clear();
+            self.best.resize(reached, ABSENT);
+            self.relative.clear();
+            self.relative.extend(0..count);
+        }
     }
 
     /// Find the semidominator of `node`, link it below its search parent, and
     /// settle every node whose semidominator is that parent.
     fn process<G: GraphView>(&mut self, graph: &G, node: usize) {
         let mut semi = self.semi[node];
+        let mut best = ABSENT;
         for predecessor in graph.predecessors(G::NodeId::from_index(slot(self.vertex[node]))) {
             let number = self.number[predecessor.index()];
             if number == ABSENT {
                 continue;
             }
             let least = self.evaluate(number);
-            semi = semi.min(self.semi[slot(least)]);
+            if self.semi[slot(least)] < semi {
+                semi = self.semi[slot(least)];
+                best = number;
+            }
         }
         self.semi[node] = semi;
+        if self.record {
+            self.best[node] = best;
+        }
 
         let parent = self.parent[node];
         if semi != parent {
@@ -169,6 +210,9 @@ impl ConstructionBuffers {
         self.bucket_head[slot(parent)] = ABSENT;
         while waiting != ABSENT {
             let least = self.evaluate(waiting);
+            if self.record {
+                self.relative[slot(waiting)] = least;
+            }
             self.dominator[slot(waiting)] = if self.semi[slot(least)] < self.semi[slot(waiting)] {
                 least
             } else {
@@ -192,7 +236,9 @@ impl ConstructionBuffers {
     /// carrying the least label down the path.
     ///
     /// The recursive form compresses the ancestor first and then the node, so
-    /// the nodes are collected on the way up and fixed from the top down.
+    /// the nodes are collected on the way up and fixed from the top down. On a
+    /// tie the label from above wins, so a label is the node of least
+    /// semidominator nearest the root.
     fn compress(&mut self, start: u32) {
         self.path.clear();
         let mut node = start;
@@ -207,7 +253,7 @@ impl ConstructionBuffers {
         while let Some(node) = self.path.pop() {
             let ancestor = self.ancestor[slot(node)];
             let above = self.label[slot(ancestor)];
-            if self.semi[slot(above)] < self.semi[slot(self.label[slot(node)])] {
+            if self.semi[slot(above)] <= self.semi[slot(self.label[slot(node)])] {
                 self.label[slot(node)] = above;
             }
             self.ancestor[slot(node)] = self.ancestor[slot(ancestor)];
@@ -220,9 +266,10 @@ impl<N: DenseId> DominatorTree<N> {
     /// reachable node ends at a reachable node whose immediate dominator is an
     /// ancestor of the edge's tail, or at the root.
     ///
-    /// With the sibling property it characterizes the dominator tree. The check
-    /// costs one interval test per edge and backs the debug assertion that
-    /// follows every construction.
+    /// This is half of what [`verify_certificate`](Self::verify_certificate)
+    /// checks. It accepts a tree that is too shallow, which the tests use to
+    /// show what the low-high half adds.
+    #[cfg(test)]
     pub(super) fn satisfies_parent_property<G: GraphView<NodeId = N>>(&self, graph: &G) -> bool {
         self.order.iter().all(|&tail| {
             graph.successors(tail).all(|head| {

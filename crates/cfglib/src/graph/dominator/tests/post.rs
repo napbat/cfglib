@@ -2,6 +2,7 @@
 //! and exit-free regions, and the properties a consumer relies on.
 
 mod cases;
+mod certificate;
 mod control_dependence;
 mod differential;
 mod edge_dominance;

@@ -305,8 +305,8 @@ pub use graph::diff::{
     RegionMatch,
 };
 pub use graph::dominator::{
-    DominanceFrontiers, DominatorScratch, DominatorTree, FrontierScratch, PostDominatorScratch,
-    PostDominatorTree, PostNode,
+    CertificateError, DominanceFrontiers, DominatorScratch, DominatorTree, FrontierScratch,
+    LowHighOrder, PostDominatorScratch, PostDominatorTree, PostNode,
 };
 pub use graph::dot::{
     DotEdgeAttributes, DotEdgeStyle, DotRankDir, DotStyle, bind_edge_attributes,

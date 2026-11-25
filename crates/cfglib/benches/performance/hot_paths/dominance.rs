@@ -1,6 +1,6 @@
 use cfglib::{
-    BlockId, Cfg, DominanceFrontiers, DominatorTree, Graph, PostDominatorTree, PostNode,
-    control_dependence_graph,
+    BlockId, CertificateError, Cfg, DominanceFrontiers, DominatorScratch, DominatorTree, Graph,
+    LowHighOrder, PostDominatorTree, PostNode, control_dependence_graph,
 };
 
 use super::NODE_COUNT;
@@ -20,6 +20,28 @@ fn register_dominators(suite: &mut BenchmarkSuite<'_>, cfg: &Cfg<u32>) {
         "cfg_dominators",
         || DominatorTree::compute(cfg),
         |result: &DominatorTree| assert_branchy_dominators(result, NODE_COUNT)
+    );
+    // The tree and its low-high order, from a fresh scratch as `compute`
+    // starts from, and the linear check of that pair on its own.
+    benchmark_case!(
+        suite,
+        "cfg_dominators_certified",
+        || DominatorTree::compute_certified_in(&mut DominatorScratch::new(), cfg, cfg.entry()),
+        |(tree, certificate): &(DominatorTree, LowHighOrder)| {
+            assert_branchy_dominators(tree, NODE_COUNT);
+            assert_eq!(
+                tree.verify_certificate(cfg, cfg.entry(), certificate),
+                Ok(())
+            );
+        }
+    );
+    let (_, certificate) =
+        DominatorTree::compute_certified_in(&mut DominatorScratch::new(), cfg, cfg.entry());
+    benchmark_case!(
+        suite,
+        "cfg_dominators_verify",
+        || cfg_dominators.verify_certificate(cfg, cfg.entry(), &certificate),
+        |result: &Result<(), CertificateError<BlockId>>| assert_eq!(*result, Ok(()))
     );
     benchmark_case!(
         suite,
