@@ -35,7 +35,7 @@ const RING_FUNCTIONS: usize = 1_000;
 const FINGERPRINT_BLOCKS: usize = 10_000;
 
 #[derive(Clone, Copy)]
-struct CallInst(Option<u32>);
+pub(super) struct CallInst(Option<u32>);
 
 impl CallInfo for CallInst {
     type Callee = u32;
@@ -777,7 +777,7 @@ fn register_recursive_ring(suite: &mut BenchmarkSuite<'_>) {
 
 /// Function `i` calls `2i + 1` and `2i + 2`; every 64th function also calls
 /// its caller back.
-fn call_tree_cfgs(function_count: usize) -> Vec<Cfg<CallInst>> {
+pub(super) fn call_tree_cfgs(function_count: usize) -> Vec<Cfg<CallInst>> {
     (0..function_count)
         .map(|index| {
             let mut cfg = Cfg::new();

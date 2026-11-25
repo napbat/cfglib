@@ -9,6 +9,7 @@ mod feedback;
 mod fixtures;
 mod frequency;
 mod graph;
+mod incremental_scc;
 mod path_expr;
 mod pipeline;
 mod program_structure;
@@ -223,6 +224,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     feedback::register(suite);
     frequency::register(suite);
     graph::register(suite);
+    incremental_scc::register(suite);
     path_expr::register(suite);
     pipeline::register(suite);
     program_structure::register(suite);
