@@ -9,16 +9,70 @@ use cfglib::{
     split_critical_edges_mapped, split_critical_edges_with, verify,
 };
 use cfglib::{
-    ExclusiveExtent, ExtentPromotionDecision, HandlerRef, RelaxError, promote_exclusive_extents,
-    recover_exclusive_extents, relax_layout,
+    DispatchBuilder, DispatchReport, DominatorTree, ExclusiveExtent, ExtentPromotionDecision,
+    HandlerRef, RelaxError, is_reducible, make_reducible, make_reducible_with_dispatch,
+    promote_exclusive_extents, recover_exclusive_extents, relax_layout,
 };
 
 use super::BenchmarkSuite;
 use super::fixtures::{ApiInst, dataflow_cfg};
-use crate::fixtures::{empty_chain_cfg, linear_cfg};
+use crate::fixtures::{empty_chain_cfg, fixture_u32, linear_cfg};
 use crate::harness::benchmark_case;
 
 const BLOCK_COUNT: usize = 256;
+
+/// The complete digraph node splitting still fixes in a benchmark sample.
+const SPLIT_COMPLETE_BLOCKS: usize = 10;
+
+/// The complete digraph only dispatch fixes in a benchmark sample.
+const DISPATCH_COMPLETE_BLOCKS: usize = 64;
+
+/// Selector code that names its entry, and dispatch code that names its hub.
+struct ApiDispatch;
+
+impl DispatchBuilder<u32, ()> for ApiDispatch {
+    fn select(&mut self, _hub: BlockId, index: usize, _entry: BlockId) -> Vec<u32> {
+        vec![fixture_u32(index)]
+    }
+
+    fn dispatch(&mut self, hub: BlockId, _entries: &[BlockId]) -> Vec<u32> {
+        vec![fixture_u32(hub.index())]
+    }
+
+    fn case(&mut self, _hub: BlockId, _index: usize) {}
+
+    fn jump(&mut self, _selector: BlockId, _hub: BlockId) {}
+}
+
+/// `blocks` blocks that all jump to each other and are each entered from the
+/// entry: an irreducible cycle at every level of the cycle forest, which node
+/// splitting fixes only with exponentially many copies.
+fn complete_cfg(blocks: usize) -> Cfg<u32> {
+    let mut cfg = Cfg::new();
+    let ids: Vec<BlockId> = (0..blocks).map(|_| cfg.new_block()).collect();
+    for &to in &ids {
+        cfg.add_edge(cfg.entry(), to, EdgeKind::Jump);
+    }
+    for &from in &ids {
+        for &to in ids.iter().filter(|&&to| to != from) {
+            cfg.add_edge(from, to, EdgeKind::Jump);
+        }
+    }
+    cfg
+}
+
+/// The dispatched complete digraph of `blocks` blocks: reducible, one hub per
+/// level of the forest, and at most one selector per edge and level.
+fn assert_dispatched_complete(result: &Cfg<u32>, report: &DispatchReport, blocks: usize) {
+    assert!(is_reducible(result, &DominatorTree::compute(result)));
+    let levels = blocks - 1;
+    assert_eq!(report.hubs.len(), levels);
+    assert!(report.selectors.len() <= blocks * blocks * levels);
+    assert_eq!(
+        result.block_count(),
+        blocks + 1 + report.hubs.len() + report.selectors.len()
+    );
+}
 
 struct ApiEmitter;
 
@@ -490,6 +544,51 @@ fn register_layout(suite: &mut BenchmarkSuite<'_>) {
     );
 }
 
+/// Node splitting against dispatch on the complete digraph: splitting copies
+/// `2^n - n - 1` blocks there, so it gets the small one, and dispatch both.
+fn register_reducibility(suite: &mut BenchmarkSuite<'_>) {
+    let small = complete_cfg(SPLIT_COMPLETE_BLOCKS);
+    let large = complete_cfg(DISPATCH_COMPLETE_BLOCKS);
+    benchmark_case!(
+        suite,
+        "cfg_clone_make_reducible_complete_10",
+        || {
+            let mut cloned = small.clone();
+            let copies = make_reducible(&mut cloned);
+            (cloned, copies)
+        },
+        |(result, copies): &(Cfg<u32>, usize)| {
+            assert!(*copies >= 1 << (SPLIT_COMPLETE_BLOCKS - 1));
+            assert!(is_reducible(result, &DominatorTree::compute(result)));
+        }
+    );
+    benchmark_case!(
+        suite,
+        "cfg_clone_make_reducible_with_dispatch_complete_10",
+        || {
+            let mut cloned = small.clone();
+            let report = make_reducible_with_dispatch(&mut cloned, &mut ApiDispatch);
+            (cloned, report)
+        },
+        |(result, report): &(Cfg<u32>, DispatchReport)| {
+            assert_dispatched_complete(result, report, SPLIT_COMPLETE_BLOCKS);
+        }
+    );
+    benchmark_case!(
+        suite,
+        "api_make_reducible_with_dispatch_complete_64",
+        covers[make_reducible_with_dispatch],
+        || {
+            let mut cloned = large.clone();
+            let report = make_reducible_with_dispatch(&mut cloned, &mut ApiDispatch);
+            (cloned, report)
+        },
+        |(result, report): &(Cfg<u32>, DispatchReport)| {
+            assert_dispatched_complete(result, report, DISPATCH_COMPLETE_BLOCKS);
+        }
+    );
+}
+
 pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     register_cleanup(suite);
     register_extents(suite);
@@ -498,4 +597,5 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     register_critical_edges(suite);
     register_frontend_utilities(suite);
     register_exception_regions(suite);
+    register_reducibility(suite);
 }

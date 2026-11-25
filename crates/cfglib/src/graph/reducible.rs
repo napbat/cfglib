@@ -1,4 +1,4 @@
-//! Irreducible-to-reducible CFG transformation via node splitting.
+//! Irreducible-to-reducible CFG transformations: node splitting and dispatch.
 //!
 //! An irreducible CFG contains cycles with multiple entry points.
 //! [`make_reducible`] removes them by choosing one entry of such a cycle as
@@ -9,6 +9,13 @@
 //! The algorithm is iterative: after each round of splitting, the
 //! dominator tree is recomputed and the CFG is re-checked. The loop
 //! terminates when the CFG is reducible.
+//!
+//! [`make_reducible_with_dispatch`] copies nothing. It enters every
+//! irreducible cycle through one new hub block that branches on a selector
+//! value, which a new block on each edge into the cycle's entries sets, with
+//! code a [`DispatchBuilder`] supplies. It grows polynomially, by at most the
+//! edges times the irreducible nesting depth, where splitting can grow
+//! exponentially, at the price of selector code instead of copies.
 
 extern crate alloc;
 use alloc::vec;
@@ -21,6 +28,10 @@ use crate::edge::{EdgeId, EdgeKind};
 use crate::graph::dominator::DominatorTree;
 use crate::graph::structure::find_irreducible_entry;
 use crate::graph::traverse::{TraversalDirection, reachable_in};
+
+mod dispatch;
+
+pub use dispatch::{DispatchBuilder, DispatchReport, make_reducible_with_dispatch};
 
 /// Transform an irreducible CFG into a reducible one by node splitting.
 ///
