@@ -1,6 +1,6 @@
 use cfglib::{
-    BlockHashes, BlockId, CascadeDiff, Cfg, CfgDiff, EdgeKind, MatchLevel, block_nesting_depths,
-    cfg_block_nesting_depths, detect_cfg_patterns, detect_patterns,
+    BlockHashes, BlockId, CascadeDiff, Cfg, CfgDiff, EdgeKind, MatchLevel, RegionDiff,
+    block_nesting_depths, cfg_block_nesting_depths, detect_cfg_patterns, detect_patterns,
 };
 
 use super::BenchmarkSuite;
@@ -141,6 +141,26 @@ fn register_cfg_diff(suite: &mut BenchmarkSuite<'_>) {
                 .iter()
                 .filter(|&&level| level == MatchLevel::Full);
             assert_eq!(full.count(), SWITCH_CASES);
+        }
+    );
+    // The branchy CFG with every fourth block split in two: each half pair
+    // becomes a chain, and each split comes back as a 1:2 region.
+    let mut split = branchy_cfg(BRANCHY_BLOCKS);
+    let blocks: Vec<BlockId> = split.block_ids().step_by(4).collect();
+    for &block in &blocks {
+        split.split_block(block, 1);
+    }
+    benchmark_case!(
+        suite,
+        "cfg_diff_region_split",
+        || RegionDiff::compute(&left, &split),
+        |diff: &RegionDiff| {
+            assert!(diff.left_only.is_empty() && diff.right_only.is_empty());
+            let halves = diff
+                .regions
+                .iter()
+                .filter(|region| region.left.len() == 1 && region.right.len() == 2);
+            assert_eq!(halves.count(), blocks.len());
         }
     );
 }
