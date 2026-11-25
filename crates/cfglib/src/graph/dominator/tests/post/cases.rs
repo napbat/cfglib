@@ -8,10 +8,12 @@ use alloc::vec::Vec;
 use super::reference::{PostReference, assert_matches};
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::graph::cdg::control_dependence_graph;
+use crate::graph::cdg::{
+    NonterminationScratch, control_dependence_graph, nontermination_sensitive_controllers,
+};
 use crate::graph::dominator::tests::support::{EdgeList, node};
 use crate::graph::dominator::tests::{BoundedDiamond, BoundedNode};
-use crate::graph::dominator::{PostDominatorScratch, PostDominatorTree, PostNode};
+use crate::graph::dominator::{ExitPolicy, PostDominatorScratch, PostDominatorTree, PostNode};
 use crate::graph::store::{Graph, NodeId};
 use crate::graph::view::{GraphView, Rooted};
 
@@ -132,6 +134,47 @@ fn a_server_loop_without_an_exit_is_cut_at_its_latch() {
             ],
         },
     );
+}
+
+#[test]
+fn the_server_loop_has_no_dependences_as_a_sink_and_two_sensitive_ones() {
+    let names = ["entry", "head", "ok", "err", "latch"];
+    let list = graph_of(
+        &names,
+        &[
+            ("entry", "head"),
+            ("head", "ok"),
+            ("head", "err"),
+            ("ok", "latch"),
+            ("err", "latch"),
+            ("latch", "head"),
+        ],
+    );
+    let graph = list.graph();
+    let sinks = PostDominatorTree::compute_with_in(
+        &mut PostDominatorScratch::new(),
+        &graph,
+        ExitPolicy::SinkComponents,
+    );
+    assert_eq!(control_dependence_graph(&graph, &sinks).edge_count(), 0);
+
+    let mut sensitive = Vec::new();
+    let mut controllers = Vec::new();
+    let mut scratch = NonterminationScratch::new();
+    for dependent in 0..node(names.len()) {
+        nontermination_sensitive_controllers(&graph, dependent, &mut scratch, &mut controllers);
+        sensitive.extend(
+            controllers
+                .iter()
+                .map(|&controller| (controller, dependent)),
+        );
+    }
+    let (head, ok, err) = (
+        index_of(&names, "head"),
+        index_of(&names, "ok"),
+        index_of(&names, "err"),
+    );
+    assert_eq!(sensitive, [(head, ok), (head, err)]);
 }
 
 #[test]

@@ -23,11 +23,13 @@ use augmented::AugmentedReverse;
 use certificate::without_virtual_exit;
 pub(crate) use cut::CutBuffers;
 use cut::ExitStructure;
+pub use sink::{ExitPolicy, SinkId};
 
 mod augmented;
 mod certificate;
 mod cut;
 mod edge_dominance;
+mod sink;
 
 /// A node of a post-dominator tree: a block of the graph, or the virtual exit
 /// that every exit joins.
@@ -129,6 +131,27 @@ impl PostDominatorScratch {
 /// - On a block without it, facts are relative to the cut. A consumer that
 ///   moves code must refuse a source or a target there.
 ///
+/// # Sink classes
+///
+/// [`compute_with_in`](Self::compute_with_in) with
+/// [`ExitPolicy::SinkComponents`] reads an exit-free region the other
+/// standard way: each sink component of it, a strongly connected component
+/// no edge leaves, is one class joined to `X*`, and has no cut. The blocks of
+/// a class post-dominate each other, and a block outside every sink
+/// post-dominates another when every path from that one into the sinks passes
+/// it. This is the sink post-dominance of Hecker et al., under which control
+/// dependence is nontermination-insensitive.
+///
+/// A class is one node of the tree, named by its lowest block:
+/// [`preorder`](Self::preorder), [`subtree`](Self::subtree) and
+/// [`children`](Self::children) list that block for the class, and
+/// [`sink_members`](Self::sink_members) expands it. The other queries take
+/// any block of a class: [`ipdom`](Self::ipdom) of each is
+/// [`PostNode::Exit`], [`control_dependents`](Self::control_dependents)
+/// skips an arm between two blocks of one class and lists every block of a
+/// class that depends, and the frontier queries read an edge into a class as
+/// an edge into the class.
+///
 /// # Queries
 ///
 /// Every table is dense, indexed by [`DenseId::index`], and sized by the
@@ -197,6 +220,13 @@ pub struct PostDominatorTree<N = BlockId> {
     exits: Vec<N>,
     /// The blocks the cut joins to the virtual exit, in ascending dense index.
     cut_roots: Vec<N>,
+    /// The sink class of each block, `ABSENT` for none; empty without
+    /// classes, which is every tree of the cut.
+    class_of: Vec<u32>,
+    /// The blocks of every class, class after class, each ascending.
+    class_members: Vec<N>,
+    /// Class `c` is `class_members[class_starts[c]..class_starts[c + 1]]`.
+    class_starts: Vec<u32>,
 }
 
 impl<N: DenseId> PostDominatorTree<N> {
@@ -325,6 +355,9 @@ impl<N: DenseId> PostDominatorTree<N> {
             reaches_exit,
             exits,
             cut_roots,
+            class_of: Vec::new(),
+            class_members: Vec::new(),
+            class_starts: Vec::new(),
         }
     }
 
@@ -370,11 +403,15 @@ impl<N: DenseId> PostDominatorTree<N> {
     /// The walk climbs from the deeper block until the two meet, so it costs
     /// O(depth). The answer is [`PostNode::Exit`] when the two sit in
     /// different trees of the forest, and `None` when either is outside the
-    /// tree.
+    /// tree. A sink class is named by its lowest block.
     #[must_use]
     pub fn nearest_common_post_dominator(&self, first: N, second: N) -> Option<PostNode<N>> {
-        (self.contains(first) && self.contains(second))
-            .then(|| lift(self.tree.nearest_common_dominator(first, second)))
+        (self.contains(first) && self.contains(second)).then(|| {
+            lift(
+                self.tree
+                    .nearest_common_dominator(self.canonical(first), self.canonical(second)),
+            )
+        })
     }
 
     /// Return the deepest node that post-dominates every block of `blocks`
@@ -382,7 +419,7 @@ impl<N: DenseId> PostDominatorTree<N> {
     ///
     /// Blocks outside the tree are skipped. The answer is `None` when no
     /// block is in the tree, and [`PostNode::Exit`] when the blocks share no
-    /// tree of the forest.
+    /// tree of the forest. A sink class is named by its lowest block.
     #[must_use]
     pub fn nearest_common_post_dominator_of(
         &self,
@@ -390,6 +427,7 @@ impl<N: DenseId> PostDominatorTree<N> {
     ) -> Option<PostNode<N>> {
         let mut meet = None;
         for block in blocks.into_iter().filter(|&block| self.contains(block)) {
+            let block = self.canonical(block);
             meet = Some(match meet {
                 None => PostNode::Node(block),
                 Some(PostNode::Node(previous)) => {
@@ -485,6 +523,10 @@ impl<N: DenseId> PostDominatorTree<N> {
     /// immediate post-dominator. The method does not check that the edge
     /// exists, so it costs O(1 + the number of blocks it yields).
     ///
+    /// Under [`ExitPolicy::SinkComponents`] a block of a sink class is read as
+    /// the class: an arm between two blocks of one class yields nothing, and
+    /// a class that depends yields all its blocks, ascending.
+    ///
     /// # Panics
     ///
     /// Panics when `from` or `to` has an index beyond the node bound the tree
@@ -528,7 +570,29 @@ impl<N: DenseId> PostDominatorTree<N> {
     /// assert_eq!(post.control_dependents(head, head).collect::<Vec<_>>(), [head]);
     /// assert_eq!(post.control_dependents(head, exit).count(), 0);
     /// ```
+    #[inline]
     pub fn control_dependents(&self, from: N, to: N) -> impl Iterator<Item = N> + '_ {
+        if self.has_sink_classes() {
+            Dependents::Classes(self.class_dependents(from, to))
+        } else {
+            Dependents::Blocks(self.tree_dependents(from, to))
+        }
+    }
+
+    /// Whether the tree has sink classes, which only
+    /// [`ExitPolicy::SinkComponents`] builds.
+    pub(crate) fn has_sink_classes(&self) -> bool {
+        !self.class_members.is_empty()
+    }
+
+    /// [`control_dependents`](Self::control_dependents) for a tree without
+    /// sink classes: the walk from `to` up to the immediate post-dominator of
+    /// `from`, which is left out.
+    ///
+    /// Callers that ask for many arms of one tree check
+    /// [`has_sink_classes`](Self::has_sink_classes) once and walk with this,
+    /// so a tree of the cut pays nothing for the classes it does not have.
+    pub(crate) fn tree_dependents(&self, from: N, to: N) -> impl Iterator<Item = N> + '_ {
         let stop = self.ipdom(from);
         let below_stop = self.contains(to)
             && match stop {
@@ -546,6 +610,19 @@ impl<N: DenseId> PostDominatorTree<N> {
         })
     }
 
+    /// [`control_dependents`](Self::control_dependents) for a tree with sink
+    /// classes: nothing for an arm inside one class, and otherwise the walk
+    /// between the classes of its ends, each class expanded into its blocks.
+    fn class_dependents(&self, from: N, to: N) -> ClassWalk<'_, N, impl Iterator<Item = N> + '_> {
+        let walk = (!self.share_class(from, to))
+            .then(|| self.tree_dependents(self.canonical(from), self.canonical(to)));
+        ClassWalk {
+            tree: self,
+            walk,
+            class: &[],
+        }
+    }
+
     /// Collect the control-dependence sources of `block` into `out`.
     ///
     /// A block `x` is a source when `block` post-dominates a successor of `x`
@@ -559,7 +636,9 @@ impl<N: DenseId> PostDominatorTree<N> {
     /// A block that branches back to itself is its own source. The edges of
     /// [`control_dependence_graph`](crate::control_dependence_graph) are this
     /// same relation: it has the edge `x -> block` exactly when `x` is a
-    /// source of `block`.
+    /// source of `block`. Under [`ExitPolicy::SinkComponents`] a block of a
+    /// sink class has the sources of its class, and no edge inside a class
+    /// makes one.
     ///
     /// # Panics
     ///
@@ -593,7 +672,13 @@ impl<N: DenseId> PostDominatorTree<N> {
     where
         G: GraphView<NodeId = N>,
     {
-        self.tree.frontier(&Reversed::new(graph), block, out);
+        match self.contracted(graph) {
+            None => self.tree.frontier(&Reversed::new(graph), block, out),
+            Some(contracted) => {
+                self.tree
+                    .frontier(&Reversed::new(&contracted), self.canonical(block), out);
+            }
+        }
     }
 
     /// Collect the iterated control-dependence frontier of `blocks` into
@@ -613,7 +698,8 @@ impl<N: DenseId> PostDominatorTree<N> {
     ///
     /// `out` is cleared first and receives each block once, in preorder of
     /// this tree. A block of `blocks` outside the tree is ignored, and so is
-    /// one named twice.
+    /// one named twice. Under [`ExitPolicy::SinkComponents`] a block of a
+    /// sink class stands for its class, as in [`frontier`](Self::frontier).
     ///
     /// # Panics
     ///
@@ -655,12 +741,85 @@ impl<N: DenseId> PostDominatorTree<N> {
     ) where
         G: GraphView<NodeId = N>,
     {
-        self.tree
-            .iterated_frontier(&Reversed::new(graph), scratch, blocks, filter, out);
+        let blocks = blocks.into_iter().map(|block| self.canonical(block));
+        match self.contracted(graph) {
+            None => {
+                self.tree
+                    .iterated_frontier(&Reversed::new(graph), scratch, blocks, filter, out);
+            }
+            Some(contracted) => {
+                self.tree.iterated_frontier(
+                    &Reversed::new(&contracted),
+                    scratch,
+                    blocks,
+                    filter,
+                    out,
+                );
+            }
+        }
     }
 }
 
 /// The node an optional parent names: `None` is the virtual exit.
 fn lift<N>(parent: Option<N>) -> PostNode<N> {
     parent.map_or(PostNode::Exit, PostNode::Node)
+}
+
+/// The dependents of one arm, as [`PostDominatorTree::control_dependents`]
+/// chooses them once per call.
+enum Dependents<B, C> {
+    /// The walk of a tree without classes.
+    Blocks(B),
+    /// The walk of a tree with classes.
+    Classes(C),
+}
+
+impl<N, B, C> Iterator for Dependents<B, C>
+where
+    B: Iterator<Item = N>,
+    C: Iterator<Item = N>,
+{
+    type Item = N;
+
+    #[inline]
+    fn next(&mut self) -> Option<N> {
+        match self {
+            Self::Blocks(blocks) => blocks.next(),
+            Self::Classes(classes) => classes.next(),
+        }
+    }
+
+    #[inline]
+    fn fold<A, F: FnMut(A, N) -> A>(self, init: A, step: F) -> A {
+        match self {
+            Self::Blocks(blocks) => blocks.fold(init, step),
+            Self::Classes(classes) => classes.fold(init, step),
+        }
+    }
+}
+
+/// A walk up the tree with each node that names a sink class expanded into
+/// the class's blocks; no walk at all for an arm inside one class.
+struct ClassWalk<'a, N, W> {
+    tree: &'a PostDominatorTree<N>,
+    walk: Option<W>,
+    /// The blocks of the class being expanded that are still to come.
+    class: &'a [N],
+}
+
+impl<N: DenseId, W: Iterator<Item = N>> Iterator for ClassWalk<'_, N, W> {
+    type Item = N;
+
+    fn next(&mut self) -> Option<N> {
+        if let [first, rest @ ..] = self.class {
+            self.class = rest;
+            return Some(*first);
+        }
+        let node = self.walk.as_mut()?.next()?;
+        if let [first, rest @ ..] = self.tree.named_class(node) {
+            self.class = rest;
+            return Some(*first);
+        }
+        Some(node)
+    }
 }

@@ -26,6 +26,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+use super::super::{ABSENT, word};
 use crate::graph::scc::tarjan_scc;
 use crate::graph::traverse::{TraversalDirection, reachable_in};
 use crate::graph::view::{DenseId, GraphView};
@@ -39,6 +40,20 @@ pub(crate) struct ExitStructure<N> {
     pub(crate) exits: Vec<N>,
     /// The blocks the cut joins to the virtual exit, in ascending dense index.
     pub(crate) cut_roots: Vec<N>,
+}
+
+/// The sink components of the reachable blocks that reach no exit, as
+/// classes.
+pub(super) struct SinkClasses<N> {
+    /// The class of each block, [`ABSENT`] for a block in none. Empty when
+    /// there is no class.
+    pub(super) class_of: Vec<u32>,
+    /// The blocks of every class, class after class, each class in ascending
+    /// dense index and the classes in ascending order of their first block.
+    pub(super) members: Vec<N>,
+    /// Class `c` is `members[starts[c]..starts[c + 1]]`. Empty when there is
+    /// no class.
+    pub(super) starts: Vec<u32>,
 }
 
 /// Every buffer the analysis fills, owned by the caller.
@@ -66,6 +81,68 @@ impl CutBuffers {
         graph: &G,
         root: G::NodeId,
     ) -> ExitStructure<G::NodeId> {
+        let (exits, reaches_exit) = self.find_exits(graph, root);
+        let cut_roots = self.cut_roots(graph, root, &reaches_exit);
+        self.join(&exits, &cut_roots);
+        ExitStructure {
+            reaches_exit,
+            exits,
+            cut_roots,
+        }
+    }
+
+    /// Find the exits and the blocks that reach them, as
+    /// [`analyze`](Self::analyze) does, and in place of the cut the sink
+    /// components of the blocks that reach none. Each class's lowest block
+    /// stands for it: it is joined to the virtual exit and listed among the
+    /// returned structure's cut roots, which the augmented graph reads.
+    pub(super) fn analyze_sinks<G: GraphView>(
+        &mut self,
+        graph: &G,
+        root: G::NodeId,
+    ) -> (ExitStructure<G::NodeId>, SinkClasses<G::NodeId>) {
+        let (exits, reaches_exit) = self.find_exits(graph, root);
+        let mut classes: Vec<Vec<G::NodeId>> = Vec::new();
+        for_each_sink(graph, &self.reachable, &reaches_exit, |component| {
+            let mut class = component.to_vec();
+            class.sort_unstable_by_key(|block| block.index());
+            classes.push(class);
+        });
+        classes.sort_unstable_by_key(|class| class[0].index());
+
+        let mut sinks = SinkClasses {
+            class_of: Vec::new(),
+            members: Vec::new(),
+            starts: Vec::new(),
+        };
+        if !classes.is_empty() {
+            sinks.class_of.resize(self.reachable.len(), ABSENT);
+            sinks.starts.push(0);
+        }
+        for (class, blocks) in classes.iter().enumerate() {
+            for &block in blocks {
+                sinks.class_of[block.index()] = word(class);
+            }
+            sinks.members.extend_from_slice(blocks);
+            sinks.starts.push(word(sinks.members.len()));
+        }
+        let representatives: Vec<G::NodeId> = classes.iter().map(|class| class[0]).collect();
+        self.join(&exits, &representatives);
+        let structure = ExitStructure {
+            reaches_exit,
+            exits,
+            cut_roots: representatives,
+        };
+        (structure, sinks)
+    }
+
+    /// Mark the blocks `root` reaches, and return the reachable blocks
+    /// without successors and whether each block reaches one of them.
+    fn find_exits<G: GraphView>(
+        &mut self,
+        graph: &G,
+        root: G::NodeId,
+    ) -> (Vec<G::NodeId>, Vec<bool>) {
         self.mark_reachable(graph, root);
         let exits: Vec<G::NodeId> = (0..self.reachable.len())
             .filter(|&block| self.reachable[block])
@@ -73,17 +150,15 @@ impl CutBuffers {
             .filter(|&block| graph.successors(block).next().is_none())
             .collect();
         let reaches_exit = self.mark_reaching(graph, &exits);
-        let cut_roots = self.cut_roots(graph, root, &reaches_exit);
+        (exits, reaches_exit)
+    }
 
+    /// Give each of `exits` and `joined` an edge to the virtual exit.
+    fn join<N: DenseId>(&mut self, exits: &[N], joined: &[N]) {
         self.exit_edge.clear();
         self.exit_edge.resize(self.reachable.len(), false);
-        for block in exits.iter().chain(&cut_roots) {
+        for block in exits.iter().chain(joined) {
             self.exit_edge[block.index()] = true;
-        }
-        ExitStructure {
-            reaches_exit,
-            exits,
-            cut_roots,
         }
     }
 
@@ -128,28 +203,12 @@ impl CutBuffers {
         reaches_exit: &[bool],
     ) -> Vec<G::NodeId> {
         let reachable = &self.reachable;
-        let trapped = Trapped {
-            graph,
-            reachable,
-            reaches_exit,
-        };
-        let mut roots = Vec::new();
-        if trapped.node_ids().next().is_none() {
-            return roots;
-        }
-
-        let components = tarjan_scc(&trapped);
         let entry = &mut self.entry;
         entry.clear();
         entry.resize(reachable.len(), false);
-        for component in components.components() {
+        let mut roots = Vec::new();
+        for_each_sink(graph, reachable, reaches_exit, |component| {
             let contains = |block: G::NodeId| component.binary_search(&block).is_ok();
-            let is_sink = component
-                .iter()
-                .all(|&block| graph.successors(block).all(contains));
-            if !is_sink {
-                continue;
-            }
             for &block in component {
                 entry[block.index()] = block == root
                     || graph
@@ -162,9 +221,38 @@ impl CutBuffers {
                     .copied()
                     .filter(|&block| graph.successors(block).any(|next| entry[next.index()])),
             );
-        }
+        });
         roots.sort_unstable_by_key(|block| block.index());
         roots
+    }
+}
+
+/// Visit every sink component of the reachable blocks that reach no exit, a
+/// strongly connected component with no edge to another, as a slice
+/// ascending by the blocks' order.
+fn for_each_sink<G: GraphView>(
+    graph: &G,
+    reachable: &[bool],
+    reaches_exit: &[bool],
+    mut visit: impl FnMut(&[G::NodeId]),
+) {
+    let trapped = Trapped {
+        graph,
+        reachable,
+        reaches_exit,
+    };
+    if trapped.node_ids().next().is_none() {
+        return;
+    }
+    let components = tarjan_scc(&trapped);
+    for component in components.components() {
+        let contains = |block: G::NodeId| component.binary_search(&block).is_ok();
+        if component
+            .iter()
+            .all(|&block| graph.successors(block).all(contains))
+        {
+            visit(component);
+        }
     }
 }
 

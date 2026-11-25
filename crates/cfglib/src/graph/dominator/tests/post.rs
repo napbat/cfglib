@@ -8,3 +8,4 @@ mod differential;
 mod edge_dominance;
 mod exhaustive;
 mod reference;
+mod sinks;

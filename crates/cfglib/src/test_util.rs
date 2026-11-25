@@ -11,6 +11,7 @@
 //! - [`shapes`] — block-and-edge shapes shared by the reusable-scratch
 //!   differential tests.
 //! - [`golden`] — exact-output comparison against `tests/golden` files.
+//! - [`postdominance`] — post-dominance without a unique exit, by fixpoint.
 //! - [`rng`] — a seeded generator for reproducible randomized tests.
 //! - [`protected_region`] — one block that can unwind into a handler.
 //!
@@ -23,6 +24,7 @@ pub(crate) mod golden;
 mod live_variables;
 mod memory_inst;
 mod mock_inst;
+pub(crate) mod postdominance;
 mod protected;
 pub(crate) mod rng;
 pub(crate) mod shapes;

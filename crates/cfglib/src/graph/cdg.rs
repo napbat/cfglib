@@ -8,6 +8,14 @@
 //! `A -> T` when `B` post-dominates `T` and does not strictly post-dominate
 //! `A`. A block that branches back to itself is therefore control dependent
 //! on itself.
+//!
+//! In a region that no exit follows, post-dominance needs a convention, and
+//! the relation follows the one its tree was built under (see
+//! [`ExitPolicy`](crate::ExitPolicy)): relative to the cut by default, or
+//! nontermination-insensitive with every exit-free sink as one class.
+//! [`nontermination_sensitive_controllers`] gives the third reading, which
+//! needs no post-dominator tree: a branch controls a block when one arm must
+//! reach it and the other may avoid it, by leaving or by looping forever.
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -16,6 +24,9 @@ use crate::graph::dominator::PostDominatorTree;
 use crate::graph::epoch::EpochMarks;
 use crate::graph::store::Graph;
 use crate::graph::view::{DenseId, GraphView};
+pub use nontermination::{NonterminationScratch, nontermination_sensitive_controllers};
+
+mod nontermination;
 
 /// Compute control dependences from a graph view and its post-dominator
 /// tree.
@@ -26,6 +37,15 @@ use crate::graph::view::{DenseId, GraphView};
 /// blocks of [`PostDominatorTree::control_dependents`], and an arm that
 /// leads back to `A` itself gives the edge `A -> A`. Parallel records
 /// contribute one edge, and a block the entry cannot reach has none.
+///
+/// The tree decides what an exit-free region gives. Under the default
+/// [`ExitPolicy::CutLoops`](crate::ExitPolicy::CutLoops) the blocks that close
+/// such a loop control it. Under
+/// [`ExitPolicy::SinkComponents`](crate::ExitPolicy::SinkComponents) no arm
+/// inside a sink class makes an edge, a class that depends contributes an
+/// edge to each of its blocks, and the result is the nontermination-insensitive
+/// control dependence of Hecker et al.: `A -> B` when `A` has one successor
+/// that `B` post-dominates and one it does not, under sink post-dominance.
 ///
 /// Returned nodes are allocated in source dense-index order, so a source node
 /// and its graph node have the same dense index even when the view overrides
@@ -89,6 +109,30 @@ pub fn control_dependence_graph<G: GraphView>(
     source: &G,
     post_dominators: &PostDominatorTree<G::NodeId>,
 ) -> Graph<G::NodeId, ()> {
+    // A tree of the cut has no sink classes, so each arm is the plain walk;
+    // choosing it once here keeps that walk inline in the loop.
+    if post_dominators.has_sink_classes() {
+        collect_dependences(source, post_dominators, |from, to| {
+            post_dominators.control_dependents(from, to)
+        })
+    } else {
+        collect_dependences(source, post_dominators, |from, to| {
+            post_dominators.tree_dependents(from, to)
+        })
+    }
+}
+
+/// The control dependence graph of `source`, with `dependents_of` giving
+/// the blocks that depend on each arm.
+fn collect_dependences<G, I>(
+    source: &G,
+    post_dominators: &PostDominatorTree<G::NodeId>,
+    dependents_of: impl Fn(G::NodeId, G::NodeId) -> I,
+) -> Graph<G::NodeId, ()>
+where
+    G: GraphView,
+    I: Iterator<Item = G::NodeId>,
+{
     let mut graph = Graph::with_capacity(source.node_bound(), source.node_bound());
     let nodes: Vec<_> = (0..source.node_bound())
         .map(G::NodeId::from_index)
@@ -113,7 +157,7 @@ pub fn control_dependence_graph<G: GraphView>(
         seen_dependents.reset();
         dependents.clear();
         for target in source.successors(controller) {
-            for dependent in post_dominators.control_dependents(controller, target) {
+            for dependent in dependents_of(controller, target) {
                 if !seen_dependents.is_marked(dependent.index()) {
                     seen_dependents.mark(dependent.index());
                     dependents.push(dependent);
