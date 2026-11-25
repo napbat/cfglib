@@ -415,7 +415,7 @@ pub use transform::contract::{contract_edge, contract_edge_mapped};
 pub use transform::critical::{
     split_critical_edges, split_critical_edges_mapped, split_critical_edges_with,
 };
-pub use transform::layout::{RelaxError, relax_layout};
+pub use transform::layout::{RelaxError, RelaxMode, SpanItem, relax_layout, relax_spans};
 pub use transform::linearize::{BlockOrder, Emitter, LinearInst, LinearizeError, linearize};
 pub use transform::pass::{
     Pass, PassChange, PassExecution, PassFailure, PassFn, PassId, PassPipeline, PassReport, pass_fn,

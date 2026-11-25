@@ -107,6 +107,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "recover_exclusive_extents_with",
     "recursive_functions",
     "relax_layout",
+    "relax_spans",
     "remove_empty_blocks",
     "remove_empty_blocks_mapped",
     "remove_unreachable",
