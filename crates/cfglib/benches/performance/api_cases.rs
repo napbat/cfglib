@@ -14,6 +14,7 @@ mod pipeline;
 mod program_structure;
 mod reach_index;
 mod relaxation;
+mod strong_cuts;
 mod summaries;
 mod transform;
 mod traversal;
@@ -130,6 +131,8 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "split_critical_edges",
     "split_critical_edges_mapped",
     "split_critical_edges_with",
+    "strong_cuts",
+    "strong_cuts_of",
     "tarjan_scc",
     "to_dot",
     "to_text",
@@ -225,6 +228,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     program_structure::register(suite);
     reach_index::register(suite);
     relaxation::register(suite);
+    strong_cuts::register(suite);
     summaries::register(suite);
     transform::register(suite);
     traversal::register(suite);
