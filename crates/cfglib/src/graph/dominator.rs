@@ -21,15 +21,21 @@
 //! about as much as the plain one. Debug builds check every tree they build
 //! this way.
 //!
+//! A tree can also follow its graph through edge edits.
+//! [`DominatorTree::apply_updates_in`] replays a batch of
+//! [`DominatorUpdate`]s on the tree it already has, where a full rebuild
+//! would pay for the whole graph to learn about one edge.
+//!
 //! The work is split by responsibility. `construction` runs the algorithm over
 //! any [`GraphView`] and builds a low-high order from it, `certificate` checks
-//! a tree against one, `numbering` numbers a forest from its parent table,
-//! `forest` extends a tree over the code its root misses, `frontier` answers
-//! dominance-frontier queries over the numbered tree, `frontier_table`
-//! computes the frontier of every node at once, `edge_dominance` answers
-//! whether every path to a node takes one edge, and `post` builds the
-//! post-dominator tree on the first two and answers its frontier queries with
-//! `frontier`. This module holds the tree and its node queries.
+//! a tree against one, `incremental` replays edits, `numbering` numbers a
+//! forest from its parent table, `forest` extends a tree over the code its
+//! root misses, `frontier` answers dominance-frontier queries over the
+//! numbered tree, `frontier_table` computes the frontier of every node at
+//! once, `edge_dominance` answers whether every path to a node takes one
+//! edge, and `post` builds the post-dominator tree on the first two and
+//! answers its frontier queries with `frontier`. This module holds the tree
+//! and its node queries.
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -42,6 +48,8 @@ pub use certificate::{CertificateError, LowHighOrder};
 use construction::{ConstructionBuffers, LowHighBuffers};
 pub use frontier::FrontierScratch;
 pub use frontier_table::DominanceFrontiers;
+pub use incremental::DominatorUpdate;
+use incremental::UpdateBuffers;
 use numbering::{Numbered, NumberingBuffers};
 pub(crate) use post::CutBuffers;
 pub use post::{PostDominatorScratch, PostDominatorTree, PostNode};
@@ -52,6 +60,7 @@ mod edge_dominance;
 mod forest;
 mod frontier;
 mod frontier_table;
+mod incremental;
 #[cfg(test)]
 mod iterative;
 mod numbering;
@@ -189,6 +198,8 @@ pub struct DominatorScratch {
     numbering: NumberingBuffers,
     /// The tables a low-high order is built in, when one is asked for.
     low_high: LowHighBuffers,
+    /// The marks and worklists of an incremental update.
+    updates: UpdateBuffers,
 }
 
 impl DominatorScratch {
@@ -291,6 +302,13 @@ impl<N: DenseId> DominatorTree<N> {
     /// A graph edit (edge insertion or removal) invalidates the tree; this
     /// recomputes it and diffs against `previous`, so downstream analyses can
     /// be updated selectively instead of from scratch.
+    ///
+    /// The cost is a full construction, O(m log n), plus an O(n) scan, however
+    /// small the edit. A caller that can name its edits can hand them to
+    /// [`apply_updates_in`](Self::apply_updates_in) instead, which updates
+    /// the tree in place and reports the same nodes; one insertion there
+    /// costs O(n) plus what it moves, and a batch it does not expect to win
+    /// on is finished with this same construction.
     ///
     /// # Panics
     ///

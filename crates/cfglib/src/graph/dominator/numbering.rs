@@ -10,7 +10,6 @@
 //! parent table, so a chain of 10⁵ nodes costs no more than a wide fan.
 
 extern crate alloc;
-use alloc::vec;
 use alloc::vec::Vec;
 
 use super::{ABSENT, slot, word};
@@ -49,6 +48,25 @@ impl NumberingBuffers {
         roots: &[u32],
         reachable: usize,
     ) -> Numbered<N> {
+        let mut numbered = Numbered {
+            pre: Vec::new(),
+            last: Vec::new(),
+            level: Vec::new(),
+            order: Vec::with_capacity(reachable),
+        };
+        self.number_into(parent, roots, reachable, &mut numbered);
+        numbered
+    }
+
+    /// [`number`](Self::number) into the arrays of `numbered`, which are
+    /// cleared first, so a tree renumbered in place keeps its storage.
+    pub(super) fn number_into<N: DenseId>(
+        &mut self,
+        parent: &[u32],
+        roots: &[u32],
+        reachable: usize,
+        numbered: &mut Numbered<N>,
+    ) {
         let bound = parent.len();
         self.first_child.clear();
         self.first_child.resize(bound, ABSENT);
@@ -62,21 +80,20 @@ impl NumberingBuffers {
             }
         }
 
-        let mut numbered = Numbered {
-            pre: vec![ABSENT; bound],
-            last: vec![ABSENT; bound],
-            level: vec![ABSENT; bound],
-            order: Vec::with_capacity(reachable),
-        };
+        for table in [&mut numbered.pre, &mut numbered.last, &mut numbered.level] {
+            table.clear();
+            table.resize(bound, ABSENT);
+        }
+        numbered.order.clear();
+        numbered.order.reserve(reachable);
         for &root in roots {
-            self.walk(parent, slot(root), &mut numbered);
+            self.walk(parent, slot(root), numbered);
         }
         debug_assert_eq!(
             numbered.order.len(),
             reachable,
             "every reachable node must hang below a root"
         );
-        numbered
     }
 
     /// Number the tree below `root` in preorder.
