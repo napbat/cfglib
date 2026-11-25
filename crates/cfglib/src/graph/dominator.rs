@@ -32,6 +32,7 @@ use construction::ConstructionBuffers;
 pub use frontier::FrontierScratch;
 pub use frontier_table::DominanceFrontiers;
 use numbering::{Numbered, NumberingBuffers};
+pub(crate) use post::CutBuffers;
 pub use post::{PostDominatorScratch, PostDominatorTree, PostNode};
 
 mod construction;

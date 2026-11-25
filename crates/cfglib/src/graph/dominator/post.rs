@@ -20,7 +20,8 @@ use super::{ABSENT, DominatorScratch, DominatorTree, slot, word};
 use crate::block::BlockId;
 use crate::graph::view::{DenseId, GraphView, Reversed, RootedView};
 use augmented::AugmentedReverse;
-use cut::{CutBuffers, ExitStructure};
+pub(crate) use cut::CutBuffers;
+use cut::ExitStructure;
 
 mod augmented;
 mod cut;
