@@ -294,7 +294,7 @@ pub use graph::eh::{EhBlockKind, EhEdge, EhEdgeKind, EhModel};
 pub use graph::epoch::{EpochMarks, EpochSet};
 pub use graph::fanout::{DenseFanout, Fanout, SortedMap};
 pub use graph::feedback::{FeedbackConfig, feedback_arc_set, linear_arrangement};
-pub use graph::horn::HornClauses;
+pub use graph::horn::{HornClauses, HornSaturation};
 pub use graph::interval::{Interval, IntervalAnalysis};
 pub use graph::keyed::KeyedGraph;
 pub use graph::label::{Label, bind_label, display_label, no_label};

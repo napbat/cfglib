@@ -89,6 +89,51 @@ fn the_answer_does_not_depend_on_the_order_clauses_were_added() {
 }
 
 #[test]
+fn a_saturation_updated_after_each_batch_matches_forward_chaining_on_the_clauses_so_far() {
+    for seed in 1..=30 {
+        let mut rng = Lcg(seed + 200);
+        let clauses = random_clauses(&mut rng, 30, 60);
+        let mut set = HornClauses::new(20);
+        let mut state = set.saturate();
+        let mut added = Vec::new();
+        let mut facts = 20;
+        let mut next = 0;
+        while next < clauses.len() {
+            let batch = 1 + rng.below(8);
+            for (head, body) in &clauses[next..clauses.len().min(next + batch)] {
+                // The clauses mention facts up to 30; grow the space on demand.
+                let needed = 1 + body.iter().copied().chain([*head]).max().expect("a head");
+                if needed > facts {
+                    facts = needed;
+                    set.grow_facts(facts);
+                }
+                set.add_clause(*head, body);
+                added.push((*head, body.clone()));
+            }
+            next += batch;
+
+            let before: Vec<bool> = (0..state.derived().len())
+                .map(|fact| state.is_derived(fact))
+                .collect();
+            let newly = state.update(&set);
+            let oracle = forward_chaining(facts, &added);
+            assert_eq!(set.derivable(), oracle, "seed {seed}");
+            let derived: Vec<bool> = (0..facts).map(|fact| state.is_derived(fact)).collect();
+            assert_eq!(
+                derived,
+                oracle,
+                "seed {seed}, after {} clauses",
+                added.len()
+            );
+            let expected_new: Vec<usize> = (0..facts)
+                .filter(|&fact| oracle[fact] && !before.get(fact).copied().unwrap_or(false))
+                .collect();
+            assert_eq!(newly, expected_new, "seed {seed}");
+        }
+    }
+}
+
+#[test]
 fn adding_a_clause_only_grows_the_derivable_set_and_solving_changes_nothing() {
     let mut rng = Lcg(7);
     let clauses = random_clauses(&mut rng, 30, 40);
