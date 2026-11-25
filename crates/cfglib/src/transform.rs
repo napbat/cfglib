@@ -7,6 +7,7 @@
 //! created. Linearization and layout relaxation read a graph and return a new
 //! value. Every pass entry point is re-exported at the crate root.
 //!
+//! - [`block_order`] — block orders from analyses and caller data, for linearization.
 //! - [`cleanup`] — unreachable removal, block merging, empty-block bypass, combined simplify.
 //! - [`contract`] — edge contraction and node splitting.
 //! - [`critical`] — critical edge splitting (required for SSA).
@@ -14,6 +15,7 @@
 //! - [`linearize`] — re-serialize a CFG back to a flat instruction stream.
 //! - [`pass`] — named, ordered, fallible pass composition and reports.
 
+pub mod block_order;
 pub mod cleanup;
 pub mod contract;
 pub mod critical;

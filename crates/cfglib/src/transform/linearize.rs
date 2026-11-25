@@ -29,6 +29,14 @@
 //!   are performed by the call instruction itself, and the exceptional
 //!   kinds (see [`EdgeKind::is_exceptional`]) by the unwinder, never by a
 //!   jump, so they emit nothing either.
+//!
+//! # Hot and cold sections
+//!
+//! [`hot_cold_order`](crate::hot_cold_order) stable-partitions a base order
+//! by coldness class into a hot part and the cold sections. Linearizing each
+//! part as its own [`BlockOrder::Custom`] gives one stream per section. The
+//! last block of a part has no next block, so a layout edge that leaves the
+//! part gets an explicit jump, and each stream can be placed anywhere.
 
 extern crate alloc;
 use alloc::vec::Vec;

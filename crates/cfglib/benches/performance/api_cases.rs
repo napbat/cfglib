@@ -2,6 +2,7 @@ use super::harness::{BenchmarkSuite, benchmark_coverage};
 
 mod address;
 mod analysis;
+mod block_order;
 mod dataflow;
 mod feedback;
 mod fixtures;
@@ -48,6 +49,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "find_function",
     "follow",
     "follow_path",
+    "hot_cold_order",
     "insert_preheader",
     "install_clr_region",
     "install_seh_region",
@@ -185,6 +187,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     benchmark_coverage!(suite, "cfg_clone_make_reducible_large", [make_reducible]);
 
     analysis::register(suite);
+    block_order::register(suite);
     dataflow::register(suite);
     feedback::register(suite);
     graph::register(suite);
