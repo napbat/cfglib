@@ -1,6 +1,6 @@
 use cfglib::{
-    Cfg, DominatorTree, Graph, IntervalAnalysis, NaturalLoop, NodeId, Rooted, SccDecomposition,
-    detect_loops, kosaraju_scc, tarjan_scc,
+    BlockId, Cfg, DominatorTree, EdgeKind, Graph, IntervalAnalysis, LoopForest, NaturalLoop,
+    NodeId, Rooted, SccDecomposition, detect_loops, kosaraju_scc, tarjan_scc,
 };
 
 use super::NODE_COUNT;
@@ -22,6 +22,126 @@ fn deep_path(nodes: usize, closed: bool) -> Graph<(), ()> {
         graph.add_edge(ids[nodes - 1], ids[0], ());
     }
     graph
+}
+
+/// Depth of the loop nests the cycle forest reads.
+const NEST_DEPTH: usize = 100_000;
+
+/// Blocks of the random CFG the cycle forest reads.
+const RANDOM_CFG_BLOCKS: usize = 1_000_000;
+
+/// Loops nested `depth` deep, with no tagged edge. Header `i` enters header
+/// `i + 1` and its latch `i`, which returns to it, and latch `i + 1` returns
+/// to latch `i`. With `irreducible`, header `i` also enters latch `i + 1`, a
+/// second entry of every loop but the outermost.
+fn deep_nest(depth: usize, irreducible: bool) -> Cfg<u32> {
+    let mut cfg = Cfg::new();
+    let headers: Vec<BlockId> = std::iter::once(cfg.entry())
+        .chain((1..depth).map(|_| cfg.new_block()))
+        .collect();
+    let latches: Vec<BlockId> = (0..depth).map(|_| cfg.new_block()).collect();
+    let exit = cfg.new_block();
+    for index in 0..depth {
+        if index + 1 < depth {
+            cfg.add_edge(
+                headers[index],
+                headers[index + 1],
+                EdgeKind::ConditionalTrue,
+            );
+            if irreducible {
+                cfg.add_edge(headers[index], latches[index + 1], EdgeKind::Jump);
+            }
+            cfg.add_edge(latches[index + 1], latches[index], EdgeKind::Fallthrough);
+        }
+        cfg.add_edge(headers[index], latches[index], EdgeKind::ConditionalFalse);
+        cfg.add_edge(latches[index], headers[index], EdgeKind::Jump);
+    }
+    cfg.add_edge(latches[0], exit, EdgeKind::ConditionalFalse);
+    cfg
+}
+
+/// A chain of `blocks` blocks, each also jumping to a block drawn from a
+/// fixed xorshift sequence: one within 64 blocks either way, like the ifs
+/// and loops of a function, and one in 64 anywhere. No edge is tagged.
+fn random_cfg(blocks: usize) -> Cfg<u32> {
+    let mut cfg = Cfg::new();
+    let ids: Vec<BlockId> = std::iter::once(cfg.entry())
+        .chain((1..blocks).map(|_| cfg.new_block()))
+        .collect();
+    for pair in ids.windows(2) {
+        cfg.add_edge(pair[0], pair[1], EdgeKind::Fallthrough);
+    }
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut below = |bound: usize| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let bound = u64::try_from(bound).expect("a block count fits in u64");
+        usize::try_from(state % bound).expect("a value below a block count fits in usize")
+    };
+    for (index, &block) in ids.iter().enumerate() {
+        let target = if below(64) == 0 {
+            below(blocks)
+        } else {
+            (index + below(128)).saturating_sub(64).min(blocks - 1)
+        };
+        cfg.add_edge(block, ids[target], EdgeKind::Jump);
+    }
+    cfg
+}
+
+/// The cycle forest of the deepest nests a graph of this size allows, and of
+/// a random CFG whose outermost cycles are its strongly connected components.
+fn register_cycles(suite: &mut BenchmarkSuite<'_>) {
+    for (name, irreducible) in [
+        ("cfg_cycle_forest_reducible_nest", false),
+        ("cfg_cycle_forest_irreducible_nest", true),
+    ] {
+        let nest = deep_nest(NEST_DEPTH, irreducible);
+        suite.case(
+            name,
+            &[],
+            move || LoopForest::compute_cycles(&nest),
+            move |forest: &LoopForest| {
+                assert_eq!(forest.len(), NEST_DEPTH);
+                assert_eq!(forest.max_nesting_depth(), NEST_DEPTH);
+                let irreducible_loops = forest
+                    .loops()
+                    .filter(|&lp| forest.is_irreducible(lp))
+                    .count();
+                assert_eq!(
+                    irreducible_loops,
+                    if irreducible { NEST_DEPTH - 1 } else { 0 }
+                );
+            },
+        );
+    }
+    let random = random_cfg(RANDOM_CFG_BLOCKS);
+    let components = tarjan_scc(&random);
+    benchmark_case!(
+        suite,
+        "cfg_cycle_forest_random_1m",
+        || LoopForest::compute_cycles(&random),
+        |forest: &LoopForest| {
+            let cyclic: Vec<usize> = components
+                .components()
+                .filter(|nodes| {
+                    nodes.len() > 1 || random.successors(nodes[0]).any(|next| next == nodes[0])
+                })
+                .map(<[BlockId]>::len)
+                .collect();
+            let mut outermost: Vec<usize> = forest
+                .loops()
+                .filter(|&lp| forest.parent(lp).is_none())
+                .map(|lp| forest.body_len(lp))
+                .collect();
+            let mut expected = cyclic;
+            expected.sort_unstable();
+            outermost.sort_unstable();
+            assert_eq!(outermost, expected);
+            assert!(forest.max_nesting_depth() > 2);
+        }
+    );
 }
 
 fn register_components_and_loops(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(), ()>) {
@@ -144,5 +264,6 @@ fn register_intervals(suite: &mut BenchmarkSuite<'_>, cfg: &Cfg<u32>) {
 
 pub(super) fn register(suite: &mut BenchmarkSuite<'_>, cfg: &Cfg<u32>, graph: &Graph<(), ()>) {
     register_components_and_loops(suite, graph);
+    register_cycles(suite);
     register_intervals(suite, cfg);
 }
