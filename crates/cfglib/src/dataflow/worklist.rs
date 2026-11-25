@@ -1,5 +1,9 @@
 //! The worklist behind every fixpoint solver.
 
+extern crate alloc;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use super::bits::{DenseBits, bit_slot};
 use crate::graph::view::{DenseId, GraphView};
 
@@ -82,6 +86,125 @@ impl Worklist {
         }
         None
     }
+
+    /// Whether `index` is queued.
+    pub(super) fn contains(&self, index: usize) -> bool {
+        self.queued.get(index)
+    }
+
+    /// The queued indices, ascending.
+    pub(super) fn queued(&self) -> impl Iterator<Item = usize> + '_ {
+        self.queued.ones()
+    }
+}
+
+/// The queue a solver core pops from and pushes to: a [`Worklist`] in index
+/// order, or a [`Ranked`] one in an iteration order.
+///
+/// A core is generic over its queue, so a solve in index order runs on the
+/// plain worklist without a position lookup on each push and pop.
+pub(super) trait Queue {
+    /// Queues the node at `index` unless it is already queued.
+    fn push(&mut self, index: usize);
+
+    /// Queues the node at `index` unless it is already queued or comes before
+    /// position `floor` of the iteration order.
+    fn push_from(&mut self, index: usize, floor: usize);
+
+    /// Removes and returns the queued node that comes first.
+    fn pop(&mut self) -> Option<usize>;
+}
+
+/// The forwarders are inline, so a core that the caller's crate instantiates
+/// calls the worklist itself rather than a wrapper around it.
+impl Queue for Worklist {
+    #[inline]
+    fn push(&mut self, index: usize) {
+        self.insert(index);
+    }
+
+    #[inline]
+    fn push_from(&mut self, index: usize, floor: usize) {
+        if index >= floor {
+            self.insert(index);
+        }
+    }
+
+    #[inline]
+    fn pop(&mut self) -> Option<usize> {
+        self.pop_first()
+    }
+}
+
+/// A worklist that pops the node earliest in an iteration order: the bit row
+/// of a [`Worklist`], indexed by position instead of by node.
+pub(super) struct Ranked {
+    slots: Worklist,
+    /// Per dense node index: its position, `u32::MAX` outside the order.
+    position: Vec<u32>,
+    /// Per position: the dense node index there.
+    node: Vec<u32>,
+}
+
+fn to_u32(value: usize) -> u32 {
+    u32::try_from(value).expect("an iteration order holds fewer than u32::MAX nodes")
+}
+
+impl Ranked {
+    /// Queues what `worklist` holds by each node's position in `order`, a
+    /// sequence of distinct nodes below `bound`.
+    pub(super) fn new<N: DenseId>(
+        worklist: &Worklist,
+        bound: usize,
+        order: impl ExactSizeIterator<Item = N>,
+    ) -> Self {
+        let mut ranked = Self {
+            slots: Worklist::new(order.len()),
+            position: vec![u32::MAX; bound],
+            node: Vec::with_capacity(order.len()),
+        };
+        for (position, node) in order.enumerate() {
+            ranked.position[node.index()] = to_u32(position);
+            ranked.node.push(to_u32(node.index()));
+        }
+        for index in worklist.queued() {
+            ranked.push(index);
+        }
+        ranked
+    }
+
+    /// The position of the node at `index`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the order does not cover `index`.
+    fn position(&self, index: usize) -> usize {
+        let position = self.position[index];
+        assert!(
+            position != u32::MAX,
+            "the iteration order covers every node a solve queues"
+        );
+        position as usize
+    }
+}
+
+impl Queue for Ranked {
+    fn push(&mut self, index: usize) {
+        let position = self.position(index);
+        self.slots.insert(position);
+    }
+
+    fn push_from(&mut self, index: usize, floor: usize) {
+        let position = self.position(index);
+        if position >= floor {
+            self.slots.insert(position);
+        }
+    }
+
+    fn pop(&mut self) -> Option<usize> {
+        let position = self.slots.pop_first()?;
+        Some(self.node[position] as usize)
+    }
 }
 
 #[cfg(test)]
@@ -90,12 +213,12 @@ mod tests {
 
     use alloc::vec::Vec;
 
-    use super::Worklist;
+    use super::{Queue, Ranked, Worklist};
     use crate::graph::store::{Graph, NodeId};
 
-    fn drain(mut worklist: Worklist) -> Vec<usize> {
+    fn drain(mut queue: impl Queue) -> Vec<usize> {
         let mut order = Vec::new();
-        while let Some(index) = worklist.pop_first() {
+        while let Some(index) = queue.pop() {
             order.push(index);
         }
         order
@@ -157,5 +280,34 @@ mod tests {
         let node = graph.add_node(());
         assert!(graph.remove_node(node));
         let _ = Worklist::seeded(&graph, &[node]);
+    }
+
+    #[test]
+    fn a_ranked_worklist_pops_by_position_and_requeues_what_it_held() {
+        let worklist = Worklist::of(200, [3, 130, 64]);
+        // The order 130, 7, 64, 3, 199: positions 0 to 4.
+        let mut ranked = Ranked::new(&worklist, 200, [130_usize, 7, 64, 3, 199].into_iter());
+        assert_eq!(ranked.pop(), Some(130));
+        ranked.push(199);
+        ranked.push(7);
+        ranked.push(7);
+        // Position 1 is before the floor 2, so 7 stays where it is queued.
+        ranked.push_from(130, 2);
+        assert_eq!(drain(ranked), [7, 64, 3, 199]);
+    }
+
+    #[test]
+    fn an_index_worklist_pushes_from_a_floor_of_indices() {
+        let mut worklist = Worklist::new(10);
+        worklist.push_from(3, 4);
+        worklist.push_from(6, 4);
+        assert_eq!(drain(worklist), [6]);
+    }
+
+    #[test]
+    #[should_panic(expected = "the iteration order covers every node a solve queues")]
+    fn queuing_a_node_outside_the_order_panics() {
+        let mut ranked = Ranked::new(&Worklist::new(10), 10, [4_usize, 2].into_iter());
+        ranked.push(5);
     }
 }

@@ -8,12 +8,13 @@ use std::fmt;
 
 use cfglib::{
     BlockId, Cfg, DenseId, Direction, NodeProblem, Problem, RootedView, SolveConfig, SolveError,
-    TryProblem, TrySolveError, meet_options, solve_node_problem, solve_problem, solve_problem_from,
-    solve_problem_from_with_config, solve_problem_with_config, try_solve_problem,
-    try_solve_problem_from, try_solve_problem_from_with_config, try_solve_problem_with_config,
+    TryProblem, TrySolveError, meet_options, solve_node_problem, solve_node_problem_with_config,
+    solve_problem, solve_problem_from, solve_problem_from_with_config, solve_problem_with_config,
+    try_solve_problem, try_solve_problem_from, try_solve_problem_from_with_config,
+    try_solve_problem_with_config,
 };
 
-use crate::graphs::{GenKill, Rng, Shape, intersection, union};
+use crate::graphs::{GenKill, ORDERS, Rng, Shape, assert_same_facts, intersection, union};
 use crate::reference::round_robin;
 
 /// The fact an analysis starts a boundary block with; no block generates or
@@ -752,4 +753,60 @@ fn both_error_kinds_expose_their_cause_through_the_error_trait() {
     assert!(consumer.source().is_some());
     assert!(consumer.to_string().contains("Meet"));
     assert!(solver.to_string().contains('1'));
+}
+
+/// The least fixpoint does not depend on the iteration order: every order,
+/// with or without descending passes, reaches the facts of the index order,
+/// forward and backward, for full and seeded solves, and for the same
+/// problem stated over nodes.
+#[test]
+fn every_iteration_order_reaches_the_facts_of_the_index_order() {
+    let mut rng = Rng::new(14);
+    for _ in 0..300 {
+        for direction in [Direction::Forward, Direction::Backward] {
+            let shape = Shape::random(&mut rng, false, false);
+            let effects = GenKill::random(&mut rng, shape.blocks);
+            let cfg = shape.cfg();
+            let live = shape.live();
+            let blocks = || live.iter().map(|&block| id(block));
+            let seeds = [id(live[rng.below(live.len())])];
+            let may = May {
+                effects: &effects,
+                direction,
+            };
+            let nodes = MayNodes {
+                effects: &effects,
+                direction,
+            };
+            let must = Must { effects: &effects };
+            let full = solve_problem(&cfg, &may).unwrap();
+            let seeded = solve_problem_from(&cfg, &may, &seeds).unwrap();
+            let over_nodes = solve_node_problem(&cfg, &nodes).unwrap();
+            let must_full = solve_problem(&cfg, &must).unwrap();
+            for order in ORDERS {
+                for passes in [0, 2] {
+                    let config = SolveConfig::new()
+                        .with_order(order)
+                        .with_narrowing_passes(passes);
+                    let what = format!("{order:?} with {passes} passes, {direction:?}, {shape:?}");
+                    let ordered = solve_problem_with_config(&cfg, &may, config).unwrap();
+                    assert_same_facts(&ordered, &full, blocks(), &what);
+                    let ordered = solve_problem_from_with_config(&cfg, &may, &seeds, config);
+                    assert_same_facts(&ordered.unwrap(), &seeded, blocks(), &what);
+                    let ordered = solve_node_problem_with_config(&cfg, &nodes, config).unwrap();
+                    assert_same_facts(&ordered, &over_nodes, blocks(), &what);
+                    let ordered = solve_problem_with_config(&cfg, &must, config).unwrap();
+                    assert_same_facts(&ordered, &must_full, blocks(), &what);
+                    if direction == Direction::Forward {
+                        let fallible = Fallible {
+                            effects: &effects,
+                            refusal: None,
+                        };
+                        let ordered = try_solve_problem_with_config(&cfg, &fallible, config);
+                        assert_same_facts(&ordered.unwrap(), &full, blocks(), &what);
+                    }
+                }
+            }
+        }
+    }
 }

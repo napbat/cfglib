@@ -3,8 +3,9 @@
 //! and never from the library's graph store.
 
 use std::collections::BTreeSet;
+use std::fmt::Debug;
 
-use cfglib::{Cfg, EdgeKind};
+use cfglib::{Cfg, DenseId, EdgeKind, Facts, IterationOrder};
 
 /// A xorshift generator: the same seed gives the same graphs everywhere.
 pub struct Rng(u64);
@@ -213,4 +214,33 @@ pub fn union(left: &BTreeSet<u8>, right: &BTreeSet<u8>) -> BTreeSet<u8> {
 /// The intersection of two sets.
 pub fn intersection(left: &BTreeSet<u8>, right: &BTreeSet<u8>) -> BTreeSet<u8> {
     left.intersection(right).copied().collect()
+}
+
+/// Every iteration order a solve can run in.
+pub const ORDERS: [IterationOrder; 3] = [
+    IterationOrder::Index,
+    IterationOrder::ReversePostorder,
+    IterationOrder::WeakTopological,
+];
+
+/// Asserts that two solves agree on the IN and OUT facts of every node in
+/// `nodes`, whatever number of steps each took.
+pub fn assert_same_facts<N: DenseId, F: PartialEq + Debug>(
+    actual: &Facts<F>,
+    expected: &Facts<F>,
+    nodes: impl IntoIterator<Item = N>,
+    what: &str,
+) {
+    for node in nodes {
+        assert_eq!(
+            actual.fact_in(node),
+            expected.fact_in(node),
+            "IN of {node:?}: {what}"
+        );
+        assert_eq!(
+            actual.fact_out(node),
+            expected.fact_out(node),
+            "OUT of {node:?}: {what}"
+        );
+    }
 }

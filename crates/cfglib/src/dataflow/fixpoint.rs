@@ -6,11 +6,18 @@
 //! The crate's three generic solvers — this one, the node-level
 //! [`node_fixpoint`], and the edge-sensitive
 //! [`edge_fixpoint`](super::edge_fixpoint) — carry the same facility matrix:
-//! a full solve, a seeded solve (`_from`), a deterministically bounded solve
+//! a full solve, a seeded solve (`_from`), a configured solve
 //! (`_with_config`), and fallible `try_` counterparts, all sharing
 //! [`SolveConfig`], [`SolveError`], and [`TrySolveError`]. This one runs
 //! per-block facts on the node solver's core, and the node solver and this
 //! one report their facts in the same [`Facts`] type.
+//!
+//! A [`SolveConfig`] bounds a solve deterministically and selects its
+//! [`IterationOrder`]. In [`IterationOrder::WeakTopological`] every solver
+//! widens at the heads of a
+//! [`WeakTopologicalOrder`](crate::WeakTopologicalOrder) and can narrow
+//! afterwards, through the `widen` and `narrow` methods that every problem
+//! trait carries with defaults that change nothing.
 //!
 //! # One vocabulary for the three problem families
 //!
@@ -80,17 +87,64 @@ impl Direction {
     }
 }
 
-/// Deterministic solver limits, shared by every fixpoint solver.
+/// The order in which a solve takes queued nodes off its worklist.
+///
+/// The least fixpoint of a monotone problem over a finite-height lattice does
+/// not depend on the order, so every order returns the same facts for such a
+/// problem; the order decides how many steps it takes to get there. Index
+/// order is program order for a CFG whose blocks were created in order, and
+/// far from it for a backward problem, for a graph that is not a CFG, or for
+/// a CFG whose blocks were split, merged or renumbered.
+///
+/// [`ReversePostorder`](Self::ReversePostorder) and
+/// [`WeakTopological`](Self::WeakTopological) order the nodes by a
+/// depth-first walk along the analysis direction. The walk starts at the
+/// root of a forward block solve when it is queued, then at every queued node
+/// with no upstream neighbor, then at the lowest-index queued node it has not
+/// reached, so it covers exactly the nodes that the solve can queue. Building
+/// the order costs one walk and a table of `u32`s per node on every solve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum IterationOrder {
+    /// The lowest dense index first: the order of a solve that names none.
+    #[default]
+    Index,
+    /// The earliest node in reverse postorder first, so a node runs after
+    /// the upstream nodes that do not close a loop onto it.
+    ReversePostorder,
+    /// The earliest node in a
+    /// [`WeakTopologicalOrder`](crate::WeakTopologicalOrder) first.
+    ///
+    /// Each component is contiguous and its head comes first, so a node after
+    /// a component runs only once nothing in the component is queued. This is
+    /// the one order that widens: the solve calls the problem's `widen` at
+    /// every head, which makes infinite-height lattices terminate, and runs
+    /// the configured [narrowing passes](SolveConfig::with_narrowing_passes)
+    /// over each outermost component once it has converged.
+    WeakTopological,
+}
+
+/// Deterministic solver limits and iteration order, shared by every fixpoint
+/// solver.
+///
+/// The default is an unbounded solve in [`IterationOrder::Index`] with no
+/// narrowing passes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SolveConfig {
     max_steps: Option<usize>,
+    order: IterationOrder,
+    narrowing_passes: usize,
 }
 
 impl SolveConfig {
     /// An unbounded solve.
     #[must_use]
     pub const fn new() -> Self {
-        Self { max_steps: None }
+        Self {
+            max_steps: None,
+            order: IterationOrder::Index,
+            narrowing_passes: 0,
+        }
     }
 
     /// Stop before processing more than `limit` worklist entries.
@@ -98,6 +152,7 @@ impl SolveConfig {
     pub const fn with_step_limit(limit: usize) -> Self {
         Self {
             max_steps: Some(limit),
+            ..Self::new()
         }
     }
 
@@ -105,6 +160,88 @@ impl SolveConfig {
     #[must_use]
     pub const fn max_steps(self) -> Option<usize> {
         self.max_steps
+    }
+
+    /// The same configuration, iterating in `order`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cfglib::{IterationOrder, SolveConfig};
+    ///
+    /// let config = SolveConfig::with_step_limit(10_000)
+    ///     .with_order(IterationOrder::WeakTopological)
+    ///     .with_narrowing_passes(1);
+    /// assert_eq!(config.order(), IterationOrder::WeakTopological);
+    /// assert_eq!(config.max_steps(), Some(10_000));
+    /// assert_eq!(SolveConfig::new().order(), IterationOrder::Index);
+    /// ```
+    #[must_use]
+    pub const fn with_order(self, order: IterationOrder) -> Self {
+        Self { order, ..self }
+    }
+
+    /// Configured iteration order.
+    #[must_use]
+    pub const fn order(self) -> IterationOrder {
+        self.order
+    }
+
+    /// The same configuration, running at most `passes` descending passes
+    /// over each outermost loop once its widened ascent has converged.
+    ///
+    /// A solve in [`IterationOrder::WeakTopological`] finishes an outermost
+    /// component of the order before it moves past it, and nothing past it
+    /// can queue the component again. At that point a pass recomputes every
+    /// node of the component that the solve visited, once each and in order,
+    /// and replaces the fact entering each head by the problem's `narrow` of
+    /// the fact it held and the one now flowing in; the nodes past the
+    /// component then start from the narrowed facts. The passes stop early
+    /// when one changes nothing, and each recomputation counts as a step
+    /// against the step limit. They run only in
+    /// [`IterationOrder::WeakTopological`]: without widening, the ascending
+    /// solve already ends at the least fixpoint.
+    #[must_use]
+    pub const fn with_narrowing_passes(self, passes: usize) -> Self {
+        Self {
+            narrowing_passes: passes,
+            ..self
+        }
+    }
+
+    /// Configured number of narrowing passes.
+    #[must_use]
+    pub const fn narrowing_passes(self) -> usize {
+        self.narrowing_passes
+    }
+
+    /// Counts one more processed node against the step limit.
+    ///
+    /// It runs once per step of every solve, inside solver cores that the
+    /// caller's crate instantiates, so it is inline: without the attribute,
+    /// every step would pay a call across crates for one comparison.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SolveError::StepLimitExceeded`], naming `pending_node`, when
+    /// `steps` already reached the limit.
+    #[inline]
+    pub(crate) fn count_step(
+        self,
+        steps: &mut usize,
+        pending_node: usize,
+    ) -> Result<(), SolveError> {
+        if let Some(limit) = self.max_steps
+            && *steps >= limit
+        {
+            return Err(SolveError::StepLimitExceeded {
+                limit,
+                steps: *steps,
+                pending_node,
+            });
+        }
+        *steps += 1;
+        Ok(())
     }
 }
 
@@ -192,8 +329,17 @@ pub(crate) fn collapse_infallible<T>(
 ///
 /// `F` is the flow fact type (e.g. `BTreeSet<DefSite>` for reaching
 /// definitions, or `BTreeSet<I::Variable>` for liveness).
-/// Termination requires `meet` and `transfer` to be monotone over a
-/// finite-height fact lattice.
+///
+/// # Termination
+///
+/// In [`IterationOrder::Index`] and [`IterationOrder::ReversePostorder`],
+/// termination requires `meet` and `transfer` to be monotone over a
+/// finite-height fact lattice. In [`IterationOrder::WeakTopological`] the
+/// solver also calls [`widen`](Self::widen) at the head of every loop, and a
+/// widening operator makes a monotone problem over an infinite-height lattice
+/// (intervals, congruences, numeric bounds) terminate as well. The defaults of
+/// `widen` and [`narrow`](Self::narrow) leave the facts unchanged, so a problem
+/// that implements neither solves exactly as before in every order.
 pub trait Problem<V: RootedView> {
     /// The flow fact (lattice element) type.
     type Fact: Clone + PartialEq;
@@ -222,6 +368,37 @@ pub trait Problem<V: RootedView> {
     /// Transfer function: given the incoming fact for a block, compute
     /// the outgoing fact after the block's instructions are applied.
     fn transfer(&self, view: &V, block: V::NodeId, input: &Self::Fact) -> Self::Fact;
+
+    /// Widens at a head of the weak topological order: combines the fact
+    /// that entered the head before with the one that flows in now.
+    ///
+    /// The solver calls it only in [`IterationOrder::WeakTopological`], only
+    /// at heads, and only when the fact flowing in differs from the one the
+    /// head holds; the result replaces the head's IN fact (its OUT fact for a
+    /// backward problem) and is what the head transfers. It must be at least
+    /// both arguments, and every chain `x₀, x₁ = x₀ ∇ y₁, x₂ = x₁ ∇ y₂, …`
+    /// must become stationary, which is what bounds the solve. Heads cut every
+    /// cycle, so widening there suffices.
+    ///
+    /// The default returns `next`, which is no widening.
+    fn widen(&self, _previous: &Self::Fact, next: &Self::Fact) -> Self::Fact {
+        next.clone()
+    }
+
+    /// Narrows at a head during a descending pass: refines the fact that
+    /// entered the head with the one that flows in now.
+    ///
+    /// The solver calls it at heads during the passes of
+    /// [`SolveConfig::with_narrowing_passes`], once the widened ascent of the
+    /// head's outermost loop has converged, and only when the fact flowing
+    /// in differs from the one the head holds. The result must lie between
+    /// `next` and `previous`, so the facts stay sound while they shrink back
+    /// from what widening overshot.
+    ///
+    /// The default returns `next`, a plain descending step.
+    fn narrow(&self, _previous: &Self::Fact, next: &Self::Fact) -> Self::Fact {
+        next.clone()
+    }
 }
 
 /// A fallible data flow problem.
@@ -230,7 +407,8 @@ pub trait Problem<V: RootedView> {
 /// and abstract interpretation where a boundary, merge, or transfer can reject
 /// the input program. The solver reports those consumer errors separately from
 /// its own configured step limit. Termination without a step limit requires
-/// `meet` and `transfer` to be monotone over a finite-height fact lattice.
+/// what [`Problem`] requires: a monotone problem over a finite-height lattice,
+/// or a [`widen`](Self::widen) in [`IterationOrder::WeakTopological`].
 pub trait TryProblem<V: RootedView> {
     /// The flow fact (lattice element) type.
     type Fact: Clone + PartialEq;
@@ -277,6 +455,36 @@ pub trait TryProblem<V: RootedView> {
         block: V::NodeId,
         input: &Self::Fact,
     ) -> Result<Self::Fact, Self::Error>;
+
+    /// Widens at the head `block`, as [`Problem::widen`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a consumer error when the facts are incompatible.
+    fn widen(
+        &self,
+        _view: &V,
+        _block: V::NodeId,
+        _previous: &Self::Fact,
+        next: &Self::Fact,
+    ) -> Result<Self::Fact, Self::Error> {
+        Ok(next.clone())
+    }
+
+    /// Narrows at the head `block`, as [`Problem::narrow`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a consumer error when the facts are incompatible.
+    fn narrow(
+        &self,
+        _view: &V,
+        _block: V::NodeId,
+        _previous: &Self::Fact,
+        next: &Self::Fact,
+    ) -> Result<Self::Fact, Self::Error> {
+        Ok(next.clone())
+    }
 }
 
 /// Per-node facts computed by a fixpoint solve, in program order: the IN fact
@@ -603,6 +811,26 @@ impl<V: RootedView, P: TryProblem<V>> TryNodeProblem<V> for BlockProblem<'_, P> 
     ) -> Result<Self::Fact, Self::Error> {
         TryProblem::transfer(self.0, view, block, input)
     }
+
+    fn widen(
+        &self,
+        view: &V,
+        block: V::NodeId,
+        previous: &Self::Fact,
+        next: &Self::Fact,
+    ) -> Result<Self::Fact, Self::Error> {
+        TryProblem::widen(self.0, view, block, previous, next)
+    }
+
+    fn narrow(
+        &self,
+        view: &V,
+        block: V::NodeId,
+        previous: &Self::Fact,
+        next: &Self::Fact,
+    ) -> Result<Self::Fact, Self::Error> {
+        TryProblem::narrow(self.0, view, block, previous, next)
+    }
 }
 
 /// Adapter that runs an infallible [`Problem`] on the fallible solver core.
@@ -641,6 +869,26 @@ impl<V: RootedView, P: Problem<V>> TryProblem<V> for InfallibleProblem<'_, P> {
         input: &Self::Fact,
     ) -> Result<Self::Fact, Self::Error> {
         Ok(Problem::transfer(self.0, view, block, input))
+    }
+
+    fn widen(
+        &self,
+        _view: &V,
+        _block: V::NodeId,
+        previous: &Self::Fact,
+        next: &Self::Fact,
+    ) -> Result<Self::Fact, Self::Error> {
+        Ok(Problem::widen(self.0, previous, next))
+    }
+
+    fn narrow(
+        &self,
+        _view: &V,
+        _block: V::NodeId,
+        previous: &Self::Fact,
+        next: &Self::Fact,
+    ) -> Result<Self::Fact, Self::Error> {
+        Ok(Problem::narrow(self.0, previous, next))
     }
 }
 

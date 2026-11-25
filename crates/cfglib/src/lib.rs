@@ -146,7 +146,10 @@
 //! [`solve_node_problem`]),
 //! [`EdgeProblem`] its edge-sensitive counterpart (run by
 //! [`solve_edge_problem`]), [`TryEdgeProblem`] the error-preserving edge
-//! variant, and [`Emitter`] the trait for linearization output.
+//! variant, and [`Emitter`] the trait for linearization output. A
+//! [`SolveConfig`] selects the [`IterationOrder`] of every solver; in
+//! [`IterationOrder::WeakTopological`] they follow a [`WeakTopologicalOrder`]
+//! and widen at its heads, so infinite-height lattices converge.
 //!
 //! # Contracts
 //!
@@ -236,10 +239,10 @@ pub use dataflow::edge_fixpoint::{
     try_solve_edge_problem_with_config,
 };
 pub use dataflow::fixpoint::{
-    Direction, Facts, Problem, SolveConfig, SolveError, TryProblem, TrySolveError, meet_options,
-    solve_problem, solve_problem_from, solve_problem_from_with_config, solve_problem_with_config,
-    try_solve_problem, try_solve_problem_from, try_solve_problem_from_with_config,
-    try_solve_problem_with_config,
+    Direction, Facts, IterationOrder, Problem, SolveConfig, SolveError, TryProblem, TrySolveError,
+    meet_options, solve_problem, solve_problem_from, solve_problem_from_with_config,
+    solve_problem_with_config, try_solve_problem, try_solve_problem_from,
+    try_solve_problem_from_with_config, try_solve_problem_with_config,
 };
 pub use dataflow::instruction::{EffectInfo, InstrInfo, VariableId};
 pub use dataflow::node_fixpoint::{
@@ -375,6 +378,7 @@ pub use graph::verify::{
 pub use graph::view::{
     DenseId, GraphView, NodeView, Reversed, Rooted, RootedView, scan_predecessors,
 };
+pub use graph::weak_topological_order::WeakTopologicalOrder;
 pub use memory::{
     MemoryAccess, MemoryAccessKind, MemoryAtomicity, MemoryEvent, MemoryEventInfo, MemoryOperations,
 };
