@@ -33,5 +33,6 @@ pub mod fixpoint;
 pub mod instruction;
 pub mod node_fixpoint;
 pub mod program_point;
+mod schedule;
 pub mod slot_fixpoint;
 mod worklist;

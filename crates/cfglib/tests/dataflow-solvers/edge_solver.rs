@@ -6,14 +6,15 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use cfglib::{
-    BlockId, Cfg, Direction, Edge, EdgeId, EdgeKind, EdgeProblem, EdgeRef, EdgeView, FilteredEdges,
-    KindedEdge, Reachable, ReachableEdgeProblem, SolveConfig, SolveError, TrySolveError,
-    solve_edge_problem, solve_edge_problem_from, solve_edge_problem_from_with_config,
-    solve_edge_problem_with_config, try_solve_edge_problem, try_solve_edge_problem_from,
-    try_solve_edge_problem_from_with_config, try_solve_edge_problem_with_config,
+    BlockId, Cfg, Direction, Edge, EdgeFacts, EdgeId, EdgeKind, EdgeProblem, EdgeRef, EdgeView,
+    FilteredEdges, KindedEdge, Reachable, ReachableEdgeProblem, SolveConfig, SolveError,
+    TrySolveError, solve_edge_problem, solve_edge_problem_from,
+    solve_edge_problem_from_with_config, solve_edge_problem_with_config, try_solve_edge_problem,
+    try_solve_edge_problem_from, try_solve_edge_problem_from_with_config,
+    try_solve_edge_problem_with_config,
 };
 
-use crate::graphs::{GenKill, Rng, Shape, union};
+use crate::graphs::{GenKill, ORDERS, Rng, Shape, union};
 use crate::reference::edge_round_robin;
 
 const BOUNDARY_MARK: u8 = 6;
@@ -583,4 +584,63 @@ fn the_fallible_edge_solvers_share_the_step_limit_and_the_seed_contract() {
     let enough = SolveConfig::with_step_limit(needed);
     assert!(try_solve_edge_problem_with_config(&cfg, &problem, enough).is_ok());
     assert!(try_solve_edge_problem_from_with_config(&cfg, &problem, &everything, enough).is_ok());
+}
+
+/// Asserts that two edge solves agree on every live node and every edge
+/// slot, whatever number of steps each took.
+fn assert_same_edge_facts(
+    actual: &EdgeFacts<BTreeSet<u8>>,
+    expected: &EdgeFacts<BTreeSet<u8>>,
+    shape: &Shape,
+    what: &str,
+) {
+    for node in shape.live() {
+        assert_eq!(
+            actual.fact_in(id(node)),
+            expected.fact_in(id(node)),
+            "IN of {node}: {what}"
+        );
+        assert_eq!(
+            actual.fact_out(id(node)),
+            expected.fact_out(id(node)),
+            "OUT of {node}: {what}"
+        );
+    }
+    assert_eq!(actual.edge_facts(), expected.edge_facts(), "edges: {what}");
+}
+
+/// Every iteration order, with or without descending passes, reaches the
+/// node and edge facts of the index order, unwind edges and holes included,
+/// forward and backward, for full and seeded solves.
+#[test]
+fn every_iteration_order_reaches_the_facts_of_the_index_order() {
+    let mut rng = Rng::new(34);
+    for _ in 0..300 {
+        for direction in [Direction::Forward, Direction::Backward] {
+            let shape = Shape::random(&mut rng, false, true);
+            let effects = GenKill::random(&mut rng, shape.blocks);
+            let cfg = shape.cfg();
+            let live = shape.live();
+            let seeds = [id(live[rng.below(live.len())])];
+            let problem = Labels {
+                effects: &effects,
+                direction,
+            };
+            let full = solve_edge_problem(&cfg, &problem).unwrap();
+            let seeded = solve_edge_problem_from(&cfg, &problem, &seeds).unwrap();
+            for order in ORDERS {
+                for passes in [0, 2] {
+                    let config = SolveConfig::new()
+                        .with_order(order)
+                        .with_narrowing_passes(passes);
+                    let what = format!("{order:?} with {passes} passes, {direction:?}, {shape:?}");
+                    let ordered = solve_edge_problem_with_config(&cfg, &problem, config);
+                    assert_same_edge_facts(&ordered.unwrap(), &full, &shape, &what);
+                    let ordered =
+                        solve_edge_problem_from_with_config(&cfg, &problem, &seeds, config);
+                    assert_same_edge_facts(&ordered.unwrap(), &seeded, &shape, &what);
+                }
+            }
+        }
+    }
 }
