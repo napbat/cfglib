@@ -305,7 +305,7 @@ pub use graph::open::{
     FoldEnter, MarkScope, OpenBfsConfig, OpenBfsEvent, OpenDfsConfig, OpenDfsEvent, OpenFold,
     OpenFoldConfig, OpenPathsConfig, OpenPathsEvent, OpenSearchConfig, follow, follow_path,
     open_breadth_first_events, open_breadth_first_paths, open_depth_first_events,
-    open_fold_post_order, open_search,
+    open_fold_post_order, open_fold_post_order_memoized, open_search,
 };
 pub use graph::reducible::make_reducible;
 pub use graph::relax::min_label_relaxation;

@@ -11,7 +11,7 @@ use std::ops::ControlFlow;
 use cfglib::{
     DenseFanout, FoldEnter, MarkScope, OpenFold, OpenFoldConfig, OpenPathsConfig, OpenSearchConfig,
     SearchOrder, StackGraph, StackNodeId, StackReverseIndex, StackSearchConfig, Visit, follow,
-    open_breadth_first_paths, open_fold_post_order, open_search,
+    open_breadth_first_paths, open_fold_post_order, open_fold_post_order_memoized, open_search,
 };
 
 use super::BenchmarkSuite;
@@ -28,6 +28,9 @@ const WALKS: usize = 256;
 const LEVELS: usize = 9;
 /// Nodes per level of the layered graphs.
 const WIDTH: usize = 2;
+/// Stacked diamonds of the fold comparison: `2^DIAMONDS` routes reach the
+/// bottom.
+const DIAMONDS: usize = 16;
 /// References, scope hops per reference, and decoy edges of the stack graph.
 const STACK_REFERENCES: usize = 256;
 const STACK_HOPS: usize = 12;
@@ -221,6 +224,83 @@ fn register_layered(suite: &mut BenchmarkSuite<'_>) {
         || open_fold_post_order(&mut RouteCount, 0_usize, OpenFoldConfig::new()),
         |size: &Option<usize>| assert_eq!(*size, Some((1 << LEVELS) - 1))
     );
+    // The same route count over stacked diamonds, folded once per route and
+    // once per node.
+    benchmark_case!(
+        suite,
+        "open_fold_isolated_diamonds",
+        || open_fold_post_order(&mut DiamondRoutes, 0_usize, OpenFoldConfig::new()),
+        |routes: &Option<usize>| assert_eq!(*routes, Some(1 << DIAMONDS))
+    );
+    benchmark_case!(
+        suite,
+        "open_fold_memoized_diamonds",
+        covers[open_fold_post_order_memoized],
+        || open_fold_post_order_memoized(&mut DiamondRoutes, 0_usize, OpenFoldConfig::new()),
+        |routes: &Option<usize>| assert_eq!(*routes, Some(1 << DIAMONDS))
+    );
+}
+
+/// The bases of `node` in `DIAMONDS` stacked diamonds: the top `3 * level`
+/// derives `3 * level + 1` and `3 * level + 2`, which both derive the next
+/// top. The last top, `3 * DIAMONDS`, is the bottom.
+fn diamond_bases(node: usize, out: &mut Vec<usize>) {
+    if node == 3 * DIAMONDS {
+        return;
+    }
+    match node % 3 {
+        0 => out.extend([node + 1, node + 2]),
+        1 => out.push(node + 2),
+        _ => out.push(node + 1),
+    }
+}
+
+/// Counts the routes from a node down to the bottom of the stacked diamonds.
+/// A node's count is the same on every route, so the memoized walk reuses it.
+struct DiamondRoutes;
+
+impl OpenFold for DiamondRoutes {
+    type Node = usize;
+    type Mark = usize;
+    type Value = usize;
+    type Accumulator = usize;
+
+    fn successors(&mut self, node: &usize, out: &mut Vec<usize>) {
+        diamond_bases(*node, out);
+    }
+
+    fn mark(&mut self, node: &usize) -> Option<usize> {
+        Some(*node)
+    }
+
+    fn memo_key(&mut self, node: &usize) -> Option<usize> {
+        Some(*node)
+    }
+
+    fn enter(&mut self, node: &usize) -> FoldEnter<usize, usize> {
+        if *node == 3 * DIAMONDS {
+            FoldEnter::Leaf(Some(1))
+        } else {
+            FoldEnter::Fold {
+                accumulator: 0,
+                marks: MarkScope::Isolated,
+            }
+        }
+    }
+
+    fn absorb(
+        &mut self,
+        accumulator: &mut usize,
+        _child: &usize,
+        value: Option<usize>,
+    ) -> ControlFlow<()> {
+        *accumulator += value.unwrap_or_default();
+        ControlFlow::Continue(())
+    }
+
+    fn finish(&mut self, _node: &usize, accumulator: usize) -> Option<usize> {
+        Some(accumulator)
+    }
 }
 
 type Stack = StackGraph<(), u32, (), ()>;

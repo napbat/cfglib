@@ -29,6 +29,18 @@
 //! A refused child — already marked, or beyond the depth bound — is absorbed
 //! as `None`: it contributes exactly the nothing a missing subtree
 //! contributes, so accumulators observe every child exactly once.
+//!
+//! [`open_fold_post_order_memoized`] gives a third answer to a node reached a
+//! second time. `Isolated` folds a shared descendant once per route, which is
+//! exponential in a stack of diamonds; `Shared` refuses the second route,
+//! which hides it from a fold that must see both routes. The memoized driver
+//! folds a node that has an [`OpenFold::memo_key`] once and hands its
+//! finished answer to every later route, so the fold still sees each route
+//! but pays one fold per key. That answer must not depend on the route: a
+//! fold that needs a fact of the route carries it in its value and decides
+//! in [`OpenFold::absorb`]. A node whose subtree refused a node that is still
+//! open on the current route (a cycle) has an answer that depends on where
+//! the walk entered the cycle, so the driver does not cache that answer.
 
 extern crate alloc;
 
@@ -39,7 +51,12 @@ use crate::graph::search::may_expand;
 
 use super::marks::Marks;
 
-/// Bounds for one [`open_fold_post_order`] walk.
+mod memoized;
+
+pub use memoized::open_fold_post_order_memoized;
+
+/// Bounds for one [`open_fold_post_order`] or
+/// [`open_fold_post_order_memoized`] walk.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OpenFoldConfig {
     max_depth: Option<usize>,
@@ -112,6 +129,18 @@ pub trait OpenFold {
     /// The cycle-guard key for `node`, or `None` to fold it every time it
     /// is reached.
     fn mark(&mut self, node: &Self::Node) -> Option<Self::Mark>;
+
+    /// The key under which `node`'s finished answer may be reused, or `None`
+    /// to fold `node` on every reach.
+    ///
+    /// Only [`open_fold_post_order_memoized`] reads this hook, and the default
+    /// memoizes nothing. The answer stored under a key is reused on every
+    /// later route to a node with that key, so it must not depend on the
+    /// route: a fold that needs a fact of the route carries it in its value
+    /// and decides in [`absorb`](Self::absorb).
+    fn memo_key(&mut self, _node: &Self::Node) -> Option<Self::Mark> {
+        None
+    }
 
     /// Answers for `node` directly or opens its accumulator.
     fn enter(&mut self, node: &Self::Node) -> FoldEnter<Self::Value, Self::Accumulator>;
@@ -189,7 +218,7 @@ struct Sandbox {
     with_key: usize,
 }
 
-struct Frame<F: OpenFold> {
+struct Frame<F: OpenFold, X> {
     node: F::Node,
     accumulator: F::Accumulator,
     /// Where this node's children start on the walk's shared child stack.
@@ -198,11 +227,13 @@ struct Frame<F: OpenFold> {
     base: usize,
     sandbox: Option<Sandbox>,
     broke: bool,
+    /// What one driver keeps for the frame beyond the shared bookkeeping.
+    extra: X,
 }
 
 /// The state of one walk: its frames, their children, and the live marks.
-struct Walk<F: OpenFold> {
-    stack: Vec<Frame<F>>,
+struct Walk<F: OpenFold, X> {
+    stack: Vec<Frame<F, X>>,
     /// Every open frame's unfolded children, the deepest frame's on top.
     pending: Vec<F::Node>,
     /// The buffer `successors` fills, reused for every node.
@@ -210,7 +241,16 @@ struct Walk<F: OpenFold> {
     marks: UndoMarks<F::Mark>,
 }
 
-impl<F: OpenFold> Walk<F> {
+impl<F: OpenFold, X> Walk<F, X> {
+    fn new() -> Self {
+        Self {
+            stack: Vec::new(),
+            pending: Vec::new(),
+            scratch: Vec::new(),
+            marks: UndoMarks::new(),
+        }
+    }
+
     /// Opens a frame for `node`, whose own key (if it has one) is already the
     /// last mark set; `entry_marks` is how many marks were set before it.
     fn push_frame(
@@ -220,6 +260,7 @@ impl<F: OpenFold> Walk<F> {
         accumulator: F::Accumulator,
         scope: MarkScope,
         entry_marks: usize,
+        extra: X,
     ) {
         let base = self.pending.len();
         self.scratch.clear();
@@ -238,7 +279,61 @@ impl<F: OpenFold> Walk<F> {
             base,
             sandbox,
             broke: false,
+            extra,
         });
+    }
+
+    /// The top frame's next child, or `None` once the frame has no child
+    /// left or has stopped early.
+    fn next_child(&mut self) -> Option<F::Node> {
+        let frame = self.stack.last()?;
+        if frame.broke || self.pending.len() <= frame.base {
+            None
+        } else {
+            self.pending.pop()
+        }
+    }
+
+    /// Pops the top frame and finishes it, returning its node, its answer
+    /// and its driver state.
+    fn finish_top(&mut self, fold: &mut F) -> Option<(F::Node, Option<F::Value>, X)> {
+        let frame = self.stack.pop()?;
+        // A node stopped early leaves its remaining children unfolded.
+        self.pending.truncate(frame.base);
+        let value = fold.finish(&frame.node, frame.accumulator);
+        if let Some(sandbox) = frame.sandbox {
+            self.marks.truncate(sandbox.entry);
+        }
+        Some((frame.node, value, frame.extra))
+    }
+
+    /// Restores the marks that the top frame's next child starts from, and
+    /// returns whether that child lies within the depth bound.
+    fn admit_child(&mut self, max_depth: Option<usize>) -> bool {
+        let Some(frame) = self.stack.last() else {
+            return false;
+        };
+        // An isolated parent resets its children's shared start state: marks
+        // as seen at its own entry, plus its own key. For its first child
+        // that is the state it already has.
+        if let Some(sandbox) = &frame.sandbox {
+            self.marks.truncate(sandbox.with_key);
+        }
+        // The parent is the top frame, at depth `stack.len() - 1`; its child
+        // is refused exactly when that parent may not expand.
+        may_expand(max_depth, self.stack.len() - 1)
+    }
+
+    /// Merges one child's answer into the top frame, which stops early when
+    /// the fold breaks.
+    fn absorb(&mut self, fold: &mut F, child: &F::Node, value: Option<F::Value>) {
+        if let Some(parent) = self.stack.last_mut()
+            && fold
+                .absorb(&mut parent.accumulator, child, value)
+                .is_break()
+        {
+            parent.broke = true;
+        }
     }
 }
 
@@ -312,17 +407,15 @@ impl<F: OpenFold> Walk<F> {
 ///     Some("member"),
 /// );
 /// ```
+///
+/// [`open_fold_post_order_memoized`] folds the diamond's base once and still
+/// gives `0` both routes.
 pub fn open_fold_post_order<F: OpenFold>(
     fold: &mut F,
     root: F::Node,
     config: OpenFoldConfig,
 ) -> Option<F::Value> {
-    let mut walk = Walk::<F> {
-        stack: Vec::new(),
-        pending: Vec::new(),
-        scratch: Vec::new(),
-        marks: UndoMarks::new(),
-    };
+    let mut walk = Walk::<F, ()>::new();
 
     let root_key = fold.mark(&root);
     if let Some(key) = root_key {
@@ -333,61 +426,31 @@ pub fn open_fold_post_order<F: OpenFold>(
         FoldEnter::Fold {
             accumulator,
             marks: scope,
-        } => walk.push_frame(fold, root, accumulator, scope, 0),
+        } => walk.push_frame(fold, root, accumulator, scope, 0, ()),
     }
 
     let mut result = None;
-    while let Some(frame) = walk.stack.last_mut() {
-        let child = if frame.broke || walk.pending.len() <= frame.base {
-            None
-        } else {
-            walk.pending.pop()
-        };
-        let Some(child) = child else {
-            let Some(frame) = walk.stack.pop() else { break };
-            // A node stopped early leaves its remaining children unfolded.
-            walk.pending.truncate(frame.base);
-            let value = fold.finish(&frame.node, frame.accumulator);
-            if let Some(sandbox) = frame.sandbox {
-                walk.marks.truncate(sandbox.entry);
-            }
-            match walk.stack.last_mut() {
-                Some(parent) => {
-                    if fold
-                        .absorb(&mut parent.accumulator, &frame.node, value)
-                        .is_break()
-                    {
-                        parent.broke = true;
-                    }
-                }
-                None => result = value,
+    while !walk.stack.is_empty() {
+        let Some(child) = walk.next_child() else {
+            let Some((node, value, ())) = walk.finish_top(fold) else {
+                break;
+            };
+            if walk.stack.is_empty() {
+                result = value;
+            } else {
+                walk.absorb(fold, &node, value);
             }
             continue;
         };
 
-        // An isolated parent resets its children's shared start state: marks
-        // as seen at its own entry, plus its own key. For its first child
-        // that is the state it already has.
-        if let Some(sandbox) = &frame.sandbox {
-            walk.marks.truncate(sandbox.with_key);
-        }
-
-        // The parent is the top frame, at depth `stack.len() - 1`; its child
-        // is refused exactly when that parent may not expand.
-        let refused_by_depth = !may_expand(config.max_depth, walk.stack.len() - 1);
+        let within_depth = walk.admit_child(config.max_depth);
         let child_key = fold.mark(&child);
-        let refused = refused_by_depth
+        let refused = !within_depth
             || child_key
                 .as_ref()
                 .is_some_and(|key| walk.marks.contains(key));
         if refused {
-            if let Some(parent) = walk.stack.last_mut()
-                && fold
-                    .absorb(&mut parent.accumulator, &child, None)
-                    .is_break()
-            {
-                parent.broke = true;
-            }
+            walk.absorb(fold, &child, None);
             continue;
         }
 
@@ -396,19 +459,11 @@ pub fn open_fold_post_order<F: OpenFold>(
             walk.marks.insert(key);
         }
         match fold.enter(&child) {
-            FoldEnter::Leaf(value) => {
-                if let Some(parent) = walk.stack.last_mut()
-                    && fold
-                        .absorb(&mut parent.accumulator, &child, value)
-                        .is_break()
-                {
-                    parent.broke = true;
-                }
-            }
+            FoldEnter::Leaf(value) => walk.absorb(fold, &child, value),
             FoldEnter::Fold {
                 accumulator,
                 marks: scope,
-            } => walk.push_frame(fold, child, accumulator, scope, entry_marks),
+            } => walk.push_frame(fold, child, accumulator, scope, entry_marks, ()),
         }
     }
     result
