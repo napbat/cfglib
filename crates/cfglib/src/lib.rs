@@ -269,6 +269,9 @@ pub use flow::{
     CallInfo, CallSite, EdgeRole, Flow, FlowControl, FlowEffect, JumpTargets, Transfer, Transfers,
     UnresolvedRole, UnresolvedTransfer,
 };
+pub use graph::bidirectional::{
+    ShortestPathScratch, shortest_path_bidirectional, shortest_path_edges_bidirectional,
+};
 pub use graph::call_graph::{
     CallMetadata, FunctionIndex, FunctionNode, call_graph, call_graph_indexed, find_function,
     is_recursive_function, propagate_summaries, propagate_summaries_narrowed,

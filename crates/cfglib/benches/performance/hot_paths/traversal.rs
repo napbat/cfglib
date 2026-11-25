@@ -1,7 +1,8 @@
 use cfglib::{
-    BlockId, Cfg, CommonAncestor, EdgeId, EdgeStep, Graph, NodeId, TraversalDirection,
-    breadth_first, breadth_first_edges, common_ancestors, depth_first_preorder,
-    nearest_common_ancestor, shortest_path, shortest_path_edges,
+    BlockId, Cfg, CommonAncestor, EdgeId, EdgeStep, Graph, GraphView, NodeId, ShortestPathScratch,
+    TraversalDirection, breadth_first, breadth_first_edges, common_ancestors, depth_first_preorder,
+    nearest_common_ancestor, shortest_path, shortest_path_bidirectional, shortest_path_edges,
+    shortest_path_edges_bidirectional,
 };
 
 use super::NODE_COUNT;
@@ -15,6 +16,13 @@ use crate::structural_oracles::assert_dense_permutation;
 
 /// Nodes of the branchy graph behind the large meet cases.
 const LARGE_NODE_COUNT: usize = 1 << 16;
+/// Nodes of the hub-heavy graph behind the repeated point queries.
+const HUB_GRAPH_NODES: usize = 1 << 17;
+/// Hubs of that graph, each called by and calling `HUB_FAN` other nodes.
+const HUBS: usize = 64;
+const HUB_FAN: usize = 1_024;
+/// Point queries one measured operation of the hub cases answers.
+const POINT_QUERIES: usize = 16;
 
 fn register_cfg_walks(suite: &mut BenchmarkSuite<'_>, cfg: &Cfg<u32>) {
     benchmark_case!(
@@ -81,6 +89,132 @@ fn register_graph_walks(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(), ()>) {
             NodeId::from_raw(0),
             NodeId::from_index(NODE_COUNT - 1),
         )
+    );
+    // One scratch serves both bidirectional cases and every iteration of
+    // each, the way a pass of point queries holds it.
+    let mut scratch = ShortestPathScratch::new(graph.node_bound());
+    benchmark_case!(
+        suite,
+        "directed_shortest_path_bidirectional",
+        || {
+            shortest_path_bidirectional(
+                graph,
+                NodeId::from_raw(0),
+                NodeId::from_index(NODE_COUNT - 1),
+                TraversalDirection::Outgoing,
+                &mut scratch,
+            )
+            .expect("fixture target is reachable")
+        },
+        |result: &Vec<NodeId>| assert_node_path(
+            result,
+            graph,
+            NodeId::from_raw(0),
+            NodeId::from_index(NODE_COUNT - 1),
+        )
+    );
+    benchmark_case!(
+        suite,
+        "directed_shortest_path_edges_bidirectional",
+        || {
+            shortest_path_edges_bidirectional(
+                graph,
+                NodeId::from_raw(0),
+                NodeId::from_index(NODE_COUNT - 1),
+                TraversalDirection::Outgoing,
+                &mut scratch,
+            )
+            .expect("fixture target is reachable")
+        },
+        |result: &Vec<EdgeId>| assert_edge_path(
+            result,
+            graph,
+            NodeId::from_raw(0),
+            NodeId::from_index(NODE_COUNT - 1),
+        )
+    );
+}
+
+/// A deterministic spread of `value` over `0..HUB_GRAPH_NODES`.
+fn hashed(value: usize) -> usize {
+    (value.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 7) % HUB_GRAPH_NODES
+}
+
+/// A whole-program call graph in miniature: every function calls two others
+/// at random, and the first `HUBS` functions are each called by, and call,
+/// `HUB_FAN` more. A one-sided search reaches a hub within a few hops and
+/// fans out over most of the graph before it meets a distant goal.
+fn hub_graph() -> Graph<(), ()> {
+    let mut graph = Graph::with_capacity(HUB_GRAPH_NODES, 2 * (HUB_GRAPH_NODES + HUBS * HUB_FAN));
+    let nodes: Vec<NodeId> = (0..HUB_GRAPH_NODES).map(|_| graph.add_node(())).collect();
+    for index in 0..HUB_GRAPH_NODES {
+        graph.add_edge(nodes[index], nodes[hashed(index)], ());
+        graph.add_edge(nodes[index], nodes[hashed(index + HUB_GRAPH_NODES)], ());
+    }
+    for hub in 0..HUBS {
+        for fan in 0..HUB_FAN {
+            let seed = 2 * HUB_GRAPH_NODES + 2 * (hub * HUB_FAN + fan);
+            graph.add_edge(nodes[hashed(seed)], nodes[hub], ());
+            graph.add_edge(nodes[hub], nodes[hashed(seed + 1)], ());
+        }
+    }
+    graph
+}
+
+/// Repeated point queries over one large graph: the one-sided search with
+/// its per-call tables, against the bidirectional search over one reused
+/// scratch, on the same pairs.
+fn register_point_queries(suite: &mut BenchmarkSuite<'_>) {
+    let graph = hub_graph();
+    let pairs: Vec<(NodeId, NodeId)> = (0..POINT_QUERIES)
+        .map(|query| {
+            let seed = 4 * HUB_GRAPH_NODES + 2 * query;
+            (
+                NodeId::from_index(hashed(seed)),
+                NodeId::from_index(hashed(seed + 1)),
+            )
+        })
+        .collect();
+    let outgoing = TraversalDirection::Outgoing;
+    let lengths: Vec<Option<usize>> = pairs
+        .iter()
+        .map(|&(start, goal)| shortest_path(&graph, start, goal, outgoing).map(|path| path.len()))
+        .collect();
+    let check = |paths: &Vec<Option<Vec<NodeId>>>| {
+        for ((path, &(start, goal)), length) in paths.iter().zip(&pairs).zip(&lengths) {
+            assert_eq!(path.as_ref().map(Vec::len), *length);
+            if let Some(path) = path {
+                assert_eq!((path[0], path[path.len() - 1]), (start, goal));
+                assert!(path.windows(2).all(|pair| {
+                    GraphView::successors(&graph, pair[0]).any(|next| next == pair[1])
+                }));
+            }
+        }
+    };
+    benchmark_case!(
+        suite,
+        "directed_shortest_path_hub_queries",
+        || {
+            pairs
+                .iter()
+                .map(|&(start, goal)| shortest_path(&graph, start, goal, outgoing))
+                .collect::<Vec<_>>()
+        },
+        check
+    );
+    let mut scratch = ShortestPathScratch::new(graph.node_bound());
+    benchmark_case!(
+        suite,
+        "directed_shortest_path_bidirectional_hub_queries",
+        || {
+            pairs
+                .iter()
+                .map(|&(start, goal)| {
+                    shortest_path_bidirectional(&graph, start, goal, outgoing, &mut scratch)
+                })
+                .collect::<Vec<_>>()
+        },
+        check
     );
 }
 
@@ -163,5 +297,6 @@ fn register_ancestors(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(), ()>) {
 pub(super) fn register(suite: &mut BenchmarkSuite<'_>, cfg: &Cfg<u32>, graph: &Graph<(), ()>) {
     register_cfg_walks(suite, cfg);
     register_graph_walks(suite, graph);
+    register_point_queries(suite);
     register_ancestors(suite, graph);
 }

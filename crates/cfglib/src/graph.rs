@@ -1,5 +1,6 @@
 //! Graph storage and algorithms for code intelligence and program analysis.
 
+pub mod bidirectional;
 pub mod call_graph;
 pub mod cdg;
 pub mod coldness;

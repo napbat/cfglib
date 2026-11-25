@@ -104,7 +104,9 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "search_with_marks",
     "search_with_scratch",
     "shortest_path",
+    "shortest_path_bidirectional",
     "shortest_path_edges",
+    "shortest_path_edges_bidirectional",
     "simplify",
     "simplify_mapped",
     "solve_edge_problem",
@@ -159,6 +161,16 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_coverage!(suite, "directed_shortest_path", [shortest_path]);
     benchmark_coverage!(suite, "directed_shortest_path_edges", [shortest_path_edges]);
+    benchmark_coverage!(
+        suite,
+        "directed_shortest_path_bidirectional",
+        [shortest_path_bidirectional]
+    );
+    benchmark_coverage!(
+        suite,
+        "directed_shortest_path_edges_bidirectional",
+        [shortest_path_edges_bidirectional]
+    );
     benchmark_coverage!(
         suite,
         "directed_nearest_common_ancestor",
