@@ -4,7 +4,9 @@
 //! holding arbitrary node and edge payloads for value-flow, symbol,
 //! type-relation, import, call, and grammar graphs, with constant-time
 //! addition, bit-cheap removal, identity-preserving endpoint redirection, and
-//! an explicit [`compact`](Graph::compact) that reports its [`Renumbering`].
+//! an explicit [`compact`](Graph::compact) that reports its [`Renumbering`],
+//! or [`compact_ordered`](Graph::compact_ordered), which also numbers the
+//! nodes in a locality-friendly [`NodeOrder`].
 //! Identities are one type, [`Id<T>`](Id), tagged per entity kind.
 //! [`Fanout`], [`DenseFanout`], and [`SortedMap`] are that base's shape
 //! without the edges: built-once tables from sparse keys, from a dense
@@ -343,7 +345,9 @@ pub use graph::stack::{
     StackResolution, StackResolutionIndex, StackReverseIndex, StackScopedSymbol, StackSearchConfig,
     StackSearchStats,
 };
-pub use graph::store::{AdjacentEdges, EdgeRecord, Graph, Id, IdTag, NodeId, NodeTag, Renumbering};
+pub use graph::store::{
+    AdjacentEdges, EdgeRecord, Graph, Id, IdTag, NodeId, NodeOrder, NodeTag, Renumbering,
+};
 pub use graph::structure::{
     BackEdge, CanonicalLoop, NaturalLoop, canonicalize_loops, detect_loops, detect_loops_tagged,
     find_back_edges, find_back_edges_tagged, insert_preheader, is_reducible, loop_exit_blocks,

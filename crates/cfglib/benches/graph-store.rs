@@ -37,6 +37,14 @@
 //! ascending order, summed and divided by its degree, averaged here over the
 //! nodes with two or more neighbors, for successors and predecessors. Lower
 //! is more local. It depends on the numbering, not on the arrival order.
+//!
+//! Each `structured_relabeled` table is followed by an ordered-compaction
+//! table for the same arrival: the store compacted by `compact()` and by
+//! `compact_ordered` in `FirstTouch`, `BreadthFirst` and `ReversePostorder`
+//! order, the searches rooted at the nodes with no predecessor. Each order
+//! reports the locality of the numbering it produced, then its compaction,
+//! both neighbor walks and `tarjan_scc` over the result. The `compact` rows
+//! are the baseline: the gain of an order is the drop from them.
 
 use std::alloc::System;
 #[cfg(cfglib_bench_alloc)]
@@ -46,7 +54,7 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use cfglib::{Graph, Id};
+use cfglib::{Graph, Id, NodeId, NodeOrder, tarjan_scc};
 
 #[cfg(cfglib_bench_alloc)]
 struct CountingAllocator;
@@ -550,6 +558,125 @@ fn run_small(edges: &[(u32, u32)]) -> Vec<(&'static str, Sample)> {
     ]
 }
 
+/// The compactions the ordered table compares, the plain one first: it is
+/// the baseline every ordered row is read against.
+#[derive(Clone, Copy)]
+enum Compaction {
+    Plain,
+    FirstTouch,
+    BreadthFirst,
+    ReversePostorder,
+}
+
+impl Compaction {
+    const ALL: [Self; 4] = [
+        Self::Plain,
+        Self::FirstTouch,
+        Self::BreadthFirst,
+        Self::ReversePostorder,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Plain => "compact",
+            Self::FirstTouch => "first_touch",
+            Self::BreadthFirst => "breadth_first",
+            Self::ReversePostorder => "reverse_postorder",
+        }
+    }
+
+    fn apply(self, graph: &mut Graph<u32, ()>, roots: &[NodeId]) {
+        let renumbering = match self {
+            Self::Plain => graph.compact(),
+            Self::FirstTouch => graph.compact_ordered(NodeOrder::FirstTouch),
+            Self::BreadthFirst => graph.compact_ordered(NodeOrder::BreadthFirst(roots)),
+            Self::ReversePostorder => graph.compact_ordered(NodeOrder::ReversePostorder(roots)),
+        };
+        drop(renumbering);
+    }
+}
+
+/// The roots the searches start from: the nodes with no predecessor, in slot
+/// order. On the structured inputs those are the procedure entries nothing
+/// calls, which is what a consumer with no designated entry would hand in.
+fn sources(graph: &Graph<u32, ()>) -> Vec<NodeId> {
+    graph
+        .node_ids()
+        .filter(|&node| graph.in_degree(node) == 0)
+        .collect()
+}
+
+/// A built store compacted `compaction`'s way. The roots are found first,
+/// outside any measured region: they are the caller's input, not part of
+/// the compaction.
+fn build_compacted(edges: &[(u32, u32)], compaction: Compaction) -> (Graph<u32, ()>, Sample) {
+    let mut graph = build_store(edges);
+    let roots = sources(&graph);
+    let ((), compacted) = measure(|| compaction.apply(&mut graph, &roots));
+    (graph, compacted)
+}
+
+/// Time one compaction and what reads its numbering: both neighbor walks and
+/// one whole-graph analysis. The second value is what each read computed,
+/// which no numbering may change.
+fn run_ordered(
+    edges: &[(u32, u32)],
+    compaction: Compaction,
+) -> (Vec<(&'static str, Sample)>, [usize; 3]) {
+    let (graph, compacted) = build_compacted(edges, compaction);
+    let (successors, scan) = measure(|| walk_neighbors(&graph, true));
+    let (predecessors, reverse_scan) = measure(|| walk_neighbors(&graph, false));
+    let (components, scc) = measure(|| tarjan_scc(&graph).len());
+    (
+        vec![
+            ("compaction", compacted),
+            ("successor_scan", scan),
+            ("predecessor_scan", reverse_scan),
+            ("tarjan_scc", scc),
+        ],
+        [successors, predecessors, components],
+    )
+}
+
+/// Compact `edges` in each order and report what each one costs and buys:
+/// the locality of the numbering it produced, and the walks and the SCC
+/// decomposition over it.
+fn report_ordered(edges: &[(u32, u32)], arrival: Arrival, mode: &str) {
+    println!(
+        "
+graph-store structured_relabeled, {} arrival, compacted in order: {NODES} nodes, {} edges; best of {REPEATS}; mode: {mode}",
+        arrival.name(),
+        edges.len()
+    );
+    let mut expected = None;
+    for compaction in Compaction::ALL {
+        let (graph, _) = build_compacted(edges, compaction);
+        let numbered: Vec<(u32, u32)> = graph
+            .edges()
+            .map(|edge| (edge.source().raw(), edge.target().raw()))
+            .collect();
+        drop(graph);
+        println!(
+            "{}: locality {} successors {} predecessors",
+            compaction.name(),
+            thousandths(n2n_aid_milli(&numbered, true)),
+            thousandths(n2n_aid_milli(&numbered, false))
+        );
+        let runs = (0..REPEATS)
+            .map(|_| {
+                let (samples, reads) = run_ordered(edges, compaction);
+                assert_eq!(
+                    *expected.get_or_insert(reads),
+                    reads,
+                    "a numbering changed what a walk or the SCC decomposition computed"
+                );
+                samples
+            })
+            .collect();
+        report(&fastest(runs));
+    }
+}
+
 /// Enough repetitions for the minimum to be meaningful without turning a
 /// four-million-edge benchmark into a coffee break.
 const REPEATS: usize = 5;
@@ -609,6 +736,9 @@ graph-store {name}, {} arrival: {NODES} nodes, {} edges, {APPENDS} appends; best
                     .collect(),
             );
             report(&store);
+            if name == "structured_relabeled" {
+                report_ordered(&arranged, arrival, mode);
+            }
         }
     }
 

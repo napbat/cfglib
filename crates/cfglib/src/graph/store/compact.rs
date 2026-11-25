@@ -18,6 +18,7 @@ use super::adjacency::{NONE, compress};
 use super::edge::EdgeRecord;
 use super::id::{Id, IdTag};
 use super::liveness::LiveSet;
+use super::node_order::NodeOrder;
 use super::renumbering::Renumbering;
 
 impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
@@ -42,7 +43,9 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// Live entities keep their relative order, so the surviving identities
     /// are renumbered but never reordered: insertion order, adjacency order,
     /// and identity order all mean the same thing afterwards as before. The
-    /// delta is emptied and every tombstone disappears.
+    /// delta is emptied and every tombstone disappears. To number the nodes
+    /// in an order of your choosing instead, use
+    /// [`compact_ordered`](Self::compact_ordered).
     ///
     /// Costs one pass over each slot space plus two counting passes over the
     /// live edges, and allocates the new base once. A node whose adjacency
@@ -66,6 +69,87 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// ```
     pub fn compact(&mut self) -> Renumbering<NT, ET> {
         let node_map = surviving_slots(&self.live_nodes, self.node_bound());
+        self.rebuild(node_map, false)
+    }
+
+    /// Rebuild the compressed base like [`compact`](Self::compact), numbering
+    /// the surviving nodes in `order` rather than in slot order.
+    ///
+    /// [`compact`](Self::compact) keeps the order the nodes were added in,
+    /// which for a whole-program graph is discovery or file order: a node's
+    /// neighbors then carry scattered identities, and so do the payloads,
+    /// adjacency offsets and node-indexed side tables a scan reads for them.
+    /// An order that numbers neighbors close together turns those reads into
+    /// reads of nearby memory. A procedure-sized graph fits in cache either
+    /// way and has nothing to gain.
+    ///
+    /// Only nodes move. Afterwards:
+    ///
+    /// - node identity order is `order`, so it no longer means insertion
+    ///   order; a node added later still follows every compacted one;
+    /// - edges keep their relative order, so edge identity order still means
+    ///   insertion order and the edge renumbering is the one
+    ///   [`compact`](Self::compact) would report;
+    /// - every node keeps its adjacency order: its edges read in the order
+    ///   they read before, under their new identities.
+    ///
+    /// The delta is emptied and every tombstone disappears, as with
+    /// [`compact`](Self::compact), and the returned [`Renumbering`]
+    /// [`compose`](Renumbering::compose)s with any other.
+    ///
+    /// Costs what [`compact`](Self::compact) costs plus the order: one pass
+    /// over the live edges for [`FirstTouch`](NodeOrder::FirstTouch), one
+    /// search over the reached nodes and their edges for
+    /// [`BreadthFirst`](NodeOrder::BreadthFirst) and
+    /// [`ReversePostorder`](NodeOrder::ReversePostorder), and one pass over
+    /// the order for [`Explicit`](NodeOrder::Explicit). The payloads move
+    /// into their new places by swaps, one per payload at most. On a
+    /// million-node graph with shuffled identities, a search compaction costs
+    /// several times a plain one (`benches/graph-store.rs`), and compacting
+    /// the store first does not remove that cost.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a root of [`BreadthFirst`](NodeOrder::BreadthFirst) or
+    /// [`ReversePostorder`](NodeOrder::ReversePostorder) names a node this
+    /// store does not hold, and when an [`Explicit`](NodeOrder::Explicit)
+    /// order is not a permutation of the live nodes: it names a node the
+    /// store does not hold, names a node twice, or leaves one out. The store
+    /// is unchanged when it panics.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cfglib::{Graph, NodeOrder};
+    ///
+    /// let mut graph = Graph::<&'static str, ()>::new();
+    /// let exit = graph.add_node("exit");
+    /// let body = graph.add_node("body");
+    /// let entry = graph.add_node("entry");
+    /// graph.add_edge(entry, body, ());
+    /// graph.add_edge(body, body, ());
+    /// graph.add_edge(body, exit, ());
+    ///
+    /// let renumbering = graph.compact_ordered(NodeOrder::ReversePostorder(&[entry]));
+    /// assert!(graph.is_compact());
+    /// assert_eq!(graph.nodes().copied().collect::<Vec<_>>(), ["entry", "body", "exit"]);
+    ///
+    /// let body = renumbering.node(body).unwrap();
+    /// let exit = renumbering.node(exit).unwrap();
+    /// assert_eq!(graph.successors(body).collect::<Vec<_>>(), [body, exit]);
+    /// ```
+    pub fn compact_ordered(&mut self, order: NodeOrder<'_, NT>) -> Renumbering<NT, ET> {
+        let node_map = self.ordered_slots(order);
+        self.rebuild(node_map, true)
+    }
+
+    /// Rebuild the base under `node_map`, which numbers every live node slot.
+    /// Unless the map `reorders`, it must keep the slots' relative order,
+    /// which saves placing the payloads one by one.
+    fn rebuild(&mut self, node_map: Vec<u32>, reorders: bool) -> Renumbering<NT, ET> {
+        // Edge numbers always keep slot order: that is what keeps edge
+        // identity order meaning insertion order under any node order, and
+        // what lets the counting passes below rebuild every run in order.
         let edge_map = surviving_slots(&self.live_edges, self.edge_bound());
         // The counting passes below place every run in identity order, so the
         // runs that read otherwise are taken now, while the old index is
@@ -74,7 +158,10 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
             self.reordered_adjacency(TraversalDirection::Outgoing, &node_map, &edge_map);
         let reordered_in =
             self.reordered_adjacency(TraversalDirection::Incoming, &node_map, &edge_map);
-        let nodes = self.take_live_nodes(&node_map);
+        let mut nodes = self.take_live_nodes(&node_map);
+        if reorders {
+            place(&mut nodes, &node_map);
+        }
         let edges = self.take_live_edges(&node_map);
 
         let (out_offsets, mut out_edges) =
@@ -149,6 +236,32 @@ fn surviving_slots(live: &LiveSet, slots: usize) -> Vec<u32> {
         }
     }
     mapping
+}
+
+/// Move each of `nodes`, the live payloads in slot order, to the number
+/// `node_map` gives its slot.
+///
+/// Following each cycle of the permutation, every swap puts one payload in
+/// its final place, so placing takes at most one swap per payload and stages
+/// no payload outside the vector.
+fn place<N>(nodes: &mut [N], node_map: &[u32]) {
+    // `targets[i]` is the new number of the payload now at `i`; a swap moves
+    // the targets with the payloads to keep that true.
+    let mut targets: Vec<u32> = node_map
+        .iter()
+        .copied()
+        .filter(|&new| new != NONE)
+        .collect();
+    for position in 0..nodes.len() {
+        loop {
+            let target = targets[position] as usize;
+            if target == position {
+                break;
+            }
+            nodes.swap(position, target);
+            targets.swap(position, target);
+        }
+    }
 }
 
 /// Overwrite the runs of the nodes in `reordered` with the order they read in.

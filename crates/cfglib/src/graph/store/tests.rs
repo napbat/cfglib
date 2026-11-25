@@ -14,6 +14,7 @@ use crate::graph::view::{GraphView, Rooted};
 use super::{Id, NodeId};
 
 mod model;
+mod ordered;
 #[cfg(feature = "serde")]
 mod serde_format;
 

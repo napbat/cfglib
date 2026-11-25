@@ -97,6 +97,14 @@
 //! [`compose`](Renumbering::compose)s, so a consumer that skipped several
 //! compactions folds them into one lookup.
 //!
+//! [`compact`](Graph::compact) keeps the nodes in the order they were added.
+//! [`compact_ordered`](Graph::compact_ordered) numbers them in a
+//! [`NodeOrder`] instead — first touch, breadth-first, reverse postorder, or
+//! the caller's own — so that neighbors carry nearby identities and a scan
+//! of a large graph reads nearby payloads, offsets and side-table entries.
+//! Only nodes move: edge identities and every node's adjacency order come
+//! out as [`compact`](Graph::compact) leaves them.
+//!
 //! # There is no builder
 //!
 //! `Graph::new()`, `add_node`, `add_edge`, `compact()` *is* the builder, and
@@ -129,6 +137,7 @@ mod compact;
 mod edge;
 mod id;
 mod liveness;
+mod node_order;
 mod relocate;
 mod renumbering;
 #[cfg(feature = "serde")]
@@ -141,6 +150,7 @@ mod tests;
 pub use adjacency::AdjacentEdges;
 pub use edge::EdgeRecord;
 pub use id::{EdgeId, EdgeTag, Id, IdTag, NodeId, NodeTag};
+pub use node_order::NodeOrder;
 pub use renumbering::Renumbering;
 
 /// Narrow a slot count to the dense identity space.

@@ -6,7 +6,8 @@ file is a dated record of that session, not a description of the current tree:
 later changes have moved the numbers, and the harness's `coverage:` line, not
 this page, states how many cases and facade functions a run covers. Rerun the
 commands in [README.md](README.md) for current figures. The graph-store
-baseline at the end is a later session with its own date and revision.
+baseline and the ordered-compaction record at the end are later sessions, each
+with its own date and revision.
 
 ## Screening comparison
 
@@ -107,3 +108,65 @@ What the inputs separate:
   ids beside the edge ids) against: a gain should appear on
   `structured_relabeled` and on predecessor walks, and the uniform rows bound
   its worst case.
+
+## Ordered compaction
+
+Measured on Linux on 2026-11-24 on revision `87bc952`, the commit that added
+these rows, on the same machine, pinned to one core. Each figure is the
+fastest of five repetitions within a run and of three runs, taken by a script
+over the three outputs. Other processes kept the load average between 21 and
+52 of 32 hardware threads. The searches start from the nodes with no
+predecessor, which are found before the clock starts.
+
+Locality of each numbering of `structured_relabeled`, as N2N AID for
+successors / predecessors; lower is more local. It does not depend on load.
+The `structured` input the relabeled one was shuffled from reads 107,466.8 /
+8,324.4.
+
+| Order | Shuffled arrival | Grouped arrival |
+| --- | ---: | ---: |
+| `compact` | 165,740.4 / 160,311.5 | 165,740.4 / 160,311.5 |
+| `first_touch` | 191,955.7 / 151,207.0 | 173,006.5 / 148,394.6 |
+| `breadth_first` | 150,257.7 / 42,096.5 | 150,256.2 / 42,091.1 |
+| `reverse_postorder` | 131,304.2 / 12,696.5 | 139,466.5 / 21,651.8 |
+
+One million nodes, 1,849,803 edges (milliseconds):
+
+| Arrival | Order | `compaction` | `successor_scan` | `predecessor_scan` | `tarjan_scc` |
+| --- | --- | ---: | ---: | ---: | ---: |
+| shuffled | `compact` | 21.3 | 22.2 | 16.5 | 158.9 |
+| shuffled | `first_touch` | 41.9 | 20.6 | 15.8 | 143.6 |
+| shuffled | `breadth_first` | 154.4 | 17.8 | 13.5 | 127.6 |
+| shuffled | `reverse_postorder` | 204.7 | 19.7 | 14.7 | 67.1 |
+| grouped | `compact` | 20.0 | 13.7 | 18.6 | 161.1 |
+| grouped | `first_touch` | 42.3 | 20.8 | 15.1 | 146.6 |
+| grouped | `breadth_first` | 139.8 | 16.9 | 13.8 | 137.9 |
+| grouped | `reverse_postorder` | 187.2 | 19.6 | 14.0 | 69.7 |
+
+The ratios below compare each order with the `compact` row of the same run,
+and give their range over the three runs. A difference is called faster or
+slower only when it has that sign in all three runs.
+
+- Reverse postorder recovers most of the predecessor locality the shuffle
+  took, and `tarjan_scc` takes 0.40 to 0.45 of its `compact` time under both
+  arrivals in every run. Breadth-first recovers less and gains less (0.74 to
+  0.88).
+- Under grouped arrival every order makes the predecessor walk faster (0.73
+  to 0.87) and the successor walk slower (1.22 to 1.62) in every run. Only
+  nodes move, so the edge records keep the order grouped arrival gave them,
+  one run per node in the old node order, and a walk in the new order most
+  likely visits those runs out of order. Neighbor ids beside the edge ids
+  (#87) target that load.
+- Under shuffled arrival breadth-first makes all three reads faster in every
+  run (0.74 to 0.94), and first touch the successor walk (0.89 to 0.97). The
+  walks under reverse postorder, and the predecessor walk and `tarjan_scc`
+  under first touch, moved in both directions between runs, so they show no
+  difference these runs can resolve.
+- An ordered compaction costs 1.8 to 2.1 times a plain one for first touch,
+  6.3 to 9.1 times for breadth-first, and 8.5 to 17 times for reverse
+  postorder. Compacting first does not remove that: in a separate check, an
+  ordered compaction of an already compacted store still cost several times a
+  plain one. Which loads of the search dominate was not isolated.
+- First touch is the weakest order here: neither arrival gives it a
+  meaningful edge order to follow, since one is random and the other is
+  sorted by the shuffled ids.

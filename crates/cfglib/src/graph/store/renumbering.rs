@@ -19,6 +19,12 @@ use super::id::{EdgeTag, Id, IdTag, NodeTag};
 /// Renumberings [`compose`](Self::compose), so a consumer holding identities
 /// from before several compactions folds them into one lookup instead of
 /// replaying each step.
+///
+/// A [`compact`](super::Graph::compact) renumbering keeps relative order:
+/// a lower old identity gets a lower new one. A
+/// [`compact_ordered`](super::Graph::compact_ordered) renumbering keeps it
+/// for edges but may map nodes to any order; every lookup, and
+/// [`compose`](Self::compose), works the same for both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Renumbering<NT: IdTag = NodeTag, ET: IdTag = EdgeTag> {
     nodes: Vec<u32>,
@@ -89,10 +95,13 @@ impl<NT: IdTag, ET: IdTag> Renumbering<NT, ET> {
 
     /// Whether every covered identity kept its number.
     ///
-    /// True exactly when nothing was removed: a removed entity has no new
-    /// number, even when it was the last slot and nothing moved down behind
-    /// it. A compaction that only folded the delta into the base removes
-    /// nothing, and is the identity.
+    /// For a [`compact`](super::Graph::compact) renumbering this is true
+    /// exactly when nothing was removed: a removed entity has no new number,
+    /// even when it was the last slot and nothing moved down behind it. A
+    /// compaction that only folded the delta into the base removes nothing,
+    /// and is the identity. A
+    /// [`compact_ordered`](super::Graph::compact_ordered) renumbering must
+    /// also have left every surviving node at its number.
     #[must_use]
     pub fn is_identity(&self) -> bool {
         is_identity_axis(&self.nodes) && is_identity_axis(&self.edges)
