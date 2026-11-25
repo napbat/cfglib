@@ -3,6 +3,7 @@ use super::harness::{BenchmarkSuite, benchmark_coverage};
 mod address;
 mod analysis;
 mod block_order;
+mod cut;
 mod dataflow;
 mod decomposition;
 mod dyck;
@@ -58,6 +59,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "detect_loops_tagged",
     "detect_patterns",
     "display_label",
+    "edge_disjoint_paths",
     "ext_tsp_order",
     "ext_tsp_score",
     "feedback_arc_set",
@@ -83,7 +85,9 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "meet_options",
     "merge_blocks",
     "merge_blocks_mapped",
+    "min_edge_cut",
     "min_label_relaxation",
+    "min_vertex_cut",
     "multiset_fingerprint",
     "nearest_common_ancestor",
     "no_label",
@@ -236,6 +240,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
 
     analysis::register(suite);
     block_order::register(suite);
+    cut::register(suite);
     dataflow::register(suite);
     decomposition::register(suite);
     dyck::register(suite);
