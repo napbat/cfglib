@@ -36,11 +36,11 @@ pub(in crate::dataflow) trait EdgeStore<N, F> {
 }
 
 /// Every node's and edge's facts, for a solve that returns them all.
-pub(super) struct Dense<F> {
-    pub(super) bottom: F,
-    pub(super) input: Vec<F>,
-    pub(super) output: Vec<F>,
-    pub(super) edge: Vec<Option<F>>,
+pub(in crate::dataflow) struct Dense<F> {
+    pub(in crate::dataflow) bottom: F,
+    pub(in crate::dataflow) input: Vec<F>,
+    pub(in crate::dataflow) output: Vec<F>,
+    pub(in crate::dataflow) edge: Vec<Option<F>>,
 }
 
 impl<N, F: PartialEq> EdgeStore<N, F> for Dense<F> {

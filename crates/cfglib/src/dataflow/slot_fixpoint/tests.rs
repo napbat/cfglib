@@ -5,8 +5,8 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use super::{
-    SequentialExecutor, SlotAccess, SlotFixpointStats, WaveExecutor, ordered_fixpoint,
-    wave_fixpoint,
+    OrderedFixpoint, SequentialExecutor, SlotAccess, SlotFixpointStats, WaveExecutor,
+    ordered_fixpoint, wave_fixpoint,
 };
 use crate::graph::fanout::Fanout;
 use crate::test_util::rng::Rng;
@@ -534,4 +534,172 @@ fn no_units_run_one_empty_sweep() {
     assert_eq!(stats.round_count(), 1);
     assert_eq!(stats.evaluation_count(), 0);
     assert!(stats.converged());
+}
+
+/// A monotone program over one slot per unit and one input slot per unit
+/// after them: unit `u` takes the maximum of its input slot and the slots of
+/// the units it depends on. The caller owns the inputs and edits them.
+struct MaxProgram {
+    dependencies: Vec<Vec<usize>>,
+}
+
+impl MaxProgram {
+    fn random(rng: &mut Rng) -> Self {
+        let units = 1 + rng.below(30);
+        Self {
+            dependencies: (0..units)
+                .map(|_| (0..rng.below(4)).map(|_| rng.below(units)).collect())
+                .collect(),
+        }
+    }
+
+    fn units(&self) -> usize {
+        self.dependencies.len()
+    }
+
+    /// Evaluates `unit` over `slots`, units first and inputs after them.
+    fn evaluate(&self, unit: usize, slots: &mut [u32], access: &mut SlotAccess<usize>) {
+        let input = self.units() + unit;
+        access.read(input);
+        let mut value = slots[input];
+        for &dependency in &self.dependencies[unit] {
+            access.read(dependency);
+            value = value.max(slots[dependency]);
+        }
+        if value != slots[unit] {
+            slots[unit] = value;
+            access.changed(unit);
+        }
+    }
+
+    /// The slots of a fresh ordered fixpoint from `inputs`.
+    fn fresh(&self, inputs: &[u32]) -> Vec<u32> {
+        let mut slots = vec![0; self.units()];
+        slots.extend_from_slice(inputs);
+        ordered_fixpoint(
+            self.units(),
+            |_| true,
+            |unit, access| {
+                self.evaluate(unit, &mut slots, access);
+            },
+        );
+        slots
+    }
+
+    /// `start` and every unit that reads it, directly or through others.
+    fn readers_closure(&self, start: usize) -> Vec<bool> {
+        let mut reached = vec![false; self.units()];
+        let mut stack = vec![start];
+        while let Some(unit) = stack.pop() {
+            if !core::mem::replace(&mut reached[unit], true) {
+                let readers =
+                    (0..self.units()).filter(|&reader| self.dependencies[reader].contains(&unit));
+                stack.extend(readers);
+            }
+        }
+        reached
+    }
+}
+
+#[test]
+fn a_later_run_evaluates_only_the_readers_of_what_an_edit_changed() {
+    for seed in 0..400 {
+        let mut rng = Rng::new(seed);
+        let program = MaxProgram::random(&mut rng);
+        let units = program.units();
+        let mut inputs: Vec<u32> = (0..units)
+            .map(|_| u32::try_from(rng.below(10)).expect("small"))
+            .collect();
+        let mut slots = vec![0; units];
+        slots.extend_from_slice(&inputs);
+        let mut fixpoint = OrderedFixpoint::new(units);
+        let first = fixpoint.run(
+            [],
+            |_| true,
+            |unit, access| {
+                program.evaluate(unit, &mut slots, access);
+            },
+        );
+        assert!(first.converged());
+        assert_eq!(slots, program.fresh(&inputs), "seed {seed}");
+
+        // Raise one unit's input; the caller says that unit is dirty.
+        let edited = rng.below(units);
+        inputs[edited] += 1 + u32::try_from(rng.below(10)).expect("small");
+        slots[units + edited] = inputs[edited];
+        let affected = program.readers_closure(edited);
+        let mut evaluated = Vec::new();
+        let again = fixpoint.run(
+            [edited],
+            |_| true,
+            |unit, access| {
+                evaluated.push(unit);
+                program.evaluate(unit, &mut slots, access);
+            },
+        );
+        assert!(again.converged());
+        assert_eq!(slots, program.fresh(&inputs), "seed {seed}");
+        assert!(
+            evaluated.iter().all(|&unit| affected[unit]),
+            "seed {seed}: {evaluated:?} outside the readers of {edited}"
+        );
+
+        // The same edit through the input slot itself.
+        let other = rng.below(units);
+        inputs[other] += 1;
+        slots[units + other] = inputs[other];
+        assert_eq!(fixpoint.invalidate(&[units + other]), [other]);
+        let affected = program.readers_closure(other);
+        evaluated.clear();
+        fixpoint.run(
+            [],
+            |_| true,
+            |unit, access| {
+                evaluated.push(unit);
+                program.evaluate(unit, &mut slots, access);
+            },
+        );
+        assert_eq!(slots, program.fresh(&inputs), "seed {seed}");
+        assert!(evaluated.iter().all(|&unit| affected[unit]), "seed {seed}");
+    }
+}
+
+#[test]
+fn a_stopped_run_leaves_its_dirty_units_for_the_next() {
+    // Unit `u` copies unit `u + 1`, against the sweep order: one sweep each.
+    let program = MaxProgram {
+        dependencies: (0..10).map(|unit| vec![unit + 1]).chain([vec![]]).collect(),
+    };
+    let mut inputs = vec![0; 11];
+    inputs[10] = 5;
+    let mut slots = vec![0; 11];
+    slots.extend_from_slice(&inputs);
+    let mut fixpoint = OrderedFixpoint::new(11);
+    let stopped = fixpoint.run(
+        [],
+        |sweep| sweep < 3,
+        |unit, access| {
+            program.evaluate(unit, &mut slots, access);
+        },
+    );
+    assert!(!stopped.converged());
+    assert_eq!(stopped.round_count(), 3);
+    let finished = fixpoint.run(
+        [],
+        |_| true,
+        |unit, access| {
+            program.evaluate(unit, &mut slots, access);
+        },
+    );
+    assert!(finished.converged());
+    assert_eq!(slots, program.fresh(&inputs));
+    let idle = fixpoint.run([], |_| true, |_, _| unreachable!("nothing is dirty"));
+    assert_eq!(idle.evaluation_count(), 0);
+}
+
+#[test]
+#[should_panic(expected = "dirty unit is out of range")]
+fn a_dirty_unit_beyond_the_units_panics() {
+    let mut fixpoint = OrderedFixpoint::<usize>::new(2);
+    fixpoint.run([2], |_| true, |_, _| {});
 }

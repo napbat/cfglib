@@ -8,8 +8,7 @@ use core::convert::Infallible;
 
 mod store;
 
-use store::Dense;
-pub(super) use store::EdgeStore;
+pub(super) use store::{Dense, EdgeStore};
 
 use crate::dataflow::bits::DenseBits;
 use crate::dataflow::fixpoint::{
@@ -394,6 +393,13 @@ impl<F> EdgeFacts<F> {
     pub const fn steps(&self) -> usize {
         self.nodes.steps()
     }
+
+    /// The physical input and output facts of every node and the fact on
+    /// every edge slot, for a solve that resumes from them.
+    pub(super) fn into_parts(self) -> (Vec<F>, Vec<F>, Vec<Option<F>>) {
+        let (input, output) = self.nodes.into_parts();
+        (input, output, self.edge)
+    }
 }
 
 /// Solve an edge-sensitive problem to a fixpoint without a step limit.
@@ -416,7 +422,9 @@ where
 /// Every fact starts at bottom, but only the seeds and nodes reached by changed
 /// edge facts enter the deterministic worklist. Duplicate seeds are ignored.
 /// This supports reachable-only verification and incremental analysis without
-/// manufacturing facts for disconnected nodes.
+/// manufacturing facts for disconnected nodes. To re-solve after an edit
+/// from the facts of the solve before it, use
+/// [`resume_edge_problem`](crate::resume_edge_problem).
 ///
 /// # Panics
 ///
@@ -582,7 +590,7 @@ where
     G: EdgeView,
     P: TryEdgeProblem<G>,
 {
-    let every = |_: Option<&WeakTopologicalOrder<G::NodeId>>| {
+    let every = || {
         let bottom = problem.bottom(graph);
         let mut edge = vec![None; graph.edge_bound()];
         for edge_id in graph.edge_ids() {
@@ -595,7 +603,22 @@ where
             bottom,
         }
     };
-    let (facts, steps) = solve_edges(graph, problem, worklist, config, every)?;
+    solve_dense(graph, problem, worklist, config, every)
+}
+
+/// The edge solver over every fact, from the facts that `facts` builds.
+pub(super) fn solve_dense<G, P>(
+    graph: &G,
+    problem: &P,
+    worklist: Worklist,
+    config: SolveConfig,
+    facts: impl FnOnce() -> Dense<P::Fact>,
+) -> Result<EdgeFacts<P::Fact>, TrySolveError<P::Error>>
+where
+    G: EdgeView,
+    P: TryEdgeProblem<G>,
+{
+    let (facts, steps) = solve_edges(graph, problem, worklist, config, |_| facts())?;
     Ok(EdgeFacts {
         nodes: Facts::new(facts.input, facts.output, steps),
         edge: facts.edge,

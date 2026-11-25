@@ -7,14 +7,14 @@ use std::fmt;
 
 use cfglib::{
     BlockId, Cfg, Direction, Edge, EdgeFacts, EdgeId, EdgeKind, EdgeProblem, EdgeRef, EdgeView,
-    FilteredEdges, IterationOrder, KindedEdge, Reachable, ReachableEdgeProblem, SolveConfig,
-    SolveError, TrySolveError, solve_edge_problem, solve_edge_problem_from,
-    solve_edge_problem_from_with_config, solve_edge_problem_with_config, stream_edge_problem,
-    try_solve_edge_problem, try_solve_edge_problem_from, try_solve_edge_problem_from_with_config,
-    try_solve_edge_problem_with_config,
+    FilteredEdges, IterationOrder, KindedEdge, Reachable, ReachableEdgeProblem, ResumeMode,
+    SolveConfig, SolveError, TrySolveError, resume_edge_problem, solve_edge_problem,
+    solve_edge_problem_from, solve_edge_problem_from_with_config, solve_edge_problem_with_config,
+    stream_edge_problem, try_solve_edge_problem, try_solve_edge_problem_from,
+    try_solve_edge_problem_from_with_config, try_solve_edge_problem_with_config,
 };
 
-use crate::graphs::{GenKill, ORDERS, Rng, Shape, union};
+use crate::graphs::{Edit, GenKill, ORDERS, Rng, Shape, union};
 use crate::lifted::Lifted;
 use crate::reference::edge_round_robin;
 
@@ -678,6 +678,61 @@ fn a_stream_visits_every_live_node_once_with_the_facts_of_the_solve() {
                 assert_eq!(stats.steps(), facts.steps(), "steps: {what}");
                 visited.sort_unstable();
                 assert_eq!(visited, shape.live(), "visits: {what}");
+            }
+        }
+    }
+}
+
+/// After a random edit — an added or removed edge of any kind, unwind edges
+/// included, or new effects for one block — resuming from the previous node
+/// and edge facts gives those of a fresh solve, forward and backward; a
+/// forward edit that only adds an edge can also grow them.
+#[test]
+fn a_resume_after_an_edit_equals_a_fresh_solve_of_the_edited_graph() {
+    let mut rng = Rng::new(36);
+    let kinds = [
+        EdgeKind::Fallthrough,
+        EdgeKind::ConditionalTrue,
+        EdgeKind::ExceptionUnwind,
+    ];
+    for round in 0..300 {
+        for direction in [Direction::Forward, Direction::Backward] {
+            let only_grow = round % 2 == 0;
+            let shape = Shape::random(&mut rng, false, true);
+            let mut effects = GenKill::random(&mut rng, shape.blocks);
+            let mut cfg = shape.cfg();
+            let before = solve_edge_problem(
+                &cfg,
+                &Labels {
+                    effects: &effects,
+                    direction,
+                },
+            )
+            .unwrap();
+            let edit = Edit::random(&mut rng, &mut cfg, &mut effects, &shape, &kinds, only_grow);
+            let problem = Labels {
+                effects: &effects,
+                direction,
+            };
+            let fresh = solve_edge_problem(&cfg, &problem).unwrap();
+            let modes: &[ResumeMode] = if only_grow && direction == Direction::Forward {
+                &[ResumeMode::Reset, ResumeMode::Grow]
+            } else {
+                &[ResumeMode::Reset]
+            };
+            for &mode in modes {
+                let what = format!("{mode:?} {direction:?} after {edit:?}, {shape:?}");
+                let changed = [edit.changed(direction)];
+                let config = SolveConfig::new();
+                let resumed = resume_edge_problem(
+                    &cfg,
+                    &Lifted(&problem),
+                    before.clone(),
+                    &changed,
+                    mode,
+                    config,
+                );
+                assert_same_edge_facts(&resumed.unwrap(), &fresh, &shape, &what);
             }
         }
     }

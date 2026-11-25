@@ -43,6 +43,7 @@ impl<K> SlotAccess<K> {
 
 /// A queue of unit indices without duplicates. The lowest index comes out
 /// first. The queue is a bit row, so a push allocates nothing.
+#[derive(Debug, Clone)]
 struct Queue {
     queued: DenseBits,
     /// The words below this index hold no queued unit.
@@ -70,6 +71,13 @@ impl Queue {
         self.queued.insert(index);
     }
 
+    /// Queues every unit that `other` holds.
+    fn absorb(&mut self, other: &Self) {
+        for index in other.queued.ones() {
+            self.insert(index);
+        }
+    }
+
     fn pop_first(&mut self) -> Option<usize> {
         let words = self.queued.words();
         while let Some(&word) = words.get(self.cursor) {
@@ -81,6 +89,168 @@ impl Queue {
             self.cursor += 1;
         }
         None
+    }
+}
+
+/// The ordered driver with its dependency index kept between runs, so a
+/// later run evaluates only the units that an edit affects.
+///
+/// [`ordered_fixpoint`] rebuilds the index of which unit read which slot on
+/// every call and starts with every unit dirty. An editor-style consumer
+/// (name resolution over files, per-declaration units) keeps one
+/// `OrderedFixpoint` instead: the first [`run`](Self::run) evaluates every
+/// unit, and each later run starts from the units the caller names and from
+/// the readers of the slots that [`invalidate`](Self::invalidate) was told
+/// about, then follows the recorded reads exactly as the first run did. This
+/// is the destabilization of the incremental top-down solver (Erhard et al.,
+/// STTT 2024; Stade, Tilscher, Seidl, CAV 2024) over the recorded read sets.
+///
+/// # Examples
+///
+/// ```
+/// use cfglib::{OrderedFixpoint, SlotAccess};
+///
+/// // Unit `u` copies slot `u + 1` into slot `u`.
+/// fn copy(slots: &mut [i32; 4], unit: usize, access: &mut SlotAccess<usize>) {
+///     access.read(unit + 1);
+///     if slots[unit] != slots[unit + 1] {
+///         slots[unit] = slots[unit + 1];
+///         access.changed(unit);
+///     }
+/// }
+///
+/// let mut slots = [0, 0, 0, 7];
+/// let mut fixpoint = OrderedFixpoint::new(3);
+/// let first = fixpoint.run([], |_| true, |unit, access| copy(&mut slots, unit, access));
+/// assert_eq!((slots, first.evaluation_count()), ([7; 4], 5));
+///
+/// // The caller edits slot 3 outside a run: only the chain of its readers
+/// // runs again, one unit each.
+/// slots[3] = 9;
+/// assert_eq!(fixpoint.invalidate(&[3]), [2]);
+/// let again = fixpoint.run([], |_| true, |unit, access| copy(&mut slots, unit, access));
+/// assert_eq!((slots, again.evaluation_count()), ([9; 4], 3));
+///
+/// // Nothing is dirty any more.
+/// let idle = fixpoint.run([], |_| true, |unit, access| copy(&mut slots, unit, access));
+/// assert_eq!(idle.evaluation_count(), 0);
+/// ```
+#[derive(Debug, Clone)]
+pub struct OrderedFixpoint<K> {
+    /// The sorted, distinct slots that the latest evaluation of each unit
+    /// read.
+    reads: Vec<Vec<K>>,
+    /// The same relation inverted: a slot and a unit that read it.
+    readers: BTreeSet<(K, usize)>,
+    /// The units the next run starts with.
+    dirty: Queue,
+}
+
+impl<K: Ord + Clone> OrderedFixpoint<K> {
+    /// A driver over the units `0..units` with every unit dirty, so the
+    /// first run evaluates them all.
+    #[must_use]
+    pub fn new(units: usize) -> Self {
+        Self {
+            reads: (0..units).map(|_| Vec::new()).collect(),
+            readers: BTreeSet::new(),
+            dirty: Queue::full(units),
+        }
+    }
+
+    /// Runs ordered sweeps until no unit is dirty, as [`ordered_fixpoint`]
+    /// does, from the units already dirty and the units in `dirty`.
+    ///
+    /// A unit that changes a slot makes every unit whose latest evaluation
+    /// read it dirty, whether that evaluation ran in this run or an earlier
+    /// one. When `proceed` stops the run, the units still dirty stay dirty
+    /// for the next run.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a unit in `dirty` is out of range.
+    pub fn run(
+        &mut self,
+        dirty: impl IntoIterator<Item = usize>,
+        mut proceed: impl FnMut(usize) -> bool,
+        mut evaluate: impl FnMut(usize, &mut SlotAccess<K>),
+    ) -> SlotFixpointStats {
+        let units = self.reads.len();
+        for unit in dirty {
+            assert!(unit < units, "dirty unit is out of range");
+            self.dirty.insert(unit);
+        }
+        let mut stats = SlotFixpointStats::default();
+        let mut current = mem::replace(&mut self.dirty, Queue::new(units));
+        let mut next = Queue::new(units);
+        let mut access = SlotAccess::new();
+        for sweep in 0.. {
+            if !proceed(sweep) {
+                current.absorb(&next);
+                self.dirty = current;
+                return stats;
+            }
+            stats.rounds += 1;
+            let mut changed = false;
+            while let Some(unit) = current.pop_first() {
+                access.reads.clear();
+                evaluate(unit, &mut access);
+                stats.evaluations += 1;
+                access.reads.sort_unstable();
+                access.reads.dedup();
+                // Record the new reads before the changes queue their
+                // readers: a unit that changes a slot that it read runs again
+                // next sweep.
+                if access.reads != self.reads[unit] {
+                    for key in self.reads[unit].drain(..) {
+                        self.readers.remove(&(key, unit));
+                    }
+                    let unit_reads = access.reads.iter().map(|key| (key.clone(), unit));
+                    self.readers.extend(unit_reads);
+                    mem::swap(&mut self.reads[unit], &mut access.reads);
+                }
+                for key in access.changes.drain(..) {
+                    changed = true;
+                    for reader in self.readers_of(key) {
+                        if reader > unit {
+                            current.insert(reader);
+                        } else {
+                            next.insert(reader);
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+            mem::swap(&mut current, &mut next);
+        }
+        stats.converged = true;
+        stats
+    }
+
+    /// Makes dirty every unit whose latest evaluation read one of `slots`,
+    /// after the caller changed them outside a run, and returns those
+    /// units, ascending and distinct. The next [`run`](Self::run) evaluates
+    /// them.
+    pub fn invalidate(&mut self, slots: &[K]) -> Vec<usize> {
+        let mut readers: Vec<usize> = slots
+            .iter()
+            .flat_map(|key| self.readers_of(key.clone()))
+            .collect();
+        readers.sort_unstable();
+        readers.dedup();
+        for &reader in &readers {
+            self.dirty.insert(reader);
+        }
+        readers
+    }
+
+    /// The units whose latest evaluation read `key`, ascending.
+    fn readers_of(&self, key: K) -> impl Iterator<Item = usize> + '_ {
+        self.readers
+            .range((key.clone(), 0)..=(key, usize::MAX))
+            .map(|&(_, reader)| reader)
     }
 }
 
@@ -110,6 +280,10 @@ impl Queue {
 /// `proceed` returns `false`, the fixpoint stops and is not converged. Put a
 /// sweep limit or a work budget in `proceed`.
 ///
+/// This is the first run of an [`OrderedFixpoint`], which keeps the reads it
+/// recorded so that a later run after an edit evaluates only what the edit
+/// affects.
+///
 /// # Examples
 ///
 /// ```
@@ -132,54 +306,8 @@ impl Queue {
 /// ```
 pub fn ordered_fixpoint<K: Ord + Clone>(
     units: usize,
-    mut proceed: impl FnMut(usize) -> bool,
-    mut evaluate: impl FnMut(usize, &mut SlotAccess<K>),
+    proceed: impl FnMut(usize) -> bool,
+    evaluate: impl FnMut(usize, &mut SlotAccess<K>),
 ) -> SlotFixpointStats {
-    let mut stats = SlotFixpointStats::default();
-    // The sorted, distinct slots that the latest evaluation of each unit
-    // read, and the same relation inverted.
-    let mut reads: Vec<Vec<K>> = (0..units).map(|_| Vec::new()).collect();
-    let mut readers: BTreeSet<(K, usize)> = BTreeSet::new();
-    let mut current = Queue::full(units);
-    let mut next = Queue::new(units);
-    let mut access = SlotAccess::new();
-    for sweep in 0.. {
-        if !proceed(sweep) {
-            return stats;
-        }
-        stats.rounds += 1;
-        let mut changed = false;
-        while let Some(unit) = current.pop_first() {
-            access.reads.clear();
-            evaluate(unit, &mut access);
-            stats.evaluations += 1;
-            access.reads.sort_unstable();
-            access.reads.dedup();
-            // Record the new reads before the changes queue their readers: a
-            // unit that changes a slot that it read runs again next sweep.
-            if access.reads != reads[unit] {
-                for key in reads[unit].drain(..) {
-                    readers.remove(&(key, unit));
-                }
-                readers.extend(access.reads.iter().map(|key| (key.clone(), unit)));
-                mem::swap(&mut reads[unit], &mut access.reads);
-            }
-            for key in access.changes.drain(..) {
-                changed = true;
-                for &(_, reader) in readers.range((key.clone(), 0)..=(key, usize::MAX)) {
-                    if reader > unit {
-                        current.insert(reader);
-                    } else {
-                        next.insert(reader);
-                    }
-                }
-            }
-        }
-        if !changed {
-            break;
-        }
-        mem::swap(&mut current, &mut next);
-    }
-    stats.converged = true;
-    stats
+    OrderedFixpoint::new(units).run([], proceed, evaluate)
 }

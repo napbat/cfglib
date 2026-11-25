@@ -6,10 +6,11 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use cfglib::{
-    Direction, Facts, Graph, GraphView, IterationOrder, NodeId, NodeProblem, SolveConfig,
-    SolveError, TryNodeProblem, TrySolveError, solve_node_problem, solve_node_problem_from,
-    solve_node_problem_from_with_config, solve_node_problem_with_config, stream_node_problem,
-    try_solve_node_problem, try_solve_node_problem_from, try_solve_node_problem_from_with_config,
+    Direction, Facts, Graph, GraphView, IterationOrder, NodeId, NodeProblem, ResumeMode,
+    SolveConfig, SolveError, TryNodeProblem, TrySolveError, resume_node_problem,
+    solve_node_problem, solve_node_problem_from, solve_node_problem_from_with_config,
+    solve_node_problem_with_config, stream_node_problem, try_solve_node_problem,
+    try_solve_node_problem_from, try_solve_node_problem_from_with_config,
     try_solve_node_problem_with_config,
 };
 
@@ -586,6 +587,76 @@ fn a_stream_visits_every_live_node_once_with_the_facts_of_the_solve() {
                     stream_node_problem(&graph, &verifying, config, visit).unwrap()
                 };
                 assert_streams_like(&facts, graph.node_ids(), stream, &what);
+            }
+        }
+    }
+}
+
+/// After a random edit of a consumer view — an edge added or removed, or a
+/// node that becomes a source — resuming from the previous facts gives the
+/// taint of a fresh solve, forward and backward. An edit that only adds
+/// taint can also grow the previous facts instead of resetting them.
+#[test]
+fn a_resume_after_an_edit_equals_a_fresh_solve_of_the_edited_graph() {
+    let mut rng = Rng::new(25);
+    for _ in 0..300 {
+        for direction in [Direction::Forward, Direction::Backward] {
+            let shape = Shape::random(&mut rng, false, false);
+            let mut graph = SymbolGraph::from_shape(&shape);
+            let mut sources = random_sources(&mut rng, &shape);
+            let previous = solve_node_problem(
+                &graph,
+                &Taint {
+                    sources: sources.clone(),
+                    direction,
+                },
+            )
+            .unwrap();
+            let live: Vec<u32> = graph.node_ids().collect();
+            let pick = |rng: &mut Rng| live[rng.below(live.len())];
+            let (changed, grows) = match rng.below(3) {
+                0 if !graph.edges.is_empty() => {
+                    let (source, target) = graph.edges.swap_remove(rng.below(graph.edges.len()));
+                    let changed = match direction {
+                        Direction::Forward => target,
+                        Direction::Backward => source,
+                    };
+                    (changed, false)
+                }
+                1 => {
+                    let node = pick(&mut rng);
+                    sources.push(node);
+                    (node, true)
+                }
+                _ => {
+                    let (source, target) = (pick(&mut rng), pick(&mut rng));
+                    graph.edges.push((source, target));
+                    let changed = match direction {
+                        Direction::Forward => target,
+                        Direction::Backward => source,
+                    };
+                    (changed, true)
+                }
+            };
+            let problem = Taint { sources, direction };
+            let fresh = solve_node_problem(&graph, &problem).unwrap();
+            let modes: &[ResumeMode] = if grows {
+                &[ResumeMode::Reset, ResumeMode::Grow]
+            } else {
+                &[ResumeMode::Reset]
+            };
+            for &mode in modes {
+                let what = format!("{mode:?} {direction:?} at {changed}, {shape:?}");
+                let config = SolveConfig::new();
+                let resumed = resume_node_problem(
+                    &graph,
+                    &Lifted(&problem),
+                    previous.clone(),
+                    &[changed],
+                    mode,
+                    config,
+                );
+                assert_same_facts(&resumed.unwrap(), &fresh, graph.node_ids(), &what);
             }
         }
     }
