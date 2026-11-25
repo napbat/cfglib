@@ -10,6 +10,7 @@ mod fixtures;
 mod frequency;
 mod graph;
 mod pipeline;
+mod reach_index;
 mod relaxation;
 mod summaries;
 mod transform;
@@ -215,6 +216,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     frequency::register(suite);
     graph::register(suite);
     pipeline::register(suite);
+    reach_index::register(suite);
     relaxation::register(suite);
     summaries::register(suite);
     transform::register(suite);

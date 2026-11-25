@@ -5,17 +5,20 @@
 //! shaped analyses over a `Graph` with edge payloads), `common_ancestors` and
 //! `nearest_common_ancestor` (class linearization, shared callers), `Reversed`, `reachable` and
 //! `reverse_postorder` over views that store only forward adjacency, `call_graph` with
-//! `propagate_summaries` over a multi-function program, and `DisjointSet`.
+//! `propagate_summaries` over a multi-function program, `ReachIndex` for repeated pairwise
+//! reachability, and `DisjointSet`.
 //!
 //! Every answer is checked against a brute-force oracle written in the test: naive repeated-scan
 //! forward chaining, Bellman-Ford style relaxation, explicit ancestor sets with hop distances, a
-//! recursive depth-first walk, reachability by enumeration, and a plain relabeling partition.
+//! recursive depth-first walk, reachability by enumeration, breadth-first distances, and a plain
+//! relabeling partition.
 
 mod ancestors_and_views;
 mod call_programs;
 mod digraph;
 mod disjoint_sets;
 mod horn_and_relaxation;
+mod reach_index;
 
 /// A linear congruential generator, so every scenario is reproducible without a dependency.
 struct Lcg(u64);

@@ -314,6 +314,7 @@ pub use graph::open::{
     open_breadth_first_events, open_breadth_first_paths, open_depth_first_events,
     open_fold_post_order, open_fold_post_order_memoized, open_search,
 };
+pub use graph::reach_index::{ReachIndex, ReachIndexConfig, ReachScratch};
 pub use graph::reducible::make_reducible;
 pub use graph::relax::min_label_relaxation;
 pub use graph::reverse::reverse_cfg;
