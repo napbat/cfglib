@@ -4,5 +4,6 @@
 mod cases;
 mod control_dependence;
 mod differential;
+mod edge_dominance;
 mod exhaustive;
 mod reference;

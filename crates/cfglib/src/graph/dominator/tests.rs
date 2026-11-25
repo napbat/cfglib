@@ -10,6 +10,7 @@ use crate::test_util::MockInst;
 mod adversarial;
 mod determinism;
 mod differential;
+mod edge_dominance;
 mod exhaustive;
 mod forest;
 mod frontier;

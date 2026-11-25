@@ -16,9 +16,10 @@
 //! any [`GraphView`], `numbering` numbers a forest from its parent table,
 //! `forest` extends a tree over the code its root misses, `frontier` answers
 //! dominance-frontier queries over the numbered tree, `frontier_table`
-//! computes the frontier of every node at once, and `post` builds the
+//! computes the frontier of every node at once, `edge_dominance` answers
+//! whether every path to a node takes one edge, and `post` builds the
 //! post-dominator tree on the first two and answers its frontier queries with
-//! `frontier`. This module holds the tree and its queries.
+//! `frontier`. This module holds the tree and its node queries.
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -34,6 +35,7 @@ use numbering::{Numbered, NumberingBuffers};
 pub use post::{PostDominatorScratch, PostDominatorTree, PostNode};
 
 mod construction;
+mod edge_dominance;
 mod forest;
 mod frontier;
 mod frontier_table;
