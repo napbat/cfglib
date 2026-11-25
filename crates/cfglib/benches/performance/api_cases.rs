@@ -4,6 +4,7 @@ mod address;
 mod analysis;
 mod block_order;
 mod dataflow;
+mod decomposition;
 mod dyck;
 mod feedback;
 mod fixtures;
@@ -150,6 +151,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "to_text",
     "topological_sort",
     "topological_sort_or_cycle",
+    "tree_decomposition",
     "try_solve_edge_problem",
     "try_solve_edge_problem_from",
     "try_solve_edge_problem_from_with_config",
@@ -231,6 +233,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     analysis::register(suite);
     block_order::register(suite);
     dataflow::register(suite);
+    decomposition::register(suite);
     dyck::register(suite);
     feedback::register(suite);
     frequency::register(suite);

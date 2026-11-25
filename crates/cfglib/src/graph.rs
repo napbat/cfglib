@@ -39,6 +39,7 @@ pub mod store;
 pub mod structure;
 pub mod text;
 pub mod traverse;
+pub mod tree_decomposition;
 pub mod verify;
 pub mod view;
 pub(crate) mod virtual_root;

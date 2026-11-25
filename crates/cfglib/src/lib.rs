@@ -380,6 +380,7 @@ pub use graph::traverse::{
     depth_first_preorder, nearest_common_ancestor, reachable, reverse_postorder, shortest_path,
     topological_sort, topological_sort_or_cycle,
 };
+pub use graph::tree_decomposition::{EliminationHeuristic, TreeDecomposition, tree_decomposition};
 pub use graph::verify::{
     SemanticValidator, SemanticVerifyReport, VerifyError, VerifyReport, verify, verify_edge_view,
     verify_view, verify_with,
