@@ -10,6 +10,7 @@
 //!   the test module's location and fence vocabularies.
 //! - [`shapes`] — block-and-edge shapes shared by the reusable-scratch
 //!   differential tests.
+//! - [`digraphs`] — every small digraph, and a graph from an edge list.
 //! - [`golden`] — exact-output comparison against `tests/golden` files.
 //! - [`postdominance`] — post-dominance without a unique exit, by fixpoint.
 //! - [`rng`] — a seeded generator for reproducible randomized tests.
@@ -20,6 +21,7 @@
 //! test modules don't need to define their own instruction types.
 
 mod dataflow_inst;
+pub(crate) mod digraphs;
 pub(crate) mod golden;
 mod live_variables;
 mod memory_inst;

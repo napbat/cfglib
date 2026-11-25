@@ -1,18 +1,9 @@
 use super::*;
-use crate::graph::store::{Graph, NodeId};
+use crate::graph::store::NodeId;
+use crate::test_util::digraphs::{for_each_multigraph, graph_of};
 use crate::test_util::postdominance::{Fixpoint, post_dominance, two_successor_dependences};
 use crate::test_util::rng::Rng;
 use alloc::vec;
-
-/// The graph over `count` nodes with `edges`, by node index.
-fn graph_of(count: usize, edges: &[(usize, usize)]) -> Graph<(), ()> {
-    let mut graph = Graph::new();
-    let nodes: Vec<NodeId> = (0..count).map(|_| graph.add_node(())).collect();
-    for &(from, to) in edges {
-        graph.add_edge(nodes[from], nodes[to], ());
-    }
-    graph
-}
 
 /// Check every dependent of the graph against the two-successor definition
 /// over max post-dominance, the least fixpoint of Hecker et al.'s rules,
@@ -42,25 +33,6 @@ fn check(count: usize, edges: &[(usize, usize)], scratch: &mut NonterminationScr
             controllers, wanted,
             "{dependent} in {count} nodes, {edges:?}"
         );
-    }
-}
-
-/// Visit every graph over `count` nodes in which each ordered pair, self-loops
-/// included, is an edge `0..=copies` times.
-fn for_each_multigraph(count: usize, copies: usize, mut visit: impl FnMut(&[(usize, usize)])) {
-    let mut multiplicity = vec![0; count * count];
-    loop {
-        let edges: Vec<(usize, usize)> = multiplicity
-            .iter()
-            .enumerate()
-            .flat_map(|(pair, &times)| core::iter::repeat_n((pair / count, pair % count), times))
-            .collect();
-        visit(&edges);
-        let Some(digit) = multiplicity.iter().position(|&times| times < copies) else {
-            return;
-        };
-        multiplicity[..digit].fill(0);
-        multiplicity[digit] += 1;
     }
 }
 
