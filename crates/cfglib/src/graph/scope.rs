@@ -30,6 +30,7 @@
 mod cursor;
 mod environment;
 mod first;
+mod index;
 mod query;
 mod storage;
 
@@ -39,10 +40,10 @@ mod tests;
 pub use cursor::{ScopeCursor, ScopeCursorQuery};
 pub use environment::{ScopeEnvironmentCache, ScopeEnvironmentQuery};
 pub use first::{ScopeFirstResolution, ScopeFirstResolutionError};
+pub use index::{ScopeGraphChanges, ScopeIndexUpdate, ScopeResolutionIndex};
 pub use query::{
     ScopeGraphPathLabel, ScopeGraphQuery, ScopeLinearResolutionError, ScopePath, ScopeQuery,
-    ScopeResolution, ScopeResolutionCandidate, ScopeResolutionConfig, ScopeResolutionIndex,
-    ScopeResolutionStats,
+    ScopeResolution, ScopeResolutionCandidate, ScopeResolutionConfig, ScopeResolutionStats,
 };
 pub use storage::{
     Scope, ScopeDatum, ScopeDatumId, ScopeEdgeId, ScopeEdgeTag, ScopeGraph, ScopeId,

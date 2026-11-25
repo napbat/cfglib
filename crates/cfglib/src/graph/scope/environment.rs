@@ -11,9 +11,10 @@ use smallvec::SmallVec;
 use crate::graph::edge_view::EdgeRef;
 use crate::graph::scc::tarjan_scc;
 
+use super::index::ScopeResolutionIndex;
 use super::query::{
     ScopeGraphPathLabel, ScopePath, ScopeQuery, ScopeResolution, ScopeResolutionCandidate,
-    ScopeResolutionConfig, ScopeResolutionIndex, ScopeResolutionStats,
+    ScopeResolutionConfig, ScopeResolutionStats,
 };
 use super::storage::{ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeId, ScopeReferenceId};
 

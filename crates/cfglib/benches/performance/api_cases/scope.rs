@@ -1,17 +1,21 @@
-//! Scope-graph indexes: every reference resolved on its own against one
-//! environment cache shared by all of them.
+//! Scope-graph indexes: every reference resolved on its own, against one
+//! environment cache shared by all of them, or again after an edit.
 //!
 //! The lexical chain is the shape of a source file: references in nested
 //! blocks climb the same parents and imports, which `compute` walks once per
-//! reference and `compute_cached` once per scope. The stacked inheritance
-//! diamonds reach one member along `2^d` equally specific paths, every one of
-//! which both resolvers keep, so their cost grows with that output.
+//! reference and `compute_cached` once per scope; `compute_tracked` walks it
+//! as `compute` does and records what each reference read. An edit of one
+//! leaf scope there is read by the references of one block, which `update`
+//! resolves again. The stacked inheritance diamonds reach one member along
+//! `2^d` equally specific paths, every one of which both resolvers keep, so
+//! their cost grows with that output.
 
 use std::cmp::Ordering;
 
 use cfglib::{
-    EdgeRef, ScopeDatumId, ScopeEdgeId, ScopeEnvironmentQuery, ScopeGraph, ScopeGraphPathLabel,
-    ScopeGraphQuery, ScopeId, ScopePath, ScopeQuery, ScopeResolutionConfig, ScopeResolutionIndex,
+    EdgeRef, ScopeDatumId, ScopeEdgeId, ScopeEnvironmentQuery, ScopeGraph, ScopeGraphChanges,
+    ScopeGraphPathLabel, ScopeGraphQuery, ScopeId, ScopeIndexUpdate, ScopePath, ScopeQuery,
+    ScopeResolutionConfig, ScopeResolutionIndex,
 };
 
 use super::BenchmarkSuite;
@@ -139,27 +143,30 @@ impl ScopeEnvironmentQuery<(), Label, (), u32, u32> for Lexical {
 /// `LEVELS` nested blocks, each with a parent edge to the enclosing one and
 /// an import of its own module. Block `i` declares `2 i` and its module
 /// declares `2 i + 1`. `REFERENCES` references, spread over the blocks, each
-/// name something declared at or around its block.
-fn lexical_chain() -> Names {
+/// name something declared at or around its block. Also returns the
+/// innermost module, a leaf scope that only the innermost block reads.
+fn lexical_chain() -> (Names, ScopeId) {
     let mut graph = Names::new();
     let mut blocks = Vec::new();
+    let mut module = None;
     for level in 0..LEVELS {
         let block = graph.add_scope(());
-        let module = graph.add_scope(());
+        let imported = graph.add_scope(());
         if let Some(&outer) = blocks.last() {
             graph.add_edge(block, outer, Label::Parent);
         }
-        graph.add_edge(block, module, Label::Import);
+        graph.add_edge(block, imported, Label::Import);
         graph.add_datum(block, (), 2 * level);
-        graph.add_datum(module, (), 2 * level + 1);
+        graph.add_datum(imported, (), 2 * level + 1);
         blocks.push(block);
+        module = Some(imported);
     }
     for reference in 0..REFERENCES {
         let level = reference % LEVELS;
         let name = fixture_u32(reference as usize) % (2 * (level + 1));
         graph.add_reference(blocks[level as usize], name);
     }
-    graph
+    (graph, module.expect("the chain has a level"))
 }
 
 /// `diamonds` stacked inheritance diamonds: class `3 k` derives `3 k + 1`
@@ -211,7 +218,7 @@ fn assert_diamond_routes(graph: &Names, index: &ScopeResolutionIndex, diamonds: 
 
 pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     let config = ScopeResolutionConfig::new();
-    let chain = lexical_chain();
+    let (chain, leaf) = lexical_chain();
     benchmark_case!(
         suite,
         "scope_index_lexical_chain",
@@ -223,6 +230,31 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         "scope_index_cached_lexical_chain",
         || ScopeResolutionIndex::compute_cached(&chain, &Lexical, config),
         |index| assert_chain_resolved(&chain, index)
+    );
+    benchmark_case!(
+        suite,
+        "scope_index_tracked_lexical_chain",
+        || ScopeResolutionIndex::compute_tracked(&chain, &Lexical, config),
+        |index| assert_chain_resolved(&chain, index)
+    );
+    // One new datum in the innermost module: only the references of the
+    // innermost block read it. Every run repeats the same update, which
+    // resolves them again and changes nothing after the first.
+    let mut index = ScopeResolutionIndex::compute_tracked(&chain, &Lexical, config);
+    let mut edited = chain.clone();
+    edited.add_datum(leaf, (), 2 * LEVELS);
+    let changes = ScopeGraphChanges {
+        scopes: vec![leaf],
+        references: Vec::new(),
+    };
+    benchmark_case!(
+        suite,
+        "scope_index_update_leaf_datum",
+        || index.update(&edited, &Lexical, config, &changes),
+        |update: &ScopeIndexUpdate| assert_eq!(
+            update.resolved_count,
+            (REFERENCES / LEVELS) as usize
+        )
     );
 
     // Sixteen diamonds would give the top class 2^16 visible paths, which
