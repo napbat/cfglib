@@ -83,6 +83,11 @@ memoized and fixpoint folds over stacked diamonds, a fixpoint fold over a
 re-export ring, and a linear stack reverse index. Cases there that time a
 method or constructor name no facade function.
 
+`api_cases/scope.rs` compares `ScopeResolutionIndex::compute` with
+`compute_cached` on ten thousand references in a hundred nested blocks with an
+import each, and on stacked inheritance diamonds. These cases time methods and
+name no facade function.
+
 ## CPU timing
 
 The default build installs `std::alloc::System` directly as the global

@@ -17,6 +17,7 @@ mod pipeline;
 mod program_structure;
 mod reach_index;
 mod relaxation;
+mod scope;
 mod strong_cuts;
 mod summaries;
 mod transform;
@@ -245,6 +246,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     program_structure::register(suite);
     reach_index::register(suite);
     relaxation::register(suite);
+    scope::register(suite);
     strong_cuts::register(suite);
     summaries::register(suite);
     transform::register(suite);

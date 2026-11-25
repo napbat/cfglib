@@ -99,7 +99,7 @@ pub struct ScopePath {
 }
 
 impl ScopePath {
-    fn new(start: ScopeId) -> Self {
+    pub(super) fn new(start: ScopeId) -> Self {
         let mut scopes = SmallVec::new();
         scopes.push(start);
         Self {
@@ -108,10 +108,15 @@ impl ScopePath {
         }
     }
 
+    /// Appends the hop across `edge` to `target`.
+    pub(super) fn push(&mut self, edge: ScopeEdgeId, target: ScopeId) {
+        self.edges.push(edge);
+        self.scopes.push(target);
+    }
+
     fn extended(&self, edge: ScopeEdgeId, target: ScopeId) -> Self {
         let mut path = self.clone();
-        path.edges.push(edge);
-        path.scopes.push(target);
+        path.push(edge, target);
         path
     }
 
@@ -380,6 +385,10 @@ pub struct ScopeResolutionCandidate {
 }
 
 impl ScopeResolutionCandidate {
+    pub(super) const fn new(datum: ScopeDatumId, path: ScopePath) -> Self {
+        Self { datum, path }
+    }
+
     /// The relation-tagged datum reached by this path.
     #[must_use]
     pub const fn datum(&self) -> ScopeDatumId {
@@ -727,6 +736,15 @@ impl ScopeResolution {
         P: ScopeGraphQuery<S, L, R, D, Q>,
     {
         let candidates = visible_candidates(graph, input, query, reachable);
+        Self::from_visible(input, candidates, stats)
+    }
+
+    /// A result for `input` whose `candidates` are already the visible ones.
+    pub(super) fn from_visible<Q>(
+        input: &ScopeQuery<'_, Q>,
+        candidates: SmallVec<[ScopeResolutionCandidate; 1]>,
+        stats: ScopeResolutionStats,
+    ) -> Self {
         Self {
             start_scope: input.scope(),
             reference: input.reference(),
@@ -800,10 +818,19 @@ impl ScopeResolutionIndex {
     where
         P: ScopeGraphQuery<S, L, R, D, Q>,
     {
-        let resolutions: Vec<_> = graph
+        let resolutions = graph
             .reference_ids()
             .map(|reference| ScopeResolution::compute(graph, reference, query, config))
             .collect();
+        Self::from_resolutions(graph, resolutions)
+    }
+
+    /// Builds the reverse index over `resolutions`, one per reference of
+    /// `graph` in identity order.
+    pub(super) fn from_resolutions<S, L, R, D, Q>(
+        graph: &ScopeGraph<S, L, R, D, Q>,
+        resolutions: Vec<ScopeResolution>,
+    ) -> Self {
         let mut references_by_datum = vec![Vec::new(); graph.datum_count()];
         for (reference, resolution) in graph.reference_ids().zip(&resolutions) {
             let mut seen = BTreeSet::new();
