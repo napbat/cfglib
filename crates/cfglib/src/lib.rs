@@ -279,7 +279,9 @@ pub use graph::call_graph::{
 };
 pub use graph::cdg::control_dependence_graph;
 pub use graph::coldness::{ColdClass, ColdnessClasses, ColdnessGraph};
-pub use graph::diff::{BlockFingerprint, BlockMatch, CfgDiff};
+pub use graph::diff::{
+    BlockFingerprint, BlockHashes, BlockMatch, CascadeDiff, CfgDiff, MatchLevel,
+};
 pub use graph::dominator::{
     DominanceFrontiers, DominatorScratch, DominatorTree, FrontierScratch, PostDominatorScratch,
     PostDominatorTree, PostNode,
