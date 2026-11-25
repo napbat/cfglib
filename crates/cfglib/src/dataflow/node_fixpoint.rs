@@ -491,9 +491,6 @@ where
     )
 }
 
-/// The solver core, generic over the axis along which facts flow: facts move
-/// from a node to its neighbors along `downstream`, and a node meets those of
-/// its neighbors along the opposite axis.
 fn try_solve_along<G, P, D>(
     downstream: D,
     graph: &G,
@@ -508,51 +505,130 @@ where
     D: Adjacency,
 {
     let node_count = graph.node_bound();
-    let mut solver = Solver {
+    let every = |_: Option<&WeakTopologicalOrder<G::NodeId>>| Dense {
+        input: vec![problem.bottom(graph); node_count],
+        output: vec![problem.bottom(graph); node_count],
+    };
+    let (facts, steps) = solve_along(downstream, graph, problem, worklist, entry, config, every)?;
+    let (input, output) = problem.direction().program_order(facts.input, facts.output);
+    Ok(Facts::new(input, output, steps))
+}
+
+/// Where a node solve keeps the facts of its nodes in flow order: what flows
+/// into a node and what its transfer produced.
+pub(super) trait NodeStore<N, F> {
+    /// Whether the solve calls [`finish`](Self::finish) as it leaves each
+    /// outermost element of its weak topological order.
+    const FINISHES: bool;
+
+    /// The fact flowing into the node at `index`.
+    fn input(&self, index: usize) -> &F;
+
+    /// The fact that the node at `index` transferred.
+    fn output(&self, index: usize) -> &F;
+
+    fn set_input(&mut self, index: usize, fact: F);
+
+    fn set_output(&mut self, index: usize, fact: F);
+
+    /// Every node before position `end` of `order` holds its final facts,
+    /// and no visit reads the facts of what is final unless a node at or
+    /// after `end` reads it.
+    fn finish(&mut self, order: &WeakTopologicalOrder<N>, end: usize);
+}
+
+/// Every node's facts, for a solve that returns them all.
+struct Dense<F> {
+    input: Vec<F>,
+    output: Vec<F>,
+}
+
+impl<N, F> NodeStore<N, F> for Dense<F> {
+    const FINISHES: bool = false;
+
+    fn input(&self, index: usize) -> &F {
+        &self.input[index]
+    }
+
+    fn output(&self, index: usize) -> &F {
+        &self.output[index]
+    }
+
+    fn set_input(&mut self, index: usize, fact: F) {
+        self.input[index] = fact;
+    }
+
+    fn set_output(&mut self, index: usize, fact: F) {
+        self.output[index] = fact;
+    }
+
+    fn finish(&mut self, _order: &WeakTopologicalOrder<N>, _end: usize) {}
+}
+
+/// The solver core, generic over the axis along which facts flow and over
+/// where the facts live: facts move from a node to its neighbors along
+/// `downstream`, and a node meets those of its neighbors along the opposite
+/// axis. `store` builds the fact store once the iteration order is known;
+/// the store comes back with the number of steps taken.
+pub(super) fn solve_along<G, P, D, S>(
+    downstream: D,
+    graph: &G,
+    problem: &P,
+    worklist: Worklist,
+    entry: Option<G::NodeId>,
+    config: SolveConfig,
+    store: impl FnOnce(Option<&WeakTopologicalOrder<G::NodeId>>) -> S,
+) -> Result<(S, usize), TrySolveError<P::Error>>
+where
+    G: GraphView,
+    P: TryNodeProblem<G>,
+    D: Adjacency,
+    S: NodeStore<G::NodeId, P::Fact>,
+{
+    let boundary = problem.boundary(graph).map_err(TrySolveError::Problem)?;
+    let traversal = problem.direction().traversal();
+    let solver = |order| Solver {
         graph,
         problem,
         downstream,
         entry,
-        boundary: problem.boundary(graph).map_err(TrySolveError::Problem)?,
-        input: vec![problem.bottom(graph); node_count],
-        output: vec![problem.bottom(graph); node_count],
+        boundary,
+        store: store(order),
     };
-    let direction = problem.direction();
-    let steps = match schedule(
-        graph,
-        worklist,
-        entry,
-        direction.traversal(),
-        config.order(),
-    ) {
-        Schedule::Index(mut worklist) => solver.solve_plain(&mut worklist, config)?,
-        Schedule::Ranked(mut ranked) => solver.solve_plain(&mut ranked, config)?,
-        Schedule::Weak(mut ranked, order) => solver.solve_ordered(&mut ranked, &order, config)?,
-    };
-    let (input, output) = direction.program_order(solver.input, solver.output);
-    Ok(Facts::new(input, output, steps))
+    match schedule(graph, worklist, entry, traversal, config.order()) {
+        Schedule::Index(mut worklist) => solver(None).solve_plain(&mut worklist, config),
+        Schedule::Ranked(mut ranked) => solver(None).solve_plain(&mut ranked, config),
+        Schedule::Weak(mut ranked, order) => {
+            solver(Some(&order)).solve_ordered(&mut ranked, &order, config)
+        }
+    }
 }
 
-/// The facts of one solve so far, in flow order: `input` is what flows into
-/// a node and `output` what its transfer produced.
-struct Solver<'a, G: GraphView, P: TryNodeProblem<G>, D> {
+/// One solve in progress.
+struct Solver<'a, G: GraphView, P: TryNodeProblem<G>, D, S> {
     graph: &'a G,
     problem: &'a P,
     downstream: D,
     entry: Option<G::NodeId>,
     boundary: P::Fact,
-    input: Vec<P::Fact>,
-    output: Vec<P::Fact>,
+    store: S,
 }
 
-impl<G: GraphView, P: TryNodeProblem<G>, D: Adjacency> Solver<'_, G, P, D> {
+impl<G, P, D, S> Solver<'_, G, P, D, S>
+where
+    G: GraphView,
+    P: TryNodeProblem<G>,
+    D: Adjacency,
+    S: NodeStore<G::NodeId, P::Fact>,
+{
     /// The worklist loop of a solve that never bounds a fact: the index or
-    /// reverse-postorder order.
+    /// reverse-postorder order. A solve whose store finishes elements runs
+    /// in a weak topological order, so none comes here.
     fn solve_plain(
-        &mut self,
+        mut self,
         queue: &mut impl Queue,
         config: SolveConfig,
-    ) -> Result<usize, TrySolveError<P::Error>> {
+    ) -> Result<(S, usize), TrySolveError<P::Error>> {
         let mut steps = 0;
         while let Some(node_index) = queue.pop() {
             config.count_step(&mut steps, node_index)?;
@@ -566,35 +642,39 @@ impl<G: GraphView, P: TryNodeProblem<G>, D: Adjacency> Solver<'_, G, P, D> {
                 }
             }
         }
-        Ok(steps)
+        Ok((self.store, steps))
     }
 
     /// The worklist loop of a solve in a weak topological order: it widens
-    /// at heads, and narrows each outermost component once it has left it.
+    /// at heads, narrows each outermost component once it has left it, and
+    /// finishes each outermost element in the store as it leaves it.
     fn solve_ordered(
-        &mut self,
+        mut self,
         queue: &mut Ranked,
         order: &WeakTopologicalOrder<G::NodeId>,
         config: SolveConfig,
-    ) -> Result<usize, TrySolveError<P::Error>> {
+    ) -> Result<(S, usize), TrySolveError<P::Error>> {
         let narrowing = config.narrowing_passes() > 0;
-        let mut leaving = narrowing.then(|| Leaving::new(order));
+        let mut leaving = (S::FINISHES || narrowing).then(|| Leaving::new(order, S::FINISHES));
         let mut visited = narrowing.then(|| DenseBits::new(self.graph.node_bound()));
         let mut steps = 0;
         loop {
             let popped = queue.pop();
-            if let Some(visited) = &visited
-                && let Some(component) = leaving.as_mut().and_then(|leaving| leaving.leave(popped))
-            {
+            if let Some(element) = leaving.as_mut().and_then(|leaving| leaving.leave(popped)) {
                 if let Some(node_index) = popped {
                     queue.push(node_index);
                 }
-                let sweep = Sweep {
-                    order,
-                    component,
-                    visited,
-                };
-                self.narrow(&sweep, queue, config, &mut steps)?;
+                if let Some(visited) = &visited
+                    && order.heads_at(element.start)
+                {
+                    let sweep = Sweep {
+                        order,
+                        component: element.clone(),
+                        visited,
+                    };
+                    self.narrow(&sweep, queue, config, &mut steps)?;
+                }
+                self.store.finish(order, element.end);
                 continue;
             }
             let Some(node_index) = popped else {
@@ -615,7 +695,10 @@ impl<G: GraphView, P: TryNodeProblem<G>, D: Adjacency> Solver<'_, G, P, D> {
                 }
             }
         }
-        Ok(steps)
+        if S::FINISHES {
+            self.store.finish(order, order.order().len());
+        }
+        Ok((self.store, steps))
     }
 
     /// Recomputes `node` from its upstream neighbors' outputs. In
@@ -631,9 +714,10 @@ impl<G: GraphView, P: TryNodeProblem<G>, D: Adjacency> Solver<'_, G, P, D> {
         let index = node.index();
         let mut met = (self.entry == Some(node)).then(|| self.boundary.clone());
         for from in self.downstream.against().neighbors(graph, node) {
+            let output = self.store.output(from.index());
             met = Some(match met {
-                None => self.output[from.index()].clone(),
-                Some(current) => problem.meet(graph, node, &current, &self.output[from.index()])?,
+                None => output.clone(),
+                Some(current) => problem.meet(graph, node, &current, output)?,
             });
         }
         let mut met = met.unwrap_or_else(|| self.boundary.clone());
@@ -641,7 +725,7 @@ impl<G: GraphView, P: TryNodeProblem<G>, D: Adjacency> Solver<'_, G, P, D> {
         if M::ORDERED
             && let Some(bound) = bound
         {
-            let held = &self.input[index];
+            let held = self.store.input(index);
             if met != *held {
                 met = match bound {
                     Bound::Widen => problem.widen(graph, node, held, &met)?,
@@ -651,10 +735,10 @@ impl<G: GraphView, P: TryNodeProblem<G>, D: Adjacency> Solver<'_, G, P, D> {
             }
         }
         let transferred = problem.transfer(graph, node, &met)?;
-        self.input[index] = met;
-        let output = transferred != self.output[index];
+        self.store.set_input(index, met);
+        let output = transferred != *self.store.output(index);
         if output {
-            self.output[index] = transferred;
+            self.store.set_output(index, transferred);
         }
         Ok(Changed { bounded, output })
     }

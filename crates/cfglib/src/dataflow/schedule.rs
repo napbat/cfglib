@@ -55,29 +55,34 @@ impl Mode for Ordered {
     const ORDERED: bool = true;
 }
 
-/// The outermost component that a solve in the weak topological order is
-/// in, so that it can narrow each one as soon as it has left it.
+/// The outermost element of the weak topological order that a solve is in,
+/// so that it can narrow each component, and let go of the facts of each
+/// element, as soon as it has left it.
 ///
-/// Once the worklist pops a node past the end of an outermost component,
-/// nothing in that component is ever queued again: an edge into it either
+/// Once the worklist pops a node past the end of an outermost element,
+/// nothing in that element is ever queued again: an edge into it either
 /// runs forward from an earlier node, which is not queued either, or closes a
-/// loop from inside it. The component is then stable, and only nodes past it
+/// loop from inside it. The element is then final, and only nodes past it
 /// read what narrowing changes.
 pub(super) struct Leaving<'o, N> {
     order: &'o WeakTopologicalOrder<N>,
+    /// Whether a loose node at the top level counts as an element, or only a
+    /// component does.
+    every: bool,
     current: Option<Range<usize>>,
 }
 
 impl<'o, N: DenseId> Leaving<'o, N> {
-    pub(super) const fn new(order: &'o WeakTopologicalOrder<N>) -> Self {
+    pub(super) const fn new(order: &'o WeakTopologicalOrder<N>, every: bool) -> Self {
         Self {
             order,
+            every,
             current: None,
         }
     }
 
     /// Notes the node the worklist popped, `None` once it ran dry, and
-    /// returns the positions of the outermost component that the solve has
+    /// returns the positions of the outermost element that the solve has
     /// just left, if any.
     pub(super) fn leave(&mut self, popped: Option<usize>) -> Option<Range<usize>> {
         let position = popped.map(|index| {
@@ -93,7 +98,7 @@ impl<'o, N: DenseId> Leaving<'o, N> {
             && let Some(position) = position
         {
             let element = self.order.outermost(position);
-            self.current = self.order.heads_at(element.start).then_some(element);
+            self.current = (self.every || self.order.heads_at(element.start)).then_some(element);
         }
         None
     }
