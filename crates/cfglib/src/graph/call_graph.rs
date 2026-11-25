@@ -292,7 +292,13 @@ pub fn propagate_summaries<N, E, S: Clone + PartialEq>(
     bottom: &S,
     compute: impl FnMut(&Graph<N, E>, NodeId, &[S]) -> S,
 ) -> Vec<S> {
-    propagate(graph, bottom, compute, None::<fn(NodeId, &S, &S) -> S>)
+    propagate(
+        graph,
+        bottom,
+        compute,
+        None::<fn(NodeId, &S, &S) -> S>,
+        None::<fn(NodeId, &S, &S) -> S>,
+    )
 }
 
 /// Compute per-node summaries as [`propagate_summaries`] does, and widen at
@@ -359,16 +365,96 @@ pub fn propagate_summaries_widened<N, E, S: Clone + PartialEq>(
     compute: impl FnMut(&Graph<N, E>, NodeId, &[S]) -> S,
     widen: impl FnMut(NodeId, &S, &S) -> S,
 ) -> Vec<S> {
-    propagate(graph, bottom, compute, Some(widen))
+    propagate(
+        graph,
+        bottom,
+        compute,
+        Some(widen),
+        None::<fn(NodeId, &S, &S) -> S>,
+    )
+}
+
+/// Compute per-node summaries as [`propagate_summaries_widened`] does, then
+/// narrow each recursive component back toward its least fixpoint before its
+/// callers read it.
+///
+/// A widening operator overshoots on purpose: it trades precision for
+/// termination, so a summary that would have settled lower is sent to the top
+/// of its chain. Once a recursive component has stabilized under `widen`,
+/// a descending pass recomputes its members in the same callee-first order:
+/// every member stores what `compute` returns, except a widening point, which
+/// stores `narrow(node, current, computed)`. A changed summary queues its
+/// callers inside the component again, as in the ascending pass, and the pass
+/// ends when nothing changes. The callers outside the component run only
+/// after that, so they read the narrowed summaries.
+///
+/// `narrow` should return a summary between `computed` and `current`: below
+/// the widened summary, and no lower than what the summaries it read give.
+/// When it does, `compute` is monotone and `widen` returns an upper bound,
+/// every returned summary stays a sound over-approximation of the least
+/// fixpoint, as with [`propagate_summaries_widened`], and is no higher than
+/// what that function returns. The descending pass terminates when `narrow`
+/// is a narrowing operator: the summaries it stores at one widening point stop
+/// changing after finitely many steps. A `narrow` that returns `current`
+/// makes this function [`propagate_summaries_widened`], apart from one
+/// further `compute` per member of each recursive component.
+///
+/// # Examples
+///
+/// A value that every call raises by one but saturates at 255. Recursion
+/// makes it climb, the widening sends a climbing value to `u32::MAX`, and
+/// narrowing brings it back down to the 255 the saturation gives.
+///
+/// ```
+/// use cfglib::{Graph, propagate_summaries_narrowed, propagate_summaries_widened};
+///
+/// // main → even ⇄ odd. Every call adds one to the highest value its callees
+/// // return, and `odd` saturates what it returns at 255.
+/// let mut graph = Graph::<bool, ()>::new();
+/// let [main, even, odd] = [false, false, true].map(|saturates| graph.add_node(saturates));
+/// for (caller, callee) in [(main, even), (even, odd), (odd, even)] {
+///     graph.add_edge(caller, callee, ());
+/// }
+///
+/// let compute = |graph: &Graph<bool, ()>, node, bounds: &[u32]| {
+///     let highest = graph.successors(node).map(|callee| bounds[callee.index()]).max();
+///     let bound = highest.map_or(0, |bound| bound.saturating_add(1));
+///     if *graph.node(node) { bound.min(255) } else { bound }
+/// };
+/// let widen = |_, previous: &u32, computed: &u32| {
+///     if computed > previous { u32::MAX } else { *previous }
+/// };
+/// let narrow = |_, current: &u32, computed: &u32| {
+///     if *current == u32::MAX { *computed } else { *current }
+/// };
+///
+/// // Widening alone leaves the cycle, and so `main`, unbounded.
+/// let widened = propagate_summaries_widened(&graph, &0, compute, widen);
+/// assert_eq!(widened[main.index()], u32::MAX);
+/// // Narrowing recovers the saturation: odd 255, even 256, main 257.
+/// let narrowed = propagate_summaries_narrowed(&graph, &0, compute, widen, narrow);
+/// assert_eq!([narrowed[odd.index()], narrowed[even.index()], narrowed[main.index()]], [255, 256, 257]);
+/// ```
+#[must_use]
+pub fn propagate_summaries_narrowed<N, E, S: Clone + PartialEq>(
+    graph: &Graph<N, E>,
+    bottom: &S,
+    compute: impl FnMut(&Graph<N, E>, NodeId, &[S]) -> S,
+    widen: impl FnMut(NodeId, &S, &S) -> S,
+    narrow: impl FnMut(NodeId, &S, &S) -> S,
+) -> Vec<S> {
+    propagate(graph, bottom, compute, Some(widen), Some(narrow))
 }
 
 /// The schedule of [`propagate_summaries`], with `widen` applied at the
-/// widening points of [`propagate_summaries_widened`] when it is given.
+/// widening points of [`propagate_summaries_widened`] when it is given, and
+/// the descending pass of [`propagate_summaries_narrowed`] when `narrow` is.
 fn propagate<N, E, S: Clone + PartialEq>(
     graph: &Graph<N, E>,
     bottom: &S,
     mut compute: impl FnMut(&Graph<N, E>, NodeId, &[S]) -> S,
     mut widen: Option<impl FnMut(NodeId, &S, &S) -> S>,
+    mut narrow: Option<impl FnMut(NodeId, &S, &S) -> S>,
 ) -> Vec<S> {
     let mut summaries = alloc::vec![bottom.clone(); graph.node_bound()];
     let components = tarjan_scc(graph);
@@ -459,359 +545,80 @@ fn propagate<N, E, S: Clone + PartialEq>(
                 }
             }
         }
+        if let Some(narrow) = narrow.as_mut() {
+            let ranking = Ranking {
+                order: &order,
+                rank: &rank,
+                widens: &widens,
+            };
+            descend(
+                graph,
+                &mut summaries,
+                &mut compute,
+                narrow,
+                &ranking,
+                &mut queued,
+                &mut pending,
+            );
+        }
     }
     summaries
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::graph::traverse::topological_sort;
-    use crate::test_util::rng::Rng;
-    use crate::test_util::{DfInst, df_call, df_ff};
-    use alloc::vec;
+/// One recursive component in the callee-first order of [`propagate`].
+struct Ranking<'a> {
+    /// The members in callee-first order.
+    order: &'a [NodeId],
+    /// Each member's position in `order`, by node index.
+    rank: &'a [usize],
+    /// Whether the member at each position is a widening point.
+    widens: &'a [bool],
+}
 
-    #[test]
-    fn build_from_cfgs_resolves_calls() {
-        let mut main_cfg: Cfg<DfInst> = Cfg::new();
-        main_cfg
-            .block_mut(main_cfg.entry())
-            .push(df_call("call", "helper", false));
-        let mut helper_cfg: Cfg<DfInst> = Cfg::new();
-        helper_cfg.block_mut(helper_cfg.entry()).push(df_ff("ret"));
-
-        let graph = call_graph(&[("main", &main_cfg), ("helper", &helper_cfg)]);
-        let main = find_function(&graph, &"main").unwrap();
-        let helper = find_function(&graph, &"helper").unwrap();
-        assert!(graph.successors(main).any(|callee| callee == helper));
-        assert!(!graph.edges().next().unwrap().payload().is_tail_call);
-    }
-
-    #[test]
-    fn a_key_listed_twice_is_one_function_calling_for_both_cfgs() {
-        let calling = |callee: &'static str| {
-            let mut cfg: Cfg<DfInst> = Cfg::new();
-            cfg.block_mut(cfg.entry())
-                .push(df_call("call", callee, false));
-            cfg
-        };
-        let (first, second) = (calling("left"), calling("right"));
-        let mut leaf: Cfg<DfInst> = Cfg::new();
-        leaf.block_mut(leaf.entry()).push(df_ff("ret"));
-
-        let graph = call_graph(&[
-            ("main", &first),
-            ("left", &leaf),
-            ("main", &second),
-            ("right", &leaf),
-        ]);
-
-        assert_eq!(graph.node_count(), 3, "one node per distinct key");
-        let main = find_function(&graph, &"main").unwrap();
-        let callees: Vec<_> = graph
-            .successors(main)
-            .map(|callee| graph.node(callee).id)
-            .collect();
-        assert_eq!(callees, ["left", "right"]);
-    }
-
-    #[test]
-    fn topology_and_recursion_use_shared_algorithms() {
-        let mut graph = Graph::new();
-        let main = graph.add_node(FunctionNode { id: "main" });
-        let helper = graph.add_node(FunctionNode { id: "helper" });
-        graph.add_edge(
-            main,
-            helper,
-            CallMetadata {
-                is_tail_call: false,
-            },
-        );
-        assert_eq!(topological_sort(&graph), Some(vec![main, helper]));
-        assert_eq!(graph.predecessors(main).count(), 0);
-        assert_eq!(graph.successors(helper).count(), 0);
-
-        graph.add_edge(
-            helper,
-            main,
-            CallMetadata {
-                is_tail_call: false,
-            },
-        );
-        assert!(topological_sort(&graph).is_none());
-        assert!(is_recursive_function(&graph, main));
-    }
-
-    #[test]
-    fn summaries_propagate_callee_first_and_stabilize_cycles() {
-        // main calls a; a and b are mutually recursive; a calls leaf.
-        let mut graph = Graph::new();
-        let main = graph.add_node(FunctionNode { id: "main" });
-        let a = graph.add_node(FunctionNode { id: "a" });
-        let b = graph.add_node(FunctionNode { id: "b" });
-        let leaf = graph.add_node(FunctionNode { id: "leaf" });
-        let call = CallMetadata {
-            is_tail_call: false,
-        };
-        graph.add_edge(main, a, call.clone());
-        graph.add_edge(a, b, call.clone());
-        graph.add_edge(b, a, call.clone());
-        graph.add_edge(a, leaf, call);
-
-        // Summary: the set of transitively reachable callees, by id.
-        let summaries = propagate_summaries(
-            &graph,
-            &alloc::collections::BTreeSet::new(),
-            |graph, node, summaries| {
-                let mut reach = alloc::collections::BTreeSet::new();
-                for callee in graph.successors(node) {
-                    reach.insert(graph.node(callee).id);
-                    reach.extend(summaries[callee.index()].iter().copied());
-                }
-                reach
-            },
-        );
-        let names = |node: NodeId| summaries[node.index()].clone();
-        assert!(names(leaf).is_empty());
-        assert_eq!(names(main), ["a", "b", "leaf"].into_iter().collect());
-        assert_eq!(names(a), ["a", "b", "leaf"].into_iter().collect());
-        assert_eq!(names(b), ["a", "b", "leaf"].into_iter().collect());
-    }
-
-    /// The walk stops at the function, ignores cycles it never re-enters, and
-    /// answers for every function what the function's component answers.
-    #[test]
-    fn recursion_matches_the_strong_components() {
-        let mut graph = Graph::new();
-        let call = || CallMetadata {
-            is_tail_call: false,
-        };
-        let ids = ["main", "a", "b", "leaf", "loop", "self", "dead"];
-        let nodes: Vec<_> = ids
-            .iter()
-            .map(|&id| graph.add_node(FunctionNode { id }))
-            .collect();
-        let [main, a, b, leaf, looping, selfish, dead] = nodes[..] else {
-            unreachable!("seven functions");
-        };
-        for (caller, callee) in [
-            (main, a),
-            (a, b),
-            (b, a),
-            (a, leaf),
-            (main, looping),
-            (looping, selfish),
-            (selfish, selfish),
-            (dead, main),
-        ] {
-            graph.add_edge(caller, callee, call());
+/// The descending pass of [`propagate_summaries_narrowed`] over a recursive
+/// component that is stable under `widen`: recompute every member from those
+/// summaries in the same order, narrowing at the same points, until nothing
+/// changes, so that the component's callers read the narrowed summaries.
+fn descend<N, E, S: PartialEq>(
+    graph: &Graph<N, E>,
+    summaries: &mut [S],
+    compute: &mut impl FnMut(&Graph<N, E>, NodeId, &[S]) -> S,
+    narrow: &mut impl FnMut(NodeId, &S, &S) -> S,
+    ranking: &Ranking<'_>,
+    queued: &mut Vec<bool>,
+    pending: &mut BinaryHeap<Reverse<usize>>,
+) {
+    let Ranking {
+        order,
+        rank,
+        widens,
+    } = *ranking;
+    queued.clear();
+    queued.resize(order.len(), true);
+    pending.extend((0..order.len()).map(Reverse));
+    while let Some(Reverse(position)) = pending.pop() {
+        queued[position] = false;
+        let node = order[position];
+        let mut updated = compute(graph, node, summaries);
+        if widens[position] {
+            updated = narrow(node, &summaries[node.index()], &updated);
         }
-        let components = tarjan_scc(&graph);
-        for node in graph.node_ids() {
-            assert_eq!(
-                is_recursive_function(&graph, node),
-                components.component(node).is_cyclic(&graph),
-                "{}",
-                graph.node(node).id
-            );
+        if updated == summaries[node.index()] {
+            continue;
         }
-        assert!(!is_recursive_function(&graph, main));
-        assert!(!is_recursive_function(&graph, looping));
-        assert!(is_recursive_function(&graph, selfish));
-    }
-
-    #[test]
-    #[should_panic(expected = "is not a node of the call graph")]
-    fn a_removed_function_is_rejected() {
-        let mut graph = Graph::<FunctionNode<&str>, CallMetadata>::new();
-        let gone = graph.add_node(FunctionNode { id: "gone" });
-        graph.remove_node(gone);
-        let _ = is_recursive_function(&graph, gone);
-    }
-
-    /// A ring whose only seed sits at its last member, against the id order:
-    /// the former round-robin schedule ran one pass over the ring per call
-    /// edge the seed had to cross, about k² transfers.
-    #[test]
-    fn a_seed_crosses_a_recursive_ring_in_one_transfer_per_member() {
-        const MEMBERS: usize = 1_000;
-        let mut graph = Graph::<(), ()>::new();
-        let members: Vec<NodeId> = (0..MEMBERS).map(|_| graph.add_node(())).collect();
-        for (index, &caller) in members.iter().enumerate() {
-            graph.add_edge(caller, members[(index + 1) % MEMBERS], ());
-        }
-        let mut calls = 0_usize;
-        let summaries = propagate_summaries(&graph, &false, |graph, node, summaries| {
-            calls += 1;
-            node.index() + 1 == MEMBERS
-                || graph
-                    .successors(node)
-                    .any(|callee| summaries[callee.index()])
-        });
-        assert!(summaries.iter().all(|&summary| summary));
-        assert!(calls <= 3 * MEMBERS, "{calls} transfers");
-    }
-
-    /// The schedule `propagate_summaries` ran before the worklist: every
-    /// member of a recursive component again, in ascending order, until a
-    /// whole pass changes nothing.
-    fn round_robin<S: Clone + PartialEq>(
-        graph: &Graph<(), ()>,
-        bottom: &S,
-        mut compute: impl FnMut(&Graph<(), ()>, NodeId, &[S]) -> S,
-    ) -> Vec<S> {
-        let mut summaries = vec![bottom.clone(); graph.node_bound()];
-        let components = tarjan_scc(graph);
-        for component in components.components() {
-            let cyclic = components.component(component[0]).is_cyclic(graph);
-            loop {
-                let mut changed = false;
-                for &node in component {
-                    let updated = compute(graph, node, &summaries);
-                    if updated != summaries[node.index()] {
-                        summaries[node.index()] = updated;
-                        changed = true;
-                    }
-                }
-                if !cyclic || !changed {
-                    break;
-                }
+        summaries[node.index()] = updated;
+        for caller in graph.predecessors(node) {
+            // A caller outside the component has no rank, or the rank of a
+            // member of another component, which `order` does not hold.
+            let caller_rank = rank[caller.index()];
+            if order.get(caller_rank) == Some(&caller)
+                && !core::mem::replace(&mut queued[caller_rank], true)
+            {
+                pending.push(Reverse(caller_rank));
             }
         }
-        summaries
-    }
-
-    /// A random graph of at most 24 nodes with parallel edges, self-calls,
-    /// recursive clusters and removed slots.
-    fn random_graph(rng: &mut Rng) -> Graph<(), ()> {
-        let node_count = 1 + rng.below(24);
-        let mut graph = Graph::<(), ()>::new();
-        let nodes: Vec<NodeId> = (0..node_count).map(|_| graph.add_node(())).collect();
-        for _ in 0..rng.below(3 * node_count + 1) {
-            graph.add_edge(
-                nodes[rng.below(node_count)],
-                nodes[rng.below(node_count)],
-                (),
-            );
-        }
-        for &node in &nodes {
-            if rng.one_in(8) {
-                graph.remove_node(node);
-            }
-        }
-        graph
-    }
-
-    /// The ids a function reaches, modulo 64: a monotone summary of finite
-    /// height whose first `compute` always changes `0`.
-    fn reached_ids(graph: &Graph<(), ()>, node: NodeId, summaries: &[u64]) -> u64 {
-        graph
-            .successors(node)
-            .fold(1_u64 << (node.index() % 64), |mask, callee| {
-                mask | summaries[callee.index()]
-            })
-    }
-
-    /// Random graphs with self-calls, recursive clusters and removed slots,
-    /// under a monotone finite-height summary (the reached ids modulo 64): the
-    /// worklist reaches the round-robin fixpoint exactly.
-    #[test]
-    fn the_worklist_reaches_the_round_robin_fixpoint() {
-        let mut rng = Rng::new(93);
-        for _ in 0..300 {
-            let graph = random_graph(&mut rng);
-            assert_eq!(
-                propagate_summaries(&graph, &0, reached_ids),
-                round_robin(&graph, &0, reached_ids)
-            );
-        }
-    }
-
-    /// Every first `compute` changes a summary, so `widen` sees every widening
-    /// point. The points are recursive functions and cut every cycle, and a
-    /// `widen` that keeps the computed summary changes neither the result nor
-    /// the `compute` calls of `propagate_summaries`.
-    #[test]
-    fn the_widening_points_cut_every_cycle() {
-        let mut rng = Rng::new(9_393);
-        for _ in 0..300 {
-            let graph = random_graph(&mut rng);
-            let mut plain_calls = 0_usize;
-            let plain = propagate_summaries(&graph, &0, |graph, node, summaries| {
-                plain_calls += 1;
-                reached_ids(graph, node, summaries)
-            });
-            let mut widened_calls = 0_usize;
-            let mut points = vec![false; graph.node_bound()];
-            let widened = propagate_summaries_widened(
-                &graph,
-                &0,
-                |graph, node, summaries| {
-                    widened_calls += 1;
-                    reached_ids(graph, node, summaries)
-                },
-                |node, previous, computed| {
-                    assert_ne!(previous, computed, "`widen` runs on a change only");
-                    points[node.index()] = true;
-                    *computed
-                },
-            );
-            assert_eq!(widened, plain);
-            assert_eq!(widened_calls, plain_calls);
-
-            let recursive = recursive_functions(&graph);
-            let mut cut = graph.clone();
-            for node in graph.node_ids() {
-                if points[node.index()] {
-                    assert!(recursive[node.index()], "a widening point is recursive");
-                    cut.remove_node(node);
-                }
-            }
-            assert!(
-                !recursive_functions(&cut).contains(&true),
-                "removing the widening points leaves no cycle"
-            );
-        }
-    }
-
-    /// The deepest stack over a ring of one-byte frames grows forever. The
-    /// only widening point is the member whose call closes the ring in the
-    /// callee-first order, and the depths settle in about two passes.
-    #[test]
-    fn a_recursive_ring_widens_at_one_member() {
-        const MEMBERS: usize = 1_000;
-        let mut graph = Graph::<(), ()>::new();
-        let members: Vec<NodeId> = (0..MEMBERS).map(|_| graph.add_node(())).collect();
-        for (index, &caller) in members.iter().enumerate() {
-            graph.add_edge(caller, members[(index + 1) % MEMBERS], ());
-        }
-        let mut calls = 0_usize;
-        let mut widened = Vec::new();
-        let depths = propagate_summaries_widened(
-            &graph,
-            &None,
-            |graph, node, depths: &[Option<u64>]| {
-                calls += 1;
-                let deepest = graph
-                    .successors(node)
-                    .filter_map(|callee| depths[callee.index()])
-                    .max();
-                Some(deepest.unwrap_or(0).saturating_add(1))
-            },
-            |node, previous, computed| {
-                widened.push(node);
-                match (*previous, *computed) {
-                    (Some(previous), Some(computed)) if computed > previous => Some(u64::MAX),
-                    (previous, computed) => previous.max(computed),
-                }
-            },
-        );
-        assert!(depths.iter().all(|&depth| depth == Some(u64::MAX)));
-        assert_eq!(
-            widened,
-            [members[MEMBERS - 1]; 2],
-            "set from bottom once, then sent to unbounded"
-        );
-        assert!(calls <= 3 * MEMBERS, "{calls} transfers");
     }
 }
+
+#[cfg(test)]
+mod tests;

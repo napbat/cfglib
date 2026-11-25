@@ -271,7 +271,8 @@ pub use flow::{
 };
 pub use graph::call_graph::{
     CallMetadata, FunctionIndex, FunctionNode, call_graph, call_graph_indexed, find_function,
-    is_recursive_function, propagate_summaries, propagate_summaries_widened, recursive_functions,
+    is_recursive_function, propagate_summaries, propagate_summaries_narrowed,
+    propagate_summaries_widened, recursive_functions,
 };
 pub use graph::cdg::control_dependence_graph;
 pub use graph::coldness::{ColdClass, ColdnessClasses, ColdnessGraph};
@@ -292,6 +293,7 @@ pub use graph::edge_view::{EdgeRef, EdgeView, FilteredEdges};
 pub use graph::eh::{EhBlockKind, EhEdge, EhEdgeKind, EhModel};
 pub use graph::epoch::{EpochMarks, EpochSet};
 pub use graph::fanout::{DenseFanout, Fanout, SortedMap};
+pub use graph::feedback::{FeedbackConfig, feedback_arc_set, linear_arrangement};
 pub use graph::horn::HornClauses;
 pub use graph::interval::{Interval, IntervalAnalysis};
 pub use graph::keyed::KeyedGraph;

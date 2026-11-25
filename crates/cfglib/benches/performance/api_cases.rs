@@ -3,10 +3,12 @@ use super::harness::{BenchmarkSuite, benchmark_coverage};
 mod address;
 mod analysis;
 mod dataflow;
+mod feedback;
 mod fixtures;
 mod graph;
 mod pipeline;
 mod relaxation;
+mod summaries;
 mod transform;
 mod traversal;
 
@@ -40,6 +42,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "detect_loops_tagged",
     "detect_patterns",
     "display_label",
+    "feedback_arc_set",
     "find_back_edges",
     "find_back_edges_tagged",
     "find_function",
@@ -52,6 +55,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "is_recursive_function",
     "is_reducible",
     "kosaraju_scc",
+    "linear_arrangement",
     "linearize",
     "loop_exit_blocks",
     "make_reducible",
@@ -72,6 +76,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "plain_edge_attributes",
     "promote_exclusive_extents",
     "propagate_summaries",
+    "propagate_summaries_narrowed",
     "propagate_summaries_widened",
     "reachable",
     "recover_exclusive_extents",
@@ -181,9 +186,11 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
 
     analysis::register(suite);
     dataflow::register(suite);
+    feedback::register(suite);
     graph::register(suite);
     pipeline::register(suite);
     relaxation::register(suite);
+    summaries::register(suite);
     transform::register(suite);
     traversal::register(suite);
 }

@@ -11,6 +11,7 @@ pub mod edge_view;
 pub mod eh;
 pub mod epoch;
 pub mod fanout;
+pub mod feedback;
 pub mod horn;
 pub mod interval;
 pub mod keyed;
