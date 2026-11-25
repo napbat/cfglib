@@ -10,6 +10,7 @@ mod feedback;
 mod fixtures;
 mod frequency;
 mod graph;
+mod ifds;
 mod incremental_scc;
 mod inference;
 mod path_expr;
@@ -132,6 +133,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "solve_edge_problem_from",
     "solve_edge_problem_from_with_config",
     "solve_edge_problem_with_config",
+    "solve_ifds",
     "solve_node_problem",
     "solve_node_problem_from",
     "solve_node_problem_from_with_config",
@@ -240,6 +242,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     feedback::register(suite);
     frequency::register(suite);
     graph::register(suite);
+    ifds::register(suite);
     incremental_scc::register(suite);
     inference::register(suite);
     path_expr::register(suite);
