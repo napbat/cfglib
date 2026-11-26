@@ -63,13 +63,17 @@ pub(super) fn parent_or_import(random: &mut Rng) -> Label {
 /// A random graph of `1..=max_scopes` scopes with payloads drawn by
 /// `payload`. Each scope has up to two edges labeled by
 /// [`parent_or_import`], and up to two data and up to two references named
-/// by [`name`]. An edge of a scope after the first goes to an earlier scope
-/// with a chance of `upward_percent` percent, and to any scope otherwise, so
-/// it may close a cycle.
+/// by [`name`].
+///
+/// With `anywhere_one_in: Some(n)`, an edge of a scope after the first goes
+/// to any scope one time in `n`, so it may close a cycle, and to an earlier
+/// scope otherwise; with `None` every edge goes to any scope, at no extra
+/// draw. The draws are the ones the environment and index tests made before
+/// they shared this generator, so their seeds still give the same graphs.
 pub(super) fn random_graph<S>(
     random: &mut Rng,
     max_scopes: usize,
-    upward_percent: usize,
+    anywhere_one_in: Option<usize>,
     mut payload: impl FnMut(&mut Rng) -> S,
 ) -> ScopeGraph<S, Label, (), u8, u8> {
     let count = 1 + random.below(max_scopes);
@@ -79,7 +83,8 @@ pub(super) fn random_graph<S>(
         .collect();
     for (index, &scope) in scopes.iter().enumerate() {
         for _ in 0..random.below(3) {
-            let target = if index > 0 && random.chance(upward_percent) {
+            let upward = index > 0 && anywhere_one_in.is_some_and(|n| !random.one_in(n));
+            let target = if upward {
                 random.below(index)
             } else {
                 random.below(count)

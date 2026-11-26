@@ -142,7 +142,7 @@ fn updates_match_a_fresh_index_after_random_edits() {
     let mut random = Rng::new(0x73_5EED);
     for _ in 0..300 {
         // Up to seven scopes, a quarter of them opaque, with edges anywhere.
-        let mut graph = random_graph(&mut random, 7, 0, |random| random.one_in(4));
+        let mut graph = random_graph(&mut random, 7, None, |random| random.one_in(4));
         let config = match random.below(3) {
             0 => PathSearchConfig::default(),
             1 => PathSearchConfig {

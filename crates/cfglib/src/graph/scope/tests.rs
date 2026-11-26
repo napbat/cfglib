@@ -587,6 +587,31 @@ fn query_can_prune_extensions_after_a_decisive_local_match() {
 }
 
 #[test]
+fn a_query_is_copy_whatever_its_data() {
+    fn twice<T: Copy>(value: T) -> (T, T) {
+        (value, value)
+    }
+    let name = alloc::string::String::from("x");
+    let (first, second) = twice(ScopeQuery::new(super::ScopeId::from_index(0), &name));
+    assert_eq!(first.data(), second.data());
+}
+
+#[test]
+#[should_panic(expected = "query scope is out of range")]
+fn a_general_query_that_starts_outside_the_graph_panics() {
+    let graph = Graph::new();
+    let _ = ScopeResolution::compute(
+        &graph,
+        ScopeQuery::new(
+            super::ScopeId::from_index(0),
+            &reference("x", Relation::Value),
+        ),
+        &LexicalQuery,
+        PathSearchConfig::default(),
+    );
+}
+
+#[test]
 fn ephemeral_queries_support_shadow_aware_completion_without_graph_mutation() {
     let mut graph = Graph::new();
     let parent = graph.add_scope(PLAIN);

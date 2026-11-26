@@ -265,7 +265,7 @@ fn cached_and_general_indexes_agree_on_random_graphs() {
         // Up to nine scopes. Most edges go to an earlier scope, which keeps
         // a region without cycles; one in four goes anywhere and can close a
         // cycle.
-        let graph = random_graph(&mut random, 9, 75, |_| ());
+        let graph = random_graph(&mut random, 9, Some(4), |_| ());
         for config in [
             PathSearchConfig::default(),
             PathSearchConfig {
