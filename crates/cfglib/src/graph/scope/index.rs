@@ -100,8 +100,7 @@ pub struct ScopeIndexConfig {
     /// first call on; without it, the first update resolves every reference
     /// and records from then on. The record costs memory in proportion to the
     /// scopes each resolution read, at most the prefixes it expanded, and the
-    /// time to note them: about a sixth more on the lexical-chain benchmark.
-    /// The index is the same either way.
+    /// time to note them. The index is the same either way.
     pub track_reads: bool,
 }
 
