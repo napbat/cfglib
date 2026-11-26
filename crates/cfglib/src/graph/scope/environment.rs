@@ -3,6 +3,7 @@
 extern crate alloc;
 
 use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
@@ -145,7 +146,9 @@ pub trait ScopeEnvironmentQuery<S, L, R, D, Q> {
 #[derive(Debug, Clone)]
 pub struct ScopeEnvironmentCache<St, K> {
     on_cycle: Vec<bool>,
-    environments: OpenFoldMemo<EnvironmentMark<St>, Environment<K>>,
+    /// Shared, so a fold that reaches a stored environment lifts it without
+    /// copying it.
+    environments: OpenFoldMemo<EnvironmentMark<St>, Arc<Environment<K>>>,
     links: Vec<Link>,
 }
 
@@ -260,8 +263,9 @@ impl<St: Clone + Ord, K: Clone + Ord> ScopeEnvironmentCache<St, K> {
             mark.as_ref()
                 .and_then(|mark| self.environments.get(mark))
                 .flatten()
+                .map(|environment| &**environment)
         } else {
-            computed.as_ref()
+            computed.as_deref()
         };
         let key = query.query_key(graph, input.data());
         let entries = environment

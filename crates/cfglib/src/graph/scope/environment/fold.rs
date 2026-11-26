@@ -5,6 +5,7 @@
 extern crate alloc;
 
 use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
 use smallvec::SmallVec;
@@ -120,7 +121,7 @@ where
 {
     type Node = Reach<P::State>;
     type Mark = EnvironmentMark<P::State>;
-    type Value = Environment<P::Key>;
+    type Value = Arc<Environment<P::Key>>;
     type Accumulator = Candidates<P::Key>;
 
     /// The reaches through the edges the query admits. With no edge left,
@@ -170,10 +171,10 @@ where
             // An edge the length bound refuses: an empty environment that
             // reports the cut. A reach that the walk refused first, a route
             // back to an open scope on a cycle, reports nothing.
-            return FoldEnter::Leaf(Some(Environment {
+            return FoldEnter::Leaf(Some(Arc::new(Environment {
                 entries: BTreeMap::new(),
                 length_limited: true,
-            }));
+            })));
         }
         if !self.budget.admit_expansion() {
             return FoldEnter::Leaf(None);
@@ -222,8 +223,8 @@ where
         candidates.sources += 1;
         if let (Some(environment), Some(edge)) = (environment, reach.via) {
             candidates.length_limited |= environment.length_limited;
-            for (key, entries) in environment.entries {
-                let by_key = candidates.by_key.entry(key).or_default();
+            for (key, entries) in &environment.entries {
+                let by_key = candidates.by_key.entry(key.clone()).or_default();
                 for entry in entries {
                     let path = self.links.len();
                     self.links.push(Link {
@@ -274,9 +275,9 @@ where
                 (key, visible)
             })
             .collect();
-        Some(Environment {
+        Some(Arc::new(Environment {
             entries,
             length_limited: candidates.length_limited,
-        })
+        }))
     }
 }
