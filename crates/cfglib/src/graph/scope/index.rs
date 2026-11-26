@@ -20,8 +20,8 @@ mod tests;
 
 /// Resolution results for every stored reference, plus a reverse index.
 ///
-/// An index from [`compute_tracked`](Self::compute_tracked) also records,
-/// for each reference, the scopes its resolution read, so
+/// An index computed with [`track_reads`](ScopeIndexConfig::track_reads)
+/// also records, for each reference, the scopes its resolution read, so
 /// [`update`](Self::update) can re-resolve only the references that an edit
 /// can affect. Two indexes are equal when their resolutions and reverse
 /// indexes are; the recorded scopes take no part.
@@ -82,59 +82,61 @@ pub struct ScopeIndexUpdate {
     pub changed: Vec<ScopeReferenceId>,
 }
 
-impl ScopeResolutionIndex {
-    /// Resolve every reference in identity order and build the reverse index.
+/// How a [`ScopeResolutionIndex`] resolves its references.
+///
+/// A plain struct: write the fields that differ from the default (unbounded
+/// resolutions, no record of reads) and take the rest with
+/// `..ScopeIndexConfig::default()`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScopeIndexConfig {
+    /// The bounds of each resolution.
+    pub search: PathSearchConfig,
+    /// Whether [`compute`](ScopeResolutionIndex::compute) records the
+    /// scopes each resolution read: the ends of the path prefixes it
+    /// expanded.
     ///
-    /// The index records nothing of what the resolutions read, so its first
-    /// [`update`](Self::update) resolves every reference.
-    /// [`compute_tracked`](Self::compute_tracked) builds the same index with
-    /// that record, for updates that are incremental from the start.
+    /// With that record, [`update`](ScopeResolutionIndex::update)
+    /// re-resolves only the references that read a changed scope from its
+    /// first call on; without it, the first update resolves every reference
+    /// and records from then on. The record costs memory in proportion to the
+    /// scopes each resolution read, at most the prefixes it expanded, and the
+    /// time to note them. The index is the same either way.
+    pub track_reads: bool,
+}
+
+impl ScopeResolutionIndex {
+    /// Resolve every reference in identity order and build the reverse index,
+    /// recording what each resolution read when `config` says so.
     #[must_use]
     pub fn compute<S, L, R, D, Q, P>(
         graph: &ScopeGraph<S, L, R, D, Q>,
         query: &P,
-        config: PathSearchConfig,
+        config: ScopeIndexConfig,
     ) -> Self
     where
         P: ScopeGraphQuery<S, L, R, D, Q>,
     {
-        let resolutions = graph
-            .reference_ids()
-            .map(|reference| {
-                ScopeResolution::compute(
-                    graph,
-                    ScopeQuery::from_reference(graph, reference),
-                    query,
-                    config,
-                )
-            })
-            .collect();
-        Self::from_resolutions(graph, resolutions)
-    }
-
-    /// Resolves every reference as [`compute`](Self::compute) does, and also
-    /// records the scopes each resolution read: the ends of the path prefixes
-    /// it expanded.
-    ///
-    /// With that record, [`update`](Self::update) re-resolves only the
-    /// references that read a changed scope. The record costs memory in
-    /// proportion to the scopes each resolution read, at most the prefixes it
-    /// expanded. The index is equal to the one `compute` builds.
-    #[must_use]
-    pub fn compute_tracked<S, L, R, D, Q, P>(
-        graph: &ScopeGraph<S, L, R, D, Q>,
-        query: &P,
-        config: PathSearchConfig,
-    ) -> Self
-    where
-        P: ScopeGraphQuery<S, L, R, D, Q>,
-    {
+        let search = config.search;
+        if !config.track_reads {
+            let resolutions = graph
+                .reference_ids()
+                .map(|reference| {
+                    ScopeResolution::compute(
+                        graph,
+                        ScopeQuery::from_reference(graph, reference),
+                        query,
+                        search,
+                    )
+                })
+                .collect();
+            return Self::from_resolutions(graph, resolutions);
+        }
         let mut reader = ScopeReads::new(graph.node_bound());
         let mut by_reference = Vec::with_capacity(graph.reference_count());
         let resolutions = graph
             .reference_ids()
             .map(|reference| {
-                let resolution = reader.resolve(graph, reference, query, config);
+                let resolution = reader.resolve(graph, reference, query, search);
                 by_reference.push(reader.take());
                 resolution
             })
@@ -194,11 +196,11 @@ impl ScopeResolutionIndex {
     /// reference joins or leaves: an edit that changes no reference's read
     /// scopes or visible data patches no list.
     ///
-    /// An index that holds no record of what its resolutions read, one from
-    /// [`compute`](Self::compute) or
-    /// [`ScopeEnvironmentCache::index`](super::ScopeEnvironmentCache::index),
+    /// An index that holds no record of what its resolutions read, one
+    /// computed without [`track_reads`](ScopeIndexConfig::track_reads) or
+    /// from [`ScopeEnvironmentCache::index`](super::ScopeEnvironmentCache::index),
     /// resolves every reference on its first update and records them from
-    /// then on, as [`compute_tracked`](Self::compute_tracked) does.
+    /// then on, whatever `config.track_reads` says.
     ///
     /// # Panics
     ///
@@ -210,9 +212,8 @@ impl ScopeResolutionIndex {
     /// use core::cmp::Ordering;
     ///
     /// use cfglib::{
-    ///     EdgeRef, PathSearchConfig, ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeGraphChanges,
-    ///     ScopeGraphPathLabel, ScopeGraphQuery, ScopeId, ScopePath, ScopeQuery,
-    ///     ScopeResolutionIndex,
+    ///     EdgeRef, ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeGraphChanges, ScopeGraphPathLabel,
+    ///     ScopeGraphQuery, ScopeId, ScopeIndexConfig, ScopePath, ScopeQuery, ScopeResolutionIndex,
     /// };
     ///
     /// type Names = ScopeGraph<(), (), (), &'static str, &'static str>;
@@ -269,8 +270,11 @@ impl ScopeResolutionIndex {
     /// let global = graph.add_datum(module, (), "x");
     /// let inside = graph.add_reference(function, "x");
     /// let outside = graph.add_reference(other, "x");
-    /// let config = PathSearchConfig::default();
-    /// let mut index = ScopeResolutionIndex::compute_tracked(&graph, &Lexical, config);
+    /// let config = ScopeIndexConfig {
+    ///     track_reads: true,
+    ///     ..ScopeIndexConfig::default()
+    /// };
+    /// let mut index = ScopeResolutionIndex::compute(&graph, &Lexical, config);
     /// assert_eq!(index.references_to(global), [inside, outside]);
     ///
     /// // A local `x` in the function shadows the global one there. Only the
@@ -288,7 +292,7 @@ impl ScopeResolutionIndex {
         &mut self,
         graph: &ScopeGraph<S, L, R, D, Q>,
         query: &P,
-        config: PathSearchConfig,
+        config: ScopeIndexConfig,
         changes: &ScopeGraphChanges,
     ) -> ScopeIndexUpdate
     where
@@ -333,7 +337,7 @@ impl ScopeResolutionIndex {
         let mut datum_patches: BTreeMap<ScopeDatumId, Patch> = BTreeMap::new();
         let mut differing = Vec::new();
         for &reference in &affected {
-            let resolution = reader.resolve(graph, reference, query, config);
+            let resolution = reader.resolve(graph, reference, query, config.search);
             let new_reads = reader.take();
             let old_reads = mem::replace(&mut reads.by_reference[reference.index()], new_reads);
             patch_difference(

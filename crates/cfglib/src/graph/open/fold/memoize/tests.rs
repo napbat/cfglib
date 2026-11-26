@@ -179,7 +179,6 @@ fn memoized_enters_each_marked_node_once_under_every_scope() {
     // `Scoped` marks every node, so the memoizing walk enters each node once
     // and hands every later reach the stored answer, whatever scope keeps the
     // marks; the refusing walk absorbs `None` there under a shared scope.
-    // The depth bound still refuses 1's child 2.
     let children: &[&[usize]] = &[&[1, 3, 1, 3], &[2], &[], &[]];
     let leaves = &[false, false, true, true];
     let stops = &[false; 4];
@@ -189,10 +188,6 @@ fn memoized_enters_each_marked_node_once_under_every_scope() {
         MarkScope::Shared,
         MarkScope::Shared,
     ];
-    let bounded = OpenFoldConfig {
-        max_depth: Some(1),
-        revisit: Revisit::Memoize,
-    };
     for scopes in [[MarkScope::Shared; 4], [MarkScope::Isolated; 4], mixed] {
         let mut fold = Scoped::new(children, leaves, &scopes, stops);
         assert_eq!(open_fold(&mut fold, 0, MEMOIZE), Ok(Some(0)), "{scopes:?}");
@@ -202,13 +197,56 @@ fn memoized_enters_each_marked_node_once_under_every_scope() {
             [(2, true), (1, true), (3, true), (1, true), (3, true)],
             "{scopes:?}",
         );
+    }
+}
 
+#[test]
+fn memoized_stores_no_answer_the_depth_bound_cut() {
+    // Under a bound of 1, the depth bound refuses 1's child 2, so 1's answer
+    // depends on its depth and is not stored; the leaf 3 is. A shared scope
+    // keeps 1 marked and prunes its second reach, and an isolated 1 folds
+    // again, as a node whose answer depended on a cycle does.
+    let children: &[&[usize]] = &[&[1, 3, 1, 3], &[2], &[], &[]];
+    let leaves = &[false, false, true, true];
+    let stops = &[false; 4];
+    let bounded = OpenFoldConfig {
+        max_depth: Some(1),
+        revisit: Revisit::Memoize,
+    };
+    let mut shared = Scoped::new(children, leaves, &[MarkScope::Shared; 4], stops);
+    let mut memo = OpenFoldMemo::default();
+    assert_eq!(
+        open_fold_in(&mut memo, &mut shared, 0, bounded),
+        Ok(Some(0))
+    );
+    assert_eq!(shared.entered, [0, 1, 3]);
+    assert_eq!(
+        shared.absorbed,
+        [(2, false), (1, true), (3, true), (1, false), (3, true)],
+    );
+    assert_eq!((memo.get(&0), memo.get(&1)), (None, None));
+    assert_eq!(memo.get(&3), Some(Some(&3)));
+
+    let isolated_one = [
+        MarkScope::Shared,
+        MarkScope::Isolated,
+        MarkScope::Shared,
+        MarkScope::Shared,
+    ];
+    for scopes in [[MarkScope::Isolated; 4], isolated_one] {
         let mut fold = Scoped::new(children, leaves, &scopes, stops);
         assert_eq!(open_fold(&mut fold, 0, bounded), Ok(Some(0)), "{scopes:?}");
-        assert_eq!(fold.entered, [0, 1, 3], "{scopes:?}");
+        assert_eq!(fold.entered, [0, 1, 3, 1], "{scopes:?}");
         assert_eq!(
             fold.absorbed,
-            [(2, false), (1, true), (3, true), (1, true), (3, true)],
+            [
+                (2, false),
+                (1, true),
+                (3, true),
+                (2, false),
+                (1, true),
+                (3, true)
+            ],
             "{scopes:?}",
         );
     }
@@ -252,37 +290,109 @@ fn memoized_respects_the_depth_bound() {
 }
 
 #[test]
-fn memoized_reuses_an_answer_the_depth_bound_cut() {
+fn memoized_reuses_only_whole_answers_and_at_any_depth() {
     // 0 derives 1 and 2, 1 derives 2, and 2 derives the leaf 3. Under a bound
-    // of 2, the route 0 -> 1 -> 2 cuts 3 off, and 2 stores what it got. The
-    // route 0 -> 2, which reaches 3 within the bound, reuses that answer, and
-    // so does a later call: the bound limits the walk, not each route.
+    // of 2, the route 0 -> 1 -> 2 cuts 3 off, so neither 2 nor 1 is stored,
+    // and the route 0 -> 2 folds 2 again and reaches 3 within the bound: the
+    // walk answers as the refusing one does. Its whole answer for 2 is
+    // stored, and a later call reuses it at a depth where a fresh fold under
+    // its own bound would cut 3.
     let bases: &[&[usize]] = &[&[1, 2], &[2], &[3], &[]];
     let owns = &[None, None, None, Some("deep")];
-    let bounded = |revisit| OpenFoldConfig {
-        max_depth: Some(2),
+    let bounded = |max_depth, revisit| OpenFoldConfig {
+        max_depth: Some(max_depth),
         revisit,
     };
     let mut memo = OpenFoldMemo::default();
     let mut lookup = Lookup::new(bases, owns, MarkScope::Isolated);
     assert_eq!(
-        open_fold_in(&mut memo, &mut lookup, 0, bounded(Revisit::Memoize)),
-        Ok(None),
-    );
-    assert_eq!(lookup.folded, [0, 1, 2]);
-    assert_eq!(memo.get(&2), Some(None));
-    assert_eq!(
-        open_fold_in(&mut memo, &mut lookup, 2, bounded(Revisit::Memoize)),
-        Ok(None),
-    );
-    assert_eq!(lookup.folded, [0, 1, 2], "the stored answer of 2 is reused");
-
-    // The refusing walk bounds each route, so the route 0 -> 2 yields.
-    let mut refusing = Lookup::new(bases, owns, MarkScope::Isolated);
-    assert_eq!(
-        open_fold(&mut refusing, 0, bounded(Revisit::Refuse)),
+        open_fold_in(&mut memo, &mut lookup, 0, bounded(2, Revisit::Memoize)),
         Ok(Some("deep")),
     );
+    assert_eq!(lookup.folded, [0, 1, 2, 2, 3]);
+    assert_eq!((memo.get(&0), memo.get(&1)), (None, None));
+    assert_eq!(memo.get(&2), Some(Some(&"deep")));
+    let mut refusing = Lookup::new(bases, owns, MarkScope::Isolated);
+    assert_eq!(
+        open_fold(&mut refusing, 0, bounded(2, Revisit::Refuse)),
+        Ok(Some("deep")),
+    );
+
+    assert_eq!(
+        open_fold_in(&mut memo, &mut lookup, 1, bounded(1, Revisit::Memoize)),
+        Ok(Some("deep")),
+    );
+    assert_eq!(lookup.folded, [0, 1, 2, 2, 3, 1], "2 is reused, not folded");
+}
+
+/// A [`Lookup`] whose listed nodes keep their answers to their routes.
+struct RouteBound<'a> {
+    lookup: Lookup<'a>,
+    route_bound: &'a [usize],
+}
+
+impl OpenFold for RouteBound<'_> {
+    type Node = usize;
+    type Mark = usize;
+    type Value = &'static str;
+    type Accumulator = super::super::tests::Combined;
+
+    fn successors(&mut self, node: &usize, out: &mut Vec<usize>) {
+        self.lookup.successors(node, out);
+    }
+
+    fn mark(&mut self, node: &usize) -> Option<usize> {
+        self.lookup.mark(node)
+    }
+
+    fn memoize(&mut self, node: &usize) -> bool {
+        !self.route_bound.contains(node)
+    }
+
+    fn enter(&mut self, node: &usize) -> FoldEnter<&'static str, Self::Accumulator> {
+        self.lookup.enter(node)
+    }
+
+    fn absorb(
+        &mut self,
+        accumulator: &mut Self::Accumulator,
+        child: &usize,
+        value: Option<&'static str>,
+    ) -> ControlFlow<()> {
+        self.lookup.absorb(accumulator, child, value)
+    }
+
+    fn finish(&mut self, node: &usize, accumulator: Self::Accumulator) -> Option<&'static str> {
+        self.lookup.finish(node, accumulator)
+    }
+}
+
+#[test]
+fn memoized_folds_a_route_bound_node_on_every_reach_and_still_guards_it() {
+    // The diamond 0 -> 1, 2 -> 3: 3 keeps its answer to its route, so both
+    // routes fold it, and the nodes above it are stored as usual.
+    let bases: &[&[usize]] = &[&[1, 2], &[3], &[3], &[]];
+    let owns = &[None, None, None, Some("member")];
+    let mut fold = RouteBound {
+        lookup: Lookup::new(bases, owns, MarkScope::Isolated),
+        route_bound: &[3],
+    };
+    let mut memo = OpenFoldMemo::default();
+    assert_eq!(open_fold_in(&mut memo, &mut fold, 0, MEMOIZE), Ok(None));
+    assert_eq!(fold.lookup.folded, [0, 1, 3, 2, 3]);
+    assert_eq!(memo.get(&3), None);
+    assert_eq!(memo.get(&1), Some(Some(&"member")));
+
+    // 1 -> 0 -> 1: the mark of the route-bound 1 still refuses the cycle.
+    let cycle: &[&[usize]] = &[&[1], &[0]];
+    let mut fold = RouteBound {
+        lookup: Lookup::new(cycle, &[None, None], MarkScope::Isolated),
+        route_bound: &[1],
+    };
+    let mut memo = OpenFoldMemo::default();
+    assert_eq!(open_fold_in(&mut memo, &mut fold, 1, MEMOIZE), Ok(None));
+    assert_eq!(fold.lookup.folded, [1, 0]);
+    assert!(memo.is_empty(), "0 depends on the cycle and 1 on its route");
 }
 
 #[test]

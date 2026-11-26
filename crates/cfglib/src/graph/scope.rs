@@ -43,7 +43,7 @@ mod tests;
 pub use cursor::{ScopeCursor, ScopeCursorPolicy, ScopeCursorQuery};
 pub use environment::{ScopeEnvironmentCache, ScopeEnvironmentQuery};
 pub use first::{ScopeFirstResolution, ScopeFirstResolutionError};
-pub use index::{ScopeGraphChanges, ScopeIndexUpdate, ScopeResolutionIndex};
+pub use index::{ScopeGraphChanges, ScopeIndexConfig, ScopeIndexUpdate, ScopeResolutionIndex};
 pub use query::{
     ScopeGraphPathLabel, ScopeGraphQuery, ScopePath, ScopeQuery, ScopeResolution,
     ScopeResolutionCandidate,

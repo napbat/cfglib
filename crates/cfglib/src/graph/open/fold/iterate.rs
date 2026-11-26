@@ -34,6 +34,9 @@ struct Fix {
     lowlink: usize,
     /// Whether the node reached itself directly.
     self_loop: bool,
+    /// Whether the depth bound refused a child in this frame's subtree. The
+    /// answer then depends on the depth the walk reached the frame at.
+    cut: bool,
 }
 
 /// The provisional answer of a member whose cycle is not finished.
@@ -67,6 +70,8 @@ struct Component {
     next: usize,
     rounds: usize,
     changed: bool,
+    /// Whether the depth bound refused a child below a fold of a member.
+    cut: bool,
 }
 
 /// What reaching a node gave.
@@ -122,6 +127,7 @@ where
                         },
                         lowlink: usize::MAX,
                         self_loop: false,
+                        cut: false,
                     };
                     self.push_frame(fold, node, accumulator, fix);
                     Reached::Opened
@@ -163,6 +169,7 @@ where
                     role: Role::Marked { index, position },
                     lowlink: index,
                     self_loop: false,
+                    cut: false,
                 };
                 self.push_frame(fold, node, accumulator, fix);
                 Reached::Opened
@@ -203,6 +210,7 @@ where
             && let Some(parent) = self.walk.stack.last_mut()
         {
             parent.extra.lowlink = parent.extra.lowlink.min(fix.lowlink);
+            parent.extra.cut |= fix.cut;
         }
         match fix.role {
             Role::Unmarked { entry } => {
@@ -216,10 +224,13 @@ where
             }
             Role::Marked { index, position } => {
                 if fix.lowlink == index && position + 1 == self.members.len() && !fix.self_loop {
-                    // A node on no cycle: its first answer is final.
+                    // A node on no cycle: its first answer is final, and
+                    // stored unless the depth bound cut its subtree.
                     if let Some(member) = self.members.pop() {
                         self.provisional.remove(&member.mark);
-                        self.answers.insert(member.mark, value.clone());
+                        if !fix.cut {
+                            self.answers.insert(member.mark, value.clone());
+                        }
                     }
                     return Ok(self.deliver(fold, &node, value));
                 }
@@ -242,6 +253,7 @@ where
                     next: 0,
                     rounds: 0,
                     changed: true,
+                    cut: fix.cut,
                 });
                 self.advance(fold)
             }
@@ -251,6 +263,7 @@ where
                 if let Some(component) = self.components.last_mut() {
                     component.lowlink = component.lowlink.min(fix.lowlink);
                     component.changed |= changed;
+                    component.cut |= fix.cut;
                     component.next += 1;
                 }
                 self.advance(fold)
@@ -310,6 +323,7 @@ where
                         role: Role::Refold { position },
                         lowlink: usize::MAX,
                         self_loop: false,
+                        cut: false,
                     };
                     self.push_frame(fold, node, accumulator, fix);
                     return Ok(Step::Continue);
@@ -337,14 +351,16 @@ where
         let value = slot.value.clone();
         if let Some(parent) = self.walk.stack.last_mut() {
             parent.extra.lowlink = parent.extra.lowlink.min(component.lowlink);
+            parent.extra.cut |= component.cut;
         }
         self.walk.absorb(fold, &node, value);
         self.members[component.base].node = Some(node);
         Step::Continue
     }
 
-    /// Makes every answer of the innermost cycle final and hands its first
-    /// node's answer to the frame that reached it.
+    /// Makes every answer of the innermost cycle final, stores them unless
+    /// the depth bound cut a fold of a member, and hands the first node's
+    /// answer to the frame that reached it.
     fn finalize(&mut self, fold: &mut F) -> Step<F::Value> {
         let Some(component) = self.components.pop() else {
             unreachable!("only a cycle being iterated is finalized");
@@ -357,11 +373,16 @@ where
             if root.is_none() {
                 root = Some((member.node, slot.value.clone()));
             }
-            self.answers.insert(member.mark, slot.value);
+            if !component.cut {
+                self.answers.insert(member.mark, slot.value);
+            }
         }
         let Some((Some(node), value)) = root else {
             unreachable!("a cycle's first member waits outside any frame");
         };
+        if let Some(parent) = self.walk.stack.last_mut() {
+            parent.extra.cut |= component.cut;
+        }
         self.deliver(fold, &node, value)
     }
 }
@@ -395,6 +416,9 @@ where
     loop {
         if let Some(child) = run.walk.next_child() {
             if !run.walk.admit_child(max_depth) {
+                if let Some(top) = run.walk.stack.last_mut() {
+                    top.extra.cut = true;
+                }
                 run.walk.absorb(fold, &child, None);
             } else if let Reached::Answer(child, value) = run.reach(fold, child) {
                 run.walk.absorb(fold, &child, value);

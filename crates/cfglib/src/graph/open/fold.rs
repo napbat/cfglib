@@ -77,10 +77,16 @@ pub struct OpenFoldConfig {
     /// The root is depth zero, and a re-fold of a cycle member under
     /// [`Revisit::Iterate`] runs at the depth of the cycle's first node. The
     /// bound is silent by design: a refused child is absorbed as `None`, the
-    /// contribution a marked child makes, and no error reports the cut. It
-    /// limits the walk, not each route: under [`Revisit::Memoize`] and
-    /// [`Revisit::Iterate`], the answer of a node whose subtree the bound cut
-    /// is stored and reused like any other.
+    /// contribution a marked child makes, and no error reports the cut.
+    ///
+    /// Under [`Revisit::Memoize`] and [`Revisit::Iterate`], the answer of a
+    /// node whose subtree the bound cut depends on the depth the walk
+    /// reached the node at, as an answer on a cycle depends on where the walk
+    /// entered it, so neither policy stores it: a later reach folds the node
+    /// again. A stored answer is the node's whole answer, and a later reach
+    /// reuses it at any depth, also where the bound would cut a fresh fold:
+    /// the bound limits the walk that computes answers, not the routes a
+    /// stored answer covers.
     pub max_depth: Option<usize>,
     /// What the fold does with a marked node it reaches again.
     pub revisit: Revisit,
@@ -119,6 +125,13 @@ pub enum Revisit {
     ///   nodes between the refusing node and the refused one depend on where
     ///   the walk entered the cycle, so they are not stored; the refused
     ///   node's own answer, and the answers above it, are.
+    /// - **Route-dependent nodes.** A node for which
+    ///   [`memoize`](OpenFold::memoize) returns `false` keeps its answer to
+    ///   its route: its mark still guards the route, so a cycle back to it is
+    ///   refused, but its answer is not stored and every reach folds it
+    ///   again.
+    /// - **Depth.** A node whose subtree the depth bound cut is not stored
+    ///   either (see [`OpenFoldConfig::max_depth`]).
     /// - **Marks.** A stored answer is handed over whatever the live marks
     ///   are, so the [`MarkScope`] matters only for a node whose answer was
     ///   not stored: a reach of it that a persisting mark refuses
@@ -163,7 +176,11 @@ pub enum Revisit {
     /// - **The table.** The policy stores each final answer in the
     ///   [`OpenFoldMemo`] of [`open_fold_in`] and reuses the final answers it
     ///   finds there. Provisional answers never reach the table, so after an
-    ///   error it holds only the answers that became final before it.
+    ///   error it holds only the answers that became final before it. Nor
+    ///   does an answer that the depth bound cut, for a cycle the cut of any
+    ///   fold of a member (see [`OpenFoldConfig::max_depth`]). The policy
+    ///   stores every other marked node's final answer and does not read
+    ///   [`memoize`](OpenFold::memoize).
     ///
     /// On a space without cycles this walks as [`Revisit::Memoize`] does:
     /// `O(n + m)` hook calls. Each cycle adds `O(rounds × (n_scc + m_scc))`
@@ -186,13 +203,14 @@ pub enum Revisit {
 /// the fold of the node yielded nothing.
 ///
 /// A stored answer belongs to the fold that computed it. Reuse a table only
-/// across calls with the same fold (the same hooks over the same space), the
-/// same [`max_depth`](OpenFoldConfig::max_depth) and the same policy, since
-/// `Memoize` and `Iterate` answer a cycle differently. An answer that the
-/// depth bound cut is stored like any other, so a later call reuses it
-/// whatever depth it reaches the node at. When any of these changes,
-/// [`clear`](Self::clear) the table or [`remove`](Self::remove) the answers
-/// that went stale.
+/// across calls with the same fold (the same hooks over the same space) and
+/// the same policy, since `Memoize` and `Iterate` answer a cycle
+/// differently. Neither policy stores an answer that the depth bound cut, so
+/// a stored answer does not depend on the
+/// [`max_depth`](OpenFoldConfig::max_depth) of the call that computed it,
+/// and calls with different bounds may share a table. When the fold or the
+/// policy changes, [`clear`](Self::clear) the table or
+/// [`remove`](Self::remove) the answers that went stale.
 #[derive(Debug, Clone)]
 pub struct OpenFoldMemo<K, V> {
     answers: BTreeMap<K, Option<V>>,
@@ -328,6 +346,21 @@ pub trait OpenFold {
     /// [`Revisit::Memoize`] and [`Revisit::Iterate`] also store the answer of
     /// `node` under this key, so nodes that share a key share one answer.
     fn mark(&mut self, node: &Self::Node) -> Option<Self::Mark>;
+
+    /// Whether [`Revisit::Memoize`] may store the answer of `node`, a marked
+    /// node, and hand it to later reaches of its mark.
+    ///
+    /// Return `false` for a node whose answer depends on its route beyond
+    /// what its value carries, such as a node on a cycle whose answer
+    /// depends on where the walk entered the cycle. The node's mark still
+    /// guards the current route, so a cycle back to it is refused, but every
+    /// reach folds it again. The walk asks once the node's answer is ready,
+    /// so the hook may depend on what the fold observed while folding it.
+    /// The default stores every marked node's answer. [`Revisit::Refuse`]
+    /// stores nothing, and [`Revisit::Iterate`] does not read this hook.
+    fn memoize(&mut self, _node: &Self::Node) -> bool {
+        true
+    }
 
     /// Answers for `node` directly or opens its accumulator.
     fn enter(&mut self, node: &Self::Node) -> FoldEnter<Self::Value, Self::Accumulator>;

@@ -10,7 +10,8 @@ use crate::PathSearchConfig;
 use crate::graph::edge_view::{EdgeRef, EdgeView};
 use crate::graph::scope::{
     ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeGraphPathLabel, ScopeGraphQuery, ScopeId,
-    ScopePath, ScopeQuery, ScopeResolution, ScopeResolutionCandidate, ScopeResolutionIndex,
+    ScopeIndexConfig, ScopePath, ScopeQuery, ScopeResolution, ScopeResolutionCandidate,
+    ScopeResolutionIndex,
 };
 use crate::test_util::rng::Rng;
 
@@ -234,7 +235,11 @@ fn assert_indexes_agree<P>(graph: &Graph, policy: &P, config: PathSearchConfig, 
 where
     P: ScopeEnvironmentQuery<(), Label, (), u8, u8>,
 {
-    let general = ScopeResolutionIndex::compute(graph, &PathAware(policy), config);
+    let index_config = ScopeIndexConfig {
+        search: config,
+        track_reads: false,
+    };
+    let general = ScopeResolutionIndex::compute(graph, &PathAware(policy), index_config);
     let cached = ScopeEnvironmentCache::new(graph).index(graph, policy, config);
     for reference in graph.reference_ids() {
         let expected = general.resolution(reference);
@@ -295,7 +300,7 @@ fn a_path_language_may_come_back_to_a_scope_in_another_state() {
     let reference = graph.add_reference(s1, 0);
 
     let general =
-        ScopeResolutionIndex::compute(&graph, &PathAware(&ThenB), PathSearchConfig::default());
+        ScopeResolutionIndex::compute(&graph, &PathAware(&ThenB), ScopeIndexConfig::default());
     assert!(!general.resolution(reference).is_resolved());
 
     let cached =

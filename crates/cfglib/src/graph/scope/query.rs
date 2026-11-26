@@ -164,7 +164,7 @@ impl ScopePath {
 
     /// The number of scope-edge hops in this path.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub fn hop_count(&self) -> usize {
         self.edges.len()
     }
 
@@ -488,7 +488,7 @@ impl ScopeResolution {
                 else {
                     continue;
                 };
-                if !budget.admit_length(work.path.len() + 1) {
+                if !budget.admit_length(work.path.hop_count() + 1) {
                     continue;
                 }
                 frontier.push(Work {

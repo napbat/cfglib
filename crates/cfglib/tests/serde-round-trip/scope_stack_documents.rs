@@ -6,10 +6,11 @@ use core::cmp::Ordering;
 
 use cfglib::{
     EdgeRef, EdgeView, GraphView, PathSearchConfig, Scope, ScopeDatum, ScopeDatumId, ScopeEdgeId,
-    ScopeGraph, ScopeGraphPathLabel, ScopeGraphQuery, ScopeId, ScopePath, ScopeQuery,
-    ScopeReference, ScopeResolutionIndex, StackEdge, StackFileId, StackGraph, StackNode,
-    StackNodeId, StackNodeKind, StackPartialPath, StackPartialPathDatabase, StackPartialPathId,
-    StackPartialPathSet, StackPartialPathStats, StackResolution, StackResolutionIndex,
+    ScopeGraph, ScopeGraphPathLabel, ScopeGraphQuery, ScopeId, ScopeIndexConfig, ScopePath,
+    ScopeQuery, ScopeReference, ScopeResolutionIndex, StackEdge, StackFileId, StackGraph,
+    StackNode, StackNodeId, StackNodeKind, StackPartialPath, StackPartialPathDatabase,
+    StackPartialPathId, StackPartialPathSet, StackPartialPathStats, StackResolution,
+    StackResolutionIndex,
 };
 
 use crate::json::round_trip;
@@ -94,7 +95,7 @@ fn names() -> Names {
 /// What every reference of `graph` resolves to, and which references point at
 /// each datum: the analysis a consumer would run on a loaded graph.
 fn resolutions(graph: &Names) -> (Vec<Vec<ScopeDatumId>>, Vec<Vec<cfglib::ScopeReferenceId>>) {
-    let index = ScopeResolutionIndex::compute(graph, &NameLookup, PathSearchConfig::default());
+    let index = ScopeResolutionIndex::compute(graph, &NameLookup, ScopeIndexConfig::default());
     let targets = graph
         .reference_ids()
         .map(|reference| {

@@ -4,8 +4,9 @@ use core::cmp::Ordering;
 
 use cfglib::{
     EdgeRef, PathSearchConfig, ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeGraphPathLabel,
-    ScopeGraphQuery, ScopeId, ScopePath, ScopeQuery, ScopeResolution, ScopeResolutionIndex,
-    StackGraph, StackNodeKind, StackPartialPathDatabase, StackResolution, StackResolutionIndex,
+    ScopeGraphQuery, ScopeId, ScopeIndexConfig, ScopePath, ScopeQuery, ScopeResolution,
+    ScopeResolutionIndex, StackGraph, StackNodeKind, StackPartialPathDatabase, StackResolution,
+    StackResolutionIndex,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,7 +209,7 @@ fn symtree_shaped_scope_queries_cover_definition_completion_and_rename() {
     let import_use = graph.add_reference(body, exact("package", Namespace::Value, 20));
 
     let index =
-        ScopeResolutionIndex::compute(&graph, &SymtreeStyleLookup, PathSearchConfig::default());
+        ScopeResolutionIndex::compute(&graph, &SymtreeStyleLookup, ScopeIndexConfig::default());
     assert_eq!(
         index.resolution(early_use).candidates()[0].datum(),
         early_item

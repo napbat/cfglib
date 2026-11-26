@@ -1,5 +1,5 @@
 //! Query hooks without a path: the policy sees where a path starts and ends
-//! and how long it is, but not its scopes or edges.
+//! and how many hops it has, but not its scopes or edges.
 
 use core::cmp::Ordering;
 
@@ -7,7 +7,7 @@ use super::query::{ScopeGraphPathLabel, ScopeGraphQuery, ScopePath, ScopeQuery};
 use super::storage::{ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeId};
 use crate::graph::edge_view::EdgeRef;
 
-/// The endpoints and the length of a scope path, without its scopes or
+/// The endpoints and the hop count of a scope path, without its scopes or
 /// edges.
 ///
 /// A [`ScopeCursorQuery`] sees only this summary, so a resolver can follow a
@@ -16,22 +16,26 @@ use crate::graph::edge_view::EdgeRef;
 pub struct ScopeCursor {
     start: ScopeId,
     end: ScopeId,
-    len: usize,
+    hop_count: usize,
 }
 
 impl ScopeCursor {
-    pub(super) const fn new(start: ScopeId, end: ScopeId, len: usize) -> Self {
-        Self { start, end, len }
+    pub(super) const fn new(start: ScopeId, end: ScopeId, hop_count: usize) -> Self {
+        Self {
+            start,
+            end,
+            hop_count,
+        }
     }
 
     /// Returns the cursor one hop further on, at `target`.
     pub(super) const fn advanced(self, target: ScopeId) -> Self {
-        Self::new(self.start, target, self.len + 1)
+        Self::new(self.start, target, self.hop_count + 1)
     }
 
-    /// Returns the endpoints and the length of the stored `path`.
+    /// Returns the endpoints and the hop count of the stored `path`.
     fn of_path(path: &ScopePath) -> Self {
-        Self::new(path.start(), path.end(), path.len())
+        Self::new(path.start(), path.end(), path.hop_count())
     }
 
     /// Returns the scope where the path starts.
@@ -48,15 +52,15 @@ impl ScopeCursor {
 
     /// Returns the number of scope-edge hops in the path.
     #[must_use]
-    pub const fn len(&self) -> usize {
-        self.len
+    pub const fn hop_count(&self) -> usize {
+        self.hop_count
     }
 
     /// Returns whether this is the path without edges at the start scope of
     /// the query.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.len == 0
+        self.hop_count == 0
     }
 }
 

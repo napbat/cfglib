@@ -334,8 +334,8 @@ pub use graph::scope::{
     Scope, ScopeCursor, ScopeCursorPolicy, ScopeCursorQuery, ScopeDatum, ScopeDatumId, ScopeEdgeId,
     ScopeEdgeTag, ScopeEnvironmentCache, ScopeEnvironmentQuery, ScopeFirstResolution,
     ScopeFirstResolutionError, ScopeGraph, ScopeGraphChanges, ScopeGraphPathLabel, ScopeGraphQuery,
-    ScopeId, ScopeIndexUpdate, ScopePath, ScopeQuery, ScopeReference, ScopeReferenceId,
-    ScopeResolution, ScopeResolutionCandidate, ScopeResolutionIndex, ScopeTag,
+    ScopeId, ScopeIndexConfig, ScopeIndexUpdate, ScopePath, ScopeQuery, ScopeReference,
+    ScopeReferenceId, ScopeResolution, ScopeResolutionCandidate, ScopeResolutionIndex, ScopeTag,
 };
 pub use graph::search::{
     DfsEvent, PathSearchConfig, PathSearchStats, SearchConfig, SearchOrder, SearchScratch, Visit,

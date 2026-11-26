@@ -4,8 +4,9 @@
 //!
 //! The lexical chain is the shape of a source file: references in nested
 //! blocks climb the same parents and imports, which `compute` walks once per
-//! reference and an environment cache once per scope; `compute_tracked` walks it
-//! as `compute` does and records what each reference read. An edit of one
+//! reference and an environment cache once per scope; `compute` with
+//! `track_reads` walks it as plain `compute` does and records what each
+//! reference read. An edit of one
 //! leaf scope there is read by the references of one block, which `update`
 //! resolves again. The first-datum walk climbs the parents alone and stops at
 //! the first declaration of the name. The stacked inheritance diamonds reach
@@ -17,8 +18,8 @@ use std::cmp::Ordering;
 use cfglib::{
     EdgeRef, PathSearchConfig, ScopeCursor, ScopeCursorQuery, ScopeDatumId, ScopeEdgeId,
     ScopeEnvironmentCache, ScopeEnvironmentQuery, ScopeFirstResolution, ScopeGraph,
-    ScopeGraphChanges, ScopeGraphPathLabel, ScopeGraphQuery, ScopeId, ScopeIndexUpdate, ScopePath,
-    ScopeQuery, ScopeResolutionIndex,
+    ScopeGraphChanges, ScopeGraphPathLabel, ScopeGraphQuery, ScopeId, ScopeIndexConfig,
+    ScopeIndexUpdate, ScopePath, ScopeQuery, ScopeResolutionIndex,
 };
 
 use super::BenchmarkSuite;
@@ -294,11 +295,16 @@ fn ephemeral_resolved_count(
 
 pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     let config = PathSearchConfig::default();
+    let plain = ScopeIndexConfig::default();
+    let tracking = ScopeIndexConfig {
+        track_reads: true,
+        ..plain
+    };
     let (chain, leaf) = lexical_chain();
     benchmark_case!(
         suite,
         "scope_index_lexical_chain",
-        || ScopeResolutionIndex::compute(&chain, &Lexical, config),
+        || ScopeResolutionIndex::compute(&chain, &Lexical, plain),
         |index| assert_chain_resolved(&chain, index)
     );
     benchmark_case!(
@@ -310,7 +316,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "scope_index_tracked_lexical_chain",
-        || ScopeResolutionIndex::compute_tracked(&chain, &Lexical, config),
+        || ScopeResolutionIndex::compute(&chain, &Lexical, tracking),
         |index| assert_chain_resolved(&chain, index)
     );
     benchmark_case!(
@@ -337,7 +343,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     // One new datum in the innermost module: only the references of the
     // innermost block read it. Every run repeats the same update, which
     // resolves them again and changes nothing after the first.
-    let mut index = ScopeResolutionIndex::compute_tracked(&chain, &Lexical, config);
+    let mut index = ScopeResolutionIndex::compute(&chain, &Lexical, tracking);
     let mut edited = chain.clone();
     edited.add_datum(leaf, (), 2 * LEVELS);
     let changes = ScopeGraphChanges {
@@ -347,7 +353,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "scope_index_update_leaf_datum",
-        || index.update(&edited, &Lexical, config, &changes),
+        || index.update(&edited, &Lexical, tracking, &changes),
         |update: &ScopeIndexUpdate| assert_eq!(
             update.resolved_count,
             (REFERENCES / LEVELS) as usize
@@ -370,7 +376,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         suite.case(
             general,
             &[],
-            || ScopeResolutionIndex::compute(&graph, &Lexical, config),
+            || ScopeResolutionIndex::compute(&graph, &Lexical, plain),
             |index| assert_diamond_routes(&graph, index, diamonds),
         );
         suite.case(

@@ -578,3 +578,52 @@ fn the_depth_bound_refuses_deeper_children() {
     let mut exact = Capped { children, marks };
     assert_eq!(open_fold(&mut exact, 0, bounded(2)), Ok(Some(3)));
 }
+
+#[test]
+fn the_table_keeps_no_answer_the_depth_bound_cut() {
+    let bounded = |max_depth| OpenFoldConfig {
+        max_depth: Some(max_depth),
+        revisit: Revisit::Iterate { max_rounds: None },
+    };
+    // 0 -> 1 -> 2 under a bound of 1 cuts 2 off below 1, so neither 1 nor 0
+    // is stored. From 1, the same bound leaves the subtree whole.
+    let marks = &[Some(0), Some(1), Some(2)];
+    let mut chain = Capped {
+        children: &[&[1], &[2], &[]],
+        marks,
+    };
+    let mut memo = OpenFoldMemo::default();
+    assert_eq!(
+        open_fold_in(&mut memo, &mut chain, 0, bounded(1)),
+        Ok(Some(2))
+    );
+    assert!(memo.is_empty());
+    assert_eq!(
+        open_fold_in(&mut memo, &mut chain, 1, bounded(1)),
+        Ok(Some(2))
+    );
+    assert_eq!(
+        (memo.get(&1), memo.get(&2)),
+        (Some(Some(&2)), Some(Some(&1)))
+    );
+
+    // The cycle 0 <-> 1 hangs 2 -> 3 off 1. Under a bound of 2 the first fold
+    // of 1 cuts 3 off below 2, so the final answers of the cycle are not
+    // stored; without a bound they are.
+    let children: &'static [&'static [usize]] = &[&[1], &[0, 2], &[3], &[]];
+    let marks = &[Some(0), Some(1), Some(2), Some(3)];
+    let mut cut = Capped { children, marks };
+    let mut memo = OpenFoldMemo::default();
+    assert_eq!(
+        open_fold_in(&mut memo, &mut cut, 0, bounded(2)),
+        Ok(Some(5))
+    );
+    assert_eq!((memo.get(&0), memo.get(&1)), (None, None));
+    let mut whole = Capped { children, marks };
+    let mut memo = OpenFoldMemo::default();
+    assert_eq!(open_fold_in(&mut memo, &mut whole, 0, ITERATE), Ok(Some(5)));
+    assert_eq!(
+        (memo.get(&0), memo.get(&1)),
+        (Some(Some(&5)), Some(Some(&5)))
+    );
+}

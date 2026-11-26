@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use core::cmp::Ordering;
 
 use super::super::test_support::{Label, name, parent_or_import, random_graph, rank};
-use super::{ScopeGraphChanges, ScopeIndexUpdate, ScopeResolutionIndex};
+use super::{ScopeGraphChanges, ScopeIndexConfig, ScopeIndexUpdate, ScopeResolutionIndex};
 use crate::PathSearchConfig;
 use crate::graph::edge_view::{EdgeRef, EdgeView};
 use crate::graph::scope::{
@@ -154,20 +154,25 @@ fn updates_match_a_fresh_index_after_random_edits() {
                 ..PathSearchConfig::default()
             },
         };
+        let plain = ScopeIndexConfig {
+            search: config,
+            track_reads: false,
+        };
+        let tracking = ScopeIndexConfig {
+            track_reads: true,
+            ..plain
+        };
         // A plain index records nothing, so its first update resolves every
         // reference and records them; a tracked one is incremental at once.
-        let mut index = if random.one_in(4) {
-            ScopeResolutionIndex::compute(&graph, &Lookup, config)
-        } else {
-            ScopeResolutionIndex::compute_tracked(&graph, &Lookup, config)
-        };
+        let config = if random.one_in(4) { plain } else { tracking };
+        let mut index = ScopeResolutionIndex::compute(&graph, &Lookup, config);
         for _ in 0..12 {
             let changes = edit(&mut graph, &mut random);
             let before = index.clone();
             let update = index.update(&graph, &Lookup, config, &changes);
-            let fresh = ScopeResolutionIndex::compute(&graph, &Lookup, config);
+            let fresh = ScopeResolutionIndex::compute(&graph, &Lookup, plain);
             assert_eq!(index, fresh, "{graph:?} {changes:?}");
-            let tracked = ScopeResolutionIndex::compute_tracked(&graph, &Lookup, config);
+            let tracked = ScopeResolutionIndex::compute(&graph, &Lookup, tracking);
             assert_eq!(index.reads, tracked.reads, "{graph:?} {changes:?}");
             assert_eq!(update.changed, differing(&before, &fresh));
             assert!(update.resolved_count >= update.changed.len());
@@ -201,8 +206,11 @@ fn blocks(count: usize) -> (Graph, Vec<ScopeId>, Vec<ScopeId>) {
 #[test]
 fn a_datum_in_a_leaf_scope_resolves_only_its_readers_again() {
     let (mut graph, _, modules) = blocks(6);
-    let config = PathSearchConfig::default();
-    let mut index = ScopeResolutionIndex::compute_tracked(&graph, &Lookup, config);
+    let config = ScopeIndexConfig {
+        track_reads: true,
+        ..ScopeIndexConfig::default()
+    };
+    let mut index = ScopeResolutionIndex::compute(&graph, &Lookup, config);
     // Only the innermost block imports the innermost module.
     let datum = graph.add_datum(modules[5], (), 5);
     let changes = ScopeGraphChanges {
@@ -242,13 +250,16 @@ fn a_datum_in_a_leaf_scope_resolves_only_its_readers_again() {
 #[test]
 fn a_plain_index_records_nothing_until_its_first_update() {
     let (mut graph, blocks, _) = blocks(4);
-    let config = PathSearchConfig::default();
+    let config = ScopeIndexConfig::default();
     let mut index = ScopeResolutionIndex::compute(&graph, &Lookup, config);
     assert!(index.reads.is_none());
-    assert_eq!(
-        index,
-        ScopeResolutionIndex::compute_tracked(&graph, &Lookup, config)
-    );
+    let tracking = ScopeIndexConfig {
+        track_reads: true,
+        ..config
+    };
+    let tracked = ScopeResolutionIndex::compute(&graph, &Lookup, tracking);
+    assert!(tracked.reads.is_some());
+    assert_eq!(index, tracked);
 
     // The first update has no record to go by: it resolves every reference.
     graph.add_datum(blocks[3], (), 3);
@@ -325,8 +336,8 @@ fn a_cached_index_resolves_every_reference_on_its_first_update() {
     for (level, &module) in modules.iter().enumerate() {
         graph.add_datum(module, (), u8::try_from(level).expect("a short chain"));
     }
-    let config = PathSearchConfig::default();
-    let mut index = ScopeEnvironmentCache::new(&graph).index(&graph, &Lookup, config);
+    let config = ScopeIndexConfig::default();
+    let mut index = ScopeEnvironmentCache::new(&graph).index(&graph, &Lookup, config.search);
     let cached: Vec<_> = index
         .resolutions()
         .iter()
