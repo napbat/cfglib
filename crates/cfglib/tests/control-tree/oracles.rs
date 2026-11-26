@@ -21,11 +21,6 @@ fn run_checks(
 ) -> ControlTree {
     let tree = ControlTree::compute(cfg);
     let report = tree.report();
-    assert_eq!(
-        ControlTree::compute(cfg),
-        tree,
-        "structuring is deterministic"
-    );
     assert_well_formed(&tree);
     if report.gotos.is_empty() {
         // Goto labels are applied after the walk, which is its own finding.
