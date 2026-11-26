@@ -1,9 +1,9 @@
 //! Integration tests: traversal orders over stores with removed nodes.
 
 use cfglib::{
-    Direction, Graph, GraphView, NodeId, breadth_first, common_ancestors, depth_first_postorder,
-    depth_first_preorder, nearest_common_ancestor, reachable, reverse_postorder, scan_predecessors,
-    shortest_path, topological_sort,
+    Direction, Graph, GraphView, NodeId, NodeOrder, breadth_first, common_ancestors,
+    depth_first_postorder, depth_first_preorder, nearest_common_ancestor, reachable,
+    reverse_postorder, scan_predecessors, shortest_path, topological_sort,
 };
 
 #[test]
@@ -90,7 +90,7 @@ fn diamond_with_a_hole() -> (Graph<&'static str, ()>, [NodeId; 5]) {
 fn traversals_over_a_hole_equal_the_traversals_after_compaction() {
     let (graph, [top, left, right, join, tail]) = diamond_with_a_hole();
     let mut compacted = graph.clone();
-    let renumbering = compacted.compact();
+    let renumbering = compacted.compact(NodeOrder::Insertion);
     let renumbered = |id: NodeId| renumbering.node(id).expect("a live node survives");
     let renumber = |ids: Vec<NodeId>| -> Vec<NodeId> { ids.into_iter().map(renumbered).collect() };
 

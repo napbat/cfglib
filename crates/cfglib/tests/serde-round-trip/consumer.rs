@@ -5,7 +5,7 @@ use std::borrow::Cow;
 
 use cfglib::{
     BlockId, Cfg, CompletionReason, Continuation, DisplayInstr, EdgeId, EdgeKind, Handler,
-    HandlerBody, HandlerKind, HandlerRef, Region, RegionId,
+    HandlerBody, HandlerKind, HandlerRef, NodeOrder, Region, RegionId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -256,7 +256,7 @@ pub fn rich_cfg() -> Cfg<Op, Route> {
 
     cfg.remove_block(blocks.scratch);
     cfg.remove_edge(dropped);
-    let renumbering = cfg.compact();
+    let renumbering = cfg.compact(NodeOrder::Insertion);
     let header = renumbering
         .node(blocks.header)
         .expect("the header survived");

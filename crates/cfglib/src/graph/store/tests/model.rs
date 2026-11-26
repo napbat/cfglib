@@ -12,7 +12,7 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::graph::store::{Graph, Id, NodeTag};
+use crate::graph::store::{Graph, Id, NodeOrder, NodeTag};
 use crate::graph::view::Direction;
 use crate::test_util::rng::Rng;
 
@@ -605,7 +605,7 @@ impl Session {
         self.exercised.compactions_keeping_overlay_order += usize::from(overlay_order);
         self.exercised.compactions_keeping_base_order += usize::from(base_order);
         let (expected_nodes, expected_edges) = self.model.compact();
-        let renumbering = self.graph.compact();
+        let renumbering = self.graph.compact(NodeOrder::Insertion);
         self.exercised.compactions += 1;
 
         assert!(self.graph.is_compact(), "compacted store at step {step}");

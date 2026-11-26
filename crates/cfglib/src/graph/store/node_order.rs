@@ -1,4 +1,4 @@
-//! The node orders an ordered compaction can number the survivors in.
+//! The node orders a compaction can number the survivors in.
 //!
 //! A node's identity decides where its payload, its adjacency offsets, and
 //! its entry in every node-indexed side table live, so an order that numbers
@@ -17,13 +17,13 @@ use super::Graph;
 use super::id::{Id, IdTag, NodeTag};
 use crate::identity::NO_INDEX;
 
-/// How [`Graph::compact_ordered`] numbers the surviving nodes.
+/// How [`Graph::compact`] numbers the surviving nodes.
 ///
 /// Every order is deterministic: ties break by adjacency order, then by slot.
 /// The searches follow outgoing edges, read each node's edges in adjacency
 /// order, start from each root in turn, and skip the nodes an earlier root
 /// already reached, so a root listed twice or reached from an earlier one
-/// adds nothing. The live nodes an order does not reach follow in slot
+/// adds nothing. The live nodes a search does not reach follow in slot
 /// order.
 ///
 /// # Examples
@@ -38,20 +38,19 @@ use crate::identity::NO_INDEX;
 /// graph.add_edge(entry, body, ());
 /// graph.add_edge(body, exit, ());
 ///
-/// graph.compact_ordered(NodeOrder::BreadthFirst(&[entry]));
+/// graph.compact(NodeOrder::BreadthFirst(&[entry]));
 /// assert_eq!(graph.nodes().copied().collect::<Vec<_>>(), ["entry", "body", "exit"]);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum NodeOrder<'a, NT: IdTag = NodeTag> {
-    /// First appearance as an endpoint, scanning the live edges in identity
-    /// order and reading each edge's source before its target; nodes with no
-    /// live edge follow in slot order.
+    /// Slot order: the survivors keep their relative order, so node
+    /// identity order still means insertion order.
     ///
-    /// Needs no roots and costs one pass over the edges, which suits a graph
-    /// with no natural entry. Its result follows the edge identity order,
-    /// which is the order the edges were added in.
-    FirstTouch,
+    /// Needs no roots, no search and no payload moves, which makes it the
+    /// cheapest order and the one to use when nothing reads the graph in
+    /// bulk.
+    Insertion,
     /// Breadth-first from the roots in turn: each root, then the nodes its
     /// search discovers, in the order it discovers them.
     ///
@@ -106,12 +105,8 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     pub(super) fn ordered_slots(&self, order: NodeOrder<'_, NT>) -> Vec<u32> {
         let mut numbering = Numbering::new(self.node_bound());
         match order {
-            NodeOrder::FirstTouch => {
-                for edge in self.edges() {
-                    numbering.assign(edge.source());
-                    numbering.assign(edge.target());
-                }
-            }
+            // Slot order is what the loop below hands out on its own.
+            NodeOrder::Insertion => {}
             NodeOrder::BreadthFirst(roots) => self.number_breadth_first(roots, &mut numbering),
             NodeOrder::ReversePostorder(roots) => {
                 self.number_reverse_postorder(roots, &mut numbering);

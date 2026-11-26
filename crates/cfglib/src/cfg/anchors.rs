@@ -87,6 +87,7 @@ mod tests {
     use alloc::vec::Vec;
 
     use crate::edge::EdgeKind;
+    use crate::graph::store::NodeOrder;
     use crate::region::{
         CompletionReason, Continuation, Handler, HandlerBody, HandlerKind, HandlerRef, Region,
         RegionId,
@@ -137,12 +138,12 @@ mod tests {
             assert!(cfg.is_anchor(anchor));
             let mut broken = cfg.clone();
             broken.remove_block(anchor);
-            let outcome = std::panic::catch_unwind(move || broken.compact());
+            let outcome = std::panic::catch_unwind(move || broken.compact(NodeOrder::Insertion));
             assert!(outcome.is_err(), "compacting survived losing {anchor}");
         }
         assert!(!cfg.is_anchor(plain));
         let mut broken = cfg;
         broken.remove_block(plain);
-        broken.compact();
+        broken.compact(NodeOrder::Insertion);
     }
 }

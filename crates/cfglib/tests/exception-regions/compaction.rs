@@ -7,7 +7,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use cfglib::{
     BlockId, Cfg, CfgRenumbering, Cleanup, CompletionReason, Continuation, EdgeKind, EhModel,
-    Handler, HandlerBody, HandlerKind, HandlerRef,
+    Handler, HandlerBody, HandlerKind, HandlerRef, NodeOrder,
 };
 
 use crate::shapes::{Stmt, block_of, catch, handler, protect, try_catch, unknown_catch};
@@ -110,7 +110,7 @@ fn compaction_renumbers_every_block_reference_as_it_renumbers_the_blocks() {
     let Holey { mut cfg, removed } = holey();
     let before = cfg.clone();
 
-    let renumbering = cfg.compact();
+    let renumbering = cfg.compact(NodeOrder::Insertion);
 
     for &block in &removed {
         assert_eq!(renumbering.node(block), None);
@@ -177,7 +177,7 @@ fn the_eh_model_before_and_after_compaction_agrees_through_the_renumbering() {
     let before_cfg = cfg.clone();
     let before = EhModel::compute(&cfg);
 
-    let renumbering = cfg.compact();
+    let renumbering = cfg.compact(NodeOrder::Insertion);
     let after = EhModel::compute(&cfg);
 
     assert_eq!(after.block_bound(), cfg.block_count());
@@ -227,10 +227,10 @@ fn the_eh_model_before_and_after_compaction_agrees_through_the_renumbering() {
 #[test]
 fn a_second_compaction_finds_nothing_to_move() {
     let Holey { mut cfg, .. } = holey();
-    cfg.compact();
+    cfg.compact(NodeOrder::Insertion);
     let settled = cfg.clone();
 
-    let again = cfg.compact();
+    let again = cfg.compact(NodeOrder::Insertion);
 
     assert!(cfg.is_compact());
     assert!(again.is_identity());
@@ -242,7 +242,7 @@ fn a_graph_with_no_removed_block_compacts_to_itself() {
     let mut cfg = try_catch(&["log(e)"]).cfg;
     let before = cfg.clone();
 
-    let renumbering = cfg.compact();
+    let renumbering = cfg.compact(NodeOrder::Insertion);
 
     assert!(renumbering.is_identity());
     assert!(cfg.is_compact());
@@ -264,7 +264,7 @@ fn is_compact_is_true_exactly_when_compaction_would_change_no_identity() {
     ] {
         let predicted = cfg.is_compact();
 
-        let renumbering = cfg.compact();
+        let renumbering = cfg.compact(NodeOrder::Insertion);
 
         assert_eq!(predicted, renumbering.is_identity(), "{name}");
         assert!(cfg.is_compact(), "{name}: nothing is left to compact");
@@ -324,7 +324,7 @@ fn compaction_panics_when_a_single_block_reference_names_a_removed_block() {
     for (name, mut cfg, block) in single_references() {
         assert!(cfg.remove_block(block), "{name}");
 
-        let outcome = catch_unwind(AssertUnwindSafe(|| cfg.compact()));
+        let outcome = catch_unwind(AssertUnwindSafe(|| cfg.compact(NodeOrder::Insertion)));
 
         assert!(
             outcome.is_err(),
@@ -340,7 +340,7 @@ fn compaction_keeps_a_graph_whose_removed_blocks_are_not_single_references() {
         cfg.remove_block(spare);
         assert!(cfg.contains_block(block), "{name}");
 
-        let renumbering = cfg.compact();
+        let renumbering = cfg.compact(NodeOrder::Insertion);
 
         assert_eq!(renumbering.node(spare), None, "{name}");
         assert!(cfg.is_compact(), "{name}");
@@ -362,7 +362,7 @@ fn a_set_of_blocks_loses_a_removed_member_instead_of_failing() {
     }
     fixture.cfg.remove_block(spare);
 
-    let renumbering = fixture.cfg.compact();
+    let renumbering = fixture.cfg.compact(NodeOrder::Insertion);
 
     let region = fixture.cfg.region(fixture.region).expect("exists");
     assert_eq!(region.protected_blocks.len(), 1);
@@ -393,7 +393,7 @@ fn an_unknown_extent_has_no_block_set_to_shrink_and_stays_unknown() {
     let hole = block_of(&mut fixture.cfg, &["hole"]);
     fixture.cfg.remove_block(hole);
 
-    fixture.cfg.compact();
+    fixture.cfg.compact(NodeOrder::Insertion);
 
     assert_eq!(
         fixture.cfg.regions()[1].handlers[0].body,

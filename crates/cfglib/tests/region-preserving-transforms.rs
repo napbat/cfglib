@@ -7,7 +7,7 @@
 
 use cfglib::{
     BlockId, Cfg, CompletionReason, Continuation, EdgeKind, EhBlockKind, EhModel, Handler,
-    HandlerBody, HandlerKind, HandlerRef, Region, RegionId, contract_edge, merge_blocks,
+    HandlerBody, HandlerKind, HandlerRef, NodeOrder, Region, RegionId, contract_edge, merge_blocks,
     remove_empty_blocks, remove_unreachable, simplify,
 };
 
@@ -46,7 +46,7 @@ fn empty_catch() -> (Cfg<u32>, BlockId) {
 }
 
 fn assert_metadata_survives_compaction(cfg: &mut Cfg<u32>) {
-    cfg.compact();
+    cfg.compact(NodeOrder::Insertion);
     assert!(cfg.is_compact());
     for region in cfg.regions() {
         for handler in &region.handlers {

@@ -2,7 +2,7 @@
 //! edge contraction, and block splitting.
 
 use cfglib::{
-    Cfg, EdgeKind, SplitPointError, contract_edge, contract_edge_mapped, merge_blocks,
+    Cfg, EdgeKind, NodeOrder, SplitPointError, contract_edge, contract_edge_mapped, merge_blocks,
     merge_blocks_mapped, remove_empty_blocks, remove_empty_blocks_mapped, remove_unreachable,
     remove_unreachable_mapped, simplify, simplify_mapped,
 };
@@ -70,7 +70,7 @@ fn simplify_mapped_case<E: Payload>(seed: u64) {
         "{context}: record and count disagree"
     );
 
-    let renumbering = cfg.compact();
+    let renumbering = cfg.compact(NodeOrder::Insertion);
     let carried = rewrite.then_renumbered(&renumbering);
     let compacted = Placement {
         rewrite: &carried,

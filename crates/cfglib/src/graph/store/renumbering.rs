@@ -20,11 +20,11 @@ use crate::identity::NO_INDEX;
 /// from before several compactions folds them into one lookup instead of
 /// replaying each step.
 ///
-/// A [`compact`](super::Graph::compact) renumbering keeps relative order:
-/// a lower old identity gets a lower new one. A
-/// [`compact_ordered`](super::Graph::compact_ordered) renumbering keeps it
-/// for edges but may map nodes to any order; every lookup, and
-/// [`compose`](Self::compose), works the same for both.
+/// A [`compact`](super::Graph::compact) renumbering keeps relative order for
+/// edges: a lower old identity gets a lower new one. It keeps it for nodes
+/// too under [`NodeOrder::Insertion`](super::NodeOrder::Insertion), and may
+/// map them to any order under every other [`NodeOrder`](super::NodeOrder);
+/// every lookup, and [`compose`](Self::compose), works the same for all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Renumbering<NT: IdTag = NodeTag, ET: IdTag = EdgeTag> {
     nodes: Vec<u32>,
@@ -56,33 +56,21 @@ impl<NT: IdTag, ET: IdTag> Renumbering<NT, ET> {
         translate(&self.edges, old.index())
     }
 
-    /// The old node bound this renumbering covers.
-    #[must_use]
-    pub fn node_bound(&self) -> usize {
-        self.nodes.len()
-    }
-
-    /// The old edge bound this renumbering covers.
-    #[must_use]
-    pub fn edge_bound(&self) -> usize {
-        self.edges.len()
-    }
-
     /// Fold `later`, which renumbered the result of this one, into a single
     /// mapping from this renumbering's old identities to `later`'s new ones.
     ///
     /// # Examples
     ///
     /// ```
-    /// use cfglib::Graph;
+    /// use cfglib::{Graph, NodeOrder};
     ///
     /// let mut graph = Graph::<&'static str, ()>::new();
     /// let first = graph.add_node("first");
     /// let second = graph.add_node("second");
     /// graph.remove_node(first);
     ///
-    /// let once = graph.compact();
-    /// let twice = once.compose(&graph.compact());
+    /// let once = graph.compact(NodeOrder::Insertion);
+    /// let twice = once.compose(&graph.compact(NodeOrder::Insertion));
     /// assert_eq!(twice.node(first), None);
     /// assert_eq!(graph.node(twice.node(second).unwrap()), &"second");
     /// ```
@@ -95,13 +83,13 @@ impl<NT: IdTag, ET: IdTag> Renumbering<NT, ET> {
 
     /// Whether every covered identity kept its number.
     ///
-    /// For a [`compact`](super::Graph::compact) renumbering this is true
+    /// For a [`compact`](super::Graph::compact) renumbering in
+    /// [`NodeOrder::Insertion`](super::NodeOrder::Insertion) this is true
     /// exactly when nothing was removed: a removed entity has no new number,
     /// even when it was the last slot and nothing moved down behind it. A
     /// compaction that only folded the delta into the base removes nothing,
-    /// and is the identity. A
-    /// [`compact_ordered`](super::Graph::compact_ordered) renumbering must
-    /// also have left every surviving node at its number.
+    /// and is the identity. Under any other order every surviving node must
+    /// also have kept its number.
     #[must_use]
     pub fn is_identity(&self) -> bool {
         is_identity_axis(&self.nodes) && is_identity_axis(&self.edges)

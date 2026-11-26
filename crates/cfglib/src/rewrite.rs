@@ -154,7 +154,7 @@ impl Rewrite {
     /// # Examples
     ///
     /// ```
-    /// use cfglib::{Cfg, EdgeKind, remove_unreachable_mapped};
+    /// use cfglib::{Cfg, EdgeKind, NodeOrder, remove_unreachable_mapped};
     ///
     /// let mut cfg = Cfg::<u32>::new();
     /// let live = cfg.new_block();
@@ -163,7 +163,7 @@ impl Rewrite {
     /// cfg.block_mut(dead).push(7);
     ///
     /// let (_, rewrite) = remove_unreachable_mapped(&mut cfg);
-    /// let renumbering = cfg.compact();
+    /// let renumbering = cfg.compact(NodeOrder::Insertion);
     /// let compacted = rewrite.then_renumbered(&renumbering);
     /// assert_eq!(compacted.blocks(dead), Some([].as_slice()));
     /// ```

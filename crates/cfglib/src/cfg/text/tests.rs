@@ -7,6 +7,7 @@ use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::display::DisplayInstr;
 use crate::edge::EdgeKind;
+use crate::graph::store::NodeOrder;
 use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
 use crate::test_util::golden::assert_golden;
 
@@ -208,7 +209,7 @@ fn a_region_that_still_names_a_removed_block_is_written_without_it() {
     let parsed = parse(&written).expect("a region lists only blocks the text declares");
 
     let mut compacted = cfg.clone();
-    compacted.compact();
+    compacted.compact(NodeOrder::Insertion);
     let region = |cfg: &Cfg<Line>| cfg.regions()[0].clone();
     // Compaction renumbers; the text form keeps the numbers, holes and all.
     assert_eq!(

@@ -38,76 +38,45 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
             && !self.has_relocations()
     }
 
-    /// Rebuild the compressed base from the live entities and report the new
-    /// numbering.
+    /// Rebuild the compressed base from the live entities, numbering the
+    /// surviving nodes in `order`, and report the new numbering.
     ///
-    /// Live entities keep their relative order, so the surviving identities
-    /// are renumbered but never reordered: insertion order, adjacency order,
-    /// and identity order all mean the same thing afterwards as before. The
-    /// delta is emptied and every tombstone disappears. To number the nodes
-    /// in an order of your choosing instead, use
-    /// [`compact_ordered`](Self::compact_ordered).
+    /// The delta is emptied and every tombstone disappears. Of the surviving
+    /// identities, only node identities can change their relative order;
+    /// afterwards:
     ///
-    /// Costs one pass over each slot space plus two counting passes over the
-    /// live edges, and allocates the new base once. A node whose adjacency
-    /// reads out of identity order, because an edge was redirected to or from
-    /// it, additionally costs one walk of that adjacency.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use cfglib::Graph;
-    ///
-    /// let mut graph = Graph::<&'static str, ()>::new();
-    /// let dropped = graph.add_node("dropped");
-    /// let kept = graph.add_node("kept");
-    /// graph.remove_node(dropped);
-    ///
-    /// let renumbering = graph.compact();
-    /// assert!(graph.is_compact());
-    /// assert_eq!(renumbering.node(dropped), None);
-    /// assert_eq!(graph.node(renumbering.node(kept).unwrap()), &"kept");
-    /// ```
-    pub fn compact(&mut self) -> Renumbering<NT, ET> {
-        let node_map = surviving_slots(&self.live_nodes, self.node_bound());
-        self.rebuild(node_map, false)
-    }
-
-    /// Rebuild the compressed base like [`compact`](Self::compact), numbering
-    /// the surviving nodes in `order` rather than in slot order.
-    ///
-    /// [`compact`](Self::compact) keeps the order the nodes were added in,
-    /// which for a whole-program graph is discovery or file order: a node's
-    /// neighbors then carry scattered identities, and so do the payloads,
-    /// adjacency offsets and node-indexed side tables a scan reads for them.
-    /// An order that numbers neighbors close together turns those reads into
-    /// reads of nearby memory. A procedure-sized graph fits in cache either
-    /// way and has nothing to gain.
-    ///
-    /// Only nodes move. Afterwards:
-    ///
-    /// - node identity order is `order`, so it no longer means insertion
-    ///   order; a node added later still follows every compacted one;
+    /// - node identity order is `order`: under
+    ///   [`Insertion`](NodeOrder::Insertion) it still means insertion order,
+    ///   and under any other order it no longer does; a node added later
+    ///   still follows every compacted one;
     /// - edges keep their relative order, so edge identity order still means
-    ///   insertion order and the edge renumbering is the one
-    ///   [`compact`](Self::compact) would report;
+    ///   insertion order and the edge renumbering is the same under every
+    ///   order;
     /// - every node keeps its adjacency order: its edges read in the order
     ///   they read before, under their new identities.
     ///
-    /// The delta is emptied and every tombstone disappears, as with
-    /// [`compact`](Self::compact), and the returned [`Renumbering`]
-    /// [`compose`](Renumbering::compose)s with any other.
+    /// [`Insertion`](NodeOrder::Insertion) keeps the order the nodes were
+    /// added in, which for a whole-program graph is discovery or file order:
+    /// a node's neighbors then carry scattered identities, and so do the
+    /// payloads, adjacency offsets and node-indexed side tables a scan reads
+    /// for them. An order that numbers neighbors close together turns those
+    /// reads into reads of nearby memory. A procedure-sized graph fits in
+    /// cache either way and has nothing to gain. Every returned
+    /// [`Renumbering`] [`compose`](Renumbering::compose)s with any other.
     ///
-    /// Costs what [`compact`](Self::compact) costs plus the order: one pass
-    /// over the live edges for [`FirstTouch`](NodeOrder::FirstTouch), one
+    /// [`Insertion`](NodeOrder::Insertion) costs one pass over each slot
+    /// space plus two counting passes over the live edges, and allocates the
+    /// new base once. A node whose adjacency reads out of identity order,
+    /// because an edge was redirected to or from it, additionally costs one
+    /// walk of that adjacency. Every other order adds its own cost: one
     /// search over the reached nodes and their edges for
     /// [`BreadthFirst`](NodeOrder::BreadthFirst) and
     /// [`ReversePostorder`](NodeOrder::ReversePostorder), and one pass over
-    /// the order for [`Explicit`](NodeOrder::Explicit). The payloads move
-    /// into their new places by swaps, one per payload at most. On a
+    /// the order for [`Explicit`](NodeOrder::Explicit); the payloads then
+    /// move into their new places by swaps, one per payload at most. On a
     /// million-node graph with shuffled identities, a search compaction costs
-    /// several times a plain one (`benches/graph-store.rs`), and compacting
-    /// the store first does not remove that cost.
+    /// several times an insertion-order one (`benches/graph-store.rs`), and
+    /// compacting the store first does not remove that cost.
     ///
     /// # Panics
     ///
@@ -124,6 +93,23 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// use cfglib::{Graph, NodeOrder};
     ///
     /// let mut graph = Graph::<&'static str, ()>::new();
+    /// let dropped = graph.add_node("dropped");
+    /// let kept = graph.add_node("kept");
+    /// graph.remove_node(dropped);
+    ///
+    /// let renumbering = graph.compact(NodeOrder::Insertion);
+    /// assert!(graph.is_compact());
+    /// assert_eq!(renumbering.node(dropped), None);
+    /// assert_eq!(graph.node(renumbering.node(kept).unwrap()), &"kept");
+    /// ```
+    ///
+    /// Reverse postorder from the entry numbers the nodes in a forward
+    /// solver's iteration order:
+    ///
+    /// ```
+    /// use cfglib::{Graph, NodeOrder};
+    ///
+    /// let mut graph = Graph::<&'static str, ()>::new();
     /// let exit = graph.add_node("exit");
     /// let body = graph.add_node("body");
     /// let entry = graph.add_node("entry");
@@ -131,7 +117,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// graph.add_edge(body, body, ());
     /// graph.add_edge(body, exit, ());
     ///
-    /// let renumbering = graph.compact_ordered(NodeOrder::ReversePostorder(&[entry]));
+    /// let renumbering = graph.compact(NodeOrder::ReversePostorder(&[entry]));
     /// assert!(graph.is_compact());
     /// assert_eq!(graph.nodes().copied().collect::<Vec<_>>(), ["entry", "body", "exit"]);
     ///
@@ -139,9 +125,14 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// let exit = renumbering.node(exit).unwrap();
     /// assert_eq!(graph.successors(body).collect::<Vec<_>>(), [body, exit]);
     /// ```
-    pub fn compact_ordered(&mut self, order: NodeOrder<'_, NT>) -> Renumbering<NT, ET> {
-        let node_map = self.ordered_slots(order);
-        self.rebuild(node_map, true)
+    pub fn compact(&mut self, order: NodeOrder<'_, NT>) -> Renumbering<NT, ET> {
+        let reorders = !matches!(order, NodeOrder::Insertion);
+        let node_map = if reorders {
+            self.ordered_slots(order)
+        } else {
+            surviving_slots(&self.live_nodes, self.node_bound())
+        };
+        self.rebuild(node_map, reorders)
     }
 
     /// Rebuild the base under `node_map`, which numbers every live node slot.
@@ -182,16 +173,6 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         self.in_edges = in_edges.into_boxed_slice();
 
         Renumbering::new(node_map, edge_map)
-    }
-
-    /// Consume the store, returning its compacted form and the new numbering.
-    ///
-    /// The owning counterpart of [`compact`](Self::compact), for a pipeline
-    /// stage that hands the store on rather than keeping it.
-    #[must_use]
-    pub fn compacted(mut self) -> (Self, Renumbering<NT, ET>) {
-        let renumbering = self.compact();
-        (self, renumbering)
     }
 
     fn take_live_nodes(&mut self, node_map: &[u32]) -> Vec<N> {

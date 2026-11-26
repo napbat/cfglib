@@ -6,8 +6,8 @@
 
 use cfglib::{
     BasicBlock, Cfg, ClrExceptionRegion, Edge, ExceptionFlow, Graph, HandlerMetadata, HornClauses,
-    KeyedGraph, Region, ScopeGraph, SehExceptionRegion, SehRegistrationChain, StackGraph,
-    StackPartialPathDatabase, VectoredExceptionModel,
+    KeyedGraph, NodeOrder, Region, ScopeGraph, SehExceptionRegion, SehRegistrationChain,
+    StackGraph, StackPartialPathDatabase, VectoredExceptionModel,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -220,7 +220,7 @@ fn store_document() -> Value {
     let a = graph.add_node("a".to_owned());
     let b = graph.add_node("b".to_owned());
     graph.add_edge(a, b, 1);
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
     let c = graph.add_node("c".to_owned());
     graph.add_edge(b, c, 2);
     document(&graph)

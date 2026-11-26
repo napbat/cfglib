@@ -2,7 +2,9 @@
 
 use std::ops::ControlFlow;
 
-use cfglib::{Direction, Graph, NodeId, SearchConfig, SearchOrder, Visit, VisitedPolicy, search};
+use cfglib::{
+    Direction, Graph, NodeId, NodeOrder, SearchConfig, SearchOrder, Visit, VisitedPolicy, search,
+};
 
 use crate::Lcg;
 use crate::reference::{Table, Visits, Walk, keep_all, nodes_of, prune_multiples_of_five};
@@ -558,7 +560,7 @@ fn a_store_with_removed_nodes_walks_like_its_reduced_table_before_and_after_comp
         assert!(expected.iter().all(|(node, _)| !removed.contains(node)));
 
         let mut compacted = graph.clone();
-        let renumbering = compacted.compact();
+        let renumbering = compacted.compact(NodeOrder::Insertion);
         let mapped_seeds: Vec<usize> = [0, 30]
             .iter()
             .map(|&seed| {

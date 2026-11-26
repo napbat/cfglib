@@ -2,8 +2,9 @@
 //! carrying them over compactions with `then_renumbered` and `Renumbering`.
 
 use cfglib::{
-    BlockId, Cfg, CfgRenumbering, EdgeId, Rewrite, merge_blocks_mapped, remove_empty_blocks_mapped,
-    remove_unreachable_mapped, simplify_mapped, split_critical_edges_mapped,
+    BlockId, Cfg, CfgRenumbering, EdgeId, NodeOrder, Rewrite, merge_blocks_mapped,
+    remove_empty_blocks_mapped, remove_unreachable_mapped, simplify_mapped,
+    split_critical_edges_mapped,
 };
 
 use crate::oracles::{
@@ -150,7 +151,7 @@ fn a_compaction_between_every_pass_keeps_the_identity_trail_intact() {
         for _ in 0..2 {
             for pass in pipeline::<Route>() {
                 let record = pass(&mut cfg);
-                let renumbering = cfg.compact();
+                let renumbering = cfg.compact(NodeOrder::Insertion);
                 stages.push((record, renumbering));
             }
         }
@@ -189,7 +190,7 @@ fn then_renumbered_translates_every_replacement_and_creation_to_the_compacted_id
         let mut cfg = before.clone();
         let records = run_passes(&mut cfg);
         let all = composed(&records);
-        let renumbering = cfg.compact();
+        let renumbering = cfg.compact(NodeOrder::Insertion);
         let carried = all.then_renumbered(&renumbering);
         let context = format!("seed {seed}");
 
@@ -248,13 +249,11 @@ fn compaction_renumbers_survivors_densely_in_order_and_reports_the_rest_as_gone(
         let removed_something = !cfg.is_compact();
         let before = cfg.clone();
         let survivors: Vec<BlockId> = live_blocks(&before).into_iter().collect();
-        let renumbering = cfg.compact();
+        let renumbering = cfg.compact(NodeOrder::Insertion);
         let context = format!("seed {seed}");
 
         assert!(cfg.is_compact(), "{context}");
         assert_eq!(renumbering.is_identity(), !removed_something, "{context}");
-        assert_eq!(renumbering.node_bound(), before.block_bound(), "{context}");
-        assert_eq!(renumbering.edge_bound(), before.edge_bound(), "{context}");
         for (rank, &old) in survivors.iter().enumerate() {
             let new = renumbering.node(old).expect("a live block survives");
             assert_eq!(
@@ -302,7 +301,7 @@ fn compaction_renumbers_survivors_densely_in_order_and_reports_the_rest_as_gone(
             assert_eq!(was.payload(), is.payload(), "{context}");
         }
         assert!(
-            cfg.compact().is_identity(),
+            cfg.compact(NodeOrder::Insertion).is_identity(),
             "{context}: a compact graph compacts to itself"
         );
     }
@@ -313,15 +312,14 @@ fn composing_two_renumberings_equals_following_them_one_after_the_other() {
     for seed in 0..SEEDS {
         let mut cfg = random_program::<()>(seed, true);
         remove_unreachable_mapped(&mut cfg);
-        let first = cfg.compact();
+        let (block_bound, edge_bound) = (cfg.block_bound(), cfg.edge_bound());
+        let first = cfg.compact(NodeOrder::Insertion);
         remove_empty_blocks_mapped(&mut cfg);
         merge_blocks_mapped(&mut cfg);
-        let second = cfg.compact();
+        let second = cfg.compact(NodeOrder::Insertion);
         let both = first.compose(&second);
 
-        assert_eq!(both.node_bound(), first.node_bound(), "seed {seed}");
-        assert_eq!(both.edge_bound(), first.edge_bound(), "seed {seed}");
-        for index in 0..first.node_bound() {
+        for index in 0..block_bound {
             let old = BlockId::from_index(index);
             assert_eq!(
                 both.node(old),
@@ -329,7 +327,7 @@ fn composing_two_renumberings_equals_following_them_one_after_the_other() {
                 "seed {seed}: {old}"
             );
         }
-        for index in 0..first.edge_bound() {
+        for index in 0..edge_bound {
             let old = EdgeId::from_index(index);
             assert_eq!(
                 both.edge(old),
@@ -351,7 +349,7 @@ fn the_entry_follows_its_block_when_earlier_slots_are_compacted_away() {
     cfg.remove_block(first);
     cfg.remove_block(dropped);
 
-    let renumbering = cfg.compact();
+    let renumbering = cfg.compact(NodeOrder::Insertion);
 
     assert_eq!(cfg.entry().index(), 0);
     assert_eq!(renumbering.node(entry), Some(cfg.entry()));

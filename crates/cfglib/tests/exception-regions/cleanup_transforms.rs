@@ -9,8 +9,9 @@
 //! leave `compact` to repair them.
 
 use cfglib::{
-    Cfg, EhBlockKind, EhEdgeKind, EhModel, HandlerBody, HandlerKind, HandlerRef, contract_edge,
-    merge_blocks, remove_empty_blocks, remove_unreachable, simplify, split_critical_edges, verify,
+    Cfg, EhBlockKind, EhEdgeKind, EhModel, HandlerBody, HandlerKind, HandlerRef, NodeOrder,
+    contract_edge, merge_blocks, remove_empty_blocks, remove_unreachable, simplify,
+    split_critical_edges, verify,
 };
 
 use crate::shapes::{
@@ -98,7 +99,7 @@ fn assert_try_survives(
     protected: &[&str],
     handler_trace: &[&str],
 ) {
-    cfg.compact();
+    cfg.compact(NodeOrder::Insertion);
 
     assert!(cfg.is_compact());
     assert_references_live(cfg, "after compaction");

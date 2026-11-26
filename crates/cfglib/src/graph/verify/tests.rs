@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::edge::EdgeKind;
+use crate::graph::store::NodeOrder;
 use crate::test_util::ff;
 use alloc::vec;
 
@@ -131,7 +132,7 @@ fn a_diamond_missing_an_arm_survives_every_whole_graph_analysis() {
         "a retired slot has an empty frontier"
     );
 
-    cfg.compact();
+    cfg.compact(NodeOrder::Insertion);
     assert_eq!(cfg.block_bound(), cfg.block_count());
     assert!(verify(&cfg).is_ok());
 }

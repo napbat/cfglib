@@ -4,8 +4,8 @@
 use std::collections::BTreeSet;
 
 use cfglib::{
-    Cfg, DenseId, EdgeKind, Graph, NodeId, SccDecomposition, condensation, condensation_of,
-    kosaraju_scc, tarjan_scc,
+    Cfg, DenseId, EdgeKind, Graph, NodeId, NodeOrder, SccDecomposition, condensation,
+    condensation_of, kosaraju_scc, tarjan_scc,
 };
 
 /// `entry -> (a <-> b) -> exit`, with a second path `entry -> exit`.
@@ -132,7 +132,7 @@ fn a_cfg_with_a_removed_block_decomposes_like_its_compacted_form() {
         assert!(!result.is_dag(&cfg));
     }
 
-    let renumbering = cfg.compact();
+    let renumbering = cfg.compact(NodeOrder::Insertion);
     let compacted = tarjan_scc(&cfg);
     assert_eq!(compacted.len(), 3);
     let head = renumbering.node(head).expect("head survives");

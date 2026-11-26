@@ -92,22 +92,21 @@
 //! ## Compaction
 //!
 //! [`compact`](Graph::compact) rebuilds the base from the live entities,
-//! keeping every node's adjacency order, and
-//! returns a [`Renumbering`]: a total old-to-new mapping that
-//! [`compose`](Renumbering::compose)s, so a consumer that skipped several
-//! compactions folds them into one lookup.
+//! keeping every node's adjacency order, numbers the surviving nodes in a
+//! [`NodeOrder`], and returns a [`Renumbering`]: a total old-to-new mapping
+//! that [`compose`](Renumbering::compose)s, so a consumer that skipped
+//! several compactions folds them into one lookup.
 //!
-//! [`compact`](Graph::compact) keeps the nodes in the order they were added.
-//! [`compact_ordered`](Graph::compact_ordered) numbers them in a
-//! [`NodeOrder`] instead — first touch, breadth-first, reverse postorder, or
-//! the caller's own — so that neighbors carry nearby identities and a scan
-//! of a large graph reads nearby payloads, offsets and side-table entries.
-//! Only nodes move: edge identities and every node's adjacency order come
-//! out as [`compact`](Graph::compact) leaves them.
+//! [`NodeOrder::Insertion`] keeps the nodes in the order they were added.
+//! The other orders — breadth-first, reverse postorder, or the caller's
+//! own — number neighbors close together, so that a scan of a large graph
+//! reads nearby payloads, offsets and side-table entries. Only nodes move:
+//! edge identities and every node's adjacency order come out the same under
+//! every order.
 //!
 //! # There is no builder
 //!
-//! `Graph::new()`, `add_node`, `add_edge`, `compact()` *is* the builder, and
+//! `Graph::new()`, `add_node`, `add_edge`, `compact` *is* the builder, and
 //! it is also the store, so a consumer that keeps mutating does not have to
 //! choose a type up front or rebuild to get back to a mutable one.
 //!
@@ -187,7 +186,7 @@ fn empty_slice<T>() -> Box<[T]> {
 /// # Examples
 ///
 /// ```
-/// use cfglib::Graph;
+/// use cfglib::{Graph, NodeOrder};
 ///
 /// let mut graph = Graph::new();
 /// let definition = graph.add_node("definition");
@@ -198,7 +197,7 @@ fn empty_slice<T>() -> Box<[T]> {
 /// assert_eq!(graph.edge(flow).payload(), &"returns");
 ///
 /// // Appending after a compaction costs no allocation per node.
-/// graph.compact();
+/// graph.compact(NodeOrder::Insertion);
 /// let other = graph.add_node("other");
 /// graph.add_edge(definition, other, "escapes");
 /// assert_eq!(graph.successors(definition).collect::<Vec<_>>(), [call, other]);

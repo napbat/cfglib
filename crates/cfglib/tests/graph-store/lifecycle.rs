@@ -1,6 +1,6 @@
 //! Add, remove, redirect, compact and append: the life of one identity in a `Graph`.
 
-use cfglib::{EdgeId, EdgeView, Graph, GraphView, Id, IdTag, NodeId, Renumbering};
+use cfglib::{EdgeId, EdgeView, Graph, GraphView, Id, IdTag, NodeId, NodeOrder, Renumbering};
 
 use crate::{Relation, Symbol, relation, symbol};
 
@@ -86,9 +86,8 @@ fn an_empty_store_is_compact_and_compacts_to_the_identity() {
     assert_eq!((graph.edge_count(), graph.edge_bound()), (0, 0));
     assert_eq!(graph.node_ids().count(), 0);
 
-    let renumbering = graph.compact();
+    let renumbering = graph.compact(NodeOrder::Insertion);
     assert!(renumbering.is_identity());
-    assert_eq!((renumbering.node_bound(), renumbering.edge_bound()), (0, 0));
     assert_eq!(renumbering.node(NodeId::from_index(0)), None);
 }
 
@@ -137,7 +136,7 @@ fn removing_every_node_leaves_an_empty_store_that_still_has_slots() {
     let b = graph.add_node(symbol("b"));
     graph.add_edge(a, b, relation("ab"));
     graph.add_edge(b, b, relation("loop"));
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
     assert!(graph.is_compact());
     graph.remove_node(a);
     graph.remove_node(b);
@@ -147,7 +146,7 @@ fn removing_every_node_leaves_an_empty_store_that_still_has_slots() {
     assert_eq!((graph.node_bound(), graph.edge_bound()), (2, 2));
     assert!(!graph.is_compact(), "a compact store has no tombstones");
 
-    let renumbering = graph.compact();
+    let renumbering = graph.compact(NodeOrder::Insertion);
     assert!(graph.is_empty() && graph.is_compact());
     assert_eq!((graph.node_bound(), graph.edge_bound()), (0, 0));
     assert_eq!(renumbering.node(a), None);
@@ -214,7 +213,7 @@ fn parallel_edges_and_self_loops_keep_their_own_identities() {
     assert_eq!((graph.out_degree(a), graph.in_degree(a)), (3, 1));
     assert_eq!((graph.out_degree(b), graph.in_degree(b)), (0, 2));
 
-    let renumbering = graph.compact();
+    let renumbering = graph.compact(NodeOrder::Insertion);
     assert!(renumbering.is_identity());
     assert_eq!(graph.outgoing(a).collect::<Vec<_>>(), [own, first, second]);
     assert_eq!(graph.predecessors(b).collect::<Vec<_>>(), [a, a]);
@@ -318,7 +317,7 @@ fn removal_then_redirect_then_compact_leaves_every_survivor_addressable() {
     assert_eq!(graph.redirect_edge_target(to_sink, other), sink);
     assert_eq!(graph.predecessors(sink).collect::<Vec<_>>(), [other]);
 
-    let renumbering = graph.compact();
+    let renumbering = graph.compact(NodeOrder::Insertion);
     assert!(graph.is_compact());
     assert_eq!((graph.node_count(), graph.edge_count()), (3, 2));
 
@@ -493,7 +492,7 @@ fn domain_tagged_identities_stay_distinct_through_compaction() {
     graph.remove_node(first);
 
     assert_eq!(format!("{first} {used}"), "sym0 ref0");
-    let renumbering: Renumbering<SymbolTag, ReferenceTag> = graph.compact();
+    let renumbering: Renumbering<SymbolTag, ReferenceTag> = graph.compact(NodeOrder::Insertion);
     assert_eq!(renumbering.node(first), None);
     let second = renumbering.node(second).expect("second survived");
     let third = renumbering.node(third).expect("third survived");

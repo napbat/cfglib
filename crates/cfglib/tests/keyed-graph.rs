@@ -1,7 +1,7 @@
 //! Integration tests: keyed graphs keep their key table in step with the
 //! graph underneath.
 
-use cfglib::KeyedGraph;
+use cfglib::{KeyedGraph, NodeOrder};
 
 fn names() -> KeyedGraph<&'static str, &'static str, ()> {
     let mut graph = KeyedGraph::new();
@@ -19,7 +19,7 @@ fn every_key_names_its_own_node_after_a_removal_and_a_compaction() {
     let before = graph.node_id(&"c").expect("minted");
     assert!(graph.remove_node(&"a"));
 
-    let renumbering = graph.compact();
+    let renumbering = graph.compact(NodeOrder::Insertion);
 
     assert_eq!(graph.node_id(&"a"), None);
     assert_eq!(graph.node_id(&"c"), renumbering.node(before));
@@ -44,13 +44,13 @@ fn a_removed_key_can_be_minted_again_and_linked() {
 
 #[cfg(feature = "serde")]
 mod serde_round_trip {
-    use super::{KeyedGraph, names};
+    use super::{KeyedGraph, NodeOrder, names};
 
     #[test]
     fn a_compacted_graph_round_trips() {
         let mut graph = names();
         graph.remove_node(&"a");
-        graph.compact();
+        graph.compact(NodeOrder::Insertion);
 
         let json = serde_json::to_string(&graph).expect("serializes");
         let loaded: KeyedGraph<&str, &str, ()> = serde_json::from_str(&json).expect("loads");

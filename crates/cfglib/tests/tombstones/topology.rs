@@ -3,8 +3,8 @@
 use std::collections::BTreeSet;
 
 use cfglib::{
-    BlockId, Cfg, CfgRenumbering, DenseId, EdgeId, EdgeKind, Graph, InstrInfo, NodeId, Renumbering,
-    Rooted, RootedView,
+    BlockId, Cfg, CfgRenumbering, DenseId, EdgeId, EdgeKind, Graph, InstrInfo, NodeId, NodeOrder,
+    Renumbering, Rooted, RootedView,
 };
 
 use crate::oracle::Reference;
@@ -314,10 +314,10 @@ impl Realizations {
 
     fn of(topology: Topology, cfg_holed: Cfg<Op>) -> Self {
         let mut cfg_compacted = cfg_holed.clone();
-        let cfg_renumbering = cfg_compacted.compact();
+        let cfg_renumbering = cfg_compacted.compact(NodeOrder::Insertion);
         let graph_holed = topology.build_graph();
         let mut graph_compacted = graph_holed.clone();
-        let graph_renumbering = graph_compacted.compact();
+        let graph_renumbering = graph_compacted.compact(NodeOrder::Insertion);
         Self {
             label: String::new(),
             topology,

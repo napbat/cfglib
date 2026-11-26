@@ -4,9 +4,9 @@
 //! holding arbitrary node and edge payloads for value-flow, symbol,
 //! type-relation, import, call, and grammar graphs, with constant-time
 //! addition, bit-cheap removal, identity-preserving endpoint redirection, and
-//! an explicit [`compact`](Graph::compact) that reports its [`Renumbering`],
-//! or [`compact_ordered`](Graph::compact_ordered), which also numbers the
-//! nodes in a locality-friendly [`NodeOrder`].
+//! an explicit [`compact`](Graph::compact) that numbers the surviving nodes
+//! in insertion or a locality-friendly [`NodeOrder`] and reports its
+//! [`Renumbering`].
 //! Identities are one type, [`Id<T>`](Id), tagged per entity kind.
 //! [`Fanout`], [`DenseFanout`], and [`SortedMap`] are that base's shape
 //! without the edges: built-once tables from sparse keys, from a dense

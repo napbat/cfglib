@@ -6,8 +6,8 @@ use std::collections::BTreeSet;
 
 use cfglib::{
     BlockId, Cfg, CfgMetrics, DenseId, DominatorTree, EdgeId, EdgeKind, Graph, GraphMetrics,
-    GraphView, Rooted, RootedView, detect_loops, find_back_edges, kosaraju_scc, merge_blocks,
-    remove_empty_blocks, remove_unreachable, simplify, tarjan_scc,
+    GraphView, NodeOrder, Rooted, RootedView, detect_loops, find_back_edges, kosaraju_scc,
+    merge_blocks, remove_empty_blocks, remove_unreachable, simplify, tarjan_scc,
 };
 
 use crate::cfg_analyses::check_cfg_analyses;
@@ -60,7 +60,7 @@ fn a_removed_block_leaves_iteration_but_stays_readable_until_compaction() {
     assert_eq!(cfg.predecessors(last).collect::<Vec<_>>(), [first]);
     assert!(!cfg.is_compact());
 
-    let renumbering = cfg.compact();
+    let renumbering = cfg.compact(NodeOrder::Insertion);
     assert!(cfg.is_compact());
     assert_eq!(cfg.block_bound(), 3);
     assert_eq!(renumbering.node(middle), None);
@@ -74,7 +74,7 @@ fn a_compaction_is_the_identity_exactly_when_nothing_was_removed() {
     let mut untouched = Cfg::<u32>::new();
     let kept = untouched.new_block();
     untouched.add_edge(untouched.entry(), kept, EdgeKind::Fallthrough);
-    let renumbering = untouched.compact();
+    let renumbering = untouched.compact(NodeOrder::Insertion);
     assert!(renumbering.is_identity(), "nothing was removed");
     assert_eq!(renumbering.node(kept), Some(kept));
 
@@ -83,7 +83,7 @@ fn a_compaction_is_the_identity_exactly_when_nothing_was_removed() {
     let last = trailing.new_block();
     trailing.add_edge(trailing.entry(), kept, EdgeKind::Fallthrough);
     assert!(trailing.remove_block(last));
-    let renumbering = trailing.compact();
+    let renumbering = trailing.compact(NodeOrder::Insertion);
     assert_eq!(
         renumbering.node(kept),
         Some(kept),
@@ -139,8 +139,6 @@ fn compaction_numbers_survivors_densely_in_their_old_order() {
                 "seed {seed}: cfg edge {edge}"
             );
         }
-        assert_eq!(realized.cfg_renumbering.node_bound(), topology.slots);
-        assert_eq!(realized.cfg_renumbering.edge_bound(), topology.edges.len());
         assert!(
             !realized.cfg_renumbering.is_identity() && !realized.graph_renumbering.is_identity(),
             "seed {seed}: every generated topology removes a node, so no numbering is the identity"
@@ -276,7 +274,7 @@ fn metrics_count_the_live_blocks_not_the_slots() {
     assert!((metrics.avg_instructions_per_block - 1.0).abs() < f64::EPSILON);
     assert_eq!(GraphMetrics::compute(&cfg), metrics.graph);
 
-    cfg.compact();
+    cfg.compact(NodeOrder::Insertion);
     assert_eq!(
         CfgMetrics::compute(&cfg),
         metrics,
@@ -316,7 +314,7 @@ fn metrics_between_a_transform_and_the_compaction_equal_the_compacted_metrics() 
             holed.graph.unreachable_node_count, 0,
             "seed {seed}: nothing unreachable is left"
         );
-        cfg.compact();
+        cfg.compact(NodeOrder::Insertion);
         assert_eq!(CfgMetrics::compute(&cfg), holed, "seed {seed}");
     }
 }

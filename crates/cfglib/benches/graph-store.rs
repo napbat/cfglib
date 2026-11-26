@@ -39,11 +39,11 @@
 //! is more local. It depends on the numbering, not on the arrival order.
 //!
 //! Each `structured_relabeled` table is followed by an ordered-compaction
-//! table for the same arrival: the store compacted by `compact()` and by
-//! `compact_ordered` in `FirstTouch`, `BreadthFirst` and `ReversePostorder`
-//! order, the searches rooted at the nodes with no predecessor. Each order
-//! reports the locality of the numbering it produced, then its compaction,
-//! both neighbor walks and `tarjan_scc` over the result. The `compact` rows
+//! table for the same arrival: the store compacted in `Insertion`,
+//! `BreadthFirst` and `ReversePostorder` order, the searches rooted at the
+//! nodes with no predecessor. Each order reports the locality of the
+//! numbering it produced, then its compaction, both neighbor walks and
+//! `tarjan_scc` over the result. The `compact` rows, in `Insertion` order,
 //! are the baseline: the gain of an order is the drop from them.
 
 use std::alloc::System;
@@ -504,7 +504,7 @@ fn run_store(edges: &[(u32, u32)], appends: &[(u32, u32)]) -> Vec<(&'static str,
     // The renumbering is dropped inside the measured region so the phase
     // reports the store's footprint, not the store plus a report the caller
     // may or may not keep.
-    let ((), first_compaction) = measure(|| drop(graph.compact()));
+    let ((), first_compaction) = measure(|| drop(graph.compact(NodeOrder::Insertion)));
     let (total, scan) = measure(|| walk_neighbors(&graph, true));
     assert!(total > 0, "the scan must observe the whole graph");
     let (reverse_total, reverse_scan) = measure(|| walk_neighbors(&graph, false));
@@ -517,7 +517,7 @@ fn run_store(edges: &[(u32, u32)], appends: &[(u32, u32)]) -> Vec<(&'static str,
         walk_neighbors(&graph, true)
     });
 
-    let ((), compaction) = measure(|| drop(graph.compact()));
+    let ((), compaction) = measure(|| drop(graph.compact(NodeOrder::Insertion)));
     assert!(graph.is_compact());
     let ((), teardown) = measure(move || drop(graph));
     vec![
@@ -545,7 +545,7 @@ fn run_small(edges: &[(u32, u32)]) -> Vec<(&'static str, Sample)> {
         let mut total = 0_usize;
         for _ in 0..SMALL_BUILDS {
             let mut graph = build_small(edges);
-            drop(graph.compact());
+            drop(graph.compact(NodeOrder::Insertion));
             total = total.wrapping_add(scan_store(&graph));
         }
         total
@@ -558,41 +558,33 @@ fn run_small(edges: &[(u32, u32)]) -> Vec<(&'static str, Sample)> {
     ]
 }
 
-/// The compactions the ordered table compares, the plain one first: it is
-/// the baseline every ordered row is read against.
+/// The compactions the ordered table compares, the insertion-order one
+/// first: it is the baseline every ordered row is read against.
 #[derive(Clone, Copy)]
 enum Compaction {
     Plain,
-    FirstTouch,
     BreadthFirst,
     ReversePostorder,
 }
 
 impl Compaction {
-    const ALL: [Self; 4] = [
-        Self::Plain,
-        Self::FirstTouch,
-        Self::BreadthFirst,
-        Self::ReversePostorder,
-    ];
+    const ALL: [Self; 3] = [Self::Plain, Self::BreadthFirst, Self::ReversePostorder];
 
     fn name(self) -> &'static str {
         match self {
             Self::Plain => "compact",
-            Self::FirstTouch => "first_touch",
             Self::BreadthFirst => "breadth_first",
             Self::ReversePostorder => "reverse_postorder",
         }
     }
 
     fn apply(self, graph: &mut Graph<u32, ()>, roots: &[NodeId]) {
-        let renumbering = match self {
-            Self::Plain => graph.compact(),
-            Self::FirstTouch => graph.compact_ordered(NodeOrder::FirstTouch),
-            Self::BreadthFirst => graph.compact_ordered(NodeOrder::BreadthFirst(roots)),
-            Self::ReversePostorder => graph.compact_ordered(NodeOrder::ReversePostorder(roots)),
+        let order = match self {
+            Self::Plain => NodeOrder::Insertion,
+            Self::BreadthFirst => NodeOrder::BreadthFirst(roots),
+            Self::ReversePostorder => NodeOrder::ReversePostorder(roots),
         };
-        drop(renumbering);
+        drop(graph.compact(order));
     }
 }
 

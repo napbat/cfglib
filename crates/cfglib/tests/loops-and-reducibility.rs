@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 use cfglib::{
     BlockId, Cfg, CfgMetrics, DominatorTree, EdgeKind, GraphMetrics, IntervalAnalysis,
-    LoopNestingTree, block_nesting_depths, canonicalize_loops, cfg_block_nesting_depths,
+    LoopNestingTree, NodeOrder, block_nesting_depths, canonicalize_loops, cfg_block_nesting_depths,
     detect_loops, detect_loops_tagged, find_back_edges, insert_preheader, is_reducible,
     loop_exit_blocks, make_reducible, verify,
 };
@@ -218,7 +218,7 @@ fn metrics_count_live_blocks_whether_or_not_the_store_was_compacted() {
     assert_eq!(before.graph.unreachable_node_count, 0);
     assert_eq!(before.graph.reachable_node_count, before.graph.node_count);
 
-    cfg.compact();
+    cfg.compact(NodeOrder::Insertion);
     assert_eq!(CfgMetrics::compute(&cfg), before);
 }
 

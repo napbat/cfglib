@@ -11,7 +11,7 @@ extern crate alloc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::graph::store::{EdgeId, Graph, NodeId};
+use crate::graph::store::{EdgeId, Graph, NodeId, NodeOrder};
 use crate::graph::view::Direction;
 use crate::test_util::golden::assert_golden;
 
@@ -35,7 +35,7 @@ fn relocated_store() -> (Store, Vec<NodeId>, Vec<EdgeId>) {
         let payload = u32::try_from(payload).expect("the fixture is small");
         edges.push(graph.add_edge(nodes[source], nodes[target], payload));
     }
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
     edges.push(graph.add_edge(nodes[5], nodes[0], 7));
 
     // Node 4 loses its only outgoing edge, node 2 its only incoming one, so
@@ -109,7 +109,7 @@ fn a_store_that_never_relocated_writes_no_overlay() {
     let first = graph.add_node("first".to_string());
     let second = graph.add_node("second".to_string());
     graph.add_edge(first, second, 1);
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
 
     let encoded = serde_json::to_string(&graph).expect("the store serializes");
     assert!(!encoded.contains("relocations"), "{encoded}");
@@ -122,8 +122,8 @@ fn compaction_folds_a_loaded_overlay_into_the_index() {
     let (expected, ..) = relocated_store();
     let mut decoded = stored_store();
     let mut compacted = expected;
-    compacted.compact();
-    decoded.compact();
+    compacted.compact(NodeOrder::Insertion);
+    decoded.compact(NodeOrder::Insertion);
 
     assert!(decoded.is_compact());
     assert_same_listings(&decoded, &compacted);
@@ -160,7 +160,7 @@ fn base_and_delta_store() -> serde_json::Value {
     let [a, b, c] = ["a", "b", "c"].map(|label| graph.add_node(label.to_string()));
     graph.add_edge(a, b, 1);
     graph.add_edge(b, c, 2);
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
     graph.add_edge(c, a, 3);
     serde_json::to_value(&graph).expect("the store serializes")
 }

@@ -23,7 +23,7 @@ use cfglib::{
     ClrHandlerKind, ControlNode, ControlTree, DenseBits, DenseFanout, Direction, DisplayInstr,
     DominatorTree, EdgeKind, EhModel, Fanout, FlowControl, FlowEffect, Graph, Handler, HandlerBody,
     HandlerKind, HandlerTypes, HornClauses, IfdsConfig, IfdsProblem, InstrInfo, KeyedGraph, NodeId,
-    PostDominatorTree, Problem, SortedMap, StackGraphError, Supergraph, TextError,
+    NodeOrder, PostDominatorTree, Problem, SortedMap, StackGraphError, Supergraph, TextError,
     VectoredExceptionModel, VectoredHandlerKind, VectoredHandlerOrder, breadth_first,
     install_clr_region, parse_cfg_text, parse_text, remove_unreachable, shortest_path, simplify,
     solve_ifds, solve_problem, tarjan_scc, topological_sort, verify,
@@ -264,7 +264,7 @@ fn a_graph_store_runs_traversals_and_components_on_owned_payloads() {
     assert_eq!(components.len(), 2, "parse, and the check-lower-emit cycle");
 
     graph.remove_node(ids[0]);
-    let renumbering = graph.compact();
+    let renumbering = graph.compact(NodeOrder::Insertion);
     assert_eq!(renumbering.node(ids[0]), None);
     assert_eq!(graph.node_count(), 3);
     let text: String = graph.to_text();
@@ -354,7 +354,7 @@ fn a_structured_stream_builds_and_the_cleanup_passes_report_alloc_results() {
     );
     assert_eq!(cfg.block_count(), before - 1);
     let _merged: usize = simplify(&mut cfg);
-    cfg.compact();
+    cfg.compact(NodeOrder::Insertion);
     assert!(cfg.is_compact());
     assert!(verify(&cfg).is_ok());
     assert!(

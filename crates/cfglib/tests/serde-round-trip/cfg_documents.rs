@@ -5,7 +5,7 @@ use std::fmt::Debug;
 
 use cfglib::{
     BasicBlock, BlockId, Cfg, DisplayInstr, DominatorTree, Edge, EdgeId, EdgeKind, ExceptionFlow,
-    ExceptionPhase, verify,
+    ExceptionPhase, NodeOrder, verify,
 };
 use serde_json::{Value, json};
 
@@ -128,7 +128,7 @@ fn evolve(mut cfg: Cfg<Op, Route>) -> (Cfg<Op, Route>, Renumbered, Renumbered) {
     cfg.remove_block(late);
 
     let (block_bound, edge_bound) = (cfg.block_bound(), cfg.edge_bound());
-    let renumbering = cfg.compact();
+    let renumbering = cfg.compact(NodeOrder::Insertion);
     let blocks = (0..block_bound)
         .map(|index| {
             renumbering

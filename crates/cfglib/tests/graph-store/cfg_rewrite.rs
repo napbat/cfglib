@@ -5,7 +5,7 @@
 //! The record only lists identities the pass touched, so an identity it left alone is found in
 //! the `Renumbering` instead. `resolve_block` and `resolve_edge` are that two-step lookup.
 
-use cfglib::{BlockId, Cfg, CfgRenumbering, EdgeId, EdgeKind, Rewrite, simplify_mapped};
+use cfglib::{BlockId, Cfg, CfgRenumbering, EdgeId, EdgeKind, NodeOrder, Rewrite, simplify_mapped};
 
 /// Edge provenance a frontend keeps beside the control flow: owned, not `Copy`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,7 +137,7 @@ fn a_cleanup_pass_followed_by_compact_leaves_every_old_identity_with_one_answer(
         "one unreachable block, one empty block, one merge"
     );
     assert_eq!((cfg.block_count(), cfg.block_bound()), (3, 6));
-    let renumbering = cfg.compact();
+    let renumbering = cfg.compact(NodeOrder::Insertion);
     let rewrite = rewrite.then_renumbered(&renumbering);
     assert!(cfg.is_compact());
     assert_eq!((cfg.block_count(), cfg.edge_count()), (3, 3));
@@ -210,7 +210,7 @@ fn a_cleanup_pass_followed_by_compact_leaves_every_old_identity_with_one_answer(
 fn the_carried_record_never_names_an_identity_the_compaction_dropped() {
     let mut fixture = fixture();
     let (_, rewrite) = simplify_mapped(&mut fixture.cfg);
-    let renumbering = fixture.cfg.compact();
+    let renumbering = fixture.cfg.compact(NodeOrder::Insertion);
     let rewrite = rewrite.then_renumbered(&renumbering);
 
     for (_, replacements) in rewrite.block_mappings() {
@@ -234,7 +234,7 @@ fn the_carried_record_never_names_an_identity_the_compaction_dropped() {
 fn carrying_a_record_across_two_compactions_equals_carrying_it_across_their_composition() {
     let mut fixture = fixture();
     let (_, rewrite) = simplify_mapped(&mut fixture.cfg);
-    let first = fixture.cfg.compact();
+    let first = fixture.cfg.compact(NodeOrder::Insertion);
 
     // A later pass drops the merged block, so the first record's replacement for `tail` is
     // dropped by the second compaction.
@@ -242,7 +242,7 @@ fn carrying_a_record_across_two_compactions_equals_carrying_it_across_their_comp
         .node(fixture.then_block)
         .expect("`then` survived the first compaction");
     assert!(fixture.cfg.remove_block(merged));
-    let second = fixture.cfg.compact();
+    let second = fixture.cfg.compact(NodeOrder::Insertion);
 
     let stepwise = rewrite.then_renumbered(&first).then_renumbered(&second);
     let composed = rewrite.then_renumbered(&first.compose(&second));
@@ -299,7 +299,7 @@ fn a_pass_that_changes_nothing_records_nothing_and_carries_an_empty_record() {
     let (changes, nothing) = simplify_mapped(&mut cfg);
     assert_eq!(changes, 0);
     assert!(nothing.is_empty());
-    let renumbering = cfg.compact();
+    let renumbering = cfg.compact(NodeOrder::Insertion);
     assert!(renumbering.is_identity());
     assert!(nothing.then_renumbered(&renumbering).is_empty());
 }

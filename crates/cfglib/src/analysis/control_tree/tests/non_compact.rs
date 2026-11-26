@@ -8,6 +8,7 @@ use super::pseudocode;
 use crate::ControlTree;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
+use crate::graph::store::NodeOrder;
 use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
 use crate::test_util::{MockInst, ff};
 
@@ -55,7 +56,7 @@ fn removed_block_slots_do_not_change_the_structure() {
     let (sparse, sparse_report) = ControlTree::compute_with_report(&cfg);
     let sparse_text = pseudocode(&cfg, &sparse);
 
-    cfg.compact();
+    cfg.compact(NodeOrder::Insertion);
     let (dense, dense_report) = ControlTree::compute_with_report(&cfg);
     assert_eq!(sparse_text, pseudocode(&cfg, &dense));
     assert_eq!(sparse_report.gotos.len(), dense_report.gotos.len());

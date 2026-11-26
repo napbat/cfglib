@@ -9,8 +9,8 @@
 use std::collections::BTreeMap;
 
 use cfglib::{
-    Direction, EdgeId, Graph, NodeId, Renumbering, breadth_first, depth_first_preorder, reachable,
-    shortest_path,
+    Direction, EdgeId, Graph, NodeId, NodeOrder, Renumbering, breadth_first, depth_first_preorder,
+    reachable, shortest_path,
 };
 
 use crate::reference_model::Reference;
@@ -72,7 +72,10 @@ fn scenario(seed: u64, redirects: bool) -> (Store, Reference) {
         let (source, target) = (rng.below(30), rng.below(30));
         add_edge(&mut graph, &mut reference, source, target);
     }
-    assert!(graph.compact().is_identity(), "nothing was removed yet");
+    assert!(
+        graph.compact(NodeOrder::Insertion).is_identity(),
+        "nothing was removed yet"
+    );
 
     for _ in 0..10 {
         add_node(&mut graph, &mut reference);
@@ -438,7 +441,7 @@ fn compaction_without_redirects_preserves_every_answer_exactly_and_matches_the_r
     for seed in SEEDS {
         let (mut graph, reference) = scenario(seed, false);
         let before = observe(&graph);
-        let renumbering = graph.compact();
+        let renumbering = graph.compact(NodeOrder::Insertion);
         let after = observe(&graph);
 
         assert!(graph.is_compact());
@@ -462,7 +465,7 @@ fn compaction_after_redirects_preserves_every_answer_up_to_adjacency_order() {
     for seed in SEEDS {
         let (mut graph, reference) = scenario(seed, true);
         let before = observe(&graph);
-        let renumbering = graph.compact();
+        let renumbering = graph.compact(NodeOrder::Insertion);
         let after = observe(&graph);
 
         assert_eq!(after.len(), before.len());
@@ -496,10 +499,8 @@ fn the_renumbering_maps_exactly_the_survivors_the_reference_predicts() {
             let labels: Vec<_> = (0..reference.edges.len())
                 .map(|slot| graph.edge(EdgeId::from_index(slot)).payload().label.clone())
                 .collect();
-            let renumbering = graph.compact();
+            let renumbering = graph.compact(NodeOrder::Insertion);
 
-            assert_eq!(renumbering.node_bound(), node_map.len());
-            assert_eq!(renumbering.edge_bound(), edge_map.len());
             for (old, expected) in node_map.iter().enumerate() {
                 let new = renumbering.node(NodeId::from_index(old));
                 assert_eq!(new.map(NodeId::index), *expected, "node slot {old}");
@@ -532,9 +533,9 @@ fn the_renumbering_maps_exactly_the_survivors_the_reference_predicts() {
 fn compacting_a_compacted_store_changes_no_identity_and_no_answer() {
     for seed in SEEDS {
         let (mut graph, _) = scenario(seed, true);
-        graph.compact();
+        graph.compact(NodeOrder::Insertion);
         let settled = observe(&graph);
-        let again = graph.compact();
+        let again = graph.compact(NodeOrder::Insertion);
         assert!(again.is_identity());
         assert_eq!(observe(&graph), settled);
     }
@@ -545,7 +546,7 @@ fn compaction_after_redirects_preserves_the_adjacency_order_redirection_produced
     for seed in SEEDS {
         let (mut graph, _) = scenario(seed, true);
         let before = observe(&graph);
-        let renumbering = graph.compact();
+        let renumbering = graph.compact(NodeOrder::Insertion);
         let after = observe(&graph);
 
         for (&old, observation) in &before {

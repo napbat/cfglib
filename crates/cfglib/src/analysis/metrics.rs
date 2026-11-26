@@ -202,6 +202,7 @@ mod tests {
     use super::*;
     use crate::cfg::Cfg;
     use crate::edge::EdgeKind;
+    use crate::graph::store::NodeOrder;
     use crate::test_util::ff;
 
     #[test]
@@ -348,7 +349,7 @@ mod tests {
         assert_eq!(before.graph.reachable_node_count, 2);
         assert!((before.avg_instructions_per_block - 0.5).abs() < f64::EPSILON);
 
-        cfg.compact();
+        cfg.compact(NodeOrder::Insertion);
         assert_eq!(CfgMetrics::compute(&cfg), before);
         assert_eq!(
             GraphMetrics::compute(&cfg),

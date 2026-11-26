@@ -53,7 +53,7 @@ fn random_store(rng: &mut Rng) -> Store {
             }
         }
         if round + 1 < rounds && rng.one_in(2) {
-            graph.compact();
+            graph.compact(NodeOrder::Insertion);
         }
     }
 
@@ -145,7 +145,7 @@ impl GraphView for VirtualRoot<'_> {
 }
 
 /// The old identities in the order `order` numbers them, computed the plain
-/// way: first touch by a scan of the edges, breadth-first by one traversal
+/// way: insertion by the slot order alone, breadth-first by one traversal
 /// per root, reverse postorder by one traversal from a virtual root.
 fn oracle(graph: &Store, order: NodeOrder<'_>) -> Vec<NodeId> {
     let mut sequence = Vec::new();
@@ -156,12 +156,8 @@ fn oracle(graph: &Store, order: NodeOrder<'_>) -> Vec<NodeId> {
         }
     };
     match order {
-        NodeOrder::FirstTouch => {
-            for edge in graph.edges() {
-                visit(edge.source(), &mut sequence);
-                visit(edge.target(), &mut sequence);
-            }
-        }
+        // The slot order every order ends with is the whole of this one.
+        NodeOrder::Insertion => {}
         NodeOrder::BreadthFirst(roots) => {
             // A node reached through an earlier root's node was reached by
             // that root, so filtering each full traversal is the forest.
@@ -202,8 +198,6 @@ fn assert_image(before: &Store, after: &Store, renumbering: &Renumbering) {
     assert!(after.is_compact());
     assert_eq!(after.node_count(), before.node_count());
     assert_eq!(after.edge_count(), before.edge_count());
-    assert_eq!(renumbering.node_bound(), before.node_bound());
-    assert_eq!(renumbering.edge_bound(), before.edge_bound());
 
     let mut taken = vec![false; after.node_bound()];
     for slot in 0..before.node_bound() {
@@ -218,7 +212,7 @@ fn assert_image(before: &Store, after: &Store, renumbering: &Renumbering) {
         }
     }
 
-    let plain = before.clone().compact();
+    let plain = before.clone().compact(NodeOrder::Insertion);
     let mut previous = None;
     for slot in 0..before.edge_bound() {
         let old = EdgeId::from_index(slot);
@@ -264,7 +258,7 @@ fn assert_composes(before: &Store, mut after: Store, first: &Renumbering, rng: &
     if let Some(&edge) = edges.get(rng.below(edges.len() + 1)) {
         after.remove_edge(edge);
     }
-    let second = after.compact();
+    let second = after.compact(NodeOrder::Insertion);
     let composed = first.compose(&second);
     for slot in 0..before.node_bound() {
         let old = NodeId::from_index(slot);
@@ -290,13 +284,13 @@ fn every_order_compacts_to_the_image_its_oracle_numbers() {
         let mut shuffled: Vec<NodeId> = before.node_ids().collect();
         rng.shuffle(&mut shuffled);
         for order in [
-            NodeOrder::FirstTouch,
+            NodeOrder::Insertion,
             NodeOrder::BreadthFirst(&roots),
             NodeOrder::ReversePostorder(&roots),
             NodeOrder::Explicit(&shuffled),
         ] {
             let mut after = before.clone();
-            let renumbering = after.compact_ordered(order);
+            let renumbering = after.compact(order);
             assert_image(&before, &after, &renumbering);
             for (position, old) in oracle(&before, order).into_iter().enumerate() {
                 assert_eq!(
@@ -350,7 +344,7 @@ fn reverse_postorder_points_every_forward_edge_up_the_numbering() {
         let dominators = DominatorTree::compute(&Rooted::new(&graph, root));
         assert!(is_reducible(&Rooted::new(&graph, root), &dominators));
 
-        let renumbering = graph.compact_ordered(NodeOrder::ReversePostorder(&[root]));
+        let renumbering = graph.compact(NodeOrder::ReversePostorder(&[root]));
         let root = renumbered(&renumbering, root);
         assert_eq!(root.index(), 0, "a single root is numbered first");
         let dominators = DominatorTree::compute(&Rooted::new(&graph, root));
@@ -381,14 +375,14 @@ fn payloads(graph: &Store) -> Vec<u64> {
 /// The payloads of a copy of `graph` compacted in `order`, in identity order.
 fn ordered(graph: &Store, order: NodeOrder<'_>) -> Vec<u64> {
     let mut graph = graph.clone();
-    graph.compact_ordered(order);
+    graph.compact(order);
     payloads(&graph)
 }
 
 #[test]
 fn nodes_an_order_does_not_reach_follow_in_slot_order() {
     let (graph, [a, _, _, d]) = sparse();
-    assert_eq!(ordered(&graph, NodeOrder::FirstTouch), [10, 11, 13, 12]);
+    assert_eq!(ordered(&graph, NodeOrder::Insertion), [10, 11, 12, 13]);
     assert_eq!(
         ordered(&graph, NodeOrder::BreadthFirst(&[a])),
         [10, 11, 12, 13]
@@ -429,7 +423,7 @@ fn several_roots_search_in_turn_and_repeats_add_nothing() {
 fn an_explicit_order_numbers_each_node_by_its_position() {
     let (mut graph, [a, b, c, d]) = sparse();
     graph.remove_node(b);
-    let renumbering = graph.compact_ordered(NodeOrder::Explicit(&[d, c, a]));
+    let renumbering = graph.compact(NodeOrder::Explicit(&[d, c, a]));
     assert_eq!(payloads(&graph), [13, 12, 10]);
     assert_eq!(renumbering.node(b), None);
     assert_eq!(renumbering.node(d), Some(NodeId::from_index(0)));
@@ -442,13 +436,13 @@ fn an_explicit_order_numbers_each_node_by_its_position() {
 #[test]
 fn an_empty_store_compacts_in_every_order() {
     for order in [
-        NodeOrder::FirstTouch,
+        NodeOrder::Insertion,
         NodeOrder::BreadthFirst(&[]),
         NodeOrder::ReversePostorder(&[]),
         NodeOrder::Explicit(&[]),
     ] {
         let mut graph = Store::new();
-        let renumbering = graph.compact_ordered(order);
+        let renumbering = graph.compact(order);
         assert!(graph.is_compact());
         assert!(graph.is_empty());
         assert!(renumbering.is_identity());
@@ -458,7 +452,7 @@ fn an_empty_store_compacts_in_every_order() {
     for node in nodes {
         graph.remove_node(node);
     }
-    let renumbering = graph.compact_ordered(NodeOrder::FirstTouch);
+    let renumbering = graph.compact(NodeOrder::BreadthFirst(&[]));
     assert!(graph.is_empty() && graph.is_compact());
     assert!(nodes.iter().all(|&node| renumbering.node(node).is_none()));
 }
@@ -466,7 +460,7 @@ fn an_empty_store_compacts_in_every_order() {
 #[test]
 fn a_node_added_after_an_ordered_compaction_follows_every_compacted_one() {
     let (mut graph, [a, _, _, d]) = sparse();
-    let renumbering = graph.compact_ordered(NodeOrder::BreadthFirst(&[d]));
+    let renumbering = graph.compact(NodeOrder::BreadthFirst(&[d]));
     let added = graph.add_node(14);
     assert_eq!(added.index(), 4);
     graph.add_edge(renumbered(&renumbering, a), added, 2);
@@ -484,28 +478,28 @@ fn a_node_added_after_an_ordered_compaction_follows_every_compacted_one() {
 fn a_removed_root_panics() {
     let (mut graph, [a, ..]) = sparse();
     graph.remove_node(a);
-    graph.compact_ordered(NodeOrder::BreadthFirst(&[a]));
+    graph.compact(NodeOrder::BreadthFirst(&[a]));
 }
 
 #[test]
 #[should_panic(expected = "root node is out of range")]
 fn a_root_out_of_range_panics() {
     let (mut graph, _) = sparse();
-    graph.compact_ordered(NodeOrder::ReversePostorder(&[NodeId::from_index(4)]));
+    graph.compact(NodeOrder::ReversePostorder(&[NodeId::from_index(4)]));
 }
 
 #[test]
 #[should_panic(expected = "an explicit order names node n0 twice")]
 fn an_explicit_order_naming_a_node_twice_panics() {
     let (mut graph, [a, b, c, d]) = sparse();
-    graph.compact_ordered(NodeOrder::Explicit(&[a, b, a, c, d]));
+    graph.compact(NodeOrder::Explicit(&[a, b, a, c, d]));
 }
 
 #[test]
 #[should_panic(expected = "an explicit order must name every live node")]
 fn an_explicit_order_leaving_a_node_out_panics() {
     let (mut graph, [a, b, c, _]) = sparse();
-    graph.compact_ordered(NodeOrder::Explicit(&[a, b, c]));
+    graph.compact(NodeOrder::Explicit(&[a, b, c]));
 }
 
 #[test]
@@ -513,7 +507,7 @@ fn an_explicit_order_leaving_a_node_out_panics() {
 fn an_explicit_order_naming_a_removed_node_panics() {
     let (mut graph, [a, b, c, d]) = sparse();
     graph.remove_node(b);
-    graph.compact_ordered(NodeOrder::Explicit(&[a, b, c, d]));
+    graph.compact(NodeOrder::Explicit(&[a, b, c, d]));
 }
 
 #[test]
@@ -522,7 +516,7 @@ fn a_rejected_order_leaves_the_store_unchanged() {
     graph.remove_edge(EdgeId::from_index(0));
     let before = graph.clone();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        graph.compact_ordered(NodeOrder::Explicit(&[a, b, c]))
+        graph.compact(NodeOrder::Explicit(&[a, b, c]))
     }));
     assert!(result.is_err());
     assert_eq!(graph, before);

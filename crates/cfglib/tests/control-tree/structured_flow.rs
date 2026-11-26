@@ -1,7 +1,7 @@
 //! The acyclic shapes a source `if` lowers to: branches, sequences, early
 //! returns, and the blocks that hold nothing.
 
-use cfglib::{Cfg, ControlNode, ControlTree, EdgeKind, simplify};
+use cfglib::{Cfg, ControlNode, ControlTree, EdgeKind, NodeOrder, simplify};
 
 use crate::builders::{Flow, pseudocode};
 use crate::oracles::{structure_and_check, structure_and_check_covering};
@@ -328,7 +328,7 @@ fn simplify_and_compact_keep_the_program_and_the_tree_covers_the_survivors() {
     );
 
     assert!(simplify(&mut flow.cfg) > 0);
-    flow.cfg.compact();
+    flow.cfg.compact(NodeOrder::Insertion);
 
     let live = flow.cfg.block_ids().collect();
     let (after, report) = structure_and_check_covering(&flow.cfg, &live);

@@ -3,7 +3,9 @@
 
 use std::fmt::{Debug, Display};
 
-use cfglib::{DominatorTree, EdgeId, Graph, HornClauses, KeyedGraph, NodeId, Rooted, tarjan_scc};
+use cfglib::{
+    DominatorTree, EdgeId, Graph, HornClauses, KeyedGraph, NodeId, NodeOrder, Rooted, tarjan_scc,
+};
 use serde_json::{Value, json};
 
 use crate::golden::assert_golden;
@@ -29,7 +31,7 @@ fn layered_store() -> Store {
     .zip(0..)
     .map(|((source, target), payload)| graph.add_edge(source, target, payload))
     .collect::<Vec<_>>();
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
 
     let link = graph.add_node("link".to_owned());
     let doomed = graph.add_node("doomed".to_owned());
@@ -146,7 +148,7 @@ fn evolve(mut graph: Store) -> (Store, Renumbered, Renumbered) {
     graph.remove_node(last);
 
     let (node_bound, edge_bound) = (graph.node_bound(), graph.edge_bound());
-    let renumbering = graph.compact();
+    let renumbering = graph.compact(NodeOrder::Insertion);
     let nodes = (0..node_bound)
         .map(|index| {
             renumbering
@@ -196,7 +198,7 @@ fn a_store_that_was_never_compacted_and_one_that_just_was_both_round_trip() {
     assert_same_store(&round_trip(&delta_only), &delta_only);
 
     let mut compacted = layered_store();
-    compacted.compact();
+    compacted.compact(NodeOrder::Insertion);
     let decoded: Store = round_trip(&compacted);
     assert_same_store(&decoded, &compacted);
     assert_eq!(decoded.node_bound(), decoded.node_count());
@@ -216,7 +218,7 @@ fn a_store_that_never_relocated_has_no_overlay_in_its_document_and_loads_without
     let a = graph.add_node("a".to_owned());
     let b = graph.add_node("b".to_owned());
     graph.add_edge(a, b, 1);
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
 
     let value = document(&graph);
     assert!(value.get("relocations").is_none(), "{value}");
@@ -235,7 +237,7 @@ fn the_store_document_is_stable() {
     let a = graph.add_node("a".to_owned());
     let b = graph.add_node("b".to_owned());
     let first = graph.add_edge(a, b, 1);
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
     let c = graph.add_node("c".to_owned());
     graph.add_edge(b, c, 2);
     graph.remove_edge(first);

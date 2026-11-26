@@ -2,6 +2,7 @@ extern crate alloc;
 extern crate std;
 use super::*;
 use crate::edge::EdgeKind;
+use crate::graph::store::NodeOrder;
 use crate::test_util::MockInst;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -266,7 +267,7 @@ fn is_compact_is_true_exactly_when_compaction_changes_no_identity() {
     cfg.remove_block(middle);
     let predicted = cfg.is_compact();
     assert!(!predicted);
-    assert_eq!(cfg.compact().is_identity(), predicted);
+    assert_eq!(cfg.compact(NodeOrder::Insertion).is_identity(), predicted);
     assert!(cfg.is_compact());
 
     // A removed trailing slot is still a removed slot: compaction drops it.
@@ -274,13 +275,13 @@ fn is_compact_is_true_exactly_when_compaction_changes_no_identity() {
     cfg.remove_block(trailing);
     let predicted = cfg.is_compact();
     assert!(!predicted);
-    assert_eq!(cfg.compact().is_identity(), predicted);
+    assert_eq!(cfg.compact(NodeOrder::Insertion).is_identity(), predicted);
 
     // Every edge removed: the edge slots are all removed ones.
     let only = cfg.edges().next().map(|edge| edge.id());
     cfg.remove_edge(only.expect("the chain kept one edge"));
     let predicted = cfg.is_compact();
     assert!(!predicted);
-    assert_eq!(cfg.compact().is_identity(), predicted);
+    assert_eq!(cfg.compact(NodeOrder::Insertion).is_identity(), predicted);
     assert!(cfg.is_compact());
 }
