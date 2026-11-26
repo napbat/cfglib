@@ -29,7 +29,7 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use crate::graph::fanout::DenseFanout;
-use crate::graph::view::Direction;
+use crate::graph::view::{Direction, assert_in_bound};
 use crate::identity::{NO_INDEX, slot, word};
 
 use super::Graph;
@@ -356,11 +356,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
 
     /// Start a walk over one node's adjacency along `axis`.
     ///
-    /// Forced inline for the reason [`adjacent`](Self::adjacent) is. The bound
-    /// check is a plain `assert!` with a fixed message, not the walks'
-    /// `assert_in_bound` with its formatted one: routed through that, as a
-    /// call or inlined, `directed_interval_reverse_id_chain` measured 11% and
-    /// `cfg_depth_first_preorder` 3 to 7% slower.
+    /// Forced inline for the reason [`adjacent`](Self::adjacent) is.
     ///
     /// # Panics
     ///
@@ -372,7 +368,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     )]
     fn cursor(&self, node: Id<NT>, axis: &Axis<'_>) -> AdjacencyCursor {
         let index = node.index();
-        assert!(index < self.node_bound(), "node identity is out of range");
+        assert_in_bound(self, node, "node identity");
         if self.tombstoned_nodes() && !self.live_nodes.is_live(index) {
             return AdjacencyCursor::EXHAUSTED;
         }
