@@ -11,7 +11,7 @@ fn a_verify_error_is_an_error_whose_display_is_its_message() {
     let error: &dyn core::error::Error = &error;
     assert_eq!(
         alloc::format!("{error}"),
-        "CFG verify: edge index 3 appears more than once"
+        "edge index 3 appears more than once"
     );
     assert!(error.source().is_none());
 }

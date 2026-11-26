@@ -27,10 +27,11 @@
 //! of them at the next [`Cfg::compact`](crate::Cfg::compact). A handler
 //! entry, a filter block, a cleanup resume point, and a continuation target
 //! are *single references* with no stand-in, so the structural passes
-//! ([`simplify`](crate::simplify), [`merge_blocks`](crate::merge_blocks),
-//! [`remove_empty_blocks`](crate::remove_empty_blocks),
-//! [`remove_unreachable`](crate::remove_unreachable),
-//! [`contract_edge`](crate::contract_edge)) never remove or merge those blocks
+//! ([`simplify_mapped`](crate::simplify_mapped),
+//! [`merge_blocks_mapped`](crate::merge_blocks_mapped),
+//! [`remove_empty_blocks_mapped`](crate::remove_empty_blocks_mapped),
+//! [`remove_unreachable_mapped`](crate::remove_unreachable_mapped),
+//! [`contract_edge_mapped`](crate::contract_edge_mapped)) never remove or merge those blocks
 //! away. [`Cfg::split_block`](crate::Cfg::split_block) keeps both kinds true:
 //! the new tail joins every set that held the original.
 //!

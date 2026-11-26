@@ -78,7 +78,7 @@ impl<I, E> Cfg<I, E> {
     /// arithmetic); dropping them states the same semantics with plain
     /// sequential flow. Returns the number of removed regions.
     ///
-    /// Run this before [`remove_unreachable`](crate::remove_unreachable) to
+    /// Run this before [`remove_unreachable_mapped`](crate::remove_unreachable_mapped) to
     /// drop the dead handler blocks too: that pass keeps every block a
     /// surviving region names.
     ///
@@ -148,7 +148,7 @@ impl<I, E> Cfg<I, E> {
     }
 
     /// Make `tail`, the second half of a split `head`, belong wherever `head`
-    /// does. See [`split_block_with_payload`](Self::split_block_with_payload).
+    /// does. See [`split_block`](Self::split_block).
     pub(crate) fn extend_exception_metadata_to_tail(&mut self, head: BlockId, tail: BlockId) {
         for region in &mut self.regions {
             if region.protected_blocks.contains(&head) {

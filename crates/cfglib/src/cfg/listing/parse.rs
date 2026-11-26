@@ -1,4 +1,4 @@
-//! Reading the line-oriented text form back into a control-flow graph.
+//! Reading a listing back into a control-flow graph.
 
 extern crate alloc;
 use alloc::string::String;
@@ -14,8 +14,8 @@ use crate::region::{Handler, Region, RegionId};
 use super::super::Cfg;
 use super::{HandlerShape, parse_handler_body};
 
-/// Read a CFG back from the text form, parsing each instruction line with
-/// `parse_instruction`.
+/// Read a CFG back from its listing ([`Cfg::write_listing`]), parsing each
+/// instruction line with `parse_instruction`.
 ///
 /// Instruction syntax belongs to the consumer, so the closure owns it: it
 /// receives one unescaped instruction line and returns the instruction or a
@@ -32,9 +32,9 @@ use super::{HandlerShape, parse_handler_body};
 /// # Examples
 ///
 /// ```
-/// use cfglib::parse_cfg_text;
+/// use cfglib::parse_cfg_listing;
 ///
-/// let cfg = parse_cfg_text(
+/// let cfg = parse_cfg_listing(
 ///     "entry bb0\nbb0:\n    nop\nbb1:\nbb0 -> bb1 fallthrough\n",
 ///     |line| Ok::<_, String>(line.to_owned()),
 /// )
@@ -43,7 +43,7 @@ use super::{HandlerShape, parse_handler_body};
 /// assert_eq!(cfg.block_count(), 2);
 /// assert_eq!(cfg.block(cfg.entry()).instructions(), ["nop"]);
 /// ```
-pub fn parse_cfg_text<I>(
+pub fn parse_cfg_listing<I>(
     text: &str,
     parse_instruction: impl Fn(&str) -> Result<I, String>,
 ) -> Result<Cfg<I>, TextError> {

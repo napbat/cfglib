@@ -13,7 +13,7 @@ use crate::test_util::golden::assert_golden;
 
 use crate::TextError;
 
-use super::parse_cfg_text;
+use super::parse_cfg_listing;
 
 /// The instruction the CFG text form round trips: its own line, verbatim.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,7 +27,7 @@ impl DisplayInstr for Line {
 
 /// Read a CFG whose instructions are their own lines.
 fn parse(text: &str) -> Result<Cfg<Line>, TextError> {
-    parse_cfg_text(text, |line| Ok(Line(line.to_string())))
+    parse_cfg_listing(text, |line| Ok(Line(line.to_string())))
 }
 
 /// A CFG with a removed block, a labeled block, every edge shape the form
@@ -80,22 +80,25 @@ fn protected_cfg() -> Cfg<Line> {
 
 #[test]
 fn a_cfg_writes_blocks_edges_and_regions() {
-    assert_golden("text/cfg-protected-region.txt", &protected_cfg().to_text());
+    assert_golden(
+        "text/cfg-protected-region.txt",
+        &protected_cfg().to_listing(),
+    );
 }
 
 #[test]
 fn writing_parsing_and_writing_again_is_a_fixed_point() {
-    let once = protected_cfg().to_text();
+    let once = protected_cfg().to_listing();
     let twice = parse(&once)
         .expect("the writer emits its own grammar")
-        .to_text();
+        .to_listing();
     assert_eq!(once, twice);
 }
 
 #[test]
 fn parsing_reproduces_identity_topology_labels_and_regions() {
     let original = protected_cfg();
-    let parsed = parse(&original.to_text()).expect("its own grammar");
+    let parsed = parse(&original.to_listing()).expect("its own grammar");
 
     assert_eq!(parsed.entry(), original.entry());
     assert_eq!(parsed.block_count(), original.block_count());
@@ -146,7 +149,7 @@ fn an_instruction_outside_a_block_is_rejected() {
 
 #[test]
 fn a_rejected_instruction_reports_the_consumers_reason() {
-    let error = parse_cfg_text("entry bb0\nbb0:\n    nope\n", |line| {
+    let error = parse_cfg_listing("entry bb0\nbb0:\n    nope\n", |line| {
         Err::<String, _>(alloc::format!("{line} is not an instruction"))
     })
     .expect_err("the consumer rejected the line");
@@ -176,13 +179,13 @@ fn an_instruction_is_read_back_whatever_its_first_character() {
         cfg.block_mut(entry).push(Line(text.to_string()));
     }
 
-    let written = cfg.to_text();
+    let written = cfg.to_listing();
     let parsed = parse(&written).expect("the writer emits its own grammar");
     assert_eq!(
         parsed.block(parsed.entry()).instructions(),
         cfg.block(entry).instructions()
     );
-    assert_eq!(parsed.to_text(), written);
+    assert_eq!(parsed.to_listing(), written);
 }
 
 #[test]
@@ -205,7 +208,7 @@ fn a_region_that_still_names_a_removed_block_is_written_without_it() {
     cfg.remove_block(doomed);
     cfg.remove_block(stray);
 
-    let written = cfg.to_text();
+    let written = cfg.to_listing();
     let parsed = parse(&written).expect("a region lists only blocks the text declares");
 
     let mut compacted = cfg.clone();
@@ -225,5 +228,5 @@ fn a_region_that_still_names_a_removed_block_is_written_without_it() {
         region(&parsed).protected_blocks.len(),
         "the text form keeps what compaction keeps"
     );
-    assert_eq!(parsed.to_text(), written);
+    assert_eq!(parsed.to_listing(), written);
 }

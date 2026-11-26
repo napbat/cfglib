@@ -28,7 +28,7 @@ use alloc::format;
 use alloc::string::String;
 use core::fmt;
 
-use crate::edge::{Edge, EdgeId, EdgeKind};
+use crate::display::render;
 use crate::graph::edge_view::EdgeView;
 use crate::graph::label::{Label, display_label, no_label};
 use crate::graph::store::{Graph, Id, IdTag};
@@ -216,45 +216,6 @@ pub fn plain_edge_attributes<Edge, Data: ?Sized>(
     DotEdgeAttributes::plain()
 }
 
-/// The color, line style, label, and thickness of one control-flow edge.
-///
-/// This is the hook [`Cfg::write_dot`](crate::Cfg::write_dot) installs: every
-/// [`EdgeKind`] has a fixed color and line style, and a weighted edge is
-/// labeled with its probability and drawn proportionally thicker.
-#[must_use]
-pub fn control_flow_edge_attributes<E>(_edge: EdgeId, data: &Edge<E>) -> DotEdgeAttributes<'_> {
-    let (color, style, kind_label) = match data.kind() {
-        EdgeKind::Fallthrough => ("black", "solid", ""),
-        EdgeKind::ConditionalTrue => ("green4", "solid", "T"),
-        EdgeKind::ConditionalFalse => ("red", "solid", "F"),
-        EdgeKind::Unconditional => ("blue", "solid", ""),
-        EdgeKind::Back => ("blue", "dashed", "back"),
-        EdgeKind::Call => ("purple", "solid", "call"),
-        EdgeKind::CallReturn => ("purple", "dashed", "ret"),
-        EdgeKind::SwitchCase => ("orange", "dotted", "case"),
-        EdgeKind::Jump => ("blue", "bold", "jmp"),
-        EdgeKind::IndirectJump => ("blue", "dotted", "ijmp"),
-        EdgeKind::IndirectCall => ("purple", "dotted", "icall"),
-        EdgeKind::ExceptionHandler => ("darkred", "solid", "handler"),
-        EdgeKind::ExceptionUnwind => ("darkred", "dashed", "unwind"),
-        EdgeKind::ExceptionLeave => ("darkred", "dotted", "leave"),
-        EdgeKind::ExceptionResume => ("darkred", "bold", "resume"),
-        EdgeKind::ExceptionContinue => ("darkgreen", "dashed", "continue"),
-    };
-    let label = match data.weight() {
-        Some(weight) if kind_label.is_empty() => Cow::Owned(format!("({weight:.2})")),
-        Some(weight) => Cow::Owned(format!("{kind_label} ({weight:.2})")),
-        None => Cow::Borrowed(kind_label),
-    };
-    DotEdgeAttributes {
-        label,
-        color: Some(color),
-        style: Some(style),
-        // 1.0 to 4.0 points, so a hot edge reads as the spine of the drawing.
-        penwidth: data.weight().map(|weight| 1.0 + weight * 3.0),
-    }
-}
-
 /// Write any node- and edge-bearing view in DOT format.
 ///
 /// # Errors
@@ -325,9 +286,7 @@ where
     NodeLabel: for<'d> Fn(G::NodeId, &'d G::NodeData) -> Cow<'d, str>,
     EdgeAttributes: for<'d> Fn(G::EdgeId, &'d G::EdgeData) -> DotEdgeAttributes<'d>,
 {
-    let mut out = String::new();
-    write_dot(view, &mut out, style).expect("writing DOT to a String cannot fail");
-    out
+    render(|sink| write_dot(view, sink, style))
 }
 
 /// Escape label text and terminate every line with Graphviz's `\l`.

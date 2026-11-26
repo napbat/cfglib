@@ -6,26 +6,23 @@ extern crate alloc;
 use alloc::collections::BTreeSet;
 
 use crate::block::{BlockId, BlockTag};
-use crate::edge::EdgeTag;
 use crate::graph::store::{NodeOrder, Renumbering};
 use crate::region::{Handler, HandlerBody, HandlerKind, Region};
 
 use super::Cfg;
 
-/// The renumbering one [`Cfg::compact`] produced.
-pub type CfgRenumbering = Renumbering<BlockTag, EdgeTag>;
-
 impl<I, E> Cfg<I, E> {
-    /// Whether [`compact`](Self::compact) in [`NodeOrder::Insertion`] would
-    /// renumber nothing: no block or edge slot has been removed, so every
-    /// slot holds a live entity.
+    /// Whether every block and edge slot holds a live entity: no slot has
+    /// been removed, so [`compact`](Self::compact) in
+    /// [`NodeOrder::Insertion`] would renumber nothing.
     ///
-    /// A CFG that was only ever added to is compact, however it was built.
-    /// Unlike [`Graph::is_compact`](crate::Graph::is_compact), which asks
-    /// whether the store is a pure compressed base, this asks what a consumer
-    /// holding identities needs to know: whether they stay valid.
+    /// A CFG that was only ever added to is dense, however it was built.
+    /// [`Graph::is_compact`](crate::Graph::is_compact) asks a different
+    /// question, whether the store is a pure compressed base; this one asks
+    /// what a consumer holding identities needs to know: whether they stay
+    /// valid.
     #[must_use]
-    pub fn is_compact(&self) -> bool {
+    pub fn is_dense(&self) -> bool {
         self.block_count() == self.block_bound() && self.edge_count() == self.edge_bound()
     }
 
@@ -44,8 +41,9 @@ impl<I, E> Cfg<I, E> {
     /// survive.
     ///
     /// Compose the result with a pass's [`Rewrite`](crate::Rewrite) through
-    /// [`then_renumbered`](crate::Rewrite::then_renumbered) to keep one
-    /// mapping from the identities a consumer held to the ones it now holds.
+    /// [`Rewrite::compose`](crate::Rewrite::compose) and the [`From`]
+    /// conversion to keep one mapping from the identities a consumer held to
+    /// the ones it now holds.
     ///
     /// # Panics
     ///
@@ -68,7 +66,7 @@ impl<I, E> Cfg<I, E> {
     /// cfg.remove_block(dropped);
     ///
     /// let renumbering = cfg.compact(NodeOrder::Insertion);
-    /// assert!(cfg.is_compact());
+    /// assert!(cfg.is_dense());
     /// assert_eq!(renumbering.node(dropped), None);
     /// assert_eq!(renumbering.node(kept).unwrap().index(), 1);
     /// ```
@@ -87,14 +85,14 @@ impl<I, E> Cfg<I, E> {
     /// assert_eq!(renumbering.node(body).unwrap().index(), 1);
     /// assert_eq!(renumbering.node(exit).unwrap().index(), 2);
     /// ```
-    pub fn compact(&mut self, order: NodeOrder<'_, BlockTag>) -> CfgRenumbering {
+    pub fn compact(&mut self, order: NodeOrder<'_, BlockTag>) -> Renumbering<BlockTag> {
         let renumbering = self.graph.compact(order);
         self.renumber_metadata(&renumbering);
         renumbering
     }
 
     /// Carry the entry block and the exception metadata across `renumbering`.
-    fn renumber_metadata(&mut self, renumbering: &CfgRenumbering) {
+    fn renumber_metadata(&mut self, renumbering: &Renumbering<BlockTag>) {
         self.entry = require(renumbering, self.entry, "entry block");
 
         for region in &mut self.regions {
@@ -112,14 +110,14 @@ impl<I, E> Cfg<I, E> {
     }
 }
 
-fn renumber_region(region: &mut Region, renumbering: &CfgRenumbering) {
+fn renumber_region(region: &mut Region, renumbering: &Renumbering<BlockTag>) {
     region.protected_blocks = retain_surviving(&region.protected_blocks, renumbering);
     for handler in &mut region.handlers {
         renumber_handler(handler, renumbering);
     }
 }
 
-fn renumber_handler(handler: &mut Handler, renumbering: &CfgRenumbering) {
+fn renumber_handler(handler: &mut Handler, renumbering: &Renumbering<BlockTag>) {
     handler.entry = require(renumbering, handler.entry, "handler entry block");
     if let HandlerBody::Known(blocks) = &handler.body {
         handler.body = HandlerBody::Known(retain_surviving(blocks, renumbering));
@@ -129,14 +127,17 @@ fn renumber_handler(handler: &mut Handler, renumbering: &CfgRenumbering) {
     }
 }
 
-fn retain_surviving(blocks: &BTreeSet<BlockId>, renumbering: &CfgRenumbering) -> BTreeSet<BlockId> {
+fn retain_surviving(
+    blocks: &BTreeSet<BlockId>,
+    renumbering: &Renumbering<BlockTag>,
+) -> BTreeSet<BlockId> {
     blocks
         .iter()
         .filter_map(|&block| renumbering.node(block))
         .collect()
 }
 
-fn require(renumbering: &CfgRenumbering, block: BlockId, role: &str) -> BlockId {
+fn require(renumbering: &Renumbering<BlockTag>, block: BlockId, role: &str) -> BlockId {
     renumbering
         .node(block)
         .unwrap_or_else(|| panic!("the {role} {block} was removed before compaction"))
@@ -241,9 +242,9 @@ mod tests {
     #[test]
     fn compaction_renumbers_every_block_the_exception_metadata_names() {
         let (mut cfg, payloads) = sparse_metadata();
-        assert!(!cfg.is_compact());
+        assert!(!cfg.is_dense());
         cfg.compact(NodeOrder::Insertion);
-        assert!(cfg.is_compact());
+        assert!(cfg.is_dense());
         assert_denotes(&cfg, payloads);
     }
 
@@ -262,7 +263,7 @@ mod tests {
         ] {
             let mut cfg = cfg.clone();
             let renumbering = cfg.compact(order);
-            assert!(cfg.is_compact());
+            assert!(cfg.is_dense());
             assert_eq!(Some(cfg.entry()), renumbering.node(entry));
             assert_eq!(cfg.entry().index(), entry_index, "{order:?}");
             assert!(
