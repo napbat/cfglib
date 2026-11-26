@@ -193,7 +193,7 @@ impl<N: DenseId, E: DenseId> ProgramStructureTree<N, E> {
 
     /// The number of regions.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub fn region_count(&self) -> usize {
         self.regions.len()
     }
 

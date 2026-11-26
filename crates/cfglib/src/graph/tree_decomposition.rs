@@ -9,8 +9,8 @@
 //! which [`ControlTree::spl_decomposition`](crate::ControlTree::spl_decomposition)
 //! does not decompose, can still be decomposed here.
 //!
-//! [`tree_decomposition`] eliminates the nodes of the undirected simple graph
-//! underlying a view one at a time, as Bodlaender and Koster survey
+//! [`TreeDecomposition::compute`] eliminates the nodes of the undirected
+//! simple graph underlying a view one at a time, as Bodlaender and Koster survey
 //! ("Treewidth computations I. Upper bounds", Information and Computation,
 //! 2010): the next node is the one with the fewest neighbors
 //! ([`EliminationHeuristic::MinDegree`]) or the fewest missing edges among
@@ -28,6 +28,7 @@ use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::block::BlockId;
 use crate::graph::epoch::EpochMarks;
 use crate::graph::view::{DenseId, GraphView};
 use crate::identity::{NO_INDEX, check_bound, slot, word};
@@ -57,7 +58,7 @@ pub enum EliminationHeuristic {
 /// # Examples
 ///
 /// ```
-/// use cfglib::{Cfg, EdgeKind, EliminationHeuristic, tree_decomposition};
+/// use cfglib::{Cfg, EdgeKind, EliminationHeuristic, TreeDecomposition};
 ///
 /// // A diamond: entry -> then | else -> merge.
 /// let mut cfg = Cfg::<u32>::new();
@@ -69,15 +70,15 @@ pub enum EliminationHeuristic {
 /// cfg.add_edge(then_block, merge, EdgeKind::Fallthrough);
 /// cfg.add_edge(else_block, merge, EdgeKind::Fallthrough);
 ///
-/// let decomposition = tree_decomposition(&cfg, EliminationHeuristic::MinDegree);
-/// assert_eq!(decomposition.len(), 4);
+/// let decomposition = TreeDecomposition::compute(&cfg, EliminationHeuristic::MinDegree);
+/// assert_eq!(decomposition.bag_count(), 4);
 /// // A cycle of four has treewidth 2.
 /// assert_eq!(decomposition.width(), 2);
 /// let bag = decomposition.bag_of(then_block).expect("every block has a bag");
 /// assert!(decomposition.bag(bag).contains(&then_block));
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TreeDecomposition<N> {
+pub struct TreeDecomposition<N = BlockId> {
     /// The nodes of every bag, bag after bag, the eliminated node first and
     /// its neighbors in ascending dense index.
     bags: Vec<N>,
@@ -91,9 +92,31 @@ pub struct TreeDecomposition<N> {
 }
 
 impl<N: DenseId> TreeDecomposition<N> {
+    /// A tree decomposition of the undirected simple graph underlying
+    /// `graph`: edge directions, parallel edges and self-loops are ignored.
+    ///
+    /// See the [module documentation](self) for the heuristics. The result
+    /// depends only on the set of edges, not on adjacency order or parallel
+    /// edges.
+    ///
+    /// Min-degree costs O(n + m + Σ d²) for n nodes, m edges, and bags of
+    /// `d + 1` nodes, with a logarithmic factor for its ordered queue: about
+    /// O(n·w²) for width w. Min-fill also recomputes the fill of the nodes
+    /// next to each new edge, which costs about another factor of w.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the node bound exceeds the range of a dense `u32` table.
+    #[must_use]
+    pub fn compute<G: GraphView<NodeId = N>>(graph: &G, heuristic: EliminationHeuristic) -> Self {
+        let mut elimination = Elimination::new(graph, heuristic);
+        elimination.run();
+        elimination.finish()
+    }
+
     /// The number of bags, one per node.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub fn bag_count(&self) -> usize {
         self.parents.len()
     }
 
@@ -106,7 +129,7 @@ impl<N: DenseId> TreeDecomposition<N> {
     /// The size of the largest bag less one, `0` without a bag.
     #[must_use]
     pub fn width(&self) -> usize {
-        (0..self.len())
+        (0..self.bag_count())
             .map(|bag| self.bag(bag).len())
             .max()
             .unwrap_or(1)
@@ -118,7 +141,7 @@ impl<N: DenseId> TreeDecomposition<N> {
     ///
     /// # Panics
     ///
-    /// Panics when `bag` is not below [`len`](Self::len).
+    /// Panics when `bag` is not below [`bag_count`](Self::bag_count).
     #[must_use]
     pub fn bag(&self, bag: usize) -> &[N] {
         &self.bags[self.starts[bag]..self.starts[bag + 1]]
@@ -129,11 +152,11 @@ impl<N: DenseId> TreeDecomposition<N> {
     ///
     /// # Panics
     ///
-    /// Panics when `bag` is not below [`len`](Self::len).
+    /// Panics when `bag` is not below [`bag_count`](Self::bag_count).
     #[must_use]
     pub fn parent(&self, bag: usize) -> Option<usize> {
         let parent = self.parents[bag];
-        (parent != NO_INDEX).then_some(parent as usize)
+        (parent != NO_INDEX).then_some(slot(parent))
     }
 
     /// The bag where `node` was eliminated, which holds it, or `None` for a
@@ -142,34 +165,9 @@ impl<N: DenseId> TreeDecomposition<N> {
     pub fn bag_of(&self, node: N) -> Option<usize> {
         match self.bag_of.get(node.index()).copied() {
             None | Some(NO_INDEX) => None,
-            Some(bag) => Some(bag as usize),
+            Some(bag) => Some(slot(bag)),
         }
     }
-}
-
-/// A tree decomposition of the undirected simple graph underlying `graph`:
-/// edge directions, parallel edges and self-loops are ignored.
-///
-/// See [`TreeDecomposition`] for the result and the [module
-/// documentation](self) for the heuristics. The result depends only on the
-/// set of edges, not on adjacency order or parallel edges.
-///
-/// Min-degree costs O(n + m + Σ d²) for n nodes, m edges, and bags of `d + 1`
-/// nodes, with a logarithmic factor for its ordered queue: about O(n·w²) for
-/// width w. Min-fill also recomputes the fill of the nodes next to each new
-/// edge, which costs about another factor of w.
-///
-/// # Panics
-///
-/// Panics when the node bound exceeds the range of a dense `u32` table.
-#[must_use]
-pub fn tree_decomposition<G: GraphView>(
-    graph: &G,
-    heuristic: EliminationHeuristic,
-) -> TreeDecomposition<G::NodeId> {
-    let mut elimination = Elimination::new(graph, heuristic);
-    elimination.run();
-    elimination.finish()
 }
 
 /// The state of one elimination.

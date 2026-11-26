@@ -189,7 +189,7 @@ fn figure_one_has_the_regions_of_its_program_structure_tree() {
     let end = region_between(&tree, edge((BOTTOM, END)), SeseEdge::Exit(blocks[END]));
     assert_eq!(tree.blocks(start), [blocks[START]]);
     assert_eq!(tree.blocks(end), [blocks[END]]);
-    assert_eq!(tree.len(), FIGURE_ONE_TREE.len() + 2);
+    assert_eq!(tree.region_count(), FIGURE_ONE_TREE.len() + 2);
     // The arm a back edge enters has two entries, so it is no region.
     assert_eq!(tree.innermost(blocks[LOOPED_ARM]), Some(region_named('d')));
     assert_matches_reference(&cfg);

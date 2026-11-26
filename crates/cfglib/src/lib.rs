@@ -301,7 +301,7 @@ pub use graph::cdg::{
     nontermination_sensitive_controllers, weak_control_closure,
 };
 pub use graph::coldness::{ColdClass, ColdnessClasses, ColdnessGraph};
-pub use graph::cut::{EdgeCut, VertexCut, edge_disjoint_paths, min_edge_cut, min_vertex_cut};
+pub use graph::cut::{EdgeCut, VertexCut, edge_disjoint_paths};
 pub use graph::diff::{
     BlockFingerprint, BlockHashes, BlockMatch, CascadeDiff, CfgDiff, MatchLevel, RegionDiff,
     RegionMatch,
@@ -381,7 +381,7 @@ pub use graph::traverse::{
     depth_first_preorder, nearest_common_ancestor, reachable, reverse_postorder, shortest_path,
     shortest_path_in, topological_sort, topological_sort_or_cycle,
 };
-pub use graph::tree_decomposition::{EliminationHeuristic, TreeDecomposition, tree_decomposition};
+pub use graph::tree_decomposition::{EliminationHeuristic, TreeDecomposition};
 pub use graph::verify::{VerifyError, VerifyReport, verify_edge_view, verify_view};
 pub use graph::view::{
     DenseId, Direction, GraphView, Induced, NodeView, Reversed, Rooted, RootedView, VirtualRoot,

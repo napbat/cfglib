@@ -1,4 +1,4 @@
-use cfglib::{BlockId, Cfg, EdgeKind, EliminationHeuristic, TreeDecomposition, tree_decomposition};
+use cfglib::{BlockId, Cfg, EdgeKind, EliminationHeuristic, TreeDecomposition};
 
 use super::BenchmarkSuite;
 use crate::fixtures::branchy_cfg;
@@ -39,7 +39,7 @@ fn cfg_with_gotos(block_count: usize) -> Cfg<u32> {
 
 /// Whether every block leads its own bag and no bag is wider than `width`.
 fn is_sound(cfg: &Cfg<u32>, decomposition: &TreeDecomposition<BlockId>, width: usize) -> bool {
-    decomposition.len() == cfg.block_count()
+    decomposition.bag_count() == cfg.block_count()
         && decomposition.width() <= width
         && cfg.block_ids().all(|block| {
             decomposition
@@ -53,8 +53,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "tree_decomposition_branchy_4k_min_degree",
-        covers[tree_decomposition],
-        || tree_decomposition(&branchy, EliminationHeuristic::MinDegree),
+        || TreeDecomposition::compute(&branchy, EliminationHeuristic::MinDegree),
         |decomposition: &TreeDecomposition<BlockId>| {
             assert!(is_sound(&branchy, decomposition, 32));
         }
@@ -62,7 +61,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "tree_decomposition_branchy_4k_min_fill",
-        || tree_decomposition(&branchy, EliminationHeuristic::MinFill),
+        || TreeDecomposition::compute(&branchy, EliminationHeuristic::MinFill),
         |decomposition: &TreeDecomposition<BlockId>| {
             assert!(is_sound(&branchy, decomposition, 32));
         }
@@ -72,7 +71,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "tree_decomposition_gotos_100k_min_degree",
-        || tree_decomposition(&gotos, EliminationHeuristic::MinDegree),
+        || TreeDecomposition::compute(&gotos, EliminationHeuristic::MinDegree),
         |decomposition: &TreeDecomposition<BlockId>| {
             assert!(is_sound(&gotos, decomposition, 4 * GOTO_REACH));
         }
@@ -80,7 +79,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "tree_decomposition_gotos_100k_min_fill",
-        || tree_decomposition(&gotos, EliminationHeuristic::MinFill),
+        || TreeDecomposition::compute(&gotos, EliminationHeuristic::MinFill),
         |decomposition: &TreeDecomposition<BlockId>| {
             assert!(is_sound(&gotos, decomposition, 4 * GOTO_REACH));
         }

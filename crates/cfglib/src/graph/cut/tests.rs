@@ -129,7 +129,7 @@ fn cuts_and_paths_match_brute_force_on_small_graphs() {
         let (nodes, edges) = (cfg.block_bound(), cfg.edge_bound());
         let none = vec![false; nodes.max(edges)];
 
-        let cut = min_edge_cut(&cfg, sources.clone(), sinks.clone(), None).expect("disjoint");
+        let cut = EdgeCut::compute(&cfg, sources.clone(), sinks.clone(), None).expect("disjoint");
         let all_edges: Vec<usize> = (0..edges).collect();
         let smallest = brute_force(&all_edges, edges, |removed| {
             separated(&cfg, &sources, &sinks, removed, &none)
@@ -154,7 +154,7 @@ fn cuts_and_paths_match_brute_force_on_small_graphs() {
         let adjacent = cfg.edge_ids().any(|edge| {
             sources.contains(&cfg.edge(edge).source()) && sinks.contains(&cfg.edge(edge).target())
         });
-        let Some(cut) = min_vertex_cut(&cfg, sources.clone(), sinks.clone(), None) else {
+        let Some(cut) = VertexCut::compute(&cfg, sources.clone(), sinks.clone(), None) else {
             assert!(
                 adjacent,
                 "only an edge between the terminals leaves no vertex cut"
@@ -190,17 +190,18 @@ fn the_cut_is_the_same_in_every_adjacency_order() {
             .collect();
         let (sources, sinks) = ([block(0)], [block(count - 1)]);
         let first = cfg_of(count, &edges);
-        let edge_side = min_edge_cut(&first, sources, sinks, None).map(|cut| cut.source_side);
-        let vertex_side = min_vertex_cut(&first, sources, sinks, None).map(|cut| cut.source_side);
+        let edge_side = EdgeCut::compute(&first, sources, sinks, None).map(|cut| cut.source_side);
+        let vertex_side =
+            VertexCut::compute(&first, sources, sinks, None).map(|cut| cut.source_side);
         for _ in 0..10 {
             rng.shuffle(&mut edges);
             let shuffled = cfg_of(count, &edges);
             assert_eq!(
-                min_edge_cut(&shuffled, sources, sinks, None).map(|cut| cut.source_side),
+                EdgeCut::compute(&shuffled, sources, sinks, None).map(|cut| cut.source_side),
                 edge_side
             );
             assert_eq!(
-                min_vertex_cut(&shuffled, sources, sinks, None).map(|cut| cut.source_side),
+                VertexCut::compute(&shuffled, sources, sinks, None).map(|cut| cut.source_side),
                 vertex_side
             );
         }
@@ -224,7 +225,7 @@ fn one_node_separates_the_root_from_a_block_exactly_when_the_root_is_not_its_ido
             if target == root || direct || !dominators.is_reachable(target) {
                 continue;
             }
-            let cut = min_vertex_cut(&cfg, [root], [target], None).expect("not adjacent");
+            let cut = VertexCut::compute(&cfg, [root], [target], None).expect("not adjacent");
             let dominated = dominators.idom(target) != Some(root);
             assert_eq!(cut.value == 1, dominated, "{edges:?} to {target:?}");
             both[usize::from(dominated)] += 1;
@@ -305,7 +306,7 @@ fn a_limit_stops_one_past_it_after_reading_the_view_once() {
         cfg: &cfg,
         touched: Cell::new(0),
     };
-    let cut = min_edge_cut(&view, sources, sinks, Some(3)).expect("disjoint");
+    let cut = EdgeCut::compute(&view, sources, sinks, Some(3)).expect("disjoint");
     assert_eq!(
         cut,
         EdgeCut {
@@ -321,7 +322,7 @@ fn a_limit_stops_one_past_it_after_reading_the_view_once() {
     );
 
     view.touched.set(0);
-    let cut = min_vertex_cut(&view, sources, sinks, Some(3)).expect("not adjacent");
+    let cut = VertexCut::compute(&view, sources, sinks, Some(3)).expect("not adjacent");
     assert_eq!(
         cut,
         VertexCut {
@@ -341,14 +342,14 @@ fn a_limit_stops_one_past_it_after_reading_the_view_once() {
     assert_disjoint_paths(&cfg, &paths, &sources, &sinks);
 
     assert_eq!(
-        min_edge_cut(&cfg, sources, sinks, Some(9))
+        EdgeCut::compute(&cfg, sources, sinks, Some(9))
             .expect("disjoint")
             .value,
         10
     );
-    let exact = min_edge_cut(&cfg, sources, sinks, Some(10)).expect("disjoint");
+    let exact = EdgeCut::compute(&cfg, sources, sinks, Some(10)).expect("disjoint");
     assert_eq!((exact.value, exact.edges.len()), (10, 10));
-    let exact = min_vertex_cut(&cfg, sources, sinks, Some(usize::MAX)).expect("not adjacent");
+    let exact = VertexCut::compute(&cfg, sources, sinks, Some(usize::MAX)).expect("not adjacent");
     assert_eq!(exact.vertices, (1..=10).map(block).collect::<Vec<_>>());
 }
 
@@ -356,25 +357,25 @@ fn a_limit_stops_one_past_it_after_reading_the_view_once() {
 fn terminals_that_meet_have_no_cut() {
     let cfg = cfg_of(3, &[(0, 1), (1, 2)]);
     assert_eq!(
-        min_edge_cut(&cfg, [block(0), block(1)], [block(1)], None),
+        EdgeCut::compute(&cfg, [block(0), block(1)], [block(1)], None),
         None
     );
-    assert_eq!(min_vertex_cut(&cfg, [block(1)], [block(1)], None), None);
+    assert_eq!(VertexCut::compute(&cfg, [block(1)], [block(1)], None), None);
     assert_eq!(
         edge_disjoint_paths(&cfg, [block(1)], [block(1)], None),
         None
     );
 
     // An edge between a source and a sink cannot be cut by removing nodes.
-    assert_eq!(min_vertex_cut(&cfg, [block(0)], [block(1)], None), None);
-    let cut = min_edge_cut(&cfg, [block(0)], [block(1)], None).expect("disjoint");
+    assert_eq!(VertexCut::compute(&cfg, [block(0)], [block(1)], None), None);
+    let cut = EdgeCut::compute(&cfg, [block(0)], [block(1)], None).expect("disjoint");
     assert_eq!(cut.value, 1);
 }
 
 #[test]
 fn parallel_edges_count_and_self_loops_do_not() {
     let cfg = cfg_of(2, &[(0, 0), (0, 1), (0, 1), (1, 1)]);
-    let cut = min_edge_cut(&cfg, [block(0)], [block(1)], None).expect("disjoint");
+    let cut = EdgeCut::compute(&cfg, [block(0)], [block(1)], None).expect("disjoint");
     assert_eq!(cut.value, 2);
     assert_eq!(cut.edges, [EdgeId::from_index(1), EdgeId::from_index(2)]);
     let paths = edge_disjoint_paths(&cfg, [block(0)], [block(1)], None).expect("disjoint");
@@ -388,10 +389,10 @@ fn parallel_edges_count_and_self_loops_do_not() {
 fn nothing_to_separate_costs_nothing() {
     let mut cfg = cfg_of(4, &[(0, 1), (2, 3)]);
     cfg.remove_block(block(2));
-    let cut = min_edge_cut(&cfg, [block(0)], [block(3)], None).expect("disjoint");
+    let cut = EdgeCut::compute(&cfg, [block(0)], [block(3)], None).expect("disjoint");
     assert_eq!((cut.value, cut.edges), (0, Vec::new()));
     assert_eq!(cut.source_side, [true, true, false, false]);
-    let cut = min_vertex_cut(&cfg, [], [block(3)], None).expect("disjoint");
+    let cut = VertexCut::compute(&cfg, [], [block(3)], None).expect("disjoint");
     assert_eq!((cut.value, cut.source_side), (0, vec![false; 4]));
     assert_eq!(
         edge_disjoint_paths(&cfg, [block(0)], [], None),
@@ -403,5 +404,5 @@ fn nothing_to_separate_costs_nothing() {
 #[should_panic(expected = "a sink is out of range")]
 fn a_terminal_must_be_below_the_bound() {
     let cfg = cfg_of(2, &[(0, 1)]);
-    let _ = min_edge_cut(&cfg, [block(0)], [block(5)], None);
+    let _ = EdgeCut::compute(&cfg, [block(0)], [block(5)], None);
 }

@@ -5,7 +5,7 @@ use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{EliminationHeuristic, TreeDecomposition, tree_decomposition};
+use super::{EliminationHeuristic, TreeDecomposition};
 use crate::ControlTree;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
@@ -27,8 +27,8 @@ const HEURISTICS: [EliminationHeuristic; 2] = [
 /// parents after their children.
 fn assert_valid<G: GraphView>(graph: &G, decomposition: &TreeDecomposition<G::NodeId>) {
     let live: Vec<G::NodeId> = graph.node_ids().collect();
-    assert_eq!(decomposition.len(), live.len(), "a bag per node");
-    let bags: Vec<BTreeSet<usize>> = (0..decomposition.len())
+    assert_eq!(decomposition.bag_count(), live.len(), "a bag per node");
+    let bags: Vec<BTreeSet<usize>> = (0..decomposition.bag_count())
         .map(|bag| {
             let members: BTreeSet<usize> = decomposition
                 .bag(bag)
@@ -162,7 +162,7 @@ fn random_graphs_match_the_definition_of_greedy_elimination() {
         let edges = random_edges(&mut rng, node_count, edge_count);
         let (graph, _) = graph_of(node_count, &edges);
         for heuristic in HEURISTICS {
-            let decomposition = tree_decomposition(&graph, heuristic);
+            let decomposition = TreeDecomposition::compute(&graph, heuristic);
             assert_valid(&graph, &decomposition);
             let (bags, parents) = reference(node_count, &edges, heuristic);
             for (bag, wanted) in bags.iter().enumerate() {
@@ -196,7 +196,7 @@ fn known_graphs_have_their_treewidth() {
     ] {
         let (graph, _) = graph_of(node_count, edges);
         for heuristic in HEURISTICS {
-            let decomposition = tree_decomposition(&graph, heuristic);
+            let decomposition = TreeDecomposition::compute(&graph, heuristic);
             assert_valid(&graph, &decomposition);
             assert_eq!(decomposition.width(), width, "{edges:?} by {heuristic:?}");
         }
@@ -206,7 +206,7 @@ fn known_graphs_have_their_treewidth() {
 #[test]
 fn an_empty_graph_has_no_bag() {
     let graph = Graph::<(), ()>::new();
-    let decomposition = tree_decomposition(&graph, EliminationHeuristic::MinFill);
+    let decomposition = TreeDecomposition::compute(&graph, EliminationHeuristic::MinFill);
     assert!(decomposition.is_empty());
     assert_eq!(decomposition.width(), 0);
 }
@@ -215,11 +215,11 @@ fn an_empty_graph_has_no_bag() {
 fn removed_nodes_have_no_bag_and_components_are_separate_trees() {
     let (mut graph, nodes) = graph_of(5, &[(0, 1), (1, 2), (3, 4)]);
     assert!(graph.remove_node(nodes[2]));
-    let decomposition = tree_decomposition(&graph, EliminationHeuristic::MinDegree);
+    let decomposition = TreeDecomposition::compute(&graph, EliminationHeuristic::MinDegree);
     assert_valid(&graph, &decomposition);
     assert_eq!(decomposition.bag_of(nodes[2]), None);
     assert_eq!(decomposition.bag_of(NodeId::from_index(9)), None);
-    let roots = (0..decomposition.len())
+    let roots = (0..decomposition.bag_count())
         .filter(|&bag| decomposition.parent(bag).is_none())
         .count();
     assert_eq!(roots, 2, "one tree per component");
@@ -239,8 +239,8 @@ fn edge_order_parallel_edges_and_direction_change_nothing() {
         let (shuffled, _) = graph_of(node_count, &doubled);
         for heuristic in HEURISTICS {
             assert_eq!(
-                tree_decomposition(&graph, heuristic),
-                tree_decomposition(&shuffled, heuristic)
+                TreeDecomposition::compute(&graph, heuristic),
+                TreeDecomposition::compute(&shuffled, heuristic)
             );
         }
     }
@@ -276,7 +276,7 @@ fn cfg_fixtures_and_cfgs_with_gotos_decompose() {
     }
     for cfg in &fixtures {
         for heuristic in HEURISTICS {
-            let decomposition = tree_decomposition(cfg, heuristic);
+            let decomposition = TreeDecomposition::compute(cfg, heuristic);
             assert_valid(cfg, &decomposition);
             let block: BlockId = cfg.entry();
             assert!(decomposition.bag_of(block).is_some());
@@ -347,8 +347,8 @@ fn heuristic_widths_against_the_spl_path_width_on_structured_fixtures() {
                 .spl_decomposition(cfg)
                 .expect("the fixture is structured");
             let widths = [
-                tree_decomposition(cfg, EliminationHeuristic::MinDegree).width(),
-                tree_decomposition(cfg, EliminationHeuristic::MinFill).width(),
+                TreeDecomposition::compute(cfg, EliminationHeuristic::MinDegree).width(),
+                TreeDecomposition::compute(cfg, EliminationHeuristic::MinFill).width(),
                 spl.path_decomposition().width(),
             ];
             (*name, widths)

@@ -79,7 +79,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         "program_structure_chain_100k",
         || ProgramStructureTree::compute(&chain),
         |tree: &ProgramStructureTree| {
-            assert_eq!(tree.len(), CHAIN_BLOCKS);
+            assert_eq!(tree.region_count(), CHAIN_BLOCKS);
             assert!(tree.regions().all(|region| tree.parent(region).is_none()));
         }
     );
@@ -92,7 +92,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         |tree: &ProgramStructureTree| {
             // The procedure, a diamond per inner level, each `else` arm, and
             // the innermost `then` block.
-            assert_eq!(tree.len(), 2 * NEST_DEPTH + 1);
+            assert_eq!(tree.region_count(), 2 * NEST_DEPTH + 1);
             assert!(is_well_formed(tree));
         }
     );

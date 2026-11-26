@@ -1,6 +1,4 @@
-use cfglib::{
-    EdgeCut, Graph, NodeId, VertexCut, edge_disjoint_paths, min_edge_cut, min_vertex_cut,
-};
+use cfglib::{EdgeCut, Graph, NodeId, VertexCut, edge_disjoint_paths};
 
 use super::BenchmarkSuite;
 use crate::harness::benchmark_case;
@@ -35,8 +33,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_min_edge_cut",
-        covers[min_edge_cut],
-        || min_edge_cut(&graph, sources.iter().copied(), sinks.iter().copied(), None),
+        || EdgeCut::compute(&graph, sources.iter().copied(), sinks.iter().copied(), None),
         |cut: &Option<EdgeCut<_>>| {
             let cut = cut.as_ref().expect("the sources are not sinks");
             assert_eq!((cut.value, cut.edges.len()), (2 * WIDTH, 2 * WIDTH));
@@ -45,7 +42,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_min_edge_cut_limit_3",
-        || min_edge_cut(
+        || EdgeCut::compute(
             &graph,
             sources.iter().copied(),
             sinks.iter().copied(),
@@ -58,8 +55,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_min_vertex_cut",
-        covers[min_vertex_cut],
-        || min_vertex_cut(&graph, sources.iter().copied(), sinks.iter().copied(), None),
+        || VertexCut::compute(&graph, sources.iter().copied(), sinks.iter().copied(), None),
         |cut: &Option<VertexCut<NodeId>>| {
             let cut = cut.as_ref().expect("no source is next to a sink");
             assert_eq!((cut.value, cut.vertices.len()), (WIDTH, WIDTH));
