@@ -7,8 +7,8 @@ use cfglib::{
     depth_first_preorder, reachable,
 };
 
-use crate::Lcg;
 use crate::reference::{Table, chain};
+use crate::rng::Rng;
 
 /// An event of the walk, with plain indices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,7 +114,7 @@ fn is_cyclic(table: &Table, nodes: &[usize]) -> bool {
 #[test]
 fn depth_first_events_match_the_recursive_tricolor_reference_in_both_directions() {
     for seed in 1..=5 {
-        let table = Table::random(&mut Lcg(seed), 30, 60);
+        let table = Table::random(&mut Rng::lcg(seed, 33), 30, 60);
         let backward = table.reversed();
         let graph = table.graph();
         for start in [0, 7, 19] {
@@ -180,7 +180,7 @@ fn self_loops_and_parallel_edges_are_classified_edge_by_edge() {
 #[test]
 fn depth_first_events_agree_with_the_plain_depth_first_traversals() {
     for seed in 1..=5 {
-        let table = Table::random(&mut Lcg(seed + 50), 30, 60);
+        let table = Table::random(&mut Rng::lcg(seed + 50, 33), 30, 60);
         let graph = table.graph();
         let events = depth_first_stream(&graph, 0, Direction::Forward);
         let discovered: Vec<usize> = events
@@ -224,7 +224,7 @@ fn every_examined_edge_is_classified_once_and_a_back_edge_exists_exactly_when_a_
     for seed in 1..=12 {
         // Sparse tables are often acyclic, which the cycle check needs as much as the dense ones.
         let edges = if seed % 2 == 0 { 70 } else { 22 };
-        let table = Table::random(&mut Lcg(seed + 70), 30, edges);
+        let table = Table::random(&mut Rng::lcg(seed + 70, 33), 30, edges);
         let graph = table.graph();
         let events = depth_first_stream(&graph, 0, Direction::Forward);
 
@@ -285,7 +285,7 @@ fn every_examined_edge_is_classified_once_and_a_back_edge_exists_exactly_when_a_
 #[test]
 fn discover_and_finish_nest_like_a_stack_and_edge_classes_agree_with_the_node_colors() {
     for seed in 1..=5 {
-        let table = Table::random(&mut Lcg(seed + 80), 30, 60);
+        let table = Table::random(&mut Rng::lcg(seed + 80, 33), 30, 60);
         let graph = table.graph();
         let events = depth_first_stream(&graph, 0, Direction::Forward);
 
@@ -352,7 +352,7 @@ fn only_nodes_reachable_from_the_start_produce_events() {
 
 #[test]
 fn a_callback_can_break_the_walk_at_any_event_and_nothing_follows() {
-    let table = Table::random(&mut Lcg(99), 30, 70);
+    let table = Table::random(&mut Rng::lcg(99, 33), 30, 70);
     let graph = table.graph();
     let start = NodeId::from_index(0);
     let full_depth_first = depth_first_stream(&graph, 0, Direction::Forward);
@@ -375,7 +375,7 @@ fn a_callback_can_break_the_walk_at_any_event_and_nothing_follows() {
 #[test]
 #[should_panic(expected = "start node is out of range")]
 fn a_start_outside_the_graph_panics_in_the_depth_first_walk() {
-    let graph = Table::random(&mut Lcg(1), 4, 6).graph();
+    let graph = Table::random(&mut Rng::lcg(1, 33), 4, 6).graph();
     let _ = depth_first_events::<_, ()>(&graph, NodeId::from_index(4), Direction::Forward, |_| {
         ControlFlow::Continue(())
     });

@@ -3,6 +3,7 @@ use cfglib::{BlockId, Cfg, EdgeKind, EliminationHeuristic, TreeDecomposition};
 use super::BenchmarkSuite;
 use crate::fixtures::branchy_cfg;
 use crate::harness::benchmark_case;
+use crate::rng::Rng;
 
 /// Blocks of the hot-path fixture, the largest CFG the benchmarks build.
 const BRANCHY_BLOCKS: usize = 4_096;
@@ -22,13 +23,9 @@ fn cfg_with_gotos(block_count: usize) -> Cfg<u32> {
     for index in 1..block_count {
         cfg.add_edge(blocks[index - 1], blocks[index], EdgeKind::Fallthrough);
     }
-    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
-    let span = u64::try_from(2 * GOTO_REACH + 1).expect("the reach fits in u64");
+    let mut rng = Rng::xorshift(0x9E37_79B9_7F4A_7C15);
     for index in (0..block_count).step_by(3) {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        let offset = usize::try_from(state % span).expect("an offset fits in usize");
+        let offset = rng.below(2 * GOTO_REACH + 1);
         let target = (index + offset)
             .saturating_sub(GOTO_REACH)
             .min(block_count - 1);

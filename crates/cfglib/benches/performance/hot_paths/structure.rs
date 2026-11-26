@@ -6,6 +6,7 @@ use cfglib::{
 use super::NODE_COUNT;
 use crate::fixtures::multi_latch_graph;
 use crate::harness::{BenchmarkSuite, benchmark_case};
+use crate::rng::Rng;
 
 /// Nodes of the one-path graphs, whose walk is as deep as the graph.
 const DEEP_PATH_NODES: usize = 1 << 18;
@@ -70,19 +71,12 @@ fn random_cfg(blocks: usize) -> Cfg<u32> {
     for pair in ids.windows(2) {
         cfg.add_edge(pair[0], pair[1], EdgeKind::Fallthrough);
     }
-    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
-    let mut below = |bound: usize| {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        let bound = u64::try_from(bound).expect("a block count fits in u64");
-        usize::try_from(state % bound).expect("a value below a block count fits in usize")
-    };
+    let mut rng = Rng::xorshift(0x9E37_79B9_7F4A_7C15);
     for (index, &block) in ids.iter().enumerate() {
-        let target = if below(64) == 0 {
-            below(blocks)
+        let target = if rng.below(64) == 0 {
+            rng.below(blocks)
         } else {
-            (index + below(128)).saturating_sub(64).min(blocks - 1)
+            (index + rng.below(128)).saturating_sub(64).min(blocks - 1)
         };
         cfg.add_edge(block, ids[target], EdgeKind::Jump);
     }

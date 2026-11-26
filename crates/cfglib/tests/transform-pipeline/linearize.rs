@@ -9,7 +9,8 @@ use cfglib::{
 };
 
 use crate::golden::assert_golden;
-use crate::programs::{Rng, random_program};
+use crate::programs::random_program;
+use crate::rng::Rng;
 use crate::toy::{
     Builder, FoldingEmitter, INPUTS, Inst, Kind, OBSERVED, ToyEmitter, run, run_linear,
 };
@@ -130,14 +131,11 @@ fn assert_stream_follows_the_cfg(
 }
 
 fn shuffled_order(cfg: &Cfg<Inst>, seed: u64) -> Vec<BlockId> {
-    let mut rng = Rng::new(seed);
     let mut rest: Vec<BlockId> = cfg
         .block_ids()
         .filter(|&block| block != cfg.entry())
         .collect();
-    for index in (1..rest.len()).rev() {
-        rest.swap(index, rng.below(index + 1));
-    }
+    Rng::new(seed).shuffle(&mut rest);
     let mut order = vec![cfg.entry()];
     order.extend(rest);
     order

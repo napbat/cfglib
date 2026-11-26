@@ -8,12 +8,12 @@ use cfglib::{
     Visit, reachable, search_in,
 };
 
-use crate::Lcg;
+use crate::rng::Rng;
 
 /// Universes on both sides of every word boundary, and the empty one.
 const UNIVERSES: [usize; 10] = [0, 1, 2, 63, 64, 65, 127, 128, 129, 200];
 
-fn random_members(rng: &mut Lcg, universe: usize, draws: usize) -> BTreeSet<usize> {
+fn random_members(rng: &mut Rng, universe: usize, draws: usize) -> BTreeSet<usize> {
     if universe == 0 {
         return BTreeSet::new();
     }
@@ -31,7 +31,7 @@ fn bits_of(universe: usize, members: &BTreeSet<usize>) -> DenseBits {
 #[test]
 fn dense_bits_follow_a_vec_of_bool_oracle_across_word_boundaries() {
     for universe in UNIVERSES {
-        let mut rng = Lcg(universe as u64 + 1);
+        let mut rng = Rng::lcg(universe as u64 + 1, 33);
         let mut bits = DenseBits::new(universe);
         let mut oracle = vec![false; universe];
         assert_eq!(bits.len(), universe);
@@ -72,7 +72,7 @@ fn dense_bits_follow_a_vec_of_bool_oracle_across_word_boundaries() {
 #[test]
 fn the_packed_words_hold_sixty_four_indices_each_least_significant_bit_first() {
     for universe in UNIVERSES {
-        let mut rng = Lcg(universe as u64 + 77);
+        let mut rng = Rng::lcg(universe as u64 + 77, 33);
         let members = random_members(&mut rng, universe, universe);
         let bits = bits_of(universe, &members);
 
@@ -101,7 +101,7 @@ fn the_packed_words_hold_sixty_four_indices_each_least_significant_bit_first() {
 #[test]
 fn union_and_intersection_match_the_btreeset_algebra() {
     for universe in [1_usize, 64, 65, 130, 257] {
-        let mut rng = Lcg(universe as u64 * 3);
+        let mut rng = Rng::lcg(universe as u64 * 3, 33);
         for round in 0..8 {
             let left_members = random_members(&mut rng, universe, universe / 3 + round);
             let right_members = random_members(&mut rng, universe, universe / 2 + round);
@@ -221,7 +221,7 @@ fn intersecting_sets_over_different_universes_panics() {
 #[test]
 fn union_with_is_the_join_of_a_reachability_fixpoint_and_its_change_report_ends_the_loop() {
     for seed in [1, 8] {
-        let mut rng = Lcg(seed);
+        let mut rng = Rng::lcg(seed, 33);
         let mut graph = Graph::<(), ()>::new();
         let nodes: Vec<NodeId> = (0..70).map(|_| graph.add_node(())).collect();
         for _ in 0..110 {
@@ -280,7 +280,7 @@ fn epoch_marks_grow_to_the_universe_they_are_asked_for() {
 }
 
 /// A random graph over `count` nodes.
-fn random_graph(rng: &mut Lcg, count: usize, edges: usize) -> Graph<(), ()> {
+fn random_graph(rng: &mut Rng, count: usize, edges: usize) -> Graph<(), ()> {
     let mut graph = Graph::new();
     let nodes: Vec<NodeId> = (0..count).map(|_| graph.add_node(())).collect();
     for _ in 0..edges {
@@ -312,7 +312,7 @@ fn closure_of(graph: &Graph<(), ()>, root: NodeId, scratch: &mut SearchScratch) 
 
 #[test]
 fn one_scratch_serves_a_closure_per_root_pass_like_a_fresh_buffer_per_root() {
-    let mut rng = Lcg(90);
+    let mut rng = Rng::lcg(90, 33);
     let graph = random_graph(&mut rng, 70, 120);
     let mut marks = SearchScratch::default();
 

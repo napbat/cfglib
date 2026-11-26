@@ -2,11 +2,12 @@
 
 use cfglib::{DenseFanout, Graph, NodeId};
 
-use crate::Lcg;
+use crate::below_u32;
+use crate::rng::Rng;
 
 /// A graph with parallel edges, self loops, removed edges and removed nodes.
 fn tombstoned_graph(seed: u64) -> Graph<u32, ()> {
-    let mut rng = Lcg(seed);
+    let mut rng = Rng::lcg(seed, 33);
     let mut graph = Graph::new();
     let nodes: Vec<NodeId> = (0..60).map(|label| graph.add_node(label)).collect();
     for _ in 0..200 {
@@ -83,9 +84,9 @@ fn a_reverse_index_keyed_by_node_identity_equals_the_stores_predecessor_lists() 
 #[test]
 fn pairs_keep_their_arrival_order_inside_each_run_against_a_vec_oracle() {
     for (seed, bound) in [(1, 25_usize), (6, 64), (8, 65)] {
-        let mut rng = Lcg(seed);
+        let mut rng = Rng::lcg(seed, 33);
         let pairs: Vec<(usize, u32)> = (0..400)
-            .map(|_| (rng.below(bound), rng.below_u32(1000)))
+            .map(|_| (rng.below(bound), below_u32(&mut rng, 1000)))
             .chain([(0, 7), (bound - 1, 8)])
             .collect();
         let mut oracle: Vec<Vec<u32>> = vec![Vec::new(); bound];
@@ -123,9 +124,13 @@ fn a_key_with_no_pairs_still_owns_an_empty_run() {
 #[test]
 fn grouped_input_equals_the_same_pairs_flattened_in_key_order() {
     for seed in [3, 12] {
-        let mut rng = Lcg(seed);
+        let mut rng = Rng::lcg(seed, 33);
         let groups: Vec<Vec<u32>> = (0..70)
-            .map(|_| (0..rng.below(4)).map(|_| rng.below_u32(500)).collect())
+            .map(|_| {
+                (0..rng.below(4))
+                    .map(|_| below_u32(&mut rng, 500))
+                    .collect()
+            })
             .collect();
         let flattened: Vec<(usize, u32)> = groups
             .iter()

@@ -3,6 +3,7 @@ use cfglib::{Cfg, CycleEquivalence, EdgeKind, ProgramStructureTree, SeseEdge};
 use super::BenchmarkSuite;
 use crate::fixtures::linear_cfg;
 use crate::harness::benchmark_case;
+use crate::rng::Rng;
 
 /// Blocks of the chain.
 const CHAIN_BLOCKS: usize = 100_000;
@@ -42,13 +43,11 @@ fn random_cfg(block_count: usize) -> Cfg<u32> {
     let mut blocks = Vec::with_capacity(block_count);
     blocks.push(cfg.entry());
     blocks.extend((1..block_count).map(|_| cfg.new_block()));
-    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut rng = Rng::xorshift(0x9E37_79B9_7F4A_7C15);
     for index in 1..block_count {
         let from = index - 1;
         cfg.add_edge(blocks[from], blocks[index], EdgeKind::Fallthrough);
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
+        let state = rng.next_u64();
         let jump = usize::try_from(state >> 60).expect("four bits fit in usize");
         match state % 4 {
             0 => {}

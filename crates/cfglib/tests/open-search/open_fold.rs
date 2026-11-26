@@ -5,8 +5,8 @@ use std::ops::ControlFlow;
 
 use cfglib::{FoldEnter, MarkScope, OpenFold, OpenFoldConfig, Revisit, open_fold};
 
-use crate::Lcg;
 use crate::reference::{Table, chain, simple_routes};
+use crate::rng::Rng;
 
 /// Counts the routes from the root to a sink, folding a node once per route that reaches it.
 struct RouteCount<'a> {
@@ -86,7 +86,7 @@ fn diamond() -> Table {
 #[test]
 fn per_path_marks_count_the_simple_routes_to_a_sink_like_a_brute_force_enumeration() {
     for seed in 1..=8 {
-        let table = Table::random(&mut Lcg(seed), 9, 15);
+        let table = Table::random(&mut Rng::lcg(seed, 33), 9, 15);
         let expected = simple_routes(&table, 0, None)
             .into_iter()
             .filter(|route| table.successors[*route.last().expect("non-empty")].is_empty())

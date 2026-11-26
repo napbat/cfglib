@@ -11,6 +11,7 @@ use cfglib::{
 use super::BenchmarkSuite;
 use crate::fixtures::{CfgReachability, Reachability, branchy_cfg, branchy_graph, fixture_u32};
 use crate::harness::benchmark_case;
+use crate::rng::Rng;
 
 const NODE_COUNT: usize = 512;
 
@@ -323,15 +324,7 @@ const NEST_NODE_COUNT: usize = 1_024;
 /// in no flow order.
 fn permuted_loop_nest(node_count: usize) -> (Graph<(), ()>, NodeId) {
     let mut ids: Vec<usize> = (0..node_count).collect();
-    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
-    for last in (1..node_count).rev() {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        let bound = u64::try_from(last + 1).expect("a fixture size fits u64");
-        let pick = usize::try_from(state % bound).expect("below the fixture size");
-        ids.swap(last, pick);
-    }
+    Rng::xorshift(0x9E37_79B9_7F4A_7C15).shuffle(&mut ids);
     let mut graph = Graph::with_capacity(node_count, node_count * 2);
     let nodes: Vec<NodeId> = (0..node_count).map(|_| graph.add_node(())).collect();
     let at = |position: usize| nodes[ids[position]];

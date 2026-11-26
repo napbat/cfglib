@@ -8,8 +8,8 @@ use cfglib::{
     reverse_postorder, scan_predecessors,
 };
 
-use crate::Lcg;
 use crate::digraph::Digraph;
+use crate::rng::Rng;
 
 const DIRECTIONS: [(Direction, bool); 2] =
     [(Direction::Forward, true), (Direction::Backward, false)];
@@ -21,7 +21,7 @@ fn indexes(nodes: Vec<NodeId>) -> Vec<usize> {
 #[test]
 fn common_ancestors_match_explicit_ancestor_sets_in_the_discovery_order_of_b() {
     for seed in 1..=8 {
-        let digraph = Digraph::random(&mut Lcg(seed), 16, 26);
+        let digraph = Digraph::random(&mut Rng::lcg(seed, 33), 16, 26);
         let graph = digraph.graph();
         for (direction, forward) in DIRECTIONS {
             for limit in [None, Some(0), Some(1), Some(2)] {
@@ -58,7 +58,7 @@ fn common_ancestors_match_explicit_ancestor_sets_in_the_discovery_order_of_b() {
 fn the_nearest_common_ancestor_minimizes_combined_distance_then_node_id() {
     let mut ties = 0;
     for seed in 1..=8 {
-        let digraph = Digraph::random(&mut Lcg(seed + 30), 16, 26);
+        let digraph = Digraph::random(&mut Rng::lcg(seed + 30, 33), 16, 26);
         let graph = digraph.graph();
         for (direction, forward) in DIRECTIONS {
             for a in 0..16 {
@@ -296,7 +296,7 @@ impl GraphView for ForwardOnly {
 }
 
 /// Distinct edges `i -> j` with `i < j`, so the graph is acyclic and has no parallel edges.
-fn random_dag(rng: &mut Lcg, nodes: usize, wanted: usize) -> Digraph {
+fn random_dag(rng: &mut Rng, nodes: usize, wanted: usize) -> Digraph {
     let mut edges = BTreeSet::new();
     while edges.len() < wanted {
         let (first, second) = (rng.below(nodes), rng.below(nodes));
@@ -309,7 +309,7 @@ fn random_dag(rng: &mut Lcg, nodes: usize, wanted: usize) -> Digraph {
 
 #[test]
 fn reversing_swaps_the_two_adjacency_directions_and_nothing_else() {
-    let digraph = Digraph::random(&mut Lcg(4), 14, 30);
+    let digraph = Digraph::random(&mut Rng::lcg(4, 33), 14, 30);
     let graph = digraph.graph();
     let reversed = Reversed::new(&graph);
 
@@ -363,7 +363,7 @@ fn a_reversed_view_forwards_node_payloads_and_leaves_removed_nodes_out() {
 #[test]
 fn walks_over_a_reversed_view_equal_the_incoming_walks_over_the_view_itself() {
     for seed in 1..=5 {
-        let digraph = Digraph::random(&mut Lcg(seed + 50), 20, 40);
+        let digraph = Digraph::random(&mut Rng::lcg(seed + 50, 33), 20, 40);
         let graph = digraph.graph();
         let reversed = Reversed::new(&graph);
         let outgoing = Direction::Forward;
@@ -420,7 +420,7 @@ fn reference_postorder(
 #[test]
 fn reverse_postorder_is_the_reversed_recursive_postorder_and_postorder_is_its_mirror() {
     for seed in 1..=6 {
-        let digraph = Digraph::random(&mut Lcg(seed + 70), 20, 36);
+        let digraph = Digraph::random(&mut Rng::lcg(seed + 70, 33), 20, 36);
         let view = ForwardOnly::from_digraph(&digraph);
         let graph = digraph.graph();
         for start in [0, 8, 16] {
@@ -459,7 +459,7 @@ fn reverse_postorder_is_the_reversed_recursive_postorder_and_postorder_is_its_mi
 #[test]
 fn over_an_acyclic_view_reverse_postorder_puts_every_source_before_its_targets() {
     for seed in 1..=8 {
-        let digraph = random_dag(&mut Lcg(seed + 90), 18, 30);
+        let digraph = random_dag(&mut Rng::lcg(seed + 90, 33), 18, 30);
         let view = ForwardOnly::from_digraph(&digraph);
         for (direction, forward) in DIRECTIONS {
             let start = if forward { 0 } else { 17 };
@@ -513,7 +513,7 @@ fn reverse_postorder_of_a_unit_graph_and_a_cycle_are_hand_derived() {
 #[test]
 fn multi_source_reachability_is_the_union_of_the_single_source_sets() {
     for seed in 1..=6 {
-        let digraph = Digraph::random(&mut Lcg(seed + 110), 24, 34);
+        let digraph = Digraph::random(&mut Rng::lcg(seed + 110, 33), 24, 34);
         let graph = digraph.graph();
         let view = ForwardOnly::from_digraph(&digraph);
         for (direction, forward) in DIRECTIONS {
@@ -544,7 +544,7 @@ fn multi_source_reachability_is_the_union_of_the_single_source_sets() {
 
 #[test]
 fn reachability_skips_removed_nodes_and_every_seed_is_reached_itself() {
-    let digraph = Digraph::random(&mut Lcg(8), 12, 20);
+    let digraph = Digraph::random(&mut Rng::lcg(8, 33), 12, 20);
     let mut graph = digraph.graph();
     graph.remove_node(NodeId::from_index(4));
     let live = reachable(&graph, [NodeId::from_index(0)], Direction::Forward);
@@ -556,6 +556,6 @@ fn reachability_skips_removed_nodes_and_every_seed_is_reached_itself() {
 #[test]
 #[should_panic(expected = "seed node is out of range")]
 fn a_reachability_seed_outside_the_graph_panics() {
-    let graph = Digraph::random(&mut Lcg(1), 5, 6).graph();
+    let graph = Digraph::random(&mut Rng::lcg(1, 33), 5, 6).graph();
     let _ = reachable(&graph, [NodeId::from_index(5)], Direction::Forward);
 }

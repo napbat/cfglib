@@ -7,7 +7,7 @@ use cfglib::{
     LoopForest, RootedView,
 };
 
-use crate::random::Rng;
+use crate::rng::Rng;
 use crate::stmt::Stmt;
 
 struct Shape {

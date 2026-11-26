@@ -13,28 +13,7 @@ use cfglib::{AddressHandlerKind, CallPolicy};
 use crate::harness::{Settings, TryRange, build_with};
 use crate::isa::Dest::{At, Beyond, Inside};
 use crate::isa::{Dest, Isa, Op};
-
-/// A small deterministic generator (`splitmix64`), so failures reproduce.
-struct Rng(u64);
-
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^ (z >> 31)
-    }
-
-    /// A value in `0..bound`.
-    fn below(&mut self, bound: usize) -> usize {
-        usize::try_from(self.next() % u64::try_from(bound).unwrap()).unwrap()
-    }
-
-    fn chance(&mut self, percent: usize) -> bool {
-        self.below(100) < percent
-    }
-}
+use crate::rng::Rng;
 
 /// An operation shape before its destinations are chosen.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -152,7 +131,7 @@ fn table(rng: &mut Rng, length: usize) -> Vec<TryRange> {
 
 fn random_programs_satisfy_every_structural_oracle<I: Isa>() {
     for seed in 0..300 {
-        let mut rng = Rng(seed);
+        let mut rng = Rng::splitmix(seed);
         let ops = program(&mut rng);
         let table = table(&mut rng, ops.len());
         let entry = rng.chance(30).then(|| rng.below(ops.len()));

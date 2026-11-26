@@ -4,8 +4,8 @@ use std::ops::ControlFlow;
 
 use cfglib::{OpenPathsEvent, Visit, open_breadth_first_paths};
 
-use crate::Lcg;
 use crate::reference::{Table, Walk, keep_all, simple_routes, table_successors};
+use crate::rng::Rng;
 use crate::spaces::{GRID_SIDE, binomial, grid_successors};
 
 /// Every route event of a walk that never prunes, in event order.
@@ -29,7 +29,7 @@ fn emitted_routes(table: &Table, seeds: &[usize], config: Option<usize>) -> Vec<
 #[test]
 fn routes_come_out_as_the_multiset_of_simple_routes_a_recursion_enumerates() {
     for seed in 1..=6 {
-        let table = Table::random(&mut Lcg(seed), 9, 16);
+        let table = Table::random(&mut Rng::lcg(seed, 33), 9, 16);
         for limit in [None, Some(3)] {
             let seeds = [0, 4, 0];
 
@@ -48,7 +48,7 @@ fn routes_come_out_as_the_multiset_of_simple_routes_a_recursion_enumerates() {
 #[test]
 fn the_number_of_routes_equals_the_number_of_path_marked_depth_first_visits() {
     for seed in 1..=6 {
-        let table = Table::random(&mut Lcg(seed + 20), 10, 18);
+        let table = Table::random(&mut Rng::lcg(seed + 20, 33), 10, 18);
         let routes = emitted_routes(&table, &[0], Some(6));
         let visits = Walk::new(&table, Some(6), &keep_all).depth_first_routes(&[0]);
         assert_eq!(routes.len(), visits.len(), "seed {seed}");
@@ -58,7 +58,7 @@ fn the_number_of_routes_equals_the_number_of_path_marked_depth_first_visits() {
 #[test]
 fn routes_arrive_in_nondecreasing_length_and_the_first_route_to_a_node_is_a_shortest_one() {
     for seed in 1..=6 {
-        let table = Table::random(&mut Lcg(seed + 40), 25, 45);
+        let table = Table::random(&mut Rng::lcg(seed + 40, 33), 25, 45);
         let routes = emitted_routes(&table, &[0], Some(5));
         let lengths: Vec<usize> = routes.iter().map(Vec::len).collect();
         assert!(
@@ -202,7 +202,7 @@ fn a_node_already_on_the_route_is_refused_instead_of_extended() {
 #[test]
 fn a_refusal_names_a_node_on_its_route_and_its_verdict_is_ignored() {
     for seed in 1..=4 {
-        let table = Table::random(&mut Lcg(seed + 60), 8, 16);
+        let table = Table::random(&mut Rng::lcg(seed + 60, 33), 8, 16);
         let mut refusals = 0;
         let outcome = open_breadth_first_paths::<_, ()>(
             [0_usize],

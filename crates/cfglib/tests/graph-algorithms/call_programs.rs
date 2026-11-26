@@ -11,8 +11,8 @@ use cfglib::{
     find_function, is_recursive_function, propagate_summaries, recursive_functions,
 };
 
-use crate::Lcg;
 use crate::digraph::Digraph;
+use crate::rng::Rng;
 
 /// A toy instruction set: calls (direct, tail, indirect), observable effects, and plain work.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,7 +262,7 @@ fn direct_and_mutual_recursion_are_recursive_and_everything_else_is_not() {
 #[test]
 fn recursion_agrees_with_a_search_on_random_call_graphs() {
     for seed in 1..=8 {
-        let digraph = Digraph::random(&mut Lcg(seed), 18, 24);
+        let digraph = Digraph::random(&mut Rng::lcg(seed, 33), 18, 24);
         let graph = random_call_graph(&digraph);
         for function in 0..18 {
             assert_eq!(
@@ -298,7 +298,7 @@ fn the_batch_classification_marks_the_self_call_and_the_cycle() {
 #[test]
 fn the_batch_forms_match_the_per_function_queries_on_random_call_graphs() {
     for seed in 1..=60 {
-        let mut rng = Lcg(seed);
+        let mut rng = Rng::lcg(seed, 33);
         let nodes = 1 + rng.below(24);
         let edges = rng.below(2 * nodes + 1);
         let digraph = Digraph::random(&mut rng, nodes, edges);
@@ -669,7 +669,7 @@ impl<C: Copy + Ord> SummaryProblem<Graph<FunctionNode<C>, CallMetadata>> for Rea
 #[test]
 fn summaries_over_random_call_graphs_are_the_reachable_sets_a_search_finds() {
     for seed in 1..=8 {
-        let digraph = Digraph::random(&mut Lcg(seed + 20), 20, 30);
+        let digraph = Digraph::random(&mut Rng::lcg(seed + 20, 33), 20, 30);
         let graph = random_call_graph(&digraph);
         let summaries = propagate_summaries(&graph, &Reached, SummaryConfig::default());
         for (function, reached) in summaries.iter().enumerate() {

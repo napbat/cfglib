@@ -4,8 +4,8 @@ use std::ops::ControlFlow;
 
 use cfglib::{SearchConfig, SearchOrder, Visit, VisitedPolicy, open_search};
 
-use crate::Lcg;
 use crate::reference::{Table, Visits, Walk, keep_all, table_successors};
+use crate::rng::Rng;
 use crate::spaces::{GRID_SIDE, binomial, collatz_successors, collatz_trajectory, grid_successors};
 
 fn open_visits(
@@ -223,7 +223,7 @@ fn a_depth_bound_over_the_grid_counts_two_to_the_depth_routes_per_level() {
 fn open_search_over_a_table_visits_like_the_dense_reference_in_every_discipline() {
     let prune = |node: usize| node.is_multiple_of(6);
     for seed in 1..=4 {
-        let table = Table::random(&mut Lcg(seed), 30, 60);
+        let table = Table::random(&mut Rng::lcg(seed, 33), 30, 60);
         for limit in [None, Some(2), Some(5)] {
             let with_limit = |config: SearchConfig| SearchConfig {
                 max_depth: limit,

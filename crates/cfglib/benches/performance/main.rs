@@ -1,5 +1,8 @@
 //! Benchmarks: performance.
 
+#[path = "../../tests/common/rng.rs"]
+pub mod rng;
+
 mod analysis_oracles;
 mod api_cases;
 mod fixtures;

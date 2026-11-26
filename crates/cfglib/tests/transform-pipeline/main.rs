@@ -12,6 +12,9 @@
 #[path = "../../src/test_util/golden.rs"]
 mod golden;
 
+#[path = "../common/rng.rs"]
+pub mod rng;
+
 mod cleanup;
 mod critical_edges;
 mod linearize;

@@ -4,12 +4,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cfglib::{Fanout, SortedMap};
 
-use crate::Lcg;
+use crate::below_u32;
+use crate::rng::Rng;
 
 /// Pairs over forty sparse keys, so runs repeat values, plus the two ends of the key space.
-fn sparse_pairs(rng: &mut Lcg, count: usize) -> Vec<(u32, u32)> {
+fn sparse_pairs(rng: &mut Rng, count: usize) -> Vec<(u32, u32)> {
     let mut pairs: Vec<(u32, u32)> = (0..count)
-        .map(|_| (rng.below_u32(40) * 997, rng.below_u32(30)))
+        .map(|_| (below_u32(rng, 40) * 997, below_u32(rng, 30)))
         .collect();
     pairs.extend([(0, 5), (u32::MAX, u32::MAX), (u32::MAX, 0)]);
     pairs
@@ -26,7 +27,7 @@ fn deduplicated(pairs: &[(u32, u32)]) -> BTreeMap<u32, BTreeSet<u32>> {
 #[test]
 fn a_reverse_index_built_from_unordered_pairs_matches_a_btreemap_oracle() {
     for seed in [3, 11, 2026] {
-        let pairs = sparse_pairs(&mut Lcg(seed), 600);
+        let pairs = sparse_pairs(&mut Rng::lcg(seed, 33), 600);
         let oracle = deduplicated(&pairs);
         let recorded = pairs.len();
         let table = Fanout::from_pairs(pairs);
@@ -131,11 +132,11 @@ fn grouped_input_keeps_each_groups_order_and_repeats_and_concatenates_repeated_k
 #[test]
 fn random_groups_match_a_stable_btreemap_concatenation() {
     for seed in [5, 17] {
-        let mut rng = Lcg(seed);
+        let mut rng = Rng::lcg(seed, 33);
         let groups: Vec<(u32, Vec<u32>)> = (0..60)
             .map(|_| {
-                let key = rng.below_u32(8);
-                let values = (0..rng.below(4)).map(|_| rng.below_u32(50)).collect();
+                let key = below_u32(&mut rng, 8);
+                let values = (0..rng.below(4)).map(|_| below_u32(&mut rng, 50)).collect();
                 (key, values)
             })
             .collect();
@@ -205,7 +206,7 @@ fn clones_are_equal_and_tables_with_different_runs_are_not() {
 #[test]
 fn a_sorted_map_agrees_with_repeated_btreemap_inserts_for_last_wins_and_for_a_sum() {
     for seed in [4, 21] {
-        let pairs = sparse_pairs(&mut Lcg(seed), 400);
+        let pairs = sparse_pairs(&mut Rng::lcg(seed, 33), 400);
         let mut last: BTreeMap<u32, u32> = BTreeMap::new();
         let mut total: BTreeMap<u32, u64> = BTreeMap::new();
         for &(key, value) in &pairs {
