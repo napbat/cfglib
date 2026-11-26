@@ -9,22 +9,28 @@ use super::{ReachIndex, ReachIndexConfig, ReachScratch};
 use crate::graph::store::{Graph, NodeId};
 use crate::test_util::rng::Rng;
 
+/// A configuration with these fields.
+const fn config(orders: usize, supportive: usize, exact: Option<usize>) -> ReachIndexConfig {
+    ReachIndexConfig {
+        orders,
+        supportive,
+        exact_max_chains: exact,
+    }
+}
+
 /// Both modes, with the order and supportive counts at zero, at one, past
 /// the four fixed alternatives, and at the limit of 64.
 const CONFIGS: [ReachIndexConfig; 10] = [
     ReachIndexConfig::new(),
-    ReachIndexConfig::new().with_orders(0).with_supportive(0),
-    ReachIndexConfig::new().with_orders(0).with_supportive(64),
-    ReachIndexConfig::new().with_orders(1).with_supportive(0),
-    ReachIndexConfig::new().with_orders(6).with_supportive(1),
-    ReachIndexConfig::new().with_orders(9).with_supportive(7),
-    ReachIndexConfig::new().with_exact_max_chains(usize::MAX),
-    ReachIndexConfig::new()
-        .with_orders(0)
-        .with_supportive(0)
-        .with_exact_max_chains(usize::MAX),
-    ReachIndexConfig::new().with_exact_max_chains(4),
-    ReachIndexConfig::new().with_exact_max_chains(0),
+    config(0, 0, None),
+    config(0, 64, None),
+    config(1, 0, None),
+    config(6, 1, None),
+    config(9, 7, None),
+    config(2, 32, Some(usize::MAX)),
+    config(0, 0, Some(usize::MAX)),
+    config(2, 32, Some(4)),
+    config(2, 32, Some(0)),
 ];
 
 /// Per node slot, whether a breadth-first walk from `source` reaches it.
@@ -280,9 +286,9 @@ fn random_pairs_match_breadth_first_search_on_large_graphs() {
     let graphs = [wide, biased, narrow];
     let configs = [
         ReachIndexConfig::new(),
-        ReachIndexConfig::new().with_orders(0).with_supportive(0),
-        ReachIndexConfig::new().with_orders(4).with_supportive(64),
-        ReachIndexConfig::new().with_exact_max_chains(1_024),
+        config(0, 0, None),
+        config(4, 64, None),
+        config(2, 32, Some(1_024)),
     ];
     for (kind, graph) in graphs.iter().enumerate() {
         let pairs = random_pairs(&mut rng, graph, 10_000);
@@ -362,7 +368,7 @@ fn the_empty_graph_has_an_empty_index() {
     let graph = Graph::<(), ()>::new();
     let observed = ReachIndex::compute(&graph, ReachIndexConfig::new());
     assert_eq!(observed.chain_count(), None);
-    let exact = ReachIndex::compute(&graph, ReachIndexConfig::new().with_exact_max_chains(0));
+    let exact = ReachIndex::compute(&graph, config(2, 32, Some(0)));
     assert_eq!(exact.chain_count(), Some(0));
 }
 
@@ -380,9 +386,9 @@ fn a_diamond_chain_is_covered_by_two_chains() {
         graph.add_edge(right, join, ());
         spine = join;
     }
-    let exact = ReachIndexConfig::new().with_exact_max_chains(2);
+    let exact = config(2, 32, Some(2));
     assert_eq!(ReachIndex::compute(&graph, exact).chain_count(), Some(2));
-    let too_few = ReachIndexConfig::new().with_exact_max_chains(1);
+    let too_few = config(2, 32, Some(1));
     assert_eq!(ReachIndex::compute(&graph, too_few).chain_count(), None);
 }
 
@@ -396,20 +402,12 @@ fn the_exact_mode_is_off_unless_requested() {
 }
 
 #[test]
-fn the_configuration_defaults_and_setters() {
+fn the_default_configuration_keeps_two_orders_and_32_supportive_components() {
     let config = ReachIndexConfig::default();
     assert_eq!(config, ReachIndexConfig::new());
     assert_eq!(
         (config.orders, config.supportive, config.exact_max_chains),
         (2, 32, None)
-    );
-    let config = config
-        .with_orders(5)
-        .with_supportive(64)
-        .with_exact_max_chains(9);
-    assert_eq!(
-        (config.orders, config.supportive, config.exact_max_chains),
-        (5, 64, Some(9))
     );
 }
 
@@ -431,7 +429,7 @@ fn a_removed_target_panics_in_exact_mode() {
     let kept = graph.add_node(());
     let removed = graph.add_node(());
     graph.remove_node(removed);
-    let index = ReachIndex::compute(&graph, ReachIndexConfig::new().with_exact_max_chains(8));
+    let index = ReachIndex::compute(&graph, config(2, 32, Some(8)));
     let _ = index.reaches_in(&mut ReachScratch::default(), kept, removed);
 }
 
@@ -448,7 +446,7 @@ fn a_node_beyond_the_bound_panics() {
 #[should_panic(expected = "at most 64 supportive components")]
 fn more_than_64_supportive_components_panic() {
     let graph = branchy(8);
-    let _ = ReachIndex::compute(&graph, ReachIndexConfig::new().with_supportive(65));
+    let _ = ReachIndex::compute(&graph, config(2, 65, None));
 }
 
 /// Prints, per fixture, the share of queries answered without the fallback
@@ -475,8 +473,8 @@ fn report_how_many_queries_skip_the_search() {
             .collect();
         for config in [
             ReachIndexConfig::new(),
-            ReachIndexConfig::new().with_orders(0).with_supportive(0),
-            ReachIndexConfig::new().with_orders(4).with_supportive(64),
+            config(0, 0, None),
+            config(4, 64, None),
         ] {
             let index = ReachIndex::compute(graph, config);
             let mut scratch = ReachScratch::default();
@@ -494,8 +492,7 @@ fn report_how_many_queries_skip_the_search() {
                     / crate::usize_to_f64(coverage.queries),
             );
         }
-        let exact =
-            ReachIndex::compute(graph, ReachIndexConfig::new().with_exact_max_chains(1_024));
+        let exact = ReachIndex::compute(graph, config(2, 32, Some(1_024)));
         println!("{name}: exact mode chain count {:?}", exact.chain_count());
     }
 }

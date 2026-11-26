@@ -9,10 +9,24 @@ use crate::digraph::Digraph;
 fn every_pair_matches_the_breadth_first_distances_in_both_modes() {
     let configs = [
         ReachIndexConfig::default(),
-        ReachIndexConfig::new().with_orders(0).with_supportive(0),
-        ReachIndexConfig::new().with_orders(5).with_supportive(64),
-        ReachIndexConfig::new().with_exact_max_chains(usize::MAX),
-        ReachIndexConfig::new().with_exact_max_chains(3),
+        ReachIndexConfig {
+            orders: 0,
+            supportive: 0,
+            exact_max_chains: None,
+        },
+        ReachIndexConfig {
+            orders: 5,
+            supportive: 64,
+            exact_max_chains: None,
+        },
+        ReachIndexConfig {
+            exact_max_chains: Some(usize::MAX),
+            ..ReachIndexConfig::default()
+        },
+        ReachIndexConfig {
+            exact_max_chains: Some(3),
+            ..ReachIndexConfig::default()
+        },
     ];
     let mut scratch = ReachScratch::default();
     for seed in 1..=24 {

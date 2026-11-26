@@ -13,7 +13,7 @@ use crate::graph::traverse::topological_sort;
 use crate::test_util::rng::Rng;
 
 const PLAIN: FeedbackConfig = FeedbackConfig::new();
-const MINIMAL: FeedbackConfig = FeedbackConfig::new().with_minimal(true);
+const MINIMAL: FeedbackConfig = FeedbackConfig { minimal: true };
 
 /// A random multigraph over up to `max_slots` node slots and about
 /// `density` edges per slot: self-loops and parallel edges occur, and some
@@ -170,11 +170,7 @@ fn check(graph: &Graph<(), ()>) {
 fn the_config_defaults_to_the_plain_set() {
     assert_eq!(FeedbackConfig::default(), FeedbackConfig { minimal: false });
     assert_eq!(FeedbackConfig::new(), FeedbackConfig::default());
-    assert_eq!(
-        FeedbackConfig::new().with_minimal(true),
-        FeedbackConfig { minimal: true }
-    );
-    assert_eq!(MINIMAL.with_minimal(false), PLAIN);
+    assert_ne!(MINIMAL, PLAIN);
 }
 
 #[test]

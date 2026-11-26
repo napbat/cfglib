@@ -76,20 +76,21 @@ const MAX_SUPPORTIVE: usize = 64;
 
 /// What a [`ReachIndex`] computes besides the components.
 ///
-/// The fields are public and the struct is `Copy`, so a consumer that stores
-/// a configuration as data can write it as a literal;
-/// [`new`](ReachIndexConfig::new) plus the setters are the ergonomic form, and
-/// [`Default`] is the same as [`new`](ReachIndexConfig::new).
+/// A plain struct with public fields: set the fields to change it.
+/// [`Default`] is the same as [`new`](ReachIndexConfig::new), which is also
+/// usable in a `const`.
 ///
 /// # Examples
 ///
 /// ```
 /// use cfglib::ReachIndexConfig;
 ///
-/// let config = ReachIndexConfig::new().with_orders(4).with_exact_max_chains(16);
-/// assert_eq!(config.orders, 4);
+/// let config = ReachIndexConfig {
+///     orders: 4,
+///     exact_max_chains: Some(16),
+///     ..ReachIndexConfig::default()
+/// };
 /// assert_eq!(config.supportive, 32);
-/// assert_eq!(config.exact_max_chains, Some(16));
 /// assert_eq!(ReachIndexConfig::default(), ReachIndexConfig::new());
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,29 +129,6 @@ impl ReachIndexConfig {
             supportive: 32,
             exact_max_chains: None,
         }
-    }
-
-    /// Return this configuration keeping `orders` extended topological
-    /// orders.
-    #[must_use]
-    pub const fn with_orders(mut self, orders: usize) -> Self {
-        self.orders = orders;
-        self
-    }
-
-    /// Return this configuration keeping `supportive` supportive components.
-    #[must_use]
-    pub const fn with_supportive(mut self, supportive: usize) -> Self {
-        self.supportive = supportive;
-        self
-    }
-
-    /// Return this configuration with the exact chain mode enabled for a
-    /// decomposition of at most `max_chains` chains.
-    #[must_use]
-    pub const fn with_exact_max_chains(mut self, max_chains: usize) -> Self {
-        self.exact_max_chains = Some(max_chains);
-        self
     }
 }
 
@@ -208,7 +186,8 @@ impl Default for ReachIndexConfig {
 /// assert!(index.reaches(log, log));
 ///
 /// // The same pairs from a chain table, without any search.
-/// let exact = ReachIndex::compute(&calls, ReachIndexConfig::new().with_exact_max_chains(8));
+/// let exact_mode = ReachIndexConfig { exact_max_chains: Some(8), ..ReachIndexConfig::default() };
+/// let exact = ReachIndex::compute(&calls, exact_mode);
 /// assert!(exact.chain_count().is_some());
 /// assert!(exact.reaches(main, lex));
 /// assert!(!exact.reaches(main, log));

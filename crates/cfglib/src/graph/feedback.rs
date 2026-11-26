@@ -38,10 +38,9 @@ use crate::identity::{NO_INDEX, check_bound, slot, word};
 
 /// Options of [`feedback_arc_set`].
 ///
-/// The field is public and the struct is `Copy`, so a consumer that stores
-/// its options as data can write a literal; [`new`](Self::new) plus
-/// [`with_minimal`](Self::with_minimal) are the ergonomic form. The default
-/// is the linear-time set, without the minimality pass.
+/// A plain struct with a public field: set it to change the options. The
+/// default, also [`new`](Self::new) for a `const`, is the linear-time set,
+/// without the minimality pass.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FeedbackConfig {
     /// Run the minimality pass: re-admit each edge of the set whose return
@@ -57,13 +56,6 @@ impl FeedbackConfig {
     #[must_use]
     pub const fn new() -> Self {
         Self { minimal: false }
-    }
-
-    /// Return this configuration with the minimality pass on or off.
-    #[must_use]
-    pub const fn with_minimal(mut self, minimal: bool) -> Self {
-        self.minimal = minimal;
-        self
     }
 }
 
@@ -178,7 +170,7 @@ pub fn linear_arrangement<G: GraphView>(graph: &G) -> Vec<G::NodeId> {
 /// assert_eq!(topological_sort(&acyclic), Some(linear_arrangement(&graph)));
 ///
 /// // Both edges are needed, so the minimality pass keeps them.
-/// let minimal = feedback_arc_set(&graph, FeedbackConfig::new().with_minimal(true));
+/// let minimal = feedback_arc_set(&graph, FeedbackConfig { minimal: true });
 /// assert_eq!(minimal, set);
 /// ```
 #[must_use]

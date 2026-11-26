@@ -45,7 +45,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_feedback_arc_set_minimal",
-        || feedback_arc_set(&graph, FeedbackConfig::new().with_minimal(true)),
+        || feedback_arc_set(&graph, FeedbackConfig { minimal: true }),
         |set: &Vec<EdgeId>| assert!(acyclic_without(&graph, set))
     );
 }
@@ -70,7 +70,7 @@ fn report_quality() {
         ("tangle", tangle_graph(NODE_COUNT)),
     ] {
         let set = feedback_arc_set(&graph, FeedbackConfig::new()).len();
-        let minimal = feedback_arc_set(&graph, FeedbackConfig::new().with_minimal(true)).len();
+        let minimal = feedback_arc_set(&graph, FeedbackConfig { minimal: true }).len();
         println!(
             "  {name:<8} {:>6} {set:>6} {minimal:>8} {:>15}",
             graph.edge_count(),
