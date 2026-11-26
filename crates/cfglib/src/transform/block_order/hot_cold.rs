@@ -97,19 +97,19 @@ pub fn hot_cold_order<G: RootedView>(
 ) -> [Vec<G::NodeId>; 3] {
     let root = graph.root();
     let root_position = base.iter().position(|&node| node == root);
-    let of_class = |class: ColdClass| -> Vec<G::NodeId> {
-        base.iter()
-            .enumerate()
-            .filter(|&(position, &node)| {
-                Some(position) != root_position && classes.class(node) == class
-            })
-            .map(|(_, &node)| node)
-            .collect()
-    };
-    let mut hot = Vec::with_capacity(base.len());
+    let [mut hot, mut rare, mut never] = [Vec::with_capacity(base.len()), Vec::new(), Vec::new()];
     hot.extend(root_position.map(|_| root));
-    hot.extend(of_class(ColdClass::Normal));
-    [hot, of_class(ColdClass::Rare), of_class(ColdClass::Never)]
+    for (position, &node) in base.iter().enumerate() {
+        if Some(position) == root_position {
+            continue;
+        }
+        match classes.class(node) {
+            ColdClass::Normal => hot.push(node),
+            ColdClass::Rare => rare.push(node),
+            ColdClass::Never => never.push(node),
+        }
+    }
+    [hot, rare, never]
 }
 
 #[cfg(test)]
