@@ -124,6 +124,33 @@ fn parsing_reproduces_identity_topology_labels_and_regions() {
 }
 
 #[test]
+fn a_region_whose_parent_comes_later_reads_back() {
+    // `region_mut` can make a region the child of one added after it; the
+    // CFG stays valid, so its text must read back too.
+    let mut original = protected_cfg();
+    let outer = original
+        .add_region(Region {
+            protected_blocks: [original.entry()].into_iter().collect(),
+            handlers: alloc::vec![],
+            parent: None,
+        })
+        .unwrap();
+    original.region_mut(RegionId::from_raw(0)).parent = Some(outer);
+    assert_eq!(original.check_regions(), Ok(()));
+
+    let parsed = parse(&original.to_text()).expect("a later parent is a region");
+    assert!(parsed.regions().eq(original.regions()));
+}
+
+#[test]
+fn a_region_whose_parent_is_no_region_is_rejected() {
+    let error = parse("entry bb0\nbb0:\nregion r0 protected=bb0 parent=r1\n")
+        .expect_err("r1 is never written");
+    assert_eq!(error.line, 3);
+    assert_eq!(error.kind, crate::TextErrorKind::Region);
+}
+
+#[test]
 fn a_parsed_entry_may_be_any_declared_block() {
     let cfg = parse("entry bb1\nbb0:\nbb1:\nbb1 -> bb0 jump\n").expect("valid text");
     assert_eq!(cfg.entry(), BlockId::from_index(1));

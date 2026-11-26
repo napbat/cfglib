@@ -248,33 +248,36 @@ impl<I, E> Cfg<I, E> {
     ///
     /// # Errors
     ///
-    /// Returns the first broken invariant, in region order and then in
-    /// cleanup order.
+    /// Returns the first broken invariant: parents in region order, then
+    /// cleanup records in handler order, then single block references in the
+    /// order of the metadata.
     pub fn check_regions(&self) -> Result<(), RegionError> {
-        for (_, region) in self.regions() {
-            if let Some(parent) = region.parent
-                && !self.contains_region(parent)
-            {
-                return Err(RegionError::ParentMissing(parent));
-            }
-        }
-        for (handler, cleanup) in self.cleanups.iter() {
-            if !self.contains_handler(handler) {
-                return Err(RegionError::HandlerMissing(handler));
-            }
+        self.region_errors().next().map_or(Ok(()), Err)
+    }
+
+    /// Every broken exception-region invariant, in the order
+    /// [`check_regions`](Self::check_regions) reports the first of them.
+    /// [`verify`](crate::verify) lists them all.
+    pub(crate) fn region_errors(&self) -> impl Iterator<Item = RegionError> + '_ {
+        let parents = self.regions.iter().filter_map(|region| {
+            region
+                .parent
+                .filter(|&parent| !self.contains_region(parent))
+                .map(RegionError::ParentMissing)
+        });
+        let cleanups = self.cleanups.iter().flat_map(|(handler, cleanup)| {
+            let missing =
+                (!self.contains_handler(handler)).then_some(RegionError::HandlerMissing(handler));
             let mut routes = BTreeSet::new();
-            if let Some(&route) = cleanup
+            let repeated = cleanup
                 .continuations
                 .iter()
-                .find(|&&route| !routes.insert(route))
-            {
-                return Err(RegionError::ContinuationRepeated(handler, route));
-            }
-        }
-        match self.dangling_anchors().next() {
-            Some(block) => Err(RegionError::BlockNotLive(block)),
-            None => Ok(()),
-        }
+                .filter(move |&&route| !routes.insert(route))
+                .map(move |&route| RegionError::ContinuationRepeated(handler, route));
+            missing.into_iter().chain(repeated)
+        });
+        let blocks = self.dangling_anchors().map(RegionError::BlockNotLive);
+        parents.chain(cleanups).chain(blocks)
     }
 
     /// Make `tail`, the second half of a split `head`, belong wherever `head`

@@ -53,6 +53,7 @@ pub fn parse_cfg_text<I>(
         entry: None,
         context: Context::Nothing,
         pending: None,
+        parents: Vec::new(),
     };
     reader.read(text, &parse_instruction)?;
     reader.finish()
@@ -74,6 +75,9 @@ struct Reader<I> {
     context: Context,
     /// The region being read, with the line that opened it.
     pending: Option<(Region, usize)>,
+    /// Every parent a region named, with the line of that region: a parent
+    /// may be a region written later, so they are checked once all are read.
+    parents: Vec<(RegionId, usize)>,
 }
 
 impl<I> Reader<I> {
@@ -100,7 +104,7 @@ impl<I> Reader<I> {
                 continue;
             }
 
-            self.flush_region()?;
+            self.flush_region();
             if let Some(rest) = trimmed.strip_prefix("entry ") {
                 self.entry = Some(parse_index(rest.trim(), "bb", line)?);
                 self.context = Context::Nothing;
@@ -110,7 +114,7 @@ impl<I> Reader<I> {
                 self.read_block_or_edge(trimmed, line)?;
             }
         }
-        self.flush_region()?;
+        self.flush_region();
         Ok(())
     }
 
@@ -239,15 +243,15 @@ impl<I> Reader<I> {
         Ok(())
     }
 
-    /// Register the region read last. Its references were read as live
-    /// blocks, so only a parent that names no earlier region is refused.
-    fn flush_region(&mut self) -> Result<(), TextError> {
+    /// Register the region read last. Every block it names was read as a
+    /// live block; its parent is checked in [`finish`](Self::finish).
+    fn flush_region(&mut self) {
         if let Some((region, line)) = self.pending.take() {
-            self.cfg
-                .add_region(region)
-                .map_err(|_| TextError::new(line, TextErrorKind::Region))?;
+            if let Some(parent) = region.parent {
+                self.parents.push((parent, line));
+            }
+            self.cfg.regions.push(region);
         }
-        Ok(())
     }
 
     fn live_block(&self, index: usize, line: usize) -> Result<BlockId, TextError> {
@@ -259,6 +263,13 @@ impl<I> Reader<I> {
         let entry = self.entry.unwrap_or(0);
         let block = self.live_block(entry, 0)?;
         self.cfg.set_entry(block);
+        if let Some(&(_, line)) = self
+            .parents
+            .iter()
+            .find(|&&(parent, _)| !self.cfg.contains_region(parent))
+        {
+            return Err(TextError::new(line, TextErrorKind::Region));
+        }
         for index in self.slots.holes() {
             self.cfg.remove_block(BlockId::from_index(index));
         }

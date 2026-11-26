@@ -51,9 +51,9 @@ pub trait SemanticValidator<I, E> {
 /// 5. The exception metadata keeps the invariants of [`Cfg::check_regions`]:
 ///    in particular every block it names by a single reference (a handler
 ///    entry, a filter block, a cleanup exit block, a continuation target) is
-///    live, the references [`Cfg::compact`] panics on. The first broken one
-///    is reported. The entry cannot be removed, so it is live by
-///    construction.
+///    live, the references [`Cfg::compact`] panics on. Each broken one is a
+///    [`RegionError`](crate::RegionError) message. The entry cannot be
+///    removed, so it is live by construction.
 ///
 /// Returns a [`VerifyReport`] containing all violations found.
 ///
@@ -72,11 +72,11 @@ pub trait SemanticValidator<I, E> {
 #[must_use]
 pub fn verify<I, E>(cfg: &Cfg<I, E>) -> VerifyReport {
     let mut report = verify_edge_view(cfg);
-    if let Err(error) = cfg.check_regions() {
-        report.errors.push(VerifyError {
+    report
+        .errors
+        .extend(cfg.region_errors().map(|error| VerifyError {
             message: alloc::string::ToString::to_string(&error),
-        });
-    }
+        }));
     report
 }
 

@@ -392,6 +392,33 @@ fn cleanups_are_per_handler_and_go_with_their_region() {
 }
 
 #[test]
+fn verify_reports_every_broken_region_reference_and_check_regions_the_first() {
+    use alloc::string::{String, ToString};
+
+    let (mut cfg, region, [pad, cleanup, _, _]) = try_catch_finally();
+    let missing = RegionId::from_raw(7);
+    cfg.remove_block(pad);
+    cfg.remove_block(cleanup);
+    cfg.region_mut(region).parent = Some(missing);
+
+    let expected = [
+        RegionError::ParentMissing(missing),
+        RegionError::BlockNotLive(pad),
+        RegionError::BlockNotLive(cleanup),
+    ];
+    assert_eq!(cfg.check_regions(), Err(expected[0]));
+    let messages: Vec<String> = crate::verify(&cfg)
+        .errors
+        .into_iter()
+        .map(|error| error.message)
+        .collect();
+    assert!(
+        messages.ends_with(&expected.map(|error| error.to_string())),
+        "{messages:?}"
+    );
+}
+
+#[test]
 fn regions_need_no_optional_cleanup_or_handler_metadata() {
     // The core region remains usable without cleanup continuations or
     // consumer-owned side metadata.
