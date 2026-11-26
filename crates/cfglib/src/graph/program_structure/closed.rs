@@ -80,9 +80,15 @@ impl<N: DenseId> ClosedGraph<N> {
 
         let mut source = vec![NO_INDEX; slots];
         let mut target = vec![NO_INDEX; slots];
+        // The slots in the order the incident lists take them: the edges of
+        // each reachable block in adjacency order, block by block, then the
+        // virtual slots. Recording them while linking lets the counting sort
+        // below read an array twice instead of walking the graph twice more.
+        let mut placed = Vec::with_capacity(slots);
         let mut link = |edge: usize, from: usize, to: usize| {
             source[edge] = word(from);
             target[edge] = word(to);
+            placed.push(word(edge));
         };
         for block in (0..bound).filter(|&block| reachable[block]) {
             for edge in graph.outgoing(N::from_index(block)) {
@@ -94,22 +100,16 @@ impl<N: DenseId> ClosedGraph<N> {
             link(edge_bound + 1 + offset, outlet.index(), bound);
         }
 
-        // The outgoing part fills in adjacency order, block by block; every
+        // The outgoing part of each list fills in adjacency order; every
         // incoming part fills in the same pass, in the order its sources come.
-        let placed = || {
-            (0..bound)
-                .filter(|&block| reachable[block])
-                .flat_map(|block| graph.outgoing(N::from_index(block)).map(DenseId::index))
-                .chain(edge_bound..slots)
-        };
         let mut runs = Vec::new();
         let mut incident = Vec::new();
         DenseFanout::group_into(
             2 * (bound + 1),
             || {
-                placed().flat_map(|edge| {
-                    let (from, to) = (slot(source[edge]), slot(target[edge]));
-                    [(2 * from, word(edge)), (2 * to + 1, word(edge))]
+                placed.iter().flat_map(|&edge| {
+                    let (from, to) = (slot(source[slot(edge)]), slot(target[slot(edge)]));
+                    [(2 * from, edge), (2 * to + 1, edge)]
                 })
             },
             &mut runs,
