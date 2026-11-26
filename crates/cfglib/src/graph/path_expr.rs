@@ -243,6 +243,10 @@ impl<N: DenseId, E> PathExpressions<N, E> {
 /// See the [module docs](self) for the algorithm and its cost. A node the
 /// root does not reach, and a removed node slot, have no expression.
 ///
+/// # Panics
+///
+/// Panics when the node bound of `graph` exceeds `u32::MAX`.
+///
 /// # Examples
 ///
 /// ```

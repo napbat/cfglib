@@ -214,7 +214,8 @@ pub fn min_vertex_cut<G: GraphView>(
 ///
 /// # Panics
 ///
-/// Panics when a source or a sink is not below the node bound of the view.
+/// Panics when a source or a sink is not below the node bound of the view, or
+/// when that bound exceeds `u32::MAX`.
 ///
 /// # Examples
 ///

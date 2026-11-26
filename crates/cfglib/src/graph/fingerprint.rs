@@ -244,6 +244,10 @@ pub fn multiset_fingerprint(colors: impl IntoIterator<Item = u64>) -> u64 {
 /// `edge_key` is called once per live edge. The walk takes O(n + m log d)
 /// time for `n` nodes, `m` edges and maximum out-degree `d`.
 ///
+/// # Panics
+///
+/// Panics when the node bound of `graph` exceeds `u32::MAX`.
+///
 /// # Examples
 ///
 /// ```
@@ -327,6 +331,10 @@ fn preorder<G: RootedView + EdgeView>(graph: &G, keys: &[u64]) -> (Vec<G::NodeId
 /// edge. The hash takes O(n + m log d) time for `n` nodes, `m` edges and
 /// maximum degree `d`, and three rounds of [`wl_colors`] more when the root
 /// does not reach every node.
+///
+/// # Panics
+///
+/// Panics when the node bound of `graph` exceeds `u32::MAX`.
 ///
 /// # Examples
 ///

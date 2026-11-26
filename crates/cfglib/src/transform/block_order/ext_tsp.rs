@@ -104,7 +104,8 @@ impl Default for ExtTspConfig {
 /// # Panics
 ///
 /// Panics when `graph` yields a node at or above its
-/// [`node_bound`](crate::GraphView::node_bound).
+/// [`node_bound`](crate::GraphView::node_bound), or when that bound exceeds
+/// `u32::MAX`.
 ///
 /// # Examples
 ///
@@ -174,7 +175,8 @@ where
 /// # Panics
 ///
 /// Panics when `order` names a node at or above the graph's
-/// [`node_bound`](crate::GraphView::node_bound).
+/// [`node_bound`](crate::GraphView::node_bound), or when that bound exceeds
+/// `u32::MAX`.
 #[must_use]
 pub fn ext_tsp_score<G: EdgeView>(
     graph: &G,

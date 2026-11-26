@@ -92,6 +92,10 @@ impl FeedbackConfig {
 /// degrees change. So ties go to the smaller node id until peeling
 /// disturbs them, and the same graph always gives the same arrangement.
 ///
+/// # Panics
+///
+/// Panics when `graph` has a cycle and its node bound exceeds `u32::MAX`.
+///
 /// # Examples
 ///
 /// ```
@@ -138,6 +142,10 @@ pub fn linear_arrangement<G: GraphView>(graph: &G) -> Vec<G::NodeId> {
 /// `O(n + m)` for `n` slots and `m` edges. With `minimal`, add
 /// `O(f · (n_c + m_c))` for each component of `n_c` nodes and `m_c` edges
 /// whose set has `f` edges.
+///
+/// # Panics
+///
+/// Panics when `graph` has a cycle and its node bound exceeds `u32::MAX`.
 ///
 /// # Examples
 ///

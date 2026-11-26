@@ -251,6 +251,11 @@ impl<N: DenseId, E: DenseId> BlockFrequencies<N, E> {
     /// `loops` must be the loop forest of `graph`. `probability` states the
     /// branch probability of an edge relative to the other edges that leave its
     /// source, or `None` when the caller has none.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the node bound of `graph` plus the number of loops exceeds
+    /// `u32::MAX`.
     #[must_use]
     pub fn compute<G>(
         graph: &G,
