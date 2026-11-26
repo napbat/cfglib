@@ -2,8 +2,9 @@
 //! random partial estimates.
 
 use super::*;
+use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::edge::EdgeKind;
+use crate::edge::{EdgeId, EdgeKind};
 use crate::test_util::rng::Rng;
 
 const EVEN: InferenceCosts = InferenceCosts {
@@ -46,8 +47,8 @@ impl Profile {
         )
     }
 
-    fn infer(&self, costs: &InferenceCosts) -> InferredCounts {
-        InferredCounts::compute(
+    fn infer(&self, costs: &InferenceCosts) -> BlockFrequencies {
+        BlockFrequencies::infer(
             &self.cfg,
             |block| self.exit[block.index()],
             |block| self.block[block.index()],
@@ -59,7 +60,7 @@ impl Profile {
     }
 }
 
-fn blocks(counts: &InferredCounts, count: usize) -> Vec<u64> {
+fn blocks(counts: &BlockFrequencies, count: usize) -> Vec<u64> {
     (0..count)
         .map(|block| counts.block(BlockId::from_index(block)))
         .collect()
@@ -151,7 +152,7 @@ fn an_estimate_beyond_the_network_range_is_an_overflow() {
     let mut profile = Profile::new(2);
     profile.edge(0, 1, None);
     profile.exit[1] = true;
-    let result = InferredCounts::compute(
+    let result = BlockFrequencies::infer(
         &profile.cfg,
         |block| profile.exit[block.index()],
         |_| Some(u64::MAX),
@@ -160,17 +161,6 @@ fn an_estimate_beyond_the_network_range_is_an_overflow() {
         &EVEN,
     );
     assert_eq!(result, Err(FlowError::Overflow));
-}
-
-#[test]
-#[should_panic(expected = "an inference cost is negative")]
-fn a_negative_cost_is_rejected() {
-    let mut profile = Profile::new(2);
-    profile.edge(0, 1, None);
-    profile.infer(&InferenceCosts {
-        increase: 1,
-        decrease: -1,
-    });
 }
 
 /// A random CFG of `count` blocks: each has up to two successors, the entry
@@ -258,8 +248,8 @@ fn random_partial_estimates_give_counts_that_conserve_flow() {
                 .then(|| u64::try_from(rng.below(100)).expect("small"));
         }
         let costs = InferenceCosts {
-            increase: i64::try_from(rng.below(5)).expect("small"),
-            decrease: i64::try_from(rng.below(5)).expect("small"),
+            increase: u32::try_from(rng.below(5)).expect("small"),
+            decrease: u32::try_from(rng.below(5)).expect("small"),
         };
         let counts = profile.infer(&costs);
         running += usize::from(profile.cfg.block_ids().any(|block| counts.block(block) > 0));

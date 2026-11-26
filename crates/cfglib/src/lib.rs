@@ -276,7 +276,7 @@ pub use dataflow::slot_fixpoint::{
 };
 pub use dataflow::stream::{SolveStats, stream_edge_problem, stream_node_problem, stream_problem};
 pub use display::{DisplayInstr, IndentedWriter};
-pub use edge::{Edge, EdgeId, EdgeKind, EdgeTag, KindedEdge};
+pub use edge::{Edge, EdgeId, EdgeKind, EdgeTag, KindedEdge, Probability};
 pub use effects::{
     Access, AccessShape, Address, CaptureBuilder, Captured, CapturedValue, DialectEffects, Effect,
     Exit, Expr, ExprId, Exprs, Opaque, RaiseOrigin, Raised, RtlEffect, SelectShape, StateTouch,
@@ -327,7 +327,7 @@ pub use graph::epoch::EpochMarks;
 pub use graph::fanout::{DenseFanout, Fanout, SortedMap};
 pub use graph::feedback::{FeedbackConfig, feedback_arc_set, linear_arrangement};
 pub use graph::fingerprint::{canonical_hash, canonical_order, multiset_fingerprint, wl_colors};
-pub use graph::frequency::{BlockFrequencies, FREQUENCY_SHIFT, FrequencyConfig, Probability};
+pub use graph::frequency::{BlockFrequencies, FREQUENCY_SHIFT, FrequencyConfig};
 pub use graph::horn::{HornClauses, HornSaturation};
 pub use graph::interval::{Interval, IntervalAnalysis};
 pub use graph::keyed::KeyedGraph;
@@ -345,7 +345,7 @@ pub use graph::path_expr::{
     GenKill, GenKillAlgebra, PathAlgebra, PathExprArena, PathExprId, PathExprNode, PathExpressions,
     interpret, path_expressions,
 };
-pub use graph::profile_inference::{InferenceCosts, InferredCounts};
+pub use graph::profile_inference::InferenceCosts;
 pub use graph::program_structure::{
     CycleEquivalence, ProgramStructureTree, SeseEdge, SeseRegionId,
 };

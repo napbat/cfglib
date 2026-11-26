@@ -10,6 +10,11 @@ use crate::harness::benchmark_case;
 /// blocks.
 const GROUP_BLOCKS: usize = 42;
 
+/// The edge weight `value`, which lies in `0.0..=1.0`.
+fn probability(value: f64) -> Probability {
+    Probability::from_f64(value).expect("a bench weight lies in 0.0..=1.0")
+}
+
 /// About `block_count` blocks in groups of loops. Each loop is a header that
 /// branches 60/40 into a diamond whose join returns to the header nine times
 /// in ten; each group of eight loops sits in an outer loop that returns half
@@ -24,20 +29,25 @@ pub(super) fn looped_cfg(block_count: usize) -> Cfg<u32> {
         for _ in 0..8 {
             let [header, left, right, join] = [(); 4].map(|()| cfg.new_block());
             cfg.add_edge(previous, header, EdgeKind::Fallthrough);
-            cfg.add_weighted_edge(header, left, EdgeKind::ConditionalTrue, 0.6);
-            cfg.add_weighted_edge(header, right, EdgeKind::ConditionalFalse, 0.4);
+            cfg.add_weighted_edge(header, left, EdgeKind::ConditionalTrue, probability(0.6));
+            cfg.add_weighted_edge(header, right, EdgeKind::ConditionalFalse, probability(0.4));
             cfg.add_edge(left, join, EdgeKind::Fallthrough);
             cfg.add_edge(right, join, EdgeKind::Fallthrough);
-            cfg.add_weighted_edge(join, header, EdgeKind::Back, 0.9);
+            cfg.add_weighted_edge(join, header, EdgeKind::Back, probability(0.9));
             let next = cfg.new_block();
-            cfg.add_weighted_edge(join, next, EdgeKind::ConditionalFalse, 0.1);
+            cfg.add_weighted_edge(join, next, EdgeKind::ConditionalFalse, probability(0.1));
             previous = next;
         }
         let latch = cfg.new_block();
         cfg.add_edge(previous, latch, EdgeKind::Fallthrough);
-        cfg.add_weighted_edge(latch, outer, EdgeKind::Back, 0.5);
+        cfg.add_weighted_edge(latch, outer, EdgeKind::Back, probability(0.5));
         previous = cfg.new_block();
-        cfg.add_weighted_edge(latch, previous, EdgeKind::ConditionalFalse, 0.5);
+        cfg.add_weighted_edge(
+            latch,
+            previous,
+            EdgeKind::ConditionalFalse,
+            probability(0.5),
+        );
     }
     cfg
 }
@@ -56,8 +66,8 @@ macro_rules! block_frequencies_case {
             || BlockFrequencies::compute(
                 &cfg,
                 &loops,
-                |edge| cfg.edge(edge).weight().and_then(Probability::from_f64),
-                FrequencyConfig::new(),
+                |edge| cfg.edge(edge).weight(),
+                FrequencyConfig::default(),
             ),
             |frequencies: &BlockFrequencies| {
                 let once = 1_u64 << FREQUENCY_SHIFT;

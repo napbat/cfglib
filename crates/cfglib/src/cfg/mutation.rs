@@ -6,7 +6,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::block::{BasicBlock, BlockId};
-use crate::edge::{Edge, EdgeId, EdgeKind};
+use crate::edge::{Edge, EdgeId, EdgeKind, Probability};
 use crate::graph::view::Direction;
 use crate::rewrite::Rewrite;
 
@@ -83,13 +83,14 @@ impl<I, E> Cfg<I, E> {
         self.add_edge_with_payload(source, target, kind, E::default())
     }
 
-    /// Add a weighted directed edge with the default consumer payload.
+    /// Add a directed edge with a branch probability and the default
+    /// consumer payload.
     pub fn add_weighted_edge(
         &mut self,
         source: BlockId,
         target: BlockId,
         kind: EdgeKind,
-        weight: f64,
+        weight: Probability,
     ) -> EdgeId
     where
         E: Default,
@@ -109,13 +110,13 @@ impl<I, E> Cfg<I, E> {
             .add_edge(source, target, Edge::new(kind, None, payload))
     }
 
-    /// Add a directed edge with a branch weight and consumer metadata.
+    /// Add a directed edge with a branch probability and consumer metadata.
     pub fn add_weighted_edge_with_payload(
         &mut self,
         source: BlockId,
         target: BlockId,
         kind: EdgeKind,
-        weight: f64,
+        weight: Probability,
         payload: E,
     ) -> EdgeId {
         self.graph

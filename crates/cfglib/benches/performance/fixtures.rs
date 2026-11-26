@@ -1,14 +1,20 @@
 use cfglib::{
     BlockId, Cfg, CfgBuilder, Direction, EdgeKind, FlowControl, FlowEffect, Graph, NodeId,
-    NodeProblem, Problem,
+    NodeProblem, Probability, Problem,
 };
 
 pub(super) fn fixture_u32(value: usize) -> u32 {
     u32::try_from(value).expect("benchmark fixture index must fit in u32")
 }
 
-pub(super) fn fixture_f64(value: usize) -> f64 {
-    f64::from(fixture_u32(value))
+/// A distinct edge weight for each fixture index: `value / 2^31`.
+pub(super) fn fixture_weight(value: usize) -> Probability {
+    Probability::from_numerator(fixture_u32(value)).expect("a fixture index is below 2^31")
+}
+
+/// The edge weight `value`, which lies in `0.0..=1.0`.
+pub(super) fn probability(value: f64) -> Probability {
+    Probability::from_f64(value).expect("a fixture weight lies in 0.0..=1.0")
 }
 
 pub(super) fn branchy_cfg(node_count: usize) -> Cfg<u32> {
@@ -132,9 +138,9 @@ pub(super) fn weighted_high_fan_out_cfg(edge_count: usize) -> (Cfg<u32>, BlockId
         } else {
             EdgeKind::ConditionalFalse
         };
-        cfg.add_weighted_edge(target, sink, kind, fixture_f64(index) + 0.25);
+        cfg.add_weighted_edge(target, sink, kind, fixture_weight(index));
     }
-    cfg.add_weighted_edge(target, source, EdgeKind::Back, 0.875);
+    cfg.add_weighted_edge(target, source, EdgeKind::Back, probability(0.875));
     (cfg, source, target)
 }
 
@@ -167,10 +173,15 @@ pub(super) fn weighted_irreducible_cfg() -> Cfg<u32> {
     }
 
     cfg.add_edge(entry, first, EdgeKind::ConditionalTrue);
-    cfg.add_weighted_edge(entry, second, EdgeKind::ConditionalFalse, 0.125);
+    cfg.add_weighted_edge(
+        entry,
+        second,
+        EdgeKind::ConditionalFalse,
+        probability(0.125),
+    );
     cfg.add_edge(first, second, EdgeKind::Fallthrough);
-    cfg.add_weighted_edge(second, first, EdgeKind::Back, 0.75);
-    cfg.add_weighted_edge(second, exit, EdgeKind::SwitchCase, 0.25);
+    cfg.add_weighted_edge(second, first, EdgeKind::Back, probability(0.75));
+    cfg.add_weighted_edge(second, exit, EdgeKind::SwitchCase, probability(0.25));
     cfg
 }
 

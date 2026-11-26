@@ -3,6 +3,9 @@
 use crate::graph::edge_view::EdgeRef;
 
 pub use crate::graph::store::{EdgeId, EdgeTag};
+pub use probability::Probability;
+
+mod probability;
 
 /// Declares [`EdgeKind`] with its canonical names, so the variants, the list
 /// of every kind, and the name of each are written once.
@@ -157,8 +160,8 @@ impl core::fmt::Display for EdgeKind {
     }
 }
 
-/// A directed edge's payload: its classification, optional branch weight, and
-/// consumer-defined metadata.
+/// A directed edge's payload: its classification, optional branch
+/// probability, and consumer-defined metadata.
 ///
 /// Identity and endpoints belong to the store, not to the payload;
 /// [`Cfg::edge`](crate::Cfg::edge) hands out an [`EdgeRef`] that carries all
@@ -167,34 +170,24 @@ impl core::fmt::Display for EdgeKind {
 /// `E` is consumer-owned metadata. The default unit payload preserves the
 /// compact `Cfg<I>` surface, while frontends that need switch labels, handler
 /// identities, continuation tokens, or source provenance use `Cfg<I, E>`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Edge<E = ()> {
     /// Classification.
     pub(crate) kind: EdgeKind,
-    /// Optional branch probability (0.0–1.0).
+    /// Optional branch probability.
     ///
     /// When set, this is the likelihood of this edge being taken relative to
     /// the other outgoing edges of the same source block.
     /// DOT output uses it for visual emphasis.
-    pub(crate) weight: Option<f64>,
+    pub(crate) weight: Option<Probability>,
     /// Consumer-defined metadata.
     pub(crate) payload: E,
 }
 
-impl<E: PartialEq> PartialEq for Edge<E> {
-    fn eq(&self, other: &Self) -> bool {
-        self.kind == other.kind
-            && self.weight.map(f64::to_bits) == other.weight.map(f64::to_bits)
-            && self.payload == other.payload
-    }
-}
-
-impl<E: Eq> Eq for Edge<E> {}
-
 impl<E> Edge<E> {
     /// Create an edge payload.
-    pub(crate) const fn new(kind: EdgeKind, weight: Option<f64>, payload: E) -> Self {
+    pub(crate) const fn new(kind: EdgeKind, weight: Option<Probability>, payload: E) -> Self {
         Self {
             kind,
             weight,
@@ -215,16 +208,16 @@ impl<E> Edge<E> {
         self.kind = kind;
     }
 
-    /// The branch weight / probability, if set.
+    /// The branch probability, if set.
     #[inline]
     #[must_use]
-    pub const fn weight(&self) -> Option<f64> {
+    pub const fn weight(&self) -> Option<Probability> {
         self.weight
     }
 
-    /// Set the branch weight / probability.
+    /// Set the branch probability.
     #[inline]
-    pub const fn set_weight(&mut self, weight: Option<f64>) {
+    pub const fn set_weight(&mut self, weight: Option<Probability>) {
         self.weight = weight;
     }
 
@@ -268,10 +261,10 @@ impl<'g, N: Copy, I: Copy, E> EdgeRef<'g, N, I, Edge<E>> {
         self.data().kind
     }
 
-    /// The branch weight / probability, if set.
+    /// The branch probability, if set.
     #[inline]
     #[must_use]
-    pub const fn weight(&self) -> Option<f64> {
+    pub const fn weight(&self) -> Option<Probability> {
         self.data().weight
     }
 

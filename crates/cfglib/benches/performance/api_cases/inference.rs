@@ -1,6 +1,6 @@
 use cfglib::{
     BlockFrequencies, Cfg, DominatorTree, FREQUENCY_SHIFT, FlowError, FrequencyConfig,
-    InferenceCosts, InferredCounts, LoopForest, Probability,
+    InferenceCosts, LoopForest,
 };
 
 use super::BenchmarkSuite;
@@ -16,8 +16,8 @@ fn samples(cfg: &Cfg<u32>) -> Vec<Option<u64>> {
     let frequencies = BlockFrequencies::compute(
         cfg,
         &loops,
-        |edge| cfg.edge(edge).weight().and_then(Probability::from_f64),
-        FrequencyConfig::new(),
+        |edge| cfg.edge(edge).weight(),
+        FrequencyConfig::default(),
     );
     cfg.block_ids()
         .map(|block| {
@@ -41,18 +41,15 @@ macro_rules! infer_counts_case {
         benchmark_case!(
             $suite,
             $name,
-            || InferredCounts::compute(
+            || BlockFrequencies::infer(
                 &cfg,
                 |block| block == exit,
                 |block| estimate[block.index()],
                 |_| None,
-                |edge| cfg.edge(edge).weight().and_then(Probability::from_f64),
-                &InferenceCosts {
-                    increase: 1,
-                    decrease: 1,
-                },
+                |edge| cfg.edge(edge).weight(),
+                &InferenceCosts::default(),
             ),
-            |counts: &Result<InferredCounts, FlowError>| {
+            |counts: &Result<BlockFrequencies, FlowError>| {
                 let counts = counts.as_ref().expect("the samples fit the network");
                 for block in cfg.block_ids() {
                     if block == cfg.entry() || block == exit {

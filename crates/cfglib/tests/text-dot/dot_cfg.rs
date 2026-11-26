@@ -5,7 +5,7 @@ use std::borrow::Cow;
 
 use cfglib::{
     BasicBlock, BlockId, Cfg, DotEdgeAttributes, DotEdgeStyle, DotStyle, Edge, EdgeId, EdgeKind,
-    FilteredEdges, control_flow_edge_attributes, to_dot,
+    FilteredEdges, Probability, control_flow_edge_attributes, to_dot,
 };
 
 use crate::dot_scanner::{Dot, Edge as DrawnEdge, scan};
@@ -74,9 +74,10 @@ fn a_hot_loop_is_drawn_with_probabilities_and_proportional_width() {
     cfg.block_mut(body).push(Line::new("i = i + 1"));
     cfg.block_mut(exit).push(Line::new("return i"));
     cfg.add_edge(cfg.entry(), header, EdgeKind::Fallthrough);
-    cfg.add_weighted_edge(header, body, EdgeKind::ConditionalTrue, 0.9);
-    cfg.add_weighted_edge(header, exit, EdgeKind::ConditionalFalse, 0.1);
-    cfg.add_weighted_edge(body, header, EdgeKind::Back, 1.0);
+    let probability = |value| Probability::from_f64(value).expect("a probability");
+    cfg.add_weighted_edge(header, body, EdgeKind::ConditionalTrue, probability(0.9));
+    cfg.add_weighted_edge(header, exit, EdgeKind::ConditionalFalse, probability(0.1));
+    cfg.add_weighted_edge(body, header, EdgeKind::Back, Probability::ONE);
 
     assert_golden("text-dot/cfg-hot-loop.dot", &cfg.to_dot());
 }
@@ -302,6 +303,7 @@ fn a_weighted_edge_names_its_probability_and_the_likelier_it_is_the_thicker() {
         let mut cfg = Cfg::<Line>::new();
         let next = cfg.new_block();
         for weight in weights {
+            let weight = Probability::from_f64(weight).expect("a probability");
             cfg.add_weighted_edge(cfg.entry(), next, kind, weight);
         }
 
@@ -310,8 +312,10 @@ fn a_weighted_edge_names_its_probability_and_the_likelier_it_is_the_thicker() {
             .zip(weights)
             .map(|(edge, weight)| {
                 let attributes = control_flow_edge_attributes(edge.id(), edge.data());
+                // The label names the shortest decimal of the weight: `0`,
+                // `0.25`, `0.5`, `0.75`, `1`, as `f64` displays them too.
                 assert!(
-                    attributes.label.contains(&format!("{weight:.2}")),
+                    attributes.label.contains(&format!("({weight})")),
                     "{kind}: {:?} should name {weight}",
                     attributes.label
                 );

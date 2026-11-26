@@ -71,7 +71,7 @@ use super::fanout::DenseFanout;
 use super::loop_forest::{LoopForest, LoopId};
 use super::view::{DenseId, RootedView};
 use crate::block::BlockId;
-use crate::edge::EdgeId;
+use crate::edge::{EdgeId, Probability};
 use crate::identity::{NO_INDEX, check_bound, slot, word};
 use crate::union_find::DisjointSet;
 
@@ -85,121 +85,36 @@ const MASS_SHIFT: u32 = 62;
 /// A whole iteration: the mass that starts at a header.
 const ONE: u64 = 1 << MASS_SHIFT;
 
-/// A branch probability in fixed point: `numerator / 2^31`.
-///
-/// # Examples
-///
-/// ```
-/// use cfglib::Probability;
-///
-/// let half = Probability::from_f64(0.5).expect("0.5 is a probability");
-/// assert_eq!(half.numerator(), Probability::DENOMINATOR / 2);
-/// assert_eq!(Probability::from_f64(1.5), None);
-/// assert_eq!(Probability::from_f64(f64::NAN), None);
-/// ```
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct Probability(u32);
-
-impl Probability {
-    /// The denominator of every probability, `2^31`.
-    pub const DENOMINATOR: u32 = 1 << 31;
-
-    /// The probability of an edge that is never taken.
-    pub const ZERO: Self = Self(0);
-
-    /// The probability of an edge that is always taken.
-    pub const ONE: Self = Self(Self::DENOMINATOR);
-
-    /// The probability `numerator / 2^31`, or `None` when `numerator` is
-    /// above [`DENOMINATOR`](Self::DENOMINATOR).
-    #[must_use]
-    pub const fn from_numerator(numerator: u32) -> Option<Self> {
-        if numerator <= Self::DENOMINATOR {
-            Some(Self(numerator))
-        } else {
-            None
-        }
-    }
-
-    /// Round `probability` to the nearest fixed-point probability, ties
-    /// upward, or `None` when it is NaN or outside `0.0..=1.0`.
-    #[must_use]
-    pub fn from_f64(probability: f64) -> Option<Self> {
-        if !(0.0..=1.0).contains(&probability) {
-            return None;
-        }
-        // Scaling by a power of two is exact, and so is the fraction of a
-        // value below 2^52, so the rounding is exact too.
-        let scaled = probability * f64::from(Self::DENOMINATOR);
-        let floor = truncate(scaled);
-        let round_up = scaled - f64::from(floor) >= 0.5;
-        Some(Self(floor + u32::from(round_up)))
-    }
-
-    /// The numerator over [`DENOMINATOR`](Self::DENOMINATOR).
-    #[must_use]
-    pub const fn numerator(self) -> u32 {
-        self.0
-    }
-}
-
-/// The integer part of a value in `0.0..=2^31`.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "the value is a scaled probability in 0.0..=2^31, whose integer part fits u32"
-)]
-fn truncate(scaled: f64) -> u32 {
-    scaled as u32
-}
-
-/// The limits of a [`BlockFrequencies`] computation.
+/// The limits of a [`BlockFrequencies::compute`] run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrequencyConfig {
-    max_loop_scale: u32,
-}
-
-impl FrequencyConfig {
-    /// The default cap on the scale of one loop: 4096 iterations for each
-    /// entry.
-    pub const DEFAULT_MAX_LOOP_SCALE: u32 = 4096;
-
-    /// The default limits.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            max_loop_scale: Self::DEFAULT_MAX_LOOP_SCALE,
-        }
-    }
-
-    /// Cap the scale of one loop at `scale` iterations for each entry. A scale
-    /// below `1` counts as `1`.
-    #[must_use]
-    pub const fn with_max_loop_scale(self, scale: u32) -> Self {
-        Self {
-            max_loop_scale: if scale == 0 { 1 } else { scale },
-        }
-    }
-
-    /// The cap on the scale of one loop.
-    #[must_use]
-    pub const fn max_loop_scale(self) -> u32 {
-        self.max_loop_scale
-    }
+    /// The cap on the scale of one loop, in iterations for each entry. A
+    /// scale below `1` counts as `1`.
+    pub max_loop_scale: u32,
 }
 
 impl Default for FrequencyConfig {
+    /// A loop runs at most 4096 times for each entry.
     fn default() -> Self {
-        Self::new()
+        Self {
+            max_loop_scale: 4096,
+        }
     }
 }
 
-/// Fixed-point execution frequencies of the blocks and edges of a rooted
-/// graph, relative to one execution of its entry.
+/// Execution counts of the blocks and edges of a rooted graph.
 ///
-/// See the [module documentation](self) for the algorithm, the treatment of
-/// missing probabilities, and where the result is an approximation. The
-/// frequencies hold no instruction data and do not borrow the graph.
+/// Two analyses produce it, and its unit is the one of the constructor:
+///
+/// - [`compute`](Self::compute) estimates them statically from branch
+///   probabilities, in fixed point with [`FREQUENCY_SHIFT`] fractional bits,
+///   relative to one execution of the root. See the
+///   [module documentation](self) for the algorithm, the treatment of
+///   missing probabilities, and where the result is an approximation.
+/// - [`infer`](Self::infer) infers whole counts that conserve flow from
+///   measured estimates; see [`profile_inference`](super::profile_inference).
+///
+/// The counts hold no instruction data and do not borrow the graph.
 ///
 /// # Examples
 ///
@@ -210,13 +125,15 @@ impl Default for FrequencyConfig {
 /// };
 ///
 /// // entry -> header; header -> body (7/8) or exit (1/8); body -> header.
+/// let probability = |value| Probability::from_f64(value).expect("a probability");
 /// let mut cfg = Cfg::<u32>::new();
 /// let header = cfg.new_block();
 /// let body = cfg.new_block();
 /// let exit = cfg.new_block();
 /// cfg.add_edge(cfg.entry(), header, EdgeKind::Fallthrough);
-/// cfg.add_weighted_edge(header, body, EdgeKind::ConditionalTrue, 0.875);
-/// let leave = cfg.add_weighted_edge(header, exit, EdgeKind::ConditionalFalse, 0.125);
+/// cfg.add_weighted_edge(header, body, EdgeKind::ConditionalTrue, probability(0.875));
+/// let leave =
+///     cfg.add_weighted_edge(header, exit, EdgeKind::ConditionalFalse, probability(0.125));
 /// cfg.add_edge(body, header, EdgeKind::Back);
 ///
 /// let dominators = DominatorTree::compute(&cfg);
@@ -224,8 +141,8 @@ impl Default for FrequencyConfig {
 /// let frequencies = BlockFrequencies::compute(
 ///     &cfg,
 ///     &loops,
-///     |edge| cfg.edge(edge).weight().and_then(Probability::from_f64),
-///     FrequencyConfig::new(),
+///     |edge| cfg.edge(edge).weight(),
+///     FrequencyConfig::default(),
 /// );
 ///
 /// let once = 1 << FREQUENCY_SHIFT;
@@ -237,20 +154,21 @@ impl Default for FrequencyConfig {
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockFrequencies<N = BlockId, E = EdgeId> {
-    /// The frequency of each node slot.
+    /// The count of each node slot.
     block: Vec<u64>,
-    /// The frequency of each edge slot.
+    /// The count of each edge slot.
     edge: Vec<u64>,
     ids: PhantomData<(N, E)>,
 }
 
 impl<N: DenseId, E: DenseId> BlockFrequencies<N, E> {
     /// Estimate how often each block and edge of `graph` runs for one
-    /// execution of its root.
+    /// execution of its root, with [`FREQUENCY_SHIFT`] fractional bits.
     ///
     /// `loops` must be the loop forest of `graph`. `probability` states the
     /// branch probability of an edge relative to the other edges that leave its
-    /// source, or `None` when the caller has none.
+    /// source, or `None` when the caller has none; over a CFG it is
+    /// `|edge| cfg.edge(edge).weight()`.
     ///
     /// # Panics
     ///
@@ -270,7 +188,13 @@ impl<N: DenseId, E: DenseId> BlockFrequencies<N, E> {
         let mut propagation = Propagation::new(graph, loops);
         let order = propagation.innermost_first(loops);
         for &x in &order {
-            propagation.propagate_loop(graph, &branch, x, loops.header(x), config.max_loop_scale);
+            propagation.propagate_loop(
+                graph,
+                &branch,
+                x,
+                loops.header(x),
+                config.max_loop_scale.max(1),
+            );
         }
         propagation.propagate_level(graph, &branch, propagation.top, graph.root());
         let block = propagation.frequencies(&order);
@@ -288,6 +212,11 @@ impl<N: DenseId, E: DenseId> BlockFrequencies<N, E> {
                 ));
             }
         }
+        Self::from_tables(block, edge)
+    }
+
+    /// The counts of every node slot and every edge slot.
+    pub(super) const fn from_tables(block: Vec<u64>, edge: Vec<u64>) -> Self {
         Self {
             block,
             edge,
@@ -295,23 +224,23 @@ impl<N: DenseId, E: DenseId> BlockFrequencies<N, E> {
         }
     }
 
-    /// How often `node` runs, with [`FREQUENCY_SHIFT`] fractional bits.
+    /// How often `node` runs, in the unit of the constructor.
     ///
-    /// The root runs `1 << FREQUENCY_SHIFT` times, or that times the scale of
-    /// the loop it heads. A node that the root does not reach runs `0` times,
-    /// and so does a node at or above the node bound of the graph at compute
-    /// time.
+    /// From [`compute`](Self::compute), the root runs `1 << FREQUENCY_SHIFT`
+    /// times, or that times the scale of the loop it heads, and a node that
+    /// the root does not reach runs `0` times. A node at or above the node
+    /// bound of the graph at compute time runs `0` times.
     #[must_use]
     pub fn block(&self, node: N) -> u64 {
         self.block.get(node.index()).copied().unwrap_or(0)
     }
 
-    /// How often `edge` is taken, with [`FREQUENCY_SHIFT`] fractional bits: the
-    /// frequency of its source times its probability.
+    /// How often `edge` is taken, in the unit of the constructor.
     ///
-    /// An edge from a node that the root does not reach is taken `0` times,
-    /// and so is an edge at or above the edge bound of the graph at compute
-    /// time.
+    /// From [`compute`](Self::compute), it is the frequency of its source
+    /// times its probability, and an edge from a node that the root does not
+    /// reach is taken `0` times. An edge at or above the edge bound of the
+    /// graph at compute time is taken `0` times.
     #[must_use]
     pub fn edge(&self, edge: E) -> u64 {
         self.edge.get(edge.index()).copied().unwrap_or(0)
@@ -327,11 +256,12 @@ fn branch_probabilities<G: EdgeView>(
     let mut stated = Vec::new();
     for node in graph.node_ids() {
         stated.clear();
-        stated.extend(
-            graph
-                .outgoing(node)
-                .map(|edge| (edge.index(), probability(edge).map(|p| u64::from(p.0)))),
-        );
+        stated.extend(graph.outgoing(node).map(|edge| {
+            (
+                edge.index(),
+                probability(edge).map(|p| u64::from(p.numerator())),
+            )
+        }));
         let given: u64 = stated.iter().filter_map(|&(_, p)| p).sum();
         let missing = count(stated.iter().filter(|(_, p)| p.is_none()).count());
         let remainder = u64::from(Probability::DENOMINATOR).saturating_sub(given);

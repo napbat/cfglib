@@ -3,7 +3,7 @@ extern crate std;
 use super::*;
 use crate::edge::EdgeKind;
 use crate::graph::store::NodeOrder;
-use crate::test_util::MockInst;
+use crate::test_util::{MockInst, probability};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -12,8 +12,8 @@ fn edge_weight_roundtrip() {
     let mut cfg = Cfg::<MockInst>::new();
     let b0 = cfg.entry();
     let b1 = cfg.new_block();
-    let eid = cfg.add_weighted_edge(b0, b1, EdgeKind::ConditionalTrue, 0.75);
-    assert_eq!(cfg.edge(eid).weight(), Some(0.75));
+    let eid = cfg.add_weighted_edge(b0, b1, EdgeKind::ConditionalTrue, probability(0.75));
+    assert_eq!(cfg.edge(eid).weight(), Some(probability(0.75)));
     // Default edge should have no weight.
     let eid2 = cfg.add_edge(b0, b1, EdgeKind::Fallthrough);
     assert_eq!(cfg.edge(eid2).weight(), None);
@@ -78,7 +78,8 @@ fn split_block_preserves_outgoing_edge_identity_and_metadata() {
     let source = cfg.entry();
     let sink = cfg.new_block();
     cfg.block_mut(source).instructions_mut().extend([1, 2]);
-    let outgoing = cfg.add_weighted_edge(source, sink, EdgeKind::ConditionalTrue, 0.75);
+    let outgoing =
+        cfg.add_weighted_edge(source, sink, EdgeKind::ConditionalTrue, probability(0.75));
 
     let split = cfg.split_block(source, 1);
     let [fallthrough] = cfg.outgoing(source).collect::<Vec<_>>()[..] else {
@@ -89,7 +90,7 @@ fn split_block_preserves_outgoing_edge_identity_and_metadata() {
     assert_eq!(cfg.edge(outgoing).source(), split);
     assert_eq!(cfg.edge(outgoing).target(), sink);
     assert_eq!(cfg.edge(outgoing).kind(), EdgeKind::ConditionalTrue);
-    assert_eq!(cfg.edge(outgoing).weight(), Some(0.75));
+    assert_eq!(cfg.edge(outgoing).weight(), Some(probability(0.75)));
     assert_eq!(cfg.edge(fallthrough).source(), source);
     assert_eq!(cfg.edge(fallthrough).target(), split);
     assert_eq!(cfg.incoming(sink).collect::<Vec<_>>(), &[outgoing]);
@@ -134,7 +135,12 @@ fn redirect_edges_moves_predecessors_in_order() {
     let new_target = cfg.new_block();
     let first = cfg.add_edge(cfg.entry(), new_target, EdgeKind::Fallthrough);
     let second = cfg.add_edge(cfg.entry(), old, EdgeKind::ConditionalTrue);
-    let third = cfg.add_weighted_edge(cfg.entry(), old, EdgeKind::ConditionalFalse, 0.25);
+    let third = cfg.add_weighted_edge(
+        cfg.entry(),
+        old,
+        EdgeKind::ConditionalFalse,
+        probability(0.25),
+    );
 
     cfg.redirect_edges_to(old, new_target);
 
@@ -145,7 +151,7 @@ fn redirect_edges_moves_predecessors_in_order() {
     );
     assert_eq!(cfg.edge(second).target(), new_target);
     assert_eq!(cfg.edge(third).target(), new_target);
-    assert_eq!(cfg.edge(third).weight(), Some(0.25));
+    assert_eq!(cfg.edge(third).weight(), Some(probability(0.25)));
 }
 
 #[test]
@@ -183,10 +189,10 @@ fn move_outgoing_edges_preserves_order_identity_and_metadata() {
     let new_source = cfg.new_block();
     let sink = cfg.new_block();
     let existing = cfg.add_edge(new_source, sink, EdgeKind::Fallthrough);
-    let first = cfg.add_weighted_edge(old, sink, EdgeKind::ConditionalTrue, 0.25);
-    let second = cfg.add_weighted_edge(old, sink, EdgeKind::ConditionalFalse, 0.75);
-    let becomes_self = cfg.add_weighted_edge(old, new_source, EdgeKind::Back, 0.875);
-    let old_self = cfg.add_weighted_edge(old, old, EdgeKind::Unconditional, 0.5);
+    let first = cfg.add_weighted_edge(old, sink, EdgeKind::ConditionalTrue, probability(0.25));
+    let second = cfg.add_weighted_edge(old, sink, EdgeKind::ConditionalFalse, probability(0.75));
+    let becomes_self = cfg.add_weighted_edge(old, new_source, EdgeKind::Back, probability(0.875));
+    let old_self = cfg.add_weighted_edge(old, old, EdgeKind::Unconditional, probability(0.5));
 
     cfg.move_outgoing_edges(old, new_source);
 
@@ -198,14 +204,14 @@ fn move_outgoing_edges_preserves_order_identity_and_metadata() {
     assert_eq!(cfg.edge(first).source(), new_source);
     assert_eq!(cfg.edge(first).target(), sink);
     assert_eq!(cfg.edge(first).kind(), EdgeKind::ConditionalTrue);
-    assert_eq!(cfg.edge(first).weight(), Some(0.25));
-    assert_eq!(cfg.edge(second).weight(), Some(0.75));
+    assert_eq!(cfg.edge(first).weight(), Some(probability(0.25)));
+    assert_eq!(cfg.edge(second).weight(), Some(probability(0.75)));
     assert_eq!(cfg.edge(becomes_self).source(), new_source);
     assert_eq!(cfg.edge(becomes_self).target(), new_source);
-    assert_eq!(cfg.edge(becomes_self).weight(), Some(0.875));
+    assert_eq!(cfg.edge(becomes_self).weight(), Some(probability(0.875)));
     assert_eq!(cfg.edge(old_self).source(), new_source);
     assert_eq!(cfg.edge(old_self).target(), old);
-    assert_eq!(cfg.edge(old_self).weight(), Some(0.5));
+    assert_eq!(cfg.edge(old_self).weight(), Some(probability(0.5)));
     assert_eq!(
         cfg.incoming(sink).collect::<Vec<_>>(),
         &[existing, first, second]
