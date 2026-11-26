@@ -31,42 +31,56 @@ fn diamond() -> (Graph<(), ()>, [NodeId; 4]) {
 }
 
 fn config(order: SearchOrder) -> SearchConfig {
-    SearchConfig::new(order, Direction::Forward)
+    SearchConfig {
+        order,
+        ..SearchConfig::default()
+    }
 }
 
-/// Visit order under `config`, seeded at `seeds`, descending everywhere.
+/// `config` with path marks.
+fn path_marked(config: SearchConfig) -> SearchConfig {
+    SearchConfig {
+        visited: VisitedPolicy::Path,
+        ..config
+    }
+}
+
+/// `config` bounded to `max_depth` hops.
+fn bounded(config: SearchConfig, max_depth: usize) -> SearchConfig {
+    SearchConfig {
+        max_depth: Some(max_depth),
+        ..config
+    }
+}
+
+/// Visit order under `config` along `direction`, seeded at `seeds`,
+/// descending everywhere.
+fn visit_along<G: GraphView>(
+    graph: &G,
+    seeds: impl IntoIterator<Item = G::NodeId>,
+    direction: Direction,
+    config: SearchConfig,
+) -> Vec<(G::NodeId, usize)> {
+    let mut order = Vec::new();
+    let outcome = search(graph, seeds, direction, config, |node, depth| {
+        order.push((node, depth));
+        ControlFlow::<(), _>::Continue(Visit::Descend)
+    });
+    assert_eq!(outcome, None, "a descending search never breaks");
+    order
+}
+
+/// Visit order under `config` along the forward axis.
 fn visit_order<G: GraphView>(
     graph: &G,
     seeds: impl IntoIterator<Item = G::NodeId>,
     config: SearchConfig,
 ) -> Vec<(G::NodeId, usize)> {
-    let mut order = Vec::new();
-    let outcome = search(graph, seeds, config, |node, depth| {
-        order.push((node, depth));
-        ControlFlow::<(), _>::Continue(Visit::Descend)
-    });
-    assert_eq!(outcome, None, "a descending search never breaks");
-    order
+    visit_along(graph, seeds, Direction::Forward, config)
 }
 
 fn nodes<N: Copy>(order: &[(N, usize)]) -> Vec<N> {
     order.iter().map(|&(node, _)| node).collect()
-}
-
-/// The same, over marks the caller owns.
-fn marked_order<G: GraphView>(
-    graph: &G,
-    seeds: impl IntoIterator<Item = G::NodeId>,
-    config: SearchConfig,
-    marks: &mut EpochMarks,
-) -> Vec<(G::NodeId, usize)> {
-    let mut order = Vec::new();
-    let outcome = search_with_marks(graph, seeds, config, marks, |node, depth| {
-        order.push((node, depth));
-        ControlFlow::<(), _>::Continue(Visit::Descend)
-    });
-    assert_eq!(outcome, None, "a descending search never breaks");
-    order
 }
 
 /// The same, over a scratch the caller owns.
@@ -77,10 +91,17 @@ fn scratch_order<G: GraphView>(
     scratch: &mut SearchScratch,
 ) -> Vec<(G::NodeId, usize)> {
     let mut order = Vec::new();
-    let outcome = search_with_scratch(graph, seeds, config, scratch, |node, depth| {
-        order.push((node, depth));
-        ControlFlow::<(), _>::Continue(Visit::Descend)
-    });
+    let outcome = search_in(
+        scratch,
+        graph,
+        seeds,
+        Direction::Forward,
+        config,
+        |node, depth| {
+            order.push((node, depth));
+            ControlFlow::<(), _>::Continue(Visit::Descend)
+        },
+    );
     assert_eq!(outcome, None, "a descending search never breaks");
     order
 }
@@ -90,7 +111,7 @@ fn disciplines() -> [SearchConfig; 3] {
     [
         config(SearchOrder::DepthFirst),
         config(SearchOrder::BreadthFirst),
-        config(SearchOrder::DepthFirst).with_visited(VisitedPolicy::Path),
+        path_marked(config(SearchOrder::DepthFirst)),
     ]
 }
 
@@ -98,7 +119,7 @@ fn disciplines() -> [SearchConfig; 3] {
 fn first_match_depends_on_the_search_order() {
     let (graph, [a, b, c, d]) = fork();
     let first_leaf = |order| {
-        search(&graph, [a], config(order), |node, _| {
+        search(&graph, [a], Direction::Forward, config(order), |node, _| {
             if graph.successors(node).count() == 0 {
                 return ControlFlow::Break(node);
             }
@@ -130,11 +151,7 @@ fn path_policy_reports_every_path_to_a_shared_node() {
     );
     // Path-marked, `d` is reported once per route into it — the shape of
     // an ambiguous base or a symbol reachable through two imports.
-    let paths = visit_order(
-        &graph,
-        [a],
-        config(SearchOrder::DepthFirst).with_visited(VisitedPolicy::Path),
-    );
+    let paths = visit_order(&graph, [a], path_marked(config(SearchOrder::DepthFirst)));
     assert_eq!(nodes(&paths), vec![a, b, d, c, d]);
     assert_eq!(paths[2], (d, 2));
     assert_eq!(paths[4], (d, 2));
@@ -148,7 +165,11 @@ fn skip_prunes_the_subtree_under_both_policies() {
         let outcome = search(
             &graph,
             [a],
-            config(SearchOrder::DepthFirst).with_visited(visited),
+            Direction::Forward,
+            SearchConfig {
+                visited,
+                ..config(SearchOrder::DepthFirst)
+            },
             |node, _| {
                 order.push(node);
                 if node == b {
@@ -221,7 +242,7 @@ fn duplicate_seeds_dedup_globally_and_repeat_on_paths() {
         nodes(&visit_order(
             &graph,
             [a, a],
-            config(SearchOrder::DepthFirst).with_visited(VisitedPolicy::Path)
+            path_marked(config(SearchOrder::DepthFirst))
         )),
         vec![a, b, d, c, a, b, d, c]
     );
@@ -253,7 +274,7 @@ fn cycles_terminate_under_both_policies() {
         nodes(&visit_order(
             &graph,
             [a],
-            config(SearchOrder::DepthFirst).with_visited(VisitedPolicy::Path)
+            path_marked(config(SearchOrder::DepthFirst))
         )),
         vec![a, b, c]
     );
@@ -273,19 +294,19 @@ fn max_depth_bounds_expansion_not_visiting() {
 
     for order in [SearchOrder::DepthFirst, SearchOrder::BreadthFirst] {
         assert_eq!(
-            visit_order(&graph, [a], config(order).with_max_depth(0)),
+            visit_order(&graph, [a], bounded(config(order), 0)),
             vec![(a, 0)],
             "{order:?}"
         );
         // The node at the bound is visited; its successor is not
         // discovered through it.
         assert_eq!(
-            visit_order(&graph, [a], config(order).with_max_depth(2)),
+            visit_order(&graph, [a], bounded(config(order), 2)),
             vec![(a, 0), (b, 1), (c, 2)],
             "{order:?}"
         );
         assert_eq!(
-            visit_order(&graph, [a], config(order).with_max_depth(9)),
+            visit_order(&graph, [a], bounded(config(order), 9)),
             vec![(a, 0), (b, 1), (c, 2), (d, 3)],
             "{order:?}"
         );
@@ -299,6 +320,7 @@ fn break_returns_immediately() {
     let found = search(
         &graph,
         [a],
+        Direction::Forward,
         config(SearchOrder::DepthFirst),
         |node, depth| {
             seen.push(node);
@@ -317,10 +339,11 @@ fn break_returns_immediately() {
 fn the_incoming_direction_searches_predecessors() {
     let (graph, [a, b, _c, d]) = fork();
     assert_eq!(
-        nodes(&visit_order(
+        nodes(&visit_along(
             &graph,
             [d],
-            SearchConfig::new(SearchOrder::DepthFirst, Direction::Backward)
+            Direction::Backward,
+            config(SearchOrder::DepthFirst)
         )),
         vec![d, b, a]
     );
@@ -332,22 +355,24 @@ fn every_discipline_walks_the_incoming_axis() {
     // discipline reaches its reverse axis through its own dispatch arm:
     // a mixed-up arm would silently walk the graph the other way round.
     let (graph, [a, b, c, d]) = diamond();
-    let reverse = |order| SearchConfig::new(order, Direction::Backward);
+    let backward = Direction::Backward;
 
     assert_eq!(
-        nodes(&visit_order(
+        nodes(&visit_along(
             &graph,
             [d],
-            reverse(SearchOrder::BreadthFirst)
+            backward,
+            config(SearchOrder::BreadthFirst)
         )),
         vec![d, b, c, a]
     );
     // Path marks un-mark on unwind, so `a` is reported once per route.
     assert_eq!(
-        nodes(&visit_order(
+        nodes(&visit_along(
             &graph,
             [d],
-            reverse(SearchOrder::DepthFirst).with_visited(VisitedPolicy::Path)
+            backward,
+            path_marked(config(SearchOrder::DepthFirst))
         )),
         vec![d, b, a, c, a]
     );
@@ -365,7 +390,8 @@ fn breadth_first_with_path_marks_is_rejected() {
     let _ = search(
         &graph,
         [a],
-        config(SearchOrder::BreadthFirst).with_visited(VisitedPolicy::Path),
+        Direction::Forward,
+        path_marked(config(SearchOrder::BreadthFirst)),
         |_, _| ControlFlow::<(), _>::Continue(Visit::Descend),
     );
 }
@@ -377,134 +403,8 @@ fn an_out_of_range_seed_panics() {
     let _ = search(
         &graph,
         [NodeId::from_index(9)],
+        Direction::Forward,
         config(SearchOrder::DepthFirst),
-        |_, _| ControlFlow::<(), _>::Continue(Visit::Descend),
-    );
-}
-
-#[test]
-fn reused_marks_equal_one_fresh_search_per_root() {
-    let (graph, roots) = diamond();
-    for config in disciplines() {
-        let mut marks = EpochMarks::new(graph.node_count());
-        // Twice around, so every root is also searched over marks a full
-        // pass has already written.
-        for &root in roots.iter().chain(roots.iter()) {
-            assert_eq!(
-                marked_order(&graph, [root], config, &mut marks),
-                visit_order(&graph, [root], config),
-                "{config:?} from {root:?}"
-            );
-        }
-        // Seed handling reads the same marks, so multi-seed searches (and
-        // the duplicate-seed rules) have to survive the reuse too.
-        for seeds in [[roots[3], roots[0]], [roots[0], roots[0]]] {
-            assert_eq!(
-                marked_order(&graph, seeds, config, &mut marks),
-                visit_order(&graph, seeds, config),
-                "{config:?} from {seeds:?}"
-            );
-        }
-    }
-}
-
-#[test]
-fn a_reused_search_never_inherits_the_previous_marks() {
-    let (graph, [a, b, c, d]) = diamond();
-    let dfs = config(SearchOrder::DepthFirst);
-    let path = dfs.with_visited(VisitedPolicy::Path);
-    let mut marks = EpochMarks::new(graph.node_count());
-
-    // A pass over the whole graph, then a search of a part of it: the
-    // second search sees none of the first one's marks.
-    assert_eq!(
-        nodes(&marked_order(&graph, [a], dfs, &mut marks)),
-        vec![a, b, d, c]
-    );
-    assert_eq!(
-        nodes(&marked_order(&graph, [b], dfs, &mut marks)),
-        vec![b, d]
-    );
-    assert_eq!(
-        nodes(&marked_order(&graph, [c], dfs, &mut marks)),
-        vec![c, d]
-    );
-
-    // A search that broke mid-walk leaves marks set under both policies —
-    // and the walk after it still starts from a clean set.
-    for config in [dfs, path] {
-        let found = search_with_marks(&graph, [a], config, &mut marks, |node, _| {
-            if node == b {
-                return ControlFlow::Break(node);
-            }
-            ControlFlow::Continue(Visit::Descend)
-        });
-        assert_eq!(found, Some(b), "{config:?}");
-        assert_eq!(
-            nodes(&marked_order(&graph, [a], dfs, &mut marks)),
-            vec![a, b, d, c],
-            "{config:?}"
-        );
-    }
-}
-
-#[test]
-fn marks_stay_correct_across_an_epoch_wrap() {
-    let (graph, [a, b, c, d]) = diamond();
-    let dfs = config(SearchOrder::DepthFirst);
-    let mut marks = EpochMarks::new(graph.node_count());
-    // The state one search short of the wrap, carrying a stamp from the
-    // last time the epoch was 1 — the one value bumping alone would not
-    // invalidate, so only clearing the buffer keeps `c` visitable.
-    marks.epoch = u32::MAX - 1;
-    marks.stamps[c.index()] = 1;
-
-    // This search takes the epoch to its last value and never touches `c`.
-    assert_eq!(
-        nodes(&marked_order(&graph, [b], dfs, &mut marks)),
-        vec![b, d]
-    );
-    assert_eq!(marks.epoch, u32::MAX);
-    // This one wraps.
-    assert_eq!(
-        nodes(&marked_order(&graph, [a], dfs, &mut marks)),
-        vec![a, b, d, c]
-    );
-    assert_eq!(marks.epoch, 1, "the epoch wrapped to its first value");
-    // And the buffer keeps working on the far side of the wrap.
-    assert_eq!(
-        nodes(&marked_order(&graph, [a], dfs, &mut marks)),
-        vec![a, b, d, c]
-    );
-    assert_eq!(marks.epoch, 2);
-}
-
-#[test]
-fn marks_larger_than_the_graph_are_accepted() {
-    // One buffer sized by the largest node space serves the smaller ones.
-    let (graph, [a, b, c, d]) = diamond();
-    let mut marks = EpochMarks::new(graph.node_count() + 8);
-    assert_eq!(
-        nodes(&marked_order(
-            &graph,
-            [a],
-            config(SearchOrder::DepthFirst),
-            &mut marks
-        )),
-        vec![a, b, d, c]
-    );
-}
-
-#[test]
-#[should_panic(expected = "visited marks cover 2 nodes but the graph has 4")]
-fn marks_smaller_than_the_graph_panic() {
-    let (graph, [a, _, _, _]) = diamond();
-    let mut marks = EpochMarks::new(2);
-    let _ = search_with_marks(
-        &graph,
-        [a],
-        config(SearchOrder::DepthFirst),
-        &mut marks,
         |_, _| ControlFlow::<(), _>::Continue(Visit::Descend),
     );
 }
@@ -513,9 +413,9 @@ fn marks_smaller_than_the_graph_panic() {
 fn a_reused_scratch_equals_one_fresh_search_per_root() {
     let (graph, roots) = diamond();
     for config in disciplines() {
-        let mut scratch = SearchScratch::new(graph.node_count());
-        // Twice around, so every root is also searched over buffers a full
-        // pass has already written.
+        let mut scratch = SearchScratch::default();
+        // Twice around, so every root is also searched over marks and
+        // buffers a full pass has already written.
         for &root in roots.iter().chain(roots.iter()) {
             assert_eq!(
                 scratch_order(&graph, [root], config, &mut scratch),
@@ -523,8 +423,9 @@ fn a_reused_scratch_equals_one_fresh_search_per_root() {
                 "{config:?} from {root:?}"
             );
         }
-        // Seeds are collected into the scratch too, so multi-seed searches
-        // (and the duplicate-seed rules) have to survive the reuse.
+        // Seeds are collected into the scratch and read the same marks, so
+        // multi-seed searches (and the duplicate-seed rules) have to survive
+        // the reuse too.
         for seeds in [[roots[3], roots[0]], [roots[0], roots[0]]] {
             assert_eq!(
                 scratch_order(&graph, seeds, config, &mut scratch),
@@ -536,13 +437,94 @@ fn a_reused_scratch_equals_one_fresh_search_per_root() {
 }
 
 #[test]
-fn one_scratch_serves_every_discipline_in_turn() {
-    // The two globally marked cores share one frontier buffer — a stack
-    // for the depth-first walk, a queue for the breadth-first one — so a
-    // pass that changes discipline mid-way is the case that would catch a
-    // buffer left in the other core's shape.
+fn a_reused_search_never_inherits_the_previous_marks() {
     let (graph, [a, b, c, d]) = diamond();
-    let mut scratch = SearchScratch::new(graph.node_count());
+    let dfs = config(SearchOrder::DepthFirst);
+    let path = path_marked(dfs);
+    let mut scratch = SearchScratch::default();
+
+    // A pass over the whole graph, then a search of a part of it: the
+    // second search sees none of the first one's marks.
+    assert_eq!(
+        nodes(&scratch_order(&graph, [a], dfs, &mut scratch)),
+        vec![a, b, d, c]
+    );
+    assert_eq!(
+        nodes(&scratch_order(&graph, [b], dfs, &mut scratch)),
+        vec![b, d]
+    );
+    assert_eq!(
+        nodes(&scratch_order(&graph, [c], dfs, &mut scratch)),
+        vec![c, d]
+    );
+
+    // A search that broke mid-walk leaves marks set under both policies —
+    // and the walk after it still starts from a clean set.
+    for config in [dfs, path] {
+        let found = search_in(
+            &mut scratch,
+            &graph,
+            [a],
+            Direction::Forward,
+            config,
+            |node, _| {
+                if node == b {
+                    return ControlFlow::Break(node);
+                }
+                ControlFlow::Continue(Visit::Descend)
+            },
+        );
+        assert_eq!(found, Some(b), "{config:?}");
+        assert_eq!(
+            nodes(&scratch_order(&graph, [a], dfs, &mut scratch)),
+            vec![a, b, d, c],
+            "{config:?}"
+        );
+    }
+}
+
+#[test]
+fn marks_stay_correct_across_an_epoch_wrap() {
+    let (graph, [a, b, c, d]) = diamond();
+    let dfs = config(SearchOrder::DepthFirst);
+    let mut scratch = SearchScratch::default();
+    scratch.marks.grow_to(graph.node_bound());
+    // The state one search short of the wrap, carrying a stamp from the
+    // last time the epoch was 1 — the one value bumping alone would not
+    // invalidate, so only clearing the buffer keeps `c` visitable.
+    scratch.marks.epoch = u32::MAX - 1;
+    scratch.marks.stamps[c.index()] = 1;
+
+    // This search takes the epoch to its last value and never touches `c`.
+    assert_eq!(
+        nodes(&scratch_order(&graph, [b], dfs, &mut scratch)),
+        vec![b, d]
+    );
+    assert_eq!(scratch.marks.epoch, u32::MAX);
+    // This one wraps.
+    assert_eq!(
+        nodes(&scratch_order(&graph, [a], dfs, &mut scratch)),
+        vec![a, b, d, c]
+    );
+    assert_eq!(
+        scratch.marks.epoch, 1,
+        "the epoch wrapped to its first value"
+    );
+    // And the buffer keeps working on the far side of the wrap.
+    assert_eq!(
+        nodes(&scratch_order(&graph, [a], dfs, &mut scratch)),
+        vec![a, b, d, c]
+    );
+    assert_eq!(scratch.marks.epoch, 2);
+}
+
+#[test]
+fn one_scratch_serves_every_discipline_in_turn() {
+    // The breadth-first queue and the depth-first stack live side by side in
+    // one scratch, so a pass that changes discipline mid-way is the case that
+    // would catch a buffer left in the other core's shape.
+    let (graph, [a, b, c, d]) = diamond();
+    let mut scratch = SearchScratch::default();
     for _ in 0..2 {
         assert_eq!(
             nodes(&scratch_order(
@@ -566,7 +548,7 @@ fn one_scratch_serves_every_discipline_in_turn() {
             nodes(&scratch_order(
                 &graph,
                 [a],
-                config(SearchOrder::DepthFirst).with_visited(VisitedPolicy::Path),
+                path_marked(config(SearchOrder::DepthFirst)),
                 &mut scratch
             )),
             vec![a, b, d, c, d]
@@ -578,18 +560,25 @@ fn one_scratch_serves_every_discipline_in_turn() {
 fn a_reused_scratch_never_inherits_the_previous_frontier() {
     let (graph, [a, b, c, d]) = diamond();
     let dfs = config(SearchOrder::DepthFirst);
-    let mut scratch = SearchScratch::new(graph.node_count());
+    let mut scratch = SearchScratch::default();
 
     // A search that broke mid-walk returns with its frontier still loaded
     // — under every discipline — and the walk after it still starts from
     // an empty one.
     for config in disciplines() {
-        let found = search_with_scratch(&graph, [a], config, &mut scratch, |node, _| {
-            if node == b {
-                return ControlFlow::Break(node);
-            }
-            ControlFlow::Continue(Visit::Descend)
-        });
+        let found = search_in(
+            &mut scratch,
+            &graph,
+            [a],
+            Direction::Forward,
+            config,
+            |node, _| {
+                if node == b {
+                    return ControlFlow::Break(node);
+                }
+                ControlFlow::Continue(Visit::Descend)
+            },
+        );
         assert_eq!(found, Some(b), "{config:?}");
         assert_eq!(
             nodes(&scratch_order(&graph, [a], dfs, &mut scratch)),
@@ -611,11 +600,24 @@ fn a_reused_scratch_never_inherits_the_previous_frontier() {
 }
 
 #[test]
-fn a_scratch_larger_than_the_graph_is_accepted() {
-    // One scratch sized by the largest node space serves the smaller ones.
+fn a_scratch_grown_by_a_larger_graph_serves_a_smaller_one() {
     let (graph, [a, b, c, d]) = diamond();
-    let mut scratch = SearchScratch::new(graph.node_count() + 8);
-    assert_eq!(scratch.capacity(), graph.node_count() + 8);
+    let mut larger = Graph::<(), ()>::new();
+    let nodes_of_larger: Vec<NodeId> = (0..12).map(|_| larger.add_node(())).collect();
+    for pair in nodes_of_larger.windows(2) {
+        larger.add_edge(pair[0], pair[1], ());
+    }
+    let mut scratch = SearchScratch::default();
+    assert_eq!(
+        scratch_order(
+            &larger,
+            [nodes_of_larger[0]],
+            config(SearchOrder::DepthFirst),
+            &mut scratch
+        )
+        .len(),
+        12
+    );
     assert_eq!(
         nodes(&scratch_order(
             &graph,
@@ -628,15 +630,17 @@ fn a_scratch_larger_than_the_graph_is_accepted() {
 }
 
 #[test]
-#[should_panic(expected = "visited marks cover 2 nodes but the graph has 4")]
-fn a_scratch_smaller_than_the_graph_panics() {
-    let (graph, [a, _, _, _]) = diamond();
-    let mut scratch = SearchScratch::new(2);
-    let _ = search_with_scratch(
-        &graph,
-        [a],
-        config(SearchOrder::DepthFirst),
-        &mut scratch,
-        |_, _| ControlFlow::<(), _>::Continue(Visit::Descend),
+fn a_scratch_smaller_than_the_graph_grows_on_entry() {
+    let (graph, [a, b, c, d]) = diamond();
+    let mut scratch = SearchScratch::default();
+    scratch.marks.grow_to(2);
+    assert_eq!(
+        nodes(&scratch_order(
+            &graph,
+            [a],
+            config(SearchOrder::DepthFirst),
+            &mut scratch
+        )),
+        vec![a, b, d, c]
     );
 }

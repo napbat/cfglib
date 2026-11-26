@@ -17,7 +17,8 @@
 //! [`EdgeView`], and [`FilteredEdges`] retain payloads and edge identity
 //! without rebuilding, so consumer-owned graph stores participate without
 //! migrating their data.
-//! [`breadth_first_events`] and [`depth_first_events`] expose traversal-tree
+//! [`Rooted`], [`Reversed`], [`Induced`], and [`VirtualRoot`] reshape a view
+//! without copying it. [`depth_first_events`] exposes traversal-tree
 //! structure for dense graphs; [`open_breadth_first_events`] and
 //! [`open_depth_first_events`] provide the corresponding discovery streams
 //! for lazily generated node spaces.
@@ -289,9 +290,6 @@ pub use flow::{
     CallInfo, CallSite, EdgeRole, Flow, FlowControl, FlowEffect, JumpTargets, Transfer, Transfers,
     UnresolvedRole, UnresolvedTransfer,
 };
-pub use graph::bidirectional::{
-    ShortestPathScratch, shortest_path_bidirectional, shortest_path_edges_bidirectional,
-};
 pub use graph::call_graph::{
     CallMetadata, FunctionIndex, FunctionNode, call_graph, call_graph_indexed, find_function,
     is_recursive_function, propagate_summaries, propagate_summaries_narrowed,
@@ -318,12 +316,11 @@ pub use graph::dot::{
 };
 pub use graph::dyck::{BidirectedDyck, bidirected_dyck_classes};
 pub use graph::edge_traverse::{
-    EdgeStep, breadth_first_edges, breadth_first_edges_with, depth_first_edges,
-    depth_first_edges_with, shortest_path_edges,
+    breadth_first_edges, depth_first_edges, shortest_path_edges, shortest_path_edges_in,
 };
 pub use graph::edge_view::{EdgeRef, EdgeView, FilteredEdges};
 pub use graph::eh::{EhBlockKind, EhEdge, EhEdgeKind, EhModel};
-pub use graph::epoch::{EpochMarks, EpochSet};
+pub use graph::epoch::EpochMarks;
 pub use graph::fanout::{DenseFanout, Fanout, SortedMap};
 pub use graph::feedback::{FeedbackConfig, feedback_arc_set, linear_arrangement};
 pub use graph::fingerprint::{canonical_hash, canonical_order, multiset_fingerprint, wl_colors};
@@ -336,9 +333,8 @@ pub use graph::loop_forest::{LoopForest, LoopId};
 pub use graph::loop_nest::{LoopNestNode, LoopNestingTree};
 pub use graph::network_flow::{ArcId, FlowError, FlowNetwork, FlowSolution};
 pub use graph::open::{
-    FoldEnter, MarkScope, OpenBfsConfig, OpenBfsEvent, OpenDfsConfig, OpenDfsEvent,
-    OpenFixpointConfig, OpenFixpointError, OpenFold, OpenFoldConfig, OpenPathsConfig,
-    OpenPathsEvent, OpenSearchConfig, follow, follow_path, open_breadth_first_events,
+    FoldEnter, MarkScope, OpenBfsEvent, OpenDfsEvent, OpenFixpointConfig, OpenFixpointError,
+    OpenFold, OpenFoldConfig, OpenPathsEvent, follow, follow_path, open_breadth_first_events,
     open_breadth_first_paths, open_depth_first_events, open_fold_fixpoint, open_fold_post_order,
     open_fold_post_order_memoized, open_search,
 };
@@ -355,7 +351,6 @@ pub use graph::reducible::{
     DispatchBuilder, DispatchReport, make_reducible, make_reducible_with_dispatch,
 };
 pub use graph::relax::min_label_relaxation;
-pub use graph::reverse::reverse_cfg;
 pub use graph::scc::{
     IncrementalScc, Scc, SccChange, SccDecomposition, StrongCutScratch, StrongCuts, condensation,
     condensation_of, kosaraju_scc, strong_cuts, strong_cuts_of, tarjan_scc,
@@ -369,8 +364,8 @@ pub use graph::scope::{
     ScopeResolutionStats, ScopeTag,
 };
 pub use graph::search::{
-    BfsEvent, DfsEvent, SearchConfig, SearchOrder, SearchScratch, Visit, VisitedPolicy,
-    breadth_first_events, depth_first_events, search, search_with_marks, search_with_scratch,
+    DfsEvent, SearchConfig, SearchOrder, SearchScratch, Visit, VisitedPolicy, depth_first_events,
+    search, search_in,
 };
 pub use graph::stack::{
     StackEdge, StackEdgeId, StackEdgeTag, StackFileId, StackFileTag, StackGraph, StackGraphError,
@@ -389,9 +384,9 @@ pub use graph::structure::{
 };
 pub use graph::text::{TextError, TextErrorKind, TextStyle, parse_text, to_text, write_text};
 pub use graph::traverse::{
-    CommonAncestor, breadth_first, common_ancestors, depth_first_postorder, depth_first_preorder,
-    nearest_common_ancestor, reachable, reverse_postorder, shortest_path, topological_sort,
-    topological_sort_or_cycle,
+    CommonAncestor, ShortestPathScratch, breadth_first, common_ancestors, depth_first_postorder,
+    depth_first_preorder, nearest_common_ancestor, reachable, reverse_postorder, shortest_path,
+    shortest_path_in, topological_sort, topological_sort_or_cycle,
 };
 pub use graph::tree_decomposition::{EliminationHeuristic, TreeDecomposition, tree_decomposition};
 pub use graph::verify::{
@@ -399,7 +394,8 @@ pub use graph::verify::{
     verify_view, verify_with,
 };
 pub use graph::view::{
-    DenseId, Direction, GraphView, NodeView, Reversed, Rooted, RootedView, scan_predecessors,
+    DenseId, Direction, GraphView, Induced, NodeView, Reversed, Rooted, RootedView, VirtualRoot,
+    scan_predecessors,
 };
 pub use graph::weak_topological_order::WeakTopologicalOrder;
 pub use memory::{

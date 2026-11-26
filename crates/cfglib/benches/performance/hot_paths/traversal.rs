@@ -1,8 +1,8 @@
 use cfglib::{
-    BlockId, Cfg, CommonAncestor, Direction, EdgeId, EdgeStep, Graph, GraphView, NodeId,
-    ShortestPathScratch, breadth_first, breadth_first_edges, common_ancestors,
-    depth_first_preorder, nearest_common_ancestor, shortest_path, shortest_path_bidirectional,
-    shortest_path_edges, shortest_path_edges_bidirectional,
+    BlockId, Cfg, CommonAncestor, Direction, EdgeId, Graph, GraphView, NodeId, ShortestPathScratch,
+    breadth_first, breadth_first_edges, common_ancestors, depth_first_preorder,
+    nearest_common_ancestor, shortest_path, shortest_path_edges, shortest_path_edges_in,
+    shortest_path_in,
 };
 
 use super::NODE_COUNT;
@@ -50,7 +50,7 @@ fn register_graph_walks(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(), ()>) {
         suite,
         "directed_breadth_first_edges",
         || breadth_first_edges(graph, NodeId::from_raw(0), Direction::Forward),
-        |result: &Vec<EdgeStep>| assert_edge_traversal(result, graph)
+        |result: &Vec<EdgeId>| assert_edge_traversal(result, graph)
     );
     benchmark_case!(
         suite,
@@ -90,19 +90,19 @@ fn register_graph_walks(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(), ()>) {
             NodeId::from_index(NODE_COUNT - 1),
         )
     );
-    // One scratch serves both bidirectional cases and every iteration of
+    // One scratch serves both scratch-reusing cases and every iteration of
     // each, the way a pass of point queries holds it.
-    let mut scratch = ShortestPathScratch::new(graph.node_bound());
+    let mut scratch = ShortestPathScratch::default();
     benchmark_case!(
         suite,
-        "directed_shortest_path_bidirectional",
+        "directed_shortest_path_in",
         || {
-            shortest_path_bidirectional(
+            shortest_path_in(
+                &mut scratch,
                 graph,
                 NodeId::from_raw(0),
                 NodeId::from_index(NODE_COUNT - 1),
                 Direction::Forward,
-                &mut scratch,
             )
             .expect("fixture target is reachable")
         },
@@ -115,14 +115,14 @@ fn register_graph_walks(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(), ()>) {
     );
     benchmark_case!(
         suite,
-        "directed_shortest_path_edges_bidirectional",
+        "directed_shortest_path_edges_in",
         || {
-            shortest_path_edges_bidirectional(
+            shortest_path_edges_in(
+                &mut scratch,
                 graph,
                 NodeId::from_raw(0),
                 NodeId::from_index(NODE_COUNT - 1),
                 Direction::Forward,
-                &mut scratch,
             )
             .expect("fixture target is reachable")
         },
@@ -161,9 +161,8 @@ fn hub_graph() -> Graph<(), ()> {
     graph
 }
 
-/// Repeated point queries over one large graph: the one-sided search with
-/// its per-call tables, against the bidirectional search over one reused
-/// scratch, on the same pairs.
+/// Repeated point queries over one large graph: a fresh scratch per query,
+/// against one scratch reused by every query, on the same pairs.
 fn register_point_queries(suite: &mut BenchmarkSuite<'_>) {
     let graph = hub_graph();
     let pairs: Vec<(NodeId, NodeId)> = (0..POINT_QUERIES)
@@ -178,7 +177,10 @@ fn register_point_queries(suite: &mut BenchmarkSuite<'_>) {
     let outgoing = Direction::Forward;
     let lengths: Vec<Option<usize>> = pairs
         .iter()
-        .map(|&(start, goal)| shortest_path(&graph, start, goal, outgoing).map(|path| path.len()))
+        .map(|&(start, goal)| {
+            let (distances, _) = directed_distances(&graph, start, outgoing);
+            (distances[goal.index()] != usize::MAX).then(|| distances[goal.index()] + 1)
+        })
         .collect();
     let check = |paths: &Vec<Option<Vec<NodeId>>>| {
         for ((path, &(start, goal)), length) in paths.iter().zip(&pairs).zip(&lengths) {
@@ -202,16 +204,14 @@ fn register_point_queries(suite: &mut BenchmarkSuite<'_>) {
         },
         check
     );
-    let mut scratch = ShortestPathScratch::new(graph.node_bound());
+    let mut scratch = ShortestPathScratch::default();
     benchmark_case!(
         suite,
-        "directed_shortest_path_bidirectional_hub_queries",
+        "directed_shortest_path_in_hub_queries",
         || {
             pairs
                 .iter()
-                .map(|&(start, goal)| {
-                    shortest_path_bidirectional(&graph, start, goal, outgoing, &mut scratch)
-                })
+                .map(|&(start, goal)| shortest_path_in(&mut scratch, &graph, start, goal, outgoing))
                 .collect::<Vec<_>>()
         },
         check

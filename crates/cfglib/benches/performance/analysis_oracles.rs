@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use cfglib::{
-    BlockId, Cfg, CommonAncestor, Direction, DominanceFrontiers, DominatorTree, EdgeStep, Facts,
+    BlockId, Cfg, CommonAncestor, Direction, DominanceFrontiers, DominatorTree, EdgeId, Facts,
     Graph, IntervalAnalysis, NodeId, PostDominatorTree, PostNode,
 };
 
@@ -77,15 +77,12 @@ pub(super) fn reference_cfg_breadth_first(cfg: &Cfg<u32>) -> Vec<BlockId> {
     order
 }
 
-pub(super) fn assert_edge_traversal(steps: &[EdgeStep], graph: &Graph<(), ()>) {
-    assert_eq!(steps.len(), graph.edge_count());
+pub(super) fn assert_edge_traversal(edges: &[EdgeId], graph: &Graph<(), ()>) {
+    assert_eq!(edges.len(), graph.edge_count());
     let mut seen = vec![false; graph.edge_bound()];
-    for step in steps {
-        assert!(!seen[step.edge.index()], "edge traversal repeated an edge");
-        seen[step.edge.index()] = true;
-        let edge = graph.edge(step.edge);
-        assert_eq!(step.source, edge.source());
-        assert_eq!(step.target, edge.target());
+    for edge in edges {
+        assert!(!seen[edge.index()], "edge traversal repeated an edge");
+        seen[edge.index()] = true;
     }
     assert!(graph.edge_ids().all(|edge| seen[edge.index()]));
 
@@ -95,19 +92,15 @@ pub(super) fn assert_edge_traversal(steps: &[EdgeStep], graph: &Graph<(), ()>) {
     expanded[0] = true;
     while let Some(node) = queue.pop_front() {
         for edge_id in graph.outgoing(node) {
-            let edge = graph.edge(edge_id);
-            expected.push(EdgeStep {
-                edge: edge_id,
-                source: edge.source(),
-                target: edge.target(),
-            });
-            if !expanded[edge.target().index()] {
-                expanded[edge.target().index()] = true;
-                queue.push_back(edge.target());
+            let target = graph.edge(edge_id).target();
+            expected.push(edge_id);
+            if !expanded[target.index()] {
+                expanded[target.index()] = true;
+                queue.push_back(target);
             }
         }
     }
-    assert_eq!(steps, expected);
+    assert_eq!(edges, expected);
 }
 
 pub(super) fn assert_node_path(path: &[NodeId], graph: &Graph<(), ()>, from: NodeId, to: NodeId) {

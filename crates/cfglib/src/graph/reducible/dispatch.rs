@@ -28,7 +28,7 @@ use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::{EdgeId, EdgeKind};
 use crate::graph::loop_forest::{LoopForest, LoopId};
-use crate::graph::traverse::reachable_in;
+use crate::graph::traverse::reachable;
 use crate::graph::view::Direction;
 
 /// The code [`make_reducible_with_dispatch`] puts in the blocks it adds, and
@@ -192,15 +192,7 @@ struct Dispatch<'a> {
 impl<'a> Dispatch<'a> {
     fn new<I, E>(cfg: &Cfg<I, E>, forest: &'a LoopForest) -> Self {
         let bound = cfg.block_bound();
-        let mut reached = Vec::new();
-        reachable_in(
-            cfg,
-            [cfg.entry()],
-            Direction::Forward,
-            None,
-            &mut reached,
-            &mut Vec::new(),
-        );
+        let reached = reachable(cfg, [cfg.entry()], Direction::Forward);
         let mut heads = vec![None; bound];
         for lp in forest.loops() {
             heads[forest.header(lp).index()] = Some(lp);

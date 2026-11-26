@@ -1,37 +1,37 @@
-//! Bidirectional shortest-path queries over caller-owned scratch.
+//! Shortest unweighted paths, searched from both ends at once.
 //!
-//! [`shortest_path`](crate::shortest_path) and
-//! [`shortest_path_edges`](crate::shortest_path_edges) search from one end
-//! only, and every call allocates and fills tables sized to the whole node
-//! space. A pass that asks many point-to-point questions over one graph ("is
-//! there a call path from A to B, and which") pays both costs per query: the
-//! tables, whatever the path length, and a search that explores the whole ball
-//! around the start until it reaches the goal.
+//! A point-to-point question ("is there a call path from A to B, and which")
+//! asked of a search from one end explores the whole ball around the start
+//! until it reaches the goal, and a pass that asks many of them over one graph
+//! also pays for tables sized to the whole node space per query. The search
+//! here runs from both ends and keeps its tables in a [`ShortestPathScratch`]
+//! the caller can reuse. It alternates one edge examination forward from the
+//! start with one backward from the goal, and stops once the best path found
+//! is no longer than the sum of the two searches' current depths, the stopping
+//! rule of Haeupler, Hladík, Rozhoň, Tarjan and Tětek (*Bidirectional
+//! Dijkstra's Algorithm is Instance-Optimal*, SOSA 2025) applied to unweighted
+//! edges. Stopping at the first node both searches have seen would be wrong:
+//! the first meeting need not lie on a shortest path.
 //!
-//! The functions here search from both ends at once and keep their tables in a
-//! [`ShortestPathScratch`] the caller reuses. They alternate one edge
-//! examination forward from the start with one backward from the goal, and
-//! stop once the best path found is no longer than the sum of the two
-//! searches' current depths, the stopping rule of Haeupler, Hladík, Rozhoň,
-//! Tarjan and Tětek (*Bidirectional Dijkstra's Algorithm is
-//! Instance-Optimal*, SOSA 2025) applied to unweighted edges. Stopping at the
-//! first node both searches have seen would be wrong: the first meeting need
-//! not lie on a shortest path.
+//! The search advances one edge at a time on alternating sides, which is a
+//! different stepping from the level-by-level breadth-first core, so it keeps
+//! its own loop. [`shortest_path_edges`](crate::shortest_path_edges) is the
+//! edge-identity form over the same search.
 
 extern crate alloc;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
-use super::edge_traverse::EdgeAdjacency;
-use super::edge_view::EdgeView;
-use super::epoch::EpochMarks;
-use super::traverse::{Adjacency, by_axis};
-use super::view::{DenseId, Direction, GraphView, assert_in_bound};
+use super::Adjacency;
+use crate::graph::edge_traverse::EdgeAdjacency;
+use crate::graph::edge_view::EdgeView;
+use crate::graph::epoch::EpochMarks;
+use crate::graph::view::{DenseId, Direction, GraphView, assert_in_bound};
 use crate::identity::{check_bound, slot, word};
 
-/// Caller-owned buffers for repeated point-to-point queries over one node
-/// space, read by [`shortest_path_bidirectional`] and
-/// [`shortest_path_edges_bidirectional`].
+/// Caller-owned buffers for repeated point-to-point queries, read by
+/// [`shortest_path_in`] and
+/// [`shortest_path_edges_in`](crate::shortest_path_edges_in).
 ///
 /// It holds two searches' worth of tables: per node, an [`EpochMarks`] stamp,
 /// a hop count and a link back toward the search's endpoint, each a `u32`, and
@@ -40,32 +40,23 @@ use crate::identity::{check_bound, slot, word};
 /// the tables are never cleared. Nothing in a query costs O(node count) once
 /// the scratch covers the graph.
 ///
-/// # Sizing
-///
-/// [`new`](Self::new) sizes the tables for a node count, and a query on a
-/// graph with a larger node bound grows them on entry, so one scratch serves a
-/// sequence of graphs and holds the largest. The scratch carries no node-id
-/// type: one instance serves every view.
+/// The scratch starts empty and a query grows its tables on entry to the
+/// graph's node bound, so one scratch serves a sequence of graphs and holds
+/// the largest. It carries no node-id type: one instance serves every view.
 ///
 /// # Examples
 ///
 /// ```
-/// use cfglib::{Graph, ShortestPathScratch, Direction, shortest_path_bidirectional};
+/// use cfglib::{Direction, Graph, ShortestPathScratch, shortest_path_in};
 ///
 /// let mut graph = Graph::<(), ()>::new();
 /// let [a, b, c] = [(); 3].map(|()| graph.add_node(()));
 /// graph.add_edge(a, b, ());
 /// graph.add_edge(b, c, ());
 ///
-/// let mut scratch = ShortestPathScratch::new(graph.node_bound());
+/// let mut scratch = ShortestPathScratch::default();
 /// for (start, goal) in [(a, c), (b, c), (c, a)] {
-///     let path = shortest_path_bidirectional(
-///         &graph,
-///         start,
-///         goal,
-///         Direction::Forward,
-///         &mut scratch,
-///     );
+///     let path = shortest_path_in(&mut scratch, &graph, start, goal, Direction::Forward);
 ///     assert_eq!(path.is_some(), start != c);
 /// }
 /// ```
@@ -73,25 +64,6 @@ use crate::identity::{check_bound, slot, word};
 pub struct ShortestPathScratch {
     /// The search from the start, then the search from the goal.
     sides: [SideBuffers; 2],
-}
-
-impl ShortestPathScratch {
-    /// Scratch whose tables cover `node_count` nodes.
-    ///
-    /// A query on a larger graph grows the tables on entry, so the count only
-    /// moves that allocation to construction.
-    #[must_use]
-    pub fn new(node_count: usize) -> Self {
-        let side = SideBuffers {
-            reached: EpochMarks::new(node_count),
-            depth: alloc::vec![0; node_count],
-            link: alloc::vec![0; node_count],
-            queue: VecDeque::new(),
-        };
-        Self {
-            sides: [side.clone(), side],
-        }
-    }
 }
 
 /// The tables of one of a query's two searches.
@@ -265,13 +237,14 @@ fn examine<I: Iterator<Item = (usize, u32)>>(
     }
 }
 
-/// Return a shortest unweighted path from `start` to `goal`, searching from
-/// both ends over caller-owned scratch.
+/// Return a shortest unweighted path from `start` to `goal` along `direction`
+/// edges.
 ///
-/// The answer is the one [`shortest_path`](crate::shortest_path) gives up to
-/// the choice among equally short paths: the path includes both endpoints,
-/// `start == goal` is the one-node path, and `None` means `goal` is
-/// unreachable. Parallel edges do not affect the path.
+/// The path includes both endpoints, `start == goal` is the one-node path,
+/// and `None` means `goal` is unreachable. Parallel edges do not affect the
+/// path. Each call allocates its own [`ShortestPathScratch`]; a pass that
+/// asks many questions over one graph reuses one through
+/// [`shortest_path_in`].
 ///
 /// # Search
 ///
@@ -286,22 +259,21 @@ fn examine<I: Iterator<Item = (usize, u32)>>(
 ///
 /// Among the shortest paths, the witness is the first join of that length the
 /// alternation finds, with neighbors in adjacency order. It depends on nothing
-/// else, so the same graph gives the same path, but it can differ from the one
-/// [`shortest_path`](crate::shortest_path) picks from its single
-/// breadth-first tree.
+/// else, so the same graph gives the same path.
 ///
 /// # Cost
 ///
 /// O(edges examined), plus the path's length to build it, with no term in
-/// the node count once `scratch` covers the graph. Each side examines about as
-/// many edges as the other, so a goal that one side reaches through a short
-/// chain is found from that side cheaply even when the other side fans out.
+/// the node count once the scratch covers the graph. Each side examines about
+/// as many edges as the other, so a goal that one side reaches through a
+/// short chain is found from that side cheaply even when the other side fans
+/// out.
 ///
 /// The backward search reads [`predecessors`](GraphView::predecessors) (or
-/// `successors` for [`Direction::Backward`]). A view that stores only
-/// forward adjacency serves that by [`scan_predecessors`](crate::scan_predecessors),
-/// O(nodes × edges) per call, so for such a view use the one-sided
-/// [`shortest_path`](crate::shortest_path) instead.
+/// `successors` for [`Direction::Backward`]). A view that stores only forward
+/// adjacency serves that by [`scan_predecessors`](crate::scan_predecessors),
+/// O(nodes × edges) per call; give such a view real reverse adjacency before
+/// asking it for paths.
 ///
 /// # Panics
 ///
@@ -311,7 +283,7 @@ fn examine<I: Iterator<Item = (usize, u32)>>(
 /// # Examples
 ///
 /// ```
-/// use cfglib::{Graph, ShortestPathScratch, Direction, shortest_path_bidirectional};
+/// use cfglib::{Direction, Graph, shortest_path};
 ///
 /// // A call graph: `main` calls `parse` and `run`, and both call `log`.
 /// let mut graph = Graph::<&str, ()>::new();
@@ -324,36 +296,77 @@ fn examine<I: Iterator<Item = (usize, u32)>>(
 /// graph.add_edge(parse, log, ());
 /// graph.add_edge(run, log, ());
 ///
-/// // One scratch serves every query over the graph.
-/// let mut scratch = ShortestPathScratch::new(graph.node_bound());
-/// let outgoing = Direction::Forward;
 /// assert_eq!(
-///     shortest_path_bidirectional(&graph, main, log, outgoing, &mut scratch),
+///     shortest_path(&graph, main, log, Direction::Forward),
 ///     Some(vec![main, parse, log]),
 /// );
-/// assert_eq!(
-///     shortest_path_bidirectional(&graph, log, main, outgoing, &mut scratch),
-///     None,
-/// );
+/// assert_eq!(shortest_path(&graph, log, main, Direction::Forward), None);
 /// // Against the edges, from a callee up to a caller.
-/// let incoming = Direction::Backward;
 /// assert_eq!(
-///     shortest_path_bidirectional(&graph, log, main, incoming, &mut scratch).map(|path| path.len()),
+///     shortest_path(&graph, log, main, Direction::Backward).map(|path| path.len()),
 ///     Some(3),
 /// );
 /// ```
 #[must_use]
-pub fn shortest_path_bidirectional<G: GraphView>(
+pub fn shortest_path<G: GraphView>(
     graph: &G,
     start: G::NodeId,
     goal: G::NodeId,
     direction: Direction,
-    scratch: &mut ShortestPathScratch,
 ) -> Option<Vec<G::NodeId>> {
-    by_axis!(direction, node_path_from(graph, start, goal, scratch))
+    shortest_path_in(
+        &mut ShortestPathScratch::default(),
+        graph,
+        start,
+        goal,
+        direction,
+    )
 }
 
-fn node_path_from<G: GraphView, A: Adjacency>(
+/// [`shortest_path`] over a caller-owned [`ShortestPathScratch`], for a pass
+/// that asks many point-to-point questions.
+///
+/// The answer is the one [`shortest_path`] gives; only the tables live in
+/// `scratch`, which grows to the graph on entry.
+///
+/// # Panics
+///
+/// Panics when either endpoint is not a node in `graph`, or when the node
+/// bound exceeds `u32::MAX`.
+///
+/// # Examples
+///
+/// ```
+/// use cfglib::{Direction, Graph, ShortestPathScratch, shortest_path_in};
+///
+/// let mut graph = Graph::<(), ()>::new();
+/// let [a, b, c] = [(); 3].map(|()| graph.add_node(()));
+/// graph.add_edge(a, b, ());
+/// graph.add_edge(b, c, ());
+///
+/// // One scratch serves every query over the graph.
+/// let mut scratch = ShortestPathScratch::default();
+/// assert_eq!(
+///     shortest_path_in(&mut scratch, &graph, a, c, Direction::Forward),
+///     Some(vec![a, b, c]),
+/// );
+/// assert_eq!(
+///     shortest_path_in(&mut scratch, &graph, c, a, Direction::Backward),
+///     Some(vec![c, b, a]),
+/// );
+/// ```
+#[must_use]
+pub fn shortest_path_in<G: GraphView>(
+    scratch: &mut ShortestPathScratch,
+    graph: &G,
+    start: G::NodeId,
+    goal: G::NodeId,
+    direction: Direction,
+) -> Option<Vec<G::NodeId>> {
+    by_axis!(direction, node_path(graph, start, goal, scratch))
+}
+
+fn node_path<G: GraphView, A: Adjacency>(
     axis: A,
     graph: &G,
     start: G::NodeId,
@@ -403,51 +416,23 @@ fn node_path_from<G: GraphView, A: Adjacency>(
     Some(path.into_iter().map(G::NodeId::from_index).collect())
 }
 
-/// The edges of a shortest path from `from` to `to` through an edge-aware
-/// view, searching from both ends over caller-owned scratch.
+/// The edges of a shortest path from `from` to `to` along `direction` edges,
+/// over a caller-owned scratch: the search of [`shortest_path`] over
+/// [`outgoing`](EdgeView::outgoing) and [`incoming`](EdgeView::incoming).
 ///
-/// The edge-identity form of [`shortest_path_bidirectional`], with the same
-/// search, cost, tie-break and adjacency requirement, over
-/// [`outgoing`](EdgeView::outgoing) and [`incoming`](EdgeView::incoming). The
-/// answer is the one [`shortest_path_edges`](crate::shortest_path_edges) gives
-/// up to the choice among equally short paths: `from == to` is the empty path,
-/// and parallel edges stay distinct, so the witness names the edge it took.
-///
-/// # Panics
-///
-/// Panics when either endpoint is not a node in `graph`, when the node or edge
-/// bound exceeds `u32::MAX`, or when the view violates its dense node/edge
-/// identity contract.
-///
-/// # Examples
-///
-/// ```
-/// use cfglib::{Graph, ShortestPathScratch, Direction, shortest_path_edges_bidirectional};
-///
-/// let mut graph = Graph::<(), &str>::new();
-/// let [a, b, c] = [(); 3].map(|()| graph.add_node(()));
-/// let first = graph.add_edge(a, b, "first");
-/// graph.add_edge(a, b, "parallel");
-/// let second = graph.add_edge(b, c, "second");
-///
-/// let mut scratch = ShortestPathScratch::default();
-/// assert_eq!(
-///     shortest_path_edges_bidirectional(&graph, a, c, Direction::Forward, &mut scratch),
-///     Some(vec![first, second]),
-/// );
-/// ```
-#[must_use]
-pub fn shortest_path_edges_bidirectional<G: EdgeView>(
+/// `from == to` is the empty path, and parallel edges stay distinct, so the
+/// witness names the edge it took.
+pub(crate) fn edge_path_in<G: EdgeView>(
+    scratch: &mut ShortestPathScratch,
     graph: &G,
     from: G::NodeId,
     to: G::NodeId,
     direction: Direction,
-    scratch: &mut ShortestPathScratch,
 ) -> Option<Vec<G::EdgeId>> {
-    by_axis!(direction, edge_path_from(graph, from, to, scratch))
+    by_axis!(direction, edge_path(graph, from, to, scratch))
 }
 
-fn edge_path_from<G: EdgeView, A: EdgeAdjacency>(
+fn edge_path<G: EdgeView, A: EdgeAdjacency>(
     axis: A,
     graph: &G,
     from: G::NodeId,

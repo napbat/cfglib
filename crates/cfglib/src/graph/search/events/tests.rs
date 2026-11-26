@@ -1,102 +1,9 @@
-extern crate alloc;
-
 use super::*;
 use crate::graph::store::{Graph, NodeId};
 use crate::graph::view::Direction;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
-
-fn bfs_graph() -> (Graph<(), ()>, [NodeId; 4]) {
-    let mut graph = Graph::new();
-    let root = graph.add_node(());
-    let left = graph.add_node(());
-    let right = graph.add_node(());
-    let merge = graph.add_node(());
-    graph.add_edge(root, left, ());
-    graph.add_edge(root, right, ());
-    graph.add_edge(left, merge, ());
-    graph.add_edge(right, merge, ());
-    graph.add_edge(right, right, ());
-    graph.add_edge(merge, root, ());
-    (graph, [root, left, right, merge])
-}
-
-fn bfs_events(graph: &Graph<(), ()>, start: NodeId) -> Vec<BfsEvent<NodeId>> {
-    let mut events = Vec::new();
-    let outcome = breadth_first_events(graph, start, Direction::Forward, |event| {
-        events.push(event);
-        ControlFlow::<()>::Continue(())
-    });
-    assert_eq!(outcome, None);
-    events
-}
-
-#[test]
-fn breadth_first_events_classify_edges_in_level_order() {
-    let (graph, [root, left, right, merge]) = bfs_graph();
-    assert_eq!(
-        bfs_events(&graph, root),
-        vec![
-            BfsEvent::Discover(root, 0),
-            BfsEvent::TreeEdge(root, left),
-            BfsEvent::Discover(left, 1),
-            BfsEvent::TreeEdge(root, right),
-            BfsEvent::Discover(right, 1),
-            BfsEvent::TreeEdge(left, merge),
-            BfsEvent::Discover(merge, 2),
-            BfsEvent::NonTreeEdge(right, merge),
-            BfsEvent::NonTreeEdge(right, right),
-            BfsEvent::NonTreeEdge(merge, root),
-        ]
-    );
-}
-
-#[test]
-fn breadth_first_events_follow_the_selected_axis() {
-    let mut graph = Graph::<(), ()>::new();
-    let first = graph.add_node(());
-    let middle = graph.add_node(());
-    let last = graph.add_node(());
-    graph.add_edge(first, middle, ());
-    graph.add_edge(middle, last, ());
-
-    let mut events = Vec::new();
-    let outcome = breadth_first_events(&graph, last, Direction::Backward, |event| {
-        events.push(event);
-        ControlFlow::<()>::Continue(())
-    });
-
-    assert_eq!(outcome, None);
-    assert_eq!(
-        events,
-        vec![
-            BfsEvent::Discover(last, 0),
-            BfsEvent::TreeEdge(last, middle),
-            BfsEvent::Discover(middle, 1),
-            BfsEvent::TreeEdge(middle, first),
-            BfsEvent::Discover(first, 2),
-        ]
-    );
-}
-
-#[test]
-fn breadth_first_events_stop_at_the_break_event() {
-    let (graph, [root, left, right, merge]) = bfs_graph();
-    let mut events = Vec::new();
-    let outcome = breadth_first_events(&graph, root, Direction::Forward, |event| {
-        events.push(event);
-        match event {
-            BfsEvent::NonTreeEdge(from, to) => ControlFlow::Break((from, to)),
-            _ => ControlFlow::Continue(()),
-        }
-    });
-
-    assert_eq!(outcome, Some((right, merge)));
-    assert_eq!(events.last(), Some(&BfsEvent::NonTreeEdge(right, merge)));
-    assert!(!events.contains(&BfsEvent::NonTreeEdge(merge, root)));
-    assert!(events.contains(&BfsEvent::TreeEdge(left, merge)));
-}
 
 /// `a -> b`, `a -> d`, `a -> c`, `b -> c`, `c -> a`, `d -> c`: one graph
 /// carrying all four edge classes.
@@ -211,6 +118,36 @@ fn depth_first_events_break_stops_the_walk() {
             DfsEvent::TreeEdge(b, c),
             DfsEvent::Discover(c, 2),
             DfsEvent::BackEdge(c, a),
+        ]
+    );
+}
+
+#[test]
+fn depth_first_events_follow_the_selected_axis() {
+    let mut graph = Graph::<(), ()>::new();
+    let first = graph.add_node(());
+    let middle = graph.add_node(());
+    let last = graph.add_node(());
+    graph.add_edge(first, middle, ());
+    graph.add_edge(middle, last, ());
+
+    let mut log = Vec::new();
+    let outcome = depth_first_events(&graph, last, Direction::Backward, |event| {
+        log.push(event);
+        ControlFlow::<()>::Continue(())
+    });
+    assert_eq!(outcome, None);
+    assert_eq!(
+        log,
+        vec![
+            DfsEvent::Discover(last, 0),
+            DfsEvent::TreeEdge(last, middle),
+            DfsEvent::Discover(middle, 1),
+            DfsEvent::TreeEdge(middle, first),
+            DfsEvent::Discover(first, 2),
+            DfsEvent::Finish(first),
+            DfsEvent::Finish(middle),
+            DfsEvent::Finish(last),
         ]
     );
 }

@@ -131,17 +131,6 @@ fn a_diamond_missing_an_arm_survives_every_whole_graph_analysis() {
         "a retired slot has an empty frontier"
     );
 
-    let reversed = crate::reverse_cfg(&cfg);
-    let reversed_report = verify(&reversed);
-    assert!(
-        reversed_report.is_ok(),
-        "the reverse of a holed CFG verifies: {:?}",
-        reversed_report.errors
-    );
-    assert_eq!(reversed.entry(), merge);
-    assert_eq!(reversed.block_count(), cfg.block_count());
-    assert_eq!(reversed.block_bound(), cfg.block_bound());
-
     cfg.compact();
     assert_eq!(cfg.block_bound(), cfg.block_count());
     assert!(verify(&cfg).is_ok());

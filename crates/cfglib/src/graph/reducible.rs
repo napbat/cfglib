@@ -27,8 +27,8 @@ use crate::cfg::Cfg;
 use crate::edge::{EdgeId, EdgeKind};
 use crate::graph::dominator::DominatorTree;
 use crate::graph::structure::find_irreducible_entry;
-use crate::graph::traverse::reachable_in;
-use crate::graph::view::Direction;
+use crate::graph::traverse::reachable;
+use crate::graph::view::{Direction, Induced};
 
 mod dispatch;
 
@@ -87,23 +87,15 @@ struct MultiEntryCycle {
 }
 
 /// The blocks of `cfg` that can be reached from `start` in `direction`
-/// without entering a block outside `within`.
+/// without entering a block outside `within`, which holds every block of
+/// `start`.
 fn closure<I, E>(
     cfg: &Cfg<I, E>,
     start: impl IntoIterator<Item = BlockId>,
     direction: Direction,
     within: &[bool],
 ) -> Vec<bool> {
-    let mut seen = Vec::new();
-    reachable_in(
-        cfg,
-        start,
-        direction,
-        Some(within),
-        &mut seen,
-        &mut Vec::new(),
-    );
-    seen
+    reachable(&Induced::new(cfg, within), start, direction)
 }
 
 /// The innermost cycle through `witness`, the target of a retreating edge,

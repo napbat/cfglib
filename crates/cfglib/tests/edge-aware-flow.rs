@@ -96,8 +96,7 @@ fn parallel_switch_and_continuation_edges_keep_identity_and_order() {
         [first_continuation, second_continuation]
     );
 
-    let steps = breadth_first_edges(&cfg, entry, Direction::Forward);
-    let ids: Vec<_> = steps.iter().map(|step| step.edge).collect();
+    let ids = breadth_first_edges(&cfg, entry, Direction::Forward);
     assert_eq!(
         ids,
         [default, case, first_continuation, second_continuation]

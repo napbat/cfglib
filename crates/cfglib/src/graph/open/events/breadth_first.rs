@@ -10,41 +10,6 @@ use crate::graph::search::{Visit, may_expand};
 
 use super::super::marks::Marks;
 
-/// Configuration for an [`open_breadth_first_events`] walk.
-///
-/// Breadth-first traversal always marks nodes globally: unlike a depth-first
-/// stack, its frontier has no unwind point at which a path mark could be
-/// released. The type therefore exposes only the meaningful depth bound.
-///
-/// Once-per-route semantics *breadth-first* is not impossible — it is a
-/// different algorithm. A frontier whose entries each carry their own route
-/// enumerates simple paths shortest-first, trading this walk's `O(nodes)`
-/// marks for a route tree that is exponential in the worst case, and its
-/// events carry the route to mean anything. That walk is
-/// [`open_breadth_first_paths`](super::super::open_breadth_first_paths), a
-/// separate entry point rather than a policy field here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct OpenBfsConfig {
-    /// Maximum depth to expand from, in hops from a seed. `None` is
-    /// unbounded; `Some(0)` discovers the seeds alone.
-    pub max_depth: Option<usize>,
-}
-
-impl OpenBfsConfig {
-    /// An unbounded breadth-first event walk.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self { max_depth: None }
-    }
-
-    /// Return this configuration bounded to `max_depth` hops from a seed.
-    #[must_use]
-    pub const fn with_max_depth(mut self, max_depth: usize) -> Self {
-        self.max_depth = Some(max_depth);
-        self
-    }
-}
-
 /// An event of an [`open_breadth_first_events`] walk.
 ///
 /// Nodes are reported by reference so the walk retains ownership of its
@@ -71,6 +36,13 @@ pub enum OpenBfsEvent<'a, N> {
 /// every call**. It pushes successors in their desired discovery order. Nodes
 /// are compared and marked by `Ord`.
 ///
+/// Breadth-first traversal always marks nodes globally: unlike a depth-first
+/// stack, its frontier has no unwind point at which a path mark could be
+/// released, so the depth bound is the walk's only setting. Once-per-route
+/// semantics breadth-first is a different algorithm, whose frontier entries
+/// each carry their own route:
+/// [`open_breadth_first_paths`](super::super::open_breadth_first_paths).
+///
 /// # Semantics
 ///
 /// - Seeds are discovered at depth zero in the order supplied. A duplicate
@@ -78,8 +50,9 @@ pub enum OpenBfsEvent<'a, N> {
 /// - Nodes are expanded level by level in discovery order. Successors are
 ///   discovered in the order the closure pushes them.
 /// - [`Visit::Skip`] prevents expansion without removing the node's mark.
-/// - `max_depth` bounds expansion, not discovery. A node at the bound still
-///   produces [`Discover`](OpenBfsEvent::Discover).
+/// - `max_depth` bounds expansion, not discovery: `None` is unbounded, and a
+///   node at the bound still produces [`Discover`](OpenBfsEvent::Discover),
+///   so `Some(0)` discovers the seeds alone.
 /// - A route to any previously discovered node produces `Refused`, including
 ///   routes to a node still waiting in the frontier.
 /// - [`ControlFlow::Break`] stops immediately and is returned as `Some(value)`.
@@ -89,7 +62,7 @@ pub enum OpenBfsEvent<'a, N> {
 /// ```
 /// use core::ops::ControlFlow;
 ///
-/// use cfglib::{OpenBfsConfig, OpenBfsEvent, Visit, open_breadth_first_events};
+/// use cfglib::{OpenBfsEvent, Visit, open_breadth_first_events};
 ///
 /// let successors = |node: &&'static str, out: &mut Vec<&'static str>| match *node {
 ///     "root" => out.extend(["left", "right"]),
@@ -101,7 +74,7 @@ pub enum OpenBfsEvent<'a, N> {
 /// let mut refused = Vec::new();
 /// let outcome = open_breadth_first_events::<_, ()>(
 ///     ["root"],
-///     OpenBfsConfig::new(),
+///     None,
 ///     successors,
 ///     |event| {
 ///         match event {
@@ -119,7 +92,7 @@ pub enum OpenBfsEvent<'a, N> {
 #[must_use]
 pub fn open_breadth_first_events<N: Clone + Ord, B>(
     seeds: impl IntoIterator<Item = N>,
-    config: OpenBfsConfig,
+    max_depth: Option<usize>,
     mut successors: impl FnMut(&N, &mut Vec<N>),
     mut on_event: impl FnMut(OpenBfsEvent<'_, N>) -> ControlFlow<B, Visit>,
 ) -> Option<B> {
@@ -128,7 +101,7 @@ pub fn open_breadth_first_events<N: Clone + Ord, B>(
 
     for seed in seeds {
         if let ControlFlow::Break(value) =
-            discover(seed, 0, config, &mut marks, &mut queue, &mut on_event)
+            discover(seed, 0, max_depth, &mut marks, &mut queue, &mut on_event)
         {
             return Some(value);
         }
@@ -142,7 +115,7 @@ pub fn open_breadth_first_events<N: Clone + Ord, B>(
             if let ControlFlow::Break(value) = discover(
                 next,
                 depth + 1,
-                config,
+                max_depth,
                 &mut marks,
                 &mut queue,
                 &mut on_event,
@@ -158,7 +131,7 @@ pub fn open_breadth_first_events<N: Clone + Ord, B>(
 fn discover<N: Clone + Ord, B>(
     node: N,
     depth: usize,
-    config: OpenBfsConfig,
+    max_depth: Option<usize>,
     marks: &mut Marks<N>,
     queue: &mut VecDeque<(N, usize)>,
     on_event: &mut impl FnMut(OpenBfsEvent<'_, N>) -> ControlFlow<B, Visit>,
@@ -172,7 +145,7 @@ fn discover<N: Clone + Ord, B>(
 
     match on_event(OpenBfsEvent::Discover(&node, depth)) {
         ControlFlow::Break(value) => ControlFlow::Break(value),
-        ControlFlow::Continue(Visit::Descend) if may_expand(config.max_depth, depth) => {
+        ControlFlow::Continue(Visit::Descend) if may_expand(max_depth, depth) => {
             queue.push_back((node, depth));
             ControlFlow::Continue(())
         }

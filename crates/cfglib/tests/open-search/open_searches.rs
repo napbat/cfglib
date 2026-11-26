@@ -2,7 +2,7 @@
 
 use std::ops::ControlFlow;
 
-use cfglib::{OpenSearchConfig, SearchOrder, Visit, VisitedPolicy, open_search};
+use cfglib::{SearchConfig, SearchOrder, Visit, VisitedPolicy, open_search};
 
 use crate::Lcg;
 use crate::reference::{Table, Visits, Walk, keep_all, table_successors};
@@ -10,7 +10,7 @@ use crate::spaces::{GRID_SIDE, binomial, collatz_successors, collatz_trajectory,
 
 fn open_visits(
     seeds: &[usize],
-    config: OpenSearchConfig,
+    config: SearchConfig,
     table: &Table,
     prune: &dyn Fn(usize) -> bool,
 ) -> Visits {
@@ -37,8 +37,11 @@ fn grid_visits(
     visited: VisitedPolicy,
     limit: Option<usize>,
 ) -> Vec<((u32, u32), usize)> {
-    let base = OpenSearchConfig::new(order).with_visited(visited);
-    let config = limit.map_or(base, |limit| base.with_max_depth(limit));
+    let config = SearchConfig {
+        order,
+        visited,
+        max_depth: limit,
+    };
     let mut visits = Vec::new();
     let outcome = open_search([(0_u32, 0_u32)], config, grid_successors, |node, depth| {
         visits.push((*node, depth));
@@ -59,7 +62,10 @@ fn a_chase_walks_the_collatz_sequence_of_27_without_any_graph() {
         let mut visits = Vec::new();
         let outcome = open_search(
             [27_u64],
-            OpenSearchConfig::new(order),
+            SearchConfig {
+                order,
+                ..SearchConfig::default()
+            },
             collatz_successors,
             |node, depth| {
                 visits.push((*node, depth));
@@ -86,7 +92,7 @@ fn skip_stops_expansion_and_the_pruned_node_is_never_probed_for_successors() {
     let mut visited = Vec::new();
     let outcome = open_search(
         [27_u64],
-        OpenSearchConfig::new(SearchOrder::DepthFirst),
+        SearchConfig::default(),
         |node: &u64, out: &mut Vec<u64>| {
             probed += 1;
             collatz_successors(node, out);
@@ -119,7 +125,10 @@ fn a_break_returns_its_value_at_the_first_match_and_nothing_is_visited_after_it(
     let mut visited = 0;
     let found = open_search(
         [27_u64],
-        OpenSearchConfig::new(SearchOrder::BreadthFirst),
+        SearchConfig {
+            order: SearchOrder::BreadthFirst,
+            ..SearchConfig::default()
+        },
         collatz_successors,
         |node, depth| {
             visited += 1;
@@ -138,7 +147,10 @@ fn a_break_returns_its_value_at_the_first_match_and_nothing_is_visited_after_it(
 fn max_depth_bounds_a_chase_by_hops_from_the_seed() {
     let trajectory = collatz_trajectory(27);
     for limit in [0, 1, 10, 50] {
-        let config = OpenSearchConfig::new(SearchOrder::DepthFirst).with_max_depth(limit);
+        let config = SearchConfig {
+            max_depth: Some(limit),
+            ..SearchConfig::default()
+        };
         let mut visited = Vec::new();
         let outcome = open_search([27_u64], config, collatz_successors, |node, _| {
             visited.push(*node);
@@ -213,17 +225,14 @@ fn open_search_over_a_table_visits_like_the_dense_reference_in_every_discipline(
     for seed in 1..=4 {
         let table = Table::random(&mut Lcg(seed), 30, 60);
         for limit in [None, Some(2), Some(5)] {
-            let with_limit = |config: OpenSearchConfig| {
-                limit.map_or(config, |limit| config.with_max_depth(limit))
+            let with_limit = |config: SearchConfig| SearchConfig {
+                max_depth: limit,
+                ..config
             };
             let seeds = [4, 11, 4];
             let walk = Walk::new(&table, limit, &prune);
-            let depth_first = open_visits(
-                &seeds,
-                with_limit(OpenSearchConfig::new(SearchOrder::DepthFirst)),
-                &table,
-                &prune,
-            );
+            let depth_first =
+                open_visits(&seeds, with_limit(SearchConfig::default()), &table, &prune);
             assert_eq!(
                 depth_first,
                 walk.depth_first(&seeds),
@@ -233,7 +242,10 @@ fn open_search_over_a_table_visits_like_the_dense_reference_in_every_discipline(
             let walk = Walk::new(&table, limit, &prune);
             let breadth_first = open_visits(
                 &seeds,
-                with_limit(OpenSearchConfig::new(SearchOrder::BreadthFirst)),
+                with_limit(SearchConfig {
+                    order: SearchOrder::BreadthFirst,
+                    ..SearchConfig::default()
+                }),
                 &table,
                 &prune,
             );
@@ -245,9 +257,11 @@ fn open_search_over_a_table_visits_like_the_dense_reference_in_every_discipline(
         }
 
         let routes = |limit| {
-            let config = OpenSearchConfig::new(SearchOrder::DepthFirst)
-                .with_visited(VisitedPolicy::Path)
-                .with_max_depth(limit);
+            let config = SearchConfig {
+                visited: VisitedPolicy::Path,
+                max_depth: Some(limit),
+                ..SearchConfig::default()
+            };
             open_visits(&[4, 11], config, &table, &keep_all)
         };
         assert_eq!(
@@ -262,13 +276,16 @@ fn no_seeds_means_no_visits_and_a_repeated_seed_restarts_only_under_path_marks()
     let table = Table {
         successors: vec![vec![1], vec![]],
     };
-    let global = OpenSearchConfig::new(SearchOrder::DepthFirst);
+    let global = SearchConfig::default();
     assert_eq!(open_visits(&[], global, &table, &keep_all).len(), 0);
     assert_eq!(
         open_visits(&[0, 0], global, &table, &keep_all),
         [(0, 0), (1, 1)]
     );
-    let path = global.with_visited(VisitedPolicy::Path);
+    let path = SearchConfig {
+        visited: VisitedPolicy::Path,
+        ..global
+    };
     assert_eq!(
         open_visits(&[0, 0], path, &table, &keep_all),
         [(0, 0), (1, 1), (0, 0), (1, 1)]
@@ -278,7 +295,11 @@ fn no_seeds_means_no_visits_and_a_repeated_seed_restarts_only_under_path_marks()
 #[test]
 #[should_panic(expected = "VisitedPolicy::Path requires SearchOrder::DepthFirst")]
 fn open_breadth_first_search_rejects_path_marks() {
-    let config = OpenSearchConfig::new(SearchOrder::BreadthFirst).with_visited(VisitedPolicy::Path);
+    let config = SearchConfig {
+        order: SearchOrder::BreadthFirst,
+        visited: VisitedPolicy::Path,
+        ..SearchConfig::default()
+    };
     let _ = open_search([0_u64], config, collatz_successors, |_, _| {
         ControlFlow::<(), Visit>::Continue(Visit::Descend)
     });

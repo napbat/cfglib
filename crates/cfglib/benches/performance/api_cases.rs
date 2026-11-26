@@ -33,8 +33,6 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "block_nesting_depths",
     "breadth_first",
     "breadth_first_edges",
-    "breadth_first_edges_with",
-    "breadth_first_events",
     "build_address_cfg",
     "call_graph",
     "call_graph_indexed",
@@ -51,7 +49,6 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "contract_edge_mapped",
     "control_dependence_graph",
     "depth_first_edges",
-    "depth_first_edges_with",
     "depth_first_events",
     "depth_first_postorder",
     "depth_first_preorder",
@@ -123,16 +120,14 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "resume_edge_problem",
     "resume_node_problem",
     "resume_problem",
-    "reverse_cfg",
     "reverse_postorder",
     "scan_predecessors",
     "search",
-    "search_with_marks",
-    "search_with_scratch",
+    "search_in",
     "shortest_path",
-    "shortest_path_bidirectional",
     "shortest_path_edges",
-    "shortest_path_edges_bidirectional",
+    "shortest_path_edges_in",
+    "shortest_path_in",
     "simplify",
     "simplify_mapped",
     "solve_edge_problem",
@@ -188,22 +183,14 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     address::register(suite);
     benchmark_coverage!(suite, "cfg_depth_first_preorder", [depth_first_preorder]);
     benchmark_coverage!(suite, "cfg_breadth_first", [breadth_first]);
-    benchmark_coverage!(
-        suite,
-        "directed_breadth_first_edges",
-        [breadth_first_edges, breadth_first_edges_with]
-    );
+    benchmark_coverage!(suite, "directed_breadth_first_edges", [breadth_first_edges]);
     benchmark_coverage!(suite, "directed_shortest_path", [shortest_path]);
     benchmark_coverage!(suite, "directed_shortest_path_edges", [shortest_path_edges]);
+    benchmark_coverage!(suite, "directed_shortest_path_in", [shortest_path_in]);
     benchmark_coverage!(
         suite,
-        "directed_shortest_path_bidirectional",
-        [shortest_path_bidirectional]
-    );
-    benchmark_coverage!(
-        suite,
-        "directed_shortest_path_edges_bidirectional",
-        [shortest_path_edges_bidirectional]
+        "directed_shortest_path_edges_in",
+        [shortest_path_edges_in]
     );
     benchmark_coverage!(
         suite,

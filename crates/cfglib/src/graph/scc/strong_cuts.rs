@@ -27,10 +27,7 @@ use alloc::vec::Vec;
 
 use crate::graph::dominator::{DominatorScratch, DominatorTree};
 use crate::graph::scc::tarjan_scc;
-use crate::graph::view::{DenseId, GraphView, Reversed};
-
-/// Marks a node outside the component being read.
-const OUTSIDE: u32 = u32::MAX;
+use crate::graph::view::{DenseId, GraphView, Positions, Renumbered, Reversed};
 
 /// The strong articulation points and strong bridges of a graph, or of one of
 /// its strongly connected components.
@@ -89,9 +86,8 @@ impl<N> Default for StrongCuts<N> {
 pub struct StrongCutScratch {
     /// The working storage of every dominator tree.
     dominators: DominatorScratch,
-    /// The position of each node in the component being read, [`OUTSIDE`]
-    /// for every other node.
-    local: Vec<u32>,
+    /// The position of each node in the component being read.
+    positions: Positions,
     /// Whether each node of the component was reached by the search that
     /// tests the root.
     reached: Vec<bool>,
@@ -186,24 +182,8 @@ fn collect<G: GraphView>(
     if component.len() < 2 {
         return;
     }
-    if scratch.local.len() < graph.node_bound() {
-        scratch.local.resize(graph.node_bound(), OUTSIDE);
-    }
-    for (position, &node) in component.iter().enumerate() {
-        let slot = &mut scratch.local[node.index()];
-        assert!(
-            *slot == OUTSIDE,
-            "node {} appears twice in the component",
-            node.index()
-        );
-        *slot = u32::try_from(position).expect("a component position fits in u32");
-    }
-
-    let view = Component {
-        graph,
-        nodes: component,
-        local: &scratch.local,
-    };
+    scratch.positions.number(graph.node_bound(), component);
+    let view = Renumbered::new(graph, component, &scratch.positions);
     let root = (0..component.len())
         .min_by_key(|&position| component[position].index())
         .expect("a component of two nodes has a lowest one");
@@ -241,9 +221,7 @@ fn collect<G: GraphView>(
         cuts.articulation_points.push(component[root]);
     }
 
-    for &node in component {
-        scratch.local[node.index()] = OUTSIDE;
-    }
+    scratch.positions.clear(component);
 }
 
 /// Whether one node of `view` other than `removed` reaches every other node
@@ -272,51 +250,6 @@ fn reaches_all_without<V: GraphView<NodeId = usize>>(
         }
     }
     count == view.node_bound()
-}
-
-/// One strongly connected component of a graph as a graph of its own, with
-/// its nodes renumbered by their position in the component.
-///
-/// Every edge of the graph between two nodes of the component is an edge of
-/// the view, once for each time the graph has it, and no other edge is.
-struct Component<'a, G: GraphView> {
-    graph: &'a G,
-    nodes: &'a [G::NodeId],
-    /// The position of each node of the graph in `nodes`, [`OUTSIDE`] for
-    /// every other node.
-    local: &'a [u32],
-}
-
-impl<G: GraphView> Component<'_, G> {
-    /// The position of `node`, when it belongs to the component.
-    fn position(&self, node: G::NodeId) -> Option<usize> {
-        let position = self.local[node.index()];
-        (position != OUTSIDE).then_some(position as usize)
-    }
-}
-
-impl<G: GraphView> GraphView for Component<'_, G> {
-    type NodeId = usize;
-
-    fn node_bound(&self) -> usize {
-        self.nodes.len()
-    }
-
-    fn node_ids(&self) -> impl Iterator<Item = usize> + '_ {
-        0..self.nodes.len()
-    }
-
-    fn successors(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
-        self.graph
-            .successors(self.nodes[node])
-            .filter_map(|next| self.position(next))
-    }
-
-    fn predecessors(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
-        self.graph
-            .predecessors(self.nodes[node])
-            .filter_map(|before| self.position(before))
-    }
 }
 
 #[cfg(test)]

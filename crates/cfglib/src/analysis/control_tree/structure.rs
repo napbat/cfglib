@@ -17,7 +17,7 @@ use crate::cfg::Cfg;
 use crate::edge::{EdgeId, EdgeKind};
 use crate::graph::dominator::{DominatorTree, PostDominatorTree};
 use crate::graph::loop_forest::LoopForest;
-use crate::graph::virtual_root::VirtualRoot;
+use crate::graph::view::VirtualRoot;
 use crate::region::{Handler, Region};
 use bound::Bound;
 use completion::Completion;

@@ -29,8 +29,7 @@ use alloc::vec::Vec;
 use super::super::{ABSENT, word};
 use crate::graph::scc::tarjan_scc;
 use crate::graph::traverse::reachable_in;
-use crate::graph::view::Direction;
-use crate::graph::view::{DenseId, GraphView};
+use crate::graph::view::{DenseId, Direction, GraphView, Induced};
 
 /// What the analysis finds and the finished post-dominator tree keeps.
 pub(crate) struct ExitStructure<N> {
@@ -169,7 +168,6 @@ impl CutBuffers {
             graph,
             [root],
             Direction::Forward,
-            None,
             &mut self.reachable,
             &mut self.stack,
         );
@@ -186,10 +184,9 @@ impl CutBuffers {
     fn mark_reaching<G: GraphView>(&mut self, graph: &G, exits: &[G::NodeId]) -> Vec<bool> {
         let mut reaching = Vec::new();
         reachable_in(
-            graph,
+            &Induced::new(graph, &self.reachable),
             exits.iter().copied(),
             Direction::Backward,
-            Some(&self.reachable),
             &mut reaching,
             &mut self.stack,
         );

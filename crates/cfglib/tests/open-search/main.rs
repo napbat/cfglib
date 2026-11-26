@@ -1,7 +1,7 @@
 //! Consumer scenario: the walks semctx and symtree-xref run over code-intelligence graphs.
 //!
-//! Dense walks (`search`, `search_with_scratch`, `search_with_marks`, `breadth_first_events`,
-//! `depth_first_events`) run over a `Graph` or any `GraphView`. Open walks (`open_search`,
+//! Dense walks (`search`, `search_in`, `depth_first_events`) run over a `Graph` or any
+//! `GraphView`. Open walks (`open_search`,
 //! `open_breadth_first_events`, `open_depth_first_events`, `open_breadth_first_paths`,
 //! `open_fold_post_order`, `follow`, `follow_path`) run over a node space that has no graph: the
 //! successor relation is a closure, and the space is generated lazily over `u64` keys or grid

@@ -9,10 +9,10 @@
 use std::ops::ControlFlow;
 
 use cfglib::{
-    DenseFanout, FoldEnter, MarkScope, OpenFixpointConfig, OpenFold, OpenFoldConfig,
-    OpenPathsConfig, OpenSearchConfig, SearchOrder, StackGraph, StackNodeId, StackReverseIndex,
-    StackSearchConfig, Visit, follow, open_breadth_first_paths, open_fold_fixpoint,
-    open_fold_post_order, open_fold_post_order_memoized, open_search,
+    DenseFanout, FoldEnter, MarkScope, OpenFixpointConfig, OpenFold, OpenFoldConfig, SearchConfig,
+    SearchOrder, StackGraph, StackNodeId, StackReverseIndex, StackSearchConfig, Visit, follow,
+    open_breadth_first_paths, open_fold_fixpoint, open_fold_post_order,
+    open_fold_post_order_memoized, open_search,
 };
 
 use super::BenchmarkSuite;
@@ -134,7 +134,10 @@ fn register_small_walks(suite: &mut BenchmarkSuite<'_>) {
                     let base = fixture_u32(walk) * 16;
                     let stopped = open_search(
                         [(base, 0), (base + 8, 0)],
-                        OpenSearchConfig::new(order),
+                        SearchConfig {
+                            order,
+                            ..SearchConfig::default()
+                        },
                         barrel,
                         |_, _| {
                             visited += 1;
@@ -207,7 +210,7 @@ fn register_layered(suite: &mut BenchmarkSuite<'_>) {
             let mut routes = 0_usize;
             let stopped = open_breadth_first_paths(
                 [0_usize],
-                OpenPathsConfig::new(),
+                None,
                 |node: &usize, out: &mut Vec<usize>| layered(*node, out),
                 |_| {
                     routes += 1;

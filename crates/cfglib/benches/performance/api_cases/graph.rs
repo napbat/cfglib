@@ -4,18 +4,17 @@ use std::ops::ControlFlow;
 
 use cfglib::{BlockId, canonical_hash, canonical_order, multiset_fingerprint, wl_colors};
 use cfglib::{
-    CallInfo, Cfg, Direction, DominatorTree, EdgeKind, EpochMarks, FoldEnter, Graph, GraphView,
-    MarkScope, NodeId, OpenBfsConfig, OpenDfsConfig, OpenFold, OpenFoldConfig, OpenPathsConfig,
-    OpenSearchConfig, Rooted, SearchConfig, SearchOrder, SearchScratch, SemanticValidator, Visit,
-    VisitedPolicy, breadth_first_events, call_graph, canonicalize_loops, condensation,
-    condensation_of, depth_first_edges, depth_first_events, depth_first_postorder,
-    detect_loops_tagged, find_back_edges_tagged, find_function, follow, follow_path,
-    insert_preheader, is_recursive_function, is_reducible, kosaraju_scc, loop_exit_blocks,
-    min_label_relaxation, open_breadth_first_events, open_breadth_first_paths,
-    open_depth_first_events, open_fold_post_order, open_search, propagate_summaries, reachable,
-    reverse_cfg, reverse_postorder, scan_predecessors, search, search_with_marks,
-    search_with_scratch, to_dot, to_text, topological_sort, topological_sort_or_cycle, verify,
-    verify_edge_view, verify_view, verify_with, write_dot, write_text,
+    CallInfo, Cfg, Direction, DominatorTree, EdgeKind, FoldEnter, Graph, GraphView, MarkScope,
+    NodeId, OpenFold, OpenFoldConfig, Rooted, SearchConfig, SearchOrder, SearchScratch,
+    SemanticValidator, Visit, call_graph, canonicalize_loops, condensation, condensation_of,
+    depth_first_edges, depth_first_events, depth_first_postorder, detect_loops_tagged,
+    find_back_edges_tagged, find_function, follow, follow_path, insert_preheader,
+    is_recursive_function, is_reducible, kosaraju_scc, loop_exit_blocks, min_label_relaxation,
+    open_breadth_first_events, open_breadth_first_paths, open_depth_first_events,
+    open_fold_post_order, open_search, propagate_summaries, reachable, reverse_postorder,
+    scan_predecessors, search, search_in, to_dot, to_text, topological_sort,
+    topological_sort_or_cycle, verify, verify_edge_view, verify_view, verify_with, write_dot,
+    write_text,
 };
 use cfglib::{
     DotEdgeAttributes, DotStyle, EdgeId, FunctionIndex, TextStyle, bind_edge_attributes,
@@ -130,26 +129,9 @@ fn register_dense_traversals(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_depth_first_edges",
-        covers [depth_first_edges, depth_first_edges_with],
+        covers[depth_first_edges],
         || depth_first_edges(&graph, root, Direction::Forward),
         |steps: &Vec<_>| assert_ne!(steps.as_slice(), [])
-    );
-    benchmark_case!(
-        suite,
-        "api_breadth_first_events",
-        covers[breadth_first_events],
-        || {
-            let mut events = 0_usize;
-            let stopped = breadth_first_events(&graph, root, Direction::Forward, |_| {
-                events += 1;
-                ControlFlow::<()>::Continue(())
-            });
-            (stopped, events)
-        },
-        |(stopped, events)| {
-            assert!(stopped.is_none());
-            assert!(*events >= NODE_COUNT);
-        }
     );
     benchmark_case!(
         suite,
@@ -174,14 +156,17 @@ fn register_dense_searches(suite: &mut BenchmarkSuite<'_>) {
     let graph = branchy_graph(NODE_COUNT);
     let root = cfglib::NodeId::from_raw(0);
 
-    let config = SearchConfig::new(SearchOrder::BreadthFirst, Direction::Forward);
+    let config = SearchConfig {
+        order: SearchOrder::BreadthFirst,
+        ..SearchConfig::default()
+    };
     benchmark_case!(
         suite,
         "api_search",
         covers[search],
         || {
             let mut visited = 0_usize;
-            let stopped = search(&graph, [root], config, |_, _| {
+            let stopped = search(&graph, [root], Direction::Forward, config, |_, _| {
                 visited += 1;
                 ControlFlow::<(), _>::Continue(Visit::Descend)
             });
@@ -193,33 +178,15 @@ fn register_dense_searches(suite: &mut BenchmarkSuite<'_>) {
         }
     );
 
-    let mut marks = EpochMarks::new(NODE_COUNT);
+    let mut scratch = SearchScratch::default();
     benchmark_case!(
         suite,
-        "api_search_with_marks",
-        covers[search_with_marks],
+        "api_search_in",
+        covers[search_in],
         || {
             let mut visited = 0_usize;
-            let stopped = search_with_marks(&graph, [root], config, &mut marks, |_, _| {
-                visited += 1;
-                ControlFlow::<(), _>::Continue(Visit::Descend)
-            });
-            (stopped, visited)
-        },
-        |(stopped, visited)| {
-            assert!(stopped.is_none());
-            assert_eq!(*visited, NODE_COUNT);
-        }
-    );
-
-    let mut scratch = SearchScratch::new(NODE_COUNT);
-    benchmark_case!(
-        suite,
-        "api_search_with_scratch",
-        covers[search_with_scratch],
-        || {
-            let mut visited = 0_usize;
-            let stopped = search_with_scratch(&graph, [root], config, &mut scratch, |_, _| {
+            let forward = Direction::Forward;
+            let stopped = search_in(&mut scratch, &graph, [root], forward, config, |_, _| {
                 visited += 1;
                 ControlFlow::<(), _>::Continue(Visit::Descend)
             });
@@ -265,11 +232,10 @@ fn register_open_traversals(suite: &mut BenchmarkSuite<'_>) {
         covers[open_breadth_first_events],
         || {
             let mut visited = 0_usize;
-            let stopped =
-                open_breadth_first_events([0_usize], OpenBfsConfig::new(), successors, |_| {
-                    visited += 1;
-                    ControlFlow::<(), _>::Continue(Visit::Descend)
-                });
+            let stopped = open_breadth_first_events([0_usize], None, successors, |_| {
+                visited += 1;
+                ControlFlow::<(), _>::Continue(Visit::Descend)
+            });
             (stopped, visited)
         },
         |(stopped, visited)| {
@@ -283,15 +249,11 @@ fn register_open_traversals(suite: &mut BenchmarkSuite<'_>) {
         covers[open_depth_first_events],
         || {
             let mut events = 0_usize;
-            let stopped = open_depth_first_events(
-                [0_usize],
-                OpenDfsConfig::new(VisitedPolicy::Global),
-                successors,
-                |_| {
+            let stopped =
+                open_depth_first_events([0_usize], SearchConfig::default(), successors, |_| {
                     events += 1;
                     ControlFlow::<(), _>::Continue(Visit::Descend)
-                },
-            );
+                });
             (stopped, events)
         },
         |(stopped, events)| {
@@ -305,11 +267,10 @@ fn register_open_traversals(suite: &mut BenchmarkSuite<'_>) {
         covers[open_breadth_first_paths],
         || {
             let mut routes = 0_usize;
-            let stopped =
-                open_breadth_first_paths([0_usize], OpenPathsConfig::new(), successors, |_| {
-                    routes += 1;
-                    ControlFlow::<(), _>::Continue(Visit::Descend)
-                });
+            let stopped = open_breadth_first_paths([0_usize], None, successors, |_| {
+                routes += 1;
+                ControlFlow::<(), _>::Continue(Visit::Descend)
+            });
             (stopped, routes)
         },
         |(stopped, routes)| {
@@ -330,15 +291,10 @@ fn register_open_traversals(suite: &mut BenchmarkSuite<'_>) {
         covers[open_search],
         || {
             let mut visited = 0_usize;
-            let stopped = open_search(
-                [0_usize],
-                OpenSearchConfig::new(SearchOrder::DepthFirst),
-                successors,
-                |_, _| {
-                    visited += 1;
-                    ControlFlow::<(), _>::Continue(Visit::Descend)
-                },
-            );
+            let stopped = open_search([0_usize], SearchConfig::default(), successors, |_, _| {
+                visited += 1;
+                ControlFlow::<(), _>::Continue(Visit::Descend)
+            });
             (stopped, visited)
         },
         |(stopped, visited)| {
@@ -482,13 +438,6 @@ fn register_cfg_graphs(suite: &mut BenchmarkSuite<'_>) {
     let graph = branchy_graph(NODE_COUNT);
     let rooted = Rooted::new(&graph, cfglib::NodeId::from_raw(0));
 
-    benchmark_case!(
-        suite,
-        "api_reverse_cfg",
-        covers[reverse_cfg],
-        || reverse_cfg(&cfg),
-        |reversed| assert!(verify(reversed).is_ok())
-    );
     benchmark_case!(
         suite,
         "api_verify",

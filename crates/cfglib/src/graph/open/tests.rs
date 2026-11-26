@@ -37,7 +37,7 @@ fn barrels(named_first: bool) -> impl FnMut(&Export, &mut Vec<Export>) {
 fn first_definition(named_first: bool) -> Option<Export> {
     open_search(
         [(0, "Widget")],
-        OpenSearchConfig::new(SearchOrder::DepthFirst),
+        SearchConfig::default(),
         barrels(named_first),
         |node, _| {
             if node.0 == 1 || node.0 == 3 {
@@ -62,7 +62,7 @@ fn an_open_chase_visits_lazily_minted_nodes_in_order() {
     let mut seen = Vec::new();
     let outcome = open_search(
         [(0, "Widget")],
-        OpenSearchConfig::new(SearchOrder::DepthFirst),
+        SearchConfig::default(),
         barrels(true),
         |node, depth| {
             seen.push((*node, depth));
@@ -88,7 +88,7 @@ fn skip_prunes_before_the_successors_are_discovered() {
     let mut seen = Vec::new();
     let outcome = open_search(
         [(0, "Widget")],
-        OpenSearchConfig::new(SearchOrder::DepthFirst),
+        SearchConfig::default(),
         |node: &Export, out: &mut Vec<Export>| {
             expanded.push(*node);
             barrels(true)(node, out);
@@ -114,7 +114,10 @@ fn max_depth_bounds_the_open_walk() {
         let mut seen = Vec::new();
         let outcome = open_search(
             [(0, "Widget")],
-            OpenSearchConfig::new(SearchOrder::DepthFirst).with_max_depth(max_depth),
+            SearchConfig {
+                max_depth: Some(max_depth),
+                ..SearchConfig::default()
+            },
             barrels(true),
             |node, _| {
                 seen.push(*node);
@@ -142,7 +145,7 @@ fn diamond(node: &&'static str, out: &mut Vec<&'static str>) {
     }
 }
 
-fn open_visits(config: OpenSearchConfig) -> Vec<(&'static str, usize)> {
+fn open_visits(config: SearchConfig) -> Vec<(&'static str, usize)> {
     let mut seen = Vec::new();
     let outcome = open_search(["a"], config, diamond, |node, depth| {
         seen.push((*node, depth));
@@ -155,15 +158,16 @@ fn open_visits(config: OpenSearchConfig) -> Vec<(&'static str, usize)> {
 #[test]
 fn path_policy_revisits_an_open_node_once_per_route() {
     assert_eq!(
-        open_visits(OpenSearchConfig::new(SearchOrder::DepthFirst)),
+        open_visits(SearchConfig::default()),
         vec![("a", 0), ("b", 1), ("d", 2), ("c", 1)]
     );
     // Both routes into `d` are reported — the answer a globally marked
     // walk silently drops.
     assert_eq!(
-        open_visits(
-            OpenSearchConfig::new(SearchOrder::DepthFirst).with_visited(VisitedPolicy::Path)
-        ),
+        open_visits(SearchConfig {
+            visited: VisitedPolicy::Path,
+            ..SearchConfig::default()
+        }),
         vec![("a", 0), ("b", 1), ("d", 2), ("c", 1), ("d", 2)]
     );
 }
@@ -181,16 +185,19 @@ fn an_open_cycle_terminates_under_both_policies() {
         seen
     };
 
+    assert_eq!(visits(SearchConfig::default()), vec![0, 1, 2]);
     assert_eq!(
-        visits(OpenSearchConfig::new(SearchOrder::DepthFirst)),
+        visits(SearchConfig {
+            order: SearchOrder::BreadthFirst,
+            ..SearchConfig::default()
+        }),
         vec![0, 1, 2]
     );
     assert_eq!(
-        visits(OpenSearchConfig::new(SearchOrder::BreadthFirst)),
-        vec![0, 1, 2]
-    );
-    assert_eq!(
-        visits(OpenSearchConfig::new(SearchOrder::DepthFirst).with_visited(VisitedPolicy::Path)),
+        visits(SearchConfig {
+            visited: VisitedPolicy::Path,
+            ..SearchConfig::default()
+        }),
         vec![0, 1, 2]
     );
 }
@@ -220,7 +227,7 @@ fn ordered_emission_reproduces_a_caller_defined_interleaving() {
     let mut emitted = Vec::new();
     let outcome = open_search(
         [(0, "file")],
-        OpenSearchConfig::new(SearchOrder::DepthFirst),
+        SearchConfig::default(),
         successors,
         |node, _| {
             emitted.push(*node);
@@ -248,7 +255,11 @@ fn ordered_emission_reproduces_a_caller_defined_interleaving() {
 fn breadth_first_with_path_marks_is_rejected() {
     let _ = open_search(
         ["a"],
-        OpenSearchConfig::new(SearchOrder::BreadthFirst).with_visited(VisitedPolicy::Path),
+        SearchConfig {
+            order: SearchOrder::BreadthFirst,
+            visited: VisitedPolicy::Path,
+            ..SearchConfig::default()
+        },
         diamond,
         |_, _| ControlFlow::<(), _>::Continue(Visit::Descend),
     );
@@ -285,10 +296,10 @@ fn the_open_search_matches_the_dense_search_node_for_node() {
                 let outcome = search(
                     &graph,
                     [a],
+                    Direction::Forward,
                     SearchConfig {
                         order,
                         visited,
-                        direction: Direction::Forward,
                         max_depth,
                     },
                     |node, depth| {
@@ -301,7 +312,7 @@ fn the_open_search_matches_the_dense_search_node_for_node() {
                 let mut open = Vec::new();
                 let outcome = open_search(
                     [a.index()],
-                    OpenSearchConfig {
+                    SearchConfig {
                         order,
                         visited,
                         max_depth,
@@ -355,10 +366,10 @@ fn the_open_search_matches_the_dense_one_past_its_inline_marks() {
         let outcome = search(
             &graph,
             seeds.iter().map(|&seed| NodeId::from_index(seed)),
+            Direction::Forward,
             SearchConfig {
                 order,
                 visited,
-                direction: Direction::Forward,
                 max_depth: None,
             },
             |node, depth| {
@@ -371,7 +382,7 @@ fn the_open_search_matches_the_dense_one_past_its_inline_marks() {
         let mut open = Vec::new();
         let outcome = open_search(
             seeds.iter().copied(),
-            OpenSearchConfig {
+            SearchConfig {
                 order,
                 visited,
                 max_depth: None,
@@ -415,7 +426,7 @@ fn seen<N: Clone>(event: &OpenDfsEvent<'_, N>) -> Seen<N> {
 /// Run an events walk to completion and return the sequence it emitted.
 fn open_events<N: Clone + Ord>(
     seeds: impl IntoIterator<Item = N>,
-    config: OpenDfsConfig,
+    config: SearchConfig,
     successors: impl FnMut(&N, &mut Vec<N>),
 ) -> Vec<Seen<N>> {
     let mut events = Vec::new();
@@ -440,7 +451,7 @@ fn tree(node: &&'static str, out: &mut Vec<&'static str>) {
 #[test]
 fn an_open_events_walk_finishes_strictly_last_in_first_out() {
     assert_eq!(
-        open_events(["a"], OpenDfsConfig::new(VisitedPolicy::Global), tree),
+        open_events(["a"], SearchConfig::default(), tree),
         vec![
             Seen::Discover("a", 0),
             Seen::Discover("b", 1),
@@ -473,11 +484,7 @@ fn the_events_closure_is_handed_a_cleared_buffer() {
     };
 
     assert_eq!(
-        open_events(
-            [0_u32],
-            OpenDfsConfig::new(VisitedPolicy::Global),
-            successors
-        ),
+        open_events([0_u32], SearchConfig::default(), successors),
         vec![
             Seen::Discover(0, 0),
             Seen::Discover(1, 1),
@@ -498,7 +505,7 @@ fn path_marks_refold_a_shared_node_once_per_route() {
     // Globally marked, the second route into `d` is refused: the walk
     // reports it, but the fold below `c` gets nothing.
     assert_eq!(
-        open_events(["a"], OpenDfsConfig::new(VisitedPolicy::Global), diamond),
+        open_events(["a"], SearchConfig::default(), diamond),
         vec![
             Seen::Discover("a", 0),
             Seen::Discover("b", 1),
@@ -514,7 +521,14 @@ fn path_marks_refold_a_shared_node_once_per_route() {
     // Path marks release at `d`'s finish, so the route through `c` folds
     // it again — the second contribution a C++ ambiguity is made of.
     assert_eq!(
-        open_events(["a"], OpenDfsConfig::new(VisitedPolicy::Path), diamond),
+        open_events(
+            ["a"],
+            SearchConfig {
+                visited: VisitedPolicy::Path,
+                ..SearchConfig::default()
+            },
+            diamond
+        ),
         vec![
             Seen::Discover("a", 0),
             Seen::Discover("b", 1),
@@ -536,7 +550,7 @@ fn a_pruned_node_finishes_immediately_and_is_never_expanded() {
     let mut events = Vec::new();
     let outcome = open_depth_first_events(
         ["a"],
-        OpenDfsConfig::new(VisitedPolicy::Global),
+        SearchConfig::default(),
         |node: &&'static str, out: &mut Vec<&'static str>| {
             expanded.push(*node);
             tree(node, out);
@@ -575,7 +589,10 @@ fn max_depth_bounds_expansion_not_visiting() {
     let mut events = Vec::new();
     let outcome = open_depth_first_events(
         ["a"],
-        OpenDfsConfig::new(VisitedPolicy::Global).with_max_depth(1),
+        SearchConfig {
+            max_depth: Some(1),
+            ..SearchConfig::default()
+        },
         |node: &&'static str, out: &mut Vec<&'static str>| {
             expanded.push(*node);
             tree(node, out);
@@ -618,25 +635,25 @@ fn a_cycle_is_refused_rather_than_re_entered() {
     // being walked, which is what a consumer diagnosing a cyclic base or
     // import graph reports.
     assert_eq!(
-        open_events([0_u32], OpenDfsConfig::new(VisitedPolicy::Path), ring),
+        open_events(
+            [0_u32],
+            SearchConfig {
+                visited: VisitedPolicy::Path,
+                ..SearchConfig::default()
+            },
+            ring
+        ),
         closed
     );
     // Under `Global` the same event says only that `0` was entered
     // earlier — here, the same node.
-    assert_eq!(
-        open_events([0_u32], OpenDfsConfig::new(VisitedPolicy::Global), ring),
-        closed
-    );
+    assert_eq!(open_events([0_u32], SearchConfig::default(), ring), closed);
 }
 
 #[test]
 fn a_repeated_seed_is_refused_globally_and_walked_again_on_a_fresh_path() {
     assert_eq!(
-        open_events(
-            ["b", "b"],
-            OpenDfsConfig::new(VisitedPolicy::Global),
-            diamond
-        ),
+        open_events(["b", "b"], SearchConfig::default(), diamond),
         vec![
             Seen::Discover("b", 0),
             Seen::Discover("d", 1),
@@ -648,7 +665,14 @@ fn a_repeated_seed_is_refused_globally_and_walked_again_on_a_fresh_path() {
     // The stack is empty between seeds, so every path mark has been
     // released and the second seed walks the same route again.
     assert_eq!(
-        open_events(["b", "b"], OpenDfsConfig::new(VisitedPolicy::Path), diamond),
+        open_events(
+            ["b", "b"],
+            SearchConfig {
+                visited: VisitedPolicy::Path,
+                ..SearchConfig::default()
+            },
+            diamond
+        ),
         vec![
             Seen::Discover("b", 0),
             Seen::Discover("d", 1),
@@ -666,19 +690,14 @@ fn a_repeated_seed_is_refused_globally_and_walked_again_on_a_fresh_path() {
 fn breaking_at_a_discover_or_a_finish_abandons_the_open_frames() {
     let broken_at = |target: Seen<&'static str>| {
         let mut events = Vec::new();
-        let outcome = open_depth_first_events(
-            ["a"],
-            OpenDfsConfig::new(VisitedPolicy::Global),
-            tree,
-            |event| {
-                let event = seen(&event);
-                events.push(event.clone());
-                if event == target {
-                    return ControlFlow::Break("stopped");
-                }
-                ControlFlow::Continue(Visit::Descend)
-            },
-        );
+        let outcome = open_depth_first_events(["a"], SearchConfig::default(), tree, |event| {
+            let event = seen(&event);
+            events.push(event.clone());
+            if event == target {
+                return ControlFlow::Break("stopped");
+            }
+            ControlFlow::Continue(Visit::Descend)
+        });
         assert_eq!(outcome, Some("stopped"));
         events
     };
@@ -725,7 +744,7 @@ fn the_open_events_walk_matches_the_dense_one_event_for_event() {
 
     let events = open_events(
         [a.index()],
-        OpenDfsConfig::new(VisitedPolicy::Global),
+        SearchConfig::default(),
         |node: &usize, out: &mut Vec<usize>| {
             out.extend(
                 graph
@@ -783,7 +802,10 @@ fn member_lookup(
     let mut answer = Lookup::Nothing;
     let outcome = open_depth_first_events(
         [class],
-        OpenDfsConfig::new(visited),
+        SearchConfig {
+            visited,
+            ..SearchConfig::default()
+        },
         |node: &&'static str, out: &mut Vec<&'static str>| {
             searched.push(*node);
             diamond(node, out);
@@ -866,7 +888,7 @@ fn events_follow_levels_and_report_every_refused_route() {
     let mut events = Vec::new();
     let outcome = open_breadth_first_events(
         [0],
-        OpenBfsConfig::new(),
+        None,
         |node, out| {
             assert_eq!(out.as_slice(), [0_u32; 0]);
             match node {
@@ -902,7 +924,7 @@ fn skipping_and_depth_bounds_prevent_successor_discovery() {
     let mut events = Vec::new();
     let outcome = open_breadth_first_events(
         [0],
-        OpenBfsConfig::new().with_max_depth(2),
+        Some(2),
         |node, out| {
             expanded.push(*node);
             out.push(node + 1);
@@ -926,7 +948,7 @@ fn skipping_and_depth_bounds_prevent_successor_discovery() {
     let mut bounded = Vec::new();
     let outcome = open_breadth_first_events(
         [0],
-        OpenBfsConfig::new().with_max_depth(2),
+        Some(2),
         |node, out| out.push(node + 1),
         |event| {
             bounded.push(bfs_seen(event));
@@ -949,7 +971,7 @@ fn duplicate_seeds_and_early_break_are_observable() {
     let mut events = Vec::new();
     let outcome = open_breadth_first_events(
         [0, 0],
-        OpenBfsConfig::new(),
+        None,
         |node, out| out.extend([node + 1, node + 2]),
         |event| {
             events.push(bfs_seen(event));

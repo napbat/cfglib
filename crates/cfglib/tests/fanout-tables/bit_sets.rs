@@ -1,11 +1,11 @@
-//! `DenseBits`, `EpochSet` and `EpochMarks`: the dense sets and visited marks kept beside a table.
+//! `DenseBits` and `EpochMarks`: the dense sets and visited marks kept beside a table.
 
 use std::collections::{BTreeSet, HashSet};
 use std::ops::ControlFlow;
 
 use cfglib::{
-    DenseBits, Direction, EpochMarks, EpochSet, Graph, NodeId, SearchConfig, SearchOrder, Visit,
-    reachable, search_with_marks,
+    DenseBits, Direction, EpochMarks, Graph, NodeId, SearchConfig, SearchOrder, SearchScratch,
+    Visit, reachable, search_in,
 };
 
 use crate::Lcg;
@@ -268,81 +268,15 @@ fn union_with_is_the_join_of_a_reachability_fixpoint_and_its_change_report_ends_
 }
 
 #[test]
-fn an_epoch_set_reports_novelty_and_yields_members_in_insertion_order() {
-    let mut visited = EpochSet::new(64);
-    assert!(visited.insert(7));
-    assert!(!visited.insert(7), "a second insert is a no-op");
-    assert!(visited.insert(3));
-    assert!(visited.insert(60));
-    assert!(visited.contains(7) && visited.contains(3) && !visited.contains(4));
-    assert_eq!(
-        visited.ones().collect::<Vec<_>>(),
-        [7, 3, 60],
-        "insertion order, not ascending"
-    );
-    assert_eq!(visited.capacity(), 64);
-
-    visited.clear();
-    assert!(!visited.contains(7));
-    assert_eq!(visited.ones().count(), 0);
-    assert_eq!(visited.capacity(), 64);
-    assert!(visited.insert(7), "a cleared member is new again");
-}
-
-#[test]
-fn one_epoch_set_reused_over_many_problems_matches_a_fresh_oracle_each_time() {
-    let universe = 128;
-    let mut rng = Lcg(31);
-    let mut set = EpochSet::new(universe + 40);
-    for round in 0..600 {
-        set.clear();
-        let draws = rng.below(30);
-        let mut order: Vec<usize> = Vec::new();
-        let mut oracle = BTreeSet::new();
-        for _ in 0..draws {
-            let index = rng.below(universe);
-            let novel = oracle.insert(index);
-            assert_eq!(set.insert(index), novel, "round {round}");
-            if novel {
-                order.push(index);
-            }
-        }
-
-        assert_eq!(set.ones().collect::<Vec<_>>(), order, "round {round}");
-        for index in 0..universe {
-            assert_eq!(
-                set.contains(index),
-                oracle.contains(&index),
-                "round {round}, index {index}"
-            );
-        }
-        assert_eq!(set.capacity(), universe + 40, "reuse never resizes");
-    }
-}
-
-#[test]
-#[should_panic(expected = "outside universe")]
-fn inserting_outside_an_epoch_sets_universe_panics() {
-    EpochSet::new(4).insert(4);
-}
-
-#[test]
-#[should_panic(expected = "outside universe")]
-fn asking_an_epoch_set_about_an_index_outside_its_universe_panics() {
-    let _ = EpochSet::new(4).contains(4);
-}
-
-#[test]
-fn epoch_marks_report_the_universe_they_were_sized_for() {
-    assert_eq!(EpochMarks::new(64).capacity(), 64);
-    assert_eq!(
-        EpochMarks::default().capacity(),
-        0,
-        "sized on first use by a consumer that rebuilds it"
-    );
-    assert_eq!(EpochMarks::new(0).capacity(), 0);
-    let marks = EpochMarks::new(9);
-    assert_eq!(marks.clone().capacity(), marks.capacity());
+fn epoch_marks_grow_to_the_universe_they_are_asked_for() {
+    let mut marks = EpochMarks::default();
+    marks.grow_to(9);
+    marks.mark(8);
+    assert!(marks.is_marked(8));
+    marks.grow_to(4);
+    assert!(marks.is_marked(8), "growing never shrinks or clears");
+    marks.reset();
+    assert!(!marks.is_marked(8));
 }
 
 /// A random graph over `count` nodes.
@@ -355,22 +289,32 @@ fn random_graph(rng: &mut Lcg, count: usize, edges: usize) -> Graph<(), ()> {
     graph
 }
 
-fn closure_of(graph: &Graph<(), ()>, root: NodeId, marks: &mut EpochMarks) -> Vec<bool> {
-    let config = SearchConfig::new(SearchOrder::BreadthFirst, Direction::Forward);
+fn closure_of(graph: &Graph<(), ()>, root: NodeId, scratch: &mut SearchScratch) -> Vec<bool> {
+    let config = SearchConfig {
+        order: SearchOrder::BreadthFirst,
+        ..SearchConfig::default()
+    };
     let mut closure = vec![false; graph.node_bound()];
-    let outcome = search_with_marks(graph, [root], config, marks, |node, _depth| {
-        closure[node.index()] = true;
-        ControlFlow::<(), Visit>::Continue(Visit::Descend)
-    });
+    let outcome = search_in(
+        scratch,
+        graph,
+        [root],
+        Direction::Forward,
+        config,
+        |node, _depth| {
+            closure[node.index()] = true;
+            ControlFlow::<(), Visit>::Continue(Visit::Descend)
+        },
+    );
     assert_eq!(outcome, None);
     closure
 }
 
 #[test]
-fn one_marks_buffer_serves_a_closure_per_root_pass_like_a_fresh_buffer_per_root() {
+fn one_scratch_serves_a_closure_per_root_pass_like_a_fresh_buffer_per_root() {
     let mut rng = Lcg(90);
     let graph = random_graph(&mut rng, 70, 120);
-    let mut marks = EpochMarks::new(graph.node_bound() + 30);
+    let mut marks = SearchScratch::default();
 
     for root in graph.node_ids() {
         let closure = closure_of(&graph, root, &mut marks);
@@ -387,15 +331,16 @@ fn one_marks_buffer_serves_a_closure_per_root_pass_like_a_fresh_buffer_per_root(
         assert_eq!(
             closure_of(&small, root, &mut marks),
             reachable(&small, [root], Direction::Forward),
-            "a buffer sized for a larger graph covers a smaller one"
+            "a scratch grown by a larger graph covers a smaller one"
         );
     }
-}
 
-#[test]
-#[should_panic(expected = "visited marks cover")]
-fn a_marks_buffer_smaller_than_the_graph_is_a_panic_not_a_resize() {
-    let graph = random_graph(&mut Lcg(2), 12, 20);
-    let mut marks = EpochMarks::new(graph.node_bound() - 1);
-    let _ = closure_of(&graph, graph.node_ids().next().expect("a node"), &mut marks);
+    let large = random_graph(&mut rng, 140, 260);
+    for root in large.node_ids().take(20) {
+        assert_eq!(
+            closure_of(&large, root, &mut marks),
+            reachable(&large, [root], Direction::Forward),
+            "a scratch smaller than the graph grows on entry"
+        );
+    }
 }

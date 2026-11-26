@@ -20,8 +20,8 @@ use alloc::vec::Vec;
 
 use super::{DominatorScratch, DominatorTree};
 use crate::graph::scc::kosaraju_scc;
+use crate::graph::view::VirtualRoot;
 use crate::graph::view::{DenseId, RootedView};
-use crate::graph::virtual_root::VirtualRoot;
 
 #[cfg(test)]
 mod tests;

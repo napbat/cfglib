@@ -160,9 +160,8 @@ fn traversals_over_a_hole_equal_the_traversals_after_compaction() {
 }
 
 use cfglib::{
-    BfsEvent, DfsEvent, OpenBfsConfig, OpenBfsEvent, OpenDfsConfig, OpenDfsEvent, OpenSearchConfig,
-    SearchConfig, SearchOrder, Visit, VisitedPolicy, breadth_first_events, depth_first_events,
-    open_breadth_first_events, open_depth_first_events, open_search, search,
+    DfsEvent, OpenBfsEvent, OpenDfsEvent, SearchConfig, SearchOrder, Visit, VisitedPolicy,
+    depth_first_events, open_breadth_first_events, open_depth_first_events, open_search, search,
 };
 use core::ops::ControlFlow;
 
@@ -309,7 +308,12 @@ fn searched(
     let outcome = search(
         graph,
         [start],
-        SearchConfig::new(order, direction).with_visited(visited),
+        direction,
+        SearchConfig {
+            order,
+            visited,
+            ..SearchConfig::default()
+        },
         |node, depth| {
             visits.push((node, depth));
             ControlFlow::<(), _>::Continue(Visit::Descend)
@@ -330,7 +334,11 @@ fn open_searched(
     let mut visits = Vec::new();
     let outcome = open_search(
         [start],
-        OpenSearchConfig::new(order).with_visited(visited),
+        SearchConfig {
+            order,
+            visited,
+            ..SearchConfig::default()
+        },
         open_edges(graph, direction),
         |&node, depth| {
             visits.push((node, depth));
@@ -384,7 +392,10 @@ fn open_depth_first_walk(
     };
     let outcome = open_depth_first_events(
         [start],
-        OpenDfsConfig::new(visited),
+        SearchConfig {
+            visited,
+            ..SearchConfig::default()
+        },
         open_edges(graph, direction),
         |event| {
             match event {
@@ -399,39 +410,18 @@ fn open_depth_first_walk(
     walk
 }
 
-fn dense_breadth_first_events(
-    graph: &Graph<usize, ()>,
-    start: NodeId,
-    direction: Direction,
-) -> Vec<(NodeId, usize)> {
-    let mut discovered = Vec::new();
-    let outcome = breadth_first_events(graph, start, direction, |event| {
-        if let BfsEvent::Discover(node, depth) = event {
-            discovered.push((node, depth));
-        }
-        ControlFlow::<()>::Continue(())
-    });
-    assert_eq!(outcome, None);
-    discovered
-}
-
 fn open_breadth_first_walk(
     graph: &Graph<usize, ()>,
     start: NodeId,
     direction: Direction,
 ) -> Vec<(NodeId, usize)> {
     let mut discovered = Vec::new();
-    let outcome = open_breadth_first_events(
-        [start],
-        OpenBfsConfig::new(),
-        open_edges(graph, direction),
-        |event| {
-            if let OpenBfsEvent::Discover(&node, depth) = event {
-                discovered.push((node, depth));
-            }
-            ControlFlow::<(), _>::Continue(Visit::Descend)
-        },
-    );
+    let outcome = open_breadth_first_events([start], None, open_edges(graph, direction), |event| {
+        if let OpenBfsEvent::Discover(&node, depth) = event {
+            discovered.push((node, depth));
+        }
+        ControlFlow::<(), _>::Continue(Visit::Descend)
+    });
     assert_eq!(outcome, None);
     discovered
 }
@@ -507,9 +497,6 @@ fn every_breadth_first_walk_visits_the_same_nodes_in_the_same_order() {
                 direction,
             );
             assert_eq!(nodes_of(&searched), expected, "search: {context}");
-
-            let events = dense_breadth_first_events(&graph, start, direction);
-            assert_eq!(events, searched, "events: {context}");
 
             let open = open_searched(
                 &graph,

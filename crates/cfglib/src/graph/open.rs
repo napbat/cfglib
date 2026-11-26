@@ -11,10 +11,10 @@
 //! which nodes exist.
 //!
 //! [`open_search`] takes the successor relation as a closure and everything
-//! else from [`OpenSearchConfig`], so an open walk gets the same first-match,
-//! pruning, depth-bounding, and backtracking discipline as a dense one. The
-//! configuration is deliberately *reduced*: there is no `direction`, because
-//! the closure defines the edges and a direction field could only lie.
+//! else from the same [`SearchConfig`](crate::SearchConfig) a dense
+//! [`search`](crate::search) takes, so an open walk gets the same first-match,
+//! pruning, depth-bounding, and backtracking discipline as a dense one. There
+//! is no direction, because the closure defines the edges.
 //!
 //! [`open_breadth_first_events`] exposes the breadth-first tree as nodes are
 //! discovered and reports routes refused by its global marks.
@@ -72,17 +72,14 @@ mod marks;
 mod paths;
 mod search;
 
-pub use events::{
-    OpenBfsConfig, OpenBfsEvent, OpenDfsConfig, OpenDfsEvent, open_breadth_first_events,
-    open_depth_first_events,
-};
+pub use events::{OpenBfsEvent, OpenDfsEvent, open_breadth_first_events, open_depth_first_events};
 pub use fold::{
     FoldEnter, MarkScope, OpenFixpointConfig, OpenFixpointError, OpenFold, OpenFoldConfig,
     open_fold_fixpoint, open_fold_post_order, open_fold_post_order_memoized,
 };
 pub use follow::{follow, follow_path};
-pub use paths::{OpenPathsConfig, OpenPathsEvent, open_breadth_first_paths};
-pub use search::{OpenSearchConfig, open_search};
+pub use paths::{OpenPathsEvent, open_breadth_first_paths};
+pub use search::open_search;
 
 #[cfg(test)]
 mod tests;

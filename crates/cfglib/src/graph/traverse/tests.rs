@@ -1,29 +1,80 @@
 use super::*;
-use crate::edge::EdgeKind;
 use crate::graph::scc::tarjan_scc;
 use crate::graph::store::{Graph, NodeId};
-use crate::test_util::ff;
+use crate::graph::view::Induced;
 use crate::test_util::rng::Rng;
 use alloc::collections::BTreeSet;
 use alloc::vec;
 
-#[test]
-fn cfg_traversal_methods_delegate_to_generic_algorithms() {
-    let mut cfg = Cfg::new();
-    let middle = cfg.new_block();
-    let last = cfg.new_block();
-    cfg.block_mut(cfg.entry()).push(ff("entry"));
-    cfg.block_mut(middle).push(ff("middle"));
-    cfg.block_mut(last).push(ff("last"));
-    cfg.add_edge(cfg.entry(), middle, EdgeKind::Fallthrough);
-    cfg.add_edge(middle, last, EdgeKind::Fallthrough);
-
-    assert_eq!(cfg.depth_first_preorder(), vec![cfg.entry(), middle, last]);
-    assert_eq!(cfg.depth_first_postorder(), vec![last, middle, cfg.entry()]);
-    assert_eq!(cfg.reverse_postorder(), vec![cfg.entry(), middle, last]);
-    assert_eq!(cfg.breadth_first(), vec![cfg.entry(), middle, last]);
+/// The neighbors of `node` along `direction`, for the oracles below.
+fn neighbors(graph: &Graph<(), ()>, node: NodeId, direction: Direction) -> Vec<NodeId> {
+    match direction {
+        Direction::Forward => GraphView::successors(graph, node).collect(),
+        Direction::Backward => GraphView::predecessors(graph, node).collect(),
+    }
 }
 
+/// Recursive depth-first search: the definition the walks must reproduce.
+fn recursive_orders(
+    graph: &Graph<(), ()>,
+    node: NodeId,
+    direction: Direction,
+    seen: &mut [bool],
+    orders: &mut (Vec<NodeId>, Vec<NodeId>),
+) {
+    seen[node.index()] = true;
+    orders.0.push(node);
+    for next in neighbors(graph, node, direction) {
+        if !seen[next.index()] {
+            recursive_orders(graph, next, direction, seen, orders);
+        }
+    }
+    orders.1.push(node);
+}
+
+/// Breadth-first search over a plain queue.
+fn queue_order(graph: &Graph<(), ()>, start: NodeId, direction: Direction) -> Vec<NodeId> {
+    let mut seen = vec![false; graph.node_bound()];
+    let mut queue = alloc::collections::VecDeque::from([start]);
+    let mut order = Vec::new();
+    seen[start.index()] = true;
+    while let Some(node) = queue.pop_front() {
+        order.push(node);
+        for next in neighbors(graph, node, direction) {
+            if !core::mem::replace(&mut seen[next.index()], true) {
+                queue.push_back(next);
+            }
+        }
+    }
+    order
+}
+
+#[test]
+fn the_walks_match_their_definitions_on_random_multigraphs() {
+    let mut rng = Rng::new(97);
+    for _ in 0..200 {
+        let graph = random_graph(&mut rng);
+        for start in graph.node_ids() {
+            for direction in [Direction::Forward, Direction::Backward] {
+                let mut orders = (Vec::new(), Vec::new());
+                let mut seen = vec![false; graph.node_bound()];
+                recursive_orders(&graph, start, direction, &mut seen, &mut orders);
+                assert_eq!(depth_first_preorder(&graph, start, direction), orders.0);
+                assert_eq!(depth_first_postorder(&graph, start, direction), orders.1);
+                assert_eq!(
+                    breadth_first(&graph, start, direction),
+                    queue_order(&graph, start, direction)
+                );
+                let reached = reachable(&graph, [start], direction);
+                assert!(
+                    graph
+                        .node_ids()
+                        .all(|node| reached[node.index()] == seen[node.index()])
+                );
+            }
+        }
+    }
+}
 #[test]
 fn directed_graph_can_be_walked_in_both_directions() {
     let mut graph = Graph::<&str, ()>::new();
@@ -128,10 +179,9 @@ fn reachable_handles_self_loops() {
 fn reachable_in_gives_the_answer_of_reachable_over_reused_buffers() {
     let (graph, [a, _, c, d]) = reach_fixture();
     // Buffers left over from a bigger graph and a different walk: the call
-    // clears the one and resizes it to this graph's bound, and empties the
-    // other.
+    // clears both and resizes the marks to this graph's bound.
     let mut visited = vec![true; 9];
-    let mut stack = vec![7, 8];
+    let mut queue = vec![7, 8];
     for (seeds, direction) in [
         (vec![a], Direction::Forward),
         (vec![c], Direction::Backward),
@@ -142,61 +192,42 @@ fn reachable_in_gives_the_answer_of_reachable_over_reused_buffers() {
             &graph,
             seeds.iter().copied(),
             direction,
-            None,
             &mut visited,
-            &mut stack,
+            &mut queue,
         );
-        assert_eq!(visited, reachable(&graph, seeds, direction));
-        assert!(stack.is_empty(), "the walk leaves its stack empty");
+        let expected = reachable(&graph, seeds, direction);
+        assert_eq!(visited, expected);
+        assert_eq!(
+            queue.len(),
+            expected.iter().filter(|&&reached| reached).count(),
+            "the queue holds exactly the reached nodes"
+        );
     }
 }
 
 #[test]
-fn reachable_in_stays_inside_the_set_it_is_confined_to() {
-    // a -> b -> c -> d, and the confinement leaves `c` out.
+fn reachable_over_an_induced_view_stays_inside_its_set() {
+    // a -> b -> c -> d, and the set leaves `c` out.
     let mut graph = Graph::<(), ()>::new();
     let [a, b, c, d] = [(); 4].map(|()| graph.add_node(()));
     graph.add_edge(a, b, ());
     graph.add_edge(b, c, ());
     graph.add_edge(c, d, ());
     let within = [true, true, false, true];
-    let (mut visited, mut stack) = (Vec::new(), Vec::new());
+    let region = Induced::new(&graph, &within);
 
-    reachable_in(
-        &graph,
-        [a],
-        Direction::Forward,
-        Some(&within),
-        &mut visited,
-        &mut stack,
-    );
     assert_eq!(
-        visited,
+        reachable(&region, [a], Direction::Forward),
         [true, true, false, false],
         "the walk cannot pass c"
     );
-
-    // A seed outside the set is still visited, and walks on into it.
-    reachable_in(
-        &graph,
-        [c],
-        Direction::Forward,
-        Some(&within),
-        &mut visited,
-        &mut stack,
-    );
-    assert_eq!(visited, [false, false, true, true]);
-
-    reachable_in(
-        &graph,
-        [d],
-        Direction::Backward,
-        Some(&within),
-        &mut visited,
-        &mut stack,
+    // A seed outside the set is visited, and has no edges to walk on.
+    assert_eq!(
+        reachable(&region, [c], Direction::Forward),
+        [false, false, true, false]
     );
     assert_eq!(
-        visited,
+        reachable(&region, [d], Direction::Backward),
         [false, false, false, true],
         "c blocks the way back"
     );
@@ -210,7 +241,6 @@ fn reachable_in_rejects_a_seed_beyond_the_node_bound() {
         &graph,
         [NodeId::from_index(4)],
         Direction::Forward,
-        None,
         &mut Vec::new(),
         &mut Vec::new(),
     );

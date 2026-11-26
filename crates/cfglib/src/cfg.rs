@@ -19,6 +19,7 @@ mod mutation;
 mod regions;
 mod subgraph;
 mod text;
+mod traverse;
 mod view;
 
 /// The store a [`Cfg`] is built on: blocks as nodes, edges as edges.

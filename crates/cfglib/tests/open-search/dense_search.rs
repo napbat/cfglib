@@ -1,4 +1,4 @@
-//! `search`, `search_with_scratch` and `search_with_marks` over a dense `Graph`.
+//! `search` and `search_in` over a dense `Graph`.
 
 use std::ops::ControlFlow;
 
@@ -7,14 +7,27 @@ use cfglib::{Direction, Graph, NodeId, SearchConfig, SearchOrder, Visit, Visited
 use crate::Lcg;
 use crate::reference::{Table, Visits, Walk, keep_all, nodes_of, prune_multiples_of_five};
 
+/// A dense search's direction with its discipline.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Discipline {
+    pub(crate) direction: Direction,
+    pub(crate) config: SearchConfig,
+}
+
 pub(crate) fn config(
     order: SearchOrder,
     direction: Direction,
     visited: VisitedPolicy,
-    limit: Option<usize>,
-) -> SearchConfig {
-    let base = SearchConfig::new(order, direction).with_visited(visited);
-    limit.map_or(base, |limit| base.with_max_depth(limit))
+    max_depth: Option<usize>,
+) -> Discipline {
+    Discipline {
+        direction,
+        config: SearchConfig {
+            order,
+            visited,
+            max_depth,
+        },
+    }
 }
 
 fn verdict(prune: &dyn Fn(usize) -> bool, node: NodeId) -> ControlFlow<(), Visit> {
@@ -28,14 +41,15 @@ fn verdict(prune: &dyn Fn(usize) -> bool, node: NodeId) -> ControlFlow<(), Visit
 fn run_search(
     graph: &Graph<(), ()>,
     seeds: &[usize],
-    config: SearchConfig,
+    discipline: Discipline,
     prune: &dyn Fn(usize) -> bool,
 ) -> Visits {
     let mut visits = Vec::new();
     let outcome = search(
         graph,
         seeds.iter().map(|&seed| NodeId::from_index(seed)),
-        config,
+        discipline.direction,
+        discipline.config,
         |node, depth| {
             visits.push((node.index(), depth));
             verdict(prune, node)
@@ -321,7 +335,11 @@ fn a_break_ends_the_walk_with_its_value_and_visits_nothing_further() {
         let outcome = search(
             &graph,
             [NodeId::from_index(3)],
-            config(order, Direction::Forward, VisitedPolicy::Global, None),
+            Direction::Forward,
+            SearchConfig {
+                order,
+                ..SearchConfig::default()
+            },
             |node, depth| {
                 visits.push((node.index(), depth));
                 if node.index() == target {
@@ -351,7 +369,11 @@ fn the_first_match_depends_on_the_discipline() {
         search(
             &graph,
             [NodeId::from_index(0)],
-            SearchConfig::new(order, Direction::Forward),
+            Direction::Forward,
+            SearchConfig {
+                order,
+                ..SearchConfig::default()
+            },
             |node, depth| {
                 if table.successors[node.index()].is_empty() {
                     ControlFlow::Break((node.index(), depth))

@@ -1,6 +1,5 @@
 //! Graph storage and algorithms for code intelligence and program analysis.
 
-pub mod bidirectional;
 pub mod call_graph;
 pub mod cdg;
 pub mod coldness;
@@ -31,7 +30,6 @@ pub mod program_structure;
 pub mod reach_index;
 pub mod reducible;
 pub mod relax;
-pub mod reverse;
 pub mod scc;
 pub mod scope;
 pub mod search;
@@ -43,5 +41,4 @@ pub mod traverse;
 pub mod tree_decomposition;
 pub mod verify;
 pub mod view;
-pub(crate) mod virtual_root;
 pub mod weak_topological_order;

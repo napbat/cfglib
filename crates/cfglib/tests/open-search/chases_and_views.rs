@@ -276,18 +276,29 @@ fn a_backward_search_over_a_forward_only_view_visits_like_one_over_the_store() {
     let view = ForwardOnly::new(&table);
     let graph = table.graph();
     for order in [SearchOrder::DepthFirst, SearchOrder::BreadthFirst] {
-        let config = SearchConfig::new(order, Direction::Backward).with_max_depth(4);
+        let config = SearchConfig {
+            order,
+            max_depth: Some(4),
+            ..SearchConfig::default()
+        };
+        let backward = Direction::Backward;
         let mut along_view = Vec::new();
-        let outcome = search(&view, [5_usize], config, |node, depth| {
+        let outcome = search(&view, [5_usize], backward, config, |node, depth| {
             along_view.push((node, depth));
             ControlFlow::<(), Visit>::Continue(Visit::Descend)
         });
         assert_eq!(outcome, None);
         let mut along_graph = Vec::new();
-        let outcome = search(&graph, [NodeId::from_index(5)], config, |node, depth| {
-            along_graph.push((node.index(), depth));
-            ControlFlow::<(), Visit>::Continue(Visit::Descend)
-        });
+        let outcome = search(
+            &graph,
+            [NodeId::from_index(5)],
+            backward,
+            config,
+            |node, depth| {
+                along_graph.push((node.index(), depth));
+                ControlFlow::<(), Visit>::Continue(Visit::Descend)
+            },
+        );
         assert_eq!(outcome, None);
         assert_eq!(along_view, along_graph, "{order:?}");
     }

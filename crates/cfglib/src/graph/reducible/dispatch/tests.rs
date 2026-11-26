@@ -156,15 +156,7 @@ fn check_digraph(count: usize, edges: &[(usize, usize)], seed: u64) -> bool {
         .filter(|&lp| forest.is_irreducible(lp))
         .count();
     let reached_edges = {
-        let mut reached = Vec::new();
-        reachable_in(
-            &original,
-            [original.entry()],
-            Direction::Forward,
-            None,
-            &mut reached,
-            &mut Vec::new(),
-        );
+        let reached = reachable(&original, [original.entry()], Direction::Forward);
         edges.iter().filter(|&&(from, _)| reached[from]).count()
     };
 

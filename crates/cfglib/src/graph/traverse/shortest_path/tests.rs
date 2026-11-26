@@ -1,7 +1,6 @@
 use super::*;
-use crate::graph::edge_traverse::shortest_path_edges;
+use crate::graph::edge_traverse::{shortest_path_edges, shortest_path_edges_in};
 use crate::graph::store::{EdgeId, Graph, NodeId};
-use crate::graph::traverse::shortest_path;
 use crate::test_util::rng::Rng;
 use alloc::vec;
 use core::cell::Cell;
@@ -73,12 +72,38 @@ fn assert_edge_path(
     assert_eq!(at, to);
 }
 
+/// The hop count from `start` to `goal` along `direction`, by a plain
+/// breadth-first search written out here as the oracle.
+fn hop_count(
+    graph: &Graph<(), ()>,
+    start: NodeId,
+    goal: NodeId,
+    direction: Direction,
+) -> Option<usize> {
+    let mut distance = vec![usize::MAX; graph.node_bound()];
+    let mut queue = alloc::collections::VecDeque::from([start]);
+    distance[start.index()] = 0;
+    while let Some(node) = queue.pop_front() {
+        let next: Vec<NodeId> = match direction {
+            Direction::Forward => GraphView::successors(graph, node).collect(),
+            Direction::Backward => GraphView::predecessors(graph, node).collect(),
+        };
+        for neighbor in next {
+            if distance[neighbor.index()] == usize::MAX {
+                distance[neighbor.index()] = distance[node.index()] + 1;
+                queue.push_back(neighbor);
+            }
+        }
+    }
+    (distance[goal.index()] != usize::MAX).then_some(distance[goal.index()])
+}
+
 /// Every ordered pair of live nodes of random multigraphs, both directions,
-/// both variants: the bidirectional answer is a valid path exactly when the
-/// one-sided one is, and as short. One scratch serves the whole sequence and
-/// grows with it.
+/// both variants: the answer is a valid path exactly when the oracle finds
+/// one, and as short. One scratch serves the whole sequence and grows with
+/// it.
 #[test]
-fn bidirectional_paths_are_as_short_as_the_one_sided_ones() {
+fn paths_are_valid_and_as_short_as_the_oracle_says() {
     let mut scratch = ShortestPathScratch::default();
     let mut rng = Rng::new(41);
     let (mut joined, mut apart) = (0, 0);
@@ -91,12 +116,11 @@ fn bidirectional_paths_are_as_short_as_the_one_sided_ones() {
             for &start in &live {
                 for &goal in &live {
                     let ends = (start, goal);
-                    let expected = shortest_path(&graph, start, goal, direction);
-                    let path =
-                        shortest_path_bidirectional(&graph, start, goal, direction, &mut scratch);
+                    let expected = hop_count(&graph, start, goal, direction);
+                    let path = shortest_path_in(&mut scratch, &graph, start, goal, direction);
                     assert_eq!(
-                        path.as_ref().map(Vec::len),
-                        expected.as_ref().map(Vec::len),
+                        path.as_ref().map(|path| path.len() - 1),
+                        expected,
                         "{ends:?} {direction:?}"
                     );
                     match &path {
@@ -107,17 +131,11 @@ fn bidirectional_paths_are_as_short_as_the_one_sided_ones() {
                         None => apart += 1,
                     }
 
-                    let expected = shortest_path_edges(&graph, start, goal, direction);
-                    let edges = shortest_path_edges_bidirectional(
-                        &graph,
-                        start,
-                        goal,
-                        direction,
-                        &mut scratch,
-                    );
+                    let edges =
+                        shortest_path_edges_in(&mut scratch, &graph, start, goal, direction);
                     assert_eq!(
                         edges.as_ref().map(Vec::len),
-                        expected.as_ref().map(Vec::len),
+                        expected,
                         "{ends:?} {direction:?}"
                     );
                     if let Some(edges) = &edges {
@@ -137,7 +155,7 @@ fn bidirectional_paths_are_as_short_as_the_one_sided_ones() {
 /// fresh scratch gives, so nothing of one query leaks into the next.
 #[test]
 fn a_reused_scratch_answers_like_a_fresh_one() {
-    let mut reused = ShortestPathScratch::new(2);
+    let mut reused = ShortestPathScratch::default();
     let mut rng = Rng::new(7);
     for node_count in [3, 10, 40, 5, 80, 1, 25] {
         let graph = random_graph(&mut rng, node_count, 2 * node_count);
@@ -150,24 +168,12 @@ fn a_reused_scratch_answers_like_a_fresh_one() {
             let goal = live[rng.below(live.len())];
             let direction = DIRECTIONS[rng.below(2)];
             assert_eq!(
-                shortest_path_bidirectional(&graph, start, goal, direction, &mut reused),
-                shortest_path_bidirectional(
-                    &graph,
-                    start,
-                    goal,
-                    direction,
-                    &mut ShortestPathScratch::default()
-                ),
+                shortest_path_in(&mut reused, &graph, start, goal, direction),
+                shortest_path(&graph, start, goal, direction),
             );
             assert_eq!(
-                shortest_path_edges_bidirectional(&graph, start, goal, direction, &mut reused),
-                shortest_path_edges_bidirectional(
-                    &graph,
-                    start,
-                    goal,
-                    direction,
-                    &mut ShortestPathScratch::new(node_count)
-                ),
+                shortest_path_edges_in(&mut reused, &graph, start, goal, direction),
+                shortest_path_edges(&graph, start, goal, direction),
             );
         }
     }
@@ -205,8 +211,8 @@ impl GraphView for Counting<'_> {
 /// `2h = 16`, from the root to the last leaf. The backward search climbs the
 /// leaf's single parent chain, one adjacency list per level, and the
 /// alternation holds the forward search to as many edges as that, so neither
-/// side asks for more than `DEPTH + 1` lists (22 in all, as it runs). The
-/// one-sided search asks for one per node it dequeues, which is every node
+/// side asks for more than `DEPTH + 1` lists (22 in all, as it runs), where a
+/// search from one end asks for one per node it dequeues, which is every node
 /// before the last leaf.
 #[test]
 fn the_backward_search_climbs_a_chain_instead_of_flooding_the_tree() {
@@ -224,21 +230,11 @@ fn the_backward_search_climbs_a_chain_instead_of_flooding_the_tree() {
         calls: Cell::new(0),
     };
 
-    let mut scratch = ShortestPathScratch::new(nodes.len());
-    let outgoing = Direction::Forward;
-    let path = shortest_path_bidirectional(&counting, root, leaf, outgoing, &mut scratch)
+    let path = shortest_path(&counting, root, leaf, Direction::Forward)
         .expect("the root reaches every leaf");
     assert_eq!(path.len(), DEPTH + 1);
-    let bidirectional = counting.calls.replace(0);
-    assert!(bidirectional <= 2 * (DEPTH + 1), "{bidirectional} calls");
-
-    let one_sided = shortest_path(&counting, root, leaf, outgoing).expect("reachable");
-    assert_eq!(one_sided.len(), DEPTH + 1);
-    assert!(
-        counting.calls.get() >= 1 << DEPTH,
-        "{} calls",
-        counting.calls.get()
-    );
+    let calls = counting.calls.get();
+    assert!(calls <= 2 * (DEPTH + 1), "{calls} calls");
 }
 
 #[test]
@@ -254,27 +250,24 @@ fn trivial_direct_and_missing_paths() {
 
     // A node is its own path, self-loop or not, as in the one-sided search.
     assert_eq!(
-        shortest_path_bidirectional(&graph, a, a, outgoing, &mut scratch),
+        shortest_path_in(&mut scratch, &graph, a, a, outgoing),
         Some(vec![a])
     );
     assert_eq!(
-        shortest_path_edges_bidirectional(&graph, a, a, outgoing, &mut scratch),
+        shortest_path_edges_in(&mut scratch, &graph, a, a, outgoing),
         Some(Vec::new())
     );
     assert_eq!(
-        shortest_path_bidirectional(&graph, a, b, outgoing, &mut scratch),
+        shortest_path_in(&mut scratch, &graph, a, b, outgoing),
         Some(vec![a, b])
     );
     assert_eq!(
-        shortest_path_edges_bidirectional(&graph, b, a, incoming, &mut scratch),
+        shortest_path_edges_in(&mut scratch, &graph, b, a, incoming),
         Some(vec![direct])
     );
+    assert_eq!(shortest_path_in(&mut scratch, &graph, b, a, outgoing), None);
     assert_eq!(
-        shortest_path_bidirectional(&graph, b, a, outgoing, &mut scratch),
-        None
-    );
-    assert_eq!(
-        shortest_path_edges_bidirectional(&graph, a, c, outgoing, &mut scratch),
+        shortest_path_edges_in(&mut scratch, &graph, a, c, outgoing),
         None
     );
 }
@@ -284,11 +277,5 @@ fn trivial_direct_and_missing_paths() {
 fn a_goal_beyond_the_bound_panics() {
     let mut graph = Graph::<(), ()>::new();
     let a = graph.add_node(());
-    let _ = shortest_path_bidirectional(
-        &graph,
-        a,
-        NodeId::from_index(3),
-        Direction::Forward,
-        &mut ShortestPathScratch::default(),
-    );
+    let _ = shortest_path(&graph, a, NodeId::from_index(3), Direction::Forward);
 }

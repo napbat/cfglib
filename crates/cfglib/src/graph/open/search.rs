@@ -7,52 +7,9 @@ use core::mem;
 use core::ops::ControlFlow;
 use smallvec::SmallVec;
 
-use crate::graph::search::{SearchOrder, Visit, VisitedPolicy, may_expand};
+use crate::graph::search::{SearchConfig, SearchOrder, Visit, VisitedPolicy, may_expand};
 
 use super::marks::{INLINE_NODES, Marks};
-
-/// The discipline an [`open_search`] runs under.
-///
-/// This is [`SearchConfig`](crate::graph::search::SearchConfig) minus its
-/// `direction`: in an open space the successor closure *is* the edge
-/// relation, so a walk runs backwards by being given a closure that reports
-/// predecessors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OpenSearchConfig {
-    /// Frontier discipline: depth-first or breadth-first.
-    pub order: SearchOrder,
-    /// Whether visited marks are global or per path.
-    pub visited: VisitedPolicy,
-    /// Maximum depth to expand from, in hops from a seed. `None` is
-    /// unbounded; `Some(0)` visits the seeds alone.
-    pub max_depth: Option<usize>,
-}
-
-impl OpenSearchConfig {
-    /// A globally marked, unbounded search in `order`.
-    #[must_use]
-    pub const fn new(order: SearchOrder) -> Self {
-        Self {
-            order,
-            visited: VisitedPolicy::Global,
-            max_depth: None,
-        }
-    }
-
-    /// Return this configuration with a different [`VisitedPolicy`].
-    #[must_use]
-    pub const fn with_visited(mut self, visited: VisitedPolicy) -> Self {
-        self.visited = visited;
-        self
-    }
-
-    /// Return this configuration bounded to `max_depth` hops from a seed.
-    #[must_use]
-    pub const fn with_max_depth(mut self, max_depth: usize) -> Self {
-        self.max_depth = Some(max_depth);
-        self
-    }
-}
 
 /// Search a lazily discovered node space from `seeds`, returning the value the
 /// visitor broke with, or `None` when the walk ran to completion.
@@ -61,13 +18,15 @@ impl OpenSearchConfig {
 /// call**, and pushes that node's successors *in the order they should be
 /// explored*. Nodes are compared and marked by `Ord`, so identity is whatever
 /// the consumer's node type says it is — a `(file, name)` pair, a resolved
-/// module handle, an interned id.
+/// module handle, an interned id. The successor closure *is* the edge
+/// relation, so a walk runs backwards by being given a closure that reports
+/// predecessors.
 ///
 /// # Semantics
 ///
-/// Identical to [`search`](crate::graph::search::search), with visited marks held
-/// in an ordered set (a short inline list while the walk is small) instead of a
-/// dense table:
+/// Identical to [`search`](crate::graph::search::search) under the same
+/// [`SearchConfig`], with visited marks held in an ordered set (a short inline
+/// list while the walk is small) instead of a dense table:
 ///
 /// - **Seeds** are visited at depth 0 in the order given; deduplicated under
 ///   [`VisitedPolicy::Global`], each starting a fresh path context under
@@ -88,7 +47,7 @@ impl OpenSearchConfig {
 /// ```
 /// use core::ops::ControlFlow;
 ///
-/// use cfglib::{OpenSearchConfig, SearchOrder, Visit, open_search};
+/// use cfglib::{SearchConfig, Visit, open_search};
 ///
 /// // Module 0 re-exports `Widget` from module 1 by name and has a star
 /// // re-export of module 2; module 2 stars module 3. Both 1 and 3 define
@@ -108,7 +67,7 @@ impl OpenSearchConfig {
 /// let defines = |&(module, _): &(u32, &str)| module == 1 || module == 3;
 /// let found = open_search(
 ///     [(0, "Widget")],
-///     OpenSearchConfig::new(SearchOrder::DepthFirst),
+///     SearchConfig::default(),
 ///     successors,
 ///     |node, _depth| {
 ///         if defines(node) {
@@ -129,7 +88,7 @@ impl OpenSearchConfig {
 #[must_use]
 pub fn open_search<N: Clone + Ord, B>(
     seeds: impl IntoIterator<Item = N>,
-    config: OpenSearchConfig,
+    config: SearchConfig,
     successors: impl FnMut(&N, &mut Vec<N>),
     visitor: impl FnMut(&N, usize) -> ControlFlow<B, Visit>,
 ) -> Option<B> {
@@ -153,7 +112,7 @@ pub fn open_search<N: Clone + Ord, B>(
 
 fn open_depth_first_global<N: Clone + Ord, B>(
     seeds: impl IntoIterator<Item = N>,
-    config: OpenSearchConfig,
+    config: SearchConfig,
     mut successors: impl FnMut(&N, &mut Vec<N>),
     mut visitor: impl FnMut(&N, usize) -> ControlFlow<B, Visit>,
 ) -> Option<B> {
@@ -199,7 +158,7 @@ enum PathStep<N> {
 
 fn open_depth_first_path<N: Clone + Ord, B>(
     seeds: impl IntoIterator<Item = N>,
-    config: OpenSearchConfig,
+    config: SearchConfig,
     mut successors: impl FnMut(&N, &mut Vec<N>),
     mut visitor: impl FnMut(&N, usize) -> ControlFlow<B, Visit>,
 ) -> Option<B> {
@@ -246,7 +205,7 @@ fn open_depth_first_path<N: Clone + Ord, B>(
 
 fn open_breadth_first_global<N: Clone + Ord, B>(
     seeds: impl IntoIterator<Item = N>,
-    config: OpenSearchConfig,
+    config: SearchConfig,
     mut successors: impl FnMut(&N, &mut Vec<N>),
     mut visitor: impl FnMut(&N, usize) -> ControlFlow<B, Visit>,
 ) -> Option<B> {
