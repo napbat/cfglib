@@ -4,7 +4,7 @@
 use std::borrow::Cow;
 
 use cfglib::{
-    BlockId, Cfg, CompletionReason, Continuation, DisplayInstr, EdgeId, EdgeKind, Handler,
+    BlockId, Cfg, CompletionReason, Continuation, DisplayInstr, Edge, EdgeId, EdgeKind, Handler,
     HandlerBody, HandlerKind, HandlerRef, NodeOrder, Region, RegionId,
 };
 use serde::{Deserialize, Serialize};
@@ -133,16 +133,24 @@ fn connect_base_blocks(cfg: &mut Cfg<Op, Route>, blocks: &BaseBlocks) -> EdgeId 
         ..
     } = *blocks;
     cfg.add_edge(entry, header, EdgeKind::Fallthrough);
-    cfg.add_weighted_edge_with_payload(
+    cfg.add_edge(
         header,
         body,
-        EdgeKind::ConditionalTrue,
-        0.75,
-        Route::from_source("loop condition"),
+        Edge::new(EdgeKind::ConditionalTrue)
+            .with_weight(0.75)
+            .with_payload(Route::from_source("loop condition")),
     );
-    cfg.add_weighted_edge(header, after, EdgeKind::ConditionalFalse, 0.25);
+    cfg.add_edge(
+        header,
+        after,
+        Edge::<Route>::from(EdgeKind::ConditionalFalse).with_weight(0.25),
+    );
     cfg.add_edge(body, header, EdgeKind::Back);
-    cfg.add_edge_with_payload(header, body, EdgeKind::SwitchCase, Route::case(3));
+    cfg.add_edge(
+        header,
+        body,
+        Edge::new(EdgeKind::SwitchCase).with_payload(Route::case(3)),
+    );
     cfg.add_edge(body, catch, EdgeKind::ExceptionUnwind);
     cfg.add_edge(body, cleanup, EdgeKind::ExceptionLeave);
     cfg.add_edge(catch, cleanup, EdgeKind::Fallthrough);
@@ -231,7 +239,11 @@ fn add_delta(cfg: &mut Cfg<Op, Route>, header: BlockId, after: BlockId, cleanup:
     let doomed = cfg.new_block();
     cfg.block_mut(late).set_label("late");
     cfg.block_mut(late).push(Op::Return);
-    cfg.add_weighted_edge(after, late, EdgeKind::Fallthrough, 0.5);
+    cfg.add_edge(
+        after,
+        late,
+        Edge::<Route>::from(EdgeKind::Fallthrough).with_weight(0.5),
+    );
     let moved = cfg.add_edge(cleanup, late, EdgeKind::IndirectJump);
     cfg.add_edge(after, doomed, EdgeKind::Jump);
     cfg.add_edge(doomed, late, EdgeKind::Jump);

@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use cfglib::{BlockId, Cfg, EdgeId, EdgeKind, EffectInfo, Emitter, InstrInfo, LinearInst};
+use cfglib::{BlockId, Cfg, Edge, EdgeId, EdgeKind, EffectInfo, Emitter, InstrInfo, LinearInst};
 
 pub type Reg = u8;
 
@@ -190,7 +190,7 @@ impl<E: Payload> Builder<E> {
         self.next_tag += 1;
         let edge = self
             .cfg
-            .add_edge_with_payload(source, target, kind, E::tagged(tag));
+            .add_edge(source, target, Edge::new(kind).with_payload(E::tagged(tag)));
         self.cfg
             .edge_mut(edge)
             .set_weight(Some(f64::from(tag % 4) / 4.0));

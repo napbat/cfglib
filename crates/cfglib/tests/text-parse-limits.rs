@@ -1,7 +1,7 @@
 //! Integration tests: the text readers answer hostile indices with an error
 //! instead of allocating for them.
 
-use cfglib::{TextErrorKind, parse_cfg_text, parse_text};
+use cfglib::{TextErrorKind, parse_cfg_listing, parse_text};
 
 /// The most removed slots a text document may ask a reader to recreate, as
 /// the readers report it.
@@ -14,7 +14,7 @@ fn hole_limit() -> usize {
 }
 
 fn blocks(text: &str) -> Result<usize, TextErrorKind> {
-    parse_cfg_text(text, |line| Ok::<_, String>(line.to_owned()))
+    parse_cfg_listing(text, |line| Ok::<_, String>(line.to_owned()))
         .map(|cfg| cfg.block_count())
         .map_err(|error| error.kind)
 }

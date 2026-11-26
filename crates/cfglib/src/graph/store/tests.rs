@@ -524,12 +524,13 @@ fn node_and_edge_payloads_are_mutable_in_place() {
 #[test]
 fn compacting_an_untouched_store_is_the_identity() {
     let (mut graph, _) = diamond();
-    let first = graph.compact(NodeOrder::Insertion);
+    let mut first = graph.compact(NodeOrder::Insertion);
     assert!(first.is_identity());
 
     let second = graph.compact(NodeOrder::Insertion);
     assert!(second.is_identity());
-    assert!(first.compose(&second).is_identity());
+    first.compose(&second);
+    assert!(first.is_identity());
 }
 
 #[test]
@@ -607,7 +608,8 @@ fn composed_renumberings_match_the_two_compactions_they_describe() {
     graph.remove_node(first.node(nodes[1]).expect("left survived the compaction"));
     let second = graph.compact(NodeOrder::Insertion);
 
-    let composed = first.compose(&second);
+    let mut composed = first.clone();
+    composed.compose(&second);
     assert_eq!(composed.node(nodes[0]), None, "removed before the first");
     assert_eq!(composed.node(nodes[1]), None, "removed before the second");
     for original in [nodes[2], nodes[3]] {

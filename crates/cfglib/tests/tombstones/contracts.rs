@@ -7,7 +7,8 @@ use std::collections::BTreeSet;
 use cfglib::{
     BlockId, Cfg, CfgMetrics, DenseId, DominatorTree, EdgeId, EdgeKind, Graph, GraphMetrics,
     GraphView, NodeOrder, Rooted, RootedView, detect_loops, find_back_edges, kosaraju_scc,
-    merge_blocks, remove_empty_blocks, remove_unreachable, simplify, tarjan_scc,
+    merge_blocks_mapped, remove_empty_blocks_mapped, remove_unreachable_mapped, simplify_mapped,
+    tarjan_scc,
 };
 
 use crate::cfg_analyses::check_cfg_analyses;
@@ -58,10 +59,10 @@ fn a_removed_block_leaves_iteration_but_stays_readable_until_compaction() {
     );
     assert_eq!(cfg.successors(first).collect::<Vec<_>>(), [last]);
     assert_eq!(cfg.predecessors(last).collect::<Vec<_>>(), [first]);
-    assert!(!cfg.is_compact());
+    assert!(!cfg.is_dense());
 
     let renumbering = cfg.compact(NodeOrder::Insertion);
-    assert!(cfg.is_compact());
+    assert!(cfg.is_dense());
     assert_eq!(cfg.block_bound(), 3);
     assert_eq!(renumbering.node(middle), None);
     assert_eq!(renumbering.node(last).map(DenseId::index), Some(2));
@@ -145,7 +146,7 @@ fn compaction_numbers_survivors_densely_in_their_old_order() {
         );
 
         let compacted = &realized.cfg_compacted;
-        assert!(compacted.is_compact());
+        assert!(compacted.is_dense());
         assert_eq!(compacted.block_bound(), live.len(), "seed {seed}");
         assert_eq!(compacted.edge_bound(), live_edges.len(), "seed {seed}");
         for (rank, &slot) in live.iter().enumerate() {
@@ -306,7 +307,7 @@ fn unreachable_blocks_are_counted_only_when_they_are_live() {
 fn metrics_between_a_transform_and_the_compaction_equal_the_compacted_metrics() {
     for seed in SEEDS {
         let mut cfg = Topology::random(seed, SSA_SAFE).build_cfg();
-        remove_unreachable(&mut cfg);
+        remove_unreachable_mapped(&mut cfg);
         let holed = CfgMetrics::compute(&cfg);
         assert_eq!(holed.graph.node_count, cfg.block_count(), "seed {seed}");
         assert_eq!(holed.graph.edge_count, cfg.edge_count(), "seed {seed}");
@@ -372,10 +373,12 @@ fn a_graph_whose_only_cycle_ran_through_a_removed_node_is_acyclic() {
 fn analyses_run_between_a_transform_and_the_compaction() {
     type Transform = fn(&mut Cfg<Op>) -> usize;
     let transforms: [(&str, Transform); 4] = [
-        ("remove_unreachable", remove_unreachable::<Op, ()>),
-        ("merge_blocks", merge_blocks::<Op, ()>),
-        ("remove_empty_blocks", remove_empty_blocks::<Op, ()>),
-        ("simplify", simplify::<Op, ()>),
+        ("remove_unreachable", |cfg| remove_unreachable_mapped(cfg).0),
+        ("merge_blocks", |cfg| merge_blocks_mapped(cfg).0),
+        ("remove_empty_blocks", |cfg| {
+            remove_empty_blocks_mapped(cfg).0
+        }),
+        ("simplify", |cfg| simplify_mapped(cfg).0),
     ];
     for (name, transform) in transforms {
         for seed in SEEDS {

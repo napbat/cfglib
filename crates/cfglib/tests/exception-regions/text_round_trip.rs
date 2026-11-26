@@ -2,7 +2,7 @@
 
 use cfglib::{
     BlockId, Cfg, EdgeKind, HandlerBody, HandlerKind, HandlerRef, Region, RegionId,
-    SemanticValidator, parse_cfg_text, verify, verify_with,
+    SemanticValidator, parse_cfg_listing, verify, verify_semantics,
 };
 
 use crate::golden::assert_golden;
@@ -65,14 +65,14 @@ fn filtered_handler(entry: BlockId, filter_block: BlockId) -> cfglib::Handler {
 }
 
 fn parse(text: &str) -> Cfg<Stmt> {
-    parse_cfg_text(text, |line| Ok::<_, String>(Stmt::text(line))).expect("well-formed text")
+    parse_cfg_listing(text, |line| Ok::<_, String>(Stmt::text(line))).expect("well-formed text")
 }
 
 #[test]
 fn a_region_bearing_graph_reads_back_equal_and_prints_the_same_text() {
     let (cfg, _) = kitchen_sink();
 
-    let text = cfg.to_text();
+    let text = cfg.to_listing();
     let parsed = parse(&text);
 
     assert_eq!(parsed.regions(), cfg.regions());
@@ -87,7 +87,7 @@ fn a_region_bearing_graph_reads_back_equal_and_prints_the_same_text() {
     };
     assert_eq!(edges(&parsed), edges(&cfg));
     assert_eq!(
-        parsed.to_text(),
+        parsed.to_listing(),
         text,
         "write, read, write is a fixed point"
     );
@@ -98,7 +98,7 @@ fn block_holes_survive_the_text_form() {
     let (cfg, gone) = kitchen_sink();
     assert!(!cfg.contains_block(gone));
 
-    let parsed = parse(&cfg.to_text());
+    let parsed = parse(&cfg.to_listing());
 
     assert!(
         !parsed.contains_block(gone),
@@ -114,7 +114,7 @@ fn block_holes_survive_the_text_form() {
 
 #[test]
 fn unknown_extents_filters_and_nesting_are_named_in_the_text() {
-    let text = kitchen_sink().0.to_text();
+    let text = kitchen_sink().0.to_listing();
 
     let regions: Vec<&str> = text
         .lines()
@@ -146,7 +146,7 @@ fn a_try_catch_prints_as_the_documented_text_form() {
 
     assert_golden(
         "exception-regions/try-catch-finally.txt",
-        &fixture.cfg.to_text(),
+        &fixture.cfg.to_listing(),
     );
 }
 
@@ -164,7 +164,7 @@ fn cleanup_records_are_not_part_of_the_text_projection() {
         },
     );
 
-    let parsed = parse(&fixture.cfg.to_text());
+    let parsed = parse(&fixture.cfg.to_listing());
 
     assert_eq!(fixture.cfg.cleanups().len(), 1);
     assert_eq!(parsed.cleanups().len(), 0);
@@ -210,11 +210,11 @@ fn a_consumer_validator_reports_a_handler_entry_the_graph_no_longer_has() {
     let mut fixture = try_catch(&["log(e)"]);
     let handler = HandlerRef::new(fixture.region, 0);
 
-    let sound = verify_with(&fixture.cfg, &HandlerEntriesAreLive);
+    let sound = verify_semantics(&fixture.cfg, &HandlerEntriesAreLive);
     assert!(sound.is_ok(), "{sound:?}");
 
     fixture.cfg.remove_block(fixture.pad);
-    let broken = verify_with(&fixture.cfg, &HandlerEntriesAreLive);
+    let broken = verify_semantics(&fixture.cfg, &HandlerEntriesAreLive);
     assert_eq!(broken.semantic_errors, [(handler, fixture.pad)]);
     assert!(!broken.is_ok());
 }
@@ -233,7 +233,7 @@ fn a_region_may_protect_blocks_with_no_handler_or_handlers_with_unknown_bodies()
         parent: None,
     });
 
-    let parsed = parse(&cfg.to_text());
+    let parsed = parse(&cfg.to_listing());
 
     assert_eq!(parsed.regions(), cfg.regions());
     assert!(verify(&cfg).is_ok());

@@ -24,7 +24,7 @@ use smallvec::SmallVec;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::edge::{EdgeId, EdgeKind};
+use crate::edge::{Edge, EdgeId, EdgeKind};
 use crate::graph::dominator::DominatorTree;
 use crate::graph::structure::find_irreducible_entry;
 use crate::graph::traverse::reachable;
@@ -217,10 +217,14 @@ fn split_cycle<I: Clone, E: Clone>(cfg: &mut Cfg<I, E>, cycle: &MultiEntryCycle)
             let target = copy_of[target.index()].unwrap_or(target);
             match weight {
                 Some(weight) => {
-                    cfg.add_weighted_edge_with_payload(copy, target, kind, weight, payload);
+                    cfg.add_edge(
+                        copy,
+                        target,
+                        Edge::new(kind).with_weight(weight).with_payload(payload),
+                    );
                 }
                 None => {
-                    cfg.add_edge_with_payload(copy, target, kind, payload);
+                    cfg.add_edge(copy, target, Edge::new(kind).with_payload(payload));
                 }
             }
         }
@@ -407,14 +411,48 @@ mod tests {
         }
 
         let entry = cfg.entry();
-        let into_a =
-            cfg.add_weighted_edge_with_payload(entry, a, EdgeKind::ConditionalTrue, 0.375, Tag(1));
-        let into_b =
-            cfg.add_weighted_edge_with_payload(entry, b, EdgeKind::ConditionalFalse, 0.125, Tag(2));
-        cfg.add_weighted_edge_with_payload(a, b, EdgeKind::Fallthrough, 0.5, Tag(3));
-        cfg.add_weighted_edge_with_payload(a, exit, EdgeKind::SwitchCase, 0.625, Tag(4));
-        cfg.add_weighted_edge_with_payload(b, a, EdgeKind::Back, 0.75, Tag(5));
-        cfg.add_weighted_edge_with_payload(b, exit, EdgeKind::SwitchCase, 0.25, Tag(6));
+        let into_a = cfg.add_edge(
+            entry,
+            a,
+            Edge::new(EdgeKind::ConditionalTrue)
+                .with_weight(0.375)
+                .with_payload(Tag(1)),
+        );
+        let into_b = cfg.add_edge(
+            entry,
+            b,
+            Edge::new(EdgeKind::ConditionalFalse)
+                .with_weight(0.125)
+                .with_payload(Tag(2)),
+        );
+        cfg.add_edge(
+            a,
+            b,
+            Edge::new(EdgeKind::Fallthrough)
+                .with_weight(0.5)
+                .with_payload(Tag(3)),
+        );
+        cfg.add_edge(
+            a,
+            exit,
+            Edge::new(EdgeKind::SwitchCase)
+                .with_weight(0.625)
+                .with_payload(Tag(4)),
+        );
+        cfg.add_edge(
+            b,
+            a,
+            Edge::new(EdgeKind::Back)
+                .with_weight(0.75)
+                .with_payload(Tag(5)),
+        );
+        cfg.add_edge(
+            b,
+            exit,
+            Edge::new(EdgeKind::SwitchCase)
+                .with_weight(0.25)
+                .with_payload(Tag(6)),
+        );
         let original_block_bound = cfg.block_bound();
         let signature = |cfg: &Cfg<MockInst, Tag>, edge| {
             let edge = cfg.edge(edge);

@@ -5,9 +5,9 @@ use std::borrow::Cow;
 use std::fmt;
 
 use cfglib::{
-    BlockId, Cfg, CompletionReason, Continuation, DisplayInstr, DominatorTree, EdgeKind,
+    BlockId, Cfg, CompletionReason, Continuation, DisplayInstr, DominatorTree, Edge, EdgeKind,
     ExceptionFlow, HandlerBody, HandlerKind, HandlerRef, Region, TextError, TextErrorKind,
-    parse_cfg_text, verify,
+    parse_cfg_listing, verify,
 };
 
 use crate::fixture::{handler, region, rich_cfg, try_finally};
@@ -17,7 +17,7 @@ use crate::labels::{TEXT_ALPHABET, strings_over};
 use crate::sink::assert_failure_is_reported_at_every_length;
 
 fn parse(text: &str) -> Result<Cfg<Line>, TextError> {
-    parse_cfg_text(text, |line| Ok(Line::new(line)))
+    parse_cfg_listing(text, |line| Ok(Line::new(line)))
 }
 
 /// Everything the text form promises to carry, read through the accessors a
@@ -61,7 +61,7 @@ fn shape<E>(cfg: &Cfg<Line, E>) -> Shape {
 
 #[test]
 fn a_try_finally_is_written_as_blocks_edges_and_regions() {
-    assert_golden("text-dot/cfg-try-finally.txt", &try_finally().to_text());
+    assert_golden("text-dot/cfg-try-finally.txt", &try_finally().to_listing());
 }
 
 #[test]
@@ -71,9 +71,9 @@ fn every_edge_kind_is_written_under_its_canonical_name() {
         let target = cfg.new_block();
         cfg.add_edge(cfg.entry(), target, kind);
     }
-    assert_golden("text-dot/cfg-every-edge-kind.txt", &cfg.to_text());
+    assert_golden("text-dot/cfg-every-edge-kind.txt", &cfg.to_listing());
 
-    let text = cfg.to_text();
+    let text = cfg.to_listing();
     for (index, kind) in EdgeKind::ALL.into_iter().enumerate() {
         let expected = format!("bb0 -> bb{} {}", index + 1, kind.name());
         assert!(
@@ -86,7 +86,7 @@ fn every_edge_kind_is_written_under_its_canonical_name() {
 #[test]
 fn parsing_a_written_cfg_reproduces_blocks_edges_regions_and_holes() {
     let original = rich_cfg();
-    let parsed = parse(&original.to_text()).expect("the writer emits its own grammar");
+    let parsed = parse(&original.to_listing()).expect("the writer emits its own grammar");
 
     assert_eq!(shape(&parsed), shape(&original));
     assert_eq!(parsed.block_count(), original.block_count());
@@ -101,8 +101,8 @@ fn parsing_a_written_cfg_reproduces_blocks_edges_regions_and_holes() {
 #[test]
 fn writing_parsing_and_writing_again_is_a_fixed_point() {
     for original in [rich_cfg(), try_finally()] {
-        let once = original.to_text();
-        let twice = parse(&once).expect("its own grammar").to_text();
+        let once = original.to_listing();
+        let twice = parse(&once).expect("its own grammar").to_listing();
         assert_eq!(once, twice);
     }
 }
@@ -110,7 +110,7 @@ fn writing_parsing_and_writing_again_is_a_fixed_point() {
 #[test]
 fn the_parsed_cfg_answers_analyses_like_the_original() {
     let original = rich_cfg();
-    let parsed = parse(&original.to_text()).expect("its own grammar");
+    let parsed = parse(&original.to_listing()).expect("its own grammar");
 
     assert_eq!(
         DominatorTree::compute(&parsed),
@@ -145,7 +145,7 @@ fn parallel_edges_keep_their_count_kinds_and_order() {
     cfg.add_edge(next, next, EdgeKind::Back);
     cfg.add_edge(next, next, EdgeKind::Back);
 
-    let parsed = parse(&cfg.to_text()).expect("its own grammar");
+    let parsed = parse(&cfg.to_listing()).expect("its own grammar");
     assert_eq!(shape(&parsed).edges, shape(&cfg).edges);
     assert_eq!(parsed.successors(cfg.entry()).count(), 4);
     assert_eq!(parsed.successors(next).collect::<Vec<_>>(), [next, next]);
@@ -159,7 +159,7 @@ fn crlf_line_endings_comments_and_blank_lines_are_not_content() {
     let expected = parse(unix).expect("valid text");
     let parsed = parse(noisy).expect("valid text with CRLF line endings");
     assert_eq!(shape(&parsed), shape(&expected));
-    assert_eq!(parsed.to_text(), unix);
+    assert_eq!(parsed.to_listing(), unix);
 }
 
 #[test]
@@ -185,7 +185,7 @@ fn a_region_that_still_names_a_removed_block_is_written_without_it() {
     cfg.remove_block(doomed);
     cfg.remove_block(stray);
 
-    let parsed = parse(&cfg.to_text())
+    let parsed = parse(&cfg.to_listing())
         .expect("the text of a CFG with a removed block in a region is still the grammar");
     let live = |blocks: &std::collections::BTreeSet<BlockId>| {
         blocks
@@ -213,7 +213,7 @@ fn an_entry_other_than_the_first_block_is_reproduced() {
     cfg.set_entry(third);
     cfg.remove_block(first);
 
-    let text = cfg.to_text();
+    let text = cfg.to_listing();
     assert!(text.starts_with("entry bb2\n"), "{text}");
     let parsed = parse(&text).expect("its own grammar");
     assert_eq!(parsed.entry(), third);
@@ -224,8 +224,8 @@ fn an_entry_other_than_the_first_block_is_reproduced() {
 #[test]
 fn empty_blocks_and_a_single_block_cfg_round_trip() {
     let cfg = Cfg::<Line>::new();
-    assert_eq!(cfg.to_text(), "entry bb0\nbb0:\n");
-    let parsed = parse(&cfg.to_text()).expect("its own grammar");
+    assert_eq!(cfg.to_listing(), "entry bb0\nbb0:\n");
+    let parsed = parse(&cfg.to_listing()).expect("its own grammar");
     assert_eq!(shape(&parsed), shape(&cfg));
     assert!(parsed.block(parsed.entry()).is_empty());
 }
@@ -237,7 +237,7 @@ fn an_instruction_that_renders_nothing_leaves_no_line_behind() {
         cfg.block_mut(cfg.entry()).push(Line::new(text));
     }
 
-    let text = cfg.to_text();
+    let text = cfg.to_listing();
     assert!(
         text.lines().all(|line| !line.trim().is_empty()),
         "an empty instruction must not become a blank line: {text:?}"
@@ -276,7 +276,7 @@ fn every_short_instruction_text_round_trips() {
         cfg.block_mut(cfg.entry()).push(Line::new(text));
     }
 
-    let parsed = parse(&cfg.to_text()).expect("the writer escapes everything it must");
+    let parsed = parse(&cfg.to_listing()).expect("the writer escapes everything it must");
     let read_back = instruction_texts(&parsed);
     let kept: std::collections::BTreeSet<_> = read_back.iter().collect();
     let lost: Vec<_> = strings
@@ -297,7 +297,7 @@ fn an_instruction_that_starts_like_a_comment_is_still_an_instruction() {
     cfg.block_mut(cfg.entry()).push(Line::new("#pragma once"));
     cfg.block_mut(cfg.entry()).push(Line::new("x = 1"));
 
-    let parsed = parse(&cfg.to_text()).expect("its own grammar");
+    let parsed = parse(&cfg.to_listing()).expect("its own grammar");
     assert_eq!(instruction_texts(&parsed), ["#pragma once", "x = 1"]);
 }
 
@@ -308,7 +308,7 @@ fn an_instruction_keeps_its_own_leading_whitespace() {
         cfg.block_mut(cfg.entry()).push(Line::new(text));
     }
 
-    let parsed = parse(&cfg.to_text()).expect("its own grammar");
+    let parsed = parse(&cfg.to_listing()).expect("its own grammar");
     assert_eq!(instruction_texts(&parsed), ["    x = 1", "\ty = 2", "  "]);
 }
 
@@ -321,7 +321,7 @@ fn every_short_block_label_round_trips() {
         cfg.block_mut(block).set_label(text.clone());
     }
 
-    let parsed = parse(&cfg.to_text()).expect("the writer escapes everything it must");
+    let parsed = parse(&cfg.to_listing()).expect("the writer escapes everything it must");
     let relabeled: Vec<_> = cfg
         .block_ids()
         .filter(|&id| parsed.block(id).label() != cfg.block(id).label())
@@ -356,7 +356,7 @@ fn an_instruction_streamed_in_pieces_is_escaped_as_one_label() {
     cfg.block_mut(block).push(Fragments(&["", ""]));
 
     assert_eq!(
-        cfg.to_text(),
+        cfg.to_listing(),
         "entry bb0\nbb0:\n    \\-x\n    a\\\\b\\nc\n",
         "the leading hyphen is escaped although the first piece was empty, and an \
          instruction that streams nothing leaves no line"
@@ -381,7 +381,7 @@ fn guarded<E: Default>(weight: Option<f64>, record_cleanup: bool) -> Cfg<Line, E
         (cleanup, exit, EdgeKind::Fallthrough),
     ] {
         match weight {
-            Some(weight) => cfg.add_weighted_edge(source, target, kind, weight),
+            Some(weight) => cfg.add_edge(source, target, Edge::from(kind).with_weight(weight)),
             None => cfg.add_edge(source, target, kind),
         };
     }
@@ -412,7 +412,7 @@ fn guarded<E: Default>(weight: Option<f64>, record_cleanup: bool) -> Cfg<Line, E
 fn edge_payloads_do_not_change_the_text() {
     let unit: Cfg<Line> = guarded(None, true);
     let annotated: Cfg<Line, ExceptionFlow<u32>> = guarded(None, true);
-    assert_eq!(annotated.to_text(), unit.to_text());
+    assert_eq!(annotated.to_listing(), unit.to_listing());
 }
 
 #[test]
@@ -421,9 +421,9 @@ fn weights_and_cleanup_records_are_outside_the_projection() {
     let bare: Cfg<Line> = guarded(None, false);
     assert_eq!(full.cleanups().len(), 1);
     assert_eq!(bare.cleanups(), []);
-    assert_eq!(full.to_text(), bare.to_text());
+    assert_eq!(full.to_listing(), bare.to_listing());
 
-    let parsed = parse(&full.to_text()).expect("its own grammar");
+    let parsed = parse(&full.to_listing()).expect("its own grammar");
     assert_eq!(parsed.cleanups(), []);
     assert!(parsed.edges().all(|edge| edge.weight().is_none()));
     assert_eq!(shape(&parsed), shape(&full));
@@ -452,21 +452,21 @@ fn a_typed_instruction_syntax_round_trips_through_the_consumers_parser() {
     cfg.block_mut(join).push(Isa::Return);
     cfg.add_edge(cfg.entry(), join, EdgeKind::ConditionalFalse);
 
-    let text = cfg.to_text();
+    let text = cfg.to_listing();
     assert!(
         text.contains("    load r1, [-8]\n"),
         "a hyphen that is not leading is written as it is: {text}"
     );
-    let parsed = parse_cfg_text(&text, parse_isa).expect("every line is the machine's syntax");
+    let parsed = parse_cfg_listing(&text, parse_isa).expect("every line is the machine's syntax");
     assert_eq!(parsed.block(parsed.entry()).instructions(), program);
     assert_eq!(parsed.block(join).instructions(), [Isa::Return]);
-    assert_eq!(parsed.to_text(), text);
+    assert_eq!(parsed.to_listing(), text);
 }
 
 #[test]
 fn the_consumers_rejection_stops_the_parse_at_its_line() {
     let text = "entry bb0\nbb0:\n    ret\n    mul r1, r2\n    ret\n";
-    let error = parse_cfg_text(text, parse_isa).expect_err("mul is not an instruction");
+    let error = parse_cfg_listing(text, parse_isa).expect_err("mul is not an instruction");
     assert_eq!(error.line, 4);
     assert_eq!(
         error.kind,
@@ -542,11 +542,12 @@ fn an_entry_naming_an_undeclared_block_is_rejected() {
 }
 
 #[test]
-fn write_text_streams_the_same_text_to_any_sink() {
+fn write_listing_streams_the_same_text_to_any_sink() {
     let cfg = rich_cfg();
     let mut streamed = String::new();
-    cfg.write_text(&mut streamed).expect("a String never fails");
-    assert_eq!(streamed, cfg.to_text());
+    cfg.write_listing(&mut streamed)
+        .expect("a String never fails");
+    assert_eq!(streamed, cfg.to_listing());
 
-    assert_failure_is_reported_at_every_length(&streamed, |sink| cfg.write_text(sink));
+    assert_failure_is_reported_at_every_length(&streamed, |sink| cfg.write_listing(sink));
 }

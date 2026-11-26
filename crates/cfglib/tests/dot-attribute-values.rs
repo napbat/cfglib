@@ -5,7 +5,7 @@ use std::borrow::Cow;
 
 use cfglib::{
     Cfg, DotEdgeAttributes, DotStyle, EdgeId, EdgeKind, EdgeTag, Graph, IdTag, Label, NodeId,
-    no_label, to_dot,
+    no_label, render, to_dot,
 };
 
 /// The one edge of a two-node graph, drawn with `attributes`.
@@ -115,7 +115,7 @@ fn a_cfg_edge_with_an_unusable_weight_is_drawn_at_the_default_width() {
         let edge = cfg.add_edge(cfg.entry(), exit, EdgeKind::Fallthrough);
         cfg.edge_mut(edge).set_weight(Some(weight));
 
-        let dot = cfg.to_dot_with(|_| Cow::Borrowed(""));
+        let dot = render(|sink| cfg.write_dot(sink, |_| Cow::Borrowed("")));
         assert!(!dot.contains("penwidth"), "{weight}: {dot}");
         assert!(!dot.contains("NaN=") && !dot.contains("inf]"), "{dot}");
         assert!(dot.contains(&format!("label=\"({weight:.2})\"")), "{dot}");

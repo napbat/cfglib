@@ -8,6 +8,8 @@ use super::{ExtTspConfig, cfg_ext_tsp_order, ext_tsp_order, ext_tsp_score};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::{EdgeId, EdgeKind};
+use crate::graph::traverse::reverse_postorder;
+use crate::graph::view::Direction;
 use crate::test_util::rng::Rng;
 use crate::test_util::{MockInst, ff};
 use crate::transform::linearize::Emitter;
@@ -158,7 +160,7 @@ fn a_graph_without_counts_keeps_its_reverse_postorder() {
     profile.counts.fill(0);
     assert_eq!(
         profile.order(&cfg, &ExtTspConfig::default()),
-        cfg.reverse_postorder()
+        reverse_postorder(&cfg, cfg.entry(), Direction::Forward)
     );
 }
 
@@ -249,7 +251,7 @@ fn the_order_is_a_deterministic_permutation_that_scores_at_least_the_reverse_pos
             )
         };
         let result = order(&cfg);
-        let reverse_postorder = cfg.reverse_postorder();
+        let reverse_postorder = reverse_postorder(&cfg, cfg.entry(), Direction::Forward);
         let context = format!("round {round}: {config:?}, order {result:?}");
 
         assert_eq!(result.first(), Some(&cfg.entry()), "{context}");
@@ -283,7 +285,7 @@ fn the_cfg_order_follows_the_emitter_and_is_a_permutation() {
         );
         let mut sorted = result.clone();
         sorted.sort_unstable();
-        let mut reachable = cfg.reverse_postorder();
+        let mut reachable = reverse_postorder(&cfg, cfg.entry(), Direction::Forward);
         reachable.sort_unstable();
         assert_eq!(sorted, reachable, "round {round}");
         assert_eq!(result[0], cfg.entry(), "round {round}");

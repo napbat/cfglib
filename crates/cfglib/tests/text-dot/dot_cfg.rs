@@ -4,8 +4,8 @@
 use std::borrow::Cow;
 
 use cfglib::{
-    BasicBlock, BlockId, Cfg, DotEdgeAttributes, DotEdgeStyle, DotStyle, Edge, EdgeId, EdgeKind,
-    FilteredEdges, control_flow_edge_attributes, to_dot,
+    BasicBlock, BlockId, Cfg, DisplayInstr, DotEdgeAttributes, DotEdgeStyle, DotStyle, Edge,
+    EdgeId, EdgeKind, FilteredEdges, control_flow_edge_attributes, render, to_dot,
 };
 
 use crate::dot_scanner::{Dot, Edge as DrawnEdge, scan};
@@ -74,9 +74,17 @@ fn a_hot_loop_is_drawn_with_probabilities_and_proportional_width() {
     cfg.block_mut(body).push(Line::new("i = i + 1"));
     cfg.block_mut(exit).push(Line::new("return i"));
     cfg.add_edge(cfg.entry(), header, EdgeKind::Fallthrough);
-    cfg.add_weighted_edge(header, body, EdgeKind::ConditionalTrue, 0.9);
-    cfg.add_weighted_edge(header, exit, EdgeKind::ConditionalFalse, 0.1);
-    cfg.add_weighted_edge(body, header, EdgeKind::Back, 1.0);
+    cfg.add_edge(
+        header,
+        body,
+        Edge::new(EdgeKind::ConditionalTrue).with_weight(0.9),
+    );
+    cfg.add_edge(
+        header,
+        exit,
+        Edge::new(EdgeKind::ConditionalFalse).with_weight(0.1),
+    );
+    cfg.add_edge(body, header, Edge::new(EdgeKind::Back).with_weight(1.0));
 
     assert_golden("text-dot/cfg-hot-loop.dot", &cfg.to_dot());
 }
@@ -186,26 +194,29 @@ fn the_bound_free_entry_point_renders_instructions_that_implement_nothing() {
     cfg.add_edge(cfg.entry(), next, EdgeKind::Fallthrough);
 
     let label = opaque_label;
-    let dot = scan(&cfg.to_dot_with(label));
+    let dot = scan(&render(|sink| cfg.write_dot(sink, label)));
     assert_eq!(
         dot.nodes[1].label_lines(),
         Some(vec!["bb1".to_owned(), "op#8".to_owned()])
     );
 
     let mut streamed = String::new();
-    cfg.write_dot_with(&mut streamed, label)
+    cfg.write_dot(&mut streamed, label)
         .expect("a String never fails");
-    assert_eq!(streamed, cfg.to_dot_with(label));
-    assert_failure_is_reported_at_every_length(&streamed, |sink| cfg.write_dot_with(sink, label));
+    assert_eq!(streamed, render(|sink| cfg.write_dot(sink, label)));
+    assert_failure_is_reported_at_every_length(&streamed, |sink| cfg.write_dot(sink, label));
 }
 
 #[test]
 fn write_dot_streams_the_same_text_as_to_dot() {
     let cfg = try_finally();
     let mut streamed = String::new();
-    cfg.write_dot(&mut streamed).expect("a String never fails");
+    cfg.write_dot(&mut streamed, DisplayInstr::mnemonic)
+        .expect("a String never fails");
     assert_eq!(streamed, cfg.to_dot());
-    assert_failure_is_reported_at_every_length(&streamed, |sink| cfg.write_dot(sink));
+    assert_failure_is_reported_at_every_length(&streamed, |sink| {
+        cfg.write_dot(sink, DisplayInstr::mnemonic)
+    });
 }
 
 #[test]
@@ -273,8 +284,8 @@ fn edges_of_one_kind_look_alike_whatever_their_endpoints_and_payloads() {
     let first = cfg.entry();
     let second = cfg.new_block();
     for kind in EdgeKind::ALL {
-        cfg.add_edge_with_payload(first, second, kind, 1);
-        cfg.add_edge_with_payload(second, first, kind, 2);
+        cfg.add_edge(first, second, Edge::new(kind).with_payload(1));
+        cfg.add_edge(second, first, Edge::new(kind).with_payload(2));
     }
 
     let attributes: Vec<_> = cfg
@@ -302,7 +313,7 @@ fn a_weighted_edge_names_its_probability_and_the_likelier_it_is_the_thicker() {
         let mut cfg = Cfg::<Line>::new();
         let next = cfg.new_block();
         for weight in weights {
-            cfg.add_weighted_edge(cfg.entry(), next, kind, weight);
+            cfg.add_edge(cfg.entry(), next, Edge::new(kind).with_weight(weight));
         }
 
         let widths: Vec<f64> = cfg

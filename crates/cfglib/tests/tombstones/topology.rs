@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use cfglib::{
-    BlockId, Cfg, CfgRenumbering, DenseId, EdgeId, EdgeKind, Graph, InstrInfo, NodeId, NodeOrder,
+    BlockId, BlockTag, Cfg, DenseId, EdgeId, EdgeKind, Graph, InstrInfo, NodeId, NodeOrder,
     Renumbering, Rooted, RootedView,
 };
 
@@ -294,7 +294,7 @@ pub struct Realizations {
     pub topology: Topology,
     pub cfg_holed: Cfg<Op>,
     pub cfg_compacted: Cfg<Op>,
-    pub cfg_renumbering: CfgRenumbering,
+    pub cfg_renumbering: Renumbering<BlockTag>,
     pub graph_holed: Graph<(), ()>,
     pub graph_compacted: Graph<(), ()>,
     pub graph_renumbering: Renumbering,

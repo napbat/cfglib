@@ -14,7 +14,7 @@ use golden::assert_golden;
 
 use cfglib::{
     Cfg, CfgBuilder, DisplayInstr, DominatorTree, EdgeKind, FlowControl, FlowEffect, InstrInfo,
-    JumpTargets, resolve_jump_edges, verify,
+    JumpTargets, render, resolve_jump_edges, verify,
 };
 
 /// A source symbol identity — deliberately non-`Copy`, non-numeric.
@@ -128,10 +128,10 @@ fn rendering_needs_only_display_instr_and_escapes_source_text() {
     cfg.add_edge(cfg.entry(), tail, EdgeKind::Fallthrough);
 
     assert_golden("dot/source-statements.dot", &cfg.to_dot());
-    assert_golden("text/source-statements.txt", &cfg.to_text());
+    assert_golden("text/source-statements.txt", &cfg.to_listing());
     assert_golden(
         "dot/source-node-ids.dot",
-        &cfg.to_dot_with(|stmt| Cow::Owned(format!("node {}", stmt.node))),
+        &render(|sink| cfg.write_dot(sink, |stmt| Cow::Owned(format!("node {}", stmt.node)))),
     );
 }
 

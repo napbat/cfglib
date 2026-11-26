@@ -205,7 +205,7 @@ impl Default for FrequencyConfig {
 ///
 /// ```
 /// use cfglib::{
-///     BlockFrequencies, Cfg, DominatorTree, EdgeKind, FREQUENCY_SHIFT, FrequencyConfig,
+///     BlockFrequencies, Cfg, DominatorTree, Edge, EdgeKind, FREQUENCY_SHIFT, FrequencyConfig,
 ///     LoopForest, Probability,
 /// };
 ///
@@ -215,8 +215,8 @@ impl Default for FrequencyConfig {
 /// let body = cfg.new_block();
 /// let exit = cfg.new_block();
 /// cfg.add_edge(cfg.entry(), header, EdgeKind::Fallthrough);
-/// cfg.add_weighted_edge(header, body, EdgeKind::ConditionalTrue, 0.875);
-/// let leave = cfg.add_weighted_edge(header, exit, EdgeKind::ConditionalFalse, 0.125);
+/// cfg.add_edge(header, body, Edge::new(EdgeKind::ConditionalTrue).with_weight(0.875));
+/// let leave = cfg.add_edge(header, exit, Edge::new(EdgeKind::ConditionalFalse).with_weight(0.125));
 /// cfg.add_edge(body, header, EdgeKind::Back);
 ///
 /// let dominators = DominatorTree::compute(&cfg);

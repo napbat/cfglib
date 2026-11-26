@@ -36,15 +36,30 @@ fn normal_and_full_flow_algorithms_share_storage_but_not_reachability() {
     let merge = cfg.new_block();
     let handler = cfg.new_block();
     let entry = cfg.entry();
-    cfg.add_edge_with_payload(entry, then_block, EdgeKind::ConditionalTrue, Route::Normal);
-    cfg.add_edge_with_payload(entry, else_block, EdgeKind::ConditionalFalse, Route::Normal);
-    cfg.add_edge_with_payload(then_block, merge, EdgeKind::Fallthrough, Route::Normal);
-    cfg.add_edge_with_payload(else_block, merge, EdgeKind::Fallthrough, Route::Normal);
-    let exceptional = cfg.add_edge_with_payload(
+    cfg.add_edge(
+        entry,
+        then_block,
+        Edge::new(EdgeKind::ConditionalTrue).with_payload(Route::Normal),
+    );
+    cfg.add_edge(
+        entry,
+        else_block,
+        Edge::new(EdgeKind::ConditionalFalse).with_payload(Route::Normal),
+    );
+    cfg.add_edge(
+        then_block,
+        merge,
+        Edge::new(EdgeKind::Fallthrough).with_payload(Route::Normal),
+    );
+    cfg.add_edge(
+        else_block,
+        merge,
+        Edge::new(EdgeKind::Fallthrough).with_payload(Route::Normal),
+    );
+    let exceptional = cfg.add_edge(
         entry,
         handler,
-        EdgeKind::ExceptionHandler,
-        Route::Handler { order: 0 },
+        Edge::new(EdgeKind::ExceptionHandler).with_payload(Route::Handler { order: 0 }),
     );
 
     let full = DominatorTree::compute(&cfg);
@@ -66,26 +81,31 @@ fn parallel_switch_and_continuation_edges_keep_identity_and_order() {
     let target = cfg.new_block();
     let resume = cfg.new_block();
     let entry = cfg.entry();
-    let default =
-        cfg.add_edge_with_payload(entry, target, EdgeKind::SwitchCase, Route::SwitchDefault);
-    let case = cfg.add_edge_with_payload(entry, target, EdgeKind::SwitchCase, Route::SwitchCase(7));
-    let first_continuation = cfg.add_edge_with_payload(
+    let default = cfg.add_edge(
+        entry,
+        target,
+        Edge::new(EdgeKind::SwitchCase).with_payload(Route::SwitchDefault),
+    );
+    let case = cfg.add_edge(
+        entry,
+        target,
+        Edge::new(EdgeKind::SwitchCase).with_payload(Route::SwitchCase(7)),
+    );
+    let first_continuation = cfg.add_edge(
         target,
         resume,
-        EdgeKind::CallReturn,
-        Route::Continuation {
+        Edge::new(EdgeKind::CallReturn).with_payload(Route::Continuation {
             call_site: 42,
             ordinal: 0,
-        },
+        }),
     );
-    let second_continuation = cfg.add_edge_with_payload(
+    let second_continuation = cfg.add_edge(
         target,
         resume,
-        EdgeKind::CallReturn,
-        Route::Continuation {
+        Edge::new(EdgeKind::CallReturn).with_payload(Route::Continuation {
             call_site: 42,
             ordinal: 1,
-        },
+        }),
     );
 
     assert_ne!(default, case);
@@ -110,10 +130,15 @@ fn split_redirect_bypass_and_clone_report_metadata_preserving_mappings() {
     let exit = cfg.new_block();
     let entry = cfg.entry();
     cfg.block_mut(entry).instructions_mut().extend([10, 20, 30]);
-    let outgoing = cfg.add_edge_with_payload(entry, exit, EdgeKind::Jump, Route::SwitchCase(9));
+    let outgoing = cfg.add_edge(
+        entry,
+        exit,
+        Edge::new(EdgeKind::Jump).with_payload(Route::SwitchCase(9)),
+    );
 
+    let synthetic = || Edge::new(EdgeKind::Fallthrough).with_payload(Route::Synthetic);
     let (parts, split) = cfg
-        .split_block_at_points_with_payloads(entry, [(1, Route::Synthetic), (2, Route::Synthetic)])
+        .split_block_at_points(entry, [(1, synthetic()), (2, synthetic())])
         .unwrap();
     assert_eq!(split.blocks(entry), Some(parts.as_slice()));
     assert_eq!(split.edges(outgoing), Some([outgoing].as_slice()));
@@ -131,9 +156,16 @@ fn split_redirect_bypass_and_clone_report_metadata_preserving_mappings() {
     let empty = bypass.new_block();
     let target = bypass.new_block();
     let entry = bypass.entry();
-    let incoming = bypass.add_edge_with_payload(entry, empty, EdgeKind::Jump, Route::SwitchCase(3));
-    let removed =
-        bypass.add_edge_with_payload(empty, target, EdgeKind::Fallthrough, Route::Synthetic);
+    let incoming = bypass.add_edge(
+        entry,
+        empty,
+        Edge::new(EdgeKind::Jump).with_payload(Route::SwitchCase(3)),
+    );
+    let removed = bypass.add_edge(
+        empty,
+        target,
+        Edge::new(EdgeKind::Fallthrough).with_payload(Route::Synthetic),
+    );
     let (count, mapping) = remove_empty_blocks_mapped(&mut bypass);
     assert_eq!(count, 1);
     assert_eq!(mapping.edges(incoming), Some([incoming].as_slice()));
@@ -151,19 +183,21 @@ fn handler_and_unwind_payloads_remain_distinct_and_ordered() {
     let unwind = cfg.new_block();
     let entry = cfg.entry();
     let edges = [
-        cfg.add_edge_with_payload(
+        cfg.add_edge(
             entry,
             first,
-            EdgeKind::ExceptionHandler,
-            Route::Handler { order: 0 },
+            Edge::new(EdgeKind::ExceptionHandler).with_payload(Route::Handler { order: 0 }),
         ),
-        cfg.add_edge_with_payload(
+        cfg.add_edge(
             entry,
             second,
-            EdgeKind::ExceptionHandler,
-            Route::Handler { order: 1 },
+            Edge::new(EdgeKind::ExceptionHandler).with_payload(Route::Handler { order: 1 }),
         ),
-        cfg.add_edge_with_payload(entry, unwind, EdgeKind::ExceptionUnwind, Route::Unwind),
+        cfg.add_edge(
+            entry,
+            unwind,
+            Edge::new(EdgeKind::ExceptionUnwind).with_payload(Route::Unwind),
+        ),
     ];
     assert_eq!(cfg.outgoing(entry).collect::<Vec<_>>(), edges);
     assert_eq!(cfg.edge(edges[0]).payload(), &Route::Handler { order: 0 });

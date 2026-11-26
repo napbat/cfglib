@@ -168,6 +168,6 @@ fn a_cfg_of_borrowed_instructions_renders_like_one_of_owned_instructions() {
         borrowed.block_mut(borrowed.entry()).push(line);
         owned.block_mut(owned.entry()).push(line.clone());
     }
-    assert_eq!(borrowed.to_text(), owned.to_text());
+    assert_eq!(borrowed.to_listing(), owned.to_listing());
     assert_eq!(borrowed.to_dot(), owned.to_dot());
 }

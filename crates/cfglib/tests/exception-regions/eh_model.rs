@@ -254,14 +254,20 @@ fn model_edges_lead_back_to_the_callers_payloads_by_edge_identity() {
     let entry = cfg.entry();
     let first = cfg.new_block();
     let second = cfg.new_block();
-    cfg.add_edge_with_payload(entry, entry, EdgeKind::Back, Dispatch::Normal);
-    let to_first =
-        cfg.add_edge_with_payload(entry, first, EdgeKind::ExceptionHandler, Dispatch::Order(0));
-    let to_second = cfg.add_edge_with_payload(
+    cfg.add_edge(
+        entry,
+        entry,
+        Edge::new(EdgeKind::Back).with_payload(Dispatch::Normal),
+    );
+    let to_first = cfg.add_edge(
+        entry,
+        first,
+        Edge::new(EdgeKind::ExceptionHandler).with_payload(Dispatch::Order(0)),
+    );
+    let to_second = cfg.add_edge(
         entry,
         second,
-        EdgeKind::ExceptionHandler,
-        Dispatch::Order(1),
+        Edge::new(EdgeKind::ExceptionHandler).with_payload(Dispatch::Order(1)),
     );
 
     let model = EhModel::compute(&cfg);

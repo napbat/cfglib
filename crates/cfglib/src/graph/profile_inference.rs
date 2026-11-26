@@ -96,14 +96,14 @@ pub struct InferenceCosts {
 /// # Examples
 ///
 /// ```
-/// use cfglib::{Cfg, EdgeKind, InferenceCosts, InferredCounts, Probability};
+/// use cfglib::{Cfg, Edge, EdgeKind, InferenceCosts, InferredCounts, Probability};
 ///
 /// // entry -> left (30%) or right (70%), both -> join. Only the entry and the
 /// // join were sampled.
 /// let mut cfg = Cfg::<u32>::new();
 /// let (left, right, join) = (cfg.new_block(), cfg.new_block(), cfg.new_block());
-/// let to_left = cfg.add_weighted_edge(cfg.entry(), left, EdgeKind::ConditionalTrue, 0.3);
-/// cfg.add_weighted_edge(cfg.entry(), right, EdgeKind::ConditionalFalse, 0.7);
+/// let to_left = cfg.add_edge(cfg.entry(), left, Edge::new(EdgeKind::ConditionalTrue).with_weight(0.3));
+/// cfg.add_edge(cfg.entry(), right, Edge::new(EdgeKind::ConditionalFalse).with_weight(0.7));
 /// cfg.add_edge(left, join, EdgeKind::Fallthrough);
 /// cfg.add_edge(right, join, EdgeKind::Fallthrough);
 ///

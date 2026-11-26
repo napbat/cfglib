@@ -52,7 +52,7 @@ fn with_gaps() -> Cfg<MockInst> {
 #[test]
 fn removed_block_slots_do_not_change_the_structure() {
     let mut cfg = with_gaps();
-    assert!(!cfg.is_compact());
+    assert!(!cfg.is_dense());
     let (sparse, sparse_report) = ControlTree::compute_with_report(&cfg);
     let sparse_text = pseudocode(&cfg, &sparse);
 

@@ -108,7 +108,7 @@ pub fn link<E: Default>(
     target: BlockId,
     kind: EdgeKind,
 ) -> EdgeId {
-    cfg.add_edge_with_payload(source, target, kind, E::default())
+    cfg.add_edge(source, target, kind)
 }
 
 pub fn fill<E>(cfg: &mut Cfg<Stmt, E>, at: BlockId, statements: impl IntoIterator<Item = Stmt>) {

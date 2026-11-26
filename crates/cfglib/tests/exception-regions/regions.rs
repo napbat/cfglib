@@ -265,8 +265,8 @@ fn statement_granular_protection_is_block_granular_once_split_at_its_boundaries(
         cfg.block_mut(entry).push(Stmt::text(text));
     }
     let pad = block_of(&mut cfg, &["recover()"]);
-    let tail = cfg.split_block(entry, 2);
-    let middle = cfg.split_block(entry, 1);
+    let tail = cfg.split_block(entry, 2, EdgeKind::Fallthrough);
+    let middle = cfg.split_block(entry, 1, EdgeKind::Fallthrough);
     cfg.add_edge(middle, pad, EdgeKind::ExceptionUnwind);
     cfg.add_edge(pad, tail, EdgeKind::Fallthrough);
     let region = protect(&mut cfg, &[middle], vec![catch(pad)]);

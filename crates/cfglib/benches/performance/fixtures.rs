@@ -1,5 +1,5 @@
 use cfglib::{
-    BlockId, Cfg, CfgBuilder, Direction, EdgeKind, FlowControl, FlowEffect, Graph, NodeId,
+    BlockId, Cfg, CfgBuilder, Direction, Edge, EdgeKind, FlowControl, FlowEffect, Graph, NodeId,
     NodeProblem, Problem,
 };
 
@@ -132,9 +132,13 @@ pub(super) fn weighted_high_fan_out_cfg(edge_count: usize) -> (Cfg<u32>, BlockId
         } else {
             EdgeKind::ConditionalFalse
         };
-        cfg.add_weighted_edge(target, sink, kind, fixture_f64(index) + 0.25);
+        cfg.add_edge(
+            target,
+            sink,
+            Edge::new(kind).with_weight(fixture_f64(index) + 0.25),
+        );
     }
-    cfg.add_weighted_edge(target, source, EdgeKind::Back, 0.875);
+    cfg.add_edge(target, source, Edge::new(EdgeKind::Back).with_weight(0.875));
     (cfg, source, target)
 }
 
@@ -167,10 +171,18 @@ pub(super) fn weighted_irreducible_cfg() -> Cfg<u32> {
     }
 
     cfg.add_edge(entry, first, EdgeKind::ConditionalTrue);
-    cfg.add_weighted_edge(entry, second, EdgeKind::ConditionalFalse, 0.125);
+    cfg.add_edge(
+        entry,
+        second,
+        Edge::new(EdgeKind::ConditionalFalse).with_weight(0.125),
+    );
     cfg.add_edge(first, second, EdgeKind::Fallthrough);
-    cfg.add_weighted_edge(second, first, EdgeKind::Back, 0.75);
-    cfg.add_weighted_edge(second, exit, EdgeKind::SwitchCase, 0.25);
+    cfg.add_edge(second, first, Edge::new(EdgeKind::Back).with_weight(0.75));
+    cfg.add_edge(
+        second,
+        exit,
+        Edge::new(EdgeKind::SwitchCase).with_weight(0.25),
+    );
     cfg
 }
 

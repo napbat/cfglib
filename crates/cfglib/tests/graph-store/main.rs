@@ -3,8 +3,8 @@
 //! They add and remove nodes and edges of a `Graph`, redirect edges without
 //! losing their identity, compact when they decide to pay for it, and carry
 //! their own identities across the compaction through the `Renumbering` it
-//! returns. The same renumbering carries a CFG pass's `Rewrite` forward with
-//! `Rewrite::then_renumbered`.
+//! returns. The same renumbering, converted with `Rewrite::from`, carries a
+//! CFG pass's `Rewrite` forward through `Rewrite::compose`.
 //!
 //! Node and edge payloads are deliberately not `Copy`: a consumer's payloads
 //! own strings and vectors, and every store operation has to leave them

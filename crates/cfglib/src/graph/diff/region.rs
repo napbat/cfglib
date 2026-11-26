@@ -692,7 +692,7 @@ mod tests {
             }
             let splits: Vec<(BlockId, BlockId)> = splits
                 .into_iter()
-                .map(|(block, at)| (block, right.split_block(block, at)))
+                .map(|(block, at)| (block, right.split_block(block, at, EdgeKind::Fallthrough)))
                 .collect();
 
             let diff = RegionDiff::compute(&left, &right);

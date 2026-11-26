@@ -227,7 +227,7 @@ impl EhModel {
 mod tests {
     use super::*;
     use crate::cfg::Cfg;
-    use crate::edge::EdgeKind;
+    use crate::edge::{Edge, EdgeKind};
     use crate::test_util::ff;
 
     #[test]
@@ -444,41 +444,37 @@ mod tests {
         let resume_target = cfg.new_block();
         let entry = cfg.entry();
 
-        let handler_edge = cfg.add_edge_with_payload(
+        let handler_edge = cfg.add_edge(
             entry,
             handler,
-            EdgeKind::ExceptionHandler,
-            ExceptionFlow::exceptional(
+            Edge::new(EdgeKind::ExceptionHandler).with_payload(ExceptionFlow::exceptional(
                 ExceptionPhase::Unwind,
                 Some(ExceptionDisposition::ExecuteHandler),
                 11,
-            ),
+            )),
         );
-        cfg.add_edge_with_payload(
+        cfg.add_edge(
             entry,
             leave,
-            EdgeKind::ExceptionLeave,
-            ExceptionFlow::normal(12),
+            Edge::new(EdgeKind::ExceptionLeave).with_payload(ExceptionFlow::normal(12)),
         );
-        cfg.add_edge_with_payload(
+        cfg.add_edge(
             rethrow,
             outer,
-            EdgeKind::ExceptionResume,
-            ExceptionFlow::exceptional(
+            Edge::new(EdgeKind::ExceptionResume).with_payload(ExceptionFlow::exceptional(
                 ExceptionPhase::Search,
                 Some(ExceptionDisposition::ContinueSearch),
                 13,
-            ),
+            )),
         );
-        cfg.add_edge_with_payload(
+        cfg.add_edge(
             continue_decision,
             resume_target,
-            EdgeKind::ExceptionContinue,
-            ExceptionFlow::exceptional(
+            Edge::new(EdgeKind::ExceptionContinue).with_payload(ExceptionFlow::exceptional(
                 ExceptionPhase::Search,
                 Some(ExceptionDisposition::ContinueExecution),
                 14,
-            ),
+            )),
         );
 
         let model = EhModel::compute(&cfg);

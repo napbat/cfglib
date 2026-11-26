@@ -2,9 +2,8 @@
 //! edge contraction, and block splitting.
 
 use cfglib::{
-    Cfg, EdgeKind, NodeOrder, SplitPointError, contract_edge, contract_edge_mapped, merge_blocks,
-    merge_blocks_mapped, remove_empty_blocks, remove_empty_blocks_mapped, remove_unreachable,
-    remove_unreachable_mapped, simplify, simplify_mapped,
+    Cfg, Edge, EdgeKind, NodeOrder, Rewrite, SplitPointError, contract_edge_mapped,
+    merge_blocks_mapped, remove_empty_blocks_mapped, remove_unreachable_mapped, simplify_mapped,
 };
 
 use crate::oracles::{
@@ -21,7 +20,7 @@ fn simplify_case<E: Payload>(seed: u64) {
     let before = random_program::<E>(seed, true);
     let reachable = reachable_blocks(&before);
     let mut cfg = before.clone();
-    let total = simplify(&mut cfg);
+    let total = simplify_mapped(&mut cfg).0;
 
     let context = format!("seed {seed}");
     assert_valid(&cfg, &context);
@@ -39,7 +38,11 @@ fn simplify_case<E: Payload>(seed: u64) {
     );
 
     let settled = cfg.clone();
-    assert_eq!(simplify(&mut cfg), 0, "{context}: second run finds work");
+    assert_eq!(
+        simplify_mapped(&mut cfg).0,
+        0,
+        "{context}: second run finds work"
+    );
     assert_eq!(cfg, settled, "{context}: second run changed the graph");
 }
 
@@ -71,7 +74,8 @@ fn simplify_mapped_case<E: Payload>(seed: u64) {
     );
 
     let renumbering = cfg.compact(NodeOrder::Insertion);
-    let carried = rewrite.then_renumbered(&renumbering);
+    let mut carried = rewrite;
+    carried.compose(&Rewrite::from(&renumbering));
     let compacted = Placement {
         rewrite: &carried,
         renumbering: Some(&renumbering),
@@ -145,7 +149,11 @@ fn merge_blocks_leaves_branch_arms_and_the_entry_alone() {
     builder.edge(join, exit, EdgeKind::Fallthrough);
     let mut cfg = builder.finish();
 
-    assert_eq!(merge_blocks(&mut cfg), 1, "only the join absorbs its exit");
+    assert_eq!(
+        merge_blocks_mapped(&mut cfg).0,
+        1,
+        "only the join absorbs its exit"
+    );
     assert_eq!(
         cfg.block(join).instructions(),
         [Inst::print(2), Inst::ret()]
@@ -171,7 +179,7 @@ fn merge_blocks_never_consumes_an_entry_that_a_loop_returns_to() {
     let mut cfg = builder.finish();
     let before = cfg.clone();
 
-    assert_eq!(merge_blocks(&mut cfg), 0);
+    assert_eq!(merge_blocks_mapped(&mut cfg).0, 0);
     assert_eq!(cfg, before);
 }
 
@@ -181,7 +189,7 @@ fn merge_blocks_keeps_the_label_of_the_block_it_folds_in() {
     cfg.block_mut(blocks[1]).set_label("loop");
     cfg.block_mut(blocks[2]).set_label("tail");
 
-    assert_eq!(merge_blocks(&mut cfg), 2);
+    assert_eq!(merge_blocks_mapped(&mut cfg).0, 2);
     assert_eq!(
         cfg.block(blocks[0]).label(),
         Some("loop"),
@@ -242,7 +250,7 @@ fn remove_empty_blocks_keeps_empty_blocks_that_decide_or_never_leave() {
     let mut cfg = builder.finish();
     let before = cfg.clone();
 
-    assert_eq!(remove_empty_blocks(&mut cfg), 0);
+    assert_eq!(remove_empty_blocks_mapped(&mut cfg).0, 0);
     assert_eq!(
         cfg, before,
         "the entry, a conditional exit, a two-way block and a self-loop stay"
@@ -285,7 +293,7 @@ fn unreachable_case<E: Payload>() {
         [Inst::print(2)],
         "a removed block stays readable until compaction"
     );
-    assert_eq!(remove_unreachable(&mut cfg), 0);
+    assert_eq!(remove_unreachable_mapped(&mut cfg).0, 0);
 }
 
 #[test]
@@ -336,7 +344,7 @@ fn contract_edge_keeps_the_source_label_when_both_blocks_have_one() {
     cfg.block_mut(blocks[0]).set_label("head");
     cfg.block_mut(blocks[1]).set_label("tail");
 
-    assert!(contract_edge(&mut cfg, blocks[0], blocks[1]));
+    assert!(contract_edge_mapped(&mut cfg, blocks[0], blocks[1]).is_some());
     assert_eq!(cfg.block(blocks[0]).label(), Some("head"));
 }
 
@@ -359,23 +367,23 @@ fn contract_edge_refuses_everything_but_a_sole_edge_between_distinct_blocks() {
     let before = cfg.clone();
 
     assert!(
-        !contract_edge(&mut cfg, branch, left),
+        contract_edge_mapped(&mut cfg, branch, left).is_none(),
         "source has two exits"
     );
     assert!(
-        !contract_edge(&mut cfg, left, join),
+        contract_edge_mapped(&mut cfg, left, join).is_none(),
         "target has two entries"
     );
     assert!(
-        !contract_edge(&mut cfg, join, entry),
+        contract_edge_mapped(&mut cfg, join, entry).is_none(),
         "the entry is never a target"
     );
     assert!(
-        !contract_edge(&mut cfg, spin, spin),
+        contract_edge_mapped(&mut cfg, spin, spin).is_none(),
         "self-loops do not contract"
     );
     assert!(
-        !contract_edge(&mut cfg, entry, join),
+        contract_edge_mapped(&mut cfg, entry, join).is_none(),
         "no edge runs entry to join"
     );
     assert!(contract_edge_mapped(&mut cfg, left, spin).is_none());
@@ -400,13 +408,14 @@ fn block_with_exits<E: Payload>() -> (Cfg<Inst, E>, cfglib::BlockId, [cfglib::Ed
 fn split_points_case<E: Payload>() {
     let (mut cfg, block, exits) = block_with_exits::<E>();
     let original: Vec<Inst> = cfg.block(block).instructions().to_vec();
+    let fallthrough = |payload| Edge::new(EdgeKind::Fallthrough).with_payload(payload);
     let (parts, rewrite) = cfg
-        .split_block_at_points_with_payloads(
+        .split_block_at_points(
             block,
             [
-                (0, E::tagged(100)),
-                (2, E::tagged(101)),
-                (5, E::tagged(102)),
+                (0, fallthrough(E::tagged(100))),
+                (2, fallthrough(E::tagged(101))),
+                (5, fallthrough(E::tagged(102))),
             ],
         )
         .expect("strictly increasing in-bounds points");
@@ -473,12 +482,17 @@ fn splitting_at_bad_points_is_rejected_before_touching_the_graph() {
     let points = |points: &[usize]| {
         points
             .iter()
-            .map(|&point| (point, Route::Synthetic))
+            .map(|&point| {
+                (
+                    point,
+                    Edge::new(EdgeKind::Fallthrough).with_payload(Route::Synthetic),
+                )
+            })
             .collect::<Vec<_>>()
     };
 
     assert_eq!(
-        cfg.split_block_at_points_with_payloads(block, points(&[1, 6]))
+        cfg.split_block_at_points(block, points(&[1, 6]))
             .unwrap_err(),
         SplitPointError::OutOfBounds {
             point: 6,
@@ -486,7 +500,7 @@ fn splitting_at_bad_points_is_rejected_before_touching_the_graph() {
         }
     );
     assert_eq!(
-        cfg.split_block_at_points_with_payloads(block, points(&[3, 3]))
+        cfg.split_block_at_points(block, points(&[3, 3]))
             .unwrap_err(),
         SplitPointError::NotStrictlyIncreasing {
             previous: 3,
@@ -494,7 +508,7 @@ fn splitting_at_bad_points_is_rejected_before_touching_the_graph() {
         }
     );
     assert_eq!(
-        cfg.split_block_at_points_with_payloads(block, points(&[4, 2]))
+        cfg.split_block_at_points(block, points(&[4, 2]))
             .unwrap_err(),
         SplitPointError::NotStrictlyIncreasing {
             previous: 4,
@@ -509,7 +523,7 @@ fn split_everywhere_case<E: Payload>(seed: u64) {
     for block in before.block_ids() {
         for at in 0..=before.block(block).instructions().len() {
             let mut cfg = before.clone();
-            let tail = cfg.split_block(block, at);
+            let tail = cfg.split_block(block, at, EdgeKind::Fallthrough);
             let context = format!("seed {seed}, {block} at {at}");
             assert_valid(&cfg, &context);
             assert_same_behavior(&before, &cfg, &context);
@@ -536,9 +550,20 @@ fn splitting_preserves_behavior_at_every_instruction_boundary() {
 }
 
 #[test]
-fn a_mapped_split_reports_the_new_tail_and_edge() {
+fn a_one_point_split_reports_the_new_tail_and_edge() {
     let (mut cfg, block, exits) = block_with_exits::<Route>();
-    let (tail, rewrite) = cfg.split_block_with_payload_mapped(block, 3, Route::Tagged(77));
+    let (blocks, rewrite) = cfg
+        .split_block_at_points(
+            block,
+            [(
+                3,
+                Edge::new(EdgeKind::Fallthrough).with_payload(Route::Tagged(77)),
+            )],
+        )
+        .expect("an in-bounds point");
+    let [_, tail] = blocks[..] else {
+        panic!("one point splits off one tail: {blocks:?}");
+    };
 
     assert_eq!(rewrite.blocks(block), Some([block, tail].as_slice()));
     assert_eq!(rewrite.created_blocks(), [tail]);

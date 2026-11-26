@@ -17,7 +17,8 @@ use crate::cfg::Cfg;
 use crate::edge::{EdgeId, EdgeKind};
 use crate::graph::dominator::{DominatorTree, PostDominatorTree};
 use crate::graph::loop_forest::LoopForest;
-use crate::graph::view::VirtualRoot;
+use crate::graph::traverse::reverse_postorder;
+use crate::graph::view::{Direction, VirtualRoot};
 use crate::region::{Handler, Region};
 use bound::Bound;
 use completion::Completion;
@@ -503,7 +504,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
 
     fn run(mut self) -> (ControlTree, LiftReport) {
         let cfg = self.cfg;
-        let order = cfg.reverse_postorder();
+        let order = reverse_postorder(cfg, cfg.entry(), Direction::Forward);
         self.anchors = try_catch::region_anchors(cfg, &order);
         let mut body = self.lift_region(cfg.entry(), Bound::Whole, None);
 

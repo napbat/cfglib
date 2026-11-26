@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 
-use cfglib::{BlockId, Cfg, DenseId, DominatorTree, EdgeKind, FlowEffect, Graph, NodeId};
+use cfglib::{
+    BlockId, Cfg, DenseId, Direction, DominatorTree, EdgeKind, FlowEffect, Graph, NodeId,
+    depth_first_preorder,
+};
 
 use super::fixtures::{BuilderInst, fixture_f64, fixture_u32};
 
@@ -179,7 +182,10 @@ pub(super) fn assert_builder_cfg(
     expected_edge_kinds: &[(EdgeKind, usize)],
 ) {
     assert_cfg_shape(cfg, expected_blocks, expected_edges);
-    assert_eq!(cfg.depth_first_preorder().len(), expected_blocks);
+    assert_eq!(
+        depth_first_preorder(cfg, cfg.entry(), Direction::Forward).len(),
+        expected_blocks
+    );
 
     let instructions: Vec<_> = cfg
         .blocks()
@@ -284,9 +290,9 @@ pub(super) enum FanOut {
     /// Untouched: `source` and `target` are still two instruction-carrying
     /// blocks joined by the connecting edge.
     Intact,
-    /// `merge_blocks` folded `target` into `source` and removed it.
+    /// `merge_blocks_mapped` folded `target` into `source` and removed it.
     Merged,
-    /// `contract_edge` folded `target` into `source` and removed it, which is
+    /// `contract_edge_mapped` folded `target` into `source` and removed it, which is
     /// the same shape `Merged` leaves behind.
     Contracted,
 }

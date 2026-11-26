@@ -7,9 +7,9 @@ use std::collections::BTreeSet;
 use std::convert::Infallible;
 
 use cfglib::{
-    BlockId, Cfg, Pass, PassChange, PassId, PassPipeline, SemanticValidator, merge_blocks, pass_fn,
-    remove_empty_blocks, remove_unreachable, simplify, split_critical_edges,
-    split_critical_edges_mapped, verify_with,
+    BlockId, Cfg, Pass, PassChange, PassId, PassPipeline, SemanticValidator, merge_blocks_mapped,
+    pass_fn, remove_empty_blocks_mapped, remove_unreachable_mapped, simplify_mapped,
+    split_critical_edges_mapped, verify_semantics,
 };
 
 use crate::oracles::{assert_surviving_payloads_unchanged, assert_valid, critical_edges};
@@ -78,7 +78,7 @@ fn verified<'a, E: 'a>(log: &'a Log) -> impl Pass<Cfg<Inst, E>, Error = Rejected
     pass_fn(
         PassId::new("check.verify"),
         move |cfg: &mut Cfg<Inst, E>| {
-            let report = verify_with(cfg, &TwoWayBranches);
+            let report = verify_semantics(cfg, &TwoWayBranches);
             log.borrow_mut().push(("check.verify", false));
             if report.is_ok() {
                 Ok(PassChange::Unchanged)
@@ -97,15 +97,19 @@ fn a_cleanup_pipeline_runs_in_schedule_order_and_reports_each_pass_honestly() {
         let log = Log::default();
         let mut pipeline = PassPipeline::<Cfg<Inst>, Rejected>::new();
         pipeline.push(transform("cleanup.remove-unreachable", &log, |cfg| {
-            remove_unreachable(cfg)
+            remove_unreachable_mapped(cfg).0
         }));
         pipeline.push(transform("cleanup.remove-empty", &log, |cfg| {
-            remove_empty_blocks(cfg)
+            remove_empty_blocks_mapped(cfg).0
         }));
-        pipeline.push(transform("cleanup.merge", &log, merge_blocks));
-        pipeline.push(transform("cleanup.simplify", &log, simplify));
+        pipeline.push(transform("cleanup.merge", &log, |cfg| {
+            merge_blocks_mapped(cfg).0
+        }));
+        pipeline.push(transform("cleanup.simplify", &log, |cfg| {
+            simplify_mapped(cfg).0
+        }));
         pipeline.push(transform("ssa.split-critical", &log, |cfg| {
-            split_critical_edges(cfg)
+            split_critical_edges_mapped(cfg, |_, _| Default::default()).0
         }));
         pipeline.push(verified(&log));
 
@@ -159,18 +163,22 @@ fn the_schedule_decides_whether_critical_edges_survive() {
 
     let mut split_last = before.clone();
     let mut pipeline = PassPipeline::<Cfg<Inst>, Rejected>::new();
-    pipeline.push(transform("cleanup.simplify", &log, simplify));
+    pipeline.push(transform("cleanup.simplify", &log, |cfg| {
+        simplify_mapped(cfg).0
+    }));
     pipeline.push(transform("ssa.split-critical", &log, |cfg| {
-        split_critical_edges(cfg)
+        split_critical_edges_mapped(cfg, |_, _| Default::default()).0
     }));
     assert_eq!(pipeline.run(&mut split_last).unwrap().len(), 2);
 
     let mut split_first = before.clone();
     let mut pipeline = PassPipeline::<Cfg<Inst>, Rejected>::new();
     pipeline.push(transform("ssa.split-critical", &log, |cfg| {
-        split_critical_edges(cfg)
+        split_critical_edges_mapped(cfg, |_, _| Default::default()).0
     }));
-    pipeline.push(transform("cleanup.simplify", &log, simplify));
+    pipeline.push(transform("cleanup.simplify", &log, |cfg| {
+        simplify_mapped(cfg).0
+    }));
     assert_eq!(pipeline.run(&mut split_first).unwrap().len(), 2);
 
     assert_eq!(critical_edges(&split_last), []);
@@ -188,7 +196,9 @@ fn a_failing_pass_stops_the_pipeline_and_the_failure_names_it() {
     let mut cfg = before.clone();
     let log = Log::default();
     let mut pipeline = PassPipeline::<Cfg<Inst>, Rejected>::new();
-    pipeline.push(transform("cleanup.simplify", &log, simplify));
+    pipeline.push(transform("cleanup.simplify", &log, |cfg| {
+        simplify_mapped(cfg).0
+    }));
     pipeline.push(pass_fn(
         PassId::new("test.reject"),
         |cfg: &mut Cfg<Inst>| {
@@ -196,7 +206,7 @@ fn a_failing_pass_stops_the_pipeline_and_the_failure_names_it() {
             Err::<PassChange, _>(Rejected::Refused("no budget"))
         },
     ));
-    pipeline.push(transform("never.runs", &log, simplify));
+    pipeline.push(transform("never.runs", &log, |cfg| simplify_mapped(cfg).0));
 
     let failure = pipeline.run(&mut cfg).expect_err("the second pass fails");
 
@@ -292,9 +302,9 @@ fn repeating_an_identity_expresses_a_fixpoint_schedule_that_ends_unchanged() {
         let mut pipeline = PassPipeline::<Cfg<Inst>, Rejected>::new();
         for _ in 0..6 {
             pipeline.push(transform("unreachable", &log, |cfg| {
-                remove_unreachable(cfg)
+                remove_unreachable_mapped(cfg).0
             }));
-            pipeline.push(transform("merge", &log, merge_blocks));
+            pipeline.push(transform("merge", &log, |cfg| merge_blocks_mapped(cfg).0));
         }
         let ids: Vec<&str> = pipeline.ids().map(PassId::as_str).collect();
         assert_eq!(
@@ -311,7 +321,9 @@ fn repeating_an_identity_expresses_a_fixpoint_schedule_that_ends_unchanged() {
         {
             converged += 1;
             let mut expected = before.clone();
-            while remove_unreachable(&mut expected) + merge_blocks(&mut expected) > 0 {}
+            while remove_unreachable_mapped(&mut expected).0 + merge_blocks_mapped(&mut expected).0
+                > 0
+            {}
             assert_eq!(
                 cfg, expected,
                 "seed {seed}: same operations in the same order"
@@ -338,7 +350,7 @@ impl Pass<Cfg<Inst>> for CountingSimplify<'_> {
     }
 
     fn run(&mut self, cfg: &mut Cfg<Inst>) -> Result<PassChange, Infallible> {
-        let removed = simplify(cfg);
+        let removed = simplify_mapped(cfg).0;
         self.blocks_removed.set(self.blocks_removed.get() + removed);
         self.runs.set(self.runs.get() + 1);
         Ok(PassChange::from_changed(removed > 0))
@@ -414,11 +426,13 @@ fn pass_identities_and_changes_have_the_documented_conversions() {
 fn payload_pipeline(log: &Log) -> PassPipeline<'_, Cfg<Inst, Route>, Rejected> {
     let mut pipeline = PassPipeline::new();
     pipeline.push(transform("cleanup.remove-empty", log, |cfg| {
-        remove_empty_blocks(cfg)
+        remove_empty_blocks_mapped(cfg).0
     }));
-    pipeline.push(transform("cleanup.simplify", log, simplify));
+    pipeline.push(transform("cleanup.simplify", log, |cfg| {
+        simplify_mapped(cfg).0
+    }));
     pipeline.push(transform("ssa.split-critical", log, |cfg| {
-        split_critical_edges_mapped(cfg).0
+        split_critical_edges_mapped(cfg, |_, _| Route::default()).0
     }));
     pipeline.push(verified(log));
     pipeline

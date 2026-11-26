@@ -25,8 +25,8 @@ use cfglib::{
     HandlerKind, HandlerTypes, HornClauses, IfdsConfig, IfdsProblem, InstrInfo, KeyedGraph, NodeId,
     NodeOrder, PostDominatorTree, Problem, SortedMap, StackGraphError, Supergraph, TextError,
     VectoredExceptionModel, VectoredHandlerKind, VectoredHandlerOrder, breadth_first,
-    install_clr_region, parse_cfg_text, parse_text, remove_unreachable, shortest_path, simplify,
-    solve_ifds, solve_problem, tarjan_scc, topological_sort, verify,
+    install_clr_region, parse_cfg_listing, parse_text, remove_unreachable_mapped, shortest_path,
+    simplify_mapped, solve_ifds, solve_problem, tarjan_scc, topological_sort, verify,
 };
 
 /// An instruction a consumer owns: its text, and the variables it reads and
@@ -112,20 +112,21 @@ fn a_cfg_is_built_verified_and_dominated_with_alloc_types() {
 #[test]
 fn the_text_form_is_an_alloc_string_that_parses_back() {
     let (cfg, _) = diamond();
-    let text: String = cfg.to_text();
+    let text: String = cfg.to_listing();
     assert_eq!(
         text,
         "entry bb0\nbb0:\n    if c\nbb1:\n    x = 1\nbb2:\n    x = 2\nbb3:\n    use x\n\
          bb0 -> bb1 true\nbb0 -> bb2 false\nbb1 -> bb3 fallthrough\nbb2 -> bb3 fallthrough\n"
     );
 
-    let parsed = parse_cfg_text(&text, |line| Ok(Statement::new(line, &[], &[])))
+    let parsed = parse_cfg_listing(&text, |line| Ok(Statement::new(line, &[], &[])))
         .expect("the text is the writer's own");
-    assert_eq!(parsed.to_text(), text);
+    assert_eq!(parsed.to_listing(), text);
     assert_eq!(parsed.block_count(), cfg.block_count());
 
     let mut streamed = String::new();
-    cfg.write_text(&mut streamed).expect("a String never fails");
+    cfg.write_listing(&mut streamed)
+        .expect("a String never fails");
     assert_eq!(streamed, text);
     assert!(cfg.to_dot().contains("digraph cfg"));
 }
@@ -347,15 +348,15 @@ fn a_structured_stream_builds_and_the_cleanup_passes_report_alloc_results() {
     assert!(verify(&cfg).is_ok());
 
     let before = cfg.block_count();
-    let removed: usize = remove_unreachable(&mut cfg);
+    let removed: usize = remove_unreachable_mapped(&mut cfg).0;
     assert_eq!(
         removed, 1,
         "the code after the return is the one unreachable block"
     );
     assert_eq!(cfg.block_count(), before - 1);
-    let _merged: usize = simplify(&mut cfg);
+    let _merged: usize = simplify_mapped(&mut cfg).0;
     cfg.compact(NodeOrder::Insertion);
-    assert!(cfg.is_compact());
+    assert!(cfg.is_dense());
     assert!(verify(&cfg).is_ok());
     assert!(
         cfg.blocks()
@@ -430,7 +431,8 @@ fn facade_errors_implement_the_core_error_trait() {
     let build_error = CfgBuilder::build(vec![Step::EndIf]).expect_err("an unbalanced stream");
     let _ = assert_core_error(build_error);
     let _ = assert_core_error(StackGraphError::EdgeFromJumpToScope);
-    let split = Cfg::<Statement>::new().split_block_at_points(BlockId::from_index(0), &[5]);
+    let split = Cfg::<Statement>::new()
+        .split_block_at_points(BlockId::from_index(0), [(5, EdgeKind::Fallthrough)]);
     let _ = assert_core_error(split.expect_err("a point past the block"));
 }
 

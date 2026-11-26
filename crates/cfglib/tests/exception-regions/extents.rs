@@ -210,9 +210,21 @@ fn normality_in_the_edge_payload_is_honored_by_the_with_variant() {
     let body = cfg.new_block();
     let pad = cfg.new_block();
     let end = cfg.new_block();
-    cfg.add_edge_with_payload(entry, body, EdgeKind::Fallthrough, Route::Normal);
-    cfg.add_edge_with_payload(body, pad, EdgeKind::Fallthrough, Route::Unwind);
-    cfg.add_edge_with_payload(pad, end, EdgeKind::Fallthrough, Route::Normal);
+    cfg.add_edge(
+        entry,
+        body,
+        Edge::new(EdgeKind::Fallthrough).with_payload(Route::Normal),
+    );
+    cfg.add_edge(
+        body,
+        pad,
+        Edge::new(EdgeKind::Fallthrough).with_payload(Route::Unwind),
+    );
+    cfg.add_edge(
+        pad,
+        end,
+        Edge::new(EdgeKind::Fallthrough).with_payload(Route::Normal),
+    );
     let region = cfg.add_region(cfglib::Region {
         id: RegionId::from_raw(0),
         protected_blocks: BTreeSet::from([body]),

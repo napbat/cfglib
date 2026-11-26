@@ -17,7 +17,7 @@ use crate::block::BlockId;
 use crate::builder::CfgBuilder;
 use crate::cfg::Cfg;
 use crate::display::DisplayInstr;
-use crate::edge::EdgeKind;
+use crate::edge::{Edge, EdgeKind};
 use crate::flow::FlowEffect;
 use crate::test_util::{MockInst, ff};
 
@@ -490,7 +490,11 @@ fn compute_accepts_caller_owned_edge_payloads() {
     cfg.block_mut(cfg.entry()).push(ff("entry"));
     cfg.block_mut(exit)
         .push(MockInst(FlowEffect::Return, "return"));
-    cfg.add_edge_with_payload(cfg.entry(), exit, EdgeKind::Fallthrough, "source identity");
+    cfg.add_edge(
+        cfg.entry(),
+        exit,
+        Edge::new(EdgeKind::Fallthrough).with_payload("source identity"),
+    );
 
     let tree = ControlTree::compute(&cfg);
     let pseudo = pseudocode(&cfg, &tree);
@@ -508,10 +512,26 @@ fn compute_recovers_a_payload_bearing_loop_from_ordinary_jump_edges() {
     cfg.block_mut(body).push(ff("body"));
     cfg.block_mut(exit)
         .push(MockInst(FlowEffect::Return, "return"));
-    cfg.add_edge_with_payload(cfg.entry(), header, EdgeKind::Fallthrough, "entry");
-    cfg.add_edge_with_payload(header, body, EdgeKind::ConditionalTrue, "true");
-    cfg.add_edge_with_payload(header, exit, EdgeKind::ConditionalFalse, "false");
-    cfg.add_edge_with_payload(body, header, EdgeKind::Jump, "native goto");
+    cfg.add_edge(
+        cfg.entry(),
+        header,
+        Edge::new(EdgeKind::Fallthrough).with_payload("entry"),
+    );
+    cfg.add_edge(
+        header,
+        body,
+        Edge::new(EdgeKind::ConditionalTrue).with_payload("true"),
+    );
+    cfg.add_edge(
+        header,
+        exit,
+        Edge::new(EdgeKind::ConditionalFalse).with_payload("false"),
+    );
+    cfg.add_edge(
+        body,
+        header,
+        Edge::new(EdgeKind::Jump).with_payload("native goto"),
+    );
 
     let tree = ControlTree::compute(&cfg);
     assert!(

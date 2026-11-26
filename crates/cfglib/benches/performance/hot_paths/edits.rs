@@ -131,7 +131,7 @@ fn register_fan_out(suite: &mut BenchmarkSuite<'_>) {
         "cfg_clone_split_weighted_high_fan_out",
         || {
             let mut cloned = weighted_high_fan_out.clone();
-            let split = cloned.split_block(fan_out_target, 1);
+            let split = cloned.split_block(fan_out_target, 1, EdgeKind::Fallthrough);
             (cloned, split)
         },
         |(result, split): &(Cfg<u32>, BlockId)| assert_split_weighted_fan_out(

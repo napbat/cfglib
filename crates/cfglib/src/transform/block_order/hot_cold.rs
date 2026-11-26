@@ -58,8 +58,8 @@ pub struct SplitOrder<N = BlockId> {
 ///
 /// ```
 /// use cfglib::{
-///     BlockId, BlockOrder, Cfg, ColdClass, ColdnessClasses, ColdnessGraph, EdgeKind, Emitter,
-///     hot_cold_order, linearize,
+///     BlockId, BlockOrder, Cfg, ColdClass, ColdnessClasses, ColdnessGraph, Direction, EdgeKind,
+///     Emitter, hot_cold_order, linearize, reverse_postorder,
 /// };
 ///
 /// /// Seeds `abort` `Rare`; every edge passes any class on.
@@ -77,7 +77,7 @@ pub struct SplitOrder<N = BlockId> {
 ///         self.cfg.entry()
 ///     }
 ///     fn reachable(&self) -> impl Iterator<Item = BlockId> + '_ {
-///         self.cfg.reverse_postorder().into_iter()
+///         reverse_postorder(self.cfg, self.cfg.entry(), Direction::Forward).into_iter()
 ///     }
 ///     fn records(&self, node: BlockId) -> impl Iterator<Item = (BlockId, ColdClass)> + '_ {
 ///         self.cfg.successors(node).map(|target| (target, ColdClass::Normal))
@@ -122,7 +122,8 @@ pub struct SplitOrder<N = BlockId> {
 /// cfg.add_edge(else_arm, abort, EdgeKind::Fallthrough);
 ///
 /// let classes = ColdnessClasses::compute(&Seeds { cfg: &cfg, abort });
-/// let split = hot_cold_order(&cfg.reverse_postorder(), &classes, entry);
+/// let order = reverse_postorder(&cfg, entry, Direction::Forward);
+/// let split = hot_cold_order(&order, &classes, entry);
 /// assert_eq!(split.order, [entry, then_arm, join, else_arm, abort]);
 /// assert_eq!((split.cold_start, split.never_start), (3, 5));
 ///
@@ -180,6 +181,8 @@ mod tests {
     use crate::cfg::Cfg;
     use crate::edge::EdgeKind;
     use crate::graph::coldness::{ColdClass, ColdnessClasses, ColdnessGraph};
+    use crate::graph::traverse::reverse_postorder;
+    use crate::graph::view::Direction;
     use crate::test_util::rng::Rng;
     use crate::transform::linearize::{BlockOrder, Emitter, LinearInst, linearize};
 
@@ -373,7 +376,8 @@ mod tests {
         let classes = block_classes(&Toy::of_cfg(&cfg, &[abort]));
         assert_eq!(classes.class(else_arm), ColdClass::Rare);
 
-        let split = hot_cold_order(&cfg.reverse_postorder(), &classes, entry);
+        let order = reverse_postorder(&cfg, entry, Direction::Forward);
+        let split = hot_cold_order(&order, &classes, entry);
         assert_eq!(split.order, [entry, then_arm, join, else_arm, abort]);
         assert_eq!((split.cold_start, split.never_start), (3, 5));
 
@@ -403,7 +407,7 @@ mod tests {
         cfg.add_edge(cfg.entry(), c, EdgeKind::Jump);
         let classes = block_classes(&Toy::of_cfg(&cfg, &[]));
 
-        let base = cfg.reverse_postorder();
+        let base = reverse_postorder(&cfg, cfg.entry(), Direction::Forward);
         let split = hot_cold_order(&base, &classes, cfg.entry());
         assert_eq!(
             split,

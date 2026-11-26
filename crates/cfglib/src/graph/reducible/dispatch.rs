@@ -26,7 +26,7 @@ use core::cmp::Reverse;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::edge::{EdgeId, EdgeKind};
+use crate::edge::{Edge, EdgeId, EdgeKind};
 use crate::graph::loop_forest::{LoopForest, LoopId};
 use crate::graph::traverse::reachable;
 use crate::graph::view::Direction;
@@ -315,7 +315,11 @@ impl<'a> Dispatch<'a> {
         }
         for (index, &entry) in entries.iter().enumerate() {
             let payload = builder.case(hub, index);
-            cfg.add_edge_with_payload(hub, entry, EdgeKind::SwitchCase, payload);
+            cfg.add_edge(
+                hub,
+                entry,
+                Edge::new(EdgeKind::SwitchCase).with_payload(payload),
+            );
         }
         for (index, edge) in redirected {
             let from = cfg.edge(edge).source();
@@ -330,7 +334,11 @@ impl<'a> Dispatch<'a> {
             cfg.block_mut(selector).instructions_mut().extend(code);
             cfg.redirect_edge_target(edge, selector);
             let payload = builder.jump(selector, hub);
-            cfg.add_edge_with_payload(selector, hub, EdgeKind::Jump, payload);
+            cfg.add_edge(
+                selector,
+                hub,
+                Edge::new(EdgeKind::Jump).with_payload(payload),
+            );
         }
 
         if let Some(around) = self.forest.parent(cycle)
