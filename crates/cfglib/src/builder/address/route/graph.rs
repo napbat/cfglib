@@ -65,8 +65,9 @@ impl<I: AddressInstruction + Clone, E: Clone> AddressGraph<I, E> {
     /// way, and an edge from each return of an instance to the next instance
     /// or to the handler block. There is one edge for each pair of source
     /// and target block. The `route` of the edge names the first route that
-    /// states it. An [`UnwindEnd::Resume`] edge goes from the protected block
-    /// to itself, and [`UnwindEnd::Propagate`] adds no edge.
+    /// states it. An [`UnwindEnd::Resume`] edge is an [`EdgeRole::Continue`]
+    /// edge, of kind [`EdgeKind::ExceptionContinue`], from the protected
+    /// block to itself, and [`UnwindEnd::Propagate`] adds no edge.
     ///
     /// The result lists the hops of each source block that has a way, so the
     /// consumer can also see the ways that have no edge, and the opaque calls
@@ -222,7 +223,7 @@ fn region_of<I: AddressInstruction, E>(
             let edge = cfg.edge(edge);
             let followed = !matches!(
                 edge.data().kind(),
-                EdgeKind::ExceptionUnwind | EdgeKind::Call
+                EdgeKind::ExceptionUnwind | EdgeKind::ExceptionContinue | EdgeKind::Call
             );
             let target = edge.target();
             if followed && !funclet_entries.contains(&target) && seen.insert(target) {
@@ -253,7 +254,7 @@ fn returns_to_runtime<I: AddressInstruction, E>(cfg: &Cfg<I, E>, block: BlockId)
             Flow::Jump { .. } => cfg.outgoing(block).all(|edge| {
                 matches!(
                     cfg.edge(edge).data().kind(),
-                    EdgeKind::ExceptionUnwind | EdgeKind::Call
+                    EdgeKind::ExceptionUnwind | EdgeKind::ExceptionContinue | EdgeKind::Call
                 )
             }),
             _ => false,
@@ -313,7 +314,8 @@ fn clone_region<I: Clone, E: Clone>(
 struct Emitter<'a, I: AddressInstruction, E, F> {
     cfg: &'a mut Cfg<I, E>,
     edge_payload: F,
-    added: BTreeSet<(BlockId, BlockId)>,
+    /// The edges added, by source, target, and whether the edge resumes.
+    added: BTreeSet<(BlockId, BlockId, bool)>,
     hops: BTreeMap<(BlockId, HopEnd), BTreeSet<Vec<u32>>>,
     instances: &'a [Option<Instance>],
     handler_blocks: &'a BTreeMap<I::Address, BlockId>,
@@ -331,19 +333,33 @@ where
                 .as_ref()
                 .expect("a child node names a funclet")
                 .entry;
-            self.way(source, route, calls, HopEnd::Block(entry));
+            self.way(
+                source,
+                EdgeRole::Route { route },
+                calls,
+                HopEnd::Block(entry),
+            );
         }
         for (calls, end) in &node.ends {
-            let end = match end {
-                UnwindEnd::Handler(address) => HopEnd::Block(self.handler_blocks[address]),
-                UnwindEnd::Propagate => HopEnd::Leave,
-                UnwindEnd::Resume => HopEnd::Block(source),
+            let (end, role) = match end {
+                UnwindEnd::Handler(address) => (
+                    HopEnd::Block(self.handler_blocks[address]),
+                    EdgeRole::Route { route },
+                ),
+                UnwindEnd::Propagate => (HopEnd::Leave, EdgeRole::Route { route }),
+                UnwindEnd::Resume => (HopEnd::Block(source), EdgeRole::Continue { route }),
             };
-            self.way(source, route, calls, end);
+            self.way(source, role, calls, end);
         }
     }
 
-    fn way(&mut self, source: BlockId, route: usize, calls: &[u32], end: HopEnd) {
+    fn way(
+        &mut self,
+        source: BlockId,
+        role: EdgeRole<'_, I::Address, I::CaseKey>,
+        calls: &[u32],
+        end: HopEnd,
+    ) {
         self.hops
             .entry((source, end))
             .or_default()
@@ -351,7 +367,10 @@ where
         let HopEnd::Block(target) = end else {
             return;
         };
-        if !self.added.insert((source, target)) {
+        // A way back to the protected block itself is its own edge beside a
+        // route to a handler that the block also leads.
+        let resumes = matches!(role, EdgeRole::Continue { .. });
+        if !self.added.insert((source, target, resumes)) {
             return;
         }
         let source_address = self
@@ -368,14 +387,15 @@ where
             .first()
             .expect("a block holds an instruction")
             .address();
+        let kind = role.kind();
         let payload = (self.edge_payload)(AddressEdgeInfo {
             source: source_address,
             target: target_address,
-            kind: EdgeKind::ExceptionUnwind,
-            role: EdgeRole::Route { route },
+            kind,
+            role,
         });
         self.cfg
-            .add_edge_with_payload(source, target, EdgeKind::ExceptionUnwind, payload);
+            .add_edge_with_payload(source, target, kind, payload);
     }
 
     fn hops(self) -> Vec<UnwindHop> {

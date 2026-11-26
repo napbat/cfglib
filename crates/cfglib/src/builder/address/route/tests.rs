@@ -17,12 +17,12 @@ mod errors;
 mod shapes;
 
 /// `(source, target, is an unwind edge, route)`; the route is set on route
-/// edges only.
+/// and continue edges only.
 pub(super) type Wire = (u32, u32, bool, Option<usize>);
 
 pub(super) fn wire(info: crate::builder::address::AddressEdgeInfo<'_, u32, i32>) -> Wire {
     let route = match info.role {
-        EdgeRole::Route { route } => Some(route),
+        EdgeRole::Route { route } | EdgeRole::Continue { route } => Some(route),
         _ => None,
     };
     (
@@ -591,6 +591,23 @@ fn a_resume_end_is_an_edge_from_the_protected_block_to_itself() {
     let built = build(instructions, &routes);
 
     assert_eq!(built.route_edges(), BTreeSet::from([(0, 0), (0, 10)]));
+    let protected = built.block_of(0);
+    let kinds: BTreeSet<_> = built
+        .graph
+        .cfg
+        .outgoing(protected)
+        .map(|edge| built.graph.cfg.edge(edge))
+        .filter(|edge| edge.kind().is_exceptional())
+        .map(|edge| (built.first_address(edge.target()), edge.kind() as u8))
+        .collect();
+    assert_eq!(
+        kinds,
+        BTreeSet::from([
+            (0, EdgeKind::ExceptionContinue as u8),
+            (10, EdgeKind::ExceptionUnwind as u8),
+        ]),
+        "execution continues at the protected instruction; the funclet is unwound to"
+    );
     let itself: Vec<_> = built
         .hops_of(built.block_of(0))
         .into_iter()

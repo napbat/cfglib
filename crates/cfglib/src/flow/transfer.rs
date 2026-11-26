@@ -205,8 +205,15 @@ pub enum EdgeRole<'k, T, K> {
     /// Exceptional transfer on one way that the runtime takes after a
     /// protected operation throws: an edge from the protected operation, or
     /// from the return of a funclet, to the next funclet instance or to a
-    /// handler block, or back to the protected operation itself.
+    /// handler block.
     Route {
+        /// Index of the first route that states the edge.
+        route: usize,
+    },
+    /// The way back to the protected operation itself, on which the runtime
+    /// resumes execution after a filter handled the exception in place
+    /// (`EXCEPTION_CONTINUE_EXECUTION`).
+    Continue {
         /// Index of the first route that states the edge.
         route: usize,
     },
@@ -227,6 +234,7 @@ impl<T, K> EdgeRole<'_, T, K> {
             Self::Exceptional | Self::Unwind { .. } | Self::Route { .. } => {
                 EdgeKind::ExceptionUnwind
             }
+            Self::Continue { .. } => EdgeKind::ExceptionContinue,
         }
     }
 
@@ -645,12 +653,14 @@ mod tests {
 
     #[test]
     fn every_role_names_one_structural_kind() {
-        let roles: [EdgeRole<'_, u32, char>; 5] = [
+        let roles: [EdgeRole<'_, u32, char>; 7] = [
             EdgeRole::Sequential,
             EdgeRole::Jump,
             EdgeRole::Call,
             EdgeRole::CallContinuation { call_site: 1 },
             EdgeRole::Unwind { handler: 0 },
+            EdgeRole::Route { route: 0 },
+            EdgeRole::Continue { route: 0 },
         ];
         let kinds: Vec<EdgeKind> = roles.iter().map(EdgeRole::kind).collect();
         assert_eq!(
@@ -661,6 +671,8 @@ mod tests {
                 EdgeKind::Call,
                 EdgeKind::CallReturn,
                 EdgeKind::ExceptionUnwind,
+                EdgeKind::ExceptionUnwind,
+                EdgeKind::ExceptionContinue,
             ]
         );
     }

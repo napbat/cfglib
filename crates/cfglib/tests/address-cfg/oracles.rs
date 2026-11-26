@@ -167,6 +167,7 @@ fn kind_of(role: Role) -> EdgeKind {
         Role::Call => EdgeKind::Call,
         Role::Continuation { .. } => EdgeKind::CallReturn,
         Role::Exceptional | Role::Unwind { .. } | Role::Route { .. } => EdgeKind::ExceptionUnwind,
+        Role::Continue { .. } => EdgeKind::ExceptionContinue,
     }
 }
 

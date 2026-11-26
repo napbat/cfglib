@@ -284,7 +284,7 @@ fn switch_cases_carry_their_dispatch_index_and_key() {
 #[test]
 fn every_edge_role_maps_to_one_structural_kind_and_only_a_call_role_is_a_call() {
     let key = 'k';
-    let table: [(EdgeRole<'_, u32, char>, EdgeKind, bool); 10] = [
+    let table: [(EdgeRole<'_, u32, char>, EdgeKind, bool); 12] = [
         (EdgeRole::Sequential, EdgeKind::Fallthrough, false),
         (EdgeRole::ConditionalTaken, EdgeKind::ConditionalTrue, false),
         (
@@ -312,6 +312,16 @@ fn every_edge_role_maps_to_one_structural_kind_and_only_a_call_role_is_a_call() 
         (
             EdgeRole::Unwind { handler: 2 },
             EdgeKind::ExceptionUnwind,
+            false,
+        ),
+        (
+            EdgeRole::Route { route: 1 },
+            EdgeKind::ExceptionUnwind,
+            false,
+        ),
+        (
+            EdgeRole::Continue { route: 1 },
+            EdgeKind::ExceptionContinue,
             false,
         ),
     ];

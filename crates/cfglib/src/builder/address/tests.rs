@@ -90,6 +90,7 @@ pub(super) fn payload(
         EdgeRole::Exceptional => "exceptional",
         EdgeRole::Unwind { .. } => "unwind",
         EdgeRole::Route { .. } => "route",
+        EdgeRole::Continue { .. } => "continue",
     };
     (info.source, info.target, info.kind, role)
 }
