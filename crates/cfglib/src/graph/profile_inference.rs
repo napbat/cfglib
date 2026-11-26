@@ -138,7 +138,7 @@ impl<N: DenseId, E: DenseId> BlockFrequencies<N, E> {
     ///     |block| (block == entry || block == join).then_some(1_000),
     ///     |_| None,
     ///     |edge| cfg.edge(edge).weight(),
-    ///     &InferenceCosts::default(),
+    ///     InferenceCosts::default(),
     /// )?;
     /// assert_eq!(counts.block(left), 300);
     /// assert_eq!(counts.edge(to_left), 300);
@@ -151,7 +151,7 @@ impl<N: DenseId, E: DenseId> BlockFrequencies<N, E> {
         block_estimate: impl Fn(N) -> Option<u64>,
         edge_estimate: impl Fn(E) -> Option<u64>,
         branch_prior: impl Fn(E) -> Option<Probability>,
-        costs: &InferenceCosts,
+        costs: InferenceCosts,
     ) -> Result<Self, FlowError>
     where
         G: RootedView<NodeId = N> + EdgeView<EdgeId = E>,
@@ -268,7 +268,7 @@ impl Model {
         tail: usize,
         head: usize,
         estimate: Option<u64>,
-        costs: &InferenceCosts,
+        costs: InferenceCosts,
     ) -> Result<usize, FlowError> {
         let first = self.network.arc_count();
         match estimate {

@@ -47,7 +47,7 @@ impl Profile {
         )
     }
 
-    fn infer(&self, costs: &InferenceCosts) -> BlockFrequencies {
+    fn infer(&self, costs: InferenceCosts) -> BlockFrequencies {
         BlockFrequencies::infer(
             &self.cfg,
             |block| self.exit[block.index()],
@@ -78,7 +78,7 @@ fn a_corrupted_block_in_a_loop_is_repaired_and_the_rest_kept() {
     profile.exit[4] = true;
     profile.block = vec![Some(1), Some(10), Some(9), Some(50), Some(1)];
 
-    let counts = profile.infer(&EVEN);
+    let counts = profile.infer(EVEN);
     assert_eq!(blocks(&counts, 5), [1, 10, 9, 9, 1]);
     let edges: Vec<u64> = profile
         .cfg
@@ -99,13 +99,13 @@ fn a_diamond_counted_at_entry_and_join_splits_by_the_priors() {
     profile.block[0] = Some(1_000);
     profile.block[3] = Some(1_000);
 
-    let counts = profile.infer(&EVEN);
+    let counts = profile.infer(EVEN);
     assert_eq!(blocks(&counts, 4), [1_000, 250, 750, 1_000]);
     assert_eq!((counts.edge(left), counts.edge(right)), (250, 750));
 
     // Without priors the arms share the count evenly.
     profile.prior = vec![None; 4];
-    let counts = profile.infer(&EVEN);
+    let counts = profile.infer(EVEN);
     assert_eq!(blocks(&counts, 4), [1_000, 500, 500, 1_000]);
 }
 
@@ -120,7 +120,7 @@ fn edge_estimates_are_honored_over_the_priors() {
     profile.block[0] = Some(100);
     profile.edge[left.index()] = Some(40);
 
-    let counts = profile.infer(&EVEN);
+    let counts = profile.infer(EVEN);
     assert_eq!(blocks(&counts, 4), [100, 40, 60, 100]);
 }
 
@@ -131,7 +131,7 @@ fn without_estimates_nothing_runs() {
     profile.edge(1, 2, None);
     profile.edge(1, 1, None);
     profile.exit[2] = true;
-    let counts = profile.infer(&EVEN);
+    let counts = profile.infer(EVEN);
     assert_eq!(blocks(&counts, 3), [0, 0, 0]);
 }
 
@@ -142,7 +142,7 @@ fn a_removed_or_unknown_block_counts_zero() {
     profile.exit[1] = true;
     profile.block[0] = Some(7);
     profile.cfg.remove_block(BlockId::from_index(2));
-    let counts = profile.infer(&EVEN);
+    let counts = profile.infer(EVEN);
     assert_eq!(blocks(&counts, 4), [7, 7, 0, 0]);
     assert_eq!(counts.edge(EdgeId::from_index(9)), 0);
 }
@@ -158,7 +158,7 @@ fn an_estimate_beyond_the_network_range_is_an_overflow() {
         |_| Some(u64::MAX),
         |_| None,
         |_| None,
-        &EVEN,
+        EVEN,
     );
     assert_eq!(result, Err(FlowError::Overflow));
 }
@@ -222,7 +222,7 @@ fn consistent_estimates_are_returned_unchanged() {
         executed += usize::from(block[0] > 0);
         profile.block = block.iter().copied().map(Some).collect();
         profile.edge = edge.iter().copied().map(Some).collect();
-        let counts = profile.infer(&EVEN);
+        let counts = profile.infer(EVEN);
         assert_eq!(blocks(&counts, count), block);
         let inferred: Vec<u64> = profile.cfg.edge_ids().map(|id| counts.edge(id)).collect();
         assert_eq!(inferred, edge);
@@ -251,7 +251,7 @@ fn random_partial_estimates_give_counts_that_conserve_flow() {
             increase: u32::try_from(rng.below(5)).expect("small"),
             decrease: u32::try_from(rng.below(5)).expect("small"),
         };
-        let counts = profile.infer(&costs);
+        let counts = profile.infer(costs);
         running += usize::from(profile.cfg.block_ids().any(|block| counts.block(block) > 0));
 
         let cfg = &profile.cfg;

@@ -235,7 +235,7 @@ mod tests {
         let [hot, rare, never] = hot_cold_order(&cfg, &cfg.reverse_postorder(), &classes);
         assert_eq!(hot, [entry, then_arm, join]);
         assert_eq!(rare, [else_arm, abort]);
-        assert!(never.is_empty());
+        assert_eq!(never, []);
 
         let hot_stream = linearize(&cfg, BlockOrder::Custom(hot.clone()), &Asm).unwrap();
         let cold_stream = linearize(&cfg, BlockOrder::Custom(rare.clone()), &Asm).unwrap();

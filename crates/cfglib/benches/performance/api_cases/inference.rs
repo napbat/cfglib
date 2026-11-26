@@ -47,7 +47,7 @@ macro_rules! infer_counts_case {
                 |block| estimate[block.index()],
                 |_| None,
                 |edge| cfg.edge(edge).weight(),
-                &InferenceCosts::default(),
+                InferenceCosts::default(),
             ),
             |counts: &Result<BlockFrequencies, FlowError>| {
                 let counts = counts.as_ref().expect("the samples fit the network");

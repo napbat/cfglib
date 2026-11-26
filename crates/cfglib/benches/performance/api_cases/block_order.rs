@@ -89,7 +89,7 @@ fn register_hot_cold(suite: &mut BenchmarkSuite<'_>) {
             assert_eq!(hot[0], NodeId::from_index(0));
             assert_eq!(hot.len(), base.len() - rare);
             assert_eq!(cold.len(), rare);
-            assert!(never.is_empty());
+            assert_eq!(never.as_slice(), []);
         }
     );
 }
