@@ -1,19 +1,22 @@
-//! Scope-graph indexes: every reference resolved on its own, against one
-//! environment cache shared by all of them, or again after an edit.
+//! Scope-graph resolution: indexes that resolve every reference on its own,
+//! against one environment cache shared by all of them, or again after an
+//! edit, and the single queries of the first-datum walk and of a kept cache.
 //!
 //! The lexical chain is the shape of a source file: references in nested
 //! blocks climb the same parents and imports, which `compute` walks once per
 //! reference and `compute_cached` once per scope; `compute_tracked` walks it
 //! as `compute` does and records what each reference read. An edit of one
 //! leaf scope there is read by the references of one block, which `update`
-//! resolves again. The stacked inheritance diamonds reach one member along
-//! `2^d` equally specific paths, every one of which both resolvers keep, so
-//! their cost grows with that output.
+//! resolves again. The first-datum walk climbs the parents alone and stops at
+//! the first declaration of the name. The stacked inheritance diamonds reach
+//! one member along `2^d` equally specific paths, every one of which both
+//! resolvers keep, so their cost grows with that output.
 
 use std::cmp::Ordering;
 
 use cfglib::{
-    EdgeRef, ScopeDatumId, ScopeEdgeId, ScopeEnvironmentQuery, ScopeGraph, ScopeGraphChanges,
+    EdgeRef, ScopeCursor, ScopeCursorQuery, ScopeDatumId, ScopeEdgeId, ScopeEnvironmentCache,
+    ScopeEnvironmentQuery, ScopeFirstResolution, ScopeGraph, ScopeGraphChanges,
     ScopeGraphPathLabel, ScopeGraphQuery, ScopeId, ScopeIndexUpdate, ScopePath, ScopeQuery,
     ScopeResolutionConfig, ScopeResolutionIndex,
 };
@@ -140,6 +143,48 @@ impl ScopeEnvironmentQuery<(), Label, (), u32, u32> for Lexical {
     }
 }
 
+/// Lexical lookup through parents alone, which stops at the first scope that
+/// declares the name.
+struct Parents;
+
+impl ScopeCursorQuery<(), Label, (), u32, u32> for Parents {
+    type State = ();
+
+    fn initial_state(&self, _graph: &Names, _input: &ScopeQuery<'_, u32>) {}
+
+    fn step(
+        &self,
+        _graph: &Names,
+        _input: &ScopeQuery<'_, u32>,
+        _cursor: ScopeCursor,
+        (): &(),
+        edge: EdgeRef<'_, ScopeId, ScopeEdgeId, Label>,
+    ) -> Option<()> {
+        (*edge.data() == Label::Parent).then_some(())
+    }
+
+    fn accepts(
+        &self,
+        graph: &Names,
+        input: &ScopeQuery<'_, u32>,
+        _cursor: ScopeCursor,
+        (): &(),
+        datum: ScopeDatumId,
+    ) -> bool {
+        graph.datum(datum).data() == input.data()
+    }
+
+    fn compare_labels(
+        &self,
+        _graph: &Names,
+        _input: &ScopeQuery<'_, u32>,
+        left: ScopeGraphPathLabel<'_, Label>,
+        right: ScopeGraphPathLabel<'_, Label>,
+    ) -> Option<Ordering> {
+        Some(compare(left, right))
+    }
+}
+
 /// `LEVELS` nested blocks, each with a parent edge to the enclosing one and
 /// an import of its own module. Block `i` declares `2 i` and its module
 /// declares `2 i + 1`. `REFERENCES` references, spread over the blocks, each
@@ -216,6 +261,37 @@ fn assert_diamond_routes(graph: &Names, index: &ScopeResolutionIndex, diamonds: 
     assert_eq!(index.resolution(top).candidates().len(), 1 << diamonds);
 }
 
+/// Resolves every reference of the chain on the first-datum walk and counts
+/// the resolved ones: those that name a block, which the parents reach.
+fn first_resolved_count(graph: &Names, config: ScopeResolutionConfig) -> usize {
+    graph
+        .reference_ids()
+        .filter(|&reference| {
+            ScopeFirstResolution::try_compute(graph, reference, &Parents, config)
+                .expect("the parents form a chain")
+                .is_resolved()
+        })
+        .count()
+}
+
+/// Resolves every reference of the chain as an ephemeral query through a kept
+/// cache and counts the resolved ones, which are all of them.
+fn ephemeral_resolved_count(
+    graph: &Names,
+    cache: &mut ScopeEnvironmentCache<bool, u32>,
+    config: ScopeResolutionConfig,
+) -> usize {
+    graph
+        .reference_ids()
+        .filter(|&reference| {
+            let stored = graph.reference(reference);
+            cache
+                .resolve_from(graph, stored.scope(), stored.data(), &Lexical, config)
+                .is_resolved()
+        })
+        .count()
+}
+
 pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     let config = ScopeResolutionConfig::new();
     let (chain, leaf) = lexical_chain();
@@ -236,6 +312,27 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         "scope_index_tracked_lexical_chain",
         || ScopeResolutionIndex::compute_tracked(&chain, &Lexical, config),
         |index| assert_chain_resolved(&chain, index)
+    );
+    benchmark_case!(
+        suite,
+        "scope_resolution_first_lexical_chain",
+        || first_resolved_count(&chain, config),
+        |&resolved| assert_eq!(
+            resolved,
+            chain
+                .reference_ids()
+                .filter(|&reference| chain.reference(reference).data() % 2 == 0)
+                .count()
+        )
+    );
+    // The cache is kept across runs: after the oracle's run every environment
+    // is cached, so a run is the lookup of each query alone.
+    let mut cache = ScopeEnvironmentCache::new(&chain);
+    benchmark_case!(
+        suite,
+        "scope_environment_ephemeral_lexical_chain",
+        || ephemeral_resolved_count(&chain, &mut cache, config),
+        |&resolved| assert_eq!(resolved, REFERENCES as usize)
     );
     // One new datum in the innermost module: only the references of the
     // innermost block read it. Every run repeats the same update, which
