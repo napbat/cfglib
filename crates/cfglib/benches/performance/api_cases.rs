@@ -196,7 +196,6 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         [control_dependence_graph]
     );
     benchmark_coverage!(suite, "directed_tarjan_scc", [tarjan_scc]);
-    benchmark_coverage!(suite, "directed_loop_forest_multilatch", [find_back_edges]);
     benchmark_coverage!(
         suite,
         "directed_node_fixpoint_bool",
