@@ -2,8 +2,8 @@
 //! cleanup records, and the consumer-owned handler metadata side table.
 
 use cfglib::{
-    BlockId, Cleanup, CompletionReason, Continuation, Handler, HandlerBody, HandlerFilters,
-    HandlerKind, HandlerRef, HandlerTypes, Region, RegionId,
+    BlockId, Cleanup, CompletionReason, Continuation, Handler, HandlerBody, HandlerKind,
+    HandlerMetadata, HandlerRef, Region, RegionId,
 };
 use serde_json::{Value, json};
 
@@ -96,20 +96,19 @@ fn every_handler_kind_and_completion_reason_round_trips_by_name() {
 #[test]
 fn a_cleanup_record_and_its_continuations_round_trip_in_recorded_order() {
     let cleanup = Cleanup {
-        handler: HandlerRef::new(RegionId::from_raw(2), 1),
-        resume_from: Some(block(8)),
+        exit_block: Some(block(8)),
         continuations: vec![
             Continuation {
                 reason: CompletionReason::Return,
-                resume: block(11),
+                target: block(11),
             },
             Continuation {
                 reason: CompletionReason::Normal,
-                resume: block(9),
+                target: block(9),
             },
             Continuation {
                 reason: CompletionReason::Return,
-                resume: block(10),
+                target: block(10),
             },
         ],
     };
@@ -118,17 +117,17 @@ fn a_cleanup_record_and_its_continuations_round_trip_in_recorded_order() {
     assert_eq!(decoded, cleanup);
     assert_eq!(
         decoded
-            .resumes_for(CompletionReason::Return)
+            .targets_for(CompletionReason::Return)
             .collect::<Vec<_>>(),
         [block(11), block(10)],
         "the recorded order is the order a consumer reads routes in"
     );
 
     let diverging = Cleanup {
-        resume_from: None,
+        exit_block: None,
         ..cleanup
     };
-    assert_eq!(round_trip(&diverging).resume_from, None);
+    assert_eq!(round_trip(&diverging).exit_block, None);
 }
 
 #[test]
@@ -167,14 +166,14 @@ fn handler_ref(region: u32, index: usize) -> HandlerRef {
 
 #[test]
 fn handler_metadata_survives_a_format_that_only_admits_string_keys() {
-    let mut types = HandlerTypes::<String>::new();
+    let mut types = HandlerMetadata::<String>::new();
     types.set(handler_ref(1, 0), "System.IO.IOException".to_owned());
     types.set(handler_ref(0, 2), "System.Exception".to_owned());
     types.set(handler_ref(0, 0), "System.ArgumentException".to_owned());
 
     // JSON objects have string keys only, so a table keyed by a struct would
     // fail to encode at all.
-    let decoded: HandlerTypes<String> = round_trip(&types);
+    let decoded: HandlerMetadata<String> = round_trip(&types);
     assert_eq!(decoded, types);
     assert_eq!(decoded.len(), 3);
     assert_eq!(
@@ -191,10 +190,10 @@ fn handler_metadata_survives_a_format_that_only_admits_string_keys() {
 
 #[test]
 fn a_decoded_metadata_table_keeps_accepting_edits_in_order() {
-    let mut filters = HandlerFilters::<u32>::new();
+    let mut filters = HandlerMetadata::<u32>::new();
     filters.set(handler_ref(0, 0), 10);
     filters.set(handler_ref(2, 0), 30);
-    let mut decoded: HandlerFilters<u32> = round_trip(&filters);
+    let mut decoded: HandlerMetadata<u32> = round_trip(&filters);
 
     assert_eq!(decoded.set(handler_ref(1, 0), 20), None);
     assert_eq!(decoded.set(handler_ref(2, 0), 31), Some(30));
@@ -214,7 +213,7 @@ fn a_hand_written_metadata_table_out_of_handler_order_never_misreports_a_key() {
     // by key. A document that lists them out of order breaks that invariant:
     // the load must either be rejected or still find every entry it holds.
     let keys = [handler_ref(2, 0), handler_ref(0, 0), handler_ref(1, 0)];
-    let mut sorted = HandlerFilters::<u32>::new();
+    let mut sorted = HandlerMetadata::<u32>::new();
     for (index, key) in keys.into_iter().enumerate() {
         sorted.set(key, u32::try_from(index).expect("a small index"));
     }
@@ -226,7 +225,7 @@ fn a_hand_written_metadata_table_out_of_handler_order_never_misreports_a_key() {
         .expect("the table is one sequence of entries");
     entries.reverse();
 
-    if let Ok(decoded) = load::<HandlerFilters<u32>>(value) {
+    if let Ok(decoded) = load::<HandlerMetadata<u32>>(value) {
         for (index, key) in keys.into_iter().enumerate() {
             assert_eq!(
                 decoded.metadata(key).copied(),

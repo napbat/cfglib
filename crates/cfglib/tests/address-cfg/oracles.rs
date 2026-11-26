@@ -264,10 +264,10 @@ fn check_regions<I: Isa>(built: &Built<I>) {
         }
     }
     ranges.sort_by_key(|(range, _)| std::cmp::Reverse(built.layout.byte_span(range.clone())));
-    assert_eq!(cfg.regions().len(), ranges.len());
+    assert_eq!(cfg.region_count(), ranges.len());
     for (region_index, (range, handler_indices)) in ranges.iter().enumerate() {
-        let region = &cfg.regions()[region_index];
-        assert_eq!(region.id.index(), region_index);
+        let id = RegionId::from_index(region_index);
+        let region = cfg.region(id);
         let protected: BTreeSet<BlockId> = range.clone().map(|p| built.block_of(p)).collect();
         assert_eq!(region.protected_blocks, protected);
         assert_eq!(region.handlers.len(), handler_indices.len());
@@ -276,10 +276,7 @@ fn check_regions<I: Isa>(built: &Built<I>) {
             assert_eq!(handler.entry, built.block_of(table[index].entry));
             assert_eq!(handler.kind, table[index].kind);
             assert_eq!(handler.body, HandlerBody::Unknown);
-            assert_eq!(
-                built.graph.handler_refs[index],
-                HandlerRef::new(region.id, slot)
-            );
+            assert_eq!(built.graph.handler_refs[index], HandlerRef::new(id, slot));
         }
         let parent = (0..ranges.len())
             .filter(|&other| encloses(&ranges[other].0, range))
@@ -367,7 +364,7 @@ fn check_dominators<I, E>(cfg: &Cfg<I, E>) {
 /// among its own region's protected blocks, and ordinary flow enters a
 /// handler (whose extent is only its entry here) from nowhere else.
 fn regions_are_well_formed<I, E>(cfg: &Cfg<I, E>) -> bool {
-    cfg.regions().iter().all(|region| {
+    cfg.regions().all(|(_, region)| {
         region.handlers.iter().all(|handler| {
             !region.protected_blocks.contains(&handler.entry)
                 && cfg.incoming(handler.entry).all(|edge| {
@@ -407,11 +404,7 @@ fn check_control_tree<I: Isa>(built: &Built<I>) {
     let visited: BTreeSet<u64> = visited.into_iter().collect();
     assert_eq!(visited.len(), held, "no instruction appears twice");
 
-    let entries: Vec<BlockId> = cfg
-        .regions()
-        .iter()
-        .flat_map(|region| region.handlers.iter().map(|handler| handler.entry))
-        .collect();
+    let entries: Vec<BlockId> = cfg.handlers().map(|(_, handler)| handler.entry).collect();
     let mut owned = reach(cfg, &[cfg.entry()], None);
     owned.extend(entries.iter().copied());
     let owned = addresses_in::<I>(cfg, &owned);

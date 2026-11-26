@@ -176,7 +176,7 @@ fn a_protected_range_must_end_on_an_instruction_or_at_the_code_end<A: Width>() {
         no_options(),
     )
     .expect("a range may end at the end of the code");
-    assert_eq!(graph.cfg.regions().len(), 1);
+    assert_eq!(graph.cfg.region_count(), 1);
     assert!(verify(&graph.cfg).is_ok());
 }
 
@@ -198,7 +198,7 @@ fn an_empty_stream_builds_one_empty_entry_block<A: Width>() {
     assert_empty(&graph.handler_refs);
     assert_empty(&graph.unresolved_transfers);
     assert_empty(&graph.calls);
-    assert_empty(graph.cfg.regions());
+    assert_eq!(graph.cfg.region_count(), 0);
     assert!(verify(&graph.cfg).is_ok());
 }
 

@@ -6,8 +6,8 @@ use std::fmt;
 
 use cfglib::{
     BlockId, Cfg, CompletionReason, Continuation, DisplayInstr, DominatorTree, EdgeKind,
-    ExceptionFlow, HandlerBody, HandlerKind, HandlerRef, Region, TextError, TextErrorKind,
-    parse_cfg_text, verify,
+    ExceptionFlow, HandlerBody, HandlerKind, HandlerRef, Region, RegionId, RegionIndex, TextError,
+    TextErrorKind, parse_cfg_text, verify,
 };
 
 use crate::fixture::{handler, region, rich_cfg, try_finally};
@@ -55,7 +55,7 @@ fn shape<E>(cfg: &Cfg<Line, E>) -> Shape {
             .edges()
             .map(|edge| (edge.source(), edge.target(), edge.kind()))
             .collect(),
-        regions: cfg.regions().to_vec(),
+        regions: cfg.regions().map(|(_, region)| region.clone()).collect(),
     }
 }
 
@@ -117,10 +117,14 @@ fn the_parsed_cfg_answers_analyses_like_the_original() {
         DominatorTree::compute(&original)
     );
     assert_eq!(verify(&parsed).is_ok(), verify(&original).is_ok());
+    let (parsed_index, original_index) = (
+        RegionIndex::compute(&parsed),
+        RegionIndex::compute(&original),
+    );
     for block in original.block_ids() {
         assert_eq!(
-            parsed.protecting_region(block).map(|region| region.id),
-            original.protecting_region(block).map(|region| region.id),
+            parsed_index.protecting(block),
+            original_index.protecting(block),
             "{block}"
         );
         assert_eq!(
@@ -181,7 +185,8 @@ fn a_region_that_still_names_a_removed_block_is_written_without_it() {
             HandlerBody::known([landing, stray]),
         )],
         None,
-    ));
+    ))
+    .unwrap();
     cfg.remove_block(doomed);
     cfg.remove_block(stray);
 
@@ -194,8 +199,8 @@ fn a_region_that_still_names_a_removed_block_is_written_without_it() {
             .filter(|&block| cfg.contains_block(block))
             .collect::<std::collections::BTreeSet<_>>()
     };
-    let region = &cfg.regions()[0];
-    let reread = &parsed.regions()[0];
+    let region = cfg.region(RegionId::from_raw(0));
+    let reread = parsed.region(RegionId::from_raw(0));
     assert_eq!(reread.protected_blocks, live(&region.protected_blocks));
     assert_eq!(
         reread.handlers[0].body.blocks().cloned(),
@@ -385,25 +390,28 @@ fn guarded<E: Default>(weight: Option<f64>, record_cleanup: bool) -> Cfg<Line, E
             None => cfg.add_edge(source, target, kind),
         };
     }
-    let region = cfg.add_region(region(
-        &[body],
-        vec![handler(
-            cleanup,
-            HandlerKind::Finally,
-            HandlerBody::known([cleanup]),
-        )],
-        None,
-    ));
+    let region = cfg
+        .add_region(region(
+            &[body],
+            vec![handler(
+                cleanup,
+                HandlerKind::Finally,
+                HandlerBody::known([cleanup]),
+            )],
+            None,
+        ))
+        .unwrap();
     if record_cleanup {
         let finally = HandlerRef::new(region, 0);
-        cfg.set_cleanup_resume(finally, cleanup);
+        cfg.set_cleanup_exit(finally, cleanup).unwrap();
         cfg.add_continuation(
             finally,
             Continuation {
                 reason: CompletionReason::Normal,
-                resume: exit,
+                target: exit,
             },
-        );
+        )
+        .unwrap();
     }
     cfg
 }
@@ -420,11 +428,11 @@ fn weights_and_cleanup_records_are_outside_the_projection() {
     let full: Cfg<Line> = guarded(Some(0.25), true);
     let bare: Cfg<Line> = guarded(None, false);
     assert_eq!(full.cleanups().len(), 1);
-    assert_eq!(bare.cleanups(), []);
+    assert!(bare.cleanups().is_empty());
     assert_eq!(full.to_text(), bare.to_text());
 
     let parsed = parse(&full.to_text()).expect("its own grammar");
-    assert_eq!(parsed.cleanups(), []);
+    assert!(parsed.cleanups().is_empty());
     assert!(parsed.edges().all(|edge| edge.weight().is_none()));
     assert_eq!(shape(&parsed), shape(&full));
 }

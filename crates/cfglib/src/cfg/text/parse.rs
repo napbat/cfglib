@@ -9,10 +9,10 @@ use crate::edge::EdgeKind;
 use crate::graph::text::{
     Slots, TextError, TextErrorKind, parse_index, significant_lines, split_tokens, unescape,
 };
-use crate::region::{Handler, Region, RegionId};
+use crate::region::{Handler, HandlerKind, Region, RegionId};
 
 use super::super::Cfg;
-use super::{HandlerShape, parse_handler_body};
+use super::parse_handler_body;
 
 /// Read a CFG back from the text form, parsing each instruction line with
 /// `parse_instruction`.
@@ -72,7 +72,8 @@ struct Reader<I> {
     slots: Slots,
     entry: Option<usize>,
     context: Context,
-    pending: Option<Region>,
+    /// The region being read, with the line that opened it.
+    pending: Option<(Region, usize)>,
 }
 
 impl<I> Reader<I> {
@@ -99,7 +100,7 @@ impl<I> Reader<I> {
                 continue;
             }
 
-            self.flush_region();
+            self.flush_region()?;
             if let Some(rest) = trimmed.strip_prefix("entry ") {
                 self.entry = Some(parse_index(rest.trim(), "bb", line)?);
                 self.context = Context::Nothing;
@@ -109,7 +110,7 @@ impl<I> Reader<I> {
                 self.read_block_or_edge(trimmed, line)?;
             }
         }
-        self.flush_region();
+        self.flush_region()?;
         Ok(())
     }
 
@@ -156,12 +157,11 @@ impl<I> Reader<I> {
             .next()
             .ok_or_else(|| TextError::new(line, TextErrorKind::Region))
             .and_then(|token| parse_index(token, "r", line))?;
-        if index != self.cfg.regions().len() {
+        if index != self.cfg.region_count() {
             return Err(TextError::new(line, TextErrorKind::Region));
         }
 
         let mut region = Region {
-            id: RegionId::from_raw(0),
             protected_blocks: alloc::collections::BTreeSet::new(),
             handlers: Vec::new(),
             parent: None,
@@ -185,7 +185,7 @@ impl<I> Reader<I> {
                 _ => return Err(TextError::new(line, TextErrorKind::Region)),
             }
         }
-        self.pending = Some(region);
+        self.pending = Some((region, line));
         self.context = Context::Region;
         Ok(())
     }
@@ -197,8 +197,6 @@ impl<I> Reader<I> {
         let mut fields = rest.split_whitespace();
         let kind_name = fields
             .next()
-            .ok_or_else(|| TextError::new(line, TextErrorKind::Region))?;
-        let shape = HandlerShape::from_name(kind_name)
             .ok_or_else(|| TextError::new(line, TextErrorKind::Region))?;
 
         let mut entry = None;
@@ -230,20 +228,26 @@ impl<I> Reader<I> {
         let handler = Handler {
             entry: entry.ok_or_else(malformed)?,
             body: body.ok_or_else(malformed)?,
-            kind: shape.kind(filter_block).ok_or_else(malformed)?,
+            kind: HandlerKind::from_name(kind_name, filter_block).ok_or_else(malformed)?,
         };
         self.pending
             .as_mut()
             .ok_or_else(malformed)?
+            .0
             .handlers
             .push(handler);
         Ok(())
     }
 
-    fn flush_region(&mut self) {
-        if let Some(region) = self.pending.take() {
-            self.cfg.add_region(region);
+    /// Register the region read last. Its references were read as live
+    /// blocks, so only a parent that names no earlier region is refused.
+    fn flush_region(&mut self) -> Result<(), TextError> {
+        if let Some((region, line)) = self.pending.take() {
+            self.cfg
+                .add_region(region)
+                .map_err(|_| TextError::new(line, TextErrorKind::Region))?;
         }
+        Ok(())
     }
 
     fn live_block(&self, index: usize, line: usize) -> Result<BlockId, TextError> {

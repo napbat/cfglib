@@ -18,7 +18,7 @@ use crate::edge::{EdgeId, EdgeKind};
 use crate::graph::dominator::{DominatorTree, PostDominatorTree};
 use crate::graph::loop_forest::LoopForest;
 use crate::graph::view::VirtualRoot;
-use crate::region::{Handler, Region};
+use crate::region::{Handler, Region, RegionId};
 use bound::Bound;
 use completion::Completion;
 use extent::ExtentWalk;
@@ -101,7 +101,7 @@ struct Structurer<'cfg, I, E> {
     forest: Rc<LoopForest>,
     /// Region anchor (first protected block in reverse postorder) → the
     /// regions anchored there, outermost (largest protected set) first.
-    anchors: BTreeMap<BlockId, Vec<&'cfg Region>>,
+    anchors: BTreeMap<BlockId, Vec<(RegionId, &'cfg Region)>>,
     visited: Vec<bool>,
     /// Blocks structured as if they held no instructions, by dense index.
     emptied: Vec<bool>,
@@ -545,13 +545,13 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             .collect();
         self.apply_labels(root_body, &mut pending_labels);
         self.report.unresolved_labels.extend(pending_labels);
-        for region in cfg.regions() {
+        for (id, region) in cfg.regions() {
             // Inert tombstones (removed regions) carry nothing to structure.
             if region.protected_blocks.is_empty() && region.handlers.is_empty() {
                 continue;
             }
-            if !self.structured_regions.contains(&region.id.0) {
-                self.report.unstructured_regions.push(region.id);
+            if !self.structured_regions.contains(&id.0) {
+                self.report.unstructured_regions.push(id);
             }
         }
 
@@ -722,13 +722,13 @@ struct Claims {
 fn region_claims<I, E>(cfg: &Cfg<I, E>) -> Claims {
     let mut claimed: BTreeSet<BlockId> = BTreeSet::new();
     let mut handlers: BTreeMap<BlockId, Vec<u32>> = BTreeMap::new();
-    for region in cfg.regions() {
+    for (id, region) in cfg.regions() {
         claimed.extend(region.protected_blocks.iter().copied());
-        for block in region.handlers.iter().flat_map(Handler::claimed_blocks) {
+        for block in region.handlers.iter().flat_map(Handler::blocks) {
             claimed.insert(block);
             let regions = handlers.entry(block).or_default();
-            if regions.last() != Some(&region.id.0) {
-                regions.push(region.id.0);
+            if regions.last() != Some(&id.0) {
+                regions.push(id.0);
             }
         }
     }

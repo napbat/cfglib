@@ -43,7 +43,6 @@ fn catch(
     parent: Option<RegionId>,
 ) -> RegionId {
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: protected.iter().copied().collect(),
         handlers: alloc::vec![Handler {
             entry,
@@ -52,6 +51,7 @@ fn catch(
         }],
         parent,
     })
+    .unwrap()
 }
 
 fn tree_text(cfg: &Cfg<MockInst>) -> (String, crate::LiftReport) {

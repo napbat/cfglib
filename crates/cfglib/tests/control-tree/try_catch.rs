@@ -3,7 +3,10 @@
 
 use std::collections::BTreeSet;
 
-use cfglib::{BlockId, ControlNode, EdgeKind, HandlerKind, HandlerRef, promote_handler_extents};
+use cfglib::{
+    BlockId, ControlNode, EdgeKind, ExtentPromotionStatus, HandlerKind, HandlerRef, RegionId,
+    promote_handler_extents,
+};
 
 use crate::builders::{Flow, handler, handler_over, pseudocode, try_catch_finally};
 use crate::coverage::{blocks_under, reachable_blocks};
@@ -80,12 +83,14 @@ fn catch_and_finally_share_one_region_and_the_cleanup_runs_after_both() {
     // Both handlers are entered through exception edges only, and every
     // path ends at `after`.
     let flow = try_catch_finally();
-    let region = flow.cfg.regions()[0].id;
-    let body = *flow.cfg.regions()[0]
+    let region = RegionId::from_raw(0);
+    let body = *flow
+        .cfg
+        .region(region)
         .protected_blocks
         .first()
         .expect("the region protects the body");
-    let cleanup = flow.cfg.regions()[0].handlers[1].entry;
+    let cleanup = flow.cfg.region(region).handlers[1].entry;
 
     let (tree, report) = structure_and_check(&flow.cfg);
     assert_fully_structured(&tree, &report);
@@ -236,7 +241,7 @@ fn nested_regions_nest_their_try_catch_nodes_and_keep_exception_edges_inside() {
         vec![handler(outer_pad, HandlerKind::Catch)],
     );
     let inner = flow.region(&[inner_body], vec![handler(inner_pad, HandlerKind::Catch)]);
-    flow.cfg.region_mut(inner).expect("just added").parent = Some(outer);
+    flow.cfg.region_mut(inner).parent = Some(outer);
 
     let (tree, report) = structure_and_check(&flow.cfg);
     assert_fully_structured(&tree, &report);
@@ -456,10 +461,7 @@ fn protected_block_the_entry_cannot_reach_is_dropped_as_dead_code() {
 #[test]
 fn unknown_handler_extent_stays_ordinary_flow_and_is_reported() {
     let (mut flow, [_, body, pad, after], region) = try_catch();
-    flow.cfg
-        .handler_mut(HandlerRef::new(region, 0))
-        .expect("handler")
-        .body = cfglib::HandlerBody::unknown();
+    flow.cfg.handler_mut(HandlerRef::new(region, 0)).body = cfglib::HandlerBody::unknown();
 
     let (tree, report) = structure_and_check(&flow.cfg);
 
@@ -482,17 +484,17 @@ fn unknown_handler_extent_stays_ordinary_flow_and_is_reported() {
 #[test]
 fn promoting_unknown_extents_on_a_derived_graph_lets_the_structurer_emit_the_try() {
     let (mut flow, _, region) = try_catch();
-    flow.cfg
-        .handler_mut(HandlerRef::new(region, 0))
-        .expect("handler")
-        .body = cfglib::HandlerBody::unknown();
+    flow.cfg.handler_mut(HandlerRef::new(region, 0)).body = cfglib::HandlerBody::unknown();
     let (_, unstructured) = cfglib::ControlTree::compute_with_report(&flow.cfg);
     assert_eq!(unstructured.unstructured_regions, [region]);
 
     // The canonical graph keeps saying "unknown"; a clone lifted for
     // presentation gets the sound dominated extent.
     let mut derived = flow.cfg.clone();
-    assert_eq!(promote_handler_extents(&mut derived), 1);
+    assert_eq!(
+        promote_handler_extents(&mut derived),
+        [(region, ExtentPromotionStatus::Promoted)]
+    );
     let (tree, report) = structure_and_check(&derived);
 
     assert_fully_structured(&tree, &report);
@@ -500,11 +502,7 @@ fn promoting_unknown_extents_on_a_derived_graph_lets_the_structurer_emit_the_try
         nodes_where(&tree, |node| matches!(node, ControlNode::TryCatch { .. })).len(),
         1
     );
-    assert!(
-        !flow.cfg.regions()[region.index()].handlers[0]
-            .body
-            .is_known()
-    );
+    assert!(!flow.cfg.region(region).handlers[0].body.is_known());
 }
 
 #[test]

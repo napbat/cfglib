@@ -2,11 +2,33 @@
 //! the normal-versus-unwind flows a `FilteredEdges` view separates.
 
 use cfglib::{
-    BlockId, Cfg, Direction, DominatorTree, Edge, EdgeId, EdgeKind, EdgeView, EhBlockKind,
-    EhEdgeKind, EhModel, FilteredEdges, HandlerKind, HandlerRef, reachable,
+    BlockId, Cfg, Direction, DominatorTree, Edge, EdgeId, EdgeKind, EdgeView, EhBlockKind, EhModel,
+    FilteredEdges, HandlerKind, HandlerRef, reachable,
 };
 
 use crate::shapes::{Stmt, block_of, catch, handler, protect, try_catch};
+
+/// The blocks the model gives `kind`, in block order.
+fn blocks_of(model: &EhModel, kind: EhBlockKind) -> Vec<BlockId> {
+    model.blocks_of(kind).collect()
+}
+
+/// Every exception edge the model lists, as identity, source, target, kind.
+fn listed_edges(cfg: &Cfg<Stmt>, model: &EhModel) -> Vec<(EdgeId, BlockId, BlockId, EdgeKind)> {
+    model
+        .eh_edges()
+        .iter()
+        .map(|&id| {
+            let edge = cfg.edge(id);
+            (id, edge.source(), edge.target(), edge.kind())
+        })
+        .collect()
+}
+
+/// The handlers entered at `block`, in region order.
+fn entered_at(cfg: &Cfg<Stmt>, block: BlockId) -> Vec<HandlerRef> {
+    cfg.handlers_at(block).map(|(handler, _)| handler).collect()
+}
 
 #[test]
 fn a_graph_without_exception_edges_or_regions_has_nothing_to_model() {
@@ -23,9 +45,9 @@ fn a_graph_without_exception_edges_or_regions_has_nothing_to_model() {
             .block_kinds()
             .all(|(_, kind)| kind == EhBlockKind::Normal)
     );
-    assert_eq!(model.landing_pads(), []);
-    assert_eq!(model.cleanup_blocks(), []);
-    assert_eq!(model.resume_blocks(), []);
+    assert_eq!(blocks_of(&model, EhBlockKind::LandingPad), []);
+    assert_eq!(blocks_of(&model, EhBlockKind::Cleanup), []);
+    assert_eq!(blocks_of(&model, EhBlockKind::Resume), []);
 }
 
 #[test]
@@ -41,7 +63,10 @@ fn handler_and_unwind_edges_make_landing_pads_and_record_who_can_raise_into_them
 
     let model = EhModel::compute(&cfg);
 
-    assert_eq!(model.landing_pads(), [handled, unwound]);
+    assert_eq!(
+        blocks_of(&model, EhBlockKind::LandingPad),
+        [handled, unwound]
+    );
     assert_eq!(model.block_kind(handled), EhBlockKind::LandingPad);
     assert_eq!(model.block_kind(entry), EhBlockKind::Normal);
     assert_eq!(
@@ -62,18 +87,13 @@ fn handler_and_unwind_edges_make_landing_pads_and_record_who_can_raise_into_them
     );
     assert!(model.protected_by(entry).is_empty());
 
-    let edges = model.eh_edges();
-    assert_eq!(edges.len(), 2);
     assert_eq!(
-        (edges[0].edge_id, edges[0].from, edges[0].to, edges[0].kind),
-        (handler_edge, entry, handled, EhEdgeKind::Handler)
+        listed_edges(&cfg, &model),
+        [
+            (handler_edge, entry, handled, EdgeKind::ExceptionHandler),
+            (unwind_edge, body, unwound, EdgeKind::ExceptionUnwind),
+        ]
     );
-    assert_eq!(
-        (edges[1].edge_id, edges[1].from, edges[1].to, edges[1].kind),
-        (unwind_edge, body, unwound, EhEdgeKind::Unwind)
-    );
-    assert!(!edges[0].kind.is_unwind());
-    assert!(edges[1].kind.is_unwind());
 }
 
 #[test]
@@ -90,12 +110,18 @@ fn resume_and_continue_edges_mark_their_sources_not_their_targets() {
 
     let model = EhModel::compute(&cfg);
 
-    assert_eq!(model.resume_blocks(), [rethrow, fixed_up]);
+    assert_eq!(blocks_of(&model, EhBlockKind::Resume), [rethrow, fixed_up]);
     assert_eq!(model.block_kind(outer), EhBlockKind::Normal);
     assert_eq!(model.block_kind(resumed), EhBlockKind::Normal);
-    let kinds: Vec<EhEdgeKind> = model.eh_edges().iter().map(|edge| edge.kind).collect();
-    assert_eq!(kinds, [EhEdgeKind::Resume, EhEdgeKind::Continue]);
-    assert!(kinds.iter().all(|kind| !kind.is_unwind()));
+    let kinds: Vec<EdgeKind> = listed_edges(&cfg, &model)
+        .into_iter()
+        .map(|(_, _, _, kind)| kind)
+        .collect();
+    assert_eq!(
+        kinds,
+        [EdgeKind::ExceptionResume, EdgeKind::ExceptionContinue]
+    );
+    assert!(kinds.iter().all(|&kind| kind != EdgeKind::ExceptionUnwind));
 }
 
 #[test]
@@ -106,9 +132,10 @@ fn a_leave_edge_is_listed_but_classifies_no_block() {
 
     let model = EhModel::compute(&cfg);
 
-    assert_eq!(model.eh_edges().len(), 1);
-    assert_eq!(model.eh_edges()[0].edge_id, leave);
-    assert_eq!(model.eh_edges()[0].kind, EhEdgeKind::Leave);
+    assert_eq!(
+        listed_edges(&cfg, &model),
+        [(leave, cfg.entry(), after, EdgeKind::ExceptionLeave)]
+    );
     assert!(
         model
             .block_kinds()
@@ -156,8 +183,11 @@ fn region_metadata_decides_the_role_an_unwind_edge_only_guesses() {
     assert_eq!(model.block_kind(finally), EhBlockKind::Cleanup);
     assert_eq!(model.block_kind(fault), EhBlockKind::Cleanup);
     assert_eq!(model.block_kind(filtered), EhBlockKind::CatchSwitch);
-    assert_eq!(model.landing_pads(), [catch_pad, catch_all]);
-    assert_eq!(model.cleanup_blocks(), [finally, fault]);
+    assert_eq!(
+        blocks_of(&model, EhBlockKind::LandingPad),
+        [catch_pad, catch_all]
+    );
+    assert_eq!(blocks_of(&model, EhBlockKind::Cleanup), [finally, fault]);
     assert_eq!(
         model.block_kind(filter),
         EhBlockKind::Normal,
@@ -202,14 +232,12 @@ fn every_handler_entered_at_a_block_is_listed_in_region_order() {
     let first = protect(&mut cfg, &[entry], vec![catch(shared)]);
     let second = protect(&mut cfg, &[entry], vec![catch(other), catch(shared)]);
 
-    let model = EhModel::compute(&cfg);
-
     assert_eq!(
-        model.handlers(shared),
+        entered_at(&cfg, shared),
         [HandlerRef::new(first, 0), HandlerRef::new(second, 1)]
     );
-    assert_eq!(model.handlers(other), [HandlerRef::new(second, 0)]);
-    assert_eq!(model.handlers(entry), []);
+    assert_eq!(entered_at(&cfg, other), [HandlerRef::new(second, 0)]);
+    assert_eq!(entered_at(&cfg, entry), []);
 }
 
 #[test]
@@ -237,9 +265,8 @@ fn a_block_added_after_the_model_reads_as_normal() {
 
     assert_eq!(model.block_kind(late), EhBlockKind::Normal);
     assert!(model.block_bound() <= late.index());
-    assert_eq!(model.handlers(late), []);
+    assert_eq!(entered_at(&fixture.cfg, late), []);
     assert!(model.protected_by(late).is_empty());
-    assert!(model.cleanup(late).is_none());
 }
 
 #[test]
@@ -269,7 +296,7 @@ fn model_edges_lead_back_to_the_callers_payloads_by_edge_identity() {
     let order: Vec<(EdgeId, Dispatch)> = model
         .eh_edges()
         .iter()
-        .map(|edge| (edge.edge_id, *cfg.edge(edge.edge_id).payload()))
+        .map(|&edge| (edge, *cfg.edge(edge).payload()))
         .collect();
     assert_eq!(
         order,
@@ -359,8 +386,8 @@ fn the_view_rejects_exactly_the_exceptional_edges_the_model_lists() {
     let listed_exceptional: Vec<EdgeId> = model
         .eh_edges()
         .iter()
-        .filter(|edge| edge.kind != EhEdgeKind::Leave)
-        .map(|edge| edge.edge_id)
+        .copied()
+        .filter(|&edge| cfg.edge(edge).kind() != EdgeKind::ExceptionLeave)
         .collect();
     assert_eq!(rejected, listed_exceptional);
     assert_eq!(model.eh_edges().len(), rejected.len() + 1, "plus the leave");

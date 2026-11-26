@@ -3,7 +3,9 @@
 
 use std::collections::BTreeSet;
 
-use cfglib::{BlockId, EhBlockKind, EhModel, HandlerKind, HandlerRef, RegionId};
+use cfglib::{
+    BlockId, EhBlockKind, EhModel, HandlerKind, HandlerRef, Region, RegionId, RegionIndex,
+};
 
 use crate::harness::{Built, FALL, Settings, TryRange, UNWIND, build_with, catch};
 use crate::isa::{Isa, Op};
@@ -21,6 +23,20 @@ fn guarded_code(count: usize, handler_bodies: usize) -> Vec<Op> {
 
 fn blocks_of<I: Isa>(built: &Built<I>, positions: &[usize]) -> BTreeSet<BlockId> {
     positions.iter().map(|&p| built.block_of(p)).collect()
+}
+
+/// Every region with its identity, in identity order.
+fn regions<I: Isa>(built: &Built<I>) -> Vec<(RegionId, &Region)> {
+    built.cfg().regions().collect()
+}
+
+/// The handlers entered at the block of instruction `position`.
+fn entered_at<I: Isa>(built: &Built<I>, position: usize) -> Vec<HandlerRef> {
+    built
+        .cfg()
+        .handlers_at(built.block_of(position))
+        .map(|(handler, _)| handler)
+        .collect()
 }
 
 fn nested_ranges_register_the_enclosing_region_first_whatever_the_table_order<I: Isa>() {
@@ -57,16 +73,16 @@ fn nested_ranges_register_the_enclosing_region_first_whatever_the_table_order<I:
             vec![11, 12],
         ]
     );
-    let regions = built.cfg().regions();
+    let regions = regions(&built);
     let [outer, middle, inner] = [0, 1, 2].map(RegionId::from_index);
     assert_eq!(
-        regions.iter().map(|region| region.id).collect::<Vec<_>>(),
+        regions.iter().map(|&(id, _)| id).collect::<Vec<_>>(),
         [outer, middle, inner]
     );
     assert_eq!(
         regions
             .iter()
-            .map(|region| region.parent)
+            .map(|(_, region)| region.parent)
             .collect::<Vec<_>>(),
         [None, Some(outer), Some(middle)]
     );
@@ -80,10 +96,8 @@ fn nested_ranges_register_the_enclosing_region_first_whatever_the_table_order<I:
         ]
     );
     let cfg = built.cfg();
-    let innermost = |position: usize| {
-        cfg.protecting_region(built.block_of(position))
-            .map(|r| r.id)
-    };
+    let index = RegionIndex::compute(cfg);
+    let innermost = |position: usize| index.protecting(built.block_of(position));
     assert_eq!(
         (0..7).map(innermost).collect::<Vec<_>>(),
         [
@@ -114,9 +128,9 @@ fn nested_ranges_register_the_enclosing_region_first_whatever_the_table_order<I:
 
     let model = EhModel::compute(cfg);
     let entry = |position| built.block_of(position);
-    assert_eq!(model.handlers(entry(7)), [HandlerRef::new(inner, 0)]);
-    assert_eq!(model.handlers(entry(9)), [HandlerRef::new(outer, 0)]);
-    assert_eq!(model.handlers(entry(11)), [HandlerRef::new(middle, 0)]);
+    assert_eq!(entered_at(&built, 7), [HandlerRef::new(inner, 0)]);
+    assert_eq!(entered_at(&built, 9), [HandlerRef::new(outer, 0)]);
+    assert_eq!(entered_at(&built, 11), [HandlerRef::new(middle, 0)]);
     assert_eq!(model.protected_by(entry(7)), &blocks_of(&built, &[2, 3]));
     assert_eq!(
         model.protected_by(entry(9)),
@@ -135,17 +149,17 @@ fn ranges_of_equal_span_stay_peers_in_table_order<I: Isa>() {
         vec![catch(2..4, 5), catch(0..2, 7)],
         Settings::default(),
     );
-    let regions = built.cfg().regions();
+    let regions = regions(&built);
     assert_eq!(regions.len(), 2);
-    assert_eq!(regions[0].protected_blocks, blocks_of(&built, &[2, 3]));
-    assert_eq!(regions[1].protected_blocks, blocks_of(&built, &[0, 1]));
-    assert_eq!(regions[0].parent, None);
-    assert_eq!(regions[1].parent, None);
+    assert_eq!(regions[0].1.protected_blocks, blocks_of(&built, &[2, 3]));
+    assert_eq!(regions[1].1.protected_blocks, blocks_of(&built, &[0, 1]));
+    assert_eq!(regions[0].1.parent, None);
+    assert_eq!(regions[1].1.parent, None);
     assert_eq!(
         built.graph.handler_refs,
         [
-            HandlerRef::new(regions[0].id, 0),
-            HandlerRef::new(regions[1].id, 0)
+            HandlerRef::new(regions[0].0, 0),
+            HandlerRef::new(regions[1].0, 0)
         ]
     );
 }
@@ -156,26 +170,23 @@ fn partly_overlapping_ranges_are_peers_and_the_later_region_is_innermost<I: Isa>
         vec![catch(0..4, 6), catch(2..5, 8)],
         Settings::default(),
     );
-    let regions = built.cfg().regions();
+    let regions = regions(&built);
     // Neither range contains the other, so neither is a parent.
     assert_eq!(
-        regions[0].protected_blocks,
+        regions[0].1.protected_blocks,
         blocks_of(&built, &[0, 1, 2, 3])
     );
-    assert_eq!(regions[1].protected_blocks, blocks_of(&built, &[2, 3, 4]));
-    assert_eq!(regions[1].parent, None);
-    let cfg = built.cfg();
-    let innermost = |position: usize| {
-        cfg.protecting_region(built.block_of(position))
-            .map(|r| r.id)
-    };
-    assert_eq!(innermost(0), Some(regions[0].id));
+    assert_eq!(regions[1].1.protected_blocks, blocks_of(&built, &[2, 3, 4]));
+    assert_eq!(regions[1].1.parent, None);
+    let index = RegionIndex::compute(built.cfg());
+    let innermost = |position: usize| index.protecting(built.block_of(position));
+    assert_eq!(innermost(0), Some(regions[0].0));
     assert_eq!(
         innermost(2),
-        Some(regions[1].id),
+        Some(regions[1].0),
         "the later region wins shared blocks"
     );
-    assert_eq!(innermost(4), Some(regions[1].id));
+    assert_eq!(innermost(4), Some(regions[1].0));
     let successors = built.successors();
     assert_eq!(successors[0], [(1, FALL), (6, UNWIND)]);
     assert_eq!(successors[2], [(3, FALL), (6, UNWIND), (7, UNWIND)]);
@@ -188,19 +199,19 @@ fn a_range_sharing_its_start_with_a_larger_one_nests_inside_it<I: Isa>() {
         vec![catch(0..2, 5), catch(0..4, 7)],
         Settings::default(),
     );
-    let regions = built.cfg().regions();
+    let regions = regions(&built);
     assert_eq!(
-        regions[0].protected_blocks,
+        regions[0].1.protected_blocks,
         blocks_of(&built, &[0, 1, 2, 3])
     );
-    assert_eq!(regions[1].protected_blocks, blocks_of(&built, &[0, 1]));
-    assert_eq!(regions[0].parent, None);
-    assert_eq!(regions[1].parent, Some(regions[0].id));
+    assert_eq!(regions[1].1.protected_blocks, blocks_of(&built, &[0, 1]));
+    assert_eq!(regions[0].1.parent, None);
+    assert_eq!(regions[1].1.parent, Some(regions[0].0));
     assert_eq!(
         built.graph.handler_refs,
         [
-            HandlerRef::new(regions[1].id, 0),
-            HandlerRef::new(regions[0].id, 0)
+            HandlerRef::new(regions[1].0, 0),
+            HandlerRef::new(regions[0].0, 0)
         ]
     );
 }
@@ -217,23 +228,23 @@ fn three_levels_of_nesting_name_each_innermost_enclosing_region<I: Isa>() {
         ],
         Settings::default(),
     );
-    let regions = built.cfg().regions();
+    let regions = regions(&built);
     assert_eq!(
         regions
             .iter()
-            .map(|region| region.parent)
+            .map(|(_, region)| region.parent)
             .collect::<Vec<_>>(),
         [
             None,
-            Some(regions[0].id),
-            Some(regions[1].id),
-            Some(regions[2].id)
+            Some(regions[0].0),
+            Some(regions[1].0),
+            Some(regions[2].0)
         ]
     );
     assert_eq!(
         regions
             .iter()
-            .map(|region| region.protected_blocks.len())
+            .map(|(_, region)| region.protected_blocks.len())
             .collect::<Vec<_>>(),
         [8, 6, 4, 2]
     );

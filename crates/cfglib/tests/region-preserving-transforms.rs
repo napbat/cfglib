@@ -1,19 +1,18 @@
 //! Integration tests: structural passes keep exception metadata consistent.
 //!
 //! A pass that removes, merges, or splits blocks must never leave a handler
-//! entry, filter block, cleanup resume block, or protected extent describing
+//! entry, filter block, cleanup exit block, or protected extent describing
 //! a block that no longer matches the code, so `compact` and the exception
 //! model stay usable after any sequence of passes.
 
 use cfglib::{
     BlockId, Cfg, CompletionReason, Continuation, EdgeKind, EhBlockKind, EhModel, Handler,
-    HandlerBody, HandlerKind, HandlerRef, NodeOrder, Region, RegionId, contract_edge, merge_blocks,
-    remove_empty_blocks, remove_unreachable, simplify,
+    HandlerBody, HandlerKind, HandlerRef, NodeOrder, Region, RegionId, RegionIndex, contract_edge,
+    merge_blocks, remove_empty_blocks, remove_unreachable, simplify,
 };
 
 fn region(protected: impl IntoIterator<Item = BlockId>, handlers: Vec<Handler>) -> Region {
     Region {
-        id: RegionId::from_raw(0),
         protected_blocks: protected.into_iter().collect(),
         handlers,
         parent: None,
@@ -41,14 +40,15 @@ fn empty_catch() -> (Cfg<u32>, BlockId) {
     cfg.add_edge(body, join, EdgeKind::Fallthrough);
     cfg.add_edge(body, handler, EdgeKind::ExceptionHandler);
     cfg.add_edge(handler, join, EdgeKind::Fallthrough);
-    cfg.add_region(region([body], vec![catch(handler)]));
+    cfg.add_region(region([body], vec![catch(handler)]))
+        .unwrap();
     (cfg, handler)
 }
 
 fn assert_metadata_survives_compaction(cfg: &mut Cfg<u32>) {
     cfg.compact(NodeOrder::Insertion);
     assert!(cfg.is_compact());
-    for region in cfg.regions() {
+    for (_, region) in cfg.regions() {
         for handler in &region.handlers {
             assert!(cfg.contains_block(handler.entry));
         }
@@ -70,7 +70,7 @@ fn simplify_then_compact_keeps_the_empty_catch() {
 
     simplify(&mut cfg);
     assert_metadata_survives_compaction(&mut cfg);
-    let handler = cfg.regions()[0].handlers[0].entry;
+    let handler = cfg.region(RegionId::from_raw(0)).handlers[0].entry;
     assert_eq!(
         EhModel::compute(&cfg).block_kind(handler),
         EhBlockKind::LandingPad
@@ -90,7 +90,8 @@ fn removing_unreachable_blocks_keeps_a_declared_handler_entry() {
     cfg.add_edge(never_entered, after, EdgeKind::Fallthrough);
     cfg.block_mut(entered).push(7);
     cfg.block_mut(never_entered).push(8);
-    cfg.add_region(region([body], vec![catch(entered), catch(never_entered)]));
+    cfg.add_region(region([body], vec![catch(entered), catch(never_entered)]))
+        .unwrap();
 
     assert_eq!(remove_unreachable(&mut cfg), 0);
     assert!(cfg.contains_block(never_entered));
@@ -109,16 +110,19 @@ fn removing_a_dead_region_releases_its_blocks() {
     cfg.add_edge(dead_handler, after, EdgeKind::Fallthrough);
     cfg.block_mut(dead_body).push(1);
     cfg.block_mut(dead_handler).push(2);
-    let dead = cfg.add_region(region([dead_body], vec![catch(dead_handler)]));
+    let dead = cfg
+        .add_region(region([dead_body], vec![catch(dead_handler)]))
+        .unwrap();
     let handler = HandlerRef::new(dead, 0);
-    cfg.set_cleanup_resume(handler, dead_handler);
+    cfg.set_cleanup_exit(handler, dead_handler).unwrap();
     cfg.add_continuation(
         handler,
         Continuation {
             reason: CompletionReason::Normal,
-            resume: after,
+            target: after,
         },
-    );
+    )
+    .unwrap();
 
     assert_eq!(cfg.remove_unreachable_regions(), 1);
     assert!(
@@ -139,7 +143,8 @@ fn merging_never_moves_code_across_a_protection_boundary() {
     cfg.block_mut(unprotected).push(2);
     cfg.block_mut(handler).push(3);
     cfg.add_edge(protected, unprotected, EdgeKind::Fallthrough);
-    cfg.add_region(region([protected], vec![catch(handler)]));
+    cfg.add_region(region([protected], vec![catch(handler)]))
+        .unwrap();
 
     assert_eq!(merge_blocks(&mut cfg), 0);
     assert!(!contract_edge(&mut cfg, protected, unprotected));
@@ -155,7 +160,8 @@ fn merging_inside_one_region_still_happens() {
     cfg.block_mut(first).push(1);
     cfg.block_mut(second).push(2);
     cfg.add_edge(first, second, EdgeKind::Fallthrough);
-    cfg.add_region(region([first, second], vec![catch(handler)]));
+    cfg.add_region(region([first, second], vec![catch(handler)]))
+        .unwrap();
 
     assert_eq!(merge_blocks(&mut cfg), 1);
     assert_eq!(cfg.block(first).instructions(), &[1, 2]);
@@ -185,7 +191,7 @@ fn merging_into_a_handler_entry_is_refused() {
     cfg.block_mut(handler).push(2);
     cfg.add_edge(body, before, EdgeKind::Fallthrough);
     cfg.add_edge(before, handler, EdgeKind::Fallthrough);
-    cfg.add_region(region([], vec![catch(handler)]));
+    cfg.add_region(region([], vec![catch(handler)])).unwrap();
 
     // `before` folds into the entry; the handler entry, which a handler names,
     // stays a block of its own.
@@ -206,13 +212,15 @@ fn splitting_a_protected_block_protects_both_halves() {
     cfg.block_mut(handler).push(9);
     cfg.add_edge(body, after, EdgeKind::Fallthrough);
     cfg.add_edge(body, handler, EdgeKind::ExceptionHandler);
-    let owner = cfg.add_region(region([body], vec![catch(handler)]));
+    let owner = cfg
+        .add_region(region([body], vec![catch(handler)]))
+        .unwrap();
 
     let tail = cfg.split_block(body, 1);
 
-    let protected = &cfg.region(owner).unwrap().protected_blocks;
+    let protected = &cfg.region(owner).protected_blocks;
     assert!(protected.contains(&body) && protected.contains(&tail));
-    assert_eq!(cfg.protecting_region(tail).map(|r| r.id), Some(owner));
+    assert_eq!(RegionIndex::compute(&cfg).protecting(tail), Some(owner));
     assert_eq!(cfg.outgoing(tail).count(), 2, "the exits moved to the tail");
 }
 
@@ -223,19 +231,18 @@ fn splitting_a_handler_body_block_keeps_the_whole_body_known() {
     let handler = cfg.new_block();
     cfg.block_mut(handler).instructions_mut().extend([1, 2]);
     cfg.add_edge(body, handler, EdgeKind::ExceptionHandler);
-    let owner = cfg.add_region(region([body], vec![catch(handler)]));
+    let owner = cfg
+        .add_region(region([body], vec![catch(handler)]))
+        .unwrap();
 
     let tail = cfg.split_block(handler, 1);
 
-    let known = cfg.region(owner).unwrap().handlers[0]
-        .body
-        .blocks()
-        .unwrap();
+    let known = cfg.region(owner).handlers[0].body.blocks().unwrap();
     assert!(known.contains(&handler) && known.contains(&tail));
 }
 
 #[test]
-fn splitting_a_cleanup_resume_block_moves_the_resume_point_to_the_tail() {
+fn splitting_a_cleanup_exit_block_moves_the_exit_point_to_the_tail() {
     let mut cfg = Cfg::<u32>::new();
     let body = cfg.entry();
     let cleanup = cfg.new_block();
@@ -243,27 +250,30 @@ fn splitting_a_cleanup_resume_block_moves_the_resume_point_to_the_tail() {
     cfg.block_mut(cleanup).instructions_mut().extend([1, 2]);
     cfg.add_edge(body, cleanup, EdgeKind::Fallthrough);
     cfg.add_edge(cleanup, exit, EdgeKind::Fallthrough);
-    let owner = cfg.add_region(region(
-        [body],
-        vec![Handler {
-            entry: cleanup,
-            body: HandlerBody::known([cleanup]),
-            kind: HandlerKind::Finally,
-        }],
-    ));
+    let owner = cfg
+        .add_region(region(
+            [body],
+            vec![Handler {
+                entry: cleanup,
+                body: HandlerBody::known([cleanup]),
+                kind: HandlerKind::Finally,
+            }],
+        ))
+        .unwrap();
     let handler = HandlerRef::new(owner, 0);
-    cfg.set_cleanup_resume(handler, cleanup);
+    cfg.set_cleanup_exit(handler, cleanup).unwrap();
     cfg.add_continuation(
         handler,
         Continuation {
             reason: CompletionReason::Normal,
-            resume: exit,
+            target: exit,
         },
-    );
+    )
+    .unwrap();
 
     let tail = cfg.split_block(cleanup, 1);
 
-    assert_eq!(cfg.cleanup(handler).unwrap().resume_from, Some(tail));
+    assert_eq!(cfg.cleanup(handler).unwrap().exit_block, Some(tail));
     assert_eq!(cfg.successors(tail).collect::<Vec<_>>(), [exit]);
 }
 

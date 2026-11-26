@@ -9,7 +9,7 @@ use crate::ControlTree;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
 use crate::graph::store::NodeOrder;
-use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
+use crate::region::{Handler, HandlerBody, HandlerKind, Region};
 use crate::test_util::{MockInst, ff};
 
 /// A loop around a try, with a removed block before every named block.
@@ -34,7 +34,6 @@ fn with_gaps() -> Cfg<MockInst> {
     cfg.add_edge(body, pad, EdgeKind::ExceptionHandler);
     cfg.add_edge(pad, header, EdgeKind::Jump);
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [body].into_iter().collect(),
         handlers: vec![Handler {
             entry: pad,
@@ -42,7 +41,8 @@ fn with_gaps() -> Cfg<MockInst> {
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
     for gap in gaps {
         cfg.remove_block(gap);
     }

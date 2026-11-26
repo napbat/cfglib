@@ -14,7 +14,7 @@ use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
 use crate::graph::traverse::reachable;
 use crate::graph::view::Direction;
-use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
+use crate::region::{Handler, HandlerBody, HandlerKind, Region};
 use crate::{ControlNode, ControlTree, LoopKind, SplError, SplNode};
 use checker::{check_decomposition, check_path};
 
@@ -456,7 +456,6 @@ fn a_try_region_has_no_decomposition() {
     let (mut cfg, blocks) = build(4, &[(0, 1, FALL), (1, 3, FALL), (2, 3, FALL)]);
     cfg.add_edge(blocks[1], blocks[2], EdgeKind::ExceptionHandler);
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [blocks[1]].into_iter().collect(),
         handlers: vec![Handler {
             entry: blocks[2],
@@ -464,7 +463,8 @@ fn a_try_region_has_no_decomposition() {
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
     assert!(matches!(obstacle(&cfg), SplError::TryCatch(_)));
 }
 

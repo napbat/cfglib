@@ -1,22 +1,15 @@
-//! Runtime-neutral exception metadata and normalized platform adapters.
+//! Runtime-neutral exception annotations for caller-owned edge payloads.
 //!
-//! Frame-scoped CLR and Windows SEH constructs lower into
-//! [`Region`](crate::Region). Dynamic x86 SEH registration and process-wide
-//! vectored handlers remain separate models because neither is a lexical CFG
-//! region. Platform-specific records stay consumer-owned generic payloads.
+//! Frame-scoped exception constructs (CLR clauses, Windows SEH `__try`
+//! scopes, C++ and source `try` blocks) lower directly into
+//! [`Region`](crate::Region) and [`Handler`](crate::Handler): an SEH
+//! `__except` is a [`HandlerKind::Filter`](crate::HandlerKind::Filter), and a
+//! CLR catch-type token goes in a [`HandlerMetadata`](crate::HandlerMetadata)
+//! side table ([`HandlerMetadata::set_all`](crate::HandlerMetadata::set_all)).
+//! Runtime registration state (an SEH frame chain, process-wide vectored
+//! handlers) is not a lexical CFG region and stays with the consumer.
+//! Platform-specific records stay consumer-owned generic payloads.
 
-mod clr;
 mod flow;
-mod seh;
-mod veh;
 
-pub use clr::{ClrExceptionRegion, ClrHandler, ClrHandlerKind, install_clr_region};
 pub use flow::{ExceptionDisposition, ExceptionFlow, ExceptionPhase};
-pub use seh::{
-    SehExceptionRegion, SehHandler, SehHandlerKind, SehRegistration, SehRegistrationChain,
-    install_seh_region,
-};
-pub use veh::{
-    VectoredExceptionModel, VectoredHandler, VectoredHandlerId, VectoredHandlerKind,
-    VectoredHandlerOrder, VehModel,
-};

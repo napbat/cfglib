@@ -3,7 +3,8 @@
 
 use cfglib::{
     AddressBuildError, AddressCfgOptions, AddressGraph, AddressHandler, AddressInstruction,
-    AddressSpace, BlockId, EdgeKind, Flow, HandlerKind, HandlerRef, build_address_cfg, verify,
+    AddressSpace, BlockId, EdgeKind, Flow, HandlerKind, HandlerRef, Region, RegionId,
+    build_address_cfg, verify,
 };
 
 use crate::bytecode::{Bytecode, Opcode};
@@ -108,8 +109,15 @@ fn a_range_may_end_at_the_last_representable_address_of_the_u32_space() {
         kind: HandlerKind::Catch,
     };
     let graph = try_build(stream, &[handler], no_options()).unwrap();
-    assert_eq!(graph.cfg.regions().len(), 1);
-    assert_eq!(graph.cfg.regions()[0].protected_blocks.len(), 2);
+    assert_eq!(graph.cfg.region_count(), 1);
+    assert_eq!(
+        graph
+            .cfg
+            .region(RegionId::from_raw(0))
+            .protected_blocks
+            .len(),
+        2
+    );
     // The load falls through into the handler's block and also unwinds to it.
     assert_eq!(
         successors(&graph),
@@ -141,8 +149,15 @@ fn a_range_may_end_at_the_last_representable_address_of_the_u64_space() {
         kind: HandlerKind::Catch,
     };
     let graph = try_build(stream, &[handler], no_options()).unwrap();
-    assert_eq!(graph.cfg.regions().len(), 1);
-    assert_eq!(graph.cfg.regions()[0].protected_blocks.len(), 2);
+    assert_eq!(graph.cfg.region_count(), 1);
+    assert_eq!(
+        graph
+            .cfg
+            .region(RegionId::from_raw(0))
+            .protected_blocks
+            .len(),
+        2
+    );
     assert_eq!(
         successors(&graph),
         vec![vec![(1, FALL), (1, UNWIND)], vec![]]
@@ -228,17 +243,17 @@ fn a_consumer_defined_address_type_orders_nested_regions_by_its_own_distance() {
             vec![],
         ]
     );
-    let regions = graph.cfg.regions();
+    let regions: Vec<(RegionId, &Region)> = graph.cfg.regions().collect();
     assert_eq!(regions.len(), 2);
-    assert_eq!(regions[0].protected_blocks.len(), 2);
-    assert_eq!(regions[1].protected_blocks.len(), 1);
-    assert_eq!(regions[0].parent, None);
-    assert_eq!(regions[1].parent, Some(regions[0].id));
+    assert_eq!(regions[0].1.protected_blocks.len(), 2);
+    assert_eq!(regions[1].1.protected_blocks.len(), 1);
+    assert_eq!(regions[0].1.parent, None);
+    assert_eq!(regions[1].1.parent, Some(regions[0].0));
     assert_eq!(
         graph.handler_refs,
         [
-            HandlerRef::new(regions[0].id, 0),
-            HandlerRef::new(regions[1].id, 0)
+            HandlerRef::new(regions[0].0, 0),
+            HandlerRef::new(regions[1].0, 0)
         ]
     );
     assert!(verify(&graph.cfg).is_ok());

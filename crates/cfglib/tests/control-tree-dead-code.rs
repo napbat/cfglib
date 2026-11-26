@@ -7,7 +7,6 @@
 
 use cfglib::{
     BlockId, Cfg, ControlNode, ControlTree, EdgeKind, Handler, HandlerBody, HandlerKind, Region,
-    RegionId,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -54,7 +53,6 @@ fn dead_pad_with_a_loop(closing: Closing) -> (Cfg<&'static str>, BlockId) {
         }
     }
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [entry].into_iter().collect(),
         handlers: vec![Handler {
             entry: pad,
@@ -62,7 +60,8 @@ fn dead_pad_with_a_loop(closing: Closing) -> (Cfg<&'static str>, BlockId) {
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
     (cfg, header)
 }
 

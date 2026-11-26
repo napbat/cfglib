@@ -13,7 +13,7 @@ use super::pseudocode;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
+use crate::region::{Handler, HandlerBody, HandlerKind, Region};
 use crate::test_util::{MockInst, ff};
 use crate::{ControlNode, ControlTree};
 
@@ -60,7 +60,6 @@ fn dead_pad_with_a_loop(closing: Closing) -> Cfg<MockInst> {
         }
     }
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [b[0]].into_iter().collect(),
         handlers: vec![Handler {
             entry: b[2],
@@ -68,7 +67,8 @@ fn dead_pad_with_a_loop(closing: Closing) -> Cfg<MockInst> {
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
     cfg
 }
 

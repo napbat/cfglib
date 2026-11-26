@@ -19,14 +19,13 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use cfglib::{
-    BlockId, BuildError, CallInfo, Cfg, CfgBuilder, CfgSupergraph, ClrExceptionRegion, ClrHandler,
-    ClrHandlerKind, ControlNode, ControlTree, DenseBits, DenseFanout, Direction, DisplayInstr,
-    DominatorTree, EdgeKind, EhModel, Fanout, FlowControl, FlowEffect, Graph, Handler, HandlerBody,
-    HandlerKind, HandlerTypes, HornClauses, IfdsConfig, IfdsProblem, InstrInfo, KeyedGraph, NodeId,
-    NodeOrder, PostDominatorTree, Problem, SortedMap, StackGraphError, Supergraph, TextError,
-    VectoredExceptionModel, VectoredHandlerKind, VectoredHandlerOrder, breadth_first,
-    install_clr_region, parse_cfg_text, parse_text, remove_unreachable, shortest_path, simplify,
-    solve_ifds, solve_problem, tarjan_scc, topological_sort, verify,
+    BlockId, BuildError, CallInfo, Cfg, CfgBuilder, CfgSupergraph, ControlNode, ControlTree,
+    DenseBits, DenseFanout, Direction, DisplayInstr, DominatorTree, EdgeKind, EhBlockKind, EhModel,
+    Fanout, FlowControl, FlowEffect, Graph, Handler, HandlerBody, HandlerKind, HandlerMetadata,
+    HornClauses, IfdsConfig, IfdsProblem, InstrInfo, KeyedGraph, NodeId, NodeOrder,
+    PostDominatorTree, Problem, Region, RegionIndex, SortedMap, StackGraphError, Supergraph,
+    TextError, breadth_first, parse_cfg_text, parse_text, remove_unreachable, shortest_path,
+    simplify, solve_ifds, solve_problem, tarjan_scc, topological_sort, verify,
 };
 
 /// An instruction a consumer owns: its text, and the variables it reads and
@@ -369,32 +368,30 @@ fn a_structured_stream_builds_and_the_cleanup_passes_report_alloc_results() {
 #[test]
 fn exception_regions_and_models_are_described_with_alloc_collections() {
     let (mut cfg, [entry, then_block, else_block, merge]) = diamond();
-    let mut types = HandlerTypes::<String>::new();
-    let region = install_clr_region(
-        &mut cfg,
-        &mut types,
-        ClrExceptionRegion {
+    let mut types = HandlerMetadata::<String>::new();
+    let region = cfg
+        .add_region(Region {
             protected_blocks: BTreeSet::from([entry, then_block]),
-            handlers: vec![ClrHandler {
+            handlers: vec![Handler {
                 entry: else_block,
                 body: HandlerBody::known([else_block]),
-                kind: ClrHandlerKind::Catch {
-                    ty: "System.IO.IOException".to_string(),
-                },
+                kind: HandlerKind::Catch,
             }],
             parent: None,
-        },
-    );
-    assert_eq!(
-        cfg.protecting_region(then_block).map(|found| found.id),
-        Some(region)
-    );
-    assert_eq!(cfg.protecting_region(merge).map(|found| found.id), None);
+        })
+        .unwrap();
+    types.set_all(region, [(0, "System.IO.IOException".to_string())]);
+    let index = RegionIndex::compute(&cfg);
+    assert_eq!(index.protecting(then_block), Some(region));
+    assert_eq!(index.protecting(merge), None);
     assert_eq!(types.len(), 1);
 
     cfg.add_edge(then_block, else_block, EdgeKind::ExceptionUnwind);
     let model = EhModel::compute(&cfg);
-    assert_eq!(model.landing_pads(), [else_block]);
+    assert_eq!(
+        model.blocks_of(EhBlockKind::LandingPad).collect::<Vec<_>>(),
+        [else_block]
+    );
     assert_eq!(
         model
             .protected_by(else_block)
@@ -403,16 +400,8 @@ fn exception_regions_and_models_are_described_with_alloc_collections() {
             .collect::<Vec<_>>(),
         [entry, then_block]
     );
-    let handlers: Vec<&Handler> = cfg.regions()[0].handlers.iter().collect();
+    let handlers: Vec<&Handler> = cfg.region(region).handlers.iter().collect();
     assert!(matches!(handlers[0].kind, HandlerKind::Catch));
-
-    let mut vectored = VectoredExceptionModel::<String>::new();
-    vectored.register(
-        VectoredHandlerKind::Exception,
-        VectoredHandlerOrder::First,
-        "veh".to_string(),
-    );
-    assert_eq!(vectored.len(), 1);
 }
 
 /// Every error type of the facade implements `core::error::Error`, not the
@@ -432,6 +421,19 @@ fn facade_errors_implement_the_core_error_trait() {
     let _ = assert_core_error(StackGraphError::EdgeFromJumpToScope);
     let split = Cfg::<Statement>::new().split_block_at_points(BlockId::from_index(0), &[5]);
     let _ = assert_core_error(split.expect_err("a point past the block"));
+    let mut cfg = Cfg::<Statement>::new();
+    let gone = cfg.new_block();
+    cfg.remove_block(gone);
+    let dangling = cfg.add_region(Region {
+        protected_blocks: BTreeSet::new(),
+        handlers: vec![Handler {
+            entry: gone,
+            body: HandlerBody::unknown(),
+            kind: HandlerKind::CatchAll,
+        }],
+        parent: None,
+    });
+    let _ = assert_core_error(dangling.expect_err("a handler entry that is no block"));
 }
 
 #[test]

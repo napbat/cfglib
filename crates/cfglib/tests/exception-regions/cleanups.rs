@@ -1,7 +1,7 @@
 //! Cleanup records: the routes a shared `finally` block continues along, told
 //! apart by the reason that entered it.
 
-use cfglib::{Cfg, CompletionReason, Continuation, EdgeKind, EhModel, HandlerKind, HandlerRef};
+use cfglib::{Cfg, CompletionReason, Continuation, EdgeKind, HandlerKind, HandlerRef, RegionError};
 
 use crate::shapes::{Stmt, block_of, catch, handler, protect, try_catch};
 
@@ -58,62 +58,65 @@ fn routes_are_recorded_by_reason_and_read_back_in_recorded_order() {
     assert!(cfg.cleanups().is_empty(), "nothing is recorded until asked");
     assert!(cfg.cleanup(handler).is_none());
 
-    cfg.set_cleanup_resume(handler, cleanup);
+    cfg.set_cleanup_exit(handler, cleanup).unwrap();
     cfg.add_continuation(
         handler,
         Continuation {
             reason: CompletionReason::Normal,
-            resume: after,
+            target: after,
         },
-    );
+    )
+    .unwrap();
     cfg.add_continuation(
         handler,
         Continuation {
             reason: CompletionReason::Return,
-            resume: exit,
+            target: exit,
         },
-    );
+    )
+    .unwrap();
     cfg.add_continuation(
         handler,
         Continuation {
             reason: CompletionReason::Transfer,
-            resume: after_loop,
+            target: after_loop,
         },
-    );
+    )
+    .unwrap();
     cfg.add_continuation(
         handler,
         Continuation {
             reason: CompletionReason::Transfer,
-            resume: after,
+            target: after,
         },
-    );
+    )
+    .unwrap();
 
     let record = cfg.cleanup(handler).expect("recorded");
-    assert_eq!(record.handler, handler);
-    assert_eq!(record.resume_from, Some(cleanup));
+    assert_eq!(record.exit_block, Some(cleanup));
     assert_eq!(record.continuations.len(), 4);
     assert_eq!(
         record
-            .resumes_for(CompletionReason::Normal)
+            .targets_for(CompletionReason::Normal)
             .collect::<Vec<_>>(),
         [after]
     );
     assert_eq!(
         record
-            .resumes_for(CompletionReason::Return)
+            .targets_for(CompletionReason::Return)
             .collect::<Vec<_>>(),
         [exit]
     );
     assert_eq!(
         record
-            .resumes_for(CompletionReason::Transfer)
+            .targets_for(CompletionReason::Transfer)
             .collect::<Vec<_>>(),
         [after_loop, after],
         "several transfers keep their recorded order"
     );
     assert_eq!(
         record
-            .resumes_for(CompletionReason::Unwind)
+            .targets_for(CompletionReason::Unwind)
             .collect::<Vec<_>>(),
         []
     );
@@ -130,18 +133,19 @@ fn recording_the_same_route_twice_keeps_one_route() {
     } = shared_cleanup();
     let route = Continuation {
         reason: CompletionReason::Normal,
-        resume: after,
+        target: after,
     };
 
-    cfg.add_continuation(handler, route);
-    cfg.add_continuation(handler, route);
+    cfg.add_continuation(handler, route).unwrap();
+    cfg.add_continuation(handler, route).unwrap();
     cfg.add_continuation(
         handler,
         Continuation {
             reason: CompletionReason::Return,
-            resume: after,
+            target: after,
         },
-    );
+    )
+    .unwrap();
 
     let record = cfg.cleanup(handler).expect("recorded");
     assert_eq!(
@@ -153,9 +157,9 @@ fn recording_the_same_route_twice_keeps_one_route() {
 }
 
 #[test]
-fn a_diverging_cleanup_records_no_resume_block() {
+fn a_diverging_cleanup_records_no_exit_block() {
     // `finally { return 1 }`: the cleanup never reaches a block it continues
-    // from, so leaving the resume block unset is the honest description.
+    // from, so leaving the exit block unset is the honest description.
     let SharedCleanup {
         mut cfg,
         handler,
@@ -167,15 +171,16 @@ fn a_diverging_cleanup_records_no_resume_block() {
         handler,
         Continuation {
             reason: CompletionReason::Return,
-            resume: exit,
+            target: exit,
         },
-    );
+    )
+    .unwrap();
 
-    assert_eq!(cfg.cleanup(handler).expect("recorded").resume_from, None);
+    assert_eq!(cfg.cleanup(handler).expect("recorded").exit_block, None);
 }
 
 #[test]
-fn the_eh_model_carries_each_record_under_its_handler_entry() {
+fn a_cleanup_record_is_reached_from_its_handler_entry() {
     let SharedCleanup {
         mut cfg,
         cleanup,
@@ -184,46 +189,45 @@ fn the_eh_model_carries_each_record_under_its_handler_entry() {
         exit,
         ..
     } = shared_cleanup();
-    cfg.set_cleanup_resume(handler, cleanup);
+    cfg.set_cleanup_exit(handler, cleanup).unwrap();
     cfg.add_continuation(
         handler,
         Continuation {
             reason: CompletionReason::Normal,
-            resume: after,
+            target: after,
         },
-    );
+    )
+    .unwrap();
     cfg.add_continuation(
         handler,
         Continuation {
             reason: CompletionReason::Return,
-            resume: exit,
+            target: exit,
         },
-    );
+    )
+    .unwrap();
 
-    let model = EhModel::compute(&cfg);
-
-    let record = model.cleanup(cleanup).expect("keyed by the entry block");
-    assert_eq!(Some(record), cfg.cleanup(handler));
+    let entered: Vec<HandlerRef> = cfg.handlers_at(cleanup).map(|(found, _)| found).collect();
+    assert_eq!(entered, [handler]);
+    let record = cfg.cleanup(entered[0]).expect("keyed by the handler");
     assert_eq!(
         record
-            .resumes_for(CompletionReason::Return)
+            .targets_for(CompletionReason::Return)
             .collect::<Vec<_>>(),
         [exit]
     );
-    assert!(model.cleanup(after).is_none());
-    let all: Vec<_> = model.cleanups().collect();
+    assert_eq!(cfg.handlers_at(after).count(), 0);
+    let all: Vec<_> = cfg.cleanups().iter().collect();
     assert_eq!(all.len(), 1);
-    assert_eq!(all[0].0, cleanup);
+    assert_eq!(all[0].0, handler);
+    assert_eq!(cfg.handler(all[0].0).entry, cleanup);
 }
 
 #[test]
-fn a_handler_without_a_record_has_no_cleanup_in_the_model() {
+fn a_handler_without_a_record_has_no_cleanup() {
     let fixture = try_catch(&["log(e)"]);
 
-    let model = EhModel::compute(&fixture.cfg);
-
-    assert!(model.cleanup(fixture.pad).is_none());
-    assert_eq!(model.cleanups().count(), 0);
+    assert!(fixture.cfg.cleanups().is_empty());
     assert!(
         fixture
             .cfg
@@ -233,7 +237,7 @@ fn a_handler_without_a_record_has_no_cleanup_in_the_model() {
 }
 
 #[test]
-fn records_of_different_handlers_are_kept_apart_in_first_recorded_order() {
+fn records_of_different_handlers_are_kept_apart_in_handler_order() {
     let mut cfg = Cfg::<Stmt>::new();
     let body = block_of(&mut cfg, &["risky()"]);
     let catch_pad = block_of(&mut cfg, &["catch"]);
@@ -254,43 +258,60 @@ fn records_of_different_handlers_are_kept_apart_in_first_recorded_order() {
         finally,
         Continuation {
             reason: CompletionReason::Normal,
-            resume: after,
+            target: after,
         },
-    );
+    )
+    .unwrap();
     cfg.add_continuation(
         catch_ref,
         Continuation {
             reason: CompletionReason::Unwind,
-            resume: after,
+            target: after,
         },
-    );
+    )
+    .unwrap();
 
-    let order: Vec<HandlerRef> = cfg.cleanups().iter().map(|record| record.handler).collect();
-    assert_eq!(order, [finally, catch_ref], "in the order first recorded");
+    let order: Vec<HandlerRef> = cfg.cleanups().iter().map(|(handler, _)| handler).collect();
+    assert_eq!(
+        order,
+        [catch_ref, finally],
+        "keyed by handler, whatever the recording order"
+    );
     assert_eq!(
         cfg.cleanup(catch_ref)
             .expect("recorded")
-            .resumes_for(CompletionReason::Normal)
+            .targets_for(CompletionReason::Normal)
             .count(),
         0
     );
-    let model = EhModel::compute(&cfg);
-    assert!(model.cleanup(catch_pad).is_some());
-    assert!(model.cleanup(cleanup).is_some());
+    assert_eq!(
+        cfg.cleanup(finally)
+            .expect("recorded")
+            .targets_for(CompletionReason::Normal)
+            .collect::<Vec<_>>(),
+        [after]
+    );
 }
 
-#[cfg(debug_assertions)]
 #[test]
-#[should_panic(expected = "handler does not exist")]
-fn recording_a_route_for_a_handler_the_graph_lacks_panics() {
+fn recording_a_route_for_a_handler_the_graph_lacks_is_an_error() {
     let mut cfg = Cfg::<Stmt>::new();
     let after = block_of(&mut cfg, &["after"]);
+    let missing = HandlerRef::new(cfglib::RegionId::from_raw(3), 0);
 
-    cfg.add_continuation(
-        HandlerRef::new(cfglib::RegionId::from_raw(3), 0),
-        Continuation {
-            reason: CompletionReason::Normal,
-            resume: after,
-        },
+    assert_eq!(
+        cfg.add_continuation(
+            missing,
+            Continuation {
+                reason: CompletionReason::Normal,
+                target: after,
+            },
+        ),
+        Err(RegionError::HandlerMissing(missing))
     );
+    assert_eq!(
+        cfg.set_cleanup_exit(missing, after),
+        Err(RegionError::HandlerMissing(missing))
+    );
+    assert!(cfg.cleanups().is_empty(), "the CFG is unchanged");
 }

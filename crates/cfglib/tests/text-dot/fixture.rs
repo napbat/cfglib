@@ -10,7 +10,6 @@ use crate::instruction::Line;
 
 pub fn region(protected: &[BlockId], handlers: Vec<Handler>, parent: Option<RegionId>) -> Region {
     Region {
-        id: RegionId::from_raw(0),
         protected_blocks: protected.iter().copied().collect(),
         handlers,
         parent,
@@ -53,30 +52,34 @@ pub fn try_finally() -> Cfg<Line> {
     cfg.add_edge(cleanup, after, EdgeKind::Fallthrough);
     cfg.add_edge(cleanup, exit, EdgeKind::Jump);
 
-    let region = cfg.add_region(region(
-        &[body],
-        vec![
-            handler(catch, HandlerKind::Catch, HandlerBody::known([catch])),
-            handler(cleanup, HandlerKind::Finally, HandlerBody::known([cleanup])),
-        ],
-        None,
-    ));
+    let region = cfg
+        .add_region(region(
+            &[body],
+            vec![
+                handler(catch, HandlerKind::Catch, HandlerBody::known([catch])),
+                handler(cleanup, HandlerKind::Finally, HandlerBody::known([cleanup])),
+            ],
+            None,
+        ))
+        .unwrap();
     let finally = HandlerRef::new(region, 1);
-    cfg.set_cleanup_resume(finally, cleanup);
+    cfg.set_cleanup_exit(finally, cleanup).unwrap();
     cfg.add_continuation(
         finally,
         Continuation {
             reason: CompletionReason::Normal,
-            resume: after,
+            target: after,
         },
-    );
+    )
+    .unwrap();
     cfg.add_continuation(
         finally,
         Continuation {
             reason: CompletionReason::Return,
-            resume: exit,
+            target: exit,
         },
-    );
+    )
+    .unwrap();
     cfg
 }
 
@@ -201,43 +204,48 @@ fn add_rich_regions(cfg: &mut Cfg<Line>, blocks: &RichBlocks) -> RegionId {
         exit,
         ..
     } = *blocks;
-    let outer = cfg.add_region(region(
-        &[entry, loop_header, empty],
-        vec![
-            handler(catch, HandlerKind::Catch, HandlerBody::known([catch])),
-            handler(catch, HandlerKind::CatchAll, HandlerBody::known([])),
-            handler(
-                catch,
-                HandlerKind::Filter {
-                    filter_block: filter,
-                },
-                HandlerBody::Unknown,
-            ),
-            handler(
-                cleanup,
-                HandlerKind::Finally,
-                HandlerBody::known([cleanup, tail]),
-            ),
-            handler(cleanup, HandlerKind::Fault, HandlerBody::Unknown),
-        ],
-        None,
-    ));
-    let inner = cfg.add_region(region(
-        &[loop_header],
-        vec![handler(
-            exit,
-            HandlerKind::Catch,
-            HandlerBody::known([exit]),
-        )],
-        Some(outer),
-    ));
-    let vanished = cfg.add_region(region(&[empty], Vec::new(), None));
+    let outer = cfg
+        .add_region(region(
+            &[entry, loop_header, empty],
+            vec![
+                handler(catch, HandlerKind::Catch, HandlerBody::known([catch])),
+                handler(catch, HandlerKind::CatchAll, HandlerBody::known([])),
+                handler(
+                    catch,
+                    HandlerKind::Filter {
+                        filter_block: filter,
+                    },
+                    HandlerBody::Unknown,
+                ),
+                handler(
+                    cleanup,
+                    HandlerKind::Finally,
+                    HandlerBody::known([cleanup, tail]),
+                ),
+                handler(cleanup, HandlerKind::Fault, HandlerBody::Unknown),
+            ],
+            None,
+        ))
+        .unwrap();
+    let inner = cfg
+        .add_region(region(
+            &[loop_header],
+            vec![handler(
+                exit,
+                HandlerKind::Catch,
+                HandlerBody::known([exit]),
+            )],
+            Some(outer),
+        ))
+        .unwrap();
+    let vanished = cfg.add_region(region(&[empty], Vec::new(), None)).unwrap();
     cfg.remove_region(vanished);
-    cfg.add_region(region(&[empty], Vec::new(), Some(inner)));
+    cfg.add_region(region(&[empty], Vec::new(), Some(inner)))
+        .unwrap();
     outer
 }
 
-/// The `finally` handler of `outer` resumes at the cleanup block and records
+/// The `finally` handler of `outer` exits from the cleanup block and records
 /// a normal and a return continuation.
 fn add_rich_continuations(cfg: &mut Cfg<Line>, blocks: &RichBlocks, outer: RegionId) {
     let RichBlocks {
@@ -247,21 +255,23 @@ fn add_rich_continuations(cfg: &mut Cfg<Line>, blocks: &RichBlocks, outer: Regio
         ..
     } = *blocks;
     let finally = HandlerRef::new(outer, 3);
-    cfg.set_cleanup_resume(finally, cleanup);
+    cfg.set_cleanup_exit(finally, cleanup).unwrap();
     cfg.add_continuation(
         finally,
         Continuation {
             reason: CompletionReason::Normal,
-            resume: tail,
+            target: tail,
         },
-    );
+    )
+    .unwrap();
     cfg.add_continuation(
         finally,
         Continuation {
             reason: CompletionReason::Return,
-            resume: exit,
+            target: exit,
         },
-    );
+    )
+    .unwrap();
 }
 
 /// A CFG that uses every feature the output formats carry: instructions that

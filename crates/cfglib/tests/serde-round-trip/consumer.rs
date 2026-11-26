@@ -53,7 +53,6 @@ impl Route {
 
 pub fn region(protected: &[BlockId], handlers: Vec<Handler>, parent: Option<RegionId>) -> Region {
     Region {
-        id: RegionId::from_raw(0),
         protected_blocks: protected.iter().copied().collect(),
         handlers,
         parent,
@@ -162,23 +161,25 @@ fn add_regions(cfg: &mut Cfg<Op, Route>, blocks: &BaseBlocks) -> RegionId {
         cleanup,
         ..
     } = *blocks;
-    let outer = cfg.add_region(region(
-        &[header, body],
-        vec![
-            handler(catch, HandlerKind::Catch, HandlerBody::known([catch])),
-            handler(catch, HandlerKind::CatchAll, HandlerBody::known([])),
-            handler(
-                catch,
-                HandlerKind::Filter {
-                    filter_block: filter,
-                },
-                HandlerBody::Unknown,
-            ),
-            handler(cleanup, HandlerKind::Finally, HandlerBody::known([cleanup])),
-            handler(cleanup, HandlerKind::Fault, HandlerBody::Unknown),
-        ],
-        None,
-    ));
+    let outer = cfg
+        .add_region(region(
+            &[header, body],
+            vec![
+                handler(catch, HandlerKind::Catch, HandlerBody::known([catch])),
+                handler(catch, HandlerKind::CatchAll, HandlerBody::known([])),
+                handler(
+                    catch,
+                    HandlerKind::Filter {
+                        filter_block: filter,
+                    },
+                    HandlerBody::Unknown,
+                ),
+                handler(cleanup, HandlerKind::Finally, HandlerBody::known([cleanup])),
+                handler(cleanup, HandlerKind::Fault, HandlerBody::Unknown),
+            ],
+            None,
+        ))
+        .unwrap();
     cfg.add_region(region(
         &[body],
         vec![handler(
@@ -187,8 +188,9 @@ fn add_regions(cfg: &mut Cfg<Op, Route>, blocks: &BaseBlocks) -> RegionId {
             HandlerBody::known([catch]),
         )],
         Some(outer),
-    ));
-    let vanished = cfg.add_region(region(&[header], Vec::new(), None));
+    ))
+    .unwrap();
+    let vanished = cfg.add_region(region(&[header], Vec::new(), None)).unwrap();
     cfg.remove_region(vanished);
     outer
 }
@@ -203,24 +205,26 @@ fn record_cleanups(cfg: &mut Cfg<Op, Route>, blocks: &BaseBlocks, outer: RegionI
         ..
     } = *blocks;
     let finally = HandlerRef::new(outer, 3);
-    cfg.set_cleanup_resume(finally, cleanup);
-    for (reason, resume) in [
+    cfg.set_cleanup_exit(finally, cleanup).unwrap();
+    for (reason, target) in [
         (CompletionReason::Normal, after),
         (CompletionReason::Transfer, header),
         (CompletionReason::Return, after),
         (CompletionReason::Unwind, catch),
     ] {
-        cfg.add_continuation(finally, Continuation { reason, resume });
+        cfg.add_continuation(finally, Continuation { reason, target })
+            .unwrap();
     }
     let fault = HandlerRef::new(outer, 4);
-    cfg.set_cleanup_resume(fault, cleanup);
+    cfg.set_cleanup_exit(fault, cleanup).unwrap();
     cfg.add_continuation(
         fault,
         Continuation {
             reason: CompletionReason::Unwind,
-            resume: catch,
+            target: catch,
         },
-    );
+    )
+    .unwrap();
 }
 
 /// The delta after the compacted base: a new block with a weighted edge, a removed block and
@@ -279,25 +283,28 @@ pub fn small_cfg(record_cleanup: bool) -> Cfg<String> {
     cfg.block_mut(entry).push("x = f()".to_owned());
     cfg.block_mut(handler_block).set_label("cleanup");
     cfg.add_edge(entry, handler_block, EdgeKind::ExceptionUnwind);
-    let region = cfg.add_region(region(
-        &[entry],
-        vec![handler(
-            handler_block,
-            HandlerKind::Finally,
-            HandlerBody::known([handler_block]),
-        )],
-        None,
-    ));
+    let region = cfg
+        .add_region(region(
+            &[entry],
+            vec![handler(
+                handler_block,
+                HandlerKind::Finally,
+                HandlerBody::known([handler_block]),
+            )],
+            None,
+        ))
+        .unwrap();
     if record_cleanup {
         let finally = HandlerRef::new(region, 0);
-        cfg.set_cleanup_resume(finally, handler_block);
+        cfg.set_cleanup_exit(finally, handler_block).unwrap();
         cfg.add_continuation(
             finally,
             Continuation {
                 reason: CompletionReason::Normal,
-                resume: handler_block,
+                target: handler_block,
             },
-        );
+        )
+        .unwrap();
     }
     cfg
 }

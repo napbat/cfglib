@@ -33,7 +33,7 @@ pub(super) fn owned_blocks<I, E>(cfg: &Cfg<I, E>) -> Vec<BlockId> {
 fn allowed_blocks<I, E>(cfg: &Cfg<I, E>, report: &LiftReport) -> Vec<BlockId> {
     let mut roots = handler_owned(cfg);
     roots.extend(report.gotos.iter().map(|goto| goto.target));
-    for region in cfg.regions() {
+    for (_, region) in cfg.regions() {
         let inside: BTreeSet<BlockId> = region
             .protected_blocks
             .iter()
@@ -75,22 +75,16 @@ pub(super) fn reach<I, E>(cfg: &Cfg<I, E>, mut stack: Vec<BlockId>) -> Vec<Block
 
 /// The handler entries, filter funclets, and known extent blocks.
 fn handler_owned<I, E>(cfg: &Cfg<I, E>) -> Vec<BlockId> {
-    let mut owned = Vec::new();
-    for handler in cfg.regions().iter().flat_map(|region| &region.handlers) {
-        owned.push(handler.entry);
-        if let crate::HandlerKind::Filter { filter_block } = handler.kind {
-            owned.push(filter_block);
-        }
-        owned.extend(handler.body.blocks().into_iter().flatten().copied());
-    }
-    owned
+    cfg.handlers()
+        .flat_map(|(_, handler)| handler.blocks())
+        .collect()
 }
 
 /// The block sets a handler owns: its entry with its known extent, and its
 /// filter funclet by itself.
 pub(super) fn handler_sets<I, E>(cfg: &Cfg<I, E>) -> Vec<BTreeSet<BlockId>> {
     let mut sets = Vec::new();
-    for handler in cfg.regions().iter().flat_map(|region| &region.handlers) {
+    for (_, handler) in cfg.handlers() {
         let mut owned: BTreeSet<BlockId> = [handler.entry].into_iter().collect();
         owned.extend(handler.body.blocks().into_iter().flatten().copied());
         sets.push(owned);
@@ -139,7 +133,7 @@ pub(super) fn describe<I, E>(cfg: &Cfg<I, E>) -> alloc::string::String {
             );
         }
     }
-    for region in cfg.regions() {
+    for (_, region) in cfg.regions() {
         let _ = write!(text, "region guarding {:?}: ", region.protected_blocks);
         for handler in &region.handlers {
             let _ = write!(

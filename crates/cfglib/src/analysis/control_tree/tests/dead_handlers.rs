@@ -62,7 +62,6 @@ fn pad_graph(looped: bool, extent: &[usize], orphan: bool) -> Cfg<MockInst> {
         cfg.add_edge(b[7], b[5], Fallthrough);
     }
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [b[2]].into_iter().collect(),
         handlers: vec![Handler {
             entry: b[4],
@@ -70,7 +69,8 @@ fn pad_graph(looped: bool, extent: &[usize], orphan: bool) -> Cfg<MockInst> {
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
     cfg
 }
 
@@ -148,7 +148,6 @@ fn a_block_only_a_known_extent_claims_is_emitted() {
     cfg.add_edge(b[1], b[2], Fallthrough);
     cfg.add_edge(b[3], b[2], Fallthrough);
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [b[1]].into_iter().collect(),
         handlers: vec![Handler {
             entry: b[3],
@@ -156,7 +155,8 @@ fn a_block_only_a_known_extent_claims_is_emitted() {
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
     let (tree, report) = ControlTree::compute_with_report(&cfg);
     check(&cfg, &tree, &report, "orphan in a known extent");
     assert_eq!(owned_blocks(&cfg), [b[0], b[1], b[2], b[3], b[5]]);
@@ -187,7 +187,6 @@ fn one_dead_pad_named_as_entry_and_filter_is_one_root() {
     cfg.add_edge(b[3], b[2], ConditionalFalse);
     cfg.add_edge(b[4], b[2], Fallthrough);
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [b[2]].into_iter().collect(),
         handlers: vec![
             Handler {
@@ -202,7 +201,8 @@ fn one_dead_pad_named_as_entry_and_filter_is_one_root() {
             },
         ],
         parent: None,
-    });
+    })
+    .unwrap();
     let (tree, report) = ControlTree::compute_with_report(&cfg);
     check(&cfg, &tree, &report, "pad named twice");
 }
@@ -352,11 +352,11 @@ fn from_text(text: &str) -> Cfg<MockInst> {
                     })
                     .collect();
                 cfg.add_region(Region {
-                    id: RegionId::from_raw(fields[1].parse().unwrap()),
                     protected_blocks: numbers(fields[3], &ids).into_iter().collect(),
                     handlers,
                     parent,
-                });
+                })
+                .unwrap();
             }
             other => panic!("unknown line {other}"),
         }
@@ -398,7 +398,6 @@ fn with_region(
         cfg.add_edge(ids[protected], ids[handler], EdgeKind::ExceptionHandler);
     }
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [ids[protected]].into_iter().collect(),
         handlers: vec![Handler {
             entry: ids[handler],
@@ -410,7 +409,8 @@ fn with_region(
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
 }
 
 #[test]
@@ -548,14 +548,13 @@ fn random_graph_with_regions(random: &mut Rng, empty_percent: usize) -> Cfg<DfIn
                 Handler { entry, body, kind }
             })
             .collect();
-        let parent =
-            (!cfg.regions().is_empty() && random.chance(30)).then(|| RegionId::from_raw(0));
+        let parent = (cfg.region_count() > 0 && random.chance(30)).then(|| RegionId::from_raw(0));
         cfg.add_region(Region {
-            id: RegionId::from_raw(0),
             protected_blocks: protected,
             handlers,
             parent,
-        });
+        })
+        .unwrap();
     }
     isolate_handlers(&mut cfg);
     cfg

@@ -3,7 +3,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use super::HandlerRef;
+use super::{HandlerRef, RegionId};
 
 /// Consumer-owned metadata for handlers, keyed by [`HandlerRef`].
 ///
@@ -18,9 +18,7 @@ use super::HandlerRef;
 /// DATA rather than a library type, and it is orthogonal to
 /// [`HandlerKind`](super::HandlerKind): any handler may carry one. The same
 /// table also carries a CLR catch-type token without forcing that token's type
-/// into [`Handler`](super::Handler) or [`Cfg`](crate::Cfg). Use the
-/// [`HandlerFilters`] and [`HandlerTypes`] aliases when the role should be
-/// explicit at a call site.
+/// into [`Handler`](super::Handler) or [`Cfg`](crate::Cfg).
 ///
 /// It is a **side table** and not a field or a type parameter on
 /// [`Handler`](super::Handler) on purpose. A `Handler<F>` would force
@@ -39,12 +37,12 @@ use super::HandlerRef;
 /// # Examples
 ///
 /// ```
-/// use cfglib::{HandlerFilters, HandlerRef, RegionId};
+/// use cfglib::{HandlerMetadata, HandlerRef, RegionId};
 ///
 /// // `catch (IOException e) when (e.Retryable)` — a plain `Catch` handler
 /// // whose predicate the frontend identifies by its own expression handle.
 /// let handler = HandlerRef::new(RegionId::from_raw(0), 0);
-/// let mut filters = HandlerFilters::new();
+/// let mut filters = HandlerMetadata::new();
 /// assert!(filters.set(handler, "expr#17").is_none());
 ///
 /// assert_eq!(filters.metadata(handler), Some(&"expr#17"));
@@ -83,6 +81,19 @@ impl<M> HandlerMetadata<M> {
                 self.entries.insert(at, (handler, metadata));
                 None
             }
+        }
+    }
+
+    /// Attach one payload to each listed handler of `region`, keyed by the
+    /// handler's position in [`Region::handlers`](super::Region::handlers),
+    /// replacing any payload a handler already carries.
+    ///
+    /// This is the step a frontend takes right after
+    /// [`Cfg::add_region`](crate::Cfg::add_region) to keep, say, the catch-type
+    /// token of each typed CLR `catch` clause.
+    pub fn set_all(&mut self, region: RegionId, entries: impl IntoIterator<Item = (usize, M)>) {
+        for (index, metadata) in entries {
+            self.set(HandlerRef::new(region, index), metadata);
         }
     }
 
@@ -130,6 +141,33 @@ impl<M> HandlerMetadata<M> {
     pub fn iter(&self) -> impl Iterator<Item = (HandlerRef, &M)> {
         self.entries.iter().map(|(key, metadata)| (*key, metadata))
     }
+
+    /// Iterate mutably over every payload, in handler order.
+    pub(crate) fn values_mut(&mut self) -> impl Iterator<Item = &mut M> {
+        self.entries.iter_mut().map(|(_, metadata)| metadata)
+    }
+
+    /// The metadata attached to `handler`, inserted from `make` when there is
+    /// none yet.
+    pub(crate) fn metadata_or_insert_with(
+        &mut self,
+        handler: HandlerRef,
+        make: impl FnOnce() -> M,
+    ) -> &mut M {
+        let at = match self.entries.binary_search_by_key(&handler, |(key, _)| *key) {
+            Ok(at) => at,
+            Err(at) => {
+                self.entries.insert(at, (handler, make()));
+                at
+            }
+        };
+        &mut self.entries[at].1
+    }
+
+    /// Keep only the payloads whose handler `keep` accepts.
+    pub(crate) fn retain(&mut self, mut keep: impl FnMut(HandlerRef) -> bool) {
+        self.entries.retain(|(key, _)| keep(*key));
+    }
 }
 
 impl<M> Default for HandlerMetadata<M> {
@@ -137,12 +175,6 @@ impl<M> Default for HandlerMetadata<M> {
         Self::new()
     }
 }
-
-/// Handler metadata used as a filter-predicate side table.
-pub type HandlerFilters<F> = HandlerMetadata<F>;
-
-/// Handler metadata used as a caught-type side table.
-pub type HandlerTypes<T> = HandlerMetadata<T>;
 
 /// The serialized form of a table and the order a document must keep true
 /// before it becomes one.
@@ -200,7 +232,6 @@ mod tests {
     use alloc::vec::Vec;
 
     use super::*;
-    use crate::region::RegionId;
 
     fn handler(region: u32, index: usize) -> HandlerRef {
         HandlerRef::new(RegionId::from_raw(region), index)
@@ -213,7 +244,7 @@ mod tests {
         let catch = handler(0, 0);
         let finally = handler(0, 1);
 
-        let mut filters: HandlerFilters<&str> = HandlerFilters::new();
+        let mut filters: HandlerMetadata<&str> = HandlerMetadata::new();
         assert!(filters.is_empty());
         assert!(filters.set(finally, "unreachable").is_none());
         assert!(filters.set(catch, "e.Retryable").is_none());
@@ -238,8 +269,25 @@ mod tests {
         assert_eq!(filters.remove(finally), None);
         assert_eq!(filters.len(), 1);
         assert_eq!(
-            HandlerFilters::<u32>::default(),
-            HandlerFilters::<u32>::new()
+            HandlerMetadata::<u32>::default(),
+            HandlerMetadata::<u32>::new()
+        );
+    }
+
+    #[test]
+    fn set_all_keys_each_payload_by_its_handler_position() {
+        let region = RegionId::from_raw(3);
+        let mut types = HandlerMetadata::new();
+        types.set(handler(3, 2), "stale");
+        types.set_all(region, [(2, "IOException"), (0, "WebException")]);
+
+        assert_eq!(
+            types.iter().collect::<Vec<_>>(),
+            vec![
+                (handler(3, 0), &"WebException"),
+                (handler(3, 2), &"IOException"),
+            ],
+            "listed handlers carry their payload, replacing an older one"
         );
     }
 
@@ -247,7 +295,7 @@ mod tests {
     /// is rewritten by `arrange`.
     #[cfg(feature = "serde")]
     fn document_with(arrange: impl FnOnce(&mut Vec<serde_json::Value>)) -> serde_json::Value {
-        let mut table = HandlerTypes::new();
+        let mut table = HandlerMetadata::new();
         for region in [2, 0, 1] {
             table.set(handler(region, 0), region);
         }
@@ -264,7 +312,7 @@ mod tests {
     #[test]
     fn a_serialized_table_reads_back_equal() {
         let document = document_with(|_| {});
-        let table: HandlerTypes<u32> = serde_json::from_value(document).expect("sorted entries");
+        let table: HandlerMetadata<u32> = serde_json::from_value(document).expect("sorted entries");
         assert_eq!(table.len(), 3);
         for region in 0..3 {
             assert_eq!(table.metadata(handler(region, 0)), Some(&region));
@@ -276,7 +324,7 @@ mod tests {
     fn entries_out_of_handler_order_are_rejected_at_decode() {
         let reversed = document_with(|entries| entries.reverse());
         assert!(
-            serde_json::from_value::<HandlerTypes<u32>>(reversed).is_err(),
+            serde_json::from_value::<HandlerMetadata<u32>>(reversed).is_err(),
             "a table whose lookups would miss its own keys must not load"
         );
     }
@@ -289,7 +337,7 @@ mod tests {
             entries.insert(1, first);
         });
         assert!(
-            serde_json::from_value::<HandlerTypes<u32>>(repeated).is_err(),
+            serde_json::from_value::<HandlerMetadata<u32>>(repeated).is_err(),
             "two payloads for one handler must not load"
         );
     }

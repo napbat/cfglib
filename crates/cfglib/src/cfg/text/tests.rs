@@ -57,7 +57,6 @@ fn protected_cfg() -> Cfg<Line> {
     cfg.add_edge(header, header, EdgeKind::Back);
     cfg.add_edge(header, handler, EdgeKind::ExceptionUnwind);
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [cfg.entry(), header].into_iter().collect(),
         handlers: alloc::vec![
             Handler {
@@ -74,7 +73,8 @@ fn protected_cfg() -> Cfg<Line> {
             },
         ],
         parent: None,
-    });
+    })
+    .unwrap();
     cfg
 }
 
@@ -120,7 +120,7 @@ fn parsing_reproduces_identity_topology_labels_and_regions() {
             .collect::<alloc::vec::Vec<_>>()
     };
     assert_eq!(edges(&parsed), edges(&original));
-    assert_eq!(parsed.regions(), original.regions());
+    assert!(parsed.regions().eq(original.regions()));
 }
 
 #[test]
@@ -193,7 +193,6 @@ fn a_region_that_still_names_a_removed_block_is_written_without_it() {
     let landing = cfg.new_block();
     let stray = cfg.new_block();
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [cfg.entry(), body, doomed].into_iter().collect(),
         handlers: alloc::vec![Handler {
             entry: landing,
@@ -201,7 +200,8 @@ fn a_region_that_still_names_a_removed_block_is_written_without_it() {
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
     cfg.remove_block(doomed);
     cfg.remove_block(stray);
 
@@ -210,7 +210,7 @@ fn a_region_that_still_names_a_removed_block_is_written_without_it() {
 
     let mut compacted = cfg.clone();
     compacted.compact(NodeOrder::Insertion);
-    let region = |cfg: &Cfg<Line>| cfg.regions()[0].clone();
+    let region = |cfg: &Cfg<Line>| cfg.region(RegionId::from_raw(0)).clone();
     // Compaction renumbers; the text form keeps the numbers, holes and all.
     assert_eq!(
         region(&parsed).protected_blocks,

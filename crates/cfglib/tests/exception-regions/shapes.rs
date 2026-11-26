@@ -108,11 +108,11 @@ pub fn handler(entry: BlockId, kind: HandlerKind, body: &[BlockId]) -> Handler {
 /// Register a region protecting `protected`.
 pub fn protect(cfg: &mut Cfg<Stmt>, protected: &[BlockId], handlers: Vec<Handler>) -> RegionId {
     cfg.add_region(Region {
-        id: RegionId::from_raw(0), // overwritten by `add_region`
         protected_blocks: protected.iter().copied().collect(),
         handlers,
         parent: None,
     })
+    .unwrap()
 }
 
 /// `setup(); try { risky() } catch { <pad> }; return`: the body falls through

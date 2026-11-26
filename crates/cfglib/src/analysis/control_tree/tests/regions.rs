@@ -43,16 +43,17 @@ fn compute_try_catch_produces_try_node() {
 
     let mut protected = BTreeSet::new();
     protected.insert(try_body);
-    let region = cfg.add_region(Region {
-        id: RegionId::from_raw(0),
-        protected_blocks: protected,
-        handlers: vec![Handler {
-            entry: handler_block,
-            body: HandlerBody::known([handler_block]),
-            kind: HandlerKind::Catch,
-        }],
-        parent: None,
-    });
+    let region = cfg
+        .add_region(Region {
+            protected_blocks: protected,
+            handlers: vec![Handler {
+                entry: handler_block,
+                body: HandlerBody::known([handler_block]),
+                kind: HandlerKind::Catch,
+            }],
+            parent: None,
+        })
+        .unwrap();
 
     let tree = ControlTree::compute(&cfg);
     let found = has_node_kind(&tree, |n| matches!(n, ControlNode::TryCatch { .. }));
@@ -95,7 +96,6 @@ fn compute_does_not_invent_structure_for_unknown_handler_body() {
     cfg.add_edge(try_body, handler, EdgeKind::ExceptionHandler);
     cfg.add_edge(handler, after, EdgeKind::Fallthrough);
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [try_body].into_iter().collect(),
         handlers: vec![Handler {
             entry: handler,
@@ -103,7 +103,8 @@ fn compute_does_not_invent_structure_for_unknown_handler_body() {
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
 
     let (tree, report) = ControlTree::compute_with_report(&cfg);
     assert!(
@@ -150,7 +151,6 @@ fn compute_preserves_fault_and_filter_handler_kinds() {
     cfg.add_edge(try_body, filtered_handler, EdgeKind::ExceptionHandler);
 
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [try_body].into_iter().collect::<BTreeSet<_>>(),
         handlers: vec![
             Handler {
@@ -167,7 +167,8 @@ fn compute_preserves_fault_and_filter_handler_kinds() {
             },
         ],
         parent: None,
-    });
+    })
+    .unwrap();
 
     let tree = ControlTree::compute(&cfg);
     let kinds: Vec<_> = find_try_handlers(&tree)
@@ -214,18 +215,18 @@ fn inner_unknown_region_does_not_suppress_an_outer_known_one() {
     cfg.add_edge(b0, unknown_handler, EdgeKind::ExceptionHandler);
     cfg.add_edge(unknown_handler, after, EdgeKind::Fallthrough);
 
-    let outer_id = cfg.add_region(Region {
-        id: RegionId::from_raw(0),
-        protected_blocks: [b0, b1].into_iter().collect(),
-        handlers: vec![Handler {
-            entry: known_handler,
-            body: HandlerBody::known([known_handler]),
-            kind: HandlerKind::Catch,
-        }],
-        parent: None,
-    });
+    let outer_id = cfg
+        .add_region(Region {
+            protected_blocks: [b0, b1].into_iter().collect(),
+            handlers: vec![Handler {
+                entry: known_handler,
+                body: HandlerBody::known([known_handler]),
+                kind: HandlerKind::Catch,
+            }],
+            parent: None,
+        })
+        .unwrap();
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [b0].into_iter().collect(),
         handlers: vec![Handler {
             entry: unknown_handler,
@@ -233,7 +234,8 @@ fn inner_unknown_region_does_not_suppress_an_outer_known_one() {
             kind: HandlerKind::Catch,
         }],
         parent: Some(outer_id),
-    });
+    })
+    .unwrap();
 
     let tree = ControlTree::compute(&cfg);
     assert!(
@@ -269,7 +271,6 @@ fn conditional_leaving_a_region_records_the_exit() {
     cfg.add_edge(t0, handler, EdgeKind::ExceptionHandler);
 
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [t0, t1].into_iter().collect(),
         handlers: vec![Handler {
             entry: handler,
@@ -277,7 +278,8 @@ fn conditional_leaving_a_region_records_the_exit() {
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
 
     let tree = ControlTree::compute(&cfg);
     for block in [exit_true, exit_false] {
@@ -311,7 +313,6 @@ fn switch_case_leaving_a_region_ends_at_its_continuation() {
     cfg.add_edge(t0, handler, EdgeKind::ExceptionHandler);
 
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [t0, selector, case_in].into_iter().collect(),
         handlers: vec![Handler {
             entry: handler,
@@ -319,7 +320,8 @@ fn switch_case_leaving_a_region_ends_at_its_continuation() {
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
 
     let (tree, report) = ControlTree::compute_with_report(&cfg);
     let case_count = tree.preorder().find_map(|id| match *tree.node(id) {
@@ -354,7 +356,6 @@ fn handler_tail_beyond_the_declared_extent_is_preserved() {
     cfg.add_edge(handler, handler_tail, EdgeKind::Fallthrough);
 
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [try_body].into_iter().collect(),
         handlers: vec![Handler {
             entry: handler,
@@ -362,7 +363,8 @@ fn handler_tail_beyond_the_declared_extent_is_preserved() {
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
 
     let (tree, report) = ControlTree::compute_with_report(&cfg);
     let handlers = find_try_handlers(&tree).expect("region structures");
@@ -401,7 +403,6 @@ fn linear_chain_leaving_a_region_records_the_exit() {
     cfg.add_edge(handler, continuation, EdgeKind::Fallthrough);
 
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [t0, t1].into_iter().collect(),
         handlers: vec![Handler {
             entry: handler,
@@ -409,7 +410,8 @@ fn linear_chain_leaving_a_region_records_the_exit() {
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
 
     let tree = ControlTree::compute(&cfg);
     assert!(
@@ -438,18 +440,18 @@ fn nested_region_respects_the_enclosing_extent() {
     cfg.add_edge(h1, escape, EdgeKind::Fallthrough);
     cfg.add_edge(h1, nested_handler, EdgeKind::ExceptionHandler);
 
-    let outer_id = cfg.add_region(Region {
-        id: RegionId::from_raw(0),
-        protected_blocks: [try_body].into_iter().collect(),
-        handlers: vec![Handler {
-            entry: h0,
-            body: HandlerBody::known([h0, h1]),
-            kind: HandlerKind::Catch,
-        }],
-        parent: None,
-    });
+    let outer_id = cfg
+        .add_region(Region {
+            protected_blocks: [try_body].into_iter().collect(),
+            handlers: vec![Handler {
+                entry: h0,
+                body: HandlerBody::known([h0, h1]),
+                kind: HandlerKind::Catch,
+            }],
+            parent: None,
+        })
+        .unwrap();
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [h1, escape].into_iter().collect(),
         handlers: vec![Handler {
             entry: nested_handler,
@@ -457,7 +459,8 @@ fn nested_region_respects_the_enclosing_extent() {
             kind: HandlerKind::Catch,
         }],
         parent: Some(outer_id),
-    });
+    })
+    .unwrap();
 
     let tree = ControlTree::compute(&cfg);
     let handlers = find_try_handlers(&tree).expect("outer region structures");
@@ -492,7 +495,6 @@ fn region_anchor_follows_flow_order_not_block_ids() {
     cfg.add_edge(handler, after, EdgeKind::Fallthrough);
 
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [interior, flow_entry].into_iter().collect(),
         handlers: vec![Handler {
             entry: handler,
@@ -500,7 +502,8 @@ fn region_anchor_follows_flow_order_not_block_ids() {
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
 
     let tree = ControlTree::compute(&cfg);
     assert!(
@@ -530,7 +533,6 @@ fn multiple_finally_handlers_concatenate() {
     cfg.add_edge(try_body, second_finally, EdgeKind::ExceptionUnwind);
 
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [try_body].into_iter().collect(),
         handlers: vec![
             Handler {
@@ -545,7 +547,8 @@ fn multiple_finally_handlers_concatenate() {
             },
         ],
         parent: None,
-    });
+    })
+    .unwrap();
 
     let tree = ControlTree::compute(&cfg);
     let (_, handlers, finally) = find_try_catch(&tree).expect("expected a TryCatch");
@@ -583,7 +586,6 @@ fn filter_funclet_code_is_emitted() {
     cfg.add_edge(try_body, handler, EdgeKind::ExceptionHandler);
 
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [try_body].into_iter().collect(),
         handlers: vec![Handler {
             entry: handler,
@@ -591,7 +593,8 @@ fn filter_funclet_code_is_emitted() {
             kind: HandlerKind::Filter { filter_block },
         }],
         parent: None,
-    });
+    })
+    .unwrap();
 
     let (tree, report) = ControlTree::compute_with_report(&cfg);
     assert!(
@@ -626,7 +629,6 @@ fn a_branch_inside_a_filter_funclet_merges_like_reachable_code() {
     cfg.add_edge(arm_a, join, EdgeKind::Fallthrough);
     cfg.add_edge(arm_b, join, EdgeKind::Fallthrough);
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [try_body].into_iter().collect(),
         handlers: vec![Handler {
             entry: handler,
@@ -636,7 +638,8 @@ fn a_branch_inside_a_filter_funclet_merges_like_reachable_code() {
             },
         }],
         parent: None,
-    });
+    })
+    .unwrap();
 
     let (tree, report) = ControlTree::compute_with_report(&cfg);
     assert_eq!(report.swept_blocks, [filter]);
@@ -666,7 +669,6 @@ fn a_known_body_omitting_its_entry_is_a_frontend_bug() {
     cfg.add_edge(try_body, handler, EdgeKind::ExceptionHandler);
 
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [try_body].into_iter().collect(),
         handlers: vec![Handler {
             entry: handler,
@@ -674,7 +676,8 @@ fn a_known_body_omitting_its_entry_is_a_frontend_bug() {
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
 
     let _ = ControlTree::compute(&cfg);
 }
@@ -701,7 +704,6 @@ fn try_anchored_at_a_conditional_keeps_the_branch_structure() {
     cfg.add_edge(branch, handler, EdgeKind::ExceptionHandler);
 
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [branch, then_arm, else_arm, merge].into_iter().collect(),
         handlers: vec![Handler {
             entry: handler,
@@ -709,7 +711,8 @@ fn try_anchored_at_a_conditional_keeps_the_branch_structure() {
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
 
     let tree = ControlTree::compute(&cfg);
     let (try_body, _, _) = find_try_catch(&tree).expect("expected a TryCatch");
@@ -746,7 +749,6 @@ fn try_anchored_at_a_switch_selector_keeps_the_dispatch() {
     cfg.add_edge(selector, handler, EdgeKind::ExceptionHandler);
 
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [selector, case_a, case_b].into_iter().collect(),
         handlers: vec![Handler {
             entry: handler,
@@ -754,7 +756,8 @@ fn try_anchored_at_a_switch_selector_keeps_the_dispatch() {
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
 
     let tree = ControlTree::compute(&cfg);
     let (try_body, _, _) = find_try_catch(&tree).expect("expected a TryCatch");
@@ -794,7 +797,6 @@ fn try_anchored_at_a_loop_header_keeps_the_loop() {
     cfg.add_edge(header, handler, EdgeKind::ExceptionHandler);
 
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [header, latch].into_iter().collect(),
         handlers: vec![Handler {
             entry: handler,
@@ -802,7 +804,8 @@ fn try_anchored_at_a_loop_header_keeps_the_loop() {
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
 
     let tree = ControlTree::compute(&cfg);
     let (try_body, _, _) = find_try_catch(&tree).expect("expected a TryCatch");

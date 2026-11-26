@@ -1,8 +1,8 @@
 //! The text form of a region-bearing graph, and `verify` over region shapes.
 
 use cfglib::{
-    BlockId, Cfg, EdgeKind, HandlerBody, HandlerKind, HandlerRef, Region, RegionId,
-    SemanticValidator, parse_cfg_text, verify, verify_with,
+    BlockId, Cfg, EdgeKind, HandlerBody, HandlerKind, HandlerRef, Region, SemanticValidator,
+    parse_cfg_text, verify, verify_with,
 };
 
 use crate::golden::assert_golden;
@@ -51,7 +51,7 @@ fn kitchen_sink() -> (Cfg<Stmt>, BlockId) {
         &[inner],
         vec![handler(cleanup, HandlerKind::Finally, &[cleanup])],
     );
-    cfg.region_mut(nested).expect("added").parent = Some(outer);
+    cfg.region_mut(nested).parent = Some(outer);
     (cfg, gone)
 }
 
@@ -75,7 +75,10 @@ fn a_region_bearing_graph_reads_back_equal_and_prints_the_same_text() {
     let text = cfg.to_text();
     let parsed = parse(&text);
 
-    assert_eq!(parsed.regions(), cfg.regions());
+    assert_eq!(
+        parsed.regions().collect::<Vec<_>>(),
+        cfg.regions().collect::<Vec<_>>()
+    );
     assert_eq!(parsed.entry(), cfg.entry());
     for block in cfg.block_ids() {
         assert_eq!(parsed.block(block), cfg.block(block), "{block}");
@@ -140,7 +143,6 @@ fn a_try_catch_prints_as_the_documented_text_form() {
     fixture
         .cfg
         .region_mut(fixture.region)
-        .expect("exists")
         .handlers
         .push(handler(end, HandlerKind::Finally, &[end]));
 
@@ -156,19 +158,25 @@ fn cleanup_records_are_not_part_of_the_text_projection() {
     // that needs the routes keeps them.
     let mut fixture = try_catch(&["log(e)"]);
     let handler = HandlerRef::new(fixture.region, 0);
-    fixture.cfg.add_continuation(
-        handler,
-        cfglib::Continuation {
-            reason: cfglib::CompletionReason::Normal,
-            resume: fixture.join,
-        },
-    );
+    fixture
+        .cfg
+        .add_continuation(
+            handler,
+            cfglib::Continuation {
+                reason: cfglib::CompletionReason::Normal,
+                target: fixture.join,
+            },
+        )
+        .unwrap();
 
     let parsed = parse(&fixture.cfg.to_text());
 
     assert_eq!(fixture.cfg.cleanups().len(), 1);
     assert_eq!(parsed.cleanups().len(), 0);
-    assert_eq!(parsed.regions(), fixture.cfg.regions());
+    assert_eq!(
+        parsed.regions().collect::<Vec<_>>(),
+        fixture.cfg.regions().collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -195,10 +203,10 @@ impl SemanticValidator<Stmt, ()> for HandlerEntriesAreLive {
     type Error = (HandlerRef, BlockId);
 
     fn finish(&self, cfg: &Cfg<Stmt>, errors: &mut Vec<Self::Error>) {
-        for region in cfg.regions() {
+        for (id, region) in cfg.regions() {
             for (index, handler) in region.handlers.iter().enumerate() {
                 if !cfg.contains_block(handler.entry) {
-                    errors.push((HandlerRef::new(region.id, index), handler.entry));
+                    errors.push((HandlerRef::new(id, index), handler.entry));
                 }
             }
         }
@@ -227,14 +235,17 @@ fn a_region_may_protect_blocks_with_no_handler_or_handlers_with_unknown_bodies()
     cfg.add_edge(cfg.entry(), body, EdgeKind::Fallthrough);
     cfg.add_edge(body, pad, EdgeKind::ExceptionUnwind);
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [body].into_iter().collect(),
         handlers: vec![unknown_catch(pad), catch(pad)],
         parent: None,
-    });
+    })
+    .unwrap();
 
     let parsed = parse(&cfg.to_text());
 
-    assert_eq!(parsed.regions(), cfg.regions());
+    assert_eq!(
+        parsed.regions().collect::<Vec<_>>(),
+        cfg.regions().collect::<Vec<_>>()
+    );
     assert!(verify(&cfg).is_ok());
 }

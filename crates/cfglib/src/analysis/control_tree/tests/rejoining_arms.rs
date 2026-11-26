@@ -9,18 +9,13 @@ use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
 use crate::flow::FlowEffect;
-use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
+use crate::region::{Handler, HandlerBody, HandlerKind, Region};
 use crate::test_util::{MockInst, ff};
 
 /// A region over `protected` with one handler of `kind` at `entry` that owns
 /// `body`.
-fn region(
-    id: u32,
-    protected: &[BlockId],
-    handlers: &[(BlockId, HandlerKind, &[BlockId])],
-) -> Region {
+fn region(protected: &[BlockId], handlers: &[(BlockId, HandlerKind, &[BlockId])]) -> Region {
     Region {
-        id: RegionId::from_raw(id),
         protected_blocks: protected.iter().copied().collect(),
         handlers: handlers
             .iter()
@@ -83,14 +78,14 @@ fn handler_arms_beside_a_rethrow_rejoin_at_code_before_the_continuation() {
     cfg.add_edge(join, after, EdgeKind::Fallthrough);
     cfg.add_edge(rethrow, exit, EdgeKind::ExceptionUnwind);
     cfg.add_region(region(
-        0,
         &[protected],
         &[(
             test,
             HandlerKind::Catch,
             &[test, then_arm, second_test, second_arm, rethrow, join],
         )],
-    ));
+    ))
+    .unwrap();
 
     assert_eq!(
         structured(&cfg),
@@ -126,14 +121,14 @@ fn switch_arms_beside_a_throwing_default_rejoin_at_code_before_the_continuation(
     cfg.add_edge(join, after, EdgeKind::Fallthrough);
     cfg.add_edge(rethrow, exit, EdgeKind::ExceptionUnwind);
     cfg.add_region(region(
-        0,
         &[protected],
         &[(
             dispatch,
             HandlerKind::Catch,
             &[dispatch, first_case, second_case, rethrow, join],
         )],
-    ));
+    ))
+    .unwrap();
 
     let text = structured(&cfg);
     assert_eq!(text.matches('z').count(), 1, "{text}");
@@ -168,10 +163,10 @@ fn try_body_arms_beside_a_return_rejoin_at_code_before_the_continuation() {
     cfg.add_edge(join, after, EdgeKind::ExceptionLeave);
     cfg.add_edge(pad, after, EdgeKind::Fallthrough);
     cfg.add_region(region(
-        0,
         &[test, then_arm, second_test, second_arm, leave, join],
         &[(pad, HandlerKind::Catch, &[pad])],
-    ));
+    ))
+    .unwrap();
 
     assert_eq!(
         structured(&cfg),
@@ -199,10 +194,10 @@ fn a_lone_completing_arm_still_runs_to_the_continuation() {
     cfg.add_edge(join, after, EdgeKind::Fallthrough);
     cfg.add_edge(rethrow, exit, EdgeKind::ExceptionUnwind);
     cfg.add_region(region(
-        0,
         &[protected],
         &[(test, HandlerKind::Catch, &[test, then_arm, join, rethrow])],
-    ));
+    ))
+    .unwrap();
 
     assert_eq!(
         structured(&cfg),
@@ -232,10 +227,10 @@ fn a_try_body_completes_into_the_finally_it_runs_into() {
     }
     cfg.add_edge(cleanup, after, EdgeKind::ExceptionLeave);
     cfg.add_region(region(
-        0,
         &[test, then_arm, second_arm, leave],
         &[(cleanup, HandlerKind::Finally, &[cleanup])],
-    ));
+    ))
+    .unwrap();
 
     assert_eq!(
         structured(&cfg),
@@ -258,15 +253,15 @@ fn a_catch_nested_in_a_try_finally_completes_into_the_finally() {
     cfg.add_edge(inner_pad, cleanup, EdgeKind::ExceptionUnwind);
     cfg.add_edge(cleanup, after, EdgeKind::ExceptionLeave);
     cfg.add_region(region(
-        0,
         &[protected],
         &[(inner_pad, HandlerKind::Catch, &[inner_pad])],
-    ));
+    ))
+    .unwrap();
     cfg.add_region(region(
-        1,
         &[protected, inner_pad],
         &[(cleanup, HandlerKind::Finally, &[cleanup])],
-    ));
+    ))
+    .unwrap();
 
     assert_eq!(
         structured(&cfg),
@@ -287,10 +282,10 @@ fn a_finally_entered_only_by_exceptions_leaves_the_body_to_its_continuation() {
     cfg.add_edge(protected, after, EdgeKind::Fallthrough);
     cfg.add_edge(protected, cleanup, EdgeKind::ExceptionUnwind);
     cfg.add_region(region(
-        0,
         &[protected],
         &[(cleanup, HandlerKind::Finally, &[cleanup])],
-    ));
+    ))
+    .unwrap();
 
     assert_eq!(
         structured(&cfg),

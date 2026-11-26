@@ -9,14 +9,13 @@ use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
 use crate::flow::FlowEffect;
-use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
+use crate::region::{Handler, HandlerBody, HandlerKind, Region};
 use crate::test_util::{MockInst, ff};
 use crate::{ControlNode, ControlTree, GotoDiagnostic, GotoReason};
 
 /// A catch region over `protected` whose handler at `entry` owns `body`.
-fn catch_region(id: u32, protected: &[BlockId], entry: BlockId, body: &[BlockId]) -> Region {
+fn catch_region(protected: &[BlockId], entry: BlockId, body: &[BlockId]) -> Region {
     Region {
-        id: RegionId::from_raw(id),
         protected_blocks: protected.iter().copied().collect(),
         handlers: vec![Handler {
             entry,
@@ -50,11 +49,11 @@ fn handler_branch_with_a_diverging_arm_converges_at_the_continuation() {
     cfg.add_edge(then_arm, after, EdgeKind::Fallthrough);
     cfg.add_edge(rethrow, exit, EdgeKind::ExceptionUnwind);
     cfg.add_region(catch_region(
-        0,
         &[try_body],
         handler,
         &[handler, then_arm, rethrow],
-    ));
+    ))
+    .unwrap();
 
     let (tree, report) = ControlTree::compute_with_report(&cfg);
     let text = pseudocode(&cfg, &tree);
@@ -102,11 +101,11 @@ fn handler_dispatch_with_a_diverging_default_converges_at_the_continuation() {
     cfg.add_edge(second, after, EdgeKind::Fallthrough);
     cfg.add_edge(rethrow, exit, EdgeKind::ExceptionUnwind);
     cfg.add_region(catch_region(
-        0,
         &[try_body],
         handler,
         &[handler, first, second, rethrow],
-    ));
+    ))
+    .unwrap();
 
     let (tree, report) = ControlTree::compute_with_report(&cfg);
     let text = pseudocode(&cfg, &tree);
@@ -160,20 +159,20 @@ fn rethrowing_handler_of_a_try_nested_last_in_a_try_is_structured() {
     cfg.add_edge(rethrow, outer_pad, EdgeKind::ExceptionHandler);
     cfg.add_edge(leave, after, EdgeKind::ExceptionLeave);
     cfg.add_edge(outer_pad, after, EdgeKind::Fallthrough);
-    let outer = cfg.add_region(catch_region(
-        0,
-        &[inner_try, inner_pad, then_arm, join, rethrow, leave],
-        outer_pad,
-        &[outer_pad],
-    ));
+    let outer = cfg
+        .add_region(catch_region(
+            &[inner_try, inner_pad, then_arm, join, rethrow, leave],
+            outer_pad,
+            &[outer_pad],
+        ))
+        .unwrap();
     let mut inner = catch_region(
-        1,
         &[inner_try],
         inner_pad,
         &[inner_pad, then_arm, join, rethrow],
     );
     inner.parent = Some(outer);
-    cfg.add_region(inner);
+    cfg.add_region(inner).unwrap();
 
     let (tree, report) = ControlTree::compute_with_report(&cfg);
     let text = pseudocode(&cfg, &tree);
@@ -220,11 +219,11 @@ fn an_arm_converges_through_a_block_without_code_another_arm_passed() {
     cfg.add_edge(inner_join, join, EdgeKind::Fallthrough);
     cfg.add_edge(rethrow, exit, EdgeKind::ExceptionUnwind);
     cfg.add_region(catch_region(
-        0,
         &[try_body],
         handler,
         &[handler, x, join, second_test, y, inner_join, rethrow],
-    ));
+    ))
+    .unwrap();
 
     let (tree, report) = ControlTree::compute_with_report(&cfg);
     let text = pseudocode(&cfg, &tree);

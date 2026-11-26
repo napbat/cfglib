@@ -25,7 +25,7 @@ use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::display::DisplayInstr;
 use crate::edge::EdgeKind;
-use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
+use crate::region::{Handler, HandlerBody, HandlerKind, Region};
 use crate::test_util::{DfInst, df_ff};
 use crate::{
     ControlDescent, ControlNode, ControlNodeId, ControlTree, ControlVisitor, LiftReport, LoopKind,
@@ -219,7 +219,6 @@ fn add_try(cfg: &mut Cfg<DfInst>, protected: &[BlockId], after: BlockId) {
     cfg.add_edge(protected[0], pad, EdgeKind::ExceptionHandler);
     cfg.add_edge(pad, after, EdgeKind::Fallthrough);
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: protected.iter().copied().collect(),
         handlers: alloc::vec![Handler {
             entry: pad,
@@ -227,7 +226,8 @@ fn add_try(cfg: &mut Cfg<DfInst>, protected: &[BlockId], after: BlockId) {
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
 }
 
 /// `try { p0; try { p1; try { ... } } }`: region `i` protects `p(i)` and

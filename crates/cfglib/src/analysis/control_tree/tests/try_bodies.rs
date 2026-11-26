@@ -9,7 +9,7 @@ use super::{
 };
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
+use crate::region::{Handler, HandlerBody, HandlerKind, Region};
 use crate::test_util::{MockInst, ff};
 use crate::{ControlNode, ControlTree};
 
@@ -38,7 +38,6 @@ fn a_try_anchored_at_a_switch_case_is_structured_inside_that_case() {
     cfg.add_edge(p, handler, EdgeKind::ExceptionHandler);
     cfg.add_edge(handler, merge, EdgeKind::Fallthrough);
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [p].into_iter().collect(),
         handlers: vec![Handler {
             entry: handler,
@@ -46,7 +45,8 @@ fn a_try_anchored_at_a_switch_case_is_structured_inside_that_case() {
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
 
     let (tree, report) = ControlTree::compute_with_report(&cfg);
     assert_eq!(
@@ -86,16 +86,17 @@ fn a_region_entered_at_two_blocks_is_not_one_try() {
     cfg.add_edge(first, handler, EdgeKind::ExceptionHandler);
     cfg.add_edge(second, handler, EdgeKind::ExceptionHandler);
     cfg.add_edge(handler, merge, EdgeKind::Fallthrough);
-    let region = cfg.add_region(Region {
-        id: RegionId::from_raw(0),
-        protected_blocks: [first, second].into_iter().collect(),
-        handlers: vec![Handler {
-            entry: handler,
-            body: HandlerBody::known([handler]),
-            kind: HandlerKind::Catch,
-        }],
-        parent: None,
-    });
+    let region = cfg
+        .add_region(Region {
+            protected_blocks: [first, second].into_iter().collect(),
+            handlers: vec![Handler {
+                entry: handler,
+                body: HandlerBody::known([handler]),
+                kind: HandlerKind::Catch,
+            }],
+            parent: None,
+        })
+        .unwrap();
 
     let (tree, report) = ControlTree::compute_with_report(&cfg);
     assert_eq!(report.unstructured_regions, [region], "{tree:?}");
@@ -149,7 +150,6 @@ fn two_tries_in_sequence(branching_first_try: bool) -> (Cfg<MockInst>, [crate::B
         (second, second_pad, vec![second_pad]),
     ] {
         cfg.add_region(Region {
-            id: RegionId::from_raw(0),
             protected_blocks: [protected].into_iter().collect(),
             handlers: vec![Handler {
                 entry: pad,
@@ -157,7 +157,8 @@ fn two_tries_in_sequence(branching_first_try: bool) -> (Cfg<MockInst>, [crate::B
                 kind: HandlerKind::Catch,
             }],
             parent: None,
-        });
+        })
+        .unwrap();
     }
     (cfg, [between, second])
 }
@@ -238,7 +239,6 @@ fn a_try_does_not_take_the_test_block_of_its_loop_from_another_region() {
     cfg.add_edge(latch, second_pad, EdgeKind::ExceptionHandler);
     for (protected, pad) in [(header, first_pad), (latch, second_pad)] {
         cfg.add_region(Region {
-            id: RegionId::from_raw(0),
             protected_blocks: [protected].into_iter().collect(),
             handlers: vec![Handler {
                 entry: pad,
@@ -246,7 +246,8 @@ fn a_try_does_not_take_the_test_block_of_its_loop_from_another_region() {
                 kind: HandlerKind::Catch,
             }],
             parent: None,
-        });
+        })
+        .unwrap();
     }
 
     let (tree, report) = ControlTree::compute_with_report(&cfg);

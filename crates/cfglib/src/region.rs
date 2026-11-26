@@ -2,14 +2,18 @@
 //!
 //! Regions represent protected areas of code (try blocks) and their
 //! associated handlers (catch, finally, fault, filter). The model follows
-//! the CLR / JVM exception metadata.
+//! the CLR / JVM exception metadata; a Windows SEH `__except` is a
+//! [`HandlerKind::Filter`] and a `__finally` a [`HandlerKind::Finally`].
 //!
 //! These regions are declared by the consumer. The single-entry single-exit
 //! regions that the shape of the graph has are a different thing:
 //! [`ProgramStructureTree`](crate::ProgramStructureTree) computes those.
 //!
 //! Regions are **optional metadata** on a [`Cfg`] — GPU
-//! shaders and simple ISAs simply leave the region list empty.
+//! shaders and simple ISAs simply leave the region list empty. A region's
+//! identity is its position in the [`Cfg`]'s region list:
+//! [`Cfg::add_region`] returns it, and [`Cfg::regions`] yields it beside each
+//! region.
 //!
 //! # Granularity contract
 //!
@@ -25,7 +29,7 @@
 //! The metadata names blocks in two ways. A region's protected set and a
 //! handler's known body are *sets*: a block that is removed simply drops out
 //! of them at the next [`Cfg::compact`](crate::Cfg::compact). A handler
-//! entry, a filter block, a cleanup resume point, and a continuation target
+//! entry, a filter block, a cleanup exit block, and a continuation target
 //! are *single references* with no stand-in, so the structural passes
 //! ([`simplify`](crate::simplify), [`merge_blocks`](crate::merge_blocks),
 //! [`remove_empty_blocks`](crate::remove_empty_blocks),
@@ -33,6 +37,8 @@
 //! [`contract_edge`](crate::contract_edge)) never remove or merge those blocks
 //! away. [`Cfg::split_block`](crate::Cfg::split_block) keeps both kinds true:
 //! the new tail joins every set that held the original.
+//! [`Cfg::check_regions`] checks that every single reference names a live
+//! block and every region and handler reference resolves.
 //!
 //! # Cleanup and filter data
 //!
@@ -51,33 +57,32 @@
 //! reference, are answered by two records:
 //!
 //! - [`Cleanup`] records what a cleanup handler does once its body ends: the
-//!   block it resumes from and the [`Continuation`]s it selects among, each
+//!   block it exits from and the [`Continuation`]s it selects among, each
 //!   tagged with the [`CompletionReason`] that entered the cleanup. A cleanup
 //!   lowered once (rather than duplicated per route) otherwise leaves a fan of
-//!   indistinguishable out-edges; with the record, [`EhModel`](crate::EhModel)
-//!   and any analysis over it read cleanup-then-continue structure instead.
-//!   Continuations are library-typed ([`BlockId`] plus a reason), so the
-//!   [`Cfg`] owns them: [`Cfg::add_continuation`], [`Cfg::set_cleanup_resume`],
-//!   [`Cfg::cleanup`].
+//!   indistinguishable out-edges; with the record, an analysis reads
+//!   cleanup-then-continue structure instead. Continuations are library-typed
+//!   ([`BlockId`] plus a reason), so the [`Cfg`] owns them:
+//!   [`Cfg::add_continuation`], [`Cfg::set_cleanup_exit`], [`Cfg::cleanup`].
 //! - [`HandlerMetadata`] carries consumer-owned handler data — for example a
 //!   filter predicate identity or a CLR catch-type token — beside the CFG.
-//!   [`HandlerFilters`] and [`HandlerTypes`] are descriptive aliases for the
-//!   two common uses. It is a side table rather than a field or a type
-//!   parameter, so no consumer type escapes into [`Cfg`]'s signature.
+//!   It is a side table rather than a field or a type parameter, so no
+//!   consumer type escapes into [`Cfg`]'s signature.
 
 extern crate alloc;
 use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 
+mod error;
 mod metadata;
 mod recover;
 
-pub use metadata::{HandlerFilters, HandlerMetadata, HandlerTypes};
+pub use error::RegionError;
+pub use metadata::HandlerMetadata;
 pub use recover::{
-    ExclusiveExtent, ExtentIssue, ExtentPromotionDecision, ExtentPromotionStatus, ExtentStatus,
-    promote_exclusive_extents, promote_handler_extents, recover_exclusive_extents,
-    recover_exclusive_extents_with,
+    ExclusiveExtent, ExtentIssue, ExtentPromotionStatus, promote_exclusive_extents,
+    promote_handler_extents, recover_exclusive_extents,
 };
 
 use crate::block::BlockId;
@@ -85,7 +90,8 @@ use crate::cfg::Cfg;
 use crate::identity::define_dense_id;
 
 define_dense_id! {
-    /// Opaque identifier for a region within a [`Cfg`].
+    /// Opaque identifier for a region within a [`Cfg`]: its position in the
+    /// region list.
     #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
     pub struct RegionId(pub(crate) u32);
     display = "region";
@@ -98,11 +104,12 @@ define_dense_id! {
 }
 
 /// A protected region (try block) and its handlers.
+///
+/// A region has no identity field: [`Cfg::add_region`] assigns its
+/// [`RegionId`], which is its position in the region list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Region {
-    /// Region identity.
-    pub id: RegionId,
     /// Blocks covered by the protected (try) region.
     pub protected_blocks: BTreeSet<BlockId>,
     /// Exception handlers attached to this region.
@@ -124,10 +131,14 @@ pub struct Handler {
 }
 
 impl Handler {
-    /// The blocks the handler names: its entry, then the blocks of its known
-    /// extent. A handler of unknown extent names only its entry.
-    pub(crate) fn claimed_blocks(&self) -> impl Iterator<Item = BlockId> + '_ {
-        core::iter::once(self.entry).chain(self.body.blocks().into_iter().flatten().copied())
+    /// The blocks the handler names: its entry, its filter block when it is a
+    /// [`HandlerKind::Filter`], then the blocks of its known extent (which
+    /// hold the entry again). A handler of unknown extent names no extent
+    /// blocks.
+    pub fn blocks(&self) -> impl Iterator<Item = BlockId> + '_ {
+        core::iter::once(self.entry)
+            .chain(self.kind.filter_block())
+            .chain(self.body.blocks().into_iter().flatten().copied())
     }
 }
 
@@ -196,7 +207,7 @@ impl From<BTreeSet<BlockId>> for HandlerBody {
 pub enum HandlerKind {
     /// Catch handler — catches a specific exception type.
     ///
-    /// Frontends retain their type token in a [`HandlerTypes`] side table.
+    /// Frontends retain their type token in a [`HandlerMetadata`] side table.
     Catch,
     /// Catch-all handler — catches any exception.
     CatchAll,
@@ -205,19 +216,62 @@ pub enum HandlerKind {
     /// Fault handler — executed on exception only (CLR).
     Fault,
     /// Filter handler — a user-defined predicate determines whether
-    /// this handler catches the exception.
+    /// this handler catches the exception (a CLR filter clause, a Windows
+    /// SEH `__except`).
     Filter {
         /// Block containing the filter predicate.
         filter_block: BlockId,
     },
 }
 
+impl HandlerKind {
+    /// The name of the kind in the CFG text form: `catch`, `catch_all`,
+    /// `finally`, `fault` or `filter`. A filter's block is not part of its
+    /// name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Catch => "catch",
+            Self::CatchAll => "catch_all",
+            Self::Finally => "finally",
+            Self::Fault => "fault",
+            Self::Filter { .. } => "filter",
+        }
+    }
+
+    /// The kind named `name`, the inverse of [`name`](Self::name). A
+    /// `filter` takes its predicate block from `filter_block`, so it is
+    /// `None` without one; every other kind ignores `filter_block`.
+    #[must_use]
+    pub fn from_name(name: &str, filter_block: Option<BlockId>) -> Option<Self> {
+        match name {
+            "catch" => Some(Self::Catch),
+            "catch_all" => Some(Self::CatchAll),
+            "finally" => Some(Self::Finally),
+            "fault" => Some(Self::Fault),
+            "filter" => filter_block.map(|filter_block| Self::Filter { filter_block }),
+            _ => None,
+        }
+    }
+
+    /// The block holding the filter predicate, for a
+    /// [`Filter`](Self::Filter) handler.
+    #[inline]
+    #[must_use]
+    pub const fn filter_block(self) -> Option<BlockId> {
+        match self {
+            Self::Filter { filter_block } => Some(filter_block),
+            Self::Catch | Self::CatchAll | Self::Finally | Self::Fault => None,
+        }
+    }
+}
+
 /// A reference to one [`Handler`] of one [`Region`] — the region's id plus
 /// the handler's position in [`Region::handlers`].
 ///
 /// Handlers have no identity of their own because they are stored inline, so
-/// this pair is what the v2 side data ([`Cleanup`] records,
-/// [`HandlerFilters`] payloads) is keyed by.
+/// this pair is what the side data ([`Cleanup`] records, [`HandlerMetadata`]
+/// payloads) is keyed by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct HandlerRef {
@@ -273,7 +327,7 @@ pub enum CompletionReason {
     Normal,
     /// A transfer left the region for another block of the same callable —
     /// `break`, `continue`, `goto`, a switch exit. Which one is the
-    /// [`Continuation::resume`] block.
+    /// [`Continuation::target`] block.
     Transfer,
     /// A `return` left the callable.
     Return,
@@ -283,58 +337,53 @@ pub enum CompletionReason {
 }
 
 /// One recorded route out of a cleanup handler: the reason control entered
-/// it, and where control resumes once its body ends.
+/// it, and where control goes once its body ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Continuation {
     /// The completion reason that entered the cleanup on this route.
     pub reason: CompletionReason,
-    /// The block control resumes at — the next cleanup of a chain, a loop's
+    /// The block control continues at — the next cleanup of a chain, a loop's
     /// break target, the enclosing handler, the callable's exit.
-    pub resume: BlockId,
+    pub target: BlockId,
 }
 
-/// What a cleanup handler does once its body ends: where it resumes from and
-/// every route it can continue along.
+/// What a cleanup handler does once its body ends: the block it exits from
+/// and every route it can continue along.
 ///
 /// A frontend records routes as it lowers them (a route exists long before
 /// the block it continues into does), and attaches them to the handler once
 /// the region is registered — [`Cfg::add_continuation`] and
-/// [`Cfg::set_cleanup_resume`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// [`Cfg::set_cleanup_exit`]. The [`Cfg`] keys the record by its handler.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Cleanup {
-    /// The handler this record belongs to — normally a
-    /// [`HandlerKind::Finally`] or [`HandlerKind::Fault`] one.
-    pub handler: HandlerRef,
     /// The block the cleanup body ends in, from which every continuation
     /// edge leaves. `None` until the body is lowered, and afterwards when the
     /// cleanup itself diverges (a `return` inside the `finally`): then the
     /// recorded continuations are unreachable, which is what the source says.
-    pub resume_from: Option<BlockId>,
+    pub exit_block: Option<BlockId>,
     /// The recorded routes, in first-recorded order, each distinct.
     pub continuations: Vec<Continuation>,
 }
 
 impl Cleanup {
-    /// The blocks control resumes at when the cleanup was entered for
+    /// The blocks control continues at when the cleanup was entered for
     /// `reason`, in recorded order.
-    pub fn resumes_for(&self, reason: CompletionReason) -> impl Iterator<Item = BlockId> + '_ {
+    pub fn targets_for(&self, reason: CompletionReason) -> impl Iterator<Item = BlockId> + '_ {
         self.continuations
             .iter()
             .filter(move |continuation| continuation.reason == reason)
-            .map(|continuation| continuation.resume)
+            .map(|continuation| continuation.target)
     }
 }
 
 /// Precomputed innermost-protecting-region lookup.
 ///
-/// [`Cfg::protecting_region`](crate::Cfg::protecting_region) scans the
-/// region list backwards per query; over many blocks (AST lifting,
-/// statement-level unwind edges) that is quadratic. This index answers the
-/// same question in O(1) per block after one O(regions × blocks) build,
-/// with identical innermost semantics (the latest-added covering region
-/// wins).
+/// It answers, in O(1) per block after one O(regions × blocks) build, which
+/// region protects a block most deeply: the latest-added covering region
+/// wins, which is the innermost one for a frontend that registers an outer
+/// region before the regions nested in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegionIndex {
     innermost: Vec<Option<RegionId>>,
@@ -347,10 +396,10 @@ impl RegionIndex {
     #[must_use]
     pub fn compute<I, E>(cfg: &Cfg<I, E>) -> Self {
         let mut innermost = vec![None; cfg.block_bound()];
-        for region in cfg.regions() {
+        for (id, region) in cfg.regions() {
             for &block in &region.protected_blocks {
                 if let Some(slot) = innermost.get_mut(block.index()) {
-                    *slot = Some(region.id);
+                    *slot = Some(id);
                 }
             }
         }
@@ -365,398 +414,4 @@ impl RegionIndex {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::block::BlockId;
-    use crate::cfg::Cfg;
-    use crate::test_util::MockInst;
-    use alloc::collections::BTreeSet;
-
-    fn block_set(ids: &[u32]) -> BTreeSet<BlockId> {
-        ids.iter().map(|&i| BlockId::from_raw(i)).collect()
-    }
-
-    #[cfg(feature = "serde")]
-    #[test]
-    fn handler_body_serde_form_is_pinned() {
-        let known = HandlerBody::known([BlockId::from_raw(1), BlockId::from_raw(2)]);
-        let json = serde_json::to_string(&known).expect("serialization cannot fail");
-        assert_eq!(json, r#"{"Known":[1,2]}"#);
-        let round_tripped: HandlerBody =
-            serde_json::from_str(&json).expect("the pinned form deserializes");
-        assert_eq!(round_tripped, known);
-
-        let unknown = HandlerBody::unknown();
-        let json = serde_json::to_string(&unknown).expect("serialization cannot fail");
-        assert_eq!(json, r#""Unknown""#);
-        let round_tripped: HandlerBody =
-            serde_json::from_str(&json).expect("the pinned form deserializes");
-        assert_eq!(round_tripped, unknown);
-    }
-
-    #[test]
-    fn add_region_assigns_sequential_ids() {
-        let mut cfg: Cfg<MockInst> = Cfg::new();
-        let r0 = cfg.add_region(Region {
-            id: RegionId(999), // should be overwritten
-            protected_blocks: block_set(&[0]),
-            handlers: alloc::vec![],
-            parent: None,
-        });
-        let r1 = cfg.add_region(Region {
-            id: RegionId(999),
-            protected_blocks: block_set(&[0]),
-            handlers: alloc::vec![],
-            parent: Some(r0),
-        });
-        assert_eq!(r0.index(), 0);
-        assert_eq!(r1.index(), 1);
-        assert_eq!(cfg.regions().len(), 2);
-        assert_eq!(cfg.regions()[1].parent, Some(r0));
-    }
-
-    #[test]
-    fn protecting_region_finds_innermost() {
-        let mut cfg: Cfg<MockInst> = Cfg::new();
-        let _b1 = cfg.new_block();
-        let _b2 = cfg.new_block();
-        // Outer region protects blocks 0,1,2.
-        let outer = cfg.add_region(Region {
-            id: RegionId(0),
-            protected_blocks: block_set(&[0, 1, 2]),
-            handlers: alloc::vec![],
-            parent: None,
-        });
-        // Inner region protects block 1 only.
-        let inner = cfg.add_region(Region {
-            id: RegionId(0),
-            protected_blocks: block_set(&[1]),
-            handlers: alloc::vec![],
-            parent: Some(outer),
-        });
-
-        // Block 1 should find the inner (last-added) region.
-        let r = cfg.protecting_region(BlockId::from_raw(1)).unwrap();
-        assert_eq!(r.id, inner);
-
-        // Block 0 should find the outer region.
-        let r = cfg.protecting_region(BlockId::from_raw(0)).unwrap();
-        assert_eq!(r.id, outer);
-
-        // Block that's not in any region.
-        let b3 = cfg.new_block();
-        assert!(cfg.protecting_region(b3).is_none());
-
-        // The precomputed index agrees with the linear scan everywhere.
-        let index = RegionIndex::compute(&cfg);
-        for block in [0, 1, 2] {
-            let block = BlockId::from_raw(block);
-            assert_eq!(
-                index.protecting(block),
-                cfg.protecting_region(block).map(|r| r.id)
-            );
-        }
-        assert_eq!(index.protecting(BlockId::from_raw(1)), Some(inner));
-        // b3 belongs to no region.
-        assert!(index.protecting(b3).is_none());
-    }
-
-    #[test]
-    fn region_index_answers_for_a_cfg_with_edge_payloads() {
-        let mut cfg = Cfg::<u32, &str>::with_edge_payload();
-        let inside = cfg.new_block();
-        let region = cfg.add_region(Region {
-            id: RegionId(0),
-            protected_blocks: [inside].into_iter().collect(),
-            handlers: alloc::vec![],
-            parent: None,
-        });
-
-        let index = RegionIndex::compute(&cfg);
-        assert_eq!(index.protecting(inside), Some(region));
-        assert_eq!(index.protecting(cfg.entry()), None);
-    }
-
-    /// A CFG with one protected block, one catch pad, and one cleanup — the
-    /// shape a source `try`/`catch`/`finally` lowers to.
-    fn try_catch_finally() -> (Cfg<MockInst>, RegionId, [BlockId; 4]) {
-        let mut cfg: Cfg<MockInst> = Cfg::new();
-        let pad = cfg.new_block();
-        let cleanup = cfg.new_block();
-        let after = cfg.new_block();
-        let exit = cfg.new_block();
-        let region = cfg.add_region(Region {
-            id: RegionId(0),
-            protected_blocks: block_set(&[0]),
-            handlers: alloc::vec![
-                Handler {
-                    entry: pad,
-                    body: HandlerBody::known([pad]),
-                    kind: HandlerKind::Catch,
-                },
-                Handler {
-                    entry: cleanup,
-                    body: HandlerBody::known([cleanup]),
-                    kind: HandlerKind::Finally,
-                },
-            ],
-            parent: None,
-        });
-        (cfg, region, [pad, cleanup, after, exit])
-    }
-
-    #[test]
-    fn handler_ref_names_one_handler_of_one_region() {
-        let (cfg, region, [pad, cleanup, _, _]) = try_catch_finally();
-        let catch = HandlerRef::new(region, 0);
-        let finally = HandlerRef::new(region, 1);
-
-        assert_eq!(catch.region(), region);
-        assert_eq!(finally.index(), 1);
-        assert!(catch < finally, "handlers order by position in the region");
-        assert_eq!(
-            cfg.regions()[region.index()].handlers[catch.index()].entry,
-            pad
-        );
-        assert_eq!(
-            cfg.regions()[region.index()].handlers[finally.index()].entry,
-            cleanup
-        );
-        assert_eq!(alloc::format!("{finally}"), "region0.handler1");
-        assert_eq!(cfg.handler(catch).map(|handler| handler.entry), Some(pad));
-        assert_eq!(
-            cfg.handler(finally).map(|handler| handler.entry),
-            Some(cleanup)
-        );
-        assert!(
-            cfg.handler(HandlerRef::new(RegionId::from_raw(99), 0))
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn identity_checked_accessors_update_regions_and_handlers() {
-        let (mut cfg, region, [pad, _, _, _]) = try_catch_finally();
-        let catch = HandlerRef::new(region, 0);
-        let replacement = cfg.new_block();
-
-        cfg.region_mut(region).unwrap().parent = Some(region);
-        cfg.handler_mut(catch).unwrap().entry = replacement;
-
-        assert_eq!(
-            cfg.region(region).and_then(|item| item.parent),
-            Some(region)
-        );
-        assert_eq!(
-            cfg.handler(catch).map(|handler| handler.entry),
-            Some(replacement)
-        );
-        assert_ne!(cfg.handler(catch).map(|handler| handler.entry), Some(pad));
-    }
-
-    #[test]
-    fn a_cleanup_records_one_route_per_distinct_destination() {
-        let (mut cfg, region, [_, cleanup, after, exit]) = try_catch_finally();
-        let finally = HandlerRef::new(region, 1);
-        assert!(
-            cfg.cleanup(finally).is_none(),
-            "no record until one is made"
-        );
-
-        cfg.set_cleanup_resume(finally, cleanup);
-        for continuation in [
-            Continuation {
-                reason: CompletionReason::Normal,
-                resume: after,
-            },
-            Continuation {
-                reason: CompletionReason::Return,
-                resume: exit,
-            },
-            // A second `return` route to the same block is the same route.
-            Continuation {
-                reason: CompletionReason::Return,
-                resume: exit,
-            },
-            // Same destination, different reason: a distinct route.
-            Continuation {
-                reason: CompletionReason::Unwind,
-                resume: exit,
-            },
-        ] {
-            cfg.add_continuation(finally, continuation);
-        }
-
-        let record = cfg.cleanup(finally).expect("recorded");
-        assert_eq!(record.handler, finally);
-        assert_eq!(record.resume_from, Some(cleanup));
-        assert_eq!(
-            record
-                .continuations
-                .iter()
-                .map(|route| (route.reason, route.resume))
-                .collect::<Vec<_>>(),
-            alloc::vec![
-                (CompletionReason::Normal, after),
-                (CompletionReason::Return, exit),
-                (CompletionReason::Unwind, exit),
-            ],
-            "distinct routes, in first-recorded order"
-        );
-
-        // The reason selects the route — the point of the record.
-        assert_eq!(
-            record
-                .resumes_for(CompletionReason::Normal)
-                .collect::<Vec<_>>(),
-            alloc::vec![after]
-        );
-        assert_eq!(
-            record
-                .resumes_for(CompletionReason::Return)
-                .collect::<Vec<_>>(),
-            alloc::vec![exit]
-        );
-        assert_eq!(record.resumes_for(CompletionReason::Transfer).next(), None);
-        assert_eq!(cfg.cleanups().len(), 1);
-    }
-
-    #[test]
-    fn a_diverging_cleanup_has_routes_but_no_resume_block() {
-        let (mut cfg, region, [_, _, after, _]) = try_catch_finally();
-        let finally = HandlerRef::new(region, 1);
-        cfg.add_continuation(
-            finally,
-            Continuation {
-                reason: CompletionReason::Normal,
-                resume: after,
-            },
-        );
-
-        // The cleanup body ends in a `return`, so nothing leaves it: the
-        // recorded route stays, unreachable, which is what the source says.
-        let record = cfg.cleanup(finally).expect("recorded");
-        assert_eq!(record.resume_from, None);
-        assert_eq!(record.continuations.len(), 1);
-    }
-
-    #[test]
-    fn cleanups_are_per_handler() {
-        let (mut cfg, region, [_, _, after, exit]) = try_catch_finally();
-        let catch = HandlerRef::new(region, 0);
-        let finally = HandlerRef::new(region, 1);
-        cfg.add_continuation(
-            catch,
-            Continuation {
-                reason: CompletionReason::Normal,
-                resume: after,
-            },
-        );
-        cfg.add_continuation(
-            finally,
-            Continuation {
-                reason: CompletionReason::Unwind,
-                resume: exit,
-            },
-        );
-
-        assert_eq!(cfg.cleanups().len(), 2);
-        assert_eq!(
-            cfg.cleanup(catch)
-                .map(|record| record.continuations[0].resume),
-            Some(after)
-        );
-        assert_eq!(
-            cfg.cleanup(finally)
-                .map(|record| record.continuations[0].reason),
-            Some(CompletionReason::Unwind)
-        );
-    }
-
-    #[test]
-    fn regions_need_no_optional_cleanup_or_handler_metadata() {
-        // The core region remains usable without cleanup continuations or
-        // consumer-owned side metadata.
-        let mut cfg: Cfg<MockInst> = Cfg::new();
-        let pad = cfg.new_block();
-        let id = cfg.add_region(Region {
-            id: RegionId(0),
-            protected_blocks: block_set(&[0]),
-            handlers: alloc::vec![Handler {
-                entry: pad,
-                body: HandlerBody::known([pad]),
-                kind: HandlerKind::Finally,
-            }],
-            parent: None,
-        });
-
-        assert_eq!(cfg.regions().len(), 1);
-        assert_eq!(
-            cfg.protecting_region(BlockId::from_raw(0)).map(|r| r.id),
-            Some(id)
-        );
-        // A frontend that records no routes carries no records.
-        assert_eq!(cfg.cleanups(), []);
-        assert!(cfg.cleanup(HandlerRef::new(id, 0)).is_none());
-    }
-
-    #[test]
-    fn handler_kind_variants() {
-        let h = Handler {
-            entry: BlockId::from_raw(1),
-            body: HandlerBody::known(block_set(&[1, 2])),
-            kind: HandlerKind::Finally,
-        };
-        assert_eq!(h.kind, HandlerKind::Finally);
-
-        let h2 = Handler {
-            entry: BlockId::from_raw(3),
-            body: HandlerBody::known(block_set(&[3])),
-            kind: HandlerKind::Filter {
-                filter_block: BlockId::from_raw(4),
-            },
-        };
-        assert!(matches!(h2.kind, HandlerKind::Filter { .. }));
-    }
-
-    #[test]
-    fn handler_body_distinguishes_unknown_from_complete_extents() {
-        let unknown = HandlerBody::unknown();
-        assert!(!unknown.is_known());
-        assert!(unknown.blocks().is_none());
-
-        let known = HandlerBody::known([
-            BlockId::from_raw(2),
-            BlockId::from_raw(1),
-            BlockId::from_raw(2),
-        ]);
-        assert!(known.is_known());
-        assert_eq!(
-            known.blocks().map(BTreeSet::len),
-            Some(2),
-            "known extents are a deduplicated block set"
-        );
-    }
-
-    #[test]
-    fn a_handler_names_its_entry_and_its_known_extent() {
-        let entry = BlockId::from_raw(1);
-        let extent = |body| Handler {
-            entry,
-            body,
-            kind: HandlerKind::Catch,
-        };
-        let known = extent(HandlerBody::known([entry, BlockId::from_raw(3)]));
-        assert_eq!(
-            known.claimed_blocks().collect::<alloc::vec::Vec<_>>(),
-            [entry, entry, BlockId::from_raw(3)],
-            "the entry, then the extent, which holds the entry again"
-        );
-        let unknown = extent(HandlerBody::unknown());
-        assert_eq!(
-            unknown.claimed_blocks().collect::<alloc::vec::Vec<_>>(),
-            [entry],
-            "a handler of unknown extent names only its entry"
-        );
-    }
-}
+mod tests;

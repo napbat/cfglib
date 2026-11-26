@@ -139,12 +139,12 @@ fn exception_flow_payloads_separate_normal_flow_from_handler_flow<I: Isa>() {
         &handlers_of(&layout, &table),
         plain_options(),
         |info: AddressEdgeInfo<'_, I::Addr, I::Key>| match info.role {
-            EdgeRole::Unwind { handler } => ExceptionFlow::exceptional(
-                ExceptionPhase::Unwind,
-                Some(ExceptionDisposition::ExecuteHandler),
-                handler,
-            ),
-            _ => ExceptionFlow::normal(usize::MAX),
+            EdgeRole::Unwind { handler } => ExceptionFlow {
+                phase: Some(ExceptionPhase::Unwind),
+                disposition: Some(ExceptionDisposition::ExecuteHandler),
+                metadata: handler,
+            },
+            _ => ExceptionFlow::new(usize::MAX),
         },
     )
     .unwrap();
@@ -154,25 +154,22 @@ fn exception_flow_payloads_separate_normal_flow_from_handler_flow<I: Isa>() {
 
     // Payload and structural kind agree on which edges are exceptional.
     for edge in cfg.edges() {
-        assert_eq!(
-            edge.payload().phase().is_some(),
-            edge.kind().is_exceptional()
-        );
+        assert_eq!(edge.payload().phase.is_some(), edge.kind().is_exceptional());
     }
     assert_eq!(cfg.edges().filter(|e| e.kind().is_exceptional()).count(), 2);
     for edge in cfg.edges().filter(|edge| edge.kind().is_exceptional()) {
         assert_eq!(
-            edge.payload().disposition(),
+            edge.payload().disposition,
             Some(ExceptionDisposition::ExecuteHandler)
         );
-        assert_eq!(*edge.payload().metadata(), 0);
+        assert_eq!(edge.payload().metadata, 0);
         assert_eq!(edge.target(), handler_block);
     }
 
     let full = DominatorTree::compute(cfg);
     assert!(full.is_reachable(handler_block));
     let normal = FilteredEdges::new(cfg, |_: EdgeId, edge: &Edge<ExceptionFlow<usize>>| {
-        edge.payload().phase().is_none()
+        edge.payload().phase.is_none()
     });
     assert!(verify_edge_view(&normal).is_ok());
     let normal_only = DominatorTree::compute(&normal);

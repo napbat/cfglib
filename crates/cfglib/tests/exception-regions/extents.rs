@@ -5,9 +5,8 @@ use std::collections::BTreeSet;
 
 use cfglib::{
     BlockId, Cfg, ControlNode, ControlTree, Edge, EdgeId, EdgeKind, ExclusiveExtent, ExtentIssue,
-    ExtentPromotionDecision, ExtentPromotionStatus, ExtentStatus, HandlerBody, HandlerRef,
-    RegionId, promote_exclusive_extents, promote_handler_extents, recover_exclusive_extents,
-    recover_exclusive_extents_with,
+    ExtentPromotionStatus, HandlerBody, HandlerRef, Region, RegionId, promote_exclusive_extents,
+    promote_handler_extents, recover_exclusive_extents,
 };
 
 use crate::shapes::{Stmt, block_of, protect, unknown_catch};
@@ -43,6 +42,23 @@ fn blocks(extent: &ExclusiveExtent) -> Vec<BlockId> {
     extent.blocks.iter().copied().collect()
 }
 
+/// The extents along the ordinary edge kinds, the exceptional ones left out.
+fn recover_by_kind<E>(cfg: &Cfg<Stmt, E>) -> Vec<ExclusiveExtent> {
+    recover_exclusive_extents(cfg, |_, edge| !edge.kind().is_exceptional())
+}
+
+/// A caller-proposed body for `handler`, entered at `entry`, with no evidence
+/// against it.
+fn proposed(handler: HandlerRef, entry: BlockId, blocks: BTreeSet<BlockId>) -> ExclusiveExtent {
+    ExclusiveExtent {
+        handler,
+        entry,
+        blocks,
+        boundary_blocks: BTreeSet::new(),
+        issues: vec![],
+    }
+}
+
 #[test]
 fn a_handler_closed_under_normal_flow_is_isolated() {
     let mut fixture = base();
@@ -50,7 +66,7 @@ fn a_handler_closed_under_normal_flow_is_isolated() {
     let end = block_of(&mut fixture.cfg, &["end of handler"]);
     fixture.cfg.add_edge(pad, end, EdgeKind::Fallthrough);
 
-    let extents = recover_exclusive_extents(&fixture.cfg);
+    let extents = recover_by_kind(&fixture.cfg);
 
     let [extent] = &extents[..] else {
         panic!("one handler, one extent");
@@ -60,7 +76,7 @@ fn a_handler_closed_under_normal_flow_is_isolated() {
     assert_eq!(blocks(extent), [pad, end]);
     assert_eq!(extent.boundary_blocks, BTreeSet::new());
     assert_eq!(extent.issues, []);
-    assert_eq!(extent.status(), ExtentStatus::Isolated);
+    assert!(!extent.is_ambiguous(), "closed under normal flow: isolated");
 }
 
 #[test]
@@ -71,7 +87,7 @@ fn a_handler_that_flows_into_the_normal_join_leaves_the_join_on_its_boundary() {
         .cfg
         .add_edge(pad, fixture.join, EdgeKind::Fallthrough);
 
-    let extents = recover_exclusive_extents(&fixture.cfg);
+    let extents = recover_by_kind(&fixture.cfg);
 
     let [extent] = &extents[..] else {
         panic!("one handler, one extent");
@@ -79,7 +95,10 @@ fn a_handler_that_flows_into_the_normal_join_leaves_the_join_on_its_boundary() {
     assert_eq!(blocks(extent), [pad], "the shared join is not claimed");
     assert_eq!(extent.boundary_blocks, BTreeSet::from([fixture.join]));
     assert_eq!(extent.issues, []);
-    assert_eq!(extent.status(), ExtentStatus::SharedContinuation);
+    assert!(
+        !extent.is_ambiguous(),
+        "a shared continuation is no ambiguity"
+    );
 }
 
 #[test]
@@ -91,7 +110,7 @@ fn a_handler_entry_that_normal_flow_reaches_is_ambiguous() {
         .cfg
         .add_edge(fixture.body, pad, EdgeKind::Fallthrough);
 
-    let extents = recover_exclusive_extents(&fixture.cfg);
+    let extents = recover_by_kind(&fixture.cfg);
 
     let [extent] = &extents[..] else {
         panic!("one handler, one extent");
@@ -99,7 +118,7 @@ fn a_handler_entry_that_normal_flow_reaches_is_ambiguous() {
     assert_eq!(blocks(extent), [], "everything is reachable from the entry");
     assert_eq!(extent.boundary_blocks, BTreeSet::from([pad]));
     assert_eq!(extent.issues, [ExtentIssue::EntryReachableFromNormalFlow]);
-    assert_eq!(extent.status(), ExtentStatus::Ambiguous);
+    assert!(extent.is_ambiguous());
 }
 
 #[test]
@@ -110,7 +129,7 @@ fn one_handler_that_flows_into_another_makes_only_the_second_ambiguous() {
     let (pad_b, region_b) = add_pad(&mut fixture, &["catch b"]);
     fixture.cfg.add_edge(pad_b, pad_a, EdgeKind::Fallthrough);
 
-    let extents = recover_exclusive_extents(&fixture.cfg);
+    let extents = recover_by_kind(&fixture.cfg);
 
     let [a, b] = &extents[..] else {
         panic!("two handlers, two extents");
@@ -119,13 +138,13 @@ fn one_handler_that_flows_into_another_makes_only_the_second_ambiguous() {
     assert_eq!(blocks(a), []);
     assert_eq!(a.boundary_blocks, BTreeSet::from([pad_a]));
     assert_eq!(a.issues, [ExtentIssue::EntryReachableFromAnotherHandler]);
-    assert_eq!(a.status(), ExtentStatus::Ambiguous);
+    assert!(a.is_ambiguous());
 
     assert_eq!(b.handler, HandlerRef::new(region_b, 0));
     assert_eq!(blocks(b), [pad_b], "the code both reach is not claimed");
     assert_eq!(b.boundary_blocks, BTreeSet::from([pad_a]));
     assert_eq!(b.issues, []);
-    assert_eq!(b.status(), ExtentStatus::SharedContinuation);
+    assert!(!b.is_ambiguous());
 }
 
 #[test]
@@ -137,7 +156,7 @@ fn an_interior_block_with_an_outside_predecessor_is_an_external_entry() {
     fixture.cfg.add_edge(pad, middle, EdgeKind::Fallthrough);
     fixture.cfg.add_edge(stray, middle, EdgeKind::Fallthrough);
 
-    let extents = recover_exclusive_extents(&fixture.cfg);
+    let extents = recover_by_kind(&fixture.cfg);
 
     let [extent] = &extents[..] else {
         panic!("one handler, one extent");
@@ -150,7 +169,7 @@ fn an_interior_block_with_an_outside_predecessor_is_an_external_entry() {
             predecessor: stray
         }]
     );
-    assert_eq!(extent.status(), ExtentStatus::Ambiguous);
+    assert!(extent.is_ambiguous());
 }
 
 #[test]
@@ -176,7 +195,7 @@ fn extents_come_back_in_region_then_handler_order_and_nothing_is_mutated() {
     );
     let before = fixture.cfg.clone();
 
-    let extents = recover_exclusive_extents(&fixture.cfg);
+    let extents = recover_by_kind(&fixture.cfg);
 
     assert_eq!(
         extents
@@ -203,7 +222,7 @@ enum Route {
 }
 
 #[test]
-fn normality_in_the_edge_payload_is_honored_by_the_with_variant() {
+fn normality_in_the_edge_payload_is_honored_by_the_normality_predicate() {
     // Every edge has an ordinary kind; the payload says which one unwinds.
     let mut cfg = Cfg::<Stmt, Route>::with_edge_payload();
     let entry = cfg.entry();
@@ -213,17 +232,18 @@ fn normality_in_the_edge_payload_is_honored_by_the_with_variant() {
     cfg.add_edge_with_payload(entry, body, EdgeKind::Fallthrough, Route::Normal);
     cfg.add_edge_with_payload(body, pad, EdgeKind::Fallthrough, Route::Unwind);
     cfg.add_edge_with_payload(pad, end, EdgeKind::Fallthrough, Route::Normal);
-    let region = cfg.add_region(cfglib::Region {
-        id: RegionId::from_raw(0),
-        protected_blocks: BTreeSet::from([body]),
-        handlers: vec![unknown_catch(pad)],
-        parent: None,
-    });
+    let region = cfg
+        .add_region(Region {
+            protected_blocks: BTreeSet::from([body]),
+            handlers: vec![unknown_catch(pad)],
+            parent: None,
+        })
+        .unwrap();
 
     // By kind, the unwind edge is ordinary flow and the pad is reachable from
     // the entry; by payload, it is not.
-    let by_kind = recover_exclusive_extents(&cfg);
-    let by_payload = recover_exclusive_extents_with(&cfg, |_: EdgeId, edge: &Edge<Route>| {
+    let by_kind = recover_by_kind(&cfg);
+    let by_payload = recover_exclusive_extents(&cfg, |_: EdgeId, edge: &Edge<Route>| {
         *edge.payload() == Route::Normal
     });
 
@@ -234,7 +254,8 @@ fn normality_in_the_edge_payload_is_honored_by_the_with_variant() {
     assert_eq!(by_payload.len(), 1);
     assert_eq!(by_payload[0].handler, HandlerRef::new(region, 0));
     assert_eq!(blocks(&by_payload[0]), [pad, end]);
-    assert_eq!(by_payload[0].status(), ExtentStatus::Isolated);
+    assert!(!by_payload[0].is_ambiguous());
+    assert_eq!(by_payload[0].boundary_blocks, BTreeSet::new());
 }
 
 /// Blocks `block` dominates, by definition: those the entry cannot reach once
@@ -264,13 +285,11 @@ fn promoting_by_dominance_claims_what_only_the_handler_reaches() {
     let canonical = fixture.cfg.clone();
 
     let mut derived = fixture.cfg.clone();
-    assert_eq!(promote_handler_extents(&mut derived), 1);
+    let decisions = promote_handler_extents(&mut derived);
+    assert_eq!(decisions, [(region, ExtentPromotionStatus::Promoted)]);
 
     let handler = HandlerRef::new(region, 0);
-    let promoted = derived
-        .handler(handler)
-        .and_then(|found| found.body.blocks())
-        .expect("promoted");
+    let promoted = derived.handler(handler).body.blocks().expect("promoted");
     assert_eq!(*promoted, dominated_by(&derived, pad));
     assert_eq!(
         promoted.iter().copied().collect::<Vec<_>>(),
@@ -278,11 +297,13 @@ fn promoting_by_dominance_claims_what_only_the_handler_reaches() {
         "the join is also reached directly from the body"
     );
     assert_eq!(
-        canonical.handler(handler).map(|found| &found.body),
-        Some(&HandlerBody::Unknown),
+        canonical.handler(handler).body,
+        HandlerBody::Unknown,
         "promotion is for a derived graph, and the canonical one is untouched"
     );
-    assert_eq!(promote_handler_extents(&mut derived), 0, "idempotent");
+    let once = derived.clone();
+    promote_handler_extents(&mut derived);
+    assert_eq!(derived, once, "idempotent");
 }
 
 #[test]
@@ -300,30 +321,36 @@ fn promoting_by_dominance_skips_known_bodies_and_unreachable_entries() {
         vec![unknown_catch(orphan), crate::shapes::catch(known)],
     );
 
-    let promoted = promote_handler_extents(&mut fixture.cfg);
+    let decisions = promote_handler_extents(&mut fixture.cfg);
 
-    assert_eq!(promoted, 1, "only the reachable unknown handler");
-    let orphan_body = &fixture
-        .cfg
-        .handler(HandlerRef::new(region, 0))
-        .expect("exists")
-        .body;
     assert_eq!(
-        *orphan_body,
+        decisions,
+        [
+            (RegionId::from_raw(0), ExtentPromotionStatus::Promoted),
+            (
+                region,
+                ExtentPromotionStatus::AmbiguousExtent {
+                    handler: HandlerRef::new(region, 0)
+                }
+            ),
+        ],
+        "only the reachable unknown handler's region"
+    );
+    assert_eq!(
+        fixture.cfg.handler(HandlerRef::new(region, 0)).body,
         HandlerBody::Unknown,
         "an unreachable entry stays unknown"
     );
     let known_body = fixture
         .cfg
         .handler(HandlerRef::new(region, 1))
-        .expect("exists")
         .body
         .blocks();
     assert_eq!(known_body.map(BTreeSet::len), Some(1));
-    assert!(fixture.cfg.regions()[0].handlers[0].body.is_known());
+    let first = &fixture.cfg.region(RegionId::from_raw(0)).handlers[0];
+    assert!(first.body.is_known());
     assert_eq!(
-        fixture.cfg.regions()[0].handlers[0].entry,
-        pad,
+        first.entry, pad,
         "the first region's pad is the one promoted"
     );
 }
@@ -376,32 +403,23 @@ fn disjoint_candidates_promote_every_region_atomically() {
         (a[1], BTreeSet::from([a1, spare])),
         (b, BTreeSet::from([b0])),
     ];
+    let extents = [
+        proposed(a[0], a0, bodies[0].1.clone()),
+        proposed(a[1], a1, bodies[1].1.clone()),
+        proposed(b, b0, bodies[2].1.clone()),
+    ];
 
-    let decisions = promote_exclusive_extents(&mut cfg, |handler| {
-        bodies
-            .iter()
-            .find(|(candidate, _)| *candidate == handler)
-            .map(|(_, body)| body.clone())
-    });
+    let decisions = promote_exclusive_extents(&mut cfg, &extents);
 
     assert_eq!(
         decisions,
         [
-            ExtentPromotionDecision {
-                region: a[0].region(),
-                status: ExtentPromotionStatus::Promoted
-            },
-            ExtentPromotionDecision {
-                region: b.region(),
-                status: ExtentPromotionStatus::Promoted
-            },
+            (a[0].region(), ExtentPromotionStatus::Promoted),
+            (b.region(), ExtentPromotionStatus::Promoted),
         ]
     );
     for (handler, body) in &bodies {
-        assert_eq!(
-            cfg.handler(*handler).and_then(|h| h.body.blocks()),
-            Some(body)
-        );
+        assert_eq!(cfg.handler(*handler).body.blocks(), Some(body));
     }
 }
 
@@ -414,27 +432,25 @@ fn one_ambiguous_handler_withholds_its_whole_region_and_only_that_region() {
         blocks: [a0, _, b0, _],
     } = candidates();
 
-    let decisions = promote_exclusive_extents(&mut cfg, |handler| {
-        if handler == a[0] {
-            Some(BTreeSet::from([a0]))
-        } else if handler == b {
-            Some(BTreeSet::from([b0]))
-        } else {
-            None
-        }
-    });
+    // `a[1]` has no candidate at all.
+    let extents = [
+        proposed(a[0], a0, BTreeSet::from([a0])),
+        proposed(b, b0, BTreeSet::from([b0])),
+    ];
+
+    let decisions = promote_exclusive_extents(&mut cfg, &extents);
 
     assert_eq!(
-        decisions[0].status,
+        decisions[0].1,
         ExtentPromotionStatus::AmbiguousExtent { handler: a[1] }
     );
-    assert_eq!(decisions[1].status, ExtentPromotionStatus::Promoted);
+    assert_eq!(decisions[1].1, ExtentPromotionStatus::Promoted);
     assert_eq!(
-        cfg.handler(a[0]).map(|h| &h.body),
-        Some(&HandlerBody::Unknown),
+        cfg.handler(a[0]).body,
+        HandlerBody::Unknown,
         "the sibling with a candidate is withheld too"
     );
-    assert!(cfg.handler(b).is_some_and(|h| h.body.is_known()));
+    assert!(cfg.handler(b).body.is_known());
 }
 
 #[test]
@@ -446,15 +462,13 @@ fn candidates_that_share_a_block_withhold_both_regions() {
         blocks: [a0, a1, b0, spare],
     } = candidates();
 
-    let decisions = promote_exclusive_extents(&mut cfg, |handler| {
-        Some(if handler == b {
-            BTreeSet::from([b0, spare])
-        } else if handler == a[0] {
-            BTreeSet::from([a0])
-        } else {
-            BTreeSet::from([a1, spare])
-        })
-    });
+    let extents = [
+        proposed(b, b0, BTreeSet::from([b0, spare])),
+        proposed(a[0], a0, BTreeSet::from([a0])),
+        proposed(a[1], a1, BTreeSet::from([a1, spare])),
+    ];
+
+    let decisions = promote_exclusive_extents(&mut cfg, &extents);
 
     // Region `a` is first in order, and its second handler overlaps region `b`.
     let overlap = ExtentPromotionStatus::OverlappingExtents {
@@ -462,14 +476,10 @@ fn candidates_that_share_a_block_withhold_both_regions() {
         second: b,
     };
     assert_eq!(decisions.len(), 2);
-    assert_eq!(decisions[0].status, overlap);
-    assert_eq!(decisions[1].status, overlap);
+    assert_eq!(decisions[0].1, overlap);
+    assert_eq!(decisions[1].1, overlap);
     for handler in [a[0], a[1], b] {
-        assert_eq!(
-            cfg.handler(handler).map(|h| &h.body),
-            Some(&HandlerBody::Unknown),
-            "{handler}"
-        );
+        assert_eq!(cfg.handler(handler).body, HandlerBody::Unknown, "{handler}");
     }
 }
 
@@ -487,16 +497,11 @@ fn recovered_extents_promoted_on_a_derived_graph_let_the_control_tree_emit_the_t
     let (_, before) = ControlTree::compute_with_report(&fixture.cfg);
     assert_eq!(before.unstructured_regions, [region]);
 
-    let extents = recover_exclusive_extents(&fixture.cfg);
+    let extents = recover_by_kind(&fixture.cfg);
     let mut derived = fixture.cfg.clone();
-    let decisions = promote_exclusive_extents(&mut derived, |handler| {
-        extents
-            .iter()
-            .find(|extent| extent.handler == handler && extent.status() != ExtentStatus::Ambiguous)
-            .map(|extent| extent.blocks.clone())
-    });
+    let decisions = promote_exclusive_extents(&mut derived, &extents);
 
-    assert_eq!(decisions[0].status, ExtentPromotionStatus::Promoted);
+    assert_eq!(decisions, [(region, ExtentPromotionStatus::Promoted)]);
     let (tree, report) = ControlTree::compute_with_report(&derived);
     assert!(report.is_fully_structured(), "{report:?}");
     assert_eq!(

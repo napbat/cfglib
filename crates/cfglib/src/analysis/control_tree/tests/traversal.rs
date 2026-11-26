@@ -10,7 +10,7 @@ use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
 use crate::flow::FlowEffect;
-use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
+use crate::region::{Handler, HandlerBody, HandlerKind, Region};
 use crate::test_util::{MockInst, ff};
 use crate::{ControlDescent, ControlNode, ControlNodeId, ControlTree, ControlVisitor};
 
@@ -181,7 +181,6 @@ fn try_child_bodies_are_try_handlers_then_finally() {
     cfg.add_edge(catch, after, EdgeKind::Fallthrough);
     cfg.add_edge(cleanup, after, EdgeKind::Fallthrough);
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [try_body].into_iter().collect(),
         handlers: vec![
             Handler {
@@ -196,7 +195,8 @@ fn try_child_bodies_are_try_handlers_then_finally() {
             },
         ],
         parent: None,
-    });
+    })
+    .unwrap();
 
     let tree = ControlTree::compute(&cfg);
     let try_node = tree

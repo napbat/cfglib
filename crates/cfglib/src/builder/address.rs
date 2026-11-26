@@ -849,12 +849,13 @@ fn add_regions<I: AddressInstruction, E>(
             .min_by_key(|(_, candidate)| span(&candidate.protected))
             .and_then(|(parent_index, _)| region_ids.get(parent_index).copied());
 
-        let region = cfg.add_region(Region {
-            id: RegionId::from_raw(0),
-            protected_blocks,
-            handlers: region_handlers,
-            parent,
-        });
+        let region = cfg
+            .add_region(Region {
+                protected_blocks,
+                handlers: region_handlers,
+                parent,
+            })
+            .expect("the builder creates every handler entry block and every parent region");
         region_ids.push(region);
         for (handler_position, &handler_index) in draft.handler_indices.iter().enumerate() {
             handler_refs[handler_index] = Some(HandlerRef::new(region, handler_position));

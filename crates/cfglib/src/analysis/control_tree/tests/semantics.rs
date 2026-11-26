@@ -89,7 +89,7 @@ fn raise_target<I, E>(cfg: &Cfg<I, E>, seed: u64, block: BlockId) -> Option<Bloc
 /// that returns is a catch body that ends, which the tree cannot tell from
 /// one that falls out into the code after it.
 fn regions_are_well_formed<I, E>(cfg: &Cfg<I, E>) -> bool {
-    if cfg.regions().is_empty() {
+    if cfg.region_count() == 0 {
         return true;
     }
     if cfg
@@ -105,8 +105,7 @@ fn regions_are_well_formed<I, E>(cfg: &Cfg<I, E>) -> bool {
         && !all.contains(&cfg.entry())
         && cfg
             .regions()
-            .iter()
-            .all(|region| region.protected_blocks.is_disjoint(&all))
+            .all(|(_, region)| region.protected_blocks.is_disjoint(&all))
 }
 
 /// The instructions a run executed, as (block, position) in order.
@@ -682,18 +681,15 @@ pub(super) fn assert_try_bodies_keep_to_their_region<I, E>(
         let Some(arm) = tree.handlers(handlers).first() else {
             continue;
         };
-        let region = cfg
-            .region(arm.handler.region())
-            .expect("a handler arm names a region of the graph");
+        let id = arm.handler.region();
+        let region = cfg.region(id);
         for block in blocks_of_try(tree, try_body) {
             let protected_elsewhere = cfg
                 .regions()
-                .iter()
-                .any(|other| other.id != region.id && other.protected_blocks.contains(&block));
+                .any(|(other, region)| other != id && region.protected_blocks.contains(&block));
             assert!(
                 !protected_elsewhere || region.protected_blocks.contains(&block),
-                "{block} sits in the try of {} but another region protects it in {context}\n{}",
-                region.id,
+                "{block} sits in the try of {id} but another region protects it in {context}\n{}",
                 render(tree)
             );
         }

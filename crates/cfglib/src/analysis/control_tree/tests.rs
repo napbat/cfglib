@@ -755,7 +755,6 @@ fn lift_jump_edge_produces_goto_and_reports_it() {
 
     cfg.add_edge(cfg.entry(), target, EdgeKind::Jump);
     cfg.add_region(crate::Region {
-        id: crate::RegionId::from_raw(0),
         protected_blocks: [target].into_iter().collect(),
         handlers: vec![crate::Handler {
             entry: pad,
@@ -763,7 +762,8 @@ fn lift_jump_edge_produces_goto_and_reports_it() {
             kind: crate::HandlerKind::CatchAll,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
 
     let (tree, report) = ControlTree::compute_with_report(&cfg);
     assert!(

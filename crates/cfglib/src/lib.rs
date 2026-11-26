@@ -283,12 +283,7 @@ pub use effects::{
     StatementTree, Summarizer, Touch, TreeItem, TreeNode, TreeNodeId, TreeSpan, TreeSpanValue,
     Write, WriteKind,
 };
-pub use exception::{
-    ClrExceptionRegion, ClrHandler, ClrHandlerKind, ExceptionDisposition, ExceptionFlow,
-    ExceptionPhase, SehExceptionRegion, SehHandler, SehHandlerKind, SehRegistration,
-    SehRegistrationChain, VectoredExceptionModel, VectoredHandler, VectoredHandlerId,
-    VectoredHandlerKind, VectoredHandlerOrder, VehModel, install_clr_region, install_seh_region,
-};
+pub use exception::{ExceptionDisposition, ExceptionFlow, ExceptionPhase};
 pub use flow::{
     CallInfo, CallSite, EdgeRole, Flow, FlowControl, FlowEffect, JumpTargets, Transfer, Transfers,
     UnresolvedRole, UnresolvedTransfer,
@@ -322,7 +317,7 @@ pub use graph::edge_traverse::{
     breadth_first_edges, depth_first_edges, shortest_path_edges, shortest_path_edges_in,
 };
 pub use graph::edge_view::{EdgeRef, EdgeView, FilteredEdges};
-pub use graph::eh::{EhBlockKind, EhEdge, EhEdgeKind, EhModel};
+pub use graph::eh::{EhBlockKind, EhModel};
 pub use graph::epoch::EpochMarks;
 pub use graph::fanout::{DenseFanout, Fanout, SortedMap};
 pub use graph::feedback::{FeedbackConfig, feedback_arc_set, linear_arrangement};
@@ -402,11 +397,9 @@ pub use memory::{
     MemoryAccess, MemoryAccessKind, MemoryAtomicity, MemoryEvent, MemoryEventInfo, MemoryOperations,
 };
 pub use region::{
-    Cleanup, CompletionReason, Continuation, ExclusiveExtent, ExtentIssue, ExtentPromotionDecision,
-    ExtentPromotionStatus, ExtentStatus, Handler, HandlerBody, HandlerFilters, HandlerKind,
-    HandlerMetadata, HandlerRef, HandlerTypes, Region, RegionId, RegionIndex,
-    promote_exclusive_extents, promote_handler_extents, recover_exclusive_extents,
-    recover_exclusive_extents_with,
+    Cleanup, CompletionReason, Continuation, ExclusiveExtent, ExtentIssue, ExtentPromotionStatus,
+    Handler, HandlerBody, HandlerKind, HandlerMetadata, HandlerRef, Region, RegionError, RegionId,
+    RegionIndex, promote_exclusive_extents, promote_handler_extents, recover_exclusive_extents,
 };
 pub use rewrite::Rewrite;
 pub use transform::block_order::{
