@@ -24,12 +24,8 @@
 
 extern crate alloc;
 use alloc::vec::Vec;
-use core::ops::ControlFlow;
 
 use crate::graph::dominator::{DominatorScratch, DominatorTree};
-use crate::graph::epoch::EpochMarks;
-use crate::graph::search::Visit;
-use crate::graph::traverse::{Outgoing, breadth_first_core};
 use crate::graph::view::{DenseId, GraphView, Positions, Renumbered, Reversed, Rooted};
 
 /// The strong articulation points and strong bridges of one strongly
@@ -93,10 +89,11 @@ pub struct StrongCutScratch {
     dominators: DominatorScratch,
     /// The position of each node in the component being read.
     positions: Positions,
-    /// The nodes of the component the search that tests the root reached.
-    reached: EpochMarks,
-    /// The nodes that search reached, in the order it reached them.
-    queue: Vec<usize>,
+    /// Whether each node of the component was reached by the search that
+    /// tests the root.
+    reached: Vec<bool>,
+    /// The nodes that search has yet to expand.
+    stack: Vec<usize>,
 }
 
 impl<N: DenseId> StrongCuts<N> {
@@ -179,8 +176,7 @@ fn collect<G: GraphView>(
         .expect("a component of two nodes has a lowest one");
     let forward = DominatorTree::compute_in(&mut scratch.dominators, &Rooted::new(&view, root));
     let reverse = Reversed::new(&view);
-    let backward =
-        DominatorTree::compute_in(&mut scratch.dominators, &Rooted::new(&reverse, root));
+    let backward = DominatorTree::compute_in(&mut scratch.dominators, &Rooted::new(&reverse, root));
     assert!(
         forward.preorder().len() == component.len() && backward.preorder().len() == component.len(),
         "the component is not strongly connected"
@@ -205,9 +201,9 @@ fn collect<G: GraphView>(
     // The component without the root stays strongly connected exactly when
     // one other node reaches every node but the root, and is reached by every
     // one, along paths that avoid the root.
-    let (reached, queue) = (&mut scratch.reached, &mut scratch.queue);
-    if !reaches_all_without(&view, root, reached, queue)
-        || !reaches_all_without(&reverse, root, reached, queue)
+    let (reached, stack) = (&mut scratch.reached, &mut scratch.stack);
+    if !reaches_all_without(&view, root, reached, stack)
+        || !reaches_all_without(&reverse, root, reached, stack)
     {
         cuts.articulation_points.push(component[root]);
     }
@@ -215,34 +211,35 @@ fn collect<G: GraphView>(
 
 /// Whether one node of `view` other than `removed` reaches every other node
 /// but `removed` along paths that avoid it.
+///
+/// The answer is a count, so the order is free and a stack keeps only the
+/// frontier. On the breadth-first core, whose queue keeps every node it
+/// reaches, over epoch marks, `api_strong_cuts_component_segment_ring` measured 13%
+/// to 31% slower than this loop.
 fn reaches_all_without<V: GraphView<NodeId = usize>>(
     view: &V,
     removed: usize,
-    reached: &mut EpochMarks,
-    queue: &mut Vec<usize>,
+    reached: &mut Vec<bool>,
+    stack: &mut Vec<usize>,
 ) -> bool {
     let start = usize::from(removed == 0);
-    reached.grow_to(view.node_bound());
-    reached.reset();
-    reached.mark(removed);
-    reached.mark(start);
-    queue.clear();
-    queue.push(start);
-    breadth_first_core::<_, _, ()>(
-        Outgoing,
-        view,
-        queue,
-        |_, _| ControlFlow::Continue(Visit::Descend),
-        |_, _, next, _| {
-            let new = !reached.is_marked(next);
-            if new {
-                reached.mark(next);
+    reached.clear();
+    reached.resize(view.node_bound(), false);
+    reached[removed] = true;
+    reached[start] = true;
+    stack.clear();
+    stack.push(start);
+    let mut count = 2;
+    while let Some(node) = stack.pop() {
+        for next in view.successors(node) {
+            if !reached[next] {
+                reached[next] = true;
+                count += 1;
+                stack.push(next);
             }
-            new
-        },
-    );
-    // The queue holds every node reached, `removed` aside.
-    queue.len() + 1 == view.node_bound()
+        }
+    }
+    count == view.node_bound()
 }
 
 #[cfg(test)]
