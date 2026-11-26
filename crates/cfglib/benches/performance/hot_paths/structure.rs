@@ -149,7 +149,7 @@ fn register_components_and_loops(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(
         DominatorTree::compute(&Rooted::new(&multi_latch, multi_latch_root));
     benchmark_case!(
         suite,
-        "directed_tarjan_scc",
+        "directed_scc_leaves_first",
         || SccDecomposition::compute(graph, SccNumbering::LeavesFirst),
         |result: &SccDecomposition<NodeId>| {
             let cycle_count = (NODE_COUNT - 1) / 32;
@@ -192,7 +192,7 @@ fn register_components_and_loops(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(
     let path = deep_path(DEEP_PATH_NODES, false);
     benchmark_case!(
         suite,
-        "directed_tarjan_scc_deep_path",
+        "directed_scc_leaves_first_deep_path",
         || SccDecomposition::compute(&path, SccNumbering::LeavesFirst),
         |result: &SccDecomposition<NodeId>| {
             assert_eq!(result.len(), DEEP_PATH_NODES);
@@ -205,13 +205,13 @@ fn register_components_and_loops(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(
     let cycle = deep_path(DEEP_PATH_NODES, true);
     benchmark_case!(
         suite,
-        "directed_tarjan_scc_deep_cycle",
+        "directed_scc_leaves_first_deep_cycle",
         || SccDecomposition::compute(&cycle, SccNumbering::LeavesFirst),
         |result: &SccDecomposition<NodeId>| assert_eq!(result.len(), 1)
     );
     benchmark_case!(
         suite,
-        "directed_kosaraju_scc_deep_path",
+        "directed_scc_sources_first_deep_path",
         || SccDecomposition::compute(&path, SccNumbering::SourcesFirst),
         |result: &SccDecomposition<NodeId>| {
             assert_eq!(result.len(), DEEP_PATH_NODES);

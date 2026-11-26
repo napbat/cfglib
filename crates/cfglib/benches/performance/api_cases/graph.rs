@@ -412,7 +412,7 @@ fn register_graph_algorithms(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "api_kosaraju_scc",
+        "api_scc_sources_first",
         || SccDecomposition::compute(&graph, SccNumbering::SourcesFirst),
         |result: &SccDecomposition<NodeId>| assert_eq!(
             result.components().map(<[_]>::len).sum::<usize>(),
@@ -421,13 +421,13 @@ fn register_graph_algorithms(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "api_condensation",
+        "api_scc_decompose_and_condense",
         || SccDecomposition::compute(&graph, SccNumbering::LeavesFirst).condensation(&graph),
         |result| assert!(topological_sort(result).is_some())
     );
     benchmark_case!(
         suite,
-        "api_condensation_of",
+        "api_scc_condensation",
         || components.condensation(&graph),
         |result| assert_eq!(result.node_count(), components.len())
     );

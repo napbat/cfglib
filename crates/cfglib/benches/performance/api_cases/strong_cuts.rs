@@ -18,14 +18,14 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     let mut scratch = StrongCutScratch::default();
     benchmark_case!(
         suite,
-        "api_strong_cuts_segment_ring",
+        "api_strong_cuts_whole_graph_segment_ring",
         || graph_cuts(&graph, &mut scratch),
         |cuts: &StrongCuts<NodeId>| assert_eq!(cuts, &expected)
     );
     let mut scratch = StrongCutScratch::default();
     benchmark_case!(
         suite,
-        "api_strong_cuts_of_segment_ring",
+        "api_strong_cuts_component_segment_ring",
         || StrongCuts::compute_in(&mut scratch, &graph, &component),
         |cuts: &StrongCuts<NodeId>| assert_eq!(cuts, &expected)
     );

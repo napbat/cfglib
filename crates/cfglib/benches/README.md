@@ -31,7 +31,7 @@ predecessors, and asserts that relabeling made it worse. Each
 `structured_relabeled` table is followed by an ordered-compaction table: the
 same arrival compacted by `compact` in `NodeOrder::Insertion` and in each
 rooted search order, with the locality of the numbering, both walks and
-`tarjan_scc` over it, so the `compact` rows are the before and the ordered
+`scc_leaves_first` over it, so the `compact` rows are the before and the ordered
 rows the after. The last table is procedure scale: five hundred nodes and
 fifteen hundred edges built without a stated capacity and thrown away, a
 thousand times over, where the whole measurement is the fixed per-append

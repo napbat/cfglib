@@ -1,6 +1,6 @@
 //! `linear_arrangement` and `feedback_arc_set` over cyclic graphs.
 //!
-//! The timed cases run on the branchy chain behind `api_kosaraju_scc`, whose
+//! The timed cases run on the branchy chain behind `api_scc_sources_first`, whose
 //! latches close a cycle every 32 nodes. Before the plain set is timed, its
 //! oracle prints how the set compares with the depth-first back edges over
 //! that chain and over a denser tangle. The sizes are reported, not asserted:

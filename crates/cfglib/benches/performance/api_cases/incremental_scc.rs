@@ -72,7 +72,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "incremental_scc_call_graph_kosaraju_per_batch",
+        "incremental_scc_call_graph_sources_first_per_batch",
         || decompose_per_batch(&calls, &call_batches, &call),
         |components: &SccDecomposition<NodeId>| {
             assert_eq!(partition(components), expected);
@@ -112,7 +112,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "incremental_scc_nearly_acyclic_kosaraju_per_batch",
+        "incremental_scc_nearly_acyclic_sources_first_per_batch",
         || decompose_per_batch(&acyclic, &acyclic_batches, &()),
         |components: &SccDecomposition<NodeId>| {
             assert_eq!(partition(components), expected);

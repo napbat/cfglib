@@ -43,7 +43,7 @@
 //! `BreadthFirst` and `ReversePostorder` order, the searches rooted at the
 //! nodes with no predecessor. Each order reports the locality of the
 //! numbering it produced, then its compaction, both neighbor walks and
-//! `tarjan_scc` over the result. The `compact` rows, in `Insertion` order,
+//! `scc_leaves_first` over the result. The `compact` rows, in `Insertion` order,
 //! are the baseline: the gain of an order is the drop from them.
 
 use std::alloc::System;
@@ -625,7 +625,7 @@ fn run_ordered(
             ("compaction", compacted),
             ("successor_scan", scan),
             ("predecessor_scan", reverse_scan),
-            ("tarjan_scc", scc),
+            ("scc_leaves_first", scc),
         ],
         [successors, predecessors, components],
     )
