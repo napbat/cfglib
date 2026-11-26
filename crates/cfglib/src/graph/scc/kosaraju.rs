@@ -27,7 +27,7 @@ pub(super) fn sources_first<G: GraphView>(graph: &G) -> SccDecomposition<G::Node
             continue;
         }
 
-        let index = word(result.len());
+        let index = word(result.component_count());
         result.component_of[root.index()] = index;
         stack.push(root);
         while let Some(node) = stack.pop() {

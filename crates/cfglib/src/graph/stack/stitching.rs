@@ -58,7 +58,10 @@ impl<S: Clone + Eq> StackResolution<S> {
                     state.cycle_cut_count += 1;
                     continue;
                 }
-                if !state.budget.admit_length(work.path.len() + partial.len()) {
+                if !state
+                    .budget
+                    .admit_length(work.path.edge_count() + partial.edge_count())
+                {
                     continue;
                 }
                 let next = match partial.append_to(graph, work.path.clone()) {

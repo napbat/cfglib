@@ -78,7 +78,7 @@ fn assert_current(graph: &Graph<(), ()>, components: &IncrementalScc<NodeId>) {
     }
 
     let snapshot = components.decomposition();
-    assert_eq!(snapshot.len(), oracle.len());
+    assert_eq!(snapshot.component_count(), oracle.component_count());
     let mut position = 0;
     for nodes in snapshot.components() {
         assert_eq!(nodes, oracle.component(nodes[0]).nodes());
@@ -499,7 +499,7 @@ fn removed_slots_belong_to_no_component() {
     graph.add_edge(node(3), node(0), ());
     let change = components.insert_edge(&graph, node(3), node(0));
     assert_eq!(change.merged, [0, 3]);
-    assert_eq!(components.decomposition().len(), 1);
+    assert_eq!(components.decomposition().component_count(), 1);
     assert_current(&graph, &components);
 }
 

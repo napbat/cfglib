@@ -305,7 +305,7 @@ impl ViewCheck for Condensations {
         let numbered = decomposition.condensation(view);
         assert_eq!(
             numbered.node_ids().count(),
-            decomposition.len(),
+            decomposition.component_count(),
             "{label}: a sources-first condensation has one node per component"
         );
         let index_of = |component: &BTreeSet<usize>| {

@@ -280,7 +280,7 @@ mod tests {
 
         // The view impl feeds the generic algorithms directly.
         let sccs = SccDecomposition::compute(&graph, SccNumbering::LeavesFirst);
-        assert_eq!(sccs.len(), 1, "a <-> b is one component");
+        assert_eq!(sccs.component_count(), 1, "a <-> b is one component");
         assert_eq!(graph.keys().count(), 2);
     }
 

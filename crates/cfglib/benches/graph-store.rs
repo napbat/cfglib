@@ -597,7 +597,7 @@ fn run_ordered(
     let (successors, scan) = measure(|| walk_neighbors(&graph, true));
     let (predecessors, reverse_scan) = measure(|| walk_neighbors(&graph, false));
     let (components, scc) =
-        measure(|| SccDecomposition::compute(&graph, SccNumbering::LeavesFirst).len());
+        measure(|| SccDecomposition::compute(&graph, SccNumbering::LeavesFirst).component_count());
     (
         vec![
             ("compaction", compacted),

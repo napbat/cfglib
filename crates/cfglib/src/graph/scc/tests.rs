@@ -24,7 +24,7 @@ fn cfg_uses_generic_scc_algorithm() {
     cfg.add_edge(cfg.entry(), next, EdgeKind::Fallthrough);
 
     let result = leaves_first(&cfg);
-    assert_eq!(result.len(), 2);
+    assert_eq!(result.component_count(), 2);
     assert!(result.is_dag(&cfg));
 }
 
@@ -63,7 +63,7 @@ fn directed_graph_cycle_forms_one_component() {
     graph.add_edge(right, left, ());
 
     let result = leaves_first(&graph);
-    assert_eq!(result.len(), 1);
+    assert_eq!(result.component_count(), 1);
     assert!(result.component(left).contains(right));
     assert_eq!(result.component_index(left), result.component_index(right));
     assert!(!result.is_dag(&graph));
@@ -114,7 +114,11 @@ fn kosaraju_and_tarjan_agree_on_the_partition() {
         let kosaraju = sources_first(&graph);
         let tarjan = leaves_first(&graph);
         assert_eq!(partition(&kosaraju), partition(&tarjan), "{name}");
-        assert_eq!(kosaraju.len(), tarjan.len(), "{name}");
+        assert_eq!(
+            kosaraju.component_count(),
+            tarjan.component_count(),
+            "{name}"
+        );
         assert_eq!(kosaraju.is_dag(&graph), tarjan.is_dag(&graph), "{name}");
         for node in graph.node_ids() {
             assert_eq!(
@@ -238,7 +242,11 @@ fn condensation_numbers_its_nodes_by_the_decomposition() {
             ("kosaraju", sources_first(&graph)),
         ] {
             let dag = components.condensation(&graph);
-            assert_eq!(dag.node_count(), components.len(), "{name}/{algorithm}");
+            assert_eq!(
+                dag.node_count(),
+                components.component_count(),
+                "{name}/{algorithm}"
+            );
 
             // Node index IS component index: every graph edge crossing two
             // components appears as that pair, and nothing else does.
@@ -415,7 +423,11 @@ fn components_are_ascending_runs_of_one_flat_array() {
             ("kosaraju", sources_first(&graph)),
         ] {
             let label = format!("{name}/{algorithm}");
-            assert_eq!(result.components().len(), result.len(), "{label}");
+            assert_eq!(
+                result.components().len(),
+                result.component_count(),
+                "{label}"
+            );
             assert_eq!(result.is_empty(), graph.node_count() == 0, "{label}");
 
             let mut seen = BTreeSet::new();
@@ -533,7 +545,7 @@ fn classic_tarjan(graph: &Graph<(), ()>) -> SccDecomposition<NodeId> {
                 continue;
             }
             if lowlinks[node.index()] == indices[node.index()] {
-                let component_index = result.len();
+                let component_index = result.component_count();
                 while let Some(member) = stack.pop() {
                     on_stack[member.index()] = false;
                     result.component_of[member.index()] = word(component_index);

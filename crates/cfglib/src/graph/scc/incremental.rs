@@ -128,7 +128,7 @@ use crate::identity::{NO_INDEX, slot, word};
 /// // The snapshot numbers the components sources first, as
 /// // `SccNumbering::SourcesFirst` does.
 /// let snapshot = components.decomposition();
-/// assert_eq!(snapshot.len(), 4);
+/// assert_eq!(snapshot.component_count(), 4);
 /// assert!(snapshot.component_index(a) < snapshot.component_index(d));
 /// ```
 #[derive(Debug, Clone)]

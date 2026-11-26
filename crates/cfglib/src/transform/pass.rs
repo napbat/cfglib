@@ -122,7 +122,7 @@ impl PassReport {
 
     /// Returns the number of completed pass executions.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub fn execution_count(&self) -> usize {
         self.executions.len()
     }
 
@@ -241,7 +241,7 @@ impl<'pass, T, E> PassPipeline<'pass, T, E> {
 
     /// Returns the number of scheduled executions.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub fn pass_count(&self) -> usize {
         self.passes.len()
     }
 
@@ -326,7 +326,7 @@ mod tests {
         let report = pipeline.run_infallible(&mut target);
 
         assert_eq!(target, vec!["first", "last"]);
-        assert_eq!(report.len(), 3);
+        assert_eq!(report.execution_count(), 3);
         assert_eq!(report.changed_count(), 2);
         assert!(report.is_changed());
         assert!(!report.executions()[1].changed());
@@ -365,7 +365,7 @@ mod tests {
         assert_eq!(target, 11);
         assert_eq!(failure.pass(), PassId::new("fail"));
         assert_eq!(failure.error(), &TestError);
-        assert_eq!(failure.completed().len(), 1);
+        assert_eq!(failure.completed().execution_count(), 1);
         assert_eq!(failure.to_string(), "pass `fail` failed: stopped");
     }
 

@@ -643,12 +643,12 @@ fn the_view_reports_slots_so_dense_analyses_stay_in_bounds() {
     // A removed node is not a node of the view at all, so a whole-graph
     // partition reports no phantom singleton for it.
     let uncompacted = SccDecomposition::compute(&graph, SccNumbering::LeavesFirst);
-    assert_eq!(uncompacted.len(), 3);
+    assert_eq!(uncompacted.component_count(), 3);
 
     graph.compact(NodeOrder::Insertion);
     assert_eq!(GraphView::node_bound(&graph), 3);
     assert_eq!(
-        SccDecomposition::compute(&graph, SccNumbering::LeavesFirst).len(),
+        SccDecomposition::compute(&graph, SccNumbering::LeavesFirst).component_count(),
         3
     );
 }

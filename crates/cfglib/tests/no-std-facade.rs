@@ -264,7 +264,11 @@ fn a_graph_store_runs_traversals_and_components_on_owned_payloads() {
         "emit now feeds back into check"
     );
     let components = SccDecomposition::compute(&graph, SccNumbering::LeavesFirst);
-    assert_eq!(components.len(), 2, "parse, and the check-lower-emit cycle");
+    assert_eq!(
+        components.component_count(),
+        2,
+        "parse, and the check-lower-emit cycle"
+    );
 
     graph.remove_node(ids[0]);
     let renumbering = graph.compact(NodeOrder::Insertion);

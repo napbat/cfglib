@@ -227,7 +227,7 @@ impl<N: DenseId> ReachIndex<N> {
             config.supportive
         );
         let components = SccDecomposition::compute(graph, SccNumbering::SourcesFirst);
-        let count = components.len();
+        let count = components.component_count();
         // The condensation's edges, straight into the two fan-outs rather
         // than through a condensed graph. Every component index fits a `u32`
         // because the node bound does, with `u32::MAX` itself left free as a

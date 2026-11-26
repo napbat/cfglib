@@ -28,7 +28,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
             (candidate, report)
         },
         |(candidate, report)| {
-            assert_eq!(report.len(), 2);
+            assert_eq!(report.execution_count(), 2);
             assert_eq!(report.changed_count(), 1);
             assert!(verify(candidate).is_ok());
         }

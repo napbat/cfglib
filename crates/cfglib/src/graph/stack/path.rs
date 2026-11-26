@@ -349,7 +349,7 @@ impl<S: Clone + Eq> StackPath<S> {
 
     /// Number of stored graph edges in the path.
     #[must_use]
-    pub const fn len(&self) -> usize {
+    pub const fn edge_count(&self) -> usize {
         self.edge_count
     }
 

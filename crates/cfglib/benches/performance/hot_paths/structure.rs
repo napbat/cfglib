@@ -147,7 +147,7 @@ fn register_components_and_loops(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(
         || SccDecomposition::compute(graph, SccNumbering::LeavesFirst),
         |result: &SccDecomposition<NodeId>| {
             let cycle_count = (NODE_COUNT - 1) / 32;
-            assert_eq!(result.len(), NODE_COUNT - 16 * cycle_count);
+            assert_eq!(result.component_count(), NODE_COUNT - 16 * cycle_count);
             let mut seen = vec![false; NODE_COUNT];
             for (component_index, component) in result.components().enumerate() {
                 assert_ne!(component, []);
@@ -189,7 +189,7 @@ fn register_components_and_loops(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(
         "directed_scc_leaves_first_deep_path",
         || SccDecomposition::compute(&path, SccNumbering::LeavesFirst),
         |result: &SccDecomposition<NodeId>| {
-            assert_eq!(result.len(), DEEP_PATH_NODES);
+            assert_eq!(result.component_count(), DEEP_PATH_NODES);
             assert_eq!(
                 result.component_index(NodeId::from_index(0)),
                 DEEP_PATH_NODES - 1
@@ -201,14 +201,14 @@ fn register_components_and_loops(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(
         suite,
         "directed_scc_leaves_first_deep_cycle",
         || SccDecomposition::compute(&cycle, SccNumbering::LeavesFirst),
-        |result: &SccDecomposition<NodeId>| assert_eq!(result.len(), 1)
+        |result: &SccDecomposition<NodeId>| assert_eq!(result.component_count(), 1)
     );
     benchmark_case!(
         suite,
         "directed_scc_sources_first_deep_path",
         || SccDecomposition::compute(&path, SccNumbering::SourcesFirst),
         |result: &SccDecomposition<NodeId>| {
-            assert_eq!(result.len(), DEEP_PATH_NODES);
+            assert_eq!(result.component_count(), DEEP_PATH_NODES);
             assert_eq!(result.component_index(NodeId::from_index(0)), 0);
         }
     );

@@ -269,14 +269,14 @@ impl<N: DenseId> SccDecomposition<N> {
 
     /// Return the number of components.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub fn component_count(&self) -> usize {
         self.offsets.len() - 1
     }
 
     /// Return whether the decomposition contains no components.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.component_count() == 0
     }
 
     /// Return whether `graph` is acyclic.
@@ -435,7 +435,7 @@ impl<N: DenseId> SccDecomposition<N> {
     /// let dag = components.condensation(&grammar);
     ///
     /// // The cycle is one component, and the numbering is the decomposition's.
-    /// assert_eq!(dag.node_bound(), components.len());
+    /// assert_eq!(dag.node_bound(), components.component_count());
     /// assert_eq!(components.component_index(expr), components.component_index(term));
     /// assert_eq!(dag[NodeId::from_index(components.component_index(stmt))], ());
     ///
@@ -479,8 +479,8 @@ impl<N: DenseId> SccDecomposition<N> {
             graph.node_bound()
         );
 
-        let mut condensed = Graph::with_capacity(self.len(), self.len());
-        for _ in 0..self.len() {
+        let mut condensed = Graph::with_capacity(self.component_count(), self.component_count());
+        for _ in 0..self.component_count() {
             condensed.add_node(());
         }
         self.for_each_component_edge(graph, |from, to| {

@@ -105,17 +105,8 @@ impl StackPartialPath {
 
     /// Number of stored edges in this summary.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub fn edge_count(&self) -> usize {
         self.edges.len()
-    }
-
-    /// Whether this summary contains no stored edges.
-    ///
-    /// Always `false`: a summary is recorded after the edge that reached its
-    /// end, and a deserialized one without an edge is rejected.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.edges.is_empty()
     }
 }
 

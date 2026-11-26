@@ -431,7 +431,7 @@ fn register_graph_algorithms(suite: &mut BenchmarkSuite<'_>) {
         suite,
         "api_scc_condensation",
         || components.condensation(&graph),
-        |result| assert_eq!(result.node_count(), components.len())
+        |result| assert_eq!(result.node_count(), components.component_count())
     );
     benchmark_case!(
         suite,
