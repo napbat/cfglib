@@ -6,18 +6,15 @@
 extern crate alloc;
 extern crate std;
 
-use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::iter;
 use core::mem;
 
 use crate::graph::dominator::DominatorTree;
 use crate::graph::store::{EdgeId, Graph, NodeId, NodeOrder, Renumbering};
 use crate::graph::structure::is_reducible;
 use crate::graph::traverse::{breadth_first, reverse_postorder};
-use crate::graph::view::Direction;
-use crate::graph::view::{GraphView, Rooted};
+use crate::graph::view::{Direction, Rooted, VirtualRoot};
 use crate::test_util::rng::Rng;
 
 type Store = Graph<u64, u64>;
@@ -99,51 +96,6 @@ fn random_roots(graph: &Store, rng: &mut Rng) -> Vec<NodeId> {
         .collect()
 }
 
-/// `graph` with one more node, numbered `graph.node_bound()`, whose
-/// successors are `roots` in order: the definition of a reverse postorder
-/// from several roots.
-struct VirtualRoot<'g> {
-    graph: &'g Store,
-    roots: &'g [NodeId],
-}
-
-impl VirtualRoot<'_> {
-    fn root(&self) -> NodeId {
-        NodeId::from_index(self.graph.node_bound())
-    }
-}
-
-impl GraphView for VirtualRoot<'_> {
-    type NodeId = NodeId;
-
-    fn node_bound(&self) -> usize {
-        self.graph.node_bound() + 1
-    }
-
-    fn node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
-        self.graph.node_ids().chain(iter::once(self.root()))
-    }
-
-    fn successors(&self, node: NodeId) -> impl Iterator<Item = NodeId> + '_ {
-        let successors: Box<dyn Iterator<Item = NodeId>> = if node == self.root() {
-            Box::new(self.roots.iter().copied())
-        } else {
-            Box::new(self.graph.successors(node))
-        };
-        successors
-    }
-
-    fn predecessors(&self, node: NodeId) -> impl Iterator<Item = NodeId> + '_ {
-        let predecessors: Box<dyn Iterator<Item = NodeId>> = if node == self.root() {
-            Box::new(iter::empty())
-        } else {
-            let from_root = self.roots.contains(&node).then(|| self.root());
-            Box::new(self.graph.predecessors(node).chain(from_root))
-        };
-        predecessors
-    }
-}
-
 /// The old identities in the order `order` numbers them, computed the plain
 /// way: insertion by the slot order alone, breadth-first by one traversal
 /// per root, reverse postorder by one traversal from a virtual root.
@@ -168,10 +120,10 @@ fn oracle(graph: &Store, order: NodeOrder<'_>) -> Vec<NodeId> {
             }
         }
         NodeOrder::ReversePostorder(roots) => {
-            let view = VirtualRoot { graph, roots };
-            let ranked = reverse_postorder(&view, view.root(), Direction::Forward);
+            let view = VirtualRoot::new(graph, roots);
+            let ranked = reverse_postorder(&view, view.virtual_root(), Direction::Forward);
             for node in ranked.into_iter().skip(1) {
-                visit(node, &mut sequence);
+                visit(NodeId::from_index(node), &mut sequence);
             }
         }
         NodeOrder::Explicit(nodes) => {

@@ -192,7 +192,9 @@ pub fn depth_first_preorder<G: GraphView>(
     start: G::NodeId,
     direction: Direction,
 ) -> Vec<G::NodeId> {
-    by_axis!(direction, preorder(graph, start))
+    assert_in_bound(graph, start, "start node");
+    let mut visited = vec![false; graph.node_bound()];
+    by_axis!(direction, preorder(graph, [start.index()], &mut visited))
 }
 
 /// Return nodes in depth-first postorder from `start`.
@@ -209,7 +211,8 @@ pub fn depth_first_postorder<G: GraphView>(
     start: G::NodeId,
     direction: Direction,
 ) -> Vec<G::NodeId> {
-    by_axis!(direction, postorder(graph, start))
+    assert_in_bound(graph, start, "start node");
+    postorder_in(graph, [start], direction, &mut Vec::new())
 }
 
 /// Return reverse postorder from `start`.
@@ -228,27 +231,62 @@ pub fn reverse_postorder<G: GraphView>(
     order
 }
 
-fn preorder<G: GraphView, A: Adjacency>(axis: A, graph: &G, start: G::NodeId) -> Vec<G::NodeId> {
-    depth_first_order::<G, A, false>(axis, graph, start)
+/// The postorder of the depth-first forest grown from each of `seeds` in
+/// turn, over caller-owned marks.
+///
+/// A seed reached from an earlier one adds nothing, so the forest visits each
+/// node once: this is the postorder from a virtual root whose successors are
+/// the seeds, in order, without the root. `visited` is cleared and sized to
+/// the node bound, and holds the reached nodes afterwards.
+///
+/// # Panics
+///
+/// Panics when a seed is not a node in `graph`.
+pub(crate) fn postorder_in<G: GraphView>(
+    graph: &G,
+    seeds: impl IntoIterator<Item = G::NodeId>,
+    direction: Direction,
+    visited: &mut Vec<bool>,
+) -> Vec<G::NodeId> {
+    visited.clear();
+    visited.resize(graph.node_bound(), false);
+    let seeds = seeds.into_iter().map(|seed| {
+        assert_in_bound(graph, seed, "seed node");
+        seed.index()
+    });
+    by_axis!(direction, postorder(graph, seeds, visited))
 }
 
-fn postorder<G: GraphView, A: Adjacency>(axis: A, graph: &G, start: G::NodeId) -> Vec<G::NodeId> {
-    depth_first_order::<G, A, true>(axis, graph, start)
+fn preorder<G: GraphView, A: Adjacency>(
+    axis: A,
+    graph: &G,
+    seeds: impl IntoIterator<Item = usize>,
+    visited: &mut [bool],
+) -> Vec<G::NodeId> {
+    depth_first_order::<G, A, false>(axis, graph, seeds, visited)
+}
+
+fn postorder<G: GraphView, A: Adjacency>(
+    axis: A,
+    graph: &G,
+    seeds: impl IntoIterator<Item = usize>,
+    visited: &mut [bool],
+) -> Vec<G::NodeId> {
+    depth_first_order::<G, A, true>(axis, graph, seeds, visited)
 }
 
 fn depth_first_order<G: GraphView, A: Adjacency, const POST: bool>(
     axis: A,
     graph: &G,
-    start: G::NodeId,
+    seeds: impl IntoIterator<Item = usize>,
+    visited: &mut [bool],
 ) -> Vec<G::NodeId> {
-    assert_in_bound(graph, start, "start node");
-    let mut visited = vec![false; graph.node_bound()];
     let mut order = Order::<G::NodeId, POST>(Vec::with_capacity(graph.node_bound()));
     depth_first_core(
         axis,
         graph,
-        [start.index()],
-        visited.as_mut_slice(),
+        seeds,
+        visited,
         &mut DepthFirstStack::default(),
         &mut order,
     );

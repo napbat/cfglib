@@ -11,10 +11,13 @@ extern crate alloc;
 
 use alloc::vec;
 use alloc::vec::Vec;
-use core::mem;
+use core::ops::ControlFlow;
 
 use super::Graph;
 use super::id::{Id, IdTag, NodeTag};
+use crate::graph::search::Visit;
+use crate::graph::traverse::{Outgoing, breadth_first_core, postorder_in};
+use crate::graph::view::Direction;
 use crate::identity::NO_INDEX;
 
 /// How [`Graph::compact`] numbers the surviving nodes.
@@ -89,7 +92,12 @@ impl Numbering {
     /// Give `node` the next number unless it has one, and report whether it
     /// was numbered now.
     fn assign<T: IdTag>(&mut self, node: Id<T>) -> bool {
-        let entry = &mut self.map[node.index()];
+        self.assign_slot(node.index())
+    }
+
+    /// [`assign`](Self::assign) by slot.
+    fn assign_slot(&mut self, slot: usize) -> bool {
+        let entry = &mut self.map[slot];
         if *entry != NO_INDEX {
             return false;
         }
@@ -132,8 +140,8 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     }
 
     fn number_breadth_first(&self, roots: &[Id<NT>], numbering: &mut Numbering) {
-        // Numbering a node when it is discovered makes the queue the order,
-        // so the queue doubles as the record of it.
+        // Numbering a node when it is discovered makes the queue the order, so
+        // the search's own marks are the numbering.
         let mut queue = Vec::new();
         for &root in roots {
             self.assert_live_endpoint(root, "root");
@@ -141,53 +149,27 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
                 continue;
             }
             queue.clear();
-            queue.push(root);
-            let mut head = 0;
-            while let Some(&node) = queue.get(head) {
-                head += 1;
-                for next in self.successors(node) {
-                    if numbering.assign(next) {
-                        queue.push(next);
-                    }
-                }
-            }
+            queue.push(root.index());
+            breadth_first_core::<_, _, ()>(
+                Outgoing,
+                self,
+                &mut queue,
+                |_, _| ControlFlow::Continue(Visit::Descend),
+                |_, _, to, _| numbering.assign_slot(to),
+            );
         }
     }
 
     fn number_reverse_postorder(&self, roots: &[Id<NT>], numbering: &mut Numbering) {
-        let mut visited = vec![false; self.node_bound()];
-        let mut postorder = Vec::new();
-        // A node is pushed to be entered and, once entered, again flagged to
-        // be finished after everything it reached. Its successors go on top
-        // in reverse, so the first is searched first, as a recursive search
-        // would. An eight-byte entry per pushed edge costs less than a frame
-        // holding an adjacency cursor per node on a path that can run the
-        // length of the graph.
-        let mut stack = Vec::new();
-        let mut successors = Vec::new();
         for &root in roots {
             self.assert_live_endpoint(root, "root");
-            stack.push((root, false));
-            while let Some((node, finished)) = stack.pop() {
-                if finished {
-                    postorder.push(node);
-                    continue;
-                }
-                if mem::replace(&mut visited[node.index()], true) {
-                    continue;
-                }
-                stack.push((node, true));
-                successors.clear();
-                successors.extend(self.successors(node));
-                stack.extend(
-                    successors
-                        .iter()
-                        .rev()
-                        .filter(|next| !visited[next.index()])
-                        .map(|&next| (next, false)),
-                );
-            }
         }
+        let postorder = postorder_in(
+            self,
+            roots.iter().copied(),
+            Direction::Forward,
+            &mut Vec::new(),
+        );
         for &node in postorder.iter().rev() {
             numbering.assign(node);
         }
