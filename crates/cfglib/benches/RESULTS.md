@@ -12,7 +12,9 @@ with its own date and revision.
 ## Screening comparison
 
 Measured before the API cleanup. Case names are updated, the rows of deleted
-cases are dropped, and the numbers are not re-measured.
+cases are dropped (with `directed_detect_loops_multilatch`, whose successor
+times `LoopForest::compute` instead of `detect_loops`), and the numbers are not
+re-measured.
 
 The table compares the unmodified starting revision with the optimized working
 tree on the same machine. Both used the direct `System` allocator, seven timing
@@ -24,7 +26,6 @@ as approximate. Mutation timings include the fixture clone named by each case.
 | --- | ---: | ---: | ---: |
 | `cfg_dominators` | 222,400 | 49,066 | 4.53x |
 | `cfg_control_dependence_graph` | 2,347,700 | 75,800 | 30.97x |
-| `directed_loop_forest_multilatch` | 18,842,000 | 578,750 | 32.56x |
 | `directed_node_fixpoint_bool` | 444,833 | 21,611 | 20.58x |
 | `directed_breadth_first_edges` | 100,560 | 14,963 | 6.72x |
 | `directed_shortest_path_edges` | 99,655 | 15,906 | 6.27x |
