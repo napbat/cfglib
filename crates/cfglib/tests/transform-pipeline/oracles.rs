@@ -99,11 +99,7 @@ pub fn assert_surviving_payloads_unchanged<E: Payload>(
     for edge in before.edge_ids().filter(|&edge| after.contains_edge(edge)) {
         let (old, new) = (before.edge(edge), after.edge(edge));
         assert_eq!(old.payload(), new.payload(), "{context}: payload of {edge}");
-        assert_eq!(
-            old.weight().map(f64::to_bits),
-            new.weight().map(f64::to_bits),
-            "{context}: weight of {edge}"
-        );
+        assert_eq!(old.weight(), new.weight(), "{context}: weight of {edge}");
     }
 }
 

@@ -5,7 +5,7 @@ use std::fmt::Debug;
 
 use cfglib::{
     BasicBlock, BlockId, Cfg, DisplayInstr, DominatorTree, Edge, EdgeId, EdgeKind, ExceptionFlow,
-    ExceptionPhase, NodeOrder, verify,
+    ExceptionPhase, NodeOrder, Probability, verify,
 };
 use serde_json::{Value, json};
 
@@ -74,11 +74,7 @@ where
         assert_eq!(actual.source(), expected.source(), "{edge}");
         assert_eq!(actual.target(), expected.target(), "{edge}");
         assert_eq!(actual.kind(), expected.kind(), "{edge}");
-        assert_eq!(
-            actual.weight().map(f64::to_bits),
-            expected.weight().map(f64::to_bits),
-            "{edge}"
-        );
+        assert_eq!(actual.weight(), expected.weight(), "{edge}");
         assert_eq!(actual.payload(), expected.payload(), "{edge}");
     }
     assert_eq!(actual.regions(), expected.regions());
@@ -124,7 +120,8 @@ fn evolve(mut cfg: Cfg<Op, Route>) -> (Cfg<Op, Route>, Renumbered, Renumbered) {
     let late = cfg.block_ids().last().expect("the fixture has blocks");
     let fresh = cfg.new_block();
     cfg.block_mut(fresh).push(Op::Call("fresh".to_owned()));
-    cfg.add_weighted_edge_with_payload(cfg.entry(), fresh, EdgeKind::Call, 0.5, Route::case(9));
+    let half = Probability::from_f64(0.5).expect("a probability");
+    cfg.add_weighted_edge_with_payload(cfg.entry(), fresh, EdgeKind::Call, half, Route::case(9));
     cfg.remove_block(late);
 
     let (block_bound, edge_bound) = (cfg.block_bound(), cfg.edge_bound());
@@ -203,7 +200,11 @@ fn the_fidelity_path_keeps_what_the_text_form_cannot() {
     let original = rich_cfg();
     let decoded: Cfg<Op, Route> = round_trip(&original);
 
-    let weights: Vec<_> = decoded.edges().filter_map(|edge| edge.weight()).collect();
+    let weights: Vec<_> = decoded
+        .edges()
+        .filter_map(|edge| edge.weight())
+        .map(Probability::to_f64)
+        .collect();
     assert_eq!(weights, [0.75, 0.25, 0.5]);
     assert!(decoded.edges().any(|edge| edge.payload().case == Some(3)));
     assert!(

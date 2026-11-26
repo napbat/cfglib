@@ -276,7 +276,7 @@ pub use dataflow::slot_fixpoint::{
 };
 pub use dataflow::stream::{SolveStats, stream_edge_problem, stream_node_problem, stream_problem};
 pub use display::{DisplayInstr, IndentedWriter};
-pub use edge::{Edge, EdgeId, EdgeKind, EdgeTag, KindedEdge};
+pub use edge::{Edge, EdgeId, EdgeKind, EdgeTag, KindedEdge, Probability};
 pub use effects::{
     Access, AccessShape, Address, CaptureBuilder, Captured, CapturedValue, DialectEffects, Effect,
     Exit, Expr, ExprId, Exprs, Opaque, RaiseOrigin, Raised, RtlEffect, SelectShape, StateTouch,
@@ -302,11 +302,10 @@ pub use graph::cdg::{
     ControlClosureScratch, NonterminationScratch, control_dependence_graph,
     nontermination_sensitive_controllers, weak_control_closure,
 };
-pub use graph::coldness::{ColdClass, ColdnessClasses, ColdnessGraph};
+pub use graph::coldness::{ColdClass, ColdnessClasses};
 pub use graph::cut::{EdgeCut, VertexCut, edge_disjoint_paths, min_edge_cut, min_vertex_cut};
 pub use graph::diff::{
-    BlockFingerprint, BlockHashes, BlockMatch, CascadeDiff, CfgDiff, MatchLevel, RegionDiff,
-    RegionMatch,
+    BlockHashes, BlockMatch, CascadeDiff, CfgDiff, MatchLevel, RegionDiff, RegionMatch,
 };
 pub use graph::dominator::{
     CertificateError, DominanceFrontiers, DominatorScratch, DominatorTree, DominatorUpdate,
@@ -326,8 +325,10 @@ pub use graph::eh::{EhBlockKind, EhEdge, EhEdgeKind, EhModel};
 pub use graph::epoch::EpochMarks;
 pub use graph::fanout::{DenseFanout, Fanout, SortedMap};
 pub use graph::feedback::{FeedbackConfig, feedback_arc_set, linear_arrangement};
-pub use graph::fingerprint::{canonical_hash, canonical_order, multiset_fingerprint, wl_colors};
-pub use graph::frequency::{BlockFrequencies, FREQUENCY_SHIFT, FrequencyConfig, Probability};
+pub use graph::fingerprint::{
+    Mixer, canonical_hash, canonical_order, multiset_fingerprint, wl_colors,
+};
+pub use graph::frequency::{BlockFrequencies, FREQUENCY_SHIFT, FrequencyConfig};
 pub use graph::horn::{HornClauses, HornSaturation};
 pub use graph::interval::{Interval, IntervalAnalysis};
 pub use graph::keyed::KeyedGraph;
@@ -345,7 +346,7 @@ pub use graph::path_expr::{
     GenKill, GenKillAlgebra, PathAlgebra, PathExprArena, PathExprId, PathExprNode, PathExpressions,
     interpret, path_expressions,
 };
-pub use graph::profile_inference::{InferenceCosts, InferredCounts};
+pub use graph::profile_inference::InferenceCosts;
 pub use graph::program_structure::{
     CycleEquivalence, ProgramStructureTree, SeseEdge, SeseRegionId,
 };
@@ -409,9 +410,7 @@ pub use region::{
     recover_exclusive_extents_with,
 };
 pub use rewrite::Rewrite;
-pub use transform::block_order::{
-    ExtTspConfig, SplitOrder, cfg_ext_tsp_order, ext_tsp_order, ext_tsp_score, hot_cold_order,
-};
+pub use transform::block_order::{ExtTspConfig, ext_tsp_order, ext_tsp_score, hot_cold_order};
 pub use transform::cleanup::{
     merge_blocks, merge_blocks_mapped, remove_empty_blocks, remove_empty_blocks_mapped,
     remove_unreachable, remove_unreachable_mapped, simplify, simplify_mapped,
@@ -421,8 +420,10 @@ pub use transform::critical::{
     split_critical_edges, split_critical_edges_mapped, split_critical_edges_with,
 };
 pub use transform::layout::{RelaxError, RelaxMode, SpanItem, relax_layout, relax_spans};
-pub use transform::linearize::{BlockOrder, Emitter, LinearInst, LinearizeError, linearize};
+pub use transform::linearize::{
+    BlockOrder, Emitter, LinearInst, LinearizeError, falls_through, linearize,
+};
 pub use transform::pass::{
-    Pass, PassChange, PassExecution, PassFailure, PassFn, PassId, PassPipeline, PassReport, pass_fn,
+    Pass, PassError, PassExecution, PassFn, PassId, PassPipeline, PassReport, pass_fn,
 };
 pub use union_find::DisjointSet;

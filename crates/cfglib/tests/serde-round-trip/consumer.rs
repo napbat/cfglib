@@ -5,7 +5,7 @@ use std::borrow::Cow;
 
 use cfglib::{
     BlockId, Cfg, CompletionReason, Continuation, DisplayInstr, EdgeId, EdgeKind, Handler,
-    HandlerBody, HandlerKind, HandlerRef, NodeOrder, Region, RegionId,
+    HandlerBody, HandlerKind, HandlerRef, NodeOrder, Probability, Region, RegionId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -119,6 +119,11 @@ fn base_blocks(cfg: &mut Cfg<Op, Route>) -> BaseBlocks {
     }
 }
 
+/// The edge weight `value`, which lies in `0.0..=1.0`.
+fn probability(value: f64) -> Probability {
+    Probability::from_f64(value).expect("a fixture weight lies in 0.0..=1.0")
+}
+
 /// The base edges: weighted, parallel, and exceptional ones, with payloads of the consumer's own.
 /// Returns the edge that is removed before compaction.
 fn connect_base_blocks(cfg: &mut Cfg<Op, Route>, blocks: &BaseBlocks) -> EdgeId {
@@ -137,10 +142,10 @@ fn connect_base_blocks(cfg: &mut Cfg<Op, Route>, blocks: &BaseBlocks) -> EdgeId 
         header,
         body,
         EdgeKind::ConditionalTrue,
-        0.75,
+        probability(0.75),
         Route::from_source("loop condition"),
     );
-    cfg.add_weighted_edge(header, after, EdgeKind::ConditionalFalse, 0.25);
+    cfg.add_weighted_edge(header, after, EdgeKind::ConditionalFalse, probability(0.25));
     cfg.add_edge(body, header, EdgeKind::Back);
     cfg.add_edge_with_payload(header, body, EdgeKind::SwitchCase, Route::case(3));
     cfg.add_edge(body, catch, EdgeKind::ExceptionUnwind);
@@ -231,7 +236,7 @@ fn add_delta(cfg: &mut Cfg<Op, Route>, header: BlockId, after: BlockId, cleanup:
     let doomed = cfg.new_block();
     cfg.block_mut(late).set_label("late");
     cfg.block_mut(late).push(Op::Return);
-    cfg.add_weighted_edge(after, late, EdgeKind::Fallthrough, 0.5);
+    cfg.add_weighted_edge(after, late, EdgeKind::Fallthrough, probability(0.5));
     let moved = cfg.add_edge(cleanup, late, EdgeKind::IndirectJump);
     cfg.add_edge(after, doomed, EdgeKind::Jump);
     cfg.add_edge(doomed, late, EdgeKind::Jump);

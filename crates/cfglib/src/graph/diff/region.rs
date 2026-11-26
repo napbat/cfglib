@@ -5,7 +5,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{BlockFacts, BlockFingerprint, Side, edges_preserved, match_by_wiring};
+use super::{BlockFacts, Side, edges_preserved, match_by_wiring};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
@@ -33,14 +33,14 @@ pub struct RegionMatch {
     /// counterparts of the same chains, kind for kind. Any other region is
     /// left by the one edge to the next region, whose kind must agree.
     pub edges_changed: bool,
-    /// The member-level pairs, in chain order.
-    pairs: Vec<(BlockId, BlockId)>,
+    /// The member-level pairs, in chain order: each left block with every
+    /// right block whose range of instructions overlaps its own.
+    pub pairs: Vec<(BlockId, BlockId)>,
 }
 
 /// n:m correspondences between the blocks of two CFGs: blocks split in two,
 /// and blocks merged into one.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct RegionDiff {
     /// The matched regions, ordered by the first block of the left chain
     /// they lie on, and in chain order along it.
@@ -112,8 +112,7 @@ impl RegionDiff {
     /// let split = split.expect("one region holds the two halves");
     /// assert_eq!(diff.regions[split].left, [b]);
     /// assert_eq!(diff.regions[split].right, [b1, b2]);
-    /// let pairs: Vec<(BlockId, BlockId)> = diff.member_pairs(split).collect();
-    /// assert_eq!(pairs, [(b, b1), (b, b2)]);
+    /// assert_eq!(diff.regions[split].pairs, [(b, b1), (b, b2)]);
     /// // The other regions pair one block with one block.
     /// assert_eq!(diff.regions.len(), 4);
     /// ```
@@ -157,17 +156,6 @@ impl RegionDiff {
         diff
     }
 
-    /// The member-level pairs of `regions[region]`, in chain order: each
-    /// left block with every right block whose range of instructions
-    /// overlaps its own.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `region` is not an index of [`regions`](Self::regions).
-    pub fn member_pairs(&self, region: usize) -> impl Iterator<Item = (BlockId, BlockId)> + '_ {
-        self.regions[region].pairs.iter().copied()
-    }
-
     /// Adds the regions of one matched pair of chains: a two-pointer merge
     /// of the members by the instruction count each side has reached.
     ///
@@ -182,7 +170,7 @@ impl RegionDiff {
         (left, right): (&[BlockId], &[BlockId]),
         chain_edges_changed: bool,
     ) {
-        let count = |side: &Side, block| side.facts(block).fingerprint.instruction_count;
+        let count = |side: &Side, block| side.facts(block).instruction_count;
         let total = |side: &Side, members: &[BlockId]| -> usize {
             members.iter().map(|&block| count(side, block)).sum()
         };
@@ -248,7 +236,7 @@ impl Chains {
                 && LINK_KINDS.contains(&kind)
                 && target != block
                 && target != blocks.entry
-                && blocks.facts(target).fingerprint.in_degree == 1
+                && blocks.facts(target).in_degree == 1
             {
                 next[block.index()] = Some(target);
                 linked[target.index()] = true;
@@ -297,23 +285,15 @@ impl Chains {
             .map(|&head| {
                 let members = self.members(head);
                 let last = blocks.facts(members[members.len() - 1]);
-                let fingerprint = BlockFingerprint {
+                let facts = BlockFacts {
                     instruction_count: members
                         .iter()
-                        .map(|&member| blocks.facts(member).fingerprint.instruction_count)
+                        .map(|&member| blocks.facts(member).instruction_count)
                         .sum(),
-                    out_degree: last.out_edges.len(),
-                    in_degree: blocks.facts(head).fingerprint.in_degree,
-                    out_edge_discriminants: last.fingerprint.out_edge_discriminants.clone(),
+                    in_degree: blocks.facts(head).in_degree,
+                    out_edges: last.out_edges.clone(),
                 };
-                let out_edges = last.out_edges.clone();
-                (
-                    head,
-                    BlockFacts {
-                        fingerprint,
-                        out_edges,
-                    },
-                )
+                (head, facts)
             })
             .collect();
         Side {
@@ -376,10 +356,7 @@ mod tests {
                 (vec![l[3]], vec![r[4]]),
             ]
         );
-        assert_eq!(
-            diff.member_pairs(2).collect::<Vec<_>>(),
-            [(l[2], r[2]), (l[2], r[3])]
-        );
+        assert_eq!(diff.regions[2].pairs, [(l[2], r[2]), (l[2], r[3])]);
         assert!(
             diff.regions
                 .iter()
@@ -402,10 +379,7 @@ mod tests {
                 (vec![l[4]], vec![r[3]]),
             ]
         );
-        assert_eq!(
-            diff.member_pairs(2).collect::<Vec<_>>(),
-            [(l[2], r[2]), (l[3], r[2])]
-        );
+        assert_eq!(diff.regions[2].pairs, [(l[2], r[2]), (l[3], r[2])]);
     }
 
     #[test]
@@ -635,8 +609,10 @@ mod tests {
                         .all(|region| region.left.len() == 1 && region.right.len() == 1),
                     "{diff:?}"
                 );
-                let pairs: BTreeSet<(BlockId, BlockId)> = (0..diff.regions.len())
-                    .flat_map(|region| diff.member_pairs(region))
+                let pairs: BTreeSet<(BlockId, BlockId)> = diff
+                    .regions
+                    .iter()
+                    .flat_map(|region| region.pairs.iter().copied())
                     .collect();
                 let matched: BTreeSet<(BlockId, BlockId)> = CfgDiff::compute(&original, copy)
                     .matched

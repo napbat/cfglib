@@ -2,8 +2,8 @@
 //! nest, and the hot/cold partition of a base order.
 
 use cfglib::{
-    BlockId, Cfg, ColdClass, ColdnessClasses, ColdnessGraph, EdgeId, EdgeKind, Emitter,
-    ExtTspConfig, SplitOrder, cfg_ext_tsp_order, ext_tsp_order, ext_tsp_score, hot_cold_order,
+    BlockId, Cfg, ColdClass, ColdnessClasses, EdgeId, EdgeKind, Emitter, ExtTspConfig, Graph,
+    NodeId, Rooted, ext_tsp_order, ext_tsp_score, falls_through, hot_cold_order,
 };
 
 use super::BenchmarkSuite;
@@ -44,14 +44,14 @@ fn register_ext_tsp(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "api_cfg_ext_tsp_order",
-        covers[cfg_ext_tsp_order],
+        "api_ext_tsp_order_falls_through",
+        covers[falls_through],
         || {
-            cfg_ext_tsp_order(
+            ext_tsp_order(
                 &small.cfg,
-                &Inverting,
                 |block| small.sizes[block.index()],
                 |edge| small.counts[edge.index()],
+                |edge| falls_through(&small.cfg, edge, &Inverting),
                 &config,
             )
         },
@@ -64,19 +64,32 @@ fn register_ext_tsp(suite: &mut BenchmarkSuite<'_>) {
 
 fn register_hot_cold(suite: &mut BenchmarkSuite<'_>) {
     let chain = DiamondChain::new(DIAMONDS);
-    let classes = ColdnessClasses::compute(&chain);
-    let base: Vec<usize> = (0..chain.node_bound()).collect();
+    let rooted = Rooted::new(&chain.graph, NodeId::from_index(0));
     let rare = DIAMONDS.div_ceil(4);
+    benchmark_case!(
+        suite,
+        "api_coldness_classes",
+        || chain.classes(),
+        |classes: &ColdnessClasses<NodeId>| {
+            let cold = chain
+                .nodes()
+                .filter(|&node| classes.class(node) == ColdClass::Rare)
+                .count();
+            assert_eq!(cold, rare);
+        }
+    );
+    let classes = chain.classes();
+    let base: Vec<NodeId> = chain.nodes().collect();
     benchmark_case!(
         suite,
         "api_hot_cold_order",
         covers[hot_cold_order],
-        || hot_cold_order(&base, &classes, 0),
-        |split: &SplitOrder<usize>| {
-            assert_eq!(split.order.len(), base.len());
-            assert_eq!(split.order[0], 0);
-            assert_eq!(split.cold_start, base.len() - rare);
-            assert_eq!(split.never_start, base.len());
+        || hot_cold_order(&rooted, &base, &classes),
+        |[hot, cold, never]: &[Vec<NodeId>; 3]| {
+            assert_eq!(hot[0], NodeId::from_index(0));
+            assert_eq!(hot.len(), base.len() - rare);
+            assert_eq!(cold.len(), rare);
+            assert_eq!(never.as_slice(), []);
         }
     );
 }
@@ -184,73 +197,49 @@ impl ProfiledLoops {
 /// from node `3i` to the arms `3i + 1` and `3i + 2`, which join at
 /// `3i + 3`. The false arm of every fourth diamond aborts instead.
 struct DiamondChain {
-    records: Vec<Vec<usize>>,
-    incoming: Vec<Vec<usize>>,
+    graph: Graph<(), ()>,
 }
 
 impl DiamondChain {
     fn new(diamonds: usize) -> Self {
         let count = 3 * diamonds + 1;
-        let mut records = vec![Vec::new(); count];
+        let mut graph = Graph::with_capacity(count, 4 * diamonds);
+        let nodes: Vec<NodeId> = (0..count).map(|_| graph.add_node(())).collect();
         for diamond in 0..diamonds {
             let (branch, join) = (3 * diamond, 3 * diamond + 3);
-            records[branch] = vec![branch + 1, branch + 2];
-            records[branch + 1] = vec![join];
+            graph.add_edge(nodes[branch], nodes[branch + 1], ());
+            graph.add_edge(nodes[branch], nodes[branch + 2], ());
+            graph.add_edge(nodes[branch + 1], nodes[join], ());
             if !Self::aborts(branch + 2) {
-                records[branch + 2] = vec![join];
+                graph.add_edge(nodes[branch + 2], nodes[join], ());
             }
         }
-        let mut incoming = vec![Vec::new(); count];
-        for (source, targets) in records.iter().enumerate() {
-            for &target in targets {
-                incoming[target].push(source);
-            }
-        }
-        Self { records, incoming }
+        Self { graph }
+    }
+
+    fn nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
+        (0..self.graph.node_count()).map(NodeId::from_index)
+    }
+
+    /// The classes with the aborting arms seeded `Rare` and every edge
+    /// uncapped.
+    fn classes(&self) -> ColdnessClasses<NodeId> {
+        ColdnessClasses::compute(
+            &Rooted::new(&self.graph, NodeId::from_index(0)),
+            |node| {
+                if Self::aborts(node.index()) {
+                    ColdClass::Rare
+                } else {
+                    ColdClass::Normal
+                }
+            },
+            |_| ColdClass::Normal,
+            |_| false,
+        )
     }
 
     /// Whether `node` is the false arm of every fourth diamond.
     fn aborts(node: usize) -> bool {
         node % 12 == 2
-    }
-}
-
-impl ColdnessGraph for DiamondChain {
-    type NodeId = usize;
-
-    fn node_bound(&self) -> usize {
-        self.records.len()
-    }
-
-    fn entry(&self) -> usize {
-        0
-    }
-
-    fn reachable(&self) -> impl Iterator<Item = usize> + '_ {
-        0..self.records.len()
-    }
-
-    fn records(&self, node: usize) -> impl Iterator<Item = (usize, ColdClass)> + '_ {
-        self.records[node]
-            .iter()
-            .map(|&target| (target, ColdClass::Normal))
-    }
-
-    fn incoming(&self, node: usize) -> impl Iterator<Item = (usize, ColdClass)> + '_ {
-        self.incoming[node]
-            .iter()
-            .map(|&source| (source, ColdClass::Normal))
-    }
-
-    fn seed(&self, node: usize) -> ColdClass {
-        if Self::aborts(node) {
-            ColdClass::Rare
-        } else {
-            ColdClass::Normal
-        }
-    }
-
-    fn ends(&self, _node: usize) -> bool {
-        false
     }
 }

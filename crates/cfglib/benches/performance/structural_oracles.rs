@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use cfglib::{BlockId, Cfg, DenseId, DominatorTree, EdgeKind, FlowEffect, Graph, NodeId};
 
-use super::fixtures::{BuilderInst, fixture_f64, fixture_u32};
+use super::fixtures::{BuilderInst, fixture_u32, fixture_weight, probability};
 
 pub(super) fn assert_cfg_shape<I>(cfg: &Cfg<I>, expected_blocks: usize, expected_edges: usize) {
     assert_eq!(
@@ -351,16 +351,13 @@ fn assert_weighted_outgoing_edges(
                 EdgeKind::ConditionalFalse
             }
         );
-        assert_eq!(
-            edge.weight().map(f64::to_bits),
-            Some((fixture_f64(index) + 0.25).to_bits())
-        );
+        assert_eq!(edge.weight(), Some(fixture_weight(index)));
     }
     let back = cfg.edge(cfglib::EdgeId::from_raw(fixture_u32(edge_count)));
     assert_eq!(back.source(), outgoing_source);
     assert_eq!(back.target(), back_target);
     assert_eq!(back.kind(), EdgeKind::Back);
-    assert_eq!(back.weight().map(f64::to_bits), Some(0.875_f64.to_bits()));
+    assert_eq!(back.weight(), Some(probability(0.875)));
 }
 
 pub(super) fn assert_split_weighted_fan_out(
@@ -427,18 +424,18 @@ pub(super) fn assert_weighted_irreducible(cfg: &Cfg<u32>, made_reducible: bool) 
             entry,
             redirected_target,
             EdgeKind::ConditionalFalse,
-            Some(0.125_f64),
+            Some(0.125),
         ),
         (first, second, EdgeKind::Fallthrough, None),
-        (second, first, EdgeKind::Back, Some(0.75_f64)),
-        (second, exit, EdgeKind::SwitchCase, Some(0.25_f64)),
+        (second, first, EdgeKind::Back, Some(0.75)),
+        (second, exit, EdgeKind::SwitchCase, Some(0.25)),
     ];
     for (index, (source, target, kind, weight)) in expected.into_iter().enumerate() {
         let edge = cfg.edge(cfglib::EdgeId::from_raw(fixture_u32(index)));
         assert_eq!(edge.source(), source);
         assert_eq!(edge.target(), target);
         assert_eq!(edge.kind(), kind);
-        assert_eq!(edge.weight().map(f64::to_bits), weight.map(f64::to_bits));
+        assert_eq!(edge.weight(), weight.map(probability));
     }
 
     if made_reducible {
@@ -449,8 +446,8 @@ pub(super) fn assert_weighted_irreducible(cfg: &Cfg<u32>, made_reducible: bool) 
             &[cfglib::EdgeId::from_raw(5), cfglib::EdgeId::from_raw(6)]
         );
         for (index, (target, kind, weight)) in [
-            (first, EdgeKind::Back, 0.75_f64),
-            (exit, EdgeKind::SwitchCase, 0.25_f64),
+            (first, EdgeKind::Back, 0.75),
+            (exit, EdgeKind::SwitchCase, 0.25),
         ]
         .into_iter()
         .enumerate()
@@ -459,7 +456,7 @@ pub(super) fn assert_weighted_irreducible(cfg: &Cfg<u32>, made_reducible: bool) 
             assert_eq!(edge.source(), copy);
             assert_eq!(edge.target(), target);
             assert_eq!(edge.kind(), kind);
-            assert_eq!(edge.weight().map(f64::to_bits), Some(weight.to_bits()));
+            assert_eq!(edge.weight(), Some(probability(weight)));
         }
     }
 }

@@ -2,7 +2,7 @@ use super::*;
 use crate::builder::CfgBuilder;
 use crate::flow::FlowEffect;
 use crate::graph::dominator::DominatorTree;
-use crate::test_util::{MockInst, ff};
+use crate::test_util::{MockInst, ff, probability};
 use alloc::vec;
 
 /// The loops of all the code, live and dead, from the forest. The tests ask the
@@ -333,10 +333,12 @@ fn two_entry_loop() -> TwoEntryLoop {
     let mut cfg = Cfg::<u32>::new();
     let entry = cfg.entry();
     let [header, body, side, other] = [(); 4].map(|()| cfg.new_block());
-    let conditional = cfg.add_weighted_edge(entry, header, EdgeKind::ConditionalTrue, 0.25);
+    let conditional =
+        cfg.add_weighted_edge(entry, header, EdgeKind::ConditionalTrue, probability(0.25));
     let unrelated = cfg.add_edge(entry, other, EdgeKind::ConditionalFalse);
     let through_side = cfg.add_edge(entry, side, EdgeKind::SwitchCase);
-    let side_to_header = cfg.add_weighted_edge(side, header, EdgeKind::Fallthrough, 0.75);
+    let side_to_header =
+        cfg.add_weighted_edge(side, header, EdgeKind::Fallthrough, probability(0.75));
     cfg.add_edge(header, body, EdgeKind::ConditionalTrue);
     cfg.add_edge(body, header, EdgeKind::Back);
     cfg.add_edge(header, other, EdgeKind::ConditionalFalse);
@@ -380,11 +382,11 @@ fn inserting_a_preheader_redirects_the_entering_edges_in_place() {
     assert_eq!(before, [conditional, unrelated, through_side]);
     assert_eq!(cfg.edge(conditional).target(), preheader);
     assert_eq!(cfg.edge(conditional).kind(), EdgeKind::ConditionalTrue);
-    assert_eq!(cfg.edge(conditional).weight(), Some(0.25));
+    assert_eq!(cfg.edge(conditional).weight(), Some(probability(0.25)));
     assert_eq!(cfg.edge(unrelated).target(), other);
     assert_eq!(cfg.edge(side_to_header).source(), side);
     assert_eq!(cfg.edge(side_to_header).target(), preheader);
-    assert_eq!(cfg.edge(side_to_header).weight(), Some(0.75));
+    assert_eq!(cfg.edge(side_to_header).weight(), Some(probability(0.75)));
 
     let outside: Vec<_> = cfg
         .incoming(header)

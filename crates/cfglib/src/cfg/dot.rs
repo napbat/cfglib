@@ -128,7 +128,7 @@ mod tests {
     use crate::cfg::Cfg;
     use crate::edge::EdgeKind;
     use crate::test_util::golden::assert_golden;
-    use crate::test_util::{MockInst, ff};
+    use crate::test_util::{MockInst, ff, probability};
 
     #[test]
     fn a_cfg_renders_one_line_per_instruction() {
@@ -170,7 +170,7 @@ mod tests {
         let target = cfg.new_block();
         cfg.block_mut(cfg.entry()).instructions_mut().push(ff("a"));
         let edge = cfg.add_edge(cfg.entry(), target, EdgeKind::Fallthrough);
-        cfg.edge_mut(edge).set_weight(Some(0.75));
+        cfg.edge_mut(edge).set_weight(Some(probability(0.75)));
 
         assert_golden("dot/cfg-weighted.dot", &cfg.to_dot());
     }

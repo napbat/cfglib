@@ -220,7 +220,8 @@ pub fn plain_edge_attributes<Edge, Data: ?Sized>(
 ///
 /// This is the hook [`Cfg::write_dot`](crate::Cfg::write_dot) installs: every
 /// [`EdgeKind`] has a fixed color and line style, and a weighted edge is
-/// labeled with its probability and drawn proportionally thicker.
+/// labeled with its probability, the shortest decimal that reads back as it,
+/// and drawn proportionally thicker.
 #[must_use]
 pub fn control_flow_edge_attributes<E>(_edge: EdgeId, data: &Edge<E>) -> DotEdgeAttributes<'_> {
     let (color, style, kind_label) = match data.kind() {
@@ -242,8 +243,8 @@ pub fn control_flow_edge_attributes<E>(_edge: EdgeId, data: &Edge<E>) -> DotEdge
         EdgeKind::ExceptionContinue => ("darkgreen", "dashed", "continue"),
     };
     let label = match data.weight() {
-        Some(weight) if kind_label.is_empty() => Cow::Owned(format!("({weight:.2})")),
-        Some(weight) => Cow::Owned(format!("{kind_label} ({weight:.2})")),
+        Some(weight) if kind_label.is_empty() => Cow::Owned(format!("({weight})")),
+        Some(weight) => Cow::Owned(format!("{kind_label} ({weight})")),
         None => Cow::Borrowed(kind_label),
     };
     DotEdgeAttributes {
@@ -251,7 +252,7 @@ pub fn control_flow_edge_attributes<E>(_edge: EdgeId, data: &Edge<E>) -> DotEdge
         color: Some(color),
         style: Some(style),
         // 1.0 to 4.0 points, so a hot edge reads as the spine of the drawing.
-        penwidth: data.weight().map(|weight| 1.0 + weight * 3.0),
+        penwidth: data.weight().map(|weight| 1.0 + weight.to_f64() * 3.0),
     }
 }
 

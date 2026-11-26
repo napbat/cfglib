@@ -14,7 +14,7 @@ use super::CfgView;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::dataflow::fixpoint::solve_problem;
-use crate::edge::{EdgeId, EdgeKind, KindedEdge};
+use crate::edge::{EdgeId, EdgeKind, KindedEdge, Probability};
 use crate::flow::FlowEffect;
 use crate::graph::edge_view::{EdgeRef, EdgeView};
 use crate::graph::view::{GraphView, RootedView};
@@ -26,7 +26,7 @@ struct ToyEdge {
     source: BlockId,
     target: BlockId,
     kind: EdgeKind,
-    weight: Option<f64>,
+    weight: Option<Probability>,
 }
 
 impl KindedEdge for ToyEdge {
@@ -136,7 +136,7 @@ impl CfgView for ToyView {
         &self.blocks[block.index()]
     }
 
-    fn edge_weight(&self, edge: EdgeId) -> Option<f64> {
+    fn edge_weight(&self, edge: EdgeId) -> Option<Probability> {
         self.edges[edge.index()].weight
     }
 }

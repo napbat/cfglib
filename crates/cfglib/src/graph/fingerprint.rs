@@ -13,10 +13,10 @@
 //! consumer that wants content in a fingerprint hashes its instructions into
 //! the node labels itself.
 //!
-//! Every value comes from one fixed 64-bit mixer, the `SplitMix64` finalizer
-//! applied to a running state, and never from a `RandomState`. A fingerprint
-//! is therefore the same across runs, platforms, and versions, and can be
-//! stored.
+//! Every value comes from one fixed 64-bit [`Mixer`], the `SplitMix64`
+//! finalizer applied to a running state, and never from a `RandomState`. A
+//! fingerprint is therefore the same across runs, platforms, and versions,
+//! and can be stored.
 //!
 //! A fingerprint has 64 bits, so two different graphs can collide: equal
 //! fingerprints are evidence of isomorphism, not proof. One-dimensional WL
@@ -28,9 +28,12 @@
 extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::ops::ControlFlow;
 
 use super::edge_view::EdgeView;
-use super::view::{DenseId, RootedView};
+use super::search::Visit;
+use super::traverse::{DepthFirstStack, Outgoing, depth_first_core};
+use super::view::{DenseId, GraphView, RootedView, scan_predecessors};
 use crate::identity::{NO_INDEX, check_bound, word};
 
 /// The rounds of [`wl_colors`] that [`canonical_hash`] runs to fingerprint
@@ -40,18 +43,40 @@ const UNREACHED_ROUNDS: usize = 3;
 /// A running 64-bit hash: each value is folded into the state with the
 /// `SplitMix64` finalizer, so the result depends on the values and on their
 /// order.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Mixer(u64);
+///
+/// It is the one mixer behind every fingerprint of this module, and its
+/// values are part of the contract: the same values in the same order give
+/// the same hash on every run, platform, and version. A consumer that hashes
+/// its own block content, such as the [`BlockHashes`](crate::BlockHashes) of
+/// a [`CascadeDiff`](crate::CascadeDiff), can use it for the same guarantee.
+///
+/// # Examples
+///
+/// ```
+/// use cfglib::Mixer;
+///
+/// let hash = |values: &[u64]| {
+///     values
+///         .iter()
+///         .fold(Mixer::new(), |mixer, &value| mixer.mix(value))
+///         .finish()
+/// };
+/// assert_eq!(hash(&[1, 2]), hash(&[1, 2]));
+/// assert_ne!(hash(&[1, 2]), hash(&[2, 1]));
+/// ```
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Mixer(u64);
 
 impl Mixer {
     /// The state before any value is mixed in.
-    pub(crate) const fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self(0)
     }
 
     /// The state after `value`.
     #[must_use]
-    pub(crate) const fn mix(self, value: u64) -> Self {
+    pub const fn mix(self, value: u64) -> Self {
         Self(splitmix64(self.0 ^ value))
     }
 
@@ -74,7 +99,8 @@ impl Mixer {
     }
 
     /// The hash of everything mixed in so far.
-    pub(crate) const fn finish(self) -> u64 {
+    #[must_use]
+    pub const fn finish(self) -> u64 {
         self.0
     }
 }
@@ -276,40 +302,79 @@ pub fn canonical_order<G: RootedView + EdgeView>(
 /// node outside it).
 fn preorder<G: RootedView + EdgeView>(graph: &G, keys: &[u64]) -> (Vec<G::NodeId>, Vec<u32>) {
     check_bound(graph.node_bound(), "node bound of a canonical order");
-    let mut position = vec![NO_INDEX; graph.node_bound()];
+    let keyed = KeyedSuccessors::new(graph, keys);
     let mut order = Vec::new();
-    // The out-edges of every node on the walk's stack, as `(key, adjacency
-    // position, target)` sorted by key and then position, each node's run
-    // above the runs of the nodes below it. A frame holds where its run
-    // starts and the next edge to take.
-    let mut edges: Vec<(u64, usize, G::NodeId)> = Vec::new();
-    let mut frames: Vec<(usize, usize)> = Vec::new();
-    let mut entered = Some(graph.root());
-    loop {
-        if let Some(node) = entered.take() {
-            position[node.index()] = word(order.len());
-            order.push(node);
-            let start = edges.len();
-            edges.extend(graph.outgoing(node).enumerate().map(|(adjacency, edge)| {
-                (keys[edge.index()], adjacency, graph.edge(edge).target())
-            }));
-            edges[start..].sort_unstable_by_key(|&(key, adjacency, _)| (key, adjacency));
-            frames.push((start, start));
-        }
-        let Some(frame) = frames.last_mut() else {
-            break;
-        };
-        if let Some(&(_, _, target)) = edges.get(frame.1) {
-            frame.1 += 1;
-            if position[target.index()] == NO_INDEX {
-                entered = Some(target);
-            }
-        } else {
-            edges.truncate(frame.0);
-            frames.pop();
-        }
+    let mut seen = vec![false; graph.node_bound()];
+    depth_first_core(
+        Outgoing,
+        &keyed,
+        [graph.root().index()],
+        seen.as_mut_slice(),
+        &mut DepthFirstStack::default(),
+        &mut |node: usize, _depth| {
+            order.push(G::NodeId::from_index(node));
+            ControlFlow::<(), _>::Continue(Visit::Descend)
+        },
+    );
+    let mut position = vec![NO_INDEX; graph.node_bound()];
+    for (place, node) in order.iter().enumerate() {
+        position[node.index()] = word(place);
     }
     (order, position)
+}
+
+/// The out-edge targets of every node slot, by index, sorted by edge key and
+/// then by adjacency position: the forward graph that [`canonical_order`]
+/// walks.
+struct KeyedSuccessors {
+    /// Where the targets of each node slot start and end in `targets`.
+    runs: Vec<(usize, usize)>,
+    targets: Vec<usize>,
+}
+
+impl KeyedSuccessors {
+    fn new<G: EdgeView>(graph: &G, keys: &[u64]) -> Self {
+        let mut runs = vec![(0, 0); graph.node_bound()];
+        let mut targets = Vec::with_capacity(graph.edge_bound());
+        let mut run: Vec<(u64, usize, usize)> = Vec::new();
+        for node in graph.node_ids() {
+            run.clear();
+            run.extend(graph.outgoing(node).enumerate().map(|(adjacency, edge)| {
+                (
+                    keys[edge.index()],
+                    adjacency,
+                    graph.edge(edge).target().index(),
+                )
+            }));
+            run.sort_unstable_by_key(|&(key, adjacency, _)| (key, adjacency));
+            let start = targets.len();
+            targets.extend(run.iter().map(|&(_, _, target)| target));
+            runs[node.index()] = (start, targets.len());
+        }
+        Self { runs, targets }
+    }
+}
+
+impl GraphView for KeyedSuccessors {
+    type NodeId = usize;
+
+    fn node_bound(&self) -> usize {
+        self.runs.len()
+    }
+
+    /// Every node slot; a removed slot has no edges.
+    fn node_ids(&self) -> impl Iterator<Item = usize> + '_ {
+        0..self.runs.len()
+    }
+
+    fn successors(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
+        let (start, end) = self.runs[node];
+        self.targets[start..end].iter().copied()
+    }
+
+    fn predecessors(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
+        scan_predecessors(self, node)
+    }
 }
 
 /// A hash of the graph in [`canonical_order`]: the number of nodes the root

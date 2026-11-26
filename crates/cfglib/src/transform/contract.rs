@@ -99,7 +99,7 @@ pub(crate) fn contract_edge_inner<I, E>(
 mod tests {
     use super::*;
     use crate::edge::EdgeKind;
-    use crate::test_util::ff;
+    use crate::test_util::{ff, probability};
 
     #[test]
     fn contract_retains_outgoing_identity_and_payload() {
@@ -179,9 +179,11 @@ mod tests {
         cfg.block_mut(target).push(1);
         cfg.block_mut(sink).push(2);
         cfg.add_edge(source, target, EdgeKind::Fallthrough);
-        let first = cfg.add_weighted_edge(target, sink, EdgeKind::ConditionalTrue, 0.25);
-        let second = cfg.add_weighted_edge(target, sink, EdgeKind::ConditionalFalse, 0.75);
-        let back = cfg.add_weighted_edge(target, source, EdgeKind::Back, 0.875);
+        let first =
+            cfg.add_weighted_edge(target, sink, EdgeKind::ConditionalTrue, probability(0.25));
+        let second =
+            cfg.add_weighted_edge(target, sink, EdgeKind::ConditionalFalse, probability(0.75));
+        let back = cfg.add_weighted_edge(target, source, EdgeKind::Back, probability(0.875));
 
         assert!(contract_edge(&mut cfg, source, target));
 
@@ -194,13 +196,13 @@ mod tests {
         assert_eq!(cfg.edge(first).source(), source);
         assert_eq!(cfg.edge(first).target(), sink);
         assert_eq!(cfg.edge(first).kind(), EdgeKind::ConditionalTrue);
-        assert_eq!(cfg.edge(first).weight(), Some(0.25));
+        assert_eq!(cfg.edge(first).weight(), Some(probability(0.25)));
         assert_eq!(cfg.edge(second).kind(), EdgeKind::ConditionalFalse);
-        assert_eq!(cfg.edge(second).weight(), Some(0.75));
+        assert_eq!(cfg.edge(second).weight(), Some(probability(0.75)));
         assert_eq!(cfg.edge(back).source(), source);
         assert_eq!(cfg.edge(back).target(), source);
         assert_eq!(cfg.edge(back).kind(), EdgeKind::Back);
-        assert_eq!(cfg.edge(back).weight(), Some(0.875));
+        assert_eq!(cfg.edge(back).weight(), Some(probability(0.875)));
         assert_eq!(cfg.edge_count(), 3);
     }
 

@@ -6,8 +6,8 @@ use std::fmt;
 
 use cfglib::{
     BlockId, Cfg, CompletionReason, Continuation, DisplayInstr, DominatorTree, EdgeKind,
-    ExceptionFlow, HandlerBody, HandlerKind, HandlerRef, Region, TextError, TextErrorKind,
-    parse_cfg_text, verify,
+    ExceptionFlow, HandlerBody, HandlerKind, HandlerRef, Probability, Region, TextError,
+    TextErrorKind, parse_cfg_text, verify,
 };
 
 use crate::fixture::{handler, region, rich_cfg, try_finally};
@@ -381,7 +381,10 @@ fn guarded<E: Default>(weight: Option<f64>, record_cleanup: bool) -> Cfg<Line, E
         (cleanup, exit, EdgeKind::Fallthrough),
     ] {
         match weight {
-            Some(weight) => cfg.add_weighted_edge(source, target, kind, weight),
+            Some(weight) => {
+                let weight = Probability::from_f64(weight).expect("a probability");
+                cfg.add_weighted_edge(source, target, kind, weight)
+            }
             None => cfg.add_edge(source, target, kind),
         };
     }

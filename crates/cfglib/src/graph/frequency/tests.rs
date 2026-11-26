@@ -79,7 +79,7 @@ fn a_diamond_splits_by_its_branch_probabilities() {
     let right = fixture.edge(0, 2, Some(0.1));
     fixture.edge(1, 3, None);
     fixture.edge(2, 3, None);
-    let frequencies = fixture.frequencies(FrequencyConfig::new());
+    let frequencies = fixture.frequencies(FrequencyConfig::default());
 
     assert_eq!(Fixture::block(&frequencies, 0), ONCE);
     assert_close(Fixture::block(&frequencies, 1), share(0.9), 1.0);
@@ -97,7 +97,7 @@ fn a_loop_that_returns_nine_times_in_ten_runs_its_header_ten_times() {
     fixture.edge(1, 2, None);
     fixture.edge(2, 1, Some(0.9));
     fixture.edge(2, 3, Some(0.1));
-    let frequencies = fixture.frequencies(FrequencyConfig::new());
+    let frequencies = fixture.frequencies(FrequencyConfig::default());
 
     // 0.9 rounds to the 31-bit probability 0.8999999999, whose scale is 10
     // less 1.6 units of the last place.
@@ -118,7 +118,7 @@ fn nested_loops_multiply_their_scales() {
     fixture.edge(3, 4, Some(0.25));
     fixture.edge(4, 1, Some(0.5));
     fixture.edge(4, 5, Some(0.5));
-    let frequencies = fixture.frequencies(FrequencyConfig::new());
+    let frequencies = fixture.frequencies(FrequencyConfig::default());
 
     let runs: Vec<u64> = (0..6)
         .map(|block| Fixture::block(&frequencies, block))
@@ -138,18 +138,17 @@ fn a_loop_that_never_exits_runs_exactly_the_capped_scale() {
     let back = fixture.edge(1, 1, Some(1.0));
     let leave = fixture.edge(1, 2, Some(0.0));
 
-    let default = fixture.frequencies(FrequencyConfig::new());
-    assert_eq!(
-        Fixture::block(&default, 1),
-        u64::from(FrequencyConfig::DEFAULT_MAX_LOOP_SCALE) * ONCE
-    );
+    let default = fixture.frequencies(FrequencyConfig::default());
+    assert_eq!(Fixture::block(&default, 1), 4096 * ONCE);
     assert_eq!(default.edge(back), Fixture::block(&default, 1));
     assert_eq!(default.edge(leave), 0);
     assert_eq!(Fixture::block(&default, 2), 0);
 
-    let capped = fixture.frequencies(FrequencyConfig::new().with_max_loop_scale(100));
+    let capped = fixture.frequencies(FrequencyConfig {
+        max_loop_scale: 100,
+    });
     assert_eq!(Fixture::block(&capped, 1), 100 * ONCE);
-    let floor = fixture.frequencies(FrequencyConfig::new().with_max_loop_scale(0));
+    let floor = fixture.frequencies(FrequencyConfig { max_loop_scale: 0 });
     assert_eq!(
         Fixture::block(&floor, 1),
         ONCE,
@@ -188,7 +187,9 @@ fn deep_nests_of_long_loops_saturate_instead_of_overflowing() {
         &cfg,
         &loops,
         |edge| probability[edge.index()],
-        FrequencyConfig::new().with_max_loop_scale(u32::MAX),
+        FrequencyConfig {
+            max_loop_scale: u32::MAX,
+        },
     );
 
     assert_eq!(frequencies.block(cfg.entry()), ONCE);
@@ -204,14 +205,14 @@ fn missing_probabilities_share_what_the_stated_ones_leave() {
     let stated = fixture.edge(0, 1, Some(0.5));
     let first = fixture.edge(0, 2, None);
     let second = fixture.edge(0, 3, None);
-    let frequencies = fixture.frequencies(FrequencyConfig::new());
+    let frequencies = fixture.frequencies(FrequencyConfig::default());
     assert_eq!(frequencies.edge(stated), ONCE / 2);
     assert_eq!(frequencies.edge(first), ONCE / 4);
     assert_eq!(frequencies.edge(second), ONCE / 4);
 
     let mut fixture = Fixture::new(4);
     let edges = [1, 2, 3].map(|to| fixture.edge(0, to, None));
-    let frequencies = fixture.frequencies(FrequencyConfig::new());
+    let frequencies = fixture.frequencies(FrequencyConfig::default());
     for edge in edges {
         assert_close(frequencies.edge(edge), share(1.0 / 3.0), 1.0);
     }
@@ -219,7 +220,7 @@ fn missing_probabilities_share_what_the_stated_ones_leave() {
     let mut fixture = Fixture::new(3);
     let stated = fixture.edge(0, 1, Some(1.0));
     let missing = fixture.edge(0, 2, None);
-    let frequencies = fixture.frequencies(FrequencyConfig::new());
+    let frequencies = fixture.frequencies(FrequencyConfig::default());
     assert_eq!(frequencies.edge(stated), ONCE);
     assert_eq!(frequencies.edge(missing), 0, "nothing is left to share");
 }
@@ -229,20 +230,20 @@ fn probabilities_that_miss_one_are_renormalized_per_source() {
     let mut fixture = Fixture::new(3);
     let heavy = fixture.edge(0, 1, Some(0.75));
     let light = fixture.edge(0, 2, Some(0.75));
-    let frequencies = fixture.frequencies(FrequencyConfig::new());
+    let frequencies = fixture.frequencies(FrequencyConfig::default());
     assert_eq!(frequencies.edge(heavy), ONCE / 2);
     assert_eq!(frequencies.edge(light), ONCE / 2);
 
     let mut fixture = Fixture::new(3);
     let small = fixture.edge(0, 1, Some(0.125));
     let large = fixture.edge(0, 2, Some(0.375));
-    let frequencies = fixture.frequencies(FrequencyConfig::new());
+    let frequencies = fixture.frequencies(FrequencyConfig::default());
     assert_eq!(frequencies.edge(small), ONCE / 4);
     assert_eq!(frequencies.edge(large), 3 * ONCE / 4);
 
     let mut fixture = Fixture::new(3);
     let zeros = [1, 2].map(|to| fixture.edge(0, to, Some(0.0)));
-    let frequencies = fixture.frequencies(FrequencyConfig::new());
+    let frequencies = fixture.frequencies(FrequencyConfig::default());
     for edge in zeros {
         assert_eq!(frequencies.edge(edge), ONCE / 2, "all zero splits evenly");
     }
@@ -255,7 +256,7 @@ fn unreachable_removed_and_unknown_blocks_never_run() {
     let dead = fixture.edge(2, 1, None);
     fixture.edge(1, 3, None);
     fixture.cfg.remove_block(BlockId::from_index(3));
-    let frequencies = fixture.frequencies(FrequencyConfig::new());
+    let frequencies = fixture.frequencies(FrequencyConfig::default());
 
     assert_eq!(Fixture::block(&frequencies, 1), ONCE);
     assert_eq!(Fixture::block(&frequencies, 2), 0);
@@ -268,14 +269,14 @@ fn unreachable_removed_and_unknown_blocks_never_run() {
 #[test]
 fn a_lone_entry_runs_once_and_an_entry_loop_runs_its_scale() {
     let fixture = Fixture::new(1);
-    let frequencies = fixture.frequencies(FrequencyConfig::new());
+    let frequencies = fixture.frequencies(FrequencyConfig::default());
     assert_eq!(Fixture::block(&frequencies, 0), ONCE);
 
     // The entry heads a loop: it runs once per entry times the loop's scale.
     let mut fixture = Fixture::new(2);
     fixture.edge(0, 0, Some(0.5));
     fixture.edge(0, 1, Some(0.5));
-    let frequencies = fixture.frequencies(FrequencyConfig::new());
+    let frequencies = fixture.frequencies(FrequencyConfig::default());
     assert_eq!(Fixture::block(&frequencies, 0), 2 * ONCE);
     assert_eq!(Fixture::block(&frequencies, 1), ONCE);
 }
@@ -309,7 +310,7 @@ fn an_irreducible_cycle_is_approximated_as_documented() {
     // taken, but adds nothing to `a`.
     let loops = LoopForest::compute(&cfg, &dominators);
     assert!(loops.is_empty());
-    let plain = BlockFrequencies::compute(&cfg, &loops, even, FrequencyConfig::new());
+    let plain = BlockFrequencies::compute(&cfg, &loops, even, FrequencyConfig::default());
     assert_eq!(
         [entry, a, b, exit].map(|block| plain.block(block)),
         [ONCE, ONCE / 2, ONCE, ONCE / 2]
@@ -321,38 +322,10 @@ fn an_irreducible_cycle_is_approximated_as_documented() {
     let dominators = DominatorTree::compute(&cfg);
     let loops = LoopForest::compute_tagged(&cfg, &dominators);
     assert_eq!(loops.len(), 1);
-    let tagged = BlockFrequencies::compute(&cfg, &loops, even, FrequencyConfig::new());
+    let tagged = BlockFrequencies::compute(&cfg, &loops, even, FrequencyConfig::default());
     assert_eq!(
         [entry, a, b, exit].map(|block| tagged.block(block)),
         [ONCE, 2 * ONCE, 2 * ONCE, ONCE]
-    );
-}
-
-#[test]
-fn probabilities_round_to_the_nearest_fixed_point_value() {
-    assert_eq!(Probability::from_f64(0.0), Some(Probability::ZERO));
-    assert_eq!(Probability::from_f64(-0.0), Some(Probability::ZERO));
-    assert_eq!(Probability::from_f64(1.0), Some(Probability::ONE));
-    assert_eq!(
-        Probability::from_f64(0.9).map(Probability::numerator),
-        Some(1_932_735_283)
-    );
-    let half_unit = 0.5 / f64::from(Probability::DENOMINATOR);
-    assert_eq!(
-        Probability::from_f64(half_unit).map(Probability::numerator),
-        Some(1),
-        "a tie rounds upward"
-    );
-    for outside in [-0.1, 1.000_001, f64::NAN, f64::INFINITY] {
-        assert_eq!(Probability::from_f64(outside), None, "{outside}");
-    }
-    assert_eq!(
-        Probability::from_numerator(Probability::DENOMINATOR),
-        Some(Probability::ONE)
-    );
-    assert_eq!(
-        Probability::from_numerator(Probability::DENOMINATOR + 1),
-        None
     );
 }
 
@@ -415,7 +388,7 @@ fn random_reducible_graphs_obey_the_flow_equations() {
             &cfg,
             &loops,
             |edge| Some(probability[edge.index()]),
-            FrequencyConfig::new(),
+            FrequencyConfig::default(),
         );
 
         for edge in cfg.edge_ids() {
@@ -462,7 +435,7 @@ fn renumbered_frequencies(
         &rooted,
         &loops,
         |edge| Some(probability[edge.index()]),
-        FrequencyConfig::new(),
+        FrequencyConfig::default(),
     );
     (
         (0..count)

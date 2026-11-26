@@ -4,7 +4,7 @@
 //! Sampled hardware profiles, and counts carried over from an older binary, are
 //! noisy, partial, and inconsistent. Every count-driven consumer assumes flow
 //! conservation: a block runs as often as the edges into it are taken, and as
-//! often as the edges out of it are. [`InferredCounts::compute`] repairs the
+//! often as the edges out of it are. [`BlockFrequencies::infer`] repairs the
 //! estimates into such counts as a minimum-cost flow, after W. He, J. Mestre,
 //! S. Pupyrev, L. Wang and H. Yu, *Profile Inference Revisited* (POPL 2022),
 //! with estimates on edges as well as blocks, after A. Ayupov, M. Panchenko
@@ -63,105 +63,99 @@
 extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::marker::PhantomData;
 
 use super::dominator::DominatorTree;
 use super::edge_view::EdgeView;
-use super::frequency::{BlockFrequencies, FREQUENCY_SHIFT, FrequencyConfig, Probability};
+use super::frequency::{BlockFrequencies, FREQUENCY_SHIFT, FrequencyConfig};
 use super::loop_forest::LoopForest;
 use super::network_flow::{ArcId, FlowError, FlowNetwork};
 use super::view::{DenseId, RootedView};
-use crate::block::BlockId;
-use crate::edge::EdgeId;
+use crate::edge::Probability;
 use crate::identity::{NO_INDEX, slot, word};
 
 /// The capacity of an arc that any amount may take.
 const UNBOUNDED: i64 = i64::MAX;
 
-/// The price of one unit of deviation from an estimate. Neither price may be
-/// negative: a negative price would reward running a count without bound.
+/// The price of one unit of deviation from an estimate. A price is unsigned:
+/// a negative price would reward running a count without bound.
+///
+/// The [`Default`] prices a unit above and a unit below an estimate alike, at
+/// `1`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InferenceCosts {
     /// The cost of each unit that a count runs above its estimate.
-    pub increase: i64,
+    pub increase: u32,
     /// The cost of each unit that a count runs below its estimate.
-    pub decrease: i64,
+    pub decrease: u32,
 }
 
-/// Block and edge counts that conserve flow, inferred from estimates.
-///
-/// See the [module documentation](self) for the model and the tie-breaking by
-/// branch priors.
-///
-/// # Examples
-///
-/// ```
-/// use cfglib::{Cfg, EdgeKind, InferenceCosts, InferredCounts, Probability};
-///
-/// // entry -> left (30%) or right (70%), both -> join. Only the entry and the
-/// // join were sampled.
-/// let mut cfg = Cfg::<u32>::new();
-/// let (left, right, join) = (cfg.new_block(), cfg.new_block(), cfg.new_block());
-/// let to_left = cfg.add_weighted_edge(cfg.entry(), left, EdgeKind::ConditionalTrue, 0.3);
-/// cfg.add_weighted_edge(cfg.entry(), right, EdgeKind::ConditionalFalse, 0.7);
-/// cfg.add_edge(left, join, EdgeKind::Fallthrough);
-/// cfg.add_edge(right, join, EdgeKind::Fallthrough);
-///
-/// let counts = InferredCounts::compute(
-///     &cfg,
-///     |block| block == join,
-///     |block| (block == cfg.entry() || block == join).then_some(1_000),
-///     |_| None,
-///     |edge| cfg.edge(edge).weight().and_then(Probability::from_f64),
-///     &InferenceCosts { increase: 1, decrease: 1 },
-/// )?;
-/// assert_eq!(counts.block(left), 300);
-/// assert_eq!(counts.edge(to_left), 300);
-/// assert_eq!(counts.block(right), 700);
-/// # Ok::<(), cfglib::FlowError>(())
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InferredCounts<N = BlockId, E = EdgeId> {
-    /// The count of each node slot.
-    block: Vec<u64>,
-    /// The count of each edge slot.
-    edge: Vec<u64>,
-    ids: PhantomData<(N, E)>,
+impl Default for InferenceCosts {
+    fn default() -> Self {
+        Self {
+            increase: 1,
+            decrease: 1,
+        }
+    }
 }
 
-impl<N: DenseId, E: DenseId> InferredCounts<N, E> {
-    /// Infer the counts of the blocks and edges of `graph`.
+impl<N: DenseId, E: DenseId> BlockFrequencies<N, E> {
+    /// Infer whole block and edge counts of `graph` that conserve flow, from
+    /// estimates.
     ///
     /// `is_exit` names the blocks where an execution can end.
     /// `block_estimate` and `edge_estimate` give the measured counts, or
     /// `None` where nothing was measured. `branch_prior` gives the branch
     /// probability of an edge relative to the other edges leaving its source,
-    /// or `None`. `costs` prices a deviation from an estimate.
+    /// or `None`. `costs` prices a deviation from an estimate. The counts are
+    /// whole executions, not fixed point. See the
+    /// [module documentation](super::profile_inference) for the model and the
+    /// tie-breaking by branch priors.
     ///
     /// # Errors
     ///
     /// [`FlowError::Overflow`] when an estimate exceeds `i64::MAX`, or when a
     /// total cost or count exceeds the range of [`FlowNetwork`].
     ///
-    /// # Panics
+    /// # Examples
     ///
-    /// Panics when [`InferenceCosts::increase`] or
-    /// [`InferenceCosts::decrease`] is negative.
-    pub fn compute<G>(
+    /// ```
+    /// use cfglib::{BlockFrequencies, Cfg, EdgeKind, InferenceCosts, Probability};
+    ///
+    /// // entry -> left (30%) or right (70%), both -> join. Only the entry and the
+    /// // join were sampled.
+    /// let probability = |value| Probability::from_f64(value).expect("a probability");
+    /// let mut cfg = Cfg::<u32>::new();
+    /// let (left, right, join) = (cfg.new_block(), cfg.new_block(), cfg.new_block());
+    /// let entry = cfg.entry();
+    /// let to_left = cfg.add_weighted_edge(entry, left, EdgeKind::ConditionalTrue, probability(0.3));
+    /// cfg.add_weighted_edge(entry, right, EdgeKind::ConditionalFalse, probability(0.7));
+    /// cfg.add_edge(left, join, EdgeKind::Fallthrough);
+    /// cfg.add_edge(right, join, EdgeKind::Fallthrough);
+    ///
+    /// let counts = BlockFrequencies::infer(
+    ///     &cfg,
+    ///     |block| block == join,
+    ///     |block| (block == entry || block == join).then_some(1_000),
+    ///     |_| None,
+    ///     |edge| cfg.edge(edge).weight(),
+    ///     InferenceCosts::default(),
+    /// )?;
+    /// assert_eq!(counts.block(left), 300);
+    /// assert_eq!(counts.edge(to_left), 300);
+    /// assert_eq!(counts.block(right), 700);
+    /// # Ok::<(), cfglib::FlowError>(())
+    /// ```
+    pub fn infer<G>(
         graph: &G,
         is_exit: impl Fn(N) -> bool,
         block_estimate: impl Fn(N) -> Option<u64>,
         edge_estimate: impl Fn(E) -> Option<u64>,
         branch_prior: impl Fn(E) -> Option<Probability>,
-        costs: &InferenceCosts,
+        costs: InferenceCosts,
     ) -> Result<Self, FlowError>
     where
         G: RootedView<NodeId = N> + EdgeView<EdgeId = E>,
     {
-        assert!(
-            costs.increase >= 0 && costs.decrease >= 0,
-            "an inference cost is negative"
-        );
         let mut model = Model::new(graph.node_bound(), graph.edge_bound());
         for node in graph.node_ids() {
             let index = node.index();
@@ -198,25 +192,10 @@ impl<N: DenseId, E: DenseId> InferredCounts<N, E> {
         }
         let counts = model.closest_to(&target)?;
         let read = |count: u32| counts.get(slot(count)).copied().unwrap_or(0);
-        Ok(Self {
-            block: model.block.iter().map(|&count| read(count)).collect(),
-            edge: model.edge.iter().map(|&count| read(count)).collect(),
-            ids: PhantomData,
-        })
-    }
-
-    /// The count of `node`: `0` for a node at or above the node bound of the
-    /// graph at compute time.
-    #[must_use]
-    pub fn block(&self, node: N) -> u64 {
-        self.block.get(node.index()).copied().unwrap_or(0)
-    }
-
-    /// The count of `edge`: `0` for an edge at or above the edge bound of the
-    /// graph at compute time.
-    #[must_use]
-    pub fn edge(&self, edge: E) -> u64 {
-        self.edge.get(edge.index()).copied().unwrap_or(0)
+        Ok(Self::from_tables(
+            model.block.iter().map(|&count| read(count)).collect(),
+            model.edge.iter().map(|&count| read(count)).collect(),
+        ))
     }
 }
 
@@ -233,7 +212,7 @@ where
     let dominators = DominatorTree::compute(graph);
     let loops = LoopForest::compute(graph, &dominators);
     let frequencies =
-        BlockFrequencies::compute(graph, &loops, branch_prior, FrequencyConfig::new());
+        BlockFrequencies::compute(graph, &loops, branch_prior, FrequencyConfig::default());
     let runs = u128::try_from(runs).expect("a count is not negative");
     let mut expected = vec![0; graph.edge_bound()];
     for edge in graph.edge_ids() {
@@ -289,7 +268,7 @@ impl Model {
         tail: usize,
         head: usize,
         estimate: Option<u64>,
-        costs: &InferenceCosts,
+        costs: InferenceCosts,
     ) -> Result<usize, FlowError> {
         let first = self.network.arc_count();
         match estimate {
@@ -299,9 +278,11 @@ impl Model {
             Some(estimate) => {
                 let estimate = i64::try_from(estimate).map_err(|_| FlowError::Overflow)?;
                 if estimate > 0 {
-                    self.network.add_arc(tail, head, estimate, -costs.decrease);
+                    self.network
+                        .add_arc(tail, head, estimate, -i64::from(costs.decrease));
                 }
-                self.network.add_arc(tail, head, UNBOUNDED, costs.increase);
+                self.network
+                    .add_arc(tail, head, UNBOUNDED, i64::from(costs.increase));
             }
         }
         self.counts.push(Count {

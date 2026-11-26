@@ -5,9 +5,9 @@ use std::collections::BTreeSet;
 
 use cfglib::{
     BlockId, Cfg, CfgMetrics, DominatorTree, EdgeKind, GraphMetrics, IntervalAnalysis,
-    LoopNestingTree, NodeOrder, block_nesting_depths, canonicalize_loops, cfg_block_nesting_depths,
-    detect_loops, detect_loops_tagged, find_back_edges, insert_preheader, is_reducible,
-    loop_exit_blocks, make_reducible, verify,
+    LoopNestingTree, NodeOrder, Probability, block_nesting_depths, canonicalize_loops,
+    cfg_block_nesting_depths, detect_loops, detect_loops_tagged, find_back_edges, insert_preheader,
+    is_reducible, loop_exit_blocks, make_reducible, verify,
 };
 
 fn set(blocks: impl IntoIterator<Item = BlockId>) -> BTreeSet<BlockId> {
@@ -238,11 +238,12 @@ fn a_preheader_takes_over_the_entering_edges_with_their_identity_and_payload() {
     let mut cfg = Cfg::<u32, Route>::with_edge_payload();
     let entry = cfg.entry();
     let [header, body, side, done] = [(); 4].map(|()| cfg.new_block());
+    let hot_weight = Probability::from_f64(0.8).expect("a probability");
     let hot = cfg.add_weighted_edge_with_payload(
         entry,
         header,
         EdgeKind::ConditionalTrue,
-        0.8,
+        hot_weight,
         Route::Hot,
     );
     let to_done = cfg.add_edge(entry, done, EdgeKind::ConditionalFalse);
@@ -264,7 +265,7 @@ fn a_preheader_takes_over_the_entering_edges_with_their_identity_and_payload() {
         "the entry's arms keep their order"
     );
     assert_eq!(cfg.edge(hot).target(), preheader);
-    assert_eq!(cfg.edge(hot).weight(), Some(0.8));
+    assert_eq!(cfg.edge(hot).weight(), Some(hot_weight));
     assert_eq!(*cfg.edge(hot).payload(), Route::Hot);
     assert_eq!(cfg.edge(cold).target(), preheader);
     assert_eq!(*cfg.edge(cold).payload(), Route::Cold);

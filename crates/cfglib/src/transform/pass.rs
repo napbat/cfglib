@@ -36,34 +36,6 @@ impl fmt::Display for PassId {
     }
 }
 
-/// Whether one pass changed its target.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PassChange {
-    /// The target was unchanged.
-    #[default]
-    Unchanged,
-    /// The target was changed.
-    Changed,
-}
-
-impl PassChange {
-    /// Converts a boolean change predicate into a pass result.
-    #[must_use]
-    pub const fn from_changed(changed: bool) -> Self {
-        if changed {
-            Self::Changed
-        } else {
-            Self::Unchanged
-        }
-    }
-
-    /// Returns whether the pass changed its target.
-    #[must_use]
-    pub const fn is_changed(self) -> bool {
-        matches!(self, Self::Changed)
-    }
-}
-
 /// One named transformation over `T`.
 ///
 /// A pass may keep analyses or configuration in its own value. Pipelines call
@@ -78,12 +50,12 @@ pub trait Pass<T> {
     /// Returns the stable identity used in schedules and reports.
     fn id(&self) -> PassId;
 
-    /// Applies this pass to `target`.
+    /// Applies this pass to `target` and reports whether it changed it.
     ///
     /// # Errors
     ///
     /// Returns a consumer error when the transformation cannot complete.
-    fn run(&mut self, target: &mut T) -> Result<PassChange, Self::Error>;
+    fn run(&mut self, target: &mut T) -> Result<bool, Self::Error>;
 }
 
 /// A named pass backed by a closure.
@@ -100,7 +72,7 @@ pub const fn pass_fn<F>(id: PassId, run: F) -> PassFn<F> {
 
 impl<T, E, F> Pass<T> for PassFn<F>
 where
-    F: FnMut(&mut T) -> Result<PassChange, E>,
+    F: FnMut(&mut T) -> Result<bool, E>,
 {
     type Error = E;
 
@@ -108,7 +80,7 @@ where
         self.id
     }
 
-    fn run(&mut self, target: &mut T) -> Result<PassChange, Self::Error> {
+    fn run(&mut self, target: &mut T) -> Result<bool, Self::Error> {
         (self.run)(target)
     }
 }
@@ -117,7 +89,7 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PassExecution {
     id: PassId,
-    change: PassChange,
+    changed: bool,
 }
 
 impl PassExecution {
@@ -129,8 +101,8 @@ impl PassExecution {
 
     /// Returns whether this execution changed the target.
     #[must_use]
-    pub const fn change(self) -> PassChange {
-        self.change
+    pub const fn changed(self) -> bool {
+        self.changed
     }
 }
 
@@ -165,28 +137,26 @@ impl PassReport {
     pub fn changed_count(&self) -> usize {
         self.executions
             .iter()
-            .filter(|execution| execution.change.is_changed())
+            .filter(|execution| execution.changed)
             .count()
     }
 
     /// Returns whether at least one completed pass changed the target.
     #[must_use]
     pub fn is_changed(&self) -> bool {
-        self.executions
-            .iter()
-            .any(|execution| execution.change.is_changed())
+        self.executions.iter().any(|execution| execution.changed)
     }
 }
 
 /// Failure of one named pass after zero or more successful executions.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PassFailure<E> {
+pub struct PassError<E> {
     pass: PassId,
     error: E,
     completed: PassReport,
 }
 
-impl<E> PassFailure<E> {
+impl<E> PassError<E> {
     /// Returns the identity of the pass that failed.
     #[must_use]
     pub const fn pass(&self) -> PassId {
@@ -210,13 +180,13 @@ impl<E> PassFailure<E> {
     }
 }
 
-impl<E: fmt::Display> fmt::Display for PassFailure<E> {
+impl<E: fmt::Display> fmt::Display for PassError<E> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "pass `{}` failed: {}", self.pass, self.error)
     }
 }
 
-impl<E: core::error::Error + 'static> core::error::Error for PassFailure<E> {
+impl<E: core::error::Error + 'static> core::error::Error for PassError<E> {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         Some(&self.error)
     }
@@ -232,12 +202,12 @@ impl<E: core::error::Error + 'static> core::error::Error for PassFailure<E> {
 ///
 /// ```
 /// use core::convert::Infallible;
-/// use cfglib::{PassChange, PassId, PassPipeline, pass_fn};
+/// use cfglib::{PassId, PassPipeline, pass_fn};
 ///
 /// let mut pipeline = PassPipeline::<usize, Infallible>::new();
 /// pipeline.push(pass_fn(PassId::new("example.increment"), |value: &mut usize| {
 ///     *value += 1;
-///     Ok(PassChange::Changed)
+///     Ok(true)
 /// }));
 ///
 /// let mut value = 0;
@@ -264,16 +234,6 @@ impl<'pass, T, E> PassPipeline<'pass, T, E> {
         self.passes.push(Box::new(pass));
     }
 
-    /// Appends a pass and returns the updated schedule.
-    #[must_use]
-    pub fn with_pass<P>(mut self, pass: P) -> Self
-    where
-        P: Pass<T, Error = E> + 'pass,
-    {
-        self.push(pass);
-        self
-    }
-
     /// Returns scheduled pass identities in execution order.
     pub fn ids(&self) -> impl ExactSizeIterator<Item = PassId> + '_ {
         self.passes.iter().map(|pass| pass.id())
@@ -297,14 +257,14 @@ impl<'pass, T, E> PassPipeline<'pass, T, E> {
     ///
     /// Returns the failed pass identity, its error, and the completed-prefix
     /// report. Mutations are not rolled back.
-    pub fn run(&mut self, target: &mut T) -> Result<PassReport, PassFailure<E>> {
+    pub fn run(&mut self, target: &mut T) -> Result<PassReport, PassError<E>> {
         let mut report = PassReport::default();
         for pass in &mut self.passes {
             let id = pass.id();
             match pass.run(target) {
-                Ok(change) => report.executions.push(PassExecution { id, change }),
+                Ok(changed) => report.executions.push(PassExecution { id, changed }),
                 Err(error) => {
-                    return Err(PassFailure {
+                    return Err(PassError {
                         pass: id,
                         error,
                         completed: report,
@@ -327,7 +287,7 @@ impl<T> PassPipeline<'_, T, Infallible> {
     pub fn run_infallible(&mut self, target: &mut T) -> PassReport {
         match self.run(target) {
             Ok(report) => report,
-            Err(PassFailure { error, .. }) => match error {},
+            Err(PassError { error, .. }) => match error {},
         }
     }
 }
@@ -343,15 +303,15 @@ mod tests {
         let mut pipeline = PassPipeline::<Vec<&str>, Infallible>::new();
         pipeline.push(pass_fn(PassId::new("first"), |target: &mut Vec<&str>| {
             target.push("first");
-            Ok(PassChange::Changed)
+            Ok(true)
         }));
         pipeline.push(pass_fn(
             PassId::new("observe"),
-            |_target: &mut Vec<&str>| Ok(PassChange::Unchanged),
+            |_target: &mut Vec<&str>| Ok(false),
         ));
         pipeline.push(pass_fn(PassId::new("last"), |target: &mut Vec<&str>| {
             target.push("last");
-            Ok(PassChange::Changed)
+            Ok(true)
         }));
 
         assert_eq!(
@@ -369,7 +329,7 @@ mod tests {
         assert_eq!(report.len(), 3);
         assert_eq!(report.changed_count(), 2);
         assert!(report.is_changed());
-        assert_eq!(report.executions()[1].change(), PassChange::Unchanged);
+        assert!(!report.executions()[1].changed());
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -388,7 +348,7 @@ mod tests {
         let mut pipeline = PassPipeline::<usize, TestError>::new();
         pipeline.push(pass_fn(PassId::new("increment"), |target: &mut usize| {
             *target += 1;
-            Ok(PassChange::Changed)
+            Ok(true)
         }));
         pipeline.push(pass_fn(PassId::new("fail"), |target: &mut usize| {
             *target += 10;
@@ -396,7 +356,7 @@ mod tests {
         }));
         pipeline.push(pass_fn(PassId::new("unreached"), |target: &mut usize| {
             *target += 100;
-            Ok(PassChange::Changed)
+            Ok(true)
         }));
 
         let mut target = 0;

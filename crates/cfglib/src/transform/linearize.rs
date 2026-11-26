@@ -53,9 +53,10 @@
 //! needs no transfer for it while its target is next: the layout kinds
 //! always, `ConditionalTrue` when the emitter inverts the block's condition,
 //! and the jump kinds when the emitter elides jumps to the next block.
-//! [`cfg_ext_tsp_order`](crate::cfg_ext_tsp_order) derives that rule from
-//! the emitter, and its result goes to [`linearize`] as a
-//! [`BlockOrder::Custom`]. To split the function as well, pass the order to
+//! [`falls_through`] states that rule for an emitter; pass it to
+//! `ext_tsp_order` as the fallthrough test, and give the result to
+//! [`linearize`] with the same emitter as a [`BlockOrder::Custom`]. To split
+//! the function as well, pass the order to
 //! [`hot_cold_order`](crate::hot_cold_order) as its base.
 
 extern crate alloc;
@@ -75,8 +76,8 @@ pub enum BlockOrder {
     ReversePostorder,
     /// Allocation order (block ids in ascending order).
     AllocationOrder,
-    /// Caller-specified order. Every id must name a live block, and blocks
-    /// left out of the list are omitted from the output.
+    /// Caller-specified order. Blocks left out of the list are omitted from
+    /// the output, and an id that names no live block is an error.
     Custom(Vec<BlockId>),
 }
 
@@ -111,6 +112,12 @@ pub enum LinearizeError {
         /// The empty block.
         block: BlockId,
     },
+    /// A [`BlockOrder::Custom`] names a block that the CFG does not hold:
+    /// one that was removed, or an id at or above its block bound.
+    UnknownBlock {
+        /// The id that names no live block.
+        block: BlockId,
+    },
 }
 
 impl fmt::Display for LinearizeError {
@@ -120,6 +127,12 @@ impl fmt::Display for LinearizeError {
                 formatter,
                 "block {block} has a conditional edge but no instruction to branch on"
             ),
+            Self::UnknownBlock { block } => {
+                write!(
+                    formatter,
+                    "the block order names {block}, which is not a live block"
+                )
+            }
         }
     }
 }
@@ -198,7 +211,9 @@ pub trait Emitter<I> {
 /// # Errors
 ///
 /// Returns [`LinearizeError::MissingCondition`] when a block has a
-/// [`ConditionalTrue`](EdgeKind::ConditionalTrue) edge but no instruction.
+/// [`ConditionalTrue`](EdgeKind::ConditionalTrue) edge but no instruction,
+/// and [`LinearizeError::UnknownBlock`] when a [`BlockOrder::Custom`] names a
+/// block that the CFG does not hold.
 pub fn linearize<I: Clone, E>(
     cfg: &Cfg<I, E>,
     order: BlockOrder,
@@ -207,7 +222,12 @@ pub fn linearize<I: Clone, E>(
     let sorted: Vec<BlockId> = match order {
         BlockOrder::ReversePostorder => cfg.reverse_postorder(),
         BlockOrder::AllocationOrder => cfg.block_ids().collect(),
-        BlockOrder::Custom(ids) => ids,
+        BlockOrder::Custom(ids) => {
+            if let Some(&block) = ids.iter().find(|&&id| !cfg.contains_block(id)) {
+                return Err(LinearizeError::UnknownBlock { block });
+            }
+            ids
+        }
     };
 
     let elide_jumps = emitter.elides_jump_to_next();
@@ -320,11 +340,75 @@ fn emit_transfers<I: Clone, E>(
 /// Whether [`linearize`] under `emitter` emits no transfer for `edge` when
 /// the target of the edge is the next block: the rule that a profile-guided
 /// order scores fallthroughs by.
-pub(crate) fn falls_through<G: CfgView>(
-    cfg: &G,
-    edge: EdgeId,
-    emitter: &dyn Emitter<G::Inst>,
-) -> bool {
+///
+/// [`Fallthrough`](EdgeKind::Fallthrough),
+/// [`ConditionalFalse`](EdgeKind::ConditionalFalse), and
+/// [`CallReturn`](EdgeKind::CallReturn) always fall through;
+/// [`ConditionalTrue`](EdgeKind::ConditionalTrue) does when the emitter
+/// [inverts](Emitter::emit_inverted_conditional_branch) the condition of its
+/// block toward the block's layout target; and the jump kinds do when the
+/// emitter [elides jumps to the next block](Emitter::elides_jump_to_next).
+/// Dispatch, call, and exceptional edges never do. To learn whether a
+/// condition inverts, the function asks the emitter for the inverted branch
+/// and drops the instruction.
+///
+/// # Panics
+///
+/// Panics when `edge` names no live edge of `cfg`.
+///
+/// # Examples
+///
+/// The hot true arm follows the branch once the emitter can invert the
+/// branch, and the branch block then emits one transfer instead of two.
+///
+/// ```
+/// use cfglib::{
+///     BlockId, BlockOrder, Cfg, EdgeKind, Emitter, ExtTspConfig, ext_tsp_order, falls_through,
+///     linearize,
+/// };
+///
+/// struct Asm;
+///
+/// impl Emitter<&'static str> for Asm {
+///     fn emit_jump(&self, _target: BlockId) -> &'static str {
+///         "jmp"
+///     }
+///     fn emit_conditional_branch(&self, _condition: &&'static str, _target: BlockId) -> &'static str {
+///         "bnz"
+///     }
+///     fn emit_block_start(&self, _block: BlockId) -> Option<&'static str> {
+///         None
+///     }
+///     fn emit_inverted_conditional_branch(
+///         &self,
+///         _condition: &&'static str,
+///         _target: BlockId,
+///     ) -> Option<&'static str> {
+///         Some("bz")
+///     }
+/// }
+///
+/// let mut cfg = Cfg::new();
+/// let entry = cfg.entry();
+/// let [hot, cold] = [(); 2].map(|()| cfg.new_block());
+/// cfg.block_mut(entry).push("test");
+/// cfg.block_mut(hot).push("work");
+/// cfg.block_mut(cold).push("report");
+/// let to_hot = cfg.add_edge(entry, hot, EdgeKind::ConditionalTrue);
+/// cfg.add_edge(entry, cold, EdgeKind::ConditionalFalse);
+///
+/// let count = |edge| if edge == to_hot { 90 } else { 10 };
+/// let falls = |edge| falls_through(&cfg, edge, &Asm);
+/// let order = ext_tsp_order(&cfg, |_| 16, count, falls, &ExtTspConfig::default());
+/// assert_eq!(order, [entry, hot, cold]);
+///
+/// let stream = linearize(&cfg, BlockOrder::Custom(order), &Asm)?;
+/// let text: Vec<&str> = stream.iter().map(|line| line.inst).collect();
+/// assert_eq!(text, ["test", "bz", "work", "report"]);
+/// # Ok::<(), cfglib::LinearizeError>(())
+/// ```
+#[must_use]
+pub fn falls_through<G: CfgView>(cfg: &G, edge: EdgeId, emitter: &dyn Emitter<G::Inst>) -> bool {
     let edge = cfg.edge(edge);
     match transfer(edge.data().kind()) {
         Transfer::Layout => true,
@@ -666,5 +750,24 @@ mod tests {
         assert!(!falls_through(&cfg, jump, &TestEmitter));
         assert!(falls_through(&cfg, true_edge, &FoldingEmitter));
         assert!(falls_through(&cfg, jump, &FoldingEmitter));
+    }
+
+    #[test]
+    fn a_custom_order_naming_a_dead_block_is_an_error() {
+        let mut cfg = Cfg::<MockInst>::new();
+        let removed = cfg.new_block();
+        assert!(cfg.remove_block(removed));
+        let beyond = BlockId::from_index(cfg.block_bound());
+        for block in [removed, beyond] {
+            let result = linearize(
+                &cfg,
+                BlockOrder::Custom(vec![cfg.entry(), block]),
+                &TestEmitter,
+            );
+            assert_eq!(
+                result.map(|stream| stream.len()),
+                Err(LinearizeError::UnknownBlock { block })
+            );
+        }
     }
 }

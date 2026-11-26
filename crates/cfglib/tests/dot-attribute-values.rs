@@ -1,11 +1,8 @@
 //! Integration tests: every value the DOT writer emits is spelled the way DOT
 //! reads it, whatever the consumer's hooks and tags hand back.
 
-use std::borrow::Cow;
-
 use cfglib::{
-    Cfg, DotEdgeAttributes, DotStyle, EdgeId, EdgeKind, EdgeTag, Graph, IdTag, Label, NodeId,
-    no_label, to_dot,
+    DotEdgeAttributes, DotStyle, EdgeId, EdgeTag, Graph, IdTag, Label, NodeId, no_label, to_dot,
 };
 
 /// The one edge of a two-node graph, drawn with `attributes`.
@@ -105,21 +102,6 @@ fn a_non_finite_pen_width_is_not_written() {
         ..DotEdgeAttributes::plain()
     };
     assert_eq!(drawn_edge(finite), "n0 -> n1 [penwidth=2.5];");
-}
-
-#[test]
-fn a_cfg_edge_with_an_unusable_weight_is_drawn_at_the_default_width() {
-    for weight in [f64::NAN, f64::INFINITY] {
-        let mut cfg = Cfg::<u32>::new();
-        let exit = cfg.new_block();
-        let edge = cfg.add_edge(cfg.entry(), exit, EdgeKind::Fallthrough);
-        cfg.edge_mut(edge).set_weight(Some(weight));
-
-        let dot = cfg.to_dot_with(|_| Cow::Borrowed(""));
-        assert!(!dot.contains("penwidth"), "{weight}: {dot}");
-        assert!(!dot.contains("NaN=") && !dot.contains("inf]"), "{dot}");
-        assert!(dot.contains(&format!("label=\"({weight:.2})\"")), "{dot}");
-    }
 }
 
 /// A node tag whose prefix is not a DOT identifier.

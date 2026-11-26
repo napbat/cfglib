@@ -5,14 +5,14 @@
 //! joins the graph views of the crate with the facts that an
 //! instruction-level algorithm needs and a graph view does not give: the
 //! ordered instructions of each block, the [`EdgeKind`](crate::EdgeKind) of each edge, and
-//! the optional branch weight of each edge.
+//! the optional branch probability of each edge.
 //! [`Cfg`] implements it, so every caller that holds a [`Cfg`] keeps working.
 //! A consumer with its own storage implements it to run the same algorithms
 //! without a conversion.
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::edge::{EdgeId, KindedEdge};
+use crate::edge::{EdgeId, KindedEdge, Probability};
 use crate::graph::edge_view::EdgeView;
 use crate::graph::view::RootedView;
 
@@ -58,17 +58,18 @@ pub trait CfgView:
     /// Panics when `block` does not belong to this view.
     fn instructions(&self, block: BlockId) -> &[Self::Inst];
 
-    /// Returns the branch weight of an edge, if the view has one.
+    /// Returns the branch probability of an edge, if the view has one.
     ///
-    /// A weight is a branch probability in `0.0..=1.0`: the likelihood that
-    /// control takes the edge, relative to the other edges leaving its
-    /// source. The default answers `None`, which means that the view carries
-    /// no profile.
+    /// It is the likelihood that control takes the edge, relative to the
+    /// other edges leaving its source, as
+    /// [`BlockFrequencies::compute`](crate::BlockFrequencies::compute) reads
+    /// it. The default answers `None`, which means that the view carries no
+    /// profile.
     ///
     /// # Panics
     ///
     /// Panics when `edge` does not belong to this view.
-    fn edge_weight(&self, _edge: EdgeId) -> Option<f64> {
+    fn edge_weight(&self, _edge: EdgeId) -> Option<Probability> {
         None
     }
 }
@@ -80,7 +81,7 @@ impl<I, E> CfgView for Cfg<I, E> {
         self.block(block).instructions()
     }
 
-    fn edge_weight(&self, edge: EdgeId) -> Option<f64> {
+    fn edge_weight(&self, edge: EdgeId) -> Option<Probability> {
         self.edge(edge).weight()
     }
 }

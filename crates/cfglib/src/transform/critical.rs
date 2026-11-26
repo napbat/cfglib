@@ -87,7 +87,7 @@ pub fn split_critical_edges_with<I, E>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::{diamond_cfg, ff};
+    use crate::test_util::{diamond_cfg, ff, probability};
     use crate::{DominatorTree, detect_loops_tagged};
 
     #[test]
@@ -128,7 +128,7 @@ mod tests {
             cfg.entry(),
             left,
             EdgeKind::ConditionalTrue,
-            0.75,
+            probability(0.75),
             "case 7",
         );
         cfg.add_edge_with_payload(cfg.entry(), right, EdgeKind::ConditionalFalse, "default");
@@ -140,7 +140,7 @@ mod tests {
         assert_eq!(replacements.len(), 2);
         assert_eq!(replacements[0], original);
         assert_eq!(cfg.edge(original).kind(), EdgeKind::ConditionalTrue);
-        assert_eq!(cfg.edge(original).weight(), Some(0.75));
+        assert_eq!(cfg.edge(original).weight(), Some(probability(0.75)));
         assert_eq!(cfg.edge(original).payload(), &"case 7");
         assert_eq!(cfg.edge(replacements[1]).payload(), &"case 7");
     }
@@ -155,7 +155,7 @@ mod tests {
         cfg.add_edge(entry, header, EdgeKind::Fallthrough);
         cfg.add_edge(header, body, EdgeKind::ConditionalTrue);
         cfg.add_edge(header, exit, EdgeKind::ConditionalFalse);
-        let back = cfg.add_weighted_edge(body, header, EdgeKind::Back, 0.5);
+        let back = cfg.add_weighted_edge(body, header, EdgeKind::Back, probability(0.5));
         cfg.add_edge(body, exit, EdgeKind::ConditionalFalse);
 
         let before = detect_loops_tagged(&cfg, &DominatorTree::compute(&cfg));
@@ -165,7 +165,11 @@ mod tests {
 
         let halves = mapping.edges(back).unwrap();
         assert_eq!(halves[0], back);
-        assert_eq!(cfg.edge(back).weight(), Some(0.5), "the weight stays put");
+        assert_eq!(
+            cfg.edge(back).weight(),
+            Some(probability(0.5)),
+            "the weight stays put"
+        );
         assert_ne!(cfg.edge(back).kind(), EdgeKind::Back);
         assert_eq!(cfg.edge(halves[1]).kind(), EdgeKind::Back);
         assert_eq!(cfg.edge(halves[1]).target(), header);
