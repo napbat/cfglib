@@ -31,6 +31,7 @@ use super::edge_view::EdgeView;
 use super::epoch::EpochMarks;
 use super::scc::{SccDecomposition, kosaraju_scc};
 use super::view::{DenseId, GraphView};
+use crate::identity::{NO_INDEX, check_bound, slot, word};
 
 /// Options of [`feedback_arc_set`].
 ///
@@ -208,8 +209,6 @@ fn arrange<G: GraphView>(graph: &G) -> (SccDecomposition<G::NodeId>, Vec<G::Node
     (components, order)
 }
 
-/// No node: the end of a list, and the list of a node not filed in one.
-const NONE: usize = usize::MAX;
 /// The list of the nodes with no out-edge left inside the component.
 const SINKS: usize = 0;
 /// The list of the nodes with no in-edge left and some out-edge.
@@ -229,17 +228,17 @@ struct Peeling {
     out_degree: Vec<usize>,
     /// In-edges left to each node from remaining nodes of its component.
     in_degree: Vec<usize>,
-    /// The list each node is filed in, [`NONE`] outside the component being
-    /// peeled and once peeled.
-    list: Vec<usize>,
-    /// The next node of the same list.
-    next: Vec<usize>,
-    /// The previous node of the same list.
-    previous: Vec<usize>,
-    /// The first node of each list.
-    head: Vec<usize>,
+    /// The list each node is filed in, [`NO_INDEX`] outside the component
+    /// being peeled and once peeled.
+    list: Vec<u32>,
+    /// The next node of the same list, [`NO_INDEX`] at its end.
+    next: Vec<u32>,
+    /// The previous node of the same list, [`NO_INDEX`] at its start.
+    previous: Vec<u32>,
+    /// The first node of each list, [`NO_INDEX`] for an empty one.
+    head: Vec<u32>,
     /// The last node of each list, where a node is filed.
-    tail: Vec<usize>,
+    tail: Vec<u32>,
     /// The largest in-degree of the component, so that every bucket index
     /// is positive.
     offset: usize,
@@ -252,12 +251,13 @@ struct Peeling {
 
 impl Peeling {
     fn new(node_bound: usize) -> Self {
+        check_bound(node_bound, "node bound of a feedback arc set");
         Self {
             out_degree: vec![0; node_bound],
             in_degree: vec![0; node_bound],
-            list: vec![NONE; node_bound],
-            next: vec![NONE; node_bound],
-            previous: vec![NONE; node_bound],
+            list: vec![NO_INDEX; node_bound],
+            next: vec![NO_INDEX; node_bound],
+            previous: vec![NO_INDEX; node_bound],
             head: Vec::new(),
             tail: Vec::new(),
             offset: 0,
@@ -292,9 +292,9 @@ impl Peeling {
         });
         let lists = BUCKETS + max_in + max_out + 1;
         self.head.clear();
-        self.head.resize(lists, NONE);
+        self.head.resize(lists, NO_INDEX);
         self.tail.clear();
-        self.tail.resize(lists, NONE);
+        self.tail.resize(lists, NO_INDEX);
         self.offset = max_in;
         self.top = BUCKETS;
         for &node in nodes {
@@ -344,15 +344,15 @@ impl Peeling {
     /// File `node` at the tail of the list its degrees put it in.
     fn file(&mut self, node: usize) {
         let list = self.key(node);
-        self.list[node] = list;
-        self.next[node] = NONE;
+        self.list[node] = word(list);
+        self.next[node] = NO_INDEX;
         let previous = self.tail[list];
         self.previous[node] = previous;
         match previous {
-            NONE => self.head[list] = node,
-            previous => self.next[previous] = node,
+            NO_INDEX => self.head[list] = word(node),
+            previous => self.next[slot(previous)] = word(node),
         }
-        self.tail[list] = node;
+        self.tail[list] = word(node);
         if list > self.top {
             self.top = list;
         }
@@ -360,24 +360,25 @@ impl Peeling {
 
     /// Take `node` out of its list.
     fn unlink(&mut self, node: usize) {
-        let (list, previous, next) = (self.list[node], self.previous[node], self.next[node]);
+        let (list, previous, next) = (slot(self.list[node]), self.previous[node], self.next[node]);
         match previous {
-            NONE => self.head[list] = next,
-            previous => self.next[previous] = next,
+            NO_INDEX => self.head[list] = next,
+            previous => self.next[slot(previous)] = next,
         }
         match next {
-            NONE => self.tail[list] = previous,
-            next => self.previous[next] = previous,
+            NO_INDEX => self.tail[list] = previous,
+            next => self.previous[slot(next)] = previous,
         }
-        self.list[node] = NONE;
+        self.list[node] = NO_INDEX;
     }
 
     /// Take the first node of `list`, if it holds one.
     fn take(&mut self, list: usize) -> Option<usize> {
         let node = self.head[list];
-        if node == NONE {
+        if node == NO_INDEX {
             return None;
         }
+        let node = slot(node);
         self.unlink(node);
         Some(node)
     }
@@ -389,7 +390,7 @@ impl Peeling {
     /// past empty buckets and rises by one per degree change, so the scans
     /// of a component cost O(buckets + edges) together.
     fn take_highest(&mut self) -> usize {
-        while self.head[self.top] == NONE {
+        while self.head[self.top] == NO_INDEX {
             self.top -= 1;
         }
         self.take(self.top)
@@ -402,14 +403,14 @@ impl Peeling {
     fn peel<G: GraphView>(&mut self, graph: &G, node: G::NodeId) {
         for successor in graph.successors(node) {
             let successor = successor.index();
-            if self.list[successor] != NONE {
+            if self.list[successor] != NO_INDEX {
                 self.in_degree[successor] -= 1;
                 self.refile(successor);
             }
         }
         for predecessor in graph.predecessors(node) {
             let predecessor = predecessor.index();
-            if self.list[predecessor] != NONE {
+            if self.list[predecessor] != NO_INDEX {
                 self.out_degree[predecessor] -= 1;
                 self.refile(predecessor);
             }
@@ -419,7 +420,7 @@ impl Peeling {
     /// Move `node` to the tail of the list its degrees now put it in, unless
     /// it is already in that list.
     fn refile(&mut self, node: usize) {
-        if self.key(node) != self.list[node] {
+        if self.key(node) != slot(self.list[node]) {
             self.unlink(node);
             self.file(node);
         }

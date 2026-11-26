@@ -70,6 +70,7 @@ use super::loop_forest::{LoopForest, LoopId};
 use super::view::{DenseId, RootedView};
 use crate::block::BlockId;
 use crate::edge::EdgeId;
+use crate::identity::{NO_INDEX, check_bound, slot, word};
 use crate::union_find::DisjointSet;
 
 /// The number of fractional bits of a frequency: one execution of the entry
@@ -440,8 +441,8 @@ struct Scratch {
     arc_starts: Vec<usize>,
     /// The units in reverse postorder from the start.
     order: Vec<usize>,
-    /// The position of each unit in `order`, `usize::MAX` when unreached.
-    position: Vec<usize>,
+    /// The position of each unit in `order`, [`NO_INDEX`] when unreached.
+    position: Vec<u32>,
     stack: Vec<(usize, usize)>,
     mass: Vec<u64>,
 }
@@ -456,6 +457,7 @@ impl Propagation {
         let loops: Vec<LoopId> = forest.loops().collect();
         let top = loops.len();
         let elements = bound + top;
+        check_bound(elements, "node and loop count of block frequencies");
         let mut level = vec![top; elements];
         let live: Vec<usize> = graph.node_ids().map(DenseId::index).collect();
         for &slot in &live {
@@ -596,7 +598,7 @@ impl Propagation {
                         weight: share,
                     }),
                     To::Unit(next) => {
-                        if scratch.position[next] > position {
+                        if slot(scratch.position[next]) > position {
                             scratch.mass[next] = scratch.mass[next].saturating_add(share);
                         }
                     }
@@ -670,7 +672,7 @@ impl Propagation {
         let units = scratch.arc_starts.len() - 1;
         scratch.order.clear();
         scratch.position.clear();
-        scratch.position.resize(units, usize::MAX);
+        scratch.position.resize(units, NO_INDEX);
         // `position` marks a unit as seen while the walk runs, and holds its
         // place in the order once the walk is done.
         scratch.position[start] = 0;
@@ -684,7 +686,7 @@ impl Propagation {
             let arc = scratch.arcs[*next];
             *next += 1;
             if let To::Unit(successor) = arc.to
-                && scratch.position[successor] == usize::MAX
+                && scratch.position[successor] == NO_INDEX
             {
                 scratch.position[successor] = 0;
                 scratch
@@ -694,7 +696,7 @@ impl Propagation {
         }
         scratch.order.reverse();
         for (position, &unit) in scratch.order.iter().enumerate() {
-            scratch.position[unit] = position;
+            scratch.position[unit] = word(position);
         }
     }
 

@@ -37,6 +37,7 @@ use core::marker::PhantomData;
 
 use crate::graph::store::{Graph, NodeId};
 use crate::graph::view::{DenseId, GraphView};
+use crate::identity::{NO_INDEX, slot, word};
 pub use incremental::{IncrementalScc, SccChange};
 pub use strong_cuts::{StrongCutScratch, StrongCuts, strong_cuts, strong_cuts_of};
 
@@ -289,8 +290,6 @@ impl<N: DenseId> SccDecomposition<N> {
     where
         G: GraphView<NodeId = N>,
     {
-        /// The parent of a member the search has not reached.
-        const UNREACHED: usize = usize::MAX;
         let component = self.component_index(node);
         let members = &self.nodes[self.offsets[component]..self.offsets[component + 1]];
         let position = |member: N| {
@@ -298,11 +297,12 @@ impl<N: DenseId> SccDecomposition<N> {
                 .binary_search(&member)
                 .expect("a node of a component is in the component's run")
         };
-        // Each member's breadth-first parent, by position in `members`. The
-        // root is its own parent, which also marks it reached.
+        // Each member's breadth-first parent, by position in `members`, and
+        // `NO_INDEX` for one the search has not reached. The root is its own
+        // parent, which also marks it reached.
         let root = position(node);
-        let mut parent = vec![UNREACHED; members.len()];
-        parent[root] = root;
+        let mut parent = vec![NO_INDEX; members.len()];
+        parent[root] = word(root);
         let mut queue = VecDeque::from([root]);
         while let Some(current) = queue.pop_front() {
             for successor in graph.successors(members[current]) {
@@ -310,7 +310,7 @@ impl<N: DenseId> SccDecomposition<N> {
                     let mut cycle = vec![members[current]];
                     let mut step = current;
                     while step != root {
-                        step = parent[step];
+                        step = slot(parent[step]);
                         cycle.push(members[step]);
                     }
                     cycle.reverse();
@@ -320,8 +320,8 @@ impl<N: DenseId> SccDecomposition<N> {
                     continue;
                 }
                 let next = position(successor);
-                if parent[next] == UNREACHED {
-                    parent[next] = current;
+                if parent[next] == NO_INDEX {
+                    parent[next] = word(current);
                     queue.push_back(next);
                 }
             }

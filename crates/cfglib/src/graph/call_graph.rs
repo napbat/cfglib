@@ -17,12 +17,12 @@ use crate::cfg::Cfg;
 use crate::flow::CallInfo;
 use crate::graph::scc::tarjan_scc;
 use crate::graph::store::{Graph, NodeId};
+use crate::identity::{NO_INDEX, slot, word};
 
-/// A function [`propagate_summaries`] has not yet placed in its component's
-/// callee-first order.
-const UNSEEN: usize = usize::MAX;
-/// A function on the walk that places its component's members.
-const OPEN: usize = usize::MAX - 1;
+/// A function on the walk that places its component's members, in the rank
+/// table of [`propagate`], where [`NO_INDEX`] marks a function not yet placed
+/// in its component's callee-first order.
+const OPEN: u32 = NO_INDEX - 1;
 
 /// The graph [`call_graph`] builds: functions as nodes, calls as edges.
 type FunctionGraph<C> = Graph<FunctionNode<C>, CallMetadata>;
@@ -459,7 +459,7 @@ fn propagate<N, E, S: Clone + PartialEq>(
     let mut summaries = alloc::vec![bottom.clone(); graph.node_bound()];
     let components = tarjan_scc(graph);
     // Each member's position in its component's callee-first order.
-    let mut rank = alloc::vec![UNSEEN; graph.node_bound()];
+    let mut rank = alloc::vec![NO_INDEX; graph.node_bound()];
     // Scratch reused by every recursive component.
     let mut order: Vec<NodeId> = Vec::new();
     let mut walk = Vec::new();
@@ -478,7 +478,7 @@ fn propagate<N, E, S: Clone + PartialEq>(
         // except along the edges that close a cycle.
         order.clear();
         for &start in component {
-            if rank[start.index()] != UNSEEN {
+            if rank[start.index()] != NO_INDEX {
                 continue;
             }
             rank[start.index()] = OPEN;
@@ -487,7 +487,7 @@ fn propagate<N, E, S: Clone + PartialEq>(
                 let node = *node;
                 match callees.next() {
                     Some(callee)
-                        if rank[callee.index()] == UNSEEN
+                        if rank[callee.index()] == NO_INDEX
                             && components.component_index(callee) == component_index =>
                     {
                         rank[callee.index()] = OPEN;
@@ -495,7 +495,7 @@ fn propagate<N, E, S: Clone + PartialEq>(
                     }
                     Some(_) => {}
                     None => {
-                        rank[node.index()] = order.len();
+                        rank[node.index()] = word(order.len());
                         order.push(node);
                         walk.pop();
                     }
@@ -510,7 +510,7 @@ fn propagate<N, E, S: Clone + PartialEq>(
             widens.extend(order.iter().enumerate().map(|(position, &node)| {
                 graph.successors(node).any(|callee| {
                     components.component_index(callee) == component_index
-                        && rank[callee.index()] >= position
+                        && slot(rank[callee.index()]) >= position
                 })
             }));
         }
@@ -538,7 +538,7 @@ fn propagate<N, E, S: Clone + PartialEq>(
             summaries[node.index()] = updated;
             for caller in graph.predecessors(node) {
                 if components.component_index(caller) == component_index {
-                    let caller_rank = rank[caller.index()];
+                    let caller_rank = slot(rank[caller.index()]);
                     if !core::mem::replace(&mut queued[caller_rank], true) {
                         pending.push(Reverse(caller_rank));
                     }
@@ -570,7 +570,7 @@ struct Ranking<'a> {
     /// The members in callee-first order.
     order: &'a [NodeId],
     /// Each member's position in `order`, by node index.
-    rank: &'a [usize],
+    rank: &'a [u32],
     /// Whether the member at each position is a widening point.
     widens: &'a [bool],
 }
@@ -610,7 +610,7 @@ fn descend<N, E, S: PartialEq>(
         for caller in graph.predecessors(node) {
             // A caller outside the component has no rank, or the rank of a
             // member of another component, which `order` does not hold.
-            let caller_rank = rank[caller.index()];
+            let caller_rank = slot(rank[caller.index()]);
             if order.get(caller_rank) == Some(&caller)
                 && !core::mem::replace(&mut queued[caller_rank], true)
             {

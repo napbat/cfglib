@@ -58,7 +58,7 @@ use crate::graph::view::Direction;
 use super::Graph;
 use super::id::{Id, IdTag};
 use super::liveness::LiveSet;
-use super::raw_index;
+use crate::identity::word;
 
 use runs::Runs;
 
@@ -186,7 +186,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         }
         *moved = endpoint;
 
-        let raw = raw_index(edge.index());
+        let raw = word(edge.index());
         self.with_run(previous, direction, |run, live| {
             sweep(run, live);
             if let Some(position) = run.iter().position(|&slot| slot == raw) {
@@ -263,7 +263,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
             self.start_run(node, direction);
         }
         let live = self.tombstoned_edges().then_some(&self.live_edges);
-        let delta_base = raw_index(self.base_edges.len());
+        let delta_base = word(self.base_edges.len());
         let run = self
             .relocations
             .as_deref_mut()

@@ -31,6 +31,7 @@ use alloc::vec::Vec;
 
 use super::edge_view::EdgeView;
 use super::view::{DenseId, RootedView};
+use crate::identity::{NO_INDEX, check_bound, word};
 
 /// The rounds of [`wl_colors`] that [`canonical_hash`] runs to fingerprint
 /// the nodes the root does not reach.
@@ -223,9 +224,6 @@ pub fn multiset_fingerprint(colors: impl IntoIterator<Item = u64>) -> u64 {
         .finish()
 }
 
-/// The marker [`preorder`] leaves on a node the root does not reach.
-const UNREACHED: usize = usize::MAX;
-
 /// The canonical numbering of the nodes the root reaches: a depth-first
 /// preorder that visits each node's out-edges sorted by `edge_key`, and
 /// edges with equal keys in adjacency order.
@@ -270,10 +268,11 @@ pub fn canonical_order<G: RootedView + EdgeView>(
 }
 
 /// The [`canonical_order`] walk with the edge keys read from `keys`: the
-/// order, and each node's position in it by node index ([`UNREACHED`] for a
+/// order, and each node's position in it by node index ([`NO_INDEX`] for a
 /// node outside it).
-fn preorder<G: RootedView + EdgeView>(graph: &G, keys: &[u64]) -> (Vec<G::NodeId>, Vec<usize>) {
-    let mut position = vec![UNREACHED; graph.node_bound()];
+fn preorder<G: RootedView + EdgeView>(graph: &G, keys: &[u64]) -> (Vec<G::NodeId>, Vec<u32>) {
+    check_bound(graph.node_bound(), "node bound of a canonical order");
+    let mut position = vec![NO_INDEX; graph.node_bound()];
     let mut order = Vec::new();
     // The out-edges of every node on the walk's stack, as `(key, adjacency
     // position, target)` sorted by key and then position, each node's run
@@ -284,7 +283,7 @@ fn preorder<G: RootedView + EdgeView>(graph: &G, keys: &[u64]) -> (Vec<G::NodeId
     let mut entered = Some(graph.root());
     loop {
         if let Some(node) = entered.take() {
-            position[node.index()] = order.len();
+            position[node.index()] = word(order.len());
             order.push(node);
             let start = edges.len();
             edges.extend(graph.outgoing(node).enumerate().map(|(adjacency, edge)| {
@@ -298,7 +297,7 @@ fn preorder<G: RootedView + EdgeView>(graph: &G, keys: &[u64]) -> (Vec<G::NodeId
         };
         if let Some(&(_, _, target)) = edges.get(frame.1) {
             frame.1 += 1;
-            if position[target.index()] == UNREACHED {
+            if position[target.index()] == NO_INDEX {
                 entered = Some(target);
             }
         } else {
@@ -368,11 +367,11 @@ pub fn canonical_hash<G: RootedView + EdgeView>(
         out_edges.clear();
         out_edges.extend(graph.outgoing(node).map(|edge| {
             let target = graph.edge(edge).target();
-            (keys[edge.index()], position[target.index()] as u64)
+            (keys[edge.index()], u64::from(position[target.index()]))
         }));
         state = state.mix(labels[node.index()]).mix_pairs(&mut out_edges);
     }
-    let unreached = |node: &G::NodeId| position[node.index()] == UNREACHED;
+    let unreached = |node: &G::NodeId| position[node.index()] == NO_INDEX;
     let unreached_count = graph.node_ids().filter(unreached).count();
     state = state.mix_count(unreached_count);
     if unreached_count > 0 {

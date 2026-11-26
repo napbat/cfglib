@@ -21,12 +21,13 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
+use super::SeseEdge;
 use super::closed::{ClosedGraph, edge_slot};
-use super::{ABSENT, SeseEdge, slot, word};
 use crate::block::BlockId;
 use crate::edge::EdgeId;
 use crate::graph::edge_view::EdgeView;
 use crate::graph::view::{DenseId, RootedView};
+use crate::identity::{NO_INDEX, slot, word};
 
 /// The cycle-equivalence classes of the edges of a rooted graph.
 ///
@@ -74,7 +75,7 @@ use crate::graph::view::{DenseId, RootedView};
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CycleEquivalence<N = BlockId, E = EdgeId> {
-    /// The class of each edge slot of the closed graph, [`ABSENT`] for a slot
+    /// The class of each edge slot of the closed graph, [`NO_INDEX`] for a slot
     /// outside it.
     classes: Vec<u32>,
     /// The edge bound of the graph, which is also the slot of the virtual
@@ -127,15 +128,15 @@ impl<N: DenseId, E: DenseId> CycleEquivalence<N, E> {
     pub fn class(&self, edge: SeseEdge<N, E>) -> Option<usize> {
         let edge = edge_slot(self.edge_bound, &self.outlets, edge)?;
         let class = *self.classes.get(edge)?;
-        (class != ABSENT).then_some(slot(class))
+        (class != NO_INDEX).then_some(slot(class))
     }
 }
 
-/// The class of every slot of `closed`, [`ABSENT`] outside it, and the number
+/// The class of every slot of `closed`, [`NO_INDEX`] outside it, and the number
 /// of classes.
 pub(super) fn cycle_classes<N: DenseId>(closed: &ClosedGraph<N>) -> (Vec<u32>, usize) {
     let mut classes = Classes {
-        of: vec![ABSENT; closed.slot_count()],
+        of: vec![NO_INDEX; closed.slot_count()],
         count: 0,
     };
     let tree = SpanningTree::new(closed, &mut classes);
@@ -170,7 +171,7 @@ struct SpanningTree {
     pre: Vec<u32>,
     /// The nodes in preorder.
     order: Vec<u32>,
-    /// The tree edge into each node, [`ABSENT`] for the root.
+    /// The tree edge into each node, [`NO_INDEX`] for the root.
     tree_edge: Vec<u32>,
     /// The first backedge whose lower end is each node.
     up_head: Vec<u32>,
@@ -190,15 +191,15 @@ impl SpanningTree {
         let slots = closed.slot_count();
         let root = closed.bound;
         let mut tree = Self {
-            pre: vec![ABSENT; nodes],
+            pre: vec![NO_INDEX; nodes],
             order: Vec::with_capacity(nodes),
-            tree_edge: vec![ABSENT; nodes],
-            up_head: vec![ABSENT; nodes],
-            up_next: vec![ABSENT; slots],
-            down_head: vec![ABSENT; nodes],
-            down_next: vec![ABSENT; slots],
+            tree_edge: vec![NO_INDEX; nodes],
+            up_head: vec![NO_INDEX; nodes],
+            up_next: vec![NO_INDEX; slots],
+            down_head: vec![NO_INDEX; nodes],
+            down_next: vec![NO_INDEX; slots],
         };
-        tree.discover(root, ABSENT);
+        tree.discover(root, NO_INDEX);
         let mut stack = vec![(root, 0_usize)];
         while let Some(frame) = stack.last_mut() {
             let (node, position) = *frame;
@@ -215,10 +216,10 @@ impl SpanningTree {
             let edge = slot(edge);
             let other = closed.other(edge, node);
             if other == node {
-                if classes.of[edge] == ABSENT {
+                if classes.of[edge] == NO_INDEX {
                     classes.of[edge] = classes.fresh();
                 }
-            } else if tree.pre[other] == ABSENT {
+            } else if tree.pre[other] == NO_INDEX {
                 tree.discover(other, word(edge));
                 stack.push((other, 0));
             } else if tree.pre[other] < tree.pre[node] {
@@ -257,9 +258,9 @@ impl SpanningTree {
         let mut lists = BracketLists::new(nodes, slots);
         // The smallest and second-smallest `hi` of the children finished so
         // far, the second from a child other than the first's.
-        let mut child_hi = vec![(ABSENT, ABSENT); nodes];
+        let mut child_hi = vec![(NO_INDEX, NO_INDEX); nodes];
         // The capping brackets ending at each node.
-        let mut capping_head = vec![ABSENT; nodes];
+        let mut capping_head = vec![NO_INDEX; nodes];
         for &node in self.order.iter().rev() {
             let node = slot(node);
             // The highest node a backedge from `node` reaches, by preorder.
@@ -267,17 +268,17 @@ impl SpanningTree {
                 .ups(node)
                 .map(|edge| self.pre[closed.other(edge, node)])
                 .min()
-                .unwrap_or(ABSENT);
+                .unwrap_or(NO_INDEX);
             let (hi1, hi2) = child_hi[node];
 
             let mut capping = capping_head[node];
-            while capping != ABSENT {
+            while capping != NO_INDEX {
                 lists.delete(node, slot(capping));
                 capping = lists.next_capping[slot(capping)];
             }
             for edge in self.downs(node) {
                 lists.delete(node, edge);
-                if classes.of[edge] == ABSENT {
+                if classes.of[edge] == NO_INDEX {
                     classes.of[edge] = classes.fresh();
                 }
             }
@@ -296,13 +297,13 @@ impl SpanningTree {
             }
 
             let tree_edge = self.tree_edge[node];
-            if tree_edge == ABSENT {
+            if tree_edge == NO_INDEX {
                 continue;
             }
             let tree_edge = slot(tree_edge);
             let top = lists.top[node];
             assert!(
-                top != ABSENT,
+                top != NO_INDEX,
                 "every edge of the strongly connected closed graph lies on a cycle"
             );
             let top = slot(top);
@@ -335,10 +336,10 @@ impl SpanningTree {
 
 /// The slots of a linked list from `head` through `next`.
 fn chain(head: u32, next: &[u32]) -> impl Iterator<Item = usize> + '_ {
-    let start = (head != ABSENT).then_some(slot(head));
+    let start = (head != NO_INDEX).then_some(slot(head));
     core::iter::successors(start, move |&edge| {
         let following = next[edge];
-        (following != ABSENT).then_some(slot(following))
+        (following != NO_INDEX).then_some(slot(following))
     })
 }
 
@@ -369,13 +370,13 @@ impl BracketLists {
     /// Empty lists for `nodes` nodes, with room for `slots` backedges.
     fn new(nodes: usize, slots: usize) -> Self {
         Self {
-            above: vec![ABSENT; slots],
-            below: vec![ABSENT; slots],
+            above: vec![NO_INDEX; slots],
+            below: vec![NO_INDEX; slots],
             recent_size: vec![0; slots],
-            recent_class: vec![ABSENT; slots],
-            next_capping: vec![ABSENT; slots],
-            top: vec![ABSENT; nodes],
-            bottom: vec![ABSENT; nodes],
+            recent_class: vec![NO_INDEX; slots],
+            next_capping: vec![NO_INDEX; slots],
+            top: vec![NO_INDEX; nodes],
+            bottom: vec![NO_INDEX; nodes],
             size: vec![0; nodes],
         }
     }
@@ -383,20 +384,20 @@ impl BracketLists {
     /// A new capping bracket, in no list yet.
     fn add_capping(&mut self) -> usize {
         let capping = self.above.len();
-        self.above.push(ABSENT);
-        self.below.push(ABSENT);
+        self.above.push(NO_INDEX);
+        self.below.push(NO_INDEX);
         self.recent_size.push(0);
-        self.recent_class.push(ABSENT);
-        self.next_capping.push(ABSENT);
+        self.recent_class.push(NO_INDEX);
+        self.next_capping.push(NO_INDEX);
         capping
     }
 
     /// Put `bracket` on top of the list of `node`.
     fn push(&mut self, node: usize, bracket: usize) {
         let old = self.top[node];
-        self.above[bracket] = ABSENT;
+        self.above[bracket] = NO_INDEX;
         self.below[bracket] = old;
-        if old == ABSENT {
+        if old == NO_INDEX {
             self.bottom[node] = word(bracket);
         } else {
             self.above[slot(old)] = word(bracket);
@@ -408,12 +409,12 @@ impl BracketLists {
     /// Take `bracket` out of the list of `node`, wherever it is.
     fn delete(&mut self, node: usize, bracket: usize) {
         let (above, below) = (self.above[bracket], self.below[bracket]);
-        if above == ABSENT {
+        if above == NO_INDEX {
             self.top[node] = below;
         } else {
             self.below[slot(above)] = below;
         }
-        if below == ABSENT {
+        if below == NO_INDEX {
             self.bottom[node] = above;
         } else {
             self.above[slot(below)] = above;
@@ -424,11 +425,11 @@ impl BracketLists {
     /// Move the list of `child` under the list of `parent`.
     fn splice(&mut self, child: usize, parent: usize) {
         let (top, bottom) = (self.top[child], self.bottom[child]);
-        if top == ABSENT {
+        if top == NO_INDEX {
             return;
         }
         let parent_bottom = self.bottom[parent];
-        if parent_bottom == ABSENT {
+        if parent_bottom == NO_INDEX {
             self.top[parent] = top;
         } else {
             self.below[slot(parent_bottom)] = top;

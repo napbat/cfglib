@@ -12,12 +12,12 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use super::{ABSENT, slot, word};
 use crate::graph::view::DenseId;
+use crate::identity::{NO_INDEX, slot, word};
 
 /// The arrays a numbered forest adds to its parent table.
 pub(super) struct Numbered<N> {
-    /// Preorder index of each node, [`ABSENT`] when it is in no tree.
+    /// Preorder index of each node, [`NO_INDEX`] when it is in no tree.
     pub(super) pre: Vec<u32>,
     /// Preorder index of each node's last descendant.
     pub(super) last: Vec<u32>,
@@ -39,7 +39,7 @@ impl NumberingBuffers {
     /// Number the forest whose parent table is `parent` and whose roots are
     /// `roots`, in ascending order.
     ///
-    /// `parent` holds [`ABSENT`] for a root and for a node outside the forest.
+    /// `parent` holds [`NO_INDEX`] for a root and for a node outside the forest.
     /// `reachable` is the number of nodes the forest holds and sizes the
     /// preorder exactly.
     pub(super) fn number<N: DenseId>(
@@ -69,12 +69,12 @@ impl NumberingBuffers {
     ) {
         let bound = parent.len();
         self.first_child.clear();
-        self.first_child.resize(bound, ABSENT);
+        self.first_child.resize(bound, NO_INDEX);
         self.next_sibling.clear();
-        self.next_sibling.resize(bound, ABSENT);
+        self.next_sibling.resize(bound, NO_INDEX);
         for node in (0..bound).rev() {
             let up = parent[node];
-            if up != ABSENT {
+            if up != NO_INDEX {
                 self.next_sibling[node] = self.first_child[slot(up)];
                 self.first_child[slot(up)] = word(node);
             }
@@ -82,7 +82,7 @@ impl NumberingBuffers {
 
         for table in [&mut numbered.pre, &mut numbered.last, &mut numbered.level] {
             table.clear();
-            table.resize(bound, ABSENT);
+            table.resize(bound, NO_INDEX);
         }
         numbered.order.clear();
         numbered.order.reserve(reachable);
@@ -104,7 +104,7 @@ impl NumberingBuffers {
             numbered.pre[node] = word(numbered.order.len());
             numbered.order.push(N::from_index(node));
             let child = self.first_child[node];
-            if child != ABSENT {
+            if child != NO_INDEX {
                 numbered.level[slot(child)] = numbered.level[node] + 1;
                 node = slot(child);
                 continue;
@@ -117,7 +117,7 @@ impl NumberingBuffers {
                     return;
                 }
                 let sibling = self.next_sibling[node];
-                if sibling != ABSENT {
+                if sibling != NO_INDEX {
                     numbered.level[slot(sibling)] = numbered.level[node];
                     node = slot(sibling);
                     break;

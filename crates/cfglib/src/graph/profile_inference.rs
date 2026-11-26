@@ -73,6 +73,7 @@ use super::network_flow::{ArcId, FlowError, FlowNetwork};
 use super::view::{DenseId, RootedView};
 use crate::block::BlockId;
 use crate::edge::EdgeId;
+use crate::identity::{NO_INDEX, slot, word};
 
 /// The capacity of an arc that any amount may take.
 const UNBOUNDED: i64 = i64::MAX;
@@ -163,14 +164,19 @@ impl<N: DenseId, E: DenseId> InferredCounts<N, E> {
         );
         let mut model = Model::new(graph.node_bound(), graph.edge_bound());
         for node in graph.node_ids() {
-            let slot = node.index();
-            model.block[slot] = model.add(2 * slot, 2 * slot + 1, block_estimate(node), costs)?;
+            let index = node.index();
+            model.block[index] =
+                word(model.add(2 * index, 2 * index + 1, block_estimate(node), costs)?);
         }
         for node in graph.node_ids() {
             for edge in graph.outgoing(node) {
                 let target = graph.edge(edge).target().index();
-                model.edge[edge.index()] =
-                    model.add(2 * node.index() + 1, 2 * target, edge_estimate(edge), costs)?;
+                model.edge[edge.index()] = word(model.add(
+                    2 * node.index() + 1,
+                    2 * target,
+                    edge_estimate(edge),
+                    costs,
+                )?);
             }
         }
         let entry = model.add(model.source, 2 * graph.root().index(), None, costs)?;
@@ -185,13 +191,13 @@ impl<N: DenseId, E: DenseId> InferredCounts<N, E> {
             .flow(ArcId::from_position(model.counts[entry].first));
         let expected = expected_counts(graph, branch_prior, runs);
         let mut target = vec![None; model.counts.len()];
-        for (slot, &count) in model.edge.iter().enumerate() {
-            if count != usize::MAX {
-                target[count] = Some(expected[slot]);
+        for (edge, &count) in model.edge.iter().enumerate() {
+            if count != NO_INDEX {
+                target[slot(count)] = Some(expected[edge]);
             }
         }
         let counts = model.closest_to(&target)?;
-        let read = |count: usize| counts.get(count).copied().unwrap_or(0);
+        let read = |count: u32| counts.get(slot(count)).copied().unwrap_or(0);
         Ok(Self {
             block: model.block.iter().map(|&count| read(count)).collect(),
             edge: model.edge.iter().map(|&count| read(count)).collect(),
@@ -253,10 +259,10 @@ struct Model {
     source: usize,
     sink: usize,
     counts: Vec<Count>,
-    /// The count of each node slot, `usize::MAX` for a removed slot.
-    block: Vec<usize>,
-    /// The count of each edge slot, `usize::MAX` for a removed slot.
-    edge: Vec<usize>,
+    /// The count of each node slot, [`NO_INDEX`] for a removed slot.
+    block: Vec<u32>,
+    /// The count of each edge slot, [`NO_INDEX`] for a removed slot.
+    edge: Vec<u32>,
 }
 
 impl Model {
@@ -271,8 +277,8 @@ impl Model {
             source: nodes - 2,
             sink: nodes - 1,
             counts: Vec::new(),
-            block: vec![usize::MAX; node_bound],
-            edge: vec![usize::MAX; edge_bound],
+            block: vec![NO_INDEX; node_bound],
+            edge: vec![NO_INDEX; edge_bound],
         }
     }
 

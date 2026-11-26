@@ -152,15 +152,6 @@ pub use id::{EdgeId, EdgeTag, Id, IdTag, NodeId, NodeTag};
 pub use node_order::NodeOrder;
 pub use renumbering::Renumbering;
 
-/// Narrow a slot count to the dense identity space.
-///
-/// Inlined because every walk start narrows one, and a call there costs more
-/// than the check.
-#[inline]
-fn raw_index(value: usize) -> u32 {
-    u32::try_from(value).expect("dense slot count exceeds u32::MAX")
-}
-
 fn empty_slice<T>() -> Box<[T]> {
     Vec::new().into_boxed_slice()
 }

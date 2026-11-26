@@ -29,13 +29,13 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
-use crate::graph::view::Direction;
-use crate::identity::{NO_INDEX, slot};
+use crate::graph::view::{Direction, assert_in_bound};
+use crate::identity::{NO_INDEX, slot, word};
 
+use super::Graph;
 use super::edge::EdgeRecord;
 use super::id::{Id, IdTag};
 use super::liveness::LiveSet;
-use super::{Graph, raw_index};
 
 /// The largest number of slots a dense store can address. A link is a `u32`
 /// with [`NO_INDEX`] for its absence, so a chain slot costs four bytes instead
@@ -110,7 +110,7 @@ impl DeltaChains {
         if self.last.len() < nodes {
             self.materialize(nodes);
         }
-        let appended = u32::try_from(self.next.len()).expect("delta edge index exceeds u32::MAX");
+        let appended = word(self.next.len());
         self.next.push(UNLINKED);
         self.thread(source, chain_of(Direction::Forward), appended);
         self.thread(target, chain_of(Direction::Backward), appended);
@@ -368,7 +368,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     )]
     fn cursor(&self, node: Id<NT>, axis: &Axis<'_>) -> AdjacencyCursor {
         let index = node.index();
-        assert!(index < self.node_bound(), "node identity is out of range");
+        assert_in_bound(self, node, "node identity");
         if self.tombstoned_nodes() && !self.live_nodes.is_live(index) {
             return AdjacencyCursor::EXHAUSTED;
         }
@@ -417,13 +417,13 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         if let Some(run) = self.overlay(node.index(), direction) {
             axis.edges = run;
             cursor.base = 0;
-            cursor.base_end = raw_index(run.len());
+            cursor.base_end = word(run.len());
         }
         AdjacentEdges {
             cursor,
             axis,
             live: self.tombstoned_edges().then_some(&self.live_edges),
-            delta_base: raw_index(self.base_edges.len()),
+            delta_base: word(self.base_edges.len()),
             tag: PhantomData,
         }
     }

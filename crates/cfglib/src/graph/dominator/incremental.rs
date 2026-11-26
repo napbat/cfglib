@@ -41,8 +41,9 @@ use alloc::vec::Vec;
 use core::mem;
 
 use super::numbering::{Numbered, NumberingBuffers};
-use super::{ABSENT, DominatorScratch, DominatorTree, check_bound, slot, word};
+use super::{DominatorScratch, DominatorTree};
 use crate::graph::view::{DenseId, GraphView, RootedView};
+use crate::identity::{NO_INDEX, check_bound, slot, word};
 
 /// When a batch stops being replayed and is finished with one full
 /// construction, because that has become the cheaper way.
@@ -138,7 +139,7 @@ impl UpdateBuffers {
     /// Give every table room for a graph of `bound` nodes.
     ///
     /// Every pass leaves the flags cleared, the buckets empty and the fresh
-    /// parents [`ABSENT`], so a table only has to grow, and an edit that
+    /// parents [`NO_INDEX`], so a table only has to grow, and an edit that
     /// changes nothing costs nothing here.
     fn start(&mut self, bound: usize) {
         for table in [
@@ -158,7 +159,7 @@ impl UpdateBuffers {
             &mut self.fresh,
         ] {
             if table.len() < bound {
-                table.resize(bound, ABSENT);
+                table.resize(bound, NO_INDEX);
             }
         }
         self.touched_list.clear();
@@ -285,7 +286,7 @@ impl<N: DenseId> DominatorTree<N> {
     {
         changed.clear();
         let bound = graph.node_bound();
-        check_bound(bound);
+        check_bound(bound, "node bound of a dominator tree");
         assert!(
             bound >= self.idom.len(),
             "the graph has fewer node slots than the dominator tree"
@@ -408,7 +409,7 @@ impl<N: DenseId> DominatorTree<N> {
             &mut self.last,
             &mut self.level,
         ] {
-            table.resize(bound, ABSENT);
+            table.resize(bound, NO_INDEX);
         }
     }
 
@@ -443,7 +444,7 @@ impl<N: DenseId> DominatorTree<N> {
 
     /// Whether the tree holds the node at `index`.
     fn holds(&self, index: usize) -> bool {
-        self.pre[index] != ABSENT
+        self.pre[index] != NO_INDEX
     }
 
     /// Whether `ancestor` dominates `node`, both by dense index.
@@ -530,7 +531,7 @@ impl<N: DenseId> DominatorTree<N> {
         let mut level = top;
         while level > floor {
             let next = buffers.bucket_head[slot(level)];
-            if next == ABSENT {
+            if next == NO_INDEX {
                 level -= 1;
                 continue;
             }
@@ -666,7 +667,7 @@ impl<N: DenseId> DominatorTree<N> {
             if node == top {
                 continue;
             }
-            let parent = mem::replace(&mut buffers.fresh[node], ABSENT);
+            let parent = mem::replace(&mut buffers.fresh[node], NO_INDEX);
             if parent != self.idom[node] {
                 self.set_parent(node, parent, buffers);
             }

@@ -10,8 +10,9 @@ use super::augmented::AugmentedReverse;
 use super::cut::CutBuffers;
 use super::{PostDominatorScratch, PostDominatorTree};
 use crate::graph::dominator::certificate::{Failure, Order, Tree, check};
-use crate::graph::dominator::{ABSENT, CertificateError, DominatorTree, LowHighOrder, slot};
+use crate::graph::dominator::{CertificateError, DominatorTree, LowHighOrder};
 use crate::graph::view::{DenseId, RootedView};
+use crate::identity::{NO_INDEX, slot};
 
 impl<N: DenseId> PostDominatorTree<N> {
     /// Compute the post-dominator tree together with a low-high order that
@@ -135,8 +136,8 @@ pub(super) fn without_virtual_exit<N: DenseId>(
         position: with_exit.position[..exit]
             .iter()
             .map(|&position| {
-                if position == ABSENT {
-                    ABSENT
+                if position == NO_INDEX {
+                    NO_INDEX
                 } else {
                     position - 1
                 }
@@ -177,7 +178,7 @@ impl<N: DenseId> Tree for WithExit<'_, N> {
     }
 
     fn contains(&self, node: usize) -> bool {
-        node == self.exit || self.tree.pre.get(node).is_some_and(|&pre| pre != ABSENT)
+        node == self.exit || self.tree.pre.get(node).is_some_and(|&pre| pre != NO_INDEX)
     }
 
     fn parent(&self, node: usize) -> Option<usize> {
@@ -185,7 +186,7 @@ impl<N: DenseId> Tree for WithExit<'_, N> {
             return None;
         }
         let parent = self.tree.idom[node];
-        Some(if parent == ABSENT {
+        Some(if parent == NO_INDEX {
             self.exit
         } else {
             slot(parent)

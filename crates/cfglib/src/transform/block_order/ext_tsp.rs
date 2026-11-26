@@ -19,6 +19,7 @@ use crate::graph::edge_view::EdgeView;
 use crate::graph::traverse::reverse_postorder;
 use crate::graph::view::Direction;
 use crate::graph::view::{DenseId, RootedView};
+use crate::identity::{NO_INDEX, check_bound, slot, word};
 use crate::transform::linearize::{Emitter, falls_through};
 
 mod chains;
@@ -299,22 +300,23 @@ impl Problem {
         edge_count: impl Fn(G::EdgeId) -> u64,
         can_fall_through: impl Fn(G::EdgeId) -> bool,
     ) -> Self {
-        let mut local = vec![usize::MAX; graph.node_bound()];
+        check_bound(graph.node_bound(), "node bound of an ext-TSP layout");
+        let mut local = vec![NO_INDEX; graph.node_bound()];
         for (index, node) in nodes.iter().enumerate() {
-            local[node.index()] = index;
+            local[node.index()] = word(index);
         }
         let mut jumps = Vec::new();
         for (source, &node) in nodes.iter().enumerate() {
             for edge in graph.outgoing(node) {
                 let target = local[graph.edge(edge).target().index()];
-                if target == usize::MAX {
+                if target == NO_INDEX {
                     continue;
                 }
                 let count = edge_count(edge);
                 if count > 0 {
                     jumps.push(Jump {
                         source,
-                        target,
+                        target: slot(target),
                         count,
                         falls: can_fall_through(edge),
                     });

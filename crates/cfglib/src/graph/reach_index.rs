@@ -63,6 +63,7 @@ use crate::graph::fanout::DenseFanout;
 use crate::graph::scc::{SccDecomposition, condensation_of, kosaraju_scc};
 use crate::graph::store::NodeId;
 use crate::graph::view::{DenseId, GraphView};
+use crate::identity::{check_bound, word};
 use chains::ChainTable;
 use observe::Observations;
 
@@ -246,15 +247,12 @@ impl<N: DenseId> ReachIndex<N> {
         let count = components.len();
         // Every per-component value fits a `u32` once the count does, with
         // `u32::MAX` itself left free as a sentinel.
-        assert!(
-            u32::try_from(count).is_ok(),
-            "a reach index holds at most u32::MAX components, not {count}"
-        );
+        check_bound(count, "component count of a reach index");
         let condensed = condensation_of(graph, &components);
         let successors = DenseFanout::from_grouped((0..count).map(|component| {
             condensed
                 .successors(NodeId::from_index(component))
-                .map(|next| component_u32(next.index()))
+                .map(|next| word(next.index()))
         }));
         let chains = config
             .exact_max_chains
@@ -265,7 +263,7 @@ impl<N: DenseId> ReachIndex<N> {
             let predecessors = DenseFanout::from_grouped((0..count).map(|component| {
                 condensed
                     .predecessors(NodeId::from_index(component))
-                    .map(|previous| component_u32(previous.index()))
+                    .map(|previous| word(previous.index()))
             }));
             Answers::Observed(Observations::compute(successors, predecessors, config))
         };
@@ -378,11 +376,6 @@ struct Coverage {
     queries: usize,
     /// The queries that ran the fallback search.
     searched: usize,
-}
-
-/// A component index as the `u32` the tables store.
-fn component_u32(component: usize) -> u32 {
-    u32::try_from(component).expect("compute checked that the component count fits in u32")
 }
 
 #[cfg(test)]

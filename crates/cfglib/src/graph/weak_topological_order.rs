@@ -24,20 +24,8 @@ use core::ops::Range;
 use crate::graph::traverse::{Adjacency, by_axis};
 use crate::graph::view::Direction;
 use crate::graph::view::{DenseId, GraphView, assert_in_bound};
+use crate::identity::{NO_INDEX, slot, word};
 use crate::union_find::DisjointSet;
-
-/// The position, preorder number or link that is absent.
-const NONE: u32 = u32::MAX;
-
-/// Narrows a position or count below a node bound.
-fn as_u32(value: usize) -> u32 {
-    u32::try_from(value).expect("a weak topological order holds fewer than u32::MAX nodes")
-}
-
-/// Widens a stored position back to an index.
-fn as_usize(value: u32) -> usize {
-    usize::try_from(value).expect("a u32 position fits in usize")
-}
 
 /// A weak topological order of the nodes that a walk from a root reaches.
 ///
@@ -92,10 +80,10 @@ pub struct WeakTopologicalOrder<N> {
     /// there, or the position itself where no component starts.
     component_end: Vec<u32>,
     /// Per position: the position of the innermost head whose component
-    /// contains the element there, other than the element itself; `NONE`
+    /// contains the element there, other than the element itself; [`NO_INDEX`]
     /// outside every component.
     parent: Vec<u32>,
-    /// Per dense node index: its position, `NONE` when the walk missed it.
+    /// Per dense node index: its position, [`NO_INDEX`] when the walk missed it.
     rank: Vec<u32>,
 }
 
@@ -145,14 +133,14 @@ impl<N: DenseId> WeakTopologicalOrder<N> {
         self.rank
             .get(node.index())
             .copied()
-            .filter(|&rank| rank != NONE)
+            .filter(|&rank| rank != NO_INDEX)
     }
 
     /// Whether `node` heads a component.
     #[must_use]
     pub fn is_head(&self, node: N) -> bool {
         self.rank(node)
-            .is_some_and(|rank| self.heads_at(as_usize(rank)))
+            .is_some_and(|rank| self.heads_at(slot(rank)))
     }
 
     /// Every head, in order; an enclosing head comes before the heads nested
@@ -168,17 +156,17 @@ impl<N: DenseId> WeakTopologicalOrder<N> {
     /// or was not reached.
     #[must_use]
     pub fn head_of(&self, node: N) -> Option<N> {
-        let position = as_usize(self.rank(node)?);
+        let position = slot(self.rank(node)?);
         if self.heads_at(position) {
             return Some(node);
         }
         let parent = self.parent[position];
-        (parent != NONE).then(|| self.order[as_usize(parent)])
+        (parent != NO_INDEX).then(|| self.order[slot(parent)])
     }
 
     /// Whether a component starts at `position`.
     pub(crate) fn heads_at(&self, position: usize) -> bool {
-        as_usize(self.component_end[position]) > position
+        slot(self.component_end[position]) > position
     }
 
     /// The positions of the outermost element that holds `position`: the
@@ -186,10 +174,10 @@ impl<N: DenseId> WeakTopologicalOrder<N> {
     /// component does.
     pub(crate) fn outermost(&self, position: usize) -> Range<usize> {
         let mut top = position;
-        while self.parent[top] != NONE {
-            top = as_usize(self.parent[top]);
+        while self.parent[top] != NO_INDEX {
+            top = slot(self.parent[top]);
         }
-        top..as_usize(self.component_end[top]).max(top + 1)
+        top..slot(self.component_end[top]).max(top + 1)
     }
 
     /// For each position, the end of the outermost element that holds it.
@@ -203,7 +191,7 @@ impl<N: DenseId> WeakTopologicalOrder<N> {
             if position >= end {
                 end = self.outermost(position).end;
             }
-            ends.push(as_u32(end));
+            ends.push(word(end));
         }
         ends
     }
@@ -213,7 +201,7 @@ impl<N: DenseId> WeakTopologicalOrder<N> {
 pub(crate) struct DepthFirstForest {
     /// The dense index of each node, by preorder number.
     preorder: Vec<u32>,
-    /// Per dense index: the preorder number, `NONE` when the walk missed it.
+    /// Per dense index: the preorder number, [`NO_INDEX`] when the walk missed it.
     number: Vec<u32>,
     /// Per preorder number: the largest preorder number in its subtree.
     last: Vec<u32>,
@@ -231,7 +219,7 @@ impl DepthFirstForest {
     ) -> Self {
         let mut forest = Self {
             preorder: Vec::new(),
-            number: vec![NONE; graph.node_bound()],
+            number: vec![NO_INDEX; graph.node_bound()],
             last: Vec::new(),
             postorder: Vec::new(),
         };
@@ -240,7 +228,7 @@ impl DepthFirstForest {
         let mut frames: Vec<(u32, usize)> = Vec::new();
         let mut pending: Vec<G::NodeId> = Vec::new();
         for root in roots {
-            if forest.number[root.index()] != NONE {
+            if forest.number[root.index()] != NO_INDEX {
                 continue;
             }
             forest.enter(axis, graph, root, &mut frames, &mut pending);
@@ -249,12 +237,12 @@ impl DepthFirstForest {
                     let next = pending
                         .pop()
                         .expect("a frame below the stack top is nonempty");
-                    if forest.number[next.index()] == NONE {
+                    if forest.number[next.index()] == NO_INDEX {
                         forest.enter(axis, graph, next, &mut frames, &mut pending);
                     }
                 } else {
                     frames.pop();
-                    forest.last[as_usize(node)] = as_u32(forest.preorder.len() - 1);
+                    forest.last[slot(node)] = word(forest.preorder.len() - 1);
                     forest.postorder.push(node);
                 }
             }
@@ -270,9 +258,9 @@ impl DepthFirstForest {
         frames: &mut Vec<(u32, usize)>,
         pending: &mut Vec<G::NodeId>,
     ) {
-        let number = as_u32(self.preorder.len());
+        let number = word(self.preorder.len());
         self.number[node.index()] = number;
-        self.preorder.push(as_u32(node.index()));
+        self.preorder.push(word(node.index()));
         self.last.push(number);
         let base = pending.len();
         pending.extend(axis.neighbors(graph, node));
@@ -282,7 +270,7 @@ impl DepthFirstForest {
 
     /// The node numbered `number` in preorder.
     fn node<N: DenseId>(&self, number: u32) -> N {
-        N::from_index(as_usize(self.preorder[as_usize(number)]))
+        N::from_index(slot(self.preorder[slot(number)]))
     }
 
     /// The reached nodes in reverse postorder.
@@ -315,7 +303,7 @@ struct Nesting {
     /// Per preorder number: whether it heads a component.
     head: Vec<bool>,
     /// Per preorder number: the innermost head whose component contains it,
-    /// other than itself; `NONE` outside every component.
+    /// other than itself; [`NO_INDEX`] outside every component.
     parent: Vec<u32>,
 }
 
@@ -335,15 +323,16 @@ impl Nesting {
         let mut sets = DisjointSet::new(count);
         let mut nesting = Self {
             head: vec![false; count],
-            parent: vec![NONE; count],
+            parent: vec![NO_INDEX; count],
         };
-        let mut pending_first = vec![NONE; count];
+        let mut pending_first = vec![NO_INDEX; count];
         let mut pending: Vec<(u32, u32)> = Vec::new();
         let mut body: Vec<u32> = Vec::new();
         for head in (0..count).rev() {
-            let head_number = as_u32(head);
+            let head_number = word(head);
             let last = forest.last[head];
-            let inside = |number: u32| number != NONE && head_number <= number && number <= last;
+            let inside =
+                |number: u32| number != NO_INDEX && head_number <= number && number <= last;
             for source in upstream.neighbors(graph, forest.node::<G::NodeId>(head_number)) {
                 let number = forest.number[source.index()];
                 if inside(number) {
@@ -352,13 +341,13 @@ impl Nesting {
                 }
             }
             while let Some(member) = body.pop() {
-                let mut entry = pending_first[as_usize(member)];
+                let mut entry = pending_first[slot(member)];
                 let sources = upstream
                     .neighbors(graph, forest.node::<G::NodeId>(member))
                     .map(|source| forest.number[source.index()])
                     .chain(core::iter::from_fn(|| {
-                        (entry != NONE).then(|| {
-                            let (source, next) = pending[as_usize(entry)];
+                        (entry != NO_INDEX).then(|| {
+                            let (source, next) = pending[slot(entry)];
                             entry = next;
                             source
                         })
@@ -367,13 +356,13 @@ impl Nesting {
                 for number in sources {
                     if inside(number) {
                         nesting.absorb(&mut sets, &mut body, head_number, number);
-                    } else if number != NONE {
+                    } else if number != NO_INDEX {
                         outside.push(number);
                     }
                 }
                 for number in outside {
                     pending.push((number, pending_first[head]));
-                    pending_first[head] = as_u32(pending.len() - 1);
+                    pending_first[head] = word(pending.len() - 1);
                 }
             }
         }
@@ -383,10 +372,10 @@ impl Nesting {
     /// Adds the component of `number` to the body of `head`, unless it is
     /// already there.
     fn absorb(&mut self, sets: &mut DisjointSet, body: &mut Vec<u32>, head: u32, number: u32) {
-        let representative = as_u32(sets.find(as_usize(number)));
+        let representative = word(sets.find(slot(number)));
         if representative != head {
-            self.parent[as_usize(representative)] = head;
-            sets.union_toward_min(as_usize(head), as_usize(representative));
+            self.parent[slot(representative)] = head;
+            sets.union_toward_min(slot(head), slot(representative));
             body.push(representative);
         }
     }
@@ -405,55 +394,51 @@ fn build<G: GraphView, A: Adjacency>(
     // `count`, in reverse postorder: compressed rows indexed by head number.
     // Counting into `start[row + 2]` leaves, after the fill below advances
     // `start[row + 1]`, each row between `start[row]` and `start[row + 1]`.
-    let slot = |number: usize| match nesting.parent[number] {
-        NONE => count,
-        head => as_usize(head),
+    let row_of = |number: usize| match nesting.parent[number] {
+        NO_INDEX => count,
+        head => slot(head),
     };
     let mut start = vec![0_u32; count + 3];
     for number in 0..count {
-        start[slot(number) + 2] += 1;
+        start[row_of(number) + 2] += 1;
     }
     for index in 2..start.len() {
         start[index] += start[index - 1];
     }
     let mut members = vec![0_u32; count];
     for &number in forest.postorder.iter().rev() {
-        let row = slot(as_usize(number)) + 1;
-        members[as_usize(start[row])] = number;
+        let row = row_of(slot(number)) + 1;
+        members[slot(start[row])] = number;
         start[row] += 1;
     }
 
     let mut order = Vec::with_capacity(count);
     let mut component_end = Vec::with_capacity(count);
     let mut parent = Vec::with_capacity(count);
-    let mut rank = vec![NONE; graph.node_bound()];
-    // A frame is a component's head position (`NONE` for the top level) and
+    let mut rank = vec![NO_INDEX; graph.node_bound()];
+    // A frame is a component's head position (`NO_INDEX` for the top level) and
     // the range of its members still to emit.
-    let mut frames = vec![(NONE, as_usize(start[count]), as_usize(start[count + 1]))];
+    let mut frames = vec![(NO_INDEX, slot(start[count]), slot(start[count + 1]))];
     while let Some(frame) = frames.last_mut() {
         let (head_position, next, end) = *frame;
         if next == end {
             frames.pop();
-            if head_position != NONE {
-                component_end[as_usize(head_position)] = as_u32(order.len());
+            if head_position != NO_INDEX {
+                component_end[slot(head_position)] = word(order.len());
             }
             continue;
         }
         frame.1 += 1;
         let number = members[next];
         let node = forest.node::<G::NodeId>(number);
-        let position = as_u32(order.len());
+        let position = word(order.len());
         rank[node.index()] = position;
         order.push(node);
         component_end.push(position);
         parent.push(head_position);
-        let number = as_usize(number);
+        let number = slot(number);
         if nesting.head[number] {
-            frames.push((
-                position,
-                as_usize(start[number]),
-                as_usize(start[number + 1]),
-            ));
+            frames.push((position, slot(start[number]), slot(start[number + 1])));
         }
     }
     WeakTopologicalOrder {

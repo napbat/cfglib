@@ -6,10 +6,11 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{NONE, WeakTopologicalOrder, as_usize};
+use super::WeakTopologicalOrder;
 use crate::graph::store::Graph;
 use crate::graph::view::Direction;
 use crate::graph::view::GraphView;
+use crate::identity::{NO_INDEX, slot};
 use crate::test_util::rng::Rng;
 
 /// Adjacency lists over `u32` nodes, successors in the order given.
@@ -168,8 +169,8 @@ fn contains(order: &WeakTopologicalOrder<u32>, head: u32, node: u32) -> bool {
     let (Some(head), Some(node)) = (order.rank(head), order.rank(node)) else {
         return false;
     };
-    let (head, node) = (as_usize(head), as_usize(node));
-    order.heads_at(head) && head <= node && node < as_usize(order.component_end[head])
+    let (head, node) = (slot(head), slot(node));
+    order.heads_at(head) && head <= node && node < slot(order.component_end[head])
 }
 
 /// Checks the definition of a weak topological order (Kim, Venet and Thakur,
@@ -182,42 +183,39 @@ fn assert_weak_topological(graph: &Digraph, root: u32, order: &WeakTopologicalOr
     assert_eq!(covered, expected, "the order covers the reached nodes");
 
     for (position, &node) in order.order().iter().enumerate() {
-        assert_eq!(order.rank(node).map(as_usize), Some(position));
-        let end = as_usize(order.component_end[position]);
+        assert_eq!(order.rank(node).map(slot), Some(position));
+        let end = slot(order.component_end[position]);
         assert!(end >= position, "a component ends after its head");
         let parent = order.parent[position];
-        if parent != NONE {
-            let parent = as_usize(parent);
+        if parent != NO_INDEX {
+            let parent = slot(parent);
             assert!(order.heads_at(parent), "a parent is a head");
-            assert!(parent < position && position < as_usize(order.component_end[parent]));
-            assert!(
-                end <= as_usize(order.component_end[parent]),
-                "components nest"
-            );
+            assert!(parent < position && position < slot(order.component_end[parent]));
+            assert!(end <= slot(order.component_end[parent]), "components nest");
         }
         // Contiguity: everything between a head and its end lies in its
         // component, and the innermost head of an element is its parent.
         for inner in position + 1..end {
             let mut ancestor = order.parent[inner];
-            while ancestor != NONE && as_usize(ancestor) > position {
-                ancestor = order.parent[as_usize(ancestor)];
+            while ancestor != NO_INDEX && slot(ancestor) > position {
+                ancestor = order.parent[slot(ancestor)];
             }
-            assert_eq!(as_usize(ancestor), position, "{position} encloses {inner}");
+            assert_eq!(slot(ancestor), position, "{position} encloses {inner}");
         }
         let expected_head = if order.heads_at(position) {
             Some(node)
         } else {
-            (parent != NONE).then(|| order.order()[as_usize(parent)])
+            (parent != NO_INDEX).then(|| order.order()[slot(parent)])
         };
         assert_eq!(order.head_of(node), expected_head);
         let outermost = order.outermost(position);
         assert!(outermost.contains(&position));
-        assert_eq!(order.parent[outermost.start], NONE, "an outermost element");
+        assert_eq!(
+            order.parent[outermost.start], NO_INDEX,
+            "an outermost element"
+        );
         if order.heads_at(outermost.start) {
-            assert_eq!(
-                outermost.end,
-                as_usize(order.component_end[outermost.start])
-            );
+            assert_eq!(outermost.end, slot(order.component_end[outermost.start]));
         } else {
             assert_eq!(outermost, position..position + 1);
         }
@@ -375,7 +373,7 @@ fn parenthesized(order: &WeakTopologicalOrder<u32>) -> alloc::string::String {
         }
         if order.heads_at(position) {
             text.push('(');
-            open.push(as_usize(order.component_end[position]));
+            open.push(slot(order.component_end[position]));
         }
         write!(text, "{node}").expect("writing to a string succeeds");
     }

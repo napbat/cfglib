@@ -29,12 +29,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::graph::view::{DenseId, GraphView};
+use crate::identity::{NO_INDEX, check_bound, slot, word};
 
 #[cfg(test)]
 mod tests;
-
-/// No bag, in a table of bag indices.
-const ABSENT: u32 = u32::MAX;
 
 /// The rule that picks the next node to eliminate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -84,9 +82,9 @@ pub struct TreeDecomposition<N> {
     bags: Vec<N>,
     /// Where each bag starts in `bags`, with one more entry for the end.
     starts: Vec<usize>,
-    /// The parent of each bag, [`ABSENT`] for a root.
+    /// The parent of each bag, [`NO_INDEX`] for a root.
     parents: Vec<u32>,
-    /// The bag of each node by dense index, [`ABSENT`] for a slot the view
+    /// The bag of each node by dense index, [`NO_INDEX`] for a slot the view
     /// does not hold.
     bag_of: Vec<u32>,
 }
@@ -134,7 +132,7 @@ impl<N: DenseId> TreeDecomposition<N> {
     #[must_use]
     pub fn parent(&self, bag: usize) -> Option<usize> {
         let parent = self.parents[bag];
-        (parent != ABSENT).then_some(parent as usize)
+        (parent != NO_INDEX).then_some(parent as usize)
     }
 
     /// The bag where `node` was eliminated, which holds it, or `None` for a
@@ -142,7 +140,7 @@ impl<N: DenseId> TreeDecomposition<N> {
     #[must_use]
     pub fn bag_of(&self, node: N) -> Option<usize> {
         match self.bag_of.get(node.index()).copied() {
-            None | Some(ABSENT) => None,
+            None | Some(NO_INDEX) => None,
             Some(bag) => Some(bag as usize),
         }
     }
@@ -184,7 +182,7 @@ struct Elimination {
     key: Vec<u64>,
     /// The uneliminated nodes by key, then by dense index.
     queue: BTreeSet<(u64, u32)>,
-    /// The position of each eliminated node in the order, [`ABSENT`] before.
+    /// The position of each eliminated node in the order, [`NO_INDEX`] before.
     position: Vec<u32>,
     /// The bags in elimination order, flat.
     bags: Vec<u32>,
@@ -196,10 +194,7 @@ struct Elimination {
 impl Elimination {
     fn new<G: GraphView>(graph: &G, heuristic: EliminationHeuristic) -> Self {
         let bound = graph.node_bound();
-        assert!(
-            u32::try_from(bound).is_ok_and(|bound| bound < ABSENT),
-            "node bound exceeds the dense u32 range of a tree decomposition"
-        );
+        check_bound(bound, "node bound of a tree decomposition");
         let mut live = vec![false; bound];
         let mut neighbors: Vec<Vec<u32>> = vec![Vec::new(); bound];
         for node in graph.node_ids() {
@@ -223,10 +218,10 @@ impl Elimination {
             live,
             key: vec![0; bound],
             queue: BTreeSet::new(),
-            position: vec![ABSENT; bound],
+            position: vec![NO_INDEX; bound],
             bags: Vec::new(),
             starts: vec![0],
-            stamp: vec![ABSENT; bound],
+            stamp: vec![NO_INDEX; bound],
         };
         for node in 0..bound {
             if elimination.live[node] {
@@ -288,7 +283,7 @@ impl Elimination {
         }
         for member in changed {
             let index = slot(member);
-            if self.position[index] != ABSENT {
+            if self.position[index] != NO_INDEX {
                 continue;
             }
             let key = self.key_of(index);
@@ -321,7 +316,7 @@ impl Elimination {
     /// neighbor eliminated next.
     fn finish<N: DenseId>(self) -> TreeDecomposition<N> {
         let count = self.starts.len() - 1;
-        let mut bag_of = vec![ABSENT; self.position.len()];
+        let mut bag_of = vec![NO_INDEX; self.position.len()];
         for (node, &position) in self.position.iter().enumerate() {
             bag_of[node] = position;
         }
@@ -331,7 +326,7 @@ impl Elimination {
                     .iter()
                     .map(|&member| self.position[slot(member)])
                     .min()
-                    .unwrap_or(ABSENT)
+                    .unwrap_or(NO_INDEX)
             })
             .collect();
         TreeDecomposition {
@@ -396,14 +391,4 @@ fn common(first: &[u32], second: &[u32]) -> usize {
         }
     }
     shared
-}
-
-/// The word that stores a dense index below the checked bound.
-fn word(index: usize) -> u32 {
-    u32::try_from(index).expect("a dense index below the checked bound fits in u32")
-}
-
-/// The dense index a stored word names.
-const fn slot(stored: u32) -> usize {
-    stored as usize
 }

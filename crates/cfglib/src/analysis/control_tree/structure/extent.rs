@@ -25,6 +25,7 @@ use alloc::vec::Vec;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::graph::scc::tarjan_scc;
+use crate::identity::{NO_INDEX, word};
 
 /// The state every walk shares: the components of the graph, found by the
 /// first walk, and the table of visited blocks.
@@ -34,9 +35,9 @@ pub(super) struct ExtentWalk {
 }
 
 struct State {
-    /// The leaves-first number of the component of each block, `usize::MAX`
+    /// The leaves-first number of the component of each block, [`NO_INDEX`]
     /// for a slot that holds no block.
-    component: Vec<usize>,
+    component: Vec<u32>,
     /// The walk that last visited each block.
     seen: Vec<u32>,
     walk: u32,
@@ -47,10 +48,10 @@ struct State {
 impl State {
     fn new<I, E>(cfg: &Cfg<I, E>) -> Self {
         let bound = cfg.block_bound();
-        let mut component = alloc::vec![usize::MAX; bound];
+        let mut component = alloc::vec![NO_INDEX; bound];
         for (number, blocks) in tarjan_scc(cfg).components().enumerate() {
             for block in blocks {
-                component[block.index()] = number;
+                component[block.index()] = word(number);
             }
         }
         Self {
@@ -89,7 +90,7 @@ impl ExtentWalk {
             .iter()
             .filter_map(|block| state.component.get(block.index()).copied())
             .min()
-            .unwrap_or(usize::MAX);
+            .unwrap_or(NO_INDEX);
         state.walk += 1;
         let walk = state.walk;
         let mut order = Vec::new();

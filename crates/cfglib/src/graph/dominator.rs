@@ -44,6 +44,7 @@ use core::ops::Range;
 
 use crate::block::BlockId;
 use crate::graph::view::{DenseId, GraphView, RootedView};
+use crate::identity::{NO_INDEX, check_bound, slot, word};
 pub use certificate::{CertificateError, LowHighOrder};
 use construction::{ConstructionBuffers, LowHighBuffers};
 pub use frontier::FrontierScratch;
@@ -67,32 +68,6 @@ mod numbering;
 mod post;
 #[cfg(test)]
 mod tests;
-
-/// Marks a root or an unreachable node in a parent table, and an unreachable
-/// node in every other table.
-const ABSENT: u32 = u32::MAX;
-
-/// The dense index a stored word names.
-const fn slot(stored: u32) -> usize {
-    stored as usize
-}
-
-/// The word that stores a dense index.
-///
-/// Every table is sized by a node bound that [`check_bound`] has already
-/// shown to fit, so a failure here is a view that yields an index past its own
-/// bound.
-fn word(index: usize) -> u32 {
-    u32::try_from(index).expect("a dense index below the checked node bound fits in u32")
-}
-
-/// Reject a node bound that dense `u32` tables cannot index.
-fn check_bound(bound: usize) {
-    assert!(
-        u32::try_from(bound).is_ok(),
-        "node bound exceeds the dense u32 range of a dominator tree"
-    );
-}
 
 /// A dominator tree computed from a rooted directed graph.
 ///
@@ -133,9 +108,9 @@ fn check_bound(bound: usize) {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DominatorTree<N = BlockId> {
-    /// Parent of each node, [`ABSENT`] for a root and for an unreachable node.
+    /// Parent of each node, [`NO_INDEX`] for a root and for an unreachable node.
     idom: Vec<u32>,
-    /// Preorder index of each node, [`ABSENT`] when it is unreachable.
+    /// Preorder index of each node, [`NO_INDEX`] when it is unreachable.
     pre: Vec<u32>,
     /// Preorder index of each node's last descendant.
     last: Vec<u32>,
@@ -221,20 +196,20 @@ impl<N: DenseId> DominatorTree<N> {
     /// no parent.
     pub(crate) fn from_forest_parts(idom: &[Option<N>], reachable: &[bool]) -> Self {
         debug_assert_eq!(idom.len(), reachable.len());
-        check_bound(idom.len());
+        check_bound(idom.len(), "node bound of a dominator tree");
         let parents: Vec<u32> = idom
             .iter()
-            .map(|parent| parent.map_or(ABSENT, |parent| word(parent.index())))
+            .map(|parent| parent.map_or(NO_INDEX, |parent| word(parent.index())))
             .collect();
         debug_assert!(
             parents
                 .iter()
                 .zip(reachable)
-                .all(|(&parent, &reachable)| reachable || parent == ABSENT),
+                .all(|(&parent, &reachable)| reachable || parent == NO_INDEX),
             "an unreachable node has no immediate dominator"
         );
         let roots: Vec<u32> = (0..parents.len())
-            .filter(|&node| reachable[node] && parents[node] == ABSENT)
+            .filter(|&node| reachable[node] && parents[node] == NO_INDEX)
             .map(word)
             .collect();
         let reached = reachable.iter().filter(|&&reachable| reachable).count();
@@ -375,7 +350,7 @@ impl<N: DenseId> DominatorTree<N> {
     #[must_use]
     pub fn idom(&self, node: N) -> Option<N> {
         let parent = self.idom[node.index()];
-        (parent != ABSENT).then(|| N::from_index(slot(parent)))
+        (parent != NO_INDEX).then(|| N::from_index(slot(parent)))
     }
 
     /// Whether `node` is in a tree of this forest, which for a tree computed
@@ -385,7 +360,7 @@ impl<N: DenseId> DominatorTree<N> {
     /// `None`.
     #[must_use]
     pub fn is_reachable(&self, node: N) -> bool {
-        self.pre[node.index()] != ABSENT
+        self.pre[node.index()] != NO_INDEX
     }
 
     /// Return whether `dominator` dominates `node`, in constant time.
@@ -400,8 +375,8 @@ impl<N: DenseId> DominatorTree<N> {
         }
         let (dominator, node) = (dominator.index(), node.index());
         let (start, position) = (self.pre[dominator], self.pre[node]);
-        start != ABSENT
-            && position != ABSENT
+        start != NO_INDEX
+            && position != NO_INDEX
             && start <= position
             && position <= self.last[dominator]
     }
@@ -417,7 +392,7 @@ impl<N: DenseId> DominatorTree<N> {
     #[must_use]
     pub fn level(&self, node: N) -> Option<u32> {
         let index = node.index();
-        (self.pre[index] != ABSENT).then(|| self.level[index])
+        (self.pre[index] != NO_INDEX).then(|| self.level[index])
     }
 
     /// Return the deepest node that dominates both `first` and `second`.
@@ -428,7 +403,7 @@ impl<N: DenseId> DominatorTree<N> {
     #[must_use]
     pub fn nearest_common_dominator(&self, first: N, second: N) -> Option<N> {
         let (mut first, mut second) = (first.index(), second.index());
-        if self.pre[first] == ABSENT || self.pre[second] == ABSENT {
+        if self.pre[first] == NO_INDEX || self.pre[second] == NO_INDEX {
             return None;
         }
         while first != second {
@@ -438,7 +413,7 @@ impl<N: DenseId> DominatorTree<N> {
                 Ordering::Equal => {
                     // Distinct nodes at one level climb together. Two roots
                     // have no parent to climb to and share no tree.
-                    if self.idom[first] == ABSENT {
+                    if self.idom[first] == NO_INDEX {
                         return None;
                     }
                     first = slot(self.idom[first]);
@@ -500,7 +475,7 @@ impl<N: DenseId> DominatorTree<N> {
     /// unreachable.
     fn span(&self, node: N) -> Range<usize> {
         let index = node.index();
-        if self.pre[index] == ABSENT {
+        if self.pre[index] == NO_INDEX {
             return 0..0;
         }
         slot(self.pre[index])..slot(self.last[index]) + 1

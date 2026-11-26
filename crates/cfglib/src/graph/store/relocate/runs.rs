@@ -6,8 +6,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
-use super::super::raw_index;
-use crate::identity::NO_INDEX;
+use crate::identity::{NO_INDEX, word};
 
 /// Both vectors start empty, so a direction that never relocates costs
 /// nothing. A node is in the index only once it has a run, and its run keeps
@@ -51,7 +50,7 @@ impl Runs {
             self.index[node] == NO_INDEX,
             "node {node} already has a run"
         );
-        self.index[node] = raw_index(self.runs.len());
+        self.index[node] = word(self.runs.len());
         self.runs.push(run);
     }
 
@@ -66,7 +65,7 @@ impl Runs {
             .iter()
             .enumerate()
             .filter(|&(_, &slot)| slot != NO_INDEX)
-            .map(|(node, &slot)| (raw_index(node), self.runs[slot as usize].as_slice()))
+            .map(|(node, &slot)| (word(node), self.runs[slot as usize].as_slice()))
     }
 }
 

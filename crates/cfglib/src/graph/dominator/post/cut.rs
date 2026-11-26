@@ -26,10 +26,10 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use super::super::{ABSENT, word};
 use crate::graph::scc::tarjan_scc;
 use crate::graph::traverse::reachable_in;
 use crate::graph::view::{DenseId, Direction, GraphView, Induced};
+use crate::identity::{NO_INDEX, word};
 
 /// What the analysis finds and the finished post-dominator tree keeps.
 pub(crate) struct ExitStructure<N> {
@@ -45,7 +45,7 @@ pub(crate) struct ExitStructure<N> {
 /// The sink components of the reachable blocks that reach no exit, as
 /// classes.
 pub(super) struct SinkClasses<N> {
-    /// The class of each block, [`ABSENT`] for a block in none. Empty when
+    /// The class of each block, [`NO_INDEX`] for a block in none. Empty when
     /// there is no class.
     pub(super) class_of: Vec<u32>,
     /// The blocks of every class, class after class, each class in ascending
@@ -116,7 +116,7 @@ impl CutBuffers {
             starts: Vec::new(),
         };
         if !classes.is_empty() {
-            sinks.class_of.resize(self.reachable.len(), ABSENT);
+            sinks.class_of.resize(self.reachable.len(), NO_INDEX);
             sinks.starts.push(0);
         }
         for (class, blocks) in classes.iter().enumerate() {

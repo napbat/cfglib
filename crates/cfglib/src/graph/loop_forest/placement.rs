@@ -8,8 +8,9 @@ use alloc::vec::Vec;
 use core::cmp::Reverse;
 use smallvec::SmallVec;
 
-use super::{LoopForest, LoopId, NONE, slot, word};
+use super::{LoopForest, LoopId};
 use crate::graph::view::DenseId;
+use crate::identity::{NO_INDEX, slot, word};
 
 impl<N: DenseId> LoopForest<N> {
     /// A preorder numbering of the properly nested loops that gives each loop's
@@ -19,7 +20,7 @@ impl<N: DenseId> LoopForest<N> {
         let mut subtree: SmallVec<[u32; 8]> = SmallVec::from_elem(1, self.loops.len());
         for &k in order {
             let up = self.loops[k].enclosing;
-            if up != NONE {
+            if up != NO_INDEX {
                 subtree[slot(up)] += subtree[k];
             }
         }
@@ -27,7 +28,7 @@ impl<N: DenseId> LoopForest<N> {
         let mut next_outermost = 0_u32;
         for &k in order.iter().rev() {
             let up = self.loops[k].enclosing;
-            let cursor = if up == NONE {
+            let cursor = if up == NO_INDEX {
                 &mut next_outermost
             } else {
                 &mut next[slot(up)]
@@ -45,7 +46,7 @@ impl<N: DenseId> LoopForest<N> {
     /// `member_starts` holds the number of positions plus one zeros.
     pub(super) fn group_members(&mut self) {
         let positions = self.member_starts.len() - 1;
-        for &held in self.innermost.iter().filter(|&&held| held != NONE) {
+        for &held in self.innermost.iter().filter(|&&held| held != NO_INDEX) {
             self.member_starts[slot(self.loops[slot(held)].first)] += 1;
         }
         let mut total = 0;
@@ -56,7 +57,7 @@ impl<N: DenseId> LoopForest<N> {
         self.member_starts[positions] = total;
         self.members = vec![N::from_index(0); slot(total)];
         for (node, &held) in self.innermost.iter().enumerate().rev() {
-            if held != NONE {
+            if held != NO_INDEX {
                 let end = &mut self.member_starts[slot(self.loops[slot(held)].first)];
                 *end -= 1;
                 self.members[slot(*end)] = N::from_index(node);
@@ -88,7 +89,7 @@ impl<N: DenseId> LoopForest<N> {
 
         for &k in order.iter().rev() {
             let around = self.loops[k].enclosing;
-            let outer = if around == NONE {
+            let outer = if around == NO_INDEX {
                 0
             } else {
                 self.loops[slot(around)].deepest
@@ -102,7 +103,7 @@ impl<N: DenseId> LoopForest<N> {
     fn assign_depths(&mut self, outermost_first: impl Iterator<Item = usize>) {
         for k in outermost_first {
             self.loops[k].depth = match self.loops[k].parent {
-                NONE => 0,
+                NO_INDEX => 0,
                 parent => self.loops[slot(parent)].depth + 1,
             };
         }
@@ -131,7 +132,7 @@ impl<N: DenseId> LoopForest<N> {
                     }
                 };
                 let mut chain = self.innermost[header.index()];
-                while chain != NONE {
+                while chain != NO_INDEX {
                     let candidate = slot(chain);
                     if sizes[candidate] > sizes[k] {
                         consider(candidate);
@@ -147,7 +148,7 @@ impl<N: DenseId> LoopForest<N> {
                         consider(candidate);
                     }
                 }
-                best.map_or(NONE, |(_, _, candidate)| word(candidate))
+                best.map_or(NO_INDEX, |(_, _, candidate)| word(candidate))
             })
             .collect();
 

@@ -44,12 +44,10 @@ use super::structure::{BackEdge, NaturalLoop, find_back_edges, find_back_edges_t
 use super::view::{DenseId, GraphView, RootedView};
 use crate::block::BlockId;
 use crate::edge::KindedEdge;
+use crate::identity::{NO_INDEX, slot, word};
 
 mod cycles;
 mod placement;
-
-/// No loop, in a table of loop indices.
-const NONE: u32 = u32::MAX;
 
 /// A loop of one [`LoopForest`], by position.
 ///
@@ -118,14 +116,14 @@ pub struct LoopForest<N = BlockId> {
     /// ascending, one run per such loop, in the order of `loops`.
     entries: Vec<N>,
     /// The outermost nested loop each block enters other than at its header,
-    /// [`NONE`] for a block that enters none. Indexed by dense node index, and
+    /// [`NO_INDEX`] for a block that enters none. Indexed by dense node index, and
     /// empty when no nested loop has such an entry. A block enters every loop
     /// that holds it and lies inside that one, but the one it heads.
     entered: Vec<u32>,
     /// The blocks of every loop whose header does not dominate each of its
     /// latches, in the order of those loops.
     explicit: Vec<BTreeSet<N>>,
-    /// The innermost properly nested loop each block belongs to, [`NONE`] for a
+    /// The innermost properly nested loop each block belongs to, [`NO_INDEX`] for a
     /// block in none. Indexed by dense node index, and empty without loops.
     innermost: Vec<u32>,
     /// The blocks of the properly nested loops, grouped by the preorder
@@ -152,17 +150,17 @@ struct LoopRecord {
     entry_end: u32,
     /// The number of the loop's entries, its header included.
     entry_count: u32,
-    /// The index in [`LoopForest::explicit`] of the loop's blocks, [`NONE`] for
+    /// The index in [`LoopForest::explicit`] of the loop's blocks, [`NO_INDEX`] for
     /// a properly nested loop, whose body is the blocks of its subtree.
     explicit: u32,
     /// Which dominator tree the loop was found with. Building reads it; the
     /// finished forest does not.
     family: u32,
-    /// The loop this one is nested in, [`NONE`] for an outermost loop.
+    /// The loop this one is nested in, [`NO_INDEX`] for an outermost loop.
     parent: u32,
     /// The number of loops this one is nested in.
     depth: usize,
-    /// The properly nested loop directly around this one, [`NONE`] for an
+    /// The properly nested loop directly around this one, [`NO_INDEX`] for an
     /// outermost one. This is the nesting of the bodies, which can differ from
     /// `parent` when an explicit loop lies between. Properly nested loops only.
     enclosing: u32,
@@ -179,7 +177,7 @@ struct LoopRecord {
 
 impl LoopRecord {
     fn is_nested(&self) -> bool {
-        self.explicit == NONE
+        self.explicit == NO_INDEX
     }
 }
 
@@ -313,7 +311,7 @@ impl<N: DenseId> LoopForest<N> {
     #[must_use]
     pub fn innermost(&self, block: N) -> Option<LoopId> {
         match self.innermost.get(block.index()).copied() {
-            None | Some(NONE) => None,
+            None | Some(NO_INDEX) => None,
             Some(held) => Some(LoopId(held)),
         }
     }
@@ -330,7 +328,7 @@ impl<N: DenseId> LoopForest<N> {
     #[must_use]
     pub fn enclosing(&self, lp: LoopId) -> Option<LoopId> {
         let enclosing = self.record(lp).enclosing;
-        (enclosing != NONE).then_some(LoopId(enclosing))
+        (enclosing != NO_INDEX).then_some(LoopId(enclosing))
     }
 
     /// Whether `lp` is properly nested with the other loops, so that its body is
@@ -401,7 +399,7 @@ impl<N: DenseId> LoopForest<N> {
             entries.extend(self.run(record).iter().copied().filter(|&block| {
                 block != header
                     && self.entered.get(block.index()).is_some_and(|&outermost| {
-                        outermost != NONE && self.encloses(LoopId(outermost), lp)
+                        outermost != NO_INDEX && self.encloses(LoopId(outermost), lp)
                     })
             }));
             entries[1..].sort_unstable();
@@ -441,7 +439,7 @@ impl<N: DenseId> LoopForest<N> {
     #[must_use]
     pub fn parent(&self, lp: LoopId) -> Option<LoopId> {
         let parent = self.record(lp).parent;
-        (parent != NONE).then_some(LoopId(parent))
+        (parent != NO_INDEX).then_some(LoopId(parent))
     }
 
     /// The number of loops `lp` is nested in, `0` for an outermost loop.
@@ -495,8 +493,12 @@ impl<N: DenseId> LoopForest<N> {
         if !record.is_nested() {
             return self.explicit[slot(record.explicit)].contains(&block);
         }
-        let innermost = self.innermost.get(block.index()).copied().unwrap_or(NONE);
-        innermost != NONE && {
+        let innermost = self
+            .innermost
+            .get(block.index())
+            .copied()
+            .unwrap_or(NO_INDEX);
+        innermost != NO_INDEX && {
             let inside = self.loops[slot(innermost)].first;
             record.first <= inside && inside <= record.last
         }
@@ -560,7 +562,7 @@ impl<N: DenseId> LoopForest<N> {
     pub fn node_depths(&self) -> Vec<usize> {
         let mut depths = vec![0; self.node_bound];
         for (depth, &innermost) in depths.iter_mut().zip(&self.innermost) {
-            if innermost != NONE {
+            if innermost != NO_INDEX {
                 *depth = self.loops[slot(innermost)].deepest + 1;
             }
         }
@@ -607,16 +609,6 @@ impl<N: DenseId> LoopForest<N> {
         let end = slot(self.member_starts[slot(record.last) + 1]);
         &self.members[start..end]
     }
-}
-
-/// The word that stores a dense index.
-fn word(index: usize) -> u32 {
-    u32::try_from(index).expect("a loop or node index fits in u32")
-}
-
-/// The dense index a stored word names.
-const fn slot(stored: u32) -> usize {
-    stored as usize
 }
 
 /// The outermost loop found so far that holds loop `x`, with every loop on the
@@ -741,7 +733,7 @@ impl<N: DenseId> LoopForest<N> {
                 .iter()
                 .all(|&latch| dominators.dominates(header, latch))
             {
-                NONE
+                NO_INDEX
             } else {
                 let body = explicit_body(graph, dominators, header, blocks);
                 forest.entries.extend(body.iter().copied().filter(|&block| {
@@ -763,11 +755,11 @@ impl<N: DenseId> LoopForest<N> {
                 entry_count: word(forest.entries.len() - entry_start + 1),
                 explicit,
                 family: word(family),
-                parent: NONE,
+                parent: NO_INDEX,
                 depth: 0,
-                enclosing: NONE,
-                first: NONE,
-                last: NONE,
+                enclosing: NO_INDEX,
+                first: NO_INDEX,
+                last: NO_INDEX,
                 deepest: 0,
             });
         }
@@ -797,7 +789,7 @@ impl<N: DenseId> LoopForest<N> {
         families: &[Family<'_, N>],
         order: &[usize],
     ) {
-        let mut innermost = vec![NONE; self.node_bound];
+        let mut innermost = vec![NO_INDEX; self.node_bound];
         let mut representative: SmallVec<[u32; 8]> = (0..self.loops.len()).map(word).collect();
         let mut stack: SmallVec<[usize; 16]> = SmallVec::new();
         for &k in order {
@@ -817,7 +809,7 @@ impl<N: DenseId> LoopForest<N> {
                     continue;
                 }
                 let entering = match innermost[node] {
-                    NONE => {
+                    NO_INDEX => {
                         // First time here: the block is this loop's own, and
                         // what reaches it is in the loop too.
                         innermost[node] = this;

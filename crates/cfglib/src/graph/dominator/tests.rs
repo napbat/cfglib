@@ -251,7 +251,7 @@ impl GraphView for Oversized {
 
 #[test]
 #[cfg(target_pointer_width = "64")]
-#[should_panic(expected = "node bound exceeds the dense u32 range")]
+#[should_panic(expected = "node bound of a dominator tree exceeds the dense u32 range")]
 fn a_node_bound_beyond_u32_is_rejected() {
     let _ = DominatorTree::compute_from(&Oversized, 0);
 }

@@ -39,6 +39,7 @@ use crate::graph::traverse::{Adjacency, by_axis};
 use crate::graph::view::Direction;
 use crate::graph::view::{DenseId, GraphView, RootedView};
 use crate::graph::weak_topological_order::WeakTopologicalOrder;
+use crate::identity::word;
 
 /// What a streamed solve did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -332,10 +333,6 @@ impl Census {
     }
 }
 
-fn to_u32(value: usize) -> u32 {
-    u32::try_from(value).expect("a weak topological order holds fewer than u32::MAX nodes")
-}
-
 /// The facts a node stream still needs, in flow order; an empty slot is
 /// bottom until written, and freed once nothing reads it.
 struct StreamedNodes<F, V> {
@@ -389,7 +386,7 @@ impl<F: Clone, V> StreamedNodes<F, V> {
         let mut release = vec![0_u32; count];
         for (&node, &end) in order.order().iter().zip(&last_read) {
             let slot = &mut cursor[end as usize];
-            release[*slot as usize] = to_u32(node.index());
+            release[*slot as usize] = word(node.index());
             *slot += 1;
         }
         Self {

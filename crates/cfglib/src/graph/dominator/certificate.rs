@@ -25,9 +25,10 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
-use super::{ABSENT, DominatorScratch, DominatorTree, check_bound, slot, word};
+use super::{DominatorScratch, DominatorTree};
 use crate::block::BlockId;
 use crate::graph::view::{DenseId, GraphView};
+use crate::identity::{NO_INDEX, check_bound, slot, word};
 
 /// A low-high order of a dominator tree: the certificate that the tree is the
 /// dominator tree of the graph it was computed from.
@@ -51,7 +52,7 @@ use crate::graph::view::{DenseId, GraphView};
 pub struct LowHighOrder<N = BlockId> {
     /// The nodes of the tree in the order.
     pub(super) order: Vec<N>,
-    /// The position of each node in `order`, [`ABSENT`] for a node outside
+    /// The position of each node in `order`, [`NO_INDEX`] for a node outside
     /// the tree.
     pub(super) position: Vec<u32>,
 }
@@ -69,7 +70,7 @@ impl<N: DenseId> LowHighOrder<N> {
     /// consumer might hand one back: nothing about it is checked.
     #[cfg(test)]
     pub(super) fn from_order(order: Vec<N>, bound: usize) -> Self {
-        let mut position = alloc::vec![ABSENT; bound];
+        let mut position = alloc::vec![NO_INDEX; bound];
         for (index, node) in order.iter().enumerate() {
             position[node.index()] = word(index);
         }
@@ -87,7 +88,7 @@ impl<N: DenseId> LowHighOrder<N> {
     #[must_use]
     pub fn position(&self, node: N) -> Option<usize> {
         let position = *self.position.get(node.index())?;
-        (position != ABSENT).then(|| slot(position))
+        (position != NO_INDEX).then(|| slot(position))
     }
 }
 
@@ -226,7 +227,7 @@ impl<N: DenseId> DominatorTree<N> {
     where
         G: GraphView<NodeId = N>,
     {
-        check_bound(graph.node_bound());
+        check_bound(graph.node_bound(), "node bound of a dominator tree");
         assert!(
             root.index() < graph.node_bound(),
             "dominator root is not a node of the graph"
@@ -347,7 +348,7 @@ impl<N: DenseId> Order for LowHighOrder<N> {
 
     fn position(&self, node: usize) -> Option<usize> {
         let position = *self.position.get(node)?;
-        (position != ABSENT).then(|| slot(position))
+        (position != NO_INDEX).then(|| slot(position))
     }
 }
 
@@ -369,12 +370,12 @@ impl<N: DenseId> Tree for Candidate<'_, N> {
     /// A node index past the tree's tables, which a certificate made for
     /// another graph can name, is not in the tree.
     fn contains(&self, node: usize) -> bool {
-        self.tree.pre.get(node).is_some_and(|&pre| pre != ABSENT)
+        self.tree.pre.get(node).is_some_and(|&pre| pre != NO_INDEX)
     }
 
     fn parent(&self, node: usize) -> Option<usize> {
         let parent = self.tree.idom[node];
-        (parent != ABSENT).then(|| slot(parent))
+        (parent != NO_INDEX).then(|| slot(parent))
     }
 
     fn dominates(&self, ancestor: usize, node: usize) -> bool {

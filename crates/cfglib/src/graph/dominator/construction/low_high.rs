@@ -30,9 +30,10 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use super::ConstructionBuffers;
+use crate::graph::dominator::LowHighOrder;
 use crate::graph::dominator::numbering::Numbered;
-use crate::graph::dominator::{ABSENT, LowHighOrder, slot, word};
 use crate::graph::view::{DenseId, GraphView};
+use crate::identity::{NO_INDEX, slot, word};
 
 /// Every buffer [`ConstructionBuffers::low_high_order`] fills, owned by the
 /// caller.
@@ -65,7 +66,7 @@ pub(in crate::graph::dominator) struct LowHighBuffers {
     work: Vec<u32>,
     /// The nodes in the order they were removed.
     removed: Vec<u32>,
-    /// The sibling each node is placed against, [`ABSENT`] for anywhere among
+    /// The sibling each node is placed against, [`NO_INDEX`] for anywhere among
     /// its siblings, and the sibling whose side it goes to.
     anchor: Vec<u32>,
     side: Vec<u32>,
@@ -135,9 +136,9 @@ impl ConstructionBuffers {
         blue.clear();
         blue.resize(reached, false);
         first.clear();
-        first.resize(idom.len(), ABSENT);
+        first.resize(idom.len(), NO_INDEX);
         second.clear();
-        second.resize(idom.len(), ABSENT);
+        second.resize(idom.len(), NO_INDEX);
         for number in 1..reached {
             // A node is blue when its semidominator is its dominator, which
             // is when its relative dominator has the same semidominator (the
@@ -179,12 +180,12 @@ fn derive<N: DenseId>(idom: &[u32], tree: &Numbered<N>, buffers: &mut LowHighBuf
         ..
     } = buffers;
     query_head.clear();
-    query_head.resize(bound, ABSENT);
+    query_head.resize(bound, NO_INDEX);
     query_next.clear();
-    query_next.resize(2 * bound, ABSENT);
+    query_next.resize(2 * bound, NO_INDEX);
     for node in tree.order.iter().map(|node| node.index()) {
         for (which, tail) in [first[node], second[node]].into_iter().enumerate() {
-            if tail != ABSENT && tail != idom[node] {
+            if tail != NO_INDEX && tail != idom[node] {
                 let query = word(2 * node + which);
                 query_next[slot(query)] = query_head[slot(tail)];
                 query_head[slot(tail)] = query;
@@ -196,7 +197,7 @@ fn derive<N: DenseId>(idom: &[u32], tree: &Numbered<N>, buffers: &mut LowHighBuf
         path.truncate(slot(tree.level[tail]));
         path.push(word(tail));
         let mut query = query_head[tail];
-        while query != ABSENT {
+        while query != NO_INDEX {
             let node = slot(query) / 2;
             let sibling = path[slot(tree.level[node])];
             if slot(query).is_multiple_of(2) {
@@ -241,7 +242,7 @@ fn remove(root: usize, bound: usize, buffers: &mut LowHighBuffers) -> usize {
         table.resize(bound, 0);
     }
     for node in 0..bound {
-        if first[node] != ABSENT {
+        if first[node] != NO_INDEX {
             first_children[slot(first[node])] += 1;
             first_child[slot(first[node])] ^= word(node);
             second_children[slot(second[node])] += 1;
@@ -255,9 +256,9 @@ fn remove(root: usize, bound: usize, buffers: &mut LowHighBuffers) -> usize {
     work.clear();
     work.extend((0..bound).filter(|&node| queued[node]).map(word));
     anchor.clear();
-    anchor.resize(bound, ABSENT);
+    anchor.resize(bound, NO_INDEX);
     side.clear();
-    side.resize(bound, ABSENT);
+    side.resize(bound, NO_INDEX);
     removed.clear();
     while let Some(node) = work.pop() {
         let node = slot(node);
@@ -306,7 +307,7 @@ fn removable(
     second_children: &[u32],
 ) -> bool {
     let parents = if first[node] == second[node] { 1 } else { 2 };
-    first[node] != ABSENT && parents > first_children[node] + second_children[node]
+    first[node] != NO_INDEX && parents > first_children[node] + second_children[node]
 }
 
 /// Put the removed nodes back in reverse, each next to its anchor on the side
@@ -336,7 +337,7 @@ fn place(idom: &[u32], buffers: &mut LowHighBuffers) {
     // order sees every contribution to a size before the size is passed on.
     for &node in removed.iter() {
         let node = slot(node);
-        if anchor[node] == ABSENT {
+        if anchor[node] == NO_INDEX {
             children[slot(idom[node])] += size[node];
         } else {
             size[slot(anchor[node])] += size[node];
@@ -351,7 +352,7 @@ fn place(idom: &[u32], buffers: &mut LowHighBuffers) {
     for &node in removed.iter().rev() {
         let node = slot(node);
         let span = size[node];
-        if anchor[node] == ABSENT {
+        if anchor[node] == NO_INDEX {
             let parent = slot(idom[node]);
             high[node] = free[parent];
             low[node] = free[parent] + 1 - span;
@@ -396,14 +397,14 @@ fn number<N: DenseId>(
         next += count;
     }
     slots.clear();
-    slots.resize(slot(next), ABSENT);
+    slots.resize(slot(next), NO_INDEX);
     for node in tree.order.iter().map(|node| node.index()) {
         if node != root {
             slots[slot(start[slot(idom[node])] + low[node] - 1)] = word(node);
         }
     }
     position.clear();
-    position.resize(idom.len(), ABSENT);
+    position.resize(idom.len(), NO_INDEX);
     position[root] = 0;
     for parent in tree.order.iter().map(|node| node.index()) {
         let mut next = position[parent] + 1;

@@ -13,10 +13,11 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{ABSENT, SeseEdge, slot, word};
+use super::SeseEdge;
 use crate::graph::dominator::CutBuffers;
 use crate::graph::edge_view::EdgeView;
 use crate::graph::view::{DenseId, RootedView};
+use crate::identity::{NO_INDEX, slot, word};
 
 /// The closed graph as edge slots and incident lists over dense indices.
 ///
@@ -35,9 +36,9 @@ pub(super) struct ClosedGraph<N> {
     /// The blocks with an edge to the virtual exit: the exits and the cut
     /// roots, in ascending dense index.
     pub(super) outlets: Vec<N>,
-    /// The source of each slot, [`ABSENT`] for a slot outside the closed graph.
+    /// The source of each slot, [`NO_INDEX`] for a slot outside the closed graph.
     source: Vec<u32>,
-    /// The target of each slot, [`ABSENT`] for a slot outside the closed graph.
+    /// The target of each slot, [`NO_INDEX`] for a slot outside the closed graph.
     target: Vec<u32>,
     /// Where each node's incident slots start in `incident`, with one more
     /// entry for the end.
@@ -73,12 +74,12 @@ impl<N: DenseId> ClosedGraph<N> {
         let outlets = merge_ascending(structure.exits, structure.cut_roots);
         let slots = edge_bound + 1 + outlets.len();
         assert!(
-            bound < slot(ABSENT) && slots < slot(ABSENT),
+            bound < slot(NO_INDEX) && slots < slot(NO_INDEX),
             "the closed graph exceeds the dense u32 range of a program structure tree"
         );
 
-        let mut source = vec![ABSENT; slots];
-        let mut target = vec![ABSENT; slots];
+        let mut source = vec![NO_INDEX; slots];
+        let mut target = vec![NO_INDEX; slots];
         let mut out_degree = vec![0_u32; bound + 1];
         let mut in_degree = vec![0_u32; bound + 1];
         let mut link = |edge: usize, from: usize, to: usize| {

@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 
 use super::bits::{DenseBits, bit_slot};
 use crate::graph::view::{DenseId, GraphView};
+use crate::identity::{NO_INDEX, slot, word};
 
 /// A deduplicating queue of dense node indices, popped lowest first.
 ///
@@ -140,14 +141,10 @@ impl Queue for Worklist {
 /// of a [`Worklist`], indexed by position instead of by node.
 pub(super) struct Ranked {
     slots: Worklist,
-    /// Per dense node index: its position, `u32::MAX` outside the order.
+    /// Per dense node index: its position, [`NO_INDEX`] outside the order.
     position: Vec<u32>,
     /// Per position: the dense node index there.
     node: Vec<u32>,
-}
-
-fn to_u32(value: usize) -> u32 {
-    u32::try_from(value).expect("an iteration order holds fewer than u32::MAX nodes")
 }
 
 impl Ranked {
@@ -160,12 +157,12 @@ impl Ranked {
     ) -> Self {
         let mut ranked = Self {
             slots: Worklist::new(order.len()),
-            position: vec![u32::MAX; bound],
+            position: vec![NO_INDEX; bound],
             node: Vec::with_capacity(order.len()),
         };
         for (position, node) in order.enumerate() {
-            ranked.position[node.index()] = to_u32(position);
-            ranked.node.push(to_u32(node.index()));
+            ranked.position[node.index()] = word(position);
+            ranked.node.push(word(node.index()));
         }
         for index in worklist.queued() {
             ranked.push(index);
@@ -181,10 +178,10 @@ impl Ranked {
     fn position(&self, index: usize) -> usize {
         let position = self.position[index];
         assert!(
-            position != u32::MAX,
+            position != NO_INDEX,
             "the iteration order covers every node a solve queues"
         );
-        position as usize
+        slot(position)
     }
 }
 
@@ -203,7 +200,7 @@ impl Queue for Ranked {
 
     fn pop(&mut self) -> Option<usize> {
         let position = self.slots.pop_first()?;
-        Some(self.node[position] as usize)
+        Some(slot(self.node[position]))
     }
 }
 

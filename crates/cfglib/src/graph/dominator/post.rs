@@ -16,9 +16,10 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use super::frontier::FrontierScratch;
-use super::{ABSENT, DominatorScratch, DominatorTree, LowHighOrder, slot, word};
+use super::{DominatorScratch, DominatorTree, LowHighOrder};
 use crate::block::BlockId;
 use crate::graph::view::{DenseId, GraphView, Reversed, RootedView};
+use crate::identity::{NO_INDEX, slot, word};
 use augmented::AugmentedReverse;
 use certificate::without_virtual_exit;
 pub(crate) use cut::CutBuffers;
@@ -220,7 +221,7 @@ pub struct PostDominatorTree<N = BlockId> {
     exits: Vec<N>,
     /// The blocks the cut joins to the virtual exit, in ascending dense index.
     cut_roots: Vec<N>,
-    /// The sink class of each block, `ABSENT` for none; empty without
+    /// The sink class of each block, [`NO_INDEX`] for none; empty without
     /// classes, which is every tree of the cut.
     class_of: Vec<u32>,
     /// The blocks of every class, class after class, each ascending.
@@ -292,7 +293,7 @@ impl<N: DenseId> PostDominatorTree<N> {
         // The virtual exit takes the index `bound`, which must stay below the
         // sentinel.
         assert!(
-            bound < slot(ABSENT),
+            bound < slot(NO_INDEX),
             "node bound plus the virtual exit exceeds the dense u32 range of a post-dominator tree"
         );
         let root = graph.root();
@@ -334,7 +335,7 @@ impl<N: DenseId> PostDominatorTree<N> {
         let mut roots = Vec::new();
         for (block, up) in parent.iter_mut().enumerate() {
             if *up == virtual_exit {
-                *up = ABSENT;
+                *up = NO_INDEX;
                 roots.push(word(block));
             }
         }

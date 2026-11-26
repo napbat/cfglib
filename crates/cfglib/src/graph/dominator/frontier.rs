@@ -38,9 +38,10 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use super::{ABSENT, DominatorTree, slot, word};
+use super::DominatorTree;
 use crate::graph::epoch::EpochMarks;
 use crate::graph::view::{DenseId, GraphView};
+use crate::identity::{NO_INDEX, slot, word};
 
 /// Every buffer [`DominatorTree::iterated_frontier`] and
 /// [`DominanceFrontiers::iterated_frontier`](super::DominanceFrontiers::iterated_frontier)
@@ -105,7 +106,7 @@ pub struct FrontierScratch {
     /// Nodes already judged as candidates for the answer, whether the live-in
     /// test took them or not, so a node is judged once per query.
     pub(super) judged: EpochMarks,
-    /// The first root waiting at each level, [`ABSENT`] when none waits.
+    /// The first root waiting at each level, [`NO_INDEX`] when none waits.
     bucket_head: Vec<u32>,
     /// The root after each queued node in its level's bucket.
     bucket_next: Vec<u32>,
@@ -133,7 +134,7 @@ impl FrontierScratch {
             marks.reset();
         }
         if self.bucket_next.len() < node_bound {
-            self.bucket_next.resize(node_bound, ABSENT);
+            self.bucket_next.resize(node_bound, NO_INDEX);
         }
         self.bucket_head.clear();
         self.pending.clear();
@@ -147,7 +148,7 @@ impl FrontierScratch {
         }
         self.queued.mark(node);
         if self.bucket_head.len() <= level {
-            self.bucket_head.resize(level + 1, ABSENT);
+            self.bucket_head.resize(level + 1, NO_INDEX);
         }
         self.bucket_next[node] = self.bucket_head[level];
         self.bucket_head[level] = word(node);
@@ -156,7 +157,7 @@ impl FrontierScratch {
     /// Take a root off the bucket of `level`, if one waits there.
     fn dequeue(&mut self, level: usize) -> Option<usize> {
         let head = self.bucket_head[level];
-        if head == ABSENT {
+        if head == NO_INDEX {
             return None;
         }
         let node = slot(head);
@@ -225,7 +226,7 @@ impl<N: DenseId> DominatorTree<N> {
         for &member in &self.order[span] {
             for successor in graph.successors(member) {
                 let position = self.pre[successor.index()];
-                if position != ABSENT && !strictly_dominated.contains(&slot(position)) {
+                if position != NO_INDEX && !strictly_dominated.contains(&slot(position)) {
                     out.push(successor);
                 }
             }
@@ -313,7 +314,7 @@ impl<N: DenseId> DominatorTree<N> {
         scratch.begin(self.pre.len());
         for def in defs {
             let index = def.index();
-            if self.pre[index] != ABSENT {
+            if self.pre[index] != NO_INDEX {
                 scratch.enqueue(index, slot(self.level[index]));
             }
         }
@@ -355,7 +356,7 @@ impl<N: DenseId> DominatorTree<N> {
             position += 1;
             for successor in graph.successors(node) {
                 let index = successor.index();
-                if self.pre[index] == ABSENT
+                if self.pre[index] == NO_INDEX
                     || self.level[index] > root_level
                     || scratch.judged.is_marked(index)
                 {

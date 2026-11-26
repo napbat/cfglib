@@ -25,8 +25,9 @@ use alloc::vec::Vec;
 
 use super::augmented::AugmentedReverse;
 use super::{PostDominatorScratch, PostDominatorTree};
-use crate::graph::dominator::{ABSENT, DominatorTree, slot, word};
+use crate::graph::dominator::DominatorTree;
 use crate::graph::view::{DenseId, GraphView, RootedView};
+use crate::identity::{NO_INDEX, slot, word};
 
 /// How a [`PostDominatorTree`] gives facts to the blocks that reach no exit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -130,7 +131,7 @@ impl<N: DenseId> PostDominatorTree<N> {
     {
         let bound = graph.node_bound();
         assert!(
-            bound < slot(ABSENT),
+            bound < slot(NO_INDEX),
             "node bound plus the virtual exit exceeds the dense u32 range of a post-dominator tree"
         );
         let root = graph.root();
@@ -164,7 +165,7 @@ impl<N: DenseId> PostDominatorTree<N> {
         let mut roots = Vec::new();
         for (block, up) in parent.iter_mut().enumerate() {
             if *up == virtual_exit {
-                *up = ABSENT;
+                *up = NO_INDEX;
                 roots.push(word(block));
             }
         }
@@ -204,7 +205,7 @@ impl<N: DenseId> PostDominatorTree<N> {
     #[must_use]
     pub fn sink_class(&self, block: N) -> Option<SinkId> {
         let class = *self.class_of.get(block.index())?;
-        (class != ABSENT).then_some(SinkId(class))
+        (class != NO_INDEX).then_some(SinkId(class))
     }
 
     /// Return the blocks of a sink class, in ascending dense index; the first
@@ -270,9 +271,9 @@ pub(super) struct Contracted<'a, G: GraphView> {
 }
 
 impl<G: GraphView> Contracted<'_, G> {
-    /// The class of `node`, [`ABSENT`] for none.
+    /// The class of `node`, [`NO_INDEX`] for none.
     fn class(&self, node: G::NodeId) -> u32 {
-        self.class_of.get(node.index()).copied().unwrap_or(ABSENT)
+        self.class_of.get(node.index()).copied().unwrap_or(NO_INDEX)
     }
 
     /// The blocks of class `class`.
@@ -283,7 +284,7 @@ impl<G: GraphView> Contracted<'_, G> {
     /// The node `node` is read as: the lowest block of its class, or itself.
     fn canonical(&self, node: G::NodeId) -> G::NodeId {
         match self.class(node) {
-            ABSENT => node,
+            NO_INDEX => node,
             class => self.blocks(class)[0],
         }
     }
@@ -303,15 +304,15 @@ impl<G: GraphView> GraphView for Contracted<'_, G> {
     }
 
     fn successors(&self, node: G::NodeId) -> impl Iterator<Item = G::NodeId> + '_ {
-        let outside = (self.class(node) == ABSENT)
+        let outside = (self.class(node) == NO_INDEX)
             .then(|| self.graph.successors(node).map(|next| self.canonical(next)));
         outside.into_iter().flatten()
     }
 
     fn predecessors(&self, node: G::NodeId) -> impl Iterator<Item = G::NodeId> + '_ {
         let class = self.class(node);
-        let outside = (class == ABSENT).then(|| self.graph.predecessors(node));
-        let gathered = (class != ABSENT && self.blocks(class)[0] == node).then(|| {
+        let outside = (class == NO_INDEX).then(|| self.graph.predecessors(node));
+        let gathered = (class != NO_INDEX && self.blocks(class)[0] == node).then(|| {
             self.blocks(class).iter().flat_map(move |&block| {
                 self.graph
                     .predecessors(block)

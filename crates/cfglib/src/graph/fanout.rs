@@ -60,11 +60,7 @@ use core::borrow::Borrow;
 use core::marker::PhantomData;
 
 use crate::graph::view::DenseId;
-
-/// Narrow a value count to the `u32` run-bound space.
-fn run_bound(count: usize) -> u32 {
-    u32::try_from(count).expect("fan-out value count exceeds u32::MAX")
-}
+use crate::identity::word;
 
 /// Reject a key outside a dense table's `0..bound` key space.
 ///
@@ -306,14 +302,14 @@ impl<K: PartialEq, V> Columns<K, V> {
         if self.keys.last() == Some(&key) {
             return;
         }
-        self.offsets.push(run_bound(self.values.len()));
+        self.offsets.push(word(self.values.len()));
         self.keys.push(key);
     }
 
     /// Closes the last run and freezes the columns to their exact sizes.
     fn finish(mut self) -> Fanout<K, V> {
         if !self.keys.is_empty() {
-            self.offsets.push(run_bound(self.values.len()));
+            self.offsets.push(word(self.values.len()));
         }
         Fanout {
             keys: self.keys.into_boxed_slice(),
@@ -395,7 +391,7 @@ impl<V, K: DenseId> DenseFanout<V, K> {
         let pairs: Vec<(K, V)> = pairs.into_iter().collect();
         // Every run bound is a `u32`, so the total is checked once here,
         // before the counting pass writes it into the offsets column.
-        let total = run_bound(pairs.len());
+        let total = word(pairs.len());
         let value_count = total as usize;
         if bound == 0 {
             assert!(
@@ -489,13 +485,13 @@ impl<V, K: DenseId> DenseFanout<V, K> {
         let mut offsets: Vec<u32> = Vec::with_capacity(groups.size_hint().0 + 1);
         let mut values: Vec<V> = Vec::new();
         for group in groups {
-            offsets.push(run_bound(values.len()));
+            offsets.push(word(values.len()));
             values.extend(group);
         }
         // The closing bound is also where the total is checked, so a table
         // that would overflow the run space panics rather than truncating.
         if !offsets.is_empty() {
-            offsets.push(run_bound(values.len()));
+            offsets.push(word(values.len()));
         }
 
         Self {

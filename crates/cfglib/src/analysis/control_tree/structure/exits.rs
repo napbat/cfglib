@@ -30,6 +30,7 @@ use alloc::vec::Vec;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::graph::loop_forest::{LoopForest, LoopId};
+use crate::identity::{NO_INDEX, slot, word};
 
 /// The exits of every properly nested loop of a forest.
 pub(super) struct LoopExits {
@@ -40,9 +41,6 @@ pub(super) struct LoopExits {
     local: Vec<Vec<BlockId>>,
 }
 
-/// No loop, in a table of loop positions.
-const NONE: u32 = u32::MAX;
-
 impl LoopExits {
     /// Find the exits of every nested loop of `forest`, reading the edges out
     /// of the blocks of `cfg` that the entry reaches.
@@ -51,12 +49,12 @@ impl LoopExits {
         let count = ids.len();
         let enclosing: Vec<u32> = ids
             .iter()
-            .map(|&lp| forest.enclosing(lp).map_or(NONE, position))
+            .map(|&lp| forest.enclosing(lp).map_or(NO_INDEX, position))
             .collect();
         let lifting = Lifting::new(&enclosing);
         // The loop after the last one: a loop with nothing around it climbs
         // into it, and nothing climbs out of it.
-        let root = position_of(count);
+        let root = word(count);
         let mut next: Vec<u32> = (0..=root).collect();
         let mut first: Vec<Option<BlockId>> = alloc::vec![None; count];
         let mut local: Vec<Vec<BlockId>> = alloc::vec![Vec::new(); count];
@@ -72,20 +70,20 @@ impl LoopExits {
                     continue;
                 }
                 let mut at = find(&mut next, position(innermost));
-                while at != root && !forest.contains(ids[at as usize], target) {
-                    first[at as usize] = Some(target);
-                    let above = match enclosing[at as usize] {
-                        NONE => root,
+                while at != root && !forest.contains(ids[slot(at)], target) {
+                    first[slot(at)] = Some(target);
+                    let above = match enclosing[slot(at)] {
+                        NO_INDEX => root,
                         outer => outer,
                     };
-                    next[at as usize] = above;
+                    next[slot(at)] = above;
                     at = find(&mut next, above);
                 }
                 let top = lifting.highest(position(innermost), |lp| {
-                    !forest.contains(ids[lp as usize], target)
+                    !forest.contains(ids[slot(lp)], target)
                 });
-                if enclosing[top as usize] != NONE {
-                    local[top as usize].push(target);
+                if enclosing[slot(top)] != NO_INDEX {
+                    local[slot(top)].push(target);
                 }
             }
         }
@@ -105,18 +103,14 @@ impl LoopExits {
 }
 
 fn position(lp: LoopId) -> u32 {
-    position_of(lp.index())
-}
-
-fn position_of(index: usize) -> u32 {
-    u32::try_from(index).expect("a loop position fits in u32")
+    word(lp.index())
 }
 
 /// The first loop at or above `at` that has no first exit yet, or the root.
 fn find(next: &mut [u32], mut at: u32) -> u32 {
-    while next[at as usize] != at {
-        next[at as usize] = next[next[at as usize] as usize];
-        at = next[at as usize];
+    while next[slot(at)] != at {
+        next[slot(at)] = next[slot(next[slot(at)])];
+        at = next[slot(at)];
     }
     at
 }
@@ -135,7 +129,13 @@ impl Lifting {
             let below = steps.last().expect("one level exists");
             let above = below
                 .iter()
-                .map(|&lp| if lp == NONE { NONE } else { below[lp as usize] })
+                .map(|&lp| {
+                    if lp == NO_INDEX {
+                        NO_INDEX
+                    } else {
+                        below[slot(lp)]
+                    }
+                })
                 .collect();
             steps.push(above);
         }
@@ -147,8 +147,8 @@ impl Lifting {
     fn highest(&self, from: u32, holds: impl Fn(u32) -> bool) -> u32 {
         let mut at = from;
         for level in self.steps.iter().rev() {
-            let above = level[at as usize];
-            if above != NONE && holds(above) {
+            let above = level[slot(at)];
+            if above != NO_INDEX && holds(above) {
                 at = above;
             }
         }

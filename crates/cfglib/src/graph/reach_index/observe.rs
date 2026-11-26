@@ -11,8 +11,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-use super::{ReachIndexConfig, ReachScratch, component_u32};
+use super::{ReachIndexConfig, ReachScratch};
 use crate::graph::fanout::DenseFanout;
+use crate::identity::{NO_INDEX, word};
 use crate::union_find::DisjointSet;
 
 /// The condensation, its observations, and nothing else.
@@ -190,9 +191,9 @@ impl Observations {
         forward.clear();
         backward.clear();
         marks.mark(2 * source);
-        forward.push(component_u32(source));
+        forward.push(word(source));
         marks.mark(2 * target + 1);
-        backward.push(component_u32(target));
+        backward.push(word(target));
 
         let (mut forward_head, mut backward_head) = (0, 0);
         while forward_head < forward.len() && backward_head < backward.len() {
@@ -211,7 +212,7 @@ impl Observations {
                     match self.decide(next, target) {
                         Some(true) => return true,
                         Some(false) => {}
-                        None => forward.push(component_u32(next)),
+                        None => forward.push(word(next)),
                     }
                 }
             } else {
@@ -229,7 +230,7 @@ impl Observations {
                     match self.decide(source, previous) {
                         Some(true) => return true,
                         Some(false) => {}
-                        None => backward.push(component_u32(previous)),
+                        None => backward.push(word(previous)),
                     }
                 }
             }
@@ -270,13 +271,10 @@ fn facts(successors: &DenseFanout<u32>, predecessors: &DenseFanout<u32>) -> Vec<
             .unwrap_or(0);
         let entry = &mut facts[component];
         entry.backward_level = level;
-        entry.weak = component_u32(weak.find(component));
+        entry.weak = word(weak.find(component));
     }
     facts
 }
-
-/// The `entered` value of a component the walk has not reached yet.
-const UNVISITED: u32 = u32::MAX;
 
 /// Compute `order_count` extended depth-first topological orders.
 ///
@@ -299,12 +297,12 @@ fn orders(
             .checked_mul(order_count)
             .expect("the order table's size fits in usize")
     ];
-    let Some(last) = count.checked_sub(1).map(component_u32) else {
+    let Some(last) = count.checked_sub(1).map(word) else {
         return entries;
     };
     // Per component, the number of components finished when it was entered:
     // the first postorder number of its subtree.
-    let mut entered = vec![UNVISITED; count];
+    let mut entered = vec![NO_INDEX; count];
     let mut stack: Vec<(usize, usize)> = Vec::new();
     for order in 0..order_count {
         let along = walks_along(order);
@@ -313,11 +311,11 @@ fn orders(
         let rotation = order / 4;
         let slot = |component: usize| component * order_count + order;
 
-        entered.fill(UNVISITED);
+        entered.fill(NO_INDEX);
         let mut finished = 0_u32;
         for step in 0..count {
             let root = if along { step } else { count - 1 - step };
-            if entered[root] != UNVISITED {
+            if entered[root] != NO_INDEX {
                 continue;
             }
             entered[root] = finished;
@@ -326,7 +324,7 @@ fn orders(
                 let component = *component;
                 if let Some(next) = pick(adjacency.get(component), *taken, reversed, rotation) {
                     *taken += 1;
-                    if entered[next] == UNVISITED {
+                    if entered[next] == NO_INDEX {
                         entered[next] = finished;
                         stack.push((next, 0));
                     }

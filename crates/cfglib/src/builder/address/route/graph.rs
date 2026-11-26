@@ -15,6 +15,7 @@ use crate::builder::address::{
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
 use crate::flow::{EdgeRole, Flow};
+use crate::identity::slot;
 
 /// The blocks of one funclet: the original blocks, which one instance uses.
 struct FuncletRegion {
@@ -146,7 +147,7 @@ impl<I: AddressInstruction + Clone, E: Clone> AddressGraph<I, E> {
         for (id, node) in tries.nodes.iter().enumerate() {
             if let Some(instance) = &instances[id] {
                 for &source in &instance.returns {
-                    emitter.ways(source, first_routes[id], node);
+                    emitter.ways(source, slot(first_routes[id]), node);
                 }
             }
         }

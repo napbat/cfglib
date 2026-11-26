@@ -41,6 +41,7 @@ use alloc::vec::Vec;
 use super::edge_view::EdgeView;
 use super::network_flow::{ArcId, FlowNetwork};
 use super::view::{DenseId, GraphView, assert_in_bound};
+use crate::identity::{NO_INDEX, check_bound, slot, word};
 
 /// The capacity of an arc that no cut takes.
 const UNBOUNDED: i64 = i64::MAX;
@@ -409,7 +410,8 @@ impl<E: Copy> EdgeFlow<E> {
             .collect();
         let mut drain = self.drain.clone();
         let mut next: Vec<usize> = self.out.iter().map(|&(start, _)| start).collect();
-        let mut position = vec![usize::MAX; bound];
+        check_bound(bound, "node bound of a cut");
+        let mut position = vec![NO_INDEX; bound];
         let (mut nodes, mut edges) = (Vec::new(), Vec::new());
         let mut paths = Vec::with_capacity(self.value);
         for &(start, arc) in &self.source_arcs {
@@ -426,14 +428,14 @@ impl<E: Copy> EdgeFlow<E> {
                     next[at] = index + 1;
                     carries[index] = false;
                     let head = self.edges[index].2;
-                    if position[head] == usize::MAX {
-                        position[head] = nodes.len();
+                    if position[head] == NO_INDEX {
+                        position[head] = word(nodes.len());
                         nodes.push(head);
                         edges.push(index);
                     } else {
-                        let keep = position[head];
+                        let keep = slot(position[head]);
                         for &node in &nodes[keep + 1..] {
-                            position[node] = usize::MAX;
+                            position[node] = NO_INDEX;
                         }
                         nodes.truncate(keep + 1);
                         edges.truncate(keep);
@@ -442,7 +444,7 @@ impl<E: Copy> EdgeFlow<E> {
                 }
                 drain[at] -= 1;
                 for &node in &nodes {
-                    position[node] = usize::MAX;
+                    position[node] = NO_INDEX;
                 }
                 let last = nodes[1..]
                     .iter()

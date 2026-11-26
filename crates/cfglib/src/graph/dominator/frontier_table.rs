@@ -25,10 +25,10 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use super::frontier::FrontierScratch;
-use super::word;
 use crate::block::BlockId;
 use crate::graph::dominator::DominatorTree;
 use crate::graph::view::{DenseId, RootedView};
+use crate::identity::word;
 
 /// The dominance frontier of every block.
 ///
