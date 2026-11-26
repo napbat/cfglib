@@ -25,6 +25,19 @@ struct Memo<K> {
     /// closes a cycle that the frame contains whole, so it keeps the answer
     /// storable.
     reaches: usize,
+    /// Whether the depth bound refused a child in this frame's subtree. The
+    /// answer then depends on the depth the walk reached the frame at.
+    cut: bool,
+}
+
+impl<K> Memo<K> {
+    const fn new(mark: Option<K>) -> Self {
+        Self {
+            mark,
+            reaches: usize::MAX,
+            cut: false,
+        }
+    }
 }
 
 /// Absorbs a child that was refused because the frame at stack position
@@ -40,6 +53,24 @@ fn refuse_open<F: OpenFold>(
         top.extra.reaches = top.extra.reaches.min(target);
     }
     walk.absorb(fold, child, None);
+}
+
+/// Stores the answer of a leaf, unless the fold keeps the node's answer to
+/// its route.
+fn store_leaf<F: OpenFold>(
+    answers: &mut BTreeMap<F::Mark, Option<F::Value>>,
+    fold: &mut F,
+    node: &F::Node,
+    mark: Option<F::Mark>,
+    value: Option<&F::Value>,
+) where
+    F::Value: Clone,
+{
+    if let Some(mark) = mark
+        && fold.memoize(node)
+    {
+        answers.insert(mark, value.cloned());
+    }
 }
 
 /// Folds the space reachable from `root` in post-order, folding each marked
@@ -71,9 +102,7 @@ where
     }
     match fold.enter(&root) {
         FoldEnter::Leaf(value) => {
-            if let Some(mark) = mark {
-                answers.insert(mark, value.clone());
-            }
+            store_leaf(answers, fold, &root, mark, value.as_ref());
             return value;
         }
         FoldEnter::Fold {
@@ -83,11 +112,7 @@ where
             if let Some(mark) = &mark {
                 open.insert(mark.clone(), 0);
             }
-            let memo = Memo {
-                mark,
-                reaches: usize::MAX,
-            };
-            walk.push_frame(fold, root, accumulator, scope, 0, memo);
+            walk.push_frame(fold, root, accumulator, scope, 0, Memo::new(mark));
         }
     }
 
@@ -99,7 +124,7 @@ where
             let position = walk.stack.len();
             if let Some(mark) = memo.mark {
                 open.remove(&mark);
-                if memo.reaches >= position {
+                if memo.reaches >= position && !memo.cut && fold.memoize(&node) {
                     answers.insert(mark, value.clone());
                 }
             }
@@ -107,11 +132,15 @@ where
                 return value;
             };
             parent.extra.reaches = parent.extra.reaches.min(memo.reaches);
+            parent.extra.cut |= memo.cut;
             walk.absorb(fold, &node, value);
             continue;
         };
 
         if !walk.admit_child(max_depth) {
+            if let Some(top) = walk.stack.last_mut() {
+                top.extra.cut = true;
+            }
             walk.absorb(fold, &child, None);
             continue;
         }
@@ -126,8 +155,8 @@ where
                 refuse_open(&mut walk, fold, &child, target);
                 continue;
             }
-            // A finished node whose answer depended on a cycle, kept marked
-            // by a persisting scope: the fold chose to prune this reach.
+            // A finished node whose answer was not stored, kept marked by a
+            // persisting scope: the fold chose to prune this reach.
             if walk.marks.contains(mark) {
                 walk.absorb(fold, &child, None);
                 continue;
@@ -140,9 +169,7 @@ where
         }
         match fold.enter(&child) {
             FoldEnter::Leaf(value) => {
-                if let Some(mark) = mark {
-                    answers.insert(mark, value.clone());
-                }
+                store_leaf(answers, fold, &child, mark, value.as_ref());
                 walk.absorb(fold, &child, value);
             }
             FoldEnter::Fold {
@@ -152,11 +179,14 @@ where
                 if let Some(mark) = &mark {
                     open.insert(mark.clone(), walk.stack.len());
                 }
-                let memo = Memo {
-                    mark,
-                    reaches: usize::MAX,
-                };
-                walk.push_frame(fold, child, accumulator, scope, entry_marks, memo);
+                walk.push_frame(
+                    fold,
+                    child,
+                    accumulator,
+                    scope,
+                    entry_marks,
+                    Memo::new(mark),
+                );
             }
         }
     }
