@@ -56,8 +56,9 @@ impl<NT: IdTag, ET: IdTag> Renumbering<NT, ET> {
         translate(&self.edges, old.index())
     }
 
-    /// Fold `later`, which renumbered the result of this one, into a single
-    /// mapping from this renumbering's old identities to `later`'s new ones.
+    /// Fold `next`, which renumbered the result of this one, into this
+    /// renumbering: afterwards it maps this renumbering's old identities to
+    /// `next`'s new ones.
     ///
     /// # Examples
     ///
@@ -69,16 +70,26 @@ impl<NT: IdTag, ET: IdTag> Renumbering<NT, ET> {
     /// let second = graph.add_node("second");
     /// graph.remove_node(first);
     ///
-    /// let once = graph.compact(NodeOrder::Insertion);
-    /// let twice = once.compose(&graph.compact(NodeOrder::Insertion));
-    /// assert_eq!(twice.node(first), None);
-    /// assert_eq!(graph.node(twice.node(second).unwrap()), &"second");
+    /// let mut renumbering = graph.compact(NodeOrder::Insertion);
+    /// renumbering.compose(&graph.compact(NodeOrder::Insertion));
+    /// assert_eq!(renumbering.node(first), None);
+    /// assert_eq!(graph.node(renumbering.node(second).unwrap()), &"second");
     /// ```
-    #[must_use]
-    pub fn compose(&self, later: &Self) -> Self {
-        let nodes = compose_axis(&self.nodes, &later.nodes);
-        let edges = compose_axis(&self.edges, &later.edges);
-        Self::new(nodes, edges)
+    pub fn compose(&mut self, next: &Self) {
+        compose_axis(&mut self.nodes, &next.nodes);
+        compose_axis(&mut self.edges, &next.edges);
+    }
+
+    /// Every old node slot with its new identity, or `None` when it did not
+    /// survive, in old identity order.
+    pub(crate) fn node_mappings(&self) -> impl Iterator<Item = (Id<NT>, Option<Id<NT>>)> + '_ {
+        mappings(&self.nodes)
+    }
+
+    /// Every old edge slot with its new identity, or `None` when it did not
+    /// survive, in old identity order.
+    pub(crate) fn edge_mappings(&self) -> impl Iterator<Item = (Id<ET>, Option<Id<ET>>)> + '_ {
+        mappings(&self.edges)
     }
 
     /// Whether every covered identity kept its number.
@@ -104,19 +115,17 @@ fn translate<T: IdTag>(mapping: &[u32], old: usize) -> Option<Id<T>> {
     Some(Id::from_raw(new))
 }
 
-fn compose_axis(first: &[u32], second: &[u32]) -> Vec<u32> {
-    first
-        .iter()
-        .map(|&intermediate| {
-            if intermediate == NO_INDEX {
-                return NO_INDEX;
-            }
-            second
-                .get(intermediate as usize)
-                .copied()
-                .unwrap_or(NO_INDEX)
-        })
-        .collect()
+fn mappings<T: IdTag>(mapping: &[u32]) -> impl Iterator<Item = (Id<T>, Option<Id<T>>)> + '_ {
+    (0..mapping.len()).map(|old| (Id::from_index(old), translate(mapping, old)))
+}
+
+/// Chase every number of `first` through `second`, in place.
+fn compose_axis(first: &mut [u32], second: &[u32]) {
+    for number in first {
+        if *number != NO_INDEX {
+            *number = second.get(*number as usize).copied().unwrap_or(NO_INDEX);
+        }
+    }
 }
 
 fn is_identity_axis(mapping: &[u32]) -> bool {

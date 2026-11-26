@@ -7,39 +7,20 @@ use crate::cfg::Cfg;
 use crate::edge::{Edge, EdgeId, EdgeKind};
 use crate::rewrite::Rewrite;
 
-/// Split every critical edge and return the number split.
+/// Split every critical edge and report the identities it made.
 ///
-/// Synthetic edges take the payload's [`Default`]; use
-/// [`split_critical_edges_with`] to choose them. The original edge identity
-/// remains on the first half of each split.
-pub fn split_critical_edges<I, E>(cfg: &mut Cfg<I, E>) -> usize
-where
-    E: Default,
-{
-    split_critical_edges_mapped(cfg).0
-}
-
-/// Split critical edges using default payloads for synthetic fallthroughs.
-pub fn split_critical_edges_mapped<I, E>(cfg: &mut Cfg<I, E>) -> (usize, Rewrite)
-where
-    E: Default,
-{
-    split_critical_edges_with(cfg, |_, _| E::default())
-}
-
-/// Split critical edges with a consumer-defined payload for each synthetic
-/// fallthrough.
-///
-/// `payload_for` sees the original stable edge before mutation. The original
-/// edge is redirected to the inserted block without changing its identity,
-/// weight, or payload, and keeps its kind with one exception: a
-/// [`Back`](EdgeKind::Back) edge is the edge that enters a loop header
-/// (`find_back_edges_tagged` reads the tag that way), so the tag moves to the
-/// second half, which is the one that now enters the header, and the first
-/// half becomes [`Unconditional`](EdgeKind::Unconditional). Its mapping
-/// contains both halves in execution order; only the second half receives the
-/// generated payload.
-pub fn split_critical_edges_with<I, E>(
+/// Returns the number of edges split and the record. `payload_for` builds
+/// the payload of each synthetic fallthrough from the original stable edge,
+/// seen before mutation; pass `|_, _| E::default()` when the payload carries
+/// nothing. The original edge is redirected to the inserted block without
+/// changing its identity, weight, or payload, and keeps its kind with one
+/// exception: a [`Back`](EdgeKind::Back) edge is the edge that enters a loop
+/// header (`find_back_edges_tagged` reads the tag that way), so the tag moves
+/// to the second half, which is the one that now enters the header, and the
+/// first half becomes [`Unconditional`](EdgeKind::Unconditional). Its record
+/// contains both halves in execution order; only the second half receives
+/// the generated payload.
+pub fn split_critical_edges_mapped<I, E>(
     cfg: &mut Cfg<I, E>,
     mut payload_for: impl FnMut(EdgeId, &Edge<E>) -> E,
 ) -> (usize, Rewrite) {
@@ -57,7 +38,7 @@ pub fn split_critical_edges_with<I, E>(
         }
     }
 
-    let mut mapping = Rewrite::new();
+    let mut rewrite = Rewrite::new();
     for &edge in &critical {
         let (target, kind, payload) = {
             let original = cfg.edge(edge);
@@ -75,13 +56,13 @@ pub fn split_critical_edges_with<I, E>(
         } else {
             EdgeKind::Fallthrough
         };
-        let second = cfg.add_edge_with_payload(middle, target, second_kind, payload);
+        let second = cfg.add_edge(middle, target, Edge::new(second_kind).with_payload(payload));
 
-        mapping.record_edge(edge, [edge, second]);
-        mapping.record_created_block(middle);
-        mapping.record_created_edge(second);
+        rewrite.record_edge(edge, [edge, second]);
+        rewrite.record_created_block(middle);
+        rewrite.record_created_edge(second);
     }
-    (critical.len(), mapping)
+    (critical.len(), rewrite)
 }
 
 #[cfg(test)]
@@ -93,7 +74,7 @@ mod tests {
     #[test]
     fn split_critical_edges_on_diamond() {
         let mut cfg = diamond_cfg();
-        let split = split_critical_edges(&mut cfg);
+        let split = split_critical_edges_mapped(&mut cfg, |_, _| Default::default()).0;
         assert_eq!(split, 0, "basic diamond has no critical edges");
     }
 
@@ -113,7 +94,7 @@ mod tests {
         cfg.add_edge(c, b, EdgeKind::ConditionalFalse);
 
         let orig_blocks = cfg.block_count();
-        let split = split_critical_edges(&mut cfg);
+        let split = split_critical_edges_mapped(&mut cfg, |_, _| Default::default()).0;
         assert_eq!(split, 4);
         assert_eq!(cfg.block_count(), orig_blocks + 4);
     }
@@ -124,17 +105,25 @@ mod tests {
         let left = cfg.new_block();
         let right = cfg.new_block();
         let other_source = cfg.new_block();
-        let original = cfg.add_weighted_edge_with_payload(
+        let original = cfg.add_edge(
             cfg.entry(),
             left,
-            EdgeKind::ConditionalTrue,
-            0.75,
-            "case 7",
+            Edge::new(EdgeKind::ConditionalTrue)
+                .with_weight(0.75)
+                .with_payload("case 7"),
         );
-        cfg.add_edge_with_payload(cfg.entry(), right, EdgeKind::ConditionalFalse, "default");
-        cfg.add_edge_with_payload(other_source, left, EdgeKind::Jump, "other");
+        cfg.add_edge(
+            cfg.entry(),
+            right,
+            Edge::new(EdgeKind::ConditionalFalse).with_payload("default"),
+        );
+        cfg.add_edge(
+            other_source,
+            left,
+            Edge::new(EdgeKind::Jump).with_payload("other"),
+        );
 
-        let (count, mapping) = split_critical_edges_with(&mut cfg, |_, edge| *edge.payload());
+        let (count, mapping) = split_critical_edges_mapped(&mut cfg, |_, edge| *edge.payload());
         assert_eq!(count, 1);
         let replacements = mapping.edges(original).unwrap();
         assert_eq!(replacements.len(), 2);
@@ -155,12 +144,12 @@ mod tests {
         cfg.add_edge(entry, header, EdgeKind::Fallthrough);
         cfg.add_edge(header, body, EdgeKind::ConditionalTrue);
         cfg.add_edge(header, exit, EdgeKind::ConditionalFalse);
-        let back = cfg.add_weighted_edge(body, header, EdgeKind::Back, 0.5);
+        let back = cfg.add_edge(body, header, Edge::new(EdgeKind::Back).with_weight(0.5));
         cfg.add_edge(body, exit, EdgeKind::ConditionalFalse);
 
         let before = detect_loops_tagged(&cfg, &DominatorTree::compute(&cfg));
         assert_eq!(before.len(), 1);
-        let (count, mapping) = split_critical_edges_mapped(&mut cfg);
+        let (count, mapping) = split_critical_edges_mapped(&mut cfg, |_, _| Default::default());
         assert_eq!(count, 3);
 
         let halves = mapping.edges(back).unwrap();
@@ -181,11 +170,27 @@ mod tests {
         let left = cfg.new_block();
         let right = cfg.new_block();
         let other_source = cfg.new_block();
-        cfg.add_edge_with_payload(cfg.entry(), left, EdgeKind::ConditionalTrue, "case");
-        cfg.add_edge_with_payload(cfg.entry(), right, EdgeKind::ConditionalFalse, "default");
-        cfg.add_edge_with_payload(other_source, left, EdgeKind::Jump, "other");
-        // `&str` is `Default`, so synthetic edges carry the empty string.
-        assert_eq!(split_critical_edges(&mut cfg), 1);
+        cfg.add_edge(
+            cfg.entry(),
+            left,
+            Edge::new(EdgeKind::ConditionalTrue).with_payload("case"),
+        );
+        cfg.add_edge(
+            cfg.entry(),
+            right,
+            Edge::new(EdgeKind::ConditionalFalse).with_payload("default"),
+        );
+        cfg.add_edge(
+            other_source,
+            left,
+            Edge::new(EdgeKind::Jump).with_payload("other"),
+        );
+        // Synthetic edges carry the payload the closure builds.
+        let (split, rewrite) = split_critical_edges_mapped(&mut cfg, |_, _| "synthetic");
+        assert_eq!(split, 1);
         assert_eq!(cfg.block_count(), 5);
+        let created = rewrite.created_edges();
+        assert_eq!(created.len(), 1);
+        assert_eq!(cfg.edge(created[0]).payload(), &"synthetic");
     }
 }
