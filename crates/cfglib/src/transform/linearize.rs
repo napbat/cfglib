@@ -67,6 +67,8 @@ use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::dataflow::cfg_view::CfgView;
 use crate::edge::{EdgeId, EdgeKind, KindedEdge};
+use crate::graph::traverse::reverse_postorder;
+use crate::graph::view::Direction;
 
 /// How to order blocks in the output stream.
 #[derive(Debug, Clone)]
@@ -220,7 +222,7 @@ pub fn linearize<I: Clone, E>(
     emitter: &dyn Emitter<I>,
 ) -> Result<Vec<LinearInst<I>>, LinearizeError> {
     let sorted: Vec<BlockId> = match order {
-        BlockOrder::ReversePostorder => cfg.reverse_postorder(),
+        BlockOrder::ReversePostorder => reverse_postorder(cfg, cfg.entry(), Direction::Forward),
         BlockOrder::AllocationOrder => cfg.block_ids().collect(),
         BlockOrder::Custom(ids) => {
             if let Some(&block) = ids.iter().find(|&&id| !cfg.contains_block(id)) {
@@ -438,7 +440,7 @@ pub fn falls_through<G: CfgView>(cfg: &G, edge: EdgeId, emitter: &dyn Emitter<G:
 mod tests {
     use super::*;
     use crate::cfg::Cfg;
-    use crate::edge::EdgeKind;
+    use crate::edge::{Edge, EdgeKind};
     use crate::test_util::{MockInst, ff};
     use alloc::string::ToString;
     use alloc::vec;
@@ -614,9 +616,21 @@ mod tests {
         let far = cfg.new_block();
         let near = cfg.new_block();
         cfg.block_mut(cfg.entry()).push(ff("cmp"));
-        cfg.add_edge_with_payload(cfg.entry(), far, EdgeKind::ConditionalTrue, "taken");
-        cfg.add_edge_with_payload(cfg.entry(), near, EdgeKind::ConditionalFalse, "not taken");
-        cfg.add_edge_with_payload(far, near, EdgeKind::Unconditional, "merge");
+        cfg.add_edge(
+            cfg.entry(),
+            far,
+            Edge::new(EdgeKind::ConditionalTrue).with_payload("taken"),
+        );
+        cfg.add_edge(
+            cfg.entry(),
+            near,
+            Edge::new(EdgeKind::ConditionalFalse).with_payload("not taken"),
+        );
+        cfg.add_edge(
+            far,
+            near,
+            Edge::new(EdgeKind::Unconditional).with_payload("merge"),
+        );
 
         // `near` is not next after the entry, so its fallthrough needs a jump.
         assert_eq!(

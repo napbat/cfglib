@@ -1,7 +1,7 @@
 //! The acyclic shapes a source `if` lowers to: branches, sequences, early
 //! returns, and the blocks that hold nothing.
 
-use cfglib::{Cfg, ControlNode, ControlTree, EdgeKind, NodeOrder, simplify};
+use cfglib::{Cfg, ControlNode, ControlTree, Edge, EdgeKind, NodeOrder, simplify_mapped};
 
 use crate::builders::{Flow, pseudocode};
 use crate::oracles::{structure_and_check, structure_and_check_covering};
@@ -327,7 +327,7 @@ fn simplify_and_compact_keep_the_program_and_the_tree_covers_the_survivors() {
         "a = 1\nb = 2\nc = 3\nif (c > 2) {\n    p()\n}\nreturn\n"
     );
 
-    assert!(simplify(&mut flow.cfg) > 0);
+    assert!(simplify_mapped(&mut flow.cfg).0 > 0);
     flow.cfg.compact(NodeOrder::Insertion);
 
     let live = flow.cfg.block_ids().collect();
@@ -365,9 +365,21 @@ fn edge_payloads_do_not_change_the_tree() {
     for (block, statement) in [(entry, "x > 0"), (then_arm, "a()"), (join, "return")] {
         with_payload.block_mut(block).push(statement);
     }
-    with_payload.add_edge_with_payload(entry, then_arm, EdgeKind::ConditionalTrue, 10);
-    with_payload.add_edge_with_payload(entry, join, EdgeKind::ConditionalFalse, 11);
-    with_payload.add_edge_with_payload(then_arm, join, EdgeKind::Fallthrough, 12);
+    with_payload.add_edge(
+        entry,
+        then_arm,
+        Edge::new(EdgeKind::ConditionalTrue).with_payload(10),
+    );
+    with_payload.add_edge(
+        entry,
+        join,
+        Edge::new(EdgeKind::ConditionalFalse).with_payload(11),
+    );
+    with_payload.add_edge(
+        then_arm,
+        join,
+        Edge::new(EdgeKind::Fallthrough).with_payload(12),
+    );
 
     let mut plain = Flow::starting_with("x > 0");
     let plain_entry = plain.entry();

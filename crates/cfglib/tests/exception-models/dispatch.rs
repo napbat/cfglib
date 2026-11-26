@@ -63,51 +63,50 @@ fn seh_function() -> SehShape {
     );
     let search =
         |disposition| ExceptionFlow::exceptional(ExceptionPhase::Search, disposition, "filter");
-    cfg.add_edge_with_payload(
+    cfg.add_edge(
         prologue,
         guarded,
-        EdgeKind::Fallthrough,
-        ExceptionFlow::normal("enter"),
+        Edge::new(EdgeKind::Fallthrough).with_payload(ExceptionFlow::normal("enter")),
     );
     // A normal exit from the guarded body is a leave, which stays sequential.
-    let leave = cfg.add_edge_with_payload(
+    let leave = cfg.add_edge(
         guarded,
         after,
-        EdgeKind::ExceptionLeave,
-        ExceptionFlow::normal("leave"),
+        Edge::new(EdgeKind::ExceptionLeave).with_payload(ExceptionFlow::normal("leave")),
     );
     // First pass: the guarded call raises and the dispatcher evaluates the
     // filter. Nothing has been selected yet, so this is the search phase.
-    let dispatch =
-        cfg.add_edge_with_payload(guarded, filter, EdgeKind::ExceptionHandler, search(None));
+    let dispatch = cfg.add_edge(
+        guarded,
+        filter,
+        Edge::new(EdgeKind::ExceptionHandler).with_payload(search(None)),
+    );
     // The filter's three answers.
-    let execute = cfg.add_edge_with_payload(
+    let execute = cfg.add_edge(
         filter,
         handler,
-        EdgeKind::ExceptionHandler,
-        ExceptionFlow::exceptional(
+        Edge::new(EdgeKind::ExceptionHandler).with_payload(ExceptionFlow::exceptional(
             ExceptionPhase::Unwind,
             Some(ExceptionDisposition::ExecuteHandler),
             "filter",
-        ),
+        )),
     );
-    let resume = cfg.add_edge_with_payload(
+    let resume = cfg.add_edge(
         filter,
         guarded,
-        EdgeKind::ExceptionContinue,
-        search(Some(ExceptionDisposition::ContinueExecution)),
+        Edge::new(EdgeKind::ExceptionContinue)
+            .with_payload(search(Some(ExceptionDisposition::ContinueExecution))),
     );
-    let search_outward = cfg.add_edge_with_payload(
+    let search_outward = cfg.add_edge(
         filter,
         outer,
-        EdgeKind::ExceptionResume,
-        search(Some(ExceptionDisposition::ContinueSearch)),
+        Edge::new(EdgeKind::ExceptionResume)
+            .with_payload(search(Some(ExceptionDisposition::ContinueSearch))),
     );
-    cfg.add_edge_with_payload(
+    cfg.add_edge(
         handler,
         after,
-        EdgeKind::Fallthrough,
-        ExceptionFlow::normal("handled"),
+        Edge::new(EdgeKind::Fallthrough).with_payload(ExceptionFlow::normal("handled")),
     );
     SehShape {
         cfg,

@@ -26,9 +26,10 @@ pub struct VerifyError {
     pub message: String,
 }
 
+/// The message alone: a view of any kind fails verification, not only a CFG.
 impl core::fmt::Display for VerifyError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "CFG verify: {}", self.message)
+        f.write_str(&self.message)
     }
 }
 
@@ -39,8 +40,8 @@ impl core::error::Error for VerifyError {}
 ///
 /// [`verify_view`], [`verify_edge_view`] and [`verify`](crate::verify) check
 /// structure only, so their report keeps the default `E = Infallible` and
-/// holds no semantic error. [`verify_with`](crate::verify_with) adds the
-/// errors of a [`SemanticValidator`](crate::SemanticValidator).
+/// holds no semantic error. [`verify_semantics`](crate::verify_semantics)
+/// adds the errors of a [`SemanticValidator`](crate::SemanticValidator).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifyReport<E = Infallible> {
     /// Every structural violation, in the order found (empty = valid).

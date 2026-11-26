@@ -13,7 +13,7 @@ use crate::builder::address::{
     AddressBuildError, AddressEdgeInfo, AddressGraph, AddressInstruction,
 };
 use crate::cfg::Cfg;
-use crate::edge::EdgeKind;
+use crate::edge::{Edge, EdgeKind};
 use crate::flow::{EdgeRole, Flow};
 use crate::identity::slot;
 
@@ -77,7 +77,7 @@ impl<I: AddressInstruction + Clone, E: Clone> AddressGraph<I, E> {
     /// Returns an [`AddressBuildError`] when a protected range is empty or
     /// does not start and end on instruction starts, when a funclet entry or a
     /// handler is no instruction start
-    /// ([`AddressBuildError::MissingRouteEntry`]), when a protected
+    /// ([`AddressBuildError::MissingHandlerEntry`]), when a protected
     /// instruction, a funclet entry or a handler does not lead its block
     /// ([`AddressBuildError::RouteAddressNotBlockStart`]), and when a path
     /// has a funclet step and ends with [`UnwindEnd::Resume`]
@@ -194,7 +194,7 @@ impl<I: AddressInstruction + Clone, E: Clone> AddressGraph<I, E> {
         let block = *self
             .instruction_blocks
             .get(&address)
-            .ok_or(AddressBuildError::MissingRouteEntry { address })?;
+            .ok_or(AddressBuildError::MissingHandlerEntry { address })?;
         let leads = self
             .cfg
             .block(block)
@@ -282,26 +282,16 @@ fn clone_region<I: Clone, E: Clone>(
         }
         for id in cfg.outgoing(original) {
             let edge = cfg.edge(id);
-            let data = edge.data();
             let target = edge.target();
             edges.push((
                 copy,
                 copies.get(&target).copied().unwrap_or(target),
-                data.kind(),
-                data.weight(),
-                data.payload().clone(),
+                edge.data().clone(),
             ));
         }
     }
-    for (source, target, kind, weight, payload) in edges {
-        match weight {
-            Some(weight) => {
-                cfg.add_weighted_edge_with_payload(source, target, kind, weight, payload);
-            }
-            None => {
-                cfg.add_edge_with_payload(source, target, kind, payload);
-            }
-        }
+    for (source, target, edge) in edges {
+        cfg.add_edge(source, target, edge);
     }
     Instance {
         entry: copies[&entry],
@@ -368,14 +358,15 @@ where
             .first()
             .expect("a block holds an instruction")
             .address();
+        let role = EdgeRole::Route { route };
+        let kind = role.kind();
         let payload = (self.edge_payload)(AddressEdgeInfo {
             source: source_address,
             target: target_address,
-            kind: EdgeKind::ExceptionUnwind,
-            role: EdgeRole::Route { route },
+            role,
         });
         self.cfg
-            .add_edge_with_payload(source, target, EdgeKind::ExceptionUnwind, payload);
+            .add_edge(source, target, Edge::new(kind).with_payload(payload));
     }
 
     fn hops(self) -> Vec<UnwindHop> {

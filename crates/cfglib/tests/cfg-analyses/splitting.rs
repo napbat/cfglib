@@ -1,6 +1,6 @@
 //! `Cfg::split_block` and its relatives, on the graph itself.
 
-use cfglib::{Cfg, EdgeKind, SplitPointError};
+use cfglib::{Cfg, Edge, EdgeKind, SplitPointError};
 
 use crate::stmt::{Route, Stmt, block, fill};
 
@@ -19,7 +19,11 @@ fn five_statement_block() -> (Cfg<Stmt, Route>, cfglib::BlockId, cfglib::EdgeId)
         ],
     );
     let exit = block(&mut cfg, [Stmt::ret()]);
-    let leaving = cfg.add_edge_with_payload(entry, exit, EdgeKind::Jump, Route(7));
+    let leaving = cfg.add_edge(
+        entry,
+        exit,
+        Edge::new(EdgeKind::Jump).with_payload(Route(7)),
+    );
     (cfg, entry, leaving)
 }
 
@@ -28,7 +32,7 @@ fn splitting_moves_the_tail_and_every_exit_to_a_new_block_behind_a_fallthrough()
     let (mut cfg, entry, leaving) = five_statement_block();
     let original: Vec<Stmt> = cfg.block(entry).instructions().to_vec();
 
-    let tail = cfg.split_block(entry, 2);
+    let tail = cfg.split_block(entry, 2, EdgeKind::Fallthrough);
 
     assert_eq!(cfg.block(entry).instructions(), &original[..2]);
     assert_eq!(cfg.block(tail).instructions(), &original[2..]);
@@ -49,7 +53,11 @@ fn splitting_moves_the_tail_and_every_exit_to_a_new_block_behind_a_fallthrough()
 fn splitting_at_either_end_leaves_one_part_empty() {
     for (at, head_len, tail_len) in [(0, 0, 5), (5, 5, 0)] {
         let (mut cfg, entry, _) = five_statement_block();
-        let tail = cfg.split_block_with_payload(entry, at, Route(9));
+        let tail = cfg.split_block(
+            entry,
+            at,
+            Edge::new(EdgeKind::Fallthrough).with_payload(Route(9)),
+        );
 
         assert_eq!(cfg.block(entry).instructions().len(), head_len);
         assert_eq!(cfg.block(tail).instructions().len(), tail_len);
@@ -66,14 +74,20 @@ fn splitting_at_either_end_leaves_one_part_empty() {
 #[should_panic(expected = "")]
 fn splitting_beyond_the_last_instruction_panics() {
     let (mut cfg, entry, _) = five_statement_block();
-    cfg.split_block(entry, 6);
+    cfg.split_block(entry, 6, EdgeKind::Fallthrough);
 }
 
 #[test]
 fn the_mapped_split_names_the_new_block_edge_and_the_moved_exits() {
     let (mut cfg, entry, leaving) = five_statement_block();
 
-    let (tail, rewrite) = cfg.split_block_with_payload_mapped(entry, 3, Route(1));
+    let (blocks, rewrite) = cfg
+        .split_block_at_points(
+            entry,
+            [(3, Edge::new(EdgeKind::Fallthrough).with_payload(Route(1)))],
+        )
+        .unwrap();
+    let tail = blocks[1];
 
     assert_eq!(rewrite.blocks(entry), Some([entry, tail].as_slice()));
     assert_eq!(rewrite.created_blocks(), [tail]);
@@ -90,9 +104,16 @@ fn splitting_at_several_points_validates_before_changing_anything() {
     let (mut cfg, entry, _) = five_statement_block();
     let before = cfg.clone();
 
-    let out_of_bounds = cfg.split_block_at_points(entry, &[2, 9]).unwrap_err();
-    let repeated = cfg.split_block_at_points(entry, &[2, 2]).unwrap_err();
-    let decreasing = cfg.split_block_at_points(entry, &[3, 1]).unwrap_err();
+    let fallthroughs = |points: [usize; 2]| points.map(|point| (point, EdgeKind::Fallthrough));
+    let out_of_bounds = cfg
+        .split_block_at_points(entry, fallthroughs([2, 9]))
+        .unwrap_err();
+    let repeated = cfg
+        .split_block_at_points(entry, fallthroughs([2, 2]))
+        .unwrap_err();
+    let decreasing = cfg
+        .split_block_at_points(entry, fallthroughs([3, 1]))
+        .unwrap_err();
 
     assert_eq!(
         out_of_bounds,
@@ -120,7 +141,9 @@ fn splitting_at_several_points_validates_before_changing_anything() {
         "an invalid sequence leaves the graph unchanged"
     );
 
-    let (parts, _) = cfg.split_block_at_points(entry, &[1, 4]).unwrap();
+    let (parts, _) = cfg
+        .split_block_at_points(entry, fallthroughs([1, 4]))
+        .unwrap();
     let lengths: Vec<usize> = parts
         .iter()
         .map(|&part| cfg.block(part).instructions().len())

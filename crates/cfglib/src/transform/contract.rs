@@ -2,57 +2,57 @@
 
 extern crate alloc;
 use alloc::string::String;
-use alloc::vec::Vec;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::edge::EdgeId;
-use crate::rewrite::Rewrite;
+use crate::rewrite::{Recorder, Rewrite};
 
 /// Contract an edge by merging `target` into `source`.
 ///
 /// `target` is removed: its instructions, its label (when `source` has none),
 /// and its outgoing edges move to `source`, and the block itself stops being
-/// a block of the CFG, exactly as [`merge_blocks`](crate::merge_blocks) leaves
-/// the chain it folded. Its slot stays reserved, so every surviving identity
-/// is unchanged.
+/// a block of the CFG, exactly as [`merge_blocks`](crate::merge_blocks)
+/// leaves the chain it folded. Its slot stays reserved, so every surviving
+/// identity is unchanged.
 ///
-/// Returns whether contraction happened. Use [`contract_edge_mapped`] when
-/// clients retain graph identities. The CFG entry is never accepted as
-/// `target`, self-loops are not contracted, and an exception edge is never
-/// contracted. When the CFG has exception regions, `source` and `target` must
-/// also be protected by the same regions and belong to the same known handler
-/// bodies, and no handler, filter, or cleanup may name `target`: folding must
-/// not move code across a protection boundary or strand exception metadata.
+/// Returns whether contraction happened, leaving the CFG unchanged when it
+/// did not. Use [`contract_edge_mapped`] when clients retain graph
+/// identities. Contraction requires that `source` has exactly one outgoing
+/// edge, that edge targets `target`, and it is `target`'s sole incoming edge.
+/// The CFG entry is never accepted as `target`, self-loops are not
+/// contracted, and an exception edge is never contracted. When the CFG has
+/// exception regions, `source` and `target` must also be protected by the
+/// same regions and belong to the same known handler bodies, and no handler,
+/// filter, or cleanup may name `target`: folding must not move code across a
+/// protection boundary or strand exception metadata.
 pub fn contract_edge<I, E>(cfg: &mut Cfg<I, E>, source: BlockId, target: BlockId) -> bool {
-    contract_edge_inner(cfg, source, target, None)
+    contract(cfg, source, target, &mut ())
 }
 
-/// Contract an edge while retaining all surviving outgoing edge identities
-/// and payloads.
+/// Contract an edge like [`contract_edge`] and report the identities it
+/// touched.
 ///
-/// Returns `None` unless `source` has exactly one outgoing edge, that edge
-/// targets `target`, and it is `target`'s sole incoming edge. The connecting
-/// edge maps to removal, `target` is removed and maps to `source`, and
-/// redirected outgoing edges map to themselves. The refusals documented on
-/// [`contract_edge`] apply here too.
+/// In the returned record the connecting edge is removed, `target` maps to
+/// `source`, and every moved outgoing edge maps to itself. Returns `None`
+/// where [`contract_edge`] returns `false`.
 pub fn contract_edge_mapped<I, E>(
     cfg: &mut Cfg<I, E>,
     source: BlockId,
     target: BlockId,
 ) -> Option<Rewrite> {
-    let mut mapping = Rewrite::new();
-    contract_edge_inner(cfg, source, target, Some(&mut mapping)).then_some(mapping)
+    let mut rewrite = Rewrite::new();
+    contract(cfg, source, target, &mut rewrite).then_some(rewrite)
 }
 
 /// The one contraction every merge goes through, so a label, a region rule,
-/// or an identity record cannot differ between [`contract_edge`] and
-/// [`merge_blocks`](crate::merge_blocks).
-pub(crate) fn contract_edge_inner<I, E>(
+/// or an identity record cannot differ between the contraction and merge
+/// passes. Records what it touched into `record` and returns whether it
+/// contracted.
+pub(crate) fn contract<I, E, R: Recorder>(
     cfg: &mut Cfg<I, E>,
     source: BlockId,
     target: BlockId,
-    mut mapping: Option<&mut Rewrite>,
+    record: &mut R,
 ) -> bool {
     if source == target || target == cfg.entry() {
         return false;
@@ -80,25 +80,27 @@ pub(crate) fn contract_edge_inner<I, E>(
     }
 
     cfg.remove_edge(connecting);
-    if let Some(mapping) = mapping.as_deref_mut() {
-        mapping.record_edge(connecting, []);
-    }
+    record.record_edge(connecting, []);
     cfg.move_outgoing_edges(target, source);
-    let moved: Vec<EdgeId> = cfg.outgoing(source).collect();
-    cfg.remove_block(target);
-    if let Some(mapping) = mapping {
-        for edge in moved {
-            mapping.record_edge(edge, [edge]);
+    if R::RECORDS {
+        // The connecting edge is gone, so every outgoing edge of `source` is
+        // one that `target` had.
+        for moved in cfg.outgoing(source) {
+            record.record_edge(moved, [moved]);
         }
-        mapping.record_block(target, [source]);
     }
+    record.record_block(target, [source]);
+    cfg.remove_block(target);
     true
 }
 
 #[cfg(test)]
 mod tests {
+    extern crate alloc;
+    use alloc::vec::Vec;
+
     use super::*;
-    use crate::edge::EdgeKind;
+    use crate::edge::{Edge, EdgeKind};
     use crate::test_util::{ff, probability};
 
     #[test]
@@ -108,9 +110,16 @@ mod tests {
         let exit = cfg.new_block();
         cfg.block_mut(cfg.entry()).push(ff("a"));
         cfg.block_mut(target).push(ff("b"));
-        let connecting =
-            cfg.add_edge_with_payload(cfg.entry(), target, EdgeKind::Fallthrough, "join");
-        let outgoing = cfg.add_edge_with_payload(target, exit, EdgeKind::Jump, "provenance");
+        let connecting = cfg.add_edge(
+            cfg.entry(),
+            target,
+            Edge::new(EdgeKind::Fallthrough).with_payload("join"),
+        );
+        let outgoing = cfg.add_edge(
+            target,
+            exit,
+            Edge::new(EdgeKind::Jump).with_payload("provenance"),
+        );
 
         let entry = cfg.entry();
         let mapping = contract_edge_mapped(&mut cfg, entry, target).unwrap();
@@ -179,11 +188,21 @@ mod tests {
         cfg.block_mut(target).push(1);
         cfg.block_mut(sink).push(2);
         cfg.add_edge(source, target, EdgeKind::Fallthrough);
-        let first =
-            cfg.add_weighted_edge(target, sink, EdgeKind::ConditionalTrue, probability(0.25));
-        let second =
-            cfg.add_weighted_edge(target, sink, EdgeKind::ConditionalFalse, probability(0.75));
-        let back = cfg.add_weighted_edge(target, source, EdgeKind::Back, probability(0.875));
+        let first = cfg.add_edge(
+            target,
+            sink,
+            Edge::new(EdgeKind::ConditionalTrue).with_weight(probability(0.25)),
+        );
+        let second = cfg.add_edge(
+            target,
+            sink,
+            Edge::new(EdgeKind::ConditionalFalse).with_weight(probability(0.75)),
+        );
+        let back = cfg.add_edge(
+            target,
+            source,
+            Edge::new(EdgeKind::Back).with_weight(probability(0.875)),
+        );
 
         assert!(contract_edge(&mut cfg, source, target));
 

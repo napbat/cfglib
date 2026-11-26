@@ -69,11 +69,12 @@
 //! rather than two writers. [`write_text`] prints the same view one fact per
 //! line, and [`parse_text`] reads it back into a plain [`Graph`], which is
 //! what makes the form comparable: write, parse, write again is a fixed
-//! point. [`Cfg::to_text`] is the control-flow reading of it — block headers
+//! point. [`Cfg::to_listing`] is the control-flow form — block headers
 //! with indented instructions, edges named by [`EdgeKind`], and exception
-//! regions — and [`parse_cfg_text`] reads that back with a consumer-supplied
+//! regions — and [`parse_cfg_listing`] reads that back with a consumer-supplied
 //! instruction parser. Every printer shares [`IndentedWriter`], so
-//! indentation is decided once and a label is written straight into the sink.
+//! indentation is decided once and a label is written straight into the sink,
+//! and [`render`] turns any printer into a `String`.
 //! [`PassPipeline`] composes named, ordered, fallible transformations over a
 //! consumer-owned target, retaining a change report and failed-pass identity
 //! without imposing a dialect policy.
@@ -180,7 +181,8 @@
 //!   side tables or in the instruction payload itself.
 //! - A transform reports what it did as a [`Rewrite`] (sparse: only the
 //!   identities it touched) and a compaction as a [`Renumbering`] (total over
-//!   the old identity space). [`Rewrite::then_renumbered`] carries the first
+//!   the old identity space). Both compose with `compose(&next)`, and
+//!   `rewrite.compose(&Rewrite::from(&renumbering))` carries the first
 //!   across the second.
 
 #![no_std]
@@ -235,14 +237,13 @@ pub use analysis::pattern::{CfgPattern, detect_cfg_patterns, detect_patterns};
 pub use block::{BasicBlock, BlockId, BlockTag};
 pub use builder::address::{
     AddressBuildError, AddressCfgOptions, AddressEdgeInfo, AddressGraph, AddressHandler,
-    AddressInstruction, AddressSpace, CallPolicy, GivenEdge, GivenEdges, HopEnd, UnwindEnd,
-    UnwindHop, UnwindPath, UnwindRoute, UnwindStep, build_address_cfg,
-    build_address_cfg_from_given_edges, build_address_cfg_with_routes,
+    AddressHandlerKind, AddressInstruction, AddressSpace, CallPolicy, GivenEdge, GivenEdges,
+    HopEnd, UnwindEnd, UnwindHop, UnwindPath, UnwindRoute, UnwindStep, build_address_cfg,
 };
 pub use builder::{BuildError, CfgBuilder, JumpResolution, resolve_jump_edges};
 pub use cfg::{
-    Cfg, CfgEdge, CfgRenumbering, SemanticValidator, SplitPointError, parse_cfg_text, verify,
-    verify_with,
+    Cfg, CfgEdge, SemanticValidator, SplitPointError, control_flow_edge_attributes,
+    parse_cfg_listing, verify, verify_semantics,
 };
 pub use dataflow::bits::DenseBits;
 pub use dataflow::cfg_view::CfgView;
@@ -275,7 +276,7 @@ pub use dataflow::slot_fixpoint::{
     ordered_fixpoint, wave_fixpoint,
 };
 pub use dataflow::stream::{SolveStats, stream_edge_problem, stream_node_problem, stream_problem};
-pub use display::{DisplayInstr, IndentedWriter};
+pub use display::{DisplayInstr, IndentedWriter, render};
 pub use edge::{Edge, EdgeId, EdgeKind, EdgeTag, KindedEdge, Probability};
 pub use effects::{
     Access, AccessShape, Address, CaptureBuilder, Captured, CapturedValue, DialectEffects, Effect,
@@ -313,8 +314,7 @@ pub use graph::dominator::{
     SinkId,
 };
 pub use graph::dot::{
-    DotEdgeAttributes, DotEdgeStyle, DotRankDir, DotStyle, control_flow_edge_attributes,
-    plain_edge_attributes, to_dot, write_dot,
+    DotEdgeAttributes, DotEdgeStyle, DotRankDir, DotStyle, plain_edge_attributes, to_dot, write_dot,
 };
 pub use graph::dyck::{BidirectedDyck, bidirected_dyck_classes};
 pub use graph::edge_traverse::{
@@ -413,12 +413,10 @@ pub use rewrite::Rewrite;
 pub use transform::block_order::{ExtTspConfig, ext_tsp_order, ext_tsp_score, hot_cold_order};
 pub use transform::cleanup::{
     merge_blocks, merge_blocks_mapped, remove_empty_blocks, remove_empty_blocks_mapped,
-    remove_unreachable, remove_unreachable_mapped, simplify, simplify_mapped,
+    remove_unreachable_mapped, simplify_mapped,
 };
 pub use transform::contract::{contract_edge, contract_edge_mapped};
-pub use transform::critical::{
-    split_critical_edges, split_critical_edges_mapped, split_critical_edges_with,
-};
+pub use transform::critical::split_critical_edges_mapped;
 pub use transform::layout::{RelaxError, RelaxMode, SpanItem, relax_layout, relax_spans};
 pub use transform::linearize::{
     BlockOrder, Emitter, LinearInst, LinearizeError, falls_through, linearize,

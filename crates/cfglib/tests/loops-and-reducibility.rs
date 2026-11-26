@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use cfglib::{
-    BlockId, Cfg, CfgMetrics, DominatorTree, EdgeKind, GraphMetrics, IntervalAnalysis,
+    BlockId, Cfg, CfgMetrics, DominatorTree, Edge, EdgeKind, GraphMetrics, IntervalAnalysis,
     LoopNestingTree, NodeOrder, Probability, block_nesting_depths, canonicalize_loops,
     cfg_block_nesting_depths, detect_loops, detect_loops_tagged, find_back_edges, insert_preheader,
     is_reducible, loop_exit_blocks, make_reducible, verify,
@@ -239,16 +239,20 @@ fn a_preheader_takes_over_the_entering_edges_with_their_identity_and_payload() {
     let entry = cfg.entry();
     let [header, body, side, done] = [(); 4].map(|()| cfg.new_block());
     let hot_weight = Probability::from_f64(0.8).expect("a probability");
-    let hot = cfg.add_weighted_edge_with_payload(
+    let hot = cfg.add_edge(
         entry,
         header,
-        EdgeKind::ConditionalTrue,
-        hot_weight,
-        Route::Hot,
+        Edge::new(EdgeKind::ConditionalTrue)
+            .with_weight(hot_weight)
+            .with_payload(Route::Hot),
     );
     let to_done = cfg.add_edge(entry, done, EdgeKind::ConditionalFalse);
     let to_side = cfg.add_edge(entry, side, EdgeKind::SwitchCase);
-    let cold = cfg.add_edge_with_payload(side, header, EdgeKind::Fallthrough, Route::Cold);
+    let cold = cfg.add_edge(
+        side,
+        header,
+        Edge::new(EdgeKind::Fallthrough).with_payload(Route::Cold),
+    );
     cfg.add_edge(header, body, EdgeKind::ConditionalTrue);
     cfg.add_edge(body, header, EdgeKind::Back);
     cfg.add_edge(header, done, EdgeKind::ConditionalFalse);
@@ -454,8 +458,16 @@ fn make_reducible_finishes_on_a_cycle_whose_witness_is_not_an_entry() {
     let mut cfg = Cfg::<u32, Route>::with_edge_payload();
     let entry = cfg.entry();
     let [q, w, s, r] = [(); 4].map(|()| cfg.new_block());
-    cfg.add_edge_with_payload(entry, r, EdgeKind::ConditionalTrue, Route::Hot);
-    cfg.add_edge_with_payload(entry, q, EdgeKind::ConditionalFalse, Route::Cold);
+    cfg.add_edge(
+        entry,
+        r,
+        Edge::new(EdgeKind::ConditionalTrue).with_payload(Route::Hot),
+    );
+    cfg.add_edge(
+        entry,
+        q,
+        Edge::new(EdgeKind::ConditionalFalse).with_payload(Route::Cold),
+    );
     cfg.add_edge(q, w, EdgeKind::Fallthrough);
     cfg.add_edge(w, s, EdgeKind::Fallthrough);
     cfg.add_edge(s, w, EdgeKind::Back);

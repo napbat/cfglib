@@ -16,20 +16,19 @@ mod compact;
 #[cfg(feature = "serde")]
 mod document;
 mod dot;
+mod listing;
 mod mutation;
 mod regions;
 mod subgraph;
-mod text;
-mod traverse;
 mod verify;
 mod view;
 
 /// The store a [`Cfg`] is built on: blocks as nodes, edges as edges.
 pub(crate) type CfgStore<I, E> = Graph<BasicBlock<I>, Edge<E>, BlockTag, EdgeTag>;
 
-pub use compact::CfgRenumbering;
-pub use text::parse_cfg_text;
-pub use verify::{SemanticValidator, verify, verify_with};
+pub use dot::control_flow_edge_attributes;
+pub use listing::parse_cfg_listing;
+pub use verify::{SemanticValidator, verify, verify_semantics};
 
 /// One borrowed control-flow edge: identity, endpoints, kind, weight, and
 /// consumer payload.
@@ -121,12 +120,12 @@ impl<I, E> Cfg<I, E> {
     /// # Examples
     ///
     /// ```
-    /// use cfglib::{Cfg, EdgeKind};
+    /// use cfglib::{Cfg, Edge, EdgeKind};
     ///
     /// let mut cfg = Cfg::<u32, &str>::with_edge_payload();
     /// let entry = cfg.entry();
     /// let b1 = cfg.new_block();
-    /// let edge = cfg.add_edge_with_payload(entry, b1, EdgeKind::Fallthrough, "next");
+    /// let edge = cfg.add_edge(entry, b1, Edge::new(EdgeKind::Fallthrough).with_payload("next"));
     /// assert_eq!(cfg.block_count(), 2);
     /// assert_eq!(cfg.edge(edge).payload(), &"next");
     /// ```

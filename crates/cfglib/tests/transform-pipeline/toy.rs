@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use cfglib::{
-    BlockId, Cfg, EdgeId, EdgeKind, EffectInfo, Emitter, InstrInfo, LinearInst, Probability,
+    BlockId, Cfg, Edge, EdgeId, EdgeKind, EffectInfo, Emitter, InstrInfo, LinearInst, Probability,
 };
 
 pub type Reg = u8;
@@ -192,7 +192,7 @@ impl<E: Payload> Builder<E> {
         self.next_tag += 1;
         let edge = self
             .cfg
-            .add_edge_with_payload(source, target, kind, E::tagged(tag));
+            .add_edge(source, target, Edge::new(kind).with_payload(E::tagged(tag)));
         let weight = Probability::from_numerator(Probability::DENOMINATOR / 4 * (tag % 4))
             .expect("at most three quarters");
         self.cfg.edge_mut(edge).set_weight(Some(weight));

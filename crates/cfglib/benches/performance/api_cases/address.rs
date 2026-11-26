@@ -1,6 +1,6 @@
 use cfglib::{
-    AddressCfgOptions, AddressEdgeInfo, AddressGraph, AddressHandler, AddressInstruction, Flow,
-    HandlerKind, build_address_cfg,
+    AddressCfgOptions, AddressEdgeInfo, AddressGraph, AddressHandler, AddressHandlerKind,
+    AddressInstruction, Flow, build_address_cfg,
 };
 
 use super::BenchmarkSuite;
@@ -54,7 +54,7 @@ fn fixture() -> (Vec<Inst>, Vec<AddressHandler<u32>>) {
             AddressHandler {
                 protected: start..start + 8,
                 entry: fixture_u32(INSTRUCTION_COUNT - 1),
-                kind: HandlerKind::CatchAll,
+                kind: AddressHandlerKind::CatchAll,
             }
         })
         .collect();

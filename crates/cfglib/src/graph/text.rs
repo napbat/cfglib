@@ -51,6 +51,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::{self, Write as _};
 
+use crate::display::render;
 use crate::graph::edge_view::EdgeView;
 use crate::graph::label::{Label, display_label, no_label};
 use crate::graph::store::{Graph, IdTag};
@@ -141,8 +142,8 @@ impl core::error::Error for TextError {}
 /// How one graph is written as text: what labels a node, what labels an edge.
 ///
 /// The store has no distinguished entry, so its text form has no `entry`
-/// header; [`Cfg::to_text`](crate::Cfg::to_text) writes one because a CFG
-/// does have one.
+/// header; the listing of a CFG ([`Cfg::to_listing`](crate::Cfg::to_listing))
+/// is a form of its own and writes one, because a CFG does have one.
 #[derive(Debug, Clone, Copy)]
 pub struct TextStyle<NodeLabel, EdgeLabel> {
     node_label: NodeLabel,
@@ -243,9 +244,7 @@ where
     NodeLabel: for<'d> Fn(G::NodeId, &'d G::NodeData) -> Cow<'d, str>,
     EdgeLabel: for<'d> Fn(G::EdgeId, &'d G::EdgeData) -> Cow<'d, str>,
 {
-    let mut out = String::new();
-    write_text(view, &mut out, style).expect("writing text to a String cannot fail");
-    out
+    render(|sink| write_text(view, sink, style))
 }
 
 /// Write a label after its subject, escaped, or nothing when it is empty.

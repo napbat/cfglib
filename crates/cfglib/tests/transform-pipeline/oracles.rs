@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cfglib::{BlockId, Cfg, CfgRenumbering, EdgeId, EdgeKind, Rewrite, verify};
+use cfglib::{BlockId, BlockTag, Cfg, EdgeId, EdgeKind, Renumbering, Rewrite, verify};
 
 use crate::toy::{Inst, Payload};
 
@@ -108,7 +108,7 @@ pub fn assert_surviving_payloads_unchanged<E: Payload>(
 /// only moves if a renumbering did.
 pub struct Placement<'a> {
     pub rewrite: &'a Rewrite,
-    pub renumbering: Option<&'a CfgRenumbering>,
+    pub renumbering: Option<&'a Renumbering<BlockTag>>,
 }
 
 impl Placement<'_> {

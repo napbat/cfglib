@@ -7,8 +7,8 @@
 
 use cfglib::{
     BlockId, Cfg, CompletionReason, Continuation, EdgeKind, EhBlockKind, EhModel, Handler,
-    HandlerBody, HandlerKind, HandlerRef, NodeOrder, Region, RegionId, contract_edge, merge_blocks,
-    remove_empty_blocks, remove_unreachable, simplify,
+    HandlerBody, HandlerKind, HandlerRef, NodeOrder, Region, RegionId, contract_edge_mapped,
+    merge_blocks_mapped, remove_empty_blocks_mapped, remove_unreachable_mapped, simplify_mapped,
 };
 
 fn region(protected: impl IntoIterator<Item = BlockId>, handlers: Vec<Handler>) -> Region {
@@ -47,7 +47,7 @@ fn empty_catch() -> (Cfg<u32>, BlockId) {
 
 fn assert_metadata_survives_compaction(cfg: &mut Cfg<u32>) {
     cfg.compact(NodeOrder::Insertion);
-    assert!(cfg.is_compact());
+    assert!(cfg.is_dense());
     for region in cfg.regions() {
         for handler in &region.handlers {
             assert!(cfg.contains_block(handler.entry));
@@ -59,7 +59,7 @@ fn assert_metadata_survives_compaction(cfg: &mut Cfg<u32>) {
 fn bypassing_empty_blocks_keeps_a_handler_entry_alive() {
     let (mut cfg, handler) = empty_catch();
 
-    assert_eq!(remove_empty_blocks(&mut cfg), 0);
+    assert_eq!(remove_empty_blocks_mapped(&mut cfg).0, 0);
     assert!(cfg.contains_block(handler));
     assert_metadata_survives_compaction(&mut cfg);
 }
@@ -68,7 +68,7 @@ fn bypassing_empty_blocks_keeps_a_handler_entry_alive() {
 fn simplify_then_compact_keeps_the_empty_catch() {
     let (mut cfg, _) = empty_catch();
 
-    simplify(&mut cfg);
+    simplify_mapped(&mut cfg);
     assert_metadata_survives_compaction(&mut cfg);
     let handler = cfg.regions()[0].handlers[0].entry;
     assert_eq!(
@@ -92,7 +92,7 @@ fn removing_unreachable_blocks_keeps_a_declared_handler_entry() {
     cfg.block_mut(never_entered).push(8);
     cfg.add_region(region([body], vec![catch(entered), catch(never_entered)]));
 
-    assert_eq!(remove_unreachable(&mut cfg), 0);
+    assert_eq!(remove_unreachable_mapped(&mut cfg).0, 0);
     assert!(cfg.contains_block(never_entered));
     assert_metadata_survives_compaction(&mut cfg);
 }
@@ -125,7 +125,7 @@ fn removing_a_dead_region_releases_its_blocks() {
         cfg.cleanup(handler).is_none(),
         "the region's cleanup went with it"
     );
-    assert_eq!(remove_unreachable(&mut cfg), 2);
+    assert_eq!(remove_unreachable_mapped(&mut cfg).0, 2);
     assert_metadata_survives_compaction(&mut cfg);
 }
 
@@ -141,8 +141,8 @@ fn merging_never_moves_code_across_a_protection_boundary() {
     cfg.add_edge(protected, unprotected, EdgeKind::Fallthrough);
     cfg.add_region(region([protected], vec![catch(handler)]));
 
-    assert_eq!(merge_blocks(&mut cfg), 0);
-    assert!(!contract_edge(&mut cfg, protected, unprotected));
+    assert_eq!(merge_blocks_mapped(&mut cfg).0, 0);
+    assert!(contract_edge_mapped(&mut cfg, protected, unprotected).is_none());
     assert_eq!(cfg.block(protected).instructions(), &[1]);
 }
 
@@ -157,7 +157,7 @@ fn merging_inside_one_region_still_happens() {
     cfg.add_edge(first, second, EdgeKind::Fallthrough);
     cfg.add_region(region([first, second], vec![catch(handler)]));
 
-    assert_eq!(merge_blocks(&mut cfg), 1);
+    assert_eq!(merge_blocks_mapped(&mut cfg).0, 1);
     assert_eq!(cfg.block(first).instructions(), &[1, 2]);
 }
 
@@ -170,8 +170,8 @@ fn merging_never_follows_an_exception_edge() {
     cfg.block_mut(handler).push(2);
     cfg.add_edge(thrower, handler, EdgeKind::ExceptionUnwind);
 
-    assert_eq!(merge_blocks(&mut cfg), 0);
-    assert!(!contract_edge(&mut cfg, thrower, handler));
+    assert_eq!(merge_blocks_mapped(&mut cfg).0, 0);
+    assert!(contract_edge_mapped(&mut cfg, thrower, handler).is_none());
     assert!(cfg.contains_block(handler));
 }
 
@@ -189,7 +189,7 @@ fn merging_into_a_handler_entry_is_refused() {
 
     // `before` folds into the entry; the handler entry, which a handler names,
     // stays a block of its own.
-    assert_eq!(merge_blocks(&mut cfg), 1);
+    assert_eq!(merge_blocks_mapped(&mut cfg).0, 1);
     assert_eq!(cfg.block(body).instructions(), &[1]);
     assert!(cfg.contains_block(handler));
     assert_eq!(cfg.block(handler).instructions(), &[2]);
@@ -208,7 +208,7 @@ fn splitting_a_protected_block_protects_both_halves() {
     cfg.add_edge(body, handler, EdgeKind::ExceptionHandler);
     let owner = cfg.add_region(region([body], vec![catch(handler)]));
 
-    let tail = cfg.split_block(body, 1);
+    let tail = cfg.split_block(body, 1, EdgeKind::Fallthrough);
 
     let protected = &cfg.region(owner).unwrap().protected_blocks;
     assert!(protected.contains(&body) && protected.contains(&tail));
@@ -225,7 +225,7 @@ fn splitting_a_handler_body_block_keeps_the_whole_body_known() {
     cfg.add_edge(body, handler, EdgeKind::ExceptionHandler);
     let owner = cfg.add_region(region([body], vec![catch(handler)]));
 
-    let tail = cfg.split_block(handler, 1);
+    let tail = cfg.split_block(handler, 1, EdgeKind::Fallthrough);
 
     let known = cfg.region(owner).unwrap().handlers[0]
         .body
@@ -261,7 +261,7 @@ fn splitting_a_cleanup_resume_block_moves_the_resume_point_to_the_tail() {
         },
     );
 
-    let tail = cfg.split_block(cleanup, 1);
+    let tail = cfg.split_block(cleanup, 1, EdgeKind::Fallthrough);
 
     assert_eq!(cfg.cleanup(handler).unwrap().resume_from, Some(tail));
     assert_eq!(cfg.successors(tail).collect::<Vec<_>>(), [exit]);
@@ -275,6 +275,6 @@ fn merging_keeps_the_label_of_the_block_it_absorbs() {
     cfg.block_mut(looped).set_label("loop");
     cfg.add_edge(entry, looped, EdgeKind::Fallthrough);
 
-    assert_eq!(merge_blocks(&mut cfg), 1);
+    assert_eq!(merge_blocks_mapped(&mut cfg).0, 1);
     assert_eq!(cfg.block(entry).label(), Some("loop"));
 }

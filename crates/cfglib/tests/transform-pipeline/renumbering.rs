@@ -1,8 +1,9 @@
 //! Identity bookkeeping across passes: composing `Rewrite` records, and
-//! carrying them over compactions with `then_renumbered` and `Renumbering`.
+//! carrying them over compactions by composing with the compaction's record,
+//! `Rewrite::from(&renumbering)`, or by following each `Renumbering`.
 
 use cfglib::{
-    BlockId, Cfg, CfgRenumbering, EdgeId, NodeOrder, Rewrite, merge_blocks_mapped,
+    BlockId, BlockTag, Cfg, EdgeId, NodeOrder, Renumbering, Rewrite, merge_blocks_mapped,
     remove_empty_blocks_mapped, remove_unreachable_mapped, simplify_mapped,
     split_critical_edges_mapped,
 };
@@ -24,7 +25,7 @@ fn pipeline<E: Payload>() -> [Pass<E>; 4] {
         |cfg| remove_unreachable_mapped(cfg).1,
         |cfg| remove_empty_blocks_mapped(cfg).1,
         |cfg| merge_blocks_mapped(cfg).1,
-        |cfg| split_critical_edges_mapped(cfg).1,
+        |cfg| split_critical_edges_mapped(cfg, |_, _| Default::default()).1,
     ]
 }
 
@@ -36,7 +37,7 @@ fn run_passes<E: Payload>(cfg: &mut Cfg<Inst, E>) -> Vec<Rewrite> {
 fn composed(records: &[Rewrite]) -> Rewrite {
     let mut all = Rewrite::new();
     for record in records {
-        all.compose(record.clone());
+        all.compose(record);
     }
     all
 }
@@ -59,12 +60,12 @@ fn composition_case<E: Payload>(seed: u64) {
     assert_same_behavior(&before, &cfg, &context);
 
     let mut left = records[0].clone();
-    left.compose(records[1].clone());
-    left.compose(records[2].clone());
+    left.compose(&records[1]);
+    left.compose(&records[2]);
     let mut tail = records[1].clone();
-    tail.compose(records[2].clone());
+    tail.compose(&records[2]);
     let mut right = records[0].clone();
-    right.compose(tail);
+    right.compose(&tail);
     assert_eq!(
         left, right,
         "{context}: composition does not depend on grouping"
@@ -72,13 +73,13 @@ fn composition_case<E: Payload>(seed: u64) {
 
     for record in &records {
         let mut after_empty = Rewrite::new();
-        after_empty.compose(record.clone());
+        after_empty.compose(record);
         assert_eq!(
             &after_empty, record,
             "{context}: an empty record composes as the identity"
         );
         let mut before_empty = record.clone();
-        before_empty.compose(Rewrite::new());
+        before_empty.compose(&Rewrite::new());
         assert_eq!(&before_empty, record, "{context}");
     }
 }
@@ -103,12 +104,12 @@ fn simplify_reports_the_same_map_as_composing_its_passes_by_hand() {
         loop {
             let mut round = Rewrite::new();
             let (unreachable, step) = remove_unreachable_mapped(&mut by_hand);
-            round.compose(step);
+            round.compose(&step);
             let (empty, step) = remove_empty_blocks_mapped(&mut by_hand);
-            round.compose(step);
+            round.compose(&step);
             let (merged, step) = merge_blocks_mapped(&mut by_hand);
-            round.compose(step);
-            record.compose(round);
+            round.compose(&step);
+            record.compose(&round);
             if unreachable + empty + merged == 0 {
                 break;
             }
@@ -120,7 +121,7 @@ fn simplify_reports_the_same_map_as_composing_its_passes_by_hand() {
 
 /// Follows one old block through a sequence of (rewrite, compaction) stages,
 /// the way a consumer holding identities from before the pipeline must.
-fn follow(stages: &[(Rewrite, CfgRenumbering)], old: BlockId) -> Vec<BlockId> {
+fn follow(stages: &[(Rewrite, Renumbering<BlockTag>)], old: BlockId) -> Vec<BlockId> {
     let mut current = vec![old];
     for (rewrite, renumbering) in stages {
         let mut next = Vec::new();
@@ -156,7 +157,7 @@ fn a_compaction_between_every_pass_keeps_the_identity_trail_intact() {
             }
         }
         let context = format!("seed {seed}");
-        assert!(cfg.is_compact(), "{context}");
+        assert!(cfg.is_dense(), "{context}");
 
         for old in before.block_ids() {
             let images = follow(&stages, old);
@@ -184,38 +185,56 @@ fn a_compaction_between_every_pass_keeps_the_identity_trail_intact() {
 }
 
 #[test]
-fn then_renumbered_translates_every_replacement_and_creation_to_the_compacted_ids() {
+fn composing_with_a_compaction_translates_every_identity_and_creation_to_the_compacted_ids() {
     for seed in 0..SEEDS {
         let before = random_program::<Route>(seed, true);
         let mut cfg = before.clone();
         let records = run_passes(&mut cfg);
         let all = composed(&records);
+        let (block_bound, edge_bound) = (cfg.block_bound(), cfg.edge_bound());
         let renumbering = cfg.compact(NodeOrder::Insertion);
-        let carried = all.then_renumbered(&renumbering);
+        let mut carried = all.clone();
+        carried.compose(&Rewrite::from(&renumbering));
         let context = format!("seed {seed}");
 
-        for (old, images) in all.block_mappings() {
-            let expected: Vec<BlockId> = images
-                .iter()
-                .filter_map(|&image| renumbering.node(image))
-                .collect();
+        // The compaction's record is total over the slots before it, so the
+        // carried record answers for every one of them: an identity the passes
+        // replaced maps through its replacements, and one they left alone maps
+        // to its renumbered identity.
+        for old in (0..block_bound).map(BlockId::from_index) {
+            let expected: Vec<BlockId> = all.blocks(old).map_or_else(
+                || renumbering.node(old).into_iter().collect(),
+                |images| {
+                    images
+                        .iter()
+                        .filter_map(|&image| renumbering.node(image))
+                        .collect()
+                },
+            );
             assert_eq!(
                 carried.blocks(old),
                 Some(expected.as_slice()),
                 "{context}: {old}"
             );
         }
-        for (old, images) in all.edge_mappings() {
-            let expected: Vec<_> = images
-                .iter()
-                .filter_map(|&image| renumbering.edge(image))
-                .collect();
+        assert_eq!(carried.block_mappings().count(), block_bound, "{context}");
+        for old in (0..edge_bound).map(EdgeId::from_index) {
+            let expected: Vec<EdgeId> = all.edges(old).map_or_else(
+                || renumbering.edge(old).into_iter().collect(),
+                |images| {
+                    images
+                        .iter()
+                        .filter_map(|&image| renumbering.edge(image))
+                        .collect()
+                },
+            );
             assert_eq!(
                 carried.edges(old),
                 Some(expected.as_slice()),
                 "{context}: {old}"
             );
         }
+        assert_eq!(carried.edge_mappings().count(), edge_bound, "{context}");
         assert!(
             carried
                 .created_blocks()
@@ -246,13 +265,13 @@ fn compaction_renumbers_survivors_densely_in_order_and_reports_the_rest_as_gone(
     for seed in 0..SEEDS {
         let mut cfg = random_program::<Route>(seed, true);
         simplify_mapped(&mut cfg);
-        let removed_something = !cfg.is_compact();
+        let removed_something = !cfg.is_dense();
         let before = cfg.clone();
         let survivors: Vec<BlockId> = live_blocks(&before).into_iter().collect();
         let renumbering = cfg.compact(NodeOrder::Insertion);
         let context = format!("seed {seed}");
 
-        assert!(cfg.is_compact(), "{context}");
+        assert!(cfg.is_dense(), "{context}");
         assert_eq!(renumbering.is_identity(), !removed_something, "{context}");
         for (rank, &old) in survivors.iter().enumerate() {
             let new = renumbering.node(old).expect("a live block survives");
@@ -317,7 +336,8 @@ fn composing_two_renumberings_equals_following_them_one_after_the_other() {
         remove_empty_blocks_mapped(&mut cfg);
         merge_blocks_mapped(&mut cfg);
         let second = cfg.compact(NodeOrder::Insertion);
-        let both = first.compose(&second);
+        let mut both = first.clone();
+        both.compose(&second);
 
         for index in 0..block_bound {
             let old = BlockId::from_index(index);

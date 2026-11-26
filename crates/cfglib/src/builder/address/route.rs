@@ -195,7 +195,7 @@ pub(super) fn validate_routes<I: AddressInstruction>(
             for address in funclets.chain(handler) {
                 let position = addresses
                     .binary_search(&address)
-                    .map_err(|_| AddressBuildError::MissingRouteEntry { address })?;
+                    .map_err(|_| AddressBuildError::MissingHandlerEntry { address })?;
                 leaders[position] = true;
             }
         }

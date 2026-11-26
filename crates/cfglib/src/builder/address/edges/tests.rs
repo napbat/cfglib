@@ -7,17 +7,18 @@ use alloc::vec::Vec;
 use crate::builder::address::tests::{Inst, inst, payload};
 use crate::builder::address::{
     AddressBuildError, AddressCfgOptions, AddressGraph, CallPolicy, GivenEdge, GivenEdges,
-    UnwindEnd, UnwindPath, UnwindRoute, UnwindStep, build_address_cfg_from_given_edges,
+    UnwindEnd, UnwindPath, UnwindRoute, UnwindStep, build_address_cfg,
 };
 use crate::edge::EdgeKind;
 use crate::flow::{CallSite, Flow};
 
 type Edge = (u32, u32, EdgeKind, &'static str);
 
-fn options(calls: CallPolicy) -> AddressCfgOptions<u32> {
+fn options<E>(calls: CallPolicy) -> AddressCfgOptions<'static, u32, E> {
     AddressCfgOptions {
         entry: Some(0),
         calls,
+        ..AddressCfgOptions::default()
     }
 }
 
@@ -51,12 +52,14 @@ fn build(
     edges: GivenEdges<u32, Edge>,
     flows: Vec<Flow<u32, i32>>,
 ) -> Result<Vec<Edge>, AddressBuildError<u32>> {
-    let graph = build_address_cfg_from_given_edges(
+    let graph = build_address_cfg(
         stream(flows),
-        edges,
         &[],
-        &[],
-        options(CallPolicy::Edges),
+        AddressCfgOptions {
+            routes: Some(&[]),
+            given_edges: Some(edges),
+            ..options(CallPolicy::Edges)
+        },
         payload,
     )?;
     Ok(sorted_edges(&graph))
@@ -146,12 +149,14 @@ fn a_given_call_under_flatten_ends_its_block_and_is_reported() {
         Flow::Call { target: 8 },
         Flow::Return,
     ];
-    let graph = build_address_cfg_from_given_edges(
+    let graph = build_address_cfg(
         stream(flows),
-        edges,
         &[],
-        &[],
-        options(CallPolicy::Flatten),
+        AddressCfgOptions {
+            routes: Some(&[]),
+            given_edges: Some(edges),
+            ..options(CallPolicy::Flatten)
+        },
         payload,
     )
     .expect("the given edges are valid");
@@ -202,12 +207,14 @@ fn routes_work_with_given_edges() {
             end: UnwindEnd::Handler(3),
         }],
     }];
-    let mut graph = build_address_cfg_from_given_edges(
+    let mut graph = build_address_cfg(
         stream(flows),
-        edges,
         &[],
-        &routes,
-        options(CallPolicy::Edges),
+        AddressCfgOptions {
+            routes: Some(&routes),
+            given_edges: Some(edges),
+            ..options(CallPolicy::Edges)
+        },
         payload,
     )
     .expect("the given edges and the routes are valid");

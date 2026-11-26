@@ -43,7 +43,7 @@ fn a_call_ends_its_block_and_its_return_site_gets_a_continuation_edge<I: Isa>() 
 
 fn edges_is_the_default_call_policy<I: Isa>() {
     assert_eq!(CallPolicy::default(), CallPolicy::Edges);
-    let options = AddressCfgOptions::<u32>::default();
+    let options = AddressCfgOptions::<u32, ()>::default();
     assert_eq!(options.entry, None);
     assert_eq!(options.calls, CallPolicy::Edges);
 
@@ -59,7 +59,7 @@ fn edges_is_the_default_call_policy<I: Isa>() {
     );
     assert_eq!(implicit.blocks(), explicit.blocks());
     assert_eq!(implicit.successors(), explicit.successors());
-    assert_eq!(implicit.cfg().to_text(), explicit.cfg().to_text());
+    assert_eq!(implicit.cfg().to_listing(), explicit.cfg().to_listing());
 }
 
 fn a_call_outside_the_code_is_unresolved_and_keeps_its_continuation<I: Isa>() {
@@ -243,7 +243,7 @@ fn programs_without_calls_ignore_the_call_policy<I: Isa>() {
         let flatten = build_with::<I>(&ops, Vec::new(), flattened());
         assert_eq!(edges.blocks(), flatten.blocks());
         assert_eq!(edges.successors(), flatten.successors());
-        assert_eq!(edges.cfg().to_text(), flatten.cfg().to_text());
+        assert_eq!(edges.cfg().to_listing(), flatten.cfg().to_listing());
         assert_empty(&flatten.graph.calls);
     }
 }

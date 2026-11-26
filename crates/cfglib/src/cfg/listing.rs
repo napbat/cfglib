@@ -1,9 +1,10 @@
-//! The line-oriented text form of a control-flow graph.
+//! The listing of a control-flow graph: its own line-oriented text form.
 //!
-//! This is the CFG's own reading of [`graph::text`](crate::graph::text): a
-//! block is a header line and its instructions, an edge names its
-//! [`EdgeKind`], and an exception region names the blocks it protects and
-//! the handlers attached to it.
+//! This is not the generic [`graph::text`](crate::graph::text) form, whose
+//! nodes are `nN` lines with one label; it shares only that form's escaping.
+//! A block is a header line and its instructions, an edge names its
+//! [`EdgeKind`](crate::EdgeKind), and an exception region names the blocks it
+//! protects and the handlers attached to it.
 //!
 //! ```text
 //! entry bb0
@@ -39,7 +40,7 @@ use alloc::string::String;
 use core::fmt::{self, Write as _};
 
 use crate::block::BlockId;
-use crate::display::{DisplayInstr, IndentedWriter};
+use crate::display::{DisplayInstr, IndentedWriter, render};
 use crate::graph::text::{EscapingSink, write_label};
 use crate::region::{Handler, HandlerBody, HandlerKind, Region};
 
@@ -47,7 +48,7 @@ use super::Cfg;
 
 mod parse;
 
-pub use parse::parse_cfg_text;
+pub use parse::parse_cfg_listing;
 
 /// What the text form calls a handler, before its filter block is known.
 ///
@@ -115,25 +116,24 @@ impl HandlerShape {
 }
 
 impl<I: DisplayInstr, E> Cfg<I, E> {
-    /// Render this CFG in the line-oriented text form.
+    /// Render this CFG as its listing.
     ///
     /// # Panics
     ///
     /// Panics only if writing to an in-memory [`String`] unexpectedly fails.
     #[must_use]
-    pub fn to_text(&self) -> String {
-        let mut out = String::new();
-        self.write_text(&mut out)
-            .expect("writing text to a String cannot fail");
-        out
+    pub fn to_listing(&self) -> String {
+        render(|sink| self.write_listing(sink))
     }
 
-    /// Write this CFG in the line-oriented text form into any sink.
+    /// Write this CFG's listing into any sink.
+    ///
+    /// [`parse_cfg_listing`] reads it back.
     ///
     /// # Errors
     ///
     /// Returns the sink's formatting error if a write fails.
-    pub fn write_text(&self, sink: &mut dyn fmt::Write) -> fmt::Result {
+    pub fn write_listing(&self, sink: &mut dyn fmt::Write) -> fmt::Result {
         let mut printer = IndentedWriter::new(sink);
         writeln!(printer, "entry {}", self.entry())?;
 

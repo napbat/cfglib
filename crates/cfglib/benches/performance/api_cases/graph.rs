@@ -13,13 +13,13 @@ use cfglib::{
     open_breadth_first_events, open_breadth_first_paths, open_depth_first_events,
     open_fold_post_order, open_search, propagate_summaries, reachable, reverse_postorder,
     scan_predecessors, search, search_in, to_dot, to_text, topological_sort,
-    topological_sort_or_cycle, verify, verify_edge_view, verify_view, verify_with, write_dot,
+    topological_sort_or_cycle, verify, verify_edge_view, verify_semantics, verify_view, write_dot,
     write_text,
 };
 use cfglib::{
     DotEdgeAttributes, DotStyle, EdgeId, FunctionIndex, TextStyle, call_graph_indexed,
-    control_flow_edge_attributes, display_label, no_label, parse_cfg_text, parse_text,
-    plain_edge_attributes, propagate_summaries_widened, recursive_functions,
+    control_flow_edge_attributes, display_label, no_label, parse_cfg_listing, parse_text,
+    plain_edge_attributes, propagate_summaries_widened, recursive_functions, render,
 };
 
 use super::BenchmarkSuite;
@@ -478,8 +478,8 @@ fn register_cfg_graphs(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_verify_with",
-        covers[verify_with],
-        || verify_with(&cfg, &NoopValidator),
+        covers[verify_semantics],
+        || verify_semantics(&cfg, &NoopValidator),
         |report| assert!(report.is_ok())
     );
 }
@@ -518,6 +518,13 @@ fn register_output_formats(suite: &mut BenchmarkSuite<'_>) {
             assert!(result.is_ok());
             assert!(dot.starts_with("digraph view"));
         }
+    );
+    benchmark_case!(
+        suite,
+        "api_render",
+        covers[render],
+        || render(|sink| write_dot(&output_graph, sink, &DotStyle::plain())),
+        |dot: &String| assert!(dot.starts_with("digraph view"))
     );
     benchmark_case!(
         suite,
@@ -569,8 +576,8 @@ fn register_output_formats(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_parse_cfg_text",
-        covers[parse_cfg_text],
-        || parse_cfg_text(&cfg_text, |line| Ok::<_, String>(line.to_owned())),
+        covers[parse_cfg_listing],
+        || parse_cfg_listing(&cfg_text, |line| Ok::<_, String>(line.to_owned())),
         |parsed: &Result<Cfg<String>, _>| assert_eq!(parsed.as_ref().unwrap().block_count(), 128)
     );
 }

@@ -2,7 +2,7 @@
 
 use cfglib::{
     BlockId, Cfg, ClrExceptionRegion, ClrHandler, ClrHandlerKind, CompletionReason, Continuation,
-    EdgeKind, EhBlockKind, EhEdgeKind, EhModel, ExceptionFlow, ExceptionPhase, Handler,
+    Edge, EdgeKind, EhBlockKind, EhEdgeKind, EhModel, ExceptionFlow, ExceptionPhase, Handler,
     HandlerBody, HandlerKind, HandlerRef, HandlerTypes, RegionId, install_clr_region, verify,
 };
 
@@ -332,11 +332,14 @@ fn clr_method_with_all_clauses() -> (
         },
     );
     for handler in handlers {
-        cfg.add_edge_with_payload(
+        cfg.add_edge(
             protected,
             handler,
-            EdgeKind::ExceptionUnwind,
-            ExceptionFlow::exceptional(ExceptionPhase::Unwind, None, "clause"),
+            Edge::new(EdgeKind::ExceptionUnwind).with_payload(ExceptionFlow::exceptional(
+                ExceptionPhase::Unwind,
+                None,
+                "clause",
+            )),
         );
     }
     (cfg, types, region, handlers)

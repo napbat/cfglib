@@ -1,7 +1,7 @@
 //! Tests for structural and semantic CFG verification.
 
 use super::*;
-use crate::edge::EdgeKind;
+use crate::edge::{Edge, EdgeKind};
 use crate::graph::store::NodeOrder;
 use crate::test_util::ff;
 
@@ -205,21 +205,23 @@ fn semantic_hooks_return_typed_cardinality_and_order_errors() {
     let handler_a = cfg.new_block();
     let handler_b = cfg.new_block();
     let entry = cfg.entry();
-    cfg.add_edge_with_payload(entry, branch, EdgeKind::ConditionalTrue, Route::Normal);
-    cfg.add_edge_with_payload(
+    cfg.add_edge(
+        entry,
+        branch,
+        Edge::new(EdgeKind::ConditionalTrue).with_payload(Route::Normal),
+    );
+    cfg.add_edge(
         entry,
         handler_a,
-        EdgeKind::ExceptionHandler,
-        Route::Handler(1),
+        Edge::new(EdgeKind::ExceptionHandler).with_payload(Route::Handler(1)),
     );
-    cfg.add_edge_with_payload(
+    cfg.add_edge(
         entry,
         handler_b,
-        EdgeKind::ExceptionHandler,
-        Route::Handler(0),
+        Edge::new(EdgeKind::ExceptionHandler).with_payload(Route::Handler(0)),
     );
 
-    let result = verify_with(&cfg, &RouteValidator);
+    let result = verify_semantics(&cfg, &RouteValidator);
     assert!(result.errors.is_empty(), "{:?}", result.errors);
     assert!(!result.is_ok());
     assert_eq!(result.semantic_errors.len(), 3);

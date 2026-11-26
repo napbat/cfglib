@@ -148,7 +148,7 @@ fn register_cfg_diff(suite: &mut BenchmarkSuite<'_>) {
     let mut split = branchy_cfg(BRANCHY_BLOCKS);
     let blocks: Vec<BlockId> = split.block_ids().step_by(4).collect();
     for &block in &blocks {
-        split.split_block(block, 1);
+        split.split_block(block, 1, EdgeKind::Fallthrough);
     }
     benchmark_case!(
         suite,

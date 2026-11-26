@@ -4,7 +4,7 @@
 //! A [`Cfg`] is an edge-aware rooted view of itself, so its structure is held
 //! to the one definition of the invariants in
 //! [`graph::verify`](crate::graph::verify), plus the exception metadata only a
-//! CFG has. [`verify_with`] layers the checks of a consumer's
+//! CFG has. [`verify_semantics`] layers the checks of a consumer's
 //! [`SemanticValidator`] on top and returns both kinds of error in one
 //! [`VerifyReport`].
 
@@ -83,7 +83,7 @@ pub fn verify<I, E>(cfg: &Cfg<I, E>) -> VerifyReport {
 /// The report holds the violations [`verify`] finds and, in hook order, the
 /// errors the validator emits.
 #[must_use]
-pub fn verify_with<I, E, S>(cfg: &Cfg<I, E>, validator: &S) -> VerifyReport<S::Error>
+pub fn verify_semantics<I, E, S>(cfg: &Cfg<I, E>, validator: &S) -> VerifyReport<S::Error>
 where
     S: SemanticValidator<I, E>,
 {

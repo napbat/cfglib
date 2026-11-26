@@ -4,7 +4,9 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use cfglib::{BlockId, BlockOrder, Cfg, EdgeKind, LinearInst, linearize};
+use cfglib::{
+    BlockId, BlockOrder, Cfg, Direction, EdgeKind, LinearInst, linearize, reverse_postorder,
+};
 
 use crate::golden::assert_golden;
 use crate::programs::{Rng, random_program};
@@ -157,7 +159,9 @@ fn assert_stream_runs_like_the_cfg(cfg: &Cfg<Inst>, stream: &[LinearInst<Inst>],
 fn every_reachable_block_is_emitted_once_in_reverse_postorder_and_runs_like_the_cfg() {
     for seed in 0..60 {
         let cfg = random_program::<()>(seed, true);
-        let reachable: BTreeSet<BlockId> = cfg.reverse_postorder().into_iter().collect();
+        let reachable: BTreeSet<BlockId> = reverse_postorder(&cfg, cfg.entry(), Direction::Forward)
+            .into_iter()
+            .collect();
         let stream = linearized(&cfg, BlockOrder::ReversePostorder);
         let context = format!("seed {seed}");
 
@@ -295,7 +299,8 @@ fn a_folding_emitter_inverts_branches_and_drops_jumps_to_the_next_block() {
     let mut inverted = 0;
     for seed in 0..60 {
         let cfg = random_program::<()>(seed, true);
-        for order in [cfg.reverse_postorder(), shuffled_order(&cfg, seed)] {
+        let rpo = reverse_postorder(&cfg, cfg.entry(), Direction::Forward);
+        for order in [rpo, shuffled_order(&cfg, seed)] {
             let context = format!("seed {seed}, order {order:?}");
             let stream =
                 linearize(&cfg, BlockOrder::Custom(order.clone()), &FoldingEmitter).stream();

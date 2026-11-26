@@ -170,6 +170,30 @@ impl core::fmt::Display for EdgeKind {
 /// `E` is consumer-owned metadata. The default unit payload preserves the
 /// compact `Cfg<I>` surface, while frontends that need switch labels, handler
 /// identities, continuation tokens, or source provenance use `Cfg<I, E>`.
+///
+/// [`Cfg::add_edge`](crate::Cfg::add_edge) takes anything that converts into
+/// an edge: a bare [`EdgeKind`] when the payload has a [`Default`], or an
+/// edge built from [`Edge::new`] with [`with_weight`](Self::with_weight) and
+/// [`with_payload`](Self::with_payload).
+///
+/// # Examples
+///
+/// ```
+/// use cfglib::{Cfg, Edge, EdgeKind, Probability};
+///
+/// let mut cfg = Cfg::<u32, &str>::with_edge_payload();
+/// let exit = cfg.new_block();
+/// let likely = Probability::from_f64(0.9).expect("0.9 is a probability");
+/// let plain = cfg.add_edge(cfg.entry(), exit, EdgeKind::Fallthrough);
+/// let hot = cfg.add_edge(
+///     cfg.entry(),
+///     exit,
+///     Edge::new(EdgeKind::Jump).with_weight(likely).with_payload("loop exit"),
+/// );
+/// assert_eq!(cfg.edge(plain).payload(), &"");
+/// assert_eq!(cfg.edge(hot).weight(), Some(likely));
+/// assert_eq!(cfg.edge(hot).payload(), &"loop exit");
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Edge<E = ()> {
@@ -185,12 +209,50 @@ pub struct Edge<E = ()> {
     pub(crate) payload: E,
 }
 
-impl<E> Edge<E> {
-    /// Create an edge payload.
-    pub(crate) const fn new(kind: EdgeKind, weight: Option<Probability>, payload: E) -> Self {
+impl Edge {
+    /// An edge of `kind` with no branch probability and the unit payload.
+    ///
+    /// [`with_weight`](Self::with_weight) adds a probability and
+    /// [`with_payload`](Self::with_payload) replaces the payload, so one
+    /// constructor serves every combination.
+    #[must_use]
+    pub const fn new(kind: EdgeKind) -> Self {
         Self {
             kind,
-            weight,
+            weight: None,
+            payload: (),
+        }
+    }
+}
+
+/// An edge of the kind with no branch weight and the default payload.
+impl<E: Default> From<EdgeKind> for Edge<E> {
+    fn from(kind: EdgeKind) -> Self {
+        Self {
+            kind,
+            weight: None,
+            payload: E::default(),
+        }
+    }
+}
+
+impl<E> Edge<E> {
+    /// This edge with the branch probability `weight`.
+    #[must_use]
+    pub fn with_weight(self, weight: Probability) -> Self {
+        Self {
+            weight: Some(weight),
+            ..self
+        }
+    }
+
+    /// This edge with `payload` as its consumer metadata in place of its
+    /// current payload.
+    #[must_use]
+    pub fn with_payload<P>(self, payload: P) -> Edge<P> {
+        Edge {
+            kind: self.kind,
+            weight: self.weight,
             payload,
         }
     }
@@ -283,7 +345,8 @@ mod tests {
     use alloc::collections::BTreeSet;
     use alloc::vec::Vec;
 
-    use super::EdgeKind;
+    use super::{Edge, EdgeKind};
+    use crate::test_util::probability;
 
     #[test]
     fn every_kind_has_a_distinct_name_that_reads_back() {
@@ -324,6 +387,26 @@ mod tests {
                 EdgeKind::ExceptionContinue,
             ],
             "ExceptionLeave is a normal transfer out of a protected region"
+        );
+    }
+
+    #[test]
+    fn every_way_to_build_an_edge_agrees_on_kind_weight_and_payload() {
+        let from_kind: Edge<u8> = EdgeKind::Jump.into();
+        assert_eq!(from_kind, Edge::new(EdgeKind::Jump).with_payload(0));
+        assert_eq!(from_kind.weight(), None);
+
+        let quarter = probability(0.25);
+        let built = Edge::new(EdgeKind::ConditionalTrue)
+            .with_weight(quarter)
+            .with_payload("taken");
+        assert_eq!(built.kind(), EdgeKind::ConditionalTrue);
+        assert_eq!(built.weight(), Some(quarter));
+        assert_eq!(built.payload(), &"taken");
+        assert_eq!(
+            built.with_payload(7_u8).weight(),
+            Some(quarter),
+            "replacing the payload keeps the weight"
         );
     }
 }

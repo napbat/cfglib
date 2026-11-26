@@ -39,8 +39,8 @@ use crate::graph::view::RootedView;
 ///
 /// ```
 /// use cfglib::{
-///     BlockId, BlockOrder, Cfg, ColdClass, ColdnessClasses, EdgeKind, Emitter, hot_cold_order,
-///     linearize,
+///     BlockId, BlockOrder, Cfg, ColdClass, ColdnessClasses, Direction, EdgeKind, Emitter,
+///     hot_cold_order, linearize, reverse_postorder,
 /// };
 ///
 /// /// Names each transfer, without its target.
@@ -74,7 +74,8 @@ use crate::graph::view::RootedView;
 /// // `abort` is seeded `Rare`; every edge passes any class on.
 /// let seed = |block| if block == abort { ColdClass::Rare } else { ColdClass::Normal };
 /// let classes = ColdnessClasses::compute(&cfg, seed, |_| ColdClass::Normal, |_| false);
-/// let [hot, rare, never] = hot_cold_order(&cfg, &cfg.reverse_postorder(), &classes);
+/// let order = reverse_postorder(&cfg, entry, Direction::Forward);
+/// let [hot, rare, never] = hot_cold_order(&cfg, &order, &classes);
 /// assert_eq!(hot, [entry, then_arm, join]);
 /// assert_eq!(rare, [else_arm, abort]);
 /// assert!(never.is_empty());
@@ -125,7 +126,8 @@ mod tests {
     use crate::edge::EdgeKind;
     use crate::graph::coldness::{ColdClass, ColdnessClasses};
     use crate::graph::store::{Graph, NodeId};
-    use crate::graph::view::{DenseId, Rooted};
+    use crate::graph::traverse::reverse_postorder;
+    use crate::graph::view::{DenseId, Direction, Rooted};
     use crate::test_util::rng::Rng;
     use crate::transform::linearize::{BlockOrder, Emitter, LinearInst, linearize};
 
@@ -232,7 +234,8 @@ mod tests {
         let classes = block_classes(&cfg, &[abort]);
         assert_eq!(classes.class(else_arm), ColdClass::Rare);
 
-        let [hot, rare, never] = hot_cold_order(&cfg, &cfg.reverse_postorder(), &classes);
+        let order = reverse_postorder(&cfg, entry, Direction::Forward);
+        let [hot, rare, never] = hot_cold_order(&cfg, &order, &classes);
         assert_eq!(hot, [entry, then_arm, join]);
         assert_eq!(rare, [else_arm, abort]);
         assert_eq!(never, []);
@@ -262,7 +265,7 @@ mod tests {
         cfg.add_edge(cfg.entry(), c, EdgeKind::Jump);
         let classes = block_classes(&cfg, &[]);
 
-        let base = cfg.reverse_postorder();
+        let base = reverse_postorder(&cfg, cfg.entry(), Direction::Forward);
         assert_eq!(
             hot_cold_order(&cfg, &base, &classes),
             [base.clone(), Vec::new(), Vec::new()]

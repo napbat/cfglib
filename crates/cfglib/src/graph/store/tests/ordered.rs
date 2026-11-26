@@ -211,7 +211,8 @@ fn assert_composes(before: &Store, mut after: Store, first: &Renumbering, rng: &
         after.remove_edge(edge);
     }
     let second = after.compact(NodeOrder::Insertion);
-    let composed = first.compose(&second);
+    let mut composed = first.clone();
+    composed.compose(&second);
     for slot in 0..before.node_bound() {
         let old = NodeId::from_index(slot);
         let direct = first.node(old).and_then(|middle| second.node(middle));

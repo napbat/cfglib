@@ -9,9 +9,9 @@
 //! leave `compact` to repair them.
 
 use cfglib::{
-    Cfg, EhBlockKind, EhEdgeKind, EhModel, HandlerBody, HandlerKind, HandlerRef, NodeOrder,
-    contract_edge, merge_blocks, remove_empty_blocks, remove_unreachable, simplify,
-    split_critical_edges, verify,
+    Cfg, EdgeKind, EhBlockKind, EhEdgeKind, EhModel, HandlerBody, HandlerKind, HandlerRef,
+    NodeOrder, contract_edge_mapped, merge_blocks_mapped, remove_empty_blocks_mapped,
+    remove_unreachable_mapped, simplify_mapped, split_critical_edges_mapped, verify,
 };
 
 use crate::shapes::{
@@ -101,7 +101,7 @@ fn assert_try_survives(
 ) {
     cfg.compact(NodeOrder::Insertion);
 
-    assert!(cfg.is_compact());
+    assert!(cfg.is_dense());
     assert_references_live(cfg, "after compaction");
     assert!(verify(cfg).is_ok());
     let handler = locate(cfg);
@@ -142,7 +142,7 @@ fn remove_empty_blocks_does_not_bypass_an_empty_catch_pad() {
         mut cfg, region, ..
     } = try_catch(&[]);
 
-    remove_empty_blocks(&mut cfg);
+    remove_empty_blocks_mapped(&mut cfg);
 
     assert_try_survives(&mut cfg, first_handler(region), &["risky()"], &["return"]);
 }
@@ -153,7 +153,7 @@ fn simplify_keeps_an_empty_catch_pad_and_the_protection_boundary() {
         mut cfg, region, ..
     } = try_catch(&[]);
 
-    simplify(&mut cfg);
+    simplify_mapped(&mut cfg);
 
     assert_try_survives(&mut cfg, first_handler(region), &["risky()"], &["return"]);
 }
@@ -164,7 +164,7 @@ fn simplify_does_not_fold_the_handler_of_a_body_that_always_throws() {
         mut cfg, region, ..
     } = always_throwing_try();
 
-    simplify(&mut cfg);
+    simplify_mapped(&mut cfg);
 
     assert_try_survives(
         &mut cfg,
@@ -182,7 +182,7 @@ fn merge_blocks_does_not_merge_a_handler_into_the_block_that_raises_into_it() {
         mut cfg, region, ..
     } = throwing_entry_try();
 
-    merge_blocks(&mut cfg);
+    merge_blocks_mapped(&mut cfg);
 
     assert_try_survives(
         &mut cfg,
@@ -200,7 +200,7 @@ fn merge_blocks_does_not_widen_protection_over_the_unprotected_predecessor() {
         mut cfg, region, ..
     } = try_catch(&["log(e)"]);
 
-    merge_blocks(&mut cfg);
+    merge_blocks_mapped(&mut cfg);
 
     assert_try_survives(
         &mut cfg,
@@ -221,7 +221,7 @@ fn contract_edge_refuses_to_fold_a_handler_entry_into_its_raising_block() {
     } = always_throwing_try();
 
     // Whether or not the contraction is refused, the graph must stay sound.
-    contract_edge(&mut cfg, body, pad);
+    contract_edge_mapped(&mut cfg, body, pad);
 
     assert_try_survives(
         &mut cfg,
@@ -237,7 +237,7 @@ fn remove_unreachable_keeps_the_handler_that_can_be_entered_when_its_sibling_can
     let mut cfg = fixture.cfg;
     let region = fixture.region;
 
-    remove_unreachable(&mut cfg);
+    remove_unreachable_mapped(&mut cfg);
 
     // The dead handler may be dropped from the region or kept with a live
     // entry; the live one is found by the code it runs.
@@ -270,7 +270,7 @@ fn simplify_keeps_a_catch_pad_whose_statements_were_removed() {
     } = try_catch_with(vec![Stmt::text("unused = 1").defining("unused")]);
     cfg.block_mut(pad).instructions_mut().clear();
 
-    simplify(&mut cfg);
+    simplify_mapped(&mut cfg);
 
     assert_try_survives(&mut cfg, first_handler(region), &["risky()"], &["return"]);
 }
@@ -283,7 +283,7 @@ fn split_critical_edges_leaves_regions_and_unwind_edges_alone() {
         mut cfg, region, ..
     } = try_catch(&["log(e)"]);
 
-    let split = split_critical_edges(&mut cfg);
+    let split = split_critical_edges_mapped(&mut cfg, |_, _| Default::default()).0;
 
     assert_eq!(split, 1);
     assert_try_survives(
@@ -308,7 +308,7 @@ fn splitting_a_protected_block_keeps_both_halves_protected() {
         .instructions_mut()
         .insert(0, Stmt::text("prepare()"));
 
-    let tail = cfg.split_block(body, 1);
+    let tail = cfg.split_block(body, 1, EdgeKind::Fallthrough);
 
     for half in [body, tail] {
         assert_eq!(

@@ -193,7 +193,8 @@ fn renumberings_compose_across_a_skipped_compaction() {
         .expect("n2 survived the first compaction");
     graph.remove_node(middle);
     let second = graph.compact(NodeOrder::Insertion);
-    let composed = first.compose(&second);
+    let mut composed = first.clone();
+    composed.compose(&second);
 
     for (old, &node) in nodes.iter().enumerate() {
         let stepwise = first

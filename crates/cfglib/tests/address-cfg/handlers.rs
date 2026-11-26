@@ -4,8 +4,9 @@
 use std::collections::BTreeSet;
 
 use cfglib::{
-    BlockId, ControlNode, ControlTree, DominatorTree, EhBlockKind, EhEdgeKind, EhModel, Handler,
-    HandlerBody, HandlerKind, HandlerRef, RegionId, promote_handler_extents, verify,
+    AddressHandlerKind, BlockId, ControlNode, ControlTree, DominatorTree, EhBlockKind, EhEdgeKind,
+    EhModel, Handler, HandlerBody, HandlerKind, HandlerRef, RegionId, promote_handler_extents,
+    verify,
 };
 
 use crate::harness::{
@@ -150,7 +151,7 @@ fn handlers_sharing_a_range_share_one_region_and_unwind_in_table_order<I: Isa>()
             TryRange {
                 protected: 0..2,
                 entry: 5,
-                kind: HandlerKind::CatchAll,
+                kind: AddressHandlerKind::CatchAll,
             },
         ],
         Settings::default(),
@@ -225,7 +226,7 @@ fn a_range_ending_at_the_code_end_needs_no_end_instruction<I: Isa>() {
     );
 }
 
-fn handler_kinds_pass_through_and_a_filter_is_patched_through_its_reference<I: Isa>() {
+fn handler_kinds_pass_through_and_a_filter_names_the_block_at_its_address<I: Isa>() {
     let mut ops = vec![Op::Work; 4];
     ops.push(Op::Return);
     // Five handler bodies, then the filter predicate's own funclet at
@@ -234,13 +235,11 @@ fn handler_kinds_pass_through_and_a_filter_is_patched_through_its_reference<I: I
         ops.extend([Op::Work, Op::Return]);
     }
     let kinds = [
-        (5, HandlerKind::Catch),
-        (7, HandlerKind::CatchAll),
-        (9, HandlerKind::Finally),
-        (11, HandlerKind::Fault),
-        // A filter names a block that does not exist at build time, so it is
-        // registered as a catch and patched afterwards.
-        (13, HandlerKind::Catch),
+        (5, AddressHandlerKind::Catch),
+        (7, AddressHandlerKind::CatchAll),
+        (9, AddressHandlerKind::Finally),
+        (11, AddressHandlerKind::Fault),
+        (13, AddressHandlerKind::Filter { filter: 15 }),
     ];
     let table = kinds
         .iter()
@@ -250,23 +249,29 @@ fn handler_kinds_pass_through_and_a_filter_is_patched_through_its_reference<I: I
             kind,
         })
         .collect();
-    let mut built = build_with::<I>(&ops, table, Settings::default());
+    let built = build_with::<I>(&ops, table, Settings::default());
     assert_eq!(built.cfg().regions().len(), 1);
     let handlers = built.graph.handler_refs.clone();
-    for (&(_, kind), &handler) in kinds.iter().zip(&handlers) {
+    let stored_kinds = [
+        HandlerKind::Catch,
+        HandlerKind::CatchAll,
+        HandlerKind::Finally,
+        HandlerKind::Fault,
+        HandlerKind::Filter {
+            filter_block: built.block_of(15),
+        },
+    ];
+    assert_eq!(handlers.len(), stored_kinds.len());
+    for (&kind, &handler) in stored_kinds.iter().zip(&handlers) {
         let stored = built.graph.cfg.handler(handler).unwrap();
         assert_eq!(stored.kind, kind);
         assert_eq!(stored.body, HandlerBody::Unknown);
         assert_eq!(stored.body.blocks(), None);
         assert!(!stored.body.is_known());
     }
-
-    let filter_block = built.block_of(15);
-    let patched = built.graph.cfg.handler_mut(handlers[4]).unwrap();
-    patched.kind = HandlerKind::Filter { filter_block };
     assert_eq!(
-        built.cfg().handler(handlers[4]).unwrap().kind,
-        HandlerKind::Filter { filter_block }
+        built.blocks()[built.block_of(15).index()].first(),
+        Some(&15)
     );
 
     let model = EhModel::compute(built.cfg());
@@ -306,7 +311,7 @@ fn the_exception_model_reads_one_unwind_edge_per_protected_instruction_and_handl
             TryRange {
                 protected: 0..2,
                 entry: 5,
-                kind: HandlerKind::Finally,
+                kind: AddressHandlerKind::Finally,
             },
         ],
         Settings::default(),
@@ -441,7 +446,7 @@ over_both_isas!(
     a_non_throwing_protected_instruction_keeps_its_block_but_loses_its_unwind_edge,
     handlers_sharing_a_range_share_one_region_and_unwind_in_table_order,
     a_range_ending_at_the_code_end_needs_no_end_instruction,
-    handler_kinds_pass_through_and_a_filter_is_patched_through_its_reference,
+    handler_kinds_pass_through_and_a_filter_names_the_block_at_its_address,
     the_exception_model_reads_one_unwind_edge_per_protected_instruction_and_handler,
     a_probe_without_any_table_still_makes_its_alternate_target_a_landing_pad,
     promoting_extents_claims_exactly_the_blocks_the_handler_entry_dominates,

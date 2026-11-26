@@ -4,12 +4,11 @@ use alloc::vec;
 
 use super::{body, build, funclets, main_code, route, stream, try_build, wire};
 use crate::builder::address::{
-    AddressBuildError, AddressCfgOptions, AddressHandler, UnwindEnd, UnwindStep, build_address_cfg,
-    build_address_cfg_with_routes,
+    AddressBuildError, AddressCfgOptions, AddressHandler, AddressHandlerKind, UnwindEnd,
+    UnwindStep, build_address_cfg,
 };
 use crate::edge::EdgeKind;
 use crate::flow::Flow;
-use crate::region::HandlerKind;
 
 const RET: Flow<u32, i32> = Flow::Return;
 const NEXT: Flow<u32, i32> = Flow::Next;
@@ -71,14 +70,14 @@ fn a_funclet_entry_or_handler_must_be_an_instruction_start() {
                 vec![(funclets(&[10, 15]), UnwindEnd::Propagate)]
             )]
         ),
-        Some(AddressBuildError::MissingRouteEntry { address: 15 }),
+        Some(AddressBuildError::MissingHandlerEntry { address: 15 }),
     );
     assert_eq!(
         error_of(
             code(),
             &[route(0..1, vec![(funclets(&[10]), UnwindEnd::Handler(31))])]
         ),
-        Some(AddressBuildError::MissingRouteEntry { address: 31 }),
+        Some(AddressBuildError::MissingHandlerEntry { address: 31 }),
     );
     assert!(
         error_of(
@@ -102,9 +101,16 @@ fn a_resume_end_after_a_funclet_is_an_error() {
     assert!(error_of(code(), &[good]).is_none());
 
     // Phase 2 rejects it too, for a graph that phase 1 built without the route.
-    let mut graph =
-        build_address_cfg_with_routes(code(), &[], &[], AddressCfgOptions::default(), wire)
-            .expect("valid");
+    let mut graph = build_address_cfg(
+        code(),
+        &[],
+        AddressCfgOptions {
+            routes: Some(&[]),
+            ..AddressCfgOptions::default()
+        },
+        wire,
+    )
+    .expect("valid");
     assert_eq!(
         graph.add_unwind_routes(&[bad], wire).err(),
         Some(AddressBuildError::ResumeAfterFunclet { route: 0 }),
@@ -163,7 +169,7 @@ fn phase_two_rejects_an_address_that_does_not_start_its_block() {
         graph
             .add_unwind_routes(&[route(0..1, propagate(&[5]))], wire)
             .err(),
-        Some(AddressBuildError::MissingRouteEntry { address: 5 }),
+        Some(AddressBuildError::MissingHandlerEntry { address: 5 }),
     );
     assert_eq!(
         graph
@@ -206,7 +212,7 @@ fn the_route_builder_adds_no_edge_from_the_handler_table() {
     let handlers = [AddressHandler {
         protected: 0..1,
         entry: 10,
-        kind: HandlerKind::Catch,
+        kind: AddressHandlerKind::Catch,
     }];
     let table = build_address_cfg(
         instructions(),
@@ -215,11 +221,13 @@ fn the_route_builder_adds_no_edge_from_the_handler_table() {
         wire,
     )
     .expect("valid");
-    let routed = build_address_cfg_with_routes(
+    let routed = build_address_cfg(
         instructions(),
         &handlers,
-        &[],
-        AddressCfgOptions::default(),
+        AddressCfgOptions {
+            routes: Some(&[]),
+            ..AddressCfgOptions::default()
+        },
         wire,
     )
     .expect("valid");
@@ -253,13 +261,15 @@ fn the_route_builder_validates_the_handler_table() {
     let handlers = [AddressHandler {
         protected: 0..1,
         entry: 7,
-        kind: HandlerKind::Catch,
+        kind: AddressHandlerKind::Catch,
     }];
-    let result = build_address_cfg_with_routes(
+    let result = build_address_cfg(
         stream(&[body(0, &[NEXT, RET])]),
         &handlers,
-        &[],
-        AddressCfgOptions::default(),
+        AddressCfgOptions {
+            routes: Some(&[]),
+            ..AddressCfgOptions::default()
+        },
         wire,
     );
 
@@ -273,17 +283,26 @@ fn the_route_builder_validates_the_handler_table() {
 fn routes_make_each_protected_instruction_and_each_funclet_return_lead_a_block() {
     let instructions = || stream(&[body(0, &[NEXT, NEXT, NEXT, RET]), body(10, &[NEXT, RET])]);
     let routes = [route(0..1, vec![(funclets(&[10]), UnwindEnd::Propagate)])];
-    let guarded = build_address_cfg_with_routes(
+    let guarded = build_address_cfg(
         instructions(),
         &[],
-        &routes,
-        AddressCfgOptions::default(),
+        AddressCfgOptions {
+            routes: Some(&routes),
+            ..AddressCfgOptions::default()
+        },
         wire,
     )
     .expect("valid");
-    let plain =
-        build_address_cfg_with_routes(instructions(), &[], &[], AddressCfgOptions::default(), wire)
-            .expect("valid");
+    let plain = build_address_cfg(
+        instructions(),
+        &[],
+        AddressCfgOptions {
+            routes: Some(&[]),
+            ..AddressCfgOptions::default()
+        },
+        wire,
+    )
+    .expect("valid");
 
     let same_block =
         |graph: &crate::builder::address::AddressGraph<_, super::Wire>, a: u32, b: u32| {

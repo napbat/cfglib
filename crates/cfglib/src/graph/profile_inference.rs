@@ -119,7 +119,7 @@ impl<N: DenseId, E: DenseId> BlockFrequencies<N, E> {
     /// # Examples
     ///
     /// ```
-    /// use cfglib::{BlockFrequencies, Cfg, EdgeKind, InferenceCosts, Probability};
+    /// use cfglib::{BlockFrequencies, Cfg, Edge, EdgeKind, InferenceCosts, Probability};
     ///
     /// // entry -> left (30%) or right (70%), both -> join. Only the entry and the
     /// // join were sampled.
@@ -127,8 +127,12 @@ impl<N: DenseId, E: DenseId> BlockFrequencies<N, E> {
     /// let mut cfg = Cfg::<u32>::new();
     /// let (left, right, join) = (cfg.new_block(), cfg.new_block(), cfg.new_block());
     /// let entry = cfg.entry();
-    /// let to_left = cfg.add_weighted_edge(entry, left, EdgeKind::ConditionalTrue, probability(0.3));
-    /// cfg.add_weighted_edge(entry, right, EdgeKind::ConditionalFalse, probability(0.7));
+    /// let to_left = cfg.add_edge(
+    ///     entry,
+    ///     left,
+    ///     Edge::new(EdgeKind::ConditionalTrue).with_weight(probability(0.3)),
+    /// );
+    /// cfg.add_edge(entry, right, Edge::new(EdgeKind::ConditionalFalse).with_weight(probability(0.7)));
     /// cfg.add_edge(left, join, EdgeKind::Fallthrough);
     /// cfg.add_edge(right, join, EdgeKind::Fallthrough);
     ///

@@ -24,7 +24,7 @@ use smallvec::SmallVec;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::edge::{EdgeId, EdgeKind, Probability};
+use crate::edge::{Edge, EdgeId, EdgeKind, Probability};
 use crate::graph::dominator::DominatorTree;
 use crate::graph::structure::find_irreducible_entry;
 use crate::graph::traverse::reachable;
@@ -217,10 +217,14 @@ fn split_cycle<I: Clone, E: Clone>(cfg: &mut Cfg<I, E>, cycle: &MultiEntryCycle)
             let target = copy_of[target.index()].unwrap_or(target);
             match weight {
                 Some(weight) => {
-                    cfg.add_weighted_edge_with_payload(copy, target, kind, weight, payload);
+                    cfg.add_edge(
+                        copy,
+                        target,
+                        Edge::new(kind).with_weight(weight).with_payload(payload),
+                    );
                 }
                 None => {
-                    cfg.add_edge_with_payload(copy, target, kind, payload);
+                    cfg.add_edge(copy, target, Edge::new(kind).with_payload(payload));
                 }
             }
         }
@@ -408,7 +412,13 @@ mod tests {
 
         let entry = cfg.entry();
         let weighted = |cfg: &mut Cfg<MockInst, Tag>, source, target, kind, weight, tag| {
-            cfg.add_weighted_edge_with_payload(source, target, kind, probability(weight), tag)
+            cfg.add_edge(
+                source,
+                target,
+                Edge::new(kind)
+                    .with_weight(probability(weight))
+                    .with_payload(tag),
+            )
         };
         let into_a = weighted(&mut cfg, entry, a, EdgeKind::ConditionalTrue, 0.375, Tag(1));
         let into_b = weighted(

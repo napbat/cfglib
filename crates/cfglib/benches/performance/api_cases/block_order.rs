@@ -2,8 +2,9 @@
 //! nest, and the hot/cold partition of a base order.
 
 use cfglib::{
-    BlockId, Cfg, ColdClass, ColdnessClasses, EdgeId, EdgeKind, Emitter, ExtTspConfig, Graph,
-    NodeId, Rooted, ext_tsp_order, ext_tsp_score, falls_through, hot_cold_order,
+    BlockId, Cfg, ColdClass, ColdnessClasses, Direction, EdgeId, EdgeKind, Emitter, ExtTspConfig,
+    Graph, NodeId, Rooted, ext_tsp_order, ext_tsp_score, falls_through, hot_cold_order,
+    reverse_postorder,
 };
 
 use super::BenchmarkSuite;
@@ -34,7 +35,7 @@ fn register_ext_tsp(suite: &mut BenchmarkSuite<'_>) {
         || large.order(&config),
         |order: &Vec<BlockId>| large.check(order, &config)
     );
-    let reverse_postorder = small.cfg.reverse_postorder();
+    let reverse_postorder = reverse_postorder(&small.cfg, small.cfg.entry(), Direction::Forward);
     benchmark_case!(
         suite,
         "api_ext_tsp_score",
@@ -189,7 +190,8 @@ impl ProfiledLoops {
     fn check(&self, order: &[BlockId], config: &ExtTspConfig) {
         assert_eq!(order.len(), self.cfg.block_ids().count());
         assert_eq!(order[0], self.cfg.entry());
-        assert!(self.score(order, config) > self.score(&self.cfg.reverse_postorder(), config));
+        let base = reverse_postorder(&self.cfg, self.cfg.entry(), Direction::Forward);
+        assert!(self.score(order, config) > self.score(&base, config));
     }
 }
 

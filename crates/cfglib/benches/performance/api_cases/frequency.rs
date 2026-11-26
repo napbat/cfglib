@@ -1,6 +1,6 @@
 use cfglib::{
-    BlockFrequencies, Cfg, DominatorTree, EdgeKind, FREQUENCY_SHIFT, FrequencyConfig, LoopForest,
-    Probability,
+    BlockFrequencies, Cfg, DominatorTree, Edge, EdgeKind, FREQUENCY_SHIFT, FrequencyConfig,
+    LoopForest, Probability,
 };
 
 use super::BenchmarkSuite;
@@ -29,24 +29,43 @@ pub(super) fn looped_cfg(block_count: usize) -> Cfg<u32> {
         for _ in 0..8 {
             let [header, left, right, join] = [(); 4].map(|()| cfg.new_block());
             cfg.add_edge(previous, header, EdgeKind::Fallthrough);
-            cfg.add_weighted_edge(header, left, EdgeKind::ConditionalTrue, probability(0.6));
-            cfg.add_weighted_edge(header, right, EdgeKind::ConditionalFalse, probability(0.4));
+            cfg.add_edge(
+                header,
+                left,
+                Edge::new(EdgeKind::ConditionalTrue).with_weight(probability(0.6)),
+            );
+            cfg.add_edge(
+                header,
+                right,
+                Edge::new(EdgeKind::ConditionalFalse).with_weight(probability(0.4)),
+            );
             cfg.add_edge(left, join, EdgeKind::Fallthrough);
             cfg.add_edge(right, join, EdgeKind::Fallthrough);
-            cfg.add_weighted_edge(join, header, EdgeKind::Back, probability(0.9));
+            cfg.add_edge(
+                join,
+                header,
+                Edge::new(EdgeKind::Back).with_weight(probability(0.9)),
+            );
             let next = cfg.new_block();
-            cfg.add_weighted_edge(join, next, EdgeKind::ConditionalFalse, probability(0.1));
+            cfg.add_edge(
+                join,
+                next,
+                Edge::new(EdgeKind::ConditionalFalse).with_weight(probability(0.1)),
+            );
             previous = next;
         }
         let latch = cfg.new_block();
         cfg.add_edge(previous, latch, EdgeKind::Fallthrough);
-        cfg.add_weighted_edge(latch, outer, EdgeKind::Back, probability(0.5));
+        cfg.add_edge(
+            latch,
+            outer,
+            Edge::new(EdgeKind::Back).with_weight(probability(0.5)),
+        );
         previous = cfg.new_block();
-        cfg.add_weighted_edge(
+        cfg.add_edge(
             latch,
             previous,
-            EdgeKind::ConditionalFalse,
-            probability(0.5),
+            Edge::new(EdgeKind::ConditionalFalse).with_weight(probability(0.5)),
         );
     }
     cfg

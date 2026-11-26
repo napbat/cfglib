@@ -68,25 +68,25 @@ fn normal_and_exceptional_edges_receive_different_physical_states() {
     let second_handler = cfg.new_block();
     let unwind_target = cfg.new_block();
     let entry = cfg.entry();
-    let normal =
-        cfg.add_edge_with_payload(entry, normal_target, EdgeKind::Fallthrough, Route::Normal);
-    let handler_zero = cfg.add_edge_with_payload(
+    let normal = cfg.add_edge(
+        entry,
+        normal_target,
+        Edge::new(EdgeKind::Fallthrough).with_payload(Route::Normal),
+    );
+    let handler_zero = cfg.add_edge(
         entry,
         first_handler,
-        EdgeKind::ExceptionHandler,
-        Route::Handler(0),
+        Edge::new(EdgeKind::ExceptionHandler).with_payload(Route::Handler(0)),
     );
-    let handler_one = cfg.add_edge_with_payload(
+    let handler_one = cfg.add_edge(
         entry,
         second_handler,
-        EdgeKind::ExceptionHandler,
-        Route::Handler(1),
+        Edge::new(EdgeKind::ExceptionHandler).with_payload(Route::Handler(1)),
     );
-    let unwind = cfg.add_edge_with_payload(
+    let unwind = cfg.add_edge(
         entry,
         unwind_target,
-        EdgeKind::ExceptionUnwind,
-        Route::Unwind,
+        Edge::new(EdgeKind::ExceptionUnwind).with_payload(Route::Unwind),
     );
 
     let facts = solve_edge_problem(&cfg, &PreAndPost { entry }).unwrap();
@@ -180,9 +180,21 @@ fn reachable_lifting_short_circuits_and_observes_pre_states() {
     let unreached = cfg.new_block();
     cfg.new_block(); // dead block: never reached, never transferred
     let _ = unreached;
-    cfg.add_edge_with_payload(entry, body, EdgeKind::Fallthrough, Route::Normal);
-    let unwind = cfg.add_edge_with_payload(body, handler, EdgeKind::ExceptionUnwind, Route::Unwind);
-    let normal = cfg.add_edge_with_payload(body, handler, EdgeKind::Fallthrough, Route::Normal);
+    cfg.add_edge(
+        entry,
+        body,
+        Edge::new(EdgeKind::Fallthrough).with_payload(Route::Normal),
+    );
+    let unwind = cfg.add_edge(
+        body,
+        handler,
+        Edge::new(EdgeKind::ExceptionUnwind).with_payload(Route::Unwind),
+    );
+    let normal = cfg.add_edge(
+        body,
+        handler,
+        Edge::new(EdgeKind::Fallthrough).with_payload(Route::Normal),
+    );
 
     let facts =
         try_solve_edge_problem(&cfg, &Reachable(Depths { entry })).expect("no transfer fails");
@@ -277,7 +289,7 @@ fn routed_cfg() -> (Cfg<(), Route>, BlockId) {
     ];
     for (kind, route) in routes {
         let target = cfg.new_block();
-        cfg.add_edge_with_payload(entry, target, kind, route);
+        cfg.add_edge(entry, target, Edge::new(kind).with_payload(route));
     }
     (cfg, entry)
 }
@@ -419,9 +431,16 @@ fn a_backward_solve_carries_the_exit_mark_to_every_ancestor() {
     let middle = cfg.new_block();
     let exit = cfg.new_block();
     let island = cfg.new_block();
-    let first =
-        cfg.add_edge_with_payload(cfg.entry(), middle, EdgeKind::Fallthrough, Route::Normal);
-    let second = cfg.add_edge_with_payload(middle, exit, EdgeKind::Fallthrough, Route::Normal);
+    let first = cfg.add_edge(
+        cfg.entry(),
+        middle,
+        Edge::new(EdgeKind::Fallthrough).with_payload(Route::Normal),
+    );
+    let second = cfg.add_edge(
+        middle,
+        exit,
+        Edge::new(EdgeKind::Fallthrough).with_payload(Route::Normal),
+    );
 
     let full = solve_edge_problem(&cfg, &MarkExitsBackward).unwrap();
     for block in [cfg.entry(), middle, exit, island] {
@@ -444,17 +463,15 @@ fn a_filtered_view_solves_without_its_excluded_edges() {
     let mut cfg = Cfg::<(), Route>::with_edge_payload();
     let kept_target = cfg.new_block();
     let cut_target = cfg.new_block();
-    let kept = cfg.add_edge_with_payload(
+    let kept = cfg.add_edge(
         cfg.entry(),
         kept_target,
-        EdgeKind::Fallthrough,
-        Route::Normal,
+        Edge::new(EdgeKind::Fallthrough).with_payload(Route::Normal),
     );
-    let cut = cfg.add_edge_with_payload(
+    let cut = cfg.add_edge(
         cfg.entry(),
         cut_target,
-        EdgeKind::Fallthrough,
-        Route::Normal,
+        Edge::new(EdgeKind::Fallthrough).with_payload(Route::Normal),
     );
     let view = FilteredEdges::new(&cfg, |edge: crate::EdgeId, _: &Edge<Route>| edge != cut);
 

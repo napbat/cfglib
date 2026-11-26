@@ -6,8 +6,8 @@ use std::collections::BTreeSet;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use cfglib::{
-    BlockId, Cfg, CfgRenumbering, Cleanup, CompletionReason, Continuation, EdgeKind, EhModel,
-    Handler, HandlerBody, HandlerKind, HandlerRef, NodeOrder,
+    BlockId, BlockTag, Cfg, Cleanup, CompletionReason, Continuation, EdgeKind, EhModel, Handler,
+    HandlerBody, HandlerKind, HandlerRef, NodeOrder, Renumbering,
 };
 
 use crate::shapes::{Stmt, block_of, catch, handler, protect, try_catch, unknown_catch};
@@ -91,14 +91,14 @@ fn holey() -> Holey {
 }
 
 /// `block` mapped through the renumbering, which it must survive.
-fn survivor(renumbering: &CfgRenumbering, block: BlockId) -> BlockId {
+fn survivor(renumbering: &Renumbering<BlockTag>, block: BlockId) -> BlockId {
     renumbering
         .node(block)
         .unwrap_or_else(|| panic!("{block} should have survived"))
 }
 
 /// A set of blocks as compaction leaves it: the members that survived, renamed.
-fn surviving(renumbering: &CfgRenumbering, blocks: &BTreeSet<BlockId>) -> BTreeSet<BlockId> {
+fn surviving(renumbering: &Renumbering<BlockTag>, blocks: &BTreeSet<BlockId>) -> BTreeSet<BlockId> {
     blocks
         .iter()
         .filter_map(|&block| renumbering.node(block))
@@ -232,7 +232,7 @@ fn a_second_compaction_finds_nothing_to_move() {
 
     let again = cfg.compact(NodeOrder::Insertion);
 
-    assert!(cfg.is_compact());
+    assert!(cfg.is_dense());
     assert!(again.is_identity());
     assert_eq!(cfg, settled);
 }
@@ -245,15 +245,15 @@ fn a_graph_with_no_removed_block_compacts_to_itself() {
     let renumbering = cfg.compact(NodeOrder::Insertion);
 
     assert!(renumbering.is_identity());
-    assert!(cfg.is_compact());
+    assert!(cfg.is_dense());
     assert_eq!(cfg.regions(), before.regions());
     assert_eq!(cfg.entry(), before.entry());
-    assert_eq!(cfg.to_text(), before.to_text());
+    assert_eq!(cfg.to_listing(), before.to_listing());
 }
 
 #[test]
-fn is_compact_is_true_exactly_when_compaction_would_change_no_identity() {
-    // The documented reading: `is_compact` is true exactly when `compact` would
+fn is_dense_is_true_exactly_when_compaction_would_change_no_identity() {
+    // The documented reading: `is_dense` is true exactly when `compact` would
     // change nothing, so it must agree with the renumbering `compact` returns.
     let mut untouched = try_catch(&["log(e)"]).cfg;
     let mut with_holes = holey().cfg;
@@ -262,12 +262,12 @@ fn is_compact_is_true_exactly_when_compaction_would_change_no_identity() {
         ("untouched", &mut untouched),
         ("with holes", &mut with_holes),
     ] {
-        let predicted = cfg.is_compact();
+        let predicted = cfg.is_dense();
 
         let renumbering = cfg.compact(NodeOrder::Insertion);
 
         assert_eq!(predicted, renumbering.is_identity(), "{name}");
-        assert!(cfg.is_compact(), "{name}: nothing is left to compact");
+        assert!(cfg.is_dense(), "{name}: nothing is left to compact");
     }
 }
 
@@ -343,7 +343,7 @@ fn compaction_keeps_a_graph_whose_removed_blocks_are_not_single_references() {
         let renumbering = cfg.compact(NodeOrder::Insertion);
 
         assert_eq!(renumbering.node(spare), None, "{name}");
-        assert!(cfg.is_compact(), "{name}");
+        assert!(cfg.is_dense(), "{name}");
     }
 }
 

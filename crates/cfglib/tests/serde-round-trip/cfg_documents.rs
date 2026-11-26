@@ -26,7 +26,7 @@ where
     assert_eq!(actual.block_count(), expected.block_count());
     assert_eq!(actual.edge_bound(), expected.edge_bound());
     assert_eq!(actual.edge_count(), expected.edge_count());
-    assert_eq!(actual.is_compact(), expected.is_compact());
+    assert_eq!(actual.is_dense(), expected.is_dense());
 
     for index in 0..expected.block_bound() {
         let block = BlockId::from_index(index);
@@ -84,14 +84,14 @@ where
         DominatorTree::compute(actual),
         DominatorTree::compute(expected)
     );
-    assert_eq!(actual.to_text(), expected.to_text());
+    assert_eq!(actual.to_listing(), expected.to_listing());
     assert_eq!(verify(actual).is_ok(), verify(expected).is_ok());
 }
 
 #[test]
 fn a_cfg_with_every_kind_of_state_decodes_equal() {
     let original = rich_cfg();
-    assert!(!original.is_compact(), "the fixture keeps removed slots");
+    assert!(!original.is_dense(), "the fixture keeps removed slots");
     assert_eq!(original.cleanups().len(), 2);
 
     let decoded = round_trip(&original);
@@ -121,7 +121,13 @@ fn evolve(mut cfg: Cfg<Op, Route>) -> (Cfg<Op, Route>, Renumbered, Renumbered) {
     let fresh = cfg.new_block();
     cfg.block_mut(fresh).push(Op::Call("fresh".to_owned()));
     let half = Probability::from_f64(0.5).expect("a probability");
-    cfg.add_weighted_edge_with_payload(cfg.entry(), fresh, EdgeKind::Call, half, Route::case(9));
+    cfg.add_edge(
+        cfg.entry(),
+        fresh,
+        Edge::new(EdgeKind::Call)
+            .with_weight(half)
+            .with_payload(Route::case(9)),
+    );
     cfg.remove_block(late);
 
     let (block_bound, edge_bound) = (cfg.block_bound(), cfg.edge_bound());
@@ -157,7 +163,7 @@ fn the_decoded_cfg_keeps_evolving_exactly_like_the_original() {
         actual_edges, expected_edges,
         "the same renumbering of edges"
     );
-    assert!(actual.is_compact());
+    assert!(actual.is_dense());
 }
 
 #[test]
@@ -181,7 +187,7 @@ fn removed_blocks_and_edges_stay_removed_and_keep_their_slots() {
 fn a_compacted_cfg_round_trips_and_stays_compact() {
     let (compacted, ..) = evolve(rich_cfg());
     let decoded: Cfg<Op, Route> = round_trip(&compacted);
-    assert!(decoded.is_compact());
+    assert!(decoded.is_dense());
     assert_same_cfg(&decoded, &compacted);
 }
 
@@ -219,17 +225,20 @@ fn the_fidelity_path_keeps_what_the_text_form_cannot() {
 fn a_cfg_edge_payload_of_the_exception_model_round_trips() {
     let mut cfg = Cfg::<Op, ExceptionFlow<String>>::with_edge_payload();
     let handler = cfg.new_block();
-    cfg.add_edge_with_payload(
+    cfg.add_edge(
         cfg.entry(),
         handler,
-        EdgeKind::ExceptionUnwind,
-        ExceptionFlow::exceptional(ExceptionPhase::Search, None, "filter #2".to_owned()),
+        Edge::new(EdgeKind::ExceptionUnwind).with_payload(ExceptionFlow::exceptional(
+            ExceptionPhase::Search,
+            None,
+            "filter #2".to_owned(),
+        )),
     );
-    cfg.add_edge_with_payload(
+    cfg.add_edge(
         cfg.entry(),
         handler,
-        EdgeKind::Fallthrough,
-        ExceptionFlow::normal("scope table".to_owned()),
+        Edge::new(EdgeKind::Fallthrough)
+            .with_payload(ExceptionFlow::normal("scope table".to_owned())),
     );
 
     let decoded: Cfg<Op, ExceptionFlow<String>> = round_trip(&cfg);
@@ -330,7 +339,7 @@ fn dropping_the_cleanups_field_from_a_current_document_leaves_everything_else() 
     let original = rich_cfg();
     assert_eq!(decoded.cleanups(), []);
     assert_eq!(decoded.regions(), original.regions());
-    assert_eq!(decoded.to_text(), original.to_text());
+    assert_eq!(decoded.to_listing(), original.to_listing());
     assert_eq!(decoded.edge_count(), original.edge_count());
     assert_eq!(decoded.block_bound(), original.block_bound());
 }

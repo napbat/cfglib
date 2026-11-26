@@ -1,4 +1,5 @@
-//! Indented text output, and display-only instruction rendering.
+//! Indented text output, display-only instruction rendering, and rendering
+//! into a [`String`].
 //!
 //! [`IndentedWriter`] is the one place indentation is decided. Every text
 //! printer in the crate writes through it, so a nested construct is indented
@@ -8,10 +9,41 @@
 //! [`FlowControl`](crate::FlowControl): rendering a graph for humans (DOT
 //! export, text) must not require implementing flow classification.
 //! Consumers that only want a picture implement its one required method.
+//!
+//! Every printer of the crate writes into a [`fmt::Write`] sink; [`render`]
+//! is the one way to get its output as a [`String`] instead.
 
 extern crate alloc;
 use alloc::borrow::Cow;
+use alloc::string::String;
 use core::fmt;
+
+/// Run a writer against a fresh [`String`] and return what it wrote.
+///
+/// This is the allocating form of every `write_*` printer in the crate:
+/// `render(|sink| cfg.write_dot(sink, label))` is the DOT text as a string.
+///
+/// # Panics
+///
+/// Panics when `write` returns an error. Writing to a [`String`] never fails,
+/// so only a formatting implementation that reports an error of its own can
+/// make it panic.
+///
+/// # Examples
+///
+/// ```
+/// use core::fmt::Write as _;
+/// use cfglib::render;
+///
+/// let text = render(|sink| write!(sink, "bb{}", 3));
+/// assert_eq!(text, "bb3");
+/// ```
+#[must_use]
+pub fn render(write: impl FnOnce(&mut dyn fmt::Write) -> fmt::Result) -> String {
+    let mut out = String::new();
+    write(&mut out).expect("a String sink never fails, so only the writer itself can");
+    out
+}
 
 /// One level of indentation.
 const INDENT: &str = "    ";
@@ -22,7 +54,7 @@ const INDENT: &str = "    ";
 /// `{`/`}` convention that changes it. Everything else is written straight
 /// through — [`IndentedWriter`] implements [`fmt::Write`], so `write!` works
 /// on it — which is what lets a printer emit a label without first
-/// collecting it into a [`String`](alloc::string::String).
+/// collecting it into a [`String`].
 ///
 /// # Examples
 ///
@@ -225,8 +257,8 @@ impl fmt::Debug for IndentedWriter<'_> {
 
 /// Opt-in, display-only rendering of instructions.
 ///
-/// [`Cfg::write_dot`](crate::Cfg::write_dot) and
-/// [`Cfg::write_text`](crate::Cfg::write_text) use it.
+/// [`Cfg::to_dot`](crate::Cfg::to_dot) and
+/// [`Cfg::write_listing`](crate::Cfg::write_listing) use it.
 ///
 /// Return a short human-readable label: a machine mnemonic, a source
 /// statement excerpt, or a node kind. Labels are escaped by the renderers,
@@ -237,7 +269,7 @@ impl fmt::Debug for IndentedWriter<'_> {
 /// an MLIL instruction naming its operands, for instance — overrides
 /// [`write_mnemonic`](Self::write_mnemonic) as well, so a renderer that only
 /// needs the text in a sink never pays for the intermediate
-/// [`String`](alloc::string::String).
+/// [`String`].
 pub trait DisplayInstr {
     /// Short label for this instruction (mnemonic, statement text, node kind).
     fn mnemonic(&self) -> Cow<'_, str>;

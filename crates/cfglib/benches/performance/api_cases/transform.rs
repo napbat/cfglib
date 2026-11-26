@@ -2,12 +2,11 @@ use std::collections::BTreeSet;
 use std::convert::Infallible;
 
 use cfglib::{
-    BlockId, BlockOrder, Cfg, ClrExceptionRegion, ClrHandler, ClrHandlerKind, EdgeKind, Emitter,
-    FlowEffect, HandlerBody, HandlerTypes, SehExceptionRegion, SehHandler, SehHandlerKind,
+    BlockId, BlockOrder, Cfg, ClrExceptionRegion, ClrHandler, ClrHandlerKind, Edge, EdgeKind,
+    Emitter, FlowEffect, HandlerBody, HandlerTypes, SehExceptionRegion, SehHandler, SehHandlerKind,
     contract_edge_mapped, install_clr_region, install_seh_region, linearize, merge_blocks_mapped,
-    promote_handler_extents, remove_empty_blocks_mapped, remove_unreachable,
-    remove_unreachable_mapped, resolve_jump_edges, simplify, simplify_mapped, split_critical_edges,
-    split_critical_edges_mapped, split_critical_edges_with, verify,
+    promote_handler_extents, remove_empty_blocks_mapped, remove_unreachable_mapped,
+    resolve_jump_edges, simplify_mapped, split_critical_edges_mapped, verify,
 };
 use cfglib::{
     DispatchBuilder, DispatchReport, DominatorTree, ExclusiveExtent, ExtentPromotionDecision,
@@ -168,10 +167,9 @@ fn register_cleanup(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_remove_unreachable",
-        covers[remove_unreachable],
         || {
             let mut candidate = unreachable.clone();
-            let removed = remove_unreachable(&mut candidate);
+            let removed = remove_unreachable_mapped(&mut candidate).0;
             (candidate, removed)
         },
         |(candidate, removed)| {
@@ -196,10 +194,9 @@ fn register_cleanup(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_simplify",
-        covers[simplify],
         || {
             let mut candidate = unreachable.clone();
-            let changed = simplify(&mut candidate);
+            let changed = simplify_mapped(&mut candidate).0;
             (candidate, changed)
         },
         |(candidate, changed)| {
@@ -252,7 +249,7 @@ fn register_node_edits(suite: &mut BenchmarkSuite<'_>) {
         || {
             let mut candidate = split.clone();
             let entry = candidate.entry();
-            let new_block = candidate.split_block(entry, 4);
+            let new_block = candidate.split_block(entry, 4, EdgeKind::Fallthrough);
             (candidate, new_block)
         },
         |(candidate, _)| {
@@ -266,8 +263,13 @@ fn register_node_edits(suite: &mut BenchmarkSuite<'_>) {
         || {
             let mut candidate = split.clone();
             let entry = candidate.entry();
-            let result = candidate.split_block_with_payload_mapped(entry, 4, ());
-            (candidate, result)
+            let (blocks, rewrite) = candidate
+                .split_block_at_points(
+                    entry,
+                    [(4, Edge::new(EdgeKind::Fallthrough).with_payload(()))],
+                )
+                .expect("4 is inside the block");
+            (candidate, (blocks[1], rewrite))
         },
         |(candidate, _)| {
             assert_eq!(candidate.block_count(), 2);
@@ -280,7 +282,10 @@ fn register_node_edits(suite: &mut BenchmarkSuite<'_>) {
         || {
             let mut candidate = split.clone();
             let entry = candidate.entry();
-            let result = candidate.split_block_at_points_with_payloads(entry, [(2, ()), (5, ())]);
+            let result = candidate.split_block_at_points(
+                entry,
+                [(2, EdgeKind::Fallthrough), (5, EdgeKind::Fallthrough)],
+            );
             (candidate, result)
         },
         |(candidate, result)| {
@@ -296,10 +301,9 @@ fn register_critical_edges(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_split_critical_edges",
-        covers[split_critical_edges],
         || {
             let mut candidate = cfg.clone();
-            let split = split_critical_edges(&mut candidate);
+            let split = split_critical_edges_mapped(&mut candidate, |_, _| ()).0;
             (candidate, split)
         },
         |(candidate, split)| {
@@ -313,7 +317,7 @@ fn register_critical_edges(suite: &mut BenchmarkSuite<'_>) {
         covers[split_critical_edges_mapped],
         || {
             let mut candidate = cfg.clone();
-            let result = split_critical_edges_mapped(&mut candidate);
+            let result = split_critical_edges_mapped(&mut candidate, |_, _| ());
             (candidate, result)
         },
         |(candidate, (split, _))| {
@@ -324,10 +328,9 @@ fn register_critical_edges(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_split_critical_edges_with",
-        covers[split_critical_edges_with],
         || {
             let mut candidate = cfg.clone();
-            let result = split_critical_edges_with(&mut candidate, |_, _| ());
+            let result = split_critical_edges_mapped(&mut candidate, |_, _| ());
             (candidate, result)
         },
         |(candidate, (split, _))| {
