@@ -77,20 +77,28 @@ impl EdgeAdjacency for Incoming {
     }
 }
 
-/// The steps of an edge walk along an axis: a step is an edge's dense index,
-/// and it leads to the edge's far end along the axis.
+/// The steps of an edge walk along an axis: a step is an edge, and it leads
+/// to the edge's far end along the axis.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Edges<A>(pub(crate) A);
 
 impl<G: EdgeView, A: EdgeAdjacency> Steps<G> for Edges<A> {
+    type Node = G::NodeId;
+    type Step = G::EdgeId;
+
     #[inline]
-    fn steps(self, graph: &G, node: G::NodeId) -> impl Iterator<Item = usize> + '_ {
-        self.0.edges(graph, node).map(DenseId::index)
+    fn steps(self, graph: &G, node: G::NodeId) -> impl Iterator<Item = G::EdgeId> + '_ {
+        self.0.edges(graph, node)
     }
 
     #[inline]
-    fn target(self, graph: &G, step: usize) -> usize {
-        self.0.next(graph.edge(G::EdgeId::from_index(step))).index()
+    fn target(self, graph: &G, step: G::EdgeId) -> G::NodeId {
+        self.0.next(graph.edge(step))
+    }
+
+    #[inline]
+    fn index(node: G::NodeId) -> usize {
+        node.index()
     }
 }
 
@@ -140,16 +148,16 @@ fn breadth_first_edge_walk<G: EdgeView, A: EdgeAdjacency>(
     assert_in_bound(graph, start, "start node");
     let mut edges = Vec::new();
     let mut visited = vec![false; graph.node_bound()];
-    let mut queue = vec![start.index()];
+    let mut queue = vec![start];
     visited[start.index()] = true;
     breadth_first_core::<_, _, ()>(
         Edges(axis),
         graph,
         &mut queue,
         |_, _| ControlFlow::Continue(Visit::Descend),
-        |_, edge, to, _| {
-            edges.push(G::EdgeId::from_index(edge));
-            !core::mem::replace(&mut visited[to], true)
+        |_, edge, to: G::NodeId, _| {
+            edges.push(edge);
+            !core::mem::replace(&mut visited[to.index()], true)
         },
     );
     edges
@@ -179,15 +187,15 @@ pub fn depth_first_edges<G: EdgeView>(
 /// The depth-first edge walk's visitor: every examined edge, in order.
 struct EdgeOrder<E>(Vec<E>);
 
-impl<E: DenseId> DepthFirstVisitor<()> for EdgeOrder<E> {
+impl<N, E> DepthFirstVisitor<N, E, ()> for EdgeOrder<E> {
     #[inline]
-    fn discover(&mut self, _node: usize, _depth: usize) -> ControlFlow<(), Visit> {
+    fn discover(&mut self, _node: N, _depth: usize) -> ControlFlow<(), Visit> {
         ControlFlow::Continue(Visit::Descend)
     }
 
     #[inline]
-    fn step(&mut self, _from: usize, edge: usize, _to: usize, _kind: StepKind) -> ControlFlow<()> {
-        self.0.push(E::from_index(edge));
+    fn step(&mut self, _from: N, edge: E, _to: N, _kind: StepKind) -> ControlFlow<()> {
+        self.0.push(edge);
         ControlFlow::Continue(())
     }
 }
@@ -203,7 +211,7 @@ fn depth_first_edge_walk<G: EdgeView, A: EdgeAdjacency>(
     depth_first_core(
         Edges(axis),
         graph,
-        [start.index()],
+        [start],
         visited.as_mut_slice(),
         &mut DepthFirstStack::default(),
         &mut order,

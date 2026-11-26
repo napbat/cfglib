@@ -128,31 +128,75 @@ macro_rules! by_axis {
 
 pub(crate) use by_axis;
 
-/// What one step of a walk core is, and where it leads.
+/// What one step of a walk core is, where it leads, and how the walk names
+/// its nodes.
 ///
-/// A node walk steps to a neighbor, so a step is the neighbor's dense index
-/// and leads to itself. An edge walk steps along an edge
-/// ([`Edges`](super::edge_traverse::Edges)), so a step is the edge's dense
-/// index and leads to the edge's far end along the axis. The cores record
-/// steps as indices, so their buffers carry no identity type and one buffer
-/// serves every graph.
+/// A node walk steps to a neighbor, so a step is the neighbor itself. An edge
+/// walk steps along an edge ([`Edges`](super::edge_traverse::Edges)), so a
+/// step is the edge and leads to its far end along the axis. Both name nodes
+/// by the view's own identity, so a walk records them without converting.
+/// [`Indexed`] names nodes and steps by dense index instead, for a walk whose
+/// buffers outlive one graph and so cannot carry an identity type.
 pub(crate) trait Steps<G: GraphView>: Copy {
-    /// The dense indices of the steps out of `node`, in adjacency order.
-    fn steps(self, graph: &G, node: G::NodeId) -> impl Iterator<Item = usize> + '_;
+    /// How the walk names a node.
+    type Node: Copy;
+    /// How the walk names a step.
+    type Step: Copy;
 
-    /// The dense index of the node `step` leads to.
-    fn target(self, graph: &G, step: usize) -> usize;
+    /// The steps out of `node`, in adjacency order.
+    fn steps(self, graph: &G, node: Self::Node) -> impl Iterator<Item = Self::Step> + '_;
+
+    /// The node `step` leads to.
+    fn target(self, graph: &G, step: Self::Step) -> Self::Node;
+
+    /// The dense index of `node`, which the walk's marks are keyed by.
+    fn index(node: Self::Node) -> usize;
 }
 
 impl<G: GraphView, A: Adjacency> Steps<G> for A {
+    type Node = G::NodeId;
+    type Step = G::NodeId;
+
     #[inline]
-    fn steps(self, graph: &G, node: G::NodeId) -> impl Iterator<Item = usize> + '_ {
-        self.neighbors(graph, node).map(DenseId::index)
+    fn steps(self, graph: &G, node: G::NodeId) -> impl Iterator<Item = G::NodeId> + '_ {
+        self.neighbors(graph, node)
+    }
+
+    #[inline]
+    fn target(self, _graph: &G, step: G::NodeId) -> G::NodeId {
+        step
+    }
+
+    #[inline]
+    fn index(node: G::NodeId) -> usize {
+        node.index()
+    }
+}
+
+/// The node steps of an axis by dense index, for a walk over a scratch that
+/// serves graphs of every identity type.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Indexed<A>(pub(crate) A);
+
+impl<G: GraphView, A: Adjacency> Steps<G> for Indexed<A> {
+    type Node = usize;
+    type Step = usize;
+
+    #[inline]
+    fn steps(self, graph: &G, node: usize) -> impl Iterator<Item = usize> + '_ {
+        self.0
+            .neighbors(graph, G::NodeId::from_index(node))
+            .map(DenseId::index)
     }
 
     #[inline]
     fn target(self, _graph: &G, step: usize) -> usize {
         step
+    }
+
+    #[inline]
+    fn index(node: usize) -> usize {
+        node
     }
 }
 
@@ -160,19 +204,19 @@ impl<G: GraphView, A: Adjacency> Steps<G> for A {
 /// `POST` is `false`, postorder when it is `true`.
 struct Order<N, const POST: bool>(Vec<N>);
 
-impl<N: DenseId, const POST: bool> DepthFirstVisitor<()> for Order<N, POST> {
+impl<N: Copy, const POST: bool> DepthFirstVisitor<N, N, ()> for Order<N, POST> {
     #[inline]
-    fn discover(&mut self, node: usize, _depth: usize) -> ControlFlow<(), Visit> {
+    fn discover(&mut self, node: N, _depth: usize) -> ControlFlow<(), Visit> {
         if !POST {
-            self.0.push(N::from_index(node));
+            self.0.push(node);
         }
         ControlFlow::Continue(Visit::Descend)
     }
 
     #[inline]
-    fn finish(&mut self, node: usize) -> ControlFlow<()> {
+    fn finish(&mut self, node: N) -> ControlFlow<()> {
         if POST {
-            self.0.push(N::from_index(node));
+            self.0.push(node);
         }
         ControlFlow::Continue(())
     }
@@ -194,7 +238,7 @@ pub fn depth_first_preorder<G: GraphView>(
 ) -> Vec<G::NodeId> {
     assert_in_bound(graph, start, "start node");
     let mut visited = vec![false; graph.node_bound()];
-    by_axis!(direction, preorder(graph, [start.index()], &mut visited))
+    by_axis!(direction, preorder(graph, [start], &mut visited))
 }
 
 /// Return nodes in depth-first postorder from `start`.
@@ -250,9 +294,8 @@ pub(crate) fn postorder_in<G: GraphView>(
 ) -> Vec<G::NodeId> {
     visited.clear();
     visited.resize(graph.node_bound(), false);
-    let seeds = seeds.into_iter().map(|seed| {
+    let seeds = seeds.into_iter().inspect(|&seed| {
         assert_in_bound(graph, seed, "seed node");
-        seed.index()
     });
     by_axis!(direction, postorder(graph, seeds, visited))
 }
@@ -260,7 +303,7 @@ pub(crate) fn postorder_in<G: GraphView>(
 fn preorder<G: GraphView, A: Adjacency>(
     axis: A,
     graph: &G,
-    seeds: impl IntoIterator<Item = usize>,
+    seeds: impl IntoIterator<Item = G::NodeId>,
     visited: &mut [bool],
 ) -> Vec<G::NodeId> {
     depth_first_order::<G, A, false>(axis, graph, seeds, visited)
@@ -269,7 +312,7 @@ fn preorder<G: GraphView, A: Adjacency>(
 fn postorder<G: GraphView, A: Adjacency>(
     axis: A,
     graph: &G,
-    seeds: impl IntoIterator<Item = usize>,
+    seeds: impl IntoIterator<Item = G::NodeId>,
     visited: &mut [bool],
 ) -> Vec<G::NodeId> {
     depth_first_order::<G, A, true>(axis, graph, seeds, visited)
@@ -278,7 +321,7 @@ fn postorder<G: GraphView, A: Adjacency>(
 fn depth_first_order<G: GraphView, A: Adjacency, const POST: bool>(
     axis: A,
     graph: &G,
-    seeds: impl IntoIterator<Item = usize>,
+    seeds: impl IntoIterator<Item = G::NodeId>,
     visited: &mut [bool],
 ) -> Vec<G::NodeId> {
     let mut order = Order::<G::NodeId, POST>(Vec::with_capacity(graph.node_bound()));
@@ -316,15 +359,15 @@ fn breadth_first_order<G: GraphView, A: Adjacency>(
     let mut visited = vec![false; graph.node_bound()];
     let mut queue = Vec::with_capacity(graph.node_bound());
     visited[start.index()] = true;
-    queue.push(start.index());
+    queue.push(start);
     breadth_first_core::<_, _, ()>(
         axis,
         graph,
         &mut queue,
         |_, _| ControlFlow::Continue(Visit::Descend),
-        |_, _, to, _| !core::mem::replace(&mut visited[to], true),
+        |_, _, to: G::NodeId, _| !core::mem::replace(&mut visited[to.index()], true),
     );
-    queue.into_iter().map(G::NodeId::from_index).collect()
+    queue
 }
 
 /// Mark every node reachable from `seeds` by walking `direction` edges.
@@ -415,7 +458,7 @@ fn reach<G: GraphView, A: Adjacency>(
     queue: &mut Vec<usize>,
 ) {
     breadth_first_core::<_, _, ()>(
-        axis,
+        Indexed(axis),
         graph,
         queue,
         |_, _| ControlFlow::Continue(Visit::Descend),

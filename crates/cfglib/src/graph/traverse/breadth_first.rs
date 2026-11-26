@@ -6,14 +6,14 @@ use core::ops::ControlFlow;
 
 use super::Steps;
 use crate::graph::search::Visit;
-use crate::graph::view::{DenseId, GraphView};
+use crate::graph::view::GraphView;
 
 /// Walk `graph` breadth-first from the nodes already in `queue`, level by
 /// level, and return the value a callback broke with.
 ///
-/// `queue` holds dense node indices; the caller seeds it with the depth-0
-/// nodes, in the order they are to be expanded, and has already recorded them
-/// in whatever marks it keeps. The queue is read through a head cursor rather
+/// `queue` holds nodes in the walk's [`Steps`] representation; the caller
+/// seeds it with the depth-0 nodes, in the order they are to be expanded, and
+/// has already recorded them in whatever marks it keeps. The queue is read through a head cursor rather
 /// than drained, so on return it holds every node the walk enqueued, in
 /// discovery order. Depths are not stored: a level ends where the queue ended
 /// when the level began.
@@ -34,9 +34,9 @@ use crate::graph::view::{DenseId, GraphView};
 pub(crate) fn breadth_first_core<G, S, B>(
     steps: S,
     graph: &G,
-    queue: &mut Vec<usize>,
-    mut visit: impl FnMut(usize, usize) -> ControlFlow<B, Visit>,
-    mut step: impl FnMut(usize, usize, usize, usize) -> bool,
+    queue: &mut Vec<S::Node>,
+    mut visit: impl FnMut(S::Node, usize) -> ControlFlow<B, Visit>,
+    mut step: impl FnMut(S::Node, S::Step, S::Node, usize) -> bool,
 ) -> Option<B>
 where
     G: GraphView,
@@ -57,7 +57,7 @@ where
             ControlFlow::Continue(Visit::Skip) => continue,
             ControlFlow::Continue(Visit::Descend) => {}
         }
-        for out in steps.steps(graph, G::NodeId::from_index(node)) {
+        for out in steps.steps(graph, node) {
             let to = steps.target(graph, out);
             if step(node, out, to, depth) {
                 queue.push(to);

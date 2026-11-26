@@ -176,6 +176,23 @@ fn register_dense_searches(suite: &mut BenchmarkSuite<'_>) {
             assert_eq!(*visited, NODE_COUNT);
         }
     );
+    benchmark_case!(
+        suite,
+        "api_search_depth_first",
+        || {
+            let mut visited = 0_usize;
+            let depth_first = SearchConfig::default();
+            let stopped = search(&graph, [root], Direction::Forward, depth_first, |_, _| {
+                visited += 1;
+                ControlFlow::<(), _>::Continue(Visit::Descend)
+            });
+            (stopped, visited)
+        },
+        |(stopped, visited)| {
+            assert!(stopped.is_none());
+            assert_eq!(*visited, NODE_COUNT);
+        }
+    );
 
     let mut scratch = SearchScratch::default();
     benchmark_case!(

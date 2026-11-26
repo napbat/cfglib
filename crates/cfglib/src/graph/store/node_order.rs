@@ -92,12 +92,7 @@ impl Numbering {
     /// Give `node` the next number unless it has one, and report whether it
     /// was numbered now.
     fn assign<T: IdTag>(&mut self, node: Id<T>) -> bool {
-        self.assign_slot(node.index())
-    }
-
-    /// [`assign`](Self::assign) by slot.
-    fn assign_slot(&mut self, slot: usize) -> bool {
-        let entry = &mut self.map[slot];
+        let entry = &mut self.map[node.index()];
         if *entry != NO_INDEX {
             return false;
         }
@@ -149,13 +144,13 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
                 continue;
             }
             queue.clear();
-            queue.push(root.index());
+            queue.push(root);
             breadth_first_core::<_, _, ()>(
                 Outgoing,
                 self,
                 &mut queue,
                 |_, _| ControlFlow::Continue(Visit::Descend),
-                |_, _, to, _| numbering.assign_slot(to),
+                |_, _, to, _| numbering.assign(to),
             );
         }
     }

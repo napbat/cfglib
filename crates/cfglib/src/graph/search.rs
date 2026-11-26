@@ -34,9 +34,9 @@ use core::ops::ControlFlow;
 
 use crate::graph::epoch::EpochMarks;
 use crate::graph::traverse::{
-    Adjacency, DepthFirstStack, PathMarks, breadth_first_core, by_axis, depth_first_core,
+    Adjacency, DepthFirstStack, Indexed, PathMarks, breadth_first_core, by_axis, depth_first_core,
 };
-use crate::graph::view::{DenseId, Direction, GraphView};
+use crate::graph::view::{DenseId, Direction, GraphView, assert_in_bound};
 
 /// The frontier discipline of a [`search`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -173,7 +173,7 @@ pub struct SearchScratch {
     /// The breadth-first queue.
     queue: Vec<usize>,
     /// The depth-first frames and their steps.
-    stack: DepthFirstStack,
+    stack: DepthFirstStack<usize, usize>,
 }
 
 /// Search `graph` from `seeds` along `direction` under a configurable
@@ -293,12 +293,12 @@ pub fn search_in<G: GraphView, B>(
     // reserves a four-element minimum, four times the bytes a one-seed search
     // needs — and at these sizes the allocator charges by the byte.
     scratch.seeds.clear();
-    let staged = seeds.into_iter().map(DenseId::index);
+    let staged = seeds.into_iter().map(|seed| {
+        assert_in_bound(graph, seed, "seed node");
+        seed.index()
+    });
     scratch.seeds.reserve_exact(staged.size_hint().0);
     scratch.seeds.extend(staged);
-    for &seed in &scratch.seeds {
-        assert!(seed < graph.node_bound(), "seed node is out of range");
-    }
     scratch.marks.grow_to(graph.node_bound());
     scratch.marks.reset();
 
@@ -364,7 +364,7 @@ fn depth_first_global<G: GraphView, A: Adjacency, B>(
         ..
     } = scratch;
     depth_first_core(
-        axis,
+        Indexed(axis),
         graph,
         seeds.iter().copied(),
         marks,
@@ -387,7 +387,7 @@ fn depth_first_path<G: GraphView, A: Adjacency, B>(
         ..
     } = scratch;
     depth_first_core(
-        axis,
+        Indexed(axis),
         graph,
         seeds.iter().copied(),
         &mut PathMarks(marks),
@@ -417,7 +417,7 @@ fn breadth_first_global<G: GraphView, A: Adjacency, B>(
         }
     }
     breadth_first_core(
-        axis,
+        Indexed(axis),
         graph,
         queue,
         |node, depth| bounded(&mut visitor, config.max_depth, node, depth),

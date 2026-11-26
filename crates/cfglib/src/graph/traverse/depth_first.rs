@@ -7,7 +7,7 @@ use core::ops::ControlFlow;
 use super::Steps;
 use crate::graph::epoch::EpochMarks;
 use crate::graph::search::Visit;
-use crate::graph::view::{DenseId, GraphView};
+use crate::graph::view::GraphView;
 
 /// Where a node stands in a depth-first walk when a step reaches it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,8 +128,8 @@ impl DepthFirstMarks for PathMarks<'_> {
 /// arena back to where its steps began. One allocation for the walk, instead
 /// of one per expanded node. A frame's depth is its position on the stack.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Frame {
-    node: usize,
+pub(crate) struct Frame<N> {
+    node: N,
     /// Where this frame's steps start in the arena; the pop truncates to it.
     start: usize,
     /// The next step to examine, as an arena index. The steps are exhausted
@@ -139,11 +139,22 @@ pub(crate) struct Frame {
 }
 
 /// The buffers of a [`depth_first_core`] walk: the frame stack and the arena
-/// of their steps, both dense indices, so one instance serves every graph.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct DepthFirstStack {
-    arena: Vec<usize>,
-    frames: Vec<Frame>,
+/// of their steps, holding the walk's [`Steps`] representation (`N` for a
+/// node, `S` for a step). A scratch that outlives one graph holds the dense
+/// indices of [`Indexed`](super::Indexed), so one instance serves every graph.
+#[derive(Debug, Clone)]
+pub(crate) struct DepthFirstStack<N, S> {
+    arena: Vec<S>,
+    frames: Vec<Frame<N>>,
+}
+
+impl<N, S> Default for DepthFirstStack<N, S> {
+    fn default() -> Self {
+        Self {
+            arena: Vec::new(),
+            frames: Vec::new(),
+        }
+    }
 }
 
 /// The classification of a step a [`depth_first_core`] walk examined.
@@ -157,33 +168,33 @@ pub(crate) enum StepKind {
     ForwardOrCross,
 }
 
-/// The callbacks of a [`depth_first_core`] walk. Each can end the walk with
-/// [`ControlFlow::Break`].
-pub(crate) trait DepthFirstVisitor<B> {
+/// The callbacks of a [`depth_first_core`] walk over nodes `N` and steps `S`.
+/// Each can end the walk with [`ControlFlow::Break`].
+pub(crate) trait DepthFirstVisitor<N, S, B> {
     /// The walk entered `node` at `depth` (0 for a seed). [`Visit::Skip`]
     /// leaves its steps unexamined and finishes it at once.
-    fn discover(&mut self, node: usize, depth: usize) -> ControlFlow<B, Visit>;
+    fn discover(&mut self, node: N, depth: usize) -> ControlFlow<B, Visit>;
 
     /// The walk examined a step from one node to another, which it
     /// classified as `kind`. A tree step runs before the discovery of its
     /// target.
     #[inline]
-    fn step(&mut self, _from: usize, _step: usize, _to: usize, _kind: StepKind) -> ControlFlow<B> {
+    fn step(&mut self, _from: N, _step: S, _to: N, _kind: StepKind) -> ControlFlow<B> {
         ControlFlow::Continue(())
     }
 
     /// Every step out of a node has been examined and its subtree is
     /// complete.
     #[inline]
-    fn finish(&mut self, _node: usize) -> ControlFlow<B> {
+    fn finish(&mut self, _node: N) -> ControlFlow<B> {
         ControlFlow::Continue(())
     }
 }
 
 /// A closure is a visitor that only discovers.
-impl<B, F: FnMut(usize, usize) -> ControlFlow<B, Visit>> DepthFirstVisitor<B> for F {
+impl<N, S, B, F: FnMut(N, usize) -> ControlFlow<B, Visit>> DepthFirstVisitor<N, S, B> for F {
     #[inline]
-    fn discover(&mut self, node: usize, depth: usize) -> ControlFlow<B, Visit> {
+    fn discover(&mut self, node: N, depth: usize) -> ControlFlow<B, Visit> {
         self(node, depth)
     }
 }
@@ -203,10 +214,10 @@ impl<B, F: FnMut(usize, usize) -> ControlFlow<B, Visit>> DepthFirstVisitor<B> fo
 pub(crate) fn depth_first_core<G, S, M, B>(
     steps: S,
     graph: &G,
-    seeds: impl IntoIterator<Item = usize>,
+    seeds: impl IntoIterator<Item = S::Node>,
     marks: &mut M,
-    stack: &mut DepthFirstStack,
-    visitor: &mut impl DepthFirstVisitor<B>,
+    stack: &mut DepthFirstStack<S::Node, S::Step>,
+    visitor: &mut impl DepthFirstVisitor<S::Node, S::Step, B>,
 ) -> Option<B>
 where
     G: GraphView,
@@ -225,59 +236,68 @@ where
         };
     }
 
-    // Enter a node at a depth: mark it, discover it, and either push its
-    // frame with its steps on the arena's tail or finish it at once.
+    // Enter a node at a depth: mark it and discover it, and either hand back
+    // its frame, with its steps on the arena's tail, or finish it at once.
     macro_rules! enter {
         ($node:expr, $depth:expr) => {{
             let node = $node;
-            marks.open(node);
+            marks.open(S::index(node));
             match visitor.discover(node, $depth) {
                 ControlFlow::Break(value) => return Some(value),
                 ControlFlow::Continue(Visit::Skip) => {
-                    marks.close(node);
+                    marks.close(S::index(node));
                     emit!(visitor.finish(node));
+                    None
                 }
                 ControlFlow::Continue(Visit::Descend) => {
                     let start = arena.len();
-                    arena.extend(steps.steps(graph, G::NodeId::from_index(node)));
-                    frames.push(Frame {
+                    arena.extend(steps.steps(graph, node));
+                    Some(Frame {
                         node,
                         start,
                         cursor: start,
-                    });
+                    })
                 }
             }
         }};
     }
 
     for seed in seeds {
-        if marks.mark(seed) != Mark::Unseen {
+        if marks.mark(S::index(seed)) != Mark::Unseen {
             continue;
         }
-        enter!(seed, 0);
-        // Read frames through `last_mut` and copy the fields out; no frame is
-        // ever cloned, and the depth of a child is the stack's length.
-        while let Some(frame) = frames.last_mut() {
-            if frame.cursor < arena.len() {
-                let out = arena[frame.cursor];
-                frame.cursor += 1;
-                let from = frame.node;
+        let Some(mut top) = enter!(seed, 0) else {
+            continue;
+        };
+        // The open frame lives in locals and only its ancestors on the stack,
+        // so examining a step touches no memory but the arena: the cursor
+        // stays in a register. The depth of a child is the number of frames
+        // above the seed, plus one.
+        loop {
+            if top.cursor < arena.len() {
+                let out = arena[top.cursor];
+                top.cursor += 1;
                 let to = steps.target(graph, out);
-                match marks.mark(to) {
+                match marks.mark(S::index(to)) {
                     Mark::Unseen => {
-                        emit!(visitor.step(from, out, to, StepKind::Tree));
-                        let depth = frames.len();
-                        enter!(to, depth);
+                        emit!(visitor.step(top.node, out, to, StepKind::Tree));
+                        if let Some(child) = enter!(to, frames.len() + 1) {
+                            frames.push(top);
+                            top = child;
+                        }
                     }
-                    Mark::Open => emit!(visitor.step(from, out, to, StepKind::Back)),
-                    Mark::Done => emit!(visitor.step(from, out, to, StepKind::ForwardOrCross)),
+                    Mark::Open => emit!(visitor.step(top.node, out, to, StepKind::Back)),
+                    Mark::Done => {
+                        emit!(visitor.step(top.node, out, to, StepKind::ForwardOrCross));
+                    }
                 }
                 continue;
             }
-            let Some(finished) = frames.pop() else { break };
-            arena.truncate(finished.start);
-            marks.close(finished.node);
-            emit!(visitor.finish(finished.node));
+            arena.truncate(top.start);
+            marks.close(S::index(top.node));
+            emit!(visitor.finish(top.node));
+            let Some(parent) = frames.pop() else { break };
+            top = parent;
         }
     }
     None

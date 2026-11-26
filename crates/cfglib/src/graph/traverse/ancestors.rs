@@ -134,9 +134,9 @@ fn nearest_meet<G: GraphView, A: Adjacency>(
             (second, &*first)
         };
         this.expand(axis, graph, |node, distance| {
-            let from_other = other.distances[node];
+            let from_other = other.distances[node.index()];
             if from_other != usize::MAX {
-                let candidate = (distance + from_other, G::NodeId::from_index(node));
+                let candidate = (distance + from_other, node);
                 best = Some(best.map_or(candidate, |known| known.min(candidate)));
             }
         });
@@ -146,24 +146,24 @@ fn nearest_meet<G: GraphView, A: Adjacency>(
 
 /// One endpoint's breadth-first search in [`nearest_meet`], advanced a whole
 /// level at a time.
-struct MeetSide {
+struct MeetSide<N> {
     /// Hop count from the endpoint per dense index, `usize::MAX` for a node
     /// not reached yet.
     distances: Vec<usize>,
-    /// The nodes at distance `radius`, as dense indices.
-    frontier: Vec<usize>,
+    /// The nodes at distance `radius`.
+    frontier: Vec<N>,
     /// Every node within this many hops is in `distances`; `usize::MAX` once
     /// the search has reached everything it can.
     radius: usize,
 }
 
-impl MeetSide {
-    fn new<G: GraphView>(graph: &G, start: G::NodeId) -> Self {
+impl<N: DenseId> MeetSide<N> {
+    fn new<G: GraphView<NodeId = N>>(graph: &G, start: N) -> Self {
         let mut distances = vec![usize::MAX; graph.node_bound()];
         distances[start.index()] = 0;
         Self {
             distances,
-            frontier: vec![start.index()],
+            frontier: vec![start],
             radius: 0,
         }
     }
@@ -177,11 +177,11 @@ impl MeetSide {
     /// The frontier is the walk's depth-0 level and every node it discovers
     /// is skipped rather than expanded, so the core expands exactly one level
     /// and leaves the next one behind the frontier in its queue.
-    fn expand<G: GraphView, A: Adjacency>(
+    fn expand<G: GraphView<NodeId = N>, A: Adjacency>(
         &mut self,
         axis: A,
         graph: &G,
-        mut discovered: impl FnMut(usize, usize),
+        mut discovered: impl FnMut(N, usize),
     ) {
         let distance = self.radius + 1;
         let level = self.frontier.len();
@@ -197,11 +197,11 @@ impl MeetSide {
                     Visit::Skip
                 })
             },
-            |_, _, to, _| {
-                if distances[to] != usize::MAX {
+            |_, _, to: N, _| {
+                if distances[to.index()] != usize::MAX {
                     return false;
                 }
-                distances[to] = distance;
+                distances[to.index()] = distance;
                 discovered(to, distance);
                 true
             },
@@ -336,11 +336,11 @@ fn all_meets<G: GraphView, A: Adjacency>(
     order_b
         .into_iter()
         .filter_map(|node| {
-            let from_a = from_a[node];
+            let from_a = from_a[node.index()];
             (from_a != usize::MAX).then(|| CommonAncestor {
-                node: G::NodeId::from_index(node),
+                node,
                 from_a,
-                from_b: from_b[node],
+                from_b: from_b[node.index()],
             })
         })
         .collect()
@@ -356,10 +356,10 @@ fn distances<G: GraphView, A: Adjacency>(
     graph: &G,
     start: G::NodeId,
     max_depth: Option<usize>,
-) -> (Vec<usize>, Vec<usize>) {
+) -> (Vec<usize>, Vec<G::NodeId>) {
     let mut distances = vec![usize::MAX; graph.node_bound()];
     distances[start.index()] = 0;
-    let mut queue = vec![start.index()];
+    let mut queue = vec![start];
     breadth_first_core::<_, _, ()>(
         axis,
         graph,
@@ -371,11 +371,11 @@ fn distances<G: GraphView, A: Adjacency>(
                 Visit::Skip
             })
         },
-        |_, _, to, depth| {
-            if distances[to] != usize::MAX {
+        |_, _, to: G::NodeId, depth| {
+            if distances[to.index()] != usize::MAX {
                 return false;
             }
-            distances[to] = depth + 1;
+            distances[to.index()] = depth + 1;
             true
         },
     );

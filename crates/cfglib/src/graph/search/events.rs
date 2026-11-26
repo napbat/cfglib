@@ -10,7 +10,7 @@ use crate::graph::search::Visit;
 use crate::graph::traverse::{
     Adjacency, DepthFirstStack, DepthFirstVisitor, Mark, StepKind, by_axis, depth_first_core,
 };
-use crate::graph::view::{DenseId, Direction, GraphView, assert_in_bound};
+use crate::graph::view::{Direction, GraphView, assert_in_bound};
 
 /// An event of a [`depth_first_events`] walk.
 ///
@@ -118,7 +118,7 @@ fn depth_first_event_walk<G: GraphView, A: Adjacency, B>(
     depth_first_core(
         axis,
         graph,
-        [start.index()],
+        [start],
         marks.as_mut_slice(),
         &mut DepthFirstStack::default(),
         &mut Events {
@@ -134,16 +134,17 @@ struct Events<F, N> {
     node: PhantomData<N>,
 }
 
-impl<N: DenseId, B, F: FnMut(DfsEvent<N>) -> ControlFlow<B>> DepthFirstVisitor<B> for Events<F, N> {
+impl<N: Copy, B, F: FnMut(DfsEvent<N>) -> ControlFlow<B>> DepthFirstVisitor<N, N, B>
+    for Events<F, N>
+{
     #[inline]
-    fn discover(&mut self, node: usize, depth: usize) -> ControlFlow<B, Visit> {
-        (self.on_event)(DfsEvent::Discover(N::from_index(node), depth))?;
+    fn discover(&mut self, node: N, depth: usize) -> ControlFlow<B, Visit> {
+        (self.on_event)(DfsEvent::Discover(node, depth))?;
         ControlFlow::Continue(Visit::Descend)
     }
 
     #[inline]
-    fn step(&mut self, from: usize, _step: usize, to: usize, kind: StepKind) -> ControlFlow<B> {
-        let (from, to) = (N::from_index(from), N::from_index(to));
+    fn step(&mut self, from: N, _step: N, to: N, kind: StepKind) -> ControlFlow<B> {
         (self.on_event)(match kind {
             StepKind::Tree => DfsEvent::TreeEdge(from, to),
             StepKind::Back => DfsEvent::BackEdge(from, to),
@@ -152,8 +153,8 @@ impl<N: DenseId, B, F: FnMut(DfsEvent<N>) -> ControlFlow<B>> DepthFirstVisitor<B
     }
 
     #[inline]
-    fn finish(&mut self, node: usize) -> ControlFlow<B> {
-        (self.on_event)(DfsEvent::Finish(N::from_index(node)))
+    fn finish(&mut self, node: N) -> ControlFlow<B> {
+        (self.on_event)(DfsEvent::Finish(node))
     }
 }
 
