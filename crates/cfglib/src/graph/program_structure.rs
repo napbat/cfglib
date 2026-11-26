@@ -49,14 +49,17 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
+use core::ops::ControlFlow;
 
 use crate::block::BlockId;
 use crate::edge::EdgeId;
 use crate::graph::edge_view::EdgeView;
 use crate::graph::fanout::DenseFanout;
+use crate::graph::search::Visit;
+use crate::graph::traverse::{DepthFirstStack, DepthFirstVisitor, StepKind, depth_first_core};
 use crate::graph::view::{DenseId, RootedView};
 use crate::identity::{NO_INDEX, define_dense_id, slot, word};
-use closed::{ClosedGraph, slot_edge};
+use closed::{ClosedGraph, Leaving, slot_edge};
 pub use cycle_equivalence::CycleEquivalence;
 use cycle_equivalence::cycle_classes;
 
@@ -418,58 +421,82 @@ impl Found {
             .map(|&size| slot(size).saturating_sub(1))
             .sum();
         let nodes = closed.node_count();
-        let mut found = Self {
-            entry: Vec::with_capacity(regions),
-            exit: Vec::with_capacity(regions),
-            parent: Vec::with_capacity(regions),
-            innermost: vec![NO_INDEX; nodes],
+        let mut pairing = Pairing {
+            classes,
+            class_size,
+            seen: vec![0; class_count],
+            open: vec![NO_INDEX; class_count],
+            found: Self {
+                entry: Vec::with_capacity(regions),
+                exit: Vec::with_capacity(regions),
+                parent: Vec::with_capacity(regions),
+                innermost: vec![NO_INDEX; nodes],
+            },
         };
-        let mut seen = vec![0_u32; class_count];
-        let mut open = vec![NO_INDEX; class_count];
         let mut visited = vec![false; nodes];
-        let root = closed.bound;
-        visited[root] = true;
-        let mut stack = vec![(root, 0_usize)];
-        while let Some(frame) = stack.last_mut() {
-            let (node, position) = *frame;
-            let Some(&edge) = closed.outgoing(node).get(position) else {
-                stack.pop();
-                continue;
-            };
-            frame.1 += 1;
-            let edge = slot(edge);
-            let class = slot(classes[edge]);
-            seen[class] += 1;
-            let rank = seen[class];
-            let to = closed.target(edge);
-            let discovers = !visited[to];
-            let mut region = found.innermost[node];
-            if rank > 1 {
-                let closing = open[class];
-                found.exit[slot(closing)] = word(edge);
-                if discovers {
-                    debug_assert_eq!(region, closing, "an exit edge leaves the current region");
-                    region = found.parent[slot(closing)];
-                }
-            }
-            if rank < class_size[class] {
-                debug_assert!(
-                    discovers,
-                    "an entry edge discovers its region's first block"
-                );
-                let opened = word(found.entry.len());
-                found.entry.push(word(edge));
-                found.exit.push(NO_INDEX);
-                found.parent.push(region);
-                open[class] = opened;
-                region = opened;
-            }
+        depth_first_core(
+            Leaving,
+            closed,
+            [closed.bound],
+            visited.as_mut_slice(),
+            &mut DepthFirstStack::default(),
+            &mut pairing,
+        );
+        pairing.found
+    }
+}
+
+/// The callbacks of [`Found::search`]: the regions found so far, and how far
+/// the search has come through each class.
+struct Pairing<'a> {
+    /// The class of each slot, [`NO_INDEX`] outside the closed graph.
+    classes: &'a [u32],
+    /// The number of slots in each class.
+    class_size: Vec<u32>,
+    /// The number of slots of each class the search has met.
+    seen: Vec<u32>,
+    /// The region the last slot met of each class opened.
+    open: Vec<u32>,
+    found: Found,
+}
+
+impl DepthFirstVisitor<usize, u32, ()> for Pairing<'_> {
+    #[inline]
+    fn discover(&mut self, _node: usize, _depth: usize) -> ControlFlow<(), Visit> {
+        ControlFlow::Continue(Visit::Descend)
+    }
+
+    #[inline]
+    fn step(&mut self, node: usize, edge: u32, to: usize, kind: StepKind) -> ControlFlow<()> {
+        let found = &mut self.found;
+        let class = slot(self.classes[slot(edge)]);
+        self.seen[class] += 1;
+        let rank = self.seen[class];
+        let discovers = kind == StepKind::Tree;
+        let mut region = found.innermost[node];
+        if rank > 1 {
+            let closing = self.open[class];
+            found.exit[slot(closing)] = edge;
             if discovers {
-                visited[to] = true;
-                found.innermost[to] = region;
-                stack.push((to, 0));
+                debug_assert_eq!(region, closing, "an exit edge leaves the current region");
+                region = found.parent[slot(closing)];
             }
         }
-        found
+        if rank < self.class_size[class] {
+            debug_assert!(
+                discovers,
+                "an entry edge discovers its region's first block"
+            );
+            let opened = word(found.entry.len());
+            found.entry.push(edge);
+            found.exit.push(NO_INDEX);
+            found.parent.push(region);
+            self.open[class] = opened;
+            region = opened;
+        }
+        if discovers {
+            found.innermost[to] = region;
+        }
+        ControlFlow::Continue(())
     }
 }
