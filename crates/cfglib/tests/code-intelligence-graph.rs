@@ -210,7 +210,7 @@ fn widened_algorithms_run_on_rooted_consumer_views() {
     let patterns = detect_patterns(&graph);
     assert!(patterns.iter().any(|p| matches!(
         p,
-        cfglib::CfgPattern::Diamond { entry, merge: m, .. } if *entry == seed && *m == merge
+        cfglib::Pattern::Diamond { entry, merge: m, .. } if *entry == seed && *m == merge
     )));
 
     // The cycle has no exit, so the post-dominator tree cuts it at the latch.

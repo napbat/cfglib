@@ -1,10 +1,12 @@
 //! Pattern matching — idiom recognition within a graph.
 //!
 //! Identifies common structural patterns (if-then-else diamonds, chains,
-//! self-loops, trampolines) for downstream consumers. [`detect_patterns`]
-//! is topology-only and serves any graph view; [`detect_cfg_patterns`]
-//! additionally orients diamond arms by edge kind and detects empty
-//! trampoline blocks, which need [`CfgView`] instruction knowledge.
+//! self-loops) for downstream consumers. [`detect_patterns`] reads only the
+//! topology, so it serves any graph view, and lists a diamond's arms in
+//! successor order. Two refinements need what a [`CfgView`] knows:
+//! [`Pattern::orient_diamonds`] puts each diamond's
+//! [`EdgeKind::ConditionalTrue`] arm first, and [`empty_trampolines`] lists
+//! the blocks without instructions that only pass control on.
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -17,20 +19,18 @@ use crate::graph::view::{DenseId, GraphView};
 
 /// A recognized structural pattern, over node identity `N`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CfgPattern<N = BlockId> {
+pub enum Pattern<N = BlockId> {
     /// Diamond: entry branches to two arms that reconverge at merge.
     ///
     /// The entry, both arms, and the merge are four distinct nodes: two
     /// edges to one arm are not two arms, and a path that returns to the
     /// entry or ends in an arm is a loop, not a merge.
-    ///
-    /// [`detect_patterns`] emits arms in successor order;
-    /// [`detect_cfg_patterns`] orients `arms[0]` to the
-    /// [`EdgeKind::ConditionalTrue`] side.
     Diamond {
         /// Node that branches.
         entry: N,
-        /// The two branch arms.
+        /// The two branch arms, in the successor order of `entry`.
+        /// [`Pattern::orient_diamonds`] puts the
+        /// [`EdgeKind::ConditionalTrue`] side first instead.
         arms: [N; 2],
         /// Merge point.
         merge: N,
@@ -39,14 +39,6 @@ pub enum CfgPattern<N = BlockId> {
     Chain {
         /// Ordered list of nodes in the chain.
         blocks: Vec<N>,
-    },
-    /// An empty block (no instructions) acting as a trampoline.
-    ///
-    /// Only emitted by [`detect_cfg_patterns`] — emptiness is an
-    /// instruction-level property.
-    EmptyTrampoline {
-        /// The empty block.
-        block: N,
     },
     /// A self-loop (node has an edge to itself).
     SelfLoop {
@@ -61,12 +53,14 @@ fn sole<T>(mut items: impl Iterator<Item = T>) -> Option<T> {
     items.next().is_none().then_some(first)
 }
 
-/// Scan a graph view for topology-level patterns.
+/// Scan a graph view for topology-level patterns: diamonds and self-loops in
+/// node order, then chains by first member. A diamond's arms are in the
+/// successor order of its entry.
 ///
 /// # Examples
 ///
 /// ```
-/// use cfglib::{Cfg, CfgPattern, EdgeKind, detect_patterns};
+/// use cfglib::{Cfg, EdgeKind, Pattern, detect_patterns};
 ///
 /// let mut cfg = Cfg::<u32>::new();
 /// let entry = cfg.entry();
@@ -78,18 +72,18 @@ fn sole<T>(mut items: impl Iterator<Item = T>) -> Option<T> {
 ///
 /// assert_eq!(
 ///     detect_patterns(&cfg),
-///     [CfgPattern::Diamond { entry, arms: [left, right], merge }]
+///     [Pattern::Diamond { entry, arms: [left, right], merge }]
 /// );
 /// ```
 #[must_use]
-pub fn detect_patterns<G: GraphView>(graph: &G) -> Vec<CfgPattern<G::NodeId>> {
+pub fn detect_patterns<G: GraphView>(graph: &G) -> Vec<Pattern<G::NodeId>> {
     let mut patterns = Vec::new();
 
     for bid in graph.node_ids() {
         let succs: SmallVec<[G::NodeId; 4]> = graph.successors(bid).collect();
 
         if succs.contains(&bid) {
-            patterns.push(CfgPattern::SelfLoop { block: bid });
+            patterns.push(Pattern::SelfLoop { block: bid });
         }
 
         // Diamond detection: two distinct successors that share a single
@@ -100,7 +94,7 @@ pub fn detect_patterns<G: GraphView>(graph: &G) -> Vec<CfgPattern<G::NodeId>> {
             && sole(graph.successors(b)) == Some(merge)
             && ![bid, a, b].contains(&merge)
         {
-            patterns.push(CfgPattern::Diamond {
+            patterns.push(Pattern::Diamond {
                 entry: bid,
                 arms: [a, b],
                 merge,
@@ -149,7 +143,7 @@ pub fn detect_patterns<G: GraphView>(graph: &G) -> Vec<CfgPattern<G::NodeId>> {
             cur = next;
         }
         if chain.len() >= 2 {
-            patterns.push(CfgPattern::Chain {
+            patterns.push(Pattern::Chain {
                 blocks: chain.clone(),
             });
         }
@@ -158,39 +152,81 @@ pub fn detect_patterns<G: GraphView>(graph: &G) -> Vec<CfgPattern<G::NodeId>> {
     patterns
 }
 
-/// Scan a [`CfgView`] for patterns, adding instruction-aware refinements.
-///
-/// Runs [`detect_patterns`], orients each diamond's `arms[0]` to the
-/// [`EdgeKind::ConditionalTrue`] side, and additionally detects
-/// [`CfgPattern::EmptyTrampoline`] blocks.
-#[must_use]
-pub fn detect_cfg_patterns<G: CfgView>(cfg: &G) -> Vec<CfgPattern> {
-    let mut patterns = detect_patterns(cfg);
-
-    // Orient diamond arms: arms[0] = ConditionalTrue side when tagged.
-    for pattern in &mut patterns {
-        if let CfgPattern::Diamond { entry, arms, .. } = pattern {
-            let true_target = cfg.outgoing(*entry).find_map(|eid| {
-                let edge = cfg.edge(eid);
-                (edge.data().kind() == EdgeKind::ConditionalTrue).then(|| edge.target())
-            });
-            if let Some(target) = true_target
-                && arms[1] == target
-            {
-                arms.swap(0, 1);
+impl Pattern {
+    /// Put the [`EdgeKind::ConditionalTrue`] arm of each diamond in `patterns`
+    /// first, leaving every other pattern as it is.
+    ///
+    /// [`detect_patterns`] lists a diamond's arms in the successor order of its
+    /// entry. A diamond whose entry has no `ConditionalTrue` edge to an arm,
+    /// such as one entered by a switch, keeps that order.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a diamond's entry is not a block of `cfg`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cfglib::{Cfg, EdgeKind, Pattern, detect_patterns};
+    ///
+    /// let mut cfg = Cfg::<u32>::new();
+    /// let entry = cfg.entry();
+    /// let [taken, other, merge] = std::array::from_fn(|_| cfg.new_block());
+    /// // The false edge comes first, so successor order lists `other` first.
+    /// cfg.add_edge(entry, other, EdgeKind::ConditionalFalse);
+    /// cfg.add_edge(entry, taken, EdgeKind::ConditionalTrue);
+    /// cfg.add_edge(taken, merge, EdgeKind::Fallthrough);
+    /// cfg.add_edge(other, merge, EdgeKind::Fallthrough);
+    ///
+    /// let mut patterns = detect_patterns(&cfg);
+    /// Pattern::orient_diamonds(&mut patterns, &cfg);
+    /// assert_eq!(patterns, [Pattern::Diamond { entry, arms: [taken, other], merge }]);
+    /// ```
+    pub fn orient_diamonds(patterns: &mut [Self], cfg: &impl CfgView) {
+        for pattern in patterns {
+            if let Self::Diamond { entry, arms, .. } = pattern {
+                let true_target = cfg.outgoing(*entry).find_map(|eid| {
+                    let edge = cfg.edge(eid);
+                    (edge.data().kind() == EdgeKind::ConditionalTrue).then(|| edge.target())
+                });
+                if let Some(target) = true_target
+                    && arms[1] == target
+                {
+                    arms.swap(0, 1);
+                }
             }
         }
     }
+}
 
-    // Empty trampolines: no instructions, exactly one successor, not entry.
-    for bid in cfg.node_ids() {
-        if cfg.instructions(bid).is_empty() && cfg.successors(bid).count() == 1 && bid != cfg.root()
-        {
-            patterns.push(CfgPattern::EmptyTrampoline { block: bid });
-        }
-    }
-
-    patterns
+/// The blocks of `cfg` that hold no instruction and have exactly one
+/// successor edge, in block order, without the root: trampolines that only
+/// pass control on.
+///
+/// # Examples
+///
+/// ```
+/// use cfglib::{Cfg, EdgeKind, empty_trampolines};
+///
+/// let mut cfg = Cfg::<u32>::new();
+/// let hop = cfg.new_block();
+/// let exit = cfg.new_block();
+/// cfg.block_mut(cfg.entry()).push(1);
+/// cfg.block_mut(exit).push(2);
+/// cfg.add_edge(cfg.entry(), hop, EdgeKind::Fallthrough);
+/// cfg.add_edge(hop, exit, EdgeKind::Jump);
+///
+/// assert_eq!(empty_trampolines(&cfg), [hop]);
+/// ```
+#[must_use]
+pub fn empty_trampolines<G: CfgView>(cfg: &G) -> Vec<BlockId> {
+    cfg.node_ids()
+        .filter(|&block| {
+            cfg.instructions(block).is_empty()
+                && cfg.successors(block).count() == 1
+                && block != cfg.root()
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -201,7 +237,7 @@ mod tests {
     use crate::test_util::ff;
 
     #[test]
-    fn detects_diamond_with_orientation() {
+    fn orienting_puts_the_true_arm_of_a_diamond_first() {
         let mut cfg = Cfg::new();
         let a = cfg.new_block();
         let b = cfg.new_block();
@@ -215,19 +251,28 @@ mod tests {
         cfg.add_edge(cfg.entry(), a, EdgeKind::ConditionalTrue);
         cfg.add_edge(a, merge, EdgeKind::Fallthrough);
         cfg.add_edge(b, merge, EdgeKind::Fallthrough);
-        let pats = detect_cfg_patterns(&cfg);
-        let diamond = pats
-            .iter()
-            .find(|p| matches!(p, CfgPattern::Diamond { .. }))
-            .expect("diamond detected");
-        if let CfgPattern::Diamond {
-            arms: [first, second],
-            ..
-        } = diamond
-        {
-            assert_eq!(*first, a, "arms[0] is the ConditionalTrue side");
-            assert_eq!(*second, b);
-        }
+        let entry = cfg.entry();
+
+        let mut patterns = detect_patterns(&cfg);
+        assert_eq!(
+            patterns,
+            [Pattern::Diamond {
+                entry,
+                arms: [b, a],
+                merge
+            }],
+            "detection keeps successor order"
+        );
+        Pattern::orient_diamonds(&mut patterns, &cfg);
+        assert_eq!(
+            patterns,
+            [Pattern::Diamond {
+                entry,
+                arms: [a, b],
+                merge
+            }],
+            "orientation puts the ConditionalTrue side first"
+        );
     }
 
     #[test]
@@ -245,7 +290,7 @@ mod tests {
         assert!(
             patterns
                 .iter()
-                .all(|p| !matches!(p, CfgPattern::SelfLoop { .. })),
+                .all(|p| !matches!(p, Pattern::SelfLoop { .. })),
             "a 2-cycle is not a self-loop: {patterns:?}"
         );
     }
@@ -258,10 +303,7 @@ mod tests {
             .push(ff("loop"));
         cfg.add_edge(cfg.entry(), cfg.entry(), EdgeKind::Back);
         let pats = detect_patterns(&cfg);
-        assert!(
-            pats.iter()
-                .any(|p| matches!(p, CfgPattern::SelfLoop { .. }))
-        );
+        assert!(pats.iter().any(|p| matches!(p, Pattern::SelfLoop { .. })));
     }
 
     #[test]
@@ -304,20 +346,20 @@ mod tests {
         assert_eq!(
             detect_patterns(&graph),
             alloc::vec![
-                CfgPattern::Diamond {
+                Pattern::Diamond {
                     entry: n[3],
                     arms: [n[4], n[5]],
                     merge: n[6]
                 },
-                CfgPattern::SelfLoop { block: n[6] },
-                CfgPattern::SelfLoop { block: n[12] },
-                CfgPattern::Chain {
+                Pattern::SelfLoop { block: n[6] },
+                Pattern::SelfLoop { block: n[12] },
+                Pattern::Chain {
                     blocks: alloc::vec![n[0], n[1], n[2], n[3]]
                 },
-                CfgPattern::Chain {
+                Pattern::Chain {
                     blocks: alloc::vec![n[7], n[8], n[9]]
                 },
-                CfgPattern::Chain {
+                Pattern::Chain {
                     blocks: alloc::vec![n[11], n[10]]
                 },
             ]
@@ -349,7 +391,7 @@ mod tests {
             assert!(
                 patterns
                     .iter()
-                    .all(|pattern| !matches!(pattern, CfgPattern::Diamond { .. })),
+                    .all(|pattern| !matches!(pattern, Pattern::Diamond { .. })),
                 "{name}: no diamond expected in {patterns:?}"
             );
         }

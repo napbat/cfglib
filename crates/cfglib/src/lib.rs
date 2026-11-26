@@ -230,7 +230,7 @@ pub use analysis::control_tree::{
 pub use analysis::metrics::{
     CfgMetrics, GraphMetrics, block_nesting_depths, cfg_block_nesting_depths,
 };
-pub use analysis::pattern::{CfgPattern, detect_cfg_patterns, detect_patterns};
+pub use analysis::pattern::{Pattern, detect_patterns, empty_trampolines};
 pub use block::{BasicBlock, BlockId, BlockTag};
 pub use builder::address::{
     AddressBuildError, AddressCfgOptions, AddressEdgeInfo, AddressGraph, AddressHandler,
