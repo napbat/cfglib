@@ -44,23 +44,16 @@ use super::structure::{BackEdge, NaturalLoop, find_back_edges, find_back_edges_t
 use super::view::{DenseId, GraphView, RootedView};
 use crate::block::BlockId;
 use crate::edge::KindedEdge;
-use crate::identity::{NO_INDEX, slot, word};
+use crate::identity::{NO_INDEX, define_dense_id, slot, word};
 
 mod cycles;
 mod placement;
 
-/// A loop of one [`LoopForest`], by position.
-///
-/// Loops are numbered in ascending order of their header.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct LoopId(u32);
-
-impl LoopId {
-    /// The position of the loop, in ascending header order.
-    #[must_use]
-    pub const fn index(self) -> usize {
-        self.0 as usize
-    }
+define_dense_id! {
+    /// A loop of one [`LoopForest`], by position.
+    ///
+    /// Loops are numbered in ascending order of their header.
+    pub struct LoopId(u32);
 }
 
 /// The loops of a graph, stored once per block.

@@ -10,7 +10,7 @@ use crate::wren::{
     Eff, Fault, Op, Reg, Space, Undef, Wren, WrenEffects, bits, capture, constant, keep, part,
     take, undefined, write_plan, write_whole,
 };
-use cfglib::{CapturedValue, DenseId};
+use cfglib::CapturedValue;
 
 /// Renders one node: the name of a named node, or the node inline.
 fn node(tree: &StatementTree<'_, Wren>, id: TreeNodeId) -> String {

@@ -38,20 +38,17 @@ use alloc::vec::Vec;
 use core::cmp::Reverse;
 use core::fmt;
 
-/// An arc of a [`FlowNetwork`], numbered in insertion order from zero.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ArcId(u32);
+use crate::identity::{define_dense_id, word};
+
+define_dense_id! {
+    /// An arc of a [`FlowNetwork`], numbered in insertion order from zero.
+    pub struct ArcId(u32);
+}
 
 impl ArcId {
-    /// The position of the arc in insertion order.
-    #[must_use]
-    pub const fn index(self) -> usize {
-        self.0 as usize
-    }
-
     /// The arc at `position` in insertion order.
     pub(crate) fn from_position(position: usize) -> Self {
-        Self(u32::try_from(position).expect("an arc position is below 2^32"))
+        Self(word(position))
     }
 }
 
@@ -184,13 +181,12 @@ impl FlowNetwork {
             "an arc endpoint is not a node of the network"
         );
         assert!(capacity >= 0, "an arc capacity is negative");
-        let id =
-            u32::try_from(self.capacity.len()).expect("a flow network holds at most 2^32 arcs");
+        let id = ArcId::from_position(self.capacity.len());
         self.head.extend([to, from]);
         self.residual.extend([capacity, 0]);
         self.capacity.push(capacity);
         self.cost.push(cost);
-        ArcId(id)
+        id
     }
 
     /// The flow that the last solve put on `arc`: `0` before any solve.

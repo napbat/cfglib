@@ -13,7 +13,6 @@ use super::tree::ControlTree;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeId;
-use crate::graph::view::DenseId;
 use crate::identity::define_dense_id;
 
 mod build;
@@ -34,16 +33,7 @@ define_dense_id! {
     ///
     /// Panics when `index` exceeds `u32::MAX`.
     from_index = "SPL node index exceeds u32::MAX";
-}
-
-impl DenseId for SplNodeId {
-    fn from_index(index: usize) -> Self {
-        Self::from_index(index)
-    }
-
-    fn index(self) -> usize {
-        self.index()
-    }
+    dense_id;
 }
 
 /// The ordered children of an [`SplNode`], as a run of one table of the

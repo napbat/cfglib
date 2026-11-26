@@ -72,10 +72,12 @@ pub(crate) fn check_bound(bound: usize, what: &str) {
 /// - a doc comment followed by `from_index = "overflow message";` adds the
 ///   panicking `from_index` constructor; the doc comment (including its
 ///   `# Panics` section) and the `expect` message come from the call site.
+/// - `dense_id;` implements [`DenseId`](crate::graph::view::DenseId) through
+///   `from_index` and `index`, for an identity that keys dense tables or
+///   names a graph node. It needs the `from_index` item.
 ///
-/// Type-specific extras — the `DenseId` impl of an identity that is a graph
-/// node, private helpers, extra constructors — stay outside the macro,
-/// written next to the invocation.
+/// Type-specific extras — private helpers, extra constructors — stay outside
+/// the macro, written next to the invocation.
 macro_rules! define_dense_id {
     (
         $(#[$meta:meta])*
@@ -131,6 +133,19 @@ macro_rules! define_dense_id {
         }
 
         crate::identity::define_dense_id! { @extras $name; $($rest)* }
+    };
+    (@extras $name:ident;
+        dense_id;
+    ) => {
+        impl crate::graph::view::DenseId for $name {
+            fn from_index(index: usize) -> Self {
+                Self::from_index(index)
+            }
+
+            fn index(self) -> usize {
+                Self::index(self)
+            }
+        }
     };
 }
 

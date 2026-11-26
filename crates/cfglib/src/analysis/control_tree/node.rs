@@ -14,7 +14,6 @@ use crate::ProgramPoint;
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
 use crate::edge::EdgeId;
-use crate::graph::view::DenseId;
 use crate::identity::define_dense_id;
 use crate::region::{HandlerKind, HandlerRef};
 
@@ -32,16 +31,7 @@ define_dense_id! {
     ///
     /// Panics when `index` exceeds `u32::MAX`.
     from_index = "control tree node index exceeds u32::MAX";
-}
-
-impl DenseId for ControlNodeId {
-    fn from_index(index: usize) -> Self {
-        Self::from_index(index)
-    }
-
-    fn index(self) -> usize {
-        self.index()
-    }
+    dense_id;
 }
 
 /// A contiguous run of `T` stored in one table of a

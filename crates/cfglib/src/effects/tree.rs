@@ -6,6 +6,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::graph::view::DenseId;
+use crate::identity::define_dense_id;
 use crate::ir::rtl::{
     Action, BitSlice, Bits, Control, Dialect, Place, RecordView, Selection, Statement, ValueRange,
     WriteTarget,
@@ -14,26 +15,16 @@ use crate::ir::rtl::{
 use super::defs::Defs;
 use super::dialect::DialectEffects;
 
-/// The identity of one node of a [`StatementTree`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TreeNodeId(u32);
-
-impl TreeNodeId {
-    /// Returns the dense index of the node in its tree.
-    #[must_use]
-    pub const fn index(self) -> usize {
-        self.0 as usize
-    }
-}
-
-impl DenseId for TreeNodeId {
-    fn from_index(index: usize) -> Self {
-        Self(u32::try_from(index).expect("a tree holds at most u32::MAX nodes"))
-    }
-
-    fn index(self) -> usize {
-        self.0 as usize
-    }
+define_dense_id! {
+    /// The identity of one node of a [`StatementTree`].
+    pub struct TreeNodeId(u32);
+    /// Creates an identity from a dense zero-based index.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `index` exceeds `u32::MAX`.
+    from_index = "a tree holds at most u32::MAX nodes";
+    dense_id;
 }
 
 /// One value of the instruction, as [`StatementTree::node`] lends it.

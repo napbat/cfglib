@@ -54,7 +54,7 @@ use crate::block::BlockId;
 use crate::edge::EdgeId;
 use crate::graph::edge_view::EdgeView;
 use crate::graph::view::{DenseId, RootedView};
-use crate::identity::{NO_INDEX, slot, word};
+use crate::identity::{NO_INDEX, define_dense_id, slot, word};
 use closed::{ClosedGraph, slot_edge};
 pub use cycle_equivalence::CycleEquivalence;
 use cycle_equivalence::cycle_classes;
@@ -79,19 +79,12 @@ pub enum SeseEdge<N = BlockId, E = EdgeId> {
     Exit(N),
 }
 
-/// A region of one [`ProgramStructureTree`], by position.
-///
-/// Regions are numbered in preorder, so a region's number is below the
-/// numbers of the regions inside it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SeseRegionId(u32);
-
-impl SeseRegionId {
-    /// The position of the region in preorder.
-    #[must_use]
-    pub const fn index(self) -> usize {
-        slot(self.0)
-    }
+define_dense_id! {
+    /// A region of one [`ProgramStructureTree`], by position.
+    ///
+    /// Regions are numbered in preorder, so a region's number is below the
+    /// numbers of the regions inside it.
+    pub struct SeseRegionId(u32);
 }
 
 /// The canonical single-entry single-exit regions of a rooted graph, nested

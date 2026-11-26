@@ -27,7 +27,7 @@ use super::augmented::AugmentedReverse;
 use super::{PostDominatorScratch, PostDominatorTree};
 use crate::graph::dominator::DominatorTree;
 use crate::graph::view::{DenseId, GraphView, RootedView};
-use crate::identity::{NO_INDEX, slot, word};
+use crate::identity::{NO_INDEX, define_dense_id, slot, word};
 
 /// How a [`PostDominatorTree`] gives facts to the blocks that reach no exit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -45,17 +45,10 @@ pub enum ExitPolicy {
     SinkComponents,
 }
 
-/// A sink class of a tree computed under [`ExitPolicy::SinkComponents`],
-/// numbered from zero in ascending order of the classes' lowest blocks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SinkId(u32);
-
-impl SinkId {
-    /// The number of the class, below the number of classes.
-    #[must_use]
-    pub const fn index(self) -> usize {
-        self.0 as usize
-    }
+define_dense_id! {
+    /// A sink class of a tree computed under [`ExitPolicy::SinkComponents`],
+    /// numbered from zero in ascending order of the classes' lowest blocks.
+    pub struct SinkId(u32);
 }
 
 impl<N: DenseId> PostDominatorTree<N> {

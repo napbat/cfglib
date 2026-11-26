@@ -74,16 +74,7 @@ define_dense_id! {
     ///
     /// Panics when `index` exceeds `u32::MAX`.
     from_index = "path expression index exceeds u32::MAX";
-}
-
-impl DenseId for PathExprId {
-    fn from_index(index: usize) -> Self {
-        Self::from_index(index)
-    }
-
-    fn index(self) -> usize {
-        self.index()
-    }
+    dense_id;
 }
 
 /// One node of a path expression over edges `E`.

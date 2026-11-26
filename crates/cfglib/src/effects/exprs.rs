@@ -4,20 +4,14 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
+use crate::identity::define_dense_id;
 use crate::ir::rtl::Bits;
 
 use super::vocabulary::Touch;
 
-/// The identity of one expression of an [`Exprs`] arena.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ExprId(u32);
-
-impl ExprId {
-    /// Returns the dense index of the expression in its arena.
-    #[must_use]
-    pub const fn index(self) -> usize {
-        self.0 as usize
-    }
+define_dense_id! {
+    /// The identity of one expression of an [`Exprs`] arena.
+    pub struct ExprId(u32);
 }
 
 /// A value that an expression cannot state.
