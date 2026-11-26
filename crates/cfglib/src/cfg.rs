@@ -15,6 +15,7 @@ mod cleanup;
 mod compact;
 #[cfg(feature = "serde")]
 mod document;
+mod dot;
 mod mutation;
 mod regions;
 mod subgraph;

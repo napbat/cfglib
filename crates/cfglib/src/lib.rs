@@ -311,8 +311,8 @@ pub use graph::dominator::{
     SinkId,
 };
 pub use graph::dot::{
-    DotEdgeAttributes, DotEdgeStyle, DotRankDir, DotStyle, bind_edge_attributes,
-    control_flow_edge_attributes, plain_edge_attributes, to_dot, write_dot,
+    DotEdgeAttributes, DotEdgeStyle, DotRankDir, DotStyle, control_flow_edge_attributes,
+    plain_edge_attributes, to_dot, write_dot,
 };
 pub use graph::dyck::{BidirectedDyck, bidirected_dyck_classes};
 pub use graph::edge_traverse::{
@@ -328,7 +328,7 @@ pub use graph::frequency::{BlockFrequencies, FREQUENCY_SHIFT, FrequencyConfig, P
 pub use graph::horn::{HornClauses, HornSaturation};
 pub use graph::interval::{Interval, IntervalAnalysis};
 pub use graph::keyed::KeyedGraph;
-pub use graph::label::{Label, bind_label, display_label, no_label};
+pub use graph::label::{Label, display_label, no_label};
 pub use graph::loop_forest::{LoopForest, LoopId};
 pub use graph::loop_nest::{LoopNestNode, LoopNestingTree};
 pub use graph::network_flow::{ArcId, FlowError, FlowNetwork, FlowSolution};

@@ -17,10 +17,9 @@ use cfglib::{
     write_text,
 };
 use cfglib::{
-    DotEdgeAttributes, DotStyle, EdgeId, FunctionIndex, TextStyle, bind_edge_attributes,
-    bind_label, call_graph_indexed, control_flow_edge_attributes, display_label, no_label,
-    parse_cfg_text, parse_text, plain_edge_attributes, propagate_summaries_widened,
-    recursive_functions,
+    DotEdgeAttributes, DotStyle, EdgeId, FunctionIndex, TextStyle, call_graph_indexed,
+    control_flow_edge_attributes, display_label, no_label, parse_cfg_text, parse_text,
+    plain_edge_attributes, propagate_summaries_widened, recursive_functions,
 };
 
 use super::BenchmarkSuite;
@@ -488,15 +487,12 @@ fn register_output_formats(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_write_dot",
-        covers[write_dot, no_label, bind_edge_attributes],
+        covers[write_dot, no_label],
         || {
-            let style = DotStyle::new(
-                no_label,
-                bind_edge_attributes::<EdgeId, String, _>(|_, label| DotEdgeAttributes {
-                    label: std::borrow::Cow::Borrowed(label),
-                    ..DotEdgeAttributes::plain()
-                }),
-            );
+            let style = DotStyle::new(no_label, |_, label: &String| DotEdgeAttributes {
+                label: std::borrow::Cow::Borrowed(label),
+                ..DotEdgeAttributes::plain()
+            });
             let mut dot = String::new();
             let result = write_dot(&output_graph, &mut dot, &style);
             (result, dot)
@@ -519,12 +515,12 @@ fn register_output_formats(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_to_text",
-        covers[to_text, bind_label],
+        covers[to_text],
         || to_text(
             &output_graph,
             &TextStyle::new(
-                bind_label::<NodeId, String, _>(|_, label| std::borrow::Cow::Borrowed(label)),
-                no_label,
+                |_, label: &String| std::borrow::Cow::Borrowed(label),
+                no_label
             )
         ),
         |text: &String| assert!(text.starts_with("n0 node 0"))

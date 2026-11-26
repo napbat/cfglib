@@ -28,8 +28,6 @@ mod traversal;
 
 pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "bidirected_dyck_classes",
-    "bind_edge_attributes",
-    "bind_label",
     "block_nesting_depths",
     "breadth_first",
     "breadth_first_edges",

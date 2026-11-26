@@ -5,7 +5,7 @@ use std::borrow::Cow;
 
 use cfglib::{
     Cfg, DotEdgeAttributes, DotStyle, EdgeId, EdgeKind, EdgeTag, Graph, IdTag, Label, NodeId,
-    bind_edge_attributes, no_label, to_dot,
+    no_label, to_dot,
 };
 
 /// The one edge of a two-node graph, drawn with `attributes`.
@@ -14,10 +14,9 @@ fn drawn_edge(attributes: DotEdgeAttributes<'static>) -> String {
     let source = graph.add_node(());
     let target = graph.add_node(());
     graph.add_edge(source, target, ());
-    let style = DotStyle::new(
-        no_label as Label<NodeId, ()>,
-        bind_edge_attributes::<EdgeId, (), _>(move |_, ()| attributes.clone()),
-    );
+    let style = DotStyle::new(no_label as Label<NodeId, ()>, move |_, ()| {
+        attributes.clone()
+    });
     to_dot(&graph, &style)
         .lines()
         .find(|line| line.contains("->"))

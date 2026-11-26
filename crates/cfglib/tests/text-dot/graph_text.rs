@@ -6,7 +6,7 @@ use std::fmt;
 
 use cfglib::{
     EdgeId, FilteredEdges, Graph, IdTag, KeyedGraph, Label, NodeId, Reversed, TextError,
-    TextErrorKind, TextStyle, bind_label, display_label, parse_text, to_text, write_text,
+    TextErrorKind, TextStyle, display_label, parse_text, to_text, write_text,
 };
 
 use crate::golden::assert_golden;
@@ -300,17 +300,17 @@ fn plain_style_writes_topology_only() {
 fn label_hooks_decide_what_each_line_says() {
     let graph = symbol_graph();
     let width = 3;
-    let node_label = bind_label::<NodeId, Symbol, _>(|id, symbol| {
-        Cow::Owned(format!("{:0width$}:{symbol}", id.index()))
-    });
-    let edge_label = bind_label::<EdgeId, Relation, _>(|id, relation| {
-        if *relation == Relation::Calls {
-            Cow::Owned(format!("call #{}", id.index()))
-        } else {
-            Cow::Borrowed("")
-        }
-    });
-    let text = to_text(&graph, &TextStyle::new(node_label, edge_label));
+    let style = TextStyle::new(
+        |id: NodeId, symbol: &Symbol| Cow::Owned(format!("{:0width$}:{symbol}", id.index())),
+        |id: EdgeId, relation: &Relation| {
+            if *relation == Relation::Calls {
+                Cow::Owned(format!("call #{}", id.index()))
+            } else {
+                Cow::Borrowed("")
+            }
+        },
+    );
+    let text = to_text(&graph, &style);
 
     let parsed = parse_text(&text).expect("its own grammar");
     assert_eq!(parsed.node(NodeId::from_index(3)), "003:fn load");
@@ -332,6 +332,18 @@ fn write_text_streams_the_same_text_to_any_sink() {
     assert_eq!(streamed, graph.to_text());
 
     assert_failure_is_reported_at_every_length(&streamed, |sink| write_text(&graph, sink, &style));
+}
+
+#[test]
+fn a_store_streams_the_same_text_it_renders() {
+    let graph = symbol_graph();
+    let mut streamed = String::new();
+    graph
+        .write_text(&mut streamed)
+        .expect("a String never fails");
+    assert_eq!(streamed, graph.to_text());
+
+    assert_failure_is_reported_at_every_length(&streamed, |sink| graph.write_text(sink));
 }
 
 #[test]

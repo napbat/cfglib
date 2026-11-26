@@ -371,7 +371,7 @@ The algorithms over this contract (lift from a flat function, lowering, structur
 | Exception handling model | `EhModel::compute` | Payload-generic CFG input; stable source `EdgeId`, exact handler/unwind/leave/resume/continue kinds, landing pads, cleanup/resume blocks, handler identities, protected-by mapping, and cleanup continuations |
 | Integrity verification | `verify`, `verify_view`, `verify_edge_view`; `verify_with` + `SemanticValidator` | Structural node/edge-view checks plus deterministic typed consumer hooks for cardinality, ordering, and edge-payload rules |
 | DOT export | `write_dot` / `to_dot` + `DotStyle` (any node- and edge-bearing view); `Cfg::to_dot` (`DisplayInstr`), `Cfg::to_dot_with` (bound-free), `Graph::to_dot` | One writer; the style supplies node labels, edge attributes, graph name, and layout direction. Labels are escaped and left-justified; the graph name, node prefix, color and style are quoted when DOT requires it, and a NaN or infinite pen width is not written |
-| Text form | `write_text` / `to_text` + `TextStyle`, `parse_text`; `Cfg::to_text`, `parse_cfg_text` | One line per node and per edge, ids are the dense indices. Round trips: write → parse → write is a fixed point, so two graphs compare as text |
+| Text form | `write_text` / `to_text` + `TextStyle`, `parse_text`; `Cfg::to_text`, `Graph::write_text` / `Graph::to_text`, `parse_cfg_text` | One line per node and per edge, ids are the dense indices. Round trips: write → parse → write is a fixed point, so two graphs compare as text |
 
 ### Dataflow framework
 
@@ -460,12 +460,13 @@ which consumer printers can also use.
 | Form | Entry points | Notes |
 |---|---|---|
 | DOT | `write_dot` / `to_dot` over a `DotStyle`; `Cfg::write_dot`, `Cfg::write_dot_with`, `Graph::write_dot` | `DotStyle` carries the node-label hook, the edge-attribute hook (`DotEdgeAttributes`: label, color, style, penwidth), the graph name, the node-identifier prefix, and `DotRankDir`. `control_flow_edge_attributes` is the CFG's kind-to-color mapping; `plain_edge_attributes` decorates nothing |
-| Text | `write_text` / `to_text` over a `TextStyle`, read back by `parse_text`; `Cfg::write_text` / `Cfg::to_text`, read back by `parse_cfg_text` | One fact per line. `n3 label`, `n3 -> n5 label`, `#` comments; a CFG adds `entry bb0`, `bb3:` headers with indented instructions, `bb3 -> bb5 kind`, and `region` / `handler` lines. Escapes are `\\`, `\n`, `\r`, and, on the first character only, `\-`, `\#`, and `\u{20}`-style for whitespace. A document may leave at most 2^20 removed slots (`TextErrorKind::TooManyHoles`). Edges replay in identity order, so the adjacency order a redirect produced is only in the serde form |
+| Text | `write_text` / `to_text` over a `TextStyle`, read back by `parse_text`; `Cfg::write_text` / `Cfg::to_text`, read back by `parse_cfg_text`; `Graph::write_text` / `Graph::to_text` | One fact per line. `n3 label`, `n3 -> n5 label`, `#` comments; a CFG adds `entry bb0`, `bb3:` headers with indented instructions, `bb3 -> bb5 kind`, and `region` / `handler` lines. Escapes are `\\`, `\n`, `\r`, and, on the first character only, `\-`, `\#`, and `\u{20}`-style for whitespace. A document may leave at most 2^20 removed slots (`TextErrorKind::TooManyHoles`). Edges replay in identity order, so the adjacency order a redirect produced is only in the serde form |
 
-Both label hooks are ordinary closures or function items of type
-`Label<Id, Data>`; `no_label` and `display_label` cover the common answers,
-and `bind_label` / `bind_edge_attributes` state the higher-ranked signature
-for a closure that would otherwise infer one fixed payload lifetime.
+Both label hooks are ordinary closures or function items. `DotStyle::new` and
+`TextStyle::new` state the higher-ranked signature the writers need, so a
+closure passed straight in may return text that borrows its payload;
+`no_label` and `display_label` cover the common answers, and `Label<Id, Data>`
+names the function-pointer type the default styles use.
 
 The text form is a readable projection — identity, topology, and label text.
 Edge weights, non-text consumer payloads, and cleanup records live in the

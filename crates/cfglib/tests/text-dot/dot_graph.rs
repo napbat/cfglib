@@ -7,8 +7,8 @@ use std::fmt;
 
 use cfglib::{
     DotEdgeAttributes, DotEdgeStyle, DotRankDir, DotStyle, EdgeId, FilteredEdges, Graph, IdTag,
-    KeyedGraph, Label, NodeId, Reversed, bind_edge_attributes, display_label, no_label,
-    plain_edge_attributes, to_dot, write_dot,
+    KeyedGraph, Label, NodeId, Reversed, display_label, no_label, plain_edge_attributes, to_dot,
+    write_dot,
 };
 
 use crate::dot_scanner::{Dot, scan};
@@ -192,13 +192,12 @@ fn every_short_string_is_escaped_as_an_edge_label() {
     for label in &labels {
         graph.add_edge(a, b, label.clone());
     }
-    let style = DotStyle::new(
-        no_label as Label<NodeId, ()>,
-        bind_edge_attributes::<EdgeId, String, _>(|_, label| DotEdgeAttributes {
+    let style = DotStyle::new(no_label as Label<NodeId, ()>, |_, label: &String| {
+        DotEdgeAttributes {
             label: Cow::Borrowed(label),
             ..DotEdgeAttributes::plain()
-        }),
-    );
+        }
+    });
 
     let dot = scan(&to_dot(&graph, &style));
     assert_eq!(dot.edges.len(), labels.len());
@@ -217,9 +216,8 @@ fn each_attribute_is_written_only_when_it_is_set() {
     for subset in 0..16_u8 {
         graph.add_edge(a, b, subset);
     }
-    let style = DotStyle::new(
-        no_label as Label<NodeId, ()>,
-        bind_edge_attributes::<EdgeId, u8, _>(|_, subset| DotEdgeAttributes {
+    let style = DotStyle::new(no_label as Label<NodeId, ()>, |_, subset: &u8| {
+        DotEdgeAttributes {
             label: if subset & 1 != 0 {
                 Cow::Borrowed("say \"x\"")
             } else {
@@ -228,8 +226,8 @@ fn each_attribute_is_written_only_when_it_is_set() {
             color: (subset & 2 != 0).then_some("green4"),
             style: (subset & 4 != 0).then_some("dashed"),
             penwidth: (subset & 8 != 0).then_some(2.5),
-        }),
-    );
+        }
+    });
 
     let dot = scan(&to_dot(&graph, &style));
     for (subset, edge) in (0..16_u8).zip(&dot.edges) {
@@ -409,12 +407,14 @@ fn hooks_decide_labels_and_attributes_per_node_and_edge() {
 fn an_edge_hook_closure_sees_identity_and_payload() {
     let graph = call_graph();
     let hot: BTreeSet<EdgeId> = [EdgeId::from_index(1), EdgeId::from_index(4)].into();
-    let hook = bind_edge_attributes::<EdgeId, u32, _>(|id, count| DotEdgeAttributes {
-        label: Cow::Owned(format!("e{}x{count}", id.index())),
-        style: hot.contains(&id).then_some("bold"),
-        ..DotEdgeAttributes::plain()
-    });
-    let style = DotStyle::new(no_label as Label<NodeId, &str>, hook);
+    let style = DotStyle::new(
+        no_label as Label<NodeId, &str>,
+        |id: EdgeId, count: &u32| DotEdgeAttributes {
+            label: Cow::Owned(format!("e{}x{count}", id.index())),
+            style: hot.contains(&id).then_some("bold"),
+            ..DotEdgeAttributes::plain()
+        },
+    );
 
     let dot = scan(&to_dot(&graph, &style));
     for (id, edge) in graph.edge_ids().zip(&dot.edges) {

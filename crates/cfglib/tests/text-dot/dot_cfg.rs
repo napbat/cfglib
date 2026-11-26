@@ -5,7 +5,7 @@ use std::borrow::Cow;
 
 use cfglib::{
     BasicBlock, BlockId, Cfg, DotEdgeAttributes, DotEdgeStyle, DotStyle, Edge, EdgeId, EdgeKind,
-    FilteredEdges, bind_label, control_flow_edge_attributes, to_dot,
+    FilteredEdges, control_flow_edge_attributes, to_dot,
 };
 
 use crate::dot_scanner::{Dot, Edge as DrawnEdge, scan};
@@ -211,11 +211,10 @@ fn write_dot_streams_the_same_text_as_to_dot() {
 #[test]
 fn a_consumer_style_over_a_cfg_uses_the_same_writer_and_the_control_flow_hook() {
     let cfg = try_finally();
-    let node_label = bind_label::<BlockId, BasicBlock<Line>, _>(|id, block| {
-        Cow::Owned(format!("{id} ({} instr)", block.instructions().len()))
-    });
     let style = DotStyle::new(
-        node_label,
+        |id, block: &BasicBlock<Line>| {
+            Cow::Owned(format!("{id} ({} instr)", block.instructions().len()))
+        },
         control_flow_edge_attributes as DotEdgeStyle<EdgeId, Edge>,
     )
     .named("flow")
@@ -235,7 +234,7 @@ fn a_view_of_the_normal_flow_leaves_the_exceptional_edges_undrawn() {
     let cfg = try_finally();
     let normal = FilteredEdges::new(&cfg, |_, edge: &Edge| !edge.kind().is_exceptional());
     let style = DotStyle::new(
-        bind_label::<BlockId, BasicBlock<Line>, _>(|id, _| Cow::Owned(id.to_string())),
+        |id: BlockId, _| Cow::Owned(id.to_string()),
         control_flow_edge_attributes as DotEdgeStyle<EdgeId, Edge>,
     )
     .node_prefix("bb");
