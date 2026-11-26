@@ -3,7 +3,7 @@
 
 use cfglib::{
     BlockId, Cfg, ColdClass, ColdnessClasses, ColdnessGraph, EdgeId, EdgeKind, Emitter,
-    ExtTspConfig, SplitOrder, cfg_ext_tsp_order, ext_tsp_order, ext_tsp_score, hot_cold_order,
+    ExtTspConfig, SplitOrder, ext_tsp_order, ext_tsp_score, falls_through, hot_cold_order,
 };
 
 use super::BenchmarkSuite;
@@ -44,14 +44,14 @@ fn register_ext_tsp(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "api_cfg_ext_tsp_order",
-        covers[cfg_ext_tsp_order],
+        "api_ext_tsp_order_falls_through",
+        covers[falls_through],
         || {
-            cfg_ext_tsp_order(
+            ext_tsp_order(
                 &small.cfg,
-                &Inverting,
                 |block| small.sizes[block.index()],
                 |edge| small.counts[edge.index()],
+                |edge| falls_through(&small.cfg, edge, &Inverting),
                 &config,
             )
         },

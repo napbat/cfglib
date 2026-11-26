@@ -6,9 +6,9 @@
 //! the graph. The orders here also read an analysis or caller data:
 //!
 //! - [`ext_tsp_order`] places blocks by a profile, to maximize the Ext-TSP
-//!   score of fallthroughs and short jumps; [`cfg_ext_tsp_order`] takes the
-//!   fallthrough rule from the [`Emitter`](crate::Emitter) that will
-//!   linearize the result.
+//!   score of fallthroughs and short jumps;
+//!   [`falls_through`](crate::falls_through) gives it the fallthrough rule of
+//!   the [`Emitter`](crate::Emitter) that will linearize the result.
 //! - [`hot_cold_order`] partitions a base order by
 //!   [`ColdnessClasses`](crate::ColdnessClasses), so the blocks that run
 //!   normally are contiguous and the cold blocks form their own sections.
@@ -18,5 +18,5 @@
 mod ext_tsp;
 mod hot_cold;
 
-pub use ext_tsp::{ExtTspConfig, cfg_ext_tsp_order, ext_tsp_order, ext_tsp_score};
+pub use ext_tsp::{ExtTspConfig, ext_tsp_order, ext_tsp_score};
 pub use hot_cold::{SplitOrder, hot_cold_order};

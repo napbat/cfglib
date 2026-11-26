@@ -4,13 +4,13 @@ use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::vec::Vec;
 
-use super::{ExtTspConfig, cfg_ext_tsp_order, ext_tsp_order, ext_tsp_score};
+use super::{ExtTspConfig, ext_tsp_order, ext_tsp_score};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::{EdgeId, EdgeKind};
 use crate::test_util::rng::Rng;
 use crate::test_util::{MockInst, ff};
-use crate::transform::linearize::Emitter;
+use crate::transform::linearize::{Emitter, falls_through};
 
 /// Sizes by block index and counts by edge index.
 struct Profile {
@@ -112,12 +112,14 @@ fn the_hot_arm_of_a_diamond_follows_the_branch() {
 
     let size = |block: BlockId| profile.sizes[block.index()];
     let count = |edge: EdgeId| profile.counts[edge.index()];
-    let inverting = cfg_ext_tsp_order(&cfg, &Asm { inverts: true }, size, count, &config);
+    let cfg = &cfg;
+    let falls = |inverts| move |edge| falls_through(cfg, edge, &Asm { inverts });
+    let inverting = ext_tsp_order(cfg, size, count, falls(true), &config);
     assert_eq!(inverting, [entry, hot, join, cold]);
 
     // Without inversion the true edge is a taken branch wherever its target
     // lands, so the false arm takes the fallthrough.
-    let plain = cfg_ext_tsp_order(&cfg, &Asm { inverts: false }, size, count, &config);
+    let plain = ext_tsp_order(cfg, size, count, falls(false), &config);
     assert_eq!(plain, [entry, cold, hot, join]);
 }
 
@@ -274,11 +276,11 @@ fn the_cfg_order_follows_the_emitter_and_is_a_permutation() {
     for round in 0..100 {
         let (cfg, profile) = random_graph(&mut rng);
         let inverts = rng.one_in(2);
-        let result = cfg_ext_tsp_order(
+        let result = ext_tsp_order(
             &cfg,
-            &Asm { inverts },
             |block| profile.sizes[block.index()],
             |edge| profile.counts[edge.index()],
+            |edge| falls_through(&cfg, edge, &Asm { inverts }),
             &ExtTspConfig::default(),
         );
         let mut sorted = result.clone();

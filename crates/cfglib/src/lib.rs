@@ -410,7 +410,7 @@ pub use region::{
 };
 pub use rewrite::Rewrite;
 pub use transform::block_order::{
-    ExtTspConfig, SplitOrder, cfg_ext_tsp_order, ext_tsp_order, ext_tsp_score, hot_cold_order,
+    ExtTspConfig, SplitOrder, ext_tsp_order, ext_tsp_score, hot_cold_order,
 };
 pub use transform::cleanup::{
     merge_blocks, merge_blocks_mapped, remove_empty_blocks, remove_empty_blocks_mapped,
@@ -421,7 +421,9 @@ pub use transform::critical::{
     split_critical_edges, split_critical_edges_mapped, split_critical_edges_with,
 };
 pub use transform::layout::{RelaxError, RelaxMode, SpanItem, relax_layout, relax_spans};
-pub use transform::linearize::{BlockOrder, Emitter, LinearInst, LinearizeError, linearize};
+pub use transform::linearize::{
+    BlockOrder, Emitter, LinearInst, LinearizeError, falls_through, linearize,
+};
 pub use transform::pass::{
     Pass, PassError, PassExecution, PassFn, PassId, PassPipeline, PassReport, pass_fn,
 };
