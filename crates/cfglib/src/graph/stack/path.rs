@@ -2,6 +2,8 @@
 
 use smallvec::SmallVec;
 
+use crate::graph::edge_view::EdgeView;
+
 use super::storage::{StackEdgeId, StackGraph, StackNodeId, StackNodeKind};
 
 /// A symbol on a stack-graph path's symbol stack.
@@ -52,12 +54,8 @@ pub enum StackPathStep {
 /// A rejected extension of a concrete stack-graph path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StackPathError {
-    /// The requested node identity is outside the graph or has been retired.
-    UnknownNode(StackNodeId),
     /// The requested edge identity is outside the graph or was removed.
     UnknownEdge(StackEdgeId),
-    /// An initial path was requested for a node that is not a source reference.
-    NotReference(StackNodeId),
     /// The appended edge does not leave the path's current end node.
     IncorrectSource {
         /// Current path end.
@@ -82,11 +80,7 @@ pub enum StackPathError {
 impl core::fmt::Display for StackPathError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::UnknownNode(node) => write!(formatter, "unknown stack-graph node {node}"),
             Self::UnknownEdge(edge) => write!(formatter, "unknown stack-graph edge {edge}"),
-            Self::NotReference(node) => {
-                write!(formatter, "stack-graph node {node} is not a reference")
-            }
             Self::IncorrectSource { expected, actual } => write!(
                 formatter,
                 "stack-graph path ends at {expected}, but the edge starts at {actual}"
@@ -144,21 +138,16 @@ impl<S: Clone + Eq> StackPath<S> {
     /// The reference node itself seeds the symbol stack, including the
     /// attached scope for a scoped-symbol reference.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// Returns [`StackPathError::UnknownNode`] when `reference` is outside the
-    /// graph, or [`StackPathError::NotReference`] when it is not a source
+    /// Panics when `reference` is out of range, retired, or not a source
     /// reference node.
-    pub fn from_reference<F, N, E>(
-        graph: &StackGraph<F, S, N, E>,
-        reference: StackNodeId,
-    ) -> Result<Self, StackPathError> {
-        if !graph.contains_node(reference) {
-            return Err(StackPathError::UnknownNode(reference));
-        }
-        if !graph.node(reference).kind().is_reference() {
-            return Err(StackPathError::NotReference(reference));
-        }
+    #[must_use]
+    pub fn from_reference<F, N, E>(graph: &StackGraph<F, S, N, E>, reference: StackNodeId) -> Self {
+        assert!(
+            graph.graph().contains_node(reference) && graph.node(reference).kind().is_reference(),
+            "stack-graph node {reference} is not a live source reference"
+        );
         let mut path = Self {
             start: reference,
             end: reference,
@@ -167,15 +156,16 @@ impl<S: Clone + Eq> StackPath<S> {
             steps: SmallVec::new(),
             edge_count: 0,
         };
-        path.apply_node(graph, reference)?;
-        Ok(path)
+        path.apply_node(graph, reference)
+            .expect("a live scoped push names a live exported scope");
+        path
     }
 
     /// Append one stored edge and apply its target node's stack semantics.
     ///
     /// Entering the jump-to-scope singleton immediately adds a virtual jump to
     /// the exported scope popped from the scope stack. On error, this path is
-    /// left unchanged.
+    /// left unchanged: every rule is checked before the path changes.
     ///
     /// # Errors
     ///
@@ -186,17 +176,7 @@ impl<S: Clone + Eq> StackPath<S> {
         graph: &StackGraph<F, S, N, E>,
         edge: StackEdgeId,
     ) -> Result<(), StackPathError> {
-        let next = self.clone().append_owned(graph, edge)?;
-        *self = next;
-        Ok(())
-    }
-
-    pub(super) fn append_owned<F, N, E>(
-        mut self,
-        graph: &StackGraph<F, S, N, E>,
-        edge: StackEdgeId,
-    ) -> Result<Self, StackPathError> {
-        if !graph.contains_edge(edge) {
+        if !graph.graph().contains_edge(edge) {
             return Err(StackPathError::UnknownEdge(edge));
         }
         let stored = graph.edge(edge);
@@ -208,28 +188,34 @@ impl<S: Clone + Eq> StackPath<S> {
         }
 
         let target = stored.target();
-        self.apply_node(graph, target)?;
-        self.end = target;
-        self.steps.push(StackPathStep::Edge(edge));
-        self.edge_count += 1;
-        if graph.node(self.end).kind().is_jump_to_scope() {
-            let scope = self
+        if graph.node(target).kind().is_jump_to_scope() {
+            let &scope = self
                 .scope_stack
-                .pop()
-                .ok_or(StackPathError::EmptyScopeStack(self.end))?;
-            if !graph.contains_node(scope) || !graph.node(scope).kind().is_exported_scope() {
+                .last()
+                .ok_or(StackPathError::EmptyScopeStack(target))?;
+            if !graph.graph().contains_node(scope) || !graph.node(scope).kind().is_exported_scope()
+            {
                 return Err(StackPathError::UnknownAttachedScope(scope));
             }
-            let source = self.end;
-            self.end = scope;
+            self.scope_stack.pop();
+            self.steps.push(StackPathStep::Edge(edge));
             self.steps.push(StackPathStep::Jump {
-                source,
+                source: target,
                 target: scope,
             });
+            self.end = scope;
+        } else {
+            self.apply_node(graph, target)?;
+            self.steps.push(StackPathStep::Edge(edge));
+            self.end = target;
         }
-        Ok(self)
+        self.edge_count += 1;
+        Ok(())
     }
 
+    /// Applies the stack semantics of `node`, which is not the jump-to-scope
+    /// singleton. Every rule is checked before a stack changes, so an error
+    /// leaves the path as it was.
     fn apply_node<F, N, E>(
         &mut self,
         graph: &StackGraph<F, S, N, E>,
@@ -243,7 +229,9 @@ impl<S: Clone + Eq> StackPath<S> {
                 });
             }
             StackNodeKind::PushScopedSymbol { symbol, scope, .. } => {
-                if !graph.contains_node(*scope) || !graph.node(*scope).kind().is_exported_scope() {
+                if !graph.graph().contains_node(*scope)
+                    || !graph.node(*scope).kind().is_exported_scope()
+                {
                     return Err(StackPathError::UnknownAttachedScope(*scope));
                 }
                 let mut scopes = self.scope_stack.clone();
@@ -286,7 +274,10 @@ impl<S: Clone + Eq> StackPath<S> {
                     .expect("a checked scoped symbol retains its attached scopes");
             }
             StackNodeKind::DropScopes => self.scope_stack.clear(),
-            StackNodeKind::Root | StackNodeKind::Scope { .. } | StackNodeKind::JumpToScope => {}
+            StackNodeKind::Root | StackNodeKind::Scope { .. } => {}
+            StackNodeKind::JumpToScope => {
+                unreachable!("append resolves the jump-to-scope node itself")
+            }
         }
         Ok(())
     }
@@ -336,12 +327,6 @@ impl<S: Clone + Eq> StackPath<S> {
     #[must_use]
     pub const fn end(&self) -> StackNodeId {
         self.end
-    }
-
-    /// The definition node when this path is complete.
-    #[must_use]
-    pub fn definition<F, N, E>(&self, graph: &StackGraph<F, S, N, E>) -> Option<StackNodeId> {
-        self.is_complete(graph).then_some(self.end)
     }
 
     /// The symbol stack from bottom to top.

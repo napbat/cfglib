@@ -7,7 +7,7 @@ use core::ops::Index;
 
 use crate::graph::edge_view::{EdgeRef, EdgeView};
 use crate::graph::store::{Graph, Id, IdTag};
-use crate::graph::view::GraphView;
+use crate::graph::view::{GraphView, assert_in_bound};
 use crate::identity::define_dense_id;
 
 #[cfg(feature = "serde")]
@@ -86,12 +86,6 @@ impl<S> Scope<S> {
     pub const fn payload_mut(&mut self) -> &mut S {
         &mut self.payload
     }
-
-    /// Consume the scope and return its payload.
-    #[must_use]
-    pub fn into_payload(self) -> S {
-        self.payload
-    }
 }
 
 /// One relation-tagged datum owned by a scope.
@@ -126,12 +120,6 @@ impl<R, D> ScopeDatum<R, D> {
     pub const fn data_mut(&mut self) -> &mut D {
         &mut self.data
     }
-
-    /// Consume the datum and return its relation and data.
-    #[must_use]
-    pub fn into_parts(self) -> (R, D) {
-        (self.relation, self.data)
-    }
 }
 
 /// One reference whose lookup starts in a scope.
@@ -158,12 +146,6 @@ impl<Q> ScopeReference<Q> {
     /// Mutably borrow the consumer-defined reference data.
     pub const fn data_mut(&mut self) -> &mut Q {
         &mut self.data
-    }
-
-    /// Consume the reference and return its data.
-    #[must_use]
-    pub fn into_data(self) -> Q {
-        self.data
     }
 }
 
@@ -215,16 +197,13 @@ impl<S, L, R, D, Q> ScopeGraph<S, L, R, D, Q> {
         }
     }
 
-    /// Create an empty scope graph with the requested capacities.
+    /// Borrow the store of the scopes and the labeled edges.
+    ///
+    /// The scope graph is a [`GraphView`] and an [`EdgeView`] through the
+    /// store; its counts, bounds, and liveness tests are the store's.
     #[must_use]
-    pub fn with_capacity(scopes: usize, edges: usize, data: usize, references: usize) -> Self {
-        Self {
-            graph: ScopeStore::tagged_with_capacity(scopes, edges),
-            data: Vec::with_capacity(data),
-            references: Vec::with_capacity(references),
-            scope_data: Vec::with_capacity(scopes),
-            scope_references: Vec::with_capacity(scopes),
-        }
+    pub const fn graph(&self) -> &Graph<Scope<S>, L, ScopeTag, ScopeEdgeTag> {
+        &self.graph
     }
 
     /// Add a scope and return its stable identity.
@@ -253,7 +232,7 @@ impl<S, L, R, D, Q> ScopeGraph<S, L, R, D, Q> {
     ///
     /// Panics when `scope` does not belong to this graph.
     pub fn add_datum(&mut self, scope: ScopeId, relation: R, data: D) -> ScopeDatumId {
-        assert!(scope.index() < self.scope_bound(), "scope is out of range");
+        assert_in_bound(self, scope, "scope");
         let id = ScopeDatumId::from_index(self.data.len());
         self.data.push(ScopeDatum {
             scope,
@@ -270,7 +249,7 @@ impl<S, L, R, D, Q> ScopeGraph<S, L, R, D, Q> {
     ///
     /// Panics when `scope` does not belong to this graph.
     pub fn add_reference(&mut self, scope: ScopeId, data: Q) -> ScopeReferenceId {
-        assert!(scope.index() < self.scope_bound(), "scope is out of range");
+        assert_in_bound(self, scope, "scope");
         let id = ScopeReferenceId::from_index(self.references.len());
         self.references.push(ScopeReference { scope, data });
         self.scope_references[scope.index()].push(id);
@@ -296,31 +275,13 @@ impl<S, L, R, D, Q> ScopeGraph<S, L, R, D, Q> {
         self.graph.node_mut(scope)
     }
 
-    /// Borrow one live edge.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `edge` is out of range or was removed.
-    #[must_use]
-    pub fn edge(&self, edge: ScopeEdgeId) -> EdgeRef<'_, ScopeId, ScopeEdgeId, L> {
-        assert!(
-            self.graph.contains_edge(edge),
-            "scope edge {edge} has been removed"
-        );
-        let value = self.graph.edge(edge);
-        EdgeRef::new(edge, value.source(), value.target(), value.payload())
-    }
-
     /// Mutably borrow a live edge's label.
     ///
     /// # Panics
     ///
     /// Panics when `edge` is out of range or was removed.
-    pub fn edge_label_mut(&mut self, edge: ScopeEdgeId) -> &mut L {
-        assert!(
-            self.graph.contains_edge(edge),
-            "scope edge {edge} has been removed"
-        );
+    pub fn edge_mut(&mut self, edge: ScopeEdgeId) -> &mut L {
+        assert!(self.graph.contains_edge(edge), "edge has been removed");
         self.graph.edge_mut(edge).payload_mut()
     }
 
@@ -389,60 +350,9 @@ impl<S, L, R, D, Q> ScopeGraph<S, L, R, D, Q> {
         &self.scope_references[scope.index()]
     }
 
-    /// Iterate over every live scope identity in allocation order.
-    pub fn scope_ids(&self) -> impl Iterator<Item = ScopeId> + '_ {
-        self.graph.node_ids()
-    }
-
-    /// Iterate over every live edge identity in insertion order.
-    pub fn edge_ids(&self) -> impl Iterator<Item = ScopeEdgeId> + '_ {
-        self.graph.edge_ids()
-    }
-
-    /// Iterate over every datum identity in insertion order.
-    pub fn datum_ids(&self) -> impl ExactSizeIterator<Item = ScopeDatumId> + '_ {
-        (0..self.data.len()).map(ScopeDatumId::from_index)
-    }
-
     /// Iterate over every reference identity in insertion order.
     pub fn reference_ids(&self) -> impl ExactSizeIterator<Item = ScopeReferenceId> + '_ {
         (0..self.references.len()).map(ScopeReferenceId::from_index)
-    }
-
-    /// Return outgoing edge identities in insertion order.
-    #[must_use = "iterators are lazy and do nothing unless consumed"]
-    pub fn outgoing(&self, scope: ScopeId) -> impl Iterator<Item = ScopeEdgeId> + '_ {
-        self.graph.outgoing(scope)
-    }
-
-    /// Return incoming edge identities in insertion order.
-    #[must_use = "iterators are lazy and do nothing unless consumed"]
-    pub fn incoming(&self, scope: ScopeId) -> impl Iterator<Item = ScopeEdgeId> + '_ {
-        self.graph.incoming(scope)
-    }
-
-    /// Return the number of scopes.
-    #[must_use]
-    pub fn scope_count(&self) -> usize {
-        self.graph.node_count()
-    }
-
-    /// Return the number of live scope edges.
-    #[must_use]
-    pub fn edge_count(&self) -> usize {
-        self.graph.edge_count()
-    }
-
-    /// An exclusive upper bound on every live [`ScopeEdgeId`] index.
-    #[must_use]
-    pub fn edge_bound(&self) -> usize {
-        self.graph.edge_bound()
-    }
-
-    /// An exclusive upper bound on every live [`ScopeId`] index.
-    #[must_use]
-    pub fn scope_bound(&self) -> usize {
-        self.graph.node_bound()
     }
 
     /// Return the number of relation-tagged data entries.
@@ -456,12 +366,6 @@ impl<S, L, R, D, Q> ScopeGraph<S, L, R, D, Q> {
     pub fn reference_count(&self) -> usize {
         self.references.len()
     }
-
-    /// Return whether the graph contains no scopes.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.graph.is_empty()
-    }
 }
 
 impl<S, L, R, D, Q> Default for ScopeGraph<S, L, R, D, Q> {
@@ -474,11 +378,11 @@ impl<S, L, R, D, Q> GraphView for ScopeGraph<S, L, R, D, Q> {
     type NodeId = ScopeId;
 
     fn node_bound(&self) -> usize {
-        self.scope_bound()
+        self.graph.node_bound()
     }
 
     fn node_ids(&self) -> impl Iterator<Item = ScopeId> + '_ {
-        ScopeGraph::scope_ids(self)
+        self.graph.node_ids()
     }
 
     fn successors(&self, node: ScopeId) -> impl Iterator<Item = ScopeId> + '_ {
@@ -495,23 +399,26 @@ impl<S, L, R, D, Q> EdgeView for ScopeGraph<S, L, R, D, Q> {
     type EdgeData = L;
 
     fn edge_bound(&self) -> usize {
-        ScopeGraph::edge_bound(self)
+        self.graph.edge_bound()
     }
 
     fn edge_ids(&self) -> impl Iterator<Item = ScopeEdgeId> + '_ {
-        ScopeGraph::edge_ids(self)
+        self.graph.edge_ids()
     }
 
     fn outgoing(&self, node: ScopeId) -> impl Iterator<Item = ScopeEdgeId> + '_ {
-        ScopeGraph::outgoing(self, node)
+        self.graph.outgoing(node)
     }
 
     fn incoming(&self, node: ScopeId) -> impl Iterator<Item = ScopeEdgeId> + '_ {
-        ScopeGraph::incoming(self, node)
+        self.graph.incoming(node)
     }
 
+    /// # Panics
+    ///
+    /// Panics when `edge` is out of range or was removed.
     fn edge(&self, edge: ScopeEdgeId) -> EdgeRef<'_, ScopeId, ScopeEdgeId, L> {
-        ScopeGraph::edge(self, edge)
+        EdgeView::edge(&self.graph, edge)
     }
 }
 

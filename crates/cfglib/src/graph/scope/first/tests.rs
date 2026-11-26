@@ -2,21 +2,16 @@ extern crate alloc;
 
 use alloc::format;
 use alloc::vec::Vec;
-use core::cmp::Ordering;
 
+use super::super::test_support::{Label, chain};
+use crate::graph::edge_view::EdgeView;
+use crate::graph::view::GraphView;
 use crate::test_util::rng::Rng;
 use crate::{
-    EdgeRef, ScopeCursor, ScopeCursorQuery, ScopeDatumId, ScopeEdgeId, ScopeFirstResolution,
-    ScopeFirstResolutionError, ScopeGraph, ScopeGraphPathLabel, ScopeGraphQuery, ScopeId,
-    ScopeLinearResolutionError, ScopePath, ScopeQuery, ScopeResolution, ScopeResolutionConfig,
+    EdgeRef, PathSearchConfig, ScopeCursor, ScopeCursorPolicy, ScopeCursorQuery, ScopeDatumId,
+    ScopeEdgeId, ScopeFirstResolution, ScopeFirstResolutionError, ScopeGraph, ScopeId, ScopeQuery,
+    ScopeResolution, ScopeResolutionCandidate,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Label {
-    Parent,
-    Import,
-    Hidden,
-}
 
 /// A declaration: its name and whether an import can see it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,7 +47,7 @@ impl ScopeCursorQuery<(), Label, (), Declaration, u8> for Lookup {
         match edge.data() {
             Label::Parent => Some(imported),
             Label::Import => (!imported).then_some(true),
-            Label::Hidden => None,
+            Label::Hidden | Label::A | Label::B => None,
         }
     }
 
@@ -78,24 +73,6 @@ impl ScopeCursorQuery<(), Label, (), Declaration, u8> for Lookup {
     ) -> bool {
         !self.stop_at_candidate || accepted_candidate_count == 0
     }
-
-    fn compare_labels(
-        &self,
-        _graph: &Graph,
-        _input: &ScopeQuery<'_, u8>,
-        left: ScopeGraphPathLabel<'_, Label>,
-        right: ScopeGraphPathLabel<'_, Label>,
-    ) -> Option<Ordering> {
-        fn rank(label: ScopeGraphPathLabel<'_, Label>) -> u8 {
-            match label {
-                ScopeGraphPathLabel::Declaration => 0,
-                ScopeGraphPathLabel::Edge(Label::Parent) => 1,
-                ScopeGraphPathLabel::Edge(Label::Import) => 2,
-                ScopeGraphPathLabel::Edge(Label::Hidden) => 3,
-            }
-        }
-        Some(rank(left).cmp(&rank(right)))
-    }
 }
 
 const STOP: Lookup = Lookup {
@@ -105,82 +82,6 @@ const EXTEND: Lookup = Lookup {
     stop_at_candidate: false,
 };
 const NAMES: u8 = 4;
-
-/// [`Lookup`] as a [`ScopeGraphQuery`]: each hook gives the cursor of the
-/// stored path to the cursor hook, so linear resolution runs the same policy.
-struct Linear<'a>(&'a Lookup);
-
-impl ScopeGraphQuery<(), Label, (), Declaration, u8> for Linear<'_> {
-    type State = bool;
-
-    fn initial_state(&self, graph: &Graph, input: &ScopeQuery<'_, u8>) -> bool {
-        ScopeCursorQuery::initial_state(self.0, graph, input)
-    }
-
-    fn step(
-        &self,
-        graph: &Graph,
-        input: &ScopeQuery<'_, u8>,
-        path: &ScopePath,
-        state: &bool,
-        edge: EdgeRef<'_, ScopeId, ScopeEdgeId, Label>,
-    ) -> Option<bool> {
-        ScopeCursorQuery::step(
-            self.0,
-            graph,
-            input,
-            ScopeCursor::of_path(path),
-            state,
-            edge,
-        )
-    }
-
-    fn accepts(
-        &self,
-        graph: &Graph,
-        input: &ScopeQuery<'_, u8>,
-        path: &ScopePath,
-        state: &bool,
-        datum: ScopeDatumId,
-    ) -> bool {
-        ScopeCursorQuery::accepts(
-            self.0,
-            graph,
-            input,
-            ScopeCursor::of_path(path),
-            state,
-            datum,
-        )
-    }
-
-    fn should_extend(
-        &self,
-        graph: &Graph,
-        input: &ScopeQuery<'_, u8>,
-        path: &ScopePath,
-        state: &bool,
-        accepted_candidate_count: usize,
-    ) -> bool {
-        ScopeCursorQuery::should_extend(
-            self.0,
-            graph,
-            input,
-            ScopeCursor::of_path(path),
-            state,
-            accepted_candidate_count,
-        )
-    }
-
-    fn compare_labels(
-        &self,
-        graph: &Graph,
-        input: &ScopeQuery<'_, u8>,
-        left: ScopeGraphPathLabel<'_, Label>,
-        right: ScopeGraphPathLabel<'_, Label>,
-    ) -> Option<Ordering> {
-        ScopeCursorQuery::compare_labels(self.0, graph, input, left, right)
-    }
-}
 
 /// A graph whose every edge leads to an earlier scope. Most scopes have one
 /// parent; some have an import, a hidden edge, a second parent (a branch), or
@@ -213,30 +114,22 @@ fn random_upward_graph(random: &mut Rng) -> Graph {
     graph
 }
 
-fn random_config(random: &mut Rng) -> ScopeResolutionConfig {
+fn random_config(random: &mut Rng) -> PathSearchConfig {
     match random.below(4) {
-        0 => ScopeResolutionConfig::new().with_max_path_length(random.below(5)),
-        1 => ScopeResolutionConfig::new().with_max_path_count(1 + random.below(6)),
-        _ => ScopeResolutionConfig::new(),
+        0 => PathSearchConfig {
+            max_path_length: Some(random.below(5)),
+            ..PathSearchConfig::default()
+        },
+        1 => PathSearchConfig {
+            max_path_count: Some(1 + random.below(6)),
+            ..PathSearchConfig::default()
+        },
+        _ => PathSearchConfig::default(),
     }
 }
 
-fn same_error(linear: ScopeLinearResolutionError, first: ScopeFirstResolutionError) -> bool {
-    match (linear, first) {
-        (
-            ScopeLinearResolutionError::MultipleCandidates { scope: linear },
-            ScopeFirstResolutionError::MultipleCandidates { scope: first },
-        )
-        | (
-            ScopeLinearResolutionError::MultipleEdges { scope: linear },
-            ScopeFirstResolutionError::MultipleEdges { scope: first },
-        ) => linear == first,
-        _ => false,
-    }
-}
-
-/// The datum and owning scope of the first visible linear candidate.
-fn first_linear_candidate(resolution: &ScopeResolution) -> Option<(ScopeDatumId, ScopeId)> {
+/// The datum and owning scope of the first candidate of a general search.
+fn first_candidate(resolution: &ScopeResolution) -> Option<(ScopeDatumId, ScopeId)> {
     resolution
         .candidates()
         .first()
@@ -244,38 +137,52 @@ fn first_linear_candidate(resolution: &ScopeResolution) -> Option<(ScopeDatumId,
 }
 
 #[test]
-fn first_resolution_equals_linear_resolution_on_random_upward_graphs() {
+fn first_resolution_is_the_general_search_of_a_policy_that_stops_at_a_candidate() {
     let mut random = Rng::new(0x5C0F_E29A);
     let (mut resolved, mut unresolved, mut failed) = (0, 0, 0);
     for _ in 0..300 {
         let graph = random_upward_graph(&mut random);
-        for scope in graph.scope_ids() {
+        for scope in graph.node_ids() {
             for name in 0..NAMES {
                 let config = random_config(&mut random);
-                let linear = ScopeResolution::try_compute_linear_from(
-                    &graph,
-                    scope,
-                    &name,
-                    &Linear(&STOP),
-                    config,
-                );
-                let first =
-                    ScopeFirstResolution::try_compute_from(&graph, scope, &name, &STOP, config);
-                match (linear, first) {
-                    (Ok(linear), Ok(first)) => {
-                        assert_eq!(first.candidate(), first_linear_candidate(&linear));
-                        assert_eq!(first.stats(), linear.stats());
+                let input = ScopeQuery::new(scope, &name);
+                let general =
+                    ScopeResolution::compute(&graph, input, &ScopeCursorPolicy(STOP), config);
+                match ScopeFirstResolution::try_compute(&graph, input, &STOP, config) {
+                    // The walk is the one path the general search expands.
+                    Ok(first) => {
+                        assert_eq!(first.candidate(), first_candidate(&general));
+                        assert_eq!(first.stats(), general.stats());
                         if first.is_resolved() {
                             resolved += 1;
                         } else {
                             unresolved += 1;
                         }
                     }
-                    (Err(linear), Err(first)) => {
-                        assert!(same_error(linear, first), "{linear:?} != {first:?}");
+                    // A cursor policy shadows nothing, so every datum of the
+                    // scope stays a candidate of the general search.
+                    Err(ScopeFirstResolutionError::MultipleCandidates { scope }) => {
+                        assert!(general.candidates().len() >= 2, "{graph:?}");
+                        assert!(
+                            general
+                                .candidates()
+                                .iter()
+                                .all(|candidate| candidate.path().end() == scope)
+                        );
                         failed += 1;
                     }
-                    (linear, first) => panic!("{linear:?} disagrees with {first:?}"),
+                    // The general search branches there instead.
+                    Err(ScopeFirstResolutionError::MultipleEdges { scope }) => {
+                        let unhidden = graph
+                            .outgoing(scope)
+                            .filter(|&edge| *graph.edge(edge).data() != Label::Hidden)
+                            .count();
+                        assert!(unhidden >= 2, "{graph:?}");
+                        failed += 1;
+                    }
+                    Err(error @ ScopeFirstResolutionError::EdgeNotUpward { .. }) => {
+                        panic!("{error} in an upward graph");
+                    }
                 }
             }
         }
@@ -284,28 +191,31 @@ fn first_resolution_equals_linear_resolution_on_random_upward_graphs() {
 }
 
 #[test]
-fn first_resolution_is_the_visible_candidate_when_declarations_shadow_edges() {
+fn every_other_candidate_of_an_extending_search_lies_past_the_first_datum() {
     let mut random = Rng::new(0x0F1E_57C0);
     let mut compared = 0;
     for _ in 0..300 {
         let graph = random_upward_graph(&mut random);
-        for scope in graph.scope_ids() {
+        for scope in graph.node_ids() {
             for name in 0..NAMES {
-                let config = ScopeResolutionConfig::new();
-                let Ok(linear) = ScopeResolution::try_compute_linear_from(
-                    &graph,
-                    scope,
-                    &name,
-                    &Linear(&EXTEND),
-                    config,
-                ) else {
+                let config = PathSearchConfig::default();
+                let input = ScopeQuery::new(scope, &name);
+                let Ok(first) = ScopeFirstResolution::try_compute(&graph, input, &EXTEND, config)
+                else {
                     continue;
                 };
-                let first =
-                    ScopeFirstResolution::try_compute_from(&graph, scope, &name, &EXTEND, config)
-                        .expect("a prefix of a valid linear walk is valid");
-                assert!(linear.candidates().len() <= 1);
-                assert_eq!(first.candidate(), first_linear_candidate(&linear));
+                let general =
+                    ScopeResolution::compute(&graph, input, &ScopeCursorPolicy(EXTEND), config);
+                assert_eq!(first.candidate(), first_candidate(&general));
+                // A label order in which a declaration is the most specific
+                // label would let the first datum shadow every other one.
+                if let [nearest, rest @ ..] = general.candidates() {
+                    let prefix = nearest.path().scopes();
+                    for candidate in rest {
+                        let scopes = candidate.path().scopes();
+                        assert!(scopes.len() > prefix.len() && scopes.starts_with(prefix));
+                    }
+                }
                 compared += usize::from(first.is_resolved());
             }
         }
@@ -313,13 +223,51 @@ fn first_resolution_is_the_visible_candidate_when_declarations_shadow_edges() {
     assert!(compared > 1000);
 }
 
-fn chain(depth: usize) -> (Graph, Vec<ScopeId>) {
-    let mut graph = Graph::new();
-    let scopes: Vec<ScopeId> = (0..depth).map(|_| graph.add_scope(())).collect();
-    for pair in scopes.windows(2) {
-        graph.add_edge(pair[1], pair[0], Label::Parent);
+#[test]
+fn first_resolution_reports_what_general_search_does_under_every_bound() {
+    let (mut graph, scopes): (Graph, _) = chain(4);
+    graph.add_datum(scopes[0], (), declaration(0));
+    let input = ScopeQuery::new(scopes[3], &0);
+    let limits = [None, Some(0), Some(1), Some(2), Some(3), Some(4), Some(5)];
+    let mut truncations = [false; 2];
+    for max_path_length in limits {
+        for max_path_count in limits {
+            let config = PathSearchConfig {
+                max_path_length,
+                max_path_count,
+                ..PathSearchConfig::default()
+            };
+            let first = ScopeFirstResolution::try_compute(&graph, input, &STOP, config)
+                .expect("a chain is linear");
+            let general = ScopeResolution::compute(&graph, input, &ScopeCursorPolicy(STOP), config);
+            assert_eq!(first.candidate(), first_candidate(&general), "{config:?}");
+            assert_eq!(first.stats(), general.stats(), "{config:?}");
+            truncations[0] |= first.stats().path_length_limited;
+            truncations[1] |= first.stats().path_count_limited;
+        }
     }
-    (graph, scopes)
+    assert_eq!(truncations, [true; 2], "the sweep hits both bounds");
+}
+
+#[test]
+fn a_cursor_policy_under_the_general_resolver_shadows_no_candidate() {
+    let (mut graph, scopes): (Graph, _) = chain(3);
+    let outer = graph.add_datum(scopes[0], (), declaration(0));
+    let inner = graph.add_datum(scopes[1], (), declaration(0));
+    let input = ScopeQuery::new(scopes[2], &0);
+    let config = PathSearchConfig::default();
+
+    let general = ScopeResolution::compute(&graph, input, &ScopeCursorPolicy(EXTEND), config);
+    let data: Vec<_> = general
+        .candidates()
+        .iter()
+        .map(ScopeResolutionCandidate::datum)
+        .collect();
+    assert_eq!(data, [inner, outer]);
+
+    let first = ScopeFirstResolution::try_compute(&graph, input, &EXTEND, config)
+        .expect("a chain is linear");
+    assert_eq!(first.candidate(), Some((inner, scopes[1])));
 }
 
 const fn declaration(name: u8) -> Declaration {
@@ -331,29 +279,47 @@ const fn declaration(name: u8) -> Declaration {
 
 #[test]
 fn stored_reference_resolves_from_its_scope() {
-    let (mut graph, scopes) = chain(3);
+    let (mut graph, scopes): (Graph, _) = chain(3);
     let outer = graph.add_datum(scopes[0], (), declaration(1));
     graph.add_datum(scopes[2], (), declaration(2));
     let reference = graph.add_reference(scopes[2], 1);
 
-    let first =
-        ScopeFirstResolution::try_compute(&graph, reference, &STOP, ScopeResolutionConfig::new())
-            .expect("a chain is linear");
+    let first = ScopeFirstResolution::try_compute(
+        &graph,
+        ScopeQuery::from_reference(&graph, reference),
+        &STOP,
+        PathSearchConfig::default(),
+    )
+    .expect("a chain is linear");
 
     assert_eq!(first.candidate(), Some((outer, scopes[0])));
-    assert_eq!(first.stats().explored_path_count, 3);
-    assert_eq!(first.stats().reachable_candidate_count, 1);
+    assert_eq!(first.stats().expanded_path_count, 3);
+    assert_eq!(first.stats().complete_path_count, 1);
     assert!(!first.stats().is_truncated());
 }
 
 #[test]
-fn admitted_edge_that_does_not_point_upward_is_an_error() {
-    let (mut graph, scopes) = chain(2);
-    let later = graph.add_edge(scopes[0], scopes[1], Label::Parent);
-    let config = ScopeResolutionConfig::new();
+#[should_panic(expected = "query scope is out of range")]
+fn a_query_that_starts_outside_the_graph_panics() {
+    let (graph, _): (Graph, _) = chain(2);
+    let outside = ScopeId::from_index(2);
+    let _ = ScopeFirstResolution::try_compute(
+        &graph,
+        ScopeQuery::new(outside, &0),
+        &STOP,
+        PathSearchConfig::default(),
+    );
+}
 
-    let error = ScopeFirstResolution::try_compute_from(&graph, scopes[1], &0, &STOP, config)
-        .expect_err("the walk reaches the downward edge");
+#[test]
+fn admitted_edge_that_does_not_point_upward_is_an_error() {
+    let (mut graph, scopes): (Graph, _) = chain(2);
+    let later = graph.add_edge(scopes[0], scopes[1], Label::Parent);
+    let config = PathSearchConfig::default();
+
+    let error =
+        ScopeFirstResolution::try_compute(&graph, ScopeQuery::new(scopes[1], &0), &STOP, config)
+            .expect_err("the walk reaches the downward edge");
     assert_eq!(
         error,
         ScopeFirstResolutionError::EdgeNotUpward { edge: later }
@@ -362,8 +328,9 @@ fn admitted_edge_that_does_not_point_upward_is_an_error() {
     let mut graph = Graph::new();
     let scope = graph.add_scope(());
     let self_loop = graph.add_edge(scope, scope, Label::Import);
-    let error = ScopeFirstResolution::try_compute_from(&graph, scope, &0, &STOP, config)
-        .expect_err("an import self loop is admitted");
+    let error =
+        ScopeFirstResolution::try_compute(&graph, ScopeQuery::new(scope, &0), &STOP, config)
+            .expect_err("an import self loop is admitted");
     assert_eq!(
         error,
         ScopeFirstResolutionError::EdgeNotUpward { edge: self_loop }
@@ -372,63 +339,68 @@ fn admitted_edge_that_does_not_point_upward_is_an_error() {
 
 #[test]
 fn rejected_edge_may_point_anywhere() {
-    let (mut graph, scopes) = chain(2);
+    let (mut graph, scopes): (Graph, _) = chain(2);
     graph.add_edge(scopes[0], scopes[1], Label::Hidden);
     graph.add_edge(scopes[1], scopes[1], Label::Hidden);
 
-    let first = ScopeFirstResolution::try_compute_from(
+    let first = ScopeFirstResolution::try_compute(
         &graph,
-        scopes[1],
-        &0,
+        ScopeQuery::new(scopes[1], &0),
         &STOP,
-        ScopeResolutionConfig::new(),
+        PathSearchConfig::default(),
     )
     .expect("hidden edges are never admitted");
 
     assert_eq!(first.candidate(), None);
-    assert_eq!(first.stats().explored_path_count, 2);
+    assert_eq!(first.stats().expanded_path_count, 2);
 }
 
 #[test]
 fn bounds_stop_the_walk_and_report_truncation() {
-    let (mut graph, scopes) = chain(5);
+    let (mut graph, scopes): (Graph, _) = chain(5);
     graph.add_datum(scopes[0], (), declaration(0));
+    let input = ScopeQuery::new(scopes[4], &0);
 
-    let length = ScopeFirstResolution::try_compute_from(
+    let length = ScopeFirstResolution::try_compute(
         &graph,
-        scopes[4],
-        &0,
+        input,
         &STOP,
-        ScopeResolutionConfig::new().with_max_path_length(2),
+        PathSearchConfig {
+            max_path_length: Some(2),
+            ..PathSearchConfig::default()
+        },
     )
     .expect("a chain is linear");
     assert_eq!(length.candidate(), None);
-    assert_eq!(length.stats().explored_path_count, 3);
+    assert_eq!(length.stats().expanded_path_count, 3);
     assert!(length.stats().path_length_limited);
 
-    let count = ScopeFirstResolution::try_compute_from(
+    let count = ScopeFirstResolution::try_compute(
         &graph,
-        scopes[4],
-        &0,
+        input,
         &STOP,
-        ScopeResolutionConfig::new().with_max_path_count(2),
+        PathSearchConfig {
+            max_path_count: Some(2),
+            ..PathSearchConfig::default()
+        },
     )
     .expect("a chain is linear");
     assert_eq!(count.candidate(), None);
-    assert_eq!(count.stats().explored_path_count, 2);
+    assert_eq!(count.stats().expanded_path_count, 2);
     assert!(count.stats().path_count_limited);
 }
 
 #[test]
 fn branches_and_ambiguities_are_errors() {
-    let (mut graph, scopes) = chain(3);
+    let (mut graph, scopes): (Graph, _) = chain(3);
     graph.add_edge(scopes[2], scopes[0], Label::Parent);
     graph.add_datum(scopes[1], (), declaration(1));
     graph.add_datum(scopes[1], (), declaration(1));
-    let config = ScopeResolutionConfig::new();
+    let config = PathSearchConfig::default();
 
-    let branch = ScopeFirstResolution::try_compute_from(&graph, scopes[2], &1, &STOP, config)
-        .expect_err("two parents are admitted");
+    let branch =
+        ScopeFirstResolution::try_compute(&graph, ScopeQuery::new(scopes[2], &1), &STOP, config)
+            .expect_err("two parents are admitted");
     assert_eq!(
         branch,
         ScopeFirstResolutionError::MultipleEdges { scope: scopes[2] }
@@ -438,8 +410,9 @@ fn branches_and_ambiguities_are_errors() {
         format!("scope {:?} admitted multiple outgoing edges", scopes[2])
     );
 
-    let ambiguous = ScopeFirstResolution::try_compute_from(&graph, scopes[1], &1, &STOP, config)
-        .expect_err("two declarations match");
+    let ambiguous =
+        ScopeFirstResolution::try_compute(&graph, ScopeQuery::new(scopes[1], &1), &STOP, config)
+            .expect_err("two declarations match");
     assert_eq!(
         ambiguous,
         ScopeFirstResolutionError::MultipleCandidates { scope: scopes[1] }
@@ -448,16 +421,15 @@ fn branches_and_ambiguities_are_errors() {
 
 #[test]
 fn walk_stops_at_the_first_candidate_before_a_later_violation() {
-    let (mut graph, scopes) = chain(3);
+    let (mut graph, scopes): (Graph, _) = chain(3);
     let near = graph.add_datum(scopes[1], (), declaration(1));
     graph.add_edge(scopes[1], scopes[2], Label::Parent);
 
-    let first = ScopeFirstResolution::try_compute_from(
+    let first = ScopeFirstResolution::try_compute(
         &graph,
-        scopes[2],
-        &1,
+        ScopeQuery::new(scopes[2], &1),
         &EXTEND,
-        ScopeResolutionConfig::new(),
+        PathSearchConfig::default(),
     )
     .expect("the walk stops before the downward edge");
 
@@ -467,7 +439,7 @@ fn walk_stops_at_the_first_candidate_before_a_later_violation() {
 #[test]
 fn deep_walk_visits_each_scope_once() {
     let depth = 1500;
-    let (mut graph, scopes) = chain(depth);
+    let (mut graph, scopes): (Graph, _) = chain(depth);
     for (index, &scope) in scopes.iter().enumerate() {
         let name = if index == 0 {
             0
@@ -477,15 +449,14 @@ fn deep_walk_visits_each_scope_once() {
         graph.add_datum(scope, (), declaration(name));
     }
 
-    let first = ScopeFirstResolution::try_compute_from(
+    let first = ScopeFirstResolution::try_compute(
         &graph,
-        scopes[depth - 1],
-        &0,
+        ScopeQuery::new(scopes[depth - 1], &0),
         &STOP,
-        ScopeResolutionConfig::new(),
+        PathSearchConfig::default(),
     )
     .expect("a chain is linear");
 
     assert_eq!(first.candidate().map(|(_, scope)| scope), Some(scopes[0]));
-    assert_eq!(first.stats().explored_path_count, depth);
+    assert_eq!(first.stats().expanded_path_count, depth);
 }

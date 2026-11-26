@@ -4,7 +4,7 @@
 //!
 //! The lexical chain is the shape of a source file: references in nested
 //! blocks climb the same parents and imports, which `compute` walks once per
-//! reference and `compute_cached` once per scope; `compute_tracked` walks it
+//! reference and an environment cache once per scope; `compute_tracked` walks it
 //! as `compute` does and records what each reference read. An edit of one
 //! leaf scope there is read by the references of one block, which `update`
 //! resolves again. The first-datum walk climbs the parents alone and stops at
@@ -15,10 +15,10 @@
 use std::cmp::Ordering;
 
 use cfglib::{
-    EdgeRef, ScopeCursor, ScopeCursorQuery, ScopeDatumId, ScopeEdgeId, ScopeEnvironmentCache,
-    ScopeEnvironmentQuery, ScopeFirstResolution, ScopeGraph, ScopeGraphChanges,
-    ScopeGraphPathLabel, ScopeGraphQuery, ScopeId, ScopeIndexUpdate, ScopePath, ScopeQuery,
-    ScopeResolutionConfig, ScopeResolutionIndex,
+    EdgeRef, PathSearchConfig, ScopeCursor, ScopeCursorQuery, ScopeDatumId, ScopeEdgeId,
+    ScopeEnvironmentCache, ScopeEnvironmentQuery, ScopeFirstResolution, ScopeGraph,
+    ScopeGraphChanges, ScopeGraphPathLabel, ScopeGraphQuery, ScopeId, ScopeIndexUpdate, ScopePath,
+    ScopeQuery, ScopeResolutionIndex,
 };
 
 use super::BenchmarkSuite;
@@ -173,16 +173,6 @@ impl ScopeCursorQuery<(), Label, (), u32, u32> for Parents {
     ) -> bool {
         graph.datum(datum).data() == input.data()
     }
-
-    fn compare_labels(
-        &self,
-        _graph: &Names,
-        _input: &ScopeQuery<'_, u32>,
-        left: ScopeGraphPathLabel<'_, Label>,
-        right: ScopeGraphPathLabel<'_, Label>,
-    ) -> Option<Ordering> {
-        Some(compare(left, right))
-    }
 }
 
 /// `LEVELS` nested blocks, each with a parent edge to the enclosing one and
@@ -263,13 +253,18 @@ fn assert_diamond_routes(graph: &Names, index: &ScopeResolutionIndex, diamonds: 
 
 /// Resolves every reference of the chain on the first-datum walk and counts
 /// the resolved ones: those that name a block, which the parents reach.
-fn first_resolved_count(graph: &Names, config: ScopeResolutionConfig) -> usize {
+fn first_resolved_count(graph: &Names, config: PathSearchConfig) -> usize {
     graph
         .reference_ids()
         .filter(|&reference| {
-            ScopeFirstResolution::try_compute(graph, reference, &Parents, config)
-                .expect("the parents form a chain")
-                .is_resolved()
+            ScopeFirstResolution::try_compute(
+                graph,
+                ScopeQuery::from_reference(graph, reference),
+                &Parents,
+                config,
+            )
+            .expect("the parents form a chain")
+            .is_resolved()
         })
         .count()
 }
@@ -279,21 +274,26 @@ fn first_resolved_count(graph: &Names, config: ScopeResolutionConfig) -> usize {
 fn ephemeral_resolved_count(
     graph: &Names,
     cache: &mut ScopeEnvironmentCache<bool, u32>,
-    config: ScopeResolutionConfig,
+    config: PathSearchConfig,
 ) -> usize {
     graph
         .reference_ids()
         .filter(|&reference| {
             let stored = graph.reference(reference);
             cache
-                .resolve_from(graph, stored.scope(), stored.data(), &Lexical, config)
+                .resolve(
+                    graph,
+                    ScopeQuery::new(stored.scope(), stored.data()),
+                    &Lexical,
+                    config,
+                )
                 .is_resolved()
         })
         .count()
 }
 
 pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
-    let config = ScopeResolutionConfig::new();
+    let config = PathSearchConfig::default();
     let (chain, leaf) = lexical_chain();
     benchmark_case!(
         suite,
@@ -304,7 +304,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "scope_index_cached_lexical_chain",
-        || ScopeResolutionIndex::compute_cached(&chain, &Lexical, config),
+        || ScopeEnvironmentCache::new(&chain).index(&chain, &Lexical, config),
         |index| assert_chain_resolved(&chain, index)
     );
     benchmark_case!(
@@ -376,7 +376,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         suite.case(
             cached,
             &[],
-            || ScopeResolutionIndex::compute_cached(&graph, &Lexical, config),
+            || ScopeEnvironmentCache::new(&graph).index(&graph, &Lexical, config),
             |index| assert_diamond_routes(&graph, index, diamonds),
         );
     }

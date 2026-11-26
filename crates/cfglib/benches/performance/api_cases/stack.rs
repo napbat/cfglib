@@ -9,8 +9,8 @@
 //! paths and stitching all pay one rejected extension per definition.
 
 use cfglib::{
-    StackGraph, StackNodeId, StackPartialPathConfig, StackPartialPathDatabase,
-    StackResolutionIndex, StackSearchConfig,
+    PathSearchConfig, StackFileId, StackGraph, StackNodeId, StackNodeKind,
+    StackPartialPathDatabase, StackResolutionIndex,
 };
 
 use super::BenchmarkSuite;
@@ -26,6 +26,27 @@ const JOINED_SYMBOLS: usize = 256;
 
 type Stack = StackGraph<(), u32, (), ()>;
 
+/// Adds a node of `kind` to `file`.
+fn node(graph: &mut Stack, file: StackFileId, kind: StackNodeKind<u32>) -> StackNodeId {
+    graph.add_node(file, kind, ()).expect("a valid file node")
+}
+
+const fn reference(symbol: u32) -> StackNodeKind<u32> {
+    StackNodeKind::PushSymbol {
+        symbol,
+        is_reference: true,
+    }
+}
+
+const fn definition(symbol: u32, is_definition: bool) -> StackNodeKind<u32> {
+    StackNodeKind::PopSymbol {
+        symbol,
+        is_definition,
+    }
+}
+
+const SCOPE: StackNodeKind<u32> = StackNodeKind::Scope { exported: false };
+
 /// One file of `DECOY_REFERENCES` references. Each pushes its symbol, hops
 /// through `DECOY_HOPS` scopes, and pops it at its definition; every scope also
 /// has an edge to a pop of another symbol, which every path rejects. The decoy
@@ -36,26 +57,20 @@ fn decoy_chain() -> (Stack, Vec<(StackNodeId, StackNodeId)>) {
     let mut bindings = Vec::with_capacity(DECOY_REFERENCES);
     for index in 0..DECOY_REFERENCES {
         let symbol = fixture_u32(index);
-        let reference = graph
-            .add_push_symbol_node(file, symbol, true, ())
-            .expect("known file");
-        let definition = graph
-            .add_pop_symbol_node(file, symbol, true, ())
-            .expect("known file");
-        let decoy = graph
-            .add_pop_symbol_node(file, u32::MAX, false, ())
-            .expect("known file");
+        let use_site = node(&mut graph, file, reference(symbol));
+        let declaration = node(&mut graph, file, definition(symbol, true));
+        let decoy = node(&mut graph, file, definition(u32::MAX, false));
         let scopes: Vec<StackNodeId> = (0..DECOY_HOPS)
-            .map(|_| graph.add_scope_node(file, false, ()).expect("known file"))
+            .map(|_| node(&mut graph, file, SCOPE))
             .collect();
         let mut add = |source, target| {
             graph
                 .add_edge(source, target, 0, ())
                 .expect("file-local edge");
         };
-        add(reference, scopes[0]);
+        add(use_site, scopes[0]);
         for (hop, &scope) in scopes.iter().enumerate() {
-            let onward = scopes.get(hop + 1).copied().unwrap_or(definition);
+            let onward = scopes.get(hop + 1).copied().unwrap_or(declaration);
             if hop % 2 == 0 {
                 add(scope, decoy);
                 add(scope, onward);
@@ -64,7 +79,7 @@ fn decoy_chain() -> (Stack, Vec<(StackNodeId, StackNodeId)>) {
                 add(scope, decoy);
             }
         }
-        bindings.push((reference, definition));
+        bindings.push((use_site, declaration));
     }
     (graph, bindings)
 }
@@ -80,23 +95,15 @@ fn joined_files() -> (Stack, Vec<(StackNodeId, StackNodeId)>) {
     let mut bindings = Vec::with_capacity(JOINED_SYMBOLS);
     for index in 0..JOINED_SYMBOLS {
         let symbol = fixture_u32(index);
-        let reference = graph
-            .add_push_symbol_node(client, symbol, true, ())
-            .expect("known file");
-        let scope = graph
-            .add_scope_node(client, false, ())
-            .expect("known file");
-        let definition = graph
-            .add_pop_symbol_node(library, symbol, true, ())
-            .expect("known file");
-        graph
-            .add_edge(reference, scope, 0, ())
-            .expect("file-local edge");
-        graph.add_edge(scope, root, 0, ()).expect("edge to the root");
-        graph
-            .add_edge(root, definition, 0, ())
-            .expect("edge from the root");
-        bindings.push((reference, definition));
+        let use_site = node(&mut graph, client, reference(symbol));
+        let scope = node(&mut graph, client, SCOPE);
+        let declaration = node(&mut graph, library, definition(symbol, true));
+        for (source, target) in [(use_site, scope), (scope, root), (root, declaration)] {
+            graph
+                .add_edge(source, target, 0, ())
+                .expect("a file-local edge or one that touches the root");
+        }
+        bindings.push((use_site, declaration));
     }
     (graph, bindings)
 }
@@ -109,11 +116,12 @@ fn assert_bound(index: &StackResolutionIndex<u32>, bindings: &[(StackNodeId, Sta
 }
 
 pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
+    let config = PathSearchConfig::default();
     let (chain, chain_bindings) = decoy_chain();
     benchmark_case!(
         suite,
         "stack_resolution_index_linear",
-        || StackResolutionIndex::try_compute_linear(&chain, StackSearchConfig::new()),
+        || StackResolutionIndex::try_compute_linear(&chain, config),
         |index| assert_bound(
             index.as_ref().expect("every query is linear"),
             &chain_bindings
@@ -124,20 +132,23 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "stack_resolution_index_direct",
-        || StackResolutionIndex::compute(&joined, StackSearchConfig::new()),
+        || StackResolutionIndex::compute(&joined, config),
         |index| assert_bound(index, &bindings)
     );
     benchmark_case!(
         suite,
         "stack_partial_paths_joined_files",
-        || StackPartialPathDatabase::compute(&joined, StackPartialPathConfig::new()),
+        || StackPartialPathDatabase::compute(&joined, config),
         |database| assert_eq!(database.path_count(), 2 * JOINED_SYMBOLS)
     );
-    let database = StackPartialPathDatabase::compute(&joined, StackPartialPathConfig::new());
+    let database = StackPartialPathDatabase::compute(&joined, config);
     benchmark_case!(
         suite,
         "stack_resolution_index_stitched",
-        || StackResolutionIndex::compute_from_partials(&joined, &database, StackSearchConfig::new()),
-        |index| assert_bound(index, &bindings)
+        || StackResolutionIndex::try_compute_stitched(&joined, &database, config),
+        |index| assert_bound(
+            index.as_ref().expect("the database matches the graph"),
+            &bindings
+        )
     );
 }

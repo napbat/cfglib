@@ -4,59 +4,45 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use crate::graph::search::PathFrontier;
+use crate::graph::search::{PathFrontier, PathSearchConfig};
 
 use super::partial::{StackPartialPathDatabase, StackPartialPathId};
 use super::path::{StackPath, StackPathError};
-use super::search::{SearchState, StackResolution, StackResolutionIndex, StackSearchConfig};
+use super::search::{SearchState, StackResolution, StackResolutionIndex};
 use super::storage::{StackGraph, StackNodeId};
 
 impl<S: Clone + Eq> StackResolution<S> {
-    /// Resolve one reference by stitching precomputed per-file summaries.
-    ///
-    /// Use [`try_compute_from_partials`](Self::try_compute_from_partials) when
-    /// the seed is not already known to be a source reference.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `reference` is not a source reference node or `database`
-    /// contains a summary whose stored edge is no longer live in `graph`.
-    #[must_use]
-    pub fn compute_from_partials<F, N, E>(
-        graph: &StackGraph<F, S, N, E>,
-        database: &StackPartialPathDatabase,
-        reference: StackNodeId,
-        config: StackSearchConfig,
-    ) -> Self {
-        Self::try_compute_from_partials(graph, database, reference, config)
-            .expect("stitched stack resolution requires a source reference node")
-    }
-
     /// Resolve one reference by replaying compatible cached summaries.
     ///
     /// Summary replay checks the same symbol/scope stack transitions as direct
     /// search. A summary or stored edge may occur at most once in a stitched
     /// path. The resulting complete paths use the same precedence shadowing as
-    /// [`compute`](Self::compute).
+    /// [`compute`](Self::compute). The length bound counts the stored edges
+    /// of the stitched path, and a prefix is one stitched path.
     ///
     /// # Errors
     ///
-    /// Returns [`StackPathError::UnknownNode`] when `reference` is outside the
-    /// graph, or [`StackPathError::NotReference`] when it is not a source
-    /// reference node. Stale summaries return [`StackPathError::UnknownEdge`].
-    pub fn try_compute_from_partials<F, N, E>(
+    /// Returns [`StackPathError::UnknownEdge`] when `database` holds a
+    /// summary whose stored edge `graph` no longer has: the database is stale
+    /// for that graph.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `reference` is out of range, retired, or not a source
+    /// reference node.
+    pub fn try_compute_stitched<F, N, E>(
         graph: &StackGraph<F, S, N, E>,
         database: &StackPartialPathDatabase,
         reference: StackNodeId,
-        config: StackSearchConfig,
+        config: PathSearchConfig,
     ) -> Result<Self, StackPathError> {
-        let initial = StackPath::from_reference(graph, reference)?;
+        let initial = StackPath::from_reference(graph, reference);
         let mut frontier = PathFrontier::new(config.order);
         frontier.push(StitchWork {
             path: initial,
             partials: Vec::new(),
         });
-        let mut state = SearchState::new(config);
+        let mut state = SearchState::new(&config);
 
         while let Some(work) = frontier.pop() {
             if !state.budget.admit_expansion() {
@@ -75,17 +61,14 @@ impl<S: Clone + Eq> StackResolution<S> {
                 if !state.budget.admit_length(work.path.len() + partial.len()) {
                     continue;
                 }
-                let mut next = work.path.clone();
-                if let Err(error) = partial.append_to(graph, &mut next) {
-                    if matches!(
-                        error,
-                        StackPathError::UnknownNode(_) | StackPathError::UnknownEdge(_)
-                    ) {
-                        return Err(error);
+                let next = match partial.append_to(graph, work.path.clone()) {
+                    Ok(next) => next,
+                    Err(error @ StackPathError::UnknownEdge(_)) => return Err(error),
+                    Err(_) => {
+                        state.rejected_extension_count += 1;
+                        continue;
                     }
-                    state.rejected_extension_count += 1;
-                    continue;
-                }
+                };
                 if next.is_complete(graph) {
                     state.record_complete(&next);
                 }
@@ -103,20 +86,25 @@ impl<S: Clone + Eq> StackResolution<S> {
 }
 
 impl<S: Clone + Eq> StackResolutionIndex<S> {
-    /// Resolve every source reference from cached per-file summaries.
-    #[must_use]
-    pub fn compute_from_partials<F, N, E>(
+    /// Resolve every source reference in node order by stitching cached
+    /// per-file summaries, and build the reverse bindings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StackPathError::UnknownEdge`] when `database` is stale for
+    /// `graph`, as [`StackResolution::try_compute_stitched`] does.
+    pub fn try_compute_stitched<F, N, E>(
         graph: &StackGraph<F, S, N, E>,
         database: &StackPartialPathDatabase,
-        config: StackSearchConfig,
-    ) -> Self {
+        config: PathSearchConfig,
+    ) -> Result<Self, StackPathError> {
         let resolutions = graph
             .reference_nodes()
             .map(|reference| {
-                StackResolution::compute_from_partials(graph, database, reference, config)
+                StackResolution::try_compute_stitched(graph, database, reference, config)
             })
-            .collect();
-        Self::from_resolutions(graph, resolutions)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self::from_resolutions(graph, resolutions))
     }
 }
 

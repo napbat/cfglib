@@ -436,8 +436,11 @@ pub use events::{DfsEvent, depth_first_events};
 
 mod path_budget;
 mod path_frontier;
+mod path_results;
 pub(crate) use path_budget::PathBudget;
+pub use path_budget::{PathSearchConfig, PathSearchStats};
 pub(crate) use path_frontier::PathFrontier;
+pub(crate) use path_results::{retain_unshadowed, sources_by_target};
 
 #[cfg(test)]
 mod tests;

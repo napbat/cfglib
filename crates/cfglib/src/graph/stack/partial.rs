@@ -5,11 +5,12 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::graph::search::{PathBudget, PathFrontier, SearchOrder};
+use crate::graph::edge_view::EdgeView;
+use crate::graph::search::{PathBudget, PathFrontier, PathSearchConfig, PathSearchStats};
 use crate::identity::define_dense_id;
 
 use super::path::{StackPath, StackPathError};
-use super::storage::{StackEdgeId, StackFileId, StackGraph, StackGraphError, StackNodeId};
+use super::storage::{StackEdgeId, StackFileId, StackGraph, StackNodeId};
 
 #[cfg(feature = "serde")]
 mod stored;
@@ -50,11 +51,12 @@ pub struct StackPartialPath {
 }
 
 impl StackPartialPath {
-    /// Replay this summary onto `path` transactionally.
+    /// Replay this summary onto `path` and return the extended path.
     ///
     /// A summary ending at the jump-to-scope singleton may leave the concrete
     /// path at a different exported scope because the target comes from that
-    /// path's scope stack.
+    /// path's scope stack. The path is consumed: a caller that needs it after
+    /// a rejected replay passes a clone.
     ///
     /// # Errors
     ///
@@ -63,34 +65,17 @@ impl StackPartialPath {
     pub fn append_to<F, S: Clone + Eq, N, E>(
         &self,
         graph: &StackGraph<F, S, N, E>,
-        path: &mut StackPath<S>,
-    ) -> Result<(), StackPathError> {
+        mut path: StackPath<S>,
+    ) -> Result<StackPath<S>, StackPathError> {
         if path.end() != self.start {
             return Err(StackPathError::IncorrectSource {
                 expected: path.end(),
                 actual: self.start,
             });
         }
-        let mut next = path.clone();
         for &edge in &self.edges {
-            next.append(graph, edge)?;
+            path.append(graph, edge)?;
         }
-        *path = next;
-        Ok(())
-    }
-
-    /// Create a concrete path when this summary starts at `reference`.
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`StackPathError`] when the start node is not a source
-    /// reference or replay rejects an edge.
-    pub fn promote<F, S: Clone + Eq, N, E>(
-        &self,
-        graph: &StackGraph<F, S, N, E>,
-    ) -> Result<StackPath<S>, StackPathError> {
-        let mut path = StackPath::from_reference(graph, self.start)?;
-        self.append_to(graph, &mut path)?;
         Ok(path)
     }
 
@@ -134,82 +119,17 @@ impl StackPartialPath {
     }
 }
 
-/// Deterministic bounds and frontier order for per-file path extraction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StackPartialPathConfig {
-    /// Structural frontier order.
-    pub order: SearchOrder,
-    /// Maximum edges in one summary. `None` is unbounded.
-    pub max_path_length: Option<usize>,
-    /// Maximum structural prefixes expanded per file. `None` is unbounded.
-    pub max_path_count: Option<usize>,
-}
-
-impl StackPartialPathConfig {
-    /// Construct an unbounded breadth-first extraction configuration.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            order: SearchOrder::BreadthFirst,
-            max_path_length: None,
-            max_path_count: None,
-        }
-    }
-
-    /// Return this configuration with a different frontier order.
-    #[must_use]
-    pub const fn with_order(mut self, order: SearchOrder) -> Self {
-        self.order = order;
-        self
-    }
-
-    /// Return this configuration with a structural path-length bound.
-    #[must_use]
-    pub const fn with_max_path_length(mut self, max_path_length: usize) -> Self {
-        self.max_path_length = Some(max_path_length);
-        self
-    }
-
-    /// Return this configuration with an expanded-prefix bound.
-    #[must_use]
-    pub const fn with_max_path_count(mut self, max_path_count: usize) -> Self {
-        self.max_path_count = Some(max_path_count);
-        self
-    }
-
-    const fn budget(&self) -> PathBudget {
-        PathBudget::new(self.max_path_length, self.max_path_count)
-    }
-}
-
-impl Default for StackPartialPathConfig {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Work and truncation information for one file's summary extraction.
+///
+/// `search.complete_path_count` is the number of summaries extracted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct StackPartialPathStats {
-    /// Number of structural path prefixes expanded.
-    pub expanded_path_count: usize,
-    /// Number of endpoint summaries produced.
-    pub partial_path_count: usize,
+    /// The prefixes expanded, the summaries recorded, and the bounds that
+    /// refused work.
+    pub search: PathSearchStats,
     /// Extensions skipped because the edge already occurred in the route.
     pub cycle_cut_count: usize,
-    /// Whether an otherwise usable edge hit the path-length bound.
-    pub path_length_limited: bool,
-    /// Whether queued prefixes remained when the path-count bound was reached.
-    pub path_count_limited: bool,
-}
-
-impl StackPartialPathStats {
-    /// Whether configured bounds may have omitted a summary.
-    #[must_use]
-    pub const fn is_truncated(&self) -> bool {
-        self.path_length_limited || self.path_count_limited
-    }
 }
 
 /// All structural path summaries extracted independently for one file.
@@ -229,24 +149,27 @@ impl StackPartialPathSet {
     /// Extract all productive routes between stitching endpoints in `file`.
     ///
     /// Starts are the root singleton, source references in the file, and its
-    /// exported scopes, expanded in that order under either
-    /// [`SearchOrder`]. A summary is recorded at the root, an exported scope,
-    /// a source definition, or the jump singleton. Exploration also continues
-    /// past those endpoints because a definition may be only an intermediate
-    /// pop while symbols remain. Only edges belonging to this file are
-    /// traversed, so the result can be cached by file content.
+    /// exported scopes, expanded in that order in `config.order`. A summary
+    /// is recorded at the root, an exported scope, a source definition, or
+    /// the jump singleton. Exploration also continues past those endpoints
+    /// because a definition may be only an intermediate pop while symbols
+    /// remain. Only edges belonging to this file are traversed, so the result
+    /// can be cached by file content. Every summary is kept, so extraction
+    /// does not read `config.max_complete_path_count`.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// Returns [`StackGraphError::UnknownFile`] when `file` is outside `graph`.
+    /// Panics when `file` does not belong to `graph`.
+    #[must_use]
     pub fn compute<F, S, N, E>(
         graph: &StackGraph<F, S, N, E>,
         file: StackFileId,
-        config: StackPartialPathConfig,
-    ) -> Result<Self, StackGraphError> {
-        if file.index() >= graph.file_count() {
-            return Err(StackGraphError::UnknownFile(file));
-        }
+        config: PathSearchConfig,
+    ) -> Self {
+        assert!(
+            file.index() < graph.file_count(),
+            "stack-graph file {file} is out of range"
+        );
         let mut start_nodes = Vec::with_capacity(graph.file_nodes(file).len() + 1);
         start_nodes.push(graph.root_node());
         start_nodes.extend(graph.file_nodes(file).iter().copied().filter(|&node| {
@@ -263,7 +186,7 @@ impl StackPartialPathSet {
             });
         }
         let mut paths = Vec::new();
-        let mut budget = config.budget();
+        let mut budget = PathBudget::new(&config);
         let mut cycle_cut_count = 0;
 
         while let Some(route) = frontier.pop() {
@@ -301,13 +224,13 @@ impl StackPartialPathSet {
         }
 
         let stats = StackPartialPathStats {
-            expanded_path_count: budget.expanded_path_count(),
-            partial_path_count: paths.len(),
+            search: PathSearchStats {
+                complete_path_count: paths.len(),
+                ..budget.stats()
+            },
             cycle_cut_count,
-            path_length_limited: budget.path_length_limited(),
-            path_count_limited: budget.path_count_limited(),
         };
-        Ok(Self { file, paths, stats })
+        Self { file, paths, stats }
     }
 
     /// File these summaries belong to.
@@ -353,27 +276,17 @@ impl StackPartialPathDatabase {
     pub fn new<F, S, N, E>(graph: &StackGraph<F, S, N, E>) -> Self {
         Self {
             paths: Vec::new(),
-            paths_by_start: vec![Vec::new(); graph.node_bound()],
+            paths_by_start: vec![Vec::new(); graph.graph().node_bound()],
             paths_by_file: vec![Vec::new(); graph.file_count()],
         }
     }
 
     /// Extract and install summaries for every file in identity order.
-    ///
-    /// # Panics
-    ///
-    /// Panics only if an identity produced by `graph.file_ids()` is rejected
-    /// by the same graph, which would violate [`StackGraph`]'s invariants.
     #[must_use]
-    pub fn compute<F, S, N, E>(
-        graph: &StackGraph<F, S, N, E>,
-        config: StackPartialPathConfig,
-    ) -> Self {
+    pub fn compute<F, S, N, E>(graph: &StackGraph<F, S, N, E>, config: PathSearchConfig) -> Self {
         let mut database = Self::new(graph);
         for file in graph.file_ids() {
-            let set = StackPartialPathSet::compute(graph, file, config)
-                .expect("a graph-provided file identity remains valid");
-            database.install(graph, set);
+            database.install(graph, StackPartialPathSet::compute(graph, file, config));
         }
         database
     }
@@ -383,20 +296,20 @@ impl StackPartialPathDatabase {
     /// Existing partial-path identities become tombstones; every other
     /// identity remains stable.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// Returns [`StackGraphError::UnknownFile`] when `file` is outside `graph`.
+    /// Panics when `file` does not belong to `graph`.
     pub fn replace_file<F, S, N, E>(
         &mut self,
         graph: &StackGraph<F, S, N, E>,
         file: StackFileId,
-        config: StackPartialPathConfig,
-    ) -> Result<StackPartialPathStats, StackGraphError> {
-        let set = StackPartialPathSet::compute(graph, file, config)?;
+        config: PathSearchConfig,
+    ) -> StackPartialPathStats {
+        let set = StackPartialPathSet::compute(graph, file, config);
         self.remove_file(file);
         let stats = set.stats();
         self.install(graph, set);
-        Ok(stats)
+        stats
     }
 
     /// Borrow one live summary, or `None` for an unknown identity or tombstone.
@@ -436,8 +349,8 @@ impl StackPartialPathDatabase {
     }
 
     /// Number of summary slots, including replaced-file tombstones.
-    #[must_use]
-    pub fn path_slot_count(&self) -> usize {
+    #[cfg(test)]
+    pub(super) fn path_slot_count(&self) -> usize {
         self.paths.len()
     }
 
@@ -456,7 +369,7 @@ impl StackPartialPathDatabase {
 
     fn install<F, S, N, E>(&mut self, graph: &StackGraph<F, S, N, E>, set: StackPartialPathSet) {
         self.paths_by_start
-            .resize_with(graph.node_bound(), Vec::new);
+            .resize_with(graph.graph().node_bound(), Vec::new);
         self.paths_by_file.resize_with(graph.file_count(), Vec::new);
         for path in set.paths {
             let id = StackPartialPathId::from_index(self.paths.len());
