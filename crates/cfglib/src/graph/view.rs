@@ -305,7 +305,10 @@ impl<G: NodeView> NodeView for Reversed<'_, G> {
 ///
 /// The entry check of every walk that takes a node from its caller: a live
 /// node is below the bound, so one that is not is no node of the view, and the
-/// side tables a walk sizes by the bound could not be indexed by it.
+/// side tables a walk sizes by the bound could not be indexed by it. Inlined,
+/// because the store runs it once per adjacency query and a call there costs
+/// more than the comparison.
+#[inline]
 #[track_caller]
 pub(crate) fn assert_in_bound<G: GraphView>(graph: &G, node: G::NodeId, role: &str) {
     assert!(node.index() < graph.node_bound(), "{role} is out of range");
