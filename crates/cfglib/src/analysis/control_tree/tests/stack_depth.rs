@@ -27,9 +27,7 @@ use crate::display::DisplayInstr;
 use crate::edge::EdgeKind;
 use crate::region::{Handler, HandlerBody, HandlerKind, Region};
 use crate::test_util::{DfInst, df_ff};
-use crate::{
-    ControlDescent, ControlNode, ControlNodeId, ControlTree, ControlVisitor, LiftReport, LoopKind,
-};
+use crate::{ControlDescent, ControlNode, ControlNodeId, ControlTree, ControlVisitor, LoopKind};
 
 /// Levels of a nesting whose graph and tree are linear in their depth.
 const LINEAR_DEPTH: usize = 100_000;
@@ -360,10 +358,10 @@ fn print_shape(build: fn(usize) -> Cfg<DfInst>) {
 }
 
 /// Structure `cfg` and read the tree back the ways a consumer does. Returns
-/// the tree, its report, and what the walk counted. The regionized tree of the
-/// same graph is built and read as well.
-fn structure_and_read(cfg: &Cfg<DfInst>) -> (ControlTree, LiftReport, Census) {
-    let (tree, report) = ControlTree::compute_with_report(cfg);
+/// the tree, which carries its report, and what the walk counted. The
+/// regionized tree of the same graph is built and read as well.
+fn structure_and_read(cfg: &Cfg<DfInst>) -> (ControlTree, Census) {
+    let tree = ControlTree::compute(cfg);
     let census = census(&tree);
     assert_eq!(
         census.nodes,
@@ -379,14 +377,15 @@ fn structure_and_read(cfg: &Cfg<DfInst>) -> (ControlTree, LiftReport, Census) {
         .map(|block| cfg.block(block).instructions().len())
         .sum();
     assert_eq!(instructions, total, "every instruction once");
-    (tree, report, census)
+    (tree, census)
 }
 
 #[test]
 fn a_hundred_thousand_nested_then_arms_structure_on_a_small_stack() {
     on_small_stack(|| {
         let cfg = nested_then_arms(LINEAR_DEPTH);
-        let (tree, report, census) = structure_and_read(&cfg);
+        let (tree, census) = structure_and_read(&cfg);
+        let report = tree.report();
         assert!(report.is_fully_structured(), "{report:?}");
         let ifs = count_nodes(&tree, |node| matches!(node, ControlNode::IfThenElse { .. }));
         assert_eq!(ifs, LINEAR_DEPTH);
@@ -399,7 +398,8 @@ fn a_hundred_thousand_nested_then_arms_structure_on_a_small_stack() {
 fn a_hundred_thousand_else_ifs_structure_on_a_small_stack() {
     on_small_stack(|| {
         let cfg = else_if_chain(LINEAR_DEPTH);
-        let (tree, report, census) = structure_and_read(&cfg);
+        let (tree, census) = structure_and_read(&cfg);
+        let report = tree.report();
         assert!(report.is_fully_structured(), "{report:?}");
         let ifs = count_nodes(&tree, |node| matches!(node, ControlNode::IfThenElse { .. }));
         assert_eq!(ifs, LINEAR_DEPTH);
@@ -412,7 +412,8 @@ fn a_hundred_thousand_else_ifs_structure_on_a_small_stack() {
 fn a_hundred_thousand_ifs_closed_by_a_loop_structure_on_a_small_stack() {
     on_small_stack(|| {
         let cfg = ifs_closed_by_a_loop(LINEAR_DEPTH);
-        let (tree, report, census) = structure_and_read(&cfg);
+        let (tree, census) = structure_and_read(&cfg);
+        let report = tree.report();
         assert!(report.is_fully_structured(), "{report:?}");
         let ifs = count_nodes(&tree, |node| matches!(node, ControlNode::IfThenElse { .. }));
         assert_eq!(ifs, LINEAR_DEPTH);
@@ -427,7 +428,8 @@ fn a_hundred_thousand_ifs_closed_by_a_loop_structure_on_a_small_stack() {
 fn a_hundred_thousand_blocks_in_a_row_structure_on_a_small_stack() {
     on_small_stack(|| {
         let cfg = straight_chain(LINEAR_DEPTH);
-        let (tree, report, _) = structure_and_read(&cfg);
+        let (tree, _) = structure_and_read(&cfg);
+        let report = tree.report();
         assert!(report.is_fully_structured(), "{report:?}");
         let leaves = count_nodes(&tree, |node| {
             matches!(node, ControlNode::Block(_) | ControlNode::Return(_))
@@ -441,7 +443,8 @@ fn a_hundred_thousand_blocks_in_a_row_structure_on_a_small_stack() {
 fn a_hundred_thousand_blocks_in_a_loop_test_structure_on_a_small_stack() {
     on_small_stack(|| {
         let cfg = loop_test_chain(LINEAR_DEPTH);
-        let (tree, report, _) = structure_and_read(&cfg);
+        let (tree, _) = structure_and_read(&cfg);
+        let report = tree.report();
         assert!(report.is_fully_structured(), "{report:?}");
         let tests: Vec<usize> = tree
             .preorder()
@@ -462,7 +465,8 @@ fn a_hundred_thousand_blocks_in_a_loop_test_structure_on_a_small_stack() {
 fn deeply_nested_loops_structure_on_a_small_stack() {
     on_small_stack(|| {
         let cfg = nested_loops(LINEAR_DEPTH);
-        let (tree, report, census) = structure_and_read(&cfg);
+        let (tree, census) = structure_and_read(&cfg);
+        let report = tree.report();
         assert!(report.is_fully_structured(), "{report:?}");
         let whiles = count_nodes(&tree, |node| {
             matches!(
@@ -483,7 +487,8 @@ fn deeply_nested_loops_structure_on_a_small_stack() {
 fn a_hundred_thousand_nested_endless_loops_structure_on_a_small_stack() {
     on_small_stack(|| {
         let cfg = nested_endless_loops(LINEAR_DEPTH);
-        let (tree, report, census) = structure_and_read(&cfg);
+        let (tree, census) = structure_and_read(&cfg);
+        let report = tree.report();
         assert!(report.is_fully_structured(), "{report:?}");
         let endless = count_nodes(&tree, |node| {
             matches!(
@@ -508,7 +513,8 @@ fn a_hundred_thousand_nested_endless_loops_structure_on_a_small_stack() {
 fn deeply_nested_switches_structure_on_a_small_stack() {
     on_small_stack(|| {
         let cfg = nested_switches(LINEAR_DEPTH);
-        let (tree, report, census) = structure_and_read(&cfg);
+        let (tree, census) = structure_and_read(&cfg);
+        let report = tree.report();
         assert!(report.is_fully_structured(), "{report:?}");
         let switches = count_nodes(&tree, |node| matches!(node, ControlNode::Switch { .. }));
         assert_eq!(switches, LINEAR_DEPTH);
@@ -521,7 +527,8 @@ fn deeply_nested_switches_structure_on_a_small_stack() {
 fn deeply_nested_tries_structure_on_a_small_stack() {
     on_small_stack(|| {
         let cfg = nested_tries(TRY_DEPTH);
-        let (tree, report, census) = structure_and_read(&cfg);
+        let (tree, census) = structure_and_read(&cfg);
+        let report = tree.report();
         assert!(report.is_fully_structured(), "{report:?}");
         let tries = count_nodes(&tree, |node| matches!(node, ControlNode::TryCatch { .. }));
         assert_eq!(tries, TRY_DEPTH);
@@ -534,7 +541,8 @@ fn deeply_nested_tries_structure_on_a_small_stack() {
 fn deeply_nested_tries_at_one_anchor_structure_on_a_small_stack() {
     on_small_stack(|| {
         let cfg = nested_tries_at_one_anchor(TRY_DEPTH);
-        let (tree, report, census) = structure_and_read(&cfg);
+        let (tree, census) = structure_and_read(&cfg);
+        let report = tree.report();
         // Each inner pad leaves the tries around it, which the report lists
         // as gotos. This test is about the nesting, so it checks only that no
         // region or label is left over.
@@ -551,7 +559,8 @@ fn deeply_nested_tries_at_one_anchor_structure_on_a_small_stack() {
 fn deeply_nested_goto_labels_structure_on_a_small_stack() {
     on_small_stack(|| {
         let cfg = nested_goto_labels(LINEAR_DEPTH);
-        let (tree, report, census) = structure_and_read(&cfg);
+        let (tree, census) = structure_and_read(&cfg);
+        let report = tree.report();
         assert!(report.unresolved_labels.is_empty(), "{report:?}");
         let labels = count_nodes(&tree, |node| matches!(node, ControlNode::Label { .. }));
         assert_eq!(labels, LINEAR_DEPTH);

@@ -54,10 +54,10 @@ fn catch(
     .unwrap()
 }
 
-fn tree_text(cfg: &Cfg<MockInst>) -> (String, crate::LiftReport) {
-    let (tree, report) = ControlTree::compute_with_report(cfg);
-    check(cfg, &tree, &report, "dead code");
-    (pseudocode(cfg, &tree), report)
+fn tree_text(cfg: &Cfg<MockInst>) -> (String, crate::StructuringReport) {
+    let tree = ControlTree::compute(cfg);
+    check(cfg, &tree, tree.report(), "dead code");
+    (pseudocode(cfg, &tree), tree.report().clone())
 }
 
 #[test]
@@ -96,7 +96,8 @@ fn a_dead_protected_block_that_leaves_through_an_emptied_join_is_dropped() {
     cfg.add_edge(b[3], b[4], Fallthrough);
     cfg.add_edge(b[5], b[3], ExceptionLeave);
     catch(&mut cfg, &[b[1], b[5]], b[2], &[b[2]], None);
-    let (tree, report) = ControlTree::compute_with_report_treating_empty(&cfg, &[b[3], b[5]]);
+    let tree = ControlTree::compute_treating_empty(&cfg, &[b[3], b[5]]);
+    let report = tree.report();
     let text = pseudocode(&cfg, &tree);
     assert!(!text.contains("b5"), "{text}");
     assert!(report.gotos.is_empty(), "{report:?}");

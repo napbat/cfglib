@@ -391,7 +391,8 @@ fn promoting_extents_claims_exactly_the_blocks_the_handler_entry_dominates<I: Is
         ]
     );
     let region = RegionId::from_raw(0);
-    let (before, report) = ControlTree::compute_with_report(built.cfg());
+    let before = ControlTree::compute(built.cfg());
+    let report = before.report();
     assert_eq!(report.unstructured_regions, [region]);
     assert!(
         !before
@@ -414,7 +415,8 @@ fn promoting_extents_claims_exactly_the_blocks_the_handler_entry_dominates<I: Is
     assert_eq!(body.blocks().unwrap(), &blocks_of(&built, &[2, 3, 4]));
     assert!(verify(built.cfg()).is_ok());
 
-    let (after, report) = ControlTree::compute_with_report(built.cfg());
+    let after = ControlTree::compute(built.cfg());
+    let report = after.report();
     assert_empty(&report.unstructured_regions);
     let arms: Vec<_> = after
         .preorder()

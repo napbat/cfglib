@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use cfglib::{
     BlockId, Cfg, ControlDescent, ControlNode, ControlNodeId, ControlTree, ControlVisitor,
-    LiftReport,
+    StructuringReport,
 };
 
 use crate::coverage::blocks_under;
@@ -141,7 +141,7 @@ pub fn label_blocks_in_tree(tree: &ControlTree) -> Vec<BlockId> {
 /// A report is the tree's own account of its gotos: one diagnostic per `Goto`
 /// node, naming the same target, and a label for each target unless the report
 /// lists it as unresolved.
-pub fn assert_report_matches_tree(tree: &ControlTree, report: &LiftReport) {
+pub fn assert_report_matches_tree(tree: &ControlTree, report: &StructuringReport) {
     let mut from_tree = goto_targets_in_tree(tree);
     let mut from_report: Vec<BlockId> = report.gotos.iter().map(|goto| goto.target).collect();
     from_tree.sort();
@@ -159,7 +159,7 @@ pub fn assert_report_matches_tree(tree: &ControlTree, report: &LiftReport) {
 
 /// A fully structured report is exactly the one with nothing to say, and the
 /// tree holds no `Goto` to back that up.
-pub fn assert_fully_structured(tree: &ControlTree, report: &LiftReport) {
+pub fn assert_fully_structured(tree: &ControlTree, report: &StructuringReport) {
     assert!(report.is_fully_structured(), "{report:?}");
     assert_eq!(report.gotos, []);
     assert_eq!(report.unresolved_labels, []);

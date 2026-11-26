@@ -197,7 +197,8 @@ fn structuring_ignores_a_removed_region_but_still_structures_the_live_one() {
     let live = protect(&mut first.cfg, &[second_body], vec![catch(second_pad)]);
     first.cfg.remove_region(first.region);
 
-    let (tree, report) = ControlTree::compute_with_report(&first.cfg);
+    let tree = ControlTree::compute(&first.cfg);
+    let report = tree.report();
 
     assert!(
         !report.unstructured_regions.contains(&first.region),
@@ -269,7 +270,8 @@ fn statement_granular_protection_is_block_granular_once_split_at_its_boundaries(
     assert_eq!(index.protecting(entry), None);
     assert_eq!(index.protecting(tail), None);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert!(report.is_fully_structured(), "{report:?}");
     let [try_node] = tree
         .preorder()

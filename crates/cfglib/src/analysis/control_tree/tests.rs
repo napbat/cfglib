@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 
 use super::{
     BlockSpan, CatchHandler, ControlBody, ControlNode, ControlNodeId, ControlRun, ControlTree,
-    GotoReason, LiftReport, LoopKind,
+    GotoReason, LoopKind, StructuringReport,
 };
 use crate::block::BlockId;
 use crate::builder::CfgBuilder;
@@ -153,7 +153,8 @@ fn while_shaped_cfg() -> (Cfg<MockInst>, BlockId, BlockId, BlockId) {
 #[test]
 fn machine_while_loop_is_classified_pre_tested() {
     let (cfg, header, body, exit) = while_shaped_cfg();
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     let loops = find_loops(&tree);
     assert_eq!(loops.len(), 1, "{tree:?}");
     let (found_header, kind, loop_body) = loops[0];
@@ -195,7 +196,8 @@ fn exit_on_true_while_loop_is_classified_pre_tested() {
     cfg.add_edge(header, body, EdgeKind::ConditionalFalse);
     cfg.add_edge(body, header, EdgeKind::Jump);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     let loops = find_loops(&tree);
     assert_eq!(loops.len(), 1, "{tree:?}");
     let (_, kind, loop_body) = loops[0];
@@ -236,7 +238,8 @@ fn multi_block_condition_chain_is_classified_pre_tested() {
     cfg.add_edge(body, latch, EdgeKind::Fallthrough);
     cfg.add_edge(latch, header, EdgeKind::Jump);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     let loops = find_loops(&tree);
     assert_eq!(loops.len(), 1, "{tree:?}");
     let (found_header, kind, loop_body) = loops[0];
@@ -285,7 +288,8 @@ fn machine_do_while_loop_is_classified_post_tested() {
     cfg.add_edge(latch, body, EdgeKind::ConditionalTrue);
     cfg.add_edge(latch, exit, EdgeKind::ConditionalFalse);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     let loops = find_loops(&tree);
     assert_eq!(loops.len(), 1, "{tree:?}");
     let (_, kind, loop_body) = loops[0];
@@ -329,7 +333,8 @@ fn loop_exit_from_the_body_becomes_a_break() {
     cfg.add_edge(body, tail, EdgeKind::ConditionalFalse);
     cfg.add_edge(tail, header, EdgeKind::Jump);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert!(
         has_node_kind(&tree, |node| matches!(
             node,
@@ -370,7 +375,8 @@ fn multi_level_exit_becomes_a_labeled_break() {
     cfg.add_edge(inner_body, inner_header, EdgeKind::ConditionalFalse);
     cfg.add_edge(outer_latch, outer_header, EdgeKind::Jump);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert!(
         has_node_kind(&tree, |node| matches!(
             node,
@@ -455,7 +461,8 @@ fn switch_records_case_edges_and_default_arm() {
     cfg.add_edge(case_b, merge, EdgeKind::Unconditional);
     cfg.add_edge(default_arm, merge, EdgeKind::Unconditional);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     let mut checked = false;
     for id in tree.preorder() {
         if let ControlNode::Switch {
@@ -731,7 +738,8 @@ fn lift_jump_edge_into_an_owned_target_continues_inline() {
 
     cfg.add_edge(cfg.entry(), target, EdgeKind::Jump);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert!(
         !has_node_kind(&tree, |n| matches!(n, ControlNode::Goto { .. })),
         "should continue inline: {tree:?}"
@@ -765,7 +773,8 @@ fn lift_jump_edge_produces_goto_and_reports_it() {
     })
     .unwrap();
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert!(
         has_node_kind(&tree, |n| matches!(n, ControlNode::Goto { .. })),
         "should contain Goto node: {tree:?}"
@@ -801,7 +810,8 @@ fn lift_jump_to_the_merge_converges_silently() {
     cfg.add_edge(jumper, target, EdgeKind::Jump);
     cfg.add_edge(target, end, EdgeKind::Fallthrough);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert!(
         report.is_fully_structured(),
         "the join jump is structural: {report:?}"
@@ -841,7 +851,8 @@ fn lift_jump_target_gets_label() {
     cfg.add_edge(target, end, EdgeKind::Fallthrough);
     cfg.add_edge(other, end, EdgeKind::Fallthrough);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert!(
         has_node_kind(&tree, |n| matches!(
             n,
@@ -865,8 +876,9 @@ fn structured_lifts_report_no_degradation() {
         MockInst(FlowEffect::Return, "ret"),
     ])
     .unwrap();
-    let (_, report) = ControlTree::compute_with_report(&cfg);
-    assert_eq!(report, LiftReport::default(), "{report:?}");
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
+    assert_eq!(*report, StructuringReport::default(), "{report:?}");
 }
 
 #[test]
@@ -878,7 +890,8 @@ fn tree_does_not_borrow_or_clone_the_instruction_type() {
     cfg.block_mut(cfg.entry()).push(NotClone(7));
     let entry = cfg.entry();
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     let ControlNode::Return(span) = *tree.node(tree.root()) else {
         panic!("a terminal entry block lifts as a return");
     };
@@ -887,7 +900,7 @@ fn tree_does_not_borrow_or_clone_the_instruction_type() {
     let read = &span.instructions(&cfg)[0];
     assert!(core::ptr::eq(read, source));
     assert_eq!(read.0, 7);
-    assert_eq!(report, LiftReport::default());
+    assert_eq!(*report, StructuringReport::default());
     // The tree is independent of the graph it was computed from.
     drop(cfg);
     assert_eq!(tree.node_count(), 1);

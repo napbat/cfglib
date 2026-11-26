@@ -55,7 +55,8 @@ fn handler_branch_with_a_diverging_arm_converges_at_the_continuation() {
     ))
     .unwrap();
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     let text = pseudocode(&cfg, &tree);
     assert!(report.is_fully_structured(), "{report:?}\n{text}");
     let handlers = find_try_handlers(&tree).expect("the region is a try");
@@ -107,7 +108,8 @@ fn handler_dispatch_with_a_diverging_default_converges_at_the_continuation() {
     ))
     .unwrap();
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     let text = pseudocode(&cfg, &tree);
     assert!(report.is_fully_structured(), "{report:?}\n{text}");
     let handlers = find_try_handlers(&tree).expect("the region is a try");
@@ -174,7 +176,8 @@ fn rethrowing_handler_of_a_try_nested_last_in_a_try_is_structured() {
     inner.parent = Some(outer);
     cfg.add_region(inner).unwrap();
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     let text = pseudocode(&cfg, &tree);
     assert!(report.is_fully_structured(), "{report:?}\n{text}");
     let (outer_body, _, _) = find_try_catch(&tree).expect("the outer region is a try");
@@ -225,7 +228,8 @@ fn an_arm_converges_through_a_block_without_code_another_arm_passed() {
     ))
     .unwrap();
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     let text = pseudocode(&cfg, &tree);
     assert!(report.is_fully_structured(), "{report:?}\n{text}");
     assert_eq!(text.matches("after").count(), 1, "{text}");
@@ -260,7 +264,8 @@ fn a_goto_through_a_block_without_code_names_the_block_it_leads_to() {
     cfg.add_edge(second_test, c, EdgeKind::ConditionalFalse);
     cfg.add_edge(b, empty, EdgeKind::Fallthrough);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     let text = pseudocode(&cfg, &tree);
     assert_eq!(
         report.gotos,

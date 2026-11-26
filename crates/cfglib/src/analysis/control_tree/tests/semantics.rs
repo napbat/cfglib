@@ -25,7 +25,7 @@ use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::{EdgeId, EdgeKind};
 use crate::{
-    BlockSpan, ControlBody, ControlNode, ControlNodeId, ControlTree, LiftReport, LoopKind,
+    BlockSpan, ControlBody, ControlNode, ControlNodeId, ControlTree, LoopKind, StructuringReport,
 };
 
 /// How many streams of decisions the runs of one graph consume.
@@ -81,7 +81,7 @@ fn raise_target<I, E>(cfg: &Cfg<I, E>, seed: u64, block: BlockId) -> Option<Bloc
 }
 
 /// Whether the regions keep the contract of
-/// [`ControlTree::compute_with_report`]: a handler's blocks (its entry, its
+/// [`ControlTree::compute`]: a handler's blocks (its entry, its
 /// filter funclet, its known extent) are not protected by its region, are not
 /// the function entry, and belong to that handler alone. A region that breaks
 /// this may hold a block in two places, so the tree has no single behavior to
@@ -271,7 +271,7 @@ enum Flow {
 fn run_tree<I, E>(
     cfg: &Cfg<I, E>,
     tree: &ControlTree,
-    report: &LiftReport,
+    report: &StructuringReport,
     seed: u64,
 ) -> (Trace, Ending) {
     let mut units = Vec::new();
@@ -615,7 +615,7 @@ impl<I, E> TreeRun<'_, I, E> {
 pub(super) fn assert_runs_alike<I, E>(
     cfg: &Cfg<I, E>,
     tree: &ControlTree,
-    report: &LiftReport,
+    report: &StructuringReport,
     context: &str,
 ) {
     assert_streams_alike(cfg, tree, report, context, STREAM_COUNT);
@@ -766,7 +766,7 @@ fn blocks_of_body(tree: &ControlTree, body: ControlBody) -> BTreeSet<BlockId> {
 pub(super) fn assert_streams_alike<I, E>(
     cfg: &Cfg<I, E>,
     tree: &ControlTree,
-    report: &LiftReport,
+    report: &StructuringReport,
     context: &str,
     streams: u64,
 ) {

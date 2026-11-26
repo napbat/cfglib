@@ -106,7 +106,8 @@ fn compute_does_not_invent_structure_for_unknown_handler_body() {
     })
     .unwrap();
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert!(
         !has_node_kind(&tree, |node| matches!(node, ControlNode::TryCatch { .. })),
         "unknown extents must remain unstructured: {tree:?}"
@@ -323,7 +324,8 @@ fn switch_case_leaving_a_region_ends_at_its_continuation() {
     })
     .unwrap();
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     let case_count = tree.preorder().find_map(|id| match *tree.node(id) {
         ControlNode::Switch { cases, .. } => Some(tree.cases(cases).len()),
         _ => None,
@@ -366,7 +368,8 @@ fn handler_tail_beyond_the_declared_extent_is_preserved() {
     })
     .unwrap();
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     let handlers = find_try_handlers(&tree).expect("region structures");
     assert!(
         !body_contains_block(&tree, handlers[0].body, handler_tail),
@@ -596,7 +599,8 @@ fn filter_funclet_code_is_emitted() {
     })
     .unwrap();
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert!(
         contains_block(&tree, filter_block),
         "the filter funclet's predicate code may not be dropped: {tree:?}"
@@ -641,7 +645,8 @@ fn a_branch_inside_a_filter_funclet_merges_like_reachable_code() {
     })
     .unwrap();
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert_eq!(report.swept_blocks, [filter]);
     assert!(
         report.gotos.is_empty(),

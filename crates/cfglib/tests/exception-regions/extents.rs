@@ -494,15 +494,16 @@ fn recovered_extents_promoted_on_a_derived_graph_let_the_control_tree_emit_the_t
     fixture
         .cfg
         .add_edge(end, fixture.join, EdgeKind::Fallthrough);
-    let (_, before) = ControlTree::compute_with_report(&fixture.cfg);
-    assert_eq!(before.unstructured_regions, [region]);
+    let before = ControlTree::compute(&fixture.cfg);
+    assert_eq!(before.report().unstructured_regions, [region]);
 
     let extents = recover_by_kind(&fixture.cfg);
     let mut derived = fixture.cfg.clone();
     let decisions = promote_exclusive_extents(&mut derived, &extents);
 
     assert_eq!(decisions, [(region, ExtentPromotionStatus::Promoted)]);
-    let (tree, report) = ControlTree::compute_with_report(&derived);
+    let tree = ControlTree::compute(&derived);
+    let report = tree.report();
     assert!(report.is_fully_structured(), "{report:?}");
     assert_eq!(
         tree.preorder()

@@ -395,7 +395,7 @@ fn check_control_tree<I: Isa>(built: &Built<I>) {
     if !regions_are_well_formed(cfg) {
         return;
     }
-    let (tree, _) = ControlTree::compute_with_report(cfg);
+    let tree = ControlTree::compute(cfg);
     let mut visited: Vec<u64> = Vec::new();
     tree.for_each_instruction(cfg, |_, instruction| {
         visited.push(instruction.address().into());

@@ -31,11 +31,13 @@ pub struct GotoDiagnostic {
 
 /// Exactly which parts of a structuring degraded to unstructured flow.
 ///
-/// Consumers use this to decide between structured emission and a
+/// Every [`ControlTree`](super::ControlTree) carries the report of the run
+/// that computed it, read with [`ControlTree::report`](super::ControlTree::report).
+/// Consumers use it to decide between structured emission and a
 /// lower-level fallback per construct — and to attach precise diagnostics —
 /// instead of inferring fidelity from the shape of the returned tree.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct LiftReport {
+pub struct StructuringReport {
     /// Every emitted goto in emission order.
     pub gotos: Vec<GotoDiagnostic>,
     /// Blocks emitted by the completeness sweep rather than the structured
@@ -59,7 +61,7 @@ pub struct LiftReport {
     pub unresolved_labels: Vec<BlockId>,
 }
 
-impl LiftReport {
+impl StructuringReport {
     /// Returns whether every transfer was represented structurally.
     #[must_use]
     pub fn is_fully_structured(&self) -> bool {

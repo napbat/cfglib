@@ -26,7 +26,7 @@
 //!
 //! # What is reported
 //!
-//! [`ControlTree::compute_with_report`] also returns a [`LiftReport`], which
+//! [`ControlTree::report`] reads the [`StructuringReport`] of the run, which
 //! lists exactly which transfers fell back to a `Goto` ([`GotoDiagnostic`],
 //! [`GotoReason`]), which blocks only the completeness sweep reached, which
 //! exception regions stayed ordinary flow, and which goto labels found no
@@ -36,7 +36,7 @@
 //!
 //! # Variants
 //!
-//! [`ControlTree::compute_with_report_treating_empty`] structures the graph as
+//! [`ControlTree::compute_treating_empty`] structures the graph as
 //! if some blocks held no instructions, for a lifter that has already decided
 //! that a block's only instruction is a transfer the structure expresses.
 //!
@@ -53,7 +53,7 @@
 //! A branch or switch rejoins at the immediate post-dominator of its block. A
 //! region that no path leaves has no exit, so the post-dominator tree cuts it
 //! and a branch with an arm that never exits has no merge point; see
-//! [`ControlTree::compute_with_report`] for what that means for the shape of
+//! [`ControlTree::compute`] for what that means for the shape of
 //! the tree.
 //!
 //! # Examples
@@ -72,8 +72,8 @@
 //! cfg.add_edge(cfg.entry(), merge, EdgeKind::ConditionalFalse);
 //! cfg.add_edge(then_block, merge, EdgeKind::Fallthrough);
 //!
-//! let (tree, report) = ControlTree::compute_with_report(&cfg);
-//! assert!(report.is_fully_structured());
+//! let tree = ControlTree::compute(&cfg);
+//! assert!(tree.report().is_fully_structured());
 //!
 //! let text = tree
 //!     .to_pseudocode(|sink, point| {
@@ -101,7 +101,7 @@ pub use node::{
     BlockSpan, CatchHandler, ControlBody, ControlNode, ControlNodeId, ControlRun, LoopKind,
     SwitchCase,
 };
-pub use report::{GotoDiagnostic, GotoReason, LiftReport};
+pub use report::{GotoDiagnostic, GotoReason, StructuringReport};
 pub use spl::{PathDecomposition, SplDecomposition, SplError, SplNode, SplNodeId, SplRun};
 pub use tree::{ChildBodies, ControlTree};
 pub use walk::{ControlDescent, ControlVisitor, Preorder};

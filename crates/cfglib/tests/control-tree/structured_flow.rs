@@ -20,8 +20,9 @@ fn if_else_diamond_is_one_branch_with_two_arms_followed_by_its_join() {
     flow.fall(then_arm, join);
     flow.fall(else_arm, join);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let statements = top_level(&tree);
     let [
@@ -55,8 +56,9 @@ fn if_without_else_leaves_the_else_arm_empty() {
     flow.branch(entry, then_arm, join);
     flow.fall(then_arm, join);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let [
         ControlNode::IfThenElse {
@@ -86,8 +88,9 @@ fn if_whose_true_arm_is_the_join_keeps_its_work_in_the_else_slot() {
     flow.branch(entry, join, else_arm);
     flow.fall(else_arm, join);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let [
         ControlNode::IfThenElse {
@@ -119,8 +122,9 @@ fn else_if_chain_nests_each_test_in_the_previous_else_arm() {
         flow.fall(arm, join);
     }
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let [
         ControlNode::IfThenElse {
@@ -166,8 +170,9 @@ fn early_return_arm_leaves_no_merge_so_the_rest_moves_into_the_else_arm() {
     flow.branch(entry, bail, work);
     flow.fall(work, done);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let [
         ControlNode::IfThenElse {
@@ -199,8 +204,9 @@ fn straight_line_blocks_become_a_sequence_of_leaves_ending_in_a_return() {
     flow.fall(flow.entry(), middle);
     flow.fall(middle, last);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let statements = top_level(&tree);
     assert!(matches!(
@@ -221,8 +227,9 @@ fn straight_line_blocks_become_a_sequence_of_leaves_ending_in_a_return() {
 fn a_single_block_function_is_its_own_root() {
     let flow = Flow::starting_with("return 0");
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     assert_eq!(tree.node_count(), 1);
     assert!(matches!(*tree.node(tree.root()), ControlNode::Return(_)));
@@ -233,7 +240,8 @@ fn a_single_block_function_is_its_own_root() {
 fn a_graph_without_instructions_has_an_empty_tree() {
     let cfg = Cfg::<&'static str>::new();
 
-    let (tree, report) = structure_and_check(&cfg);
+    let tree = structure_and_check(&cfg);
+    let report = tree.report();
 
     assert!(report.is_fully_structured());
     assert!(tree.is_empty());
@@ -267,9 +275,10 @@ fn an_empty_join_block_leaves_no_node_and_prints_like_a_graph_without_it() {
     without_join.fall(yes, tail);
     without_join.fall(no, tail);
 
-    let (tree, report) = structure_and_check(&with_join.cfg);
-    let (plain_tree, _) = structure_and_check(&without_join.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&with_join.cfg);
+    let report = tree.report();
+    let plain_tree = structure_and_check(&without_join.cfg);
+    assert_fully_structured(&tree, report);
 
     assert_eq!(
         pseudocode(&with_join.cfg, &tree),
@@ -287,8 +296,9 @@ fn unreachable_code_is_not_part_of_the_tree() {
     flow.fall(flow.entry(), exit);
 
     // The entry reaches the exit; nothing reaches `dead`.
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let text = pseudocode(&flow.cfg, &tree);
     assert!(!text.contains("dead()"), "{text}");
@@ -319,8 +329,9 @@ fn simplify_and_compact_keep_the_program_and_the_tree_covers_the_survivors() {
     flow.fall(join, tail);
     flow.fall(dead, tail);
 
-    let (before, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&before, &report);
+    let before = structure_and_check(&flow.cfg);
+    let report = before.report();
+    assert_fully_structured(&before, report);
     let program = pseudocode(&flow.cfg, &before);
     assert_eq!(
         program,
@@ -331,8 +342,9 @@ fn simplify_and_compact_keep_the_program_and_the_tree_covers_the_survivors() {
     flow.cfg.compact(NodeOrder::Insertion);
 
     let live = flow.cfg.block_ids().collect();
-    let (after, report) = structure_and_check_covering(&flow.cfg, &live);
-    assert_fully_structured(&after, &report);
+    let after = structure_and_check_covering(&flow.cfg, &live);
+    let report = after.report();
+    assert_fully_structured(&after, report);
     assert_eq!(pseudocode(&flow.cfg, &after), program);
     assert!(
         flow.cfg.block_count() < 9,
@@ -377,7 +389,7 @@ fn edge_payloads_do_not_change_the_tree() {
     plain.fall(plain_then, plain_join);
 
     assert_eq!(
-        ControlTree::compute_with_report(&with_payload),
-        ControlTree::compute_with_report(&plain.cfg)
+        ControlTree::compute(&with_payload),
+        ControlTree::compute(&plain.cfg)
     );
 }

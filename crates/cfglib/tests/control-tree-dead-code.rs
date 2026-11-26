@@ -69,7 +69,8 @@ fn dead_pad_with_a_loop(closing: Closing) -> (Cfg<&'static str>, BlockId) {
 fn a_loop_in_a_dead_catch_pad_is_a_loop() {
     for closing in [Closing::SelfEdge, Closing::Tagged, Closing::Untagged] {
         let (cfg, header) = dead_pad_with_a_loop(closing);
-        let (tree, report) = ControlTree::compute_with_report(&cfg);
+        let tree = ControlTree::compute(&cfg);
+        let report = tree.report();
 
         let loops: Vec<BlockId> = tree
             .preorder()
@@ -107,7 +108,8 @@ fn a_dead_block_that_returns_into_live_code_makes_no_loop_of_it() {
     cfg.block_mut(dead).push("dead");
     cfg.add_edge(dead, cfg.entry(), EdgeKind::Back);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
 
     assert!(
         tree.preorder()

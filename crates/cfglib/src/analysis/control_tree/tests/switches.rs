@@ -38,7 +38,8 @@ fn switch_arm_leaving_the_loop() -> Cfg<MockInst> {
 #[test]
 fn case_arm_that_leaves_the_loop_is_a_break_like_the_same_arm_of_an_if() {
     let cfg = switch_arm_leaving_the_loop();
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
 
     assert!(report.is_fully_structured(), "{report:?}\n{tree:?}");
     assert!(!has_node_kind(&tree, |node| matches!(
@@ -118,7 +119,8 @@ fn a_case_that_leaves_an_endless_loop_is_a_break() {
     cfg.add_edge(work, dispatch, EdgeKind::Jump);
     cfg.add_edge(rest, dispatch, EdgeKind::Jump);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert!(
         report.is_fully_structured(),
         "{report:?}\n{}",

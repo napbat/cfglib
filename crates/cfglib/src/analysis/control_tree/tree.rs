@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 use super::node::{
     BlockSpan, CatchHandler, ControlBody, ControlNode, ControlNodeId, ControlRun, SwitchCase,
 };
+use super::report::StructuringReport;
 use crate::edge::EdgeId;
 
 /// One table of runs: elements are appended in runs and never moved.
@@ -68,8 +69,12 @@ impl Tables {
         }
     }
 
-    pub(super) fn finish(self, root: ControlNodeId) -> ControlTree {
-        ControlTree { tables: self, root }
+    pub(super) fn finish(self, root: ControlNodeId, report: StructuringReport) -> ControlTree {
+        ControlTree {
+            tables: self,
+            root,
+            report,
+        }
     }
 
     pub(super) fn node(&self, id: ControlNodeId) -> &ControlNode {
@@ -230,6 +235,13 @@ fn node_body_count(tables: &Tables, node: ControlNode) -> usize {
 /// every child has a lower handle than its parent and the [`root`](Self::root)
 /// has the highest.
 ///
+/// # Report
+///
+/// The tree keeps the [`StructuringReport`] of the run that computed it:
+/// which transfers fell back to a goto, which blocks only the completeness
+/// sweep reached, which regions stayed ordinary flow, and which goto labels
+/// found no anchor. [`report`](Self::report) reads it.
+///
 /// # Examples
 ///
 /// ```
@@ -257,9 +269,17 @@ fn node_body_count(tables: &Tables, node: ControlNode) -> usize {
 pub struct ControlTree {
     tables: Tables,
     pub(super) root: ControlNodeId,
+    report: StructuringReport,
 }
 
 impl ControlTree {
+    /// Which parts of the structuring that computed this tree degraded to
+    /// unstructured flow.
+    #[must_use]
+    pub const fn report(&self) -> &StructuringReport {
+        &self.report
+    }
+
     /// The root node: the whole function body. A function with one statement
     /// has that statement as its root; any other body is a
     /// [`ControlNode::Sequence`].

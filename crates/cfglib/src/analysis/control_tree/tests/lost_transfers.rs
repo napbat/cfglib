@@ -19,9 +19,10 @@ const MANY_STREAMS: u64 = 64;
 
 /// Compute the tree of `cfg`, check every invariant, and compare many runs.
 fn check_equivalent<I, E>(cfg: &Cfg<I, E>, context: &str) {
-    let (tree, report) = ControlTree::compute_with_report(cfg);
-    check(cfg, &tree, &report, context);
-    assert_streams_alike(cfg, &tree, &report, context, MANY_STREAMS);
+    let tree = ControlTree::compute(cfg);
+    let report = tree.report();
+    check(cfg, &tree, report, context);
+    assert_streams_alike(cfg, &tree, report, context, MANY_STREAMS);
 }
 
 #[test]
@@ -68,8 +69,9 @@ fn a_back_edge_from_dead_code_does_not_loop_the_live_program() {
         &[Terminator::Exit, Terminator::One(0, EdgeKind::Back)],
         &[1; 2],
     );
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
-    check(&cfg, &tree, &report, "dead back edge");
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
+    check(&cfg, &tree, report, "dead back edge");
     assert!(
         !tree
             .preorder()
@@ -187,8 +189,9 @@ fn no_transfer_repeats_after_a_branch_whose_arms_all_transfer() {
     cfg.add_edge(again, header, EdgeKind::Jump);
     cfg.add_edge(work, header, EdgeKind::Jump);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
-    check(&cfg, &tree, &report, "branches that all transfer");
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
+    check(&cfg, &tree, report, "branches that all transfer");
     assert!(report.is_fully_structured(), "{report:?}");
     assert!(
         !has_transfer_after_a_branch(&tree),
@@ -231,8 +234,9 @@ fn no_goto_follows_a_try_whose_paths_all_return() {
     })
     .unwrap();
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
-    check(&cfg, &tree, &report, "a try whose paths all return");
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
+    check(&cfg, &tree, report, "a try whose paths all return");
     assert!(report.is_fully_structured(), "{report:?}");
     assert!(
         !tree

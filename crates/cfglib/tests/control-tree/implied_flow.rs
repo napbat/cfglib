@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cfglib::{
-    BlockId, Cfg, ControlBody, ControlNode, ControlNodeId, ControlTree, LiftReport, LoopKind,
+    BlockId, Cfg, ControlBody, ControlNode, ControlNodeId, ControlTree, LoopKind, StructuringReport,
 };
 
 /// The normal flow edges a tree implies, found by giving the tree a
@@ -302,7 +302,7 @@ fn contract_hollow_blocks(
 pub fn assert_flow_matches_graph_with<I, E>(
     cfg: &Cfg<I, E>,
     tree: &ControlTree,
-    report: &LiftReport,
+    report: &StructuringReport,
     covered: &BTreeSet<BlockId>,
     hollow: &impl Fn(BlockId) -> bool,
 ) {
@@ -346,7 +346,7 @@ pub fn assert_flow_matches_graph_with<I, E>(
 pub fn assert_flow_matches_graph<I, E>(
     cfg: &Cfg<I, E>,
     tree: &ControlTree,
-    report: &LiftReport,
+    report: &StructuringReport,
     covered: &BTreeSet<BlockId>,
 ) {
     assert_flow_matches_graph_with(cfg, tree, report, covered, &|block| {

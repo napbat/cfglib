@@ -10,7 +10,7 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 
 use super::node::{BlockSpan, ControlNode};
-use super::report::LiftReport;
+use super::report::StructuringReport;
 use super::tree::{ControlTree, Tables};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
@@ -134,48 +134,16 @@ struct Structurer<'cfg, I, E> {
     /// Where the arms of a branch beside a diverging arm rejoin, for the
     /// last stop that needed it.
     rejoins: rejoin::Rejoins,
-    report: LiftReport,
+    report: StructuringReport,
     tables: Tables,
     /// Which nodes of `tables` control can never run to the end of.
     completion: Completion,
 }
 
 impl ControlTree {
-    /// Structure a [`Cfg`] into a control tree.
-    ///
-    /// Convenience wrapper over [`compute_with_report`](Self::compute_with_report)
-    /// that discards the structural fidelity report.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use cfglib::{Cfg, ControlNode, ControlTree, EdgeKind};
-    ///
-    /// // entry --true--> body --jump--> entry, entry --false--> exit
-    /// let mut cfg = Cfg::<&str>::new();
-    /// let body = cfg.new_block();
-    /// let exit = cfg.new_block();
-    /// cfg.block_mut(cfg.entry()).push("test");
-    /// cfg.block_mut(body).push("work");
-    /// cfg.block_mut(exit).push("done");
-    /// cfg.add_edge(cfg.entry(), body, EdgeKind::ConditionalTrue);
-    /// cfg.add_edge(cfg.entry(), exit, EdgeKind::ConditionalFalse);
-    /// cfg.add_edge(body, cfg.entry(), EdgeKind::Jump);
-    ///
-    /// let tree = ControlTree::compute(&cfg);
-    /// let loops = tree
-    ///     .preorder()
-    ///     .filter(|&id| matches!(tree.node(id), ControlNode::Loop { .. }))
-    ///     .count();
-    /// assert_eq!(loops, 1);
-    /// ```
-    #[must_use]
-    pub fn compute<I, E>(cfg: &Cfg<I, E>) -> Self {
-        Self::compute_with_report(cfg).0
-    }
-
-    /// Structure a [`Cfg`] into a control tree and report exactly which
-    /// parts degraded to unstructured flow.
+    /// Structure a [`Cfg`] into a control tree, keeping the
+    /// [`report`](Self::report) of exactly which parts degraded to
+    /// unstructured flow.
     ///
     /// The structurer handles:
     /// - Structured flow: `IfThenElse`, `Loop` (classified pre-tested,
@@ -209,10 +177,10 @@ impl ControlTree {
     /// structural boundary becomes an explicit [`ControlNode::Goto`], and
     /// every owned block the structured walk did not emit (refused targets,
     /// handler pads entered only through exception edges, dead pads and their
-    /// tails, filter funclets) is appended at the end under its label. The returned
-    /// [`LiftReport`] lists every emitted goto, swept block, and unstructured
-    /// region so consumers can degrade per construct instead of guessing from
-    /// the tree shape.
+    /// tails, filter funclets) is appended at the end under its label. The
+    /// tree's [`report`](Self::report) lists every emitted goto, swept block,
+    /// and unstructured region so consumers can degrade per construct instead
+    /// of guessing from the tree shape.
     ///
     /// # Merge points and exit-free regions
     ///
@@ -381,16 +349,40 @@ impl ControlTree {
     /// Panics (debug) when a [`HandlerBody::Known`](crate::HandlerBody::Known)
     /// omits its own handler entry — a frontend bug; release builds treat such
     /// a region as unstructured flow.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cfglib::{Cfg, ControlNode, ControlTree, EdgeKind};
+    ///
+    /// // entry --true--> body --jump--> entry, entry --false--> exit
+    /// let mut cfg = Cfg::<&str>::new();
+    /// let body = cfg.new_block();
+    /// let exit = cfg.new_block();
+    /// cfg.block_mut(cfg.entry()).push("test");
+    /// cfg.block_mut(body).push("work");
+    /// cfg.block_mut(exit).push("done");
+    /// cfg.add_edge(cfg.entry(), body, EdgeKind::ConditionalTrue);
+    /// cfg.add_edge(cfg.entry(), exit, EdgeKind::ConditionalFalse);
+    /// cfg.add_edge(body, cfg.entry(), EdgeKind::Jump);
+    ///
+    /// let tree = ControlTree::compute(&cfg);
+    /// assert!(tree.report().is_fully_structured());
+    /// let loops = tree
+    ///     .preorder()
+    ///     .filter(|&id| matches!(tree.node(id), ControlNode::Loop { .. }))
+    ///     .count();
+    /// assert_eq!(loops, 1);
+    /// ```
     #[must_use]
-    pub fn compute_with_report<I, E>(cfg: &Cfg<I, E>) -> (Self, LiftReport) {
+    pub fn compute<I, E>(cfg: &Cfg<I, E>) -> Self {
         Structurer::new(cfg, &[]).run()
     }
 
-    /// Structure a [`Cfg`] as if the blocks of `empty` held no instructions,
-    /// and report which parts degraded to unstructured flow.
+    /// Structure a [`Cfg`] as if the blocks of `empty` held no instructions.
     ///
     /// The structurer reads only how many instructions a block has, so the
-    /// result is the tree [`compute_with_report`](Self::compute_with_report)
+    /// result, report included, is the tree [`compute`](Self::compute)
     /// gives for a copy of `cfg` whose `empty` blocks were cleared: an emptied
     /// block has no [`ControlNode::Block`] or [`ControlNode::Return`] leaf, its
     /// condition spans are empty, and an emptied block with a single
@@ -405,7 +397,7 @@ impl ControlTree {
     ///
     /// Panics when a block of `empty` lies beyond `cfg`'s
     /// [`block_bound`](Cfg::block_bound), and under the conditions of
-    /// [`compute_with_report`](Self::compute_with_report).
+    /// [`compute`](Self::compute).
     ///
     /// # Examples
     ///
@@ -423,7 +415,7 @@ impl ControlTree {
     /// cfg.add_edge(cfg.entry(), exit, EdgeKind::ConditionalFalse);
     /// cfg.add_edge(hop, exit, EdgeKind::Jump);
     ///
-    /// let (tree, _) = ControlTree::compute_with_report_treating_empty(&cfg, &[hop]);
+    /// let tree = ControlTree::compute_treating_empty(&cfg, &[hop]);
     /// let text = tree
     ///     .to_pseudocode(|sink, point| {
     ///         sink.write_str(cfg.block(point.block).instructions()[point.inst_idx])
@@ -432,10 +424,7 @@ impl ControlTree {
     /// assert!(!text.contains("jmp"));
     /// ```
     #[must_use]
-    pub fn compute_with_report_treating_empty<I, E>(
-        cfg: &Cfg<I, E>,
-        empty: &[BlockId],
-    ) -> (Self, LiftReport) {
+    pub fn compute_treating_empty<I, E>(cfg: &Cfg<I, E>, empty: &[BlockId]) -> Self {
         Structurer::new(cfg, empty).run()
     }
 }
@@ -495,13 +484,13 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             handler_claims: claims.handlers,
             unemitted_targets: BTreeSet::new(),
             rejoins: rejoin::Rejoins::default(),
-            report: LiftReport::default(),
+            report: StructuringReport::default(),
             tables: Tables::new(),
             completion: Completion::default(),
         }
     }
 
-    fn run(mut self) -> (ControlTree, LiftReport) {
+    fn run(mut self) -> ControlTree {
         let cfg = self.cfg;
         let order = cfg.reverse_postorder();
         self.anchors = try_catch::region_anchors(cfg, &order);
@@ -560,7 +549,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             &[only] => only,
             _ => self.tables.push_node(ControlNode::Sequence(root_body)),
         };
-        (self.tables.finish(root), self.report)
+        self.tables.finish(root, self.report)
     }
 
     /// Emit the code at `pending`, which nothing structured reached, under

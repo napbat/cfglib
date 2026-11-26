@@ -43,7 +43,8 @@ pub(super) fn blocks<const N: usize>(
 
 /// The structured text of `cfg`, which must structure without a goto.
 pub(super) fn structured(cfg: &Cfg<MockInst>) -> alloc::string::String {
-    let (tree, report) = ControlTree::compute_with_report(cfg);
+    let tree = ControlTree::compute(cfg);
+    let report = tree.report();
     let text = pseudocode(cfg, &tree);
     assert!(report.is_fully_structured(), "{report:?}\n{text}");
     text

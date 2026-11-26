@@ -15,7 +15,7 @@ use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
 use crate::region::{Handler, HandlerBody, HandlerKind, Region};
 use crate::test_util::{DfInst, df_ff};
-use crate::{ControlTree, LiftReport};
+use crate::{ControlTree, StructuringReport};
 
 const BLOCKS: usize = 100_000;
 
@@ -28,10 +28,11 @@ fn new_block(cfg: &mut Cfg<DfInst>) -> BlockId {
 
 /// Structure `cfg` on a small stack and check that every instruction is in the
 /// tree once. Returns the report.
-fn structure_and_cover(build: fn(usize) -> Cfg<DfInst>) -> LiftReport {
+fn structure_and_cover(build: fn(usize) -> Cfg<DfInst>) -> StructuringReport {
     on_small_stack(move || {
         let cfg = build(BLOCKS);
-        let (tree, report) = ControlTree::compute_with_report(&cfg);
+        let tree = ControlTree::compute(&cfg);
+        let report = tree.report();
         let mut seen = 0;
         tree.for_each_instruction(&cfg, |_, _| seen += 1);
         let total: usize = cfg
@@ -40,7 +41,7 @@ fn structure_and_cover(build: fn(usize) -> Cfg<DfInst>) -> LiftReport {
             .sum();
         assert_eq!(seen, total, "every instruction once");
         assert_eq!(report.unresolved_labels, []);
-        report
+        report.clone()
     })
 }
 

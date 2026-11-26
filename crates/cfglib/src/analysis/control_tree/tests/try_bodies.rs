@@ -48,7 +48,8 @@ fn a_try_anchored_at_a_switch_case_is_structured_inside_that_case() {
     })
     .unwrap();
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert_eq!(
         report.unstructured_regions,
         [],
@@ -98,7 +99,8 @@ fn a_region_entered_at_two_blocks_is_not_one_try() {
         })
         .unwrap();
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert_eq!(report.unstructured_regions, [region], "{tree:?}");
     assert!(
         !has_node_kind(&tree, |node| matches!(node, ControlNode::TryCatch { .. })),
@@ -184,7 +186,8 @@ fn a_try_resumes_after_its_body_when_its_handler_leaves_elsewhere() {
     // `first_leaves`, so the two exits differ. The code after the try belongs
     // after it, not in it, and the second try follows the first.
     let (cfg, [between, _]) = two_tries_in_sequence(false);
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     let (try_body, _, _) = find_try_catch(&tree).expect("the first region is a try");
     assert!(
         !body_contains_block(&tree, try_body, between),
@@ -201,7 +204,7 @@ fn a_try_is_not_swallowed_into_the_try_before_it() {
     // to resume at. The unprotected code after it may be lifted into it, but
     // the second region's protected code may not.
     let (cfg, _) = two_tries_in_sequence(true);
-    let (tree, _) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
     assert_eq!(
         count_tries_in_try_bodies(&tree),
         0,
@@ -250,7 +253,8 @@ fn a_try_does_not_take_the_test_block_of_its_loop_from_another_region() {
         .unwrap();
     }
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert_eq!(
         tree.preorder()
             .filter(|&id| matches!(tree.node(id), ControlNode::TryCatch { .. }))

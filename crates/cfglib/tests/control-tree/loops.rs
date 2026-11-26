@@ -48,8 +48,9 @@ fn for_like_loop_is_a_pre_tested_loop_between_its_init_and_its_follow() {
         exit,
     } = sum_loop();
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let [
         ControlNode::Block(init),
@@ -99,8 +100,9 @@ fn while_loop_whose_true_edge_leaves_records_the_inverted_exit() {
     flow.branch(header, exit, body);
     flow.jump(body, header);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let loops = nodes_where(&tree, |node| matches!(node, ControlNode::Loop { .. }));
     let [
@@ -129,8 +131,9 @@ fn condition_chain_of_several_blocks_is_one_pre_test() {
     flow.branch(test, body, exit);
     flow.jump(body, header);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let [
         _,
@@ -160,8 +163,9 @@ fn do_while_loop_tests_in_its_latch_after_the_body() {
     flow.edge(latch, body, EdgeKind::ConditionalTrue);
     flow.edge(latch, exit, EdgeKind::ConditionalFalse);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let [
         _,
@@ -198,8 +202,9 @@ fn do_while_loop_that_exits_on_the_true_edge_negates_its_condition() {
     flow.edge(latch, exit, EdgeKind::ConditionalTrue);
     flow.edge(latch, flow.entry(), EdgeKind::ConditionalFalse);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let [
         ControlNode::Loop {
@@ -224,8 +229,9 @@ fn single_block_spin_loop_is_its_own_latch_with_an_empty_body() {
     flow.edge(flow.entry(), flow.entry(), EdgeKind::ConditionalTrue);
     flow.edge(flow.entry(), exit, EdgeKind::ConditionalFalse);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let [
         ControlNode::Loop {
@@ -262,8 +268,9 @@ fn loop_with_several_latches_and_no_test_is_endless_and_leaves_through_break() {
     flow.edge(even, exit, EdgeKind::ConditionalTrue);
     flow.edge(even, header, EdgeKind::ConditionalFalse);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let loops = nodes_where(&tree, |node| matches!(node, ControlNode::Loop { .. }));
     let [
@@ -298,8 +305,9 @@ fn break_and_continue_resolve_against_the_loop_instead_of_becoming_gotos() {
     flow.branch(done, exit, work);
     flow.jump(work, header);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let continues = nodes_where(&tree, |node| matches!(node, ControlNode::Continue { .. }));
     let breaks = nodes_where(&tree, |node| matches!(node, ControlNode::Break { .. }));
@@ -338,8 +346,9 @@ fn break_out_of_the_inner_of_two_loops_stays_unlabeled() {
     flow.jump(step_j, inner);
     flow.jump(step_i, outer);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let loops = nodes_where(&tree, |node| matches!(node, ControlNode::Loop { .. }));
     assert_eq!(loops.len(), 2);
@@ -370,8 +379,9 @@ fn break_out_of_the_inner_of_two_loops_stays_unlabeled() {
 fn multi_level_break_labels_the_outer_loop_and_names_it() {
     let (flow, outer) = labeled_break_loops();
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let labeled_breaks = nodes_where(
         &tree,
@@ -419,8 +429,9 @@ fn continue_of_the_outer_loop_from_inside_the_inner_one_is_labeled() {
     flow.jump(step_j, inner);
     flow.jump(step_i, outer);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let outer_continues = nodes_where(
         &tree,
@@ -452,8 +463,9 @@ fn transfer_to_the_follow_of_the_inner_loop_that_is_the_outer_header_breaks_the_
     flow.branch(skip, outer, step_j);
     flow.jump(step_j, inner);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     assert_eq!(
         nodes_where(&tree, |node| matches!(node, ControlNode::Label { .. })),

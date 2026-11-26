@@ -187,7 +187,8 @@ fn arms_that_leave_by_their_own_exits_do_not_rejoin() {
     cfg.add_edge(dispatch, second_case, EdgeKind::SwitchCase);
     cfg.add_edge(dispatch, throw, EdgeKind::Fallthrough);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert!(report.is_fully_structured(), "{report:?}");
     let text = super::pseudocode(&cfg, &tree);
     assert!(

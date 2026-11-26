@@ -42,7 +42,8 @@ fn main() {
     cfg.add_edge(even, step, EdgeKind::Fallthrough);
     cfg.add_edge(step, header, EdgeKind::Jump);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert!(report.is_fully_structured(), "{report:?}");
 
     let pseudocode = tree
