@@ -14,6 +14,7 @@ use alloc::vec::Vec;
 use core::convert::Infallible;
 
 use super::RelaxError;
+use crate::graph::fanout::DenseFanout;
 
 #[cfg(test)]
 mod tests;
@@ -387,34 +388,20 @@ impl Layout {
 struct Covering {
     /// The number of leaves, a power of two.
     leaves: usize,
-    /// The spans stored at tree node `node` are
-    /// `spans[starts[node]..starts[node + 1]]`.
-    starts: Vec<usize>,
-    spans: Vec<usize>,
+    /// The spans stored at each tree node.
+    spans: DenseFanout<usize>,
 }
 
 impl Covering {
-    fn new(count: usize, spans: impl Iterator<Item = (usize, usize, usize)> + Clone) -> Self {
+    fn new(count: usize, spans: impl Iterator<Item = (usize, usize, usize)>) -> Self {
         let leaves = count.next_power_of_two();
-        let mut starts = vec![0; 2 * leaves + 1];
-        for (_, low, high) in spans.clone() {
-            Self::decompose(leaves, low, high, |node| starts[node + 1] += 1);
-        }
-        for node in 1..starts.len() {
-            starts[node] += starts[node - 1];
-        }
-        let mut fill = starts.clone();
-        let mut stored = vec![0; starts[starts.len() - 1]];
+        let mut stored = Vec::new();
         for (span, low, high) in spans {
-            Self::decompose(leaves, low, high, |node| {
-                stored[fill[node]] = span;
-                fill[node] += 1;
-            });
+            Self::decompose(leaves, low, high, |node| stored.push((node, span)));
         }
         Self {
             leaves,
-            starts,
-            spans: stored,
+            spans: DenseFanout::from_pairs(2 * leaves, stored),
         }
     }
 
@@ -440,7 +427,7 @@ impl Covering {
     fn spans_over(&self, item: usize, mut visit: impl FnMut(usize)) {
         let mut node = item + self.leaves;
         while node > 0 {
-            for &span in &self.spans[self.starts[node]..self.starts[node + 1]] {
+            for &span in self.spans.get(node) {
                 visit(span);
             }
             node >>= 1;

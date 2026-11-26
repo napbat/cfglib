@@ -35,6 +35,7 @@ use super::node_fixpoint::{self, NodeStore, TryNodeProblem};
 use super::worklist::Worklist;
 use crate::graph::edge_traverse::EdgeAdjacency;
 use crate::graph::edge_view::EdgeView;
+use crate::graph::fanout::DenseFanout;
 use crate::graph::traverse::{Adjacency, by_axis};
 use crate::graph::view::Direction;
 use crate::graph::view::{DenseId, GraphView, RootedView};
@@ -370,25 +371,27 @@ impl<F: Clone, V> StreamedNodes<F, V> {
         };
         let count = order.order().len();
         let mut last_read = Vec::with_capacity(count);
-        let mut release_start = vec![0_u32; count + 2];
         for (at, &node) in order.order().iter().enumerate() {
             let mut end = ends[at];
             for next in downstream.neighbors(graph, node) {
                 end = end.max(ends[position(next)]);
             }
             last_read.push(end);
-            release_start[end as usize + 1] += 1;
         }
-        for row in 1..release_start.len() {
-            release_start[row] += release_start[row - 1];
-        }
-        let mut cursor = release_start.clone();
-        let mut release = vec![0_u32; count];
-        for (&node, &end) in order.order().iter().zip(&last_read) {
-            let slot = &mut cursor[end as usize];
-            release[*slot as usize] = word(node.index());
-            *slot += 1;
-        }
+        let mut release_start = Vec::new();
+        let mut release = Vec::new();
+        DenseFanout::group_into(
+            count + 1,
+            || {
+                order
+                    .order()
+                    .iter()
+                    .zip(&last_read)
+                    .map(|(&node, &end)| (end, word(node.index())))
+            },
+            &mut release_start,
+            &mut release,
+        );
         Self {
             bottom,
             direction,

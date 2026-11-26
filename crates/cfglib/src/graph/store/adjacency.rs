@@ -25,10 +25,10 @@
 
 extern crate alloc;
 
-use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
+use crate::graph::fanout::DenseFanout;
 use crate::graph::view::{Direction, assert_in_bound};
 use crate::identity::{NO_INDEX, slot, word};
 
@@ -212,7 +212,7 @@ impl DeltaChains {
             return Err("the adjacency chains do not match the nodes and delta edges");
         }
         for chain in 0..2 {
-            let mut seen = vec![false; self.next.len()];
+            let mut seen = alloc::vec![false; self.next.len()];
             for (node, links) in self.last.iter().enumerate() {
                 let last = links[chain];
                 if last == NO_INDEX {
@@ -633,8 +633,8 @@ impl<ET: IdTag> Iterator for AdjacentEdges<'_, ET> {
 
 /// Build one direction's compressed adjacency index over compacted edges.
 ///
-/// One counting pass, then a stable placement pass, so the edges inside every
-/// node's run keep their insertion order.
+/// The counting sort of [`DenseFanout`], so the edges inside every node's run
+/// keep their insertion order.
 pub(super) fn compress<E, NT: IdTag>(
     edges: &[EdgeRecord<E, NT>],
     nodes: usize,
@@ -644,24 +644,19 @@ pub(super) fn compress<E, NT: IdTag>(
         Direction::Forward => edge.source.index(),
         Direction::Backward => edge.target.index(),
     };
-
-    let mut offsets = vec![0_u32; nodes + 1];
-    for edge in edges {
-        offsets[endpoint(edge) + 1] += 1;
-    }
-    for index in 1..offsets.len() {
-        offsets[index] += offsets[index - 1];
-    }
-
-    let mut next = offsets[..nodes].to_vec();
-    let mut adjacency = vec![0_u32; edges.len()];
-    for (index, edge) in edges.iter().enumerate() {
-        let slot = &mut next[endpoint(edge)];
-        adjacency[*slot as usize] =
-            u32::try_from(index).expect("compacted edge index exceeds u32::MAX");
-        *slot += 1;
-    }
-
+    let mut offsets = Vec::new();
+    let mut adjacency = Vec::new();
+    DenseFanout::group_into(
+        nodes,
+        || {
+            edges
+                .iter()
+                .enumerate()
+                .map(|(index, edge)| (endpoint(edge), word(index)))
+        },
+        &mut offsets,
+        &mut adjacency,
+    );
     (offsets, adjacency)
 }
 

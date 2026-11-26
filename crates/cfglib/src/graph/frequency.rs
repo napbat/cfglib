@@ -64,8 +64,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::Reverse;
 use core::marker::PhantomData;
+use core::ops::Range;
 
 use super::edge_view::EdgeView;
+use super::fanout::DenseFanout;
 use super::loop_forest::{LoopForest, LoopId};
 use super::view::{DenseId, RootedView};
 use crate::block::BlockId;
@@ -417,7 +419,7 @@ struct Propagation {
     units: Vec<usize>,
     /// Where the units of each level start in `units`, with one more entry
     /// for the end.
-    starts: Vec<usize>,
+    starts: Vec<u32>,
     /// The finished loops: each set is a finished loop with everything in it,
     /// or a node in no finished loop.
     sets: DisjointSet,
@@ -480,19 +482,14 @@ impl Propagation {
             level[bound + x] = forest.parent(lp).map_or(top, LoopId::index);
         }
         let members = || live.iter().copied().chain(bound..elements);
-        let mut starts = vec![0; top + 2];
-        for element in members() {
-            starts[level[element] + 1] += 1;
-        }
-        for slot in 1..starts.len() {
-            starts[slot] += starts[slot - 1];
-        }
-        let mut fill = starts.clone();
-        let mut units = vec![0; starts[top + 1]];
-        for element in members() {
-            units[fill[level[element]]] = element;
-            fill[level[element]] += 1;
-        }
+        let mut starts = Vec::new();
+        let mut units = Vec::new();
+        DenseFanout::group_into(
+            top + 1,
+            || members().map(|element| (level[element], element)),
+            &mut starts,
+            &mut units,
+        );
         Self {
             bound,
             top,
@@ -519,6 +516,11 @@ impl Propagation {
         let mut order = self.loops.clone();
         order.sort_by_key(|&lp| Reverse(forest.depth(lp)));
         order
+    }
+
+    /// Where the units of `level` lie in `units`.
+    fn level_units(&self, level: usize) -> Range<usize> {
+        slot(self.starts[level])..slot(self.starts[level + 1])
     }
 
     /// The unit of `level` that holds node slot `node`, if any.
@@ -548,7 +550,7 @@ impl Propagation {
         self.scale[level] = scale;
         self.exit_range[level] = (first, self.exits.len());
         let element = self.bound + level;
-        for slot in self.starts[level]..self.starts[level + 1] {
+        for slot in self.level_units(level) {
             self.sets.union(self.units[slot], element);
         }
         let root = self.sets.find(element);
@@ -572,7 +574,7 @@ impl Propagation {
         let Some(start) = self.unit_of(level, header) else {
             return 0;
         };
-        let (begin, end) = (self.starts[level], self.starts[level + 1]);
+        let Range { start: begin, end } = self.level_units(level);
         for slot in begin..end {
             self.scratch.local[self.units[slot]] = slot - begin;
         }
@@ -623,7 +625,7 @@ impl Propagation {
         let mut arc_starts = core::mem::take(&mut self.scratch.arc_starts);
         arcs.clear();
         arc_starts.clear();
-        for slot in self.starts[level]..self.starts[level + 1] {
+        for slot in self.level_units(level) {
             arc_starts.push(arcs.len());
             let unit = self.units[slot];
             if unit < self.bound {
@@ -712,7 +714,7 @@ impl Propagation {
             if runs == 0 {
                 continue;
             }
-            for &unit in &self.units[self.starts[level]..self.starts[level + 1]] {
+            for &unit in &self.units[self.level_units(level)] {
                 let entering = mul_div(runs, self.mass[unit], u128::from(ONE));
                 if unit < self.bound {
                     block[unit] = saturate(round_shift(entering, MASS_SHIFT - FREQUENCY_SHIFT));

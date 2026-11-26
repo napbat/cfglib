@@ -10,13 +10,13 @@
 //! time, so the whole check is O(n + m).
 
 extern crate alloc;
-use alloc::vec;
 use alloc::vec::Vec;
 
 use super::{SplDecomposition, SplError, SplNode, SplNodeId};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::graph::epoch::EpochMarks;
+use crate::graph::fanout::DenseFanout;
 use crate::identity::{NO_INDEX, slot, word};
 
 /// Check that the grammar's construction of `decomposition` gives exactly the
@@ -37,28 +37,16 @@ pub(super) fn verify<I, E>(
 
     // The targets the construction makes, grouped by source.
     let bound = cfg.block_bound();
-    let mut starts = vec![0_usize; bound + 1];
-    for &(source, _) in &made {
-        starts[source.index() + 1] += 1;
-    }
-    for index in 1..starts.len() {
-        starts[index] += starts[index - 1];
-    }
-    let mut cursor = starts.clone();
-    let mut targets = vec![cfg.entry(); made.len()];
-    for &(source, target) in &made {
-        targets[cursor[source.index()]] = target;
-        cursor[source.index()] += 1;
-    }
+    let targets: DenseFanout<BlockId, BlockId> = DenseFanout::from_pairs(bound, made);
 
     // Each source marks its targets in the graph and in the construction.
     let mut in_graph = EpochMarks::new(bound);
     let mut in_made = EpochMarks::new(bound);
     for source in cfg.block_ids() {
-        let at = source.index();
+        let made_here = targets.get(source);
         in_graph.reset();
         in_made.reset();
-        for &target in &targets[starts[at]..starts[at + 1]] {
+        for &target in made_here {
             in_made.mark(target.index());
         }
         for edge in cfg.outgoing(source) {
@@ -68,7 +56,7 @@ pub(super) fn verify<I, E>(
             }
             in_graph.mark(target.index());
         }
-        if targets[starts[at]..starts[at + 1]]
+        if made_here
             .iter()
             .any(|target| !in_graph.is_marked(target.index()))
         {

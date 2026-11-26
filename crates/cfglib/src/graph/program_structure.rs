@@ -53,6 +53,7 @@ use core::marker::PhantomData;
 use crate::block::BlockId;
 use crate::edge::EdgeId;
 use crate::graph::edge_view::EdgeView;
+use crate::graph::fanout::DenseFanout;
 use crate::graph::view::{DenseId, RootedView};
 use crate::identity::{NO_INDEX, define_dense_id, slot, word};
 use closed::{ClosedGraph, slot_edge};
@@ -299,20 +300,20 @@ impl<N: DenseId, E: DenseId> ProgramStructureTree<N, E> {
                 slot(parent)
             }
         };
-        let mut child_starts = vec![0_u32; count + 2];
-        for &parent in &found.parent {
-            child_starts[group(parent) + 1] += 1;
-        }
-        for index in 1..child_starts.len() {
-            child_starts[index] += child_starts[index - 1];
-        }
-        let mut cursor = child_starts.clone();
-        let mut children = vec![0_u32; count];
-        for (region, &parent) in found.parent.iter().enumerate() {
-            let at = &mut cursor[group(parent)];
-            children[slot(*at)] = word(region);
-            *at += 1;
-        }
+        let mut child_starts = Vec::new();
+        let mut children = Vec::new();
+        DenseFanout::group_into(
+            count + 1,
+            || {
+                found
+                    .parent
+                    .iter()
+                    .enumerate()
+                    .map(|(region, &parent)| (group(parent), word(region)))
+            },
+            &mut child_starts,
+            &mut children,
+        );
         let children_of =
             |group: usize| &children[slot(child_starts[group])..slot(child_starts[group + 1])];
 
@@ -355,24 +356,20 @@ impl<N: DenseId, E: DenseId> ProgramStructureTree<N, E> {
             .iter()
             .map(|&region| renumber(region))
             .collect();
-        let mut member_starts = vec![0_u32; count + 1];
-        for &region in &innermost {
-            if region != NO_INDEX {
-                member_starts[slot(region) + 1] += 1;
-            }
-        }
-        for index in 1..member_starts.len() {
-            member_starts[index] += member_starts[index - 1];
-        }
-        let mut cursor = member_starts.clone();
-        let mut members = vec![N::from_index(0); slot(member_starts[count])];
-        for (block, &region) in innermost.iter().enumerate() {
-            if region != NO_INDEX {
-                let at = &mut cursor[slot(region)];
-                members[slot(*at)] = N::from_index(block);
-                *at += 1;
-            }
-        }
+        let mut member_starts = Vec::new();
+        let mut members = Vec::new();
+        DenseFanout::group_into(
+            count,
+            || {
+                innermost
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &region)| region != NO_INDEX)
+                    .map(|(block, &region)| (slot(region), N::from_index(block)))
+            },
+            &mut member_starts,
+            &mut members,
+        );
 
         Self {
             regions,

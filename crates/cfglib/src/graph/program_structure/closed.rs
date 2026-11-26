@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 use super::SeseEdge;
 use crate::graph::dominator::CutBuffers;
 use crate::graph::edge_view::EdgeView;
+use crate::graph::fanout::DenseFanout;
 use crate::graph::view::{DenseId, RootedView};
 use crate::identity::{NO_INDEX, slot, word};
 
@@ -40,11 +41,10 @@ pub(super) struct ClosedGraph<N> {
     source: Vec<u32>,
     /// The target of each slot, [`NO_INDEX`] for a slot outside the closed graph.
     target: Vec<u32>,
-    /// Where each node's incident slots start in `incident`, with one more
-    /// entry for the end.
-    starts: Vec<u32>,
-    /// Where each node's outgoing slots end and its incoming slots start.
-    out_ends: Vec<u32>,
+    /// Where the incident slots of each node start in `incident`, two runs
+    /// per node: entry `2 * node` starts its outgoing slots and entry
+    /// `2 * node + 1` its incoming ones, with one more entry for the end.
+    runs: Vec<u32>,
     /// The slots incident to each node: its outgoing slots in adjacency order,
     /// then its incoming ones. A self-loop is in both parts.
     incident: Vec<u32>,
@@ -80,13 +80,9 @@ impl<N: DenseId> ClosedGraph<N> {
 
         let mut source = vec![NO_INDEX; slots];
         let mut target = vec![NO_INDEX; slots];
-        let mut out_degree = vec![0_u32; bound + 1];
-        let mut in_degree = vec![0_u32; bound + 1];
         let mut link = |edge: usize, from: usize, to: usize| {
             source[edge] = word(from);
             target[edge] = word(to);
-            out_degree[from] += 1;
-            in_degree[to] += 1;
         };
         for block in (0..bound).filter(|&block| reachable[block]) {
             for edge in graph.outgoing(N::from_index(block)) {
@@ -98,36 +94,27 @@ impl<N: DenseId> ClosedGraph<N> {
             link(edge_bound + 1 + offset, outlet.index(), bound);
         }
 
-        let mut starts = Vec::with_capacity(bound + 2);
-        let mut out_ends = Vec::with_capacity(bound + 1);
-        let mut end = 0_u32;
-        starts.push(end);
-        for (outgoing, incoming) in out_degree.iter().zip(&in_degree) {
-            out_ends.push(end + outgoing);
-            end += outgoing + incoming;
-            starts.push(end);
-        }
-
         // The outgoing part fills in adjacency order, block by block; every
         // incoming part fills in the same pass, in the order its sources come.
-        let mut out_cursor = starts[..=bound].to_vec();
-        let mut in_cursor = out_ends.clone();
-        let mut incident = vec![0_u32; slot(end)];
-        let mut place = |edge: usize| {
-            let (from, to) = (slot(source[edge]), slot(target[edge]));
-            incident[slot(out_cursor[from])] = word(edge);
-            out_cursor[from] += 1;
-            incident[slot(in_cursor[to])] = word(edge);
-            in_cursor[to] += 1;
+        let placed = || {
+            (0..bound)
+                .filter(|&block| reachable[block])
+                .flat_map(|block| graph.outgoing(N::from_index(block)).map(DenseId::index))
+                .chain(edge_bound..slots)
         };
-        for block in (0..bound).filter(|&block| reachable[block]) {
-            for edge in graph.outgoing(N::from_index(block)) {
-                place(edge.index());
-            }
-        }
-        for edge in edge_bound..slots {
-            place(edge);
-        }
+        let mut runs = Vec::new();
+        let mut incident = Vec::new();
+        DenseFanout::group_into(
+            2 * (bound + 1),
+            || {
+                placed().flat_map(|edge| {
+                    let (from, to) = (slot(source[edge]), slot(target[edge]));
+                    [(2 * from, word(edge)), (2 * to + 1, word(edge))]
+                })
+            },
+            &mut runs,
+            &mut incident,
+        );
 
         Self {
             bound,
@@ -135,8 +122,7 @@ impl<N: DenseId> ClosedGraph<N> {
             outlets,
             source,
             target,
-            starts,
-            out_ends,
+            runs,
             incident,
         }
     }
@@ -169,12 +155,12 @@ impl<N: DenseId> ClosedGraph<N> {
 
     /// The slots leaving `node`, in adjacency order.
     pub(super) fn outgoing(&self, node: usize) -> &[u32] {
-        &self.incident[slot(self.starts[node])..slot(self.out_ends[node])]
+        &self.incident[slot(self.runs[2 * node])..slot(self.runs[2 * node + 1])]
     }
 
     /// The slots incident to `node`, leaving it first.
     pub(super) fn incident(&self, node: usize) -> &[u32] {
-        &self.incident[slot(self.starts[node])..slot(self.starts[node + 1])]
+        &self.incident[slot(self.runs[2 * node])..slot(self.runs[2 * node + 2])]
     }
 }
 

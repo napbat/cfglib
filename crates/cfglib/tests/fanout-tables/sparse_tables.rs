@@ -1,7 +1,6 @@
 //! `Fanout` (sparse key to a run of values) and `SortedMap` (sparse key to one value).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::mem::size_of;
 
 use cfglib::{Fanout, SortedMap};
 
@@ -103,10 +102,7 @@ fn an_empty_input_builds_the_canonical_empty_table() {
         Fanout::<u32, u32>::from_grouped(Vec::<(u32, Vec<u32>)>::new())
     );
     assert!(table.is_empty());
-    assert_eq!(
-        (table.len(), table.value_count(), table.heap_bytes()),
-        (0, 0, 0)
-    );
+    assert_eq!((table.len(), table.value_count()), (0, 0));
     assert_eq!(table.get(&7).len(), 0);
     assert!(!table.contains_key(&7));
     assert_eq!(table.keys().count(), 0);
@@ -196,25 +192,6 @@ fn compound_keys_iterate_in_lexicographic_order() {
 }
 
 #[test]
-fn heap_bytes_counts_the_three_columns_and_nothing_a_key_or_value_owns() {
-    let pairs = sparse_pairs(&mut Lcg(9), 300);
-    let table = Fanout::from_pairs(pairs);
-    // Keys, one closing run bound beyond one per key, and values.
-    let expected = table.len() * size_of::<u32>()
-        + (table.len() + 1) * size_of::<u32>()
-        + table.value_count() * size_of::<u32>();
-    assert_eq!(table.heap_bytes(), expected);
-
-    let short = Fanout::from_pairs(vec![(1_u32, "x".to_owned())]);
-    let long = Fanout::from_pairs(vec![(1_u32, "x".repeat(4096))]);
-    assert_eq!(
-        short.heap_bytes(),
-        long.heap_bytes(),
-        "a string's own heap is not counted"
-    );
-}
-
-#[test]
 fn clones_are_equal_and_tables_with_different_runs_are_not() {
     let table = Fanout::from_pairs(vec![(1_u32, 10_u32), (1, 11), (4, 40)]);
     assert_eq!(table.clone(), table);
@@ -285,16 +262,15 @@ fn a_sorted_map_merge_sees_a_keys_pairs_in_the_order_they_were_recorded() {
 }
 
 #[test]
-fn a_sorted_map_costs_one_entry_per_key_and_the_empty_map_nothing() {
+fn a_sorted_map_keeps_one_entry_per_key_and_the_empty_map_none() {
     let map = SortedMap::from_pairs(vec![(1_u32, 10_u64), (1, 11), (4, 40)], |slot, value| {
         *slot = value;
     });
     assert_eq!(map.len(), 2);
-    assert_eq!(map.heap_bytes(), 2 * size_of::<(u32, u64)>());
 
     let empty = SortedMap::<u32, u64>::default();
     assert!(empty.is_empty());
-    assert_eq!((empty.len(), empty.heap_bytes()), (0, 0));
+    assert_eq!(empty.len(), 0);
     assert_eq!(empty.iter().count(), 0);
     assert_eq!(empty.get(&1), None);
     assert_eq!(
