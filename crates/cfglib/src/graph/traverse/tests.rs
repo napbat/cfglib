@@ -193,6 +193,7 @@ fn reachable_in_gives_the_answer_of_reachable_over_reused_buffers() {
             &graph,
             seeds.iter().copied(),
             direction,
+            None,
             &mut visited,
             &mut stack,
         );
@@ -230,6 +231,34 @@ fn reachable_over_an_induced_view_stays_inside_its_set() {
 }
 
 #[test]
+fn reachable_in_within_a_mask_matches_the_induced_view_from_inside_seeds() {
+    // a -> b -> c -> d, and the mask leaves `c` out.
+    let mut graph = Graph::<(), ()>::new();
+    let [a, b, c, d] = [(); 4].map(|()| graph.add_node(()));
+    graph.add_edge(a, b, ());
+    graph.add_edge(b, c, ());
+    graph.add_edge(c, d, ());
+    let within = [true, true, false, true];
+    let region = Induced::new(&graph, &within);
+    let (mut visited, mut stack) = (Vec::new(), Vec::new());
+    for (seed, direction) in [
+        (a, Direction::Forward),
+        (b, Direction::Forward),
+        (d, Direction::Backward),
+    ] {
+        reachable_in(
+            &graph,
+            [seed],
+            direction,
+            Some(&within),
+            &mut visited,
+            &mut stack,
+        );
+        assert_eq!(visited, reachable(&region, [seed], direction));
+    }
+}
+
+#[test]
 #[should_panic(expected = "seed node is out of range")]
 fn reachable_in_rejects_a_seed_beyond_the_node_bound() {
     let (graph, _) = reach_fixture();
@@ -237,6 +266,7 @@ fn reachable_in_rejects_a_seed_beyond_the_node_bound() {
         &graph,
         [NodeId::from_index(4)],
         Direction::Forward,
+        None,
         &mut Vec::new(),
         &mut Vec::new(),
     );

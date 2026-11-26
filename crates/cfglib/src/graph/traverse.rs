@@ -425,42 +425,40 @@ pub fn reachable<G: GraphView>(
     direction: Direction,
 ) -> Vec<bool> {
     let mut visited = Vec::new();
-    reachable_in(graph, seeds, direction, &mut visited, &mut Vec::new());
+    reachable_in(graph, seeds, direction, None, &mut visited, &mut Vec::new());
     visited
 }
 
-/// [`reachable`] over caller-owned buffers.
+/// [`reachable`] over caller-owned buffers, optionally confined to the nodes
+/// whose `within` entry is `true`.
 ///
-/// `visited` is cleared and sized to the node bound, then holds the answer.
-/// `stack` is cleared first and left empty. The stack holds dense indices,
-/// not node ids, so one pair of buffers serves every node-id type, which is
-/// what a scratch that outlives one graph needs.
+/// The seeds are marked whether or not they are within. `visited` is cleared
+/// and sized to the node bound, then holds the answer. `stack` is cleared
+/// first and left empty. The stack holds dense indices, not node ids, so one
+/// pair of buffers serves every node-id type, which is what a scratch that
+/// outlives one graph needs.
 ///
 /// # Panics
 ///
-/// Panics when a seed is not a node in `graph`.
+/// Panics when a seed is not a node in `graph`, or when `within` is shorter
+/// than an index the walk reaches.
 ///
-/// Both functions of the walk are `#[inline]`: left out of line, the shared
-/// instance ran the post-dominator tree's forward walk 2.2 times slower than
-/// the loop it replaced, and compiled into each caller it matches it.
+/// The confinement is a mask, not an [`Induced`](super::view::Induced) view:
+/// through the view's filtered adjacency, the post-dominator tree's backward
+/// walk made `cfg_post_dominators` 9% slower. Both functions of the walk are
+/// `#[inline]`: left out of line, the shared instance ran the post-dominator
+/// tree's forward walk 2.2 times slower than the loop it replaced, and
+/// compiled into each caller it matches it.
 #[inline]
 pub(crate) fn reachable_in<G: GraphView>(
     graph: &G,
     seeds: impl IntoIterator<Item = G::NodeId>,
     direction: Direction,
+    within: Option<&[bool]>,
     visited: &mut Vec<bool>,
     stack: &mut Vec<usize>,
 ) {
-    visited.clear();
-    visited.resize(graph.node_bound(), false);
-    stack.clear();
-    for seed in seeds {
-        assert_in_bound(graph, seed, "seed node");
-        if !core::mem::replace(&mut visited[seed.index()], true) {
-            stack.push(seed.index());
-        }
-    }
-    by_axis!(direction, reach(graph, visited, stack));
+    by_axis!(direction, reach(graph, seeds, within, visited, stack));
 }
 
 /// The reachability walk, kept out of the breadth-first core on purpose.
@@ -474,13 +472,26 @@ pub(crate) fn reachable_in<G: GraphView>(
 fn reach<G: GraphView, A: Adjacency>(
     axis: A,
     graph: &G,
-    visited: &mut [bool],
+    seeds: impl IntoIterator<Item = G::NodeId>,
+    within: Option<&[bool]>,
+    visited: &mut Vec<bool>,
     stack: &mut Vec<usize>,
 ) {
+    visited.clear();
+    visited.resize(graph.node_bound(), false);
+    stack.clear();
+    for seed in seeds {
+        assert_in_bound(graph, seed, "seed node");
+        if !core::mem::replace(&mut visited[seed.index()], true) {
+            stack.push(seed.index());
+        }
+    }
     while let Some(index) = stack.pop() {
         for next in axis.neighbors(graph, G::NodeId::from_index(index)) {
             let next = next.index();
-            if !core::mem::replace(&mut visited[next], true) {
+            if within.is_none_or(|within| within[next])
+                && !core::mem::replace(&mut visited[next], true)
+            {
                 stack.push(next);
             }
         }
