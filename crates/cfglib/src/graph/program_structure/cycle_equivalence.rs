@@ -186,6 +186,12 @@ struct SpanningTree {
 impl SpanningTree {
     /// Search `closed` from the virtual exit, giving each self-loop a class of
     /// its own on the way.
+    ///
+    /// The walk keeps its own loop rather than the shared `depth_first_core`:
+    /// it reads each incident list in place, while the core copies it, with
+    /// the far end of every slot, into its arena. On the core, cycle
+    /// equivalence measured 1.03–1.06 and the program structure tree up to
+    /// 1.12 on the million-block random graph.
     fn new<N: DenseId>(closed: &ClosedGraph<N>, classes: &mut Classes) -> Self {
         let nodes = closed.node_count();
         let slots = closed.slot_count();
