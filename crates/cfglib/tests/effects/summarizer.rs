@@ -1,30 +1,23 @@
-//! Each rule of the summarizer, on one Wren instruction each.
+//! Each rule of `Effect::compute`, on one Wren instruction each.
 
 use cfglib::ir::rtl::{
-    BitSlice, Bits, Control, InstructionBuilder, Place, Raise, Selection, SpanAction, Statement,
-    ValueRange, WriteTarget,
+    BitSlice, Bits, Control, InstructionBuilder, Place, Raise, RecordView, Selection, SpanAction,
+    Statement, ValueRange, WriteTarget,
 };
 use cfglib::{
-    Access, Address, CaptureBuilder, CapturedValue, Exit, Expr, MemoryAccessKind, MemoryAtomicity,
-    Opaque, RaiseOrigin, Raised, StateTouch, Summarizer, Touch, Write, WriteKind,
+    Access, AccessMode, CaptureBuilder, CapturedValue, Effect, Expr, ExprId, Exprs,
+    MemoryAccessKind, MemoryAddress, MemoryAtomicity, Opaque, RaiseOrigin, Raised, StateTouch,
+    Write, WriteKind,
 };
 
 use crate::wren::{
     BASE, Eff, Fault, Op, Policy, Reg, Space, Undef, Wren, WrenEffects, bits, capture, constant,
-    effect_of, keep, part, take, undefined, write_plan, write_whole,
+    effect_of, keep, part, take, undefined, whole, write_plan, write_whole,
 };
 
-fn touch(place: Reg, offset: u16, width: u16) -> Touch<Reg> {
-    Touch {
-        place,
-        bits: BitSlice::new(offset, bits(width)),
-    }
-}
-
-fn write(place: Reg, offset: u16, width: u16, kind: WriteKind) -> Write<Reg> {
+fn write(root: Reg, offset: u16, width: u16, kind: WriteKind) -> Write<Reg> {
     Write {
-        place,
-        bits: BitSlice::new(offset, bits(width)),
+        place: part(root, offset, width),
         kind,
     }
 }
@@ -43,14 +36,10 @@ fn every_read_is_upward_exposed_and_one_root_is_listed_once() {
     });
     assert_eq!(
         effect.reads,
-        [
-            touch(Reg::A, 0, 32),
-            touch(Reg::B, 0, 8),
-            touch(Reg::B, 24, 8)
-        ]
+        [part(Reg::A, 0, 32), part(Reg::B, 0, 8), part(Reg::B, 24, 8)]
     );
     assert_eq!(effect.writes, [write(Reg::A, 0, 16, WriteKind::Always)]);
-    assert_eq!(effect.exit, Exit::Next);
+    assert_eq!(effect.exit, Control::Advance);
     assert!(!effect.nondeterministic);
     assert_eq!(effect.memory, []);
     assert_eq!(effect.raises, []);
@@ -60,44 +49,39 @@ fn every_read_is_upward_exposed_and_one_root_is_listed_once() {
 #[test]
 fn a_select_of_the_old_bits_is_a_conditional_write() {
     let effect = effect_of(|b| {
-        let guard = b.read(Selection::Direct(Place::whole(Reg::Z)));
-        let new = b.read(Selection::Direct(Place::whole(Reg::B)));
-        let old = b.read(Selection::Direct(Place::whole(Reg::A)));
+        let guard = b.read(Selection::Direct(whole(Reg::Z)));
+        let new = b.read(Selection::Direct(whole(Reg::B)));
+        let old = b.read(Selection::Direct(whole(Reg::A)));
         let chosen = b.apply(&Op::Select, &[guard, new, old], &[bits(32)]).first;
         write_whole(b, Reg::A, chosen);
         Control::Advance
     });
     let [
         Write {
-            place: Reg::A,
+            place: written,
             kind: WriteKind::Conditional(guard),
-            bits: written,
         },
     ] = effect.writes[..]
     else {
         panic!("one conditional write of A: {:?}", effect.writes);
     };
-    assert_eq!(written, BitSlice::whole(bits(32)));
+    assert_eq!(written, whole(Reg::A));
     assert_eq!(
         effect.exprs.get(guard),
-        Expr::Read(touch(Reg::Z, 0, 1)),
+        Expr::Read(part(Reg::Z, 0, 1)),
         "the guard of the write is the guard of the select"
     );
     // The select reads the old value, so the conditional write keeps it live.
     assert_eq!(
         effect.reads,
-        [
-            touch(Reg::A, 0, 32),
-            touch(Reg::B, 0, 32),
-            touch(Reg::Z, 0, 1)
-        ]
+        [part(Reg::A, 0, 32), part(Reg::B, 0, 32), part(Reg::Z, 0, 1)]
     );
 }
 
 #[test]
 fn a_select_with_its_arms_in_the_other_order_is_conditional_too() {
     let effect = effect_of(|b| {
-        let guard = b.read(Selection::Direct(Place::whole(Reg::Z)));
+        let guard = b.read(Selection::Direct(whole(Reg::Z)));
         let old = b.read(Selection::Direct(part(Reg::A, 16, 16)));
         let new = constant(b, 7, 16);
         let chosen = b.apply(&Op::Mux, &[guard, old, new], &[bits(16)]).first;
@@ -107,20 +91,19 @@ fn a_select_with_its_arms_in_the_other_order_is_conditional_too() {
     assert!(matches!(
         effect.writes[..],
         [Write {
-            place: Reg::A,
+            place: Place { root: Reg::A, .. },
             kind: WriteKind::Conditional(_),
-            ..
         }]
     ));
-    assert_eq!(effect.writes[0].bits, BitSlice::new(16, bits(16)));
+    assert_eq!(effect.writes[0].place.slice, BitSlice::new(16, bits(16)));
 }
 
 #[test]
 fn a_select_of_other_bits_is_an_unconditional_write() {
     let effect = effect_of(|b| {
-        let guard = b.read(Selection::Direct(Place::whole(Reg::Z)));
-        let new = b.read(Selection::Direct(Place::whole(Reg::B)));
-        let other = b.read(Selection::Direct(Place::whole(Reg::A)));
+        let guard = b.read(Selection::Direct(whole(Reg::Z)));
+        let new = b.read(Selection::Direct(whole(Reg::B)));
+        let other = b.read(Selection::Direct(whole(Reg::A)));
         let low = b.read(Selection::Direct(part(Reg::A, 0, 16)));
         let high = b.read(Selection::Direct(part(Reg::A, 16, 16)));
         let wide = b
@@ -145,9 +128,9 @@ fn a_select_of_other_bits_is_an_unconditional_write() {
 #[test]
 fn a_select_of_a_part_of_the_root_matches_the_span_offset() {
     let effect = effect_of(|b| {
-        let guard = b.read(Selection::Direct(Place::whole(Reg::Z)));
-        let old = b.read(Selection::Direct(Place::whole(Reg::A)));
-        let new = b.read(Selection::Direct(Place::whole(Reg::B)));
+        let guard = b.read(Selection::Direct(whole(Reg::Z)));
+        let old = b.read(Selection::Direct(whole(Reg::A)));
+        let new = b.read(Selection::Direct(whole(Reg::B)));
         let chosen = b.apply(&Op::Select, &[guard, new, old], &[bits(32)]).first;
         // The span at bit 8 takes the select from bit 8: these are the old
         // bits 8..16 of A when Z is zero.
@@ -165,7 +148,7 @@ fn a_select_of_a_part_of_the_root_matches_the_span_offset() {
             ..
         }]
     ));
-    assert_eq!(effect.writes[0].bits, BitSlice::new(8, bits(8)));
+    assert_eq!(effect.writes[0].place.slice, BitSlice::new(8, bits(8)));
 }
 
 #[test]
@@ -190,7 +173,7 @@ fn a_nondeterministic_span_is_an_undefined_write() {
 #[test]
 fn a_kept_span_is_no_write_and_neighbor_spans_of_one_kind_merge() {
     let effect = effect_of(|b| {
-        let value = b.read(Selection::Direct(Place::whole(Reg::B)));
+        let value = b.read(Selection::Direct(whole(Reg::B)));
         let zero = constant(b, 0, 8);
         write_plan(
             b,
@@ -217,10 +200,10 @@ fn a_kept_span_is_no_write_and_neighbor_spans_of_one_kind_merge() {
 
 #[test]
 fn an_indexed_access_touches_every_candidate() {
-    let candidates = [Place::whole(Reg::Slot(0)), Place::whole(Reg::Slot(1))];
+    let candidates = [whole(Reg::Slot(0)), whole(Reg::Slot(1))];
     let effect = effect_of(|b| {
-        let index = b.read(Selection::Direct(Place::whole(Reg::Z)));
-        let key = b.read(Selection::Direct(Place::whole(Reg::B)));
+        let index = b.read(Selection::Direct(whole(Reg::Z)));
+        let key = b.read(Selection::Direct(whole(Reg::B)));
         let value = b.read(Selection::FiniteIndexed {
             index,
             candidates: &candidates,
@@ -252,11 +235,11 @@ fn an_indexed_access_touches_every_candidate() {
     assert_eq!(
         effect.reads,
         [
-            touch(Reg::B, 0, 32),
-            touch(Reg::Z, 0, 1),
-            touch(Reg::Slot(0), 0, 16),
-            touch(Reg::Slot(1), 0, 16),
-            touch(Reg::Bank, 0, 16),
+            part(Reg::B, 0, 32),
+            part(Reg::Z, 0, 1),
+            part(Reg::Slot(0), 0, 16),
+            part(Reg::Slot(1), 0, 16),
+            part(Reg::Bank, 0, 16),
         ]
     );
     assert_eq!(
@@ -272,8 +255,8 @@ fn an_indexed_access_touches_every_candidate() {
 #[test]
 fn guarded_loads_and_stores_keep_their_guards_and_shapes() {
     let effect = effect_of(|b| {
-        let guard = b.read(Selection::Direct(Place::whole(Reg::Z)));
-        let base = b.read(Selection::Direct(Place::whole(Reg::A)));
+        let guard = b.read(Selection::Direct(whole(Reg::Z)));
+        let base = b.read(Selection::Direct(whole(Reg::A)));
         let four = constant(b, 4, 32);
         let address = b.apply(&Op::Add, &[base, four], &[bits(32)]).first;
         let loaded = b
@@ -286,7 +269,7 @@ fn guarded_loads_and_stores_keep_their_guards_and_shapes() {
     });
     let guard = effect.memory[0].guard.expect("the load is guarded");
     let address = effect.memory[0].location.address;
-    assert_eq!(effect.exprs.get(guard), Expr::Read(touch(Reg::Z, 0, 1)));
+    assert_eq!(effect.exprs.get(guard), Expr::Read(part(Reg::Z, 0, 1)));
     let Expr::Op {
         name: "add",
         args: &[base, four],
@@ -297,15 +280,14 @@ fn guarded_loads_and_stores_keep_their_guards_and_shapes() {
         panic!("the address is the sum: {:?}", effect.exprs.get(address));
     };
     assert_eq!(width, bits(32));
-    assert_eq!(effect.exprs.get(base), Expr::Read(touch(Reg::A, 0, 32)));
+    assert_eq!(effect.exprs.get(base), Expr::Read(part(Reg::A, 0, 32)));
     assert!(matches!(
         effect.exprs.get(four),
         Expr::Const { words: &[4], .. }
     ));
     let access = |kind, atomicity, space, address, bytes, guard| Access {
-        kind,
-        atomicity,
-        location: Address { space, address },
+        mode: AccessMode { kind, atomicity },
+        location: MemoryAddress { space, address },
         bytes,
         guard,
     };
@@ -346,22 +328,20 @@ fn guarded_loads_and_stores_keep_their_guards_and_shapes() {
             ),
         ]
     );
-    let environment = |guard| Raised {
+    // The environment raises the page faults of the load and of the store,
+    // the effects at positions 0 and 1.
+    let environment = |position| Raised {
         outcome: Fault::Page,
-        guard,
-        origin: RaiseOrigin::Environment,
-        check: false,
+        guard: Some(guard),
+        origin: RaiseOrigin::Environment { effect: position },
     };
-    assert_eq!(
-        effect.raises,
-        [environment(Some(guard)), environment(Some(guard))]
-    );
+    assert_eq!(effect.raises, [environment(0), environment(1)]);
 }
 
 #[test]
 fn a_raise_keeps_its_guard_and_its_bindings_are_not_writes() {
     let effect = effect_of(|b| {
-        let divisor = b.read(Selection::Direct(Place::whole(Reg::B)));
+        let divisor = b.read(Selection::Direct(whole(Reg::B)));
         let zero = constant(b, 0, 32);
         let is_zero = b.apply(&Op::Eq, &[divisor, zero], &[Bits::BOOL]).first;
         let flag = constant(b, 1, 1);
@@ -371,7 +351,7 @@ fn a_raise_keeps_its_guard_and_its_bindings_are_not_writes() {
             payload: &[divisor],
             binds: &[(Reg::C, flag)],
         });
-        let dividend = b.read(Selection::Direct(Place::whole(Reg::A)));
+        let dividend = b.read(Selection::Direct(whole(Reg::A)));
         let results = b.apply(&Op::DivMod, &[dividend, divisor], &[bits(32), bits(32)]);
         write_whole(b, Reg::A, results.first);
         write_whole(b, Reg::B, results.get(1).expect("two results"));
@@ -382,7 +362,6 @@ fn a_raise_keeps_its_guard_and_its_bindings_are_not_writes() {
             outcome: Fault::Divide,
             guard: Some(guard),
             origin: RaiseOrigin::Raise,
-            check: false,
         },
     ] = effect.raises[..]
     else {
@@ -418,28 +397,36 @@ fn an_unconditional_raise_terminates() {
             outcome: Fault::Divide,
             guard: None,
             origin: RaiseOrigin::Raise,
-            check: false,
         }]
     );
-    assert_eq!(effect.exit, Exit::Terminating);
+    assert_eq!(effect.exit, Control::Terminating);
 }
 
 #[test]
 fn each_control_boundary_gives_its_exit() {
     let exit = |control: fn(cfglib::CapturedValue) -> Control<cfglib::CapturedValue>| {
         effect_of(|b| {
-            let target = b.read(Selection::Direct(Place::whole(Reg::A)));
+            let target = b.read(Selection::Direct(whole(Reg::A)));
             control(target)
         })
         .exit
     };
-    assert_eq!(exit(|_| Control::Advance), Exit::Next);
-    assert_eq!(exit(|target| Control::Jump { target }), Exit::Jump);
-    assert_eq!(exit(|target| Control::Call { target }), Exit::Call);
-    assert_eq!(exit(|target| Control::Return { target }), Exit::Return);
+    assert_eq!(exit(|_| Control::Advance), Control::Advance);
+    assert_eq!(
+        exit(|target| Control::Jump { target }),
+        Control::Jump { target: () }
+    );
+    assert_eq!(
+        exit(|target| Control::Call { target }),
+        Control::Call { target: () }
+    );
+    assert_eq!(
+        exit(|target| Control::Return { target }),
+        Control::Return { target: () }
+    );
     assert_eq!(
         exit(|scrutinee| Control::Dispatch { scrutinee }),
-        Exit::Dispatch
+        Control::Dispatch { scrutinee: () }
     );
     assert_eq!(
         exit(|taken| Control::Branch {
@@ -447,42 +434,32 @@ fn each_control_boundary_gives_its_exit() {
             taken,
             not_taken: None
         }),
-        Exit::Branch
+        Control::Branch {
+            condition: (),
+            taken: (),
+            not_taken: None
+        }
     );
-    assert_eq!(exit(|_| Control::Terminating), Exit::Terminating);
-}
-
-#[test]
-fn each_exit_has_a_name() {
-    let names = [
-        Exit::Next,
-        Exit::Jump,
-        Exit::Branch,
-        Exit::Call,
-        Exit::Return,
-        Exit::Dispatch,
-        Exit::Terminating,
-    ]
-    .map(|exit| exit.to_string());
     assert_eq!(
-        names,
-        [
-            "next",
-            "jump",
-            "branch",
-            "call",
-            "return",
-            "dispatch",
-            "terminating"
-        ]
+        exit(|taken| Control::Branch {
+            condition: taken,
+            taken,
+            not_taken: Some(taken)
+        }),
+        Control::Branch {
+            condition: (),
+            taken: (),
+            not_taken: Some(())
+        }
     );
+    assert_eq!(exit(|_| Control::Terminating), Control::Terminating);
 }
 
 #[test]
 fn a_call_lists_its_reads_and_writes_and_follows_no_callee() {
     let effect = effect_of(|b| {
-        let target = b.read(Selection::Direct(Place::whole(Reg::A)));
-        let stack = b.read(Selection::Direct(Place::whole(Reg::B)));
+        let target = b.read(Selection::Direct(whole(Reg::A)));
+        let stack = b.read(Selection::Direct(whole(Reg::B)));
         let four = constant(b, 4, 32);
         let below = b.apply(&Op::Sub, &[stack, four], &[bits(32)]).first;
         b.effect(
@@ -494,20 +471,19 @@ fn a_call_lists_its_reads_and_writes_and_follows_no_callee() {
         write_whole(b, Reg::B, below);
         Control::Call { target }
     });
-    assert_eq!(effect.exit, Exit::Call);
-    assert_eq!(effect.reads, [touch(Reg::A, 0, 32), touch(Reg::B, 0, 32)]);
+    assert_eq!(effect.exit, Control::Call { target: () });
+    assert_eq!(effect.reads, [part(Reg::A, 0, 32), part(Reg::B, 0, 32)]);
     assert_eq!(effect.writes, [write(Reg::B, 0, 32, WriteKind::Always)]);
     assert_eq!(effect.memory.len(), 1);
 }
 
 #[test]
-fn intrinsics_report_the_state_they_can_change_and_the_check() {
+fn intrinsics_report_the_state_they_can_change() {
     let quiet = effect_of(|b| {
         b.effect(&Eff::Fence, &[], &[], &[]);
         Control::Advance
     });
     assert_eq!(quiet.intrinsic_state, StateTouch::Preserved);
-    assert!(!quiet.instruction_check);
 
     let loud = effect_of(|b| {
         b.effect(&Eff::Fence, &[], &[], &[]);
@@ -520,16 +496,33 @@ fn intrinsics_report_the_state_they_can_change_and_the_check() {
         [Raised {
             outcome: Fault::Page,
             guard: None,
-            origin: RaiseOrigin::Environment,
-            check: false,
+            origin: RaiseOrigin::Environment { effect: 1 },
         }]
     );
 }
 
+/// Whether expression `id` depends on a result of the effect at `position`.
+fn depends_on_effect(exprs: &Exprs<Reg>, id: ExprId, position: u32) -> bool {
+    match exprs.get(id) {
+        Expr::Opaque {
+            origin: Opaque::Effect { ordinal, .. },
+            ..
+        } => ordinal == position,
+        Expr::Op { args, .. } => args
+            .iter()
+            .any(|&arg| depends_on_effect(exprs, arg, position)),
+        Expr::Read(_) | Expr::Const { .. } | Expr::Opaque { .. } => false,
+    }
+}
+
+/// A consumer whose dialect runs a check at the start of each instruction
+/// finds the raises of the check by the position of the check effect: the
+/// outcomes that the effect declares, and the raises whose guards depend on
+/// a result of the effect.
 #[test]
-fn the_raises_of_the_instruction_check_are_marked() {
+fn a_reader_finds_the_raises_of_one_effect_by_its_position() {
     let effect = effect_of(|b| {
-        let pending = b.read(Selection::Direct(Place::whole(Reg::Check)));
+        let pending = b.read(Selection::Direct(whole(Reg::Check)));
         let fault = b
             .effect(
                 &Eff::InstructionCheck,
@@ -546,7 +539,7 @@ fn the_raises_of_the_instruction_check_are_marked() {
             payload: &[],
             binds: &[],
         });
-        let flag = b.read(Selection::Direct(Place::whole(Reg::Z)));
+        let flag = b.read(Selection::Direct(whole(Reg::Z)));
         b.raise(Raise {
             outcome: Fault::Divide,
             guard: Some(flag),
@@ -557,28 +550,22 @@ fn the_raises_of_the_instruction_check_are_marked() {
         write_whole(b, Reg::Check, zero);
         Control::Advance
     });
-    assert!(effect.instruction_check);
     assert_eq!(effect.intrinsic_state, StateTouch::Preserved);
-    let checks: Vec<bool> = effect.raises.iter().map(|raised| raised.check).collect();
+    let check = 0;
+    let from_check = |raised: &Raised<Fault>| match raised.origin {
+        RaiseOrigin::Environment { effect: position } => position == check,
+        RaiseOrigin::Raise => raised
+            .guard
+            .is_some_and(|guard| depends_on_effect(&effect.exprs, guard, check)),
+    };
+    let checks: Vec<bool> = effect.raises.iter().map(from_check).collect();
     assert_eq!(checks, [true, true, false]);
-    let guard = effect.raises[1].guard.expect("the check raise is guarded");
-    let Expr::Op { args: &[inner], .. } = effect.exprs.get(guard) else {
-        panic!("the guard is a negation");
-    };
-    let Expr::Op {
-        args: &[result], ..
-    } = effect.exprs.get(inner)
-    else {
-        panic!("the inner guard is a negation");
-    };
     assert_eq!(
-        effect.exprs.get(result),
-        Expr::Opaque {
-            origin: Opaque::Effect {
-                ordinal: 0,
-                result: 0
-            },
-            width: Bits::BOOL,
+        effect.raises[0],
+        Raised {
+            outcome: Fault::Check,
+            guard: None,
+            origin: RaiseOrigin::Environment { effect: check },
         }
     );
 }
@@ -586,9 +573,9 @@ fn the_raises_of_the_instruction_check_are_marked() {
 #[test]
 fn a_value_that_two_rules_need_has_one_expression() {
     let effect = effect_of(|b| {
-        let base = b.read(Selection::Direct(Place::whole(Reg::A)));
-        let flag = b.read(Selection::Direct(Place::whole(Reg::Z)));
-        let old = b.read(Selection::Direct(Place::whole(Reg::B)));
+        let base = b.read(Selection::Direct(whole(Reg::A)));
+        let flag = b.read(Selection::Direct(whole(Reg::Z)));
+        let old = b.read(Selection::Direct(whole(Reg::B)));
         let chosen = b.apply(&Op::Select, &[flag, base, old], &[bits(32)]).first;
         b.effect(&Eff::Load(Space::Data), &[base], &[bits(8)], &[]);
         b.effect(&Eff::StoreIf, &[base, base, flag], &[], &[]);
@@ -596,7 +583,7 @@ fn a_value_that_two_rules_need_has_one_expression() {
         Control::Advance
     });
     // The address A, the guard Z: one expression each, in the order of need.
-    assert_eq!(effect.exprs.len(), 2);
+    assert_eq!(effect.exprs.expr_count(), 2);
     assert_eq!(
         effect.memory[0].location.address,
         effect.memory[1].location.address
@@ -611,11 +598,11 @@ fn a_value_that_two_rules_need_has_one_expression() {
 /// a raise on a choice, and a branch.
 fn emit_mixed(
     b: &mut CaptureBuilder<'_, Wren>,
-    candidates: &[Place<Wren>; 2],
+    candidates: &[Place<Reg>; 2],
 ) -> Control<CapturedValue> {
-    let flag = b.read(Selection::Direct(Place::whole(Reg::Z)));
-    let base = b.read(Selection::Direct(Place::whole(Reg::A)));
-    let old = b.read(Selection::Direct(Place::whole(Reg::B)));
+    let flag = b.read(Selection::Direct(whole(Reg::Z)));
+    let base = b.read(Selection::Direct(whole(Reg::A)));
+    let old = b.read(Selection::Direct(whole(Reg::B)));
     let slot = b.read(Selection::FiniteIndexed {
         index: flag,
         candidates,
@@ -644,11 +631,37 @@ fn emit_mixed(
     }
 }
 
+/// One record as plain data, with value handles from 1000.
+struct Plain<'a> {
+    statements: Vec<Statement<'a, Wren, usize>>,
+    control: Control<usize>,
+}
+
+impl RecordView<Wren> for Plain<'_> {
+    type Value = usize;
+
+    fn statements(&self) -> impl ExactSizeIterator<Item = Statement<'_, Wren, usize>> + '_ {
+        self.statements.iter().cloned()
+    }
+
+    fn control(&self) -> Control<usize> {
+        self.control
+    }
+
+    fn width(&self, value: usize) -> Bits {
+        match value - 1000 {
+            0 | 8 => Bits::BOOL,
+            3 => bits(16),
+            _ => bits(32),
+        }
+    }
+}
+
 /// The statements of one instruction, written as plain data with value
 /// handles from 1000, and the same instruction emitted into a capture.
 #[test]
 fn a_capture_and_the_same_statements_from_another_source_give_one_effect() {
-    let candidates = [Place::whole(Reg::Slot(2)), Place::whole(Reg::Slot(3))];
+    let candidates = [whole(Reg::Slot(2)), whole(Reg::Slot(3))];
     let captured = capture(|b| emit_mixed(b, &candidates));
 
     let v = |index: usize| 1000 + index;
@@ -660,18 +673,18 @@ fn a_capture_and_the_same_statements_from_another_source_give_one_effect() {
     let payload = [v(3)];
     let b_plan = [take(0, 32, v(7), 0)];
     let a_plan: [SpanAction<Wren, usize>; 2] = [take(0, 16, v(5), 0), undefined(16, 16)];
-    let statements = [
+    let statements = vec![
         Statement::Read {
             result: v(0),
-            source: Selection::Direct(Place::whole(Reg::Z)),
+            source: Selection::Direct(whole(Reg::Z)),
         },
         Statement::Read {
             result: v(1),
-            source: Selection::Direct(Place::whole(Reg::A)),
+            source: Selection::Direct(whole(Reg::A)),
         },
         Statement::Read {
             result: v(2),
-            source: Selection::Direct(Place::whole(Reg::B)),
+            source: Selection::Direct(whole(Reg::B)),
         },
         Statement::Read {
             result: v(3),
@@ -727,26 +740,24 @@ fn a_capture_and_the_same_statements_from_another_source_give_one_effect() {
             policy: Policy::Merge,
         },
     ];
-    let control = Control::Branch {
-        condition: v(0),
-        taken: v(5),
-        not_taken: None,
-    };
-    let width = |value: usize| match value - 1000 {
-        0 | 8 => Bits::BOOL,
-        3 => bits(16),
-        _ => bits(32),
+    let plain = Plain {
+        statements,
+        control: Control::Branch {
+            condition: v(0),
+            taken: v(5),
+            not_taken: None,
+        },
     };
 
-    let summarizer = Summarizer::new(&WrenEffects);
-    let direct = summarizer.summarize(statements, control, width);
-    let from_capture = summarizer.summarize_record(&captured);
-    assert_eq!(direct, from_capture);
+    assert_eq!(
+        Effect::compute(&WrenEffects, &plain),
+        Effect::compute(&WrenEffects, &captured)
+    );
 }
 
 #[test]
 fn the_mixed_instruction_has_a_conditional_an_assigned_and_an_undefined_write() {
-    let candidates = [Place::whole(Reg::Slot(2)), Place::whole(Reg::Slot(3))];
+    let candidates = [whole(Reg::Slot(2)), whole(Reg::Slot(3))];
     let effect = effect_of(|b| emit_mixed(b, &candidates));
     let flag = effect.raises[0].guard.expect("the load is guarded by Z");
     assert_eq!(
@@ -758,26 +769,68 @@ fn the_mixed_instruction_has_a_conditional_an_assigned_and_an_undefined_write() 
         ]
     );
     assert!(effect.nondeterministic);
-    assert_eq!(effect.exit, Exit::Branch);
+    assert_eq!(
+        effect.exit,
+        Control::Branch {
+            condition: (),
+            taken: (),
+            not_taken: None
+        }
+    );
 }
 
 #[test]
 fn a_record_with_no_statement_has_an_empty_effect() {
     let effect = effect_of(|_| Control::Advance);
     assert!(effect.reads.is_empty() && effect.writes.is_empty());
-    assert_eq!(effect.exit, Exit::Next);
+    assert_eq!(effect.exit, Control::Advance);
     assert_eq!(effect.intrinsic_state, StateTouch::Preserved);
 }
 
+/// The summary keeps an operator without operands as an operator. A reader
+/// that knows its value, here where it placed the module, rewrites the arena
+/// in order, so every expression keeps its identity.
 #[test]
-fn an_operator_that_the_dialect_knows_as_a_number_is_a_constant() {
+fn a_reader_substitutes_the_value_of_an_operator_without_operands() {
     let effect = effect_of(|b| {
         let base = b.apply(&Op::Base, &[], &[bits(32)]).first;
         b.effect(&Eff::Load(Space::Data), &[base], &[bits(8)], &[]);
         Control::Advance
     });
+    let address = effect.memory[0].location.address;
     assert_eq!(
-        effect.exprs.get(effect.memory[0].location.address),
+        effect.exprs.get(address),
+        Expr::Op {
+            name: "base",
+            args: &[],
+            result: 0,
+            width: bits(32)
+        }
+    );
+
+    let mut placed = Exprs::new();
+    for id in effect.exprs.ids() {
+        let rewritten = match effect.exprs.get(id) {
+            Expr::Op {
+                name: "base",
+                args: &[],
+                width,
+                ..
+            } => placed.constant(&[BASE], width),
+            Expr::Op {
+                name,
+                args,
+                result,
+                width,
+            } => placed.op(name, args, result, width),
+            Expr::Read(place) => placed.read(place),
+            Expr::Const { words, width } => placed.constant(words, width),
+            Expr::Opaque { origin, width } => placed.opaque(origin, width),
+        };
+        assert_eq!(rewritten, id);
+    }
+    assert_eq!(
+        placed.get(address),
         Expr::Const {
             words: &[BASE],
             width: bits(32)

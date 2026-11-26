@@ -44,7 +44,7 @@ impl<V: DenseId> ValueRange<V> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Selection<'a, D: Dialect, V> {
     /// One fixed place.
-    Direct(Place<D>),
+    Direct(Place<D::Root>),
     /// The place `candidates[k]` where `k` is the value of `index`.
     ///
     /// The producer normalizes the index (for example `(top + i) & 7`), so
@@ -56,7 +56,7 @@ pub enum Selection<'a, D: Dialect, V> {
         /// The selector, computed from the state before the instruction.
         index: V,
         /// The places that the selector chooses from, in index order.
-        candidates: &'a [Place<D>],
+        candidates: &'a [Place<D::Root>],
     },
     /// An element of a sparse or unbounded bank, such as a model-specific
     /// register. A consumer keeps such an access opaque instead of expanding
@@ -120,7 +120,7 @@ pub enum WriteTarget<'a, D: Dialect, V> {
         /// The selector, computed from the state before the instruction.
         index: V,
         /// The places that the selector chooses from, in index order.
-        candidates: &'a [Place<D>],
+        candidates: &'a [Place<D::Root>],
         /// The written value. Its width equals the width of every candidate.
         value: V,
     },
@@ -217,6 +217,55 @@ pub enum Control<V> {
     Terminating,
 }
 
+impl<V> Control<V> {
+    /// Returns the same boundary with each operand mapped through `f`, in
+    /// the order of [`operands`](Self::operands).
+    ///
+    /// `control.map(|_| ())` is the kind of the boundary without its values,
+    /// which is how an [`Effect`](crate::Effect) states its exit.
+    #[must_use]
+    pub fn map<W>(self, mut f: impl FnMut(V) -> W) -> Control<W> {
+        match self {
+            Self::Advance => Control::Advance,
+            Self::Jump { target } => Control::Jump { target: f(target) },
+            Self::Branch {
+                condition,
+                taken,
+                not_taken,
+            } => Control::Branch {
+                condition: f(condition),
+                taken: f(taken),
+                not_taken: not_taken.map(f),
+            },
+            Self::Call { target } => Control::Call { target: f(target) },
+            Self::Return { target } => Control::Return { target: f(target) },
+            Self::Dispatch { scrutinee } => Control::Dispatch {
+                scrutinee: f(scrutinee),
+            },
+            Self::Terminating => Control::Terminating,
+        }
+    }
+
+    /// Iterates over the operands: the target of a jump, a call, or a
+    /// return; the condition, the taken target, and the not-taken target of
+    /// a branch; or the scrutinee of a dispatch.
+    pub fn operands(self) -> impl Iterator<Item = V> {
+        let operands = match self {
+            Self::Advance | Self::Terminating => [None, None, None],
+            Self::Jump { target } | Self::Call { target } | Self::Return { target } => {
+                [Some(target), None, None]
+            }
+            Self::Branch {
+                condition,
+                taken,
+                not_taken,
+            } => [Some(condition), Some(taken), not_taken],
+            Self::Dispatch { scrutinee } => [Some(scrutinee), None, None],
+        };
+        operands.into_iter().flatten()
+    }
+}
+
 /// One statement of a sealed record, in the order that it was built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Statement<'a, D: Dialect, V> {
@@ -275,4 +324,58 @@ pub enum Statement<'a, D: Dialect, V> {
         /// The policy that the producer resolved into `target`.
         policy: D::WritePolicy,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate alloc;
+
+    use alloc::vec::Vec;
+
+    use super::Control;
+
+    #[test]
+    fn the_operands_of_a_boundary_come_in_the_order_that_map_visits() {
+        let boundaries = [
+            Control::Advance,
+            Control::Jump { target: 1 },
+            Control::Branch {
+                condition: 1,
+                taken: 2,
+                not_taken: None,
+            },
+            Control::Branch {
+                condition: 1,
+                taken: 2,
+                not_taken: Some(3),
+            },
+            Control::Call { target: 1 },
+            Control::Return { target: 1 },
+            Control::Dispatch { scrutinee: 1 },
+            Control::Terminating,
+        ];
+        for control in boundaries {
+            let mut visited = Vec::new();
+            let mapped = control.map(|value| {
+                visited.push(value);
+                value * 10
+            });
+            assert_eq!(control.operands().collect::<Vec<_>>(), visited);
+            assert_eq!(
+                mapped.operands().collect::<Vec<_>>(),
+                visited.iter().map(|value| value * 10).collect::<Vec<_>>()
+            );
+            assert_eq!(mapped.map(|_| ()), control.map(|_| ()));
+        }
+        assert_eq!(
+            Control::Branch {
+                condition: 1,
+                taken: 2,
+                not_taken: Some(3),
+            }
+            .operands()
+            .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+    }
 }

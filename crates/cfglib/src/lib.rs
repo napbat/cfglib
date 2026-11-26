@@ -53,10 +53,11 @@
 //! Every IR storage, builder implementation, editing machinery, and
 //! algorithm over the contents of an instruction belongs to the consumer.
 //! [`effects`] is the one exception: [`Effect`] states what code reads,
-//! writes, accesses in memory, and raises, and [`Summarizer`] computes it from
-//! register-transfer statements with one set of rules for every level and
-//! every consumer. [`Captured`] holds the statements of one instruction, and
-//! [`StatementTree`] turns them into expression trees for a readable view.
+//! writes, accesses in memory, and raises, and [`Effect::compute`] computes
+//! it from register-transfer statements with one set of rules for every
+//! level and every consumer. [`Captured`] holds the statements of one
+//! instruction, and [`StatementTree`] turns them into expression trees for a
+//! readable view.
 //! [`ControlTree::compute`] structures a [`Cfg`] into `if / else`, loops,
 //! `switch`, `try / catch`, and `goto` form. The tree is a fact about the graph
 //! in the way [`DominatorTree`] is: a flat arena of nodes that name blocks,
@@ -276,10 +277,9 @@ pub use dataflow::stream::{SolveStats, stream_edge_problem, stream_node_problem,
 pub use display::{DisplayInstr, IndentedWriter};
 pub use edge::{Edge, EdgeId, EdgeKind, EdgeTag, KindedEdge};
 pub use effects::{
-    Access, AccessShape, Address, CaptureBuilder, Captured, CapturedValue, DialectEffects, Effect,
-    Exit, Expr, ExprId, Exprs, Opaque, RaiseOrigin, Raised, RtlEffect, SelectShape, StateTouch,
-    StatementTree, Summarizer, Touch, TreeItem, TreeNode, TreeNodeId, TreeSpan, TreeSpanValue,
-    Write, WriteKind,
+    Access, AccessShape, CaptureBuilder, Captured, CapturedValue, DialectEffects, Effect, Expr,
+    ExprId, Exprs, MemoryAddress, Opaque, RaiseOrigin, Raised, RtlEffect, SelectShape, StateTouch,
+    StatementTree, TreeItem, TreeNode, TreeNodeId, TreeSpan, TreeSpanValue, Write, WriteKind,
 };
 pub use exception::{ExceptionDisposition, ExceptionFlow, ExceptionPhase};
 pub use flow::{

@@ -5,55 +5,33 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::convert::Infallible;
 
-use crate::graph::view::DenseId;
+use crate::identity::define_dense_id;
 use crate::ir::rtl::{
     BitSlice, Bits, Control, Dialect, InstructionBuilder, Place, Raise, RecordView, Selection,
     SpanAction, Statement, ValueRange, WriteTarget,
 };
 
-/// A value of a [`Captured`] instruction. The values of one capture are dense
-/// from zero, in the order that the statements define them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct CapturedValue(u32);
+use super::pool::Span;
 
-impl DenseId for CapturedValue {
-    fn from_index(index: usize) -> Self {
-        Self(u32::try_from(index).expect("a capture holds at most u32::MAX values"))
-    }
-
-    fn index(self) -> usize {
-        self.0 as usize
-    }
-}
-
-/// A run of one pool of a [`Captured`] instruction.
-#[derive(Debug, Clone, Copy)]
-struct Run {
-    start: usize,
-    end: usize,
-}
-
-impl Run {
-    fn push<T: Clone>(pool: &mut Vec<T>, items: &[T]) -> Self {
-        let start = pool.len();
-        pool.extend_from_slice(items);
-        Self {
-            start,
-            end: pool.len(),
-        }
-    }
-
-    fn get<T>(self, pool: &[T]) -> &[T] {
-        &pool[self.start..self.end]
-    }
+define_dense_id! {
+    /// A value of a [`Captured`] instruction. The values of one capture are
+    /// dense from zero, in the order that the statements define them.
+    pub struct CapturedValue(u32);
+    /// Creates a value from a dense zero-based index.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `index` exceeds `u32::MAX`.
+    from_index = "a capture holds at most u32::MAX values";
+    dense_id;
 }
 
 #[derive(Debug, Clone, Copy)]
 enum StoredSource<D: Dialect> {
-    Direct(Place<D>),
+    Direct(Place<D::Root>),
     Finite {
         index: CapturedValue,
-        candidates: Run,
+        candidates: Span,
     },
     Sparse {
         bank: D::Root,
@@ -66,11 +44,11 @@ enum StoredSource<D: Dialect> {
 enum StoredTarget<D: Dialect> {
     Root {
         root: D::Root,
-        plan: Run,
+        plan: Span,
     },
     Finite {
         index: CapturedValue,
-        candidates: Run,
+        candidates: Span,
         value: CapturedValue,
     },
     Sparse {
@@ -81,7 +59,7 @@ enum StoredTarget<D: Dialect> {
     },
 }
 
-/// One stored statement. Its slices are runs of the pools of the capture.
+/// One stored statement. Its slices are spans of the pools of the capture.
 #[derive(Debug, Clone, Copy)]
 enum Stored<D: Dialect> {
     Read {
@@ -90,13 +68,13 @@ enum Stored<D: Dialect> {
     },
     Constant {
         result: CapturedValue,
-        words: Run,
+        words: Span,
         width: Bits,
     },
     Apply {
         results: ValueRange<CapturedValue>,
         operator: usize,
-        args: Run,
+        args: Span,
     },
     Nondet {
         result: CapturedValue,
@@ -106,14 +84,14 @@ enum Stored<D: Dialect> {
     Effect {
         results: ValueRange<CapturedValue>,
         operation: usize,
-        args: Run,
-        outcomes: Run,
+        args: Span,
+        outcomes: Span,
     },
     Raise {
         outcome: D::Outcome,
         guard: Option<CapturedValue>,
-        payload: Run,
-        binds: Run,
+        payload: Span,
+        binds: Span,
     },
     Write {
         target: StoredTarget<D>,
@@ -131,16 +109,16 @@ enum Stored<D: Dialect> {
 /// indexed read without a candidate has no width, so the capture panics at
 /// such a read.
 ///
-/// The capture implements [`RecordView`], so the
-/// [`Summarizer`](super::Summarizer) and the
-/// [`StatementTree`](super::StatementTree) read it as they read a sealed
-/// record.
+/// The capture implements [`RecordView`], so
+/// [`Effect::compute`](super::Effect::compute) and
+/// [`StatementTree::compute`](super::StatementTree::compute) read it as they
+/// read a sealed record.
 #[derive(Debug, Clone)]
 pub struct Captured<D: Dialect> {
     widths: Vec<Bits>,
     statements: Vec<Stored<D>>,
     args: Vec<CapturedValue>,
-    places: Vec<Place<D>>,
+    places: Vec<Place<D::Root>>,
     plans: Vec<SpanAction<D, CapturedValue>>,
     words: Vec<u64>,
     operators: Vec<D::Operator>,
@@ -360,7 +338,7 @@ impl<D: Dialect> InstructionBuilder<D> for CaptureBuilder<'_, D> {
                     .width,
                 StoredSource::Finite {
                     index,
-                    candidates: Run::push(&mut self.captured.places, candidates),
+                    candidates: Span::push(&mut self.captured.places, candidates),
                 },
             ),
             Selection::SparseIndexed { bank, key, slice } => {
@@ -376,7 +354,7 @@ impl<D: Dialect> InstructionBuilder<D> for CaptureBuilder<'_, D> {
 
     fn constant(&mut self, words: &[u64], width: Bits) -> CapturedValue {
         let result = self.captured.fresh(&[width]).first;
-        let words = Run::push(&mut self.captured.words, words);
+        let words = Span::push(&mut self.captured.words, words);
         self.captured.statements.push(Stored::Constant {
             result,
             words,
@@ -392,7 +370,7 @@ impl<D: Dialect> InstructionBuilder<D> for CaptureBuilder<'_, D> {
         results: &[Bits],
     ) -> ValueRange<CapturedValue> {
         let range = self.captured.fresh(results);
-        let args = Run::push(&mut self.captured.args, args);
+        let args = Span::push(&mut self.captured.args, args);
         self.captured.operators.push(operator.clone());
         self.captured.statements.push(Stored::Apply {
             results: range,
@@ -420,8 +398,8 @@ impl<D: Dialect> InstructionBuilder<D> for CaptureBuilder<'_, D> {
         outcomes: &[D::Outcome],
     ) -> ValueRange<CapturedValue> {
         let range = self.captured.fresh(results);
-        let args = Run::push(&mut self.captured.args, args);
-        let outcomes = Run::push(&mut self.captured.outcomes, outcomes);
+        let args = Span::push(&mut self.captured.args, args);
+        let outcomes = Span::push(&mut self.captured.outcomes, outcomes);
         self.captured.operations.push(operation.clone());
         self.captured.statements.push(Stored::Effect {
             results: range,
@@ -433,8 +411,8 @@ impl<D: Dialect> InstructionBuilder<D> for CaptureBuilder<'_, D> {
     }
 
     fn raise(&mut self, raise: Raise<'_, D, CapturedValue>) {
-        let payload = Run::push(&mut self.captured.args, raise.payload);
-        let binds = Run::push(&mut self.captured.binds, raise.binds);
+        let payload = Span::push(&mut self.captured.args, raise.payload);
+        let binds = Span::push(&mut self.captured.binds, raise.binds);
         self.captured.statements.push(Stored::Raise {
             outcome: raise.outcome,
             guard: raise.guard,
@@ -447,7 +425,7 @@ impl<D: Dialect> InstructionBuilder<D> for CaptureBuilder<'_, D> {
         let target = match target {
             WriteTarget::Root { root, plan } => StoredTarget::Root {
                 root,
-                plan: Run::push(&mut self.captured.plans, plan),
+                plan: Span::push(&mut self.captured.plans, plan),
             },
             WriteTarget::FiniteIndexed {
                 index,
@@ -455,7 +433,7 @@ impl<D: Dialect> InstructionBuilder<D> for CaptureBuilder<'_, D> {
                 value,
             } => StoredTarget::Finite {
                 index,
-                candidates: Run::push(&mut self.captured.places, candidates),
+                candidates: Span::push(&mut self.captured.places, candidates),
                 value,
             },
             WriteTarget::SparseIndexed {

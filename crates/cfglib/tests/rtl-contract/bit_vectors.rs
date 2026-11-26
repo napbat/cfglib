@@ -107,28 +107,28 @@ fn slices_order_by_offset_before_width() {
 #[test]
 fn the_whole_place_of_every_root_covers_its_width_in_both_dialects() {
     for root in Reg::ALL {
-        let place = Place::<Kestrel>::whole(root);
+        let place = Place::whole::<Kestrel>(root);
         assert_eq!(place.root, root);
         assert_eq!(place.slice, BitSlice::whole(Kestrel::root_width(root)));
     }
     for id in 0..10 {
         let root = Slot::of(id);
-        let place = Place::<Tessera>::whole(root);
+        let place = Place::whole::<Tessera>(root);
         assert_eq!(place.root, root);
         assert_eq!(place.slice.offset, 0);
         assert_eq!(place.slice.width, Tessera::root_width(root));
     }
-    assert_eq!(Place::<Kestrel>::whole(Reg::Wide).slice.width.words(), 3);
-    assert_eq!(Place::<Tessera>::whole(Slot::of(8)).slice.width.words(), 4);
+    assert_eq!(Place::whole::<Kestrel>(Reg::Wide).slice.width.words(), 3);
+    assert_eq!(Place::whole::<Tessera>(Slot::of(8)).slice.width.words(), 4);
 }
 
 #[test]
 fn places_order_by_root_before_slice() {
-    let low = Place::<Kestrel> {
+    let low = Place {
         root: Reg::R0,
         slice: BitSlice::new(8, bits(8)),
     };
-    let high = Place::<Kestrel> {
+    let high = Place {
         root: Reg::R1,
         slice: BitSlice::new(0, bits(8)),
     };
