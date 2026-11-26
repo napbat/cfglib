@@ -6,7 +6,7 @@
 //! yield and is therefore the right size for a dense side table, while
 //! [`Graph::node_ids`] yields only the live nodes. A removed node is not a
 //! node of the view at all, so a whole-graph partition such as
-//! [`tarjan_scc`](crate::tarjan_scc) reports no phantom singleton for it and
+//! [`SccDecomposition`](crate::SccDecomposition) reports no phantom singleton for it and
 //! no analysis has to compact the store first.
 
 use crate::graph::edge_view::{EdgeRef, EdgeView};

@@ -241,7 +241,7 @@ fn all_pairs_match_breadth_first_search_on_small_graphs() {
     let mut rng = Rng::new(67);
     // One scratch for every graph and configuration, so it grows and shrinks
     // between indexes of different sizes.
-    let mut scratch = ReachScratch::new();
+    let mut scratch = ReachScratch::default();
     for _ in 0..48 {
         let graph = random_graph(&mut rng, 64);
         let live: Vec<NodeId> = graph.node_ids().collect();
@@ -254,7 +254,7 @@ fn all_pairs_match_breadth_first_search_on_small_graphs() {
             for (row, &source) in oracle.iter().zip(&live) {
                 for &target in &live {
                     assert_eq!(
-                        index.reaches(source, target, &mut scratch),
+                        index.reaches_in(&mut scratch, source, target),
                         row[target.index()],
                         "{source:?} -> {target:?} under {config:?} in {graph:?}"
                     );
@@ -268,7 +268,7 @@ fn all_pairs_match_breadth_first_search_on_small_graphs() {
 fn random_pairs_match_breadth_first_search_on_large_graphs() {
     const NODES: usize = 10_000;
     let mut rng = Rng::new(10_000);
-    let mut scratch = ReachScratch::new();
+    let mut scratch = ReachScratch::default();
     let mut wide = uniform(&mut rng, NODES, NODES);
     remove_some(&mut rng, &mut wide, 5);
     let mut biased = forward_biased(&mut rng, NODES, 2 * NODES);
@@ -301,7 +301,7 @@ fn random_pairs_match_breadth_first_search_on_large_graphs() {
             for ((source, targets), reached) in pairs.iter().zip(&oracle) {
                 for &target in targets {
                     assert_eq!(
-                        index.reaches(*source, target, &mut scratch),
+                        index.reaches_in(&mut scratch, *source, target),
                         reached[target.index()],
                         "{source:?} -> {target:?} under {config:?} in graph {kind}"
                     );
@@ -312,9 +312,9 @@ fn random_pairs_match_breadth_first_search_on_large_graphs() {
 }
 
 #[test]
-fn two_computations_compare_equal_and_answer_alike() {
+fn two_computations_compare_equal_and_answer_alike_with_or_without_a_scratch() {
     let mut rng = Rng::new(2);
-    let mut scratch = ReachScratch::new();
+    let mut scratch = ReachScratch::default();
     for _ in 0..12 {
         let graph = random_graph(&mut rng, 200);
         for config in CONFIGS {
@@ -324,8 +324,8 @@ fn two_computations_compare_equal_and_answer_alike() {
             for (source, targets) in random_pairs(&mut rng, &graph, 400) {
                 for target in targets {
                     assert_eq!(
-                        first.reaches(source, target, &mut scratch),
-                        second.reaches(source, target, &mut scratch)
+                        first.reaches_in(&mut scratch, source, target),
+                        second.reaches(source, target)
                     );
                 }
             }
@@ -344,16 +344,16 @@ fn every_node_reaches_itself_and_a_cycle_reaches_around() {
         graph.add_edge(node, ring[(index + 1) % ring.len()], ());
     }
     graph.add_edge(looped, ring[0], ());
-    let mut scratch = ReachScratch::new();
+    let mut scratch = ReachScratch::default();
     for config in CONFIGS {
         let index = ReachIndex::compute(&graph, config);
-        assert!(index.reaches(looped, looped, &mut scratch));
-        assert!(index.reaches(alone, alone, &mut scratch));
-        assert!(index.reaches(ring[2], ring[1], &mut scratch));
-        assert!(index.reaches(looped, ring[2], &mut scratch));
-        assert!(!index.reaches(ring[0], looped, &mut scratch));
-        assert!(!index.reaches(alone, looped, &mut scratch));
-        assert!(!index.reaches(looped, alone, &mut scratch));
+        assert!(index.reaches_in(&mut scratch, looped, looped));
+        assert!(index.reaches_in(&mut scratch, alone, alone));
+        assert!(index.reaches_in(&mut scratch, ring[2], ring[1]));
+        assert!(index.reaches(looped, ring[2]));
+        assert!(!index.reaches(ring[0], looped));
+        assert!(!index.reaches_in(&mut scratch, alone, looped));
+        assert!(!index.reaches_in(&mut scratch, looped, alone));
     }
 }
 
@@ -421,7 +421,7 @@ fn a_removed_source_panics() {
     let removed = graph.add_node(());
     graph.remove_node(removed);
     let index = ReachIndex::compute(&graph, ReachIndexConfig::new());
-    let _ = index.reaches(removed, kept, &mut ReachScratch::new());
+    let _ = index.reaches(removed, kept);
 }
 
 #[test]
@@ -432,7 +432,7 @@ fn a_removed_target_panics_in_exact_mode() {
     let removed = graph.add_node(());
     graph.remove_node(removed);
     let index = ReachIndex::compute(&graph, ReachIndexConfig::new().with_exact_max_chains(8));
-    let _ = index.reaches(kept, removed, &mut ReachScratch::new());
+    let _ = index.reaches_in(&mut ReachScratch::default(), kept, removed);
 }
 
 #[test]
@@ -441,7 +441,7 @@ fn a_node_beyond_the_bound_panics() {
     let mut graph = Graph::<(), ()>::new();
     let node = graph.add_node(());
     let index = ReachIndex::compute(&graph, ReachIndexConfig::new());
-    let _ = index.reaches(node, NodeId::from_index(1), &mut ReachScratch::new());
+    let _ = index.reaches(node, NodeId::from_index(1));
 }
 
 #[test]
@@ -479,9 +479,9 @@ fn report_how_many_queries_skip_the_search() {
             ReachIndexConfig::new().with_orders(4).with_supportive(64),
         ] {
             let index = ReachIndex::compute(graph, config);
-            let mut scratch = ReachScratch::new();
+            let mut scratch = ReachScratch::default();
             for &(source, target) in &pairs {
-                let _ = index.reaches(source, target, &mut scratch);
+                let _ = index.reaches_in(&mut scratch, source, target);
             }
             let coverage = scratch.coverage;
             println!(

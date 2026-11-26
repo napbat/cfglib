@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 
 use crate::graph::dominator::DominatorTree;
 use crate::graph::edge_view::EdgeView;
-use crate::graph::scc::tarjan_scc;
+use crate::graph::scc::{SccDecomposition, SccNumbering};
 use crate::graph::store::Graph;
 use crate::graph::traverse::depth_first_preorder;
 use crate::graph::view::Direction;
@@ -640,12 +640,15 @@ fn the_view_reports_slots_so_dense_analyses_stay_in_bounds() {
 
     // A removed node is not a node of the view at all, so a whole-graph
     // partition reports no phantom singleton for it.
-    let uncompacted = tarjan_scc(&graph);
+    let uncompacted = SccDecomposition::compute(&graph, SccNumbering::LeavesFirst);
     assert_eq!(uncompacted.len(), 3);
 
     graph.compact(NodeOrder::Insertion);
     assert_eq!(GraphView::node_bound(&graph), 3);
-    assert_eq!(tarjan_scc(&graph).len(), 3);
+    assert_eq!(
+        SccDecomposition::compute(&graph, SccNumbering::LeavesFirst).len(),
+        3
+    );
 }
 
 #[test]
@@ -731,7 +734,7 @@ fn the_algorithms_agree_whether_the_edges_sit_in_the_delta_or_the_compacted_base
     }
 
     let components = |graph: &Graph<&'static str, &'static str>| {
-        tarjan_scc(graph)
+        SccDecomposition::compute(graph, SccNumbering::LeavesFirst)
             .components()
             .map(|nodes| indexes(nodes.iter().copied(), Id::index))
             .collect::<Vec<_>>()

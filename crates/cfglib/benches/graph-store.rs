@@ -54,7 +54,7 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use cfglib::{Graph, Id, NodeId, NodeOrder, tarjan_scc};
+use cfglib::{Graph, Id, NodeId, NodeOrder, SccDecomposition, SccNumbering};
 
 #[cfg(cfglib_bench_alloc)]
 struct CountingAllocator;
@@ -618,7 +618,8 @@ fn run_ordered(
     let (graph, compacted) = build_compacted(edges, compaction);
     let (successors, scan) = measure(|| walk_neighbors(&graph, true));
     let (predecessors, reverse_scan) = measure(|| walk_neighbors(&graph, false));
-    let (components, scc) = measure(|| tarjan_scc(&graph).len());
+    let (components, scc) =
+        measure(|| SccDecomposition::compute(&graph, SccNumbering::LeavesFirst).len());
     (
         vec![
             ("compaction", compacted),

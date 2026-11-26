@@ -15,7 +15,7 @@ use core::cmp::Reverse;
 
 use crate::cfg::Cfg;
 use crate::flow::CallInfo;
-use crate::graph::scc::tarjan_scc;
+use crate::graph::scc::{SccDecomposition, SccNumbering};
 use crate::graph::store::{Graph, NodeId};
 use crate::identity::{NO_INDEX, slot, word};
 
@@ -241,10 +241,10 @@ pub fn is_recursive_function<C>(
 
 /// Return for every node whether it is directly or mutually recursive.
 ///
-/// The answer for all nodes comes from one [`tarjan_scc`] pass, O(n + m): a
-/// node is recursive when its strong component has several nodes or its one
-/// node calls itself, so entry `f` equals [`is_recursive_function`] for every
-/// live node `f`.
+/// The answer for all nodes comes from one leaves-first [`SccDecomposition`]
+/// pass, O(n + m): a node is recursive when its strong component has several
+/// nodes or its one node calls itself, so entry `f` equals
+/// [`is_recursive_function`] for every live node `f`.
 ///
 /// The vector is indexed by [`NodeId::index`] and sized by the graph's node
 /// *bound*; a removed node's slot is `false`. Generic over any [`Graph`], like
@@ -252,7 +252,7 @@ pub fn is_recursive_function<C>(
 #[must_use]
 pub fn recursive_functions<N, E>(graph: &Graph<N, E>) -> Vec<bool> {
     let mut recursive = vec![false; graph.node_bound()];
-    let components = tarjan_scc(graph);
+    let components = SccDecomposition::compute(graph, SccNumbering::LeavesFirst);
     for component in components.components() {
         if components.component(component[0]).is_cyclic(graph) {
             for &node in component {
@@ -457,7 +457,7 @@ fn propagate<N, E, S: Clone + PartialEq>(
     mut narrow: Option<impl FnMut(NodeId, &S, &S) -> S>,
 ) -> Vec<S> {
     let mut summaries = alloc::vec![bottom.clone(); graph.node_bound()];
-    let components = tarjan_scc(graph);
+    let components = SccDecomposition::compute(graph, SccNumbering::LeavesFirst);
     // Each member's position in its component's callee-first order.
     let mut rank = alloc::vec![NO_INDEX; graph.node_bound()];
     // Scratch reused by every recursive component.

@@ -1,6 +1,6 @@
 use cfglib::{
     BlockId, Cfg, DominatorTree, EdgeKind, Graph, LoopForest, NodeId, Rooted, SccDecomposition,
-    kosaraju_scc, tarjan_scc,
+    SccNumbering,
 };
 
 use super::NODE_COUNT;
@@ -116,7 +116,7 @@ fn register_cycles(suite: &mut BenchmarkSuite<'_>) {
         );
     }
     let random = random_cfg(RANDOM_CFG_BLOCKS);
-    let components = tarjan_scc(&random);
+    let components = SccDecomposition::compute(&random, SccNumbering::LeavesFirst);
     benchmark_case!(
         suite,
         "cfg_cycle_forest_random_1m",
@@ -150,7 +150,7 @@ fn register_components_and_loops(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(
     benchmark_case!(
         suite,
         "directed_tarjan_scc",
-        || tarjan_scc(graph),
+        || SccDecomposition::compute(graph, SccNumbering::LeavesFirst),
         |result: &SccDecomposition<NodeId>| {
             let cycle_count = (NODE_COUNT - 1) / 32;
             assert_eq!(result.len(), NODE_COUNT - 16 * cycle_count);
@@ -193,7 +193,7 @@ fn register_components_and_loops(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(
     benchmark_case!(
         suite,
         "directed_tarjan_scc_deep_path",
-        || tarjan_scc(&path),
+        || SccDecomposition::compute(&path, SccNumbering::LeavesFirst),
         |result: &SccDecomposition<NodeId>| {
             assert_eq!(result.len(), DEEP_PATH_NODES);
             assert_eq!(
@@ -206,13 +206,13 @@ fn register_components_and_loops(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(
     benchmark_case!(
         suite,
         "directed_tarjan_scc_deep_cycle",
-        || tarjan_scc(&cycle),
+        || SccDecomposition::compute(&cycle, SccNumbering::LeavesFirst),
         |result: &SccDecomposition<NodeId>| assert_eq!(result.len(), 1)
     );
     benchmark_case!(
         suite,
         "directed_kosaraju_scc_deep_path",
-        || kosaraju_scc(&path),
+        || SccDecomposition::compute(&path, SccNumbering::SourcesFirst),
         |result: &SccDecomposition<NodeId>| {
             assert_eq!(result.len(), DEEP_PATH_NODES);
             assert_eq!(result.component_index(NodeId::from_index(0)), 0);

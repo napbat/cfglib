@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use super::{FeedbackConfig, feedback_arc_set, linear_arrangement};
 use crate::graph::edge_view::FilteredEdges;
-use crate::graph::scc::kosaraju_scc;
+use crate::graph::scc::{SccDecomposition, SccNumbering};
 use crate::graph::store::{EdgeId, Graph, NodeId};
 use crate::graph::traverse::topological_sort;
 use crate::test_util::rng::Rng;
@@ -99,12 +99,12 @@ fn check(graph: &Graph<(), ()>) {
         graph.node_ids().collect::<Vec<_>>(),
         "a permutation of the live nodes"
     );
-    let components = kosaraju_scc(graph);
+    let components = SccDecomposition::compute(graph, SccNumbering::SourcesFirst);
     assert!(
         order.windows(2).all(|pair| {
             components.component_index(pair[0]) <= components.component_index(pair[1])
         }),
-        "components in kosaraju_scc order"
+        "components in sources-first order"
     );
 
     let rank = ranks(graph, &order);

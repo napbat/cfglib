@@ -26,7 +26,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use crate::graph::scc::tarjan_scc;
+use crate::graph::scc::{SccDecomposition, SccNumbering};
 use crate::graph::traverse::reachable_in;
 use crate::graph::view::{DenseId, Direction, GraphView};
 use crate::identity::{NO_INDEX, word};
@@ -244,7 +244,7 @@ fn for_each_sink<G: GraphView>(
     if trapped.node_ids().next().is_none() {
         return;
     }
-    let components = tarjan_scc(&trapped);
+    let components = SccDecomposition::compute(&trapped, SccNumbering::LeavesFirst);
     for component in components.components() {
         let contains = |block: G::NodeId| component.binary_search(&block).is_ok();
         if component

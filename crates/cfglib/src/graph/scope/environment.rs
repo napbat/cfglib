@@ -9,7 +9,7 @@ use core::cmp::Ordering;
 use smallvec::SmallVec;
 
 use crate::graph::edge_view::EdgeRef;
-use crate::graph::scc::tarjan_scc;
+use crate::graph::scc::{SccDecomposition, SccNumbering};
 
 use super::index::ScopeResolutionIndex;
 use super::query::{
@@ -203,7 +203,7 @@ impl<St: Clone + Ord, K: Clone + Ord> ScopeEnvironmentCache<St, K> {
     #[must_use]
     pub fn new<S, L, R, D, Q>(graph: &ScopeGraph<S, L, R, D, Q>) -> Self {
         let mut on_cycle = vec![false; graph.scope_bound()];
-        for component in tarjan_scc(graph).components() {
+        for component in SccDecomposition::compute(graph, SccNumbering::LeavesFirst).components() {
             let cyclic = component.len() > 1
                 || component.iter().any(|&scope| {
                     graph

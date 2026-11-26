@@ -14,7 +14,7 @@ fn every_pair_matches_the_breadth_first_distances_in_both_modes() {
         ReachIndexConfig::new().with_exact_max_chains(usize::MAX),
         ReachIndexConfig::new().with_exact_max_chains(3),
     ];
-    let mut scratch = ReachScratch::new();
+    let mut scratch = ReachScratch::default();
     for seed in 1..=24 {
         let nodes = 8 + usize::try_from(seed).expect("a small seed fits in usize") * 2;
         let digraph = Digraph::random(&mut Lcg(seed + 130), nodes, nodes + nodes / 2);
@@ -27,10 +27,10 @@ fn every_pair_matches_the_breadth_first_distances_in_both_modes() {
             for (source, row) in distances.iter().enumerate() {
                 for (target, distance) in row.iter().enumerate() {
                     assert_eq!(
-                        index.reaches(
+                        index.reaches_in(
+                            &mut scratch,
                             NodeId::from_index(source),
                             NodeId::from_index(target),
-                            &mut scratch
                         ),
                         distance.is_some(),
                         "{source} -> {target} under {config:?} in {:?}",

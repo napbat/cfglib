@@ -1,5 +1,5 @@
 use super::*;
-use crate::graph::scc::tarjan_scc;
+use crate::graph::scc::{SccDecomposition, SccNumbering};
 use crate::graph::store::{Graph, NodeId};
 use crate::graph::view::Induced;
 use crate::test_util::rng::Rng;
@@ -617,7 +617,7 @@ fn topological_sort_or_cycle_sorts_exactly_the_acyclic_graphs() {
     let (mut sorted, mut cyclic) = (0, 0);
     for seed in 0..800 {
         let graph = random_graph(&mut Rng::new(seed));
-        let components = tarjan_scc(&graph);
+        let components = SccDecomposition::compute(&graph, SccNumbering::LeavesFirst);
         let result = topological_sort_or_cycle(&graph);
         match &result {
             Ok(order) => {

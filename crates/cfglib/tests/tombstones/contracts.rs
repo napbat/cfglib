@@ -6,8 +6,8 @@ use std::collections::BTreeSet;
 
 use cfglib::{
     BlockId, Cfg, CfgMetrics, DenseId, DominatorTree, EdgeId, EdgeKind, Graph, GraphMetrics,
-    GraphView, LoopForest, NodeOrder, Rooted, RootedView, find_back_edges, kosaraju_scc,
-    merge_blocks, remove_empty_blocks, remove_unreachable, simplify, tarjan_scc,
+    GraphView, LoopForest, NodeOrder, Rooted, RootedView, SccDecomposition, SccNumbering,
+    find_back_edges, merge_blocks, remove_empty_blocks, remove_unreachable, simplify,
 };
 
 use crate::cfg_analyses::check_cfg_analyses;
@@ -334,8 +334,14 @@ fn components_cover_the_live_nodes_only() {
     assert!(graph.remove_node(removed));
 
     for (name, decomposition) in [
-        ("tarjan", tarjan_scc(&graph)),
-        ("kosaraju", kosaraju_scc(&graph)),
+        (
+            "tarjan",
+            SccDecomposition::compute(&graph, SccNumbering::LeavesFirst),
+        ),
+        (
+            "kosaraju",
+            SccDecomposition::compute(&graph, SccNumbering::SourcesFirst),
+        ),
     ] {
         let components: BTreeSet<Vec<_>> = decomposition.components().map(<[_]>::to_vec).collect();
         assert_eq!(
@@ -358,10 +364,13 @@ fn a_graph_whose_only_cycle_ran_through_a_removed_node_is_acyclic() {
     graph.add_edge(first, middle, ());
     graph.add_edge(middle, last, ());
     graph.add_edge(last, first, ());
-    assert!(!tarjan_scc(&graph).is_dag(&graph));
+    assert!(!SccDecomposition::compute(&graph, SccNumbering::LeavesFirst).is_dag(&graph));
 
     assert!(graph.remove_node(middle));
-    for decomposition in [tarjan_scc(&graph), kosaraju_scc(&graph)] {
+    for decomposition in [
+        SccDecomposition::compute(&graph, SccNumbering::LeavesFirst),
+        SccDecomposition::compute(&graph, SccNumbering::SourcesFirst),
+    ] {
         assert!(decomposition.is_dag(&graph));
         assert_eq!(decomposition.len(), 2);
     }

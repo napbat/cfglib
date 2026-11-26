@@ -5,11 +5,11 @@ use std::ops::ControlFlow;
 use cfglib::{BlockId, canonical_hash, canonical_order, multiset_fingerprint, wl_colors};
 use cfglib::{
     CallInfo, Cfg, Direction, DominatorTree, EdgeKind, FoldEnter, Graph, GraphView, LoopForest,
-    MarkScope, NodeId, OpenFold, OpenFoldConfig, Rooted, SearchConfig, SearchOrder, SearchScratch,
-    SemanticValidator, Visit, call_graph, canonicalize_loops, condensation, condensation_of,
-    depth_first_edges, depth_first_events, depth_first_postorder, find_back_edges, find_function,
-    follow, follow_path, insert_preheader, is_recursive_function, is_reducible, kosaraju_scc,
-    min_label_relaxation, open_breadth_first_events, open_breadth_first_paths,
+    MarkScope, NodeId, OpenFold, OpenFoldConfig, Rooted, SccDecomposition, SccNumbering,
+    SearchConfig, SearchOrder, SearchScratch, SemanticValidator, Visit, call_graph,
+    canonicalize_loops, depth_first_edges, depth_first_events, depth_first_postorder,
+    find_back_edges, find_function, follow, follow_path, insert_preheader, is_recursive_function,
+    is_reducible, min_label_relaxation, open_breadth_first_events, open_breadth_first_paths,
     open_depth_first_events, open_fold_post_order, open_search, propagate_summaries, reachable,
     reverse_postorder, scan_predecessors, search, search_in, to_dot, to_text, topological_sort,
     topological_sort_or_cycle, verify, verify_edge_view, verify_view, verify_with, write_dot,
@@ -375,7 +375,7 @@ fn register_graph_algorithms(suite: &mut BenchmarkSuite<'_>) {
         || scan_predecessors(&graph, scanned_target).collect::<BTreeSet<_>>(),
         |scanned: &BTreeSet<NodeId>| assert_eq!(scanned, &stored_predecessors)
     );
-    let components = kosaraju_scc(&graph);
+    let components = SccDecomposition::compute(&graph, SccNumbering::SourcesFirst);
     let dag = chain_graph(NODE_COUNT);
 
     benchmark_case!(
@@ -413,9 +413,8 @@ fn register_graph_algorithms(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_kosaraju_scc",
-        covers[kosaraju_scc],
-        || kosaraju_scc(&graph),
-        |result| assert_eq!(
+        || SccDecomposition::compute(&graph, SccNumbering::SourcesFirst),
+        |result: &SccDecomposition<NodeId>| assert_eq!(
             result.components().map(<[_]>::len).sum::<usize>(),
             NODE_COUNT
         )
@@ -423,15 +422,13 @@ fn register_graph_algorithms(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_condensation",
-        covers[condensation],
-        || condensation(&graph),
+        || SccDecomposition::compute(&graph, SccNumbering::LeavesFirst).condensation(&graph),
         |result| assert!(topological_sort(result).is_some())
     );
     benchmark_case!(
         suite,
         "api_condensation_of",
-        covers[condensation_of],
-        || condensation_of(&graph, &components),
+        || components.condensation(&graph),
         |result| assert_eq!(result.node_count(), components.len())
     );
     benchmark_case!(
@@ -637,7 +634,7 @@ fn register_call_tree(suite: &mut BenchmarkSuite<'_>) {
         .map(|(index, cfg)| (fixture_u32(index), cfg))
         .collect();
     let tree = call_graph(&tree_functions);
-    let components = kosaraju_scc(&tree);
+    let components = SccDecomposition::compute(&tree, SccNumbering::SourcesFirst);
     let recursive = tree
         .node_ids()
         .filter(|&function| components.component(function).is_cyclic(&tree))

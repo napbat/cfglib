@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 use super::{PathExprArena, PathExprId, PathExpressions};
 use crate::graph::dominator::DominatorTree;
 use crate::graph::edge_view::EdgeView;
-use crate::graph::scc::tarjan_scc;
+use crate::graph::scc::{SccDecomposition, SccNumbering};
 use crate::graph::store::{Graph, NodeId};
 use crate::graph::traverse::reverse_postorder;
 use crate::graph::view::Direction;
@@ -184,7 +184,7 @@ impl<G: RootedView + EdgeView> Elimination<'_, G> {
         for edge in derived {
             shape.add_edge(nodes[edge.from], nodes[edge.to], ());
         }
-        let decomposition = tarjan_scc(&shape);
+        let decomposition = SccDecomposition::compute(&shape, SccNumbering::LeavesFirst);
         // Leaves come first, so the reversed order is topological.
         let order: Vec<&[NodeId]> = decomposition.components().rev().collect();
         let mut component = vec![0; children.len()];

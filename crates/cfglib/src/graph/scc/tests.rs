@@ -5,6 +5,16 @@ use crate::graph::store::Graph;
 use crate::test_util::ff;
 use alloc::format;
 
+/// The leaves-first decomposition of `graph`.
+fn leaves_first<G: GraphView>(graph: &G) -> SccDecomposition<G::NodeId> {
+    SccDecomposition::compute(graph, SccNumbering::LeavesFirst)
+}
+
+/// The sources-first decomposition of `graph`.
+fn sources_first<G: GraphView>(graph: &G) -> SccDecomposition<G::NodeId> {
+    SccDecomposition::compute(graph, SccNumbering::SourcesFirst)
+}
+
 #[test]
 fn cfg_uses_generic_scc_algorithm() {
     let mut cfg = Cfg::new();
@@ -13,7 +23,7 @@ fn cfg_uses_generic_scc_algorithm() {
     cfg.block_mut(next).push(ff("next"));
     cfg.add_edge(cfg.entry(), next, EdgeKind::Fallthrough);
 
-    let result = tarjan_scc(&cfg);
+    let result = leaves_first(&cfg);
     assert_eq!(result.len(), 2);
     assert!(result.is_dag(&cfg));
 }
@@ -31,16 +41,17 @@ fn condensation_collapses_cycles_to_a_dag() {
     graph.add_edge(b, a, ());
     graph.add_edge(b, exit, ());
 
-    let condensed = condensation(&graph);
+    let components = leaves_first(&graph);
+    let condensed = components.condensation(&graph);
     assert_eq!(condensed.node_count(), 3);
     assert_eq!(condensed.edge_count(), 2, "cycle-internal edges collapse");
-    assert!(tarjan_scc(&condensed).is_dag(&condensed));
+    assert!(leaves_first(&condensed).is_dag(&condensed));
     let cycle_component = condensed
         .node_ids()
-        .find(|&node| condensed.node(node).nodes().len() == 2)
+        .find(|&node| components.components().nth(node.index()).map(<[_]>::len) == Some(2))
         .expect("the a/b component");
-    assert!(condensed.node(cycle_component).contains(a));
-    assert!(condensed.node(cycle_component).contains(b));
+    assert_eq!(cycle_component.index(), components.component_index(a));
+    assert_eq!(cycle_component.index(), components.component_index(b));
 }
 
 #[test]
@@ -51,7 +62,7 @@ fn directed_graph_cycle_forms_one_component() {
     graph.add_edge(left, right, ());
     graph.add_edge(right, left, ());
 
-    let result = tarjan_scc(&graph);
+    let result = leaves_first(&graph);
     assert_eq!(result.len(), 1);
     assert!(result.component(left).contains(right));
     assert_eq!(result.component_index(left), result.component_index(right));
@@ -100,8 +111,8 @@ fn partition(result: &SccDecomposition<NodeId>) -> BTreeSet<BTreeSet<NodeId>> {
 #[test]
 fn kosaraju_and_tarjan_agree_on_the_partition() {
     for (name, graph) in fixtures() {
-        let kosaraju = kosaraju_scc(&graph);
-        let tarjan = tarjan_scc(&graph);
+        let kosaraju = sources_first(&graph);
+        let tarjan = leaves_first(&graph);
         assert_eq!(partition(&kosaraju), partition(&tarjan), "{name}");
         assert_eq!(kosaraju.len(), tarjan.len(), "{name}");
         assert_eq!(kosaraju.is_dag(&graph), tarjan.is_dag(&graph), "{name}");
@@ -118,8 +129,8 @@ fn kosaraju_and_tarjan_agree_on_the_partition() {
 #[test]
 fn kosaraju_numbers_components_topologically() {
     for (name, graph) in fixtures() {
-        let kosaraju = kosaraju_scc(&graph);
-        let tarjan = tarjan_scc(&graph);
+        let kosaraju = sources_first(&graph);
+        let tarjan = leaves_first(&graph);
         for edge in graph.edges() {
             let (from, to) = (edge.source(), edge.target());
             let (source, target) = (kosaraju.component_index(from), kosaraju.component_index(to));
@@ -183,7 +194,7 @@ fn kosaraju_numbering_matches_the_hand_computed_two_pass_order() {
     // Pass 1 finishes [c, e, d, b, a, f, g], so pass 2 walks that in
     // reverse and mints components from the roots g, f, a, d — the
     // isolated node first because it finished last.
-    let result = kosaraju_scc(&graph);
+    let result = sources_first(&graph);
     assert_eq!(
         sequence(&result, &graph),
         vec![vec!["g"], vec!["f"], vec!["a", "b", "c"], vec!["d", "e"]]
@@ -201,7 +212,7 @@ fn tarjan_numbering_matches_the_hand_computed_leaves_first_order() {
     // One pass from `a`: `c` closes the cycle back to `a` without minting,
     // then `b`'s second successor `d` mints the inner cycle first, then
     // `a` mints its own. `f` and `g` follow as later roots, in node order.
-    let result = tarjan_scc(&graph);
+    let result = leaves_first(&graph);
     assert_eq!(
         sequence(&result, &graph),
         vec![vec!["d", "e"], vec!["a", "b", "c"], vec!["f"], vec!["g"]]
@@ -220,13 +231,13 @@ fn condensed_pairs(dag: &Graph<(), ()>) -> BTreeSet<(usize, usize)> {
 }
 
 #[test]
-fn condensation_of_numbers_its_nodes_by_the_decomposition_it_is_given() {
+fn condensation_numbers_its_nodes_by_the_decomposition() {
     for (name, graph) in fixtures() {
         for (algorithm, components) in [
-            ("tarjan", tarjan_scc(&graph)),
-            ("kosaraju", kosaraju_scc(&graph)),
+            ("tarjan", leaves_first(&graph)),
+            ("kosaraju", sources_first(&graph)),
         ] {
-            let dag = condensation_of(&graph, &components);
+            let dag = components.condensation(&graph);
             assert_eq!(dag.node_count(), components.len(), "{name}/{algorithm}");
 
             // Node index IS component index: every graph edge crossing two
@@ -242,13 +253,12 @@ fn condensation_of_numbers_its_nodes_by_the_decomposition_it_is_given() {
                 .filter(|&(from, to)| from != to)
                 .collect();
             assert_eq!(condensed_pairs(&dag), expected, "{name}/{algorithm}");
-            assert!(tarjan_scc(&dag).is_dag(&dag), "{name}/{algorithm}");
+            assert!(leaves_first(&dag).is_dag(&dag), "{name}/{algorithm}");
         }
 
         // And under sources-first numbering the DAG's own edges only ever
         // run upwards — the property a single ascending pass rides on.
-        let sources_first = kosaraju_scc(&graph);
-        let dag = condensation_of(&graph, &sources_first);
+        let dag = sources_first(&graph).condensation(&graph);
         for (from, to) in condensed_pairs(&dag) {
             assert!(from < to, "{name}: {from} !< {to}");
         }
@@ -256,7 +266,7 @@ fn condensation_of_numbers_its_nodes_by_the_decomposition_it_is_given() {
 }
 
 #[test]
-fn condensation_of_deduplicates_parallel_and_repeated_component_edges() {
+fn condensation_deduplicates_parallel_and_repeated_component_edges() {
     // Two nodes of the same component both point into the other, one of
     // them twice: three graph edges, one component edge.
     let mut graph = Graph::<(), ()>::new();
@@ -269,8 +279,8 @@ fn condensation_of_deduplicates_parallel_and_repeated_component_edges() {
     graph.add_edge(left, sink, ());
     graph.add_edge(right, sink, ());
 
-    let components = kosaraju_scc(&graph);
-    let dag = condensation_of(&graph, &components);
+    let components = sources_first(&graph);
+    let dag = components.condensation(&graph);
     assert_eq!(dag.node_count(), 2);
     assert_eq!(dag.edge_count(), 1);
     assert_eq!(
@@ -282,23 +292,6 @@ fn condensation_of_deduplicates_parallel_and_repeated_component_edges() {
         .into_iter()
         .collect()
     );
-}
-
-#[test]
-fn condensation_of_tarjan_is_the_condensation_without_its_payloads() {
-    for (name, graph) in fixtures() {
-        let payloaded = condensation(&graph);
-        let plain = condensation_of(&graph, &tarjan_scc(&graph));
-        assert_eq!(plain.node_count(), payloaded.node_count(), "{name}");
-        assert_eq!(
-            condensed_pairs(&plain),
-            payloaded
-                .edges()
-                .map(|edge| (edge.source().index(), edge.target().index()))
-                .collect(),
-            "{name}"
-        );
-    }
 }
 
 /// `a <-> b`, a removed slot `c`, and `d -> a`: the slot sits between live
@@ -318,8 +311,8 @@ fn both_algorithms_partition_only_the_live_nodes_around_a_removed_slot() {
     let (graph, [a, b, c, d]) = with_removed_slot();
     let expected = BTreeSet::from([BTreeSet::from([a, b]), BTreeSet::from([d])]);
     for (algorithm, result) in [
-        ("tarjan", tarjan_scc(&graph)),
-        ("kosaraju", kosaraju_scc(&graph)),
+        ("tarjan", leaves_first(&graph)),
+        ("kosaraju", sources_first(&graph)),
     ] {
         assert_eq!(partition(&result), expected, "{algorithm}");
         assert!(
@@ -335,7 +328,7 @@ fn both_algorithms_partition_only_the_live_nodes_around_a_removed_slot() {
 #[should_panic(expected = "is not a node of the decomposed graph")]
 fn kosaraju_component_index_rejects_a_removed_slot() {
     let (graph, [_, _, c, _]) = with_removed_slot();
-    let _ = kosaraju_scc(&graph).component_index(c);
+    let _ = sources_first(&graph).component_index(c);
 }
 
 #[test]
@@ -346,18 +339,18 @@ fn component_of_a_removed_slot_is_not_the_first_component() {
     let mut graph = Graph::<(), ()>::new();
     let only = graph.add_node(());
     assert!(graph.remove_node(only));
-    let _ = tarjan_scc(&graph).component(only);
+    let _ = leaves_first(&graph).component(only);
 }
 
 #[test]
 #[should_panic(expected = "the decomposition covers 4 nodes but the graph has 2")]
-fn condensation_of_another_graphs_decomposition_panics() {
+fn condensation_of_another_graph_panics() {
     let (four, _) = nested_pair();
     let mut two = Graph::<&str, ()>::new();
     let first = two.add_node("a");
     let second = two.add_node("b");
     two.add_edge(first, second, ());
-    let _ = condensation_of(&two, &kosaraju_scc(&four));
+    let _ = sources_first(&four).condensation(&two);
 }
 
 /// A four-node graph for the mismatch test: `a <-> b`, `c -> d`.
@@ -378,7 +371,7 @@ fn self_edge_is_not_a_dag() {
     let mut graph = Graph::<(), ()>::new();
     let node = graph.add_node(());
     graph.add_edge(node, node, ());
-    let result = tarjan_scc(&graph);
+    let result = leaves_first(&graph);
     assert!(result.component(node).is_singleton());
     assert!(!result.is_dag(&graph));
 }
@@ -393,7 +386,7 @@ fn a_component_is_cyclic_when_it_has_several_nodes_or_a_self_edge() {
     graph.add_edge(b, a, ());
     graph.add_edge(plain, a, ());
 
-    for result in [tarjan_scc(&graph), kosaraju_scc(&graph)] {
+    for result in [leaves_first(&graph), sources_first(&graph)] {
         assert!(!result.component(plain).is_cyclic(&graph));
         assert!(result.component(looped).is_cyclic(&graph));
         assert!(result.component(a).is_cyclic(&graph));
@@ -405,10 +398,10 @@ fn a_component_is_cyclic_when_it_has_several_nodes_or_a_self_edge() {
 #[test]
 fn a_graph_is_a_dag_exactly_when_no_component_is_cyclic() {
     for (name, graph) in fixtures() {
-        for result in [tarjan_scc(&graph), kosaraju_scc(&graph)] {
+        for result in [leaves_first(&graph), sources_first(&graph)] {
             let any_cyclic = result
                 .components()
-                .any(|nodes| Scc::<_, &[NodeId]>::new(nodes).is_cyclic(&graph));
+                .any(|nodes| Scc { nodes }.is_cyclic(&graph));
             assert_eq!(result.is_dag(&graph), !any_cyclic, "{name}");
         }
     }
@@ -418,8 +411,8 @@ fn a_graph_is_a_dag_exactly_when_no_component_is_cyclic() {
 fn components_are_ascending_runs_of_one_flat_array() {
     for (name, graph) in fixtures() {
         for (algorithm, result) in [
-            ("tarjan", tarjan_scc(&graph)),
-            ("kosaraju", kosaraju_scc(&graph)),
+            ("tarjan", leaves_first(&graph)),
+            ("kosaraju", sources_first(&graph)),
         ] {
             let label = format!("{name}/{algorithm}");
             assert_eq!(result.components().len(), result.len(), "{label}");
@@ -463,8 +456,8 @@ fn descending_cycle() -> (Graph<(), ()>, [NodeId; 5]) {
 fn component_nodes_are_ascending_whatever_order_they_were_found_in() {
     let (graph, [root, first, second, third, gap]) = descending_cycle();
     for (algorithm, result) in [
-        ("tarjan", tarjan_scc(&graph)),
-        ("kosaraju", kosaraju_scc(&graph)),
+        ("tarjan", leaves_first(&graph)),
+        ("kosaraju", sources_first(&graph)),
     ] {
         let cycle = result.component(first);
         assert_eq!(cycle.nodes(), [first, second, third], "{algorithm}");
@@ -480,26 +473,9 @@ fn component_nodes_are_ascending_whatever_order_they_were_found_in() {
 }
 
 #[test]
-fn condensation_payloads_are_owned_copies_of_the_components() {
-    for (name, graph) in fixtures() {
-        let components = tarjan_scc(&graph);
-        let dag = condensation(&graph);
-        assert_eq!(dag.node_count(), components.len(), "{name}");
-        for (index, nodes) in components.components().enumerate() {
-            let owned: &Scc<NodeId> = dag.node(NodeId::from_index(index));
-            assert_eq!(owned.nodes(), nodes, "{name}");
-            assert_eq!(owned.is_singleton(), nodes.len() == 1, "{name}");
-            let borrowed = components.component(nodes[0]);
-            assert_eq!(borrowed.nodes(), owned.nodes(), "{name}");
-            assert!(nodes.iter().all(|&node| owned.contains(node)), "{name}");
-        }
-    }
-}
-
-#[test]
 fn component_views_compare_and_print_by_their_nodes() {
     let (graph, [_, first, second, third, gap]) = descending_cycle();
-    let result = tarjan_scc(&graph);
+    let result = leaves_first(&graph);
     let cycle = result.component(second);
     assert_eq!(cycle, result.component(third));
     assert_ne!(cycle, result.component(gap));
@@ -507,13 +483,19 @@ fn component_views_compare_and_print_by_their_nodes() {
     assert!(rendered.starts_with("Scc { nodes: ["), "{rendered}");
     assert!(rendered.contains(&format!("{first:?}")), "{rendered}");
 
-    let owned: Scc<NodeId> = Scc::new(Box::from(cycle.nodes()));
-    assert_eq!(owned.clone(), owned);
-    assert_eq!(owned.nodes(), cycle.nodes());
+    let copy = cycle;
+    assert_eq!(copy, cycle);
+    assert_eq!(
+        copy.nodes(),
+        result
+            .components()
+            .nth(result.component_index(first))
+            .unwrap()
+    );
 }
 
 /// Tarjan's algorithm with its separate index, low-link and on-stack arrays,
-/// as `tarjan_scc` ran before it moved to Pearce's single array: the oracle
+/// as the leaves-first decomposition ran before it moved to Pearce's single array: the oracle
 /// for the numbering, which both must give in the same completion order.
 fn classic_tarjan(graph: &Graph<(), ()>) -> SccDecomposition<NodeId> {
     let node_count = graph.node_bound();
@@ -554,7 +536,7 @@ fn classic_tarjan(graph: &Graph<(), ()>) -> SccDecomposition<NodeId> {
                 let component_index = result.len();
                 while let Some(member) = stack.pop() {
                     on_stack[member.index()] = false;
-                    result.component_of[member.index()] = component_index;
+                    result.component_of[member.index()] = word(component_index);
                     result.nodes.push(member);
                     if member == node {
                         break;
@@ -594,7 +576,7 @@ fn the_single_array_walk_decomposes_like_the_classic_one() {
                 graph.remove_node(node);
             }
         }
-        assert_eq!(tarjan_scc(&graph), classic_tarjan(&graph));
+        assert_eq!(leaves_first(&graph), classic_tarjan(&graph));
     }
 }
 
@@ -642,7 +624,7 @@ fn cycle_through_is_a_shortest_cycle_inside_the_component() {
                 graph.remove_node(node);
             }
         }
-        let (sources_first, leaves_first) = (kosaraju_scc(&graph), tarjan_scc(&graph));
+        let (sources_first, leaves_first) = (sources_first(&graph), leaves_first(&graph));
         for node in graph.node_ids() {
             let shortest = graph
                 .successors(node)
@@ -674,7 +656,7 @@ fn cycle_through_a_self_loop_is_the_node_alone() {
     graph.add_edge(a, b, ());
     graph.add_edge(b, b, ());
     graph.add_edge(b, b, ());
-    let components = kosaraju_scc(&graph);
+    let components = sources_first(&graph);
     assert_eq!(components.cycle_through(&graph, b), Some(vec![b]));
     assert_eq!(components.cycle_through(&graph, a), None);
 }
@@ -683,5 +665,5 @@ fn cycle_through_a_self_loop_is_the_node_alone() {
 #[should_panic(expected = "is not a node of the decomposed graph")]
 fn cycle_through_rejects_a_removed_slot() {
     let (graph, [_, _, c, _]) = with_removed_slot();
-    let _ = kosaraju_scc(&graph).cycle_through(&graph, c);
+    let _ = sources_first(&graph).cycle_through(&graph, c);
 }

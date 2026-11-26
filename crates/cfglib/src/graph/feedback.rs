@@ -9,12 +9,12 @@
 //! drawing should not rank by — wants one that violates as few edges as it
 //! can, and the edges it violates.
 //!
-//! [`linear_arrangement`] orders every live node: the components of
-//! [`kosaraju_scc`] sources first, and the nodes of each cyclic component by
-//! the greedy heuristic of Eades, Lin and Smyth (*A fast and effective
-//! heuristic for the feedback arc set problem*, Information Processing
-//! Letters 47(6), 1993). [`feedback_arc_set`] reports the edges that point
-//! backward in that order, self-loops included; removing them leaves the
+//! [`linear_arrangement`] orders every live node: the components in their
+//! [`SccNumbering::SourcesFirst`] order, and the nodes of each cyclic
+//! component by the greedy heuristic of Eades, Lin and Smyth (*A fast and
+//! effective heuristic for the feedback arc set problem*, Information
+//! Processing Letters 47(6), 1993). [`feedback_arc_set`] reports the edges
+//! that point backward in that order, self-loops included; removing them leaves the
 //! graph acyclic. With [`FeedbackConfig::minimal`], it then re-admits every
 //! reported edge whose return closes no cycle, the minimality pass of
 //! Cavallaro, Cutello and Pavone (*Efficient heuristics to compute minimal and
@@ -29,7 +29,7 @@ use alloc::vec::Vec;
 
 use super::edge_view::EdgeView;
 use super::epoch::EpochMarks;
-use super::scc::{SccDecomposition, kosaraju_scc};
+use super::scc::{SccDecomposition, SccNumbering};
 use super::view::{DenseId, GraphView};
 use crate::identity::{NO_INDEX, check_bound, slot, word};
 
@@ -66,8 +66,8 @@ impl FeedbackConfig {
 
 /// Order every live node so that few edges point backward.
 ///
-/// The result is a permutation of the live nodes. The components of
-/// [`kosaraju_scc`] come in its order, sources first, so every edge between
+/// The result is a permutation of the live nodes. The components come in
+/// their [`SccNumbering::SourcesFirst`] order, so every edge between
 /// two components points forward. A singleton component is its node. A
 /// cyclic component is ordered by the Eades–Lin–Smyth heuristic over the
 /// edges inside it, self-loops aside: repeatedly peel a sink to the tail of
@@ -200,7 +200,7 @@ pub fn feedback_arc_set<G: EdgeView>(graph: &G, config: FeedbackConfig) -> Vec<G
 
 /// The decomposition and the arrangement of [`linear_arrangement`].
 fn arrange<G: GraphView>(graph: &G) -> (SccDecomposition<G::NodeId>, Vec<G::NodeId>) {
-    let components = kosaraju_scc(graph);
+    let components = SccDecomposition::compute(graph, SccNumbering::SourcesFirst);
     let mut order = Vec::with_capacity(graph.node_bound());
     // An acyclic graph has no component to peel, so it never pays for the
     // buffers.

@@ -19,7 +19,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use super::{DominatorScratch, DominatorTree};
-use crate::graph::scc::kosaraju_scc;
+use crate::graph::scc::{SccDecomposition, SccNumbering};
 use crate::graph::view::VirtualRoot;
 use crate::graph::view::{DenseId, RootedView};
 
@@ -103,7 +103,7 @@ impl<N: DenseId> DominatorTree<N> {
             return None;
         }
 
-        let components = kosaraju_scc(graph);
+        let components = SccDecomposition::compute(graph, SccNumbering::SourcesFirst);
         roots.clear();
         roots.push(graph.root());
         for (component_index, component) in components.components().enumerate() {

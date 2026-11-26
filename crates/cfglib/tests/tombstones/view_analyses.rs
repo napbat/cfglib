@@ -4,9 +4,8 @@
 use std::collections::BTreeSet;
 
 use cfglib::{
-    DominatorTree, EdgeView, GraphMetrics, KindedEdge, LoopForest, PostDominatorTree, PostNode,
-    RootedView, Scc, SccDecomposition, condensation, condensation_of, control_dependence_graph,
-    is_reducible, kosaraju_scc, tarjan_scc,
+    DominatorTree, EdgeView, GraphMetrics, KindedEdge, LoopForest, NodeId, PostDominatorTree,
+    PostNode, RootedView, SccDecomposition, SccNumbering, control_dependence_graph, is_reducible,
 };
 
 use crate::oracle::{PostReference, Reference};
@@ -203,8 +202,8 @@ impl ViewCheck for StronglyConnectedComponents {
         let condensation_edges = reference.condensation_edges();
         let acyclic =
             expected.iter().all(|component| component.len() == 1) && !reference.has_self_loop();
-        let tarjan = tarjan_scc(view);
-        let kosaraju = kosaraju_scc(view);
+        let tarjan = SccDecomposition::compute(view, SccNumbering::LeavesFirst);
+        let kosaraju = SccDecomposition::compute(view, SccNumbering::SourcesFirst);
         for (name, decomposition, sources_first) in
             [("tarjan", &tarjan, false), ("kosaraju", &kosaraju, true)]
         {
@@ -277,12 +276,11 @@ impl ViewCheck for Condensations {
         let expected_components = reference.components();
         let expected_edges = reference.condensation_edges();
 
-        let graph = condensation(view);
-        let members = |component: &Scc<G::NodeId>| slot_set::<G>(component.nodes(), slots);
-        let found_components: Vec<BTreeSet<usize>> = graph
-            .node_ids()
-            .map(|node| members(graph.node(node)))
-            .collect();
+        let leaves_first = SccDecomposition::compute(view, SccNumbering::LeavesFirst);
+        let graph = leaves_first.condensation(view);
+        let runs: Vec<&[G::NodeId]> = leaves_first.components().collect();
+        let members = |node: NodeId| slot_set::<G>(runs[node.index()], slots);
+        let found_components: Vec<BTreeSet<usize>> = graph.node_ids().map(&members).collect();
         assert_eq!(
             found_components.iter().cloned().collect::<BTreeSet<_>>(),
             expected_components,
@@ -295,25 +293,20 @@ impl ViewCheck for Condensations {
         );
         let found_edges: BTreeSet<(BTreeSet<usize>, BTreeSet<usize>)> = graph
             .edges()
-            .map(|edge| {
-                (
-                    members(graph.node(edge.source())),
-                    members(graph.node(edge.target())),
-                )
-            })
+            .map(|edge| (members(edge.source()), members(edge.target())))
             .collect();
         assert_eq!(found_edges, expected_edges, "{label}: condensation edges");
         assert!(
-            tarjan_scc(&graph).is_dag(&graph),
+            SccDecomposition::compute(&graph, SccNumbering::LeavesFirst).is_dag(&graph),
             "{label}: a condensation is acyclic"
         );
 
-        let decomposition = kosaraju_scc(view);
-        let numbered = condensation_of(view, &decomposition);
+        let decomposition = SccDecomposition::compute(view, SccNumbering::SourcesFirst);
+        let numbered = decomposition.condensation(view);
         assert_eq!(
             numbered.node_ids().count(),
             decomposition.len(),
-            "{label}: condensation_of has one node per component"
+            "{label}: a sources-first condensation has one node per component"
         );
         let index_of = |component: &BTreeSet<usize>| {
             let member = *component.iter().next().expect("components are never empty");
@@ -329,7 +322,7 @@ impl ViewCheck for Condensations {
             .collect();
         assert_eq!(
             found_numbered, expected_numbered,
-            "{label}: condensation_of edges"
+            "{label}: sources-first condensation edges"
         );
     }
 }

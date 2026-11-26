@@ -139,7 +139,7 @@ fn recursion_matches_the_strong_components() {
     ] {
         graph.add_edge(caller, callee, call());
     }
-    let components = tarjan_scc(&graph);
+    let components = SccDecomposition::compute(&graph, SccNumbering::LeavesFirst);
     for node in graph.node_ids() {
         assert_eq!(
             is_recursive_function(&graph, node),
@@ -194,7 +194,7 @@ fn round_robin<S: Clone + PartialEq>(
     mut compute: impl FnMut(&Graph<(), ()>, NodeId, &[S]) -> S,
 ) -> Vec<S> {
     let mut summaries = vec![bottom.clone(); graph.node_bound()];
-    let components = tarjan_scc(graph);
+    let components = SccDecomposition::compute(graph, SccNumbering::LeavesFirst);
     for component in components.components() {
         let cyclic = components.component(component[0]).is_cyclic(graph);
         loop {

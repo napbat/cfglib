@@ -38,8 +38,6 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "canonicalize_loops",
     "cfg_ext_tsp_order",
     "common_ancestors",
-    "condensation",
-    "condensation_of",
     "control_flow_edge_attributes",
     "contract_edge",
     "contract_edge_mapped",
@@ -67,7 +65,6 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "promote_handler_extents",
     "is_recursive_function",
     "is_reducible",
-    "kosaraju_scc",
     "linear_arrangement",
     "linearize",
     "make_reducible",
@@ -139,9 +136,6 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "stream_edge_problem",
     "stream_node_problem",
     "stream_problem",
-    "strong_cuts",
-    "strong_cuts_of",
-    "tarjan_scc",
     "to_dot",
     "to_text",
     "topological_sort",
@@ -192,7 +186,6 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         "cfg_control_dependence_graph",
         [control_dependence_graph]
     );
-    benchmark_coverage!(suite, "directed_tarjan_scc", [tarjan_scc]);
     benchmark_coverage!(
         suite,
         "directed_node_fixpoint_bool",

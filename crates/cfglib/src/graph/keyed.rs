@@ -254,7 +254,7 @@ mod unchecked {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::scc::tarjan_scc;
+    use crate::graph::scc::{SccDecomposition, SccNumbering};
     use alloc::string::String;
     use alloc::string::ToString;
     use alloc::vec::Vec;
@@ -279,7 +279,7 @@ mod tests {
         graph.add_edge(b, a, "cycle");
 
         // The view impl feeds the generic algorithms directly.
-        let sccs = tarjan_scc(&graph);
+        let sccs = SccDecomposition::compute(&graph, SccNumbering::LeavesFirst);
         assert_eq!(sccs.len(), 1, "a <-> b is one component");
         assert_eq!(graph.keys().count(), 2);
     }

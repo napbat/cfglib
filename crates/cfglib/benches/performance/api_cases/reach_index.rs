@@ -24,7 +24,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     let graph = branchy_graph(BRANCHY_NODES);
     let pairs = hashed_pairs(BRANCHY_NODES, PAIR_COUNT);
     let index = ReachIndex::compute(&graph, ReachIndexConfig::default());
-    let mut scratch = ReachScratch::new();
+    let mut scratch = ReachScratch::default();
     benchmark_case!(
         suite,
         "api_reach_index_build",
@@ -43,14 +43,14 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         || answer_by_walks(&graph, &pairs),
         |reached: &usize| assert_eq!(
             *reached,
-            answer_by_index(&index, &pairs, &mut ReachScratch::new())
+            answer_by_index(&index, &pairs, &mut ReachScratch::default())
         )
     );
 
     let graph = call_graph(CALL_GRAPH_FUNCTIONS);
     let pairs = hashed_pairs(CALL_GRAPH_FUNCTIONS, PAIR_COUNT);
     let index = ReachIndex::compute(&graph, ReachIndexConfig::default());
-    let mut scratch = ReachScratch::new();
+    let mut scratch = ReachScratch::default();
     benchmark_case!(
         suite,
         "api_reach_index_build_call_graph",
@@ -69,7 +69,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         || answer_by_walks(&graph, &pairs),
         |reached: &usize| assert_eq!(
             *reached,
-            answer_by_index(&index, &pairs, &mut ReachScratch::new())
+            answer_by_index(&index, &pairs, &mut ReachScratch::default())
         )
     );
 }
@@ -82,7 +82,7 @@ fn answer_by_index(
 ) -> usize {
     pairs
         .iter()
-        .filter(|&&(source, target)| index.reaches(source, target, scratch))
+        .filter(|&&(source, target)| index.reaches_in(scratch, source, target))
         .count()
 }
 

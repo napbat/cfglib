@@ -19,7 +19,7 @@ use core::ops::ControlFlow;
 
 use super::dominator::DominatorTree;
 use super::edge_view::EdgeView;
-use super::scc::tarjan_scc;
+use super::scc::{SccDecomposition, SccNumbering};
 use super::search::{DfsEvent, depth_first_events};
 use super::view::{Direction, RootedView};
 use crate::block::BlockId;
@@ -100,7 +100,8 @@ where
         // on one too, which holds when both ends are in one strongly
         // connected component.
         let on_a_cycle = backs[..dominance].binary_search(&tagged).is_ok() || {
-            let components = components.get_or_insert_with(|| tarjan_scc(graph));
+            let components = components
+                .get_or_insert_with(|| SccDecomposition::compute(graph, SccNumbering::LeavesFirst));
             components.component_index(tagged.tail) == components.component_index(tagged.header)
         };
         if on_a_cycle {

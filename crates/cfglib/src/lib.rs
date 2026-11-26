@@ -348,8 +348,7 @@ pub use graph::program_structure::{
 pub use graph::reach_index::{ReachIndex, ReachIndexConfig, ReachScratch};
 pub use graph::relax::min_label_relaxation;
 pub use graph::scc::{
-    IncrementalScc, Scc, SccChange, SccDecomposition, StrongCutScratch, StrongCuts, condensation,
-    condensation_of, kosaraju_scc, strong_cuts, strong_cuts_of, tarjan_scc,
+    IncrementalScc, Scc, SccChange, SccDecomposition, SccNumbering, StrongCutScratch, StrongCuts,
 };
 pub use graph::scope::{
     Scope, ScopeCursor, ScopeCursorQuery, ScopeDatum, ScopeDatumId, ScopeEdgeId, ScopeEdgeTag,

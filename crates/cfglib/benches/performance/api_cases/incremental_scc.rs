@@ -2,7 +2,7 @@
 //!
 //! Two cases per graph start from it, add the same batches of random edges,
 //! each one percent of the graph's edge count, and after every batch either
-//! report it with `IncrementalScc::insert_edges` or run `kosaraju_scc` from
+//! report it with `IncrementalScc::insert_edges` or decompose sources first from
 //! scratch. Both clone the graph inside the measured operation and add the
 //! same edges to it, so what differs is the update; a third case per graph
 //! does only that shared part.
@@ -18,7 +18,7 @@
 use std::collections::BTreeSet;
 
 use cfglib::{
-    CallMetadata, Graph, IncrementalScc, NodeId, SccDecomposition, call_graph, kosaraju_scc,
+    CallMetadata, Graph, IncrementalScc, NodeId, SccDecomposition, SccNumbering, call_graph,
 };
 
 use super::BenchmarkSuite;
@@ -52,7 +52,10 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     };
     let seeded = IncrementalScc::compute(&calls);
     let added = BATCHES * call_batches[0].len();
-    let expected = partition(&kosaraju_scc(&with_batches(&calls, &call_batches, &call)));
+    let expected = partition(&SccDecomposition::compute(
+        &with_batches(&calls, &call_batches, &call),
+        SccNumbering::SourcesFirst,
+    ));
     benchmark_case!(
         suite,
         "incremental_scc_call_graph_edges_only",
@@ -89,11 +92,10 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     });
     let added = BATCHES * acyclic_batches[0].len();
     let seeded = IncrementalScc::compute(&acyclic);
-    let expected = partition(&kosaraju_scc(&with_batches(
-        &acyclic,
-        &acyclic_batches,
-        &(),
-    )));
+    let expected = partition(&SccDecomposition::compute(
+        &with_batches(&acyclic, &acyclic_batches, &()),
+        SccNumbering::SourcesFirst,
+    ));
     benchmark_case!(
         suite,
         "incremental_scc_nearly_acyclic_edges_only",
@@ -168,12 +170,12 @@ fn decompose_per_batch<N: Clone, E: Clone>(
     payload: &E,
 ) -> SccDecomposition<NodeId> {
     let mut graph = graph.clone();
-    let mut components = kosaraju_scc(&graph);
+    let mut components = SccDecomposition::compute(&graph, SccNumbering::SourcesFirst);
     for batch in batches {
         for &(source, target) in batch {
             graph.add_edge(source, target, payload.clone());
         }
-        components = kosaraju_scc(&graph);
+        components = SccDecomposition::compute(&graph, SccNumbering::SourcesFirst);
     }
     components
 }

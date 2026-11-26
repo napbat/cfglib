@@ -12,7 +12,7 @@
 //! cannot reach any extent block from, and no block that can reach one
 //! looks at those marks. So the walk skips every block that no extent block
 //! can be reached from. That is read off the strongly connected components,
-//! which [`tarjan_scc`] numbers leaves first: a block reaches only blocks of a
+//! which [`SccNumbering::LeavesFirst`] numbers leaves first: a block reaches only blocks of a
 //! number at most its own, so a block whose number is below the lowest number
 //! of the extent cannot reach it. A walk that skips them is the walk of the
 //! blocks around the extent, and the visited table is shared by every walk,
@@ -25,7 +25,7 @@ use alloc::vec::Vec;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::graph::epoch::EpochMarks;
-use crate::graph::scc::tarjan_scc;
+use crate::graph::scc::{SccDecomposition, SccNumbering};
 use crate::identity::{NO_INDEX, word};
 
 /// The state every walk shares: the components of the graph, found by the
@@ -49,7 +49,10 @@ impl State {
     fn new<I, E>(cfg: &Cfg<I, E>) -> Self {
         let bound = cfg.block_bound();
         let mut component = alloc::vec![NO_INDEX; bound];
-        for (number, blocks) in tarjan_scc(cfg).components().enumerate() {
+        for (number, blocks) in SccDecomposition::compute(cfg, SccNumbering::LeavesFirst)
+            .components()
+            .enumerate()
+        {
             for block in blocks {
                 component[block.index()] = word(number);
             }
