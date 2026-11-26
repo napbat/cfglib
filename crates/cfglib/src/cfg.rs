@@ -21,6 +21,7 @@ mod regions;
 mod subgraph;
 mod text;
 mod traverse;
+mod verify;
 mod view;
 
 /// The store a [`Cfg`] is built on: blocks as nodes, edges as edges.
@@ -28,6 +29,7 @@ pub(crate) type CfgStore<I, E> = Graph<BasicBlock<I>, Edge<E>, BlockTag, EdgeTag
 
 pub use compact::CfgRenumbering;
 pub use text::parse_cfg_text;
+pub use verify::{SemanticValidator, verify, verify_with};
 
 /// One borrowed control-flow edge: identity, endpoints, kind, weight, and
 /// consumer payload.

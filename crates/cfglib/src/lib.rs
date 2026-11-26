@@ -240,7 +240,10 @@ pub use builder::address::{
     build_address_cfg_from_given_edges, build_address_cfg_with_routes,
 };
 pub use builder::{BuildError, CfgBuilder, JumpResolution, resolve_jump_edges};
-pub use cfg::{Cfg, CfgEdge, CfgRenumbering, SplitPointError, parse_cfg_text};
+pub use cfg::{
+    Cfg, CfgEdge, CfgRenumbering, SemanticValidator, SplitPointError, parse_cfg_text, verify,
+    verify_with,
+};
 pub use dataflow::bits::DenseBits;
 pub use dataflow::cfg_view::CfgView;
 pub use dataflow::edge_fixpoint::{
@@ -389,10 +392,7 @@ pub use graph::traverse::{
     shortest_path_in, topological_sort, topological_sort_or_cycle,
 };
 pub use graph::tree_decomposition::{EliminationHeuristic, TreeDecomposition, tree_decomposition};
-pub use graph::verify::{
-    SemanticValidator, SemanticVerifyReport, VerifyError, VerifyReport, verify, verify_edge_view,
-    verify_view, verify_with,
-};
+pub use graph::verify::{VerifyError, VerifyReport, verify_edge_view, verify_view};
 pub use graph::view::{
     DenseId, Direction, GraphView, Induced, NodeView, Reversed, Rooted, RootedView, VirtualRoot,
     scan_predecessors,
