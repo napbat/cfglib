@@ -32,7 +32,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     let (sources, sinks) = (sources.as_slice(), sinks.as_slice());
     benchmark_case!(
         suite,
-        "api_min_edge_cut",
+        "api_edge_cut",
         || EdgeCut::compute(&graph, sources.iter().copied(), sinks.iter().copied(), None),
         |cut: &Option<EdgeCut<_>>| {
             let cut = cut.as_ref().expect("the sources are not sinks");
@@ -41,7 +41,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "api_min_edge_cut_limit_3",
+        "api_edge_cut_limit_3",
         || EdgeCut::compute(
             &graph,
             sources.iter().copied(),
@@ -54,7 +54,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "api_min_vertex_cut",
+        "api_vertex_cut",
         || VertexCut::compute(&graph, sources.iter().copied(), sinks.iter().copied(), None),
         |cut: &Option<VertexCut<NodeId>>| {
             let cut = cut.as_ref().expect("no source is next to a sink");
