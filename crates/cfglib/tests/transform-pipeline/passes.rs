@@ -119,7 +119,7 @@ fn a_cleanup_pipeline_runs_in_schedule_order_and_reports_each_pass_honestly() {
             .expect("every pass succeeds on a valid program");
 
         let recorded = log.borrow();
-        assert_eq!(scheduled.len(), pipeline.len());
+        assert_eq!(scheduled.len(), pipeline.pass_count());
         assert_eq!(
             report
                 .executions()
@@ -139,7 +139,7 @@ fn a_cleanup_pipeline_runs_in_schedule_order_and_reports_each_pass_honestly() {
         let changes = recorded.iter().filter(|&&(_, changed)| changed).count();
         assert_eq!(report.changed_count(), changes);
         assert_eq!(report.is_changed(), changes > 0);
-        assert_eq!(report.len(), 6);
+        assert_eq!(report.execution_count(), 6);
         assert!(
             critical_edges(&cfg).is_empty(),
             "seed {seed}: the last structural pass was the split"
@@ -165,7 +165,7 @@ fn the_schedule_decides_whether_critical_edges_survive() {
     pipeline.push(transform("ssa.split-critical", &log, |cfg| {
         split_critical_edges_mapped(cfg, |_, _| Default::default()).0
     }));
-    assert_eq!(pipeline.run(&mut split_last).unwrap().len(), 2);
+    assert_eq!(pipeline.run(&mut split_last).unwrap().execution_count(), 2);
 
     let mut split_first = before.clone();
     let mut pipeline = PassPipeline::<Cfg<Inst>, Rejected>::new();
@@ -175,7 +175,7 @@ fn the_schedule_decides_whether_critical_edges_survive() {
     pipeline.push(transform("cleanup.simplify", &log, |cfg| {
         simplify_mapped(cfg).0
     }));
-    assert_eq!(pipeline.run(&mut split_first).unwrap().len(), 2);
+    assert_eq!(pipeline.run(&mut split_first).unwrap().execution_count(), 2);
 
     assert_eq!(critical_edges(&split_last), []);
     assert!(
@@ -208,7 +208,11 @@ fn a_failing_pass_stops_the_pipeline_and_the_failure_names_it() {
 
     assert_eq!(failure.pass(), PassId::new("test.reject"));
     assert_eq!(failure.error(), &Rejected::Refused("no budget"));
-    assert_eq!(failure.completed().len(), 1, "only the prefix is reported");
+    assert_eq!(
+        failure.completed().execution_count(),
+        1,
+        "only the prefix is reported"
+    );
     assert_eq!(
         failure.completed().executions()[0].id().as_str(),
         "cleanup.simplify"
@@ -234,7 +238,7 @@ fn a_failing_pass_stops_the_pipeline_and_the_failure_names_it() {
         (pass.as_str(), error),
         ("test.reject", Rejected::Refused("no budget"))
     );
-    assert_eq!(completed.len(), 1);
+    assert_eq!(completed.execution_count(), 1);
 }
 
 #[test]
@@ -310,7 +314,7 @@ fn repeating_an_identity_expresses_a_fixpoint_schedule_that_ends_unchanged() {
         );
         let report = pipeline.run(&mut cfg).unwrap();
 
-        let tail = &report.executions()[report.len() - 2..];
+        let tail = &report.executions()[report.execution_count() - 2..];
         if tail.iter().all(|execution| !execution.changed()) {
             converged += 1;
             let mut expected = before.clone();
@@ -391,11 +395,15 @@ fn an_empty_schedule_succeeds_with_an_empty_report() {
     let before = cfg.clone();
     let mut pipeline = PassPipeline::<Cfg<Inst>, Infallible>::default();
     assert!(pipeline.is_empty());
-    assert_eq!(pipeline.len(), 0);
+    assert_eq!(pipeline.pass_count(), 0);
     let report = pipeline.run_infallible(&mut cfg);
     assert!(report.is_empty());
     assert_eq!(
-        (report.len(), report.changed_count(), report.is_changed()),
+        (
+            report.execution_count(),
+            report.changed_count(),
+            report.is_changed()
+        ),
         (0, 0, false)
     );
     assert_eq!(cfg, before);
@@ -436,7 +444,7 @@ fn the_same_pipeline_runs_over_a_payload_bearing_cfg_and_keeps_every_edge_payloa
         let report = payload_pipeline(&log)
             .run(&mut cfg)
             .expect("valid at every step");
-        assert_eq!(report.len(), 4, "seed {seed}");
+        assert_eq!(report.execution_count(), 4, "seed {seed}");
 
         assert_surviving_payloads_unchanged(&before, &cfg, &format!("seed {seed}"));
         assert_eq!(critical_edges(&cfg), [], "seed {seed}");

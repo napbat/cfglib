@@ -32,8 +32,8 @@ fn strongly_connected(
         .filter(|&(index, _)| Some(index) != removed_edge)
         .filter_map(|(_, &(from, to))| Some((kept(from)?, kept(to)?)))
         .collect();
-    let components =
-        SccDecomposition::compute(&graph_of(size, &rest), SccNumbering::LeavesFirst).len();
+    let components = SccDecomposition::compute(&graph_of(size, &rest), SccNumbering::LeavesFirst)
+        .component_count();
     // The removed node stays behind as a component of its own.
     components <= 1 + usize::from(removed_node.is_some())
 }

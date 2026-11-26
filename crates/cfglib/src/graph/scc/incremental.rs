@@ -8,6 +8,7 @@ use core::ops::Range;
 
 use super::tarjan::Tarjan;
 use super::{SccDecomposition, SccNumbering};
+use crate::block::BlockId;
 use crate::graph::view::{DenseId, GraphView};
 use crate::identity::{NO_INDEX, slot, word};
 
@@ -127,11 +128,11 @@ use crate::identity::{NO_INDEX, slot, word};
 /// // The snapshot numbers the components sources first, as
 /// // `SccNumbering::SourcesFirst` does.
 /// let snapshot = components.decomposition();
-/// assert_eq!(snapshot.len(), 4);
+/// assert_eq!(snapshot.component_count(), 4);
 /// assert!(snapshot.component_index(a) < snapshot.component_index(d));
 /// ```
 #[derive(Debug, Clone)]
-pub struct IncrementalScc<N> {
+pub struct IncrementalScc<N = BlockId> {
     order: Order<N>,
     walk: Tarjan<N>,
     /// The windows of the last batch, kept so that a batch allocates nothing

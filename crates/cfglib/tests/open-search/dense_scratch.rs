@@ -7,13 +7,13 @@ use cfglib::{
     search_in,
 };
 
-use crate::Lcg;
 use crate::dense_search::config;
 use crate::reference::{Table, Walk, keep_all};
+use crate::rng::Rng;
 
 #[test]
 fn one_scratch_serves_every_root_of_a_pass_and_forgets_a_walk_that_broke() {
-    let table = Table::random(&mut Lcg(61), 50, 110);
+    let table = Table::random(&mut Rng::lcg(61, 33), 50, 110);
     let graph = table.graph();
     let mut scratch = SearchScratch::default();
 
@@ -63,8 +63,8 @@ fn one_scratch_serves_every_root_of_a_pass_and_forgets_a_walk_that_broke() {
 
 #[test]
 fn a_scratch_grown_by_a_larger_graph_covers_a_smaller_one_and_the_path_discipline_too() {
-    let large = Table::random(&mut Lcg(71), 100, 200).graph();
-    let small = Table::random(&mut Lcg(70), 10, 20);
+    let large = Table::random(&mut Rng::lcg(71, 33), 100, 200).graph();
+    let small = Table::random(&mut Rng::lcg(70, 33), 10, 20);
     let graph = small.graph();
     let mut scratch = SearchScratch::default();
     let discipline = config(
@@ -105,7 +105,7 @@ fn a_scratch_grown_by_a_larger_graph_covers_a_smaller_one_and_the_path_disciplin
 
 #[test]
 fn a_reused_scratch_resets_the_marks_for_each_search_under_both_policies() {
-    let table = Table::random(&mut Lcg(80), 30, 60);
+    let table = Table::random(&mut Rng::lcg(80, 33), 30, 60);
     let graph = table.graph();
     let mut scratch = SearchScratch::default();
     for policy in [VisitedPolicy::Global, VisitedPolicy::Path] {
@@ -136,7 +136,7 @@ fn a_reused_scratch_resets_the_marks_for_each_search_under_both_policies() {
 
 #[test]
 fn a_scratch_smaller_than_the_graph_grows_on_entry() {
-    let table = Table::random(&mut Lcg(3), 12, 20);
+    let table = Table::random(&mut Rng::lcg(3, 33), 12, 20);
     let graph = table.graph();
     let mut scratch = SearchScratch::default();
     let mut visits = Vec::new();
@@ -158,7 +158,7 @@ fn a_scratch_smaller_than_the_graph_grows_on_entry() {
 #[test]
 #[should_panic(expected = "seed node is out of range")]
 fn a_seed_outside_the_graph_panics() {
-    let graph = Table::random(&mut Lcg(3), 5, 8).graph();
+    let graph = Table::random(&mut Rng::lcg(3, 33), 5, 8).graph();
     let _ = search(
         &graph,
         [NodeId::from_index(5)],
@@ -171,7 +171,7 @@ fn a_seed_outside_the_graph_panics() {
 #[test]
 #[should_panic(expected = "VisitedPolicy::Path requires SearchOrder::DepthFirst")]
 fn a_breadth_first_frontier_has_no_unwind_so_path_marks_are_rejected() {
-    let graph = Table::random(&mut Lcg(3), 5, 8).graph();
+    let graph = Table::random(&mut Rng::lcg(3, 33), 5, 8).graph();
     let _ = search(
         &graph,
         [NodeId::from_index(0)],

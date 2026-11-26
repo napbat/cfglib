@@ -122,8 +122,8 @@ fn check(graph: &Graph<(), ()>) {
 
     // Each component's backward edges, self-loops aside, are at most half of
     // its edges, self-loops aside.
-    let mut inside = vec![0_usize; components.len()];
-    let mut cut = vec![0_usize; components.len()];
+    let mut inside = vec![0_usize; components.component_count()];
+    let mut cut = vec![0_usize; components.component_count()];
     for edge in graph.edge_ids() {
         let record = graph.edge(edge);
         let (source, target) = (record.source(), record.target());

@@ -350,7 +350,7 @@ fn components_cover_the_live_nodes_only() {
             BTreeSet::from([vec![first, second], vec![last]]),
             "{name}: the removed node is in no component"
         );
-        assert_eq!(decomposition.len(), 2, "{name}");
+        assert_eq!(decomposition.component_count(), 2, "{name}");
         assert!(
             !decomposition.is_dag(&graph),
             "{name}: first and second still form a cycle"
@@ -373,7 +373,7 @@ fn a_graph_whose_only_cycle_ran_through_a_removed_node_is_acyclic() {
         SccDecomposition::compute(&graph, SccNumbering::SourcesFirst),
     ] {
         assert!(decomposition.is_dag(&graph));
-        assert_eq!(decomposition.len(), 2);
+        assert_eq!(decomposition.component_count(), 2);
     }
     let rooted = Rooted::new(&graph, first);
     assert_eq!(GraphMetrics::compute(&rooted).node_count, 2);

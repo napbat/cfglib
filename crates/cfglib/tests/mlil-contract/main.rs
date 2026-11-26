@@ -8,6 +8,9 @@
 //! the functions are run through the view alone, and the generic graph
 //! algorithms are compared with brute-force oracles over the same functions.
 
+#[path = "../common/rng.rs"]
+pub mod rng;
+
 mod algorithms;
 mod contract;
 mod execution;

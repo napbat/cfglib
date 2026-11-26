@@ -10,27 +10,19 @@ use cfglib::{
     SolveStats,
 };
 
-/// A xorshift generator: the same seed gives the same graphs everywhere.
-pub struct Rng(u64);
+/// The suite's draws: the shared `xorshift64*` generator read from the high 48
+/// bits of each draw, so the same seed gives the same graphs everywhere.
+pub struct Rng(crate::rng::Rng);
 
 impl Rng {
-    pub fn new(seed: u64) -> Self {
-        Self(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut state = self.0;
-        state ^= state >> 12;
-        state ^= state << 25;
-        state ^= state >> 27;
-        self.0 = state;
-        state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    pub const fn new(seed: u64) -> Self {
+        Self(crate::rng::Rng::new(seed))
     }
 
     /// A value below `bound`.
     pub fn below(&mut self, bound: usize) -> usize {
         let bound = u64::try_from(bound).expect("a small bound");
-        usize::try_from((self.next_u64() >> 16) % bound).expect("below the bound")
+        usize::try_from((self.0.next_u64() >> 16) % bound).expect("below the bound")
     }
 }
 

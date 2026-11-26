@@ -30,6 +30,7 @@ use alloc::collections::{BTreeSet, VecDeque};
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::block::BlockId;
 use crate::graph::store::{Graph, NodeId};
 use crate::graph::view::{DenseId, GraphView};
 use crate::identity::{NO_INDEX, check_bound, slot, word};
@@ -44,7 +45,7 @@ mod tarjan;
 /// A maximal set of mutually reachable nodes, in ascending order, borrowed
 /// from the [`SccDecomposition`] that holds it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Scc<'a, N> {
+pub struct Scc<'a, N = BlockId> {
     nodes: &'a [N],
 }
 
@@ -132,7 +133,7 @@ pub enum SccNumbering {
 /// it the same way: [`component_index`](Self::component_index) and
 /// [`component`](Self::component) panic for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SccDecomposition<N> {
+pub struct SccDecomposition<N = BlockId> {
     nodes: Vec<N>,
     /// `offsets[i]..offsets[i + 1]` is component `i` within `nodes`.
     offsets: Vec<u32>,
@@ -268,14 +269,14 @@ impl<N: DenseId> SccDecomposition<N> {
 
     /// Return the number of components.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub fn component_count(&self) -> usize {
         self.offsets.len() - 1
     }
 
     /// Return whether the decomposition contains no components.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.component_count() == 0
     }
 
     /// Return whether `graph` is acyclic.
@@ -434,7 +435,7 @@ impl<N: DenseId> SccDecomposition<N> {
     /// let dag = components.condensation(&grammar);
     ///
     /// // The cycle is one component, and the numbering is the decomposition's.
-    /// assert_eq!(dag.node_bound(), components.len());
+    /// assert_eq!(dag.node_bound(), components.component_count());
     /// assert_eq!(components.component_index(expr), components.component_index(term));
     /// assert_eq!(dag[NodeId::from_index(components.component_index(stmt))], ());
     ///
@@ -478,8 +479,8 @@ impl<N: DenseId> SccDecomposition<N> {
             graph.node_bound()
         );
 
-        let mut condensed = Graph::with_capacity(self.len(), self.len());
-        for _ in 0..self.len() {
+        let mut condensed = Graph::with_capacity(self.component_count(), self.component_count());
+        for _ in 0..self.component_count() {
             condensed.add_node(());
         }
         self.for_each_component_edge(graph, |from, to| {

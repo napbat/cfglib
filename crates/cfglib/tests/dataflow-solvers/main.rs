@@ -10,6 +10,9 @@
 //! narrowing, and every stream is checked against the solve that keeps its
 //! facts.
 
+#[path = "../common/rng.rs"]
+pub mod rng;
+
 mod block_solver;
 mod edge_solver;
 mod graphs;

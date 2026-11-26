@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use cfglib::DisjointSet;
 
-use crate::Lcg;
+use crate::rng::Rng;
 
 /// The obvious partition: every element carries its class label, and a union relabels a class.
 struct Relabeling {
@@ -50,7 +50,7 @@ impl Relabeling {
 }
 
 fn random_pairs(seed: u64, len: usize, count: usize) -> Vec<(usize, usize)> {
-    let mut rng = Lcg(seed);
+    let mut rng = Rng::lcg(seed, 33);
     (0..count)
         .map(|_| (rng.below(len), rng.below(len)))
         .collect()

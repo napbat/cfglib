@@ -15,6 +15,7 @@ use cfglib::{Graph, NodeId, SummaryConfig, SummaryProblem, propagate_summaries};
 
 use super::BenchmarkSuite;
 use crate::harness::benchmark_case;
+use crate::rng::Rng;
 
 /// Functions in the cluster, and the calls each one makes.
 const FUNCTIONS: usize = 2_048;
@@ -228,14 +229,11 @@ impl SummaryProblem<Graph<(), ()>> for SaturatingDepths {
 fn cluster() -> Graph<(), ()> {
     let mut graph = Graph::new();
     let nodes: Vec<NodeId> = (0..FUNCTIONS).map(|_| graph.add_node(())).collect();
-    let mut state = 0x2545_F491_4F6C_DD1D_u64;
+    let mut rng = Rng::xorshift(0x2545_F491_4F6C_DD1D);
     for (index, &caller) in nodes.iter().enumerate() {
         graph.add_edge(caller, nodes[(index + 1) % FUNCTIONS], ());
         for _ in 1..CALLS {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            let callee = usize::try_from(state % FUNCTIONS as u64).expect("an index fits");
+            let callee = rng.below(FUNCTIONS);
             graph.add_edge(caller, nodes[callee], ());
         }
     }

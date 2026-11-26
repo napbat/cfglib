@@ -2,8 +2,8 @@
 
 use cfglib::{NodeId, ReachIndex, ReachIndexConfig, ReachScratch};
 
-use crate::Lcg;
 use crate::digraph::Digraph;
+use crate::rng::Rng;
 
 #[test]
 fn every_pair_matches_the_breadth_first_distances_in_both_modes() {
@@ -31,7 +31,7 @@ fn every_pair_matches_the_breadth_first_distances_in_both_modes() {
     let mut scratch = ReachScratch::default();
     for seed in 1..=24 {
         let nodes = 8 + usize::try_from(seed).expect("a small seed fits in usize") * 2;
-        let digraph = Digraph::random(&mut Lcg(seed + 130), nodes, nodes + nodes / 2);
+        let digraph = Digraph::random(&mut Rng::lcg(seed + 130, 33), nodes, nodes + nodes / 2);
         let graph = digraph.graph();
         let distances: Vec<_> = (0..nodes)
             .map(|source| digraph.distances(source, true, None))

@@ -94,7 +94,7 @@ impl<S: Clone + Eq> StackResolution<S> {
                     state.cycle_cut_count += 1;
                     continue;
                 }
-                if !state.budget.admit_length(path.len() + 1) {
+                if !state.budget.admit_length(path.edge_count() + 1) {
                     continue;
                 }
                 let mut next = path.clone();
@@ -152,7 +152,7 @@ impl<S: Clone + Eq> StackResolution<S> {
                     state.cycle_cut_count += 1;
                     continue;
                 }
-                if !state.budget.admit_length(current.len() + 1) {
+                if !state.budget.admit_length(current.edge_count() + 1) {
                     continue;
                 }
                 let mut candidate = if edges.peek().is_some() {

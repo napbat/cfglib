@@ -52,6 +52,8 @@ use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::block::BlockId;
+use crate::edge::EdgeId;
 use crate::graph::edge_view::EdgeView;
 use crate::graph::view::{DenseId, RootedView};
 use crate::identity::define_dense_id;
@@ -79,7 +81,7 @@ define_dense_id! {
 
 /// One node of a path expression over edges `E`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum PathExprNode<E> {
+pub enum PathExprNode<E = EdgeId> {
     /// No path at all.
     Zero,
     /// The empty path.
@@ -100,7 +102,7 @@ pub enum PathExprNode<E> {
 /// subexpression share its id, and an interpretation evaluates it once.
 /// [`ZERO`](Self::ZERO) and [`ONE`](Self::ONE) are always present.
 #[derive(Debug, Clone)]
-pub struct PathExprArena<E> {
+pub struct PathExprArena<E = EdgeId> {
     nodes: Vec<PathExprNode<E>>,
     /// The id of each node, for hash-consing.
     dedup: BTreeMap<PathExprNode<E>, PathExprId>,
@@ -195,7 +197,7 @@ impl<E: Copy + Ord> PathExprArena<E> {
 ///
 /// Made by [`path_expressions`]; evaluated by [`interpret`].
 #[derive(Debug, Clone)]
-pub struct PathExpressions<N, E> {
+pub struct PathExpressions<N = BlockId, E = EdgeId> {
     arena: PathExprArena<E>,
     /// Per dense node index, its expression; zero for a node the root does
     /// not reach.

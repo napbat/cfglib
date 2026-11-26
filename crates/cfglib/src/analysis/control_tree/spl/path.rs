@@ -43,21 +43,21 @@ pub struct PathDecomposition {
 impl PathDecomposition {
     /// The number of bags.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub fn bag_count(&self) -> usize {
         self.starts.len() - 1
     }
 
     /// Whether there is no bag.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.bag_count() == 0
     }
 
     /// The blocks of bag `index`.
     ///
     /// # Panics
     ///
-    /// Panics when `index` is not below [`len`](Self::len).
+    /// Panics when `index` is not below [`bag_count`](Self::bag_count).
     #[must_use]
     pub fn bag(&self, index: usize) -> &[BlockId] {
         &self.blocks[self.starts[index]..self.starts[index + 1]]
@@ -65,7 +65,7 @@ impl PathDecomposition {
 
     /// Every bag, in order.
     pub fn bags(&self) -> impl ExactSizeIterator<Item = &[BlockId]> + '_ {
-        (0..self.len()).map(|index| self.bag(index))
+        (0..self.bag_count()).map(|index| self.bag(index))
     }
 
     /// The size of the largest bag, less one; `0` without a bag.

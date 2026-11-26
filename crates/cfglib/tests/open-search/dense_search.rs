@@ -6,8 +6,8 @@ use cfglib::{
     Direction, Graph, NodeId, NodeOrder, SearchConfig, SearchOrder, Visit, VisitedPolicy, search,
 };
 
-use crate::Lcg;
 use crate::reference::{Table, Visits, Walk, keep_all, nodes_of, prune_multiples_of_five};
+use crate::rng::Rng;
 
 /// A dense search's direction with its discipline.
 #[derive(Debug, Clone, Copy)]
@@ -76,7 +76,7 @@ fn assert_each_node_once(visits: &Visits) {
 #[test]
 fn the_random_tables_make_walks_worth_comparing() {
     for seed in (1..=4).chain(11..=14) {
-        let table = Table::random(&mut Lcg(seed), 40, 90);
+        let table = Table::random(&mut Rng::lcg(seed, 33), 40, 90);
         let visits = Walk::new(&table, None, &keep_all).breadth_first(&[3, 17, 30]);
         assert!(
             visits.len() > 10,
@@ -94,7 +94,7 @@ fn the_random_tables_make_walks_worth_comparing() {
 fn depth_first_search_matches_a_recursive_reference_in_order_and_depth() {
     let prunes: [&dyn Fn(usize) -> bool; 2] = [&keep_all, &prune_multiples_of_five];
     for seed in 1..=4 {
-        let table = Table::random(&mut Lcg(seed), 40, 90);
+        let table = Table::random(&mut Rng::lcg(seed, 33), 40, 90);
         let graph = table.graph();
         let backward = table.reversed();
         for (direction, adjacency) in [
@@ -127,7 +127,7 @@ fn depth_first_search_matches_a_recursive_reference_in_order_and_depth() {
 fn breadth_first_search_matches_a_queue_reference_in_order_and_depth() {
     let prunes: [&dyn Fn(usize) -> bool; 2] = [&keep_all, &prune_multiples_of_five];
     for seed in 1..=4 {
-        let table = Table::random(&mut Lcg(seed + 10), 40, 90);
+        let table = Table::random(&mut Rng::lcg(seed + 10, 33), 40, 90);
         let graph = table.graph();
         let backward = table.reversed();
         for (direction, adjacency) in [
@@ -160,7 +160,7 @@ fn breadth_first_search_matches_a_queue_reference_in_order_and_depth() {
 fn path_marks_visit_a_node_once_per_simple_route_like_a_brute_force_enumeration() {
     let prunes: [&dyn Fn(usize) -> bool; 2] = [&keep_all, &prune_multiples_of_five];
     for seed in 1..=4 {
-        let table = Table::random(&mut Lcg(seed + 20), 14, 26);
+        let table = Table::random(&mut Rng::lcg(seed + 20, 33), 14, 26);
         let graph = table.graph();
         let backward = table.reversed();
         for (direction, adjacency) in [
@@ -320,7 +320,7 @@ fn duplicate_seeds_are_visited_once_under_global_marks_and_again_under_path_mark
 
 #[test]
 fn a_break_ends_the_walk_with_its_value_and_visits_nothing_further() {
-    let table = Table::random(&mut Lcg(40), 40, 90);
+    let table = Table::random(&mut Rng::lcg(40, 33), 40, 90);
     let graph = table.graph();
     for order in [SearchOrder::DepthFirst, SearchOrder::BreadthFirst] {
         let full = match order {
@@ -527,7 +527,7 @@ fn backward_search_follows_predecessors() {
 
 #[test]
 fn a_store_with_removed_nodes_walks_like_its_reduced_table_before_and_after_compaction() {
-    let table = Table::random(&mut Lcg(55), 40, 100);
+    let table = Table::random(&mut Rng::lcg(55, 33), 40, 100);
     let removed = [7, 8, 21, 22];
     let reduced = table.without(&removed);
     let mut graph = table.graph();

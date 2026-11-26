@@ -9,8 +9,8 @@ use cfglib::{
     VisitedPolicy, depth_first_events, open_breadth_first_events, open_depth_first_events,
 };
 
-use crate::Lcg;
 use crate::reference::{Table, Walk, keep_all, table_successors};
+use crate::rng::Rng;
 use crate::spaces::{collatz_predecessors, collatz_steps, grid_successors};
 
 /// What an event stream says, in plain values, comparable across the dense and the open walk.
@@ -108,7 +108,7 @@ fn open_breadth_first_steps(table: &Table, max_depth: Option<usize>, seeds: &[us
 #[test]
 fn the_open_breadth_first_events_equal_the_queue_reference_with_non_tree_edges_as_refusals() {
     for seed in 1..=5 {
-        let table = Table::random(&mut Lcg(seed + 100), 30, 55);
+        let table = Table::random(&mut Rng::lcg(seed + 100, 33), 30, 55);
         assert_eq!(
             open_breadth_first_steps(&table, None, &[2]),
             queue_breadth_first_steps(&table, 2),
@@ -120,7 +120,7 @@ fn the_open_breadth_first_events_equal_the_queue_reference_with_non_tree_edges_a
 #[test]
 fn the_open_depth_first_events_equal_the_dense_events_with_back_and_cross_edges_as_refusals() {
     for seed in 1..=5 {
-        let table = Table::random(&mut Lcg(seed + 110), 30, 55);
+        let table = Table::random(&mut Rng::lcg(seed + 110, 33), 30, 55);
         let graph = table.graph();
         assert_eq!(
             open_depth_first_steps(&table, SearchConfig::default(), &[2]),
@@ -259,7 +259,7 @@ fn grid_event_counts_follow_from_its_edge_and_route_counts() {
 #[test]
 fn path_marks_refuse_exactly_the_nodes_already_on_the_open_path_and_nest_discoveries() {
     for seed in 1..=5 {
-        let table = Table::random(&mut Lcg(seed + 120), 12, 24);
+        let table = Table::random(&mut Rng::lcg(seed + 120, 33), 12, 24);
         let steps = open_depth_first_steps(
             &table,
             SearchConfig {
@@ -514,7 +514,7 @@ fn a_breadth_first_skip_keeps_the_mark_and_a_refusal_verdict_is_ignored() {
 
 #[test]
 fn a_break_in_either_event_walk_returns_its_value_and_leaves_open_frames_unfinished() {
-    let table = Table::random(&mut Lcg(140), 20, 40);
+    let table = Table::random(&mut Rng::lcg(140, 33), 20, 40);
     let full_depth = open_depth_first_steps(&table, SearchConfig::default(), &[0]);
     let full_breadth = open_breadth_first_steps(&table, None, &[0]);
     assert!(full_depth.len() > 8 && full_breadth.len() > 4);

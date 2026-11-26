@@ -34,10 +34,10 @@ fn the_tree_answers_ancestry_levels_and_common_dominators() {
     assert_eq!(dom.nearest_common_dominator(left, right), Some(head));
     assert_eq!(dom.nearest_common_dominator(left, left), Some(left));
     assert_eq!(
-        dom.nearest_common_dominator_of([left, right, exit]),
+        dom.nearest_common_dominator_among([left, right, exit]),
         Some(head)
     );
-    assert_eq!(dom.nearest_common_dominator_of([join]), Some(join));
+    assert_eq!(dom.nearest_common_dominator_among([join]), Some(join));
 
     assert_eq!(dom.preorder()[0], entry);
     assert_eq!(dom.subtree(head).len(), cfg.block_count() - 1);
@@ -60,7 +60,7 @@ fn unreachable_blocks_are_in_no_tree() {
     assert_eq!(dom.idom(dead), None);
     assert_eq!(dom.level(dead), None);
     assert_eq!(dom.nearest_common_dominator(dead, head), None);
-    assert_eq!(dom.nearest_common_dominator_of([dead]), None);
+    assert_eq!(dom.nearest_common_dominator_among([dead]), None);
     assert_eq!(dom.subtree(dead), []);
     assert_eq!(
         dom.idom(left),

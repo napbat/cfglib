@@ -59,6 +59,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+use crate::block::BlockId;
 use crate::graph::epoch::EpochMarks;
 use crate::graph::fanout::DenseFanout;
 use crate::graph::scc::{SccDecomposition, SccNumbering};
@@ -193,7 +194,7 @@ impl Default for ReachIndexConfig {
 /// assert!(!exact.reaches(main, log));
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReachIndex<N> {
+pub struct ReachIndex<N = BlockId> {
     /// The strongly connected components, numbered sources first.
     components: SccDecomposition<N>,
     /// How a pair of distinct components, the source numbered first, is
@@ -226,7 +227,7 @@ impl<N: DenseId> ReachIndex<N> {
             config.supportive
         );
         let components = SccDecomposition::compute(graph, SccNumbering::SourcesFirst);
-        let count = components.len();
+        let count = components.component_count();
         // The condensation's edges, straight into the two fan-outs rather
         // than through a condensed graph. Every component index fits a `u32`
         // because the node bound does, with `u32::MAX` itself left free as a

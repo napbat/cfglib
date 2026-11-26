@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
 use super::{Adjacency, breadth_first_core};
+use crate::block::BlockId;
 use crate::graph::search::{Visit, may_expand};
 use crate::graph::view::{DenseId, Direction, GraphView, assert_in_bound};
 
@@ -218,7 +219,7 @@ impl<N: DenseId> MeetSide<N> {
 /// A node reachable from both endpoints of a [`common_ancestors`] query,
 /// carrying the hop count from each so the consumer can rank it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct CommonAncestor<N> {
+pub struct CommonAncestor<N = BlockId> {
     /// The shared node.
     pub node: N,
     /// Hop count from the first endpoint (`a`).

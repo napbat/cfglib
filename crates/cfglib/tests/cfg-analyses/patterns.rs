@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use cfglib::{BlockId, Cfg, EdgeKind, Graph, NodeId, Pattern, detect_patterns, empty_trampolines};
 
-use crate::random::Rng;
+use crate::rng::Rng;
 use crate::stmt::{Route, Stmt, block, link};
 
 fn diamonds<N: Clone>(patterns: &[Pattern<N>]) -> Vec<Pattern<N>> {

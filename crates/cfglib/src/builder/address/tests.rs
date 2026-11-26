@@ -659,7 +659,7 @@ fn flattened_calls_continue_in_their_block_and_are_reported() {
     );
     assert_eq!(
         graph.unresolved_transfers,
-        [] as [crate::flow::transfer::UnresolvedTransfer<u32>; 0]
+        [] as [crate::flow::UnresolvedTransfer<u32>; 0]
     );
 }
 

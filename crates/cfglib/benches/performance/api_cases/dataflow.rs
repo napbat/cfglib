@@ -11,6 +11,7 @@ use cfglib::{
 use super::BenchmarkSuite;
 use crate::fixtures::{CfgReachability, Reachability, branchy_cfg, branchy_graph, fixture_u32};
 use crate::harness::benchmark_case;
+use crate::rng::Rng;
 
 const NODE_COUNT: usize = 512;
 
@@ -192,22 +193,13 @@ fn register_cfg_solvers(suite: &mut BenchmarkSuite<'_>) {
     };
     let rooted = rooted(&cfg);
 
-    solver_case!(suite, "api_solve_problem_from", || {
+    solver_case!(suite, "api_solve_node_problem_cfg_seeded", || {
         solve_node_problem(&cfg, &CfgReachability, seeded)
     });
-    solver_case!(suite, "api_solve_problem_from_with_config", || {
-        solve_node_problem(&cfg, &CfgReachability, seeded)
-    });
-    solver_case!(suite, "api_try_solve_problem", || {
+    solver_case!(suite, "api_solve_node_problem_cfg_fallible_rooted", || {
         solve_node_problem(&cfg, &TryCfgReachability, rooted)
     });
-    solver_case!(suite, "api_try_solve_problem_from", || {
-        solve_node_problem(&cfg, &TryCfgReachability, seeded)
-    });
-    solver_case!(suite, "api_try_solve_problem_with_config", || {
-        solve_node_problem(&cfg, &TryCfgReachability, rooted)
-    });
-    solver_case!(suite, "api_try_solve_problem_from_with_config", || {
+    solver_case!(suite, "api_solve_node_problem_cfg_fallible_seeded", || {
         solve_node_problem(&cfg, &TryCfgReachability, seeded)
     });
 }
@@ -220,22 +212,13 @@ fn register_node_solvers(suite: &mut BenchmarkSuite<'_>) {
         ..Solve::default()
     };
 
-    solver_case!(suite, "api_solve_node_problem_from", || {
+    solver_case!(suite, "api_solve_node_problem_seeded", || {
         solve_node_problem(&graph, &Reachability, seeded)
     });
-    solver_case!(suite, "api_solve_node_problem_from_with_config", || {
-        solve_node_problem(&graph, &Reachability, seeded)
-    });
-    solver_case!(suite, "api_try_solve_node_problem", || {
+    solver_case!(suite, "api_solve_node_problem_fallible", || {
         solve_node_problem(&graph, &TryGraphReachability, Solve::default())
     });
-    solver_case!(suite, "api_try_solve_node_problem_from", || {
-        solve_node_problem(&graph, &TryGraphReachability, seeded)
-    });
-    solver_case!(suite, "api_try_solve_node_problem_with_config", || {
-        solve_node_problem(&graph, &TryGraphReachability, Solve::default())
-    });
-    solver_case!(suite, "api_try_solve_node_problem_from_with_config", || {
+    solver_case!(suite, "api_solve_node_problem_fallible_seeded", || {
         solve_node_problem(&graph, &TryGraphReachability, seeded)
     });
 }
@@ -254,25 +237,13 @@ fn register_edge_solvers(suite: &mut BenchmarkSuite<'_>) {
         covers[solve_edge_problem],
         || solve_edge_problem(&graph, &EdgeReachability, Solve::default())
     );
-    solver_case!(suite, "api_solve_edge_problem_from", || {
+    solver_case!(suite, "api_solve_edge_problem_seeded", || {
         solve_edge_problem(&graph, &EdgeReachability, seeded)
     });
-    solver_case!(suite, "api_solve_edge_problem_with_config", || {
-        solve_edge_problem(&graph, &EdgeReachability, Solve::default())
-    });
-    solver_case!(suite, "api_solve_edge_problem_from_with_config", || {
-        solve_edge_problem(&graph, &EdgeReachability, seeded)
-    });
-    solver_case!(suite, "api_try_solve_edge_problem", || {
+    solver_case!(suite, "api_solve_edge_problem_fallible", || {
         solve_edge_problem(&graph, &TryEdgeReachability, Solve::default())
     });
-    solver_case!(suite, "api_try_solve_edge_problem_from", || {
-        solve_edge_problem(&graph, &TryEdgeReachability, seeded)
-    });
-    solver_case!(suite, "api_try_solve_edge_problem_with_config", || {
-        solve_edge_problem(&graph, &TryEdgeReachability, Solve::default())
-    });
-    solver_case!(suite, "api_try_solve_edge_problem_from_with_config", || {
+    solver_case!(suite, "api_solve_edge_problem_fallible_seeded", || {
         solve_edge_problem(&graph, &TryEdgeReachability, seeded)
     });
 }
@@ -323,15 +294,7 @@ const NEST_NODE_COUNT: usize = 1_024;
 /// in no flow order.
 fn permuted_loop_nest(node_count: usize) -> (Graph<(), ()>, NodeId) {
     let mut ids: Vec<usize> = (0..node_count).collect();
-    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
-    for last in (1..node_count).rev() {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        let bound = u64::try_from(last + 1).expect("a fixture size fits u64");
-        let pick = usize::try_from(state % bound).expect("below the fixture size");
-        ids.swap(last, pick);
-    }
+    Rng::xorshift(0x9E37_79B9_7F4A_7C15).shuffle(&mut ids);
     let mut graph = Graph::with_capacity(node_count, node_count * 2);
     let nodes: Vec<NodeId> = (0..node_count).map(|_| graph.add_node(())).collect();
     let at = |position: usize| nodes[ids[position]];
@@ -486,7 +449,7 @@ fn register_streams(suite: &mut BenchmarkSuite<'_>) {
     let rooted = rooted(&cfg);
     benchmark_case!(
         suite,
-        "api_stream_problem",
+        "api_stream_node_problem_cfg",
         || {
             let mut visited = 0;
             stream_node_problem(&cfg, &TryCfgReachability, rooted, |_, _, out| {
@@ -588,7 +551,7 @@ fn register_resumes(suite: &mut BenchmarkSuite<'_>) {
     };
     benchmark_case!(
         suite,
-        "api_resume_problem",
+        "api_resume_node_problem_cfg",
         || {
             let previous = solved_cfg.clone();
             resume_node_problem(&cfg, &TryCfgReachability, previous, edit, rooted)

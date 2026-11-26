@@ -46,6 +46,9 @@
 //! `scc_leaves_first` over the result. The `compact` rows, in `Insertion` order,
 //! are the baseline: the gain of an order is the drop from them.
 
+#[path = "../tests/common/rng.rs"]
+pub mod rng;
+
 use std::alloc::System;
 #[cfg(cfglib_bench_alloc)]
 use std::alloc::{GlobalAlloc, Layout};
@@ -55,6 +58,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use cfglib::{Graph, Id, NodeId, NodeOrder, SccDecomposition, SccNumbering};
+
+use crate::rng::Rng;
 
 #[cfg(cfglib_bench_alloc)]
 struct CountingAllocator;
@@ -174,25 +179,6 @@ fn measure<T>(operation: impl FnOnce() -> T) -> (T, Sample) {
     )
 }
 
-/// A xorshift generator, so every run sees the same graph.
-struct Rng(u64);
-
-impl Rng {
-    fn next_u64(&mut self) -> u64 {
-        let mut state = self.0;
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        self.0 = state;
-        state
-    }
-
-    fn below(&mut self, bound: usize) -> usize {
-        let bound = u64::try_from(bound).expect("bound fits in u64");
-        usize::try_from(self.next_u64() % bound).expect("a value below bound fits in usize")
-    }
-}
-
 /// The raw id of the node at `index`.
 fn node(index: usize) -> u32 {
     u32::try_from(index).expect("node index fits in u32")
@@ -238,9 +224,7 @@ fn edge_list(rng: &mut Rng) -> Vec<(u32, u32)> {
 
     // Without the shuffle the hub edges arrive grouped by source, which is
     // the one order a compressed index would find unfairly easy.
-    for index in (1..edges.len()).rev() {
-        edges.swap(index, rng.below(index + 1));
-    }
+    rng.shuffle(&mut edges);
     edges
 }
 
@@ -308,17 +292,11 @@ fn structured_edge_list(rng: &mut Rng) -> Vec<(u32, u32)> {
 /// `edges` under a random permutation of the node ids.
 fn relabeled(edges: &[(u32, u32)], rng: &mut Rng) -> Vec<(u32, u32)> {
     let mut label: Vec<u32> = (0..NODES).map(node).collect();
-    shuffle(&mut label, rng);
+    rng.shuffle(&mut label);
     edges
         .iter()
         .map(|&(source, target)| (label[source as usize], label[target as usize]))
         .collect()
-}
-
-fn shuffle<T>(items: &mut [T], rng: &mut Rng) {
-    for index in (1..items.len()).rev() {
-        items.swap(index, rng.below(index + 1));
-    }
 }
 
 /// The order a configuration feeds its edges to the store.
@@ -343,7 +321,7 @@ impl Arrival {
         match self {
             // A stable sort keeps each source's edges in their order.
             Self::Grouped => arranged.sort_by_key(|&(source, _)| source),
-            Self::Shuffled => shuffle(&mut arranged, rng),
+            Self::Shuffled => rng.shuffle(&mut arranged),
         }
         arranged
     }
@@ -619,7 +597,7 @@ fn run_ordered(
     let (successors, scan) = measure(|| walk_neighbors(&graph, true));
     let (predecessors, reverse_scan) = measure(|| walk_neighbors(&graph, false));
     let (components, scc) =
-        measure(|| SccDecomposition::compute(&graph, SccNumbering::LeavesFirst).len());
+        measure(|| SccDecomposition::compute(&graph, SccNumbering::LeavesFirst).component_count());
     (
         vec![
             ("compaction", compacted),
@@ -675,13 +653,13 @@ graph-store structured_relabeled, {} arrival, compacted in order: {NODES} nodes,
 const REPEATS: usize = 5;
 
 fn main() {
-    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    let mut rng = Rng::xorshift(0x9E37_79B9_7F4A_7C15);
     let uniform = edge_list(&mut rng);
     let appends = append_list(&mut rng);
     let small = small_edge_list(&mut rng);
     // The structured inputs draw from their own generator, so the uniform
     // and procedure-scale inputs stay the ones earlier runs measured.
-    let mut structure_rng = Rng(0xD1B5_4A32_D192_ED03);
+    let mut structure_rng = Rng::xorshift(0xD1B5_4A32_D192_ED03);
     let structured = structured_edge_list(&mut structure_rng);
     let structured_relabeled = relabeled(&structured, &mut structure_rng);
     let inputs = [

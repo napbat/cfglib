@@ -19,6 +19,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use crate::block::BlockId;
 use crate::graph::fanout::DenseFanout;
 use crate::graph::loop_forest::cycles::CycleNesting;
 use crate::graph::traverse::{Adjacency, Outgoing, by_axis};
@@ -72,7 +73,7 @@ use crate::identity::{NO_INDEX, slot, word};
 /// assert_eq!(order.rank(exit), Some(4));
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WeakTopologicalOrder<N> {
+pub struct WeakTopologicalOrder<N = BlockId> {
     /// The nodes in order; every component is contiguous, head first.
     order: Vec<N>,
     /// Per position: one past the last position of the component headed

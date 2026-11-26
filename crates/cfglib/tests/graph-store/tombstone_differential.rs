@@ -14,25 +14,8 @@ use cfglib::{
 };
 
 use crate::reference_model::Reference;
+use crate::rng::Rng;
 use crate::{Relation, Symbol, relation, symbol};
-
-/// A linear congruential generator, so every scenario is reproducible without a dependency.
-struct Lcg(u64);
-
-impl Lcg {
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.0 >> 33
-    }
-
-    fn below(&mut self, bound: usize) -> usize {
-        let bound = u64::try_from(bound).expect("the bound fits in u64");
-        usize::try_from(self.next_u64() % bound).expect("a value below the bound fits in usize")
-    }
-}
 
 type Store = Graph<Symbol, Relation>;
 
@@ -58,7 +41,7 @@ fn add_edge(graph: &mut Store, reference: &mut Reference, source: usize, target:
 /// Thirty nodes and ninety edges compacted into the base, then ten more nodes and forty more edges
 /// in the delta, then removals and (optionally) redirections.
 fn scenario(seed: u64, redirects: bool) -> (Store, Reference) {
-    let mut rng = Lcg(seed);
+    let mut rng = Rng::lcg(seed, 33);
     let mut graph = Store::new();
     let mut reference = Reference::new();
 

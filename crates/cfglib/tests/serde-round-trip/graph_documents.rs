@@ -282,7 +282,8 @@ fn a_keyed_graph_keeps_its_keys_ids_and_edges() {
         );
     }
     assert_same_store(decoded.graph(), original.graph());
-    let components = |graph| SccDecomposition::compute(graph, SccNumbering::LeavesFirst).len();
+    let components =
+        |graph| SccDecomposition::compute(graph, SccNumbering::LeavesFirst).component_count();
     assert_eq!(components(&decoded), components(&original));
 }
 

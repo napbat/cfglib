@@ -431,7 +431,7 @@ fn register_graph_algorithms(suite: &mut BenchmarkSuite<'_>) {
         suite,
         "api_scc_condensation",
         || components.condensation(&graph),
-        |result| assert_eq!(result.node_count(), components.len())
+        |result| assert_eq!(result.node_count(), components.component_count())
     );
     benchmark_case!(
         suite,
@@ -489,7 +489,7 @@ fn register_cfg_graphs(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "api_verify_with",
+        "api_verify_semantics",
         covers[verify_semantics],
         || verify_semantics(&cfg, &NoopValidator),
         |report| assert!(report.is_ok())
@@ -587,7 +587,7 @@ fn register_output_formats(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "api_parse_cfg_text",
+        "api_parse_cfg_listing",
         covers[parse_cfg_listing],
         || parse_cfg_listing(&cfg_text, |line| Ok::<_, String>(line.to_owned())),
         |parsed: &Result<Cfg<String>, _>| assert_eq!(parsed.as_ref().unwrap().block_count(), 128)

@@ -244,7 +244,7 @@ mod tests {
         let cold_stream = linearize(&cfg, BlockOrder::Custom(rare.clone()), &Asm).unwrap();
         let entry_transfers: Vec<Op> = hot_stream
             .iter()
-            .filter(|line| line.block == entry && line.index == usize::MAX)
+            .filter(|line| line.block == entry && line.index.is_none())
             .map(|line| line.inst)
             .collect();
         assert_eq!(

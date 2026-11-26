@@ -13,25 +13,10 @@ use crate::analysis_oracles::{
 };
 use crate::fixtures::{branchy_graph, linear_cfg, many_exit_cfg};
 use crate::harness::{BenchmarkSuite, benchmark_case};
+use crate::rng::Rng;
 
 /// Nodes of the large sparse graph of the update cases.
 const SPARSE_NODES: usize = 1 << 20;
-
-/// A deterministic stream of indices, so every run edits the same edges.
-struct Stream(u64);
-
-impl Stream {
-    /// An index below `bound`, from the splitmix64 sequence.
-    fn below(&mut self, bound: usize) -> usize {
-        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut mixed = self.0;
-        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        mixed ^= mixed >> 31;
-        usize::try_from(mixed % u64::try_from(bound).expect("a bound fits in u64"))
-            .expect("an index below a usize bound fits in usize")
-    }
-}
 
 /// A path through every node plus one random edge out of each, forward or
 /// back: about two edges per node, every node reachable from node 0.
@@ -41,7 +26,7 @@ fn sparse_graph(nodes: usize) -> Graph<(), ()> {
     for pair in ids.windows(2) {
         graph.add_edge(pair[0], pair[1], ());
     }
-    let mut stream = Stream(nodes as u64);
+    let mut stream = Rng::splitmix(nodes as u64);
     for &id in &ids {
         graph.add_edge(id, ids[stream.below(nodes)], ());
     }
@@ -64,7 +49,7 @@ impl Edited {
         let root = NodeId::from_index(0);
         let tree = DominatorTree::compute(&Rooted::new(graph, root));
         let mut edited = graph.clone();
-        let mut stream = Stream(seed);
+        let mut stream = Rng::splitmix(seed);
         let nodes = graph.node_count();
         let mut updates = Vec::new();
         while updates.len() < inserts {

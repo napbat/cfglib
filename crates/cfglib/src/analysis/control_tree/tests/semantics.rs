@@ -24,6 +24,7 @@ use super::invariants::{handler_sets, reach, render};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::{EdgeId, EdgeKind};
+use crate::test_util::rng::Rng;
 use crate::{
     BlockSpan, ControlBody, ControlNode, ControlNodeId, ControlTree, LoopKind, StructuringReport,
 };
@@ -40,15 +41,19 @@ const STEP_LIMIT: usize = 2_000;
 
 /// The decisions both runs consume, in order.
 #[derive(Clone)]
-struct Decisions(u64);
+struct Decisions(Rng);
 
 impl Decisions {
+    /// The decisions of `seed`, which starts the generator unmixed so every
+    /// stream keeps the draws it always had.
+    const fn new(seed: u64) -> Self {
+        Self(Rng::from_state(seed))
+    }
+
     fn choose(&mut self, options: usize) -> usize {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
+        let draw = self.0.next_u64() >> 20;
         let options = u64::try_from(options).expect("an option count fits in 64 bits");
-        usize::try_from((self.0 >> 20) % options).expect("a value below a usize bound")
+        usize::try_from(draw % options).expect("a value below a usize bound")
     }
 }
 
@@ -74,7 +79,7 @@ fn raise_target<I, E>(cfg: &Cfg<I, E>, seed: u64, block: BlockId) -> Option<Bloc
         .outgoing(block)
         .any(|edge| !cfg.edge(edge).kind().is_exceptional());
     let mut mix =
-        Decisions(seed ^ (u64::from(block.raw()) + 1).wrapping_mul(0xD1B5_4A32_D192_ED03));
+        Decisions::new(seed ^ (u64::from(block.raw()) + 1).wrapping_mul(0xD1B5_4A32_D192_ED03));
     mix.choose(2);
     let raises = !has_normal_successor || mix.choose(2) == 1;
     raises.then(|| targets[mix.choose(targets.len())])
@@ -189,7 +194,7 @@ fn successor<I, E>(cfg: &Cfg<I, E>, block: BlockId, decisions: &mut Decisions) -
 }
 
 fn run_graph<I, E>(cfg: &Cfg<I, E>, seed: u64) -> Trace {
-    let mut decisions = Decisions(seed);
+    let mut decisions = Decisions::new(seed);
     let mut trace = Trace::new();
     let mut block = cfg.entry();
     for _ in 0..STEP_LIMIT {
@@ -300,7 +305,7 @@ fn run_tree<I, E>(
         seed,
         live: reach(cfg, Vec::new()),
         units,
-        decisions: Decisions(seed),
+        decisions: Decisions::new(seed),
         trace: Trace::new(),
         frames: alloc::vec![Frame::Body {
             nodes: first,

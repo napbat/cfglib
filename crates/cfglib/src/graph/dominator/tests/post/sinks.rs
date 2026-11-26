@@ -271,7 +271,7 @@ fn a_server_loop_is_one_class_named_by_its_head() {
         Some(PostNode::Node(1))
     );
     assert_eq!(
-        post.nearest_common_post_dominator_of([0, 3]),
+        post.nearest_common_post_dominator_among([0, 3]),
         Some(PostNode::Node(1))
     );
     assert_eq!(

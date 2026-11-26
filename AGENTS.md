@@ -73,8 +73,8 @@ Follow the Cargo package layout:
   children and re-export nothing. The crate root re-exports every public item, one `pub use`
   for each module, in alphabetical order. The root re-exports nothing from `ir`, because its
   levels share names (`ir::hlil::FunctionView`).
-- A domain module with a narrow API (`cfg`, `exception`, `ir::llil`, `ir::rtl`, `ir::mlil`, `ir::hlil`)
-  keeps its children private and re-exports its public items.
+- A domain module with a narrow API (`builder`, `cfg`, `exception`, `flow`, `ir::llil`,
+  `ir::rtl`, `ir::mlil`, `ir::hlil`) keeps its children private and re-exports its public items.
 - Spell compound names in full with underscores (`control_dependence`). Keep the standard
   acronyms (`scc`, `cdg`, `eh`, `seh`, `veh`, `clr`).
 - Make a derived analysis with `Type::compute`. Use `build` only for a fallible builder
@@ -84,34 +84,47 @@ Follow the Cargo package layout:
 - Mark a variant of a function only with these affixes: `try_` (it runs a fallible problem),
   `_in` (it takes a caller-owned scratch as its first argument) and `_mapped` (it also returns
   the identity remapping). Do not use `_with`, `_from`, `_of` or `_with_config` as variant
-  markers: pass a config, a seed descriptor or a view instead, and give a genuinely different
-  operation its own name.
+  markers: pass a config, a seed descriptor or a view instead. Give a genuinely different
+  operation its own name, which may say what it does differently
+  (`LoopForest::compute_cycles` finds every cycle, `DominatorTree::compute_certified_in` also
+  builds a certificate, `ControlTree::compute_treating_empty` structures the program with some
+  blocks emptied, `nearest_common_dominator_among` takes a set and skips its unreachable nodes).
+  An accessor may name its argument with a preposition when no other function does its job
+  (`WeakTopologicalOrder::head_of`, `StackPartialPathDatabase::paths_from`).
 - An analysis that starts from a root takes a `RootedView`. Choose the root with `Rooted` and the
-  direction with `Reversed`; do not add a separate root or direction parameter. Where a
-  direction is a value, use the one `Direction { Forward, Backward }`.
+  direction with `Reversed`; do not add a separate root or direction parameter. A walk or a
+  query that takes its own start nodes (the traversals, `search`, `min_label_relaxation`,
+  `common_ancestors`) takes the direction as a value: the one `Direction { Forward, Backward }`.
 - A config is a plain struct with public fields that implements `Default`. Do not add `with_*`
-  setters. Share a bound instead of redeclaring it (one depth bound, one step limit).
+  setters to it. Share a bound instead of redeclaring it (one depth bound, one step limit). A
+  value type with private fields may offer `with_*` builder methods (`Edge::with_weight`).
 - A scratch type implements `Default`, starts empty and grows on entry to fit the graph. Only
   the `_in` form of a function takes it.
-- A node-generic result type defaults its id parameters to `BlockId` and `EdgeId`.
+- A node-generic public type defaults its id parameters to `BlockId` and `EdgeId`: a result,
+  an event, an update and a solve descriptor alike. The open-graph types have no default,
+  because their node is a consumer value rather than a dense id.
 - Use a `*Result` name only for a type in a `Result` position. Give each error type a name that
   ends in `Error`, and implement `core::error::Error`.
-- Use `*_count` for counting accessors. Do not use `num_*`.
+- Name a counting accessor `*_count` (`block_count`, `component_count`). Do not use `num_*`,
+  and do not use `len` on a type that is not a collection. A collection or a range handle that
+  the caller indexes keeps `len` and `is_empty` (`DenseBits`, `Fanout`, `DisjointSet`,
+  `ControlRun`, `BlockSpan`).
 - `_mapped` marks the variant of a transform that also returns a `Rewrite`. A pass that only
   adds blocks or edges returns the new identities.
 - Pass composition owns identity, declared order, change reports and fallible execution. The
   consumer owns pass selection, dependency order, dialect semantics and cache invalidation.
 - The node and edge fixpoint solvers each have one entry point (`solve_node_problem`,
-  `solve_edge_problem`) that takes the problem and one `Solve` descriptor: the `Seeds` (`Live`,
-  `Reachable(root)` for a rooted solve, `Of(nodes)` for a dirty region) and the `SolveConfig`.
-  Their `stream_` forms take the same descriptor and ignore only `SolveConfig::order`, since a
-  stream always runs in the weak topological order; their `resume_` forms take a `Resume` and
-  the descriptor of the solve they continue. A problem trait comes in an infallible and a
-  fallible form; the fallible form has a blanket implementation for every infallible problem,
-  and the solvers take the fallible form. Both solvers run the shared worklist loops of
-  `dataflow/schedule.rs`. A derived analysis wraps a solver or runs its own loop
-  (`propagate_summaries` keeps its callee-first schedule and borrows only the worklist and the
-  `widen`/`narrow` hook shape). It does not add entry points.
+  `solve_edge_problem`) that takes the graph, the problem and one `Solve` descriptor: the
+  `Seeds` (`Live`, `Reachable(root)` for a rooted solve, `Of(nodes)` for a dirty region) and the
+  `SolveConfig`. Their `stream_` forms take the same descriptor and ignore only
+  `SolveConfig::order`, since a stream always runs in the weak topological order; their
+  `resume_` forms take the previous facts, a `Resume` and the descriptor of the solve they
+  continue. A problem trait comes in an infallible and a fallible form; the fallible form has a
+  blanket implementation for every infallible problem, and the solvers take the fallible form.
+  Both solvers run the shared worklist loops of `dataflow/schedule.rs`. A derived analysis
+  wraps a solver or runs its own loop (`propagate_summaries` keeps its callee-first schedule
+  and borrows only the worklist and the `widen`/`narrow` hook shape). It does not add entry
+  points.
 - Every bounded fixpoint (the solvers, IFDS, the slot drivers) takes its budget as one
   `max_steps: Option<usize>`, counts it with the one step counter of `dataflow/solve.rs`, fails
   with `SolveError::StepLimitExceeded`, and reports a `SolveStats`. The open fold's
@@ -127,9 +140,12 @@ Follow the Cargo package layout:
 - Build on the crate's shared pieces instead of hand-rolling them: the walk cores of
   `graph::traverse` and `graph::search` for breadth-first and depth-first walks; the views of
   `graph::view` (`Rooted`, `Reversed`, `Induced`, `VirtualRoot`) and the crate-private
-  renumbered component view; `EpochMarks` for visited stamps; `DenseFanout::from_pairs` for
-  counting-sort adjacency; `define_dense_id!` for index newtypes; and the shared no-index
-  sentinel. When a module needs something the shared piece lacks, extend the shared piece.
+  renumbered component view; the one `Direction`; `EpochMarks` for visited stamps;
+  `DenseFanout::from_pairs` for counting-sort adjacency; `define_dense_id!` for index newtypes;
+  and, for a dense `u32` table, the sentinel `NO_INDEX` with `check_bound`, `word` and `slot` of
+  `crate::identity`. When a module needs something the shared piece lacks, extend the shared
+  piece. A loop that stays off a shared core because the core measured slower says so in a
+  comment, with the numbers.
 - Return structured errors. Do not panic in a public API unless the panic is documented. Panic
   (under `# Panics`) only for a caller bug the caller can check cheaply, such as an id that is
   out of range or removed. Return a `Result` for input the caller cannot check cheaply: derived
@@ -146,7 +162,10 @@ Follow the Cargo package layout:
 - Put unit tests in a `#[cfg(test)] mod tests` in the file that they test. Move them to
   `<parent>/tests.rs` when the file gets near the size limit.
 - Cover edge cases, failure paths and exceptional control flow where they apply.
-- Keep tests deterministic.
+- Keep tests deterministic. Draw random input from the one seeded generator:
+  `test_util::rng::Rng` in unit tests, and `tests/common/rng.rs` in integration tests and
+  benches, included as `#[path = "..."] pub mod rng;` at the crate root of the target. Do not
+  write another generator; add a constructor there when a suite needs a new sequence.
 - Do not remove or weaken a test to make a change pass.
 
 ## Checks

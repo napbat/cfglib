@@ -9,33 +9,11 @@
 //! whatever its shape.
 
 use crate::glint::{Arm, Block, Function, Op, Ty, Value};
+use crate::rng::Rng;
 
-struct Rng(u64);
-
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
-    }
-
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 >> 12;
-        self.0 ^= self.0 << 25;
-        self.0 ^= self.0 >> 27;
-        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-
-    fn below(&mut self, bound: usize) -> usize {
-        let bound = u64::try_from(bound).expect("small bound");
-        usize::try_from(self.next() % bound).expect("below the bound")
-    }
-
-    fn chance(&mut self, percent: usize) -> bool {
-        self.below(100) < percent
-    }
-
-    fn pick(&mut self, values: &[Value]) -> Value {
-        values[self.below(values.len())]
-    }
+/// One of `values`, drawn uniformly.
+fn pick(rng: &mut Rng, values: &[Value]) -> Value {
+    values[rng.below(values.len())]
 }
 
 /// A random function of two to nine slots.
@@ -73,7 +51,7 @@ pub fn random_function(seed: u64) -> Function {
             available.extend(function_params(&function, block));
         }
         for _ in 0..rng.below(3) {
-            let (left, right) = (rng.pick(&available), rng.pick(&available));
+            let (left, right) = (pick(&mut rng, &available), pick(&mut rng, &available));
             available.push(function.add_inst(block, Op::Add, &[left, right], &[Ty::I32])[0]);
         }
         terminate(&mut function, &mut rng, block, &available, &blocks, &live);
@@ -107,7 +85,7 @@ fn terminate(
     let args_for = |function: &Function, rng: &mut Rng, target: Block| -> Vec<Value> {
         function_params(function, target)
             .iter()
-            .map(|_| rng.pick(available))
+            .map(|_| pick(rng, available))
             .collect()
     };
     match targets.as_slice() {
@@ -115,7 +93,7 @@ fn terminate(
             if rng.chance(25) {
                 function.terminate(block, Op::Discard, &[], Vec::new());
             } else {
-                let value = rng.pick(available);
+                let value = pick(rng, available);
                 function.terminate(block, Op::Return, &[value], Vec::new());
             }
         }
@@ -124,7 +102,7 @@ fn terminate(
             function.terminate(block, Op::Jump, &[], vec![(*only, args, Arm::Always)]);
         }
         [taken, not_taken] => {
-            let (left, right) = (rng.pick(available), rng.pick(available));
+            let (left, right) = (pick(rng, available), pick(rng, available));
             let condition = function.add_inst(block, Op::Lt, &[left, right], &[Ty::Bool])[0];
             let taken_args = args_for(function, rng, *taken);
             let not_taken_args = args_for(function, rng, *not_taken);
@@ -139,7 +117,7 @@ fn terminate(
             );
         }
         many => {
-            let scrutinee = rng.pick(available);
+            let scrutinee = pick(rng, available);
             let last = many.len() - 1;
             let records = many
                 .iter()

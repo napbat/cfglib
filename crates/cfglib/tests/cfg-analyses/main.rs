@@ -5,8 +5,10 @@
 //! Every analysis is judged by hand-labeled fixtures or by a brute-force
 //! reference written in the test: definition-level dominance.
 
+#[path = "../common/rng.rs"]
+pub mod rng;
+
 mod nesting;
 mod patterns;
-mod random;
 mod splitting;
 mod stmt;

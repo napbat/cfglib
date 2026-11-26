@@ -199,7 +199,7 @@ fn dominance_keeps_its_answers_for_unreachable_nodes() {
 }
 
 #[test]
-fn nearest_common_dominator_of_skips_unreachable_nodes() {
+fn nearest_common_dominator_among_skips_unreachable_nodes() {
     let mut cfg: Cfg<MockInst> = Cfg::new();
     let a = cfg.new_block();
     let b = cfg.new_block();
@@ -215,15 +215,15 @@ fn nearest_common_dominator_of_skips_unreachable_nodes() {
     assert_eq!(dom.nearest_common_dominator(a, merge), Some(cfg.entry()));
     assert_eq!(dom.nearest_common_dominator(merge, merge), Some(merge));
     assert_eq!(
-        dom.nearest_common_dominator_of([merge, unreachable, a]),
+        dom.nearest_common_dominator_among([merge, unreachable, a]),
         Some(cfg.entry())
     );
     assert_eq!(
-        dom.nearest_common_dominator_of([unreachable, merge]),
+        dom.nearest_common_dominator_among([unreachable, merge]),
         Some(merge)
     );
-    assert_eq!(dom.nearest_common_dominator_of([unreachable]), None);
-    assert_eq!(dom.nearest_common_dominator_of([]), None);
+    assert_eq!(dom.nearest_common_dominator_among([unreachable]), None);
+    assert_eq!(dom.nearest_common_dominator_among([]), None);
 }
 
 #[cfg(target_pointer_width = "64")]

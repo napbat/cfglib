@@ -11,6 +11,11 @@ with its own date and revision.
 
 ## Screening comparison
 
+Measured before the API cleanup. Case names are updated, the rows of deleted
+cases are dropped (with `directed_detect_loops_multilatch`, whose successor
+times `LoopForest::compute` instead of `detect_loops`), and the numbers are not
+re-measured.
+
 The table compares the unmodified starting revision with the optimized working
 tree on the same machine. Both used the direct `System` allocator, seven timing
 samples, and `CFGLIB_BENCH_MS=1`. That short target is useful for ranking large
@@ -21,9 +26,6 @@ as approximate. Mutation timings include the fixture clone named by each case.
 | --- | ---: | ---: | ---: |
 | `cfg_dominators` | 222,400 | 49,066 | 4.53x |
 | `cfg_control_dependence_graph` | 2,347,700 | 75,800 | 30.97x |
-| `directed_detect_loops_multilatch` | 18,842,000 | 578,750 | 32.56x |
-| `cfg_interval_analysis` | 45,103,800 | 137,013 | 329.19x |
-| `directed_interval_reverse_id_chain` | 851,031,600 | 110,340 | 7,712.81x |
 | `directed_node_fixpoint_bool` | 444,833 | 21,611 | 20.58x |
 | `directed_breadth_first_edges` | 100,560 | 14,963 | 6.72x |
 | `directed_shortest_path_edges` | 99,655 | 15,906 | 6.27x |
@@ -40,6 +42,9 @@ edge kind, weight, identity rules, and adjacency order.
 
 ## Verification run
 
+Measured before the API cleanup. Case names are updated; the numbers are not
+re-measured.
+
 A longer run of the optimized tree with `CFGLIB_BENCH_MS=25` completed every
 case and all semantic oracles. The registry verified benchmark coverage for
 every root-facade free function. The allocation-instrumented build also
@@ -47,15 +52,16 @@ completed every case and verified that each measured operation returned to its
 starting live-byte baseline.
 
 The zero-allocation reusable-scratch search is a useful harness sanity check:
-`api_search_with_scratch` reports no allocations where the allocating
-`api_search` entry point reports 11 on the same 1,024-node workload, which
-holds in the current tree. Use the commands in [README.md](README.md) to
-reproduce either mode; pinning an otherwise-idle machine and increasing the
-target duration is recommended before making small-factor decisions. The
-per-case figures of that run are not kept here, because the allocation counts
-of most cases have moved since.
+`api_search_in` reports no allocations where the allocating `api_search`
+entry point reports 11 on the same 1,024-node workload. Use the commands in
+[README.md](README.md) to reproduce either mode; pinning an otherwise-idle
+machine and increasing the target duration is recommended before making
+small-factor decisions. The per-case figures of that run are not kept here,
+because the allocation counts of most cases have moved since.
 
 ## Graph-store baseline
+
+Measured before the API cleanup; the numbers are not re-measured.
 
 Measured on Linux on 2026-11-24 at revision `94ca44a`, the commit that added
 the structured inputs, on an AMD Ryzen AI MAX+ 395. Each figure is the
@@ -111,6 +117,11 @@ What the inputs separate:
 
 ## Ordered compaction
 
+Measured before the API cleanup, which deleted one of the three orders
+measured here. Its rows and findings are dropped, but a range that covers
+every order still includes it. Column names are updated, and the numbers are
+not re-measured.
+
 Measured on Linux on 2026-11-24 on revision `87bc952`, the commit that added
 these rows, on the same machine, pinned to one core. Each figure is the
 fastest of five repetitions within a run and of three runs, taken by a script
@@ -126,7 +137,6 @@ The `structured` input the relabeled one was shuffled from reads 107,466.8 /
 | Order | Shuffled arrival | Grouped arrival |
 | --- | ---: | ---: |
 | `compact` | 165,740.4 / 160,311.5 | 165,740.4 / 160,311.5 |
-| `first_touch` | 191,955.7 / 151,207.0 | 173,006.5 / 148,394.6 |
 | `breadth_first` | 150,257.7 / 42,096.5 | 150,256.2 / 42,091.1 |
 | `reverse_postorder` | 131,304.2 / 12,696.5 | 139,466.5 / 21,651.8 |
 
@@ -135,11 +145,9 @@ One million nodes, 1,849,803 edges (milliseconds):
 | Arrival | Order | `compaction` | `successor_scan` | `predecessor_scan` | `scc_leaves_first` |
 | --- | --- | ---: | ---: | ---: | ---: |
 | shuffled | `compact` | 21.3 | 22.2 | 16.5 | 158.9 |
-| shuffled | `first_touch` | 41.9 | 20.6 | 15.8 | 143.6 |
 | shuffled | `breadth_first` | 154.4 | 17.8 | 13.5 | 127.6 |
 | shuffled | `reverse_postorder` | 204.7 | 19.7 | 14.7 | 67.1 |
 | grouped | `compact` | 20.0 | 13.7 | 18.6 | 161.1 |
-| grouped | `first_touch` | 42.3 | 20.8 | 15.1 | 146.6 |
 | grouped | `breadth_first` | 139.8 | 16.9 | 13.8 | 137.9 |
 | grouped | `reverse_postorder` | 187.2 | 19.6 | 14.0 | 69.7 |
 
@@ -148,9 +156,9 @@ and give their range over the three runs. A difference is called faster or
 slower only when it has that sign in all three runs.
 
 - Reverse postorder recovers most of the predecessor locality the shuffle
-  took, and `scc_leaves_first` takes 0.40 to 0.45 of its `compact` time under both
-  arrivals in every run. Breadth-first recovers less and gains less (0.74 to
-  0.88).
+  took, and `scc_leaves_first` takes 0.40 to 0.45 of its `compact` time under
+  both arrivals in every run. Breadth-first recovers less and gains less (0.74
+  to 0.88).
 - Under grouped arrival every order makes the predecessor walk faster (0.73
   to 0.87) and the successor walk slower (1.22 to 1.62) in every run. Only
   nodes move, so the edge records keep the order grouped arrival gave them,
@@ -158,15 +166,10 @@ slower only when it has that sign in all three runs.
   likely visits those runs out of order. Neighbor ids beside the edge ids
   (#87) target that load.
 - Under shuffled arrival breadth-first makes all three reads faster in every
-  run (0.74 to 0.94), and first touch the successor walk (0.89 to 0.97). The
-  walks under reverse postorder, and the predecessor walk and `scc_leaves_first`
-  under first touch, moved in both directions between runs, so they show no
-  difference these runs can resolve.
-- An ordered compaction costs 1.8 to 2.1 times a plain one for first touch,
-  6.3 to 9.1 times for breadth-first, and 8.5 to 17 times for reverse
-  postorder. Compacting first does not remove that: in a separate check, an
-  ordered compaction of an already compacted store still cost several times a
-  plain one. Which loads of the search dominate was not isolated.
-- First touch is the weakest order here: neither arrival gives it a
-  meaningful edge order to follow, since one is random and the other is
-  sorted by the shuffled ids.
+  run (0.74 to 0.94). The walks under reverse postorder moved in both
+  directions between runs, so they show no difference these runs can resolve.
+- An ordered compaction costs 6.3 to 9.1 times a plain one for breadth-first,
+  and 8.5 to 17 times for reverse postorder. Compacting first does not remove
+  that: in a separate check, an ordered compaction of an already compacted
+  store still cost several times a plain one. Which loads of the search
+  dominate was not isolated.

@@ -25,6 +25,7 @@ use super::BenchmarkSuite;
 use super::graph::call_tree_cfgs;
 use crate::fixtures::fixture_u32;
 use crate::harness::benchmark_case;
+use crate::rng::Rng;
 
 /// Functions of the call graph.
 const CALL_FUNCTIONS: usize = 1_024;
@@ -41,7 +42,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         .map(|(index, cfg)| (fixture_u32(index), cfg))
         .collect();
     let calls = call_graph(&functions);
-    let mut draws = Draws(1);
+    let mut draws = Rng::splitmix(1);
     let call_batches = batches(calls.edge_count(), || {
         let source = draws.below(CALL_FUNCTIONS);
         let target = draws.below(CALL_FUNCTIONS);
@@ -80,7 +81,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     );
 
     let acyclic = nearly_acyclic(ACYCLIC_NODES);
-    let mut draws = Draws(2);
+    let mut draws = Rng::splitmix(2);
     let acyclic_batches = batches(acyclic.edge_count(), || {
         let source = draws.below(ACYCLIC_NODES);
         let target = if draws.below(100) == 0 {
@@ -190,7 +191,7 @@ fn partition(components: &SccDecomposition<NodeId>) -> BTreeSet<Vec<NodeId>> {
 fn nearly_acyclic(node_count: usize) -> Graph<(), ()> {
     let mut graph = Graph::with_capacity(node_count, 2 * node_count);
     let nodes: Vec<NodeId> = (0..node_count).map(|_| graph.add_node(())).collect();
-    let mut draws = Draws(3);
+    let mut draws = Rng::splitmix(3);
     for index in 0..node_count - 1 {
         graph.add_edge(nodes[index], nodes[index + 1], ());
         let shortcut = index + 2 + draws.below(64);
@@ -202,20 +203,4 @@ fn nearly_acyclic(node_count: usize) -> Graph<(), ()> {
         graph.add_edge(nodes[index], nodes[index - 8], ());
     }
     graph
-}
-
-/// A splitmix64 sequence, so every run draws the same edges.
-struct Draws(u64);
-
-impl Draws {
-    /// A value in `0..bound`, which must be nonzero.
-    fn below(&mut self, bound: usize) -> usize {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut mixed = self.0;
-        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        mixed ^= mixed >> 31;
-        let bound = u64::try_from(bound).expect("a bound fits in u64");
-        usize::try_from(mixed % bound).expect("a value below a usize bound fits in usize")
-    }
 }

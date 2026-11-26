@@ -53,7 +53,7 @@ fn condensation_keeps_the_numbering_of_the_decomposition() {
     let components = SccDecomposition::compute(&graph, SccNumbering::SourcesFirst);
     let dag = components.condensation(&graph);
 
-    assert_eq!(dag.node_count(), components.len());
+    assert_eq!(dag.node_count(), components.component_count());
     let component = |node: NodeId| NodeId::from_index(components.component_index(node));
     assert!(
         dag.successors(component(entry))
@@ -136,14 +136,14 @@ fn a_cfg_with_a_removed_block_decomposes_like_its_compacted_form() {
         SccDecomposition::compute(&cfg, SccNumbering::LeavesFirst),
         SccDecomposition::compute(&cfg, SccNumbering::SourcesFirst),
     ] {
-        assert_eq!(result.len(), 3);
+        assert_eq!(result.component_count(), 3);
         assert_eq!(result.component(head).nodes(), [head, body]);
         assert!(!result.is_dag(&cfg));
     }
 
     let renumbering = cfg.compact(NodeOrder::Insertion);
     let compacted = SccDecomposition::compute(&cfg, SccNumbering::LeavesFirst);
-    assert_eq!(compacted.len(), 3);
+    assert_eq!(compacted.component_count(), 3);
     let head = renumbering.node(head).expect("head survives");
     let body = renumbering.node(body).expect("body survives");
     assert_eq!(compacted.component(head).nodes(), [head, body]);

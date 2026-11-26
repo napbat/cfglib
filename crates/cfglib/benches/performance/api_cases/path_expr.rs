@@ -12,6 +12,7 @@ use cfglib::{
 
 use super::BenchmarkSuite;
 use crate::harness::benchmark_case;
+use crate::rng::Rng;
 
 /// Blocks of the structured CFG.
 const BLOCKS: usize = 100_000;
@@ -102,18 +103,12 @@ impl NodeProblem<Plain> for Transfers {
 
 /// A structured CFG of about `blocks` blocks, the same on every run.
 fn structured_cfg(blocks: usize) -> Plain {
-    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
-    let mut roll = move || {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        state % 10
-    };
+    let mut rng = Rng::xorshift(0x9E37_79B9_7F4A_7C15);
     let mut graph = Graph::with_capacity(blocks + 16, blocks * 2);
     let mut current = graph.add_node(());
     let mut open = Vec::new();
     while graph.node_count() < blocks {
-        match roll() {
+        match rng.below(10) {
             0..=2 => {
                 let [then, other, join] = [(); 3].map(|()| graph.add_node(()));
                 graph.add_edge(current, then, ());

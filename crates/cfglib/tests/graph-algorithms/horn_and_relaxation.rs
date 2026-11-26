@@ -2,7 +2,7 @@
 
 use cfglib::{DenseBits, Direction, EdgeId, Graph, HornClauses, NodeId, min_label_relaxation};
 
-use crate::Lcg;
+use crate::rng::Rng;
 
 /// Repeat "derive every head whose body is derived" until nothing changes.
 fn forward_chaining(fact_count: usize, clauses: &[(usize, Vec<usize>)]) -> Vec<bool> {
@@ -35,7 +35,7 @@ fn row(bits: &DenseBits) -> Vec<bool> {
 }
 
 /// Random clauses: a quarter are axioms, and bodies may repeat a fact.
-fn random_clauses(rng: &mut Lcg, fact_count: usize, count: usize) -> Vec<(usize, Vec<usize>)> {
+fn random_clauses(rng: &mut Rng, fact_count: usize, count: usize) -> Vec<(usize, Vec<usize>)> {
     (0..count)
         .map(|_| {
             let head = rng.below(fact_count);
@@ -50,7 +50,7 @@ fn random_clauses(rng: &mut Lcg, fact_count: usize, count: usize) -> Vec<(usize,
 fn derivability_matches_naive_forward_chaining_on_random_clause_sets() {
     let mut mixed = 0;
     for seed in 1..=40 {
-        let mut rng = Lcg(seed);
+        let mut rng = Rng::lcg(seed, 33);
         let facts = 30;
         let clauses = random_clauses(&mut rng, facts, 45);
         let derived = row(&clause_set(facts, &clauses).derivable());
@@ -69,7 +69,7 @@ fn derivability_matches_naive_forward_chaining_on_random_clause_sets() {
 #[test]
 fn the_answer_does_not_depend_on_the_order_clauses_were_added() {
     for seed in 1..=10 {
-        let mut rng = Lcg(seed + 100);
+        let mut rng = Rng::lcg(seed + 100, 33);
         let clauses = random_clauses(&mut rng, 25, 40);
         let expected = clause_set(25, &clauses).derivable();
 
@@ -94,7 +94,7 @@ fn the_answer_does_not_depend_on_the_order_clauses_were_added() {
 #[test]
 fn a_saturation_updated_after_each_batch_matches_forward_chaining_on_the_clauses_so_far() {
     for seed in 1..=30 {
-        let mut rng = Lcg(seed + 200);
+        let mut rng = Rng::lcg(seed + 200, 33);
         let clauses = random_clauses(&mut rng, 30, 60);
         let mut set = HornClauses::new(20);
         let mut state = set.saturate();
@@ -138,7 +138,7 @@ fn a_saturation_updated_after_each_batch_matches_forward_chaining_on_the_clauses
 
 #[test]
 fn adding_a_clause_only_grows_the_derivable_set_and_solving_changes_nothing() {
-    let mut rng = Lcg(7);
+    let mut rng = Rng::lcg(7, 33);
     let clauses = random_clauses(&mut rng, 30, 40);
     let mut set = clause_set(30, &clauses);
     let before = set.derivable();
@@ -316,7 +316,7 @@ type ModelEdge = (usize, usize, Step);
 
 /// A weighted graph with removed nodes and edges, with the live edges in the model's terms.
 fn weighted_scenario(seed: u64) -> (Graph<(), Step>, Vec<ModelEdge>) {
-    let mut rng = Lcg(seed);
+    let mut rng = Rng::lcg(seed, 33);
     let nodes = 24;
     let mut graph = Graph::new();
     let ids: Vec<NodeId> = (0..nodes).map(|_| graph.add_node(())).collect();

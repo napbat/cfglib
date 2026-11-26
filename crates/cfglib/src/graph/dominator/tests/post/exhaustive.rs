@@ -22,7 +22,7 @@ fn check_against_definition(edges: &EdgeList, scratch: &mut DominatorScratch) {
 
     for members in &sets {
         assert_eq!(
-            post.nearest_common_post_dominator_of(blocks(members)),
+            post.nearest_common_post_dominator_among(blocks(members)),
             reference.nearest_common(members).map(post_node),
             "nearest common post-dominator of {members:?} in {edges:?}"
         );

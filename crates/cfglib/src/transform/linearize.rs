@@ -90,8 +90,9 @@ pub struct LinearInst<I> {
     pub inst: I,
     /// Which block this instruction came from.
     pub block: BlockId,
-    /// Index within the block (label/jump synthetics use `usize::MAX`).
-    pub index: usize,
+    /// Index within the block, or `None` for a label or a jump that the
+    /// emitter created.
+    pub index: Option<usize>,
 }
 
 impl<I> LinearInst<I> {
@@ -100,7 +101,7 @@ impl<I> LinearInst<I> {
         Self {
             inst,
             block,
-            index: usize::MAX,
+            index: None,
         }
     }
 }
@@ -242,7 +243,7 @@ pub fn linearize<I: Clone, E>(
             out.push(LinearInst {
                 inst: inst.clone(),
                 block: id,
-                index,
+                index: Some(index),
             });
         }
         let next = sorted.get(pos + 1).copied();

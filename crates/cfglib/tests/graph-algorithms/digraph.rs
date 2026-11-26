@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 
 use cfglib::{Graph, NodeId};
 
-use crate::Lcg;
+use crate::rng::Rng;
 
 /// Edges in insertion order, plus the adjacency lists a store keeps for them: each node's
 /// successors and predecessors in the order the edges arrived.
@@ -32,7 +32,7 @@ impl Digraph {
     }
 
     /// Random edges, so parallel edges and self loops occur.
-    pub(crate) fn random(rng: &mut Lcg, nodes: usize, edges: usize) -> Self {
+    pub(crate) fn random(rng: &mut Rng, nodes: usize, edges: usize) -> Self {
         let edges = (0..edges)
             .map(|_| (rng.below(nodes), rng.below(nodes)))
             .collect();

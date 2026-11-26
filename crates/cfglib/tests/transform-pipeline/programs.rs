@@ -5,31 +5,8 @@
 
 use cfglib::{BlockId, Cfg, EdgeKind};
 
+use crate::rng::Rng;
 use crate::toy::{BinaryOp, Builder, Inst, Payload, Reg};
-
-/// xorshift64*: enough randomness for fixture shapes, reproducible per seed.
-pub struct Rng(u64);
-
-impl Rng {
-    pub fn new(seed: u64) -> Self {
-        Self(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
-    }
-
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 >> 12;
-        self.0 ^= self.0 << 25;
-        self.0 ^= self.0 >> 27;
-        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-
-    pub fn below(&mut self, bound: usize) -> usize {
-        usize::try_from(self.next() % u64::try_from(bound).unwrap()).unwrap()
-    }
-
-    fn percent(&mut self, chance: usize) -> bool {
-        self.below(100) < chance
-    }
-}
 
 const DATA: [Reg; 2] = [2, 3];
 const BOUND: Reg = 1;
@@ -65,7 +42,7 @@ impl<E: Payload> Generator<E> {
     }
 
     fn destination(&mut self) -> Reg {
-        if self.rng.percent(65) {
+        if self.rng.chance(65) {
             let register = self.fresh();
             self.readable.push(register);
             self.writable.push(register);
@@ -110,7 +87,7 @@ impl<E: Payload> Generator<E> {
                 }
                 70..=84 if depth < 3 => self.conditional(block, depth),
                 85..=94 if depth < 2 => self.counted_loop(block, depth),
-                _ if self.rng.percent(50) => self.trampoline(block),
+                _ if self.rng.chance(50) => self.trampoline(block),
                 _ => block,
             };
         }
@@ -155,7 +132,7 @@ impl<E: Payload> Generator<E> {
         let then_end = self.scoped_statements(then_block, depth);
         self.builder.edge(then_end, join, EdgeKind::Fallthrough);
 
-        if self.rng.percent(50) {
+        if self.rng.chance(50) {
             let else_block = self.builder.block([]);
             self.builder
                 .edge(block, else_block, EdgeKind::ConditionalFalse);

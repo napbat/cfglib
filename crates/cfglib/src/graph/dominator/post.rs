@@ -39,7 +39,7 @@ mod sink;
 /// A node of a post-dominator tree: a block of the graph, or the virtual exit
 /// that every exit joins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum PostNode<N> {
+pub enum PostNode<N = BlockId> {
     /// A block of the graph.
     Node(N),
     /// The virtual exit `X*`, the root of the tree.
@@ -409,12 +409,12 @@ impl<N: DenseId> PostDominatorTree<N> {
     /// block is in the tree, and [`PostNode::Exit`] when the blocks share no
     /// tree of the forest. A sink class is named by its lowest block.
     #[must_use]
-    pub fn nearest_common_post_dominator_of(
+    pub fn nearest_common_post_dominator_among(
         &self,
         blocks: impl IntoIterator<Item = N>,
     ) -> Option<PostNode<N>> {
         let mut any = false;
-        let meet = self.tree.nearest_common_dominator_of(
+        let meet = self.tree.nearest_common_dominator_among(
             blocks
                 .into_iter()
                 .filter(|&block| self.contains(block))

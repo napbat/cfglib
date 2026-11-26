@@ -10,6 +10,9 @@
 //! own strings and vectors, and every store operation has to leave them
 //! intact.
 
+#[path = "../common/rng.rs"]
+pub mod rng;
+
 mod cfg_rewrite;
 mod compaction;
 mod lifecycle;

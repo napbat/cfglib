@@ -63,7 +63,7 @@ fn unreachable_code_gets_numbered_trees_of_its_own() {
     assert_eq!(forest.nearest_common_dominator(left, right), Some(entry));
     assert_eq!(forest.nearest_common_dominator(left, join), None);
     assert_eq!(
-        forest.nearest_common_dominator_of([left, right, join]),
+        forest.nearest_common_dominator_among([left, right, join]),
         None
     );
 }

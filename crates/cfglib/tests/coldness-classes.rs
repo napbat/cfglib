@@ -5,8 +5,13 @@
 //! random order, until no bound lowers a class. The greatest assignment is
 //! unique, so every order must reach the classes that the propagation finds.
 
+#[path = "common/rng.rs"]
+pub mod rng;
+
 use cfglib::ColdClass::{Never, Normal, Rare};
 use cfglib::{ColdClass, ColdnessClasses, Graph, NodeId, Rooted};
+
+use crate::rng::Rng;
 
 /// A graph of numbered nodes with node 0 as the entry.
 #[derive(Debug, Clone)]
@@ -107,30 +112,9 @@ fn reachable(records: &[Vec<(usize, ColdClass)>]) -> Vec<usize> {
     order
 }
 
-/// A small deterministic generator (xorshift64).
-struct Rng(u64);
-
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-
-    fn below(&mut self, bound: usize) -> usize {
-        usize::try_from(self.next() % bound as u64).expect("the bound fits usize")
-    }
-
-    fn class(&mut self) -> ColdClass {
-        [Never, Rare, Normal][self.below(3)]
-    }
-
-    fn shuffle<T>(&mut self, items: &mut [T]) {
-        for at in (1..items.len()).rev() {
-            items.swap(at, self.below(at + 1));
-        }
-    }
+/// A class drawn uniformly.
+fn random_class(rng: &mut Rng) -> ColdClass {
+    [Never, Rare, Normal][rng.below(3)]
 }
 
 /// The hottest of `values`, or `Never` when there is none.
@@ -193,7 +177,7 @@ fn random_toy(rng: &mut Rng) -> Toy {
     let mut toy = Toy::new(count);
     for node in 0..count {
         toy.seed[node] = if rng.below(3) == 0 {
-            rng.class()
+            random_class(rng)
         } else {
             Normal
         };
@@ -208,7 +192,7 @@ fn random_toy(rng: &mut Rng) -> Toy {
 
 #[test]
 fn the_classes_are_the_greatest_assignment_under_the_bounds() {
-    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    let mut rng = Rng::xorshift(0x9e37_79b9_7f4a_7c15);
     for _ in 0..20_000 {
         let toy = random_toy(&mut rng);
         let classes = toy.compute();
@@ -220,7 +204,7 @@ fn the_classes_are_the_greatest_assignment_under_the_bounds() {
 
 #[test]
 fn the_order_of_nodes_and_edges_does_not_change_the_classes() {
-    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+    let mut rng = Rng::xorshift(0x2545_f491_4f6c_dd1d);
     for _ in 0..5_000 {
         let toy = random_toy(&mut rng);
         let expected = toy.compute();

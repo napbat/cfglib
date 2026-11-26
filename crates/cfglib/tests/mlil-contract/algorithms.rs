@@ -92,7 +92,11 @@ fn strongly_connected_components_are_the_mutual_reachability_classes_numbered_le
         let cfg = extract::<Glint, _>(&function);
         let classes = cfg.components();
         let scc = SccDecomposition::compute(&function, SccNumbering::LeavesFirst);
-        assert_eq!(scc.len(), classes.len(), "{name}: component count");
+        assert_eq!(
+            scc.component_count(),
+            classes.len(),
+            "{name}: component count"
+        );
         let same_class = |a: usize, b: usize| {
             classes
                 .iter()
@@ -303,7 +307,7 @@ fn the_graph_view_of_a_function_with_a_removed_block_skips_the_slot() {
     let order = reverse_postorder(&function, function.root(), Direction::Forward);
     assert_eq!(order, [block(0), block(2)]);
     let scc = SccDecomposition::compute(&function, SccNumbering::LeavesFirst);
-    assert_eq!(scc.len(), 2);
+    assert_eq!(scc.component_count(), 2);
     assert_eq!(GraphView::node_bound(&function), 3);
 }
 
