@@ -255,19 +255,18 @@ fn preorder<G: GraphView, A: Adjacency>(axis: A, graph: &G, start: G::NodeId) ->
     let mut stack = vec![start];
     let mut adjacent = Vec::new();
     while let Some(node) = stack.pop() {
-        if core::mem::replace(&mut visited[node.index()], true) {
+        if visited[node.index()] {
             continue;
         }
+        visited[node.index()] = true;
         order.push(node);
         adjacent.clear();
         adjacent.extend(axis.neighbors(graph, node));
-        stack.extend(
-            adjacent
-                .iter()
-                .rev()
-                .copied()
-                .filter(|next| !visited[next.index()]),
-        );
+        for &next in adjacent.iter().rev() {
+            if !visited[next.index()] {
+                stack.push(next);
+            }
+        }
     }
     order
 }
