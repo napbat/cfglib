@@ -81,13 +81,6 @@ impl<K: Clone + Ord, N, E> KeyedGraph<K, N, E> {
         self.graph.add_edge(source, target, payload)
     }
 
-    /// Add an edge between two keys, when both have been minted.
-    pub fn add_edge_between(&mut self, source: &K, target: &K, payload: E) -> Option<EdgeId> {
-        let source = self.node_id(source)?;
-        let target = self.node_id(target)?;
-        Some(self.graph.add_edge(source, target, payload))
-    }
-
     /// Borrow the underlying graph (for algorithms and payload access).
     #[must_use]
     pub const fn graph(&self) -> &Graph<N, E> {
@@ -283,14 +276,7 @@ mod tests {
         assert_eq!(a, a_again);
         let b = graph.ensure_node(&"pkg::b".to_string(), || "b");
         graph.add_edge(a, b, "extends");
-        assert_eq!(
-            graph.add_edge_between(&"pkg::b".to_string(), &"pkg::a".to_string(), "cycle"),
-            Some(EdgeId::from_raw(1))
-        );
-        assert_eq!(
-            graph.add_edge_between(&"missing".to_string(), &"pkg::a".to_string(), "x"),
-            None
-        );
+        graph.add_edge(b, a, "cycle");
 
         // The view impl feeds the generic algorithms directly.
         let sccs = tarjan_scc(&graph);

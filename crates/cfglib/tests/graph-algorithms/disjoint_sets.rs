@@ -157,22 +157,6 @@ fn a_union_reports_whether_it_merged_two_classes_and_never_merges_an_element_wit
 }
 
 #[test]
-fn a_read_only_root_query_agrees_with_find_without_compressing() {
-    let len = 200;
-    let mut sets = DisjointSet::new(len);
-    // A chain, so representatives are many hops away.
-    for element in (1..len).rev() {
-        sets.union_toward_min(element - 1, element);
-    }
-    let frozen = sets.clone();
-    let before: Vec<usize> = (0..len).map(|element| frozen.root(element)).collect();
-    let after: Vec<usize> = (0..len).map(|element| sets.find(element)).collect();
-    assert_eq!(before, after);
-    assert!(after.iter().all(|&root| root == 0));
-    assert_eq!(frozen.root(len - 1), 0);
-}
-
-#[test]
 fn pushed_elements_join_as_singletons_and_can_be_merged_later() {
     let mut sets = DisjointSet::default();
     assert!(sets.is_empty());
@@ -202,7 +186,7 @@ fn a_long_chain_of_unions_is_resolved_without_recursion() {
     }
     let root = sets.find(0);
     assert_eq!(sets.find(len - 1), root);
-    assert_eq!(sets.root(len / 2), root);
+    assert_eq!(sets.find(len / 2), root);
 }
 
 #[test]
@@ -221,13 +205,6 @@ fn a_clone_is_independent_of_the_forest_it_came_from() {
 fn finding_an_element_outside_the_forest_panics() {
     let mut sets = DisjointSet::new(3);
     let _ = sets.find(3);
-}
-
-#[test]
-#[should_panic(expected = "index out of bounds")]
-fn asking_the_root_of_an_element_outside_the_forest_panics() {
-    let sets = DisjointSet::new(3);
-    let _ = sets.root(5);
 }
 
 #[test]

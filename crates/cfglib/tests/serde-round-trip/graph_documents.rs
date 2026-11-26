@@ -293,10 +293,6 @@ fn a_decoded_keyed_graph_keeps_minting_dense_ids_in_the_same_order() {
         let new = graph.intern(&"pkg::e".to_owned());
         let known = graph.node_id(&"pkg::a".to_owned()).expect("a is minted");
         graph.add_edge(new, known, 6);
-        assert_eq!(
-            graph.add_edge_between(&"pkg::e".to_owned(), &"pkg::missing".to_owned(), 7),
-            None
-        );
     }
     assert_eq!(decoded, original);
     assert_eq!(
