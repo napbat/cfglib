@@ -4,10 +4,9 @@
 use std::collections::BTreeSet;
 
 use cfglib::{
-    BlockId, Cfg, DominatorTree, Edge, EdgeId, EdgeKind, EdgeView, EhBlockKind, EhEdgeKind,
-    EhModel, ExceptionDisposition, ExceptionFlow, ExceptionPhase, FilteredEdges, HandlerBody,
-    HandlerKind, RootedView, SehExceptionRegion, SehHandler, SehHandlerKind, install_seh_region,
-    verify, verify_edge_view,
+    BlockId, Cfg, DominatorTree, Edge, EdgeId, EdgeKind, EdgeView, EhBlockKind, EhModel,
+    ExceptionDisposition, ExceptionFlow, ExceptionPhase, FilteredEdges, Handler, HandlerBody,
+    HandlerKind, Region, RegionId, RootedView, verify, verify_edge_view,
 };
 
 use crate::{LiftedCfg, set};
@@ -47,32 +46,33 @@ fn seh_function() -> SehShape {
     ] {
         cfg.block_mut(block).push(text);
     }
-    install_seh_region(
-        &mut cfg,
-        SehExceptionRegion {
-            protected_blocks: set(&[guarded]),
-            handlers: vec![SehHandler {
-                entry: handler,
-                body: HandlerBody::known([handler]),
-                kind: SehHandlerKind::Except {
-                    filter_block: filter,
-                },
-            }],
-            parent: None,
-        },
-    );
-    let search =
-        |disposition| ExceptionFlow::exceptional(ExceptionPhase::Search, disposition, "filter");
+    cfg.add_region(Region {
+        protected_blocks: set(&[guarded]),
+        handlers: vec![Handler {
+            entry: handler,
+            body: HandlerBody::known([handler]),
+            kind: HandlerKind::Filter {
+                filter_block: filter,
+            },
+        }],
+        parent: None,
+    })
+    .unwrap();
+    let search = |disposition| ExceptionFlow {
+        phase: Some(ExceptionPhase::Search),
+        disposition,
+        metadata: "filter",
+    };
     cfg.add_edge(
         prologue,
         guarded,
-        Edge::new(EdgeKind::Fallthrough).with_payload(ExceptionFlow::normal("enter")),
+        Edge::new(EdgeKind::Fallthrough).with_payload(ExceptionFlow::new("enter")),
     );
     // A normal exit from the guarded body is a leave, which stays sequential.
     let leave = cfg.add_edge(
         guarded,
         after,
-        Edge::new(EdgeKind::ExceptionLeave).with_payload(ExceptionFlow::normal("leave")),
+        Edge::new(EdgeKind::ExceptionLeave).with_payload(ExceptionFlow::new("leave")),
     );
     // First pass: the guarded call raises and the dispatcher evaluates the
     // filter. Nothing has been selected yet, so this is the search phase.
@@ -85,11 +85,11 @@ fn seh_function() -> SehShape {
     let execute = cfg.add_edge(
         filter,
         handler,
-        Edge::new(EdgeKind::ExceptionHandler).with_payload(ExceptionFlow::exceptional(
-            ExceptionPhase::Unwind,
-            Some(ExceptionDisposition::ExecuteHandler),
-            "filter",
-        )),
+        Edge::new(EdgeKind::ExceptionHandler).with_payload(ExceptionFlow {
+            phase: Some(ExceptionPhase::Unwind),
+            disposition: Some(ExceptionDisposition::ExecuteHandler),
+            metadata: "filter",
+        }),
     );
     let resume = cfg.add_edge(
         filter,
@@ -106,7 +106,7 @@ fn seh_function() -> SehShape {
     cfg.add_edge(
         handler,
         after,
-        Edge::new(EdgeKind::Fallthrough).with_payload(ExceptionFlow::normal("handled")),
+        Edge::new(EdgeKind::Fallthrough).with_payload(ExceptionFlow::new("handled")),
     );
     SehShape {
         cfg,
@@ -166,17 +166,14 @@ fn seh_filter_edges_carry_the_documented_phase_and_disposition_semantics() {
     // The payload and the structural kind agree on which edges are
     // exceptional; a leave is a normal transfer out of the guarded body.
     for edge in cfg.edges() {
-        assert_eq!(
-            edge.payload().phase().is_some(),
-            edge.kind().is_exceptional()
-        );
+        assert_eq!(edge.payload().phase.is_some(), edge.kind().is_exceptional());
     }
     assert!(!cfg.edge(shape.leave).kind().is_exceptional());
 
     // Search happens before a handler is selected; unwinding after.
     let in_phase = |phase| {
         cfg.edges()
-            .filter(|edge| edge.payload().phase() == Some(phase))
+            .filter(|edge| edge.payload().phase == Some(phase))
             .map(|edge| edge.id())
             .collect::<Vec<_>>()
     };
@@ -189,12 +186,13 @@ fn seh_filter_edges_carry_the_documented_phase_and_disposition_semantics() {
     // Each disposition lands where its documentation says.
     let target_of = |edge| cfg.edge(edge).target();
     assert_eq!(
-        cfg.edge(shape.execute).payload().disposition(),
+        cfg.edge(shape.execute).payload().disposition,
         Some(ExceptionDisposition::ExecuteHandler)
     );
-    assert_eq!(target_of(shape.execute), cfg.regions()[0].handlers[0].entry);
+    let region = cfg.region(RegionId::from_raw(0));
+    assert_eq!(target_of(shape.execute), region.handlers[0].entry);
     assert_eq!(
-        cfg.edge(shape.resume).payload().disposition(),
+        cfg.edge(shape.resume).payload().disposition,
         Some(ExceptionDisposition::ContinueExecution)
     );
     assert_eq!(
@@ -202,57 +200,60 @@ fn seh_filter_edges_carry_the_documented_phase_and_disposition_semantics() {
         shape.guarded,
         "execution resumes in the protected block"
     );
-    assert!(
-        cfg.regions()[0]
-            .protected_blocks
-            .contains(&target_of(shape.resume))
-    );
+    assert!(region.protected_blocks.contains(&target_of(shape.resume)));
     assert_eq!(
-        cfg.edge(shape.search_outward).payload().disposition(),
+        cfg.edge(shape.search_outward).payload().disposition,
         Some(ExceptionDisposition::ContinueSearch)
     );
     assert!(
-        !cfg.regions()[0]
+        !region
             .protected_blocks
             .contains(&target_of(shape.search_outward))
     );
     assert_eq!(target_of(shape.search_outward), shape.outer);
-    assert_eq!(cfg.edge(shape.dispatch).payload().disposition(), None);
+    assert_eq!(cfg.edge(shape.dispatch).payload().disposition, None);
     assert_eq!(target_of(shape.dispatch), shape.filter);
 }
 
 #[test]
 fn the_exception_model_reads_a_seh_dispatch_as_handler_resume_continue_and_leave_edges() {
     let shape = seh_function();
-    let model = EhModel::compute(&shape.cfg);
+    let cfg = &shape.cfg;
+    let model = EhModel::compute(cfg);
     // Edge identities are allocated in insertion order, so sorting by them
     // lists the edges the way the lifter drew them.
     let mut kinds: Vec<_> = model
         .eh_edges()
         .iter()
-        .map(|edge| (edge.edge_id, edge.kind))
+        .map(|&edge| (edge, cfg.edge(edge).kind()))
         .collect();
     kinds.sort_by_key(|&(edge, _)| edge.index());
     assert_eq!(
         kinds,
         [
-            (shape.leave, EhEdgeKind::Leave),
-            (shape.dispatch, EhEdgeKind::Handler),
-            (shape.execute, EhEdgeKind::Handler),
-            (shape.resume, EhEdgeKind::Continue),
-            (shape.search_outward, EhEdgeKind::Resume),
+            (shape.leave, EdgeKind::ExceptionLeave),
+            (shape.dispatch, EdgeKind::ExceptionHandler),
+            (shape.execute, EdgeKind::ExceptionHandler),
+            (shape.resume, EdgeKind::ExceptionContinue),
+            (shape.search_outward, EdgeKind::ExceptionResume),
         ]
     );
-    assert!(model.eh_edges().iter().all(|edge| !edge.kind.is_unwind()));
-    // The route from the handler entry back to the installed handler.
-    let route = model.handlers(shape.handler);
+    assert!(
+        model
+            .eh_edges()
+            .iter()
+            .all(|&edge| cfg.edge(edge).kind() != EdgeKind::ExceptionUnwind)
+    );
+    // The route from the handler entry back to the registered handler.
+    let route: Vec<_> = cfg.handlers_at(shape.handler).collect();
     assert_eq!(route.len(), 1);
     assert_eq!(
-        shape.cfg.handler(route[0]).unwrap().kind,
+        route[0].1.kind,
         HandlerKind::Filter {
             filter_block: shape.filter
         }
     );
+    assert_eq!(cfg.handler(route[0].0).entry, shape.handler);
     assert_eq!(model.block_kind(shape.handler), EhBlockKind::CatchSwitch);
     assert!(model.protected_by(shape.handler).contains(&shape.guarded));
     assert_eq!(model.block_kind(shape.prologue), EhBlockKind::Normal);
@@ -285,8 +286,18 @@ fn a_block_that_is_both_a_dispatch_target_and_a_resume_point_is_classified_indep
     let (forward, filter) = build(false);
     let (backward, _) = build(true);
     assert_eq!(forward.block_kind(filter), backward.block_kind(filter));
-    assert_eq!(forward.landing_pads(), backward.landing_pads());
-    assert_eq!(forward.resume_blocks(), backward.resume_blocks());
+    assert_eq!(
+        forward
+            .blocks_of(EhBlockKind::LandingPad)
+            .collect::<Vec<_>>(),
+        backward
+            .blocks_of(EhBlockKind::LandingPad)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        forward.blocks_of(EhBlockKind::Resume).collect::<Vec<_>>(),
+        backward.blocks_of(EhBlockKind::Resume).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -294,7 +305,7 @@ fn the_normal_only_view_hides_the_handler_the_full_flow_reaches() {
     let shape = seh_function();
     let cfg = &shape.cfg;
     let normal = FilteredEdges::new(cfg, |_: EdgeId, edge: &Edge<ExceptionFlow<&str>>| {
-        edge.payload().phase().is_none()
+        edge.payload().phase.is_none()
     });
     assert!(verify_edge_view(cfg).is_ok());
     assert!(verify_edge_view(&normal).is_ok());
@@ -335,7 +346,7 @@ fn payload_and_kind_predicates_select_the_same_normal_edges() {
     let shape = seh_function();
     let cfg = &shape.cfg;
     let by_payload = FilteredEdges::new(cfg, |_: EdgeId, edge: &Edge<ExceptionFlow<&str>>| {
-        edge.payload().phase().is_none()
+        edge.payload().phase.is_none()
     });
     let by_kind = FilteredEdges::new(cfg, |_: EdgeId, edge: &Edge<ExceptionFlow<&str>>| {
         !edge.kind().is_exceptional()
@@ -348,10 +359,10 @@ fn payload_and_kind_predicates_select_the_same_normal_edges() {
 
     // Phase views partition the exceptional edges.
     let search = FilteredEdges::new(cfg, |_: EdgeId, edge: &Edge<ExceptionFlow<&str>>| {
-        edge.payload().phase() == Some(ExceptionPhase::Search)
+        edge.payload().phase == Some(ExceptionPhase::Search)
     });
     let unwind = FilteredEdges::new(cfg, |_: EdgeId, edge: &Edge<ExceptionFlow<&str>>| {
-        edge.payload().phase() == Some(ExceptionPhase::Unwind)
+        edge.payload().phase == Some(ExceptionPhase::Unwind)
     });
     assert_eq!(
         search.edge_ids().count() + unwind.edge_ids().count() + by_payload.edge_ids().count(),

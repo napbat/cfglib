@@ -42,78 +42,13 @@ use core::fmt::{self, Write as _};
 use crate::block::BlockId;
 use crate::display::{DisplayInstr, IndentedWriter, render};
 use crate::graph::text::{EscapingSink, write_label};
-use crate::region::{Handler, HandlerBody, HandlerKind, Region};
+use crate::region::{Handler, HandlerBody, Region, RegionId};
 
 use super::Cfg;
 
 mod parse;
 
 pub use parse::parse_cfg_listing;
-
-/// What the text form calls a handler, before its filter block is known.
-///
-/// A filter handler names its predicate block in a field of its own, so the
-/// kind name carries no block and the reader cannot invent one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HandlerShape {
-    /// `catch`.
-    Catch,
-    /// `catch_all`.
-    CatchAll,
-    /// `finally`.
-    Finally,
-    /// `fault`.
-    Fault,
-    /// `filter`, whose predicate block comes from the `filter=` field.
-    Filter,
-}
-
-impl HandlerShape {
-    pub(crate) const fn of(kind: HandlerKind) -> Self {
-        match kind {
-            HandlerKind::Catch => Self::Catch,
-            HandlerKind::CatchAll => Self::CatchAll,
-            HandlerKind::Finally => Self::Finally,
-            HandlerKind::Fault => Self::Fault,
-            HandlerKind::Filter { .. } => Self::Filter,
-        }
-    }
-
-    pub(crate) const fn name(self) -> &'static str {
-        match self {
-            Self::Catch => "catch",
-            Self::CatchAll => "catch_all",
-            Self::Finally => "finally",
-            Self::Fault => "fault",
-            Self::Filter => "filter",
-        }
-    }
-
-    pub(crate) fn from_name(name: &str) -> Option<Self> {
-        [
-            Self::Catch,
-            Self::CatchAll,
-            Self::Finally,
-            Self::Fault,
-            Self::Filter,
-        ]
-        .into_iter()
-        .find(|shape| shape.name() == name)
-    }
-
-    /// The handler kind this shape stands for, given the block a `filter=`
-    /// field named.
-    pub(crate) const fn kind(self, filter_block: Option<BlockId>) -> Option<HandlerKind> {
-        match (self, filter_block) {
-            (Self::Catch, _) => Some(HandlerKind::Catch),
-            (Self::CatchAll, _) => Some(HandlerKind::CatchAll),
-            (Self::Finally, _) => Some(HandlerKind::Finally),
-            (Self::Fault, _) => Some(HandlerKind::Fault),
-            (Self::Filter, Some(filter_block)) => Some(HandlerKind::Filter { filter_block }),
-            (Self::Filter, None) => None,
-        }
-    }
-}
 
 impl<I: DisplayInstr, E> Cfg<I, E> {
     /// Render this CFG as its listing.
@@ -165,8 +100,8 @@ impl<I: DisplayInstr, E> Cfg<I, E> {
             )?;
         }
 
-        for (index, region) in self.regions().iter().enumerate() {
-            write_region(&mut printer, index, region, &|block| {
+        for (id, region) in self.regions() {
+            write_region(&mut printer, id, region, &|block| {
                 self.contains_block(block)
             })?;
         }
@@ -179,11 +114,11 @@ impl<I: DisplayInstr, E> Cfg<I, E> {
 /// region until then, and the text form has no slot to put it in.
 fn write_region(
     printer: &mut IndentedWriter<'_>,
-    index: usize,
+    id: RegionId,
     region: &Region,
     live: &impl Fn(BlockId) -> bool,
 ) -> fmt::Result {
-    write!(printer, "region r{index} protected=")?;
+    write!(printer, "region r{} protected=", id.index())?;
     write_blocks(
         printer,
         region
@@ -213,10 +148,10 @@ fn write_handler(
     write!(
         printer,
         "handler {} entry={}",
-        HandlerShape::of(handler.kind).name(),
+        handler.kind.name(),
         handler.entry
     )?;
-    if let HandlerKind::Filter { filter_block } = handler.kind {
+    if let Some(filter_block) = handler.kind.filter_block() {
         write!(printer, " filter={filter_block}")?;
     }
     printer.write_str(" body=")?;

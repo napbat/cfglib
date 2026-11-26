@@ -14,31 +14,31 @@ use super::walk::{Lifted, RegionWalk};
 use super::{Structurer, flow_successors};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::region::{Handler, HandlerKind, HandlerRef, Region};
+use crate::region::{Handler, HandlerKind, HandlerRef, Region, RegionId};
 
 /// Group regions by anchor — their first protected block in reverse
 /// postorder, i.e. the region's entry in flow order rather than by block id.
 pub(super) fn region_anchors<'c, I, E>(
     cfg: &'c Cfg<I, E>,
     order: &[BlockId],
-) -> BTreeMap<BlockId, Vec<&'c Region>> {
+) -> BTreeMap<BlockId, Vec<(RegionId, &'c Region)>> {
     let mut position: BTreeMap<BlockId, usize> = BTreeMap::new();
     for (index, &block) in order.iter().enumerate() {
         position.insert(block, index);
     }
-    let mut anchors: BTreeMap<BlockId, Vec<&Region>> = BTreeMap::new();
-    for region in cfg.regions() {
+    let mut anchors: BTreeMap<BlockId, Vec<(RegionId, &Region)>> = BTreeMap::new();
+    for (id, region) in cfg.regions() {
         let anchor = region
             .protected_blocks
             .iter()
             .min_by_key(|block| position.get(block).copied().unwrap_or(usize::MAX))
             .copied();
         if let Some(anchor) = anchor {
-            anchors.entry(anchor).or_default().push(region);
+            anchors.entry(anchor).or_default().push((id, region));
         }
     }
     for candidates in anchors.values_mut() {
-        candidates.sort_by_key(|region| core::cmp::Reverse(region.protected_blocks.len()));
+        candidates.sort_by_key(|(_, region)| core::cmp::Reverse(region.protected_blocks.len()));
     }
     anchors
 }
@@ -59,12 +59,10 @@ pub(super) fn handler_roots<I, E>(
 ) -> Vec<BlockId> {
     let mut listed: BTreeSet<BlockId> = BTreeSet::new();
     let mut roots = Vec::new();
-    for region in cfg.regions() {
-        for handler in &region.handlers {
-            for block in handler_blocks_in_order(cfg, handler, walk, &carries_code) {
-                if listed.insert(block) {
-                    roots.push(block);
-                }
+    for (_, handler) in cfg.handlers() {
+        for block in handler_blocks_in_order(cfg, handler, walk, &carries_code) {
+            if listed.insert(block) {
+                roots.push(block);
             }
         }
     }
@@ -194,6 +192,7 @@ fn entered_finally<I, E>(cfg: &Cfg<I, E>, region: &Region) -> Option<BlockId> {
 /// A try region being lifted: the frame that lifts its body, then hands the
 /// handlers to a [`Handlers`] frame.
 pub(super) struct TryBuild<'cfg> {
+    id: RegionId,
     region: &'cfg Region,
     handler_bodies: Vec<&'cfg BTreeSet<BlockId>>,
     /// The region's anchor.
@@ -237,6 +236,7 @@ pub(super) struct HandlerArms {
 /// The handler arms of a region being lifted: the frame of its handlers, in
 /// declaration order.
 pub(super) struct Handlers<'cfg> {
+    id: RegionId,
     region: &'cfg Region,
     handler_bodies: Vec<&'cfg BTreeSet<BlockId>>,
     allowed: Bound,
@@ -309,12 +309,14 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
     pub(super) fn select_try(&mut self, block: BlockId, allowed: &Bound) -> Option<Frame<'cfg>> {
         let cfg = self.cfg;
         let candidates = self.anchors.get(&block)?;
-        let (region, handler_bodies) = candidates
+        let (id, region, handler_bodies) = candidates
             .iter()
-            .filter(|region| !self.structured_regions.contains(&region.id.0))
-            .filter(|region| self.fits_one_try(region, block, allowed))
-            .find_map(|&region| complete_handler_bodies(region).map(|bodies| (region, bodies)))?;
-        self.structured_regions.insert(region.id.0);
+            .filter(|(id, _)| !self.structured_regions.contains(&id.0))
+            .filter(|(_, region)| self.fits_one_try(region, block, allowed))
+            .find_map(|&(id, region)| {
+                complete_handler_bodies(region).map(|bodies| (id, region, bodies))
+            })?;
+        self.structured_regions.insert(id.0);
 
         // The region's normal continuation: the unique block ordinary flow
         // reconverges at, or the anchor's in-bound post-dominator when the
@@ -340,6 +342,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
 
         let try_bound = Bound::Set(Rc::new(allowed.blocks_within(&region.protected_blocks)));
         Some(Frame::Try(Box::new(TryBuild {
+            id,
             region,
             handler_bodies,
             block,
@@ -440,6 +443,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         }
         build.awaiting = TryWait::Handlers;
         Next::Call(Frame::Handlers(Box::new(Handlers {
+            id: build.id,
             region: build.region,
             handler_bodies: core::mem::take(&mut build.handler_bodies),
             allowed: build.allowed.clone(),
@@ -550,13 +554,13 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
     /// Lift the next block of the handler's extent that no walk reached, or
     /// seal the handler and go on to the next one.
     fn lift_handler_extent(&mut self, state: &mut Handlers<'cfg>) -> Next<'cfg> {
-        let region = state.region;
+        let (id, region) = (state.id, state.region);
         let handler_blocks = state.handler_bodies[state.index];
         let reached = state.extent.find(|&block| {
             handler_blocks.contains(&block)
                 && !self.reachable[block.index()]
                 && !self.is_visited(block)
-                && !self.awaits_its_handler(region, block)
+                && !self.awaits_its_handler(id, block)
         });
         if let Some(block) = reached {
             state.awaiting = HandlerWait::Extent;
@@ -573,7 +577,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
             state.finally_nodes.extend(nodes);
         } else {
             state.catches.push(CatchHandler {
-                handler: HandlerRef::new(region.id, state.index),
+                handler: HandlerRef::new(id, state.index),
                 entry: handler.entry,
                 kind: handler.kind,
                 body: self.tables.seal(nodes),
@@ -586,11 +590,11 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
     /// Whether `block` is a pad, or in the extent, of a handler of a region
     /// other than `region` that the walk has not structured yet. That region
     /// lifts the block when it reaches the region's anchor.
-    fn awaits_its_handler(&self, region: &Region, block: BlockId) -> bool {
+    fn awaits_its_handler(&self, region: RegionId, block: BlockId) -> bool {
         self.handler_claims.get(&block).is_some_and(|regions| {
             regions
                 .iter()
-                .any(|&other| other != region.id.0 && !self.structured_regions.contains(&other))
+                .any(|&other| other != region.0 && !self.structured_regions.contains(&other))
         })
     }
 }

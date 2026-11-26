@@ -138,6 +138,26 @@ pub enum MemoryAtomicity {
     Atomic,
 }
 
+/// How one access touches its location: its direction and whether it is
+/// atomic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AccessMode {
+    /// Whether the access reads, writes, or reads and writes the location.
+    pub kind: MemoryAccessKind,
+    /// Whether competing observers see the access as indivisible.
+    pub atomicity: MemoryAtomicity,
+}
+
+impl AccessMode {
+    /// Returns the non-atomic mode of `kind`.
+    const fn non_atomic(kind: MemoryAccessKind) -> Self {
+        Self {
+            kind,
+            atomicity: MemoryAtomicity::NonAtomic,
+        }
+    }
+}
+
 /// One access to a consumer-defined memory location.
 ///
 /// `address_uses` links the access back to the instruction variables that
@@ -163,10 +183,9 @@ pub struct MemoryAccess<L, V> {
     /// read/modify/write, these definitions receive the value observed before
     /// the replacement is committed.
     value_defs: Vec<V>,
-    /// Whether the location is read, written, or modified in place.
-    kind: MemoryAccessKind,
-    /// Whether competing observers see the access as indivisible.
-    atomicity: MemoryAtomicity,
+    /// The direction of the access and whether competing observers see it
+    /// as indivisible.
+    mode: AccessMode,
 }
 
 impl<L, V> MemoryAccess<L, V> {
@@ -178,8 +197,7 @@ impl<L, V> MemoryAccess<L, V> {
             address_uses: Vec::new(),
             value_uses: Vec::new(),
             value_defs: value_defs.into_iter().collect(),
-            kind: MemoryAccessKind::Read,
-            atomicity: MemoryAtomicity::NonAtomic,
+            mode: AccessMode::non_atomic(MemoryAccessKind::Read),
         }
     }
 
@@ -191,8 +209,7 @@ impl<L, V> MemoryAccess<L, V> {
             address_uses: Vec::new(),
             value_uses: value_uses.into_iter().collect(),
             value_defs: Vec::new(),
-            kind: MemoryAccessKind::Write,
-            atomicity: MemoryAtomicity::NonAtomic,
+            mode: AccessMode::non_atomic(MemoryAccessKind::Write),
         }
     }
 
@@ -211,8 +228,7 @@ impl<L, V> MemoryAccess<L, V> {
             address_uses: Vec::new(),
             value_uses: value_uses.into_iter().collect(),
             value_defs: value_defs.into_iter().collect(),
-            kind: MemoryAccessKind::ReadModifyWrite,
-            atomicity: MemoryAtomicity::NonAtomic,
+            mode: AccessMode::non_atomic(MemoryAccessKind::ReadModifyWrite),
         }
     }
 
@@ -229,8 +245,7 @@ impl<L, V> MemoryAccess<L, V> {
             address_uses: Vec::new(),
             value_uses: Vec::new(),
             value_defs: Vec::new(),
-            kind,
-            atomicity: MemoryAtomicity::NonAtomic,
+            mode: AccessMode::non_atomic(kind),
         }
     }
 
@@ -244,7 +259,7 @@ impl<L, V> MemoryAccess<L, V> {
     /// Sets whether competing observers see the access as indivisible.
     #[must_use]
     pub const fn with_atomicity(mut self, atomicity: MemoryAtomicity) -> Self {
-        self.atomicity = atomicity;
+        self.mode.atomicity = atomicity;
         self
     }
 
@@ -273,40 +288,10 @@ impl<L, V> MemoryAccess<L, V> {
         &self.value_defs
     }
 
-    /// Direction of the access.
+    /// Direction and atomicity of the access.
     #[must_use]
-    pub const fn kind(&self) -> MemoryAccessKind {
-        self.kind
-    }
-
-    /// Whether competing observers see the access as indivisible.
-    #[must_use]
-    pub const fn atomicity(&self) -> MemoryAtomicity {
-        self.atomicity
-    }
-
-    /// Whether the access consumes the location's previous value.
-    #[must_use]
-    pub const fn reads(&self) -> bool {
-        self.kind.reads()
-    }
-
-    /// Whether the replacement depends on the location's previous value.
-    #[must_use]
-    pub const fn modifies(&self) -> bool {
-        self.kind.modifies()
-    }
-
-    /// Whether the access may change the location.
-    #[must_use]
-    pub const fn writes(&self) -> bool {
-        self.kind.writes()
-    }
-
-    /// Instruction-level properties contributed by this access.
-    #[must_use]
-    pub const fn operations(&self) -> MemoryOperations {
-        self.kind.operations()
+    pub const fn mode(&self) -> AccessMode {
+        self.mode
     }
 }
 
@@ -325,34 +310,13 @@ pub enum MemoryEvent<L, V, F> {
 }
 
 impl<L, V, F> MemoryEvent<L, V, F> {
-    /// Instruction-level properties contributed by this event.
-    ///
-    /// A fence contributes no access properties; it remains visible as an
-    /// explicit [`MemoryEvent::Fence`] in the event stream.
+    /// Returns the access of this event, or `None` for a fence.
     #[must_use]
-    pub const fn operations(&self) -> MemoryOperations {
+    pub const fn access(&self) -> Option<&MemoryAccess<L, V>> {
         match self {
-            Self::Access(access) => access.operations(),
-            Self::Fence(_) => MemoryOperations::NONE,
+            Self::Access(access) => Some(access),
+            Self::Fence(_) => None,
         }
-    }
-
-    /// Whether this event reads memory.
-    #[must_use]
-    pub const fn reads(&self) -> bool {
-        matches!(self, Self::Access(access) if access.reads())
-    }
-
-    /// Whether this event is one compound read/modify/write access.
-    #[must_use]
-    pub const fn modifies(&self) -> bool {
-        matches!(self, Self::Access(access) if access.modifies())
-    }
-
-    /// Whether this event writes memory.
-    #[must_use]
-    pub const fn writes(&self) -> bool {
-        matches!(self, Self::Access(access) if access.writes())
     }
 
     /// Whether this event is a fence rather than a location access.
@@ -389,14 +353,14 @@ pub trait MemoryEventInfo: InstrInfo {
     ///
     /// Separate read and write events produce [`MemoryOperations::READ_WRITE`];
     /// a [`MemoryAccessKind::ReadModifyWrite`] event produces
-    /// [`MemoryOperations::READ_MODIFY_WRITE`].
+    /// [`MemoryOperations::READ_MODIFY_WRITE`]. A fence contributes no access
+    /// properties.
     fn memory_operations(&self) -> MemoryOperations {
         self.memory_events()
-            .map(|event| event.operations())
+            .filter_map(|event| event.access().map(|access| access.mode().kind.operations()))
             .collect()
     }
 }
 
 #[cfg(test)]
-#[path = "memory/tests.rs"]
 mod tests;

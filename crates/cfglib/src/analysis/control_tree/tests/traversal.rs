@@ -9,8 +9,8 @@ use crate::ProgramPoint;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::flow::FlowEffect;
-use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
+use crate::flow::{Flow, FlowEffect};
+use crate::region::{Handler, HandlerBody, HandlerKind, Region};
 use crate::test_util::{MockInst, ff};
 use crate::{ControlDescent, ControlNode, ControlNodeId, ControlTree, ControlVisitor};
 
@@ -25,7 +25,7 @@ fn diamond() -> Cfg<MockInst> {
     cfg.block_mut(then_arm).push(ff("then"));
     cfg.block_mut(else_arm).push(ff("else"));
     cfg.block_mut(merge)
-        .push(MockInst(FlowEffect::Return, "merge"));
+        .push(MockInst(FlowEffect::Flow(Flow::Return), "merge"));
     cfg.add_edge(cfg.entry(), then_arm, EdgeKind::ConditionalTrue);
     cfg.add_edge(cfg.entry(), else_arm, EdgeKind::ConditionalFalse);
     cfg.add_edge(then_arm, merge, EdgeKind::Fallthrough);
@@ -102,7 +102,7 @@ fn a_switch_header_shows_the_dispatch_instruction() {
     cfg.block_mut(case_a).push(ff("a"));
     cfg.block_mut(default_arm).push(ff("d"));
     cfg.block_mut(merge)
-        .push(MockInst(FlowEffect::Return, "after"));
+        .push(MockInst(FlowEffect::Flow(Flow::Return), "after"));
     cfg.add_edge(cfg.entry(), case_a, EdgeKind::SwitchCase);
     cfg.add_edge(cfg.entry(), default_arm, EdgeKind::Fallthrough);
     cfg.add_edge(case_a, merge, EdgeKind::Fallthrough);
@@ -127,7 +127,7 @@ fn child_bodies_follow_execution_order() {
     cfg.block_mut(case_b).push(ff("b"));
     cfg.block_mut(default_arm).push(ff("d"));
     cfg.block_mut(merge)
-        .push(MockInst(FlowEffect::Return, "after"));
+        .push(MockInst(FlowEffect::Flow(Flow::Return), "after"));
     cfg.add_edge(cfg.entry(), case_a, EdgeKind::SwitchCase);
     cfg.add_edge(cfg.entry(), case_b, EdgeKind::SwitchCase);
     cfg.add_edge(cfg.entry(), default_arm, EdgeKind::Fallthrough);
@@ -181,7 +181,6 @@ fn try_child_bodies_are_try_handlers_then_finally() {
     cfg.add_edge(catch, after, EdgeKind::Fallthrough);
     cfg.add_edge(cleanup, after, EdgeKind::Fallthrough);
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [try_body].into_iter().collect(),
         handlers: vec![
             Handler {
@@ -196,7 +195,8 @@ fn try_child_bodies_are_try_handlers_then_finally() {
             },
         ],
         parent: None,
-    });
+    })
+    .unwrap();
 
     let tree = ControlTree::compute(&cfg);
     let try_node = tree
@@ -277,7 +277,7 @@ fn nested_loop_cfg() -> Cfg<MockInst> {
     cfg.block_mut(body).push(ff("inner_body"));
     cfg.block_mut(latch).push(ff("latch"));
     cfg.block_mut(exit)
-        .push(MockInst(FlowEffect::Return, "exit"));
+        .push(MockInst(FlowEffect::Flow(Flow::Return), "exit"));
     cfg.add_edge(cfg.entry(), outer, EdgeKind::Fallthrough);
     cfg.add_edge(outer, inner, EdgeKind::ConditionalTrue);
     cfg.add_edge(outer, exit, EdgeKind::ConditionalFalse);
@@ -369,7 +369,7 @@ fn for_each_instruction_follows_program_structure_order() {
     cfg.block_mut(body).push(ff("body_inst"));
     cfg.block_mut(latch).push(ff("latch_cond"));
     cfg.block_mut(exit)
-        .push(MockInst(FlowEffect::Return, "after_loop"));
+        .push(MockInst(FlowEffect::Flow(Flow::Return), "after_loop"));
     cfg.add_edge(cfg.entry(), body, EdgeKind::Fallthrough);
     cfg.add_edge(body, latch, EdgeKind::Fallthrough);
     cfg.add_edge(latch, body, EdgeKind::ConditionalTrue);
@@ -428,7 +428,7 @@ fn pseudocode_prints_each_loop_shape() {
     cfg.block_mut(body).push(ff("body_inst"));
     cfg.block_mut(latch).push(ff("latch_cond"));
     cfg.block_mut(exit)
-        .push(MockInst(FlowEffect::Return, "after_loop"));
+        .push(MockInst(FlowEffect::Flow(Flow::Return), "after_loop"));
     cfg.add_edge(cfg.entry(), body, EdgeKind::Fallthrough);
     cfg.add_edge(body, latch, EdgeKind::Fallthrough);
     cfg.add_edge(latch, body, EdgeKind::ConditionalTrue);

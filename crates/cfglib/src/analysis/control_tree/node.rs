@@ -35,18 +35,22 @@ define_dense_id! {
 }
 
 /// A contiguous run of `T` stored in one table of a
-/// [`ControlTree`](super::ControlTree).
+/// [`ControlTree`](super::ControlTree) or of an
+/// [`SplDecomposition`](super::SplDecomposition).
 ///
 /// A run is a handle, not a slice: the tree's accessors ([`body`], [`cases`],
-/// [`handlers`], [`edges`], [`spans`]) turn it into the slice it names. The
-/// type parameter keeps a run of nodes from being read as a run of edges. A
-/// run is meaningful only for the tree that produced it.
+/// [`handlers`], [`edges`], [`spans`]) and the decomposition's [`children`]
+/// turn it into the slice it names. The type parameter keeps a run of nodes
+/// from being read as a run of edges, and a run of tree nodes from being read
+/// as a run of decomposition nodes. A run is meaningful only for the tree or
+/// decomposition that produced it.
 ///
 /// [`body`]: super::ControlTree::body
 /// [`cases`]: super::ControlTree::cases
 /// [`handlers`]: super::ControlTree::handlers
 /// [`edges`]: super::ControlTree::edges
 /// [`spans`]: super::ControlTree::spans
+/// [`children`]: super::SplDecomposition::children
 pub struct ControlRun<T> {
     start: u32,
     len: u32,

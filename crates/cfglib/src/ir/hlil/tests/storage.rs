@@ -309,13 +309,6 @@ impl<D: Dialect> ToyHlilBuilder<D> {
         self.function.stmts.push(node);
         id
     }
-
-    /// Seals the function without verifying it, so a test can hand a
-    /// malformed function to an algorithm.
-    pub(crate) fn finish_unchecked(mut self, body: &[StmtId]) -> ToyHlil<D> {
-        self.function.body = body.to_vec();
-        self.function
-    }
 }
 
 impl<D: Dialect> FunctionBuilder<D> for ToyHlilBuilder<D> {
@@ -489,7 +482,8 @@ impl<D: Dialect> FunctionBuilder<D> for ToyHlilBuilder<D> {
         })
     }
 
-    fn finish(self, body: &[StmtId]) -> Result<ToyHlil<D>, Infallible> {
-        Ok(self.finish_unchecked(body))
+    fn finish(mut self, body: &[StmtId]) -> Result<ToyHlil<D>, Infallible> {
+        self.function.body = body.to_vec();
+        Ok(self.function)
     }
 }

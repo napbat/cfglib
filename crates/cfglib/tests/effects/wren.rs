@@ -4,8 +4,8 @@ use cfglib::ir::rtl::{
     Action, BitSlice, Bits, Control, Dialect, InstructionBuilder, Place, SpanAction, WriteTarget,
 };
 use cfglib::{
-    AccessShape, CaptureBuilder, Captured, CapturedValue, DialectEffects, MemoryAccessKind,
-    MemoryAtomicity, RtlEffect, SelectShape, StateTouch, Summarizer,
+    AccessMode, AccessShape, CaptureBuilder, Captured, CapturedValue, DialectEffects, Effect,
+    MemoryAccessKind, MemoryAtomicity, RtlEffect, SelectShape, StateTouch,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -127,8 +127,7 @@ fn shape(
     guard: Option<usize>,
 ) -> AccessShape<Space> {
     AccessShape {
-        kind,
-        atomicity,
+        mode: AccessMode { kind, atomicity },
         space,
         bytes: u32::from(bytes.width() / 8),
         address,
@@ -164,10 +163,6 @@ impl DialectEffects<Wren> for WrenEffects {
         }
     }
 
-    fn is_instruction_check(&self, operation: &Eff) -> bool {
-        matches!(operation, Eff::InstructionCheck)
-    }
-
     fn select(&self, operator: &Op) -> Option<SelectShape> {
         match operator {
             Op::Select => Some(SelectShape {
@@ -197,10 +192,6 @@ impl DialectEffects<Wren> for WrenEffects {
             Op::Base => "base",
         }
     }
-
-    fn constant(&self, operator: &Op) -> Option<u64> {
-        matches!(operator, Op::Base).then_some(BASE)
-    }
 }
 
 /// A bit-vector type whose width the test knows to be valid.
@@ -208,8 +199,13 @@ pub fn bits(width: u16) -> Bits {
     Bits::new(width).expect("the test width is in 1..=Bits::MAX_WIDTH")
 }
 
+/// The place that covers the whole of `root`.
+pub fn whole(root: Reg) -> Place<Reg> {
+    Place::whole::<Wren>(root)
+}
+
 /// The place of `width` bits of `root` from `offset`.
-pub fn part(root: Reg, offset: u16, width: u16) -> Place<Wren> {
+pub fn part(root: Reg, offset: u16, width: u16) -> Place<Reg> {
     Place {
         root,
         slice: BitSlice::new(offset, bits(width)),
@@ -273,9 +269,9 @@ pub fn capture(
     captured
 }
 
-/// Captures the instruction that `emit` produces and summarizes it.
+/// Captures the instruction that `emit` produces and computes its effect.
 pub fn effect_of(
     emit: impl FnOnce(&mut CaptureBuilder<'_, Wren>) -> Control<CapturedValue>,
 ) -> RtlEffect<Wren, WrenEffects> {
-    Summarizer::new(&WrenEffects).summarize_record(&capture(emit))
+    Effect::compute(&WrenEffects, &capture(emit))
 }

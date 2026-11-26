@@ -6,7 +6,7 @@
 //! largest bag less one. Dynamic programs over a decomposition of small width
 //! (register allocation, constraint satisfaction) run in time linear in the
 //! graph, so a graph whose structured form has gotos or irreducible loops,
-//! which [`ControlTree::spl_decomposition`](crate::ControlTree::spl_decomposition)
+//! which [`SplDecomposition::compute`](crate::SplDecomposition::compute)
 //! does not decompose, can still be decomposed here.
 //!
 //! [`tree_decomposition`] eliminates the nodes of the undirected simple graph

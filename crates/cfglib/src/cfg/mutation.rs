@@ -126,7 +126,7 @@ impl<I, E> Cfg<I, E> {
     /// The split does not change what any instruction does, so the new block
     /// belongs wherever the original did: it joins every region's protected
     /// set and every known handler body that contains the original, and it
-    /// replaces the original as the block a cleanup resumes from, because it
+    /// replaces the original as the block a cleanup exits from, because it
     /// now holds the exits. A frontend that wants the boundary to be a
     /// protection boundary edits the region afterwards.
     ///

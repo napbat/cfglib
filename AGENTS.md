@@ -50,9 +50,9 @@ Follow the Cargo package layout:
 - The library owns the graph algorithms, the generic fixpoint solvers, the transforms of the
   CFG shape and the generic `Cfg` container. A graph algorithm reads the shape of a graph
   (blocks, edges and instruction counts). It can also read the control-flow classification of
-  an instruction through the shared traits (`FlowControl`, `CallInfo`, `AddressInstruction`),
-  because that classification makes the graph. A renderer (DOT, text, control-tree
-  pseudocode) takes the text of an instruction from the caller (`DisplayInstr`).
+  an instruction through the shared traits (`FlowControl`, `AddressInstruction`, both read as
+  a `Flow`), because that classification makes the graph. A renderer (DOT, text,
+  control-tree pseudocode) takes the text of an instruction from the caller (`DisplayInstr`).
 - Do not add an IR algorithm. An IR algorithm reads the operands, values, effects or
   operations of instructions: dataflow over instructions, SSA construction, memory SSA,
   lifting, lowering, and the verification or printing of IR. The consumer that owns the IR

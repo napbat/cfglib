@@ -14,6 +14,7 @@ use super::{
 use crate::EdgeKind;
 use crate::flow::{CallSite, EdgeRole, Flow, UnresolvedRole, UnresolvedTransfer};
 
+mod function_exits;
 mod handlers;
 
 #[derive(Debug, Clone)]
@@ -89,6 +90,7 @@ pub(super) fn payload(
         EdgeRole::Exceptional => "exceptional",
         EdgeRole::Unwind { .. } => "unwind",
         EdgeRole::Route { .. } => "route",
+        EdgeRole::Continue { .. } => "continue",
     };
     (info.source, info.target, info.role.kind(), role)
 }
@@ -529,7 +531,7 @@ fn indirect_and_missing_exceptional_exits_are_explicit() {
             UnresolvedTransfer {
                 source: 0,
                 target: None,
-                role: UnresolvedRole::Indirect,
+                role: UnresolvedRole::Jump,
             },
             UnresolvedTransfer {
                 source: 1,
@@ -568,17 +570,17 @@ fn computed_conditional_and_trap_exits_keep_only_their_stated_continuations() {
             UnresolvedTransfer {
                 source: 0,
                 target: None,
-                role: UnresolvedRole::ConditionalIndirect,
+                role: UnresolvedRole::ConditionalTaken,
             },
             UnresolvedTransfer {
                 source: 1,
                 target: None,
-                role: UnresolvedRole::Trap,
+                role: UnresolvedRole::Exceptional,
             },
             UnresolvedTransfer {
                 source: 2,
                 target: None,
-                role: UnresolvedRole::Trap,
+                role: UnresolvedRole::Exceptional,
             },
         ]
     );
@@ -710,7 +712,7 @@ fn an_indirect_call_kept_as_an_edge_is_an_unresolved_transfer() {
         vec![UnresolvedTransfer {
             source: 0,
             target: None,
-            role: UnresolvedRole::IndirectCall,
+            role: UnresolvedRole::Call,
         }]
     );
 }

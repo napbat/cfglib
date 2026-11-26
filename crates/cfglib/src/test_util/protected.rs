@@ -33,8 +33,8 @@ mod tests {
 
     use alloc::vec::Vec;
 
+    use crate::InstrInfo;
     use crate::edge::EdgeKind;
-    use crate::flow::{FlowControl, FlowEffect};
     use crate::test_util::{df_ff, df_throwing, protected_region};
 
     #[test]
@@ -64,13 +64,13 @@ mod tests {
         let (cfg, [protected, normal, handler]) =
             protected_region([df_throwing(df_ff("call")), df_ff("after")]);
 
-        let effects: Vec<_> = cfg
+        let unwinding: Vec<_> = cfg
             .block(protected)
             .instructions()
             .iter()
-            .map(FlowControl::flow_effect)
+            .map(InstrInfo::may_unwind)
             .collect();
-        assert_eq!(effects, [FlowEffect::MayThrow, FlowEffect::Fallthrough]);
+        assert_eq!(unwinding, [true, false]);
         for empty in [cfg.entry(), normal, handler] {
             assert!(cfg.block(empty).instructions().is_empty());
         }

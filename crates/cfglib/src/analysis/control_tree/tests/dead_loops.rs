@@ -13,7 +13,7 @@ use super::pseudocode;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
+use crate::region::{Handler, HandlerBody, HandlerKind, Region};
 use crate::test_util::{MockInst, ff};
 use crate::{ControlNode, ControlTree};
 
@@ -60,7 +60,6 @@ fn dead_pad_with_a_loop(closing: Closing) -> Cfg<MockInst> {
         }
     }
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [b[0]].into_iter().collect(),
         handlers: vec![Handler {
             entry: b[2],
@@ -68,7 +67,8 @@ fn dead_pad_with_a_loop(closing: Closing) -> Cfg<MockInst> {
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
     cfg
 }
 
@@ -87,8 +87,9 @@ fn a_loop_in_a_dead_catch_pad_is_a_loop_however_it_closes() {
     for closing in [Closing::SelfEdge, Closing::Tagged, Closing::Untagged] {
         let cfg = dead_pad_with_a_loop(closing);
         let header = cfg.block_ids().nth(3).expect("the loop header");
-        let (tree, report) = ControlTree::compute_with_report(&cfg);
-        check(&cfg, &tree, &report, "dead loop");
+        let tree = ControlTree::compute(&cfg);
+        let report = tree.report();
+        check(&cfg, &tree, report, "dead loop");
         assert_eq!(loop_headers(&tree), [header], "{closing:?}");
         assert!(
             report.is_fully_structured(),
@@ -137,8 +138,9 @@ fn a_dead_loop_beside_a_live_loop_leaves_both_as_loops() {
     // Dead code that enters the live loop's body does not make it a latch.
     cfg.add_edge(feeder, live_body, EdgeKind::Jump);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
-    check(&cfg, &tree, &report, "dead loop beside a live loop");
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
+    check(&cfg, &tree, report, "dead loop beside a live loop");
 
     let dead_header = cfg.block_ids().nth(3).expect("the dead loop's header");
     let mut headers = loop_headers(&tree);

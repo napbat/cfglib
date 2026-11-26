@@ -83,7 +83,7 @@ fn an_indirect_call_kept_as_an_edge_is_unresolved_and_keeps_its_continuation<I: 
         [UnresolvedTransfer {
             source: built.layout.address(0),
             target: None,
-            role: UnresolvedRole::IndirectCall,
+            role: UnresolvedRole::Call,
         }]
     );
 }

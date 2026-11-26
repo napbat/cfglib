@@ -9,8 +9,8 @@
 //! leave `compact` to repair them.
 
 use cfglib::{
-    Cfg, EdgeKind, EhBlockKind, EhEdgeKind, EhModel, HandlerBody, HandlerKind, HandlerRef,
-    NodeOrder, contract_edge_mapped, merge_blocks_mapped, remove_empty_blocks_mapped,
+    Cfg, EdgeKind, EhBlockKind, EhModel, HandlerBody, HandlerKind, HandlerRef, NodeOrder,
+    RegionIndex, contract_edge_mapped, merge_blocks_mapped, remove_empty_blocks_mapped,
     remove_unreachable_mapped, simplify_mapped, split_critical_edges_mapped, verify,
 };
 
@@ -21,23 +21,18 @@ use crate::shapes::{
 
 /// Every block a region, handler, or cleanup of `cfg` names is live.
 fn assert_references_live(cfg: &Cfg<Stmt>, when: &str) {
-    for region in cfg.regions() {
+    for (id, region) in cfg.regions() {
         for &block in &region.protected_blocks {
             assert!(
                 cfg.contains_block(block),
-                "{when}: {} protects the removed block {block}",
-                region.id
+                "{when}: {id} protects the removed block {block}"
             );
         }
         if let Some(parent) = region.parent {
-            assert!(
-                cfg.region(parent).is_some(),
-                "{when}: parent of {}",
-                region.id
-            );
+            assert!(cfg.contains_region(parent), "{when}: parent of {id}");
         }
         for (index, handler) in region.handlers.iter().enumerate() {
-            let which = HandlerRef::new(region.id, index);
+            let which = HandlerRef::new(id, index);
             assert!(
                 cfg.contains_block(handler.entry),
                 "{when}: {which} enters the removed block {}",
@@ -59,16 +54,15 @@ fn assert_references_live(cfg: &Cfg<Stmt>, when: &str) {
             }
         }
     }
-    for cleanup in cfg.cleanups() {
+    for (handler, cleanup) in cfg.cleanups().iter() {
         let named = cleanup
-            .resume_from
+            .exit_block
             .into_iter()
-            .chain(cleanup.continuations.iter().map(|route| route.resume));
+            .chain(cleanup.continuations.iter().map(|route| route.target));
         for block in named {
             assert!(
                 cfg.contains_block(block),
-                "{when}: the cleanup of {} names the removed block {block}",
-                cleanup.handler
+                "{when}: the cleanup of {handler} names the removed block {block}"
             );
         }
     }
@@ -76,7 +70,7 @@ fn assert_references_live(cfg: &Cfg<Stmt>, when: &str) {
 
 /// The statements inside the blocks a region protects, sorted.
 fn protected_statements(cfg: &Cfg<Stmt>, handler: HandlerRef) -> Vec<String> {
-    let region = cfg.region(handler.region()).expect("the region exists");
+    let region = cfg.region(handler.region());
     let mut statements: Vec<String> = region
         .protected_blocks
         .iter()
@@ -105,16 +99,17 @@ fn assert_try_survives(
     assert_references_live(cfg, "after compaction");
     assert!(verify(cfg).is_ok());
     let handler = locate(cfg);
-    let entry = cfg.handler(handler).expect("the handler survives").entry;
-    let region = cfg.region(handler.region()).expect("the region survives");
+    let entry = cfg.handler(handler).entry;
+    let region = cfg.region(handler.region());
     let model = EhModel::compute(cfg);
     assert_eq!(model.block_kind(entry), EhBlockKind::LandingPad);
-    assert!(model.handlers(entry).contains(&handler));
+    assert!(cfg.handlers_at(entry).any(|(found, _)| found == handler));
     assert!(
-        model.eh_edges().iter().any(|edge| {
-            edge.to == entry
-                && edge.kind == EhEdgeKind::Unwind
-                && region.protected_blocks.contains(&edge.from)
+        model.eh_edges().iter().any(|&edge| {
+            let edge = cfg.edge(edge);
+            edge.target() == entry
+                && edge.kind() == EdgeKind::ExceptionUnwind
+                && region.protected_blocks.contains(&edge.source())
         }),
         "no unwind edge from the protected code enters the handler: {:?}",
         model.eh_edges()
@@ -242,7 +237,7 @@ fn remove_unreachable_keeps_the_handler_that_can_be_entered_when_its_sibling_can
     // The dead handler may be dropped from the region or kept with a live
     // entry; the live one is found by the code it runs.
     let live = move |cfg: &Cfg<Stmt>| {
-        let regions = cfg.region(region).expect("the region survives");
+        let regions = cfg.region(region);
         let index = regions
             .handlers
             .iter()
@@ -310,9 +305,10 @@ fn splitting_a_protected_block_keeps_both_halves_protected() {
 
     let tail = cfg.split_block(body, 1, EdgeKind::Fallthrough);
 
+    let index = RegionIndex::compute(&cfg);
     for half in [body, tail] {
         assert_eq!(
-            cfg.protecting_region(half).map(|found| found.id),
+            index.protecting(half),
             Some(region),
             "{half} holds instructions that used to be protected"
         );

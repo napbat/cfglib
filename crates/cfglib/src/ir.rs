@@ -25,8 +25,7 @@
 //! - [`hlil`] is the structured level: statement and expression trees read
 //!   through a [`FunctionView`](hlil::FunctionView) and built through a
 //!   write-only [`FunctionBuilder`](hlil::FunctionBuilder) that the consumer
-//!   implements, with the walks that every reader of the shapes needs. The
-//!   consumer stores the function.
+//!   implements. The consumer stores the function.
 //!
 //! Every level is language-neutral. The library defines the shapes and the
 //! traits, and names no language, runtime, ABI, or instruction set: a

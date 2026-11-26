@@ -31,7 +31,7 @@ fn sample_trees() -> Vec<(&'static str, Cfg<&'static str>, ControlTree)> {
     graphs
         .into_iter()
         .map(|(name, flow)| {
-            let (tree, _) = structure_and_check(&flow.cfg);
+            let tree = structure_and_check(&flow.cfg);
             (name, flow.cfg, tree)
         })
         .collect()
@@ -115,7 +115,7 @@ fn walk_enters_in_preorder_and_leaves_in_postorder_with_every_pair_nested() {
 #[test]
 fn skipping_a_node_hides_its_children_but_still_leaves_it() {
     let (flow, _) = labeled_break_loops();
-    let (tree, _) = structure_and_check(&flow.cfg);
+    let tree = structure_and_check(&flow.cfg);
     let loops = nodes_where(&tree, |node| matches!(node, ControlNode::Loop { .. }));
     let outer_loop = loops[0];
 
@@ -233,7 +233,7 @@ fn child_bodies_follow_the_documented_order_for_every_node_kind() {
 #[test]
 fn child_bodies_can_be_consumed_from_both_ends() {
     let flow = dispatch();
-    let (tree, _) = structure_and_check(&flow.cfg);
+    let tree = structure_and_check(&flow.cfg);
     let switch = nodes_where(&tree, |node| matches!(node, ControlNode::Switch { .. }))[0];
     let all: Vec<_> = tree.child_bodies(switch).collect();
     assert_eq!(all.len(), 3, "two cases and the default");
@@ -273,7 +273,7 @@ fn spans_name_whole_blocks_and_read_back_their_instructions() {
 #[should_panic(expected = "out of range")]
 fn reading_a_span_from_a_graph_the_tree_was_not_computed_from_panics() {
     let flow = Flow::starting_with("return");
-    let (tree, _) = structure_and_check(&flow.cfg);
+    let tree = structure_and_check(&flow.cfg);
     let ControlNode::Return(span) = *tree.node(tree.root()) else {
         panic!("a lone return");
     };
@@ -286,7 +286,7 @@ fn reading_a_span_from_a_graph_the_tree_was_not_computed_from_panics() {
 #[should_panic(expected = "index out of bounds")]
 fn asking_for_a_node_the_tree_does_not_have_panics() {
     let flow = Flow::starting_with("return");
-    let (tree, _) = structure_and_check(&flow.cfg);
+    let tree = structure_and_check(&flow.cfg);
 
     let _ = tree.node(ControlNodeId::from_raw(9));
 }
@@ -336,7 +336,7 @@ fn instructions_come_in_program_structure_order() {
             vec!["n = len(xs)", "n > 0", "y = 1", "y = 2", "return y"],
         ),
     ] {
-        let (tree, _) = structure_and_check(&flow.cfg);
+        let tree = structure_and_check(&flow.cfg);
         let mut seen = Vec::new();
         tree.for_each_instruction(&flow.cfg, |_, instruction| seen.push(*instruction));
         assert_eq!(seen, expected);

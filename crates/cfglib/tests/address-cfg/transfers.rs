@@ -39,7 +39,7 @@ fn an_indirect_jump_ends_its_block_and_is_reported_unresolved<I: Isa>() {
         [UnresolvedTransfer {
             source: built.layout.address(1),
             target: None,
-            role: UnresolvedRole::Indirect,
+            role: UnresolvedRole::Jump,
         }]
     );
 }
@@ -242,7 +242,7 @@ fn the_kitchen_sink_function_has_hand_derived_blocks_and_edges<I: Isa>() {
         [UnresolvedTransfer {
             source: built.layout.address(8),
             target: None,
-            role: UnresolvedRole::IndirectCall,
+            role: UnresolvedRole::Call,
         }]
     );
     assert_empty(&built.graph.calls);

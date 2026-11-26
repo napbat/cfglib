@@ -77,7 +77,10 @@ where
         assert_eq!(actual.weight(), expected.weight(), "{edge}");
         assert_eq!(actual.payload(), expected.payload(), "{edge}");
     }
-    assert_eq!(actual.regions(), expected.regions());
+    assert_eq!(
+        actual.regions().collect::<Vec<_>>(),
+        expected.regions().collect::<Vec<_>>()
+    );
     assert_eq!(actual.cleanups(), expected.cleanups());
 
     assert_eq!(
@@ -228,22 +231,21 @@ fn a_cfg_edge_payload_of_the_exception_model_round_trips() {
     cfg.add_edge(
         cfg.entry(),
         handler,
-        Edge::new(EdgeKind::ExceptionUnwind).with_payload(ExceptionFlow::exceptional(
-            ExceptionPhase::Search,
-            None,
-            "filter #2".to_owned(),
-        )),
+        Edge::new(EdgeKind::ExceptionUnwind).with_payload(ExceptionFlow {
+            phase: Some(ExceptionPhase::Search),
+            disposition: None,
+            metadata: "filter #2".to_owned(),
+        }),
     );
     cfg.add_edge(
         cfg.entry(),
         handler,
-        Edge::new(EdgeKind::Fallthrough)
-            .with_payload(ExceptionFlow::normal("scope table".to_owned())),
+        Edge::new(EdgeKind::Fallthrough).with_payload(ExceptionFlow::new("scope table".to_owned())),
     );
 
     let decoded: Cfg<Op, ExceptionFlow<String>> = round_trip(&cfg);
     assert_same_cfg(&decoded, &cfg);
-    let kinds: Vec<_> = decoded.edges().map(|edge| edge.payload().phase()).collect();
+    let kinds: Vec<_> = decoded.edges().map(|edge| edge.payload().phase).collect();
     assert_eq!(kinds, [Some(ExceptionPhase::Search), None]);
 }
 
@@ -323,7 +325,7 @@ fn older_document() -> Value {
 fn a_document_written_before_cleanup_records_existed_still_loads_with_none() {
     let decoded: Cfg<String> = load(older_document()).expect("`cleanups` has a default");
     assert_eq!(decoded, small_cfg(false));
-    assert_eq!(decoded.cleanups(), []);
+    assert!(decoded.cleanups().is_empty());
 }
 
 #[test]
@@ -337,8 +339,11 @@ fn dropping_the_cleanups_field_from_a_current_document_leaves_everything_else() 
 
     let decoded: Cfg<Op, Route> = load(value).expect("`cleanups` has a default");
     let original = rich_cfg();
-    assert_eq!(decoded.cleanups(), []);
-    assert_eq!(decoded.regions(), original.regions());
+    assert!(decoded.cleanups().is_empty());
+    assert_eq!(
+        decoded.regions().collect::<Vec<_>>(),
+        original.regions().collect::<Vec<_>>()
+    );
     assert_eq!(decoded.to_listing(), original.to_listing());
     assert_eq!(decoded.edge_count(), original.edge_count());
     assert_eq!(decoded.block_bound(), original.block_bound());
@@ -347,7 +352,7 @@ fn dropping_the_cleanups_field_from_a_current_document_leaves_everything_else() 
 #[test]
 fn an_explicitly_empty_cleanups_field_is_the_same_as_an_absent_one() {
     let mut explicit = older_document();
-    explicit["cleanups"] = json!([]);
+    explicit["cleanups"] = json!({"entries": []});
     let decoded: Cfg<String> = load(explicit).expect("an empty list loads");
     assert_eq!(decoded, small_cfg(false));
 }

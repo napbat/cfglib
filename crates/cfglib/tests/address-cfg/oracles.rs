@@ -11,7 +11,7 @@ use std::ops::Range;
 
 use cfglib::{
     AddressHandlerKind, AddressInstruction, BasicBlock, BlockId, CallPolicy, Cfg, ControlTree,
-    DominatorTree, EdgeKind, Flow, HandlerBody, HandlerKind, HandlerRef, RegionId, verify,
+    DominatorTree, EdgeKind, Flow, HandlerBody, HandlerRef, RegionId, verify,
 };
 
 use crate::harness::{Built, Role, Wire};
@@ -112,7 +112,7 @@ fn expected_leaders<I: Isa>(built: &Built<I>) -> BTreeSet<usize> {
             mark(&mut leaders, end);
         }
         let flow = instruction.flow();
-        if matches!(flow, Flow::Next) || (flatten && flow.is_call()) {
+        if matches!(flow, Flow::Next) || (flatten && flow.is_call() && flow.continues()) {
             continue;
         }
         if position + 1 < count {
@@ -122,10 +122,15 @@ fn expected_leaders<I: Isa>(built: &Built<I>) -> BTreeSet<usize> {
             mark(&mut leaders, end);
         }
         match &flow {
-            Flow::Jump { target }
-            | Flow::Conditional { target }
-            | Flow::Call { target }
-            | Flow::Exceptional { target } => mark(&mut leaders, *target),
+            Flow::Jump { target } | Flow::Conditional { target } | Flow::Exceptional { target } => {
+                mark(&mut leaders, *target);
+            }
+            // A flattened graph reports a callee as a call site, not a leader.
+            Flow::Call { target } | Flow::TailCall { target } => {
+                if !flatten {
+                    mark(&mut leaders, *target);
+                }
+            }
             Flow::Switch { default, cases } => {
                 mark(&mut leaders, *default);
                 for (_, target) in cases {
@@ -134,6 +139,7 @@ fn expected_leaders<I: Isa>(built: &Built<I>) -> BTreeSet<usize> {
             }
             Flow::Next
             | Flow::Return
+            | Flow::ConditionalReturn
             | Flow::Throw
             | Flow::Indirect
             | Flow::ConditionalIndirect
@@ -170,6 +176,7 @@ fn kind_of(role: Role) -> EdgeKind {
         Role::Call => EdgeKind::Call,
         Role::Continuation { .. } => EdgeKind::CallReturn,
         Role::Exceptional | Role::Unwind { .. } | Role::Route { .. } => EdgeKind::ExceptionUnwind,
+        Role::Continue { .. } => EdgeKind::ExceptionContinue,
     }
 }
 
@@ -267,10 +274,10 @@ fn check_regions<I: Isa>(built: &Built<I>) {
         }
     }
     ranges.sort_by_key(|(range, _)| std::cmp::Reverse(built.layout.byte_span(range.clone())));
-    assert_eq!(cfg.regions().len(), ranges.len());
+    assert_eq!(cfg.region_count(), ranges.len());
     for (region_index, (range, handler_indices)) in ranges.iter().enumerate() {
-        let region = &cfg.regions()[region_index];
-        assert_eq!(region.id.index(), region_index);
+        let id = RegionId::from_index(region_index);
+        let region = cfg.region(id);
         let protected: BTreeSet<BlockId> = range.clone().map(|p| built.block_of(p)).collect();
         assert_eq!(region.protected_blocks, protected);
         assert_eq!(region.handlers.len(), handler_indices.len());
@@ -279,10 +286,7 @@ fn check_regions<I: Isa>(built: &Built<I>) {
             assert_eq!(handler.entry, built.block_of(table[index].entry));
             assert_eq!(handler.kind, built.handler_kind(table[index].kind));
             assert_eq!(handler.body, HandlerBody::Unknown);
-            assert_eq!(
-                built.graph.handler_refs[index],
-                HandlerRef::new(region.id, slot)
-            );
+            assert_eq!(built.graph.handler_refs[index], HandlerRef::new(id, slot));
         }
         let parent = (0..ranges.len())
             .filter(|&other| encloses(&ranges[other].0, range))
@@ -370,7 +374,7 @@ fn check_dominators<I, E>(cfg: &Cfg<I, E>) {
 /// among its own region's protected blocks, and ordinary flow enters a
 /// handler (whose extent is only its entry here) from nowhere else.
 fn regions_are_well_formed<I, E>(cfg: &Cfg<I, E>) -> bool {
-    cfg.regions().iter().all(|region| {
+    cfg.regions().all(|(_, region)| {
         region.handlers.iter().all(|handler| {
             !region.protected_blocks.contains(&handler.entry)
                 && cfg.incoming(handler.entry).all(|edge| {
@@ -402,7 +406,7 @@ fn check_control_tree<I: Isa>(built: &Built<I>) {
     if !regions_are_well_formed(cfg) {
         return;
     }
-    let (tree, _) = ControlTree::compute_with_report(cfg);
+    let tree = ControlTree::compute(cfg);
     let mut visited: Vec<u64> = Vec::new();
     tree.for_each_instruction(cfg, |_, instruction| {
         visited.push(instruction.address().into());
@@ -412,16 +416,8 @@ fn check_control_tree<I: Isa>(built: &Built<I>) {
     assert_eq!(visited.len(), held, "no instruction appears twice");
 
     let handler_roots: Vec<BlockId> = cfg
-        .regions()
-        .iter()
-        .flat_map(|region| &region.handlers)
-        .flat_map(|handler| {
-            let filter = match handler.kind {
-                HandlerKind::Filter { filter_block } => Some(filter_block),
-                _ => None,
-            };
-            std::iter::once(handler.entry).chain(filter)
-        })
+        .handlers()
+        .flat_map(|(_, handler)| std::iter::once(handler.entry).chain(handler.kind.filter_block()))
         .collect();
     let mut owned = reach(cfg, &[cfg.entry()], None);
     owned.extend(handler_roots.iter().copied());

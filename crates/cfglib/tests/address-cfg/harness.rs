@@ -42,6 +42,7 @@ pub enum Role {
     Exceptional,
     Unwind { handler: usize },
     Route { route: usize },
+    Continue { route: usize },
 }
 
 /// The edge payload a dasm-shaped consumer builds from each
@@ -73,6 +74,7 @@ pub fn wire<A: Copy + Into<u64>, K: Copy + Into<i64>>(info: AddressEdgeInfo<'_, 
         EdgeRole::Exceptional => Role::Exceptional,
         EdgeRole::Unwind { handler } => Role::Unwind { handler },
         EdgeRole::Route { route } => Role::Route { route },
+        EdgeRole::Continue { route } => Role::Continue { route },
     };
     Wire {
         source: info.source.into(),

@@ -19,7 +19,7 @@
 //! is the consumer's) and the flow functions as an [`IfdsProblem`] over dense
 //! facts, so access paths, variables and every other fact domain stay in its
 //! IR crate. [`CfgSupergraph`] adapts a set of keyed CFGs whose calls come
-//! from [`CallInfo`](crate::CallInfo), the input of
+//! from the [`Flow`](crate::Flow) of their instructions, the input of
 //! [`call_graph`](crate::call_graph), with one node per program point.
 //!
 //! # Determinism and limits

@@ -8,7 +8,8 @@ use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeId;
 use crate::{
-    ControlDescent, ControlNode, ControlNodeId, ControlTree, ControlVisitor, LiftReport, LoopKind,
+    ControlDescent, ControlNode, ControlNodeId, ControlTree, ControlVisitor, LoopKind,
+    StructuringReport,
 };
 
 /// The blocks whose instructions a tree must hold: the blocks the entry
@@ -30,10 +31,10 @@ pub(super) fn owned_blocks<I, E>(cfg: &Cfg<I, E>) -> Vec<BlockId> {
 /// that the label resolves; and the code a region continues at, since the
 /// walk resumes there even when only a dead protected block leads to it.
 /// Sorted.
-fn allowed_blocks<I, E>(cfg: &Cfg<I, E>, report: &LiftReport) -> Vec<BlockId> {
+fn allowed_blocks<I, E>(cfg: &Cfg<I, E>, report: &StructuringReport) -> Vec<BlockId> {
     let mut roots = handler_owned(cfg);
     roots.extend(report.gotos.iter().map(|goto| goto.target));
-    for region in cfg.regions() {
+    for (_, region) in cfg.regions() {
         let inside: BTreeSet<BlockId> = region
             .protected_blocks
             .iter()
@@ -75,22 +76,16 @@ pub(super) fn reach<I, E>(cfg: &Cfg<I, E>, mut stack: Vec<BlockId>) -> Vec<Block
 
 /// The handler entries, filter funclets, and known extent blocks.
 fn handler_owned<I, E>(cfg: &Cfg<I, E>) -> Vec<BlockId> {
-    let mut owned = Vec::new();
-    for handler in cfg.regions().iter().flat_map(|region| &region.handlers) {
-        owned.push(handler.entry);
-        if let crate::HandlerKind::Filter { filter_block } = handler.kind {
-            owned.push(filter_block);
-        }
-        owned.extend(handler.body.blocks().into_iter().flatten().copied());
-    }
-    owned
+    cfg.handlers()
+        .flat_map(|(_, handler)| handler.blocks())
+        .collect()
 }
 
 /// The block sets a handler owns: its entry with its known extent, and its
 /// filter funclet by itself.
 pub(super) fn handler_sets<I, E>(cfg: &Cfg<I, E>) -> Vec<BTreeSet<BlockId>> {
     let mut sets = Vec::new();
-    for handler in cfg.regions().iter().flat_map(|region| &region.handlers) {
+    for (_, handler) in cfg.handlers() {
         let mut owned: BTreeSet<BlockId> = [handler.entry].into_iter().collect();
         owned.extend(handler.body.blocks().into_iter().flatten().copied());
         sets.push(owned);
@@ -139,7 +134,7 @@ pub(super) fn describe<I, E>(cfg: &Cfg<I, E>) -> alloc::string::String {
             );
         }
     }
-    for region in cfg.regions() {
+    for (_, region) in cfg.regions() {
         let _ = write!(text, "region guarding {:?}: ", region.protected_blocks);
         for handler in &region.handlers {
             let _ = write!(
@@ -256,7 +251,12 @@ fn assert_display_follows_walk<I, E>(cfg: &Cfg<I, E>, tree: &ControlTree, contex
 ///   both, and no block is labeled twice.
 /// - Every swept block carries its label.
 /// - The tree executes the instructions in the order the graph does.
-pub(super) fn check<I, E>(cfg: &Cfg<I, E>, tree: &ControlTree, report: &LiftReport, context: &str) {
+pub(super) fn check<I, E>(
+    cfg: &Cfg<I, E>,
+    tree: &ControlTree,
+    report: &StructuringReport,
+    context: &str,
+) {
     assert_arena_is_a_tree(tree, context);
     assert_display_follows_walk(cfg, tree, context);
     assert_instructions_appear_once_and_only_when_allowed(cfg, tree, report, context);
@@ -279,7 +279,7 @@ pub(super) fn check<I, E>(cfg: &Cfg<I, E>, tree: &ControlTree, report: &LiftRepo
 fn assert_instructions_appear_once_and_only_when_allowed<I, E>(
     cfg: &Cfg<I, E>,
     tree: &ControlTree,
-    report: &LiftReport,
+    report: &StructuringReport,
     context: &str,
 ) {
     let instructions = |blocks: Vec<BlockId>| -> Vec<(BlockId, usize)> {
@@ -322,7 +322,7 @@ fn assert_instructions_appear_once_and_only_when_allowed<I, E>(
 /// goto targets.
 fn assert_gotos_match_report(
     tree: &ControlTree,
-    report: &LiftReport,
+    report: &StructuringReport,
     context: &str,
 ) -> Vec<BlockId> {
     let mut gotos: Vec<BlockId> = tree
@@ -343,7 +343,7 @@ fn assert_gotos_match_report(
 /// label, never both, and no block is labeled twice. Returns the sorted labels.
 fn assert_labels_resolve_gotos(
     tree: &ControlTree,
-    report: &LiftReport,
+    report: &StructuringReport,
     reported: &[BlockId],
     context: &str,
 ) -> Vec<BlockId> {
@@ -377,7 +377,7 @@ fn assert_labels_resolve_gotos(
 fn assert_dangling_labels_are_justified<I, E>(
     cfg: &Cfg<I, E>,
     tree: &ControlTree,
-    report: &LiftReport,
+    report: &StructuringReport,
     reported: &[BlockId],
     context: &str,
 ) {
@@ -413,7 +413,7 @@ fn assert_dangling_labels_are_justified<I, E>(
 /// A region the report calls unstructured has no handler arm in the tree.
 fn assert_unstructured_regions_have_no_handler_arm(
     tree: &ControlTree,
-    report: &LiftReport,
+    report: &StructuringReport,
     context: &str,
 ) {
     for id in tree.preorder() {
@@ -435,7 +435,7 @@ fn assert_unstructured_regions_have_no_handler_arm(
 /// A fully structured tree holds no goto.
 fn assert_fully_structured_tree_holds_no_goto(
     tree: &ControlTree,
-    report: &LiftReport,
+    report: &StructuringReport,
     context: &str,
 ) {
     assert!(

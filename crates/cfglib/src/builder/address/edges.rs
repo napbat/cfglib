@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use super::{
     AddressBuildError, AddressEdgeInfo, AddressHandler, AddressInstruction, AddressTransfers,
-    CallPolicy, GivenEdge, GivenEdges, HandlerIndex, ends_block,
+    CallPolicy, GivenEdge, GivenEdges, HandlerIndex, ends_block, is_flattened,
 };
 use crate::block::BlockId;
 use crate::cfg::Cfg;
@@ -132,7 +132,7 @@ where
                 EdgeRole::Sequential | EdgeRole::CallContinuation { .. }
             ) {
                 self.add_continuation(block, source, transfer, strict)?;
-            } else {
+            } else if !is_flattened(&transfer.role, self.policy) {
                 self.add_transfer(block, source, transfer);
             }
         }
@@ -182,7 +182,7 @@ where
         transfer: Transfer<'_, I::Address, I::CaseKey>,
     ) {
         let Some(target) = transfer.target else {
-            if let Some(role) = transfer.unresolved_role() {
+            if let Some(role) = transfer.role.unresolved_role() {
                 self.unresolved.push(UnresolvedTransfer {
                     source,
                     target: None,
@@ -192,7 +192,7 @@ where
             return;
         };
         let Ok(target_position) = self.addresses.binary_search(&target) else {
-            if let Some(role) = transfer.unresolved_role() {
+            if let Some(role) = transfer.role.unresolved_role() {
                 self.unresolved.push(UnresolvedTransfer {
                     source,
                     target: Some(target),

@@ -1,13 +1,12 @@
-//! The elevator vocabulary: how a Windows/.NET lifter installs CLR and SEH
-//! exception metadata into a `Cfg`, models dynamic SEH registration and
-//! process-wide vectored handlers beside it, and annotates edges with
-//! `ExceptionFlow`.
+//! The elevator vocabulary: how a Windows/.NET lifter records CLR clause
+//! tables and SEH scope tables as `Cfg` regions, keeps catch-type tokens in a
+//! `HandlerMetadata` side table, and annotates edges with `ExceptionFlow`.
 //!
-//! Expectations are derived by hand from the documented clause kinds, chain
-//! orders, and dispatch phases, then compared with the installed regions,
-//! handlers, edges, and `EhModel` classification. Reachability over the
-//! normal-only and full-flow views is checked against dominance by node
-//! removal, which shares no code with `DominatorTree`.
+//! Expectations are derived by hand from the documented clause kinds and
+//! dispatch phases, then compared with the registered regions, handlers,
+//! edges, and `EhModel` classification. Reachability over the normal-only and
+//! full-flow views is checked against dominance by node removal, which shares
+//! no code with `DominatorTree`.
 
 use std::collections::BTreeSet;
 
@@ -15,10 +14,8 @@ use cfglib::{BlockId, Cfg, ExceptionFlow};
 
 mod clr;
 mod dispatch;
-mod dispatch_order;
 mod exception_flow;
 mod seh;
-mod vectored;
 
 /// The control-flow graph a lifter builds: statement labels as instructions,
 /// exception semantics on the edges.

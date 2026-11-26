@@ -60,7 +60,7 @@ fn extend<T: Clone>(pool: &mut Vec<T>, items: &[T]) -> Span {
 
 #[derive(Clone, Copy)]
 enum StoredSource {
-    Direct(Place<Kestrel>),
+    Direct(Place<Reg>),
     Finite {
         index: ValueRef,
         candidates: Span,
@@ -132,7 +132,7 @@ enum StoredStatement {
 
 #[derive(Default)]
 struct Pools {
-    places: Vec<Place<Kestrel>>,
+    places: Vec<Place<Reg>>,
     plans: Vec<SpanAction<Kestrel, ValueRef>>,
     values: Vec<ValueRef>,
     binds: Vec<(Reg, ValueRef)>,

@@ -3,8 +3,8 @@
 use std::borrow::Cow;
 
 use cfglib::{
-    BlockId, Cfg, DisplayInstr, EdgeKind, EffectInfo, Handler, HandlerBody, HandlerKind, InstrInfo,
-    Region, RegionId,
+    BlockId, Cfg, DisplayInstr, EdgeKind, Handler, HandlerBody, HandlerKind, InstrInfo, Region,
+    RegionId,
 };
 
 /// A source-like statement with the def, use, and effect sets the dataflow
@@ -54,14 +54,6 @@ impl InstrInfo for Stmt {
     }
 }
 
-impl EffectInfo for Stmt {
-    type Effect = &'static str;
-
-    fn effects(&self) -> &[&'static str] {
-        &self.effects
-    }
-}
-
 impl DisplayInstr for Stmt {
     fn mnemonic(&self) -> Cow<'_, str> {
         Cow::Borrowed(&self.text)
@@ -108,11 +100,11 @@ pub fn handler(entry: BlockId, kind: HandlerKind, body: &[BlockId]) -> Handler {
 /// Register a region protecting `protected`.
 pub fn protect(cfg: &mut Cfg<Stmt>, protected: &[BlockId], handlers: Vec<Handler>) -> RegionId {
     cfg.add_region(Region {
-        id: RegionId::from_raw(0), // overwritten by `add_region`
         protected_blocks: protected.iter().copied().collect(),
         handlers,
         parent: None,
     })
+    .unwrap()
 }
 
 /// `setup(); try { risky() } catch { <pad> }; return`: the body falls through

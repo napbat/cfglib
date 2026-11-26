@@ -3,28 +3,28 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use core::fmt;
 
-use crate::ir::rtl::{BitSlice, Control};
-use crate::memory::{MemoryAccessKind, MemoryAtomicity};
+use crate::ir::rtl::{Control, Place};
+use crate::memory::AccessMode;
 
 use super::exprs::{ExprId, Exprs};
 
 /// The effects of one instruction, one block, or one function.
 ///
-/// `S` is a storage place, such as a register root or a stack slot. `L` is a
-/// memory location, such as an address space with an address expression. `O`
-/// is the kind of a non-normal outcome. The vocabulary names no instruction
-/// set: every place, location, and outcome is opaque here.
+/// `S` is a storage root, such as a register root or a stack slot, and a
+/// [`Place`] names bits of one root. `L` is a memory location, such as an
+/// address space with an address expression. `O` is the kind of a non-normal
+/// outcome. The vocabulary names no instruction set: every root, location,
+/// and outcome is opaque here.
 ///
 /// Every [`ExprId`] in the effect points into [`exprs`](Self::exprs).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Effect<S, L, O> {
     /// The places whose values from before the code the code can read.
     ///
-    /// The summarizer lists each place once, with its read bits in ascending
-    /// order and without overlap.
-    pub reads: Vec<Touch<S>>,
+    /// [`Effect::compute`] lists each root once, with its read bits in
+    /// ascending order and without overlap.
+    pub reads: Vec<Place<S>>,
     /// Each write, with its kind, in the order of the code.
     pub writes: Vec<Write<S>>,
     /// Each memory access, in the order of the code.
@@ -32,36 +32,23 @@ pub struct Effect<S, L, O> {
     /// The outcomes that the code can raise, with their guards, in the order
     /// of the code.
     pub raises: Vec<Raised<O>>,
-    /// How control leaves the code.
-    pub exit: Exit,
+    /// How control leaves the code: the kind of its control boundary,
+    /// without the values.
+    pub exit: Control<()>,
     /// Whether the code makes a nondeterministic choice.
     pub nondeterministic: bool,
     /// The machine state that an intrinsic of the code can change and that no
     /// place names.
     pub intrinsic_state: StateTouch,
-    /// Whether the code runs the check that the dialect runs at the start of
-    /// each instruction.
-    pub instruction_check: bool,
     /// The expressions that the guards and the addresses use.
     pub exprs: Exprs<S>,
-}
-
-/// Bits of one place that code reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Touch<S> {
-    /// The place.
-    pub place: S,
-    /// The bits of the place.
-    pub bits: BitSlice,
 }
 
 /// Bits of one place that code writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Write<S> {
-    /// The place.
-    pub place: S,
-    /// The written bits of the place.
-    pub bits: BitSlice,
+    /// The written bits.
+    pub place: Place<S>,
     /// When and with what the bits change.
     pub kind: WriteKind,
 }
@@ -87,10 +74,9 @@ pub enum WriteKind {
 /// One memory access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Access<L> {
-    /// Whether the access reads, writes, or reads and writes the location.
-    pub kind: MemoryAccessKind,
-    /// Whether the access is atomic.
-    pub atomicity: MemoryAtomicity,
+    /// Whether the access reads, writes, or reads and writes the location,
+    /// and whether it is atomic.
+    pub mode: AccessMode,
     /// The accessed location.
     pub location: L,
     /// The number of accessed bytes.
@@ -102,10 +88,10 @@ pub struct Access<L> {
 
 /// A memory location as an address space and an address expression.
 ///
-/// This is the location that the summarizer of the register-transfer level
-/// gives. `P` is the address space of the dialect.
+/// This is the location that [`Effect::compute`] gives. `P` is the address
+/// space of the dialect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Address<P> {
+pub struct MemoryAddress<P> {
     /// The address space.
     pub space: P,
     /// The address, as an expression of [`Effect::exprs`].
@@ -122,12 +108,17 @@ pub struct Raised<O> {
     pub guard: Option<ExprId>,
     /// What raises the outcome.
     pub origin: RaiseOrigin,
-    /// Whether the outcome belongs to the check that the dialect runs at the
-    /// start of each instruction.
-    pub check: bool,
 }
 
 /// What raises an outcome.
+///
+/// A reader that treats the outcomes of one effect apart, such as the check
+/// that a dialect runs at the start of each instruction, finds them by the
+/// position of the effect: [`Environment::effect`](Self::Environment) names
+/// the effect that declares an outcome, and an [`Opaque::Effect`] in a guard
+/// names the effect that a guard depends on.
+///
+/// [`Opaque::Effect`]: super::Opaque::Effect
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RaiseOrigin {
     /// The code raises the outcome when its guard is one. Without a guard,
@@ -137,7 +128,11 @@ pub enum RaiseOrigin {
     /// page fault of a load. The guard is the guard of a conditional access.
     /// Without a guard, the environment can raise the outcome whenever the
     /// effect runs.
-    Environment,
+    Environment {
+        /// The position of the effect among the effects of the code, from
+        /// zero.
+        effect: u32,
+    },
 }
 
 /// The machine state that an intrinsic can change and that no place names.
@@ -156,58 +151,5 @@ impl StateTouch {
     #[must_use]
     pub fn join(self, other: Self) -> Self {
         self.max(other)
-    }
-}
-
-/// How control leaves an instruction: the kind of its [`Control`], without
-/// its values.
-///
-/// A record ends in a [`Control`], and its kind is an `Exit`. A decoded
-/// instruction states its transfer as a [`Flow`](crate::Flow) instead. A
-/// consumer that checks a sealed record against the decoded flow compares
-/// two exits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Exit {
-    /// Execution continues at the next instruction.
-    Next,
-    /// Execution continues at one target.
-    Jump,
-    /// Execution continues at one of two targets.
-    Branch,
-    /// A call that returns to the next instruction.
-    Call,
-    /// A return.
-    Return,
-    /// A multi-way transfer.
-    Dispatch,
-    /// Execution does not continue.
-    Terminating,
-}
-
-impl<V> From<Control<V>> for Exit {
-    fn from(control: Control<V>) -> Self {
-        match control {
-            Control::Advance => Self::Next,
-            Control::Jump { .. } => Self::Jump,
-            Control::Branch { .. } => Self::Branch,
-            Control::Call { .. } => Self::Call,
-            Control::Return { .. } => Self::Return,
-            Control::Dispatch { .. } => Self::Dispatch,
-            Control::Terminating => Self::Terminating,
-        }
-    }
-}
-
-impl fmt::Display for Exit {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Next => "next",
-            Self::Jump => "jump",
-            Self::Branch => "branch",
-            Self::Call => "call",
-            Self::Return => "return",
-            Self::Dispatch => "dispatch",
-            Self::Terminating => "terminating",
-        })
     }
 }

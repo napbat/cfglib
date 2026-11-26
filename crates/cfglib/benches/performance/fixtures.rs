@@ -1,6 +1,6 @@
 use cfglib::{
-    BlockId, Cfg, CfgBuilder, Direction, Edge, EdgeKind, FlowControl, FlowEffect, Graph, NodeId,
-    NodeProblem, Probability, Problem,
+    BlockId, Cfg, CfgBuilder, Direction, Edge, EdgeKind, Flow, FlowControl, FlowEffect, Graph,
+    NodeId, NodeProblem, Probability, Problem,
 };
 
 pub(super) fn fixture_u32(value: usize) -> u32 {
@@ -324,23 +324,54 @@ impl NodeProblem<Graph<(), ()>> for WideNodeFact {
     }
 }
 
+/// The one-byte operation of a builder input instruction: a structured
+/// marker, or plain work. The construction cases measure the builder's
+/// classification and pairing, not copies of a wide instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BuilderOp {
+    Plain,
+    ConditionalOpen,
+    ConditionalAlternate,
+    ConditionalClose,
+    LoopOpen,
+    ConditionalBreak,
+    LoopClose,
+    SwitchOpen,
+    SwitchCase,
+    SwitchClose,
+}
+
 #[derive(Clone, Copy)]
-pub(super) struct BuilderInst(pub(super) FlowEffect);
+pub(super) struct BuilderInst(pub(super) BuilderOp);
 
 impl FlowControl for BuilderInst {
-    fn flow_effect(&self) -> FlowEffect {
-        self.0
+    type Target = u32;
+    type CaseKey = ();
+
+    fn flow_effect(&self) -> FlowEffect<u32, ()> {
+        match self.0 {
+            BuilderOp::Plain => FlowEffect::Flow(Flow::Next),
+            BuilderOp::ConditionalOpen => FlowEffect::ConditionalOpen,
+            BuilderOp::ConditionalAlternate => FlowEffect::ConditionalAlternate,
+            BuilderOp::ConditionalClose => FlowEffect::ConditionalClose,
+            BuilderOp::LoopOpen => FlowEffect::LoopOpen,
+            BuilderOp::ConditionalBreak => FlowEffect::ConditionalBreak,
+            BuilderOp::LoopClose => FlowEffect::LoopClose,
+            BuilderOp::SwitchOpen => FlowEffect::SwitchOpen,
+            BuilderOp::SwitchCase => FlowEffect::SwitchCase,
+            BuilderOp::SwitchClose => FlowEffect::SwitchClose,
+        }
     }
 }
 
 pub(super) fn build_if_else_chain(region_count: usize) -> Cfg<BuilderInst> {
     CfgBuilder::build((0..region_count).flat_map(|_| {
         [
-            BuilderInst(FlowEffect::ConditionalOpen),
-            BuilderInst(FlowEffect::Fallthrough),
-            BuilderInst(FlowEffect::ConditionalAlternate),
-            BuilderInst(FlowEffect::Fallthrough),
-            BuilderInst(FlowEffect::ConditionalClose),
+            BuilderInst(BuilderOp::ConditionalOpen),
+            BuilderInst(BuilderOp::Plain),
+            BuilderInst(BuilderOp::ConditionalAlternate),
+            BuilderInst(BuilderOp::Plain),
+            BuilderInst(BuilderOp::ConditionalClose),
         ]
     }))
     .expect("synthetic conditionals are balanced")
@@ -349,9 +380,9 @@ pub(super) fn build_if_else_chain(region_count: usize) -> Cfg<BuilderInst> {
 pub(super) fn build_conditional_break_chain(region_count: usize) -> Cfg<BuilderInst> {
     CfgBuilder::build((0..region_count).flat_map(|_| {
         [
-            BuilderInst(FlowEffect::LoopOpen),
-            BuilderInst(FlowEffect::ConditionalBreak),
-            BuilderInst(FlowEffect::LoopClose),
+            BuilderInst(BuilderOp::LoopOpen),
+            BuilderInst(BuilderOp::ConditionalBreak),
+            BuilderInst(BuilderOp::LoopClose),
         ]
     }))
     .expect("synthetic loops are balanced")
@@ -360,11 +391,11 @@ pub(super) fn build_conditional_break_chain(region_count: usize) -> Cfg<BuilderI
 pub(super) fn build_two_case_switch_chain(region_count: usize) -> Cfg<BuilderInst> {
     CfgBuilder::build((0..region_count).flat_map(|_| {
         [
-            BuilderInst(FlowEffect::SwitchOpen),
-            BuilderInst(FlowEffect::Fallthrough),
-            BuilderInst(FlowEffect::SwitchCase),
-            BuilderInst(FlowEffect::Fallthrough),
-            BuilderInst(FlowEffect::SwitchClose),
+            BuilderInst(BuilderOp::SwitchOpen),
+            BuilderInst(BuilderOp::Plain),
+            BuilderInst(BuilderOp::SwitchCase),
+            BuilderInst(BuilderOp::Plain),
+            BuilderInst(BuilderOp::SwitchClose),
         ]
     }))
     .expect("synthetic switches are balanced")
@@ -373,13 +404,13 @@ pub(super) fn build_two_case_switch_chain(region_count: usize) -> Cfg<BuilderIns
 pub(super) fn build_eight_case_switch_chain(region_count: usize) -> Cfg<BuilderInst> {
     CfgBuilder::build((0..region_count).flat_map(|_| {
         (0..17).map(|position| {
-            let effect = match position {
-                0 => FlowEffect::SwitchOpen,
-                16 => FlowEffect::SwitchClose,
-                odd if odd % 2 == 1 => FlowEffect::Fallthrough,
-                _ => FlowEffect::SwitchCase,
+            let op = match position {
+                0 => BuilderOp::SwitchOpen,
+                16 => BuilderOp::SwitchClose,
+                odd if odd % 2 == 1 => BuilderOp::Plain,
+                _ => BuilderOp::SwitchCase,
             };
-            BuilderInst(effect)
+            BuilderInst(op)
         })
     }))
     .expect("synthetic switches are balanced")

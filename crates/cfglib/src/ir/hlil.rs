@@ -16,20 +16,9 @@
 //! before parents, and the consumer seals the function in
 //! [`finish`](FunctionBuilder::finish).
 //!
-//! [`for_each_child_body`], [`for_each_statement_expression`],
-//! [`visit_statements`], and [`visit_expression_tree`] are the walks that
-//! every reader of the shapes
-//! needs. The algorithms over this contract (lifting, lowering, structure
-//! recovery, verification, printing) live with the consumers of the
-//! contract, not here.
-//!
-//! # Depth
-//!
-//! The walks over statements, [`visit_statements`] and
-//! [`for_each_child_body`], and the walk over an expression tree,
-//! [`visit_expression_tree`], keep a stack of their own. A nest as deep as
-//! generated code or untrusted input produces costs memory, not stack
-//! frames of the thread.
+//! The algorithms over this contract (lifting, lowering, structure recovery,
+//! verification, printing) and the walks over its shapes live with the
+//! consumers of the contract, not here.
 
 mod builder;
 mod dialect;
@@ -39,10 +28,7 @@ mod view;
 pub use builder::FunctionBuilder;
 pub use dialect::Dialect;
 pub use shape::{ExprShape, Handler, HandlerKind, StmtShape, SwitchArm};
-pub use view::{
-    ChildBodyKind, Entity, FunctionView, for_each_child_body, for_each_statement_expression,
-    visit_expression_tree, visit_statements,
-};
+pub use view::{Entity, FunctionView};
 
 #[cfg(test)]
 mod tests;

@@ -20,7 +20,7 @@ fn straight_code_is_one_block_without_edges<I: Isa>() {
     assert_empty(&built.graph.unresolved_transfers);
     assert_empty(&built.graph.calls);
     assert_empty(&built.graph.handler_refs);
-    assert_empty(built.cfg().regions());
+    assert_eq!(built.cfg().region_count(), 0);
 }
 
 fn a_taken_conditional_splits_the_run_into_three_blocks<I: Isa>() {

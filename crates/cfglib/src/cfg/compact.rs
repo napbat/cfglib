@@ -7,9 +7,9 @@ use alloc::collections::BTreeSet;
 
 use crate::block::{BlockId, BlockTag};
 use crate::graph::store::{NodeOrder, Renumbering};
-use crate::region::{Handler, HandlerBody, HandlerKind, Region};
 
 use super::Cfg;
+use super::anchors::BlockRefMut;
 
 impl<I, E> Cfg<I, E> {
     /// Whether every block and edge slot holds a live entity: no slot has
@@ -49,10 +49,12 @@ impl<I, E> Cfg<I, E> {
     ///
     /// Panics under the conditions of
     /// [`Graph::compact`](crate::Graph::compact), before anything changes.
-    /// Panics when a handler entry, a filter block, or a cleanup resume point
-    /// names a block that did not survive: those are single references with
-    /// no meaningful replacement, so the exception metadata has to be rebuilt
-    /// before such a block is removed.
+    /// Panics when a handler entry, a filter block, a cleanup exit block, or
+    /// a continuation target names a block that did not survive: those are
+    /// single references with no meaningful replacement, so the exception
+    /// metadata has to be rebuilt before such a block is removed
+    /// ([`check_regions`](Self::check_regions) reports them as
+    /// [`RegionError::BlockNotLive`](crate::RegionError::BlockNotLive)).
     ///
     /// # Examples
     ///
@@ -95,35 +97,10 @@ impl<I, E> Cfg<I, E> {
     fn renumber_metadata(&mut self, renumbering: &Renumbering<BlockTag>) {
         self.entry = require(renumbering, self.entry, "entry block");
 
-        for region in &mut self.regions {
-            renumber_region(region, renumbering);
-        }
-        for cleanup in &mut self.cleanups {
-            cleanup.resume_from = cleanup
-                .resume_from
-                .map(|block| require(renumbering, block, "cleanup resume block"));
-            for continuation in &mut cleanup.continuations {
-                continuation.resume =
-                    require(renumbering, continuation.resume, "cleanup continuation");
-            }
-        }
-    }
-}
-
-fn renumber_region(region: &mut Region, renumbering: &Renumbering<BlockTag>) {
-    region.protected_blocks = retain_surviving(&region.protected_blocks, renumbering);
-    for handler in &mut region.handlers {
-        renumber_handler(handler, renumbering);
-    }
-}
-
-fn renumber_handler(handler: &mut Handler, renumbering: &Renumbering<BlockTag>) {
-    handler.entry = require(renumbering, handler.entry, "handler entry block");
-    if let HandlerBody::Known(blocks) = &handler.body {
-        handler.body = HandlerBody::Known(retain_surviving(blocks, renumbering));
-    }
-    if let HandlerKind::Filter { filter_block } = &mut handler.kind {
-        *filter_block = require(renumbering, *filter_block, "handler filter block");
+        self.for_each_block_ref_mut(|reference| match reference {
+            BlockRefMut::Set(blocks) => *blocks = retain_surviving(blocks, renumbering),
+            BlockRefMut::Anchor(block, role) => *block = require(renumbering, *block, role.name()),
+        });
     }
 }
 
@@ -153,7 +130,8 @@ mod tests {
     use super::*;
     use crate::edge::EdgeKind;
     use crate::region::{
-        CompletionReason, Continuation, HandlerBody, HandlerKind, HandlerRef, RegionId,
+        CompletionReason, Continuation, Handler, HandlerBody, HandlerKind, HandlerRef, Region,
+        RegionId,
     };
 
     /// The payload of every block names it, so a renumbered reference can be
@@ -172,7 +150,7 @@ mod tests {
     /// A graph with a removable block between every pair of blocks that
     /// exception metadata names: a protected block and a block of the
     /// handler's extent, the handler entry, its filter block, the cleanup's
-    /// resume block, and its continuation target. Returns the graph and the
+    /// exit block, and its continuation target. Returns the graph and the
     /// payloads in that order.
     fn sparse_metadata() -> (Cfg<u32>, [u32; 6]) {
         let mut cfg = Cfg::<u32>::new();
@@ -182,32 +160,33 @@ mod tests {
             gaps.push(tagged(&mut cfg));
             named.push(tagged(&mut cfg));
         }
-        let [protected, extent, entry, filter, resume, target] =
-            [0, 1, 2, 3, 4, 5].map(|i| named[i]);
+        let [protected, extent, entry, filter, exit, target] = [0, 1, 2, 3, 4, 5].map(|i| named[i]);
         cfg.add_edge(cfg.entry(), protected, EdgeKind::Fallthrough);
-        let region = cfg.add_region(Region {
-            id: RegionId::from_raw(0),
-            protected_blocks: [protected, gaps[0]].into_iter().collect(),
-            handlers: vec![Handler {
-                entry,
-                body: HandlerBody::known([entry, extent, gaps[1]]),
-                kind: HandlerKind::Filter {
-                    filter_block: filter,
-                },
-            }],
-            parent: None,
-        });
+        let region = cfg
+            .add_region(Region {
+                protected_blocks: [protected, gaps[0]].into_iter().collect(),
+                handlers: vec![Handler {
+                    entry,
+                    body: HandlerBody::known([entry, extent, gaps[1]]),
+                    kind: HandlerKind::Filter {
+                        filter_block: filter,
+                    },
+                }],
+                parent: None,
+            })
+            .unwrap();
         let handler = HandlerRef::new(region, 0);
-        cfg.set_cleanup_resume(handler, resume);
+        cfg.set_cleanup_exit(handler, exit).unwrap();
         cfg.add_continuation(
             handler,
             Continuation {
                 reason: CompletionReason::Normal,
-                resume: target,
+                target,
             },
-        );
+        )
+        .unwrap();
         let payloads =
-            [protected, extent, entry, filter, resume, target].map(|block| payload(&cfg, block));
+            [protected, extent, entry, filter, exit, target].map(|block| payload(&cfg, block));
         for gap in gaps {
             cfg.remove_block(gap);
         }
@@ -215,8 +194,8 @@ mod tests {
     }
 
     fn assert_denotes(cfg: &Cfg<u32>, payloads: [u32; 6]) {
-        let [protected, extent, entry, filter, resume, target] = payloads;
-        let region = &cfg.regions()[0];
+        let [protected, extent, entry, filter, exit, target] = payloads;
+        let region = cfg.region(RegionId::from_raw(0));
         let handler = &region.handlers[0];
         let names = |blocks: &BTreeSet<BlockId>| -> alloc::vec::Vec<u32> {
             blocks.iter().map(|&block| payload(cfg, block)).collect()
@@ -231,12 +210,12 @@ mod tests {
             panic!("the handler stays a filter");
         };
         assert_eq!(payload(cfg, filter_block), filter);
-        let cleanup = &cfg.cleanups()[0];
+        let (_, cleanup) = cfg.cleanups().iter().next().expect("the record stays");
         assert_eq!(
-            payload(cfg, cleanup.resume_from.expect("resume stays set")),
-            resume
+            payload(cfg, cleanup.exit_block.expect("the exit stays set")),
+            exit
         );
-        assert_eq!(payload(cfg, cleanup.continuations[0].resume), target);
+        assert_eq!(payload(cfg, cleanup.continuations[0].target), target);
     }
 
     #[test]

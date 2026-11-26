@@ -146,6 +146,26 @@ fn a_funclet_that_ends_in_a_tail_jump_returns_through_the_jump() {
 }
 
 #[test]
+fn a_funclet_that_ends_in_a_tail_call_returns_through_the_call() {
+    // Unlike a jump, a tail call returns to the runtime even when the stream
+    // holds its target.
+    let instructions = stream(&[
+        main_code(2),
+        body(10, &[NEXT, Flow::TailCall { target: 30 }]),
+        body(20, &[RET]),
+        body(30, &[RET]),
+    ]);
+    let routes = [route(
+        0..1,
+        vec![(funclets(&[10, 20]), UnwindEnd::Propagate)],
+    )];
+    let built = build(instructions, &routes);
+
+    built.assert_exact(&routes, &[]);
+    assert_eq!(built.route_edges(), BTreeSet::from([(0, 10), (11, 20)]));
+}
+
+#[test]
 fn a_jump_inside_the_stream_is_no_return() {
     let instructions = stream(&[
         main_code(2),

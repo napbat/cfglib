@@ -8,15 +8,14 @@ use super::{body_contains_block, find_try_catch, find_try_handlers, has_goto_to,
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::flow::FlowEffect;
-use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
+use crate::flow::{Flow, FlowEffect};
+use crate::region::{Handler, HandlerBody, HandlerKind, Region};
 use crate::test_util::{MockInst, ff};
 use crate::{ControlNode, ControlTree, GotoDiagnostic, GotoReason};
 
 /// A catch region over `protected` whose handler at `entry` owns `body`.
-fn catch_region(id: u32, protected: &[BlockId], entry: BlockId, body: &[BlockId]) -> Region {
+fn catch_region(protected: &[BlockId], entry: BlockId, body: &[BlockId]) -> Region {
     Region {
-        id: RegionId::from_raw(id),
         protected_blocks: protected.iter().copied().collect(),
         handlers: vec![Handler {
             entry,
@@ -50,13 +49,14 @@ fn handler_branch_with_a_diverging_arm_converges_at_the_continuation() {
     cfg.add_edge(then_arm, after, EdgeKind::Fallthrough);
     cfg.add_edge(rethrow, exit, EdgeKind::ExceptionUnwind);
     cfg.add_region(catch_region(
-        0,
         &[try_body],
         handler,
         &[handler, then_arm, rethrow],
-    ));
+    ))
+    .unwrap();
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     let text = pseudocode(&cfg, &tree);
     assert!(report.is_fully_structured(), "{report:?}\n{text}");
     let handlers = find_try_handlers(&tree).expect("the region is a try");
@@ -102,13 +102,14 @@ fn handler_dispatch_with_a_diverging_default_converges_at_the_continuation() {
     cfg.add_edge(second, after, EdgeKind::Fallthrough);
     cfg.add_edge(rethrow, exit, EdgeKind::ExceptionUnwind);
     cfg.add_region(catch_region(
-        0,
         &[try_body],
         handler,
         &[handler, first, second, rethrow],
-    ));
+    ))
+    .unwrap();
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     let text = pseudocode(&cfg, &tree);
     assert!(report.is_fully_structured(), "{report:?}\n{text}");
     let handlers = find_try_handlers(&tree).expect("the region is a try");
@@ -149,7 +150,7 @@ fn rethrowing_handler_of_a_try_nested_last_in_a_try_is_structured() {
     cfg.block_mut(rethrow).push(ff("rethrow"));
     cfg.block_mut(outer_pad).push(ff("outer_catch"));
     cfg.block_mut(after)
-        .push(MockInst(FlowEffect::Return, "after"));
+        .push(MockInst(FlowEffect::Flow(Flow::Return), "after"));
     cfg.add_edge(cfg.entry(), inner_try, EdgeKind::Fallthrough);
     cfg.add_edge(inner_try, leave, EdgeKind::ExceptionLeave);
     cfg.add_edge(inner_try, inner_pad, EdgeKind::ExceptionHandler);
@@ -160,22 +161,23 @@ fn rethrowing_handler_of_a_try_nested_last_in_a_try_is_structured() {
     cfg.add_edge(rethrow, outer_pad, EdgeKind::ExceptionHandler);
     cfg.add_edge(leave, after, EdgeKind::ExceptionLeave);
     cfg.add_edge(outer_pad, after, EdgeKind::Fallthrough);
-    let outer = cfg.add_region(catch_region(
-        0,
-        &[inner_try, inner_pad, then_arm, join, rethrow, leave],
-        outer_pad,
-        &[outer_pad],
-    ));
+    let outer = cfg
+        .add_region(catch_region(
+            &[inner_try, inner_pad, then_arm, join, rethrow, leave],
+            outer_pad,
+            &[outer_pad],
+        ))
+        .unwrap();
     let mut inner = catch_region(
-        1,
         &[inner_try],
         inner_pad,
         &[inner_pad, then_arm, join, rethrow],
     );
     inner.parent = Some(outer);
-    cfg.add_region(inner);
+    cfg.add_region(inner).unwrap();
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     let text = pseudocode(&cfg, &tree);
     assert!(report.is_fully_structured(), "{report:?}\n{text}");
     let (outer_body, _, _) = find_try_catch(&tree).expect("the outer region is a try");
@@ -220,13 +222,14 @@ fn an_arm_converges_through_a_block_without_code_another_arm_passed() {
     cfg.add_edge(inner_join, join, EdgeKind::Fallthrough);
     cfg.add_edge(rethrow, exit, EdgeKind::ExceptionUnwind);
     cfg.add_region(catch_region(
-        0,
         &[try_body],
         handler,
         &[handler, x, join, second_test, y, inner_join, rethrow],
-    ));
+    ))
+    .unwrap();
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     let text = pseudocode(&cfg, &tree);
     assert!(report.is_fully_structured(), "{report:?}\n{text}");
     assert_eq!(text.matches("after").count(), 1, "{text}");
@@ -248,10 +251,11 @@ fn a_goto_through_a_block_without_code_names_the_block_it_leads_to() {
     cfg.block_mut(cfg.entry()).push(ff("first_test"));
     cfg.block_mut(a).push(ff("a"));
     cfg.block_mut(tail)
-        .push(MockInst(FlowEffect::Return, "tail"));
+        .push(MockInst(FlowEffect::Flow(Flow::Return), "tail"));
     cfg.block_mut(second_test).push(ff("second_test"));
     cfg.block_mut(b).push(ff("b"));
-    cfg.block_mut(c).push(MockInst(FlowEffect::Return, "c"));
+    cfg.block_mut(c)
+        .push(MockInst(FlowEffect::Flow(Flow::Return), "c"));
     cfg.add_edge(cfg.entry(), a, EdgeKind::ConditionalTrue);
     cfg.add_edge(cfg.entry(), second_test, EdgeKind::ConditionalFalse);
     cfg.add_edge(a, empty, EdgeKind::ConditionalTrue);
@@ -261,7 +265,8 @@ fn a_goto_through_a_block_without_code_names_the_block_it_leads_to() {
     cfg.add_edge(second_test, c, EdgeKind::ConditionalFalse);
     cfg.add_edge(b, empty, EdgeKind::Fallthrough);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     let text = pseudocode(&cfg, &tree);
     assert_eq!(
         report.gotos,

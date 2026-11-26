@@ -17,15 +17,22 @@
 //! of the extent cannot reach it. A walk that skips them is the walk of the
 //! blocks around the extent, and the visited table is shared by every walk,
 //! told apart by a generation.
+//!
+//! The walk runs on the crate's depth-first core. A block below the floor is
+//! entered but never expanded, and it is in no extent, so the extent's blocks
+//! finish in the order they would if the walk never reached it.
 
 extern crate alloc;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
+use core::ops::ControlFlow;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::graph::epoch::EpochMarks;
 use crate::graph::scc::tarjan_scc;
+use crate::graph::search::Visit;
+use crate::graph::traverse::{DepthFirstStack, DepthFirstVisitor, Outgoing, depth_first_core};
 use crate::identity::{NO_INDEX, word};
 
 /// The state every walk shares: the components of the graph, found by the
@@ -41,8 +48,7 @@ struct State {
     component: Vec<u32>,
     /// The blocks the current walk has visited.
     seen: EpochMarks,
-    stack: Vec<(BlockId, bool)>,
-    successors: Vec<BlockId>,
+    stack: DepthFirstStack<BlockId, BlockId>,
 }
 
 impl State {
@@ -57,9 +63,38 @@ impl State {
         Self {
             component,
             seen: EpochMarks::new(bound),
-            stack: Vec::new(),
-            successors: Vec::new(),
+            stack: DepthFirstStack::default(),
         }
+    }
+}
+
+/// The visitor of one walk: it expands only the blocks at or above the floor,
+/// and records the extent's blocks as they finish.
+struct ExtentPostorder<'a> {
+    component: &'a [u32],
+    /// The lowest component of the extent.
+    floor: u32,
+    extent: &'a BTreeSet<BlockId>,
+    order: Vec<BlockId>,
+}
+
+impl DepthFirstVisitor<BlockId, BlockId, ()> for ExtentPostorder<'_> {
+    #[inline]
+    fn discover(&mut self, block: BlockId, _depth: usize) -> ControlFlow<(), Visit> {
+        // Nothing below the floor reaches the extent.
+        if self.component[block.index()] >= self.floor {
+            ControlFlow::Continue(Visit::Descend)
+        } else {
+            ControlFlow::Continue(Visit::Skip)
+        }
+    }
+
+    #[inline]
+    fn finish(&mut self, block: BlockId) -> ControlFlow<()> {
+        if self.extent.contains(&block) {
+            self.order.push(block);
+        }
+        ControlFlow::Continue(())
     }
 }
 
@@ -84,40 +119,27 @@ impl ExtentWalk {
             entry.index()
         );
         let state = self.state.get_or_insert_with(|| State::new(cfg));
-        // Nothing below the lowest component of the extent reaches it.
         let floor = extent
             .iter()
             .filter_map(|block| state.component.get(block.index()).copied())
             .min()
             .unwrap_or(NO_INDEX);
         state.seen.reset();
-        let mut order = Vec::new();
-        state.stack.clear();
-        state.stack.push((entry, false));
-        // The flag is whether the block's successors have been pushed, so the
-        // second pop is its place in the postorder.
-        while let Some((block, processed)) = state.stack.pop() {
-            if processed {
-                if extent.contains(&block) {
-                    order.push(block);
-                }
-                continue;
-            }
-            if state.seen.is_marked(block.index()) {
-                continue;
-            }
-            state.seen.mark(block.index());
-            state.stack.push((block, true));
-            state.successors.clear();
-            state.successors.extend(cfg.successors(block));
-            for &successor in state.successors.iter().rev() {
-                if !state.seen.is_marked(successor.index())
-                    && state.component[successor.index()] >= floor
-                {
-                    state.stack.push((successor, false));
-                }
-            }
-        }
+        let mut visitor = ExtentPostorder {
+            component: &state.component,
+            floor,
+            extent,
+            order: Vec::new(),
+        };
+        depth_first_core(
+            Outgoing,
+            cfg,
+            [entry],
+            &mut state.seen,
+            &mut state.stack,
+            &mut visitor,
+        );
+        let mut order = visitor.order;
         order.reverse();
         order
     }

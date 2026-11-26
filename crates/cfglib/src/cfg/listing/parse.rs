@@ -9,10 +9,10 @@ use crate::edge::EdgeKind;
 use crate::graph::text::{
     Slots, TextError, TextErrorKind, parse_index, significant_lines, split_tokens, unescape,
 };
-use crate::region::{Handler, Region, RegionId};
+use crate::region::{Handler, HandlerKind, Region, RegionId};
 
 use super::super::Cfg;
-use super::{HandlerShape, parse_handler_body};
+use super::parse_handler_body;
 
 /// Read a CFG back from its listing ([`Cfg::write_listing`]), parsing each
 /// instruction line with `parse_instruction`.
@@ -53,6 +53,7 @@ pub fn parse_cfg_listing<I>(
         entry: None,
         context: Context::Nothing,
         pending: None,
+        parents: Vec::new(),
     };
     reader.read(text, &parse_instruction)?;
     reader.finish()
@@ -72,7 +73,11 @@ struct Reader<I> {
     slots: Slots,
     entry: Option<usize>,
     context: Context,
-    pending: Option<Region>,
+    /// The region being read, with the line that opened it.
+    pending: Option<(Region, usize)>,
+    /// Every parent a region named, with the line of that region: a parent
+    /// may be a region written later, so they are checked once all are read.
+    parents: Vec<(RegionId, usize)>,
 }
 
 impl<I> Reader<I> {
@@ -156,12 +161,11 @@ impl<I> Reader<I> {
             .next()
             .ok_or_else(|| TextError::new(line, TextErrorKind::Region))
             .and_then(|token| parse_index(token, "r", line))?;
-        if index != self.cfg.regions().len() {
+        if index != self.cfg.region_count() {
             return Err(TextError::new(line, TextErrorKind::Region));
         }
 
         let mut region = Region {
-            id: RegionId::from_raw(0),
             protected_blocks: alloc::collections::BTreeSet::new(),
             handlers: Vec::new(),
             parent: None,
@@ -185,7 +189,7 @@ impl<I> Reader<I> {
                 _ => return Err(TextError::new(line, TextErrorKind::Region)),
             }
         }
-        self.pending = Some(region);
+        self.pending = Some((region, line));
         self.context = Context::Region;
         Ok(())
     }
@@ -197,8 +201,6 @@ impl<I> Reader<I> {
         let mut fields = rest.split_whitespace();
         let kind_name = fields
             .next()
-            .ok_or_else(|| TextError::new(line, TextErrorKind::Region))?;
-        let shape = HandlerShape::from_name(kind_name)
             .ok_or_else(|| TextError::new(line, TextErrorKind::Region))?;
 
         let mut entry = None;
@@ -230,19 +232,25 @@ impl<I> Reader<I> {
         let handler = Handler {
             entry: entry.ok_or_else(malformed)?,
             body: body.ok_or_else(malformed)?,
-            kind: shape.kind(filter_block).ok_or_else(malformed)?,
+            kind: HandlerKind::from_name(kind_name, filter_block).ok_or_else(malformed)?,
         };
         self.pending
             .as_mut()
             .ok_or_else(malformed)?
+            .0
             .handlers
             .push(handler);
         Ok(())
     }
 
+    /// Register the region read last. Every block it names was read as a
+    /// live block; its parent is checked in [`finish`](Self::finish).
     fn flush_region(&mut self) {
-        if let Some(region) = self.pending.take() {
-            self.cfg.add_region(region);
+        if let Some((region, line)) = self.pending.take() {
+            if let Some(parent) = region.parent {
+                self.parents.push((parent, line));
+            }
+            self.cfg.regions.push(region);
         }
     }
 
@@ -255,6 +263,13 @@ impl<I> Reader<I> {
         let entry = self.entry.unwrap_or(0);
         let block = self.live_block(entry, 0)?;
         self.cfg.set_entry(block);
+        if let Some(&(_, line)) = self
+            .parents
+            .iter()
+            .find(|&&(parent, _)| !self.cfg.contains_region(parent))
+        {
+            return Err(TextError::new(line, TextErrorKind::Region));
+        }
         for index in self.slots.holes() {
             self.cfg.remove_block(BlockId::from_index(index));
         }

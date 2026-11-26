@@ -4,7 +4,7 @@ use super::{contains_block, has_node_kind};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::flow::FlowEffect;
+use crate::flow::{Flow, FlowEffect};
 use crate::test_util::{MockInst, ff};
 use crate::{BlockSpan, ControlNode, ControlTree};
 
@@ -26,7 +26,7 @@ fn loop_with_jump_trampoline(hop_instruction: bool) -> (Cfg<MockInst>, BlockId) 
     }
     cfg.block_mut(tail).push(ff("tail_inst"));
     cfg.block_mut(exit)
-        .push(MockInst(FlowEffect::Return, "after_loop"));
+        .push(MockInst(FlowEffect::Flow(Flow::Return), "after_loop"));
     cfg.add_edge(cfg.entry(), header, EdgeKind::Fallthrough);
     cfg.add_edge(header, body, EdgeKind::ConditionalTrue);
     cfg.add_edge(header, exit, EdgeKind::ConditionalFalse);
@@ -42,32 +42,35 @@ fn treating_a_block_as_empty_matches_a_graph_where_it_is_empty() {
     let (full, hop) = loop_with_jump_trampoline(true);
     let (empty, _) = loop_with_jump_trampoline(false);
 
-    let ignored = ControlTree::compute_with_report_treating_empty(&full, &[hop]);
-    assert_eq!(ignored, ControlTree::compute_with_report(&empty));
+    let ignored = ControlTree::compute_treating_empty(&full, &[hop]);
+    assert_eq!(ignored, ControlTree::compute(&empty));
 
     // The jump block is a trampoline only once it is treated as empty: the
     // body's exit is then a plain `break`, and the hop block has no leaf.
     assert!(
-        has_node_kind(&ignored.0, |n| matches!(
+        has_node_kind(&ignored, |n| matches!(
             n,
             ControlNode::Break { label: None }
         )),
-        "{:?}",
-        ignored.0
+        "{ignored:?}"
     );
-    assert!(!contains_block(&ignored.0, hop), "{:?}", ignored.0);
-    assert!(ignored.1.is_fully_structured(), "{:?}", ignored.1);
+    assert!(!contains_block(&ignored, hop), "{ignored:?}");
+    assert!(
+        ignored.report().is_fully_structured(),
+        "{:?}",
+        ignored.report()
+    );
     let plain = ControlTree::compute(&full);
     assert!(contains_block(&plain, hop), "{plain:?}");
-    assert_ne!(plain, ignored.0);
+    assert_ne!(plain, ignored);
 }
 
 #[test]
-fn treating_nothing_as_empty_is_compute_with_report() {
+fn treating_nothing_as_empty_is_compute() {
     let (cfg, _) = loop_with_jump_trampoline(true);
     assert_eq!(
-        ControlTree::compute_with_report_treating_empty(&cfg, &[]),
-        ControlTree::compute_with_report(&cfg)
+        ControlTree::compute_treating_empty(&cfg, &[]),
+        ControlTree::compute(&cfg)
     );
 }
 
@@ -83,7 +86,7 @@ fn an_emptied_condition_block_has_an_empty_condition_span() {
     cfg.add_edge(cfg.entry(), merge, EdgeKind::ConditionalFalse);
     cfg.add_edge(then_block, merge, EdgeKind::Fallthrough);
 
-    let (tree, _) = ControlTree::compute_with_report_treating_empty(&cfg, &[cfg.entry()]);
+    let tree = ControlTree::compute_treating_empty(&cfg, &[cfg.entry()]);
     let condition = tree
         .preorder()
         .find_map(|id| match *tree.node(id) {

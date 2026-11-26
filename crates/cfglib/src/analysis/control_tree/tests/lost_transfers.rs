@@ -10,7 +10,7 @@ use super::semantics::assert_streams_alike;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
+use crate::region::{Handler, HandlerBody, HandlerKind, Region};
 use crate::test_util::{MockInst, ff};
 use crate::{ControlNode, ControlTree};
 
@@ -19,9 +19,10 @@ const MANY_STREAMS: u64 = 64;
 
 /// Compute the tree of `cfg`, check every invariant, and compare many runs.
 fn check_equivalent<I, E>(cfg: &Cfg<I, E>, context: &str) {
-    let (tree, report) = ControlTree::compute_with_report(cfg);
-    check(cfg, &tree, &report, context);
-    assert_streams_alike(cfg, &tree, &report, context, MANY_STREAMS);
+    let tree = ControlTree::compute(cfg);
+    let report = tree.report();
+    check(cfg, &tree, report, context);
+    assert_streams_alike(cfg, &tree, report, context, MANY_STREAMS);
 }
 
 #[test]
@@ -68,8 +69,9 @@ fn a_back_edge_from_dead_code_does_not_loop_the_live_program() {
         &[Terminator::Exit, Terminator::One(0, EdgeKind::Back)],
         &[1; 2],
     );
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
-    check(&cfg, &tree, &report, "dead back edge");
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
+    check(&cfg, &tree, report, "dead back edge");
     assert!(
         !tree
             .preorder()
@@ -97,7 +99,6 @@ fn a_handler_entry_that_dominates_its_protected_blocks_does_not_cut_their_flow()
     cfg.add_edge(b1, b0, EdgeKind::ExceptionHandler);
     cfg.add_edge(b2, b0, EdgeKind::ExceptionHandler);
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [b1, b2].into_iter().collect(),
         handlers: alloc::vec![Handler {
             entry: b0,
@@ -105,7 +106,8 @@ fn a_handler_entry_that_dominates_its_protected_blocks_does_not_cut_their_flow()
             kind: HandlerKind::CatchAll,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
     check_equivalent(&cfg, "handler entry dominating its protected blocks");
 }
 
@@ -127,7 +129,6 @@ fn a_retry_loop_that_leaves_through_the_enclosing_loops_back_edge_continues_it()
     let [b1, b2] = [1, 2].map(BlockId::from_index);
     cfg.add_edge(b1, b2, EdgeKind::ExceptionHandler);
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [b1].into_iter().collect(),
         handlers: alloc::vec![Handler {
             entry: b2,
@@ -135,7 +136,8 @@ fn a_retry_loop_that_leaves_through_the_enclosing_loops_back_edge_continues_it()
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
     check_equivalent(&cfg, "retry loop inside a while loop");
 }
 
@@ -187,8 +189,9 @@ fn no_transfer_repeats_after_a_branch_whose_arms_all_transfer() {
     cfg.add_edge(again, header, EdgeKind::Jump);
     cfg.add_edge(work, header, EdgeKind::Jump);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
-    check(&cfg, &tree, &report, "branches that all transfer");
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
+    check(&cfg, &tree, report, "branches that all transfer");
     assert!(report.is_fully_structured(), "{report:?}");
     assert!(
         !has_transfer_after_a_branch(&tree),
@@ -221,7 +224,6 @@ fn no_goto_follows_a_try_whose_paths_all_return() {
     cfg.add_edge(work, tail, EdgeKind::Fallthrough);
     cfg.add_edge(work, pad, EdgeKind::ExceptionUnwind);
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [test, early, work].into_iter().collect(),
         handlers: alloc::vec![Handler {
             entry: pad,
@@ -229,10 +231,12 @@ fn no_goto_follows_a_try_whose_paths_all_return() {
             kind: HandlerKind::CatchAll,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
-    check(&cfg, &tree, &report, "a try whose paths all return");
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
+    check(&cfg, &tree, report, "a try whose paths all return");
     assert!(report.is_fully_structured(), "{report:?}");
     assert!(
         !tree
@@ -276,7 +280,6 @@ fn a_dead_extent_tail_does_not_make_a_catch_that_resumes_look_like_it_transfers(
         cfg.add_edge(blocks[from], blocks[to], kind);
     }
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [blocks[0]].into_iter().collect(),
         handlers: alloc::vec![Handler {
             entry: blocks[9],
@@ -284,7 +287,8 @@ fn a_dead_extent_tail_does_not_make_a_catch_that_resumes_look_like_it_transfers(
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
     check_equivalent(&cfg, "catch that resumes after a dead extent tail");
 }
 
@@ -322,7 +326,6 @@ fn a_goto_into_the_same_handler_does_not_end_the_try() {
         cfg.add_edge(blocks[from], blocks[to], kind);
     }
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [blocks[5]].into_iter().collect(),
         handlers: alloc::vec![Handler {
             entry: blocks[6],
@@ -330,6 +333,7 @@ fn a_goto_into_the_same_handler_does_not_end_the_try() {
             kind: HandlerKind::CatchAll,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
     check_equivalent(&cfg, "goto into the same handler");
 }

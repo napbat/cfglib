@@ -8,7 +8,7 @@ use crate::block::{BasicBlock, BlockId, BlockTag};
 use crate::edge::{Edge, EdgeId, EdgeTag};
 use crate::graph::edge_view::EdgeRef;
 use crate::graph::store::Graph;
-use crate::region::{Cleanup, Region};
+use crate::region::{Cleanup, HandlerMetadata, Region};
 
 mod anchors;
 mod cleanup;
@@ -104,7 +104,7 @@ pub struct Cfg<I, E = ()> {
     pub(crate) regions: Vec<Region>,
     /// Cleanup records for handlers that continue somewhere once their body
     /// ends (optional; empty unless a frontend records them).
-    pub(crate) cleanups: Vec<Cleanup>,
+    pub(crate) cleanups: HandlerMetadata<Cleanup>,
 }
 
 impl<I, E> Cfg<I, E> {
@@ -137,7 +137,7 @@ impl<I, E> Cfg<I, E> {
             graph,
             entry,
             regions: Vec::new(),
-            cleanups: Vec::new(),
+            cleanups: HandlerMetadata::new(),
         }
     }
 

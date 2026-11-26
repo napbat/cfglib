@@ -71,12 +71,13 @@ impl Flow {
 
     /// Register a region protecting `protected`, with `handlers` attached.
     pub fn region(&mut self, protected: &[BlockId], handlers: Vec<Handler>) -> RegionId {
-        self.cfg.add_region(Region {
-            id: RegionId::from_raw(0), // overwritten by `add_region`
-            protected_blocks: protected.iter().copied().collect(),
-            handlers,
-            parent: None,
-        })
+        self.cfg
+            .add_region(Region {
+                protected_blocks: protected.iter().copied().collect(),
+                handlers,
+                parent: None,
+            })
+            .unwrap()
     }
 
     /// One dispatch edge of a `switch` at `from`.

@@ -1,11 +1,10 @@
 use std::collections::BTreeSet;
 
 use cfglib::{
-    BlockId, Cfg, DenseId, Direction, DominatorTree, EdgeKind, FlowEffect, Graph, NodeId,
-    depth_first_preorder,
+    BlockId, Cfg, DenseId, Direction, DominatorTree, EdgeKind, Graph, NodeId, depth_first_preorder,
 };
 
-use super::fixtures::{BuilderInst, fixture_u32, fixture_weight, probability};
+use super::fixtures::{BuilderInst, BuilderOp, fixture_u32, fixture_weight, probability};
 
 pub(super) fn assert_cfg_shape<I>(cfg: &Cfg<I>, expected_blocks: usize, expected_edges: usize) {
     assert_eq!(
@@ -178,7 +177,7 @@ pub(super) fn assert_builder_cfg(
     cfg: &Cfg<BuilderInst>,
     expected_blocks: usize,
     expected_edges: usize,
-    expected_effects: &[(FlowEffect, usize)],
+    expected_effects: &[(BuilderOp, usize)],
     expected_edge_kinds: &[(EdgeKind, usize)],
 ) {
     assert_cfg_shape(cfg, expected_blocks, expected_edges);

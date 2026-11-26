@@ -49,15 +49,15 @@
 //! single assignment function with block parameters; value analyses over it
 //! belong to the consumer. [`ir::hlil`] is the structured contract: a
 //! read-only [`ir::hlil::FunctionView`] of statement and expression trees and
-//! a write-only [`ir::hlil::FunctionBuilder`] that the consumer implements,
-//! with the walks over its shapes. Every IR storage, builder implementation,
-//! editing machinery, and algorithm over the contents of an instruction
-//! belongs to the consumer.
+//! a write-only [`ir::hlil::FunctionBuilder`] that the consumer implements.
+//! Every IR storage, builder implementation, editing machinery, and
+//! algorithm over the contents of an instruction belongs to the consumer.
 //! [`effects`] is the one exception: [`Effect`] states what code reads,
-//! writes, accesses in memory, and raises, and [`Summarizer`] computes it from
-//! register-transfer statements with one set of rules for every level and
-//! every consumer. [`Captured`] holds the statements of one instruction, and
-//! [`StatementTree`] turns them into expression trees for a readable view.
+//! writes, accesses in memory, and raises, and [`Effect::compute`] computes
+//! it from register-transfer statements with one set of rules for every
+//! level and every consumer. [`Captured`] holds the statements of one
+//! instruction, and [`StatementTree`] turns them into expression trees for a
+//! readable view.
 //! [`ControlTree::compute`] structures a [`Cfg`] into `if / else`, loops,
 //! `switch`, `try / catch`, and `goto` form. The tree is a fact about the graph
 //! in the way [`DominatorTree`] is: a flat arena of nodes that name blocks,
@@ -104,8 +104,8 @@
 //!
 //! Frontends with a flat, structured instruction stream (shader bytecode,
 //! structured ISAs) can instead implement [`FlowControl`] and use
-//! [`CfgBuilder::build`]; [`resolve_jump_edges`] wires explicit gotos
-//! afterwards via [`JumpTargets`].
+//! [`CfgBuilder::build`]; [`resolve_jump_edges`] wires the targets that
+//! their [`Flow`]s name afterwards.
 //!
 //! # Extension contracts
 //!
@@ -131,15 +131,13 @@
 //!                            `Cfg` implements it, every instruction-level
 //!                            analysis reads it)
 //!
-//! FlowControl               (required by CfgBuilder)
-//!   └─ JumpTargets          (optional — explicit goto/label wiring, Target)
+//! FlowControl               (required by CfgBuilder and call graphs —
+//!                            structured markers or a Flow; Target, CaseKey)
 //!
 //! InstrInfo<Variable = V>   (optional — native IR variables for dataflow)
-//!   ├─ EffectInfo           (optional — side effects, Effect)
 //!   └─ MemoryEventInfo      (optional — memory data flow + fences, Location + Fence)
 //!
 //! DisplayInstr              (optional — rendering only: DOT, text)
-//! CallInfo                  (optional — call graphs, Callee)
 //! ```
 //!
 //! [`MemoryEventInfo`] is the sole instruction-side memory contract. Memory
@@ -226,14 +224,14 @@ pub(crate) mod test_util;
 
 pub use analysis::control_tree::{
     BlockSpan, CatchHandler, ChildBodies, ControlBody, ControlDescent, ControlNode, ControlNodeId,
-    ControlRun, ControlTree, ControlVisitor, GotoDiagnostic, GotoReason, LiftReport, LoopKind,
-    PathDecomposition, Preorder, SplDecomposition, SplError, SplNode, SplNodeId, SplRun,
+    ControlRun, ControlTree, ControlVisitor, GotoDiagnostic, GotoReason, LoopKind,
+    PathDecomposition, Preorder, SplDecomposition, SplError, SplNode, SplNodeId, StructuringReport,
     SwitchCase,
 };
 pub use analysis::metrics::{
     CfgMetrics, GraphMetrics, block_nesting_depths, cfg_block_nesting_depths,
 };
-pub use analysis::pattern::{CfgPattern, detect_cfg_patterns, detect_patterns};
+pub use analysis::pattern::{Pattern, detect_patterns, empty_trampolines};
 pub use block::{BasicBlock, BlockId, BlockTag};
 pub use builder::address::{
     AddressBuildError, AddressCfgOptions, AddressEdgeInfo, AddressGraph, AddressHandler,
@@ -262,7 +260,7 @@ pub use dataflow::fixpoint::{
 pub use dataflow::ifds::{
     CfgSupergraph, IfdsConfig, IfdsProblem, IfdsResults, Supergraph, solve_ifds,
 };
-pub use dataflow::instruction::{EffectInfo, InstrInfo, VariableId};
+pub use dataflow::instruction::InstrInfo;
 pub use dataflow::node_fixpoint::{
     NodeProblem, TryNodeProblem, solve_node_problem, solve_node_problem_from,
     solve_node_problem_from_with_config, solve_node_problem_with_config, try_solve_node_problem,
@@ -279,20 +277,14 @@ pub use dataflow::stream::{SolveStats, stream_edge_problem, stream_node_problem,
 pub use display::{DisplayInstr, IndentedWriter, render};
 pub use edge::{Edge, EdgeId, EdgeKind, EdgeTag, KindedEdge, Probability};
 pub use effects::{
-    Access, AccessShape, Address, CaptureBuilder, Captured, CapturedValue, DialectEffects, Effect,
-    Exit, Expr, ExprId, Exprs, Opaque, RaiseOrigin, Raised, RtlEffect, SelectShape, StateTouch,
-    StatementTree, Summarizer, Touch, TreeItem, TreeNode, TreeNodeId, TreeSpan, TreeSpanValue,
-    Write, WriteKind,
+    Access, AccessShape, CaptureBuilder, Captured, CapturedValue, DialectEffects, Effect, Expr,
+    ExprId, Exprs, MemoryAddress, Opaque, RaiseOrigin, Raised, RtlEffect, SelectShape, StateTouch,
+    StatementTree, TreeItem, TreeNode, TreeNodeId, TreeSpan, TreeSpanValue, Write, WriteKind,
 };
-pub use exception::{
-    ClrExceptionRegion, ClrHandler, ClrHandlerKind, ExceptionDisposition, ExceptionFlow,
-    ExceptionPhase, SehExceptionRegion, SehHandler, SehHandlerKind, SehRegistration,
-    SehRegistrationChain, VectoredExceptionModel, VectoredHandler, VectoredHandlerId,
-    VectoredHandlerKind, VectoredHandlerOrder, VehModel, install_clr_region, install_seh_region,
-};
+pub use exception::{ExceptionDisposition, ExceptionFlow, ExceptionPhase};
 pub use flow::{
-    CallInfo, CallSite, EdgeRole, Flow, FlowControl, FlowEffect, JumpTargets, Transfer, Transfers,
-    UnresolvedRole, UnresolvedTransfer,
+    CallSite, EdgeRole, Flow, FlowControl, FlowEffect, Transfer, Transfers, UnresolvedRole,
+    UnresolvedTransfer,
 };
 pub use graph::call_graph::{
     CallMetadata, FunctionIndex, FunctionNode, call_graph, call_graph_indexed, find_function,
@@ -321,7 +313,7 @@ pub use graph::edge_traverse::{
     breadth_first_edges, depth_first_edges, shortest_path_edges, shortest_path_edges_in,
 };
 pub use graph::edge_view::{EdgeRef, EdgeView, FilteredEdges};
-pub use graph::eh::{EhBlockKind, EhEdge, EhEdgeKind, EhModel};
+pub use graph::eh::{EhBlockKind, EhModel};
 pub use graph::epoch::EpochMarks;
 pub use graph::fanout::{DenseFanout, Fanout, SortedMap};
 pub use graph::feedback::{FeedbackConfig, feedback_arc_set, linear_arrangement};
@@ -398,14 +390,13 @@ pub use graph::view::{
 };
 pub use graph::weak_topological_order::WeakTopologicalOrder;
 pub use memory::{
-    MemoryAccess, MemoryAccessKind, MemoryAtomicity, MemoryEvent, MemoryEventInfo, MemoryOperations,
+    AccessMode, MemoryAccess, MemoryAccessKind, MemoryAtomicity, MemoryEvent, MemoryEventInfo,
+    MemoryOperations,
 };
 pub use region::{
-    Cleanup, CompletionReason, Continuation, ExclusiveExtent, ExtentIssue, ExtentPromotionDecision,
-    ExtentPromotionStatus, ExtentStatus, Handler, HandlerBody, HandlerFilters, HandlerKind,
-    HandlerMetadata, HandlerRef, HandlerTypes, Region, RegionId, RegionIndex,
-    promote_exclusive_extents, promote_handler_extents, recover_exclusive_extents,
-    recover_exclusive_extents_with,
+    Cleanup, CompletionReason, Continuation, ExclusiveExtent, ExtentIssue, ExtentPromotionStatus,
+    Handler, HandlerBody, HandlerKind, HandlerMetadata, HandlerRef, Region, RegionError, RegionId,
+    RegionIndex, promote_exclusive_extents, promote_handler_extents, recover_exclusive_extents,
 };
 pub use rewrite::Rewrite;
 pub use transform::block_order::{ExtTspConfig, ext_tsp_order, ext_tsp_score, hot_cold_order};

@@ -14,8 +14,8 @@ use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
 use crate::graph::traverse::reachable;
 use crate::graph::view::Direction;
-use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
-use crate::{ControlNode, ControlTree, LoopKind, SplError, SplNode};
+use crate::region::{Handler, HandlerBody, HandlerKind, Region};
+use crate::{ControlNode, ControlTree, LoopKind, SplDecomposition, SplError, SplNode};
 use checker::{check_decomposition, check_path};
 
 mod checker;
@@ -99,7 +99,7 @@ fn names(tree: &ControlTree, block: BlockId) -> bool {
 /// decomposition either: there the tree shows the goto or the return.
 fn check<I>(cfg: &Cfg<I>, refused_with_code: &dyn Fn() -> bool, context: &str) -> bool {
     let tree = ControlTree::compute(cfg);
-    match (expected(cfg, &tree), tree.spl_decomposition(cfg)) {
+    match (expected(cfg, &tree), SplDecomposition::compute(&tree, cfg)) {
         (None, Ok(spl)) => {
             check_decomposition(&spl, cfg, context);
             check_path(&spl, cfg, context);
@@ -158,9 +158,7 @@ fn check_every_graph(count: usize, kinds: &[EdgeKind], switches: bool, most: usi
             let cfg = graph(picked, &lengths);
             let refused_with_code = || {
                 let full = graph(picked, &vec![1; count]);
-                ControlTree::compute(&full)
-                    .spl_decomposition(&full)
-                    .is_err()
+                SplDecomposition::compute(&ControlTree::compute(&full), &full).is_err()
             };
             let context = format!("{picked:?} with {lengths:?} instructions");
             if check(&cfg, &refused_with_code, &context) {
@@ -214,8 +212,7 @@ fn build(count: usize, edges: &[(usize, usize, EdgeKind)]) -> (Cfg<&'static str>
 
 /// The decomposition of `cfg`, checked.
 fn decompose(cfg: &Cfg<&'static str>) -> crate::SplDecomposition {
-    let spl = ControlTree::compute(cfg)
-        .spl_decomposition(cfg)
+    let spl = SplDecomposition::compute(&ControlTree::compute(cfg), cfg)
         .expect("the graph is structured");
     check_decomposition(&spl, cfg, "fixture");
     check_path(&spl, cfg, "fixture");
@@ -402,9 +399,7 @@ fn a_switch_is_one_parallel_with_an_arm_per_target() {
 /// against [`expected`].
 fn obstacle(cfg: &Cfg<&'static str>) -> SplError {
     let tree = ControlTree::compute(cfg);
-    let found = tree
-        .spl_decomposition(cfg)
-        .expect_err("the graph has an obstacle");
+    let found = SplDecomposition::compute(&tree, cfg).expect_err("the graph has an obstacle");
     assert_eq!(Some(found), expected(cfg, &tree));
     found
 }
@@ -456,7 +451,6 @@ fn a_try_region_has_no_decomposition() {
     let (mut cfg, blocks) = build(4, &[(0, 1, FALL), (1, 3, FALL), (2, 3, FALL)]);
     cfg.add_edge(blocks[1], blocks[2], EdgeKind::ExceptionHandler);
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [blocks[1]].into_iter().collect(),
         handlers: vec![Handler {
             entry: blocks[2],
@@ -464,7 +458,8 @@ fn a_try_region_has_no_decomposition() {
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
     assert!(matches!(obstacle(&cfg), SplError::TryCatch(_)));
 }
 
@@ -522,11 +517,9 @@ fn with_and_without_code(
     let decompose = |cfg: &Cfg<&'static str>| {
         let tree = ControlTree::compute(cfg);
         assert_eq!(expected(cfg, &tree), None, "the tree has no obstacle");
-        tree.spl_decomposition(cfg).map(|_| ())
+        SplDecomposition::compute(&tree, cfg).map(|_| ())
     };
-    let with_code = ControlTree::compute(&full)
-        .spl_decomposition(&full)
-        .map(|_| ());
+    let with_code = SplDecomposition::compute(&ControlTree::compute(&full), &full).map(|_| ());
     (decompose(&emptied), with_code, blocks)
 }
 
@@ -565,7 +558,7 @@ fn an_exception_edge_has_no_production() {
     let tree = ControlTree::compute(&cfg);
     assert_eq!(expected(&cfg, &tree), None, "the tree has no obstacle");
     assert_eq!(
-        tree.spl_decomposition(&cfg),
+        SplDecomposition::compute(&tree, &cfg),
         Err(SplError::UnplacedEdge(unwind))
     );
 }
@@ -613,8 +606,7 @@ fn a_hundred_thousand_nested_constructs_decompose_on_a_small_stack() {
         let (depth, blocks, width, path_depth) = on_small_stack(move || {
             let decompose = |depth| {
                 let cfg = build(depth);
-                ControlTree::compute(&cfg)
-                    .spl_decomposition(&cfg)
+                SplDecomposition::compute(&ControlTree::compute(&cfg), &cfg)
                     .expect("the nest is structured")
             };
             let spl = decompose(DEPTH);

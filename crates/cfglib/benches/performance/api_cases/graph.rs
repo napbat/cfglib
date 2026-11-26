@@ -4,15 +4,15 @@ use std::ops::ControlFlow;
 
 use cfglib::{BlockId, canonical_hash, canonical_order, multiset_fingerprint, wl_colors};
 use cfglib::{
-    CallInfo, Cfg, Direction, DominatorTree, EdgeKind, FoldEnter, Graph, GraphView, MarkScope,
-    NodeId, OpenFold, OpenFoldConfig, Rooted, SearchConfig, SearchOrder, SearchScratch,
-    SemanticValidator, Visit, call_graph, canonicalize_loops, condensation, condensation_of,
-    depth_first_edges, depth_first_events, depth_first_postorder, detect_loops_tagged,
-    find_back_edges_tagged, find_function, follow, follow_path, insert_preheader,
-    is_recursive_function, is_reducible, kosaraju_scc, loop_exit_blocks, min_label_relaxation,
-    open_breadth_first_events, open_breadth_first_paths, open_depth_first_events,
-    open_fold_post_order, open_search, propagate_summaries, reachable, reverse_postorder,
-    scan_predecessors, search, search_in, to_dot, to_text, topological_sort,
+    Cfg, Direction, DominatorTree, EdgeKind, Flow, FlowControl, FlowEffect, FoldEnter, Graph,
+    GraphView, MarkScope, NodeId, OpenFold, OpenFoldConfig, Rooted, SearchConfig, SearchOrder,
+    SearchScratch, SemanticValidator, Visit, call_graph, canonicalize_loops, condensation,
+    condensation_of, depth_first_edges, depth_first_events, depth_first_postorder,
+    detect_loops_tagged, find_back_edges_tagged, find_function, follow, follow_path,
+    insert_preheader, is_recursive_function, is_reducible, kosaraju_scc, loop_exit_blocks,
+    min_label_relaxation, open_breadth_first_events, open_breadth_first_paths,
+    open_depth_first_events, open_fold_post_order, open_search, propagate_summaries, reachable,
+    reverse_postorder, scan_predecessors, search, search_in, to_dot, to_text, topological_sort,
     topological_sort_or_cycle, verify, verify_edge_view, verify_semantics, verify_view, write_dot,
     write_text,
 };
@@ -35,11 +35,12 @@ const FINGERPRINT_BLOCKS: usize = 10_000;
 #[derive(Clone, Copy)]
 pub(super) struct CallInst(Option<u32>);
 
-impl CallInfo for CallInst {
-    type Callee = u32;
+impl FlowControl for CallInst {
+    type Target = u32;
+    type CaseKey = ();
 
-    fn callee(&self) -> Option<Self::Callee> {
-        self.0
+    fn flow_effect(&self) -> FlowEffect<u32, ()> {
+        FlowEffect::Flow(self.0.map_or(Flow::Next, |target| Flow::Call { target }))
     }
 }
 

@@ -5,8 +5,8 @@
 //! back as a report and never abort the validator.
 
 use cfglib::{
-    Cfg, EdgeRef, EdgeView, GraphView, Handler, HandlerBody, HandlerKind, Region, RegionId,
-    RootedView, VerifyReport, verify, verify_edge_view, verify_view,
+    Cfg, EdgeRef, EdgeView, GraphView, Handler, HandlerBody, HandlerKind, Region, RootedView,
+    VerifyReport, verify, verify_edge_view, verify_view,
 };
 
 /// A two-node view over explicit tables, rooted at node 0. Each field can be
@@ -125,7 +125,6 @@ fn catch_cfg() -> (Cfg<u32>, cfglib::BlockId) {
     let mut cfg = Cfg::<u32>::new();
     let handler = cfg.new_block();
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [cfg.entry()].into_iter().collect(),
         handlers: vec![Handler {
             entry: handler,
@@ -133,7 +132,8 @@ fn catch_cfg() -> (Cfg<u32>, cfglib::BlockId) {
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
     (cfg, handler)
 }
 
@@ -148,6 +148,6 @@ fn a_handler_entry_that_was_removed_is_reported_before_compaction_panics() {
     assert_eq!(report.error_count(), 1, "{:?}", report.errors);
     assert_eq!(
         report.errors[0].message,
-        format!("exception metadata names {handler}, which is not a live block")
+        format!("exception metadata names {handler}, which is not a live block of the graph")
     );
 }

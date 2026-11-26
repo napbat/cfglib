@@ -54,8 +54,10 @@ fn treating_a_jump_trampoline_as_empty_structures_it_as_a_plain_break_or_continu
     } = loop_with_trampolines();
     let empty = [break_hop, continue_hop];
 
-    let (as_is, as_is_report) = ControlTree::compute_with_report(&flow.cfg);
-    let (tree, report) = ControlTree::compute_with_report_treating_empty(&flow.cfg, &empty);
+    let as_is = ControlTree::compute(&flow.cfg);
+    let as_is_report = as_is.report();
+    let tree = ControlTree::compute_treating_empty(&flow.cfg, &empty);
+    let report = tree.report();
 
     assert!(as_is_report.is_fully_structured(), "{as_is_report:?}");
     assert!(report.is_fully_structured(), "{report:?}");
@@ -82,8 +84,10 @@ fn treating_blocks_as_empty_equals_structuring_a_copy_whose_blocks_were_cleared(
     for block in empty {
         cleared.block_mut(block).instructions_mut().clear();
     }
-    let (expected_tree, expected_report) = ControlTree::compute_with_report(&cleared);
-    let (tree, report) = ControlTree::compute_with_report_treating_empty(&flow.cfg, &empty);
+    let expected_tree = ControlTree::compute(&cleared);
+    let expected_report = expected_tree.report();
+    let tree = ControlTree::compute_treating_empty(&flow.cfg, &empty);
+    let report = tree.report();
 
     assert_eq!(tree, expected_tree);
     assert_eq!(report, expected_report);
@@ -97,12 +101,12 @@ fn treating_blocks_as_empty_equals_structuring_a_copy_whose_blocks_were_cleared(
 }
 
 #[test]
-fn treating_no_block_as_empty_is_compute_with_report() {
+fn treating_no_block_as_empty_is_compute() {
     let Trampolines { flow, .. } = loop_with_trampolines();
 
     assert_eq!(
-        ControlTree::compute_with_report_treating_empty(&flow.cfg, &[]),
-        ControlTree::compute_with_report(&flow.cfg)
+        ControlTree::compute_treating_empty(&flow.cfg, &[]),
+        ControlTree::compute(&flow.cfg)
     );
 }
 
@@ -115,12 +119,12 @@ fn trees_treating_blocks_as_empty_imply_the_flow_through_those_blocks() {
     } = loop_with_trampolines();
     let empty: BTreeSet<BlockId> = [break_hop, continue_hop].into_iter().collect();
 
-    let (tree, report) =
-        ControlTree::compute_with_report_treating_empty(&flow.cfg, &[break_hop, continue_hop]);
+    let tree = ControlTree::compute_treating_empty(&flow.cfg, &[break_hop, continue_hop]);
+    let report = tree.report();
 
     assert_well_formed(&tree);
     let covered = reachable_blocks(&flow.cfg);
-    assert_flow_matches_graph_with(&flow.cfg, &tree, &report, &covered, &|block| {
+    assert_flow_matches_graph_with(&flow.cfg, &tree, report, &covered, &|block| {
         empty.contains(&block) || flow.cfg.block(block).is_empty()
     });
     let mut kept = covered;
@@ -135,7 +139,7 @@ fn trees_treating_blocks_as_empty_imply_the_flow_through_those_blocks() {
 fn treating_a_block_the_graph_lacks_as_empty_panics() {
     let flow = Flow::starting_with("only");
 
-    let _ = ControlTree::compute_with_report_treating_empty(&flow.cfg, &[BlockId::from_raw(9)]);
+    let _ = ControlTree::compute_treating_empty(&flow.cfg, &[BlockId::from_raw(9)]);
 }
 
 #[test]

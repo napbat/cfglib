@@ -2,15 +2,14 @@ use std::collections::BTreeSet;
 use std::convert::Infallible;
 
 use cfglib::{
-    BlockId, BlockOrder, Cfg, ClrExceptionRegion, ClrHandler, ClrHandlerKind, Edge, EdgeKind,
-    Emitter, FlowEffect, HandlerBody, HandlerTypes, SehExceptionRegion, SehHandler, SehHandlerKind,
-    contract_edge_mapped, install_clr_region, install_seh_region, linearize, merge_blocks_mapped,
+    BlockId, BlockOrder, Cfg, Edge, EdgeKind, Emitter, Flow, FlowEffect, Handler, HandlerBody,
+    HandlerKind, Region, contract_edge_mapped, linearize, merge_blocks_mapped,
     promote_handler_extents, remove_empty_blocks_mapped, remove_unreachable_mapped,
     resolve_jump_edges, simplify_mapped, split_critical_edges_mapped, verify,
 };
 use cfglib::{
-    DispatchBuilder, DispatchReport, DominatorTree, ExclusiveExtent, ExtentPromotionDecision,
-    HandlerRef, RelaxError, RelaxMode, SpanItem, is_reducible, make_reducible,
+    DispatchBuilder, DispatchReport, DominatorTree, ExclusiveExtent, ExtentPromotionStatus,
+    RegionId, RelaxError, RelaxMode, SpanItem, is_reducible, make_reducible,
     make_reducible_with_dispatch, promote_exclusive_extents, recover_exclusive_extents,
     relax_layout, relax_spans,
 };
@@ -77,26 +76,26 @@ fn assert_dispatched_complete(result: &Cfg<u32>, report: &DispatchReport, blocks
 
 struct ApiEmitter;
 
+/// The `u32` token of `block`, which both a jump target and a label carry.
+fn block_token(block: BlockId) -> u32 {
+    u32::try_from(block.index()).expect("benchmark block index must fit in u32")
+}
+
 impl Emitter<ApiInst> for ApiEmitter {
     fn emit_jump(&self, target: BlockId) -> ApiInst {
-        let mut instruction = ApiInst::control(FlowEffect::Jump);
-        instruction.jump_target =
-            Some(u32::try_from(target.index()).expect("benchmark block index must fit in u32"));
-        instruction
+        ApiInst::control(FlowEffect::Flow(Flow::Jump {
+            target: block_token(target),
+        }))
     }
 
     fn emit_conditional_branch(&self, _condition: &ApiInst, target: BlockId) -> ApiInst {
-        let mut instruction = ApiInst::control(FlowEffect::ConditionalJump);
-        instruction.jump_target =
-            Some(u32::try_from(target.index()).expect("benchmark block index must fit in u32"));
-        instruction
+        ApiInst::control(FlowEffect::Flow(Flow::Conditional {
+            target: block_token(target),
+        }))
     }
 
     fn emit_block_start(&self, block: BlockId) -> Option<ApiInst> {
-        let mut instruction = ApiInst::control(FlowEffect::Label);
-        instruction.label =
-            Some(u32::try_from(block.index()).expect("benchmark block index must fit in u32"));
-        Some(instruction)
+        Some(ApiInst::control(FlowEffect::Label(block_token(block))))
     }
 }
 
@@ -121,12 +120,10 @@ fn critical_cfg() -> Cfg<ApiInst> {
 fn jump_cfg() -> Cfg<ApiInst> {
     let mut cfg = Cfg::new();
     let target = cfg.new_block();
-    let mut jump = ApiInst::control(FlowEffect::Jump);
-    jump.jump_target = Some(7);
-    cfg.block_mut(cfg.entry()).push(jump);
-    let mut label = ApiInst::control(FlowEffect::Label);
-    label.label = Some(7);
-    cfg.block_mut(target).push(label);
+    cfg.block_mut(cfg.entry())
+        .push(ApiInst::control(FlowEffect::Flow(Flow::Jump { target: 7 })));
+    cfg.block_mut(target)
+        .push(ApiInst::control(FlowEffect::Label(7)));
     cfg
 }
 
@@ -369,11 +366,25 @@ fn register_frontend_utilities(suite: &mut BenchmarkSuite<'_>) {
             assert_eq!(resolution.resolved, 1);
             assert_eq!(
                 resolution.unresolved,
-                [] as [(cfglib::Id<cfglib::BlockTag>, u32); 0]
+                [] as [cfglib::UnresolvedTransfer<u32, cfglib::BlockId>; 0]
             );
             assert!(verify(candidate).is_ok());
         }
     );
+}
+
+/// A region protecting `protected_blocks` with one catch handler of unknown
+/// extent entered at `handler`.
+fn unknown_catch_region(protected_blocks: BTreeSet<BlockId>, handler: BlockId) -> Region {
+    Region {
+        protected_blocks,
+        handlers: vec![Handler {
+            entry: handler,
+            body: HandlerBody::Unknown,
+            kind: HandlerKind::Catch,
+        }],
+        parent: None,
+    }
 }
 
 fn register_exception_regions(suite: &mut BenchmarkSuite<'_>) {
@@ -386,69 +397,12 @@ fn register_exception_regions(suite: &mut BenchmarkSuite<'_>) {
         covers[promote_handler_extents],
         || {
             let mut candidate = base.clone();
-            let mut handler_types = HandlerTypes::new();
-            install_clr_region(
-                &mut candidate,
-                &mut handler_types,
-                ClrExceptionRegion {
-                    protected_blocks: protected_blocks.clone(),
-                    handlers: vec![ClrHandler {
-                        entry: handler,
-                        body: HandlerBody::Unknown,
-                        kind: ClrHandlerKind::Catch { ty: 1_u32 },
-                    }],
-                    parent: None,
-                },
-            );
+            candidate
+                .add_region(unknown_catch_region(protected_blocks.clone(), handler))
+                .unwrap();
             promote_handler_extents(&mut candidate)
         },
-        |promoted: &usize| assert!(*promoted <= 1)
-    );
-    benchmark_case!(
-        suite,
-        "api_install_clr_region",
-        covers[install_clr_region],
-        || {
-            let mut candidate = base.clone();
-            let mut handler_types = HandlerTypes::new();
-            let id = install_clr_region(
-                &mut candidate,
-                &mut handler_types,
-                ClrExceptionRegion {
-                    protected_blocks: protected_blocks.clone(),
-                    handlers: vec![ClrHandler {
-                        entry: handler,
-                        body: HandlerBody::Unknown,
-                        kind: ClrHandlerKind::Catch { ty: 1_u32 },
-                    }],
-                    parent: None,
-                },
-            );
-            (candidate, handler_types, id)
-        },
-        |(candidate, _, _)| assert_eq!(candidate.regions().len(), 1)
-    );
-    benchmark_case!(
-        suite,
-        "api_install_seh_region",
-        covers[install_seh_region],
-        || {
-            let mut candidate = base.clone();
-            let id = install_seh_region(
-                &mut candidate,
-                SehExceptionRegion {
-                    protected_blocks: protected_blocks.clone(),
-                    handlers: vec![SehHandler {
-                        entry: handler,
-                        body: HandlerBody::Unknown,
-                        kind: SehHandlerKind::Finally,
-                    }],
-                    parent: None,
-                },
-            );
-            (candidate, id)
-        },
-        |(candidate, _)| assert_eq!(candidate.regions().len(), 1)
+        |decisions: &Vec<(RegionId, ExtentPromotionStatus)>| assert_eq!(decisions.len(), 1)
     );
 }
 
@@ -464,20 +418,8 @@ fn guarded_cfg() -> Cfg<ApiInst> {
     cfg.add_edge(entry, handler, EdgeKind::ExceptionHandler);
     cfg.add_edge(body, join, EdgeKind::Fallthrough);
     cfg.add_edge(handler, join, EdgeKind::Fallthrough);
-    let mut handler_types = HandlerTypes::new();
-    install_clr_region(
-        &mut cfg,
-        &mut handler_types,
-        ClrExceptionRegion {
-            protected_blocks: BTreeSet::from([entry]),
-            handlers: vec![ClrHandler {
-                entry: handler,
-                body: HandlerBody::Unknown,
-                kind: ClrHandlerKind::Catch { ty: 1_u32 },
-            }],
-            parent: None,
-        },
-    );
+    cfg.add_region(unknown_catch_region(BTreeSet::from([entry]), handler))
+        .unwrap();
     cfg
 }
 
@@ -487,8 +429,8 @@ fn register_extents(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_recover_exclusive_extents",
-        covers[recover_exclusive_extents, recover_exclusive_extents_with],
-        || recover_exclusive_extents(&guarded),
+        covers[recover_exclusive_extents],
+        || recover_exclusive_extents(&guarded, |_, edge| !edge.kind().is_exceptional()),
         |extents: &Vec<ExclusiveExtent>| assert_eq!(extents.len(), 1)
     );
     benchmark_case!(
@@ -497,20 +439,12 @@ fn register_extents(suite: &mut BenchmarkSuite<'_>) {
         covers[promote_exclusive_extents],
         || {
             let mut candidate = guarded.clone();
-            let bodies: Vec<(HandlerRef, BTreeSet<BlockId>)> =
-                recover_exclusive_extents(&candidate)
-                    .into_iter()
-                    .map(|extent| (extent.handler, extent.blocks))
-                    .collect();
-            let decisions = promote_exclusive_extents(&mut candidate, |handler| {
-                bodies
-                    .iter()
-                    .find(|(candidate, _)| *candidate == handler)
-                    .map(|(_, blocks)| blocks.clone())
-            });
+            let extents =
+                recover_exclusive_extents(&candidate, |_, edge| !edge.kind().is_exceptional());
+            let decisions = promote_exclusive_extents(&mut candidate, &extents);
             (candidate, decisions)
         },
-        |(candidate, decisions): &(Cfg<ApiInst>, Vec<ExtentPromotionDecision>)| {
+        |(candidate, decisions): &(Cfg<ApiInst>, Vec<(RegionId, ExtentPromotionStatus)>)| {
             assert!(verify(candidate).is_ok());
             assert_eq!(decisions.len(), 1);
         }

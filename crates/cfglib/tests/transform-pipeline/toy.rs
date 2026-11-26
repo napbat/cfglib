@@ -5,9 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use cfglib::{
-    BlockId, Cfg, Edge, EdgeId, EdgeKind, EffectInfo, Emitter, InstrInfo, LinearInst, Probability,
-};
+use cfglib::{BlockId, Cfg, Edge, EdgeId, EdgeKind, Emitter, InstrInfo, LinearInst, Probability};
 
 pub type Reg = u8;
 
@@ -122,14 +120,6 @@ impl InstrInfo for Inst {
 
     fn defs(&self) -> &[Reg] {
         &self.defs
-    }
-}
-
-impl EffectInfo for Inst {
-    type Effect = Effect;
-
-    fn effects(&self) -> &[Effect] {
-        &self.effects
     }
 }
 

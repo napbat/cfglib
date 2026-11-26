@@ -5,9 +5,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::identity::define_dense_id;
-use crate::ir::rtl::Bits;
+use crate::ir::rtl::{Bits, Place};
 
-use super::vocabulary::Touch;
+use super::pool::Span;
 
 define_dense_id! {
     /// The identity of one expression of an [`Exprs`] arena.
@@ -35,7 +35,7 @@ pub enum Opaque {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Expr<'e, S> {
     /// A read of the value from before the code.
-    Read(Touch<S>),
+    Read(Place<S>),
     /// A constant.
     Const {
         /// The little-endian 64-bit words of the value. Bits past the width
@@ -64,40 +64,17 @@ pub enum Expr<'e, S> {
     },
 }
 
-/// A run of one pool of an [`Exprs`] arena.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct Run {
-    start: u32,
-    len: u32,
-}
-
-impl Run {
-    fn push<T: Copy>(pool: &mut Vec<T>, items: &[T]) -> Self {
-        let start =
-            u32::try_from(pool.len()).expect("an expression pool holds at most u32::MAX items");
-        pool.extend_from_slice(items);
-        let len =
-            u32::try_from(items.len()).expect("an expression pool holds at most u32::MAX items");
-        Self { start, len }
-    }
-
-    fn get<T>(self, pool: &[T]) -> &[T] {
-        let start = self.start as usize;
-        &pool[start..start + self.len as usize]
-    }
-}
-
-/// One stored expression. Its slices are runs of the pools of the arena.
+/// One stored expression. Its slices are spans of the pools of the arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Node<S> {
-    Read(Touch<S>),
+    Read(Place<S>),
     Const {
-        words: Run,
+        words: Span,
         width: Bits,
     },
     Op {
         name: &'static str,
-        args: Run,
+        args: Span,
         result: u32,
         width: Bits,
     },
@@ -107,12 +84,18 @@ enum Node<S> {
     },
 }
 
-/// A small arena of expressions over places of type `S`.
+/// A small arena of expressions over places of roots of type `S`.
 ///
 /// The guards and the addresses of an [`Effect`](super::Effect) point into
 /// it. An expression refers only to expressions that were added before it,
 /// so the arena is a directed acyclic graph. Two arenas are equal when they
 /// hold the same expressions in the same order.
+///
+/// A reader rewrites an arena by adding one expression to a new arena for
+/// each expression of the old one, in the order of [`ids`](Self::ids): every
+/// [`ExprId`] of the effect then names the rewritten expression. This is how
+/// a reader substitutes what it knows and the dialect does not, such as the
+/// value of an operator without operands.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Exprs<S> {
     nodes: Vec<Node<S>>,
@@ -139,7 +122,7 @@ impl<S> Exprs<S> {
 
     /// Returns how many expressions the arena holds.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub fn expr_count(&self) -> usize {
         self.nodes.len()
     }
 
@@ -156,14 +139,14 @@ impl<S> Exprs<S> {
         ExprId(id)
     }
 
-    /// Adds a read of `touch`.
-    pub fn read(&mut self, touch: Touch<S>) -> ExprId {
-        self.push(Node::Read(touch))
+    /// Adds a read of `place`.
+    pub fn read(&mut self, place: Place<S>) -> ExprId {
+        self.push(Node::Read(place))
     }
 
     /// Adds a constant of type `width` from little-endian 64-bit words.
     pub fn constant(&mut self, words: &[u64], width: Bits) -> ExprId {
-        let words = Run::push(&mut self.words, words);
+        let words = Span::push(&mut self.words, words);
         self.push(Node::Const { words, width })
     }
 
@@ -177,7 +160,7 @@ impl<S> Exprs<S> {
             args.iter().all(|arg| arg.index() < self.nodes.len()),
             "an operand is an earlier expression of the arena"
         );
-        let args = Run::push(&mut self.args, args);
+        let args = Span::push(&mut self.args, args);
         self.push(Node::Op {
             name,
             args,
@@ -201,7 +184,7 @@ impl<S: Copy> Exprs<S> {
     #[must_use]
     pub fn get(&self, id: ExprId) -> Expr<'_, S> {
         match self.nodes[id.index()] {
-            Node::Read(touch) => Expr::Read(touch),
+            Node::Read(place) => Expr::Read(place),
             Node::Const { words, width } => Expr::Const {
                 words: words.get(&self.words),
                 width,

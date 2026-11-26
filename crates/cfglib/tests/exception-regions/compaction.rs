@@ -7,7 +7,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use cfglib::{
     BlockId, BlockTag, Cfg, Cleanup, CompletionReason, Continuation, EdgeKind, EhModel, Handler,
-    HandlerBody, HandlerKind, HandlerRef, NodeOrder, Renumbering,
+    HandlerBody, HandlerKind, HandlerRef, NodeOrder, RegionId, Renumbering,
 };
 
 use crate::shapes::{Stmt, block_of, catch, handler, protect, try_catch, unknown_catch};
@@ -77,15 +77,16 @@ fn holey() -> Holey {
         &[inner],
         vec![handler(cleanup, HandlerKind::Finally, &[cleanup])],
     );
-    cfg.region_mut(nested).expect("added").parent = Some(outer);
+    cfg.region_mut(nested).parent = Some(outer);
     let finally = HandlerRef::new(nested, 0);
-    cfg.set_cleanup_resume(finally, cleanup);
-    for (reason, resume) in [
+    cfg.set_cleanup_exit(finally, cleanup).unwrap();
+    for (reason, target) in [
         (CompletionReason::Normal, after),
         (CompletionReason::Transfer, catch_tail),
         (CompletionReason::Unwind, inner),
     ] {
-        cfg.add_continuation(finally, Continuation { reason, resume });
+        cfg.add_continuation(finally, Continuation { reason, target })
+            .unwrap();
     }
     Holey { cfg, removed }
 }
@@ -125,9 +126,9 @@ fn compaction_renumbers_every_block_reference_as_it_renumbers_the_blocks() {
     }
     assert_eq!(cfg.entry(), survivor(&renumbering, before.entry()));
 
-    assert_eq!(cfg.regions().len(), before.regions().len());
-    for (old, new) in before.regions().iter().zip(cfg.regions()) {
-        assert_eq!(new.id, old.id, "region identities are not renumbered");
+    assert_eq!(cfg.region_count(), before.region_count());
+    for ((old_id, old), (new_id, new)) in before.regions().zip(cfg.regions()) {
+        assert_eq!(new_id, old_id, "region identities are not renumbered");
         assert_eq!(new.parent, old.parent);
         assert_eq!(
             new.protected_blocks,
@@ -154,16 +155,18 @@ fn compaction_renumbers_every_block_reference_as_it_renumbers_the_blocks() {
     }
 
     assert_eq!(cfg.cleanups().len(), before.cleanups().len());
-    for (old, new) in before.cleanups().iter().zip(cfg.cleanups()) {
+    for ((old_handler, old), (new_handler, new)) in
+        before.cleanups().iter().zip(cfg.cleanups().iter())
+    {
+        assert_eq!(new_handler, old_handler);
         let expected = Cleanup {
-            handler: old.handler,
-            resume_from: old.resume_from.map(|block| survivor(&renumbering, block)),
+            exit_block: old.exit_block.map(|block| survivor(&renumbering, block)),
             continuations: old
                 .continuations
                 .iter()
                 .map(|route| Continuation {
                     reason: route.reason,
-                    resume: survivor(&renumbering, route.resume),
+                    target: survivor(&renumbering, route.target),
                 })
                 .collect(),
         };
@@ -180,6 +183,18 @@ fn the_eh_model_before_and_after_compaction_agrees_through_the_renumbering() {
     let renumbering = cfg.compact(NodeOrder::Insertion);
     let after = EhModel::compute(&cfg);
 
+    // The handlers entered at `block`, and how many routes each one records.
+    let entered = |cfg: &Cfg<Stmt>, block: BlockId| {
+        cfg.handlers_at(block)
+            .map(|(handler, _)| {
+                (
+                    handler,
+                    cfg.cleanup(handler)
+                        .map(|cleanup| cleanup.continuations.len()),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
     assert_eq!(after.block_bound(), cfg.block_count());
     for block in before_cfg.block_ids() {
         let renamed = survivor(&renumbering, block);
@@ -188,38 +203,37 @@ fn the_eh_model_before_and_after_compaction_agrees_through_the_renumbering() {
             before.block_kind(block),
             "{block}"
         );
-        assert_eq!(after.handlers(renamed), before.handlers(block), "{block}");
         assert_eq!(
-            *after.protected_by(renamed),
-            surviving(&renumbering, before.protected_by(block)),
+            entered(&cfg, renamed),
+            entered(&before_cfg, block),
             "{block}"
         );
         assert_eq!(
-            after
-                .cleanup(renamed)
-                .map(|cleanup| cleanup.continuations.len()),
-            before
-                .cleanup(block)
-                .map(|cleanup| cleanup.continuations.len()),
+            *after.protected_by(renamed),
+            surviving(&renumbering, before.protected_by(block)),
             "{block}"
         );
     }
     let expected_edges: Vec<_> = before
         .eh_edges()
         .iter()
-        .map(|edge| {
+        .map(|&edge| {
+            let old = before_cfg.edge(edge);
             (
-                renumbering.edge(edge.edge_id).expect("the edge survived"),
-                survivor(&renumbering, edge.from),
-                survivor(&renumbering, edge.to),
-                edge.kind,
+                renumbering.edge(edge).expect("the edge survived"),
+                survivor(&renumbering, old.source()),
+                survivor(&renumbering, old.target()),
+                old.kind(),
             )
         })
         .collect();
     let actual_edges: Vec<_> = after
         .eh_edges()
         .iter()
-        .map(|edge| (edge.edge_id, edge.from, edge.to, edge.kind))
+        .map(|&edge| {
+            let new = cfg.edge(edge);
+            (edge, new.source(), new.target(), new.kind())
+        })
         .collect();
     assert_eq!(actual_edges, expected_edges);
 }
@@ -246,7 +260,10 @@ fn a_graph_with_no_removed_block_compacts_to_itself() {
 
     assert!(renumbering.is_identity());
     assert!(cfg.is_dense());
-    assert_eq!(cfg.regions(), before.regions());
+    assert_eq!(
+        cfg.regions().collect::<Vec<_>>(),
+        before.regions().collect::<Vec<_>>()
+    );
     assert_eq!(cfg.entry(), before.entry());
     assert_eq!(cfg.to_listing(), before.to_listing());
 }
@@ -302,18 +319,22 @@ fn single_references() -> Vec<(&'static str, Cfg<Stmt>, BlockId)> {
     let resume_block = block_of(&mut resume.cfg, &["resume here"]);
     resume
         .cfg
-        .set_cleanup_resume(HandlerRef::new(resume.region, 0), resume_block);
-    graphs.push(("cleanup resume block", resume.cfg, resume_block));
+        .set_cleanup_exit(HandlerRef::new(resume.region, 0), resume_block)
+        .unwrap();
+    graphs.push(("cleanup exit block", resume.cfg, resume_block));
 
     let mut route = try_catch(&["log(e)"]);
     let target = block_of(&mut route.cfg, &["continue here"]);
-    route.cfg.add_continuation(
-        HandlerRef::new(route.region, 0),
-        Continuation {
-            reason: CompletionReason::Normal,
-            resume: target,
-        },
-    );
+    route
+        .cfg
+        .add_continuation(
+            HandlerRef::new(route.region, 0),
+            Continuation {
+                reason: CompletionReason::Normal,
+                target,
+            },
+        )
+        .unwrap();
     graphs.push(("cleanup continuation", route.cfg, target));
 
     graphs
@@ -352,7 +373,7 @@ fn a_set_of_blocks_loses_a_removed_member_instead_of_failing() {
     let mut fixture = try_catch(&["log(e)"]);
     let spare = block_of(&mut fixture.cfg, &["spare"]);
     {
-        let region = fixture.cfg.region_mut(fixture.region).expect("exists");
+        let region = fixture.cfg.region_mut(fixture.region);
         region.protected_blocks.insert(spare);
         region.handlers.push(Handler {
             entry: fixture.pad,
@@ -364,7 +385,7 @@ fn a_set_of_blocks_loses_a_removed_member_instead_of_failing() {
 
     let renumbering = fixture.cfg.compact(NodeOrder::Insertion);
 
-    let region = fixture.cfg.region(fixture.region).expect("exists");
+    let region = fixture.cfg.region(fixture.region);
     assert_eq!(region.protected_blocks.len(), 1);
     assert!(
         region
@@ -396,7 +417,7 @@ fn an_unknown_extent_has_no_block_set_to_shrink_and_stays_unknown() {
     fixture.cfg.compact(NodeOrder::Insertion);
 
     assert_eq!(
-        fixture.cfg.regions()[1].handlers[0].body,
+        fixture.cfg.region(RegionId::from_raw(1)).handlers[0].body,
         HandlerBody::Unknown
     );
 }

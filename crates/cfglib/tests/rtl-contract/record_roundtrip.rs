@@ -20,10 +20,10 @@ use crate::tessera::{Tessera, TesseraFunction};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum OwnedSelection<D: Dialect, V> {
-    Direct(Place<D>),
+    Direct(Place<D::Root>),
     Finite {
         index: V,
-        candidates: Vec<Place<D>>,
+        candidates: Vec<Place<D::Root>>,
     },
     Sparse {
         bank: D::Root,
@@ -40,7 +40,7 @@ pub enum OwnedTarget<D: Dialect, V> {
     },
     Finite {
         index: V,
-        candidates: Vec<Place<D>>,
+        candidates: Vec<Place<D::Root>>,
         value: V,
     },
     Sparse {
@@ -321,7 +321,7 @@ fn sink_reads_and_raise<D: Target, B: InstructionBuilder<D>>(
     let root = D::root_of;
     let width_of = |id: u8| D::root_width(root(id));
 
-    let whole = rec.read(Selection::Direct(Place::whole(root(0))), width_of(0));
+    let whole = rec.read(Selection::Direct(Place::whole::<D>(root(0))), width_of(0));
     let field = Place {
         root: root(1),
         slice: BitSlice::new(8, bits(16)),
@@ -329,9 +329,9 @@ fn sink_reads_and_raise<D: Target, B: InstructionBuilder<D>>(
     let part = rec.read(Selection::Direct(field), bits(16));
     let index = rec.constant(&[2], bits(8));
     let candidates = [
-        Place::whole(root(0)),
-        Place::whole(root(1)),
-        Place::whole(root(2)),
+        Place::whole::<D>(root(0)),
+        Place::whole::<D>(root(1)),
+        Place::whole::<D>(root(2)),
     ];
     let picked = rec.read(
         Selection::FiniteIndexed {
@@ -411,7 +411,7 @@ fn sink_writes<D: Target, B: InstructionBuilder<D>>(
         },
         D::policy(),
     );
-    let targets = [Place::whole(root(2)), Place::whole(root(3))];
+    let targets = [Place::whole::<D>(root(2)), Place::whole::<D>(root(3))];
     rec.write(
         WriteTarget::FiniteIndexed {
             index: handles.index,
@@ -690,7 +690,7 @@ fn root_write_beside_indexed_write<D: Target, B: InstructionBuilder<D>>(builder:
     let width = D::root_width(root(0)).width();
     full_plan::<D, B>(builder, 1);
     let index = builder.constant(&[0], bits(8));
-    let candidates = [Place::whole(root(0)), Place::whole(root(1))];
+    let candidates = [Place::whole::<D>(root(0)), Place::whole::<D>(root(1))];
     let value = builder.constant(&vec![0; bits(width).words()], bits(width));
     builder.write(
         WriteTarget::FiniteIndexed {
@@ -735,7 +735,7 @@ fn produce<D: Target, B: InstructionBuilder<D>>(mut b: B, case: Case) -> Result<
     let control = match case {
         Case::UnknownOperand => {
             let stray = B::Value::from_index(999);
-            let candidates = [Place::whole(root(0)), Place::whole(root(1))];
+            let candidates = [Place::whole::<D>(root(0)), Place::whole::<D>(root(1))];
             b.read(Selection::FiniteIndexed {
                 index: stray,
                 candidates: &candidates,
@@ -800,7 +800,7 @@ fn produce<D: Target, B: InstructionBuilder<D>>(mut b: B, case: Case) -> Result<
             Control::Terminating
         }
         Case::UnconditionalRaiseThatTerminates => {
-            b.read(Selection::Direct(Place::whole(root(0))));
+            b.read(Selection::Direct(Place::whole::<D>(root(0))));
             raise_with::<D, B>(&mut b, None, &[]);
             Control::Terminating
         }

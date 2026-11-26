@@ -37,7 +37,7 @@ use crate::transform::contract::contract;
 /// [`Cfg::compact`], so a caller can still inspect what it dropped.
 ///
 /// Blocks that exception metadata names (handler entries, filter blocks,
-/// cleanup resume points and continuation targets) count as roots, along with
+/// cleanup exit blocks and continuation targets) count as roots, along with
 /// everything they reach: a handler no modeled edge enters is still a handler.
 /// Call [`Cfg::remove_unreachable_regions`] first to drop regions that nothing
 /// can raise into, together with their handler blocks.

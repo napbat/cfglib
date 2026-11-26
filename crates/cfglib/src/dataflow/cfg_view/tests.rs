@@ -15,10 +15,9 @@ use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::dataflow::fixpoint::solve_problem;
 use crate::edge::{EdgeId, EdgeKind, KindedEdge, Probability};
-use crate::flow::FlowEffect;
 use crate::graph::edge_view::{EdgeRef, EdgeView};
 use crate::graph::view::{GraphView, RootedView};
-use crate::test_util::{DfInst, LiveVariables, df_def, df_use, df_with_effect};
+use crate::test_util::{DfInst, LiveVariables, df_def, df_throwing, df_use};
 
 /// One edge of the toy storage.
 #[derive(Debug)]
@@ -155,8 +154,7 @@ fn fixture() -> Cfg<DfInst> {
     let handler = cfg.new_block();
 
     cfg.block_mut(entry).push(df_def("r0", 0));
-    cfg.block_mut(entry)
-        .push(df_with_effect(df_def("r1", 1), FlowEffect::MayThrow));
+    cfg.block_mut(entry).push(df_throwing(df_def("r1", 1)));
     cfg.block_mut(left).push(df_use("use r0", 0));
     cfg.block_mut(left).push(df_def("r2 left", 2));
     cfg.block_mut(right).push(df_def("r2 right", 2));

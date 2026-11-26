@@ -176,7 +176,8 @@ fn arms_that_enter_a_shared_exit_free_loop_keep_the_transfer_explicit() {
         &[(3, Fallthrough)],
         &[(1, Back)],
     ]);
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert_eq!(report.gotos.len(), 1, "{report:?}");
     assert_eq!(report.gotos[0].reason, GotoReason::RevisitedTarget);
     assert_eq!(

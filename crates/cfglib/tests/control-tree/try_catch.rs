@@ -3,7 +3,10 @@
 
 use std::collections::BTreeSet;
 
-use cfglib::{BlockId, ControlNode, EdgeKind, HandlerKind, HandlerRef, promote_handler_extents};
+use cfglib::{
+    BlockId, ControlNode, EdgeKind, ExtentPromotionStatus, HandlerKind, HandlerRef, RegionId,
+    promote_handler_extents,
+};
 
 use crate::builders::{Flow, handler, handler_over, pseudocode, try_catch_finally};
 use crate::coverage::{blocks_under, reachable_blocks};
@@ -39,8 +42,9 @@ fn try_catch() -> (Flow, [BlockId; 4], cfglib::RegionId) {
 fn region_with_a_catch_handler_becomes_a_try_catch_node() {
     let (flow, [entry, body, pad, after], region) = try_catch();
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
     assert!(
         report.swept_blocks.is_empty(),
         "the pad is lifted inside its handler"
@@ -80,15 +84,18 @@ fn catch_and_finally_share_one_region_and_the_cleanup_runs_after_both() {
     // Both handlers are entered through exception edges only, and every
     // path ends at `after`.
     let flow = try_catch_finally();
-    let region = flow.cfg.regions()[0].id;
-    let body = *flow.cfg.regions()[0]
+    let region = RegionId::from_raw(0);
+    let body = *flow
+        .cfg
+        .region(region)
         .protected_blocks
         .first()
         .expect("the region protects the body");
-    let cleanup = flow.cfg.regions()[0].handlers[1].entry;
+    let cleanup = flow.cfg.region(region).handlers[1].entry;
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let ControlNode::TryCatch {
         try_body,
@@ -143,7 +150,8 @@ fn handler_kinds_keep_their_declaration_order_and_their_text() {
     // reach it; it is covered all the same.
     let mut covered = reachable_blocks(&flow.cfg);
     covered.insert(filter);
-    let (tree, report) = structure_and_check_covering(&flow.cfg, &covered);
+    let tree = structure_and_check_covering(&flow.cfg, &covered);
+    let report = tree.report();
 
     let ControlNode::TryCatch { handlers, .. } = first_try(&tree) else {
         unreachable!("first_try returns a try/catch");
@@ -198,8 +206,9 @@ fn several_finally_handlers_concatenate_in_declaration_order() {
         ],
     );
 
-    let (tree, report) = structure_and_check_shape_only(&flow.cfg, &reachable_blocks(&flow.cfg));
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check_shape_only(&flow.cfg, &reachable_blocks(&flow.cfg));
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let ControlNode::TryCatch {
         handlers,
@@ -236,10 +245,11 @@ fn nested_regions_nest_their_try_catch_nodes_and_keep_exception_edges_inside() {
         vec![handler(outer_pad, HandlerKind::Catch)],
     );
     let inner = flow.region(&[inner_body], vec![handler(inner_pad, HandlerKind::Catch)]);
-    flow.cfg.region_mut(inner).expect("just added").parent = Some(outer);
+    flow.cfg.region_mut(inner).parent = Some(outer);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let tries = nodes_where(&tree, |node| matches!(node, ControlNode::TryCatch { .. }));
     assert_eq!(tries.len(), 2);
@@ -293,8 +303,9 @@ fn protected_block_that_returns_is_a_block_leaf_since_its_exception_edge_is_a_su
     flow.fall(pad, after);
     flow.region(&[body], vec![handler(pad, HandlerKind::Catch)]);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let ControlNode::TryCatch {
         try_body, handlers, ..
@@ -322,8 +333,9 @@ fn catch_arm_that_returns_ends_in_a_return_leaf() {
     flow.edge(entry, pad, EdgeKind::ExceptionHandler);
     flow.region(&[entry], vec![handler(pad, HandlerKind::Catch)]);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let ControlNode::TryCatch { handlers, .. } = first_try(&tree) else {
         unreachable!("first_try returns a try/catch");
@@ -363,8 +375,9 @@ fn shared_cleanup_entered_by_ordinary_flow_is_the_finally_the_try_completes_into
         ],
     );
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
     assert_eq!(
         pseudocode(&flow.cfg, &tree),
         "open()\ntry {\n    work()\n} catch {\n    recover()\n} finally {\n    close()\n}\nreturn\n"
@@ -388,8 +401,9 @@ fn try_inside_a_loop_keeps_the_loop_around_the_try_catch() {
     flow.jump(step, header);
     flow.region(&[body], vec![handler(pad, HandlerKind::Catch)]);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     assert_eq!(
         pseudocode(&flow.cfg, &tree),
@@ -414,9 +428,10 @@ fn catch_pad_that_no_exception_edge_enters_is_still_emitted_in_its_handler() {
     let mut covered = reachable_blocks(&flow.cfg);
     covered.insert(pad);
 
-    let (tree, report) = structure_and_check_covering(&flow.cfg, &covered);
+    let tree = structure_and_check_covering(&flow.cfg, &covered);
+    let report = tree.report();
 
-    assert_fully_structured(&tree, &report);
+    assert_fully_structured(&tree, report);
     let ControlNode::TryCatch {
         try_body, handlers, ..
     } = first_try(&tree)
@@ -442,7 +457,7 @@ fn protected_block_the_entry_cannot_reach_is_dropped_as_dead_code() {
     flow.fall(pad, after);
     flow.region(&[dead], vec![handler(pad, HandlerKind::Catch)]);
 
-    let (tree, _) = cfglib::ControlTree::compute_with_report(&flow.cfg);
+    let tree = cfglib::ControlTree::compute(&flow.cfg);
 
     let text = pseudocode(&flow.cfg, &tree);
     assert!(!text.contains("never()"), "{text}");
@@ -456,12 +471,10 @@ fn protected_block_the_entry_cannot_reach_is_dropped_as_dead_code() {
 #[test]
 fn unknown_handler_extent_stays_ordinary_flow_and_is_reported() {
     let (mut flow, [_, body, pad, after], region) = try_catch();
-    flow.cfg
-        .handler_mut(HandlerRef::new(region, 0))
-        .expect("handler")
-        .body = cfglib::HandlerBody::unknown();
+    flow.cfg.handler_mut(HandlerRef::new(region, 0)).body = cfglib::HandlerBody::unknown();
 
-    let (tree, report) = structure_and_check(&flow.cfg);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
 
     assert!(!report.is_fully_structured());
     assert_eq!(report.unstructured_regions, [region]);
@@ -482,29 +495,26 @@ fn unknown_handler_extent_stays_ordinary_flow_and_is_reported() {
 #[test]
 fn promoting_unknown_extents_on_a_derived_graph_lets_the_structurer_emit_the_try() {
     let (mut flow, _, region) = try_catch();
-    flow.cfg
-        .handler_mut(HandlerRef::new(region, 0))
-        .expect("handler")
-        .body = cfglib::HandlerBody::unknown();
-    let (_, unstructured) = cfglib::ControlTree::compute_with_report(&flow.cfg);
-    assert_eq!(unstructured.unstructured_regions, [region]);
+    flow.cfg.handler_mut(HandlerRef::new(region, 0)).body = cfglib::HandlerBody::unknown();
+    let unstructured = cfglib::ControlTree::compute(&flow.cfg);
+    assert_eq!(unstructured.report().unstructured_regions, [region]);
 
     // The canonical graph keeps saying "unknown"; a clone lifted for
     // presentation gets the sound dominated extent.
     let mut derived = flow.cfg.clone();
-    assert_eq!(promote_handler_extents(&mut derived), 1);
-    let (tree, report) = structure_and_check(&derived);
+    assert_eq!(
+        promote_handler_extents(&mut derived),
+        [(region, ExtentPromotionStatus::Promoted)]
+    );
+    let tree = structure_and_check(&derived);
+    let report = tree.report();
 
-    assert_fully_structured(&tree, &report);
+    assert_fully_structured(&tree, report);
     assert_eq!(
         nodes_where(&tree, |node| matches!(node, ControlNode::TryCatch { .. })).len(),
         1
     );
-    assert!(
-        !flow.cfg.regions()[region.index()].handlers[0]
-            .body
-            .is_known()
-    );
+    assert!(!flow.cfg.region(region).handlers[0].body.is_known());
 }
 
 #[test]
@@ -530,8 +540,9 @@ fn two_handlers_with_disjoint_extents_each_own_their_blocks() {
         ],
     );
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let ControlNode::TryCatch { handlers, .. } = first_try(&tree) else {
         unreachable!("first_try returns a try/catch");

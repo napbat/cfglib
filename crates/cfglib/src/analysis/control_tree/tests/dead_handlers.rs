@@ -62,7 +62,6 @@ fn pad_graph(looped: bool, extent: &[usize], orphan: bool) -> Cfg<MockInst> {
         cfg.add_edge(b[7], b[5], Fallthrough);
     }
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [b[2]].into_iter().collect(),
         handlers: vec![Handler {
             entry: b[4],
@@ -70,15 +69,17 @@ fn pad_graph(looped: bool, extent: &[usize], orphan: bool) -> Cfg<MockInst> {
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
     cfg
 }
 
 #[test]
 fn a_dead_catch_pad_inside_a_loop_keeps_its_body() {
     let cfg = dead_pad(true);
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
-    check(&cfg, &tree, &report, "dead pad in a loop");
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
+    check(&cfg, &tree, report, "dead pad in a loop");
     // The pad's tail reaches the try's continuation, the loop's latch, and
     // so does the pad's false arm: both simply end the handler.
     assert_eq!(
@@ -112,8 +113,9 @@ fn a_live_catch_pad_inside_a_loop_matches_the_dead_one() {
         cfg.block_ids().nth(2).unwrap(),
     );
     cfg.add_edge(try_block, pad, EdgeKind::ExceptionHandler);
-    let (live, report) = ControlTree::compute_with_report(&cfg);
-    check(&cfg, &live, &report, "live pad in a loop");
+    let live = ControlTree::compute(&cfg);
+    let report = live.report();
+    check(&cfg, &live, report, "live pad in a loop");
     let dead_cfg = dead_pad(true);
     let dead = ControlTree::compute(&dead_cfg);
     assert_eq!(pseudocode(&cfg, &live), pseudocode(&dead_cfg, &dead));
@@ -126,8 +128,9 @@ fn a_dead_pad_tail_outside_the_extent_is_swept_under_its_label() {
     // b5, so only the sweep can emit it.
     let cfg = pad_graph(true, &[4], true);
     let b: Vec<BlockId> = cfg.block_ids().collect();
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
-    check(&cfg, &tree, &report, "dead pad tail");
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
+    check(&cfg, &tree, report, "dead pad tail");
     assert_eq!(report.swept_blocks, [b[5]], "{report:?}");
     assert!(report.unresolved_labels.is_empty(), "{report:?}");
     let text = pseudocode(&cfg, &tree);
@@ -148,7 +151,6 @@ fn a_block_only_a_known_extent_claims_is_emitted() {
     cfg.add_edge(b[1], b[2], Fallthrough);
     cfg.add_edge(b[3], b[2], Fallthrough);
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [b[1]].into_iter().collect(),
         handlers: vec![Handler {
             entry: b[3],
@@ -156,9 +158,11 @@ fn a_block_only_a_known_extent_claims_is_emitted() {
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
-    check(&cfg, &tree, &report, "orphan in a known extent");
+    })
+    .unwrap();
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
+    check(&cfg, &tree, report, "orphan in a known extent");
     assert_eq!(owned_blocks(&cfg), [b[0], b[1], b[2], b[3], b[5]]);
     // The extent is the handler's own code, so the block lands inside it.
     assert!(report.swept_blocks.is_empty(), "{report:?}");
@@ -187,7 +191,6 @@ fn one_dead_pad_named_as_entry_and_filter_is_one_root() {
     cfg.add_edge(b[3], b[2], ConditionalFalse);
     cfg.add_edge(b[4], b[2], Fallthrough);
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [b[2]].into_iter().collect(),
         handlers: vec![
             Handler {
@@ -202,9 +205,11 @@ fn one_dead_pad_named_as_entry_and_filter_is_one_root() {
             },
         ],
         parent: None,
-    });
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
-    check(&cfg, &tree, &report, "pad named twice");
+    })
+    .unwrap();
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
+    check(&cfg, &tree, report, "pad named twice");
 }
 
 /// A real function's graph, minimized from a Rust-to-IL lowering: five
@@ -352,11 +357,11 @@ fn from_text(text: &str) -> Cfg<MockInst> {
                     })
                     .collect();
                 cfg.add_region(Region {
-                    id: RegionId::from_raw(fields[1].parse().unwrap()),
                     protected_blocks: numbers(fields[3], &ids).into_iter().collect(),
                     handlers,
                     parent,
-                });
+                })
+                .unwrap();
             }
             other => panic!("unknown line {other}"),
         }
@@ -367,8 +372,9 @@ fn from_text(text: &str) -> Cfg<MockInst> {
 #[test]
 fn a_real_function_with_dead_pads_in_loops_loses_no_block() {
     let cfg = from_text(REAL_FUNCTION);
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
-    check(&cfg, &tree, &report, "real function");
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
+    check(&cfg, &tree, report, "real function");
     assert!(report.unresolved_labels.is_empty(), "{report:?}");
     assert!(report.unstructured_regions.is_empty(), "{report:?}");
     // The catch pad's blocks are in the tree, inside its handler. The pad's
@@ -398,7 +404,6 @@ fn with_region(
         cfg.add_edge(ids[protected], ids[handler], EdgeKind::ExceptionHandler);
     }
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [ids[protected]].into_iter().collect(),
         handlers: vec![Handler {
             entry: ids[handler],
@@ -410,7 +415,8 @@ fn with_region(
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
 }
 
 #[test]
@@ -453,14 +459,15 @@ fn every_small_graph_with_a_handler_keeps_every_owned_block() {
                                 "{picked:?} guarding {protected}, pad {handler} extent \
                                  {extent:?} live {live} emptied {emptied:?}"
                             );
-                            let (tree, report) = ControlTree::compute_with_report(&cfg);
-                            check(&cfg, &tree, &report, &context);
+                            let tree = ControlTree::compute(&cfg);
+                            let report = tree.report();
+                            check(&cfg, &tree, report, &context);
                             if let Some(block) = emptied {
                                 let full = build(&vec![1; count]);
                                 let hole = full.block_ids().nth(block).unwrap();
                                 assert_eq!(
-                                    ControlTree::compute_with_report_treating_empty(&full, &[hole]),
-                                    (tree, report),
+                                    ControlTree::compute_treating_empty(&full, &[hole]),
+                                    tree,
                                     "{context}"
                                 );
                             }
@@ -548,14 +555,13 @@ fn random_graph_with_regions(random: &mut Rng, empty_percent: usize) -> Cfg<DfIn
                 Handler { entry, body, kind }
             })
             .collect();
-        let parent =
-            (!cfg.regions().is_empty() && random.chance(30)).then(|| RegionId::from_raw(0));
+        let parent = (cfg.region_count() > 0 && random.chance(30)).then(|| RegionId::from_raw(0));
         cfg.add_region(Region {
-            id: RegionId::from_raw(0),
             protected_blocks: protected,
             handlers,
             parent,
-        });
+        })
+        .unwrap();
     }
     isolate_handlers(&mut cfg);
     cfg
@@ -566,11 +572,12 @@ fn random_graphs_with_handlers_keep_every_owned_block() {
     let mut random = Rng::new(0x9E37_79B9_7F4A_7C15);
     for sample in 0..40_000 {
         let cfg = random_graph_with_regions(&mut random, 0);
-        let (tree, report) = ControlTree::compute_with_report(&cfg);
+        let tree = ControlTree::compute(&cfg);
+        let report = tree.report();
         check(
             &cfg,
             &tree,
-            &report,
+            report,
             &alloc::format!("sample {sample}: {}", describe(&cfg)),
         );
     }
@@ -585,8 +592,9 @@ fn random_graphs_with_handlers_and_empty_blocks_keep_every_label() {
     for sample in 0..40_000 {
         let mut cfg = random_graph_with_regions(&mut random, 30);
         let context = alloc::format!("sample {sample}: {}", describe(&cfg));
-        let (tree, report) = ControlTree::compute_with_report(&cfg);
-        check(&cfg, &tree, &report, &context);
+        let tree = ControlTree::compute(&cfg);
+        let report = tree.report();
+        check(&cfg, &tree, report, &context);
         let emptied: Vec<BlockId> = cfg
             .block_ids()
             .filter(|&block| cfg.block(block).instructions().is_empty())
@@ -595,8 +603,8 @@ fn random_graphs_with_handlers_and_empty_blocks_keep_every_label() {
             cfg.block_mut(block).push(crate::test_util::df_ff("i"));
         }
         assert_eq!(
-            ControlTree::compute_with_report_treating_empty(&cfg, &emptied),
-            (tree, report),
+            ControlTree::compute_treating_empty(&cfg, &emptied),
+            tree,
             "{context}"
         );
     }
