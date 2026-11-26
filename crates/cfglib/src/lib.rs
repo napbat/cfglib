@@ -423,6 +423,6 @@ pub use transform::critical::{
 pub use transform::layout::{RelaxError, RelaxMode, SpanItem, relax_layout, relax_spans};
 pub use transform::linearize::{BlockOrder, Emitter, LinearInst, LinearizeError, linearize};
 pub use transform::pass::{
-    Pass, PassChange, PassExecution, PassFailure, PassFn, PassId, PassPipeline, PassReport, pass_fn,
+    Pass, PassError, PassExecution, PassFn, PassId, PassPipeline, PassReport, pass_fn,
 };
 pub use union_find::DisjointSet;

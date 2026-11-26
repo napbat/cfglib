@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::convert::Infallible;
 
 use cfglib::{
-    BlockId, Cfg, Pass, PassChange, PassId, PassPipeline, SemanticValidator, merge_blocks, pass_fn,
+    BlockId, Cfg, Pass, PassId, PassPipeline, SemanticValidator, merge_blocks, pass_fn,
     remove_empty_blocks, remove_unreachable, simplify, split_critical_edges,
     split_critical_edges_mapped, verify_with,
 };
@@ -52,7 +52,7 @@ fn transform<'a, E: Payload + 'a>(
             "{name}: the count disagrees with what changed"
         );
         log.borrow_mut().push((name, count > 0));
-        Ok(PassChange::from_changed(count > 0))
+        Ok(count > 0)
     })
 }
 
@@ -81,7 +81,7 @@ fn verified<'a, E: 'a>(log: &'a Log) -> impl Pass<Cfg<Inst, E>, Error = Rejected
             let report = verify_with(cfg, &TwoWayBranches);
             log.borrow_mut().push(("check.verify", false));
             if report.is_ok() {
-                Ok(PassChange::Unchanged)
+                Ok(false)
             } else {
                 Err(Rejected::Invalid(report.error_count()))
             }
@@ -130,11 +130,7 @@ fn a_cleanup_pipeline_runs_in_schedule_order_and_reports_each_pass_honestly() {
             scheduled
         );
         for (execution, &(_, changed)) in report.executions().iter().zip(recorded.iter()) {
-            assert_eq!(
-                execution.change(),
-                PassChange::from_changed(changed),
-                "seed {seed}"
-            );
+            assert_eq!(execution.changed(), changed, "seed {seed}");
         }
         let changes = recorded.iter().filter(|&&(_, changed)| changed).count();
         assert_eq!(report.changed_count(), changes);
@@ -193,7 +189,7 @@ fn a_failing_pass_stops_the_pipeline_and_the_failure_names_it() {
         PassId::new("test.reject"),
         |cfg: &mut Cfg<Inst>| {
             cfg.new_block();
-            Err::<PassChange, _>(Rejected::Refused("no budget"))
+            Err::<bool, _>(Rejected::Refused("no budget"))
         },
     ));
     pipeline.push(transform("never.runs", &log, simplify));
@@ -236,7 +232,7 @@ fn a_pass_failing_first_leaves_an_empty_completed_report_and_converts_to_a_boxed
     fn run_all(cfg: &mut Cfg<Inst>) -> Result<(), Box<dyn std::error::Error>> {
         let mut pipeline = PassPipeline::<Cfg<Inst>, Rejected>::new();
         pipeline.push(pass_fn(PassId::new("check.first"), |_: &mut Cfg<Inst>| {
-            Err::<PassChange, _>(Rejected::Invalid(3))
+            Err::<bool, _>(Rejected::Invalid(3))
         }));
         let report = pipeline.run(cfg)?;
         assert!(report.is_empty(), "the only pass failed");
@@ -269,7 +265,7 @@ fn a_verifying_pass_turns_a_violated_consumer_rule_into_a_failure() {
             .expect("the program branches");
         let edge = cfg.outgoing(branch).next().unwrap();
         cfg.remove_edge(edge);
-        Ok::<_, Rejected>(PassChange::Changed)
+        Ok::<_, Rejected>(true)
     }));
     pipeline.push(verified(&log));
 
@@ -305,10 +301,7 @@ fn repeating_an_identity_expresses_a_fixpoint_schedule_that_ends_unchanged() {
         let report = pipeline.run(&mut cfg).unwrap();
 
         let tail = &report.executions()[report.len() - 2..];
-        if tail
-            .iter()
-            .all(|execution| !execution.change().is_changed())
-        {
+        if tail.iter().all(|execution| !execution.changed()) {
             converged += 1;
             let mut expected = before.clone();
             while remove_unreachable(&mut expected) + merge_blocks(&mut expected) > 0 {}
@@ -337,11 +330,11 @@ impl Pass<Cfg<Inst>> for CountingSimplify<'_> {
         PassId::new("stateful.simplify")
     }
 
-    fn run(&mut self, cfg: &mut Cfg<Inst>) -> Result<PassChange, Infallible> {
+    fn run(&mut self, cfg: &mut Cfg<Inst>) -> Result<bool, Infallible> {
         let removed = simplify(cfg);
         self.blocks_removed.set(self.blocks_removed.get() + removed);
         self.runs.set(self.runs.get() + 1);
-        Ok(PassChange::from_changed(removed > 0))
+        Ok(removed > 0)
     }
 }
 
@@ -351,11 +344,12 @@ fn passes_keep_their_own_state_and_borrowed_context_across_runs() {
     let mut observed_sizes = Vec::new();
     let (blocks_removed, runs) = (Cell::new(0), Cell::new(0));
     {
-        let mut pipeline = PassPipeline::<Cfg<Inst>, Infallible>::new().with_pass(pass_fn(
+        let mut pipeline = PassPipeline::<Cfg<Inst>, Infallible>::new();
+        pipeline.push(pass_fn(
             PassId::new("observe.size"),
             |cfg: &mut Cfg<Inst>| {
                 observed_sizes.push(cfg.block_count());
-                Ok(PassChange::Unchanged)
+                Ok(false)
             },
         ));
         pipeline.push(CountingSimplify {
@@ -396,12 +390,7 @@ fn an_empty_schedule_succeeds_with_an_empty_report() {
 }
 
 #[test]
-fn pass_identities_and_changes_have_the_documented_conversions() {
-    assert_eq!(PassChange::default(), PassChange::Unchanged);
-    assert_eq!(PassChange::from_changed(true), PassChange::Changed);
-    assert_eq!(PassChange::from_changed(false), PassChange::Unchanged);
-    assert!(PassChange::Changed.is_changed() && !PassChange::Unchanged.is_changed());
-
+fn pass_identities_have_the_documented_conversions() {
     let first = PassId::new("java.recover-loops");
     assert_eq!(first.as_str(), "java.recover-loops");
     assert_eq!(first.to_string(), "java.recover-loops");
