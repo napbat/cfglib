@@ -545,7 +545,7 @@ fn refuse_ignores_the_table() {
         open_fold_in(&mut memo, &mut memoizing, 1, memoize),
         Ok(Some("member")),
     );
-    assert_eq!(memo.len(), 2);
+    assert_eq!(memo.answer_count(), 2);
 
     let mut refusing = Lookup::new(bases, owns, MarkScope::Isolated);
     assert_eq!(
@@ -553,7 +553,7 @@ fn refuse_ignores_the_table() {
         Ok(None),
     );
     assert_eq!(refusing.folded, [0, 1, 3, 2, 3]);
-    assert_eq!(memo.len(), 2);
+    assert_eq!(memo.answer_count(), 2);
     assert_eq!(memo.get(&0), None);
 }
 

@@ -304,7 +304,7 @@ fn memoized_reuses_the_answers_of_earlier_calls_until_they_are_removed() {
         "both routes still reach 0",
     );
     assert_eq!(lookup.folded, [1, 3, 0, 2]);
-    assert_eq!(memo.len(), 4);
+    assert_eq!(memo.answer_count(), 4);
     assert_eq!(memo.get(&0), Some(None));
 
     // A removed answer is folded again; the answers it fed stay stored.

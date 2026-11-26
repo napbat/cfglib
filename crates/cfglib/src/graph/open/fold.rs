@@ -230,7 +230,7 @@ impl<K: Ord, V> OpenFoldMemo<K, V> {
 
     /// The number of stored answers.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub fn answer_count(&self) -> usize {
         self.answers.len()
     }
 
@@ -676,7 +676,7 @@ where
 /// assert_eq!(open_fold_in(&mut memo, &mut height, 1, memoize), Ok(Some(2)));
 /// assert_eq!(height.folded, [0, 2, 3, 1]);
 /// assert_eq!(memo.get(&2), Some(Some(&1)));
-/// assert_eq!(memo.len(), 4);
+/// assert_eq!(memo.answer_count(), 4);
 /// ```
 pub fn open_fold_in<F: OpenFold>(
     memo: &mut OpenFoldMemo<F::Mark, F::Value>,

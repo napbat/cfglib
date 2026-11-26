@@ -154,7 +154,7 @@ fn iterate_stores_the_final_answers_and_reuses_them() {
         open_fold_in(&mut memo, &mut exports, 0, ITERATE),
         Ok(Some(both.clone())),
     );
-    assert_eq!(memo.len(), 2);
+    assert_eq!(memo.answer_count(), 2);
     assert_eq!(memo.get(&1), Some(Some(&both)));
     let folds = exports.entered.len();
     assert_eq!(
@@ -491,7 +491,7 @@ fn an_error_leaves_only_final_answers_in_the_table() {
             rounds: 4
         }),
     );
-    assert_eq!(memo.len(), 1);
+    assert_eq!(memo.answer_count(), 1);
     assert_eq!(memo.get(&4), Some(Some(&false)));
 }
 
