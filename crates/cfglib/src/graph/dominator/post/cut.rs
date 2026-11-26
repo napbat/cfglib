@@ -245,7 +245,8 @@ fn for_each_sink<G: GraphView>(
     if !trapped.contains(&true) {
         return;
     }
-    let components = SccDecomposition::compute(&Induced::new(graph, trapped), SccNumbering::LeavesFirst);
+    let components =
+        SccDecomposition::compute(&Induced::new(graph, trapped), SccNumbering::LeavesFirst);
     for component in components.components() {
         let contains = |block: G::NodeId| component.binary_search(&block).is_ok();
         if component
