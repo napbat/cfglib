@@ -11,10 +11,7 @@ use crate::dataflow::cfg_view::CfgView;
 use crate::dataflow::program_point::ProgramPoint;
 use crate::flow::{Flow, FlowControl, FlowEffect};
 use crate::graph::view::GraphView;
-
-/// An unset slot: a removed block, or an instruction that calls no listed
-/// function.
-const NONE: usize = usize::MAX;
+use crate::identity::{NO_INDEX, check_bound, slot, word};
 
 /// The supergraph of a set of keyed CFGs, the input of
 /// [`call_graph`](crate::call_graph), with one node per program point.
@@ -77,12 +74,14 @@ pub struct CfgSupergraph<'g, V> {
     views: Vec<&'g V>,
     /// Per procedure, where its block table starts in `block_first`.
     block_base: Vec<usize>,
-    /// Per procedure and block slot, the block's first node.
-    block_first: Vec<usize>,
+    /// Per procedure and block slot, the block's first node; `NO_INDEX` for a
+    /// removed block.
+    block_first: Vec<u32>,
     /// Per node, its procedure, block and position.
     points: Vec<(usize, BlockId, usize)>,
-    /// Per node, the procedure its instruction calls.
-    calls: Vec<usize>,
+    /// Per node, the procedure its instruction calls; `NO_INDEX` when it calls
+    /// no listed function.
+    calls: Vec<u32>,
 }
 
 impl<'g, V> CfgSupergraph<'g, V>
@@ -91,8 +90,22 @@ where
     V::Inst: FlowControl,
 {
     /// The supergraph of `functions`, each a callee key and its CFG.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the supergraph has more than `u32::MAX` nodes.
     #[must_use]
     pub fn new(functions: &[(<V::Inst as FlowControl>::Target, &'g V)]) -> Self {
+        // Every procedure has its root block, so the procedure count is below
+        // the node bound and fits the same tables.
+        let node_bound: usize = functions
+            .iter()
+            .flat_map(|&(_, view)| {
+                view.node_ids()
+                    .map(move |block| view.instructions(block).len() + 1)
+            })
+            .sum();
+        check_bound(node_bound, "node bound of a CFG supergraph");
         let mut procs_by_key = BTreeMap::new();
         for (proc, (key, _)) in functions.iter().enumerate() {
             procs_by_key.entry(key).or_insert(proc);
@@ -101,8 +114,8 @@ where
             views: Vec::with_capacity(functions.len()),
             block_base: Vec::with_capacity(functions.len()),
             block_first: Vec::new(),
-            points: Vec::new(),
-            calls: Vec::new(),
+            points: Vec::with_capacity(node_bound),
+            calls: Vec::with_capacity(node_bound),
         };
         for (proc, &(_, view)) in functions.iter().enumerate() {
             graph.views.push(view);
@@ -110,9 +123,9 @@ where
             graph.block_base.push(base);
             graph
                 .block_first
-                .resize(base + GraphView::node_bound(view), NONE);
+                .resize(base + GraphView::node_bound(view), NO_INDEX);
             for block in view.node_ids() {
-                graph.block_first[base + block.index()] = graph.points.len();
+                graph.block_first[base + block.index()] = word(graph.points.len());
                 let instructions = view.instructions(block);
                 for (position, instruction) in instructions.iter().enumerate() {
                     graph.points.push((proc, block, position));
@@ -122,10 +135,10 @@ where
                         }
                         _ => None,
                     };
-                    graph.calls.push(callee.unwrap_or(NONE));
+                    graph.calls.push(callee.map_or(NO_INDEX, word));
                 }
                 graph.points.push((proc, block, instructions.len()));
-                graph.calls.push(NONE);
+                graph.calls.push(NO_INDEX);
             }
         }
         graph
@@ -155,12 +168,12 @@ impl<'g, V: CfgView> CfgSupergraph<'g, V> {
     #[must_use]
     pub fn node(&self, proc: usize, point: ProgramPoint) -> usize {
         let first = self.block_first[self.block_base[proc] + point.block.index()];
-        assert!(first != NONE, "the block is not in the procedure");
+        assert!(first != NO_INDEX, "the block is not in the procedure");
         assert!(
             point.inst_idx <= self.views[proc].instructions(point.block).len(),
             "the position is past the end of the block"
         );
-        first + point.inst_idx
+        slot(first) + point.inst_idx
     }
 
     /// The instruction that the edges leaving `node` execute; `None` at the
@@ -177,7 +190,7 @@ impl<'g, V: CfgView> CfgSupergraph<'g, V> {
 
     /// The first node of `block` in procedure `proc`.
     fn first(&self, proc: usize, block: BlockId) -> usize {
-        self.block_first[self.block_base[proc] + block.index()]
+        slot(self.block_first[self.block_base[proc] + block.index()])
     }
 }
 
@@ -218,8 +231,9 @@ impl<V: CfgView> Supergraph for CfgSupergraph<'_, V> {
     }
 
     fn callees(&self, node: usize, out: &mut Vec<usize>) {
-        if self.calls[node] != NONE {
-            out.push(self.calls[node]);
+        let callee = self.calls[node];
+        if callee != NO_INDEX {
+            out.push(slot(callee));
         }
     }
 }

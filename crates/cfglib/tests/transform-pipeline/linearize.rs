@@ -88,16 +88,16 @@ fn assert_stream_follows_the_cfg(
         position += run_length;
 
         assert_eq!(run[0].inst.kind, Kind::Label(block.index()), "{context}");
-        assert_eq!(run[0].index, usize::MAX, "{context}");
+        assert_eq!(run[0].index, None, "{context}");
         let own = cfg.block(block).instructions();
         for (offset, instruction) in own.iter().enumerate() {
-            assert_eq!(run[1 + offset].index, offset, "{context}");
+            assert_eq!(run[1 + offset].index, Some(offset), "{context}");
             assert_eq!(&run[1 + offset].inst, instruction, "{context}");
         }
         let synthetic: Vec<Kind> = run[1 + own.len()..]
             .iter()
             .map(|entry| {
-                assert_eq!(entry.index, usize::MAX, "{context}: only synthetics follow");
+                assert_eq!(entry.index, None, "{context}: only synthetics follow");
                 entry.inst.kind
             })
             .collect();
@@ -215,7 +215,7 @@ fn any_caller_chosen_order_still_runs_like_the_cfg_by_adding_jumps() {
 fn render(stream: &[LinearInst<Inst>]) -> String {
     let mut text = String::new();
     for entry in stream {
-        let synthetic = entry.index == usize::MAX;
+        let synthetic = entry.index.is_none();
         match entry.inst.kind {
             Kind::Label(block) => {
                 if !text.is_empty() {
@@ -225,7 +225,13 @@ fn render(stream: &[LinearInst<Inst>]) -> String {
             }
             Kind::Jump(block) if synthetic => write!(text, " jmp L{block}"),
             Kind::BranchIf(block) if synthetic => write!(text, " bnz L{block}"),
-            _ => write!(text, " {}", entry.index),
+            _ => write!(
+                text,
+                " {}",
+                entry
+                    .index
+                    .expect("the emitter creates only labels, jumps and branches")
+            ),
         }
         .expect("writing to a string cannot fail");
     }
@@ -286,7 +292,7 @@ fn folded_transfers(cfg: &Cfg<Inst>, block: BlockId, next: Option<BlockId>) -> V
 fn synthetic_transfers(stream: &[LinearInst<Inst>], block: BlockId) -> Vec<Kind> {
     stream
         .iter()
-        .filter(|entry| entry.block == block && entry.index == usize::MAX)
+        .filter(|entry| entry.block == block && entry.index.is_none())
         .map(|entry| entry.inst.kind)
         .filter(|kind| !matches!(kind, Kind::Label(_)))
         .collect()
