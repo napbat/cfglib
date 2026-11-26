@@ -6,7 +6,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::{EliminationHeuristic, TreeDecomposition, tree_decomposition};
-use crate::ControlTree;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
@@ -14,6 +13,7 @@ use crate::graph::store::{Graph, NodeId};
 use crate::graph::view::{DenseId, GraphView};
 use crate::test_util::rng::Rng;
 use crate::test_util::shapes::{diamond_chain, scratch_sequence};
+use crate::{ControlTree, SplDecomposition};
 
 const HEURISTICS: [EliminationHeuristic; 2] = [
     EliminationHeuristic::MinDegree,
@@ -343,8 +343,7 @@ fn heuristic_widths_against_the_spl_path_width_on_structured_fixtures() {
     let widths: Vec<(&str, [usize; 3])> = fixtures
         .iter()
         .map(|(name, cfg)| {
-            let spl = ControlTree::compute(cfg)
-                .spl_decomposition(cfg)
+            let spl = SplDecomposition::compute(&ControlTree::compute(cfg), cfg)
                 .expect("the fixture is structured");
             let widths = [
                 tree_decomposition(cfg, EliminationHeuristic::MinDegree).width(),

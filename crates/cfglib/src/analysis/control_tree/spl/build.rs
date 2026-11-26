@@ -17,8 +17,10 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{SplDecomposition, SplError, SplNode, SplNodeId, SplRun};
-use crate::analysis::control_tree::node::{ControlBody, ControlNode, ControlNodeId, LoopKind};
+use super::{SplDecomposition, SplError, SplNode, SplNodeId};
+use crate::analysis::control_tree::node::{
+    ControlBody, ControlNode, ControlNodeId, ControlRun, LoopKind,
+};
 use crate::analysis::control_tree::tree::ControlTree;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
@@ -655,11 +657,11 @@ impl<'a, I, E> Builder<'a, I, E> {
         id
     }
 
-    fn run_of(&mut self, nodes: &[SplNodeId]) -> SplRun {
-        let run = SplRun {
-            start: u32::try_from(self.children.len()).expect("SPL child count fits in u32"),
-            len: u32::try_from(nodes.len()).expect("SPL child count fits in u32"),
-        };
+    fn run_of(&mut self, nodes: &[SplNodeId]) -> ControlRun<SplNodeId> {
+        let run = ControlRun::new(
+            u32::try_from(self.children.len()).expect("SPL child count fits in u32"),
+            u32::try_from(nodes.len()).expect("SPL child count fits in u32"),
+        );
         self.children.extend_from_slice(nodes);
         run
     }
@@ -695,8 +697,7 @@ impl<'a, I, E> Builder<'a, I, E> {
                 SplNode::Break | SplNode::Continue => continue,
             };
             nesting_depth = nesting_depth.max(inner);
-            let start = children.start as usize;
-            let run = &self.children[start..start + children.len()];
+            let run = &self.children[children.range()];
             stack.extend(run.iter().rev().map(|&child| (child, inner)));
         }
         SplDecomposition {

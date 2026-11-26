@@ -8,7 +8,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
-use super::node::ControlNodeId;
+use super::node::{ControlNodeId, ControlRun};
 use super::tree::ControlTree;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
@@ -36,30 +36,6 @@ define_dense_id! {
     dense_id;
 }
 
-/// The ordered children of an [`SplNode`], as a run of one table of the
-/// [`SplDecomposition`] that holds it.
-///
-/// [`SplDecomposition::children`] turns a run into its slice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SplRun {
-    start: u32,
-    len: u32,
-}
-
-impl SplRun {
-    /// The number of children.
-    #[must_use]
-    pub const fn len(self) -> usize {
-        self.len as usize
-    }
-
-    /// Whether the run has no children.
-    #[must_use]
-    pub const fn is_empty(self) -> bool {
-        self.len == 0
-    }
-}
-
 /// One node of an [`SplDecomposition`]: a production of the grammar.
 ///
 /// [`SplDecomposition`] tells what each node does with the edges that enter
@@ -72,7 +48,7 @@ pub enum SplNode {
     /// Series composition, in execution order. An empty series is `ε`.
     Series {
         /// The statements.
-        children: SplRun,
+        children: ControlRun<SplNodeId>,
     },
     /// Parallel composition of the arms of the block before it: `if / else`,
     /// or a `switch` with one arm per target.
@@ -80,7 +56,7 @@ pub enum SplNode {
         /// The block that branches, whose leaf comes right before this node.
         branch: BlockId,
         /// One arm per target of `branch`, each entered over its edges.
-        arms: SplRun,
+        arms: ControlRun<SplNodeId>,
     },
     /// A loop that every iteration enters at `header`.
     Loop {
@@ -152,11 +128,11 @@ impl core::error::Error for SplError {}
 ///
 /// under its CFG construction, and run dynamic programs (register allocation,
 /// lifetime-optimal speculative PRE, partial constraint satisfaction)
-/// bottom-up over the parse tree. [`ControlTree::spl_decomposition`] gives
+/// bottom-up over the parse tree. [`SplDecomposition::compute`] gives
 /// that parse tree for a [`Cfg`] whose [`ControlTree`] is such a program.
 ///
 /// The nodes live in one flat arena, children before their parents, and each
-/// node's children are a [`SplRun`] of one table, as in [`ControlTree`].
+/// node's children are a [`ControlRun`] of one table, as in [`ControlTree`].
 ///
 /// # The grammar over blocks
 ///
@@ -220,7 +196,7 @@ impl core::error::Error for SplError {}
 /// # Examples
 ///
 /// ```
-/// use cfglib::{Cfg, ControlTree, EdgeKind, SplNode};
+/// use cfglib::{Cfg, ControlTree, EdgeKind, SplDecomposition, SplNode};
 ///
 /// // entry; if (test) { then } else { other }; merge
 /// let mut cfg = Cfg::<&str>::new();
@@ -236,7 +212,7 @@ impl core::error::Error for SplError {}
 /// cfg.add_edge(other, merge, EdgeKind::Fallthrough);
 ///
 /// let tree = ControlTree::compute(&cfg);
-/// let spl = tree.spl_decomposition(&cfg).expect("an if/else is structured");
+/// let spl = SplDecomposition::compute(&tree, &cfg).expect("an if/else is structured");
 /// assert_eq!(spl.blocks(), [cfg.entry(), then_block, other, merge]);
 /// assert_eq!(spl.nesting_depth(), 1);
 ///
@@ -263,6 +239,31 @@ pub struct SplDecomposition {
 }
 
 impl SplDecomposition {
+    /// The series-parallel-loop decomposition of `cfg`, the graph `tree` was
+    /// computed from, or the first construct with no counterpart in the
+    /// grammar.
+    ///
+    /// The decomposition follows the tree's statements in their order. It
+    /// adds the blocks the tree has no leaf for: a loop's condition chain and
+    /// latch as the loop's tests, and every block without code where flow
+    /// enters it. The result is checked against `cfg`: the grammar's CFG
+    /// construction gives back exactly its blocks and its edges. That costs
+    /// O(n + m) for n blocks and m edges, as does building it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`SplError`] of the first construct in preorder with no
+    /// counterpart in the grammar; see [`SplDecomposition`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when `cfg` is not the graph `tree` was computed from.
+    pub fn compute<I, E>(tree: &ControlTree, cfg: &Cfg<I, E>) -> Result<Self, SplError> {
+        let decomposition = build::build(tree, cfg)?;
+        expand::verify(&decomposition, cfg)?;
+        Ok(decomposition)
+    }
+
     /// The node of the whole procedure.
     #[must_use]
     pub const fn root(&self) -> SplNodeId {
@@ -291,9 +292,8 @@ impl SplDecomposition {
     ///
     /// Panics when `run` is not a run of this decomposition.
     #[must_use]
-    pub fn children(&self, run: SplRun) -> &[SplNodeId] {
-        let start = run.start as usize;
-        &self.children[start..start + run.len()]
+    pub fn children(&self, run: ControlRun<SplNodeId>) -> &[SplNodeId] {
+        &self.children[run.range()]
     }
 
     /// Every block of the graph, once, in the order of the leaves in
@@ -318,32 +318,5 @@ impl SplDecomposition {
     #[must_use]
     pub fn path_decomposition(&self) -> PathDecomposition {
         path::decompose(self)
-    }
-}
-
-impl ControlTree {
-    /// The series-parallel-loop decomposition of `cfg`, the graph this tree
-    /// was computed from, or the first construct with no counterpart in the
-    /// grammar.
-    ///
-    /// The decomposition follows the tree's statements in their order. It
-    /// adds the blocks the tree has no leaf for: a loop's condition chain and
-    /// latch as the loop's tests, and every block without code where flow
-    /// enters it. The result is checked against `cfg`: the grammar's CFG
-    /// construction gives back exactly its blocks and its edges. That costs
-    /// O(n + m) for n blocks and m edges, as does building it.
-    ///
-    /// # Errors
-    ///
-    /// Returns the [`SplError`] of the first construct in preorder with no
-    /// counterpart in the grammar; see [`SplDecomposition`].
-    ///
-    /// # Panics
-    ///
-    /// Panics when `cfg` is not the graph the tree was computed from.
-    pub fn spl_decomposition<I, E>(&self, cfg: &Cfg<I, E>) -> Result<SplDecomposition, SplError> {
-        let decomposition = build::build(self, cfg)?;
-        expand::verify(&decomposition, cfg)?;
-        Ok(decomposition)
     }
 }

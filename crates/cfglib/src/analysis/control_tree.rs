@@ -42,11 +42,11 @@
 //!
 //! # Decomposition
 //!
-//! [`ControlTree::spl_decomposition`] turns a tree without gotos, labels,
-//! `try` regions, multi-level jumps and early returns into a
-//! [`SplDecomposition`]: the parse tree of the graph's blocks under the
-//! grammar of structured goto-free programs, for dynamic programs that run
-//! over it, with a [`PathDecomposition`] of bounded width.
+//! [`SplDecomposition::compute`] turns a tree without gotos, labels, `try`
+//! regions, multi-level jumps and early returns into a [`SplDecomposition`]:
+//! the parse tree of the graph's blocks under the grammar of structured
+//! goto-free programs, for dynamic programs that run over it, with a
+//! [`PathDecomposition`] of bounded width.
 //!
 //! # Merge points
 //!
@@ -102,6 +102,6 @@ pub use node::{
     SwitchCase,
 };
 pub use report::{GotoDiagnostic, GotoReason, StructuringReport};
-pub use spl::{PathDecomposition, SplDecomposition, SplError, SplNode, SplNodeId, SplRun};
+pub use spl::{PathDecomposition, SplDecomposition, SplError, SplNode, SplNodeId};
 pub use tree::{ChildBodies, ControlTree};
 pub use walk::{ControlDescent, ControlVisitor, Preorder};
