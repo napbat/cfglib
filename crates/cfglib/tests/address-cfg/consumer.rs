@@ -3,8 +3,8 @@
 //! and print the text form.
 
 use cfglib::{
-    AddressEdgeInfo, CallPolicy, Cfg, DominatorTree, Edge, EdgeId, EdgeKind, EdgeRole,
-    ExceptionDisposition, ExceptionFlow, ExceptionPhase, FilteredEdges, HandlerKind,
+    AddressEdgeInfo, AddressHandlerKind, CallPolicy, Cfg, DominatorTree, Edge, EdgeId, EdgeKind,
+    EdgeRole, ExceptionDisposition, ExceptionFlow, ExceptionPhase, FilteredEdges,
     build_address_cfg, verify, verify_edge_view,
 };
 
@@ -25,7 +25,7 @@ fn function_with_handlers() -> (Vec<Op>, Vec<TryRange>) {
             TryRange {
                 protected: 3..6,
                 entry: 9,
-                kind: HandlerKind::Finally,
+                kind: AddressHandlerKind::Finally,
             },
         ],
     )
@@ -49,7 +49,7 @@ fn guarded_function() -> (Vec<Op>, Vec<TryRange>) {
 
 fn assert_same_graph<I: Isa>(first: &Built<I>, second: &Built<I>) {
     assert_eq!(first.graph.cfg, second.graph.cfg);
-    assert_eq!(first.graph.cfg.to_text(), second.graph.cfg.to_text());
+    assert_eq!(first.graph.cfg.to_listing(), second.graph.cfg.to_listing());
     assert_eq!(
         first.graph.instruction_blocks,
         second.graph.instruction_blocks
@@ -86,7 +86,7 @@ fn the_edge_payload_type_does_not_change_the_graph<I: Isa>() {
         |_| (),
     )
     .unwrap();
-    assert_eq!(bare.cfg.to_text(), with_wire.graph.cfg.to_text());
+    assert_eq!(bare.cfg.to_listing(), with_wire.graph.cfg.to_listing());
     assert_eq!(bare.cfg.edge_count(), with_wire.graph.cfg.edge_count());
     assert_eq!(bare.instruction_blocks, with_wire.graph.instruction_blocks);
     assert_eq!(bare.handler_refs, with_wire.graph.handler_refs);
@@ -105,7 +105,6 @@ fn each_edge_is_described_once_with_its_instruction_addresses_and_kind<I: Isa>()
             described.push((
                 layout.position_of(info.source).unwrap(),
                 layout.position_of(info.target).unwrap(),
-                info.kind,
                 info.role.kind(),
             ));
         },
@@ -123,8 +122,8 @@ fn each_edge_is_described_once_with_its_instruction_addresses_and_kind<I: Isa>()
     assert_eq!(graph.cfg.edge_count(), expected.len());
     for (source, target, kind) in expected {
         assert!(
-            described.contains(&(source, target, kind, kind)),
-            "{source} -> {target} {kind} is described, and its role maps to the same kind"
+            described.contains(&(source, target, kind)),
+            "{source} -> {target} {kind} is described, and its role maps to that kind"
         );
     }
 }
@@ -210,7 +209,7 @@ bb2 -> bb4 unwind
 region r0 protected=bb1,bb2
     handler catch entry=bb4 body=?
 ";
-    assert_eq!(built.cfg().to_text(), expected);
+    assert_eq!(built.cfg().to_listing(), expected);
 }
 
 over_both_isas!(

@@ -10,12 +10,12 @@ use core::fmt::{Debug, Display};
 use std::error::Error;
 
 use cfglib::{
-    AddressBuildError, AddressCfgOptions, AddressHandler, AddressInstruction, AddressSpace,
-    CallPolicy, Flow, HandlerKind, verify,
+    AddressBuildError, AddressCfgOptions, AddressHandler, AddressHandlerKind, AddressInstruction,
+    AddressSpace, CallPolicy, Flow, verify,
 };
 
 use crate::bytecode::{Bytecode, Opcode};
-use crate::harness::{assert_empty, plain_options as no_options, try_build};
+use crate::harness::{Wire, assert_empty, plain_options as no_options, try_build};
 use crate::machine::{Machine, Mnemonic};
 
 /// What the error scenarios need of an address type.
@@ -69,21 +69,22 @@ fn catch_range<A: Width>(start: u8, end: u8, entry: u8) -> AddressHandler<A> {
     AddressHandler {
         protected: at(start)..at(end),
         entry: at(entry),
-        kind: HandlerKind::Catch,
+        kind: AddressHandlerKind::Catch,
     }
 }
 
-fn entry_at<A: Width>(entry: u8) -> AddressCfgOptions<A> {
+fn entry_at<A: Width>(entry: u8) -> AddressCfgOptions<'static, A, Wire> {
     AddressCfgOptions {
         entry: Some(at(entry)),
         calls: CallPolicy::Edges,
+        ..AddressCfgOptions::default()
     }
 }
 
 fn error_of<A: Width>(
     instructions: Vec<Span<A>>,
     handlers: &[AddressHandler<A>],
-    options: AddressCfgOptions<A>,
+    options: AddressCfgOptions<'_, A, Wire>,
 ) -> AddressBuildError<A> {
     match try_build(instructions, handlers, options) {
         Ok(_) => panic!("the stream was accepted"),

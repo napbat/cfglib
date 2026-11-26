@@ -9,8 +9,8 @@ use alloc::vec::Vec;
 use super::{HopEnd, UnwindEnd, UnwindHop, UnwindPath, UnwindRoute, UnwindStep};
 use crate::block::BlockId;
 use crate::builder::address::tests::{Inst, inst, quiet_inst};
-use crate::builder::address::{AddressCfgOptions, AddressGraph, build_address_cfg_with_routes};
-use crate::edge::EdgeKind;
+use crate::builder::address::{AddressCfgOptions, AddressGraph, build_address_cfg};
+use crate::edge::{Edge, EdgeKind};
 use crate::flow::{EdgeRole, Flow};
 
 mod errors;
@@ -28,7 +28,7 @@ pub(super) fn wire(info: crate::builder::address::AddressEdgeInfo<'_, u32, i32>)
     (
         info.source,
         info.target,
-        info.kind == EdgeKind::ExceptionUnwind,
+        info.role.kind() == EdgeKind::ExceptionUnwind,
         route,
     )
 }
@@ -82,11 +82,13 @@ pub(super) fn try_build(
     instructions: Vec<Inst>,
     routes: &[UnwindRoute<u32>],
 ) -> Result<Built, crate::builder::address::AddressBuildError<u32>> {
-    let mut graph = build_address_cfg_with_routes(
+    let mut graph = build_address_cfg(
         instructions,
         &[],
-        routes,
-        AddressCfgOptions::default(),
+        AddressCfgOptions {
+            routes: Some(routes),
+            ..AddressCfgOptions::default()
+        },
         wire,
     )?;
     let hops = graph.add_unwind_routes(routes, wire)?;
@@ -670,18 +672,22 @@ fn a_funclet_entry_that_is_split_after_the_build_still_has_its_instances() {
         route(0..1, vec![(funclets(&[10, 20]), UnwindEnd::Propagate)]),
         route(1..2, vec![(funclets(&[10]), UnwindEnd::Propagate)]),
     ];
-    let mut graph = build_address_cfg_with_routes(
+    let mut graph = build_address_cfg(
         instructions,
         &[],
-        &routes,
-        AddressCfgOptions::default(),
+        AddressCfgOptions {
+            routes: Some(&routes),
+            ..AddressCfgOptions::default()
+        },
         wire,
     )
     .expect("valid");
     let head = graph.instruction_blocks[&10];
-    let tail = graph
-        .cfg
-        .split_block_with_payload(head, 1, (10, 11, false, None));
+    let tail = graph.cfg.split_block(
+        head,
+        1,
+        Edge::new(EdgeKind::Fallthrough).with_payload((10, 11, false, None)),
+    );
     graph.instruction_blocks.insert(11, tail);
     let hops = graph.add_unwind_routes(&routes, wire).expect("valid");
     let built = Built { graph, hops };

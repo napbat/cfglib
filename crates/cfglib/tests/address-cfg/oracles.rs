@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 use cfglib::{
-    AddressInstruction, BasicBlock, BlockId, CallPolicy, Cfg, ControlTree, DominatorTree, EdgeKind,
-    Flow, HandlerBody, HandlerRef, RegionId, verify,
+    AddressHandlerKind, AddressInstruction, BasicBlock, BlockId, CallPolicy, Cfg, ControlTree,
+    DominatorTree, EdgeKind, Flow, HandlerBody, HandlerKind, HandlerRef, RegionId, verify,
 };
 
 use crate::harness::{Built, Role, Wire};
@@ -151,6 +151,9 @@ fn expected_leaders<I: Isa>(built: &Built<I>) -> BTreeSet<usize> {
             leaders.insert(entry.protected.end);
         }
         leaders.insert(entry.entry);
+        if let AddressHandlerKind::Filter { filter } = entry.kind {
+            leaders.insert(filter);
+        }
         leaders.extend(entry.protected.clone());
     }
     leaders
@@ -274,7 +277,7 @@ fn check_regions<I: Isa>(built: &Built<I>) {
         for (slot, &index) in handler_indices.iter().enumerate() {
             let handler = &region.handlers[slot];
             assert_eq!(handler.entry, built.block_of(table[index].entry));
-            assert_eq!(handler.kind, table[index].kind);
+            assert_eq!(handler.kind, built.handler_kind(table[index].kind));
             assert_eq!(handler.body, HandlerBody::Unknown);
             assert_eq!(
                 built.graph.handler_refs[index],
@@ -389,10 +392,11 @@ fn addresses_in<I: Isa>(cfg: &Cfg<I::Insn, Wire>, blocks: &BTreeSet<BlockId>) ->
 
 /// The control tree holds each owned instruction exactly once.
 ///
-/// A block is owned when the entry reaches it or when it is a handler entry.
-/// The tree may also lift what flows out of a dead handler pad, but it never
-/// holds a block nothing reaches. Regions that break the structuring
-/// precondition promise nothing, so they are not checked.
+/// A block is owned when the entry reaches it, when it is a handler entry, or
+/// when it starts a handler's filter funclet, which the runtime invokes
+/// without an edge. The tree may also lift what flows out of a dead handler
+/// pad, but it never holds a block nothing reaches. Regions that break the
+/// structuring precondition promise nothing, so they are not checked.
 fn check_control_tree<I: Isa>(built: &Built<I>) {
     let cfg = built.cfg();
     if !regions_are_well_formed(cfg) {
@@ -407,13 +411,20 @@ fn check_control_tree<I: Isa>(built: &Built<I>) {
     let visited: BTreeSet<u64> = visited.into_iter().collect();
     assert_eq!(visited.len(), held, "no instruction appears twice");
 
-    let entries: Vec<BlockId> = cfg
+    let handler_roots: Vec<BlockId> = cfg
         .regions()
         .iter()
-        .flat_map(|region| region.handlers.iter().map(|handler| handler.entry))
+        .flat_map(|region| &region.handlers)
+        .flat_map(|handler| {
+            let filter = match handler.kind {
+                HandlerKind::Filter { filter_block } => Some(filter_block),
+                _ => None,
+            };
+            std::iter::once(handler.entry).chain(filter)
+        })
         .collect();
     let mut owned = reach(cfg, &[cfg.entry()], None);
-    owned.extend(entries.iter().copied());
+    owned.extend(handler_roots.iter().copied());
     let owned = addresses_in::<I>(cfg, &owned);
     let missing: Vec<_> = owned.difference(&visited).collect();
     assert!(
@@ -421,7 +432,7 @@ fn check_control_tree<I: Isa>(built: &Built<I>) {
         "owned instructions {missing:?} were dropped"
     );
 
-    let mut roots = entries;
+    let mut roots = handler_roots;
     roots.push(cfg.entry());
     let candidates = addresses_in::<I>(cfg, &reach(cfg, &roots, None));
     let invented: Vec<_> = visited.difference(&candidates).collect();

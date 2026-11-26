@@ -6,8 +6,8 @@ use core::ops::Range;
 
 use cfglib::{
     AddressBuildError, AddressCfgOptions, AddressEdgeInfo, AddressGraph, AddressHandler,
-    AddressInstruction, BlockId, CallPolicy, Cfg, EdgeKind, EdgeRole, HandlerKind,
-    build_address_cfg,
+    AddressHandlerKind, AddressInstruction, BlockId, CallPolicy, Cfg, EdgeKind, EdgeRole,
+    HandlerKind, build_address_cfg,
 };
 
 use crate::isa::{Isa, Layout, Op};
@@ -77,7 +77,7 @@ pub fn wire<A: Copy + Into<u64>, K: Copy + Into<i64>>(info: AddressEdgeInfo<'_, 
     Wire {
         source: info.source.into(),
         target: info.target.into(),
-        kind: info.kind,
+        kind: info.role.kind(),
         role,
     }
 }
@@ -88,14 +88,15 @@ pub fn wire<A: Copy + Into<u64>, K: Copy + Into<i64>>(info: AddressEdgeInfo<'_, 
 pub struct TryRange {
     pub protected: Range<usize>,
     pub entry: usize,
-    pub kind: HandlerKind,
+    /// The kind, a filter spelled as the position of its first instruction.
+    pub kind: AddressHandlerKind<usize>,
 }
 
 pub fn catch(protected: Range<usize>, entry: usize) -> TryRange {
     TryRange {
         protected,
         entry,
-        kind: HandlerKind::Catch,
+        kind: AddressHandlerKind::Catch,
     }
 }
 
@@ -128,17 +129,27 @@ pub fn handlers_of<I: Isa>(layout: &Layout<I>, table: &[TryRange]) -> Vec<Addres
         .map(|entry| AddressHandler {
             protected: layout.address(entry.protected.start)..layout.address(entry.protected.end),
             entry: layout.address(entry.entry),
-            kind: entry.kind,
+            kind: match entry.kind {
+                AddressHandlerKind::Catch => AddressHandlerKind::Catch,
+                AddressHandlerKind::CatchAll => AddressHandlerKind::CatchAll,
+                AddressHandlerKind::Finally => AddressHandlerKind::Finally,
+                AddressHandlerKind::Fault => AddressHandlerKind::Fault,
+                AddressHandlerKind::Filter { filter } => AddressHandlerKind::Filter {
+                    filter: layout.address(filter),
+                },
+            },
         })
         .collect()
 }
 
-/// Options that enter at the first instruction and keep calls as edges,
-/// spelled out because `AddressCfgOptions::default` needs `A: Default`.
-pub const fn plain_options<A>() -> AddressCfgOptions<A> {
+/// Options that enter at the first instruction, keep calls as edges, and take
+/// every edge from the flows and the handler table.
+pub const fn plain_options<'r, A, E>() -> AddressCfgOptions<'r, A, E> {
     AddressCfgOptions {
         entry: None,
         calls: CallPolicy::Edges,
+        routes: None,
+        given_edges: None,
     }
 }
 
@@ -153,6 +164,7 @@ pub fn build_with<I: Isa>(ops: &[Op], table: Vec<TryRange>, settings: Settings) 
     let options = AddressCfgOptions {
         entry: settings.entry.map(|position| layout.address(position)),
         calls: settings.calls,
+        ..AddressCfgOptions::default()
     };
     let mut payload_calls = 0;
     let graph = build_address_cfg(layout.instructions().to_vec(), &handlers, options, |info| {
@@ -180,7 +192,7 @@ pub fn build_with<I: Isa>(ops: &[Op], table: Vec<TryRange>, settings: Settings) 
 pub fn try_build<T>(
     instructions: Vec<T>,
     handlers: &[AddressHandler<T::Address>],
-    options: AddressCfgOptions<T::Address>,
+    options: AddressCfgOptions<'_, T::Address, Wire>,
 ) -> Result<AddressGraph<T, Wire>, AddressBuildError<T::Address>>
 where
     T: AddressInstruction,
@@ -198,6 +210,20 @@ impl<I: Isa> Built<I> {
     /// The block holding the instruction at `position`.
     pub fn block_of(&self, position: usize) -> BlockId {
         self.graph.instruction_blocks[&self.layout.address(position)]
+    }
+
+    /// The region handler kind that the build stores for the table kind
+    /// `kind`: a filter names the block that starts at its position.
+    pub fn handler_kind(&self, kind: AddressHandlerKind<usize>) -> HandlerKind {
+        match kind {
+            AddressHandlerKind::Catch => HandlerKind::Catch,
+            AddressHandlerKind::CatchAll => HandlerKind::CatchAll,
+            AddressHandlerKind::Finally => HandlerKind::Finally,
+            AddressHandlerKind::Fault => HandlerKind::Fault,
+            AddressHandlerKind::Filter { filter } => HandlerKind::Filter {
+                filter_block: self.block_of(filter),
+            },
+        }
     }
 
     /// The positions of every block's instructions, in block order.

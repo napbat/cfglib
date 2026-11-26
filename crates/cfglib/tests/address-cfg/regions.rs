@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use cfglib::{BlockId, EhBlockKind, EhModel, HandlerKind, HandlerRef, RegionId};
+use cfglib::{AddressHandlerKind, BlockId, EhBlockKind, EhModel, HandlerRef, RegionId};
 
 use crate::harness::{Built, FALL, Settings, TryRange, UNWIND, build_with, catch};
 use crate::isa::{Isa, Op};
@@ -32,12 +32,12 @@ fn nested_ranges_register_the_enclosing_region_first_whatever_the_table_order<I:
             TryRange {
                 protected: 0..6,
                 entry: 9,
-                kind: HandlerKind::CatchAll,
+                kind: AddressHandlerKind::CatchAll,
             },
             TryRange {
                 protected: 1..5,
                 entry: 11,
-                kind: HandlerKind::Finally,
+                kind: AddressHandlerKind::Finally,
             },
         ],
         Settings::default(),

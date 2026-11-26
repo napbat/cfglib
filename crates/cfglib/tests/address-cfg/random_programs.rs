@@ -8,7 +8,7 @@
 //! so a disagreement names a real defect or a wrong oracle, never a shared
 //! mistake.
 
-use cfglib::{CallPolicy, HandlerKind};
+use cfglib::{AddressHandlerKind, CallPolicy};
 
 use crate::harness::{Settings, TryRange, build_with};
 use crate::isa::Dest::{At, Beyond, Inside};
@@ -125,11 +125,11 @@ fn laminar(first: &core::ops::Range<usize>, second: &core::ops::Range<usize>) ->
 }
 
 fn table(rng: &mut Rng, length: usize) -> Vec<TryRange> {
-    const KINDS: [HandlerKind; 4] = [
-        HandlerKind::Catch,
-        HandlerKind::CatchAll,
-        HandlerKind::Finally,
-        HandlerKind::Fault,
+    const KINDS: [AddressHandlerKind<usize>; 4] = [
+        AddressHandlerKind::Catch,
+        AddressHandlerKind::CatchAll,
+        AddressHandlerKind::Finally,
+        AddressHandlerKind::Fault,
     ];
     let mut table: Vec<TryRange> = Vec::new();
     for _ in 0..rng.below(4) {
