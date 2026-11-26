@@ -104,9 +104,7 @@ impl EpochMarks {
     /// never marks a node. A buffer that already covers `node_count` nodes is
     /// left as it is.
     pub fn grow_to(&mut self, node_count: usize) {
-        if self.stamps.len() < node_count {
-            self.stamps.resize(node_count, 0);
-        }
+        grow_to(&mut self.stamps, node_count, 0);
     }
 
     /// Whether `index` is marked in the current epoch.
@@ -134,6 +132,15 @@ impl EpochMarks {
     #[inline]
     pub(crate) fn unmark(&mut self, index: usize) {
         self.stamps[index] = 0;
+    }
+}
+
+/// Grow `table` to `len` entries, filling the new ones with `fill` and keeping
+/// the rest: the sizing step of every scratch table (see the module docs). A
+/// table that already holds `len` entries is left as it is.
+pub(crate) fn grow_to<T: Clone>(table: &mut Vec<T>, len: usize, fill: T) {
+    if table.len() < len {
+        table.resize(len, fill);
     }
 }
 
