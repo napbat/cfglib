@@ -224,7 +224,8 @@ fn small_digraphs() -> impl Iterator<Item = (u32, Vec<(u32, u32)>)> {
 
 /// Every small digraph: the table agrees with the on-demand frontier for
 /// every node, an unreachable one included, which has an empty frontier in
-/// both. The two are one rule computed two ways.
+/// both. The two are one rule computed two ways, and they list it in the same
+/// ascending order.
 #[test]
 fn the_table_agrees_with_the_on_demand_frontier_on_every_small_digraph() {
     let mut on_demand = Vec::new();
@@ -234,9 +235,9 @@ fn the_table_agrees_with_the_on_demand_frontier_on_every_small_digraph() {
         let table = DominanceFrontiers::compute(&graph, &dominators);
         for node in 0..count {
             dominators.frontier(&graph, node, &mut on_demand);
-            let expected: BTreeSet<u32> = on_demand.iter().copied().collect();
-            assert!(
-                table.frontier(node).iter().eq(&expected),
+            assert_eq!(
+                table.frontier(node),
+                on_demand,
                 "frontier of {node} in {edges:?}"
             );
         }
@@ -337,9 +338,9 @@ fn a_block_past_the_node_bound_panics() {
 #[test]
 fn the_iterated_frontier_of_the_table_agrees_with_the_one_of_the_tree() {
     use super::support::{Family, Recipe, Rng, node, random_graph};
-    use crate::graph::dominator::{DominatorScratch, FrontierScratch};
+    use crate::graph::dominator::DominatorScratch;
 
-    let mut scratch = FrontierScratch::new();
+    let mut scratch = DominatorScratch::default();
     let (mut from_table, mut from_tree) = (Vec::new(), Vec::new());
     let mut queries = 0;
     for seed in 0..300_u64 {
@@ -353,7 +354,8 @@ fn the_iterated_frontier_of_the_table_agrees_with_the_one_of_the_tree() {
         let edges = random_graph(&mut rng, recipe);
         let graph = edges.graph();
         let tree = DominatorTree::compute(&graph);
-        let forest = tree.complete_forest_in(&mut DominatorScratch::new(), &mut Vec::new(), &graph);
+        let forest =
+            tree.complete_forest_in(&mut DominatorScratch::default(), &mut Vec::new(), &graph);
         for dominators in [Some(&tree), forest.as_ref()].into_iter().flatten() {
             let table = DominanceFrontiers::compute(&graph, dominators);
             for _ in 0..8 {
@@ -363,20 +365,19 @@ fn the_iterated_frontier_of_the_table_agrees_with_the_one_of_the_tree() {
                 let live: Vec<bool> = (0..edges.node_count).map(|_| !rng.one_in(3)).collect();
                 let live_in = |member: u32| live[member as usize];
                 for filter in [None, Some(&live_in as &dyn Fn(u32) -> bool)] {
-                    table.iterated_frontier(
+                    table.iterated_frontier_in(
                         &mut scratch,
                         defs.iter().copied(),
                         filter,
                         &mut from_table,
                     );
-                    dominators.iterated_frontier(
-                        &graph,
+                    dominators.iterated_frontier_in(
                         &mut scratch,
+                        &graph,
                         defs.iter().copied(),
                         filter,
                         &mut from_tree,
                     );
-                    from_tree.sort_unstable();
                     assert_eq!(
                         from_table, from_tree,
                         "{recipe:?} seed {seed} defs {defs:?}"

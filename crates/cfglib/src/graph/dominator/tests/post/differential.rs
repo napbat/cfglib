@@ -9,7 +9,7 @@ use super::reference::{PostReference, assert_contract, assert_frontiers, assert_
 use crate::graph::dominator::tests::determinism::with_extra_copies;
 use crate::graph::dominator::tests::support::{EdgeList, Family, Recipe, Rng, node, random_graph};
 use crate::graph::dominator::{
-    DominatorTree, FrontierScratch, PostDominatorScratch, PostDominatorTree, PostNode,
+    DominatorScratch, DominatorTree, ExitPolicy, PostDominatorTree, PostNode,
 };
 use crate::graph::view::GraphView;
 
@@ -45,13 +45,13 @@ pub(super) const SMALL_SEEDS: u64 = 240;
 
 #[test]
 fn random_graphs_match_the_definition() {
-    let mut scratch = PostDominatorScratch::new();
-    let mut frontier_scratch = FrontierScratch::new();
+    let mut scratch = DominatorScratch::default();
+    let mut frontier_scratch = DominatorScratch::default();
     for seed in 0..SMALL_SEEDS {
         let mut rng = Rng::new(seed);
         let (recipe, edges) = small_graph(seed, &mut rng);
         let graph = edges.graph();
-        let post = PostDominatorTree::compute_in(&mut scratch, &graph);
+        let post = PostDominatorTree::compute_in(&mut scratch, &graph, ExitPolicy::CutLoops);
         let reference = PostReference::new(&graph);
         assert_matches(&post, &reference, &(recipe, seed));
         assert_post_certified(&post, &graph, &mut scratch);
@@ -124,7 +124,7 @@ fn large_graphs_match_the_iterative_oracle_on_the_augmented_graph() {
             let edges = random_graph(&mut rng, recipe);
             let graph = edges.graph();
             let post = PostDominatorTree::compute(&graph);
-            assert_post_certified(&post, &graph, &mut PostDominatorScratch::new());
+            assert_post_certified(&post, &graph, &mut DominatorScratch::default());
             let reachable = reachable_from_entry(&edges);
 
             let exits: Vec<u32> = (0..edges.node_count)
@@ -238,7 +238,7 @@ fn changing_parallel_edge_multiplicity_leaves_the_whole_tree_identical() {
 
 #[test]
 fn a_reused_scratch_computes_what_a_fresh_one_does() {
-    let mut scratch = PostDominatorScratch::new();
+    let mut scratch = DominatorScratch::default();
     for seed in 0..60 {
         let mut rng = Rng::new(seed);
         let sizes = [8, 400, 12, 90];
@@ -250,7 +250,7 @@ fn a_reused_scratch_computes_what_a_fresh_one_does() {
         };
         let graph = random_graph(&mut rng, recipe).graph();
         assert_eq!(
-            PostDominatorTree::compute_in(&mut scratch, &graph),
+            PostDominatorTree::compute_in(&mut scratch, &graph, ExitPolicy::CutLoops),
             PostDominatorTree::compute(&graph),
             "{recipe:?} seed {seed}"
         );

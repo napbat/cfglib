@@ -42,7 +42,8 @@ use core::mem;
 
 use super::numbering::{Numbered, NumberingBuffers};
 use super::{DominatorScratch, DominatorTree};
-use crate::graph::view::{DenseId, GraphView, RootedView};
+use crate::graph::epoch::grow_to;
+use crate::graph::view::{DenseId, GraphView, Induced, RootedView};
 use crate::identity::{NO_INDEX, check_bound, slot, word};
 
 /// When a batch stops being replayed and is finished with one full
@@ -148,9 +149,7 @@ impl UpdateBuffers {
             &mut self.scanned,
             &mut self.member,
         ] {
-            if table.len() < bound {
-                table.resize(bound, false);
-            }
+            grow_to(table, bound, false);
         }
         for table in [
             &mut self.original,
@@ -158,9 +157,7 @@ impl UpdateBuffers {
             &mut self.bucket_next,
             &mut self.fresh,
         ] {
-            if table.len() < bound {
-                table.resize(bound, NO_INDEX);
-            }
+            grow_to(table, bound, NO_INDEX);
         }
         self.touched_list.clear();
         self.marked.clear();
@@ -209,15 +206,16 @@ impl<N: DenseId> DominatorTree<N> {
     /// tree [`compute`](Self::compute) builds, `==` to it.
     ///
     /// Replaying stops paying at some point, and the batch is then finished
-    /// with one full construction, the cost of
-    /// [`compute_with_diff`](Self::compute_with_diff): when it holds more
-    /// than 64 edits, when a subtree to recompute holds more than a quarter
-    /// of the tree, or when, with edits left, it would renumber the tree more
-    /// than once per 2¹⁴ of its nodes. So a single edit is always replayed,
-    /// and a tree under 2¹⁴ nodes finishes a batch from scratch once an edit
+    /// with one full construction, the cost of [`compute`](Self::compute)
+    /// plus an O(n) scan for the nodes that moved: when it holds more than 64
+    /// edits, when a subtree to recompute holds more than a quarter of the
+    /// tree, or when, with edits left, it would renumber the tree more than
+    /// once per 2¹⁴ of its nodes. So a single edit is always replayed, and a
+    /// tree under 2¹⁴ nodes finishes a batch from scratch once an edit
     /// changes it. On the benchmark graphs one insertion takes about half
-    /// the time of `compute_with_diff` at 4,096 nodes and about a ninetieth
-    /// at 2²⁰, a deletion and a batch of 16 mixed edits about the same.
+    /// the time of that full construction at 4,096 nodes and about a
+    /// ninetieth at 2²⁰, a deletion and a batch of 16 mixed edits about the
+    /// same.
     ///
     /// A node beyond the tree's node bound joins the tree as an unreachable
     /// node first, so the edits may name nodes the graph gained after the
@@ -252,7 +250,7 @@ impl<N: DenseId> DominatorTree<N> {
     /// cfg.add_edge(entry, b, EdgeKind::ConditionalTrue);
     /// let mut changed = Vec::new();
     /// tree.apply_updates_in(
-    ///     &mut DominatorScratch::new(),
+    ///     &mut DominatorScratch::default(),
     ///     &cfg,
     ///     &[DominatorUpdate::Insert { from: entry, to: b }],
     ///     &mut changed,
@@ -650,11 +648,7 @@ impl<N: DenseId> DominatorTree<N> {
             .iter()
             .filter(|&&node| self.holds(slot(node)))
             .count();
-        let region = Region {
-            view,
-            member: &buffers.member,
-        };
-        construction.run(&region, top, false);
+        construction.run(&Induced::new(view, &buffers.member), top, false);
         let mut reached = 1;
         for (node, parent) in construction.reached_parents() {
             buffers.fresh[node] = parent;
@@ -796,40 +790,5 @@ impl<G: GraphView> GraphView for Pending<'_, G> {
                 }
             })
             .chain(self.restored(node, true))
-    }
-}
-
-/// The nodes a region marks, as a graph of their own: an edge of the view
-/// between two of them is an edge here.
-struct Region<'a, V> {
-    view: &'a V,
-    member: &'a [bool],
-}
-
-impl<V: GraphView> GraphView for Region<'_, V> {
-    type NodeId = V::NodeId;
-
-    fn node_bound(&self) -> usize {
-        self.view.node_bound()
-    }
-
-    fn node_ids(&self) -> impl Iterator<Item = V::NodeId> + '_ {
-        self.view
-            .node_ids()
-            .filter(|node| self.member[node.index()])
-    }
-
-    fn successors(&self, node: V::NodeId) -> impl Iterator<Item = V::NodeId> + '_ {
-        let inside = self.member[node.index()];
-        self.view
-            .successors(node)
-            .filter(move |next| inside && self.member[next.index()])
-    }
-
-    fn predecessors(&self, node: V::NodeId) -> impl Iterator<Item = V::NodeId> + '_ {
-        let inside = self.member[node.index()];
-        self.view
-            .predecessors(node)
-            .filter(move |before| inside && self.member[before.index()])
     }
 }

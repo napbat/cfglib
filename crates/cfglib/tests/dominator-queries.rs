@@ -70,14 +70,24 @@ fn unreachable_blocks_are_in_no_tree() {
 }
 
 #[test]
-fn recomputing_after_an_edit_reports_the_blocks_whose_idom_changed() {
+fn updating_after_an_edit_reports_the_blocks_whose_idom_changed() {
     let (mut cfg, [entry, head, left, right, join, exit]) = diamond_loop();
     let before = DominatorTree::compute(&cfg);
 
     // A second way into the join from the entry takes it out from under the
     // head: the head no longer dominates the join.
     cfg.add_edge(entry, join, EdgeKind::SwitchCase);
-    let (after, changed) = DominatorTree::compute_with_diff(&cfg, &before);
+    let mut after = before.clone();
+    let mut changed = Vec::new();
+    after.apply_updates_in(
+        &mut DominatorScratch::default(),
+        &cfg,
+        &[DominatorUpdate::Insert {
+            from: entry,
+            to: join,
+        }],
+        &mut changed,
+    );
 
     assert_eq!(after, DominatorTree::compute(&cfg));
     assert_eq!(after.idom(join), Some(entry));
@@ -88,7 +98,8 @@ fn recomputing_after_an_edit_reports_the_blocks_whose_idom_changed() {
 }
 
 use cfglib::{
-    DominanceFrontiers, FrontierScratch, NodeId, PostDominatorTree, control_dependence_graph,
+    DominanceFrontiers, DominatorScratch, DominatorUpdate, NodeId, PostDominatorTree,
+    control_dependence_graph,
 };
 use std::collections::BTreeSet;
 
@@ -187,16 +198,16 @@ fn an_iterated_frontier_is_the_closure_of_the_table() {
         }
     }
 
-    let mut scratch = FrontierScratch::new();
+    let mut scratch = DominatorScratch::default();
     let mut placed = Vec::new();
-    dominators.iterated_frontier(&cfg, &mut scratch, [left], None, &mut placed);
+    dominators.iterated_frontier_in(&mut scratch, &cfg, [left], None, &mut placed);
     assert_eq!(placed.iter().copied().collect::<BTreeSet<_>>(), closure);
     assert_eq!(closure, BTreeSet::from([join, head]));
 
     let only_the_header = |block: BlockId| block == head;
-    dominators.iterated_frontier(
-        &cfg,
+    dominators.iterated_frontier_in(
         &mut scratch,
+        &cfg,
         [left],
         Some(&only_the_header),
         &mut placed,
@@ -240,7 +251,7 @@ fn dead_code_has_no_frontier_and_adds_none_to_live_code() {
 }
 
 #[test]
-fn a_frontier_scratch_gives_the_answers_of_a_fresh_one_across_graphs() {
+fn a_shared_scratch_gives_the_answers_of_a_fresh_one_across_graphs() {
     let DiamondLoop {
         cfg: large, left, ..
     } = frontier_diamond_loop();
@@ -251,19 +262,19 @@ fn a_frontier_scratch_gives_the_answers_of_a_fresh_one_across_graphs() {
     small.add_edge(small.entry(), small_merge, EdgeKind::ConditionalFalse);
     small.add_edge(only_arm, small_merge, EdgeKind::Fallthrough);
 
-    let mut shared = FrontierScratch::new();
+    let mut shared = DominatorScratch::default();
     for _ in 0..2 {
         for (cfg, definition) in [(&large, left), (&small, only_arm), (&large, left)] {
             let dominators = DominatorTree::compute(cfg);
             let (mut fresh, mut reused) = (Vec::new(), Vec::new());
-            dominators.iterated_frontier(
+            dominators.iterated_frontier_in(
+                &mut DominatorScratch::default(),
                 cfg,
-                &mut FrontierScratch::new(),
                 [definition],
                 None,
                 &mut fresh,
             );
-            dominators.iterated_frontier(cfg, &mut shared, [definition], None, &mut reused);
+            dominators.iterated_frontier_in(&mut shared, cfg, [definition], None, &mut reused);
             assert_eq!(reused, fresh);
             assert_ne!(reused.len(), 0);
         }
@@ -315,9 +326,9 @@ fn the_post_dominance_frontier_lists_the_branches_that_decide_a_block() {
     );
 
     let mut decided = Vec::new();
-    post.iterated_frontier(
+    post.iterated_frontier_in(
+        &mut DominatorScratch::default(),
         &cfg,
-        &mut FrontierScratch::new(),
         [left, right],
         None,
         &mut decided,
@@ -352,9 +363,9 @@ fn definitions_in_both_arms_merge_at_the_join_and_the_loop_header() {
     }
 
     let mut placed = Vec::new();
-    dominators.iterated_frontier(
+    dominators.iterated_frontier_in(
+        &mut DominatorScratch::default(),
         &cfg,
-        &mut FrontierScratch::new(),
         [left, right],
         None,
         &mut placed,

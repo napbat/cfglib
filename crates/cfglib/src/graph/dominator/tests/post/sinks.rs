@@ -13,7 +13,7 @@ use crate::graph::dominator::tests::support::{
     Digraph, EdgeList, Family, Recipe, Rng, for_each_multigraph, node, random_graph,
 };
 use crate::graph::dominator::{
-    ExitPolicy, FrontierScratch, PostDominatorScratch, PostDominatorTree, PostNode,
+    DominanceFrontiers, DominatorScratch, ExitPolicy, PostDominatorTree, PostNode,
 };
 use crate::graph::view::GraphView;
 use crate::test_util::postdominance::{
@@ -47,10 +47,9 @@ fn subsets(count: usize) -> Vec<Vec<u32>> {
 }
 
 /// Check the tree with sink classes of `edges` against the fixpoint.
-fn check(edges: &EdgeList, scratches: &mut (PostDominatorScratch, FrontierScratch)) {
+fn check(edges: &EdgeList, scratch: &mut DominatorScratch) {
     let graph: Digraph = edges.graph();
-    let post =
-        PostDominatorTree::compute_with_in(&mut scratches.0, &graph, ExitPolicy::SinkComponents);
+    let post = PostDominatorTree::compute_in(scratch, &graph, ExitPolicy::SinkComponents);
     let (part, kept) = reachable_part(&successors_of(edges), 0);
     let relation = post_dominance(&part, Fixpoint::Sink);
     let id = |index: usize| node(kept[index]);
@@ -62,7 +61,7 @@ fn check(edges: &EdgeList, scratches: &mut (PostDominatorScratch, FrontierScratc
         .into_iter()
         .map(|(controller, dependent)| (id(controller), id(dependent)))
         .collect();
-    check_dependences(&post, &graph, &expected, &mut scratches.1, edges);
+    check_dependences(&post, &graph, &expected, scratch, edges);
 
     // Where every reachable block reaches an exit there is nothing to read
     // two ways, and the two policies agree.
@@ -128,12 +127,13 @@ fn check_relation(
 }
 
 /// Check the control dependence graph, the frontier and the iterated
-/// frontier against the dependences `expected`.
+/// frontier, per query and off a [`DominanceFrontiers`] table, against the
+/// dependences `expected`.
 fn check_dependences(
     post: &PostDominatorTree<u32>,
     graph: &Digraph,
     expected: &BTreeSet<(u32, u32)>,
-    scratch: &mut FrontierScratch,
+    scratch: &mut DominatorScratch,
     edges: &EdgeList,
 ) {
     let dependences = control_dependence_graph(graph, post);
@@ -154,17 +154,25 @@ fn check_dependences(
             .filter(move |&&(_, dependent)| dependent == block)
             .map(|&(controller, _)| controller)
     };
+    let table = DominanceFrontiers::compute(graph, post);
     let mut sources = Vec::new();
     for block in 0..node(edges.node_count) {
         post.frontier(graph, block, &mut sources);
+        let expected: Vec<u32> = sources_of(block)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        assert_eq!(sources, expected, "sources of {block} in {edges:?}");
         assert_eq!(
-            sources.iter().copied().collect::<BTreeSet<_>>(),
-            sources_of(block).collect(),
-            "sources of {block} in {edges:?}"
+            table.frontier(block),
+            expected,
+            "tabulated sources of {block} in {edges:?}"
         );
     }
+    let mut from_table = Vec::new();
     for blocks in subsets(edges.node_count) {
-        post.iterated_frontier(graph, scratch, blocks.iter().copied(), None, &mut sources);
+        post.iterated_frontier_in(scratch, graph, blocks.iter().copied(), None, &mut sources);
+        table.iterated_frontier_in(scratch, blocks.iter().copied(), None, &mut from_table);
         let mut closure: BTreeSet<u32> = BTreeSet::new();
         let mut frontier: Vec<u32> = blocks.clone();
         while let Some(block) = frontier.pop() {
@@ -174,37 +182,41 @@ fn check_dependences(
                 }
             }
         }
+        let closure: Vec<u32> = closure.into_iter().collect();
         assert_eq!(
-            sources.iter().copied().collect::<BTreeSet<_>>(),
-            closure,
+            sources, closure,
             "iterated frontier of {blocks:?} in {edges:?}"
+        );
+        assert_eq!(
+            from_table, closure,
+            "tabulated iterated frontier of {blocks:?} in {edges:?}"
         );
     }
 }
 
 #[test]
 fn every_digraph_of_up_to_four_nodes_matches_sink_post_dominance() {
-    let mut scratches = (PostDominatorScratch::new(), FrontierScratch::new());
+    let mut scratch = DominatorScratch::default();
     for count in 1..=4 {
-        for_each_multigraph(count, 1, |edges| check(edges, &mut scratches));
+        for_each_multigraph(count, 1, |edges| check(edges, &mut scratch));
     }
 }
 
 #[test]
 fn every_multigraph_of_up_to_three_nodes_matches_sink_post_dominance() {
-    let mut scratches = (PostDominatorScratch::new(), FrontierScratch::new());
+    let mut scratch = DominatorScratch::default();
     for count in 1..=3 {
-        for_each_multigraph(count, 2, |edges| check(edges, &mut scratches));
+        for_each_multigraph(count, 2, |edges| check(edges, &mut scratch));
     }
 }
 
 #[test]
 fn random_graphs_match_sink_post_dominance() {
-    let mut scratches = (PostDominatorScratch::new(), FrontierScratch::new());
+    let mut scratch = DominatorScratch::default();
     for seed in 0..120 {
         let mut rng = Rng::new(seed);
         let (_, edges) = small_graph(seed, &mut rng);
-        check(&edges, &mut scratches);
+        check(&edges, &mut scratch);
     }
 }
 
@@ -213,7 +225,7 @@ fn sinks_entered_at_several_blocks_match_sink_post_dominance() {
     // Graphs with no exit at all: every block that would end a path jumps
     // back somewhere, so the exit-free blocks form loops entered from many
     // places, and every one of them is in a sink or reaches one.
-    let mut scratches = (PostDominatorScratch::new(), FrontierScratch::new());
+    let mut scratch = DominatorScratch::default();
     for seed in 0..120 {
         let mut rng = Rng::new(seed + 1_000);
         let recipe = Recipe {
@@ -229,7 +241,7 @@ fn sinks_entered_at_several_blocks_match_sink_post_dominance() {
                 edges.edges.push((node(block), node(rng.below(count))));
             }
         }
-        check(&edges, &mut scratches);
+        check(&edges, &mut scratch);
     }
 }
 
@@ -239,8 +251,8 @@ fn a_server_loop_is_one_class_named_by_its_head() {
     // latch -> head.
     let edges = EdgeList::new(5, vec![(0, 1), (1, 2), (1, 3), (2, 4), (3, 4), (4, 1)]);
     let graph = edges.graph();
-    let post = PostDominatorTree::compute_with_in(
-        &mut PostDominatorScratch::new(),
+    let post = PostDominatorTree::compute_in(
+        &mut DominatorScratch::default(),
         &graph,
         ExitPolicy::SinkComponents,
     );
@@ -263,8 +275,8 @@ fn a_server_loop_is_one_class_named_by_its_head() {
         Some(PostNode::Node(1))
     );
     assert_eq!(
-        PostDominatorTree::compute_with_in(
-            &mut PostDominatorScratch::new(),
+        PostDominatorTree::compute_in(
+            &mut DominatorScratch::default(),
             &graph,
             ExitPolicy::CutLoops
         ),

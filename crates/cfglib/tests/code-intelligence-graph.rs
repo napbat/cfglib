@@ -1,7 +1,7 @@
 //! Integration tests: code intelligence graph.
 
 use cfglib::{
-    DenseId, Direction, DominatorTree, Graph, GraphView, SccDecomposition, SccNumbering,
+    DenseId, Direction, DominatorTree, Graph, GraphView, Rooted, SccDecomposition, SccNumbering,
     breadth_first, shortest_path, topological_sort,
 };
 
@@ -159,7 +159,7 @@ fn existing_consumer_graph_can_adopt_algorithms_without_storage_migration() {
 
     let root = 0_u32;
     let merge = 3_u32;
-    let dominators = DominatorTree::compute_from(&graph, root);
+    let dominators = DominatorTree::compute(&Rooted::new(&graph, root));
     assert_eq!(dominators.idom(merge), Some(root));
     assert!(SccDecomposition::compute(&graph, SccNumbering::LeavesFirst).is_dag(&graph));
     assert_eq!(

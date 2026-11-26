@@ -72,7 +72,7 @@ impl<N: DenseId> ClosedGraph<N> {
         let mut cut = CutBuffers::default();
         let structure = cut.analyze(graph, root);
         let reachable = &cut.reachable;
-        let outlets = merge_ascending(structure.exits, structure.cut_roots);
+        let outlets = structure.outlets;
         let slots = edge_bound + 1 + outlets.len();
         assert!(
             bound < slot(NO_INDEX) && slots < slot(NO_INDEX),
@@ -245,23 +245,4 @@ pub(super) fn edge_slot<N: DenseId, E: DenseId>(
             .ok()
             .map(|offset| edge_bound + 1 + offset),
     }
-}
-
-/// Two ascending lists of distinct blocks merged into one.
-///
-/// An exit has no successor and a cut root has one, so no block is in both.
-fn merge_ascending<N: DenseId>(first: Vec<N>, second: Vec<N>) -> Vec<N> {
-    if second.is_empty() {
-        return first;
-    }
-    let mut merged = Vec::with_capacity(first.len() + second.len());
-    let mut second = second.into_iter().peekable();
-    for block in first {
-        while let Some(earlier) = second.next_if(|other| other.index() < block.index()) {
-            merged.push(earlier);
-        }
-        merged.push(block);
-    }
-    merged.extend(second);
-    merged
 }

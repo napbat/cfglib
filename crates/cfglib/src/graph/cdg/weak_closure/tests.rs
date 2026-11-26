@@ -1,5 +1,5 @@
 use super::*;
-use crate::graph::dominator::{FrontierScratch, PostDominatorTree};
+use crate::graph::dominator::{DominatorScratch, PostDominatorTree};
 use crate::graph::store::{Graph, NodeId};
 use crate::test_util::digraphs::{for_each_multigraph, graph_of};
 use crate::test_util::rng::Rng;
@@ -136,10 +136,10 @@ fn closure(
     scratch: &mut ControlClosureScratch,
 ) -> Vec<usize> {
     let mut out = vec![NodeId::from_index(99)];
-    weak_control_closure(
+    weak_control_closure_in(
+        scratch,
         graph,
         seeds.into_iter().map(NodeId::from_index),
-        scratch,
         &mut out,
     );
     out.iter().map(|vertex| vertex.index()).collect()
@@ -166,7 +166,7 @@ fn check_every_seed_set(
 
 #[test]
 fn every_digraph_of_up_to_four_nodes_matches_the_definition() {
-    let mut scratch = ControlClosureScratch::new();
+    let mut scratch = ControlClosureScratch::default();
     for count in 1..=4 {
         for_each_multigraph(count, 1, |edges| {
             check_every_seed_set(count, edges, &mut scratch);
@@ -176,7 +176,7 @@ fn every_digraph_of_up_to_four_nodes_matches_the_definition() {
 
 #[test]
 fn every_multigraph_of_up_to_three_nodes_matches_the_definition() {
-    let mut scratch = ControlClosureScratch::new();
+    let mut scratch = ControlClosureScratch::default();
     for count in 1..=3 {
         for_each_multigraph(count, 2, |edges| {
             check_every_seed_set(count, edges, &mut scratch);
@@ -187,7 +187,7 @@ fn every_multigraph_of_up_to_three_nodes_matches_the_definition() {
 #[test]
 fn random_graphs_match_danicics_algorithm() {
     let mut rng = Rng::new(84);
-    let mut scratch = ControlClosureScratch::new();
+    let mut scratch = ControlClosureScratch::default();
     let mut grown = 0;
     for round in 0..60 {
         let count = 2 + rng.below(if round < 40 { 30 } else { 300 });
@@ -245,8 +245,8 @@ fn with_the_entry_and_every_exit_as_seeds_it_is_the_iterated_frontier() {
     // control-closure agree once the closure can see both ends: the entry,
     // so that controllers before a seed are reached, and the exits, so that
     // a choice between a seed and leaving is a choice between two seeds.
-    let mut scratch = ControlClosureScratch::new();
-    let mut frontier = FrontierScratch::new();
+    let mut scratch = ControlClosureScratch::default();
+    let mut frontier = DominatorScratch::default();
     let mut found = Vec::new();
     let mut expected = Vec::new();
     for count in 1..=4 {
@@ -269,10 +269,10 @@ fn with_the_entry_and_every_exit_as_seeds_it_is_the_iterated_frontier() {
                     .collect();
                 seeds.sort_unstable();
                 seeds.dedup();
-                weak_control_closure(&cfg, seeds.iter().copied(), &mut scratch, &mut found);
-                post.iterated_frontier(
-                    &cfg,
+                weak_control_closure_in(&mut scratch, &cfg, seeds.iter().copied(), &mut found);
+                post.iterated_frontier_in(
                     &mut frontier,
+                    &cfg,
                     seeds.iter().copied(),
                     None,
                     &mut expected,
@@ -298,13 +298,13 @@ fn a_loop_exit_test_does_not_decide_for_the_body() {
     post.frontier(&cfg, body, &mut sources);
     assert_eq!(sources, [test]);
 
-    let mut scratch = ControlClosureScratch::new();
+    let mut scratch = ControlClosureScratch::default();
     let mut closure = Vec::new();
-    weak_control_closure(&cfg, [body], &mut scratch, &mut closure);
+    weak_control_closure_in(&mut scratch, &cfg, [body], &mut closure);
     assert_eq!(closure, [body]);
     // With the exit as a seed the test chooses between two seeds.
     let exit = BlockId::from_index(2);
-    weak_control_closure(&cfg, [body, exit], &mut scratch, &mut closure);
+    weak_control_closure_in(&mut scratch, &cfg, [body, exit], &mut closure);
     assert_eq!(closure, [body, test, exit]);
 }
 
@@ -313,7 +313,7 @@ fn a_decision_the_seeds_do_not_reach_stays_out() {
     // 0 -> 1 | 2: block 0 chooses between the seeds 1 and 2, but neither
     // reaches it.
     let graph = graph_of(3, &[(0, 1), (0, 2)]);
-    let mut scratch = ControlClosureScratch::new();
+    let mut scratch = ControlClosureScratch::default();
     assert_eq!(closure(&graph, [1, 2], &mut scratch), [1, 2]);
     assert_eq!(closure(&graph, [0, 1, 2], &mut scratch), [0, 1, 2]);
     // From a seed before it, block 3 decides between the seeds 1 and 2.
@@ -326,7 +326,7 @@ fn removed_slots_and_a_reused_scratch_change_nothing() {
     // 0 -> 1 -> 3 | 4, 3 -> 4, with the slot of 2 (between 1 and 4) empty.
     let mut graph = graph_of(5, &[(0, 1), (1, 2), (1, 3), (2, 4), (3, 4), (1, 4)]);
     assert!(graph.remove_node(NodeId::from_index(2)));
-    let mut scratch = ControlClosureScratch::new();
+    let mut scratch = ControlClosureScratch::default();
     for _ in 0..2 {
         assert_eq!(closure(&graph, [0, 3, 4], &mut scratch), [0, 1, 3, 4]);
         assert_eq!(closure(&graph, [0, 4], &mut scratch), [0, 4]);

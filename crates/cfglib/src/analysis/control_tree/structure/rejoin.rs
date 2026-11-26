@@ -22,7 +22,7 @@ use super::bound::Bound;
 use super::{Structurer, flow_successors};
 use crate::block::BlockId;
 use crate::graph::dominator::DominatorTree;
-use crate::graph::view::GraphView;
+use crate::graph::view::{GraphView, Rooted};
 
 /// The immediate post-dominators of the code that runs up to one stop:
 /// [`Structurer::rejoin`]'s cache.
@@ -212,7 +212,7 @@ impl<I, E> Structurer<'_, I, E> {
                 return Rejoins::default();
             }
         }
-        let tree = DominatorTree::compute_from(&graph, 0);
+        let tree = DominatorTree::compute(&Rooted::new(&graph, 0));
         let ipdom = (1..=blocks.len())
             .filter_map(|node| {
                 let idom = tree.idom(node)?;

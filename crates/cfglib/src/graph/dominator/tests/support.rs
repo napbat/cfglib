@@ -6,7 +6,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::graph::dominator::{DominatorScratch, DominatorTree};
-use crate::graph::view::{GraphView, RootedView};
+use crate::graph::view::{GraphView, Rooted, RootedView};
 
 pub(super) use crate::test_util::rng::Rng;
 
@@ -23,12 +23,10 @@ pub(super) fn assert_certified(
     root: u32,
     scratch: &mut DominatorScratch,
 ) {
-    let (certified, certificate) = DominatorTree::compute_certified_in(scratch, graph, root);
+    let rooted = Rooted::new(graph, root);
+    let (certified, certificate) = DominatorTree::compute_certified_in(scratch, &rooted);
     assert!(&certified == tree, "the certified tree differs");
-    assert_eq!(
-        certified.verify_certificate(graph, root, &certificate),
-        Ok(())
-    );
+    assert_eq!(certified.verify_certificate(&rooted, &certificate), Ok(()));
 }
 
 /// A directed multigraph, as a node count and an edge list.

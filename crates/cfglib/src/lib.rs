@@ -298,7 +298,8 @@ pub use graph::call_graph::{
 };
 pub use graph::cdg::{
     ControlClosureScratch, NonterminationScratch, control_dependence_graph,
-    nontermination_sensitive_controllers, weak_control_closure,
+    nontermination_sensitive_controllers, nontermination_sensitive_controllers_in,
+    weak_control_closure, weak_control_closure_in,
 };
 pub use graph::coldness::{ColdClass, ColdnessClasses, ColdnessGraph};
 pub use graph::cut::{EdgeCut, VertexCut, edge_disjoint_paths};
@@ -308,8 +309,7 @@ pub use graph::diff::{
 };
 pub use graph::dominator::{
     CertificateError, DominanceFrontiers, DominatorScratch, DominatorTree, DominatorUpdate,
-    ExitPolicy, FrontierScratch, LowHighOrder, PostDominatorScratch, PostDominatorTree, PostNode,
-    SinkId,
+    ExitPolicy, FrontierTree, LowHighOrder, PostDominatorTree, PostNode, SinkId,
 };
 pub use graph::dot::{
     DotEdgeAttributes, DotEdgeStyle, DotRankDir, DotStyle, control_flow_edge_attributes,

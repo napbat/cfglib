@@ -233,7 +233,7 @@ impl<N: DenseId> LoopForest<N> {
         };
         let mut roots = Vec::new();
         let Some(forest) =
-            dominators.complete_forest_in(&mut DominatorScratch::new(), &mut roots, graph)
+            dominators.complete_forest_in(&mut DominatorScratch::default(), &mut roots, graph)
         else {
             return build(graph, &[live]);
         };

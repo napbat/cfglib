@@ -110,7 +110,8 @@ fn oracle_loops(cfg: &Cfg<u32>, dom: &DominatorTree) -> Vec<NaturalLoop> {
 fn oracle_all_loops(cfg: &Cfg<u32>, dom: &DominatorTree) -> Vec<NaturalLoop> {
     let mut loops = oracle_loops(cfg, dom);
     let mut roots = Vec::new();
-    let Some(forest) = dom.complete_forest_in(&mut DominatorScratch::new(), &mut roots, cfg) else {
+    let Some(forest) = dom.complete_forest_in(&mut DominatorScratch::default(), &mut roots, cfg)
+    else {
         return loops;
     };
     loops.extend(
