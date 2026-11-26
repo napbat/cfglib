@@ -141,7 +141,7 @@ fn a_region_whose_parent_comes_later_reads_back() {
     original.region_mut(RegionId::from_raw(0)).parent = Some(outer);
     assert_eq!(original.check_regions(), Ok(()));
 
-    let parsed = parse(&original.to_text()).expect("a later parent is a region");
+    let parsed = parse(&original.to_listing()).expect("a later parent is a region");
     assert!(parsed.regions().eq(original.regions()));
 }
 

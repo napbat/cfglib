@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use super::*;
 use crate::cfg::Cfg;
-use crate::edge::EdgeKind;
+use crate::edge::{Edge, EdgeKind};
 use crate::region::{
     CompletionReason, Continuation, Handler, HandlerBody, HandlerKind, HandlerRef, Region,
 };
@@ -191,41 +191,37 @@ fn payload_cfg_retains_every_exception_transfer_and_edge_identity() {
         metadata,
     };
 
-    let handler_edge = cfg.add_edge_with_payload(
+    let handler_edge = cfg.add_edge(
         entry,
         handler,
-        EdgeKind::ExceptionHandler,
-        decision(
+        Edge::new(EdgeKind::ExceptionHandler).with_payload(decision(
             ExceptionPhase::Unwind,
             ExceptionDisposition::ExecuteHandler,
             11,
-        ),
+        )),
     );
-    cfg.add_edge_with_payload(
+    cfg.add_edge(
         entry,
         leave,
-        EdgeKind::ExceptionLeave,
-        ExceptionFlow::new(12),
+        Edge::new(EdgeKind::ExceptionLeave).with_payload(ExceptionFlow::new(12)),
     );
-    cfg.add_edge_with_payload(
+    cfg.add_edge(
         rethrow,
         outer,
-        EdgeKind::ExceptionResume,
-        decision(
+        Edge::new(EdgeKind::ExceptionResume).with_payload(decision(
             ExceptionPhase::Search,
             ExceptionDisposition::ContinueSearch,
             13,
-        ),
+        )),
     );
-    cfg.add_edge_with_payload(
+    cfg.add_edge(
         continue_decision,
         resume_target,
-        EdgeKind::ExceptionContinue,
-        decision(
+        Edge::new(EdgeKind::ExceptionContinue).with_payload(decision(
             ExceptionPhase::Search,
             ExceptionDisposition::ContinueExecution,
             14,
-        ),
+        )),
     );
 
     let model = EhModel::compute(&cfg);

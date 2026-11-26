@@ -34,8 +34,8 @@ fn a_flattened_tail_call_ends_its_block_without_an_edge_and_is_reported() {
         inst(3, Flow::Return),
     ];
     let options = AddressCfgOptions {
-        entry: None,
         calls: CallPolicy::Flatten,
+        ..AddressCfgOptions::default()
     };
     let graph = build_address_cfg(instructions, &[], options, payload).unwrap();
 

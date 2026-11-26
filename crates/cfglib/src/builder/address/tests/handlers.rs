@@ -12,7 +12,7 @@ use crate::builder::address::{
     build_address_cfg,
 };
 use crate::flow::Flow;
-use crate::region::HandlerKind;
+use crate::region::{HandlerKind, RegionId};
 
 #[test]
 fn exception_tables_make_protected_instructions_leaders_with_unwind_edges() {
@@ -48,7 +48,7 @@ fn exception_tables_make_protected_instructions_leaders_with_unwind_edges() {
     assert_eq!(unwinds, vec![0, 1]);
 
     assert_eq!(graph.handler_refs.len(), 1);
-    let regions = graph.cfg.regions();
+    let regions: Vec<_> = graph.cfg.regions().map(|(_, region)| region).collect();
     assert_eq!(regions.len(), 1);
     assert_eq!(regions[0].handlers[0].entry, graph.instruction_blocks[&3]);
     assert_eq!(regions[0].handlers[0].body, HandlerBody::Unknown);
@@ -105,18 +105,21 @@ fn nested_ranges_register_enclosing_regions_first() {
         payload,
     )
     .unwrap();
-    let regions = graph.cfg.regions();
+    let regions: Vec<_> = graph.cfg.regions().collect();
     assert_eq!(regions.len(), 2);
+    let [(outer, outer_region), (inner, inner_region)] = regions[..] else {
+        unreachable!("two regions")
+    };
     assert_eq!(
-        regions[0].protected_blocks.len(),
+        outer_region.protected_blocks.len(),
         3,
         "outer registered first"
     );
-    assert_eq!(regions[1].protected_blocks.len(), 1);
-    assert_eq!(regions[1].parent, Some(regions[0].id));
+    assert_eq!(inner_region.protected_blocks.len(), 1);
+    assert_eq!(inner_region.parent, Some(outer));
     // Table order survives in the returned refs.
-    assert_eq!(graph.handler_refs[0].region(), regions[1].id);
-    assert_eq!(graph.handler_refs[1].region(), regions[0].id);
+    assert_eq!(graph.handler_refs[0].region(), inner);
+    assert_eq!(graph.handler_refs[1].region(), outer);
 }
 
 #[test]
@@ -145,8 +148,8 @@ fn shared_protected_ranges_share_one_region() {
         payload,
     )
     .unwrap();
-    assert_eq!(graph.cfg.regions().len(), 1);
-    assert_eq!(graph.cfg.regions()[0].handlers.len(), 2);
+    assert_eq!(graph.cfg.region_count(), 1);
+    assert_eq!(graph.cfg.region(RegionId::from_raw(0)).handlers.len(), 2);
     assert_eq!(
         graph.handler_refs[0].region(),
         graph.handler_refs[1].region()
@@ -213,7 +216,7 @@ fn a_table_filter_resolves_to_the_block_that_starts_at_its_address() {
         Some(3),
         "the filter block starts at the filter address"
     );
-    let handler = graph.cfg.handler(graph.handler_refs[0]).unwrap();
+    let handler = graph.cfg.handler(graph.handler_refs[0]);
     assert_eq!(handler.kind, HandlerKind::Filter { filter_block });
     assert_eq!(handler.entry, graph.instruction_blocks[&5]);
 }
