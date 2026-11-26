@@ -25,7 +25,7 @@
 //! continues and may throw has the flow [`Flow::Next`] and reports
 //! [`InstrInfo::may_unwind`](crate::InstrInfo::may_unwind).
 
-pub mod transfer;
+mod transfer;
 
 pub use transfer::{
     CallSite, EdgeRole, Flow, Transfer, Transfers, UnresolvedRole, UnresolvedTransfer,

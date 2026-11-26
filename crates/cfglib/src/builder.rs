@@ -3,10 +3,16 @@
 //!
 //! Address-shaped streams (machine code, bytecode with branch targets and
 //! exception tables in one address space) build through
-//! [`address::build_address_cfg`] instead, which discovers leaders rather
-//! than consuming structured markers.
+//! [`build_address_cfg`] instead, which discovers leaders rather than
+//! consuming structured markers.
 
-pub mod address;
+mod address;
+
+pub use address::{
+    AddressBuildError, AddressCfgOptions, AddressEdgeInfo, AddressGraph, AddressHandler,
+    AddressHandlerKind, AddressInstruction, AddressSpace, CallPolicy, GivenEdge, GivenEdges,
+    HopEnd, UnwindEnd, UnwindHop, UnwindPath, UnwindRoute, UnwindStep, build_address_cfg,
+};
 
 extern crate alloc;
 use alloc::collections::BTreeMap;

@@ -231,12 +231,12 @@ pub use analysis::control_tree::{
 pub use analysis::metrics::{CfgMetrics, GraphMetrics};
 pub use analysis::pattern::{Pattern, detect_patterns, empty_trampolines};
 pub use block::{BasicBlock, BlockId, BlockTag};
-pub use builder::address::{
+pub use builder::{
     AddressBuildError, AddressCfgOptions, AddressEdgeInfo, AddressGraph, AddressHandler,
-    AddressHandlerKind, AddressInstruction, AddressSpace, CallPolicy, GivenEdge, GivenEdges,
-    HopEnd, UnwindEnd, UnwindHop, UnwindPath, UnwindRoute, UnwindStep, build_address_cfg,
+    AddressHandlerKind, AddressInstruction, AddressSpace, BuildError, CallPolicy, CfgBuilder,
+    GivenEdge, GivenEdges, HopEnd, JumpResolution, UnwindEnd, UnwindHop, UnwindPath, UnwindRoute,
+    UnwindStep, build_address_cfg, resolve_jump_edges,
 };
-pub use builder::{BuildError, CfgBuilder, JumpResolution, resolve_jump_edges};
 pub use cfg::{
     Cfg, CfgEdge, SemanticValidator, SplitPointError, control_flow_edge_attributes,
     parse_cfg_listing, verify, verify_semantics,
