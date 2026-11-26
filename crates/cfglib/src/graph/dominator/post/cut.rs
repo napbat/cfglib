@@ -28,7 +28,8 @@ use alloc::vec::Vec;
 
 use super::super::{ABSENT, word};
 use crate::graph::scc::tarjan_scc;
-use crate::graph::traverse::{TraversalDirection, reachable_in};
+use crate::graph::traverse::reachable_in;
+use crate::graph::view::Direction;
 use crate::graph::view::{DenseId, GraphView};
 
 /// What the analysis finds and the finished post-dominator tree keeps.
@@ -167,7 +168,7 @@ impl CutBuffers {
         reachable_in(
             graph,
             [root],
-            TraversalDirection::Outgoing,
+            Direction::Forward,
             None,
             &mut self.reachable,
             &mut self.stack,
@@ -187,7 +188,7 @@ impl CutBuffers {
         reachable_in(
             graph,
             exits.iter().copied(),
-            TraversalDirection::Incoming,
+            Direction::Backward,
             Some(&self.reachable),
             &mut reaching,
             &mut self.stack,

@@ -9,8 +9,8 @@
 use std::collections::BTreeMap;
 
 use cfglib::{
-    EdgeId, Graph, NodeId, Renumbering, TraversalDirection, breadth_first, depth_first_preorder,
-    reachable, shortest_path,
+    Direction, EdgeId, Graph, NodeId, Renumbering, breadth_first, depth_first_preorder, reachable,
+    shortest_path,
 };
 
 use crate::reference_model::Reference;
@@ -151,7 +151,7 @@ fn observe(graph: &Store) -> BTreeMap<usize, Observation> {
                     if !graph.contains_node(target) {
                         return None;
                     }
-                    shortest_path(graph, node, target, TraversalDirection::Outgoing)
+                    shortest_path(graph, node, target, Direction::Forward)
                         .map(|path| path.len() - 1)
                 })
                 .collect();
@@ -160,18 +160,10 @@ fn observe(graph: &Store) -> BTreeMap<usize, Observation> {
                 predecessors: indexes(graph.predecessors(node).collect()),
                 out_degree: graph.out_degree(node),
                 in_degree: graph.in_degree(node),
-                breadth_first: indexes(breadth_first(graph, node, TraversalDirection::Outgoing)),
-                breadth_first_backward: indexes(breadth_first(
-                    graph,
-                    node,
-                    TraversalDirection::Incoming,
-                )),
-                preorder: indexes(depth_first_preorder(
-                    graph,
-                    node,
-                    TraversalDirection::Outgoing,
-                )),
-                reachable: reachable(graph, [node], TraversalDirection::Outgoing),
+                breadth_first: indexes(breadth_first(graph, node, Direction::Forward)),
+                breadth_first_backward: indexes(breadth_first(graph, node, Direction::Backward)),
+                preorder: indexes(depth_first_preorder(graph, node, Direction::Forward)),
+                reachable: reachable(graph, [node], Direction::Forward),
                 distances,
             };
             (node.index(), observation)
@@ -302,9 +294,9 @@ fn assert_traversals_match_reference(
     let id = NodeId::from_index(node);
     for forward in [true, false] {
         let direction = if forward {
-            TraversalDirection::Outgoing
+            Direction::Forward
         } else {
-            TraversalDirection::Incoming
+            Direction::Backward
         };
         let mut seen = vec![false; reference.node_live.len()];
         let mut preorder = Vec::new();
@@ -343,12 +335,7 @@ fn assert_shortest_paths_match_reference(
     let id = NodeId::from_index(node);
     let distances = reference.distances(node);
     for &target in live {
-        let path = shortest_path(
-            graph,
-            id,
-            NodeId::from_index(target),
-            TraversalDirection::Outgoing,
-        );
+        let path = shortest_path(graph, id, NodeId::from_index(target), Direction::Forward);
         let Some(expected) = distances[target] else {
             assert!(path.is_none(), "n{node} cannot reach n{target}");
             continue;

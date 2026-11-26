@@ -3,18 +3,16 @@
 use std::collections::BTreeSet;
 
 use cfglib::{
-    Graph, GraphView, NodeId, NodeView, Reversed, TraversalDirection, breadth_first,
-    common_ancestors, depth_first_postorder, depth_first_preorder, nearest_common_ancestor,
-    reachable, reverse_postorder, scan_predecessors,
+    Direction, Graph, GraphView, NodeId, NodeView, Reversed, breadth_first, common_ancestors,
+    depth_first_postorder, depth_first_preorder, nearest_common_ancestor, reachable,
+    reverse_postorder, scan_predecessors,
 };
 
 use crate::Lcg;
 use crate::digraph::Digraph;
 
-const DIRECTIONS: [(TraversalDirection, bool); 2] = [
-    (TraversalDirection::Outgoing, true),
-    (TraversalDirection::Incoming, false),
-];
+const DIRECTIONS: [(Direction, bool); 2] =
+    [(Direction::Forward, true), (Direction::Backward, false)];
 
 fn indexes(nodes: Vec<NodeId>) -> Vec<usize> {
     nodes.into_iter().map(NodeId::index).collect()
@@ -112,7 +110,7 @@ fn class_hierarchy() -> (Graph<&'static str, ()>, [NodeId; 5]) {
 #[test]
 fn a_hand_derived_inheritance_query_lists_shared_bases_in_the_order_b_discovers_them() {
     let (graph, [object, mixin, _plain, a, b]) = class_hierarchy();
-    let incoming = TraversalDirection::Incoming;
+    let incoming = Direction::Backward;
 
     let shared = common_ancestors(&graph, a, b, incoming, None);
     let summary: Vec<(&str, usize, usize)> = shared
@@ -155,7 +153,7 @@ fn a_depth_bound_applies_to_each_endpoint_independently() {
     graph.add_edge(first, second, ());
     graph.add_edge(second, deep, ());
     graph.add_edge(origin, shallow, ());
-    let incoming = TraversalDirection::Incoming;
+    let incoming = Direction::Backward;
 
     assert_eq!(
         common_ancestors(&graph, deep, shallow, incoming, Some(2)).len(),
@@ -186,7 +184,7 @@ fn the_nearest_meeting_point_follows_the_combined_distance_rule_not_the_second_e
     graph.add_edge(turn, right, ());
     graph.add_edge(right, meeting, ());
 
-    let outgoing = TraversalDirection::Outgoing;
+    let outgoing = Direction::Forward;
     assert_eq!(
         nearest_common_ancestor(&graph, left, right, outgoing),
         Some(meeting),
@@ -206,7 +204,7 @@ fn the_nearest_meeting_point_follows_the_combined_distance_rule_not_the_second_e
 #[test]
 fn equal_endpoints_and_disconnected_endpoints_have_hand_derived_answers() {
     let (graph, [object, mixin, plain, a, b]) = class_hierarchy();
-    let incoming = TraversalDirection::Incoming;
+    let incoming = Direction::Backward;
     assert_eq!(
         nearest_common_ancestor(&graph, a, a, incoming),
         Some(a),
@@ -224,15 +222,15 @@ fn equal_endpoints_and_disconnected_endpoints_have_hand_derived_answers() {
         Some(object)
     );
     assert_eq!(
-        nearest_common_ancestor(&graph, plain, mixin, TraversalDirection::Outgoing),
+        nearest_common_ancestor(&graph, plain, mixin, Direction::Forward),
         Some(b)
     );
     assert_eq!(
-        nearest_common_ancestor(&graph, a, b, TraversalDirection::Outgoing),
+        nearest_common_ancestor(&graph, a, b, Direction::Forward),
         None
     );
     assert_eq!(
-        common_ancestors(&graph, a, b, TraversalDirection::Outgoing, None).len(),
+        common_ancestors(&graph, a, b, Direction::Forward, None).len(),
         0
     );
 }
@@ -245,7 +243,7 @@ fn a_first_endpoint_outside_the_graph_panics() {
         &graph,
         NodeId::from_index(9),
         NodeId::from_index(0),
-        TraversalDirection::Incoming,
+        Direction::Backward,
     );
 }
 
@@ -257,7 +255,7 @@ fn a_second_endpoint_outside_the_graph_panics_in_the_ranked_query() {
         &graph,
         NodeId::from_index(0),
         NodeId::from_index(9),
-        TraversalDirection::Incoming,
+        Direction::Backward,
         None,
     );
 }
@@ -368,8 +366,8 @@ fn walks_over_a_reversed_view_equal_the_incoming_walks_over_the_view_itself() {
         let digraph = Digraph::random(&mut Lcg(seed + 50), 20, 40);
         let graph = digraph.graph();
         let reversed = Reversed::new(&graph);
-        let outgoing = TraversalDirection::Outgoing;
-        let incoming = TraversalDirection::Incoming;
+        let outgoing = Direction::Forward;
+        let incoming = Direction::Backward;
         for start in [0, 9, 19] {
             let id = NodeId::from_index(start);
             assert_eq!(
@@ -433,11 +431,11 @@ fn reverse_postorder_is_the_reversed_recursive_postorder_and_postorder_is_its_mi
             expected.reverse();
 
             assert_eq!(
-                depth_first_postorder(&view, start, TraversalDirection::Outgoing),
+                depth_first_postorder(&view, start, Direction::Forward),
                 postorder
             );
             assert_eq!(
-                reverse_postorder(&view, start, TraversalDirection::Outgoing),
+                reverse_postorder(&view, start, Direction::Forward),
                 expected,
                 "seed {seed}"
             );
@@ -445,7 +443,7 @@ fn reverse_postorder_is_the_reversed_recursive_postorder_and_postorder_is_its_mi
                 indexes(reverse_postorder(
                     &graph,
                     NodeId::from_index(start),
-                    TraversalDirection::Outgoing
+                    Direction::Forward
                 )),
                 expected
             );
@@ -496,21 +494,18 @@ fn reverse_postorder_of_a_unit_graph_and_a_cycle_are_hand_derived() {
     let single = ForwardOnly {
         successors: vec![vec![]],
     };
-    assert_eq!(
-        reverse_postorder(&single, 0, TraversalDirection::Outgoing),
-        [0]
-    );
+    assert_eq!(reverse_postorder(&single, 0, Direction::Forward), [0]);
 
     // 0 -> 1 -> 2 -> 0 and 0 -> 3
     let cycle = ForwardOnly {
         successors: vec![vec![1, 3], vec![2], vec![0], vec![]],
     };
     assert_eq!(
-        depth_first_postorder(&cycle, 0, TraversalDirection::Outgoing),
+        depth_first_postorder(&cycle, 0, Direction::Forward),
         [2, 1, 3, 0]
     );
     assert_eq!(
-        reverse_postorder(&cycle, 0, TraversalDirection::Outgoing),
+        reverse_postorder(&cycle, 0, Direction::Forward),
         [0, 3, 1, 2]
     );
 }
@@ -552,11 +547,7 @@ fn reachability_skips_removed_nodes_and_every_seed_is_reached_itself() {
     let digraph = Digraph::random(&mut Lcg(8), 12, 20);
     let mut graph = digraph.graph();
     graph.remove_node(NodeId::from_index(4));
-    let live = reachable(
-        &graph,
-        [NodeId::from_index(0)],
-        TraversalDirection::Outgoing,
-    );
+    let live = reachable(&graph, [NodeId::from_index(0)], Direction::Forward);
     assert!(live[0], "a seed is reached");
     assert!(!live[4], "a removed node is reached by nothing");
     assert_eq!(live.len(), graph.node_bound());
@@ -566,9 +557,5 @@ fn reachability_skips_removed_nodes_and_every_seed_is_reached_itself() {
 #[should_panic(expected = "seed node is out of range")]
 fn a_reachability_seed_outside_the_graph_panics() {
     let graph = Digraph::random(&mut Lcg(1), 5, 6).graph();
-    let _ = reachable(
-        &graph,
-        [NodeId::from_index(5)],
-        TraversalDirection::Outgoing,
-    );
+    let _ = reachable(&graph, [NodeId::from_index(5)], Direction::Forward);
 }

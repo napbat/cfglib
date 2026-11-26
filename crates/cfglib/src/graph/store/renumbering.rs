@@ -5,8 +5,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
-use super::adjacency::NONE;
 use super::id::{EdgeTag, Id, IdTag, NodeTag};
+use crate::identity::NO_INDEX;
 
 /// Every old identity's replacement after one compaction.
 ///
@@ -110,7 +110,7 @@ impl<NT: IdTag, ET: IdTag> Renumbering<NT, ET> {
 
 fn translate<T: IdTag>(mapping: &[u32], old: usize) -> Option<Id<T>> {
     let new = *mapping.get(old)?;
-    if new == NONE {
+    if new == NO_INDEX {
         return None;
     }
     Some(Id::from_raw(new))
@@ -120,10 +120,13 @@ fn compose_axis(first: &[u32], second: &[u32]) -> Vec<u32> {
     first
         .iter()
         .map(|&intermediate| {
-            if intermediate == NONE {
-                return NONE;
+            if intermediate == NO_INDEX {
+                return NO_INDEX;
             }
-            second.get(intermediate as usize).copied().unwrap_or(NONE)
+            second
+                .get(intermediate as usize)
+                .copied()
+                .unwrap_or(NO_INDEX)
         })
         .collect()
 }

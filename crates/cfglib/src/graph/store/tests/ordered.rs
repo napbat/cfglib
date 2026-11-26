@@ -15,7 +15,8 @@ use core::mem;
 use crate::graph::dominator::DominatorTree;
 use crate::graph::store::{EdgeId, Graph, NodeId, NodeOrder, Renumbering};
 use crate::graph::structure::is_reducible;
-use crate::graph::traverse::{TraversalDirection, breadth_first, reverse_postorder};
+use crate::graph::traverse::{breadth_first, reverse_postorder};
+use crate::graph::view::Direction;
 use crate::graph::view::{GraphView, Rooted};
 use crate::test_util::rng::Rng;
 
@@ -76,7 +77,7 @@ fn random_store(rng: &mut Rng) -> Store {
         let old = live[rng.below(live.len())];
         let new = live[rng.below(live.len())];
         if old != new {
-            graph.move_adjacency(old, new, TraversalDirection::Outgoing);
+            graph.move_adjacency(old, new, Direction::Forward);
         }
     }
     for node in live {
@@ -165,14 +166,14 @@ fn oracle(graph: &Store, order: NodeOrder<'_>) -> Vec<NodeId> {
             // A node reached through an earlier root's node was reached by
             // that root, so filtering each full traversal is the forest.
             for &root in roots {
-                for node in breadth_first(graph, root, TraversalDirection::Outgoing) {
+                for node in breadth_first(graph, root, Direction::Forward) {
                     visit(node, &mut sequence);
                 }
             }
         }
         NodeOrder::ReversePostorder(roots) => {
             let view = VirtualRoot { graph, roots };
-            let ranked = reverse_postorder(&view, view.root(), TraversalDirection::Outgoing);
+            let ranked = reverse_postorder(&view, view.root(), Direction::Forward);
             for node in ranked.into_iter().skip(1) {
                 visit(node, &mut sequence);
             }
@@ -238,7 +239,7 @@ fn assert_image(before: &Store, after: &Store, renumbering: &Renumbering) {
 
     for old in before.node_ids() {
         let new = renumbered(renumbering, old);
-        for direction in [TraversalDirection::Outgoing, TraversalDirection::Incoming] {
+        for direction in [Direction::Forward, Direction::Backward] {
             let expected: Vec<EdgeId> = before
                 .adjacent(old, direction)
                 .map(|edge| renumbering.edge(edge).expect("a live edge survives"))

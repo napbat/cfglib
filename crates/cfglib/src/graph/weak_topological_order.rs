@@ -21,7 +21,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use crate::graph::traverse::{Adjacency, TraversalDirection, by_axis};
+use crate::graph::traverse::{Adjacency, by_axis};
+use crate::graph::view::Direction;
 use crate::graph::view::{DenseId, GraphView, assert_in_bound};
 use crate::union_find::DisjointSet;
 
@@ -63,7 +64,7 @@ fn as_usize(value: u32) -> usize {
 /// The outer loop `1 → 2 → 1` encloses the inner loop `2 → 3 → 2`:
 ///
 /// ```
-/// use cfglib::{Graph, TraversalDirection, WeakTopologicalOrder};
+/// use cfglib::{Graph, Direction, WeakTopologicalOrder};
 ///
 /// let mut graph = Graph::<(), ()>::new();
 /// let [entry, outer, inner, latch, exit] = [(); 5].map(|()| graph.add_node(()));
@@ -74,7 +75,7 @@ fn as_usize(value: u32) -> usize {
 /// graph.add_edge(inner, outer, ());
 /// graph.add_edge(outer, exit, ());
 ///
-/// let order = WeakTopologicalOrder::compute(&graph, entry, TraversalDirection::Outgoing);
+/// let order = WeakTopologicalOrder::compute(&graph, entry, Direction::Forward);
 /// // entry (outer (inner latch)) exit
 /// assert_eq!(order.order(), [entry, outer, inner, latch, exit]);
 /// assert_eq!(order.heads().collect::<Vec<_>>(), [outer, inner]);
@@ -106,7 +107,7 @@ impl<N: DenseId> WeakTopologicalOrder<N> {
     ///
     /// Panics when `root` is not below the node bound of `graph`.
     #[must_use]
-    pub fn compute<G>(graph: &G, root: N, direction: TraversalDirection) -> Self
+    pub fn compute<G>(graph: &G, root: N, direction: Direction) -> Self
     where
         G: GraphView<NodeId = N>,
     {
@@ -123,7 +124,7 @@ impl<N: DenseId> WeakTopologicalOrder<N> {
     pub(crate) fn from_roots<G>(
         graph: &G,
         roots: impl IntoIterator<Item = N>,
-        direction: TraversalDirection,
+        direction: Direction,
     ) -> Self
     where
         G: GraphView<NodeId = N>,
@@ -295,7 +296,7 @@ impl DepthFirstForest {
 pub(crate) fn depth_first_forest<G: GraphView>(
     graph: &G,
     roots: impl IntoIterator<Item = G::NodeId>,
-    direction: TraversalDirection,
+    direction: Direction,
 ) -> DepthFirstForest {
     by_axis!(direction, forest_along(graph, roots))
 }

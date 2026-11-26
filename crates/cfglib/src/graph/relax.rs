@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use core::cmp::Reverse;
 
 use super::store::{EdgeRecord, Graph, NodeId};
-use super::traverse::TraversalDirection;
+use crate::graph::view::Direction;
 
 /// Compute the minimum label reachable at every node from `seeds`.
 ///
@@ -46,7 +46,7 @@ use super::traverse::TraversalDirection;
 /// # Examples
 ///
 /// ```rust
-/// use cfglib::{Graph, TraversalDirection, min_label_relaxation};
+/// use cfglib::{Graph, Direction, min_label_relaxation};
 ///
 /// let mut graph = Graph::new();
 /// let start = graph.add_node(());
@@ -59,7 +59,7 @@ use super::traverse::TraversalDirection;
 /// let distances = min_label_relaxation(
 ///     &graph,
 ///     [(start, 0_u32)],
-///     TraversalDirection::Outgoing,
+///     Direction::Forward,
 ///     |edge, distance| distance.checked_add(*edge.payload()),
 /// );
 /// assert_eq!(distances, [Some(0), Some(2), Some(5)]);
@@ -68,7 +68,7 @@ use super::traverse::TraversalDirection;
 pub fn min_label_relaxation<N, E, L>(
     graph: &Graph<N, E>,
     seeds: impl IntoIterator<Item = (NodeId, L)>,
-    direction: TraversalDirection,
+    direction: Direction,
     mut relax: impl FnMut(&EdgeRecord<E>, &L) -> Option<L>,
 ) -> Vec<Option<L>>
 where
@@ -81,7 +81,7 @@ where
         .into_iter()
         .map(|(node, label)| Reverse((label, node)))
         .collect();
-    let forward = matches!(direction, TraversalDirection::Outgoing);
+    let forward = matches!(direction, Direction::Forward);
 
     while let Some(Reverse((candidate, node))) = worklist.pop() {
         assert!(node.index() < labels.len(), "seed node is out of range");
@@ -156,12 +156,10 @@ mod tests {
         graph.add_edge(join, tail, Rule::Carry);
         graph.add_edge(root, blocked, Rule::Block);
 
-        let labels = min_label_relaxation(
-            &graph,
-            [(root, 0)],
-            TraversalDirection::Outgoing,
-            |edge, label| apply_rule(edge, *label),
-        );
+        let labels =
+            min_label_relaxation(&graph, [(root, 0)], Direction::Forward, |edge, label| {
+                apply_rule(edge, *label)
+            });
 
         assert_eq!(labels, [Some(0), Some(2), Some(2), Some(2), None]);
     }
@@ -175,12 +173,10 @@ mod tests {
         graph.add_edge(source, middle, Rule::Carry);
         graph.add_edge(middle, sink, Rule::Carry);
 
-        let labels = min_label_relaxation(
-            &graph,
-            [(sink, 4)],
-            TraversalDirection::Incoming,
-            |edge, label| apply_rule(edge, *label),
-        );
+        let labels =
+            min_label_relaxation(&graph, [(sink, 4)], Direction::Backward, |edge, label| {
+                apply_rule(edge, *label)
+            });
 
         assert_eq!(labels, [Some(4), Some(4), Some(4)]);
     }
@@ -196,7 +192,7 @@ mod tests {
         let labels = min_label_relaxation(
             &graph,
             [(source, 1), (source, 7)],
-            TraversalDirection::Outgoing,
+            Direction::Forward,
             |edge, label| apply_rule(edge, *label),
         );
 
@@ -210,7 +206,7 @@ mod tests {
         let _ = min_label_relaxation(
             &graph,
             [(NodeId::from_index(0), 0_u32)],
-            TraversalDirection::Outgoing,
+            Direction::Forward,
             |_, label| Some(*label),
         );
     }
@@ -238,7 +234,7 @@ mod tests {
         let labels = min_label_relaxation(
             &graph,
             [(start, 0_u64)],
-            TraversalDirection::Outgoing,
+            Direction::Forward,
             |edge, label| {
                 calls += 1;
                 label.checked_add(*edge.payload())
@@ -265,15 +261,15 @@ mod tests {
                 graph.add_edge(nodes[source], nodes[target], weight);
                 edges.push((source, target, weight));
             }
-            for direction in [TraversalDirection::Outgoing, TraversalDirection::Incoming] {
+            for direction in [Direction::Forward, Direction::Backward] {
                 let seed = rng.below(node_count);
                 let mut expected = alloc::vec![None; node_count];
                 expected[seed] = Some(0_u64);
                 for _ in 0..node_count {
                     for &(source, target, weight) in &edges {
                         let (near, far) = match direction {
-                            TraversalDirection::Outgoing => (source, target),
-                            TraversalDirection::Incoming => (target, source),
+                            Direction::Forward => (source, target),
+                            Direction::Backward => (target, source),
                         };
                         if let Some(label) = expected[near] {
                             let candidate = label + weight;

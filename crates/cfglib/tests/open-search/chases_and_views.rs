@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cfglib::{
-    GraphView, NodeId, SearchConfig, SearchOrder, TraversalDirection, Visit, breadth_first,
+    Direction, GraphView, NodeId, SearchConfig, SearchOrder, Visit, breadth_first,
     depth_first_preorder, follow, follow_path, reachable, scan_predecessors, search, shortest_path,
     topological_sort,
 };
@@ -239,7 +239,7 @@ fn the_backward_algorithms_agree_between_a_forward_only_view_and_the_store() {
         let table = simple(&Table::random(&mut Lcg(seed + 10), 25, 60));
         let view = ForwardOnly::new(&table);
         let graph = table.graph();
-        let incoming = TraversalDirection::Incoming;
+        let incoming = Direction::Backward;
         for start in [0, 6, 17] {
             let id = NodeId::from_index(start);
             assert_eq!(
@@ -276,7 +276,7 @@ fn a_backward_search_over_a_forward_only_view_visits_like_one_over_the_store() {
     let view = ForwardOnly::new(&table);
     let graph = table.graph();
     for order in [SearchOrder::DepthFirst, SearchOrder::BreadthFirst] {
-        let config = SearchConfig::new(order, TraversalDirection::Incoming).with_max_depth(4);
+        let config = SearchConfig::new(order, Direction::Backward).with_max_depth(4);
         let mut along_view = Vec::new();
         let outcome = search(&view, [5_usize], config, |node, depth| {
             along_view.push((node, depth));

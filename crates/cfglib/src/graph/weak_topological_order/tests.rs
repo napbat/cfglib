@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 
 use super::{NONE, WeakTopologicalOrder, as_usize};
 use crate::graph::store::Graph;
-use crate::graph::traverse::TraversalDirection;
+use crate::graph::view::Direction;
 use crate::graph::view::GraphView;
 use crate::test_util::rng::Rng;
 
@@ -265,7 +265,7 @@ fn assert_weak_topological(graph: &Digraph, root: u32, order: &WeakTopologicalOr
 }
 
 fn check(graph: &Digraph, root: u32) {
-    let order = WeakTopologicalOrder::compute(graph, root, TraversalDirection::Outgoing);
+    let order = WeakTopologicalOrder::compute(graph, root, Direction::Forward);
     assert_weak_topological(graph, root, &order);
     let (expected, heads) = Bourdoncle::order(graph, root);
     assert_eq!(order.order(), expected, "Bourdoncle's order");
@@ -331,10 +331,10 @@ fn random_digraphs_match_bourdoncle_and_the_definition_both_ways() {
 
         let reversed = graph.reversed();
         let root = u32::try_from(count - 1).expect("few nodes");
-        let backward = WeakTopologicalOrder::compute(&graph, root, TraversalDirection::Incoming);
+        let backward = WeakTopologicalOrder::compute(&graph, root, Direction::Backward);
         assert_eq!(
             backward,
-            WeakTopologicalOrder::compute(&reversed, root, TraversalDirection::Outgoing),
+            WeakTopologicalOrder::compute(&reversed, root, Direction::Forward),
             "walking incoming edges is walking the reversed graph"
         );
         assert_weak_topological(&reversed, root, &backward);
@@ -386,19 +386,19 @@ fn parenthesized(order: &WeakTopologicalOrder<u32>) -> alloc::string::String {
 #[test]
 fn the_three_graphs_of_figure_one_get_the_orders_of_the_paper() {
     let g1 = figure_one(&[]);
-    let w1 = WeakTopologicalOrder::compute(&g1, 1, TraversalDirection::Outgoing);
+    let w1 = WeakTopologicalOrder::compute(&g1, 1, Direction::Forward);
     assert_eq!(parenthesized(&w1), "1 2 3 4 5 6 7 8 9");
 
     // G2 adds the loops 4 <-> 5 and 7 <-> 8 and the edge 2 -> 8.
     let g2 = figure_one(&[(2, 8), (5, 4), (8, 7)]);
-    let w2 = WeakTopologicalOrder::compute(&g2, 1, TraversalDirection::Outgoing);
+    let w2 = WeakTopologicalOrder::compute(&g2, 1, Direction::Forward);
     assert_eq!(parenthesized(&w2), "1 2 3 (4 5) 6 (7 8) 9");
     assert_eq!(w2.head_of(5), Some(4));
     assert_eq!(w2.head_of(6), None);
 
     // G3 also closes the outer loop 3 ... 6 with 5 -> 3 and 6 -> 3.
     let g3 = figure_one(&[(2, 8), (5, 3), (5, 4), (6, 3), (8, 7)]);
-    let w3 = WeakTopologicalOrder::compute(&g3, 1, TraversalDirection::Outgoing);
+    let w3 = WeakTopologicalOrder::compute(&g3, 1, Direction::Forward);
     assert_eq!(parenthesized(&w3), "1 2 (3 (4 5) 6) (7 8) 9");
     assert_eq!(w3.heads().collect::<Vec<_>>(), [3, 4, 7]);
     assert_eq!(w3.head_of(5), Some(4));
@@ -412,7 +412,7 @@ fn the_three_graphs_of_figure_one_get_the_orders_of_the_paper() {
 #[test]
 fn a_self_loop_heads_a_component_of_one_node() {
     let graph = Digraph::new(3, &[(0, 1), (1, 1), (1, 2)]);
-    let order = WeakTopologicalOrder::compute(&graph, 0, TraversalDirection::Outgoing);
+    let order = WeakTopologicalOrder::compute(&graph, 0, Direction::Forward);
     assert_eq!(parenthesized(&order), "0 (1) 2");
     assert!(order.is_head(1));
     assert_eq!(order.head_of(2), None);
@@ -422,7 +422,7 @@ fn a_self_loop_heads_a_component_of_one_node() {
 fn an_irreducible_loop_is_headed_by_the_entry_the_walk_takes_first() {
     // 0 enters the cycle 1 <-> 2 at both nodes; the walk enters at 1.
     let graph = Digraph::new(4, &[(0, 1), (0, 2), (1, 2), (2, 1), (2, 3)]);
-    let order = WeakTopologicalOrder::compute(&graph, 0, TraversalDirection::Outgoing);
+    let order = WeakTopologicalOrder::compute(&graph, 0, Direction::Forward);
     assert_eq!(parenthesized(&order), "0 (1 2) 3");
     check(&graph, 0);
 }
@@ -436,7 +436,7 @@ fn nodes_the_root_misses_and_removed_slots_have_no_rank() {
     graph.add_edge(nodes[3], nodes[0], ());
     graph.add_edge(nodes[2], nodes[4], ());
     assert!(graph.remove_node(nodes[4]));
-    let order = WeakTopologicalOrder::compute(&graph, nodes[0], TraversalDirection::Outgoing);
+    let order = WeakTopologicalOrder::compute(&graph, nodes[0], Direction::Forward);
     assert_eq!(order.order(), [nodes[0], nodes[2]]);
     assert_eq!(order.heads().collect::<Vec<_>>(), [nodes[0]]);
     for missed in [nodes[1], nodes[3], nodes[4]] {
@@ -450,8 +450,7 @@ fn later_roots_come_first_because_they_can_reach_earlier_ones() {
     // 3 -> 0 and 1 -> 2, walked from 0, then 1, then 3; the repeated 0 is
     // skipped.
     let graph = Digraph::new(4, &[(3, 0), (1, 2)]);
-    let order =
-        WeakTopologicalOrder::from_roots(&graph, [0, 1, 3, 0], TraversalDirection::Outgoing);
+    let order = WeakTopologicalOrder::from_roots(&graph, [0, 1, 3, 0], Direction::Forward);
     assert_eq!(order.order(), [3, 1, 2, 0]);
     assert_eq!(order.heads().count(), 0);
 }
@@ -464,7 +463,7 @@ fn a_long_chain_of_nested_loops_needs_no_recursion() {
     let mut edges: Vec<(u32, u32)> = (1..count).map(|node| (node - 1, node)).collect();
     edges.extend((1..count).map(|node| (node, node - 1)));
     let graph = Digraph::new(count as usize, &edges);
-    let order = WeakTopologicalOrder::compute(&graph, 0, TraversalDirection::Outgoing);
+    let order = WeakTopologicalOrder::compute(&graph, 0, Direction::Forward);
     assert_eq!(order.order(), (0..count).collect::<Vec<_>>());
     assert_eq!(order.heads().count(), count as usize - 1);
     assert_eq!(order.head_of(count - 1), Some(count - 2));
@@ -474,5 +473,5 @@ fn a_long_chain_of_nested_loops_needs_no_recursion() {
 #[should_panic(expected = "root is out of range")]
 fn a_root_beyond_the_bound_panics() {
     let graph = Digraph::new(1, &[]);
-    let _ = WeakTopologicalOrder::compute(&graph, 1, TraversalDirection::Outgoing);
+    let _ = WeakTopologicalOrder::compute(&graph, 1, Direction::Forward);
 }

@@ -9,12 +9,13 @@ use core::convert::Infallible;
 use super::{ResumeMode, resume_node_problem, resume_problem};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::dataflow::fixpoint::{Direction, Facts, SolveConfig, TryProblem, try_solve_problem};
+use crate::dataflow::fixpoint::{Facts, SolveConfig, TryProblem, try_solve_problem};
 use crate::dataflow::node_fixpoint::{
     TryNodeProblem, try_solve_node_problem, try_solve_node_problem_from,
 };
 use crate::edge::EdgeKind;
 use crate::graph::store::{Graph, NodeId};
+use crate::graph::view::Direction;
 
 /// Taint as a bit row: each source sets its own bit, and a node's fact is
 /// what flows in with its own bit added when it is a source.

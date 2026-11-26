@@ -12,7 +12,7 @@ pub(super) use store::{Dense, EdgeStore};
 
 use crate::dataflow::bits::DenseBits;
 use crate::dataflow::fixpoint::{
-    Direction, Facts, SolveConfig, SolveError, TrySolveError, collapse_infallible,
+    Facts, SolveConfig, SolveError, TrySolveError, collapse_infallible,
 };
 use crate::dataflow::schedule::{
     Bound, Changed, Leaving, Mode, Ordered, Plain, Schedule, Sweep, schedule,
@@ -22,6 +22,7 @@ use crate::graph::edge_traverse::EdgeAdjacency;
 use crate::graph::edge_view::{EdgeRef, EdgeView};
 use crate::graph::traverse::by_axis;
 use crate::graph::view::DenseId;
+use crate::graph::view::Direction;
 use crate::graph::weak_topological_order::WeakTopologicalOrder;
 
 /// A dataflow problem whose transfer can distinguish individual edges.
@@ -640,7 +641,7 @@ where
     P: TryEdgeProblem<G>,
     S: EdgeStore<G::NodeId, P::Fact>,
 {
-    let traversal = problem.direction().traversal();
+    let traversal = problem.direction();
     let solver = |order| Solver {
         graph,
         problem,
@@ -764,7 +765,7 @@ where
         queue: &mut impl Queue,
         config: SolveConfig,
     ) -> Result<(S, usize), TrySolveError<P::Error>> {
-        let traversal = self.problem.direction().traversal();
+        let traversal = self.problem.direction();
         let mut steps = 0;
         while let Some(node_index) = queue.pop() {
             config.count_step(&mut steps, node_index)?;
@@ -791,7 +792,7 @@ where
         order: &WeakTopologicalOrder<G::NodeId>,
         config: SolveConfig,
     ) -> Result<(S, usize), TrySolveError<P::Error>> {
-        let traversal = self.problem.direction().traversal();
+        let traversal = self.problem.direction();
         let narrowing = config.narrowing_passes() > 0;
         let mut leaving = (S::FINISHES || narrowing).then(|| Leaving::new(order, S::FINISHES));
         let mut visited = narrowing.then(|| DenseBits::new(self.graph.node_bound()));
@@ -848,7 +849,7 @@ where
         config: SolveConfig,
         steps: &mut usize,
     ) -> Result<(), TrySolveError<P::Error>> {
-        let traversal = self.problem.direction().traversal();
+        let traversal = self.problem.direction();
         let floor = sweep.component.end;
         for _ in 0..config.narrowing_passes() {
             let mut changed = false;

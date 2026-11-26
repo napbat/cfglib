@@ -8,7 +8,8 @@ use crate::graph::dominator::DominatorTree;
 use crate::graph::edge_view::EdgeView;
 use crate::graph::scc::tarjan_scc;
 use crate::graph::store::Graph;
-use crate::graph::traverse::{TraversalDirection, depth_first_preorder};
+use crate::graph::traverse::depth_first_preorder;
+use crate::graph::view::Direction;
 use crate::graph::view::{GraphView, Rooted};
 
 use super::{Id, NodeId};
@@ -260,15 +261,15 @@ fn assert_mirrored<N, E>(graph: &Graph<N, E>) {
     for node in graph.node_ids() {
         for edge in graph.outgoing(node) {
             assert_eq!(graph.edge(edge).source(), node, "outgoing listing");
-            listed.push((edge, TraversalDirection::Outgoing));
+            listed.push((edge, Direction::Forward));
         }
         for edge in graph.incoming(node) {
             assert_eq!(graph.edge(edge).target(), node, "incoming listing");
-            listed.push((edge, TraversalDirection::Incoming));
+            listed.push((edge, Direction::Backward));
         }
     }
     for edge in graph.edge_ids() {
-        for direction in [TraversalDirection::Outgoing, TraversalDirection::Incoming] {
+        for direction in [Direction::Forward, Direction::Backward] {
             let count = listed
                 .iter()
                 .filter(|&&(candidate, side)| candidate == edge && side == direction)
@@ -365,7 +366,7 @@ fn nodes_added_after_the_first_relocation_relocate_too() {
 
     graph.redirect_edge_source(second, tail);
     graph.redirect_edge_target(first, tail);
-    graph.move_adjacency(head, tail, TraversalDirection::Outgoing);
+    graph.move_adjacency(head, tail, Direction::Forward);
 
     assert_eq!(graph.outgoing(tail).count(), 2);
     assert_eq!(graph.incoming(tail).count(), 2);
@@ -409,7 +410,7 @@ fn a_bulk_move_carries_the_overlay_and_the_delta_chain_in_order() {
     let appended = graph.add_edge(c, b, "appended");
     let own = graph.add_edge(a, d, "own");
 
-    graph.move_adjacency(c, a, TraversalDirection::Outgoing);
+    graph.move_adjacency(c, a, Direction::Forward);
 
     assert_eq!(
         graph.outgoing(a).collect::<Vec<_>>(),
@@ -437,7 +438,7 @@ fn a_bulk_move_leaves_removed_edges_as_they_were() {
     graph.compact();
     assert!(graph.remove_edge(dead));
 
-    graph.move_adjacency(a, b, TraversalDirection::Outgoing);
+    graph.move_adjacency(a, b, Direction::Forward);
 
     assert_eq!(graph.edge(dead).source(), a, "a removed edge is not moved");
     assert_eq!(graph.edge(live).source(), b);
@@ -451,7 +452,7 @@ fn a_bulk_move_of_nothing_names_no_replacement() {
     let [empty, gone] = ["empty", "gone"].map(|payload| graph.add_node(payload));
     graph.remove_node(gone);
 
-    graph.move_adjacency(empty, gone, TraversalDirection::Incoming);
+    graph.move_adjacency(empty, gone, Direction::Backward);
 
     assert!(graph.incoming(empty).next().is_none());
     assert!(graph.incoming(gone).next().is_none());
@@ -461,10 +462,9 @@ fn a_bulk_move_of_nothing_names_no_replacement() {
 fn verify_reports_an_edge_its_endpoint_stopped_listing() {
     // The shape of a dropped listing: the edge is live and its other
     // endpoint still lists it, but one endpoint's chain has forgotten it.
-    for (direction, (outgoing, incoming)) in [
-        (TraversalDirection::Outgoing, (0, 1)),
-        (TraversalDirection::Incoming, (1, 0)),
-    ] {
+    for (direction, (outgoing, incoming)) in
+        [(Direction::Forward, (0, 1)), (Direction::Backward, (1, 0))]
+    {
         let mut cfg = crate::Cfg::<u32>::new();
         let source = cfg.entry();
         let target = cfg.new_block();
@@ -472,8 +472,8 @@ fn verify_reports_an_edge_its_endpoint_stopped_listing() {
         assert!(crate::verify(&cfg).is_ok());
 
         let forgetful = match direction {
-            TraversalDirection::Outgoing => source,
-            TraversalDirection::Incoming => target,
+            Direction::Forward => source,
+            Direction::Backward => target,
         };
         cfg.graph.chains.detach_node(forgetful.index(), direction);
 
@@ -538,23 +538,23 @@ fn compacting_an_untouched_store_is_the_identity() {
 fn compaction_keeps_the_adjacency_order_a_redirect_produced() {
     // A redirect appends the edge to its new endpoint's adjacency, so there
     // the older edge comes second and the order is no longer identity order.
-    for direction in [TraversalDirection::Outgoing, TraversalDirection::Incoming] {
+    for direction in [Direction::Forward, Direction::Backward] {
         let mut graph = Graph::<&'static str, &'static str>::new();
         let [hub, other, near, far] =
             ["hub", "other", "near", "far"].map(|payload| graph.add_node(payload));
         let (moved, resident) = match direction {
-            TraversalDirection::Outgoing => (
+            Direction::Forward => (
                 graph.add_edge(other, near, "moved"),
                 graph.add_edge(hub, far, "resident"),
             ),
-            TraversalDirection::Incoming => (
+            Direction::Backward => (
                 graph.add_edge(near, other, "moved"),
                 graph.add_edge(far, hub, "resident"),
             ),
         };
         match direction {
-            TraversalDirection::Outgoing => graph.redirect_edge_source(moved, hub),
-            TraversalDirection::Incoming => graph.redirect_edge_target(moved, hub),
+            Direction::Forward => graph.redirect_edge_source(moved, hub),
+            Direction::Backward => graph.redirect_edge_target(moved, hub),
         };
         assert_eq!(
             graph.adjacent(hub, direction).collect::<Vec<_>>(),
@@ -743,11 +743,11 @@ fn the_algorithms_agree_whether_the_edges_sit_in_the_delta_or_the_compacted_base
 
     assert_eq!(
         indexes(
-            depth_first_preorder(&base, base_nodes[0], TraversalDirection::Outgoing),
+            depth_first_preorder(&base, base_nodes[0], Direction::Forward),
             Id::index
         ),
         indexes(
-            depth_first_preorder(&delta, delta_nodes[0], TraversalDirection::Outgoing),
+            depth_first_preorder(&delta, delta_nodes[0], Direction::Forward),
             Id::index
         )
     );

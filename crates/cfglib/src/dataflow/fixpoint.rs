@@ -52,33 +52,10 @@ use core::convert::Infallible;
 
 use super::node_fixpoint::{self, TryNodeProblem};
 use super::worklist::Worklist;
-use crate::graph::traverse::{TraversalDirection, depth_first_preorder};
-use crate::graph::view::{DenseId, RootedView};
-
-/// Direction of the data flow analysis.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
-    /// Forward: information flows from predecessors to successors.
-    Forward,
-    /// Backward: information flows from successors to predecessors.
-    Backward,
-}
+use crate::graph::traverse::depth_first_preorder;
+use crate::graph::view::{DenseId, Direction, RootedView};
 
 impl Direction {
-    /// The direction in which the solver follows edges to carry a fact from
-    /// a node to the nodes that consume it.
-    ///
-    /// A forward analysis carries facts along outgoing edges, a backward
-    /// analysis along incoming ones. Every solver derives its adjacency
-    /// from this one conversion.
-    #[must_use]
-    pub const fn traversal(self) -> TraversalDirection {
-        match self {
-            Self::Forward => TraversalDirection::Outgoing,
-            Self::Backward => TraversalDirection::Incoming,
-        }
-    }
-
     /// Orders what a node receives and what it transfers by program order.
     ///
     /// A forward analysis receives its fact at the node's start and transfers
@@ -769,7 +746,7 @@ pub(super) fn initial_worklist<V: RootedView>(view: &V, direction: Direction) ->
     match direction {
         Direction::Forward => Worklist::of(
             view.node_bound(),
-            depth_first_preorder(view, view.root(), direction.traversal())
+            depth_first_preorder(view, view.root(), Direction::Forward)
                 .into_iter()
                 .map(DenseId::index),
         ),

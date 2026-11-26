@@ -11,15 +11,16 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::mem;
 
-use crate::graph::traverse::TraversalDirection;
+use crate::graph::view::Direction;
 
 use super::Graph;
-use super::adjacency::{NONE, compress};
+use super::adjacency::compress;
 use super::edge::EdgeRecord;
 use super::id::{Id, IdTag};
 use super::liveness::LiveSet;
 use super::node_order::NodeOrder;
 use super::renumbering::Renumbering;
+use crate::identity::NO_INDEX;
 
 impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// Whether the store is a pure compressed base: no delta, no tombstones.
@@ -154,20 +155,16 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         // The counting passes below place every run in identity order, so the
         // runs that read otherwise are taken now, while the old index is
         // still there to read them from.
-        let reordered_out =
-            self.reordered_adjacency(TraversalDirection::Outgoing, &node_map, &edge_map);
-        let reordered_in =
-            self.reordered_adjacency(TraversalDirection::Incoming, &node_map, &edge_map);
+        let reordered_out = self.reordered_adjacency(Direction::Forward, &node_map, &edge_map);
+        let reordered_in = self.reordered_adjacency(Direction::Backward, &node_map, &edge_map);
         let mut nodes = self.take_live_nodes(&node_map);
         if reorders {
             place(&mut nodes, &node_map);
         }
         let edges = self.take_live_edges(&node_map);
 
-        let (out_offsets, mut out_edges) =
-            compress(&edges, nodes.len(), TraversalDirection::Outgoing);
-        let (in_offsets, mut in_edges) =
-            compress(&edges, nodes.len(), TraversalDirection::Incoming);
+        let (out_offsets, mut out_edges) = compress(&edges, nodes.len(), Direction::Forward);
+        let (in_offsets, mut in_edges) = compress(&edges, nodes.len(), Direction::Backward);
         restore_runs(&out_offsets, &mut out_edges, reordered_out);
         restore_runs(&in_offsets, &mut in_edges, reordered_in);
 
@@ -202,7 +199,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         let delta = mem::take(&mut self.delta_nodes);
         let mut nodes = Vec::with_capacity(self.live_node_count);
         for (slot, payload) in Vec::from(base).into_iter().chain(delta).enumerate() {
-            if node_map[slot] != NONE {
+            if node_map[slot] != NO_INDEX {
                 nodes.push(payload);
             }
         }
@@ -225,9 +222,9 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     }
 }
 
-/// The new dense number of every live slot, with [`NONE`] for the removed.
+/// The new dense number of every live slot, with [`NO_INDEX`] for the removed.
 fn surviving_slots(live: &LiveSet, slots: usize) -> Vec<u32> {
-    let mut mapping = vec![NONE; slots];
+    let mut mapping = vec![NO_INDEX; slots];
     let mut next = 0;
     for (slot, entry) in mapping.iter_mut().enumerate() {
         if live.is_live(slot) {
@@ -250,7 +247,7 @@ fn place<N>(nodes: &mut [N], node_map: &[u32]) {
     let mut targets: Vec<u32> = node_map
         .iter()
         .copied()
-        .filter(|&new| new != NONE)
+        .filter(|&new| new != NO_INDEX)
         .collect();
     for position in 0..nodes.len() {
         loop {
@@ -278,7 +275,7 @@ fn restore_runs(offsets: &[u32], edges: &mut [u32], reordered: Vec<(u32, Vec<u32
 fn remap_endpoint<NT: IdTag>(node_map: &[u32], old: Id<NT>) -> Id<NT> {
     let new = node_map[old.index()];
     debug_assert_ne!(
-        new, NONE,
+        new, NO_INDEX,
         "a live edge always has live endpoints: removing a node removes its edges"
     );
     Id::from_raw(new)

@@ -2,7 +2,7 @@
 
 use cfglib::{
     Cfg, Direction, DominatorTree, Edge, EdgeId, EdgeKind, EdgeView, FilteredEdges, KeyedGraph,
-    NodeId, RootedView, TraversalDirection, TryEdgeProblem, TrySolveError, breadth_first_edges,
+    NodeId, RootedView, TryEdgeProblem, TrySolveError, breadth_first_edges,
     remove_empty_blocks_mapped, try_solve_edge_problem_from, verify_edge_view,
 };
 
@@ -96,7 +96,7 @@ fn parallel_switch_and_continuation_edges_keep_identity_and_order() {
         [first_continuation, second_continuation]
     );
 
-    let steps = breadth_first_edges(&cfg, entry, TraversalDirection::Outgoing);
+    let steps = breadth_first_edges(&cfg, entry, Direction::Forward);
     let ids: Vec<_> = steps.iter().map(|step| step.edge).collect();
     assert_eq!(
         ids,

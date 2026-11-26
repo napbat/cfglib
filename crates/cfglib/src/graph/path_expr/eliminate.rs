@@ -26,7 +26,8 @@ use crate::graph::dominator::DominatorTree;
 use crate::graph::edge_view::EdgeView;
 use crate::graph::scc::tarjan_scc;
 use crate::graph::store::{Graph, NodeId};
-use crate::graph::traverse::{TraversalDirection, reverse_postorder};
+use crate::graph::traverse::reverse_postorder;
+use crate::graph::view::Direction;
 use crate::graph::view::{DenseId, RootedView};
 
 /// An unset slot of a dense side table.
@@ -42,7 +43,7 @@ pub(super) fn path_expressions<G: RootedView + EdgeView>(
     let root = graph.root();
     let tree = DominatorTree::compute(graph);
     let mut rank = vec![NONE; bound];
-    for (position, node) in reverse_postorder(graph, root, TraversalDirection::Outgoing)
+    for (position, node) in reverse_postorder(graph, root, Direction::Forward)
         .into_iter()
         .enumerate()
     {

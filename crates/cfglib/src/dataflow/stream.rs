@@ -30,14 +30,13 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::edge_fixpoint::{self, EdgeStore, TryEdgeProblem};
-use super::fixpoint::{
-    self, BlockProblem, Direction, IterationOrder, SolveConfig, TryProblem, TrySolveError,
-};
+use super::fixpoint::{self, BlockProblem, IterationOrder, SolveConfig, TryProblem, TrySolveError};
 use super::node_fixpoint::{self, NodeStore, TryNodeProblem};
 use super::worklist::Worklist;
 use crate::graph::edge_traverse::EdgeAdjacency;
 use crate::graph::edge_view::EdgeView;
 use crate::graph::traverse::{Adjacency, by_axis};
+use crate::graph::view::Direction;
 use crate::graph::view::{DenseId, GraphView, RootedView};
 use crate::graph::weak_topological_order::WeakTopologicalOrder;
 
@@ -214,7 +213,7 @@ where
     F: FnMut(G::NodeId, &P::Fact, &P::Fact),
 {
     by_axis!(
-        problem.direction().traversal(),
+        problem.direction(),
         stream_edges_along(graph, problem, config, visit)
     )
 }
@@ -233,7 +232,7 @@ where
     F: FnMut(G::NodeId, &P::Fact, &P::Fact),
 {
     by_axis!(
-        problem.direction().traversal(),
+        problem.direction(),
         stream_nodes_along(graph, problem, worklist, entry, config, visit)
     )
 }

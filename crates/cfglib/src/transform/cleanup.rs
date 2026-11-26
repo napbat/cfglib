@@ -19,7 +19,8 @@ use alloc::vec::Vec;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::graph::traverse::{TraversalDirection, reachable};
+use crate::graph::traverse::reachable;
+use crate::graph::view::Direction;
 use crate::rewrite::Rewrite;
 use crate::transform::contract::contract_edge_inner;
 
@@ -46,7 +47,7 @@ pub fn remove_unreachable_mapped<I, E>(cfg: &mut Cfg<I, E>) -> (usize, Rewrite) 
     let roots: Vec<BlockId> = core::iter::once(cfg.entry())
         .chain(cfg.anchors().filter(|&anchor| cfg.contains_block(anchor)))
         .collect();
-    let reachable = reachable(&*cfg, roots, TraversalDirection::Outgoing);
+    let reachable = reachable(&*cfg, roots, Direction::Forward);
 
     let doomed: Vec<BlockId> = cfg
         .block_ids()

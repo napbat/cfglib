@@ -4,8 +4,8 @@ use std::collections::{BTreeSet, HashSet};
 use std::ops::ControlFlow;
 
 use cfglib::{
-    DenseBits, EpochMarks, EpochSet, Graph, NodeId, SearchConfig, SearchOrder, TraversalDirection,
-    Visit, reachable, search_with_marks,
+    DenseBits, Direction, EpochMarks, EpochSet, Graph, NodeId, SearchConfig, SearchOrder, Visit,
+    reachable, search_with_marks,
 };
 
 use crate::Lcg;
@@ -253,7 +253,7 @@ fn union_with_is_the_join_of_a_reachability_fixpoint_and_its_change_report_ends_
         );
 
         for &node in &nodes {
-            let expected = reachable(&graph, [node], TraversalDirection::Outgoing);
+            let expected = reachable(&graph, [node], Direction::Forward);
             let actual: Vec<bool> = (0..70)
                 .map(|index| reach[node.index()].get(index))
                 .collect();
@@ -356,7 +356,7 @@ fn random_graph(rng: &mut Lcg, count: usize, edges: usize) -> Graph<(), ()> {
 }
 
 fn closure_of(graph: &Graph<(), ()>, root: NodeId, marks: &mut EpochMarks) -> Vec<bool> {
-    let config = SearchConfig::new(SearchOrder::BreadthFirst, TraversalDirection::Outgoing);
+    let config = SearchConfig::new(SearchOrder::BreadthFirst, Direction::Forward);
     let mut closure = vec![false; graph.node_bound()];
     let outcome = search_with_marks(graph, [root], config, marks, |node, _depth| {
         closure[node.index()] = true;
@@ -376,7 +376,7 @@ fn one_marks_buffer_serves_a_closure_per_root_pass_like_a_fresh_buffer_per_root(
         let closure = closure_of(&graph, root, &mut marks);
         assert_eq!(
             closure,
-            reachable(&graph, [root], TraversalDirection::Outgoing),
+            reachable(&graph, [root], Direction::Forward),
             "closure of n{}",
             root.index()
         );
@@ -386,7 +386,7 @@ fn one_marks_buffer_serves_a_closure_per_root_pass_like_a_fresh_buffer_per_root(
     for root in small.node_ids() {
         assert_eq!(
             closure_of(&small, root, &mut marks),
-            reachable(&small, [root], TraversalDirection::Outgoing),
+            reachable(&small, [root], Direction::Forward),
             "a buffer sized for a larger graph covers a smaller one"
         );
     }

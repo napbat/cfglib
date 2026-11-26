@@ -4,11 +4,11 @@ use std::ops::ControlFlow;
 
 use cfglib::{BlockId, canonical_hash, canonical_order, multiset_fingerprint, wl_colors};
 use cfglib::{
-    CallInfo, Cfg, DominatorTree, EdgeKind, EpochMarks, FoldEnter, Graph, GraphView, MarkScope,
-    NodeId, OpenBfsConfig, OpenDfsConfig, OpenFold, OpenFoldConfig, OpenPathsConfig,
-    OpenSearchConfig, Rooted, SearchConfig, SearchOrder, SearchScratch, SemanticValidator,
-    TraversalDirection, Visit, VisitedPolicy, breadth_first_events, call_graph, canonicalize_loops,
-    condensation, condensation_of, depth_first_edges, depth_first_events, depth_first_postorder,
+    CallInfo, Cfg, Direction, DominatorTree, EdgeKind, EpochMarks, FoldEnter, Graph, GraphView,
+    MarkScope, NodeId, OpenBfsConfig, OpenDfsConfig, OpenFold, OpenFoldConfig, OpenPathsConfig,
+    OpenSearchConfig, Rooted, SearchConfig, SearchOrder, SearchScratch, SemanticValidator, Visit,
+    VisitedPolicy, breadth_first_events, call_graph, canonicalize_loops, condensation,
+    condensation_of, depth_first_edges, depth_first_events, depth_first_postorder,
     detect_loops_tagged, find_back_edges_tagged, find_function, follow, follow_path,
     insert_preheader, is_recursive_function, is_reducible, kosaraju_scc, loop_exit_blocks,
     min_label_relaxation, open_breadth_first_events, open_breadth_first_paths,
@@ -110,28 +110,28 @@ fn register_dense_traversals(suite: &mut BenchmarkSuite<'_>) {
         suite,
         "api_depth_first_postorder",
         covers[depth_first_postorder],
-        || depth_first_postorder(&graph, root, TraversalDirection::Outgoing),
+        || depth_first_postorder(&graph, root, Direction::Forward),
         |order: &Vec<_>| assert_eq!(order.len(), NODE_COUNT)
     );
     benchmark_case!(
         suite,
         "api_reverse_postorder",
         covers[reverse_postorder],
-        || reverse_postorder(&graph, root, TraversalDirection::Outgoing),
+        || reverse_postorder(&graph, root, Direction::Forward),
         |order: &Vec<_>| assert_eq!(order.len(), NODE_COUNT)
     );
     benchmark_case!(
         suite,
         "api_reachable",
         covers[reachable],
-        || reachable(&graph, [root], TraversalDirection::Outgoing),
+        || reachable(&graph, [root], Direction::Forward),
         |marks: &Vec<bool>| assert!(marks.iter().all(|marked| *marked))
     );
     benchmark_case!(
         suite,
         "api_depth_first_edges",
         covers [depth_first_edges, depth_first_edges_with],
-        || depth_first_edges(&graph, root, TraversalDirection::Outgoing),
+        || depth_first_edges(&graph, root, Direction::Forward),
         |steps: &Vec<_>| assert_ne!(steps.as_slice(), [])
     );
     benchmark_case!(
@@ -140,7 +140,7 @@ fn register_dense_traversals(suite: &mut BenchmarkSuite<'_>) {
         covers[breadth_first_events],
         || {
             let mut events = 0_usize;
-            let stopped = breadth_first_events(&graph, root, TraversalDirection::Outgoing, |_| {
+            let stopped = breadth_first_events(&graph, root, Direction::Forward, |_| {
                 events += 1;
                 ControlFlow::<()>::Continue(())
             });
@@ -157,7 +157,7 @@ fn register_dense_traversals(suite: &mut BenchmarkSuite<'_>) {
         covers[depth_first_events],
         || {
             let mut events = 0_usize;
-            let stopped = depth_first_events(&graph, root, TraversalDirection::Outgoing, |_| {
+            let stopped = depth_first_events(&graph, root, Direction::Forward, |_| {
                 events += 1;
                 ControlFlow::<()>::Continue(())
             });
@@ -174,7 +174,7 @@ fn register_dense_searches(suite: &mut BenchmarkSuite<'_>) {
     let graph = branchy_graph(NODE_COUNT);
     let root = cfglib::NodeId::from_raw(0);
 
-    let config = SearchConfig::new(SearchOrder::BreadthFirst, TraversalDirection::Outgoing);
+    let config = SearchConfig::new(SearchOrder::BreadthFirst, Direction::Forward);
     benchmark_case!(
         suite,
         "api_search",
@@ -411,12 +411,9 @@ fn register_graph_algorithms(suite: &mut BenchmarkSuite<'_>) {
         suite,
         "api_min_label_relaxation",
         covers[min_label_relaxation],
-        || min_label_relaxation(
-            &graph,
-            [(root, 0_usize)],
-            TraversalDirection::Outgoing,
-            |_, label| Some(*label + 1),
-        ),
+        || min_label_relaxation(&graph, [(root, 0_usize)], Direction::Forward, |_, label| {
+            Some(*label + 1)
+        },),
         |labels: &Vec<Option<usize>>| assert!(labels.iter().all(Option::is_some))
     );
     benchmark_case!(

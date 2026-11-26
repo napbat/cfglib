@@ -2,16 +2,14 @@
 
 use std::ops::ControlFlow;
 
-use cfglib::{
-    Graph, NodeId, SearchConfig, SearchOrder, TraversalDirection, Visit, VisitedPolicy, search,
-};
+use cfglib::{Direction, Graph, NodeId, SearchConfig, SearchOrder, Visit, VisitedPolicy, search};
 
 use crate::Lcg;
 use crate::reference::{Table, Visits, Walk, keep_all, nodes_of, prune_multiples_of_five};
 
 pub(crate) fn config(
     order: SearchOrder,
-    direction: TraversalDirection,
+    direction: Direction,
     visited: VisitedPolicy,
     limit: Option<usize>,
 ) -> SearchConfig {
@@ -84,8 +82,8 @@ fn depth_first_search_matches_a_recursive_reference_in_order_and_depth() {
         let graph = table.graph();
         let backward = table.reversed();
         for (direction, adjacency) in [
-            (TraversalDirection::Outgoing, &table),
-            (TraversalDirection::Incoming, &backward),
+            (Direction::Forward, &table),
+            (Direction::Backward, &backward),
         ] {
             for limit in [None, Some(0), Some(1), Some(3)] {
                 for prune in prunes {
@@ -117,8 +115,8 @@ fn breadth_first_search_matches_a_queue_reference_in_order_and_depth() {
         let graph = table.graph();
         let backward = table.reversed();
         for (direction, adjacency) in [
-            (TraversalDirection::Outgoing, &table),
-            (TraversalDirection::Incoming, &backward),
+            (Direction::Forward, &table),
+            (Direction::Backward, &backward),
         ] {
             for limit in [None, Some(0), Some(1), Some(3)] {
                 for prune in prunes {
@@ -150,8 +148,8 @@ fn path_marks_visit_a_node_once_per_simple_route_like_a_brute_force_enumeration(
         let graph = table.graph();
         let backward = table.reversed();
         for (direction, adjacency) in [
-            (TraversalDirection::Outgoing, &table),
-            (TraversalDirection::Incoming, &backward),
+            (Direction::Forward, &table),
+            (Direction::Backward, &backward),
         ] {
             for prune in prunes {
                 let seeds = [2, 9, 2];
@@ -203,7 +201,7 @@ fn a_shared_node_is_reached_once_globally_and_once_per_route_under_path_marks() 
     let table = diamond_ladder();
     let graph = table.graph();
     let order = SearchOrder::DepthFirst;
-    let outgoing = TraversalDirection::Outgoing;
+    let outgoing = Direction::Forward;
 
     let global = run_search(
         &graph,
@@ -254,7 +252,7 @@ fn the_path_cycle_guard_stops_a_route_at_a_node_already_on_it() {
         &[0],
         config(
             SearchOrder::DepthFirst,
-            TraversalDirection::Outgoing,
+            Direction::Forward,
             VisitedPolicy::Path,
             None,
         ),
@@ -269,7 +267,7 @@ fn duplicate_seeds_are_visited_once_under_global_marks_and_again_under_path_mark
         successors: vec![vec![1], vec![]],
     };
     let graph = table.graph();
-    let outgoing = TraversalDirection::Outgoing;
+    let outgoing = Direction::Forward;
     let order = SearchOrder::DepthFirst;
 
     let global = run_search(
@@ -323,12 +321,7 @@ fn a_break_ends_the_walk_with_its_value_and_visits_nothing_further() {
         let outcome = search(
             &graph,
             [NodeId::from_index(3)],
-            config(
-                order,
-                TraversalDirection::Outgoing,
-                VisitedPolicy::Global,
-                None,
-            ),
+            config(order, Direction::Forward, VisitedPolicy::Global, None),
             |node, depth| {
                 visits.push((node.index(), depth));
                 if node.index() == target {
@@ -358,7 +351,7 @@ fn the_first_match_depends_on_the_discipline() {
         search(
             &graph,
             [NodeId::from_index(0)],
-            SearchConfig::new(order, TraversalDirection::Outgoing),
+            SearchConfig::new(order, Direction::Forward),
             |node, depth| {
                 if table.successors[node.index()].is_empty() {
                     ControlFlow::Break((node.index(), depth))
@@ -387,7 +380,7 @@ fn a_skipped_node_counts_as_visited_but_its_successors_are_not_discovered_throug
         successors: vec![vec![1, 2], vec![3], vec![3], vec![4], vec![]],
     };
     let graph = table.graph();
-    let outgoing = TraversalDirection::Outgoing;
+    let outgoing = Direction::Forward;
     for order in [SearchOrder::DepthFirst, SearchOrder::BreadthFirst] {
         let walk = |prune: &dyn Fn(usize) -> bool| {
             nodes_of(&run_search(
@@ -421,7 +414,7 @@ fn max_depth_bounds_expansion_not_visiting() {
         successors: vec![vec![1], vec![2], vec![3], vec![]],
     };
     let graph = chain.graph();
-    let outgoing = TraversalDirection::Outgoing;
+    let outgoing = Direction::Forward;
     for order in [SearchOrder::DepthFirst, SearchOrder::BreadthFirst] {
         let walk = |limit| {
             run_search(
@@ -452,7 +445,7 @@ fn depth_first_depth_is_the_route_taken_not_the_shortest_one() {
         successors: vec![vec![1, 3], vec![2], vec![3], vec![]],
     };
     let graph = table.graph();
-    let outgoing = TraversalDirection::Outgoing;
+    let outgoing = Direction::Forward;
     let unbounded = |order| {
         run_search(
             &graph,
@@ -499,7 +492,7 @@ fn backward_search_follows_predecessors() {
         &[2],
         config(
             SearchOrder::DepthFirst,
-            TraversalDirection::Incoming,
+            Direction::Backward,
             VisitedPolicy::Global,
             None,
         ),
@@ -531,12 +524,7 @@ fn a_store_with_removed_nodes_walks_like_its_reduced_table_before_and_after_comp
             run_search(
                 graph,
                 seeds,
-                config(
-                    order,
-                    TraversalDirection::Outgoing,
-                    VisitedPolicy::Global,
-                    Some(4),
-                ),
+                config(order, Direction::Forward, VisitedPolicy::Global, Some(4)),
                 &keep_all,
             )
         };

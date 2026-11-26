@@ -34,7 +34,8 @@ use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
 use crate::graph::epoch::EpochMarks;
-use crate::graph::traverse::{Adjacency, TraversalDirection, by_axis};
+use crate::graph::traverse::{Adjacency, by_axis};
+use crate::graph::view::Direction;
 use crate::graph::view::{DenseId, GraphView};
 
 /// The frontier discipline of a [`search`].
@@ -98,7 +99,7 @@ pub struct SearchConfig {
     /// Whether visited marks are global or per path.
     pub visited: VisitedPolicy,
     /// Whether the walk follows edges forwards or backwards.
-    pub direction: TraversalDirection,
+    pub direction: Direction,
     /// Maximum depth to expand from, in hops from a seed. `None` is
     /// unbounded; `Some(0)` visits the seeds alone.
     pub max_depth: Option<usize>,
@@ -107,7 +108,7 @@ pub struct SearchConfig {
 impl SearchConfig {
     /// A globally marked, unbounded search in `order` along `direction`.
     #[must_use]
-    pub const fn new(order: SearchOrder, direction: TraversalDirection) -> Self {
+    pub const fn new(order: SearchOrder, direction: Direction) -> Self {
         Self {
             order,
             visited: VisitedPolicy::Global,
@@ -298,7 +299,7 @@ impl SearchScratch {
 /// ```
 /// use core::ops::ControlFlow;
 ///
-/// use cfglib::{Graph, SearchConfig, SearchOrder, TraversalDirection, Visit, search};
+/// use cfglib::{Graph, SearchConfig, SearchOrder, Direction, Visit, search};
 ///
 /// //     a -> b -> d
 /// //     a -> c
@@ -315,7 +316,7 @@ impl SearchScratch {
 ///     search(
 ///         &graph,
 ///         [a],
-///         SearchConfig::new(order, TraversalDirection::Outgoing),
+///         SearchConfig::new(order, Direction::Forward),
 ///         |node, _depth| {
 ///             if graph.successors(node).count() == 0 {
 ///                 return ControlFlow::Break(graph[node]);
@@ -384,7 +385,7 @@ pub fn search<G: GraphView, B>(
 ///
 /// use cfglib::{
 ///     Graph, GraphView, EpochMarks, SearchConfig, SearchOrder,
-///     TraversalDirection, Visit, search_with_marks,
+///     Direction, Visit, search_with_marks,
 /// };
 ///
 /// //     a -> b -> c,  d -> c
@@ -397,7 +398,7 @@ pub fn search<G: GraphView, B>(
 /// graph.add_edge(b, c, ());
 /// graph.add_edge(d, c, ());
 ///
-/// let config = SearchConfig::new(SearchOrder::BreadthFirst, TraversalDirection::Outgoing);
+/// let config = SearchConfig::new(SearchOrder::BreadthFirst, Direction::Forward);
 /// let mut marks = EpochMarks::new(graph.node_bound());
 /// let mut closures = Vec::new();
 ///
@@ -461,7 +462,7 @@ pub fn search_with_marks<G: GraphView, B>(
 ///
 /// use cfglib::{
 ///     Graph, GraphView, SearchConfig, SearchOrder, SearchScratch,
-///     TraversalDirection, Visit, search_with_scratch,
+///     Direction, Visit, search_with_scratch,
 /// };
 ///
 /// //     a -> b -> c,  d -> c
@@ -474,7 +475,7 @@ pub fn search_with_marks<G: GraphView, B>(
 /// graph.add_edge(b, c, ());
 /// graph.add_edge(d, c, ());
 ///
-/// let config = SearchConfig::new(SearchOrder::DepthFirst, TraversalDirection::Outgoing);
+/// let config = SearchConfig::new(SearchOrder::DepthFirst, Direction::Forward);
 /// let mut scratch = SearchScratch::new(graph.node_bound());
 /// let mut closures = Vec::new();
 ///

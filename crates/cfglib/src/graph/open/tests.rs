@@ -5,7 +5,7 @@ use crate::graph::search::{
     DfsEvent, SearchConfig, SearchOrder, Visit, VisitedPolicy, depth_first_events, search,
 };
 use crate::graph::store::{Graph, NodeId};
-use crate::graph::traverse::TraversalDirection;
+use crate::graph::view::Direction;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
@@ -288,7 +288,7 @@ fn the_open_search_matches_the_dense_search_node_for_node() {
                     SearchConfig {
                         order,
                         visited,
-                        direction: TraversalDirection::Outgoing,
+                        direction: Direction::Forward,
                         max_depth,
                     },
                     |node, depth| {
@@ -358,7 +358,7 @@ fn the_open_search_matches_the_dense_one_past_its_inline_marks() {
             SearchConfig {
                 order,
                 visited,
-                direction: TraversalDirection::Outgoing,
+                direction: Direction::Forward,
                 max_depth: None,
             },
             |node, depth| {
@@ -710,7 +710,7 @@ fn the_open_events_walk_matches_the_dense_one_event_for_event() {
 
     let mut dense = Vec::new();
     let mut dense_refused = Vec::new();
-    let outcome = depth_first_events(&graph, a, TraversalDirection::Outgoing, |event| {
+    let outcome = depth_first_events(&graph, a, Direction::Forward, |event| {
         match event {
             DfsEvent::Discover(node, depth) => dense.push(Seen::Discover(node.index(), depth)),
             DfsEvent::Finish(node) => dense.push(Seen::Finish(node.index())),

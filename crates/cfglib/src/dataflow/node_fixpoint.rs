@@ -22,12 +22,11 @@ use alloc::vec::Vec;
 use core::convert::Infallible;
 
 use super::bits::DenseBits;
-use super::fixpoint::{
-    Direction, Facts, SolveConfig, SolveError, TrySolveError, collapse_infallible,
-};
+use super::fixpoint::{Facts, SolveConfig, SolveError, TrySolveError, collapse_infallible};
 use super::schedule::{Bound, Changed, Leaving, Mode, Ordered, Plain, Schedule, Sweep, schedule};
 use super::worklist::{Queue, Ranked, Worklist};
 use crate::graph::traverse::{Adjacency, by_axis};
+use crate::graph::view::Direction;
 use crate::graph::view::{DenseId, GraphView};
 use crate::graph::weak_topological_order::WeakTopologicalOrder;
 
@@ -487,7 +486,7 @@ where
     P: TryNodeProblem<G>,
 {
     by_axis!(
-        problem.direction().traversal(),
+        problem.direction(),
         try_solve_along(graph, problem, worklist, entry, config)
     )
 }
@@ -607,7 +606,7 @@ where
     S: NodeStore<G::NodeId, P::Fact>,
 {
     let boundary = problem.boundary(graph).map_err(TrySolveError::Problem)?;
-    let traversal = problem.direction().traversal();
+    let traversal = problem.direction();
     let solver = |order| Solver {
         graph,
         problem,

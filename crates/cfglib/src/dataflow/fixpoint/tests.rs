@@ -330,15 +330,6 @@ fn a_removed_block_is_never_visited() {
 }
 
 #[test]
-fn a_direction_follows_edges_the_way_its_facts_flow() {
-    assert_eq!(Direction::Forward.traversal(), TraversalDirection::Outgoing);
-    assert_eq!(
-        Direction::Backward.traversal(),
-        TraversalDirection::Incoming
-    );
-}
-
-#[test]
 fn program_order_puts_what_a_backward_analysis_transfers_at_the_start() {
     assert_eq!(
         Direction::Forward.program_order("receives", "transfers"),

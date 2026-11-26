@@ -77,7 +77,7 @@ let resolution = resolve_jump_edges(&mut cfg); // wires goto/label edges
 `Graph<N, E>` is the single owned storage type for consumer-defined node and edge payloads, stable identities, and forward/reverse adjacency. `GraphView` lets existing graph stores use node algorithms without first migrating their storage; `EdgeView` additionally exposes stable edge identity, view-oriented endpoints, payloads, and ordered adjacency. `FilteredEdges` borrows either representation through an edge predicate without cloning or renumbering anything—for example, the same CFG can be viewed as normal-only flow or full normal-plus-exception flow. `RootedView` adds a distinguished entry node for algorithms that need one (dominance, reachability metrics, loop and interval analysis), and the `Rooted` adapter roots any plain view at a chosen node. This layer is suitable for symbol/reference graphs, value-flow graphs, call graphs, type relations, import graphs, grammar dependencies, and analysis-derived relations; it has no instruction or binary-analysis concepts.
 
 ```rust
-use cfglib::{DominatorTree, Graph, Rooted, TraversalDirection, shortest_path};
+use cfglib::{Direction, DominatorTree, Graph, Rooted, shortest_path};
 
 let mut graph = Graph::new();
 let source = graph.add_node("definition");
@@ -86,7 +86,7 @@ let edge = graph.add_edge(source, target, ("return", "src/lib.rs", 42));
 
 assert_eq!(graph.edge(edge).payload().0, "return");
 assert_eq!(
-    shortest_path(&graph, source, target, TraversalDirection::Outgoing),
+    shortest_path(&graph, source, target, Direction::Forward),
     Some(vec![source, target]),
 );
 let dominators = DominatorTree::compute(&Rooted::new(&graph, source));

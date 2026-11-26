@@ -23,7 +23,8 @@ use crate::analysis::control_tree::tree::ControlTree;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::graph::traverse::{TraversalDirection, reachable};
+use crate::graph::traverse::reachable;
+use crate::graph::view::Direction;
 use fragment::{Arm, BodyFrame, BranchFrame, Built, Cursor, Exits, Frame, Piece, Stubs, Target};
 
 mod fragment;
@@ -34,7 +35,7 @@ pub(super) fn build<I, E>(
     cfg: &Cfg<I, E>,
 ) -> Result<SplDecomposition, SplError> {
     let named = scan(tree, cfg)?;
-    let reached = reachable(cfg, [cfg.entry()], TraversalDirection::Outgoing);
+    let reached = reachable(cfg, [cfg.entry()], Direction::Forward);
     if let Some(dead) = cfg.block_ids().find(|block| !reached[block.index()]) {
         return Err(SplError::UnplacedBlock(dead));
     }

@@ -6,7 +6,8 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
-use crate::graph::traverse::{TraversalDirection, reachable};
+use crate::graph::traverse::reachable;
+use crate::graph::view::Direction;
 use crate::region::{Handler, HandlerBody, HandlerRef, Region, RegionId};
 
 use super::Cfg;
@@ -105,7 +106,7 @@ impl<I, E> Cfg<I, E> {
     /// assert!(cfg.protecting_region(body).is_none());
     /// ```
     pub fn remove_unreachable_regions(&mut self) -> usize {
-        let reachable = reachable(self, [self.entry()], TraversalDirection::Outgoing);
+        let reachable = reachable(self, [self.entry()], Direction::Forward);
         let doomed: Vec<RegionId> = self
             .regions
             .iter()

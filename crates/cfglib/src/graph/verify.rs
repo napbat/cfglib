@@ -16,7 +16,8 @@ use crate::cfg::Cfg;
 use crate::edge::EdgeId;
 use crate::graph::edge_traverse::EdgeAdjacency;
 use crate::graph::edge_view::EdgeView;
-use crate::graph::traverse::{Incoming, Outgoing, TraversalDirection, reachable};
+use crate::graph::traverse::{Incoming, Outgoing, reachable};
+use crate::graph::view::Direction;
 use crate::graph::view::{DenseId, RootedView};
 
 /// A single verification failure.
@@ -301,7 +302,7 @@ pub fn verify_view<G: RootedView>(graph: &G) -> VerifyReport {
 
     // Every reachable non-root node has a predecessor.
     if in_bounds {
-        let reached = reachable(graph, [root], TraversalDirection::Outgoing);
+        let reached = reachable(graph, [root], Direction::Forward);
         for node in graph.node_ids() {
             if reached[node.index()] && node != root && graph.predecessors(node).next().is_none() {
                 errors.push(VerifyError {

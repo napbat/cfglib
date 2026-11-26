@@ -9,8 +9,8 @@
 use std::ops::ControlFlow;
 
 use cfglib::{
-    DfsEvent, EdgeId, FeedbackConfig, FilteredEdges, Graph, NodeId, TraversalDirection,
-    depth_first_events, feedback_arc_set, linear_arrangement, topological_sort,
+    DfsEvent, Direction, EdgeId, FeedbackConfig, FilteredEdges, Graph, NodeId, depth_first_events,
+    feedback_arc_set, linear_arrangement, topological_sort,
 };
 
 use super::BenchmarkSuite;
@@ -84,19 +84,15 @@ fn report_quality() {
 fn depth_first_back_edges(graph: &Graph<(), ()>) -> usize {
     let mut discovered = 0;
     let mut back_edges = 0;
-    let outcome = depth_first_events::<_, ()>(
-        graph,
-        NodeId::from_raw(0),
-        TraversalDirection::Outgoing,
-        |event| {
+    let outcome =
+        depth_first_events::<_, ()>(graph, NodeId::from_raw(0), Direction::Forward, |event| {
             match event {
                 DfsEvent::Discover(..) => discovered += 1,
                 DfsEvent::BackEdge(..) => back_edges += 1,
                 _ => {}
             }
             ControlFlow::Continue(())
-        },
-    );
+        });
     assert_eq!(outcome, None);
     assert_eq!(discovered, graph.node_count(), "node 0 reaches every node");
     back_edges

@@ -7,7 +7,8 @@ use alloc::collections::BTreeSet;
 use crate::InstrInfo;
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
-use crate::dataflow::fixpoint::{Direction, Problem};
+use crate::dataflow::fixpoint::Problem;
+use crate::graph::view::Direction;
 
 use super::DfInst;
 

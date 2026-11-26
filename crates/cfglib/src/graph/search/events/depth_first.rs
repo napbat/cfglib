@@ -6,7 +6,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
-use crate::graph::traverse::{Adjacency, TraversalDirection, by_axis};
+use crate::graph::traverse::{Adjacency, by_axis};
+use crate::graph::view::Direction;
 use crate::graph::view::{DenseId, GraphView, assert_in_bound};
 
 /// An event of a [`depth_first_events`] walk.
@@ -97,7 +98,7 @@ enum Color {
 /// ```
 /// use core::ops::ControlFlow;
 ///
-/// use cfglib::{DfsEvent, Graph, TraversalDirection, depth_first_events};
+/// use cfglib::{DfsEvent, Graph, Direction, depth_first_events};
 ///
 /// // a -> b -> c -> a, plus a chord a -> c.
 /// let mut graph = Graph::<&str, ()>::new();
@@ -113,7 +114,7 @@ enum Color {
 /// let outcome = depth_first_events::<_, ()>(
 ///     &graph,
 ///     a,
-///     TraversalDirection::Outgoing,
+///     Direction::Forward,
 ///     |event| {
 ///         if let DfsEvent::BackEdge(from, to) = event {
 ///             cycles.push((graph[from], graph[to]));
@@ -133,7 +134,7 @@ enum Color {
 pub fn depth_first_events<G: GraphView, B>(
     graph: &G,
     start: G::NodeId,
-    direction: TraversalDirection,
+    direction: Direction,
     on_event: impl FnMut(DfsEvent<G::NodeId>) -> ControlFlow<B>,
 ) -> Option<B> {
     by_axis!(direction, depth_first_events_from(graph, start, on_event))

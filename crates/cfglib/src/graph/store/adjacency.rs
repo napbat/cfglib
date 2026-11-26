@@ -20,7 +20,7 @@
 //! The per-node array is materialized lazily: it exists only while the delta
 //! holds an edge, because a node with nothing appended to it has nothing to
 //! say. A compacted store therefore carries no per-node array at all, rather
-//! than one all-[`NONE`] pair per node of a graph whose adjacency is entirely
+//! than one all-[`NO_INDEX`] pair per node of a graph whose adjacency is entirely
 //! in the base — and that is the state a store spends most of its life in.
 
 extern crate alloc;
@@ -29,31 +29,30 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
-use crate::graph::traverse::TraversalDirection;
+use crate::graph::view::Direction;
+use crate::identity::{NO_INDEX, slot};
 
 use super::edge::EdgeRecord;
 use super::id::{Id, IdTag};
 use super::liveness::LiveSet;
 use super::{Graph, raw_index};
 
-/// Absence of a link. One value of the dense space is spent so that a chain
-/// slot costs four bytes instead of an eight-byte `Option<u32>`.
-pub(super) const NONE: u32 = u32::MAX;
-
-/// The largest number of slots a dense store can address.
-pub(super) const MAX_SLOTS: usize = NONE as usize;
+/// The largest number of slots a dense store can address. A link is a `u32`
+/// with [`NO_INDEX`] for its absence, so a chain slot costs four bytes instead
+/// of an eight-byte `Option<u32>`.
+pub(super) const MAX_SLOTS: usize = slot(NO_INDEX);
 
 /// One chain link per direction, in [`chain_of`] order.
 type Links = [u32; 2];
 
 /// A pair of chain links belonging to no chain, which is where a node starts.
-const UNLINKED: Links = [NONE; 2];
+const UNLINKED: Links = [NO_INDEX; 2];
 
 /// Which half of a [`Links`] pair one direction threads.
-const fn chain_of(direction: TraversalDirection) -> usize {
+const fn chain_of(direction: Direction) -> usize {
     match direction {
-        TraversalDirection::Outgoing => 0,
-        TraversalDirection::Incoming => 1,
+        Direction::Forward => 0,
+        Direction::Backward => 1,
     }
 }
 
@@ -69,7 +68,7 @@ const fn chain_of(direction: TraversalDirection) -> usize {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct DeltaChains {
     /// Last delta edge appended to each materialized node slot's two chains,
-    /// or [`NONE`].
+    /// or [`NO_INDEX`].
     last: Vec<Links>,
     /// Successor of each delta edge within each of its two circular chains.
     next: Vec<Links>,
@@ -113,8 +112,8 @@ impl DeltaChains {
         }
         let appended = u32::try_from(self.next.len()).expect("delta edge index exceeds u32::MAX");
         self.next.push(UNLINKED);
-        self.thread(source, chain_of(TraversalDirection::Outgoing), appended);
-        self.thread(target, chain_of(TraversalDirection::Incoming), appended);
+        self.thread(source, chain_of(Direction::Forward), appended);
+        self.thread(target, chain_of(Direction::Backward), appended);
     }
 
     /// Give every node slot two empty chains, which is what the first append
@@ -131,7 +130,7 @@ impl DeltaChains {
     /// whose slots [`append`](Self::append) has already materialized.
     fn thread(&mut self, node: usize, chain: usize, appended: u32) {
         let last = self.last[node][chain];
-        self.next[appended as usize][chain] = if last == NONE {
+        self.next[appended as usize][chain] = if last == NO_INDEX {
             appended
         } else {
             let first = self.next[last as usize][chain];
@@ -146,10 +145,10 @@ impl DeltaChains {
     ///
     /// A node the delta has never touched has no slot at all, which is how a
     /// walk over a compacted store answers from the array's length instead of
-    /// reading one per-node entry that is entirely [`NONE`].
+    /// reading one per-node entry that is entirely [`NO_INDEX`].
     fn ends(&self, node: usize, chain: usize) -> Option<(u32, u32)> {
         let last = self.last.get(node)?[chain];
-        if last == NONE {
+        if last == NO_INDEX {
             return None;
         }
         Some((self.next[last as usize][chain], last))
@@ -158,9 +157,9 @@ impl DeltaChains {
     /// Forget one of a node's chains, whose edges an overlay has taken over.
     ///
     /// A node the delta has never touched has no chain to forget.
-    pub(super) fn detach_node(&mut self, node: usize, direction: TraversalDirection) {
+    pub(super) fn detach_node(&mut self, node: usize, direction: Direction) {
         if let Some(links) = self.last.get_mut(node) {
-            links[chain_of(direction)] = NONE;
+            links[chain_of(direction)] = NO_INDEX;
         }
     }
 
@@ -173,7 +172,7 @@ impl DeltaChains {
     pub(super) fn drain_into(
         &mut self,
         node: usize,
-        direction: TraversalDirection,
+        direction: Direction,
         delta_base: u32,
         live: Option<&LiveSet>,
         run: &mut Vec<u32>,
@@ -216,7 +215,7 @@ impl DeltaChains {
             let mut seen = vec![false; self.next.len()];
             for (node, links) in self.last.iter().enumerate() {
                 let last = links[chain];
-                if last == NONE {
+                if last == NO_INDEX {
                     continue;
                 }
                 let mut edge = self
@@ -268,8 +267,8 @@ impl AdjacencyCursor {
     const EXHAUSTED: Self = Self {
         base: 0,
         base_end: 0,
-        delta: NONE,
-        delta_last: NONE,
+        delta: NO_INDEX,
+        delta_last: NO_INDEX,
     };
 }
 
@@ -325,10 +324,10 @@ fn advance(
         }
     }
 
-    while cursor.delta != NONE {
+    while cursor.delta != NO_INDEX {
         let delta = cursor.delta;
         cursor.delta = if delta == cursor.delta_last {
-            NONE
+            NO_INDEX
         } else {
             axis.chains.next[delta as usize][axis.chain]
         };
@@ -342,10 +341,10 @@ fn advance(
 }
 
 impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
-    fn axis(&self, direction: TraversalDirection) -> Axis<'_> {
+    fn axis(&self, direction: Direction) -> Axis<'_> {
         let (offsets, edges) = match direction {
-            TraversalDirection::Outgoing => (&self.out_offsets, &self.out_edges),
-            TraversalDirection::Incoming => (&self.in_offsets, &self.in_edges),
+            Direction::Forward => (&self.out_offsets, &self.out_edges),
+            Direction::Backward => (&self.in_offsets, &self.in_edges),
         };
         Axis {
             offsets,
@@ -378,7 +377,10 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         } else {
             (0, 0)
         };
-        let (delta, delta_last) = axis.chains.ends(index, axis.chain).unwrap_or((NONE, NONE));
+        let (delta, delta_last) = axis
+            .chains
+            .ends(index, axis.chain)
+            .unwrap_or((NO_INDEX, NO_INDEX));
         AdjacencyCursor {
             base,
             base_end,
@@ -405,11 +407,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         clippy::inline_always,
         reason = "a call leaves the walk to be copied out of a return slot, which stalls on store forwarding"
     )]
-    pub(super) fn adjacent(
-        &self,
-        node: Id<NT>,
-        direction: TraversalDirection,
-    ) -> AdjacentEdges<'_, ET> {
+    pub(super) fn adjacent(&self, node: Id<NT>, direction: Direction) -> AdjacentEdges<'_, ET> {
         let mut axis = self.axis(direction);
         let mut cursor = self.cursor(node, &axis);
         // A node whose edges have moved reads its compressed run from a
@@ -431,7 +429,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     }
 
     /// `node`'s compressed run along `direction`, removed edges included.
-    fn base_run(&self, node: usize, direction: TraversalDirection) -> &[u32] {
+    fn base_run(&self, node: usize, direction: Direction) -> &[u32] {
         let axis = self.axis(direction);
         if node + 1 < axis.offsets.len() {
             &axis.edges[axis.offsets[node] as usize..axis.offsets[node + 1] as usize]
@@ -447,7 +445,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// is the run the overlay replaces, and the one extra slot is the edge a
     /// redirect is about to append. Only the compressed run is copied; the
     /// node's delta chain is [`DeltaChains::drain_into`]'s.
-    pub(super) fn live_base_run(&self, node: Id<NT>, direction: TraversalDirection) -> Vec<u32> {
+    pub(super) fn live_base_run(&self, node: Id<NT>, direction: Direction) -> Vec<u32> {
         let run = self.base_run(node.index(), direction);
         let mut copy = Vec::with_capacity(run.len() + 1);
         match self.tombstoned_edges().then_some(&self.live_edges) {
@@ -474,12 +472,12 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// order they were added.
     pub(super) fn reordered_adjacency(
         &self,
-        direction: TraversalDirection,
+        direction: Direction,
         node_map: &[u32],
         edge_map: &[u32],
     ) -> Vec<(u32, Vec<u32>)> {
         (0..self.node_bound())
-            .filter(|&slot| node_map[slot] != NONE)
+            .filter(|&slot| node_map[slot] != NO_INDEX)
             .filter(|&slot| {
                 let run = self
                     .overlay(slot, direction)
@@ -505,7 +503,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// Panics when `node` names no slot in this store.
     #[must_use = "iterators are lazy and do nothing unless consumed"]
     pub fn outgoing(&self, node: Id<NT>) -> AdjacentEdges<'_, ET> {
-        self.adjacent(node, TraversalDirection::Outgoing)
+        self.adjacent(node, Direction::Forward)
     }
 
     /// Iterate over the live incoming edges of `node` in adjacency order: the
@@ -517,7 +515,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// Panics when `node` names no slot in this store.
     #[must_use = "iterators are lazy and do nothing unless consumed"]
     pub fn incoming(&self, node: Id<NT>) -> AdjacentEdges<'_, ET> {
-        self.adjacent(node, TraversalDirection::Incoming)
+        self.adjacent(node, Direction::Backward)
     }
 
     /// Iterate over outgoing neighbors, retaining parallel entries.
@@ -545,7 +543,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// Panics when `node` names no slot in this store.
     #[must_use]
     pub fn out_degree(&self, node: Id<NT>) -> usize {
-        self.degree(node, TraversalDirection::Outgoing)
+        self.degree(node, Direction::Forward)
     }
 
     /// The number of live incoming edges of `node`.
@@ -555,7 +553,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// Panics when `node` names no slot in this store.
     #[must_use]
     pub fn in_degree(&self, node: Id<NT>) -> usize {
-        self.degree(node, TraversalDirection::Incoming)
+        self.degree(node, Direction::Backward)
     }
 
     /// Count one node's adjacency without materializing it.
@@ -570,14 +568,14 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// is still live is one bitset probe per edge, and skipping it would count
     /// removed edges. Such a store counts the walk instead, which is what a
     /// caller would have written by hand.
-    fn degree(&self, node: Id<NT>, direction: TraversalDirection) -> usize {
+    fn degree(&self, node: Id<NT>, direction: Direction) -> usize {
         let walk = self.adjacent(node, direction);
         if walk.live.is_some() {
             return walk.count();
         }
         let mut count = (walk.cursor.base_end - walk.cursor.base) as usize;
         let mut delta = walk.cursor.delta;
-        while delta != NONE {
+        while delta != NO_INDEX {
             count += 1;
             if delta == walk.cursor.delta_last {
                 break;
@@ -592,7 +590,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// The walk is collected first because the loop body needs the store
     /// mutably. That is the removal path, not a scan, so the buffer never
     /// reaches an analysis.
-    pub(super) fn clear_adjacency(&mut self, node: Id<NT>, direction: TraversalDirection) {
+    pub(super) fn clear_adjacency(&mut self, node: Id<NT>, direction: Direction) {
         let incident: Vec<Id<ET>> = self.adjacent(node, direction).collect();
         for edge in incident {
             self.retire_edge(edge.index());
@@ -640,11 +638,11 @@ impl<ET: IdTag> Iterator for AdjacentEdges<'_, ET> {
 pub(super) fn compress<E, NT: IdTag>(
     edges: &[EdgeRecord<E, NT>],
     nodes: usize,
-    direction: TraversalDirection,
+    direction: Direction,
 ) -> (Vec<u32>, Vec<u32>) {
     let endpoint = |edge: &EdgeRecord<E, NT>| match direction {
-        TraversalDirection::Outgoing => edge.source.index(),
-        TraversalDirection::Incoming => edge.target.index(),
+        Direction::Forward => edge.source.index(),
+        Direction::Backward => edge.target.index(),
     };
 
     let mut offsets = vec![0_u32; nodes + 1];

@@ -1,8 +1,6 @@
 //! `HornClauses` against naive forward chaining, and `min_label_relaxation` against Bellman-Ford.
 
-use cfglib::{
-    EdgeId, EdgeRecord, Graph, HornClauses, NodeId, TraversalDirection, min_label_relaxation,
-};
+use cfglib::{Direction, EdgeId, EdgeRecord, Graph, HornClauses, NodeId, min_label_relaxation};
 
 use crate::Lcg;
 
@@ -346,7 +344,7 @@ fn weighted_scenario(seed: u64) -> (Graph<(), Step>, Vec<ModelEdge>) {
 fn relaxed(
     graph: &Graph<(), Step>,
     seeds: &[(usize, u32, u32)],
-    direction: TraversalDirection,
+    direction: Direction,
 ) -> Vec<Option<Effort>> {
     min_label_relaxation(
         graph,
@@ -370,10 +368,7 @@ fn relaxation_matches_bellman_ford_in_both_directions_on_graphs_with_removed_ent
             (live[9], 1, 0),
             (live[5], 2, 1),
         ];
-        for (direction, forward) in [
-            (TraversalDirection::Outgoing, true),
-            (TraversalDirection::Incoming, false),
-        ] {
+        for (direction, forward) in [(Direction::Forward, true), (Direction::Backward, false)] {
             let actual = relaxed(&graph, &seeds, direction);
             let expected = bellman_ford(24, &edges, &seeds, forward);
             assert_eq!(actual, expected, "seed {seed}, {direction:?}");
@@ -387,7 +382,7 @@ fn the_scenarios_have_improvements_blocked_edges_and_unreachable_nodes() {
     let (graph, edges) = weighted_scenario(3);
     assert!(edges.iter().any(|(_, _, step)| *step == Step::Closed));
     let live: Vec<usize> = graph.node_ids().map(NodeId::index).collect();
-    let labels = relaxed(&graph, &[(live[0], 0, 0)], TraversalDirection::Outgoing);
+    let labels = relaxed(&graph, &[(live[0], 0, 0)], Direction::Forward);
     let reached = labels.iter().flatten().count();
     assert!(
         reached > 3 && reached < graph.node_count(),
@@ -415,12 +410,10 @@ fn diamond_with_shortcut() -> (Graph<&'static str, u32>, [NodeId; 4]) {
 #[test]
 fn a_smaller_label_reexpands_a_node_visited_earlier_with_a_larger_one() {
     let (graph, [s, a, b, t]) = diamond_with_shortcut();
-    let distances = min_label_relaxation(
-        &graph,
-        [(s, 0_u32)],
-        TraversalDirection::Outgoing,
-        |edge, label| Some(label + edge.payload()),
-    );
+    let distances =
+        min_label_relaxation(&graph, [(s, 0_u32)], Direction::Forward, |edge, label| {
+            Some(label + edge.payload())
+        });
     assert_eq!(distances[s.index()], Some(0));
     assert_eq!(distances[a.index()], Some(1));
     assert_eq!(
@@ -439,15 +432,11 @@ fn a_smaller_label_reexpands_a_node_visited_earlier_with_a_larger_one() {
 fn incoming_relaxation_hands_the_stored_edge_to_the_transfer_and_expands_from_the_target() {
     let (graph, [s, a, b, t]) = diamond_with_shortcut();
     let mut first_call = None;
-    let distances = min_label_relaxation(
-        &graph,
-        [(t, 0_u32)],
-        TraversalDirection::Incoming,
-        |edge, label| {
+    let distances =
+        min_label_relaxation(&graph, [(t, 0_u32)], Direction::Backward, |edge, label| {
             first_call.get_or_insert((edge.source(), edge.target()));
             Some(label + edge.payload())
-        },
-    );
+        });
     assert_eq!(distances[t.index()], Some(0));
     assert_eq!(distances[b.index()], Some(1));
     assert_eq!(distances[a.index()], Some(2), "a -> b -> t beats a -> t");
@@ -474,7 +463,7 @@ fn parallel_edges_competing_seeds_and_blocked_edges_resolve_to_the_minimum() {
     let labels = min_label_relaxation(
         &graph,
         [(a, 5_u32), (a, 1), (a, 9)],
-        TraversalDirection::Outgoing,
+        Direction::Forward,
         |edge, label| edge.payload().map(|cost| label + cost),
     );
     assert_eq!(
@@ -494,7 +483,7 @@ fn a_node_no_seed_reaches_has_no_label_and_two_seeds_label_two_regions() {
     let labels = min_label_relaxation(
         &graph,
         [(nodes[0], 0_u32), (nodes[3], 10)],
-        TraversalDirection::Outgoing,
+        Direction::Forward,
         |edge, label| Some(label + edge.payload()),
     );
     assert_eq!(
@@ -505,7 +494,7 @@ fn a_node_no_seed_reaches_has_no_label_and_two_seeds_label_two_regions() {
     let none = min_label_relaxation(
         &graph,
         Vec::<(NodeId, u32)>::new(),
-        TraversalDirection::Outgoing,
+        Direction::Forward,
         |_, label| Some(*label),
     );
     assert!(none.iter().all(Option::is_none));
@@ -519,7 +508,7 @@ fn a_seed_outside_the_graph_panics() {
     let _ = min_label_relaxation(
         &graph,
         [(NodeId::from_index(0), 0_u32)],
-        TraversalDirection::Outgoing,
+        Direction::Forward,
         |_, label| Some(*label),
     );
 }

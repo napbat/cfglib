@@ -1,8 +1,8 @@
 use cfglib::{
-    BlockId, Cfg, CommonAncestor, EdgeId, EdgeStep, Graph, GraphView, NodeId, ShortestPathScratch,
-    TraversalDirection, breadth_first, breadth_first_edges, common_ancestors, depth_first_preorder,
-    nearest_common_ancestor, shortest_path, shortest_path_bidirectional, shortest_path_edges,
-    shortest_path_edges_bidirectional,
+    BlockId, Cfg, CommonAncestor, Direction, EdgeId, EdgeStep, Graph, GraphView, NodeId,
+    ShortestPathScratch, breadth_first, breadth_first_edges, common_ancestors,
+    depth_first_preorder, nearest_common_ancestor, shortest_path, shortest_path_bidirectional,
+    shortest_path_edges, shortest_path_edges_bidirectional,
 };
 
 use super::NODE_COUNT;
@@ -28,7 +28,7 @@ fn register_cfg_walks(suite: &mut BenchmarkSuite<'_>, cfg: &Cfg<u32>) {
     benchmark_case!(
         suite,
         "cfg_depth_first_preorder",
-        || depth_first_preorder(cfg, cfg.entry(), TraversalDirection::Outgoing),
+        || depth_first_preorder(cfg, cfg.entry(), Direction::Forward),
         |result: &Vec<BlockId>| {
             assert_dense_permutation(result, NODE_COUNT);
             assert_eq!(*result, reference_cfg_preorder(cfg));
@@ -37,7 +37,7 @@ fn register_cfg_walks(suite: &mut BenchmarkSuite<'_>, cfg: &Cfg<u32>) {
     benchmark_case!(
         suite,
         "cfg_breadth_first",
-        || breadth_first(cfg, cfg.entry(), TraversalDirection::Outgoing),
+        || breadth_first(cfg, cfg.entry(), Direction::Forward),
         |result: &Vec<BlockId>| {
             assert_dense_permutation(result, NODE_COUNT);
             assert_eq!(*result, reference_cfg_breadth_first(cfg));
@@ -49,7 +49,7 @@ fn register_graph_walks(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(), ()>) {
     benchmark_case!(
         suite,
         "directed_breadth_first_edges",
-        || breadth_first_edges(graph, NodeId::from_raw(0), TraversalDirection::Outgoing),
+        || breadth_first_edges(graph, NodeId::from_raw(0), Direction::Forward),
         |result: &Vec<EdgeStep>| assert_edge_traversal(result, graph)
     );
     benchmark_case!(
@@ -60,7 +60,7 @@ fn register_graph_walks(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(), ()>) {
                 graph,
                 NodeId::from_raw(0),
                 NodeId::from_index(NODE_COUNT - 1),
-                TraversalDirection::Outgoing,
+                Direction::Forward,
             )
             .expect("fixture target is reachable")
         },
@@ -79,7 +79,7 @@ fn register_graph_walks(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(), ()>) {
                 graph,
                 NodeId::from_raw(0),
                 NodeId::from_index(NODE_COUNT - 1),
-                TraversalDirection::Outgoing,
+                Direction::Forward,
             )
             .expect("fixture target is reachable")
         },
@@ -101,7 +101,7 @@ fn register_graph_walks(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(), ()>) {
                 graph,
                 NodeId::from_raw(0),
                 NodeId::from_index(NODE_COUNT - 1),
-                TraversalDirection::Outgoing,
+                Direction::Forward,
                 &mut scratch,
             )
             .expect("fixture target is reachable")
@@ -121,7 +121,7 @@ fn register_graph_walks(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(), ()>) {
                 graph,
                 NodeId::from_raw(0),
                 NodeId::from_index(NODE_COUNT - 1),
-                TraversalDirection::Outgoing,
+                Direction::Forward,
                 &mut scratch,
             )
             .expect("fixture target is reachable")
@@ -175,7 +175,7 @@ fn register_point_queries(suite: &mut BenchmarkSuite<'_>) {
             )
         })
         .collect();
-    let outgoing = TraversalDirection::Outgoing;
+    let outgoing = Direction::Forward;
     let lengths: Vec<Option<usize>> = pairs
         .iter()
         .map(|&(start, goal)| shortest_path(&graph, start, goal, outgoing).map(|path| path.len()))
@@ -220,8 +220,8 @@ fn register_point_queries(suite: &mut BenchmarkSuite<'_>) {
 
 /// The meet `nearest_common_ancestor` must return, from two full searches.
 fn expected_meet(graph: &Graph<(), ()>, a: NodeId, b: NodeId) -> Option<NodeId> {
-    let (from_a, _) = directed_distances(graph, a, TraversalDirection::Incoming);
-    let (from_b, _) = directed_distances(graph, b, TraversalDirection::Incoming);
+    let (from_a, _) = directed_distances(graph, a, Direction::Backward);
+    let (from_b, _) = directed_distances(graph, b, Direction::Backward);
     graph
         .node_ids()
         .filter(|node| from_a[node.index()] != usize::MAX && from_b[node.index()] != usize::MAX)
@@ -237,7 +237,7 @@ fn register_ancestors(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(), ()>) {
                 graph,
                 NodeId::from_index(NODE_COUNT - 1),
                 NodeId::from_index(NODE_COUNT - 2),
-                TraversalDirection::Incoming,
+                Direction::Backward,
             )
         },
         |result: &Option<NodeId>| assert_eq!(
@@ -264,13 +264,13 @@ fn register_ancestors(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(), ()>) {
     benchmark_case!(
         suite,
         "directed_nearest_common_ancestor_large_near",
-        || nearest_common_ancestor(&large, a, near, TraversalDirection::Incoming),
+        || nearest_common_ancestor(&large, a, near, Direction::Backward),
         |result: &Option<NodeId>| assert_eq!(*result, near_meet)
     );
     benchmark_case!(
         suite,
         "directed_nearest_common_ancestor_large_far",
-        || nearest_common_ancestor(&large, a, far, TraversalDirection::Incoming),
+        || nearest_common_ancestor(&large, a, far, Direction::Backward),
         |result: &Option<NodeId>| assert_eq!(*result, far_meet)
     );
     benchmark_case!(
@@ -281,7 +281,7 @@ fn register_ancestors(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(), ()>) {
                 graph,
                 NodeId::from_index(NODE_COUNT - 1),
                 NodeId::from_index(NODE_COUNT - 2),
-                TraversalDirection::Incoming,
+                Direction::Backward,
                 None,
             )
         },

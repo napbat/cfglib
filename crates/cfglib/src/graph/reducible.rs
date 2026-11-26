@@ -27,7 +27,8 @@ use crate::cfg::Cfg;
 use crate::edge::{EdgeId, EdgeKind};
 use crate::graph::dominator::DominatorTree;
 use crate::graph::structure::find_irreducible_entry;
-use crate::graph::traverse::{TraversalDirection, reachable_in};
+use crate::graph::traverse::reachable_in;
+use crate::graph::view::Direction;
 
 mod dispatch;
 
@@ -90,7 +91,7 @@ struct MultiEntryCycle {
 fn closure<I, E>(
     cfg: &Cfg<I, E>,
     start: impl IntoIterator<Item = BlockId>,
-    direction: TraversalDirection,
+    direction: Direction,
     within: &[bool],
 ) -> Vec<bool> {
     let mut seen = Vec::new();
@@ -125,11 +126,11 @@ fn multi_entry_cycle<I, E>(
 ) -> MultiEntryCycle {
     let mut allowed = vec![true; cfg.block_bound()];
     loop {
-        let ahead = closure(cfg, [witness], TraversalDirection::Outgoing, &allowed);
+        let ahead = closure(cfg, [witness], Direction::Forward, &allowed);
         // Every block on a path back to `witness` from a block it reaches is
         // itself reached from `witness`, so the walk back can stay inside
         // `ahead` instead of visiting everything that merely leads here.
-        let behind = closure(cfg, [witness], TraversalDirection::Incoming, &ahead);
+        let behind = closure(cfg, [witness], Direction::Backward, &ahead);
         let member: Vec<bool> = ahead
             .iter()
             .zip(&behind)
@@ -176,7 +177,7 @@ fn split_cycle<I: Clone, E: Clone>(cfg: &mut Cfg<I, E>, cycle: &MultiEntryCycle)
             .iter()
             .copied()
             .filter(|&entry| entry != header);
-        closure(cfg, others, TraversalDirection::Outgoing, &allowed)
+        closure(cfg, others, Direction::Forward, &allowed)
     };
     let size = |region: &[bool]| region.iter().filter(|&&copied| copied).count();
     let (header, region) = if cycle.entries.contains(&cfg.entry()) {

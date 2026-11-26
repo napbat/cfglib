@@ -21,7 +21,8 @@ use crate::cfg::Cfg;
 use crate::edge::{Edge, EdgeId};
 use crate::graph::dominator::DominatorTree;
 use crate::graph::edge_view::FilteredEdges;
-use crate::graph::traverse::{TraversalDirection, reachable};
+use crate::graph::traverse::reachable;
+use crate::graph::view::Direction;
 use crate::region::{HandlerBody, HandlerRef, RegionId};
 
 /// Promotes every reachable [`HandlerBody::Unknown`] extent to the blocks
@@ -155,7 +156,7 @@ pub fn recover_exclusive_extents_with<I, E>(
     is_normal: impl Fn(EdgeId, &Edge<E>) -> bool,
 ) -> Vec<ExclusiveExtent> {
     let normal = FilteredEdges::new(cfg, &is_normal);
-    let method_reachable = reachable(&normal, [cfg.entry()], TraversalDirection::Outgoing);
+    let method_reachable = reachable(&normal, [cfg.entry()], Direction::Forward);
 
     let mut handlers: Vec<(HandlerRef, BlockId)> = Vec::new();
     for region in cfg.regions() {
@@ -168,12 +169,7 @@ pub fn recover_exclusive_extents_with<I, E>(
         .map(|&(_, entry)| entry)
         .collect::<BTreeSet<_>>()
         .into_iter()
-        .map(|entry| {
-            (
-                entry,
-                reachable(&normal, [entry], TraversalDirection::Outgoing),
-            )
-        })
+        .map(|entry| (entry, reachable(&normal, [entry], Direction::Forward)))
         .collect();
 
     handlers

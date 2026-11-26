@@ -5,7 +5,7 @@
 //! chain of if/else diamonds whose arms cost different amounts, and the
 //! branchy chain with scattered weights.
 
-use cfglib::{Graph, NodeId, TraversalDirection, min_label_relaxation};
+use cfglib::{Direction, Graph, NodeId, min_label_relaxation};
 
 use super::BenchmarkSuite;
 use crate::harness::benchmark_case;
@@ -24,7 +24,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         || min_label_relaxation(
             &diamonds,
             [(start, 0_u64)],
-            TraversalDirection::Outgoing,
+            Direction::Forward,
             |edge, label| label.checked_add(*edge.payload()),
         ),
         |labels: &Vec<Option<u64>>| assert_eq!(labels[end.index()], Some(0))
@@ -36,7 +36,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         || min_label_relaxation(
             &branchy,
             [(NodeId::from_index(0), 0_u64)],
-            TraversalDirection::Outgoing,
+            Direction::Forward,
             |edge, label| label.checked_add(*edge.payload()),
         ),
         |labels: &Vec<Option<u64>>| assert!(labels.iter().all(Option::is_some))

@@ -12,7 +12,8 @@ use alloc::vec::Vec;
 use smallvec::SmallVec;
 
 use crate::block::BlockId;
-use crate::graph::traverse::{TraversalDirection, reachable};
+use crate::graph::traverse::reachable;
+use crate::graph::view::Direction;
 use crate::graph::view::{DenseId, RootedView};
 
 /// One interval in the source graph's first-level partition.
@@ -56,7 +57,7 @@ fn compute_intervals_from_graph<G: RootedView>(graph: &G) -> Vec<Interval<G::Nod
     //
     // Only predecessors the root reaches are counted: a block that never runs
     // cannot be in an interval, so it must not keep a live block out of one.
-    let live = reachable(graph, [graph.root()], TraversalDirection::Outgoing);
+    let live = reachable(graph, [graph.root()], Direction::Forward);
     let mut remaining = alloc::vec![0_usize; graph.node_bound()];
     for node in graph.node_ids() {
         remaining[node.index()] = graph

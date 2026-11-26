@@ -5,7 +5,7 @@ use alloc::string::String;
 use alloc::vec;
 use core::cmp::Ordering;
 
-use crate::{TraversalDirection, shortest_path};
+use crate::{Direction, shortest_path};
 
 use super::{
     ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeGraphPathLabel, ScopeGraphQuery,
@@ -257,7 +257,7 @@ fn storage_is_an_edge_aware_graph_view() {
     assert_eq!(graph.edge(edge).source(), child);
     assert_eq!(graph.edge(edge).target(), parent);
     assert_eq!(
-        shortest_path(&graph, child, parent, TraversalDirection::Outgoing),
+        shortest_path(&graph, child, parent, Direction::Forward),
         Some(vec![child, parent])
     );
 

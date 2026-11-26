@@ -249,7 +249,7 @@ pub use dataflow::edge_fixpoint::{
     try_solve_edge_problem_with_config,
 };
 pub use dataflow::fixpoint::{
-    Direction, Facts, IterationOrder, Problem, SolveConfig, SolveError, TryProblem, TrySolveError,
+    Facts, IterationOrder, Problem, SolveConfig, SolveError, TryProblem, TrySolveError,
     meet_options, solve_problem, solve_problem_from, solve_problem_from_with_config,
     solve_problem_with_config, try_solve_problem, try_solve_problem_from,
     try_solve_problem_from_with_config, try_solve_problem_with_config,
@@ -389,9 +389,9 @@ pub use graph::structure::{
 };
 pub use graph::text::{TextError, TextErrorKind, TextStyle, parse_text, to_text, write_text};
 pub use graph::traverse::{
-    CommonAncestor, TraversalDirection, breadth_first, common_ancestors, depth_first_postorder,
-    depth_first_preorder, nearest_common_ancestor, reachable, reverse_postorder, shortest_path,
-    topological_sort, topological_sort_or_cycle,
+    CommonAncestor, breadth_first, common_ancestors, depth_first_postorder, depth_first_preorder,
+    nearest_common_ancestor, reachable, reverse_postorder, shortest_path, topological_sort,
+    topological_sort_or_cycle,
 };
 pub use graph::tree_decomposition::{EliminationHeuristic, TreeDecomposition, tree_decomposition};
 pub use graph::verify::{
@@ -399,7 +399,7 @@ pub use graph::verify::{
     verify_view, verify_with,
 };
 pub use graph::view::{
-    DenseId, GraphView, NodeView, Reversed, Rooted, RootedView, scan_predecessors,
+    DenseId, Direction, GraphView, NodeView, Reversed, Rooted, RootedView, scan_predecessors,
 };
 pub use graph::weak_topological_order::WeakTopologicalOrder;
 pub use memory::{

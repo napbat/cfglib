@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use crate::block::{BasicBlock, BlockId};
 use crate::edge::{Edge, EdgeId, EdgeKind};
-use crate::graph::traverse::TraversalDirection;
+use crate::graph::view::Direction;
 use crate::rewrite::Rewrite;
 
 use super::{Cfg, SplitPointError};
@@ -346,7 +346,7 @@ impl<I, E> Cfg<I, E> {
             }
         }
         self.graph
-            .move_adjacency(old, new_target, TraversalDirection::Incoming);
+            .move_adjacency(old, new_target, Direction::Backward);
     }
 
     /// Redirect one edge's source while retaining its identity and payload.
@@ -416,7 +416,7 @@ impl<I, E> Cfg<I, E> {
             return;
         }
         self.graph
-            .move_adjacency(old, new_source, TraversalDirection::Outgoing);
+            .move_adjacency(old, new_source, Direction::Forward);
     }
 
     /// Mutable access to an edge's kind, weight, and consumer payload.

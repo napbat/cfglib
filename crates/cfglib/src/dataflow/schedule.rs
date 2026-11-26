@@ -8,7 +8,7 @@ use core::ops::Range;
 use super::bits::DenseBits;
 use super::fixpoint::IterationOrder;
 use super::worklist::{Ranked, Worklist};
-use crate::graph::traverse::TraversalDirection;
+use crate::graph::view::Direction;
 use crate::graph::view::{DenseId, GraphView};
 use crate::graph::weak_topological_order::{WeakTopologicalOrder, depth_first_forest};
 
@@ -146,7 +146,7 @@ pub(super) fn schedule<G: GraphView>(
     graph: &G,
     worklist: Worklist,
     entry: Option<G::NodeId>,
-    direction: TraversalDirection,
+    direction: Direction,
     order: IterationOrder,
 ) -> Schedule<G::NodeId> {
     if order == IterationOrder::Index {
@@ -155,8 +155,8 @@ pub(super) fn schedule<G: GraphView>(
     let entry = entry.filter(|node| worklist.contains(node.index()));
     let queued: Vec<G::NodeId> = worklist.queued().map(G::NodeId::from_index).collect();
     let is_source = |node: &G::NodeId| match direction {
-        TraversalDirection::Outgoing => graph.predecessors(*node).next().is_none(),
-        TraversalDirection::Incoming => graph.successors(*node).next().is_none(),
+        Direction::Forward => graph.predecessors(*node).next().is_none(),
+        Direction::Backward => graph.successors(*node).next().is_none(),
     };
     let roots = entry
         .into_iter()

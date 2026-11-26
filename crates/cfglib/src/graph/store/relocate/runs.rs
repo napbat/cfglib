@@ -6,15 +6,15 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
-use super::super::adjacency::NONE;
 use super::super::raw_index;
+use crate::identity::NO_INDEX;
 
 /// Both vectors start empty, so a direction that never relocates costs
 /// nothing. A node is in the index only once it has a run, and its run keeps
 /// its place in the storage for as long as the overlay lives.
 #[derive(Clone, Default)]
 pub(super) struct Runs {
-    /// Each node's position in `runs`, or [`NONE`]. Shorter than the node
+    /// Each node's position in `runs`, or [`NO_INDEX`]. Shorter than the node
     /// count until a later node is relocated; a node past the end has no run.
     pub(super) index: Vec<u32>,
     /// The runs themselves, in the order their nodes were first relocated.
@@ -25,7 +25,7 @@ impl Runs {
     /// `node`'s run, when it has one.
     pub(super) fn get(&self, node: usize) -> Option<&[u32]> {
         match *self.index.get(node)? {
-            NONE => None,
+            NO_INDEX => None,
             slot => Some(&self.runs[slot as usize]),
         }
     }
@@ -33,7 +33,7 @@ impl Runs {
     /// `node`'s run, for editing, when it has one.
     pub(super) fn get_mut(&mut self, node: usize) -> Option<&mut Vec<u32>> {
         match *self.index.get(node)? {
-            NONE => None,
+            NO_INDEX => None,
             slot => Some(&mut self.runs[slot as usize]),
         }
     }
@@ -45,9 +45,12 @@ impl Runs {
     /// bulk before the next relocation do not each regrow it.
     pub(super) fn insert(&mut self, node: usize, node_bound: usize, run: Vec<u32>) {
         if node >= self.index.len() {
-            self.index.resize(node_bound, NONE);
+            self.index.resize(node_bound, NO_INDEX);
         }
-        assert!(self.index[node] == NONE, "node {node} already has a run");
+        assert!(
+            self.index[node] == NO_INDEX,
+            "node {node} already has a run"
+        );
         self.index[node] = raw_index(self.runs.len());
         self.runs.push(run);
     }
@@ -62,7 +65,7 @@ impl Runs {
         self.index
             .iter()
             .enumerate()
-            .filter(|&(_, &slot)| slot != NONE)
+            .filter(|&(_, &slot)| slot != NO_INDEX)
             .map(|(node, &slot)| (raw_index(node), self.runs[slot as usize].as_slice()))
     }
 }

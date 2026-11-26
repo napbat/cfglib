@@ -13,7 +13,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::graph::store::{Graph, Id, NodeTag};
-use crate::graph::traverse::TraversalDirection;
+use crate::graph::view::Direction;
 use crate::test_util::rng::Rng;
 
 #[derive(Clone)]
@@ -405,18 +405,18 @@ struct Session {
 }
 
 /// The direction a source (`true`) or target (`false`) endpoint is read along.
-const fn direction(outgoing: bool) -> TraversalDirection {
+const fn direction(outgoing: bool) -> Direction {
     if outgoing {
-        TraversalDirection::Outgoing
+        Direction::Forward
     } else {
-        TraversalDirection::Incoming
+        Direction::Backward
     }
 }
 
 impl Session {
     /// Whether `node` is served from an overlay run along `direction` and also
     /// lists an edge that is not in that run: one appended since.
-    fn appended_beside_overlay(&self, node: usize, direction: TraversalDirection) -> bool {
+    fn appended_beside_overlay(&self, node: usize, direction: Direction) -> bool {
         let Some(run) = self.graph.overlay(node, direction) else {
             return false;
         };
@@ -427,7 +427,7 @@ impl Session {
 
     /// Whether `node` reads its live edges along `direction` in anything but
     /// ascending identity order, which only a redirect produces.
-    fn reads_out_of_identity_order(&self, node: usize, direction: TraversalDirection) -> bool {
+    fn reads_out_of_identity_order(&self, node: usize, direction: Direction) -> bool {
         let edges: Vec<usize> = self
             .graph
             .adjacent(node_id(node), direction)
@@ -499,13 +499,8 @@ impl Session {
             self.exercised.self_edges += 1;
         }
         self.exercised.appended_beside_overlay += usize::from(
-            self.graph
-                .overlay(source, TraversalDirection::Outgoing)
-                .is_some()
-                || self
-                    .graph
-                    .overlay(target, TraversalDirection::Incoming)
-                    .is_some(),
+            self.graph.overlay(source, Direction::Forward).is_some()
+                || self.graph.overlay(target, Direction::Backward).is_some(),
         );
         if self
             .model

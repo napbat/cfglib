@@ -14,8 +14,8 @@ use alloc::vec::Vec;
 use core::mem;
 
 use super::Graph;
-use super::adjacency::NONE;
 use super::id::{Id, IdTag, NodeTag};
+use crate::identity::NO_INDEX;
 
 /// How [`Graph::compact_ordered`] numbers the surviving nodes.
 ///
@@ -82,7 +82,7 @@ struct Numbering {
 impl Numbering {
     fn new(slots: usize) -> Self {
         Self {
-            map: vec![NONE; slots],
+            map: vec![NO_INDEX; slots],
             next: 0,
         }
     }
@@ -91,7 +91,7 @@ impl Numbering {
     /// was numbered now.
     fn assign<T: IdTag>(&mut self, node: Id<T>) -> bool {
         let entry = &mut self.map[node.index()];
-        if *entry != NONE {
+        if *entry != NO_INDEX {
             return false;
         }
         *entry = self.next;
@@ -101,7 +101,7 @@ impl Numbering {
 }
 
 impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
-    /// The new number of every node slot under `order`, with [`NONE`] for
+    /// The new number of every node slot under `order`, with [`NO_INDEX`] for
     /// the removed.
     pub(super) fn ordered_slots(&self, order: NodeOrder<'_, NT>) -> Vec<u32> {
         let mut numbering = Numbering::new(self.node_bound());

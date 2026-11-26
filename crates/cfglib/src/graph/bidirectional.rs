@@ -25,8 +25,9 @@ use alloc::vec::Vec;
 use super::edge_traverse::EdgeAdjacency;
 use super::edge_view::EdgeView;
 use super::epoch::EpochMarks;
-use super::traverse::{Adjacency, TraversalDirection, by_axis};
-use super::view::{DenseId, GraphView, assert_in_bound};
+use super::traverse::{Adjacency, by_axis};
+use super::view::{DenseId, Direction, GraphView, assert_in_bound};
+use crate::identity::{check_bound, slot, word};
 
 /// Caller-owned buffers for repeated point-to-point queries over one node
 /// space, read by [`shortest_path_bidirectional`] and
@@ -49,7 +50,7 @@ use super::view::{DenseId, GraphView, assert_in_bound};
 /// # Examples
 ///
 /// ```
-/// use cfglib::{Graph, ShortestPathScratch, TraversalDirection, shortest_path_bidirectional};
+/// use cfglib::{Graph, ShortestPathScratch, Direction, shortest_path_bidirectional};
 ///
 /// let mut graph = Graph::<(), ()>::new();
 /// let [a, b, c] = [(); 3].map(|()| graph.add_node(()));
@@ -62,7 +63,7 @@ use super::view::{DenseId, GraphView, assert_in_bound};
 ///         &graph,
 ///         start,
 ///         goal,
-///         TraversalDirection::Outgoing,
+///         Direction::Forward,
 ///         &mut scratch,
 ///     );
 ///     assert_eq!(path.is_some(), start != c);
@@ -264,20 +265,6 @@ fn examine<I: Iterator<Item = (usize, u32)>>(
     }
 }
 
-/// The `u32` a table stores for a dense index.
-///
-/// Every table is checked against [`check_bound`] on entry, so a failure here
-/// is a view yielding an index past its own bound.
-fn word(index: usize) -> u32 {
-    u32::try_from(index).expect("a dense index below a checked bound fits in u32")
-}
-
-/// Reject a bound that the scratch's `u32` tables cannot index.
-#[track_caller]
-fn check_bound(bound: usize, what: &str) {
-    assert!(u32::try_from(bound).is_ok(), "{what} exceeds u32::MAX");
-}
-
 /// Return a shortest unweighted path from `start` to `goal`, searching from
 /// both ends over caller-owned scratch.
 ///
@@ -311,7 +298,7 @@ fn check_bound(bound: usize, what: &str) {
 /// chain is found from that side cheaply even when the other side fans out.
 ///
 /// The backward search reads [`predecessors`](GraphView::predecessors) (or
-/// `successors` for [`TraversalDirection::Incoming`]). A view that stores only
+/// `successors` for [`Direction::Backward`]). A view that stores only
 /// forward adjacency serves that by [`scan_predecessors`](crate::scan_predecessors),
 /// O(nodes × edges) per call, so for such a view use the one-sided
 /// [`shortest_path`](crate::shortest_path) instead.
@@ -324,7 +311,7 @@ fn check_bound(bound: usize, what: &str) {
 /// # Examples
 ///
 /// ```
-/// use cfglib::{Graph, ShortestPathScratch, TraversalDirection, shortest_path_bidirectional};
+/// use cfglib::{Graph, ShortestPathScratch, Direction, shortest_path_bidirectional};
 ///
 /// // A call graph: `main` calls `parse` and `run`, and both call `log`.
 /// let mut graph = Graph::<&str, ()>::new();
@@ -339,7 +326,7 @@ fn check_bound(bound: usize, what: &str) {
 ///
 /// // One scratch serves every query over the graph.
 /// let mut scratch = ShortestPathScratch::new(graph.node_bound());
-/// let outgoing = TraversalDirection::Outgoing;
+/// let outgoing = Direction::Forward;
 /// assert_eq!(
 ///     shortest_path_bidirectional(&graph, main, log, outgoing, &mut scratch),
 ///     Some(vec![main, parse, log]),
@@ -349,7 +336,7 @@ fn check_bound(bound: usize, what: &str) {
 ///     None,
 /// );
 /// // Against the edges, from a callee up to a caller.
-/// let incoming = TraversalDirection::Incoming;
+/// let incoming = Direction::Backward;
 /// assert_eq!(
 ///     shortest_path_bidirectional(&graph, log, main, incoming, &mut scratch).map(|path| path.len()),
 ///     Some(3),
@@ -360,7 +347,7 @@ pub fn shortest_path_bidirectional<G: GraphView>(
     graph: &G,
     start: G::NodeId,
     goal: G::NodeId,
-    direction: TraversalDirection,
+    direction: Direction,
     scratch: &mut ShortestPathScratch,
 ) -> Option<Vec<G::NodeId>> {
     by_axis!(direction, node_path_from(graph, start, goal, scratch))
@@ -435,7 +422,7 @@ fn node_path_from<G: GraphView, A: Adjacency>(
 /// # Examples
 ///
 /// ```
-/// use cfglib::{Graph, ShortestPathScratch, TraversalDirection, shortest_path_edges_bidirectional};
+/// use cfglib::{Graph, ShortestPathScratch, Direction, shortest_path_edges_bidirectional};
 ///
 /// let mut graph = Graph::<(), &str>::new();
 /// let [a, b, c] = [(); 3].map(|()| graph.add_node(()));
@@ -445,7 +432,7 @@ fn node_path_from<G: GraphView, A: Adjacency>(
 ///
 /// let mut scratch = ShortestPathScratch::default();
 /// assert_eq!(
-///     shortest_path_edges_bidirectional(&graph, a, c, TraversalDirection::Outgoing, &mut scratch),
+///     shortest_path_edges_bidirectional(&graph, a, c, Direction::Forward, &mut scratch),
 ///     Some(vec![first, second]),
 /// );
 /// ```
@@ -454,7 +441,7 @@ pub fn shortest_path_edges_bidirectional<G: EdgeView>(
     graph: &G,
     from: G::NodeId,
     to: G::NodeId,
-    direction: TraversalDirection,
+    direction: Direction,
     scratch: &mut ShortestPathScratch,
 ) -> Option<Vec<G::EdgeId>> {
     by_axis!(direction, edge_path_from(graph, from, to, scratch))
@@ -512,11 +499,6 @@ where
         node = axis.next(graph.edge(edge(link))).index();
     }
     Some(path)
-}
-
-/// The dense index a stored word names.
-const fn slot(stored: u32) -> usize {
-    stored as usize
 }
 
 #[cfg(test)]

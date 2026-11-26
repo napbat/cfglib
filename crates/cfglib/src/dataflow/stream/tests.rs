@@ -8,12 +8,11 @@ use core::convert::Infallible;
 
 use super::{StreamedNodes, stream_edge_problem, stream_node_problem};
 use crate::dataflow::edge_fixpoint::TryEdgeProblem;
-use crate::dataflow::fixpoint::{
-    Direction, IterationOrder, SolveConfig, SolveError, TrySolveError,
-};
+use crate::dataflow::fixpoint::{IterationOrder, SolveConfig, SolveError, TrySolveError};
 use crate::dataflow::node_fixpoint::{TryNodeProblem, try_solve_node_problem_with_config};
 use crate::graph::store::{Graph, NodeId};
-use crate::graph::traverse::{Outgoing, TraversalDirection};
+use crate::graph::traverse::Outgoing;
+use crate::graph::view::Direction;
 use crate::graph::weak_topological_order::WeakTopologicalOrder;
 
 fn node(index: usize) -> NodeId {
@@ -53,7 +52,7 @@ fn figure_one(loops: &[(usize, usize)]) -> Graph<(), ()> {
 /// fact in the paper's terms: the head of the outermost element (or the
 /// loose node) after which the stream releases it.
 fn release_points(graph: &Graph<(), ()>) -> Vec<(usize, usize)> {
-    let order = WeakTopologicalOrder::compute(graph, node(1), TraversalDirection::Outgoing);
+    let order = WeakTopologicalOrder::compute(graph, node(1), Direction::Forward);
     let nodes: StreamedNodes<(), _> = StreamedNodes::new(
         graph,
         &order,

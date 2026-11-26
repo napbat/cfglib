@@ -1,8 +1,8 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use cfglib::{
-    BlockId, Cfg, CommonAncestor, DominanceFrontiers, DominatorTree, EdgeStep, Facts, Graph,
-    IntervalAnalysis, NodeId, PostDominatorTree, PostNode, TraversalDirection,
+    BlockId, Cfg, CommonAncestor, Direction, DominanceFrontiers, DominatorTree, EdgeStep, Facts,
+    Graph, IntervalAnalysis, NodeId, PostDominatorTree, PostNode,
 };
 
 use super::fixtures::{WIDE_FACT_WORDS, fixture_u32};
@@ -11,7 +11,7 @@ use super::structural_oracles::has_directed_edge;
 pub(super) fn directed_distances(
     graph: &Graph<(), ()>,
     start: NodeId,
-    direction: TraversalDirection,
+    direction: Direction,
 ) -> (Vec<usize>, Vec<NodeId>) {
     let mut distances = vec![usize::MAX; graph.node_bound()];
     let mut order = Vec::with_capacity(graph.node_bound());
@@ -21,14 +21,14 @@ pub(super) fn directed_distances(
     while let Some(node) = queue.pop_front() {
         order.push(node);
         let adjacent: Vec<_> = match direction {
-            TraversalDirection::Outgoing => graph.outgoing(node).collect(),
-            TraversalDirection::Incoming => graph.incoming(node).collect(),
+            Direction::Forward => graph.outgoing(node).collect(),
+            Direction::Backward => graph.incoming(node).collect(),
         };
         for edge_id in adjacent {
             let edge = graph.edge(edge_id);
             let next = match direction {
-                TraversalDirection::Outgoing => edge.target(),
-                TraversalDirection::Incoming => edge.source(),
+                Direction::Forward => edge.target(),
+                Direction::Backward => edge.source(),
             };
             if distances[next.index()] == usize::MAX {
                 distances[next.index()] = distances[node.index()] + 1;
@@ -113,7 +113,7 @@ pub(super) fn assert_edge_traversal(steps: &[EdgeStep], graph: &Graph<(), ()>) {
 pub(super) fn assert_node_path(path: &[NodeId], graph: &Graph<(), ()>, from: NodeId, to: NodeId) {
     assert_eq!(path.first(), Some(&from));
     assert_eq!(path.last(), Some(&to));
-    let (distances, _) = directed_distances(graph, from, TraversalDirection::Outgoing);
+    let (distances, _) = directed_distances(graph, from, Direction::Forward);
     assert_eq!(path.len(), distances[to.index()] + 1);
     assert!(
         path.windows(2)
@@ -127,7 +127,7 @@ pub(super) fn assert_edge_path(
     from: NodeId,
     to: NodeId,
 ) {
-    let (distances, _) = directed_distances(graph, from, TraversalDirection::Outgoing);
+    let (distances, _) = directed_distances(graph, from, Direction::Forward);
     assert_eq!(path.len(), distances[to.index()]);
     let mut current = from;
     let mut seen = BTreeSet::new();
@@ -146,8 +146,8 @@ pub(super) fn assert_common_ancestor_results(
     a: NodeId,
     b: NodeId,
 ) {
-    let (from_a, _) = directed_distances(graph, a, TraversalDirection::Incoming);
-    let (from_b, b_order) = directed_distances(graph, b, TraversalDirection::Incoming);
+    let (from_a, _) = directed_distances(graph, a, Direction::Backward);
+    let (from_b, b_order) = directed_distances(graph, b, Direction::Backward);
     let expected: Vec<_> = b_order
         .into_iter()
         .filter(|node| from_a[node.index()] != usize::MAX)

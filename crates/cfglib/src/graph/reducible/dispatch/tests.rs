@@ -160,7 +160,7 @@ fn check_digraph(count: usize, edges: &[(usize, usize)], seed: u64) -> bool {
         reachable_in(
             &original,
             [original.entry()],
-            TraversalDirection::Outgoing,
+            Direction::Forward,
             None,
             &mut reached,
             &mut Vec::new(),

@@ -1,16 +1,16 @@
 use cfglib::{
     Cfg, Direction, EdgeFacts, EdgeProblem, Facts, Graph, IterationOrder, NodeId, NodeProblem,
-    ResumeMode, SolveConfig, SolveError, SolveStats, TraversalDirection, TryEdgeProblem,
-    TryNodeProblem, TryProblem, TrySolveError, WeakTopologicalOrder, meet_options,
-    resume_edge_problem, resume_node_problem, resume_problem, solve_edge_problem,
-    solve_edge_problem_from, solve_edge_problem_from_with_config, solve_edge_problem_with_config,
-    solve_node_problem, solve_node_problem_from, solve_node_problem_from_with_config,
-    solve_node_problem_with_config, solve_problem_from, solve_problem_from_with_config,
-    stream_edge_problem, stream_node_problem, stream_problem, try_solve_edge_problem,
-    try_solve_edge_problem_from, try_solve_edge_problem_from_with_config,
-    try_solve_edge_problem_with_config, try_solve_node_problem, try_solve_node_problem_from,
-    try_solve_node_problem_from_with_config, try_solve_node_problem_with_config, try_solve_problem,
-    try_solve_problem_from, try_solve_problem_from_with_config, try_solve_problem_with_config,
+    ResumeMode, SolveConfig, SolveError, SolveStats, TryEdgeProblem, TryNodeProblem, TryProblem,
+    TrySolveError, WeakTopologicalOrder, meet_options, resume_edge_problem, resume_node_problem,
+    resume_problem, solve_edge_problem, solve_edge_problem_from,
+    solve_edge_problem_from_with_config, solve_edge_problem_with_config, solve_node_problem,
+    solve_node_problem_from, solve_node_problem_from_with_config, solve_node_problem_with_config,
+    solve_problem_from, solve_problem_from_with_config, stream_edge_problem, stream_node_problem,
+    stream_problem, try_solve_edge_problem, try_solve_edge_problem_from,
+    try_solve_edge_problem_from_with_config, try_solve_edge_problem_with_config,
+    try_solve_node_problem, try_solve_node_problem_from, try_solve_node_problem_from_with_config,
+    try_solve_node_problem_with_config, try_solve_problem, try_solve_problem_from,
+    try_solve_problem_from_with_config, try_solve_problem_with_config,
 };
 
 use super::BenchmarkSuite;
@@ -438,7 +438,7 @@ fn register_iteration_orders(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_weak_topological_order",
-        || WeakTopologicalOrder::compute(&graph, entry, TraversalDirection::Outgoing),
+        || WeakTopologicalOrder::compute(&graph, entry, Direction::Forward),
         |order: &WeakTopologicalOrder<NodeId>| assert_eq!(order.order().len(), NEST_NODE_COUNT)
     );
 }

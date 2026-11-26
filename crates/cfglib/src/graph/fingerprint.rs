@@ -396,7 +396,8 @@ mod tests {
     use crate::cfg::Cfg;
     use crate::edge::EdgeKind;
     use crate::graph::store::{Graph, NodeId};
-    use crate::graph::traverse::{TraversalDirection, reachable};
+    use crate::graph::traverse::reachable;
+    use crate::graph::view::Direction;
     use crate::graph::view::Rooted;
     use crate::test_util::rng::Rng;
 
@@ -511,7 +512,7 @@ mod tests {
             let rooted = Rooted::new(&graph, NodeId::from_index(0));
             let order = canonical_order(&rooted, key(&graph));
             let root = NodeId::from_index(0);
-            let reached = reachable(&graph, [root], TraversalDirection::Outgoing);
+            let reached = reachable(&graph, [root], Direction::Forward);
             let mut sorted = order.clone();
             sorted.sort_unstable();
             let expected: Vec<NodeId> = graph

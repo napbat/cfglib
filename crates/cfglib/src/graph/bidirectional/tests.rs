@@ -6,8 +6,7 @@ use crate::test_util::rng::Rng;
 use alloc::vec;
 use core::cell::Cell;
 
-const DIRECTIONS: [TraversalDirection; 2] =
-    [TraversalDirection::Outgoing, TraversalDirection::Incoming];
+const DIRECTIONS: [Direction; 2] = [Direction::Forward, Direction::Backward];
 
 /// A random multigraph over `node_count` slots with `edge_count` edges:
 /// cycles, self-loops and parallel edges occur, and about one slot in six is
@@ -36,18 +35,14 @@ fn assert_node_path(
     graph: &Graph<(), ()>,
     path: &[NodeId],
     (start, goal): (NodeId, NodeId),
-    direction: TraversalDirection,
+    direction: Direction,
 ) {
     assert_eq!(path.first(), Some(&start));
     assert_eq!(path.last(), Some(&goal));
     for pair in path.windows(2) {
         let joined = match direction {
-            TraversalDirection::Outgoing => {
-                GraphView::successors(graph, pair[0]).any(|n| n == pair[1])
-            }
-            TraversalDirection::Incoming => {
-                GraphView::predecessors(graph, pair[0]).any(|n| n == pair[1])
-            }
+            Direction::Forward => GraphView::successors(graph, pair[0]).any(|n| n == pair[1]),
+            Direction::Backward => GraphView::predecessors(graph, pair[0]).any(|n| n == pair[1]),
         };
         assert!(
             joined,
@@ -63,14 +58,14 @@ fn assert_edge_path(
     graph: &Graph<(), ()>,
     path: &[EdgeId],
     (from, to): (NodeId, NodeId),
-    direction: TraversalDirection,
+    direction: Direction,
 ) {
     let mut at = from;
     for &edge in path {
         let edge = EdgeView::edge(graph, edge);
         let (near, far) = match direction {
-            TraversalDirection::Outgoing => (edge.source(), edge.target()),
-            TraversalDirection::Incoming => (edge.target(), edge.source()),
+            Direction::Forward => (edge.source(), edge.target()),
+            Direction::Backward => (edge.target(), edge.source()),
         };
         assert_eq!(near, at, "{path:?} breaks at {at:?}");
         at = far;
@@ -230,7 +225,7 @@ fn the_backward_search_climbs_a_chain_instead_of_flooding_the_tree() {
     };
 
     let mut scratch = ShortestPathScratch::new(nodes.len());
-    let outgoing = TraversalDirection::Outgoing;
+    let outgoing = Direction::Forward;
     let path = shortest_path_bidirectional(&counting, root, leaf, outgoing, &mut scratch)
         .expect("the root reaches every leaf");
     assert_eq!(path.len(), DEPTH + 1);
@@ -254,8 +249,8 @@ fn trivial_direct_and_missing_paths() {
     graph.add_edge(a, a, ());
     let direct = graph.add_edge(a, b, ());
     let mut scratch = ShortestPathScratch::default();
-    let outgoing = TraversalDirection::Outgoing;
-    let incoming = TraversalDirection::Incoming;
+    let outgoing = Direction::Forward;
+    let incoming = Direction::Backward;
 
     // A node is its own path, self-loop or not, as in the one-sided search.
     assert_eq!(
@@ -293,7 +288,7 @@ fn a_goal_beyond_the_bound_panics() {
         &graph,
         a,
         NodeId::from_index(3),
-        TraversalDirection::Outgoing,
+        Direction::Forward,
         &mut ShortestPathScratch::default(),
     );
 }

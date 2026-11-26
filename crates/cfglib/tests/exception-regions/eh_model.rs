@@ -2,8 +2,8 @@
 //! the normal-versus-unwind flows a `FilteredEdges` view separates.
 
 use cfglib::{
-    BlockId, Cfg, DominatorTree, Edge, EdgeId, EdgeKind, EdgeView, EhBlockKind, EhEdgeKind,
-    EhModel, FilteredEdges, HandlerKind, HandlerRef, TraversalDirection, reachable,
+    BlockId, Cfg, Direction, DominatorTree, Edge, EdgeId, EdgeKind, EdgeView, EhBlockKind,
+    EhEdgeKind, EhModel, FilteredEdges, HandlerKind, HandlerRef, reachable,
 };
 
 use crate::shapes::{Stmt, block_of, catch, handler, protect, try_catch};
@@ -308,8 +308,8 @@ fn normal_flow_never_reaches_a_pad_that_the_full_graph_reaches() {
     let cfg = &fixture.cfg;
     let normal = FilteredEdges::new(cfg, is_normal);
 
-    let along_normal = reachable(&normal, [cfg.entry()], TraversalDirection::Outgoing);
-    let along_all = reachable(cfg, [cfg.entry()], TraversalDirection::Outgoing);
+    let along_normal = reachable(&normal, [cfg.entry()], Direction::Forward);
+    let along_all = reachable(cfg, [cfg.entry()], Direction::Forward);
 
     assert_eq!(
         along_normal,

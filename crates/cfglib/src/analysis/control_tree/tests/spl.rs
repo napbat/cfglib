@@ -12,7 +12,8 @@ use super::small_stack::on_small_stack;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::graph::traverse::{TraversalDirection, reachable};
+use crate::graph::traverse::reachable;
+use crate::graph::view::Direction;
 use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
 use crate::{ControlNode, ControlTree, LoopKind, SplError, SplNode};
 use checker::{check_decomposition, check_path};
@@ -52,7 +53,7 @@ fn expected<I>(cfg: &Cfg<I>, tree: &ControlTree) -> Option<SplError> {
             return found;
         }
     }
-    let reached = reachable(cfg, [cfg.entry()], TraversalDirection::Outgoing);
+    let reached = reachable(cfg, [cfg.entry()], Direction::Forward);
     if let Some(dead) = cfg.block_ids().find(|block| !reached[block.index()]) {
         return Some(SplError::UnplacedBlock(dead));
     }

@@ -7,9 +7,7 @@
 //! `graph.rs`; the call graph is wide and shallow, with leaf functions and
 //! small recursive cycles, which leaves the index more pairs to search.
 
-use cfglib::{
-    Graph, NodeId, ReachIndex, ReachIndexConfig, ReachScratch, TraversalDirection, reachable,
-};
+use cfglib::{Direction, Graph, NodeId, ReachIndex, ReachIndexConfig, ReachScratch, reachable};
 
 use super::BenchmarkSuite;
 use crate::fixtures::branchy_graph;
@@ -92,9 +90,7 @@ fn answer_by_index(
 fn answer_by_walks(graph: &Graph<(), ()>, pairs: &[(NodeId, NodeId)]) -> usize {
     pairs
         .iter()
-        .filter(|&&(source, target)| {
-            reachable(graph, [source], TraversalDirection::Outgoing)[target.index()]
-        })
+        .filter(|&&(source, target)| reachable(graph, [source], Direction::Forward)[target.index()])
         .count()
 }
 

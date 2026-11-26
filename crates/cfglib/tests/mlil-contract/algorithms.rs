@@ -7,8 +7,8 @@
 use std::collections::BTreeSet;
 
 use cfglib::{
-    DenseId, DominanceFrontiers, DominatorTree, GraphView, PostDominatorTree, PostNode, RootedView,
-    TraversalDirection, control_dependence_graph, reverse_postorder, tarjan_scc,
+    DenseId, Direction, DominanceFrontiers, DominatorTree, GraphView, PostDominatorTree, PostNode,
+    RootedView, control_dependence_graph, reverse_postorder, tarjan_scc,
 };
 
 use crate::fixtures;
@@ -134,7 +134,7 @@ fn reverse_postorder_lists_the_reachable_blocks_and_puts_forward_edges_in_order(
     for (name, function) in functions() {
         let cfg = extract::<Glint, _>(&function);
         let reachable = cfg.reachable();
-        let order = reverse_postorder(&function, function.root(), TraversalDirection::Outgoing);
+        let order = reverse_postorder(&function, function.root(), Direction::Forward);
         let listed: BTreeSet<usize> = order.iter().map(|&node| node.index()).collect();
         assert_eq!(order.len(), listed.len(), "{name}: no block twice");
         let expected: BTreeSet<usize> = cfg.live_nodes().filter(|&node| reachable[node]).collect();
@@ -300,7 +300,7 @@ fn a_dag_function_is_acyclic_and_a_loop_is_not() {
 #[test]
 fn the_graph_view_of_a_function_with_a_removed_block_skips_the_slot() {
     let function = fixtures::with_a_removed_block();
-    let order = reverse_postorder(&function, function.root(), TraversalDirection::Outgoing);
+    let order = reverse_postorder(&function, function.root(), Direction::Forward);
     assert_eq!(order, [block(0), block(2)]);
     let scc = tarjan_scc(&function);
     assert_eq!(scc.len(), 2);

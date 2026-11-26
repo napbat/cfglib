@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 
 use cfglib::{
-    BfsEvent, DfsEvent, Graph, NodeId, OpenBfsConfig, OpenBfsEvent, OpenDfsConfig, OpenDfsEvent,
-    TraversalDirection, Visit, VisitedPolicy, breadth_first_events, depth_first_events,
+    BfsEvent, DfsEvent, Direction, Graph, NodeId, OpenBfsConfig, OpenBfsEvent, OpenDfsConfig,
+    OpenDfsEvent, Visit, VisitedPolicy, breadth_first_events, depth_first_events,
     open_breadth_first_events, open_depth_first_events,
 };
 
@@ -28,7 +28,7 @@ fn dense_depth_first_steps(graph: &Graph<(), ()>, start: usize) -> Vec<Step> {
     let outcome = depth_first_events::<_, ()>(
         graph,
         NodeId::from_index(start),
-        TraversalDirection::Outgoing,
+        Direction::Forward,
         |event| {
             match event {
                 DfsEvent::Discover(node, at) => {
@@ -54,7 +54,7 @@ fn dense_breadth_first_steps(graph: &Graph<(), ()>, start: usize) -> Vec<Step> {
     let outcome = breadth_first_events::<_, ()>(
         graph,
         NodeId::from_index(start),
-        TraversalDirection::Outgoing,
+        Direction::Forward,
         |event| {
             match event {
                 BfsEvent::Discover(node, at) => {

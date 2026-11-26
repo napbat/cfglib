@@ -126,7 +126,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
-use crate::graph::traverse::TraversalDirection;
+use crate::graph::view::Direction;
 
 use adjacency::{DeltaChains, MAX_SLOTS};
 use liveness::LiveSet;
@@ -369,8 +369,8 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         if !self.node_is_live(index) {
             return false;
         }
-        self.clear_adjacency(node, TraversalDirection::Outgoing);
-        self.clear_adjacency(node, TraversalDirection::Incoming);
+        self.clear_adjacency(node, Direction::Forward);
+        self.clear_adjacency(node, Direction::Backward);
         self.live_nodes.clear(index);
         self.live_node_count -= 1;
         true

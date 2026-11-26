@@ -28,7 +28,8 @@ use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::{EdgeId, EdgeKind};
 use crate::graph::loop_forest::{LoopForest, LoopId};
-use crate::graph::traverse::{TraversalDirection, reachable_in};
+use crate::graph::traverse::reachable_in;
+use crate::graph::view::Direction;
 
 /// The code [`make_reducible_with_dispatch`] puts in the blocks it adds, and
 /// the payloads of the edges it adds.
@@ -195,7 +196,7 @@ impl<'a> Dispatch<'a> {
         reachable_in(
             cfg,
             [cfg.entry()],
-            TraversalDirection::Outgoing,
+            Direction::Forward,
             None,
             &mut reached,
             &mut Vec::new(),

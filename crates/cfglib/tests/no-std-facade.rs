@@ -24,9 +24,9 @@ use cfglib::{
     DominatorTree, EdgeKind, EhModel, Fanout, FlowControl, FlowEffect, Graph, Handler, HandlerBody,
     HandlerKind, HandlerTypes, HornClauses, IfdsConfig, IfdsProblem, InstrInfo, KeyedGraph, NodeId,
     PostDominatorTree, Problem, SortedMap, StackGraphError, Supergraph, TextError,
-    TraversalDirection, VectoredExceptionModel, VectoredHandlerKind, VectoredHandlerOrder,
-    breadth_first, install_clr_region, parse_cfg_text, parse_text, remove_unreachable,
-    shortest_path, simplify, solve_ifds, solve_problem, tarjan_scc, topological_sort, verify,
+    VectoredExceptionModel, VectoredHandlerKind, VectoredHandlerOrder, breadth_first,
+    install_clr_region, parse_cfg_text, parse_text, remove_unreachable, shortest_path, simplify,
+    solve_ifds, solve_problem, tarjan_scc, topological_sort, verify,
 };
 
 /// An instruction a consumer owns: its text, and the variables it reads and
@@ -246,11 +246,11 @@ fn a_graph_store_runs_traversals_and_components_on_owned_payloads() {
     }
     assert_eq!(topological_sort(&graph), Some(ids.clone()));
     assert_eq!(
-        shortest_path(&graph, ids[0], ids[3], TraversalDirection::Outgoing),
+        shortest_path(&graph, ids[0], ids[3], Direction::Forward),
         Some(ids.clone())
     );
     assert_eq!(
-        breadth_first(&graph, ids[3], TraversalDirection::Incoming),
+        breadth_first(&graph, ids[3], Direction::Backward),
         [ids[3], ids[2], ids[1], ids[0]]
     );
 

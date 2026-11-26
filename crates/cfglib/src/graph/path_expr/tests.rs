@@ -8,11 +8,11 @@ use super::{
     interpret, path_expressions,
 };
 use crate::dataflow::bits::DenseBits;
-use crate::dataflow::fixpoint::Direction;
 use crate::dataflow::node_fixpoint::{NodeProblem, solve_node_problem};
 use crate::graph::dominator::DominatorTree;
 use crate::graph::store::{EdgeId, Graph, NodeId};
 use crate::graph::structure::is_reducible;
+use crate::graph::view::Direction;
 use crate::graph::view::Rooted;
 use crate::test_util::rng::Rng;
 

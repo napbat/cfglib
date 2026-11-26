@@ -21,11 +21,11 @@ use super::edge_view::EdgeView;
 use super::loop_forest::LoopForest;
 use super::scc::tarjan_scc;
 use super::search::{DfsEvent, depth_first_events};
-use super::traverse::TraversalDirection;
 use super::view::{GraphView, RootedView};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::{EdgeKind, KindedEdge};
+use crate::graph::view::Direction;
 
 /// A natural loop over node identity `N`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,7 +227,7 @@ pub(crate) fn find_irreducible_entry<G: RootedView>(
     depth_first_events(
         graph,
         graph.root(),
-        TraversalDirection::Outgoing,
+        Direction::Forward,
         |event| match event {
             DfsEvent::BackEdge(tail, header) if !dom.dominates(header, tail) => {
                 ControlFlow::Break(header)

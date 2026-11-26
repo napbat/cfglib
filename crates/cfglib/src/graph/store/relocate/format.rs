@@ -16,9 +16,9 @@ use alloc::vec::Vec;
 use serde::ser::{SerializeMap, SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
 
-use super::super::adjacency::NONE;
 use super::super::raw_index;
 use super::{Relocations, Runs};
+use crate::identity::NO_INDEX;
 
 /// One direction, written as the map it used to be.
 struct RunMap<'runs>(&'runs Runs);
@@ -95,7 +95,7 @@ impl Runs {
         {
             return Err("an overlay run names an edge the store does not hold");
         }
-        let mut index = vec![NONE; highest as usize + 1];
+        let mut index = vec![NO_INDEX; highest as usize + 1];
         let mut runs = Vec::with_capacity(encoded.len());
         for (node, run) in encoded {
             index[node as usize] = raw_index(runs.len());

@@ -12,7 +12,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::graph::store::{EdgeId, Graph, NodeId};
-use crate::graph::traverse::TraversalDirection;
+use crate::graph::view::Direction;
 use crate::test_util::golden::assert_golden;
 
 type Store = Graph<String, u32>;
@@ -91,8 +91,8 @@ fn the_stored_encoding_still_loads_and_keeps_relocating() {
     for graph in [&mut expected, &mut decoded] {
         graph.redirect_edge_target(edges[8], nodes[5]);
         graph.redirect_edge_source(edges[0], nodes[6]);
-        graph.move_adjacency(nodes[2], nodes[1], TraversalDirection::Outgoing);
-        graph.move_adjacency(nodes[3], nodes[6], TraversalDirection::Incoming);
+        graph.move_adjacency(nodes[2], nodes[1], Direction::Forward);
+        graph.move_adjacency(nodes[3], nodes[6], Direction::Backward);
     }
     assert_same_listings(&decoded, &expected);
 

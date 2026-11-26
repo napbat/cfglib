@@ -4,8 +4,8 @@
 use std::ops::ControlFlow;
 
 use cfglib::{
-    EpochMarks, NodeId, SearchConfig, SearchOrder, SearchScratch, TraversalDirection, Visit,
-    VisitedPolicy, search, search_with_marks, search_with_scratch,
+    Direction, EpochMarks, NodeId, SearchConfig, SearchOrder, SearchScratch, Visit, VisitedPolicy,
+    search, search_with_marks, search_with_scratch,
 };
 
 use crate::Lcg;
@@ -26,7 +26,7 @@ fn one_scratch_serves_every_root_of_a_pass_and_forgets_a_walk_that_broke() {
                 let stopped = search_with_scratch(
                     &graph,
                     [NodeId::from_index(root)],
-                    SearchConfig::new(order, TraversalDirection::Outgoing),
+                    SearchConfig::new(order, Direction::Forward),
                     &mut scratch,
                     |_, _| ControlFlow::Break(()),
                 );
@@ -36,12 +36,7 @@ fn one_scratch_serves_every_root_of_a_pass_and_forgets_a_walk_that_broke() {
             let outcome = search_with_scratch(
                 &graph,
                 [NodeId::from_index(root)],
-                config(
-                    order,
-                    TraversalDirection::Outgoing,
-                    VisitedPolicy::Global,
-                    Some(4),
-                ),
+                config(order, Direction::Forward, VisitedPolicy::Global, Some(4)),
                 &mut scratch,
                 |node, depth| {
                     visits.push((node.index(), depth));
@@ -74,7 +69,7 @@ fn a_scratch_built_for_a_larger_graph_covers_a_smaller_one_and_the_path_discipli
             [NodeId::from_index(root)],
             config(
                 SearchOrder::DepthFirst,
-                TraversalDirection::Outgoing,
+                Direction::Forward,
                 VisitedPolicy::Path,
                 Some(4),
             ),
@@ -103,12 +98,7 @@ fn search_with_marks_resets_the_marks_for_each_search_under_both_policies() {
             let outcome = search_with_marks(
                 &graph,
                 [NodeId::from_index(root)],
-                config(
-                    SearchOrder::DepthFirst,
-                    TraversalDirection::Outgoing,
-                    policy,
-                    Some(4),
-                ),
+                config(SearchOrder::DepthFirst, Direction::Forward, policy, Some(4)),
                 &mut marks,
                 |node, depth| {
                     visits.push((node.index(), depth));
@@ -134,7 +124,7 @@ fn a_scratch_smaller_than_the_graph_panics_instead_of_resizing() {
     let _ = search_with_scratch(
         &graph,
         [NodeId::from_index(0)],
-        SearchConfig::new(SearchOrder::DepthFirst, TraversalDirection::Outgoing),
+        SearchConfig::new(SearchOrder::DepthFirst, Direction::Forward),
         &mut scratch,
         |_, _| ControlFlow::<(), Visit>::Continue(Visit::Descend),
     );
@@ -147,7 +137,7 @@ fn a_seed_outside_the_graph_panics() {
     let _ = search(
         &graph,
         [NodeId::from_index(5)],
-        SearchConfig::new(SearchOrder::DepthFirst, TraversalDirection::Outgoing),
+        SearchConfig::new(SearchOrder::DepthFirst, Direction::Forward),
         |_, _| ControlFlow::<(), Visit>::Continue(Visit::Descend),
     );
 }
@@ -159,7 +149,7 @@ fn a_breadth_first_frontier_has_no_unwind_so_path_marks_are_rejected() {
     let _ = search(
         &graph,
         [NodeId::from_index(0)],
-        SearchConfig::new(SearchOrder::BreadthFirst, TraversalDirection::Outgoing)
+        SearchConfig::new(SearchOrder::BreadthFirst, Direction::Forward)
             .with_visited(VisitedPolicy::Path),
         |_, _| ControlFlow::<(), Visit>::Continue(Visit::Descend),
     );
@@ -170,14 +160,13 @@ fn a_configuration_is_plain_data_a_consumer_can_store_and_compare() {
     let literal = SearchConfig {
         order: SearchOrder::BreadthFirst,
         visited: VisitedPolicy::Global,
-        direction: TraversalDirection::Incoming,
+        direction: Direction::Backward,
         max_depth: Some(3),
     };
-    let built = SearchConfig::new(SearchOrder::BreadthFirst, TraversalDirection::Incoming)
-        .with_max_depth(3);
+    let built = SearchConfig::new(SearchOrder::BreadthFirst, Direction::Backward).with_max_depth(3);
     assert_eq!(literal, built);
     assert_eq!(
-        SearchConfig::new(SearchOrder::DepthFirst, TraversalDirection::Outgoing).max_depth,
+        SearchConfig::new(SearchOrder::DepthFirst, Direction::Forward).max_depth,
         None
     );
 }

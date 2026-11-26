@@ -65,6 +65,21 @@ impl DenseId for u32 {
     }
 }
 
+/// The direction in which an algorithm follows edges.
+///
+/// A walk follows `Forward` edges from source to target
+/// ([`GraphView::successors`]) and `Backward` edges from target to source
+/// ([`GraphView::predecessors`]). A data flow analysis carries a fact the same
+/// way: a forward analysis from a node to its successors, a backward analysis
+/// from a node to its predecessors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Direction {
+    /// Follow edges from source to target.
+    Forward,
+    /// Follow edges from target to source.
+    Backward,
+}
+
 /// Read-only directed adjacency consumed by generic graph algorithms.
 ///
 /// A view may be backed by [`Graph`](crate::Graph), [`Cfg`](crate::Cfg), or a

@@ -16,7 +16,8 @@ use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
 use crate::edge::EdgeId;
 use crate::graph::edge_view::EdgeView;
-use crate::graph::traverse::{TraversalDirection, reverse_postorder};
+use crate::graph::traverse::reverse_postorder;
+use crate::graph::view::Direction;
 use crate::graph::view::{DenseId, RootedView};
 use crate::transform::linearize::{Emitter, falls_through};
 
@@ -136,7 +137,7 @@ pub fn ext_tsp_order<G>(
 where
     G: RootedView + EdgeView,
 {
-    let nodes = reverse_postorder(graph, graph.root(), TraversalDirection::Outgoing);
+    let nodes = reverse_postorder(graph, graph.root(), Direction::Forward);
     let problem = Problem::new(graph, &nodes, block_size, edge_count, can_fall_through);
     let greedy = chains::merge(&problem, config);
     let chosen =

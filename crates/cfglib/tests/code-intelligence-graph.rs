@@ -1,8 +1,8 @@
 //! Integration tests: code intelligence graph.
 
 use cfglib::{
-    DenseId, DominatorTree, Graph, GraphView, TraversalDirection, breadth_first, shortest_path,
-    tarjan_scc, topological_sort,
+    DenseId, Direction, DominatorTree, Graph, GraphView, breadth_first, shortest_path, tarjan_scc,
+    topological_sort,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,11 +84,11 @@ fn symtree_like_value_flow_uses_generic_storage_and_reverse_queries() {
     );
 
     assert_eq!(
-        breadth_first(&graph, seed, TraversalDirection::Outgoing),
+        breadth_first(&graph, seed, Direction::Forward),
         vec![seed, parameter, call_result, output]
     );
     assert_eq!(
-        shortest_path(&graph, output, seed, TraversalDirection::Incoming),
+        shortest_path(&graph, output, seed, Direction::Backward),
         Some(vec![output, call_result, parameter, seed])
     );
     assert_eq!(graph.edge(assignment).payload().kind, FlowKind::Assign);
@@ -163,7 +163,7 @@ fn existing_consumer_graph_can_adopt_algorithms_without_storage_migration() {
     assert_eq!(dominators.idom(merge), Some(root));
     assert!(tarjan_scc(&graph).is_dag(&graph));
     assert_eq!(
-        shortest_path(&graph, root, merge, TraversalDirection::Outgoing)
+        shortest_path(&graph, root, merge, Direction::Forward)
             .unwrap()
             .len(),
         3

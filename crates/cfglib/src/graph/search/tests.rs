@@ -31,7 +31,7 @@ fn diamond() -> (Graph<(), ()>, [NodeId; 4]) {
 }
 
 fn config(order: SearchOrder) -> SearchConfig {
-    SearchConfig::new(order, TraversalDirection::Outgoing)
+    SearchConfig::new(order, Direction::Forward)
 }
 
 /// Visit order under `config`, seeded at `seeds`, descending everywhere.
@@ -320,7 +320,7 @@ fn the_incoming_direction_searches_predecessors() {
         nodes(&visit_order(
             &graph,
             [d],
-            SearchConfig::new(SearchOrder::DepthFirst, TraversalDirection::Incoming)
+            SearchConfig::new(SearchOrder::DepthFirst, Direction::Backward)
         )),
         vec![d, b, a]
     );
@@ -332,7 +332,7 @@ fn every_discipline_walks_the_incoming_axis() {
     // discipline reaches its reverse axis through its own dispatch arm:
     // a mixed-up arm would silently walk the graph the other way round.
     let (graph, [a, b, c, d]) = diamond();
-    let reverse = |order| SearchConfig::new(order, TraversalDirection::Incoming);
+    let reverse = |order| SearchConfig::new(order, Direction::Backward);
 
     assert_eq!(
         nodes(&visit_order(

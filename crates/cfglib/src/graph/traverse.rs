@@ -7,21 +7,12 @@ use alloc::vec::Vec;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::graph::view::{DenseId, GraphView, assert_in_bound};
-
-/// Direction in which a graph traversal follows edges.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TraversalDirection {
-    /// Follow edges from source to target.
-    Outgoing,
-    /// Follow edges from target to source.
-    Incoming,
-}
+use crate::graph::view::{DenseId, Direction, GraphView, assert_in_bound};
 
 /// One adjacency axis of a [`GraphView`], as a **type** rather than a
 /// value.
 ///
-/// [`TraversalDirection`] is a public parameter of every walk here, and
+/// [`Direction`] is a public parameter of every walk here, and
 /// reading it *inside* a walk costs more than the branch it looks like:
 /// `successors` and `predecessors` are distinct opaque iterator types, so a
 /// core that decides per expanded node cannot hold either of them. It has to
@@ -32,7 +23,7 @@ pub enum TraversalDirection {
 /// A zero-sized axis moves the decision to monomorphisation: a core generic
 /// over `A: Adjacency` names one concrete iterator type, so it can iterate the
 /// graph's own adjacency **in place**. The public functions keep their
-/// `TraversalDirection` argument and turn it into a type exactly once, at
+/// [`Direction`] argument and turn it into a type exactly once, at
 /// entry, with [`by_axis!`].
 ///
 /// # Which walks the copy actually leaves
@@ -121,7 +112,7 @@ impl Adjacency for Incoming {
     }
 }
 
-/// Call an axis-generic core, resolving a [`TraversalDirection`] **once**.
+/// Call an axis-generic core, resolving a [`Direction`] **once**.
 ///
 /// The core takes its axis as a leading argument, so the value becomes a type
 /// at one place per public walk — its entry — and the two arms cannot drift
@@ -131,10 +122,10 @@ impl Adjacency for Incoming {
 macro_rules! by_axis {
     ($direction:expr, $core:ident($($argument:expr),* $(,)?)) => {
         match $direction {
-            $crate::graph::traverse::TraversalDirection::Outgoing => {
+            $crate::graph::view::Direction::Forward => {
                 $core($crate::graph::traverse::Outgoing, $($argument),*)
             }
-            $crate::graph::traverse::TraversalDirection::Incoming => {
+            $crate::graph::view::Direction::Backward => {
                 $core($crate::graph::traverse::Incoming, $($argument),*)
             }
         }
@@ -152,7 +143,7 @@ pub(crate) use by_axis;
 pub fn depth_first_preorder<G: GraphView>(
     graph: &G,
     start: G::NodeId,
-    direction: TraversalDirection,
+    direction: Direction,
 ) -> Vec<G::NodeId> {
     by_axis!(direction, preorder_from(graph, start))
 }
@@ -196,7 +187,7 @@ fn preorder_from<G: GraphView, A: Adjacency>(
 pub fn depth_first_postorder<G: GraphView>(
     graph: &G,
     start: G::NodeId,
-    direction: TraversalDirection,
+    direction: Direction,
 ) -> Vec<G::NodeId> {
     by_axis!(direction, postorder_from(graph, start))
 }
@@ -242,7 +233,7 @@ fn postorder_from<G: GraphView, A: Adjacency>(
 pub fn reverse_postorder<G: GraphView>(
     graph: &G,
     start: G::NodeId,
-    direction: TraversalDirection,
+    direction: Direction,
 ) -> Vec<G::NodeId> {
     let mut order = depth_first_postorder(graph, start, direction);
     order.reverse();
@@ -258,7 +249,7 @@ pub fn reverse_postorder<G: GraphView>(
 pub fn breadth_first<G: GraphView>(
     graph: &G,
     start: G::NodeId,
-    direction: TraversalDirection,
+    direction: Direction,
 ) -> Vec<G::NodeId> {
     by_axis!(direction, breadth_first_from(graph, start))
 }
@@ -300,7 +291,7 @@ pub fn shortest_path<G: GraphView>(
     graph: &G,
     start: G::NodeId,
     goal: G::NodeId,
-    direction: TraversalDirection,
+    direction: Direction,
 ) -> Option<Vec<G::NodeId>> {
     by_axis!(direction, shortest_path_from(graph, start, goal))
 }
@@ -353,13 +344,13 @@ fn shortest_path_from<G: GraphView, A: Adjacency>(
 /// Multi-source reachability is the shape most whole-program queries take:
 /// live code from a set of roots, the callees of an entry-point set, the
 /// nodes a set of definitions can flow to, and (with
-/// [`TraversalDirection::Incoming`]) everything that can reach a set of
+/// [`Direction::Backward`]) everything that can reach a set of
 /// sinks.
 ///
 /// # Examples
 ///
 /// ```
-/// use cfglib::{Graph, TraversalDirection, reachable};
+/// use cfglib::{Graph, Direction, reachable};
 ///
 /// let mut graph = Graph::<&str, ()>::new();
 /// let main = graph.add_node("main");
@@ -367,11 +358,11 @@ fn shortest_path_from<G: GraphView, A: Adjacency>(
 /// let orphan = graph.add_node("orphan");
 /// graph.add_edge(main, helper, ());
 ///
-/// let live = reachable(&graph, [main], TraversalDirection::Outgoing);
+/// let live = reachable(&graph, [main], Direction::Forward);
 /// assert_eq!(live, vec![true, true, false]);
 ///
 /// // Seeding the orphan too covers the whole graph.
-/// let live = reachable(&graph, [main, orphan], TraversalDirection::Outgoing);
+/// let live = reachable(&graph, [main, orphan], Direction::Forward);
 /// assert_eq!(live, vec![true, true, true]);
 /// ```
 ///
@@ -382,7 +373,7 @@ fn shortest_path_from<G: GraphView, A: Adjacency>(
 pub fn reachable<G: GraphView>(
     graph: &G,
     seeds: impl IntoIterator<Item = G::NodeId>,
-    direction: TraversalDirection,
+    direction: Direction,
 ) -> Vec<bool> {
     let mut visited = Vec::new();
     reachable_in(graph, seeds, direction, None, &mut visited, &mut Vec::new());
@@ -410,7 +401,7 @@ pub fn reachable<G: GraphView>(
 pub(crate) fn reachable_in<G: GraphView>(
     graph: &G,
     seeds: impl IntoIterator<Item = G::NodeId>,
-    direction: TraversalDirection,
+    direction: Direction,
     within: Option<&[bool]>,
     visited: &mut Vec<bool>,
     stack: &mut Vec<usize>,
@@ -501,11 +492,11 @@ fn breadth_first_bounded_with<G: GraphView, A: Adjacency>(
 /// Return the nearest node reachable from both `a` and `b` by walking
 /// `direction` edges — the meeting point of two outward searches.
 ///
-/// With [`TraversalDirection::Incoming`] this is the classic *nearest common
+/// With [`Direction::Backward`] this is the classic *nearest common
 /// ancestor*: the closest node from which both `a` and `b` can be reached
 /// (a shared dominator-like join in a CFG, a shared caller in a call graph, a
 /// shared origin in a value-flow graph). With
-/// [`TraversalDirection::Outgoing`] it is the mirror question — the closest
+/// [`Direction::Forward`] it is the mirror question — the closest
 /// node both can reach, such as a shared sink or merge point. The graph need
 /// not be a tree or a DAG; cycles terminate the searches like every other
 /// traversal here.
@@ -542,7 +533,7 @@ fn breadth_first_bounded_with<G: GraphView, A: Adjacency>(
 /// # Examples
 ///
 /// ```
-/// use cfglib::{Graph, TraversalDirection, nearest_common_ancestor};
+/// use cfglib::{Graph, Direction, nearest_common_ancestor};
 ///
 /// //   root         `left` and `right` share one predecessor
 /// //   /  \
@@ -556,20 +547,20 @@ fn breadth_first_bounded_with<G: GraphView, A: Adjacency>(
 ///
 /// // Walking predecessors from both leaves meets at the root.
 /// assert_eq!(
-///     nearest_common_ancestor(&graph, left, right, TraversalDirection::Incoming),
+///     nearest_common_ancestor(&graph, left, right, Direction::Backward),
 ///     Some(root)
 /// );
 ///
 /// // Forward, `left` is reachable from `root` and from itself, so the meet
 /// // is `left` at a combined distance of 1.
 /// assert_eq!(
-///     nearest_common_ancestor(&graph, root, left, TraversalDirection::Outgoing),
+///     nearest_common_ancestor(&graph, root, left, Direction::Forward),
 ///     Some(left)
 /// );
 ///
 /// // Two leaves have no common successor.
 /// assert_eq!(
-///     nearest_common_ancestor(&graph, left, right, TraversalDirection::Outgoing),
+///     nearest_common_ancestor(&graph, left, right, Direction::Forward),
 ///     None
 /// );
 /// ```
@@ -582,7 +573,7 @@ pub fn nearest_common_ancestor<G: GraphView>(
     graph: &G,
     a: G::NodeId,
     b: G::NodeId,
-    direction: TraversalDirection,
+    direction: Direction,
 ) -> Option<G::NodeId> {
     by_axis!(direction, nearest_meet(graph, a, b))
 }
@@ -738,7 +729,7 @@ impl<N> CommonAncestor<N> {
 /// # Examples
 ///
 /// ```
-/// use cfglib::{Graph, TraversalDirection, common_ancestors};
+/// use cfglib::{Graph, Direction, common_ancestors};
 ///
 /// // An inheritance graph with edges base -> derived, so predecessors are
 /// // base classes:  object -> mixin, mixin -> a, mixin -> b.
@@ -752,7 +743,7 @@ impl<N> CommonAncestor<N> {
 /// graph.add_edge(mixin, b, ());
 ///
 /// // Both shared bases, in the order a walk from `b` discovers them.
-/// let shared = common_ancestors(&graph, a, b, TraversalDirection::Incoming, None);
+/// let shared = common_ancestors(&graph, a, b, Direction::Backward, None);
 /// assert_eq!(
 ///     shared.iter().map(|found| found.node).collect::<Vec<_>>(),
 ///     vec![mixin, object]
@@ -768,7 +759,7 @@ impl<N> CommonAncestor<N> {
 /// assert_eq!(chosen, Some(mixin));
 ///
 /// // Bounding the search to one hop from each endpoint drops `object`.
-/// let near = common_ancestors(&graph, a, b, TraversalDirection::Incoming, Some(1));
+/// let near = common_ancestors(&graph, a, b, Direction::Backward, Some(1));
 /// assert_eq!(
 ///     near.iter().map(|found| found.node).collect::<Vec<_>>(),
 ///     vec![mixin]
@@ -783,7 +774,7 @@ pub fn common_ancestors<G: GraphView>(
     graph: &G,
     a: G::NodeId,
     b: G::NodeId,
-    direction: TraversalDirection,
+    direction: Direction,
     max_depth: Option<usize>,
 ) -> Vec<CommonAncestor<G::NodeId>> {
     by_axis!(direction, all_meets(graph, a, b, max_depth))
@@ -859,33 +850,25 @@ impl<I, E> Cfg<I, E> {
     /// Depth-first preorder traversal starting from the entry block.
     #[must_use]
     pub fn depth_first_preorder(&self) -> Vec<BlockId> {
-        crate::graph::traverse::depth_first_preorder(
-            self,
-            self.entry(),
-            TraversalDirection::Outgoing,
-        )
+        crate::graph::traverse::depth_first_preorder(self, self.entry(), Direction::Forward)
     }
 
     /// Depth-first postorder traversal starting from the entry block.
     #[must_use]
     pub fn depth_first_postorder(&self) -> Vec<BlockId> {
-        crate::graph::traverse::depth_first_postorder(
-            self,
-            self.entry(),
-            TraversalDirection::Outgoing,
-        )
+        crate::graph::traverse::depth_first_postorder(self, self.entry(), Direction::Forward)
     }
 
     /// Breadth-first traversal starting from the entry block.
     #[must_use]
     pub fn breadth_first(&self) -> Vec<BlockId> {
-        crate::graph::traverse::breadth_first(self, self.entry(), TraversalDirection::Outgoing)
+        crate::graph::traverse::breadth_first(self, self.entry(), Direction::Forward)
     }
 
     /// Reverse postorder starting from the entry block.
     #[must_use]
     pub fn reverse_postorder(&self) -> Vec<BlockId> {
-        crate::graph::traverse::reverse_postorder(self, self.entry(), TraversalDirection::Outgoing)
+        crate::graph::traverse::reverse_postorder(self, self.entry(), Direction::Forward)
     }
 }
 

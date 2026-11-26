@@ -2,7 +2,7 @@ extern crate alloc;
 
 use super::*;
 use crate::graph::store::{Graph, NodeId};
-use crate::graph::traverse::TraversalDirection;
+use crate::graph::view::Direction;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
@@ -24,7 +24,7 @@ fn bfs_graph() -> (Graph<(), ()>, [NodeId; 4]) {
 
 fn bfs_events(graph: &Graph<(), ()>, start: NodeId) -> Vec<BfsEvent<NodeId>> {
     let mut events = Vec::new();
-    let outcome = breadth_first_events(graph, start, TraversalDirection::Outgoing, |event| {
+    let outcome = breadth_first_events(graph, start, Direction::Forward, |event| {
         events.push(event);
         ControlFlow::<()>::Continue(())
     });
@@ -62,7 +62,7 @@ fn breadth_first_events_follow_the_selected_axis() {
     graph.add_edge(middle, last, ());
 
     let mut events = Vec::new();
-    let outcome = breadth_first_events(&graph, last, TraversalDirection::Incoming, |event| {
+    let outcome = breadth_first_events(&graph, last, Direction::Backward, |event| {
         events.push(event);
         ControlFlow::<()>::Continue(())
     });
@@ -84,7 +84,7 @@ fn breadth_first_events_follow_the_selected_axis() {
 fn breadth_first_events_stop_at_the_break_event() {
     let (graph, [root, left, right, merge]) = bfs_graph();
     let mut events = Vec::new();
-    let outcome = breadth_first_events(&graph, root, TraversalDirection::Outgoing, |event| {
+    let outcome = breadth_first_events(&graph, root, Direction::Forward, |event| {
         events.push(event);
         match event {
             BfsEvent::NonTreeEdge(from, to) => ControlFlow::Break((from, to)),
@@ -117,7 +117,7 @@ fn dfs_graph() -> (Graph<(), ()>, [NodeId; 4]) {
 
 fn dfs_events(graph: &Graph<(), ()>, start: NodeId) -> Vec<DfsEvent<NodeId>> {
     let mut log = Vec::new();
-    let outcome = depth_first_events(graph, start, TraversalDirection::Outgoing, |event| {
+    let outcome = depth_first_events(graph, start, Direction::Forward, |event| {
         log.push(event);
         ControlFlow::<()>::Continue(())
     });
@@ -193,7 +193,7 @@ fn depth_first_events_only_cover_the_reachable_set() {
 fn depth_first_events_break_stops_the_walk() {
     let (graph, [a, b, c, _d]) = dfs_graph();
     let mut log = Vec::new();
-    let found = depth_first_events(&graph, a, TraversalDirection::Outgoing, |event| {
+    let found = depth_first_events(&graph, a, Direction::Forward, |event| {
         log.push(event);
         match event {
             DfsEvent::BackEdge(from, to) => ControlFlow::Break((from, to)),

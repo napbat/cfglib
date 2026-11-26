@@ -10,8 +10,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::edge_view::{EdgeRef, EdgeView};
-use super::traverse::{Adjacency, Incoming, Outgoing, TraversalDirection, by_axis};
+use super::traverse::{Adjacency, Incoming, Outgoing, by_axis};
 use super::view::{DenseId, assert_in_bound};
+use crate::graph::view::Direction;
 
 /// An adjacency axis over edges: which edges a node exposes, and which end of
 /// an exposed edge is the neighbor.
@@ -80,7 +81,7 @@ pub struct EdgeStep<N = crate::NodeId, E = crate::EdgeId> {
 pub fn breadth_first_edges<G: EdgeView>(
     graph: &G,
     start: G::NodeId,
-    direction: TraversalDirection,
+    direction: Direction,
 ) -> Vec<EdgeStep<G::NodeId, G::EdgeId>> {
     breadth_first_edges_with(graph, start, direction, None, |_| true)
 }
@@ -101,7 +102,7 @@ pub fn breadth_first_edges<G: EdgeView>(
 pub fn breadth_first_edges_with<G: EdgeView>(
     graph: &G,
     start: G::NodeId,
-    direction: TraversalDirection,
+    direction: Direction,
     max_depth: Option<usize>,
     filter: impl FnMut(EdgeRef<'_, G::NodeId, G::EdgeId, G::EdgeData>) -> bool,
 ) -> Vec<EdgeStep<G::NodeId, G::EdgeId>> {
@@ -154,7 +155,7 @@ fn breadth_first_edges_from<G: EdgeView, A: EdgeAdjacency>(
 pub fn depth_first_edges<G: EdgeView>(
     graph: &G,
     start: G::NodeId,
-    direction: TraversalDirection,
+    direction: Direction,
 ) -> Vec<EdgeStep<G::NodeId, G::EdgeId>> {
     depth_first_edges_with(graph, start, direction, None, |_| true)
 }
@@ -174,7 +175,7 @@ pub fn depth_first_edges<G: EdgeView>(
 pub fn depth_first_edges_with<G: EdgeView>(
     graph: &G,
     start: G::NodeId,
-    direction: TraversalDirection,
+    direction: Direction,
     max_depth: Option<usize>,
     filter: impl FnMut(EdgeRef<'_, G::NodeId, G::EdgeId, G::EdgeData>) -> bool,
 ) -> Vec<EdgeStep<G::NodeId, G::EdgeId>> {
@@ -260,7 +261,7 @@ pub fn shortest_path_edges<G: EdgeView>(
     graph: &G,
     from: G::NodeId,
     to: G::NodeId,
-    direction: TraversalDirection,
+    direction: Direction,
 ) -> Option<Vec<G::EdgeId>> {
     by_axis!(direction, shortest_path_edges_from(graph, from, to))
 }
@@ -333,7 +334,7 @@ mod tests {
     #[test]
     fn edge_bfs_reports_parallel_and_cycle_edges_once() {
         let (graph, [a, _, c]) = fixture();
-        let steps = breadth_first_edges(&graph, a, TraversalDirection::Outgoing);
+        let steps = breadth_first_edges(&graph, a, Direction::Forward);
         assert_eq!(steps.len(), 4);
         let payloads: Vec<_> = steps
             .iter()
@@ -341,7 +342,7 @@ mod tests {
             .collect();
         assert_eq!(payloads, ["x", "z", "y", "cycle"]);
 
-        let backward = breadth_first_edges(&graph, c, TraversalDirection::Incoming);
+        let backward = breadth_first_edges(&graph, c, Direction::Backward);
         let backward_payloads: Vec<_> = backward
             .iter()
             .map(|step| *graph.edge(step.edge).payload())
@@ -354,19 +355,19 @@ mod tests {
         let (graph, [a, _, c]) = fixture();
         let rooted = Rooted::new(&graph, a);
         let filtered = FilteredEdges::new(&rooted, |_, payload: &&str| *payload != "z");
-        let steps = breadth_first_edges(&filtered, a, TraversalDirection::Outgoing);
+        let steps = breadth_first_edges(&filtered, a, Direction::Forward);
         let payloads: Vec<_> = steps
             .iter()
             .map(|step| *filtered.edge(step.edge).data())
             .collect();
         assert_eq!(payloads, ["x", "y", "cycle"]);
         assert_eq!(
-            shortest_path_edges(&filtered, a, c, TraversalDirection::Outgoing)
+            shortest_path_edges(&filtered, a, c, Direction::Forward)
                 .unwrap()
                 .len(),
             2
         );
-        let incoming = shortest_path_edges(&filtered, c, a, TraversalDirection::Incoming).unwrap();
+        let incoming = shortest_path_edges(&filtered, c, a, Direction::Backward).unwrap();
         assert_eq!(incoming.len(), 2);
         assert_eq!(*filtered.edge(incoming[0]).data(), "y");
         assert_eq!(*filtered.edge(incoming[1]).data(), "x");
@@ -375,10 +376,9 @@ mod tests {
     #[test]
     fn depth_and_predicate_filters_remain_compatible() {
         let (graph, [a, _, _]) = fixture();
-        let steps =
-            breadth_first_edges_with(&graph, a, TraversalDirection::Outgoing, Some(1), |edge| {
-                *edge.data() != "z"
-            });
+        let steps = breadth_first_edges_with(&graph, a, Direction::Forward, Some(1), |edge| {
+            *edge.data() != "z"
+        });
         assert_eq!(steps.len(), 1);
         assert_eq!(*graph.edge(steps[0].edge).payload(), "x");
     }
@@ -386,7 +386,7 @@ mod tests {
     #[test]
     fn depth_first_edges_descend_before_examining_the_next_sibling() {
         let (graph, [a, _, _]) = fixture();
-        let steps = depth_first_edges(&graph, a, TraversalDirection::Outgoing);
+        let steps = depth_first_edges(&graph, a, Direction::Forward);
         let payloads: Vec<_> = steps
             .iter()
             .map(|step| *graph.edge(step.edge).payload())
@@ -397,10 +397,9 @@ mod tests {
     #[test]
     fn depth_first_filters_and_bounds_match_breadth_first_contracts() {
         let (graph, [a, _, _]) = fixture();
-        let steps =
-            depth_first_edges_with(&graph, a, TraversalDirection::Outgoing, Some(1), |edge| {
-                *edge.data() != "z"
-            });
+        let steps = depth_first_edges_with(&graph, a, Direction::Forward, Some(1), |edge| {
+            *edge.data() != "z"
+        });
         assert_eq!(steps.len(), 1);
         assert_eq!(*graph.edge(steps[0].edge).payload(), "x");
     }

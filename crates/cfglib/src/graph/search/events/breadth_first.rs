@@ -6,7 +6,8 @@ use alloc::collections::VecDeque;
 use alloc::vec;
 use core::ops::ControlFlow;
 
-use crate::graph::traverse::{Adjacency, TraversalDirection, by_axis};
+use crate::graph::traverse::{Adjacency, by_axis};
+use crate::graph::view::Direction;
 use crate::graph::view::{DenseId, GraphView, assert_in_bound};
 
 /// An event of a [`breadth_first_events`] walk.
@@ -51,7 +52,7 @@ pub enum BfsEvent<N> {
 /// ```
 /// use core::ops::ControlFlow;
 ///
-/// use cfglib::{BfsEvent, Graph, TraversalDirection, breadth_first_events};
+/// use cfglib::{BfsEvent, Graph, Direction, breadth_first_events};
 ///
 /// let mut graph = Graph::<&str, ()>::new();
 /// let root = graph.add_node("root");
@@ -67,7 +68,7 @@ pub enum BfsEvent<N> {
 /// let outcome = breadth_first_events::<_, ()>(
 ///     &graph,
 ///     root,
-///     TraversalDirection::Outgoing,
+///     Direction::Forward,
 ///     |event| {
 ///         if let BfsEvent::NonTreeEdge(from, to) = event {
 ///             non_tree.push((graph[from], graph[to]));
@@ -87,7 +88,7 @@ pub enum BfsEvent<N> {
 pub fn breadth_first_events<G: GraphView, B>(
     graph: &G,
     start: G::NodeId,
-    direction: TraversalDirection,
+    direction: Direction,
     on_event: impl FnMut(BfsEvent<G::NodeId>) -> ControlFlow<B>,
 ) -> Option<B> {
     by_axis!(direction, breadth_first_events_from(graph, start, on_event))

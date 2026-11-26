@@ -23,12 +23,13 @@ use alloc::vec::Vec;
 
 use super::bits::DenseBits;
 use super::edge_fixpoint::{self, EdgeFacts, TryEdgeProblem};
-use super::fixpoint::{BlockProblem, Direction, Facts, SolveConfig, TryProblem, TrySolveError};
+use super::fixpoint::{BlockProblem, Facts, SolveConfig, TryProblem, TrySolveError};
 use super::node_fixpoint::{self, TryNodeProblem};
 use super::worklist::Worklist;
 use crate::graph::edge_traverse::EdgeAdjacency;
 use crate::graph::edge_view::EdgeView;
 use crate::graph::traverse::{Adjacency, by_axis};
+use crate::graph::view::Direction;
 use crate::graph::view::{DenseId, GraphView, RootedView};
 
 /// How a resumed solve treats the facts of the previous solve.
@@ -92,7 +93,7 @@ where
         entry,
     };
     by_axis!(
-        problem.direction().traversal(),
+        problem.direction(),
         resume_nodes_along(view, &BlockProblem(problem), previous, edit, config)
     )
 }
@@ -193,7 +194,7 @@ where
         entry: None,
     };
     by_axis!(
-        problem.direction().traversal(),
+        problem.direction(),
         resume_nodes_along(graph, problem, previous, edit, config)
     )
 }
@@ -234,7 +235,7 @@ where
         entry: None,
     };
     by_axis!(
-        problem.direction().traversal(),
+        problem.direction(),
         resume_edges_along(graph, problem, previous, edit, config)
     )
 }
