@@ -35,6 +35,7 @@ use super::edge_fixpoint::{self, EdgeFacts, TryEdgeProblem};
 use super::node_fixpoint::{self, TryNodeProblem};
 use super::solve::{Facts, Solve, SolveConfig, TrySolveError};
 use super::worklist::Worklist;
+use crate::block::BlockId;
 use crate::graph::edge_traverse::EdgeAdjacency;
 use crate::graph::edge_view::EdgeView;
 use crate::graph::traverse::{Adjacency, by_axis, reachable_in};
@@ -60,7 +61,7 @@ pub enum ResumeMode {
 
 /// What an edit changed, and how to resume from it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Resume<'a, N> {
+pub struct Resume<'a, N = BlockId> {
     /// Every node whose transfer, boundary or upstream edges changed, and
     /// every removed node.
     pub changed: &'a [N],

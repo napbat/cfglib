@@ -102,7 +102,7 @@ impl<N: DenseId> LowHighOrder<N> {
 /// rejected only with a certificate that is not a low-high order of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum CertificateError<N> {
+pub enum CertificateError<N = BlockId> {
     /// The tree and the certificate were not made for a graph with this
     /// node bound.
     NodeBound {

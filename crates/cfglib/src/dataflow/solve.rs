@@ -55,6 +55,7 @@ use alloc::vec::Vec;
 use core::convert::Infallible;
 
 use super::worklist::Worklist;
+use crate::block::BlockId;
 use crate::graph::traverse::reachable_in;
 use crate::graph::view::{DenseId, Direction, GraphView};
 
@@ -163,7 +164,7 @@ pub struct SolveConfig {
 /// only when it is queued: at the start, or after an upstream neighbor's
 /// output changed. The seeds decide what is queued at the start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Seeds<'a, N> {
+pub enum Seeds<'a, N = BlockId> {
     /// Every live node. A node with no upstream neighbor along the analysis
     /// direction receives the boundary fact.
     #[default]
@@ -260,7 +261,7 @@ impl<N: DenseId> Seeds<'_, N> {
 /// The seeds and limits of one solve: what every solver entry point takes
 /// besides the graph and the problem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Solve<'a, N> {
+pub struct Solve<'a, N = BlockId> {
     /// The nodes the solve starts from.
     pub seeds: Seeds<'a, N>,
     /// Its limits and iteration order.

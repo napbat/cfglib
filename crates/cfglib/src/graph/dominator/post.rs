@@ -39,7 +39,7 @@ mod sink;
 /// A node of a post-dominator tree: a block of the graph, or the virtual exit
 /// that every exit joins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum PostNode<N> {
+pub enum PostNode<N = BlockId> {
     /// A block of the graph.
     Node(N),
     /// The virtual exit `X*`, the root of the tree.

@@ -42,6 +42,7 @@ use core::mem;
 
 use super::numbering::{Numbered, NumberingBuffers};
 use super::{DominatorScratch, DominatorTree};
+use crate::block::BlockId;
 use crate::graph::epoch::grow_to;
 use crate::graph::view::{DenseId, GraphView, Induced, RootedView};
 use crate::identity::{NO_INDEX, check_bound, slot, word};
@@ -93,7 +94,7 @@ enum Step {
 /// One edit already applied to the graph a dominator tree is being updated
 /// for. See [`DominatorTree::apply_updates_in`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DominatorUpdate<N> {
+pub enum DominatorUpdate<N = BlockId> {
     /// The edge `from -> to` was added, beside any copies already there.
     Insert {
         /// The tail of the edge.

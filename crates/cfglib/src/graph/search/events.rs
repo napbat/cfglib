@@ -6,6 +6,7 @@ use alloc::vec;
 use core::marker::PhantomData;
 use core::ops::ControlFlow;
 
+use crate::block::BlockId;
 use crate::graph::search::Visit;
 use crate::graph::traverse::{
     Adjacency, DepthFirstStack, DepthFirstVisitor, Mark, StepKind, by_axis, depth_first_core,
@@ -18,7 +19,7 @@ use crate::graph::view::{Direction, GraphView, assert_in_bound};
 /// edges of the walk split into the tree it builds, the back edges that close
 /// a cycle, and the rest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DfsEvent<N> {
+pub enum DfsEvent<N = BlockId> {
     /// The node was reached for the first time, at this depth.
     Discover(N, usize),
     /// The edge from the first node to the second discovered the second —

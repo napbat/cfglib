@@ -59,6 +59,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+use crate::block::BlockId;
 use crate::graph::epoch::EpochMarks;
 use crate::graph::fanout::DenseFanout;
 use crate::graph::scc::{SccDecomposition, SccNumbering};
@@ -193,7 +194,7 @@ impl Default for ReachIndexConfig {
 /// assert!(!exact.reaches(main, log));
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReachIndex<N> {
+pub struct ReachIndex<N = BlockId> {
     /// The strongly connected components, numbered sources first.
     components: SccDecomposition<N>,
     /// How a pair of distinct components, the source numbered first, is

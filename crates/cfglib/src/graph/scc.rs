@@ -30,6 +30,7 @@ use alloc::collections::{BTreeSet, VecDeque};
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::block::BlockId;
 use crate::graph::store::{Graph, NodeId};
 use crate::graph::view::{DenseId, GraphView};
 use crate::identity::{NO_INDEX, check_bound, slot, word};
@@ -44,7 +45,7 @@ mod tarjan;
 /// A maximal set of mutually reachable nodes, in ascending order, borrowed
 /// from the [`SccDecomposition`] that holds it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Scc<'a, N> {
+pub struct Scc<'a, N = BlockId> {
     nodes: &'a [N],
 }
 
@@ -132,7 +133,7 @@ pub enum SccNumbering {
 /// it the same way: [`component_index`](Self::component_index) and
 /// [`component`](Self::component) panic for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SccDecomposition<N> {
+pub struct SccDecomposition<N = BlockId> {
     nodes: Vec<N>,
     /// `offsets[i]..offsets[i + 1]` is component `i` within `nodes`.
     offsets: Vec<u32>,

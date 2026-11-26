@@ -25,6 +25,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+use crate::block::BlockId;
 use crate::graph::dominator::{DominatorScratch, DominatorTree};
 use crate::graph::view::{DenseId, GraphView, Positions, Renumbered, Reversed, Rooted};
 
@@ -58,7 +59,7 @@ use crate::graph::view::{DenseId, GraphView, Positions, Renumbered, Reversed, Ro
 /// assert_eq!(cuts.bridges.len(), 5);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StrongCuts<N> {
+pub struct StrongCuts<N = BlockId> {
     /// The strong articulation points, ascending by dense index.
     pub articulation_points: Vec<N>,
     /// The strong bridges as `(tail, head)`, ascending by the dense indices
