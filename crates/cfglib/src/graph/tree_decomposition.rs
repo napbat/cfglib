@@ -28,6 +28,7 @@ use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::graph::epoch::EpochMarks;
 use crate::graph::view::{DenseId, GraphView};
 use crate::identity::{NO_INDEX, check_bound, slot, word};
 
@@ -187,8 +188,8 @@ struct Elimination {
     /// The bags in elimination order, flat.
     bags: Vec<u32>,
     starts: Vec<usize>,
-    /// Which node last stamped each slot, to collect a set without sorting.
-    stamp: Vec<u32>,
+    /// The slots one requeue has collected, to collect a set without sorting.
+    collected: EpochMarks,
 }
 
 impl Elimination {
@@ -221,7 +222,7 @@ impl Elimination {
             position: vec![NO_INDEX; bound],
             bags: Vec::new(),
             starts: vec![0],
-            stamp: vec![NO_INDEX; bound],
+            collected: EpochMarks::new(bound),
         };
         for node in 0..bound {
             if elimination.live[node] {
@@ -257,27 +258,29 @@ impl Elimination {
                 }
                 *list = merged;
             }
-            self.requeue(node, &around, &gained);
+            self.requeue(&around, &gained);
         }
     }
 
-    /// Requeue the nodes whose key the elimination of `node` changed.
-    fn requeue(&mut self, node: usize, around: &[u32], gained: &[u32]) {
-        let stamp = word(node);
+    /// Requeue the nodes whose key the last elimination changed: `around`,
+    /// the neighbors of the eliminated node, and under min-fill the neighbors
+    /// of the members that `gained` an edge.
+    fn requeue(&mut self, around: &[u32], gained: &[u32]) {
+        self.collected.reset();
         let mut changed: Vec<u32> = Vec::new();
-        let mut mark = |member: u32, stamps: &mut Vec<u32>| {
-            if stamps[slot(member)] != stamp {
-                stamps[slot(member)] = stamp;
+        let mut mark = |member: u32, collected: &mut EpochMarks| {
+            if !collected.is_marked(slot(member)) {
+                collected.mark(slot(member));
                 changed.push(member);
             }
         };
         for &member in around {
-            mark(member, &mut self.stamp);
+            mark(member, &mut self.collected);
         }
         if self.heuristic == EliminationHeuristic::MinFill {
             for &member in gained {
                 for &next in &self.neighbors[slot(member)] {
-                    mark(next, &mut self.stamp);
+                    mark(next, &mut self.collected);
                 }
             }
         }

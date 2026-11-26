@@ -27,6 +27,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+use crate::graph::epoch::EpochMarks;
 use crate::graph::view::{DenseId, GraphView};
 
 /// Marks a vertex without a label.
@@ -44,11 +45,9 @@ pub struct ControlClosureScratch {
     /// The vertex of the set each vertex last reached first, [`UNLABELED`]
     /// for none.
     label: Vec<usize>,
-    /// The search that last visited each vertex, so a search needs no
+    /// The vertices the current search has visited, so a search needs no
     /// clearing pass.
-    visit: Vec<u32>,
-    /// The number of the current search.
-    epoch: u32,
+    visited: EpochMarks,
     /// Vertices of the set not propagated yet.
     work: Vec<usize>,
     /// Vertices a search has yet to expand.
@@ -138,8 +137,8 @@ pub fn weak_control_closure<G: GraphView>(
     if scratch.closed.len() < bound {
         scratch.closed.resize(bound, false);
         scratch.label.resize(bound, UNLABELED);
-        scratch.visit.resize(bound, 0);
     }
+    scratch.visited.grow_to(bound);
     // `out` holds the distinct seeds until the reachability search.
     for seed in seeds {
         let index = seed.index();
@@ -172,25 +171,25 @@ pub fn weak_control_closure<G: GraphView>(
 
     // The set is now the seeds with every seed-weakly deciding vertex; the
     // closure keeps what the seeds reach.
-    let epoch = scratch.next_epoch();
+    scratch.visited.reset();
     let ControlClosureScratch {
         closed,
         label,
-        visit,
+        visited,
         stack,
         touched,
         ..
     } = &mut *scratch;
     stack.clear();
     for seed in out.iter() {
-        visit[seed.index()] = epoch;
+        visited.mark(seed.index());
         stack.push(seed.index());
     }
     while let Some(vertex) = stack.pop() {
         for next in graph.successors(G::NodeId::from_index(vertex)) {
             let next = next.index();
-            if visit[next] != epoch {
-                visit[next] = epoch;
+            if !visited.is_marked(next) {
+                visited.mark(next);
                 stack.push(next);
             }
         }
@@ -199,7 +198,7 @@ pub fn weak_control_closure<G: GraphView>(
     out.extend(
         touched
             .iter()
-            .filter(|&&vertex| closed[vertex] && visit[vertex] == epoch)
+            .filter(|&&vertex| closed[vertex] && visited.is_marked(vertex))
             .map(|&vertex| G::NodeId::from_index(vertex)),
     );
     out.sort_unstable_by_key(|vertex| vertex.index());
@@ -222,32 +221,22 @@ impl ControlClosureScratch {
         self.work.push(vertex);
     }
 
-    /// Number a new search, so that no vertex looks visited by it.
-    fn next_epoch(&mut self) -> u32 {
-        self.epoch = self.epoch.wrapping_add(1);
-        if self.epoch == 0 {
-            self.visit.fill(0);
-            self.epoch = 1;
-        }
-        self.epoch
-    }
-
     /// Label with `vertex` every vertex whose paths reach `vertex` before
     /// any other vertex of the set, and collect as candidates those of them
     /// that carried another label and have two successors.
     fn propagate<G: GraphView>(&mut self, graph: &G, vertex: usize) {
-        let epoch = self.next_epoch();
+        self.visited.reset();
         self.candidates.clear();
         self.stack.clear();
         self.stack.push(vertex);
-        self.visit[vertex] = epoch;
+        self.visited.mark(vertex);
         while let Some(current) = self.stack.pop() {
             for before in graph.predecessors(G::NodeId::from_index(current)) {
                 let index = before.index();
-                if self.closed[index] || self.visit[index] == epoch {
+                if self.closed[index] || self.visited.is_marked(index) {
                     continue;
                 }
-                self.visit[index] = epoch;
+                self.visited.mark(index);
                 if self.label[index] == UNLABELED {
                     self.touched.push(index);
                 } else if graph.successors(before).nth(1).is_some() {

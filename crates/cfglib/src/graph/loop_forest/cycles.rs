@@ -40,6 +40,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::{LoopForest, LoopRecord};
+use crate::graph::epoch::EpochMarks;
 use crate::graph::view::{DenseId, RootedView};
 use crate::identity::{NO_INDEX, slot, word};
 use crate::union_find::DisjointSet;
@@ -264,10 +265,10 @@ impl Cycles {
         let collapsed = |sets: &mut DisjointSet, header: &[u32], position: u32| {
             header[sets.find(slot(position))]
         };
-        // The first edge handed to each collapsed position, and the header
-        // whose walk last took each one in.
+        // The first edge handed to each collapsed position, and the positions
+        // the walk of the current header has taken in.
         let mut incoming = vec![NO_INDEX; count];
-        let mut taken = vec![NO_INDEX; count];
+        let mut taken = EpochMarks::new(count);
         let mut body: Vec<u32> = Vec::new();
         for w in (0..count).rev() {
             let at = word(w);
@@ -292,12 +293,13 @@ impl Cycles {
                 continue;
             }
             body.clear();
+            taken.reset();
             while edge != NO_INDEX {
                 let source = walk.sources[slot(edge)];
                 cycles.latches.push(source);
                 let member = collapsed(&mut sets, &header, source);
-                if member != at && taken[slot(member)] != at {
-                    taken[slot(member)] = at;
+                if member != at && !taken.is_marked(slot(member)) {
+                    taken.mark(slot(member));
                     body.push(member);
                 }
                 edge = walk.next[slot(edge)];
@@ -311,8 +313,8 @@ impl Cycles {
                 let mut edge = incoming[slot(member)];
                 while edge != NO_INDEX {
                     let source = collapsed(&mut sets, &header, walk.sources[slot(edge)]);
-                    if source != at && taken[slot(source)] != at {
-                        taken[slot(source)] = at;
+                    if source != at && !taken.is_marked(slot(source)) {
+                        taken.mark(slot(source));
                         body.push(source);
                     }
                     edge = walk.next[slot(edge)];

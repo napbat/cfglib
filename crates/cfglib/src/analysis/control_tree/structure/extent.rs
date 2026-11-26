@@ -24,6 +24,7 @@ use alloc::vec::Vec;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
+use crate::graph::epoch::EpochMarks;
 use crate::graph::scc::tarjan_scc;
 use crate::identity::{NO_INDEX, word};
 
@@ -38,9 +39,8 @@ struct State {
     /// The leaves-first number of the component of each block, [`NO_INDEX`]
     /// for a slot that holds no block.
     component: Vec<u32>,
-    /// The walk that last visited each block.
-    seen: Vec<u32>,
-    walk: u32,
+    /// The blocks the current walk has visited.
+    seen: EpochMarks,
     stack: Vec<(BlockId, bool)>,
     successors: Vec<BlockId>,
 }
@@ -56,8 +56,7 @@ impl State {
         }
         Self {
             component,
-            seen: alloc::vec![0; bound],
-            walk: 0,
+            seen: EpochMarks::new(bound),
             stack: Vec::new(),
             successors: Vec::new(),
         }
@@ -91,8 +90,7 @@ impl ExtentWalk {
             .filter_map(|block| state.component.get(block.index()).copied())
             .min()
             .unwrap_or(NO_INDEX);
-        state.walk += 1;
-        let walk = state.walk;
+        state.seen.reset();
         let mut order = Vec::new();
         state.stack.clear();
         state.stack.push((entry, false));
@@ -105,15 +103,15 @@ impl ExtentWalk {
                 }
                 continue;
             }
-            if state.seen[block.index()] == walk {
+            if state.seen.is_marked(block.index()) {
                 continue;
             }
-            state.seen[block.index()] = walk;
+            state.seen.mark(block.index());
             state.stack.push((block, true));
             state.successors.clear();
             state.successors.extend(cfg.successors(block));
             for &successor in state.successors.iter().rev() {
-                if state.seen[successor.index()] != walk
+                if !state.seen.is_marked(successor.index())
                     && state.component[successor.index()] >= floor
                 {
                     state.stack.push((successor, false));

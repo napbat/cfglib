@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 use super::{SplDecomposition, SplError, SplNode, SplNodeId};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
+use crate::graph::epoch::EpochMarks;
 use crate::identity::{NO_INDEX, slot, word};
 
 /// Check that the grammar's construction of `decomposition` gives exactly the
@@ -50,24 +51,26 @@ pub(super) fn verify<I, E>(
         cursor[source.index()] += 1;
     }
 
-    // Each source stamps its targets in the graph and in the construction.
-    let mut in_graph = vec![usize::MAX; bound];
-    let mut in_made = vec![usize::MAX; bound];
+    // Each source marks its targets in the graph and in the construction.
+    let mut in_graph = EpochMarks::new(bound);
+    let mut in_made = EpochMarks::new(bound);
     for source in cfg.block_ids() {
-        let stamp = source.index();
-        for &target in &targets[starts[stamp]..starts[stamp + 1]] {
-            in_made[target.index()] = stamp;
+        let at = source.index();
+        in_graph.reset();
+        in_made.reset();
+        for &target in &targets[starts[at]..starts[at + 1]] {
+            in_made.mark(target.index());
         }
         for edge in cfg.outgoing(source) {
             let target = cfg.edge(edge).target();
-            if in_made[target.index()] != stamp {
+            if !in_made.is_marked(target.index()) {
                 return Err(SplError::UnplacedEdge(edge));
             }
-            in_graph[target.index()] = stamp;
+            in_graph.mark(target.index());
         }
-        if targets[starts[stamp]..starts[stamp + 1]]
+        if targets[starts[at]..starts[at + 1]]
             .iter()
-            .any(|target| in_graph[target.index()] != stamp)
+            .any(|target| !in_graph.is_marked(target.index()))
         {
             return Err(cfg
                 .outgoing(source)
