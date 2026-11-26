@@ -302,7 +302,7 @@ pub use graph::cdg::{
     ControlClosureScratch, NonterminationScratch, control_dependence_graph,
     nontermination_sensitive_controllers, weak_control_closure,
 };
-pub use graph::coldness::{ColdClass, ColdnessClasses, ColdnessGraph};
+pub use graph::coldness::{ColdClass, ColdnessClasses};
 pub use graph::cut::{EdgeCut, VertexCut, edge_disjoint_paths, min_edge_cut, min_vertex_cut};
 pub use graph::diff::{
     BlockFingerprint, BlockHashes, BlockMatch, CascadeDiff, CfgDiff, MatchLevel, RegionDiff,
@@ -409,9 +409,7 @@ pub use region::{
     recover_exclusive_extents_with,
 };
 pub use rewrite::Rewrite;
-pub use transform::block_order::{
-    ExtTspConfig, SplitOrder, ext_tsp_order, ext_tsp_score, hot_cold_order,
-};
+pub use transform::block_order::{ExtTspConfig, ext_tsp_order, ext_tsp_score, hot_cold_order};
 pub use transform::cleanup::{
     merge_blocks, merge_blocks_mapped, remove_empty_blocks, remove_empty_blocks_mapped,
     remove_unreachable, remove_unreachable_mapped, simplify, simplify_mapped,

@@ -19,4 +19,4 @@ mod ext_tsp;
 mod hot_cold;
 
 pub use ext_tsp::{ExtTspConfig, ext_tsp_order, ext_tsp_score};
-pub use hot_cold::{SplitOrder, hot_cold_order};
+pub use hot_cold::hot_cold_order;
