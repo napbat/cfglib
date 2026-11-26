@@ -34,6 +34,12 @@
 //! once for each, which is quadratic on deep irreducible nests. So each block
 //! keeps only the outermost cycle it enters, and a difference over the forest
 //! counts the entries of every cycle.
+//!
+//! The same construction, along either axis and from several roots in turn,
+//! is the loop nesting that a weak topological order lists:
+//! [`CycleNesting`] is that shared core, and
+//! [`WeakTopologicalOrder`](crate::WeakTopologicalOrder) reads its heads,
+//! nesting and postorder.
 
 extern crate alloc;
 use alloc::vec;
@@ -41,7 +47,8 @@ use alloc::vec::Vec;
 
 use super::{LoopForest, LoopRecord};
 use crate::graph::epoch::EpochMarks;
-use crate::graph::view::{DenseId, RootedView};
+use crate::graph::traverse::{Adjacency, Outgoing};
+use crate::graph::view::{DenseId, GraphView, RootedView};
 use crate::identity::{NO_INDEX, slot, word};
 use crate::union_find::DisjointSet;
 
@@ -100,9 +107,71 @@ impl<N: DenseId> LoopForest<N> {
     /// ```
     #[must_use]
     pub fn compute_cycles<G: RootedView<NodeId = N>>(graph: &G) -> Self {
-        let mut walk = Walk::new(graph);
+        let nesting = CycleNesting::compute(Outgoing, graph, [graph.root()]);
+        nesting.cycles.place(&nesting.walk, graph.node_bound())
+    }
+}
+
+/// Havlak's cycle nesting of a depth-first forest: the one construction
+/// behind [`LoopForest::compute_cycles`] and the weak topological order.
+///
+/// The forest grows along `axis` from each root in turn that an earlier walk
+/// missed, taking neighbors in adjacency order, and numbers the nodes it
+/// reaches in preorder; a node is named by that position. A later walk
+/// cannot be reached from an earlier one, so an edge from a later walk into an
+/// earlier one lies on no cycle and is left out.
+pub(crate) struct CycleNesting<N> {
+    walk: Walk<N>,
+    cycles: Cycles,
+}
+
+impl<N: DenseId> CycleNesting<N> {
+    /// The cycle nesting of the forest grown along `axis` from `roots`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a root is not below the node bound of `graph`.
+    pub(crate) fn compute<G, A>(axis: A, graph: &G, roots: impl IntoIterator<Item = N>) -> Self
+    where
+        G: GraphView<NodeId = N>,
+        A: Adjacency,
+    {
+        let mut walk = Walk::new(axis, graph, roots);
         let cycles = Cycles::collapse(&mut walk);
-        cycles.place(&walk, graph.node_bound())
+        Self { walk, cycles }
+    }
+
+    /// The number of nodes the forest reached.
+    pub(crate) fn len(&self) -> usize {
+        self.walk.blocks.len()
+    }
+
+    /// The node at preorder `position`.
+    pub(crate) fn node(&self, position: u32) -> N {
+        self.walk.blocks[slot(position)]
+    }
+
+    /// The preorder positions in postorder.
+    pub(crate) fn postorder(&self) -> &[u32] {
+        &self.walk.postorder
+    }
+
+    /// Whether the node at `position` heads a cycle.
+    pub(crate) fn heads(&self, position: usize) -> bool {
+        self.cycles.headed[position] != NO_INDEX
+    }
+
+    /// The position of the head of the innermost cycle that holds the node at
+    /// `position`, other than a cycle it heads; [`NO_INDEX`] for none.
+    pub(crate) fn parent_head(&self, position: usize) -> u32 {
+        let cycle = match self.cycles.headed[position] {
+            NO_INDEX => self.cycles.innermost[position],
+            own => self.cycles.parents[slot(own)],
+        };
+        match cycle {
+            NO_INDEX => NO_INDEX,
+            cycle => self.cycles.headers[slot(cycle)],
+        }
     }
 }
 
@@ -111,6 +180,8 @@ impl<N: DenseId> LoopForest<N> {
 struct Walk<N> {
     /// The block at each position of the preorder.
     blocks: Vec<N>,
+    /// The positions in postorder.
+    postorder: Vec<u32>,
     /// The position each edge leaves.
     sources: Vec<u32>,
     /// The position each edge enters.
@@ -135,9 +206,14 @@ struct Frame {
 }
 
 impl<N: DenseId> Walk<N> {
-    fn new<G: RootedView<NodeId = N>>(graph: &G) -> Self {
+    fn new<G, A>(axis: A, graph: &G, roots: impl IntoIterator<Item = N>) -> Self
+    where
+        G: GraphView<NodeId = N>,
+        A: Adjacency,
+    {
         let mut walk = Self {
             blocks: Vec::new(),
+            postorder: Vec::new(),
             sources: Vec::new(),
             targets: Vec::new(),
             next: Vec::new(),
@@ -155,37 +231,54 @@ impl<N: DenseId> Walk<N> {
         let mut arena: Vec<N> = Vec::new();
         let mut frames: Vec<Frame> = Vec::new();
 
-        walk.enter(graph, graph.root(), &mut position, &mut arena, &mut frames);
-        finished.push();
-        open.push(0);
-        while let Some(frame) = frames.last_mut() {
-            let from = frame.position;
-            let Some(&successor) = arena.get(frame.cursor) else {
-                arena.truncate(frame.start);
-                frames.pop();
-                if let Some(parent) = frames.last() {
-                    finished.union(slot(from), slot(parent.position));
-                    open[finished.find(slot(from))] = parent.position;
-                }
+        for root in roots {
+            if position[root.index()] != NO_INDEX {
                 continue;
-            };
-            frame.cursor += 1;
-            match position[successor.index()] {
-                NO_INDEX => {
-                    let to = walk.enter(graph, successor, &mut position, &mut arena, &mut frames);
-                    finished.push();
-                    open.push(to);
-                    walk.file(from, to, from);
+            }
+            // The positions below `start` belong to earlier walks.
+            let start = walk.enter(axis, graph, root, &mut position, &mut arena, &mut frames);
+            finished.push();
+            open.push(start);
+            while let Some(frame) = frames.last_mut() {
+                let from = frame.position;
+                let Some(&successor) = arena.get(frame.cursor) else {
+                    arena.truncate(frame.start);
+                    frames.pop();
+                    walk.postorder.push(from);
+                    if let Some(parent) = frames.last() {
+                        finished.union(slot(from), slot(parent.position));
+                        open[finished.find(slot(from))] = parent.position;
+                    }
+                    continue;
+                };
+                frame.cursor += 1;
+                match position[successor.index()] {
+                    NO_INDEX => {
+                        let to = walk.enter(
+                            axis,
+                            graph,
+                            successor,
+                            &mut position,
+                            &mut arena,
+                            &mut frames,
+                        );
+                        finished.push();
+                        open.push(to);
+                        walk.file(from, to, from);
+                    }
+                    to if to >= start => walk.file(from, to, open[finished.find(slot(to))]),
+                    _ => {}
                 }
-                to => walk.file(from, to, open[finished.find(slot(to))]),
             }
         }
         walk
     }
 
-    /// Give `block` the next position, and start examining its successors.
-    fn enter<G: RootedView<NodeId = N>>(
+    /// Give `block` the next position, and start examining its neighbors
+    /// along `axis`.
+    fn enter<G: GraphView<NodeId = N>, A: Adjacency>(
         &mut self,
+        axis: A,
         graph: &G,
         block: N,
         position: &mut [u32],
@@ -198,7 +291,7 @@ impl<N: DenseId> Walk<N> {
         self.returning.push(NO_INDEX);
         self.waiting.push(NO_INDEX);
         let start = arena.len();
-        arena.extend(graph.successors(block));
+        arena.extend(axis.neighbors(graph, block));
         frames.push(Frame {
             position: at,
             start,
@@ -413,8 +506,8 @@ impl Cycles {
 
         // The cycles were found innermost first, the order placing them needs.
         let order: Vec<usize> = id.iter().map(|&lp| slot(lp)).collect();
-        forest.number_subtrees(&order);
-        forest.group_members();
+        let positions = forest.number_subtrees(&order);
+        forest.group_members(positions);
         forest.nest(&order);
         forest
     }

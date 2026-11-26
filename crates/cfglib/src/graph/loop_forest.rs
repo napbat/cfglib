@@ -42,7 +42,7 @@ use crate::block::BlockId;
 use crate::edge::KindedEdge;
 use crate::identity::{NO_INDEX, define_dense_id, slot, word};
 
-mod cycles;
+pub(crate) mod cycles;
 mod placement;
 
 define_dense_id! {
@@ -649,8 +649,8 @@ fn build<G: GraphView>(graph: &G, families: &[Family<'_, G::NodeId>]) -> LoopFor
     }
     let order = forest.innermost_first(families);
     forest.claim_blocks(graph, families, &order);
-    forest.number_subtrees(&order);
-    forest.group_members();
+    let positions = forest.number_subtrees(&order);
+    forest.group_members(positions);
     forest.nest(&order);
     forest
 }

@@ -3,20 +3,21 @@
 //! nesting rule's parent and depth of every loop.
 
 extern crate alloc;
-use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::Reverse;
 use smallvec::SmallVec;
 
 use super::{LoopForest, LoopId};
+use crate::graph::fanout::DenseFanout;
 use crate::graph::view::DenseId;
 use crate::identity::{NO_INDEX, slot, word};
 
 impl<N: DenseId> LoopForest<N> {
     /// A preorder numbering of the properly nested loops that gives each loop's
-    /// subtree a run of positions. Children come before parents in `order`, so
-    /// the sizes add up in it and the positions are handed out in its reverse.
-    pub(super) fn number_subtrees(&mut self, order: &[usize]) {
+    /// subtree a run of positions, returning the number of positions. Children
+    /// come before parents in `order`, so the sizes add up in it and the
+    /// positions are handed out in its reverse.
+    pub(super) fn number_subtrees(&mut self, order: &[usize]) -> usize {
         let mut subtree: SmallVec<[u32; 8]> = SmallVec::from_elem(1, self.loops.len());
         for &k in order {
             let up = self.loops[k].enclosing;
@@ -39,30 +40,25 @@ impl<N: DenseId> LoopForest<N> {
             self.loops[k].first = first;
             self.loops[k].last = first + subtree[k] - 1;
         }
-        self.member_starts = vec![0; slot(next_outermost) + 1];
+        slot(next_outermost)
     }
 
-    /// The blocks of each position, as one run apiece, in ascending order.
-    /// `member_starts` holds the number of positions plus one zeros.
-    pub(super) fn group_members(&mut self) {
-        let positions = self.member_starts.len() - 1;
-        for &held in self.innermost.iter().filter(|&&held| held != NO_INDEX) {
-            self.member_starts[slot(self.loops[slot(held)].first)] += 1;
-        }
-        let mut total = 0;
-        for count in &mut self.member_starts[..positions] {
-            total += *count;
-            *count = total;
-        }
-        self.member_starts[positions] = total;
-        self.members = vec![N::from_index(0); slot(total)];
-        for (node, &held) in self.innermost.iter().enumerate().rev() {
-            if held != NO_INDEX {
-                let end = &mut self.member_starts[slot(self.loops[slot(held)].first)];
-                *end -= 1;
-                self.members[slot(*end)] = N::from_index(node);
-            }
-        }
+    /// The blocks of each of `positions` preorder positions, as one run apiece,
+    /// in ascending order.
+    pub(super) fn group_members(&mut self, positions: usize) {
+        let (loops, innermost) = (&self.loops, &self.innermost);
+        DenseFanout::<N, u32>::group_into(
+            positions,
+            || {
+                innermost
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &held)| held != NO_INDEX)
+                    .map(|(node, &held)| (loops[slot(held)].first, N::from_index(node)))
+            },
+            &mut self.member_starts,
+            &mut self.members,
+        );
     }
 
     /// Work out the nesting rule's parent and depth of every loop, and the
