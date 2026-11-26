@@ -7,7 +7,6 @@ pub(super) struct ApiInst {
     pub(super) flow: FlowEffect<u32, ()>,
     pub(super) uses: Vec<u32>,
     pub(super) defs: Vec<u32>,
-
 }
 
 impl ApiInst {
@@ -16,7 +15,6 @@ impl ApiInst {
             flow: FlowEffect::Flow(Flow::Next),
             uses,
             defs: vec![definition],
-
         }
     }
 

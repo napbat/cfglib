@@ -230,7 +230,7 @@ fn remove_unreachable_regions_keeps_a_region_while_any_of_its_handlers_can_be_en
     let removed = cfg.remove_unreachable_regions();
 
     assert_eq!(removed, 1);
-    assert!(!cfg.region(live).handlers.is_empty());
+    assert_eq!(cfg.region(live).handlers.len(), 1);
     assert_eq!(cfg.region(mixed).handlers.len(), 2);
     let dead = cfg.region(dead);
     assert!(
