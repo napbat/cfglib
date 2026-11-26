@@ -54,8 +54,8 @@ fn sole<T>(mut items: impl Iterator<Item = T>) -> Option<T> {
 }
 
 /// Scan a graph view for topology-level patterns: diamonds and self-loops in
-/// node order, then chains by first member. A diamond's arms are in the
-/// successor order of its entry.
+/// node order, then chains, each from its first block to its last. A
+/// diamond's arms are in the successor order of its entry.
 ///
 /// # Examples
 ///
