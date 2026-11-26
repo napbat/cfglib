@@ -624,8 +624,15 @@ impl<ET: IdTag> core::fmt::Debug for AdjacentEdges<'_, ET> {
 impl<ET: IdTag> Iterator for AdjacentEdges<'_, ET> {
     type Item = Id<ET>;
 
-    /// Inlined for the reason the walk it steps is.
-    #[inline]
+    /// Forced inline for the reason the walk it steps is. A hint was not
+    /// enough: behind the generic [`EdgeView`](crate::EdgeView) adjacency,
+    /// `min_label_relaxation` called it out of line and ran 1.3x the time it
+    /// takes with the step inlined.
+    #[inline(always)]
+    #[expect(
+        clippy::inline_always,
+        reason = "a hint left the step out of line behind the generic edge view; 1.3x slower"
+    )]
     fn next(&mut self) -> Option<Self::Item> {
         advance(&mut self.cursor, &self.axis, self.live, self.delta_base).map(Id::from_raw)
     }

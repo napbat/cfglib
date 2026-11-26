@@ -36,7 +36,14 @@ pub(crate) trait EdgeAdjacency: Adjacency {
 }
 
 impl EdgeAdjacency for Outgoing {
-    #[inline]
+    /// Forced inline with the store's trait `outgoing` below it: left to the
+    /// inliner, the walk stayed out of line in `min_label_relaxation` and the
+    /// relaxation ran up to 1.8x its time over the inherent store methods.
+    #[inline(always)]
+    #[expect(
+        clippy::inline_always,
+        reason = "out of line, an edge walk through the axis ran up to 1.8x slower"
+    )]
     fn edges<G: EdgeView>(
         self,
         graph: &G,
@@ -57,7 +64,12 @@ impl EdgeAdjacency for Outgoing {
 }
 
 impl EdgeAdjacency for Incoming {
-    #[inline]
+    /// Forced inline for the reason [`Outgoing`]'s `edges` is.
+    #[inline(always)]
+    #[expect(
+        clippy::inline_always,
+        reason = "out of line, an edge walk through the axis ran up to 1.8x slower"
+    )]
     fn edges<G: EdgeView>(
         self,
         graph: &G,
