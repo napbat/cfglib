@@ -4,7 +4,7 @@ Generic, `no_std` graph and dataflow framework for code intelligence, program an
 
 `cfglib` has purpose-built storage for arbitrary directed relations, language-parametric scope graphs, file-incremental stack graphs, and `Cfg<I, E = ()>` graphs. A `Cfg` has basic blocks, typed control-flow edges, caller-owned edge metadata, and exception regions.
 
-`cfglib::ir` holds IR traits. `ir::rtl` is the register-transfer contract. `ir::mlil` is the read-only view contract of a flat function in static single assignment form with block parameters. `ir::hlil` is the structured contract: a read-only view of statement and expression trees, a builder trait that the consumer implements, and the walks over the shapes. The consumer owns every IR storage, builder implementation, editing pass, and IR algorithm (lifting, lowering, verification, value analyses, and the facts over an RTL function). The RTL and MLIL views are rooted graph views, so the graph algorithms of cfglib run on them and return facts about the graph.
+`cfglib::ir` holds IR traits. `ir::rtl` is the register-transfer contract. `ir::mlil` is the read-only view contract of a flat function in static single assignment form with block parameters. `ir::hlil` is the structured contract: a read-only view of statement and expression trees and a builder trait that the consumer implements. The consumer owns every IR storage, builder implementation, editing pass, and IR algorithm (lifting, lowering, verification, value analyses, walks over the structured shapes, and the facts over an RTL function). The RTL and MLIL views are rooted graph views, so the graph algorithms of cfglib run on them and return facts about the graph.
 
 Small read-only node and edge view contracts let consumer-owned stores and zero-copy filtered views reuse the algorithms. `CfgView` extends them for the instruction-level analyses of a consumer, so the generic solvers run the same way over a consumer block store as over `Cfg`. Every instruction-adjacent axis is consumer-typed. Dataflow variables, constants, expression operators, side-effect vocabularies, branch targets, call targets, and edge payloads all come from the adapter. x86 registers and flags, shader register components, bytecode locals, compiler IR values, and source-language symbols do not need a library-owned numbering scheme. String literals and symbol ids flow through the solvers as naturally as machine words and addresses.
 
@@ -205,9 +205,9 @@ A fact is a side table about one state of a function. No algorithm changes the f
 | Level | Module | The consumer implements | cfglib provides |
 |---|---|---|---|
 | Low level (LLIL), editable | `ir::llil` | `Instruction` (address, length, bytes and `Flow` of one instruction in the literal form of its instruction set), `Semantics` | `Semantics::capture`, the capture of one record into `effects::Captured` |
-| Register transfer (RTL) | `ir::rtl` | `Dialect`, `InstructionBuilder`, `RecordView`, `FunctionView`, `Fold` | Nothing. The facts over an RTL function belong to the consumer. |
+| Register transfer (RTL) | `ir::rtl` | `Dialect`, `InstructionBuilder`, `RecordView`, `FunctionView` | Nothing. The facts over an RTL function and the constant evaluation of its operators belong to the consumer. |
 | Medium level (MLIL) | `ir::mlil` | `Dialect`, `FunctionView` | Nothing. Value analyses over the view belong to the consumer. |
-| Structured (HLIL) | `ir::hlil` | `Dialect`, `FunctionView`, `FunctionBuilder` | The walks over the shapes |
+| Structured (HLIL) | `ir::hlil` | `Dialect`, `FunctionView`, `FunctionBuilder` | Nothing. The walks over the shapes belong to the consumer. |
 
 Every dialect type is plain data that the consumer defines. The traits contain no language, runtime, calling convention, opcode, or source-location type.
 
@@ -233,7 +233,6 @@ Every RTL value is a signless bit vector. Signedness, a floating format, and a l
 | `InstructionBuilder<D>` | The write-only protocol through which instruction semantics emit one record into consumer storage. The producer calls `read`, `constant`, `apply`, `nondet`, `effect`, `raise`, and `write` in statement order, then `finish` with a `Control`. `finish` seals the record. The protocol cannot read a statement back or change it. |
 | `RecordView<D>` | One sealed record: its `statements`, its `control`, and the `width` of each value. A sealed record is read-only. |
 | `FunctionView<D>` | A `RootedView` over the decoded machine control flow. The root is the entry block. It adds `inst_bound`, `value_bound`, the `instructions` of a block, and the `record` of an instruction. |
-| `Fold` | Constant evaluation of the operators of a dialect. `Fold::fold` writes the results of an operator over `ConstBits` operands to a buffer. It returns `false` when the operator has no constant evaluation for the operands. |
 
 The builder takes these plain-data types, and a record yields them. Every slice inside them is flat, so a consumer keeps them in dense pools:
 
@@ -290,8 +289,7 @@ An HLIL function is a pair of trees over declared variables:
 |---|---|
 | `Dialect`, `FunctionView<D>` | The vocabulary of one structured dialect, and the read-only view that lends statements, expressions, switch arms, and handlers as slices from the consumer's dense storage. |
 | `FunctionBuilder<D>` | The write-only protocol that builds a function, children before parents. The consumer seals the function in `finish`. |
-| `Entity`, `ChildBodyKind`, `StmtShape`, `ExprShape`, `SwitchArm`, `Handler`, `HandlerKind` | The shapes that the view lends, the role of a child body, and the name of one statement, expression, or variable. |
-| `for_each_child_body`, `for_each_statement_expression`, `visit_statements`, `visit_expression_tree`, `expressions_equal`, `compound_assignment` | The walks over the shapes. `for_each_child_body`, `visit_statements`, and `visit_expression_tree` keep their own stack, so memory bounds the depth, not the thread's stack. |
+| `Entity`, `StmtShape`, `ExprShape`, `SwitchArm`, `Handler`, `HandlerKind` | The shapes that the view lends, and the name of one statement, expression, or variable. |
 
 A function follows these rules:
 
@@ -501,8 +499,7 @@ ir::llil::Instruction     (AddressInstruction + length and bytes of one
 ir::llil::Semantics       (emits or captures the RTL record of one instruction)
 
 ir::rtl::Dialect          (instruction-set vocabulary — Root, Operator, EffectOp,
-│                          WritePolicy, Outcome, NondetDomain)
-└── ir::rtl::Fold         (constant evaluation of operators)
+                           WritePolicy, Outcome, NondetDomain)
 ir::rtl::InstructionBuilder<D>  (write-only emission into consumer storage)
 ir::rtl::RecordView<D>    (one sealed instruction record)
 ir::rtl::FunctionView<D>  (RootedView + blocks of instruction records)

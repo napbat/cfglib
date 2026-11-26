@@ -49,10 +49,9 @@
 //! single assignment function with block parameters; value analyses over it
 //! belong to the consumer. [`ir::hlil`] is the structured contract: a
 //! read-only [`ir::hlil::FunctionView`] of statement and expression trees and
-//! a write-only [`ir::hlil::FunctionBuilder`] that the consumer implements,
-//! with the walks over its shapes. Every IR storage, builder implementation,
-//! editing machinery, and algorithm over the contents of an instruction
-//! belongs to the consumer.
+//! a write-only [`ir::hlil::FunctionBuilder`] that the consumer implements.
+//! Every IR storage, builder implementation, editing machinery, and
+//! algorithm over the contents of an instruction belongs to the consumer.
 //! [`effects`] is the one exception: [`Effect`] states what code reads,
 //! writes, accesses in memory, and raises, and [`Summarizer`] computes it from
 //! register-transfer statements with one set of rules for every level and

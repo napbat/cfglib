@@ -1,14 +1,9 @@
-//! The read-only view of one structured function, and the walks over it.
-
-extern crate alloc;
-
-use alloc::vec;
-use alloc::vec::Vec;
+//! The read-only view of one structured function.
 
 use crate::graph::view::DenseId;
 
 use super::dialect::Dialect;
-use super::shape::{ExprShape, Handler, HandlerKind, StmtShape, SwitchArm};
+use super::shape::{ExprShape, Handler, StmtShape, SwitchArm};
 
 /// One entity of a structured function, named by a handle.
 ///
@@ -24,18 +19,6 @@ pub enum Entity<S, E, V> {
     Expression(E),
     /// A declared variable.
     Variable(V),
-}
-
-/// Whether a child statement sequence is a lexical body or belongs to the
-/// syntax of its parent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChildBodyKind {
-    /// A body that opens its own declaration scope, such as the arm of an
-    /// `if` or the body of a loop.
-    Lexical,
-    /// A clause of the parent's own syntax, such as the initializer or the
-    /// update of a `for`. It declares into the scope that holds the parent.
-    Clause,
 }
 
 /// A read-only structured function: trees of statements and expressions over
@@ -119,164 +102,4 @@ pub trait FunctionView<D: Dialect> {
 
     /// Returns the return types in result order. Empty for no return value.
     fn returns(&self) -> &[D::Type];
-}
-
-/// Visits every child statement body of `stmt` in execution order, with its
-/// declaration-scope role.
-///
-/// A leaf statement has no body. An `if` has its then and else bodies. A `for`
-/// has its initializer, body, and update. A `switch` has every arm and then
-/// the default. A `try` has its body, then each handler's filter (when it has
-/// one) and body, then the finally body. Code that walks or rewrites the
-/// statement tree uses this function instead of matching every shape, so a
-/// new shape reaches it in one place.
-pub fn for_each_child_body<'a, D, F>(
-    view: &'a F,
-    stmt: F::Stmt,
-    mut visit: impl FnMut(&'a [F::Stmt], ChildBodyKind),
-) where
-    D: Dialect,
-    F: FunctionView<D>,
-{
-    match view.stmt(stmt) {
-        StmtShape::Expression(_)
-        | StmtShape::Assign { .. }
-        | StmtShape::Break { .. }
-        | StmtShape::Continue { .. }
-        | StmtShape::Return { .. }
-        | StmtShape::Goto { .. } => {}
-        StmtShape::If {
-            then_body,
-            else_body,
-            ..
-        } => {
-            visit(then_body, ChildBodyKind::Lexical);
-            visit(else_body, ChildBodyKind::Lexical);
-        }
-        StmtShape::While { body, .. }
-        | StmtShape::DoWhile { body, .. }
-        | StmtShape::Loop { body }
-        | StmtShape::Labeled { body, .. }
-        | StmtShape::Region { body, .. } => visit(body, ChildBodyKind::Lexical),
-        StmtShape::For {
-            initializer,
-            update,
-            body,
-            ..
-        } => {
-            visit(initializer, ChildBodyKind::Clause);
-            visit(body, ChildBodyKind::Lexical);
-            visit(update, ChildBodyKind::Clause);
-        }
-        StmtShape::Switch { default_body, .. } => {
-            for arm in view.switch_arms(stmt) {
-                visit(arm.body, ChildBodyKind::Lexical);
-            }
-            visit(default_body, ChildBodyKind::Lexical);
-        }
-        StmtShape::Try {
-            body, finally_body, ..
-        } => {
-            visit(body, ChildBodyKind::Lexical);
-            for handler in view.handlers(stmt) {
-                if let HandlerKind::Filter { filter_body } = handler.kind {
-                    visit(filter_body, ChildBodyKind::Lexical);
-                }
-                visit(handler.body, ChildBodyKind::Lexical);
-            }
-            visit(finally_body, ChildBodyKind::Lexical);
-        }
-    }
-}
-
-/// Visits every expression that `stmt` references directly: its condition,
-/// scrutinee, assignment sides, return values, and region operands.
-///
-/// Expressions inside child bodies are not visited, and neither are the
-/// operands nested inside a visited expression.
-pub fn for_each_statement_expression<D, F>(view: &F, stmt: F::Stmt, mut visit: impl FnMut(F::Expr))
-where
-    D: Dialect,
-    F: FunctionView<D>,
-{
-    match view.stmt(stmt) {
-        StmtShape::Expression(expression) => visit(expression),
-        StmtShape::Assign { target, value } => {
-            visit(target);
-            visit(value);
-        }
-        StmtShape::If { condition, .. }
-        | StmtShape::While { condition, .. }
-        | StmtShape::DoWhile { condition, .. }
-        | StmtShape::Switch {
-            scrutinee: condition,
-            ..
-        } => visit(condition),
-        StmtShape::For { condition, .. } => {
-            if let Some(condition) = condition {
-                visit(condition);
-            }
-        }
-        StmtShape::Return { values: operands } | StmtShape::Region { operands, .. } => {
-            for &operand in operands {
-                visit(operand);
-            }
-        }
-        StmtShape::Loop { .. }
-        | StmtShape::Break { .. }
-        | StmtShape::Continue { .. }
-        | StmtShape::Labeled { .. }
-        | StmtShape::Goto { .. }
-        | StmtShape::Try { .. } => {}
-    }
-}
-
-/// Visits every statement under `roots` in preorder: a statement, then the
-/// statements of its child bodies in [`for_each_child_body`] order.
-pub fn visit_statements<'a, D, F>(
-    view: &'a F,
-    roots: &'a [F::Stmt],
-    visit: &mut impl FnMut(F::Stmt),
-) where
-    D: Dialect,
-    F: FunctionView<D>,
-{
-    let mut pending = vec![roots.iter()];
-    while let Some(bodies) = pending.last_mut() {
-        let Some(&stmt) = bodies.next() else {
-            pending.pop();
-            continue;
-        };
-        visit(stmt);
-        let first_child = pending.len();
-        for_each_child_body(view, stmt, |body, _| pending.push(body.iter()));
-        // The first child body is the next one to run, so it goes on top.
-        pending[first_child..].reverse();
-    }
-}
-
-/// Visits the expression tree under `root` in postorder: the operands of an
-/// operation before the operation.
-///
-/// A function that meets the [`FunctionView`] contract stores operands before
-/// their parent, so this order is also a valid evaluation order.
-pub fn visit_expression_tree<D, F>(view: &F, root: F::Expr, visit: &mut impl FnMut(F::Expr))
-where
-    D: Dialect,
-    F: FunctionView<D>,
-{
-    // Each entry is an expression and the position of its next operand.
-    let mut pending: Vec<(F::Expr, usize)> = vec![(root, 0)];
-    while let Some((expr, next)) = pending.last_mut() {
-        let expr = *expr;
-        if let ExprShape::Operation { operands, .. } = view.expr(expr)
-            && let Some(&operand) = operands.get(*next)
-        {
-            *next += 1;
-            pending.push((operand, 0));
-        } else {
-            visit(expr);
-            pending.pop();
-        }
-    }
 }
