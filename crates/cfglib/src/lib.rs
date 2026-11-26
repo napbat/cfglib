@@ -305,8 +305,7 @@ pub use graph::cdg::{
 pub use graph::coldness::{ColdClass, ColdnessClasses};
 pub use graph::cut::{EdgeCut, VertexCut, edge_disjoint_paths, min_edge_cut, min_vertex_cut};
 pub use graph::diff::{
-    BlockFingerprint, BlockHashes, BlockMatch, CascadeDiff, CfgDiff, MatchLevel, RegionDiff,
-    RegionMatch,
+    BlockHashes, BlockMatch, CascadeDiff, CfgDiff, MatchLevel, RegionDiff, RegionMatch,
 };
 pub use graph::dominator::{
     CertificateError, DominanceFrontiers, DominatorScratch, DominatorTree, DominatorUpdate,
@@ -326,7 +325,9 @@ pub use graph::eh::{EhBlockKind, EhEdge, EhEdgeKind, EhModel};
 pub use graph::epoch::EpochMarks;
 pub use graph::fanout::{DenseFanout, Fanout, SortedMap};
 pub use graph::feedback::{FeedbackConfig, feedback_arc_set, linear_arrangement};
-pub use graph::fingerprint::{canonical_hash, canonical_order, multiset_fingerprint, wl_colors};
+pub use graph::fingerprint::{
+    Mixer, canonical_hash, canonical_order, multiset_fingerprint, wl_colors,
+};
 pub use graph::frequency::{BlockFrequencies, FREQUENCY_SHIFT, FrequencyConfig};
 pub use graph::horn::{HornClauses, HornSaturation};
 pub use graph::interval::{Interval, IntervalAnalysis};

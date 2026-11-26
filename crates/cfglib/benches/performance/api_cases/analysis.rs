@@ -135,9 +135,9 @@ fn register_cfg_diff(suite: &mut BenchmarkSuite<'_>) {
         "cfg_diff_hash_cascade",
         || CascadeDiff::compute(&old, &new, content_hashes, content_hashes),
         |diff: &CascadeDiff| {
-            assert_eq!(diff.diff().matched.len(), SWITCH_CASES + 3);
+            assert_eq!(diff.diff.matched.len(), SWITCH_CASES + 3);
             let full = diff
-                .levels()
+                .levels
                 .iter()
                 .filter(|&&level| level == MatchLevel::Full);
             assert_eq!(full.count(), SWITCH_CASES);

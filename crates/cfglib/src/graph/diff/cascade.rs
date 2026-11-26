@@ -54,9 +54,11 @@ pub enum MatchLevel {
 /// with the evidence for each pair.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CascadeDiff {
-    diff: CfgDiff,
+    /// The structural differences, reported like [`CfgDiff::compute`]
+    /// reports them.
+    pub diff: CfgDiff,
     /// The level of each pair of `diff.matched`, in the same order.
-    levels: Vec<MatchLevel>,
+    pub levels: Vec<MatchLevel>,
 }
 
 impl CascadeDiff {
@@ -102,7 +104,7 @@ impl CascadeDiff {
     /// # Examples
     ///
     /// ```
-    /// use cfglib::{BlockHashes, BlockId, CascadeDiff, Cfg, CfgDiff, EdgeKind, MatchLevel};
+    /// use cfglib::{BlockHashes, BlockId, CascadeDiff, Cfg, CfgDiff, EdgeKind, MatchLevel, Mixer};
     ///
     /// // `entry -> body`, and a copy in which a jump from new code reaches
     /// // `body` too, which changes its shape.
@@ -122,17 +124,18 @@ impl CascadeDiff {
     /// // By wiring alone, `body` has no counterpart.
     /// assert!(CfgDiff::compute(&old, &new).left_only.contains(&body));
     ///
-    /// // The consumer hashes its own instructions.
+    /// // The consumer hashes its own instructions, with the crate's mixer.
     /// let hash = |_: BlockId, instructions: &[u32]| {
     ///     let strict = instructions
     ///         .iter()
-    ///         .fold(17_u64, |hash, &op| hash.wrapping_mul(31).wrapping_add(op.into()));
+    ///         .fold(Mixer::new(), |mixer, &op| mixer.mix(op.into()))
+    ///         .finish();
     ///     BlockHashes { strict, loose: strict }
     /// };
     /// let cascade = CascadeDiff::compute(&old, &new, hash, hash);
     /// assert_eq!(cascade.match_level(old.entry()), Some(MatchLevel::Entry));
     /// assert_eq!(cascade.match_level(body), Some(MatchLevel::Strict));
-    /// assert_eq!(cascade.diff().right_only, [jump]);
+    /// assert_eq!(cascade.diff.right_only, [jump]);
     /// ```
     #[must_use]
     pub fn compute<I, E, I2, E2>(
@@ -152,26 +155,6 @@ impl CascadeDiff {
         let keys = (&left_keys, &right_keys);
         let levels = match_levels(&diff.matched, left.entry(), keys, &by_shape);
         Self { diff, levels }
-    }
-
-    /// The structural differences, reported like [`CfgDiff::compute`]
-    /// reports them.
-    #[must_use]
-    pub const fn diff(&self) -> &CfgDiff {
-        &self.diff
-    }
-
-    /// The structural differences, without the levels.
-    #[must_use]
-    pub fn into_diff(self) -> CfgDiff {
-        self.diff
-    }
-
-    /// The level of each pair of [`diff`](Self::diff)`.matched`, in the
-    /// same order.
-    #[must_use]
-    pub fn levels(&self) -> &[MatchLevel] {
-        &self.levels
     }
 
     /// The level of the pair that contains the left block `left`, or `None`
@@ -224,8 +207,8 @@ fn match_by_cascade(
         keys,
         &mut matching,
         &mut pending,
-        |block| left_side.facts(block).fingerprint.shape(),
-        |block| right_side.facts(block).fingerprint.shape(),
+        |block| left_side.facts(block).shape(),
+        |block| right_side.facts(block).shape(),
     );
     let by_shape: BTreeSet<BlockId> = pending.iter().map(|&(block, _)| block).collect();
     walk(&mut matching, &mut pending);
@@ -504,9 +487,9 @@ mod tests {
         assert_eq!(structural.right_only, [b, jump]);
 
         let diff = cascade(&left, &right);
-        assert_eq!(diff.diff().right_only, [jump]);
-        assert_eq!(diff.diff().left_only, Vec::<BlockId>::new());
-        assert_eq!(right_of(diff.diff(), b), Some(b));
+        assert_eq!(diff.diff.right_only, [jump]);
+        assert_eq!(diff.diff.left_only, Vec::<BlockId>::new());
+        assert_eq!(right_of(&diff.diff, b), Some(b));
         assert_eq!(diff.match_level(left.entry()), Some(MatchLevel::Entry));
         assert_eq!(diff.match_level(a), Some(MatchLevel::Full));
         assert_eq!(diff.match_level(b), Some(MatchLevel::Strict));
@@ -538,10 +521,10 @@ mod tests {
         assert_eq!(right_of(&structural, one), Some(right_two), "crosswise");
 
         let diff = cascade(&left, &right);
-        assert_eq!(right_of(diff.diff(), one), Some(right_one));
-        assert_eq!(right_of(diff.diff(), two), Some(right_two));
+        assert_eq!(right_of(&diff.diff, one), Some(right_one));
+        assert_eq!(right_of(&diff.diff, two), Some(right_two));
         assert_eq!(diff.match_level(one), Some(MatchLevel::Full));
-        assert!(diff.diff().is_identical(), "{diff:?}");
+        assert!(diff.diff.is_identical(), "{diff:?}");
     }
 
     #[test]
@@ -549,13 +532,13 @@ mod tests {
         let (left, [_, b, _]) = chain(201);
         let (right, _) = chain(202);
         let diff = cascade(&left, &right);
-        assert_eq!(right_of(diff.diff(), b), Some(b));
+        assert_eq!(right_of(&diff.diff, b), Some(b));
         assert_eq!(diff.match_level(b), Some(MatchLevel::Loose));
 
         // A new opcode leaves only the wiring: the walk pairs `b`.
         let (right, _) = chain(900);
         let diff = cascade(&left, &right);
-        assert_eq!(right_of(diff.diff(), b), Some(b));
+        assert_eq!(right_of(&diff.diff, b), Some(b));
         assert_eq!(diff.match_level(b), Some(MatchLevel::Walk));
 
         // An unreachable block of new content pairs by its shape.
@@ -565,7 +548,7 @@ mod tests {
         block(&mut right, &[600]);
         let diff = cascade(&left, &right);
         assert_eq!(diff.match_level(orphan), Some(MatchLevel::Shape));
-        assert!(diff.diff().left_only.is_empty() && diff.diff().right_only.is_empty());
+        assert!(diff.diff.left_only.is_empty() && diff.diff.right_only.is_empty());
     }
 
     #[test]
@@ -583,8 +566,8 @@ mod tests {
         block(&mut right, &[2]);
         let last = block(&mut right, &[700]);
         let diff = cascade(&left, &right);
-        assert_eq!(right_of(diff.diff(), late), Some(last));
-        assert_eq!(diff.diff().right_only, [first]);
+        assert_eq!(right_of(&diff.diff, late), Some(last));
+        assert_eq!(diff.diff.right_only, [first]);
 
         // At 1/2 on the left, between 1/3 and 2/3: equally near both.
         let mut left = Cfg::new();
@@ -592,25 +575,25 @@ mod tests {
         let mut right = Cfg::new();
         let (lower, upper) = (block(&mut right, &[700]), block(&mut right, &[700]));
         let diff = cascade(&left, &right);
-        assert_eq!(right_of(diff.diff(), middle), Some(lower));
-        assert_eq!(diff.diff().right_only, [upper]);
+        assert_eq!(right_of(&diff.diff, middle), Some(lower));
+        assert_eq!(diff.diff.right_only, [upper]);
     }
 
     #[test]
     fn removed_blocks_and_a_lone_entry_take_no_part() {
         let entry_only = Cfg::<u32>::new();
         let diff = cascade(&entry_only, &entry_only);
-        assert_eq!(diff.levels(), [MatchLevel::Entry]);
+        assert_eq!(diff.levels, [MatchLevel::Entry]);
         assert_eq!(diff.match_level(BlockId::from_index(1)), None);
 
         let (mut left, [a, b, _]) = chain(200);
         let (right, _) = chain(200);
         left.remove_block(b);
         let diff = cascade(&left, &right);
-        assert_eq!(diff.diff().right_only, [b]);
+        assert_eq!(diff.diff.right_only, [b]);
         assert_eq!(diff.match_level(b), None);
         assert_eq!(diff.match_level(a), Some(MatchLevel::Strict));
-        assert_eq!(diff.levels().len(), diff.diff().matched.len());
+        assert_eq!(diff.levels.len(), diff.diff.matched.len());
     }
 
     const KINDS: [EdgeKind; 6] = [
@@ -717,11 +700,11 @@ mod tests {
             let copy = shape.build(&slots, &shape.edges);
 
             let diff = cascade(&original, &copy);
-            assert!(diff.diff().is_identical(), "{diff:?}");
-            for pair in &diff.diff().matched {
+            assert!(diff.diff.is_identical(), "{diff:?}");
+            for pair in &diff.diff.matched {
                 assert_eq!(pair.right.index(), slots[pair.left.index()]);
             }
-            let mut levels = diff.levels().iter();
+            let mut levels = diff.levels.iter();
             assert_eq!(levels.next(), Some(&MatchLevel::Entry));
             assert!(levels.all(|&level| level == MatchLevel::Full), "{diff:?}");
         }
@@ -760,31 +743,27 @@ mod tests {
             let right = edited.build(&edited.identity(), &edited.edges);
             let diff = cascade(&left, &right);
 
-            let lefts: BTreeSet<BlockId> =
-                diff.diff().matched.iter().map(|pair| pair.left).collect();
+            let lefts: BTreeSet<BlockId> = diff.diff.matched.iter().map(|pair| pair.left).collect();
             let rights: BTreeSet<BlockId> =
-                diff.diff().matched.iter().map(|pair| pair.right).collect();
-            assert_eq!(lefts.len(), diff.diff().matched.len(), "one-to-one");
-            assert_eq!(rights.len(), diff.diff().matched.len(), "one-to-one");
+                diff.diff.matched.iter().map(|pair| pair.right).collect();
+            assert_eq!(lefts.len(), diff.diff.matched.len(), "one-to-one");
+            assert_eq!(rights.len(), diff.diff.matched.len(), "one-to-one");
             assert!(
                 lefts
                     .iter()
-                    .all(|block| !diff.diff().left_only.contains(block))
+                    .all(|block| !diff.diff.left_only.contains(block))
             );
             assert!(
                 rights
                     .iter()
-                    .all(|block| !diff.diff().right_only.contains(block))
+                    .all(|block| !diff.diff.right_only.contains(block))
             );
+            assert_eq!(lefts.len() + diff.diff.left_only.len(), left.block_count());
             assert_eq!(
-                lefts.len() + diff.diff().left_only.len(),
-                left.block_count()
-            );
-            assert_eq!(
-                rights.len() + diff.diff().right_only.len(),
+                rights.len() + diff.diff.right_only.len(),
                 right.block_count()
             );
-            assert_eq!(diff.levels().len(), diff.diff().matched.len());
+            assert_eq!(diff.levels.len(), diff.diff.matched.len());
 
             let shuffled_left = shape.build(&shape.identity(), &reordered(&mut rng, &shape.edges));
             let shuffled_right =

@@ -13,10 +13,10 @@
 //! consumer that wants content in a fingerprint hashes its instructions into
 //! the node labels itself.
 //!
-//! Every value comes from one fixed 64-bit mixer, the `SplitMix64` finalizer
-//! applied to a running state, and never from a `RandomState`. A fingerprint
-//! is therefore the same across runs, platforms, and versions, and can be
-//! stored.
+//! Every value comes from one fixed 64-bit [`Mixer`], the `SplitMix64`
+//! finalizer applied to a running state, and never from a `RandomState`. A
+//! fingerprint is therefore the same across runs, platforms, and versions,
+//! and can be stored.
 //!
 //! A fingerprint has 64 bits, so two different graphs can collide: equal
 //! fingerprints are evidence of isomorphism, not proof. One-dimensional WL
@@ -40,18 +40,40 @@ const UNREACHED_ROUNDS: usize = 3;
 /// A running 64-bit hash: each value is folded into the state with the
 /// `SplitMix64` finalizer, so the result depends on the values and on their
 /// order.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Mixer(u64);
+///
+/// It is the one mixer behind every fingerprint of this module, and its
+/// values are part of the contract: the same values in the same order give
+/// the same hash on every run, platform, and version. A consumer that hashes
+/// its own block content, such as the [`BlockHashes`](crate::BlockHashes) of
+/// a [`CascadeDiff`](crate::CascadeDiff), can use it for the same guarantee.
+///
+/// # Examples
+///
+/// ```
+/// use cfglib::Mixer;
+///
+/// let hash = |values: &[u64]| {
+///     values
+///         .iter()
+///         .fold(Mixer::new(), |mixer, &value| mixer.mix(value))
+///         .finish()
+/// };
+/// assert_eq!(hash(&[1, 2]), hash(&[1, 2]));
+/// assert_ne!(hash(&[1, 2]), hash(&[2, 1]));
+/// ```
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Mixer(u64);
 
 impl Mixer {
     /// The state before any value is mixed in.
-    pub(crate) const fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self(0)
     }
 
     /// The state after `value`.
     #[must_use]
-    pub(crate) const fn mix(self, value: u64) -> Self {
+    pub const fn mix(self, value: u64) -> Self {
         Self(splitmix64(self.0 ^ value))
     }
 
@@ -74,7 +96,8 @@ impl Mixer {
     }
 
     /// The hash of everything mixed in so far.
-    pub(crate) const fn finish(self) -> u64 {
+    #[must_use]
+    pub const fn finish(self) -> u64 {
         self.0
     }
 }
