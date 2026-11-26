@@ -41,10 +41,9 @@ pub trait InstrInfo {
     /// possible unwind point: a block with an unwind successor and no such
     /// instruction is treated as unwinding after its last instruction.
     ///
-    /// A consumer's analyses read only this method. The
-    /// [`FlowEffect::MayThrow`](crate::FlowEffect::MayThrow) classification
-    /// the CFG builder sees is separate, so an adapter that classifies a
-    /// throwing instruction reports it here as well.
+    /// An instruction's [`Flow`](crate::Flow) states only how it leaves when
+    /// it does not throw, so a throwing instruction that continues has the
+    /// flow [`Flow::Next`](crate::Flow::Next) and reports `true` here.
     fn may_unwind(&self) -> bool {
         false
     }

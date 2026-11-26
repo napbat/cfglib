@@ -19,9 +19,9 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use cfglib::{
-    BlockId, BuildError, CallInfo, Cfg, CfgBuilder, CfgSupergraph, ControlNode, ControlTree,
-    DenseBits, DenseFanout, Direction, DisplayInstr, DominatorTree, EdgeKind, EhBlockKind, EhModel,
-    Fanout, FlowControl, FlowEffect, Graph, Handler, HandlerBody, HandlerKind, HandlerMetadata,
+    BlockId, BuildError, Cfg, CfgBuilder, CfgSupergraph, ControlNode, ControlTree, DenseBits,
+    DenseFanout, Direction, DisplayInstr, DominatorTree, EdgeKind, EhBlockKind, EhModel, Fanout,
+    Flow, FlowControl, FlowEffect, Graph, Handler, HandlerBody, HandlerKind, HandlerMetadata,
     HornClauses, IfdsConfig, IfdsProblem, InstrInfo, KeyedGraph, NodeId, NodeOrder,
     PostDominatorTree, Problem, Region, RegionIndex, SortedMap, StackGraphError, Supergraph,
     TextError, breadth_first, parse_cfg_text, parse_text, remove_unreachable, shortest_path,
@@ -320,13 +320,16 @@ enum Step {
 }
 
 impl FlowControl for Step {
-    fn flow_effect(&self) -> FlowEffect {
+    type Target = &'static str;
+    type CaseKey = ();
+
+    fn flow_effect(&self) -> FlowEffect<&'static str, ()> {
         match self {
-            Self::Plain(_) => FlowEffect::Fallthrough,
+            Self::Plain(_) => FlowEffect::Flow(Flow::Next),
             Self::If => FlowEffect::ConditionalOpen,
             Self::Else => FlowEffect::ConditionalAlternate,
             Self::EndIf => FlowEffect::ConditionalClose,
-            Self::Return => FlowEffect::Return,
+            Self::Return => FlowEffect::Flow(Flow::Return),
         }
     }
 }
@@ -458,14 +461,17 @@ enum CallOp {
     Call(String),
 }
 
-impl CallInfo for CallOp {
-    type Callee = String;
+impl FlowControl for CallOp {
+    type Target = String;
+    type CaseKey = ();
 
-    fn callee(&self) -> Option<String> {
-        match self {
-            Self::Call(name) => Some(name.clone()),
-            Self::Work => None,
-        }
+    fn flow_effect(&self) -> FlowEffect<String, ()> {
+        FlowEffect::Flow(match self {
+            Self::Call(name) => Flow::Call {
+                target: name.clone(),
+            },
+            Self::Work => Flow::Next,
+        })
     }
 }
 

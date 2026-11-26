@@ -8,7 +8,7 @@ use crate::ControlTree;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::flow::FlowEffect;
+use crate::flow::{Flow, FlowEffect};
 use crate::region::{Handler, HandlerBody, HandlerKind, Region};
 use crate::test_util::{MockInst, ff};
 
@@ -152,7 +152,7 @@ fn try_body_arms_beside_a_return_rejoin_at_code_before_the_continuation() {
         blocks(&mut cfg, ["a", "x", "b", "y", "z", "h", "after"]);
     let leave = cfg.new_block();
     cfg.block_mut(leave)
-        .push(MockInst(FlowEffect::Return, "leave"));
+        .push(MockInst(FlowEffect::Flow(Flow::Return), "leave"));
     cfg.add_edge(cfg.entry(), test, EdgeKind::Fallthrough);
     cfg.add_edge(test, then_arm, EdgeKind::ConditionalTrue);
     cfg.add_edge(test, second_test, EdgeKind::ConditionalFalse);

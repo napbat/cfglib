@@ -3,9 +3,10 @@
 //! A call graph does not need its own storage abstraction. Functions are node
 //! payloads, call details are edge payloads, and all traversal, SCC, dominance,
 //! and topological algorithms operate on the returned generic graph directly.
-//! Call targets come from the instructions themselves via
-//! [`CallInfo`] — callee identities are consumer-typed (symbol ids, addresses,
-//! names), never a library-owned string.
+//! Call targets come from the instructions themselves: the target of a
+//! [`Flow::Call`] or a [`Flow::TailCall`] their [`FlowControl`] states.
+//! Callee identities are consumer-typed (symbol ids, addresses, names),
+//! never a library-owned string.
 
 extern crate alloc;
 use alloc::collections::{BTreeMap, BinaryHeap};
@@ -14,7 +15,7 @@ use alloc::vec::Vec;
 use core::cmp::Reverse;
 
 use crate::cfg::Cfg;
-use crate::flow::CallInfo;
+use crate::flow::{Flow, FlowControl, FlowEffect};
 use crate::graph::scc::tarjan_scc;
 use crate::graph::store::{Graph, NodeId};
 use crate::identity::{NO_INDEX, slot, word};
@@ -96,10 +97,11 @@ impl<C: Ord> FunctionIndex<C> {
 
 /// Build a call graph by scanning the instructions of a set of keyed CFGs.
 ///
-/// Nodes are emitted in input order. Every instruction whose
-/// [`CallInfo::callee`] resolves to one of the input keys creates an
-/// inter-procedural edge; calls to unknown targets remain represented in the
-/// source CFG but do not create an edge.
+/// Nodes are emitted in input order. Every instruction whose flow is a
+/// [`Flow::Call`] or a [`Flow::TailCall`] to one of the input keys creates
+/// an inter-procedural edge, marked as a tail call for the latter; calls to
+/// unknown targets and computed calls remain represented in the source CFG
+/// but do not create an edge.
 ///
 /// A key is one function. When it is listed more than once it still has one
 /// node, at its first position, and the calls of every CFG listed under it
@@ -107,9 +109,9 @@ impl<C: Ord> FunctionIndex<C> {
 ///
 /// [`call_graph_indexed`] also returns the index of the functions by key.
 #[must_use]
-pub fn call_graph<I: CallInfo>(
-    functions: &[(I::Callee, &Cfg<I>)],
-) -> Graph<FunctionNode<I::Callee>, CallMetadata> {
+pub fn call_graph<I: FlowControl>(
+    functions: &[(I::Target, &Cfg<I>)],
+) -> Graph<FunctionNode<I::Target>, CallMetadata> {
     call_graph_indexed(functions).0
 }
 
@@ -123,16 +125,17 @@ pub fn call_graph<I: CallInfo>(
 /// # Examples
 ///
 /// ```
-/// use cfglib::{CallInfo, Cfg, call_graph_indexed, recursive_functions};
+/// use cfglib::{Cfg, Flow, FlowControl, FlowEffect, call_graph_indexed, recursive_functions};
 ///
 /// /// A call to a named function, or plain work.
 /// struct Op(Option<&'static str>);
 ///
-/// impl CallInfo for Op {
-///     type Callee = &'static str;
+/// impl FlowControl for Op {
+///     type Target = &'static str;
+///     type CaseKey = ();
 ///
-///     fn callee(&self) -> Option<&'static str> {
-///         self.0
+///     fn flow_effect(&self) -> FlowEffect<&'static str, ()> {
+///         FlowEffect::Flow(self.0.map_or(Flow::Next, |target| Flow::Call { target }))
 ///     }
 /// }
 ///
@@ -152,9 +155,9 @@ pub fn call_graph<I: CallInfo>(
 /// assert!(recursive[even.index()] && recursive[odd.index()]);
 /// ```
 #[must_use]
-pub fn call_graph_indexed<I: CallInfo>(
-    functions: &[(I::Callee, &Cfg<I>)],
-) -> (FunctionGraph<I::Callee>, FunctionIndex<I::Callee>) {
+pub fn call_graph_indexed<I: FlowControl>(
+    functions: &[(I::Target, &Cfg<I>)],
+) -> (FunctionGraph<I::Target>, FunctionIndex<I::Target>) {
     let mut graph = Graph::with_capacity(functions.len(), functions.len());
     let mut key_to_id = BTreeMap::new();
 
@@ -172,16 +175,13 @@ pub fn call_graph_indexed<I: CallInfo>(
         };
         for block in cfg.blocks() {
             for instruction in block.instructions() {
-                if let Some(callee_key) = instruction.callee()
-                    && let Some(&callee) = key_to_id.get(&callee_key)
-                {
-                    graph.add_edge(
-                        caller,
-                        callee,
-                        CallMetadata {
-                            is_tail_call: instruction.is_tail_call(),
-                        },
-                    );
+                let (callee_key, is_tail_call) = match instruction.flow_effect() {
+                    FlowEffect::Flow(Flow::Call { target }) => (target, false),
+                    FlowEffect::Flow(Flow::TailCall { target }) => (target, true),
+                    _ => continue,
+                };
+                if let Some(&callee) = key_to_id.get(&callee_key) {
+                    graph.add_edge(caller, callee, CallMetadata { is_tail_call });
                 }
             }
         }

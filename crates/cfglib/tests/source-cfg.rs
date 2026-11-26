@@ -13,8 +13,8 @@ mod golden;
 use golden::assert_golden;
 
 use cfglib::{
-    Cfg, CfgBuilder, DisplayInstr, DominatorTree, EdgeKind, FlowControl, FlowEffect, InstrInfo,
-    JumpTargets, resolve_jump_edges, verify,
+    BlockId, Cfg, CfgBuilder, DisplayInstr, DominatorTree, EdgeKind, Flow, FlowControl, FlowEffect,
+    InstrInfo, UnresolvedTransfer, resolve_jump_edges, verify,
 };
 
 /// A source symbol identity — deliberately non-`Copy`, non-numeric.
@@ -31,11 +31,9 @@ struct Stmt {
     /// Pre-order CST node id (anchor back into the syntax tree).
     node: u32,
     text: &'static str,
-    effect: FlowEffect,
+    effect: FlowEffect<String, ()>,
     defs: Vec<SymbolId>,
     uses: Vec<SymbolId>,
-    jump_target: Option<String>,
-    label: Option<String>,
 }
 
 impl Stmt {
@@ -43,11 +41,9 @@ impl Stmt {
         Stmt {
             node,
             text,
-            effect: FlowEffect::Fallthrough,
+            effect: FlowEffect::Flow(Flow::Next),
             defs: Vec::new(),
             uses: Vec::new(),
-            jump_target: None,
-            label: None,
         }
     }
 
@@ -63,8 +59,11 @@ impl Stmt {
 }
 
 impl FlowControl for Stmt {
-    fn flow_effect(&self) -> FlowEffect {
-        self.effect
+    type Target = String;
+    type CaseKey = ();
+
+    fn flow_effect(&self) -> FlowEffect<String, ()> {
+        self.effect.clone()
     }
 }
 
@@ -83,18 +82,6 @@ impl InstrInfo for Stmt {
 
     fn defs(&self) -> &[SymbolId] {
         &self.defs
-    }
-}
-
-impl JumpTargets for Stmt {
-    type Target = String;
-
-    fn jump_target(&self) -> Option<String> {
-        self.jump_target.clone()
-    }
-
-    fn label(&self) -> Option<String> {
-        self.label.clone()
     }
 }
 
@@ -138,11 +125,11 @@ fn rendering_needs_only_display_instr_and_escapes_source_text() {
 #[test]
 fn goto_wiring_uses_consumer_string_targets() {
     let mut retry = Stmt::new(10, "retry:");
-    retry.effect = FlowEffect::Label;
-    retry.label = Some(String::from("retry"));
+    retry.effect = FlowEffect::Label(String::from("retry"));
     let mut goto_retry = Stmt::new(11, "goto retry");
-    goto_retry.effect = FlowEffect::Jump;
-    goto_retry.jump_target = Some(String::from("retry"));
+    goto_retry.effect = FlowEffect::Flow(Flow::Jump {
+        target: String::from("retry"),
+    });
 
     let mut cfg = CfgBuilder::build(vec![retry, Stmt::new(12, "work()"), goto_retry]).unwrap();
 
@@ -150,7 +137,7 @@ fn goto_wiring_uses_consumer_string_targets() {
     assert_eq!(resolution.resolved, 1);
     assert_eq!(
         resolution.unresolved,
-        [] as [(cfglib::Id<cfglib::BlockTag>, std::string::String); 0]
+        [] as [UnresolvedTransfer<String, BlockId>; 0]
     );
     let back = cfg
         .edges()

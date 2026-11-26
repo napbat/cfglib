@@ -2,11 +2,11 @@ use std::collections::BTreeSet;
 use std::convert::Infallible;
 
 use cfglib::{
-    BlockId, BlockOrder, Cfg, EdgeKind, Emitter, FlowEffect, Handler, HandlerBody, HandlerKind,
-    Region, contract_edge_mapped, linearize, merge_blocks_mapped, promote_handler_extents,
-    remove_empty_blocks_mapped, remove_unreachable, remove_unreachable_mapped, resolve_jump_edges,
-    simplify, simplify_mapped, split_critical_edges, split_critical_edges_mapped,
-    split_critical_edges_with, verify,
+    BlockId, BlockOrder, Cfg, EdgeKind, Emitter, Flow, FlowEffect, Handler, HandlerBody,
+    HandlerKind, Region, contract_edge_mapped, linearize, merge_blocks_mapped,
+    promote_handler_extents, remove_empty_blocks_mapped, remove_unreachable,
+    remove_unreachable_mapped, resolve_jump_edges, simplify, simplify_mapped, split_critical_edges,
+    split_critical_edges_mapped, split_critical_edges_with, verify,
 };
 use cfglib::{
     DispatchBuilder, DispatchReport, DominatorTree, ExclusiveExtent, ExtentPromotionStatus,
@@ -77,26 +77,26 @@ fn assert_dispatched_complete(result: &Cfg<u32>, report: &DispatchReport, blocks
 
 struct ApiEmitter;
 
+/// The `u32` token of `block`, which both a jump target and a label carry.
+fn block_token(block: BlockId) -> u32 {
+    u32::try_from(block.index()).expect("benchmark block index must fit in u32")
+}
+
 impl Emitter<ApiInst> for ApiEmitter {
     fn emit_jump(&self, target: BlockId) -> ApiInst {
-        let mut instruction = ApiInst::control(FlowEffect::Jump);
-        instruction.jump_target =
-            Some(u32::try_from(target.index()).expect("benchmark block index must fit in u32"));
-        instruction
+        ApiInst::control(FlowEffect::Flow(Flow::Jump {
+            target: block_token(target),
+        }))
     }
 
     fn emit_conditional_branch(&self, _condition: &ApiInst, target: BlockId) -> ApiInst {
-        let mut instruction = ApiInst::control(FlowEffect::ConditionalJump);
-        instruction.jump_target =
-            Some(u32::try_from(target.index()).expect("benchmark block index must fit in u32"));
-        instruction
+        ApiInst::control(FlowEffect::Flow(Flow::Conditional {
+            target: block_token(target),
+        }))
     }
 
     fn emit_block_start(&self, block: BlockId) -> Option<ApiInst> {
-        let mut instruction = ApiInst::control(FlowEffect::Label);
-        instruction.label =
-            Some(u32::try_from(block.index()).expect("benchmark block index must fit in u32"));
-        Some(instruction)
+        Some(ApiInst::control(FlowEffect::Label(block_token(block))))
     }
 }
 
@@ -121,12 +121,10 @@ fn critical_cfg() -> Cfg<ApiInst> {
 fn jump_cfg() -> Cfg<ApiInst> {
     let mut cfg = Cfg::new();
     let target = cfg.new_block();
-    let mut jump = ApiInst::control(FlowEffect::Jump);
-    jump.jump_target = Some(7);
-    cfg.block_mut(cfg.entry()).push(jump);
-    let mut label = ApiInst::control(FlowEffect::Label);
-    label.label = Some(7);
-    cfg.block_mut(target).push(label);
+    cfg.block_mut(cfg.entry())
+        .push(ApiInst::control(FlowEffect::Flow(Flow::Jump { target: 7 })));
+    cfg.block_mut(target)
+        .push(ApiInst::control(FlowEffect::Label(7)));
     cfg
 }
 
@@ -365,7 +363,7 @@ fn register_frontend_utilities(suite: &mut BenchmarkSuite<'_>) {
             assert_eq!(resolution.resolved, 1);
             assert_eq!(
                 resolution.unresolved,
-                [] as [(cfglib::Id<cfglib::BlockTag>, u32); 0]
+                [] as [cfglib::UnresolvedTransfer<u32, cfglib::BlockId>; 0]
             );
             assert!(verify(candidate).is_ok());
         }

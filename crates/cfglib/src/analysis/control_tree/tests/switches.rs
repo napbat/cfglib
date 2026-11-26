@@ -4,7 +4,7 @@
 use super::{has_node_kind, pseudocode};
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::flow::FlowEffect;
+use crate::flow::{Flow, FlowEffect};
 use crate::test_util::{MockInst, ff};
 use crate::{ControlNode, ControlTree};
 
@@ -21,7 +21,7 @@ fn switch_arm_leaving_the_loop() -> Cfg<MockInst> {
     cfg.block_mut(header).push(ff("i < n"));
     cfg.block_mut(dispatch).push(ff("switch op[i]"));
     cfg.block_mut(exit)
-        .push(MockInst(FlowEffect::Return, "return"));
+        .push(MockInst(FlowEffect::Flow(Flow::Return), "return"));
     cfg.block_mut(work).push(ff("work()"));
     cfg.block_mut(rest).push(ff("rest()"));
     cfg.add_edge(cfg.entry(), header, EdgeKind::Fallthrough);
@@ -66,7 +66,7 @@ fn switch_with_case_fallthrough() -> Cfg<MockInst> {
     cfg.block_mut(second).push(ff("b()"));
     cfg.block_mut(default_arm).push(ff("d()"));
     cfg.block_mut(join)
-        .push(MockInst(FlowEffect::Return, "return"));
+        .push(MockInst(FlowEffect::Flow(Flow::Return), "return"));
     cfg.add_edge(cfg.entry(), first, EdgeKind::SwitchCase);
     cfg.add_edge(cfg.entry(), second, EdgeKind::SwitchCase);
     cfg.add_edge(cfg.entry(), default_arm, EdgeKind::Fallthrough);
@@ -109,7 +109,7 @@ fn a_case_that_leaves_an_endless_loop_is_a_break() {
     cfg.block_mut(cfg.entry()).push(ff("start"));
     cfg.block_mut(dispatch).push(ff("switch op"));
     cfg.block_mut(exit)
-        .push(MockInst(FlowEffect::Return, "return"));
+        .push(MockInst(FlowEffect::Flow(Flow::Return), "return"));
     cfg.block_mut(work).push(ff("work()"));
     cfg.block_mut(rest).push(ff("rest()"));
     cfg.add_edge(cfg.entry(), dispatch, EdgeKind::Fallthrough);

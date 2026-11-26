@@ -1,4 +1,5 @@
-//! A [`Supergraph`] over keyed CFGs whose calls come from [`CallInfo`].
+//! A [`Supergraph`] over keyed CFGs whose calls come from the [`Flow`] of
+//! their instructions.
 
 extern crate alloc;
 use alloc::collections::BTreeMap;
@@ -8,7 +9,7 @@ use super::Supergraph;
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
 use crate::dataflow::program_point::ProgramPoint;
-use crate::flow::CallInfo;
+use crate::flow::{Flow, FlowControl, FlowEffect};
 use crate::graph::view::GraphView;
 
 /// An unset slot: a removed block, or an instruction that calls no listed
@@ -27,10 +28,11 @@ const NONE: usize = usize::MAX;
 ///
 /// - The start of a procedure is the start of its entry block.
 /// - An exit is the end of a block without successors.
-/// - A call node is a point whose instruction's [`CallInfo::callee`] names a
-///   listed key; its return site is the next point. A call to an unknown or
-///   unresolved callee is an ordinary instruction. A key listed more than
-///   once resolves to its first procedure.
+/// - A call node is a point whose instruction's flow is a [`Flow::Call`] or
+///   a [`Flow::TailCall`] to a listed key; its return site is the next
+///   point. A call to an unknown callee and a computed call are ordinary
+///   instructions. A key listed more than once resolves to its first
+///   procedure.
 /// - A tail call returns to the point after it, which is normally the end
 ///   of a block without successors and so an exit: the callee's facts flow
 ///   on to the caller's caller.
@@ -38,20 +40,21 @@ const NONE: usize = usize::MAX;
 /// # Examples
 ///
 /// ```
-/// use cfglib::{CallInfo, Cfg, CfgSupergraph, Supergraph};
+/// use cfglib::{Cfg, CfgSupergraph, Flow, FlowControl, FlowEffect, Supergraph};
 ///
 /// #[derive(Debug)]
 /// enum Op {
 ///     Work,
 ///     Call(&'static str),
 /// }
-/// impl CallInfo for Op {
-///     type Callee = &'static str;
-///     fn callee(&self) -> Option<&'static str> {
-///         match self {
-///             Op::Call(name) => Some(name),
-///             Op::Work => None,
-///         }
+/// impl FlowControl for Op {
+///     type Target = &'static str;
+///     type CaseKey = ();
+///     fn flow_effect(&self) -> FlowEffect<&'static str, ()> {
+///         FlowEffect::Flow(match self {
+///             Op::Call(target) => Flow::Call { target: *target },
+///             Op::Work => Flow::Next,
+///         })
 ///     }
 /// }
 ///
@@ -85,11 +88,11 @@ pub struct CfgSupergraph<'g, V> {
 impl<'g, V> CfgSupergraph<'g, V>
 where
     V: CfgView,
-    V::Inst: CallInfo,
+    V::Inst: FlowControl,
 {
     /// The supergraph of `functions`, each a callee key and its CFG.
     #[must_use]
-    pub fn new(functions: &[(<V::Inst as CallInfo>::Callee, &'g V)]) -> Self {
+    pub fn new(functions: &[(<V::Inst as FlowControl>::Target, &'g V)]) -> Self {
         let mut procs_by_key = BTreeMap::new();
         for (proc, (key, _)) in functions.iter().enumerate() {
             procs_by_key.entry(key).or_insert(proc);
@@ -113,9 +116,12 @@ where
                 let instructions = view.instructions(block);
                 for (position, instruction) in instructions.iter().enumerate() {
                     graph.points.push((proc, block, position));
-                    let callee = instruction
-                        .callee()
-                        .and_then(|callee| procs_by_key.get(&callee).copied());
+                    let callee = match instruction.flow_effect() {
+                        FlowEffect::Flow(Flow::Call { target } | Flow::TailCall { target }) => {
+                            procs_by_key.get(&target).copied()
+                        }
+                        _ => None,
+                    };
                     graph.calls.push(callee.unwrap_or(NONE));
                 }
                 graph.points.push((proc, block, instructions.len()));

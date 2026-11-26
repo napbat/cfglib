@@ -19,7 +19,7 @@ fn transfers(
             (
                 transfer.target,
                 transfer.role.kind(),
-                transfer.unresolved_role(),
+                transfer.role.unresolved_role(),
             )
         })
         .collect()
@@ -57,6 +57,14 @@ fn targetless_rows() -> Vec<Row> {
             transfers: vec![],
         },
         Row {
+            flow: Flow::ConditionalReturn,
+            ends_block: true,
+            continues: true,
+            is_call: false,
+            direct_target: None,
+            transfers: vec![(Some(11), ConditionalFalse, None)],
+        },
+        Row {
             flow: Flow::Throw,
             ends_block: true,
             continues: false,
@@ -70,7 +78,7 @@ fn targetless_rows() -> Vec<Row> {
             continues: false,
             is_call: false,
             direct_target: None,
-            transfers: vec![(None, Jump, Some(UnresolvedRole::Indirect))],
+            transfers: vec![(None, Jump, Some(UnresolvedRole::Jump))],
         },
         Row {
             flow: Flow::ConditionalIndirect,
@@ -82,7 +90,7 @@ fn targetless_rows() -> Vec<Row> {
                 (
                     None,
                     ConditionalTrue,
-                    Some(UnresolvedRole::ConditionalIndirect),
+                    Some(UnresolvedRole::ConditionalTaken),
                 ),
                 (Some(11), ConditionalFalse, None),
             ],
@@ -94,7 +102,7 @@ fn targetless_rows() -> Vec<Row> {
             is_call: true,
             direct_target: None,
             transfers: vec![
-                (None, Call, Some(UnresolvedRole::IndirectCall)),
+                (None, Call, Some(UnresolvedRole::Call)),
                 (Some(11), CallReturn, None),
             ],
         },
@@ -104,7 +112,7 @@ fn targetless_rows() -> Vec<Row> {
             continues: false,
             is_call: false,
             direct_target: None,
-            transfers: vec![(None, ExceptionUnwind, Some(UnresolvedRole::Trap))],
+            transfers: vec![(None, ExceptionUnwind, Some(UnresolvedRole::Exceptional))],
         },
         Row {
             flow: Flow::ConditionalTrap,
@@ -113,7 +121,7 @@ fn targetless_rows() -> Vec<Row> {
             is_call: false,
             direct_target: None,
             transfers: vec![
-                (None, ExceptionUnwind, Some(UnresolvedRole::Trap)),
+                (None, ExceptionUnwind, Some(UnresolvedRole::Exceptional)),
                 (Some(11), Fallthrough, None),
             ],
         },
@@ -159,6 +167,14 @@ fn single_target_rows() -> Vec<Row> {
                 (Some(40), Call, Some(UnresolvedRole::Call)),
                 (Some(11), CallReturn, None),
             ],
+        },
+        Row {
+            flow: Flow::TailCall { target: 40 },
+            ends_block: true,
+            continues: false,
+            is_call: true,
+            direct_target: Some(40),
+            transfers: vec![(Some(40), Call, Some(UnresolvedRole::Call))],
         },
         Row {
             flow: Flow::Exceptional { target: 40 },
@@ -332,29 +348,26 @@ fn every_edge_role_maps_to_one_structural_kind_and_only_a_call_role_is_a_call() 
 }
 
 #[test]
-fn a_continuation_and_an_unwind_have_no_unresolved_form() {
-    let target_less = |role| Transfer::<u32, char> { target: None, role };
-    let named = |role| Transfer::<u32, char> {
-        target: Some(5),
-        role,
-    };
+fn a_continuation_and_an_exception_model_role_have_no_unresolved_form() {
     for role in [
-        EdgeRole::Sequential,
+        EdgeRole::<u32, char>::Sequential,
         EdgeRole::ConditionalFallThrough,
         EdgeRole::CallContinuation { call_site: 1 },
         EdgeRole::Unwind { handler: 0 },
+        EdgeRole::Route { route: 0 },
+        EdgeRole::Continue { route: 0 },
     ] {
-        assert_eq!(named(role).unresolved_role(), None, "{role:?}");
-        assert_eq!(target_less(role).unresolved_role(), None, "{role:?}");
+        assert_eq!(role.unresolved_role(), None, "{role:?}");
     }
-    // A computed jump and a computed call are the only transfers whose
-    // missing target is unresolved because it was never named.
+    // A computed transfer reports the role of a named one; its missing
+    // target is the `target: None` of the report.
+    let target_less = |role| Transfer::<u32, char> { target: None, role };
     assert_eq!(
-        target_less(EdgeRole::Jump).unresolved_role(),
-        Some(UnresolvedRole::Indirect)
+        target_less(EdgeRole::Jump).role.unresolved_role(),
+        Some(UnresolvedRole::Jump)
     );
     assert_eq!(
-        target_less(EdgeRole::Call).unresolved_role(),
-        Some(UnresolvedRole::IndirectCall)
+        target_less(EdgeRole::Call).role.unresolved_role(),
+        Some(UnresolvedRole::Call)
     );
 }

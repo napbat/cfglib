@@ -159,12 +159,14 @@ pub type GivenEdges<A, E> = BTreeMap<A, Vec<GivenEdge<A, E>>>;
 pub enum CallPolicy {
     /// A call is a transfer: the graph carries a `Call` edge to a recovered
     /// callee and a `CallReturn` edge to the continuation, and the call ends
-    /// its block.
+    /// its block. A [tail call](Flow::TailCall) has no continuation.
     #[default]
     Edges,
     /// A call is an operation of the caller: the graph carries only the
     /// sequential continuation, the call does not end its block, and every
-    /// call site is reported in [`AddressGraph::calls`].
+    /// call site is reported in [`AddressGraph::calls`]. A
+    /// [tail call](Flow::TailCall) does not continue, so it ends its block,
+    /// which no edge leaves.
     ///
     /// This is the intraprocedural view a function-local recovery wants: an
     /// edge into the callee would fuse two functions' graphs.
@@ -679,10 +681,18 @@ fn inspect_instructions<I: AddressInstruction>(
 
 /// Whether `flow` ends its block under `policy`.
 ///
-/// A flattened call is an operation of its block, so only its continuation
-/// leaves it and it ends nothing.
+/// A flattened call that continues is an operation of its block, so only
+/// its continuation leaves it and it ends nothing. A flattened tail call
+/// ends its block, which [`is_flattened`] leaves without an edge.
 fn ends_block<A, K>(flow: &Flow<A, K>, policy: CallPolicy) -> bool {
-    flow.ends_block() && !(policy == CallPolicy::Flatten && flow.is_call())
+    flow.ends_block() && !(policy == CallPolicy::Flatten && flow.is_call() && flow.continues())
+}
+
+/// Whether `policy` flattens a transfer of `role`: the call transfer into a
+/// callee, which a flattened graph reports as a call site and not as an
+/// edge or a leader.
+fn is_flattened<A, K>(role: &EdgeRole<'_, A, K>, policy: CallPolicy) -> bool {
+    policy == CallPolicy::Flatten && role.is_call()
 }
 
 /// Every call site in address order, for a graph that flattens calls.

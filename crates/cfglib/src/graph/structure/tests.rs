@@ -1,6 +1,6 @@
 use super::*;
 use crate::builder::CfgBuilder;
-use crate::flow::FlowEffect;
+use crate::flow::{Flow, FlowEffect};
 use crate::graph::dominator::DominatorTree;
 use crate::test_util::{MockInst, ff};
 use alloc::vec;
@@ -33,7 +33,7 @@ fn simple_loop_detected() {
         MockInst(FlowEffect::LoopOpen, "loop"),
         ff("body"),
         MockInst(FlowEffect::LoopClose, "endloop"),
-        MockInst(FlowEffect::Return, "ret"),
+        MockInst(FlowEffect::Flow(Flow::Return), "ret"),
     ])
     .unwrap();
     let dom = DominatorTree::compute(&cfg);
@@ -83,7 +83,7 @@ fn nested_loops_have_depth() {
         MockInst(FlowEffect::LoopClose, "end_inner"),
         MockInst(FlowEffect::ConditionalBreak, "breakc_outer"),
         MockInst(FlowEffect::LoopClose, "end_outer"),
-        MockInst(FlowEffect::Return, "ret"),
+        MockInst(FlowEffect::Flow(Flow::Return), "ret"),
     ])
     .unwrap();
     let dom = DominatorTree::compute(&cfg);
@@ -140,7 +140,7 @@ fn detected_depth_is_the_depth_in_the_nesting_tree() {
         MockInst(FlowEffect::LoopClose, "end_inner"),
         MockInst(FlowEffect::ConditionalBreak, "breakc_outer"),
         MockInst(FlowEffect::LoopClose, "end_outer"),
-        MockInst(FlowEffect::Return, "ret"),
+        MockInst(FlowEffect::Flow(Flow::Return), "ret"),
     ])
     .unwrap();
     let dom = DominatorTree::compute(&cfg);
@@ -287,7 +287,7 @@ fn loop_exit_blocks_found() {
         MockInst(FlowEffect::ConditionalBreak, "breakc"),
         ff("body"),
         MockInst(FlowEffect::LoopClose, "endloop"),
-        MockInst(FlowEffect::Return, "ret"),
+        MockInst(FlowEffect::Flow(Flow::Return), "ret"),
     ])
     .unwrap();
     let dom = DominatorTree::compute(&cfg);
@@ -307,7 +307,7 @@ fn canonicalize_loops_adds_exits() {
         MockInst(FlowEffect::ConditionalBreak, "breakc"),
         ff("body"),
         MockInst(FlowEffect::LoopClose, "endloop"),
-        MockInst(FlowEffect::Return, "ret"),
+        MockInst(FlowEffect::Flow(Flow::Return), "ret"),
     ])
     .unwrap();
     let dom = DominatorTree::compute(&cfg);

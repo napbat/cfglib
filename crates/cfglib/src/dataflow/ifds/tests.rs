@@ -8,7 +8,7 @@ use crate::cfg::Cfg;
 use crate::dataflow::fixpoint::{SolveConfig, SolveError};
 use crate::dataflow::program_point::ProgramPoint;
 use crate::edge::EdgeKind;
-use crate::flow::CallInfo;
+use crate::flow::{Flow, FlowControl, FlowEffect};
 use crate::test_util::rng::Rng;
 
 /// A supergraph written out node by node: an exit is a node without
@@ -659,14 +659,15 @@ enum Op {
     Call(u32),
 }
 
-impl CallInfo for Op {
-    type Callee = u32;
+impl FlowControl for Op {
+    type Target = u32;
+    type CaseKey = ();
 
-    fn callee(&self) -> Option<u32> {
-        match self {
-            Op::Call(key) => Some(*key),
-            Op::Work | Op::Source => None,
-        }
+    fn flow_effect(&self) -> FlowEffect<u32, ()> {
+        FlowEffect::Flow(match self {
+            Op::Call(key) => Flow::Call { target: *key },
+            Op::Work | Op::Source => Flow::Next,
+        })
     }
 }
 

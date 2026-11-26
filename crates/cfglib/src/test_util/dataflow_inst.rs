@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use crate::InstrInfo;
 use crate::display::DisplayInstr;
-use crate::flow::{FlowControl, FlowEffect};
+use crate::flow::{Flow, FlowControl, FlowEffect};
 
 /// A mock instruction that carries control-flow, data-flow, and call
 /// semantics.
@@ -15,23 +15,24 @@ use crate::flow::{FlowControl, FlowEffect};
 /// Used across all analysis and transform test modules.
 #[derive(Debug, Clone)]
 pub struct DfInst {
-    /// Control-flow classification.
-    pub effect: FlowEffect,
+    /// Control-flow classification; a call names its callee here.
+    pub effect: FlowEffect<&'static str, ()>,
     /// Mnemonic label.
     pub name: &'static str,
     /// Variables read by this instruction.
     pub uses: Vec<u16>,
     /// Variables written by this instruction.
     pub defs: Vec<u16>,
-    /// If set, this instruction calls the named function.
-    pub callee: Option<&'static str>,
-    /// Whether this call is a tail call.
-    pub tail: bool,
+    /// Whether execution can unwind before this instruction completes.
+    pub throws: bool,
 }
 
 impl FlowControl for DfInst {
-    fn flow_effect(&self) -> FlowEffect {
-        self.effect
+    type Target = &'static str;
+    type CaseKey = ();
+
+    fn flow_effect(&self) -> FlowEffect<&'static str, ()> {
+        self.effect.clone()
     }
 }
 
@@ -52,31 +53,18 @@ impl InstrInfo for DfInst {
     }
 
     fn may_unwind(&self) -> bool {
-        self.effect == FlowEffect::MayThrow
-    }
-}
-
-impl crate::flow::CallInfo for DfInst {
-    type Callee = &'static str;
-
-    fn callee(&self) -> Option<&'static str> {
-        self.callee
-    }
-
-    fn is_tail_call(&self) -> bool {
-        self.tail
+        self.throws
     }
 }
 
 /// Default fields for a `DfInst` (no defs, uses, effects, or callee).
 fn df_base(name: &'static str) -> DfInst {
     DfInst {
-        effect: FlowEffect::Fallthrough,
+        effect: FlowEffect::Flow(Flow::Next),
         name,
         uses: Vec::new(),
         defs: Vec::new(),
-        callee: None,
-        tail: false,
+        throws: false,
     }
 }
 
@@ -101,23 +89,21 @@ pub fn df_ff(name: &'static str) -> DfInst {
     df_base(name)
 }
 
-/// Override the flow effect of a [`DfInst`].
-pub fn df_with_effect(mut inst: DfInst, effect: FlowEffect) -> DfInst {
-    inst.effect = effect;
+/// Make `inst` an instruction that may unwind, as a call does.
+pub fn df_throwing(mut inst: DfInst) -> DfInst {
+    inst.throws = true;
     inst
 }
 
-/// Make `inst` an instruction that may unwind, as a call does.
-pub fn df_throwing(inst: DfInst) -> DfInst {
-    df_with_effect(inst, FlowEffect::MayThrow)
-}
-
-/// Create a call instruction targeting `callee`.
+/// Create a call instruction targeting `callee`, as a tail call when `tail`.
 pub fn df_call(name: &'static str, callee: &'static str, tail: bool) -> DfInst {
+    let flow = if tail {
+        Flow::TailCall { target: callee }
+    } else {
+        Flow::Call { target: callee }
+    };
     DfInst {
-        effect: FlowEffect::Call,
-        callee: Some(callee),
-        tail,
+        effect: FlowEffect::Flow(flow),
         ..df_base(name)
     }
 }

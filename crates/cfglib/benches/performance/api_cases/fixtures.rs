@@ -1,28 +1,26 @@
 use std::borrow::Cow;
 
-use cfglib::{Cfg, DisplayInstr, EdgeKind, FlowControl, FlowEffect, InstrInfo, JumpTargets};
+use cfglib::{Cfg, DisplayInstr, EdgeKind, Flow, FlowControl, FlowEffect, InstrInfo};
 
 #[derive(Clone, Debug)]
 pub(super) struct ApiInst {
-    pub(super) flow: FlowEffect,
+    pub(super) flow: FlowEffect<u32, ()>,
     pub(super) uses: Vec<u32>,
     pub(super) defs: Vec<u32>,
-    pub(super) jump_target: Option<u32>,
-    pub(super) label: Option<u32>,
+
 }
 
 impl ApiInst {
     pub(super) fn pure(definition: u32, uses: Vec<u32>) -> Self {
         Self {
-            flow: FlowEffect::Fallthrough,
+            flow: FlowEffect::Flow(Flow::Next),
             uses,
             defs: vec![definition],
-            jump_target: None,
-            label: None,
+
         }
     }
 
-    pub(super) fn control(flow: FlowEffect) -> Self {
+    pub(super) fn control(flow: FlowEffect<u32, ()>) -> Self {
         Self {
             flow,
             defs: Vec::new(),
@@ -41,10 +39,6 @@ impl InstrInfo for ApiInst {
     fn defs(&self) -> &[Self::Variable] {
         &self.defs
     }
-
-    fn may_unwind(&self) -> bool {
-        self.flow == FlowEffect::MayThrow
-    }
 }
 
 impl DisplayInstr for ApiInst {
@@ -54,20 +48,11 @@ impl DisplayInstr for ApiInst {
 }
 
 impl FlowControl for ApiInst {
-    fn flow_effect(&self) -> FlowEffect {
-        self.flow
-    }
-}
-
-impl JumpTargets for ApiInst {
     type Target = u32;
+    type CaseKey = ();
 
-    fn jump_target(&self) -> Option<Self::Target> {
-        self.jump_target
-    }
-
-    fn label(&self) -> Option<Self::Target> {
-        self.label
+    fn flow_effect(&self) -> FlowEffect<u32, ()> {
+        self.flow.clone()
     }
 }
 

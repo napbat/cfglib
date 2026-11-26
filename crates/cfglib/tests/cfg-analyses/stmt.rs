@@ -1,7 +1,7 @@
 //! The statement language the analyses read: three-address statements over
 //! named locals, with declared effects and returns.
 
-use cfglib::{BlockId, Cfg, EdgeId, EdgeKind, FlowControl, FlowEffect, InstrInfo};
+use cfglib::{BlockId, Cfg, EdgeId, EdgeKind, Flow, FlowControl, FlowEffect, InstrInfo};
 
 pub type Local = &'static str;
 
@@ -76,11 +76,14 @@ impl InstrInfo for Stmt {
 }
 
 impl FlowControl for Stmt {
-    fn flow_effect(&self) -> FlowEffect {
-        match self.kind {
-            Kind::Return => FlowEffect::Return,
-            Kind::Compute | Kind::Effect | Kind::Plain => FlowEffect::Fallthrough,
-        }
+    type Target = ();
+    type CaseKey = ();
+
+    fn flow_effect(&self) -> FlowEffect<(), ()> {
+        FlowEffect::Flow(match self.kind {
+            Kind::Return => Flow::Return,
+            Kind::Compute | Kind::Effect | Kind::Plain => Flow::Next,
+        })
     }
 }
 

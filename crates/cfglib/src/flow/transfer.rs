@@ -3,8 +3,12 @@
 //! [`Flow`] is the one vocabulary for an operation's control transfer. A
 //! machine instruction, a bytecode operation, and a lowered source statement
 //! all state the same thing: whether control continues at the next
-//! position, which targets it names, and how it leaves. Everything that
-//! turns a stream of operations into a graph reads that statement through
+//! position, which targets it names, and how it leaves. Both builders read
+//! it: [`build_address_cfg`](crate::build_address_cfg) through
+//! [`AddressInstruction::flow`](crate::AddressInstruction::flow), and
+//! [`CfgBuilder`](crate::CfgBuilder) through
+//! [`FlowEffect::Flow`](crate::FlowEffect::Flow). Everything that turns a
+//! stream of operations into a graph reads that statement through
 //! [`Flow::transfers`], so the mapping from a flow to its successors is
 //! written once here rather than in every builder and every walker.
 //!
@@ -31,6 +35,9 @@ pub enum Flow<T, K> {
     Next,
     /// Leaves the function normally.
     Return,
+    /// Leaves the function normally when its condition holds. Otherwise,
+    /// continues at the next position.
+    ConditionalReturn,
     /// Leaves the function exceptionally, through the enclosing regions.
     Throw,
     /// Transfers to a target the operation does not name.
@@ -54,6 +61,15 @@ pub enum Flow<T, K> {
     },
     /// Calls `target`, then continues at the next position.
     Call {
+        /// Call target.
+        target: T,
+    },
+    /// Calls `target` in place of returning: the callee returns to this
+    /// function's caller, so control does not continue here.
+    ///
+    /// A computed tail call names no target; it is an
+    /// [`Indirect`](Self::Indirect) jump.
+    TailCall {
         /// Call target.
         target: T,
     },
@@ -108,6 +124,7 @@ impl<T, K> Flow<T, K> {
         matches!(
             self,
             Self::Next
+                | Self::ConditionalReturn
                 | Self::IndirectCall
                 | Self::Conditional { .. }
                 | Self::ConditionalIndirect
@@ -120,13 +137,17 @@ impl<T, K> Flow<T, K> {
     /// Whether the operation calls another function.
     #[must_use]
     pub const fn is_call(&self) -> bool {
-        matches!(self, Self::Call { .. } | Self::IndirectCall)
+        matches!(
+            self,
+            Self::Call { .. } | Self::TailCall { .. } | Self::IndirectCall
+        )
     }
 
     /// The single target the operation names directly, if it names one.
     ///
-    /// A jump, a conditional branch, a call, and an exceptional transfer
-    /// name one target. A switch names several, and the rest name none.
+    /// A jump, a conditional branch, a call, a tail call, and an exceptional
+    /// transfer name one target. A switch names several, and the rest name
+    /// none.
     #[must_use]
     pub fn direct_target(&self) -> Option<T>
     where
@@ -136,9 +157,11 @@ impl<T, K> Flow<T, K> {
             Self::Jump { target }
             | Self::Conditional { target }
             | Self::Call { target }
+            | Self::TailCall { target }
             | Self::Exceptional { target } => Some(*target),
             Self::Next
             | Self::Return
+            | Self::ConditionalReturn
             | Self::Throw
             | Self::Indirect
             | Self::ConditionalIndirect
@@ -156,12 +179,26 @@ impl<T, K> Flow<T, K> {
     /// target is an edge the graph can carry when the target is recovered.
     pub fn transfers(&self, source: T, next: Option<T>) -> Transfers<'_, T, K>
     where
-        T: Copy,
+        T: Clone,
     {
         Transfers {
             flow: self,
-            source,
-            next,
+            continuation: next.map(|next| (source, next)),
+            index: 0,
+        }
+    }
+
+    /// Every transfer this flow makes except its continuation.
+    ///
+    /// A structured stream has no positions that a target can name (its
+    /// targets are labels), so it asks only for the transfers that leave.
+    pub(crate) fn departures(&self) -> Transfers<'_, T, K>
+    where
+        T: Clone,
+    {
+        Transfers {
+            flow: self,
+            continuation: None,
             index: 0,
         }
     }
@@ -187,7 +224,7 @@ pub enum EdgeRole<'k, T, K> {
         /// The consumer's case key.
         key: &'k K,
     },
-    /// Direct call transfer.
+    /// Direct call transfer, of a call or of a tail call.
     Call,
     /// Continuation after a call returns.
     CallContinuation {
@@ -243,6 +280,32 @@ impl<T, K> EdgeRole<'_, T, K> {
     pub const fn is_call(&self) -> bool {
         matches!(self, Self::Call)
     }
+
+    /// The role a transfer reports when its target is not recovered, with
+    /// the case key dropped so the report outlives the flow.
+    ///
+    /// A continuation never reports one: a continuation whose next position
+    /// is not a recovered operation is dropped without a report. Nor do the
+    /// exception-model roles, which the handler table and the unwind routes
+    /// add, not an operation's flow.
+    #[must_use]
+    pub const fn unresolved_role(&self) -> Option<UnresolvedRole> {
+        let role = match self {
+            Self::Jump => UnresolvedRole::Jump,
+            Self::ConditionalTaken => UnresolvedRole::ConditionalTaken,
+            Self::SwitchDefault => UnresolvedRole::SwitchDefault,
+            Self::SwitchCase { index, .. } => UnresolvedRole::SwitchCase { index: *index },
+            Self::Call => UnresolvedRole::Call,
+            Self::Exceptional => UnresolvedRole::Exceptional,
+            Self::Sequential
+            | Self::ConditionalFallThrough
+            | Self::CallContinuation { .. }
+            | Self::Unwind { .. }
+            | Self::Route { .. }
+            | Self::Continue { .. } => return None,
+        };
+        Some(role)
+    }
 }
 
 /// One transfer a flow makes.
@@ -258,22 +321,32 @@ pub struct Transfer<'k, T, K> {
 #[derive(Debug, Clone)]
 pub struct Transfers<'f, T, K> {
     flow: &'f Flow<T, K>,
-    source: T,
-    next: Option<T>,
+    /// The position of the operation and the position control continues
+    /// at, when the caller asks for the continuation and the stream has one.
+    continuation: Option<(T, T)>,
     index: usize,
 }
 
-impl<'f, T: Copy, K> Transfers<'f, T, K> {
+impl<'f, T: Clone, K> Transfers<'f, T, K> {
     fn continuation(&self, role: EdgeRole<'f, T, K>) -> Option<Transfer<'f, T, K>> {
-        self.next.map(|target| Transfer {
-            target: Some(target),
+        self.continuation.as_ref().map(|(_, next)| Transfer {
+            target: Some(next.clone()),
             role,
         })
     }
 
-    fn named(target: T, role: EdgeRole<'f, T, K>) -> Transfer<'f, T, K> {
+    fn call_continuation(&self) -> Option<Transfer<'f, T, K>> {
+        self.continuation.as_ref().map(|(source, next)| Transfer {
+            target: Some(next.clone()),
+            role: EdgeRole::CallContinuation {
+                call_site: source.clone(),
+            },
+        })
+    }
+
+    fn named(target: &T, role: EdgeRole<'f, T, K>) -> Transfer<'f, T, K> {
         Transfer {
-            target: Some(target),
+            target: Some(target.clone()),
             role,
         }
     }
@@ -285,34 +358,33 @@ impl<'f, T: Copy, K> Transfers<'f, T, K> {
     /// slot per case after it.
     fn slot(&self, index: usize) -> Option<Transfer<'f, T, K>> {
         let computed = |role| Transfer { target: None, role };
-        let call_continuation = EdgeRole::CallContinuation {
-            call_site: self.source,
-        };
         match (self.flow, index) {
             (Flow::Next, 0) | (Flow::Exceptional { .. } | Flow::ConditionalTrap, 1) => {
                 self.continuation(EdgeRole::Sequential)
             }
             (Flow::Indirect, 0) => Some(computed(EdgeRole::Jump)),
             (Flow::IndirectCall, 0) => Some(computed(EdgeRole::Call)),
-            (Flow::IndirectCall | Flow::Call { .. }, 1) => self.continuation(call_continuation),
-            (Flow::Jump { target }, 0) => Some(Self::named(*target, EdgeRole::Jump)),
+            (Flow::IndirectCall | Flow::Call { .. }, 1) => self.call_continuation(),
+            (Flow::Jump { target }, 0) => Some(Self::named(target, EdgeRole::Jump)),
             (Flow::Conditional { target }, 0) => {
-                Some(Self::named(*target, EdgeRole::ConditionalTaken))
+                Some(Self::named(target, EdgeRole::ConditionalTaken))
             }
             (Flow::ConditionalIndirect, 0) => Some(computed(EdgeRole::ConditionalTaken)),
-            (Flow::Conditional { .. } | Flow::ConditionalIndirect, 1) => {
+            (Flow::Conditional { .. } | Flow::ConditionalIndirect | Flow::ConditionalReturn, 1) => {
                 self.continuation(EdgeRole::ConditionalFallThrough)
             }
-            (Flow::Call { target }, 0) => Some(Self::named(*target, EdgeRole::Call)),
-            (Flow::Exceptional { target }, 0) => Some(Self::named(*target, EdgeRole::Exceptional)),
+            (Flow::Call { target } | Flow::TailCall { target }, 0) => {
+                Some(Self::named(target, EdgeRole::Call))
+            }
+            (Flow::Exceptional { target }, 0) => Some(Self::named(target, EdgeRole::Exceptional)),
             (Flow::Trap | Flow::ConditionalTrap, 0) => Some(computed(EdgeRole::Exceptional)),
             (Flow::Switch { default, .. }, 0) => {
-                Some(Self::named(*default, EdgeRole::SwitchDefault))
+                Some(Self::named(default, EdgeRole::SwitchDefault))
             }
             (Flow::Switch { cases, .. }, index) => {
                 let (key, target) = cases.get(index - 1)?;
                 Some(Self::named(
-                    *target,
+                    target,
                     EdgeRole::SwitchCase {
                         index: index - 1,
                         key,
@@ -324,7 +396,7 @@ impl<'f, T: Copy, K> Transfers<'f, T, K> {
     }
 }
 
-impl<'f, T: Copy, K> Iterator for Transfers<'f, T, K> {
+impl<'f, T: Clone, K> Iterator for Transfers<'f, T, K> {
     type Item = Transfer<'f, T, K>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -345,8 +417,13 @@ impl<T, K> Transfers<'_, T, K> {
     fn slot_count(&self) -> usize {
         match self.flow {
             Flow::Return | Flow::Throw => 0,
-            Flow::Next | Flow::Indirect | Flow::Jump { .. } | Flow::Trap => 1,
-            Flow::IndirectCall
+            Flow::Next
+            | Flow::Indirect
+            | Flow::Jump { .. }
+            | Flow::TailCall { .. }
+            | Flow::Trap => 1,
+            Flow::ConditionalReturn
+            | Flow::IndirectCall
             | Flow::Conditional { .. }
             | Flow::ConditionalIndirect
             | Flow::Call { .. }
@@ -358,18 +435,16 @@ impl<T, K> Transfers<'_, T, K> {
 }
 
 /// Why one transfer could not be connected to a recovered operation.
+///
+/// This is the [`EdgeRole`] of the transfer without its borrowed case key.
+/// Whether the transfer was computed or named a target that is not
+/// recovered is the `target` of its [`UnresolvedTransfer`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnresolvedRole {
-    /// A computed jump with no statically named target.
-    Indirect,
-    /// A computed call with no statically named target.
-    IndirectCall,
+    /// Unconditional jump.
+    Jump,
     /// Taken path of a conditional branch.
     ConditionalTaken,
-    /// Computed taken path of a conditional branch.
-    ConditionalIndirect,
-    /// Direct unconditional jump.
-    Jump,
     /// Switch default destination.
     SwitchDefault,
     /// One switch case destination, by its dispatch-order position.
@@ -377,40 +452,11 @@ pub enum UnresolvedRole {
         /// Zero-based case position in [`Flow::Switch`].
         index: usize,
     },
-    /// Direct call target.
+    /// Call target, of a call or of a tail call.
     Call,
-    /// Exceptional or alternate target the operation names.
+    /// Exceptional or alternate target, or the platform destination of a
+    /// trap.
     Exceptional,
-    /// A trap whose destination the platform states.
-    Trap,
-}
-
-impl<T, K> Transfer<'_, T, K> {
-    /// The role this transfer reports when its target is not recovered.
-    ///
-    /// A continuation and an unwind never report an unresolved target, so
-    /// they return `None`: a continuation whose next position is not a
-    /// recovered operation is dropped without a report, and an unwind is
-    /// wired by the exception model, not by an operation's flow.
-    #[must_use]
-    pub const fn unresolved_role(&self) -> Option<UnresolvedRole> {
-        let role = match (&self.role, self.target.is_some()) {
-            (EdgeRole::Jump, false) => UnresolvedRole::Indirect,
-            (EdgeRole::Call, false) => UnresolvedRole::IndirectCall,
-            (EdgeRole::ConditionalTaken, false) => UnresolvedRole::ConditionalIndirect,
-            (EdgeRole::ConditionalTaken, true) => UnresolvedRole::ConditionalTaken,
-            (EdgeRole::Jump, true) => UnresolvedRole::Jump,
-            (EdgeRole::SwitchDefault, true) => UnresolvedRole::SwitchDefault,
-            (EdgeRole::SwitchCase { index, .. }, true) => {
-                UnresolvedRole::SwitchCase { index: *index }
-            }
-            (EdgeRole::Call, true) => UnresolvedRole::Call,
-            (EdgeRole::Exceptional, true) => UnresolvedRole::Exceptional,
-            (EdgeRole::Exceptional, false) => UnresolvedRole::Trap,
-            _ => return None,
-        };
-        Some(role)
-    }
 }
 
 /// One transfer that leaves the recovered operations.
@@ -418,10 +464,14 @@ impl<T, K> Transfer<'_, T, K> {
 /// A named but unavailable destination keeps its identity in `target`; a
 /// computed transfer has `None`. The local successors of the same operation
 /// stay in the graph.
+///
+/// `S` identifies the transferring operation: its position for
+/// [`build_address_cfg`](crate::build_address_cfg), its block for
+/// [`resolve_jump_edges`](crate::resolve_jump_edges).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UnresolvedTransfer<T> {
-    /// Position of the transferring operation.
-    pub source: T,
+pub struct UnresolvedTransfer<T, S = T> {
+    /// The transferring operation.
+    pub source: S,
     /// Named destination outside the recovered operations, if any.
     pub target: Option<T>,
     /// Semantic role of the missing successor.
@@ -441,6 +491,7 @@ pub struct CallSite<T> {
 mod tests {
     extern crate alloc;
 
+    use alloc::string::String;
     use alloc::vec;
     use alloc::vec::Vec;
 
@@ -456,15 +507,17 @@ mod tests {
     /// are the statement of what it does, so every list must agree with them.
     #[test]
     fn the_flow_predicates_agree_with_the_transfers_of_every_variant() {
-        let flows: [Flow<u32, char>; 14] = [
+        let flows: [Flow<u32, char>; 16] = [
             Flow::Next,
             Flow::Return,
+            Flow::ConditionalReturn,
             Flow::Throw,
             Flow::Indirect,
             Flow::IndirectCall,
             Flow::Jump { target: 1 },
             Flow::Conditional { target: 1 },
             Flow::Call { target: 1 },
+            Flow::TailCall { target: 1 },
             Flow::Exceptional { target: 1 },
             Flow::ConditionalIndirect,
             Flow::Trap,
@@ -512,6 +565,13 @@ mod tests {
                 !matches!(flow, Flow::Next),
                 "{flow:?} ends its block"
             );
+            let departing: Vec<_> = flow.departures().collect();
+            let leaving: Vec<_> = made
+                .iter()
+                .copied()
+                .filter(|transfer| !is_continuation(&transfer.role))
+                .collect();
+            assert_eq!(departing, leaving, "{flow:?} departs as it transfers");
         }
     }
 
@@ -542,22 +602,50 @@ mod tests {
     }
 
     #[test]
+    fn a_conditional_return_leaves_by_no_edge_and_falls_through_otherwise() {
+        let flow: Flow<u32, char> = Flow::ConditionalReturn;
+        assert_eq!(
+            transfers(&flow),
+            vec![Transfer {
+                target: Some(11),
+                role: EdgeRole::ConditionalFallThrough
+            }]
+        );
+        assert_eq!(flow.departures().count(), 0);
+    }
+
+    #[test]
+    fn a_tail_call_calls_its_target_and_does_not_continue() {
+        let flow: Flow<u32, char> = Flow::TailCall { target: 40 };
+        assert_eq!(
+            transfers(&flow),
+            vec![Transfer {
+                target: Some(40),
+                role: EdgeRole::Call
+            }]
+        );
+        assert!(flow.is_call());
+        assert!(!flow.continues());
+        assert_eq!(flow.direct_target(), Some(40));
+    }
+
+    #[test]
     fn computed_transfers_have_no_target() {
         let jump: Flow<u32, char> = Flow::Indirect;
         assert_eq!(transfers(&jump)[0].target, None);
         assert_eq!(transfers(&jump)[0].role, EdgeRole::Jump);
         assert_eq!(
-            transfers(&jump)[0].unresolved_role(),
-            Some(UnresolvedRole::Indirect)
+            transfers(&jump)[0].role.unresolved_role(),
+            Some(UnresolvedRole::Jump)
         );
 
         let call: Flow<u32, char> = Flow::IndirectCall;
         let all = transfers(&call);
         assert_eq!(all[0].target, None);
         assert!(all[0].role.is_call());
-        assert_eq!(all[0].unresolved_role(), Some(UnresolvedRole::IndirectCall));
+        assert_eq!(all[0].role.unresolved_role(), Some(UnresolvedRole::Call));
         assert_eq!(all[1].role, EdgeRole::CallContinuation { call_site: 10 });
-        assert_eq!(all[1].unresolved_role(), None);
+        assert_eq!(all[1].role.unresolved_role(), None);
         assert!(call.is_call());
     }
 
@@ -569,12 +657,12 @@ mod tests {
         assert_eq!(all[0].target, None);
         assert_eq!(all[0].role, EdgeRole::ConditionalTaken);
         assert_eq!(
-            all[0].unresolved_role(),
-            Some(UnresolvedRole::ConditionalIndirect)
+            all[0].role.unresolved_role(),
+            Some(UnresolvedRole::ConditionalTaken)
         );
         assert_eq!(all[1].target, Some(11));
         assert_eq!(all[1].role, EdgeRole::ConditionalFallThrough);
-        assert_eq!(all[1].unresolved_role(), None);
+        assert_eq!(all[1].role.unresolved_role(), None);
     }
 
     #[test]
@@ -588,8 +676,8 @@ mod tests {
             }]
         );
         assert_eq!(
-            transfers(&trap)[0].unresolved_role(),
-            Some(UnresolvedRole::Trap)
+            transfers(&trap)[0].role.unresolved_role(),
+            Some(UnresolvedRole::Exceptional)
         );
         assert_eq!(transfers(&trap)[0].role.kind(), EdgeKind::ExceptionUnwind);
 
@@ -597,7 +685,10 @@ mod tests {
         let all = transfers(&conditional);
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].target, None);
-        assert_eq!(all[0].unresolved_role(), Some(UnresolvedRole::Trap));
+        assert_eq!(
+            all[0].role.unresolved_role(),
+            Some(UnresolvedRole::Exceptional)
+        );
         assert_eq!(all[1].target, Some(11));
         assert_eq!(all[1].role, EdgeRole::Sequential);
     }
@@ -645,10 +736,30 @@ mod tests {
         );
         assert_eq!(all[2].target, Some(70));
         assert_eq!(
-            all[2].unresolved_role(),
+            all[2].role.unresolved_role(),
             Some(UnresolvedRole::SwitchCase { index: 1 })
         );
         assert_eq!(flow.direct_target(), None);
+    }
+
+    /// A label token of a structured stream need not be `Copy`; the
+    /// transfers hand out clones of the targets the flow owns.
+    #[test]
+    fn owned_targets_are_cloned_into_the_transfers() {
+        let flow: Flow<String, char> = Flow::Conditional {
+            target: String::from("retry"),
+        };
+        let all: Vec<_> = flow
+            .transfers(String::from("here"), Some(String::from("next")))
+            .map(|transfer| (transfer.target, transfer.role.kind()))
+            .collect();
+        assert_eq!(
+            all,
+            [
+                (Some(String::from("retry")), EdgeKind::ConditionalTrue),
+                (Some(String::from("next")), EdgeKind::ConditionalFalse),
+            ]
+        );
     }
 
     #[test]

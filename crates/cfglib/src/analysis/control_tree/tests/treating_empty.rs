@@ -4,7 +4,7 @@ use super::{contains_block, has_node_kind};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::flow::FlowEffect;
+use crate::flow::{Flow, FlowEffect};
 use crate::test_util::{MockInst, ff};
 use crate::{BlockSpan, ControlNode, ControlTree};
 
@@ -26,7 +26,7 @@ fn loop_with_jump_trampoline(hop_instruction: bool) -> (Cfg<MockInst>, BlockId) 
     }
     cfg.block_mut(tail).push(ff("tail_inst"));
     cfg.block_mut(exit)
-        .push(MockInst(FlowEffect::Return, "after_loop"));
+        .push(MockInst(FlowEffect::Flow(Flow::Return), "after_loop"));
     cfg.add_edge(cfg.entry(), header, EdgeKind::Fallthrough);
     cfg.add_edge(header, body, EdgeKind::ConditionalTrue);
     cfg.add_edge(header, exit, EdgeKind::ConditionalFalse);

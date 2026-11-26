@@ -112,7 +112,7 @@ fn expected_leaders<I: Isa>(built: &Built<I>) -> BTreeSet<usize> {
             mark(&mut leaders, end);
         }
         let flow = instruction.flow();
-        if matches!(flow, Flow::Next) || (flatten && flow.is_call()) {
+        if matches!(flow, Flow::Next) || (flatten && flow.is_call() && flow.continues()) {
             continue;
         }
         if position + 1 < count {
@@ -122,10 +122,15 @@ fn expected_leaders<I: Isa>(built: &Built<I>) -> BTreeSet<usize> {
             mark(&mut leaders, end);
         }
         match &flow {
-            Flow::Jump { target }
-            | Flow::Conditional { target }
-            | Flow::Call { target }
-            | Flow::Exceptional { target } => mark(&mut leaders, *target),
+            Flow::Jump { target } | Flow::Conditional { target } | Flow::Exceptional { target } => {
+                mark(&mut leaders, *target);
+            }
+            // A flattened graph reports a callee as a call site, not a leader.
+            Flow::Call { target } | Flow::TailCall { target } => {
+                if !flatten {
+                    mark(&mut leaders, *target);
+                }
+            }
             Flow::Switch { default, cases } => {
                 mark(&mut leaders, *default);
                 for (_, target) in cases {
@@ -134,6 +139,7 @@ fn expected_leaders<I: Isa>(built: &Built<I>) -> BTreeSet<usize> {
             }
             Flow::Next
             | Flow::Return
+            | Flow::ConditionalReturn
             | Flow::Throw
             | Flow::Indirect
             | Flow::ConditionalIndirect

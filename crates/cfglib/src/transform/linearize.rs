@@ -364,13 +364,13 @@ mod tests {
 
     impl Emitter<MockInst> for TestEmitter {
         fn emit_jump(&self, _target: BlockId) -> MockInst {
-            MockInst(crate::flow::FlowEffect::Fallthrough, "jump")
+            ff("jump")
         }
         fn emit_conditional_branch(&self, _cond: &MockInst, _target: BlockId) -> MockInst {
-            MockInst(crate::flow::FlowEffect::Fallthrough, "branch")
+            ff("branch")
         }
         fn emit_block_start(&self, _block: BlockId) -> Option<MockInst> {
-            Some(MockInst(crate::flow::FlowEffect::Fallthrough, "label"))
+            Some(ff("label"))
         }
     }
 
@@ -560,7 +560,7 @@ mod tests {
             _condition: &MockInst,
             _target: BlockId,
         ) -> Option<MockInst> {
-            Some(MockInst(crate::flow::FlowEffect::Fallthrough, "branch-not"))
+            Some(ff("branch-not"))
         }
         fn elides_jump_to_next(&self) -> bool {
             true

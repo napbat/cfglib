@@ -243,14 +243,14 @@ fn region_of<I: AddressInstruction, E>(
 }
 
 /// Tests whether the last instruction of `block` returns to the runtime: a
-/// return, or a jump that has no edge but unwind and call edges. That jump
-/// leaves the function, so it is a tail call.
+/// return, a tail call, or a jump that has no edge but exception and call
+/// edges. That jump leaves the function, so it is a tail call.
 fn returns_to_runtime<I: AddressInstruction, E>(cfg: &Cfg<I, E>, block: BlockId) -> bool {
     cfg.block(block)
         .instructions()
         .last()
         .is_some_and(|instruction| match instruction.flow() {
-            Flow::Return => true,
+            Flow::Return | Flow::TailCall { .. } => true,
             Flow::Jump { .. } => cfg.outgoing(block).all(|edge| {
                 matches!(
                     cfg.edge(edge).data().kind(),

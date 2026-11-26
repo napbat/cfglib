@@ -103,8 +103,8 @@
 //!
 //! Frontends with a flat, structured instruction stream (shader bytecode,
 //! structured ISAs) can instead implement [`FlowControl`] and use
-//! [`CfgBuilder::build`]; [`resolve_jump_edges`] wires explicit gotos
-//! afterwards via [`JumpTargets`].
+//! [`CfgBuilder::build`]; [`resolve_jump_edges`] wires the targets that
+//! their [`Flow`]s name afterwards.
 //!
 //! # Extension contracts
 //!
@@ -130,14 +130,13 @@
 //!                            `Cfg` implements it, every instruction-level
 //!                            analysis reads it)
 //!
-//! FlowControl               (required by CfgBuilder)
-//!   └─ JumpTargets          (optional — explicit goto/label wiring, Target)
+//! FlowControl               (required by CfgBuilder and call graphs —
+//!                            structured markers or a Flow; Target, CaseKey)
 //!
 //! InstrInfo<Variable = V>   (optional — native IR variables for dataflow)
 //!   └─ MemoryEventInfo      (optional — memory data flow + fences, Location + Fence)
 //!
 //! DisplayInstr              (optional — rendering only: DOT, text)
-//! CallInfo                  (optional — call graphs, Callee)
 //! ```
 //!
 //! [`MemoryEventInfo`] is the sole instruction-side memory contract. Memory
@@ -283,8 +282,8 @@ pub use effects::{
 };
 pub use exception::{ExceptionDisposition, ExceptionFlow, ExceptionPhase};
 pub use flow::{
-    CallInfo, CallSite, EdgeRole, Flow, FlowControl, FlowEffect, JumpTargets, Transfer, Transfers,
-    UnresolvedRole, UnresolvedTransfer,
+    CallSite, EdgeRole, Flow, FlowControl, FlowEffect, Transfer, Transfers, UnresolvedRole,
+    UnresolvedTransfer,
 };
 pub use graph::call_graph::{
     CallMetadata, FunctionIndex, FunctionNode, call_graph, call_graph_indexed, find_function,

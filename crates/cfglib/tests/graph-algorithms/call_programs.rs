@@ -5,9 +5,9 @@
 use std::collections::BTreeSet;
 
 use cfglib::{
-    BasicBlock, CallInfo, CallMetadata, Cfg, EdgeKind, FunctionIndex, FunctionNode, Graph, NodeId,
-    call_graph, call_graph_indexed, find_function, is_recursive_function, propagate_summaries,
-    propagate_summaries_widened, recursive_functions,
+    BasicBlock, CallMetadata, Cfg, EdgeKind, Flow, FlowControl, FlowEffect, FunctionIndex,
+    FunctionNode, Graph, NodeId, call_graph, call_graph_indexed, find_function,
+    is_recursive_function, propagate_summaries, propagate_summaries_widened, recursive_functions,
 };
 
 use crate::Lcg;
@@ -23,18 +23,17 @@ enum Op {
     Compute,
 }
 
-impl CallInfo for Op {
-    type Callee = &'static str;
+impl FlowControl for Op {
+    type Target = &'static str;
+    type CaseKey = ();
 
-    fn callee(&self) -> Option<&'static str> {
-        match self {
-            Self::Call(callee) | Self::TailCall(callee) => Some(callee),
-            Self::CallIndirect | Self::Effect(_) | Self::Compute => None,
-        }
-    }
-
-    fn is_tail_call(&self) -> bool {
-        matches!(self, Self::TailCall(_))
+    fn flow_effect(&self) -> FlowEffect<&'static str, ()> {
+        FlowEffect::Flow(match *self {
+            Self::Call(target) => Flow::Call { target },
+            Self::TailCall(target) => Flow::TailCall { target },
+            Self::CallIndirect => Flow::IndirectCall,
+            Self::Effect(_) | Self::Compute => Flow::Next,
+        })
     }
 }
 

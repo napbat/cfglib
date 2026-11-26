@@ -170,7 +170,7 @@ impl<N: DenseId> IntervalAnalysis<N> {
 mod tests {
     use super::*;
     use crate::builder::CfgBuilder;
-    use crate::flow::FlowEffect;
+    use crate::flow::{Flow, FlowEffect};
     use crate::test_util::{MockInst, ff};
     use crate::{DenseId, Graph, GraphView, NodeId, Rooted, RootedView};
     use alloc::format;
@@ -258,7 +258,7 @@ mod tests {
             MockInst(FlowEffect::LoopOpen, "loop"),
             ff("body"),
             MockInst(FlowEffect::LoopClose, "endloop"),
-            MockInst(FlowEffect::Return, "ret"),
+            MockInst(FlowEffect::Flow(Flow::Return), "ret"),
         ])
         .unwrap();
         let result = IntervalAnalysis::compute(&cfg);
