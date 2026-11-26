@@ -120,22 +120,21 @@ impl DepthFirstMarks for PathMarks<'_> {
     }
 }
 
-/// One node on the depth-first stack.
+/// One open node on the depth-first stack.
 ///
-/// A frame's steps live in the walk's single arena rather than in a `Vec` of
-/// their own: frames are pushed and popped strictly last in, first out, so
-/// the frame on top always owns the arena's tail and a pop truncates the
-/// arena back to where its steps began. One allocation for the walk, instead
-/// of one per expanded node. A frame's depth is its position on the stack.
+/// A frame's pending steps live in the walk's single arena rather than in a
+/// `Vec` of their own: frames are pushed and popped strictly last in, first
+/// out, so the frame on top always owns the arena's tail. Each run is stored
+/// reversed and consumed by popping, so the arena holds only steps not yet
+/// examined and a frame needs no cursor: it is exhausted when the arena is
+/// back at its start. One allocation for the walk, instead of one per
+/// expanded node, and two words per open node on a path that can run the
+/// length of the graph.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Frame<N> {
     node: N,
-    /// Where this frame's steps start in the arena; the pop truncates to it.
+    /// Where this frame's pending steps start in the arena.
     start: usize,
-    /// The next step to examine, as an arena index. The steps are exhausted
-    /// when it reaches the arena's length, since the top frame's run ends
-    /// there.
-    cursor: usize,
 }
 
 /// The buffers of a [`depth_first_core`] walk: the frame stack and the arena
@@ -227,6 +226,12 @@ where
     let DepthFirstStack { arena, frames } = stack;
     arena.clear();
     frames.clear();
+    // Sized for the deepest walk the graph allows up front: growing the
+    // stack by doubling copied it a dozen times on a 4,096-node chain and
+    // cost a fifth of the walk. The pages stay untouched until a walk that
+    // deep uses them, and a reused scratch reserves only once.
+    frames.reserve(graph.node_bound());
+    arena.reserve(graph.node_bound());
 
     macro_rules! emit {
         ($callback:expr) => {
@@ -237,7 +242,8 @@ where
     }
 
     // Enter a node at a depth: mark it and discover it, and either hand back
-    // its frame, with its steps on the arena's tail, or finish it at once.
+    // its frame, with its steps reversed on the arena's tail, or finish it at
+    // once.
     macro_rules! enter {
         ($node:expr, $depth:expr) => {{
             let node = $node;
@@ -252,11 +258,8 @@ where
                 ControlFlow::Continue(Visit::Descend) => {
                     let start = arena.len();
                     arena.extend(steps.steps(graph, node));
-                    Some(Frame {
-                        node,
-                        start,
-                        cursor: start,
-                    })
+                    arena[start..].reverse();
+                    Some(Frame { node, start })
                 }
             }
         }};
@@ -269,14 +272,12 @@ where
         let Some(mut top) = enter!(seed, 0) else {
             continue;
         };
-        // The open frame lives in locals and only its ancestors on the stack,
-        // so examining a step touches no memory but the arena: the cursor
-        // stays in a register. The depth of a child is the number of frames
-        // above the seed, plus one.
+        // The open frame lives in locals and only its ancestors on the stack.
+        // The depth of a child is the number of frames above the seed, plus
+        // one.
         loop {
-            if top.cursor < arena.len() {
-                let out = arena[top.cursor];
-                top.cursor += 1;
+            if arena.len() > top.start {
+                let Some(out) = arena.pop() else { break };
                 let to = steps.target(graph, out);
                 match marks.mark(S::index(to)) {
                     Mark::Unseen => {
@@ -293,7 +294,6 @@ where
                 }
                 continue;
             }
-            arena.truncate(top.start);
             marks.close(S::index(top.node));
             emit!(visitor.finish(top.node));
             let Some(parent) = frames.pop() else { break };

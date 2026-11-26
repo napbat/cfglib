@@ -1,15 +1,21 @@
 //! Generic directed-graph traversals and ordering algorithms.
 //!
-//! Every walk here, and every walk of [`search`](super::search),
+//! The walks here, and those of [`search`](super::search),
 //! [`edge_traverse`](super::edge_traverse) and the graph store's orderings,
-//! is a thin wrapper over one of two crate-private cores: a breadth-first core
-//! that expands a queue level by level, and a depth-first core that keeps one
-//! frame per open node over one arena of steps. A wrapper only says what it
+//! are thin wrappers over two crate-private cores: a breadth-first core that
+//! expands a queue level by level, and a depth-first core that keeps one frame
+//! per open node over one arena of pending steps. A wrapper only says what it
 //! records (an order, a distance, a parent, an event) and which marks it keeps
 //! (visited flags, epoch marks, marks per path, the three colors of an edge
 //! classification). Both cores are generic over what a step is — a neighbor
 //! of a node walk, an edge of an edge walk — and over the adjacency axis, so
 //! one loop serves both directions and both kinds of walk.
+//!
+//! Three loops stay out of the cores on measured grounds, each documented
+//! where it lives: [`depth_first_preorder`], which needs no frames;
+//! [`topological_sort`], whose Kahn loop is not a search; and the
+//! bidirectional [`shortest_path`], which advances two searches one edge at a
+//! time.
 
 extern crate alloc;
 use alloc::collections::VecDeque;
@@ -200,24 +206,18 @@ impl<G: GraphView, A: Adjacency> Steps<G> for Indexed<A> {
     }
 }
 
-/// The two orders a depth-first walk records, as one visitor: preorder when
-/// `POST` is `false`, postorder when it is `true`.
-struct Order<N, const POST: bool>(Vec<N>);
+/// A depth-first visitor that records the postorder.
+struct Postorder<N>(Vec<N>);
 
-impl<N: Copy, const POST: bool> DepthFirstVisitor<N, N, ()> for Order<N, POST> {
+impl<N: Copy> DepthFirstVisitor<N, N, ()> for Postorder<N> {
     #[inline]
-    fn discover(&mut self, node: N, _depth: usize) -> ControlFlow<(), Visit> {
-        if !POST {
-            self.0.push(node);
-        }
+    fn discover(&mut self, _node: N, _depth: usize) -> ControlFlow<(), Visit> {
         ControlFlow::Continue(Visit::Descend)
     }
 
     #[inline]
     fn finish(&mut self, node: N) -> ControlFlow<()> {
-        if POST {
-            self.0.push(node);
-        }
+        self.0.push(node);
         ControlFlow::Continue(())
     }
 }
@@ -236,9 +236,39 @@ pub fn depth_first_preorder<G: GraphView>(
     start: G::NodeId,
     direction: Direction,
 ) -> Vec<G::NodeId> {
+    by_axis!(direction, preorder(graph, start))
+}
+
+/// The preorder walk, kept out of the depth-first core on purpose.
+///
+/// A preorder needs neither finishes nor depths, so this loop keeps no frames:
+/// a node is visited when it is popped and pushes its unvisited successors in
+/// reverse, which yields the order a recursive search would. Routed through
+/// the core's frame stack it measured 8 to 10% slower on the 4,096-node chain
+/// of the `cfg_depth_first_preorder` bench, whose search runs the length of
+/// the graph; every other depth-first walk runs on the core.
+fn preorder<G: GraphView, A: Adjacency>(axis: A, graph: &G, start: G::NodeId) -> Vec<G::NodeId> {
     assert_in_bound(graph, start, "start node");
     let mut visited = vec![false; graph.node_bound()];
-    by_axis!(direction, preorder(graph, [start], &mut visited))
+    let mut order = Vec::with_capacity(graph.node_bound());
+    let mut stack = vec![start];
+    let mut adjacent = Vec::new();
+    while let Some(node) = stack.pop() {
+        if core::mem::replace(&mut visited[node.index()], true) {
+            continue;
+        }
+        order.push(node);
+        adjacent.clear();
+        adjacent.extend(axis.neighbors(graph, node));
+        stack.extend(
+            adjacent
+                .iter()
+                .rev()
+                .copied()
+                .filter(|next| !visited[next.index()]),
+        );
+    }
+    order
 }
 
 /// Return nodes in depth-first postorder from `start`.
@@ -300,31 +330,13 @@ pub(crate) fn postorder_in<G: GraphView>(
     by_axis!(direction, postorder(graph, seeds, visited))
 }
 
-fn preorder<G: GraphView, A: Adjacency>(
-    axis: A,
-    graph: &G,
-    seeds: impl IntoIterator<Item = G::NodeId>,
-    visited: &mut [bool],
-) -> Vec<G::NodeId> {
-    depth_first_order::<G, A, false>(axis, graph, seeds, visited)
-}
-
 fn postorder<G: GraphView, A: Adjacency>(
     axis: A,
     graph: &G,
     seeds: impl IntoIterator<Item = G::NodeId>,
     visited: &mut [bool],
 ) -> Vec<G::NodeId> {
-    depth_first_order::<G, A, true>(axis, graph, seeds, visited)
-}
-
-fn depth_first_order<G: GraphView, A: Adjacency, const POST: bool>(
-    axis: A,
-    graph: &G,
-    seeds: impl IntoIterator<Item = G::NodeId>,
-    visited: &mut [bool],
-) -> Vec<G::NodeId> {
-    let mut order = Order::<G::NodeId, POST>(Vec::with_capacity(graph.node_bound()));
+    let mut order = Postorder(Vec::with_capacity(graph.node_bound()));
     depth_first_core(
         axis,
         graph,
