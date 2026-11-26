@@ -2,26 +2,29 @@
 
 extern crate alloc;
 
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 use smallvec::SmallVec;
 
 use crate::graph::edge_view::{EdgeRef, EdgeView};
+use crate::graph::open::{OpenFold, OpenFoldConfig, OpenFoldMemo, Revisit, open_fold_in};
 use crate::graph::scc::{SccDecomposition, SccNumbering};
-use crate::graph::search::{PathBudget, PathSearchConfig, PathSearchStats, retain_unshadowed};
+use crate::graph::search::{PathBudget, PathSearchConfig, PathSearchStats};
 use crate::graph::view::{GraphView, assert_in_bound};
 
 use super::index::ScopeResolutionIndex;
 use super::query::{
     ScopeGraphPathLabel, ScopePath, ScopeQuery, ScopeResolution, ScopeResolutionCandidate,
-    label_word_shadows,
 };
 use super::storage::{ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeId};
 
+mod fold;
 #[cfg(test)]
 mod tests;
+
+use fold::{EnvironmentFold, EnvironmentMark, Reach};
 
 /// A scope-graph query whose hooks see neither the path nor the reference,
 /// so the visible data of a scope can be computed once and shared.
@@ -106,7 +109,10 @@ pub trait ScopeEnvironmentQuery<S, L, R, D, Q> {
 ///
 /// [`index`](Self::index) fills the cache for all the references of a graph.
 /// A kept cache serves later queries ([`resolve`](Self::resolve)), stored or
-/// ephemeral, from the same environments.
+/// ephemeral, from the same environments. The environments are the answers
+/// of a memoizing [`open_fold_in`] whose [`OpenFoldMemo`] the cache keeps:
+/// the environment of a scope folds the scope's own accepted data and the
+/// environments its admitted edges reach.
 ///
 /// - **Cycles.** [`new`](Self::new) finds the strongly connected components
 ///   of the graph once. A scope on a cycle (in a component of several scopes,
@@ -139,16 +145,12 @@ pub trait ScopeEnvironmentQuery<S, L, R, D, Q> {
 #[derive(Debug, Clone)]
 pub struct ScopeEnvironmentCache<St, K> {
     on_cycle: Vec<bool>,
-    environments: BTreeMap<EnvironmentKey<St>, Environment<K>>,
+    environments: OpenFoldMemo<EnvironmentMark<St>, Environment<K>>,
     links: Vec<Link>,
 }
 
-/// A scope, the state there, and the edges left under the length bound:
-/// what an environment depends on.
-type EnvironmentKey<St> = (ScopeId, St, Option<usize>);
-
 /// The visible data of one scope in one state, by key.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Environment<K> {
     entries: BTreeMap<K, SmallVec<[Entry; 1]>>,
     /// Whether the length bound refused an extension below this scope.
@@ -156,7 +158,7 @@ struct Environment<K> {
 }
 
 /// One visible datum and the path that reaches it.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Entry {
     datum: ScopeDatumId,
     /// The first link of the path, in the cache's link table.
@@ -173,30 +175,12 @@ struct Link {
     hop: Option<(ScopeEdgeId, usize)>,
 }
 
-/// The environment of one scope being computed.
-struct Frame<St, K> {
-    scope: ScopeId,
-    state: St,
-    remaining: Option<usize>,
-    /// The edge its parent frame reached it through.
-    via: Option<ScopeEdgeId>,
-    on_cycle: bool,
-    /// The admitted edges, with their targets and the states there.
-    edges: Vec<(ScopeEdgeId, ScopeId, St)>,
-    next: usize,
-    /// The candidates by key, each with its source: `0` for the scope's own
-    /// data, `n` for the `n`-th admitted edge.
-    candidates: BTreeMap<K, SmallVec<[(usize, Entry); 1]>>,
-    length_limited: bool,
-}
-
-/// The environment a resolution asked for.
-enum Computed<St, K> {
-    /// It is in the cache under this key.
-    Cached(EnvironmentKey<St>),
-    /// It is the environment of a scope on a cycle, or a bound cut it short.
-    Owned(Environment<K>),
-}
+/// The memoizing walk of the environment fold. The length bound lives in
+/// the reaches (see [`EnvironmentFold`]), so the walk has no depth bound.
+const MEMOIZE: OpenFoldConfig = OpenFoldConfig {
+    max_depth: None,
+    revisit: Revisit::Memoize,
+};
 
 impl<St: Clone + Ord, K: Clone + Ord> ScopeEnvironmentCache<St, K> {
     /// Creates an empty cache for `graph` and finds its cycles.
@@ -218,7 +202,7 @@ impl<St: Clone + Ord, K: Clone + Ord> ScopeEnvironmentCache<St, K> {
         }
         Self {
             on_cycle,
-            environments: BTreeMap::new(),
+            environments: OpenFoldMemo::default(),
             links: Vec::new(),
         }
     }
@@ -226,7 +210,7 @@ impl<St: Clone + Ord, K: Clone + Ord> ScopeEnvironmentCache<St, K> {
     /// Returns the number of environments the cache holds.
     #[cfg(test)]
     fn environment_count(&self) -> usize {
-        self.environments.len()
+        self.environments.answer_count()
     }
 
     /// Resolves `input`, a stored reference or an ephemeral query on the
@@ -247,16 +231,37 @@ impl<St: Clone + Ord, K: Clone + Ord> ScopeEnvironmentCache<St, K> {
         P: ScopeEnvironmentQuery<S, L, R, D, Q, State = St, Key = K>,
     {
         assert_in_bound(graph, input.scope(), "query scope");
-        let mut budget = PathBudget::new(&config);
-        let start = (
+        let start = Reach::start(
             input.scope(),
             query.initial_state(graph),
             config.max_path_length,
         );
-        let computed = self.environment(graph, query, start, &mut budget);
-        let environment = match &computed {
-            Computed::Cached(key) => self.environments.get(key),
-            Computed::Owned(environment) => Some(environment),
+        let mut fold = EnvironmentFold {
+            graph,
+            query,
+            on_cycle: &self.on_cycle,
+            links: &mut self.links,
+            budget: PathBudget::new(&config),
+        };
+        // A stored environment is read in place; only a missing one is
+        // folded, and handed over by value.
+        let mark = fold.mark(&start);
+        let stored = mark
+            .as_ref()
+            .is_some_and(|mark| self.environments.get(mark).is_some());
+        let computed = if stored {
+            None
+        } else {
+            open_fold_in(&mut self.environments, &mut fold, start, MEMOIZE)
+                .expect("the memoizing fold never fails")
+        };
+        let budget = fold.budget.stats();
+        let environment = if stored {
+            mark.as_ref()
+                .and_then(|mark| self.environments.get(mark))
+                .flatten()
+        } else {
+            computed.as_ref()
         };
         let key = query.query_key(graph, input.data());
         let entries = environment
@@ -269,7 +274,7 @@ impl<St: Clone + Ord, K: Clone + Ord> ScopeEnvironmentCache<St, K> {
         let stats = PathSearchStats {
             complete_path_count: entries.len(),
             path_length_limited: environment.is_some_and(|environment| environment.length_limited),
-            ..budget.stats()
+            ..budget
         };
         ScopeResolution::from_visible(&input, candidates, stats)
     }
@@ -404,223 +409,6 @@ impl<St: Clone + Ord, K: Clone + Ord> ScopeEnvironmentCache<St, K> {
         ScopeResolutionIndex::from_resolutions(graph, resolutions)
     }
 
-    /// Computes the environment of a scope in a state with a remaining path
-    /// length, reusing every cached environment.
-    fn environment<S, L, R, D, Q, P>(
-        &mut self,
-        graph: &ScopeGraph<S, L, R, D, Q>,
-        query: &P,
-        key: EnvironmentKey<St>,
-        budget: &mut PathBudget,
-    ) -> Computed<St, K>
-    where
-        P: ScopeEnvironmentQuery<S, L, R, D, Q, State = St, Key = K>,
-    {
-        if !self.on_cycle[key.0.index()] && self.environments.contains_key(&key) {
-            return Computed::Cached(key);
-        }
-        if !budget.admit_expansion() {
-            return Computed::Owned(Environment {
-                entries: BTreeMap::new(),
-                length_limited: false,
-            });
-        }
-        // The (scope, state) pairs of the frames on a cycle that are open:
-        // the path guard of the environments that are not cached.
-        let mut guard = BTreeSet::new();
-        let mut stack = vec![self.open_frame(graph, query, key, None, &mut guard)];
-        loop {
-            let Some(top) = stack.last_mut() else {
-                unreachable!("the walk returns when its first frame finishes");
-            };
-            if !budget.stats().path_count_limited && top.next < top.edges.len() {
-                let (edge, target, next_state) = top.edges[top.next].clone();
-                top.next += 1;
-                let child_remaining = top.remaining.map(|remaining| remaining - 1);
-                let key = (target, next_state, child_remaining);
-                if !self.on_cycle[target.index()]
-                    && let Some(environment) = self.environments.get(&key)
-                {
-                    lift(&mut self.links, top, edge, environment);
-                    continue;
-                }
-                if budget.admit_expansion() {
-                    let frame = self.open_frame(graph, query, key, Some(edge), &mut guard);
-                    stack.push(frame);
-                }
-                continue;
-            }
-
-            let Some(frame) = stack.pop() else {
-                unreachable!("the loop ran on the top frame");
-            };
-            if frame.on_cycle {
-                guard.remove(&(frame.scope, frame.state.clone()));
-            }
-            // An environment a bound cut short is not the scope's
-            // environment, and one on a cycle depends on the path.
-            let cacheable = !frame.on_cycle && !budget.stats().path_count_limited;
-            let key = (frame.scope, frame.state.clone(), frame.remaining);
-            let via = frame.via;
-            let environment = self.finish(graph, query, frame);
-            match stack.last_mut() {
-                Some(parent) => {
-                    let Some(edge) = via else {
-                        unreachable!("every frame but the first was reached through an edge");
-                    };
-                    lift(&mut self.links, parent, edge, &environment);
-                    if cacheable {
-                        self.environments.insert(key, environment);
-                    }
-                }
-                None => {
-                    return if cacheable {
-                        self.environments.insert(key.clone(), environment);
-                        Computed::Cached(key)
-                    } else {
-                        Computed::Owned(environment)
-                    };
-                }
-            }
-        }
-    }
-
-    /// Opens the frame of a scope in a state: the scope's own accepted data,
-    /// and the edges that the query admits and the guard and the length
-    /// bound allow.
-    fn open_frame<S, L, R, D, Q, P>(
-        &mut self,
-        graph: &ScopeGraph<S, L, R, D, Q>,
-        query: &P,
-        (scope, state, remaining): EnvironmentKey<St>,
-        via: Option<ScopeEdgeId>,
-        guard: &mut BTreeSet<(ScopeId, St)>,
-    ) -> Frame<St, K>
-    where
-        P: ScopeEnvironmentQuery<S, L, R, D, Q, State = St, Key = K>,
-    {
-        let on_cycle = self.on_cycle[scope.index()];
-        if on_cycle {
-            guard.insert((scope, state.clone()));
-        }
-        // The path that ends here, shared by every datum of the scope.
-        let mut end = None;
-        let mut candidates: BTreeMap<K, SmallVec<[(usize, Entry); 1]>> = BTreeMap::new();
-        for &datum in graph.scope_data(scope) {
-            if query.accepts(graph, scope, &state, datum) {
-                let path = *end.get_or_insert_with(|| {
-                    self.links.push(Link { scope, hop: None });
-                    self.links.len() - 1
-                });
-                candidates
-                    .entry(query.key(graph, datum))
-                    .or_default()
-                    .push((0, Entry { datum, path }));
-            }
-        }
-        let mut edges = Vec::new();
-        let mut length_limited = false;
-        for edge_id in graph.outgoing(scope) {
-            let edge = graph.edge(edge_id);
-            let Some(next_state) = query.step(graph, scope, &state, edge) else {
-                continue;
-            };
-            let target = edge.target();
-            if self.on_cycle[target.index()] && guard.contains(&(target, next_state.clone())) {
-                continue;
-            }
-            if remaining == Some(0) {
-                length_limited = true;
-                continue;
-            }
-            edges.push((edge_id, target, next_state));
-        }
-        Frame {
-            scope,
-            state,
-            remaining,
-            via,
-            on_cycle,
-            edges,
-            next: 0,
-            candidates,
-            length_limited,
-        }
-    }
-
-    /// Keeps, within each key, the candidates that no other candidate of the
-    /// frame shadows.
-    ///
-    /// Two candidates from one source never shadow each other: two data of
-    /// the scope both end at the declaration marker, and the candidates
-    /// through one edge are the visible ones of one environment, which no
-    /// other one of them shadows. Only pairs from different sources are
-    /// compared.
-    fn finish<S, L, R, D, Q, P>(
-        &self,
-        graph: &ScopeGraph<S, L, R, D, Q>,
-        query: &P,
-        frame: Frame<St, K>,
-    ) -> Environment<K>
-    where
-        P: ScopeEnvironmentQuery<S, L, R, D, Q, State = St, Key = K>,
-    {
-        let entries = frame
-            .candidates
-            .into_iter()
-            .map(|(key, mut candidates)| {
-                retain_unshadowed(
-                    &mut candidates,
-                    |&(other_source, other), &(source, candidate)| {
-                        other_source != source
-                            && self.shadows(graph, query, other.path, candidate.path)
-                    },
-                );
-                let visible = candidates
-                    .into_iter()
-                    .map(|(_, candidate)| candidate)
-                    .collect();
-                (key, visible)
-            })
-            .collect();
-        Environment {
-            entries,
-            length_limited: frame.length_limited,
-        }
-    }
-
-    /// Whether the path from link `left` is lexicographically more specific
-    /// than the one from link `right`; both start in the same scope.
-    fn shadows<S, L, R, D, Q, P>(
-        &self,
-        graph: &ScopeGraph<S, L, R, D, Q>,
-        query: &P,
-        left: usize,
-        right: usize,
-    ) -> bool
-    where
-        P: ScopeEnvironmentQuery<S, L, R, D, Q, State = St, Key = K>,
-    {
-        label_word_shadows(
-            self.edge_labels(graph, left),
-            self.edge_labels(graph, right),
-            |left, right| query.compare_labels(graph, left, right),
-        )
-    }
-
-    /// The labels of the edges of the stored path that starts at `link`.
-    fn edge_labels<'a, S, L, R, D, Q>(
-        &'a self,
-        graph: &'a ScopeGraph<S, L, R, D, Q>,
-        mut link: usize,
-    ) -> impl Iterator<Item = &'a L> {
-        core::iter::from_fn(move || {
-            let (edge, next) = self.links[link].hop?;
-            link = next;
-            Some(graph.edge(edge).data())
-        })
-    }
-
     /// The stored path that starts at `link`.
     fn path(&self, mut link: usize) -> ScopePath {
         let mut path = ScopePath::new(self.links[link].scope);
@@ -629,32 +417,5 @@ impl<St: Clone + Ord, K: Clone + Ord> ScopeEnvironmentCache<St, K> {
             path.push(edge, self.links[link].scope);
         }
         path
-    }
-}
-
-/// Adds the entries of `environment`, at the target of `edge`, to the
-/// candidates of `frame`, with paths that start with `edge`. The edge is the
-/// one the frame took last, so its position names the source.
-fn lift<St, K: Clone + Ord>(
-    links: &mut Vec<Link>,
-    frame: &mut Frame<St, K>,
-    edge: ScopeEdgeId,
-    environment: &Environment<K>,
-) {
-    frame.length_limited |= environment.length_limited;
-    for (key, entries) in &environment.entries {
-        let candidates = frame.candidates.entry(key.clone()).or_default();
-        for entry in entries {
-            let path = links.len();
-            links.push(Link {
-                scope: frame.scope,
-                hop: Some((edge, entry.path)),
-            });
-            let lifted = Entry {
-                datum: entry.datum,
-                path,
-            };
-            candidates.push((frame.next, lifted));
-        }
     }
 }
