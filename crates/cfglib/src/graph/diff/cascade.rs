@@ -9,6 +9,8 @@ use super::{BlockMatch, CfgDiff, Matching, Side, follow_edges};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::graph::fingerprint::{Mixer, wl_colors};
+use crate::graph::traverse::postorder_in;
+use crate::graph::view::{Direction, GraphView, scan_predecessors};
 
 /// Consumer-supplied content hashes of one block.
 ///
@@ -310,23 +312,9 @@ impl Keys {
 /// Kind order rather than adjacency order keeps the positions independent of
 /// the order in which edges of different kinds were added.
 fn position_order(side: &Side, bound: usize) -> Vec<BlockId> {
-    let mut seen = vec![false; bound];
-    let mut order = Vec::with_capacity(side.blocks.len());
-    let mut stack = vec![(side.entry, 0)];
-    seen[side.entry.index()] = true;
-    while let Some(top) = stack.last_mut() {
-        let (block, next) = *top;
-        if let Some(&(_, target)) = side.facts(block).out_edges.get(next) {
-            top.1 += 1;
-            if !seen[target.index()] {
-                seen[target.index()] = true;
-                stack.push((target, 0));
-            }
-        } else {
-            order.push(block);
-            stack.pop();
-        }
-    }
+    let mut seen = Vec::new();
+    let view = KindOrder { side, bound };
+    let mut order = postorder_in(&view, [side.entry], Direction::Forward, &mut seen);
     order.reverse();
     order.extend(
         side.blocks
@@ -335,6 +323,37 @@ fn position_order(side: &Side, bound: usize) -> Vec<BlockId> {
             .filter(|block| !seen[block.index()]),
     );
     order
+}
+
+/// The blocks of one side as a forward graph whose out-edges run in kind
+/// order, for the walk of [`position_order`].
+struct KindOrder<'a> {
+    side: &'a Side,
+    bound: usize,
+}
+
+impl GraphView for KindOrder<'_> {
+    type NodeId = BlockId;
+
+    fn node_bound(&self) -> usize {
+        self.bound
+    }
+
+    fn node_ids(&self) -> impl Iterator<Item = BlockId> + '_ {
+        self.side.blocks.keys().copied()
+    }
+
+    fn successors(&self, block: BlockId) -> impl Iterator<Item = BlockId> + '_ {
+        self.side
+            .facts(block)
+            .out_edges
+            .iter()
+            .map(|&(_, target)| target)
+    }
+
+    fn predecessors(&self, block: BlockId) -> impl Iterator<Item = BlockId> + '_ {
+        scan_predecessors(self, block)
+    }
 }
 
 /// [`pair_nearest_with`] for a key both sides compute alike.
