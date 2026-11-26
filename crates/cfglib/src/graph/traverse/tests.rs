@@ -179,9 +179,10 @@ fn reachable_handles_self_loops() {
 fn reachable_in_gives_the_answer_of_reachable_over_reused_buffers() {
     let (graph, [a, _, c, d]) = reach_fixture();
     // Buffers left over from a bigger graph and a different walk: the call
-    // clears both and resizes the marks to this graph's bound.
+    // clears the one and resizes it to this graph's bound, and empties the
+    // other.
     let mut visited = vec![true; 9];
-    let mut queue = vec![7, 8];
+    let mut stack = vec![7, 8];
     for (seeds, direction) in [
         (vec![a], Direction::Forward),
         (vec![c], Direction::Backward),
@@ -193,15 +194,10 @@ fn reachable_in_gives_the_answer_of_reachable_over_reused_buffers() {
             seeds.iter().copied(),
             direction,
             &mut visited,
-            &mut queue,
+            &mut stack,
         );
-        let expected = reachable(&graph, seeds, direction);
-        assert_eq!(visited, expected);
-        assert_eq!(
-            queue.len(),
-            expected.iter().filter(|&&reached| reached).count(),
-            "the queue holds exactly the reached nodes"
-        );
+        assert_eq!(visited, reachable(&graph, seeds, direction));
+        assert!(stack.is_empty(), "the walk leaves its stack empty");
     }
 }
 

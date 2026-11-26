@@ -11,8 +11,9 @@
 //! of a node walk, an edge of an edge walk — and over the adjacency axis, so
 //! one loop serves both directions and both kinds of walk.
 //!
-//! Three loops stay out of the cores on measured grounds, each documented
+//! Four loops stay out of the cores on measured grounds, each documented
 //! where it lives: [`depth_first_preorder`], which needs no frames;
+//! [`reachable`], whose order is free, so a stack holds only the frontier;
 //! [`topological_sort`], whose Kahn loop is not a search; and the
 //! bidirectional [`shortest_path`], which advances two searches one edge at a
 //! time.
@@ -431,9 +432,9 @@ pub fn reachable<G: GraphView>(
 /// [`reachable`] over caller-owned buffers.
 ///
 /// `visited` is cleared and sized to the node bound, then holds the answer.
-/// `queue` is cleared first and holds the reached nodes afterwards. Both hold
-/// dense indices, not node ids, so one pair of buffers serves every node-id
-/// type, which is what a scratch that outlives one graph needs.
+/// `stack` is cleared first and left empty. The stack holds dense indices,
+/// not node ids, so one pair of buffers serves every node-id type, which is
+/// what a scratch that outlives one graph needs.
 ///
 /// # Panics
 ///
@@ -448,34 +449,42 @@ pub(crate) fn reachable_in<G: GraphView>(
     seeds: impl IntoIterator<Item = G::NodeId>,
     direction: Direction,
     visited: &mut Vec<bool>,
-    queue: &mut Vec<usize>,
+    stack: &mut Vec<usize>,
 ) {
     visited.clear();
     visited.resize(graph.node_bound(), false);
-    queue.clear();
+    stack.clear();
     for seed in seeds {
         assert_in_bound(graph, seed, "seed node");
         if !core::mem::replace(&mut visited[seed.index()], true) {
-            queue.push(seed.index());
+            stack.push(seed.index());
         }
     }
-    by_axis!(direction, reach(graph, visited, queue));
+    by_axis!(direction, reach(graph, visited, stack));
 }
 
+/// The reachability walk, kept out of the breadth-first core on purpose.
+///
+/// The answer is a set, so the order is free, and a LIFO stack keeps the
+/// working set to the open frontier where the core's queue keeps every node it
+/// reached: through the core, `reachable` measured 29% slower on the
+/// call-graph pairs of the `api_reach_index_reachable_pairs_call_graph` bench
+/// and 17% slower on the small graphs of `api_remove_unreachable`.
 #[inline]
 fn reach<G: GraphView, A: Adjacency>(
     axis: A,
     graph: &G,
     visited: &mut [bool],
-    queue: &mut Vec<usize>,
+    stack: &mut Vec<usize>,
 ) {
-    breadth_first_core::<_, _, ()>(
-        Indexed(axis),
-        graph,
-        queue,
-        |_, _| ControlFlow::Continue(Visit::Descend),
-        |_, _, to, _| !core::mem::replace(&mut visited[to], true),
-    );
+    while let Some(index) = stack.pop() {
+        for next in axis.neighbors(graph, G::NodeId::from_index(index)) {
+            let next = next.index();
+            if !core::mem::replace(&mut visited[next], true) {
+                stack.push(next);
+            }
+        }
+    }
 }
 
 /// Return a topological ordering of the live nodes, or `None` when they
