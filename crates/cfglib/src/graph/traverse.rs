@@ -466,7 +466,7 @@ pub(crate) fn reachable_in<G: GraphView>(
 /// working set to the open frontier where the core's queue keeps every node it
 /// reached: through the core, `reachable` measured 29% slower on the
 /// call-graph pairs of the `api_reach_index_reachable_pairs_call_graph` bench
-/// and 17% slower on the small graphs of `api_remove_unreachable`.
+/// and 17% slower on the small graphs of `api_remove_unreachable_mapped`.
 #[inline]
 fn reach<G: GraphView, A: Adjacency>(
     axis: A,

@@ -163,19 +163,6 @@ fn register_cleanup(suite: &mut BenchmarkSuite<'_>) {
     let unreachable = unreachable_cfg();
     benchmark_case!(
         suite,
-        "api_remove_unreachable",
-        || {
-            let mut candidate = unreachable.clone();
-            let removed = remove_unreachable_mapped(&mut candidate).0;
-            (candidate, removed)
-        },
-        |(candidate, removed)| {
-            assert_eq!(*removed, 1);
-            assert!(verify(candidate).is_ok());
-        }
-    );
-    benchmark_case!(
-        suite,
         "api_remove_unreachable_mapped",
         covers[remove_unreachable_mapped],
         || {
@@ -185,19 +172,6 @@ fn register_cleanup(suite: &mut BenchmarkSuite<'_>) {
         },
         |(candidate, (removed, _))| {
             assert_eq!(*removed, 1);
-            assert!(verify(candidate).is_ok());
-        }
-    );
-    benchmark_case!(
-        suite,
-        "api_simplify",
-        || {
-            let mut candidate = unreachable.clone();
-            let changed = simplify_mapped(&mut candidate).0;
-            (candidate, changed)
-        },
-        |(candidate, changed)| {
-            assert_eq!(*changed, 1);
             assert!(verify(candidate).is_ok());
         }
     );
@@ -297,34 +271,8 @@ fn register_critical_edges(suite: &mut BenchmarkSuite<'_>) {
     let cfg = critical_cfg();
     benchmark_case!(
         suite,
-        "api_split_critical_edges",
-        || {
-            let mut candidate = cfg.clone();
-            let split = split_critical_edges_mapped(&mut candidate, |_, _| ()).0;
-            (candidate, split)
-        },
-        |(candidate, split)| {
-            assert_eq!(*split, 1);
-            assert!(verify(candidate).is_ok());
-        }
-    );
-    benchmark_case!(
-        suite,
         "api_split_critical_edges_mapped",
         covers[split_critical_edges_mapped],
-        || {
-            let mut candidate = cfg.clone();
-            let result = split_critical_edges_mapped(&mut candidate, |_, _| ());
-            (candidate, result)
-        },
-        |(candidate, (split, _))| {
-            assert_eq!(*split, 1);
-            assert!(verify(candidate).is_ok());
-        }
-    );
-    benchmark_case!(
-        suite,
-        "api_split_critical_edges_with",
         || {
             let mut candidate = cfg.clone();
             let result = split_critical_edges_mapped(&mut candidate, |_, _| ());
@@ -612,7 +560,7 @@ fn register_reducibility(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "cfg_clone_make_reducible_with_dispatch_complete_10",
+        "cfg_clone_make_reducible_by_dispatch_complete_10",
         || {
             let mut cloned = small.clone();
             let report = make_reducible_by_dispatch(&mut cloned, &mut ApiDispatch);
@@ -624,7 +572,7 @@ fn register_reducibility(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "api_make_reducible_with_dispatch_complete_64",
+        "api_make_reducible_by_dispatch_complete_64",
         covers[make_reducible_by_dispatch],
         || {
             let mut cloned = large.clone();

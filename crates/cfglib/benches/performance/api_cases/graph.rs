@@ -489,7 +489,7 @@ fn register_cfg_graphs(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "api_verify_with",
+        "api_verify_semantics",
         covers[verify_semantics],
         || verify_semantics(&cfg, &NoopValidator),
         |report| assert!(report.is_ok())
@@ -587,7 +587,7 @@ fn register_output_formats(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "api_parse_cfg_text",
+        "api_parse_cfg_listing",
         covers[parse_cfg_listing],
         || parse_cfg_listing(&cfg_text, |line| Ok::<_, String>(line.to_owned())),
         |parsed: &Result<Cfg<String>, _>| assert_eq!(parsed.as_ref().unwrap().block_count(), 128)

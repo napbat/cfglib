@@ -21,6 +21,7 @@ mod program_structure;
 mod reach_index;
 mod relaxation;
 mod scope;
+mod slot_fixpoint;
 mod stack;
 mod strong_cuts;
 mod summaries;
@@ -82,6 +83,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "open_fold",
     "open_fold_in",
     "open_search",
+    "ordered_fixpoint",
     "parse_cfg_listing",
     "parse_text",
     "pass_fn",
@@ -126,6 +128,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "verify_edge_view",
     "verify_semantics",
     "verify_view",
+    "wave_fixpoint",
     "weak_control_closure",
     "weak_control_closure_in",
     "wl_colors",
@@ -186,6 +189,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     reach_index::register(suite);
     relaxation::register(suite);
     scope::register(suite);
+    slot_fixpoint::register(suite);
     stack::register(suite);
     strong_cuts::register(suite);
     summaries::register(suite);

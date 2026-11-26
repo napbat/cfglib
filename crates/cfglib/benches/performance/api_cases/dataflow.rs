@@ -193,22 +193,13 @@ fn register_cfg_solvers(suite: &mut BenchmarkSuite<'_>) {
     };
     let rooted = rooted(&cfg);
 
-    solver_case!(suite, "api_solve_problem_from", || {
+    solver_case!(suite, "api_solve_node_problem_cfg_seeded", || {
         solve_node_problem(&cfg, &CfgReachability, seeded)
     });
-    solver_case!(suite, "api_solve_problem_from_with_config", || {
-        solve_node_problem(&cfg, &CfgReachability, seeded)
-    });
-    solver_case!(suite, "api_try_solve_problem", || {
+    solver_case!(suite, "api_solve_node_problem_cfg_fallible_rooted", || {
         solve_node_problem(&cfg, &TryCfgReachability, rooted)
     });
-    solver_case!(suite, "api_try_solve_problem_from", || {
-        solve_node_problem(&cfg, &TryCfgReachability, seeded)
-    });
-    solver_case!(suite, "api_try_solve_problem_with_config", || {
-        solve_node_problem(&cfg, &TryCfgReachability, rooted)
-    });
-    solver_case!(suite, "api_try_solve_problem_from_with_config", || {
+    solver_case!(suite, "api_solve_node_problem_cfg_fallible_seeded", || {
         solve_node_problem(&cfg, &TryCfgReachability, seeded)
     });
 }
@@ -221,22 +212,13 @@ fn register_node_solvers(suite: &mut BenchmarkSuite<'_>) {
         ..Solve::default()
     };
 
-    solver_case!(suite, "api_solve_node_problem_from", || {
+    solver_case!(suite, "api_solve_node_problem_seeded", || {
         solve_node_problem(&graph, &Reachability, seeded)
     });
-    solver_case!(suite, "api_solve_node_problem_from_with_config", || {
-        solve_node_problem(&graph, &Reachability, seeded)
-    });
-    solver_case!(suite, "api_try_solve_node_problem", || {
+    solver_case!(suite, "api_solve_node_problem_fallible", || {
         solve_node_problem(&graph, &TryGraphReachability, Solve::default())
     });
-    solver_case!(suite, "api_try_solve_node_problem_from", || {
-        solve_node_problem(&graph, &TryGraphReachability, seeded)
-    });
-    solver_case!(suite, "api_try_solve_node_problem_with_config", || {
-        solve_node_problem(&graph, &TryGraphReachability, Solve::default())
-    });
-    solver_case!(suite, "api_try_solve_node_problem_from_with_config", || {
+    solver_case!(suite, "api_solve_node_problem_fallible_seeded", || {
         solve_node_problem(&graph, &TryGraphReachability, seeded)
     });
 }
@@ -255,25 +237,13 @@ fn register_edge_solvers(suite: &mut BenchmarkSuite<'_>) {
         covers[solve_edge_problem],
         || solve_edge_problem(&graph, &EdgeReachability, Solve::default())
     );
-    solver_case!(suite, "api_solve_edge_problem_from", || {
+    solver_case!(suite, "api_solve_edge_problem_seeded", || {
         solve_edge_problem(&graph, &EdgeReachability, seeded)
     });
-    solver_case!(suite, "api_solve_edge_problem_with_config", || {
-        solve_edge_problem(&graph, &EdgeReachability, Solve::default())
-    });
-    solver_case!(suite, "api_solve_edge_problem_from_with_config", || {
-        solve_edge_problem(&graph, &EdgeReachability, seeded)
-    });
-    solver_case!(suite, "api_try_solve_edge_problem", || {
+    solver_case!(suite, "api_solve_edge_problem_fallible", || {
         solve_edge_problem(&graph, &TryEdgeReachability, Solve::default())
     });
-    solver_case!(suite, "api_try_solve_edge_problem_from", || {
-        solve_edge_problem(&graph, &TryEdgeReachability, seeded)
-    });
-    solver_case!(suite, "api_try_solve_edge_problem_with_config", || {
-        solve_edge_problem(&graph, &TryEdgeReachability, Solve::default())
-    });
-    solver_case!(suite, "api_try_solve_edge_problem_from_with_config", || {
+    solver_case!(suite, "api_solve_edge_problem_fallible_seeded", || {
         solve_edge_problem(&graph, &TryEdgeReachability, seeded)
     });
 }
@@ -479,7 +449,7 @@ fn register_streams(suite: &mut BenchmarkSuite<'_>) {
     let rooted = rooted(&cfg);
     benchmark_case!(
         suite,
-        "api_stream_problem",
+        "api_stream_node_problem_cfg",
         || {
             let mut visited = 0;
             stream_node_problem(&cfg, &TryCfgReachability, rooted, |_, _, out| {
@@ -581,7 +551,7 @@ fn register_resumes(suite: &mut BenchmarkSuite<'_>) {
     };
     benchmark_case!(
         suite,
-        "api_resume_problem",
+        "api_resume_node_problem_cfg",
         || {
             let previous = solved_cfg.clone();
             resume_node_problem(&cfg, &TryCfgReachability, previous, edit, rooted)
