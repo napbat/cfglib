@@ -323,10 +323,9 @@ pub use graph::loop_forest::{LoopForest, LoopId};
 pub use graph::loop_nest::{LoopNestNode, LoopNestingTree};
 pub use graph::network_flow::{ArcId, FlowError, FlowNetwork, FlowSolution};
 pub use graph::open::{
-    FoldEnter, MarkScope, OpenBfsEvent, OpenDfsEvent, OpenFixpointConfig, OpenFixpointError,
-    OpenFold, OpenFoldConfig, OpenPathsEvent, follow, follow_path, open_breadth_first_events,
-    open_breadth_first_paths, open_depth_first_events, open_fold_fixpoint, open_fold_post_order,
-    open_fold_post_order_memoized, open_search,
+    FoldEnter, MarkScope, OpenBfsEvent, OpenDfsEvent, OpenFold, OpenFoldConfig, OpenFoldError,
+    OpenFoldMemo, OpenPathsEvent, Revisit, follow, follow_path, open_breadth_first_events,
+    open_breadth_first_paths, open_depth_first_events, open_fold, open_fold_in, open_search,
 };
 pub use graph::path_expr::{
     GenKill, GenKillAlgebra, PathAlgebra, PathExprArena, PathExprId, PathExprNode, PathExpressions,

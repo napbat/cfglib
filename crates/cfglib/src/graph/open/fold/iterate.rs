@@ -5,80 +5,12 @@ extern crate alloc;
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use core::fmt;
 
-use super::{FoldEnter, MarkScope, OpenFold, Walk};
+use super::walk::Walk;
+use super::{FoldEnter, MarkScope, OpenFold, OpenFoldError};
 
 #[cfg(test)]
 mod tests;
-
-/// Bounds for one [`open_fold_fixpoint`] walk.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct OpenFixpointConfig {
-    max_depth: Option<usize>,
-    max_scc_rounds: Option<usize>,
-}
-
-impl OpenFixpointConfig {
-    /// Creates the unbounded configuration.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            max_depth: None,
-            max_scc_rounds: None,
-        }
-    }
-
-    /// Refuses children more than `depth` frames below the root.
-    ///
-    /// The root is depth zero, and a re-fold of a cycle member runs at the
-    /// depth of the cycle's first node. A refused child is absorbed as
-    /// `None`. The bound limits the walk, not each route: the answer of a node
-    /// whose subtree the bound cut is memoized like any other.
-    #[must_use]
-    pub const fn with_max_depth(mut self, depth: usize) -> Self {
-        self.max_depth = Some(depth);
-        self
-    }
-
-    /// Stops with [`OpenFixpointError::RoundLimit`] when a cycle's answers
-    /// still change after `rounds` re-fold rounds.
-    #[must_use]
-    pub const fn with_max_scc_rounds(mut self, rounds: usize) -> Self {
-        self.max_scc_rounds = Some(rounds);
-        self
-    }
-}
-
-/// Why [`open_fold_fixpoint`] stopped without an answer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OpenFixpointError {
-    /// The answers of a cycle still changed in the last round that
-    /// [`OpenFixpointConfig::with_max_scc_rounds`] allows.
-    RoundLimit {
-        /// The re-fold rounds that ran.
-        rounds: usize,
-    },
-    /// A node without a mark lies on a cycle, so the walk has no key to hold
-    /// its provisional answer.
-    UnmarkedCycle,
-}
-
-impl fmt::Display for OpenFixpointError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::RoundLimit { rounds } => {
-                write!(
-                    formatter,
-                    "a cycle was still changing after {rounds} rounds"
-                )
-            }
-            Self::UnmarkedCycle => formatter.write_str("a node without a mark lies on a cycle"),
-        }
-    }
-}
-
-impl core::error::Error for OpenFixpointError {}
 
 /// What the frame of one node is folding.
 #[derive(Clone, Copy)]
@@ -104,13 +36,12 @@ struct Fix {
     self_loop: bool,
 }
 
-/// The answer the walk holds for one mark.
-enum Slot<V> {
-    /// A member of a cycle that is not finished, with its index and its
-    /// current, provisional answer.
-    Open { index: usize, value: Option<V> },
-    /// A final answer.
-    Done(Option<V>),
+/// The provisional answer of a member whose cycle is not finished.
+struct Provisional<V> {
+    /// The member's index in discovery order.
+    index: usize,
+    /// Its current answer.
+    value: Option<V>,
 }
 
 /// A marked node whose cycle is not finished.
@@ -154,17 +85,21 @@ enum Step<V> {
     Root(Option<V>),
 }
 
-struct Run<F: OpenFold> {
+struct Run<'a, F: OpenFold> {
     walk: Walk<F, Fix>,
-    slots: BTreeMap<F::Mark, Slot<F::Value>>,
+    /// The final answers by mark: the caller's table.
+    answers: &'a mut BTreeMap<F::Mark, Option<F::Value>>,
+    /// The provisional answers of the members by mark. They stay out of the
+    /// caller's table, so it never holds an answer that is not final.
+    provisional: BTreeMap<F::Mark, Provisional<F::Value>>,
     members: Vec<Member<F>>,
     components: Vec<Component>,
     next_index: usize,
     finished: usize,
-    config: OpenFixpointConfig,
+    max_rounds: Option<usize>,
 }
 
-impl<F: OpenFold> Run<F>
+impl<F: OpenFold> Run<'_, F>
 where
     F::Value: Clone + PartialEq,
 {
@@ -174,7 +109,8 @@ where
             .push_frame(fold, node, accumulator, MarkScope::Shared, 0, fix);
     }
 
-    /// Answers `node` from its slot or as a leaf, or opens a frame for it.
+    /// Answers `node` from its final or provisional answer or as a leaf, or
+    /// opens a frame for it.
     fn reach(&mut self, fold: &mut F, node: F::Node) -> Reached<F::Node, F::Value> {
         let Some(mark) = fold.mark(&node) else {
             return match fold.enter(&node) {
@@ -192,32 +128,31 @@ where
                 }
             };
         };
-        match self.slots.get(&mark) {
-            Some(Slot::Done(value)) => return Reached::Answer(node, value.clone()),
-            Some(Slot::Open { index, value }) => {
-                let index = *index;
-                let value = value.clone();
-                if let Some(top) = self.walk.stack.last_mut() {
-                    top.extra.lowlink = top.extra.lowlink.min(index);
-                    if matches!(top.extra.role, Role::Marked { index: own, .. } if own == index) {
-                        top.extra.self_loop = true;
-                    }
+        if let Some(value) = self.answers.get(&mark) {
+            return Reached::Answer(node, value.clone());
+        }
+        if let Some(slot) = self.provisional.get(&mark) {
+            let index = slot.index;
+            let value = slot.value.clone();
+            if let Some(top) = self.walk.stack.last_mut() {
+                top.extra.lowlink = top.extra.lowlink.min(index);
+                if matches!(top.extra.role, Role::Marked { index: own, .. } if own == index) {
+                    top.extra.self_loop = true;
                 }
-                return Reached::Answer(node, value);
             }
-            None => {}
+            return Reached::Answer(node, value);
         }
         match fold.enter(&node) {
             // A leaf has no successors, so it lies on no cycle.
             FoldEnter::Leaf(value) => {
-                self.slots.insert(mark, Slot::Done(value.clone()));
+                self.answers.insert(mark, value.clone());
                 Reached::Answer(node, value)
             }
             FoldEnter::Fold { accumulator, .. } => {
                 let index = self.next_index;
                 self.next_index += 1;
-                self.slots
-                    .insert(mark.clone(), Slot::Open { index, value: None });
+                self.provisional
+                    .insert(mark.clone(), Provisional { index, value: None });
                 let position = self.members.len();
                 self.members.push(Member {
                     mark,
@@ -248,12 +183,11 @@ where
 
     /// Stores a member's current answer, reporting whether it changed.
     fn update(&mut self, position: usize, value: Option<F::Value>) -> bool {
-        let slot = self.slots.get_mut(&self.members[position].mark);
-        let Some(Slot::Open { value: current, .. }) = slot else {
-            unreachable!("a member's slot stays open until its cycle is final");
+        let Some(slot) = self.provisional.get_mut(&self.members[position].mark) else {
+            unreachable!("a member's answer stays provisional until its cycle is final");
         };
-        let changed = *current != value;
-        *current = value;
+        let changed = slot.value != value;
+        slot.value = value;
         changed
     }
 
@@ -264,7 +198,7 @@ where
         node: F::Node,
         value: Option<F::Value>,
         fix: Fix,
-    ) -> Result<Step<F::Value>, OpenFixpointError> {
+    ) -> Result<Step<F::Value>, OpenFoldError> {
         if !matches!(fix.role, Role::Refold { .. })
             && let Some(parent) = self.walk.stack.last_mut()
         {
@@ -276,7 +210,7 @@ where
                 // opened: that member reaches back here, so this node is on
                 // its cycle.
                 if fix.lowlink < entry {
-                    return Err(OpenFixpointError::UnmarkedCycle);
+                    return Err(OpenFoldError::UnmarkedCycle);
                 }
                 Ok(self.deliver(fold, &node, value))
             }
@@ -284,7 +218,8 @@ where
                 if fix.lowlink == index && position + 1 == self.members.len() && !fix.self_loop {
                     // A node on no cycle: its first answer is final.
                     if let Some(member) = self.members.pop() {
-                        self.slots.insert(member.mark, Slot::Done(value.clone()));
+                        self.provisional.remove(&member.mark);
+                        self.answers.insert(member.mark, value.clone());
                     }
                     return Ok(self.deliver(fold, &node, value));
                 }
@@ -325,7 +260,7 @@ where
 
     /// Re-folds the next member of the innermost cycle, starts its next
     /// round, or finalizes it once a round changed nothing.
-    fn advance(&mut self, fold: &mut F) -> Result<Step<F::Value>, OpenFixpointError> {
+    fn advance(&mut self, fold: &mut F) -> Result<Step<F::Value>, OpenFoldError> {
         loop {
             let Some(component) = self.components.last_mut() else {
                 unreachable!("only a cycle being iterated advances");
@@ -339,10 +274,11 @@ where
                 if !component.changed && !grew {
                     return Ok(self.finalize(fold));
                 }
-                if let Some(max) = self.config.max_scc_rounds
-                    && component.rounds >= max
+                if let Some(limit) = self.max_rounds
+                    && component.rounds >= limit
                 {
-                    return Err(OpenFixpointError::RoundLimit {
+                    return Err(OpenFoldError::RoundLimitExceeded {
+                        limit,
                         rounds: component.rounds,
                     });
                 }
@@ -395,10 +331,10 @@ where
         let Some(node) = member.node.take() else {
             unreachable!("a cycle's first member waits outside any frame");
         };
-        let value = match self.slots.get(&member.mark) {
-            Some(Slot::Open { value, .. }) => value.clone(),
-            _ => unreachable!("a member's slot stays open until its cycle is final"),
+        let Some(slot) = self.provisional.get(&member.mark) else {
+            unreachable!("a member's answer stays provisional until its cycle is final");
         };
+        let value = slot.value.clone();
         if let Some(parent) = self.walk.stack.last_mut() {
             parent.extra.lowlink = parent.extra.lowlink.min(component.lowlink);
         }
@@ -415,16 +351,13 @@ where
         };
         let mut root = None;
         for member in self.members.drain(component.base..) {
-            let Some(slot) = self.slots.get_mut(&member.mark) else {
-                unreachable!("every member has a slot");
+            let Some(slot) = self.provisional.remove(&member.mark) else {
+                unreachable!("a member's answer stays provisional until its cycle is final");
             };
-            if let Slot::Open { value, .. } = slot {
-                let value = value.take();
-                if root.is_none() {
-                    root = Some((member.node, value.clone()));
-                }
-                *slot = Slot::Done(value);
+            if root.is_none() {
+                root = Some((member.node, slot.value.clone()));
             }
+            self.answers.insert(member.mark, slot.value);
         }
         let Some((Some(node), value)) = root else {
             unreachable!("a cycle's first member waits outside any frame");
@@ -434,158 +367,34 @@ where
 }
 
 /// Folds the space reachable from `root` in post-order and iterates every
-/// cycle of marked nodes until its answers are stable.
-///
-/// [`open_fold_post_order`](super::open_fold_post_order) refuses a node that
-/// is still open on the route, so a fold over a cyclic space gets an answer
-/// that misses what travels around the cycle and that depends on where the
-/// walk entered it. This driver keeps one answer per [`mark`](OpenFold::mark)
-/// instead: it finds the strongly connected components of marked nodes with
-/// Tarjan's lowlinks as it walks, and re-folds the nodes of each cycle until
-/// a round changes no answer. Then every node of the cycle has its least
-/// fixpoint answer, whichever node the walk entered first.
-///
-/// - **The walk.** The frames are those of the plain driver. A marked node
-///   that is still open absorbs its current, provisional answer, which
-///   starts as `None`; a finished marked node absorbs its final answer. The
-///   driver memoizes every marked node, so it reads neither
-///   [`memo_key`](OpenFold::memo_key) nor the [`MarkScope`] of
-///   [`FoldEnter::Fold`]. A node without a mark is folded on every reach.
-/// - **Iteration.** When the first node of a cycle finishes, each member of
-///   the cycle is re-folded in the order its first fold finished: the driver
-///   calls [`enter`](OpenFold::enter), absorbs each successor's current answer
-///   without descending into members, and calls
-///   [`finish`](OpenFold::finish). Rounds repeat until no answer changes, and
-///   the answers become final. Hooks with side effects observe a member's
-///   hooks once per round.
-/// - **The contract.** `enter`, `absorb` and `finish` must be deterministic,
-///   and monotone in the absorbed answers over a domain of finite height; or
-///   [`OpenFixpointConfig::with_max_scc_rounds`] bounds the rounds. A node on
-///   a cycle needs a mark: a cycle that passes a marked node and a node
-///   without a mark is reported as [`OpenFixpointError::UnmarkedCycle`]. A
-///   cycle of nodes without marks is never closed, so only the depth bound
-///   stops it.
-///
-/// On a space without cycles this is the walk of
-/// [`open_fold_post_order_memoized`](super::open_fold_post_order_memoized)
-/// with a memo key equal to each node's mark: `O(n + m)` hook calls. Each
-/// cycle adds `O(rounds × (n_scc + m_scc))` hook calls. The successor order
-/// is fixed, so results are deterministic.
-///
-/// # Errors
-///
-/// Returns [`OpenFixpointError::RoundLimit`] when a cycle still changes after
-/// the configured rounds, and [`OpenFixpointError::UnmarkedCycle`] when a
-/// node without a mark lies on a cycle with a marked node.
-///
-/// ```rust
-/// use std::collections::BTreeSet;
-/// use core::ops::ControlFlow;
-/// use cfglib::{
-///     FoldEnter, MarkScope, OpenFixpointConfig, OpenFold, OpenFoldConfig, open_fold_fixpoint,
-///     open_fold_post_order,
-/// };
-///
-/// /// How a module re-exports another.
-/// enum Export {
-///     /// `export * from "..."`
-///     All,
-///     /// `export { from as to } from "..."`
-///     Renamed(&'static str, &'static str),
-/// }
-///
-/// /// The names each module exports: its own, and what its re-exports bring.
-/// struct Exports<'a> {
-///     own: &'a [&'a [&'static str]],
-///     reexports: &'a [&'a [(usize, Export)]],
-/// }
-///
-/// impl OpenFold for Exports<'_> {
-///     type Node = usize;
-///     type Mark = usize;
-///     type Value = BTreeSet<&'static str>;
-///     type Accumulator = (usize, BTreeSet<&'static str>);
-///
-///     fn successors(&mut self, module: &usize, out: &mut Vec<usize>) {
-///         out.extend(self.reexports[*module].iter().map(|(target, _)| *target));
-///     }
-///     fn mark(&mut self, module: &usize) -> Option<usize> {
-///         Some(*module)
-///     }
-///     fn enter(&mut self, module: &usize) -> FoldEnter<Self::Value, Self::Accumulator> {
-///         let names = self.own[*module].iter().copied().collect();
-///         FoldEnter::Fold { accumulator: (*module, names), marks: MarkScope::Shared }
-///     }
-///     fn absorb(
-///         &mut self,
-///         (module, names): &mut Self::Accumulator,
-///         target: &usize,
-///         value: Option<Self::Value>,
-///     ) -> ControlFlow<()> {
-///         let exported = value.unwrap_or_default();
-///         for (reexported, export) in self.reexports[*module] {
-///             if reexported != target {
-///                 continue;
-///             }
-///             match export {
-///                 Export::All => names.extend(exported.iter().copied()),
-///                 Export::Renamed(from, to) => {
-///                     if exported.contains(from) {
-///                         names.insert(*to);
-///                     }
-///                 }
-///             }
-///         }
-///         ControlFlow::Continue(())
-///     }
-///     fn finish(&mut self, _module: &usize, (_, names): Self::Accumulator) -> Option<Self::Value> {
-///         Some(names)
-///     }
-/// }
-///
-/// // Module 0 exports `x` and re-exports 1's `x` as `z`; module 1 re-exports
-/// // all of 0. Both export `x` and `z`.
-/// let own: &[&[&str]] = &[&["x"], &[]];
-/// let reexports: &[&[(usize, Export)]] =
-///     &[&[(1, Export::Renamed("x", "z"))], &[(0, Export::All)]];
-/// let both = BTreeSet::from(["x", "z"]);
-/// for module in [0, 1] {
-///     let mut exports = Exports { own, reexports };
-///     assert_eq!(
-///         open_fold_fixpoint(&mut exports, module, OpenFixpointConfig::new()),
-///         Ok(Some(both.clone())),
-///     );
-/// }
-/// // One post-order pass refuses 0 under 1, so 1 brings nothing back to 0.
-/// let mut exports = Exports { own, reexports };
-/// assert_eq!(
-///     open_fold_post_order(&mut exports, 0, OpenFoldConfig::new()),
-///     Some(BTreeSet::from(["x"])),
-/// );
-/// ```
-pub fn open_fold_fixpoint<F: OpenFold>(
+/// cycle of marked nodes until its answers are stable: `answers` holds the
+/// final answers by mark, and the walk reads and extends it.
+pub(super) fn run<F: OpenFold>(
+    answers: &mut BTreeMap<F::Mark, Option<F::Value>>,
     fold: &mut F,
     root: F::Node,
-    config: OpenFixpointConfig,
-) -> Result<Option<F::Value>, OpenFixpointError>
+    max_depth: Option<usize>,
+    max_rounds: Option<usize>,
+) -> Result<Option<F::Value>, OpenFoldError>
 where
     F::Value: Clone + PartialEq,
 {
     let mut run = Run::<F> {
         walk: Walk::new(),
-        slots: BTreeMap::new(),
+        answers,
+        provisional: BTreeMap::new(),
         members: Vec::new(),
         components: Vec::new(),
         next_index: 0,
         finished: 0,
-        config,
+        max_rounds,
     };
     if let Reached::Answer(_, value) = run.reach(fold, root) {
         return Ok(value);
     }
     loop {
         if let Some(child) = run.walk.next_child() {
-            if !run.walk.admit_child(config.max_depth) {
+            if !run.walk.admit_child(max_depth) {
                 run.walk.absorb(fold, &child, None);
             } else if let Reached::Answer(child, value) = run.reach(fold, child) {
                 run.walk.absorb(fold, &child, value);

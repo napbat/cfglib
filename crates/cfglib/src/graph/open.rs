@@ -36,29 +36,21 @@
 //! breadth-first counterpart of [`open_depth_first_events`] under
 //! [`crate::VisitedPolicy::Path`].
 //!
-//! [`open_fold_post_order`] packages that fold shape completely: an
-//! [`OpenFold`] answers per node (or opens an accumulator), absorbs each
-//! child's answer with early exit, rewrites on the unwind, and controls the
-//! cycle guard itself — which nodes carry a mark key at all, and whether a
-//! node's subtree marks persist ([`MarkScope::Shared`]) or stay per-route
+//! [`open_fold`] packages that fold shape completely: an [`OpenFold`]
+//! answers per node (or opens an accumulator), absorbs each child's answer
+//! with early exit, rewrites on the unwind, and controls the cycle guard
+//! itself — which nodes carry a mark key at all, and whether a node's
+//! subtree marks persist ([`MarkScope::Shared`]) or stay per-route
 //! ([`MarkScope::Isolated`]), so both per-path ambiguity detection and
-//! prune-on-revisit evaluators fold without hand-written frame stacks.
-//!
-//! [`open_fold_post_order_memoized`] is the third choice for a node reached
-//! again: a node with an [`OpenFold::memo_key`] is folded once, and every
-//! later route absorbs its finished answer. A diamond's base is folded once
-//! but still reaches the fold along both routes, so the ambiguity check of a
-//! member lookup costs one fold per class instead of one per route, as long
-//! as the answer of a node does not depend on the route to it.
-//!
-//! [`open_fold_fixpoint`] is the driver for a cyclic space whose answers
-//! must travel around a cycle, such as the names a module exports through
-//! `export *` cycles. The other drivers refuse a node that is still open on
-//! the route, so on a cycle they return an answer that depends on where the
-//! walk entered it and can miss what comes back around. The fixpoint driver
-//! keeps one answer per mark, finds the cycles of marked nodes as it walks,
-//! and re-folds each cycle until its answers are stable. It needs monotone
-//! hooks (or a round limit) and a mark on every node of a cycle.
+//! prune-on-revisit evaluators fold without hand-written frame stacks. The
+//! [`Revisit`] policy of its [`OpenFoldConfig`] decides what a marked node
+//! reached again gives: [`Revisit::Refuse`] absorbs nothing for it,
+//! [`Revisit::Memoize`] folds it once and hands its answer to every later
+//! route, and [`Revisit::Iterate`] re-folds each cycle of marked nodes until
+//! its answers are stable, for a space whose answers travel around cycles
+//! (the names a module exports through `export *` cycles).
+//! [`open_fold_in`] keeps the finished answers in a caller-owned
+//! [`OpenFoldMemo`] across calls.
 //!
 //! [`follow`] and [`follow_path`] are the degenerate case that shows up just
 //! as often: an out-degree ≤ 1 chase (import alias to import alias, symlink to
@@ -74,8 +66,8 @@ mod search;
 
 pub use events::{OpenBfsEvent, OpenDfsEvent, open_breadth_first_events, open_depth_first_events};
 pub use fold::{
-    FoldEnter, MarkScope, OpenFixpointConfig, OpenFixpointError, OpenFold, OpenFoldConfig,
-    open_fold_fixpoint, open_fold_post_order, open_fold_post_order_memoized,
+    FoldEnter, MarkScope, OpenFold, OpenFoldConfig, OpenFoldError, OpenFoldMemo, Revisit,
+    open_fold, open_fold_in,
 };
 pub use follow::{follow, follow_path};
 pub use paths::{OpenPathsEvent, open_breadth_first_paths};

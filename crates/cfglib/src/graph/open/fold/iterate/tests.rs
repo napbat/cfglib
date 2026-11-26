@@ -7,11 +7,26 @@ use core::ops::ControlFlow;
 
 use super::super::tests::{Digest, random_dag};
 use super::super::{
-    FoldEnter, MarkScope, OpenFold, OpenFoldConfig, open_fold_post_order,
-    open_fold_post_order_memoized,
+    FoldEnter, MarkScope, OpenFold, OpenFoldConfig, OpenFoldError, OpenFoldMemo, Revisit,
+    open_fold, open_fold_in,
 };
-use super::{OpenFixpointConfig, OpenFixpointError, open_fold_fixpoint};
 use crate::test_util::rng::Rng;
+
+/// Iterates without a depth bound or a round limit.
+const ITERATE: OpenFoldConfig = OpenFoldConfig {
+    max_depth: None,
+    revisit: Revisit::Iterate { max_rounds: None },
+};
+
+/// Iterates under the round limit `max_rounds`.
+const fn round_limit(max_rounds: usize) -> OpenFoldConfig {
+    OpenFoldConfig {
+        max_depth: None,
+        revisit: Revisit::Iterate {
+            max_rounds: Some(max_rounds),
+        },
+    }
+}
 
 /// How a module re-exports another.
 enum Export {
@@ -101,12 +116,12 @@ fn a_reexport_cycle_reaches_the_least_fixpoint_from_either_module() {
 
     // One pass refuses A under B, so B brings nothing back to A; rooted at B,
     // A's rename finds no `x` in B either. That is the documented behavior of
-    // the plain driver.
+    // `Revisit::Refuse`.
     for root in [0, 1] {
         let mut exports = Exports::new(own, reexports);
         assert_eq!(
-            open_fold_post_order(&mut exports, root, OpenFoldConfig::new()),
-            Some(Names::from(["x"])),
+            open_fold(&mut exports, root, OpenFoldConfig::default()),
+            Ok(Some(Names::from(["x"]))),
             "root {root}",
         );
     }
@@ -114,7 +129,7 @@ fn a_reexport_cycle_reaches_the_least_fixpoint_from_either_module() {
     for root in [0, 1] {
         let mut exports = Exports::new(own, reexports);
         assert_eq!(
-            open_fold_fixpoint(&mut exports, root, OpenFixpointConfig::new()),
+            open_fold(&mut exports, root, ITERATE),
             Ok(Some(both.clone())),
             "root {root}",
         );
@@ -123,6 +138,30 @@ fn a_reexport_cycle_reaches_the_least_fixpoint_from_either_module() {
         // rooted at B, the first round already reaches the fixpoint.
         assert_eq!(exports.entered.len(), [8, 6][root], "root {root}");
     }
+}
+
+#[test]
+fn iterate_stores_the_final_answers_and_reuses_them() {
+    // The re-export cycle of A and B, rooted at A: both answers become final
+    // and go to the table, so a later call rooted at B folds nothing.
+    let own: &[&[&str]] = &[&["x"], &[]];
+    let reexports: &[&[(usize, Export)]] =
+        &[&[(1, Export::Renamed("x", "z"))], &[(0, Export::All)]];
+    let both = Names::from(["x", "z"]);
+    let mut memo = OpenFoldMemo::default();
+    let mut exports = Exports::new(own, reexports);
+    assert_eq!(
+        open_fold_in(&mut memo, &mut exports, 0, ITERATE),
+        Ok(Some(both.clone())),
+    );
+    assert_eq!(memo.len(), 2);
+    assert_eq!(memo.get(&1), Some(Some(&both)));
+    let folds = exports.entered.len();
+    assert_eq!(
+        open_fold_in(&mut memo, &mut exports, 1, ITERATE),
+        Ok(Some(both)),
+    );
+    assert_eq!(exports.entered.len(), folds);
 }
 
 #[test]
@@ -142,12 +181,15 @@ fn fixpoint_and_memoized_folds_agree_on_random_dags() {
                 entered: Vec::new(),
             };
             assert_eq!(
-                open_fold_fixpoint(&mut fixpoint, root, OpenFixpointConfig::new()),
-                Ok(open_fold_post_order_memoized(
+                open_fold(&mut fixpoint, root, ITERATE),
+                open_fold(
                     &mut memoized,
                     root,
-                    OpenFoldConfig::new()
-                )),
+                    OpenFoldConfig {
+                        max_depth: None,
+                        revisit: Revisit::Memoize,
+                    },
+                ),
                 "{children:?} {unmarked:?} root {root}",
             );
             assert_eq!(fixpoint.entered, memoized.entered, "root {root}");
@@ -270,7 +312,7 @@ fn monotone_folds_reach_the_least_fixpoint_on_random_cyclic_graphs() {
                 children: &children,
             };
             assert_eq!(
-                open_fold_fixpoint(&mut bits, root, OpenFixpointConfig::new()),
+                open_fold(&mut bits, root, ITERATE),
                 Ok(expected),
                 "{children:?} root {root}",
             );
@@ -292,7 +334,7 @@ fn a_cycle_that_a_refold_links_to_an_open_node_joins_its_cycle() {
             children: &children,
         };
         assert_eq!(
-            open_fold_fixpoint(&mut bits, root, OpenFixpointConfig::new()),
+            open_fold(&mut bits, root, ITERATE),
             Ok(expected),
             "root {root}",
         );
@@ -357,10 +399,7 @@ fn a_member_reached_only_in_a_later_round_joins_the_cycle() {
         children: &[&[0, 1], &[0]],
         entered: Vec::new(),
     };
-    assert_eq!(
-        open_fold_fixpoint(&mut fold, 0, OpenFixpointConfig::new()),
-        Ok(Some(0b11)),
-    );
+    assert_eq!(open_fold(&mut fold, 0, ITERATE), Ok(Some(0b11)),);
     assert_eq!(fold.entered, [0, 0, 1, 0, 1]);
 }
 
@@ -415,26 +454,45 @@ fn a_fold_that_never_settles_reaches_the_round_limit() {
         state: false,
     };
     assert_eq!(
-        open_fold_fixpoint(
-            &mut flipper,
-            0,
-            OpenFixpointConfig::new().with_max_scc_rounds(8)
-        ),
-        Err(OpenFixpointError::RoundLimit { rounds: 8 }),
+        open_fold(&mut flipper, 0, round_limit(8)),
+        Err(OpenFoldError::RoundLimitExceeded {
+            limit: 8,
+            rounds: 8
+        }),
     );
     let mut flipper = Flipper {
         children: &[&[0]],
         state: false,
     };
     assert_eq!(
-        open_fold_fixpoint(
-            &mut flipper,
-            0,
-            OpenFixpointConfig::new().with_max_scc_rounds(0)
-        ),
-        Err(OpenFixpointError::RoundLimit { rounds: 0 }),
+        open_fold(&mut flipper, 0, round_limit(0)),
+        Err(OpenFoldError::RoundLimitExceeded {
+            limit: 0,
+            rounds: 0
+        }),
         "a self-loop is a cycle too",
     );
+}
+
+#[test]
+fn an_error_leaves_only_final_answers_in_the_table() {
+    // 3 reaches 4, whose answer is final at once, and then the cycle
+    // 0 -> 1 -> 2 -> 0, which never settles. The provisional answers of the
+    // cycle and of 3 never reach the table.
+    let mut flipper = Flipper {
+        children: &[&[1], &[2], &[0], &[4, 0], &[]],
+        state: false,
+    };
+    let mut memo = OpenFoldMemo::default();
+    assert_eq!(
+        open_fold_in(&mut memo, &mut flipper, 3, round_limit(4)),
+        Err(OpenFoldError::RoundLimitExceeded {
+            limit: 4,
+            rounds: 4
+        }),
+    );
+    assert_eq!(memo.len(), 1);
+    assert_eq!(memo.get(&4), Some(Some(&false)));
 }
 
 /// Counts the nodes below a node, up to a cap; `None` marks a node unmarked.
@@ -485,10 +543,7 @@ fn a_self_loop_iterates_to_its_cap() {
         children: &[&[0]],
         marks: &[Some(0)],
     };
-    assert_eq!(
-        open_fold_fixpoint(&mut capped, 0, OpenFixpointConfig::new()),
-        Ok(Some(5)),
-    );
+    assert_eq!(open_fold(&mut capped, 0, ITERATE), Ok(Some(5)),);
 }
 
 #[test]
@@ -499,18 +554,15 @@ fn a_cycle_through_an_unmarked_node_is_an_error() {
         marks: &[Some(0), None],
     };
     assert_eq!(
-        open_fold_fixpoint(&mut capped, 0, OpenFixpointConfig::new()),
-        Err(OpenFixpointError::UnmarkedCycle),
+        open_fold(&mut capped, 0, ITERATE),
+        Err(OpenFoldError::UnmarkedCycle),
     );
     // An unmarked node off the cycle folds on every reach.
     let mut capped = Capped {
         children: &[&[1, 1], &[2], &[]],
         marks: &[Some(0), None, Some(2)],
     };
-    assert_eq!(
-        open_fold_fixpoint(&mut capped, 0, OpenFixpointConfig::new()),
-        Ok(Some(5)),
-    );
+    assert_eq!(open_fold(&mut capped, 0, ITERATE), Ok(Some(5)),);
 }
 
 #[test]
@@ -518,13 +570,11 @@ fn the_depth_bound_refuses_deeper_children() {
     let children: &'static [&'static [usize]] = &[&[1], &[2], &[]];
     let marks = &[Some(0), Some(1), Some(2)];
     let mut shallow = Capped { children, marks };
-    assert_eq!(
-        open_fold_fixpoint(&mut shallow, 0, OpenFixpointConfig::new().with_max_depth(1)),
-        Ok(Some(2)),
-    );
+    let bounded = |max_depth| OpenFoldConfig {
+        max_depth: Some(max_depth),
+        revisit: Revisit::Iterate { max_rounds: None },
+    };
+    assert_eq!(open_fold(&mut shallow, 0, bounded(1)), Ok(Some(2)));
     let mut exact = Capped { children, marks };
-    assert_eq!(
-        open_fold_fixpoint(&mut exact, 0, OpenFixpointConfig::new().with_max_depth(2)),
-        Ok(Some(3)),
-    );
+    assert_eq!(open_fold(&mut exact, 0, bounded(2)), Ok(Some(3)));
 }

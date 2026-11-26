@@ -11,11 +11,10 @@ use cfglib::{
     depth_first_edges, depth_first_events, depth_first_postorder, detect_loops_tagged,
     find_back_edges_tagged, find_function, follow, follow_path, insert_preheader,
     is_recursive_function, is_reducible, kosaraju_scc, loop_exit_blocks, min_label_relaxation,
-    open_breadth_first_events, open_breadth_first_paths, open_depth_first_events,
-    open_fold_post_order, open_search, propagate_summaries, reachable, reverse_postorder,
-    scan_predecessors, search, search_in, to_dot, to_text, topological_sort,
-    topological_sort_or_cycle, verify, verify_edge_view, verify_view, verify_with, write_dot,
-    write_text,
+    open_breadth_first_events, open_breadth_first_paths, open_depth_first_events, open_fold,
+    open_search, propagate_summaries, reachable, reverse_postorder, scan_predecessors, search,
+    search_in, to_dot, to_text, topological_sort, topological_sort_or_cycle, verify,
+    verify_edge_view, verify_view, verify_with, write_dot, write_text,
 };
 use cfglib::{
     CallMetadata, DotEdgeAttributes, DotStyle, EdgeId, FunctionIndex, FunctionNode, SummaryConfig,
@@ -298,9 +297,9 @@ fn register_open_traversals(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_open_fold_post_order",
-        covers[open_fold_post_order],
-        || open_fold_post_order(&mut SubtreeSize, 0_usize, OpenFoldConfig::new()),
-        |size: &Option<usize>| assert_eq!(*size, Some(NODE_COUNT))
+        covers[open_fold],
+        || open_fold(&mut SubtreeSize, 0_usize, OpenFoldConfig::default()),
+        |size: &Result<_, _>| assert_eq!(*size, Ok(Some(NODE_COUNT)))
     );
     benchmark_case!(
         suite,

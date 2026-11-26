@@ -9,10 +9,9 @@
 use std::ops::ControlFlow;
 
 use cfglib::{
-    DenseFanout, FoldEnter, MarkScope, OpenFixpointConfig, OpenFold, OpenFoldConfig, SearchConfig,
-    SearchOrder, StackGraph, StackNodeId, StackReverseIndex, StackSearchConfig, Visit, follow,
-    open_breadth_first_paths, open_fold_fixpoint, open_fold_post_order,
-    open_fold_post_order_memoized, open_search,
+    DenseFanout, FoldEnter, MarkScope, OpenFold, OpenFoldConfig, OpenFoldMemo, Revisit,
+    SearchConfig, SearchOrder, StackGraph, StackNodeId, StackReverseIndex, StackSearchConfig,
+    Visit, follow, open_breadth_first_paths, open_fold, open_fold_in, open_search,
 };
 
 use super::BenchmarkSuite;
@@ -34,6 +33,11 @@ const WIDTH: usize = 2;
 const DIAMONDS: usize = 16;
 /// Modules of the re-export ring of the fixpoint case.
 const RING: u32 = 64;
+/// The fold of the fixpoint cases: iterate every cycle, with no bound.
+const ITERATE: OpenFoldConfig = OpenFoldConfig {
+    max_depth: None,
+    revisit: Revisit::Iterate { max_rounds: None },
+};
 /// References, scope hops per reference, and decoy edges of the stack graph.
 const STACK_REFERENCES: usize = 256;
 const STACK_HOPS: usize = 12;
@@ -227,44 +231,54 @@ fn register_layered(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "open_fold_isolated_layered",
-        || open_fold_post_order(&mut RouteCount, 0_usize, OpenFoldConfig::new()),
-        |size: &Option<usize>| assert_eq!(*size, Some((1 << LEVELS) - 1))
+        || open_fold(&mut RouteCount, 0_usize, OpenFoldConfig::default()),
+        |size: &Result<_, _>| assert_eq!(*size, Ok(Some((1 << LEVELS) - 1)))
     );
     // The same route count over stacked diamonds, folded once per route and
     // once per node.
     benchmark_case!(
         suite,
         "open_fold_isolated_diamonds",
-        || open_fold_post_order(&mut DiamondRoutes, 0_usize, OpenFoldConfig::new()),
-        |routes: &Option<usize>| assert_eq!(*routes, Some(1 << DIAMONDS))
+        || open_fold(&mut DiamondRoutes, 0_usize, OpenFoldConfig::default()),
+        |routes: &Result<_, _>| assert_eq!(*routes, Ok(Some(1 << DIAMONDS)))
     );
     benchmark_case!(
         suite,
         "open_fold_memoized_diamonds",
-        covers[open_fold_post_order_memoized],
-        || open_fold_post_order_memoized(&mut DiamondRoutes, 0_usize, OpenFoldConfig::new()),
-        |routes: &Option<usize>| assert_eq!(*routes, Some(1 << DIAMONDS))
+        covers[open_fold_in],
+        || {
+            let memoize = OpenFoldConfig {
+                max_depth: None,
+                revisit: Revisit::Memoize,
+            };
+            open_fold_in(
+                &mut OpenFoldMemo::default(),
+                &mut DiamondRoutes,
+                0_usize,
+                memoize,
+            )
+        },
+        |routes: &Result<_, _>| assert_eq!(*routes, Ok(Some(1 << DIAMONDS)))
     );
-    // The fixpoint driver memoizes every marked node, so it walks the
-    // diamonds as the memoized driver does.
+    // Iterating memoizes every marked node, so it walks the diamonds as
+    // memoizing does.
     benchmark_case!(
         suite,
         "open_fold_fixpoint_diamonds",
-        || open_fold_fixpoint(&mut DiamondRoutes, 0_usize, OpenFixpointConfig::new()),
+        || open_fold(&mut DiamondRoutes, 0_usize, ITERATE),
         |routes: &Result<_, _>| assert_eq!(*routes, Ok(Some(1 << DIAMONDS)))
     );
     benchmark_case!(
         suite,
         "open_fold_fixpoint_export_ring",
-        covers[open_fold_fixpoint],
-        || open_fold_fixpoint(&mut ExportRing, 0_u32, OpenFixpointConfig::new()),
+        || open_fold(&mut ExportRing, 0_u32, ITERATE),
         |names: &Result<_, _>| assert_eq!(*names, Ok(Some(u64::MAX)))
     );
 }
 
 /// `RING` modules in a ring: each exports its own name, one bit, and
 /// re-exports all of the next one, so every module exports every name. The
-/// whole ring is one cycle, which the fixpoint driver re-folds twice.
+/// whole ring is one cycle, which `Revisit::Iterate` re-folds twice.
 struct ExportRing;
 
 impl OpenFold for ExportRing {
@@ -332,10 +346,6 @@ impl OpenFold for DiamondRoutes {
     }
 
     fn mark(&mut self, node: &usize) -> Option<usize> {
-        Some(*node)
-    }
-
-    fn memo_key(&mut self, node: &usize) -> Option<usize> {
         Some(*node)
     }
 
