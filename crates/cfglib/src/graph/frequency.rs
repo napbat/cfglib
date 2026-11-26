@@ -64,14 +64,12 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::Reverse;
 use core::marker::PhantomData;
-use core::ops::{ControlFlow, Range};
+use core::ops::Range;
 
 use super::edge_view::EdgeView;
 use super::fanout::DenseFanout;
 use super::loop_forest::{LoopForest, LoopId};
-use super::search::Visit;
-use super::traverse::{DepthFirstStack, DepthFirstVisitor, Outgoing, depth_first_core};
-use super::view::{DenseId, GraphView, RootedView, scan_predecessors};
+use super::view::{DenseId, RootedView};
 use crate::block::BlockId;
 use crate::edge::{EdgeId, Probability};
 use crate::identity::{NO_INDEX, check_bound, slot, word};
@@ -382,9 +380,7 @@ struct Scratch {
     order: Vec<usize>,
     /// The position of each unit in `order`, [`NO_INDEX`] when unreached.
     position: Vec<u32>,
-    /// The units the walk of `order` has entered.
-    seen: Vec<bool>,
-    stack: DepthFirstStack<usize, usize>,
+    stack: Vec<(usize, usize)>,
     mass: Vec<u64>,
 }
 
@@ -608,37 +604,41 @@ impl Propagation {
 
     /// Order the units that `start` reaches through the arcs in reverse
     /// postorder.
+    ///
+    /// This loop stays outside the shared depth-first core of
+    /// [`graph::traverse`](super::traverse): a level holds a handful of
+    /// units, and the core's per-walk setup over a view of the level's arcs
+    /// made `api_block_frequencies_1k` and `_10k` about 1.5 times slower.
     fn order_from(&mut self, start: usize) {
-        let Scratch {
-            arcs,
-            arc_starts,
-            order,
-            position,
-            seen,
-            stack,
-            ..
-        } = &mut self.scratch;
-        let level = LevelArcs {
-            arcs,
-            starts: arc_starts,
-        };
-        let units = level.node_bound();
-        seen.clear();
-        seen.resize(units, false);
-        order.clear();
-        depth_first_core(
-            Outgoing,
-            &level,
-            [start],
-            seen.as_mut_slice(),
-            stack,
-            &mut Finished(order),
-        );
-        order.reverse();
-        position.clear();
-        position.resize(units, NO_INDEX);
-        for (place, &unit) in order.iter().enumerate() {
-            position[unit] = word(place);
+        let scratch = &mut self.scratch;
+        let units = scratch.arc_starts.len() - 1;
+        scratch.order.clear();
+        scratch.position.clear();
+        scratch.position.resize(units, NO_INDEX);
+        // `position` marks a unit as seen while the walk runs, and holds its
+        // place in the order once the walk is done.
+        scratch.position[start] = 0;
+        scratch.stack.push((start, scratch.arc_starts[start]));
+        while let Some((unit, next)) = scratch.stack.last_mut() {
+            if *next == scratch.arc_starts[*unit + 1] {
+                scratch.order.push(*unit);
+                scratch.stack.pop();
+                continue;
+            }
+            let arc = scratch.arcs[*next];
+            *next += 1;
+            if let To::Unit(successor) = arc.to
+                && scratch.position[successor] == NO_INDEX
+            {
+                scratch.position[successor] = 0;
+                scratch
+                    .stack
+                    .push((successor, scratch.arc_starts[successor]));
+            }
+        }
+        scratch.order.reverse();
+        for (position, &unit) in scratch.order.iter().enumerate() {
+            scratch.position[unit] = word(position);
         }
     }
 
@@ -665,56 +665,6 @@ impl Propagation {
             }
         }
         block
-    }
-}
-
-/// The arcs of one level as a forward graph over the local unit numbers, for
-/// the walk of [`Propagation::order_from`]. An arc that leaves the level or
-/// returns to its header leads to no unit.
-struct LevelArcs<'a> {
-    arcs: &'a [Arc],
-    /// Where the arcs of each unit start, with one more entry for the end.
-    starts: &'a [usize],
-}
-
-impl GraphView for LevelArcs<'_> {
-    type NodeId = usize;
-
-    fn node_bound(&self) -> usize {
-        self.starts.len() - 1
-    }
-
-    fn node_ids(&self) -> impl Iterator<Item = usize> + '_ {
-        0..self.node_bound()
-    }
-
-    fn successors(&self, unit: usize) -> impl Iterator<Item = usize> + '_ {
-        self.arcs[self.starts[unit]..self.starts[unit + 1]]
-            .iter()
-            .filter_map(|arc| match arc.to {
-                To::Unit(next) => Some(next),
-                To::Back | To::Out => None,
-            })
-    }
-
-    fn predecessors(&self, unit: usize) -> impl Iterator<Item = usize> + '_ {
-        scan_predecessors(self, unit)
-    }
-}
-
-/// A depth-first visitor that records the units it finishes: the postorder.
-struct Finished<'a>(&'a mut Vec<usize>);
-
-impl DepthFirstVisitor<usize, usize, ()> for Finished<'_> {
-    #[inline]
-    fn discover(&mut self, _unit: usize, _depth: usize) -> ControlFlow<(), Visit> {
-        ControlFlow::Continue(Visit::Descend)
-    }
-
-    #[inline]
-    fn finish(&mut self, unit: usize) -> ControlFlow<()> {
-        self.0.push(unit);
-        ControlFlow::Continue(())
     }
 }
 
