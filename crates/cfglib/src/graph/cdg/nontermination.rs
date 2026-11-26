@@ -20,14 +20,16 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+use crate::graph::epoch::grow_to;
 use crate::graph::view::{DenseId, GraphView};
 
-/// The buffers [`nontermination_sensitive_controllers`] fills, owned by the
-/// caller.
+/// The buffers [`nontermination_sensitive_controllers_in`] fills, owned by
+/// the caller.
 ///
-/// Only the blocks a call colors or counts are touched, and each is restored
-/// before the call returns, so a call that reaches a few blocks of a large
-/// graph costs only those blocks once the tables have grown.
+/// It starts empty ([`Default`]) and grows on entry to fit the graph. Only the
+/// blocks a call colors or counts are touched, and each is restored before
+/// the call returns, so a call that reaches a few blocks of a large graph
+/// costs only those blocks once the tables have grown.
 #[derive(Debug, Clone, Default)]
 pub struct NonterminationScratch {
     /// How many successor edges of each counted block are not red yet.
@@ -41,16 +43,8 @@ pub struct NonterminationScratch {
     stack: Vec<usize>,
 }
 
-impl NonterminationScratch {
-    /// Scratch holding nothing yet.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-/// Write to `out` the predicates that `node` is nontermination-sensitively
-/// control dependent on, ascending by dense index.
+/// Return the predicates that `node` is nontermination-sensitively control
+/// dependent on, ascending by dense index.
 ///
 /// A predicate `p` controls `node` when `p` has two distinct successors, one
 /// from which every maximal path passes `node` and one from which some
@@ -62,10 +56,12 @@ impl NonterminationScratch {
 /// The call colors backward from `node` (Chalupa et al., CAV 2021), so it
 /// costs O(n + m) at most and only the part of the graph that leads to
 /// `node`. The whole relation, one call per block, is O(n·(n + m)) and can
-/// itself be quadratic, so there is deliberately no builder of it.
+/// itself be quadratic, so there is deliberately no builder of it; a pass
+/// that asks for many dependents hands one scratch to
+/// [`nontermination_sensitive_controllers_in`] instead.
 ///
-/// `out` is cleared first. Parallel edges and self-loops are read as they
-/// are: a block whose only successor is itself never passes another block.
+/// Parallel edges and self-loops are read as they are: a block whose only
+/// successor is itself never passes another block.
 ///
 /// # Panics
 ///
@@ -79,7 +75,7 @@ impl NonterminationScratch {
 /// which has one successor:
 ///
 /// ```
-/// use cfglib::{Cfg, EdgeKind, NonterminationScratch, nontermination_sensitive_controllers};
+/// use cfglib::{Cfg, EdgeKind, nontermination_sensitive_controllers};
 ///
 /// let mut cfg = Cfg::<u32>::new();
 /// let entry = cfg.entry();
@@ -94,17 +90,60 @@ impl NonterminationScratch {
 /// cfg.add_edge(err, latch, EdgeKind::Unconditional);
 /// cfg.add_edge(latch, head, EdgeKind::Back);
 ///
-/// let mut scratch = NonterminationScratch::new();
-/// let mut controllers = Vec::new();
-/// nontermination_sensitive_controllers(&cfg, ok, &mut scratch, &mut controllers);
-/// assert_eq!(controllers, [head]);
-/// nontermination_sensitive_controllers(&cfg, latch, &mut scratch, &mut controllers);
-/// assert!(controllers.is_empty());
+/// assert_eq!(nontermination_sensitive_controllers(&cfg, ok), [head]);
+/// assert!(nontermination_sensitive_controllers(&cfg, latch).is_empty());
 /// ```
+#[must_use]
 pub fn nontermination_sensitive_controllers<G: GraphView>(
     graph: &G,
     node: G::NodeId,
+) -> Vec<G::NodeId> {
+    let mut out = Vec::new();
+    nontermination_sensitive_controllers_in(
+        &mut NonterminationScratch::default(),
+        graph,
+        node,
+        &mut out,
+    );
+    out
+}
+
+/// Write to `out` the controllers [`nontermination_sensitive_controllers`]
+/// returns, over caller-owned working storage.
+///
+/// `out` is cleared first. A call allocates nothing once `scratch` and `out`
+/// have grown to the graph.
+///
+/// # Panics
+///
+/// Panics under the conditions of [`nontermination_sensitive_controllers`].
+///
+/// # Examples
+///
+/// ```
+/// use cfglib::{
+///     Cfg, EdgeKind, NonterminationScratch, nontermination_sensitive_controllers_in,
+/// };
+///
+/// let mut cfg = Cfg::<u32>::new();
+/// let head = cfg.entry();
+/// let body = cfg.new_block();
+/// let exit = cfg.new_block();
+/// cfg.add_edge(head, body, EdgeKind::ConditionalTrue);
+/// cfg.add_edge(head, exit, EdgeKind::ConditionalFalse);
+/// cfg.add_edge(body, head, EdgeKind::Back);
+///
+/// let mut scratch = NonterminationScratch::default();
+/// let mut controllers = Vec::new();
+/// nontermination_sensitive_controllers_in(&mut scratch, &cfg, body, &mut controllers);
+/// assert_eq!(controllers, [head]);
+/// nontermination_sensitive_controllers_in(&mut scratch, &cfg, exit, &mut controllers);
+/// assert_eq!(controllers, [head]);
+/// ```
+pub fn nontermination_sensitive_controllers_in<G: GraphView>(
     scratch: &mut NonterminationScratch,
+    graph: &G,
+    node: G::NodeId,
     out: &mut Vec<G::NodeId>,
 ) {
     out.clear();
@@ -120,11 +159,9 @@ pub fn nontermination_sensitive_controllers<G: GraphView>(
         touched,
         stack,
     } = scratch;
-    if pending.len() < bound {
-        pending.resize(bound, 0);
-        counted.resize(bound, false);
-        red.resize(bound, false);
-    }
+    grow_to(pending, bound, 0);
+    grow_to(counted, bound, false);
+    grow_to(red, bound, false);
 
     let start = node.index();
     red[start] = true;
