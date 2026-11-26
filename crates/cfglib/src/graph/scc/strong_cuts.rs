@@ -17,7 +17,7 @@
 //! - `s` itself is tested directly: the component without it is strongly
 //!   connected when one other node reaches, and is reached by, all the rest.
 //!
-//! Each component is read through a view that renumbers its nodes densely
+//! The component is read through a view that renumbers its nodes densely
 //! from zero, so no subgraph is copied and the trees cost the component's
 //! size, not the graph's. The root is the node of lowest dense index, so the
 //! answer does not depend on the order of successor lists.
@@ -26,19 +26,19 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::graph::dominator::{DominatorScratch, DominatorTree};
-use crate::graph::scc::tarjan_scc;
-use crate::graph::view::{DenseId, GraphView, Positions, Renumbered, Reversed};
+use crate::graph::view::{DenseId, GraphView, Positions, Renumbered, Reversed, Rooted};
 
-/// The strong articulation points and strong bridges of a graph, or of one of
-/// its strongly connected components.
+/// The strong articulation points and strong bridges of one strongly
+/// connected component of a graph.
 ///
 /// Both lists are sorted by the dense indices of their nodes, so the answer
-/// does not depend on the order of successor lists or of the components.
+/// does not depend on the order of successor lists. The cuts of a whole graph
+/// are those of its components, which share no node and no edge.
 ///
 /// # Examples
 ///
 /// ```
-/// use cfglib::{Graph, StrongCutScratch, strong_cuts};
+/// use cfglib::{Graph, NodeId, StrongCuts};
 ///
 /// // Two cycles that share `hub`: a -> hub -> a, and hub -> b -> c -> hub.
 /// let mut graph = Graph::<&str, ()>::new();
@@ -52,7 +52,8 @@ use crate::graph::view::{DenseId, GraphView, Positions, Renumbered, Reversed};
 /// graph.add_edge(b, c, ());
 /// graph.add_edge(c, hub, ());
 ///
-/// let cuts = strong_cuts(&graph, &mut StrongCutScratch::new());
+/// let component: Vec<NodeId> = graph.node_ids().collect();
+/// let cuts = StrongCuts::compute(&graph, &component);
 /// assert_eq!(cuts.articulation_points, [hub, b, c]);
 /// assert_eq!(cuts.bridges.len(), 5);
 /// ```
@@ -65,8 +66,8 @@ pub struct StrongCuts<N> {
     pub bridges: Vec<(N, N)>,
 }
 
-/// No articulation point and no bridge, the answer for a graph without a
-/// strongly connected component of two nodes.
+/// No articulation point and no bridge, the answer for a component of one
+/// node.
 impl<N> Default for StrongCuts<N> {
     fn default() -> Self {
         Self {
@@ -76,11 +77,11 @@ impl<N> Default for StrongCuts<N> {
     }
 }
 
-/// The buffers [`strong_cuts`] and [`strong_cuts_of`] fill, owned by the
-/// caller.
+/// The buffers [`StrongCuts::compute_in`] fills, owned by the caller.
 ///
-/// One instance serves every component and every graph: the dominator scratch
-/// is reused by every tree, and the renumbering table and the search buffers
+/// It starts empty and grows on entry to fit the graph it is handed, so one
+/// instance serves every component and every graph: the dominator scratch is
+/// reused by every tree, and the renumbering table and the search buffers
 /// grow to the largest graph seen and are then reused.
 #[derive(Debug, Clone, Default)]
 pub struct StrongCutScratch {
@@ -95,68 +96,57 @@ pub struct StrongCutScratch {
     stack: Vec<usize>,
 }
 
-impl StrongCutScratch {
-    /// Scratch holding nothing yet.
+impl<N: DenseId> StrongCuts<N> {
+    /// Compute the strong articulation points and strong bridges of one
+    /// strongly connected component of `graph`, given as its nodes.
+    ///
+    /// The nodes are a slice of
+    /// [`SccDecomposition::components`](crate::SccDecomposition::components),
+    /// under either numbering. A component of one node has neither cut. A
+    /// parallel edge is never a strong bridge, because its twin keeps the
+    /// component connected, and a self-loop never is either.
+    ///
+    /// The cost is two dominator trees, of the component and of its reverse,
+    /// and two extra searches, all over a view of that component alone: with
+    /// the simple Lengauer-Tarjan construction, O(m log n) for a component of
+    /// `n` nodes and `m` edges. [`compute_in`](Self::compute_in) reuses its
+    /// buffers across components.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `component` lists a node twice, when the subgraph it
+    /// induces is not strongly connected, when a node has an index beyond the
+    /// graph's node bound, and when that bound exceeds the range of a dense
+    /// `u32` table.
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub fn compute<G>(graph: &G, component: &[N]) -> Self
+    where
+        G: GraphView<NodeId = N>,
+    {
+        Self::compute_in(&mut StrongCutScratch::default(), graph, component)
     }
-}
 
-/// Compute the strong articulation points and strong bridges of every
-/// strongly connected component of `graph`.
-///
-/// A component of one node has neither. A parallel edge is never a strong
-/// bridge, because its twin keeps the component connected, and a self-loop
-/// never is either.
-///
-/// The cost is one [`tarjan_scc`] pass, and for each component of at least
-/// two nodes two dominator trees, of the component and of its reverse, and
-/// one extra search, all over a view of that component alone. With the
-/// simple Lengauer-Tarjan construction that is O(m log n) in total.
-///
-/// # Panics
-///
-/// Panics when [`node_bound`](GraphView::node_bound) exceeds the range of a
-/// dense `u32` table.
-#[must_use]
-pub fn strong_cuts<G: GraphView>(
-    graph: &G,
-    scratch: &mut StrongCutScratch,
-) -> StrongCuts<G::NodeId> {
-    let components = tarjan_scc(graph);
-    let mut cuts = StrongCuts::default();
-    for component in components.components() {
+    /// [`compute`](Self::compute) over caller-owned buffers, which grow to
+    /// fit `graph` and are reused by every later call.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the conditions of [`compute`](Self::compute).
+    #[must_use]
+    pub fn compute_in<G>(scratch: &mut StrongCutScratch, graph: &G, component: &[N]) -> Self
+    where
+        G: GraphView<NodeId = N>,
+    {
+        let mut cuts = Self::default();
+        if component.len() < 2 {
+            return cuts;
+        }
+        scratch.positions.number(graph.node_bound(), component);
         collect(graph, component, scratch, &mut cuts);
+        scratch.positions.clear(component);
+        sort(&mut cuts);
+        cuts
     }
-    sort(&mut cuts);
-    cuts
-}
-
-/// Compute the strong articulation points and strong bridges of one strongly
-/// connected component of `graph`, given as its nodes.
-///
-/// This serves a caller that already holds an
-/// [`SccDecomposition`](crate::SccDecomposition), from either algorithm:
-/// pass it a slice of [`components`](crate::SccDecomposition::components).
-/// The answer is [`strong_cuts`] restricted to that component, at the cost of
-/// that component alone.
-///
-/// # Panics
-///
-/// Panics when `component` lists a node twice, when the subgraph it induces
-/// is not strongly connected, and when a node has an index beyond the
-/// graph's node bound.
-#[must_use]
-pub fn strong_cuts_of<G: GraphView>(
-    graph: &G,
-    component: &[G::NodeId],
-    scratch: &mut StrongCutScratch,
-) -> StrongCuts<G::NodeId> {
-    let mut cuts = StrongCuts::default();
-    collect(graph, component, scratch, &mut cuts);
-    sort(&mut cuts);
-    cuts
 }
 
 /// Put both lists in ascending dense-index order, each entry once.
@@ -172,24 +162,21 @@ fn sort<N: DenseId>(cuts: &mut StrongCuts<N>) {
     cuts.bridges.dedup();
 }
 
-/// Append the cuts of `component` to `cuts`.
+/// Append the cuts of `component`, of at least two nodes and numbered in
+/// `scratch.positions`, to `cuts`.
 fn collect<G: GraphView>(
     graph: &G,
     component: &[G::NodeId],
     scratch: &mut StrongCutScratch,
     cuts: &mut StrongCuts<G::NodeId>,
 ) {
-    if component.len() < 2 {
-        return;
-    }
-    scratch.positions.number(graph.node_bound(), component);
     let view = Renumbered::new(graph, component, &scratch.positions);
     let root = (0..component.len())
         .min_by_key(|&position| component[position].index())
         .expect("a component of two nodes has a lowest one");
-    let forward = DominatorTree::compute_from_in(&mut scratch.dominators, &view, root);
+    let forward = DominatorTree::compute_in(&mut scratch.dominators, &Rooted::new(&view, root));
     let reverse = Reversed::new(&view);
-    let backward = DominatorTree::compute_from_in(&mut scratch.dominators, &reverse, root);
+    let backward = DominatorTree::compute_in(&mut scratch.dominators, &Rooted::new(&reverse, root));
     assert!(
         forward.preorder().len() == component.len() && backward.preorder().len() == component.len(),
         "the component is not strongly connected"
@@ -220,12 +207,15 @@ fn collect<G: GraphView>(
     {
         cuts.articulation_points.push(component[root]);
     }
-
-    scratch.positions.clear(component);
 }
 
 /// Whether one node of `view` other than `removed` reaches every other node
 /// but `removed` along paths that avoid it.
+///
+/// The answer is a count, so the order is free and a stack keeps only the
+/// frontier. On the breadth-first core, whose queue keeps every node it
+/// reaches, over epoch marks, `api_strong_cuts_component_segment_ring` measured 13%
+/// to 31% slower than this loop.
 fn reaches_all_without<V: GraphView<NodeId = usize>>(
     view: &V,
     removed: usize,

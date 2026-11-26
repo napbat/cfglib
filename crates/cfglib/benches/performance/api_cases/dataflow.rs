@@ -2,10 +2,10 @@ use std::convert::Infallible;
 
 use cfglib::{
     Cfg, Direction, EdgeFacts, EdgeProblem, Facts, Graph, IterationOrder, NodeId, NodeProblem,
-    Resume, ResumeMode, Seeds, Solve, SolveConfig, SolveStats, TryEdgeProblem, TryNodeProblem,
-    TrySolveError, WeakTopologicalOrder, meet_options, resume_edge_problem, resume_node_problem,
-    solve_edge_problem, solve_node_problem, stream_edge_problem, stream_node_problem,
-    try_meet_options,
+    Resume, ResumeMode, Rooted, Seeds, Solve, SolveConfig, SolveStats, TryEdgeProblem,
+    TryNodeProblem, TrySolveError, WeakTopologicalOrder, meet_options, resume_edge_problem,
+    resume_node_problem, solve_edge_problem, solve_node_problem, stream_edge_problem,
+    stream_node_problem, try_meet_options,
 };
 
 use super::BenchmarkSuite;
@@ -436,7 +436,7 @@ fn register_iteration_orders(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_weak_topological_order",
-        || WeakTopologicalOrder::compute(&graph, entry, Direction::Forward),
+        || WeakTopologicalOrder::compute(&Rooted::new(&graph, entry)),
         |order: &WeakTopologicalOrder<NodeId>| assert_eq!(order.order().len(), NEST_NODE_COUNT)
     );
 }

@@ -3,8 +3,8 @@
 use std::collections::BTreeSet;
 
 use cfglib::{
-    BlockId, BlockTag, Cfg, DenseId, EdgeId, EdgeKind, Graph, InstrInfo, NodeId, NodeOrder,
-    Renumbering, Rooted, RootedView,
+    BlockId, BlockTag, Cfg, DenseId, EdgeId, EdgeKind, EdgeView, Graph, InstrInfo, KindedEdge,
+    NodeId, NodeOrder, Renumbering, Rooted, RootedView,
 };
 
 use crate::oracle::Reference;
@@ -277,15 +277,13 @@ impl<N: DenseId> Slots<N> {
     }
 }
 
-/// An analysis over any rooted view, checked against the reference.
+/// An analysis over any rooted view, checked against the reference. Every
+/// realization is a rooted edge view whose edges carry no
+/// [`EdgeKind::Back`] tag.
 pub trait ViewCheck {
-    fn check<G: RootedView>(
-        &self,
-        view: &G,
-        slots: &Slots<G::NodeId>,
-        reference: &Reference<'_>,
-        label: &str,
-    );
+    fn check<G>(&self, view: &G, slots: &Slots<G::NodeId>, reference: &Reference<'_>, label: &str)
+    where
+        G: RootedView + EdgeView<EdgeData: KindedEdge>;
 }
 
 /// One topology realized in both stores, with and without holes.

@@ -23,10 +23,10 @@ use cfglib::{
     DenseFanout, Direction, DisplayInstr, DominatorTree, EdgeKind, EhBlockKind, EhModel, Fanout,
     Flow, FlowControl, FlowEffect, Graph, Handler, HandlerBody, HandlerKind, HandlerMetadata,
     HornClauses, IfdsConfig, IfdsProblem, InstrInfo, KeyedGraph, NodeId, NodeOrder, NodeProblem,
-    PostDominatorTree, Region, RegionIndex, Solve, SortedMap, StackGraphError, Supergraph,
-    TextError, breadth_first, parse_cfg_listing, parse_text, remove_unreachable_mapped,
-    shortest_path, simplify_mapped, solve_ifds, solve_node_problem, tarjan_scc, topological_sort,
-    verify,
+    PostDominatorTree, Region, RegionIndex, SccDecomposition, SccNumbering, Solve, SortedMap,
+    StackGraphError, Supergraph, TextError, breadth_first, parse_cfg_listing, parse_text,
+    remove_unreachable_mapped, shortest_path, simplify_mapped, solve_ifds, solve_node_problem,
+    topological_sort, verify,
 };
 
 /// An instruction a consumer owns: its text, and the variables it reads and
@@ -263,7 +263,7 @@ fn a_graph_store_runs_traversals_and_components_on_owned_payloads() {
         None,
         "emit now feeds back into check"
     );
-    let components = tarjan_scc(&graph);
+    let components = SccDecomposition::compute(&graph, SccNumbering::LeavesFirst);
     assert_eq!(components.len(), 2, "parse, and the check-lower-emit cycle");
 
     graph.remove_node(ids[0]);

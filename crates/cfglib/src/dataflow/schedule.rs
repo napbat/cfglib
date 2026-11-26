@@ -8,9 +8,10 @@ use core::ops::Range;
 use super::bits::DenseBits;
 use super::solve::{IterationOrder, SolveConfig, TrySolveError, count_step};
 use super::worklist::{Queue, Ranked, Worklist};
+use crate::graph::traverse::postorder_in;
 use crate::graph::view::Direction;
 use crate::graph::view::{DenseId, GraphView};
-use crate::graph::weak_topological_order::{WeakTopologicalOrder, depth_first_forest};
+use crate::graph::weak_topological_order::WeakTopologicalOrder;
 
 /// Which operator a loop head applies to the fact flowing into it.
 #[derive(Debug, Clone, Copy)]
@@ -333,8 +334,8 @@ fn schedule<G: GraphView>(
         .chain(queued.iter().copied());
     let bound = graph.node_bound();
     if order == IterationOrder::ReversePostorder {
-        let forest = depth_first_forest(graph, roots, direction);
-        let ranked = Ranked::new(&worklist, bound, forest.reverse_postorder::<G::NodeId>());
+        let postorder = postorder_in(graph, roots, direction, &mut Vec::new());
+        let ranked = Ranked::new(&worklist, bound, postorder.into_iter().rev());
         return Schedule::Ranked(ranked);
     }
     let order = WeakTopologicalOrder::from_roots(graph, roots, direction);

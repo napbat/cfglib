@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 
 use super::reference::PostReference;
 use crate::graph::dominator::tests::support::{EdgeList, for_each_multigraph, node};
-use crate::graph::dominator::{PostDominatorScratch, PostDominatorTree};
+use crate::graph::dominator::{DominatorScratch, ExitPolicy, PostDominatorTree};
 
 /// The blocks with a path to one of `joined` over `edges` without the edge
 /// at index `skipped`.
@@ -32,9 +32,9 @@ fn reaching(edges: &EdgeList, joined: &[usize], skipped: usize) -> Vec<bool> {
 
 /// Check every edge, present or not, and every block against the
 /// definition, on the cut the reference derives independently.
-fn check_against_definition(edges: &EdgeList, scratch: &mut PostDominatorScratch) {
+fn check_against_definition(edges: &EdgeList, scratch: &mut DominatorScratch) {
     let graph = edges.graph();
-    let post = PostDominatorTree::compute_in(scratch, &graph);
+    let post = PostDominatorTree::compute_in(scratch, &graph, ExitPolicy::CutLoops);
     let reference = PostReference::new(&graph);
     let joined: Vec<usize> = reference
         .exits()
@@ -66,7 +66,7 @@ fn check_against_definition(edges: &EdgeList, scratch: &mut PostDominatorScratch
 
 #[test]
 fn every_digraph_of_up_to_four_nodes_matches_the_definition() {
-    let mut scratch = PostDominatorScratch::new();
+    let mut scratch = DominatorScratch::default();
     for node_count in 1..=4 {
         for_each_multigraph(node_count, 1, |edges| {
             check_against_definition(edges, &mut scratch);
@@ -76,7 +76,7 @@ fn every_digraph_of_up_to_four_nodes_matches_the_definition() {
 
 #[test]
 fn every_multigraph_of_up_to_three_nodes_matches_the_definition() {
-    let mut scratch = PostDominatorScratch::new();
+    let mut scratch = DominatorScratch::default();
     for node_count in 1..=3 {
         for_each_multigraph(node_count, 2, |edges| {
             check_against_definition(edges, &mut scratch);

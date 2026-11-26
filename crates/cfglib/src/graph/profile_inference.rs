@@ -70,7 +70,7 @@ use super::frequency::{BlockFrequencies, FREQUENCY_SHIFT, FrequencyConfig};
 use super::loop_forest::LoopForest;
 use super::network_flow::{ArcId, FlowError, FlowNetwork};
 use super::view::{DenseId, RootedView};
-use crate::edge::Probability;
+use crate::edge::{KindedEdge, Probability};
 use crate::identity::{NO_INDEX, slot, word};
 
 /// The capacity of an arc that any amount may take.
@@ -159,6 +159,7 @@ impl<N: DenseId, E: DenseId> BlockFrequencies<N, E> {
     ) -> Result<Self, FlowError>
     where
         G: RootedView<NodeId = N> + EdgeView<EdgeId = E>,
+        G::EdgeData: KindedEdge,
     {
         let mut model = Model::new(graph.node_bound(), graph.edge_bound());
         for node in graph.node_ids() {
@@ -212,6 +213,7 @@ fn expected_counts<G>(
 ) -> Vec<i64>
 where
     G: RootedView + EdgeView,
+    G::EdgeData: KindedEdge,
 {
     let dominators = DominatorTree::compute(graph);
     let loops = LoopForest::compute(graph, &dominators);

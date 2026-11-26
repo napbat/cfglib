@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, VecDeque};
 
 use cfglib::{
     BlockId, Cfg, CommonAncestor, Direction, DominanceFrontiers, DominatorTree, EdgeId, Facts,
-    Graph, IntervalAnalysis, NodeId, PostDominatorTree, PostNode,
+    Graph, NodeId, PostDominatorTree, PostNode,
 };
 
 use super::fixtures::{WIDE_FACT_WORDS, fixture_u32};
@@ -242,37 +242,6 @@ pub(super) fn assert_control_dependence_graph(
         .collect();
     assert_eq!(actual, expected);
     assert_eq!(result.edge_count(), expected.len());
-}
-
-pub(super) fn assert_cfg_intervals(result: &IntervalAnalysis, cfg: &Cfg<u32>) {
-    assert_ne!(result.intervals.len(), 0);
-    let mut assigned = BTreeSet::new();
-    for interval in &result.intervals {
-        assert!(interval.blocks.contains(&interval.header));
-        for &block in &interval.blocks {
-            assert!(assigned.insert(block), "block appeared in two intervals");
-            if block != interval.header {
-                assert!(
-                    cfg.predecessors(block)
-                        .all(|predecessor| interval.blocks.contains(&predecessor)),
-                    "non-header interval block has an external predecessor"
-                );
-            }
-        }
-    }
-    assert_eq!(assigned.len(), cfg.block_count());
-}
-
-pub(super) fn assert_reverse_chain_intervals(
-    result: &IntervalAnalysis<NodeId>,
-    node_count: usize,
-    root: NodeId,
-) {
-    assert_eq!(result.intervals.len(), 1);
-    let interval = &result.intervals[0];
-    assert_eq!(interval.header, root);
-    assert_eq!(interval.blocks.len(), node_count);
-    assert!((0..node_count).all(|index| interval.blocks.contains(&NodeId::from_index(index))));
 }
 
 pub(super) fn assert_bool_node_facts(facts: &Facts<bool>, node_count: usize) {

@@ -2,7 +2,7 @@ use std::cell::OnceCell;
 
 use cfglib::{
     BlockId, CertificateError, Cfg, DominanceFrontiers, DominatorScratch, DominatorTree,
-    DominatorUpdate, Graph, LowHighOrder, NodeId, PostDominatorTree, PostNode, Rooted,
+    DominatorUpdate, Graph, GraphView, LowHighOrder, NodeId, PostDominatorTree, PostNode, Rooted,
     control_dependence_graph,
 };
 
@@ -123,9 +123,16 @@ impl Edited {
         (tree, changed.clone())
     }
 
-    /// Recompute the tree and diff it against the old one.
+    /// Recompute the tree and diff it against the old one: a full
+    /// construction plus an O(n) scan for the nodes whose parent changed.
     fn recompute(&self) -> (DominatorTree<NodeId>, Vec<NodeId>) {
-        DominatorTree::compute_with_diff(&self.rooted(), &self.tree)
+        let graph = self.rooted();
+        let next = DominatorTree::compute(&graph);
+        let changed = (0..graph.node_bound())
+            .map(NodeId::from_index)
+            .filter(|&node| self.tree.idom(node) != next.idom(node))
+            .collect();
+        (next, changed)
     }
 
     /// Check an answer against a fresh construction and its diff.
@@ -143,7 +150,7 @@ impl Edited {
 /// names given.
 macro_rules! update_cases {
     ($suite:expr, $edited:expr, $incremental:literal, $recomputed:literal) => {{
-        let mut scratch = DominatorScratch::new();
+        let mut scratch = DominatorScratch::default();
         let mut changed = Vec::new();
         benchmark_case!(
             $suite,
@@ -159,8 +166,8 @@ macro_rules! update_cases {
 
 /// One insertion that moves nodes, one deletion, and a batch of eight of
 /// each, on the branchy fixture and on a sparse graph of 2²⁰ nodes, each
-/// against the full recomputation of `compute_with_diff`. The large graph
-/// and its batches are built only when one of its cases runs.
+/// against a full recomputation and its diff. The large graph and its
+/// batches are built only when one of its cases runs.
 fn register_dominator_updates(suite: &mut BenchmarkSuite<'_>) {
     let branchy = branchy_graph(NODE_COUNT);
     let insert = Edited::new(&branchy, 1, 0, 1);
@@ -223,21 +230,18 @@ fn register_dominators(suite: &mut BenchmarkSuite<'_>, cfg: &Cfg<u32>) {
     benchmark_case!(
         suite,
         "cfg_dominators_certified",
-        || DominatorTree::compute_certified_in(&mut DominatorScratch::new(), cfg, cfg.entry()),
+        || DominatorTree::compute_certified_in(&mut DominatorScratch::default(), cfg),
         |(tree, certificate): &(DominatorTree, LowHighOrder)| {
             assert_branchy_dominators(tree, NODE_COUNT);
-            assert_eq!(
-                tree.verify_certificate(cfg, cfg.entry(), certificate),
-                Ok(())
-            );
+            assert_eq!(tree.verify_certificate(cfg, certificate), Ok(()));
         }
     );
     let (_, certificate) =
-        DominatorTree::compute_certified_in(&mut DominatorScratch::new(), cfg, cfg.entry());
+        DominatorTree::compute_certified_in(&mut DominatorScratch::default(), cfg);
     benchmark_case!(
         suite,
         "cfg_dominators_verify",
-        || cfg_dominators.verify_certificate(cfg, cfg.entry(), &certificate),
+        || cfg_dominators.verify_certificate(cfg, &certificate),
         |result: &Result<(), CertificateError<BlockId>>| assert_eq!(*result, Ok(()))
     );
     benchmark_case!(

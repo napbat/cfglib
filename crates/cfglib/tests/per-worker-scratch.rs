@@ -2,30 +2,26 @@
 //! owns them.
 //!
 //! A worker thread is handed a slice of the corpus and visits one callable at
-//! a time. The three analyses it runs per callable each take a scratch, so the
-//! worker holds one bundle of them for its whole slice: the scratches grow to
-//! the largest callable the worker meets and every callable after that one is
-//! analyzed without allocating working storage at all. This test is that
-//! worker, and it checks the bundle answers exactly what the allocating entry
-//! points do.
+//! a time. The three analyses it runs per callable share one scratch, so the
+//! worker holds that one value for its whole slice: it grows to the largest
+//! callable the worker meets and every callable after that one is analyzed
+//! without allocating working storage at all. This test is that worker, and
+//! it checks the scratch answers exactly what the allocating entry points do.
 
 use std::thread;
 
 use cfglib::{
-    BlockId, Cfg, DominatorScratch, DominatorTree, EdgeKind, FrontierScratch, PostDominatorScratch,
-    PostDominatorTree,
+    BlockId, Cfg, DominatorScratch, DominatorTree, EdgeKind, ExitPolicy, PostDominatorTree,
 };
 
 /// Everything one worker thread keeps between callables.
 ///
 /// This is the shape a consumer wants: one value per worker, created once,
 /// passed to each analysis by `&mut`, and never reset by the caller — every
-/// `compute_in` and every frontier query clears what it is about to use.
+/// `_in` function clears what it is about to use.
 #[derive(Default)]
 struct FlowScratch {
     dominators: DominatorScratch,
-    post_dominators: PostDominatorScratch,
-    frontier: FrontierScratch,
 }
 
 /// The results one callable's flow build produces.
@@ -40,9 +36,10 @@ impl FlowScratch {
     /// Build one callable's flow, reusing every buffer from the last one.
     fn visit(&mut self, cfg: &Cfg<bool>) -> CallableAnalyses {
         let dominators = DominatorTree::compute_in(&mut self.dominators, cfg);
-        let post_dominators = PostDominatorTree::compute_in(&mut self.post_dominators, cfg);
+        let post_dominators =
+            PostDominatorTree::compute_in(&mut self.dominators, cfg, ExitPolicy::CutLoops);
         let mut merges = Vec::new();
-        dominators.iterated_frontier(cfg, &mut self.frontier, writers(cfg), None, &mut merges);
+        dominators.iterated_frontier_in(&mut self.dominators, cfg, writers(cfg), None, &mut merges);
         CallableAnalyses {
             dominators,
             post_dominators,
@@ -56,13 +53,7 @@ fn allocating(cfg: &Cfg<bool>) -> CallableAnalyses {
     let dominators = DominatorTree::compute(cfg);
     let post_dominators = PostDominatorTree::compute(cfg);
     let mut merges = Vec::new();
-    dominators.iterated_frontier(
-        cfg,
-        &mut FrontierScratch::new(),
-        writers(cfg),
-        None,
-        &mut merges,
-    );
+    dominators.iterated_frontier(cfg, writers(cfg), None, &mut merges);
     CallableAnalyses {
         dominators,
         post_dominators,

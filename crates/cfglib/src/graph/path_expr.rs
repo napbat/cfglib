@@ -35,7 +35,7 @@
 //!   paper, path compression bounds the work by O(m log n) for `m` edges and
 //!   `n` nodes; it is near-linear in practice.
 //! - On an irreducible view, each strongly connected group of `r` siblings in
-//!   the derived graph ([`tarjan_scc`](crate::tarjan_scc)) is solved by
+//!   the derived graph ([`SccDecomposition`](crate::SccDecomposition)) is solved by
 //!   Gaussian elimination at an extra O(r³).
 //!   [`make_reducible`](crate::make_reducible) removes that cost by splitting
 //!   nodes first.

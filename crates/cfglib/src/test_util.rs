@@ -25,6 +25,7 @@ mod dataflow_inst;
 pub(crate) mod digraphs;
 pub(crate) mod golden;
 mod live_variables;
+pub(crate) mod loops;
 mod memory_inst;
 mod mock_inst;
 pub(crate) mod postdominance;

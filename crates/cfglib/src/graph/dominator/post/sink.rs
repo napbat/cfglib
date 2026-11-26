@@ -19,14 +19,18 @@
 //! test and holds both ways between two blocks of a class. The queries that
 //! walk the tree read a block of a class as the class, and the ones that list
 //! dependents expand a class into its blocks.
+//!
+//! A tree without classes, which is every tree of the cut, holds an empty
+//! [`SinkClasses`], and every reading here is then the identity: the
+//! contracted graph is the graph and a block stands for itself. The queries
+//! therefore have one form for both policies.
 
 extern crate alloc;
 use alloc::vec::Vec;
 
-use super::augmented::AugmentedReverse;
-use super::{PostDominatorScratch, PostDominatorTree};
+use super::PostDominatorTree;
 use crate::graph::dominator::DominatorTree;
-use crate::graph::view::{DenseId, GraphView, RootedView};
+use crate::graph::view::{DenseId, GraphView};
 use crate::identity::{NO_INDEX, define_dense_id, slot, word};
 
 /// How a [`PostDominatorTree`] gives facts to the blocks that reach no exit.
@@ -51,122 +55,109 @@ define_dense_id! {
     pub struct SinkId(u32);
 }
 
-impl<N: DenseId> PostDominatorTree<N> {
-    /// Compute the post-dominator tree under `policy` over caller-owned
-    /// working storage.
-    ///
-    /// [`ExitPolicy::CutLoops`] builds exactly the tree of
-    /// [`compute_in`](Self::compute_in). [`ExitPolicy::SinkComponents`]
-    /// makes each sink component of the blocks that reach no exit one class
-    /// joined to the virtual exit (see [`sink_class`](Self::sink_class)), and
-    /// has no cut roots. On a graph whose reachable blocks all reach an exit
-    /// the two trees are `==`. Both cost the same O(m log n) construction plus
-    /// O(n + m) to find the exits and the sinks.
-    ///
-    /// A low-high certificate (see
-    /// [`compute_certified_in`](Self::compute_certified_in)) covers the cut
-    /// only, so [`verify_certificate`](Self::verify_certificate) rejects a tree
-    /// with sink classes.
-    ///
-    /// # Panics
-    ///
-    /// Panics under the conditions of [`compute`](Self::compute).
-    ///
-    /// # Examples
-    ///
-    /// A server loop reached from the entry never exits. Under the cut its
-    /// latch controls the loop; with the loop as one class nothing inside it
-    /// controls anything, because every block of it runs again on every
-    /// execution:
-    ///
-    /// ```
-    /// use cfglib::{Cfg, EdgeKind, ExitPolicy, PostDominatorScratch, PostDominatorTree};
-    ///
-    /// let mut cfg = Cfg::<u32>::new();
-    /// let entry = cfg.entry();
-    /// let head = cfg.new_block();
-    /// let ok = cfg.new_block();
-    /// let latch = cfg.new_block();
-    /// cfg.add_edge(entry, head, EdgeKind::Unconditional);
-    /// cfg.add_edge(head, ok, EdgeKind::ConditionalTrue);
-    /// cfg.add_edge(head, latch, EdgeKind::ConditionalFalse);
-    /// cfg.add_edge(ok, latch, EdgeKind::Unconditional);
-    /// cfg.add_edge(latch, head, EdgeKind::Back);
-    ///
-    /// let mut scratch = PostDominatorScratch::new();
-    /// let post =
-    ///     PostDominatorTree::compute_with_in(&mut scratch, &cfg, ExitPolicy::SinkComponents);
-    /// let class = post.sink_class(ok).expect("the loop is a sink");
-    /// assert_eq!(post.sink_members(class), [head, ok, latch]);
-    /// assert!(post.post_dominates(ok, latch) && post.post_dominates(latch, ok));
-    /// assert_eq!(post.control_dependents(head, ok).count(), 0);
-    /// assert!(post.cut_roots().is_empty());
-    /// ```
-    #[must_use]
-    pub fn compute_with_in<G>(
-        scratch: &mut PostDominatorScratch,
-        graph: &G,
-        policy: ExitPolicy,
-    ) -> Self
-    where
-        G: RootedView<NodeId = N>,
-    {
-        match policy {
-            ExitPolicy::CutLoops => Self::compute_in(scratch, graph),
-            ExitPolicy::SinkComponents => Self::compute_sinks(scratch, graph),
+/// The sink components of the reachable blocks that reach no exit, as
+/// classes; empty for a tree of the cut.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SinkClasses<N> {
+    /// The class of each block, [`NO_INDEX`] for a block in none. Empty when
+    /// there is no class.
+    class_of: Vec<u32>,
+    /// The blocks of every class, class after class, each class in ascending
+    /// dense index and the classes in ascending order of their first block.
+    members: Vec<N>,
+    /// Class `c` is `members[starts[c]..starts[c + 1]]`. Empty when there is
+    /// no class.
+    starts: Vec<u32>,
+}
+
+impl<N> Default for SinkClasses<N> {
+    /// No class at all, which allocates nothing.
+    fn default() -> Self {
+        Self {
+            class_of: Vec::new(),
+            members: Vec::new(),
+            starts: Vec::new(),
+        }
+    }
+}
+
+impl<N: DenseId> SinkClasses<N> {
+    /// The classes `classes` over `bound` blocks, each class ascending and
+    /// the classes in ascending order of their first block.
+    pub(super) fn new(bound: usize, classes: &[Vec<N>]) -> Self {
+        let mut sinks = Self::default();
+        if classes.is_empty() {
+            return sinks;
+        }
+        sinks.class_of.resize(bound, NO_INDEX);
+        sinks.starts.push(0);
+        for (class, blocks) in classes.iter().enumerate() {
+            for &block in blocks {
+                sinks.class_of[block.index()] = word(class);
+            }
+            sinks.members.extend_from_slice(blocks);
+            sinks.starts.push(word(sinks.members.len()));
+        }
+        sinks
+    }
+
+    /// Whether there is no class.
+    pub(super) fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+
+    /// How many blocks the classes hold beyond the one that names each:
+    /// the blocks the contracted graph leaves out.
+    pub(super) fn hidden(&self) -> usize {
+        self.members.len() - self.starts.len().saturating_sub(1)
+    }
+
+    /// The class of `block`, [`NO_INDEX`] for none.
+    #[inline]
+    fn class(&self, block: N) -> u32 {
+        self.class_of
+            .get(block.index())
+            .copied()
+            .unwrap_or(NO_INDEX)
+    }
+
+    /// The blocks of class `class`, ascending.
+    fn blocks(&self, class: u32) -> &[N] {
+        &self.members[slot(self.starts[slot(class)])..slot(self.starts[slot(class) + 1])]
+    }
+
+    /// The block `block` is read as: the lowest block of its class, or
+    /// itself.
+    #[inline]
+    pub(super) fn canonical(&self, block: N) -> N {
+        match self.class(block) {
+            NO_INDEX => block,
+            class => self.blocks(class)[0],
         }
     }
 
-    /// The tree under [`ExitPolicy::SinkComponents`].
-    fn compute_sinks<G>(scratch: &mut PostDominatorScratch, graph: &G) -> Self
-    where
-        G: RootedView<NodeId = N>,
-    {
-        let bound = graph.node_bound();
-        assert!(
-            bound < slot(NO_INDEX),
-            "node bound plus the virtual exit exceeds the dense u32 range of a post-dominator tree"
-        );
-        let root = graph.root();
-        assert!(
-            root.index() < bound,
-            "post-dominator root is not a node of the graph"
-        );
-
-        let PostDominatorScratch { dominators, cut } = scratch;
-        let (structure, classes) = cut.analyze_sinks(graph, root);
-        let contracted = Contracted {
-            graph,
-            class_of: &classes.class_of,
-            members: &classes.members,
-            starts: &classes.starts,
-        };
-        let augmented = AugmentedReverse::new(&contracted, cut, &structure);
-        let mut parent = dominators
-            .construction
-            .immediate_dominators(&augmented, bound, false);
-        // The virtual exit is reached and is not a block.
-        let reached = dominators.construction.reached() - 1;
-        debug_assert_eq!(
-            reached + classes.members.len() - classes.starts.len().saturating_sub(1),
-            cut.reachable.iter().filter(|&&reachable| reachable).count(),
-            "a reachable block outside every sink has no path to the virtual exit"
-        );
-
-        parent.truncate(bound);
-        let virtual_exit = word(bound);
-        let mut roots = Vec::new();
-        for (block, up) in parent.iter_mut().enumerate() {
-            if *up == virtual_exit {
-                *up = NO_INDEX;
-                roots.push(word(block));
-            }
+    /// The blocks of the class `node` names, or none when it names no class.
+    #[inline]
+    pub(super) fn named(&self, node: N) -> &[N] {
+        match self.class(node) {
+            NO_INDEX => &[],
+            class if self.blocks(class)[0] == node => self.blocks(class),
+            _ => &[],
         }
-        let numbered = dominators.numbering.number(&parent, &roots, reached);
-        let mut tree = DominatorTree::from_numbered(parent, numbered);
-        // The other blocks of a class take its place in the numbering.
-        for class in classes.starts.windows(2) {
-            let blocks = &classes.members[slot(class[0])..slot(class[1])];
+    }
+
+    /// Whether two blocks lie in one class.
+    #[inline]
+    pub(super) fn share(&self, first: N, second: N) -> bool {
+        let class = self.class(first);
+        class != NO_INDEX && class == self.class(second)
+    }
+
+    /// Give the other blocks of each class the place of its lowest block in
+    /// the numbering of `tree`, which only the lowest block reached.
+    pub(super) fn share_numbering(&self, tree: &mut DominatorTree<N>) {
+        for class in self.starts.windows(2) {
+            let blocks = &self.members[slot(class[0])..slot(class[1])];
             let first = blocks[0].index();
             for block in &blocks[1..] {
                 let block = block.index();
@@ -175,18 +166,25 @@ impl<N: DenseId> PostDominatorTree<N> {
                 tree.level[block] = tree.level[first];
             }
         }
-
-        Self {
-            tree,
-            reaches_exit: structure.reaches_exit,
-            exits: structure.exits,
-            cut_roots: Vec::new(),
-            class_of: classes.class_of,
-            class_members: classes.members,
-            class_starts: classes.starts,
-        }
     }
 
+    /// Give the other blocks of each class the `(runner, frontier block)`
+    /// pairs of the block that names it, so a frontier table reads every
+    /// block of a class as the class.
+    pub(super) fn share_runs(&self, pairs: &mut Vec<(N, N)>) {
+        if self.is_empty() {
+            return;
+        }
+        for index in 0..pairs.len() {
+            let (runner, block) = pairs[index];
+            if let [_, others @ ..] = self.named(runner) {
+                pairs.extend(others.iter().map(|&other| (other, block)));
+            }
+        }
+    }
+}
+
+impl<N: DenseId> PostDominatorTree<N> {
     /// Return the sink class of `block` under
     /// [`ExitPolicy::SinkComponents`], or `None` when it is in none, which
     /// holds for every block of a tree computed under another policy.
@@ -197,7 +195,7 @@ impl<N: DenseId> PostDominatorTree<N> {
     /// computed with and the tree has sink classes.
     #[must_use]
     pub fn sink_class(&self, block: N) -> Option<SinkId> {
-        let class = *self.class_of.get(block.index())?;
+        let class = *self.classes.class_of.get(block.index())?;
         (class != NO_INDEX).then_some(SinkId(class))
     }
 
@@ -210,44 +208,16 @@ impl<N: DenseId> PostDominatorTree<N> {
     /// Panics when `class` is not a class of this tree.
     #[must_use]
     pub fn sink_members(&self, class: SinkId) -> &[N] {
-        let index = class.index();
-        &self.class_members[slot(self.class_starts[index])..slot(self.class_starts[index + 1])]
+        self.classes.blocks(class.0)
     }
 
-    /// The block that names the class of `block`, or `block` itself when it
-    /// is in no class.
-    pub(super) fn canonical(&self, block: N) -> N {
-        self.sink_class(block)
-            .map_or(block, |class| self.sink_members(class)[0])
-    }
-
-    /// The blocks of the class `node` names, or none when it names no class.
-    pub(super) fn named_class(&self, node: N) -> &[N] {
-        match self.sink_class(node) {
-            Some(class) if self.sink_members(class)[0] == node => self.sink_members(class),
-            _ => &[],
-        }
-    }
-
-    /// Whether two blocks lie in one sink class.
-    pub(super) fn share_class(&self, first: N, second: N) -> bool {
-        self.sink_class(first)
-            .is_some_and(|class| self.sink_class(second) == Some(class))
-    }
-
-    /// `graph` with each class contracted as the tree reads it, for the
-    /// frontier queries; `None` for a tree without classes, which reads
-    /// `graph` as it is.
-    pub(super) fn contracted<'a, G>(&'a self, graph: &'a G) -> Option<Contracted<'a, G>>
+    /// `graph` with each class contracted as the tree reads it, which is
+    /// `graph` itself for a tree without classes.
+    pub(super) const fn contracted<'a, G>(&'a self, graph: &'a G) -> Contracted<'a, G>
     where
         G: GraphView<NodeId = N>,
     {
-        (!self.class_members.is_empty()).then_some(Contracted {
-            graph,
-            class_of: &self.class_of,
-            members: &self.class_members,
-            starts: &self.class_starts,
-        })
+        Contracted::new(graph, &self.classes)
     }
 }
 
@@ -255,31 +225,16 @@ impl<N: DenseId> PostDominatorTree<N> {
 ///
 /// An edge inside a class disappears, an edge into a class enters its lowest
 /// block, and the other blocks of a class have no edges. No edge leaves a
-/// sink, so nothing else changes.
+/// sink, so nothing else changes, and without classes the view is the graph.
 pub(super) struct Contracted<'a, G: GraphView> {
     graph: &'a G,
-    class_of: &'a [u32],
-    members: &'a [G::NodeId],
-    starts: &'a [u32],
+    classes: &'a SinkClasses<G::NodeId>,
 }
 
-impl<G: GraphView> Contracted<'_, G> {
-    /// The class of `node`, [`NO_INDEX`] for none.
-    fn class(&self, node: G::NodeId) -> u32 {
-        self.class_of.get(node.index()).copied().unwrap_or(NO_INDEX)
-    }
-
-    /// The blocks of class `class`.
-    fn blocks(&self, class: u32) -> &[G::NodeId] {
-        &self.members[slot(self.starts[slot(class)])..slot(self.starts[slot(class) + 1])]
-    }
-
-    /// The node `node` is read as: the lowest block of its class, or itself.
-    fn canonical(&self, node: G::NodeId) -> G::NodeId {
-        match self.class(node) {
-            NO_INDEX => node,
-            class => self.blocks(class)[0],
-        }
+impl<'a, G: GraphView> Contracted<'a, G> {
+    /// `graph` with the classes of `classes` contracted.
+    pub(super) const fn new(graph: &'a G, classes: &'a SinkClasses<G::NodeId>) -> Self {
+        Self { graph, classes }
     }
 }
 
@@ -293,23 +248,28 @@ impl<G: GraphView> GraphView for Contracted<'_, G> {
     fn node_ids(&self) -> impl Iterator<Item = G::NodeId> + '_ {
         self.graph
             .node_ids()
-            .filter(|&node| self.canonical(node) == node)
+            .filter(|&node| self.classes.canonical(node) == node)
     }
 
+    #[inline]
     fn successors(&self, node: G::NodeId) -> impl Iterator<Item = G::NodeId> + '_ {
-        let outside = (self.class(node) == NO_INDEX)
-            .then(|| self.graph.successors(node).map(|next| self.canonical(next)));
+        let outside = (self.classes.class(node) == NO_INDEX).then(|| {
+            self.graph
+                .successors(node)
+                .map(|next| self.classes.canonical(next))
+        });
         outside.into_iter().flatten()
     }
 
+    #[inline]
     fn predecessors(&self, node: G::NodeId) -> impl Iterator<Item = G::NodeId> + '_ {
-        let class = self.class(node);
+        let class = self.classes.class(node);
         let outside = (class == NO_INDEX).then(|| self.graph.predecessors(node));
-        let gathered = (class != NO_INDEX && self.blocks(class)[0] == node).then(|| {
-            self.blocks(class).iter().flat_map(move |&block| {
+        let gathered = (class != NO_INDEX && self.classes.blocks(class)[0] == node).then(|| {
+            self.classes.blocks(class).iter().flat_map(move |&block| {
                 self.graph
                     .predecessors(block)
-                    .filter(move |&before| self.class(before) != class)
+                    .filter(move |&before| self.classes.class(before) != class)
             })
         });
         outside

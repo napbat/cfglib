@@ -1,6 +1,6 @@
 use cfglib::{
-    BlockId, ControlClosureScratch, FrontierScratch, Graph, NodeId, NonterminationScratch,
-    PostDominatorTree, nontermination_sensitive_controllers, weak_control_closure,
+    BlockId, ControlClosureScratch, Graph, NodeId, NonterminationScratch, PostDominatorTree,
+    nontermination_sensitive_controllers_in, weak_control_closure_in,
 };
 
 use super::BenchmarkSuite;
@@ -38,21 +38,24 @@ fn ladder(rungs: usize) -> Graph<(), ()> {
 
 fn register_nontermination_sensitive(suite: &mut BenchmarkSuite<'_>) {
     let graph = ladder(LADDER_RUNGS);
-    let mut scratch = NonterminationScratch::new();
+    let mut scratch = NonterminationScratch::default();
     let mut controllers = Vec::new();
     benchmark_case!(
         suite,
         "api_nontermination_sensitive_controllers_ladder",
-        covers[nontermination_sensitive_controllers],
+        covers[
+            nontermination_sensitive_controllers,
+            nontermination_sensitive_controllers_in
+        ],
         || {
             // The whole relation, one dependent at a time.
             graph
                 .node_ids()
                 .map(|node| {
-                    nontermination_sensitive_controllers(
+                    nontermination_sensitive_controllers_in(
+                        &mut scratch,
                         &graph,
                         node,
-                        &mut scratch,
                         &mut controllers,
                     );
                     controllers.len()
@@ -67,15 +70,15 @@ fn register_nontermination_sensitive(suite: &mut BenchmarkSuite<'_>) {
 /// block in a hundred with the entry and the exit, and on the ladder.
 fn register_weak_control_closure(suite: &mut BenchmarkSuite<'_>) {
     let cfg = branchy_cfg(BRANCHY_BLOCKS);
-    let mut scratch = ControlClosureScratch::new();
+    let mut scratch = ControlClosureScratch::default();
     let mut closure = Vec::new();
     let middle = BlockId::from_index(BRANCHY_BLOCKS / 2);
     benchmark_case!(
         suite,
         "api_weak_control_closure_branchy_one_seed",
-        covers[weak_control_closure],
+        covers[weak_control_closure, weak_control_closure_in],
         || {
-            weak_control_closure(&cfg, [middle], &mut scratch, &mut closure);
+            weak_control_closure_in(&mut scratch, &cfg, [middle], &mut closure);
             closure.clone()
         },
         // One seed leaves no choice between two seeds.
@@ -92,7 +95,7 @@ fn register_weak_control_closure(suite: &mut BenchmarkSuite<'_>) {
         suite,
         "api_weak_control_closure_branchy_percent",
         || {
-            weak_control_closure(&cfg, seeds.iter().copied(), &mut scratch, &mut closure);
+            weak_control_closure_in(&mut scratch, &cfg, seeds.iter().copied(), &mut closure);
             closure.clone()
         },
         |result: &Vec<BlockId>| {
@@ -101,13 +104,7 @@ fn register_weak_control_closure(suite: &mut BenchmarkSuite<'_>) {
             // control-dependence frontier.
             let post = PostDominatorTree::compute(&cfg);
             let mut expected = Vec::new();
-            post.iterated_frontier(
-                &cfg,
-                &mut FrontierScratch::new(),
-                seeds.iter().copied(),
-                None,
-                &mut expected,
-            );
+            post.iterated_frontier(&cfg, seeds.iter().copied(), None, &mut expected);
             expected.extend(&seeds);
             expected.sort_unstable();
             expected.dedup();
@@ -127,10 +124,10 @@ fn register_weak_control_closure(suite: &mut BenchmarkSuite<'_>) {
         suite,
         "api_weak_control_closure_ladder",
         || {
-            weak_control_closure(
+            weak_control_closure_in(
+                &mut scratch,
                 &ladder,
                 ladder_seeds.iter().copied(),
-                &mut scratch,
                 &mut closure_on_ladder,
             );
             closure_on_ladder.clone()

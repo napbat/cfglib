@@ -11,12 +11,11 @@ use cfglib::{
 };
 use cfglib::{
     Cfg, Direction, DominatorTree, EdgeKind, Flow, FlowControl, FlowEffect, FoldEnter, Graph,
-    GraphView, MarkScope, NodeId, OpenFold, OpenFoldConfig, Rooted, SearchConfig, SearchOrder,
-    SearchScratch, SemanticValidator, Visit, call_graph, canonicalize_loops, condensation,
-    condensation_of, depth_first_edges, depth_first_events, depth_first_postorder,
-    detect_loops_tagged, find_back_edges_tagged, find_function, follow, follow_path,
-    insert_preheader, is_recursive_function, is_reducible, kosaraju_scc, loop_exit_blocks,
-    min_label_relaxation, open_breadth_first_events, open_breadth_first_paths,
+    GraphView, LoopForest, MarkScope, NodeId, OpenFold, OpenFoldConfig, Rooted, SccDecomposition,
+    SccNumbering, SearchConfig, SearchOrder, SearchScratch, SemanticValidator, Visit, call_graph,
+    canonicalize_loops, depth_first_edges, depth_first_events, depth_first_postorder,
+    find_back_edges, find_function, follow, follow_path, insert_preheader, is_recursive_function,
+    is_reducible, min_label_relaxation, open_breadth_first_events, open_breadth_first_paths,
     open_depth_first_events, open_fold, open_search, propagate_summaries, reachable,
     reverse_postorder, scan_predecessors, search, search_in, to_dot, to_text, topological_sort,
     topological_sort_or_cycle, verify, verify_edge_view, verify_semantics, verify_view, write_dot,
@@ -378,7 +377,7 @@ fn register_graph_algorithms(suite: &mut BenchmarkSuite<'_>) {
         || scan_predecessors(&graph, scanned_target).collect::<BTreeSet<_>>(),
         |scanned: &BTreeSet<NodeId>| assert_eq!(scanned, &stored_predecessors)
     );
-    let components = kosaraju_scc(&graph);
+    let components = SccDecomposition::compute(&graph, SccNumbering::SourcesFirst);
     let dag = chain_graph(NODE_COUNT);
 
     benchmark_case!(
@@ -415,26 +414,23 @@ fn register_graph_algorithms(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "api_kosaraju_scc",
-        covers[kosaraju_scc],
-        || kosaraju_scc(&graph),
-        |result| assert_eq!(
+        "api_scc_sources_first",
+        || SccDecomposition::compute(&graph, SccNumbering::SourcesFirst),
+        |result: &SccDecomposition<NodeId>| assert_eq!(
             result.components().map(<[_]>::len).sum::<usize>(),
             NODE_COUNT
         )
     );
     benchmark_case!(
         suite,
-        "api_condensation",
-        covers[condensation],
-        || condensation(&graph),
+        "api_scc_decompose_and_condense",
+        || SccDecomposition::compute(&graph, SccNumbering::LeavesFirst).condensation(&graph),
         |result| assert!(topological_sort(result).is_some())
     );
     benchmark_case!(
         suite,
-        "api_condensation_of",
-        covers[condensation_of],
-        || condensation_of(&graph, &components),
+        "api_scc_condensation",
+        || components.condensation(&graph),
         |result| assert_eq!(result.node_count(), components.len())
     );
     benchmark_case!(
@@ -661,7 +657,7 @@ fn register_call_tree(suite: &mut BenchmarkSuite<'_>) {
         .map(|(index, cfg)| (fixture_u32(index), cfg))
         .collect();
     let tree = call_graph(&tree_functions);
-    let components = kosaraju_scc(&tree);
+    let components = SccDecomposition::compute(&tree, SccNumbering::SourcesFirst);
     let recursive = tree
         .node_ids()
         .filter(|&function| components.component(function).is_cyclic(&tree))
@@ -821,25 +817,24 @@ pub(super) fn call_tree_cfgs(function_count: usize) -> Vec<Cfg<CallInst>> {
 fn register_loop_structure(suite: &mut BenchmarkSuite<'_>) {
     let cfg = loop_cfg();
     let dominators = DominatorTree::compute(&cfg);
-    let loops = detect_loops_tagged(&cfg, &dominators);
-    let natural_loop = loops
-        .first()
-        .expect("benchmark loop fixture must contain a loop")
-        .clone();
+    let loops = LoopForest::compute(&cfg, &dominators);
+    let lp = loops
+        .loops()
+        .next()
+        .expect("benchmark loop fixture must contain a loop");
 
     benchmark_case!(
         suite,
-        "api_find_back_edges_tagged",
-        covers[find_back_edges_tagged],
-        || find_back_edges_tagged(&cfg, &dominators),
+        "api_find_back_edges",
+        covers[find_back_edges],
+        || find_back_edges(&cfg, &dominators),
         |edges: &Vec<_>| assert_eq!(edges.len(), 1)
     );
     benchmark_case!(
         suite,
-        "api_detect_loops_tagged",
-        covers[detect_loops_tagged],
-        || detect_loops_tagged(&cfg, &dominators),
-        |found: &Vec<_>| assert_eq!(found.len(), 1)
+        "api_loop_forest",
+        || LoopForest::compute(&cfg, &dominators),
+        |found: &LoopForest| assert_eq!(found.loop_count(), 1)
     );
     benchmark_case!(
         suite,
@@ -850,10 +845,9 @@ fn register_loop_structure(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "api_loop_exit_blocks",
-        covers[loop_exit_blocks],
-        || loop_exit_blocks(&cfg, &natural_loop),
-        |exits| assert_eq!(exits.len(), 1)
+        "api_loop_exits",
+        || loops.exits(&cfg, lp),
+        |exits: &Vec<_>| assert_eq!(exits.len(), 1)
     );
     benchmark_case!(
         suite,
@@ -861,7 +855,7 @@ fn register_loop_structure(suite: &mut BenchmarkSuite<'_>) {
         covers[insert_preheader],
         || {
             let mut candidate = cfg.clone();
-            let preheader = insert_preheader(&mut candidate, &natural_loop);
+            let preheader = insert_preheader(&mut candidate, &loops, lp);
             (candidate, preheader)
         },
         |(candidate, preheader)| {

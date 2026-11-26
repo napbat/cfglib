@@ -27,13 +27,13 @@ fn permuting_successor_order_leaves_every_array_identical() {
             detached: 5,
         };
         let edges = random_graph(&mut rng, recipe);
-        let expected = DominatorTree::compute_from(&edges.graph(), 0);
+        let expected = DominatorTree::compute(&edges.graph());
         for _ in 0..4 {
             let mut shuffled = edges.edges.clone();
             rng.shuffle(&mut shuffled);
             let permuted = EdgeList::new(edges.node_count, shuffled);
             assert_eq!(
-                DominatorTree::compute_from(&permuted.graph(), 0),
+                DominatorTree::compute(&permuted.graph()),
                 expected,
                 "{recipe:?} seed {seed}"
             );
@@ -52,17 +52,17 @@ fn changing_parallel_edge_multiplicity_leaves_every_array_identical() {
             detached: 5,
         };
         let edges = random_graph(&mut rng, recipe);
-        let expected = DominatorTree::compute_from(&edges.graph(), 0);
+        let expected = DominatorTree::compute(&edges.graph());
 
         let sprinkled = with_extra_copies(&mut rng, &edges, 3);
         assert_eq!(
-            DominatorTree::compute_from(&sprinkled.graph(), 0),
+            DominatorTree::compute(&sprinkled.graph()),
             expected,
             "{recipe:?} seed {seed}"
         );
         let tripled = edges.repeated(3);
         assert_eq!(
-            DominatorTree::compute_from(&tripled.graph(), 0),
+            DominatorTree::compute(&tripled.graph()),
             expected,
             "{recipe:?} seed {seed}"
         );
@@ -84,7 +84,7 @@ fn a_graph_listed_in_another_order_yields_the_same_tree_as_its_duplicate_free_fo
     unique.dedup();
     let unique = EdgeList::new(noisy.node_count, unique);
     assert_eq!(
-        DominatorTree::compute_from(&noisy.graph(), 0),
-        DominatorTree::compute_from(&unique.graph(), 0)
+        DominatorTree::compute(&noisy.graph()),
+        DominatorTree::compute(&unique.graph())
     );
 }

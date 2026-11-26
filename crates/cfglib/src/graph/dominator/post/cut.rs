@@ -22,14 +22,19 @@
 //! not a sink reaches a sink, and needs no cut of its own. The result depends
 //! only on the edge set among the reachable blocks, not on the order of
 //! successor lists, on dense indices, or on the order of a depth-first search.
+//!
+//! The exits and the blocks the cut joins are together the *outlets*: the
+//! blocks with an edge to the virtual exit. The post-dominator tree and the
+//! closed graph of the program structure tree both read the virtual exit
+//! through them.
 
 extern crate alloc;
 use alloc::vec::Vec;
 
-use crate::graph::scc::tarjan_scc;
+use super::sink::SinkClasses;
+use crate::graph::scc::{SccDecomposition, SccNumbering};
 use crate::graph::traverse::reachable_in;
-use crate::graph::view::{DenseId, Direction, GraphView};
-use crate::identity::{NO_INDEX, word};
+use crate::graph::view::{DenseId, Direction, GraphView, Induced};
 
 /// What the analysis finds and the finished post-dominator tree keeps.
 pub(crate) struct ExitStructure<N> {
@@ -39,34 +44,27 @@ pub(crate) struct ExitStructure<N> {
     /// The reachable blocks without successors, in ascending dense index.
     pub(crate) exits: Vec<N>,
     /// The blocks the cut joins to the virtual exit, in ascending dense index.
+    /// Empty under sink classes, which join a class in place of a cut.
     pub(crate) cut_roots: Vec<N>,
-}
-
-/// The sink components of the reachable blocks that reach no exit, as
-/// classes.
-pub(super) struct SinkClasses<N> {
-    /// The class of each block, [`NO_INDEX`] for a block in none. Empty when
-    /// there is no class.
-    pub(super) class_of: Vec<u32>,
-    /// The blocks of every class, class after class, each class in ascending
-    /// dense index and the classes in ascending order of their first block.
-    pub(super) members: Vec<N>,
-    /// Class `c` is `members[starts[c]..starts[c + 1]]`. Empty when there is
-    /// no class.
-    pub(super) starts: Vec<u32>,
+    /// Every block with an edge to the virtual exit, in ascending dense index:
+    /// the exits, and the cut roots or the block that names each sink class.
+    pub(crate) outlets: Vec<N>,
 }
 
 /// Every buffer the analysis fills, owned by the caller.
 ///
-/// The two tables the augmented graph reads stay here after the analysis, so
-/// the construction that follows needs no copy of them.
+/// The two tables the construction's view reads stay here after the
+/// analysis, so the construction that follows needs no copy of them.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CutBuffers {
     /// Whether the entry reaches each block.
     pub(crate) reachable: Vec<bool>,
-    /// Whether each block has an edge to the virtual exit, which holds for an
-    /// exit and for a cut root.
+    /// Whether each block has an edge to the virtual exit, which holds
+    /// exactly for the outlets.
     pub(super) exit_edge: Vec<bool>,
+    /// Whether each block is reachable and reaches no exit: the region whose
+    /// sink components are cut.
+    trapped: Vec<bool>,
     /// Whether each block is an entry block of the component being cut.
     entry: Vec<bool>,
     /// Blocks a search has yet to expand.
@@ -83,11 +81,13 @@ impl CutBuffers {
     ) -> ExitStructure<G::NodeId> {
         let (exits, reaches_exit) = self.find_exits(graph, root);
         let cut_roots = self.cut_roots(graph, root, &reaches_exit);
-        self.join(&exits, &cut_roots);
+        let outlets = merge_ascending(&exits, &cut_roots);
+        self.join(&outlets);
         ExitStructure {
             reaches_exit,
             exits,
             cut_roots,
+            outlets,
         }
     }
 
@@ -95,7 +95,7 @@ impl CutBuffers {
     /// [`analyze`](Self::analyze) does, and in place of the cut the sink
     /// components of the blocks that reach none. Each class's lowest block
     /// stands for it: it is joined to the virtual exit and listed among the
-    /// returned structure's cut roots, which the augmented graph reads.
+    /// returned structure's outlets.
     pub(super) fn analyze_sinks<G: GraphView>(
         &mut self,
         graph: &G,
@@ -103,37 +103,28 @@ impl CutBuffers {
     ) -> (ExitStructure<G::NodeId>, SinkClasses<G::NodeId>) {
         let (exits, reaches_exit) = self.find_exits(graph, root);
         let mut classes: Vec<Vec<G::NodeId>> = Vec::new();
-        for_each_sink(graph, &self.reachable, &reaches_exit, |component| {
-            let mut class = component.to_vec();
-            class.sort_unstable_by_key(|block| block.index());
-            classes.push(class);
-        });
+        for_each_sink(
+            graph,
+            &self.reachable,
+            &reaches_exit,
+            &mut self.trapped,
+            |component| {
+                let mut class = component.to_vec();
+                class.sort_unstable_by_key(|block| block.index());
+                classes.push(class);
+            },
+        );
         classes.sort_unstable_by_key(|class| class[0].index());
-
-        let mut sinks = SinkClasses {
-            class_of: Vec::new(),
-            members: Vec::new(),
-            starts: Vec::new(),
-        };
-        if !classes.is_empty() {
-            sinks.class_of.resize(self.reachable.len(), NO_INDEX);
-            sinks.starts.push(0);
-        }
-        for (class, blocks) in classes.iter().enumerate() {
-            for &block in blocks {
-                sinks.class_of[block.index()] = word(class);
-            }
-            sinks.members.extend_from_slice(blocks);
-            sinks.starts.push(word(sinks.members.len()));
-        }
         let representatives: Vec<G::NodeId> = classes.iter().map(|class| class[0]).collect();
-        self.join(&exits, &representatives);
+        let outlets = merge_ascending(&exits, &representatives);
+        self.join(&outlets);
         let structure = ExitStructure {
             reaches_exit,
             exits,
-            cut_roots: representatives,
+            cut_roots: Vec::new(),
+            outlets,
         };
-        (structure, sinks)
+        (structure, SinkClasses::new(self.reachable.len(), &classes))
     }
 
     /// Mark the blocks `root` reaches, and return the reachable blocks
@@ -153,11 +144,11 @@ impl CutBuffers {
         (exits, reaches_exit)
     }
 
-    /// Give each of `exits` and `joined` an edge to the virtual exit.
-    fn join<N: DenseId>(&mut self, exits: &[N], joined: &[N]) {
+    /// Give each of `outlets` an edge to the virtual exit.
+    fn join<N: DenseId>(&mut self, outlets: &[N]) {
         self.exit_edge.clear();
         self.exit_edge.resize(self.reachable.len(), false);
-        for block in exits.iter().chain(joined) {
+        for block in outlets {
             self.exit_edge[block.index()] = true;
         }
     }
@@ -202,12 +193,16 @@ impl CutBuffers {
         root: G::NodeId,
         reaches_exit: &[bool],
     ) -> Vec<G::NodeId> {
-        let reachable = &self.reachable;
-        let entry = &mut self.entry;
+        let Self {
+            reachable,
+            trapped,
+            entry,
+            ..
+        } = self;
         entry.clear();
         entry.resize(reachable.len(), false);
         let mut roots = Vec::new();
-        for_each_sink(graph, reachable, reaches_exit, |component| {
+        for_each_sink(graph, reachable, reaches_exit, trapped, |component| {
             let contains = |block: G::NodeId| component.binary_search(&block).is_ok();
             for &block in component {
                 entry[block.index()] = block == root
@@ -230,21 +225,28 @@ impl CutBuffers {
 /// Visit every sink component of the reachable blocks that reach no exit, a
 /// strongly connected component with no edge to another, as a slice
 /// ascending by the blocks' order.
+///
+/// `trapped` is filled with that set of blocks, which is closed under
+/// successors, so the subgraph it induces holds every edge its blocks have.
 fn for_each_sink<G: GraphView>(
     graph: &G,
     reachable: &[bool],
     reaches_exit: &[bool],
+    trapped: &mut Vec<bool>,
     mut visit: impl FnMut(&[G::NodeId]),
 ) {
-    let trapped = Trapped {
-        graph,
-        reachable,
-        reaches_exit,
-    };
-    if trapped.node_ids().next().is_none() {
+    trapped.clear();
+    trapped.extend(
+        reachable
+            .iter()
+            .zip(reaches_exit)
+            .map(|(&reachable, &reaches_exit)| reachable && !reaches_exit),
+    );
+    if !trapped.contains(&true) {
         return;
     }
-    let components = tarjan_scc(&trapped);
+    let components =
+        SccDecomposition::compute(&Induced::new(graph, trapped), SccNumbering::LeavesFirst);
     for component in components.components() {
         let contains = |block: G::NodeId| component.binary_search(&block).is_ok();
         if component
@@ -256,57 +258,16 @@ fn for_each_sink<G: GraphView>(
     }
 }
 
-/// The reachable blocks that cannot reach an exit, as a graph of their own.
-///
-/// The set is closed under successors, so every edge a member has ends at a
-/// member and the view is an induced subgraph. A block outside the set has no
-/// edges in the view.
-struct Trapped<'a, G: GraphView> {
-    graph: &'a G,
-    reachable: &'a [bool],
-    reaches_exit: &'a [bool],
-}
-
-impl<G: GraphView> Trapped<'_, G> {
-    /// Whether the block at `index` is a member.
-    fn holds(&self, index: usize) -> bool {
-        self.reachable[index] && !self.reaches_exit[index]
+/// The blocks of two ascending, disjoint lists, in one ascending list.
+fn merge_ascending<N: DenseId>(first: &[N], second: &[N]) -> Vec<N> {
+    let mut merged = Vec::with_capacity(first.len() + second.len());
+    let mut second = second.iter().copied().peekable();
+    for &block in first {
+        while let Some(earlier) = second.next_if(|other| other.index() < block.index()) {
+            merged.push(earlier);
+        }
+        merged.push(block);
     }
-
-    /// `node` when it is a member.
-    fn member(&self, node: G::NodeId) -> Option<G::NodeId> {
-        self.holds(node.index()).then_some(node)
-    }
-}
-
-impl<G: GraphView> GraphView for Trapped<'_, G> {
-    type NodeId = G::NodeId;
-
-    fn node_bound(&self) -> usize {
-        self.graph.node_bound()
-    }
-
-    fn node_ids(&self) -> impl Iterator<Item = G::NodeId> + '_ {
-        (0..self.reachable.len())
-            .filter(|&index| self.holds(index))
-            .map(G::NodeId::from_index)
-    }
-
-    fn successors(&self, node: G::NodeId) -> impl Iterator<Item = G::NodeId> + '_ {
-        self.member(node)
-            .map(|node| self.graph.successors(node))
-            .into_iter()
-            .flatten()
-    }
-
-    fn predecessors(&self, node: G::NodeId) -> impl Iterator<Item = G::NodeId> + '_ {
-        self.member(node)
-            .map(|node| {
-                self.graph
-                    .predecessors(node)
-                    .filter(move |&before| self.holds(before.index()))
-            })
-            .into_iter()
-            .flatten()
-    }
+    merged.extend(second);
+    merged
 }

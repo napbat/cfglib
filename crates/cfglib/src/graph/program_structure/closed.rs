@@ -17,7 +17,8 @@ use super::SeseEdge;
 use crate::graph::dominator::CutBuffers;
 use crate::graph::edge_view::EdgeView;
 use crate::graph::fanout::DenseFanout;
-use crate::graph::view::{DenseId, RootedView};
+use crate::graph::traverse::Steps;
+use crate::graph::view::{DenseId, GraphView, RootedView};
 use crate::identity::{NO_INDEX, slot, word};
 
 /// The closed graph as edge slots and incident lists over dense indices.
@@ -71,7 +72,7 @@ impl<N: DenseId> ClosedGraph<N> {
         let mut cut = CutBuffers::default();
         let structure = cut.analyze(graph, root);
         let reachable = &cut.reachable;
-        let outlets = merge_ascending(structure.exits, structure.cut_roots);
+        let outlets = structure.outlets;
         let slots = edge_bound + 1 + outlets.len();
         assert!(
             bound < slot(NO_INDEX) && slots < slot(NO_INDEX),
@@ -164,6 +165,58 @@ impl<N: DenseId> ClosedGraph<N> {
     }
 }
 
+/// The closed graph as a view over dense indices, the virtual exit at
+/// `bound`, so that the walk cores run on it. A block the root does not reach
+/// is a node without edges.
+impl<N: DenseId> GraphView for ClosedGraph<N> {
+    type NodeId = usize;
+
+    fn node_bound(&self) -> usize {
+        self.node_count()
+    }
+
+    fn node_ids(&self) -> impl Iterator<Item = usize> + '_ {
+        0..self.node_count()
+    }
+
+    fn successors(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
+        self.outgoing(node)
+            .iter()
+            .map(|&edge| slot(self.target[slot(edge)]))
+    }
+
+    fn predecessors(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
+        self.incident[slot(self.runs[2 * node + 1])..slot(self.runs[2 * node + 2])]
+            .iter()
+            .map(|&edge| slot(self.source[slot(edge)]))
+    }
+}
+
+/// The slots leaving each node of a closed graph, in adjacency order, as the
+/// steps of a directed walk.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Leaving;
+
+impl<N: DenseId> Steps<ClosedGraph<N>> for Leaving {
+    type Node = usize;
+    type Step = u32;
+
+    #[inline]
+    fn steps(self, graph: &ClosedGraph<N>, node: usize) -> impl Iterator<Item = u32> + '_ {
+        graph.outgoing(node).iter().copied()
+    }
+
+    #[inline]
+    fn target(self, graph: &ClosedGraph<N>, edge: u32) -> usize {
+        graph.target(slot(edge))
+    }
+
+    #[inline]
+    fn index(node: usize) -> usize {
+        node
+    }
+}
+
 /// The edge a slot names.
 pub(super) fn slot_edge<N: DenseId, E: DenseId>(
     edge_bound: usize,
@@ -192,23 +245,4 @@ pub(super) fn edge_slot<N: DenseId, E: DenseId>(
             .ok()
             .map(|offset| edge_bound + 1 + offset),
     }
-}
-
-/// Two ascending lists of distinct blocks merged into one.
-///
-/// An exit has no successor and a cut root has one, so no block is in both.
-fn merge_ascending<N: DenseId>(first: Vec<N>, second: Vec<N>) -> Vec<N> {
-    if second.is_empty() {
-        return first;
-    }
-    let mut merged = Vec::with_capacity(first.len() + second.len());
-    let mut second = second.into_iter().peekable();
-    for block in first {
-        while let Some(earlier) = second.next_if(|other| other.index() < block.index()) {
-            merged.push(earlier);
-        }
-        merged.push(block);
-    }
-    merged.extend(second);
-    merged
 }

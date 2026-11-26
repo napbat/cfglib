@@ -10,8 +10,8 @@ use cfglib::{
 use cfglib::{
     DispatchBuilder, DispatchReport, DominatorTree, ExclusiveExtent, ExtentPromotionStatus,
     RegionId, RelaxError, RelaxMode, SpanItem, is_reducible, make_reducible,
-    make_reducible_with_dispatch, promote_exclusive_extents, recover_exclusive_extents,
-    relax_layout, relax_spans,
+    make_reducible_by_dispatch, promote_exclusive_extents, recover_exclusive_extents, relax_layout,
+    relax_spans,
 };
 
 use super::BenchmarkSuite;
@@ -602,7 +602,7 @@ fn register_reducibility(suite: &mut BenchmarkSuite<'_>) {
         "cfg_clone_make_reducible_complete_10",
         || {
             let mut cloned = small.clone();
-            let copies = make_reducible(&mut cloned);
+            let copies = make_reducible(&mut cloned).len();
             (cloned, copies)
         },
         |(result, copies): &(Cfg<u32>, usize)| {
@@ -615,7 +615,7 @@ fn register_reducibility(suite: &mut BenchmarkSuite<'_>) {
         "cfg_clone_make_reducible_with_dispatch_complete_10",
         || {
             let mut cloned = small.clone();
-            let report = make_reducible_with_dispatch(&mut cloned, &mut ApiDispatch);
+            let report = make_reducible_by_dispatch(&mut cloned, &mut ApiDispatch);
             (cloned, report)
         },
         |(result, report): &(Cfg<u32>, DispatchReport)| {
@@ -625,10 +625,10 @@ fn register_reducibility(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_make_reducible_with_dispatch_complete_64",
-        covers[make_reducible_with_dispatch],
+        covers[make_reducible_by_dispatch],
         || {
             let mut cloned = large.clone();
-            let report = make_reducible_with_dispatch(&mut cloned, &mut ApiDispatch);
+            let report = make_reducible_by_dispatch(&mut cloned, &mut ApiDispatch);
             (cloned, report)
         },
         |(result, report): &(Cfg<u32>, DispatchReport)| {

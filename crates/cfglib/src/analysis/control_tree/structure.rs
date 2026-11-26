@@ -439,7 +439,7 @@ impl<'cfg, I, E> Structurer<'cfg, I, E> {
         let dom = DominatorTree::compute(cfg);
         // The structurer also lays out code the entry cannot reach, so its
         // loops are those of the live program and of that code alike.
-        let forest = Rc::new(LoopForest::compute_all_tagged(cfg, &dom));
+        let forest = Rc::new(LoopForest::compute_all(cfg, &dom));
         let back_edges = forest
             .loops()
             .flat_map(|lp| {

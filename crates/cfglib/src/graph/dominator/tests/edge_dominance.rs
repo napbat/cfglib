@@ -32,7 +32,7 @@ pub(super) fn reached_without(edges: &EdgeList, skipped: Option<usize>) -> Vec<b
 /// Check every edge, present or not, and every node against the definition.
 fn check_node_form(edges: &EdgeList, scratch: &mut DominatorScratch) {
     let graph = edges.graph();
-    let tree = DominatorTree::compute_from_in(scratch, &graph, 0);
+    let tree = DominatorTree::compute_in(scratch, &graph);
     let count = edges.node_count;
     let reached = reached_without(edges, None);
 
@@ -107,7 +107,7 @@ fn check_id_form(edges: &EdgeList, scratch: &mut DominatorScratch) {
 
 #[test]
 fn every_digraph_of_up_to_four_nodes_matches_the_definition() {
-    let mut scratch = DominatorScratch::new();
+    let mut scratch = DominatorScratch::default();
     for node_count in 1..=4 {
         for_each_multigraph(node_count, 1, |edges| {
             check_node_form(edges, &mut scratch);
@@ -118,7 +118,7 @@ fn every_digraph_of_up_to_four_nodes_matches_the_definition() {
 
 #[test]
 fn every_multigraph_of_up_to_three_nodes_matches_the_definition() {
-    let mut scratch = DominatorScratch::new();
+    let mut scratch = DominatorScratch::default();
     for node_count in 1..=3 {
         for_each_multigraph(node_count, 2, |edges| {
             check_node_form(edges, &mut scratch);

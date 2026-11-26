@@ -503,7 +503,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// The consequence is worth stating plainly: a removed node remains a
     /// node of the *view*, with no edges. Reachability-based analyses
     /// (dominators, traversals) simply find it unreachable, but a whole-graph
-    /// partition such as [`tarjan_scc`](crate::tarjan_scc) reports it as a
+    /// partition such as [`SccDecomposition`](crate::SccDecomposition) reports it as a
     /// singleton component. [`compact`](Self::compact) first when that
     /// matters; [`is_compact`](Self::is_compact) says whether it would change
     /// anything.

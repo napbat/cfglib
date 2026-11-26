@@ -1,6 +1,6 @@
 //! Irreducible-to-reducible transformation through dispatch blocks.
 //!
-//! [`make_reducible_with_dispatch`] makes every irreducible cycle single-entry
+//! [`make_reducible_by_dispatch`] makes every irreducible cycle single-entry
 //! without copying a block, as LLVM's `FixIrreducible` does over `CycleInfo`,
 //! and as the predicate variables of Bahmann et al. (TACO 2015) do for a whole
 //! graph. Every edge into an entry of the cycle goes to a selector block that
@@ -31,7 +31,7 @@ use crate::graph::loop_forest::{LoopForest, LoopId};
 use crate::graph::traverse::reachable;
 use crate::graph::view::Direction;
 
-/// The code [`make_reducible_with_dispatch`] puts in the blocks it adds, and
+/// The code [`make_reducible_by_dispatch`] puts in the blocks it adds, and
 /// the payloads of the edges it adds.
 ///
 /// cfglib does not invent instructions, so the consumer writes the selector
@@ -69,7 +69,7 @@ pub trait DispatchBuilder<I, E> {
     fn jump(&mut self, selector: BlockId, hub: BlockId) -> E;
 }
 
-/// The blocks [`make_reducible_with_dispatch`] added, in the order it added
+/// The blocks [`make_reducible_by_dispatch`] added, in the order it added
 /// them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DispatchReport {
@@ -111,7 +111,7 @@ pub struct DispatchReport {
 /// ```
 /// use cfglib::{
 ///     BlockId, Cfg, DispatchBuilder, DominatorTree, EdgeKind, is_reducible,
-///     make_reducible_with_dispatch,
+///     make_reducible_by_dispatch,
 /// };
 ///
 /// /// A toy instruction set: set the selector of a hub, or branch on it.
@@ -143,7 +143,7 @@ pub struct DispatchReport {
 /// cfg.add_edge(a, b, EdgeKind::Jump);
 /// cfg.add_edge(b, a, EdgeKind::Jump);
 ///
-/// let report = make_reducible_with_dispatch(&mut cfg, &mut Selectors);
+/// let report = make_reducible_by_dispatch(&mut cfg, &mut Selectors);
 ///
 /// assert!(is_reducible(&cfg, &DominatorTree::compute(&cfg)));
 /// let &[hub] = report.hubs.as_slice() else { panic!("one irreducible cycle") };
@@ -152,7 +152,7 @@ pub struct DispatchReport {
 /// // Two edges into each of the two entries.
 /// assert_eq!(report.selectors.len(), 4);
 /// ```
-pub fn make_reducible_with_dispatch<I, E, B: DispatchBuilder<I, E>>(
+pub fn make_reducible_by_dispatch<I, E, B: DispatchBuilder<I, E>>(
     cfg: &mut Cfg<I, E>,
     builder: &mut B,
 ) -> DispatchReport {
@@ -204,7 +204,7 @@ impl<'a> Dispatch<'a> {
                 .collect(),
             heads,
             reached,
-            candidates: vec![Vec::new(); forest.len()],
+            candidates: vec![Vec::new(); forest.loop_count()],
         };
         // A block enters every cycle from the innermost one around it that it
         // does not head, up to some outermost one, and every cycle it enters

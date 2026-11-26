@@ -1,7 +1,7 @@
 //! What the report says when flow cannot be structured: irreducible cycles,
 //! loops entered from the side, and transfers that leave a structural bound.
 
-use cfglib::{ControlNode, DominatorTree, GotoReason, detect_loops, is_reducible};
+use cfglib::{ControlNode, DominatorTree, GotoReason, LoopForest, is_reducible};
 
 use crate::builders::{Flow, irreducible_pair, pseudocode};
 use crate::golden::assert_golden;
@@ -23,7 +23,7 @@ fn irreducible_cycle_has_no_loop_and_every_goto_revisits_a_block() {
         "the fixture is irreducible"
     );
     assert!(
-        detect_loops(&flow.cfg, &dominators).is_empty(),
+        LoopForest::compute(&flow.cfg, &dominators).is_empty(),
         "neither block dominates the other, so there is no natural loop"
     );
 

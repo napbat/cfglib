@@ -1,6 +1,6 @@
 //! `linear_arrangement` and `feedback_arc_set` over cyclic graphs.
 //!
-//! The timed cases run on the branchy chain behind `api_kosaraju_scc`, whose
+//! The timed cases run on the branchy chain behind `api_scc_sources_first`, whose
 //! latches close a cycle every 32 nodes. Before the plain set is timed, its
 //! oracle prints how the set compares with the depth-first back edges over
 //! that chain and over a denser tangle. The sizes are reported, not asserted:
@@ -45,7 +45,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_feedback_arc_set_minimal",
-        || feedback_arc_set(&graph, FeedbackConfig::new().with_minimal(true)),
+        || feedback_arc_set(&graph, FeedbackConfig { minimal: true }),
         |set: &Vec<EdgeId>| assert!(acyclic_without(&graph, set))
     );
 }
@@ -70,7 +70,7 @@ fn report_quality() {
         ("tangle", tangle_graph(NODE_COUNT)),
     ] {
         let set = feedback_arc_set(&graph, FeedbackConfig::new()).len();
-        let minimal = feedback_arc_set(&graph, FeedbackConfig::new().with_minimal(true)).len();
+        let minimal = feedback_arc_set(&graph, FeedbackConfig { minimal: true }).len();
         println!(
             "  {name:<8} {:>6} {set:>6} {minimal:>8} {:>15}",
             graph.edge_count(),

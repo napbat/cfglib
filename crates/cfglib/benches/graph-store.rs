@@ -43,7 +43,7 @@
 //! `BreadthFirst` and `ReversePostorder` order, the searches rooted at the
 //! nodes with no predecessor. Each order reports the locality of the
 //! numbering it produced, then its compaction, both neighbor walks and
-//! `tarjan_scc` over the result. The `compact` rows, in `Insertion` order,
+//! `scc_leaves_first` over the result. The `compact` rows, in `Insertion` order,
 //! are the baseline: the gain of an order is the drop from them.
 
 use std::alloc::System;
@@ -54,7 +54,7 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use cfglib::{Graph, Id, NodeId, NodeOrder, tarjan_scc};
+use cfglib::{Graph, Id, NodeId, NodeOrder, SccDecomposition, SccNumbering};
 
 #[cfg(cfglib_bench_alloc)]
 struct CountingAllocator;
@@ -618,13 +618,14 @@ fn run_ordered(
     let (graph, compacted) = build_compacted(edges, compaction);
     let (successors, scan) = measure(|| walk_neighbors(&graph, true));
     let (predecessors, reverse_scan) = measure(|| walk_neighbors(&graph, false));
-    let (components, scc) = measure(|| tarjan_scc(&graph).len());
+    let (components, scc) =
+        measure(|| SccDecomposition::compute(&graph, SccNumbering::LeavesFirst).len());
     (
         vec![
             ("compaction", compacted),
             ("successor_scan", scan),
             ("predecessor_scan", reverse_scan),
-            ("tarjan_scc", scc),
+            ("scc_leaves_first", scc),
         ],
         [successors, predecessors, components],
     )

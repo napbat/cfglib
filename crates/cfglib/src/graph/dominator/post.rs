@@ -8,25 +8,29 @@
 //! exit-free regions.
 //!
 //! The work is split by responsibility. `cut` finds the exits and gives every
-//! exit-free region a path to the virtual exit, `augmented` presents the
-//! resulting graph to the simple Lengauer-Tarjan construction, and this module
-//! holds the tree and its queries.
+//! exit-free region a path to the virtual exit, `sink` reads exit-free sinks
+//! as classes instead, and this module runs the simple Lengauer-Tarjan
+//! construction on the result and holds the tree and its queries. The graph
+//! the construction reads is composed from the shared views: the reverse of
+//! the reachable blocks behind a virtual root,
+//! `VirtualRoot::masked(&Reversed::new(&Induced::new(graph, reachable)), outlets, is_outlet)`,
+//! so no node, edge, or adjacency list is copied to build it.
 
 extern crate alloc;
 use alloc::vec::Vec;
 
-use super::frontier::FrontierScratch;
-use super::{DominatorScratch, DominatorTree, LowHighOrder};
+use super::construction::{ConstructionBuffers, LowHighBuffers};
+use super::frontier_table::sealed::Tabulate;
+use super::numbering::NumberingBuffers;
+use super::{DominanceFrontiers, DominatorScratch, DominatorTree, FrontierTree, LowHighOrder};
 use crate::block::BlockId;
-use crate::graph::view::{DenseId, GraphView, Reversed, RootedView};
+use crate::graph::view::{DenseId, GraphView, Induced, Reversed, RootedView, VirtualRoot};
 use crate::identity::{NO_INDEX, slot, word};
-use augmented::AugmentedReverse;
 use certificate::without_virtual_exit;
-pub(crate) use cut::CutBuffers;
-use cut::ExitStructure;
+pub(crate) use cut::{CutBuffers, ExitStructure};
+use sink::{Contracted, SinkClasses};
 pub use sink::{ExitPolicy, SinkId};
 
-mod augmented;
 mod certificate;
 mod cut;
 mod edge_dominance;
@@ -40,54 +44,6 @@ pub enum PostNode<N> {
     Node(N),
     /// The virtual exit `X*`, the root of the tree.
     Exit,
-}
-
-/// Every buffer [`PostDominatorTree::compute_in`] fills, owned by the caller.
-///
-/// This is [`DominatorScratch`] for the post-dominator tree: a pass that
-/// computes one tree per procedure hands one scratch to every call, and the
-/// buffers grow to the largest graph the pass meets instead of being
-/// allocated again for each procedure. It holds the dominator computation's
-/// buffers and the ones that find the exits and the cut.
-///
-/// Nodes are held as dense indices rather than as a node-id type, so the
-/// scratch carries no type parameter: one instance serves a [`Cfg`](crate::Cfg),
-/// a [`Graph`](crate::Graph), and a consumer-defined [`GraphView`], in any
-/// order, and it is [`Send`]. Every buffer is cleared and resized on entry,
-/// so a scratch used on a large graph and then on a small one is correct and
-/// allocation-free.
-///
-/// # Examples
-///
-/// ```
-/// use cfglib::{Cfg, EdgeKind, PostDominatorScratch, PostDominatorTree};
-///
-/// let mut cfg = Cfg::<u32>::new();
-/// let entry = cfg.entry();
-/// let then_block = cfg.new_block();
-/// cfg.add_edge(entry, then_block, EdgeKind::ConditionalTrue);
-///
-/// let mut scratch = PostDominatorScratch::new();
-/// let tree = PostDominatorTree::compute_in(&mut scratch, &cfg);
-/// assert_eq!(tree, PostDominatorTree::compute(&cfg));
-/// ```
-#[derive(Debug, Clone, Default)]
-pub struct PostDominatorScratch {
-    /// The dominator computation's buffers.
-    dominators: DominatorScratch,
-    /// The buffers of the exit and cut analysis.
-    cut: CutBuffers,
-}
-
-impl PostDominatorScratch {
-    /// Scratch holding nothing yet.
-    ///
-    /// Every buffer is sized by the first graph it sees, so there is no node
-    /// count to state here.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
 }
 
 /// A post-dominator tree computed from a rooted directed graph.
@@ -134,7 +90,7 @@ impl PostDominatorScratch {
 ///
 /// # Sink classes
 ///
-/// [`compute_with_in`](Self::compute_with_in) with
+/// [`compute_in`](Self::compute_in) with
 /// [`ExitPolicy::SinkComponents`] reads an exit-free region the other
 /// standard way: each sink component of it, a strongly connected component
 /// no edge leaves, is one class joined to `X*`, and has no cut. The blocks of
@@ -221,18 +177,13 @@ pub struct PostDominatorTree<N = BlockId> {
     exits: Vec<N>,
     /// The blocks the cut joins to the virtual exit, in ascending dense index.
     cut_roots: Vec<N>,
-    /// The sink class of each block, [`NO_INDEX`] for none; empty without
-    /// classes, which is every tree of the cut.
-    class_of: Vec<u32>,
-    /// The blocks of every class, class after class, each ascending.
-    class_members: Vec<N>,
-    /// Class `c` is `class_members[class_starts[c]..class_starts[c + 1]]`.
-    class_starts: Vec<u32>,
+    /// The sink classes, none for every tree of the cut.
+    classes: SinkClasses<N>,
 }
 
 impl<N: DenseId> PostDominatorTree<N> {
     /// Compute the post-dominator tree of the blocks a rooted graph view
-    /// reaches from its root.
+    /// reaches from its root, under [`ExitPolicy::CutLoops`].
     ///
     /// The running time is O(m log n) for a graph of n blocks and m edges, and
     /// the bound holds on irreducible graphs and on graphs without an exit.
@@ -247,28 +198,76 @@ impl<N: DenseId> PostDominatorTree<N> {
     where
         G: RootedView<NodeId = N>,
     {
-        Self::compute_in(&mut PostDominatorScratch::new(), graph)
+        Self::compute_in(
+            &mut DominatorScratch::default(),
+            graph,
+            ExitPolicy::CutLoops,
+        )
     }
 
-    /// Compute the post-dominator tree over caller-owned working storage.
+    /// Compute the post-dominator tree under `policy` over caller-owned
+    /// working storage.
     ///
-    /// This is [`compute`](Self::compute) with the call's buffers taken out of
-    /// it. The tree it returns is the same one, built by the same code: the
-    /// allocating entry point is this function over a fresh
-    /// [`PostDominatorScratch`].
+    /// [`ExitPolicy::CutLoops`] builds exactly the tree of
+    /// [`compute`](Self::compute): the allocating entry point is this
+    /// function over a fresh [`DominatorScratch`]. Debug builds also build a
+    /// low-high order of that tree and check it with
+    /// [`verify_certificate`](Self::verify_certificate).
+    /// [`ExitPolicy::SinkComponents`] makes each sink component of the blocks
+    /// that reach no exit one class joined to the virtual exit (see
+    /// [`sink_class`](Self::sink_class)), and has no cut roots. On a graph
+    /// whose reachable blocks all reach an exit the two trees are `==`. Both
+    /// cost the same O(m log n) construction plus O(n + m) to find the exits
+    /// and the cut or the sinks.
     ///
-    /// Debug builds also build a low-high order and check the tree against
-    /// it with [`verify_certificate`](Self::verify_certificate).
+    /// A low-high certificate (see
+    /// [`compute_certified_in`](Self::compute_certified_in)) covers the cut
+    /// only, so [`verify_certificate`](Self::verify_certificate) rejects a tree
+    /// with sink classes.
     ///
     /// # Panics
     ///
     /// Panics under the conditions of [`compute`](Self::compute).
+    ///
+    /// # Examples
+    ///
+    /// A server loop reached from the entry never exits. Under the cut its
+    /// latch controls the loop; with the loop as one class nothing inside it
+    /// controls anything, because every block of it runs again on every
+    /// execution:
+    ///
+    /// ```
+    /// use cfglib::{Cfg, DominatorScratch, EdgeKind, ExitPolicy, PostDominatorTree};
+    ///
+    /// let mut cfg = Cfg::<u32>::new();
+    /// let entry = cfg.entry();
+    /// let head = cfg.new_block();
+    /// let ok = cfg.new_block();
+    /// let latch = cfg.new_block();
+    /// cfg.add_edge(entry, head, EdgeKind::Unconditional);
+    /// cfg.add_edge(head, ok, EdgeKind::ConditionalTrue);
+    /// cfg.add_edge(head, latch, EdgeKind::ConditionalFalse);
+    /// cfg.add_edge(ok, latch, EdgeKind::Unconditional);
+    /// cfg.add_edge(latch, head, EdgeKind::Back);
+    ///
+    /// let mut scratch = DominatorScratch::default();
+    /// let cut = PostDominatorTree::compute_in(&mut scratch, &cfg, ExitPolicy::CutLoops);
+    /// assert_eq!(cut, PostDominatorTree::compute(&cfg));
+    /// assert_eq!(cut.cut_roots(), [latch]);
+    ///
+    /// let post = PostDominatorTree::compute_in(&mut scratch, &cfg, ExitPolicy::SinkComponents);
+    /// let class = post.sink_class(ok).expect("the loop is a sink");
+    /// assert_eq!(post.sink_members(class), [head, ok, latch]);
+    /// assert!(post.post_dominates(ok, latch) && post.post_dominates(latch, ok));
+    /// assert_eq!(post.control_dependents(head, ok).count(), 0);
+    /// assert!(post.cut_roots().is_empty());
+    /// ```
     #[must_use]
-    pub fn compute_in<G>(scratch: &mut PostDominatorScratch, graph: &G) -> Self
+    pub fn compute_in<G>(scratch: &mut DominatorScratch, graph: &G, policy: ExitPolicy) -> Self
     where
         G: RootedView<NodeId = N>,
     {
-        if cfg!(debug_assertions) {
+        if cfg!(debug_assertions) && policy == ExitPolicy::CutLoops {
             let (tree, certificate) = Self::compute_certified_in(scratch, graph);
             debug_assert_eq!(
                 tree.verify_certificate(graph, &certificate),
@@ -277,13 +276,15 @@ impl<N: DenseId> PostDominatorTree<N> {
             );
             return tree;
         }
-        Self::construct(scratch, graph, None)
+        Self::construct(scratch, graph, policy, None)
     }
 
-    /// Build the tree, and fill `certificate` when one is asked for.
+    /// Build the tree under `policy`, and fill `certificate`, which only the
+    /// cut asks for, when one is asked for.
     fn construct<G>(
-        scratch: &mut PostDominatorScratch,
+        scratch: &mut DominatorScratch,
         graph: &G,
+        policy: ExitPolicy,
         certificate: Option<&mut LowHighOrder<N>>,
     ) -> Self
     where
@@ -302,63 +303,49 @@ impl<N: DenseId> PostDominatorTree<N> {
             "post-dominator root is not a node of the graph"
         );
 
-        let PostDominatorScratch { dominators, cut } = scratch;
-        let structure = cut.analyze(graph, root);
-        let augmented = AugmentedReverse::new(graph, cut, &structure);
-        let mut parent =
-            dominators
-                .construction
-                .immediate_dominators(&augmented, bound, certificate.is_some());
-        // The virtual exit is reached and is not a block.
-        let reached = dominators.construction.reached() - 1;
-        let virtual_exit = word(bound);
-        if let Some(certificate) = certificate {
-            // The order is built on the whole tree, the virtual exit at its
-            // root, and then read without it.
-            let whole = dominators
-                .numbering
-                .number::<usize>(&parent, &[virtual_exit], reached + 1);
-            let mut with_exit = LowHighOrder::empty();
-            dominators.construction.low_high_order(
-                &augmented,
-                &parent,
-                &whole,
-                &mut dominators.low_high,
-                &mut with_exit,
-            );
-            *certificate = without_virtual_exit(&with_exit, bound);
-        }
-
-        // The virtual exit is the last index and has no parent, so dropping it
-        // leaves a table over the blocks. Its children become the roots.
-        parent.truncate(bound);
-        let mut roots = Vec::new();
-        for (block, up) in parent.iter_mut().enumerate() {
-            if *up == virtual_exit {
-                *up = NO_INDEX;
-                roots.push(word(block));
-            }
-        }
+        let DominatorScratch {
+            construction,
+            numbering,
+            low_high,
+            cut,
+            ..
+        } = scratch;
+        let (structure, classes) = match policy {
+            ExitPolicy::CutLoops => (cut.analyze(graph, root), SinkClasses::default()),
+            ExitPolicy::SinkComponents => cut.analyze_sinks(graph, root),
+        };
+        let mut buffers = Buffers {
+            construction,
+            numbering,
+            low_high,
+            cut,
+        };
+        let tree = if classes.is_empty() {
+            buffers.forest(graph, &structure.outlets, certificate)
+        } else {
+            let contracted = Contracted::new(graph, &classes);
+            let mut tree = buffers.forest(&contracted, &structure.outlets, None);
+            classes.share_numbering(&mut tree);
+            tree
+        };
         debug_assert_eq!(
-            reached,
+            tree.order.len() + classes.hidden(),
             cut.reachable.iter().filter(|&&reachable| reachable).count(),
-            "the cut leaves a reachable block without a path to the virtual exit"
+            "a reachable block has no path to the virtual exit"
         );
 
-        let numbered = dominators.numbering.number(&parent, &roots, reached);
         let ExitStructure {
             reaches_exit,
             exits,
             cut_roots,
+            ..
         } = structure;
         Self {
-            tree: DominatorTree::from_numbered(parent, numbered),
+            tree,
             reaches_exit,
             exits,
             cut_roots,
-            class_of: Vec::new(),
-            class_members: Vec::new(),
-            class_starts: Vec::new(),
+            classes,
         }
     }
 
@@ -408,10 +395,10 @@ impl<N: DenseId> PostDominatorTree<N> {
     #[must_use]
     pub fn nearest_common_post_dominator(&self, first: N, second: N) -> Option<PostNode<N>> {
         (self.contains(first) && self.contains(second)).then(|| {
-            lift(
-                self.tree
-                    .nearest_common_dominator(self.canonical(first), self.canonical(second)),
-            )
+            lift(self.tree.nearest_common_dominator(
+                self.classes.canonical(first),
+                self.classes.canonical(second),
+            ))
         })
     }
 
@@ -426,18 +413,17 @@ impl<N: DenseId> PostDominatorTree<N> {
         &self,
         blocks: impl IntoIterator<Item = N>,
     ) -> Option<PostNode<N>> {
-        let mut meet = None;
-        for block in blocks.into_iter().filter(|&block| self.contains(block)) {
-            let block = self.canonical(block);
-            meet = Some(match meet {
-                None => PostNode::Node(block),
-                Some(PostNode::Node(previous)) => {
-                    lift(self.tree.nearest_common_dominator(previous, block))
-                }
-                Some(PostNode::Exit) => return Some(PostNode::Exit),
-            });
-        }
-        meet
+        let mut any = false;
+        let meet = self.tree.nearest_common_dominator_of(
+            blocks
+                .into_iter()
+                .filter(|&block| self.contains(block))
+                .map(|block| {
+                    any = true;
+                    self.classes.canonical(block)
+                }),
+        );
+        any.then(|| lift(meet))
     }
 
     /// Return whether some path leads from `block` to an exit.
@@ -489,19 +475,10 @@ impl<N: DenseId> PostDominatorTree<N> {
     /// exits, the cut roots, and the blocks whose paths split between them.
     /// The walk skips each child's subtree, so it costs one step per child.
     pub fn children(&self, node: PostNode<N>) -> impl Iterator<Item = N> + '_ {
-        let tree = &self.tree;
-        let (first, end) = match node {
-            PostNode::Node(block) => {
-                let span = tree.span(block);
-                (span.start + 1, span.end)
-            }
-            PostNode::Exit => (0, tree.order.len()),
-        };
-        core::iter::successors((first < end).then_some(first), move |&position| {
-            let next = slot(tree.last[tree.order[position].index()]) + 1;
-            (next < end).then_some(next)
+        self.tree.below(match node {
+            PostNode::Node(block) => Some(block),
+            PostNode::Exit => None,
         })
-        .map(move |position| tree.order[position])
     }
 
     /// Iterate over the blocks that are control dependent on the arm
@@ -573,27 +550,21 @@ impl<N: DenseId> PostDominatorTree<N> {
     /// ```
     #[inline]
     pub fn control_dependents(&self, from: N, to: N) -> impl Iterator<Item = N> + '_ {
-        if self.has_sink_classes() {
-            Dependents::Classes(self.class_dependents(from, to))
-        } else {
-            Dependents::Blocks(self.tree_dependents(from, to))
+        let classes = &self.classes;
+        let walk = (!classes.share(from, to))
+            .then(|| self.walk_up(classes.canonical(from), classes.canonical(to)));
+        ClassWalk {
+            classes,
+            walk,
+            class: &[],
         }
     }
 
-    /// Whether the tree has sink classes, which only
-    /// [`ExitPolicy::SinkComponents`] builds.
-    pub(crate) fn has_sink_classes(&self) -> bool {
-        !self.class_members.is_empty()
-    }
-
-    /// [`control_dependents`](Self::control_dependents) for a tree without
-    /// sink classes: the walk from `to` up to the immediate post-dominator of
+    /// The walk of [`control_dependents`](Self::control_dependents) between
+    /// two nodes of the tree: from `to` up to the immediate post-dominator of
     /// `from`, which is left out.
-    ///
-    /// Callers that ask for many arms of one tree check
-    /// [`has_sink_classes`](Self::has_sink_classes) once and walk with this,
-    /// so a tree of the cut pays nothing for the classes it does not have.
-    pub(crate) fn tree_dependents(&self, from: N, to: N) -> impl Iterator<Item = N> + '_ {
+    #[inline]
+    fn walk_up(&self, from: N, to: N) -> impl Iterator<Item = N> + '_ {
         let stop = self.ipdom(from);
         let below_stop = self.contains(to)
             && match stop {
@@ -611,19 +582,6 @@ impl<N: DenseId> PostDominatorTree<N> {
         })
     }
 
-    /// [`control_dependents`](Self::control_dependents) for a tree with sink
-    /// classes: nothing for an arm inside one class, and otherwise the walk
-    /// between the classes of its ends, each class expanded into its blocks.
-    fn class_dependents(&self, from: N, to: N) -> ClassWalk<'_, N, impl Iterator<Item = N> + '_> {
-        let walk = (!self.share_class(from, to))
-            .then(|| self.tree_dependents(self.canonical(from), self.canonical(to)));
-        ClassWalk {
-            tree: self,
-            walk,
-            class: &[],
-        }
-    }
-
     /// Collect the control-dependence sources of `block` into `out`.
     ///
     /// A block `x` is a source when `block` post-dominates a successor of `x`
@@ -632,8 +590,8 @@ impl<N: DenseId> PostDominatorTree<N> {
     /// the predecessors of `graph`. `graph` is the graph this tree was
     /// computed from.
     ///
-    /// `out` is cleared first and receives each source once, in preorder of
-    /// this tree. A block outside the tree has no sources, and is no one's.
+    /// `out` is cleared first and receives each source once, in ascending
+    /// dense index. A block outside the tree has no sources, and is no one's.
     /// A block that branches back to itself is its own source. The edges of
     /// [`control_dependence_graph`](crate::control_dependence_graph) are this
     /// same relation: it has the edge `x -> block` exactly when `x` is a
@@ -673,13 +631,11 @@ impl<N: DenseId> PostDominatorTree<N> {
     where
         G: GraphView<NodeId = N>,
     {
-        match self.contracted(graph) {
-            None => self.tree.frontier(&Reversed::new(graph), block, out),
-            Some(contracted) => {
-                self.tree
-                    .frontier(&Reversed::new(&contracted), self.canonical(block), out);
-            }
-        }
+        self.tree.frontier(
+            &Reversed::new(&self.contracted(graph)),
+            self.classes.canonical(block),
+            out,
+        );
     }
 
     /// Collect the iterated control-dependence frontier of `blocks` into
@@ -697,8 +653,8 @@ impl<N: DenseId> PostDominatorTree<N> {
     /// block of `blocks` is a root of the search whether `filter` accepts it
     /// or not.
     ///
-    /// `out` is cleared first and receives each block once, in preorder of
-    /// this tree. A block of `blocks` outside the tree is ignored, and so is
+    /// `out` is cleared first and receives each block once, in ascending
+    /// dense index. A block of `blocks` outside the tree is ignored, and so is
     /// one named twice. Under [`ExitPolicy::SinkComponents`] a block of a
     /// sink class stands for its class, as in [`frontier`](Self::frontier).
     ///
@@ -710,7 +666,7 @@ impl<N: DenseId> PostDominatorTree<N> {
     /// # Examples
     ///
     /// ```
-    /// use cfglib::{Cfg, EdgeKind, FrontierScratch, PostDominatorTree};
+    /// use cfglib::{Cfg, EdgeKind, PostDominatorTree};
     ///
     /// let mut cfg = Cfg::<u32>::new();
     /// let branch = cfg.entry();
@@ -723,41 +679,125 @@ impl<N: DenseId> PostDominatorTree<N> {
     /// cfg.add_edge(right, merge, EdgeKind::Fallthrough);
     /// let post = PostDominatorTree::compute(&cfg);
     ///
-    /// let mut scratch = FrontierScratch::new();
     /// let mut kept = Vec::new();
-    /// post.iterated_frontier(&cfg, &mut scratch, [left, right], None, &mut kept);
+    /// post.iterated_frontier(&cfg, [left, right], None, &mut kept);
     /// assert_eq!(kept, [branch]);
     ///
     /// let nothing_live = |_| false;
-    /// post.iterated_frontier(&cfg, &mut scratch, [left], Some(&nothing_live), &mut kept);
+    /// post.iterated_frontier(&cfg, [left], Some(&nothing_live), &mut kept);
     /// assert!(kept.is_empty());
     /// ```
     pub fn iterated_frontier<G>(
         &self,
         graph: &G,
-        scratch: &mut FrontierScratch,
         blocks: impl IntoIterator<Item = N>,
         filter: Option<&dyn Fn(N) -> bool>,
         out: &mut Vec<N>,
     ) where
         G: GraphView<NodeId = N>,
     {
-        let blocks = blocks.into_iter().map(|block| self.canonical(block));
-        match self.contracted(graph) {
-            None => {
-                self.tree
-                    .iterated_frontier(&Reversed::new(graph), scratch, blocks, filter, out);
-            }
-            Some(contracted) => {
-                self.tree.iterated_frontier(
-                    &Reversed::new(&contracted),
-                    scratch,
-                    blocks,
-                    filter,
-                    out,
-                );
-            }
+        self.iterated_frontier_in(&mut DominatorScratch::default(), graph, blocks, filter, out);
+    }
+
+    /// [`iterated_frontier`](Self::iterated_frontier) over caller-owned
+    /// working storage, the same answer: a pass that asks for many frontiers
+    /// hands one [`DominatorScratch`] to every query, and a query allocates
+    /// nothing once the scratch and `out` have grown.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the conditions of
+    /// [`iterated_frontier`](Self::iterated_frontier).
+    pub fn iterated_frontier_in<G>(
+        &self,
+        scratch: &mut DominatorScratch,
+        graph: &G,
+        blocks: impl IntoIterator<Item = N>,
+        filter: Option<&dyn Fn(N) -> bool>,
+        out: &mut Vec<N>,
+    ) where
+        G: GraphView<NodeId = N>,
+    {
+        let blocks = blocks
+            .into_iter()
+            .map(|block| self.classes.canonical(block));
+        self.tree.iterated_frontier_in(
+            scratch,
+            &Reversed::new(&self.contracted(graph)),
+            blocks,
+            filter,
+            out,
+        );
+    }
+}
+
+impl<N: DenseId> FrontierTree<N> for PostDominatorTree<N> {}
+
+/// The table of [`frontier`](PostDominatorTree::frontier): the frontiers of
+/// the tree over the reverse of the contracted graph, with every block of a
+/// class given the run of the block that names it.
+impl<N: DenseId> Tabulate<N> for PostDominatorTree<N> {
+    fn tabulate<G: GraphView<NodeId = N>>(&self, graph: &G, table: &mut DominanceFrontiers<N>) {
+        table.collect(&Reversed::new(&self.contracted(graph)), &self.tree);
+        self.classes.share_runs(&mut table.pairs);
+        table.group(graph.node_bound());
+    }
+}
+
+/// The buffers of one post-dominator construction, borrowed from a
+/// [`DominatorScratch`] once the exits and the cut are known.
+struct Buffers<'a> {
+    construction: &'a mut ConstructionBuffers,
+    numbering: &'a mut NumberingBuffers,
+    low_high: &'a mut LowHighBuffers,
+    cut: &'a CutBuffers,
+}
+
+impl Buffers<'_> {
+    /// The forest of blocks below the virtual exit of `graph`, the graph or
+    /// its contraction, with `outlets` joined to the virtual exit; and a
+    /// low-high order of it in `certificate` when one is asked for.
+    ///
+    /// The construction runs on the reverse of the blocks the cut found
+    /// reachable, from a virtual exit with an edge to every outlet. That graph
+    /// is the view composition below, whose virtual exit finds its
+    /// predecessors through the cut's outlet table in constant time.
+    fn forest<V, N>(
+        &mut self,
+        graph: &V,
+        outlets: &[N],
+        certificate: Option<&mut LowHighOrder<N>>,
+    ) -> DominatorTree<N>
+    where
+        V: GraphView<NodeId = N>,
+        N: DenseId,
+    {
+        let bound = graph.node_bound();
+        let live = Induced::new(graph, &self.cut.reachable);
+        let reverse = Reversed::new(&live);
+        let augmented = VirtualRoot::masked(&reverse, outlets, &self.cut.exit_edge);
+        let parent =
+            self.construction
+                .immediate_dominators(&augmented, bound, certificate.is_some());
+        // The virtual exit is reached and is not a block.
+        let reached = self.construction.reached() - 1;
+        if let Some(certificate) = certificate {
+            // The order is built on the whole tree, the virtual exit at its
+            // root, and then read without it.
+            let whole = self
+                .numbering
+                .number::<usize>(&parent, &[word(bound)], reached + 1);
+            let mut with_exit = LowHighOrder::empty();
+            self.construction.low_high_order(
+                &augmented,
+                &parent,
+                &whole,
+                self.low_high,
+                &mut with_exit,
+            );
+            *certificate = without_virtual_exit(&with_exit, bound);
         }
+        DominatorTree::from_virtual_root(self.numbering, parent, reached)
     }
 }
 
@@ -766,43 +806,11 @@ fn lift<N>(parent: Option<N>) -> PostNode<N> {
     parent.map_or(PostNode::Exit, PostNode::Node)
 }
 
-/// The dependents of one arm, as [`PostDominatorTree::control_dependents`]
-/// chooses them once per call.
-enum Dependents<B, C> {
-    /// The walk of a tree without classes.
-    Blocks(B),
-    /// The walk of a tree with classes.
-    Classes(C),
-}
-
-impl<N, B, C> Iterator for Dependents<B, C>
-where
-    B: Iterator<Item = N>,
-    C: Iterator<Item = N>,
-{
-    type Item = N;
-
-    #[inline]
-    fn next(&mut self) -> Option<N> {
-        match self {
-            Self::Blocks(blocks) => blocks.next(),
-            Self::Classes(classes) => classes.next(),
-        }
-    }
-
-    #[inline]
-    fn fold<A, F: FnMut(A, N) -> A>(self, init: A, step: F) -> A {
-        match self {
-            Self::Blocks(blocks) => blocks.fold(init, step),
-            Self::Classes(classes) => classes.fold(init, step),
-        }
-    }
-}
-
 /// A walk up the tree with each node that names a sink class expanded into
-/// the class's blocks; no walk at all for an arm inside one class.
+/// the class's blocks; no walk at all for an arm inside one class. Without
+/// classes it is the walk itself.
 struct ClassWalk<'a, N, W> {
-    tree: &'a PostDominatorTree<N>,
+    classes: &'a SinkClasses<N>,
     walk: Option<W>,
     /// The blocks of the class being expanded that are still to come.
     class: &'a [N],
@@ -811,13 +819,14 @@ struct ClassWalk<'a, N, W> {
 impl<N: DenseId, W: Iterator<Item = N>> Iterator for ClassWalk<'_, N, W> {
     type Item = N;
 
+    #[inline]
     fn next(&mut self) -> Option<N> {
         if let [first, rest @ ..] = self.class {
             self.class = rest;
             return Some(*first);
         }
         let node = self.walk.as_mut()?.next()?;
-        if let [first, rest @ ..] = self.tree.named_class(node) {
+        if let [first, rest @ ..] = self.classes.named(node) {
             self.class = rest;
             return Some(*first);
         }

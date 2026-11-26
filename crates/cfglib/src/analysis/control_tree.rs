@@ -11,7 +11,7 @@
 //! [`BlockId`](crate::BlockId), an [`EdgeId`](crate::EdgeId), a
 //! [`RegionId`](crate::RegionId), or a [`ProgramPoint`](crate::ProgramPoint).
 //! It is a fact about the graph, in the way [`DominatorTree`](crate::DominatorTree)
-//! and [`LoopNestingTree`](crate::LoopNestingTree) are, so the tree needs no
+//! and [`LoopForest`](crate::LoopForest) are, so the tree needs no
 //! copy of the instruction type. A consumer that lifts to a higher IR walks the
 //! tree and reads each leaf's instructions from its own graph.
 //!

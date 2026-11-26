@@ -124,7 +124,7 @@ fn every_single_edit(node_count: usize, copies: usize, scratch: &mut DominatorSc
 
 #[test]
 fn every_single_edit_of_every_digraph_of_up_to_four_nodes_matches_a_recomputation() {
-    let mut scratch = DominatorScratch::new();
+    let mut scratch = DominatorScratch::default();
     for node_count in 1..=4 {
         every_single_edit(node_count, 1, &mut scratch);
     }
@@ -132,7 +132,7 @@ fn every_single_edit_of_every_digraph_of_up_to_four_nodes_matches_a_recomputatio
 
 #[test]
 fn every_single_edit_of_every_multigraph_of_up_to_three_nodes_matches_a_recomputation() {
-    let mut scratch = DominatorScratch::new();
+    let mut scratch = DominatorScratch::default();
     for node_count in 1..=3 {
         every_single_edit(node_count, 2, &mut scratch);
     }
@@ -172,7 +172,7 @@ fn random_batch(
 
 #[test]
 fn random_batches_on_random_graphs_match_a_recomputation() {
-    let mut scratch = DominatorScratch::new();
+    let mut scratch = DominatorScratch::default();
     for (span, seeds) in [(6, 300), (12, 200), (40, 80), (200, 30), (1_000, 8)] {
         for seed in 0..seeds {
             let mut rng = Rng::new(seed * 104_729 + u64::try_from(span).expect("fits"));
@@ -202,7 +202,7 @@ fn random_batches_on_random_graphs_match_a_recomputation() {
 
 #[test]
 fn random_batches_on_the_adversarial_families_match_a_recomputation() {
-    let mut scratch = DominatorScratch::new();
+    let mut scratch = DominatorScratch::default();
     let mut rng = Rng::new(59);
     // The path with a reverse subpath of Georgiadis et al., figure 1, where
     // one insertion or deletion moves every node but two, and a dispatcher.
@@ -243,7 +243,7 @@ fn random_batches_on_the_adversarial_families_match_a_recomputation() {
 
 #[test]
 fn edits_may_name_nodes_added_after_the_tree_was_computed() {
-    let mut scratch = DominatorScratch::new();
+    let mut scratch = DominatorScratch::default();
     let mut rng = Rng::new(590);
     for seed in 0..200 {
         let span = 6 + rng.below(30);
@@ -298,7 +298,7 @@ fn a_deletion_that_strands_a_subtree_moves_what_it_led_to() {
     let graph = edited(&edges, 6, &[deletion]).graph();
     let mut changed = Vec::new();
     tree.apply_updates_in(
-        &mut DominatorScratch::new(),
+        &mut DominatorScratch::default(),
         &graph,
         &[deletion],
         &mut changed,
@@ -313,7 +313,7 @@ fn edits_that_change_nothing_report_nothing() {
     // A diamond with a back edge from the join to the entry.
     let edges = EdgeList::new(4, vec![(0, 1), (0, 2), (1, 3), (2, 3), (3, 0)]);
     let tree = DominatorTree::compute(&edges.graph());
-    let mut scratch = DominatorScratch::new();
+    let mut scratch = DominatorScratch::default();
     for update in [
         DominatorUpdate::Insert { from: 1, to: 3 },
         DominatorUpdate::Insert { from: 3, to: 1 },
@@ -339,7 +339,12 @@ fn an_insertion_and_its_deletion_in_one_batch_cancel() {
     let graph = edges.graph();
     let mut updated = tree.clone();
     let mut changed = Vec::new();
-    updated.apply_updates_in(&mut DominatorScratch::new(), &graph, &batch, &mut changed);
+    updated.apply_updates_in(
+        &mut DominatorScratch::default(),
+        &graph,
+        &batch,
+        &mut changed,
+    );
     assert_eq!(updated, tree);
     assert_eq!(changed, Vec::<u32>::new());
     assert_eq!(graph.node_bound(), 3);

@@ -4,9 +4,8 @@
 use std::collections::BTreeSet;
 
 use cfglib::{
-    DominatorTree, GraphMetrics, PostDominatorTree, PostNode, RootedView, Scc, SccDecomposition,
-    condensation, condensation_of, control_dependence_graph, detect_loops, is_reducible,
-    kosaraju_scc, tarjan_scc,
+    DominatorTree, EdgeView, GraphMetrics, KindedEdge, LoopForest, NodeId, PostDominatorTree,
+    PostNode, RootedView, SccDecomposition, SccNumbering, control_dependence_graph, is_reducible,
 };
 
 use crate::oracle::{PostReference, Reference};
@@ -203,8 +202,8 @@ impl ViewCheck for StronglyConnectedComponents {
         let condensation_edges = reference.condensation_edges();
         let acyclic =
             expected.iter().all(|component| component.len() == 1) && !reference.has_self_loop();
-        let tarjan = tarjan_scc(view);
-        let kosaraju = kosaraju_scc(view);
+        let tarjan = SccDecomposition::compute(view, SccNumbering::LeavesFirst);
+        let kosaraju = SccDecomposition::compute(view, SccNumbering::SourcesFirst);
         for (name, decomposition, sources_first) in
             [("tarjan", &tarjan, false), ("kosaraju", &kosaraju, true)]
         {
@@ -277,12 +276,11 @@ impl ViewCheck for Condensations {
         let expected_components = reference.components();
         let expected_edges = reference.condensation_edges();
 
-        let graph = condensation(view);
-        let members = |component: &Scc<G::NodeId>| slot_set::<G>(component.nodes(), slots);
-        let found_components: Vec<BTreeSet<usize>> = graph
-            .node_ids()
-            .map(|node| members(graph.node(node)))
-            .collect();
+        let leaves_first = SccDecomposition::compute(view, SccNumbering::LeavesFirst);
+        let graph = leaves_first.condensation(view);
+        let runs: Vec<&[G::NodeId]> = leaves_first.components().collect();
+        let members = |node: NodeId| slot_set::<G>(runs[node.index()], slots);
+        let found_components: Vec<BTreeSet<usize>> = graph.node_ids().map(&members).collect();
         assert_eq!(
             found_components.iter().cloned().collect::<BTreeSet<_>>(),
             expected_components,
@@ -295,25 +293,20 @@ impl ViewCheck for Condensations {
         );
         let found_edges: BTreeSet<(BTreeSet<usize>, BTreeSet<usize>)> = graph
             .edges()
-            .map(|edge| {
-                (
-                    members(graph.node(edge.source())),
-                    members(graph.node(edge.target())),
-                )
-            })
+            .map(|edge| (members(edge.source()), members(edge.target())))
             .collect();
         assert_eq!(found_edges, expected_edges, "{label}: condensation edges");
         assert!(
-            tarjan_scc(&graph).is_dag(&graph),
+            SccDecomposition::compute(&graph, SccNumbering::LeavesFirst).is_dag(&graph),
             "{label}: a condensation is acyclic"
         );
 
-        let decomposition = kosaraju_scc(view);
-        let numbered = condensation_of(view, &decomposition);
+        let decomposition = SccDecomposition::compute(view, SccNumbering::SourcesFirst);
+        let numbered = decomposition.condensation(view);
         assert_eq!(
             numbered.node_ids().count(),
             decomposition.len(),
-            "{label}: condensation_of has one node per component"
+            "{label}: a sources-first condensation has one node per component"
         );
         let index_of = |component: &BTreeSet<usize>| {
             let member = *component.iter().next().expect("components are never empty");
@@ -329,7 +322,7 @@ impl ViewCheck for Condensations {
             .collect();
         assert_eq!(
             found_numbered, expected_numbered,
-            "{label}: condensation_of edges"
+            "{label}: sources-first condensation edges"
         );
     }
 }
@@ -344,39 +337,25 @@ fn condensations_are_the_quotient_graph_around_holes() {
 struct LoopFacts;
 
 impl ViewCheck for LoopFacts {
-    fn check<G: RootedView>(
-        &self,
-        view: &G,
-        slots: &Slots<G::NodeId>,
-        reference: &Reference<'_>,
-        label: &str,
-    ) {
+    fn check<G>(&self, view: &G, slots: &Slots<G::NodeId>, reference: &Reference<'_>, label: &str)
+    where
+        G: RootedView + EdgeView<EdgeData: KindedEdge>,
+    {
         let tree = DominatorTree::compute(view);
-        let found = detect_loops(view, &tree);
+        let found = LoopForest::compute(view, &tree);
         let expected = reference.loops();
-        assert_eq!(found.len(), expected.len(), "{label}: loop count");
-        let bodies: Vec<BTreeSet<usize>> = found
-            .iter()
-            .map(|natural| {
-                natural
-                    .body
-                    .iter()
-                    .map(|&node| slots.slot_of(node))
-                    .collect()
-            })
-            .collect();
-        for natural in &found {
-            let header = slots.slot_of(natural.header);
+        assert_eq!(found.loop_count(), expected.len(), "{label}: loop count");
+        let slots_of =
+            |lp| -> BTreeSet<usize> { found.body(lp).map(|node| slots.slot_of(node)).collect() };
+        let bodies: Vec<BTreeSet<usize>> = found.loops().map(slots_of).collect();
+        for lp in found.loops() {
+            let header = slots.slot_of(found.header(lp));
             let expected = expected
                 .get(&header)
                 .unwrap_or_else(|| panic!("{label}: {header} is not a loop header"));
-            let body: BTreeSet<usize> = natural
-                .body
-                .iter()
-                .map(|&node| slots.slot_of(node))
-                .collect();
-            let latches: BTreeSet<usize> = natural
-                .latches
+            let body = slots_of(lp);
+            let latches: BTreeSet<usize> = found
+                .latches(lp)
                 .iter()
                 .map(|&node| slots.slot_of(node))
                 .collect();
@@ -395,7 +374,8 @@ impl ViewCheck for LoopFacts {
                     .filter(|other| body.is_subset(other) && **other != body)
                     .count();
                 assert_eq!(
-                    natural.depth, enclosing,
+                    found.depth(lp),
+                    enclosing,
                     "{label}: depth of the loop at {header}"
                 );
             }
@@ -418,13 +398,10 @@ fn natural_loops_and_reducibility_match_the_back_edge_definition_around_holes() 
 struct Metrics;
 
 impl ViewCheck for Metrics {
-    fn check<G: RootedView>(
-        &self,
-        view: &G,
-        _slots: &Slots<G::NodeId>,
-        reference: &Reference<'_>,
-        label: &str,
-    ) {
+    fn check<G>(&self, view: &G, _slots: &Slots<G::NodeId>, reference: &Reference<'_>, label: &str)
+    where
+        G: RootedView + EdgeView<EdgeData: KindedEdge>,
+    {
         let metrics = GraphMetrics::compute(view);
         let expected = reference.metrics();
         assert_eq!(
@@ -444,8 +421,9 @@ impl ViewCheck for Metrics {
             "{label}: reachable_node_count"
         );
         assert_eq!(
-            metrics.unreachable_node_count, expected.unreachable_node_count,
-            "{label}: unreachable_node_count"
+            metrics.node_count - metrics.reachable_node_count,
+            expected.node_count - expected.reachable_node_count,
+            "{label}: unreachable nodes"
         );
         assert_eq!(
             metrics.exit_count, expected.exit_count,

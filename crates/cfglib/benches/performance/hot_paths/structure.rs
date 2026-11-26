@@ -1,11 +1,10 @@
 use cfglib::{
-    BlockId, Cfg, DominatorTree, EdgeKind, Graph, IntervalAnalysis, LoopForest, NaturalLoop,
-    NodeId, Rooted, SccDecomposition, detect_loops, kosaraju_scc, tarjan_scc,
+    BlockId, Cfg, DominatorTree, EdgeKind, Graph, LoopForest, NodeId, Rooted, SccDecomposition,
+    SccNumbering,
 };
 
 use super::NODE_COUNT;
-use crate::analysis_oracles::{assert_cfg_intervals, assert_reverse_chain_intervals};
-use crate::fixtures::{multi_latch_graph, reverse_id_chain_graph};
+use crate::fixtures::multi_latch_graph;
 use crate::harness::{BenchmarkSuite, benchmark_case};
 
 /// Nodes of the one-path graphs, whose walk is as deep as the graph.
@@ -103,7 +102,7 @@ fn register_cycles(suite: &mut BenchmarkSuite<'_>) {
             &[],
             move || LoopForest::compute_cycles(&nest),
             move |forest: &LoopForest| {
-                assert_eq!(forest.len(), NEST_DEPTH);
+                assert_eq!(forest.loop_count(), NEST_DEPTH);
                 assert_eq!(forest.max_nesting_depth(), NEST_DEPTH);
                 let irreducible_loops = forest
                     .loops()
@@ -117,7 +116,7 @@ fn register_cycles(suite: &mut BenchmarkSuite<'_>) {
         );
     }
     let random = random_cfg(RANDOM_CFG_BLOCKS);
-    let components = tarjan_scc(&random);
+    let components = SccDecomposition::compute(&random, SccNumbering::LeavesFirst);
     benchmark_case!(
         suite,
         "cfg_cycle_forest_random_1m",
@@ -133,7 +132,7 @@ fn register_cycles(suite: &mut BenchmarkSuite<'_>) {
             let mut outermost: Vec<usize> = forest
                 .loops()
                 .filter(|&lp| forest.parent(lp).is_none())
-                .map(|lp| forest.body_len(lp))
+                .map(|lp| forest.body_count(lp))
                 .collect();
             let mut expected = cyclic;
             expected.sort_unstable();
@@ -150,8 +149,8 @@ fn register_components_and_loops(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(
         DominatorTree::compute(&Rooted::new(&multi_latch, multi_latch_root));
     benchmark_case!(
         suite,
-        "directed_tarjan_scc",
-        || tarjan_scc(graph),
+        "directed_scc_leaves_first",
+        || SccDecomposition::compute(graph, SccNumbering::LeavesFirst),
         |result: &SccDecomposition<NodeId>| {
             let cycle_count = (NODE_COUNT - 1) / 32;
             assert_eq!(result.len(), NODE_COUNT - 16 * cycle_count);
@@ -193,8 +192,8 @@ fn register_components_and_loops(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(
     let path = deep_path(DEEP_PATH_NODES, false);
     benchmark_case!(
         suite,
-        "directed_tarjan_scc_deep_path",
-        || tarjan_scc(&path),
+        "directed_scc_leaves_first_deep_path",
+        || SccDecomposition::compute(&path, SccNumbering::LeavesFirst),
         |result: &SccDecomposition<NodeId>| {
             assert_eq!(result.len(), DEEP_PATH_NODES);
             assert_eq!(
@@ -206,14 +205,14 @@ fn register_components_and_loops(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(
     let cycle = deep_path(DEEP_PATH_NODES, true);
     benchmark_case!(
         suite,
-        "directed_tarjan_scc_deep_cycle",
-        || tarjan_scc(&cycle),
+        "directed_scc_leaves_first_deep_cycle",
+        || SccDecomposition::compute(&cycle, SccNumbering::LeavesFirst),
         |result: &SccDecomposition<NodeId>| assert_eq!(result.len(), 1)
     );
     benchmark_case!(
         suite,
-        "directed_kosaraju_scc_deep_path",
-        || kosaraju_scc(&path),
+        "directed_scc_sources_first_deep_path",
+        || SccDecomposition::compute(&path, SccNumbering::SourcesFirst),
         |result: &SccDecomposition<NodeId>| {
             assert_eq!(result.len(), DEEP_PATH_NODES);
             assert_eq!(result.component_index(NodeId::from_index(0)), 0);
@@ -221,49 +220,25 @@ fn register_components_and_loops(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(
     );
     benchmark_case!(
         suite,
-        "directed_detect_loops_multilatch",
-        || detect_loops(&multi_latch, &multi_latch_dominators),
-        |result: &Vec<NaturalLoop<NodeId>>| {
-            assert_eq!(result.len(), 1);
-            let natural_loop = &result[0];
-            assert_eq!(natural_loop.header, multi_latch_root);
-            assert_eq!(natural_loop.depth, 0);
-            assert_eq!(natural_loop.body.len(), 2_048 + 256 + 1);
-            assert!(
-                (0..=2_048 + 256)
-                    .all(|index| natural_loop.body.contains(&NodeId::from_index(index)))
-            );
-            assert_eq!(natural_loop.latches.len(), 256);
-            assert!(
-                (2_049..=2_304)
-                    .all(|index| natural_loop.latches.contains(&NodeId::from_index(index)))
+        "directed_loop_forest_multilatch",
+        || LoopForest::compute(&multi_latch, &multi_latch_dominators),
+        |forest: &LoopForest<NodeId>| {
+            assert_eq!(forest.loop_count(), 1);
+            let lp = forest
+                .loop_of_header(multi_latch_root)
+                .expect("the root heads the loop");
+            assert_eq!(forest.depth(lp), 0);
+            assert_eq!(forest.body_count(lp), 2_048 + 256 + 1);
+            assert!((0..=2_048 + 256).all(|index| forest.contains(lp, NodeId::from_index(index))));
+            assert_eq!(
+                forest.latches(lp),
+                (2_049..=2_304).map(NodeId::from_index).collect::<Vec<_>>()
             );
         }
     );
 }
 
-fn register_intervals(suite: &mut BenchmarkSuite<'_>, cfg: &Cfg<u32>) {
-    let (reverse_id_chain, reverse_id_root) = reverse_id_chain_graph(NODE_COUNT);
-    benchmark_case!(
-        suite,
-        "cfg_interval_analysis",
-        || IntervalAnalysis::compute(cfg),
-        |result: &IntervalAnalysis| assert_cfg_intervals(result, cfg)
-    );
-    benchmark_case!(
-        suite,
-        "directed_interval_reverse_id_chain",
-        || IntervalAnalysis::compute(&Rooted::new(&reverse_id_chain, reverse_id_root)),
-        |result: &IntervalAnalysis<NodeId>| assert_reverse_chain_intervals(
-            result,
-            NODE_COUNT,
-            reverse_id_root,
-        )
-    );
-}
-
-pub(super) fn register(suite: &mut BenchmarkSuite<'_>, cfg: &Cfg<u32>, graph: &Graph<(), ()>) {
+pub(super) fn register(suite: &mut BenchmarkSuite<'_>, graph: &Graph<(), ()>) {
     register_components_and_loops(suite, graph);
     register_cycles(suite);
-    register_intervals(suite, cfg);
 }

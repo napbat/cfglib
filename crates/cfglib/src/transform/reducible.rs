@@ -6,45 +6,45 @@
 //! cycle, so that the original blocks are entered only through the header and
 //! the copies sit in front of it.
 //!
-//! The algorithm is iterative: after each round of splitting, the
-//! dominator tree is recomputed and the CFG is re-checked. The loop
-//! terminates when the CFG is reducible.
-//!
-//! [`make_reducible_with_dispatch`] copies nothing. It enters every
+//! [`make_reducible_by_dispatch`] copies nothing. It enters every
 //! irreducible cycle through one new hub block that branches on a selector
 //! value, which a new block on each edge into the cycle's entries sets, with
 //! code a [`DispatchBuilder`] supplies. It grows polynomially, by at most the
 //! edges times the irreducible nesting depth, where splitting can grow
 //! exponentially, at the price of selector code instead of copies.
+//!
+//! Both read the irreducible cycles, and their entries, off one forest:
+//! [`LoopForest::compute_cycles`], innermost cycles first.
 
 extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cmp::Reverse;
 use smallvec::SmallVec;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::{Edge, EdgeId, EdgeKind, Probability};
-use crate::graph::dominator::DominatorTree;
-use crate::graph::structure::find_irreducible_entry;
+use crate::graph::loop_forest::LoopForest;
 use crate::graph::traverse::reachable;
 use crate::graph::view::{Direction, Induced};
 
 mod dispatch;
 
-pub use dispatch::{DispatchBuilder, DispatchReport, make_reducible_with_dispatch};
+pub use dispatch::{DispatchBuilder, DispatchReport, make_reducible_by_dispatch};
 
 /// Transform an irreducible CFG into a reducible one by node splitting.
 ///
-/// Returns the number of blocks that were duplicated. If the CFG is
-/// already reducible, returns 0 and makes no changes.
+/// Returns the copies, in the order they were added. If the CFG is already
+/// reducible, returns nothing and makes no changes.
 ///
-/// Each round finds a cycle with more than one entry and picks the entry
-/// whose rivals lead to the fewest blocks of the cycle without passing it.
-/// Those blocks are copied, the edges from outside the cycle into the other
-/// entries are redirected to the copies, and the copies keep the kind, weight
-/// and payload of every edge they were copied from. Cycles inside the copies
-/// and inside the original are handled by later rounds.
+/// Each round takes an innermost cycle of [`LoopForest::compute_cycles`]
+/// with more than one entry and picks the entry whose rivals lead to the
+/// fewest blocks of the cycle without passing it. Those blocks are copied, the
+/// edges from outside the cycle into the other entries are redirected to the
+/// copies, and the copies keep the kind, weight and payload of every edge they
+/// were copied from. Cycles inside the copies and inside the original are
+/// handled by later rounds.
 ///
 /// **Caution**: node splitting can cause exponential code growth in
 /// pathological cases. For most real-world binaries the duplication
@@ -53,37 +53,43 @@ pub use dispatch::{DispatchBuilder, DispatchReport, make_reducible_with_dispatch
 /// # Examples
 ///
 /// ```
-/// use cfglib::{Cfg, EdgeKind};
-/// use cfglib::graph::reducible::make_reducible;
+/// use cfglib::{Cfg, DominatorTree, EdgeKind, is_reducible, make_reducible};
 ///
-/// // A simple reducible CFG returns 0 (no changes).
+/// // A reducible CFG is left alone.
 /// let mut cfg = Cfg::<u32>::new();
-/// let b1 = cfg.new_block();
-/// cfg.add_edge(cfg.entry(), b1, EdgeKind::Fallthrough);
-/// assert_eq!(make_reducible(&mut cfg), 0);
+/// let [a, b] = [(); 2].map(|()| cfg.new_block());
+/// cfg.add_edge(cfg.entry(), a, EdgeKind::ConditionalTrue);
+/// cfg.add_edge(cfg.entry(), b, EdgeKind::ConditionalFalse);
+/// assert_eq!(make_reducible(&mut cfg), []);
+///
+/// // Once `a` and `b` jump to each other, the cycle has two entries: one of
+/// // them is copied in front of the other.
+/// cfg.add_edge(a, b, EdgeKind::Jump);
+/// cfg.add_edge(b, a, EdgeKind::Jump);
+/// assert!(!is_reducible(&cfg, &DominatorTree::compute(&cfg)));
+/// assert_eq!(make_reducible(&mut cfg).len(), 1);
+/// assert!(is_reducible(&cfg, &DominatorTree::compute(&cfg)));
 /// ```
-pub fn make_reducible<I: Clone, E: Clone>(cfg: &mut Cfg<I, E>) -> usize {
-    let mut duplicated = 0;
-
+pub fn make_reducible<I: Clone, E: Clone>(cfg: &mut Cfg<I, E>) -> Vec<BlockId> {
+    let mut copies = Vec::new();
     loop {
-        // After each round the dominator tree is stale, so it is recomputed
-        // before the next cycle is picked.
-        let dom = DominatorTree::compute(cfg);
-        let Some(witness) = find_irreducible_entry(cfg, &dom) else {
-            return duplicated;
+        // Copies add blocks, so each round finds the cycles again.
+        let forest = LoopForest::compute_cycles(cfg);
+        let Some(cycle) = forest
+            .loops()
+            .filter(|&lp| forest.is_irreducible(lp))
+            .min_by_key(|&lp| Reverse(forest.depth(lp)))
+        else {
+            return copies;
         };
-        let cycle = multi_entry_cycle(cfg, &dom, witness);
-        duplicated += split_cycle(cfg, &cycle);
+        let mut member = vec![false; cfg.block_bound()];
+        for block in forest.body(cycle) {
+            member[block.index()] = true;
+        }
+        let mut entries = forest.entries(cycle);
+        entries.sort_unstable();
+        split_cycle(cfg, &member, &entries, &mut copies);
     }
-}
-
-/// A cycle that can be entered at more than one block.
-struct MultiEntryCycle {
-    /// Whether each block is in the cycle.
-    member: Vec<bool>,
-    /// The blocks with a reachable predecessor outside the cycle, and the
-    /// function entry if it is in the cycle, in ascending order.
-    entries: Vec<BlockId>,
 }
 
 /// The blocks of `cfg` that can be reached from `start` in `direction`
@@ -98,85 +104,33 @@ fn closure<I, E>(
     reachable(&Induced::new(cfg, within), start, direction)
 }
 
-/// The innermost cycle through `witness`, the target of a retreating edge,
-/// that has more than one entry.
-///
-/// The strongly connected component of `witness` is one when it has several
-/// entries. With a single entry the component is not what makes the CFG
-/// irreducible: the entry is its header, and the retreating edge belongs to a
-/// cycle inside what is left once the header is set aside, so the search goes
-/// on in that remainder. It ends because the retreating edge's tail is reached
-/// from the root by a path that avoids `witness`: the first block of that
-/// path inside a component is an entry other than `witness`, and when it is
-/// the only one every path to `witness` passes through it, so removing it
-/// strictly shrinks the component while keeping both `witness` and the
-/// tail, which stay in a cycle together until two entries appear.
-fn multi_entry_cycle<I, E>(
-    cfg: &Cfg<I, E>,
-    dom: &DominatorTree,
-    witness: BlockId,
-) -> MultiEntryCycle {
-    let mut allowed = vec![true; cfg.block_bound()];
-    loop {
-        let ahead = closure(cfg, [witness], Direction::Forward, &allowed);
-        // Every block on a path back to `witness` from a block it reaches is
-        // itself reached from `witness`, so the walk back can stay inside
-        // `ahead` instead of visiting everything that merely leads here.
-        let behind = closure(cfg, [witness], Direction::Backward, &ahead);
-        let member: Vec<bool> = ahead
-            .iter()
-            .zip(&behind)
-            .map(|(&ahead, &behind)| ahead && behind)
-            .collect();
-        let entries: Vec<BlockId> = cfg
-            .block_ids()
-            .filter(|&block| {
-                member[block.index()]
-                    && (block == cfg.entry()
-                        || cfg
-                            .predecessors(block)
-                            .any(|before| dom.is_reachable(before) && !member[before.index()]))
-            })
-            .collect();
-        if let [only] = entries[..] {
-            assert!(
-                only != witness,
-                "a retreating edge's target that is the only entry of its cycle dominates the edge's tail"
-            );
-            allowed[only.index()] = false;
-            continue;
-        }
-        return MultiEntryCycle { member, entries };
-    }
-}
-
-/// Make `cycle` single-entry: keep one entry as its header, copy the blocks
-/// the other entries lead to without passing the header, and send every edge
-/// from outside the cycle into those entries to the copies. Returns the number
-/// of blocks copied.
+/// Make the cycle of the blocks in `member` single-entry: keep one of its
+/// `entries` (ascending) as its header, copy the blocks the other entries lead
+/// to without passing the header, and send every edge from outside the cycle
+/// into those entries to the copies, which are appended to `copies`.
 ///
 /// The blocks the other entries lead to are closed under the cycle's edges
 /// except for the edge back to the header, so the copies need no edge into
 /// the cycle other than that one. The header is the function entry when it
 /// is an entry of the cycle, since nothing can be put in front of it, and
 /// otherwise the entry with the smallest set to copy.
-fn split_cycle<I: Clone, E: Clone>(cfg: &mut Cfg<I, E>, cycle: &MultiEntryCycle) -> usize {
+fn split_cycle<I: Clone, E: Clone>(
+    cfg: &mut Cfg<I, E>,
+    member: &[bool],
+    entries: &[BlockId],
+    copies: &mut Vec<BlockId>,
+) {
     let region_without = |header: BlockId| {
-        let mut allowed = cycle.member.clone();
+        let mut allowed = member.to_vec();
         allowed[header.index()] = false;
-        let others = cycle
-            .entries
-            .iter()
-            .copied()
-            .filter(|&entry| entry != header);
+        let others = entries.iter().copied().filter(|&entry| entry != header);
         closure(cfg, others, Direction::Forward, &allowed)
     };
     let size = |region: &[bool]| region.iter().filter(|&&copied| copied).count();
-    let (header, region) = if cycle.entries.contains(&cfg.entry()) {
+    let (header, region) = if entries.contains(&cfg.entry()) {
         (cfg.entry(), region_without(cfg.entry()))
     } else {
-        cycle
-            .entries
+        entries
             .iter()
             .map(|&header| (header, region_without(header)))
             .min_by_key(|(_, region)| size(region))
@@ -184,22 +138,23 @@ fn split_cycle<I: Clone, E: Clone>(cfg: &mut Cfg<I, E>, cycle: &MultiEntryCycle)
     };
 
     let mut copy_of: Vec<Option<BlockId>> = vec![None; cfg.block_bound()];
-    let copied: Vec<BlockId> = cfg
+    let originals: Vec<BlockId> = cfg
         .block_ids()
         .filter(|block| region[block.index()])
         .collect();
-    for &block in &copied {
+    for &block in &originals {
         let copy = cfg.new_block();
         let instructions = cfg.block(block).instructions().to_vec();
         cfg.block_mut(copy).instructions_mut().extend(instructions);
         copy_of[block.index()] = Some(copy);
+        copies.push(copy);
     }
 
     // Each copy takes the edges of its original in the same adjacency order,
     // with fresh identities and all the metadata of the edge it copies. An
     // edge to a copied block goes to its copy; the others (to the header, or
     // out of the cycle) go where the original did.
-    for &block in &copied {
+    for &block in &originals {
         let copy = copy_of[block.index()].expect("every copied block has a copy");
         let outgoing: Vec<(BlockId, EdgeKind, Option<Probability>, E)> = cfg
             .outgoing(block)
@@ -232,17 +187,16 @@ fn split_cycle<I: Clone, E: Clone>(cfg: &mut Cfg<I, E>, cycle: &MultiEntryCycle)
 
     // Edges from outside the cycle now enter the copies; the originals keep
     // the edges from inside the cycle, so the header is their only way in.
-    for &entry in cycle.entries.iter().filter(|&&entry| entry != header) {
+    for &entry in entries.iter().filter(|&&entry| entry != header) {
         let from_outside: SmallVec<[EdgeId; 4]> = cfg
             .incoming(entry)
-            .filter(|&id| !cycle.member[cfg.edge(id).source().index()])
+            .filter(|&id| !member[cfg.edge(id).source().index()])
             .collect();
         let copy = copy_of[entry.index()].expect("every entry other than the header is copied");
         for id in from_outside {
             cfg.redirect_edge_target(id, copy);
         }
     }
-    copied.len()
 }
 
 #[cfg(test)]
@@ -274,8 +228,7 @@ mod tests {
 
         let dom = DominatorTree::compute(&cfg);
         assert!(is_reducible(&cfg, &dom));
-        let splits = make_reducible(&mut cfg);
-        assert_eq!(splits, 0);
+        assert_eq!(make_reducible(&mut cfg), []);
     }
 
     #[test]
@@ -299,8 +252,8 @@ mod tests {
         let dom = DominatorTree::compute(&cfg);
         assert!(!is_reducible(&cfg, &dom), "should be irreducible before");
 
-        let splits = make_reducible(&mut cfg);
-        assert!(splits > 0, "should have split at least one node");
+        let copies = make_reducible(&mut cfg);
+        assert_ne!(copies.len(), 0, "should have split at least one node");
 
         let dom2 = DominatorTree::compute(&cfg);
         assert!(is_reducible(&cfg, &dom2), "should be reducible after");
@@ -337,7 +290,7 @@ mod tests {
             assert!(!is_reducible(&cfg, &before), "q first: {q_first}");
             let original_blocks = cfg.block_count();
 
-            let splits = make_reducible(&mut cfg);
+            let splits = make_reducible(&mut cfg).len();
 
             assert!(splits >= 1, "q first: {q_first}");
             assert_eq!(cfg.block_count(), original_blocks + splits);
@@ -363,7 +316,7 @@ mod tests {
         assert!(!is_reducible(&cfg, &before));
         let original_blocks = cfg.block_count();
 
-        let splits = make_reducible(&mut cfg);
+        let splits = make_reducible(&mut cfg).len();
 
         assert!(splits >= 2, "each cycle needs a split, got {splits}");
         assert_eq!(cfg.block_count(), original_blocks + splits);
@@ -389,7 +342,7 @@ mod tests {
         assert!(!is_reducible(&cfg, &before));
         let original_blocks = cfg.block_count();
 
-        let splits = make_reducible(&mut cfg);
+        let splits = make_reducible(&mut cfg).len();
 
         assert!(splits >= 1);
         assert_eq!(cfg.block_count(), original_blocks + splits);
@@ -450,7 +403,7 @@ mod tests {
         });
         let entering_before = [into_a, into_b].map(|edge| cfg.edge(edge).weight());
 
-        assert_eq!(make_reducible(&mut cfg), 1);
+        assert_eq!(make_reducible(&mut cfg).len(), 1);
 
         let copy = BlockId::from_index(original_block_bound);
         let which = [a, b]
@@ -536,13 +489,21 @@ mod tests {
         }
         let was_reducible = is_reducible(&cfg, &DominatorTree::compute(&cfg));
         let original_blocks = cfg.block_count();
+        let original_bound = cfg.block_bound();
         let label = alloc::format!("{count} nodes {edges:?}");
 
-        let duplicated = make_reducible(&mut cfg);
+        let copies = make_reducible(&mut cfg);
 
         assert!(is_reducible(&cfg, &DominatorTree::compute(&cfg)), "{label}");
-        assert_eq!(cfg.block_count(), original_blocks + duplicated, "{label}");
-        assert_eq!(duplicated == 0, was_reducible, "{label}");
+        assert_eq!(
+            copies,
+            (original_bound..cfg.block_bound())
+                .map(BlockId::from_index)
+                .collect::<Vec<_>>(),
+            "{label}: the copies are the new blocks"
+        );
+        assert_eq!(cfg.block_count(), original_blocks + copies.len(), "{label}");
+        assert_eq!(copies.is_empty(), was_reducible, "{label}");
 
         // The new graph covers the old one: mapping each block to the
         // original it stands for sends the outgoing edges of every block,

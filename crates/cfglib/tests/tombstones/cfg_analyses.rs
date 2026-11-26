@@ -41,10 +41,6 @@ fn cfg_metrics_match(
         "{label}: reachable_node_count"
     );
     assert_eq!(
-        metrics.graph.unreachable_node_count, expected.unreachable_node_count,
-        "{label}: unreachable_node_count"
-    );
-    assert_eq!(
         metrics.graph.cyclomatic_complexity, expected.cyclomatic_complexity,
         "{label}: cyclomatic_complexity"
     );

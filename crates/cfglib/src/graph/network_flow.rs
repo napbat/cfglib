@@ -32,12 +32,16 @@
 //! shortest paths; each search stops at the first node that can absorb flow.
 
 extern crate alloc;
-use alloc::collections::{BinaryHeap, VecDeque};
+use alloc::collections::BinaryHeap;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::Reverse;
 use core::fmt;
+use core::ops::ControlFlow;
 
+use crate::graph::search::Visit;
+use crate::graph::traverse::{Outgoing, breadth_first_core};
+use crate::graph::view::GraphView;
 use crate::identity::{define_dense_id, word};
 
 define_dense_id! {
@@ -350,7 +354,7 @@ impl FlowNetwork {
         self.build_adjacency();
         let mut level = vec![usize::MAX; self.nodes];
         let mut current = vec![0; self.nodes];
-        let mut queue = VecDeque::new();
+        let mut queue = Vec::new();
         let mut path = Vec::new();
         let mut total = 0;
         while total < limit && self.levels(source, sink, &mut level, &mut queue) {
@@ -379,7 +383,7 @@ impl FlowNetwork {
     /// gives alike.
     pub(crate) fn residual_reachable(&self, source: usize) -> Vec<bool> {
         let mut level = vec![usize::MAX; self.nodes];
-        self.levels(source, source, &mut level, &mut VecDeque::new());
+        self.levels(source, source, &mut level, &mut Vec::new());
         level.into_iter().map(|level| level != usize::MAX).collect()
     }
 
@@ -390,21 +394,25 @@ impl FlowNetwork {
         source: usize,
         sink: usize,
         level: &mut [usize],
-        queue: &mut VecDeque<usize>,
+        queue: &mut Vec<usize>,
     ) -> bool {
         level.fill(usize::MAX);
         level[source] = 0;
         queue.clear();
-        queue.push_back(source);
-        while let Some(node) = queue.pop_front() {
-            for &half in self.arcs_out(node) {
-                let next = self.head[half];
-                if self.residual[half] > 0 && level[next] == usize::MAX {
-                    level[next] = level[node] + 1;
-                    queue.push_back(next);
+        queue.push(source);
+        breadth_first_core::<_, _, ()>(
+            Outgoing,
+            &Residual(self),
+            queue,
+            |_, _| ControlFlow::Continue(Visit::Descend),
+            |_, _, next, depth| {
+                let new = level[next] == usize::MAX;
+                if new {
+                    level[next] = depth + 1;
                 }
-            }
-        }
+                new
+            },
+        );
         level[sink] != usize::MAX
     }
 
@@ -585,6 +593,44 @@ impl FlowNetwork {
             })
             .ok_or(FlowError::Overflow)?;
         i64::try_from(total).map_err(|_| FlowError::Overflow)
+    }
+}
+
+/// The residual network of a [`FlowNetwork`] as a view: an edge for each half
+/// arc with residual capacity left, in the order the half arcs are grouped,
+/// so it reads the grouping of the last `build_adjacency`.
+struct Residual<'a>(&'a FlowNetwork);
+
+impl GraphView for Residual<'_> {
+    type NodeId = usize;
+
+    fn node_bound(&self) -> usize {
+        self.0.nodes
+    }
+
+    fn node_ids(&self) -> impl Iterator<Item = usize> + '_ {
+        0..self.0.nodes
+    }
+
+    #[inline]
+    fn successors(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
+        let network = self.0;
+        network
+            .arcs_out(node)
+            .iter()
+            .filter(|&&half| network.residual[half] > 0)
+            .map(|&half| network.head[half])
+    }
+
+    /// The half arc against each one leaving `node` enters it, from that
+    /// one's head.
+    fn predecessors(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
+        let network = self.0;
+        network
+            .arcs_out(node)
+            .iter()
+            .filter(|&&half| network.residual[half ^ 1] > 0)
+            .map(|&half| network.head[half])
     }
 }
 

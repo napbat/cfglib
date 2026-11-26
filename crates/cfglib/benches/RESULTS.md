@@ -132,7 +132,7 @@ The `structured` input the relabeled one was shuffled from reads 107,466.8 /
 
 One million nodes, 1,849,803 edges (milliseconds):
 
-| Arrival | Order | `compaction` | `successor_scan` | `predecessor_scan` | `tarjan_scc` |
+| Arrival | Order | `compaction` | `successor_scan` | `predecessor_scan` | `scc_leaves_first` |
 | --- | --- | ---: | ---: | ---: | ---: |
 | shuffled | `compact` | 21.3 | 22.2 | 16.5 | 158.9 |
 | shuffled | `first_touch` | 41.9 | 20.6 | 15.8 | 143.6 |
@@ -148,7 +148,7 @@ and give their range over the three runs. A difference is called faster or
 slower only when it has that sign in all three runs.
 
 - Reverse postorder recovers most of the predecessor locality the shuffle
-  took, and `tarjan_scc` takes 0.40 to 0.45 of its `compact` time under both
+  took, and `scc_leaves_first` takes 0.40 to 0.45 of its `compact` time under both
   arrivals in every run. Breadth-first recovers less and gains less (0.74 to
   0.88).
 - Under grouped arrival every order makes the predecessor walk faster (0.73
@@ -159,7 +159,7 @@ slower only when it has that sign in all three runs.
   (#87) target that load.
 - Under shuffled arrival breadth-first makes all three reads faster in every
   run (0.74 to 0.94), and first touch the successor walk (0.89 to 0.97). The
-  walks under reverse postorder, and the predecessor walk and `tarjan_scc`
+  walks under reverse postorder, and the predecessor walk and `scc_leaves_first`
   under first touch, moved in both directions between runs, so they show no
   difference these runs can resolve.
 - An ordered compaction costs 1.8 to 2.1 times a plain one for first touch,

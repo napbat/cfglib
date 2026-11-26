@@ -5,7 +5,7 @@ use std::fmt::{Debug, Display};
 
 use cfglib::{
     DenseBits, DominatorTree, EdgeId, Graph, HornClauses, KeyedGraph, NodeId, NodeOrder, Rooted,
-    tarjan_scc,
+    SccDecomposition, SccNumbering,
 };
 use serde_json::{Value, json};
 
@@ -282,7 +282,8 @@ fn a_keyed_graph_keeps_its_keys_ids_and_edges() {
         );
     }
     assert_same_store(decoded.graph(), original.graph());
-    assert_eq!(tarjan_scc(&decoded).len(), tarjan_scc(&original).len());
+    let components = |graph| SccDecomposition::compute(graph, SccNumbering::LeavesFirst).len();
+    assert_eq!(components(&decoded), components(&original));
 }
 
 #[test]

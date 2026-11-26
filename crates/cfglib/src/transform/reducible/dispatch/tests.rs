@@ -162,7 +162,7 @@ fn check_digraph(count: usize, edges: &[(usize, usize)], seed: u64) -> bool {
 
     let mut cfg = original.clone();
     let mut recorder = Recorder::default();
-    let report = make_reducible_with_dispatch(&mut cfg, &mut recorder);
+    let report = make_reducible_by_dispatch(&mut cfg, &mut recorder);
 
     assert!(is_reducible(&cfg, &DominatorTree::compute(&cfg)), "{label}");
     assert_eq!(report.hubs.len(), irreducible, "{label}");
@@ -281,7 +281,7 @@ fn a_removed_block_is_no_block_of_the_result() {
     cfg.remove_block(BlockId::from_index(3));
     let bound = cfg.block_bound();
 
-    let report = make_reducible_with_dispatch(&mut cfg, &mut Recorder::default());
+    let report = make_reducible_by_dispatch(&mut cfg, &mut Recorder::default());
 
     assert!(is_reducible(&cfg, &DominatorTree::compute(&cfg)));
     assert_eq!(report.hubs.len(), 1);
@@ -316,7 +316,7 @@ fn a_reducible_graph_is_left_alone() {
     let mut cfg = original.clone();
     let mut recorder = Recorder::default();
 
-    let report = make_reducible_with_dispatch(&mut cfg, &mut recorder);
+    let report = make_reducible_by_dispatch(&mut cfg, &mut recorder);
 
     assert_eq!(report, DispatchReport::default());
     assert_eq!(recorder.calls, []);
@@ -332,7 +332,7 @@ fn a_loop_an_entry_heads_inside_the_cycle_stays_a_loop() {
     let (b, c) = (BlockId::from_index(2), BlockId::from_index(3));
     let mut cfg = original.clone();
 
-    let report = make_reducible_with_dispatch(&mut cfg, &mut Recorder::default());
+    let report = make_reducible_by_dispatch(&mut cfg, &mut Recorder::default());
 
     assert!(is_reducible(&cfg, &DominatorTree::compute(&cfg)));
     assert_eq!(report.hubs.len(), 1);
@@ -351,7 +351,7 @@ fn an_edge_from_unreached_code_is_left_alone() {
     let (b, dead) = (BlockId::from_index(2), BlockId::from_index(3));
     let mut cfg = original.clone();
 
-    let report = make_reducible_with_dispatch(&mut cfg, &mut Recorder::default());
+    let report = make_reducible_by_dispatch(&mut cfg, &mut Recorder::default());
 
     assert_eq!(report.selectors.len(), 4);
     assert_eq!(cfg.successors(dead).collect::<Vec<_>>(), [b]);
@@ -375,9 +375,9 @@ fn dispatch_grows_with_the_edges_per_level_where_splitting_grows_exponentially()
         let levels = blocks - 1;
 
         let mut dispatched = original.clone();
-        let report = make_reducible_with_dispatch(&mut dispatched, &mut Recorder::default());
+        let report = make_reducible_by_dispatch(&mut dispatched, &mut Recorder::default());
         let mut split = original.clone();
-        let copies = crate::graph::reducible::make_reducible(&mut split);
+        let copies = super::super::make_reducible(&mut split).len();
 
         assert!(is_reducible(
             &dispatched,
@@ -418,7 +418,7 @@ fn a_deep_irreducible_nest_grows_linearly() {
     }
     let mut cfg = graph_of(1 + 2 * depth, &edges);
 
-    let report = make_reducible_with_dispatch(&mut cfg, &mut Recorder::default());
+    let report = make_reducible_by_dispatch(&mut cfg, &mut Recorder::default());
 
     assert!(is_reducible(&cfg, &DominatorTree::compute(&cfg)));
     assert_eq!(report.hubs.len(), depth - 1);

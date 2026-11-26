@@ -6,9 +6,9 @@ use std::collections::BTreeSet;
 
 use cfglib::{
     BlockId, Cfg, CfgMetrics, DenseId, DominatorTree, EdgeId, EdgeKind, Graph, GraphMetrics,
-    GraphView, NodeOrder, Rooted, RootedView, detect_loops, find_back_edges, kosaraju_scc,
-    merge_blocks_mapped, remove_empty_blocks_mapped, remove_unreachable_mapped, simplify_mapped,
-    tarjan_scc,
+    GraphView, LoopForest, NodeOrder, Rooted, RootedView, SccDecomposition, SccNumbering,
+    find_back_edges, merge_blocks_mapped, remove_empty_blocks_mapped, remove_unreachable_mapped,
+    simplify_mapped,
 };
 
 use crate::cfg_analyses::check_cfg_analyses;
@@ -267,7 +267,7 @@ fn metrics_count_the_live_blocks_not_the_slots() {
     assert_eq!(metrics.graph.edge_count, 1);
     assert_eq!(metrics.graph.reachable_node_count, 2);
     assert_eq!(
-        metrics.graph.unreachable_node_count, 0,
+        metrics.graph.reachable_node_count, metrics.graph.node_count,
         "a removed slot is not unreachable code"
     );
     assert_eq!(metrics.graph.exit_count, 1);
@@ -297,7 +297,8 @@ fn unreachable_blocks_are_counted_only_when_they_are_live() {
     assert_eq!(metrics.node_count, 3);
     assert_eq!(metrics.reachable_node_count, 2);
     assert_eq!(
-        metrics.unreachable_node_count, 1,
+        metrics.node_count - metrics.reachable_node_count,
+        1,
         "only the live dead block"
     );
     assert_eq!(metrics.edge_count, 2);
@@ -312,7 +313,7 @@ fn metrics_between_a_transform_and_the_compaction_equal_the_compacted_metrics() 
         assert_eq!(holed.graph.node_count, cfg.block_count(), "seed {seed}");
         assert_eq!(holed.graph.edge_count, cfg.edge_count(), "seed {seed}");
         assert_eq!(
-            holed.graph.unreachable_node_count, 0,
+            holed.graph.reachable_node_count, holed.graph.node_count,
             "seed {seed}: nothing unreachable is left"
         );
         cfg.compact(NodeOrder::Insertion);
@@ -334,8 +335,14 @@ fn components_cover_the_live_nodes_only() {
     assert!(graph.remove_node(removed));
 
     for (name, decomposition) in [
-        ("tarjan", tarjan_scc(&graph)),
-        ("kosaraju", kosaraju_scc(&graph)),
+        (
+            "tarjan",
+            SccDecomposition::compute(&graph, SccNumbering::LeavesFirst),
+        ),
+        (
+            "kosaraju",
+            SccDecomposition::compute(&graph, SccNumbering::SourcesFirst),
+        ),
     ] {
         let components: BTreeSet<Vec<_>> = decomposition.components().map(<[_]>::to_vec).collect();
         assert_eq!(
@@ -358,10 +365,13 @@ fn a_graph_whose_only_cycle_ran_through_a_removed_node_is_acyclic() {
     graph.add_edge(first, middle, ());
     graph.add_edge(middle, last, ());
     graph.add_edge(last, first, ());
-    assert!(!tarjan_scc(&graph).is_dag(&graph));
+    assert!(!SccDecomposition::compute(&graph, SccNumbering::LeavesFirst).is_dag(&graph));
 
     assert!(graph.remove_node(middle));
-    for decomposition in [tarjan_scc(&graph), kosaraju_scc(&graph)] {
+    for decomposition in [
+        SccDecomposition::compute(&graph, SccNumbering::LeavesFirst),
+        SccDecomposition::compute(&graph, SccNumbering::SourcesFirst),
+    ] {
         assert!(decomposition.is_dag(&graph));
         assert_eq!(decomposition.len(), 2);
     }
@@ -404,7 +414,7 @@ fn loops_are_relative_to_the_entry_so_dead_cycles_are_not_loops() {
 
     let dominators = DominatorTree::compute(&cfg);
     assert!(
-        detect_loops(&cfg, &dominators).is_empty(),
+        LoopForest::compute(&cfg, &dominators).is_empty(),
         "no cycle is reachable from the entry, so no loop exists"
     );
     assert_eq!(find_back_edges(&cfg, &dominators), Vec::new());

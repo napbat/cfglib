@@ -545,7 +545,8 @@ pub use ancestors::{CommonAncestor, common_ancestors, nearest_common_ancestor};
 pub(crate) use breadth_first::breadth_first_core;
 pub use cycle_witness::topological_sort_or_cycle;
 pub(crate) use depth_first::{
-    DepthFirstStack, DepthFirstVisitor, Mark, PathMarks, StepKind, depth_first_core,
+    DepthFirstMarks, DepthFirstStack, DepthFirstVisitor, Mark, PathMarks, StepKind,
+    depth_first_core,
 };
 pub(crate) use shortest_path::edge_path_in;
 pub use shortest_path::{ShortestPathScratch, shortest_path, shortest_path_in};

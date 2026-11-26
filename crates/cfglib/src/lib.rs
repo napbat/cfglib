@@ -228,9 +228,7 @@ pub use analysis::control_tree::{
     PathDecomposition, Preorder, SplDecomposition, SplError, SplNode, SplNodeId, StructuringReport,
     SwitchCase,
 };
-pub use analysis::metrics::{
-    CfgMetrics, GraphMetrics, block_nesting_depths, cfg_block_nesting_depths,
-};
+pub use analysis::metrics::{CfgMetrics, GraphMetrics};
 pub use analysis::pattern::{Pattern, detect_patterns, empty_trampolines};
 pub use block::{BasicBlock, BlockId, BlockTag};
 pub use builder::address::{
@@ -281,17 +279,17 @@ pub use graph::call_graph::{
 };
 pub use graph::cdg::{
     ControlClosureScratch, NonterminationScratch, control_dependence_graph,
-    nontermination_sensitive_controllers, weak_control_closure,
+    nontermination_sensitive_controllers, nontermination_sensitive_controllers_in,
+    weak_control_closure, weak_control_closure_in,
 };
 pub use graph::coldness::{ColdClass, ColdnessClasses};
-pub use graph::cut::{EdgeCut, VertexCut, edge_disjoint_paths, min_edge_cut, min_vertex_cut};
+pub use graph::cut::{EdgeCut, VertexCut, edge_disjoint_paths};
 pub use graph::diff::{
     BlockHashes, BlockMatch, CascadeDiff, CfgDiff, MatchLevel, RegionDiff, RegionMatch,
 };
 pub use graph::dominator::{
     CertificateError, DominanceFrontiers, DominatorScratch, DominatorTree, DominatorUpdate,
-    ExitPolicy, FrontierScratch, LowHighOrder, PostDominatorScratch, PostDominatorTree, PostNode,
-    SinkId,
+    ExitPolicy, FrontierTree, LowHighOrder, PostDominatorTree, PostNode, SinkId,
 };
 pub use graph::dot::{
     DotEdgeAttributes, DotEdgeStyle, DotRankDir, DotStyle, plain_edge_attributes, to_dot, write_dot,
@@ -310,11 +308,9 @@ pub use graph::fingerprint::{
 };
 pub use graph::frequency::{BlockFrequencies, FREQUENCY_SHIFT, FrequencyConfig};
 pub use graph::horn::{HornClauses, HornSaturation};
-pub use graph::interval::{Interval, IntervalAnalysis};
 pub use graph::keyed::KeyedGraph;
 pub use graph::label::{Label, display_label, no_label};
 pub use graph::loop_forest::{LoopForest, LoopId};
-pub use graph::loop_nest::{LoopNestNode, LoopNestingTree};
 pub use graph::network_flow::{ArcId, FlowError, FlowNetwork, FlowSolution};
 pub use graph::open::{
     FoldEnter, MarkScope, OpenBfsEvent, OpenDfsEvent, OpenFold, OpenFoldConfig, OpenFoldError,
@@ -330,13 +326,9 @@ pub use graph::program_structure::{
     CycleEquivalence, ProgramStructureTree, SeseEdge, SeseRegionId,
 };
 pub use graph::reach_index::{ReachIndex, ReachIndexConfig, ReachScratch};
-pub use graph::reducible::{
-    DispatchBuilder, DispatchReport, make_reducible, make_reducible_with_dispatch,
-};
 pub use graph::relax::min_label_relaxation;
 pub use graph::scc::{
-    IncrementalScc, Scc, SccChange, SccDecomposition, StrongCutScratch, StrongCuts, condensation,
-    condensation_of, kosaraju_scc, strong_cuts, strong_cuts_of, tarjan_scc,
+    IncrementalScc, Scc, SccChange, SccDecomposition, SccNumbering, StrongCutScratch, StrongCuts,
 };
 pub use graph::scope::{
     Scope, ScopeCursor, ScopeCursorPolicy, ScopeCursorQuery, ScopeDatum, ScopeDatumId, ScopeEdgeId,
@@ -359,17 +351,14 @@ pub use graph::stack::{
 pub use graph::store::{
     AdjacentEdges, EdgeRecord, Graph, Id, IdTag, NodeId, NodeOrder, NodeTag, Renumbering,
 };
-pub use graph::structure::{
-    BackEdge, CanonicalLoop, NaturalLoop, canonicalize_loops, detect_loops, detect_loops_tagged,
-    find_back_edges, find_back_edges_tagged, insert_preheader, is_reducible, loop_exit_blocks,
-};
+pub use graph::structure::{BackEdge, find_back_edges, is_reducible};
 pub use graph::text::{TextError, TextErrorKind, TextStyle, parse_text, to_text, write_text};
 pub use graph::traverse::{
     CommonAncestor, ShortestPathScratch, breadth_first, common_ancestors, depth_first_postorder,
     depth_first_preorder, nearest_common_ancestor, reachable, reverse_postorder, shortest_path,
     shortest_path_in, topological_sort, topological_sort_or_cycle,
 };
-pub use graph::tree_decomposition::{EliminationHeuristic, TreeDecomposition, tree_decomposition};
+pub use graph::tree_decomposition::{EliminationHeuristic, TreeDecomposition};
 pub use graph::verify::{VerifyError, VerifyReport, verify_edge_view, verify_view};
 pub use graph::view::{
     DenseId, Direction, GraphView, Induced, NodeView, Reversed, Rooted, RootedView, VirtualRoot,
@@ -397,7 +386,11 @@ pub use transform::layout::{RelaxError, RelaxMode, SpanItem, relax_layout, relax
 pub use transform::linearize::{
     BlockOrder, Emitter, LinearInst, LinearizeError, falls_through, linearize,
 };
+pub use transform::loops::{CanonicalLoop, canonicalize_loops, insert_preheader};
 pub use transform::pass::{
     Pass, PassError, PassExecution, PassFn, PassId, PassPipeline, PassReport, pass_fn,
+};
+pub use transform::reducible::{
+    DispatchBuilder, DispatchReport, make_reducible, make_reducible_by_dispatch,
 };
 pub use union_find::DisjointSet;

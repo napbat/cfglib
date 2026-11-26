@@ -1,71 +1,57 @@
-//! Structural detection — natural loops, regions, and reducibility.
+//! Back edges and reducibility.
 //!
-//! Identifies loop structures and classifies a graph as reducible or
-//! irreducible, building on the dominator tree and back-edge detection.
+//! [`find_back_edges`] lists the edges that close a loop: every edge whose
+//! target dominates its source, and every edge a builder tagged
+//! [`EdgeKind::Back`] (a structured `loop` or `continue`) that closes a cycle
+//! dominance cannot prove, as on an irreducible machine CFG.
+//! [`LoopForest::compute`](crate::LoopForest::compute) builds the loops from
+//! them. [`is_reducible`] says whether every cycle has a block that dominates
+//! the rest of it.
 //!
-//! The core detectors are generic over [`GraphView`] / [`RootedView`] and use
-//! dominance only. A consumer whose builder tags explicit
-//! [`EdgeKind::Back`] edges (structured `loop` / `continue` markers, including
-//! on irreducible machine CFGs) uses the `_tagged` variants, which union the
-//! tags with dominance-based detection. Those are generic too: any
-//! [`EdgeView`] whose edge data declares a [`KindedEdge`] kind participates,
-//! so the tag-aware detectors are not a second copy written against [`Cfg`].
+//! The detectors are generic: any [`EdgeView`] whose edge data declares a
+//! [`KindedEdge`] kind participates, so they are not a copy written against
+//! [`Cfg`](crate::Cfg). The `()` edge data of a plain graph declares no tag,
+//! which leaves dominance alone to find its loops.
 
 extern crate alloc;
-use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
 use super::dominator::DominatorTree;
 use super::edge_view::EdgeView;
-use super::loop_forest::LoopForest;
-use super::scc::tarjan_scc;
+use super::scc::{SccDecomposition, SccNumbering};
 use super::search::{DfsEvent, depth_first_events};
-use super::view::{GraphView, RootedView};
+use super::view::{Direction, RootedView};
 use crate::block::BlockId;
-use crate::cfg::Cfg;
 use crate::edge::{EdgeKind, KindedEdge};
-use crate::graph::view::Direction;
 
-/// A natural loop over node identity `N`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NaturalLoop<N = BlockId> {
-    /// The loop header, the node the back-edges return to.
-    ///
-    /// Dominance-based detection gives a header that dominates the whole
-    /// body. A tagged loop on an irreducible graph need not have one.
-    pub header: N,
-    /// All nodes in the loop body (including the header).
-    pub body: BTreeSet<N>,
-    /// Back-edge tail nodes (nodes that jump back to the header).
-    pub latches: BTreeSet<N>,
-    /// Nesting depth (0 = outermost).
-    pub depth: usize,
-}
-
-/// A back-edge: tail → header where header dominates tail.
+/// A back edge: an edge from `tail` to `header` that closes a loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BackEdge<N = BlockId> {
-    /// The node at the tail of the back-edge (the source of the jump).
+    /// The node at the tail of the back edge (the source of the jump).
     pub tail: N,
-    /// The loop header node (the target of the back-edge).
+    /// The loop header node (the target of the back edge).
     pub header: N,
 }
 
-/// Find all back-edges in a graph view (edges whose target dominates
-/// their source).
+/// Find the back edges of `graph`, in ascending order of tail, then header.
 ///
-/// The result is deduplicated: parallel edges between the same pair
-/// appear once. Only code the root reaches has back-edges: a block
-/// dominates itself whether or not it runs, so unreachable code is skipped
-/// rather than reported as loops. For [`Cfg`]s whose builders also tag
-/// explicit [`EdgeKind::Back`] edges, [`find_back_edges_tagged`]
-/// additionally honors the tags.
+/// A back edge is an edge whose target dominates its source, or an edge
+/// tagged [`EdgeKind::Back`] whose ends lie on one cycle. The tags matter on
+/// irreducible machine CFGs, where a frontend knows an edge is a loop back
+/// edge even though dominance cannot prove it.
+///
+/// Parallel edges between the same pair appear once. Only code the root
+/// reaches has back edges: a block dominates itself whether or not it runs, so
+/// unreachable code is skipped rather than reported as loops, and so is a tag
+/// on an edge out of it. A tag on an edge that lies on no cycle is ignored
+/// too: a header that cannot reach the tail has no loop around it, whatever
+/// the edge is called.
 ///
 /// # Examples
 ///
 /// ```
-/// use cfglib::{Cfg, EdgeKind, DominatorTree, find_back_edges};
+/// use cfglib::{Cfg, DominatorTree, EdgeKind, find_back_edges};
 ///
 /// let mut cfg = Cfg::<u32>::new();
 /// let b0 = cfg.entry();
@@ -80,10 +66,11 @@ pub struct BackEdge<N = BlockId> {
 /// assert_eq!(backs[0].tail, b1);
 /// ```
 #[must_use]
-pub fn find_back_edges<G: GraphView>(
-    graph: &G,
-    dom: &DominatorTree<G::NodeId>,
-) -> Vec<BackEdge<G::NodeId>> {
+pub fn find_back_edges<G>(graph: &G, dom: &DominatorTree<G::NodeId>) -> Vec<BackEdge<G::NodeId>>
+where
+    G: EdgeView,
+    G::EdgeData: KindedEdge,
+{
     let mut backs = Vec::new();
     for node in graph.node_ids().filter(|&node| dom.is_reachable(node)) {
         for successor in graph.successors(node) {
@@ -95,31 +82,10 @@ pub fn find_back_edges<G: GraphView>(
             }
         }
     }
-    backs.sort();
+    backs.sort_unstable();
     backs.dedup();
-    backs
-}
 
-/// Find back-edges in an edge view, honoring explicit [`EdgeKind::Back`] tags.
-///
-/// The union of [`find_back_edges`]'s dominance-based detection and the
-/// builder's tags. The tags matter on irreducible machine CFGs where a
-/// frontend knows an edge is a loop back-edge even though dominance cannot
-/// prove it. A tag on an edge out of unreachable code is ignored, as
-/// dominance is, and so is a tag on an edge that lies on no cycle: a header
-/// that cannot reach the tail has no loop around it, whatever the edge is
-/// called.
-#[must_use]
-pub fn find_back_edges_tagged<G>(
-    graph: &G,
-    dom: &DominatorTree<G::NodeId>,
-) -> Vec<BackEdge<G::NodeId>>
-where
-    G: EdgeView,
-    G::EdgeData: KindedEdge,
-{
-    let dominance = find_back_edges(graph, dom);
-    let mut backs = dominance.clone();
+    let dominance = backs.len();
     let mut components = None;
     for edge in graph.edge_ids() {
         let edge = graph.edge(edge);
@@ -133,241 +99,47 @@ where
         // A dominance back edge closes a cycle by definition. A tag must be
         // on one too, which holds when both ends are in one strongly
         // connected component.
-        let on_a_cycle = dominance.binary_search(&tagged).is_ok() || {
-            let components = components.get_or_insert_with(|| tarjan_scc(graph));
+        let on_a_cycle = backs[..dominance].binary_search(&tagged).is_ok() || {
+            let components = components
+                .get_or_insert_with(|| SccDecomposition::compute(graph, SccNumbering::LeavesFirst));
             components.component_index(tagged.tail) == components.component_index(tagged.header)
         };
         if on_a_cycle {
             backs.push(tagged);
         }
     }
-    backs.sort();
-    backs.dedup();
+    if backs.len() > dominance {
+        backs.sort_unstable();
+        backs.dedup();
+    }
     backs
-}
-
-/// Detect all natural loops in a graph view.
-///
-/// Loops sharing the same header are merged into a single
-/// [`NaturalLoop`] with multiple latches.
-///
-/// **Dominance-based only.** Unlike the pre-substrate function of the same
-/// name, this does NOT honor explicit [`EdgeKind::Back`] tags — a tagged
-/// back-edge whose target does not dominate its source (an irreducible
-/// machine CFG) is invisible here. [`Cfg`] callers wanting tag recall use
-/// [`detect_loops_tagged`], as [`CfgMetrics::compute`](crate::CfgMetrics::compute) and
-/// [`cfg_block_nesting_depths`](crate::cfg_block_nesting_depths) do.
-///
-/// # Examples
-///
-/// ```
-/// use cfglib::{Cfg, EdgeKind, DominatorTree, detect_loops};
-///
-/// let mut cfg = Cfg::<u32>::new();
-/// let b0 = cfg.entry();
-/// let b1 = cfg.new_block();
-/// let b2 = cfg.new_block();
-/// cfg.add_edge(b0, b1, EdgeKind::Fallthrough);
-/// cfg.add_edge(b1, b0, EdgeKind::Back);
-/// cfg.add_edge(b0, b2, EdgeKind::ConditionalTrue);
-///
-/// let dom = DominatorTree::compute(&cfg);
-/// let loops = detect_loops(&cfg, &dom);
-/// assert_eq!(loops.len(), 1);
-/// assert_eq!(loops[0].header, b0);
-/// assert!(loops[0].body.contains(&b1));
-/// ```
-#[must_use]
-pub fn detect_loops<G: GraphView>(
-    graph: &G,
-    dom: &DominatorTree<G::NodeId>,
-) -> Vec<NaturalLoop<G::NodeId>> {
-    LoopForest::compute(graph, dom).natural_loops()
-}
-
-/// Detect natural loops in an edge view, honoring explicit
-/// [`EdgeKind::Back`] tags (see [`find_back_edges_tagged`]).
-#[must_use]
-pub fn detect_loops_tagged<G>(
-    graph: &G,
-    dom: &DominatorTree<G::NodeId>,
-) -> Vec<NaturalLoop<G::NodeId>>
-where
-    G: EdgeView,
-    G::EdgeData: KindedEdge,
-{
-    LoopForest::compute_tagged(graph, dom).natural_loops()
 }
 
 /// Whether the graph is reducible.
 ///
 /// A graph is **reducible** if and only if every cycle contains a node
 /// that dominates all other nodes in that cycle. Equivalently, every
-/// retreating edge in a DFS is a back-edge (target dominates source).
+/// retreating edge of a depth-first walk is a back edge (its target dominates
+/// its source).
 ///
-/// The DFS runs from the view's root; any [`DfsEvent::BackEdge`] whose
+/// The walk runs from the view's root; any [`DfsEvent::BackEdge`] whose
 /// target does not dominate its source witnesses an irreducible cycle.
+/// [`EdgeKind::Back`] tags play no part.
 #[must_use]
 pub fn is_reducible<G: RootedView>(graph: &G, dom: &DominatorTree<G::NodeId>) -> bool {
-    find_irreducible_entry(graph, dom).is_none()
-}
-
-/// Return the first irreducible entry witnessed by the reducibility DFS.
-///
-/// Keeping target discovery and the Boolean query on one traversal prevents
-/// transformations from choosing a different witness than [`is_reducible`]
-/// used to reject the graph.
-pub(crate) fn find_irreducible_entry<G: RootedView>(
-    graph: &G,
-    dom: &DominatorTree<G::NodeId>,
-) -> Option<G::NodeId> {
-    if graph.node_bound() == 0 {
-        return None;
-    }
-    depth_first_events(
-        graph,
-        graph.root(),
-        Direction::Forward,
-        |event| match event {
-            DfsEvent::BackEdge(tail, header) if !dom.dominates(header, tail) => {
-                ControlFlow::Break(header)
-            }
-            _ => ControlFlow::Continue(()),
-        },
-    )
-}
-
-/// Information about a canonicalized loop.
-#[derive(Debug, Clone)]
-pub struct CanonicalLoop {
-    /// The natural loop. Its body includes the preheaders
-    /// [`canonicalize_loops`] inserted for the loops nested in it.
-    pub natural_loop: NaturalLoop,
-    /// The loop's preheader: the one block outside the loop that enters the
-    /// header, whose only successor is the header.
-    ///
-    /// `None` when the header has no predecessor outside the loop, which is
-    /// the case for a loop headed by the entry block: the entry cannot gain
-    /// a predecessor, so no preheader can be put before it.
-    pub preheader: Option<BlockId>,
-    /// Exit blocks — blocks outside the loop that are targets of edges
-    /// from inside the loop.
-    pub exits: BTreeSet<BlockId>,
-}
-
-/// Insert a dedicated **preheader** block for a natural loop.
-///
-/// A preheader is a single-successor block that becomes the sole
-/// non-backedge predecessor of the loop header. This simplifies
-/// many loop transformations (LICM, unrolling, etc.).
-///
-/// The header's edges from outside the loop are redirected to the preheader
-/// in place: each keeps its identity, kind, weight and payload, and its
-/// position among its source's outgoing edges, so a branch keeps its arm
-/// order. The preheader reaches the header by a new fallthrough edge.
-///
-/// Returns the `BlockId` of the new preheader, or `None` if the header is
-/// already canonical: it has no predecessor outside the loop, or exactly one
-/// whose only successor is the header.
-pub fn insert_preheader<I, E: Default>(cfg: &mut Cfg<I, E>, lp: &NaturalLoop) -> Option<BlockId> {
-    // Collect non-backedge predecessors of the header.
-    let outside_preds: Vec<crate::edge::EdgeId> = cfg
-        .incoming(lp.header)
-        .filter(|&eid| {
-            let src = cfg.edge(eid).source();
-            !lp.body.contains(&src)
-        })
-        .collect();
-
-    match outside_preds.as_slice() {
-        [] => return None,
-        &[only] if cfg.outgoing(cfg.edge(only).source()).nth(1).is_none() => return None,
-        _ => {}
-    }
-
-    let preheader = cfg.new_block();
-    for eid in outside_preds {
-        cfg.redirect_edge_target(eid, preheader);
-    }
-
-    // Add fallthrough from preheader to the header.
-    cfg.add_edge(preheader, lp.header, crate::edge::EdgeKind::Fallthrough);
-
-    Some(preheader)
-}
-
-/// Identify exit nodes of a natural loop.
-///
-/// An exit node is any node **outside** the loop body that has a
-/// predecessor inside the loop body.
-#[must_use]
-pub fn loop_exit_blocks<G: GraphView>(
-    graph: &G,
-    lp: &NaturalLoop<G::NodeId>,
-) -> BTreeSet<G::NodeId> {
-    let mut exits = BTreeSet::new();
-    for &b in &lp.body {
-        for s in graph.successors(b) {
-            if !lp.body.contains(&s) {
-                exits.insert(s);
-            }
-        }
-    }
-    exits
-}
-
-/// Canonicalize all loops: insert preheaders and identify exits.
-///
-/// Uses [`detect_loops_tagged`], so explicit [`EdgeKind::Back`] tags are
-/// honored. Loops come outermost first, as detection orders them, each with
-/// the preheader [`insert_preheader`] puts before it. A preheader that sits on
-/// the paths through a loop nested in another is part of the outer loop's
-/// body, and exits are read once every preheader is in, so an edge that leaves
-/// one loop for the preheader of the next ends at the preheader.
-///
-/// `dom` is the dominator tree of `cfg` as it was passed in, and the inserted
-/// blocks are not in it: compute it again before relying on it.
-pub fn canonicalize_loops<I, E: Default>(
-    cfg: &mut Cfg<I, E>,
-    dom: &DominatorTree,
-) -> Vec<CanonicalLoop> {
-    let mut loops = detect_loops_tagged(cfg, dom);
-    let mut preheaders = Vec::with_capacity(loops.len());
-
-    for index in 0..loops.len() {
-        let header = loops[index].header;
-        let inserted = insert_preheader(cfg, &loops[index]);
-        if let Some(preheader) = inserted {
-            // The new block is reached from the sources of the redirected
-            // edges and reaches the header, so it lies on a cycle of every
-            // other loop that holds both the header and one of those sources.
-            let sources: Vec<BlockId> = cfg.predecessors(preheader).collect();
-            for (other_index, other) in loops.iter_mut().enumerate() {
-                if other_index != index
-                    && other.body.contains(&header)
-                    && sources.iter().any(|source| other.body.contains(source))
-                {
-                    other.body.insert(preheader);
+    graph.node_bound() == 0
+        || depth_first_events(
+            graph,
+            graph.root(),
+            Direction::Forward,
+            |event| match event {
+                DfsEvent::BackEdge(tail, header) if !dom.dominates(header, tail) => {
+                    ControlFlow::Break(())
                 }
-            }
-        }
-        // Without an insertion the header has no outside predecessor, or one
-        // that is already the preheader.
-        preheaders.push(inserted.or_else(|| {
-            cfg.predecessors(header)
-                .find(|block| !loops[index].body.contains(block))
-        }));
-    }
-
-    loops
-        .into_iter()
-        .zip(preheaders)
-        .map(|(natural_loop, preheader)| CanonicalLoop {
-            exits: loop_exit_blocks(cfg, &natural_loop),
-            natural_loop,
-            preheader,
-        })
-        .collect()
+                _ => ControlFlow::Continue(()),
+            },
+        )
+        .is_none()
 }
 
 #[cfg(test)]

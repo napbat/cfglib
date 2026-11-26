@@ -9,22 +9,28 @@ use super::{ReachIndex, ReachIndexConfig, ReachScratch};
 use crate::graph::store::{Graph, NodeId};
 use crate::test_util::rng::Rng;
 
+/// A configuration with these fields.
+const fn config(orders: usize, supportive: usize, exact: Option<usize>) -> ReachIndexConfig {
+    ReachIndexConfig {
+        orders,
+        supportive,
+        exact_max_chains: exact,
+    }
+}
+
 /// Both modes, with the order and supportive counts at zero, at one, past
 /// the four fixed alternatives, and at the limit of 64.
 const CONFIGS: [ReachIndexConfig; 10] = [
     ReachIndexConfig::new(),
-    ReachIndexConfig::new().with_orders(0).with_supportive(0),
-    ReachIndexConfig::new().with_orders(0).with_supportive(64),
-    ReachIndexConfig::new().with_orders(1).with_supportive(0),
-    ReachIndexConfig::new().with_orders(6).with_supportive(1),
-    ReachIndexConfig::new().with_orders(9).with_supportive(7),
-    ReachIndexConfig::new().with_exact_max_chains(usize::MAX),
-    ReachIndexConfig::new()
-        .with_orders(0)
-        .with_supportive(0)
-        .with_exact_max_chains(usize::MAX),
-    ReachIndexConfig::new().with_exact_max_chains(4),
-    ReachIndexConfig::new().with_exact_max_chains(0),
+    config(0, 0, None),
+    config(0, 64, None),
+    config(1, 0, None),
+    config(6, 1, None),
+    config(9, 7, None),
+    config(2, 32, Some(usize::MAX)),
+    config(0, 0, Some(usize::MAX)),
+    config(2, 32, Some(4)),
+    config(2, 32, Some(0)),
 ];
 
 /// Per node slot, whether a breadth-first walk from `source` reaches it.
@@ -241,7 +247,7 @@ fn all_pairs_match_breadth_first_search_on_small_graphs() {
     let mut rng = Rng::new(67);
     // One scratch for every graph and configuration, so it grows and shrinks
     // between indexes of different sizes.
-    let mut scratch = ReachScratch::new();
+    let mut scratch = ReachScratch::default();
     for _ in 0..48 {
         let graph = random_graph(&mut rng, 64);
         let live: Vec<NodeId> = graph.node_ids().collect();
@@ -254,7 +260,7 @@ fn all_pairs_match_breadth_first_search_on_small_graphs() {
             for (row, &source) in oracle.iter().zip(&live) {
                 for &target in &live {
                     assert_eq!(
-                        index.reaches(source, target, &mut scratch),
+                        index.reaches_in(&mut scratch, source, target),
                         row[target.index()],
                         "{source:?} -> {target:?} under {config:?} in {graph:?}"
                     );
@@ -268,7 +274,7 @@ fn all_pairs_match_breadth_first_search_on_small_graphs() {
 fn random_pairs_match_breadth_first_search_on_large_graphs() {
     const NODES: usize = 10_000;
     let mut rng = Rng::new(10_000);
-    let mut scratch = ReachScratch::new();
+    let mut scratch = ReachScratch::default();
     let mut wide = uniform(&mut rng, NODES, NODES);
     remove_some(&mut rng, &mut wide, 5);
     let mut biased = forward_biased(&mut rng, NODES, 2 * NODES);
@@ -280,9 +286,9 @@ fn random_pairs_match_breadth_first_search_on_large_graphs() {
     let graphs = [wide, biased, narrow];
     let configs = [
         ReachIndexConfig::new(),
-        ReachIndexConfig::new().with_orders(0).with_supportive(0),
-        ReachIndexConfig::new().with_orders(4).with_supportive(64),
-        ReachIndexConfig::new().with_exact_max_chains(1_024),
+        config(0, 0, None),
+        config(4, 64, None),
+        config(2, 32, Some(1_024)),
     ];
     for (kind, graph) in graphs.iter().enumerate() {
         let pairs = random_pairs(&mut rng, graph, 10_000);
@@ -301,7 +307,7 @@ fn random_pairs_match_breadth_first_search_on_large_graphs() {
             for ((source, targets), reached) in pairs.iter().zip(&oracle) {
                 for &target in targets {
                     assert_eq!(
-                        index.reaches(*source, target, &mut scratch),
+                        index.reaches_in(&mut scratch, *source, target),
                         reached[target.index()],
                         "{source:?} -> {target:?} under {config:?} in graph {kind}"
                     );
@@ -312,9 +318,9 @@ fn random_pairs_match_breadth_first_search_on_large_graphs() {
 }
 
 #[test]
-fn two_computations_compare_equal_and_answer_alike() {
+fn two_computations_compare_equal_and_answer_alike_with_or_without_a_scratch() {
     let mut rng = Rng::new(2);
-    let mut scratch = ReachScratch::new();
+    let mut scratch = ReachScratch::default();
     for _ in 0..12 {
         let graph = random_graph(&mut rng, 200);
         for config in CONFIGS {
@@ -324,8 +330,8 @@ fn two_computations_compare_equal_and_answer_alike() {
             for (source, targets) in random_pairs(&mut rng, &graph, 400) {
                 for target in targets {
                     assert_eq!(
-                        first.reaches(source, target, &mut scratch),
-                        second.reaches(source, target, &mut scratch)
+                        first.reaches_in(&mut scratch, source, target),
+                        second.reaches(source, target)
                     );
                 }
             }
@@ -344,16 +350,16 @@ fn every_node_reaches_itself_and_a_cycle_reaches_around() {
         graph.add_edge(node, ring[(index + 1) % ring.len()], ());
     }
     graph.add_edge(looped, ring[0], ());
-    let mut scratch = ReachScratch::new();
+    let mut scratch = ReachScratch::default();
     for config in CONFIGS {
         let index = ReachIndex::compute(&graph, config);
-        assert!(index.reaches(looped, looped, &mut scratch));
-        assert!(index.reaches(alone, alone, &mut scratch));
-        assert!(index.reaches(ring[2], ring[1], &mut scratch));
-        assert!(index.reaches(looped, ring[2], &mut scratch));
-        assert!(!index.reaches(ring[0], looped, &mut scratch));
-        assert!(!index.reaches(alone, looped, &mut scratch));
-        assert!(!index.reaches(looped, alone, &mut scratch));
+        assert!(index.reaches_in(&mut scratch, looped, looped));
+        assert!(index.reaches_in(&mut scratch, alone, alone));
+        assert!(index.reaches_in(&mut scratch, ring[2], ring[1]));
+        assert!(index.reaches(looped, ring[2]));
+        assert!(!index.reaches(ring[0], looped));
+        assert!(!index.reaches_in(&mut scratch, alone, looped));
+        assert!(!index.reaches_in(&mut scratch, looped, alone));
     }
 }
 
@@ -362,7 +368,7 @@ fn the_empty_graph_has_an_empty_index() {
     let graph = Graph::<(), ()>::new();
     let observed = ReachIndex::compute(&graph, ReachIndexConfig::new());
     assert_eq!(observed.chain_count(), None);
-    let exact = ReachIndex::compute(&graph, ReachIndexConfig::new().with_exact_max_chains(0));
+    let exact = ReachIndex::compute(&graph, config(2, 32, Some(0)));
     assert_eq!(exact.chain_count(), Some(0));
 }
 
@@ -380,9 +386,9 @@ fn a_diamond_chain_is_covered_by_two_chains() {
         graph.add_edge(right, join, ());
         spine = join;
     }
-    let exact = ReachIndexConfig::new().with_exact_max_chains(2);
+    let exact = config(2, 32, Some(2));
     assert_eq!(ReachIndex::compute(&graph, exact).chain_count(), Some(2));
-    let too_few = ReachIndexConfig::new().with_exact_max_chains(1);
+    let too_few = config(2, 32, Some(1));
     assert_eq!(ReachIndex::compute(&graph, too_few).chain_count(), None);
 }
 
@@ -396,20 +402,12 @@ fn the_exact_mode_is_off_unless_requested() {
 }
 
 #[test]
-fn the_configuration_defaults_and_setters() {
+fn the_default_configuration_keeps_two_orders_and_32_supportive_components() {
     let config = ReachIndexConfig::default();
     assert_eq!(config, ReachIndexConfig::new());
     assert_eq!(
         (config.orders, config.supportive, config.exact_max_chains),
         (2, 32, None)
-    );
-    let config = config
-        .with_orders(5)
-        .with_supportive(64)
-        .with_exact_max_chains(9);
-    assert_eq!(
-        (config.orders, config.supportive, config.exact_max_chains),
-        (5, 64, Some(9))
     );
 }
 
@@ -421,7 +419,7 @@ fn a_removed_source_panics() {
     let removed = graph.add_node(());
     graph.remove_node(removed);
     let index = ReachIndex::compute(&graph, ReachIndexConfig::new());
-    let _ = index.reaches(removed, kept, &mut ReachScratch::new());
+    let _ = index.reaches(removed, kept);
 }
 
 #[test]
@@ -431,8 +429,8 @@ fn a_removed_target_panics_in_exact_mode() {
     let kept = graph.add_node(());
     let removed = graph.add_node(());
     graph.remove_node(removed);
-    let index = ReachIndex::compute(&graph, ReachIndexConfig::new().with_exact_max_chains(8));
-    let _ = index.reaches(kept, removed, &mut ReachScratch::new());
+    let index = ReachIndex::compute(&graph, config(2, 32, Some(8)));
+    let _ = index.reaches_in(&mut ReachScratch::default(), kept, removed);
 }
 
 #[test]
@@ -441,14 +439,14 @@ fn a_node_beyond_the_bound_panics() {
     let mut graph = Graph::<(), ()>::new();
     let node = graph.add_node(());
     let index = ReachIndex::compute(&graph, ReachIndexConfig::new());
-    let _ = index.reaches(node, NodeId::from_index(1), &mut ReachScratch::new());
+    let _ = index.reaches(node, NodeId::from_index(1));
 }
 
 #[test]
 #[should_panic(expected = "at most 64 supportive components")]
 fn more_than_64_supportive_components_panic() {
     let graph = branchy(8);
-    let _ = ReachIndex::compute(&graph, ReachIndexConfig::new().with_supportive(65));
+    let _ = ReachIndex::compute(&graph, config(2, 65, None));
 }
 
 /// Prints, per fixture, the share of queries answered without the fallback
@@ -475,13 +473,13 @@ fn report_how_many_queries_skip_the_search() {
             .collect();
         for config in [
             ReachIndexConfig::new(),
-            ReachIndexConfig::new().with_orders(0).with_supportive(0),
-            ReachIndexConfig::new().with_orders(4).with_supportive(64),
+            config(0, 0, None),
+            config(4, 64, None),
         ] {
             let index = ReachIndex::compute(graph, config);
-            let mut scratch = ReachScratch::new();
+            let mut scratch = ReachScratch::default();
             for &(source, target) in &pairs {
-                let _ = index.reaches(source, target, &mut scratch);
+                let _ = index.reaches_in(&mut scratch, source, target);
             }
             let coverage = scratch.coverage;
             println!(
@@ -494,8 +492,7 @@ fn report_how_many_queries_skip_the_search() {
                     / crate::usize_to_f64(coverage.queries),
             );
         }
-        let exact =
-            ReachIndex::compute(graph, ReachIndexConfig::new().with_exact_max_chains(1_024));
+        let exact = ReachIndex::compute(graph, config(2, 32, Some(1_024)));
         println!("{name}: exact mode chain count {:?}", exact.chain_count());
     }
 }

@@ -1,9 +1,9 @@
 //! Minimum source-to-sink edge and vertex cuts, and edge-disjoint paths
 //! (Menger), over any view, with unit capacities.
 //!
-//! [`min_edge_cut`] finds the fewest edges whose removal leaves no path from
-//! any source to any sink. [`min_vertex_cut`] finds the fewest nodes, other
-//! than the sources and sinks, whose removal does the same.
+//! [`EdgeCut::compute`] finds the fewest edges whose removal leaves no path
+//! from any source to any sink. [`VertexCut::compute`] finds the fewest nodes,
+//! other than the sources and sinks, whose removal does the same.
 //! [`edge_disjoint_paths`] finds as many paths from a source to a sink that
 //! share no edge as a minimum edge cut has edges, which is Menger's theorem.
 //! Several sources and sinks join a virtual super-source and super-sink.
@@ -41,6 +41,8 @@ use alloc::vec::Vec;
 use super::edge_view::EdgeView;
 use super::network_flow::{ArcId, FlowNetwork};
 use super::view::{DenseId, GraphView, assert_in_bound};
+use crate::block::BlockId;
+use crate::edge::EdgeId;
 use crate::identity::{NO_INDEX, check_bound, slot, word};
 
 /// The capacity of an arc that no cut takes.
@@ -48,7 +50,7 @@ const UNBOUNDED: i64 = i64::MAX;
 
 /// A minimum edge cut between sources and sinks.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EdgeCut<E> {
+pub struct EdgeCut<E = EdgeId> {
     /// The number of edges in a minimum cut, or `limit + 1` when every cut has
     /// more than `limit` edges.
     pub value: usize,
@@ -63,7 +65,7 @@ pub struct EdgeCut<E> {
 
 /// A minimum vertex cut between sources and sinks.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VertexCut<N> {
+pub struct VertexCut<N = BlockId> {
     /// The number of nodes in a minimum cut, or `limit + 1` when every cut has
     /// more than `limit` nodes.
     pub value: usize,
@@ -77,131 +79,137 @@ pub struct VertexCut<N> {
     pub source_side: Vec<bool>,
 }
 
-/// Find a minimum set of edges whose removal leaves no path from any of
-/// `sources` to any of `sinks`.
-///
-/// `None` when a source is also a sink, because no set of edges separates
-/// them. See the [module documentation](self) for the cost, the `limit`, and
-/// which minimum cut is returned.
-///
-/// # Panics
-///
-/// Panics when a source or a sink is not below the node bound of the view.
-///
-/// # Examples
-///
-/// ```
-/// use cfglib::{Cfg, EdgeKind, min_edge_cut, min_vertex_cut};
-///
-/// // entry -> a, b; a -> join; b -> join; join -> exit.
-/// let mut cfg = Cfg::<u32>::new();
-/// let [a, b, join, exit] = [(); 4].map(|()| cfg.new_block());
-/// cfg.add_edge(cfg.entry(), a, EdgeKind::ConditionalTrue);
-/// cfg.add_edge(cfg.entry(), b, EdgeKind::ConditionalFalse);
-/// cfg.add_edge(a, join, EdgeKind::Fallthrough);
-/// cfg.add_edge(b, join, EdgeKind::Fallthrough);
-/// let last = cfg.add_edge(join, exit, EdgeKind::Fallthrough);
-///
-/// let cut = min_edge_cut(&cfg, [cfg.entry()], [exit], None).expect("entry is not exit");
-/// assert_eq!((cut.value, cut.edges), (1, vec![last]));
-///
-/// let cut = min_vertex_cut(&cfg, [cfg.entry()], [exit], None).expect("not adjacent");
-/// assert_eq!(cut.vertices, [join]);
-///
-/// // Two edges separate the entry from the join: is there a cut of one?
-/// let cut = min_edge_cut(&cfg, [cfg.entry()], [join], Some(1)).expect("entry is not join");
-/// assert_eq!(cut.value, 2, "more than the limit of one");
-/// ```
-pub fn min_edge_cut<G: EdgeView>(
-    graph: &G,
-    sources: impl IntoIterator<Item = G::NodeId>,
-    sinks: impl IntoIterator<Item = G::NodeId>,
-    limit: Option<usize>,
-) -> Option<EdgeCut<G::EdgeId>> {
-    let flow = EdgeFlow::compute(graph, sources, sinks, limit)?;
-    if limit.is_some_and(|limit| flow.value > limit) {
-        return Some(EdgeCut {
+impl<E: Copy> EdgeCut<E> {
+    /// Find a minimum set of edges whose removal leaves no path from any of
+    /// `sources` to any of `sinks`.
+    ///
+    /// `None` when a source is also a sink, because no set of edges separates
+    /// them. See the [module documentation](self) for the cost, the `limit`,
+    /// and which minimum cut is returned.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a source or a sink is not below the node bound of the view.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cfglib::{Cfg, EdgeCut, EdgeKind, VertexCut};
+    ///
+    /// // entry -> a, b; a -> join; b -> join; join -> exit.
+    /// let mut cfg = Cfg::<u32>::new();
+    /// let [a, b, join, exit] = [(); 4].map(|()| cfg.new_block());
+    /// cfg.add_edge(cfg.entry(), a, EdgeKind::ConditionalTrue);
+    /// cfg.add_edge(cfg.entry(), b, EdgeKind::ConditionalFalse);
+    /// cfg.add_edge(a, join, EdgeKind::Fallthrough);
+    /// cfg.add_edge(b, join, EdgeKind::Fallthrough);
+    /// let last = cfg.add_edge(join, exit, EdgeKind::Fallthrough);
+    ///
+    /// let cut = EdgeCut::compute(&cfg, [cfg.entry()], [exit], None).expect("entry is not exit");
+    /// assert_eq!((cut.value, cut.edges), (1, vec![last]));
+    ///
+    /// let cut = VertexCut::compute(&cfg, [cfg.entry()], [exit], None).expect("not adjacent");
+    /// assert_eq!(cut.vertices, [join]);
+    ///
+    /// // Two edges separate the entry from the join: is there a cut of one?
+    /// let cut = EdgeCut::compute(&cfg, [cfg.entry()], [join], Some(1)).expect("entry is not join");
+    /// assert_eq!(cut.value, 2, "more than the limit of one");
+    /// ```
+    pub fn compute<G: EdgeView<EdgeId = E>>(
+        graph: &G,
+        sources: impl IntoIterator<Item = G::NodeId>,
+        sinks: impl IntoIterator<Item = G::NodeId>,
+        limit: Option<usize>,
+    ) -> Option<Self> {
+        let terminals = Terminals::new(graph, sources, sinks)?;
+        let flow = EdgeFlow::build(graph, &terminals, limit);
+        if limit.is_some_and(|limit| flow.value > limit) {
+            return Some(Self {
+                value: flow.value,
+                edges: Vec::new(),
+                source_side: Vec::new(),
+            });
+        }
+        let mut side = flow.network.residual_reachable(flow.source);
+        let edges = flow
+            .edges
+            .iter()
+            .filter(|&&(_, tail, head)| side[tail] && !side[head])
+            .map(|&(edge, ..)| edge)
+            .collect();
+        side.truncate(graph.node_bound());
+        Some(Self {
             value: flow.value,
-            edges: Vec::new(),
-            source_side: Vec::new(),
-        });
+            edges,
+            source_side: side,
+        })
     }
-    let mut side = flow.network.residual_reachable(flow.source);
-    let edges = flow
-        .edges
-        .iter()
-        .filter(|&&(_, tail, head)| side[tail] && !side[head])
-        .map(|&(edge, ..)| edge)
-        .collect();
-    side.truncate(graph.node_bound());
-    Some(EdgeCut {
-        value: flow.value,
-        edges,
-        source_side: side,
-    })
 }
 
-/// Find a minimum set of nodes, other than `sources` and `sinks`, whose
-/// removal leaves no path from any source to any sink.
-///
-/// `None` when a source is also a sink or has an edge to a sink, because no
-/// set of other nodes separates them. See the [module documentation](self) for
-/// the cost, the `limit`, and which minimum cut is returned.
-///
-/// # Panics
-///
-/// Panics when a source or a sink is not below the node bound of the view.
-pub fn min_vertex_cut<G: GraphView>(
-    graph: &G,
-    sources: impl IntoIterator<Item = G::NodeId>,
-    sinks: impl IntoIterator<Item = G::NodeId>,
-    limit: Option<usize>,
-) -> Option<VertexCut<G::NodeId>> {
-    let terminals = Terminals::new(graph, sources, sinks)?;
-    let adjacent = terminals
-        .sources
-        .iter()
-        .any(|&source| graph.successors(source).any(|next| terminals.is_sink(next)));
-    if adjacent {
-        return None;
-    }
-    // Node `v` is `in` at `2v` and `out` at `2v + 1`.
-    let bound = graph.node_bound();
-    let (mut network, source, sink) = network_with_terminals(2 * bound);
-    for node in graph.node_ids() {
-        if !terminals.is_source(node) && !terminals.is_sink(node) {
-            network.add_arc(2 * node.index(), 2 * node.index() + 1, 1, 0);
+impl<N: DenseId> VertexCut<N> {
+    /// Find a minimum set of nodes, other than `sources` and `sinks`, whose
+    /// removal leaves no path from any source to any sink.
+    ///
+    /// `None` when a source is also a sink or has an edge to a sink, because
+    /// no set of other nodes separates them. See the [module
+    /// documentation](self) for the cost, the `limit`, and which minimum cut
+    /// is returned.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a source or a sink is not below the node bound of the view.
+    pub fn compute<G: GraphView<NodeId = N>>(
+        graph: &G,
+        sources: impl IntoIterator<Item = N>,
+        sinks: impl IntoIterator<Item = N>,
+        limit: Option<usize>,
+    ) -> Option<Self> {
+        let terminals = Terminals::new(graph, sources, sinks)?;
+        let adjacent = terminals
+            .sources
+            .iter()
+            .any(|&source| graph.successors(source).any(|next| terminals.is_sink(next)));
+        if adjacent {
+            return None;
         }
-    }
-    for &node in &terminals.sources {
-        network.add_arc(source, 2 * node.index() + 1, UNBOUNDED, 0);
-    }
-    for &node in &terminals.sinks {
-        network.add_arc(2 * node.index(), sink, UNBOUNDED, 0);
-    }
-    for node in graph.node_ids() {
-        for next in graph.successors(node) {
-            network.add_arc(2 * node.index() + 1, 2 * next.index(), UNBOUNDED, 0);
+        // Node `v` is `in` at `2v` and `out` at `2v + 1`.
+        let bound = graph.node_bound();
+        let (mut network, source, sink) = network_with_terminals(2 * bound);
+        for node in graph.node_ids() {
+            if !terminals.is_source(node) && !terminals.is_sink(node) {
+                network.add_arc(2 * node.index(), 2 * node.index() + 1, 1, 0);
+            }
         }
-    }
-    let value = unit_count(network.max_flow_up_to(source, sink, flow_limit(limit)));
-    if limit.is_some_and(|limit| value > limit) {
-        return Some(VertexCut {
+        for &node in &terminals.sources {
+            network.add_arc(source, 2 * node.index() + 1, UNBOUNDED, 0);
+        }
+        for &node in &terminals.sinks {
+            network.add_arc(2 * node.index(), sink, UNBOUNDED, 0);
+        }
+        for node in graph.node_ids() {
+            for next in graph.successors(node) {
+                network.add_arc(2 * node.index() + 1, 2 * next.index(), UNBOUNDED, 0);
+            }
+        }
+        let value = unit_count(network.max_flow_up_to(source, sink, flow_limit(limit)));
+        if limit.is_some_and(|limit| value > limit) {
+            return Some(Self {
+                value,
+                vertices: Vec::new(),
+                source_side: Vec::new(),
+            });
+        }
+        let side = network.residual_reachable(source);
+        let vertices = graph
+            .node_ids()
+            .filter(|node| side[2 * node.index()] && !side[2 * node.index() + 1])
+            .collect();
+        Some(Self {
             value,
-            vertices: Vec::new(),
-            source_side: Vec::new(),
-        });
+            vertices,
+            source_side: (0..bound).map(|slot| side[2 * slot + 1]).collect(),
+        })
     }
-    let side = network.residual_reachable(source);
-    let vertices = graph
-        .node_ids()
-        .filter(|node| side[2 * node.index()] && !side[2 * node.index() + 1])
-        .collect();
-    Some(VertexCut {
-        value,
-        vertices,
-        source_side: (0..bound).map(|slot| side[2 * slot + 1]).collect(),
-    })
 }
 
 /// Find as many paths from a source to a sink that share no edge as a
@@ -209,7 +217,7 @@ pub fn min_vertex_cut<G: GraphView>(
 ///
 /// A path starts at a source and ends at a sink, visits no node twice, and
 /// passes no other sink. `None` when a source is also a sink. The number of
-/// paths is the [`value`](EdgeCut::value) of [`min_edge_cut`] with the same
+/// paths is the [`value`](EdgeCut::value) of [`EdgeCut::compute`] with the same
 /// inputs, so with `limit: Some(k)` it is at most `k + 1`.
 ///
 /// # Panics
@@ -334,16 +342,6 @@ struct EdgeFlow<E> {
 }
 
 impl<E: Copy> EdgeFlow<E> {
-    fn compute<G: EdgeView<EdgeId = E>>(
-        graph: &G,
-        sources: impl IntoIterator<Item = G::NodeId>,
-        sinks: impl IntoIterator<Item = G::NodeId>,
-        limit: Option<usize>,
-    ) -> Option<Self> {
-        let terminals = Terminals::new(graph, sources, sinks)?;
-        Some(Self::build(graph, &terminals, limit))
-    }
-
     fn build<G: EdgeView<EdgeId = E>>(
         graph: &G,
         terminals: &Terminals<G::NodeId>,

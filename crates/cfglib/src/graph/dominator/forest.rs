@@ -19,9 +19,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use super::{DominatorScratch, DominatorTree};
-use crate::graph::scc::kosaraju_scc;
-use crate::graph::view::VirtualRoot;
-use crate::graph::view::{DenseId, RootedView};
+use crate::graph::scc::{SccDecomposition, SccNumbering};
+use crate::graph::view::{DenseId, GraphView, RootedView, VirtualRoot};
+use crate::identity::check_bound;
 
 #[cfg(test)]
 mod tests;
@@ -76,7 +76,7 @@ impl<N: DenseId> DominatorTree<N> {
     /// cfg.add_edge(dead, fed, EdgeKind::Fallthrough);
     ///
     /// let tree = DominatorTree::compute(&cfg);
-    /// let mut scratch = DominatorScratch::new();
+    /// let mut scratch = DominatorScratch::default();
     /// let mut roots = Vec::new();
     /// let forest = tree
     ///     .complete_forest_in(&mut scratch, &mut roots, &cfg)
@@ -103,7 +103,7 @@ impl<N: DenseId> DominatorTree<N> {
             return None;
         }
 
-        let components = kosaraju_scc(graph);
+        let components = SccDecomposition::compute(graph, SccNumbering::SourcesFirst);
         roots.clear();
         roots.push(graph.root());
         for (component_index, component) in components.components().enumerate() {
@@ -126,19 +126,16 @@ impl<N: DenseId> DominatorTree<N> {
         roots.dedup();
 
         let view = VirtualRoot::new(graph, roots);
-        let complete = DominatorTree::<usize>::compute_in(scratch, &view);
-        let original_bound = graph.node_bound();
-        let idom: Vec<Option<N>> = (0..original_bound)
-            .map(|node| {
-                complete
-                    .idom(node)
-                    .filter(|&parent| parent < original_bound)
-                    .map(N::from_index)
-            })
-            .collect();
-        let reachable: Vec<bool> = (0..original_bound)
-            .map(|node| complete.is_reachable(node))
-            .collect();
-        Some(Self::from_forest_parts(&idom, &reachable))
+        check_bound(view.node_bound(), "node bound of a dominator forest");
+        let parent = scratch
+            .construction
+            .immediate_dominators(&view, view.virtual_root(), false);
+        // The virtual root is reached and is not a node of the graph.
+        let reached = scratch.construction.reached() - 1;
+        Some(Self::from_virtual_root(
+            &mut scratch.numbering,
+            parent,
+            reached,
+        ))
     }
 }

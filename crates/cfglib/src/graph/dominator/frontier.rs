@@ -1,4 +1,5 @@
-//! Dominance frontiers, answered per query.
+//! Dominance frontiers, answered per query, and the iterated-frontier search
+//! every frontier query shares.
 //!
 //! The frontier of a node `x` is every node `y` where `x` dominates a
 //! predecessor of `y` but does not strictly dominate `y`: the first nodes
@@ -16,7 +17,12 @@
 //! first, a successor accepted only when its level is no deeper than the
 //! root's, and an optional live-in test that prunes the result. Roots wait in
 //! buckets by level rather than in a heap, so a query costs O(n + m) for n
-//! nodes and m edges, plus the sort that puts the answer in preorder.
+//! nodes and m edges, plus the sort that puts the answer in ascending order.
+//!
+//! The worklist of that search, [`FrontierBuffers`], is also the one
+//! [`DominanceFrontiers::iterated_frontier`](super::DominanceFrontiers::iterated_frontier)
+//! runs over its table: a candidate is judged once per query, added when the
+//! live-in test takes it, and then queued once as a root of its own.
 //!
 //! # Direction
 //!
@@ -38,92 +44,35 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use super::DominatorTree;
-use crate::graph::epoch::EpochMarks;
+use super::{DominatorScratch, DominatorTree};
+use crate::graph::epoch::{EpochMarks, grow_to};
 use crate::graph::view::{DenseId, GraphView};
 use crate::identity::{NO_INDEX, slot, word};
 
-/// Every buffer [`DominatorTree::iterated_frontier`] and
-/// [`DominanceFrontiers::iterated_frontier`](super::DominanceFrontiers::iterated_frontier)
-/// fill, owned by the caller.
+/// The worklist of an iterated-frontier query, kept in a
+/// [`DominatorScratch`]: the marks of the nodes queued and judged, and the
+/// roots waiting by level.
 ///
-/// A pass that places phi functions asks for one iterated frontier per
-/// variable, and most variables are written in a handful of blocks. At that
-/// size the search is not the cost, the *call* is: two visit flags the size of
-/// the graph and the buckets of waiting roots, each a malloc and a free for an
-/// answer of two nodes. This moves all of them out of the call, and the
-/// per-query clearing of the flags is a bump of an epoch rather than a pass over
-/// the graph.
-///
-/// Hand one scratch to every iterated-frontier query of the pass, of either
-/// kind. The buffers grow to the largest graph the pass meets and are then
-/// reused by every graph after it, so a query allocates nothing once the
-/// scratch has seen a graph that size.
-///
-/// # One scratch, any graph
-///
-/// Nodes are held as dense indices rather than as a node-id type, so the
-/// scratch carries no type parameter: one instance serves a [`Cfg`](crate::Cfg),
-/// a [`Graph`](crate::Graph), and a consumer-defined [`GraphView`], in any
-/// order, and it is [`Send`], so a worker thread can own one for the whole
-/// corpus it is handed.
-///
-/// # Sizing
-///
-/// Nothing is fixed at construction and nothing is released by a call. Every
-/// buffer is cleared and grown on entry, so a scratch used on a large graph
-/// and then on a small one is correct and allocation-free, and the space it
-/// holds is the high-water mark of the sequence.
-///
-/// # Examples
-///
-/// ```
-/// use cfglib::{Cfg, DominatorTree, EdgeKind, FrontierScratch};
-///
-/// let mut cfg = Cfg::<u32>::new();
-/// let entry = cfg.entry();
-/// let then_block = cfg.new_block();
-/// let merge = cfg.new_block();
-/// cfg.add_edge(entry, then_block, EdgeKind::ConditionalTrue);
-/// cfg.add_edge(entry, merge, EdgeKind::ConditionalFalse);
-/// cfg.add_edge(then_block, merge, EdgeKind::Fallthrough);
-/// let dominators = DominatorTree::compute(&cfg);
-///
-/// let mut scratch = FrontierScratch::new();
-/// let mut fresh = Vec::new();
-/// let mut reused = Vec::new();
-/// dominators.iterated_frontier(&cfg, &mut FrontierScratch::new(), [then_block], None, &mut fresh);
-/// dominators.iterated_frontier(&cfg, &mut scratch, [then_block], None, &mut reused);
-/// dominators.iterated_frontier(&cfg, &mut scratch, [then_block], None, &mut reused);
-/// assert_eq!(reused, fresh);
-/// assert_eq!(reused, [merge]);
-/// ```
+/// The marks are epochs, so the per-query clearing is a bump rather than a
+/// pass over the graph, and a query allocates nothing once the buffers have
+/// grown to the graph.
 #[derive(Debug, Clone, Default)]
-pub struct FrontierScratch {
+pub(super) struct FrontierBuffers {
     /// Nodes that are, or have been, a root of the search: the definitions,
     /// and every node added to the answer. A queued node is walked once.
-    pub(super) queued: EpochMarks,
+    queued: EpochMarks,
     /// Nodes already judged as candidates for the answer, whether the live-in
     /// test took them or not, so a node is judged once per query.
-    pub(super) judged: EpochMarks,
+    judged: EpochMarks,
     /// The first root waiting at each level, [`NO_INDEX`] when none waits.
     bucket_head: Vec<u32>,
     /// The root after each queued node in its level's bucket.
     bucket_next: Vec<u32>,
-    /// The queued nodes that a walk over a frontier table has yet to visit.
-    pub(super) pending: Vec<u32>,
+    /// The deepest level that may still hold a waiting root.
+    deepest: usize,
 }
 
-impl FrontierScratch {
-    /// Scratch holding nothing yet.
-    ///
-    /// Every buffer is sized by the first graph it sees, so there is no node
-    /// count to state here.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
+impl FrontierBuffers {
     /// Empty every buffer and grow the node-indexed ones to `node_bound`.
     ///
     /// This is a correctness step, not only hygiene: nothing a previous query
@@ -133,16 +82,14 @@ impl FrontierScratch {
             marks.grow_to(node_bound);
             marks.reset();
         }
-        if self.bucket_next.len() < node_bound {
-            self.bucket_next.resize(node_bound, NO_INDEX);
-        }
+        grow_to(&mut self.bucket_next, node_bound, NO_INDEX);
         self.bucket_head.clear();
-        self.pending.clear();
+        self.deepest = 0;
     }
 
     /// Queue `node`, of tree level `level`, as a root to walk, unless it has
     /// been queued already.
-    fn enqueue(&mut self, node: usize, level: usize) {
+    pub(super) fn enqueue(&mut self, node: usize, level: usize) {
         if self.queued.is_marked(node) {
             return;
         }
@@ -152,17 +99,48 @@ impl FrontierScratch {
         }
         self.bucket_next[node] = self.bucket_head[level];
         self.bucket_head[level] = word(node);
+        self.deepest = self.deepest.max(level);
     }
 
-    /// Take a root off the bucket of `level`, if one waits there.
-    fn dequeue(&mut self, level: usize) -> Option<usize> {
-        let head = self.bucket_head[level];
-        if head == NO_INDEX {
-            return None;
+    /// Take the next root to walk: one of the deepest level that holds one.
+    pub(super) fn next_root(&mut self) -> Option<usize> {
+        loop {
+            let head = *self.bucket_head.get(self.deepest)?;
+            if head != NO_INDEX {
+                let node = slot(head);
+                self.bucket_head[self.deepest] = self.bucket_next[node];
+                return Some(node);
+            }
+            self.deepest = self.deepest.checked_sub(1)?;
         }
-        let node = slot(head);
-        self.bucket_head[level] = self.bucket_next[node];
-        Some(node)
+    }
+
+    /// Judge `member`, of tree level `level`, as a member of the answer:
+    /// once per query, it is added to `out` and queued as a root when
+    /// `live_in` accepts it or there is no `live_in`.
+    #[inline]
+    pub(super) fn offer<N: DenseId>(
+        &mut self,
+        member: N,
+        level: usize,
+        live_in: Option<&dyn Fn(N) -> bool>,
+        out: &mut Vec<N>,
+    ) {
+        let index = member.index();
+        if self.judged.is_marked(index) {
+            return;
+        }
+        self.judged.mark(index);
+        if live_in.is_some_and(|accepts| !accepts(member)) {
+            return;
+        }
+        out.push(member);
+        self.enqueue(index, level);
+    }
+
+    /// Whether `node` is or has been a root of this query.
+    fn is_queued(&self, node: usize) -> bool {
+        self.queued.is_marked(node)
     }
 }
 
@@ -177,7 +155,9 @@ impl<N: DenseId> DominatorTree<N> {
     /// entry that heads a loop. A node in no tree is never a member, and an
     /// unreachable `node` has an empty frontier.
     ///
-    /// `out` is cleared first and receives each member once, in preorder.
+    /// `out` is cleared first and receives each member once, in ascending
+    /// dense index, the order [`DominanceFrontiers::frontier`](super::DominanceFrontiers::frontier)
+    /// gives.
     ///
     /// `graph` must be the view the tree was computed over, because the walk
     /// follows its [`successors`](GraphView::successors). A tree computed over
@@ -231,7 +211,7 @@ impl<N: DenseId> DominatorTree<N> {
                 }
             }
         }
-        out.sort_unstable_by_key(|member| self.pre[member.index()]);
+        out.sort_unstable_by_key(|member| member.index());
         out.dedup();
     }
 
@@ -249,21 +229,23 @@ impl<N: DenseId> DominatorTree<N> {
     /// one, every node of the plain iterated frontier is returned. Each node
     /// is offered to `live_in` at most once per call.
     ///
-    /// `out` is cleared first and receives each member once, in preorder.
+    /// `out` is cleared first and receives each member once, in ascending
+    /// dense index.
     ///
     /// `graph` must be the view the tree was computed over, because the search
     /// follows its [`successors`](GraphView::successors); see
     /// [`frontier`](Self::frontier). A tree computed over
     /// [`Reversed`](crate::Reversed) takes that reversed view.
     ///
-    /// The search takes the roots deepest level first from buckets in
-    /// `scratch`, and walks the dominator subtree of each, skipping the
-    /// subtrees an earlier root already walked. It follows an edge only when
-    /// the level of its target is no deeper than the level of the root being
-    /// walked, which is exactly when the target is in the frontier of that
-    /// root. Every node and edge is visited at most once, so the cost is
-    /// O(n + m) plus the sort of the answer, and a call allocates nothing once
-    /// `scratch` and `out` have grown to the size the graph needs.
+    /// The search takes the roots deepest level first from buckets, and walks
+    /// the dominator subtree of each, skipping the subtrees an earlier root
+    /// already walked. It follows an edge only when the level of its target
+    /// is no deeper than the level of the root being walked, which is exactly
+    /// when the target is in the frontier of that root. Every node and edge
+    /// is visited at most once, so the cost is O(n + m) plus the sort of the
+    /// answer. A pass that asks for many frontiers hands one scratch to
+    /// [`iterated_frontier_in`](Self::iterated_frontier_in) instead, which
+    /// allocates nothing once the scratch and `out` have grown.
     ///
     /// A graph that takes many queries, or queries whose definitions sit high
     /// in the tree, reads the same answer faster off a
@@ -278,7 +260,7 @@ impl<N: DenseId> DominatorTree<N> {
     /// # Examples
     ///
     /// ```
-    /// use cfglib::{Cfg, DominatorTree, EdgeKind, FrontierScratch};
+    /// use cfglib::{Cfg, DominatorTree, EdgeKind};
     ///
     /// let mut cfg = Cfg::<u32>::new();
     /// let entry = cfg.entry();
@@ -292,42 +274,89 @@ impl<N: DenseId> DominatorTree<N> {
     /// let dominators = DominatorTree::compute(&cfg);
     ///
     /// // A variable written in the loop body is merged at the loop header.
-    /// let mut scratch = FrontierScratch::new();
     /// let mut placed = Vec::new();
-    /// dominators.iterated_frontier(&cfg, &mut scratch, [body], None, &mut placed);
+    /// dominators.iterated_frontier(&cfg, [body], None, &mut placed);
     /// assert_eq!(placed, [head]);
     ///
     /// // Pruned by liveness: the variable is dead on entry to the header.
     /// let live_in = |block| block != head;
-    /// dominators.iterated_frontier(&cfg, &mut scratch, [body], Some(&live_in), &mut placed);
+    /// dominators.iterated_frontier(&cfg, [body], Some(&live_in), &mut placed);
     /// assert!(placed.is_empty());
     /// ```
     pub fn iterated_frontier<G: GraphView<NodeId = N>>(
         &self,
         graph: &G,
-        scratch: &mut FrontierScratch,
+        defs: impl IntoIterator<Item = N>,
+        live_in: Option<&dyn Fn(N) -> bool>,
+        out: &mut Vec<N>,
+    ) {
+        self.iterated_frontier_in(&mut DominatorScratch::default(), graph, defs, live_in, out);
+    }
+
+    /// [`iterated_frontier`](Self::iterated_frontier) over caller-owned
+    /// working storage.
+    ///
+    /// A pass that places phi functions asks for one iterated frontier per
+    /// variable, and most variables are written in a handful of blocks. At
+    /// that size the search is not the cost, the *call* is: two visit flags
+    /// the size of the graph and the buckets of waiting roots, each a malloc
+    /// and a free for an answer of two nodes. One [`DominatorScratch`] handed
+    /// to every query of the pass moves them out of the call, and the answer
+    /// is the same.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the conditions of
+    /// [`iterated_frontier`](Self::iterated_frontier).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cfglib::{Cfg, DominatorScratch, DominatorTree, EdgeKind};
+    ///
+    /// let mut cfg = Cfg::<u32>::new();
+    /// let entry = cfg.entry();
+    /// let then_block = cfg.new_block();
+    /// let merge = cfg.new_block();
+    /// cfg.add_edge(entry, then_block, EdgeKind::ConditionalTrue);
+    /// cfg.add_edge(entry, merge, EdgeKind::ConditionalFalse);
+    /// cfg.add_edge(then_block, merge, EdgeKind::Fallthrough);
+    /// let dominators = DominatorTree::compute(&cfg);
+    ///
+    /// let mut scratch = DominatorScratch::default();
+    /// let mut fresh = Vec::new();
+    /// let mut reused = Vec::new();
+    /// dominators.iterated_frontier(&cfg, [then_block], None, &mut fresh);
+    /// dominators.iterated_frontier_in(&mut scratch, &cfg, [then_block], None, &mut reused);
+    /// dominators.iterated_frontier_in(&mut scratch, &cfg, [then_block], None, &mut reused);
+    /// assert_eq!(reused, fresh);
+    /// assert_eq!(reused, [merge]);
+    /// ```
+    pub fn iterated_frontier_in<G: GraphView<NodeId = N>>(
+        &self,
+        scratch: &mut DominatorScratch,
+        graph: &G,
         defs: impl IntoIterator<Item = N>,
         live_in: Option<&dyn Fn(N) -> bool>,
         out: &mut Vec<N>,
     ) {
         out.clear();
-        scratch.begin(self.pre.len());
+        let search = &mut scratch.frontier;
+        search.begin(self.pre.len());
         for def in defs {
             let index = def.index();
             if self.pre[index] != NO_INDEX {
-                scratch.enqueue(index, slot(self.level[index]));
+                search.enqueue(index, slot(self.level[index]));
             }
         }
-        for level in (0..scratch.bucket_head.len()).rev() {
-            while let Some(root) = scratch.dequeue(level) {
-                self.walk_root(graph, scratch, live_in, root, out);
-            }
+        while let Some(root) = search.next_root() {
+            self.walk_root(graph, search, live_in, root, out);
         }
-        out.sort_unstable_by_key(|member| self.pre[member.index()]);
+        out.sort_unstable_by_key(|member| member.index());
     }
 
-    /// Walk the subtree of `root`, and add to `out` and to the queue every
-    /// successor that lies in the frontier of `root`.
+    /// Walk the subtree of `root`, and offer every successor that lies in the
+    /// frontier of `root`.
     ///
     /// The walk is a scan of the preorder positions of the subtree. A queued
     /// node met on the way, other than `root`, was a root of an earlier walk:
@@ -338,7 +367,7 @@ impl<N: DenseId> DominatorTree<N> {
     fn walk_root<G: GraphView<NodeId = N>>(
         &self,
         graph: &G,
-        scratch: &mut FrontierScratch,
+        search: &mut FrontierBuffers,
         live_in: Option<&dyn Fn(N) -> bool>,
         root: usize,
         out: &mut Vec<N>,
@@ -349,25 +378,17 @@ impl<N: DenseId> DominatorTree<N> {
         let mut position = start;
         while position < end {
             let node = self.order[position];
-            if position != start && scratch.queued.is_marked(node.index()) {
+            if position != start && search.is_queued(node.index()) {
                 position = slot(self.last[node.index()]) + 1;
                 continue;
             }
             position += 1;
             for successor in graph.successors(node) {
                 let index = successor.index();
-                if self.pre[index] == NO_INDEX
-                    || self.level[index] > root_level
-                    || scratch.judged.is_marked(index)
-                {
+                if self.pre[index] == NO_INDEX || self.level[index] > root_level {
                     continue;
                 }
-                scratch.judged.mark(index);
-                if live_in.is_some_and(|accepts| !accepts(successor)) {
-                    continue;
-                }
-                out.push(successor);
-                scratch.enqueue(index, slot(self.level[index]));
+                search.offer(successor, slot(self.level[index]), live_in, out);
             }
         }
     }

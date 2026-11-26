@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 
 use cfglib::{
     DenseId, Direction, DominanceFrontiers, DominatorTree, GraphView, PostDominatorTree, PostNode,
-    RootedView, control_dependence_graph, reverse_postorder, tarjan_scc,
+    RootedView, SccDecomposition, SccNumbering, control_dependence_graph, reverse_postorder,
 };
 
 use crate::fixtures;
@@ -91,7 +91,7 @@ fn strongly_connected_components_are_the_mutual_reachability_classes_numbered_le
     for (name, function) in functions() {
         let cfg = extract::<Glint, _>(&function);
         let classes = cfg.components();
-        let scc = tarjan_scc(&function);
+        let scc = SccDecomposition::compute(&function, SccNumbering::LeavesFirst);
         assert_eq!(scc.len(), classes.len(), "{name}: component count");
         let same_class = |a: usize, b: usize| {
             classes
@@ -284,7 +284,7 @@ fn a_dag_function_is_acyclic_and_a_loop_is_not() {
         fixtures::with_an_unreachable_block(),
     ];
     for function in &acyclic {
-        assert!(tarjan_scc(function).is_dag(function));
+        assert!(SccDecomposition::compute(function, SccNumbering::LeavesFirst).is_dag(function));
     }
     let cyclic = [
         fixtures::counting_sum(),
@@ -293,7 +293,7 @@ fn a_dag_function_is_acyclic_and_a_loop_is_not() {
         fixtures::irreducible(),
     ];
     for function in &cyclic {
-        assert!(!tarjan_scc(function).is_dag(function));
+        assert!(!SccDecomposition::compute(function, SccNumbering::LeavesFirst).is_dag(function));
     }
 }
 
@@ -302,7 +302,7 @@ fn the_graph_view_of_a_function_with_a_removed_block_skips_the_slot() {
     let function = fixtures::with_a_removed_block();
     let order = reverse_postorder(&function, function.root(), Direction::Forward);
     assert_eq!(order, [block(0), block(2)]);
-    let scc = tarjan_scc(&function);
+    let scc = SccDecomposition::compute(&function, SccNumbering::LeavesFirst);
     assert_eq!(scc.len(), 2);
     assert_eq!(GraphView::node_bound(&function), 3);
 }

@@ -27,15 +27,15 @@
 //! would pay for the whole graph to learn about one edge.
 //!
 //! The work is split by responsibility. `construction` runs the algorithm over
-//! any [`GraphView`] and builds a low-high order from it, `certificate` checks
+//! any [`GraphView`](crate::GraphView) and builds a low-high order from it, `certificate` checks
 //! a tree against one, `incremental` replays edits, `numbering` numbers a
 //! forest from its parent table, `forest` extends a tree over the code its
 //! root misses, `frontier` answers dominance-frontier queries over the
 //! numbered tree, `frontier_table` computes the frontier of every node at
 //! once, `edge_dominance` answers whether every path to a node takes one
 //! edge, and `post` builds the post-dominator tree on the first two and
-//! answers its frontier queries with `frontier`. This module holds the tree
-//! and its node queries.
+//! answers its frontier queries with `frontier`. This module holds the tree,
+//! its node queries and the one scratch every construction and query shares.
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -43,17 +43,17 @@ use core::cmp::Ordering;
 use core::ops::Range;
 
 use crate::block::BlockId;
-use crate::graph::view::{DenseId, GraphView, RootedView};
-use crate::identity::{NO_INDEX, check_bound, slot, word};
+use crate::graph::view::{DenseId, RootedView};
+use crate::identity::{NO_INDEX, slot, word};
 pub use certificate::{CertificateError, LowHighOrder};
 use construction::{ConstructionBuffers, LowHighBuffers};
-pub use frontier::FrontierScratch;
-pub use frontier_table::DominanceFrontiers;
+use frontier::FrontierBuffers;
+pub use frontier_table::{DominanceFrontiers, FrontierTree};
 pub use incremental::DominatorUpdate;
 use incremental::UpdateBuffers;
 use numbering::{Numbered, NumberingBuffers};
 pub(crate) use post::CutBuffers;
-pub use post::{ExitPolicy, PostDominatorScratch, PostDominatorTree, PostNode, SinkId};
+pub use post::{ExitPolicy, PostDominatorTree, PostNode, SinkId};
 
 mod certificate;
 mod construction;
@@ -121,49 +121,58 @@ pub struct DominatorTree<N = BlockId> {
     order: Vec<N>,
 }
 
-/// Every buffer [`DominatorTree::compute_in`] fills, owned by the caller.
+/// Every buffer a dominator computation or query fills, owned by the caller.
 ///
 /// A whole-codebase pass computes a dominator tree once per procedure, and
 /// most procedures are a handful of blocks. At that size the tree is not the
 /// cost, the *call* is: the depth-first numbering, the semidominator and
-/// link-eval tables, the buckets, the two search stacks, and the sibling
-/// chains of the numbering walk, each a malloc and a free for a four-block
-/// answer. This moves all of them out of the call, leaving only the five
-/// arrays the tree itself keeps.
+/// link-eval tables, the buckets, the search stack, and the sibling chains of
+/// the numbering walk, each a malloc and a free for a four-block answer. This
+/// moves all of them out of the call, leaving only the five arrays the tree
+/// itself keeps.
 ///
-/// Hand one scratch to every [`compute_in`](DominatorTree::compute_in) of the
-/// pass. The buffers grow to the largest graph the pass meets and are then
-/// reused by every graph after it, so the whole pass allocates a bounded
-/// number of times instead of a few times per procedure.
+/// One scratch serves every `_in` function of the dominator family:
+/// [`DominatorTree::compute_in`] and its certified, incremental and forest
+/// forms, [`PostDominatorTree::compute_in`] (which also keeps the buffers that
+/// find the exits and the cut here), and the iterated-frontier queries
+/// [`DominatorTree::iterated_frontier_in`],
+/// [`PostDominatorTree::iterated_frontier_in`] and
+/// [`DominanceFrontiers::iterated_frontier_in`]. Hand one scratch to every
+/// call of the pass. The buffers grow to the largest graph the pass meets and
+/// are then reused by every graph after it, so the whole pass allocates a
+/// bounded number of times instead of a few times per procedure.
 ///
 /// # One scratch, any graph
 ///
 /// Nodes are held as dense indices rather than as a node-id type, so the
 /// scratch carries no type parameter: one instance serves a [`Cfg`](crate::Cfg), a
-/// [`Graph`](crate::Graph), and a consumer-defined [`GraphView`], in any
+/// [`Graph`](crate::Graph), and a consumer-defined [`GraphView`](crate::GraphView), in any
 /// order, and it is [`Send`], so a worker thread can own one for the whole
 /// corpus it is handed.
 ///
 /// # Sizing
 ///
-/// Nothing is fixed at construction and nothing is released by a call. Every
-/// buffer is cleared and resized on entry, so a scratch used on a large graph
-/// and then on a small one is correct and allocation-free, and the space it
-/// holds is the high-water mark of the sequence.
+/// It starts empty ([`Default`]), nothing is fixed at construction and nothing
+/// is released by a call. Every buffer is cleared and grown on entry, so a
+/// scratch used on a large graph and then on a small one is correct and
+/// allocation-free, and the space it holds is the high-water mark of the
+/// sequence.
 ///
 /// # Examples
 ///
 /// ```
-/// use cfglib::{Cfg, DominatorScratch, DominatorTree, EdgeKind};
+/// use cfglib::{Cfg, DominatorScratch, DominatorTree, EdgeKind, ExitPolicy, PostDominatorTree};
 ///
 /// let mut cfg = Cfg::<u32>::new();
 /// let entry = cfg.entry();
 /// let then_block = cfg.new_block();
 /// cfg.add_edge(entry, then_block, EdgeKind::ConditionalTrue);
 ///
-/// let mut scratch = DominatorScratch::new();
+/// let mut scratch = DominatorScratch::default();
 /// let tree = DominatorTree::compute_in(&mut scratch, &cfg);
 /// assert_eq!(tree, DominatorTree::compute(&cfg));
+/// let post = PostDominatorTree::compute_in(&mut scratch, &cfg, ExitPolicy::CutLoops);
+/// assert_eq!(post, PostDominatorTree::compute(&cfg));
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct DominatorScratch {
@@ -175,28 +184,22 @@ pub struct DominatorScratch {
     low_high: LowHighBuffers,
     /// The marks and worklists of an incremental update.
     updates: UpdateBuffers,
-}
-
-impl DominatorScratch {
-    /// Scratch holding nothing yet.
-    ///
-    /// Every buffer is sized by the first graph it sees, so there is no node
-    /// count to state here.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
+    /// The exits and the cut of a post-dominator tree.
+    cut: CutBuffers,
+    /// The marks and buckets of an iterated-frontier query.
+    frontier: FrontierBuffers,
 }
 
 impl<N: DenseId> DominatorTree<N> {
-    /// Constructs an internal dominator forest from already validated dense
-    /// parent and reachability tables.
+    /// Constructs a dominator forest from already validated dense parent and
+    /// reachability tables.
     ///
     /// A reachable node without a parent is a root. An unreachable node has
     /// no parent.
+    #[cfg(test)]
     pub(crate) fn from_forest_parts(idom: &[Option<N>], reachable: &[bool]) -> Self {
         debug_assert_eq!(idom.len(), reachable.len());
-        check_bound(idom.len(), "node bound of a dominator tree");
+        crate::identity::check_bound(idom.len(), "node bound of a dominator tree");
         let parents: Vec<u32> = idom
             .iter()
             .map(|parent| parent.map_or(NO_INDEX, |parent| word(parent.index())))
@@ -234,22 +237,54 @@ impl<N: DenseId> DominatorTree<N> {
         }
     }
 
+    /// The forest a construction from a virtual root leaves once the virtual
+    /// root is dropped.
+    ///
+    /// `parent` is the parent table of a construction over a view with one
+    /// node more than the graph, the virtual root, at its last index, and
+    /// `reached` is how many nodes of the graph that construction reached.
+    /// The virtual root has no parent, so dropping it leaves a table over the
+    /// graph's nodes, and its children become the roots of the forest. This
+    /// is how a post-dominator tree leaves its virtual exit and how a forest
+    /// over unreachable code leaves its virtual entry.
+    fn from_virtual_root(
+        numbering: &mut NumberingBuffers,
+        mut parent: Vec<u32>,
+        reached: usize,
+    ) -> Self {
+        let bound = parent.len() - 1;
+        parent.truncate(bound);
+        let virtual_root = word(bound);
+        let mut roots = Vec::new();
+        for (node, up) in parent.iter_mut().enumerate() {
+            if *up == virtual_root {
+                *up = NO_INDEX;
+                roots.push(word(node));
+            }
+        }
+        let numbered = numbering.number(&parent, &roots, reached);
+        Self::from_numbered(parent, numbered)
+    }
+
     /// Compute the dominator tree of a rooted graph view with the simple
     /// Lengauer-Tarjan algorithm.
     ///
-    /// The running time is O(m log n) for a graph of n nodes and m edges.
+    /// The running time is O(m log n) for a graph of n nodes and m edges. To
+    /// start from another root, pass [`Rooted::new(&graph, root)`](crate::Rooted);
+    /// for dominators of the reverse graph, pass a
+    /// [`Reversed`](crate::Reversed) view under it.
     ///
     /// # Panics
     ///
     /// Panics when the root is not a node of `graph`, or when
-    /// [`node_bound`](GraphView::node_bound) exceeds the range of a dense
+    /// [`node_bound`](crate::GraphView::node_bound) exceeds the range of a dense
     /// `u32` table.
     #[must_use]
     pub fn compute<G>(graph: &G) -> Self
     where
         G: RootedView<NodeId = N>,
     {
-        Self::compute_in(&mut DominatorScratch::new(), graph)
+        Self::compute_in(&mut DominatorScratch::default(), graph)
     }
 
     /// Compute the dominator tree of a rooted graph view over caller-owned
@@ -260,6 +295,9 @@ impl<N: DenseId> DominatorTree<N> {
     /// allocating entry point is this function over a fresh
     /// [`DominatorScratch`].
     ///
+    /// Debug builds also build a low-high order and check the tree against
+    /// it with [`verify_certificate`](Self::verify_certificate).
+    ///
     /// # Panics
     ///
     /// Panics under the conditions of [`compute`](Self::compute).
@@ -268,81 +306,16 @@ impl<N: DenseId> DominatorTree<N> {
     where
         G: RootedView<NodeId = N>,
     {
-        Self::compute_from_in(scratch, graph, graph.root())
-    }
-
-    /// Recompute the dominator tree and report which nodes' immediate
-    /// dominators changed relative to `previous`.
-    ///
-    /// A graph edit (edge insertion or removal) invalidates the tree; this
-    /// recomputes it and diffs against `previous`, so downstream analyses can
-    /// be updated selectively instead of from scratch.
-    ///
-    /// The cost is a full construction, O(m log n), plus an O(n) scan, however
-    /// small the edit. A caller that can name its edits can hand them to
-    /// [`apply_updates_in`](Self::apply_updates_in) instead, which updates
-    /// the tree in place and reports the same nodes; one insertion there
-    /// costs O(n) plus what it moves, and a batch it does not expect to win
-    /// on is finished with this same construction.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `previous` was computed over a smaller node space than
-    /// `graph` currently has, and under the conditions of
-    /// [`compute`](Self::compute).
-    #[must_use]
-    pub fn compute_with_diff<G>(graph: &G, previous: &Self) -> (Self, Vec<N>)
-    where
-        G: RootedView<NodeId = N>,
-    {
-        let next = Self::compute(graph);
-        let changed = (0..graph.node_bound())
-            .map(N::from_index)
-            .filter(|&node| previous.idom(node) != next.idom(node))
-            .collect();
-        (next, changed)
-    }
-
-    /// Compute dominators for any directed graph view from an explicit root.
-    ///
-    /// # Panics
-    ///
-    /// Panics under the conditions of [`compute`](Self::compute).
-    #[must_use]
-    pub fn compute_from<G>(graph: &G, root: N) -> Self
-    where
-        G: GraphView<NodeId = N>,
-    {
-        Self::compute_from_in(&mut DominatorScratch::new(), graph, root)
-    }
-
-    /// Compute dominators from an explicit root over caller-owned working
-    /// storage.
-    ///
-    /// This is [`compute_from`](Self::compute_from) with the call's buffers
-    /// taken out of it; see [`DominatorScratch`].
-    ///
-    /// Debug builds also build a low-high order and check the tree against
-    /// it with [`verify_certificate`](Self::verify_certificate).
-    ///
-    /// # Panics
-    ///
-    /// Panics under the conditions of [`compute`](Self::compute).
-    #[must_use]
-    pub fn compute_from_in<G>(scratch: &mut DominatorScratch, graph: &G, root: N) -> Self
-    where
-        G: GraphView<NodeId = N>,
-    {
         if cfg!(debug_assertions) {
-            let (tree, certificate) = Self::compute_certified_in(scratch, graph, root);
+            let (tree, certificate) = Self::compute_certified_in(scratch, graph);
             debug_assert_eq!(
-                tree.verify_certificate(graph, root, &certificate),
+                tree.verify_certificate(graph, &certificate),
                 Ok(()),
                 "the construction built a tree its own certificate rejects"
             );
             return tree;
         }
-        Self::construct(scratch, graph, root, None)
+        Self::construct(scratch, graph, graph.root(), None)
     }
 
     /// Return the immediate dominator of `node`, or `None` for a root and for
@@ -462,11 +435,33 @@ impl<N: DenseId> DominatorTree<N> {
     ///
     /// The walk skips each child's subtree, so it costs one step per child.
     pub fn children(&self, node: N) -> impl Iterator<Item = N> + '_ {
-        let span = self.span(node);
-        let first = span.start + 1;
-        core::iter::successors((first < span.end).then_some(first), move |&position| {
+        self.below(Some(node))
+    }
+
+    /// Iterate over the roots of the forest, in ascending dense index: the
+    /// root of a tree computed from one root, every root of a forest, and
+    /// nothing for a tree of no node.
+    ///
+    /// The walk skips each root's tree, so it costs one step per root.
+    pub fn roots(&self) -> impl Iterator<Item = N> + '_ {
+        self.below(None)
+    }
+
+    /// The children of `parent`, or the roots of the forest for `None`, in
+    /// ascending dense index: the nodes atop the whole subtrees that tile the
+    /// preorder positions below `parent`, found by jumping from each one past
+    /// its subtree.
+    fn below(&self, parent: Option<N>) -> impl Iterator<Item = N> + '_ {
+        let Range { start, end } = match parent {
+            Some(node) => {
+                let span = self.span(node);
+                span.start + 1..span.end
+            }
+            None => 0..self.order.len(),
+        };
+        core::iter::successors((start < end).then_some(start), move |&position| {
             let next = slot(self.last[self.order[position].index()]) + 1;
-            (next < span.end).then_some(next)
+            (next < end).then_some(next)
         })
         .map(|position| self.order[position])
     }

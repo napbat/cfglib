@@ -1,10 +1,7 @@
 //! Critical-edge splitting: the default payload and caller-chosen payloads
 //! for the synthetic halves, on unit and payload-bearing CFGs.
 
-use cfglib::{
-    BlockId, Cfg, DominatorTree, EdgeKind, cfg_block_nesting_depths, detect_loops_tagged,
-    split_critical_edges_mapped,
-};
+use cfglib::{BlockId, Cfg, DominatorTree, EdgeKind, LoopForest, split_critical_edges_mapped};
 
 use crate::oracles::{
     Placement, assert_rewrite_accounts_for_identities, assert_surviving_payloads_unchanged,
@@ -229,22 +226,23 @@ fn splitting_a_critical_self_loop_keeps_the_loop_and_its_behavior() {
 #[test]
 fn loop_structure_survives_critical_edge_splitting_with_back_tags() {
     let (before, entry, body) = self_loop_case::<()>();
-    let loops_before = detect_loops_tagged(&before, &DominatorTree::compute(&before));
-    assert_eq!(loops_before.len(), 1);
-    assert_eq!(loops_before[0].header, body);
+    let loops_before = LoopForest::compute(&before, &DominatorTree::compute(&before));
+    assert_eq!(loops_before.loop_count(), 1);
+    assert!(loops_before.loop_of_header(body).is_some());
 
     let mut cfg = before.clone();
     split_critical_edges_mapped(&mut cfg, |_, _| Default::default());
-    let loops = detect_loops_tagged(&cfg, &DominatorTree::compute(&cfg));
+    let loops = LoopForest::compute(&cfg, &DominatorTree::compute(&cfg));
 
     assert_eq!(
-        loops.iter().map(|lp| lp.header).collect::<Vec<_>>(),
+        loops.loops().map(|lp| loops.header(lp)).collect::<Vec<_>>(),
         [body],
         "a back-tagged edge that was split must not invent a second loop"
     );
-    assert_eq!(loops[0].latches.len(), 1);
+    let lp = loops.loop_of_header(body).expect("body heads the loop");
+    assert_eq!(loops.latches(lp).len(), 1);
     assert_eq!(
-        cfg_block_nesting_depths(&cfg)[entry.index()],
+        loops.node_depths()[entry.index()],
         0,
         "code before the loop is not inside it"
     );

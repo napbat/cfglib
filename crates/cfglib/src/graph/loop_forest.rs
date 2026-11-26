@@ -1,13 +1,12 @@
 //! The loops of a graph as a forest, in near-linear space and time.
 //!
-//! [`detect_loops`](crate::detect_loops) returns each loop with an owned set
-//! of its body blocks. Loops nested `n` deep share most of their blocks, so
-//! those sets hold `n²/2` entries in all: 8,000 nested loops are 64 million
-//! entries and nine seconds, and 100,000 would not fit in memory. The
-//! quadratic size is in the answer's shape, not in the way it is computed.
-//! [`LoopForest`] is the same answer without that shape: every block is stored
-//! once, under the innermost loop it belongs to, and the loops form a forest
-//! in which a loop's body is the blocks of its subtree.
+//! Loops nested `n` deep share most of their blocks, so an owned set of body
+//! blocks per loop holds `n²/2` entries in all: 8,000 nested loops are 64
+//! million entries and nine seconds, and 100,000 would not fit in memory. The
+//! quadratic size is in that shape of the answer, not in the way it is
+//! computed. [`LoopForest`] stores every block once, under the innermost loop
+//! it belongs to, and the loops form a forest in which a loop's body is the
+//! blocks of its subtree.
 //!
 //! Natural loops are properly nested: two of them with different headers are
 //! disjoint or one holds the other (a block in both has both headers among its
@@ -20,16 +19,13 @@
 //!
 //! A tagged back edge whose header does not dominate its tail (an irreducible
 //! cycle) can break proper nesting, so such a loop is kept as an explicit set
-//! of blocks, as [`NaturalLoop`] has it, and every question about it is
-//! answered from that set. The cost of such a loop is its own size, so a graph
-//! with many of them still costs what [`detect_loops_tagged`] costs for them.
+//! of blocks, and every question about it is answered from that set. The cost
+//! of such a loop is its own size.
 //!
 //! [`LoopForest::compute_cycles`] needs no tag to find an irreducible cycle: it
 //! builds Havlak's cycle nesting forest, whose cycles are properly nested by
 //! definition, so every one of them, irreducible or not, lives in the forest
 //! and is answered in constant time.
-//!
-//! [`detect_loops_tagged`]: crate::detect_loops_tagged
 
 extern crate alloc;
 use alloc::collections::BTreeSet;
@@ -40,13 +36,13 @@ use smallvec::SmallVec;
 
 use super::dominator::{DominatorScratch, DominatorTree};
 use super::edge_view::EdgeView;
-use super::structure::{BackEdge, NaturalLoop, find_back_edges, find_back_edges_tagged};
+use super::structure::{BackEdge, find_back_edges};
 use super::view::{DenseId, GraphView, RootedView};
 use crate::block::BlockId;
 use crate::edge::KindedEdge;
 use crate::identity::{NO_INDEX, define_dense_id, slot, word};
 
-mod cycles;
+pub(crate) mod cycles;
 mod placement;
 
 define_dense_id! {
@@ -62,9 +58,7 @@ define_dense_id! {
 /// loop is named by a [`LoopId`] and has a header, latches, entries, a body,
 /// and a depth: the number of loops it is nested in, where one loop is nested
 /// in another when the other is the smallest loop with a strictly larger body
-/// that contains its header. That is the rule of
-/// [`LoopNestingTree`](crate::LoopNestingTree) and of
-/// [`NaturalLoop::depth`].
+/// that contains its header.
 ///
 /// # Examples
 ///
@@ -86,7 +80,7 @@ define_dense_id! {
 /// cfg.add_edge(inner, outer, EdgeKind::Back);
 ///
 /// let dominators = DominatorTree::compute(&cfg);
-/// let forest = LoopForest::compute_tagged(&cfg, &dominators);
+/// let forest = LoopForest::compute(&cfg, &dominators);
 ///
 /// let outer_loop = forest.loop_of_header(outer).expect("outer heads a loop");
 /// let inner_loop = forest.loop_of_header(inner).expect("inner heads a loop");
@@ -94,7 +88,8 @@ define_dense_id! {
 /// assert_eq!(forest.depth(inner_loop), 1);
 /// assert!(forest.contains(outer_loop, body));
 /// assert!(!forest.contains(outer_loop, exit));
-/// assert_eq!(forest.body_len(outer_loop), 3);
+/// assert_eq!(forest.body_count(outer_loop), 3);
+/// assert_eq!(forest.exits(&cfg, outer_loop), [exit]);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopForest<N = BlockId> {
@@ -181,15 +176,21 @@ struct Family<'a, N> {
 }
 
 impl<N: DenseId> LoopForest<N> {
-    /// Find the loops dominance finds in `graph`: one per header that is the
-    /// target of an edge from a block it dominates.
+    /// Find the loops of `graph`: one per header that is the target of a
+    /// [back edge](find_back_edges).
     ///
-    /// The forest holds the loops of [`detect_loops`](crate::detect_loops).
-    /// `dominators` must be the dominator tree of `graph`.
+    /// A back edge is an edge from a block the header dominates, or one a
+    /// builder tagged [`EdgeKind::Back`] that closes a cycle dominance cannot
+    /// prove. The edges of a plain graph carry `()`, which declares no tag, so
+    /// its loops are those dominance finds. `dominators` must be the dominator
+    /// tree of `graph`.
+    ///
+    /// [`EdgeKind::Back`]: crate::EdgeKind::Back
     #[must_use]
     pub fn compute<G>(graph: &G, dominators: &DominatorTree<N>) -> Self
     where
-        G: GraphView<NodeId = N>,
+        G: EdgeView<NodeId = N>,
+        G::EdgeData: KindedEdge,
     {
         let back_edges = find_back_edges(graph, dominators);
         build(
@@ -201,40 +202,16 @@ impl<N: DenseId> LoopForest<N> {
         )
     }
 
-    /// Find the loops of `graph`, honoring the [`EdgeKind::Back`] tags a
-    /// builder put on edges that close a cycle dominance cannot prove.
+    /// Find the loops of all the code, including the code the root does not
+    /// reach.
     ///
-    /// The forest holds the loops of
-    /// [`detect_loops_tagged`](crate::detect_loops_tagged). `dominators` must
-    /// be the dominator tree of `graph`.
-    ///
-    /// [`EdgeKind::Back`]: crate::EdgeKind::Back
-    #[must_use]
-    pub fn compute_tagged<G>(graph: &G, dominators: &DominatorTree<N>) -> Self
-    where
-        G: EdgeView<NodeId = N>,
-        G::EdgeData: KindedEdge,
-    {
-        let back_edges = find_back_edges_tagged(graph, dominators);
-        build(
-            graph,
-            &[Family {
-                dominators,
-                back_edges,
-            }],
-        )
-    }
-
-    /// Find the loops of all the code, tagged, including the code the root
-    /// does not reach.
-    ///
-    /// The loops of [`compute_tagged`](Self::compute_tagged) are the live
-    /// program's, and a consumer that also lays out the code the root misses (a
-    /// handler pad no exception edge leads to, a filter funclet) wants the
-    /// loops inside that code too: a loop there is as much a loop as one in live
-    /// code. Those come from dominance within the dead code, which
-    /// [`DominatorTree::complete_forest_in`] provides by rooting a tree at each source
-    /// component of it.
+    /// The loops of [`compute`](Self::compute) are the live program's, and a
+    /// consumer that also lays out the code the root misses (a handler pad no
+    /// exception edge leads to, a filter funclet) wants the loops inside that
+    /// code too: a loop there is as much a loop as one in live code. Those
+    /// come from dominance within the dead code, which
+    /// [`DominatorTree::complete_forest_in`] provides by rooting a tree at each
+    /// source component of it.
     ///
     /// The forest of dominators is a whole-graph answer, so the loops it gives
     /// for live headers are not the live program's: dead code that jumps into a
@@ -245,24 +222,24 @@ impl<N: DenseId> LoopForest<N> {
     /// tail without passing the header, are all dead, whatever the dead code
     /// feeds into. A dead loop is therefore nested only in dead loops, and a
     /// live loop only in live ones.
-    pub(crate) fn compute_all_tagged<G>(graph: &G, dominators: &DominatorTree<N>) -> Self
+    pub(crate) fn compute_all<G>(graph: &G, dominators: &DominatorTree<N>) -> Self
     where
         G: RootedView<NodeId = N> + EdgeView,
         G::EdgeData: KindedEdge,
     {
         let live = Family {
             dominators,
-            back_edges: find_back_edges_tagged(graph, dominators),
+            back_edges: find_back_edges(graph, dominators),
         };
         let mut roots = Vec::new();
         let Some(forest) =
-            dominators.complete_forest_in(&mut DominatorScratch::new(), &mut roots, graph)
+            dominators.complete_forest_in(&mut DominatorScratch::default(), &mut roots, graph)
         else {
             return build(graph, &[live]);
         };
         let dead = Family {
             dominators: &forest,
-            back_edges: find_back_edges_tagged(graph, &forest)
+            back_edges: find_back_edges(graph, &forest)
                 .into_iter()
                 .filter(|back_edge| !dominators.is_reachable(back_edge.header))
                 .collect(),
@@ -272,7 +249,7 @@ impl<N: DenseId> LoopForest<N> {
 
     /// The number of loops.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub fn loop_count(&self) -> usize {
         self.loops.len()
     }
 
@@ -365,10 +342,10 @@ impl<N: DenseId> LoopForest<N> {
     /// a predecessor outside it that the root reaches, or the root itself.
     ///
     /// A loop whose header dominates its latches has no entry but its header.
-    /// An irreducible loop has more: a tagged loop of
-    /// [`compute_tagged`](Self::compute_tagged) whose header does not dominate
-    /// a latch, or a cycle of [`compute_cycles`](Self::compute_cycles) that can
-    /// be entered at a block other than the one the walk reached first.
+    /// An irreducible loop has more: a tagged loop of [`compute`](Self::compute)
+    /// whose header does not dominate a latch, or a cycle of
+    /// [`compute_cycles`](Self::compute_cycles) that can be entered at a block
+    /// other than the one the walk reached first.
     ///
     /// A loop with one entry answers at once. The others of a cycle are found
     /// in its body, at the cost of its size: a block shared by deeply nested
@@ -462,7 +439,7 @@ impl<N: DenseId> LoopForest<N> {
     ///
     /// Panics when `lp` is not a loop of this forest.
     #[must_use]
-    pub fn body_len(&self, lp: LoopId) -> usize {
+    pub fn body_count(&self, lp: LoopId) -> usize {
         let record = self.record(lp);
         if record.is_nested() {
             self.run(record).len()
@@ -525,7 +502,7 @@ impl<N: DenseId> LoopForest<N> {
             return outer_record.first <= inner_record.first
                 && inner_record.last <= outer_record.last;
         }
-        self.body_len(inner) <= self.body_len(outer)
+        self.body_count(inner) <= self.body_count(outer)
             && self.body(inner).all(|block| self.contains(outer, block))
     }
 
@@ -569,27 +546,26 @@ impl<N: DenseId> LoopForest<N> {
         depths
     }
 
-    /// The loops as [`NaturalLoop`]s, outermost first and by header within a
-    /// depth, which is what [`detect_loops`](crate::detect_loops) and
-    /// [`detect_loops_tagged`](crate::detect_loops_tagged) return.
+    /// The exits of `lp`, ascending: the blocks outside it that a block of it
+    /// has an edge to.
     ///
-    /// Every loop gets an owned set of its blocks, so the result is as large as
-    /// the bodies of all the loops together, which is quadratic in the
-    /// nesting depth of a deeply nested graph. A caller that only asks
-    /// questions of the loops should ask the forest.
+    /// The walk costs the size of the body and the edges out of it. `graph`
+    /// must be the graph the loops were found in, or one that only added
+    /// blocks and edges to it: an added block is in no loop.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `lp` is not a loop of this forest.
     #[must_use]
-    pub fn natural_loops(&self) -> Vec<NaturalLoop<N>> {
-        let mut loops: Vec<NaturalLoop<N>> = self
-            .loops()
-            .map(|lp| NaturalLoop {
-                header: self.header(lp),
-                body: self.body(lp).collect(),
-                latches: self.latches(lp).iter().copied().collect(),
-                depth: self.depth(lp),
-            })
+    pub fn exits<G: GraphView<NodeId = N>>(&self, graph: &G, lp: LoopId) -> Vec<N> {
+        let mut exits: Vec<N> = self
+            .body(lp)
+            .flat_map(|block| graph.successors(block))
+            .filter(|&successor| !self.contains(lp, successor))
             .collect();
-        loops.sort_by(|a, b| a.depth.cmp(&b.depth).then(a.header.cmp(&b.header)));
-        loops
+        exits.sort_unstable();
+        exits.dedup();
+        exits
     }
 
     fn record(&self, lp: LoopId) -> &LoopRecord {
@@ -673,8 +649,8 @@ fn build<G: GraphView>(graph: &G, families: &[Family<'_, G::NodeId>]) -> LoopFor
     }
     let order = forest.innermost_first(families);
     forest.claim_blocks(graph, families, &order);
-    forest.number_subtrees(&order);
-    forest.group_members();
+    let positions = forest.number_subtrees(&order);
+    forest.group_members(positions);
     forest.nest(&order);
     forest
 }
