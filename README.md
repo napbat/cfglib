@@ -126,17 +126,20 @@ refused work. Scope storage supports `serde` when the feature is enabled. The
 store of scopes and edges is `ScopeGraph::graph`, and the scope graph is a
 `GraphView` and an `EdgeView`.
 
-`ScopeResolutionIndex::compute_tracked` builds the same index as `compute` and
-also records the scopes each resolution read: the ends of the path prefixes it
-expanded. After the graph is edited in place, `ScopeResolutionIndex::update`
+`ScopeResolutionIndex::compute` takes a `ScopeIndexConfig`: the
+`PathSearchConfig` of each resolution, and `track_reads`, which also records
+the scopes each resolution read: the ends of the path prefixes it expanded
+(the index is the same either way; the record costs memory and some time).
+After the graph is edited in place, `ScopeResolutionIndex::update`
 takes a `ScopeGraphChanges` (the scopes whose payload, data, outgoing edges or
 edge labels changed, and the references added or edited), re-resolves only the
 references that read a changed scope, and patches the reverse index; the result
 equals a fresh `compute`, and a `ScopeIndexUpdate` reports how many references
 it resolved and which ones changed. This holds when the query's hooks read only
 the scopes on the path and the query input, as the `ScopeGraphQuery`
-documentation spells out. An index from plain `compute` records nothing, so
-its first update resolves every reference and records them from then on.
+documentation spells out. An index computed without `track_reads` records
+nothing, so its first update resolves every reference and records them from
+then on.
 
 `ScopeFirstResolution::try_compute` follows the one upward path that a
 `ScopeCursorQuery` admits and stops at the first accepted datum. Its hooks see

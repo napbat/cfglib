@@ -10,8 +10,9 @@ use core::cmp::Ordering;
 
 use cfglib::{
     EdgeRef, PathSearchConfig, ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeGraphPathLabel,
-    ScopeGraphQuery, ScopeId, ScopePath, ScopeQuery, ScopeResolution, ScopeResolutionIndex,
-    StackGraph, StackNodeId, StackNodeKind, StackPartialPathDatabase, StackResolution,
+    ScopeGraphQuery, ScopeId, ScopeIndexConfig, ScopePath, ScopeQuery, ScopeResolution,
+    ScopeResolutionIndex, StackGraph, StackNodeId, StackNodeKind, StackPartialPathDatabase,
+    StackResolution,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -104,7 +105,7 @@ mod scope {
     }
 
     fn resolutions(graph: &Scopes) -> ScopeResolutionIndex {
-        ScopeResolutionIndex::compute(graph, &ByName, PathSearchConfig::default())
+        ScopeResolutionIndex::compute(graph, &ByName, ScopeIndexConfig::default())
     }
 
     #[test]

@@ -10,8 +10,8 @@ use crate::{Direction, PathSearchConfig, shortest_path};
 
 use super::test_support::{Label, rank};
 use super::{
-    ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeGraphPathLabel, ScopeGraphQuery, ScopePath,
-    ScopeQuery, ScopeResolution, ScopeResolutionIndex,
+    ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeGraphPathLabel, ScopeGraphQuery, ScopeIndexConfig,
+    ScopePath, ScopeQuery, ScopeResolution, ScopeResolutionIndex,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,7 +278,7 @@ fn local_data_shadows_parent_data_without_crossing_namespaces() {
     assert_eq!(result.candidates()[0].datum(), inner);
     assert!(!result.is_ambiguous());
 
-    let index = ScopeResolutionIndex::compute(&graph, &LexicalQuery, PathSearchConfig::default());
+    let index = ScopeResolutionIndex::compute(&graph, &LexicalQuery, ScopeIndexConfig::default());
     assert_eq!(index.references_to(inner), &[use_x]);
     assert_eq!(index.references_to(outer), []);
     assert_eq!(index.references_to(outer_type), []);

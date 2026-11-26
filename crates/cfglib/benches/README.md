@@ -84,11 +84,12 @@ re-export ring. Cases there that time a method or constructor name no facade
 function.
 
 `api_cases/scope.rs` compares `ScopeResolutionIndex::compute` with
-`ScopeEnvironmentCache::index` and `compute_tracked` on ten thousand references
-in a hundred nested blocks with an import each, and `compute` with the cached
-index on stacked inheritance diamonds, times `update` after one new datum in a
-leaf scope of the blocks, and times single queries: the first-datum walk up
-the parents, and ephemeral queries of a kept environment cache.
+`ScopeEnvironmentCache::index` and with `compute` under `track_reads` on ten
+thousand references in a hundred nested blocks with an import each, and
+`compute` with the cached index on stacked inheritance diamonds, times `update`
+after one new datum in a leaf scope of the blocks, and times single queries:
+the first-datum walk up the parents, and ephemeral queries of a kept
+environment cache.
 
 `api_cases/stack.rs` times the linear stack index on a chain with a dead end
 at every hop, and direct search, partial-path extraction, and stitching on a
