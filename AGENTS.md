@@ -78,7 +78,22 @@ Follow the Cargo package layout:
 - Spell compound names in full with underscores (`control_dependence`). Keep the standard
   acronyms (`scc`, `cdg`, `eh`, `seh`, `veh`, `clr`).
 - Make a derived analysis with `Type::compute`. Use `build` only for a fallible builder
-  (`CfgBuilder::build`). Give a function that returns a graph a noun name (`call_graph`).
+  (`CfgBuilder::build`). Give a function that returns a graph a noun name (`call_graph`). A free
+  function returns a standard type (`Vec`, `bool`, `Option`) or a graph; anything with its own
+  result type is `Type::compute`.
+- Mark a variant of a function only with these affixes: `try_` (it runs a fallible problem),
+  `_in` (it takes a caller-owned scratch as its first argument) and `_mapped` (it also returns
+  the identity remapping). Do not use `_with`, `_from`, `_of` or `_with_config` as variant
+  markers: pass a config, a seed descriptor or a view instead, and give a genuinely different
+  operation its own name.
+- An analysis that starts from a root takes a `RootedView`. Choose the root with `Rooted` and the
+  direction with `Reversed`; do not add a separate root or direction parameter. Where a
+  direction is a value, use the one `Direction { Forward, Backward }`.
+- A config is a plain struct with public fields that implements `Default`. Do not add `with_*`
+  setters. Share a bound instead of redeclaring it (one depth bound, one step limit).
+- A scratch type implements `Default`, starts empty and grows on entry to fit the graph. Only
+  the `_in` form of a function takes it.
+- A node-generic result type defaults its id parameters to `BlockId` and `EdgeId`.
 - Use a `*Result` name only for a type in a `Result` position. Give each error type a name that
   ends in `Error`, and implement `core::error::Error`.
 - Use `*_count` for counting accessors. Do not use `num_*`.
@@ -86,17 +101,29 @@ Follow the Cargo package layout:
   adds blocks or edges returns the new identities.
 - Pass composition owns identity, declared order, change reports and fallible execution. The
   consumer owns pass selection, dependency order, dialect semantics and cache invalidation.
-- Each fixpoint solver (`solve_problem`, `solve_node_problem`, `solve_edge_problem`) has the
-  same set: full solve, `_from`, `_with_config` and `try_` forms. Each is a fallible core with
-  infallible wrappers, on one shared worklist, with `SolveConfig`, `SolveError` and
-  `TrySolveError`. A derived analysis wraps a solver or runs its own loop. It does not add to
-  the set.
+- The node and edge fixpoint solvers each have one entry point that takes the problem and one
+  descriptor of the seeds and the `SolveConfig`, plus their `stream_` and `resume_` forms. A
+  problem trait comes in an infallible and a fallible form; the fallible form has a blanket
+  implementation for every infallible problem, and the solvers take the fallible form. A
+  derived analysis wraps a solver or runs its own loop. It does not add entry points.
 - The slot fixpoint drivers (`ordered_fixpoint`, `wave_fixpoint`) are schedulers over keyed
   slots that the caller owns. They have no graph and no problem trait, so they are not in the
   solver set above.
 - Give sibling implementations parallel module paths and names (`breadth_first.rs`,
   `depth_first.rs`) behind one small coordinator module.
-- Return structured errors. Do not panic in a public API unless the panic is documented.
+- Code that mutates a `Cfg` lives under `transform/` or `cfg/`; `graph/` holds analyses over
+  views. The methods of `Cfg` live under `cfg/`.
+- Build on the crate's shared pieces instead of hand-rolling them: the walk cores of
+  `graph::traverse` and `graph::search` for breadth-first and depth-first walks; the views of
+  `graph::view` (`Rooted`, `Reversed`, `Induced`, `VirtualRoot`) and the crate-private
+  renumbered component view; `EpochMarks` for visited stamps; `DenseFanout::from_pairs` for
+  counting-sort adjacency; `define_dense_id!` for index newtypes; and the shared no-index
+  sentinel. When a module needs something the shared piece lacks, extend the shared piece.
+- Return structured errors. Do not panic in a public API unless the panic is documented. Panic
+  (under `# Panics`) only for a caller bug the caller can check cheaply, such as an id that is
+  out of range or removed. Return a `Result` for input the caller cannot check cheaply: derived
+  inputs that do not match, invalid structure, an exhausted budget, arithmetic overflow. Prefer
+  a type that excludes invalid input (an unsigned cost) to a panic.
 - Use `unwrap` or `expect` only for a proven invariant. Make an `expect` message state the
   invariant.
 
