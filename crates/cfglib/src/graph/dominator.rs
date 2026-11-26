@@ -402,7 +402,7 @@ impl<N: DenseId> DominatorTree<N> {
     /// Unreachable nodes are skipped. The answer is `None` when no node is
     /// reachable and when the reachable ones share no tree.
     #[must_use]
-    pub fn nearest_common_dominator_of(&self, nodes: impl IntoIterator<Item = N>) -> Option<N> {
+    pub fn nearest_common_dominator_among(&self, nodes: impl IntoIterator<Item = N>) -> Option<N> {
         let mut common = None;
         for node in nodes.into_iter().filter(|&node| self.is_reachable(node)) {
             common = Some(match common {

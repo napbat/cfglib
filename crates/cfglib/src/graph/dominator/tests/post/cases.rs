@@ -425,14 +425,14 @@ fn blocks_the_entry_cannot_reach_are_not_in_the_tree() {
         assert_eq!(post.nearest_common_post_dominator(outside, outside), None);
     }
     assert_eq!(
-        post.nearest_common_post_dominator_of([island, entry, island_exit]),
+        post.nearest_common_post_dominator_among([island, entry, island_exit]),
         Some(PostNode::Node(entry))
     );
     assert_eq!(
-        post.nearest_common_post_dominator_of([island, island_exit]),
+        post.nearest_common_post_dominator_among([island, island_exit]),
         None
     );
-    assert_eq!(post.nearest_common_post_dominator_of([]), None);
+    assert_eq!(post.nearest_common_post_dominator_among([]), None);
 }
 
 #[test]
@@ -456,15 +456,15 @@ fn the_nearest_common_post_dominator_of_separate_trees_is_the_virtual_exit() {
         Some(PostNode::Exit)
     );
     assert_eq!(
-        post.nearest_common_post_dominator_of([spin, out]),
+        post.nearest_common_post_dominator_among([spin, out]),
         Some(PostNode::Exit)
     );
     assert_eq!(
-        post.nearest_common_post_dominator_of([spin, spin]),
+        post.nearest_common_post_dominator_among([spin, spin]),
         Some(PostNode::Node(spin))
     );
     assert_eq!(
-        post.nearest_common_post_dominator_of([out, spin, entry]),
+        post.nearest_common_post_dominator_among([out, spin, entry]),
         Some(PostNode::Exit),
         "the virtual exit stays the answer however many blocks follow"
     );

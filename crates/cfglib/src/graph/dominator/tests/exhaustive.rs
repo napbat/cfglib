@@ -98,7 +98,7 @@ fn check_against_definition(edges: &EdgeList, scratch: &mut DominatorScratch) {
                     .expect("reachable nodes share the root")
             });
         assert_eq!(
-            tree.nearest_common_dominator_of(members.iter().copied().map(node)),
+            tree.nearest_common_dominator_among(members.iter().copied().map(node)),
             expected.map(node),
             "nearest common dominator of {members:?} in {edges:?}"
         );

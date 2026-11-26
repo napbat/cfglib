@@ -52,9 +52,9 @@ fn nearest_common_dominators_need_a_shared_tree() {
     assert_eq!(forest.nearest_common_dominator(2, 5), None);
     assert_eq!(forest.nearest_common_dominator(6, 3), None);
     assert_eq!(forest.nearest_common_dominator(6, 0), None);
-    assert_eq!(forest.nearest_common_dominator_of([3, 1, 7]), Some(5));
-    assert_eq!(forest.nearest_common_dominator_of([6, 3, 7]), None);
-    assert_eq!(forest.nearest_common_dominator_of([2, 6]), Some(2));
+    assert_eq!(forest.nearest_common_dominator_among([3, 1, 7]), Some(5));
+    assert_eq!(forest.nearest_common_dominator_among([6, 3, 7]), None);
+    assert_eq!(forest.nearest_common_dominator_among([2, 6]), Some(2));
 }
 
 #[test]
