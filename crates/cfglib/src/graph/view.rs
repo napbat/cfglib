@@ -305,24 +305,10 @@ impl<G: NodeView> NodeView for Reversed<'_, G> {
 ///
 /// The entry check of every walk that takes a node from its caller: a live
 /// node is below the bound, so one that is not is no node of the view, and the
-/// side tables a walk sizes by the bound could not be indexed by it. The
-/// comparison is inlined, because the store runs it once per adjacency query
-/// and a call there costs more than the comparison; the panic stays out of
-/// line, so each inlined copy is only the comparison and a call.
-#[inline]
+/// side tables a walk sizes by the bound could not be indexed by it.
 #[track_caller]
 pub(crate) fn assert_in_bound<G: GraphView>(graph: &G, node: G::NodeId, role: &str) {
-    if node.index() >= graph.node_bound() {
-        out_of_bound(role);
-    }
-}
-
-/// The panic of [`assert_in_bound`].
-#[cold]
-#[inline(never)]
-#[track_caller]
-fn out_of_bound(role: &str) -> ! {
-    panic!("{role} is out of range");
+    assert!(node.index() < graph.node_bound(), "{role} is out of range");
 }
 
 mod induced;
