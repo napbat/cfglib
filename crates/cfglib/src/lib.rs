@@ -228,9 +228,7 @@ pub use analysis::control_tree::{
     PathDecomposition, Preorder, SplDecomposition, SplError, SplNode, SplNodeId, SplRun,
     SwitchCase,
 };
-pub use analysis::metrics::{
-    CfgMetrics, GraphMetrics, block_nesting_depths, cfg_block_nesting_depths,
-};
+pub use analysis::metrics::{CfgMetrics, GraphMetrics};
 pub use analysis::pattern::{CfgPattern, detect_cfg_patterns, detect_patterns};
 pub use block::{BasicBlock, BlockId, BlockTag};
 pub use builder::address::{
@@ -329,11 +327,9 @@ pub use graph::feedback::{FeedbackConfig, feedback_arc_set, linear_arrangement};
 pub use graph::fingerprint::{canonical_hash, canonical_order, multiset_fingerprint, wl_colors};
 pub use graph::frequency::{BlockFrequencies, FREQUENCY_SHIFT, FrequencyConfig, Probability};
 pub use graph::horn::{HornClauses, HornSaturation};
-pub use graph::interval::{Interval, IntervalAnalysis};
 pub use graph::keyed::KeyedGraph;
 pub use graph::label::{Label, display_label, no_label};
 pub use graph::loop_forest::{LoopForest, LoopId};
-pub use graph::loop_nest::{LoopNestNode, LoopNestingTree};
 pub use graph::network_flow::{ArcId, FlowError, FlowNetwork, FlowSolution};
 pub use graph::open::{
     FoldEnter, MarkScope, OpenBfsEvent, OpenDfsEvent, OpenFixpointConfig, OpenFixpointError,
@@ -350,9 +346,6 @@ pub use graph::program_structure::{
     CycleEquivalence, ProgramStructureTree, SeseEdge, SeseRegionId,
 };
 pub use graph::reach_index::{ReachIndex, ReachIndexConfig, ReachScratch};
-pub use graph::reducible::{
-    DispatchBuilder, DispatchReport, make_reducible, make_reducible_with_dispatch,
-};
 pub use graph::relax::min_label_relaxation;
 pub use graph::scc::{
     IncrementalScc, Scc, SccChange, SccDecomposition, StrongCutScratch, StrongCuts, condensation,
@@ -381,10 +374,7 @@ pub use graph::stack::{
 pub use graph::store::{
     AdjacentEdges, EdgeRecord, Graph, Id, IdTag, NodeId, NodeOrder, NodeTag, Renumbering,
 };
-pub use graph::structure::{
-    BackEdge, CanonicalLoop, NaturalLoop, canonicalize_loops, detect_loops, detect_loops_tagged,
-    find_back_edges, find_back_edges_tagged, insert_preheader, is_reducible, loop_exit_blocks,
-};
+pub use graph::structure::{BackEdge, find_back_edges, is_reducible};
 pub use graph::text::{TextError, TextErrorKind, TextStyle, parse_text, to_text, write_text};
 pub use graph::traverse::{
     CommonAncestor, ShortestPathScratch, breadth_first, common_ancestors, depth_first_postorder,
@@ -422,7 +412,11 @@ pub use transform::critical::{
 };
 pub use transform::layout::{RelaxError, RelaxMode, SpanItem, relax_layout, relax_spans};
 pub use transform::linearize::{BlockOrder, Emitter, LinearInst, LinearizeError, linearize};
+pub use transform::loops::{CanonicalLoop, canonicalize_loops, insert_preheader};
 pub use transform::pass::{
     Pass, PassChange, PassExecution, PassFailure, PassFn, PassId, PassPipeline, PassReport, pass_fn,
+};
+pub use transform::reducible::{
+    DispatchBuilder, DispatchReport, make_reducible, make_reducible_by_dispatch,
 };
 pub use union_find::DisjointSet;

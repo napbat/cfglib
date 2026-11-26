@@ -36,7 +36,6 @@ pub struct MetricsReference {
     pub edge_count: usize,
     pub cyclomatic_complexity: usize,
     pub reachable_node_count: usize,
-    pub unreachable_node_count: usize,
     pub exit_count: usize,
     pub instruction_count: usize,
 }
@@ -316,7 +315,6 @@ impl<'t> Reference<'t> {
             edge_count: self.edge_count(),
             cyclomatic_complexity: reachable_edges + 2 - reachable.len(),
             reachable_node_count: reachable.len(),
-            unreachable_node_count: self.live_count() - reachable.len(),
             exit_count: self.sinks().len(),
             instruction_count: self.live().map(|n| self.topology.blocks[n].len()).sum(),
         }

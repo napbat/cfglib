@@ -53,15 +53,14 @@ edge_kinds! {
     ///
     /// # Which kinds algorithms interpret
     ///
-    /// Dominance, loop detection, SCC, and traversals are purely structural —
-    /// they never read kinds, so consumers may choose kinds freely for their own
-    /// purposes. The kind-sensitive surfaces are: AST lifting (block
-    /// classification via [`Back`](Self::Back),
-    /// [`ConditionalTrue`](Self::ConditionalTrue) /
+    /// Dominance, SCC, and traversals are purely structural — they never read
+    /// kinds, so consumers may choose kinds freely for their own purposes. The
+    /// kind-sensitive surfaces are: AST lifting (block classification via
+    /// [`Back`](Self::Back), [`ConditionalTrue`](Self::ConditionalTrue) /
     /// [`ConditionalFalse`](Self::ConditionalFalse),
-    /// [`SwitchCase`](Self::SwitchCase), [`Jump`](Self::Jump)), the `_tagged`
-    /// loop detectors ([`Back`](Self::Back)), linearization (fallthrough-like
-    /// kinds vs branches), switch recovery
+    /// [`SwitchCase`](Self::SwitchCase), [`Jump`](Self::Jump)), loop detection
+    /// ([`Back`](Self::Back), see [`find_back_edges`](crate::find_back_edges)),
+    /// linearization (fallthrough-like kinds vs branches), switch recovery
     /// ([`IndirectJump`](Self::IndirectJump) removal), the exception model
     /// (the `Exception*` kinds), diffing (kind discriminants in fingerprints),
     /// and DOT styling.
@@ -149,6 +148,15 @@ impl EdgeKind {
 pub trait KindedEdge {
     /// The control-flow classification of this edge.
     fn kind(&self) -> EdgeKind;
+}
+
+/// The edge data of a plain graph declares no tag: every edge is a
+/// [`Fallthrough`](EdgeKind::Fallthrough), so the kind-sensitive algorithms
+/// read the graph by its shape alone.
+impl KindedEdge for () {
+    fn kind(&self) -> EdgeKind {
+        EdgeKind::Fallthrough
+    }
 }
 
 impl core::fmt::Display for EdgeKind {

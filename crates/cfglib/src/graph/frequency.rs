@@ -55,7 +55,7 @@
 //!   loop, carries its frequency but adds nothing to its target. Such an edge
 //!   closes a cycle that the forest does not name, such as an irreducible
 //!   cycle of [`LoopForest::compute`].
-//! - A tagged irreducible loop of [`LoopForest::compute_tagged`] has several
+//! - A tagged irreducible loop of [`LoopForest::compute`] has several
 //!   entries. The mass that enters it at any of them is propagated as mass
 //!   entering at its header, with the same scale and the same cap.
 

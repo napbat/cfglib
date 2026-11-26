@@ -212,7 +212,7 @@ mod tests {
         for sample in 0..30_000 {
             let cfg = random_graph(&mut random);
             let dom = DominatorTree::compute(&cfg);
-            let forest = Rc::new(LoopForest::compute_all_tagged(&cfg, &dom));
+            let forest = Rc::new(LoopForest::compute_all(&cfg, &dom));
             let mut reachable = alloc::vec![false; cfg.block_bound()];
             for block in cfg.block_ids() {
                 reachable[block.index()] = dom.is_reachable(block);
@@ -264,7 +264,7 @@ mod tests {
         for sample in 0..30_000 {
             let cfg = random_graph(&mut random);
             let dom = DominatorTree::compute(&cfg);
-            let forest = Rc::new(LoopForest::compute_all_tagged(&cfg, &dom));
+            let forest = Rc::new(LoopForest::compute_all(&cfg, &dom));
             let mut reachable = alloc::vec![false; cfg.block_bound()];
             for block in cfg.block_ids() {
                 reachable[block.index()] = dom.is_reachable(block);

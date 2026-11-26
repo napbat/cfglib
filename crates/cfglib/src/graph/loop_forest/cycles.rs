@@ -91,7 +91,7 @@ impl<N: DenseId> LoopForest<N> {
     ///
     /// let forest = LoopForest::compute_cycles(&cfg);
     ///
-    /// assert_eq!(forest.len(), 1);
+    /// assert_eq!(forest.loop_count(), 1);
     /// let cycle = forest.loop_of_header(a).expect("the walk reaches `a` first");
     /// assert_eq!(forest.entries(cycle), [a, b]);
     /// assert!(forest.is_irreducible(cycle));

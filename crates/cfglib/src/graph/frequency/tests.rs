@@ -183,7 +183,7 @@ fn deep_nests_of_long_loops_saturate_instead_of_overflowing() {
     }
     let dominators = DominatorTree::compute(&cfg);
     let loops = LoopForest::compute(&cfg, &dominators);
-    assert_eq!(loops.len(), DEPTH);
+    assert_eq!(loops.loop_count(), DEPTH);
     let frequencies = BlockFrequencies::compute(
         &cfg,
         &loops,
@@ -319,8 +319,8 @@ fn an_irreducible_cycle_is_approximated_as_documented() {
     // at `b` is propagated as if it entered at `a`.
     let (cfg, [entry, a, b, exit]) = irreducible_pair(true);
     let dominators = DominatorTree::compute(&cfg);
-    let loops = LoopForest::compute_tagged(&cfg, &dominators);
-    assert_eq!(loops.len(), 1);
+    let loops = LoopForest::compute(&cfg, &dominators);
+    assert_eq!(loops.loop_count(), 1);
     let tagged = BlockFrequencies::compute(&cfg, &loops, even, FrequencyConfig::new());
     assert_eq!(
         [entry, a, b, exit].map(|block| tagged.block(block)),

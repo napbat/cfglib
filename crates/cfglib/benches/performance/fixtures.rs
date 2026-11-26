@@ -53,16 +53,6 @@ pub(super) fn branchy_graph(node_count: usize) -> Graph<(), ()> {
     graph
 }
 
-pub(super) fn reverse_id_chain_graph(node_count: usize) -> (Graph<(), ()>, NodeId) {
-    assert!(node_count > 0);
-    let mut graph = Graph::with_capacity(node_count, node_count - 1);
-    let nodes: Vec<_> = (0..node_count).map(|_| graph.add_node(())).collect();
-    for index in 1..node_count {
-        graph.add_edge(nodes[index], nodes[index - 1], ());
-    }
-    (graph, nodes[node_count - 1])
-}
-
 pub(super) fn linear_cfg(node_count: usize) -> Cfg<u32> {
     assert!(node_count > 0);
     let mut cfg = Cfg::new();

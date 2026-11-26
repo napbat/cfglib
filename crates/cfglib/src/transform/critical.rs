@@ -34,7 +34,7 @@ where
 /// edge is redirected to the inserted block without changing its identity,
 /// weight, or payload, and keeps its kind with one exception: a
 /// [`Back`](EdgeKind::Back) edge is the edge that enters a loop header
-/// (`find_back_edges_tagged` reads the tag that way), so the tag moves to the
+/// (`find_back_edges` reads the tag that way), so the tag moves to the
 /// second half, which is the one that now enters the header, and the first
 /// half becomes [`Unconditional`](EdgeKind::Unconditional). Its mapping
 /// contains both halves in execution order; only the second half receives the
@@ -88,7 +88,7 @@ pub fn split_critical_edges_with<I, E>(
 mod tests {
     use super::*;
     use crate::test_util::{diamond_cfg, ff};
-    use crate::{DominatorTree, detect_loops_tagged};
+    use crate::{DominatorTree, LoopForest};
 
     #[test]
     fn split_critical_edges_on_diamond() {
@@ -158,8 +158,8 @@ mod tests {
         let back = cfg.add_weighted_edge(body, header, EdgeKind::Back, 0.5);
         cfg.add_edge(body, exit, EdgeKind::ConditionalFalse);
 
-        let before = detect_loops_tagged(&cfg, &DominatorTree::compute(&cfg));
-        assert_eq!(before.len(), 1);
+        let before = LoopForest::compute(&cfg, &DominatorTree::compute(&cfg));
+        assert_eq!(before.loop_count(), 1);
         let (count, mapping) = split_critical_edges_mapped(&mut cfg);
         assert_eq!(count, 3);
 
@@ -169,10 +169,12 @@ mod tests {
         assert_ne!(cfg.edge(back).kind(), EdgeKind::Back);
         assert_eq!(cfg.edge(halves[1]).kind(), EdgeKind::Back);
         assert_eq!(cfg.edge(halves[1]).target(), header);
-        let after = detect_loops_tagged(&cfg, &DominatorTree::compute(&cfg));
-        assert_eq!(after.len(), 1, "{after:?}");
-        assert_eq!(after[0].header, header);
-        assert!(!after[0].body.contains(&entry));
+        let after = LoopForest::compute(&cfg, &DominatorTree::compute(&cfg));
+        assert_eq!(after.loop_count(), 1, "{after:?}");
+        let lp = after
+            .loop_of_header(header)
+            .expect("the header still heads the loop");
+        assert!(!after.contains(lp, entry));
     }
 
     #[test]

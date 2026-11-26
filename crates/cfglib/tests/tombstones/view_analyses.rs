@@ -4,9 +4,9 @@
 use std::collections::BTreeSet;
 
 use cfglib::{
-    DominatorTree, GraphMetrics, PostDominatorTree, PostNode, RootedView, Scc, SccDecomposition,
-    condensation, condensation_of, control_dependence_graph, detect_loops, is_reducible,
-    kosaraju_scc, tarjan_scc,
+    DominatorTree, EdgeView, GraphMetrics, KindedEdge, LoopForest, PostDominatorTree, PostNode,
+    RootedView, Scc, SccDecomposition, condensation, condensation_of, control_dependence_graph,
+    is_reducible, kosaraju_scc, tarjan_scc,
 };
 
 use crate::oracle::{PostReference, Reference};
@@ -344,39 +344,25 @@ fn condensations_are_the_quotient_graph_around_holes() {
 struct LoopFacts;
 
 impl ViewCheck for LoopFacts {
-    fn check<G: RootedView>(
-        &self,
-        view: &G,
-        slots: &Slots<G::NodeId>,
-        reference: &Reference<'_>,
-        label: &str,
-    ) {
+    fn check<G>(&self, view: &G, slots: &Slots<G::NodeId>, reference: &Reference<'_>, label: &str)
+    where
+        G: RootedView + EdgeView<EdgeData: KindedEdge>,
+    {
         let tree = DominatorTree::compute(view);
-        let found = detect_loops(view, &tree);
+        let found = LoopForest::compute(view, &tree);
         let expected = reference.loops();
-        assert_eq!(found.len(), expected.len(), "{label}: loop count");
-        let bodies: Vec<BTreeSet<usize>> = found
-            .iter()
-            .map(|natural| {
-                natural
-                    .body
-                    .iter()
-                    .map(|&node| slots.slot_of(node))
-                    .collect()
-            })
-            .collect();
-        for natural in &found {
-            let header = slots.slot_of(natural.header);
+        assert_eq!(found.loop_count(), expected.len(), "{label}: loop count");
+        let slots_of =
+            |lp| -> BTreeSet<usize> { found.body(lp).map(|node| slots.slot_of(node)).collect() };
+        let bodies: Vec<BTreeSet<usize>> = found.loops().map(slots_of).collect();
+        for lp in found.loops() {
+            let header = slots.slot_of(found.header(lp));
             let expected = expected
                 .get(&header)
                 .unwrap_or_else(|| panic!("{label}: {header} is not a loop header"));
-            let body: BTreeSet<usize> = natural
-                .body
-                .iter()
-                .map(|&node| slots.slot_of(node))
-                .collect();
-            let latches: BTreeSet<usize> = natural
-                .latches
+            let body = slots_of(lp);
+            let latches: BTreeSet<usize> = found
+                .latches(lp)
                 .iter()
                 .map(|&node| slots.slot_of(node))
                 .collect();
@@ -395,7 +381,8 @@ impl ViewCheck for LoopFacts {
                     .filter(|other| body.is_subset(other) && **other != body)
                     .count();
                 assert_eq!(
-                    natural.depth, enclosing,
+                    found.depth(lp),
+                    enclosing,
                     "{label}: depth of the loop at {header}"
                 );
             }
@@ -418,13 +405,10 @@ fn natural_loops_and_reducibility_match_the_back_edge_definition_around_holes() 
 struct Metrics;
 
 impl ViewCheck for Metrics {
-    fn check<G: RootedView>(
-        &self,
-        view: &G,
-        _slots: &Slots<G::NodeId>,
-        reference: &Reference<'_>,
-        label: &str,
-    ) {
+    fn check<G>(&self, view: &G, _slots: &Slots<G::NodeId>, reference: &Reference<'_>, label: &str)
+    where
+        G: RootedView + EdgeView<EdgeData: KindedEdge>,
+    {
         let metrics = GraphMetrics::compute(view);
         let expected = reference.metrics();
         assert_eq!(
@@ -444,8 +428,9 @@ impl ViewCheck for Metrics {
             "{label}: reachable_node_count"
         );
         assert_eq!(
-            metrics.unreachable_node_count, expected.unreachable_node_count,
-            "{label}: unreachable_node_count"
+            metrics.node_count - metrics.reachable_node_count,
+            expected.node_count - expected.reachable_node_count,
+            "{label}: unreachable nodes"
         );
         assert_eq!(
             metrics.exit_count, expected.exit_count,

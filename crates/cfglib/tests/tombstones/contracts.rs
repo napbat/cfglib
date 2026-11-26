@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 use cfglib::{
     BlockId, Cfg, CfgMetrics, DenseId, DominatorTree, EdgeId, EdgeKind, Graph, GraphMetrics,
-    GraphView, NodeOrder, Rooted, RootedView, detect_loops, find_back_edges, kosaraju_scc,
+    GraphView, LoopForest, NodeOrder, Rooted, RootedView, find_back_edges, kosaraju_scc,
     merge_blocks, remove_empty_blocks, remove_unreachable, simplify, tarjan_scc,
 };
 
@@ -266,7 +266,7 @@ fn metrics_count_the_live_blocks_not_the_slots() {
     assert_eq!(metrics.graph.edge_count, 1);
     assert_eq!(metrics.graph.reachable_node_count, 2);
     assert_eq!(
-        metrics.graph.unreachable_node_count, 0,
+        metrics.graph.reachable_node_count, metrics.graph.node_count,
         "a removed slot is not unreachable code"
     );
     assert_eq!(metrics.graph.exit_count, 1);
@@ -296,7 +296,8 @@ fn unreachable_blocks_are_counted_only_when_they_are_live() {
     assert_eq!(metrics.node_count, 3);
     assert_eq!(metrics.reachable_node_count, 2);
     assert_eq!(
-        metrics.unreachable_node_count, 1,
+        metrics.node_count - metrics.reachable_node_count,
+        1,
         "only the live dead block"
     );
     assert_eq!(metrics.edge_count, 2);
@@ -311,7 +312,7 @@ fn metrics_between_a_transform_and_the_compaction_equal_the_compacted_metrics() 
         assert_eq!(holed.graph.node_count, cfg.block_count(), "seed {seed}");
         assert_eq!(holed.graph.edge_count, cfg.edge_count(), "seed {seed}");
         assert_eq!(
-            holed.graph.unreachable_node_count, 0,
+            holed.graph.reachable_node_count, holed.graph.node_count,
             "seed {seed}: nothing unreachable is left"
         );
         cfg.compact(NodeOrder::Insertion);
@@ -401,7 +402,7 @@ fn loops_are_relative_to_the_entry_so_dead_cycles_are_not_loops() {
 
     let dominators = DominatorTree::compute(&cfg);
     assert!(
-        detect_loops(&cfg, &dominators).is_empty(),
+        LoopForest::compute(&cfg, &dominators).is_empty(),
         "no cycle is reachable from the entry, so no loop exists"
     );
     assert_eq!(find_back_edges(&cfg, &dominators), Vec::new());

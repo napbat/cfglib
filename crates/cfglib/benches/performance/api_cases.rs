@@ -28,7 +28,6 @@ mod traversal;
 
 pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "bidirected_dyck_classes",
-    "block_nesting_depths",
     "breadth_first",
     "breadth_first_edges",
     "build_address_cfg",
@@ -37,7 +36,6 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "canonical_hash",
     "canonical_order",
     "canonicalize_loops",
-    "cfg_block_nesting_depths",
     "cfg_ext_tsp_order",
     "common_ancestors",
     "condensation",
@@ -51,8 +49,6 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "depth_first_postorder",
     "depth_first_preorder",
     "detect_cfg_patterns",
-    "detect_loops",
-    "detect_loops_tagged",
     "detect_patterns",
     "display_label",
     "edge_disjoint_paths",
@@ -60,7 +56,6 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "ext_tsp_score",
     "feedback_arc_set",
     "find_back_edges",
-    "find_back_edges_tagged",
     "find_function",
     "follow",
     "follow_path",
@@ -75,9 +70,8 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "kosaraju_scc",
     "linear_arrangement",
     "linearize",
-    "loop_exit_blocks",
     "make_reducible",
-    "make_reducible_with_dispatch",
+    "make_reducible_by_dispatch",
     "meet_options",
     "merge_blocks",
     "merge_blocks_mapped",
@@ -202,11 +196,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         [control_dependence_graph]
     );
     benchmark_coverage!(suite, "directed_tarjan_scc", [tarjan_scc]);
-    benchmark_coverage!(
-        suite,
-        "directed_detect_loops_multilatch",
-        [detect_loops, find_back_edges]
-    );
+    benchmark_coverage!(suite, "directed_loop_forest_multilatch", [find_back_edges]);
     benchmark_coverage!(
         suite,
         "directed_node_fixpoint_bool",

@@ -2,9 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use cfglib::{
-    BlockId, Cfg, ControlNode, ControlTree, DominatorTree, LiftReport, detect_loops_tagged,
-};
+use cfglib::{BlockId, Cfg, ControlNode, ControlTree, DominatorTree, LiftReport, LoopForest};
 
 use crate::coverage::{
     assert_each_block_in_exactly_one_leaf, assert_instruction_walk_is_a_partition,
@@ -86,10 +84,8 @@ pub fn structure_and_check(cfg: &Cfg<&'static str>) -> (ControlTree, LiftReport)
             _ => None,
         })
         .collect();
-    let mut natural: Vec<BlockId> = detect_loops_tagged(cfg, &DominatorTree::compute(cfg))
-        .into_iter()
-        .map(|natural| natural.header)
-        .collect();
+    let loops = LoopForest::compute(cfg, &DominatorTree::compute(cfg));
+    let mut natural: Vec<BlockId> = loops.loops().map(|lp| loops.header(lp)).collect();
     headers.sort();
     natural.sort();
     assert_eq!(headers, natural, "one Loop node per natural loop\n{tree:?}");

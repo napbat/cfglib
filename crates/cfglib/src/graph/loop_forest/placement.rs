@@ -116,7 +116,7 @@ impl<N: DenseId> LoopForest<N> {
     /// first, and their bodies grow along it, so the first one larger than the
     /// loop is the best of them. An explicit loop is found by asking each one.
     fn parents_among_explicit_loops(&self) -> (Vec<u32>, Vec<usize>) {
-        let sizes: Vec<usize> = self.loops().map(|lp| self.body_len(lp)).collect();
+        let sizes: Vec<usize> = self.loops().map(|lp| self.body_count(lp)).collect();
         let explicit: Vec<usize> = (0..self.loops.len())
             .filter(|&k| !self.loops[k].is_nested())
             .collect();

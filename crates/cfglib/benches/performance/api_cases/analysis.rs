@@ -1,6 +1,6 @@
 use cfglib::{
-    BlockHashes, BlockId, CascadeDiff, Cfg, CfgDiff, EdgeKind, MatchLevel, RegionDiff,
-    block_nesting_depths, cfg_block_nesting_depths, detect_cfg_patterns, detect_patterns,
+    BlockHashes, BlockId, CascadeDiff, Cfg, CfgDiff, DominatorTree, EdgeKind, LoopForest,
+    MatchLevel, RegionDiff, detect_cfg_patterns, detect_patterns,
 };
 
 use super::BenchmarkSuite;
@@ -33,16 +33,8 @@ fn register_metrics_and_patterns(suite: &mut BenchmarkSuite<'_>) {
 
     benchmark_case!(
         suite,
-        "api_block_nesting_depths",
-        covers[block_nesting_depths],
-        || block_nesting_depths(&cfg),
-        |depths: &Vec<usize>| assert!(depths.contains(&1))
-    );
-    benchmark_case!(
-        suite,
-        "api_cfg_block_nesting_depths",
-        covers[cfg_block_nesting_depths],
-        || cfg_block_nesting_depths(&cfg),
+        "api_loop_node_depths",
+        || LoopForest::compute(&cfg, &DominatorTree::compute(&cfg)).node_depths(),
         |depths: &Vec<usize>| assert!(depths.contains(&1))
     );
     benchmark_case!(

@@ -173,7 +173,7 @@ fn existing_consumer_graph_can_adopt_algorithms_without_storage_migration() {
 #[test]
 fn widened_algorithms_run_on_rooted_consumer_views() {
     use cfglib::{
-        GraphMetrics, PostDominatorTree, Rooted, control_dependence_graph, detect_loops,
+        GraphMetrics, LoopForest, PostDominatorTree, Rooted, control_dependence_graph,
         detect_patterns, verify_view,
     };
 
@@ -202,10 +202,10 @@ fn widened_algorithms_run_on_rooted_consumer_views() {
     assert_eq!(metrics.max_nesting_depth, 1);
 
     let dominators = DominatorTree::compute(&rooted);
-    let loops = detect_loops(&rooted, &dominators);
-    assert_eq!(loops.len(), 1);
-    assert_eq!(loops[0].header, merge);
-    assert!(loops[0].body.contains(&feedback));
+    let loops = LoopForest::compute(&rooted, &dominators);
+    assert_eq!(loops.loop_count(), 1);
+    let lp = loops.loop_of_header(merge).expect("merge heads the loop");
+    assert!(loops.contains(lp, feedback));
 
     let patterns = detect_patterns(&graph);
     assert!(patterns.iter().any(|p| matches!(

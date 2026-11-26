@@ -72,7 +72,7 @@ use super::loop_forest::LoopForest;
 use super::network_flow::{ArcId, FlowError, FlowNetwork};
 use super::view::{DenseId, RootedView};
 use crate::block::BlockId;
-use crate::edge::EdgeId;
+use crate::edge::{EdgeId, KindedEdge};
 use crate::identity::{NO_INDEX, slot, word};
 
 /// The capacity of an arc that any amount may take.
@@ -157,6 +157,7 @@ impl<N: DenseId, E: DenseId> InferredCounts<N, E> {
     ) -> Result<Self, FlowError>
     where
         G: RootedView<NodeId = N> + EdgeView<EdgeId = E>,
+        G::EdgeData: KindedEdge,
     {
         assert!(
             costs.increase >= 0 && costs.decrease >= 0,
@@ -229,6 +230,7 @@ fn expected_counts<G>(
 ) -> Vec<i64>
 where
     G: RootedView + EdgeView,
+    G::EdgeData: KindedEdge,
 {
     let dominators = DominatorTree::compute(graph);
     let loops = LoopForest::compute(graph, &dominators);

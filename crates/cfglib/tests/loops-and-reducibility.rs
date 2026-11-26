@@ -4,14 +4,17 @@
 use std::collections::BTreeSet;
 
 use cfglib::{
-    BlockId, Cfg, CfgMetrics, DominatorTree, EdgeKind, GraphMetrics, IntervalAnalysis,
-    LoopNestingTree, NodeOrder, block_nesting_depths, canonicalize_loops, cfg_block_nesting_depths,
-    detect_loops, detect_loops_tagged, find_back_edges, insert_preheader, is_reducible,
-    loop_exit_blocks, make_reducible, verify,
+    BlockId, Cfg, CfgMetrics, DominatorTree, EdgeKind, GraphMetrics, LoopForest, NodeOrder,
+    canonicalize_loops, find_back_edges, insert_preheader, is_reducible, make_reducible, verify,
 };
 
 fn set(blocks: impl IntoIterator<Item = BlockId>) -> BTreeSet<BlockId> {
     blocks.into_iter().collect()
+}
+
+/// The loops of `cfg` as it is now.
+fn loops_of<E>(cfg: &Cfg<u32, E>) -> LoopForest {
+    LoopForest::compute(cfg, &DominatorTree::compute(cfg))
 }
 
 #[test]
@@ -24,12 +27,12 @@ fn a_dead_predecessor_is_not_part_of_the_loop_it_feeds() {
     cfg.add_edge(body, header, EdgeKind::Back);
     cfg.add_edge(dead, body, EdgeKind::Fallthrough);
 
-    let dom = DominatorTree::compute(&cfg);
-    let loops = detect_loops(&cfg, &dom);
-    assert_eq!(loops.len(), 1);
-    assert_eq!(loops[0].body, set([header, body]));
+    let loops = loops_of(&cfg);
+    assert_eq!(loops.loop_count(), 1);
+    let lp = loops.loop_of_header(header).expect("header heads the loop");
+    assert_eq!(loops.body(lp).collect::<BTreeSet<_>>(), set([header, body]));
 
-    let depths = block_nesting_depths(&cfg);
+    let depths = loops.node_depths();
     assert_eq!(depths[header.index()], 1);
     assert_eq!(depths[body.index()], 1);
     assert_eq!(depths[dead.index()], 0, "dead code is in no loop");
@@ -46,10 +49,9 @@ fn unreachable_code_has_no_loops_however_it_branches() {
 
     let dom = DominatorTree::compute(&cfg);
     assert_eq!(find_back_edges(&cfg, &dom), Vec::new());
-    assert_eq!(detect_loops_tagged(&cfg, &dom), Vec::new());
-    for depths in [block_nesting_depths(&cfg), cfg_block_nesting_depths(&cfg)] {
-        assert_eq!(depths, [0; 4]);
-    }
+    let loops = LoopForest::compute(&cfg, &dom);
+    assert!(loops.is_empty());
+    assert_eq!(loops.node_depths(), [0; 4]);
 }
 
 #[test]
@@ -67,14 +69,14 @@ fn a_tagged_irreducible_loop_covers_its_cycle_and_nothing_before_it() {
     cfg.add_edge(y, h, EdgeKind::Back);
 
     let dom = DominatorTree::compute(&cfg);
-    assert_eq!(detect_loops(&cfg, &dom), Vec::new());
-    let loops = detect_loops_tagged(&cfg, &dom);
-    assert_eq!(loops.len(), 1);
-    assert_eq!(loops[0].header, h);
-    assert_eq!(loops[0].latches, set([y]));
-    assert_eq!(loops[0].body, set([h, x, y]));
+    assert!(!dom.dominates(h, y), "dominance cannot see the loop");
+    let loops = LoopForest::compute(&cfg, &dom);
+    assert_eq!(loops.loop_count(), 1);
+    let lp = loops.loop_of_header(h).expect("the tag makes `h` a header");
+    assert_eq!(loops.latches(lp), [y]);
+    assert_eq!(loops.body(lp).collect::<BTreeSet<_>>(), set([h, x, y]));
 
-    let depths = cfg_block_nesting_depths(&cfg);
+    let depths = loops.node_depths();
     assert_eq!(depths[entry.index()], 0);
     assert_eq!(depths[h.index()], 1);
     assert_eq!(depths[x.index()], 1);
@@ -117,30 +119,22 @@ fn nested_loops_form_a_tree_whose_depths_the_loops_share() {
         body,
         exit,
     } = nested_loops();
-    let dom = DominatorTree::compute(&cfg);
-    let loops = detect_loops(&cfg, &dom);
+    let loops = loops_of(&cfg);
     assert_eq!(
-        loops.iter().map(|lp| lp.header).collect::<Vec<_>>(),
+        loops.loops().map(|lp| loops.header(lp)).collect::<Vec<_>>(),
         [outer, inner],
-        "outermost first"
+        "by header"
     );
 
-    let tree = LoopNestingTree::compute(&loops);
-    assert_eq!(tree.roots(), [0]);
-    assert_eq!(tree.nodes[1].parent, Some(0));
-    assert_eq!(tree.nodes[0].children, [1]);
-    for (index, lp) in loops.iter().enumerate() {
-        assert_eq!(
-            lp.depth,
-            tree.depth(index),
-            "depth of the loop at {:?}",
-            lp.header
-        );
-    }
-    assert_eq!(tree.innermost_loop(body), Some(1));
-    assert_eq!(tree.innermost_loop(outer), Some(0));
-    assert_eq!(tree.innermost_loop(exit), None);
-    assert_eq!(tree.innermost_loop(inner), Some(1));
+    let [outer_loop, inner_loop] =
+        [outer, inner].map(|header| loops.loop_of_header(header).expect("a header"));
+    assert_eq!(loops.parent(outer_loop), None);
+    assert_eq!(loops.parent(inner_loop), Some(outer_loop));
+    assert_eq!([outer_loop, inner_loop].map(|lp| loops.depth(lp)), [0, 1]);
+    assert_eq!(loops.innermost(body), Some(inner_loop));
+    assert_eq!(loops.innermost(outer), Some(outer_loop));
+    assert_eq!(loops.innermost(exit), None);
+    assert_eq!(loops.innermost(inner), Some(inner_loop));
 }
 
 #[test]
@@ -154,15 +148,21 @@ fn an_irreducible_cycle_tagged_both_ways_nests_without_hanging() {
     cfg.add_edge(b1, b2, EdgeKind::Back);
     cfg.add_edge(b2, b1, EdgeKind::Back);
 
-    let dom = DominatorTree::compute(&cfg);
-    let loops = detect_loops_tagged(&cfg, &dom);
-    assert_eq!(loops.len(), 2);
-    assert_eq!(loops[0].body, loops[1].body);
-
-    let tree = LoopNestingTree::compute(&loops);
-    assert_eq!(tree.roots(), [0, 1], "neither loop contains the other");
-    assert!(tree.nodes.iter().all(|node| node.depth == 0));
-    assert_eq!(cfg_block_nesting_depths(&cfg), [0, 1, 1]);
+    let loops = loops_of(&cfg);
+    assert_eq!(loops.loop_count(), 2);
+    let [first, second] =
+        [b1, b2].map(|header| loops.loop_of_header(header).expect("a tagged header"));
+    assert_eq!(
+        loops.body(first).collect::<BTreeSet<_>>(),
+        loops.body(second).collect::<BTreeSet<_>>()
+    );
+    assert_eq!(
+        [first, second].map(|lp| loops.parent(lp)),
+        [None, None],
+        "neither loop contains the other"
+    );
+    assert!(loops.loops().all(|lp| loops.depth(lp) == 0));
+    assert_eq!(loops.node_depths(), [0, 1, 1]);
     assert_eq!(CfgMetrics::compute(&cfg).graph.max_nesting_depth, 1);
 }
 
@@ -176,7 +176,7 @@ fn the_deepest_loop_is_the_deepest_block() {
         exit,
     } = nested_loops();
 
-    let depths = block_nesting_depths(&cfg);
+    let depths = loops_of(&cfg).node_depths();
     assert_eq!(depths[outer.index()], 1);
     assert_eq!(depths[inner.index()], 2);
     assert_eq!(depths[body.index()], 2);
@@ -215,7 +215,6 @@ fn metrics_count_live_blocks_whether_or_not_the_store_was_compacted() {
 
     let before = CfgMetrics::compute(&cfg);
     assert_eq!(before.graph.node_count, cfg.block_count());
-    assert_eq!(before.graph.unreachable_node_count, 0);
     assert_eq!(before.graph.reachable_node_count, before.graph.node_count);
 
     cfg.compact(NodeOrder::Insertion);
@@ -253,9 +252,9 @@ fn a_preheader_takes_over_the_entering_edges_with_their_identity_and_payload() {
     cfg.add_edge(header, done, EdgeKind::ConditionalFalse);
 
     let before: Vec<_> = cfg.outgoing(entry).collect();
-    let dom = DominatorTree::compute(&cfg);
-    let lp = detect_loops(&cfg, &dom).remove(0);
-    let preheader = insert_preheader(&mut cfg, &lp).expect("two entries need a preheader");
+    let loops = loops_of(&cfg);
+    let lp = loops.loop_of_header(header).expect("header heads the loop");
+    let preheader = insert_preheader(&mut cfg, &loops, lp).expect("two entries need a preheader");
 
     assert_eq!(before, [hot, to_done, to_side]);
     assert_eq!(
@@ -291,7 +290,7 @@ fn canonicalizing_gives_every_entered_loop_a_dedicated_preheader() {
         .preheader
         .expect("the loop is entered from outside");
     assert_eq!(cfg.successors(preheader).collect::<Vec<_>>(), [header]);
-    assert_eq!(canonical[0].exits, set([exit]));
+    assert_eq!(canonical[0].exits, [exit]);
     assert!(verify(&cfg).is_ok());
 
     // Canonical form is stable: the same loop, and nothing left to insert.
@@ -299,7 +298,7 @@ fn canonicalizing_gives_every_entered_loop_a_dedicated_preheader() {
     let again = canonicalize_loops(&mut cfg, &dom);
     assert_eq!(again.len(), 1);
     assert_eq!(again[0].preheader, Some(preheader));
-    assert_eq!(again[0].natural_loop.body, canonical[0].natural_loop.body);
+    assert_eq!(again[0], canonical[0]);
 }
 
 #[test]
@@ -319,7 +318,7 @@ fn a_loop_headed_by_the_entry_has_no_preheader() {
 }
 
 #[test]
-fn canonicalized_nested_loops_report_current_bodies_and_exits() {
+fn canonicalized_nested_loops_report_current_exits() {
     // outer -> {inner, side}, side -> inner: the inner header has two entries,
     // and its preheader lies inside the outer loop. A second loop follows the
     // first, entered from the first loop's exit and from the entry.
@@ -341,76 +340,29 @@ fn canonicalized_nested_loops_report_current_bodies_and_exits() {
 
     let canonical = canonicalize_loops(&mut cfg, &dom);
 
-    // What canonicalization reports is what detection finds afterwards.
-    let dom = DominatorTree::compute(&cfg);
-    let detected = detect_loops_tagged(&cfg, &dom);
-    assert_eq!(canonical.len(), detected.len());
+    // What canonicalization reports is what the loops found afterwards say.
+    let loops = loops_of(&cfg);
+    assert_eq!(canonical.len(), loops.loop_count());
     for report in &canonical {
-        let now = detected
-            .iter()
-            .find(|lp| lp.header == report.natural_loop.header)
+        let now = loops
+            .loop_of_header(report.header)
             .expect("the loop is still there");
         assert_eq!(
-            report.natural_loop.body, now.body,
-            "body of {:?}",
-            now.header
-        );
-        assert_eq!(
             report.exits,
-            loop_exit_blocks(&cfg, now),
+            loops.exits(&cfg, now),
             "exits of {:?}",
-            now.header
+            report.header
         );
         let preheader = report
             .preheader
             .expect("every header here is entered from outside");
-        assert_eq!(cfg.successors(preheader).collect::<Vec<_>>(), [now.header]);
+        assert_eq!(
+            cfg.successors(preheader).collect::<Vec<_>>(),
+            [report.header]
+        );
+        assert!(!loops.contains(now, preheader));
     }
     assert!(verify(&cfg).is_ok());
-}
-
-#[test]
-fn intervals_partition_the_blocks_the_entry_reaches() {
-    // entry -> header <-> body -> exit, and a dead block into the exit.
-    let mut cfg = Cfg::<u32>::new();
-    let [header, body, exit, dead] = [(); 4].map(|()| cfg.new_block());
-    cfg.add_edge(cfg.entry(), header, EdgeKind::Fallthrough);
-    cfg.add_edge(header, body, EdgeKind::ConditionalTrue);
-    cfg.add_edge(body, header, EdgeKind::Back);
-    cfg.add_edge(header, exit, EdgeKind::ConditionalFalse);
-    cfg.add_edge(dead, exit, EdgeKind::Fallthrough);
-
-    let analysis = IntervalAnalysis::compute(&cfg);
-
-    let covered: BTreeSet<BlockId> = analysis
-        .intervals
-        .iter()
-        .flat_map(|interval| interval.blocks.iter().copied())
-        .collect();
-    assert_eq!(covered, set([cfg.entry(), header, body, exit]));
-    assert_eq!(
-        analysis
-            .intervals
-            .iter()
-            .map(|i| i.blocks.len())
-            .sum::<usize>(),
-        covered.len(),
-        "no block is in two intervals"
-    );
-    assert_eq!(analysis.intervals[0].header, cfg.entry());
-}
-
-#[test]
-fn a_dead_block_does_not_split_an_interval() {
-    let mut cfg = Cfg::<u32>::new();
-    let [join, dead] = [(); 2].map(|()| cfg.new_block());
-    cfg.add_edge(cfg.entry(), join, EdgeKind::Fallthrough);
-    cfg.add_edge(dead, join, EdgeKind::Fallthrough);
-
-    let analysis = IntervalAnalysis::compute(&cfg);
-
-    assert_eq!(analysis.intervals.len(), 1);
-    assert_eq!(analysis.intervals[0].blocks, set([cfg.entry(), join]));
 }
 
 #[test]
@@ -424,9 +376,9 @@ fn splitting_makes_an_irreducible_cfg_reducible() {
     cfg.add_edge(b, a, EdgeKind::Fallthrough);
     assert!(!is_reducible(&cfg, &DominatorTree::compute(&cfg)));
 
-    let split = make_reducible(&mut cfg);
+    let copies = make_reducible(&mut cfg);
 
-    assert!(split > 0);
+    assert_ne!(copies.len(), 0);
     assert!(is_reducible(&cfg, &DominatorTree::compute(&cfg)));
     assert!(verify(&cfg).is_ok());
 }
@@ -439,8 +391,9 @@ fn a_back_tag_that_closes_no_cycle_is_not_a_loop() {
     cfg.add_edge(cfg.entry(), sink, EdgeKind::Back);
     let dom = DominatorTree::compute(&cfg);
 
-    assert_eq!(detect_loops_tagged(&cfg, &dom), Vec::new());
-    assert_eq!(cfg_block_nesting_depths(&cfg), [0, 0]);
+    let loops = LoopForest::compute(&cfg, &dom);
+    assert!(loops.is_empty());
+    assert_eq!(loops.node_depths(), [0, 0]);
     assert_eq!(CfgMetrics::compute(&cfg).graph.max_nesting_depth, 0);
 }
 
@@ -463,10 +416,10 @@ fn make_reducible_finishes_on_a_cycle_whose_witness_is_not_an_entry() {
     assert!(!is_reducible(&cfg, &DominatorTree::compute(&cfg)));
     let blocks_before = cfg.block_count();
 
-    let duplicated = make_reducible(&mut cfg);
+    let copies = make_reducible(&mut cfg);
 
-    assert!(duplicated > 0);
-    assert_eq!(cfg.block_count(), blocks_before + duplicated);
+    assert_ne!(copies.len(), 0);
+    assert_eq!(cfg.block_count(), blocks_before + copies.len());
     assert!(is_reducible(&cfg, &DominatorTree::compute(&cfg)));
     assert!(verify(&cfg).is_ok());
     // The two edges out of the entry keep their payloads and order.
@@ -476,8 +429,6 @@ fn make_reducible_finishes_on_a_cycle_whose_witness_is_not_an_entry() {
         .collect();
     assert_eq!(from_entry, [Route::Hot, Route::Cold]);
 }
-
-use cfglib::LoopForest;
 
 /// `entry -> outer`; `outer -> middle` or `exit`; `middle -> inner` or
 /// `middle_latch`; `inner <-> inner_body`; the latches return to their headers;
@@ -523,7 +474,7 @@ fn nested_and_sibling() -> (Cfg<u32>, [BlockId; 8]) {
 }
 
 #[test]
-fn the_forest_states_what_the_flat_loops_and_the_nesting_tree_state() {
+fn the_forest_states_the_nesting_rule() {
     let (
         cfg,
         [
@@ -539,10 +490,9 @@ fn the_forest_states_what_the_flat_loops_and_the_nesting_tree_state() {
     ) = nested_and_sibling();
     let dom = DominatorTree::compute(&cfg);
 
-    let forest = LoopForest::compute_tagged(&cfg, &dom);
+    let forest = LoopForest::compute(&cfg, &dom);
 
-    assert_eq!(forest.natural_loops(), detect_loops_tagged(&cfg, &dom));
-    assert_eq!(forest.len(), 4);
+    assert_eq!(forest.loop_count(), 4);
     let [outer_loop, middle_loop, inner_loop, again_loop] =
         [outer, middle, inner, again].map(|header| {
             forest
@@ -566,7 +516,7 @@ fn the_forest_states_what_the_flat_loops_and_the_nesting_tree_state() {
         forest.body(middle_loop).collect::<BTreeSet<_>>(),
         set([middle, inner, inner_body, middle_latch])
     );
-    assert_eq!(forest.body_len(outer_loop), 5);
+    assert_eq!(forest.body_count(outer_loop), 5);
     assert!(forest.contains(outer_loop, inner_body));
     assert!(!forest.contains(inner_loop, middle));
     assert!(!forest.contains(outer_loop, exit));
@@ -581,33 +531,15 @@ fn the_forest_states_what_the_flat_loops_and_the_nesting_tree_state() {
     assert!(!forest.encloses(inner_loop, middle_loop));
     assert!(!forest.encloses(outer_loop, again_loop));
     assert!(!forest.encloses(again_loop, outer_loop));
-
-    // The nesting tree of the flat loops agrees loop for loop.
-    let flat = forest.natural_loops();
-    let tree = LoopNestingTree::compute(&flat);
-    for (position, lp) in flat.iter().enumerate() {
-        let id = forest
-            .loop_of_header(lp.header)
-            .expect("a loop of the forest");
-        assert_eq!(tree.depth(position), forest.depth(id));
-        assert_eq!(
-            tree.nodes[position]
-                .parent
-                .map(|parent| flat[parent].header),
-            forest.parent(id).map(|parent| forest.header(parent)),
-        );
-    }
-
     let depths = forest.node_depths();
     assert_eq!(depths.len(), cfg.block_ids().count());
-    assert_eq!(depths, cfg_block_nesting_depths(&cfg));
     assert_eq!(depths[inner_body.index()], 3);
     assert_eq!(depths[middle_latch.index()], 2);
     assert_eq!(depths[exit.index()], 0);
 }
 
 #[test]
-fn the_untagged_forest_misses_what_dominance_cannot_prove_like_detect_loops() {
+fn a_tag_names_a_loop_dominance_cannot_prove() {
     // Two entries into one cycle: dominance finds no loop, and the tag names one.
     let mut cfg = Cfg::<u32>::new();
     let [left, right] = [(); 2].map(|()| cfg.new_block());
@@ -616,12 +548,11 @@ fn the_untagged_forest_misses_what_dominance_cannot_prove_like_detect_loops() {
     cfg.add_edge(left, right, EdgeKind::Fallthrough);
     cfg.add_edge(right, left, EdgeKind::Back);
     let dom = DominatorTree::compute(&cfg);
+    assert!(!dom.dominates(left, right) && !dom.dominates(right, left));
 
-    let untagged = LoopForest::compute(&cfg, &dom);
-    let tagged = LoopForest::compute_tagged(&cfg, &dom);
+    let tagged = LoopForest::compute(&cfg, &dom);
 
-    assert!(untagged.is_empty());
-    assert_eq!(untagged.natural_loops(), detect_loops(&cfg, &dom));
+    assert_eq!(tagged.loop_count(), 1);
     let cycle = tagged.loop_of_header(left).expect("the tag names the loop");
     assert_eq!(
         tagged.body(cycle).collect::<BTreeSet<_>>(),
@@ -654,9 +585,9 @@ fn a_hundred_thousand_nested_loops_are_found_and_measured() {
     }
     let dom = DominatorTree::compute(&cfg);
 
-    let forest = LoopForest::compute_tagged(&cfg, &dom);
+    let forest = LoopForest::compute(&cfg, &dom);
 
-    assert_eq!(forest.len(), depth);
+    assert_eq!(forest.loop_count(), depth);
     assert_eq!(forest.max_nesting_depth(), depth);
     let outermost = forest
         .loop_of_header(headers[0])
@@ -665,7 +596,7 @@ fn a_hundred_thousand_nested_loops_are_found_and_measured() {
         .loop_of_header(headers[depth - 1])
         .expect("the last header heads a loop");
     assert_eq!(forest.depth(innermost), depth - 1);
-    assert_eq!(forest.body_len(outermost), 2 * depth);
+    assert_eq!(forest.body_count(outermost), 2 * depth);
     assert!(forest.contains(outermost, latches[depth - 1]));
     assert!(forest.encloses(outermost, innermost));
     assert!(!forest.encloses(innermost, outermost));
@@ -673,7 +604,7 @@ fn a_hundred_thousand_nested_loops_are_found_and_measured() {
 
     // The metrics read the forest too, so they scale with it.
     assert_eq!(CfgMetrics::compute(&cfg).graph.max_nesting_depth, depth);
-    let depths = cfg_block_nesting_depths(&cfg);
+    let depths = forest.node_depths();
     assert_eq!(depths[headers[depth - 1].index()], depth);
     assert_eq!(depths[exit.index()], 0);
 }

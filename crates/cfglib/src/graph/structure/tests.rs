@@ -1,29 +1,36 @@
 use super::*;
 use crate::builder::CfgBuilder;
+use crate::cfg::Cfg;
 use crate::flow::FlowEffect;
-use crate::graph::dominator::DominatorTree;
+use crate::graph::loop_forest::LoopForest;
+use crate::test_util::loops::{NaturalLoop, natural_loops, nesting};
 use crate::test_util::{MockInst, ff};
+use alloc::collections::BTreeSet;
 use alloc::vec;
 
-/// The loops of all the code, live and dead, from the forest. The tests ask the
-/// forest rather than a function of this module, which has no other reader once
-/// the structurer holds a [`LoopForest`] itself.
-fn detect_all_loops_tagged<G>(
-    graph: &G,
-    dom: &DominatorTree<G::NodeId>,
-) -> Vec<NaturalLoop<G::NodeId>>
+/// The loops of the code the root reaches, as owned sets.
+fn loops_of<G>(graph: &G, dom: &DominatorTree<G::NodeId>) -> Vec<NaturalLoop<G::NodeId>>
+where
+    G: EdgeView,
+    G::EdgeData: KindedEdge,
+{
+    natural_loops(&LoopForest::compute(graph, dom))
+}
+
+/// The loops of all the code, live and dead, as owned sets.
+fn all_loops_of<G>(graph: &G, dom: &DominatorTree<G::NodeId>) -> Vec<NaturalLoop<G::NodeId>>
 where
     G: RootedView + EdgeView,
     G::EdgeData: KindedEdge,
 {
-    LoopForest::compute_all_tagged(graph, dom).natural_loops()
+    natural_loops(&LoopForest::compute_all(graph, dom))
 }
 
 #[test]
 fn no_loops_in_linear_cfg() {
     let cfg = CfgBuilder::build(vec![ff("a"), ff("b"), ff("c")]).unwrap();
     let dom = DominatorTree::compute(&cfg);
-    let loops = detect_loops(&cfg, &dom);
+    let loops = loops_of(&cfg, &dom);
     assert_eq!(loops.len(), 0);
 }
 
@@ -37,7 +44,7 @@ fn simple_loop_detected() {
     ])
     .unwrap();
     let dom = DominatorTree::compute(&cfg);
-    let loops = detect_loops(&cfg, &dom);
+    let loops = loops_of(&cfg, &dom);
     assert_eq!(loops.len(), 1);
     assert!(!loops[0].body.is_empty(), "loop body is non-empty");
 }
@@ -61,7 +68,7 @@ fn loops_with_one_header_merge_every_latch_body() {
     cfg.add_edge(right_latch, header, EdgeKind::Back);
 
     let dom = DominatorTree::compute(&cfg);
-    let loops = detect_loops(&cfg, &dom);
+    let loops = loops_of(&cfg, &dom);
 
     assert_eq!(loops.len(), 1);
     assert_eq!(loops[0].header, header);
@@ -87,7 +94,7 @@ fn nested_loops_have_depth() {
     ])
     .unwrap();
     let dom = DominatorTree::compute(&cfg);
-    let loops = detect_loops(&cfg, &dom);
+    let loops = loops_of(&cfg, &dom);
     assert_eq!(loops.len(), 2);
     // Outermost first (depth 0), inner second (depth 1).
     assert_eq!(loops[0].depth, 0);
@@ -104,7 +111,7 @@ fn loop_with_break_still_detected() {
     ])
     .unwrap();
     let dom = DominatorTree::compute(&cfg);
-    let loops = detect_loops(&cfg, &dom);
+    let loops = loops_of(&cfg, &dom);
     assert_eq!(loops.len(), 1);
 }
 
@@ -121,17 +128,22 @@ fn tagged_back_edge_survives_without_dominance() {
     cfg.add_edge(b2, b1, EdgeKind::Back);
 
     let dom = DominatorTree::compute(&cfg);
-    assert_eq!(find_back_edges(&cfg, &dom).len(), 0);
-    let tagged = find_back_edges_tagged(&cfg, &dom);
-    assert_eq!(tagged.len(), 1);
-    assert_eq!(tagged[0].header, b1);
-    let loops = detect_loops_tagged(&cfg, &dom);
+    assert!(!dom.dominates(b1, b2), "dominance alone cannot see it");
+    let backs = find_back_edges(&cfg, &dom);
+    assert_eq!(
+        backs,
+        [BackEdge {
+            tail: b2,
+            header: b1
+        }]
+    );
+    let loops = loops_of(&cfg, &dom);
     assert_eq!(loops.len(), 1);
     assert!(loops[0].body.contains(&b2));
 }
 
 #[test]
-fn detected_depth_is_the_depth_in_the_nesting_tree() {
+fn the_depth_of_a_loop_is_its_depth_in_the_nesting_rule() {
     let cfg = CfgBuilder::build(vec![
         MockInst(FlowEffect::LoopOpen, "outer"),
         MockInst(FlowEffect::LoopOpen, "inner"),
@@ -144,11 +156,11 @@ fn detected_depth_is_the_depth_in_the_nesting_tree() {
     ])
     .unwrap();
     let dom = DominatorTree::compute(&cfg);
-    let loops = detect_loops(&cfg, &dom);
-    let tree = crate::graph::loop_nest::LoopNestingTree::compute(&loops);
+    let loops = loops_of(&cfg, &dom);
+    let depths = nesting(&loops).depths;
     assert_eq!(loops.len(), 2);
-    for (index, lp) in loops.iter().enumerate() {
-        assert_eq!(lp.depth, tree.depth(index), "loop at {:?}", lp.header);
+    for (lp, depth) in loops.iter().zip(depths) {
+        assert_eq!(lp.depth, depth, "loop at {:?}", lp.header);
     }
 }
 
@@ -165,11 +177,10 @@ fn irreducible_loops_over_one_cycle_are_siblings_not_each_others_parents() {
     cfg.add_edge(b2, b1, EdgeKind::Back);
 
     let dom = DominatorTree::compute(&cfg);
-    let loops = detect_loops_tagged(&cfg, &dom);
+    let loops = loops_of(&cfg, &dom);
     assert_eq!(loops.len(), 2);
     assert!(loops.iter().all(|lp| lp.depth == 0));
-    let tree = crate::graph::loop_nest::LoopNestingTree::compute(&loops);
-    assert_eq!(tree.roots(), [0, 1]);
+    assert_eq!(nesting(&loops).parents, [None, None]);
 }
 
 #[test]
@@ -185,7 +196,7 @@ fn tagged_irreducible_loop_body_stays_inside_the_cycle() {
     cfg.add_edge(b2, b1, EdgeKind::Back);
 
     let dom = DominatorTree::compute(&cfg);
-    let loops = detect_loops_tagged(&cfg, &dom);
+    let loops = loops_of(&cfg, &dom);
     assert_eq!(loops.len(), 2);
     for lp in &loops {
         assert_eq!(lp.body, BTreeSet::from([b1, b2]), "header {:?}", lp.header);
@@ -205,7 +216,7 @@ fn tagged_irreducible_loop_keeps_every_block_of_the_cycle() {
     cfg.add_edge(y, h, EdgeKind::Back);
 
     let dom = DominatorTree::compute(&cfg);
-    let loops = detect_loops_tagged(&cfg, &dom);
+    let loops = loops_of(&cfg, &dom);
     assert_eq!(loops.len(), 1);
     assert_eq!(loops[0].header, h);
     assert_eq!(loops[0].body, BTreeSet::from([h, x, y]));
@@ -221,10 +232,9 @@ fn dead_predecessors_are_not_part_of_a_loop_body() {
     cfg.add_edge(dead, body, EdgeKind::Fallthrough);
 
     let dom = DominatorTree::compute(&cfg);
-    for loops in [detect_loops(&cfg, &dom), detect_loops_tagged(&cfg, &dom)] {
-        assert_eq!(loops.len(), 1);
-        assert_eq!(loops[0].body, BTreeSet::from([header, body]));
-    }
+    let loops = loops_of(&cfg, &dom);
+    assert_eq!(loops.len(), 1);
+    assert_eq!(loops[0].body, BTreeSet::from([header, body]));
 }
 
 #[test]
@@ -241,8 +251,7 @@ fn unreachable_code_has_no_back_edges() {
 
     let dom = DominatorTree::compute(&cfg);
     assert_eq!(find_back_edges(&cfg, &dom), Vec::new());
-    assert_eq!(find_back_edges_tagged(&cfg, &dom), Vec::new());
-    assert_eq!(detect_loops_tagged(&cfg, &dom), Vec::new());
+    assert_eq!(loops_of(&cfg, &dom), Vec::new());
 }
 
 #[test]
@@ -275,13 +284,13 @@ fn if_else_no_loops() {
     ])
     .unwrap();
     let dom = DominatorTree::compute(&cfg);
-    let loops = detect_loops(&cfg, &dom);
+    let loops = loops_of(&cfg, &dom);
     assert_eq!(loops.len(), 0);
     assert!(is_reducible(&cfg, &dom));
 }
 
 #[test]
-fn loop_exit_blocks_found() {
+fn loop_exits_found() {
     let cfg = CfgBuilder::build(vec![
         MockInst(FlowEffect::LoopOpen, "loop"),
         MockInst(FlowEffect::ConditionalBreak, "breakc"),
@@ -291,238 +300,15 @@ fn loop_exit_blocks_found() {
     ])
     .unwrap();
     let dom = DominatorTree::compute(&cfg);
-    let loops = detect_loops(&cfg, &dom);
-    assert_ne!(loops.len(), 0);
-    let exits = loop_exit_blocks(&cfg, &loops[0]);
+    let forest = LoopForest::compute(&cfg, &dom);
+    let lp = forest.loops().next().expect("one loop");
+    let exits = forest.exits(&cfg, lp);
     assert!(
         !exits.is_empty(),
         "loop should have at least one exit block"
     );
-}
-
-#[test]
-fn canonicalize_loops_adds_exits() {
-    let mut cfg = CfgBuilder::build(vec![
-        MockInst(FlowEffect::LoopOpen, "loop"),
-        MockInst(FlowEffect::ConditionalBreak, "breakc"),
-        ff("body"),
-        MockInst(FlowEffect::LoopClose, "endloop"),
-        MockInst(FlowEffect::Return, "ret"),
-    ])
-    .unwrap();
-    let dom = DominatorTree::compute(&cfg);
-    let canonical = canonicalize_loops(&mut cfg, &dom);
-    assert!(!canonical.is_empty());
-    assert!(!canonical[0].exits.is_empty());
-}
-
-/// `entry -> header` twice over (a weighted conditional arm and a weighted
-/// switch arm through `side`), the loop `header <-> body`, and the exits.
-struct TwoEntryLoop {
-    cfg: Cfg<u32>,
-    header: BlockId,
-    side: BlockId,
-    other: BlockId,
-    conditional: crate::edge::EdgeId,
-    unrelated: crate::edge::EdgeId,
-    through_side: crate::edge::EdgeId,
-    side_to_header: crate::edge::EdgeId,
-}
-
-fn two_entry_loop() -> TwoEntryLoop {
-    let mut cfg = Cfg::<u32>::new();
-    let entry = cfg.entry();
-    let [header, body, side, other] = [(); 4].map(|()| cfg.new_block());
-    let conditional = cfg.add_weighted_edge(entry, header, EdgeKind::ConditionalTrue, 0.25);
-    let unrelated = cfg.add_edge(entry, other, EdgeKind::ConditionalFalse);
-    let through_side = cfg.add_edge(entry, side, EdgeKind::SwitchCase);
-    let side_to_header = cfg.add_weighted_edge(side, header, EdgeKind::Fallthrough, 0.75);
-    cfg.add_edge(header, body, EdgeKind::ConditionalTrue);
-    cfg.add_edge(body, header, EdgeKind::Back);
-    cfg.add_edge(header, other, EdgeKind::ConditionalFalse);
-    TwoEntryLoop {
-        cfg,
-        header,
-        side,
-        other,
-        conditional,
-        unrelated,
-        through_side,
-        side_to_header,
-    }
-}
-
-#[test]
-fn inserting_a_preheader_redirects_the_entering_edges_in_place() {
-    let TwoEntryLoop {
-        mut cfg,
-        header,
-        side,
-        other,
-        conditional,
-        unrelated,
-        through_side,
-        side_to_header,
-        ..
-    } = two_entry_loop();
-    let entry = cfg.entry();
-    let before: Vec<_> = cfg.outgoing(entry).collect();
-    let dom = DominatorTree::compute(&cfg);
-    let lp = detect_loops(&cfg, &dom).remove(0);
-
-    let preheader = insert_preheader(&mut cfg, &lp).expect("two entries need a preheader");
-
-    assert_eq!(
-        cfg.outgoing(entry).collect::<Vec<_>>(),
-        before,
-        "the entry keeps its edges in order"
-    );
-    assert_eq!(before, [conditional, unrelated, through_side]);
-    assert_eq!(cfg.edge(conditional).target(), preheader);
-    assert_eq!(cfg.edge(conditional).kind(), EdgeKind::ConditionalTrue);
-    assert_eq!(cfg.edge(conditional).weight(), Some(0.25));
-    assert_eq!(cfg.edge(unrelated).target(), other);
-    assert_eq!(cfg.edge(side_to_header).source(), side);
-    assert_eq!(cfg.edge(side_to_header).target(), preheader);
-    assert_eq!(cfg.edge(side_to_header).weight(), Some(0.75));
-
-    let outside: Vec<_> = cfg
-        .incoming(header)
-        .filter(|&edge| !lp.body.contains(&cfg.edge(edge).source()))
-        .collect();
-    assert_eq!(outside.len(), 1);
-    assert_eq!(cfg.edge(outside[0]).source(), preheader);
-    assert_eq!(cfg.edge(outside[0]).kind(), EdgeKind::Fallthrough);
-    assert_eq!(cfg.outgoing(preheader).count(), 1);
-}
-
-#[test]
-fn a_header_with_a_sole_dedicated_predecessor_needs_no_preheader() {
-    let mut cfg = Cfg::<u32>::new();
-    let [header, body] = [(); 2].map(|()| cfg.new_block());
-    cfg.add_edge(cfg.entry(), header, EdgeKind::Fallthrough);
-    cfg.add_edge(header, body, EdgeKind::ConditionalTrue);
-    cfg.add_edge(body, header, EdgeKind::Back);
-    let dom = DominatorTree::compute(&cfg);
-    let lp = detect_loops(&cfg, &dom).remove(0);
-
-    assert_eq!(insert_preheader(&mut cfg, &lp), None);
-    assert_eq!(cfg.block_count(), 3);
-}
-
-#[test]
-fn a_sole_predecessor_that_also_branches_elsewhere_is_not_a_preheader() {
-    let mut cfg = Cfg::<u32>::new();
-    let [header, body, exit] = [(); 3].map(|()| cfg.new_block());
-    cfg.add_edge(cfg.entry(), header, EdgeKind::ConditionalTrue);
-    cfg.add_edge(cfg.entry(), exit, EdgeKind::ConditionalFalse);
-    cfg.add_edge(header, body, EdgeKind::ConditionalTrue);
-    cfg.add_edge(body, header, EdgeKind::Back);
-    cfg.add_edge(header, exit, EdgeKind::ConditionalFalse);
-    let dom = DominatorTree::compute(&cfg);
-
-    let canonical = canonicalize_loops(&mut cfg, &dom);
-
-    assert_eq!(canonical.len(), 1);
-    let preheader = canonical[0]
-        .preheader
-        .expect("the loop is entered from outside");
-    assert_ne!(preheader, cfg.entry());
-    assert_eq!(cfg.successors(preheader).collect::<Vec<_>>(), [header]);
-    let outside: Vec<_> = cfg
-        .predecessors(header)
-        .filter(|block| !canonical[0].natural_loop.body.contains(block))
-        .collect();
-    assert_eq!(outside, [preheader]);
-}
-
-#[test]
-fn an_existing_dedicated_predecessor_is_reported_as_the_preheader() {
-    let mut cfg = Cfg::<u32>::new();
-    let [header, body] = [(); 2].map(|()| cfg.new_block());
-    cfg.add_edge(cfg.entry(), header, EdgeKind::Fallthrough);
-    cfg.add_edge(header, body, EdgeKind::ConditionalTrue);
-    cfg.add_edge(body, header, EdgeKind::Back);
-    let dom = DominatorTree::compute(&cfg);
-
-    let canonical = canonicalize_loops(&mut cfg, &dom);
-
-    assert_eq!(canonical[0].preheader, Some(cfg.entry()));
-    assert_eq!(cfg.block_count(), 3);
-}
-
-#[test]
-fn an_inner_preheader_joins_the_loops_around_it() {
-    // entry -> outer; outer -> {inner, side}; side -> inner; inner <-> work;
-    // work -> outer is the outer back edge; outer -> exit. The inner header has
-    // two entries, both inside the outer loop.
-    let mut cfg = Cfg::<u32>::new();
-    let [outer, inner, side, work, exit] = [(); 5].map(|()| cfg.new_block());
-    cfg.add_edge(cfg.entry(), outer, EdgeKind::Fallthrough);
-    cfg.add_edge(outer, inner, EdgeKind::ConditionalTrue);
-    cfg.add_edge(outer, side, EdgeKind::SwitchCase);
-    cfg.add_edge(outer, exit, EdgeKind::ConditionalFalse);
-    cfg.add_edge(side, inner, EdgeKind::Fallthrough);
-    cfg.add_edge(inner, work, EdgeKind::ConditionalTrue);
-    cfg.add_edge(work, inner, EdgeKind::Back);
-    cfg.add_edge(inner, outer, EdgeKind::Back);
-    let dom = DominatorTree::compute(&cfg);
-
-    let canonical = canonicalize_loops(&mut cfg, &dom);
-
-    assert_eq!(canonical.len(), 2);
-    let [outer_loop, inner_loop] = [&canonical[0], &canonical[1]];
-    assert_eq!(outer_loop.natural_loop.header, outer);
-    assert_eq!(inner_loop.natural_loop.header, inner);
-    let inner_preheader = inner_loop.preheader.expect("two entries");
-    assert!(
-        outer_loop.natural_loop.body.contains(&inner_preheader),
-        "the new block sits on the path through the outer loop"
-    );
-    assert!(!inner_loop.natural_loop.body.contains(&inner_preheader));
-    let dom = DominatorTree::compute(&cfg);
-    let recomputed = detect_loops_tagged(&cfg, &dom);
-    let outer_now = recomputed.iter().find(|lp| lp.header == outer).unwrap();
-    assert_eq!(outer_now.body, outer_loop.natural_loop.body);
-}
-
-#[test]
-fn exits_are_reported_after_every_preheader_exists() {
-    // entry -> {h1, h2}; h1 <-> b1; h1 -> h2. The second loop's preheader takes
-    // over the edge that leaves the first loop, so that edge now ends there.
-    let mut cfg = Cfg::<u32>::new();
-    let [h1, b1, h2, b2, done] = [(); 5].map(|()| cfg.new_block());
-    cfg.add_edge(cfg.entry(), h1, EdgeKind::ConditionalTrue);
-    cfg.add_edge(cfg.entry(), h2, EdgeKind::ConditionalFalse);
-    cfg.add_edge(h1, b1, EdgeKind::ConditionalTrue);
-    cfg.add_edge(b1, h1, EdgeKind::Back);
-    cfg.add_edge(h1, h2, EdgeKind::ConditionalFalse);
-    cfg.add_edge(h2, b2, EdgeKind::ConditionalTrue);
-    cfg.add_edge(b2, h2, EdgeKind::Back);
-    cfg.add_edge(h2, done, EdgeKind::ConditionalFalse);
-    let dom = DominatorTree::compute(&cfg);
-
-    let canonical = canonicalize_loops(&mut cfg, &dom);
-
-    assert_eq!(canonical.len(), 2);
-    for canonical_loop in &canonical {
-        assert_eq!(
-            canonical_loop.exits,
-            loop_exit_blocks(&cfg, &canonical_loop.natural_loop),
-            "exits of the loop at {:?}",
-            canonical_loop.natural_loop.header
-        );
-    }
-    let first = canonical
-        .iter()
-        .find(|c| c.natural_loop.header == h1)
-        .unwrap();
-    let second_preheader = canonical
-        .iter()
-        .find(|c| c.natural_loop.header == h2)
-        .and_then(|c| c.preheader)
-        .expect("the second loop has two entries");
-    assert_eq!(first.exits, BTreeSet::from([second_preheader]));
+    assert!(exits.iter().all(|&exit| !forest.contains(lp, exit)));
+    assert!(exits.is_sorted());
 }
 
 /// A cycle that survives removing every edge whose target dominates its
@@ -602,8 +388,8 @@ fn a_back_tag_on_an_edge_that_closes_no_cycle_is_not_a_back_edge() {
     cfg.add_edge(cfg.entry(), sink, EdgeKind::Back);
     let dom = DominatorTree::compute(&cfg);
 
-    assert_eq!(find_back_edges_tagged(&cfg, &dom), Vec::new());
-    assert_eq!(detect_loops_tagged(&cfg, &dom), Vec::new());
+    assert_eq!(find_back_edges(&cfg, &dom), Vec::new());
+    assert_eq!(loops_of(&cfg, &dom), Vec::new());
 }
 
 #[test]
@@ -617,10 +403,10 @@ fn a_back_tag_leaving_a_cycle_for_a_block_outside_it_is_ignored() {
     cfg.add_edge(b, exit, EdgeKind::Back);
     let dom = DominatorTree::compute(&cfg);
 
-    let backs = find_back_edges_tagged(&cfg, &dom);
+    let backs = find_back_edges(&cfg, &dom);
 
     assert_eq!(backs, [BackEdge { tail: b, header: a }]);
-    let loops = detect_loops_tagged(&cfg, &dom);
+    let loops = loops_of(&cfg, &dom);
     assert_eq!(loops.len(), 1);
     assert_eq!(loops[0].body, BTreeSet::from([a, b]));
 }
@@ -647,7 +433,7 @@ fn dead_loop() -> DeadLoop {
 }
 
 #[test]
-fn without_dead_code_every_loop_is_the_one_detect_loops_tagged_finds() {
+fn without_dead_code_every_loop_is_a_live_loop() {
     let mut cfg = Cfg::<u32>::new();
     let [head, body, exit] = [(); 3].map(|()| cfg.new_block());
     cfg.add_edge(cfg.entry(), head, EdgeKind::Fallthrough);
@@ -656,19 +442,16 @@ fn without_dead_code_every_loop_is_the_one_detect_loops_tagged_finds() {
     cfg.add_edge(body, head, EdgeKind::Back);
     let dom = DominatorTree::compute(&cfg);
 
-    assert_eq!(
-        detect_all_loops_tagged(&cfg, &dom),
-        detect_loops_tagged(&cfg, &dom)
-    );
+    assert_eq!(all_loops_of(&cfg, &dom), loops_of(&cfg, &dom));
 }
 
 #[test]
 fn dominance_within_dead_code_finds_its_loops() {
     let DeadLoop { cfg, head, tail } = dead_loop();
     let dom = DominatorTree::compute(&cfg);
-    assert_eq!(detect_loops_tagged(&cfg, &dom), Vec::new());
+    assert_eq!(loops_of(&cfg, &dom), Vec::new());
 
-    let loops = detect_all_loops_tagged(&cfg, &dom);
+    let loops = all_loops_of(&cfg, &dom);
 
     assert_eq!(loops.len(), 1);
     assert_eq!(loops[0].header, head);
@@ -687,7 +470,7 @@ fn dead_self_loops_and_tagged_loops_are_loops_too() {
     cfg.add_edge(tagged_tail, tagged_head, EdgeKind::Back);
     let dom = DominatorTree::compute(&cfg);
 
-    let headers: Vec<BlockId> = detect_all_loops_tagged(&cfg, &dom)
+    let headers: Vec<BlockId> = all_loops_of(&cfg, &dom)
         .iter()
         .map(|lp| lp.header)
         .collect();
@@ -713,7 +496,7 @@ fn nesting_among_dead_loops_counts_only_dead_loops() {
     cfg.add_edge(inner, outer, EdgeKind::Fallthrough);
     let dom = DominatorTree::compute(&cfg);
 
-    let loops = detect_all_loops_tagged(&cfg, &dom);
+    let loops = all_loops_of(&cfg, &dom);
 
     let depth_of = |header| {
         loops
@@ -747,9 +530,9 @@ fn dead_code_that_jumps_into_live_code_neither_joins_nor_closes_its_loops() {
     cfg.add_edge(feeder, head, EdgeKind::Back);
     let dom = DominatorTree::compute(&cfg);
 
-    let all = detect_all_loops_tagged(&cfg, &dom);
+    let all = all_loops_of(&cfg, &dom);
 
-    assert_eq!(all, detect_loops_tagged(&cfg, &dom));
+    assert_eq!(all, loops_of(&cfg, &dom));
     assert_eq!(all.len(), 1);
     assert_eq!(all[0].body, BTreeSet::from([head, body]));
 }
@@ -771,7 +554,7 @@ fn a_dead_loop_that_feeds_a_live_loops_body_stays_apart_from_it() {
     cfg.add_edge(side, body, EdgeKind::Jump);
     let dom = DominatorTree::compute(&cfg);
 
-    let loops = detect_all_loops_tagged(&cfg, &dom);
+    let loops = all_loops_of(&cfg, &dom);
 
     let find = |header| loops.iter().find(|lp| lp.header == header);
     let live = find(head).expect("the live loop is still found");
@@ -786,7 +569,7 @@ fn a_dead_loop_that_feeds_a_live_loops_body_stays_apart_from_it() {
 
 /// On random graphs with dead code, loops of every closing style and edges
 /// from dead code into live code: the live loops are exactly those of
-/// [`detect_loops_tagged`]; a dead loop's header, latches and body are all dead
+/// [`LoopForest::compute`]; a dead loop's header, latches and body are all dead
 /// blocks; and a dead loop's depth counts the dead loops around it and no live
 /// one.
 #[test]
@@ -810,7 +593,7 @@ fn the_loops_of_dead_code_hold_only_dead_blocks_on_random_graphs() {
             cfg.add_edge(blocks[from], blocks[to], kinds[rng.below(kinds.len())]);
         }
         let dom = DominatorTree::compute(&cfg);
-        let all = detect_all_loops_tagged(&cfg, &dom);
+        let all = all_loops_of(&cfg, &dom);
         let label = alloc::format!("seed {seed}");
 
         let live: Vec<_> = all
@@ -818,7 +601,7 @@ fn the_loops_of_dead_code_hold_only_dead_blocks_on_random_graphs() {
             .filter(|lp| dom.is_reachable(lp.header))
             .cloned()
             .collect();
-        assert_eq!(live, detect_loops_tagged(&cfg, &dom), "{label}");
+        assert_eq!(live, loops_of(&cfg, &dom), "{label}");
 
         let dead: Vec<_> = all
             .iter()
@@ -840,7 +623,7 @@ fn the_loops_of_dead_code_hold_only_dead_blocks_on_random_graphs() {
         // order, and detection lists loops by header.
         let mut by_header = dead.clone();
         by_header.sort_by_key(|lp| lp.header);
-        let depths = crate::graph::loop_nest::nesting(&by_header).depths;
+        let depths = nesting(&by_header).depths;
         for (lp, depth) in by_header.iter().zip(depths) {
             let listed = dead.iter().find(|other| other.header == lp.header);
             assert_eq!(

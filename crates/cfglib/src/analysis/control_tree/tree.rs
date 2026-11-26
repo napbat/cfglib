@@ -213,7 +213,7 @@ fn node_body_count(tables: &Tables, node: ControlNode) -> usize {
 /// A control tree: the structured form of a [`Cfg`](crate::Cfg).
 ///
 /// The tree is a fact about the CFG it was computed from, like
-/// [`LoopNestingTree`](crate::LoopNestingTree) or
+/// [`LoopForest`](crate::LoopForest) or
 /// [`DominatorTree`](crate::DominatorTree). It holds no instruction: leaves and
 /// references name [`BlockId`](crate::BlockId)s, [`EdgeId`]s,
 /// [`RegionId`](crate::RegionId)s, and, for a guard, a

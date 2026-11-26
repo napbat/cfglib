@@ -296,7 +296,7 @@ impl<I, E> Structurer<'_, I, E> {
             }
         }
         if let Some(set) = allowed.root_set()
-            && set.len() < natural.forest.body_len(lp)
+            && set.len() < natural.forest.body_count(lp)
         {
             if let Some(target) = first_exit_into(self.cfg, natural, &self.reachable, allowed, set)
             {

@@ -4,15 +4,14 @@ use std::ops::ControlFlow;
 
 use cfglib::{BlockId, canonical_hash, canonical_order, multiset_fingerprint, wl_colors};
 use cfglib::{
-    CallInfo, Cfg, Direction, DominatorTree, EdgeKind, FoldEnter, Graph, GraphView, MarkScope,
-    NodeId, OpenFold, OpenFoldConfig, Rooted, SearchConfig, SearchOrder, SearchScratch,
+    CallInfo, Cfg, Direction, DominatorTree, EdgeKind, FoldEnter, Graph, GraphView, LoopForest,
+    MarkScope, NodeId, OpenFold, OpenFoldConfig, Rooted, SearchConfig, SearchOrder, SearchScratch,
     SemanticValidator, Visit, call_graph, canonicalize_loops, condensation, condensation_of,
-    depth_first_edges, depth_first_events, depth_first_postorder, detect_loops_tagged,
-    find_back_edges_tagged, find_function, follow, follow_path, insert_preheader,
-    is_recursive_function, is_reducible, kosaraju_scc, loop_exit_blocks, min_label_relaxation,
-    open_breadth_first_events, open_breadth_first_paths, open_depth_first_events,
-    open_fold_post_order, open_search, propagate_summaries, reachable, reverse_postorder,
-    scan_predecessors, search, search_in, to_dot, to_text, topological_sort,
+    depth_first_edges, depth_first_events, depth_first_postorder, find_back_edges, find_function,
+    follow, follow_path, insert_preheader, is_recursive_function, is_reducible, kosaraju_scc,
+    min_label_relaxation, open_breadth_first_events, open_breadth_first_paths,
+    open_depth_first_events, open_fold_post_order, open_search, propagate_summaries, reachable,
+    reverse_postorder, scan_predecessors, search, search_in, to_dot, to_text, topological_sort,
     topological_sort_or_cycle, verify, verify_edge_view, verify_view, verify_with, write_dot,
     write_text,
 };
@@ -759,25 +758,24 @@ pub(super) fn call_tree_cfgs(function_count: usize) -> Vec<Cfg<CallInst>> {
 fn register_loop_structure(suite: &mut BenchmarkSuite<'_>) {
     let cfg = loop_cfg();
     let dominators = DominatorTree::compute(&cfg);
-    let loops = detect_loops_tagged(&cfg, &dominators);
-    let natural_loop = loops
-        .first()
-        .expect("benchmark loop fixture must contain a loop")
-        .clone();
+    let loops = LoopForest::compute(&cfg, &dominators);
+    let lp = loops
+        .loops()
+        .next()
+        .expect("benchmark loop fixture must contain a loop");
 
     benchmark_case!(
         suite,
-        "api_find_back_edges_tagged",
-        covers[find_back_edges_tagged],
-        || find_back_edges_tagged(&cfg, &dominators),
+        "api_find_back_edges",
+        covers[find_back_edges],
+        || find_back_edges(&cfg, &dominators),
         |edges: &Vec<_>| assert_eq!(edges.len(), 1)
     );
     benchmark_case!(
         suite,
-        "api_detect_loops_tagged",
-        covers[detect_loops_tagged],
-        || detect_loops_tagged(&cfg, &dominators),
-        |found: &Vec<_>| assert_eq!(found.len(), 1)
+        "api_loop_forest",
+        || LoopForest::compute(&cfg, &dominators),
+        |found: &LoopForest| assert_eq!(found.loop_count(), 1)
     );
     benchmark_case!(
         suite,
@@ -788,10 +786,9 @@ fn register_loop_structure(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "api_loop_exit_blocks",
-        covers[loop_exit_blocks],
-        || loop_exit_blocks(&cfg, &natural_loop),
-        |exits| assert_eq!(exits.len(), 1)
+        "api_loop_exits",
+        || loops.exits(&cfg, lp),
+        |exits: &Vec<_>| assert_eq!(exits.len(), 1)
     );
     benchmark_case!(
         suite,
@@ -799,7 +796,7 @@ fn register_loop_structure(suite: &mut BenchmarkSuite<'_>) {
         covers[insert_preheader],
         || {
             let mut candidate = cfg.clone();
-            let preheader = insert_preheader(&mut candidate, &natural_loop);
+            let preheader = insert_preheader(&mut candidate, &loops, lp);
             (candidate, preheader)
         },
         |(candidate, preheader)| {
