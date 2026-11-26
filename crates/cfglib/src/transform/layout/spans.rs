@@ -11,7 +11,6 @@
 extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::convert::Infallible;
 
 use super::RelaxError;
 use crate::graph::fanout::DenseFanout;
@@ -168,12 +167,12 @@ pub trait SpanItem {
 /// let (offsets, total) = relax_spans(&mut items, RelaxMode::Grow)?;
 /// assert_eq!(offsets, [0, 5, 10, 134]);
 /// assert_eq!(total, 144);
-/// # Ok::<(), cfglib::RelaxError<core::convert::Infallible>>(())
+/// # Ok::<(), cfglib::RelaxError>(())
 /// ```
 pub fn relax_spans<I: SpanItem>(
     items: &mut [I],
     mode: RelaxMode,
-) -> Result<(Vec<usize>, usize), RelaxError<Infallible>> {
+) -> Result<(Vec<usize>, usize), RelaxError> {
     let count = items.len();
     let targets: Vec<Option<usize>> = items.iter().map(SpanItem::span_target).collect();
     for (item, target) in targets.iter().enumerate() {
@@ -258,7 +257,7 @@ struct Layout {
 
 impl Layout {
     /// Lays the items out from offset zero.
-    fn new<I: SpanItem>(items: &[I]) -> Result<Self, RelaxError<Infallible>> {
+    fn new<I: SpanItem>(items: &[I]) -> Result<Self, RelaxError> {
         let mut widths = Vec::with_capacity(items.len());
         let mut total = 0_usize;
         for item in items {
@@ -292,7 +291,7 @@ impl Layout {
         sum
     }
 
-    fn displacement(&self, item: usize, target: usize) -> Result<isize, RelaxError<Infallible>> {
+    fn displacement(&self, item: usize, target: usize) -> Result<isize, RelaxError> {
         let (from, to) = (self.offset(item), self.offset(target));
         let distance =
             |magnitude: usize| isize::try_from(magnitude).map_err(|_| RelaxError::Overflow);
@@ -326,7 +325,7 @@ impl Layout {
         changed: &[usize],
         aligned: &[usize],
         moved: &mut Vec<usize>,
-    ) -> Result<(), RelaxError<Infallible>> {
+    ) -> Result<(), RelaxError> {
         // How far the items already read again moved every offset after
         // them, wrapping in `usize`. The old and the new offset both fit
         // `usize`, so it is zero exactly when they are equal.
