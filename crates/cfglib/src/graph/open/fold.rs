@@ -1,7 +1,7 @@
 //! Post-order folding over an open node space.
 //!
 //! A search can only stop; a fold computes each node's answer from its
-//! children's answers on the unwind. [`open_fold_post_order`] owns the frame
+//! children's answers on the unwind. [`open_fold`] owns the frame
 //! bookkeeping that every hand-written fold repeats — the accumulator stack,
 //! the cycle guard, the depth bound — while the [`OpenFold`] implementation
 //! keeps full control of the three things real folds disagree on:
@@ -30,68 +30,252 @@
 //! as `None`: it contributes exactly the nothing a missing subtree
 //! contributes, so accumulators observe every child exactly once.
 //!
-//! [`open_fold_post_order_memoized`] gives a third answer to a node reached a
-//! second time. `Isolated` folds a shared descendant once per route, which is
-//! exponential in a stack of diamonds; `Shared` refuses the second route,
-//! which hides it from a fold that must see both routes. The memoized driver
-//! folds a node that has an [`OpenFold::memo_key`] once and hands its
-//! finished answer to every later route, so the fold still sees each route
-//! but pays one fold per key. That answer must not depend on the route: a
-//! fold that needs a fact of the route carries it in its value and decides
-//! in [`OpenFold::absorb`]. A node whose subtree refused a node that is still
-//! open on the current route (a cycle) has an answer that depends on where
-//! the walk entered the cycle, so the driver does not cache that answer.
+//! The [`Revisit`] policy of the [`OpenFoldConfig`] decides what the fold
+//! does with a marked node it reaches again:
 //!
-//! [`open_fold_fixpoint`] is the driver for a space whose cycles carry
-//! answers around: the names a module exports through `export *` cycles, or
-//! the members visible through cyclic includes. Refusing a node that is still
-//! open makes each answer on a cycle depend on where the walk entered it, and
-//! loses what a value brings back around the cycle. The fixpoint driver
-//! keeps one answer per mark, finds the cycles of marked nodes with Tarjan's
-//! lowlinks as it walks, and re-folds each cycle until a round changes
-//! nothing, so monotone hooks reach the least fixpoint from any root.
+//! - [`Revisit::Refuse`] absorbs it as `None` while its mark is live.
+//!   `Isolated` then folds a shared descendant once per route, which is
+//!   exponential in a stack of diamonds, and `Shared` refuses the second
+//!   route, which hides it from a fold that must see both routes.
+//! - [`Revisit::Memoize`] folds each marked node once and hands its finished
+//!   answer to every later route, so the fold still sees each route but pays
+//!   one fold per mark. That answer must not depend on the route: a fold
+//!   that needs a fact of the route carries it in its value and decides in
+//!   [`OpenFold::absorb`].
+//! - [`Revisit::Iterate`] is the policy for a space whose cycles carry
+//!   answers around: the names a module exports through `export *` cycles,
+//!   or the members visible through cyclic includes. The other policies
+//!   refuse a node that is still open, which makes each answer on a cycle
+//!   depend on where the walk entered it and loses what a value brings back
+//!   around the cycle. `Iterate` keeps one answer per mark, finds the cycles
+//!   of marked nodes with Tarjan's lowlinks as it walks, and re-folds each
+//!   cycle until a round changes nothing, so monotone hooks reach the least
+//!   fixpoint from any root.
+//!
+//! [`open_fold_in`] takes the [`OpenFoldMemo`] of finished answers from the
+//! caller, so a pass that folds from many roots over one space folds each
+//! marked node once in total.
 
 extern crate alloc;
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use core::fmt;
 use core::ops::ControlFlow;
 
-use crate::graph::search::may_expand;
+mod iterate;
+mod memoize;
+mod refuse;
+mod walk;
 
-use super::marks::Marks;
-
-mod fixpoint;
-mod memoized;
-
-pub use fixpoint::{OpenFixpointConfig, OpenFixpointError, open_fold_fixpoint};
-pub use memoized::open_fold_post_order_memoized;
-
-/// Bounds for one [`open_fold_post_order`] or
-/// [`open_fold_post_order_memoized`] walk.
-#[derive(Debug, Clone, Copy, Default)]
+/// Bounds and revisit policy of one open fold.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OpenFoldConfig {
-    max_depth: Option<usize>,
-}
-
-impl OpenFoldConfig {
-    /// Creates the unbounded configuration.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self { max_depth: None }
-    }
-
-    /// Refuses children deeper than `depth` levels below the root.
+    /// Refuses children more than this many levels below the root, or `None`
+    /// for no bound.
     ///
-    /// The root is depth zero. A refused child is absorbed as `None`, the
-    /// same contribution a marked child makes.
-    #[must_use]
-    pub const fn with_max_depth(mut self, depth: usize) -> Self {
-        self.max_depth = Some(depth);
-        self
+    /// The root is depth zero, and a re-fold of a cycle member under
+    /// [`Revisit::Iterate`] runs at the depth of the cycle's first node. The
+    /// bound is silent by design: a refused child is absorbed as `None`, the
+    /// contribution a marked child makes, and no error reports the cut. It
+    /// limits the walk, not each route: under [`Revisit::Memoize`] and
+    /// [`Revisit::Iterate`], the answer of a node whose subtree the bound cut
+    /// is stored and reused like any other.
+    pub max_depth: Option<usize>,
+    /// What the fold does with a marked node it reaches again.
+    pub revisit: Revisit,
+}
+
+/// What an open fold does with a marked node it reaches again.
+///
+/// Every policy folds a node without a [`mark`](OpenFold::mark) on each
+/// reach, and every policy refuses a marked node that is still open on the
+/// current route, except that [`Revisit::Iterate`] absorbs its provisional
+/// answer instead.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Revisit {
+    /// Absorbs a reached node whose mark is live as `None`.
+    ///
+    /// The [`MarkScope`] of each folded node decides how long the marks of
+    /// its subtree live, so a diamond's shared base folds once per route
+    /// (`Isolated`) or once per walk (`Shared`). The policy ignores the
+    /// [`OpenFoldMemo`] of [`open_fold_in`].
+    #[default]
+    Refuse,
+    /// Folds each marked node once and hands a clone of its finished answer
+    /// to every later reach of its mark, without calling
+    /// [`enter`](OpenFold::enter) or [`successors`](OpenFold::successors)
+    /// again.
+    ///
+    /// - **The contract.** The stored answer is reused on every route, so it
+    ///   must not depend on the route. A fold that needs a fact of the route
+    ///   carries it in its value and decides in [`absorb`](OpenFold::absorb).
+    ///   On a space without cycles, a fold that marks each node
+    ///   [`MarkScope::Isolated`] then returns the answer of
+    ///   [`Revisit::Refuse`] while it folds each mark once instead of once per
+    ///   route.
+    /// - **Cycles.** A child whose mark belongs to a node still open on the
+    ///   current route is refused and absorbed as `None`. The answers of the
+    ///   nodes between the refusing node and the refused one depend on where
+    ///   the walk entered the cycle, so they are not stored; the refused
+    ///   node's own answer, and the answers above it, are.
+    /// - **Marks.** A stored answer is handed over whatever the live marks
+    ///   are, so the [`MarkScope`] matters only for a node whose answer was
+    ///   not stored: a reach of it that a persisting mark refuses
+    ///   ([`MarkScope::Shared`]) contributes `None`, and other reaches fold it
+    ///   again.
+    /// - **The table.** The policy reads the [`OpenFoldMemo`] of
+    ///   [`open_fold_in`] and stores every answer it may reuse there, the
+    ///   root's included.
+    ///
+    /// Each marked node costs one fold, plus one table lookup of `O(log n)`
+    /// per reach. Results are deterministic, because the successor order is
+    /// fixed.
+    Memoize,
+    /// Keeps one answer per mark and re-folds every cycle of marked nodes
+    /// until its answers are stable.
+    ///
+    /// The other policies refuse a node that is still open on the route, so
+    /// a fold over a cyclic space gets an answer that misses what travels
+    /// around the cycle and that depends on where the walk entered it. This
+    /// policy finds the strongly connected components of marked nodes with
+    /// Tarjan's lowlinks as it walks, and re-folds the nodes of each cycle
+    /// until a round changes no answer. Then every node of the cycle has its
+    /// least fixpoint answer, whichever node the walk entered first.
+    ///
+    /// - **The walk.** A marked node that is still open absorbs its current,
+    ///   provisional answer, which starts as `None`; a finished marked node
+    ///   absorbs its final answer. Every marked node is memoized, so the
+    ///   policy ignores the [`MarkScope`] of [`FoldEnter::Fold`].
+    /// - **Iteration.** When the first node of a cycle finishes, each member
+    ///   of the cycle is re-folded in the order its first fold finished: the
+    ///   walk calls [`enter`](OpenFold::enter), absorbs each successor's
+    ///   current answer without descending into members, and calls
+    ///   [`finish`](OpenFold::finish). Rounds repeat until no answer changes,
+    ///   and the answers become final. Hooks with side effects observe a
+    ///   member's hooks once per round.
+    /// - **The contract.** `enter`, `absorb` and `finish` must be
+    ///   deterministic, and monotone in the absorbed answers over a domain of
+    ///   finite height; or `max_rounds` bounds the rounds. A node on a cycle
+    ///   needs a mark: a cycle that passes a marked node and a node without a
+    ///   mark fails with [`OpenFoldError::UnmarkedCycle`]. A cycle of nodes
+    ///   without marks is never closed, so only the depth bound stops it.
+    /// - **The table.** The policy stores each final answer in the
+    ///   [`OpenFoldMemo`] of [`open_fold_in`] and reuses the final answers it
+    ///   finds there. Provisional answers never reach the table, so after an
+    ///   error it holds only the answers that became final before it.
+    ///
+    /// On a space without cycles this walks as [`Revisit::Memoize`] does:
+    /// `O(n + m)` hook calls. Each cycle adds `O(rounds × (n_scc + m_scc))`
+    /// hook calls. The successor order is fixed, so results are deterministic.
+    Iterate {
+        /// The re-fold rounds one cycle may take, or `None` for no limit. A
+        /// cycle whose answers still change after them fails with
+        /// [`OpenFoldError::RoundLimitExceeded`].
+        max_rounds: Option<usize>,
+    },
+}
+
+/// The finished answers of open folds by mark, owned by the caller of
+/// [`open_fold_in`] so that they persist across calls.
+///
+/// [`Revisit::Memoize`] reads and writes the table, [`Revisit::Iterate`]
+/// stores its final answers in it and reuses the final answers it finds
+/// there, and [`Revisit::Refuse`] ignores it. An answer is stored under the
+/// [`mark`](OpenFold::mark) of its node, and `None` is a stored answer too:
+/// the fold of the node yielded nothing.
+///
+/// A stored answer belongs to the fold that computed it. Reuse a table only
+/// across calls with the same fold (the same hooks over the same space), the
+/// same [`max_depth`](OpenFoldConfig::max_depth) and the same policy, since
+/// `Memoize` and `Iterate` answer a cycle differently. An answer that the
+/// depth bound cut is stored like any other, so a later call reuses it
+/// whatever depth it reaches the node at. When any of these changes,
+/// [`clear`](Self::clear) the table or [`remove`](Self::remove) the answers
+/// that went stale.
+#[derive(Debug, Clone)]
+pub struct OpenFoldMemo<K, V> {
+    answers: BTreeMap<K, Option<V>>,
+}
+
+impl<K, V> Default for OpenFoldMemo<K, V> {
+    fn default() -> Self {
+        Self {
+            answers: BTreeMap::new(),
+        }
     }
 }
+
+impl<K: Ord, V> OpenFoldMemo<K, V> {
+    /// The answer stored for `mark`: `None` when there is none, and
+    /// `Some(None)` when the fold of its node yielded nothing.
+    #[must_use]
+    pub fn get(&self, mark: &K) -> Option<Option<&V>> {
+        self.answers.get(mark).map(Option::as_ref)
+    }
+
+    /// Removes the answer stored for `mark` and returns it, so the next fold
+    /// that reaches the mark folds its node again.
+    ///
+    /// The answers of the nodes that absorbed it stay stored; remove them
+    /// too when the removed answer went stale.
+    pub fn remove(&mut self, mark: &K) -> Option<Option<V>> {
+        self.answers.remove(mark)
+    }
+
+    /// Removes every stored answer.
+    pub fn clear(&mut self) {
+        self.answers.clear();
+    }
+
+    /// The number of stored answers.
+    #[must_use]
+    pub fn answer_count(&self) -> usize {
+        self.answers.len()
+    }
+
+    /// Whether the table stores no answer.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.answers.is_empty()
+    }
+}
+
+/// Why [`open_fold`] or [`open_fold_in`] stopped without an answer.
+///
+/// Only [`Revisit::Iterate`] fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenFoldError {
+    /// The answers of a cycle still changed in the last round that the
+    /// `max_rounds` of [`Revisit::Iterate`] allows.
+    RoundLimitExceeded {
+        /// The configured round limit.
+        limit: usize,
+        /// The re-fold rounds that ran.
+        rounds: usize,
+    },
+    /// A node without a mark lies on a cycle with a marked node, so the walk
+    /// has no key to hold its provisional answer.
+    UnmarkedCycle,
+}
+
+impl fmt::Display for OpenFoldError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::RoundLimitExceeded { limit, rounds } => write!(
+                formatter,
+                "open fold round limit {limit} exceeded: a cycle still changed after {rounds} rounds"
+            ),
+            Self::UnmarkedCycle => formatter.write_str("a node without a mark lies on a cycle"),
+        }
+    }
+}
+
+impl core::error::Error for OpenFoldError {}
 
 /// How far the marks written inside one folded node's subtree reach.
+///
+/// [`Revisit::Iterate`] ignores the scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarkScope {
     /// Children share the live mark set and their marks persist for the
@@ -108,8 +292,9 @@ pub enum MarkScope {
 pub enum FoldEnter<T, C> {
     /// Answer immediately without visiting children.
     ///
-    /// The node is still marked (per [`OpenFold::mark`]), so a later reach
-    /// under a persisting scope is refused rather than re-answered.
+    /// The node is still marked (per [`OpenFold::mark`]): under
+    /// [`Revisit::Refuse`] a later reach under a persisting scope is refused
+    /// rather than re-answered, and the other policies store the answer.
     Leaf(Option<T>),
     /// Descend: fold every child into `accumulator`, guarded per `marks`.
     Fold {
@@ -122,8 +307,7 @@ pub enum FoldEnter<T, C> {
 
 /// One post-order fold over an open node space.
 ///
-/// Implementations are driven by [`open_fold_post_order`],
-/// [`open_fold_post_order_memoized`] or [`open_fold_fixpoint`]; see the
+/// Implementations are driven by [`open_fold`] or [`open_fold_in`]; see the
 /// module documentation for which hook owns which decision.
 pub trait OpenFold {
     /// The node vocabulary — often a computed value, not a stored graph node.
@@ -140,19 +324,10 @@ pub trait OpenFold {
 
     /// The cycle-guard key for `node`, or `None` to fold it every time it
     /// is reached.
-    fn mark(&mut self, node: &Self::Node) -> Option<Self::Mark>;
-
-    /// The key under which `node`'s finished answer may be reused, or `None`
-    /// to fold `node` on every reach.
     ///
-    /// Only [`open_fold_post_order_memoized`] reads this hook, and the default
-    /// memoizes nothing. The answer stored under a key is reused on every
-    /// later route to a node with that key, so it must not depend on the
-    /// route: a fold that needs a fact of the route carries it in its value
-    /// and decides in [`absorb`](Self::absorb).
-    fn memo_key(&mut self, _node: &Self::Node) -> Option<Self::Mark> {
-        None
-    }
+    /// [`Revisit::Memoize`] and [`Revisit::Iterate`] also store the answer of
+    /// `node` under this key, so nodes that share a key share one answer.
+    fn mark(&mut self, node: &Self::Node) -> Option<Self::Mark>;
 
     /// Answers for `node` directly or opens its accumulator.
     fn enter(&mut self, node: &Self::Node) -> FoldEnter<Self::Value, Self::Accumulator>;
@@ -177,191 +352,34 @@ pub trait OpenFold {
     fn finish(&mut self, node: &Self::Node, accumulator: Self::Accumulator) -> Option<Self::Value>;
 }
 
-/// The live mark set, with the order its marks were set in.
+/// Folds the space reachable from `root` in post-order under `fold`'s rules
+/// and the policy of `config`, and returns the root's answer.
 ///
-/// Isolation is an undo, not a copy: a node that sandboxes its children
-/// records how many marks were set when it was entered, and taking back
-/// everything its subtree added is dropping the marks past that length. A
-/// mark is only ever set when absent, so the log and the set always hold the
-/// same keys.
-struct UndoMarks<K> {
-    set: Marks<K>,
-    log: Vec<K>,
-}
-
-impl<K: Clone + Ord> UndoMarks<K> {
-    fn new() -> Self {
-        Self {
-            set: Marks::new(),
-            log: Vec::new(),
-        }
-    }
-
-    fn contains(&self, key: &K) -> bool {
-        self.set.contains(key)
-    }
-
-    /// The number of marks set, which is also the position of the next one.
-    fn len(&self) -> usize {
-        self.log.len()
-    }
-
-    /// Sets a mark the caller has checked is absent.
-    fn insert(&mut self, key: K) {
-        self.set.insert(key.clone());
-        self.log.push(key);
-    }
-
-    /// Takes back every mark set after the first `len`.
-    fn truncate(&mut self, len: usize) {
-        while self.log.len() > len {
-            if let Some(key) = self.log.pop() {
-                self.set.remove(&key);
-            }
-        }
-    }
-}
-
-/// The marks an `Isolated` node restores, as lengths of the mark log.
-struct Sandbox {
-    /// The marks as seen at the node's entry, before its own key.
-    entry: usize,
-    /// The same marks plus the node's own key: what each child starts from.
-    with_key: usize,
-}
-
-struct Frame<F: OpenFold, X> {
-    node: F::Node,
-    accumulator: F::Accumulator,
-    /// Where this node's children start on the walk's shared child stack.
-    /// They are pushed in reverse, so the next one to fold is on top, and the
-    /// frame has none left once the stack is back down to `base`.
-    base: usize,
-    sandbox: Option<Sandbox>,
-    broke: bool,
-    /// What one driver keeps for the frame beyond the shared bookkeeping.
-    extra: X,
-}
-
-/// The state of one walk: its frames, their children, and the live marks.
-struct Walk<F: OpenFold, X> {
-    stack: Vec<Frame<F, X>>,
-    /// Every open frame's unfolded children, the deepest frame's on top.
-    pending: Vec<F::Node>,
-    /// The buffer `successors` fills, reused for every node.
-    scratch: Vec<F::Node>,
-    marks: UndoMarks<F::Mark>,
-}
-
-impl<F: OpenFold, X> Walk<F, X> {
-    fn new() -> Self {
-        Self {
-            stack: Vec::new(),
-            pending: Vec::new(),
-            scratch: Vec::new(),
-            marks: UndoMarks::new(),
-        }
-    }
-
-    /// Opens a frame for `node`, whose own key (if it has one) is already the
-    /// last mark set; `entry_marks` is how many marks were set before it.
-    fn push_frame(
-        &mut self,
-        fold: &mut F,
-        node: F::Node,
-        accumulator: F::Accumulator,
-        scope: MarkScope,
-        entry_marks: usize,
-        extra: X,
-    ) {
-        let base = self.pending.len();
-        self.scratch.clear();
-        fold.successors(&node, &mut self.scratch);
-        self.pending.extend(self.scratch.drain(..).rev());
-        // The sandbox restores the marks as seen at entry, before this node's
-        // own key: once an isolated node finishes, a sibling may reach it
-        // again through its own route.
-        let sandbox = (scope == MarkScope::Isolated).then(|| Sandbox {
-            entry: entry_marks,
-            with_key: self.marks.len(),
-        });
-        self.stack.push(Frame {
-            node,
-            accumulator,
-            base,
-            sandbox,
-            broke: false,
-            extra,
-        });
-    }
-
-    /// The top frame's next child, or `None` once the frame has no child
-    /// left or has stopped early.
-    fn next_child(&mut self) -> Option<F::Node> {
-        let frame = self.stack.last()?;
-        if frame.broke || self.pending.len() <= frame.base {
-            None
-        } else {
-            self.pending.pop()
-        }
-    }
-
-    /// Pops the top frame and finishes it, returning its node, its answer
-    /// and its driver state.
-    fn finish_top(&mut self, fold: &mut F) -> Option<(F::Node, Option<F::Value>, X)> {
-        let frame = self.stack.pop()?;
-        // A node stopped early leaves its remaining children unfolded.
-        self.pending.truncate(frame.base);
-        let value = fold.finish(&frame.node, frame.accumulator);
-        if let Some(sandbox) = frame.sandbox {
-            self.marks.truncate(sandbox.entry);
-        }
-        Some((frame.node, value, frame.extra))
-    }
-
-    /// Restores the marks that the top frame's next child starts from, and
-    /// returns whether that child lies within the depth bound.
-    fn admit_child(&mut self, max_depth: Option<usize>) -> bool {
-        let Some(frame) = self.stack.last() else {
-            return false;
-        };
-        // An isolated parent resets its children's shared start state: marks
-        // as seen at its own entry, plus its own key. For its first child
-        // that is the state it already has.
-        if let Some(sandbox) = &frame.sandbox {
-            self.marks.truncate(sandbox.with_key);
-        }
-        // The parent is the top frame, at depth `stack.len() - 1`; its child
-        // is refused exactly when that parent may not expand.
-        may_expand(max_depth, self.stack.len() - 1)
-    }
-
-    /// Merges one child's answer into the top frame, which stops early when
-    /// the fold breaks.
-    fn absorb(&mut self, fold: &mut F, child: &F::Node, value: Option<F::Value>) {
-        if let Some(parent) = self.stack.last_mut()
-            && fold
-                .absorb(&mut parent.accumulator, child, value)
-                .is_break()
-        {
-            parent.broke = true;
-        }
-    }
-}
-
-/// Folds the space reachable from `root` in post-order under `fold`'s rules.
+/// This is [`open_fold_in`] with a fresh [`OpenFoldMemo`], so the answers that
+/// [`Revisit::Memoize`] and [`Revisit::Iterate`] store last for this call.
+/// See [`OpenFold`], [`Revisit`] and the module documentation for the
+/// contract; the walk itself is iterative, so recursion depth never limits
+/// the foldable space.
 ///
-/// Returns the root's answer. See [`OpenFold`] and the module documentation
-/// for the contract; the walk itself is iterative, so recursion depth never
-/// limits the foldable space.
+/// # Errors
+///
+/// Only [`Revisit::Iterate`] fails: with
+/// [`OpenFoldError::RoundLimitExceeded`] when a cycle still changes after
+/// its `max_rounds`, and with [`OpenFoldError::UnmarkedCycle`] when a node
+/// without a mark lies on a cycle with a marked node.
+///
+/// # Examples
+///
+/// Under [`Revisit::Refuse`], per-path marks fold a diamond's shared base
+/// once per route:
 ///
 /// ```rust
 /// use core::ops::ControlFlow;
-/// use cfglib::{FoldEnter, MarkScope, OpenFold, OpenFoldConfig, open_fold_post_order};
+/// use cfglib::{FoldEnter, MarkScope, OpenFold, OpenFoldConfig, open_fold};
 ///
 /// // C++-style member lookup: a class answers with its own declaration or
 /// // with the answer of exactly one yielding base; two yielding bases are
-/// // an ambiguity. Per-path marks fold a diamond's shared base per route.
+/// // an ambiguity.
 /// struct Lookup<'a> {
 ///     bases: &'a [&'a [usize]],
 ///     owns: &'a [Option<&'static str>],
@@ -409,76 +427,278 @@ impl<F: OpenFold, X> Walk<F, X> {
 /// let bases: &[&[usize]] = &[&[1, 2], &[3], &[3], &[]];
 /// let owns = &[None, None, None, Some("member")];
 /// let mut lookup = Lookup { bases, owns };
-/// assert_eq!(
-///     open_fold_post_order(&mut lookup, 0, OpenFoldConfig::new()),
-///     None,
-/// );
+/// assert_eq!(open_fold(&mut lookup, 0, OpenFoldConfig::default()), Ok(None));
 /// // 1 alone sees it unambiguously.
-/// assert_eq!(
-///     open_fold_post_order(&mut lookup, 1, OpenFoldConfig::new()),
-///     Some("member"),
-/// );
+/// assert_eq!(open_fold(&mut lookup, 1, OpenFoldConfig::default()), Ok(Some("member")));
 /// ```
 ///
-/// [`open_fold_post_order_memoized`] folds the diamond's base once and still
-/// gives `0` both routes.
-pub fn open_fold_post_order<F: OpenFold>(
+/// [`Revisit::Memoize`] folds a class once and hands its answer to every
+/// route, so a fact of the route travels in the value:
+///
+/// ```rust
+/// use core::ops::ControlFlow;
+/// use cfglib::{FoldEnter, MarkScope, OpenFold, OpenFoldConfig, Revisit, open_fold};
+///
+/// /// The subobject that declares a member: its class, and whether its
+/// /// route passed a virtual base, which makes it one shared subobject.
+/// #[derive(Debug, Clone, Copy, PartialEq)]
+/// struct Subobject {
+///     class: usize,
+///     shared: bool,
+/// }
+///
+/// /// The class being folded, and what its bases yielded so far.
+/// struct Found {
+///     class: usize,
+///     subobject: Option<Subobject>,
+///     ambiguous: bool,
+/// }
+///
+/// // A simplified C++ member lookup. Each base carries a flag that says
+/// // whether it is virtual. A class's answer is the same on every route.
+/// struct Lookup<'a> {
+///     bases: &'a [&'a [(usize, bool)]],
+///     owns: &'a [bool],
+/// }
+///
+/// impl OpenFold for Lookup<'_> {
+///     type Node = usize;
+///     type Mark = usize;
+///     type Value = Subobject;
+///     type Accumulator = Found;
+///
+///     fn successors(&mut self, node: &usize, out: &mut Vec<usize>) {
+///         out.extend(self.bases[*node].iter().map(|&(base, _)| base));
+///     }
+///     fn mark(&mut self, node: &usize) -> Option<usize> {
+///         Some(*node)
+///     }
+///     fn enter(&mut self, node: &usize) -> FoldEnter<Subobject, Found> {
+///         if self.owns[*node] {
+///             FoldEnter::Leaf(Some(Subobject { class: *node, shared: false }))
+///         } else {
+///             let accumulator = Found { class: *node, subobject: None, ambiguous: false };
+///             FoldEnter::Fold { accumulator, marks: MarkScope::Isolated }
+///         }
+///     }
+///     fn absorb(
+///         &mut self,
+///         found: &mut Found,
+///         base: &usize,
+///         value: Option<Subobject>,
+///     ) -> ControlFlow<()> {
+///         if let Some(mut value) = value {
+///             // The route decides in `absorb`: through a virtual base, the
+///             // declaring subobject is the shared one.
+///             value.shared |= self.bases[found.class].contains(&(*base, true));
+///             match found.subobject {
+///                 None => found.subobject = Some(value),
+///                 // Two routes to one shared subobject find one member.
+///                 Some(seen) if seen == value && seen.shared => {}
+///                 Some(_) => found.ambiguous = true,
+///             }
+///         }
+///         ControlFlow::Continue(())
+///     }
+///     fn finish(&mut self, _node: &usize, found: Found) -> Option<Subobject> {
+///         if found.ambiguous { None } else { found.subobject }
+///     }
+/// }
+///
+/// // 0 derives 1 and 2; both derive 3, which declares the member. The walk
+/// // folds 3 once and hands its answer to both routes.
+/// let memoize = OpenFoldConfig { revisit: Revisit::Memoize, ..OpenFoldConfig::default() };
+/// let owns = &[false, false, false, true];
+/// let plain: &[&[(usize, bool)]] = &[&[(1, false), (2, false)], &[(3, false)], &[(3, false)], &[]];
+/// let mut lookup = Lookup { bases: plain, owns };
+/// // Two distinct subobjects of 3 declare the member: ambiguous.
+/// assert_eq!(open_fold(&mut lookup, 0, memoize), Ok(None));
+/// // Virtual inheritance of 3 leaves one shared subobject.
+/// let virtual_bases: &[&[(usize, bool)]] = &[&[(1, false), (2, false)], &[(3, true)], &[(3, true)], &[]];
+/// let mut lookup = Lookup { bases: virtual_bases, owns };
+/// assert_eq!(open_fold(&mut lookup, 0, memoize), Ok(Some(Subobject { class: 3, shared: true })));
+/// ```
+///
+/// [`Revisit::Iterate`] carries the answers around a cycle:
+///
+/// ```rust
+/// use std::collections::BTreeSet;
+/// use core::ops::ControlFlow;
+/// use cfglib::{FoldEnter, MarkScope, OpenFold, OpenFoldConfig, Revisit, open_fold};
+///
+/// /// How a module re-exports another.
+/// enum Export {
+///     /// `export * from "..."`
+///     All,
+///     /// `export { from as to } from "..."`
+///     Renamed(&'static str, &'static str),
+/// }
+///
+/// /// The names each module exports: its own, and what its re-exports bring.
+/// struct Exports<'a> {
+///     own: &'a [&'a [&'static str]],
+///     reexports: &'a [&'a [(usize, Export)]],
+/// }
+///
+/// impl OpenFold for Exports<'_> {
+///     type Node = usize;
+///     type Mark = usize;
+///     type Value = BTreeSet<&'static str>;
+///     type Accumulator = (usize, BTreeSet<&'static str>);
+///
+///     fn successors(&mut self, module: &usize, out: &mut Vec<usize>) {
+///         out.extend(self.reexports[*module].iter().map(|(target, _)| *target));
+///     }
+///     fn mark(&mut self, module: &usize) -> Option<usize> {
+///         Some(*module)
+///     }
+///     fn enter(&mut self, module: &usize) -> FoldEnter<Self::Value, Self::Accumulator> {
+///         let names = self.own[*module].iter().copied().collect();
+///         FoldEnter::Fold { accumulator: (*module, names), marks: MarkScope::Shared }
+///     }
+///     fn absorb(
+///         &mut self,
+///         (module, names): &mut Self::Accumulator,
+///         target: &usize,
+///         value: Option<Self::Value>,
+///     ) -> ControlFlow<()> {
+///         let exported = value.unwrap_or_default();
+///         for (reexported, export) in self.reexports[*module] {
+///             if reexported != target {
+///                 continue;
+///             }
+///             match export {
+///                 Export::All => names.extend(exported.iter().copied()),
+///                 Export::Renamed(from, to) => {
+///                     if exported.contains(from) {
+///                         names.insert(*to);
+///                     }
+///                 }
+///             }
+///         }
+///         ControlFlow::Continue(())
+///     }
+///     fn finish(&mut self, _module: &usize, (_, names): Self::Accumulator) -> Option<Self::Value> {
+///         Some(names)
+///     }
+/// }
+///
+/// // Module 0 exports `x` and re-exports 1's `x` as `z`; module 1 re-exports
+/// // all of 0. Both export `x` and `z`.
+/// let own: &[&[&str]] = &[&["x"], &[]];
+/// let reexports: &[&[(usize, Export)]] =
+///     &[&[(1, Export::Renamed("x", "z"))], &[(0, Export::All)]];
+/// let iterate = OpenFoldConfig {
+///     revisit: Revisit::Iterate { max_rounds: None },
+///     ..OpenFoldConfig::default()
+/// };
+/// let both = BTreeSet::from(["x", "z"]);
+/// for module in [0, 1] {
+///     let mut exports = Exports { own, reexports };
+///     assert_eq!(open_fold(&mut exports, module, iterate), Ok(Some(both.clone())));
+/// }
+/// // Refusing 0 under 1 brings nothing back to 0.
+/// let mut exports = Exports { own, reexports };
+/// assert_eq!(
+///     open_fold(&mut exports, 0, OpenFoldConfig::default()),
+///     Ok(Some(BTreeSet::from(["x"]))),
+/// );
+/// ```
+pub fn open_fold<F: OpenFold>(
     fold: &mut F,
     root: F::Node,
     config: OpenFoldConfig,
-) -> Option<F::Value> {
-    let mut walk = Walk::<F, ()>::new();
+) -> Result<Option<F::Value>, OpenFoldError>
+where
+    F::Value: Clone + PartialEq,
+{
+    open_fold_in(&mut OpenFoldMemo::default(), fold, root, config)
+}
 
-    let root_key = fold.mark(&root);
-    if let Some(key) = root_key {
-        walk.marks.insert(key);
-    }
-    match fold.enter(&root) {
-        FoldEnter::Leaf(value) => return value,
-        FoldEnter::Fold {
-            accumulator,
-            marks: scope,
-        } => walk.push_frame(fold, root, accumulator, scope, 0, ()),
-    }
-
-    let mut result = None;
-    while !walk.stack.is_empty() {
-        let Some(child) = walk.next_child() else {
-            let Some((node, value, ())) = walk.finish_top(fold) else {
-                break;
-            };
-            if walk.stack.is_empty() {
-                result = value;
-            } else {
-                walk.absorb(fold, &node, value);
-            }
-            continue;
-        };
-
-        let within_depth = walk.admit_child(config.max_depth);
-        let child_key = fold.mark(&child);
-        let refused = !within_depth
-            || child_key
-                .as_ref()
-                .is_some_and(|key| walk.marks.contains(key));
-        if refused {
-            walk.absorb(fold, &child, None);
-            continue;
+/// Folds the space reachable from `root` as [`open_fold`] does, with the
+/// table of finished answers owned by the caller.
+///
+/// [`Revisit::Memoize`] reads and writes `memo`, [`Revisit::Iterate`] stores
+/// its final answers there and reuses the final answers it finds, and
+/// [`Revisit::Refuse`] ignores it. A pass that folds from many roots over
+/// one space keeps one table, so each marked node folds once over the whole
+/// pass; [`OpenFoldMemo`] says when a table may be reused.
+///
+/// # Errors
+///
+/// Fails as [`open_fold`] does. The table then holds only answers that were
+/// final before the failure.
+///
+/// # Examples
+///
+/// ```rust
+/// use core::ops::ControlFlow;
+/// use cfglib::{FoldEnter, MarkScope, OpenFold, OpenFoldConfig, OpenFoldMemo, Revisit, open_fold_in};
+///
+/// /// The longest chain of bases below a class, recording the classes folded.
+/// struct Height<'a> {
+///     bases: &'a [&'a [usize]],
+///     folded: Vec<usize>,
+/// }
+///
+/// impl OpenFold for Height<'_> {
+///     type Node = usize;
+///     type Mark = usize;
+///     type Value = usize;
+///     type Accumulator = usize;
+///
+///     fn successors(&mut self, class: &usize, out: &mut Vec<usize>) {
+///         out.extend_from_slice(self.bases[*class]);
+///     }
+///     fn mark(&mut self, class: &usize) -> Option<usize> {
+///         Some(*class)
+///     }
+///     fn enter(&mut self, class: &usize) -> FoldEnter<usize, usize> {
+///         self.folded.push(*class);
+///         FoldEnter::Fold { accumulator: 0, marks: MarkScope::Isolated }
+///     }
+///     fn absorb(&mut self, height: &mut usize, _base: &usize, below: Option<usize>) -> ControlFlow<()> {
+///         *height = (*height).max(below.map_or(0, |below| below + 1));
+///         ControlFlow::Continue(())
+///     }
+///     fn finish(&mut self, _class: &usize, height: usize) -> Option<usize> {
+///         Some(height)
+///     }
+/// }
+///
+/// // 0 and 1 both derive 2, which derives 3.
+/// let bases: &[&[usize]] = &[&[2], &[2], &[3], &[]];
+/// let mut height = Height { bases, folded: Vec::new() };
+/// let memoize = OpenFoldConfig { revisit: Revisit::Memoize, ..OpenFoldConfig::default() };
+/// let mut memo = OpenFoldMemo::default();
+/// assert_eq!(open_fold_in(&mut memo, &mut height, 0, memoize), Ok(Some(2)));
+/// // The second root reuses the answer the first call stored for 2.
+/// assert_eq!(open_fold_in(&mut memo, &mut height, 1, memoize), Ok(Some(2)));
+/// assert_eq!(height.folded, [0, 2, 3, 1]);
+/// assert_eq!(memo.get(&2), Some(Some(&1)));
+/// assert_eq!(memo.answer_count(), 4);
+/// ```
+pub fn open_fold_in<F: OpenFold>(
+    memo: &mut OpenFoldMemo<F::Mark, F::Value>,
+    fold: &mut F,
+    root: F::Node,
+    config: OpenFoldConfig,
+) -> Result<Option<F::Value>, OpenFoldError>
+where
+    F::Value: Clone + PartialEq,
+{
+    match config.revisit {
+        Revisit::Refuse => Ok(refuse::run(fold, root, config.max_depth)),
+        Revisit::Memoize => Ok(memoize::run(
+            &mut memo.answers,
+            fold,
+            root,
+            config.max_depth,
+        )),
+        Revisit::Iterate { max_rounds } => {
+            iterate::run(&mut memo.answers, fold, root, config.max_depth, max_rounds)
         }
-
-        let entry_marks = walk.marks.len();
-        if let Some(key) = child_key {
-            walk.marks.insert(key);
-        }
-        match fold.enter(&child) {
-            FoldEnter::Leaf(value) => walk.absorb(fold, &child, value),
-            FoldEnter::Fold {
-                accumulator,
-                marks: scope,
-            } => walk.push_frame(fold, child, accumulator, scope, entry_marks, ()),
-        }
     }
-    result
 }
 
 #[cfg(test)]

@@ -1,16 +1,14 @@
 //! Fixpoints over keyed slots that the caller owns. A unit runs again only
 //! when a slot that it read changed.
 //!
-//! The solvers of [`fixpoint`](super::fixpoint),
-//! [`node_fixpoint`](super::node_fixpoint) and
+//! The solvers of [`node_fixpoint`](super::node_fixpoint) and
 //! [`edge_fixpoint`](super::edge_fixpoint) own their facts and get the
 //! dependencies of a node from the edges of a graph view. Some fixpoints have
 //! no such graph: the caller keeps the facts in its own tables, a unit of
 //! evaluation is a file or a declaration, and the slots that a unit reads
 //! come from an index that the caller built or from what the evaluation read.
 //! The two drivers here schedule such units. They own nothing else: they
-//! have no problem trait, no meet and no transfer function. The caller
-//! limits them through its executor or its sweep hook.
+//! have no problem trait, no meet and no transfer function.
 //!
 //! - [`wave_fixpoint`] evaluates groups in waves against the facts that are
 //!   known before the wave. A [`WaveExecutor`] of the caller runs the
@@ -25,8 +23,11 @@
 //!   evaluation to the next. An [`OrderedFixpoint`] keeps those reads between
 //!   runs, so a run after an edit evaluates only the units that it affects.
 //!
-//! Both drivers stop when no unit is left to run. Each one returns its
-//! rounds and evaluations in a [`SlotFixpointStats`].
+//! Both drivers stop when no unit is left to run. Both take the step limit of
+//! every bounded fixpoint of the crate, counted in evaluations, and stop with
+//! [`SolveError::StepLimitExceeded`](crate::SolveError::StepLimitExceeded)
+//! when work is left at it. Each one returns its evaluations and rounds in a
+//! [`SolveStats`](crate::SolveStats).
 
 mod ordered;
 mod wave;
@@ -36,33 +37,3 @@ mod tests;
 
 pub use ordered::{OrderedFixpoint, SlotAccess, ordered_fixpoint};
 pub use wave::{SequentialExecutor, WaveExecutor, WaveRequeue, wave_fixpoint};
-
-/// What a slot fixpoint did: its rounds, its evaluations, and whether it
-/// reached the fixpoint.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SlotFixpointStats {
-    rounds: usize,
-    evaluations: usize,
-    converged: bool,
-}
-
-impl SlotFixpointStats {
-    /// Returns the number of waves or sweeps that ran.
-    #[must_use]
-    pub const fn round_count(self) -> usize {
-        self.rounds
-    }
-
-    /// Returns the number of unit evaluations in all rounds.
-    #[must_use]
-    pub const fn evaluation_count(self) -> usize {
-        self.evaluations
-    }
-
-    /// Returns whether the fixpoint ran until no unit was left to run. The
-    /// value is `false` when the executor or the sweep hook stopped it first.
-    #[must_use]
-    pub const fn converged(self) -> bool {
-        self.converged
-    }
-}

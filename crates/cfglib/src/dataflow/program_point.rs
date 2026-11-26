@@ -2,10 +2,8 @@
 
 use crate::block::BlockId;
 
-/// A point in the program identified by a (block, instruction-index) pair.
-///
-/// Used to refer to both definition sites and use sites in data flow
-/// analyses.
+/// A point in the program identified by a (block, instruction-index) pair:
+/// the site of a definition or a use in a data flow analysis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProgramPoint {
     /// The block containing the instruction.
@@ -19,8 +17,3 @@ impl core::fmt::Display for ProgramPoint {
         write!(f, "{}:{}", self.block, self.inst_idx)
     }
 }
-
-/// Alias for [`ProgramPoint`] used in definition contexts.
-pub type DefSite = ProgramPoint;
-/// Alias for [`ProgramPoint`] used in use-site contexts.
-pub type UseSite = ProgramPoint;

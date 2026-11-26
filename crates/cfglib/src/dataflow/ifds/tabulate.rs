@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use super::{IfdsConfig, IfdsProblem, IfdsResults, Supergraph};
-use crate::dataflow::fixpoint::SolveError;
+use crate::dataflow::solve::{SolveError, SolveStats, count_step};
 use crate::graph::view::DenseId;
 
 /// The stored path edges below which no collection pass runs.
@@ -33,7 +33,7 @@ pub(super) fn solve<S: Supergraph, P: IfdsProblem<S>>(
         graph,
         problem,
         fact_bound: problem.fact_bound(),
-        collect: config.collects_path_edges(),
+        collect: config.collect_path_edges,
         context_of: BTreeMap::new(),
         contexts: Vec::new(),
         worklist: BTreeSet::new(),
@@ -58,16 +58,7 @@ pub(super) fn solve<S: Supergraph, P: IfdsProblem<S>>(
 
     let mut steps = 0;
     while let Some((node, fact, context)) = tabulation.worklist.pop_first() {
-        if let Some(limit) = config.solve_config().max_steps()
-            && steps >= limit
-        {
-            return Err(SolveError::StepLimitExceeded {
-                limit,
-                steps,
-                pending_node: node,
-            });
-        }
-        steps += 1;
+        count_step(config.max_steps, &mut steps, node)?;
         tabulation.contexts[context].pending -= 1;
         tabulation.process(node, fact, context);
         if tabulation.contexts[context].pending == 0 {
@@ -371,8 +362,7 @@ impl<S: Supergraph, P: IfdsProblem<S>> Tabulation<'_, S, P> {
             offsets,
             facts,
             summaries,
-            steps,
-            peak_path_edges: self.peak,
+            stats: SolveStats::new(steps, 0, self.peak),
             graph: PhantomData,
         }
     }

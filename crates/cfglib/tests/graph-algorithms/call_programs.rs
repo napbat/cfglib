@@ -1,13 +1,14 @@
 //! `call_graph`, `call_graph_indexed`, `FunctionIndex`, `find_function`,
-//! `is_recursive_function`, `recursive_functions`, `propagate_summaries` and
-//! `propagate_summaries_widened` over a multi-function program.
+//! `is_recursive_function`, `recursive_functions` and `propagate_summaries`, with and without
+//! widening, over a multi-function program.
 
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 
 use cfglib::{
     BasicBlock, CallMetadata, Cfg, EdgeKind, Flow, FlowControl, FlowEffect, FunctionIndex,
-    FunctionNode, Graph, NodeId, call_graph, call_graph_indexed, find_function,
-    is_recursive_function, propagate_summaries, propagate_summaries_widened, recursive_functions,
+    FunctionNode, Graph, NodeId, SummaryConfig, SummaryProblem, call_graph, call_graph_indexed,
+    find_function, is_recursive_function, propagate_summaries, recursive_functions,
 };
 
 use crate::Lcg;
@@ -389,22 +390,61 @@ fn intrinsic_effects(cfg: &Cfg<Op>) -> BTreeSet<&'static str> {
         .collect()
 }
 
+/// The effects each function performs itself or through a callee, recording every `compute`
+/// call and every callee summary it read.
+struct Effects {
+    /// The effects of each function's own instructions.
+    intrinsic: Vec<BTreeSet<&'static str>>,
+    /// How many times `compute` ran for each function.
+    calls: RefCell<Vec<usize>>,
+    /// Every callee summary a caller read: the caller, the callee and the summary.
+    reads: RefCell<Vec<(usize, usize, BTreeSet<&'static str>)>>,
+}
+
+impl Effects {
+    fn of(program: &[(&'static str, Cfg<Op>)]) -> Self {
+        Self {
+            intrinsic: program
+                .iter()
+                .map(|(_, cfg)| intrinsic_effects(cfg))
+                .collect(),
+            calls: RefCell::new(vec![0; program.len()]),
+            reads: RefCell::default(),
+        }
+    }
+}
+
+impl SummaryProblem<Graph<FunctionNode<&'static str>, CallMetadata>> for Effects {
+    type Summary = BTreeSet<&'static str>;
+
+    fn bottom(&self, _: &Graph<FunctionNode<&'static str>, CallMetadata>) -> Self::Summary {
+        BTreeSet::new()
+    }
+
+    fn compute(
+        &self,
+        graph: &Graph<FunctionNode<&'static str>, CallMetadata>,
+        node: NodeId,
+        summaries: &[Self::Summary],
+    ) -> Self::Summary {
+        self.calls.borrow_mut()[node.index()] += 1;
+        let mut effects = self.intrinsic[node.index()].clone();
+        for callee in graph.successors(node) {
+            let summary = &summaries[callee.index()];
+            self.reads
+                .borrow_mut()
+                .push((node.index(), callee.index(), summary.clone()));
+            effects.extend(summary.iter().copied());
+        }
+        effects
+    }
+}
+
 #[test]
 fn summaries_flow_from_callees_to_callers_through_recursion_to_a_fixpoint() {
     let program = program();
     let graph = build(&program);
-    let intrinsic: Vec<BTreeSet<&str>> = program
-        .iter()
-        .map(|(_, cfg)| intrinsic_effects(cfg))
-        .collect();
-
-    let summaries = propagate_summaries(&graph, &BTreeSet::new(), |graph, node, summaries| {
-        let mut effects = intrinsic[node.index()].clone();
-        for callee in graph.successors(node) {
-            effects.extend(summaries[callee.index()].iter().copied());
-        }
-        effects
-    });
+    let summaries = propagate_summaries(&graph, &Effects::of(&program), SummaryConfig::default());
 
     let expected: [&[&str]; 8] = [
         &["alloc", "free", "io", "math"],
@@ -438,29 +478,15 @@ fn an_acyclic_program_computes_each_function_once_after_its_callees_are_final() 
         ),
     ];
     let graph = build(&straight_line);
-    let mut calls = vec![0; 4];
-    let mut seen_by_callers: Vec<(usize, usize, BTreeSet<&str>)> = Vec::new();
-
-    let summaries = propagate_summaries(&graph, &BTreeSet::new(), |graph, node, summaries| {
-        calls[node.index()] += 1;
-        let mut effects = intrinsic_effects(&straight_line[node.index()].1);
-        for callee in graph.successors(node) {
-            seen_by_callers.push((
-                node.index(),
-                callee.index(),
-                summaries[callee.index()].clone(),
-            ));
-            effects.extend(summaries[callee.index()].iter().copied());
-        }
-        effects
-    });
+    let effects = Effects::of(&straight_line);
+    let summaries = propagate_summaries(&graph, &effects, SummaryConfig::default());
 
     assert_eq!(
-        calls,
+        effects.calls.into_inner(),
         [1, 1, 1, 1],
         "no component is cyclic, so nothing is recomputed"
     );
-    for (caller, callee, seen) in seen_by_callers {
+    for (caller, callee, seen) in effects.reads.into_inner() {
         assert_eq!(
             seen, summaries[callee],
             "{} read {} before it was final",
@@ -474,24 +500,9 @@ fn an_acyclic_program_computes_each_function_once_after_its_callees_are_final() 
 fn recursive_functions_settle_on_a_summary_that_no_longer_changes() {
     let program = program();
     let graph = build(&program);
-    let mut calls = [0; 8];
-    let intrinsic: Vec<BTreeSet<&str>> = program
-        .iter()
-        .map(|(_, cfg)| intrinsic_effects(cfg))
-        .collect();
-    let compute = |graph: &Graph<FunctionNode<&str>, CallMetadata>,
-                   node: NodeId,
-                   summaries: &[BTreeSet<&'static str>]| {
-        let mut effects = intrinsic[node.index()].clone();
-        for callee in graph.successors(node) {
-            effects.extend(summaries[callee.index()].iter().copied());
-        }
-        effects
-    };
-    let summaries = propagate_summaries(&graph, &BTreeSet::new(), |graph, node, summaries| {
-        calls[node.index()] += 1;
-        compute(graph, node, summaries)
-    });
+    let effects = Effects::of(&program);
+    let summaries = propagate_summaries(&graph, &effects, SummaryConfig::default());
+    let calls = effects.calls.borrow().clone();
     // A recursive cluster is iterated, so one of its members runs again once
     // a callee it read has changed; every member ends on a summary that
     // computing it once more would not change.
@@ -501,7 +512,7 @@ fn recursive_functions_settle_on_a_summary_that_no_longer_changes() {
         let node = find_function(&graph, &recursive).expect("present");
         assert!(!summaries[node.index()].is_empty());
         assert_eq!(
-            compute(&graph, node, &summaries),
+            effects.compute(&graph, node, &summaries),
             summaries[node.index()],
             "{recursive} is stable"
         );
@@ -529,6 +540,57 @@ fn deepest_stack(
     FRAMES[node.index()].saturating_add(deepest.unwrap_or(0))
 }
 
+/// The deepest stack of each function, as `deepest_stack` gives it, counting the `compute`
+/// calls. Past `budget` calls every summary freezes, so that a run that would climb forever ends.
+struct StackDepths {
+    budget: usize,
+    calls: Cell<usize>,
+}
+
+impl StackDepths {
+    fn with_budget(budget: usize) -> Self {
+        Self {
+            budget,
+            calls: Cell::new(0),
+        }
+    }
+}
+
+impl SummaryProblem<Graph<FunctionNode<&'static str>, CallMetadata>> for StackDepths {
+    type Summary = Option<u64>;
+
+    fn bottom(&self, _: &Graph<FunctionNode<&'static str>, CallMetadata>) -> Option<u64> {
+        None
+    }
+
+    fn compute(
+        &self,
+        graph: &Graph<FunctionNode<&'static str>, CallMetadata>,
+        node: NodeId,
+        depths: &[Option<u64>],
+    ) -> Option<u64> {
+        self.calls.set(self.calls.get() + 1);
+        if self.calls.get() > self.budget {
+            return depths[node.index()];
+        }
+        Some(deepest_stack(graph, node, depths))
+    }
+
+    /// Interval widening on the upper end: a depth that grows again is unbounded.
+    fn widen(
+        &self,
+        _: &Graph<FunctionNode<&'static str>, CallMetadata>,
+        _: NodeId,
+        previous: &Option<u64>,
+        computed: &Option<u64>,
+    ) -> Option<u64> {
+        match (*previous, *computed) {
+            (Some(previous), Some(computed)) if computed > previous => Some(u64::MAX),
+            (previous, computed) => previous.max(computed),
+        }
+    }
+}
+
 /// The stack depth of a recursive function grows with every turn of the recursion, so
 /// without widening the iteration still climbs after any budget. Widening at the recursion
 /// boundaries ends it: the recursive functions and their callers are unbounded, every other
@@ -539,34 +601,21 @@ fn stack_depths_climb_forever_over_recursion_and_converge_when_widened() {
     let program = program();
     let graph = build(&program);
 
-    let mut calls = 0;
-    let _ = propagate_summaries(&graph, &None::<u64>, |graph, node, depths| {
-        calls += 1;
-        if calls > BUDGET {
-            // Past the budget, freeze every summary so that the run ends.
-            return depths[node.index()];
-        }
-        Some(deepest_stack(graph, node, depths))
-    });
+    let unwidened = StackDepths::with_budget(BUDGET);
+    let _ = propagate_summaries(&graph, &unwidened, SummaryConfig::default());
+    let calls = unwidened.calls.get();
     assert!(
         calls > BUDGET,
         "unwidened, the depths still change after {BUDGET} computes"
     );
 
-    let mut calls = 0;
-    let depths = propagate_summaries_widened(
-        &graph,
-        &None,
-        |graph, node, depths| {
-            calls += 1;
-            Some(deepest_stack(graph, node, depths))
-        },
-        // Interval widening on the upper end: a depth that grows again is unbounded.
-        |_, previous, computed| match (*previous, *computed) {
-            (Some(previous), Some(computed)) if computed > previous => Some(u64::MAX),
-            (previous, computed) => previous.max(computed),
-        },
-    );
+    let widened = StackDepths::with_budget(usize::MAX);
+    let widening = SummaryConfig {
+        widening: true,
+        narrowing: false,
+    };
+    let depths = propagate_summaries(&graph, &widened, widening);
+    let calls = widened.calls.get();
     assert!(calls <= 2 * NAMES.len(), "{calls} computes");
     let unbounded = u64::MAX;
     assert_eq!(
@@ -593,18 +642,36 @@ fn stack_depths_climb_forever_over_recursion_and_converge_when_widened() {
     }
 }
 
+/// The functions each function reaches through calls, itself included, by their ids.
+struct Reached;
+
+impl<C: Copy + Ord> SummaryProblem<Graph<FunctionNode<C>, CallMetadata>> for Reached {
+    type Summary = BTreeSet<C>;
+
+    fn bottom(&self, _: &Graph<FunctionNode<C>, CallMetadata>) -> BTreeSet<C> {
+        BTreeSet::new()
+    }
+
+    fn compute(
+        &self,
+        graph: &Graph<FunctionNode<C>, CallMetadata>,
+        node: NodeId,
+        summaries: &[BTreeSet<C>],
+    ) -> BTreeSet<C> {
+        let mut reached = BTreeSet::from([graph.node(node).id]);
+        for callee in graph.successors(node) {
+            reached.extend(summaries[callee.index()].iter().copied());
+        }
+        reached
+    }
+}
+
 #[test]
 fn summaries_over_random_call_graphs_are_the_reachable_sets_a_search_finds() {
     for seed in 1..=8 {
         let digraph = Digraph::random(&mut Lcg(seed + 20), 20, 30);
         let graph = random_call_graph(&digraph);
-        let summaries = propagate_summaries(&graph, &BTreeSet::new(), |graph, node, summaries| {
-            let mut reached = BTreeSet::from([node.index()]);
-            for callee in graph.successors(node) {
-                reached.extend(summaries[callee.index()].iter().copied());
-            }
-            reached
-        });
+        let summaries = propagate_summaries(&graph, &Reached, SummaryConfig::default());
         for (function, reached) in summaries.iter().enumerate() {
             let expected: BTreeSet<usize> = digraph
                 .distances(function, true, None)
@@ -624,13 +691,7 @@ fn a_removed_function_keeps_the_bottom_summary_and_recursion_ignores_it() {
     let legacy = find_function(&graph, &"legacy").expect("present");
     graph.remove_node(legacy);
 
-    let summaries = propagate_summaries(&graph, &BTreeSet::new(), |graph, node, summaries| {
-        let mut reached = BTreeSet::from([name(graph, node)]);
-        for callee in graph.successors(node) {
-            reached.extend(summaries[callee.index()].iter().copied());
-        }
-        reached
-    });
+    let summaries = propagate_summaries(&graph, &Reached, SummaryConfig::default());
     assert_eq!(
         summaries.len(),
         graph.node_bound(),

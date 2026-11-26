@@ -143,22 +143,22 @@
 //! [`MemoryEventInfo`] is the sole instruction-side memory contract. Memory
 //! SSA and memory-carried value flow over it live in the `il` crate.
 //!
-//! Additionally, [`Problem`] is the trait for pluggable instruction-level
-//! dataflow analyses over any rooted view (run by [`solve_problem`]),
-//! [`NodeProblem`] its node-level counterpart over any graph view (run by
-//! [`solve_node_problem`]),
-//! [`EdgeProblem`] its edge-sensitive counterpart (run by
-//! [`solve_edge_problem`]), [`TryEdgeProblem`] the error-preserving edge
-//! variant, and [`Emitter`] the trait for linearization output. A
-//! [`SolveConfig`] selects the [`IterationOrder`] of every solver; in
-//! [`IterationOrder::WeakTopological`] they follow a [`WeakTopologicalOrder`]
-//! and widen at its heads, so infinite-height lattices converge.
-//! [`stream_problem`], [`stream_node_problem`] and [`stream_edge_problem`]
+//! Additionally, [`NodeProblem`] is the trait for pluggable dataflow analyses
+//! with one fact per node of any graph view (per-block problems of a CFG
+//! included), run by [`solve_node_problem`]; [`EdgeProblem`] is its
+//! edge-sensitive counterpart, run by [`solve_edge_problem`]; each has a
+//! fallible form ([`TryNodeProblem`], [`TryEdgeProblem`]) that every
+//! infallible problem implements; and [`Emitter`] is the trait for
+//! linearization output. A [`Solve`] names the [`Seeds`] a solve starts from
+//! and its [`SolveConfig`], which selects the [`IterationOrder`]; in
+//! [`IterationOrder::WeakTopological`] the solvers follow a
+//! [`WeakTopologicalOrder`] and widen at its heads, so infinite-height
+//! lattices converge. [`stream_node_problem`] and [`stream_edge_problem`]
 //! run that solve and hand each node's facts out once they are final, instead
-//! of keeping every fact until the end. [`resume_problem`],
-//! [`resume_node_problem`] and [`resume_edge_problem`] re-solve after an edit
-//! from the facts of the solve before it, and [`OrderedFixpoint`] keeps the
-//! reads of the ordered slot driver between runs.
+//! of keeping every fact until the end. [`resume_node_problem`] and
+//! [`resume_edge_problem`] re-solve after an edit from the facts of the solve
+//! before it, and [`OrderedFixpoint`] keeps the reads of the ordered slot
+//! driver between runs.
 //!
 //! # Contracts
 //!
@@ -245,35 +245,23 @@ pub use cfg::{
 };
 pub use dataflow::bits::DenseBits;
 pub use dataflow::cfg_view::CfgView;
-pub use dataflow::edge_fixpoint::{
-    EdgeFacts, EdgeProblem, Reachable, ReachableEdgeProblem, TryEdgeProblem, solve_edge_problem,
-    solve_edge_problem_from, solve_edge_problem_from_with_config, solve_edge_problem_with_config,
-    try_solve_edge_problem, try_solve_edge_problem_from, try_solve_edge_problem_from_with_config,
-    try_solve_edge_problem_with_config,
-};
-pub use dataflow::fixpoint::{
-    Facts, IterationOrder, Problem, SolveConfig, SolveError, TryProblem, TrySolveError,
-    meet_options, solve_problem, solve_problem_from, solve_problem_from_with_config,
-    solve_problem_with_config, try_solve_problem, try_solve_problem_from,
-    try_solve_problem_from_with_config, try_solve_problem_with_config,
-};
+pub use dataflow::edge_fixpoint::{EdgeFacts, EdgeProblem, TryEdgeProblem, solve_edge_problem};
 pub use dataflow::ifds::{
     CfgSupergraph, IfdsConfig, IfdsProblem, IfdsResults, Supergraph, solve_ifds,
 };
 pub use dataflow::instruction::InstrInfo;
-pub use dataflow::node_fixpoint::{
-    NodeProblem, TryNodeProblem, solve_node_problem, solve_node_problem_from,
-    solve_node_problem_from_with_config, solve_node_problem_with_config, try_solve_node_problem,
-    try_solve_node_problem_from, try_solve_node_problem_from_with_config,
-    try_solve_node_problem_with_config,
-};
-pub use dataflow::program_point::{DefSite, ProgramPoint, UseSite};
-pub use dataflow::resume::{ResumeMode, resume_edge_problem, resume_node_problem, resume_problem};
+pub use dataflow::node_fixpoint::{NodeProblem, TryNodeProblem, solve_node_problem};
+pub use dataflow::program_point::ProgramPoint;
+pub use dataflow::resume::{Resume, ResumeMode, resume_edge_problem, resume_node_problem};
 pub use dataflow::slot_fixpoint::{
-    OrderedFixpoint, SequentialExecutor, SlotAccess, SlotFixpointStats, WaveExecutor, WaveRequeue,
-    ordered_fixpoint, wave_fixpoint,
+    OrderedFixpoint, SequentialExecutor, SlotAccess, WaveExecutor, WaveRequeue, ordered_fixpoint,
+    wave_fixpoint,
 };
-pub use dataflow::stream::{SolveStats, stream_edge_problem, stream_node_problem, stream_problem};
+pub use dataflow::solve::{
+    Facts, IterationOrder, Seeds, Solve, SolveConfig, SolveError, SolveStats, TrySolveError,
+    meet_options, try_meet_options,
+};
+pub use dataflow::stream::{stream_edge_problem, stream_node_problem};
 pub use display::{DisplayInstr, IndentedWriter, render};
 pub use edge::{Edge, EdgeId, EdgeKind, EdgeTag, KindedEdge, Probability};
 pub use effects::{
@@ -287,9 +275,9 @@ pub use flow::{
     UnresolvedTransfer,
 };
 pub use graph::call_graph::{
-    CallMetadata, FunctionIndex, FunctionNode, call_graph, call_graph_indexed, find_function,
-    is_recursive_function, propagate_summaries, propagate_summaries_narrowed,
-    propagate_summaries_widened, recursive_functions,
+    CallMetadata, FunctionIndex, FunctionNode, SummaryConfig, SummaryProblem, call_graph,
+    call_graph_indexed, find_function, is_recursive_function, propagate_summaries,
+    recursive_functions,
 };
 pub use graph::cdg::{
     ControlClosureScratch, NonterminationScratch, control_dependence_graph,
@@ -329,10 +317,9 @@ pub use graph::loop_forest::{LoopForest, LoopId};
 pub use graph::loop_nest::{LoopNestNode, LoopNestingTree};
 pub use graph::network_flow::{ArcId, FlowError, FlowNetwork, FlowSolution};
 pub use graph::open::{
-    FoldEnter, MarkScope, OpenBfsEvent, OpenDfsEvent, OpenFixpointConfig, OpenFixpointError,
-    OpenFold, OpenFoldConfig, OpenPathsEvent, follow, follow_path, open_breadth_first_events,
-    open_breadth_first_paths, open_depth_first_events, open_fold_fixpoint, open_fold_post_order,
-    open_fold_post_order_memoized, open_search,
+    FoldEnter, MarkScope, OpenBfsEvent, OpenDfsEvent, OpenFold, OpenFoldConfig, OpenFoldError,
+    OpenFoldMemo, OpenPathsEvent, Revisit, follow, follow_path, open_breadth_first_events,
+    open_breadth_first_paths, open_depth_first_events, open_fold, open_fold_in, open_search,
 };
 pub use graph::path_expr::{
     GenKill, GenKillAlgebra, PathAlgebra, PathExprArena, PathExprId, PathExprNode, PathExpressions,

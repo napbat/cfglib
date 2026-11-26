@@ -1,6 +1,6 @@
 use cfglib::{
     BlockId, Cfg, CfgBuilder, Direction, Edge, EdgeKind, Flow, FlowControl, FlowEffect, Graph,
-    NodeId, NodeProblem, Probability, Problem,
+    NodeId, NodeProblem, Probability,
 };
 
 pub(super) fn fixture_u32(value: usize) -> u32 {
@@ -246,7 +246,7 @@ impl NodeProblem<Graph<(), ()>> for Reachability {
 
 pub(super) struct CfgReachability;
 
-impl Problem<Cfg<u32>> for CfgReachability {
+impl NodeProblem<Cfg<u32>> for CfgReachability {
     type Fact = bool;
 
     fn direction(&self) -> Direction {
@@ -274,7 +274,7 @@ pub(super) const WIDE_FACT_WORDS: usize = 256;
 
 pub(super) struct WideCfgFact;
 
-impl Problem<Cfg<u32>> for WideCfgFact {
+impl NodeProblem<Cfg<u32>> for WideCfgFact {
     type Fact = Vec<u64>;
 
     fn direction(&self) -> Direction {

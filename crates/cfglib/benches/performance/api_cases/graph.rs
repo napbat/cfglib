@@ -1,8 +1,14 @@
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::ops::ControlFlow;
 
 use cfglib::{BlockId, canonical_hash, canonical_order, multiset_fingerprint, wl_colors};
+use cfglib::{
+    CallMetadata, DotEdgeAttributes, DotStyle, EdgeId, FunctionIndex, FunctionNode, SummaryConfig,
+    SummaryProblem, TextStyle, call_graph_indexed, control_flow_edge_attributes, display_label,
+    no_label, parse_cfg_listing, parse_text, plain_edge_attributes, recursive_functions, render,
+};
 use cfglib::{
     Cfg, Direction, DominatorTree, EdgeKind, Flow, FlowControl, FlowEffect, FoldEnter, Graph,
     GraphView, MarkScope, NodeId, OpenFold, OpenFoldConfig, Rooted, SearchConfig, SearchOrder,
@@ -11,15 +17,10 @@ use cfglib::{
     detect_loops_tagged, find_back_edges_tagged, find_function, follow, follow_path,
     insert_preheader, is_recursive_function, is_reducible, kosaraju_scc, loop_exit_blocks,
     min_label_relaxation, open_breadth_first_events, open_breadth_first_paths,
-    open_depth_first_events, open_fold_post_order, open_search, propagate_summaries, reachable,
+    open_depth_first_events, open_fold, open_search, propagate_summaries, reachable,
     reverse_postorder, scan_predecessors, search, search_in, to_dot, to_text, topological_sort,
     topological_sort_or_cycle, verify, verify_edge_view, verify_semantics, verify_view, write_dot,
     write_text,
-};
-use cfglib::{
-    DotEdgeAttributes, DotStyle, EdgeId, FunctionIndex, TextStyle, call_graph_indexed,
-    control_flow_edge_attributes, display_label, no_label, parse_cfg_listing, parse_text,
-    plain_edge_attributes, propagate_summaries_widened, recursive_functions, render,
 };
 
 use super::BenchmarkSuite;
@@ -298,9 +299,9 @@ fn register_open_traversals(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_open_fold_post_order",
-        covers[open_fold_post_order],
-        || open_fold_post_order(&mut SubtreeSize, 0_usize, OpenFoldConfig::new()),
-        |size: &Option<usize>| assert_eq!(*size, Some(NODE_COUNT))
+        covers[open_fold],
+        || open_fold(&mut SubtreeSize, 0_usize, OpenFoldConfig::default()),
+        |size: &Result<_, _>| assert_eq!(*size, Ok(Some(NODE_COUNT)))
     );
     benchmark_case!(
         suite,
@@ -440,14 +441,28 @@ fn register_graph_algorithms(suite: &mut BenchmarkSuite<'_>) {
         suite,
         "api_propagate_summaries",
         covers[propagate_summaries],
-        || propagate_summaries(&graph, &false, |graph, node, summaries| {
-            node.index() + 1 == NODE_COUNT
-                || graph
-                    .successors(node)
-                    .any(|successor| summaries[successor.index()])
-        }),
+        || propagate_summaries(&graph, &ReachesLast(NODE_COUNT), SummaryConfig::default()),
         |summaries: &Vec<bool>| assert!(summaries.iter().all(|summary| *summary))
     );
+}
+
+/// Whether a function reaches the last one, id `count - 1`, through its
+/// callees.
+struct ReachesLast(usize);
+
+impl SummaryProblem<Graph<(), ()>> for ReachesLast {
+    type Summary = bool;
+
+    fn bottom(&self, _graph: &Graph<(), ()>) -> bool {
+        false
+    }
+
+    fn compute(&self, graph: &Graph<(), ()>, node: NodeId, summaries: &[bool]) -> bool {
+        node.index() + 1 == self.0
+            || graph
+                .successors(node)
+                .any(|callee| summaries[callee.index()])
+    }
 }
 
 fn register_cfg_graphs(suite: &mut BenchmarkSuite<'_>) {
@@ -671,22 +686,37 @@ fn register_call_tree(suite: &mut BenchmarkSuite<'_>) {
     // Each function's summary is the set of `id % 64` over everything it
     // reaches: a finite-height domain that every recursive cluster of the
     // call tree has to iterate.
-    let reach_mask = |graph: &cfglib::Graph<cfglib::FunctionNode<u32>, cfglib::CallMetadata>,
-                      node: cfglib::NodeId,
-                      summaries: &[u64]| {
+    let tree_masks = propagate_summaries(&tree, &ReachMask, SummaryConfig::default());
+    benchmark_case!(
+        suite,
+        "call_tree_propagate_summaries",
+        || propagate_summaries(&tree, &ReachMask, SummaryConfig::default()),
+        |masks: &Vec<u64>| assert_eq!(*masks, tree_masks)
+    );
+}
+
+/// Each function's `id % 64` over everything it reaches.
+struct ReachMask;
+
+impl SummaryProblem<Graph<FunctionNode<u32>, CallMetadata>> for ReachMask {
+    type Summary = u64;
+
+    fn bottom(&self, _graph: &Graph<FunctionNode<u32>, CallMetadata>) -> u64 {
+        0
+    }
+
+    fn compute(
+        &self,
+        graph: &Graph<FunctionNode<u32>, CallMetadata>,
+        node: NodeId,
+        summaries: &[u64],
+    ) -> u64 {
         graph
             .successors(node)
             .fold(1_u64 << (node.index() % 64), |mask, callee| {
                 mask | summaries[callee.index()]
             })
-    };
-    let tree_masks = propagate_summaries(&tree, &0, reach_mask);
-    benchmark_case!(
-        suite,
-        "call_tree_propagate_summaries",
-        || propagate_summaries(&tree, &0, reach_mask),
-        |masks: &Vec<u64>| assert_eq!(*masks, tree_masks)
-    );
+    }
 }
 
 fn register_recursive_ring(suite: &mut BenchmarkSuite<'_>) {
@@ -700,12 +730,11 @@ fn register_recursive_ring(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "ring_propagate_summaries_seed_at_last",
-        || propagate_summaries(&ring, &false, |graph, node, summaries| {
-            node.index() + 1 == RING_FUNCTIONS
-                || graph
-                    .successors(node)
-                    .any(|callee| summaries[callee.index()])
-        }),
+        || propagate_summaries(
+            &ring,
+            &ReachesLast(RING_FUNCTIONS),
+            SummaryConfig::default()
+        ),
         |summaries: &Vec<bool>| assert!(summaries.iter().all(|summary| *summary))
     );
     // The deepest stack over the same ring grows forever. Widening at the
@@ -714,32 +743,57 @@ fn register_recursive_ring(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_propagate_summaries_widened",
-        covers[propagate_summaries_widened],
         || {
-            let mut calls = 0_usize;
-            let depths = propagate_summaries_widened(
-                &ring,
-                &None,
-                |graph, node, depths: &[Option<u32>]| {
-                    calls += 1;
-                    let deepest = graph
-                        .successors(node)
-                        .filter_map(|callee| depths[callee.index()])
-                        .max();
-                    Some(deepest.unwrap_or(0).saturating_add(1))
-                },
-                |_, previous, computed| match (*previous, *computed) {
-                    (Some(previous), Some(computed)) if computed > previous => Some(u32::MAX),
-                    (previous, computed) => previous.max(computed),
-                },
-            );
-            (depths, calls)
+            let problem = StackDepths::default();
+            let widened = SummaryConfig {
+                widening: true,
+                narrowing: false,
+            };
+            let depths = propagate_summaries(&ring, &problem, widened);
+            (depths, problem.computes.get())
         },
         |(depths, calls): &(Vec<Option<u32>>, usize)| {
             assert!(depths.iter().all(|depth| *depth == Some(u32::MAX)));
             assert!(*calls <= 3 * RING_FUNCTIONS, "{calls} compute calls");
         }
     );
+}
+
+/// The deepest call stack below each function: a widening point whose depth
+/// still grows jumps to `u32::MAX`. Counts the computes.
+#[derive(Default)]
+struct StackDepths {
+    computes: Cell<usize>,
+}
+
+impl SummaryProblem<Graph<(), ()>> for StackDepths {
+    type Summary = Option<u32>;
+
+    fn bottom(&self, _graph: &Graph<(), ()>) -> Option<u32> {
+        None
+    }
+
+    fn compute(&self, graph: &Graph<(), ()>, node: NodeId, depths: &[Option<u32>]) -> Option<u32> {
+        self.computes.set(self.computes.get() + 1);
+        let deepest = graph
+            .successors(node)
+            .filter_map(|callee| depths[callee.index()])
+            .max();
+        Some(deepest.unwrap_or(0).saturating_add(1))
+    }
+
+    fn widen(
+        &self,
+        _graph: &Graph<(), ()>,
+        _node: NodeId,
+        previous: &Option<u32>,
+        computed: &Option<u32>,
+    ) -> Option<u32> {
+        match (*previous, *computed) {
+            (Some(previous), Some(computed)) if computed > previous => Some(u32::MAX),
+            (previous, computed) => previous.max(computed),
+        }
+    }
 }
 
 /// Function `i` calls `2i + 1` and `2i + 2`; every 64th function also calls

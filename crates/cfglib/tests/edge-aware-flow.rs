@@ -2,8 +2,8 @@
 
 use cfglib::{
     Cfg, Direction, DominatorTree, Edge, EdgeId, EdgeKind, EdgeView, FilteredEdges, KeyedGraph,
-    NodeId, RootedView, TryEdgeProblem, TrySolveError, breadth_first_edges,
-    remove_empty_blocks_mapped, try_solve_edge_problem_from, verify_edge_view,
+    NodeId, RootedView, Seeds, Solve, TryEdgeProblem, TrySolveError, breadth_first_edges,
+    remove_empty_blocks_mapped, solve_edge_problem, verify_edge_view,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,14 +264,19 @@ fn keyed_seeded_dataflow_preserves_bottom_and_consumer_errors() {
     let reached = graph.intern(&20);
     let island = graph.intern(&1_000);
     let edge = graph.add_edge(entry, reached, Route::Normal);
+    let seeds = [entry];
+    let from_entry = Solve {
+        seeds: Seeds::Of(&seeds),
+        ..Solve::default()
+    };
 
-    let facts = try_solve_edge_problem_from(
+    let facts = solve_edge_problem(
         &graph,
         &FallibleReach {
             entry,
             reject: None,
         },
-        &[entry],
+        from_entry,
     )
     .unwrap();
     assert_eq!(facts.fact_in(entry), &Some(1));
@@ -280,13 +285,13 @@ fn keyed_seeded_dataflow_preserves_bottom_and_consumer_errors() {
     assert_eq!(facts.fact_on(edge), Some(&Some(2)));
     assert_eq!(graph.edge(edge).data(), &Route::Normal);
 
-    let error = try_solve_edge_problem_from(
+    let error = solve_edge_problem(
         &graph,
         &FallibleReach {
             entry,
             reject: Some(reached),
         },
-        &[entry],
+        from_entry,
     )
     .unwrap_err();
     assert_eq!(

@@ -6,16 +6,14 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use cfglib::{
-    Direction, Facts, Graph, GraphView, IterationOrder, NodeId, NodeProblem, ResumeMode,
-    SolveConfig, SolveError, TryNodeProblem, TrySolveError, resume_node_problem,
-    solve_node_problem, solve_node_problem_from, solve_node_problem_from_with_config,
-    solve_node_problem_with_config, stream_node_problem, try_solve_node_problem,
-    try_solve_node_problem_from, try_solve_node_problem_from_with_config,
-    try_solve_node_problem_with_config,
+    Direction, Facts, Graph, GraphView, IterationOrder, NodeId, NodeProblem, Resume, ResumeMode,
+    Solve, SolveConfig, SolveError, TryNodeProblem, TrySolveError, resume_node_problem,
+    solve_node_problem, stream_node_problem,
 };
 
-use crate::graphs::{ORDERS, Rng, Shape, assert_same_facts, assert_streams_like};
-use crate::lifted::Lifted;
+use crate::graphs::{
+    ORDERS, Rng, Shape, assert_same_facts, assert_streams_like, live, seeded, step_limit,
+};
 
 /// A consumer's symbol graph: dense `u32` ids, forward and reverse adjacency,
 /// and a slot that was retired without renumbering its neighbors.
@@ -158,7 +156,7 @@ fn taint_over_a_consumer_graph_equals_reachability_from_the_sources() {
                 sources: sources.clone(),
                 direction,
             };
-            let facts = solve_node_problem(&graph, &problem).unwrap();
+            let facts = solve_node_problem(&graph, &problem, Solve::default()).unwrap();
             assert_eq!(
                 tainted(&facts, &shape, direction),
                 reach(&shape, &sources, direction),
@@ -182,7 +180,8 @@ fn the_same_taint_over_the_crates_own_graph_store_gives_the_same_answer() {
             assert!(store.remove_node(ids[hole]));
         }
         let sources = random_sources(&mut rng, &shape);
-        let facts = solve_node_problem(&store, &StoreTaint(sources.clone())).unwrap();
+        let facts = solve_node_problem(&store, &StoreTaint(sources.clone()), Solve::default());
+        let facts = facts.unwrap();
         let reached = reach(&shape, &sources, Direction::Forward);
         for node in shape.live() {
             let flagged = *facts.fact_out(ids[node]);
@@ -238,6 +237,7 @@ fn node_facts_are_in_program_order_whichever_way_the_analysis_flows() {
             sources: vec![2],
             direction: Direction::Backward,
         },
+        Solve::default(),
     )
     .unwrap();
     // c has no successor: the boundary fact (false) is what follows it, and
@@ -261,19 +261,24 @@ fn seeding_a_source_reaches_exactly_what_the_source_reaches() {
             sources: vec![seed],
             direction: Direction::Forward,
         };
-        let seeded = solve_node_problem_from(&graph, &problem, &[seed]).unwrap();
-        let full = solve_node_problem(&graph, &problem).unwrap();
+        let once = solve_node_problem(&graph, &problem, seeded(&[seed], SolveConfig::default()));
+        let once = once.unwrap();
+        let full = solve_node_problem(&graph, &problem, Solve::default()).unwrap();
         assert_eq!(
-            tainted(&seeded, &shape, Direction::Forward),
+            tainted(&once, &shape, Direction::Forward),
             reach(&shape, &[seed], Direction::Forward)
         );
         assert_eq!(
-            tainted(&seeded, &shape, Direction::Forward),
+            tainted(&once, &shape, Direction::Forward),
             tainted(&full, &shape, Direction::Forward)
         );
         // A duplicate seed is queued once.
-        let doubled = solve_node_problem_from(&graph, &problem, &[seed, seed]).unwrap();
-        assert_eq!(doubled.steps(), seeded.steps());
+        let seeds = [seed, seed];
+        let doubled = solve_node_problem(&graph, &problem, seeded(&seeds, SolveConfig::default()));
+        assert_eq!(
+            doubled.unwrap().stats().step_count(),
+            once.stats().step_count()
+        );
     }
 }
 
@@ -289,12 +294,13 @@ fn only_the_seeded_node_is_a_source_for_a_seeded_solve() {
         sources: vec![0, 2],
         direction: Direction::Forward,
     };
-    let facts = solve_node_problem_from(&graph, &problem, &[0]).unwrap();
+    let facts = solve_node_problem(&graph, &problem, seeded(&[0], SolveConfig::default())).unwrap();
     assert!(*facts.fact_out(1_u32));
     assert!(!*facts.fact_out(2_u32));
     assert!(!*facts.fact_out(3_u32));
-    let nothing = solve_node_problem_from(&graph, &problem, &[]).unwrap();
-    assert_eq!(nothing.steps(), 0);
+    let nothing =
+        solve_node_problem(&graph, &problem, seeded(&[], SolveConfig::default())).unwrap();
+    assert_eq!(nothing.stats().step_count(), 0);
     assert!(!*nothing.fact_out(0_u32));
 }
 
@@ -309,7 +315,7 @@ fn a_removed_slot_is_never_visited_and_keeps_bottom() {
         sources: vec![1],
         direction: Direction::Forward,
     };
-    let facts = solve_node_problem(&graph, &problem).unwrap();
+    let facts = solve_node_problem(&graph, &problem, Solve::default()).unwrap();
     assert!(
         !*facts.fact_out(1_u32),
         "a removed node is not a node of the view"
@@ -328,7 +334,7 @@ fn seeding_a_removed_slot_panics() {
         sources: vec![],
         direction: Direction::Forward,
     };
-    let _ = solve_node_problem_from(&graph, &problem, &[1]);
+    let _ = solve_node_problem(&graph, &problem, seeded(&[1], SolveConfig::default()));
 }
 
 #[test]
@@ -342,26 +348,27 @@ fn a_cycle_converges_and_a_step_limit_below_the_work_fails_with_its_position() {
         sources: vec![0],
         direction: Direction::Forward,
     };
-    let unbounded = solve_node_problem(&graph, &problem).unwrap();
-    let needed = unbounded.steps();
-    let short = SolveConfig::with_step_limit(needed - 1);
+    let unbounded = solve_node_problem(&graph, &problem, Solve::default()).unwrap();
+    let needed = unbounded.stats().step_count();
+    let short = step_limit(needed - 1);
+    let error = solve_node_problem(&graph, &problem, live(short)).unwrap_err();
     let SolveError::StepLimitExceeded {
         limit,
         steps,
         pending_node,
-    } = solve_node_problem_with_config(&graph, &problem, short).unwrap_err();
+    } = SolveError::from(error);
     assert_eq!((limit, steps), (needed - 1, needed - 1));
     assert!(pending_node < graph.node_bound());
 
     let seeds = [0_u32, 1, 2];
-    assert!(solve_node_problem_from_with_config(&graph, &problem, &seeds, short).is_err());
+    assert!(solve_node_problem(&graph, &problem, seeded(&seeds, short)).is_err());
     for limit in [needed, needed + 5] {
-        let config = SolveConfig::with_step_limit(limit);
-        let bounded = solve_node_problem_with_config(&graph, &problem, config).unwrap();
-        let seeded = solve_node_problem_from_with_config(&graph, &problem, &seeds, config).unwrap();
+        let config = step_limit(limit);
+        let bounded = solve_node_problem(&graph, &problem, live(config)).unwrap();
+        let from_seeds = solve_node_problem(&graph, &problem, seeded(&seeds, config)).unwrap();
         for node in 0..3_u32 {
             assert_eq!(bounded.fact_out(node), unbounded.fact_out(node));
-            assert_eq!(seeded.fact_out(node), unbounded.fact_out(node));
+            assert_eq!(from_seeds.fact_out(node), unbounded.fact_out(node));
         }
     }
 }
@@ -383,7 +390,7 @@ impl fmt::Display for Rejected {
 
 impl std::error::Error for Rejected {}
 
-impl<G: GraphView<NodeId = u32>> TryNodeProblem<G> for Verifying {
+impl TryNodeProblem<SymbolGraph> for Verifying {
     type Fact = bool;
     type Error = Rejected;
 
@@ -391,19 +398,19 @@ impl<G: GraphView<NodeId = u32>> TryNodeProblem<G> for Verifying {
         Direction::Forward
     }
 
-    fn bottom(&self, _graph: &G) -> bool {
+    fn bottom(&self, _graph: &SymbolGraph) -> bool {
         false
     }
 
-    fn boundary(&self, _graph: &G) -> Result<bool, Rejected> {
+    fn boundary(&self, _graph: &SymbolGraph) -> Result<bool, Rejected> {
         Ok(false)
     }
 
-    fn meet(&self, _graph: &G, _node: u32, a: &bool, b: &bool) -> Result<bool, Rejected> {
+    fn meet(&self, _graph: &SymbolGraph, _node: u32, a: &bool, b: &bool) -> Result<bool, Rejected> {
         Ok(*a || *b)
     }
 
-    fn transfer(&self, _graph: &G, node: u32, input: &bool) -> Result<bool, Rejected> {
+    fn transfer(&self, _graph: &SymbolGraph, node: u32, input: &bool) -> Result<bool, Rejected> {
         if *input && self.rejected == Some(node) {
             return Err(Rejected(node));
         }
@@ -412,7 +419,7 @@ impl<G: GraphView<NodeId = u32>> TryNodeProblem<G> for Verifying {
 }
 
 #[test]
-fn the_fallible_node_solvers_agree_with_the_infallible_one_and_report_refusals() {
+fn a_fallible_node_problem_agrees_with_the_infallible_one_and_reports_refusals() {
     let graph = SymbolGraph {
         alive: vec![true; 4],
         edges: vec![(0, 1), (1, 2), (2, 3)],
@@ -424,6 +431,7 @@ fn the_fallible_node_solvers_agree_with_the_infallible_one_and_report_refusals()
             sources: sources.clone(),
             direction: Direction::Forward,
         },
+        Solve::default(),
     )
     .unwrap();
     let accepting = Verifying {
@@ -431,12 +439,9 @@ fn the_fallible_node_solvers_agree_with_the_infallible_one_and_report_refusals()
         rejected: None,
     };
     let seeds = [0_u32, 1, 2, 3];
-    let config = SolveConfig::new();
     let results = [
-        try_solve_node_problem(&graph, &accepting),
-        try_solve_node_problem_with_config(&graph, &accepting, config),
-        try_solve_node_problem_from(&graph, &accepting, &seeds),
-        try_solve_node_problem_from_with_config(&graph, &accepting, &seeds, config),
+        solve_node_problem(&graph, &accepting, Solve::default()),
+        solve_node_problem(&graph, &accepting, seeded(&seeds, SolveConfig::default())),
     ];
     for result in results {
         let facts = result.unwrap();
@@ -451,11 +456,11 @@ fn the_fallible_node_solvers_agree_with_the_infallible_one_and_report_refusals()
         rejected: Some(2),
     };
     assert_eq!(
-        try_solve_node_problem(&graph, &rejecting).unwrap_err(),
+        solve_node_problem(&graph, &rejecting, Solve::default()).unwrap_err(),
         TrySolveError::Problem(Rejected(2))
     );
     assert_eq!(
-        try_solve_node_problem_from(&graph, &rejecting, &[0]).unwrap_err(),
+        solve_node_problem(&graph, &rejecting, seeded(&[0], SolveConfig::default())).unwrap_err(),
         TrySolveError::Problem(Rejected(2))
     );
     // Without a taint source nothing reaches node 2, so nothing is rejected.
@@ -463,11 +468,11 @@ fn the_fallible_node_solvers_agree_with_the_infallible_one_and_report_refusals()
         sources: vec![],
         rejected: Some(2),
     };
-    assert!(try_solve_node_problem(&graph, &clean).is_ok());
+    assert!(solve_node_problem(&graph, &clean, Solve::default()).is_ok());
 
-    let limited = SolveConfig::with_step_limit(1);
+    let limited = step_limit(1);
     assert!(matches!(
-        try_solve_node_problem_with_config(&graph, &accepting, limited),
+        solve_node_problem(&graph, &accepting, live(limited)),
         Err(TrySolveError::Solver(SolveError::StepLimitExceeded {
             limit: 1,
             steps: 1,
@@ -487,8 +492,9 @@ fn a_removed_node_of_the_crates_graph_store_is_neither_counted_nor_visited() {
     // The only source is the removed node: it must stay at bottom, and the
     // solve visits the two live nodes once each.
     let removed_index = u32::try_from(removed.index()).expect("a small graph");
-    let facts = solve_node_problem(&store, &StoreTaint(vec![removed_index])).unwrap();
-    assert_eq!(facts.steps(), 2);
+    let facts = solve_node_problem(&store, &StoreTaint(vec![removed_index]), Solve::default());
+    let facts = facts.unwrap();
+    assert_eq!(facts.stats().step_count(), 2);
     assert!(!*facts.fact_out(removed));
     assert!(!*facts.fact_out(other));
 }
@@ -501,7 +507,12 @@ fn seeding_a_removed_node_of_the_crates_graph_store_panics() {
     let removed = store.add_node(());
     store.add_edge(kept, removed, ());
     assert!(store.remove_node(removed));
-    let _ = solve_node_problem_from(&store, &StoreTaint(vec![]), &[removed]);
+    let seeds = [removed];
+    let _ = solve_node_problem(
+        &store,
+        &StoreTaint(vec![]),
+        seeded(&seeds, SolveConfig::default()),
+    );
 }
 
 /// Every iteration order, with or without descending passes, taints what the
@@ -524,28 +535,31 @@ fn every_iteration_order_reaches_the_facts_of_the_index_order() {
                 sources: sources.clone(),
                 rejected: None,
             };
-            let full = solve_node_problem(&graph, &problem).unwrap();
-            let seeded = solve_node_problem_from(&graph, &problem, &seeds).unwrap();
+            let full = solve_node_problem(&graph, &problem, Solve::default()).unwrap();
+            let from_seeds = seeded(&seeds, SolveConfig::default());
+            let from_seeds = solve_node_problem(&graph, &problem, from_seeds).unwrap();
             let forward = solve_node_problem(
                 &graph,
                 &Taint {
                     sources,
                     direction: Direction::Forward,
                 },
+                Solve::default(),
             )
             .unwrap();
             for order in ORDERS {
                 for passes in [0, 2] {
-                    let config = SolveConfig::new()
-                        .with_order(order)
-                        .with_narrowing_passes(passes);
+                    let config = SolveConfig {
+                        max_steps: None,
+                        order,
+                        narrowing_passes: passes,
+                    };
                     let what = format!("{order:?} with {passes} passes, {direction:?}, {shape:?}");
-                    let ordered = solve_node_problem_with_config(&graph, &problem, config);
+                    let ordered = solve_node_problem(&graph, &problem, live(config));
                     assert_same_facts(&ordered.unwrap(), &full, graph.node_ids(), &what);
-                    let ordered =
-                        solve_node_problem_from_with_config(&graph, &problem, &seeds, config);
-                    assert_same_facts(&ordered.unwrap(), &seeded, graph.node_ids(), &what);
-                    let ordered = try_solve_node_problem_with_config(&graph, &verifying, config);
+                    let ordered = solve_node_problem(&graph, &problem, seeded(&seeds, config));
+                    assert_same_facts(&ordered.unwrap(), &from_seeds, graph.node_ids(), &what);
+                    let ordered = solve_node_problem(&graph, &verifying, live(config));
                     assert_same_facts(&ordered.unwrap(), &forward, graph.node_ids(), &what);
                 }
             }
@@ -573,18 +587,20 @@ fn a_stream_visits_every_live_node_once_with_the_facts_of_the_solve() {
                 rejected: None,
             };
             for passes in [0, 2] {
-                let config = SolveConfig::new()
-                    .with_order(IterationOrder::WeakTopological)
-                    .with_narrowing_passes(passes);
+                let config = SolveConfig {
+                    max_steps: None,
+                    order: IterationOrder::WeakTopological,
+                    narrowing_passes: passes,
+                };
                 let what = format!("{direction:?} with {passes} passes, {shape:?}");
-                let facts = solve_node_problem_with_config(&graph, &problem, config).unwrap();
+                let facts = solve_node_problem(&graph, &problem, live(config)).unwrap();
                 let stream = |visit: &mut dyn FnMut(u32, &bool, &bool)| {
-                    stream_node_problem(&graph, &Lifted(&problem), config, visit).unwrap()
+                    stream_node_problem(&graph, &problem, live(config), visit).unwrap()
                 };
                 assert_streams_like(&facts, graph.node_ids(), stream, &what);
-                let facts = try_solve_node_problem_with_config(&graph, &verifying, config).unwrap();
+                let facts = solve_node_problem(&graph, &verifying, live(config)).unwrap();
                 let stream = |visit: &mut dyn FnMut(u32, &bool, &bool)| {
-                    stream_node_problem(&graph, &verifying, config, visit).unwrap()
+                    stream_node_problem(&graph, &verifying, live(config), visit).unwrap()
                 };
                 assert_streams_like(&facts, graph.node_ids(), stream, &what);
             }
@@ -610,6 +626,7 @@ fn a_resume_after_an_edit_equals_a_fresh_solve_of_the_edited_graph() {
                     sources: sources.clone(),
                     direction,
                 },
+                Solve::default(),
             )
             .unwrap();
             let live: Vec<u32> = graph.node_ids().collect();
@@ -639,7 +656,7 @@ fn a_resume_after_an_edit_equals_a_fresh_solve_of_the_edited_graph() {
                 }
             };
             let problem = Taint { sources, direction };
-            let fresh = solve_node_problem(&graph, &problem).unwrap();
+            let fresh = solve_node_problem(&graph, &problem, Solve::default()).unwrap();
             let modes: &[ResumeMode] = if grows {
                 &[ResumeMode::Reset, ResumeMode::Grow]
             } else {
@@ -647,15 +664,12 @@ fn a_resume_after_an_edit_equals_a_fresh_solve_of_the_edited_graph() {
             };
             for &mode in modes {
                 let what = format!("{mode:?} {direction:?} at {changed}, {shape:?}");
-                let config = SolveConfig::new();
-                let resumed = resume_node_problem(
-                    &graph,
-                    &Lifted(&problem),
-                    previous.clone(),
-                    &[changed],
+                let edit = Resume {
+                    changed: &[changed],
                     mode,
-                    config,
-                );
+                };
+                let resumed =
+                    resume_node_problem(&graph, &problem, previous.clone(), edit, Solve::default());
                 assert_same_facts(&resumed.unwrap(), &fresh, graph.node_ids(), &what);
             }
         }

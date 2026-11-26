@@ -4,7 +4,8 @@
 use std::fmt::{Debug, Display};
 
 use cfglib::{
-    DominatorTree, EdgeId, Graph, HornClauses, KeyedGraph, NodeId, NodeOrder, Rooted, tarjan_scc,
+    DenseBits, DominatorTree, EdgeId, Graph, HornClauses, KeyedGraph, NodeId, NodeOrder, Rooted,
+    tarjan_scc,
 };
 use serde_json::{Value, json};
 
@@ -364,12 +365,17 @@ fn nullability() -> HornClauses {
     clauses
 }
 
+/// The set as one `bool` per fact of its universe, to compare against a row written by hand.
+fn row(bits: &DenseBits) -> Vec<bool> {
+    (0..bits.len()).map(|fact| bits.get(fact)).collect()
+}
+
 #[test]
 fn a_clause_set_decodes_equal_and_solves_to_the_same_fixpoint() {
     let original = nullability();
     let decoded: HornClauses = round_trip(&original);
     assert_eq!(decoded, original);
-    assert_eq!(decoded.derivable(), [true, true, true, false]);
+    assert_eq!(row(&decoded.derivable()), [true, true, true, false]);
     assert_eq!(decoded.derivable(), original.derivable());
 }
 
@@ -383,7 +389,7 @@ fn a_decoded_clause_set_keeps_accepting_clauses_and_counting_repeated_bodies() {
         clauses.add_clause(3, &[0]);
     }
     assert_eq!(decoded, original);
-    assert_eq!(decoded.derivable(), [true, true, true, true]);
+    assert_eq!(row(&decoded.derivable()), [true, true, true, true]);
 }
 
 #[test]
@@ -392,5 +398,5 @@ fn cyclic_support_with_no_axiom_stays_underivable_after_a_round_trip() {
     clauses.add_clause(0, &[1]);
     clauses.add_clause(1, &[0]);
     let decoded: HornClauses = round_trip(&clauses);
-    assert_eq!(decoded.derivable(), [false, false]);
+    assert_eq!(row(&decoded.derivable()), [false, false]);
 }

@@ -7,8 +7,8 @@ use cfglib::{
     RegionId,
 };
 
-/// A source-like statement with the def, use, and effect sets the dataflow
-/// traits ask for.
+/// A source-like statement with the def and use sets the dataflow traits ask
+/// for, and the effects it declares.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stmt {
     text: String,

@@ -1,6 +1,6 @@
 //! `HornClauses` against naive forward chaining, and `min_label_relaxation` against Bellman-Ford.
 
-use cfglib::{Direction, EdgeId, EdgeRecord, Graph, HornClauses, NodeId, min_label_relaxation};
+use cfglib::{DenseBits, Direction, EdgeId, Graph, HornClauses, NodeId, min_label_relaxation};
 
 use crate::Lcg;
 
@@ -29,6 +29,11 @@ fn clause_set(fact_count: usize, clauses: &[(usize, Vec<usize>)]) -> HornClauses
     set
 }
 
+/// The set as one `bool` per fact of its universe, to compare against a row written by hand.
+fn row(bits: &DenseBits) -> Vec<bool> {
+    (0..bits.len()).map(|fact| bits.get(fact)).collect()
+}
+
 /// Random clauses: a quarter are axioms, and bodies may repeat a fact.
 fn random_clauses(rng: &mut Lcg, fact_count: usize, count: usize) -> Vec<(usize, Vec<usize>)> {
     (0..count)
@@ -48,7 +53,7 @@ fn derivability_matches_naive_forward_chaining_on_random_clause_sets() {
         let mut rng = Lcg(seed);
         let facts = 30;
         let clauses = random_clauses(&mut rng, facts, 45);
-        let derived = clause_set(facts, &clauses).derivable();
+        let derived = row(&clause_set(facts, &clauses).derivable());
         assert_eq!(derived, forward_chaining(facts, &clauses), "seed {seed}");
         let count = derived.iter().filter(|&&yes| yes).count();
         if count > 0 && count < facts {
@@ -115,7 +120,7 @@ fn a_saturation_updated_after_each_batch_matches_forward_chaining_on_the_clauses
                 .collect();
             let newly = state.update(&set);
             let oracle = forward_chaining(facts, &added);
-            assert_eq!(set.derivable(), oracle, "seed {seed}");
+            assert_eq!(row(&set.derivable()), oracle, "seed {seed}");
             let derived: Vec<bool> = (0..facts).map(|fact| state.is_derived(fact)).collect();
             assert_eq!(
                 derived,
@@ -146,9 +151,9 @@ fn adding_a_clause_only_grows_the_derivable_set_and_solving_changes_nothing() {
     for round in 0..10 {
         set.add_clause(rng.below(30), &[rng.below(30), rng.below(30)]);
         let after = set.derivable();
-        for (fact, (&was, &is)) in before.iter().zip(&after).enumerate() {
+        for fact in before.ones() {
             assert!(
-                !was || is,
+                after.get(fact),
                 "round {round}: fact {fact} stopped being derivable"
             );
         }
@@ -167,7 +172,10 @@ fn grammar_nullability_of_a_small_language_is_derived_by_hand() {
     grammar.add_clause(opt, &[]);
     grammar.add_clause(block, &[stmts, opt]);
 
-    assert_eq!(grammar.derivable(), [true, true, false, true, false, true]);
+    assert_eq!(
+        row(&grammar.derivable()),
+        [true, true, false, true, false, true]
+    );
 }
 
 #[test]
@@ -182,13 +190,13 @@ fn a_cycle_of_callers_without_a_grounded_member_is_never_derived_dead() {
     dead.add_clause(5, &[4]);
 
     assert_eq!(
-        dead.derivable(),
+        row(&dead.derivable()),
         [false, false, false, false, true, true],
         "the least fixpoint has no ground for b and c"
     );
     dead.add_clause(2, &[]);
     assert_eq!(
-        dead.derivable(),
+        row(&dead.derivable()),
         [false, false, true, true, true, true],
         "grounding one derives both"
     );
@@ -198,15 +206,15 @@ fn a_cycle_of_callers_without_a_grounded_member_is_never_derived_dead() {
 fn a_repeated_body_fact_counts_once_per_occurrence_and_one_derivation_discharges_all() {
     let mut set = HornClauses::new(3);
     set.add_clause(0, &[1, 1, 2]);
-    assert_eq!(set.derivable(), [false, false, false]);
+    assert_eq!(row(&set.derivable()), [false, false, false]);
     set.add_clause(1, &[]);
     assert_eq!(
-        set.derivable(),
+        row(&set.derivable()),
         [false, true, false],
         "fact 2 is still missing"
     );
     set.add_clause(2, &[]);
-    assert_eq!(set.derivable(), [true, true, true]);
+    assert_eq!(row(&set.derivable()), [true, true, true]);
 }
 
 #[test]
@@ -221,11 +229,11 @@ fn the_empty_fact_space_and_clones_are_ordinary() {
     set.add_clause(1, &[0]);
     assert_ne!(copy, set);
     assert_eq!(
-        copy.derivable(),
+        row(&copy.derivable()),
         [true, false],
         "the clone does not see the later clause"
     );
-    assert_eq!(set.derivable(), [true, true]);
+    assert_eq!(row(&set.derivable()), [true, true]);
 }
 
 #[test]
@@ -352,7 +360,7 @@ fn relaxed(
             .iter()
             .map(|&(node, hops, units)| (NodeId::from_index(node), Effort { hops, units })),
         direction,
-        |edge: &EdgeRecord<Step>, label: &Effort| advance(label, *edge.payload()),
+        |edge, label| advance(label, *edge.data()),
     )
 }
 
@@ -412,7 +420,7 @@ fn a_smaller_label_reexpands_a_node_visited_earlier_with_a_larger_one() {
     let (graph, [s, a, b, t]) = diamond_with_shortcut();
     let distances =
         min_label_relaxation(&graph, [(s, 0_u32)], Direction::Forward, |edge, label| {
-            Some(label + edge.payload())
+            Some(label + edge.data())
         });
     assert_eq!(distances[s.index()], Some(0));
     assert_eq!(distances[a.index()], Some(1));
@@ -435,7 +443,7 @@ fn incoming_relaxation_hands_the_stored_edge_to_the_transfer_and_expands_from_th
     let distances =
         min_label_relaxation(&graph, [(t, 0_u32)], Direction::Backward, |edge, label| {
             first_call.get_or_insert((edge.source(), edge.target()));
-            Some(label + edge.payload())
+            Some(label + edge.data())
         });
     assert_eq!(distances[t.index()], Some(0));
     assert_eq!(distances[b.index()], Some(1));
@@ -464,7 +472,7 @@ fn parallel_edges_competing_seeds_and_blocked_edges_resolve_to_the_minimum() {
         &graph,
         [(a, 5_u32), (a, 1), (a, 9)],
         Direction::Forward,
-        |edge, label| edge.payload().map(|cost| label + cost),
+        |edge, label| edge.data().map(|cost| label + cost),
     );
     assert_eq!(
         labels,
@@ -484,7 +492,7 @@ fn a_node_no_seed_reaches_has_no_label_and_two_seeds_label_two_regions() {
         &graph,
         [(nodes[0], 0_u32), (nodes[3], 10)],
         Direction::Forward,
-        |edge, label| Some(label + edge.payload()),
+        |edge, label| Some(label + edge.data()),
     );
     assert_eq!(
         labels,

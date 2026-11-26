@@ -114,7 +114,8 @@ fn a_diamond_missing_an_arm_survives_every_whole_graph_analysis() {
     );
     assert_eq!(post_dominators.exits(), [merge]);
 
-    let facts = crate::solve_problem(&cfg, &LiveVariables).expect("liveness solves");
+    let facts = crate::solve_node_problem(&cfg, &LiveVariables, crate::Solve::default())
+        .expect("liveness solves");
     assert!(facts.fact_in(merge).contains(&0));
     assert!(
         facts.fact_in(left).is_empty(),

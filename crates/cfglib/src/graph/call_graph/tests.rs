@@ -2,7 +2,27 @@ use super::*;
 use crate::graph::traverse::topological_sort;
 use crate::test_util::rng::Rng;
 use crate::test_util::{DfInst, df_call, df_ff};
+use alloc::collections::BTreeSet;
 use alloc::vec;
+use core::cell::{Cell, RefCell};
+
+/// No widening and no narrowing.
+const PLAIN: SummaryConfig = SummaryConfig {
+    widening: false,
+    narrowing: false,
+};
+
+/// Widening without the descending pass.
+const WIDENING: SummaryConfig = SummaryConfig {
+    widening: true,
+    narrowing: false,
+};
+
+/// Widening and then the descending pass.
+const NARROWING: SummaryConfig = SummaryConfig {
+    widening: true,
+    narrowing: true,
+};
 
 #[test]
 fn build_from_cfgs_resolves_calls() {
@@ -75,6 +95,31 @@ fn topology_and_recursion_use_shared_algorithms() {
     assert!(is_recursive_function(&graph, main));
 }
 
+/// The set of transitively reachable callees, by id.
+struct ReachableIds;
+
+impl SummaryProblem<Graph<FunctionNode<&'static str>, CallMetadata>> for ReachableIds {
+    type Summary = BTreeSet<&'static str>;
+
+    fn bottom(&self, _: &Graph<FunctionNode<&'static str>, CallMetadata>) -> Self::Summary {
+        BTreeSet::new()
+    }
+
+    fn compute(
+        &self,
+        graph: &Graph<FunctionNode<&'static str>, CallMetadata>,
+        node: NodeId,
+        summaries: &[Self::Summary],
+    ) -> Self::Summary {
+        let mut reach = BTreeSet::new();
+        for callee in graph.successors(node) {
+            reach.insert(graph.node(callee).id);
+            reach.extend(summaries[callee.index()].iter().copied());
+        }
+        reach
+    }
+}
+
 #[test]
 fn summaries_propagate_callee_first_and_stabilize_cycles() {
     // main calls a; a and b are mutually recursive; a calls leaf.
@@ -91,19 +136,7 @@ fn summaries_propagate_callee_first_and_stabilize_cycles() {
     graph.add_edge(b, a, call.clone());
     graph.add_edge(a, leaf, call);
 
-    // Summary: the set of transitively reachable callees, by id.
-    let summaries = propagate_summaries(
-        &graph,
-        &alloc::collections::BTreeSet::new(),
-        |graph, node, summaries| {
-            let mut reach = alloc::collections::BTreeSet::new();
-            for callee in graph.successors(node) {
-                reach.insert(graph.node(callee).id);
-                reach.extend(summaries[callee.index()].iter().copied());
-            }
-            reach
-        },
-    );
+    let summaries = propagate_summaries(&graph, &ReachableIds, SummaryConfig::default());
     let names = |node: NodeId| summaries[node.index()].clone();
     assert!(names(leaf).is_empty());
     assert_eq!(names(main), ["a", "b", "leaf"].into_iter().collect());
@@ -162,6 +195,29 @@ fn a_removed_function_is_rejected() {
     let _ = is_recursive_function(&graph, gone);
 }
 
+/// Whether a function reaches the last member of a ring, counting the
+/// `compute` calls.
+struct ReachesLast {
+    members: usize,
+    calls: Cell<usize>,
+}
+
+impl SummaryProblem<Graph<(), ()>> for ReachesLast {
+    type Summary = bool;
+
+    fn bottom(&self, _: &Graph<(), ()>) -> bool {
+        false
+    }
+
+    fn compute(&self, graph: &Graph<(), ()>, node: NodeId, summaries: &[bool]) -> bool {
+        self.calls.set(self.calls.get() + 1);
+        node.index() + 1 == self.members
+            || graph
+                .successors(node)
+                .any(|callee| summaries[callee.index()])
+    }
+}
+
 /// A ring whose only seed sits at its last member, against the id order:
 /// the former round-robin schedule ran one pass over the ring per call
 /// edge the seed had to cross, about k² transfers.
@@ -173,34 +229,31 @@ fn a_seed_crosses_a_recursive_ring_in_one_transfer_per_member() {
     for (index, &caller) in members.iter().enumerate() {
         graph.add_edge(caller, members[(index + 1) % MEMBERS], ());
     }
-    let mut calls = 0_usize;
-    let summaries = propagate_summaries(&graph, &false, |graph, node, summaries| {
-        calls += 1;
-        node.index() + 1 == MEMBERS
-            || graph
-                .successors(node)
-                .any(|callee| summaries[callee.index()])
-    });
+    let problem = ReachesLast {
+        members: MEMBERS,
+        calls: Cell::new(0),
+    };
+    let summaries = propagate_summaries(&graph, &problem, PLAIN);
     assert!(summaries.iter().all(|&summary| summary));
+    let calls = problem.calls.get();
     assert!(calls <= 3 * MEMBERS, "{calls} transfers");
 }
 
 /// The schedule `propagate_summaries` ran before the worklist: every
 /// member of a recursive component again, in ascending order, until a
 /// whole pass changes nothing.
-fn round_robin<S: Clone + PartialEq>(
+fn round_robin<P: SummaryProblem<Graph<(), ()>>>(
     graph: &Graph<(), ()>,
-    bottom: &S,
-    mut compute: impl FnMut(&Graph<(), ()>, NodeId, &[S]) -> S,
-) -> Vec<S> {
-    let mut summaries = vec![bottom.clone(); graph.node_bound()];
+    problem: &P,
+) -> Vec<P::Summary> {
+    let mut summaries = vec![problem.bottom(graph); graph.node_bound()];
     let components = tarjan_scc(graph);
     for component in components.components() {
         let cyclic = components.component(component[0]).is_cyclic(graph);
         loop {
             let mut changed = false;
             for &node in component {
-                let updated = compute(graph, node, &summaries);
+                let updated = problem.compute(graph, node, &summaries);
                 if updated != summaries[node.index()] {
                     summaries[node.index()] = updated;
                     changed = true;
@@ -236,13 +289,35 @@ fn random_graph(rng: &mut Rng) -> Graph<(), ()> {
 }
 
 /// The ids a function reaches, modulo 64: a monotone summary of finite
-/// height whose first `compute` always changes `0`.
-fn reached_ids(graph: &Graph<(), ()>, node: NodeId, summaries: &[u64]) -> u64 {
-    graph
-        .successors(node)
-        .fold(1_u64 << (node.index() % 64), |mask, callee| {
-            mask | summaries[callee.index()]
-        })
+/// height whose first `compute` always changes `0`. It counts its `compute`
+/// calls and marks the nodes it widens at, keeping what `compute` returned.
+#[derive(Default)]
+struct ReachedIds {
+    calls: Cell<usize>,
+    points: RefCell<Vec<NodeId>>,
+}
+
+impl SummaryProblem<Graph<(), ()>> for ReachedIds {
+    type Summary = u64;
+
+    fn bottom(&self, _: &Graph<(), ()>) -> u64 {
+        0
+    }
+
+    fn compute(&self, graph: &Graph<(), ()>, node: NodeId, summaries: &[u64]) -> u64 {
+        self.calls.set(self.calls.get() + 1);
+        graph
+            .successors(node)
+            .fold(1_u64 << (node.index() % 64), |mask, callee| {
+                mask | summaries[callee.index()]
+            })
+    }
+
+    fn widen(&self, _: &Graph<(), ()>, node: NodeId, previous: &u64, computed: &u64) -> u64 {
+        assert_ne!(previous, computed, "`widen` runs on a change only");
+        self.points.borrow_mut().push(node);
+        *computed
+    }
 }
 
 /// Random graphs with self-calls, recursive clusters and removed slots,
@@ -253,57 +328,80 @@ fn the_worklist_reaches_the_round_robin_fixpoint() {
     let mut rng = Rng::new(93);
     for _ in 0..300 {
         let graph = random_graph(&mut rng);
+        let problem = ReachedIds::default();
         assert_eq!(
-            propagate_summaries(&graph, &0, reached_ids),
-            round_robin(&graph, &0, reached_ids)
+            propagate_summaries(&graph, &problem, PLAIN),
+            round_robin(&graph, &problem)
         );
+        assert!(problem.points.borrow().is_empty(), "no widening asked for");
     }
 }
 
 /// Every first `compute` changes a summary, so `widen` sees every widening
 /// point. The points are recursive functions and cut every cycle, and a
 /// `widen` that keeps the computed summary changes neither the result nor
-/// the `compute` calls of `propagate_summaries`.
+/// the `compute` calls of the plain propagation.
 #[test]
 fn the_widening_points_cut_every_cycle() {
     let mut rng = Rng::new(9_393);
     for _ in 0..300 {
         let graph = random_graph(&mut rng);
-        let mut plain_calls = 0_usize;
-        let plain = propagate_summaries(&graph, &0, |graph, node, summaries| {
-            plain_calls += 1;
-            reached_ids(graph, node, summaries)
-        });
-        let mut widened_calls = 0_usize;
-        let mut points = vec![false; graph.node_bound()];
-        let widened = propagate_summaries_widened(
-            &graph,
-            &0,
-            |graph, node, summaries| {
-                widened_calls += 1;
-                reached_ids(graph, node, summaries)
-            },
-            |node, previous, computed| {
-                assert_ne!(previous, computed, "`widen` runs on a change only");
-                points[node.index()] = true;
-                *computed
-            },
-        );
+        let plain_problem = ReachedIds::default();
+        let plain = propagate_summaries(&graph, &plain_problem, PLAIN);
+        let problem = ReachedIds::default();
+        let widened = propagate_summaries(&graph, &problem, WIDENING);
         assert_eq!(widened, plain);
-        assert_eq!(widened_calls, plain_calls);
+        assert_eq!(problem.calls.get(), plain_problem.calls.get());
 
         let recursive = recursive_functions(&graph);
         let mut cut = graph.clone();
-        for node in graph.node_ids() {
-            if points[node.index()] {
-                assert!(recursive[node.index()], "a widening point is recursive");
-                cut.remove_node(node);
-            }
+        for &node in problem.points.borrow().iter() {
+            assert!(recursive[node.index()], "a widening point is recursive");
+            cut.remove_node(node);
         }
         assert!(
             !recursive_functions(&cut).contains(&true),
             "removing the widening points leaves no cycle"
         );
+    }
+}
+
+/// The deepest stack over a ring of one-byte frames, counting the `compute`
+/// calls and recording the nodes it widens at.
+#[derive(Default)]
+struct StackDepths {
+    calls: Cell<usize>,
+    widened: RefCell<Vec<NodeId>>,
+}
+
+impl SummaryProblem<Graph<(), ()>> for StackDepths {
+    type Summary = Option<u64>;
+
+    fn bottom(&self, _: &Graph<(), ()>) -> Option<u64> {
+        None
+    }
+
+    fn compute(&self, graph: &Graph<(), ()>, node: NodeId, depths: &[Option<u64>]) -> Option<u64> {
+        self.calls.set(self.calls.get() + 1);
+        let deepest = graph
+            .successors(node)
+            .filter_map(|callee| depths[callee.index()])
+            .max();
+        Some(deepest.unwrap_or(0).saturating_add(1))
+    }
+
+    fn widen(
+        &self,
+        _: &Graph<(), ()>,
+        node: NodeId,
+        previous: &Option<u64>,
+        computed: &Option<u64>,
+    ) -> Option<u64> {
+        self.widened.borrow_mut().push(node);
+        match (*previous, *computed) {
+            (Some(previous), Some(computed)) if computed > previous => Some(u64::MAX),
+            (previous, computed) => previous.max(computed),
+        }
     }
 }
 
@@ -318,60 +416,69 @@ fn a_recursive_ring_widens_at_one_member() {
     for (index, &caller) in members.iter().enumerate() {
         graph.add_edge(caller, members[(index + 1) % MEMBERS], ());
     }
-    let mut calls = 0_usize;
-    let mut widened = Vec::new();
-    let depths = propagate_summaries_widened(
-        &graph,
-        &None,
-        |graph, node, depths: &[Option<u64>]| {
-            calls += 1;
-            let deepest = graph
-                .successors(node)
-                .filter_map(|callee| depths[callee.index()])
-                .max();
-            Some(deepest.unwrap_or(0).saturating_add(1))
-        },
-        |node, previous, computed| {
-            widened.push(node);
-            match (*previous, *computed) {
-                (Some(previous), Some(computed)) if computed > previous => Some(u64::MAX),
-                (previous, computed) => previous.max(computed),
-            }
-        },
-    );
+    let problem = StackDepths::default();
+    let depths = propagate_summaries(&graph, &problem, WIDENING);
     assert!(depths.iter().all(|&depth| depth == Some(u64::MAX)));
     assert_eq!(
-        widened,
+        *problem.widened.borrow(),
         [members[MEMBERS - 1]; 2],
         "set from bottom once, then sent to unbounded"
     );
+    let calls = problem.calls.get();
     assert!(calls <= 3 * MEMBERS, "{calls} transfers");
+}
+
+/// How [`RaisedBound`] narrows.
+#[derive(Clone, Copy)]
+enum Narrowing {
+    /// A plain descending step: keep what `compute` returned.
+    Computed,
+    /// Refine only a summary at the top.
+    AtTop,
+    /// Keep the current summary: no narrowing at all.
+    Current,
 }
 
 /// A bound that every call raises by one over its callees' highest, and
 /// that every third function saturates at 100: a monotone summary of height
 /// 256 whose fixpoint is unique, since a cycle either passes a saturating
-/// function or climbs to `u8::MAX`.
-fn raised_bound(graph: &Graph<(), ()>, node: NodeId, bounds: &[u8]) -> u8 {
-    let highest = graph
-        .successors(node)
-        .map(|callee| bounds[callee.index()])
-        .max();
-    let bound = highest.map_or(0, |bound| bound.saturating_add(1));
-    if node.index().is_multiple_of(3) {
-        bound.min(100)
-    } else {
-        bound
-    }
-}
+/// function or climbs to `u8::MAX`. It widens any increase to the top, as a
+/// widening of a bound to infinity.
+struct RaisedBound(Narrowing);
 
-/// Sends any increase to the top, as a widening of a bound to infinity.
-fn to_top() -> impl FnMut(NodeId, &u8, &u8) -> u8 + Copy {
-    |_, previous, computed| {
+impl SummaryProblem<Graph<(), ()>> for RaisedBound {
+    type Summary = u8;
+
+    fn bottom(&self, _: &Graph<(), ()>) -> u8 {
+        0
+    }
+
+    fn compute(&self, graph: &Graph<(), ()>, node: NodeId, bounds: &[u8]) -> u8 {
+        let highest = graph
+            .successors(node)
+            .map(|callee| bounds[callee.index()])
+            .max();
+        let bound = highest.map_or(0, |bound| bound.saturating_add(1));
+        if node.index().is_multiple_of(3) {
+            bound.min(100)
+        } else {
+            bound
+        }
+    }
+
+    fn widen(&self, _: &Graph<(), ()>, _: NodeId, previous: &u8, computed: &u8) -> u8 {
         if computed > previous {
             u8::MAX
         } else {
             *previous
+        }
+    }
+
+    fn narrow(&self, _: &Graph<(), ()>, _: NodeId, current: &u8, computed: &u8) -> u8 {
+        match self.0 {
+            Narrowing::Computed => *computed,
+            Narrowing::AtTop if *current == u8::MAX => *computed,
+            Narrowing::AtTop | Narrowing::Current => *current,
         }
     }
 }
@@ -383,14 +490,12 @@ fn to_top() -> impl FnMut(NodeId, &u8, &u8) -> u8 + Copy {
 fn a_descending_pass_recovers_the_least_fixpoint() {
     let mut rng = Rng::new(7_272);
     let mut recovered = 0;
+    let problem = RaisedBound(Narrowing::Computed);
     for _ in 0..300 {
         let graph = random_graph(&mut rng);
-        let least = round_robin(&graph, &0, raised_bound);
-        let widened = propagate_summaries_widened(&graph, &0, raised_bound, to_top());
-        let narrowed =
-            propagate_summaries_narrowed(&graph, &0, raised_bound, to_top(), |_, _, computed| {
-                *computed
-            });
+        let least = round_robin(&graph, &problem);
+        let widened = propagate_summaries(&graph, &problem, WIDENING);
+        let narrowed = propagate_summaries(&graph, &problem, NARROWING);
         assert_eq!(narrowed, least);
         recovered += usize::from(widened != least);
     }
@@ -404,27 +509,16 @@ fn a_descending_pass_recovers_the_least_fixpoint() {
 fn narrowing_at_the_top_keeps_a_post_fixpoint_below_the_widened_one() {
     let mut rng = Rng::new(7_373);
     let mut lowered = 0;
+    let problem = RaisedBound(Narrowing::AtTop);
     for _ in 0..300 {
         let graph = random_graph(&mut rng);
-        let least = round_robin(&graph, &0, raised_bound);
-        let widened = propagate_summaries_widened(&graph, &0, raised_bound, to_top());
-        let narrowed = propagate_summaries_narrowed(
-            &graph,
-            &0,
-            raised_bound,
-            to_top(),
-            |_, current, computed| {
-                if *current == u8::MAX {
-                    *computed
-                } else {
-                    *current
-                }
-            },
-        );
+        let least = round_robin(&graph, &problem);
+        let widened = propagate_summaries(&graph, &problem, WIDENING);
+        let narrowed = propagate_summaries(&graph, &problem, NARROWING);
         for node in graph.node_ids() {
             let index = node.index();
             assert!(least[index] <= narrowed[index] && narrowed[index] <= widened[index]);
-            assert!(raised_bound(&graph, node, &narrowed) <= narrowed[index]);
+            assert!(problem.compute(&graph, node, &narrowed) <= narrowed[index]);
         }
         lowered += usize::from(narrowed != widened);
     }
@@ -436,13 +530,29 @@ fn narrowing_at_the_top_keeps_a_post_fixpoint_below_the_widened_one() {
 #[test]
 fn narrowing_that_keeps_the_current_summary_is_the_widened_result() {
     let mut rng = Rng::new(7_474);
+    let problem = RaisedBound(Narrowing::Current);
     for _ in 0..300 {
         let graph = random_graph(&mut rng);
         assert_eq!(
-            propagate_summaries_narrowed(&graph, &0, raised_bound, to_top(), |_, current, _| {
-                *current
-            }),
-            propagate_summaries_widened(&graph, &0, raised_bound, to_top())
+            propagate_summaries(&graph, &problem, NARROWING),
+            propagate_summaries(&graph, &problem, WIDENING)
         );
+    }
+}
+
+/// The default hooks change nothing, so asking for widening and narrowing
+/// of a problem that implements neither returns the plain least fixpoint.
+#[test]
+fn default_hooks_leave_the_plain_fixpoint() {
+    let mut rng = Rng::new(7_575);
+    for _ in 0..100 {
+        let graph = random_graph(&mut rng);
+        let problem = || ReachesLast {
+            members: graph.node_bound(),
+            calls: Cell::new(0),
+        };
+        let plain = propagate_summaries(&graph, &problem(), PLAIN);
+        let bounded = propagate_summaries(&graph, &problem(), NARROWING);
+        assert_eq!(bounded, plain);
     }
 }

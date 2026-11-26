@@ -22,10 +22,10 @@ use cfglib::{
     BlockId, BuildError, Cfg, CfgBuilder, CfgSupergraph, ControlNode, ControlTree, DenseBits,
     DenseFanout, Direction, DisplayInstr, DominatorTree, EdgeKind, EhBlockKind, EhModel, Fanout,
     Flow, FlowControl, FlowEffect, Graph, Handler, HandlerBody, HandlerKind, HandlerMetadata,
-    HornClauses, IfdsConfig, IfdsProblem, InstrInfo, KeyedGraph, NodeId, NodeOrder,
-    PostDominatorTree, Problem, Region, RegionIndex, SortedMap, StackGraphError, Supergraph,
+    HornClauses, IfdsConfig, IfdsProblem, InstrInfo, KeyedGraph, NodeId, NodeOrder, NodeProblem,
+    PostDominatorTree, Region, RegionIndex, Solve, SortedMap, StackGraphError, Supergraph,
     TextError, breadth_first, parse_cfg_listing, parse_text, remove_unreachable_mapped,
-    shortest_path, simplify_mapped, solve_ifds, solve_problem, tarjan_scc, topological_sort,
+    shortest_path, simplify_mapped, solve_ifds, solve_node_problem, tarjan_scc, topological_sort,
     verify,
 };
 
@@ -134,7 +134,7 @@ fn the_text_form_is_an_alloc_string_that_parses_back() {
 /// Live variables, as a consumer writes them with owned names.
 struct Live;
 
-impl Problem<Cfg<Statement>> for Live {
+impl NodeProblem<Cfg<Statement>> for Live {
     type Fact = BTreeSet<String>;
 
     fn direction(&self) -> Direction {
@@ -168,7 +168,8 @@ impl Problem<Cfg<Statement>> for Live {
 #[test]
 fn a_fixpoint_problem_runs_over_owned_string_variables() {
     let (cfg, [entry, then_block, else_block, merge]) = diamond();
-    let facts = solve_problem(&cfg, &Live).expect("the unbounded solve has no step limit");
+    let facts = solve_node_problem(&cfg, &Live, Solve::default())
+        .expect("the unbounded solve has no step limit");
 
     let at_merge: &BTreeSet<String> = facts.fact_in(merge);
     assert_eq!(
@@ -304,7 +305,10 @@ fn keyed_graphs_fanouts_and_clause_sets_use_alloc_collections() {
     let mut clauses = HornClauses::new(3);
     clauses.add_clause(0, &[1]);
     clauses.add_clause(1, &[]);
-    assert_eq!(clauses.derivable(), [true, true, false]);
+    let mut derivable = DenseBits::new(3);
+    derivable.insert(0);
+    derivable.insert(1);
+    assert_eq!(clauses.derivable(), derivable);
     let mut saturation = clauses.saturate();
     clauses.add_clause(2, &[0, 1]);
     let newly: Vec<usize> = saturation.update(&clauses);
@@ -509,8 +513,13 @@ fn an_interprocedural_solve_runs_over_keyed_cfgs_named_by_owned_strings() {
         ("unused".to_string(), &unused),
     ];
     let graph = CfgSupergraph::new(&functions);
-    let results = solve_ifds(&graph, &Reaches, &[(graph.start(0), 0)], IfdsConfig::new())
-        .expect("an unbounded solve");
+    let results = solve_ifds(
+        &graph,
+        &Reaches,
+        &[(graph.start(0), 0)],
+        IfdsConfig::default(),
+    )
+    .expect("an unbounded solve");
     let reached: Vec<usize> = (0..graph.node_bound())
         .filter(|&node| results.holds(node, 0))
         .collect();
