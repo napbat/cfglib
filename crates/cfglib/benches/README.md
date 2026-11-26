@@ -79,15 +79,21 @@ the workloads but are not individually timed as facade functions.
 `api_cases/traversal.rs` holds the small-run shapes that the 1,024-node chains
 of `graph.rs` hide behind per-step costs: many short chases and searches, a
 dense fan-out read once per parser step, layered route and fold walks, plain,
-memoized and fixpoint folds over stacked diamonds, a fixpoint fold over a
-re-export ring, and a linear stack reverse index. Cases there that time a
-method or constructor name no facade function.
+memoized and fixpoint folds over stacked diamonds, and a fixpoint fold over a
+re-export ring. Cases there that time a method or constructor name no facade
+function.
 
 `api_cases/scope.rs` compares `ScopeResolutionIndex::compute` with
-`compute_cached` and `compute_tracked` on ten thousand references in a hundred
-nested blocks with an import each, and `compute` with `compute_cached` on
-stacked inheritance diamonds, and times `update` after one new datum in a leaf
-scope of the blocks. These cases time methods and name no facade function.
+`ScopeEnvironmentCache::index` and `compute_tracked` on ten thousand references
+in a hundred nested blocks with an import each, and `compute` with the cached
+index on stacked inheritance diamonds, times `update` after one new datum in a
+leaf scope of the blocks, and times single queries: the first-datum walk up
+the parents, and ephemeral queries of a kept environment cache.
+
+`api_cases/stack.rs` times the linear stack index on a chain with a dead end
+at every hop, and direct search, partial-path extraction, and stitching on a
+client and a library file that meet at the root. The cases of both files time
+methods and name no facade function.
 
 ## CPU timing
 

@@ -5,11 +5,10 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::cmp::Ordering;
 
 use cfglib::{
-    EdgeRef, ScopeCursor, ScopeCursorQuery, ScopeDatumId, ScopeEdgeId, ScopeFirstResolution,
-    ScopeGraph, ScopeGraphPathLabel, ScopeId, ScopeQuery, ScopeResolutionConfig,
+    EdgeRef, PathSearchConfig, ScopeCursor, ScopeCursorQuery, ScopeDatumId, ScopeEdgeId,
+    ScopeFirstResolution, ScopeGraph, ScopeId, ScopeQuery,
 };
 
 struct CountingAllocator;
@@ -100,17 +99,6 @@ impl ScopeCursorQuery<(), (), (), u32, u32> for Lexical {
     ) -> bool {
         accepted_candidate_count == 0
     }
-
-    fn compare_labels(
-        &self,
-        _: &Names,
-        _: &ScopeQuery<'_, u32>,
-        left: ScopeGraphPathLabel<'_, ()>,
-        right: ScopeGraphPathLabel<'_, ()>,
-    ) -> Option<Ordering> {
-        let is_edge = |label| matches!(label, ScopeGraphPathLabel::Edge(()));
-        Some(is_edge(left).cmp(&is_edge(right)))
-    }
 }
 
 #[test]
@@ -128,17 +116,16 @@ fn first_candidate_query_does_not_allocate() {
         .collect();
 
     let (resolution, allocations) = allocations_during(|| {
-        ScopeFirstResolution::try_compute_from(
+        ScopeFirstResolution::try_compute(
             &graph,
-            scopes[scopes.len() - 1],
-            &0,
+            ScopeQuery::new(scopes[scopes.len() - 1], &0),
             &Lexical,
-            ScopeResolutionConfig::new(),
+            PathSearchConfig::default(),
         )
     });
     let resolution = resolution.expect("a chain is linear");
 
     assert_eq!(resolution.candidate(), Some((data[0], scopes[0])));
-    assert_eq!(resolution.stats().explored_path_count, scopes.len());
+    assert_eq!(resolution.stats().expanded_path_count, scopes.len());
     assert_eq!(allocations, 0);
 }

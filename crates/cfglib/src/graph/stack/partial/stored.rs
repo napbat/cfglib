@@ -76,7 +76,7 @@ impl TryFrom<Set> for StackPartialPathSet {
         if paths.iter().any(|path| path.file() != file) {
             return Err("a path summary belongs to another file than its set");
         }
-        if stats.partial_path_count != paths.len() {
+        if stats.search.complete_path_count != paths.len() {
             return Err("the statistics count other summaries than the set holds");
         }
         Ok(Self { file, paths, stats })

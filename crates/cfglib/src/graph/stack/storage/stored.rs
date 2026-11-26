@@ -61,7 +61,7 @@ impl<F, S, N, E> TryFrom<Stored<F, S, N, E>> for StackGraph<F, S, N, E> {
 }
 
 impl<F, S, N, E> StackGraph<F, S, N, E> {
-    /// Check the rules `new`, `add_file`, the `add_*_node` builders, `add_edge`,
+    /// Check the rules `new`, `add_file`, `add_node`, `add_edge`,
     /// and `clear_file` keep, in an order that lets each check index only
     /// what the ones before it have bounded.
     fn check(&self) -> Result<(), &'static str> {
@@ -74,10 +74,10 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
     /// `new` makes the root and the jump-to-scope node, and nothing removes
     /// them.
     fn check_singletons(&self) -> Result<(), &'static str> {
-        if !self.contains_node(self.root) || !self.node(self.root).kind().is_root() {
+        if !self.graph.contains_node(self.root) || !self.node(self.root).kind().is_root() {
             return Err("the root is not a live root node");
         }
-        if !self.contains_node(self.jump_to_scope)
+        if !self.graph.contains_node(self.jump_to_scope)
             || !self.node(self.jump_to_scope).kind().is_jump_to_scope()
         {
             return Err("the jump-to-scope node is not a live jump-to-scope node");
@@ -89,7 +89,7 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
     /// file, kind, and payload readable: only the singletons are in no file
     /// and carry no payload, and no other node is a singleton.
     fn check_nodes(&self) -> Result<(), &'static str> {
-        for index in 0..self.node_bound() {
+        for index in 0..self.graph.node_bound() {
             let id = StackNodeId::from_index(index);
             let node = self.node(id);
             if id == self.root || id == self.jump_to_scope {
@@ -107,9 +107,12 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
             if node.kind().is_root() || node.kind().is_jump_to_scope() {
                 return Err("a second singleton node");
             }
+            // `clear_file` retires a push with its scope, which is in the
+            // same file, so a live push names a live scope.
             if let StackNodeKind::PushScopedSymbol { scope, .. } = node.kind()
-                && (scope.index() >= self.node_bound()
-                    || require_attachable_scope(file, *scope, self.node(*scope)).is_err())
+                && (scope.index() >= self.graph.node_bound()
+                    || require_attachable_scope(file, *scope, self.node(*scope)).is_err()
+                    || (self.graph.contains_node(id) && !self.graph.contains_node(*scope)))
             {
                 return Err(
                     "a scoped push names something other than an exported scope of its file",
@@ -119,13 +122,13 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
         Ok(())
     }
 
-    /// `add_file` starts an empty list, `add_local_node` appends each live
+    /// `add_file` starts an empty list, `add_node` appends each live
     /// node to its file's, and `clear_file` empties it, so a list holds the
     /// live nodes of its file in identity order. Every node's file is below
     /// the file count, which `check_nodes` has established.
     fn check_file_lists(&self) -> Result<(), &'static str> {
         let mut expected = vec![Vec::new(); self.files.len()];
-        for node in self.node_ids() {
+        for node in self.graph.node_ids() {
             if let Some(file) = self.node(node).file() {
                 expected[file.index()].push(node);
             }
@@ -138,8 +141,8 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
 
     /// The rule `add_edge` enforces, for every live edge.
     fn check_edges(&self) -> Result<(), &'static str> {
-        for edge in self.edge_ids() {
-            let edge = self.edge(edge);
+        for edge in self.graph.edge_ids() {
+            let edge = self.graph.edge(edge);
             let (source, target) = (edge.source(), edge.target());
             if require_joinable(source, self.node(source), target, self.node(target)).is_err() {
                 return Err("an edge leaves the jump-to-scope node or joins two files directly");

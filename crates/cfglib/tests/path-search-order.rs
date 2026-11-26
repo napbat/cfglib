@@ -1,8 +1,8 @@
 //! Integration tests: frontier order of the bounded stack-graph path searches.
 
 use cfglib::{
-    SearchOrder, StackGraph, StackNodeId, StackPartialPathConfig, StackPartialPathDatabase,
-    StackPartialPathSet, StackPath, StackResolution, StackSearchConfig,
+    PathSearchConfig, SearchOrder, StackGraph, StackNodeId, StackNodeKind,
+    StackPartialPathDatabase, StackPartialPathSet, StackPath, StackResolution,
 };
 
 type Graph = StackGraph<&'static str, &'static str, &'static str, ()>;
@@ -21,22 +21,47 @@ fn short_and_long() -> ShortAndLong {
     let mut graph = Graph::new();
     let file = graph.add_file("main.rs");
     let reference = graph
-        .add_push_symbol_node(file, "x", true, "use")
+        .add_node(
+            file,
+            StackNodeKind::PushSymbol {
+                symbol: "x",
+                is_reference: true,
+            },
+            "use",
+        )
         .expect("known file");
     let long_entry = graph
-        .add_scope_node(file, false, "long entry")
+        .add_node(file, StackNodeKind::Scope { exported: false }, "long entry")
         .expect("known file");
     let long_exit = graph
-        .add_scope_node(file, false, "long exit")
+        .add_node(file, StackNodeKind::Scope { exported: false }, "long exit")
         .expect("known file");
     let short_entry = graph
-        .add_scope_node(file, false, "short entry")
+        .add_node(
+            file,
+            StackNodeKind::Scope { exported: false },
+            "short entry",
+        )
         .expect("known file");
     let long_definition = graph
-        .add_pop_symbol_node(file, "x", true, "long def")
+        .add_node(
+            file,
+            StackNodeKind::PopSymbol {
+                symbol: "x",
+                is_definition: true,
+            },
+            "long def",
+        )
         .expect("known file");
     let short_definition = graph
-        .add_pop_symbol_node(file, "x", true, "short def")
+        .add_node(
+            file,
+            StackNodeKind::PopSymbol {
+                symbol: "x",
+                is_definition: true,
+            },
+            "short def",
+        )
         .expect("known file");
     for (source, target) in [
         (reference, long_entry),
@@ -68,7 +93,10 @@ fn direct_search_discovers_complete_paths_by_frontier_order() {
         StackResolution::compute(
             &fixture.graph,
             fixture.reference,
-            StackSearchConfig::new().with_order(order),
+            PathSearchConfig {
+                order,
+                ..PathSearchConfig::default()
+            },
         )
     };
 
@@ -87,16 +115,20 @@ fn direct_search_discovers_complete_paths_by_frontier_order() {
 #[test]
 fn stitched_search_finds_the_same_paths_under_either_order() {
     let fixture = short_and_long();
-    let database = StackPartialPathDatabase::compute(&fixture.graph, StackPartialPathConfig::new());
+    let database = StackPartialPathDatabase::compute(&fixture.graph, PathSearchConfig::default());
     for order in [SearchOrder::BreadthFirst, SearchOrder::DepthFirst] {
-        let config = StackSearchConfig::new().with_order(order);
+        let config = PathSearchConfig {
+            order,
+            ..PathSearchConfig::default()
+        };
         let direct = StackResolution::compute(&fixture.graph, fixture.reference, config);
-        let stitched = StackResolution::compute_from_partials(
+        let stitched = StackResolution::try_compute_stitched(
             &fixture.graph,
             &database,
             fixture.reference,
             config,
-        );
+        )
+        .expect("the database matches the graph");
         let mut direct_ends = ends(&direct);
         let mut stitched_ends = ends(&stitched);
         direct_ends.sort();
@@ -112,10 +144,24 @@ fn partial_extraction_expands_starting_points_in_declaration_order() {
     let mut starts_and_ends = Vec::new();
     for name in ["a", "b", "c"] {
         let reference = graph
-            .add_push_symbol_node(file, name, true, "use")
+            .add_node(
+                file,
+                StackNodeKind::PushSymbol {
+                    symbol: name,
+                    is_reference: true,
+                },
+                "use",
+            )
             .expect("known file");
         let definition = graph
-            .add_pop_symbol_node(file, name, true, "def")
+            .add_node(
+                file,
+                StackNodeKind::PopSymbol {
+                    symbol: name,
+                    is_definition: true,
+                },
+                "def",
+            )
             .expect("known file");
         graph
             .add_edge(reference, definition, 0, ())
@@ -127,9 +173,11 @@ fn partial_extraction_expands_starting_points_in_declaration_order() {
         let set = StackPartialPathSet::compute(
             &graph,
             file,
-            StackPartialPathConfig::new().with_order(order),
-        )
-        .expect("known file");
+            PathSearchConfig {
+                order,
+                ..PathSearchConfig::default()
+            },
+        );
         let summaries: Vec<_> = set
             .paths()
             .iter()

@@ -10,8 +10,7 @@ use std::ops::ControlFlow;
 
 use cfglib::{
     DenseFanout, FoldEnter, MarkScope, OpenFixpointConfig, OpenFold, OpenFoldConfig, SearchConfig,
-    SearchOrder, StackGraph, StackNodeId, StackReverseIndex, StackSearchConfig, Visit, follow,
-    open_breadth_first_paths, open_fold_fixpoint, open_fold_post_order,
+    SearchOrder, Visit, follow, open_breadth_first_paths, open_fold_fixpoint, open_fold_post_order,
     open_fold_post_order_memoized, open_search,
 };
 
@@ -34,15 +33,11 @@ const WIDTH: usize = 2;
 const DIAMONDS: usize = 16;
 /// Modules of the re-export ring of the fixpoint case.
 const RING: u32 = 64;
-/// References, scope hops per reference, and decoy edges of the stack graph.
-const STACK_REFERENCES: usize = 256;
-const STACK_HOPS: usize = 12;
 
 pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     register_fanout(suite);
     register_small_walks(suite);
     register_layered(suite);
-    register_stack(suite);
 }
 
 /// Pairs scattered over the key space in an order unrelated to the keys, the
@@ -363,64 +358,4 @@ impl OpenFold for DiamondRoutes {
     fn finish(&mut self, _node: &usize, accumulator: usize) -> Option<usize> {
         Some(accumulator)
     }
-}
-
-type Stack = StackGraph<(), u32, (), ()>;
-
-/// One file of `STACK_REFERENCES` references. Each pushes its symbol, hops
-/// through `STACK_HOPS` scopes, and pops it at its definition; every scope also
-/// has an edge to a pop of another symbol, which every path rejects. The decoy
-/// is listed first on even hops and last on odd ones.
-fn stack_graph() -> (Stack, Vec<(StackNodeId, StackNodeId)>) {
-    let mut graph = Stack::new();
-    let file = graph.add_file(());
-    let mut bindings = Vec::with_capacity(STACK_REFERENCES);
-    for index in 0..STACK_REFERENCES {
-        let symbol = fixture_u32(index);
-        let reference = graph
-            .add_push_symbol_node(file, symbol, true, ())
-            .expect("known file");
-        let definition = graph
-            .add_pop_symbol_node(file, symbol, true, ())
-            .expect("known file");
-        let decoy = graph
-            .add_pop_symbol_node(file, u32::MAX, false, ())
-            .expect("known file");
-        let scopes: Vec<StackNodeId> = (0..STACK_HOPS)
-            .map(|_| graph.add_scope_node(file, false, ()).expect("known file"))
-            .collect();
-        let mut add = |source, target| {
-            graph
-                .add_edge(source, target, 0, ())
-                .expect("file-local edge");
-        };
-        add(reference, scopes[0]);
-        for (hop, &scope) in scopes.iter().enumerate() {
-            let onward = scopes.get(hop + 1).copied().unwrap_or(definition);
-            if hop % 2 == 0 {
-                add(scope, decoy);
-                add(scope, onward);
-            } else {
-                add(scope, onward);
-                add(scope, decoy);
-            }
-        }
-        bindings.push((reference, definition));
-    }
-    (graph, bindings)
-}
-
-fn register_stack(suite: &mut BenchmarkSuite<'_>) {
-    let (graph, bindings) = stack_graph();
-    benchmark_case!(
-        suite,
-        "stack_reverse_index_linear",
-        || StackReverseIndex::try_compute_linear(&graph, StackSearchConfig::new()),
-        |index| {
-            let index = index.as_ref().expect("every query is linear");
-            for &(reference, definition) in &bindings {
-                assert_eq!(index.references_to(definition), [reference]);
-            }
-        }
-    );
 }

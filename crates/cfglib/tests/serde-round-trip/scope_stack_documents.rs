@@ -5,12 +5,11 @@
 use core::cmp::Ordering;
 
 use cfglib::{
-    EdgeRef, Scope, ScopeDatum, ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeGraphPathLabel,
-    ScopeGraphQuery, ScopeId, ScopePath, ScopeQuery, ScopeReference, ScopeResolutionConfig,
-    ScopeResolutionIndex, StackEdge, StackFileId, StackGraph, StackNode, StackNodeId,
-    StackNodeKind, StackPartialPath, StackPartialPathConfig, StackPartialPathDatabase,
-    StackPartialPathId, StackPartialPathSet, StackPartialPathStats, StackResolution,
-    StackResolutionIndex, StackSearchConfig,
+    EdgeRef, EdgeView, GraphView, PathSearchConfig, Scope, ScopeDatum, ScopeDatumId, ScopeEdgeId,
+    ScopeGraph, ScopeGraphPathLabel, ScopeGraphQuery, ScopeId, ScopePath, ScopeQuery,
+    ScopeReference, ScopeResolutionIndex, StackEdge, StackFileId, StackGraph, StackNode,
+    StackNodeId, StackNodeKind, StackPartialPath, StackPartialPathDatabase, StackPartialPathId,
+    StackPartialPathSet, StackPartialPathStats, StackResolution, StackResolutionIndex,
 };
 
 use crate::json::round_trip;
@@ -95,7 +94,7 @@ fn names() -> Names {
 /// What every reference of `graph` resolves to, and which references point at
 /// each datum: the analysis a consumer would run on a loaded graph.
 fn resolutions(graph: &Names) -> (Vec<Vec<ScopeDatumId>>, Vec<Vec<cfglib::ScopeReferenceId>>) {
-    let index = ScopeResolutionIndex::compute(graph, &NameLookup, ScopeResolutionConfig::new());
+    let index = ScopeResolutionIndex::compute(graph, &NameLookup, PathSearchConfig::default());
     let targets = graph
         .reference_ids()
         .map(|reference| {
@@ -107,8 +106,8 @@ fn resolutions(graph: &Names) -> (Vec<Vec<ScopeDatumId>>, Vec<Vec<cfglib::ScopeR
                 .collect()
         })
         .collect();
-    let users = graph
-        .datum_ids()
+    let users = (0..graph.datum_count())
+        .map(ScopeDatumId::from_index)
         .map(|datum| index.references_to(datum).to_vec())
         .collect();
     (targets, users)
@@ -135,14 +134,14 @@ fn a_scope_graph_keeps_its_removed_edge_slot_and_adjacency() {
     let original = names();
     let decoded: Names = round_trip(&original);
 
-    assert_eq!(decoded.scope_count(), original.scope_count());
-    assert_eq!(decoded.edge_count(), original.edge_count());
+    assert_eq!(decoded.graph().node_count(), original.graph().node_count());
+    assert_eq!(decoded.graph().edge_count(), original.graph().edge_count());
     assert_eq!(decoded.edge_bound(), original.edge_bound());
     assert!(
-        decoded.edge_bound() > decoded.edge_count(),
+        decoded.edge_bound() > decoded.graph().edge_count(),
         "the removed edge keeps its slot"
     );
-    for scope in original.scope_ids() {
+    for scope in original.node_ids() {
         assert_eq!(
             decoded.scope(scope).payload(),
             original.scope(scope).payload()
@@ -168,7 +167,7 @@ fn a_decoded_scope_graph_keeps_growing_and_resolving_like_the_original() {
     let mut original = names();
     let mut decoded: Names = round_trip(&original);
     for graph in [&mut original, &mut decoded] {
-        let body = graph.scope_ids().last().expect("the fixture has scopes");
+        let body = graph.node_ids().last().expect("the fixture has scopes");
         graph.add_datum(body, "value".to_owned(), "missing".to_owned());
         graph.add_reference(body, "outer".to_owned());
     }
@@ -201,31 +200,41 @@ fn indexed() -> Indexed {
     let consumer = graph.add_file("consumer.rs".to_owned());
     let provider = graph.add_file("provider.rs".to_owned());
     let reference = graph
-        .add_push_symbol_node(
+        .add_node(
             consumer,
-            "package".to_owned(),
-            true,
+            StackNodeKind::PushSymbol {
+                symbol: "package".to_owned(),
+                is_reference: true,
+            },
             "import package".to_owned(),
         )
         .expect("a known file");
     let preferred = graph
-        .add_pop_symbol_node(
+        .add_node(
             provider,
-            "package".to_owned(),
-            true,
+            StackNodeKind::PopSymbol {
+                symbol: "package".to_owned(),
+                is_definition: true,
+            },
             "public package".to_owned(),
         )
         .expect("a known file");
     let fallback = graph
-        .add_pop_symbol_node(
+        .add_node(
             provider,
-            "package".to_owned(),
-            true,
+            StackNodeKind::PopSymbol {
+                symbol: "package".to_owned(),
+                is_definition: true,
+            },
             "fallback package".to_owned(),
         )
         .expect("a known file");
     let scope = graph
-        .add_scope_node(provider, true, "exports".to_owned())
+        .add_node(
+            provider,
+            StackNodeKind::Scope { exported: true },
+            "exports".to_owned(),
+        )
         .expect("a known file");
     let root = graph.root_node();
 
@@ -260,10 +269,16 @@ fn a_stack_graph_decodes_equal_and_resolves_like_the_original() {
     let decoded: Files = round_trip(&indexed.graph);
     assert_eq!(decoded, indexed.graph);
 
-    assert_eq!(decoded.node_count(), indexed.graph.node_count());
-    assert_eq!(decoded.edge_count(), indexed.graph.edge_count());
+    assert_eq!(
+        decoded.graph().node_count(),
+        indexed.graph.graph().node_count()
+    );
+    assert_eq!(
+        decoded.graph().edge_count(),
+        indexed.graph.graph().edge_count()
+    );
     assert!(
-        decoded.edge_bound() > decoded.edge_count(),
+        decoded.edge_bound() > decoded.graph().edge_count(),
         "the removed edge keeps its slot"
     );
     assert_eq!(decoded.root_node(), indexed.graph.root_node());
@@ -272,10 +287,13 @@ fn a_stack_graph_decodes_equal_and_resolves_like_the_original() {
         indexed.graph.jump_to_scope_node()
     );
 
-    let from_original =
-        StackResolution::compute(&indexed.graph, indexed.reference, StackSearchConfig::new());
+    let from_original = StackResolution::compute(
+        &indexed.graph,
+        indexed.reference,
+        PathSearchConfig::default(),
+    );
     let from_decoded =
-        StackResolution::compute(&decoded, indexed.reference, StackSearchConfig::new());
+        StackResolution::compute(&decoded, indexed.reference, PathSearchConfig::default());
     assert_eq!(from_decoded.paths(), from_original.paths());
     assert_eq!(
         from_decoded.paths()[0].end(),
@@ -288,30 +306,35 @@ fn a_stack_graph_decodes_equal_and_resolves_like_the_original() {
 #[test]
 fn partial_paths_persisted_beside_the_graph_resolve_without_extraction() {
     let indexed = indexed();
-    let database = StackPartialPathDatabase::compute(&indexed.graph, StackPartialPathConfig::new());
+    let database = StackPartialPathDatabase::compute(&indexed.graph, PathSearchConfig::default());
     let decoded_graph: Files = round_trip(&indexed.graph);
     let decoded_database: StackPartialPathDatabase = round_trip(&database);
     assert_eq!(decoded_database, database);
 
-    let direct =
-        StackResolution::compute(&indexed.graph, indexed.reference, StackSearchConfig::new());
-    let stitched = StackResolution::compute_from_partials(
+    let direct = StackResolution::compute(
+        &indexed.graph,
+        indexed.reference,
+        PathSearchConfig::default(),
+    );
+    let stitched = StackResolution::try_compute_stitched(
         &decoded_graph,
         &decoded_database,
         indexed.reference,
-        StackSearchConfig::new(),
-    );
+        PathSearchConfig::default(),
+    )
+    .expect("the database matches the graph");
     assert_eq!(
         stitched.paths(),
         direct.paths(),
         "stitching the loaded summaries is direct resolution"
     );
 
-    let reverse = StackResolutionIndex::compute_from_partials(
+    let reverse = StackResolutionIndex::try_compute_stitched(
         &decoded_graph,
         &decoded_database,
-        StackSearchConfig::new(),
-    );
+        PathSearchConfig::default(),
+    )
+    .expect("the database matches the graph");
     assert_eq!(
         reverse.references_to(indexed.preferred),
         [indexed.reference]
@@ -324,7 +347,7 @@ fn a_decoded_database_replaces_one_file_exactly_like_the_original() {
     let indexed = indexed();
     let mut original_graph = indexed.graph.clone();
     let mut decoded_graph: Files = round_trip(&indexed.graph);
-    let config = StackPartialPathConfig::new();
+    let config = PathSearchConfig::default();
     let mut original_database = StackPartialPathDatabase::compute(&original_graph, config);
     let mut decoded_database: StackPartialPathDatabase = round_trip(&original_database);
 
@@ -335,21 +358,21 @@ fn a_decoded_database_replaces_one_file_exactly_like_the_original() {
         (&mut original_graph, &mut original_database),
         (&mut decoded_graph, &mut decoded_database),
     ] {
-        graph.clear_file(indexed.provider).expect("a known file");
+        graph.clear_file(indexed.provider);
         let export = graph
-            .add_pop_symbol_node(
+            .add_node(
                 indexed.provider,
-                "package".to_owned(),
-                true,
+                StackNodeKind::PopSymbol {
+                    symbol: "package".to_owned(),
+                    is_definition: true,
+                },
                 "rewritten".to_owned(),
             )
             .expect("a known file");
         graph
             .add_edge(graph.root_node(), export, 0, "export".to_owned())
             .expect("root joins files");
-        database
-            .replace_file(graph, indexed.provider, config)
-            .expect("a known file");
+        database.replace_file(graph, indexed.provider, config);
         replacements.push(export);
     }
     assert_eq!(
@@ -359,14 +382,18 @@ fn a_decoded_database_replaces_one_file_exactly_like_the_original() {
     assert_eq!(decoded_database, original_database);
     assert_eq!(decoded_graph, original_graph);
 
-    let resolution = StackResolution::compute_from_partials(
+    let resolution = StackResolution::try_compute_stitched(
         &decoded_graph,
         &decoded_database,
         indexed.reference,
-        StackSearchConfig::new(),
+        PathSearchConfig::default(),
+    )
+    .expect("the database matches the graph");
+    let direct = StackResolution::compute(
+        &original_graph,
+        indexed.reference,
+        PathSearchConfig::default(),
     );
-    let direct =
-        StackResolution::compute(&original_graph, indexed.reference, StackSearchConfig::new());
     assert_eq!(resolution.paths(), direct.paths());
     assert_eq!(resolution.paths()[0].end(), replacements[0]);
 }
@@ -374,12 +401,12 @@ fn a_decoded_database_replaces_one_file_exactly_like_the_original() {
 #[test]
 fn the_pieces_of_a_scope_graph_round_trip_on_their_own() {
     let graph = names();
-    for scope in graph.scope_ids() {
+    for scope in graph.node_ids() {
         let decoded: Scope<String> = round_trip(graph.scope(scope));
         assert_eq!(&decoded, graph.scope(scope));
         assert_eq!(round_trip(&scope), scope);
     }
-    for datum in graph.datum_ids() {
+    for datum in (0..graph.datum_count()).map(ScopeDatumId::from_index) {
         let decoded: ScopeDatum<String, String> = round_trip(graph.datum(datum));
         assert_eq!(&decoded, graph.datum(datum));
         assert_eq!(round_trip(&datum), datum);
@@ -418,9 +445,8 @@ fn the_pieces_of_a_stack_graph_round_trip_on_their_own() {
 #[test]
 fn extracted_partial_paths_and_their_statistics_round_trip_on_their_own() {
     let indexed = indexed();
-    let config = StackPartialPathConfig::new();
-    let set = StackPartialPathSet::compute(&indexed.graph, indexed.provider, config)
-        .expect("a known file");
+    let config = PathSearchConfig::default();
+    let set = StackPartialPathSet::compute(&indexed.graph, indexed.provider, config);
     assert!(!set.paths().is_empty(), "the provider has partial paths");
     let decoded: StackPartialPathSet = round_trip(&set);
     assert_eq!(decoded, set);

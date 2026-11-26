@@ -8,17 +8,10 @@ use core::ops::Index;
 use crate::graph::edge_view::{EdgeRef, EdgeView};
 use crate::graph::store::{Graph, Id, IdTag};
 use crate::graph::view::GraphView;
+use crate::identity::define_dense_id;
 
 #[cfg(feature = "serde")]
 mod stored;
-
-/// Tag marking an identity that addresses a stack-graph file partition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct StackFileTag;
-
-impl IdTag for StackFileTag {
-    const PREFIX: &'static str = "f";
-}
 
 /// Tag marking an identity that addresses a stack-graph node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -36,11 +29,19 @@ impl IdTag for StackEdgeTag {
     const PREFIX: &'static str = "sg-e";
 }
 
-/// Dense identity of a file partition in a [`StackGraph`].
-///
-/// A file is not a graph entity — it indexes the graph's file table — but it
-/// is dense and stable, so it shares the crate's one identity definition.
-pub type StackFileId = Id<StackFileTag>;
+define_dense_id! {
+    /// Dense identity of a file partition in a [`StackGraph`]: an index into
+    /// the graph's file table, which the store does not mint.
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    pub struct StackFileId(u32);
+    display = "f";
+    /// Construct a file identity from a dense zero-based index.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `index` exceeds `u32::MAX`.
+    from_index = "stack-graph file index exceeds u32::MAX";
+}
 
 /// Dense identity of a node in a [`StackGraph`].
 pub type StackNodeId = Id<StackNodeTag>;
@@ -209,6 +210,11 @@ impl<E> StackEdge<E> {
         self.precedence
     }
 
+    /// Mutably borrow the edge precedence used for path shadowing.
+    pub const fn precedence_mut(&mut self) -> &mut i32 {
+        &mut self.precedence
+    }
+
     /// Borrow consumer-defined edge data.
     #[must_use]
     pub const fn payload(&self) -> &E {
@@ -221,13 +227,16 @@ impl<E> StackEdge<E> {
     }
 }
 
-/// A rejected stack-graph construction operation.
+/// A construction operation that would break a rule of the stack-graph
+/// structure.
+///
+/// An identity that is not part of the graph is a caller bug that the
+/// builders report by panicking, as the scope-graph builders do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StackGraphError {
-    /// A file identity is outside this graph.
-    UnknownFile(StackFileId),
-    /// A node identity is outside this graph or belongs to a retired file generation.
-    UnknownNode(StackNodeId),
+    /// A file node of a singleton kind: the root and the jump-to-scope node
+    /// exist once, outside every file.
+    SingletonKind,
     /// A scoped-symbol node names something other than an exported scope.
     ScopeNotExported(StackNodeId),
     /// A scoped-symbol node refers to an exported scope in another file.
@@ -251,8 +260,9 @@ pub enum StackGraphError {
 impl core::fmt::Display for StackGraphError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::UnknownFile(file) => write!(formatter, "unknown stack-graph file {file}"),
-            Self::UnknownNode(node) => write!(formatter, "unknown stack-graph node {node}"),
+            Self::SingletonKind => {
+                formatter.write_str("the root and the jump-to-scope node belong to no file")
+            }
             Self::ScopeNotExported(scope) => {
                 write!(
                     formatter,
@@ -343,133 +353,42 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
         file
     }
 
-    /// Add an internal or exported scope node.
+    /// Add a node of `kind` to `file` and return its stable identity.
+    ///
+    /// A [`PushScopedSymbol`](StackNodeKind::PushScopedSymbol) must name a
+    /// live exported scope of the same file.
     ///
     /// # Errors
     ///
-    /// Returns [`StackGraphError::UnknownFile`] for an invalid file identity.
-    pub fn add_scope_node(
-        &mut self,
-        file: StackFileId,
-        exported: bool,
-        payload: N,
-    ) -> Result<StackNodeId, StackGraphError> {
-        self.add_local_node(file, StackNodeKind::Scope { exported }, payload)
-    }
-
-    /// Add an unscoped symbol-push node.
+    /// Returns [`StackGraphError::SingletonKind`] for a root or jump-to-scope
+    /// kind, and [`StackGraphError::ScopeNotExported`] or
+    /// [`StackGraphError::ScopeFromOtherFile`] for a scoped push whose scope
+    /// is not an exported scope of `file`.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// Returns [`StackGraphError::UnknownFile`] for an invalid file identity.
-    pub fn add_push_symbol_node(
-        &mut self,
-        file: StackFileId,
-        symbol: S,
-        is_reference: bool,
-        payload: N,
-    ) -> Result<StackNodeId, StackGraphError> {
-        self.add_local_node(
-            file,
-            StackNodeKind::PushSymbol {
-                symbol,
-                is_reference,
-            },
-            payload,
-        )
-    }
-
-    /// Add an unscoped symbol-pop node.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StackGraphError::UnknownFile`] for an invalid file identity.
-    pub fn add_pop_symbol_node(
-        &mut self,
-        file: StackFileId,
-        symbol: S,
-        is_definition: bool,
-        payload: N,
-    ) -> Result<StackNodeId, StackGraphError> {
-        self.add_local_node(
-            file,
-            StackNodeKind::PopSymbol {
-                symbol,
-                is_definition,
-            },
-            payload,
-        )
-    }
-
-    /// Add a scoped symbol-push node.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when `file` is unknown, `scope` is unknown or not
-    /// exported, or the scope belongs to a different file partition.
-    pub fn add_push_scoped_symbol_node(
-        &mut self,
-        file: StackFileId,
-        symbol: S,
-        scope: StackNodeId,
-        is_reference: bool,
-        payload: N,
-    ) -> Result<StackNodeId, StackGraphError> {
-        self.require_file(file)?;
-        require_attachable_scope(file, scope, self.require_node(scope)?)?;
-        self.add_local_node(
-            file,
-            StackNodeKind::PushScopedSymbol {
-                symbol,
-                scope,
-                is_reference,
-            },
-            payload,
-        )
-    }
-
-    /// Add a scoped symbol-pop node.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StackGraphError::UnknownFile`] for an invalid file identity.
-    pub fn add_pop_scoped_symbol_node(
-        &mut self,
-        file: StackFileId,
-        symbol: S,
-        is_definition: bool,
-        payload: N,
-    ) -> Result<StackNodeId, StackGraphError> {
-        self.add_local_node(
-            file,
-            StackNodeKind::PopScopedSymbol {
-                symbol,
-                is_definition,
-            },
-            payload,
-        )
-    }
-
-    /// Add a node that clears the scope stack.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StackGraphError::UnknownFile`] for an invalid file identity.
-    pub fn add_drop_scopes_node(
-        &mut self,
-        file: StackFileId,
-        payload: N,
-    ) -> Result<StackNodeId, StackGraphError> {
-        self.add_local_node(file, StackNodeKind::DropScopes, payload)
-    }
-
-    fn add_local_node(
+    /// Panics when `file` does not belong to this graph, or when a scoped
+    /// push names a node that is out of range or retired.
+    pub fn add_node(
         &mut self,
         file: StackFileId,
         kind: StackNodeKind<S>,
         payload: N,
     ) -> Result<StackNodeId, StackGraphError> {
-        self.require_file(file)?;
+        self.require_file(file);
+        match &kind {
+            StackNodeKind::Root | StackNodeKind::JumpToScope => {
+                return Err(StackGraphError::SingletonKind);
+            }
+            StackNodeKind::PushScopedSymbol { scope, .. } => {
+                require_attachable_scope(file, *scope, self.require_node(*scope))?;
+            }
+            StackNodeKind::Scope { .. }
+            | StackNodeKind::PushSymbol { .. }
+            | StackNodeKind::PopSymbol { .. }
+            | StackNodeKind::PopScopedSymbol { .. }
+            | StackNodeKind::DropScopes => {}
+        }
         let node = self.graph.add_node(StackNode {
             file: Some(file),
             kind,
@@ -487,8 +406,13 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
     ///
     /// # Errors
     ///
-    /// Returns an error for unknown endpoints, an edge leaving the
-    /// jump-to-scope singleton, or a direct edge between different files.
+    /// Returns [`StackGraphError::EdgeFromJumpToScope`] for an edge leaving
+    /// the jump-to-scope singleton, and [`StackGraphError::CrossFileEdge`]
+    /// for a direct edge between different files.
+    ///
+    /// # Panics
+    ///
+    /// Panics when an endpoint is out of range or retired.
     pub fn add_edge(
         &mut self,
         source: StackNodeId,
@@ -496,9 +420,12 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
         precedence: i32,
         payload: E,
     ) -> Result<StackEdgeId, StackGraphError> {
-        let source_node = self.require_node(source)?;
-        let target_node = self.require_node(target)?;
-        require_joinable(source, source_node, target, target_node)?;
+        require_joinable(
+            source,
+            self.require_node(source),
+            target,
+            self.require_node(target),
+        )?;
         Ok(self.graph.add_edge(
             source,
             target,
@@ -516,7 +443,8 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
         self.graph.remove_edge(edge)
     }
 
-    /// Remove every node and incident edge belonging to `file`.
+    /// Remove every node and incident edge belonging to `file`, and return
+    /// the retired nodes.
     ///
     /// The file identity and payload remain available for rebuilding. Removed
     /// node and edge slots are never reused, and their payloads stay readable
@@ -526,16 +454,27 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
     /// [`StackPartialPathDatabase`](super::StackPartialPathDatabase) with
     /// [`replace_file`](super::StackPartialPathDatabase::replace_file).
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// Returns [`StackGraphError::UnknownFile`] for an invalid file identity.
-    pub fn clear_file(&mut self, file: StackFileId) -> Result<Vec<StackNodeId>, StackGraphError> {
-        self.require_file(file)?;
+    /// Panics when `file` does not belong to this graph.
+    pub fn clear_file(&mut self, file: StackFileId) -> Vec<StackNodeId> {
+        self.require_file(file);
         let retired = core::mem::take(&mut self.file_nodes[file.index()]);
         for &node in &retired {
             self.graph.remove_node(node);
         }
-        Ok(retired)
+        retired
+    }
+
+    /// Borrow the store of the nodes and edges.
+    ///
+    /// The stack graph is a [`GraphView`] and an [`EdgeView`] through the
+    /// store; its counts, bounds, and liveness tests are the store's. The
+    /// bound exceeds the node count once a file has been cleared, and a
+    /// retired node stays readable.
+    #[must_use]
+    pub const fn graph(&self) -> &Graph<StackNode<S, N>, StackEdge<E>, StackNodeTag, StackEdgeTag> {
+        &self.graph
     }
 
     /// The singleton root node.
@@ -579,11 +518,11 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
         &self.file_nodes[file.index()]
     }
 
-    /// Borrow one node.
+    /// Borrow one node, live or retired.
     ///
     /// # Panics
     ///
-    /// Panics when `node` does not belong to this graph.
+    /// Panics when `node` is out of range.
     #[must_use]
     pub fn node(&self, node: StackNodeId) -> &StackNode<S, N> {
         self.graph.node(node)
@@ -593,24 +532,9 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
     ///
     /// # Panics
     ///
-    /// Panics when `node` does not belong to this graph.
+    /// Panics when `node` is out of range.
     pub fn node_mut(&mut self, node: StackNodeId) -> &mut StackNode<S, N> {
         self.graph.node_mut(node)
-    }
-
-    /// Borrow one live edge.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `edge` is out of range or was removed.
-    #[must_use]
-    pub fn edge(&self, edge: StackEdgeId) -> EdgeRef<'_, StackNodeId, StackEdgeId, StackEdge<E>> {
-        assert!(
-            self.graph.contains_edge(edge),
-            "stack-graph edge {edge} has been removed"
-        );
-        let value = self.graph.edge(edge);
-        EdgeRef::new(edge, value.source(), value.target(), value.payload())
     }
 
     /// Mutably borrow one live edge's data and precedence.
@@ -619,20 +543,8 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
     ///
     /// Panics when `edge` is out of range or was removed.
     pub fn edge_mut(&mut self, edge: StackEdgeId) -> &mut StackEdge<E> {
-        assert!(
-            self.graph.contains_edge(edge),
-            "stack-graph edge {edge} has been removed"
-        );
+        assert!(self.graph.contains_edge(edge), "edge has been removed");
         self.graph.edge_mut(edge).payload_mut()
-    }
-
-    /// Set the precedence used when comparing paths through `edge`.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `edge` is out of range or was removed.
-    pub fn set_edge_precedence(&mut self, edge: StackEdgeId, precedence: i32) {
-        self.edge_mut(edge).precedence = precedence;
     }
 
     /// Iterate over every file identity in insertion order.
@@ -640,33 +552,12 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
         (0..self.files.len()).map(StackFileId::from_index)
     }
 
-    /// Iterate over the singleton nodes and current file-generation nodes.
-    pub fn node_ids(&self) -> impl Iterator<Item = StackNodeId> + '_ {
-        self.graph.node_ids()
-    }
-
     /// Iterate over every source reference node in node order: the seeds of
     /// a whole-graph resolution.
     pub(super) fn reference_nodes(&self) -> impl Iterator<Item = StackNodeId> + '_ {
-        self.node_ids()
+        self.graph
+            .node_ids()
             .filter(|&node| self.node(node).kind().is_reference())
-    }
-
-    /// Iterate over every live edge identity in insertion order.
-    pub fn edge_ids(&self) -> impl Iterator<Item = StackEdgeId> + '_ {
-        self.graph.edge_ids()
-    }
-
-    /// Return outgoing edge identities in insertion order.
-    #[must_use = "iterators are lazy and do nothing unless consumed"]
-    pub fn outgoing(&self, node: StackNodeId) -> impl Iterator<Item = StackEdgeId> + '_ {
-        self.graph.outgoing(node)
-    }
-
-    /// Return incoming edge identities in insertion order.
-    #[must_use = "iterators are lazy and do nothing unless consumed"]
-    pub fn incoming(&self, node: StackNodeId) -> impl Iterator<Item = StackEdgeId> + '_ {
-        self.graph.incoming(node)
     }
 
     /// Return the number of file partitions.
@@ -675,59 +566,21 @@ impl<F, S, N, E> StackGraph<F, S, N, E> {
         self.files.len()
     }
 
-    /// Return the number of live nodes, including the two singletons.
-    #[must_use]
-    pub const fn node_count(&self) -> usize {
-        self.graph.node_count()
+    #[track_caller]
+    fn require_file(&self, file: StackFileId) {
+        assert!(
+            file.index() < self.files.len(),
+            "stack-graph file {file} is out of range"
+        );
     }
 
-    /// An exclusive upper bound on every live [`StackNodeId`] index.
-    ///
-    /// The right size for a node-indexed side table; it exceeds
-    /// [`node_count`](Self::node_count) once a file has been cleared.
-    #[must_use]
-    pub fn node_bound(&self) -> usize {
-        self.graph.node_bound()
-    }
-
-    /// Return whether `node` belongs to the current graph generation.
-    #[must_use]
-    pub fn contains_node(&self, node: StackNodeId) -> bool {
-        self.graph.contains_node(node)
-    }
-
-    /// Return the number of live edges.
-    #[must_use]
-    pub const fn edge_count(&self) -> usize {
-        self.graph.edge_count()
-    }
-
-    /// An exclusive upper bound on every live [`StackEdgeId`] index.
-    #[must_use]
-    pub fn edge_bound(&self) -> usize {
-        self.graph.edge_bound()
-    }
-
-    /// Return whether `edge` identifies a live edge in this graph.
-    #[must_use]
-    pub fn contains_edge(&self, edge: StackEdgeId) -> bool {
-        self.graph.contains_edge(edge)
-    }
-
-    fn require_file(&self, file: StackFileId) -> Result<(), StackGraphError> {
-        if file.index() < self.files.len() {
-            Ok(())
-        } else {
-            Err(StackGraphError::UnknownFile(file))
-        }
-    }
-
-    fn require_node(&self, node: StackNodeId) -> Result<&StackNode<S, N>, StackGraphError> {
-        if self.contains_node(node) {
-            Ok(self.node(node))
-        } else {
-            Err(StackGraphError::UnknownNode(node))
-        }
+    #[track_caller]
+    fn require_node(&self, node: StackNodeId) -> &StackNode<S, N> {
+        assert!(
+            self.graph.contains_node(node),
+            "stack-graph node {node} is out of range or retired"
+        );
+        self.node(node)
     }
 }
 
@@ -779,11 +632,11 @@ impl<F, S, N, E> GraphView for StackGraph<F, S, N, E> {
     type NodeId = StackNodeId;
 
     fn node_bound(&self) -> usize {
-        StackGraph::node_bound(self)
+        self.graph.node_bound()
     }
 
     fn node_ids(&self) -> impl Iterator<Item = StackNodeId> + '_ {
-        StackGraph::node_ids(self)
+        self.graph.node_ids()
     }
 
     fn successors(&self, node: StackNodeId) -> impl Iterator<Item = StackNodeId> + '_ {
@@ -800,23 +653,26 @@ impl<F, S, N, E> EdgeView for StackGraph<F, S, N, E> {
     type EdgeData = StackEdge<E>;
 
     fn edge_bound(&self) -> usize {
-        StackGraph::edge_bound(self)
+        self.graph.edge_bound()
     }
 
     fn edge_ids(&self) -> impl Iterator<Item = StackEdgeId> + '_ {
-        StackGraph::edge_ids(self)
+        self.graph.edge_ids()
     }
 
     fn outgoing(&self, node: StackNodeId) -> impl Iterator<Item = StackEdgeId> + '_ {
-        StackGraph::outgoing(self, node)
+        self.graph.outgoing(node)
     }
 
     fn incoming(&self, node: StackNodeId) -> impl Iterator<Item = StackEdgeId> + '_ {
-        StackGraph::incoming(self, node)
+        self.graph.incoming(node)
     }
 
+    /// # Panics
+    ///
+    /// Panics when `edge` is out of range or was removed.
     fn edge(&self, edge: StackEdgeId) -> EdgeRef<'_, StackNodeId, StackEdgeId, StackEdge<E>> {
-        StackGraph::edge(self, edge)
+        EdgeView::edge(&self.graph, edge)
     }
 }
 

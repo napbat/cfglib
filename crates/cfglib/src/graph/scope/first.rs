@@ -3,20 +3,23 @@
 
 use core::fmt;
 
+use crate::graph::edge_view::EdgeView;
+use crate::graph::search::{PathBudget, PathSearchConfig, PathSearchStats};
+use crate::graph::view::assert_in_bound;
+
 use super::cursor::{ScopeCursor, ScopeCursorQuery};
-use super::query::{ScopeQuery, ScopeResolutionConfig, ScopeResolutionStats};
-use super::storage::{ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeId, ScopeReferenceId};
+use super::query::ScopeQuery;
+use super::storage::{ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeId};
 
 #[cfg(test)]
 mod tests;
 
-/// The first datum that a linear query accepts on an upward path.
+/// The first datum that a linear query accepts on an upward path: the scope
+/// resolver for a policy that admits one edge at each step.
 ///
-/// This resolver follows the one path that
-/// [`ScopeResolution::try_compute_linear`](super::ScopeResolution::try_compute_linear)
-/// follows, but it keeps only a [`ScopeCursor`] and the query state. A query
-/// that climbs `D` scopes costs `O(D)` hook calls and no cycle check. It
-/// allocates nothing more than the query hooks allocate.
+/// The resolver keeps only a [`ScopeCursor`] and the query state, not the
+/// path. A query that climbs `D` scopes costs `O(D)` hook calls and no cycle
+/// check. It allocates nothing more than the query hooks allocate.
 ///
 /// # Precondition
 ///
@@ -29,25 +32,24 @@ mod tests;
 /// ([`ScopeFirstResolutionError::EdgeNotUpward`]). An edge that the query
 /// rejects can point in any direction.
 ///
-/// # Relation to linear resolution
+/// # Relation to the general resolver
 ///
 /// The resolver stops at the first accepted datum. It does not call
 /// [`should_extend`](ScopeCursorQuery::should_extend) there, and it applies
-/// no shadowing order. For a query that stops the extension when it accepts
-/// a datum, the result and the statistics are equal to those of
-/// [`try_compute_linear`](super::ScopeResolution::try_compute_linear): its
-/// one visible candidate is the datum found here. A query that extends past
-/// a candidate can reach more data, and a more specific later path can
-/// shadow the first datum. This resolver looks for neither.
+/// no shadowing order. Under [`ScopeCursorPolicy`](super::ScopeCursorPolicy),
+/// [`ScopeResolution::compute`](super::ScopeResolution::compute) runs the
+/// same policy breadth-first: on a walk that this resolver completes, the
+/// first candidate there is the datum found here, and for a query that stops
+/// the extension when it accepts a datum, the statistics are equal too. A
+/// query that extends past a candidate can reach more data. This resolver
+/// looks for none.
 ///
 /// # Examples
 ///
 /// ```
-/// use core::cmp::Ordering;
-///
 /// use cfglib::{
-///     EdgeRef, ScopeCursor, ScopeCursorQuery, ScopeDatumId, ScopeEdgeId, ScopeFirstResolution,
-///     ScopeGraph, ScopeGraphPathLabel, ScopeId, ScopeQuery, ScopeResolutionConfig,
+///     EdgeRef, PathSearchConfig, ScopeCursor, ScopeCursorQuery, ScopeDatumId, ScopeEdgeId,
+///     ScopeFirstResolution, ScopeGraph, ScopeId, ScopeQuery,
 /// };
 ///
 /// type Names = ScopeGraph<(), (), (), &'static str, &'static str>;
@@ -81,28 +83,6 @@ mod tests;
 ///     ) -> bool {
 ///         graph.datum(datum).data() == input.data()
 ///     }
-///
-///     fn should_extend(
-///         &self,
-///         _: &Names,
-///         _: &ScopeQuery<'_, &'static str>,
-///         _: ScopeCursor,
-///         (): &(),
-///         accepted_candidate_count: usize,
-///     ) -> bool {
-///         accepted_candidate_count == 0
-///     }
-///
-///     fn compare_labels(
-///         &self,
-///         _: &Names,
-///         _: &ScopeQuery<'_, &'static str>,
-///         left: ScopeGraphPathLabel<'_, ()>,
-///         right: ScopeGraphPathLabel<'_, ()>,
-///     ) -> Option<Ordering> {
-///         let is_edge = |label| matches!(label, ScopeGraphPathLabel::Edge(()));
-///         Some(is_edge(left).cmp(&is_edge(right)))
-///     }
 /// }
 ///
 /// // The scopes are added from the outside in, so every parent edge points
@@ -116,26 +96,28 @@ mod tests;
 /// let global = graph.add_datum(module, (), "x");
 /// graph.add_datum(function, (), "y");
 ///
-/// let resolution = ScopeFirstResolution::try_compute_from(
+/// let resolution = ScopeFirstResolution::try_compute(
 ///     &graph,
-///     block,
-///     &"x",
+///     ScopeQuery::new(block, &"x"),
 ///     &Lexical,
-///     ScopeResolutionConfig::new(),
+///     PathSearchConfig::default(),
 /// )?;
 /// assert_eq!(resolution.candidate(), Some((global, module)));
-/// assert_eq!(resolution.stats().explored_path_count, 3);
+/// assert_eq!(resolution.stats().expanded_path_count, 3);
 /// # Ok::<(), cfglib::ScopeFirstResolutionError>(())
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScopeFirstResolution {
     candidate: Option<(ScopeDatumId, ScopeId)>,
-    stats: ScopeResolutionStats,
+    stats: PathSearchStats,
 }
 
 impl ScopeFirstResolution {
-    /// Resolves one stored reference to the first datum that `query`
-    /// accepts.
+    /// Resolves `input`, a stored reference or an ephemeral query, to the
+    /// first datum that `query` accepts.
+    ///
+    /// The walk follows one path, so it reads neither `config.order` nor
+    /// `config.max_complete_path_count`.
     ///
     /// # Errors
     ///
@@ -145,65 +127,21 @@ impl ScopeFirstResolution {
     ///
     /// # Panics
     ///
-    /// Panics when `reference` is not a reference of `graph`.
+    /// Panics when `input` starts in a scope that does not belong to `graph`.
     pub fn try_compute<S, L, R, D, Q, P>(
         graph: &ScopeGraph<S, L, R, D, Q>,
-        reference: ScopeReferenceId,
+        input: ScopeQuery<'_, Q>,
         query: &P,
-        config: ScopeResolutionConfig,
+        config: PathSearchConfig,
     ) -> Result<Self, ScopeFirstResolutionError>
     where
         P: ScopeCursorQuery<S, L, R, D, Q> + ?Sized,
     {
-        Self::try_compute_query(
-            graph,
-            &ScopeQuery::from_reference(graph, reference),
-            query,
-            config,
-        )
-    }
-
-    /// Resolves one ephemeral query that starts in `scope` to the first
-    /// datum that `query` accepts.
-    ///
-    /// This is the counterpart of [`try_compute`](Self::try_compute) for a
-    /// query that the graph does not store.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ScopeFirstResolutionError`] when a prefix accepts more than
-    /// one datum, admits more than one outgoing edge, or admits an edge that
-    /// does not point upward.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `scope` is not a scope of `graph`.
-    pub fn try_compute_from<S, L, R, D, Q, P>(
-        graph: &ScopeGraph<S, L, R, D, Q>,
-        scope: ScopeId,
-        data: &Q,
-        query: &P,
-        config: ScopeResolutionConfig,
-    ) -> Result<Self, ScopeFirstResolutionError>
-    where
-        P: ScopeCursorQuery<S, L, R, D, Q> + ?Sized,
-    {
-        let _ = graph.scope(scope);
-        Self::try_compute_query(graph, &ScopeQuery::new(scope, data), query, config)
-    }
-
-    fn try_compute_query<S, L, R, D, Q, P>(
-        graph: &ScopeGraph<S, L, R, D, Q>,
-        input: &ScopeQuery<'_, Q>,
-        query: &P,
-        config: ScopeResolutionConfig,
-    ) -> Result<Self, ScopeFirstResolutionError>
-    where
-        P: ScopeCursorQuery<S, L, R, D, Q> + ?Sized,
-    {
+        assert_in_bound(graph, input.scope(), "query scope");
+        let input = &input;
         let mut cursor = ScopeCursor::new(input.scope(), input.scope(), 0);
         let mut state = query.initial_state(graph, input);
-        let mut budget = Budget::new(config);
+        let mut budget = PathBudget::new(&config);
         let mut candidate = None;
 
         while budget.admit_expansion() {
@@ -255,10 +193,12 @@ impl ScopeFirstResolution {
             state = next_state;
         }
 
-        budget.stats.reachable_candidate_count = usize::from(candidate.is_some());
         Ok(Self {
             candidate,
-            stats: budget.stats,
+            stats: PathSearchStats {
+                complete_path_count: usize::from(candidate.is_some()),
+                ..budget.stats()
+            },
         })
     }
 
@@ -278,61 +218,11 @@ impl ScopeFirstResolution {
 
     /// Returns the work of the query and the bounds that stopped it.
     ///
-    /// `explored_path_count` is the number of scopes that the walk tested.
-    /// `reachable_candidate_count` is one for a resolved query and zero
-    /// otherwise.
+    /// `expanded_path_count` is the number of scopes that the walk tested.
+    /// `complete_path_count` is one for a resolved query and zero otherwise.
     #[must_use]
-    pub const fn stats(&self) -> ScopeResolutionStats {
+    pub const fn stats(&self) -> PathSearchStats {
         self.stats
-    }
-}
-
-/// The bounds of one walk and the record of the bound that refused work.
-///
-/// A truncation flag is set only when a bound refuses work, not when the
-/// work only reaches the bound. These are the rules of
-/// [`ScopeResolution`](super::ScopeResolution), so the statistics of the
-/// two resolvers are comparable.
-struct Budget {
-    max_path_length: Option<usize>,
-    max_path_count: Option<usize>,
-    stats: ScopeResolutionStats,
-}
-
-impl Budget {
-    fn new(config: ScopeResolutionConfig) -> Self {
-        Self {
-            max_path_length: config.max_path_length,
-            max_path_count: config.max_path_count,
-            stats: ScopeResolutionStats::default(),
-        }
-    }
-
-    /// Counts one more tested prefix. Returns `false` and records the
-    /// truncation when the count bound has no space for it.
-    fn admit_expansion(&mut self) -> bool {
-        if self
-            .max_path_count
-            .is_some_and(|limit| self.stats.explored_path_count >= limit)
-        {
-            self.stats.path_count_limited = true;
-            return false;
-        }
-        self.stats.explored_path_count += 1;
-        true
-    }
-
-    /// Returns whether a path of `extended_len` edges fits the length bound.
-    /// Otherwise records the truncation and returns `false`.
-    fn admit_length(&mut self, extended_len: usize) -> bool {
-        if self
-            .max_path_length
-            .is_some_and(|limit| extended_len > limit)
-        {
-            self.stats.path_length_limited = true;
-            return false;
-        }
-        true
     }
 }
 

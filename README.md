@@ -109,14 +109,16 @@ pruning, and—when needed—a full path/data shadowing order. This keeps lexica
 inheritance, namespaces, ordered declarations, accessibility, redirects, and
 opacity in the frontend's vocabulary.
 
-`ScopeResolution::compute` resolves a stored reference.
-`ScopeResolution::compute_from` runs the same algorithm for an ephemeral query,
-which supports completion and speculative refactoring without modifying the
-graph. `ScopeResolutionIndex` resolves all stored references and provides the
+`ScopeResolution::compute` resolves a `ScopeQuery`: a stored reference
+(`ScopeQuery::from_reference`) or an ephemeral query (`ScopeQuery::new`), which
+supports completion and speculative refactoring without modifying the graph.
+`ScopeResolutionIndex` resolves all stored references and provides the
 reverse definition-to-reference relation used by rename and find-references.
-Paths are cycle-free, deterministic, and optionally bounded; truncated results
-report which bound was reached. Scope storage supports `serde` when the feature
-is enabled.
+Paths are cycle-free, deterministic, and optionally bounded by a
+`PathSearchConfig`; the `PathSearchStats` of a result report which bound
+refused work. Scope storage supports `serde` when the feature is enabled. The
+store of scopes and edges is `ScopeGraph::graph`, and the scope graph is a
+`GraphView` and an `EdgeView`.
 
 `ScopeResolutionIndex::compute_tracked` builds the same index as `compute` and
 also records the scopes each resolution read: the ends of the path prefixes it
@@ -134,34 +136,41 @@ its first update resolves every reference and records them from then on.
 `ScopeCursorQuery` admits and stops at the first accepted datum. Its hooks see
 a `ScopeCursor` (the start, the end, and the length of a path) instead of a
 stored path, so a walk of `D` scopes costs `O(D)` hook calls and allocates
-nothing. `ScopeCursor::of_path` lets one policy type serve both query forms.
+nothing. `ScopeCursorPolicy` runs the same policy under `ScopeResolution`,
+where a cursor policy shadows no candidate.
 
-`ScopeResolutionIndex::compute_cached` resolves every reference through one
-`ScopeEnvironmentCache` under a `ScopeEnvironmentQuery`, the memo-safe query
-form. Its hooks see the scope where a path ends and the path-language state
-there, never the path or the reference, and a key projects each datum to what
-shadowing and lookup compare (typically its name). The environment of a scope
-in a state (every visible datum by key, with its path, after lexicographic
-label-word shadowing within each key) is then the same for every reference,
-so it is computed once and the references of a block share the walk up their
-parents and imports. On a graph without cycles each reference sees the data
-that `compute` shows with the same hooks. Scopes on a cycle (found once with
-`tarjan_scc`) are resolved anew on each reach under a (scope, state) path
-guard and not cached, so a path language that comes back to a scope in
-another state can reach data that `compute`'s scope guard cuts off. Policies
-that need the whole path, such as accessibility, stay `ScopeGraphQuery`s or
-run afterwards on the stored candidate paths. The cache trades memory for
-time: it holds every key of every environment it computed.
+A `ScopeEnvironmentCache` resolves queries under a `ScopeEnvironmentQuery`,
+the memo-safe query form, and `ScopeEnvironmentCache::index` resolves every
+reference through one cache. Its hooks see the scope where a path ends and the
+path-language state there, never the path or the reference, and a key
+projects each datum to what shadowing and lookup compare (typically its name).
+The environment of a scope in a state (every visible datum by key, with its
+path, after lexicographic label-word shadowing within each key) is then the
+same for every reference, so it is computed once and the references of a
+block share the walk up their parents and imports. On a graph without cycles
+each reference sees the data that `compute` shows with the same hooks. Scopes
+on a cycle (found once with `tarjan_scc`) are resolved anew on each reach
+under a (scope, state) path guard and not cached, so a path language that
+comes back to a scope in another state can reach data that `compute`'s scope
+guard cuts off. Policies that need the whole path, such as accessibility,
+stay `ScopeGraphQuery`s or run afterwards on the stored candidate paths. The
+cache trades memory for time: it holds every key of every environment it
+computed. An index from the cache records no reads, so its first `update`
+resolves every reference.
 
 ### Stack graphs
 
 `graph::stack::StackGraph<F, S, N, E>` implements the standard root,
 exported/internal scope, symbol push/pop, scoped-symbol push/pop, drop-scopes,
-and jump-to-scope nodes. Symbols, file records, node metadata, and edge metadata
-are consumer types.
+and jump-to-scope nodes. The two singletons come with the graph, and every
+other node is added through `StackGraph::add_node` with its `StackNodeKind`.
+Symbols, file records, node metadata, and edge metadata are consumer types.
 Concrete paths maintain symbol and scope stacks transactionally, scoped symbols
 can pause one lookup while another resolves, and edge precedence removes
-shadowed complete paths while retaining genuine ambiguity.
+shadowed complete paths while retaining genuine ambiguity. Both graphs share
+one misuse policy: an identity that is not part of the graph panics, and a
+broken structural rule, a branch of a linear walk, or a stale summary is an
+error.
 
 Every ordinary node belongs to one file partition. Direct cross-file edges are
 rejected; independently constructed files compose through the root or exported
@@ -169,11 +178,12 @@ scope stitching endpoints. `StackPartialPathSet` extracts reusable structural
 routes per file, `StackPartialPathDatabase` replaces one file at a time while
 leaving other identities stable, and `StackGraph::clear_file` retires one
 changed partition with node/edge tombstones before it is rebuilt. Then
-`StackResolution::compute_from_partials` replays compatible summaries with the
-same semantics as direct search. Graphs and partial-path databases are
-serializable with `serde`, so unchanged file summaries can be persisted and
-reused. Both direct and stitched indexes expose reverse
-definition-to-reference bindings.
+`StackResolution::try_compute_stitched` replays compatible summaries with the
+same semantics as direct search, and reports a database that no longer
+matches the graph. Every search takes the same `PathSearchConfig`. Graphs and
+partial-path databases are serializable with `serde`, so unchanged file
+summaries can be persisted and reused. Direct, linear, and stitched
+`StackResolutionIndex`es expose reverse definition-to-reference bindings.
 
 ### Control-flow graph (`Cfg<I>`)
 

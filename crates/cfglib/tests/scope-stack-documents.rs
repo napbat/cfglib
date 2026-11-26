@@ -9,10 +9,9 @@
 use core::cmp::Ordering;
 
 use cfglib::{
-    EdgeRef, ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeGraphPathLabel, ScopeGraphQuery, ScopeId,
-    ScopePath, ScopeQuery, ScopeResolution, ScopeResolutionConfig, ScopeResolutionIndex,
-    StackGraph, StackNodeId, StackPartialPathConfig, StackPartialPathDatabase, StackResolution,
-    StackSearchConfig,
+    EdgeRef, PathSearchConfig, ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeGraphPathLabel,
+    ScopeGraphQuery, ScopeId, ScopePath, ScopeQuery, ScopeResolution, ScopeResolutionIndex,
+    StackGraph, StackNodeId, StackNodeKind, StackPartialPathDatabase, StackResolution,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -105,7 +104,7 @@ mod scope {
     }
 
     fn resolutions(graph: &Scopes) -> ScopeResolutionIndex {
-        ScopeResolutionIndex::compute(graph, &ByName, ScopeResolutionConfig::new())
+        ScopeResolutionIndex::compute(graph, &ByName, PathSearchConfig::default())
     }
 
     #[test]
@@ -216,30 +215,79 @@ fn stack() -> (Stack, Nodes) {
     let provider = graph.add_file("provider.rs".into());
     let spare = graph.add_file("spare.rs".into());
     let stale = graph
-        .add_scope_node(spare, true, "stale scope".into())
+        .add_node(
+            spare,
+            StackNodeKind::Scope { exported: true },
+            "stale scope".into(),
+        )
         .expect("known file");
     graph
-        .add_push_scoped_symbol_node(spare, "stale".into(), stale, false, "stale push".into())
+        .add_node(
+            spare,
+            StackNodeKind::PushScopedSymbol {
+                symbol: "stale".into(),
+                scope: stale,
+                is_reference: false,
+            },
+            "stale push".into(),
+        )
         .expect("a file-local exported scope");
-    graph.clear_file(spare).expect("known file");
+    graph.clear_file(spare);
 
     let reference = graph
-        .add_push_symbol_node(consumer, "member".into(), true, "member use".into())
+        .add_node(
+            consumer,
+            StackNodeKind::PushSymbol {
+                symbol: "member".into(),
+                is_reference: true,
+            },
+            "member use".into(),
+        )
         .expect("known file");
     let receiver = graph
-        .add_scope_node(consumer, true, "receiver scope".into())
+        .add_node(
+            consumer,
+            StackNodeKind::Scope { exported: true },
+            "receiver scope".into(),
+        )
         .expect("known file");
     let push_receiver = graph
-        .add_push_scoped_symbol_node(consumer, "receiver".into(), receiver, false, "pause".into())
+        .add_node(
+            consumer,
+            StackNodeKind::PushScopedSymbol {
+                symbol: "receiver".into(),
+                scope: receiver,
+                is_reference: false,
+            },
+            "pause".into(),
+        )
         .expect("a file-local exported scope");
     let pop_receiver = graph
-        .add_pop_scoped_symbol_node(consumer, "receiver".into(), false, "resume".into())
+        .add_node(
+            consumer,
+            StackNodeKind::PopScopedSymbol {
+                symbol: "receiver".into(),
+                is_definition: false,
+            },
+            "resume".into(),
+        )
         .expect("known file");
     let members = graph
-        .add_scope_node(provider, true, "members".into())
+        .add_node(
+            provider,
+            StackNodeKind::Scope { exported: true },
+            "members".into(),
+        )
         .expect("known file");
     let definition = graph
-        .add_pop_symbol_node(provider, "member".into(), true, "member def".into())
+        .add_node(
+            provider,
+            StackNodeKind::PopSymbol {
+                symbol: "member".into(),
+                is_definition: true,
+            },
+            "member def".into(),
+        )
         .expect("known file");
     let (root, jump) = (graph.root_node(), graph.jump_to_scope_node());
     for (source, target) in [
@@ -268,15 +316,16 @@ mod stack_graph {
 
     /// Resolves from the reference directly and by stitching file summaries.
     fn resolve(graph: &Stack, nodes: &Nodes) -> [StackResolution<String>; 2] {
-        let database = StackPartialPathDatabase::compute(graph, StackPartialPathConfig::new());
+        let database = StackPartialPathDatabase::compute(graph, PathSearchConfig::default());
         [
-            StackResolution::compute(graph, nodes.reference, StackSearchConfig::new()),
-            StackResolution::compute_from_partials(
+            StackResolution::compute(graph, nodes.reference, PathSearchConfig::default()),
+            StackResolution::try_compute_stitched(
                 graph,
                 &database,
                 nodes.reference,
-                StackSearchConfig::new(),
-            ),
+                PathSearchConfig::default(),
+            )
+            .expect("the database matches the graph"),
         ]
     }
 
@@ -445,6 +494,16 @@ mod stack_graph {
                     "a retired push naming a scope of another file",
                     &[(retired_scope, json!(5))],
                 ),
+                (
+                    // The spare file's scope and push move to the consumer
+                    // file whole, so only the liveness of the scope is wrong.
+                    "a live push naming a retired scope of its file",
+                    &[
+                        (live_scope, json!(2)),
+                        ("/graph/delta_nodes/2/file", json!(0)),
+                        ("/graph/delta_nodes/3/file", json!(0)),
+                    ],
+                ),
             ],
         );
     }
@@ -485,7 +544,7 @@ mod stack_graph {
 
 mod partial_paths {
     use super::*;
-    use cfglib::{StackFileId, StackPartialPath, StackPartialPathSet};
+    use cfglib::{StackFileId, StackPartialPath, StackPartialPathId, StackPartialPathSet};
 
     /// The summaries of [`stack`] after its consumer file was extracted
     /// again, so that the slots of the first extraction are tombstones.
@@ -498,11 +557,9 @@ mod partial_paths {
     /// rest are file 1's. The start table has a row for each of the ten
     /// nodes, and the file table one for each of the three files.
     fn database(graph: &Stack, consumer: StackFileId) -> StackPartialPathDatabase {
-        let config = StackPartialPathConfig::new();
+        let config = PathSearchConfig::default();
         let mut database = StackPartialPathDatabase::compute(graph, config);
-        database
-            .replace_file(graph, consumer, config)
-            .expect("known file");
+        database.replace_file(graph, consumer, config);
         database
     }
 
@@ -521,24 +578,26 @@ mod partial_paths {
             serde_json::from_value(document).expect("a sound document loads");
 
         assert_eq!(loaded, original);
-        assert_eq!(loaded.path_slot_count(), 7);
+        let live: Vec<bool> = (0..7)
+            .map(|slot| loaded.path(StackPartialPathId::from_index(slot)).is_some())
+            .collect();
+        assert_eq!(live, [false, false, true, true, true, true, true]);
         assert_eq!(loaded.path_count(), 5);
-        let direct = StackResolution::compute(&graph, nodes.reference, StackSearchConfig::new());
-        let stitched = StackResolution::compute_from_partials(
+        let direct = StackResolution::compute(&graph, nodes.reference, PathSearchConfig::default());
+        let stitched = StackResolution::try_compute_stitched(
             &graph,
             &loaded,
             nodes.reference,
-            StackSearchConfig::new(),
-        );
+            PathSearchConfig::default(),
+        )
+        .expect("the database matches the graph");
         assert_eq!(stitched.paths(), direct.paths());
         assert_eq!(direct.paths()[0].end(), nodes.definition);
 
         // Extracting a file again reads and rewrites every table.
         let mut replaced = original;
         for database in [&mut loaded, &mut replaced] {
-            database
-                .replace_file(&graph, consumer, StackPartialPathConfig::new())
-                .expect("known file");
+            database.replace_file(&graph, consumer, PathSearchConfig::default());
         }
         assert_eq!(loaded, replaced);
     }
@@ -639,8 +698,7 @@ mod partial_paths {
             ],
         );
 
-        let set = StackPartialPathSet::compute(&graph, consumer, StackPartialPathConfig::new())
-            .expect("known file");
+        let set = StackPartialPathSet::compute(&graph, consumer, PathSearchConfig::default());
         let path = serde_json::to_value(&set.paths()[1]).expect("serializes");
         let loaded: StackPartialPath =
             serde_json::from_value(path.clone()).expect("a sound path loads");
@@ -661,8 +719,7 @@ mod partial_paths {
     fn a_summary_set_whose_counts_disagree_is_rejected() {
         let (graph, nodes) = stack();
         let consumer = consumer_file(&graph, &nodes);
-        let set = StackPartialPathSet::compute(&graph, consumer, StackPartialPathConfig::new())
-            .expect("known file");
+        let set = StackPartialPathSet::compute(&graph, consumer, PathSearchConfig::default());
         let sound = serde_json::to_value(&set).expect("serializes");
         let loaded: StackPartialPathSet =
             serde_json::from_value(sound.clone()).expect("a sound set loads");
@@ -673,7 +730,7 @@ mod partial_paths {
             &[
                 (
                     "stats counting summaries the set does not hold",
-                    &[("/stats/partial_path_count", json!(3))],
+                    &[("/stats/search/complete_path_count", json!(3))],
                 ),
                 (
                     "a summary of another file than the set",

@@ -3,7 +3,7 @@
 
 use core::cmp::Ordering;
 
-use super::query::{ScopeGraphPathLabel, ScopePath, ScopeQuery};
+use super::query::{ScopeGraphPathLabel, ScopeGraphQuery, ScopePath, ScopeQuery};
 use super::storage::{ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeId};
 use crate::graph::edge_view::EdgeRef;
 
@@ -11,8 +11,7 @@ use crate::graph::edge_view::EdgeRef;
 /// edges.
 ///
 /// A [`ScopeCursorQuery`] sees only this summary, so a resolver can follow a
-/// path without storing it. [`ScopeCursor::of_path`] gives the cursor of a
-/// stored path.
+/// path without storing it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScopeCursor {
     start: ScopeId,
@@ -31,8 +30,7 @@ impl ScopeCursor {
     }
 
     /// Returns the endpoints and the length of the stored `path`.
-    #[must_use]
-    pub fn of_path(path: &ScopePath) -> Self {
+    fn of_path(path: &ScopePath) -> Self {
         Self::new(path.start(), path.end(), path.len())
     }
 
@@ -64,15 +62,11 @@ impl ScopeCursor {
 
 /// A scope-graph query whose hooks never read the scopes or edges of a path.
 ///
-/// Each hook matches the [`ScopeGraphQuery`](super::ScopeGraphQuery) hook
-/// of the same name, with a [`ScopeCursor`] in place of the
-/// [`ScopePath`]. [`ScopeFirstResolution`](super::ScopeFirstResolution) runs
-/// a cursor query along one path without storing it.
-///
-/// To run the same policy under [`ScopeResolution`](super::ScopeResolution), implement
-/// [`ScopeGraphQuery`](super::ScopeGraphQuery) for the policy type: give
-/// [`ScopeCursor::of_path`] of each path to the hook of the same name, and
-/// keep the default shadowing order.
+/// Each hook is the [`ScopeGraphQuery`] hook of the same name, with a
+/// [`ScopeCursor`] in place of the [`ScopePath`]. A cursor query has no
+/// shadowing order: [`ScopeFirstResolution`](super::ScopeFirstResolution)
+/// runs it along one path without storing it and stops at the first datum,
+/// and [`ScopeCursorPolicy`] runs it under every other resolver.
 pub trait ScopeCursorQuery<S, L, R, D, Q> {
     /// The path-language state that the consumer owns.
     type State: Clone;
@@ -162,27 +156,120 @@ pub trait ScopeCursorQuery<S, L, R, D, Q> {
     ) -> bool {
         true
     }
+}
 
-    /// Compares two extended labels for path specificity, as
-    /// [`ScopeGraphQuery::compare_labels`](super::ScopeGraphQuery::compare_labels) does.
-    fn compare_labels(
+/// A [`ScopeCursorQuery`] run as a [`ScopeGraphQuery`], so that one policy
+/// serves every resolver.
+///
+/// Each hook gives the cursor of the stored path to the cursor hook of the
+/// same name. A cursor query has no shadowing order, so no candidate shadows
+/// another: [`ScopeResolution::compute`](super::ScopeResolution::compute)
+/// keeps every candidate the policy accepts. On a path that the policy
+/// admits one edge at a time, the first of those candidates is the datum
+/// that [`ScopeFirstResolution`](super::ScopeFirstResolution) finds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScopeCursorPolicy<P>(pub P);
+
+impl<S, L, R, D, Q, P> ScopeGraphQuery<S, L, R, D, Q> for ScopeCursorPolicy<P>
+where
+    P: ScopeCursorQuery<S, L, R, D, Q>,
+{
+    type State = P::State;
+
+    fn initial_state(
         &self,
         graph: &ScopeGraph<S, L, R, D, Q>,
         input: &ScopeQuery<'_, Q>,
-        left: ScopeGraphPathLabel<'_, L>,
-        right: ScopeGraphPathLabel<'_, L>,
-    ) -> Option<Ordering>;
+    ) -> Self::State {
+        self.0.initial_state(graph, input)
+    }
 
-    /// Returns whether `left` is at least as data-specific as `right`, as
-    /// [`ScopeGraphQuery::data_leq`](super::ScopeGraphQuery::data_leq) decides. The default
-    /// holds for every pair.
-    fn data_leq(
+    fn step(
+        &self,
+        graph: &ScopeGraph<S, L, R, D, Q>,
+        input: &ScopeQuery<'_, Q>,
+        path: &ScopePath,
+        state: &Self::State,
+        edge: EdgeRef<'_, ScopeId, ScopeEdgeId, L>,
+    ) -> Option<Self::State> {
+        self.0
+            .step(graph, input, ScopeCursor::of_path(path), state, edge)
+    }
+
+    fn visit_candidate_data(
+        &self,
+        graph: &ScopeGraph<S, L, R, D, Q>,
+        input: &ScopeQuery<'_, Q>,
+        path: &ScopePath,
+        state: &Self::State,
+        visit: &mut impl FnMut(ScopeDatumId),
+    ) {
+        self.0
+            .visit_candidate_data(graph, input, ScopeCursor::of_path(path), state, visit);
+    }
+
+    fn accepts(
+        &self,
+        graph: &ScopeGraph<S, L, R, D, Q>,
+        input: &ScopeQuery<'_, Q>,
+        path: &ScopePath,
+        state: &Self::State,
+        datum: ScopeDatumId,
+    ) -> bool {
+        self.0
+            .accepts(graph, input, ScopeCursor::of_path(path), state, datum)
+    }
+
+    fn visit_accepted_data(
+        &self,
+        graph: &ScopeGraph<S, L, R, D, Q>,
+        input: &ScopeQuery<'_, Q>,
+        path: &ScopePath,
+        state: &Self::State,
+        visit: &mut impl FnMut(ScopeDatumId),
+    ) {
+        self.0
+            .visit_accepted_data(graph, input, ScopeCursor::of_path(path), state, visit);
+    }
+
+    fn should_extend(
+        &self,
+        graph: &ScopeGraph<S, L, R, D, Q>,
+        input: &ScopeQuery<'_, Q>,
+        path: &ScopePath,
+        state: &Self::State,
+        accepted_candidate_count: usize,
+    ) -> bool {
+        self.0.should_extend(
+            graph,
+            input,
+            ScopeCursor::of_path(path),
+            state,
+            accepted_candidate_count,
+        )
+    }
+
+    /// No two labels are comparable.
+    fn compare_labels(
         &self,
         _graph: &ScopeGraph<S, L, R, D, Q>,
         _input: &ScopeQuery<'_, Q>,
-        _left: ScopeDatumId,
-        _right: ScopeDatumId,
+        _left: ScopeGraphPathLabel<'_, L>,
+        _right: ScopeGraphPathLabel<'_, L>,
+    ) -> Option<Ordering> {
+        None
+    }
+
+    /// No candidate shadows another.
+    fn shadows(
+        &self,
+        _graph: &ScopeGraph<S, L, R, D, Q>,
+        _input: &ScopeQuery<'_, Q>,
+        _left_path: &ScopePath,
+        _left_datum: ScopeDatumId,
+        _right_path: &ScopePath,
+        _right_datum: ScopeDatumId,
     ) -> bool {
-        true
+        false
     }
 }

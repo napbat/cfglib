@@ -4,35 +4,18 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
+use super::super::test_support::{Label, chain, random_graph, rank};
 use super::{ScopeEnvironmentCache, ScopeEnvironmentQuery};
-use crate::graph::edge_view::EdgeRef;
+use crate::PathSearchConfig;
+use crate::graph::edge_view::{EdgeRef, EdgeView};
 use crate::graph::scope::{
     ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeGraphPathLabel, ScopeGraphQuery, ScopeId,
-    ScopePath, ScopeQuery, ScopeResolution, ScopeResolutionCandidate, ScopeResolutionConfig,
-    ScopeResolutionIndex,
+    ScopePath, ScopeQuery, ScopeResolution, ScopeResolutionCandidate, ScopeResolutionIndex,
 };
 use crate::test_util::rng::Rng;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Label {
-    Parent,
-    Import,
-    A,
-    B,
-}
-
 /// Scopes without payload, data and references named by a small number.
 type Graph = ScopeGraph<(), Label, (), u8, u8>;
-
-/// The lexicographic label order of every policy here: a declaration
-/// shadows an import, which shadows a parent.
-fn rank(label: ScopeGraphPathLabel<'_, Label>) -> u8 {
-    match label {
-        ScopeGraphPathLabel::Declaration => 0,
-        ScopeGraphPathLabel::Edge(Label::Import | Label::A | Label::B) => 1,
-        ScopeGraphPathLabel::Edge(Label::Parent) => 2,
-    }
-}
 
 /// Every edge, in one state: the path language is `(P | I)*`.
 struct Anywhere;
@@ -218,41 +201,6 @@ where
     }
 }
 
-/// A random graph of up to nine scopes. Most edges go to an earlier scope,
-/// which keeps a region without cycles; one in four goes anywhere and can
-/// close a cycle.
-fn random_graph(random: &mut Rng) -> Graph {
-    let count = 1 + random.below(9);
-    let mut graph = Graph::new();
-    let scopes: Vec<ScopeId> = (0..count).map(|_| graph.add_scope(())).collect();
-    for (index, &scope) in scopes.iter().enumerate() {
-        for _ in 0..random.below(3) {
-            let target = if index > 0 && !random.one_in(4) {
-                random.below(index)
-            } else {
-                random.below(count)
-            };
-            let label = if random.chance(60) {
-                Label::Parent
-            } else {
-                Label::Import
-            };
-            graph.add_edge(scope, scopes[target], label);
-        }
-        for _ in 0..random.below(3) {
-            graph.add_datum(scope, (), name(random));
-        }
-        for _ in 0..random.below(3) {
-            graph.add_reference(scope, name(random));
-        }
-    }
-    graph
-}
-
-fn name(random: &mut Rng) -> u8 {
-    u8::try_from(random.below(3)).expect("a name below three fits in u8")
-}
-
 /// The visible candidates of a resolution, as an ordered set.
 fn candidates(resolution: &ScopeResolution) -> BTreeSet<(ScopeDatumId, Vec<ScopeEdgeId>)> {
     resolution
@@ -282,16 +230,12 @@ fn assert_paths_are_walks(graph: &Graph, resolution: &ScopeResolution) {
 /// whether the length bound refused an extension; with several states the
 /// cached resolver admits a return in another state, which a length bound
 /// can then refuse.
-fn assert_indexes_agree<P>(
-    graph: &Graph,
-    policy: &P,
-    config: ScopeResolutionConfig,
-    same_cycles: bool,
-) where
+fn assert_indexes_agree<P>(graph: &Graph, policy: &P, config: PathSearchConfig, same_cycles: bool)
+where
     P: ScopeEnvironmentQuery<(), Label, (), u8, u8>,
 {
     let general = ScopeResolutionIndex::compute(graph, &PathAware(policy), config);
-    let cached = ScopeResolutionIndex::compute_cached(graph, policy, config);
+    let cached = ScopeEnvironmentCache::new(graph).index(graph, policy, config);
     for reference in graph.reference_ids() {
         let expected = general.resolution(reference);
         let actual = cached.resolution(reference);
@@ -309,7 +253,7 @@ fn assert_indexes_agree<P>(
         }
         assert_paths_are_walks(graph, actual);
     }
-    for datum in graph.datum_ids() {
+    for datum in (0..graph.datum_count()).map(ScopeDatumId::from_index) {
         assert_eq!(cached.references_to(datum), general.references_to(datum));
     }
 }
@@ -318,10 +262,16 @@ fn assert_indexes_agree<P>(
 fn cached_and_general_indexes_agree_on_random_graphs() {
     let mut random = Rng::new(0x74_5EED);
     for _ in 0..1_000 {
-        let graph = random_graph(&mut random);
+        // Up to nine scopes. Most edges go to an earlier scope, which keeps
+        // a region without cycles; one in four goes anywhere and can close a
+        // cycle.
+        let graph = random_graph(&mut random, 9, Some(4), |_| ());
         for config in [
-            ScopeResolutionConfig::new(),
-            ScopeResolutionConfig::new().with_max_path_length(random.below(4)),
+            PathSearchConfig::default(),
+            PathSearchConfig {
+                max_path_length: Some(random.below(4)),
+                ..PathSearchConfig::default()
+            },
         ] {
             assert_indexes_agree(&graph, &Anywhere, config, true);
             assert_indexes_agree(&graph, &ParentsThenImport, config, false);
@@ -345,10 +295,11 @@ fn a_path_language_may_come_back_to_a_scope_in_another_state() {
     let reference = graph.add_reference(s1, 0);
 
     let general =
-        ScopeResolutionIndex::compute(&graph, &PathAware(&ThenB), ScopeResolutionConfig::new());
+        ScopeResolutionIndex::compute(&graph, &PathAware(&ThenB), PathSearchConfig::default());
     assert!(!general.resolution(reference).is_resolved());
 
-    let cached = ScopeResolutionIndex::compute_cached(&graph, &ThenB, ScopeResolutionConfig::new());
+    let cached =
+        ScopeEnvironmentCache::new(&graph).index(&graph, &ThenB, PathSearchConfig::default());
     let resolution = cached.resolution(reference);
     assert_eq!(resolution.candidates().len(), 1);
     assert_eq!(resolution.candidates()[0].datum(), datum);
@@ -370,7 +321,7 @@ fn equal_labels_keep_both_candidates() {
     let in_right = graph.add_datum(right, (), 0);
     let reference = graph.add_reference(block, 0);
     let index =
-        ScopeResolutionIndex::compute_cached(&graph, &Anywhere, ScopeResolutionConfig::new());
+        ScopeEnvironmentCache::new(&graph).index(&graph, &Anywhere, PathSearchConfig::default());
     let resolution = index.resolution(reference);
     assert!(resolution.is_ambiguous());
     let data: Vec<_> = resolution
@@ -383,62 +334,68 @@ fn equal_labels_keep_both_candidates() {
 
 /// A chain of `count` scopes, each with a parent edge to the previous one,
 /// the first declaring `0`.
-fn chain(count: usize) -> (Graph, Vec<ScopeId>) {
-    let mut graph = Graph::new();
-    let scopes: Vec<ScopeId> = (0..count).map(|_| graph.add_scope(())).collect();
-    for pair in scopes.windows(2) {
-        graph.add_edge(pair[1], pair[0], Label::Parent);
-    }
+fn declaring_chain(count: usize) -> (Graph, Vec<ScopeId>) {
+    let (mut graph, scopes): (Graph, _) = chain(count);
     graph.add_datum(scopes[0], (), 0);
     (graph, scopes)
 }
 
 #[test]
 fn references_share_the_environments_of_their_scopes() {
-    let (mut graph, scopes) = chain(4);
+    let (mut graph, scopes) = declaring_chain(4);
     let inner = scopes[3];
     let first = graph.add_reference(inner, 0);
     let second = graph.add_reference(inner, 1);
     let mut cache = ScopeEnvironmentCache::new(&graph);
-    let config = ScopeResolutionConfig::new();
+    let config = PathSearchConfig::default();
 
+    let first = ScopeQuery::from_reference(&graph, first);
     let resolution = cache.resolve(&graph, first, &Anywhere, config);
     assert!(resolution.is_resolved());
-    assert_eq!(resolution.stats().explored_path_count, 4);
+    assert_eq!(resolution.stats().expanded_path_count, 4);
     assert_eq!(cache.environment_count(), 4);
 
     // The second reference starts where the first did: one lookup.
+    let second = ScopeQuery::from_reference(&graph, second);
     let resolution = cache.resolve(&graph, second, &Anywhere, config);
     assert!(!resolution.is_resolved());
-    assert_eq!(resolution.stats().explored_path_count, 0);
+    assert_eq!(resolution.stats().expanded_path_count, 0);
     assert_eq!(cache.environment_count(), 4);
 
     // An ephemeral query from a scope on the way is a lookup too, and it
     // sees what the general resolver sees.
-    let ephemeral = cache.resolve_from(&graph, scopes[2], &0, &Anywhere, config);
-    assert_eq!(ephemeral.stats().explored_path_count, 0);
-    let general =
-        ScopeResolution::compute_from(&graph, scopes[2], &0, &PathAware(&Anywhere), config);
+    let ephemeral = cache.resolve(&graph, ScopeQuery::new(scopes[2], &0), &Anywhere, config);
+    assert_eq!(ephemeral.stats().expanded_path_count, 0);
+    let general = ScopeResolution::compute(
+        &graph,
+        ScopeQuery::new(scopes[2], &0),
+        &PathAware(&Anywhere),
+        config,
+    );
     assert_eq!(candidates(&ephemeral), candidates(&general));
 }
 
 #[test]
 fn an_environment_a_count_bound_cut_short_is_not_cached() {
-    let (mut graph, scopes) = chain(3);
+    let (mut graph, scopes) = declaring_chain(3);
     let reference = graph.add_reference(scopes[2], 0);
+    let reference = ScopeQuery::from_reference(&graph, reference);
     let mut cache = ScopeEnvironmentCache::new(&graph);
 
     let cut = cache.resolve(
         &graph,
         reference,
         &Anywhere,
-        ScopeResolutionConfig::new().with_max_path_count(1),
+        PathSearchConfig {
+            max_path_count: Some(1),
+            ..PathSearchConfig::default()
+        },
     );
     assert!(!cut.is_resolved());
     assert!(cut.stats().path_count_limited);
     assert_eq!(cache.environment_count(), 0);
 
-    let full = cache.resolve(&graph, reference, &Anywhere, ScopeResolutionConfig::new());
+    let full = cache.resolve(&graph, reference, &Anywhere, PathSearchConfig::default());
     assert!(full.is_resolved());
     assert!(!full.stats().is_truncated());
 }
@@ -456,8 +413,9 @@ fn scopes_on_a_cycle_are_not_cached() {
     graph.add_edge(outside, first, Label::Parent);
     let datum = graph.add_datum(second, (), 0);
     let reference = graph.add_reference(outside, 0);
+    let reference = ScopeQuery::from_reference(&graph, reference);
     let mut cache = ScopeEnvironmentCache::new(&graph);
-    let resolution = cache.resolve(&graph, reference, &Anywhere, ScopeResolutionConfig::new());
+    let resolution = cache.resolve(&graph, reference, &Anywhere, PathSearchConfig::default());
     assert_eq!(resolution.candidates()[0].datum(), datum);
     assert_eq!(cache.environment_count(), 1);
 }

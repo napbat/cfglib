@@ -29,8 +29,8 @@
 //! the same resolver handles stored references and ephemeral completion
 //! requests and builds forward/reverse binding indexes.
 //! [`graph::scope::ScopeEnvironmentQuery`] is the path-free form whose
-//! per-scope environments [`ScopeResolutionIndex::compute_cached`] computes
-//! once and shares across references.
+//! per-scope environments a [`ScopeEnvironmentCache`] computes once and
+//! shares across references.
 //! [`graph::stack::StackGraph`] provides the complementary file-incremental
 //! model with the standard root, scope, symbol push/pop, scoped-symbol,
 //! drop-scopes, and jump-to-scope nodes. It supports concrete direct paths,
@@ -360,24 +360,22 @@ pub use graph::scc::{
     condensation_of, kosaraju_scc, strong_cuts, strong_cuts_of, tarjan_scc,
 };
 pub use graph::scope::{
-    Scope, ScopeCursor, ScopeCursorQuery, ScopeDatum, ScopeDatumId, ScopeEdgeId, ScopeEdgeTag,
-    ScopeEnvironmentCache, ScopeEnvironmentQuery, ScopeFirstResolution, ScopeFirstResolutionError,
-    ScopeGraph, ScopeGraphChanges, ScopeGraphPathLabel, ScopeGraphQuery, ScopeId, ScopeIndexUpdate,
-    ScopeLinearResolutionError, ScopePath, ScopeQuery, ScopeReference, ScopeReferenceId,
-    ScopeResolution, ScopeResolutionCandidate, ScopeResolutionConfig, ScopeResolutionIndex,
-    ScopeResolutionStats, ScopeTag,
+    Scope, ScopeCursor, ScopeCursorPolicy, ScopeCursorQuery, ScopeDatum, ScopeDatumId, ScopeEdgeId,
+    ScopeEdgeTag, ScopeEnvironmentCache, ScopeEnvironmentQuery, ScopeFirstResolution,
+    ScopeFirstResolutionError, ScopeGraph, ScopeGraphChanges, ScopeGraphPathLabel, ScopeGraphQuery,
+    ScopeId, ScopeIndexUpdate, ScopePath, ScopeQuery, ScopeReference, ScopeReferenceId,
+    ScopeResolution, ScopeResolutionCandidate, ScopeResolutionIndex, ScopeTag,
 };
 pub use graph::search::{
-    DfsEvent, SearchConfig, SearchOrder, SearchScratch, Visit, VisitedPolicy, depth_first_events,
-    search, search_in,
+    DfsEvent, PathSearchConfig, PathSearchStats, SearchConfig, SearchOrder, SearchScratch, Visit,
+    VisitedPolicy, depth_first_events, search, search_in,
 };
 pub use graph::stack::{
-    StackEdge, StackEdgeId, StackEdgeTag, StackFileId, StackFileTag, StackGraph, StackGraphError,
+    StackEdge, StackEdgeId, StackEdgeTag, StackFileId, StackGraph, StackGraphError,
     StackLinearResolutionError, StackNode, StackNodeId, StackNodeKind, StackNodeTag,
-    StackPartialPath, StackPartialPathConfig, StackPartialPathDatabase, StackPartialPathId,
-    StackPartialPathSet, StackPartialPathStats, StackPath, StackPathError, StackPathStep,
-    StackResolution, StackResolutionIndex, StackReverseIndex, StackScopedSymbol, StackSearchConfig,
-    StackSearchStats,
+    StackPartialPath, StackPartialPathDatabase, StackPartialPathId, StackPartialPathSet,
+    StackPartialPathStats, StackPath, StackPathError, StackPathStep, StackResolution,
+    StackResolutionIndex, StackScopedSymbol, StackSearchStats,
 };
 pub use graph::store::{
     AdjacentEdges, EdgeRecord, Graph, Id, IdTag, NodeId, NodeOrder, NodeTag, Renumbering,
