@@ -7,7 +7,7 @@
 
 use cfglib::{
     DenseBits, Direction, EdgeId, GenKill, GenKillAlgebra, Graph, NodeId, NodeProblem,
-    PathExpressions, Rooted, interpret, path_expressions, solve_node_problem,
+    PathExpressions, Rooted, Solve, interpret, path_expressions, solve_node_problem,
 };
 
 use super::BenchmarkSuite;
@@ -56,7 +56,8 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         covers[interpret],
         || interpret(&expressions, &algebra),
         |values: &Vec<Option<Option<GenKill>>>| {
-            let fixpoint = solve_node_problem(&graph, &transfers).expect("an unbounded solve");
+            let fixpoint = solve_node_problem(&graph, &transfers, Solve::default())
+                .expect("an unbounded solve");
             let empty = DenseBits::new(UNIVERSE);
             for node in graph.node_ids() {
                 let paths = values[node.index()]

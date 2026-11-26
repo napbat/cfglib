@@ -1,15 +1,12 @@
 use std::borrow::Cow;
 
-use cfglib::{
-    Cfg, DisplayInstr, EdgeKind, EffectInfo, FlowControl, FlowEffect, InstrInfo, JumpTargets,
-};
+use cfglib::{Cfg, DisplayInstr, EdgeKind, FlowControl, FlowEffect, InstrInfo, JumpTargets};
 
 #[derive(Clone, Debug)]
 pub(super) struct ApiInst {
     pub(super) flow: FlowEffect,
     pub(super) uses: Vec<u32>,
     pub(super) defs: Vec<u32>,
-    pub(super) effects: Vec<u8>,
     pub(super) jump_target: Option<u32>,
     pub(super) label: Option<u32>,
 }
@@ -20,7 +17,6 @@ impl ApiInst {
             flow: FlowEffect::Fallthrough,
             uses,
             defs: vec![definition],
-            effects: Vec::new(),
             jump_target: None,
             label: None,
         }
@@ -48,14 +44,6 @@ impl InstrInfo for ApiInst {
 
     fn may_unwind(&self) -> bool {
         self.flow == FlowEffect::MayThrow
-    }
-}
-
-impl EffectInfo for ApiInst {
-    type Effect = u8;
-
-    fn effects(&self) -> &[Self::Effect] {
-        &self.effects
     }
 }
 
@@ -90,14 +78,11 @@ pub(super) fn dataflow_cfg(block_count: usize, instructions_per_block: usize) ->
     let mut variable = 0_u32;
     for block_index in 0..block_count {
         for instruction_index in 0..instructions_per_block {
-            let mut instruction = if instruction_index == 0 {
+            let instruction = if instruction_index == 0 {
                 ApiInst::pure(variable, Vec::new())
             } else {
                 ApiInst::pure(variable, vec![variable.saturating_sub(1)])
             };
-            if instruction_index + 1 == instructions_per_block && block_index % 8 == 0 {
-                instruction.effects.push(1);
-            }
             cfg.block_mut(block).push(instruction);
             variable = variable.wrapping_add(1);
         }

@@ -6,16 +6,14 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::convert::Infallible;
 
-use super::{ResumeMode, resume_node_problem, resume_problem};
+use super::{Resume, ResumeMode, resume_node_problem};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::dataflow::fixpoint::{Facts, SolveConfig, TryProblem, try_solve_problem};
-use crate::dataflow::node_fixpoint::{
-    TryNodeProblem, try_solve_node_problem, try_solve_node_problem_from,
-};
+use crate::dataflow::node_fixpoint::{TryNodeProblem, solve_node_problem};
+use crate::dataflow::solve::{Facts, Seeds, Solve};
 use crate::edge::EdgeKind;
 use crate::graph::store::{Graph, NodeId};
-use crate::graph::view::Direction;
+use crate::graph::view::{Direction, RootedView};
 
 /// Taint as a bit row: each source sets its own bit, and a node's fact is
 /// what flows in with its own bit added when it is a source.
@@ -84,21 +82,32 @@ fn a_resume_keeps_what_flows_in_from_nodes_it_does_not_visit() {
     let after = Taint {
         sources: vec![(a, 1), (b, 2)],
     };
-    let previous = try_solve_node_problem(&graph, &before).unwrap();
+    let previous = solve_node_problem(&graph, &before, Solve::default()).unwrap();
 
     // The seeded solve starts b and c at bottom and never visits a, so a's
     // taint is lost downstream of the edit.
-    let seeded = try_solve_node_problem_from(&graph, &after, &[b]).unwrap();
+    let seeds = Solve {
+        seeds: Seeds::Of(&[b]),
+        ..Solve::default()
+    };
+    let seeded = solve_node_problem(&graph, &after, seeds).unwrap();
     assert_eq!((*seeded.fact_out(b), *seeded.fact_out(c)), (2, 2));
 
-    let fresh = try_solve_node_problem(&graph, &after).unwrap();
+    let fresh = solve_node_problem(&graph, &after, Solve::default()).unwrap();
     for mode in [ResumeMode::Reset, ResumeMode::Grow] {
-        let config = SolveConfig::new();
-        let resumed = resume_node_problem(&graph, &after, previous.clone(), &[b], mode, config);
+        let edit = Resume {
+            changed: &[b],
+            mode,
+        };
+        let resumed = resume_node_problem(&graph, &after, previous.clone(), edit, Solve::default());
         let resumed = resumed.unwrap();
         assert_eq!((*resumed.fact_out(b), *resumed.fact_out(c)), (3, 3));
         assert_same(&resumed, &fresh, &nodes);
-        assert_eq!(resumed.steps(), 2, "{mode:?} re-solves b and c only");
+        assert_eq!(
+            resumed.stats().step_count(),
+            2,
+            "{mode:?} re-solves b and c only"
+        );
     }
 }
 
@@ -116,19 +125,15 @@ fn a_reset_costs_the_region_the_edit_reaches_not_the_graph() {
     let after = Taint {
         sources: vec![(nodes[0], 1), (first, 2)],
     };
-    let previous = try_solve_node_problem(&graph, &before).unwrap();
-    let config = SolveConfig::new();
-    let resumed = resume_node_problem(
-        &graph,
-        &after,
-        previous,
-        &[first],
-        ResumeMode::Reset,
-        config,
-    )
-    .unwrap();
-    assert!(resumed.steps() <= 4 * 100, "{} steps", resumed.steps());
-    let fresh = try_solve_node_problem(&graph, &after).unwrap();
+    let previous = solve_node_problem(&graph, &before, Solve::default()).unwrap();
+    let edit = Resume {
+        changed: &[first],
+        mode: ResumeMode::Reset,
+    };
+    let resumed = resume_node_problem(&graph, &after, previous, edit, Solve::default()).unwrap();
+    let steps = resumed.stats().step_count();
+    assert!(steps <= 4 * 100, "{steps} steps");
+    let fresh = solve_node_problem(&graph, &after, Solve::default()).unwrap();
     assert_same(&resumed, &fresh, &nodes);
 }
 
@@ -138,7 +143,7 @@ fn slots_follow_the_edited_bound_and_a_removed_node_gets_bottom() {
     let problem = Taint {
         sources: vec![(nodes[0], 1), (nodes[2], 4)],
     };
-    let previous = try_solve_node_problem(&graph, &problem).unwrap();
+    let previous = solve_node_problem(&graph, &problem, Solve::default()).unwrap();
     assert_eq!(*previous.fact_out(nodes[2]), 5);
 
     // Remove the last node and add two: the removed slot keeps bottom, the
@@ -148,17 +153,12 @@ fn slots_follow_the_edited_bound_and_a_removed_node_gets_bottom() {
     graph.add_edge(nodes[1], added[0], ());
     graph.add_edge(added[0], added[1], ());
     let changed = [nodes[2], added[0]];
-    let config = SolveConfig::new();
-    let resumed = resume_node_problem(
-        &graph,
-        &problem,
-        previous,
-        &changed,
-        ResumeMode::Reset,
-        config,
-    )
-    .unwrap();
-    let fresh = try_solve_node_problem(&graph, &problem).unwrap();
+    let edit = Resume {
+        changed: &changed,
+        mode: ResumeMode::Reset,
+    };
+    let resumed = resume_node_problem(&graph, &problem, previous, edit, Solve::default()).unwrap();
+    let fresh = solve_node_problem(&graph, &problem, Solve::default()).unwrap();
     assert_eq!(*resumed.fact_out(nodes[2]), 0);
     assert_same(
         &resumed,
@@ -172,23 +172,19 @@ fn slots_follow_the_edited_bound_and_a_removed_node_gets_bottom() {
 fn a_changed_node_beyond_the_bound_panics() {
     let (graph, _) = chain(2);
     let problem = Taint { sources: vec![] };
-    let previous = try_solve_node_problem(&graph, &problem).unwrap();
+    let previous = solve_node_problem(&graph, &problem, Solve::default()).unwrap();
     let beyond = [NodeId::from_index(5)];
-    let config = SolveConfig::new();
-    let _ = resume_node_problem(
-        &graph,
-        &problem,
-        previous,
-        &beyond,
-        ResumeMode::Reset,
-        config,
-    );
+    let edit = Resume {
+        changed: &beyond,
+        mode: ResumeMode::Reset,
+    };
+    let _ = resume_node_problem(&graph, &problem, previous, edit, Solve::default());
 }
 
 /// Forward reachability from the entry over blocks.
 struct Reached;
 
-impl TryProblem<Cfg<()>> for Reached {
+impl TryNodeProblem<Cfg<()>> for Reached {
     type Fact = bool;
     type Error = Infallible;
 
@@ -214,25 +210,64 @@ impl TryProblem<Cfg<()>> for Reached {
 }
 
 #[test]
-fn a_forward_block_resume_leaves_blocks_the_root_no_longer_reaches_at_bottom() {
+fn a_reachable_resume_leaves_blocks_the_root_no_longer_reaches_at_bottom() {
     // entry -> a -> b; removing entry -> a cuts a and b off, and a, which
     // has no predecessor left, is not a boundary the way a seeded block is.
     let mut cfg = Cfg::<()>::new();
     let [a, b] = [cfg.new_block(), cfg.new_block()];
     let cut = cfg.add_edge(cfg.entry(), a, EdgeKind::Fallthrough);
     cfg.add_edge(a, b, EdgeKind::Fallthrough);
-    let previous = try_solve_problem(&cfg, &Reached).unwrap();
+    let rooted = Solve {
+        seeds: Seeds::Reachable(cfg.root()),
+        ..Solve::default()
+    };
+    let previous = solve_node_problem(&cfg, &Reached, rooted).unwrap();
     assert!(*previous.fact_out(b));
 
     assert!(cfg.remove_edge(cut));
-    let config = SolveConfig::new();
-    let resumed = resume_problem(&cfg, &Reached, previous, &[a], ResumeMode::Reset, config);
-    let resumed = resumed.unwrap();
-    let fresh = try_solve_problem(&cfg, &Reached).unwrap();
+    let edit = Resume {
+        changed: &[a],
+        mode: ResumeMode::Reset,
+    };
+    let resumed = resume_node_problem(&cfg, &Reached, previous, edit, rooted).unwrap();
+    let fresh = solve_node_problem(&cfg, &Reached, rooted).unwrap();
     for block in [cfg.entry(), a, b] {
         assert_eq!(resumed.fact_in(block), fresh.fact_in(block));
         assert_eq!(resumed.fact_out(block), fresh.fact_out(block));
     }
     assert!(!*resumed.fact_out(a) && !*resumed.fact_out(b));
-    assert_eq!(resumed.steps(), 0);
+    assert_eq!(resumed.stats().step_count(), 0);
+}
+
+#[test]
+fn a_resume_from_named_seeds_re_solves_only_within_their_reach() {
+    // a -> b -> c and x -> c. Resuming within what `b` reaches re-solves b
+    // and c after the edit at a; a is reset and, outside b's reach, stays at
+    // bottom as in a fresh solve from b, while x keeps its previous fact.
+    let (mut graph, nodes) = chain(3);
+    let [a, b, c] = [nodes[0], nodes[1], nodes[2]];
+    let x = graph.add_node(());
+    graph.add_edge(x, c, ());
+    let problem = Taint {
+        sources: vec![(a, 1), (x, 8)],
+    };
+    let previous = solve_node_problem(&graph, &problem, Solve::default()).unwrap();
+    let within_b = Solve {
+        seeds: Seeds::Of(&[b]),
+        ..Solve::default()
+    };
+    let edit = Resume {
+        changed: &[a, b],
+        mode: ResumeMode::Reset,
+    };
+    let resumed = resume_node_problem(&graph, &problem, previous, edit, within_b).unwrap();
+    assert_eq!(
+        *resumed.fact_out(a),
+        0,
+        "reset, outside b's reach, not re-solved"
+    );
+    assert_eq!(*resumed.fact_out(b), 0, "b reads a's reset fact");
+    assert_eq!(*resumed.fact_out(c), 8, "c still meets x's kept fact");
+    assert_eq!(*resumed.fact_out(x), 8);
+    assert_eq!(resumed.stats().step_count(), 2);
 }

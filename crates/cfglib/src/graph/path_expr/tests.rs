@@ -9,6 +9,7 @@ use super::{
 };
 use crate::dataflow::bits::DenseBits;
 use crate::dataflow::node_fixpoint::{NodeProblem, solve_node_problem};
+use crate::dataflow::solve::Solve;
 use crate::graph::dominator::DominatorTree;
 use crate::graph::store::{EdgeId, Graph, NodeId};
 use crate::graph::structure::is_reducible;
@@ -287,7 +288,8 @@ fn gen_kill_interpretation_equals_the_node_fixpoint() {
                 })
                 .collect(),
         );
-        let fixpoint = solve_node_problem(&graph, &transfers).expect("an unbounded solve");
+        let fixpoint =
+            solve_node_problem(&graph, &transfers, Solve::default()).expect("an unbounded solve");
 
         // An edge carries the transfer of the node it enters; the root's own
         // transfer comes first.

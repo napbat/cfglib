@@ -1,7 +1,15 @@
 extern crate alloc;
 
 use super::*;
+use crate::dataflow::solve::{Seeds, Solve, SolveError};
 use crate::graph::store::{Graph, NodeId};
+
+fn seeded(seeds: &[NodeId]) -> Solve<'_, NodeId> {
+    Solve {
+        seeds: Seeds::Of(seeds),
+        ..Solve::default()
+    }
+}
 
 /// Taint: a node is tainted when it is a source or any upstream node's
 /// output is tainted — over a value-flow-shaped graph.
@@ -69,7 +77,8 @@ fn flow_fixture() -> (Graph<&'static str, ()>, [NodeId; 5]) {
 fn taint_propagates_through_cycles() {
     let (graph, [source, a, b, clean, _]) = flow_fixture();
 
-    let facts = solve_node_problem(&graph, &Taint::forward(alloc::vec![source])).unwrap();
+    let problem = Taint::forward(alloc::vec![source]);
+    let facts = solve_node_problem(&graph, &problem, Solve::default()).unwrap();
     assert!(*facts.fact_out(source));
     assert!(*facts.fact_out(a), "reached through the source");
     assert!(*facts.fact_out(b), "reached through the cycle");
@@ -90,29 +99,28 @@ fn seeding_every_node_is_the_full_solve() {
         Taint::backward(alloc::vec![b]),
         Taint::backward(alloc::vec![]),
     ] {
-        let full = solve_node_problem(&graph, &problem).unwrap();
+        let full = solve_node_problem(&graph, &problem, Solve::default()).unwrap();
         // Seed order only reorders the worklist, never the fixpoint.
         for seeds in [&all, &reversed] {
-            let seeded = solve_node_problem_from(&graph, &problem, seeds).unwrap();
+            let from_all = solve_node_problem(&graph, &problem, seeded(seeds)).unwrap();
             for node in graph.node_ids() {
-                assert_eq!(seeded.fact_in(node), full.fact_in(node));
-                assert_eq!(seeded.fact_out(node), full.fact_out(node));
+                assert_eq!(from_all.fact_in(node), full.fact_in(node));
+                assert_eq!(from_all.fact_out(node), full.fact_out(node));
             }
         }
         // Duplicated seeds are queued once and change nothing.
         let doubled: alloc::vec::Vec<NodeId> = all.iter().chain(all.iter()).copied().collect();
-        let seeded = solve_node_problem_from(&graph, &problem, &doubled).unwrap();
-        for node in graph.node_ids() {
-            assert_eq!(seeded.fact_out(node), full.fact_out(node));
-        }
+        let from_doubled = solve_node_problem(&graph, &problem, seeded(&doubled)).unwrap();
+        assert_eq!(from_doubled, full);
     }
 }
 
 #[test]
 fn no_seeds_leaves_every_fact_at_bottom() {
     let (graph, [source, ..]) = flow_fixture();
-    let facts = solve_node_problem_from(&graph, &Taint::forward(alloc::vec![source]), &[]).unwrap();
-    assert_eq!(facts.steps(), 0);
+    let problem = Taint::forward(alloc::vec![source]);
+    let facts = solve_node_problem(&graph, &problem, seeded(&[])).unwrap();
+    assert_eq!(facts.stats().step_count(), 0);
     for node in graph.node_ids() {
         assert!(!*facts.fact_in(node));
         assert!(!*facts.fact_out(node), "not even the source is visited");
@@ -120,7 +128,7 @@ fn no_seeds_leaves_every_fact_at_bottom() {
 
     // An empty graph has nothing to seed and nothing to solve.
     let empty: Graph<&'static str, ()> = Graph::new();
-    let facts = solve_node_problem_from(&empty, &Taint::forward(alloc::vec![]), &[]).unwrap();
+    let facts = solve_node_problem(&empty, &Taint::forward(alloc::vec![]), seeded(&[])).unwrap();
     assert_eq!(empty.node_count(), 0);
     assert!(empty.node_ids().all(|node| *facts.fact_out(node)));
 }
@@ -130,12 +138,8 @@ fn a_seeded_solve_propagates_only_where_transfers_carry_it() {
     let (graph, [source, a, b, clean, island]) = flow_fixture();
     // `clean` is a source too, but seeding only `source` never visits it,
     // so its own taint is never generated.
-    let facts = solve_node_problem_from(
-        &graph,
-        &Taint::forward(alloc::vec![source, clean]),
-        &[source],
-    )
-    .unwrap();
+    let problem = Taint::forward(alloc::vec![source, clean]);
+    let facts = solve_node_problem(&graph, &problem, seeded(&[source])).unwrap();
     assert!(*facts.fact_out(source));
     assert!(*facts.fact_out(a), "carried along the seed's out-edges");
     assert!(*facts.fact_out(b), "and around the cycle");
@@ -143,7 +147,8 @@ fn a_seeded_solve_propagates_only_where_transfers_carry_it() {
     assert!(!*facts.fact_out(island), "unreachable from the seed");
 
     // Seeding the middle of the graph propagates forward from there only.
-    let facts = solve_node_problem_from(&graph, &Taint::forward(alloc::vec![b]), &[b]).unwrap();
+    let problem = Taint::forward(alloc::vec![b]);
+    let facts = solve_node_problem(&graph, &problem, seeded(&[b])).unwrap();
     assert!(*facts.fact_out(b));
     assert!(*facts.fact_out(a), "b's successor");
     assert!(!*facts.fact_out(source), "upstream of the seed");
@@ -153,32 +158,55 @@ fn a_seeded_solve_propagates_only_where_transfers_carry_it() {
 fn a_backward_seeded_solve_walks_the_out_edges() {
     let (graph, [source, a, b, _, _]) = flow_fixture();
     // Backward, facts travel from `b` to its predecessors' inputs.
-    let facts = solve_node_problem_from(&graph, &Taint::backward(alloc::vec![b]), &[b]).unwrap();
+    let problem = Taint::backward(alloc::vec![b]);
+    let facts = solve_node_problem(&graph, &problem, seeded(&[b])).unwrap();
     assert!(*facts.fact_out(b));
     assert!(*facts.fact_out(a), "a's successor b is tainted");
     assert!(*facts.fact_out(source), "and so on upstream");
 }
 
 #[test]
+fn a_reachable_solve_covers_what_the_root_reaches_from_the_root() {
+    let (graph, [source, a, b, clean, island]) = flow_fixture();
+    // `clean` taints too, but the root `source` never reaches it.
+    let problem = Taint::forward(alloc::vec![source, clean]);
+    let rooted = Solve {
+        seeds: Seeds::Reachable(source),
+        ..Solve::default()
+    };
+    let facts = solve_node_problem(&graph, &problem, rooted).unwrap();
+    assert!(*facts.fact_out(a) && *facts.fact_out(b));
+    assert!(!*facts.fact_out(clean), "never queued");
+    assert!(!*facts.fact_out(island));
+}
+
+#[test]
 #[should_panic(expected = "seed node is out of range")]
 fn an_out_of_range_seed_panics() {
     let (graph, _) = flow_fixture();
-    let beyond = NodeId::from_index(graph.node_bound());
-    let _ = solve_node_problem_from(&graph, &Taint::forward(alloc::vec![]), &[beyond]);
+    let beyond = [NodeId::from_index(graph.node_bound())];
+    let _ = solve_node_problem(&graph, &Taint::forward(alloc::vec![]), seeded(&beyond));
 }
 
 #[test]
 fn step_limit_reports_the_pending_node() {
     let (graph, [source, ..]) = flow_fixture();
-    let error = solve_node_problem_with_config(
-        &graph,
-        &Taint::forward(alloc::vec![source]),
-        SolveConfig::with_step_limit(1),
-    )
-    .unwrap_err();
-    let SolveError::StepLimitExceeded { limit, steps, .. } = error;
-    assert_eq!(limit, 1);
-    assert_eq!(steps, 1);
+    let bounded = Solve {
+        config: SolveConfig {
+            max_steps: Some(1),
+            ..SolveConfig::default()
+        },
+        ..Solve::default()
+    };
+    let error =
+        solve_node_problem(&graph, &Taint::forward(alloc::vec![source]), bounded).unwrap_err();
+    let SolveError::StepLimitExceeded {
+        limit,
+        steps,
+        pending_node,
+    } = SolveError::from(error);
+    assert_eq!((limit, steps), (1, 1));
+    assert_eq!(pending_node, 1, "the source ran; `a` is next");
 }
 
 /// A taint clone that rejects a designated forbidden node.
@@ -229,14 +257,11 @@ impl<E> TryNodeProblem<Graph<&'static str, E>> for Guarded {
 #[test]
 fn a_consumer_error_is_reported_as_a_problem_error() {
     let (graph, [source, a, ..]) = flow_fixture();
-    let error = try_solve_node_problem(
-        &graph,
-        &Guarded {
-            sources: alloc::vec![source],
-            forbidden: a,
-        },
-    )
-    .unwrap_err();
+    let problem = Guarded {
+        sources: alloc::vec![source],
+        forbidden: a,
+    };
+    let error = solve_node_problem(&graph, &problem, Solve::default()).unwrap_err();
     assert_eq!(error, TrySolveError::Problem("forbidden node visited"));
 }
 
@@ -245,15 +270,11 @@ fn a_fallible_seeded_solve_avoids_unreached_nodes() {
     let (graph, [source, a, b, clean, island]) = flow_fixture();
     // The forbidden node is never reached from the seed, so the solve
     // completes.
-    let facts = try_solve_node_problem_from(
-        &graph,
-        &Guarded {
-            sources: alloc::vec![source],
-            forbidden: island,
-        },
-        &[source],
-    )
-    .unwrap();
+    let problem = Guarded {
+        sources: alloc::vec![source],
+        forbidden: island,
+    };
+    let facts = solve_node_problem(&graph, &problem, seeded(&[source])).unwrap();
     assert!(*facts.fact_out(a));
     assert!(*facts.fact_out(b));
     assert!(!*facts.fact_out(clean));
@@ -264,8 +285,9 @@ fn a_removed_node_is_never_visited() {
     let (mut graph, [_, _, _, _, island]) = flow_fixture();
     assert!(graph.remove_node(island));
 
-    let facts = solve_node_problem(&graph, &Taint::forward(alloc::vec![island])).unwrap();
-    assert_eq!(facts.steps(), graph.node_count());
+    let problem = Taint::forward(alloc::vec![island]);
+    let facts = solve_node_problem(&graph, &problem, Solve::default()).unwrap();
+    assert_eq!(facts.stats().step_count(), graph.node_count());
     assert!(
         !*facts.fact_out(island),
         "a removed node's slot stays at bottom"
@@ -277,87 +299,27 @@ fn a_removed_node_is_never_visited() {
 fn a_removed_seed_panics() {
     let (mut graph, [_, _, _, _, island]) = flow_fixture();
     assert!(graph.remove_node(island));
-    let _ = solve_node_problem_from(&graph, &Taint::forward(alloc::vec![]), &[island]);
-}
-
-fn assert_same_facts(
-    graph: &Graph<&'static str, ()>,
-    expected: &Facts<bool>,
-    actual: &Facts<bool>,
-) {
-    assert_eq!(actual.steps(), expected.steps());
-    for node in graph.node_ids() {
-        assert_eq!(actual.fact_in(node), expected.fact_in(node));
-        assert_eq!(actual.fact_out(node), expected.fact_out(node));
-    }
-}
-
-fn solver_error<F>(result: Result<F, TrySolveError<Infallible>>) -> SolveError {
-    match result.err() {
-        Some(TrySolveError::Solver(error)) => error,
-        Some(TrySolveError::Problem(never)) => match never {},
-        None => panic!("the solve stayed within its step limit"),
-    }
+    let _ = solve_node_problem(&graph, &Taint::forward(alloc::vec![]), seeded(&[island]));
 }
 
 #[test]
-fn every_entry_point_of_the_matrix_reaches_the_same_fixpoint() {
-    let (graph, [source, ..]) = flow_fixture();
+fn an_infallible_problem_solves_through_the_fallible_trait() {
+    // The blanket implementation answers exactly what the problem does.
+    let (graph, [source, a, ..]) = flow_fixture();
     let problem = Taint::forward(alloc::vec![source]);
-    let infallible = InfallibleNodeProblem(&problem);
-    let all: alloc::vec::Vec<NodeId> = graph.node_ids().collect();
-    let config = SolveConfig::new();
-    let full = solve_node_problem(&graph, &problem).unwrap();
-
-    let variants = [
-        solve_node_problem_with_config(&graph, &problem, config).unwrap(),
-        solve_node_problem_from(&graph, &problem, &all).unwrap(),
-        solve_node_problem_from_with_config(&graph, &problem, &all, config).unwrap(),
-        try_solve_node_problem(&graph, &infallible).unwrap(),
-        try_solve_node_problem_with_config(&graph, &infallible, config).unwrap(),
-        try_solve_node_problem_from(&graph, &infallible, &all).unwrap(),
-        try_solve_node_problem_from_with_config(&graph, &infallible, &all, config).unwrap(),
-    ];
-    for variant in &variants {
-        assert_same_facts(&graph, &full, variant);
-    }
-}
-
-#[test]
-fn every_entry_point_of_the_matrix_enforces_the_step_limit() {
-    let (graph, [source, ..]) = flow_fixture();
-    let problem = Taint::forward(alloc::vec![source]);
-    let infallible = InfallibleNodeProblem(&problem);
-    let all: alloc::vec::Vec<NodeId> = graph.node_ids().collect();
-    let steps = solve_node_problem(&graph, &problem).unwrap().steps();
-    let exact = SolveConfig::with_step_limit(steps);
-    let short = SolveConfig::with_step_limit(steps - 1);
-
-    assert!(solve_node_problem_with_config(&graph, &problem, exact).is_ok());
-    assert!(solve_node_problem_from_with_config(&graph, &problem, &all, exact).is_ok());
-    assert!(try_solve_node_problem_with_config(&graph, &infallible, exact).is_ok());
-    assert!(try_solve_node_problem_from_with_config(&graph, &infallible, &all, exact).is_ok());
-
-    let errors = [
-        solve_node_problem_with_config(&graph, &problem, short).unwrap_err(),
-        solve_node_problem_from_with_config(&graph, &problem, &all, short).unwrap_err(),
-        solver_error(try_solve_node_problem_with_config(
-            &graph,
-            &infallible,
-            short,
-        )),
-        solver_error(try_solve_node_problem_from_with_config(
-            &graph,
-            &infallible,
-            &all,
-            short,
-        )),
-    ];
-    let SolveError::StepLimitExceeded {
-        limit, steps: done, ..
-    } = errors[0];
-    assert_eq!((limit, done), (steps - 1, steps - 1));
-    for error in errors {
-        assert_eq!(error, errors[0], "every path reports the same pending node");
-    }
+    let direction = <Taint as TryNodeProblem<Graph<&'static str, ()>>>::direction(&problem);
+    assert_eq!(direction, Direction::Forward);
+    assert_eq!(TryNodeProblem::boundary(&problem, &graph), Ok(false));
+    assert_eq!(
+        TryNodeProblem::meet(&problem, &graph, a, &true, &false),
+        Ok(true)
+    );
+    assert_eq!(
+        TryNodeProblem::transfer(&problem, &graph, source, &false),
+        Ok(true)
+    );
+    assert_eq!(
+        TryNodeProblem::widen(&problem, &graph, a, &false, &true),
+        Ok(true)
+    );
 }

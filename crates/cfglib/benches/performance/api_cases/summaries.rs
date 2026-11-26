@@ -1,4 +1,4 @@
-//! `propagate_summaries` and its widened form over one large recursive
+//! `propagate_summaries` with and without widening over one large recursive
 //! cluster, where the order inside the component decides how often a
 //! summary is recomputed.
 //!
@@ -8,11 +8,10 @@
 //! returns its `compute` count beside its summaries, and the oracle prints
 //! it, so a change of schedule shows in work as well as in time.
 
+use std::cell::Cell;
 use std::collections::BTreeSet;
 
-use cfglib::{
-    Graph, NodeId, propagate_summaries, propagate_summaries_narrowed, propagate_summaries_widened,
-};
+use cfglib::{Graph, NodeId, SummaryConfig, SummaryProblem, propagate_summaries};
 
 use super::BenchmarkSuite;
 use crate::harness::benchmark_case;
@@ -28,12 +27,9 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         suite,
         "cluster_propagate_summaries",
         || {
-            let mut calls = 0_usize;
-            let masks = propagate_summaries(&cluster, &0_u64, |graph, node, masks| {
-                calls += 1;
-                reached_mask(graph, node, masks)
-            });
-            (masks, calls)
+            let problem = Masks::default();
+            let masks = propagate_summaries(&cluster, &problem, SummaryConfig::default());
+            (masks, problem.computes.get())
         },
         |(masks, calls): &(Vec<u64>, usize)| {
             assert_eq!(*masks, expected);
@@ -47,12 +43,9 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         suite,
         "cluster_propagate_summaries_sets",
         || {
-            let mut calls = 0_usize;
-            let sets = propagate_summaries(&cluster, &BTreeSet::new(), |graph, node, sets| {
-                calls += 1;
-                reached_set(graph, node, sets)
-            });
-            (sets, calls)
+            let problem = Sets::default();
+            let sets = propagate_summaries(&cluster, &problem, SummaryConfig::default());
+            (sets, problem.computes.get())
         },
         |(sets, calls): &(Vec<BTreeSet<u16>>, usize)| {
             assert_eq!(*sets, expected_sets);
@@ -63,27 +56,13 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         suite,
         "cluster_propagate_summaries_widened",
         || {
-            let (mut calls, mut widens) = (0_usize, 0_usize);
-            let depths = propagate_summaries_widened(
-                &cluster,
-                &None,
-                |graph, node, depths: &[Option<u32>]| {
-                    calls += 1;
-                    let deepest = graph
-                        .successors(node)
-                        .filter_map(|callee| depths[callee.index()])
-                        .max();
-                    Some(deepest.unwrap_or(0).saturating_add(1))
-                },
-                |_, previous, computed| {
-                    widens += 1;
-                    match (*previous, *computed) {
-                        (Some(previous), Some(computed)) if computed > previous => Some(u32::MAX),
-                        (previous, computed) => previous.max(computed),
-                    }
-                },
-            );
-            (depths, calls, widens)
+            let problem = Depths::default();
+            let widened = SummaryConfig {
+                widening: true,
+                narrowing: false,
+            };
+            let depths = propagate_summaries(&cluster, &problem, widened);
+            (depths, problem.computes.get(), problem.widens.get())
         },
         |(depths, calls, widens): &(Vec<Option<u32>>, usize, usize)| {
             assert!(depths.iter().all(|depth| *depth == Some(u32::MAX)));
@@ -93,6 +72,89 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     register_narrowed(suite, &cluster);
 }
 
+/// The reach masks of [`reached_mask`], counting the computes.
+#[derive(Default)]
+struct Masks {
+    computes: Cell<usize>,
+}
+
+impl SummaryProblem<Graph<(), ()>> for Masks {
+    type Summary = u64;
+
+    fn bottom(&self, _graph: &Graph<(), ()>) -> u64 {
+        0
+    }
+
+    fn compute(&self, graph: &Graph<(), ()>, node: NodeId, masks: &[u64]) -> u64 {
+        self.computes.set(self.computes.get() + 1);
+        reached_mask(graph, node, masks)
+    }
+}
+
+/// The reach sets of [`reached_set`], counting the computes.
+#[derive(Default)]
+struct Sets {
+    computes: Cell<usize>,
+}
+
+impl SummaryProblem<Graph<(), ()>> for Sets {
+    type Summary = BTreeSet<u16>;
+
+    fn bottom(&self, _graph: &Graph<(), ()>) -> BTreeSet<u16> {
+        BTreeSet::new()
+    }
+
+    fn compute(
+        &self,
+        graph: &Graph<(), ()>,
+        node: NodeId,
+        sets: &[BTreeSet<u16>],
+    ) -> BTreeSet<u16> {
+        self.computes.set(self.computes.get() + 1);
+        reached_set(graph, node, sets)
+    }
+}
+
+/// The deepest call stack below each function, which grows forever around
+/// every cycle: a widening point whose depth still grows jumps to
+/// `u32::MAX`. Counts the computes and the widens.
+#[derive(Default)]
+struct Depths {
+    computes: Cell<usize>,
+    widens: Cell<usize>,
+}
+
+impl SummaryProblem<Graph<(), ()>> for Depths {
+    type Summary = Option<u32>;
+
+    fn bottom(&self, _graph: &Graph<(), ()>) -> Option<u32> {
+        None
+    }
+
+    fn compute(&self, graph: &Graph<(), ()>, node: NodeId, depths: &[Option<u32>]) -> Option<u32> {
+        self.computes.set(self.computes.get() + 1);
+        let deepest = graph
+            .successors(node)
+            .filter_map(|callee| depths[callee.index()])
+            .max();
+        Some(deepest.unwrap_or(0).saturating_add(1))
+    }
+
+    fn widen(
+        &self,
+        _graph: &Graph<(), ()>,
+        _node: NodeId,
+        previous: &Option<u32>,
+        computed: &Option<u32>,
+    ) -> Option<u32> {
+        self.widens.set(self.widens.get() + 1);
+        match (*previous, *computed) {
+            (Some(previous), Some(computed)) if computed > previous => Some(u32::MAX),
+            (previous, computed) => previous.max(computed),
+        }
+    }
+}
+
 /// A depth that every fourth function saturates at 1,000: widening sends the
 /// cluster to the top, and narrowing brings back down every depth whose
 /// cycles all pass a saturating function.
@@ -100,41 +162,14 @@ fn register_narrowed(suite: &mut BenchmarkSuite<'_>, cluster: &Graph<(), ()>) {
     benchmark_case!(
         suite,
         "api_propagate_summaries_narrowed",
-        covers[propagate_summaries_narrowed],
         || {
-            let mut calls = 0_usize;
-            let depths = propagate_summaries_narrowed(
-                cluster,
-                &0_u32,
-                |graph, node, depths| {
-                    calls += 1;
-                    let deepest = graph
-                        .successors(node)
-                        .map(|callee| depths[callee.index()])
-                        .max();
-                    let depth = deepest.unwrap_or(0).saturating_add(1);
-                    if node.index().is_multiple_of(4) {
-                        depth.min(1_000)
-                    } else {
-                        depth
-                    }
-                },
-                |_, previous, computed| {
-                    if computed > previous {
-                        u32::MAX
-                    } else {
-                        *previous
-                    }
-                },
-                |_, current, computed| {
-                    if *current == u32::MAX {
-                        *computed
-                    } else {
-                        *current
-                    }
-                },
-            );
-            (depths, calls)
+            let problem = SaturatingDepths::default();
+            let narrowed = SummaryConfig {
+                widening: true,
+                narrowing: true,
+            };
+            let depths = propagate_summaries(cluster, &problem, narrowed);
+            (depths, problem.computes.get())
         },
         |(depths, calls): &(Vec<u32>, usize)| {
             let bounded = depths.iter().filter(|depth| **depth < u32::MAX).count();
@@ -142,6 +177,50 @@ fn register_narrowed(suite: &mut BenchmarkSuite<'_>, cluster: &Graph<(), ()>) {
             println!("api_propagate_summaries_narrowed: {calls} computes, {bounded} bounded");
         }
     );
+}
+
+/// The depth of [`register_narrowed`], counting the computes.
+#[derive(Default)]
+struct SaturatingDepths {
+    computes: Cell<usize>,
+}
+
+impl SummaryProblem<Graph<(), ()>> for SaturatingDepths {
+    type Summary = u32;
+
+    fn bottom(&self, _graph: &Graph<(), ()>) -> u32 {
+        0
+    }
+
+    fn compute(&self, graph: &Graph<(), ()>, node: NodeId, depths: &[u32]) -> u32 {
+        self.computes.set(self.computes.get() + 1);
+        let deepest = graph
+            .successors(node)
+            .map(|callee| depths[callee.index()])
+            .max();
+        let depth = deepest.unwrap_or(0).saturating_add(1);
+        if node.index().is_multiple_of(4) {
+            depth.min(1_000)
+        } else {
+            depth
+        }
+    }
+
+    fn widen(&self, _graph: &Graph<(), ()>, _node: NodeId, previous: &u32, computed: &u32) -> u32 {
+        if computed > previous {
+            u32::MAX
+        } else {
+            *previous
+        }
+    }
+
+    fn narrow(&self, _graph: &Graph<(), ()>, _node: NodeId, current: &u32, computed: &u32) -> u32 {
+        if *current == u32::MAX {
+            *computed
+        } else {
+            *current
+        }
+    }
 }
 
 /// Every function calls the next one, so the cluster is strongly connected,

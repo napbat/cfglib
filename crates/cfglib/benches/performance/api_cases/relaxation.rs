@@ -25,7 +25,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
             &diamonds,
             [(start, 0_u64)],
             Direction::Forward,
-            |edge, label| label.checked_add(*edge.payload()),
+            |edge, label| label.checked_add(*edge.data()),
         ),
         |labels: &Vec<Option<u64>>| assert_eq!(labels[end.index()], Some(0))
     );
@@ -37,7 +37,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
             &branchy,
             [(NodeId::from_index(0), 0_u64)],
             Direction::Forward,
-            |edge, label| label.checked_add(*edge.payload()),
+            |edge, label| label.checked_add(*edge.data()),
         ),
         |labels: &Vec<Option<u64>>| assert!(labels.iter().all(Option::is_some))
     );

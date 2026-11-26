@@ -101,11 +101,22 @@ Follow the Cargo package layout:
   adds blocks or edges returns the new identities.
 - Pass composition owns identity, declared order, change reports and fallible execution. The
   consumer owns pass selection, dependency order, dialect semantics and cache invalidation.
-- The node and edge fixpoint solvers each have one entry point that takes the problem and one
-  descriptor of the seeds and the `SolveConfig`, plus their `stream_` and `resume_` forms. A
-  problem trait comes in an infallible and a fallible form; the fallible form has a blanket
-  implementation for every infallible problem, and the solvers take the fallible form. A
-  derived analysis wraps a solver or runs its own loop. It does not add entry points.
+- The node and edge fixpoint solvers each have one entry point (`solve_node_problem`,
+  `solve_edge_problem`) that takes the problem and one `Solve` descriptor: the `Seeds` (`Live`,
+  `Reachable(root)` for a rooted solve, `Of(nodes)` for a dirty region) and the `SolveConfig`.
+  Their `stream_` forms take the same descriptor and ignore only `SolveConfig::order`, since a
+  stream always runs in the weak topological order; their `resume_` forms take a `Resume` and
+  the descriptor of the solve they continue. A problem trait comes in an infallible and a
+  fallible form; the fallible form has a blanket implementation for every infallible problem,
+  and the solvers take the fallible form. Both solvers run the shared worklist loops of
+  `dataflow/schedule.rs`. A derived analysis wraps a solver or runs its own loop
+  (`propagate_summaries` keeps its callee-first schedule and borrows only the worklist and the
+  `widen`/`narrow` hook shape). It does not add entry points.
+- Every bounded fixpoint (the solvers, IFDS, the slot drivers) takes its budget as one
+  `max_steps: Option<usize>`, counts it with the one step counter of `dataflow/solve.rs`, fails
+  with `SolveError::StepLimitExceeded`, and reports a `SolveStats`. The open fold's
+  `Revisit::Iterate` bounds rounds per cycle instead (`max_rounds`,
+  `OpenFoldError::RoundLimitExceeded`).
 - The slot fixpoint drivers (`ordered_fixpoint`, `wave_fixpoint`) are schedulers over keyed
   slots that the caller owns. They have no graph and no problem trait, so they are not in the
   solver set above.

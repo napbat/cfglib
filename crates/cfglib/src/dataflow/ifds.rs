@@ -25,21 +25,22 @@
 //! # Determinism and limits
 //!
 //! The worklist pops path edges in ascending (node, fact) order, the facts
-//! at a node come out ascending, and [`SolveConfig::max_steps`] bounds the
-//! number of path edges processed exactly as it bounds the worklist entries
-//! of the other solvers.
+//! at a node come out ascending, and [`IfdsConfig::max_steps`] bounds the
+//! number of path edges processed exactly as
+//! [`SolveConfig::max_steps`](crate::SolveConfig::max_steps) bounds the
+//! worklist entries of the other solvers.
 //!
 //! # Collecting path edges
 //!
-//! With [`IfdsConfig::with_path_edge_collection`], the solver drops the path
-//! edges of a context (a procedure entered with one fact) once neither the
-//! context nor any context it calls, transitively, has work left: none of
-//! them can produce a path edge again. That is the fact-level collection of
-//! D. He, Y. Gui, Y. Gao and J. Xue (ISSTA 2023). A collected context keeps
-//! its end summaries and stays known, so a later call into it reuses them
-//! instead of analyzing it again. The results and the processed path edges
-//! are the same either way; only the peak number of path edges held at once
-//! ([`IfdsResults::peak_path_edges`]) goes down.
+//! With [`IfdsConfig::collect_path_edges`], the solver drops the path edges
+//! of a context (a procedure entered with one fact) once neither the context
+//! nor any context it calls, transitively, has work left: none of them can
+//! produce a path edge again. That is the fact-level collection of D. He,
+//! Y. Gui, Y. Gao and J. Xue (ISSTA 2023). A collected context keeps its end
+//! summaries and stays known, so a later call into it reuses them instead of
+//! analyzing it again. The results and the processed path edges are the same
+//! either way; only the peak number of path edges held at once
+//! ([`SolveStats::peak_count`]) goes down.
 
 extern crate alloc;
 use alloc::collections::BTreeMap;
@@ -47,7 +48,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::marker::PhantomData;
 
-use super::fixpoint::{SolveConfig, SolveError};
+use super::solve::{SolveError, SolveStats};
 use crate::graph::view::DenseId;
 
 mod cfg_supergraph;
@@ -139,51 +140,17 @@ pub trait IfdsProblem<S: Supergraph> {
     fn call_to_return(&self, call: S::Node, return_site: S::Node, fact: u32, out: &mut Vec<u32>);
 }
 
-/// Configuration of [`solve_ifds`].
+/// Configuration of [`solve_ifds`]. The default is an unbounded solve that
+/// keeps every path edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct IfdsConfig {
-    solve: SolveConfig,
-    collect_path_edges: bool,
-}
-
-impl IfdsConfig {
-    /// An unbounded solve that keeps every path edge.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            solve: SolveConfig::new(),
-            collect_path_edges: false,
-        }
-    }
-
-    /// The same configuration with the step limit of `solve`, counted in
-    /// processed path edges.
-    #[must_use]
-    pub const fn with_solve_config(self, solve: SolveConfig) -> Self {
-        Self { solve, ..self }
-    }
-
-    /// The same configuration, collecting the path edges of finished
-    /// contexts when `collect` is set; see the [module docs](self).
-    #[must_use]
-    pub const fn with_path_edge_collection(self, collect: bool) -> Self {
-        Self {
-            collect_path_edges: collect,
-            ..self
-        }
-    }
-
-    /// The solver limits.
-    #[must_use]
-    pub const fn solve_config(self) -> SolveConfig {
-        self.solve
-    }
-
-    /// Whether the path edges of finished contexts are collected.
-    #[must_use]
-    pub const fn collects_path_edges(self) -> bool {
-        self.collect_path_edges
-    }
+    /// The most path edges the solve processes; with path edges left at the
+    /// limit it stops with [`SolveError::StepLimitExceeded`]. `None` is
+    /// unbounded.
+    pub max_steps: Option<usize>,
+    /// Whether the path edges of finished contexts are collected; see the
+    /// [module docs](self).
+    pub collect_path_edges: bool,
 }
 
 /// The answer of [`solve_ifds`]: the facts at each node and the end
@@ -196,8 +163,7 @@ pub struct IfdsResults<S: Supergraph> {
     /// Each context, a procedure and its entry fact, and its end summaries:
     /// the (exit node, fact) pairs, ascending.
     summaries: BTreeMap<(usize, u32), Vec<(usize, u32)>>,
-    steps: usize,
-    peak_path_edges: usize,
+    stats: SolveStats,
     graph: PhantomData<fn() -> S>,
 }
 
@@ -243,16 +209,11 @@ impl<S: Supergraph> IfdsResults<S> {
             .map(|&(exit, fact)| (S::Node::from_index(exit), fact))
     }
 
-    /// The number of path edges processed.
+    /// What the solve did: its steps are the path edges it processed and
+    /// its peak the most path edges it held at once.
     #[must_use]
-    pub fn steps(&self) -> usize {
-        self.steps
-    }
-
-    /// The largest number of path edges held at once.
-    #[must_use]
-    pub fn peak_path_edges(&self) -> usize {
-        self.peak_path_edges
+    pub const fn stats(&self) -> SolveStats {
+        self.stats
     }
 }
 
@@ -263,8 +224,7 @@ impl<S: Supergraph> fmt::Debug for IfdsResults<S> {
             .field("node_bound", &(self.offsets.len() - 1))
             .field("facts", &self.facts.len())
             .field("contexts", &self.summaries.len())
-            .field("steps", &self.steps)
-            .field("peak_path_edges", &self.peak_path_edges)
+            .field("stats", &self.stats)
             .finish_non_exhaustive()
     }
 }
@@ -328,7 +288,7 @@ impl<S: Supergraph> fmt::Debug for IfdsResults<S> {
 ///     fn call_to_return(&self, _: usize, _: usize, _: u32, _: &mut Vec<u32>) {}
 /// }
 ///
-/// let results = solve_ifds(&Program, &Taint, &[(0, 0)], IfdsConfig::new()).unwrap();
+/// let results = solve_ifds(&Program, &Taint, &[(0, 0)], IfdsConfig::default()).unwrap();
 /// assert_eq!(results.facts_at(2).collect::<Vec<_>>(), [0, 1]);
 /// assert_eq!(results.summaries(1, 1).collect::<Vec<_>>(), [(3, 1)]);
 /// ```

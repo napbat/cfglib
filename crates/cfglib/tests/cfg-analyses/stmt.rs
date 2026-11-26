@@ -1,7 +1,7 @@
 //! The statement language the analyses read: three-address statements over
 //! named locals, with declared effects and returns.
 
-use cfglib::{BlockId, Cfg, EdgeId, EdgeKind, EffectInfo, FlowControl, FlowEffect, InstrInfo};
+use cfglib::{BlockId, Cfg, EdgeId, EdgeKind, FlowControl, FlowEffect, InstrInfo};
 
 pub type Local = &'static str;
 
@@ -72,14 +72,6 @@ impl InstrInfo for Stmt {
 
     fn defs(&self) -> &[Local] {
         &self.defs
-    }
-}
-
-impl EffectInfo for Stmt {
-    type Effect = Effect;
-
-    fn effects(&self) -> &[Effect] {
-        &self.effects
     }
 }
 

@@ -1,16 +1,11 @@
+use std::convert::Infallible;
+
 use cfglib::{
     Cfg, Direction, EdgeFacts, EdgeProblem, Facts, Graph, IterationOrder, NodeId, NodeProblem,
-    ResumeMode, SolveConfig, SolveError, SolveStats, TryEdgeProblem, TryNodeProblem, TryProblem,
+    Resume, ResumeMode, Seeds, Solve, SolveConfig, SolveStats, TryEdgeProblem, TryNodeProblem,
     TrySolveError, WeakTopologicalOrder, meet_options, resume_edge_problem, resume_node_problem,
-    resume_problem, solve_edge_problem, solve_edge_problem_from,
-    solve_edge_problem_from_with_config, solve_edge_problem_with_config, solve_node_problem,
-    solve_node_problem_from, solve_node_problem_from_with_config, solve_node_problem_with_config,
-    solve_problem_from, solve_problem_from_with_config, stream_edge_problem, stream_node_problem,
-    stream_problem, try_solve_edge_problem, try_solve_edge_problem_from,
-    try_solve_edge_problem_from_with_config, try_solve_edge_problem_with_config,
-    try_solve_node_problem, try_solve_node_problem_from, try_solve_node_problem_from_with_config,
-    try_solve_node_problem_with_config, try_solve_problem, try_solve_problem_from,
-    try_solve_problem_from_with_config, try_solve_problem_with_config,
+    solve_edge_problem, solve_node_problem, stream_edge_problem, stream_node_problem,
+    try_meet_options,
 };
 
 use super::BenchmarkSuite;
@@ -21,7 +16,7 @@ const NODE_COUNT: usize = 512;
 
 struct TryCfgReachability;
 
-impl TryProblem<Cfg<u32>> for TryCfgReachability {
+impl TryNodeProblem<Cfg<u32>> for TryCfgReachability {
     type Fact = bool;
     type Error = ();
 
@@ -169,143 +164,117 @@ impl TryEdgeProblem<Graph<(), ()>> for TryEdgeReachability {
 }
 
 macro_rules! solver_case {
-    ($suite:expr, $name:literal, $api:path, $operation:expr) => {
+    ($suite:expr, $name:literal, covers[$api:path], $operation:expr) => {
         benchmark_case!($suite, $name, covers[$api], $operation, |result| assert!(
             result.is_ok()
         ));
     };
+    ($suite:expr, $name:literal, $operation:expr) => {
+        benchmark_case!($suite, $name, $operation, |result| assert!(result.is_ok()));
+    };
+}
+
+/// The rooted solve of a control-flow graph: what its entry reaches, with
+/// the boundary in front of the entry.
+fn rooted(cfg: &Cfg<u32>) -> Solve<'static, cfglib::BlockId> {
+    Solve {
+        seeds: Seeds::Reachable(cfg.entry()),
+        ..Solve::default()
+    }
 }
 
 fn register_cfg_solvers(suite: &mut BenchmarkSuite<'_>) {
     let cfg = branchy_cfg(NODE_COUNT);
     let seeds = [cfg.entry()];
-    let config = SolveConfig::new();
+    let seeded = Solve {
+        seeds: Seeds::Of(&seeds),
+        ..Solve::default()
+    };
+    let rooted = rooted(&cfg);
 
-    solver_case!(suite, "api_solve_problem_from", solve_problem_from, || {
-        solve_problem_from(&cfg, &CfgReachability, &seeds)
+    solver_case!(suite, "api_solve_problem_from", || {
+        solve_node_problem(&cfg, &CfgReachability, seeded)
     });
-    solver_case!(
-        suite,
-        "api_solve_problem_from_with_config",
-        solve_problem_from_with_config,
-        || solve_problem_from_with_config(&cfg, &CfgReachability, &seeds, config)
-    );
-    solver_case!(suite, "api_try_solve_problem", try_solve_problem, || {
-        try_solve_problem(&cfg, &TryCfgReachability)
+    solver_case!(suite, "api_solve_problem_from_with_config", || {
+        solve_node_problem(&cfg, &CfgReachability, seeded)
     });
-    solver_case!(
-        suite,
-        "api_try_solve_problem_from",
-        try_solve_problem_from,
-        || try_solve_problem_from(&cfg, &TryCfgReachability, &seeds)
-    );
-    solver_case!(
-        suite,
-        "api_try_solve_problem_with_config",
-        try_solve_problem_with_config,
-        || try_solve_problem_with_config(&cfg, &TryCfgReachability, config)
-    );
-    solver_case!(
-        suite,
-        "api_try_solve_problem_from_with_config",
-        try_solve_problem_from_with_config,
-        || try_solve_problem_from_with_config(&cfg, &TryCfgReachability, &seeds, config)
-    );
+    solver_case!(suite, "api_try_solve_problem", || {
+        solve_node_problem(&cfg, &TryCfgReachability, rooted)
+    });
+    solver_case!(suite, "api_try_solve_problem_from", || {
+        solve_node_problem(&cfg, &TryCfgReachability, seeded)
+    });
+    solver_case!(suite, "api_try_solve_problem_with_config", || {
+        solve_node_problem(&cfg, &TryCfgReachability, rooted)
+    });
+    solver_case!(suite, "api_try_solve_problem_from_with_config", || {
+        solve_node_problem(&cfg, &TryCfgReachability, seeded)
+    });
 }
 
 fn register_node_solvers(suite: &mut BenchmarkSuite<'_>) {
     let graph = branchy_graph(NODE_COUNT);
     let seeds = [NodeId::from_raw(0)];
-    let config = SolveConfig::new();
+    let seeded = Solve {
+        seeds: Seeds::Of(&seeds),
+        ..Solve::default()
+    };
 
-    solver_case!(
-        suite,
-        "api_solve_node_problem_from",
-        solve_node_problem_from,
-        || solve_node_problem_from(&graph, &Reachability, &seeds)
-    );
-    solver_case!(
-        suite,
-        "api_solve_node_problem_from_with_config",
-        solve_node_problem_from_with_config,
-        || solve_node_problem_from_with_config(&graph, &Reachability, &seeds, config)
-    );
-    solver_case!(
-        suite,
-        "api_try_solve_node_problem",
-        try_solve_node_problem,
-        || try_solve_node_problem(&graph, &TryGraphReachability)
-    );
-    solver_case!(
-        suite,
-        "api_try_solve_node_problem_from",
-        try_solve_node_problem_from,
-        || try_solve_node_problem_from(&graph, &TryGraphReachability, &seeds)
-    );
-    solver_case!(
-        suite,
-        "api_try_solve_node_problem_with_config",
-        try_solve_node_problem_with_config,
-        || try_solve_node_problem_with_config(&graph, &TryGraphReachability, config)
-    );
-    solver_case!(
-        suite,
-        "api_try_solve_node_problem_from_with_config",
-        try_solve_node_problem_from_with_config,
-        || try_solve_node_problem_from_with_config(&graph, &TryGraphReachability, &seeds, config)
-    );
+    solver_case!(suite, "api_solve_node_problem_from", || {
+        solve_node_problem(&graph, &Reachability, seeded)
+    });
+    solver_case!(suite, "api_solve_node_problem_from_with_config", || {
+        solve_node_problem(&graph, &Reachability, seeded)
+    });
+    solver_case!(suite, "api_try_solve_node_problem", || {
+        solve_node_problem(&graph, &TryGraphReachability, Solve::default())
+    });
+    solver_case!(suite, "api_try_solve_node_problem_from", || {
+        solve_node_problem(&graph, &TryGraphReachability, seeded)
+    });
+    solver_case!(suite, "api_try_solve_node_problem_with_config", || {
+        solve_node_problem(&graph, &TryGraphReachability, Solve::default())
+    });
+    solver_case!(suite, "api_try_solve_node_problem_from_with_config", || {
+        solve_node_problem(&graph, &TryGraphReachability, seeded)
+    });
 }
 
 fn register_edge_solvers(suite: &mut BenchmarkSuite<'_>) {
     let graph = branchy_graph(NODE_COUNT);
     let seeds = [NodeId::from_raw(0)];
-    let config = SolveConfig::new();
+    let seeded = Solve {
+        seeds: Seeds::Of(&seeds),
+        ..Solve::default()
+    };
 
-    solver_case!(suite, "api_solve_edge_problem", solve_edge_problem, || {
-        solve_edge_problem(&graph, &EdgeReachability)
+    solver_case!(
+        suite,
+        "api_solve_edge_problem",
+        covers[solve_edge_problem],
+        || solve_edge_problem(&graph, &EdgeReachability, Solve::default())
+    );
+    solver_case!(suite, "api_solve_edge_problem_from", || {
+        solve_edge_problem(&graph, &EdgeReachability, seeded)
     });
-    solver_case!(
-        suite,
-        "api_solve_edge_problem_from",
-        solve_edge_problem_from,
-        || solve_edge_problem_from(&graph, &EdgeReachability, &seeds)
-    );
-    solver_case!(
-        suite,
-        "api_solve_edge_problem_with_config",
-        solve_edge_problem_with_config,
-        || solve_edge_problem_with_config(&graph, &EdgeReachability, config)
-    );
-    solver_case!(
-        suite,
-        "api_solve_edge_problem_from_with_config",
-        solve_edge_problem_from_with_config,
-        || solve_edge_problem_from_with_config(&graph, &EdgeReachability, &seeds, config)
-    );
-    solver_case!(
-        suite,
-        "api_try_solve_edge_problem",
-        try_solve_edge_problem,
-        || try_solve_edge_problem(&graph, &TryEdgeReachability)
-    );
-    solver_case!(
-        suite,
-        "api_try_solve_edge_problem_from",
-        try_solve_edge_problem_from,
-        || try_solve_edge_problem_from(&graph, &TryEdgeReachability, &seeds)
-    );
-    solver_case!(
-        suite,
-        "api_try_solve_edge_problem_with_config",
-        try_solve_edge_problem_with_config,
-        || try_solve_edge_problem_with_config(&graph, &TryEdgeReachability, config)
-    );
-    solver_case!(
-        suite,
-        "api_try_solve_edge_problem_from_with_config",
-        try_solve_edge_problem_from_with_config,
-        || try_solve_edge_problem_from_with_config(&graph, &TryEdgeReachability, &seeds, config,)
-    );
+    solver_case!(suite, "api_solve_edge_problem_with_config", || {
+        solve_edge_problem(&graph, &EdgeReachability, Solve::default())
+    });
+    solver_case!(suite, "api_solve_edge_problem_from_with_config", || {
+        solve_edge_problem(&graph, &EdgeReachability, seeded)
+    });
+    solver_case!(suite, "api_try_solve_edge_problem", || {
+        solve_edge_problem(&graph, &TryEdgeReachability, Solve::default())
+    });
+    solver_case!(suite, "api_try_solve_edge_problem_from", || {
+        solve_edge_problem(&graph, &TryEdgeReachability, seeded)
+    });
+    solver_case!(suite, "api_try_solve_edge_problem_with_config", || {
+        solve_edge_problem(&graph, &TryEdgeReachability, Solve::default())
+    });
+    solver_case!(suite, "api_try_solve_edge_problem_from_with_config", || {
+        solve_edge_problem(&graph, &TryEdgeReachability, seeded)
+    });
 }
 
 /// The number of facts the option-meet helper folds together.
@@ -327,6 +296,20 @@ fn register_lattice_helpers(suite: &mut BenchmarkSuite<'_>) {
             merged
         },
         |merged: &Option<u64>| assert_eq!(*merged, Some(0))
+    );
+    benchmark_case!(
+        suite,
+        "api_try_meet_options",
+        covers[try_meet_options],
+        || -> Result<Option<u64>, ()> {
+            let mut merged: Option<u64> = None;
+            for &value in &facts {
+                merged =
+                    try_meet_options(&merged, &Some(value), |left, right| Ok(*left.min(right)))?;
+            }
+            Ok(merged)
+        },
+        |merged: &Result<Option<u64>, ()>| assert_eq!(*merged, Ok(Some(0)))
     );
 }
 
@@ -395,42 +378,57 @@ impl NodeProblem<Graph<(), ()>> for Definitions {
     }
 }
 
+/// What a solve of [`Definitions`] returns.
+type Solved = Result<Facts<u64>, TrySolveError<Infallible>>;
+
+/// A solve of every live node in `order`.
+fn in_order(order: IterationOrder) -> Solve<'static, NodeId> {
+    Solve {
+        config: SolveConfig {
+            order,
+            ..SolveConfig::default()
+        },
+        ..Solve::default()
+    }
+}
+
 fn register_iteration_orders(suite: &mut BenchmarkSuite<'_>) {
     let (graph, entry) = permuted_loop_nest(NEST_NODE_COUNT);
-    let index = solve_node_problem(&graph, &Definitions).expect("an unbounded solve converges");
+    let index = solve_node_problem(&graph, &Definitions, Solve::default())
+        .expect("an unbounded solve converges");
     // Every order reaches the facts of the index order. The step count goes
     // next to the time, because the steps are what an order changes.
-    let check = |name: &str, facts: &Result<Facts<u64>, SolveError>| {
+    let check = |name: &str, facts: &Solved| {
         let facts = facts.as_ref().expect("an unbounded solve converges");
         for node in graph.node_ids() {
             assert_eq!(facts.fact_out(node), index.fact_out(node));
         }
         println!(
             "{name:<36} {:>12} steps  index order {}",
-            facts.steps(),
-            index.steps()
+            facts.stats().step_count(),
+            index.stats().step_count()
         );
-        facts.steps()
+        facts.stats().step_count()
     };
-    let reverse_postorder = SolveConfig::new().with_order(IterationOrder::ReversePostorder);
-    let weak_topological = SolveConfig::new().with_order(IterationOrder::WeakTopological);
+    let reverse_postorder = in_order(IterationOrder::ReversePostorder);
+    let weak_topological = in_order(IterationOrder::WeakTopological);
 
     benchmark_case!(
         suite,
         "api_solve_node_problem_rpo",
-        || solve_node_problem_with_config(&graph, &Definitions, reverse_postorder),
-        |facts: &Result<Facts<u64>, SolveError>| {
+        || solve_node_problem(&graph, &Definitions, reverse_postorder),
+        |facts: &Solved| {
             check("api_solve_node_problem_rpo", facts);
         }
     );
     benchmark_case!(
         suite,
         "api_solve_node_problem_wto",
-        || solve_node_problem_with_config(&graph, &Definitions, weak_topological),
-        |facts: &Result<Facts<u64>, SolveError>| {
+        || solve_node_problem(&graph, &Definitions, weak_topological),
+        |facts: &Solved| {
             let steps = check("api_solve_node_problem_wto", facts);
             assert!(
-                steps < index.steps(),
+                steps < index.stats().step_count(),
                 "the weak topological order saves steps"
             );
         }
@@ -443,42 +441,17 @@ fn register_iteration_orders(suite: &mut BenchmarkSuite<'_>) {
     );
 }
 
-impl TryNodeProblem<Graph<(), ()>> for Definitions {
-    type Fact = u64;
-    type Error = ();
-
-    fn direction(&self) -> Direction {
-        Direction::Forward
-    }
-
-    fn bottom(&self, _graph: &Graph<(), ()>) -> u64 {
-        0
-    }
-
-    fn boundary(&self, _graph: &Graph<(), ()>) -> Result<u64, ()> {
-        Ok(0)
-    }
-
-    fn meet(&self, _: &Graph<(), ()>, _: NodeId, left: &u64, right: &u64) -> Result<u64, ()> {
-        Ok(left | right)
-    }
-
-    fn transfer(&self, _: &Graph<(), ()>, node: NodeId, input: &u64) -> Result<u64, ()> {
-        Ok(input | 1 << (node.index() % 64))
-    }
-}
-
 /// Nodes in the loop nest that the node stream solves.
 const STREAM_NODE_COUNT: usize = 100_000;
 
 /// What a stream run hands back to its oracle: its stats, how many nodes it
 /// visited, and every OUT fact folded into one word.
-type Streamed = Result<(SolveStats, usize, u64), TrySolveError<()>>;
+type Streamed<E = ()> = Result<(SolveStats, usize, u64), TrySolveError<E>>;
 
 fn register_streams(suite: &mut BenchmarkSuite<'_>) {
     let (nest, _) = permuted_loop_nest(STREAM_NODE_COUNT);
-    let weak_topological = SolveConfig::new().with_order(IterationOrder::WeakTopological);
-    let kept = try_solve_node_problem_with_config(&nest, &Definitions, weak_topological)
+    let weak_topological = in_order(IterationOrder::WeakTopological);
+    let kept = solve_node_problem(&nest, &Definitions, weak_topological)
         .expect("an unbounded solve converges");
     let folded = nest.node_ids().fold(0, |folded, node| {
         folded ^ kept.fact_out(node).rotate_left(fixture_u32(node.index()))
@@ -489,42 +462,36 @@ fn register_streams(suite: &mut BenchmarkSuite<'_>) {
         covers[stream_node_problem],
         || {
             let (mut visited, mut fold) = (0, 0_u64);
-            let config = SolveConfig::new();
-            stream_node_problem(&nest, &Definitions, config, |node, _, out| {
+            stream_node_problem(&nest, &Definitions, Solve::default(), |node, _, out| {
                 visited += 1;
                 fold ^= out.rotate_left(fixture_u32(node.index()));
             })
             .map(|stats| (stats, visited, fold))
         },
-        |streamed: &Streamed| {
+        |streamed: &Streamed<Infallible>| {
             let (stats, visited, fold) = streamed.as_ref().expect("the stream converges");
             assert_eq!((*visited, *fold), (STREAM_NODE_COUNT, folded));
-            assert_eq!(stats.steps(), kept.steps());
+            assert_eq!(stats.step_count(), kept.stats().step_count());
             // Peak memory goes next to the time: it is what a stream saves.
             println!(
                 "{:<36} {:>12} peak live facts  solve keeps {}",
                 "api_stream_node_problem",
-                stats.peak_live_facts(),
+                stats.peak_count(),
                 2 * STREAM_NODE_COUNT
             );
         }
     );
 
     let cfg = branchy_cfg(NODE_COUNT);
+    let rooted = rooted(&cfg);
     benchmark_case!(
         suite,
         "api_stream_problem",
-        covers[stream_problem],
         || {
             let mut visited = 0;
-            stream_problem(
-                &cfg,
-                &TryCfgReachability,
-                SolveConfig::new(),
-                |_, _, out| {
-                    visited += usize::from(*out);
-                },
-            )
+            stream_node_problem(&cfg, &TryCfgReachability, rooted, |_, _, out| {
+                visited += usize::from(*out);
+            })
             .map(|stats| (stats, visited, 0))
         },
         |streamed: &Streamed| {
@@ -543,7 +510,7 @@ fn register_streams(suite: &mut BenchmarkSuite<'_>) {
             stream_edge_problem(
                 &graph,
                 &TryEdgeReachability,
-                SolveConfig::new(),
+                Solve::default(),
                 |_, _, out| {
                     visited += usize::from(*out);
                 },
@@ -569,11 +536,15 @@ fn register_resumes(suite: &mut BenchmarkSuite<'_>) {
     for pair in nodes.windows(2) {
         chain.add_edge(pair[0], pair[1], ());
     }
-    let solved = try_solve_node_problem(&chain, &TryGraphReachability).expect("a solve converges");
+    let solved = solve_node_problem(&chain, &TryGraphReachability, Solve::default())
+        .expect("a solve converges");
     let changed = [nodes[RESUME_NODE_COUNT - RESUME_REGION]];
     let last = nodes[RESUME_NODE_COUNT - 1];
     let reset = ResumeMode::Reset;
-    let config = SolveConfig::new();
+    let edit = Resume {
+        changed: &changed,
+        mode: reset,
+    };
     benchmark_case!(
         suite,
         "api_resume_node_problem",
@@ -584,39 +555,43 @@ fn register_resumes(suite: &mut BenchmarkSuite<'_>) {
                 &chain,
                 &TryGraphReachability,
                 previous,
-                &changed,
-                reset,
-                config,
+                edit,
+                Solve::default(),
             )
         },
         |resumed: &Result<Facts<bool>, TrySolveError<()>>| {
             let resumed = resumed.as_ref().expect("a resume converges");
             assert!(*resumed.fact_out(last));
-            assert_eq!(resumed.steps(), RESUME_REGION);
+            assert_eq!(resumed.stats().step_count(), RESUME_REGION);
             // The steps go next to the time: the full solve takes one per
             // node, the resume one per node of the region.
             println!(
                 "{:<36} {:>12} steps  full solve {}",
                 "api_resume_node_problem",
-                resumed.steps(),
-                solved.steps()
+                resumed.stats().step_count(),
+                solved.stats().step_count()
             );
         }
     );
 
     let cfg = branchy_cfg(NODE_COUNT);
-    let solved_cfg = try_solve_problem(&cfg, &TryCfgReachability).expect("a solve converges");
+    let rooted = rooted(&cfg);
+    let solved_cfg =
+        solve_node_problem(&cfg, &TryCfgReachability, rooted).expect("a solve converges");
     let block = [cfg
         .block_ids()
         .nth(NODE_COUNT - 16)
         .expect("the fixture has the block")];
+    let edit = Resume {
+        changed: &block,
+        mode: reset,
+    };
     benchmark_case!(
         suite,
         "api_resume_problem",
-        covers[resume_problem],
         || {
             let previous = solved_cfg.clone();
-            resume_problem(&cfg, &TryCfgReachability, previous, &block, reset, config)
+            resume_node_problem(&cfg, &TryCfgReachability, previous, edit, rooted)
         },
         |resumed: &Result<Facts<bool>, TrySolveError<()>>| {
             let resumed = resumed.as_ref().expect("a resume converges");
@@ -625,16 +600,26 @@ fn register_resumes(suite: &mut BenchmarkSuite<'_>) {
     );
 
     let graph = branchy_graph(NODE_COUNT);
-    let solved_graph =
-        try_solve_edge_problem(&graph, &TryEdgeReachability).expect("a solve converges");
+    let solved_graph = solve_edge_problem(&graph, &TryEdgeReachability, Solve::default())
+        .expect("a solve converges");
     let node = [NodeId::from_raw(fixture_u32(NODE_COUNT - 16))];
+    let edit = Resume {
+        changed: &node,
+        mode: reset,
+    };
     benchmark_case!(
         suite,
         "api_resume_edge_problem",
         covers[resume_edge_problem],
         || {
             let previous = solved_graph.clone();
-            resume_edge_problem(&graph, &TryEdgeReachability, previous, &node, reset, config)
+            resume_edge_problem(
+                &graph,
+                &TryEdgeReachability,
+                previous,
+                edit,
+                Solve::default(),
+            )
         },
         |resumed: &Result<EdgeFacts<bool>, TrySolveError<()>>| {
             let resumed = resumed.as_ref().expect("a resume converges");

@@ -5,11 +5,17 @@ use alloc::vec::Vec;
 
 use super::{CfgSupergraph, IfdsConfig, IfdsProblem, IfdsResults, Supergraph, solve_ifds};
 use crate::cfg::Cfg;
-use crate::dataflow::fixpoint::{SolveConfig, SolveError};
 use crate::dataflow::program_point::ProgramPoint;
+use crate::dataflow::solve::SolveError;
 use crate::edge::EdgeKind;
 use crate::flow::CallInfo;
 use crate::test_util::rng::Rng;
+
+/// An unbounded solve that collects the path edges of finished contexts.
+const COLLECTING: IfdsConfig = IfdsConfig {
+    max_steps: None,
+    collect_path_edges: true,
+};
 
 /// A supergraph written out node by node: an exit is a node without
 /// successors.
@@ -244,7 +250,7 @@ fn facts_of(results: &IfdsResults<Toy>, node: usize) -> Vec<u32> {
 }
 
 fn solve(graph: &Toy, problem: &impl IfdsProblem<Toy>, seeds: &[(usize, u32)]) -> IfdsResults<Toy> {
-    solve_ifds(graph, problem, seeds, IfdsConfig::new()).expect("an unbounded solve")
+    solve_ifds(graph, problem, seeds, IfdsConfig::default()).expect("an unbounded solve")
 }
 
 #[test]
@@ -453,13 +459,8 @@ fn the_tabulation_equals_realizable_path_reachability_on_random_programs() {
             sensitive += 1;
         }
 
-        let collected = solve_ifds(
-            &graph,
-            &problem,
-            &seeds,
-            IfdsConfig::new().with_path_edge_collection(true),
-        )
-        .expect("an unbounded solve");
+        let collected =
+            solve_ifds(&graph, &problem, &seeds, COLLECTING).expect("an unbounded solve");
         assert_same_answer(&graph, facts, &results, &collected);
     }
     assert!(
@@ -474,7 +475,7 @@ fn assert_same_answer(
     kept: &IfdsResults<Toy>,
     collected: &IfdsResults<Toy>,
 ) {
-    assert_eq!(kept.steps(), collected.steps());
+    assert_eq!(kept.stats().step_count(), collected.stats().step_count());
     for node in 0..graph.node_bound() {
         assert_eq!(
             facts_of(kept, node),
@@ -520,16 +521,17 @@ fn collecting_path_edges_lowers_the_peak_and_changes_no_answer() {
     let problem = Flows { facts: 4, flow };
     let seeds = [(main[0], 0)];
     let kept = solve(&graph, &problem, &seeds);
-    let config = IfdsConfig::new().with_path_edge_collection(true);
-    assert!(config.collects_path_edges());
-    let collected = solve_ifds(&graph, &problem, &seeds, config).expect("an unbounded solve");
+    let collected = solve_ifds(&graph, &problem, &seeds, COLLECTING).expect("an unbounded solve");
     assert_same_answer(&graph, 4, &kept, &collected);
-    assert_eq!(kept.peak_path_edges(), kept.steps(), "nothing is dropped");
+    assert_eq!(
+        kept.stats().peak_count(),
+        kept.stats().step_count(),
+        "nothing is dropped"
+    );
+    let (with, without) = (collected.stats().peak_count(), kept.stats().peak_count());
     assert!(
-        2 * collected.peak_path_edges() < kept.peak_path_edges(),
-        "peak {} with collection, {} without",
-        collected.peak_path_edges(),
-        kept.peak_path_edges()
+        2 * with < without,
+        "peak {with} with collection, {without} without"
     );
 }
 
@@ -560,20 +562,14 @@ fn a_call_into_a_collected_context_reuses_its_summaries() {
     let problem = Flows { facts: 2, flow };
     let seeds = [(main[0], 0)];
     let kept = solve(&graph, &problem, &seeds);
-    let collected = solve_ifds(
-        &graph,
-        &problem,
-        &seeds,
-        IfdsConfig::new().with_path_edge_collection(true),
-    )
-    .expect("an unbounded solve");
+    let collected = solve_ifds(&graph, &problem, &seeds, COLLECTING).expect("an unbounded solve");
     assert_same_answer(&graph, 2, &kept, &collected);
     assert_eq!(facts_of(&collected, main[151]), [0, 1]);
     assert_eq!(
         collected.summaries(0, 0).collect::<Vec<_>>(),
         [(leaf[2], 0), (leaf[2], 1)]
     );
-    assert!(collected.peak_path_edges() < kept.peak_path_edges());
+    assert!(collected.stats().peak_count() < kept.stats().peak_count());
 }
 
 #[test]
@@ -589,13 +585,18 @@ fn the_step_limit_counts_processed_path_edges() {
         flow: |_: Step, _: u32| vec![1],
     };
     let seeds = [(main[0], 0)];
-    let steps = solve(&graph, &problem, &seeds).steps();
+    let steps = solve(&graph, &problem, &seeds).stats().step_count();
     assert_eq!(steps, 7);
-    let exact = IfdsConfig::new().with_solve_config(SolveConfig::with_step_limit(steps));
-    assert_eq!(exact.solve_config().max_steps(), Some(steps));
+    let exact = IfdsConfig {
+        max_steps: Some(steps),
+        ..IfdsConfig::default()
+    };
     assert!(solve_ifds(&graph, &problem, &seeds, exact).is_ok());
 
-    let short = IfdsConfig::new().with_solve_config(SolveConfig::with_step_limit(steps - 1));
+    let short = IfdsConfig {
+        max_steps: Some(steps - 1),
+        ..IfdsConfig::default()
+    };
     let error = solve_ifds(&graph, &problem, &seeds, short).expect_err("one path edge is left");
     let SolveError::StepLimitExceeded {
         limit,
@@ -616,7 +617,7 @@ fn no_seed_reaches_nothing_and_a_mid_procedure_seed_holds_where_it_is() {
         flow: |_: Step, fact: u32| (fact != 0).then_some(fact).into_iter().collect(),
     };
     let none = solve(&graph, &problem, &[]);
-    assert_eq!(none.steps(), 0);
+    assert_eq!(none.stats().step_count(), 0);
     assert!((0..3).all(|node| none.facts_at(node).next().is_none()));
 
     let seeded = solve(&graph, &problem, &[(main[1], 1)]);
@@ -635,7 +636,7 @@ fn a_seed_past_the_nodes_panics() {
         facts: 1,
         flow: |_: Step, _: u32| Vec::new(),
     };
-    let _ = solve_ifds(&graph, &problem, &[(1, 0)], IfdsConfig::new());
+    let _ = solve_ifds(&graph, &problem, &[(1, 0)], IfdsConfig::default());
 }
 
 #[test]
@@ -648,7 +649,7 @@ fn a_flow_fact_past_the_bound_panics() {
         facts: 2,
         flow: |_: Step, _: u32| vec![2],
     };
-    let _ = solve_ifds(&graph, &problem, &[(main[0], 0)], IfdsConfig::new());
+    let _ = solve_ifds(&graph, &problem, &[(main[0], 0)], IfdsConfig::default());
 }
 
 /// A toy instruction: work, a taint source, or a call by key.
@@ -756,7 +757,7 @@ fn the_cfg_adapter_numbers_program_points_and_resolves_listed_callees() {
     assert!(!graph.is_exit(2));
     assert!(graph.is_exit(5) && graph.is_exit(7) && graph.is_exit(8));
 
-    let results = solve_ifds(&graph, &CfgTaint(&graph), &[(0, 0)], IfdsConfig::new())
+    let results = solve_ifds(&graph, &CfgTaint(&graph), &[(0, 0)], IfdsConfig::default())
         .expect("an unbounded solve");
     assert_eq!(results.facts_at(1).collect::<Vec<_>>(), [0, 1]);
     assert_eq!(

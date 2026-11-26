@@ -1,4 +1,4 @@
-//! The worklist behind every fixpoint solver.
+//! The deduplicating index queue behind every fixpoint of the crate.
 
 extern crate alloc;
 use alloc::vec;
@@ -8,14 +8,16 @@ use super::bits::{DenseBits, bit_slot};
 use crate::graph::view::{DenseId, GraphView};
 use crate::identity::{NO_INDEX, slot, word};
 
-/// A deduplicating queue of dense node indices, popped lowest first.
+/// A deduplicating queue of dense indices, popped lowest first.
 ///
 /// Every solver revisits a node only after one of its inputs changed, and
 /// queuing a node that is already queued must not visit it twice. The lowest
 /// index pops first, which is program order for a CFG whose blocks were
 /// created in order and keeps every solve deterministic. The queue is a bit
-/// row, so queuing allocates nothing.
-pub(super) struct Worklist {
+/// row, so queuing allocates nothing. The node and edge solvers, the slot
+/// drivers and the summary propagation of the call graph all queue on it.
+#[derive(Debug, Clone)]
+pub(crate) struct Worklist {
     queued: DenseBits,
     /// Words below this index hold no queued node.
     cursor: usize,
@@ -23,7 +25,7 @@ pub(super) struct Worklist {
 
 impl Worklist {
     /// An empty worklist for the indices `0..bound`.
-    pub(super) fn new(bound: usize) -> Self {
+    pub(crate) fn new(bound: usize) -> Self {
         Self {
             queued: DenseBits::new(bound),
             cursor: 0,
@@ -31,7 +33,7 @@ impl Worklist {
     }
 
     /// A worklist of `indices`, duplicates queued once.
-    pub(super) fn of(bound: usize, indices: impl IntoIterator<Item = usize>) -> Self {
+    pub(crate) fn of(bound: usize, indices: impl IntoIterator<Item = usize>) -> Self {
         let mut worklist = Self::new(bound);
         for index in indices {
             worklist.insert(index);
@@ -69,13 +71,22 @@ impl Worklist {
     }
 
     /// Queues `index` unless it is already queued.
-    pub(super) fn insert(&mut self, index: usize) {
+    pub(crate) fn insert(&mut self, index: usize) {
         self.cursor = self.cursor.min(bit_slot(index).0);
         self.queued.insert(index);
     }
 
+    /// Queues every index of `0..bound`, widening the worklist to fit, so one
+    /// worklist serves a run of problems of different sizes.
+    pub(crate) fn queue_all(&mut self, bound: usize) {
+        self.queued.grow(bound);
+        for index in 0..bound {
+            self.insert(index);
+        }
+    }
+
     /// Removes and returns the lowest queued index.
-    pub(super) fn pop_first(&mut self) -> Option<usize> {
+    pub(crate) fn pop_first(&mut self) -> Option<usize> {
         let words = self.queued.words();
         while let Some(&word) = words.get(self.cursor) {
             if word != 0 {

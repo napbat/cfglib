@@ -102,8 +102,6 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "plain_edge_attributes",
     "promote_exclusive_extents",
     "propagate_summaries",
-    "propagate_summaries_narrowed",
-    "propagate_summaries_widened",
     "reachable",
     "recover_exclusive_extents",
     "recover_exclusive_extents_with",
@@ -117,7 +115,6 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "resolve_jump_edges",
     "resume_edge_problem",
     "resume_node_problem",
-    "resume_problem",
     "reverse_postorder",
     "scan_predecessors",
     "search",
@@ -129,24 +126,13 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "simplify",
     "simplify_mapped",
     "solve_edge_problem",
-    "solve_edge_problem_from",
-    "solve_edge_problem_from_with_config",
-    "solve_edge_problem_with_config",
     "solve_ifds",
     "solve_node_problem",
-    "solve_node_problem_from",
-    "solve_node_problem_from_with_config",
-    "solve_node_problem_with_config",
-    "solve_problem",
-    "solve_problem_from",
-    "solve_problem_from_with_config",
-    "solve_problem_with_config",
     "split_critical_edges",
     "split_critical_edges_mapped",
     "split_critical_edges_with",
     "stream_edge_problem",
     "stream_node_problem",
-    "stream_problem",
     "strong_cuts",
     "strong_cuts_of",
     "tarjan_scc",
@@ -155,18 +141,7 @@ pub(super) const PUBLIC_API_FUNCTIONS: &[&str] = &[
     "topological_sort",
     "topological_sort_or_cycle",
     "tree_decomposition",
-    "try_solve_edge_problem",
-    "try_solve_edge_problem_from",
-    "try_solve_edge_problem_from_with_config",
-    "try_solve_edge_problem_with_config",
-    "try_solve_node_problem",
-    "try_solve_node_problem_from",
-    "try_solve_node_problem_from_with_config",
-    "try_solve_node_problem_with_config",
-    "try_solve_problem",
-    "try_solve_problem_from",
-    "try_solve_problem_from_with_config",
-    "try_solve_problem_with_config",
+    "try_meet_options",
     "verify",
     "verify_edge_view",
     "verify_view",
@@ -207,16 +182,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         "directed_detect_loops_multilatch",
         [detect_loops, find_back_edges]
     );
-    benchmark_coverage!(
-        suite,
-        "directed_node_fixpoint_bool",
-        [solve_node_problem, solve_node_problem_with_config]
-    );
-    benchmark_coverage!(
-        suite,
-        "cfg_fixpoint_bool",
-        [solve_problem, solve_problem_with_config]
-    );
+    benchmark_coverage!(suite, "directed_node_fixpoint_bool", [solve_node_problem]);
     benchmark_coverage!(suite, "cfg_clone_merge_linear", [merge_blocks]);
     benchmark_coverage!(suite, "cfg_clone_remove_empty_chain", [remove_empty_blocks]);
     benchmark_coverage!(

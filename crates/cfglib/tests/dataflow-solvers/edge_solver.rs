@@ -1,21 +1,19 @@
 //! The edge-sensitive solver: facts on edges as well as nodes, exceptional
-//! edges that leave before a node's effect, and the `Reachable` lifting for
-//! verification-style analyses whose bottom is "unreached".
+//! edges that leave before a node's effect, and `Option` facts lifted with
+//! `try_meet_options` for verification-style analyses whose bottom is
+//! "unreached".
 
 use std::collections::BTreeSet;
 use std::fmt;
 
 use cfglib::{
     BlockId, Cfg, Direction, Edge, EdgeFacts, EdgeId, EdgeKind, EdgeProblem, EdgeRef, EdgeView,
-    FilteredEdges, IterationOrder, KindedEdge, Reachable, ReachableEdgeProblem, ResumeMode,
-    SolveConfig, SolveError, TrySolveError, resume_edge_problem, solve_edge_problem,
-    solve_edge_problem_from, solve_edge_problem_from_with_config, solve_edge_problem_with_config,
-    stream_edge_problem, try_solve_edge_problem, try_solve_edge_problem_from,
-    try_solve_edge_problem_from_with_config, try_solve_edge_problem_with_config,
+    FilteredEdges, IterationOrder, KindedEdge, Resume, ResumeMode, Solve, SolveConfig, SolveError,
+    TryEdgeProblem, TrySolveError, resume_edge_problem, solve_edge_problem, stream_edge_problem,
+    try_meet_options,
 };
 
-use crate::graphs::{Edit, GenKill, ORDERS, Rng, Shape, union};
-use crate::lifted::Lifted;
+use crate::graphs::{Edit, GenKill, ORDERS, Rng, Shape, live, seeded, step_limit, union};
 use crate::reference::edge_round_robin;
 
 const BOUNDARY_MARK: u8 = 6;
@@ -107,7 +105,7 @@ where
 fn assert_matches_reference(shape: &Shape, direction: Direction, effects: &GenKill) {
     let cfg = shape.cfg();
     let problem = Labels { effects, direction };
-    let facts = solve_edge_problem(&cfg, &problem).unwrap();
+    let facts = solve_edge_problem(&cfg, &problem, Solve::default()).unwrap();
     let forward = direction == Direction::Forward;
     let reference = edge_round_robin(
         shape,
@@ -187,6 +185,7 @@ fn an_unwind_edge_carries_the_pre_state_while_a_normal_edge_carries_the_post_sta
             effects: &effects,
             direction: Direction::Forward,
         },
+        Solve::default(),
     )
     .unwrap();
     assert_eq!(facts.fact_in(id(1)), &BTreeSet::from([BOUNDARY_MARK, 1]));
@@ -214,14 +213,14 @@ fn a_filtered_view_solves_like_the_graph_without_the_filtered_edges() {
         let cfg = shape.cfg();
         let normal_only = |_: EdgeId, edge: &Edge<()>| edge.kind() != EdgeKind::ExceptionUnwind;
         let filtered = FilteredEdges::new(&cfg, normal_only);
-        let through_view = solve_edge_problem(&filtered, &problem).unwrap();
+        let through_view = solve_edge_problem(&filtered, &problem, Solve::default()).unwrap();
 
         let mut rebuilt = shape.clone();
         rebuilt
             .edges
             .retain(|(_, _, kind)| *kind != EdgeKind::ExceptionUnwind);
         let rebuilt_cfg = rebuilt.cfg();
-        let direct = solve_edge_problem(&rebuilt_cfg, &problem).unwrap();
+        let direct = solve_edge_problem(&rebuilt_cfg, &problem, Solve::default()).unwrap();
         for node in shape.live() {
             assert_eq!(
                 through_view.fact_in(id(node)),
@@ -261,36 +260,36 @@ fn seeded_edge_solves_visit_only_what_the_seeds_reach() {
         effects: &effects,
         direction: Direction::Forward,
     };
-    let full = solve_edge_problem(&cfg, &problem).unwrap();
+    let full = solve_edge_problem(&cfg, &problem, Solve::default()).unwrap();
     // The island is visited by the full solve and its gen reaches the join.
     assert!(full.fact_in(id(2)).contains(&3));
 
-    let seeded = solve_edge_problem_from(&cfg, &problem, &[id(0)]).unwrap();
+    let default = SolveConfig::default();
+    let from_entry = solve_edge_problem(&cfg, &problem, seeded(&[id(0)], default)).unwrap();
     assert!(
-        !seeded.fact_in(id(2)).contains(&3),
+        !from_entry.fact_in(id(2)).contains(&3),
         "the island was never seeded"
     );
     assert_eq!(
-        seeded.fact_in(id(2)),
+        from_entry.fact_in(id(2)),
         &BTreeSet::from([BOUNDARY_MARK, 0, 1])
     );
     assert_eq!(
-        seeded.fact_on(edge_id(2)),
+        from_entry.fact_on(edge_id(2)),
         Some(&BTreeSet::new()),
         "an unvisited edge stays at bottom"
     );
 
-    let doubled = solve_edge_problem_from(&cfg, &problem, &[id(0), id(0)]).unwrap();
-    assert_eq!(doubled.steps(), seeded.steps());
+    let doubled = solve_edge_problem(&cfg, &problem, seeded(&[id(0), id(0)], default)).unwrap();
     assert_eq!(
-        solve_edge_problem_from(&cfg, &problem, &[])
-            .unwrap()
-            .steps(),
-        0
+        doubled.stats().step_count(),
+        from_entry.stats().step_count()
     );
+    let nothing = solve_edge_problem(&cfg, &problem, seeded(&[], default)).unwrap();
+    assert_eq!(nothing.stats().step_count(), 0);
 
     let everything: Vec<BlockId> = cfg.block_ids().collect();
-    let all = solve_edge_problem_from(&cfg, &problem, &everything).unwrap();
+    let all = solve_edge_problem(&cfg, &problem, seeded(&everything, default)).unwrap();
     for node in cfg.block_ids() {
         assert_eq!(all.fact_in(node), full.fact_in(node));
         assert_eq!(all.fact_out(node), full.fact_out(node));
@@ -301,7 +300,7 @@ fn seeded_edge_solves_visit_only_what_the_seeds_reach() {
 }
 
 #[test]
-fn the_step_limit_applies_to_every_edge_solver_form_and_raising_it_converges() {
+fn the_step_limit_applies_to_live_and_seeded_edge_solves_and_raising_it_converges() {
     // entry -> head -> body -> head, head -> exit
     let shape = Shape::new(4, &[(0, 1), (1, 2), (2, 1), (1, 3)]);
     let effects = GenKill::with_gen(4, &[(2, 1), (3, 2)]);
@@ -310,31 +309,30 @@ fn the_step_limit_applies_to_every_edge_solver_form_and_raising_it_converges() {
         effects: &effects,
         direction: Direction::Forward,
     };
-    let unbounded = solve_edge_problem(&cfg, &problem).unwrap();
-    let needed = unbounded.steps();
+    let unbounded = solve_edge_problem(&cfg, &problem, Solve::default()).unwrap();
+    let needed = unbounded.stats().step_count();
     let everything: Vec<BlockId> = cfg.block_ids().collect();
-    let short = SolveConfig::with_step_limit(needed - 1);
+    let short = step_limit(needed - 1);
 
     for error in [
-        solve_edge_problem_with_config(&cfg, &problem, short).unwrap_err(),
-        solve_edge_problem_from_with_config(&cfg, &problem, &everything, short).unwrap_err(),
+        solve_edge_problem(&cfg, &problem, live(short)).unwrap_err(),
+        solve_edge_problem(&cfg, &problem, seeded(&everything, short)).unwrap_err(),
     ] {
         let SolveError::StepLimitExceeded {
             limit,
             steps,
             pending_node,
-        } = error;
+        } = SolveError::from(error);
         assert_eq!((limit, steps), (needed - 1, needed - 1));
         assert!(pending_node < cfg.block_bound());
     }
     for limit in [needed, needed + 7] {
-        let config = SolveConfig::with_step_limit(limit);
-        let bounded = solve_edge_problem_with_config(&cfg, &problem, config).unwrap();
-        let seeded =
-            solve_edge_problem_from_with_config(&cfg, &problem, &everything, config).unwrap();
+        let config = step_limit(limit);
+        let bounded = solve_edge_problem(&cfg, &problem, live(config)).unwrap();
+        let from_all = solve_edge_problem(&cfg, &problem, seeded(&everything, config)).unwrap();
         for node in cfg.block_ids() {
             assert_eq!(bounded.fact_out(node), unbounded.fact_out(node));
-            assert_eq!(seeded.fact_out(node), unbounded.fact_out(node));
+            assert_eq!(from_all.fact_out(node), unbounded.fact_out(node));
         }
     }
 }
@@ -371,7 +369,7 @@ fn a_removed_block_is_not_visited_even_when_the_problem_has_a_boundary_for_it() 
     let mut shape = Shape::new(3, &[(0, 1), (1, 2)]);
     shape.hole = Some(1);
     let cfg = shape.cfg();
-    let facts = solve_edge_problem(&cfg, &EveryNodeIsARoot).unwrap();
+    let facts = solve_edge_problem(&cfg, &EveryNodeIsARoot, Solve::default()).unwrap();
     assert_eq!(facts.fact_in(id(0)), &BTreeSet::from([1]));
     assert_eq!(facts.fact_in(id(2)), &BTreeSet::from([1]));
     assert_eq!(
@@ -380,7 +378,7 @@ fn a_removed_block_is_not_visited_even_when_the_problem_has_a_boundary_for_it() 
         "a removed block is not a node of the view"
     );
     assert_eq!(
-        facts.steps(),
+        facts.stats().step_count(),
         cfg.block_count(),
         "each live block is visited once"
     );
@@ -397,10 +395,12 @@ fn seeding_a_removed_block_panics() {
         effects: &effects,
         direction: Direction::Forward,
     };
-    let _ = solve_edge_problem_from(&cfg, &problem, &[id(1)]);
+    let _ = solve_edge_problem(&cfg, &problem, seeded(&[id(1)], SolveConfig::default()));
 }
 
-/// Verification-style stack depth: unreached is `None`, merges must agree.
+/// Verification-style stack depth over `Option` facts: `None` is unreached
+/// bottom and the identity of every merge, a transfer passes it through, and
+/// two reached depths must agree.
 struct Depth {
     deltas: Vec<i32>,
 }
@@ -424,46 +424,65 @@ impl fmt::Display for Mismatch {
 
 impl std::error::Error for Mismatch {}
 
-impl ReachableEdgeProblem<Cfg<()>> for Depth {
-    type Fact = i32;
+impl TryEdgeProblem<Cfg<()>> for Depth {
+    type Fact = Option<i32>;
     type Error = Mismatch;
 
     fn direction(&self) -> Direction {
         Direction::Forward
     }
 
-    fn boundary(&self, _graph: &Cfg<()>, node: BlockId) -> Result<Option<i32>, Mismatch> {
-        Ok((node.index() == 0).then_some(0))
+    fn bottom(&self, _graph: &Cfg<()>) -> Self::Fact {
+        None
     }
 
-    fn merge(
+    fn boundary(&self, _graph: &Cfg<()>, node: BlockId) -> Result<Option<Self::Fact>, Mismatch> {
+        Ok((node.index() == 0).then_some(Some(0)))
+    }
+
+    fn meet(
         &self,
         _graph: &Cfg<()>,
         node: BlockId,
-        left: &i32,
-        right: &i32,
-    ) -> Result<i32, Mismatch> {
-        if left == right {
-            Ok(*left)
-        } else {
-            Err(Mismatch {
-                node: node.index(),
-                left: *left,
-                right: *right,
-            })
-        }
+        left: &Self::Fact,
+        right: &Self::Fact,
+    ) -> Result<Self::Fact, Mismatch> {
+        try_meet_options(left, right, |left, right| {
+            if left == right {
+                Ok(*left)
+            } else {
+                Err(Mismatch {
+                    node: node.index(),
+                    left: *left,
+                    right: *right,
+                })
+            }
+        })
     }
 
-    fn transfer(&self, _graph: &Cfg<()>, node: BlockId, input: &i32) -> Result<i32, Mismatch> {
-        Ok(input + self.deltas[node.index()])
+    fn transfer_node(
+        &self,
+        _graph: &Cfg<()>,
+        node: BlockId,
+        flow_fact: &Self::Fact,
+    ) -> Result<Self::Fact, Mismatch> {
+        Ok(flow_fact.map(|depth| depth + self.deltas[node.index()]))
     }
 
-    fn edge_observes_input(
+    /// An unwind edge leaves before the node's effect commits, so the handler
+    /// observes the state the node received; every other edge its result.
+    fn transfer_edge(
         &self,
         _graph: &Cfg<()>,
         edge: EdgeRef<'_, BlockId, EdgeId, Edge<()>>,
-    ) -> bool {
-        edge.kind() == EdgeKind::ExceptionUnwind
+        node_input: &Self::Fact,
+        node_output: &Self::Fact,
+    ) -> Result<Self::Fact, Mismatch> {
+        Ok(if edge.kind() == EdgeKind::ExceptionUnwind {
+            *node_input
+        } else {
+            *node_output
+        })
     }
 }
 
@@ -477,7 +496,7 @@ fn depth_shape(edges: &[(usize, usize, EdgeKind)], blocks: usize) -> Cfg<()> {
 }
 
 #[test]
-fn reachable_lifting_keeps_unreached_nodes_at_none_and_reached_ones_at_their_depth() {
+fn option_lifting_keeps_unreached_nodes_at_none_and_reached_ones_at_their_depth() {
     use EdgeKind::{ConditionalFalse, ConditionalTrue, Fallthrough};
     // A diamond whose arms agree, plus an island nothing reaches.
     let cfg = depth_shape(
@@ -490,10 +509,10 @@ fn reachable_lifting_keeps_unreached_nodes_at_none_and_reached_ones_at_their_dep
         ],
         5,
     );
-    let problem = Reachable(Depth {
+    let problem = Depth {
         deltas: vec![1, 2, 2, 0, 9],
-    });
-    let facts = try_solve_edge_problem(&cfg, &problem).unwrap();
+    };
+    let facts = solve_edge_problem(&cfg, &problem, Solve::default()).unwrap();
     assert_eq!(facts.fact_in(id(0)), &Some(0));
     assert_eq!(facts.fact_out(id(0)), &Some(1));
     assert_eq!(facts.fact_in(id(3)), &Some(3));
@@ -504,7 +523,7 @@ fn reachable_lifting_keeps_unreached_nodes_at_none_and_reached_ones_at_their_dep
 }
 
 #[test]
-fn reachable_lifting_reports_a_disagreeing_merge_as_a_consumer_error() {
+fn option_lifting_reports_a_disagreeing_merge_as_a_consumer_error() {
     use EdgeKind::{ConditionalFalse, ConditionalTrue, Fallthrough};
     let cfg = depth_shape(
         &[
@@ -515,10 +534,10 @@ fn reachable_lifting_reports_a_disagreeing_merge_as_a_consumer_error() {
         ],
         4,
     );
-    let problem = Reachable(Depth {
+    let problem = Depth {
         deltas: vec![0, 1, 2, 0],
-    });
-    match try_solve_edge_problem(&cfg, &problem).unwrap_err() {
+    };
+    match solve_edge_problem(&cfg, &problem, Solve::default()).unwrap_err() {
         TrySolveError::Problem(mismatch) => {
             assert_eq!(mismatch.node, 3);
             assert_eq!(
@@ -531,13 +550,13 @@ fn reachable_lifting_reports_a_disagreeing_merge_as_a_consumer_error() {
 }
 
 #[test]
-fn reachable_lifting_lets_an_exceptional_edge_observe_the_nodes_pre_state() {
+fn option_lifting_lets_an_exceptional_edge_observe_the_nodes_pre_state() {
     use EdgeKind::{ExceptionUnwind, Fallthrough};
     let cfg = depth_shape(&[(0, 1, Fallthrough), (0, 2, ExceptionUnwind)], 3);
-    let problem = Reachable(Depth {
+    let problem = Depth {
         deltas: vec![3, 0, 0],
-    });
-    let facts = try_solve_edge_problem(&cfg, &problem).unwrap();
+    };
+    let facts = solve_edge_problem(&cfg, &problem, Solve::default()).unwrap();
     assert_eq!(
         facts.fact_in(id(1)),
         &Some(3),
@@ -551,29 +570,30 @@ fn reachable_lifting_lets_an_exceptional_edge_observe_the_nodes_pre_state() {
 }
 
 #[test]
-fn the_fallible_edge_solvers_share_the_step_limit_and_the_seed_contract() {
+fn a_fallible_edge_problem_shares_the_step_limit_and_the_seed_contract() {
     use EdgeKind::Fallthrough;
     let cfg = depth_shape(&[(0, 1, Fallthrough), (1, 2, Fallthrough)], 3);
-    let problem = Reachable(Depth {
+    let problem = Depth {
         deltas: vec![1, 1, 1],
-    });
-    let full = try_solve_edge_problem(&cfg, &problem).unwrap();
-    let needed = full.steps();
+    };
+    let full = solve_edge_problem(&cfg, &problem, Solve::default()).unwrap();
+    let needed = full.stats().step_count();
     let everything: Vec<BlockId> = cfg.block_ids().collect();
 
-    let seeded = try_solve_edge_problem_from(&cfg, &problem, &[id(0)]).unwrap();
-    assert_eq!(seeded.fact_in(id(2)), full.fact_in(id(2)));
-    let nothing = try_solve_edge_problem_from(&cfg, &problem, &[]).unwrap();
+    let default = SolveConfig::default();
+    let from_entry = solve_edge_problem(&cfg, &problem, seeded(&[id(0)], default)).unwrap();
+    assert_eq!(from_entry.fact_in(id(2)), full.fact_in(id(2)));
+    let nothing = solve_edge_problem(&cfg, &problem, seeded(&[], default)).unwrap();
     assert_eq!(
         nothing.fact_in(id(0)),
         &None,
         "nothing was visited, so nothing was reached"
     );
 
-    let short = SolveConfig::with_step_limit(needed - 1);
+    let short = step_limit(needed - 1);
     for error in [
-        try_solve_edge_problem_with_config(&cfg, &problem, short).unwrap_err(),
-        try_solve_edge_problem_from_with_config(&cfg, &problem, &everything, short).unwrap_err(),
+        solve_edge_problem(&cfg, &problem, live(short)).unwrap_err(),
+        solve_edge_problem(&cfg, &problem, seeded(&everything, short)).unwrap_err(),
     ] {
         match error {
             TrySolveError::Solver(SolveError::StepLimitExceeded { limit, steps, .. }) => {
@@ -582,9 +602,9 @@ fn the_fallible_edge_solvers_share_the_step_limit_and_the_seed_contract() {
             TrySolveError::Problem(mismatch) => panic!("unexpected consumer error: {mismatch}"),
         }
     }
-    let enough = SolveConfig::with_step_limit(needed);
-    assert!(try_solve_edge_problem_with_config(&cfg, &problem, enough).is_ok());
-    assert!(try_solve_edge_problem_from_with_config(&cfg, &problem, &everything, enough).is_ok());
+    let enough = step_limit(needed);
+    assert!(solve_edge_problem(&cfg, &problem, live(enough)).is_ok());
+    assert!(solve_edge_problem(&cfg, &problem, seeded(&everything, enough)).is_ok());
 }
 
 /// Asserts that two edge solves agree on every live node and every edge
@@ -621,25 +641,27 @@ fn every_iteration_order_reaches_the_facts_of_the_index_order() {
             let shape = Shape::random(&mut rng, false, true);
             let effects = GenKill::random(&mut rng, shape.blocks);
             let cfg = shape.cfg();
-            let live = shape.live();
-            let seeds = [id(live[rng.below(live.len())])];
+            let blocks = shape.live();
+            let seeds = [id(blocks[rng.below(blocks.len())])];
             let problem = Labels {
                 effects: &effects,
                 direction,
             };
-            let full = solve_edge_problem(&cfg, &problem).unwrap();
-            let seeded = solve_edge_problem_from(&cfg, &problem, &seeds).unwrap();
+            let full = solve_edge_problem(&cfg, &problem, Solve::default()).unwrap();
+            let from_seeds = seeded(&seeds, SolveConfig::default());
+            let from_seeds = solve_edge_problem(&cfg, &problem, from_seeds).unwrap();
             for order in ORDERS {
                 for passes in [0, 2] {
-                    let config = SolveConfig::new()
-                        .with_order(order)
-                        .with_narrowing_passes(passes);
+                    let config = SolveConfig {
+                        max_steps: None,
+                        order,
+                        narrowing_passes: passes,
+                    };
                     let what = format!("{order:?} with {passes} passes, {direction:?}, {shape:?}");
-                    let ordered = solve_edge_problem_with_config(&cfg, &problem, config);
+                    let ordered = solve_edge_problem(&cfg, &problem, live(config));
                     assert_same_edge_facts(&ordered.unwrap(), &full, &shape, &what);
-                    let ordered =
-                        solve_edge_problem_from_with_config(&cfg, &problem, &seeds, config);
-                    assert_same_edge_facts(&ordered.unwrap(), &seeded, &shape, &what);
+                    let ordered = solve_edge_problem(&cfg, &problem, seeded(&seeds, config));
+                    assert_same_edge_facts(&ordered.unwrap(), &from_seeds, &shape, &what);
                 }
             }
         }
@@ -662,20 +684,26 @@ fn a_stream_visits_every_live_node_once_with_the_facts_of_the_solve() {
                 direction,
             };
             for passes in [0, 2] {
-                let config = SolveConfig::new()
-                    .with_order(IterationOrder::WeakTopological)
-                    .with_narrowing_passes(passes);
+                let config = SolveConfig {
+                    max_steps: None,
+                    order: IterationOrder::WeakTopological,
+                    narrowing_passes: passes,
+                };
                 let what = format!("{direction:?} with {passes} passes, {shape:?}");
-                let facts = solve_edge_problem_with_config(&cfg, &problem, config).unwrap();
+                let facts = solve_edge_problem(&cfg, &problem, live(config)).unwrap();
                 let mut visited = Vec::new();
                 let stats =
-                    stream_edge_problem(&cfg, &Lifted(&problem), config, |node, input, output| {
+                    stream_edge_problem(&cfg, &problem, live(config), |node, input, output| {
                         assert_eq!(input, facts.fact_in(node), "IN of {node:?}: {what}");
                         assert_eq!(output, facts.fact_out(node), "OUT of {node:?}: {what}");
                         visited.push(node.index());
                     })
                     .unwrap();
-                assert_eq!(stats.steps(), facts.steps(), "steps: {what}");
+                assert_eq!(
+                    stats.step_count(),
+                    facts.stats().step_count(),
+                    "steps: {what}"
+                );
                 visited.sort_unstable();
                 assert_eq!(visited, shape.live(), "visits: {what}");
             }
@@ -707,6 +735,7 @@ fn a_resume_after_an_edit_equals_a_fresh_solve_of_the_edited_graph() {
                     effects: &effects,
                     direction,
                 },
+                Solve::default(),
             )
             .unwrap();
             let edit = Edit::random(&mut rng, &mut cfg, &mut effects, &shape, &kinds, only_grow);
@@ -714,7 +743,7 @@ fn a_resume_after_an_edit_equals_a_fresh_solve_of_the_edited_graph() {
                 effects: &effects,
                 direction,
             };
-            let fresh = solve_edge_problem(&cfg, &problem).unwrap();
+            let fresh = solve_edge_problem(&cfg, &problem, Solve::default()).unwrap();
             let modes: &[ResumeMode] = if only_grow && direction == Direction::Forward {
                 &[ResumeMode::Reset, ResumeMode::Grow]
             } else {
@@ -723,15 +752,12 @@ fn a_resume_after_an_edit_equals_a_fresh_solve_of_the_edited_graph() {
             for &mode in modes {
                 let what = format!("{mode:?} {direction:?} after {edit:?}, {shape:?}");
                 let changed = [edit.changed(direction)];
-                let config = SolveConfig::new();
-                let resumed = resume_edge_problem(
-                    &cfg,
-                    &Lifted(&problem),
-                    before.clone(),
-                    &changed,
+                let resume = Resume {
+                    changed: &changed,
                     mode,
-                    config,
-                );
+                };
+                let resumed =
+                    resume_edge_problem(&cfg, &problem, before.clone(), resume, Solve::default());
                 assert_same_edge_facts(&resumed.unwrap(), &fresh, &shape, &what);
             }
         }

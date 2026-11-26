@@ -7,8 +7,8 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use core::mem;
 
-use super::SlotFixpointStats;
-use crate::dataflow::bits::DenseBits;
+use crate::dataflow::solve::{SolveError, SolveStats, count_step};
+use crate::dataflow::worklist::Worklist;
 
 /// The slots that one evaluation read and the slots that it changed.
 ///
@@ -41,54 +41,10 @@ impl<K> SlotAccess<K> {
     }
 }
 
-/// A queue of unit indices without duplicates. The lowest index comes out
-/// first. The queue is a bit row, so a push allocates nothing.
-#[derive(Debug, Clone)]
-struct Queue {
-    queued: DenseBits,
-    /// The words below this index hold no queued unit.
-    cursor: usize,
-}
-
-impl Queue {
-    fn new(bound: usize) -> Self {
-        Self {
-            queued: DenseBits::new(bound),
-            cursor: 0,
-        }
-    }
-
-    fn full(bound: usize) -> Self {
-        let mut queue = Self::new(bound);
-        for index in 0..bound {
-            queue.insert(index);
-        }
-        queue
-    }
-
-    fn insert(&mut self, index: usize) {
-        self.cursor = self.cursor.min(index / 64);
-        self.queued.insert(index);
-    }
-
-    /// Queues every unit that `other` holds.
-    fn absorb(&mut self, other: &Self) {
-        for index in other.queued.ones() {
-            self.insert(index);
-        }
-    }
-
-    fn pop_first(&mut self) -> Option<usize> {
-        let words = self.queued.words();
-        while let Some(&word) = words.get(self.cursor) {
-            if word != 0 {
-                let index = self.cursor * 64 + word.trailing_zeros() as usize;
-                self.queued.remove(index);
-                return Some(index);
-            }
-            self.cursor += 1;
-        }
-        None
+/// Queues every unit that `from` holds into `into`.
+fn absorb(into: &mut Worklist, from: &Worklist) {
+    for index in from.queued() {
+        into.insert(index);
     }
 }
 
@@ -121,19 +77,19 @@ impl Queue {
 ///
 /// let mut slots = [0, 0, 0, 7];
 /// let mut fixpoint = OrderedFixpoint::new(3);
-/// let first = fixpoint.run([], |_| true, |unit, access| copy(&mut slots, unit, access));
-/// assert_eq!((slots, first.evaluation_count()), ([7; 4], 5));
+/// let first = fixpoint.run([], None, |unit, access| copy(&mut slots, unit, access)).unwrap();
+/// assert_eq!((slots, first.step_count()), ([7; 4], 5));
 ///
 /// // The caller edits slot 3 outside a run: only the chain of its readers
 /// // runs again, one unit each.
 /// slots[3] = 9;
 /// assert_eq!(fixpoint.invalidate(&[3]), [2]);
-/// let again = fixpoint.run([], |_| true, |unit, access| copy(&mut slots, unit, access));
-/// assert_eq!((slots, again.evaluation_count()), ([9; 4], 3));
+/// let again = fixpoint.run([], None, |unit, access| copy(&mut slots, unit, access)).unwrap();
+/// assert_eq!((slots, again.step_count()), ([9; 4], 3));
 ///
 /// // Nothing is dirty any more.
-/// let idle = fixpoint.run([], |_| true, |unit, access| copy(&mut slots, unit, access));
-/// assert_eq!(idle.evaluation_count(), 0);
+/// let idle = fixpoint.run([], None, |unit, access| copy(&mut slots, unit, access)).unwrap();
+/// assert_eq!(idle.step_count(), 0);
 /// ```
 #[derive(Debug, Clone)]
 pub struct OrderedFixpoint<K> {
@@ -143,7 +99,7 @@ pub struct OrderedFixpoint<K> {
     /// The same relation inverted: a slot and a unit that read it.
     readers: BTreeSet<(K, usize)>,
     /// The units the next run starts with.
-    dirty: Queue,
+    dirty: Worklist,
 }
 
 impl<K: Ord + Clone> OrderedFixpoint<K> {
@@ -154,48 +110,54 @@ impl<K: Ord + Clone> OrderedFixpoint<K> {
         Self {
             reads: (0..units).map(|_| Vec::new()).collect(),
             readers: BTreeSet::new(),
-            dirty: Queue::full(units),
+            dirty: Worklist::of(units, 0..units),
         }
     }
 
     /// Runs ordered sweeps until no unit is dirty, as [`ordered_fixpoint`]
-    /// does, from the units already dirty and the units in `dirty`.
+    /// does, from the units already dirty and the units in `dirty`, taking at
+    /// most `max_steps` evaluations (`None` is unbounded).
     ///
     /// A unit that changes a slot makes every unit whose latest evaluation
     /// read it dirty, whether that evaluation ran in this run or an earlier
-    /// one. When `proceed` stops the run, the units still dirty stay dirty
-    /// for the next run.
+    /// one. When the step limit stops the run, the units still dirty stay
+    /// dirty for the next run.
     ///
     /// # Panics
     ///
     /// Panics when a unit in `dirty` is out of range.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SolveError::StepLimitExceeded`], naming the next unit, when
+    /// a dirty unit is left at the limit.
     pub fn run(
         &mut self,
         dirty: impl IntoIterator<Item = usize>,
-        mut proceed: impl FnMut(usize) -> bool,
+        max_steps: Option<usize>,
         mut evaluate: impl FnMut(usize, &mut SlotAccess<K>),
-    ) -> SlotFixpointStats {
+    ) -> Result<SolveStats, SolveError> {
         let units = self.reads.len();
         for unit in dirty {
             assert!(unit < units, "dirty unit is out of range");
             self.dirty.insert(unit);
         }
-        let mut stats = SlotFixpointStats::default();
-        let mut current = mem::replace(&mut self.dirty, Queue::new(units));
-        let mut next = Queue::new(units);
+        let (mut rounds, mut steps) = (0, 0);
+        let mut current = mem::replace(&mut self.dirty, Worklist::new(units));
+        let mut next = Worklist::new(units);
         let mut access = SlotAccess::new();
-        for sweep in 0.. {
-            if !proceed(sweep) {
-                current.absorb(&next);
-                self.dirty = current;
-                return stats;
-            }
-            stats.rounds += 1;
+        loop {
+            rounds += 1;
             let mut changed = false;
             while let Some(unit) = current.pop_first() {
+                if let Err(error) = count_step(max_steps, &mut steps, unit) {
+                    current.insert(unit);
+                    absorb(&mut current, &next);
+                    self.dirty = current;
+                    return Err(error);
+                }
                 access.reads.clear();
                 evaluate(unit, &mut access);
-                stats.evaluations += 1;
                 access.reads.sort_unstable();
                 access.reads.dedup();
                 // Record the new reads before the changes queue their
@@ -225,8 +187,7 @@ impl<K: Ord + Clone> OrderedFixpoint<K> {
             }
             mem::swap(&mut current, &mut next);
         }
-        stats.converged = true;
-        stats
+        Ok(SolveStats::new(steps, rounds, 0))
     }
 
     /// Makes dirty every unit whose latest evaluation read one of `slots`,
@@ -276,13 +237,17 @@ impl<K: Ord + Clone> OrderedFixpoint<K> {
 /// A sweep after the first runs only when the sweep before it changed a
 /// slot. It then runs also when no unit is dirty, so the sweep count is that
 /// of the full sweep, which stops after its first sweep without a change.
-/// Before each sweep the driver calls `proceed` with the sweep index. When
-/// `proceed` returns `false`, the fixpoint stops and is not converged. Put a
-/// sweep limit or a work budget in `proceed`.
+/// The driver takes at most `max_steps` evaluations (`None` is unbounded);
+/// put a work budget there.
 ///
 /// This is the first run of an [`OrderedFixpoint`], which keeps the reads it
 /// recorded so that a later run after an edit evaluates only what the edit
 /// affects.
+///
+/// # Errors
+///
+/// Returns [`SolveError::StepLimitExceeded`], naming the next unit, when a
+/// dirty unit is left at the limit.
 ///
 /// # Examples
 ///
@@ -292,22 +257,22 @@ impl<K: Ord + Clone> OrderedFixpoint<K> {
 /// // Unit `u` copies slot `u + 1` into slot `u`, and slot 3 starts set. The
 /// // chain runs against the sweep order, so it sets one unit in each sweep.
 /// let mut slots = [false, false, false, true];
-/// let stats = ordered_fixpoint(3, |_| true, |unit, access| {
+/// let stats = ordered_fixpoint(3, None, |unit, access| {
 ///     access.read(unit + 1);
 ///     if !slots[unit] && slots[unit + 1] {
 ///         slots[unit] = true;
 ///         access.changed(unit);
 ///     }
-/// });
+/// })
+/// .unwrap();
 /// assert_eq!(slots, [true; 4]);
 /// assert_eq!(stats.round_count(), 4);
-/// assert_eq!(stats.evaluation_count(), 5);
-/// assert!(stats.converged());
+/// assert_eq!(stats.step_count(), 5);
 /// ```
 pub fn ordered_fixpoint<K: Ord + Clone>(
     units: usize,
-    proceed: impl FnMut(usize) -> bool,
+    max_steps: Option<usize>,
     evaluate: impl FnMut(usize, &mut SlotAccess<K>),
-) -> SlotFixpointStats {
-    OrderedFixpoint::new(units).run([], proceed, evaluate)
+) -> Result<SolveStats, SolveError> {
+    OrderedFixpoint::new(units).run([], max_steps, evaluate)
 }

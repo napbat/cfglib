@@ -5,7 +5,10 @@
 use std::collections::BTreeSet;
 use std::fmt::Debug;
 
-use cfglib::{BlockId, Cfg, DenseId, Direction, EdgeKind, Facts, IterationOrder, SolveStats};
+use cfglib::{
+    BlockId, Cfg, DenseId, Direction, EdgeKind, Facts, IterationOrder, Seeds, Solve, SolveConfig,
+    SolveStats,
+};
 
 /// A xorshift generator: the same seed gives the same graphs everywhere.
 pub struct Rng(u64);
@@ -292,6 +295,42 @@ pub const ORDERS: [IterationOrder; 3] = [
     IterationOrder::WeakTopological,
 ];
 
+/// An index-order solve config that stops after `max_steps` steps.
+pub fn step_limit(max_steps: usize) -> SolveConfig {
+    SolveConfig {
+        max_steps: Some(max_steps),
+        ..SolveConfig::default()
+    }
+}
+
+/// A solve from every live node, within `config`.
+pub fn live<'a, N>(config: SolveConfig) -> Solve<'a, N> {
+    Solve {
+        seeds: Seeds::Live,
+        config,
+    }
+}
+
+/// A solve from `seeds` alone, within `config`.
+pub fn seeded<N>(seeds: &[N], config: SolveConfig) -> Solve<'_, N> {
+    Solve {
+        seeds: Seeds::Of(seeds),
+        config,
+    }
+}
+
+/// The solve of a per-block analysis of a control-flow graph, within
+/// `config`: forward from the entry, which starts from the boundary fact
+/// even where it is a branch target, so that only what it reaches is
+/// solved; backward from every live block.
+pub fn rooted<'a>(cfg: &Cfg<()>, direction: Direction, config: SolveConfig) -> Solve<'a, BlockId> {
+    let seeds = match direction {
+        Direction::Forward => Seeds::Reachable(cfg.entry()),
+        Direction::Backward => Seeds::Live,
+    };
+    Solve { seeds, config }
+}
+
 /// Asserts that two solves agree on the IN and OUT facts of every node in
 /// `nodes`, whatever number of steps each took.
 pub fn assert_same_facts<N: DenseId, F: PartialEq + Debug>(
@@ -328,7 +367,11 @@ pub fn assert_streams_like<N: DenseId, F: PartialEq + Debug>(
         assert_eq!(output, expected.fact_out(node), "OUT of {node:?}: {what}");
         visited.push(node);
     });
-    assert_eq!(stats.steps(), expected.steps(), "steps: {what}");
+    assert_eq!(
+        stats.step_count(),
+        expected.stats().step_count(),
+        "steps: {what}"
+    );
     visited.sort_unstable();
     let mut nodes: Vec<N> = nodes.into_iter().collect();
     nodes.sort_unstable();

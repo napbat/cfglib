@@ -1,4 +1,5 @@
-//! Whole-program call-graph construction on [`Graph`].
+//! Whole-program call-graph construction on [`Graph`], and the callee-first
+//! summary propagation over any [`GraphView`].
 //!
 //! A call graph does not need its own storage abstraction. Functions are node
 //! payloads, call details are edge payloads, and all traversal, SCC, dominance,
@@ -8,20 +9,21 @@
 //! names), never a library-owned string.
 
 extern crate alloc;
-use alloc::collections::{BTreeMap, BinaryHeap};
+use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::cmp::Reverse;
 
 use crate::cfg::Cfg;
+use crate::dataflow::worklist::Worklist;
 use crate::flow::CallInfo;
 use crate::graph::scc::tarjan_scc;
 use crate::graph::store::{Graph, NodeId};
+use crate::graph::view::{DenseId, GraphView, NodeView};
 use crate::identity::{NO_INDEX, slot, word};
 
 /// A function on the walk that places its component's members, in the rank
-/// table of [`propagate`], where [`NO_INDEX`] marks a function not yet placed
-/// in its component's callee-first order.
+/// table of [`propagate_summaries`], where [`NO_INDEX`] marks a function not
+/// yet placed in its component's callee-first order.
 const OPEN: u32 = NO_INDEX - 1;
 
 /// The graph [`call_graph`] builds: functions as nodes, calls as edges.
@@ -197,10 +199,11 @@ pub fn call_graph_indexed<I: CallInfo>(
 /// keys should compute a [`FunctionIndex`] once, or keep the one
 /// [`call_graph_indexed`] returns.
 #[must_use]
-pub fn find_function<C: PartialEq>(
-    graph: &Graph<FunctionNode<C>, CallMetadata>,
-    id: &C,
-) -> Option<NodeId> {
+pub fn find_function<G, C>(graph: &G, id: &C) -> Option<G::NodeId>
+where
+    G: NodeView<NodeData = FunctionNode<C>>,
+    C: PartialEq,
+{
     graph.node_ids().find(|&node| graph.node(node).id == *id)
 }
 
@@ -213,14 +216,15 @@ pub fn find_function<C: PartialEq>(
 /// consumer that classifies every function should call
 /// [`recursive_functions`] once, which answers for all of them in O(n + m).
 ///
+/// It takes the store rather than a view because it rejects a removed node,
+/// which only the store can tell from a live one without a scan of the
+/// nodes.
+///
 /// # Panics
 ///
 /// Panics when `function` is not a node of `graph`.
 #[must_use]
-pub fn is_recursive_function<C>(
-    graph: &Graph<FunctionNode<C>, CallMetadata>,
-    function: NodeId,
-) -> bool {
+pub fn is_recursive_function<N, E>(graph: &Graph<N, E>, function: NodeId) -> bool {
     assert!(
         graph.contains_node(function),
         "node {} is not a node of the call graph",
@@ -246,11 +250,10 @@ pub fn is_recursive_function<C>(
 /// node calls itself, so entry `f` equals [`is_recursive_function`] for every
 /// live node `f`.
 ///
-/// The vector is indexed by [`NodeId::index`] and sized by the graph's node
-/// *bound*; a removed node's slot is `false`. Generic over any [`Graph`], like
-/// [`propagate_summaries`].
+/// The vector is indexed by [`DenseId::index`] and sized by the view's node
+/// *bound*; a removed node's slot is `false`.
 #[must_use]
-pub fn recursive_functions<N, E>(graph: &Graph<N, E>) -> Vec<bool> {
+pub fn recursive_functions<G: GraphView>(graph: &G) -> Vec<bool> {
     let mut recursive = vec![false; graph.node_bound()];
     let components = tarjan_scc(graph);
     for component in components.components() {
@@ -263,141 +266,118 @@ pub fn recursive_functions<N, E>(graph: &Graph<N, E>) -> Vec<bool> {
     recursive
 }
 
+/// A per-node summary over a dependency graph, which
+/// [`propagate_summaries`] computes callee-first.
+///
+/// Nodes are functions, edges point from caller to callee, and
+/// [`compute`](Self::compute) derives one function's summary while reading
+/// its callees' current summaries. The widening and narrowing hooks take
+/// the parameters of [`TryNodeProblem`](crate::TryNodeProblem)'s (the graph,
+/// the node, the summary it held and the one now computed) and default to
+/// changing nothing; [`SummaryConfig`] decides whether they run.
+pub trait SummaryProblem<G: GraphView> {
+    /// The summary of one function.
+    type Summary: Clone + PartialEq;
+
+    /// The summary every function starts with, and keeps when it is removed.
+    fn bottom(&self, graph: &G) -> Self::Summary;
+
+    /// The summary of `node`, from its callees' current summaries, indexed
+    /// by [`DenseId::index`].
+    fn compute(&self, graph: &G, node: G::NodeId, summaries: &[Self::Summary]) -> Self::Summary;
+
+    /// Widens at the widening point `node`: combines the summary it held
+    /// with the one `compute` returned.
+    ///
+    /// It must return a summary at least both arguments, and the summaries
+    /// stored at one widening point must stop changing after finitely many
+    /// steps whatever `compute` returns. The default returns `next`, which is
+    /// no widening.
+    fn widen(
+        &self,
+        _graph: &G,
+        _node: G::NodeId,
+        _previous: &Self::Summary,
+        next: &Self::Summary,
+    ) -> Self::Summary {
+        next.clone()
+    }
+
+    /// Narrows at the widening point `node` during the descending pass:
+    /// refines the summary it holds with the one `compute` returned.
+    ///
+    /// It should return a summary between `next` and `previous`, and the
+    /// summaries it stores at one widening point must stop changing after
+    /// finitely many steps. The default returns `next`, a plain descending
+    /// step.
+    fn narrow(
+        &self,
+        _graph: &G,
+        _node: G::NodeId,
+        _previous: &Self::Summary,
+        next: &Self::Summary,
+    ) -> Self::Summary {
+        next.clone()
+    }
+}
+
+/// Which hooks of a [`SummaryProblem`] [`propagate_summaries`] runs. The
+/// default runs neither: a plain least fixpoint over a finite-height
+/// summary domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SummaryConfig {
+    /// Widen at the widening points of each recursive component, so that
+    /// summary domains of infinite height (intervals, stack depths, argument
+    /// ranges) converge too.
+    pub widening: bool,
+    /// Once a recursive component is stable, run a descending pass over it
+    /// that narrows at its widening points, before its callers read it.
+    pub narrowing: bool,
+}
+
 /// Compute a per-node summary over a dependency graph in callee-first
 /// order, iterating cyclic components to a fixpoint.
 ///
-/// The interprocedural scaffold: nodes are functions, edges point from
-/// caller to callee, and `compute` derives one function's summary while
-/// reading its callees' current summaries out of the slice (indexed by
-/// [`NodeId::index`]). Acyclic call graphs get exactly one `compute` per
-/// function with every callee already final; recursive components iterate
-/// until their summaries stabilize, so `compute` must be monotone over a
-/// finite-height summary domain for termination.
-/// [`propagate_summaries_widened`] runs the same schedule with a widening
-/// hook, for summary domains of infinite height.
+/// The interprocedural scaffold: acyclic call graphs get exactly one
+/// `compute` per function with every callee already final; recursive
+/// components iterate until their summaries stabilize, so without widening
+/// `compute` must be monotone over a finite-height summary domain for
+/// termination.
 ///
-/// Inside a recursive component, `compute` runs once for every member, callees
-/// first along a depth-first postorder of the component, and then again only
-/// for the callers of a member whose summary changed. A summary therefore
-/// crosses one call edge per `compute`, not one per pass over the component.
+/// Inside a recursive component, `compute` runs once for every member,
+/// callees first along a depth-first postorder of the component, and then
+/// again only for the callers of a member whose summary changed. A summary
+/// therefore crosses one call edge per `compute`, not one per pass over the
+/// component. This schedule is its own, not a solve in a weak topological
+/// order: callee-first along the call edges is what makes an acyclic call
+/// graph cost one `compute` per function.
 ///
-/// The returned vector is indexed by [`NodeId::index`] and sized by the
-/// graph's node *bound*, so a removed node keeps `bottom` in its slot.
+/// - **Widening** ([`SummaryConfig::widening`]). A widening point is a member
+///   that reads a callee of its own component that does not run before it in
+///   the callee-first order: a later member, or itself through a self-call. A
+///   cycle cannot run strictly callee-first all the way around, so every
+///   cycle of the component holds a widening point: the points form a
+///   feedback vertex set of the component. When `compute` changes the
+///   summary of a widening point, the summary stored is
+///   [`widen`](SummaryProblem::widen)`(graph, node, previous, computed)`, not `computed`;
+///   `previous` is `bottom` the first time. A summary that `widen` leaves at
+///   `previous` does not count as changed. Every other function stores what
+///   `compute` returns. The iteration terminates when `widen` is a widening
+///   operator; when it also returns an upper bound of its two summaries and
+///   `compute` is monotone, every returned summary is a sound
+///   over-approximation of the least fixpoint.
+/// - **Narrowing** ([`SummaryConfig::narrowing`]). Once a recursive component
+///   has stabilized, a descending pass recomputes its members in the same
+///   callee-first order: every member stores what `compute` returns, except a
+///   widening point, which stores [`narrow`](SummaryProblem::narrow)`(graph, node, current,
+///   computed)`. A changed summary queues its callers inside the component
+///   again, and the pass ends when nothing changes. The callers outside the
+///   component run only after that, so they read the narrowed summaries.
 ///
-/// Generic over any [`Graph`] — the same shape serves module
-/// graphs, type-relation closures, or any callee-first aggregation.
-#[must_use]
-pub fn propagate_summaries<N, E, S: Clone + PartialEq>(
-    graph: &Graph<N, E>,
-    bottom: &S,
-    compute: impl FnMut(&Graph<N, E>, NodeId, &[S]) -> S,
-) -> Vec<S> {
-    propagate(
-        graph,
-        bottom,
-        compute,
-        None::<fn(NodeId, &S, &S) -> S>,
-        None::<fn(NodeId, &S, &S) -> S>,
-    )
-}
-
-/// Compute per-node summaries as [`propagate_summaries`] does, and widen at
-/// the functions that cut the recursion, so that summary domains of infinite
-/// height (intervals, stack depths, argument ranges) converge too.
-///
-/// The schedule is the one of [`propagate_summaries`]. Inside a recursive
-/// component, a widening point is a member that reads a callee of its own
-/// component that does not run before it in the callee-first order: a later
-/// member, or itself through a self-call. A cycle cannot run strictly
-/// callee-first all the way around, so every cycle of the component holds a
-/// widening point: the points form a feedback vertex set of the component.
-///
-/// When `compute` changes the summary of a widening point, the summary stored
-/// is `widen(node, previous, computed)`, not `computed`; `previous` is
-/// `bottom` the first time. A summary that `widen` leaves at `previous` does
-/// not count as changed. Every other function, and every function outside a
-/// recursive component, stores what `compute` returns.
-///
-/// The iteration terminates when `widen` is a widening operator: whatever
-/// summaries `compute` returns, the summaries stored at one widening point
-/// stop changing after finitely many steps. When `widen` also returns an upper
-/// bound of its two summaries and `compute` is monotone, every returned summary
-/// is at least what `compute` derives from the returned summaries of the
-/// function's callees: a sound over-approximation of the least fixpoint. A
-/// `widen` that returns `computed` makes this function
-/// [`propagate_summaries`], call for call.
-///
-/// # Examples
-///
-/// The deepest stack a call reaches is the function's frame plus the deepest
-/// stack of its callees. Recursion makes that grow forever; the widening
-/// sends a depth that grows again to `u32::MAX`, unbounded.
-///
-/// ```
-/// use cfglib::{Graph, propagate_summaries_widened};
-///
-/// // Frame sizes: main → even ⇄ odd, and even → leaf.
-/// let mut graph = Graph::<u32, ()>::new();
-/// let [main, even, odd, leaf] = [16, 32, 32, 8].map(|frame| graph.add_node(frame));
-/// for (caller, callee) in [(main, even), (even, odd), (odd, even), (even, leaf)] {
-///     graph.add_edge(caller, callee, ());
-/// }
-///
-/// let depths = propagate_summaries_widened(
-///     &graph,
-///     &None,
-///     |graph, node, depths: &[Option<u32>]| {
-///         let deepest = graph.successors(node).filter_map(|callee| depths[callee.index()]);
-///         Some(graph.node(node).saturating_add(deepest.max().unwrap_or(0)))
-///     },
-///     |_, previous, computed| match (*previous, *computed) {
-///         (Some(previous), Some(computed)) if computed > previous => Some(u32::MAX),
-///         (previous, computed) => previous.max(computed),
-///     },
-/// );
-/// assert_eq!(depths[leaf.index()], Some(8));
-/// assert_eq!(depths[main.index()], Some(u32::MAX));
-/// ```
-#[must_use]
-pub fn propagate_summaries_widened<N, E, S: Clone + PartialEq>(
-    graph: &Graph<N, E>,
-    bottom: &S,
-    compute: impl FnMut(&Graph<N, E>, NodeId, &[S]) -> S,
-    widen: impl FnMut(NodeId, &S, &S) -> S,
-) -> Vec<S> {
-    propagate(
-        graph,
-        bottom,
-        compute,
-        Some(widen),
-        None::<fn(NodeId, &S, &S) -> S>,
-    )
-}
-
-/// Compute per-node summaries as [`propagate_summaries_widened`] does, then
-/// narrow each recursive component back toward its least fixpoint before its
-/// callers read it.
-///
-/// A widening operator overshoots on purpose: it trades precision for
-/// termination, so a summary that would have settled lower is sent to the top
-/// of its chain. Once a recursive component has stabilized under `widen`,
-/// a descending pass recomputes its members in the same callee-first order:
-/// every member stores what `compute` returns, except a widening point, which
-/// stores `narrow(node, current, computed)`. A changed summary queues its
-/// callers inside the component again, as in the ascending pass, and the pass
-/// ends when nothing changes. The callers outside the component run only
-/// after that, so they read the narrowed summaries.
-///
-/// `narrow` should return a summary between `computed` and `current`: below
-/// the widened summary, and no lower than what the summaries it read give.
-/// When it does, `compute` is monotone and `widen` returns an upper bound,
-/// every returned summary stays a sound over-approximation of the least
-/// fixpoint, as with [`propagate_summaries_widened`], and is no higher than
-/// what that function returns. The descending pass terminates when `narrow`
-/// is a narrowing operator: the summaries it stores at one widening point stop
-/// changing after finitely many steps. A `narrow` that returns `current`
-/// makes this function [`propagate_summaries_widened`], apart from one
-/// further `compute` per member of each recursive component.
+/// The returned vector is indexed by [`DenseId::index`] and sized by the
+/// view's node *bound*, so a removed node keeps `bottom` in its slot. The
+/// same shape serves module graphs, type-relation closures, or any
+/// callee-first aggregation.
 ///
 /// # Examples
 ///
@@ -406,71 +386,65 @@ pub fn propagate_summaries_widened<N, E, S: Clone + PartialEq>(
 /// narrowing brings it back down to the 255 the saturation gives.
 ///
 /// ```
-/// use cfglib::{Graph, propagate_summaries_narrowed, propagate_summaries_widened};
+/// use cfglib::{Graph, NodeId, SummaryConfig, SummaryProblem, propagate_summaries};
 ///
-/// // main → even ⇄ odd. Every call adds one to the highest value its callees
-/// // return, and `odd` saturates what it returns at 255.
+/// /// Each node's payload says whether it saturates what it returns.
+/// struct Bound;
+///
+/// impl SummaryProblem<Graph<bool, ()>> for Bound {
+///     type Summary = u32;
+///     fn bottom(&self, _: &Graph<bool, ()>) -> u32 {
+///         0
+///     }
+///     fn compute(&self, graph: &Graph<bool, ()>, node: NodeId, bounds: &[u32]) -> u32 {
+///         let highest = graph.successors(node).map(|callee| bounds[callee.index()]).max();
+///         let bound = highest.map_or(0, |bound| bound.saturating_add(1));
+///         if *graph.node(node) { bound.min(255) } else { bound }
+///     }
+///     fn widen(&self, _: &Graph<bool, ()>, _: NodeId, previous: &u32, computed: &u32) -> u32 {
+///         if computed > previous { u32::MAX } else { *previous }
+///     }
+///     fn narrow(&self, _: &Graph<bool, ()>, _: NodeId, current: &u32, computed: &u32) -> u32 {
+///         if *current == u32::MAX { *computed } else { *current }
+///     }
+/// }
+///
+/// // main → even ⇄ odd, and `odd` saturates what it returns at 255.
 /// let mut graph = Graph::<bool, ()>::new();
 /// let [main, even, odd] = [false, false, true].map(|saturates| graph.add_node(saturates));
 /// for (caller, callee) in [(main, even), (even, odd), (odd, even)] {
 ///     graph.add_edge(caller, callee, ());
 /// }
 ///
-/// let compute = |graph: &Graph<bool, ()>, node, bounds: &[u32]| {
-///     let highest = graph.successors(node).map(|callee| bounds[callee.index()]).max();
-///     let bound = highest.map_or(0, |bound| bound.saturating_add(1));
-///     if *graph.node(node) { bound.min(255) } else { bound }
-/// };
-/// let widen = |_, previous: &u32, computed: &u32| {
-///     if computed > previous { u32::MAX } else { *previous }
-/// };
-/// let narrow = |_, current: &u32, computed: &u32| {
-///     if *current == u32::MAX { *computed } else { *current }
-/// };
-///
 /// // Widening alone leaves the cycle, and so `main`, unbounded.
-/// let widened = propagate_summaries_widened(&graph, &0, compute, widen);
+/// let widening = SummaryConfig { widening: true, narrowing: false };
+/// let widened = propagate_summaries(&graph, &Bound, widening);
 /// assert_eq!(widened[main.index()], u32::MAX);
 /// // Narrowing recovers the saturation: odd 255, even 256, main 257.
-/// let narrowed = propagate_summaries_narrowed(&graph, &0, compute, widen, narrow);
+/// let narrowing = SummaryConfig { widening: true, narrowing: true };
+/// let narrowed = propagate_summaries(&graph, &Bound, narrowing);
 /// assert_eq!([narrowed[odd.index()], narrowed[even.index()], narrowed[main.index()]], [255, 256, 257]);
 /// ```
 #[must_use]
-pub fn propagate_summaries_narrowed<N, E, S: Clone + PartialEq>(
-    graph: &Graph<N, E>,
-    bottom: &S,
-    compute: impl FnMut(&Graph<N, E>, NodeId, &[S]) -> S,
-    widen: impl FnMut(NodeId, &S, &S) -> S,
-    narrow: impl FnMut(NodeId, &S, &S) -> S,
-) -> Vec<S> {
-    propagate(graph, bottom, compute, Some(widen), Some(narrow))
-}
-
-/// The schedule of [`propagate_summaries`], with `widen` applied at the
-/// widening points of [`propagate_summaries_widened`] when it is given, and
-/// the descending pass of [`propagate_summaries_narrowed`] when `narrow` is.
-fn propagate<N, E, S: Clone + PartialEq>(
-    graph: &Graph<N, E>,
-    bottom: &S,
-    mut compute: impl FnMut(&Graph<N, E>, NodeId, &[S]) -> S,
-    mut widen: Option<impl FnMut(NodeId, &S, &S) -> S>,
-    mut narrow: Option<impl FnMut(NodeId, &S, &S) -> S>,
-) -> Vec<S> {
-    let mut summaries = alloc::vec![bottom.clone(); graph.node_bound()];
+pub fn propagate_summaries<G, P>(graph: &G, problem: &P, config: SummaryConfig) -> Vec<P::Summary>
+where
+    G: GraphView,
+    P: SummaryProblem<G>,
+{
+    let mut summaries = vec![problem.bottom(graph); graph.node_bound()];
     let components = tarjan_scc(graph);
     // Each member's position in its component's callee-first order.
-    let mut rank = alloc::vec![NO_INDEX; graph.node_bound()];
+    let mut rank = vec![NO_INDEX; graph.node_bound()];
     // Scratch reused by every recursive component.
-    let mut order: Vec<NodeId> = Vec::new();
+    let mut order: Vec<G::NodeId> = Vec::new();
     let mut walk = Vec::new();
-    let mut queued: Vec<bool> = Vec::new();
     let mut widens: Vec<bool> = Vec::new();
-    let mut pending: BinaryHeap<Reverse<usize>> = BinaryHeap::new();
+    let mut pending = Worklist::new(0);
     // Components arrive in reverse topological order: callees first.
     for (component_index, component) in components.components().enumerate() {
         if !components.component(component[0]).is_cyclic(graph) {
             let node = component[0];
-            summaries[node.index()] = compute(graph, node, &summaries);
+            summaries[node.index()] = problem.compute(graph, node, &summaries);
             continue;
         }
         // Depth-first postorder over the component's own call edges, from
@@ -505,7 +479,7 @@ fn propagate<N, E, S: Clone + PartialEq>(
         // A member widens when it reads a member of the component ranked no
         // earlier than itself. Ranks cannot fall all the way around a cycle,
         // so every cycle has such a call edge.
-        if widen.is_some() {
+        if config.widening || config.narrowing {
             widens.clear();
             widens.extend(order.iter().enumerate().map(|(position, &node)| {
                 graph.successors(node).any(|callee| {
@@ -516,21 +490,15 @@ fn propagate<N, E, S: Clone + PartialEq>(
         }
         // Every member starts queued; a change queues the member's callers
         // inside the component, and the lowest rank runs first.
-        queued.clear();
-        queued.resize(order.len(), true);
-        pending.clear();
-        pending.extend((0..order.len()).map(Reverse));
-        while let Some(Reverse(position)) = pending.pop() {
-            queued[position] = false;
+        pending.queue_all(order.len());
+        while let Some(position) = pending.pop_first() {
             let node = order[position];
-            let mut updated = compute(graph, node, &summaries);
+            let mut updated = problem.compute(graph, node, &summaries);
             if updated == summaries[node.index()] {
                 continue;
             }
-            if let Some(widen) = widen.as_mut()
-                && widens[position]
-            {
-                updated = widen(node, &summaries[node.index()], &updated);
+            if config.widening && widens[position] {
+                updated = problem.widen(graph, node, &summaries[node.index()], &updated);
                 if updated == summaries[node.index()] {
                     continue;
                 }
@@ -538,70 +506,58 @@ fn propagate<N, E, S: Clone + PartialEq>(
             summaries[node.index()] = updated;
             for caller in graph.predecessors(node) {
                 if components.component_index(caller) == component_index {
-                    let caller_rank = slot(rank[caller.index()]);
-                    if !core::mem::replace(&mut queued[caller_rank], true) {
-                        pending.push(Reverse(caller_rank));
-                    }
+                    pending.insert(slot(rank[caller.index()]));
                 }
             }
         }
-        if let Some(narrow) = narrow.as_mut() {
+        if config.narrowing {
             let ranking = Ranking {
                 order: &order,
                 rank: &rank,
                 widens: &widens,
             };
-            descend(
-                graph,
-                &mut summaries,
-                &mut compute,
-                narrow,
-                &ranking,
-                &mut queued,
-                &mut pending,
-            );
+            descend(graph, problem, &mut summaries, &ranking, &mut pending);
         }
     }
     summaries
 }
 
-/// One recursive component in the callee-first order of [`propagate`].
-struct Ranking<'a> {
+/// One recursive component in the callee-first order of
+/// [`propagate_summaries`].
+struct Ranking<'a, N> {
     /// The members in callee-first order.
-    order: &'a [NodeId],
+    order: &'a [N],
     /// Each member's position in `order`, by node index.
     rank: &'a [u32],
     /// Whether the member at each position is a widening point.
     widens: &'a [bool],
 }
 
-/// The descending pass of [`propagate_summaries_narrowed`] over a recursive
-/// component that is stable under `widen`: recompute every member from those
+/// The descending pass of [`propagate_summaries`] over a recursive component
+/// that is stable under widening: recompute every member from those
 /// summaries in the same order, narrowing at the same points, until nothing
 /// changes, so that the component's callers read the narrowed summaries.
-fn descend<N, E, S: PartialEq>(
-    graph: &Graph<N, E>,
-    summaries: &mut [S],
-    compute: &mut impl FnMut(&Graph<N, E>, NodeId, &[S]) -> S,
-    narrow: &mut impl FnMut(NodeId, &S, &S) -> S,
-    ranking: &Ranking<'_>,
-    queued: &mut Vec<bool>,
-    pending: &mut BinaryHeap<Reverse<usize>>,
-) {
+fn descend<G, P>(
+    graph: &G,
+    problem: &P,
+    summaries: &mut [P::Summary],
+    ranking: &Ranking<'_, G::NodeId>,
+    pending: &mut Worklist,
+) where
+    G: GraphView,
+    P: SummaryProblem<G>,
+{
     let Ranking {
         order,
         rank,
         widens,
     } = *ranking;
-    queued.clear();
-    queued.resize(order.len(), true);
-    pending.extend((0..order.len()).map(Reverse));
-    while let Some(Reverse(position)) = pending.pop() {
-        queued[position] = false;
+    pending.queue_all(order.len());
+    while let Some(position) = pending.pop_first() {
         let node = order[position];
-        let mut updated = compute(graph, node, summaries);
+        let mut updated = problem.compute(graph, node, summaries);
         if widens[position] {
-            updated = narrow(node, &summaries[node.index()], &updated);
+            updated = problem.narrow(graph, node, &summaries[node.index()], &updated);
         }
         if updated == summaries[node.index()] {
             continue;
@@ -611,10 +567,8 @@ fn descend<N, E, S: PartialEq>(
             // A caller outside the component has no rank, or the rank of a
             // member of another component, which `order` does not hold.
             let caller_rank = slot(rank[caller.index()]);
-            if order.get(caller_rank) == Some(&caller)
-                && !core::mem::replace(&mut queued[caller_rank], true)
-            {
-                pending.push(Reverse(caller_rank));
+            if order.get(caller_rank) == Some(&caller) {
+                pending.insert(caller_rank);
             }
         }
     }

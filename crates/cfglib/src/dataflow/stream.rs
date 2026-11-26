@@ -1,17 +1,16 @@
 //! Streamed solves: each node's facts go to the caller as soon as they are
 //! final, and are freed as soon as nothing reads them any more.
 //!
-//! A solve that returns [`Facts`](super::fixpoint::Facts) holds an IN and an
+//! A solve that returns [`Facts`](super::solve::Facts) holds an IN and an
 //! OUT fact for every node until it returns, and an edge solve one more fact
 //! per edge. A consumer that only checks a property at each node, reports a
 //! diagnostic, or copies a projection into its own sparse table does not need
-//! them all at once. [`stream_problem`], [`stream_node_problem`] and
-//! [`stream_edge_problem`] run the same solve in
-//! [`IterationOrder::WeakTopological`] and hand each node to a visitor once,
-//! as soon as the solve has left the outermost element of the order that
-//! holds it: nothing outside an element can queue it again, so its facts are
-//! final (S. K. Kim, A. J. Venet, A. V. Thakur, *Memory-efficient fixpoint
-//! computation*, FMSD 65, 2025).
+//! them all at once. [`stream_node_problem`] and [`stream_edge_problem`] run
+//! the same solve in [`IterationOrder::WeakTopological`] and hand each node
+//! to a visitor once, as soon as the solve has left the outermost element of
+//! the order that holds it: nothing outside an element can queue it again,
+//! so its facts are final (S. K. Kim, A. J. Venet, A. V. Thakur,
+//! *Memory-efficient fixpoint computation*, FMSD 65, 2025).
 //!
 //! The node's IN fact is freed right after the visit. Its OUT fact is freed
 //! once the outermost element of its last reader is final, its own included,
@@ -24,92 +23,45 @@
 //! Prefer a stream when facts are large (bit rows over the node set) and the
 //! consumer keeps only a projection of them. A stream returns no facts; a
 //! consumer that needs them all keeps using the solvers.
+//!
+//! A stream takes the same [`Solve`] descriptor as its solver and honors its
+//! seeds, its step limit and its narrowing passes. It ignores
+//! [`SolveConfig::order`](super::solve::SolveConfig::order): the weak
+//! topological order is what decides when a fact is final, so a stream always
+//! runs in it, and its steps are those of the same solve in that order.
 
 extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use super::edge_fixpoint::{self, EdgeStore, TryEdgeProblem};
-use super::fixpoint::{self, BlockProblem, IterationOrder, SolveConfig, TryProblem, TrySolveError};
 use super::node_fixpoint::{self, NodeStore, TryNodeProblem};
+use super::solve::{IterationOrder, Solve, SolveConfig, SolveStats, TrySolveError};
 use super::worklist::Worklist;
 use crate::graph::edge_traverse::EdgeAdjacency;
 use crate::graph::edge_view::EdgeView;
 use crate::graph::fanout::DenseFanout;
 use crate::graph::traverse::{Adjacency, by_axis};
 use crate::graph::view::Direction;
-use crate::graph::view::{DenseId, GraphView, RootedView};
+use crate::graph::view::{DenseId, GraphView};
 use crate::graph::weak_topological_order::WeakTopologicalOrder;
 use crate::identity::word;
 
-/// What a streamed solve did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SolveStats {
-    steps: usize,
-    peak_live_facts: usize,
-}
-
-impl SolveStats {
-    /// Worklist entries processed, narrowing passes included: the
-    /// [`Facts::steps`](super::fixpoint::Facts::steps) of the same solve in
-    /// [`IterationOrder::WeakTopological`] that keeps every fact.
-    #[must_use]
-    pub const fn steps(self) -> usize {
-        self.steps
-    }
-
-    /// The most facts the solve held at once: IN and OUT facts of nodes, and
-    /// facts on edges for an edge problem. A fact that still equals bottom
-    /// because nothing reached it is not held. A solve that returns every
-    /// fact holds two per node, and one per edge, from start to end.
-    #[must_use]
-    pub const fn peak_live_facts(self) -> usize {
-        self.peak_live_facts
-    }
-}
-
-/// Solve a fallible block-level problem and stream each block's facts to
-/// `visit` once they are final.
+/// Solve a node-level problem and stream each node's facts to `visit` once
+/// they are final.
 ///
-/// `visit` receives every block the solve reaches exactly once — every block
-/// the root reaches forward, every block backward — with its IN and OUT
-/// facts in program order, as [`Facts`](super::fixpoint::Facts) reports
-/// them. The solve runs in [`IterationOrder::WeakTopological`] whatever order
-/// `config` names, because that order decides when a fact is final; the step
-/// limit and the narrowing passes of `config` apply. An infallible problem
-/// implements [`TryProblem`] with `Error = Infallible`.
+/// `visit` receives every node that the seeds of `solve` reach exactly once
+/// — every live node for [`Seeds::Live`](super::solve::Seeds::Live) — with
+/// its IN and OUT facts in program order, as
+/// [`Facts`](super::solve::Facts) reports them; a node the solve never
+/// visited reports `bottom`. The solve runs in
+/// [`IterationOrder::WeakTopological`] whatever order `solve.config` names,
+/// because that order decides when a fact is final; its step limit and
+/// narrowing passes apply.
 ///
-/// # Errors
+/// # Panics
 ///
-/// Returns [`TrySolveError::Problem`] for a consumer error or
-/// [`TrySolveError::Solver`] when work remains at the configured limit. The
-/// blocks visited before the error keep their final facts.
-pub fn stream_problem<V, P, F>(
-    view: &V,
-    problem: &P,
-    config: SolveConfig,
-    visit: F,
-) -> Result<SolveStats, TrySolveError<P::Error>>
-where
-    V: RootedView,
-    P: TryProblem<V>,
-    F: FnMut(V::NodeId, &P::Fact, &P::Fact),
-{
-    let direction = problem.direction();
-    let worklist = fixpoint::initial_worklist(view, direction);
-    let entry = matches!(direction, Direction::Forward).then(|| view.root());
-    stream_nodes(view, &BlockProblem(problem), worklist, entry, config, visit)
-}
-
-/// Solve a fallible node-level problem and stream each node's facts to
-/// `visit` once they are final.
-///
-/// `visit` receives every live node exactly once, with its IN and OUT facts
-/// in program order. The solve runs in [`IterationOrder::WeakTopological`]
-/// whatever order `config` names, because that order decides when a fact is
-/// final; the step limit and the narrowing passes of `config` apply. An
-/// infallible problem implements [`TryNodeProblem`] with
-/// `Error = Infallible`.
+/// Panics when a seed or the root is not a live node of `graph`.
 ///
 /// # Errors
 ///
@@ -123,15 +75,12 @@ where
 /// facts of the loop being solved and of the edge into the next one.
 ///
 /// ```
-/// use core::convert::Infallible;
-///
-/// use cfglib::{Direction, Graph, NodeId, SolveConfig, TryNodeProblem, stream_node_problem};
+/// use cfglib::{Direction, Graph, NodeId, NodeProblem, Solve, stream_node_problem};
 ///
 /// struct Taint(NodeId);
 ///
-/// impl TryNodeProblem<Graph<(), ()>> for Taint {
+/// impl NodeProblem<Graph<(), ()>> for Taint {
 ///     type Fact = bool;
-///     type Error = Infallible;
 ///
 ///     fn direction(&self) -> Direction {
 ///         Direction::Forward
@@ -139,14 +88,14 @@ where
 ///     fn bottom(&self, _: &Graph<(), ()>) -> bool {
 ///         false
 ///     }
-///     fn boundary(&self, _: &Graph<(), ()>) -> Result<bool, Infallible> {
-///         Ok(false)
+///     fn boundary(&self, _: &Graph<(), ()>) -> bool {
+///         false
 ///     }
-///     fn meet(&self, _: &Graph<(), ()>, _: NodeId, a: &bool, b: &bool) -> Result<bool, Infallible> {
-///         Ok(*a || *b)
+///     fn meet(&self, a: &bool, b: &bool) -> bool {
+///         *a || *b
 ///     }
-///     fn transfer(&self, _: &Graph<(), ()>, node: NodeId, input: &bool) -> Result<bool, Infallible> {
-///         Ok(*input || node == self.0)
+///     fn transfer(&self, _: &Graph<(), ()>, node: NodeId, input: &bool) -> bool {
+///         *input || node == self.0
 ///     }
 /// }
 ///
@@ -166,17 +115,17 @@ where
 /// }
 ///
 /// let mut tainted = 0;
-/// let stats = stream_node_problem(&graph, &Taint(heads[500]), SolveConfig::new(), |_, _, out| {
+/// let stats = stream_node_problem(&graph, &Taint(heads[500]), Solve::default(), |_, _, out| {
 ///     tainted += usize::from(*out);
 /// })
 /// .unwrap();
 /// assert_eq!(tainted, 1_000);
-/// assert!(stats.peak_live_facts() < 10);
+/// assert!(stats.peak_count() < 10);
 /// ```
 pub fn stream_node_problem<G, P, F>(
     graph: &G,
     problem: &P,
-    config: SolveConfig,
+    solve: Solve<'_, G::NodeId>,
     visit: F,
 ) -> Result<SolveStats, TrySolveError<P::Error>>
 where
@@ -184,19 +133,29 @@ where
     P: TryNodeProblem<G>,
     F: FnMut(G::NodeId, &P::Fact, &P::Fact),
 {
-    stream_nodes(graph, problem, Worklist::live(graph), None, config, visit)
+    let direction = problem.direction();
+    let (worklist, entry) = solve.seeds.start(graph, direction);
+    let config = weak_topological(solve.config);
+    by_axis!(
+        direction,
+        stream_nodes_along(graph, problem, worklist, entry, config, visit)
+    )
 }
 
-/// Solve a fallible edge-sensitive problem and stream each node's facts to
-/// `visit` once they are final.
+/// Solve an edge-sensitive problem and stream each node's facts to `visit`
+/// once they are final.
 ///
-/// `visit` receives every live node exactly once, with its physical input
-/// and output facts. The fact on an edge is the problem's
-/// [`transfer_edge`](TryEdgeProblem::transfer_edge) of its source's facts,
-/// so a visitor that needs it computes it from what it receives at the
-/// source. The solve runs in [`IterationOrder::WeakTopological`] whatever
-/// order `config` names; the step limit and the narrowing passes of `config`
-/// apply.
+/// `visit` receives every node that the seeds of `solve` reach exactly once,
+/// with its physical input and output facts. The fact on an edge is the
+/// problem's [`transfer_edge`](TryEdgeProblem::transfer_edge) of its
+/// source's facts, so a visitor that needs it computes it from what it
+/// receives at the source. The solve runs in
+/// [`IterationOrder::WeakTopological`] whatever order `solve.config` names;
+/// its step limit and narrowing passes apply.
+///
+/// # Panics
+///
+/// Panics when a seed or the root is not a live node of `graph`.
 ///
 /// # Errors
 ///
@@ -206,7 +165,7 @@ where
 pub fn stream_edge_problem<G, P, F>(
     graph: &G,
     problem: &P,
-    config: SolveConfig,
+    solve: Solve<'_, G::NodeId>,
     visit: F,
 ) -> Result<SolveStats, TrySolveError<P::Error>>
 where
@@ -214,29 +173,21 @@ where
     P: TryEdgeProblem<G>,
     F: FnMut(G::NodeId, &P::Fact, &P::Fact),
 {
+    let direction = problem.direction();
+    let (worklist, entry) = solve.seeds.start(graph, direction);
+    let config = weak_topological(solve.config);
     by_axis!(
-        problem.direction(),
-        stream_edges_along(graph, problem, config, visit)
+        direction,
+        stream_edges_along(graph, problem, worklist, entry, config, visit)
     )
 }
 
-fn stream_nodes<G, P, F>(
-    graph: &G,
-    problem: &P,
-    worklist: Worklist,
-    entry: Option<G::NodeId>,
-    config: SolveConfig,
-    visit: F,
-) -> Result<SolveStats, TrySolveError<P::Error>>
-where
-    G: GraphView,
-    P: TryNodeProblem<G>,
-    F: FnMut(G::NodeId, &P::Fact, &P::Fact),
-{
-    by_axis!(
-        problem.direction(),
-        stream_nodes_along(graph, problem, worklist, entry, config, visit)
-    )
+/// `config` in the one order a stream runs in.
+const fn weak_topological(config: SolveConfig) -> SolveConfig {
+    SolveConfig {
+        order: IterationOrder::WeakTopological,
+        ..config
+    }
 }
 
 fn stream_nodes_along<G, P, D, F>(
@@ -254,7 +205,6 @@ where
     D: Adjacency,
     F: FnMut(G::NodeId, &P::Fact, &P::Fact),
 {
-    let config = config.with_order(IterationOrder::WeakTopological);
     let store = |order: Option<&WeakTopologicalOrder<G::NodeId>>| {
         let order = order.expect("a stream runs in the weak topological order");
         let direction = problem.direction();
@@ -269,16 +219,15 @@ where
     };
     let (store, steps) =
         node_fixpoint::solve_along(downstream, graph, problem, worklist, entry, config, store)?;
-    Ok(SolveStats {
-        steps,
-        peak_live_facts: store.census.peak,
-    })
+    Ok(SolveStats::new(steps, 0, store.census.peak))
 }
 
 fn stream_edges_along<G, P, D, F>(
     downstream: D,
     graph: &G,
     problem: &P,
+    worklist: Worklist,
+    entry: Option<G::NodeId>,
     config: SolveConfig,
     visit: F,
 ) -> Result<SolveStats, TrySolveError<P::Error>>
@@ -289,7 +238,6 @@ where
     D::Against: EdgeAdjacency,
     F: FnMut(G::NodeId, &P::Fact, &P::Fact),
 {
-    let config = config.with_order(IterationOrder::WeakTopological);
     let store = |_: Option<&WeakTopologicalOrder<G::NodeId>>| StreamedEdges {
         graph,
         upstream: downstream.against(),
@@ -302,11 +250,8 @@ where
         visit,
     };
     let (store, steps) =
-        edge_fixpoint::solve_edges(graph, problem, Worklist::live(graph), config, store)?;
-    Ok(SolveStats {
-        steps,
-        peak_live_facts: store.census.peak,
-    })
+        edge_fixpoint::solve_edges(downstream, graph, problem, worklist, entry, config, store)?;
+    Ok(SolveStats::new(steps, 0, store.census.peak))
 }
 
 /// How many facts a stream holds, and the most it held.
