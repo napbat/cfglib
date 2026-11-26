@@ -26,10 +26,13 @@
 extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::ops::ControlFlow;
 
-use super::edge_view::EdgeView;
+use super::edge_view::{EdgeView, FilteredEdges};
 use super::epoch::EpochMarks;
 use super::scc::{SccDecomposition, SccNumbering};
+use super::search::Visit;
+use super::traverse::{DepthFirstStack, DepthFirstVisitor, Outgoing, StepKind, depth_first_core};
 use super::view::{DenseId, GraphView};
 use crate::identity::{NO_INDEX, check_bound, slot, word};
 
@@ -452,7 +455,7 @@ fn minimize<G: EdgeView>(
         excluded[edge.index()] = true;
     }
     let mut marks = EpochMarks::new(graph.node_bound());
-    let mut stack = Vec::new();
+    let mut stack = DepthFirstStack::default();
     set.retain(|&edge| {
         let edge_ref = graph.edge(edge);
         let (source, target) = (edge_ref.source(), edge_ref.target());
@@ -478,29 +481,46 @@ fn reaches<G: EdgeView>(
     from: G::NodeId,
     to: G::NodeId,
     marks: &mut EpochMarks,
-    stack: &mut Vec<G::NodeId>,
+    stack: &mut DepthFirstStack<G::NodeId, G::NodeId>,
 ) -> bool {
-    let component = components.component_index(from);
+    let admitted = FilteredEdges::new(graph, |edge: G::EdgeId, _: &G::EdgeData| {
+        !excluded[edge.index()]
+    });
     marks.reset();
-    marks.mark(from.index());
-    stack.clear();
-    stack.push(from);
-    while let Some(node) = stack.pop() {
-        for edge in graph.outgoing(node) {
-            if excluded[edge.index()] {
-                continue;
-            }
-            let next = graph.edge(edge).target();
-            if next == to {
-                return true;
-            }
-            if !marks.is_marked(next.index()) && components.component_index(next) == component {
-                marks.mark(next.index());
-                stack.push(next);
-            }
+    let mut search = Within {
+        components,
+        component: components.component_index(from),
+        target: to,
+    };
+    depth_first_core(Outgoing, &admitted, [from], marks, stack, &mut search).is_some()
+}
+
+/// A depth-first search that stays inside one component and stops at the
+/// first step to `target`.
+struct Within<'a, N> {
+    components: &'a SccDecomposition<N>,
+    component: usize,
+    target: N,
+}
+
+impl<N: DenseId> DepthFirstVisitor<N, N, ()> for Within<'_, N> {
+    #[inline]
+    fn discover(&mut self, node: N, _depth: usize) -> ControlFlow<(), Visit> {
+        ControlFlow::Continue(if self.components.component_index(node) == self.component {
+            Visit::Descend
+        } else {
+            Visit::Skip
+        })
+    }
+
+    #[inline]
+    fn step(&mut self, _from: N, _step: N, to: N, _kind: StepKind) -> ControlFlow<()> {
+        if to == self.target {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
         }
     }
-    false
 }
 
 #[cfg(test)]
