@@ -133,7 +133,6 @@
 //!   └─ JumpTargets          (optional — explicit goto/label wiring, Target)
 //!
 //! InstrInfo<Variable = V>   (optional — native IR variables for dataflow)
-//!   ├─ EffectInfo           (optional — side effects, Effect)
 //!   └─ MemoryEventInfo      (optional — memory data flow + fences, Location + Fence)
 //!
 //! DisplayInstr              (optional — rendering only: DOT, text)
@@ -260,7 +259,7 @@ pub use dataflow::fixpoint::{
 pub use dataflow::ifds::{
     CfgSupergraph, IfdsConfig, IfdsProblem, IfdsResults, Supergraph, solve_ifds,
 };
-pub use dataflow::instruction::{EffectInfo, InstrInfo, VariableId};
+pub use dataflow::instruction::InstrInfo;
 pub use dataflow::node_fixpoint::{
     NodeProblem, TryNodeProblem, solve_node_problem, solve_node_problem_from,
     solve_node_problem_from_with_config, solve_node_problem_with_config, try_solve_node_problem,
@@ -393,7 +392,8 @@ pub use graph::view::{
 };
 pub use graph::weak_topological_order::WeakTopologicalOrder;
 pub use memory::{
-    MemoryAccess, MemoryAccessKind, MemoryAtomicity, MemoryEvent, MemoryEventInfo, MemoryOperations,
+    AccessMode, MemoryAccess, MemoryAccessKind, MemoryAtomicity, MemoryEvent, MemoryEventInfo,
+    MemoryOperations,
 };
 pub use region::{
     Cleanup, CompletionReason, Continuation, ExclusiveExtent, ExtentIssue, ExtentPromotionStatus,

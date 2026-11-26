@@ -3,8 +3,8 @@
 use std::borrow::Cow;
 
 use cfglib::{
-    BlockId, Cfg, DisplayInstr, EdgeKind, EffectInfo, Handler, HandlerBody, HandlerKind, InstrInfo,
-    Region, RegionId,
+    BlockId, Cfg, DisplayInstr, EdgeKind, Handler, HandlerBody, HandlerKind, InstrInfo, Region,
+    RegionId,
 };
 
 /// A source-like statement with the def, use, and effect sets the dataflow
@@ -51,14 +51,6 @@ impl InstrInfo for Stmt {
 
     fn defs(&self) -> &[&'static str] {
         &self.defs
-    }
-}
-
-impl EffectInfo for Stmt {
-    type Effect = &'static str;
-
-    fn effects(&self) -> &[&'static str] {
-        &self.effects
     }
 }
 

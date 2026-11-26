@@ -488,7 +488,6 @@ FlowControl               (required only by CfgBuilder)
 └── JumpTargets           (goto/label wiring — associated Target)
 
 InstrInfo<Variable = V>   (optional — native IR variables, defs/uses)
-├── EffectInfo            (associated Effect)
 └── MemoryEventInfo       (locations, address uses, access kinds, and fences — associated Location, Fence)
 
 DisplayInstr              (rendering only — DOT and text)
