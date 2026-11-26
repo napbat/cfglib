@@ -140,7 +140,7 @@ its first update resolves every reference and records them from then on.
 
 `ScopeFirstResolution::try_compute` follows the one upward path that a
 `ScopeCursorQuery` admits and stops at the first accepted datum. Its hooks see
-a `ScopeCursor` (the start, the end, and the length of a path) instead of a
+a `ScopeCursor` (the start, the end, and the hop count of a path) instead of a
 stored path, so a walk of `D` scopes costs `O(D)` hook calls and allocates
 nothing. `ScopeCursorPolicy` runs the same policy under `ScopeResolution`,
 where a cursor policy shadows no candidate.

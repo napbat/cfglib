@@ -176,7 +176,7 @@ impl ScopeFirstResolution {
                 if edge.target().index() >= edge.source().index() {
                     return Err(ScopeFirstResolutionError::EdgeNotUpward { edge: edge_id });
                 }
-                if !budget.admit_length(cursor.len() + 1) {
+                if !budget.admit_length(cursor.hop_count() + 1) {
                     continue;
                 }
                 if next.is_some() {
