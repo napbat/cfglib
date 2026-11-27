@@ -16,7 +16,12 @@
 //! [`reachable`], whose order is free, so a stack holds only the frontier;
 //! [`topological_sort`], whose Kahn loop is not a search; and the
 //! bidirectional [`shortest_path`], which advances two searches one edge at a
-//! time.
+//! time. Elsewhere, the depth-first walks whose bookkeeping doubles as their
+//! marks keep their own loops too, with their measurements: the
+//! [`canonical_order`](crate::canonical_order) preorder, Tarjan's walk of the
+//! strongly connected components, and Havlak's cycle walk behind
+//! [`LoopForest::compute_cycles`](crate::LoopForest::compute_cycles) and the
+//! weak topological order.
 
 extern crate alloc;
 use alloc::collections::VecDeque;
@@ -545,8 +550,7 @@ pub use ancestors::{CommonAncestor, common_ancestors, nearest_common_ancestor};
 pub(crate) use breadth_first::breadth_first_core;
 pub use cycle_witness::topological_sort_or_cycle;
 pub(crate) use depth_first::{
-    DepthFirstMarks, DepthFirstStack, DepthFirstVisitor, Mark, PathMarks, StepKind,
-    depth_first_core,
+    DepthFirstStack, DepthFirstVisitor, Mark, PathMarks, StepKind, depth_first_core,
 };
 pub(crate) use shortest_path::edge_path_in;
 pub use shortest_path::{ShortestPathScratch, shortest_path, shortest_path_in};

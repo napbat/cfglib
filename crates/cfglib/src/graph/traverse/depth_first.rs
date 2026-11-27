@@ -1,4 +1,5 @@
-//! The depth-first walk core every depth-first walk of the crate runs.
+//! The depth-first walk core the crate's depth-first walks run, apart from
+//! the few that keep their own loop (see the [module docs](super)).
 
 extern crate alloc;
 use alloc::vec::Vec;

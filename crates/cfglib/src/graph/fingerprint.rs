@@ -28,12 +28,9 @@
 extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::ops::ControlFlow;
 
 use super::edge_view::EdgeView;
-use super::search::Visit;
-use super::traverse::{DepthFirstStack, Outgoing, depth_first_core};
-use super::view::{DenseId, GraphView, RootedView, scan_predecessors};
+use super::view::{DenseId, RootedView};
 use crate::identity::{NO_INDEX, check_bound, word};
 
 /// The rounds of [`wl_colors`] that [`canonical_hash`] runs to fingerprint
@@ -300,81 +297,48 @@ pub fn canonical_order<G: RootedView + EdgeView>(
 /// The [`canonical_order`] walk with the edge keys read from `keys`: the
 /// order, and each node's position in it by node index ([`NO_INDEX`] for a
 /// node outside it).
+///
+/// The walk keeps its own loop instead of running the shared depth-first
+/// core over a successor table sorted up front: sorting each node's
+/// out-edges as the walk enters it, on one stack, and marking positions on
+/// entry. On 10,000 blocks the core form measured 1.14x the time of the
+/// previous release (`api_canonical_order`), and this loop 0.99x to 1.02x.
 fn preorder<G: RootedView + EdgeView>(graph: &G, keys: &[u64]) -> (Vec<G::NodeId>, Vec<u32>) {
     check_bound(graph.node_bound(), "node bound of a canonical order");
-    let keyed = KeyedSuccessors::new(graph, keys);
-    let mut order = Vec::new();
-    let mut seen = vec![false; graph.node_bound()];
-    depth_first_core(
-        Outgoing,
-        &keyed,
-        [graph.root().index()],
-        seen.as_mut_slice(),
-        &mut DepthFirstStack::default(),
-        &mut |node: usize, _depth| {
-            order.push(G::NodeId::from_index(node));
-            ControlFlow::<(), _>::Continue(Visit::Descend)
-        },
-    );
     let mut position = vec![NO_INDEX; graph.node_bound()];
-    for (place, node) in order.iter().enumerate() {
-        position[node.index()] = word(place);
+    let mut order = Vec::new();
+    // The out-edges of every node on the walk's stack, as `(key, adjacency
+    // position, target)` sorted by key and then position, each node's run
+    // above the runs of the nodes below it. A frame holds where its run
+    // starts and the next edge to take.
+    let mut edges: Vec<(u64, usize, G::NodeId)> = Vec::new();
+    let mut frames: Vec<(usize, usize)> = Vec::new();
+    let mut entered = Some(graph.root());
+    loop {
+        if let Some(node) = entered.take() {
+            position[node.index()] = word(order.len());
+            order.push(node);
+            let start = edges.len();
+            edges.extend(graph.outgoing(node).enumerate().map(|(adjacency, edge)| {
+                (keys[edge.index()], adjacency, graph.edge(edge).target())
+            }));
+            edges[start..].sort_unstable_by_key(|&(key, adjacency, _)| (key, adjacency));
+            frames.push((start, start));
+        }
+        let Some(frame) = frames.last_mut() else {
+            break;
+        };
+        if let Some(&(_, _, target)) = edges.get(frame.1) {
+            frame.1 += 1;
+            if position[target.index()] == NO_INDEX {
+                entered = Some(target);
+            }
+        } else {
+            edges.truncate(frame.0);
+            frames.pop();
+        }
     }
     (order, position)
-}
-
-/// The out-edge targets of every node slot, by index, sorted by edge key and
-/// then by adjacency position: the forward graph that [`canonical_order`]
-/// walks.
-struct KeyedSuccessors {
-    /// Where the targets of each node slot start and end in `targets`.
-    runs: Vec<(usize, usize)>,
-    targets: Vec<usize>,
-}
-
-impl KeyedSuccessors {
-    fn new<G: EdgeView>(graph: &G, keys: &[u64]) -> Self {
-        let mut runs = vec![(0, 0); graph.node_bound()];
-        let mut targets = Vec::with_capacity(graph.edge_bound());
-        let mut run: Vec<(u64, usize, usize)> = Vec::new();
-        for node in graph.node_ids() {
-            run.clear();
-            run.extend(graph.outgoing(node).enumerate().map(|(adjacency, edge)| {
-                (
-                    keys[edge.index()],
-                    adjacency,
-                    graph.edge(edge).target().index(),
-                )
-            }));
-            run.sort_unstable_by_key(|&(key, adjacency, _)| (key, adjacency));
-            let start = targets.len();
-            targets.extend(run.iter().map(|&(_, _, target)| target));
-            runs[node.index()] = (start, targets.len());
-        }
-        Self { runs, targets }
-    }
-}
-
-impl GraphView for KeyedSuccessors {
-    type NodeId = usize;
-
-    fn node_bound(&self) -> usize {
-        self.runs.len()
-    }
-
-    /// Every node slot; a removed slot has no edges.
-    fn node_ids(&self) -> impl Iterator<Item = usize> + '_ {
-        0..self.runs.len()
-    }
-
-    fn successors(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
-        let (start, end) = self.runs[node];
-        self.targets[start..end].iter().copied()
-    }
-
-    fn predecessors(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
-        scan_predecessors(self, node)
-    }
 }
 
 /// A hash of the graph in [`canonical_order`]: the number of nodes the root

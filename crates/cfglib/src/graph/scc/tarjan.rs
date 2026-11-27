@@ -1,18 +1,19 @@
 //! Tarjan's algorithm, in Pearce's single-array form: the one walk behind
 //! the leaves-first decomposition and the [`IncrementalScc`](super::IncrementalScc)
 //! repairs.
+//!
+//! The walk keeps its own loop instead of running the shared depth-first
+//! core. The core keeps the marks and the visitor apart, so Pearce's array
+//! had to be shared between them as cells, and every open node took a second
+//! stack entry for the index it was entered at. On 4,096 nodes the core form
+//! measured 1.13x the time of the previous release's walk
+//! (`directed_scc_leaves_first`), and this loop 0.98x.
 
 extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::cell::Cell;
-use core::ops::ControlFlow;
 
 use super::SccDecomposition;
-use crate::graph::search::Visit;
-use crate::graph::traverse::{
-    DepthFirstMarks, DepthFirstStack, DepthFirstVisitor, Mark, Outgoing, StepKind, depth_first_core,
-};
 use crate::graph::view::{DenseId, GraphView};
 use crate::identity::{NO_INDEX, check_bound, slot, word};
 
@@ -67,15 +68,30 @@ pub(super) struct Tarjan<N> {
     /// The finished nodes that were not the root of their component, waiting
     /// for that root to finish.
     waiting: Vec<N>,
-    /// The open nodes, each with the index it was entered at: it is the root
-    /// of its component exactly when it finishes still holding that index.
-    path: Vec<(N, u32)>,
-    /// The frames and pending successors of the depth-first core.
-    stack: DepthFirstStack<N, N>,
+    /// Every open node's successors, appended as its frame is pushed and
+    /// truncated away as it pops.
+    arena: Vec<N>,
+    /// The open nodes, innermost last.
+    frames: Vec<Frame<N>>,
     /// The components found, each an ascending run, leaves first.
     found: Vec<N>,
     /// `offsets[i]..offsets[i + 1]` is the `i`th component within `found`.
     offsets: Vec<u32>,
+}
+
+/// An open node of the walk.
+#[derive(Debug, Clone, Copy)]
+struct Frame<N> {
+    node: N,
+    /// Where the node's successors start in the arena; the pop truncates to
+    /// it.
+    start: usize,
+    /// The next successor to examine, as an arena index. The top frame's
+    /// successors run to the arena's end.
+    cursor: usize,
+    /// Whether no successor has yet shown the node a lower index, so it is
+    /// still the root of its component.
+    root: bool,
 }
 
 impl<N: DenseId> Tarjan<N> {
@@ -93,8 +109,8 @@ impl<N: DenseId> Tarjan<N> {
         Self {
             rindex: vec![0; node_bound],
             waiting: Vec::new(),
-            path: Vec::new(),
-            stack: DepthFirstStack::default(),
+            arena: Vec::new(),
+            frames: Vec::new(),
             found: Vec::new(),
             offsets: vec![0],
         }
@@ -106,7 +122,7 @@ impl<N: DenseId> Tarjan<N> {
     /// Every node outside `within` is left out of the graph. A component that
     /// a root reaches is found whole, since all its nodes are reachable from
     /// any one of them, as long as `within` admits them all. A root already
-    /// visited is passed over; every root must be admitted by `within`.
+    /// visited, or one `within` refuses, is passed over.
     pub(super) fn run<G>(
         &mut self,
         graph: &G,
@@ -115,33 +131,82 @@ impl<N: DenseId> Tarjan<N> {
     ) where
         G: GraphView<NodeId = N>,
     {
-        // The core keeps a frame per open node, and the path one word pair
-        // more, so a walk as deep as the graph grows neither by doubling.
-        self.path.reserve(graph.node_bound());
-        // The core's marks and the visitor both read and write Pearce's
-        // array, so they share it as cells.
-        let rindex = Cell::from_mut(self.rindex.as_mut_slice()).as_slice_of_cells();
-        let mut marks = Unvisited {
+        let Self {
             rindex,
-            within: |index| within(N::from_index(index)),
-        };
-        let mut visitor = Visitor {
-            rindex,
-            waiting: &mut self.waiting,
-            path: &mut self.path,
-            found: &mut self.found,
-            offsets: &mut self.offsets,
-            next_index: 1,
-            next_component: word(rindex.len()),
-        };
-        depth_first_core::<_, _, _, ()>(
-            Outgoing,
-            graph,
-            roots,
-            &mut marks,
-            &mut self.stack,
-            &mut visitor,
-        );
+            waiting,
+            arena,
+            frames,
+            found,
+            offsets,
+        } = self;
+        let mut next_index = 1;
+        let mut next_component = word(rindex.len());
+        for root in roots {
+            if rindex[root.index()] != 0 || !within(root) {
+                continue;
+            }
+            rindex[root.index()] = next_index;
+            next_index += 1;
+            enter(graph, root, arena, frames);
+            while let Some(frame) = frames.last_mut() {
+                let node = frame.node;
+                if let Some(&successor) = arena.get(frame.cursor) {
+                    frame.cursor += 1;
+                    // A node seen before lowers this node's word to its own
+                    // when that is lower: a node still waiting, which this one
+                    // therefore shares a component with. A finished node's
+                    // word is above every waiting one.
+                    let seen = rindex[successor.index()];
+                    if seen == 0 {
+                        if within(successor) {
+                            rindex[successor.index()] = next_index;
+                            next_index += 1;
+                            enter(graph, successor, arena, frames);
+                        }
+                    } else if seen < rindex[node.index()] {
+                        rindex[node.index()] = seen;
+                        frame.root = false;
+                    }
+                    continue;
+                }
+
+                let Some(finished) = frames.pop() else { break };
+                arena.truncate(finished.start);
+                if finished.root {
+                    // The root has the component's lowest index. Its members
+                    // are the waiting nodes that hold an index no lower; they
+                    // come off in reverse finish order, which along a path is
+                    // visit order, so a cycle entered at its lowest id is
+                    // ascending already.
+                    let first = found.len();
+                    let root_index = rindex[node.index()];
+                    rindex[node.index()] = next_component;
+                    found.push(node);
+                    while let Some(&member) = waiting.last() {
+                        if rindex[member.index()] < root_index {
+                            break;
+                        }
+                        waiting.pop();
+                        rindex[member.index()] = next_component;
+                        found.push(member);
+                    }
+                    next_index -= word(found.len() - first);
+                    next_component -= 1;
+                    found[first..].sort_unstable();
+                    offsets.push(word(found.len()));
+                } else {
+                    waiting.push(node);
+                }
+                // The parent shares a component with whatever this node's
+                // subtree reached that is still waiting.
+                if let Some(parent) = frames.last_mut()
+                    && rindex[node.index()] < rindex[parent.node.index()]
+                {
+                    rindex[parent.node.index()] = rindex[node.index()];
+                    parent.root = false;
+                }
+            }
+        }
     }
 
     /// Whether the last walk put `node` into a component.
@@ -171,109 +236,20 @@ impl<N: DenseId> Tarjan<N> {
     }
 }
 
-/// The core's marks, read off Pearce's array: a slot is unseen while its
-/// word is 0 and `within` admits it, and done otherwise. A step to a node
-/// `within` refuses is therefore a step to a done node whose word is 0, which
-/// the visitor passes over.
-struct Unvisited<'a, F> {
-    rindex: &'a [Cell<u32>],
-    within: F,
-}
-
-impl<F: Fn(usize) -> bool> DepthFirstMarks for Unvisited<'_, F> {
-    #[inline]
-    fn mark(&self, index: usize) -> Mark {
-        if self.rindex[index].get() == 0 && (self.within)(index) {
-            Mark::Unseen
-        } else {
-            Mark::Done
-        }
-    }
-
-    /// The visitor's discovery writes the node's index right after.
-    #[inline]
-    fn open(&mut self, _index: usize) {}
-
-    #[inline]
-    fn close(&mut self, _index: usize) {}
-}
-
-/// Pearce's bookkeeping on the core's callbacks.
-struct Visitor<'a, N> {
-    rindex: &'a [Cell<u32>],
-    waiting: &'a mut Vec<N>,
-    path: &'a mut Vec<(N, u32)>,
-    found: &'a mut Vec<N>,
-    offsets: &'a mut Vec<u32>,
-    next_index: u32,
-    next_component: u32,
-}
-
-impl<N: DenseId> DepthFirstVisitor<N, N, ()> for Visitor<'_, N> {
-    #[inline]
-    fn discover(&mut self, node: N, _depth: usize) -> ControlFlow<(), Visit> {
-        self.rindex[node.index()].set(self.next_index);
-        self.path.push((node, self.next_index));
-        self.next_index += 1;
-        ControlFlow::Continue(Visit::Descend)
-    }
-
-    /// A step to a node seen before lowers this node's word to that node's,
-    /// when it is lower: a node still waiting, which this one therefore
-    /// shares a component with. A finished node's word is above every
-    /// waiting one, and a refused node's is 0.
-    #[inline]
-    fn step(&mut self, from: N, _step: N, to: N, kind: StepKind) -> ControlFlow<()> {
-        if kind != StepKind::Tree {
-            let seen = self.rindex[to.index()].get();
-            let own = &self.rindex[from.index()];
-            if seen != 0 && seen < own.get() {
-                own.set(seen);
-            }
-        }
-        ControlFlow::Continue(())
-    }
-
-    #[inline]
-    fn finish(&mut self, node: N) -> ControlFlow<()> {
-        let (_, entered) = self
-            .path
-            .pop()
-            .expect("the core finishes only a node it entered");
-        let cell = &self.rindex[node.index()];
-        if cell.get() == entered {
-            // The root has the component's lowest index. Its members are the
-            // waiting nodes that hold an index no lower; they come off in
-            // reverse finish order, which along a path is visit order, so a
-            // cycle entered at its lowest id is ascending already.
-            let first = self.found.len();
-            cell.set(self.next_component);
-            self.found.push(node);
-            while let Some(&member) = self.waiting.last() {
-                let member_word = &self.rindex[member.index()];
-                if member_word.get() < entered {
-                    break;
-                }
-                self.waiting.pop();
-                member_word.set(self.next_component);
-                self.found.push(member);
-            }
-            self.next_index -= word(self.found.len() - first);
-            self.next_component -= 1;
-            self.found[first..].sort_unstable();
-            self.offsets.push(word(self.found.len()));
-        } else {
-            self.waiting.push(node);
-        }
-        // The parent shares a component with whatever this node's subtree
-        // reached that is still waiting.
-        if let Some(&(parent, _)) = self.path.last() {
-            let low = cell.get();
-            let theirs = &self.rindex[parent.index()];
-            if low < theirs.get() {
-                theirs.set(low);
-            }
-        }
-        ControlFlow::Continue(())
-    }
+/// Open `node`: push its frame, with its successors on the arena's tail.
+#[inline]
+fn enter<G: GraphView>(
+    graph: &G,
+    node: G::NodeId,
+    arena: &mut Vec<G::NodeId>,
+    frames: &mut Vec<Frame<G::NodeId>>,
+) {
+    let start = arena.len();
+    arena.extend(graph.successors(node));
+    frames.push(Frame {
+        node,
+        start,
+        cursor: start,
+        root: true,
+    });
 }
