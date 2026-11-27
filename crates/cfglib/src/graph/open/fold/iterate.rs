@@ -147,8 +147,7 @@ where
                 let value = member.value.clone();
                 if let Some(top) = self.walk.stack.last_mut() {
                     top.extra.lowlink = top.extra.lowlink.min(index);
-                    if matches!(top.extra.role, Role::Marked { index: own, .. } if own == index)
-                    {
+                    if matches!(top.extra.role, Role::Marked { index: own, .. } if own == index) {
                         top.extra.self_loop = true;
                     }
                 }
@@ -385,12 +384,7 @@ where
 
 /// Replaces the open entry of a member whose answer became final with that
 /// answer, or removes it when the depth bound cut the answer.
-fn settle<K: Ord, V>(
-    table: &mut BTreeMap<K, Stored<V>>,
-    mark: K,
-    value: Option<V>,
-    cut: bool,
-) {
+fn settle<K: Ord, V>(table: &mut BTreeMap<K, Stored<V>>, mark: K, value: Option<V>, cut: bool) {
     if cut {
         table.remove(&mark);
     } else {
