@@ -29,7 +29,7 @@ mod dialect;
 mod statement;
 mod view;
 
-pub use bits::{BitSlice, Bits};
+pub use bits::{BitSlice, Bits, ConstBits};
 pub use builder::InstructionBuilder;
 pub use dialect::{Dialect, Place};
 pub use statement::{

@@ -1,4 +1,4 @@
-//! The RTL value type and bit ranges within a storage root.
+//! The RTL value type, constant values and bit ranges within a storage root.
 
 use core::fmt;
 use core::num::NonZeroU16;
@@ -82,4 +82,18 @@ impl BitSlice {
     pub const fn end(self) -> u32 {
         self.offset as u32 + self.width.width() as u32
     }
+}
+
+/// A known constant value: little-endian 64-bit words and a type.
+///
+/// This is the one form of a constant operand that every executor and
+/// evaluator of an RTL dialect passes, including a consumer that has no
+/// storage of its own. The constant evaluation of the operators belongs to
+/// the consumer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ConstBits<'a> {
+    /// The words of the value. Bits past the width are zero.
+    pub words: &'a [u64],
+    /// The type of the value.
+    pub width: Bits,
 }

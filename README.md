@@ -248,7 +248,7 @@ Every RTL value is a signless bit vector. Signedness, a floating format, and a l
 
 | Item | Description |
 |---|---|
-| `Bits`, `BitSlice` | `Bits` is the one value type: a width in `1..=Bits::MAX_WIDTH` (8192). `Bits::BOOL` is the one-bit type. A `BitSlice` is a bit range inside one root. |
+| `Bits`, `BitSlice`, `ConstBits` | `Bits` is the one value type: a width in `1..=Bits::MAX_WIDTH` (8192). `Bits::BOOL` is the one-bit type. A `BitSlice` is a bit range inside one root. A `ConstBits` is a known constant value: little-endian words and a `Bits`. It is the one form of a constant operand that a consumer's executor and evaluator pass; the constant evaluation of the operators belongs to the consumer. |
 | `Dialect` | The vocabulary of one instruction set, normally a unit marker type. The associated types are `Root`, `Operator`, `EffectOp`, `WritePolicy`, `Outcome`, and `NondetDomain`. `Dialect::root_width` gives the width of a root. Roots never alias: a register view is a `BitSlice` of one root. `Place<R>` names such a range of a root of type `R`, and `Place::whole::<D>(root)` covers the whole root. |
 | `InstructionBuilder<D>` | The write-only protocol through which instruction semantics emit one record into consumer storage. The producer calls `read`, `constant`, `apply`, `nondet`, `effect`, `raise`, and `write` in statement order, then `finish` with a `Control`. `finish` seals the record. The protocol cannot read a statement back or change it. |
 | `RecordView<D>` | One sealed record: its `statements`, its `control`, and the `width` of each value. A sealed record is read-only. |
