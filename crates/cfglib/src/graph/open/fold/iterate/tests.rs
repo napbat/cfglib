@@ -495,6 +495,67 @@ fn an_error_leaves_only_final_answers_in_the_table() {
     assert_eq!(memo.get(&4), Some(Some(&false)));
 }
 
+/// Counts the nodes below a node, and panics on entering `trap`.
+struct Trapped {
+    children: &'static [&'static [usize]],
+    trap: usize,
+}
+
+impl OpenFold for Trapped {
+    type Node = usize;
+    type Mark = usize;
+    type Value = usize;
+    type Accumulator = usize;
+
+    fn successors(&mut self, node: &usize, out: &mut Vec<usize>) {
+        out.extend_from_slice(self.children[*node]);
+    }
+
+    fn mark(&mut self, node: &usize) -> Option<usize> {
+        Some(*node)
+    }
+
+    fn enter(&mut self, node: &usize) -> FoldEnter<usize, usize> {
+        assert_ne!(*node, self.trap, "the fold entered its trap");
+        FoldEnter::Fold {
+            accumulator: 1,
+            marks: MarkScope::Shared,
+        }
+    }
+
+    fn absorb(
+        &mut self,
+        accumulator: &mut usize,
+        _child: &usize,
+        value: Option<usize>,
+    ) -> ControlFlow<()> {
+        *accumulator += value.unwrap_or_default();
+        ControlFlow::Continue(())
+    }
+
+    fn finish(&mut self, _node: &usize, accumulator: usize) -> Option<usize> {
+        Some(accumulator)
+    }
+}
+
+#[test]
+fn a_panicking_hook_leaves_only_final_answers_in_the_table() {
+    // 4 reaches 3, whose answer is final at once, and then the cycle 0 <-> 1,
+    // whose members are still open when entering 2 panics. The table holds
+    // the open members' entries until the walk unwinds.
+    let mut trapped = Trapped {
+        children: &[&[1], &[0, 2], &[], &[], &[3, 0]],
+        trap: 2,
+    };
+    let mut memo = OpenFoldMemo::default();
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        open_fold_in(&mut memo, &mut trapped, 4, ITERATE)
+    }));
+    assert!(unwound.is_err());
+    assert_eq!(memo.answer_count(), 1);
+    assert_eq!(memo.get(&3), Some(Some(&1)));
+}
+
 /// Counts the nodes below a node, up to a cap; `None` marks a node unmarked.
 struct Capped {
     children: &'static [&'static [usize]],
@@ -619,6 +680,12 @@ fn the_table_keeps_no_answer_the_depth_bound_cut() {
         Ok(Some(5))
     );
     assert_eq!((memo.get(&0), memo.get(&1)), (None, None));
+    let finals = (0..4).filter(|mark| memo.get(mark).is_some()).count();
+    assert_eq!(
+        memo.answer_count(),
+        finals,
+        "no open entry of the cut cycle outlives the walk"
+    );
     let mut whole = Capped { children, marks };
     let mut memo = OpenFoldMemo::default();
     assert_eq!(open_fold_in(&mut memo, &mut whole, 0, ITERATE), Ok(Some(5)));
