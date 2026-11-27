@@ -31,6 +31,7 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use super::bits::DenseBits;
 use super::edge_fixpoint::{self, EdgeFacts, TryEdgeProblem};
 use super::node_fixpoint::{self, TryNodeProblem};
 use super::solve::{Facts, Solve, SolveConfig, TrySolveError};
@@ -38,9 +39,8 @@ use super::worklist::Worklist;
 use crate::block::BlockId;
 use crate::graph::edge_traverse::EdgeAdjacency;
 use crate::graph::edge_view::EdgeView;
-use crate::graph::traverse::{Adjacency, by_axis, reachable_in};
-use crate::graph::view::Direction;
-use crate::graph::view::{DenseId, GraphView};
+use crate::graph::traverse::{Adjacency, by_axis};
+use crate::graph::view::{DenseId, Direction, GraphView};
 
 /// How a resumed solve treats the facts of the previous solve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,12 +230,12 @@ fn fit<F: Clone>(facts: &mut Vec<F>, bound: usize, bottom: &F) {
 }
 
 /// The nodes to re-solve: the live changed nodes, and in
-/// [`ResumeMode::Reset`] everything they reach along `direction`. Calls
+/// [`ResumeMode::Reset`] everything they reach along `downstream`. Calls
 /// `reset` on each node a reset clears, with whether it is live: the
 /// region's nodes and the removed changed nodes.
-fn region<G: GraphView>(
+fn region<G: GraphView, D: Adjacency>(
+    downstream: D,
     graph: &G,
-    direction: Direction,
     edit: &Edit<'_, G::NodeId>,
     mut reset: impl FnMut(G::NodeId, bool),
 ) -> Worklist {
@@ -254,19 +254,21 @@ fn region<G: GraphView>(
     let mut worklist = Worklist::new(bound);
     match edit.mode {
         ResumeMode::Reset => {
-            let mut reached = Vec::new();
-            reachable_in(
-                graph,
-                changed,
-                direction,
-                None,
-                &mut reached,
-                &mut Vec::new(),
-            );
-            for (index, _) in reached.iter().enumerate().filter(|&(_, &hit)| hit) {
-                reset(G::NodeId::from_index(index), true);
-                if solved(index) {
-                    worklist.insert(index);
+            // The walk resets each node as it reaches it. Through
+            // `reachable_in`, whose byte per node then needs a pass over the
+            // whole bound to find the region, resuming the 100-node region at
+            // the end of a 100 000-node chain (`api_resume_node_problem`)
+            // took 1.22x the time of this walk.
+            let mut reached = DenseBits::new(bound);
+            let mut stack = changed;
+            while let Some(node) = stack.pop() {
+                let index = node.index();
+                if reached.insert(index) {
+                    reset(node, true);
+                    if solved(index) {
+                        worklist.insert(index);
+                    }
+                    stack.extend(downstream.neighbors(graph, node));
                 }
             }
         }
@@ -300,7 +302,7 @@ where
     let (mut input, mut output) = direction.program_order(input, output);
     fit(&mut input, graph.node_bound(), &bottom);
     fit(&mut output, graph.node_bound(), &bottom);
-    let worklist = region(graph, direction, edit, |node, _| {
+    let worklist = region(downstream, graph, edit, |node, _| {
         input[node.index()] = bottom.clone();
         output[node.index()] = bottom.clone();
     });
@@ -339,7 +341,7 @@ where
         }
         edge[id.index()] = Some(held.unwrap_or_else(|| bottom.clone()));
     }
-    let mut worklist = region(graph, problem.direction(), edit, |node, live| {
+    let mut worklist = region(downstream, graph, edit, |node, live| {
         input[node.index()] = bottom.clone();
         output[node.index()] = bottom.clone();
         // A removed node's edges went with it and have no slot left.
