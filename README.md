@@ -324,7 +324,7 @@ The algorithms over this contract (lift from a flat function, lowering, structur
 
 | Algorithm | Function / Type | Description |
 |---|---|---|
-| DFS / BFS | `depth_first_preorder`, `depth_first_postorder`, `reverse_postorder`, `breadth_first`, and matching `Cfg` methods | Traversals over any `GraphView` along a `Direction`; every walk of the crate runs on one breadth-first and one depth-first core |
+| DFS / BFS | `depth_first_preorder`, `depth_first_postorder`, `reverse_postorder`, `breadth_first`, and matching `Cfg` methods | Traversals over any `GraphView` along a `Direction`; the crate's walks run on one breadth-first and one depth-first core, apart from a few hot loops that measured faster on their own |
 | Graph views | `Rooted`, `Reversed`, `Induced`, `VirtualRoot` | Reshape a view without copying it: root it at a node, reverse every edge, confine it to a node set, or put one extra node in front of a list of roots (caller order, optional membership mask for constant-time reverse adjacency). Compose them, e.g. a virtual exit over `Reversed` |
 | Edge-aware traversal | `breadth_first_edges`, `depth_first_edges`, `shortest_path_edges[_in]` | Every distinct edge once, as edge ids, over any edge view; parallel edges stay distinct. Restrict the edges a walk may take with `FilteredEdges` |
 | Configurable search | `search` + `SearchConfig` (order, visited policy, depth bound) along a `Direction` | First-match, pruning (`Visit::Skip`), early exit (`ControlFlow::Break`), and backtracking as configuration; `VisitedPolicy::Path` un-marks on unwind so every route to a node is reported |
