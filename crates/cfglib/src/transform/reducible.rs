@@ -97,9 +97,8 @@ pub fn make_reducible<I: Clone, E: Clone>(cfg: &mut Cfg<I, E>) -> Vec<BlockId> {
 /// `start`.
 ///
 /// The confinement is the walk's mask rather than an
-/// [`Induced`](crate::graph::view::Induced) view: through the view's filtered
-/// adjacency, `cfg_clone_make_reducible_complete_10` took 1.46x and
-/// `cfg_clone_make_reducible_large` 1.08x the time of the masked walk.
+/// [`Induced`](crate::graph::view::Induced) view, whose filtered adjacency
+/// costs every step a lookup, as [`reachable_in`] documents.
 fn closure<I, E>(
     cfg: &Cfg<I, E>,
     start: impl IntoIterator<Item = BlockId>,
