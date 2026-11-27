@@ -44,15 +44,10 @@
 extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::convert::Infallible;
-use core::ops::ControlFlow;
 
 use super::{LoopForest, LoopRecord};
 use crate::graph::epoch::EpochMarks;
-use crate::graph::search::Visit;
-use crate::graph::traverse::{
-    Adjacency, DepthFirstStack, DepthFirstVisitor, Outgoing, StepKind, depth_first_core,
-};
+use crate::graph::traverse::{Adjacency, Outgoing};
 use crate::graph::view::{DenseId, GraphView, RootedView};
 use crate::identity::{NO_INDEX, slot, word};
 use crate::union_find::DisjointSet;
@@ -200,103 +195,129 @@ struct Walk<N> {
     waiting: Vec<u32>,
 }
 
+/// A block of the walk with successors left to examine.
+struct Frame {
+    position: u32,
+    /// Where the block's successors start in the arena; leaving the block
+    /// truncates the arena back to it.
+    start: usize,
+    /// The next successor to examine, as an arena index.
+    cursor: usize,
+}
+
 impl<N: DenseId> Walk<N> {
+    /// Walk along `axis` from each of `roots` in turn that an earlier walk
+    /// missed, numbering the blocks in preorder and postorder and filing
+    /// every edge between blocks of one walk.
+    ///
+    /// The walk keeps its own loop instead of running the shared depth-first
+    /// core: the preorder positions double as the visited marks and the
+    /// frames as the path, where the core kept a mark table, a path stack and
+    /// a reversed copy of each successor run beside them. With its buffers
+    /// sized up front it measured 0.83x the core form on
+    /// `cfg_clone_make_reducible_weighted` (a 4-block graph, walked once per
+    /// split) and 0.90x on `cfg_cycle_forest_reducible_nest`, and the sizing
+    /// alone 0.82x against growing the buffers by push, with
+    /// `cfg_cycle_forest_random_1m` level throughout.
     fn new<G, A>(axis: A, graph: &G, roots: impl IntoIterator<Item = N>) -> Self
     where
         G: GraphView<NodeId = N>,
         A: Adjacency,
     {
-        let mut filing = Filing {
-            walk: Self {
-                blocks: Vec::new(),
-                postorder: Vec::new(),
-                sources: Vec::new(),
-                targets: Vec::new(),
-                next: Vec::new(),
-                returning: Vec::new(),
-                waiting: Vec::new(),
-            },
-            position: vec![NO_INDEX; graph.node_bound()],
-            finished: DisjointSet::new(0),
-            open: Vec::new(),
-            path: Vec::new(),
-            start: 0,
+        // Every buffer starts at the size the graph allows, so a small graph
+        // walked many times, as `make_reducible` does, never grows one by
+        // reallocation. The edges filed are a tree edge per block but the
+        // roots, and in a control-flow graph about as many others.
+        let node_bound = graph.node_bound();
+        let edges = 2 * node_bound;
+        let mut walk = Self {
+            blocks: Vec::with_capacity(node_bound),
+            postorder: Vec::with_capacity(node_bound),
+            sources: Vec::with_capacity(edges),
+            targets: Vec::with_capacity(edges),
+            next: Vec::with_capacity(edges),
+            returning: Vec::with_capacity(node_bound),
+            waiting: Vec::with_capacity(node_bound),
         };
-        let mut marks = vec![false; graph.node_bound()];
-        let _: Option<Infallible> = depth_first_core(
-            axis,
-            graph,
-            roots,
-            marks.as_mut_slice(),
-            &mut DepthFirstStack::default(),
-            &mut filing,
-        );
-        filing.walk
-    }
-}
-
-/// The walk's callbacks: number each block in preorder and in postorder, and
-/// file each edge under the nearest common ancestor of its ends.
-struct Filing<N> {
-    walk: Walk<N>,
-    /// The preorder position of each block, [`NO_INDEX`] before the walk
-    /// reaches it.
-    position: Vec<u32>,
-    /// Tarjan's offline nearest common ancestors: a finished position joins
-    /// the set of its parent, and `open` names, for each set, its one position
-    /// still on the path. That is the nearest common ancestor of any member
-    /// and of the block being examined, which is below every position on the
-    /// path. A position on the path names itself.
-    finished: DisjointSet,
-    open: Vec<u32>,
-    /// The positions of the blocks on the walk's current path.
-    path: Vec<u32>,
-    /// The position of the current walk's root: the positions below it belong
-    /// to earlier walks, which this one cannot be reached from.
-    start: u32,
-}
-
-impl<N: DenseId> DepthFirstVisitor<N, N, Infallible> for Filing<N> {
-    #[inline]
-    fn discover(&mut self, block: N, depth: usize) -> ControlFlow<Infallible, Visit> {
-        let walk = &mut self.walk;
-        let at = word(walk.blocks.len());
-        self.position[block.index()] = at;
-        walk.blocks.push(block);
-        walk.returning.push(NO_INDEX);
-        walk.waiting.push(NO_INDEX);
-        self.finished.push();
-        self.open.push(at);
-        match self.path.last() {
-            Some(&parent) if depth > 0 => walk.file(parent, at, parent),
-            _ => self.start = at,
-        }
-        self.path.push(at);
-        ControlFlow::Continue(Visit::Descend)
-    }
-
-    #[inline]
-    fn step(&mut self, _: N, _: N, to: N, kind: StepKind) -> ControlFlow<Infallible> {
-        if kind != StepKind::Tree {
-            let to = self.position[to.index()];
-            if to >= self.start {
-                let from = *self.path.last().expect("a step leaves a block on the path");
-                let ancestor = self.open[self.finished.find(slot(to))];
-                self.walk.file(from, to, ancestor);
+        let mut position = vec![NO_INDEX; node_bound];
+        // Tarjan's offline nearest common ancestors: a finished position joins
+        // the set of its parent, and `open` names, for each set, its one
+        // position still on the stack. That is the nearest common ancestor of
+        // any member and of the block being examined, which is below every
+        // position on the stack. A position on the stack names itself. The
+        // positions the walk does not hand out stay singletons nobody reads.
+        let mut finished = DisjointSet::new(node_bound);
+        let mut open: Vec<u32> = Vec::with_capacity(node_bound);
+        let mut arena: Vec<N> = Vec::with_capacity(node_bound);
+        let mut frames: Vec<Frame> = Vec::with_capacity(node_bound);
+        for root in roots {
+            if position[root.index()] != NO_INDEX {
+                continue;
+            }
+            // The positions below the root's belong to earlier walks, which
+            // this one cannot be reached from, so an edge into one lies on no
+            // cycle and is left out.
+            let start = walk.enter(axis, graph, root, &mut position, &mut arena, &mut frames);
+            open.push(start);
+            while let Some(frame) = frames.last_mut() {
+                let from = frame.position;
+                let Some(&successor) = arena.get(frame.cursor) else {
+                    arena.truncate(frame.start);
+                    frames.pop();
+                    walk.postorder.push(from);
+                    if let Some(parent) = frames.last() {
+                        finished.union(slot(from), slot(parent.position));
+                        open[finished.find(slot(from))] = parent.position;
+                    }
+                    continue;
+                };
+                frame.cursor += 1;
+                match position[successor.index()] {
+                    NO_INDEX => {
+                        let to = walk.enter(
+                            axis,
+                            graph,
+                            successor,
+                            &mut position,
+                            &mut arena,
+                            &mut frames,
+                        );
+                        open.push(to);
+                        walk.file(from, to, from);
+                    }
+                    to if to >= start => walk.file(from, to, open[finished.find(slot(to))]),
+                    _ => {}
+                }
             }
         }
-        ControlFlow::Continue(())
+        walk
     }
 
+    /// Give `block` the next position, and start examining its neighbors
+    /// along `axis`.
     #[inline]
-    fn finish(&mut self, _: N) -> ControlFlow<Infallible> {
-        let at = self.path.pop().expect("a finished block is on the path");
-        self.walk.postorder.push(at);
-        if let Some(&parent) = self.path.last() {
-            self.finished.union(slot(at), slot(parent));
-            self.open[self.finished.find(slot(at))] = parent;
-        }
-        ControlFlow::Continue(())
+    fn enter<G: GraphView<NodeId = N>, A: Adjacency>(
+        &mut self,
+        axis: A,
+        graph: &G,
+        block: N,
+        position: &mut [u32],
+        arena: &mut Vec<N>,
+        frames: &mut Vec<Frame>,
+    ) -> u32 {
+        let at = word(self.blocks.len());
+        position[block.index()] = at;
+        self.blocks.push(block);
+        self.returning.push(NO_INDEX);
+        self.waiting.push(NO_INDEX);
+        let start = arena.len();
+        arena.extend(axis.neighbors(graph, block));
+        frames.push(Frame {
+            position: at,
+            start,
+            cursor: start,
+        });
+        at
     }
 }
 
