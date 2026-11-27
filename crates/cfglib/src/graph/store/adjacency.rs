@@ -524,7 +524,10 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     ///
     /// Panics when `node` names no slot in this store.
     pub fn successors(&self, node: Id<NT>) -> impl Iterator<Item = Id<NT>> + '_ {
-        self.outgoing(node).map(|edge| self.edge(edge).target())
+        Neighbors::<'_, N, E, NT, ET, true> {
+            graph: self,
+            edges: self.outgoing(node),
+        }
     }
 
     /// Iterate over incoming neighbors, retaining parallel entries.
@@ -533,7 +536,10 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     ///
     /// Panics when `node` names no slot in this store.
     pub fn predecessors(&self, node: Id<NT>) -> impl Iterator<Item = Id<NT>> + '_ {
-        self.incoming(node).map(|edge| self.edge(edge).source())
+        Neighbors::<'_, N, E, NT, ET, false> {
+            graph: self,
+            edges: self.incoming(node),
+        }
     }
 
     /// The number of live outgoing edges of `node`.
@@ -635,6 +641,40 @@ impl<ET: IdTag> Iterator for AdjacentEdges<'_, ET> {
     )]
     fn next(&mut self) -> Option<Self::Item> {
         advance(&mut self.cursor, &self.axis, self.live, self.delta_base).map(Id::from_raw)
+    }
+}
+
+/// The neighbors of one node in adjacency order, parallel entries retained:
+/// the far end of each edge an [`AdjacentEdges`] walk yields, the target
+/// when `FORWARD` and the source otherwise.
+///
+/// Returned by [`Graph::successors`] and [`Graph::predecessors`] in place of
+/// a `map` over the walk, whose step the inliner left out of line in generic
+/// callers: `api_propagate_summaries_widened` ran 1.3x the time it takes
+/// with this step forced inline.
+struct Neighbors<'g, N, E, NT: IdTag, ET: IdTag, const FORWARD: bool> {
+    graph: &'g Graph<N, E, NT, ET>,
+    edges: AdjacentEdges<'g, ET>,
+}
+
+impl<N, E, NT: IdTag, ET: IdTag, const FORWARD: bool> Iterator
+    for Neighbors<'_, N, E, NT, ET, FORWARD>
+{
+    type Item = Id<NT>;
+
+    /// Forced inline for the reason the walk it steps is.
+    #[inline(always)]
+    #[expect(
+        clippy::inline_always,
+        reason = "a hint left the step out of line in generic callers; up to 1.3x slower"
+    )]
+    fn next(&mut self) -> Option<Id<NT>> {
+        let record = self.graph.edge(self.edges.next()?);
+        Some(if FORWARD {
+            record.target()
+        } else {
+            record.source()
+        })
     }
 }
 

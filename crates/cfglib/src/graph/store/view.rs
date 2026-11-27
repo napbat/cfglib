@@ -27,10 +27,26 @@ impl<N, E, NT: IdTag, ET: IdTag> GraphView for Graph<N, E, NT, ET> {
         Graph::node_ids(self)
     }
 
+    /// Forced inline, as [`outgoing`](EdgeView::outgoing) is: a generic node
+    /// walk calls this through the trait. Left to the inliner, it stayed out
+    /// of line in `propagate_summaries`, and
+    /// `ring_propagate_summaries_seed_at_last` ran 1.27x the time it takes
+    /// with this and [`predecessors`](Self::predecessors) forced.
+    #[inline(always)]
+    #[expect(
+        clippy::inline_always,
+        reason = "out of line, a node walk through the trait ran up to 1.27x slower"
+    )]
     fn successors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
         Graph::successors(self, node)
     }
 
+    /// Forced inline for the reason [`successors`](Self::successors) is.
+    #[inline(always)]
+    #[expect(
+        clippy::inline_always,
+        reason = "out of line, a node walk through the trait ran up to 1.27x slower"
+    )]
     fn predecessors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
         Graph::predecessors(self, node)
     }
