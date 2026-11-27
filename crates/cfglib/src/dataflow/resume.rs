@@ -254,11 +254,12 @@ fn region<G: GraphView, D: Adjacency>(
     let mut worklist = Worklist::new(bound);
     match edit.mode {
         ResumeMode::Reset => {
-            // The walk resets each node as it reaches it. Through
-            // `reachable_in`, whose byte per node then needs a pass over the
-            // whole bound to find the region, resuming the 100-node region at
-            // the end of a 100 000-node chain (`api_resume_node_problem`)
-            // took 1.22x the time of this walk.
+            // The walk resets each node as it reaches it, so the cost is the
+            // region's. Through `reachable_in`, whose byte per node then
+            // needs a pass over the whole bound to find the region, resuming
+            // the 100-node region at the end of a 100 000-node chain
+            // (`api_resume_node_problem`) took 1.22x main's time; with this
+            // walk and `Worklist::of` filling its row directly, 0.97x.
             let mut reached = DenseBits::new(bound);
             let mut stack = changed;
             while let Some(node) = stack.pop() {
