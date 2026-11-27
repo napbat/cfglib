@@ -26,8 +26,9 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{ABSENT, DominatorTree, slot, word};
+use super::DominatorTree;
 use crate::graph::view::{DenseId, GraphView};
+use crate::identity::{NO_INDEX, slot, word};
 
 mod low_high;
 
@@ -44,7 +45,7 @@ struct Pending {
 /// Every table the Lengauer-Tarjan computation fills, owned by the caller.
 #[derive(Debug, Clone, Default)]
 pub(super) struct ConstructionBuffers {
-    /// Depth-first number of each node, [`ABSENT`] when the root misses it.
+    /// Depth-first number of each node, [`NO_INDEX`] when the root misses it.
     number: Vec<u32>,
     /// Node index of each depth-first number.
     vertex: Vec<u32>,
@@ -54,7 +55,7 @@ pub(super) struct ConstructionBuffers {
     semi: Vec<u32>,
     /// The node of least semidominator on the compressed path above a node.
     label: Vec<u32>,
-    /// The link-eval forest, [`ABSENT`] for a node not yet linked.
+    /// The link-eval forest, [`NO_INDEX`] for a node not yet linked.
     ancestor: Vec<u32>,
     /// Relative dominator of each node, then its immediate dominator.
     dominator: Vec<u32>,
@@ -87,7 +88,7 @@ impl ConstructionBuffers {
     }
 
     /// The parent table of the dominator tree of `graph` from `root`, indexed
-    /// by dense node index, with [`ABSENT`] for the root and for every node
+    /// by dense node index, with [`NO_INDEX`] for the root and for every node
     /// the root does not reach.
     ///
     /// With `record`, the run also keeps the tables a low-high order is built
@@ -99,7 +100,7 @@ impl ConstructionBuffers {
         record: bool,
     ) -> Vec<u32> {
         self.run(graph, root, record);
-        let mut idom = vec![ABSENT; graph.node_bound()];
+        let mut idom = vec![NO_INDEX; graph.node_bound()];
         for (node, parent) in self.reached_parents() {
             idom[node] = parent;
         }
@@ -141,16 +142,16 @@ impl ConstructionBuffers {
     /// search would produce.
     fn search<G: GraphView>(&mut self, graph: &G, root: usize) {
         self.number.clear();
-        self.number.resize(graph.node_bound(), ABSENT);
+        self.number.resize(graph.node_bound(), NO_INDEX);
         self.vertex.clear();
         self.parent.clear();
         self.pending.clear();
         self.pending.push(Pending {
             node: word(root),
-            parent: ABSENT,
+            parent: NO_INDEX,
         });
         while let Some(Pending { node, parent }) = self.pending.pop() {
-            if self.number[slot(node)] != ABSENT {
+            if self.number[slot(node)] != NO_INDEX {
                 continue;
             }
             let number = word(self.vertex.len());
@@ -158,7 +159,7 @@ impl ConstructionBuffers {
             self.vertex.push(node);
             self.parent.push(parent);
             for successor in graph.successors(G::NodeId::from_index(slot(node))) {
-                if self.number[successor.index()] == ABSENT {
+                if self.number[successor.index()] == NO_INDEX {
                     self.pending.push(Pending {
                         node: word(successor.index()),
                         parent: number,
@@ -180,17 +181,17 @@ impl ConstructionBuffers {
         self.label.clear();
         self.label.extend(0..count);
         self.ancestor.clear();
-        self.ancestor.resize(reached, ABSENT);
+        self.ancestor.resize(reached, NO_INDEX);
         self.dominator.clear();
         self.dominator.extend_from_slice(&self.parent);
         self.dominator[0] = 0;
         self.bucket_head.clear();
-        self.bucket_head.resize(reached, ABSENT);
+        self.bucket_head.resize(reached, NO_INDEX);
         self.bucket_next.clear();
-        self.bucket_next.resize(reached, ABSENT);
+        self.bucket_next.resize(reached, NO_INDEX);
         if self.record {
             self.best.clear();
-            self.best.resize(reached, ABSENT);
+            self.best.resize(reached, NO_INDEX);
             self.relative.clear();
             self.relative.extend(0..count);
         }
@@ -200,10 +201,10 @@ impl ConstructionBuffers {
     /// settle every node whose semidominator is that parent.
     fn process<G: GraphView>(&mut self, graph: &G, node: usize) {
         let mut semi = self.semi[node];
-        let mut best = ABSENT;
+        let mut best = NO_INDEX;
         for predecessor in graph.predecessors(G::NodeId::from_index(slot(self.vertex[node]))) {
             let number = self.number[predecessor.index()];
-            if number == ABSENT {
+            if number == NO_INDEX {
                 continue;
             }
             let least = self.evaluate(number);
@@ -225,8 +226,8 @@ impl ConstructionBuffers {
         self.ancestor[node] = parent;
 
         let mut waiting = self.bucket_head[slot(parent)];
-        self.bucket_head[slot(parent)] = ABSENT;
-        while waiting != ABSENT {
+        self.bucket_head[slot(parent)] = NO_INDEX;
+        while waiting != NO_INDEX {
             let least = self.evaluate(waiting);
             if self.record {
                 self.relative[slot(waiting)] = least;
@@ -243,7 +244,7 @@ impl ConstructionBuffers {
     /// The node of least semidominator on the path from `node` up to, but not
     /// including, the root of its tree in the link-eval forest.
     fn evaluate(&mut self, node: u32) -> u32 {
-        if self.ancestor[slot(node)] == ABSENT {
+        if self.ancestor[slot(node)] == NO_INDEX {
             return node;
         }
         self.compress(node);
@@ -262,7 +263,7 @@ impl ConstructionBuffers {
         let mut node = start;
         loop {
             let ancestor = self.ancestor[slot(node)];
-            if self.ancestor[slot(ancestor)] == ABSENT {
+            if self.ancestor[slot(ancestor)] == NO_INDEX {
                 break;
             }
             self.path.push(node);

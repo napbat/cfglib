@@ -8,12 +8,13 @@ use core::convert::Infallible;
 
 use super::{StreamedNodes, stream_edge_problem, stream_node_problem};
 use crate::dataflow::edge_fixpoint::TryEdgeProblem;
-use crate::dataflow::fixpoint::{
-    Direction, IterationOrder, SolveConfig, SolveError, TrySolveError,
+use crate::dataflow::node_fixpoint::{TryNodeProblem, solve_node_problem};
+use crate::dataflow::solve::{
+    IterationOrder, Seeds, Solve, SolveConfig, SolveError, TrySolveError,
 };
-use crate::dataflow::node_fixpoint::{TryNodeProblem, try_solve_node_problem_with_config};
 use crate::graph::store::{Graph, NodeId};
-use crate::graph::traverse::{Outgoing, TraversalDirection};
+use crate::graph::traverse::Outgoing;
+use crate::graph::view::{Direction, Rooted};
 use crate::graph::weak_topological_order::WeakTopologicalOrder;
 
 fn node(index: usize) -> NodeId {
@@ -53,7 +54,7 @@ fn figure_one(loops: &[(usize, usize)]) -> Graph<(), ()> {
 /// fact in the paper's terms: the head of the outermost element (or the
 /// loose node) after which the stream releases it.
 fn release_points(graph: &Graph<(), ()>) -> Vec<(usize, usize)> {
-    let order = WeakTopologicalOrder::compute(graph, node(1), TraversalDirection::Outgoing);
+    let order = WeakTopologicalOrder::compute(&Rooted::new(graph, node(1)));
     let nodes: StreamedNodes<(), _> = StreamedNodes::new(
         graph,
         &order,
@@ -146,25 +147,51 @@ fn every_node_is_visited_once_with_the_facts_of_the_solve_that_keeps_them() {
         ],
     );
     for passes in [0, 2] {
-        let config = SolveConfig::new()
-            .with_order(IterationOrder::WeakTopological)
-            .with_narrowing_passes(passes);
-        let expected = try_solve_node_problem_with_config(&graph, &Reaching, config).unwrap();
+        let config = SolveConfig {
+            order: IterationOrder::WeakTopological,
+            narrowing_passes: passes,
+            ..SolveConfig::default()
+        };
+        let solve = Solve {
+            config,
+            ..Solve::default()
+        };
+        let expected = solve_node_problem(&graph, &Reaching, solve).unwrap();
         let mut seen = Vec::new();
         // The stream runs in the weak topological order whatever the config
         // names; the passes carry over.
-        let streamed = SolveConfig::new().with_narrowing_passes(passes);
+        let streamed = Solve {
+            config: SolveConfig {
+                order: IterationOrder::Index,
+                ..config
+            },
+            ..Solve::default()
+        };
         let stats = stream_node_problem(&graph, &Reaching, streamed, |id, input, output| {
             assert_eq!(input, expected.fact_in(id));
             assert_eq!(output, expected.fact_out(id));
             seen.push(id.index());
         })
         .unwrap();
-        assert_eq!(stats.steps(), expected.steps());
+        assert_eq!(stats.step_count(), expected.stats().step_count());
         seen.sort_unstable();
         assert_eq!(seen, [0, 1, 2, 3, 4, 5, 6]);
-        assert!(stats.peak_live_facts() < 2 * 7);
+        assert!(stats.peak_count() < 2 * 7);
     }
+}
+
+#[test]
+fn a_seeded_stream_visits_what_its_seeds_reach() {
+    // 0 -> 1 -> 2 and 3 -> 4: from 1, the stream hands out 1 and 2 only.
+    let graph = graph(5, &[(0, 1), (1, 2), (3, 4)]);
+    let seeds = Solve {
+        seeds: Seeds::Of(&[node(1)]),
+        ..Solve::default()
+    };
+    let mut seen = Vec::new();
+    stream_node_problem(&graph, &Reaching, seeds, |id, _, _| seen.push(id.index())).unwrap();
+    seen.sort_unstable();
+    assert_eq!(seen, [1, 2]);
 }
 
 #[test]
@@ -172,14 +199,20 @@ fn an_error_ends_the_stream_after_the_nodes_already_final() {
     // 0 -> 1 -> 7: node 7 rejects its input, after 0 and 1 are final.
     let graph = graph(8, &[(0, 1), (1, 7)]);
     let mut seen = Vec::new();
-    let error = stream_node_problem(&graph, &Reaching, SolveConfig::new(), |id, _, _| {
+    let error = stream_node_problem(&graph, &Reaching, Solve::default(), |id, _, _| {
         seen.push(id.index());
     })
     .unwrap_err();
     assert_eq!(error, TrySolveError::Problem(7));
     assert!(seen.contains(&0) && seen.contains(&1) && !seen.contains(&7));
 
-    let limited = SolveConfig::with_step_limit(1);
+    let limited = Solve {
+        config: SolveConfig {
+            max_steps: Some(1),
+            ..SolveConfig::default()
+        },
+        ..Solve::default()
+    };
     let error = stream_node_problem(&graph, &Reaching, limited, |_, _, _| {}).unwrap_err();
     assert!(matches!(
         error,
@@ -222,7 +255,7 @@ fn an_edge_stream_frees_node_and_edge_facts_along_a_chain() {
     let edges: Vec<(usize, usize)> = (1..count).map(|index| (index - 1, index)).collect();
     let graph = graph(count, &edges);
     let mut visited = 0;
-    let stats = stream_edge_problem(&graph, &Marks, SolveConfig::new(), |id, input, _| {
+    let stats = stream_edge_problem(&graph, &Marks, Solve::default(), |id, input, _| {
         // Backward: a node's input is what it transferred, every later bit.
         let expected = (id.index()..count).fold(0_u64, |bits, at| bits | 1 << (at % 64));
         assert_eq!(*input, expected);
@@ -232,5 +265,5 @@ fn an_edge_stream_frees_node_and_edge_facts_along_a_chain() {
     assert_eq!(visited, count);
     // At most the facts of the node being solved, the edge it reads and the
     // edge it writes: a constant, whatever the length of the chain.
-    assert_eq!(stats.peak_live_facts(), 4, "{stats:?}");
+    assert_eq!(stats.peak_count(), 4, "{stats:?}");
 }

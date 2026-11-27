@@ -7,9 +7,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::cfg::Cfg;
-use crate::region::HandlerRef;
+use crate::edge::EdgeKind;
 
-use super::{EhBlockKind, EhEdge, EhEdgeKind, EhModel};
+use super::{EhBlockKind, EhModel};
 
 impl EhModel {
     /// Compute an EH model by analyzing edge kinds and region metadata.
@@ -24,12 +24,6 @@ impl EhModel {
     /// them, in region and handler order.
     ///
     /// [`Region`]: crate::Region
-    ///
-    /// Cleanup records the frontend attached to a handler
-    /// ([`Cfg::add_continuation`]) are carried into [`EhModel::cleanup`],
-    /// keyed by that handler's entry block, so an analysis reads
-    /// cleanup-then-continue structure instead of a fan of indistinguishable
-    /// out-edges.
     ///
     /// # Examples
     ///
@@ -52,8 +46,6 @@ impl EhModel {
             block_kinds: vec![EhBlockKind::Normal; blocks],
             eh_edges: Vec::new(),
             protected_by: vec![BTreeSet::new(); blocks],
-            handlers: vec![Vec::new(); blocks],
-            cleanups: vec![None; blocks],
         };
         model.classify_edges(cfg);
         model.classify_regions(cfg);
@@ -62,42 +54,42 @@ impl EhModel {
 
     fn classify_edges<I, E>(&mut self, cfg: &Cfg<I, E>) {
         for edge in cfg.edges() {
-            let Some(kind) = EhEdgeKind::from_cfg(edge.kind()) else {
-                continue;
-            };
-            self.eh_edges.push(EhEdge {
-                edge_id: edge.id(),
-                from: edge.source(),
-                to: edge.target(),
-                kind,
-            });
-            match kind {
-                EhEdgeKind::Handler | EhEdgeKind::Unwind => {
+            match edge.kind() {
+                EdgeKind::ExceptionHandler | EdgeKind::ExceptionUnwind => {
                     // Entry by dispatch outranks being a resume point, so the
                     // role does not depend on which edge is met first.
                     self.block_kinds[edge.target().index()] = EhBlockKind::LandingPad;
                     self.protected_by[edge.target().index()].insert(edge.source());
                 }
-                EhEdgeKind::Resume | EhEdgeKind::Continue => {
+                EdgeKind::ExceptionResume | EdgeKind::ExceptionContinue => {
                     let role = &mut self.block_kinds[edge.source().index()];
                     if *role == EhBlockKind::Normal {
                         *role = EhBlockKind::Resume;
                     }
                 }
-                EhEdgeKind::Leave => {}
+                EdgeKind::ExceptionLeave => {}
+                // Listed rather than matched by a wildcard, so a new edge kind
+                // has to say here whether the exception model carries it.
+                EdgeKind::Fallthrough
+                | EdgeKind::ConditionalTrue
+                | EdgeKind::ConditionalFalse
+                | EdgeKind::Unconditional
+                | EdgeKind::Back
+                | EdgeKind::Call
+                | EdgeKind::CallReturn
+                | EdgeKind::SwitchCase
+                | EdgeKind::Jump
+                | EdgeKind::IndirectJump
+                | EdgeKind::IndirectCall => continue,
             }
+            self.eh_edges.push(edge.id());
         }
     }
 
     fn classify_regions<I, E>(&mut self, cfg: &Cfg<I, E>) {
-        for region in cfg.regions() {
-            for (index, handler) in region.handlers.iter().enumerate() {
+        for (_, region) in cfg.regions() {
+            for handler in &region.handlers {
                 let target = handler.entry.index();
-                let handler_ref = HandlerRef::new(region.id, index);
-                self.handlers[target].push(handler_ref);
-                if let Some(cleanup) = cfg.cleanup(handler_ref) {
-                    self.cleanups[target] = Some(cleanup.clone());
-                }
                 // Region metadata is more precise than the role inferred from
                 // an exception edge, so this intentionally overwrites it.
                 self.block_kinds[target] = handler.kind.into();

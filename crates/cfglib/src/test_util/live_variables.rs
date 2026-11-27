@@ -1,4 +1,4 @@
-//! A small backward problem that exercises the block fixpoint solver.
+//! A small backward per-block problem that exercises the node solver.
 
 extern crate alloc;
 
@@ -7,7 +7,8 @@ use alloc::collections::BTreeSet;
 use crate::InstrInfo;
 use crate::block::BlockId;
 use crate::dataflow::cfg_view::CfgView;
-use crate::dataflow::fixpoint::{Direction, Problem};
+use crate::dataflow::node_fixpoint::NodeProblem;
+use crate::graph::view::Direction;
 
 use super::DfInst;
 
@@ -18,7 +19,7 @@ use super::DfInst;
 /// facts are those of plain textbook liveness.
 pub struct LiveVariables;
 
-impl<V: CfgView<Inst = DfInst>> Problem<V> for LiveVariables {
+impl<V: CfgView<Inst = DfInst>> NodeProblem<V> for LiveVariables {
     type Fact = BTreeSet<u16>;
 
     fn direction(&self) -> Direction {

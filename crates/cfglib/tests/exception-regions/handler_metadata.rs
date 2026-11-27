@@ -2,8 +2,7 @@
 //! filter predicates beside the CFG, keyed by handler identity.
 
 use cfglib::{
-    ControlNode, ControlTree, EdgeKind, HandlerFilters, HandlerKind, HandlerMetadata, HandlerRef,
-    HandlerTypes, RegionId,
+    ControlNode, ControlTree, EdgeKind, HandlerKind, HandlerMetadata, HandlerRef, RegionId,
 };
 
 use crate::shapes::{Stmt, block_of, catch, protect, try_catch};
@@ -14,7 +13,7 @@ fn key(region: u32, index: usize) -> HandlerRef {
 
 #[test]
 fn setting_a_payload_returns_the_one_it_replaced() {
-    let mut types = HandlerTypes::new();
+    let mut types = HandlerMetadata::new();
 
     assert_eq!(types.set(key(0, 0), "IOException"), None);
     assert_eq!(types.set(key(0, 1), "ArgumentException"), None);
@@ -31,7 +30,7 @@ fn setting_a_payload_returns_the_one_it_replaced() {
 
 #[test]
 fn iteration_is_in_handler_order_whatever_the_order_of_insertion() {
-    let mut filters = HandlerFilters::new();
+    let mut filters = HandlerMetadata::new();
     for (region, index, filter) in [
         (1, 0, "g"),
         (0, 2, "c"),
@@ -84,15 +83,6 @@ fn a_payload_is_edited_in_place_and_removed_by_handler() {
 }
 
 #[test]
-fn the_filter_and_type_aliases_are_the_same_table() {
-    let mut filters: HandlerFilters<u32> = HandlerFilters::new();
-    filters.set(key(0, 0), 17);
-    let as_types: HandlerTypes<u32> = filters.clone();
-
-    assert_eq!(as_types, filters);
-}
-
-#[test]
 fn a_consumer_reads_a_catch_type_back_through_the_tree_by_handler_identity() {
     // try { risky() } catch (IOException e) { .. } catch (ArgumentException e) { .. }
     let mut cfg = cfglib::Cfg::<Stmt>::new();
@@ -107,9 +97,8 @@ fn a_consumer_reads_a_catch_type_back_through_the_tree_by_handler_identity() {
     cfg.add_edge(io, after, EdgeKind::Fallthrough);
     cfg.add_edge(argument, after, EdgeKind::Fallthrough);
     let region = protect(&mut cfg, &[entry], vec![catch(io), catch(argument)]);
-    let mut types = HandlerTypes::new();
-    types.set(HandlerRef::new(region, 0), "IOException");
-    types.set(HandlerRef::new(region, 1), "ArgumentException");
+    let mut types = HandlerMetadata::new();
+    types.set_all(region, [(0, "IOException"), (1, "ArgumentException")]);
 
     let tree = ControlTree::compute(&cfg);
 
@@ -145,13 +134,10 @@ fn a_filtered_catch_with_no_funclet_is_a_plain_catch_carrying_its_predicate() {
     // handler is a `Catch` and the predicate is the frontend's own handle.
     let fixture = try_catch(&["log(e)"]);
     let handler = HandlerRef::new(fixture.region, 0);
-    let mut filters = HandlerFilters::new();
+    let mut filters = HandlerMetadata::new();
 
     filters.set(handler, "expr#17");
 
-    assert_eq!(
-        fixture.cfg.handler(handler).map(|found| found.kind),
-        Some(HandlerKind::Catch)
-    );
+    assert_eq!(fixture.cfg.handler(handler).kind, HandlerKind::Catch);
     assert_eq!(filters.metadata(handler), Some(&"expr#17"));
 }

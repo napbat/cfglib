@@ -4,109 +4,63 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use core::marker::PhantomData;
 
 use crate::graph::view::DenseId;
 use crate::ir::rtl::{
-    Action, BitSlice, Bits, Control, Dialect, RecordView, Selection, Statement, WriteTarget,
+    Action, BitSlice, Bits, Dialect, Place, RecordView, Selection, Statement, WriteTarget,
 };
 
 use super::defs::{Def, Defs};
 use super::dialect::DialectEffects;
 use super::exprs::{ExprId, Exprs, Opaque};
 use super::vocabulary::{
-    Access, Address, Effect, Exit, RaiseOrigin, Raised, StateTouch, Touch, Write, WriteKind,
+    Access, Effect, MemoryAddress, RaiseOrigin, Raised, StateTouch, Write, WriteKind,
 };
 
-/// The effect that the [`Summarizer`] gives for dialect `D` with the effect
-/// knowledge `C`: places are roots, locations are addresses in the address
-/// spaces of `C`, and outcomes are the outcomes of `D`.
-pub type RtlEffect<D, C> =
-    Effect<<D as Dialect>::Root, Address<<C as DialectEffects<D>>::Space>, <D as Dialect>::Outcome>;
+/// The effect that [`Effect::compute`] gives for dialect `D` with the effect
+/// knowledge `C`: places are bits of roots, locations are addresses in the
+/// address spaces of `C`, and outcomes are the outcomes of `D`.
+pub type RtlEffect<D, C> = Effect<
+    <D as Dialect>::Root,
+    MemoryAddress<<C as DialectEffects<D>>::Space>,
+    <D as Dialect>::Outcome,
+>;
 
-/// Turns the statements of one instruction into its [`Effect`].
-///
-/// One set of rules applies to every source of statements:
-///
-/// - **Reads.** Every read observes the state before the instruction, so
-///   every read is upward-exposed. A direct read touches its place. An
-///   indexed read touches every candidate, and a sparse read touches its bank.
-///   The effect lists each root once, with the union of its read bits.
-/// - **Writes.** One span of a [`WriteTarget::Root`] write is
-///   [`WriteKind::Always`] when it takes an input value, and
-///   [`WriteKind::Conditional`] when that value is a select (see
-///   [`DialectEffects::select`]) whose `otherwise` operand reads the same
-///   bits before the instruction. A span that takes a nondeterministic choice,
-///   either through [`Action::Nondeterministic`] or as the value of a `nondet`
-///   statement, is [`WriteKind::Undefined`]. An [`Action::PreservePreState`]
-///   span is no write. Neighbor spans of one write with the same kind form
-///   one [`Write`]. Every candidate of an indexed write, and the bank of a
-///   sparse write, is [`WriteKind::Indexed`].
-/// - **Memory.** [`DialectEffects::access`] classifies each effect statement.
-///   An effect statement that is not an access is an intrinsic, and
-///   [`DialectEffects::intrinsic_state`] gives the state that it can change.
-/// - **Raises.** Each raise statement is a [`RaiseOrigin::Raise`] with its
-///   guard. Each outcome of an effect statement is a
-///   [`RaiseOrigin::Environment`], with the guard of a conditional access.
-///   An outcome belongs to the instruction check when the check effect
-///   declares it, or when its guard depends on a result of the check effect.
-/// - **Exit.** The kind of the control boundary.
-///
-/// The expressions of the guards and the addresses are added to
-/// [`Effect::exprs`] in the order that the rules need them, and a value that
-/// two rules need has one expression. So two sources that give the same
-/// statements give equal effects, whatever their value handles are.
-#[derive(Debug)]
-pub struct Summarizer<'c, D, C> {
-    dialect: &'c C,
-    marker: PhantomData<fn(D)>,
-}
-
-impl<D, C> Clone for Summarizer<'_, D, C> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<D, C> Copy for Summarizer<'_, D, C> {}
-
-/// The data of the summarizer for one value: the memoized expression and
-/// whether the value depends on the instruction check.
-#[derive(Debug, Clone, Copy)]
-struct Extra {
-    expr: Option<ExprId>,
-    check: bool,
-}
-
-impl<'c, D: Dialect, C: DialectEffects<D>> Summarizer<'c, D, C> {
-    /// Creates a summarizer that classifies effects through `dialect`.
-    #[must_use]
-    pub const fn new(dialect: &'c C) -> Self {
-        Self {
-            dialect,
-            marker: PhantomData,
-        }
-    }
-
-    /// Summarizes one sealed record.
+impl<S, P, O> Effect<S, MemoryAddress<P>, O> {
+    /// Computes the effect of one sealed record.
     ///
-    /// This is [`Self::summarize`] over the statements, the control, and the
-    /// widths of `record`.
+    /// One set of rules applies to every source of statements:
     ///
-    /// # Panics
+    /// - **Reads.** Every read observes the state before the instruction, so
+    ///   every read is upward-exposed. A direct read touches its place. An
+    ///   indexed read touches every candidate, and a sparse read touches its
+    ///   bank. The effect lists each root once, with the union of its read
+    ///   bits.
+    /// - **Writes.** One span of a [`WriteTarget::Root`] write is
+    ///   [`WriteKind::Always`] when it takes an input value, and
+    ///   [`WriteKind::Conditional`] when that value is a select (see
+    ///   [`DialectEffects::select`]) whose `otherwise` operand reads the same
+    ///   bits before the instruction. A span that takes a nondeterministic
+    ///   choice, either through [`Action::Nondeterministic`] or as the value
+    ///   of a `nondet` statement, is [`WriteKind::Undefined`]. An
+    ///   [`Action::PreservePreState`] span is no write. Neighbor spans of one
+    ///   write with the same kind form one [`Write`]. Every candidate of an
+    ///   indexed write, and the bank of a sparse write, is
+    ///   [`WriteKind::Indexed`].
+    /// - **Memory.** [`DialectEffects::access`] classifies each effect
+    ///   statement. An effect statement that is not an access is an
+    ///   intrinsic, and [`DialectEffects::intrinsic_state`] gives the state
+    ///   that it can change.
+    /// - **Raises.** Each raise statement is a [`RaiseOrigin::Raise`] with
+    ///   its guard. Each outcome of an effect statement is a
+    ///   [`RaiseOrigin::Environment`] that names the effect, with the guard
+    ///   of a conditional access.
+    /// - **Exit.** The control boundary of the record without its values.
     ///
-    /// Panics as [`Self::summarize`] does.
-    #[must_use]
-    pub fn summarize_record<R: RecordView<D>>(&self, record: &R) -> RtlEffect<D, C> {
-        self.summarize(record.statements(), record.control(), |value| {
-            record.width(value)
-        })
-    }
-
-    /// Summarizes the statements of one instruction and its control boundary.
-    ///
-    /// `statements` yields the statements in the order that they were built.
-    /// `width` gives the type of each value that the statements define.
+    /// The expressions of the guards and the addresses are added to
+    /// [`Effect::exprs`] in the order that the rules need them, and a value
+    /// that two rules need has one expression. So two sources that give the
+    /// same statements give equal effects, whatever their value handles are.
     ///
     /// # Panics
     ///
@@ -115,46 +69,42 @@ impl<'c, D: Dialect, C: DialectEffects<D>> Summarizer<'c, D, C> {
     /// [`DialectEffects::select`] names an operand position past the
     /// operands. A sealed record meets these conditions.
     #[must_use]
-    pub fn summarize<'a, V, I>(
-        &self,
-        statements: I,
-        control: Control<V>,
-        width: impl Fn(V) -> Bits,
-    ) -> RtlEffect<D, C>
+    pub fn compute<D, C, R>(dialect: &C, record: &R) -> Self
     where
-        D: 'a,
-        V: DenseId + 'a,
-        I: IntoIterator<Item = Statement<'a, D, V>>,
+        D: Dialect<Root = S, Outcome = O>,
+        C: DialectEffects<D, Space = P>,
+        R: RecordView<D>,
     {
         let mut run = Run {
-            dialect: self.dialect,
+            dialect,
             defs: Defs::new(),
             effect: Effect {
                 reads: Vec::new(),
                 writes: Vec::new(),
                 memory: Vec::new(),
                 raises: Vec::new(),
-                exit: Exit::from(control),
+                exit: record.control().map(|_| ()),
                 nondeterministic: false,
                 intrinsic_state: StateTouch::Preserved,
-                instruction_check: false,
                 exprs: Exprs::new(),
             },
             widths: Vec::new(),
             stack: Vec::new(),
             operands: Vec::new(),
         };
-        for statement in statements {
+        let width = |value| record.width(value);
+        for statement in record.statements() {
             run.statement(&statement, &width);
         }
         run.finish()
     }
 }
 
-/// The state of one summary.
+/// The state of one summary. The data of a value is its memoized
+/// expression.
 struct Run<'a, 'c, D: Dialect, C: DialectEffects<D>, V> {
     dialect: &'c C,
-    defs: Defs<'a, D, V, Extra>,
+    defs: Defs<'a, D, V, Option<ExprId>>,
     effect: RtlEffect<D, C>,
     /// Scratch for the operand and result widths of one effect.
     widths: Vec<Bits>,
@@ -166,15 +116,7 @@ struct Run<'a, 'c, D: Dialect, C: DialectEffects<D>, V> {
 
 impl<'a, D: Dialect, C: DialectEffects<D>, V: DenseId> Run<'a, '_, D, C, V> {
     fn statement(&mut self, statement: &Statement<'a, D, V>, width: &impl Fn(V) -> Bits) {
-        let check = match *statement {
-            Statement::Effect { operation, .. } => self.dialect.is_instruction_check(operation),
-            _ => false,
-        };
-        let tainted = check || self.depends_on_check(statement);
-        self.defs.define(statement, width, |_, _| Extra {
-            expr: None,
-            check: tainted,
-        });
+        self.defs.define(statement, width, None);
         match *statement {
             Statement::Read { source, .. } => self.read(source),
             Statement::Nondet { .. } => self.effect.nondeterministic = true,
@@ -196,9 +138,8 @@ impl<'a, D: Dialect, C: DialectEffects<D>, V: DenseId> Run<'a, '_, D, C, V> {
                     let address = self.expr(args[shape.address]);
                     guard = shape.guard.map(|position| self.expr(args[position]));
                     self.effect.memory.push(Access {
-                        kind: shape.kind,
-                        atomicity: shape.atomicity,
-                        location: Address {
+                        mode: shape.mode,
+                        location: MemoryAddress {
                             space: shape.space,
                             address,
                         },
@@ -209,26 +150,21 @@ impl<'a, D: Dialect, C: DialectEffects<D>, V: DenseId> Run<'a, '_, D, C, V> {
                     let touch = self.dialect.intrinsic_state(operation);
                     self.effect.intrinsic_state = self.effect.intrinsic_state.join(touch);
                 }
-                self.effect.instruction_check |= check;
+                let effect = self.defs.last_effect();
                 for &outcome in outcomes {
                     self.effect.raises.push(Raised {
                         outcome,
                         guard,
-                        origin: RaiseOrigin::Environment,
-                        check,
+                        origin: RaiseOrigin::Environment { effect },
                     });
                 }
             }
             Statement::Raise(raise) => {
-                let check = raise
-                    .guard
-                    .is_some_and(|guard| self.defs.slot(guard).extra.check);
                 let guard = raise.guard.map(|guard| self.expr(guard));
                 self.effect.raises.push(Raised {
                     outcome: raise.outcome,
                     guard,
                     origin: RaiseOrigin::Raise,
-                    check,
                 });
             }
             Statement::Write { target, .. } => self.write(target),
@@ -236,35 +172,15 @@ impl<'a, D: Dialect, C: DialectEffects<D>, V: DenseId> Run<'a, '_, D, C, V> {
         }
     }
 
-    /// Returns whether the results of the operator `statement` depend on a
-    /// result of the instruction check.
-    fn depends_on_check(&self, statement: &Statement<'a, D, V>) -> bool {
-        match *statement {
-            Statement::Apply { args, .. } => {
-                args.iter().any(|&arg| self.defs.slot(arg).extra.check)
-            }
-            _ => false,
-        }
-    }
-
     fn read(&mut self, source: Selection<'a, D, V>) {
         match source {
-            Selection::Direct(place) => self.effect.reads.push(Touch {
-                place: place.root,
-                bits: place.slice,
-            }),
+            Selection::Direct(place) => self.effect.reads.push(place),
             Selection::FiniteIndexed { candidates, .. } => {
-                self.effect
-                    .reads
-                    .extend(candidates.iter().map(|place| Touch {
-                        place: place.root,
-                        bits: place.slice,
-                    }));
+                self.effect.reads.extend_from_slice(candidates);
             }
-            Selection::SparseIndexed { bank, slice, .. } => self.effect.reads.push(Touch {
-                place: bank,
-                bits: slice,
-            }),
+            Selection::SparseIndexed { bank, slice, .. } => {
+                self.effect.reads.push(Place { root: bank, slice });
+            }
         }
     }
 
@@ -289,15 +205,13 @@ impl<'a, D: Dialect, C: DialectEffects<D>, V: DenseId> Run<'a, '_, D, C, V> {
             WriteTarget::FiniteIndexed { candidates, .. } => {
                 self.effect
                     .writes
-                    .extend(candidates.iter().map(|place| Write {
-                        place: place.root,
-                        bits: place.slice,
+                    .extend(candidates.iter().map(|&place| Write {
+                        place,
                         kind: WriteKind::Indexed,
                     }));
             }
             WriteTarget::SparseIndexed { bank, slice, .. } => self.effect.writes.push(Write {
-                place: bank,
-                bits: slice,
+                place: Place { root: bank, slice },
                 kind: WriteKind::Indexed,
             }),
         }
@@ -322,14 +236,13 @@ impl<'a, D: Dialect, C: DialectEffects<D>, V: DenseId> Run<'a, '_, D, C, V> {
     fn push_write(&mut self, first: usize, root: D::Root, span: BitSlice, kind: WriteKind) {
         if let Some(last) = self.effect.writes[first..].last_mut()
             && last.kind == kind
-            && last.bits.end() == u32::from(span.offset)
+            && last.place.slice.end() == u32::from(span.offset)
         {
-            last.bits.width = add_widths(last.bits.width, span.width);
+            last.place.slice.width = add_widths(last.place.slice.width, span.width);
             return;
         }
         self.effect.writes.push(Write {
-            place: root,
-            bits: span,
+            place: Place { root, slice: span },
             kind,
         });
     }
@@ -337,14 +250,14 @@ impl<'a, D: Dialect, C: DialectEffects<D>, V: DenseId> Run<'a, '_, D, C, V> {
     /// Returns the expression of `value`, and adds it and the expressions of
     /// its operands to the arena when they are not there yet.
     fn expr(&mut self, value: V) -> ExprId {
-        if let Some(expr) = self.defs.slot(value).extra.expr {
+        if let Some(expr) = self.defs.slot(value).extra {
             return expr;
         }
         let mut stack = core::mem::take(&mut self.stack);
         stack.push((value, false));
         while let Some((value, expanded)) = stack.pop() {
             let slot = *self.defs.slot(value);
-            if slot.extra.expr.is_some() {
+            if slot.extra.is_some() {
                 continue;
             }
             let expr = match slot.def {
@@ -353,17 +266,10 @@ impl<'a, D: Dialect, C: DialectEffects<D>, V: DenseId> Run<'a, '_, D, C, V> {
                     stack.extend(
                         args.iter()
                             .rev()
-                            .filter(|&&arg| self.defs.slot(arg).extra.expr.is_none())
+                            .filter(|&&arg| self.defs.slot(arg).extra.is_none())
                             .map(|&arg| (arg, false)),
                     );
                     continue;
-                }
-                Def::Apply {
-                    operator,
-                    args: [],
-                    result: 0,
-                } if let Some(word) = self.dialect.constant(operator) => {
-                    self.effect.exprs.constant(&[word], slot.width)
                 }
                 Def::Apply {
                     operator,
@@ -376,17 +282,13 @@ impl<'a, D: Dialect, C: DialectEffects<D>, V: DenseId> Run<'a, '_, D, C, V> {
                         self.defs
                             .slot(arg)
                             .extra
-                            .expr
                             .expect("the walk adds every operand before its user")
                     }));
                     self.effect
                         .exprs
                         .op(name, &self.operands, result, slot.width)
                 }
-                Def::Read(Selection::Direct(place)) => self.effect.exprs.read(Touch {
-                    place: place.root,
-                    bits: place.slice,
-                }),
+                Def::Read(Selection::Direct(place)) => self.effect.exprs.read(place),
                 Def::Read(_) => self.effect.exprs.opaque(Opaque::IndexedRead, slot.width),
                 Def::Const { words } => self.effect.exprs.constant(words, slot.width),
                 Def::Nondet => self.effect.exprs.opaque(Opaque::Nondet, slot.width),
@@ -395,13 +297,12 @@ impl<'a, D: Dialect, C: DialectEffects<D>, V: DenseId> Run<'a, '_, D, C, V> {
                     .exprs
                     .opaque(Opaque::Effect { ordinal, result }, slot.width),
             };
-            self.defs.slot_mut(value).extra.expr = Some(expr);
+            self.defs.slot_mut(value).extra = Some(expr);
         }
         self.stack = stack;
         self.defs
             .slot(value)
             .extra
-            .expr
             .expect("the walk adds the requested value")
     }
 
@@ -416,25 +317,25 @@ fn add_widths(left: Bits, right: Bits) -> Bits {
     Bits::new(left.width() + right.width()).expect("two neighbor spans of one root fit in the root")
 }
 
-/// Sorts the touches by place and offset, and merges the touches of one
-/// place that overlap or meet.
-fn coalesce<S: Copy + Ord>(mut reads: Vec<Touch<S>>) -> Vec<Touch<S>> {
+/// Sorts the places by root and offset, and merges the places of one root
+/// that overlap or meet.
+fn coalesce<S: Copy + Ord>(mut reads: Vec<Place<S>>) -> Vec<Place<S>> {
     reads.sort_unstable();
-    let mut merged: Vec<Touch<S>> = Vec::with_capacity(reads.len());
-    for touch in reads {
+    let mut merged: Vec<Place<S>> = Vec::with_capacity(reads.len());
+    for place in reads {
         if let Some(last) = merged.last_mut()
-            && last.place == touch.place
-            && u32::from(touch.bits.offset) <= last.bits.end()
+            && last.root == place.root
+            && u32::from(place.slice.offset) <= last.slice.end()
         {
-            let end = last.bits.end().max(touch.bits.end());
-            let width = u16::try_from(end - u32::from(last.bits.offset))
+            let end = last.slice.end().max(place.slice.end());
+            let width = u16::try_from(end - u32::from(last.slice.offset))
                 .ok()
                 .and_then(Bits::new)
                 .expect("the merged bits lie in one root");
-            last.bits.width = width;
+            last.slice.width = width;
             continue;
         }
-        merged.push(touch);
+        merged.push(place);
     }
     merged
 }

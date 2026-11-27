@@ -1,10 +1,7 @@
-//! Critical-edge splitting: the unit-payload wrapper, the default-payload
-//! form, and the caller-payload form on payload-bearing CFGs.
+//! Critical-edge splitting: the default payload and caller-chosen payloads
+//! for the synthetic halves, on unit and payload-bearing CFGs.
 
-use cfglib::{
-    BlockId, Cfg, DominatorTree, EdgeKind, cfg_block_nesting_depths, detect_loops_tagged,
-    split_critical_edges, split_critical_edges_mapped, split_critical_edges_with,
-};
+use cfglib::{BlockId, Cfg, DominatorTree, EdgeKind, LoopForest, split_critical_edges_mapped};
 
 use crate::oracles::{
     Placement, assert_rewrite_accounts_for_identities, assert_surviving_payloads_unchanged,
@@ -22,7 +19,7 @@ fn split_critical_edges_leaves_no_edge_from_a_branch_to_a_join() {
         let before = random_program::<()>(seed, true);
         let critical = critical_edges(&before);
         let mut cfg = before.clone();
-        let split = split_critical_edges(&mut cfg);
+        let split = split_critical_edges_mapped(&mut cfg, |_, _| Default::default()).0;
         let context = format!("seed {seed}");
 
         assert_eq!(split, critical.len(), "{context}");
@@ -33,7 +30,11 @@ fn split_critical_edges_leaves_no_edge_from_a_branch_to_a_join() {
         assert_eq!(cfg.block_count(), before.block_count() + split, "{context}");
         assert_valid(&cfg, &context);
         assert_same_behavior(&before, &cfg, &context);
-        assert_eq!(split_critical_edges(&mut cfg), 0, "{context}: second run");
+        assert_eq!(
+            split_critical_edges_mapped(&mut cfg, |_, _| Default::default()).0,
+            0,
+            "{context}: second run"
+        );
         total += split;
     }
     assert!(total > 0, "the generator must produce critical edges");
@@ -43,7 +44,7 @@ fn mapped_case<E: Payload>(seed: u64) {
     let before = random_program::<E>(seed, true);
     let critical = critical_edges(&before);
     let mut cfg = before.clone();
-    let (split, rewrite) = split_critical_edges_mapped(&mut cfg);
+    let (split, rewrite) = split_critical_edges_mapped(&mut cfg, |_, _| Default::default());
     let context = format!("seed {seed}");
 
     assert_eq!(split, critical.len(), "{context}");
@@ -110,13 +111,13 @@ fn split_critical_edges_mapped_records_both_halves_and_defaults_the_new_payload(
 }
 
 #[test]
-fn split_critical_edges_with_asks_for_the_payload_of_each_synthetic_half() {
+fn split_critical_edges_mapped_asks_for_the_payload_of_each_synthetic_half() {
     for seed in 0..SEEDS {
         let before = random_program::<Route>(seed, false);
         let critical = critical_edges(&before);
         let mut cfg = before.clone();
         let mut asked = Vec::new();
-        let (split, rewrite) = split_critical_edges_with(&mut cfg, |edge, original| {
+        let (split, rewrite) = split_critical_edges_mapped(&mut cfg, |edge, original| {
             asked.push(edge);
             match original.payload() {
                 Route::Tagged(tag) => Route::Tagged(tag + 5_000),
@@ -171,7 +172,7 @@ fn parallel_switch_edges_into_a_join_are_split_one_by_one() {
     builder.edge(target, third, EdgeKind::Fallthrough);
     let mut cfg = builder.finish();
 
-    let (split, rewrite) = split_critical_edges_mapped(&mut cfg);
+    let (split, rewrite) = split_critical_edges_mapped(&mut cfg, |_, _| Route::default());
 
     assert_eq!(split, 2, "each parallel edge is its own critical edge");
     assert_eq!(rewrite.created_blocks().len(), 2);
@@ -209,7 +210,7 @@ fn self_loop_case<E: Payload>() -> (Cfg<Inst, E>, BlockId, BlockId) {
 fn splitting_a_critical_self_loop_keeps_the_loop_and_its_behavior() {
     let (before, entry, body) = self_loop_case::<Route>();
     let mut cfg = before.clone();
-    let (split, rewrite) = split_critical_edges_mapped(&mut cfg);
+    let (split, rewrite) = split_critical_edges_mapped(&mut cfg, |_, _| Route::default());
 
     assert_eq!(split, 1);
     let [middle] = rewrite.created_blocks() else {
@@ -225,22 +226,23 @@ fn splitting_a_critical_self_loop_keeps_the_loop_and_its_behavior() {
 #[test]
 fn loop_structure_survives_critical_edge_splitting_with_back_tags() {
     let (before, entry, body) = self_loop_case::<()>();
-    let loops_before = detect_loops_tagged(&before, &DominatorTree::compute(&before));
-    assert_eq!(loops_before.len(), 1);
-    assert_eq!(loops_before[0].header, body);
+    let loops_before = LoopForest::compute(&before, &DominatorTree::compute(&before));
+    assert_eq!(loops_before.loop_count(), 1);
+    assert!(loops_before.loop_of_header(body).is_some());
 
     let mut cfg = before.clone();
-    split_critical_edges(&mut cfg);
-    let loops = detect_loops_tagged(&cfg, &DominatorTree::compute(&cfg));
+    split_critical_edges_mapped(&mut cfg, |_, _| Default::default());
+    let loops = LoopForest::compute(&cfg, &DominatorTree::compute(&cfg));
 
     assert_eq!(
-        loops.iter().map(|lp| lp.header).collect::<Vec<_>>(),
+        loops.loops().map(|lp| loops.header(lp)).collect::<Vec<_>>(),
         [body],
         "a back-tagged edge that was split must not invent a second loop"
     );
-    assert_eq!(loops[0].latches.len(), 1);
+    let lp = loops.loop_of_header(body).expect("body heads the loop");
+    assert_eq!(loops.latches(lp).len(), 1);
     assert_eq!(
-        cfg_block_nesting_depths(&cfg)[entry.index()],
+        loops.node_depths()[entry.index()],
         0,
         "code before the loop is not inside it"
     );

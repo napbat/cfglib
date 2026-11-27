@@ -6,7 +6,7 @@
 //! yield and is therefore the right size for a dense side table, while
 //! [`Graph::node_ids`] yields only the live nodes. A removed node is not a
 //! node of the view at all, so a whole-graph partition such as
-//! [`tarjan_scc`](crate::tarjan_scc) reports no phantom singleton for it and
+//! [`SccDecomposition`](crate::SccDecomposition) reports no phantom singleton for it and
 //! no analysis has to compact the store first.
 
 use crate::graph::edge_view::{EdgeRef, EdgeView};
@@ -27,10 +27,26 @@ impl<N, E, NT: IdTag, ET: IdTag> GraphView for Graph<N, E, NT, ET> {
         Graph::node_ids(self)
     }
 
+    /// Forced inline, as [`outgoing`](EdgeView::outgoing) is: a generic node
+    /// walk calls this through the trait. Left to the inliner, it stayed out
+    /// of line in `propagate_summaries`, and
+    /// `ring_propagate_summaries_seed_at_last` ran 1.27x the time it takes
+    /// with this and [`predecessors`](Self::predecessors) forced.
+    #[inline(always)]
+    #[expect(
+        clippy::inline_always,
+        reason = "out of line, a node walk through the trait ran up to 1.27x slower"
+    )]
     fn successors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
         Graph::successors(self, node)
     }
 
+    /// Forced inline for the reason [`successors`](Self::successors) is.
+    #[inline(always)]
+    #[expect(
+        clippy::inline_always,
+        reason = "out of line, a node walk through the trait ran up to 1.27x slower"
+    )]
     fn predecessors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
         Graph::predecessors(self, node)
     }
@@ -56,10 +72,27 @@ impl<N, E, NT: IdTag, ET: IdTag> EdgeView for Graph<N, E, NT, ET> {
         Graph::edge_ids(self)
     }
 
+    /// Forced inline, as the store's own `adjacent` is: a generic walk calls
+    /// this through the trait, and out of line the walk is copied out of a
+    /// return slot and stepped by a call. `min_label_relaxation` over an
+    /// [`EdgeView`] measured 1.70x to 1.82x the time of the same loop over
+    /// the inherent store methods until this, the edge axes' `edges`, and
+    /// `AdjacentEdges::next` were all forced.
+    #[inline(always)]
+    #[expect(
+        clippy::inline_always,
+        reason = "out of line, an edge walk through the trait ran up to 1.8x slower"
+    )]
     fn outgoing(&self, node: Self::NodeId) -> impl Iterator<Item = Self::EdgeId> + '_ {
         Graph::outgoing(self, node)
     }
 
+    /// Forced inline for the reason [`outgoing`](Self::outgoing) is.
+    #[inline(always)]
+    #[expect(
+        clippy::inline_always,
+        reason = "out of line, an edge walk through the trait ran up to 1.8x slower"
+    )]
     fn incoming(&self, node: Self::NodeId) -> impl Iterator<Item = Self::EdgeId> + '_ {
         Graph::incoming(self, node)
     }

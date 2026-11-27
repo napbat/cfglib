@@ -4,9 +4,9 @@
 //! holding arbitrary node and edge payloads for value-flow, symbol,
 //! type-relation, import, call, and grammar graphs, with constant-time
 //! addition, bit-cheap removal, identity-preserving endpoint redirection, and
-//! an explicit [`compact`](Graph::compact) that reports its [`Renumbering`],
-//! or [`compact_ordered`](Graph::compact_ordered), which also numbers the
-//! nodes in a locality-friendly [`NodeOrder`].
+//! an explicit [`compact`](Graph::compact) that numbers the surviving nodes
+//! in insertion or a locality-friendly [`NodeOrder`] and reports its
+//! [`Renumbering`].
 //! Identities are one type, [`Id<T>`](Id), tagged per entity kind.
 //! [`Fanout`], [`DenseFanout`], and [`SortedMap`] are that base's shape
 //! without the edges: built-once tables from sparse keys, from a dense
@@ -17,7 +17,8 @@
 //! [`EdgeView`], and [`FilteredEdges`] retain payloads and edge identity
 //! without rebuilding, so consumer-owned graph stores participate without
 //! migrating their data.
-//! [`breadth_first_events`] and [`depth_first_events`] expose traversal-tree
+//! [`Rooted`], [`Reversed`], [`Induced`], and [`VirtualRoot`] reshape a view
+//! without copying it. [`depth_first_events`] exposes traversal-tree
 //! structure for dense graphs; [`open_breadth_first_events`] and
 //! [`open_depth_first_events`] provide the corresponding discovery streams
 //! for lazily generated node spaces.
@@ -28,8 +29,8 @@
 //! the same resolver handles stored references and ephemeral completion
 //! requests and builds forward/reverse binding indexes.
 //! [`graph::scope::ScopeEnvironmentQuery`] is the path-free form whose
-//! per-scope environments [`ScopeResolutionIndex::compute_cached`] computes
-//! once and shares across references.
+//! per-scope environments a [`ScopeEnvironmentCache`] computes once and
+//! shares across references.
 //! [`graph::stack::StackGraph`] provides the complementary file-incremental
 //! model with the standard root, scope, symbol push/pop, scoped-symbol,
 //! drop-scopes, and jump-to-scope nodes. It supports concrete direct paths,
@@ -48,15 +49,15 @@
 //! single assignment function with block parameters; value analyses over it
 //! belong to the consumer. [`ir::hlil`] is the structured contract: a
 //! read-only [`ir::hlil::FunctionView`] of statement and expression trees and
-//! a write-only [`ir::hlil::FunctionBuilder`] that the consumer implements,
-//! with the walks over its shapes. Every IR storage, builder implementation,
-//! editing machinery, and algorithm over the contents of an instruction
-//! belongs to the consumer.
+//! a write-only [`ir::hlil::FunctionBuilder`] that the consumer implements.
+//! Every IR storage, builder implementation, editing machinery, and
+//! algorithm over the contents of an instruction belongs to the consumer.
 //! [`effects`] is the one exception: [`Effect`] states what code reads,
-//! writes, accesses in memory, and raises, and [`Summarizer`] computes it from
-//! register-transfer statements with one set of rules for every level and
-//! every consumer. [`Captured`] holds the statements of one instruction, and
-//! [`StatementTree`] turns them into expression trees for a readable view.
+//! writes, accesses in memory, and raises, and [`Effect::compute`] computes
+//! it from register-transfer statements with one set of rules for every
+//! level and every consumer. [`Captured`] holds the statements of one
+//! instruction, and [`StatementTree`] turns them into expression trees for a
+//! readable view.
 //! [`ControlTree::compute`] structures a [`Cfg`] into `if / else`, loops,
 //! `switch`, `try / catch`, and `goto` form. The tree is a fact about the graph
 //! in the way [`DominatorTree`] is: a flat arena of nodes that name blocks,
@@ -68,11 +69,12 @@
 //! rather than two writers. [`write_text`] prints the same view one fact per
 //! line, and [`parse_text`] reads it back into a plain [`Graph`], which is
 //! what makes the form comparable: write, parse, write again is a fixed
-//! point. [`Cfg::to_text`] is the control-flow reading of it — block headers
+//! point. [`Cfg::to_listing`] is the control-flow form — block headers
 //! with indented instructions, edges named by [`EdgeKind`], and exception
-//! regions — and [`parse_cfg_text`] reads that back with a consumer-supplied
+//! regions — and [`parse_cfg_listing`] reads that back with a consumer-supplied
 //! instruction parser. Every printer shares [`IndentedWriter`], so
-//! indentation is decided once and a label is written straight into the sink.
+//! indentation is decided once and a label is written straight into the sink,
+//! and [`render`] turns any printer into a `String`.
 //! [`PassPipeline`] composes named, ordered, fallible transformations over a
 //! consumer-owned target, retaining a change report and failed-pass identity
 //! without imposing a dialect policy.
@@ -102,8 +104,8 @@
 //!
 //! Frontends with a flat, structured instruction stream (shader bytecode,
 //! structured ISAs) can instead implement [`FlowControl`] and use
-//! [`CfgBuilder::build`]; [`resolve_jump_edges`] wires explicit gotos
-//! afterwards via [`JumpTargets`].
+//! [`CfgBuilder::build`]; [`resolve_jump_edges`] wires the targets that
+//! their [`Flow`]s name afterwards.
 //!
 //! # Extension contracts
 //!
@@ -129,36 +131,34 @@
 //!                            `Cfg` implements it, every instruction-level
 //!                            analysis reads it)
 //!
-//! FlowControl               (required by CfgBuilder)
-//!   └─ JumpTargets          (optional — explicit goto/label wiring, Target)
+//! FlowControl               (required by CfgBuilder and call graphs —
+//!                            structured markers or a Flow; Target, CaseKey)
 //!
 //! InstrInfo<Variable = V>   (optional — native IR variables for dataflow)
-//!   ├─ EffectInfo           (optional — side effects, Effect)
 //!   └─ MemoryEventInfo      (optional — memory data flow + fences, Location + Fence)
 //!
 //! DisplayInstr              (optional — rendering only: DOT, text)
-//! CallInfo                  (optional — call graphs, Callee)
 //! ```
 //!
 //! [`MemoryEventInfo`] is the sole instruction-side memory contract. Memory
 //! SSA and memory-carried value flow over it live in the `il` crate.
 //!
-//! Additionally, [`Problem`] is the trait for pluggable instruction-level
-//! dataflow analyses over any rooted view (run by [`solve_problem`]),
-//! [`NodeProblem`] its node-level counterpart over any graph view (run by
-//! [`solve_node_problem`]),
-//! [`EdgeProblem`] its edge-sensitive counterpart (run by
-//! [`solve_edge_problem`]), [`TryEdgeProblem`] the error-preserving edge
-//! variant, and [`Emitter`] the trait for linearization output. A
-//! [`SolveConfig`] selects the [`IterationOrder`] of every solver; in
-//! [`IterationOrder::WeakTopological`] they follow a [`WeakTopologicalOrder`]
-//! and widen at its heads, so infinite-height lattices converge.
-//! [`stream_problem`], [`stream_node_problem`] and [`stream_edge_problem`]
+//! Additionally, [`NodeProblem`] is the trait for pluggable dataflow analyses
+//! with one fact per node of any graph view (per-block problems of a CFG
+//! included), run by [`solve_node_problem`]; [`EdgeProblem`] is its
+//! edge-sensitive counterpart, run by [`solve_edge_problem`]; each has a
+//! fallible form ([`TryNodeProblem`], [`TryEdgeProblem`]) that every
+//! infallible problem implements; and [`Emitter`] is the trait for
+//! linearization output. A [`Solve`] names the [`Seeds`] a solve starts from
+//! and its [`SolveConfig`], which selects the [`IterationOrder`]; in
+//! [`IterationOrder::WeakTopological`] the solvers follow a
+//! [`WeakTopologicalOrder`] and widen at its heads, so infinite-height
+//! lattices converge. [`stream_node_problem`] and [`stream_edge_problem`]
 //! run that solve and hand each node's facts out once they are final, instead
-//! of keeping every fact until the end. [`resume_problem`],
-//! [`resume_node_problem`] and [`resume_edge_problem`] re-solve after an edit
-//! from the facts of the solve before it, and [`OrderedFixpoint`] keeps the
-//! reads of the ordered slot driver between runs.
+//! of keeping every fact until the end. [`resume_node_problem`] and
+//! [`resume_edge_problem`] re-solve after an edit from the facts of the solve
+//! before it, and [`OrderedFixpoint`] keeps the reads of the ordered slot
+//! driver between runs.
 //!
 //! # Contracts
 //!
@@ -179,7 +179,8 @@
 //!   side tables or in the instruction payload itself.
 //! - A transform reports what it did as a [`Rewrite`] (sparse: only the
 //!   identities it touched) and a compaction as a [`Renumbering`] (total over
-//!   the old identity space). [`Rewrite::then_renumbered`] carries the first
+//!   the old identity space). Both compose with `compose(&next)`, and
+//!   `rewrite.compose(&Rewrite::from(&renumbering))` carries the first
 //!   across the second.
 
 #![no_std]
@@ -223,210 +224,173 @@ pub(crate) mod test_util;
 
 pub use analysis::control_tree::{
     BlockSpan, CatchHandler, ChildBodies, ControlBody, ControlDescent, ControlNode, ControlNodeId,
-    ControlRun, ControlTree, ControlVisitor, GotoDiagnostic, GotoReason, LiftReport, LoopKind,
-    PathDecomposition, Preorder, SplDecomposition, SplError, SplNode, SplNodeId, SplRun,
+    ControlRun, ControlTree, ControlVisitor, GotoDiagnostic, GotoReason, LoopKind,
+    PathDecomposition, Preorder, SplDecomposition, SplError, SplNode, SplNodeId, StructuringReport,
     SwitchCase,
 };
-pub use analysis::metrics::{
-    CfgMetrics, GraphMetrics, block_nesting_depths, cfg_block_nesting_depths,
-};
-pub use analysis::pattern::{CfgPattern, detect_cfg_patterns, detect_patterns};
+pub use analysis::metrics::{CfgMetrics, GraphMetrics};
+pub use analysis::pattern::{Pattern, detect_patterns, empty_trampolines};
 pub use block::{BasicBlock, BlockId, BlockTag};
-pub use builder::address::{
+pub use builder::{
     AddressBuildError, AddressCfgOptions, AddressEdgeInfo, AddressGraph, AddressHandler,
-    AddressInstruction, AddressSpace, CallPolicy, GivenEdge, GivenEdges, HopEnd, UnwindEnd,
-    UnwindHop, UnwindPath, UnwindRoute, UnwindStep, build_address_cfg,
-    build_address_cfg_from_given_edges, build_address_cfg_with_routes,
+    AddressHandlerKind, AddressInstruction, AddressSpace, BuildError, CallPolicy, CfgBuilder,
+    GivenEdge, GivenEdges, HopEnd, JumpResolution, UnwindEnd, UnwindHop, UnwindPath, UnwindRoute,
+    UnwindStep, build_address_cfg, resolve_jump_edges,
 };
-pub use builder::{BuildError, CfgBuilder, JumpResolution, resolve_jump_edges};
-pub use cfg::{Cfg, CfgEdge, CfgRenumbering, SplitPointError, parse_cfg_text};
+pub use cfg::{
+    Cfg, CfgEdge, SemanticValidator, SplitPointError, control_flow_edge_attributes,
+    parse_cfg_listing, verify, verify_semantics,
+};
 pub use dataflow::bits::DenseBits;
 pub use dataflow::cfg_view::CfgView;
-pub use dataflow::edge_fixpoint::{
-    EdgeFacts, EdgeProblem, Reachable, ReachableEdgeProblem, TryEdgeProblem, solve_edge_problem,
-    solve_edge_problem_from, solve_edge_problem_from_with_config, solve_edge_problem_with_config,
-    try_solve_edge_problem, try_solve_edge_problem_from, try_solve_edge_problem_from_with_config,
-    try_solve_edge_problem_with_config,
-};
-pub use dataflow::fixpoint::{
-    Direction, Facts, IterationOrder, Problem, SolveConfig, SolveError, TryProblem, TrySolveError,
-    meet_options, solve_problem, solve_problem_from, solve_problem_from_with_config,
-    solve_problem_with_config, try_solve_problem, try_solve_problem_from,
-    try_solve_problem_from_with_config, try_solve_problem_with_config,
-};
+pub use dataflow::edge_fixpoint::{EdgeFacts, EdgeProblem, TryEdgeProblem, solve_edge_problem};
 pub use dataflow::ifds::{
     CfgSupergraph, IfdsConfig, IfdsProblem, IfdsResults, Supergraph, solve_ifds,
 };
-pub use dataflow::instruction::{EffectInfo, InstrInfo, VariableId};
-pub use dataflow::node_fixpoint::{
-    NodeProblem, TryNodeProblem, solve_node_problem, solve_node_problem_from,
-    solve_node_problem_from_with_config, solve_node_problem_with_config, try_solve_node_problem,
-    try_solve_node_problem_from, try_solve_node_problem_from_with_config,
-    try_solve_node_problem_with_config,
-};
-pub use dataflow::program_point::{DefSite, ProgramPoint, UseSite};
-pub use dataflow::resume::{ResumeMode, resume_edge_problem, resume_node_problem, resume_problem};
+pub use dataflow::instruction::InstrInfo;
+pub use dataflow::node_fixpoint::{NodeProblem, TryNodeProblem, solve_node_problem};
+pub use dataflow::program_point::ProgramPoint;
+pub use dataflow::resume::{Resume, ResumeMode, resume_edge_problem, resume_node_problem};
 pub use dataflow::slot_fixpoint::{
-    OrderedFixpoint, SequentialExecutor, SlotAccess, SlotFixpointStats, WaveExecutor, WaveRequeue,
-    ordered_fixpoint, wave_fixpoint,
+    OrderedFixpoint, SequentialExecutor, SlotAccess, WaveExecutor, WaveRequeue, ordered_fixpoint,
+    wave_fixpoint,
 };
-pub use dataflow::stream::{SolveStats, stream_edge_problem, stream_node_problem, stream_problem};
-pub use display::{DisplayInstr, IndentedWriter};
-pub use edge::{Edge, EdgeId, EdgeKind, EdgeTag, KindedEdge};
+pub use dataflow::solve::{
+    Facts, IterationOrder, Seeds, Solve, SolveConfig, SolveError, SolveStats, TrySolveError,
+    meet_options, try_meet_options,
+};
+pub use dataflow::stream::{stream_edge_problem, stream_node_problem};
+pub use display::{DisplayInstr, IndentedWriter, render};
+pub use edge::{Edge, EdgeId, EdgeKind, EdgeTag, KindedEdge, Probability};
 pub use effects::{
-    Access, AccessShape, Address, CaptureBuilder, Captured, CapturedValue, DialectEffects, Effect,
-    Exit, Expr, ExprId, Exprs, Opaque, RaiseOrigin, Raised, RtlEffect, SelectShape, StateTouch,
-    StatementTree, Summarizer, Touch, TreeItem, TreeNode, TreeNodeId, TreeSpan, TreeSpanValue,
-    Write, WriteKind,
+    Access, AccessShape, CaptureBuilder, Captured, CapturedValue, DialectEffects, Effect, Expr,
+    ExprId, Exprs, MemoryAddress, Opaque, RaiseOrigin, Raised, RtlEffect, SelectShape, StateTouch,
+    StatementTree, TreeItem, TreeNode, TreeNodeId, TreeSpan, TreeSpanValue, Write, WriteKind,
 };
-pub use exception::{
-    ClrExceptionRegion, ClrHandler, ClrHandlerKind, ExceptionDisposition, ExceptionFlow,
-    ExceptionPhase, SehExceptionRegion, SehHandler, SehHandlerKind, SehRegistration,
-    SehRegistrationChain, VectoredExceptionModel, VectoredHandler, VectoredHandlerId,
-    VectoredHandlerKind, VectoredHandlerOrder, VehModel, install_clr_region, install_seh_region,
-};
+pub use exception::{ExceptionDisposition, ExceptionFlow, ExceptionPhase};
 pub use flow::{
-    CallInfo, CallSite, EdgeRole, Flow, FlowControl, FlowEffect, JumpTargets, Transfer, Transfers,
-    UnresolvedRole, UnresolvedTransfer,
-};
-pub use graph::bidirectional::{
-    ShortestPathScratch, shortest_path_bidirectional, shortest_path_edges_bidirectional,
+    CallSite, EdgeRole, Flow, FlowControl, FlowEffect, Transfer, Transfers, UnresolvedRole,
+    UnresolvedTransfer,
 };
 pub use graph::call_graph::{
-    CallMetadata, FunctionIndex, FunctionNode, call_graph, call_graph_indexed, find_function,
-    is_recursive_function, propagate_summaries, propagate_summaries_narrowed,
-    propagate_summaries_widened, recursive_functions,
+    CallMetadata, FunctionIndex, FunctionNode, SummaryConfig, SummaryProblem, call_graph,
+    call_graph_indexed, find_function, is_recursive_function, propagate_summaries,
+    recursive_functions,
 };
 pub use graph::cdg::{
     ControlClosureScratch, NonterminationScratch, control_dependence_graph,
-    nontermination_sensitive_controllers, weak_control_closure,
+    nontermination_sensitive_controllers, nontermination_sensitive_controllers_in,
+    weak_control_closure, weak_control_closure_in,
 };
-pub use graph::coldness::{ColdClass, ColdnessClasses, ColdnessGraph};
-pub use graph::cut::{EdgeCut, VertexCut, edge_disjoint_paths, min_edge_cut, min_vertex_cut};
+pub use graph::coldness::{ColdClass, ColdnessClasses};
+pub use graph::cut::{EdgeCut, VertexCut, edge_disjoint_paths};
 pub use graph::diff::{
-    BlockFingerprint, BlockHashes, BlockMatch, CascadeDiff, CfgDiff, MatchLevel, RegionDiff,
-    RegionMatch,
+    BlockHashes, BlockMatch, CascadeDiff, CfgDiff, MatchLevel, RegionDiff, RegionMatch,
 };
 pub use graph::dominator::{
     CertificateError, DominanceFrontiers, DominatorScratch, DominatorTree, DominatorUpdate,
-    ExitPolicy, FrontierScratch, LowHighOrder, PostDominatorScratch, PostDominatorTree, PostNode,
-    SinkId,
+    ExitPolicy, FrontierTree, LowHighOrder, PostDominatorTree, PostNode, SinkId,
 };
 pub use graph::dot::{
-    DotEdgeAttributes, DotEdgeStyle, DotRankDir, DotStyle, bind_edge_attributes,
-    control_flow_edge_attributes, plain_edge_attributes, to_dot, write_dot,
+    DotEdgeAttributes, DotEdgeStyle, DotRankDir, DotStyle, plain_edge_attributes, to_dot, write_dot,
 };
 pub use graph::dyck::{BidirectedDyck, bidirected_dyck_classes};
 pub use graph::edge_traverse::{
-    EdgeStep, breadth_first_edges, breadth_first_edges_with, depth_first_edges,
-    depth_first_edges_with, shortest_path_edges,
+    breadth_first_edges, depth_first_edges, shortest_path_edges, shortest_path_edges_in,
 };
 pub use graph::edge_view::{EdgeRef, EdgeView, FilteredEdges};
-pub use graph::eh::{EhBlockKind, EhEdge, EhEdgeKind, EhModel};
-pub use graph::epoch::{EpochMarks, EpochSet};
+pub use graph::eh::{EhBlockKind, EhModel};
+pub use graph::epoch::EpochMarks;
 pub use graph::fanout::{DenseFanout, Fanout, SortedMap};
 pub use graph::feedback::{FeedbackConfig, feedback_arc_set, linear_arrangement};
-pub use graph::fingerprint::{canonical_hash, canonical_order, multiset_fingerprint, wl_colors};
-pub use graph::frequency::{BlockFrequencies, FREQUENCY_SHIFT, FrequencyConfig, Probability};
+pub use graph::fingerprint::{
+    Mixer, canonical_hash, canonical_order, multiset_fingerprint, wl_colors,
+};
+pub use graph::frequency::{BlockFrequencies, FREQUENCY_SHIFT, FrequencyConfig};
 pub use graph::horn::{HornClauses, HornSaturation};
-pub use graph::interval::{Interval, IntervalAnalysis};
 pub use graph::keyed::KeyedGraph;
-pub use graph::label::{Label, bind_label, display_label, no_label};
+pub use graph::label::{Label, display_label, no_label};
 pub use graph::loop_forest::{LoopForest, LoopId};
-pub use graph::loop_nest::{LoopNestNode, LoopNestingTree};
 pub use graph::network_flow::{ArcId, FlowError, FlowNetwork, FlowSolution};
 pub use graph::open::{
-    FoldEnter, MarkScope, OpenBfsConfig, OpenBfsEvent, OpenDfsConfig, OpenDfsEvent,
-    OpenFixpointConfig, OpenFixpointError, OpenFold, OpenFoldConfig, OpenPathsConfig,
-    OpenPathsEvent, OpenSearchConfig, follow, follow_path, open_breadth_first_events,
-    open_breadth_first_paths, open_depth_first_events, open_fold_fixpoint, open_fold_post_order,
-    open_fold_post_order_memoized, open_search,
+    FoldEnter, MarkScope, OpenBfsEvent, OpenDfsEvent, OpenFold, OpenFoldConfig, OpenFoldError,
+    OpenFoldMemo, OpenPathsEvent, Revisit, follow, follow_path, open_breadth_first_events,
+    open_breadth_first_paths, open_depth_first_events, open_fold, open_fold_in, open_search,
 };
 pub use graph::path_expr::{
     GenKill, GenKillAlgebra, PathAlgebra, PathExprArena, PathExprId, PathExprNode, PathExpressions,
     interpret, path_expressions,
 };
-pub use graph::profile_inference::{InferenceCosts, InferredCounts};
+pub use graph::profile_inference::InferenceCosts;
 pub use graph::program_structure::{
     CycleEquivalence, ProgramStructureTree, SeseEdge, SeseRegionId,
 };
 pub use graph::reach_index::{ReachIndex, ReachIndexConfig, ReachScratch};
-pub use graph::reducible::{
-    DispatchBuilder, DispatchReport, make_reducible, make_reducible_with_dispatch,
-};
 pub use graph::relax::min_label_relaxation;
-pub use graph::reverse::reverse_cfg;
 pub use graph::scc::{
-    IncrementalScc, Scc, SccChange, SccDecomposition, StrongCutScratch, StrongCuts, condensation,
-    condensation_of, kosaraju_scc, strong_cuts, strong_cuts_of, tarjan_scc,
+    IncrementalScc, Scc, SccChange, SccDecomposition, SccNumbering, StrongCutScratch, StrongCuts,
 };
 pub use graph::scope::{
-    Scope, ScopeCursor, ScopeCursorQuery, ScopeDatum, ScopeDatumId, ScopeEdgeId, ScopeEdgeTag,
-    ScopeEnvironmentCache, ScopeEnvironmentQuery, ScopeFirstResolution, ScopeFirstResolutionError,
-    ScopeGraph, ScopeGraphChanges, ScopeGraphPathLabel, ScopeGraphQuery, ScopeId, ScopeIndexUpdate,
-    ScopeLinearResolutionError, ScopePath, ScopeQuery, ScopeReference, ScopeReferenceId,
-    ScopeResolution, ScopeResolutionCandidate, ScopeResolutionConfig, ScopeResolutionIndex,
-    ScopeResolutionStats, ScopeTag,
+    Scope, ScopeCursor, ScopeCursorPolicy, ScopeCursorQuery, ScopeDatum, ScopeDatumId, ScopeEdgeId,
+    ScopeEdgeTag, ScopeEnvironmentCache, ScopeEnvironmentQuery, ScopeFirstResolution,
+    ScopeFirstResolutionError, ScopeGraph, ScopeGraphChanges, ScopeGraphPathLabel, ScopeGraphQuery,
+    ScopeId, ScopeIndexConfig, ScopeIndexUpdate, ScopePath, ScopeQuery, ScopeReference,
+    ScopeReferenceId, ScopeResolution, ScopeResolutionCandidate, ScopeResolutionIndex, ScopeTag,
 };
 pub use graph::search::{
-    BfsEvent, DfsEvent, SearchConfig, SearchOrder, SearchScratch, Visit, VisitedPolicy,
-    breadth_first_events, depth_first_events, search, search_with_marks, search_with_scratch,
+    DfsEvent, PathSearchConfig, PathSearchStats, SearchConfig, SearchOrder, SearchScratch, Visit,
+    VisitedPolicy, depth_first_events, search, search_in,
 };
 pub use graph::stack::{
-    StackEdge, StackEdgeId, StackEdgeTag, StackFileId, StackFileTag, StackGraph, StackGraphError,
+    StackEdge, StackEdgeId, StackEdgeTag, StackFileId, StackGraph, StackGraphError,
     StackLinearResolutionError, StackNode, StackNodeId, StackNodeKind, StackNodeTag,
-    StackPartialPath, StackPartialPathConfig, StackPartialPathDatabase, StackPartialPathId,
-    StackPartialPathSet, StackPartialPathStats, StackPath, StackPathError, StackPathStep,
-    StackResolution, StackResolutionIndex, StackReverseIndex, StackScopedSymbol, StackSearchConfig,
-    StackSearchStats,
+    StackPartialPath, StackPartialPathDatabase, StackPartialPathId, StackPartialPathSet,
+    StackPartialPathStats, StackPath, StackPathError, StackPathStep, StackResolution,
+    StackResolutionIndex, StackScopedSymbol, StackSearchStats,
 };
 pub use graph::store::{
     AdjacentEdges, EdgeRecord, Graph, Id, IdTag, NodeId, NodeOrder, NodeTag, Renumbering,
 };
-pub use graph::structure::{
-    BackEdge, CanonicalLoop, NaturalLoop, canonicalize_loops, detect_loops, detect_loops_tagged,
-    find_back_edges, find_back_edges_tagged, insert_preheader, is_reducible, loop_exit_blocks,
-};
+pub use graph::structure::{BackEdge, find_back_edges, is_reducible};
 pub use graph::text::{TextError, TextErrorKind, TextStyle, parse_text, to_text, write_text};
 pub use graph::traverse::{
-    CommonAncestor, TraversalDirection, breadth_first, common_ancestors, depth_first_postorder,
+    CommonAncestor, ShortestPathScratch, breadth_first, common_ancestors, depth_first_postorder,
     depth_first_preorder, nearest_common_ancestor, reachable, reverse_postorder, shortest_path,
-    topological_sort, topological_sort_or_cycle,
+    shortest_path_in, topological_sort, topological_sort_or_cycle,
 };
-pub use graph::tree_decomposition::{EliminationHeuristic, TreeDecomposition, tree_decomposition};
-pub use graph::verify::{
-    SemanticValidator, SemanticVerifyReport, VerifyError, VerifyReport, verify, verify_edge_view,
-    verify_view, verify_with,
-};
+pub use graph::tree_decomposition::{EliminationHeuristic, TreeDecomposition};
+pub use graph::verify::{VerifyError, VerifyReport, verify_edge_view, verify_view};
 pub use graph::view::{
-    DenseId, GraphView, NodeView, Reversed, Rooted, RootedView, scan_predecessors,
+    DenseId, Direction, GraphView, Induced, NodeView, Reversed, Rooted, RootedView, VirtualRoot,
+    scan_predecessors,
 };
 pub use graph::weak_topological_order::WeakTopologicalOrder;
 pub use memory::{
-    MemoryAccess, MemoryAccessKind, MemoryAtomicity, MemoryEvent, MemoryEventInfo, MemoryOperations,
+    AccessMode, MemoryAccess, MemoryAccessKind, MemoryAtomicity, MemoryEvent, MemoryEventInfo,
+    MemoryOperations,
 };
 pub use region::{
-    Cleanup, CompletionReason, Continuation, ExclusiveExtent, ExtentIssue, ExtentPromotionDecision,
-    ExtentPromotionStatus, ExtentStatus, Handler, HandlerBody, HandlerFilters, HandlerKind,
-    HandlerMetadata, HandlerRef, HandlerTypes, Region, RegionId, RegionIndex,
-    promote_exclusive_extents, promote_handler_extents, recover_exclusive_extents,
-    recover_exclusive_extents_with,
+    Cleanup, CompletionReason, Continuation, ExclusiveExtent, ExtentIssue, ExtentPromotionStatus,
+    Handler, HandlerBody, HandlerKind, HandlerMetadata, HandlerRef, Region, RegionError, RegionId,
+    RegionIndex, promote_exclusive_extents, promote_handler_extents, recover_exclusive_extents,
 };
 pub use rewrite::Rewrite;
-pub use transform::block_order::{
-    ExtTspConfig, SplitOrder, cfg_ext_tsp_order, ext_tsp_order, ext_tsp_score, hot_cold_order,
-};
+pub use transform::block_order::{ExtTspConfig, ext_tsp_order, ext_tsp_score, hot_cold_order};
 pub use transform::cleanup::{
     merge_blocks, merge_blocks_mapped, remove_empty_blocks, remove_empty_blocks_mapped,
-    remove_unreachable, remove_unreachable_mapped, simplify, simplify_mapped,
+    remove_unreachable_mapped, simplify_mapped,
 };
 pub use transform::contract::{contract_edge, contract_edge_mapped};
-pub use transform::critical::{
-    split_critical_edges, split_critical_edges_mapped, split_critical_edges_with,
-};
+pub use transform::critical::split_critical_edges_mapped;
 pub use transform::layout::{RelaxError, RelaxMode, SpanItem, relax_layout, relax_spans};
-pub use transform::linearize::{BlockOrder, Emitter, LinearInst, LinearizeError, linearize};
+pub use transform::linearize::{
+    BlockOrder, Emitter, LinearInst, LinearizeError, falls_through, linearize,
+};
+pub use transform::loops::{CanonicalLoop, canonicalize_loops, insert_preheader};
 pub use transform::pass::{
-    Pass, PassChange, PassExecution, PassFailure, PassFn, PassId, PassPipeline, PassReport, pass_fn,
+    Pass, PassError, PassExecution, PassFn, PassId, PassPipeline, PassReport, pass_fn,
+};
+pub use transform::reducible::{
+    DispatchBuilder, DispatchReport, make_reducible, make_reducible_by_dispatch,
 };
 pub use union_find::DisjointSet;

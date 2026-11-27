@@ -1,6 +1,6 @@
 use cfglib::{
-    BlockHashes, BlockId, CascadeDiff, Cfg, CfgDiff, EdgeKind, MatchLevel, RegionDiff,
-    block_nesting_depths, cfg_block_nesting_depths, detect_cfg_patterns, detect_patterns,
+    BlockHashes, BlockId, CascadeDiff, Cfg, CfgDiff, DominatorTree, EdgeKind, LoopForest,
+    MatchLevel, RegionDiff, detect_patterns, empty_trampolines,
 };
 
 use super::BenchmarkSuite;
@@ -26,23 +26,29 @@ fn loop_cfg() -> Cfg<ApiInst> {
     cfg
 }
 
+/// `count` blocks in a line, each past the entry without instructions, so
+/// every one but the last is an empty trampoline.
+fn hollow_line(count: usize) -> Cfg<u32> {
+    let mut cfg = Cfg::new();
+    let mut previous = cfg.entry();
+    cfg.block_mut(previous).push(0);
+    for _ in 1..count {
+        let next = cfg.new_block();
+        cfg.add_edge(previous, next, EdgeKind::Fallthrough);
+        previous = next;
+    }
+    cfg
+}
+
 fn register_metrics_and_patterns(suite: &mut BenchmarkSuite<'_>) {
     let cfg = loop_cfg();
     let graph = linear_cfg(BLOCK_COUNT);
-    let patterns = linear_cfg(BLOCK_COUNT);
+    let hollow = hollow_line(BLOCK_COUNT);
 
     benchmark_case!(
         suite,
-        "api_block_nesting_depths",
-        covers[block_nesting_depths],
-        || block_nesting_depths(&cfg),
-        |depths: &Vec<usize>| assert!(depths.contains(&1))
-    );
-    benchmark_case!(
-        suite,
-        "api_cfg_block_nesting_depths",
-        covers[cfg_block_nesting_depths],
-        || cfg_block_nesting_depths(&cfg),
+        "api_loop_node_depths",
+        || LoopForest::compute(&cfg, &DominatorTree::compute(&cfg)).node_depths(),
         |depths: &Vec<usize>| assert!(depths.contains(&1))
     );
     benchmark_case!(
@@ -54,10 +60,10 @@ fn register_metrics_and_patterns(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "api_detect_cfg_patterns",
-        covers[detect_cfg_patterns],
-        || detect_cfg_patterns(&patterns),
-        |result: &Vec<_>| assert_ne!(result.as_slice(), [])
+        "api_empty_trampolines",
+        covers[empty_trampolines],
+        || empty_trampolines(&hollow),
+        |result: &Vec<BlockId>| assert_eq!(result.len(), BLOCK_COUNT - 2)
     );
 }
 
@@ -135,9 +141,9 @@ fn register_cfg_diff(suite: &mut BenchmarkSuite<'_>) {
         "cfg_diff_hash_cascade",
         || CascadeDiff::compute(&old, &new, content_hashes, content_hashes),
         |diff: &CascadeDiff| {
-            assert_eq!(diff.diff().matched.len(), SWITCH_CASES + 3);
+            assert_eq!(diff.diff.matched.len(), SWITCH_CASES + 3);
             let full = diff
-                .levels()
+                .levels
                 .iter()
                 .filter(|&&level| level == MatchLevel::Full);
             assert_eq!(full.count(), SWITCH_CASES);
@@ -148,7 +154,7 @@ fn register_cfg_diff(suite: &mut BenchmarkSuite<'_>) {
     let mut split = branchy_cfg(BRANCHY_BLOCKS);
     let blocks: Vec<BlockId> = split.block_ids().step_by(4).collect();
     for &block in &blocks {
-        split.split_block(block, 1);
+        split.split_block(block, 1, EdgeKind::Fallthrough);
     }
     benchmark_case!(
         suite,

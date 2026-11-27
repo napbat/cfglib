@@ -6,16 +6,17 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use super::{NO_COMPONENT, SccDecomposition, SccFrame, enter, kosaraju_scc};
+use super::tarjan::Tarjan;
+use super::{SccDecomposition, SccNumbering};
+use crate::block::BlockId;
 use crate::graph::view::{DenseId, GraphView};
-
-/// The walk's word for a node it has put into a component.
-const FINISHED: usize = usize::MAX;
+use crate::identity::{NO_INDEX, slot, word};
 
 /// Strongly connected components and a topological order of them, kept
 /// current while the caller edits the edges of a graph.
 ///
-/// [`compute`](Self::compute) seeds the structure from [`kosaraju_scc`].
+/// [`compute`](Self::compute) seeds the structure from
+/// [`SccNumbering::SourcesFirst`].
 /// From then on the caller edits its graph first and reports each edit right
 /// after it: [`insert_edge`](Self::insert_edge) for an added edge,
 /// [`insert_edges`](Self::insert_edges) for a batch of them, and
@@ -34,22 +35,24 @@ const FINISHED: usize = usize::MAX;
 /// edge `u -> v` of the graph,
 ///
 /// ```text
-/// position(component_index(u)) <= position(component_index(v))
+/// position(component_id(u)) <= position(component_id(v))
 /// ```
 ///
 /// with equality exactly when `u` and `v` share a component.
 ///
-/// A component's id, which [`component_index`](Self::component_index)
-/// returns, is the index of its smallest node. An edit that does not touch a
-/// component keeps its id, a merge keeps the smallest id of the components it
-/// merges, and a split leaves the old id with the part that holds the old
-/// smallest node. Every id is the index of a node, so the component that holds
-/// an id from before an update is `component_index(N::from_index(id))`.
+/// A component's id, which [`component_id`](Self::component_id) returns, is
+/// the index of its smallest node. An edit that does not touch a component
+/// keeps its id, a merge keeps the smallest id of the components it merges,
+/// and a split leaves the old id with the part that holds the old smallest
+/// node. Every id is the index of a node, so the component that holds an id
+/// from before an update is `component_id(N::from_index(id))`. An id is not
+/// the dense index an [`SccDecomposition`] numbers a component with.
 ///
 /// [`decomposition`](Self::decomposition) numbers the components densely in
-/// this order, which meets the [`kosaraju_scc`] numbering contract. After an
-/// edit it may number them differently from a fresh [`kosaraju_scc`] of the
-/// same graph: a graph can have several topological orders, and both are one.
+/// this order, which meets the [`SccNumbering::SourcesFirst`] numbering
+/// contract. After an edit it may number them differently from a fresh
+/// sources-first decomposition of the same graph: a graph can have several
+/// topological orders, and both are one.
 ///
 /// # Cost
 ///
@@ -113,8 +116,8 @@ const FINISHED: usize = usize::MAX;
 /// let back = graph.add_edge(c, a, ());
 /// let change = components.insert_edge(&graph, c, a);
 /// assert_eq!(change.merged, [a.index(), b.index(), c.index()]);
-/// assert_eq!(components.component_index(c), a.index());
-/// let exit = components.component_index(d);
+/// assert_eq!(components.component_id(c), a.index());
+/// let exit = components.component_id(d);
 /// assert!(components.position(a.index()) < components.position(exit));
 ///
 /// // Removing that call splits the cycle into its three nodes again.
@@ -122,16 +125,16 @@ const FINISHED: usize = usize::MAX;
 /// let change = components.remove_edge(&graph, c, a);
 /// assert_eq!(change.split, [a.index(), b.index(), c.index()]);
 ///
-/// // The snapshot numbers the components sources first, as `kosaraju_scc`
-/// // does.
+/// // The snapshot numbers the components sources first, as
+/// // `SccNumbering::SourcesFirst` does.
 /// let snapshot = components.decomposition();
-/// assert_eq!(snapshot.len(), 4);
+/// assert_eq!(snapshot.component_count(), 4);
 /// assert!(snapshot.component_index(a) < snapshot.component_index(d));
 /// ```
 #[derive(Debug, Clone)]
-pub struct IncrementalScc<N> {
+pub struct IncrementalScc<N = BlockId> {
     order: Order<N>,
-    walk: Walk<N>,
+    walk: Tarjan<N>,
     /// The windows of the last batch, kept so that a batch allocates nothing
     /// once the buffer has grown.
     windows: Vec<Window<N>>,
@@ -139,7 +142,7 @@ pub struct IncrementalScc<N> {
 
 /// What one update of an [`IncrementalScc`] changed.
 ///
-/// Component ids are the ones [`IncrementalScc::component_index`] returns,
+/// Component ids are the ones [`IncrementalScc::component_id`] returns,
 /// the index of each component's smallest node. An update that changed
 /// nothing returns [`SccChange::default`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -161,34 +164,40 @@ pub struct SccChange {
 }
 
 impl<N: DenseId> IncrementalScc<N> {
-    /// Compute the components of `graph` and order them as [`kosaraju_scc`]
-    /// numbers them.
+    /// Compute the components of `graph` and order them as
+    /// [`SccNumbering::SourcesFirst`] numbers them.
     ///
-    /// Right after this, [`decomposition`](Self::decomposition) equals
-    /// `kosaraju_scc(graph)`. The cost is that of [`kosaraju_scc`], `O(V + E)`,
-    /// and the structure keeps three words per node slot besides the order
-    /// itself.
+    /// Right after this, [`decomposition`](Self::decomposition) equals the
+    /// sources-first [`SccDecomposition::compute`] of `graph`, at its cost,
+    /// `O(V + E)`, and the structure keeps three words per node slot besides
+    /// the order itself.
+    ///
+    /// # Panics
+    ///
+    /// Panics when [`node_bound`](GraphView::node_bound) exceeds the range of
+    /// a dense `u32` table.
     #[must_use]
     pub fn compute<G>(graph: &G) -> Self
     where
         G: GraphView<NodeId = N>,
     {
-        // Kosaraju's runs are ascending and in topological order already, so
-        // its node array is the order as it stands. Its component table
-        // becomes the position table: each entry is read once, as the
+        // The sources-first runs are ascending and in topological order
+        // already, so its node array is the order as it stands. Its component
+        // table becomes the position table: each entry is read once, as the
         // component whose first node is the id, and then overwritten.
         let SccDecomposition {
             nodes,
             offsets,
             component_of: mut position_of,
-        } = kosaraju_scc(graph);
-        let mut component_of = vec![NO_COMPONENT; position_of.len()];
+        } = SccDecomposition::compute(graph, SccNumbering::SourcesFirst);
+        let mut component_of = vec![NO_INDEX; position_of.len()];
         for (position, &node) in nodes.iter().enumerate() {
             let index = node.index();
-            component_of[index] = nodes[offsets[position_of[index]]].index();
-            position_of[index] = position;
+            let first = nodes[slot(offsets[slot(position_of[index])])];
+            component_of[index] = word(first.index());
+            position_of[index] = word(position);
         }
-        let walk = Walk::with_node_bound(position_of.len());
+        let walk = Tarjan::with_node_bound(position_of.len());
         Self {
             order: Order {
                 nodes,
@@ -281,7 +290,7 @@ impl<N: DenseId> IncrementalScc<N> {
             self.walk.run(
                 graph,
                 windows[group..next].iter().map(|window| window.target),
-                |node| order.position_of[order.component_of[node.index()]] <= last,
+                |node| slot(order.position_of[slot(order.component_of[node.index()])]) <= last,
             );
             let end = self.order.run_end(last);
             self.order.collect_merged(&self.walk, &mut change.merged);
@@ -314,7 +323,7 @@ impl<N: DenseId> IncrementalScc<N> {
         if self.order.component(target) != component {
             return SccChange::default();
         }
-        let start = self.order.position_of[component];
+        let start = slot(self.order.position_of[component]);
         let end = self.order.run_end(start);
         if end - start == 1 {
             // A self-loop of a node alone in its component.
@@ -322,9 +331,10 @@ impl<N: DenseId> IncrementalScc<N> {
         }
 
         let order = &self.order;
+        let id = word(component);
         self.walk
             .run(graph, order.nodes[start..end].iter().copied(), |node| {
-                order.component_of[node.index()] == component
+                order.component_of[node.index()] == id
             });
         let mut change = SccChange::default();
         if self.walk.component_count() > 1 {
@@ -344,12 +354,16 @@ impl<N: DenseId> IncrementalScc<N> {
 
     /// Return the id of `node`'s component: the index of its smallest node.
     ///
+    /// The id stays with the component across edits that do not touch it
+    /// (see [Order and identity](Self#order-and-identity)); it is not a dense
+    /// component index.
+    ///
     /// # Panics
     ///
     /// Panics when `node` is not a node of the graph at
     /// [`compute`](Self::compute) (see [Node set](Self#node-set)).
     #[must_use]
-    pub fn component_index(&self, node: N) -> usize {
+    pub fn component_id(&self, node: N) -> usize {
         self.order.component(node)
     }
 
@@ -362,33 +376,36 @@ impl<N: DenseId> IncrementalScc<N> {
     #[must_use]
     pub fn position(&self, component: usize) -> usize {
         assert!(
-            self.order.component_of.get(component) == Some(&component),
+            self.order
+                .component_of
+                .get(component)
+                .is_some_and(|&id| slot(id) == component),
             "{component} is not the id of a component"
         );
-        self.order.position_of[component]
+        slot(self.order.position_of[component])
     }
 
     /// Return the components numbered densely in the order, sources first.
     ///
-    /// The result meets the [`kosaraju_scc`] numbering contract,
-    /// `component_index(u) <= component_index(v)` on every edge `u -> v`,
-    /// but may number the components differently from a fresh
-    /// [`kosaraju_scc`] once an update has reordered them. Its tables span
-    /// the node bound at [`compute`](Self::compute). `O(V)`.
+    /// The result meets the [`SccNumbering::SourcesFirst`] numbering
+    /// contract, `component_index(u) <= component_index(v)` on every edge
+    /// `u -> v`, but may number the components differently from a fresh
+    /// sources-first decomposition once an update has reordered them. Its
+    /// tables span the node bound at [`compute`](Self::compute). `O(V)`.
     #[must_use]
     pub fn decomposition(&self) -> SccDecomposition<N> {
         let nodes = self.order.nodes.clone();
         let mut offsets = vec![0];
-        let mut component_of = vec![NO_COMPONENT; self.order.component_of.len()];
+        let mut component_of = vec![NO_INDEX; self.order.component_of.len()];
         for (position, &node) in nodes.iter().enumerate() {
             // A run starts at its smallest node, whose index is the id.
-            if position > 0 && self.order.component_of[node.index()] == node.index() {
-                offsets.push(position);
+            if position > 0 && slot(self.order.component_of[node.index()]) == node.index() {
+                offsets.push(word(position));
             }
-            component_of[node.index()] = offsets.len() - 1;
+            component_of[node.index()] = word(offsets.len() - 1);
         }
         if !nodes.is_empty() {
-            offsets.push(nodes.len());
+            offsets.push(word(nodes.len()));
         }
         SccDecomposition {
             nodes,
@@ -404,13 +421,13 @@ struct Order<N> {
     /// Position to node: every component's nodes as one ascending run, the
     /// runs sources first.
     nodes: Vec<N>,
-    /// Each slot's position in `nodes`; [`NO_COMPONENT`] for a slot that held
-    /// no node at [`IncrementalScc::compute`].
-    position_of: Vec<usize>,
+    /// Each slot's position in `nodes`; [`NO_INDEX`] for a slot that held no
+    /// node at [`IncrementalScc::compute`].
+    position_of: Vec<u32>,
     /// Each slot's component id, which is the index of the component's
-    /// smallest node and so of the first node of its run; [`NO_COMPONENT`] as
+    /// smallest node and so of the first node of its run; [`NO_INDEX`] as
     /// above.
-    component_of: Vec<usize>,
+    component_of: Vec<u32>,
 }
 
 impl<N: DenseId> Order<N> {
@@ -420,18 +437,18 @@ impl<N: DenseId> Order<N> {
             .component_of
             .get(node.index())
             .copied()
-            .unwrap_or(NO_COMPONENT);
+            .unwrap_or(NO_INDEX);
         assert!(
-            component != NO_COMPONENT,
+            component != NO_INDEX,
             "node {} is not a node of the graph the components were computed for",
             node.index()
         );
-        component
+        slot(component)
     }
 
     /// Where the run of `node`'s component starts.
     fn start(&self, node: N) -> usize {
-        self.position_of[self.component(node)]
+        slot(self.position_of[self.component(node)])
     }
 
     /// Where the run that starts at `start` ends.
@@ -451,12 +468,12 @@ impl<N: DenseId> Order<N> {
         found
             .iter()
             .map(|node| node.index())
-            .filter(|&index| self.component_of[index] == index)
+            .filter(|&index| slot(self.component_of[index]) == index)
     }
 
     /// Add to `merged` the ids of the components the walk found in one
     /// component with another, before any of them is relabeled.
-    fn collect_merged(&self, walk: &Walk<N>, merged: &mut Vec<usize>) {
+    fn collect_merged(&self, walk: &Tarjan<N>, merged: &mut Vec<usize>) {
         for found in walk.components() {
             if self.ids_within(found).nth(1).is_some() {
                 merged.extend(self.ids_within(found));
@@ -470,19 +487,35 @@ impl<N: DenseId> Order<N> {
     fn move_reached_last(
         &mut self,
         window: Range<usize>,
-        walk: &Walk<N>,
+        walk: &Tarjan<N>,
         rewritten: &mut Option<Range<usize>>,
     ) {
-        // Compact the unreached nodes towards the start. A write lands at or
-        // before the position read in the same step, so nothing is
-        // overwritten before it is read.
+        // Compact the unreached nodes towards the start. The ones before the
+        // first reached node keep their positions; every one after it moves
+        // down and keeps its component, so each of its writes is a change and
+        // they fill one run of positions, which widens `rewritten` once. A
+        // write lands before the position read in the same step, so nothing
+        // is overwritten before it is read. Writing the moved nodes directly,
+        // rather than comparing every position through `place`, took the
+        // batched repairs of a 1,024-function call graph from 1.08x to 0.76x
+        // the previous release (`incremental_scc_call_graph_insert_edges`).
         let mut next = window.start;
-        for position in window {
+        while next < window.end && !walk.reached(self.nodes[next]) {
+            next += 1;
+        }
+        let first = next;
+        for position in first..window.end {
             let node = self.nodes[position];
             if !walk.reached(node) {
-                self.place(next, node, self.component_of[node.index()], rewritten);
+                self.nodes[next] = node;
+                self.position_of[node.index()] = word(next);
                 next += 1;
             }
+        }
+        if next > first {
+            let range = rewritten.get_or_insert(first..next);
+            range.start = range.start.min(first);
+            range.end = range.end.max(next);
         }
         self.place_found(next, walk, rewritten);
     }
@@ -492,12 +525,12 @@ impl<N: DenseId> Order<N> {
     fn place_found(
         &mut self,
         mut next: usize,
-        walk: &Walk<N>,
+        walk: &Tarjan<N>,
         rewritten: &mut Option<Range<usize>>,
     ) {
         // The walk completes components leaves first.
         for found in walk.components().rev() {
-            let id = found[0].index();
+            let id = word(found[0].index());
             for &node in found {
                 self.place(next, node, id, rewritten);
                 next += 1;
@@ -507,13 +540,13 @@ impl<N: DenseId> Order<N> {
 
     /// Put `node` at `position` in the component `id`, widening `rewritten`
     /// over the position when that changes either.
-    fn place(&mut self, position: usize, node: N, id: usize, rewritten: &mut Option<Range<usize>>) {
+    fn place(&mut self, position: usize, node: N, id: u32, rewritten: &mut Option<Range<usize>>) {
         if self.nodes[position] != node || self.component_of[node.index()] != id {
             let range = rewritten.get_or_insert(position..position);
             range.start = range.start.min(position);
             range.end = range.end.max(position + 1);
             self.nodes[position] = node;
-            self.position_of[node.index()] = position;
+            self.position_of[node.index()] = word(position);
             self.component_of[node.index()] = id;
         }
     }
@@ -526,138 +559,6 @@ struct Window<N> {
     first: usize,
     last: usize,
     target: N,
-}
-
-/// Tarjan's walk over part of a graph, with its buffers kept across updates.
-#[derive(Debug, Clone)]
-struct Walk<N> {
-    /// Per slot, Pearce's one word: 0 for a node not visited, `1..` for a
-    /// node waiting for its component, holding the lowest index it has seen,
-    /// and [`FINISHED`] once it is in a component. Every word is 0 between
-    /// walks; [`clear`](Self::clear) resets only the nodes a walk visited.
-    rindex: Vec<usize>,
-    /// The visited nodes that were not the root of their component, waiting
-    /// for that root to finish.
-    waiting: Vec<N>,
-    /// The successors of every frame on the stack, as `SccFrame` describes.
-    arena: Vec<N>,
-    calls: Vec<SccFrame<N>>,
-    /// The components found, each an ascending run, leaves first.
-    found: Vec<N>,
-    /// `offsets[i]..offsets[i + 1]` is the `i`th component within `found`.
-    offsets: Vec<usize>,
-}
-
-impl<N: DenseId> Walk<N> {
-    fn with_node_bound(node_bound: usize) -> Self {
-        Self {
-            rindex: vec![0; node_bound],
-            waiting: Vec::new(),
-            arena: Vec::new(),
-            calls: Vec::new(),
-            found: Vec::new(),
-            offsets: vec![0],
-        }
-    }
-
-    /// Find the components of the nodes `roots` reach through nodes `within`
-    /// admits, in completion order, leaves first.
-    ///
-    /// This is the walk of [`tarjan_scc`](super::tarjan_scc) from chosen
-    /// roots, with every node outside `within` left out of the graph. A
-    /// component that a root reaches is found whole, since all its nodes are
-    /// reachable from any one of them, as long as `within` admits them all.
-    fn run<G>(&mut self, graph: &G, roots: impl IntoIterator<Item = N>, within: impl Fn(N) -> bool)
-    where
-        G: GraphView<NodeId = N>,
-    {
-        let mut next_index = 1;
-        for root in roots {
-            if self.rindex[root.index()] != 0 {
-                continue;
-            }
-            self.rindex[root.index()] = next_index;
-            next_index += 1;
-            enter(graph, root, &mut self.arena, &mut self.calls);
-
-            while let Some(frame) = self.calls.last_mut() {
-                let node = frame.node;
-                if frame.cursor < self.arena.len() {
-                    let successor = self.arena[frame.cursor];
-                    frame.cursor += 1;
-                    if !within(successor) {
-                        continue;
-                    }
-                    let seen = self.rindex[successor.index()];
-                    if seen == 0 {
-                        self.rindex[successor.index()] = next_index;
-                        next_index += 1;
-                        enter(graph, successor, &mut self.arena, &mut self.calls);
-                    } else if seen < self.rindex[node.index()] {
-                        self.rindex[node.index()] = seen;
-                        frame.root = false;
-                    }
-                    continue;
-                }
-
-                let Some(finished) = self.calls.pop() else {
-                    break;
-                };
-                self.arena.truncate(finished.start);
-                if finished.root {
-                    // The members are the waiting nodes that hold an index no
-                    // lower than the root's, as in `tarjan_scc`.
-                    let first = self.found.len();
-                    let root_index = self.rindex[node.index()];
-                    self.rindex[node.index()] = FINISHED;
-                    self.found.push(node);
-                    while let Some(&member) = self.waiting.last() {
-                        if self.rindex[member.index()] < root_index {
-                            break;
-                        }
-                        self.waiting.pop();
-                        self.rindex[member.index()] = FINISHED;
-                        self.found.push(member);
-                    }
-                    self.found[first..].sort_unstable();
-                    self.offsets.push(self.found.len());
-                } else {
-                    self.waiting.push(node);
-                }
-                if let Some(parent) = self.calls.last_mut()
-                    && self.rindex[node.index()] < self.rindex[parent.node.index()]
-                {
-                    self.rindex[parent.node.index()] = self.rindex[node.index()];
-                    parent.root = false;
-                }
-            }
-        }
-    }
-
-    /// Whether the last walk put `node` into a component.
-    fn reached(&self, node: N) -> bool {
-        self.rindex[node.index()] == FINISHED
-    }
-
-    /// The components the last walk found, leaves first.
-    fn components(&self) -> impl DoubleEndedIterator<Item = &[N]> + '_ {
-        self.offsets
-            .windows(2)
-            .map(|run| &self.found[run[0]..run[1]])
-    }
-
-    fn component_count(&self) -> usize {
-        self.offsets.len() - 1
-    }
-
-    /// Forget the last walk, leaving every word of `rindex` 0 again.
-    fn clear(&mut self) {
-        for &node in &self.found {
-            self.rindex[node.index()] = 0;
-        }
-        self.found.clear();
-        self.offsets.truncate(1);
-    }
 }
 
 #[cfg(test)]

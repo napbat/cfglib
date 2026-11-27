@@ -12,6 +12,9 @@
 //! `Renumbering` reports, and on both a `Cfg` and a `Graph` so the contract is
 //! the same for both stores.
 
+#[path = "../common/rng.rs"]
+pub mod rng;
+
 mod cfg_analyses;
 mod contracts;
 mod oracle;

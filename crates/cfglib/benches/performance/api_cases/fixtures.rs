@@ -1,32 +1,24 @@
 use std::borrow::Cow;
 
-use cfglib::{
-    Cfg, DisplayInstr, EdgeKind, EffectInfo, FlowControl, FlowEffect, InstrInfo, JumpTargets,
-};
+use cfglib::{Cfg, DisplayInstr, EdgeKind, Flow, FlowControl, FlowEffect, InstrInfo};
 
 #[derive(Clone, Debug)]
 pub(super) struct ApiInst {
-    pub(super) flow: FlowEffect,
+    pub(super) flow: FlowEffect<u32, ()>,
     pub(super) uses: Vec<u32>,
     pub(super) defs: Vec<u32>,
-    pub(super) effects: Vec<u8>,
-    pub(super) jump_target: Option<u32>,
-    pub(super) label: Option<u32>,
 }
 
 impl ApiInst {
     pub(super) fn pure(definition: u32, uses: Vec<u32>) -> Self {
         Self {
-            flow: FlowEffect::Fallthrough,
+            flow: FlowEffect::Flow(Flow::Next),
             uses,
             defs: vec![definition],
-            effects: Vec::new(),
-            jump_target: None,
-            label: None,
         }
     }
 
-    pub(super) fn control(flow: FlowEffect) -> Self {
+    pub(super) fn control(flow: FlowEffect<u32, ()>) -> Self {
         Self {
             flow,
             defs: Vec::new(),
@@ -45,18 +37,6 @@ impl InstrInfo for ApiInst {
     fn defs(&self) -> &[Self::Variable] {
         &self.defs
     }
-
-    fn may_unwind(&self) -> bool {
-        self.flow == FlowEffect::MayThrow
-    }
-}
-
-impl EffectInfo for ApiInst {
-    type Effect = u8;
-
-    fn effects(&self) -> &[Self::Effect] {
-        &self.effects
-    }
 }
 
 impl DisplayInstr for ApiInst {
@@ -66,20 +46,11 @@ impl DisplayInstr for ApiInst {
 }
 
 impl FlowControl for ApiInst {
-    fn flow_effect(&self) -> FlowEffect {
-        self.flow
-    }
-}
-
-impl JumpTargets for ApiInst {
     type Target = u32;
+    type CaseKey = ();
 
-    fn jump_target(&self) -> Option<Self::Target> {
-        self.jump_target
-    }
-
-    fn label(&self) -> Option<Self::Target> {
-        self.label
+    fn flow_effect(&self) -> FlowEffect<u32, ()> {
+        self.flow.clone()
     }
 }
 
@@ -90,14 +61,11 @@ pub(super) fn dataflow_cfg(block_count: usize, instructions_per_block: usize) ->
     let mut variable = 0_u32;
     for block_index in 0..block_count {
         for instruction_index in 0..instructions_per_block {
-            let mut instruction = if instruction_index == 0 {
+            let instruction = if instruction_index == 0 {
                 ApiInst::pure(variable, Vec::new())
             } else {
                 ApiInst::pure(variable, vec![variable.saturating_sub(1)])
             };
-            if instruction_index + 1 == instructions_per_block && block_index % 8 == 0 {
-                instruction.effects.push(1);
-            }
             cfg.block_mut(block).push(instruction);
             variable = variable.wrapping_add(1);
         }

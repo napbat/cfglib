@@ -8,8 +8,7 @@ use std::convert::Infallible;
 use std::rc::Rc;
 
 use cfglib::{
-    Direction, Graph, NodeId, SolveConfig, TryNodeProblem, stream_node_problem,
-    try_solve_node_problem,
+    Direction, Graph, NodeId, Solve, TryNodeProblem, solve_node_problem, stream_node_problem,
 };
 
 /// How many facts exist right now, and the most that ever did.
@@ -133,14 +132,14 @@ fn streamed_peaks(loops: usize) -> (usize, usize) {
         census: Rc::clone(&census),
     };
     let mut visited = 0;
-    let stats = stream_node_problem(&graph, &problem, SolveConfig::new(), |_, input, output| {
+    let stats = stream_node_problem(&graph, &problem, Solve::default(), |_, input, output| {
         assert!(input.tainted && output.tainted);
         visited += 1;
     })
     .unwrap();
     assert_eq!(visited, 2 * loops);
     assert_eq!(census.live.get(), 0, "the stream freed every fact");
-    (stats.peak_live_facts(), census.peak.get())
+    (stats.peak_count(), census.peak.get())
 }
 
 #[test]
@@ -161,7 +160,7 @@ fn the_solve_that_returns_every_fact_holds_two_per_node() {
         source,
         census: Rc::clone(&census),
     };
-    let facts = try_solve_node_problem(&graph, &problem).unwrap();
+    let facts = solve_node_problem(&graph, &problem, Solve::default()).unwrap();
     assert!(census.live.get() >= 2 * 2 * loops);
     drop(facts);
     assert_eq!(census.live.get(), 0);

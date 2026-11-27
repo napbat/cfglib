@@ -1,10 +1,10 @@
 //! `ir::llil`: the semantics of one instruction, emitted and captured.
 
 use cfglib::ir::llil::{Instruction, Semantics, TranslateError};
-use cfglib::ir::rtl::{Control, InstructionBuilder, Place, Selection, Statement, WriteTarget};
-use cfglib::{AddressInstruction, Captured, CapturedValue, DenseId, Flow};
+use cfglib::ir::rtl::{Control, InstructionBuilder, Selection, Statement, WriteTarget};
+use cfglib::{AddressInstruction, Captured, CapturedValue, Flow};
 
-use crate::wren::{Policy, Reg, Wren, take};
+use crate::wren::{Policy, Reg, Wren, take, whole};
 
 /// A two-byte instruction that copies `A` to `B`, or one that the semantics
 /// do not model.
@@ -60,7 +60,7 @@ impl Semantics for MoveSemantics {
         if !instruction.modeled {
             return Err(TranslateError::Unsupported);
         }
-        let value = builder.read(Selection::Direct(Place::whole(Reg::A)));
+        let value = builder.read(Selection::Direct(whole(Reg::A)));
         builder.write(
             WriteTarget::Root {
                 root: Reg::B,
@@ -121,7 +121,7 @@ fn the_default_capture_holds_what_translate_emits() {
     let expected = [
         Statement::Read {
             result: value,
-            source: Selection::Direct(Place::whole(Reg::A)),
+            source: Selection::Direct(whole(Reg::A)),
         },
         Statement::Write {
             target: WriteTarget::Root {

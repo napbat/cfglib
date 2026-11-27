@@ -1,4 +1,4 @@
-//! The block fixpoint solver gives the same answer on a [`CfgView`] that is
+//! The node solver gives the same per-block answer on a [`CfgView`] that is
 //! not a [`Cfg`].
 //!
 //! The toy view keeps instructions and edges in plain vectors. It shares no
@@ -13,12 +13,12 @@ use alloc::vec::Vec;
 use super::CfgView;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::dataflow::fixpoint::solve_problem;
-use crate::edge::{EdgeId, EdgeKind, KindedEdge};
-use crate::flow::FlowEffect;
+use crate::dataflow::node_fixpoint::solve_node_problem;
+use crate::dataflow::solve::Solve;
+use crate::edge::{EdgeId, EdgeKind, KindedEdge, Probability};
 use crate::graph::edge_view::{EdgeRef, EdgeView};
 use crate::graph::view::{GraphView, RootedView};
-use crate::test_util::{DfInst, LiveVariables, df_def, df_use, df_with_effect};
+use crate::test_util::{DfInst, LiveVariables, df_def, df_throwing, df_use};
 
 /// One edge of the toy storage.
 #[derive(Debug)]
@@ -26,7 +26,7 @@ struct ToyEdge {
     source: BlockId,
     target: BlockId,
     kind: EdgeKind,
-    weight: Option<f64>,
+    weight: Option<Probability>,
 }
 
 impl KindedEdge for ToyEdge {
@@ -136,7 +136,7 @@ impl CfgView for ToyView {
         &self.blocks[block.index()]
     }
 
-    fn edge_weight(&self, edge: EdgeId) -> Option<f64> {
+    fn edge_weight(&self, edge: EdgeId) -> Option<Probability> {
         self.edges[edge.index()].weight
     }
 }
@@ -155,8 +155,7 @@ fn fixture() -> Cfg<DfInst> {
     let handler = cfg.new_block();
 
     cfg.block_mut(entry).push(df_def("r0", 0));
-    cfg.block_mut(entry)
-        .push(df_with_effect(df_def("r1", 1), FlowEffect::MayThrow));
+    cfg.block_mut(entry).push(df_throwing(df_def("r1", 1)));
     cfg.block_mut(left).push(df_use("use r0", 0));
     cfg.block_mut(left).push(df_def("r2 left", 2));
     cfg.block_mut(right).push(df_def("r2 right", 2));
@@ -198,11 +197,11 @@ fn the_toy_view_reports_the_graph_of_the_cfg() {
 fn the_block_fixpoint_matches_on_a_view_that_is_not_a_cfg() {
     let cfg = fixture();
     let toy = ToyView::copy_of(&cfg);
-    let expected = solve_problem(&cfg, &LiveVariables).unwrap();
-    let actual = solve_problem(&toy, &LiveVariables).unwrap();
+    let expected = solve_node_problem(&cfg, &LiveVariables, Solve::default()).unwrap();
+    let actual = solve_node_problem(&toy, &LiveVariables, Solve::default()).unwrap();
     for block in cfg.block_ids() {
         assert_eq!(actual.fact_in(block), expected.fact_in(block));
         assert_eq!(actual.fact_out(block), expected.fact_out(block));
     }
-    assert_eq!(actual.steps(), expected.steps());
+    assert_eq!(actual.stats(), expected.stats());
 }

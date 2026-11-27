@@ -1,6 +1,6 @@
 //! `compact`, `Renumbering` and appending after a compaction.
 
-use cfglib::{EdgeId, Graph, NodeId};
+use cfglib::{EdgeId, Graph, NodeId, NodeOrder};
 
 use crate::{Relation, Symbol, relation, symbol};
 
@@ -36,10 +36,8 @@ fn compaction_renumbers_every_survivor_densely_and_reports_the_removed_as_none()
 
     let live_nodes = [0_usize, 2, 3, 5];
     let live_edges = [2_usize, 5, 6];
-    let renumbering = graph.compact();
+    let renumbering = graph.compact(NodeOrder::Insertion);
 
-    assert_eq!(renumbering.node_bound(), 6);
-    assert_eq!(renumbering.edge_bound(), 8);
     for (old, &node) in nodes.iter().enumerate() {
         let position = live_nodes.iter().position(|&live| live == old);
         let expected = position.map(NodeId::from_index);
@@ -76,7 +74,7 @@ fn a_compaction_with_nothing_to_drop_is_the_identity_and_a_removal_ahead_of_a_su
     let a = untouched.add_node(symbol("a"));
     let b = untouched.add_node(symbol("b"));
     untouched.add_edge(a, b, relation("ab"));
-    let renumbering = untouched.compact();
+    let renumbering = untouched.compact(NodeOrder::Insertion);
     assert!(renumbering.is_identity(), "nothing to drop");
     assert_eq!(
         (renumbering.node(a), renumbering.node(b)),
@@ -87,7 +85,7 @@ fn a_compaction_with_nothing_to_drop_is_the_identity_and_a_removal_ahead_of_a_su
     let a = leading.add_node(symbol("a"));
     let b = leading.add_node(symbol("b"));
     leading.remove_node(a);
-    let renumbering = leading.compact();
+    let renumbering = leading.compact(NodeOrder::Insertion);
     assert!(!renumbering.is_identity());
     assert_eq!(renumbering.node(b), Some(NodeId::from_index(0)));
 }
@@ -100,7 +98,7 @@ fn a_trailing_removal_leaves_every_survivor_where_it_was() {
     graph.add_edge(a, b, relation("ab"));
     graph.remove_node(b);
 
-    let renumbering = graph.compact();
+    let renumbering = graph.compact(NodeOrder::Insertion);
     assert_eq!(renumbering.node(a), Some(a), "the survivor kept its number");
     assert_eq!(
         renumbering.node(b),
@@ -117,7 +115,7 @@ fn appending_after_a_compaction_extends_the_dense_numbering() {
     let definition = graph.add_node(symbol("definition"));
     let call = graph.add_node(symbol("call"));
     let returns = graph.add_edge(definition, call, relation("returns"));
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
     assert!(graph.is_compact());
 
     let other = graph.add_node(symbol("other"));
@@ -142,9 +140,8 @@ fn appending_after_a_compaction_extends_the_dense_numbering() {
         (2, 1)
     );
 
-    let renumbering = graph.compact();
+    let renumbering = graph.compact(NodeOrder::Insertion);
     assert!(renumbering.is_identity(), "appending alone moves nothing");
-    assert_eq!((renumbering.node_bound(), renumbering.edge_bound()), (3, 2));
     assert!(graph.is_compact());
     assert_eq!(
         graph.outgoing(definition).collect::<Vec<_>>(),
@@ -159,7 +156,7 @@ fn an_appended_edge_may_attach_to_a_node_of_the_compacted_base() {
     let a = graph.add_node(symbol("a"));
     let b = graph.add_node(symbol("b"));
     let base = graph.add_edge(a, b, relation("base"));
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
 
     let delta = graph.add_edge(b, a, relation("delta"));
     let repeat = graph.add_edge(a, b, relation("repeat"));
@@ -189,17 +186,16 @@ fn renumberings_compose_across_a_skipped_compaction() {
         .collect();
 
     graph.remove_node(nodes[0]);
-    let first = graph.compact();
+    let first = graph.compact(NodeOrder::Insertion);
     let late = graph.add_node(symbol("late"));
     let middle = first
         .node(nodes[2])
         .expect("n2 survived the first compaction");
     graph.remove_node(middle);
-    let second = graph.compact();
-    let composed = first.compose(&second);
+    let second = graph.compact(NodeOrder::Insertion);
+    let mut composed = first.clone();
+    composed.compose(&second);
 
-    assert_eq!(composed.node_bound(), first.node_bound());
-    assert_eq!(composed.edge_bound(), first.edge_bound());
     for (old, &node) in nodes.iter().enumerate() {
         let stepwise = first
             .node(node)
@@ -224,19 +220,4 @@ fn renumberings_compose_across_a_skipped_compaction() {
         .node(late)
         .expect("late survived the second compaction");
     assert_eq!(graph.node(late).name, "late");
-}
-
-#[test]
-fn compacted_consumes_the_store_and_hands_back_the_numbering() {
-    let mut graph = Graph::new();
-    let gone = graph.add_node(symbol("gone"));
-    let kept = graph.add_node(symbol("kept"));
-    graph.add_edge(gone, kept, relation("dropped"));
-    graph.remove_node(gone);
-
-    let (compacted, renumbering) = graph.compacted();
-    assert!(compacted.is_compact());
-    assert_eq!(compacted.edge_count(), 0);
-    let kept = renumbering.node(kept).expect("kept survived");
-    assert_eq!(compacted.node(kept).name, "kept");
 }

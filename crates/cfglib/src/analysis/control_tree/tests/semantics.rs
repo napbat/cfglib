@@ -24,8 +24,9 @@ use super::invariants::{handler_sets, reach, render};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::{EdgeId, EdgeKind};
+use crate::test_util::rng::Rng;
 use crate::{
-    BlockSpan, ControlBody, ControlNode, ControlNodeId, ControlTree, LiftReport, LoopKind,
+    BlockSpan, ControlBody, ControlNode, ControlNodeId, ControlTree, LoopKind, StructuringReport,
 };
 
 /// How many streams of decisions the runs of one graph consume.
@@ -40,15 +41,19 @@ const STEP_LIMIT: usize = 2_000;
 
 /// The decisions both runs consume, in order.
 #[derive(Clone)]
-struct Decisions(u64);
+struct Decisions(Rng);
 
 impl Decisions {
+    /// The decisions of `seed`, which starts the generator unmixed so every
+    /// stream keeps the draws it always had.
+    const fn new(seed: u64) -> Self {
+        Self(Rng::from_state(seed))
+    }
+
     fn choose(&mut self, options: usize) -> usize {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
+        let draw = self.0.next_u64() >> 20;
         let options = u64::try_from(options).expect("an option count fits in 64 bits");
-        usize::try_from((self.0 >> 20) % options).expect("a value below a usize bound")
+        usize::try_from(draw % options).expect("a value below a usize bound")
     }
 }
 
@@ -74,14 +79,14 @@ fn raise_target<I, E>(cfg: &Cfg<I, E>, seed: u64, block: BlockId) -> Option<Bloc
         .outgoing(block)
         .any(|edge| !cfg.edge(edge).kind().is_exceptional());
     let mut mix =
-        Decisions(seed ^ (u64::from(block.raw()) + 1).wrapping_mul(0xD1B5_4A32_D192_ED03));
+        Decisions::new(seed ^ (u64::from(block.raw()) + 1).wrapping_mul(0xD1B5_4A32_D192_ED03));
     mix.choose(2);
     let raises = !has_normal_successor || mix.choose(2) == 1;
     raises.then(|| targets[mix.choose(targets.len())])
 }
 
 /// Whether the regions keep the contract of
-/// [`ControlTree::compute_with_report`]: a handler's blocks (its entry, its
+/// [`ControlTree::compute`]: a handler's blocks (its entry, its
 /// filter funclet, its known extent) are not protected by its region, are not
 /// the function entry, and belong to that handler alone. A region that breaks
 /// this may hold a block in two places, so the tree has no single behavior to
@@ -89,7 +94,7 @@ fn raise_target<I, E>(cfg: &Cfg<I, E>, seed: u64, block: BlockId) -> Option<Bloc
 /// that returns is a catch body that ends, which the tree cannot tell from
 /// one that falls out into the code after it.
 fn regions_are_well_formed<I, E>(cfg: &Cfg<I, E>) -> bool {
-    if cfg.regions().is_empty() {
+    if cfg.region_count() == 0 {
         return true;
     }
     if cfg
@@ -105,8 +110,7 @@ fn regions_are_well_formed<I, E>(cfg: &Cfg<I, E>) -> bool {
         && !all.contains(&cfg.entry())
         && cfg
             .regions()
-            .iter()
-            .all(|region| region.protected_blocks.is_disjoint(&all))
+            .all(|(_, region)| region.protected_blocks.is_disjoint(&all))
 }
 
 /// The instructions a run executed, as (block, position) in order.
@@ -190,7 +194,7 @@ fn successor<I, E>(cfg: &Cfg<I, E>, block: BlockId, decisions: &mut Decisions) -
 }
 
 fn run_graph<I, E>(cfg: &Cfg<I, E>, seed: u64) -> Trace {
-    let mut decisions = Decisions(seed);
+    let mut decisions = Decisions::new(seed);
     let mut trace = Trace::new();
     let mut block = cfg.entry();
     for _ in 0..STEP_LIMIT {
@@ -272,7 +276,7 @@ enum Flow {
 fn run_tree<I, E>(
     cfg: &Cfg<I, E>,
     tree: &ControlTree,
-    report: &LiftReport,
+    report: &StructuringReport,
     seed: u64,
 ) -> (Trace, Ending) {
     let mut units = Vec::new();
@@ -301,7 +305,7 @@ fn run_tree<I, E>(
         seed,
         live: reach(cfg, Vec::new()),
         units,
-        decisions: Decisions(seed),
+        decisions: Decisions::new(seed),
         trace: Trace::new(),
         frames: alloc::vec![Frame::Body {
             nodes: first,
@@ -616,7 +620,7 @@ impl<I, E> TreeRun<'_, I, E> {
 pub(super) fn assert_runs_alike<I, E>(
     cfg: &Cfg<I, E>,
     tree: &ControlTree,
-    report: &LiftReport,
+    report: &StructuringReport,
     context: &str,
 ) {
     assert_streams_alike(cfg, tree, report, context, STREAM_COUNT);
@@ -682,18 +686,15 @@ pub(super) fn assert_try_bodies_keep_to_their_region<I, E>(
         let Some(arm) = tree.handlers(handlers).first() else {
             continue;
         };
-        let region = cfg
-            .region(arm.handler.region())
-            .expect("a handler arm names a region of the graph");
+        let id = arm.handler.region();
+        let region = cfg.region(id);
         for block in blocks_of_try(tree, try_body) {
             let protected_elsewhere = cfg
                 .regions()
-                .iter()
-                .any(|other| other.id != region.id && other.protected_blocks.contains(&block));
+                .any(|(other, region)| other != id && region.protected_blocks.contains(&block));
             assert!(
                 !protected_elsewhere || region.protected_blocks.contains(&block),
-                "{block} sits in the try of {} but another region protects it in {context}\n{}",
-                region.id,
+                "{block} sits in the try of {id} but another region protects it in {context}\n{}",
                 render(tree)
             );
         }
@@ -770,7 +771,7 @@ fn blocks_of_body(tree: &ControlTree, body: ControlBody) -> BTreeSet<BlockId> {
 pub(super) fn assert_streams_alike<I, E>(
     cfg: &Cfg<I, E>,
     tree: &ControlTree,
-    report: &LiftReport,
+    report: &StructuringReport,
     context: &str,
     streams: u64,
 ) {

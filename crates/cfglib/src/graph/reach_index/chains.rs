@@ -5,8 +5,8 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::component_u32;
 use crate::graph::fanout::DenseFanout;
+use crate::identity::word;
 
 /// A greedy chain cover of the condensation and the reach of every component
 /// into every chain.
@@ -76,15 +76,15 @@ impl ChainTable {
             if let Some(index) = joined {
                 let member_depth = depth[heads[index] as usize] + 1;
                 depth[component] = member_depth;
-                chain[component] = component_u32(index);
-                heads[index] = component_u32(component);
+                chain[component] = word(index);
+                heads[index] = word(component);
                 row[index] = member_depth + 1;
             } else {
                 if heads.len() == max_chains {
                     return None;
                 }
-                chain[component] = component_u32(heads.len());
-                heads.push(component_u32(component));
+                chain[component] = word(heads.len());
+                heads.push(word(component));
                 reach.push(1);
             }
             offsets.push(reach.len());

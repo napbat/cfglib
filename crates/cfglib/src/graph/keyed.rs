@@ -12,10 +12,8 @@
 //! The key table and the graph describe the same nodes, so the wrapper never
 //! hands out `&mut Graph`: a removal or a compaction through it would leave
 //! the table naming removed nodes or, after a renumbering, the wrong ones.
-//! [`remove_node`](KeyedGraph::remove_node),
-//! [`compact`](KeyedGraph::compact) and
-//! [`compact_ordered`](KeyedGraph::compact_ordered) keep the table in step
-//! instead.
+//! [`remove_node`](KeyedGraph::remove_node) and
+//! [`compact`](KeyedGraph::compact) keep the table in step instead.
 
 extern crate alloc;
 use alloc::collections::BTreeMap;
@@ -83,13 +81,6 @@ impl<K: Clone + Ord, N, E> KeyedGraph<K, N, E> {
         self.graph.add_edge(source, target, payload)
     }
 
-    /// Add an edge between two keys, when both have been minted.
-    pub fn add_edge_between(&mut self, source: &K, target: &K, payload: E) -> Option<EdgeId> {
-        let source = self.node_id(source)?;
-        let target = self.node_id(target)?;
-        Some(self.graph.add_edge(source, target, payload))
-    }
-
     /// Borrow the underlying graph (for algorithms and payload access).
     #[must_use]
     pub const fn graph(&self) -> &Graph<N, E> {
@@ -109,30 +100,19 @@ impl<K: Clone + Ord, N, E> KeyedGraph<K, N, E> {
             .is_some_and(|node| self.graph.remove_node(node))
     }
 
-    /// Compact the graph and renumber the key table with it.
+    /// Compact the graph with its nodes numbered in `order`, and renumber
+    /// the key table with it.
     ///
     /// The key table follows [`Graph::compact`]: afterwards every key names
     /// the node it named before, under its new identity, which the returned
     /// [`Renumbering`] also reports for ids held elsewhere.
-    pub fn compact(&mut self) -> Renumbering {
-        let renumbering = self.graph.compact();
-        self.renumber_keys(&renumbering);
-        renumbering
-    }
-
-    /// Compact the graph with its nodes numbered in `order`, and renumber
-    /// the key table with it.
-    ///
-    /// The key table follows [`Graph::compact_ordered`] as
-    /// [`compact`](Self::compact) follows [`Graph::compact`]: afterwards every
-    /// key names the node it named before, under its new identity.
     ///
     /// # Panics
     ///
-    /// Panics under the conditions of [`Graph::compact_ordered`], before
-    /// anything changes.
-    pub fn compact_ordered(&mut self, order: NodeOrder<'_>) -> Renumbering {
-        let renumbering = self.graph.compact_ordered(order);
+    /// Panics under the conditions of [`Graph::compact`], before anything
+    /// changes.
+    pub fn compact(&mut self, order: NodeOrder<'_>) -> Renumbering {
+        let renumbering = self.graph.compact(order);
         self.renumber_keys(&renumbering);
         renumbering
     }
@@ -274,7 +254,7 @@ mod unchecked {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::scc::tarjan_scc;
+    use crate::graph::scc::{SccDecomposition, SccNumbering};
     use alloc::string::String;
     use alloc::string::ToString;
     use alloc::vec::Vec;
@@ -296,18 +276,11 @@ mod tests {
         assert_eq!(a, a_again);
         let b = graph.ensure_node(&"pkg::b".to_string(), || "b");
         graph.add_edge(a, b, "extends");
-        assert_eq!(
-            graph.add_edge_between(&"pkg::b".to_string(), &"pkg::a".to_string(), "cycle"),
-            Some(EdgeId::from_raw(1))
-        );
-        assert_eq!(
-            graph.add_edge_between(&"missing".to_string(), &"pkg::a".to_string(), "x"),
-            None
-        );
+        graph.add_edge(b, a, "cycle");
 
         // The view impl feeds the generic algorithms directly.
-        let sccs = tarjan_scc(&graph);
-        assert_eq!(sccs.len(), 1, "a <-> b is one component");
+        let sccs = SccDecomposition::compute(&graph, SccNumbering::LeavesFirst);
+        assert_eq!(sccs.component_count(), 1, "a <-> b is one component");
         assert_eq!(graph.keys().count(), 2);
     }
 
@@ -337,7 +310,7 @@ mod tests {
         graph.add_edge(b, c, ());
         graph.remove_node(&"a");
 
-        let renumbering = graph.compact();
+        let renumbering = graph.compact(NodeOrder::Insertion);
 
         assert_eq!(renumbering.node(a), None);
         assert_eq!(graph.node_id(&"b"), renumbering.node(b));
@@ -359,7 +332,7 @@ mod tests {
         graph.add_edge(c, b, ());
         graph.remove_node(&"a");
 
-        let renumbering = graph.compact_ordered(NodeOrder::ReversePostorder(&[d]));
+        let renumbering = graph.compact(NodeOrder::ReversePostorder(&[d]));
 
         assert_eq!(renumbering.node(a), None);
         for (key, old) in [("b", b), ("c", c), ("d", d)] {

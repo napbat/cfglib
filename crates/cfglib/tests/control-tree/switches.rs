@@ -55,8 +55,9 @@ fn switch_with_a_default_is_one_dispatch_with_an_arm_per_target_and_its_join() {
         join,
     } = dispatch_with_default();
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let [
         ControlNode::Switch {
@@ -121,8 +122,9 @@ fn case_labels_sharing_a_target_are_one_arm_selected_by_several_edges() {
         flow.fall(arm, join);
     }
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let [ControlNode::Switch { cases, .. }, _] = top_level(&tree)[..] else {
         panic!("expected a switch: {tree:?}");
@@ -152,8 +154,9 @@ fn default_that_goes_straight_to_the_join_has_an_edge_and_no_body() {
     flow.fall(first, join);
     flow.fall(second, join);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let [
         ControlNode::Switch {
@@ -182,8 +185,9 @@ fn switch_without_a_default_edge_has_no_default() {
     flow.fall(first, join);
     flow.fall(second, join);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let [
         ControlNode::Switch {
@@ -211,8 +215,9 @@ fn arms_that_return_have_no_merge_and_end_where_they_return() {
     flow.case(dispatch, second);
     flow.fall(dispatch, default_arm);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     assert!(matches!(
         *tree.node(tree.root()),
@@ -240,7 +245,8 @@ fn fallthrough_between_cases_is_a_reported_goto_to_the_next_arm() {
     flow.fall(second, join);
     flow.fall(default_arm, join);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
 
     assert!(!report.is_fully_structured());
     assert_eq!(report.gotos.len(), 1, "{report:?}");
@@ -280,8 +286,9 @@ fn case_that_continues_the_loop_is_an_arm_that_ends_at_the_loop_header() {
     flow.jump(work, header);
     flow.jump(rest, header);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
-    assert_fully_structured(&tree, &report);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
+    assert_fully_structured(&tree, report);
 
     let switches = nodes_where(&tree, |node| matches!(node, ControlNode::Switch { .. }));
     let [ControlNode::Switch { cases, .. }] = switches
@@ -320,9 +327,10 @@ fn case_arm_that_leaves_the_loop_is_a_break_like_the_same_arm_of_an_if() {
     flow.jump(work, header);
     flow.jump(rest, header);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
 
-    assert_fully_structured(&tree, &report);
+    assert_fully_structured(&tree, report);
     assert_eq!(
         nodes_where(&tree, |node| matches!(
             node,

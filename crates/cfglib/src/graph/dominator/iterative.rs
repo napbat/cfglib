@@ -10,7 +10,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::DominatorTree;
-use crate::graph::traverse::{TraversalDirection, reverse_postorder};
+use crate::graph::traverse::reverse_postorder;
+use crate::graph::view::Direction;
 use crate::graph::view::{DenseId, GraphView};
 
 impl<N: DenseId> DominatorTree<N> {
@@ -21,7 +22,7 @@ impl<N: DenseId> DominatorTree<N> {
     where
         G: GraphView<NodeId = N>,
     {
-        let order: Vec<usize> = reverse_postorder(graph, root, TraversalDirection::Outgoing)
+        let order: Vec<usize> = reverse_postorder(graph, root, Direction::Forward)
             .into_iter()
             .map(DenseId::index)
             .collect();

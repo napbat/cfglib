@@ -12,13 +12,11 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::block::BlockId;
-use crate::dataflow::cfg_view::CfgView;
-use crate::edge::EdgeId;
 use crate::graph::edge_view::EdgeView;
-use crate::graph::traverse::{TraversalDirection, reverse_postorder};
+use crate::graph::traverse::reverse_postorder;
+use crate::graph::view::Direction;
 use crate::graph::view::{DenseId, RootedView};
-use crate::transform::linearize::{Emitter, falls_through};
+use crate::identity::{NO_INDEX, check_bound, slot, word};
 
 mod chains;
 #[cfg(test)]
@@ -74,7 +72,11 @@ impl Default for ExtTspConfig {
 /// edges whose stream needs no transfer when the target follows the source
 /// (see [`ext_tsp_score`]). The callbacks are asked about the reachable part
 /// of the graph only, and `can_fall_through` only about the edges with a
-/// nonzero count.
+/// nonzero count. Over a CFG, [`falls_through`](crate::falls_through) is the
+/// `can_fall_through` of [`linearize`](crate::linearize) under an emitter,
+/// and [`BlockFrequencies`](crate::BlockFrequencies) turns the branch
+/// probabilities of [`CfgView::edge_weight`](crate::CfgView::edge_weight)
+/// into edge counts.
 ///
 /// Nodes the root does not reach are omitted, as with reverse postorder, so
 /// the result goes to [`linearize`](crate::linearize) as a
@@ -102,7 +104,8 @@ impl Default for ExtTspConfig {
 /// # Panics
 ///
 /// Panics when `graph` yields a node at or above its
-/// [`node_bound`](crate::GraphView::node_bound).
+/// [`node_bound`](crate::GraphView::node_bound), or when that bound exceeds
+/// `u32::MAX`.
 ///
 /// # Examples
 ///
@@ -136,7 +139,7 @@ pub fn ext_tsp_order<G>(
 where
     G: RootedView + EdgeView,
 {
-    let nodes = reverse_postorder(graph, graph.root(), TraversalDirection::Outgoing);
+    let nodes = reverse_postorder(graph, graph.root(), Direction::Forward);
     let problem = Problem::new(graph, &nodes, block_size, edge_count, can_fall_through);
     let greedy = chains::merge(&problem, config);
     let chosen =
@@ -148,7 +151,7 @@ where
     chosen.into_iter().map(|local| nodes[local]).collect()
 }
 
-/// The score that [`ext_tsp_order`] maximizes, for tests and comparisons.
+/// The score that [`ext_tsp_order`] maximizes, to compare orders.
 ///
 /// The blocks of `order` are laid out one after another, each `block_size`
 /// bytes long. Every edge between two blocks of `order` adds its count times
@@ -172,7 +175,8 @@ where
 /// # Panics
 ///
 /// Panics when `order` names a node at or above the graph's
-/// [`node_bound`](crate::GraphView::node_bound).
+/// [`node_bound`](crate::GraphView::node_bound), or when that bound exceeds
+/// `u32::MAX`.
 #[must_use]
 pub fn ext_tsp_score<G: EdgeView>(
     graph: &G,
@@ -184,92 +188,6 @@ pub fn ext_tsp_score<G: EdgeView>(
 ) -> u128 {
     Problem::new(graph, order, block_size, edge_count, can_fall_through)
         .score(0..order.len(), config)
-}
-
-/// [`ext_tsp_order`] over a CFG, with the fallthrough rule of
-/// [`linearize`](crate::linearize) under `emitter`.
-///
-/// An edge can fall through when `linearize` emits no transfer for it while
-/// its target is the next block: [`Fallthrough`](crate::EdgeKind::Fallthrough),
-/// [`ConditionalFalse`](crate::EdgeKind::ConditionalFalse), and
-/// [`CallReturn`](crate::EdgeKind::CallReturn) always;
-/// [`ConditionalTrue`](crate::EdgeKind::ConditionalTrue) when the emitter
-/// [inverts](Emitter::emit_inverted_conditional_branch) the condition of
-/// its block toward the block's layout target; and the jump kinds when the
-/// emitter [elides jumps to the next block](Emitter::elides_jump_to_next).
-/// Dispatch, call, and exceptional edges never do. To learn whether a
-/// condition inverts, the function asks the emitter for the inverted branch
-/// of each counted true edge and drops the instruction. Pass the result to
-/// `linearize` with the same emitter as a
-/// [`BlockOrder::Custom`](crate::BlockOrder::Custom).
-///
-/// A consumer whose profile holds branch probabilities
-/// ([`CfgView::edge_weight`]) converts them to counts first.
-///
-/// # Examples
-///
-/// The hot true arm follows the branch once the emitter can invert the
-/// branch, and the branch block then emits one transfer instead of two.
-///
-/// ```
-/// use cfglib::{
-///     BlockId, BlockOrder, Cfg, EdgeKind, Emitter, ExtTspConfig, cfg_ext_tsp_order, linearize,
-/// };
-///
-/// struct Asm;
-///
-/// impl Emitter<&'static str> for Asm {
-///     fn emit_jump(&self, _target: BlockId) -> &'static str {
-///         "jmp"
-///     }
-///     fn emit_conditional_branch(&self, _condition: &&'static str, _target: BlockId) -> &'static str {
-///         "bnz"
-///     }
-///     fn emit_block_start(&self, _block: BlockId) -> Option<&'static str> {
-///         None
-///     }
-///     fn emit_inverted_conditional_branch(
-///         &self,
-///         _condition: &&'static str,
-///         _target: BlockId,
-///     ) -> Option<&'static str> {
-///         Some("bz")
-///     }
-/// }
-///
-/// let mut cfg = Cfg::new();
-/// let entry = cfg.entry();
-/// let [hot, cold] = [(); 2].map(|()| cfg.new_block());
-/// cfg.block_mut(entry).push("test");
-/// cfg.block_mut(hot).push("work");
-/// cfg.block_mut(cold).push("report");
-/// let to_hot = cfg.add_edge(entry, hot, EdgeKind::ConditionalTrue);
-/// cfg.add_edge(entry, cold, EdgeKind::ConditionalFalse);
-///
-/// let count = |edge| if edge == to_hot { 90 } else { 10 };
-/// let order = cfg_ext_tsp_order(&cfg, &Asm, |_| 16, count, &ExtTspConfig::default());
-/// assert_eq!(order, [entry, hot, cold]);
-///
-/// let stream = linearize(&cfg, BlockOrder::Custom(order), &Asm)?;
-/// let text: Vec<&str> = stream.iter().map(|line| line.inst).collect();
-/// assert_eq!(text, ["test", "bz", "work", "report"]);
-/// # Ok::<(), cfglib::LinearizeError>(())
-/// ```
-#[must_use]
-pub fn cfg_ext_tsp_order<G: CfgView>(
-    cfg: &G,
-    emitter: &dyn Emitter<G::Inst>,
-    block_size: impl Fn(BlockId) -> u64,
-    edge_count: impl Fn(EdgeId) -> u64,
-    config: &ExtTspConfig,
-) -> Vec<BlockId> {
-    ext_tsp_order(
-        cfg,
-        block_size,
-        edge_count,
-        |edge| falls_through(cfg, edge, emitter),
-        config,
-    )
 }
 
 /// One edge with a nonzero count, between local node numbers.
@@ -298,22 +216,23 @@ impl Problem {
         edge_count: impl Fn(G::EdgeId) -> u64,
         can_fall_through: impl Fn(G::EdgeId) -> bool,
     ) -> Self {
-        let mut local = vec![usize::MAX; graph.node_bound()];
+        check_bound(graph.node_bound(), "node bound of an ext-TSP layout");
+        let mut local = vec![NO_INDEX; graph.node_bound()];
         for (index, node) in nodes.iter().enumerate() {
-            local[node.index()] = index;
+            local[node.index()] = word(index);
         }
         let mut jumps = Vec::new();
         for (source, &node) in nodes.iter().enumerate() {
             for edge in graph.outgoing(node) {
                 let target = local[graph.edge(edge).target().index()];
-                if target == usize::MAX {
+                if target == NO_INDEX {
                     continue;
                 }
                 let count = edge_count(edge);
                 if count > 0 {
                     jumps.push(Jump {
                         source,
-                        target,
+                        target: slot(target),
                         count,
                         falls: can_fall_through(edge),
                     });

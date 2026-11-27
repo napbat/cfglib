@@ -24,13 +24,12 @@ use alloc::vec::Vec;
 use super::{PathExprArena, PathExprId, PathExpressions};
 use crate::graph::dominator::DominatorTree;
 use crate::graph::edge_view::EdgeView;
-use crate::graph::scc::tarjan_scc;
+use crate::graph::scc::{SccDecomposition, SccNumbering};
 use crate::graph::store::{Graph, NodeId};
-use crate::graph::traverse::{TraversalDirection, reverse_postorder};
+use crate::graph::traverse::reverse_postorder;
+use crate::graph::view::Direction;
 use crate::graph::view::{DenseId, RootedView};
-
-/// An unset slot of a dense side table.
-const NONE: usize = usize::MAX;
+use crate::identity::{NO_INDEX, check_bound, slot, word};
 
 const ZERO: PathExprId = PathExprArena::<()>::ZERO;
 const ONE: PathExprId = PathExprArena::<()>::ONE;
@@ -39,14 +38,15 @@ pub(super) fn path_expressions<G: RootedView + EdgeView>(
     graph: &G,
 ) -> PathExpressions<G::NodeId, G::EdgeId> {
     let bound = graph.node_bound();
+    check_bound(bound, "node bound of path expressions");
     let root = graph.root();
     let tree = DominatorTree::compute(graph);
-    let mut rank = vec![NONE; bound];
-    for (position, node) in reverse_postorder(graph, root, TraversalDirection::Outgoing)
+    let mut rank = vec![NO_INDEX; bound];
+    for (position, node) in reverse_postorder(graph, root, Direction::Forward)
         .into_iter()
         .enumerate()
     {
-        rank[node.index()] = position;
+        rank[node.index()] = word(position);
     }
 
     let mut elimination = Elimination {
@@ -54,11 +54,11 @@ pub(super) fn path_expressions<G: RootedView + EdgeView>(
         tree: &tree,
         rank,
         arena: PathExprArena::new(),
-        ancestor: vec![NONE; bound],
+        ancestor: vec![NO_INDEX; bound],
         summary: vec![ONE; bound],
         loops: vec![ONE; bound],
         entry: vec![ZERO; bound],
-        local: vec![NONE; bound],
+        local: vec![NO_INDEX; bound],
     };
     for &node in tree.preorder().iter().rev() {
         elimination.enter_children(node);
@@ -86,11 +86,11 @@ struct Elimination<'g, G: EdgeView> {
     graph: &'g G,
     tree: &'g DominatorTree<G::NodeId>,
     /// Reverse-postorder position of each reachable node.
-    rank: Vec<usize>,
+    rank: Vec<u32>,
     arena: PathExprArena<G::EdgeId>,
     /// The forest parent of a node whose subtree is solved, until the node's
-    /// own tree root is linked; `NONE` for a forest root.
-    ancestor: Vec<usize>,
+    /// own tree root is linked; [`NO_INDEX`] for a forest root.
+    ancestor: Vec<u32>,
     /// The paths from just below the forest parent down to the node: the
     /// product of `entry` along that stretch of the dominator tree.
     summary: Vec<PathExprId>,
@@ -98,7 +98,7 @@ struct Elimination<'g, G: EdgeView> {
     entry: Vec<PathExprId>,
     /// Scratch: the position of each child among its siblings while their
     /// parent is processed.
-    local: Vec<usize>,
+    local: Vec<u32>,
 }
 
 /// An edge of the derived graph of one sibling group: from a sibling, the
@@ -119,7 +119,7 @@ impl<G: RootedView + EdgeView> Elimination<'_, G> {
         }
         children.sort_unstable_by_key(|child| self.rank[child.index()]);
         for (position, child) in children.iter().enumerate() {
-            self.local[child.index()] = position;
+            self.local[child.index()] = word(position);
         }
 
         // The direct steps from the parent into each child, and the derived
@@ -141,7 +141,7 @@ impl<G: RootedView + EdgeView> Elimination<'_, G> {
                     direct[to] = self.arena.union(direct[to], step);
                 } else {
                     let (sibling, below) = self.eval(source.index());
-                    let from = self.local[sibling];
+                    let from = slot(self.local[sibling]);
                     let path = self.arena.concat(below, step);
                     retreating |= from > to;
                     derived.push(Derived { from, to, path });
@@ -168,9 +168,9 @@ impl<G: RootedView + EdgeView> Elimination<'_, G> {
         }
 
         for &child in &children {
-            self.ancestor[child.index()] = parent.index();
+            self.ancestor[child.index()] = word(parent.index());
             self.summary[child.index()] = self.entry[child.index()];
-            self.local[child.index()] = NONE;
+            self.local[child.index()] = NO_INDEX;
         }
     }
 
@@ -184,7 +184,7 @@ impl<G: RootedView + EdgeView> Elimination<'_, G> {
         for edge in derived {
             shape.add_edge(nodes[edge.from], nodes[edge.to], ());
         }
-        let decomposition = tarjan_scc(&shape);
+        let decomposition = SccDecomposition::compute(&shape, SccNumbering::LeavesFirst);
         // Leaves come first, so the reversed order is topological.
         let order: Vec<&[NodeId]> = decomposition.components().rev().collect();
         let mut component = vec![0; children.len()];
@@ -286,22 +286,22 @@ impl<G: RootedView + EdgeView> Elimination<'_, G> {
     /// The forest root above `node` and the paths from just below that root
     /// down to `node`, compressing the forest path on the way.
     fn eval(&mut self, node: usize) -> (usize, PathExprId) {
-        if self.ancestor[node] == NONE {
+        if self.ancestor[node] == NO_INDEX {
             return (node, ONE);
         }
         let mut path = Vec::new();
         let mut top = node;
-        while self.ancestor[self.ancestor[top]] != NONE {
+        while self.ancestor[slot(self.ancestor[top])] != NO_INDEX {
             path.push(top);
-            top = self.ancestor[top];
+            top = slot(self.ancestor[top]);
         }
         // `top` hangs directly under the root; fold the summaries down from
         // it so that every node on the path hangs there too.
         while let Some(below) = path.pop() {
-            let above = self.ancestor[below];
+            let above = slot(self.ancestor[below]);
             self.summary[below] = self.arena.concat(self.summary[above], self.summary[below]);
             self.ancestor[below] = self.ancestor[above];
         }
-        (self.ancestor[node], self.summary[node])
+        (slot(self.ancestor[node]), self.summary[node])
     }
 }

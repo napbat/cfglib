@@ -127,20 +127,20 @@ impl<'a, D: Dialect, V: DenseId, X: Copy> Defs<'a, D, V, X> {
 
     /// Records the values that `statement` defines.
     ///
-    /// `width` gives the type of an operator or effect result, and `extra`
-    /// gives the data of the reader for each new value.
+    /// `width` gives the type of an operator or effect result, and every new
+    /// value starts with the data `extra` of the reader.
     pub(super) fn define(
         &mut self,
         statement: &Statement<'a, D, V>,
         width: impl Fn(V) -> Bits,
-        mut extra: impl FnMut(&Self, V) -> X,
+        extra: X,
     ) {
         match *statement {
             Statement::Read { result, source } => {
                 let slot = Slot {
                     def: Def::Read(source),
                     width: width(result),
-                    extra: extra(self, result),
+                    extra,
                 };
                 self.insert(result, slot);
             }
@@ -152,7 +152,7 @@ impl<'a, D: Dialect, V: DenseId, X: Copy> Defs<'a, D, V, X> {
                 let slot = Slot {
                     def: Def::Const { words },
                     width,
-                    extra: extra(self, result),
+                    extra,
                 };
                 self.insert(result, slot);
             }
@@ -169,7 +169,7 @@ impl<'a, D: Dialect, V: DenseId, X: Copy> Defs<'a, D, V, X> {
                             result,
                         },
                         width: width(value),
-                        extra: extra(self, value),
+                        extra,
                     };
                     self.insert(value, slot);
                 }
@@ -178,7 +178,7 @@ impl<'a, D: Dialect, V: DenseId, X: Copy> Defs<'a, D, V, X> {
                 let slot = Slot {
                     def: Def::Nondet,
                     width,
-                    extra: extra(self, result),
+                    extra,
                 };
                 self.insert(result, slot);
             }
@@ -189,7 +189,7 @@ impl<'a, D: Dialect, V: DenseId, X: Copy> Defs<'a, D, V, X> {
                     let slot = Slot {
                         def: Def::Effect { ordinal, result },
                         width: width(value),
-                        extra: extra(self, value),
+                        extra,
                     };
                     self.insert(value, slot);
                 }

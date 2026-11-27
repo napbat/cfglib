@@ -2,12 +2,11 @@ extern crate alloc;
 
 use alloc::vec;
 use alloc::vec::Vec;
-use core::cell::RefCell;
 
 use super::{
-    OrderedFixpoint, SequentialExecutor, SlotAccess, SlotFixpointStats, WaveExecutor,
-    ordered_fixpoint, wave_fixpoint,
+    OrderedFixpoint, SequentialExecutor, SlotAccess, WaveExecutor, ordered_fixpoint, wave_fixpoint,
 };
+use crate::dataflow::solve::{SolveError, SolveStats};
 use crate::graph::fanout::Fanout;
 use crate::test_util::rng::Rng;
 
@@ -16,14 +15,14 @@ use crate::test_util::rng::Rng;
 struct Threads;
 
 impl WaveExecutor for Threads {
-    fn run<T, F>(&mut self, wave: &[usize], evaluate: F) -> Option<Vec<T>>
+    fn run<T, F>(&mut self, wave: &[usize], evaluate: F) -> Vec<T>
     where
         T: Send,
         F: Fn(usize) -> T + Sync,
     {
         let evaluate = &evaluate;
         let half = wave.len().div_ceil(2).max(1);
-        Some(std::thread::scope(|scope| {
+        std::thread::scope(|scope| {
             let parts: Vec<_> = wave
                 .chunks(half)
                 .map(|part| {
@@ -38,23 +37,7 @@ impl WaveExecutor for Threads {
                 .into_iter()
                 .flat_map(|part| part.join().expect("an evaluation does not panic"))
                 .collect()
-        }))
-    }
-}
-
-/// Declines every wave after the first `waves`.
-struct Budget {
-    waves: usize,
-}
-
-impl WaveExecutor for Budget {
-    fn run<T, F>(&mut self, wave: &[usize], evaluate: F) -> Option<Vec<T>>
-    where
-        T: Send,
-        F: Fn(usize) -> T + Sync,
-    {
-        self.waves = self.waves.checked_sub(1)?;
-        SequentialExecutor.run(wave, evaluate)
+        })
     }
 }
 
@@ -138,21 +121,24 @@ impl WaveProgram {
     }
 }
 
-/// Runs `program` through the wave driver with `executor`, returning the
-/// slots, the stats, the merge order and the readers of every change.
+/// Runs `program` through the wave driver with `executor` and at most
+/// `max_steps` evaluations, returning the slots, the outcome, the merge order
+/// and the readers of every change.
 fn run_waves(
     program: &WaveProgram,
     executor: &mut impl WaveExecutor,
-) -> (Vec<u8>, SlotFixpointStats, Vec<usize>, usize) {
+    max_steps: Option<usize>,
+) -> (Vec<u8>, Result<SolveStats, SolveError>, Vec<usize>, usize) {
     let readers = program.readers();
     let mut slots = program.start();
     let mut merged = Vec::new();
     let mut requeued = 0;
-    let stats = wave_fixpoint(
+    let outcome = wave_fixpoint(
         program.owned.len(),
         &readers,
         &mut slots,
         executor,
+        max_steps,
         |group, slots: &Vec<u8>| program.evaluate(group, slots),
         |slots, group, values, requeue| {
             merged.push(group);
@@ -164,7 +150,7 @@ fn run_waves(
             }
         },
     );
-    (slots, stats, merged, requeued)
+    (slots, outcome, merged, requeued)
 }
 
 #[test]
@@ -174,18 +160,18 @@ fn waves_reach_the_round_robin_fixpoint_on_random_graphs() {
         let height = [1, 2, 5][rng.below(3)];
         let program = WaveProgram::random(&mut rng, height);
         let expected = program.naive();
-        let (sequential, stats, _, requeued) = run_waves(&program, &mut SequentialExecutor);
+        let (sequential, stats, _, requeued) = run_waves(&program, &mut SequentialExecutor, None);
+        let stats = stats.expect("an unbounded fixpoint converges");
         assert_eq!(sequential, expected, "seed {seed}");
-        assert!(stats.converged(), "seed {seed}");
         assert!(
-            stats.evaluation_count() <= program.owned.len() + requeued,
+            stats.step_count() <= program.owned.len() + requeued,
             "seed {seed}: {} evaluations for {} groups and {requeued} readers of changes",
-            stats.evaluation_count(),
+            stats.step_count(),
             program.owned.len(),
         );
-        let (threaded, threaded_stats, _, _) = run_waves(&program, &mut Threads);
+        let (threaded, threaded_stats, _, _) = run_waves(&program, &mut Threads, None);
         assert_eq!(threaded, expected, "seed {seed}");
-        assert_eq!(threaded_stats, stats, "seed {seed}");
+        assert_eq!(threaded_stats, Ok(stats), "seed {seed}");
     }
 }
 
@@ -200,15 +186,14 @@ fn each_wave_merges_in_ascending_group_order() {
         seeds: vec![0],
         slot_count: 5,
     };
-    let (slots, stats, merged, _) = run_waves(&program, &mut Threads);
+    let (slots, stats, merged, _) = run_waves(&program, &mut Threads, None);
     assert_eq!(slots, [1, 2, 3, 2, 3]);
     assert_eq!(merged, [0, 1, 2, 3, 1, 2]);
-    assert_eq!(stats.round_count(), 2);
-    assert!(stats.converged());
+    assert_eq!(stats.map(SolveStats::round_count), Ok(2));
 }
 
 #[test]
-fn a_declined_wave_stops_with_the_merged_facts() {
+fn the_step_limit_stops_before_a_wave_that_does_not_fit_with_the_merged_facts() {
     // A chain: group `g` raises slot `g + 1` from slot `g`, one wave a link.
     let program = WaveProgram {
         height: 9,
@@ -217,15 +202,23 @@ fn a_declined_wave_stops_with_the_merged_facts() {
         seeds: vec![0],
         slot_count: 6,
     };
-    let (slots, stats, _, _) = run_waves(&program, &mut Budget { waves: 2 });
+    // Wave 0 evaluates all five groups and wave 1 one more; wave 2 would be
+    // the seventh evaluation.
+    let (slots, outcome, _, _) = run_waves(&program, &mut SequentialExecutor, Some(6));
     assert_eq!(slots, [1, 2, 3, 0, 0, 0]);
-    assert_eq!(stats.round_count(), 2);
-    assert_eq!(stats.evaluation_count(), 6);
-    assert!(!stats.converged());
-    let (slots, stats, _, _) = run_waves(&program, &mut SequentialExecutor);
+    assert_eq!(
+        outcome,
+        Err(SolveError::StepLimitExceeded {
+            limit: 6,
+            steps: 6,
+            pending_node: 2,
+        })
+    );
+    let (slots, stats, _, _) = run_waves(&program, &mut SequentialExecutor, None);
     assert_eq!(slots, [1, 2, 3, 4, 5, 6]);
-    assert_eq!(stats.round_count(), 5);
-    assert!(stats.converged());
+    let stats = stats.expect("an unbounded fixpoint converges");
+    assert_eq!((stats.round_count(), stats.step_count()), (5, 9));
+    assert_eq!(stats.peak_count(), 0, "the driver holds no facts");
 }
 
 #[test]
@@ -236,12 +229,13 @@ fn no_groups_run_no_wave() {
         &readers,
         &mut (),
         &mut SequentialExecutor,
+        Some(0),
         |_, ()| (),
         |(), _, (), _| {},
-    );
+    )
+    .expect("no wave runs, so none passes the limit");
     assert_eq!(stats.round_count(), 0);
-    assert_eq!(stats.evaluation_count(), 0);
-    assert!(stats.converged());
+    assert_eq!(stats.step_count(), 0);
 }
 
 /// An order-dependent, first-value-wins program over one slot per unit, in
@@ -360,30 +354,34 @@ impl OrderedProgram {
 /// What one run of the ordered driver did.
 struct OrderedRun {
     slots: Vec<Option<u32>>,
-    stats: SlotFixpointStats,
+    stats: Result<SolveStats, SolveError>,
     /// Each evaluation that ran, as `(sweep, unit)`.
     log: Vec<(usize, usize)>,
     /// For each change, the units whose latest evaluation read the slot.
     readers_of_changes: usize,
 }
 
-fn run_ordered(program: &OrderedProgram, sweeps: usize) -> OrderedRun {
+fn run_ordered(program: &OrderedProgram, max_steps: Option<usize>) -> OrderedRun {
     let mut slots = vec![None; program.units()];
     let mut latest: Vec<Vec<usize>> = vec![Vec::new(); program.units()];
     let mut log = Vec::new();
     let mut readers_of_changes = 0;
-    let sweep = RefCell::new(0);
+    // A sweep evaluates its units in ascending order, so a unit at or below
+    // the one before it starts the next sweep.
+    let mut sweep = 0;
+    let mut last = None;
     let stats = ordered_fixpoint(
         program.units(),
-        |index| {
-            *sweep.borrow_mut() = index;
-            index < sweeps
-        },
+        max_steps,
         |unit, access: &mut SlotAccess<usize>| {
+            if last.is_some_and(|last| unit <= last) {
+                sweep += 1;
+            }
+            last = Some(unit);
             let mut reads = Vec::new();
             let (ran, set) = program.evaluate(unit, &mut slots, |slot| reads.push(slot));
             if ran {
-                log.push((*sweep.borrow(), unit));
+                log.push((sweep, unit));
             }
             for &slot in &reads {
                 access.read(slot);
@@ -410,16 +408,16 @@ fn ordered_sweeps_match_the_round_robin_and_the_stamped_scan() {
         let program = OrderedProgram::random(&mut rng);
         let (naive, naive_sweeps) = program.naive();
         let (stamped, stamped_log) = program.stamped();
-        let run = run_ordered(&program, usize::MAX);
+        let run = run_ordered(&program, None);
+        let stats = run.stats.expect("an unbounded fixpoint converges");
         assert_eq!(run.slots, naive, "seed {seed}");
         assert_eq!(stamped, naive, "seed {seed}");
         assert_eq!(run.log, stamped_log, "seed {seed}");
-        assert_eq!(run.stats.round_count(), naive_sweeps, "seed {seed}");
-        assert!(run.stats.converged(), "seed {seed}");
+        assert_eq!(stats.round_count(), naive_sweeps, "seed {seed}");
         assert!(
-            run.stats.evaluation_count() <= program.units() + run.readers_of_changes,
+            stats.step_count() <= program.units() + run.readers_of_changes,
             "seed {seed}: {} evaluations for {} units and {} readers of changes",
-            run.stats.evaluation_count(),
+            stats.step_count(),
             program.units(),
             run.readers_of_changes,
         );
@@ -437,12 +435,13 @@ fn a_reverse_chain_settles_one_unit_a_sweep_without_rescanning() {
         candidates: (0..UNITS).map(|unit| vec![unit + 1]).collect(),
         self_read: vec![false; UNITS],
     };
-    let run = run_ordered(&program, usize::MAX);
+    let run = run_ordered(&program, None);
     assert!(run.slots.iter().all(Option::is_some));
-    assert_eq!(run.stats.round_count(), UNITS + 1);
+    let stats = run.stats.expect("an unbounded fixpoint converges");
+    assert_eq!(stats.round_count(), UNITS + 1);
     // Every unit once in sweep 0, then one unit a sweep: linear, where the
     // full scan visits every unit in every sweep.
-    assert_eq!(run.stats.evaluation_count(), 2 * UNITS - 1);
+    assert_eq!(stats.step_count(), 2 * UNITS - 1);
 }
 
 #[test]
@@ -459,14 +458,15 @@ fn a_forward_chain_settles_in_one_sweep() {
             .collect(),
         self_read: vec![false; UNITS],
     };
-    let run = run_ordered(&program, usize::MAX);
+    let run = run_ordered(&program, None);
     assert!(run.slots.iter().all(Option::is_some));
-    assert_eq!(run.stats.round_count(), 2);
-    assert_eq!(run.stats.evaluation_count(), UNITS);
+    let stats = run.stats.expect("an unbounded fixpoint converges");
+    assert_eq!(stats.round_count(), 2);
+    assert_eq!(stats.step_count(), UNITS);
 }
 
 #[test]
-fn a_refused_sweep_stops_unconverged() {
+fn the_step_limit_stops_with_the_unit_that_would_run_next() {
     const UNITS: usize = 10;
     let mut seeds = vec![None; UNITS];
     seeds[UNITS - 1] = Some(1);
@@ -475,9 +475,17 @@ fn a_refused_sweep_stops_unconverged() {
         candidates: (0..UNITS).map(|unit| vec![unit + 1]).collect(),
         self_read: vec![false; UNITS],
     };
-    let run = run_ordered(&program, 3);
-    assert_eq!(run.stats.round_count(), 3);
-    assert!(!run.stats.converged());
+    // Sweep 0 evaluates every unit and sets the last; sweeps 1 and 2 each
+    // set one more link, and the thirteenth evaluation would start sweep 3.
+    let run = run_ordered(&program, Some(UNITS + 2));
+    assert_eq!(
+        run.stats,
+        Err(SolveError::StepLimitExceeded {
+            limit: UNITS + 2,
+            steps: UNITS + 2,
+            pending_node: UNITS - 4,
+        })
+    );
     let set = run.slots.iter().filter(|slot| slot.is_some()).count();
     assert_eq!(set, 3, "one link a sweep");
 }
@@ -488,36 +496,33 @@ fn a_dependency_dropped_by_a_later_evaluation_does_not_requeue() {
     // after unit 1 dropped it, which must not run unit 1 again.
     let mut evaluated = Vec::new();
     let mut slots = [0_u8; 3];
-    let stats = ordered_fixpoint(
-        3,
-        |_| true,
-        |unit, access: &mut SlotAccess<usize>| {
-            evaluated.push(unit);
-            match unit {
-                0 => {
-                    access.read(2);
-                    if slots[2] > 0 && slots[0] == 0 {
-                        slots[0] = 1;
-                        access.changed(0);
-                    }
-                }
-                1 => {
-                    access.read(0);
-                    if slots[0] == 0 {
-                        access.read(2);
-                    }
-                }
-                _ => {
-                    access.read(0);
-                    let target = slots[0] + 1;
-                    if slots[2] < target {
-                        slots[2] = target;
-                        access.changed(2);
-                    }
+    let stats = ordered_fixpoint(3, None, |unit, access: &mut SlotAccess<usize>| {
+        evaluated.push(unit);
+        match unit {
+            0 => {
+                access.read(2);
+                if slots[2] > 0 && slots[0] == 0 {
+                    slots[0] = 1;
+                    access.changed(0);
                 }
             }
-        },
-    );
+            1 => {
+                access.read(0);
+                if slots[0] == 0 {
+                    access.read(2);
+                }
+            }
+            _ => {
+                access.read(0);
+                let target = slots[0] + 1;
+                if slots[2] < target {
+                    slots[2] = target;
+                    access.changed(2);
+                }
+            }
+        }
+    })
+    .expect("an unbounded fixpoint converges");
     // Sweep 0: unit 2 sets slot 2 and queues units 0 and 1 for sweep 1.
     // Sweep 1: unit 0 sets slot 0 and queues units 1 and 2 later in the
     // sweep; unit 1 drops slot 2; unit 2 raises slot 2 again, which queues
@@ -525,15 +530,14 @@ fn a_dependency_dropped_by_a_later_evaluation_does_not_requeue() {
     assert_eq!(evaluated, [0, 1, 2, 0, 1, 2, 0]);
     assert_eq!(slots, [1, 0, 2]);
     assert_eq!(stats.round_count(), 3);
-    assert!(stats.converged());
 }
 
 #[test]
 fn no_units_run_one_empty_sweep() {
-    let stats = ordered_fixpoint(0, |_| true, |_, _: &mut SlotAccess<usize>| {});
+    let stats = ordered_fixpoint(0, Some(0), |_, _: &mut SlotAccess<usize>| {})
+        .expect("no unit runs, so none passes the limit");
     assert_eq!(stats.round_count(), 1);
-    assert_eq!(stats.evaluation_count(), 0);
-    assert!(stats.converged());
+    assert_eq!(stats.step_count(), 0);
 }
 
 /// A monotone program over one slot per unit and one input slot per unit
@@ -576,13 +580,10 @@ impl MaxProgram {
     fn fresh(&self, inputs: &[u32]) -> Vec<u32> {
         let mut slots = vec![0; self.units()];
         slots.extend_from_slice(inputs);
-        ordered_fixpoint(
-            self.units(),
-            |_| true,
-            |unit, access| {
-                self.evaluate(unit, &mut slots, access);
-            },
-        );
+        ordered_fixpoint(self.units(), None, |unit, access| {
+            self.evaluate(unit, &mut slots, access);
+        })
+        .expect("an unbounded fixpoint converges");
         slots
     }
 
@@ -613,14 +614,10 @@ fn a_later_run_evaluates_only_the_readers_of_what_an_edit_changed() {
         let mut slots = vec![0; units];
         slots.extend_from_slice(&inputs);
         let mut fixpoint = OrderedFixpoint::new(units);
-        let first = fixpoint.run(
-            [],
-            |_| true,
-            |unit, access| {
-                program.evaluate(unit, &mut slots, access);
-            },
-        );
-        assert!(first.converged());
+        let first = fixpoint.run([], None, |unit, access| {
+            program.evaluate(unit, &mut slots, access);
+        });
+        assert!(first.is_ok());
         assert_eq!(slots, program.fresh(&inputs), "seed {seed}");
 
         // Raise one unit's input; the caller says that unit is dirty.
@@ -629,15 +626,11 @@ fn a_later_run_evaluates_only_the_readers_of_what_an_edit_changed() {
         slots[units + edited] = inputs[edited];
         let affected = program.readers_closure(edited);
         let mut evaluated = Vec::new();
-        let again = fixpoint.run(
-            [edited],
-            |_| true,
-            |unit, access| {
-                evaluated.push(unit);
-                program.evaluate(unit, &mut slots, access);
-            },
-        );
-        assert!(again.converged());
+        let again = fixpoint.run([edited], None, |unit, access| {
+            evaluated.push(unit);
+            program.evaluate(unit, &mut slots, access);
+        });
+        assert!(again.is_ok());
         assert_eq!(slots, program.fresh(&inputs), "seed {seed}");
         assert!(
             evaluated.iter().all(|&unit| affected[unit]),
@@ -651,14 +644,11 @@ fn a_later_run_evaluates_only_the_readers_of_what_an_edit_changed() {
         assert_eq!(fixpoint.invalidate(&[units + other]), [other]);
         let affected = program.readers_closure(other);
         evaluated.clear();
-        fixpoint.run(
-            [],
-            |_| true,
-            |unit, access| {
-                evaluated.push(unit);
-                program.evaluate(unit, &mut slots, access);
-            },
-        );
+        let rerun = fixpoint.run([], None, |unit, access| {
+            evaluated.push(unit);
+            program.evaluate(unit, &mut slots, access);
+        });
+        assert!(rerun.is_ok());
         assert_eq!(slots, program.fresh(&inputs), "seed {seed}");
         assert!(evaluated.iter().all(|&unit| affected[unit]), "seed {seed}");
     }
@@ -675,31 +665,33 @@ fn a_stopped_run_leaves_its_dirty_units_for_the_next() {
     let mut slots = vec![0; 11];
     slots.extend_from_slice(&inputs);
     let mut fixpoint = OrderedFixpoint::new(11);
-    let stopped = fixpoint.run(
-        [],
-        |sweep| sweep < 3,
-        |unit, access| {
-            program.evaluate(unit, &mut slots, access);
-        },
+    // Sweep 0 evaluates all eleven units and sweeps 1 and 2 one link each;
+    // the fourteenth evaluation would start sweep 3.
+    let stopped = fixpoint.run([], Some(13), |unit, access| {
+        program.evaluate(unit, &mut slots, access);
+    });
+    assert_eq!(
+        stopped,
+        Err(SolveError::StepLimitExceeded {
+            limit: 13,
+            steps: 13,
+            pending_node: 7,
+        })
     );
-    assert!(!stopped.converged());
-    assert_eq!(stopped.round_count(), 3);
-    let finished = fixpoint.run(
-        [],
-        |_| true,
-        |unit, access| {
-            program.evaluate(unit, &mut slots, access);
-        },
-    );
-    assert!(finished.converged());
+    let finished = fixpoint.run([], None, |unit, access| {
+        program.evaluate(unit, &mut slots, access);
+    });
+    assert!(finished.is_ok());
     assert_eq!(slots, program.fresh(&inputs));
-    let idle = fixpoint.run([], |_| true, |_, _| unreachable!("nothing is dirty"));
-    assert_eq!(idle.evaluation_count(), 0);
+    let idle = fixpoint
+        .run([], Some(0), |_, _| unreachable!("nothing is dirty"))
+        .expect("nothing runs");
+    assert_eq!(idle.step_count(), 0);
 }
 
 #[test]
 #[should_panic(expected = "dirty unit is out of range")]
 fn a_dirty_unit_beyond_the_units_panics() {
     let mut fixpoint = OrderedFixpoint::<usize>::new(2);
-    fixpoint.run([2], |_| true, |_, _| {});
+    let _ = fixpoint.run([2], None, |_, _| {});
 }

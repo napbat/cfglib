@@ -10,12 +10,12 @@ use core::fmt::{Debug, Display};
 use std::error::Error;
 
 use cfglib::{
-    AddressBuildError, AddressCfgOptions, AddressHandler, AddressInstruction, AddressSpace,
-    CallPolicy, Flow, HandlerKind, verify,
+    AddressBuildError, AddressCfgOptions, AddressHandler, AddressHandlerKind, AddressInstruction,
+    AddressSpace, CallPolicy, Flow, verify,
 };
 
 use crate::bytecode::{Bytecode, Opcode};
-use crate::harness::{assert_empty, plain_options as no_options, try_build};
+use crate::harness::{Wire, assert_empty, plain_options as no_options, try_build};
 use crate::machine::{Machine, Mnemonic};
 
 /// What the error scenarios need of an address type.
@@ -69,21 +69,22 @@ fn catch_range<A: Width>(start: u8, end: u8, entry: u8) -> AddressHandler<A> {
     AddressHandler {
         protected: at(start)..at(end),
         entry: at(entry),
-        kind: HandlerKind::Catch,
+        kind: AddressHandlerKind::Catch,
     }
 }
 
-fn entry_at<A: Width>(entry: u8) -> AddressCfgOptions<A> {
+fn entry_at<A: Width>(entry: u8) -> AddressCfgOptions<'static, A, Wire> {
     AddressCfgOptions {
         entry: Some(at(entry)),
         calls: CallPolicy::Edges,
+        ..AddressCfgOptions::default()
     }
 }
 
 fn error_of<A: Width>(
     instructions: Vec<Span<A>>,
     handlers: &[AddressHandler<A>],
-    options: AddressCfgOptions<A>,
+    options: AddressCfgOptions<'_, A, Wire>,
 ) -> AddressBuildError<A> {
     match try_build(instructions, handlers, options) {
         Ok(_) => panic!("the stream was accepted"),
@@ -176,7 +177,7 @@ fn a_protected_range_must_end_on_an_instruction_or_at_the_code_end<A: Width>() {
         no_options(),
     )
     .expect("a range may end at the end of the code");
-    assert_eq!(graph.cfg.regions().len(), 1);
+    assert_eq!(graph.cfg.region_count(), 1);
     assert!(verify(&graph.cfg).is_ok());
 }
 
@@ -198,7 +199,7 @@ fn an_empty_stream_builds_one_empty_entry_block<A: Width>() {
     assert_empty(&graph.handler_refs);
     assert_empty(&graph.unresolved_transfers);
     assert_empty(&graph.calls);
-    assert_empty(graph.cfg.regions());
+    assert_eq!(graph.cfg.region_count(), 0);
     assert!(verify(&graph.cfg).is_ok());
 }
 

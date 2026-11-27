@@ -2,22 +2,36 @@
 
 use cfglib::{NodeId, ReachIndex, ReachIndexConfig, ReachScratch};
 
-use crate::Lcg;
 use crate::digraph::Digraph;
+use crate::rng::Rng;
 
 #[test]
 fn every_pair_matches_the_breadth_first_distances_in_both_modes() {
     let configs = [
         ReachIndexConfig::default(),
-        ReachIndexConfig::new().with_orders(0).with_supportive(0),
-        ReachIndexConfig::new().with_orders(5).with_supportive(64),
-        ReachIndexConfig::new().with_exact_max_chains(usize::MAX),
-        ReachIndexConfig::new().with_exact_max_chains(3),
+        ReachIndexConfig {
+            orders: 0,
+            supportive: 0,
+            exact_max_chains: None,
+        },
+        ReachIndexConfig {
+            orders: 5,
+            supportive: 64,
+            exact_max_chains: None,
+        },
+        ReachIndexConfig {
+            exact_max_chains: Some(usize::MAX),
+            ..ReachIndexConfig::default()
+        },
+        ReachIndexConfig {
+            exact_max_chains: Some(3),
+            ..ReachIndexConfig::default()
+        },
     ];
-    let mut scratch = ReachScratch::new();
+    let mut scratch = ReachScratch::default();
     for seed in 1..=24 {
         let nodes = 8 + usize::try_from(seed).expect("a small seed fits in usize") * 2;
-        let digraph = Digraph::random(&mut Lcg(seed + 130), nodes, nodes + nodes / 2);
+        let digraph = Digraph::random(&mut Rng::lcg(seed + 130, 33), nodes, nodes + nodes / 2);
         let graph = digraph.graph();
         let distances: Vec<_> = (0..nodes)
             .map(|source| digraph.distances(source, true, None))
@@ -27,10 +41,10 @@ fn every_pair_matches_the_breadth_first_distances_in_both_modes() {
             for (source, row) in distances.iter().enumerate() {
                 for (target, distance) in row.iter().enumerate() {
                     assert_eq!(
-                        index.reaches(
+                        index.reaches_in(
+                            &mut scratch,
                             NodeId::from_index(source),
                             NodeId::from_index(target),
-                            &mut scratch
                         ),
                         distance.is_some(),
                         "{source} -> {target} under {config:?} in {:?}",

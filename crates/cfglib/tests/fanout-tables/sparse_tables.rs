@@ -1,16 +1,16 @@
 //! `Fanout` (sparse key to a run of values) and `SortedMap` (sparse key to one value).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::mem::size_of;
 
 use cfglib::{Fanout, SortedMap};
 
-use crate::Lcg;
+use crate::below_u32;
+use crate::rng::Rng;
 
 /// Pairs over forty sparse keys, so runs repeat values, plus the two ends of the key space.
-fn sparse_pairs(rng: &mut Lcg, count: usize) -> Vec<(u32, u32)> {
+fn sparse_pairs(rng: &mut Rng, count: usize) -> Vec<(u32, u32)> {
     let mut pairs: Vec<(u32, u32)> = (0..count)
-        .map(|_| (rng.below_u32(40) * 997, rng.below_u32(30)))
+        .map(|_| (below_u32(rng, 40) * 997, below_u32(rng, 30)))
         .collect();
     pairs.extend([(0, 5), (u32::MAX, u32::MAX), (u32::MAX, 0)]);
     pairs
@@ -27,7 +27,7 @@ fn deduplicated(pairs: &[(u32, u32)]) -> BTreeMap<u32, BTreeSet<u32>> {
 #[test]
 fn a_reverse_index_built_from_unordered_pairs_matches_a_btreemap_oracle() {
     for seed in [3, 11, 2026] {
-        let pairs = sparse_pairs(&mut Lcg(seed), 600);
+        let pairs = sparse_pairs(&mut Rng::lcg(seed, 33), 600);
         let oracle = deduplicated(&pairs);
         let recorded = pairs.len();
         let table = Fanout::from_pairs(pairs);
@@ -103,10 +103,7 @@ fn an_empty_input_builds_the_canonical_empty_table() {
         Fanout::<u32, u32>::from_grouped(Vec::<(u32, Vec<u32>)>::new())
     );
     assert!(table.is_empty());
-    assert_eq!(
-        (table.len(), table.value_count(), table.heap_bytes()),
-        (0, 0, 0)
-    );
+    assert_eq!((table.len(), table.value_count()), (0, 0));
     assert_eq!(table.get(&7).len(), 0);
     assert!(!table.contains_key(&7));
     assert_eq!(table.keys().count(), 0);
@@ -135,11 +132,11 @@ fn grouped_input_keeps_each_groups_order_and_repeats_and_concatenates_repeated_k
 #[test]
 fn random_groups_match_a_stable_btreemap_concatenation() {
     for seed in [5, 17] {
-        let mut rng = Lcg(seed);
+        let mut rng = Rng::lcg(seed, 33);
         let groups: Vec<(u32, Vec<u32>)> = (0..60)
             .map(|_| {
-                let key = rng.below_u32(8);
-                let values = (0..rng.below(4)).map(|_| rng.below_u32(50)).collect();
+                let key = below_u32(&mut rng, 8);
+                let values = (0..rng.below(4)).map(|_| below_u32(&mut rng, 50)).collect();
                 (key, values)
             })
             .collect();
@@ -196,25 +193,6 @@ fn compound_keys_iterate_in_lexicographic_order() {
 }
 
 #[test]
-fn heap_bytes_counts_the_three_columns_and_nothing_a_key_or_value_owns() {
-    let pairs = sparse_pairs(&mut Lcg(9), 300);
-    let table = Fanout::from_pairs(pairs);
-    // Keys, one closing run bound beyond one per key, and values.
-    let expected = table.len() * size_of::<u32>()
-        + (table.len() + 1) * size_of::<u32>()
-        + table.value_count() * size_of::<u32>();
-    assert_eq!(table.heap_bytes(), expected);
-
-    let short = Fanout::from_pairs(vec![(1_u32, "x".to_owned())]);
-    let long = Fanout::from_pairs(vec![(1_u32, "x".repeat(4096))]);
-    assert_eq!(
-        short.heap_bytes(),
-        long.heap_bytes(),
-        "a string's own heap is not counted"
-    );
-}
-
-#[test]
 fn clones_are_equal_and_tables_with_different_runs_are_not() {
     let table = Fanout::from_pairs(vec![(1_u32, 10_u32), (1, 11), (4, 40)]);
     assert_eq!(table.clone(), table);
@@ -228,7 +206,7 @@ fn clones_are_equal_and_tables_with_different_runs_are_not() {
 #[test]
 fn a_sorted_map_agrees_with_repeated_btreemap_inserts_for_last_wins_and_for_a_sum() {
     for seed in [4, 21] {
-        let pairs = sparse_pairs(&mut Lcg(seed), 400);
+        let pairs = sparse_pairs(&mut Rng::lcg(seed, 33), 400);
         let mut last: BTreeMap<u32, u32> = BTreeMap::new();
         let mut total: BTreeMap<u32, u64> = BTreeMap::new();
         for &(key, value) in &pairs {
@@ -285,16 +263,15 @@ fn a_sorted_map_merge_sees_a_keys_pairs_in_the_order_they_were_recorded() {
 }
 
 #[test]
-fn a_sorted_map_costs_one_entry_per_key_and_the_empty_map_nothing() {
+fn a_sorted_map_keeps_one_entry_per_key_and_the_empty_map_none() {
     let map = SortedMap::from_pairs(vec![(1_u32, 10_u64), (1, 11), (4, 40)], |slot, value| {
         *slot = value;
     });
     assert_eq!(map.len(), 2);
-    assert_eq!(map.heap_bytes(), 2 * size_of::<(u32, u64)>());
 
     let empty = SortedMap::<u32, u64>::default();
     assert!(empty.is_empty());
-    assert_eq!((empty.len(), empty.heap_bytes()), (0, 0));
+    assert_eq!(empty.len(), 0);
     assert_eq!(empty.iter().count(), 0);
     assert_eq!(empty.get(&1), None);
     assert_eq!(

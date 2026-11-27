@@ -20,10 +20,24 @@ impl<I, E> GraphView for Cfg<I, E> {
         self.block_ids()
     }
 
+    /// Forced inline, as the store's view methods are: a generic walk over a
+    /// `Cfg` calls this through the trait, and left to the inliner it stayed
+    /// out of line in `depth_first_preorder` and `wl_colors`.
+    #[inline(always)]
+    #[expect(
+        clippy::inline_always,
+        reason = "out of line, a node walk over a Cfg through the trait ran slower"
+    )]
     fn successors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
         Cfg::successors(self, node)
     }
 
+    /// Forced inline for the reason [`successors`](Self::successors) is.
+    #[inline(always)]
+    #[expect(
+        clippy::inline_always,
+        reason = "out of line, a node walk over a Cfg through the trait ran slower"
+    )]
     fn predecessors(&self, node: Self::NodeId) -> impl Iterator<Item = Self::NodeId> + '_ {
         Cfg::predecessors(self, node)
     }
@@ -55,10 +69,23 @@ impl<I, E> EdgeView for Cfg<I, E> {
         Cfg::edge_ids(self)
     }
 
+    /// Forced inline, as the store's view methods are: a generic edge walk
+    /// over a `Cfg` calls this through the trait.
+    #[inline(always)]
+    #[expect(
+        clippy::inline_always,
+        reason = "out of line, an edge walk over a Cfg through the trait ran slower"
+    )]
     fn outgoing(&self, node: BlockId) -> impl Iterator<Item = EdgeId> + '_ {
         Cfg::outgoing(self, node)
     }
 
+    /// Forced inline for the reason [`outgoing`](Self::outgoing) is.
+    #[inline(always)]
+    #[expect(
+        clippy::inline_always,
+        reason = "out of line, an edge walk over a Cfg through the trait ran slower"
+    )]
     fn incoming(&self, node: BlockId) -> impl Iterator<Item = EdgeId> + '_ {
         Cfg::incoming(self, node)
     }

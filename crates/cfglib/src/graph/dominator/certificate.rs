@@ -19,15 +19,17 @@
 //! nodes and their edges with the tree's O(1) ancestor test, so the checker
 //! is small enough to trust: [`DominatorTree::verify_certificate`] and
 //! [`PostDominatorTree::verify_certificate`](super::PostDominatorTree::verify_certificate)
-//! are both this one function, [`check`], over two ways of reading a tree.
+//! are both this one function, [`check`], reading the tree from its root or
+//! from the virtual exit of a post-dominator tree.
 
 extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
-use super::{ABSENT, DominatorScratch, DominatorTree, check_bound, slot, word};
+use super::{DominatorScratch, DominatorTree};
 use crate::block::BlockId;
-use crate::graph::view::{DenseId, GraphView};
+use crate::graph::view::{DenseId, GraphView, RootedView};
+use crate::identity::{NO_INDEX, check_bound, slot, word};
 
 /// A low-high order of a dominator tree: the certificate that the tree is the
 /// dominator tree of the graph it was computed from.
@@ -51,7 +53,7 @@ use crate::graph::view::{DenseId, GraphView};
 pub struct LowHighOrder<N = BlockId> {
     /// The nodes of the tree in the order.
     pub(super) order: Vec<N>,
-    /// The position of each node in `order`, [`ABSENT`] for a node outside
+    /// The position of each node in `order`, [`NO_INDEX`] for a node outside
     /// the tree.
     pub(super) position: Vec<u32>,
 }
@@ -69,7 +71,7 @@ impl<N: DenseId> LowHighOrder<N> {
     /// consumer might hand one back: nothing about it is checked.
     #[cfg(test)]
     pub(super) fn from_order(order: Vec<N>, bound: usize) -> Self {
-        let mut position = alloc::vec![ABSENT; bound];
+        let mut position = alloc::vec![NO_INDEX; bound];
         for (index, node) in order.iter().enumerate() {
             position[node.index()] = word(index);
         }
@@ -87,7 +89,7 @@ impl<N: DenseId> LowHighOrder<N> {
     #[must_use]
     pub fn position(&self, node: N) -> Option<usize> {
         let position = *self.position.get(node.index())?;
-        (position != ABSENT).then(|| slot(position))
+        (position != NO_INDEX).then(|| slot(position))
     }
 }
 
@@ -100,7 +102,7 @@ impl<N: DenseId> LowHighOrder<N> {
 /// rejected only with a certificate that is not a low-high order of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum CertificateError<N> {
+pub enum CertificateError<N = BlockId> {
     /// The tree and the certificate were not made for a graph with this
     /// node bound.
     NodeBound {
@@ -168,14 +170,14 @@ impl<N: fmt::Debug> fmt::Display for CertificateError<N> {
 impl<N: fmt::Debug> core::error::Error for CertificateError<N> {}
 
 impl<N: DenseId> DominatorTree<N> {
-    /// Compute the dominator tree of `graph` from `root` together with a
+    /// Compute the dominator tree of a rooted graph view together with a
     /// low-high order that certifies it.
     ///
-    /// The tree is the one [`compute_from_in`](Self::compute_from_in) builds.
-    /// The construction also keeps, for each node, the predecessor that
-    /// attains its semidominator and its relative dominator, and the order is
-    /// built from those in linear time (Georgiadis and Tarjan, section 6).
-    /// Release builds pay for this only here.
+    /// The tree is the one [`compute_in`](Self::compute_in) builds. The
+    /// construction also keeps, for each node, the predecessor that attains
+    /// its semidominator and its relative dominator, and the order is built
+    /// from those in linear time (Georgiadis and Tarjan, section 6). Release
+    /// builds pay for this only here.
     ///
     /// # Panics
     ///
@@ -196,27 +198,27 @@ impl<N: DenseId> DominatorTree<N> {
     /// cfg.add_edge(left, join, EdgeKind::Unconditional);
     /// cfg.add_edge(right, join, EdgeKind::Unconditional);
     ///
-    /// let mut scratch = DominatorScratch::new();
-    /// let (tree, certificate) = DominatorTree::compute_certified_in(&mut scratch, &cfg, entry);
+    /// let mut scratch = DominatorScratch::default();
+    /// let (tree, certificate) = DominatorTree::compute_certified_in(&mut scratch, &cfg);
     /// assert_eq!(tree, DominatorTree::compute(&cfg));
     /// assert_eq!(certificate.order()[0], entry);
-    /// assert_eq!(tree.verify_certificate(&cfg, entry, &certificate), Ok(()));
+    /// assert_eq!(tree.verify_certificate(&cfg, &certificate), Ok(()));
     /// ```
     #[must_use]
     pub fn compute_certified_in<G>(
         scratch: &mut DominatorScratch,
         graph: &G,
-        root: N,
     ) -> (Self, LowHighOrder<N>)
     where
-        G: GraphView<NodeId = N>,
+        G: RootedView<NodeId = N>,
     {
         let mut certificate = LowHighOrder::empty();
-        let tree = Self::construct(scratch, graph, root, Some(&mut certificate));
+        let tree = Self::construct(scratch, graph, graph.root(), Some(&mut certificate));
         (tree, certificate)
     }
 
-    /// Build the tree, and fill `certificate` when one is asked for.
+    /// Build the tree of `graph` from `root`, and fill `certificate` when one
+    /// is asked for.
     pub(super) fn construct<G>(
         scratch: &mut DominatorScratch,
         graph: &G,
@@ -226,7 +228,7 @@ impl<N: DenseId> DominatorTree<N> {
     where
         G: GraphView<NodeId = N>,
     {
-        check_bound(graph.node_bound());
+        check_bound(graph.node_bound(), "node bound of a dominator tree");
         assert!(
             root.index() < graph.node_bound(),
             "dominator root is not a node of the graph"
@@ -251,14 +253,14 @@ impl<N: DenseId> DominatorTree<N> {
         Self::from_numbered(idom, numbered)
     }
 
-    /// Check that this is the dominator tree of `graph` from `root`, given a
-    /// low-high order of it.
+    /// Check that this is the dominator tree of `graph` from its root, given
+    /// a low-high order of it.
     ///
     /// The check reads every node of the tree and every edge at it once, with
     /// the tree's O(1) ancestor test, so it costs O(n + m) and allocates
     /// nothing:
     ///
-    /// - `root` is the one root of the tree;
+    /// - the graph's root is the one root of the tree;
     /// - `certificate` is a preorder of the tree;
     /// - the parent property: every edge out of a node of the tree ends at a
     ///   node of the tree, and at the root or at a node whose parent is an
@@ -280,11 +282,10 @@ impl<N: DenseId> DominatorTree<N> {
     pub fn verify_certificate<G>(
         &self,
         graph: &G,
-        root: N,
         certificate: &LowHighOrder<N>,
     ) -> Result<(), CertificateError<N>>
     where
-        G: GraphView<NodeId = N>,
+        G: RootedView<NodeId = N>,
     {
         let bound = graph.node_bound();
         if self.idom.len() != bound || certificate.position.len() != bound {
@@ -294,6 +295,7 @@ impl<N: DenseId> DominatorTree<N> {
                 certificate: certificate.position.len(),
             });
         }
+        let root = graph.root();
         let index = root.index();
         if index >= bound
             || !self.is_reachable(root)
@@ -302,152 +304,204 @@ impl<N: DenseId> DominatorTree<N> {
         {
             return Err(CertificateError::Root(root));
         }
-        let candidate = Candidate {
-            tree: self,
-            root: index,
-        };
-        check(graph, &candidate, certificate).map_err(|failure| failure.lift(N::from_index))
+        check(graph, &Reading::rooted(self, certificate, index))
     }
 }
 
-/// A tree as the checker reads it, in dense indices.
-pub(super) trait Tree {
-    /// The root, which has no parent.
-    fn root(&self) -> usize;
-    /// How many nodes the tree holds.
-    fn size(&self) -> usize;
-    /// Whether `node` is in the tree.
-    fn contains(&self, node: usize) -> bool;
-    /// The parent of `node`, a node of the tree.
-    fn parent(&self, node: usize) -> Option<usize>;
-    /// Whether `ancestor` is an ancestor of `node`, or `node` itself.
-    fn dominates(&self, ancestor: usize, node: usize) -> bool;
-    /// Every node of the tree.
-    fn nodes(&self) -> impl Iterator<Item = usize> + '_;
-}
-
-/// A certificate as the checker reads it, in dense indices.
-pub(super) trait Order {
-    /// How many nodes it lists.
-    fn len(&self) -> usize;
-    /// The node at `position`.
-    fn at(&self, position: usize) -> usize;
-    /// The position of `node`, if it is listed.
-    fn position(&self, node: usize) -> Option<usize>;
-}
-
-impl<N: DenseId> Order for LowHighOrder<N> {
-    fn len(&self) -> usize {
-        self.order.len()
-    }
-
-    fn at(&self, position: usize) -> usize {
-        self.order[position].index()
-    }
-
-    fn position(&self, node: usize) -> Option<usize> {
-        let position = *self.position.get(node)?;
-        (position != ABSENT).then(|| slot(position))
-    }
-}
-
-/// A dominator tree read from one of its roots.
-struct Candidate<'a, N> {
+/// A tree and its certificate as [`check`] reads them, in dense indices.
+///
+/// The tree is read from one of its nodes, or, when `EXIT` is set, for a
+/// post-dominator tree, below a virtual exit at the index one past the
+/// graph's blocks: the exit is then the root, the parent of every root of the
+/// forest of blocks, and the first node of an order that the certificate
+/// itself leaves out.
+///
+/// `EXIT` is a constant rather than a field so that the rooted reading of
+/// [`DominatorTree::verify_certificate`] compiles without a single exit test:
+/// with a runtime flag, `cfg_dominators_verify` took 1.38x the time of the
+/// separate rooted reader on main; with the constant it takes 0.98x.
+pub(super) struct Reading<'a, N, const EXIT: bool> {
     tree: &'a DominatorTree<N>,
+    certificate: &'a LowHighOrder<N>,
+    /// The root, which has no parent.
     root: usize,
 }
 
-impl<N: DenseId> Tree for Candidate<'_, N> {
-    fn root(&self) -> usize {
-        self.root
+impl<'a, N: DenseId> Reading<'a, N, false> {
+    /// `tree` read from its node `root`.
+    const fn rooted(
+        tree: &'a DominatorTree<N>,
+        certificate: &'a LowHighOrder<N>,
+        root: usize,
+    ) -> Self {
+        Self {
+            tree,
+            certificate,
+            root,
+        }
+    }
+}
+
+impl<'a, N: DenseId> Reading<'a, N, true> {
+    /// `tree`, a forest over the blocks below `exit`, read from that virtual
+    /// exit.
+    pub(super) const fn below_exit(
+        tree: &'a DominatorTree<N>,
+        certificate: &'a LowHighOrder<N>,
+        exit: usize,
+    ) -> Self {
+        Self {
+            tree,
+            certificate,
+            root: exit,
+        }
+    }
+}
+
+impl<N: DenseId, const EXIT: bool> Reading<'_, N, EXIT> {
+    /// Whether `node` is the virtual exit.
+    fn is_exit(&self, node: usize) -> bool {
+        EXIT && node == self.root
     }
 
+    /// How many nodes the tree holds.
     fn size(&self) -> usize {
-        self.tree.order.len()
+        self.tree.order.len() + usize::from(EXIT)
     }
 
-    /// A node index past the tree's tables, which a certificate made for
-    /// another graph can name, is not in the tree.
+    /// Whether `node` is in the tree. A node index past the tree's tables,
+    /// which a certificate made for another graph can name, is not.
     fn contains(&self, node: usize) -> bool {
-        self.tree.pre.get(node).is_some_and(|&pre| pre != ABSENT)
+        self.is_exit(node) || self.tree.pre.get(node).is_some_and(|&pre| pre != NO_INDEX)
     }
 
+    /// The parent of `node`, a node of the tree.
     fn parent(&self, node: usize) -> Option<usize> {
-        let parent = self.tree.idom[node];
-        (parent != ABSENT).then(|| slot(parent))
+        if self.is_exit(node) {
+            return None;
+        }
+        match self.tree.idom[node] {
+            NO_INDEX => EXIT.then_some(self.root),
+            parent => Some(slot(parent)),
+        }
     }
 
+    /// Whether `ancestor` is an ancestor of `node`, or `node` itself.
     fn dominates(&self, ancestor: usize, node: usize) -> bool {
+        if EXIT && (ancestor == self.root || node == self.root) {
+            return ancestor == self.root;
+        }
         self.tree
             .dominates(N::from_index(ancestor), N::from_index(node))
     }
 
+    /// Every node of the tree.
     fn nodes(&self) -> impl Iterator<Item = usize> + '_ {
-        self.tree.order.iter().map(|node| node.index())
+        EXIT.then_some(self.root)
+            .into_iter()
+            .chain(self.tree.order.iter().map(|node| node.index()))
+    }
+
+    /// How many nodes the order lists.
+    fn order_len(&self) -> usize {
+        self.certificate.order.len() + usize::from(EXIT)
+    }
+
+    /// The node at `position` of the order.
+    fn at(&self, position: usize) -> usize {
+        match (EXIT, position) {
+            (false, _) => self.certificate.order[position].index(),
+            (true, 0) => self.root,
+            (true, _) => self.certificate.order[position - 1].index(),
+        }
+    }
+
+    /// The position of `node` in the order, if it is listed.
+    fn position(&self, node: usize) -> Option<usize> {
+        if self.is_exit(node) {
+            return Some(0);
+        }
+        let position = *self.certificate.position.get(node)?;
+        (position != NO_INDEX).then(|| slot(position) + usize::from(EXIT))
+    }
+
+    /// The error a failure at dense indices reports. A failure that names the
+    /// virtual exit is a fault of the exit structure the tree hangs from.
+    fn lift(&self, failure: Failure) -> CertificateError<N> {
+        let names_exit = match failure {
+            Failure::Preorder(node) | Failure::LowHigh(node) => self.is_exit(node),
+            Failure::ParentProperty(tail, head) => self.is_exit(tail) || self.is_exit(head),
+        };
+        match failure {
+            _ if names_exit => CertificateError::ExitStructure,
+            Failure::Preorder(node) => CertificateError::Preorder(N::from_index(node)),
+            Failure::ParentProperty(tail, head) => CertificateError::ParentProperty {
+                tail: N::from_index(tail),
+                head: N::from_index(head),
+            },
+            Failure::LowHigh(node) => CertificateError::LowHigh(N::from_index(node)),
+        }
     }
 }
 
 /// What [`check`] found wrong, in dense indices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Failure {
+enum Failure {
+    /// The order is not a preorder of the tree at this node.
     Preorder(usize),
+    /// This edge breaks the parent property.
     ParentProperty(usize, usize),
+    /// This node has no low and high in-edges.
     LowHigh(usize),
 }
 
-impl Failure {
-    /// The same failure with every index named by `name`.
-    pub(super) fn lift<N>(self, name: impl Fn(usize) -> N) -> CertificateError<N> {
-        match self {
-            Self::Preorder(node) => CertificateError::Preorder(name(node)),
-            Self::ParentProperty(tail, head) => CertificateError::ParentProperty {
-                tail: name(tail),
-                head: name(head),
-            },
-            Self::LowHigh(node) => CertificateError::LowHigh(name(node)),
-        }
-    }
+/// Check that the tree of `reading`, whose root has no parent, is the
+/// dominator tree of `graph` from its root, given the low-high order of
+/// `reading`.
+///
+/// Every node of the order must be in the tree at the position the order
+/// gives it, the first must be the root, and every later one must have a
+/// parent that is an ancestor of the node before it, which is what makes the
+/// sequence a preorder. With as many entries as the tree has nodes, it lists
+/// them all. Then every edge out of the tree must keep the parent property,
+/// and every node but the root must have its low and high in-edges.
+pub(super) fn check<G: GraphView, N: DenseId, const EXIT: bool>(
+    graph: &G,
+    reading: &Reading<'_, N, EXIT>,
+) -> Result<(), CertificateError<N>> {
+    passes(graph, reading).map_err(|failure| reading.lift(failure))
 }
 
-/// Check that `tree`, whose root has no parent, is the dominator tree of
-/// `graph` from its root, given the low-high order `order`.
-///
-/// Every node of `order` must be in `tree` at the position `order` gives it,
-/// the first must be the root, and every later one must have a parent that is
-/// an ancestor of the node before it, which is what makes the sequence a
-/// preorder. With as many entries as the tree has nodes, it lists them all.
-/// Then every edge out of the tree must keep the parent property, and every
-/// node but the root must have its low and high in-edges.
-pub(super) fn check<G: GraphView>(
+/// The three passes of [`check`], reporting in dense indices.
+fn passes<G: GraphView, N: DenseId, const EXIT: bool>(
     graph: &G,
-    tree: &impl Tree,
-    order: &impl Order,
+    tree: &Reading<'_, N, EXIT>,
 ) -> Result<(), Failure> {
-    let root = tree.root();
-    for position in 0..order.len() {
-        let node = order.at(position);
+    let root = tree.root;
+    for position in 0..tree.order_len() {
+        let node = tree.at(position);
         let placed = tree.contains(node)
-            && order.position(node) == Some(position)
+            && tree.position(node) == Some(position)
             && if position == 0 {
                 node == root
             } else {
                 tree.parent(node)
-                    .is_some_and(|parent| tree.dominates(parent, order.at(position - 1)))
+                    .is_some_and(|parent| tree.dominates(parent, tree.at(position - 1)))
             };
         if !placed {
             return Err(Failure::Preorder(node));
         }
     }
-    if order.len() != tree.size() {
+    if tree.order_len() != tree.size() {
         let missing = tree
             .nodes()
-            .find(|&node| order.position(node).is_none())
+            .find(|&node| tree.position(node).is_none())
             .unwrap_or(root);
         return Err(Failure::Preorder(missing));
     }
 
-    for position in 0..order.len() {
-        let tail = order.at(position);
+    for position in 0..tree.order_len() {
+        let tail = tree.at(position);
         for head in graph.successors(G::NodeId::from_index(tail)) {
             let head = head.index();
             let kept = tree.contains(head)
@@ -461,8 +515,8 @@ pub(super) fn check<G: GraphView>(
         }
     }
 
-    for position in 1..order.len() {
-        let node = order.at(position);
+    for position in 1..tree.order_len() {
+        let node = tree.at(position);
         let parent = tree.parent(node);
         let (mut low, mut high) = (false, false);
         for before in graph.predecessors(G::NodeId::from_index(node)) {
@@ -474,7 +528,7 @@ pub(super) fn check<G: GraphView>(
             if !tree.contains(before) {
                 continue;
             }
-            match order.position(before) {
+            match tree.position(before) {
                 Some(other) if other < position => low = true,
                 Some(other) if other > position && !tree.dominates(node, before) => high = true,
                 _ => {}

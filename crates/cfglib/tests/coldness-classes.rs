@@ -5,36 +5,38 @@
 //! random order, until no bound lowers a class. The greatest assignment is
 //! unique, so every order must reach the classes that the propagation finds.
 
+#[path = "common/rng.rs"]
+pub mod rng;
+
 use cfglib::ColdClass::{Never, Normal, Rare};
-use cfglib::{ColdClass, ColdnessClasses, ColdnessGraph};
+use cfglib::{ColdClass, ColdnessClasses, Graph, NodeId, Rooted};
+
+use crate::rng::Rng;
 
 /// A graph of numbered nodes with node 0 as the entry.
 #[derive(Debug, Clone)]
 struct Toy {
     seed: Vec<ColdClass>,
     ends: Vec<bool>,
-    /// The `(target, cap)` records of each node, in record order.
+    /// The `(target, cap)` edges of each node, in edge order.
     records: Vec<Vec<(usize, ColdClass)>>,
-    /// The `(source, cap)` records that name each node, from every node.
-    incoming: Vec<Vec<(usize, ColdClass)>>,
-    /// The nodes that the entry reaches, in the order that `reachable`
-    /// yields them.
-    order: Vec<usize>,
+    /// The edges as a graph whose edges hold their caps, node `i` at index
+    /// `i`.
+    graph: Graph<(), ColdClass>,
 }
 
 impl Toy {
-    /// A graph of `count` nodes, seeded `Normal`, without `ends` or records.
+    /// A graph of `count` nodes, seeded `Normal`, without `ends` or edges.
     fn new(count: usize) -> Self {
         Self {
             seed: vec![Normal; count],
             ends: vec![false; count],
             records: vec![Vec::new(); count],
-            incoming: Vec::new(),
-            order: Vec::new(),
+            graph: Graph::new(),
         }
     }
 
-    /// Adds a record from `source` to `target` with the cap `cap`.
+    /// Adds an edge from `source` to `target` with the cap `cap`.
     fn record(mut self, source: usize, target: usize, cap: ColdClass) -> Self {
         self.records[source].push((target, cap));
         self
@@ -50,57 +52,48 @@ impl Toy {
         self
     }
 
-    /// Fills `incoming` and `order` from the records: the order is the
-    /// depth-first preorder from the entry.
+    /// Builds the graph from the edges, in edge order.
     fn finish(mut self) -> Self {
-        let count = self.records.len();
-        self.incoming = vec![Vec::new(); count];
+        let mut graph = Graph::with_capacity(self.records.len(), 0);
+        let nodes: Vec<NodeId> = self.records.iter().map(|_| graph.add_node(())).collect();
         for (source, records) in self.records.iter().enumerate() {
             for &(target, cap) in records {
-                self.incoming[target].push((source, cap));
+                graph.add_edge(nodes[source], nodes[target], cap);
             }
         }
-        self.order = reachable(&self.records).into_iter().collect();
+        self.graph = graph;
         self
     }
 
+    fn classes(&self) -> ColdnessClasses<NodeId> {
+        ColdnessClasses::compute(
+            &Rooted::new(&self.graph, NodeId::from_index(0)),
+            |node| self.seed[node.index()],
+            |edge| *self.graph.edge(edge).payload(),
+            |node| self.ends[node.index()],
+        )
+    }
+
     fn compute(&self) -> Vec<ColdClass> {
-        let classes = ColdnessClasses::compute(self);
+        let classes = self.classes();
         (0..self.records.len())
-            .map(|node| classes.class(node))
+            .map(|node| classes.class(NodeId::from_index(node)))
             .collect()
     }
-}
 
-impl ColdnessGraph for Toy {
-    type NodeId = usize;
-
-    fn node_bound(&self) -> usize {
-        self.records.len()
-    }
-
-    fn entry(&self) -> usize {
-        0
-    }
-
-    fn reachable(&self) -> impl Iterator<Item = usize> + '_ {
-        self.order.iter().copied()
-    }
-
-    fn records(&self, node: usize) -> impl Iterator<Item = (usize, ColdClass)> + '_ {
-        self.records[node].iter().copied()
-    }
-
-    fn incoming(&self, node: usize) -> impl Iterator<Item = (usize, ColdClass)> + '_ {
-        self.incoming[node].iter().copied()
-    }
-
-    fn seed(&self, node: usize) -> ColdClass {
-        self.seed[node]
-    }
-
-    fn ends(&self, node: usize) -> bool {
-        self.ends[node]
+    /// The same graph with node `i` renumbered `to[i]`.
+    fn renumbered(&self, to: &[usize]) -> Self {
+        let count = self.records.len();
+        let mut renumbered = Self::new(count);
+        for node in 0..count {
+            renumbered.seed[to[node]] = self.seed[node];
+            renumbered.ends[to[node]] = self.ends[node];
+            renumbered.records[to[node]] = self.records[node]
+                .iter()
+                .map(|&(target, cap)| (to[target], cap))
+                .collect();
+        }
+        renumbered.finish()
     }
 }
 
@@ -119,30 +112,9 @@ fn reachable(records: &[Vec<(usize, ColdClass)>]) -> Vec<usize> {
     order
 }
 
-/// A small deterministic generator (xorshift64).
-struct Rng(u64);
-
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-
-    fn below(&mut self, bound: usize) -> usize {
-        usize::try_from(self.next() % bound as u64).expect("the bound fits usize")
-    }
-
-    fn class(&mut self) -> ColdClass {
-        [Never, Rare, Normal][self.below(3)]
-    }
-
-    fn shuffle<T>(&mut self, items: &mut [T]) {
-        for at in (1..items.len()).rev() {
-            items.swap(at, self.below(at + 1));
-        }
-    }
+/// A class drawn uniformly.
+fn random_class(rng: &mut Rng) -> ColdClass {
+    [Never, Rare, Normal][rng.below(3)]
 }
 
 /// The hottest of `values`, or `Never` when there is none.
@@ -205,7 +177,7 @@ fn random_toy(rng: &mut Rng) -> Toy {
     let mut toy = Toy::new(count);
     for node in 0..count {
         toy.seed[node] = if rng.below(3) == 0 {
-            rng.class()
+            random_class(rng)
         } else {
             Normal
         };
@@ -220,7 +192,7 @@ fn random_toy(rng: &mut Rng) -> Toy {
 
 #[test]
 fn the_classes_are_the_greatest_assignment_under_the_bounds() {
-    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    let mut rng = Rng::xorshift(0x9e37_79b9_7f4a_7c15);
     for _ in 0..20_000 {
         let toy = random_toy(&mut rng);
         let classes = toy.compute();
@@ -231,27 +203,32 @@ fn the_classes_are_the_greatest_assignment_under_the_bounds() {
 }
 
 #[test]
-fn the_order_of_nodes_and_records_does_not_change_the_classes() {
-    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+fn the_order_of_nodes_and_edges_does_not_change_the_classes() {
+    let mut rng = Rng::xorshift(0x2545_f491_4f6c_dd1d);
     for _ in 0..5_000 {
         let toy = random_toy(&mut rng);
         let expected = toy.compute();
         let mut permuted = toy.clone();
-        rng.shuffle(&mut permuted.order);
         for records in &mut permuted.records {
             rng.shuffle(records);
         }
-        for incoming in &mut permuted.incoming {
-            rng.shuffle(incoming);
-        }
+        let permuted = permuted.finish();
         assert_eq!(permuted.compute(), expected, "{toy:?}");
+
+        // Renumber every node but the entry.
+        let mut to: Vec<usize> = (0..toy.records.len()).collect();
+        rng.shuffle(&mut to[1..]);
+        let renumbered = permuted.renumbered(&to).compute();
+        let back: Vec<ColdClass> = to.iter().map(|&node| renumbered[node]).collect();
+        assert_eq!(back, expected, "renumbered by {to:?}: {toy:?}");
+
         let mut doubled = permuted.clone();
         for records in &mut doubled.records {
             let copy = records.clone();
             records.extend(copy);
         }
         let doubled = doubled.finish();
-        assert_eq!(doubled.compute(), expected, "parallel records: {toy:?}");
+        assert_eq!(doubled.compute(), expected, "parallel edges: {toy:?}");
     }
 }
 
@@ -392,30 +369,47 @@ fn an_irreducible_cycle_supports_itself_unless_a_seed_cools_it() {
 }
 
 #[test]
-fn records_from_unreached_nodes_are_ignored() {
-    // Node 2 is unreachable and names node 1 with a normal record; node 1 is
-    // reachable only through a capped record.
+fn edges_from_unreached_nodes_are_ignored() {
+    // Node 2 is unreachable and names node 1 with a normal edge; node 1 is
+    // reachable only through a capped edge.
     let toy = Toy::new(3).record(0, 1, Rare).record(2, 1, Normal).finish();
-    let classes = ColdnessClasses::compute(&toy);
-    assert_eq!(classes.class(1), Rare);
-    assert_eq!(classes.class(2), Never);
-    assert_eq!(classes.class(7), Never, "past the node bound");
+    let classes = toy.classes();
+    assert_eq!(classes.class(NodeId::from_index(1)), Rare);
+    assert_eq!(classes.class(NodeId::from_index(2)), Never);
+    assert_eq!(
+        classes.class(NodeId::from_index(7)),
+        Never,
+        "past the node bound"
+    );
 }
 
 #[test]
-fn a_record_is_as_cold_as_its_ends_and_its_cap() {
+fn an_edge_is_as_cold_as_its_ends_and_its_cap() {
     let toy = Toy::new(4)
         .record(0, 1, Normal)
         .record(0, 2, Rare)
         .record(0, 3, Normal)
         .seeded(1, Rare)
         .finish();
-    let classes = ColdnessClasses::compute(&toy);
+    let classes = toy.classes();
+    let node = NodeId::from_index;
     assert_eq!(toy.compute(), [Normal, Rare, Rare, Normal]);
-    assert_eq!(classes.record(0, Normal, 1), Rare, "the target is rare");
-    assert_eq!(classes.record(0, Rare, 3), Rare, "the cap is rare");
-    assert_eq!(classes.record(0, Normal, 3), Normal);
-    assert_eq!(classes.record(5, Normal, 0), Never, "past the node bound");
+    assert_eq!(
+        classes.edge(node(0), Normal, node(1)),
+        Rare,
+        "the target is rare"
+    );
+    assert_eq!(
+        classes.edge(node(0), Rare, node(3)),
+        Rare,
+        "the cap is rare"
+    );
+    assert_eq!(classes.edge(node(0), Normal, node(3)), Normal);
+    assert_eq!(
+        classes.edge(node(5), Normal, node(0)),
+        Never,
+        "past the node bound"
+    );
 }
 
 #[test]

@@ -19,8 +19,8 @@ use super::support::{
 };
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::graph::dominator::{DominatorScratch, DominatorTree, FrontierScratch};
-use crate::graph::view::{GraphView, Reversed};
+use crate::graph::dominator::{DominatorScratch, DominatorTree};
+use crate::graph::view::{GraphView, Reversed, Rooted};
 
 /// Where the oracle reads dominance from.
 trait Dominance {
@@ -130,8 +130,8 @@ struct Subject<'a, G, D> {
     view: &'a G,
     tree: &'a DominatorTree<u32>,
     oracle: Oracle<'a, D>,
-    /// Preorder position of each node of the tree.
-    position: Vec<usize>,
+    /// How many nodes the view has.
+    node_count: usize,
     /// What a failure names.
     context: &'a dyn Debug,
 }
@@ -145,32 +145,23 @@ impl<'a, G: GraphView<NodeId = u32>, D: Dominance> Subject<'a, G, D> {
         context: &'a dyn Debug,
     ) -> Self {
         let node_count = view.node_bound();
-        let mut position = vec![usize::MAX; node_count];
-        for (index, &member) in tree.preorder().iter().enumerate() {
-            position[member as usize] = index;
-        }
         Self {
             view,
             tree,
             oracle: Oracle::new(dominance, edges, node_count),
-            position,
+            node_count,
             context,
         }
     }
 
-    fn node_count(&self) -> usize {
-        self.position.len()
+    const fn node_count(&self) -> usize {
+        self.node_count
     }
 
-    /// Nodes of the tree in the order the tree numbers them.
-    fn in_preorder(&self, mut members: Vec<u32>) -> Vec<u32> {
-        members.sort_unstable_by_key(|&member| self.position[member as usize]);
-        members
-    }
-
+    /// The frontier comes ascending, as the oracle lists it.
     fn check_frontier(&self, member: u32, out: &mut Vec<u32>) {
         self.tree.frontier(self.view, member, out);
-        let expected = self.in_preorder(self.oracle.frontier(member).to_vec());
+        let expected = self.oracle.frontier(member);
         assert_eq!(*out, expected, "frontier of {member} in {:?}", self.context);
     }
 
@@ -178,7 +169,7 @@ impl<'a, G: GraphView<NodeId = u32>, D: Dominance> Subject<'a, G, D> {
     /// test twice.
     fn check_iterated(
         &self,
-        scratch: &mut FrontierScratch,
+        scratch: &mut DominatorScratch,
         defs: &[u32],
         live_in: Option<&dyn Fn(u32) -> bool>,
         out: &mut Vec<u32>,
@@ -189,14 +180,14 @@ impl<'a, G: GraphView<NodeId = u32>, D: Dominance> Subject<'a, G, D> {
             live_in.is_none_or(|accepts| accepts(member))
         };
         let counting: &dyn Fn(u32) -> bool = &counted;
-        self.tree.iterated_frontier(
-            self.view,
+        self.tree.iterated_frontier_in(
             scratch,
+            self.view,
             defs.iter().copied(),
             live_in.map(|_| counting),
             out,
         );
-        let expected = self.in_preorder(self.oracle.iterated(defs, live_in));
+        let expected = self.oracle.iterated(defs, live_in);
         let pruned = live_in.is_some();
         assert_eq!(
             *out, expected,
@@ -213,7 +204,7 @@ impl<'a, G: GraphView<NodeId = u32>, D: Dominance> Subject<'a, G, D> {
     /// Check the frontier of every node and the iterated frontier of every set
     /// of nodes, plain and pruned. Up to three nodes the pruned queries use
     /// every live-in set, and beyond that one chosen at random.
-    fn check_every_query(&self, scratch: &mut FrontierScratch, rng: &mut Rng) {
+    fn check_every_query(&self, scratch: &mut DominatorScratch, rng: &mut Rng) {
         let count = self.node_count();
         let mut out = Vec::new();
         for member in 0..node(count) {
@@ -239,7 +230,7 @@ impl<'a, G: GraphView<NodeId = u32>, D: Dominance> Subject<'a, G, D> {
 
     /// Check a spread of frontiers and random definition sets, which may name
     /// nodes outside the tree and the same node twice.
-    fn check_sampled(&self, scratch: &mut FrontierScratch, rng: &mut Rng) {
+    fn check_sampled(&self, scratch: &mut DominatorScratch, rng: &mut Rng) {
         let count = self.node_count();
         let mut out = Vec::new();
         for member in (0..node(count)).step_by((count / 150).max(1)) {
@@ -282,20 +273,20 @@ fn iterated_of<G: GraphView<NodeId = u32>>(
     live_in: Option<&dyn Fn(u32) -> bool>,
 ) -> Vec<u32> {
     let mut out = Vec::new();
-    let mut scratch = FrontierScratch::new();
-    tree.iterated_frontier(view, &mut scratch, defs.iter().copied(), live_in, &mut out);
+    let mut scratch = DominatorScratch::default();
+    tree.iterated_frontier_in(&mut scratch, view, defs.iter().copied(), live_in, &mut out);
     out
 }
 
 #[test]
 fn every_digraph_of_up_to_four_nodes_matches_the_definition() {
-    let mut scratch = FrontierScratch::new();
-    let mut dominators = DominatorScratch::new();
+    let mut scratch = DominatorScratch::default();
+    let mut dominators = DominatorScratch::default();
     let mut rng = Rng::new(4);
     for node_count in 1..=4 {
         for_each_multigraph(node_count, 1, |edges| {
             let graph = edges.graph();
-            let tree = DominatorTree::compute_from_in(&mut dominators, &graph, 0);
+            let tree = DominatorTree::compute_in(&mut dominators, &Rooted::new(&graph, 0));
             let reference = Reference::new(&graph, 0);
             let subject = Subject::new(&graph, &tree, &reference, &edges.edges, edges);
             subject.check_every_query(&mut scratch, &mut rng);
@@ -305,12 +296,12 @@ fn every_digraph_of_up_to_four_nodes_matches_the_definition() {
 
 #[test]
 fn every_multigraph_of_up_to_three_nodes_matches_the_definition() {
-    let mut scratch = FrontierScratch::new();
+    let mut scratch = DominatorScratch::default();
     let mut rng = Rng::new(3);
     for node_count in 1..=3 {
         for_each_multigraph(node_count, 2, |edges| {
             let graph = edges.graph();
-            let tree = DominatorTree::compute_from(&graph, 0);
+            let tree = DominatorTree::compute(&Rooted::new(&graph, 0));
             let reference = Reference::new(&graph, 0);
             let subject = Subject::new(&graph, &tree, &reference, &edges.edges, edges);
             subject.check_every_query(&mut scratch, &mut rng);
@@ -321,24 +312,24 @@ fn every_multigraph_of_up_to_three_nodes_matches_the_definition() {
 #[test]
 fn an_entry_with_a_back_edge_is_in_its_own_frontier() {
     let two_cycle = digraph(2, &[(0, 1), (1, 0)]).graph();
-    let tree = DominatorTree::compute_from(&two_cycle, 0);
+    let tree = DominatorTree::compute(&Rooted::new(&two_cycle, 0));
     assert_eq!(frontier_of(&tree, &two_cycle, 0), [0]);
     assert_eq!(frontier_of(&tree, &two_cycle, 1), [0]);
     assert_eq!(iterated_of(&tree, &two_cycle, &[1], None), [0]);
     assert_eq!(iterated_of(&tree, &two_cycle, &[0], None), [0]);
 
     let self_loop = digraph(1, &[(0, 0)]).graph();
-    let tree = DominatorTree::compute_from(&self_loop, 0);
+    let tree = DominatorTree::compute(&Rooted::new(&self_loop, 0));
     assert_eq!(frontier_of(&tree, &self_loop, 0), [0]);
 
     let inner_loop = digraph(3, &[(0, 1), (1, 2), (2, 1)]).graph();
-    let tree = DominatorTree::compute_from(&inner_loop, 0);
+    let tree = DominatorTree::compute(&Rooted::new(&inner_loop, 0));
     assert_eq!(frontier_of(&tree, &inner_loop, 0), NOTHING);
     assert_eq!(frontier_of(&tree, &inner_loop, 1), [1]);
     assert_eq!(frontier_of(&tree, &inner_loop, 2), [1]);
 
     let chain = digraph(3, &[(0, 1), (1, 2)]).graph();
-    let tree = DominatorTree::compute_from(&chain, 0);
+    let tree = DominatorTree::compute(&Rooted::new(&chain, 0));
     assert_eq!(frontier_of(&tree, &chain, 0), NOTHING);
 }
 
@@ -357,7 +348,7 @@ fn a_rejected_node_is_not_explored_and_a_definition_is_always_a_root() {
         (5, 6),
     ];
     let graph = digraph(7, &edges).graph();
-    let tree = DominatorTree::compute_from(&graph, 0);
+    let tree = DominatorTree::compute(&Rooted::new(&graph, 0));
     assert_eq!(iterated_of(&tree, &graph, &[2], None), [4, 6]);
     assert_eq!(iterated_of(&tree, &graph, &[3, 2], None), [4, 6]);
 
@@ -373,7 +364,7 @@ fn the_reversed_view_gives_control_dependence() {
     // entry 0 -> header 1 -> body 2 -> header, header 1 -> exit 3.
     let graph = digraph(4, &[(0, 1), (1, 2), (2, 1), (1, 3)]).graph();
     let view = Reversed::new(&graph);
-    let tree = DominatorTree::compute_from(&view, 3);
+    let tree = DominatorTree::compute(&Rooted::new(&view, 3));
     assert_eq!(
         frontier_of(&tree, &view, 2),
         [1],
@@ -392,8 +383,8 @@ fn the_reversed_view_gives_control_dependence() {
 
 #[test]
 fn every_rooted_digraph_of_up_to_three_nodes_matches_the_definition_on_the_reversed_view() {
-    let mut scratch = FrontierScratch::new();
-    let mut dominators = DominatorScratch::new();
+    let mut scratch = DominatorScratch::default();
+    let mut dominators = DominatorScratch::default();
     let mut rng = Rng::new(5);
     for node_count in 1..=3 {
         for_each_multigraph(node_count, 1, |edges| {
@@ -405,7 +396,8 @@ fn every_rooted_digraph_of_up_to_three_nodes_matches_the_definition_on_the_rever
             );
             let reversed_graph = reversed.graph();
             for root in 0..node_count {
-                let tree = DominatorTree::compute_from_in(&mut dominators, &view, node(root));
+                let tree =
+                    DominatorTree::compute_in(&mut dominators, &Rooted::new(&view, node(root)));
                 let reference = Reference::new(&reversed_graph, root);
                 let context = (edges, root);
                 let subject = Subject::new(&view, &tree, &reference, &reversed.edges, &context);
@@ -453,17 +445,17 @@ fn a_forest_has_frontier_members_in_other_trees_and_ignores_nodes_outside() {
     assert_eq!(frontier_of(&forest, &graph, 5), [2]);
     assert_eq!(
         frontier_of(&forest, &graph, 4),
-        [2, 1],
-        "preorder, not index"
+        [1, 2],
+        "dense index, not preorder"
     );
     assert_eq!(frontier_of(&forest, &graph, 1), [4]);
     assert_eq!(frontier_of(&forest, &graph, 3), [1]);
     assert_eq!(frontier_of(&forest, &graph, 0), NOTHING);
     assert_eq!(frontier_of(&forest, &graph, 7), NOTHING);
 
-    assert_eq!(iterated_of(&forest, &graph, &[3], None), [2, 5, 1, 4]);
+    assert_eq!(iterated_of(&forest, &graph, &[3], None), [1, 2, 4, 5]);
     assert_eq!(iterated_of(&forest, &graph, &[6], None), [2, 5]);
-    assert_eq!(iterated_of(&forest, &graph, &[3, 0, 7], None), [2, 5, 1, 4]);
+    assert_eq!(iterated_of(&forest, &graph, &[3, 0, 7], None), [1, 2, 4, 5]);
     let not_four = |member: u32| member != 4;
     assert_eq!(iterated_of(&forest, &graph, &[3], Some(&not_four)), [1]);
 }
@@ -501,7 +493,7 @@ fn augmented_forest(edges: &EdgeList, rng: &mut Rng) -> (Reference, DominatorTre
 
 #[test]
 fn random_forests_match_the_frontiers_of_the_graph_with_a_virtual_root() {
-    let mut scratch = FrontierScratch::new();
+    let mut scratch = DominatorScratch::default();
     for seed in 0..150 {
         let mut rng = Rng::new(seed);
         let recipe = Recipe {
@@ -525,7 +517,7 @@ const SWEEP: [(usize, u64); 5] = [(10, 120), (40, 40), (150, 20), (600, 4), (2_5
 
 #[test]
 fn random_graphs_match_the_definition() {
-    let mut scratch = FrontierScratch::new();
+    let mut scratch = DominatorScratch::default();
     for (node_count, seeds) in SWEEP {
         let size = u64::try_from(node_count).expect("a graph size fits in u64");
         for seed in 0..seeds {
@@ -538,7 +530,7 @@ fn random_graphs_match_the_definition() {
             };
             let edges = random_graph(&mut rng, recipe);
             let graph = edges.graph();
-            let tree = DominatorTree::compute_from(&graph, 0);
+            let tree = DominatorTree::compute(&Rooted::new(&graph, 0));
             let oracle = DominatorTree::compute_iterative(&graph, 0);
             let context = (recipe, seed);
             let subject = Subject::new(&graph, &tree, &oracle, &edges.edges, &context);
@@ -549,7 +541,7 @@ fn random_graphs_match_the_definition() {
 
 #[test]
 fn a_reused_scratch_answers_what_a_fresh_one_does() {
-    let mut shared = FrontierScratch::new();
+    let mut shared = DominatorScratch::default();
     let sizes = [8, 400, 12, 90, 4, 150];
     for seed in 0..48_u64 {
         let mut rng = Rng::new(seed);
@@ -561,7 +553,7 @@ fn a_reused_scratch_answers_what_a_fresh_one_does() {
         };
         let edges = random_graph(&mut rng, recipe);
         let graph = edges.graph();
-        let tree = DominatorTree::compute_from(&graph, 0);
+        let tree = DominatorTree::compute(&Rooted::new(&graph, 0));
         let mut reused = Vec::new();
         let mut fresh = Vec::new();
         for _ in 0..6 {
@@ -571,16 +563,16 @@ fn a_reused_scratch_answers_what_a_fresh_one_does() {
             let live: Vec<bool> = (0..edges.node_count).map(|_| rng.below(3) != 0).collect();
             let live_in = |member: u32| live[member as usize];
             for pruned in [None, Some(&live_in as &dyn Fn(u32) -> bool)] {
-                tree.iterated_frontier(
-                    &graph,
+                tree.iterated_frontier_in(
                     &mut shared,
+                    &graph,
                     defs.iter().copied(),
                     pruned,
                     &mut reused,
                 );
-                tree.iterated_frontier(
+                tree.iterated_frontier_in(
+                    &mut DominatorScratch::default(),
                     &graph,
-                    &mut FrontierScratch::new(),
                     defs.iter().copied(),
                     pruned,
                     &mut fresh,
@@ -593,12 +585,12 @@ fn a_reused_scratch_answers_what_a_fresh_one_does() {
 
 #[test]
 fn one_scratch_serves_every_node_type() {
-    let mut scratch = FrontierScratch::new();
+    let mut scratch = DominatorScratch::default();
     let mut out = Vec::new();
 
     let loop_graph = digraph(4, &[(0, 1), (1, 2), (1, 3), (2, 1)]).graph();
-    let loop_tree = DominatorTree::compute_from(&loop_graph, 0);
-    loop_tree.iterated_frontier(&loop_graph, &mut scratch, [2], None, &mut out);
+    let loop_tree = DominatorTree::compute(&Rooted::new(&loop_graph, 0));
+    loop_tree.iterated_frontier_in(&mut scratch, &loop_graph, [2], None, &mut out);
     assert_eq!(out, [1]);
 
     let mut cfg = Cfg::<u32>::new();
@@ -612,10 +604,10 @@ fn one_scratch_serves_every_node_type() {
     cfg.add_edge(right, merge, EdgeKind::Fallthrough);
     let cfg_tree = DominatorTree::compute(&cfg);
     let mut blocks = Vec::new();
-    cfg_tree.iterated_frontier(&cfg, &mut scratch, [left, right], None, &mut blocks);
+    cfg_tree.iterated_frontier_in(&mut scratch, &cfg, [left, right], None, &mut blocks);
     assert_eq!(blocks, [merge]);
 
-    loop_tree.iterated_frontier(&loop_graph, &mut scratch, [2], None, &mut out);
+    loop_tree.iterated_frontier_in(&mut scratch, &loop_graph, [2], None, &mut out);
     assert_eq!(out, [1], "the scratch still answers the first graph");
 }
 
@@ -626,7 +618,7 @@ fn a_long_chain_with_a_back_edge_is_searched_without_recursion() {
     let mut edges: Vec<(u32, u32)> = (0..last).map(|member| (member, member + 1)).collect();
     edges.push((last, 1));
     let graph = EdgeList::new(BLOCKS, edges).graph();
-    let tree = DominatorTree::compute_from(&graph, 0);
+    let tree = DominatorTree::compute(&Rooted::new(&graph, 0));
 
     assert_eq!(frontier_of(&tree, &graph, 0), NOTHING);
     for member in [1, 2, node(BLOCKS / 2), last] {
@@ -643,8 +635,8 @@ fn a_long_chain_with_a_back_edge_is_searched_without_recursion() {
 #[test]
 fn a_query_replaces_whatever_the_output_held() {
     let graph = digraph(4, &[(0, 1), (0, 2), (1, 3), (2, 3)]).graph();
-    let tree = DominatorTree::compute_from(&graph, 0);
-    let mut scratch = FrontierScratch::new();
+    let tree = DominatorTree::compute(&Rooted::new(&graph, 0));
+    let mut scratch = DominatorScratch::default();
 
     let mut out = vec![9, 3, 3];
     tree.frontier(&graph, 1, &mut out);
@@ -652,19 +644,19 @@ fn a_query_replaces_whatever_the_output_held() {
     tree.frontier(&graph, 0, &mut out);
     assert_eq!(out, NOTHING);
     out.extend([8, 8]);
-    tree.iterated_frontier(&graph, &mut scratch, [1], None, &mut out);
+    tree.iterated_frontier_in(&mut scratch, &graph, [1], None, &mut out);
     assert_eq!(out, [3]);
     out.extend([8, 8]);
-    tree.iterated_frontier(&graph, &mut scratch, [], None, &mut out);
+    tree.iterated_frontier_in(&mut scratch, &graph, [], None, &mut out);
     assert_eq!(out, NOTHING);
 
     let unreachable = digraph(3, &[(0, 1), (2, 1)]).graph();
-    let tree = DominatorTree::compute_from(&unreachable, 0);
+    let tree = DominatorTree::compute(&Rooted::new(&unreachable, 0));
     let mut out = vec![1, 1];
     tree.frontier(&unreachable, 2, &mut out);
     assert_eq!(out, NOTHING, "an unreachable node has no frontier");
     out.push(1);
-    tree.iterated_frontier(&unreachable, &mut scratch, [2], None, &mut out);
+    tree.iterated_frontier_in(&mut scratch, &unreachable, [2], None, &mut out);
     assert_eq!(out, NOTHING, "an unreachable definition is ignored");
     assert_eq!(frontier_of(&tree, &unreachable, 0), NOTHING);
 }
@@ -672,28 +664,28 @@ fn a_query_replaces_whatever_the_output_held() {
 #[test]
 fn a_query_that_panics_leaves_the_scratch_usable() {
     let graph = digraph(4, &[(0, 1), (0, 2), (1, 3), (2, 3)]).graph();
-    let tree = DominatorTree::compute_from(&graph, 0);
-    let mut scratch = FrontierScratch::new();
+    let tree = DominatorTree::compute(&Rooted::new(&graph, 0));
+    let mut scratch = DominatorScratch::default();
 
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let refuse = |_: u32| -> bool { panic!("the live-in test cannot answer") };
         let mut out = Vec::new();
-        tree.iterated_frontier(&graph, &mut scratch, [1, 2], Some(&refuse), &mut out);
+        tree.iterated_frontier_in(&mut scratch, &graph, [1, 2], Some(&refuse), &mut out);
     }));
     assert!(panicked.is_err(), "the live-in test was never asked");
 
     let mut out = Vec::new();
-    tree.iterated_frontier(&graph, &mut scratch, [], None, &mut out);
+    tree.iterated_frontier_in(&mut scratch, &graph, [], None, &mut out);
     assert_eq!(
         out, NOTHING,
         "a root queued before the panic must not survive it"
     );
-    tree.iterated_frontier(&graph, &mut scratch, [1, 2], None, &mut out);
+    tree.iterated_frontier_in(&mut scratch, &graph, [1, 2], None, &mut out);
     assert_eq!(out, [3]);
 }
 
 #[test]
 fn a_scratch_can_move_to_another_thread() {
     const fn assert_send<T: Send>() {}
-    assert_send::<FrontierScratch>();
+    assert_send::<DominatorScratch>();
 }

@@ -34,13 +34,22 @@
 //! once for each, which is quadratic on deep irreducible nests. So each block
 //! keeps only the outermost cycle it enters, and a difference over the forest
 //! counts the entries of every cycle.
+//!
+//! The same construction, along either axis and from several roots in turn,
+//! is the loop nesting that a weak topological order lists:
+//! [`CycleNesting`] is that shared core, and
+//! [`WeakTopologicalOrder`](crate::WeakTopologicalOrder) reads its heads,
+//! nesting and postorder.
 
 extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{LoopForest, LoopRecord, NONE, slot, word};
-use crate::graph::view::{DenseId, RootedView};
+use super::{LoopForest, LoopRecord};
+use crate::graph::epoch::EpochMarks;
+use crate::graph::traverse::{Adjacency, Outgoing};
+use crate::graph::view::{DenseId, GraphView, RootedView};
+use crate::identity::{NO_INDEX, slot, word};
 use crate::union_find::DisjointSet;
 
 impl<N: DenseId> LoopForest<N> {
@@ -89,7 +98,7 @@ impl<N: DenseId> LoopForest<N> {
     ///
     /// let forest = LoopForest::compute_cycles(&cfg);
     ///
-    /// assert_eq!(forest.len(), 1);
+    /// assert_eq!(forest.loop_count(), 1);
     /// let cycle = forest.loop_of_header(a).expect("the walk reaches `a` first");
     /// assert_eq!(forest.entries(cycle), [a, b]);
     /// assert!(forest.is_irreducible(cycle));
@@ -98,9 +107,71 @@ impl<N: DenseId> LoopForest<N> {
     /// ```
     #[must_use]
     pub fn compute_cycles<G: RootedView<NodeId = N>>(graph: &G) -> Self {
-        let mut walk = Walk::new(graph);
+        let nesting = CycleNesting::compute(Outgoing, graph, [graph.root()]);
+        nesting.cycles.place(&nesting.walk, graph.node_bound())
+    }
+}
+
+/// Havlak's cycle nesting of a depth-first forest: the one construction
+/// behind [`LoopForest::compute_cycles`] and the weak topological order.
+///
+/// The forest grows along `axis` from each root in turn that an earlier walk
+/// missed, taking neighbors in adjacency order, and numbers the nodes it
+/// reaches in preorder; a node is named by that position. A later walk
+/// cannot be reached from an earlier one, so an edge from a later walk into an
+/// earlier one lies on no cycle and is left out.
+pub(crate) struct CycleNesting<N> {
+    walk: Walk<N>,
+    cycles: Cycles,
+}
+
+impl<N: DenseId> CycleNesting<N> {
+    /// The cycle nesting of the forest grown along `axis` from `roots`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a root is not below the node bound of `graph`.
+    pub(crate) fn compute<G, A>(axis: A, graph: &G, roots: impl IntoIterator<Item = N>) -> Self
+    where
+        G: GraphView<NodeId = N>,
+        A: Adjacency,
+    {
+        let mut walk = Walk::new(axis, graph, roots);
         let cycles = Cycles::collapse(&mut walk);
-        cycles.place(&walk, graph.node_bound())
+        Self { walk, cycles }
+    }
+
+    /// The number of nodes the forest reached.
+    pub(crate) fn len(&self) -> usize {
+        self.walk.blocks.len()
+    }
+
+    /// The node at preorder `position`.
+    pub(crate) fn node(&self, position: u32) -> N {
+        self.walk.blocks[slot(position)]
+    }
+
+    /// The preorder positions in postorder.
+    pub(crate) fn postorder(&self) -> &[u32] {
+        &self.walk.postorder
+    }
+
+    /// Whether the node at `position` heads a cycle.
+    pub(crate) fn heads(&self, position: usize) -> bool {
+        self.cycles.headed[position] != NO_INDEX
+    }
+
+    /// The position of the head of the innermost cycle that holds the node at
+    /// `position`, other than a cycle it heads; [`NO_INDEX`] for none.
+    pub(crate) fn parent_head(&self, position: usize) -> u32 {
+        let cycle = match self.cycles.headed[position] {
+            NO_INDEX => self.cycles.innermost[position],
+            own => self.cycles.parents[slot(own)],
+        };
+        match cycle {
+            NO_INDEX => NO_INDEX,
+            cycle => self.cycles.headers[slot(cycle)],
+        }
     }
 }
 
@@ -109,6 +180,8 @@ impl<N: DenseId> LoopForest<N> {
 struct Walk<N> {
     /// The block at each position of the preorder.
     blocks: Vec<N>,
+    /// The positions in postorder.
+    postorder: Vec<u32>,
     /// The position each edge leaves.
     sources: Vec<u32>,
     /// The position each edge enters.
@@ -133,57 +206,99 @@ struct Frame {
 }
 
 impl<N: DenseId> Walk<N> {
-    fn new<G: RootedView<NodeId = N>>(graph: &G) -> Self {
+    /// Walk along `axis` from each of `roots` in turn that an earlier walk
+    /// missed, numbering the blocks in preorder and postorder and filing
+    /// every edge between blocks of one walk.
+    ///
+    /// The walk keeps its own loop instead of running the shared depth-first
+    /// core: the preorder positions double as the visited marks and the
+    /// frames as the path, where the core kept a mark table, a path stack and
+    /// a reversed copy of each successor run beside them. With its buffers
+    /// sized up front it measured 0.83x the core form on
+    /// `cfg_clone_make_reducible_weighted` (a 4-block graph, walked once per
+    /// split) and 0.90x on `cfg_cycle_forest_reducible_nest`, and the sizing
+    /// alone 0.82x against growing the buffers by push, with
+    /// `cfg_cycle_forest_random_1m` level throughout.
+    fn new<G, A>(axis: A, graph: &G, roots: impl IntoIterator<Item = N>) -> Self
+    where
+        G: GraphView<NodeId = N>,
+        A: Adjacency,
+    {
+        // Every buffer starts at the size the graph allows, so a small graph
+        // walked many times, as `make_reducible` does, never grows one by
+        // reallocation. The edges filed are a tree edge per block but the
+        // roots, and in a control-flow graph about as many others.
+        let node_bound = graph.node_bound();
+        let edges = 2 * node_bound;
         let mut walk = Self {
-            blocks: Vec::new(),
-            sources: Vec::new(),
-            targets: Vec::new(),
-            next: Vec::new(),
-            returning: Vec::new(),
-            waiting: Vec::new(),
+            blocks: Vec::with_capacity(node_bound),
+            postorder: Vec::with_capacity(node_bound),
+            sources: Vec::with_capacity(edges),
+            targets: Vec::with_capacity(edges),
+            next: Vec::with_capacity(edges),
+            returning: Vec::with_capacity(node_bound),
+            waiting: Vec::with_capacity(node_bound),
         };
-        let mut position = vec![NONE; graph.node_bound()];
+        let mut position = vec![NO_INDEX; node_bound];
         // Tarjan's offline nearest common ancestors: a finished position joins
         // the set of its parent, and `open` names, for each set, its one
         // position still on the stack. That is the nearest common ancestor of
         // any member and of the block being examined, which is below every
-        // position on the stack. A position on the stack names itself.
-        let mut finished = DisjointSet::new(0);
-        let mut open: Vec<u32> = Vec::new();
-        let mut arena: Vec<N> = Vec::new();
-        let mut frames: Vec<Frame> = Vec::new();
-
-        walk.enter(graph, graph.root(), &mut position, &mut arena, &mut frames);
-        finished.push();
-        open.push(0);
-        while let Some(frame) = frames.last_mut() {
-            let from = frame.position;
-            let Some(&successor) = arena.get(frame.cursor) else {
-                arena.truncate(frame.start);
-                frames.pop();
-                if let Some(parent) = frames.last() {
-                    finished.union(slot(from), slot(parent.position));
-                    open[finished.find(slot(from))] = parent.position;
-                }
+        // position on the stack. A position on the stack names itself. The
+        // positions the walk does not hand out stay singletons nobody reads.
+        let mut finished = DisjointSet::new(node_bound);
+        let mut open: Vec<u32> = Vec::with_capacity(node_bound);
+        let mut arena: Vec<N> = Vec::with_capacity(node_bound);
+        let mut frames: Vec<Frame> = Vec::with_capacity(node_bound);
+        for root in roots {
+            if position[root.index()] != NO_INDEX {
                 continue;
-            };
-            frame.cursor += 1;
-            match position[successor.index()] {
-                NONE => {
-                    let to = walk.enter(graph, successor, &mut position, &mut arena, &mut frames);
-                    finished.push();
-                    open.push(to);
-                    walk.file(from, to, from);
+            }
+            // The positions below the root's belong to earlier walks, which
+            // this one cannot be reached from, so an edge into one lies on no
+            // cycle and is left out.
+            let start = walk.enter(axis, graph, root, &mut position, &mut arena, &mut frames);
+            open.push(start);
+            while let Some(frame) = frames.last_mut() {
+                let from = frame.position;
+                let Some(&successor) = arena.get(frame.cursor) else {
+                    arena.truncate(frame.start);
+                    frames.pop();
+                    walk.postorder.push(from);
+                    if let Some(parent) = frames.last() {
+                        finished.union(slot(from), slot(parent.position));
+                        open[finished.find(slot(from))] = parent.position;
+                    }
+                    continue;
+                };
+                frame.cursor += 1;
+                match position[successor.index()] {
+                    NO_INDEX => {
+                        let to = walk.enter(
+                            axis,
+                            graph,
+                            successor,
+                            &mut position,
+                            &mut arena,
+                            &mut frames,
+                        );
+                        open.push(to);
+                        walk.file(from, to, from);
+                    }
+                    to if to >= start => walk.file(from, to, open[finished.find(slot(to))]),
+                    _ => {}
                 }
-                to => walk.file(from, to, open[finished.find(slot(to))]),
             }
         }
         walk
     }
 
-    /// Give `block` the next position, and start examining its successors.
-    fn enter<G: RootedView<NodeId = N>>(
+    /// Give `block` the next position, and start examining its neighbors
+    /// along `axis`.
+    #[inline]
+    fn enter<G: GraphView<NodeId = N>, A: Adjacency>(
         &mut self,
+        axis: A,
         graph: &G,
         block: N,
         position: &mut [u32],
@@ -193,10 +308,10 @@ impl<N: DenseId> Walk<N> {
         let at = word(self.blocks.len());
         position[block.index()] = at;
         self.blocks.push(block);
-        self.returning.push(NONE);
-        self.waiting.push(NONE);
+        self.returning.push(NO_INDEX);
+        self.waiting.push(NO_INDEX);
         let start = arena.len();
-        arena.extend(graph.successors(block));
+        arena.extend(axis.neighbors(graph, block));
         frames.push(Frame {
             position: at,
             start,
@@ -204,7 +319,9 @@ impl<N: DenseId> Walk<N> {
         });
         at
     }
+}
 
+impl<N> Walk<N> {
     /// File the edge `from -> to`, whose ends have `ancestor` as nearest common
     /// ancestor: as returning to `to` when that is `to` itself, and otherwise
     /// as waiting at `ancestor`.
@@ -226,19 +343,19 @@ impl<N: DenseId> Walk<N> {
 struct Cycles {
     /// The header of each cycle.
     headers: Vec<u32>,
-    /// The cycle directly around each one, [`NONE`] for an outermost one.
+    /// The cycle directly around each one, [`NO_INDEX`] for an outermost one.
     parents: Vec<u32>,
     /// Where the latches of each cycle start in `latches`, with one more entry
     /// for the end.
     latch_starts: Vec<u32>,
     /// The sources of the edges returning to each header, one run per cycle.
     latches: Vec<u32>,
-    /// The innermost cycle of each position, [`NONE`] for a position in none.
+    /// The innermost cycle of each position, [`NO_INDEX`] for a position in none.
     innermost: Vec<u32>,
-    /// The cycle each position heads, [`NONE`] for a position that heads none.
+    /// The cycle each position heads, [`NO_INDEX`] for a position that heads none.
     headed: Vec<u32>,
     /// The outermost cycle each position enters other than as its header,
-    /// [`NONE`] for a position that enters none.
+    /// [`NO_INDEX`] for a position that enters none.
     entered: Vec<u32>,
 }
 
@@ -252,9 +369,9 @@ impl Cycles {
             parents: Vec::new(),
             latch_starts: vec![0],
             latches: Vec::new(),
-            innermost: vec![NONE; count],
-            headed: vec![NONE; count],
-            entered: vec![NONE; count],
+            innermost: vec![NO_INDEX; count],
+            headed: vec![NO_INDEX; count],
+            entered: vec![NO_INDEX; count],
         };
         // A set is a lone position or a finished cycle, and `header` names the
         // position it has collapsed into, by representative.
@@ -263,10 +380,10 @@ impl Cycles {
         let collapsed = |sets: &mut DisjointSet, header: &[u32], position: u32| {
             header[sets.find(slot(position))]
         };
-        // The first edge handed to each collapsed position, and the header
-        // whose walk last took each one in.
-        let mut incoming = vec![NONE; count];
-        let mut taken = vec![NONE; count];
+        // The first edge handed to each collapsed position, and the positions
+        // the walk of the current header has taken in.
+        let mut incoming = vec![NO_INDEX; count];
+        let mut taken = EpochMarks::new(count);
         let mut body: Vec<u32> = Vec::new();
         for w in (0..count).rev() {
             let at = word(w);
@@ -274,7 +391,7 @@ impl Cycles {
             // of an edge waiting here enters the one it has been collapsed
             // into, and the visits of the ancestors of `w` find it there.
             let mut edge = walk.waiting[w];
-            while edge != NONE {
+            while edge != NO_INDEX {
                 let following = walk.next[slot(edge)];
                 let target = walk.targets[slot(edge)];
                 let into = collapsed(&mut sets, &header, target);
@@ -287,16 +404,17 @@ impl Cycles {
             }
 
             let mut edge = walk.returning[w];
-            if edge == NONE {
+            if edge == NO_INDEX {
                 continue;
             }
             body.clear();
-            while edge != NONE {
+            taken.reset();
+            while edge != NO_INDEX {
                 let source = walk.sources[slot(edge)];
                 cycles.latches.push(source);
                 let member = collapsed(&mut sets, &header, source);
-                if member != at && taken[slot(member)] != at {
-                    taken[slot(member)] = at;
+                if member != at && !taken.is_marked(slot(member)) {
+                    taken.mark(slot(member));
                     body.push(member);
                 }
                 edge = walk.next[slot(edge)];
@@ -308,10 +426,10 @@ impl Cycles {
             while let Some(&member) = body.get(cursor) {
                 cursor += 1;
                 let mut edge = incoming[slot(member)];
-                while edge != NONE {
+                while edge != NO_INDEX {
                     let source = collapsed(&mut sets, &header, walk.sources[slot(edge)]);
-                    if source != at && taken[slot(source)] != at {
-                        taken[slot(source)] = at;
+                    if source != at && !taken.is_marked(slot(source)) {
+                        taken.mark(slot(source));
                         body.push(source);
                     }
                     edge = walk.next[slot(edge)];
@@ -320,13 +438,13 @@ impl Cycles {
 
             let this = word(cycles.headers.len());
             cycles.headers.push(at);
-            cycles.parents.push(NONE);
+            cycles.parents.push(NO_INDEX);
             cycles.latch_starts.push(word(cycles.latches.len()));
             cycles.innermost[w] = this;
             cycles.headed[w] = this;
             for &member in &body {
                 match cycles.headed[slot(member)] {
-                    NONE => cycles.innermost[slot(member)] = this,
+                    NO_INDEX => cycles.innermost[slot(member)] = this,
                     inner => cycles.parents[slot(inner)] = this,
                 }
                 sets.union(slot(member), w);
@@ -355,7 +473,7 @@ impl Cycles {
         }
         let mut ascending: Vec<usize> = (0..self.headers.len()).collect();
         ascending.sort_unstable_by_key(|&k| walk.blocks[slot(self.headers[k])]);
-        let mut id = vec![NONE; self.headers.len()];
+        let mut id = vec![NO_INDEX; self.headers.len()];
         for (index, &k) in ascending.iter().enumerate() {
             id[k] = word(index);
         }
@@ -380,29 +498,29 @@ impl Cycles {
                 entry_start: 0,
                 entry_end: 0,
                 entry_count: entry_counts[k],
-                explicit: NONE,
+                explicit: NO_INDEX,
                 family: 0,
-                parent: NONE,
+                parent: NO_INDEX,
                 depth: 0,
                 enclosing: match self.parents[k] {
-                    NONE => NONE,
+                    NO_INDEX => NO_INDEX,
                     parent => id[slot(parent)],
                 },
-                first: NONE,
-                last: NONE,
+                first: NO_INDEX,
+                last: NO_INDEX,
                 deepest: 0,
             });
         }
-        forest.innermost = vec![NONE; node_bound];
+        forest.innermost = vec![NO_INDEX; node_bound];
         for (&block, &cycle) in walk.blocks.iter().zip(&self.innermost) {
-            if cycle != NONE {
+            if cycle != NO_INDEX {
                 forest.innermost[block.index()] = id[slot(cycle)];
             }
         }
         if entry_counts.iter().any(|&count| count > 1) {
-            forest.entered = vec![NONE; node_bound];
+            forest.entered = vec![NO_INDEX; node_bound];
             for (&block, &cycle) in walk.blocks.iter().zip(&self.entered) {
-                if cycle != NONE {
+                if cycle != NO_INDEX {
                     forest.entered[block.index()] = id[slot(cycle)];
                 }
             }
@@ -410,8 +528,8 @@ impl Cycles {
 
         // The cycles were found innermost first, the order placing them needs.
         let order: Vec<usize> = id.iter().map(|&lp| slot(lp)).collect();
-        forest.number_subtrees(&order);
-        forest.group_members();
+        let positions = forest.number_subtrees(&order);
+        forest.group_members(positions);
         forest.nest(&order);
         forest
     }
@@ -428,9 +546,9 @@ impl Cycles {
         let mut starts = vec![0_u32; self.headers.len()];
         let mut ends = vec![0_u32; self.headers.len()];
         for (position, &outermost) in self.entered.iter().enumerate() {
-            if outermost != NONE {
+            if outermost != NO_INDEX {
                 let first = match self.headed[position] {
-                    NONE => self.innermost[position],
+                    NO_INDEX => self.innermost[position],
                     own => self.parents[slot(own)],
                 };
                 starts[slot(first)] += 1;
@@ -439,7 +557,7 @@ impl Cycles {
         }
         let mut ended_inside = vec![0_u32; self.headers.len()];
         for (k, &parent) in self.parents.iter().enumerate() {
-            if parent != NONE {
+            if parent != NO_INDEX {
                 starts[slot(parent)] += starts[k];
                 ended_inside[slot(parent)] += ended_inside[k] + ends[k];
             }

@@ -1,8 +1,8 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use cfglib::{
-    BlockId, Cfg, CommonAncestor, DominanceFrontiers, DominatorTree, EdgeStep, Facts, Graph,
-    IntervalAnalysis, NodeId, PostDominatorTree, PostNode, TraversalDirection,
+    BlockId, Cfg, CommonAncestor, Direction, DominanceFrontiers, DominatorTree, EdgeId, Facts,
+    Graph, NodeId, PostDominatorTree, PostNode,
 };
 
 use super::fixtures::{WIDE_FACT_WORDS, fixture_u32};
@@ -11,7 +11,7 @@ use super::structural_oracles::has_directed_edge;
 pub(super) fn directed_distances(
     graph: &Graph<(), ()>,
     start: NodeId,
-    direction: TraversalDirection,
+    direction: Direction,
 ) -> (Vec<usize>, Vec<NodeId>) {
     let mut distances = vec![usize::MAX; graph.node_bound()];
     let mut order = Vec::with_capacity(graph.node_bound());
@@ -21,14 +21,14 @@ pub(super) fn directed_distances(
     while let Some(node) = queue.pop_front() {
         order.push(node);
         let adjacent: Vec<_> = match direction {
-            TraversalDirection::Outgoing => graph.outgoing(node).collect(),
-            TraversalDirection::Incoming => graph.incoming(node).collect(),
+            Direction::Forward => graph.outgoing(node).collect(),
+            Direction::Backward => graph.incoming(node).collect(),
         };
         for edge_id in adjacent {
             let edge = graph.edge(edge_id);
             let next = match direction {
-                TraversalDirection::Outgoing => edge.target(),
-                TraversalDirection::Incoming => edge.source(),
+                Direction::Forward => edge.target(),
+                Direction::Backward => edge.source(),
             };
             if distances[next.index()] == usize::MAX {
                 distances[next.index()] = distances[node.index()] + 1;
@@ -77,15 +77,12 @@ pub(super) fn reference_cfg_breadth_first(cfg: &Cfg<u32>) -> Vec<BlockId> {
     order
 }
 
-pub(super) fn assert_edge_traversal(steps: &[EdgeStep], graph: &Graph<(), ()>) {
-    assert_eq!(steps.len(), graph.edge_count());
+pub(super) fn assert_edge_traversal(edges: &[EdgeId], graph: &Graph<(), ()>) {
+    assert_eq!(edges.len(), graph.edge_count());
     let mut seen = vec![false; graph.edge_bound()];
-    for step in steps {
-        assert!(!seen[step.edge.index()], "edge traversal repeated an edge");
-        seen[step.edge.index()] = true;
-        let edge = graph.edge(step.edge);
-        assert_eq!(step.source, edge.source());
-        assert_eq!(step.target, edge.target());
+    for edge in edges {
+        assert!(!seen[edge.index()], "edge traversal repeated an edge");
+        seen[edge.index()] = true;
     }
     assert!(graph.edge_ids().all(|edge| seen[edge.index()]));
 
@@ -95,25 +92,21 @@ pub(super) fn assert_edge_traversal(steps: &[EdgeStep], graph: &Graph<(), ()>) {
     expanded[0] = true;
     while let Some(node) = queue.pop_front() {
         for edge_id in graph.outgoing(node) {
-            let edge = graph.edge(edge_id);
-            expected.push(EdgeStep {
-                edge: edge_id,
-                source: edge.source(),
-                target: edge.target(),
-            });
-            if !expanded[edge.target().index()] {
-                expanded[edge.target().index()] = true;
-                queue.push_back(edge.target());
+            let target = graph.edge(edge_id).target();
+            expected.push(edge_id);
+            if !expanded[target.index()] {
+                expanded[target.index()] = true;
+                queue.push_back(target);
             }
         }
     }
-    assert_eq!(steps, expected);
+    assert_eq!(edges, expected);
 }
 
 pub(super) fn assert_node_path(path: &[NodeId], graph: &Graph<(), ()>, from: NodeId, to: NodeId) {
     assert_eq!(path.first(), Some(&from));
     assert_eq!(path.last(), Some(&to));
-    let (distances, _) = directed_distances(graph, from, TraversalDirection::Outgoing);
+    let (distances, _) = directed_distances(graph, from, Direction::Forward);
     assert_eq!(path.len(), distances[to.index()] + 1);
     assert!(
         path.windows(2)
@@ -127,7 +120,7 @@ pub(super) fn assert_edge_path(
     from: NodeId,
     to: NodeId,
 ) {
-    let (distances, _) = directed_distances(graph, from, TraversalDirection::Outgoing);
+    let (distances, _) = directed_distances(graph, from, Direction::Forward);
     assert_eq!(path.len(), distances[to.index()]);
     let mut current = from;
     let mut seen = BTreeSet::new();
@@ -146,8 +139,8 @@ pub(super) fn assert_common_ancestor_results(
     a: NodeId,
     b: NodeId,
 ) {
-    let (from_a, _) = directed_distances(graph, a, TraversalDirection::Incoming);
-    let (from_b, b_order) = directed_distances(graph, b, TraversalDirection::Incoming);
+    let (from_a, _) = directed_distances(graph, a, Direction::Backward);
+    let (from_b, b_order) = directed_distances(graph, b, Direction::Backward);
     let expected: Vec<_> = b_order
         .into_iter()
         .filter(|node| from_a[node.index()] != usize::MAX)
@@ -249,37 +242,6 @@ pub(super) fn assert_control_dependence_graph(
         .collect();
     assert_eq!(actual, expected);
     assert_eq!(result.edge_count(), expected.len());
-}
-
-pub(super) fn assert_cfg_intervals(result: &IntervalAnalysis, cfg: &Cfg<u32>) {
-    assert_ne!(result.intervals.len(), 0);
-    let mut assigned = BTreeSet::new();
-    for interval in &result.intervals {
-        assert!(interval.blocks.contains(&interval.header));
-        for &block in &interval.blocks {
-            assert!(assigned.insert(block), "block appeared in two intervals");
-            if block != interval.header {
-                assert!(
-                    cfg.predecessors(block)
-                        .all(|predecessor| interval.blocks.contains(&predecessor)),
-                    "non-header interval block has an external predecessor"
-                );
-            }
-        }
-    }
-    assert_eq!(assigned.len(), cfg.block_count());
-}
-
-pub(super) fn assert_reverse_chain_intervals(
-    result: &IntervalAnalysis<NodeId>,
-    node_count: usize,
-    root: NodeId,
-) {
-    assert_eq!(result.intervals.len(), 1);
-    let interval = &result.intervals[0];
-    assert_eq!(interval.header, root);
-    assert_eq!(interval.blocks.len(), node_count);
-    assert!((0..node_count).all(|index| interval.blocks.contains(&NodeId::from_index(index))));
 }
 
 pub(super) fn assert_bool_node_facts(facts: &Facts<bool>, node_count: usize) {

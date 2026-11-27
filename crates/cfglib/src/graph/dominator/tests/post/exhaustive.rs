@@ -6,36 +6,23 @@ use super::reference::{
     post_node,
 };
 use crate::graph::dominator::tests::support::{EdgeList, for_each_multigraph};
-use crate::graph::dominator::{FrontierScratch, PostDominatorScratch, PostDominatorTree};
+use crate::graph::dominator::{DominatorScratch, ExitPolicy, PostDominatorTree};
 
-/// The buffers one sweep reuses for every graph it visits.
-#[derive(Default)]
-struct Scratches {
-    post: PostDominatorScratch,
-    frontier: FrontierScratch,
-}
-
-/// Check every query of a tree against the brute-force reference.
-fn check_against_definition(edges: &EdgeList, scratches: &mut Scratches) {
+/// Check every query of a tree against the brute-force reference, with one
+/// scratch serving the tree, its certificate and its frontiers.
+fn check_against_definition(edges: &EdgeList, scratch: &mut DominatorScratch) {
     let graph = edges.graph();
-    let post = PostDominatorTree::compute_in(&mut scratches.post, &graph);
+    let post = PostDominatorTree::compute_in(scratch, &graph, ExitPolicy::CutLoops);
     let reference = PostReference::new(&graph);
     let sets = all_subsets(edges.node_count);
     assert_matches(&post, &reference, edges);
-    assert_post_certified(&post, &graph, &mut scratches.post);
+    assert_post_certified(&post, &graph, scratch);
     assert_contract(&post, &reference, edges);
-    assert_frontiers(
-        &post,
-        &graph,
-        &reference,
-        &mut scratches.frontier,
-        &sets,
-        edges,
-    );
+    assert_frontiers(&post, &graph, &reference, scratch, &sets, edges);
 
     for members in &sets {
         assert_eq!(
-            post.nearest_common_post_dominator_of(blocks(members)),
+            post.nearest_common_post_dominator_among(blocks(members)),
             reference.nearest_common(members).map(post_node),
             "nearest common post-dominator of {members:?} in {edges:?}"
         );
@@ -44,20 +31,20 @@ fn check_against_definition(edges: &EdgeList, scratches: &mut Scratches) {
 
 #[test]
 fn every_digraph_of_up_to_four_nodes_matches_the_definition() {
-    let mut scratches = Scratches::default();
+    let mut scratch = DominatorScratch::default();
     for node_count in 1..=4 {
         for_each_multigraph(node_count, 1, |edges| {
-            check_against_definition(edges, &mut scratches);
+            check_against_definition(edges, &mut scratch);
         });
     }
 }
 
 #[test]
 fn every_multigraph_of_up_to_three_nodes_matches_the_definition() {
-    let mut scratches = Scratches::default();
+    let mut scratch = DominatorScratch::default();
     for node_count in 1..=3 {
         for_each_multigraph(node_count, 2, |edges| {
-            check_against_definition(edges, &mut scratches);
+            check_against_definition(edges, &mut scratch);
         });
     }
 }

@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use crate::test_util::MemInst;
 use crate::{InstrInfo, MemoryAccessKind, MemoryAtomicity, MemoryOperations};
 
-use super::{MemoryAccess, MemoryEvent, MemoryEventInfo};
+use super::{AccessMode, MemoryAccess, MemoryEvent, MemoryEventInfo};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Location {
@@ -92,6 +92,32 @@ fn access_identifies_its_address_dependencies() {
     assert_eq!(access.address_uses(), [7]);
     assert!(instruction.uses().contains(&access.address_uses()[0]));
     assert!(!access.address_uses().contains(&9));
+}
+
+#[test]
+fn an_event_lends_its_access_and_a_fence_lends_none() {
+    let access = MemoryAccess::read_modify_write(Location::Field, [1], [2])
+        .with_atomicity(MemoryAtomicity::Atomic);
+    let event: MemoryEvent<Location, u8, Fence> = MemoryEvent::Access(access.clone());
+    let fence: MemoryEvent<Location, u8, Fence> = MemoryEvent::Fence(Fence::Function);
+
+    assert_eq!(event.access(), Some(&access));
+    assert_eq!(fence.access(), None);
+    assert!(fence.is_fence());
+    assert_eq!(
+        access.mode(),
+        AccessMode {
+            kind: MemoryAccessKind::ReadModifyWrite,
+            atomicity: MemoryAtomicity::Atomic,
+        }
+    );
+    assert_eq!(
+        MemoryAccess::<Location, u8>::write(Location::Object, [3]).mode(),
+        AccessMode {
+            kind: MemoryAccessKind::Write,
+            atomicity: MemoryAtomicity::NonAtomic,
+        }
+    );
 }
 
 #[test]

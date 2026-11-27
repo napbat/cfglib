@@ -2,18 +2,16 @@ use std::collections::BTreeSet;
 use std::convert::Infallible;
 
 use cfglib::{
-    BlockId, BlockOrder, Cfg, ClrExceptionRegion, ClrHandler, ClrHandlerKind, EdgeKind, Emitter,
-    FlowEffect, HandlerBody, HandlerTypes, SehExceptionRegion, SehHandler, SehHandlerKind,
-    contract_edge_mapped, install_clr_region, install_seh_region, linearize, merge_blocks_mapped,
-    promote_handler_extents, remove_empty_blocks_mapped, remove_unreachable,
-    remove_unreachable_mapped, resolve_jump_edges, simplify, simplify_mapped, split_critical_edges,
-    split_critical_edges_mapped, split_critical_edges_with, verify,
+    BlockId, BlockOrder, Cfg, Edge, EdgeKind, Emitter, Flow, FlowEffect, Handler, HandlerBody,
+    HandlerKind, Region, contract_edge_mapped, linearize, merge_blocks_mapped,
+    promote_handler_extents, remove_empty_blocks_mapped, remove_unreachable_mapped,
+    resolve_jump_edges, simplify_mapped, split_critical_edges_mapped, verify,
 };
 use cfglib::{
-    DispatchBuilder, DispatchReport, DominatorTree, ExclusiveExtent, ExtentPromotionDecision,
-    HandlerRef, RelaxError, RelaxMode, SpanItem, is_reducible, make_reducible,
-    make_reducible_with_dispatch, promote_exclusive_extents, recover_exclusive_extents,
-    relax_layout, relax_spans,
+    DispatchBuilder, DispatchReport, DominatorTree, ExclusiveExtent, ExtentPromotionStatus,
+    RegionId, RelaxError, RelaxMode, SpanItem, is_reducible, make_reducible,
+    make_reducible_by_dispatch, promote_exclusive_extents, recover_exclusive_extents, relax_layout,
+    relax_spans,
 };
 
 use super::BenchmarkSuite;
@@ -78,26 +76,26 @@ fn assert_dispatched_complete(result: &Cfg<u32>, report: &DispatchReport, blocks
 
 struct ApiEmitter;
 
+/// The `u32` token of `block`, which both a jump target and a label carry.
+fn block_token(block: BlockId) -> u32 {
+    u32::try_from(block.index()).expect("benchmark block index must fit in u32")
+}
+
 impl Emitter<ApiInst> for ApiEmitter {
     fn emit_jump(&self, target: BlockId) -> ApiInst {
-        let mut instruction = ApiInst::control(FlowEffect::Jump);
-        instruction.jump_target =
-            Some(u32::try_from(target.index()).expect("benchmark block index must fit in u32"));
-        instruction
+        ApiInst::control(FlowEffect::Flow(Flow::Jump {
+            target: block_token(target),
+        }))
     }
 
     fn emit_conditional_branch(&self, _condition: &ApiInst, target: BlockId) -> ApiInst {
-        let mut instruction = ApiInst::control(FlowEffect::ConditionalJump);
-        instruction.jump_target =
-            Some(u32::try_from(target.index()).expect("benchmark block index must fit in u32"));
-        instruction
+        ApiInst::control(FlowEffect::Flow(Flow::Conditional {
+            target: block_token(target),
+        }))
     }
 
     fn emit_block_start(&self, block: BlockId) -> Option<ApiInst> {
-        let mut instruction = ApiInst::control(FlowEffect::Label);
-        instruction.label =
-            Some(u32::try_from(block.index()).expect("benchmark block index must fit in u32"));
-        Some(instruction)
+        Some(ApiInst::control(FlowEffect::Label(block_token(block))))
     }
 }
 
@@ -122,12 +120,10 @@ fn critical_cfg() -> Cfg<ApiInst> {
 fn jump_cfg() -> Cfg<ApiInst> {
     let mut cfg = Cfg::new();
     let target = cfg.new_block();
-    let mut jump = ApiInst::control(FlowEffect::Jump);
-    jump.jump_target = Some(7);
-    cfg.block_mut(cfg.entry()).push(jump);
-    let mut label = ApiInst::control(FlowEffect::Label);
-    label.label = Some(7);
-    cfg.block_mut(target).push(label);
+    cfg.block_mut(cfg.entry())
+        .push(ApiInst::control(FlowEffect::Flow(Flow::Jump { target: 7 })));
+    cfg.block_mut(target)
+        .push(ApiInst::control(FlowEffect::Label(7)));
     cfg
 }
 
@@ -167,20 +163,6 @@ fn register_cleanup(suite: &mut BenchmarkSuite<'_>) {
     let unreachable = unreachable_cfg();
     benchmark_case!(
         suite,
-        "api_remove_unreachable",
-        covers[remove_unreachable],
-        || {
-            let mut candidate = unreachable.clone();
-            let removed = remove_unreachable(&mut candidate);
-            (candidate, removed)
-        },
-        |(candidate, removed)| {
-            assert_eq!(*removed, 1);
-            assert!(verify(candidate).is_ok());
-        }
-    );
-    benchmark_case!(
-        suite,
         "api_remove_unreachable_mapped",
         covers[remove_unreachable_mapped],
         || {
@@ -190,20 +172,6 @@ fn register_cleanup(suite: &mut BenchmarkSuite<'_>) {
         },
         |(candidate, (removed, _))| {
             assert_eq!(*removed, 1);
-            assert!(verify(candidate).is_ok());
-        }
-    );
-    benchmark_case!(
-        suite,
-        "api_simplify",
-        covers[simplify],
-        || {
-            let mut candidate = unreachable.clone();
-            let changed = simplify(&mut candidate);
-            (candidate, changed)
-        },
-        |(candidate, changed)| {
-            assert_eq!(*changed, 1);
             assert!(verify(candidate).is_ok());
         }
     );
@@ -252,7 +220,7 @@ fn register_node_edits(suite: &mut BenchmarkSuite<'_>) {
         || {
             let mut candidate = split.clone();
             let entry = candidate.entry();
-            let new_block = candidate.split_block(entry, 4);
+            let new_block = candidate.split_block(entry, 4, EdgeKind::Fallthrough);
             (candidate, new_block)
         },
         |(candidate, _)| {
@@ -266,8 +234,13 @@ fn register_node_edits(suite: &mut BenchmarkSuite<'_>) {
         || {
             let mut candidate = split.clone();
             let entry = candidate.entry();
-            let result = candidate.split_block_with_payload_mapped(entry, 4, ());
-            (candidate, result)
+            let (blocks, rewrite) = candidate
+                .split_block_at_points(
+                    entry,
+                    [(4, Edge::new(EdgeKind::Fallthrough).with_payload(()))],
+                )
+                .expect("4 is inside the block");
+            (candidate, (blocks[1], rewrite))
         },
         |(candidate, _)| {
             assert_eq!(candidate.block_count(), 2);
@@ -280,7 +253,10 @@ fn register_node_edits(suite: &mut BenchmarkSuite<'_>) {
         || {
             let mut candidate = split.clone();
             let entry = candidate.entry();
-            let result = candidate.split_block_at_points_with_payloads(entry, [(2, ()), (5, ())]);
+            let result = candidate.split_block_at_points(
+                entry,
+                [(2, EdgeKind::Fallthrough), (5, EdgeKind::Fallthrough)],
+            );
             (candidate, result)
         },
         |(candidate, result)| {
@@ -295,39 +271,11 @@ fn register_critical_edges(suite: &mut BenchmarkSuite<'_>) {
     let cfg = critical_cfg();
     benchmark_case!(
         suite,
-        "api_split_critical_edges",
-        covers[split_critical_edges],
-        || {
-            let mut candidate = cfg.clone();
-            let split = split_critical_edges(&mut candidate);
-            (candidate, split)
-        },
-        |(candidate, split)| {
-            assert_eq!(*split, 1);
-            assert!(verify(candidate).is_ok());
-        }
-    );
-    benchmark_case!(
-        suite,
         "api_split_critical_edges_mapped",
         covers[split_critical_edges_mapped],
         || {
             let mut candidate = cfg.clone();
-            let result = split_critical_edges_mapped(&mut candidate);
-            (candidate, result)
-        },
-        |(candidate, (split, _))| {
-            assert_eq!(*split, 1);
-            assert!(verify(candidate).is_ok());
-        }
-    );
-    benchmark_case!(
-        suite,
-        "api_split_critical_edges_with",
-        covers[split_critical_edges_with],
-        || {
-            let mut candidate = cfg.clone();
-            let result = split_critical_edges_with(&mut candidate, |_, _| ());
+            let result = split_critical_edges_mapped(&mut candidate, |_, _| ());
             (candidate, result)
         },
         |(candidate, (split, _))| {
@@ -366,11 +314,25 @@ fn register_frontend_utilities(suite: &mut BenchmarkSuite<'_>) {
             assert_eq!(resolution.resolved, 1);
             assert_eq!(
                 resolution.unresolved,
-                [] as [(cfglib::Id<cfglib::BlockTag>, u32); 0]
+                [] as [cfglib::UnresolvedTransfer<u32, cfglib::BlockId>; 0]
             );
             assert!(verify(candidate).is_ok());
         }
     );
+}
+
+/// A region protecting `protected_blocks` with one catch handler of unknown
+/// extent entered at `handler`.
+fn unknown_catch_region(protected_blocks: BTreeSet<BlockId>, handler: BlockId) -> Region {
+    Region {
+        protected_blocks,
+        handlers: vec![Handler {
+            entry: handler,
+            body: HandlerBody::Unknown,
+            kind: HandlerKind::Catch,
+        }],
+        parent: None,
+    }
 }
 
 fn register_exception_regions(suite: &mut BenchmarkSuite<'_>) {
@@ -383,69 +345,12 @@ fn register_exception_regions(suite: &mut BenchmarkSuite<'_>) {
         covers[promote_handler_extents],
         || {
             let mut candidate = base.clone();
-            let mut handler_types = HandlerTypes::new();
-            install_clr_region(
-                &mut candidate,
-                &mut handler_types,
-                ClrExceptionRegion {
-                    protected_blocks: protected_blocks.clone(),
-                    handlers: vec![ClrHandler {
-                        entry: handler,
-                        body: HandlerBody::Unknown,
-                        kind: ClrHandlerKind::Catch { ty: 1_u32 },
-                    }],
-                    parent: None,
-                },
-            );
+            candidate
+                .add_region(unknown_catch_region(protected_blocks.clone(), handler))
+                .unwrap();
             promote_handler_extents(&mut candidate)
         },
-        |promoted: &usize| assert!(*promoted <= 1)
-    );
-    benchmark_case!(
-        suite,
-        "api_install_clr_region",
-        covers[install_clr_region],
-        || {
-            let mut candidate = base.clone();
-            let mut handler_types = HandlerTypes::new();
-            let id = install_clr_region(
-                &mut candidate,
-                &mut handler_types,
-                ClrExceptionRegion {
-                    protected_blocks: protected_blocks.clone(),
-                    handlers: vec![ClrHandler {
-                        entry: handler,
-                        body: HandlerBody::Unknown,
-                        kind: ClrHandlerKind::Catch { ty: 1_u32 },
-                    }],
-                    parent: None,
-                },
-            );
-            (candidate, handler_types, id)
-        },
-        |(candidate, _, _)| assert_eq!(candidate.regions().len(), 1)
-    );
-    benchmark_case!(
-        suite,
-        "api_install_seh_region",
-        covers[install_seh_region],
-        || {
-            let mut candidate = base.clone();
-            let id = install_seh_region(
-                &mut candidate,
-                SehExceptionRegion {
-                    protected_blocks: protected_blocks.clone(),
-                    handlers: vec![SehHandler {
-                        entry: handler,
-                        body: HandlerBody::Unknown,
-                        kind: SehHandlerKind::Finally,
-                    }],
-                    parent: None,
-                },
-            );
-            (candidate, id)
-        },
-        |(candidate, _)| assert_eq!(candidate.regions().len(), 1)
+        |decisions: &Vec<(RegionId, ExtentPromotionStatus)>| assert_eq!(decisions.len(), 1)
     );
 }
 
@@ -461,20 +366,8 @@ fn guarded_cfg() -> Cfg<ApiInst> {
     cfg.add_edge(entry, handler, EdgeKind::ExceptionHandler);
     cfg.add_edge(body, join, EdgeKind::Fallthrough);
     cfg.add_edge(handler, join, EdgeKind::Fallthrough);
-    let mut handler_types = HandlerTypes::new();
-    install_clr_region(
-        &mut cfg,
-        &mut handler_types,
-        ClrExceptionRegion {
-            protected_blocks: BTreeSet::from([entry]),
-            handlers: vec![ClrHandler {
-                entry: handler,
-                body: HandlerBody::Unknown,
-                kind: ClrHandlerKind::Catch { ty: 1_u32 },
-            }],
-            parent: None,
-        },
-    );
+    cfg.add_region(unknown_catch_region(BTreeSet::from([entry]), handler))
+        .unwrap();
     cfg
 }
 
@@ -484,8 +377,8 @@ fn register_extents(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_recover_exclusive_extents",
-        covers[recover_exclusive_extents, recover_exclusive_extents_with],
-        || recover_exclusive_extents(&guarded),
+        covers[recover_exclusive_extents],
+        || recover_exclusive_extents(&guarded, |_, edge| !edge.kind().is_exceptional()),
         |extents: &Vec<ExclusiveExtent>| assert_eq!(extents.len(), 1)
     );
     benchmark_case!(
@@ -494,20 +387,12 @@ fn register_extents(suite: &mut BenchmarkSuite<'_>) {
         covers[promote_exclusive_extents],
         || {
             let mut candidate = guarded.clone();
-            let bodies: Vec<(HandlerRef, BTreeSet<BlockId>)> =
-                recover_exclusive_extents(&candidate)
-                    .into_iter()
-                    .map(|extent| (extent.handler, extent.blocks))
-                    .collect();
-            let decisions = promote_exclusive_extents(&mut candidate, |handler| {
-                bodies
-                    .iter()
-                    .find(|(candidate, _)| *candidate == handler)
-                    .map(|(_, blocks)| blocks.clone())
-            });
+            let extents =
+                recover_exclusive_extents(&candidate, |_, edge| !edge.kind().is_exceptional());
+            let decisions = promote_exclusive_extents(&mut candidate, &extents);
             (candidate, decisions)
         },
-        |(candidate, decisions): &(Cfg<ApiInst>, Vec<ExtentPromotionDecision>)| {
+        |(candidate, decisions): &(Cfg<ApiInst>, Vec<(RegionId, ExtentPromotionStatus)>)| {
             assert!(verify(candidate).is_ok());
             assert_eq!(decisions.len(), 1);
         }
@@ -665,7 +550,7 @@ fn register_reducibility(suite: &mut BenchmarkSuite<'_>) {
         "cfg_clone_make_reducible_complete_10",
         || {
             let mut cloned = small.clone();
-            let copies = make_reducible(&mut cloned);
+            let copies = make_reducible(&mut cloned).len();
             (cloned, copies)
         },
         |(result, copies): &(Cfg<u32>, usize)| {
@@ -675,10 +560,10 @@ fn register_reducibility(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "cfg_clone_make_reducible_with_dispatch_complete_10",
+        "cfg_clone_make_reducible_by_dispatch_complete_10",
         || {
             let mut cloned = small.clone();
-            let report = make_reducible_with_dispatch(&mut cloned, &mut ApiDispatch);
+            let report = make_reducible_by_dispatch(&mut cloned, &mut ApiDispatch);
             (cloned, report)
         },
         |(result, report): &(Cfg<u32>, DispatchReport)| {
@@ -687,11 +572,11 @@ fn register_reducibility(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "api_make_reducible_with_dispatch_complete_64",
-        covers[make_reducible_with_dispatch],
+        "api_make_reducible_by_dispatch_complete_64",
+        covers[make_reducible_by_dispatch],
         || {
             let mut cloned = large.clone();
-            let report = make_reducible_with_dispatch(&mut cloned, &mut ApiDispatch);
+            let report = make_reducible_by_dispatch(&mut cloned, &mut ApiDispatch);
             (cloned, report)
         },
         |(result, report): &(Cfg<u32>, DispatchReport)| {

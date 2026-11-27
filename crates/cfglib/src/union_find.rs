@@ -97,22 +97,6 @@ impl DisjointSet {
         index
     }
 
-    /// Returns the representative of `index`'s set without compressing.
-    ///
-    /// Use this for read-only queries through shared references; prefer
-    /// [`find`](Self::find) when the set is mutable.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `index` is out of bounds.
-    #[must_use]
-    pub fn root(&self, mut index: usize) -> usize {
-        while self.parent[index] != index {
-            index = self.parent[index];
-        }
-        index
-    }
-
     /// Merges the sets of `left` and `right`, balancing by rank.
     ///
     /// The surviving representative is unspecified. Returns whether the two
@@ -174,7 +158,6 @@ mod tests {
         assert!(!sets.is_empty());
         for index in 0..3 {
             assert_eq!(sets.find(index), index);
-            assert_eq!(sets.root(index), index);
         }
     }
 
@@ -210,14 +193,6 @@ mod tests {
     }
 
     #[test]
-    fn root_answers_without_mutation() {
-        let mut sets = DisjointSet::new(4);
-        sets.union_toward_min(2, 3);
-        let read_only = sets.clone();
-        assert_eq!(read_only.root(3), 2);
-    }
-
-    #[test]
     fn both_strategies_agree_with_a_naive_partition_for_every_short_sequence() {
         const LEN: usize = 5;
         let pairs: Vec<(usize, usize)> = (0..LEN)
@@ -248,7 +223,7 @@ mod tests {
                         for right in 0..LEN {
                             let same = label[left] == label[right];
                             assert_eq!(by_rank.find(left) == by_rank.find(right), same);
-                            assert_eq!(toward_min.root(left) == toward_min.root(right), same);
+                            assert_eq!(toward_min.find(left) == toward_min.find(right), same);
                         }
                     }
                 }

@@ -2,12 +2,15 @@
 //!
 //! The runner walk of Cooper, Harvey, and Kennedy collects `(runner, frontier
 //! block)` pairs, and grouping them by runner makes every block's frontier
-//! one contiguous, ascending run. [`FrontierRuns`] is that table, and
-//! [`DominanceFrontiers`] hands it to a consumer that asks for one block's
-//! frontier, or for the iterated frontier of a set of blocks.
+//! one contiguous, ascending run. [`DominanceFrontiers`] is that table: it
+//! hands a consumer one block's frontier, or the iterated frontier of a set
+//! of blocks.
 //!
-//! Both read any [`RootedView`], so a [`Cfg`](crate::Cfg) and a
-//! consumer-owned function view share the one algorithm.
+//! It reads any [`GraphView`], so a [`Cfg`](crate::Cfg) and a consumer-owned
+//! function view share the one algorithm, and any [`FrontierTree`]: a
+//! [`DominatorTree`] over the graph it was computed on, or a
+//! [`PostDominatorTree`](crate::PostDominatorTree), whose frontiers are the
+//! control-dependence sources of its blocks.
 //!
 //! The rule itself is the one [`DominatorTree::frontier`] states, which
 //! evaluates it per query where this table walks every join once: block `y`
@@ -24,50 +27,117 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use super::frontier::FrontierScratch;
-use super::word;
+use super::{DominatorScratch, DominatorTree};
 use crate::block::BlockId;
-use crate::graph::dominator::DominatorTree;
-use crate::graph::view::{DenseId, RootedView};
+use crate::graph::view::{DenseId, GraphView};
 
-/// The dominance frontier of every block.
+/// A tree whose frontiers [`DominanceFrontiers`] tabulates.
+///
+/// A [`DominatorTree`] gives its dominance frontiers over the graph it was
+/// computed on. A [`PostDominatorTree`](crate::PostDominatorTree) gives the
+/// frontiers of [`PostDominatorTree::frontier`](crate::PostDominatorTree::frontier),
+/// which it reads over the reverse of the graph it was computed on: the
+/// control-dependence sources of each block, where a block of a sink class
+/// has the sources of its class. The trait is sealed; those two are its only
+/// implementations.
+pub trait FrontierTree<N>: sealed::Tabulate<N> {}
+
+impl<N: DenseId> FrontierTree<N> for DominatorTree<N> {}
+
+pub(super) mod sealed {
+    use super::DominanceFrontiers;
+    use crate::graph::view::GraphView;
+
+    /// How a tree fills a frontier table, which only the crate implements.
+    pub trait Tabulate<N> {
+        /// Fill `table` with the frontier of every block of `graph`.
+        fn tabulate<G: GraphView<NodeId = N>>(&self, graph: &G, table: &mut DominanceFrontiers<N>);
+    }
+}
+
+impl<N: DenseId> sealed::Tabulate<N> for DominatorTree<N> {
+    fn tabulate<G: GraphView<NodeId = N>>(&self, graph: &G, table: &mut DominanceFrontiers<N>) {
+        table.collect(graph, self);
+        table.group(graph.node_bound());
+    }
+}
+
+/// The frontier of every block, in one flat run table.
 ///
 /// The block type `N` is the node identity of the view the frontiers were
 /// computed from. It defaults to [`BlockId`], the identity of a
 /// [`Cfg`](crate::Cfg).
 ///
-/// For a reachable block, the frontier holds the members of
-/// [`DominatorTree::frontier`] of that block, in ascending order. This type
-/// computes every frontier at once and keeps them in one flat table, which
-/// is two buffers however many blocks there are.
+/// For a reachable block, the frontier holds the members of the per-query
+/// frontier of its tree ([`DominatorTree::frontier`] or
+/// [`PostDominatorTree::frontier`](crate::PostDominatorTree::frontier)), in
+/// the same ascending dense index. The runner walk emits each `(runner,
+/// frontier block)` pair once, and the table groups them by runner with a
+/// counting pass instead of a sort: one buffer of members and one of run
+/// starts however many blocks there are.
 #[derive(Debug, Clone)]
 pub struct DominanceFrontiers<N = BlockId> {
-    /// Every block's frontier, flat.
-    runs: FrontierRuns<N>,
+    /// The `(runner, frontier block)` pairs of the last walk, in the order
+    /// the walk emitted them. A table that is kept drops them; one that is
+    /// recomputed keeps them for the next walk.
+    pub(super) pairs: Vec<(N, N)>,
+    /// Where each block's run starts in `blocks`. One longer than the block
+    /// bound, so a run is `starts[b]..starts[b + 1]`.
+    starts: Vec<usize>,
+    /// The frontier members themselves, grouped by runner, each run strictly
+    /// ascending by dense index.
+    blocks: Vec<N>,
 }
 
 impl<N: DenseId> DominanceFrontiers<N> {
-    /// Compute dominance frontiers using the algorithm from Cooper, Harvey,
-    /// and Kennedy.
+    /// Compute the frontier of every block of `graph` under `tree`, with the
+    /// runner walk of Cooper, Harvey, and Kennedy.
     ///
-    /// `dom` is the dominator tree of `graph`. The predecessors of `graph`
-    /// are what the algorithm walks, so a view whose adjacency breaks the
-    /// [`GraphView`](crate::graph::view::GraphView) contract gives an
-    /// unspecified answer.
+    /// `tree` is the dominator tree or the post-dominator tree computed from
+    /// `graph`. The predecessors of `graph`, or its successors for a
+    /// post-dominator tree, are what the algorithm walks, so a view whose
+    /// adjacency breaks the [`GraphView`] contract gives an unspecified
+    /// answer.
+    ///
+    /// # Examples
+    ///
+    /// The control-dependence frontiers of a diamond: both arms depend on the
+    /// branch, and the merge on nothing.
+    ///
+    /// ```
+    /// use cfglib::{Cfg, DominanceFrontiers, EdgeKind, PostDominatorTree};
+    ///
+    /// let mut cfg = Cfg::<u32>::new();
+    /// let branch = cfg.entry();
+    /// let left = cfg.new_block();
+    /// let right = cfg.new_block();
+    /// let merge = cfg.new_block();
+    /// cfg.add_edge(branch, left, EdgeKind::ConditionalTrue);
+    /// cfg.add_edge(branch, right, EdgeKind::ConditionalFalse);
+    /// cfg.add_edge(left, merge, EdgeKind::Fallthrough);
+    /// cfg.add_edge(right, merge, EdgeKind::Fallthrough);
+    /// let post = PostDominatorTree::compute(&cfg);
+    ///
+    /// let sources = DominanceFrontiers::compute(&cfg, &post);
+    /// assert_eq!(sources.frontier(left), [branch]);
+    /// assert_eq!(sources.frontier(right), [branch]);
+    /// assert!(sources.frontier(merge).is_empty());
+    /// ```
     #[must_use]
-    pub fn compute<G>(graph: &G, dom: &DominatorTree<N>) -> Self
+    pub fn compute<G, T>(graph: &G, tree: &T) -> Self
     where
-        G: RootedView<NodeId = N>,
+        G: GraphView<NodeId = N>,
+        T: FrontierTree<N>,
     {
-        let mut runs = FrontierRuns::default();
-        runs.rebuild(graph, dom);
-        // A scratch keeps the pair list for the next procedure, but a table
-        // that is kept has no use for it.
-        runs.pairs = Vec::new();
-        Self { runs }
+        let mut table = Self::default();
+        tree.tabulate(graph, &mut table);
+        // A recomputed table keeps the pair list for the next procedure, but
+        // a table that is kept has no use for it.
+        table.pairs = Vec::new();
+        table
     }
 
-    /// Recompute the table for `graph` under `dom` in the storage of this
+    /// Recompute the table for `graph` under `tree` in the storage of this
     /// table.
     ///
     /// The result equals [`compute`](Self::compute) of the same graph and
@@ -95,14 +165,15 @@ impl<N: DenseId> DominanceFrontiers<N> {
     /// assert_eq!(frontiers.frontier(left), [merge]);
     /// assert!(frontiers.frontier(entry).is_empty());
     /// ```
-    pub fn recompute<G>(&mut self, graph: &G, dom: &DominatorTree<N>)
+    pub fn recompute<G, T>(&mut self, graph: &G, tree: &T)
     where
-        G: RootedView<NodeId = N>,
+        G: GraphView<NodeId = N>,
+        T: FrontierTree<N>,
     {
-        self.runs.rebuild(graph, dom);
+        tree.tabulate(graph, self);
     }
 
-    /// Return the dominance frontier of `block`, in ascending order.
+    /// Return the frontier of `block`, in ascending dense index.
     ///
     /// # Panics
     ///
@@ -110,20 +181,23 @@ impl<N: DenseId> DominanceFrontiers<N> {
     /// computed the frontiers.
     #[must_use]
     pub fn frontier(&self, block: N) -> &[N] {
-        self.runs.frontier(block)
+        let start = self.starts[block.index()];
+        let end = self.starts[block.index() + 1];
+        &self.blocks[start..end]
     }
 
-    /// Collect the iterated dominance frontier of `defs` into `out`, read off
-    /// this table.
+    /// Collect the iterated frontier of `defs` into `out`, read off this
+    /// table.
     ///
-    /// The answer is the one [`DominatorTree::iterated_frontier`] gives for
-    /// the tree and graph that computed the table, with the same `live_in`
-    /// rule: a node is added, and its own frontier explored, only when
-    /// `live_in` accepts it, a definition is a root of the search whether
-    /// `live_in` accepts it or not, and each node is offered to `live_in` at
-    /// most once per call. A definition outside every tree has an empty
-    /// frontier, so it adds nothing. `out` is cleared first and receives each
-    /// member once, in ascending order.
+    /// The answer is the one the tree that computed the table gives
+    /// ([`DominatorTree::iterated_frontier`] or
+    /// [`PostDominatorTree::iterated_frontier`](crate::PostDominatorTree::iterated_frontier)),
+    /// with the same `live_in` rule: a node is added, and its own frontier
+    /// explored, only when `live_in` accepts it, a definition is a root of
+    /// the search whether `live_in` accepts it or not, and each node is
+    /// offered to `live_in` at most once per call. A definition outside every
+    /// tree has an empty frontier, so it adds nothing. `out` is cleared first
+    /// and receives each member once, in ascending dense index.
     ///
     /// # Choosing between the two queries
     ///
@@ -145,7 +219,7 @@ impl<N: DenseId> DominanceFrontiers<N> {
     /// # Examples
     ///
     /// ```
-    /// use cfglib::{Cfg, DominanceFrontiers, DominatorTree, EdgeKind, FrontierScratch};
+    /// use cfglib::{Cfg, DominanceFrontiers, DominatorScratch, DominatorTree, EdgeKind};
     ///
     /// let mut cfg = Cfg::<u32>::new();
     /// let entry = cfg.entry();
@@ -160,99 +234,61 @@ impl<N: DenseId> DominanceFrontiers<N> {
     /// let frontiers = DominanceFrontiers::compute(&cfg, &dominators);
     ///
     /// // The entry defines the variable and the loop body writes it again.
-    /// let mut scratch = FrontierScratch::new();
     /// let mut placed = Vec::new();
-    /// frontiers.iterated_frontier(&mut scratch, [entry, body], None, &mut placed);
+    /// frontiers.iterated_frontier([entry, body], None, &mut placed);
     /// assert_eq!(placed, [head]);
     ///
     /// // Pruned by liveness: the variable is dead on entry to the header.
+    /// let mut scratch = DominatorScratch::default();
     /// let live_in = |block| block != head;
-    /// frontiers.iterated_frontier(&mut scratch, [entry, body], Some(&live_in), &mut placed);
+    /// frontiers.iterated_frontier_in(&mut scratch, [entry, body], Some(&live_in), &mut placed);
     /// assert!(placed.is_empty());
     /// ```
     pub fn iterated_frontier(
         &self,
-        scratch: &mut FrontierScratch,
+        defs: impl IntoIterator<Item = N>,
+        live_in: Option<&dyn Fn(N) -> bool>,
+        out: &mut Vec<N>,
+    ) {
+        self.iterated_frontier_in(&mut DominatorScratch::default(), defs, live_in, out);
+    }
+
+    /// [`iterated_frontier`](Self::iterated_frontier) over caller-owned
+    /// working storage, the same answer: a pass that asks for many frontiers
+    /// hands one [`DominatorScratch`] to every query, and a query allocates
+    /// nothing once the scratch and `out` have grown.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the conditions of
+    /// [`iterated_frontier`](Self::iterated_frontier).
+    pub fn iterated_frontier_in(
+        &self,
+        scratch: &mut DominatorScratch,
         defs: impl IntoIterator<Item = N>,
         live_in: Option<&dyn Fn(N) -> bool>,
         out: &mut Vec<N>,
     ) {
         out.clear();
-        scratch.begin(self.runs.starts.len().saturating_sub(1));
+        // The table knows no levels, and needs none: every root waits on one
+        // level, so the buckets are a stack.
+        let search = &mut scratch.frontier;
+        search.begin(self.starts.len().saturating_sub(1));
         for def in defs {
-            let index = def.index();
-            if !scratch.queued.is_marked(index) {
-                scratch.queued.mark(index);
-                scratch.pending.push(word(index));
+            search.enqueue(def.index(), 0);
+        }
+        while let Some(node) = search.next_root() {
+            for &member in self.frontier(N::from_index(node)) {
+                search.offer(member, 0, live_in, out);
             }
         }
-        while let Some(node) = scratch.pending.pop() {
-            for &member in self.frontier(N::from_index(node as usize)) {
-                let index = member.index();
-                if scratch.judged.is_marked(index) {
-                    continue;
-                }
-                scratch.judged.mark(index);
-                if live_in.is_some_and(|accepts| !accepts(member)) {
-                    continue;
-                }
-                out.push(member);
-                if !scratch.queued.is_marked(index) {
-                    scratch.queued.mark(index);
-                    scratch.pending.push(word(index));
-                }
-            }
-        }
-        out.sort_unstable();
+        out.sort_unstable_by_key(|member| member.index());
     }
-}
 
-impl<N> Default for DominanceFrontiers<N> {
-    /// The table of the empty graph, which allocates nothing. It holds no
-    /// frontier until [`recompute`](DominanceFrontiers::recompute) fills it.
-    fn default() -> Self {
-        Self {
-            runs: FrontierRuns::default(),
-        }
-    }
-}
-
-/// Every block's dominance frontier in one flat run table.
-///
-/// The runner walk emits each `(runner, frontier block)` pair once, and the
-/// table groups them by runner with a counting pass instead of a sort: the
-/// table is one buffer of members and one of run starts however many blocks
-/// there are, and a frontier is read back as a slice in ascending order. The
-/// pair list is the walk's own scratch, and a scratch keeps it between
-/// procedures.
-#[derive(Debug, Clone)]
-pub(crate) struct FrontierRuns<N = BlockId> {
-    /// The `(runner, frontier block)` pairs of the last walk, in the order
-    /// the walk emitted them.
-    pairs: Vec<(N, N)>,
-    /// Where each block's run starts in [`blocks`](Self::blocks). One longer
-    /// than the block bound, so a run is `starts[b]..starts[b + 1]`.
-    starts: Vec<usize>,
-    /// The frontier members themselves, grouped by runner, each run strictly
-    /// ascending.
-    blocks: Vec<N>,
-}
-
-impl<N> Default for FrontierRuns<N> {
-    fn default() -> Self {
-        Self {
-            pairs: Vec::new(),
-            starts: Vec::new(),
-            blocks: Vec::new(),
-        }
-    }
-}
-
-impl<N: DenseId> FrontierRuns<N> {
-    /// Recompute the table for `graph` under `dom`, reusing every buffer.
-    pub(crate) fn rebuild<G>(&mut self, graph: &G, dom: &DominatorTree<N>)
+    /// Collect the `(runner, frontier block)` pairs of `graph` under `dom`.
+    pub(super) fn collect<G>(&mut self, graph: &G, dom: &DominatorTree<N>)
     where
-        G: RootedView<NodeId = N>,
+        G: GraphView<NodeId = N>,
     {
         let bound = graph.node_bound();
         self.pairs.clear();
@@ -297,7 +333,11 @@ impl<N: DenseId> FrontierRuns<N> {
                 }
             }
         }
+    }
 
+    /// Group the collected pairs by runner into the runs of a table over
+    /// `bound` blocks.
+    pub(super) fn group(&mut self, bound: usize) {
         // Group the pairs by runner without comparing them. `starts` first
         // holds the run lengths as running totals, so `starts[b]` is where
         // run `b` begins; the scatter then advances each cursor to the end of
@@ -306,12 +346,13 @@ impl<N: DenseId> FrontierRuns<N> {
         // blocks in ascending order, as it does for every store here, and
         // only then.
         let mut ascending = true;
-        let mut previous = None;
-        self.starts.fill(0);
+        let mut previous = 0;
+        self.starts.clear();
+        self.starts.resize(bound + 1, 0);
         for &(runner, block) in &self.pairs {
             self.starts[runner.index() + 1] += 1;
-            ascending &= previous <= Some(block);
-            previous = Some(block);
+            ascending &= previous <= block.index();
+            previous = block.index();
         }
         for index in 1..self.starts.len() {
             self.starts[index] += self.starts[index - 1];
@@ -328,15 +369,20 @@ impl<N: DenseId> FrontierRuns<N> {
 
         if !ascending {
             for run in self.starts.windows(2) {
-                self.blocks[run[0]..run[1]].sort_unstable();
+                self.blocks[run[0]..run[1]].sort_unstable_by_key(|block| block.index());
             }
         }
     }
+}
 
-    /// The dominance frontier of `block`, in ascending order.
-    pub(crate) fn frontier(&self, block: N) -> &[N] {
-        let start = self.starts[block.index()];
-        let end = self.starts[block.index() + 1];
-        &self.blocks[start..end]
+impl<N> Default for DominanceFrontiers<N> {
+    /// The table of the empty graph, which allocates nothing. It holds no
+    /// frontier until [`recompute`](DominanceFrontiers::recompute) fills it.
+    fn default() -> Self {
+        Self {
+            pairs: Vec::new(),
+            starts: Vec::new(),
+            blocks: Vec::new(),
+        }
     }
 }

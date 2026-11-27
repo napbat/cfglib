@@ -17,32 +17,6 @@ use core::ops::ControlFlow;
 
 use crate::graph::search::{Visit, may_expand};
 
-/// Configuration for an [`open_breadth_first_paths`] walk.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct OpenPathsConfig {
-    /// Maximum route length to extend, in hops from a seed. `None` is
-    /// unbounded; `Some(0)` emits the seed routes alone.
-    pub max_depth: Option<usize>,
-}
-
-impl OpenPathsConfig {
-    /// An unbounded route enumeration.
-    ///
-    /// Unbounded enumeration of an unbounded space does not terminate; rely
-    /// on a finite space, a depth bound, or a breaking event callback.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self { max_depth: None }
-    }
-
-    /// Return this configuration bounded to `max_depth` hops from a seed.
-    #[must_use]
-    pub const fn with_max_depth(mut self, max_depth: usize) -> Self {
-        self.max_depth = Some(max_depth);
-        self
-    }
-}
-
 /// An event of an [`open_breadth_first_paths`] walk.
 ///
 /// Routes are reported by reference so the walk retains ownership of its
@@ -87,9 +61,10 @@ pub enum OpenPathsEvent<'a, N> {
 ///
 /// Simple-route enumeration is exponential in the worst case — a route tree,
 /// not a node set. Memory is proportional to the live frontier's total route
-/// length and there are no `O(nodes)` marks to bound it. Bound the walk with
-/// [`OpenPathsConfig::with_max_depth`], prune with [`Visit::Skip`], or stop
-/// early with [`ControlFlow::Break`].
+/// length and there are no `O(nodes)` marks to bound it. Unbounded
+/// enumeration of an unbounded space does not terminate: bound the walk with
+/// `max_depth`, prune with [`Visit::Skip`], or stop early with
+/// [`ControlFlow::Break`].
 ///
 /// # Semantics
 ///
@@ -99,8 +74,9 @@ pub enum OpenPathsEvent<'a, N> {
 ///   route length. Successors extend a route in the order the closure pushed
 ///   them.
 /// - [`Visit::Skip`] seals a route without extending it.
-/// - `max_depth` bounds extension, not discovery: a route at the bound is
-///   still emitted, and never extended.
+/// - `max_depth` bounds extension, not discovery: `None` is unbounded, and a
+///   route at the bound is still emitted and never extended, so `Some(0)`
+///   emits the seed routes alone.
 /// - An extension whose node is already on that route produces
 ///   [`Refused`](OpenPathsEvent::Refused) instead of a route.
 /// - [`ControlFlow::Break`] stops immediately and is returned as
@@ -114,7 +90,7 @@ pub enum OpenPathsEvent<'a, N> {
 /// ```
 /// use core::ops::ControlFlow;
 ///
-/// use cfglib::{OpenPathsConfig, OpenPathsEvent, Visit, open_breadth_first_paths};
+/// use cfglib::{OpenPathsEvent, Visit, open_breadth_first_paths};
 ///
 /// // "app" imports "util" directly and through two re-export hops.
 /// let imports = |module: &&'static str, out: &mut Vec<&'static str>| match *module {
@@ -126,7 +102,7 @@ pub enum OpenPathsEvent<'a, N> {
 ///
 /// let shortest = open_breadth_first_paths(
 ///     ["app"],
-///     OpenPathsConfig::new(),
+///     None,
 ///     imports,
 ///     |event| match event {
 ///         OpenPathsEvent::Route(route) if *route.last().unwrap() == "util" => {
@@ -141,7 +117,7 @@ pub enum OpenPathsEvent<'a, N> {
 #[must_use]
 pub fn open_breadth_first_paths<N: Clone + PartialEq, B>(
     seeds: impl IntoIterator<Item = N>,
-    config: OpenPathsConfig,
+    max_depth: Option<usize>,
     mut successors: impl FnMut(&N, &mut Vec<N>),
     mut on_event: impl FnMut(OpenPathsEvent<'_, N>) -> ControlFlow<B, Visit>,
 ) -> Option<B> {
@@ -157,7 +133,7 @@ pub fn open_breadth_first_paths<N: Clone + PartialEq, B>(
         let route = vec![seed];
         match on_event(OpenPathsEvent::Route(&route)) {
             ControlFlow::Break(value) => return Some(value),
-            ControlFlow::Continue(Visit::Descend) if may_expand(config.max_depth, 0) => {
+            ControlFlow::Continue(Visit::Descend) if may_expand(max_depth, 0) => {
                 frontier.push_back(route);
             }
             ControlFlow::Continue(Visit::Descend | Visit::Skip) => {}
@@ -184,7 +160,7 @@ pub fn open_breadth_first_paths<N: Clone + PartialEq, B>(
                 ControlFlow::Break(value) => return Some(value),
                 ControlFlow::Continue(verdict) => verdict,
             };
-            if matches!(verdict, Visit::Descend) && may_expand(config.max_depth, route.len() - 1) {
+            if matches!(verdict, Visit::Descend) && may_expand(max_depth, route.len() - 1) {
                 if extensions.peek().is_none() {
                     // No successor is left to extend this route, so the
                     // frontier takes the route itself instead of a copy.
@@ -223,7 +199,7 @@ mod tests {
     /// Collect every emitted route, running to completion.
     fn all_routes(
         seeds: impl IntoIterator<Item = &'static str>,
-        config: OpenPathsConfig,
+        config: Option<usize>,
         successors: impl FnMut(&&'static str, &mut Vec<&'static str>),
     ) -> Vec<Vec<&'static str>> {
         let mut routes = Vec::new();
@@ -239,7 +215,7 @@ mod tests {
 
     #[test]
     fn a_shared_node_is_reached_once_per_route() {
-        let routes = all_routes(["app"], OpenPathsConfig::new(), diamond);
+        let routes = all_routes(["app"], None, diamond);
         let merged: Vec<_> = routes
             .iter()
             .filter(|route| *route.last().unwrap() == "merge")
@@ -251,7 +227,7 @@ mod tests {
 
     #[test]
     fn routes_arrive_in_nondecreasing_length_order() {
-        let routes = all_routes(["app"], OpenPathsConfig::new(), diamond);
+        let routes = all_routes(["app"], None, diamond);
         let lengths: Vec<_> = routes.iter().map(Vec::len).collect();
         let mut sorted = lengths.clone();
         sorted.sort_unstable();
@@ -267,15 +243,12 @@ mod tests {
             "b" => out.push("goal"),
             _ => {}
         };
-        let first =
-            open_breadth_first_paths(["app"], OpenPathsConfig::new(), successors, |event| {
-                match event {
-                    OpenPathsEvent::Route(route) if *route.last().unwrap() == "goal" => {
-                        ControlFlow::Break(route.to_vec())
-                    }
-                    _ => ControlFlow::Continue(Visit::Descend),
-                }
-            });
+        let first = open_breadth_first_paths(["app"], None, successors, |event| match event {
+            OpenPathsEvent::Route(route) if *route.last().unwrap() == "goal" => {
+                ControlFlow::Break(route.to_vec())
+            }
+            _ => ControlFlow::Continue(Visit::Descend),
+        });
         assert_eq!(first, Some(alloc::vec!["app", "goal"]));
     }
 
@@ -287,36 +260,34 @@ mod tests {
             _ => {}
         };
         let mut refusals = Vec::new();
-        let outcome =
-            open_breadth_first_paths::<_, ()>(["a"], OpenPathsConfig::new(), successors, |event| {
-                if let OpenPathsEvent::Refused(route, node) = event {
-                    refusals.push((route.to_vec(), *node));
-                }
-                ControlFlow::Continue(Visit::Descend)
-            });
+        let outcome = open_breadth_first_paths::<_, ()>(["a"], None, successors, |event| {
+            if let OpenPathsEvent::Refused(route, node) = event {
+                refusals.push((route.to_vec(), *node));
+            }
+            ControlFlow::Continue(Visit::Descend)
+        });
         assert_eq!(outcome, None);
         assert_eq!(refusals, alloc::vec![(alloc::vec!["a", "b"], "a")]);
     }
 
     #[test]
     fn skip_seals_a_route_without_extending_it() {
-        let routes = all_routes(["app"], OpenPathsConfig::new(), diamond)
+        let routes = all_routes(["app"], None, diamond)
             .into_iter()
             .collect::<Vec<_>>();
         // Baseline: both sides reach merge. Now seal routes ending in left.
         assert_eq!(routes.iter().filter(|r| r.ends_with(&["merge"])).count(), 2);
 
         let mut sealed_routes = Vec::new();
-        let outcome =
-            open_breadth_first_paths::<_, ()>(["app"], OpenPathsConfig::new(), diamond, |event| {
-                if let OpenPathsEvent::Route(route) = event {
-                    sealed_routes.push(route.to_vec());
-                    if *route.last().unwrap() == "left" {
-                        return ControlFlow::Continue(Visit::Skip);
-                    }
+        let outcome = open_breadth_first_paths::<_, ()>(["app"], None, diamond, |event| {
+            if let OpenPathsEvent::Route(route) = event {
+                sealed_routes.push(route.to_vec());
+                if *route.last().unwrap() == "left" {
+                    return ControlFlow::Continue(Visit::Skip);
                 }
-                ControlFlow::Continue(Visit::Descend)
-            });
+            }
+            ControlFlow::Continue(Visit::Descend)
+        });
         assert_eq!(outcome, None);
         let merged: Vec<_> = sealed_routes
             .iter()
@@ -327,7 +298,7 @@ mod tests {
 
     #[test]
     fn max_depth_bounds_extension_not_discovery() {
-        let routes = all_routes(["app"], OpenPathsConfig::new().with_max_depth(1), diamond);
+        let routes = all_routes(["app"], Some(1), diamond);
         // Depth-1 routes are still discovered; nothing is extended past them.
         assert!(routes.contains(&alloc::vec!["app", "left"]));
         assert!(routes.contains(&alloc::vec!["app", "right"]));
@@ -336,11 +307,7 @@ mod tests {
 
     #[test]
     fn duplicate_seeds_start_independent_routes() {
-        let routes = all_routes(
-            ["app", "app"],
-            OpenPathsConfig::new().with_max_depth(0),
-            diamond,
-        );
+        let routes = all_routes(["app", "app"], Some(0), diamond);
         assert_eq!(routes, alloc::vec![alloc::vec!["app"], alloc::vec!["app"]]);
     }
 
@@ -386,7 +353,7 @@ mod tests {
             let mut walked = Vec::new();
             let outcome = open_breadth_first_paths::<_, ()>(
                 [0_u32],
-                OpenPathsConfig::new().with_max_depth(max_depth),
+                Some(max_depth),
                 |node: &u32, out: &mut Vec<u32>| complete_from(*node, out),
                 |event| {
                     let OpenPathsEvent::Route(route) = event else {

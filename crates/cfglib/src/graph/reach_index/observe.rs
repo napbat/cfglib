@@ -10,9 +10,15 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
+use core::ops::ControlFlow;
 
-use super::{ReachIndexConfig, ReachScratch, component_u32};
+use super::{ReachIndexConfig, ReachScratch};
+use crate::graph::epoch::EpochMarks;
 use crate::graph::fanout::DenseFanout;
+use crate::graph::search::Visit;
+use crate::graph::traverse::{DepthFirstStack, DepthFirstVisitor, Steps, depth_first_core};
+use crate::graph::view::GraphView;
+use crate::identity::{slot, word};
 use crate::union_find::DisjointSet;
 
 /// The condensation, its observations, and nothing else.
@@ -190,9 +196,9 @@ impl Observations {
         forward.clear();
         backward.clear();
         marks.mark(2 * source);
-        forward.push(component_u32(source));
+        forward.push(word(source));
         marks.mark(2 * target + 1);
-        backward.push(component_u32(target));
+        backward.push(word(target));
 
         let (mut forward_head, mut backward_head) = (0, 0);
         while forward_head < forward.len() && backward_head < backward.len() {
@@ -211,7 +217,7 @@ impl Observations {
                     match self.decide(next, target) {
                         Some(true) => return true,
                         Some(false) => {}
-                        None => forward.push(component_u32(next)),
+                        None => forward.push(word(next)),
                     }
                 }
             } else {
@@ -229,7 +235,7 @@ impl Observations {
                     match self.decide(source, previous) {
                         Some(true) => return true,
                         Some(false) => {}
-                        None => backward.push(component_u32(previous)),
+                        None => backward.push(word(previous)),
                     }
                 }
             }
@@ -270,13 +276,10 @@ fn facts(successors: &DenseFanout<u32>, predecessors: &DenseFanout<u32>) -> Vec<
             .unwrap_or(0);
         let entry = &mut facts[component];
         entry.backward_level = level;
-        entry.weak = component_u32(weak.find(component));
+        entry.weak = word(weak.find(component));
     }
     facts
 }
-
-/// The `entered` value of a component the walk has not reached yet.
-const UNVISITED: u32 = u32::MAX;
 
 /// Compute `order_count` extended depth-first topological orders.
 ///
@@ -299,57 +302,47 @@ fn orders(
             .checked_mul(order_count)
             .expect("the order table's size fits in usize")
     ];
-    let Some(last) = count.checked_sub(1).map(component_u32) else {
+    let Some(last) = count.checked_sub(1).map(word) else {
         return entries;
+    };
+    let condensation = Condensation {
+        successors,
+        predecessors,
     };
     // Per component, the number of components finished when it was entered:
     // the first postorder number of its subtree.
-    let mut entered = vec![UNVISITED; count];
-    let mut stack: Vec<(usize, usize)> = Vec::new();
+    let mut entered = vec![0_u32; count];
+    let mut marks = EpochMarks::new(count);
+    let mut stack = DepthFirstStack::default();
     for order in 0..order_count {
         let along = walks_along(order);
-        let adjacency = if along { successors } else { predecessors };
-        let reversed = order / 2 % 2 == 1;
-        let rotation = order / 4;
-        let slot = |component: usize| component * order_count + order;
-
-        entered.fill(UNVISITED);
-        let mut finished = 0_u32;
-        for step in 0..count {
-            let root = if along { step } else { count - 1 - step };
-            if entered[root] != UNVISITED {
-                continue;
-            }
-            entered[root] = finished;
-            stack.push((root, 0));
-            while let Some((component, taken)) = stack.last_mut() {
-                let component = *component;
-                if let Some(next) = pick(adjacency.get(component), *taken, reversed, rotation) {
-                    *taken += 1;
-                    if entered[next] == UNVISITED {
-                        entered[next] = finished;
-                        stack.push((next, 0));
-                    }
-                    continue;
-                }
-                stack.pop();
-                // The subtree's postorder numbers are `entered..=finished`.
-                // Reversed for a walk along the edges, they become positions
-                // `last - finished..=last - entered`.
-                let entry = &mut entries[slot(component)];
-                if along {
-                    entry.position = last - finished;
-                    entry.tree = last - entered[component];
-                } else {
-                    entry.position = finished;
-                    entry.tree = entered[component];
-                }
-                finished += 1;
-            }
-        }
+        let picks = Picks {
+            along,
+            reversed: order / 2 % 2 == 1,
+            rotation: order / 4,
+        };
+        marks.reset();
+        let roots = (0..count).map(|step| if along { step } else { count - 1 - step });
+        depth_first_core::<_, _, _, ()>(
+            picks,
+            &condensation,
+            roots,
+            &mut marks,
+            &mut stack,
+            &mut Numbering {
+                entries: &mut entries,
+                entered: &mut entered,
+                slot: order,
+                order_count,
+                along,
+                last,
+                finished: 0,
+            },
+        );
 
         // Reach bounds, each over a direction whose bounds it reads are
         // already final in this component order.
+        let slot = |component: usize| component * order_count + order;
         for component in (0..count).rev() {
             let mut max_reached = entries[slot(component)].position;
             for &next in successors.get(component) {
@@ -368,16 +361,123 @@ fn orders(
     entries
 }
 
-/// The neighbor a walk takes after `taken` others, or `None` once it has
-/// taken them all.
-fn pick(neighbors: &[u32], taken: usize, reversed: bool, rotation: usize) -> Option<usize> {
-    let len = neighbors.len();
-    if taken == len {
-        return None;
+/// The condensation's two adjacency lists as a graph the depth-first core
+/// walks, its nodes the component indices.
+struct Condensation<'a> {
+    successors: &'a DenseFanout<u32>,
+    predecessors: &'a DenseFanout<u32>,
+}
+
+impl GraphView for Condensation<'_> {
+    type NodeId = usize;
+
+    fn node_bound(&self) -> usize {
+        self.successors.bound()
     }
-    let place = (taken + rotation % len) % len;
-    let place = if reversed { len - 1 - place } else { place };
-    Some(neighbors[place] as usize)
+
+    fn node_ids(&self) -> impl Iterator<Item = usize> + '_ {
+        0..self.node_bound()
+    }
+
+    fn successors(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
+        self.successors.get(node).iter().map(|&next| slot(next))
+    }
+
+    fn predecessors(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
+        self.predecessors
+            .get(node)
+            .iter()
+            .map(|&previous| slot(previous))
+    }
+}
+
+/// The neighbors one order takes, in the order it takes them: along the
+/// edges or against them, each list read forward or `reversed` and entered
+/// `rotation` places later, wrapping around.
+#[derive(Debug, Clone, Copy)]
+struct Picks {
+    along: bool,
+    reversed: bool,
+    rotation: usize,
+}
+
+impl<'a> Steps<Condensation<'a>> for Picks {
+    type Node = usize;
+    type Step = usize;
+
+    #[inline]
+    fn steps<'g>(
+        self,
+        graph: &'g Condensation<'a>,
+        node: usize,
+    ) -> impl Iterator<Item = usize> + 'g {
+        let neighbors = if self.along {
+            graph.successors.get(node)
+        } else {
+            graph.predecessors.get(node)
+        };
+        let len = neighbors.len();
+        (0..len).map(move |taken| {
+            let place = (taken + self.rotation % len) % len;
+            let place = if self.reversed {
+                len - 1 - place
+            } else {
+                place
+            };
+            slot(neighbors[place])
+        })
+    }
+
+    #[inline]
+    fn target(self, _graph: &Condensation<'a>, step: usize) -> usize {
+        step
+    }
+
+    #[inline]
+    fn index(node: usize) -> usize {
+        node
+    }
+}
+
+/// One order's numbering on the core's callbacks: a component's entry is
+/// written when its subtree is complete.
+struct Numbering<'a> {
+    entries: &'a mut [OrderEntry],
+    entered: &'a mut [u32],
+    /// The order's column within a component's entries.
+    slot: usize,
+    order_count: usize,
+    along: bool,
+    /// The highest position of the order.
+    last: u32,
+    /// How many components the walk has finished.
+    finished: u32,
+}
+
+impl DepthFirstVisitor<usize, usize, ()> for Numbering<'_> {
+    #[inline]
+    fn discover(&mut self, component: usize, _depth: usize) -> ControlFlow<(), Visit> {
+        self.entered[component] = self.finished;
+        ControlFlow::Continue(Visit::Descend)
+    }
+
+    #[inline]
+    fn finish(&mut self, component: usize) -> ControlFlow<()> {
+        // The subtree's postorder numbers are `entered..=finished`. Reversed
+        // for a walk along the edges, they become positions
+        // `last - finished..=last - entered`.
+        let entered = self.entered[component];
+        let entry = &mut self.entries[component * self.order_count + self.slot];
+        if self.along {
+            entry.position = self.last - self.finished;
+            entry.tree = self.last - entered;
+        } else {
+            entry.position = self.finished;
+            entry.tree = entered;
+        }
+        self.finished += 1;
+        ControlFlow::Continue(())
+    }
 }
 
 /// Choose up to `supportive` components and record every component's reach

@@ -7,11 +7,11 @@ use alloc::vec::Vec;
 
 use super::{
     AddressBuildError, AddressEdgeInfo, AddressHandler, AddressInstruction, AddressTransfers,
-    CallPolicy, GivenEdge, GivenEdges, HandlerIndex, ends_block,
+    CallPolicy, GivenEdge, GivenEdges, HandlerIndex, ends_block, is_flattened,
 };
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-use crate::edge::EdgeKind;
+use crate::edge::Edge;
 use crate::flow::{EdgeRole, Flow, Transfer, UnresolvedTransfer};
 
 /// Where the normal edges of a build come from.
@@ -132,7 +132,7 @@ where
                 EdgeRole::Sequential | EdgeRole::CallContinuation { .. }
             ) {
                 self.add_continuation(block, source, transfer, strict)?;
-            } else {
+            } else if !is_flattened(&transfer.role, self.policy) {
                 self.add_transfer(block, source, transfer);
             }
         }
@@ -168,11 +168,10 @@ where
             .addresses
             .binary_search(&edge.target)
             .expect("a given target is an instruction start");
-        self.cfg.add_edge_with_payload(
+        self.cfg.add_edge(
             block,
             self.blocks_by_instruction[target],
-            edge.kind,
-            edge.payload,
+            Edge::new(edge.kind).with_payload(edge.payload),
         );
     }
 
@@ -183,7 +182,7 @@ where
         transfer: Transfer<'_, I::Address, I::CaseKey>,
     ) {
         let Some(target) = transfer.target else {
-            if let Some(role) = transfer.unresolved_role() {
+            if let Some(role) = transfer.role.unresolved_role() {
                 self.unresolved.push(UnresolvedTransfer {
                     source,
                     target: None,
@@ -193,7 +192,7 @@ where
             return;
         };
         let Ok(target_position) = self.addresses.binary_search(&target) else {
-            if let Some(role) = transfer.unresolved_role() {
+            if let Some(role) = transfer.role.unresolved_role() {
                 self.unresolved.push(UnresolvedTransfer {
                     source,
                     target: Some(target),
@@ -206,14 +205,12 @@ where
         let payload = (self.edge_payload)(AddressEdgeInfo {
             source,
             target,
-            kind,
             role: transfer.role,
         });
-        self.cfg.add_edge_with_payload(
+        self.cfg.add_edge(
             block,
             self.blocks_by_instruction[target_position],
-            kind,
-            payload,
+            Edge::new(kind).with_payload(payload),
         );
     }
 }
@@ -237,13 +234,14 @@ pub(super) fn add_exception_edges<I: AddressInstruction, E>(
                 .expect("a protected instruction leads its block");
             debug_assert!(instruction.address() == addresses[position]);
             if instruction.retains_exception_edge() {
+                let role = EdgeRole::Unwind { handler: index };
+                let kind = role.kind();
                 let payload = edge_payload(AddressEdgeInfo {
                     source: addresses[position],
                     target: handler.entry,
-                    kind: EdgeKind::ExceptionUnwind,
-                    role: EdgeRole::Unwind { handler: index },
+                    role,
                 });
-                cfg.add_edge_with_payload(source, target, EdgeKind::ExceptionUnwind, payload);
+                cfg.add_edge(source, target, Edge::new(kind).with_payload(payload));
             }
         }
     }

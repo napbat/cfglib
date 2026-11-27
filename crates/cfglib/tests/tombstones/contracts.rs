@@ -6,8 +6,9 @@ use std::collections::BTreeSet;
 
 use cfglib::{
     BlockId, Cfg, CfgMetrics, DenseId, DominatorTree, EdgeId, EdgeKind, Graph, GraphMetrics,
-    GraphView, Rooted, RootedView, detect_loops, find_back_edges, kosaraju_scc, merge_blocks,
-    remove_empty_blocks, remove_unreachable, simplify, tarjan_scc,
+    GraphView, LoopForest, NodeOrder, Rooted, RootedView, SccDecomposition, SccNumbering,
+    find_back_edges, merge_blocks_mapped, remove_empty_blocks_mapped, remove_unreachable_mapped,
+    simplify_mapped,
 };
 
 use crate::cfg_analyses::check_cfg_analyses;
@@ -58,10 +59,10 @@ fn a_removed_block_leaves_iteration_but_stays_readable_until_compaction() {
     );
     assert_eq!(cfg.successors(first).collect::<Vec<_>>(), [last]);
     assert_eq!(cfg.predecessors(last).collect::<Vec<_>>(), [first]);
-    assert!(!cfg.is_compact());
+    assert!(!cfg.is_dense());
 
-    let renumbering = cfg.compact();
-    assert!(cfg.is_compact());
+    let renumbering = cfg.compact(NodeOrder::Insertion);
+    assert!(cfg.is_dense());
     assert_eq!(cfg.block_bound(), 3);
     assert_eq!(renumbering.node(middle), None);
     assert_eq!(renumbering.node(last).map(DenseId::index), Some(2));
@@ -74,7 +75,7 @@ fn a_compaction_is_the_identity_exactly_when_nothing_was_removed() {
     let mut untouched = Cfg::<u32>::new();
     let kept = untouched.new_block();
     untouched.add_edge(untouched.entry(), kept, EdgeKind::Fallthrough);
-    let renumbering = untouched.compact();
+    let renumbering = untouched.compact(NodeOrder::Insertion);
     assert!(renumbering.is_identity(), "nothing was removed");
     assert_eq!(renumbering.node(kept), Some(kept));
 
@@ -83,7 +84,7 @@ fn a_compaction_is_the_identity_exactly_when_nothing_was_removed() {
     let last = trailing.new_block();
     trailing.add_edge(trailing.entry(), kept, EdgeKind::Fallthrough);
     assert!(trailing.remove_block(last));
-    let renumbering = trailing.compact();
+    let renumbering = trailing.compact(NodeOrder::Insertion);
     assert_eq!(
         renumbering.node(kept),
         Some(kept),
@@ -139,15 +140,13 @@ fn compaction_numbers_survivors_densely_in_their_old_order() {
                 "seed {seed}: cfg edge {edge}"
             );
         }
-        assert_eq!(realized.cfg_renumbering.node_bound(), topology.slots);
-        assert_eq!(realized.cfg_renumbering.edge_bound(), topology.edges.len());
         assert!(
             !realized.cfg_renumbering.is_identity() && !realized.graph_renumbering.is_identity(),
             "seed {seed}: every generated topology removes a node, so no numbering is the identity"
         );
 
         let compacted = &realized.cfg_compacted;
-        assert!(compacted.is_compact());
+        assert!(compacted.is_dense());
         assert_eq!(compacted.block_bound(), live.len(), "seed {seed}");
         assert_eq!(compacted.edge_bound(), live_edges.len(), "seed {seed}");
         for (rank, &slot) in live.iter().enumerate() {
@@ -268,7 +267,7 @@ fn metrics_count_the_live_blocks_not_the_slots() {
     assert_eq!(metrics.graph.edge_count, 1);
     assert_eq!(metrics.graph.reachable_node_count, 2);
     assert_eq!(
-        metrics.graph.unreachable_node_count, 0,
+        metrics.graph.reachable_node_count, metrics.graph.node_count,
         "a removed slot is not unreachable code"
     );
     assert_eq!(metrics.graph.exit_count, 1);
@@ -276,7 +275,7 @@ fn metrics_count_the_live_blocks_not_the_slots() {
     assert!((metrics.avg_instructions_per_block - 1.0).abs() < f64::EPSILON);
     assert_eq!(GraphMetrics::compute(&cfg), metrics.graph);
 
-    cfg.compact();
+    cfg.compact(NodeOrder::Insertion);
     assert_eq!(
         CfgMetrics::compute(&cfg),
         metrics,
@@ -298,7 +297,8 @@ fn unreachable_blocks_are_counted_only_when_they_are_live() {
     assert_eq!(metrics.node_count, 3);
     assert_eq!(metrics.reachable_node_count, 2);
     assert_eq!(
-        metrics.unreachable_node_count, 1,
+        metrics.node_count - metrics.reachable_node_count,
+        1,
         "only the live dead block"
     );
     assert_eq!(metrics.edge_count, 2);
@@ -308,15 +308,15 @@ fn unreachable_blocks_are_counted_only_when_they_are_live() {
 fn metrics_between_a_transform_and_the_compaction_equal_the_compacted_metrics() {
     for seed in SEEDS {
         let mut cfg = Topology::random(seed, SSA_SAFE).build_cfg();
-        remove_unreachable(&mut cfg);
+        remove_unreachable_mapped(&mut cfg);
         let holed = CfgMetrics::compute(&cfg);
         assert_eq!(holed.graph.node_count, cfg.block_count(), "seed {seed}");
         assert_eq!(holed.graph.edge_count, cfg.edge_count(), "seed {seed}");
         assert_eq!(
-            holed.graph.unreachable_node_count, 0,
+            holed.graph.reachable_node_count, holed.graph.node_count,
             "seed {seed}: nothing unreachable is left"
         );
-        cfg.compact();
+        cfg.compact(NodeOrder::Insertion);
         assert_eq!(CfgMetrics::compute(&cfg), holed, "seed {seed}");
     }
 }
@@ -335,8 +335,14 @@ fn components_cover_the_live_nodes_only() {
     assert!(graph.remove_node(removed));
 
     for (name, decomposition) in [
-        ("tarjan", tarjan_scc(&graph)),
-        ("kosaraju", kosaraju_scc(&graph)),
+        (
+            "tarjan",
+            SccDecomposition::compute(&graph, SccNumbering::LeavesFirst),
+        ),
+        (
+            "kosaraju",
+            SccDecomposition::compute(&graph, SccNumbering::SourcesFirst),
+        ),
     ] {
         let components: BTreeSet<Vec<_>> = decomposition.components().map(<[_]>::to_vec).collect();
         assert_eq!(
@@ -344,7 +350,7 @@ fn components_cover_the_live_nodes_only() {
             BTreeSet::from([vec![first, second], vec![last]]),
             "{name}: the removed node is in no component"
         );
-        assert_eq!(decomposition.len(), 2, "{name}");
+        assert_eq!(decomposition.component_count(), 2, "{name}");
         assert!(
             !decomposition.is_dag(&graph),
             "{name}: first and second still form a cycle"
@@ -359,12 +365,15 @@ fn a_graph_whose_only_cycle_ran_through_a_removed_node_is_acyclic() {
     graph.add_edge(first, middle, ());
     graph.add_edge(middle, last, ());
     graph.add_edge(last, first, ());
-    assert!(!tarjan_scc(&graph).is_dag(&graph));
+    assert!(!SccDecomposition::compute(&graph, SccNumbering::LeavesFirst).is_dag(&graph));
 
     assert!(graph.remove_node(middle));
-    for decomposition in [tarjan_scc(&graph), kosaraju_scc(&graph)] {
+    for decomposition in [
+        SccDecomposition::compute(&graph, SccNumbering::LeavesFirst),
+        SccDecomposition::compute(&graph, SccNumbering::SourcesFirst),
+    ] {
         assert!(decomposition.is_dag(&graph));
-        assert_eq!(decomposition.len(), 2);
+        assert_eq!(decomposition.component_count(), 2);
     }
     let rooted = Rooted::new(&graph, first);
     assert_eq!(GraphMetrics::compute(&rooted).node_count, 2);
@@ -374,10 +383,12 @@ fn a_graph_whose_only_cycle_ran_through_a_removed_node_is_acyclic() {
 fn analyses_run_between_a_transform_and_the_compaction() {
     type Transform = fn(&mut Cfg<Op>) -> usize;
     let transforms: [(&str, Transform); 4] = [
-        ("remove_unreachable", remove_unreachable::<Op, ()>),
-        ("merge_blocks", merge_blocks::<Op, ()>),
-        ("remove_empty_blocks", remove_empty_blocks::<Op, ()>),
-        ("simplify", simplify::<Op, ()>),
+        ("remove_unreachable", |cfg| remove_unreachable_mapped(cfg).0),
+        ("merge_blocks", |cfg| merge_blocks_mapped(cfg).0),
+        ("remove_empty_blocks", |cfg| {
+            remove_empty_blocks_mapped(cfg).0
+        }),
+        ("simplify", |cfg| simplify_mapped(cfg).0),
     ];
     for (name, transform) in transforms {
         for seed in SEEDS {
@@ -403,7 +414,7 @@ fn loops_are_relative_to_the_entry_so_dead_cycles_are_not_loops() {
 
     let dominators = DominatorTree::compute(&cfg);
     assert!(
-        detect_loops(&cfg, &dominators).is_empty(),
+        LoopForest::compute(&cfg, &dominators).is_empty(),
         "no cycle is reachable from the entry, so no loop exists"
     );
     assert_eq!(find_back_edges(&cfg, &dominators), Vec::new());

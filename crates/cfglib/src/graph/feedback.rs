@@ -9,12 +9,12 @@
 //! drawing should not rank by — wants one that violates as few edges as it
 //! can, and the edges it violates.
 //!
-//! [`linear_arrangement`] orders every live node: the components of
-//! [`kosaraju_scc`] sources first, and the nodes of each cyclic component by
-//! the greedy heuristic of Eades, Lin and Smyth (*A fast and effective
-//! heuristic for the feedback arc set problem*, Information Processing
-//! Letters 47(6), 1993). [`feedback_arc_set`] reports the edges that point
-//! backward in that order, self-loops included; removing them leaves the
+//! [`linear_arrangement`] orders every live node: the components in their
+//! [`SccNumbering::SourcesFirst`] order, and the nodes of each cyclic
+//! component by the greedy heuristic of Eades, Lin and Smyth (*A fast and
+//! effective heuristic for the feedback arc set problem*, Information
+//! Processing Letters 47(6), 1993). [`feedback_arc_set`] reports the edges
+//! that point backward in that order, self-loops included; removing them leaves the
 //! graph acyclic. With [`FeedbackConfig::minimal`], it then re-admits every
 //! reported edge whose return closes no cycle, the minimality pass of
 //! Cavallaro, Cutello and Pavone (*Efficient heuristics to compute minimal and
@@ -26,18 +26,21 @@
 extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::ops::ControlFlow;
 
-use super::edge_view::EdgeView;
+use super::edge_view::{EdgeView, FilteredEdges};
 use super::epoch::EpochMarks;
-use super::scc::{SccDecomposition, kosaraju_scc};
+use super::scc::{SccDecomposition, SccNumbering};
+use super::search::Visit;
+use super::traverse::{DepthFirstStack, DepthFirstVisitor, Outgoing, StepKind, depth_first_core};
 use super::view::{DenseId, GraphView};
+use crate::identity::{NO_INDEX, check_bound, slot, word};
 
 /// Options of [`feedback_arc_set`].
 ///
-/// The field is public and the struct is `Copy`, so a consumer that stores
-/// its options as data can write a literal; [`new`](Self::new) plus
-/// [`with_minimal`](Self::with_minimal) are the ergonomic form. The default
-/// is the linear-time set, without the minimality pass.
+/// A plain struct with a public field: set it to change the options. The
+/// default, also [`new`](Self::new) for a `const`, is the linear-time set,
+/// without the minimality pass.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FeedbackConfig {
     /// Run the minimality pass: re-admit each edge of the set whose return
@@ -54,19 +57,12 @@ impl FeedbackConfig {
     pub const fn new() -> Self {
         Self { minimal: false }
     }
-
-    /// Return this configuration with the minimality pass on or off.
-    #[must_use]
-    pub const fn with_minimal(mut self, minimal: bool) -> Self {
-        self.minimal = minimal;
-        self
-    }
 }
 
 /// Order every live node so that few edges point backward.
 ///
-/// The result is a permutation of the live nodes. The components of
-/// [`kosaraju_scc`] come in its order, sources first, so every edge between
+/// The result is a permutation of the live nodes. The components come in
+/// their [`SccNumbering::SourcesFirst`] order, so every edge between
 /// two components points forward. A singleton component is its node. A
 /// cyclic component is ordered by the Eades–Lin–Smyth heuristic over the
 /// edges inside it, self-loops aside: repeatedly peel a sink to the tail of
@@ -90,6 +86,10 @@ impl FeedbackConfig {
 /// ascending node id, and a node goes to the back of a bucket when its
 /// degrees change. So ties go to the smaller node id until peeling
 /// disturbs them, and the same graph always gives the same arrangement.
+///
+/// # Panics
+///
+/// Panics when `graph` has a cycle and its node bound exceeds `u32::MAX`.
 ///
 /// # Examples
 ///
@@ -138,6 +138,10 @@ pub fn linear_arrangement<G: GraphView>(graph: &G) -> Vec<G::NodeId> {
 /// `O(f · (n_c + m_c))` for each component of `n_c` nodes and `m_c` edges
 /// whose set has `f` edges.
 ///
+/// # Panics
+///
+/// Panics when `graph` has a cycle and its node bound exceeds `u32::MAX`.
+///
 /// # Examples
 ///
 /// ```
@@ -166,7 +170,7 @@ pub fn linear_arrangement<G: GraphView>(graph: &G) -> Vec<G::NodeId> {
 /// assert_eq!(topological_sort(&acyclic), Some(linear_arrangement(&graph)));
 ///
 /// // Both edges are needed, so the minimality pass keeps them.
-/// let minimal = feedback_arc_set(&graph, FeedbackConfig::new().with_minimal(true));
+/// let minimal = feedback_arc_set(&graph, FeedbackConfig { minimal: true });
 /// assert_eq!(minimal, set);
 /// ```
 #[must_use]
@@ -191,7 +195,7 @@ pub fn feedback_arc_set<G: EdgeView>(graph: &G, config: FeedbackConfig) -> Vec<G
 
 /// The decomposition and the arrangement of [`linear_arrangement`].
 fn arrange<G: GraphView>(graph: &G) -> (SccDecomposition<G::NodeId>, Vec<G::NodeId>) {
-    let components = kosaraju_scc(graph);
+    let components = SccDecomposition::compute(graph, SccNumbering::SourcesFirst);
     let mut order = Vec::with_capacity(graph.node_bound());
     // An acyclic graph has no component to peel, so it never pays for the
     // buffers.
@@ -208,8 +212,6 @@ fn arrange<G: GraphView>(graph: &G) -> (SccDecomposition<G::NodeId>, Vec<G::Node
     (components, order)
 }
 
-/// No node: the end of a list, and the list of a node not filed in one.
-const NONE: usize = usize::MAX;
 /// The list of the nodes with no out-edge left inside the component.
 const SINKS: usize = 0;
 /// The list of the nodes with no in-edge left and some out-edge.
@@ -229,17 +231,17 @@ struct Peeling {
     out_degree: Vec<usize>,
     /// In-edges left to each node from remaining nodes of its component.
     in_degree: Vec<usize>,
-    /// The list each node is filed in, [`NONE`] outside the component being
-    /// peeled and once peeled.
-    list: Vec<usize>,
-    /// The next node of the same list.
-    next: Vec<usize>,
-    /// The previous node of the same list.
-    previous: Vec<usize>,
-    /// The first node of each list.
-    head: Vec<usize>,
+    /// The list each node is filed in, [`NO_INDEX`] outside the component
+    /// being peeled and once peeled.
+    list: Vec<u32>,
+    /// The next node of the same list, [`NO_INDEX`] at its end.
+    next: Vec<u32>,
+    /// The previous node of the same list, [`NO_INDEX`] at its start.
+    previous: Vec<u32>,
+    /// The first node of each list, [`NO_INDEX`] for an empty one.
+    head: Vec<u32>,
     /// The last node of each list, where a node is filed.
-    tail: Vec<usize>,
+    tail: Vec<u32>,
     /// The largest in-degree of the component, so that every bucket index
     /// is positive.
     offset: usize,
@@ -252,12 +254,13 @@ struct Peeling {
 
 impl Peeling {
     fn new(node_bound: usize) -> Self {
+        check_bound(node_bound, "node bound of a feedback arc set");
         Self {
             out_degree: vec![0; node_bound],
             in_degree: vec![0; node_bound],
-            list: vec![NONE; node_bound],
-            next: vec![NONE; node_bound],
-            previous: vec![NONE; node_bound],
+            list: vec![NO_INDEX; node_bound],
+            next: vec![NO_INDEX; node_bound],
+            previous: vec![NO_INDEX; node_bound],
             head: Vec::new(),
             tail: Vec::new(),
             offset: 0,
@@ -292,9 +295,9 @@ impl Peeling {
         });
         let lists = BUCKETS + max_in + max_out + 1;
         self.head.clear();
-        self.head.resize(lists, NONE);
+        self.head.resize(lists, NO_INDEX);
         self.tail.clear();
-        self.tail.resize(lists, NONE);
+        self.tail.resize(lists, NO_INDEX);
         self.offset = max_in;
         self.top = BUCKETS;
         for &node in nodes {
@@ -344,15 +347,15 @@ impl Peeling {
     /// File `node` at the tail of the list its degrees put it in.
     fn file(&mut self, node: usize) {
         let list = self.key(node);
-        self.list[node] = list;
-        self.next[node] = NONE;
+        self.list[node] = word(list);
+        self.next[node] = NO_INDEX;
         let previous = self.tail[list];
         self.previous[node] = previous;
         match previous {
-            NONE => self.head[list] = node,
-            previous => self.next[previous] = node,
+            NO_INDEX => self.head[list] = word(node),
+            previous => self.next[slot(previous)] = word(node),
         }
-        self.tail[list] = node;
+        self.tail[list] = word(node);
         if list > self.top {
             self.top = list;
         }
@@ -360,24 +363,25 @@ impl Peeling {
 
     /// Take `node` out of its list.
     fn unlink(&mut self, node: usize) {
-        let (list, previous, next) = (self.list[node], self.previous[node], self.next[node]);
+        let (list, previous, next) = (slot(self.list[node]), self.previous[node], self.next[node]);
         match previous {
-            NONE => self.head[list] = next,
-            previous => self.next[previous] = next,
+            NO_INDEX => self.head[list] = next,
+            previous => self.next[slot(previous)] = next,
         }
         match next {
-            NONE => self.tail[list] = previous,
-            next => self.previous[next] = previous,
+            NO_INDEX => self.tail[list] = previous,
+            next => self.previous[slot(next)] = previous,
         }
-        self.list[node] = NONE;
+        self.list[node] = NO_INDEX;
     }
 
     /// Take the first node of `list`, if it holds one.
     fn take(&mut self, list: usize) -> Option<usize> {
         let node = self.head[list];
-        if node == NONE {
+        if node == NO_INDEX {
             return None;
         }
+        let node = slot(node);
         self.unlink(node);
         Some(node)
     }
@@ -389,7 +393,7 @@ impl Peeling {
     /// past empty buckets and rises by one per degree change, so the scans
     /// of a component cost O(buckets + edges) together.
     fn take_highest(&mut self) -> usize {
-        while self.head[self.top] == NONE {
+        while self.head[self.top] == NO_INDEX {
             self.top -= 1;
         }
         self.take(self.top)
@@ -402,14 +406,14 @@ impl Peeling {
     fn peel<G: GraphView>(&mut self, graph: &G, node: G::NodeId) {
         for successor in graph.successors(node) {
             let successor = successor.index();
-            if self.list[successor] != NONE {
+            if self.list[successor] != NO_INDEX {
                 self.in_degree[successor] -= 1;
                 self.refile(successor);
             }
         }
         for predecessor in graph.predecessors(node) {
             let predecessor = predecessor.index();
-            if self.list[predecessor] != NONE {
+            if self.list[predecessor] != NO_INDEX {
                 self.out_degree[predecessor] -= 1;
                 self.refile(predecessor);
             }
@@ -419,7 +423,7 @@ impl Peeling {
     /// Move `node` to the tail of the list its degrees now put it in, unless
     /// it is already in that list.
     fn refile(&mut self, node: usize) {
-        if self.key(node) != self.list[node] {
+        if self.key(node) != slot(self.list[node]) {
             self.unlink(node);
             self.file(node);
         }
@@ -443,7 +447,7 @@ fn minimize<G: EdgeView>(
         excluded[edge.index()] = true;
     }
     let mut marks = EpochMarks::new(graph.node_bound());
-    let mut stack = Vec::new();
+    let mut stack = DepthFirstStack::default();
     set.retain(|&edge| {
         let edge_ref = graph.edge(edge);
         let (source, target) = (edge_ref.source(), edge_ref.target());
@@ -469,29 +473,46 @@ fn reaches<G: EdgeView>(
     from: G::NodeId,
     to: G::NodeId,
     marks: &mut EpochMarks,
-    stack: &mut Vec<G::NodeId>,
+    stack: &mut DepthFirstStack<G::NodeId, G::NodeId>,
 ) -> bool {
-    let component = components.component_index(from);
+    let admitted = FilteredEdges::new(graph, |edge: G::EdgeId, _: &G::EdgeData| {
+        !excluded[edge.index()]
+    });
     marks.reset();
-    marks.mark(from.index());
-    stack.clear();
-    stack.push(from);
-    while let Some(node) = stack.pop() {
-        for edge in graph.outgoing(node) {
-            if excluded[edge.index()] {
-                continue;
-            }
-            let next = graph.edge(edge).target();
-            if next == to {
-                return true;
-            }
-            if !marks.is_marked(next.index()) && components.component_index(next) == component {
-                marks.mark(next.index());
-                stack.push(next);
-            }
+    let mut search = Within {
+        components,
+        component: components.component_index(from),
+        target: to,
+    };
+    depth_first_core(Outgoing, &admitted, [from], marks, stack, &mut search).is_some()
+}
+
+/// A depth-first search that stays inside one component and stops at the
+/// first step to `target`.
+struct Within<'a, N> {
+    components: &'a SccDecomposition<N>,
+    component: usize,
+    target: N,
+}
+
+impl<N: DenseId> DepthFirstVisitor<N, N, ()> for Within<'_, N> {
+    #[inline]
+    fn discover(&mut self, node: N, _depth: usize) -> ControlFlow<(), Visit> {
+        ControlFlow::Continue(if self.components.component_index(node) == self.component {
+            Visit::Descend
+        } else {
+            Visit::Skip
+        })
+    }
+
+    #[inline]
+    fn step(&mut self, _from: N, _step: N, to: N, _kind: StepKind) -> ControlFlow<()> {
+        if to == self.target {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
         }
     }
-    false
 }
 
 #[cfg(test)]

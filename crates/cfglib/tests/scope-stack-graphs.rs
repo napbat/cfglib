@@ -3,10 +3,10 @@
 use core::cmp::Ordering;
 
 use cfglib::{
-    EdgeRef, ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeGraphPathLabel, ScopeGraphQuery, ScopeId,
-    ScopePath, ScopeQuery, ScopeResolution, ScopeResolutionConfig, ScopeResolutionIndex,
-    StackGraph, StackPartialPathConfig, StackPartialPathDatabase, StackResolution,
-    StackResolutionIndex, StackSearchConfig,
+    EdgeRef, PathSearchConfig, ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeGraphPathLabel,
+    ScopeGraphQuery, ScopeId, ScopeIndexConfig, ScopePath, ScopeQuery, ScopeResolution,
+    ScopeResolutionIndex, StackGraph, StackNodeKind, StackPartialPathDatabase, StackResolution,
+    StackResolutionIndex,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,7 +209,7 @@ fn symtree_shaped_scope_queries_cover_definition_completion_and_rename() {
     let import_use = graph.add_reference(body, exact("package", Namespace::Value, 20));
 
     let index =
-        ScopeResolutionIndex::compute(&graph, &SymtreeStyleLookup, ScopeResolutionConfig::new());
+        ScopeResolutionIndex::compute(&graph, &SymtreeStyleLookup, ScopeIndexConfig::default());
     assert_eq!(
         index.resolution(early_use).candidates()[0].datum(),
         early_item
@@ -232,12 +232,11 @@ fn symtree_shaped_scope_queries_cover_definition_completion_and_rename() {
         position: 10,
         name_match: NameMatch::Prefix,
     };
-    let completion = ScopeResolution::compute_from(
+    let completion = ScopeResolution::compute(
         &graph,
-        body,
-        &completion,
+        ScopeQuery::new(body, &completion),
         &SymtreeStyleLookup,
-        ScopeResolutionConfig::new(),
+        PathSearchConfig::default(),
     );
     let targets: Vec<_> = completion
         .candidates()
@@ -258,13 +257,34 @@ fn non_copy_stack_symbols_resolve_directly_and_from_file_summaries() {
     let consumer = graph.add_file("consumer.rs".into());
     let provider = graph.add_file("provider.rs".into());
     let reference = graph
-        .add_push_symbol_node(consumer, "package".into(), true, "import package".into())
+        .add_node(
+            consumer,
+            StackNodeKind::PushSymbol {
+                symbol: "package".into(),
+                is_reference: true,
+            },
+            "import package".into(),
+        )
         .expect("known file");
     let preferred = graph
-        .add_pop_symbol_node(provider, "package".into(), true, "public package".into())
+        .add_node(
+            provider,
+            StackNodeKind::PopSymbol {
+                symbol: "package".into(),
+                is_definition: true,
+            },
+            "public package".into(),
+        )
         .expect("known file");
     let fallback = graph
-        .add_pop_symbol_node(provider, "package".into(), true, "fallback package".into())
+        .add_node(
+            provider,
+            StackNodeKind::PopSymbol {
+                symbol: "package".into(),
+                is_definition: true,
+            },
+            "fallback package".into(),
+        )
         .expect("known file");
     let root = graph.root_node();
     graph
@@ -277,20 +297,22 @@ fn non_copy_stack_symbols_resolve_directly_and_from_file_summaries() {
         .add_edge(root, fallback, 1, "fallback export")
         .expect("root joins files");
 
-    let direct = StackResolution::compute(&graph, reference, StackSearchConfig::new());
-    let partials = StackPartialPathDatabase::compute(&graph, StackPartialPathConfig::new());
-    let stitched = StackResolution::compute_from_partials(
+    let direct = StackResolution::compute(&graph, reference, PathSearchConfig::default());
+    let partials = StackPartialPathDatabase::compute(&graph, PathSearchConfig::default());
+    let stitched = StackResolution::try_compute_stitched(
         &graph,
         &partials,
         reference,
-        StackSearchConfig::new(),
-    );
+        PathSearchConfig::default(),
+    )
+    .expect("the database matches the graph");
     assert_eq!(direct.paths(), stitched.paths());
     assert_eq!(stitched.target_count(), 1);
     assert_eq!(stitched.paths()[0].end(), preferred);
 
     let reverse =
-        StackResolutionIndex::compute_from_partials(&graph, &partials, StackSearchConfig::new());
+        StackResolutionIndex::try_compute_stitched(&graph, &partials, PathSearchConfig::default())
+            .expect("the database matches the graph");
     assert_eq!(reverse.references_to(preferred), &[reference]);
     assert_eq!(reverse.references_to(fallback), []);
 }

@@ -3,6 +3,9 @@
 use crate::graph::edge_view::EdgeRef;
 
 pub use crate::graph::store::{EdgeId, EdgeTag};
+pub use probability::Probability;
+
+mod probability;
 
 /// Declares [`EdgeKind`] with its canonical names, so the variants, the list
 /// of every kind, and the name of each are written once.
@@ -53,15 +56,14 @@ edge_kinds! {
     ///
     /// # Which kinds algorithms interpret
     ///
-    /// Dominance, loop detection, SCC, and traversals are purely structural —
-    /// they never read kinds, so consumers may choose kinds freely for their own
-    /// purposes. The kind-sensitive surfaces are: AST lifting (block
-    /// classification via [`Back`](Self::Back),
-    /// [`ConditionalTrue`](Self::ConditionalTrue) /
+    /// Dominance, SCC, and traversals are purely structural — they never read
+    /// kinds, so consumers may choose kinds freely for their own purposes. The
+    /// kind-sensitive surfaces are: AST lifting (block classification via
+    /// [`Back`](Self::Back), [`ConditionalTrue`](Self::ConditionalTrue) /
     /// [`ConditionalFalse`](Self::ConditionalFalse),
-    /// [`SwitchCase`](Self::SwitchCase), [`Jump`](Self::Jump)), the `_tagged`
-    /// loop detectors ([`Back`](Self::Back)), linearization (fallthrough-like
-    /// kinds vs branches), switch recovery
+    /// [`SwitchCase`](Self::SwitchCase), [`Jump`](Self::Jump)), loop detection
+    /// ([`Back`](Self::Back), see [`find_back_edges`](crate::find_back_edges)),
+    /// linearization (fallthrough-like kinds vs branches), switch recovery
     /// ([`IndirectJump`](Self::IndirectJump) removal), the exception model
     /// (the `Exception*` kinds), diffing (kind discriminants in fingerprints),
     /// and DOT styling.
@@ -118,10 +120,9 @@ impl EdgeKind {
     /// sequentially.
     ///
     /// [`ExceptionLeave`](Self::ExceptionLeave) is a normal transfer out
-    /// of a protected region, so it stays sequential. A frontend that
-    /// attaches an [`ExceptionFlow`](crate::ExceptionFlow) payload is
-    /// expected to make it [`Exceptional`](crate::ExceptionFlow::Exceptional)
-    /// for exactly these kinds; the graph does not check the pairing.
+    /// of a protected region, so it stays sequential. An
+    /// [`ExceptionFlow`](crate::ExceptionFlow) payload does not restate this:
+    /// it only adds the phase and disposition of an exceptional transfer.
     #[must_use]
     pub const fn is_exceptional(self) -> bool {
         matches!(
@@ -151,14 +152,23 @@ pub trait KindedEdge {
     fn kind(&self) -> EdgeKind;
 }
 
+/// The edge data of a plain graph declares no tag: every edge is a
+/// [`Fallthrough`](EdgeKind::Fallthrough), so the kind-sensitive algorithms
+/// read the graph by its shape alone.
+impl KindedEdge for () {
+    fn kind(&self) -> EdgeKind {
+        EdgeKind::Fallthrough
+    }
+}
+
 impl core::fmt::Display for EdgeKind {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(self.name())
     }
 }
 
-/// A directed edge's payload: its classification, optional branch weight, and
-/// consumer-defined metadata.
+/// A directed edge's payload: its classification, optional branch
+/// probability, and consumer-defined metadata.
 ///
 /// Identity and endpoints belong to the store, not to the payload;
 /// [`Cfg::edge`](crate::Cfg::edge) hands out an [`EdgeRef`] that carries all
@@ -167,37 +177,89 @@ impl core::fmt::Display for EdgeKind {
 /// `E` is consumer-owned metadata. The default unit payload preserves the
 /// compact `Cfg<I>` surface, while frontends that need switch labels, handler
 /// identities, continuation tokens, or source provenance use `Cfg<I, E>`.
-#[derive(Debug, Clone)]
+///
+/// [`Cfg::add_edge`](crate::Cfg::add_edge) takes anything that converts into
+/// an edge: a bare [`EdgeKind`] when the payload has a [`Default`], or an
+/// edge built from [`Edge::new`] with [`with_weight`](Self::with_weight) and
+/// [`with_payload`](Self::with_payload).
+///
+/// # Examples
+///
+/// ```
+/// use cfglib::{Cfg, Edge, EdgeKind, Probability};
+///
+/// let mut cfg = Cfg::<u32, &str>::with_edge_payload();
+/// let exit = cfg.new_block();
+/// let likely = Probability::from_f64(0.9).expect("0.9 is a probability");
+/// let plain = cfg.add_edge(cfg.entry(), exit, EdgeKind::Fallthrough);
+/// let hot = cfg.add_edge(
+///     cfg.entry(),
+///     exit,
+///     Edge::new(EdgeKind::Jump).with_weight(likely).with_payload("loop exit"),
+/// );
+/// assert_eq!(cfg.edge(plain).payload(), &"");
+/// assert_eq!(cfg.edge(hot).weight(), Some(likely));
+/// assert_eq!(cfg.edge(hot).payload(), &"loop exit");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Edge<E = ()> {
     /// Classification.
     pub(crate) kind: EdgeKind,
-    /// Optional branch probability (0.0–1.0).
+    /// Optional branch probability.
     ///
     /// When set, this is the likelihood of this edge being taken relative to
     /// the other outgoing edges of the same source block.
     /// DOT output uses it for visual emphasis.
-    pub(crate) weight: Option<f64>,
+    pub(crate) weight: Option<Probability>,
     /// Consumer-defined metadata.
     pub(crate) payload: E,
 }
 
-impl<E: PartialEq> PartialEq for Edge<E> {
-    fn eq(&self, other: &Self) -> bool {
-        self.kind == other.kind
-            && self.weight.map(f64::to_bits) == other.weight.map(f64::to_bits)
-            && self.payload == other.payload
+impl Edge {
+    /// An edge of `kind` with no branch probability and the unit payload.
+    ///
+    /// [`with_weight`](Self::with_weight) adds a probability and
+    /// [`with_payload`](Self::with_payload) replaces the payload, so one
+    /// constructor serves every combination.
+    #[must_use]
+    pub const fn new(kind: EdgeKind) -> Self {
+        Self {
+            kind,
+            weight: None,
+            payload: (),
+        }
     }
 }
 
-impl<E: Eq> Eq for Edge<E> {}
-
-impl<E> Edge<E> {
-    /// Create an edge payload.
-    pub(crate) const fn new(kind: EdgeKind, weight: Option<f64>, payload: E) -> Self {
+/// An edge of the kind with no branch weight and the default payload.
+impl<E: Default> From<EdgeKind> for Edge<E> {
+    fn from(kind: EdgeKind) -> Self {
         Self {
             kind,
-            weight,
+            weight: None,
+            payload: E::default(),
+        }
+    }
+}
+
+impl<E> Edge<E> {
+    /// This edge with the branch probability `weight`.
+    #[must_use]
+    pub fn with_weight(self, weight: Probability) -> Self {
+        Self {
+            weight: Some(weight),
+            ..self
+        }
+    }
+
+    /// This edge with `payload` as its consumer metadata in place of its
+    /// current payload.
+    #[must_use]
+    pub fn with_payload<P>(self, payload: P) -> Edge<P> {
+        Edge {
+            kind: self.kind,
+            weight: self.weight,
             payload,
         }
     }
@@ -215,16 +277,16 @@ impl<E> Edge<E> {
         self.kind = kind;
     }
 
-    /// The branch weight / probability, if set.
+    /// The branch probability, if set.
     #[inline]
     #[must_use]
-    pub const fn weight(&self) -> Option<f64> {
+    pub const fn weight(&self) -> Option<Probability> {
         self.weight
     }
 
-    /// Set the branch weight / probability.
+    /// Set the branch probability.
     #[inline]
-    pub const fn set_weight(&mut self, weight: Option<f64>) {
+    pub const fn set_weight(&mut self, weight: Option<Probability>) {
         self.weight = weight;
     }
 
@@ -268,10 +330,10 @@ impl<'g, N: Copy, I: Copy, E> EdgeRef<'g, N, I, Edge<E>> {
         self.data().kind
     }
 
-    /// The branch weight / probability, if set.
+    /// The branch probability, if set.
     #[inline]
     #[must_use]
-    pub const fn weight(&self) -> Option<f64> {
+    pub const fn weight(&self) -> Option<Probability> {
         self.data().weight
     }
 
@@ -290,7 +352,8 @@ mod tests {
     use alloc::collections::BTreeSet;
     use alloc::vec::Vec;
 
-    use super::EdgeKind;
+    use super::{Edge, EdgeKind};
+    use crate::test_util::probability;
 
     #[test]
     fn every_kind_has_a_distinct_name_that_reads_back() {
@@ -331,6 +394,26 @@ mod tests {
                 EdgeKind::ExceptionContinue,
             ],
             "ExceptionLeave is a normal transfer out of a protected region"
+        );
+    }
+
+    #[test]
+    fn every_way_to_build_an_edge_agrees_on_kind_weight_and_payload() {
+        let from_kind: Edge<u8> = EdgeKind::Jump.into();
+        assert_eq!(from_kind, Edge::new(EdgeKind::Jump).with_payload(0));
+        assert_eq!(from_kind.weight(), None);
+
+        let quarter = probability(0.25);
+        let built = Edge::new(EdgeKind::ConditionalTrue)
+            .with_weight(quarter)
+            .with_payload("taken");
+        assert_eq!(built.kind(), EdgeKind::ConditionalTrue);
+        assert_eq!(built.weight(), Some(quarter));
+        assert_eq!(built.payload(), &"taken");
+        assert_eq!(
+            built.with_payload(7_u8).weight(),
+            Some(quarter),
+            "replacing the payload keeps the weight"
         );
     }
 }

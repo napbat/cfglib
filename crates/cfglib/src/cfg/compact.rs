@@ -6,53 +6,60 @@ extern crate alloc;
 use alloc::collections::BTreeSet;
 
 use crate::block::{BlockId, BlockTag};
-use crate::edge::EdgeTag;
 use crate::graph::store::{NodeOrder, Renumbering};
-use crate::region::{Handler, HandlerBody, HandlerKind, Region};
 
 use super::Cfg;
-
-/// The renumbering one [`Cfg::compact`] or [`Cfg::compact_ordered`]
-/// produced.
-pub type CfgRenumbering = Renumbering<BlockTag, EdgeTag>;
+use super::anchors::BlockRefMut;
 
 impl<I, E> Cfg<I, E> {
-    /// Whether [`compact`](Self::compact) would renumber nothing: no block or
-    /// edge slot has been removed, so every slot holds a live entity.
+    /// Whether every block and edge slot holds a live entity: no slot has
+    /// been removed, so [`compact`](Self::compact) in
+    /// [`NodeOrder::Insertion`] would renumber nothing.
     ///
-    /// A CFG that was only ever added to is compact, however it was built.
-    /// Unlike [`Graph::is_compact`](crate::Graph::is_compact), which asks
-    /// whether the store is a pure compressed base, this asks what a consumer
-    /// holding identities needs to know: whether they stay valid.
+    /// A CFG that was only ever added to is dense, however it was built.
+    /// [`Graph::is_compact`](crate::Graph::is_compact) asks a different
+    /// question, whether the store is a pure compressed base; this one asks
+    /// what a consumer holding identities needs to know: whether they stay
+    /// valid.
     #[must_use]
-    pub fn is_compact(&self) -> bool {
+    pub fn is_dense(&self) -> bool {
         self.block_count() == self.block_bound() && self.edge_count() == self.edge_bound()
     }
 
-    /// Renumber the surviving blocks and edges densely and report the change.
+    /// Renumber the surviving blocks in `order` and the surviving edges
+    /// densely, and report the change.
     ///
-    /// Survivors keep their relative order, so identity order still means
-    /// insertion order afterwards; [`compact_ordered`](Self::compact_ordered)
-    /// numbers the blocks in another order. The entry block, the exception regions,
-    /// and the cleanup records are renumbered with the graph; a set of blocks
-    /// (a region's protected blocks, a handler's known body) simply loses the
-    /// members that did not survive.
+    /// This carries [`Graph::compact`](crate::Graph::compact) over to the
+    /// CFG: block identity order follows `order` (under
+    /// [`NodeOrder::Insertion`] it still means insertion order), while edge
+    /// identity order still means insertion order and every block keeps the
+    /// order of its successor and predecessor edges. Reverse postorder from
+    /// the entry makes identity order a forward solver's iteration order.
+    /// The entry block, the exception regions, and the cleanup records are
+    /// renumbered with the graph; a set of blocks (a region's protected
+    /// blocks, a handler's known body) simply loses the members that did not
+    /// survive.
     ///
     /// Compose the result with a pass's [`Rewrite`](crate::Rewrite) through
-    /// [`then_renumbered`](crate::Rewrite::then_renumbered) to keep one
-    /// mapping from the identities a consumer held to the ones it now holds.
+    /// [`Rewrite::compose`](crate::Rewrite::compose) and the [`From`]
+    /// conversion to keep one mapping from the identities a consumer held to
+    /// the ones it now holds.
     ///
     /// # Panics
     ///
-    /// Panics when a handler entry, a filter block, or a cleanup resume point
-    /// names a block that did not survive: those are single references with
-    /// no meaningful replacement, so the exception metadata has to be rebuilt
-    /// before such a block is removed.
+    /// Panics under the conditions of
+    /// [`Graph::compact`](crate::Graph::compact), before anything changes.
+    /// Panics when a handler entry, a filter block, a cleanup exit block, or
+    /// a continuation target names a block that did not survive: those are
+    /// single references with no meaningful replacement, so the exception
+    /// metadata has to be rebuilt before such a block is removed
+    /// ([`check_regions`](Self::check_regions) reports them as
+    /// [`RegionError::BlockNotLive`](crate::RegionError::BlockNotLive)).
     ///
     /// # Examples
     ///
     /// ```
-    /// use cfglib::{Cfg, EdgeKind};
+    /// use cfglib::{Cfg, EdgeKind, NodeOrder};
     ///
     /// let mut cfg = Cfg::<u32>::new();
     /// let dropped = cfg.new_block();
@@ -60,37 +67,11 @@ impl<I, E> Cfg<I, E> {
     /// cfg.add_edge(cfg.entry(), kept, EdgeKind::Fallthrough);
     /// cfg.remove_block(dropped);
     ///
-    /// let renumbering = cfg.compact();
-    /// assert!(cfg.is_compact());
+    /// let renumbering = cfg.compact(NodeOrder::Insertion);
+    /// assert!(cfg.is_dense());
     /// assert_eq!(renumbering.node(dropped), None);
     /// assert_eq!(renumbering.node(kept).unwrap().index(), 1);
     /// ```
-    pub fn compact(&mut self) -> CfgRenumbering {
-        let renumbering = self.graph.compact();
-        self.renumber_metadata(&renumbering);
-        renumbering
-    }
-
-    /// Renumber the surviving blocks in `order` and the surviving edges
-    /// densely, and report the change.
-    ///
-    /// This is [`compact`](Self::compact) over
-    /// [`Graph::compact_ordered`](crate::Graph::compact_ordered): block
-    /// identity order follows `order` rather than insertion order, while edge
-    /// identity order still means insertion order and every block keeps the
-    /// order of its successor and predecessor edges. The entry block, the
-    /// exception regions, and the cleanup records are renumbered with the
-    /// graph as [`compact`](Self::compact) renumbers them. Reverse postorder
-    /// from the entry makes identity order a forward solver's iteration
-    /// order.
-    ///
-    /// # Panics
-    ///
-    /// Panics under the conditions of
-    /// [`Graph::compact_ordered`](crate::Graph::compact_ordered), before
-    /// anything changes, and under those of [`compact`](Self::compact).
-    ///
-    /// # Examples
     ///
     /// ```
     /// use cfglib::{Cfg, EdgeKind, NodeOrder};
@@ -101,61 +82,39 @@ impl<I, E> Cfg<I, E> {
     /// cfg.add_edge(cfg.entry(), body, EdgeKind::Fallthrough);
     /// cfg.add_edge(body, exit, EdgeKind::Fallthrough);
     ///
-    /// let renumbering = cfg.compact_ordered(NodeOrder::ReversePostorder(&[cfg.entry()]));
+    /// let renumbering = cfg.compact(NodeOrder::ReversePostorder(&[cfg.entry()]));
     /// assert_eq!(cfg.entry().index(), 0);
     /// assert_eq!(renumbering.node(body).unwrap().index(), 1);
     /// assert_eq!(renumbering.node(exit).unwrap().index(), 2);
     /// ```
-    pub fn compact_ordered(&mut self, order: NodeOrder<'_, BlockTag>) -> CfgRenumbering {
-        let renumbering = self.graph.compact_ordered(order);
+    pub fn compact(&mut self, order: NodeOrder<'_, BlockTag>) -> Renumbering<BlockTag> {
+        let renumbering = self.graph.compact(order);
         self.renumber_metadata(&renumbering);
         renumbering
     }
 
     /// Carry the entry block and the exception metadata across `renumbering`.
-    fn renumber_metadata(&mut self, renumbering: &CfgRenumbering) {
+    fn renumber_metadata(&mut self, renumbering: &Renumbering<BlockTag>) {
         self.entry = require(renumbering, self.entry, "entry block");
 
-        for region in &mut self.regions {
-            renumber_region(region, renumbering);
-        }
-        for cleanup in &mut self.cleanups {
-            cleanup.resume_from = cleanup
-                .resume_from
-                .map(|block| require(renumbering, block, "cleanup resume block"));
-            for continuation in &mut cleanup.continuations {
-                continuation.resume =
-                    require(renumbering, continuation.resume, "cleanup continuation");
-            }
-        }
+        self.for_each_block_ref_mut(|reference| match reference {
+            BlockRefMut::Set(blocks) => *blocks = retain_surviving(blocks, renumbering),
+            BlockRefMut::Anchor(block, role) => *block = require(renumbering, *block, role.name()),
+        });
     }
 }
 
-fn renumber_region(region: &mut Region, renumbering: &CfgRenumbering) {
-    region.protected_blocks = retain_surviving(&region.protected_blocks, renumbering);
-    for handler in &mut region.handlers {
-        renumber_handler(handler, renumbering);
-    }
-}
-
-fn renumber_handler(handler: &mut Handler, renumbering: &CfgRenumbering) {
-    handler.entry = require(renumbering, handler.entry, "handler entry block");
-    if let HandlerBody::Known(blocks) = &handler.body {
-        handler.body = HandlerBody::Known(retain_surviving(blocks, renumbering));
-    }
-    if let HandlerKind::Filter { filter_block } = &mut handler.kind {
-        *filter_block = require(renumbering, *filter_block, "handler filter block");
-    }
-}
-
-fn retain_surviving(blocks: &BTreeSet<BlockId>, renumbering: &CfgRenumbering) -> BTreeSet<BlockId> {
+fn retain_surviving(
+    blocks: &BTreeSet<BlockId>,
+    renumbering: &Renumbering<BlockTag>,
+) -> BTreeSet<BlockId> {
     blocks
         .iter()
         .filter_map(|&block| renumbering.node(block))
         .collect()
 }
 
-fn require(renumbering: &CfgRenumbering, block: BlockId, role: &str) -> BlockId {
+fn require(renumbering: &Renumbering<BlockTag>, block: BlockId, role: &str) -> BlockId {
     renumbering
         .node(block)
         .unwrap_or_else(|| panic!("the {role} {block} was removed before compaction"))
@@ -171,7 +130,8 @@ mod tests {
     use super::*;
     use crate::edge::EdgeKind;
     use crate::region::{
-        CompletionReason, Continuation, HandlerBody, HandlerKind, HandlerRef, RegionId,
+        CompletionReason, Continuation, Handler, HandlerBody, HandlerKind, HandlerRef, Region,
+        RegionId,
     };
 
     /// The payload of every block names it, so a renumbered reference can be
@@ -190,7 +150,7 @@ mod tests {
     /// A graph with a removable block between every pair of blocks that
     /// exception metadata names: a protected block and a block of the
     /// handler's extent, the handler entry, its filter block, the cleanup's
-    /// resume block, and its continuation target. Returns the graph and the
+    /// exit block, and its continuation target. Returns the graph and the
     /// payloads in that order.
     fn sparse_metadata() -> (Cfg<u32>, [u32; 6]) {
         let mut cfg = Cfg::<u32>::new();
@@ -200,32 +160,33 @@ mod tests {
             gaps.push(tagged(&mut cfg));
             named.push(tagged(&mut cfg));
         }
-        let [protected, extent, entry, filter, resume, target] =
-            [0, 1, 2, 3, 4, 5].map(|i| named[i]);
+        let [protected, extent, entry, filter, exit, target] = [0, 1, 2, 3, 4, 5].map(|i| named[i]);
         cfg.add_edge(cfg.entry(), protected, EdgeKind::Fallthrough);
-        let region = cfg.add_region(Region {
-            id: RegionId::from_raw(0),
-            protected_blocks: [protected, gaps[0]].into_iter().collect(),
-            handlers: vec![Handler {
-                entry,
-                body: HandlerBody::known([entry, extent, gaps[1]]),
-                kind: HandlerKind::Filter {
-                    filter_block: filter,
-                },
-            }],
-            parent: None,
-        });
+        let region = cfg
+            .add_region(Region {
+                protected_blocks: [protected, gaps[0]].into_iter().collect(),
+                handlers: vec![Handler {
+                    entry,
+                    body: HandlerBody::known([entry, extent, gaps[1]]),
+                    kind: HandlerKind::Filter {
+                        filter_block: filter,
+                    },
+                }],
+                parent: None,
+            })
+            .unwrap();
         let handler = HandlerRef::new(region, 0);
-        cfg.set_cleanup_resume(handler, resume);
+        cfg.set_cleanup_exit(handler, exit).unwrap();
         cfg.add_continuation(
             handler,
             Continuation {
                 reason: CompletionReason::Normal,
-                resume: target,
+                target,
             },
-        );
+        )
+        .unwrap();
         let payloads =
-            [protected, extent, entry, filter, resume, target].map(|block| payload(&cfg, block));
+            [protected, extent, entry, filter, exit, target].map(|block| payload(&cfg, block));
         for gap in gaps {
             cfg.remove_block(gap);
         }
@@ -233,8 +194,8 @@ mod tests {
     }
 
     fn assert_denotes(cfg: &Cfg<u32>, payloads: [u32; 6]) {
-        let [protected, extent, entry, filter, resume, target] = payloads;
-        let region = &cfg.regions()[0];
+        let [protected, extent, entry, filter, exit, target] = payloads;
+        let region = cfg.region(RegionId::from_raw(0));
         let handler = &region.handlers[0];
         let names = |blocks: &BTreeSet<BlockId>| -> alloc::vec::Vec<u32> {
             blocks.iter().map(|&block| payload(cfg, block)).collect()
@@ -249,20 +210,20 @@ mod tests {
             panic!("the handler stays a filter");
         };
         assert_eq!(payload(cfg, filter_block), filter);
-        let cleanup = &cfg.cleanups()[0];
+        let (_, cleanup) = cfg.cleanups().iter().next().expect("the record stays");
         assert_eq!(
-            payload(cfg, cleanup.resume_from.expect("resume stays set")),
-            resume
+            payload(cfg, cleanup.exit_block.expect("the exit stays set")),
+            exit
         );
-        assert_eq!(payload(cfg, cleanup.continuations[0].resume), target);
+        assert_eq!(payload(cfg, cleanup.continuations[0].target), target);
     }
 
     #[test]
     fn compaction_renumbers_every_block_the_exception_metadata_names() {
         let (mut cfg, payloads) = sparse_metadata();
-        assert!(!cfg.is_compact());
-        cfg.compact();
-        assert!(cfg.is_compact());
+        assert!(!cfg.is_dense());
+        cfg.compact(NodeOrder::Insertion);
+        assert!(cfg.is_dense());
         assert_denotes(&cfg, payloads);
     }
 
@@ -280,8 +241,8 @@ mod tests {
             (NodeOrder::Explicit(&rotated), rotated_entry),
         ] {
             let mut cfg = cfg.clone();
-            let renumbering = cfg.compact_ordered(order);
-            assert!(cfg.is_compact());
+            let renumbering = cfg.compact(order);
+            assert!(cfg.is_dense());
             assert_eq!(Some(cfg.entry()), renumbering.node(entry));
             assert_eq!(cfg.entry().index(), entry_index, "{order:?}");
             assert!(
@@ -296,7 +257,7 @@ mod tests {
     #[test]
     fn a_compacted_graph_with_metadata_survives_a_serde_round_trip() {
         let (mut cfg, payloads) = sparse_metadata();
-        cfg.compact();
+        cfg.compact(NodeOrder::Insertion);
         let text = serde_json::to_string(&cfg).expect("a graph serializes");
         let read: Cfg<u32> = serde_json::from_str(&text).expect("a compacted graph decodes");
         assert_eq!(read, cfg);

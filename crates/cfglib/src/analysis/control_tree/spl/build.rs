@@ -17,13 +17,16 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{SplDecomposition, SplError, SplNode, SplNodeId, SplRun};
-use crate::analysis::control_tree::node::{ControlBody, ControlNode, ControlNodeId, LoopKind};
+use super::{SplDecomposition, SplError, SplNode, SplNodeId};
+use crate::analysis::control_tree::node::{
+    ControlBody, ControlNode, ControlNodeId, ControlRun, LoopKind,
+};
 use crate::analysis::control_tree::tree::ControlTree;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::graph::traverse::{TraversalDirection, reachable};
+use crate::graph::traverse::reachable;
+use crate::graph::view::Direction;
 use fragment::{Arm, BodyFrame, BranchFrame, Built, Cursor, Exits, Frame, Piece, Stubs, Target};
 
 mod fragment;
@@ -34,7 +37,7 @@ pub(super) fn build<I, E>(
     cfg: &Cfg<I, E>,
 ) -> Result<SplDecomposition, SplError> {
     let named = scan(tree, cfg)?;
-    let reached = reachable(cfg, [cfg.entry()], TraversalDirection::Outgoing);
+    let reached = reachable(cfg, [cfg.entry()], Direction::Forward);
     if let Some(dead) = cfg.block_ids().find(|block| !reached[block.index()]) {
         return Err(SplError::UnplacedBlock(dead));
     }
@@ -654,11 +657,11 @@ impl<'a, I, E> Builder<'a, I, E> {
         id
     }
 
-    fn run_of(&mut self, nodes: &[SplNodeId]) -> SplRun {
-        let run = SplRun {
-            start: u32::try_from(self.children.len()).expect("SPL child count fits in u32"),
-            len: u32::try_from(nodes.len()).expect("SPL child count fits in u32"),
-        };
+    fn run_of(&mut self, nodes: &[SplNodeId]) -> ControlRun<SplNodeId> {
+        let run = ControlRun::new(
+            u32::try_from(self.children.len()).expect("SPL child count fits in u32"),
+            u32::try_from(nodes.len()).expect("SPL child count fits in u32"),
+        );
         self.children.extend_from_slice(nodes);
         run
     }
@@ -694,8 +697,7 @@ impl<'a, I, E> Builder<'a, I, E> {
                 SplNode::Break | SplNode::Continue => continue,
             };
             nesting_depth = nesting_depth.max(inner);
-            let start = children.start as usize;
-            let run = &self.children[start..start + children.len()];
+            let run = &self.children[children.range()];
             stack.extend(run.iter().rev().map(|&child| (child, inner)));
         }
         SplDecomposition {

@@ -5,9 +5,8 @@
 //! later.
 
 use cfglib::{
-    BasicBlock, Cfg, ClrExceptionRegion, Edge, ExceptionFlow, Graph, HandlerMetadata, HornClauses,
-    KeyedGraph, Region, ScopeGraph, SehExceptionRegion, SehRegistrationChain, StackGraph,
-    StackPartialPathDatabase, VectoredExceptionModel,
+    BasicBlock, Cfg, Edge, ExceptionFlow, Graph, HandlerMetadata, HornClauses, KeyedGraph,
+    NodeOrder, Region, ScopeGraph, StackGraph, StackPartialPathDatabase,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -61,10 +60,6 @@ fn every_document_type_rejects_text_that_is_not_one_of_its_values() {
     assert_rejects_garbage::<StackGraph<String, String, String, String>>("StackGraph");
     assert_rejects_garbage::<StackPartialPathDatabase>("StackPartialPathDatabase");
     assert_rejects_garbage::<HornClauses>("HornClauses");
-    assert_rejects_garbage::<VectoredExceptionModel<String>>("VectoredExceptionModel");
-    assert_rejects_garbage::<SehRegistrationChain<u32, u64>>("SehRegistrationChain");
-    assert_rejects_garbage::<SehExceptionRegion>("SehExceptionRegion");
-    assert_rejects_garbage::<ClrExceptionRegion<u32>>("ClrExceptionRegion");
     assert_rejects_garbage::<ExceptionFlow<String>>("ExceptionFlow");
 }
 
@@ -173,17 +168,18 @@ fn a_cfg_whose_handler_names_a_block_it_does_not_have_is_rejected() {
 #[test]
 fn a_cfg_whose_cleanup_lists_one_route_twice_is_rejected() {
     let mut edited = document(&rich_cfg());
-    let record = edited["cleanups"]
+    // `cleanups` is `{"entries": [[<handler>, <cleanup>], ...]}`.
+    let record = edited["cleanups"]["entries"]
         .as_array_mut()
-        .and_then(|records| {
-            records.iter_mut().find(|record| {
-                record["continuations"]
+        .and_then(|entries| {
+            entries.iter_mut().find(|entry| {
+                entry[1]["continuations"]
                     .as_array()
                     .is_some_and(|c| !c.is_empty())
             })
         })
         .expect("the fixture records a route");
-    let routes = record["continuations"]
+    let routes = record[1]["continuations"]
         .as_array_mut()
         .expect("the routes are a sequence");
     let route = routes[0].clone();
@@ -220,7 +216,7 @@ fn store_document() -> Value {
     let a = graph.add_node("a".to_owned());
     let b = graph.add_node("b".to_owned());
     graph.add_edge(a, b, 1);
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
     let c = graph.add_node("c".to_owned());
     graph.add_edge(b, c, 2);
     document(&graph)

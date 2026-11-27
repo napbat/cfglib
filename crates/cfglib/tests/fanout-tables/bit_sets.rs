@@ -1,19 +1,19 @@
-//! `DenseBits`, `EpochSet` and `EpochMarks`: the dense sets and visited marks kept beside a table.
+//! `DenseBits` and `EpochMarks`: the dense sets and visited marks kept beside a table.
 
 use std::collections::{BTreeSet, HashSet};
 use std::ops::ControlFlow;
 
 use cfglib::{
-    DenseBits, EpochMarks, EpochSet, Graph, NodeId, SearchConfig, SearchOrder, TraversalDirection,
-    Visit, reachable, search_with_marks,
+    DenseBits, Direction, EpochMarks, Graph, NodeId, SearchConfig, SearchOrder, SearchScratch,
+    Visit, reachable, search_in,
 };
 
-use crate::Lcg;
+use crate::rng::Rng;
 
 /// Universes on both sides of every word boundary, and the empty one.
 const UNIVERSES: [usize; 10] = [0, 1, 2, 63, 64, 65, 127, 128, 129, 200];
 
-fn random_members(rng: &mut Lcg, universe: usize, draws: usize) -> BTreeSet<usize> {
+fn random_members(rng: &mut Rng, universe: usize, draws: usize) -> BTreeSet<usize> {
     if universe == 0 {
         return BTreeSet::new();
     }
@@ -31,7 +31,7 @@ fn bits_of(universe: usize, members: &BTreeSet<usize>) -> DenseBits {
 #[test]
 fn dense_bits_follow_a_vec_of_bool_oracle_across_word_boundaries() {
     for universe in UNIVERSES {
-        let mut rng = Lcg(universe as u64 + 1);
+        let mut rng = Rng::lcg(universe as u64 + 1, 33);
         let mut bits = DenseBits::new(universe);
         let mut oracle = vec![false; universe];
         assert_eq!(bits.len(), universe);
@@ -72,7 +72,7 @@ fn dense_bits_follow_a_vec_of_bool_oracle_across_word_boundaries() {
 #[test]
 fn the_packed_words_hold_sixty_four_indices_each_least_significant_bit_first() {
     for universe in UNIVERSES {
-        let mut rng = Lcg(universe as u64 + 77);
+        let mut rng = Rng::lcg(universe as u64 + 77, 33);
         let members = random_members(&mut rng, universe, universe);
         let bits = bits_of(universe, &members);
 
@@ -101,7 +101,7 @@ fn the_packed_words_hold_sixty_four_indices_each_least_significant_bit_first() {
 #[test]
 fn union_and_intersection_match_the_btreeset_algebra() {
     for universe in [1_usize, 64, 65, 130, 257] {
-        let mut rng = Lcg(universe as u64 * 3);
+        let mut rng = Rng::lcg(universe as u64 * 3, 33);
         for round in 0..8 {
             let left_members = random_members(&mut rng, universe, universe / 3 + round);
             let right_members = random_members(&mut rng, universe, universe / 2 + round);
@@ -221,7 +221,7 @@ fn intersecting_sets_over_different_universes_panics() {
 #[test]
 fn union_with_is_the_join_of_a_reachability_fixpoint_and_its_change_report_ends_the_loop() {
     for seed in [1, 8] {
-        let mut rng = Lcg(seed);
+        let mut rng = Rng::lcg(seed, 33);
         let mut graph = Graph::<(), ()>::new();
         let nodes: Vec<NodeId> = (0..70).map(|_| graph.add_node(())).collect();
         for _ in 0..110 {
@@ -253,7 +253,7 @@ fn union_with_is_the_join_of_a_reachability_fixpoint_and_its_change_report_ends_
         );
 
         for &node in &nodes {
-            let expected = reachable(&graph, [node], TraversalDirection::Outgoing);
+            let expected = reachable(&graph, [node], Direction::Forward);
             let actual: Vec<bool> = (0..70)
                 .map(|index| reach[node.index()].get(index))
                 .collect();
@@ -268,85 +268,19 @@ fn union_with_is_the_join_of_a_reachability_fixpoint_and_its_change_report_ends_
 }
 
 #[test]
-fn an_epoch_set_reports_novelty_and_yields_members_in_insertion_order() {
-    let mut visited = EpochSet::new(64);
-    assert!(visited.insert(7));
-    assert!(!visited.insert(7), "a second insert is a no-op");
-    assert!(visited.insert(3));
-    assert!(visited.insert(60));
-    assert!(visited.contains(7) && visited.contains(3) && !visited.contains(4));
-    assert_eq!(
-        visited.ones().collect::<Vec<_>>(),
-        [7, 3, 60],
-        "insertion order, not ascending"
-    );
-    assert_eq!(visited.capacity(), 64);
-
-    visited.clear();
-    assert!(!visited.contains(7));
-    assert_eq!(visited.ones().count(), 0);
-    assert_eq!(visited.capacity(), 64);
-    assert!(visited.insert(7), "a cleared member is new again");
-}
-
-#[test]
-fn one_epoch_set_reused_over_many_problems_matches_a_fresh_oracle_each_time() {
-    let universe = 128;
-    let mut rng = Lcg(31);
-    let mut set = EpochSet::new(universe + 40);
-    for round in 0..600 {
-        set.clear();
-        let draws = rng.below(30);
-        let mut order: Vec<usize> = Vec::new();
-        let mut oracle = BTreeSet::new();
-        for _ in 0..draws {
-            let index = rng.below(universe);
-            let novel = oracle.insert(index);
-            assert_eq!(set.insert(index), novel, "round {round}");
-            if novel {
-                order.push(index);
-            }
-        }
-
-        assert_eq!(set.ones().collect::<Vec<_>>(), order, "round {round}");
-        for index in 0..universe {
-            assert_eq!(
-                set.contains(index),
-                oracle.contains(&index),
-                "round {round}, index {index}"
-            );
-        }
-        assert_eq!(set.capacity(), universe + 40, "reuse never resizes");
-    }
-}
-
-#[test]
-#[should_panic(expected = "outside universe")]
-fn inserting_outside_an_epoch_sets_universe_panics() {
-    EpochSet::new(4).insert(4);
-}
-
-#[test]
-#[should_panic(expected = "outside universe")]
-fn asking_an_epoch_set_about_an_index_outside_its_universe_panics() {
-    let _ = EpochSet::new(4).contains(4);
-}
-
-#[test]
-fn epoch_marks_report_the_universe_they_were_sized_for() {
-    assert_eq!(EpochMarks::new(64).capacity(), 64);
-    assert_eq!(
-        EpochMarks::default().capacity(),
-        0,
-        "sized on first use by a consumer that rebuilds it"
-    );
-    assert_eq!(EpochMarks::new(0).capacity(), 0);
-    let marks = EpochMarks::new(9);
-    assert_eq!(marks.clone().capacity(), marks.capacity());
+fn epoch_marks_grow_to_the_universe_they_are_asked_for() {
+    let mut marks = EpochMarks::default();
+    marks.grow_to(9);
+    marks.mark(8);
+    assert!(marks.is_marked(8));
+    marks.grow_to(4);
+    assert!(marks.is_marked(8), "growing never shrinks or clears");
+    marks.reset();
+    assert!(!marks.is_marked(8));
 }
 
 /// A random graph over `count` nodes.
-fn random_graph(rng: &mut Lcg, count: usize, edges: usize) -> Graph<(), ()> {
+fn random_graph(rng: &mut Rng, count: usize, edges: usize) -> Graph<(), ()> {
     let mut graph = Graph::new();
     let nodes: Vec<NodeId> = (0..count).map(|_| graph.add_node(())).collect();
     for _ in 0..edges {
@@ -355,28 +289,38 @@ fn random_graph(rng: &mut Lcg, count: usize, edges: usize) -> Graph<(), ()> {
     graph
 }
 
-fn closure_of(graph: &Graph<(), ()>, root: NodeId, marks: &mut EpochMarks) -> Vec<bool> {
-    let config = SearchConfig::new(SearchOrder::BreadthFirst, TraversalDirection::Outgoing);
+fn closure_of(graph: &Graph<(), ()>, root: NodeId, scratch: &mut SearchScratch) -> Vec<bool> {
+    let config = SearchConfig {
+        order: SearchOrder::BreadthFirst,
+        ..SearchConfig::default()
+    };
     let mut closure = vec![false; graph.node_bound()];
-    let outcome = search_with_marks(graph, [root], config, marks, |node, _depth| {
-        closure[node.index()] = true;
-        ControlFlow::<(), Visit>::Continue(Visit::Descend)
-    });
+    let outcome = search_in(
+        scratch,
+        graph,
+        [root],
+        Direction::Forward,
+        config,
+        |node, _depth| {
+            closure[node.index()] = true;
+            ControlFlow::<(), Visit>::Continue(Visit::Descend)
+        },
+    );
     assert_eq!(outcome, None);
     closure
 }
 
 #[test]
-fn one_marks_buffer_serves_a_closure_per_root_pass_like_a_fresh_buffer_per_root() {
-    let mut rng = Lcg(90);
+fn one_scratch_serves_a_closure_per_root_pass_like_a_fresh_buffer_per_root() {
+    let mut rng = Rng::lcg(90, 33);
     let graph = random_graph(&mut rng, 70, 120);
-    let mut marks = EpochMarks::new(graph.node_bound() + 30);
+    let mut marks = SearchScratch::default();
 
     for root in graph.node_ids() {
         let closure = closure_of(&graph, root, &mut marks);
         assert_eq!(
             closure,
-            reachable(&graph, [root], TraversalDirection::Outgoing),
+            reachable(&graph, [root], Direction::Forward),
             "closure of n{}",
             root.index()
         );
@@ -386,16 +330,17 @@ fn one_marks_buffer_serves_a_closure_per_root_pass_like_a_fresh_buffer_per_root(
     for root in small.node_ids() {
         assert_eq!(
             closure_of(&small, root, &mut marks),
-            reachable(&small, [root], TraversalDirection::Outgoing),
-            "a buffer sized for a larger graph covers a smaller one"
+            reachable(&small, [root], Direction::Forward),
+            "a scratch grown by a larger graph covers a smaller one"
         );
     }
-}
 
-#[test]
-#[should_panic(expected = "visited marks cover")]
-fn a_marks_buffer_smaller_than_the_graph_is_a_panic_not_a_resize() {
-    let graph = random_graph(&mut Lcg(2), 12, 20);
-    let mut marks = EpochMarks::new(graph.node_bound() - 1);
-    let _ = closure_of(&graph, graph.node_ids().next().expect("a node"), &mut marks);
+    let large = random_graph(&mut rng, 140, 260);
+    for root in large.node_ids().take(20) {
+        assert_eq!(
+            closure_of(&large, root, &mut marks),
+            reachable(&large, [root], Direction::Forward),
+            "a scratch smaller than the graph grows on entry"
+        );
+    }
 }

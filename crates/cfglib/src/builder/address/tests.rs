@@ -7,15 +7,15 @@ use alloc::vec::Vec;
 use std::cell::Cell;
 use std::rc::Rc;
 
-use crate::region::HandlerKind;
-use crate::{EdgeKind, HandlerBody};
-
 use super::{
-    AddressBuildError, AddressCfgOptions, AddressHandler, AddressInstruction, CallPolicy,
-    GivenEdge, UnwindEnd, UnwindPath, UnwindRoute, build_address_cfg,
-    build_address_cfg_from_given_edges,
+    AddressBuildError, AddressCfgOptions, AddressHandler, AddressHandlerKind, AddressInstruction,
+    CallPolicy, GivenEdge, UnwindEnd, UnwindPath, UnwindRoute, build_address_cfg,
 };
+use crate::EdgeKind;
 use crate::flow::{CallSite, EdgeRole, Flow, UnresolvedRole, UnresolvedTransfer};
+
+mod function_exits;
+mod handlers;
 
 #[derive(Debug, Clone)]
 pub(super) struct Inst {
@@ -90,8 +90,9 @@ pub(super) fn payload(
         EdgeRole::Exceptional => "exceptional",
         EdgeRole::Unwind { .. } => "unwind",
         EdgeRole::Route { .. } => "route",
+        EdgeRole::Continue { .. } => "continue",
     };
-    (info.source, info.target, info.kind, role)
+    (info.source, info.target, info.role.kind(), role)
 }
 
 #[test]
@@ -202,147 +203,6 @@ fn a_call_ends_its_block_so_the_return_site_gets_both_edges() {
             (0, 2, EdgeKind::Call, "call"),
         ],
     );
-}
-
-#[test]
-fn exception_tables_make_protected_instructions_leaders_with_unwind_edges() {
-    let instructions = vec![
-        inst(0, Flow::Next),
-        inst(1, Flow::Next),
-        inst(2, Flow::Return),
-        inst(3, Flow::Return),
-    ];
-    let handlers = [AddressHandler {
-        protected: 0..2,
-        entry: 3,
-        kind: HandlerKind::CatchAll,
-    }];
-    let graph = build_address_cfg(
-        instructions,
-        &handlers,
-        AddressCfgOptions::default(),
-        payload,
-    )
-    .unwrap();
-
-    assert_ne!(
-        graph.instruction_blocks[&0], graph.instruction_blocks[&1],
-        "every protected instruction leads its own block"
-    );
-    let unwinds: Vec<_> = graph
-        .cfg
-        .edges()
-        .filter(|edge| edge.payload().3 == "unwind")
-        .map(|edge| edge.payload().0)
-        .collect();
-    assert_eq!(unwinds, vec![0, 1]);
-
-    assert_eq!(graph.handler_refs.len(), 1);
-    let regions = graph.cfg.regions();
-    assert_eq!(regions.len(), 1);
-    assert_eq!(regions[0].handlers[0].entry, graph.instruction_blocks[&3]);
-    assert_eq!(regions[0].handlers[0].body, HandlerBody::Unknown);
-    assert_eq!(regions[0].protected_blocks.len(), 2);
-}
-
-#[test]
-fn a_non_throwing_protected_instruction_keeps_no_unwind_edge() {
-    let mut pure = inst(0, Flow::Next);
-    pure.throws = false;
-    let instructions = vec![pure, inst(1, Flow::Return), inst(2, Flow::Return)];
-    let handlers = [AddressHandler {
-        protected: 0..1,
-        entry: 2,
-        kind: HandlerKind::CatchAll,
-    }];
-    let graph = build_address_cfg(
-        instructions,
-        &handlers,
-        AddressCfgOptions::default(),
-        payload,
-    )
-    .unwrap();
-    assert!(graph.cfg.edges().all(|edge| edge.payload().3 != "unwind"),);
-}
-
-#[test]
-fn nested_ranges_register_enclosing_regions_first() {
-    let instructions = vec![
-        inst(0, Flow::Next),
-        inst(1, Flow::Next),
-        inst(2, Flow::Return),
-        inst(3, Flow::Return),
-        inst(4, Flow::Return),
-    ];
-    // Table lists the nested range first; construction must still register
-    // the enclosing range before it and wire the parent.
-    let handlers = [
-        AddressHandler {
-            protected: 1..2,
-            entry: 3,
-            kind: HandlerKind::CatchAll,
-        },
-        AddressHandler {
-            protected: 0..3,
-            entry: 4,
-            kind: HandlerKind::CatchAll,
-        },
-    ];
-    let graph = build_address_cfg(
-        instructions,
-        &handlers,
-        AddressCfgOptions::default(),
-        payload,
-    )
-    .unwrap();
-    let regions = graph.cfg.regions();
-    assert_eq!(regions.len(), 2);
-    assert_eq!(
-        regions[0].protected_blocks.len(),
-        3,
-        "outer registered first"
-    );
-    assert_eq!(regions[1].protected_blocks.len(), 1);
-    assert_eq!(regions[1].parent, Some(regions[0].id));
-    // Table order survives in the returned refs.
-    assert_eq!(graph.handler_refs[0].region(), regions[1].id);
-    assert_eq!(graph.handler_refs[1].region(), regions[0].id);
-}
-
-#[test]
-fn shared_protected_ranges_share_one_region() {
-    let instructions = vec![
-        inst(0, Flow::Return),
-        inst(1, Flow::Return),
-        inst(2, Flow::Return),
-    ];
-    let handlers = [
-        AddressHandler {
-            protected: 0..1,
-            entry: 1,
-            kind: HandlerKind::Catch,
-        },
-        AddressHandler {
-            protected: 0..1,
-            entry: 2,
-            kind: HandlerKind::CatchAll,
-        },
-    ];
-    let graph = build_address_cfg(
-        instructions,
-        &handlers,
-        AddressCfgOptions::default(),
-        payload,
-    )
-    .unwrap();
-    assert_eq!(graph.cfg.regions().len(), 1);
-    assert_eq!(graph.cfg.regions()[0].handlers.len(), 2);
-    assert_eq!(
-        graph.handler_refs[0].region(),
-        graph.handler_refs[1].region()
-    );
-    assert_eq!(graph.handler_refs[0].index(), 0);
-    assert_eq!(graph.handler_refs[1].index(), 1);
 }
 
 #[test]
@@ -475,12 +335,14 @@ fn instruction_flow_is_classified_once() {
             end: UnwindEnd::Handler(4),
         }],
     }];
-    build_address_cfg_from_given_edges(
+    build_address_cfg(
         instructions,
-        given,
         &[],
-        &routes,
-        AddressCfgOptions::default(),
+        AddressCfgOptions {
+            routes: Some(&routes),
+            given_edges: Some(given),
+            ..AddressCfgOptions::default()
+        },
         |_| (),
     )
     .unwrap();
@@ -509,7 +371,7 @@ fn invalid_streams_are_rejected_with_exact_errors() {
             &[AddressHandler {
                 protected: 0..1,
                 entry: 9,
-                kind: HandlerKind::CatchAll,
+                kind: AddressHandlerKind::CatchAll,
             }],
             AddressCfgOptions::default(),
             payload
@@ -525,7 +387,7 @@ fn invalid_streams_are_rejected_with_exact_errors() {
             &[AddressHandler {
                 protected: 0..0,
                 entry: 0,
-                kind: HandlerKind::CatchAll,
+                kind: AddressHandlerKind::CatchAll,
             }],
             AddressCfgOptions::default(),
             payload
@@ -669,7 +531,7 @@ fn indirect_and_missing_exceptional_exits_are_explicit() {
             UnresolvedTransfer {
                 source: 0,
                 target: None,
-                role: UnresolvedRole::Indirect,
+                role: UnresolvedRole::Jump,
             },
             UnresolvedTransfer {
                 source: 1,
@@ -708,17 +570,17 @@ fn computed_conditional_and_trap_exits_keep_only_their_stated_continuations() {
             UnresolvedTransfer {
                 source: 0,
                 target: None,
-                role: UnresolvedRole::ConditionalIndirect,
+                role: UnresolvedRole::ConditionalTaken,
             },
             UnresolvedTransfer {
                 source: 1,
                 target: None,
-                role: UnresolvedRole::Trap,
+                role: UnresolvedRole::Exceptional,
             },
             UnresolvedTransfer {
                 source: 2,
                 target: None,
-                role: UnresolvedRole::Trap,
+                role: UnresolvedRole::Exceptional,
             },
         ]
     );
@@ -729,25 +591,6 @@ fn computed_conditional_and_trap_exits_keep_only_their_stated_continuations() {
             (0, 1, EdgeKind::ConditionalFalse, "fall"),
             (1, 2, EdgeKind::Fallthrough, "seq"),
         ]
-    );
-}
-
-#[test]
-fn a_range_ending_at_code_end_needs_no_end_instruction() {
-    let instructions = vec![inst(0, Flow::Next), inst(1, Flow::Return)];
-    let handlers = [AddressHandler {
-        protected: 0..2,
-        entry: 1,
-        kind: HandlerKind::CatchAll,
-    }];
-    assert!(
-        build_address_cfg(
-            instructions,
-            &handlers,
-            AddressCfgOptions::default(),
-            payload
-        )
-        .is_ok()
     );
 }
 
@@ -787,8 +630,8 @@ fn flattened_calls_continue_in_their_block_and_are_reported() {
         inst(3, Flow::Return),
     ];
     let options = AddressCfgOptions {
-        entry: None,
         calls: CallPolicy::Flatten,
+        ..AddressCfgOptions::default()
     };
     let graph = build_address_cfg(instructions, &[], options, payload).unwrap();
 
@@ -816,7 +659,7 @@ fn flattened_calls_continue_in_their_block_and_are_reported() {
     );
     assert_eq!(
         graph.unresolved_transfers,
-        [] as [crate::flow::transfer::UnresolvedTransfer<u32>; 0]
+        [] as [crate::flow::UnresolvedTransfer<u32>; 0]
     );
 }
 
@@ -828,8 +671,8 @@ fn a_flattened_terminator_call_continues_sequentially() {
         inst(2, Flow::Return),
     ];
     let options = AddressCfgOptions {
-        entry: None,
         calls: CallPolicy::Flatten,
+        ..AddressCfgOptions::default()
     };
     let graph = build_address_cfg(instructions, &[], options, payload).unwrap();
 
@@ -869,7 +712,7 @@ fn an_indirect_call_kept_as_an_edge_is_an_unresolved_transfer() {
         vec![UnresolvedTransfer {
             source: 0,
             target: None,
-            role: UnresolvedRole::IndirectCall,
+            role: UnresolvedRole::Call,
         }]
     );
 }
@@ -909,7 +752,7 @@ fn default_options_need_no_default_address_type() {
         }
     }
 
-    let options = AddressCfgOptions::<Rva>::default();
+    let options = AddressCfgOptions::<Rva, EdgeKind>::default();
     assert_eq!(options.entry, None);
     assert_eq!(options.calls, CallPolicy::Edges);
 
@@ -926,7 +769,7 @@ fn default_options_need_no_default_address_type() {
         ],
         &[],
         options,
-        |info| info.kind,
+        |info| info.role.kind(),
     )
     .unwrap();
     assert_eq!((graph.cfg.block_count(), graph.cfg.edge_count()), (1, 0));

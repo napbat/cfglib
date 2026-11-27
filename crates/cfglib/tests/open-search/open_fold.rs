@@ -1,12 +1,12 @@
-//! `open_fold_post_order` with the cycle guard under every `MarkScope`, early exit, the depth
-//! bound, and nodes that carry no ordering.
+//! `open_fold` under `Revisit::Refuse`, with the cycle guard under every `MarkScope`, early exit,
+//! the depth bound, and nodes that carry no ordering.
 
 use std::ops::ControlFlow;
 
-use cfglib::{FoldEnter, MarkScope, OpenFold, OpenFoldConfig, open_fold_post_order};
+use cfglib::{FoldEnter, MarkScope, OpenFold, OpenFoldConfig, Revisit, open_fold};
 
-use crate::Lcg;
 use crate::reference::{Table, chain, simple_routes};
+use crate::rng::Rng;
 
 /// Counts the routes from the root to a sink, folding a node once per route that reaches it.
 struct RouteCount<'a> {
@@ -86,16 +86,16 @@ fn diamond() -> Table {
 #[test]
 fn per_path_marks_count_the_simple_routes_to_a_sink_like_a_brute_force_enumeration() {
     for seed in 1..=8 {
-        let table = Table::random(&mut Lcg(seed), 9, 15);
+        let table = Table::random(&mut Rng::lcg(seed, 33), 9, 15);
         let expected = simple_routes(&table, 0, None)
             .into_iter()
             .filter(|route| table.successors[*route.last().expect("non-empty")].is_empty())
             .count();
 
         let mut fold = RouteCount::new(&table, MarkScope::Isolated);
-        let counted = open_fold_post_order(&mut fold, 0, OpenFoldConfig::new());
+        let counted = open_fold(&mut fold, 0, OpenFoldConfig::default());
         let expected = u64::try_from(expected).expect("fits");
-        assert_eq!(counted, Some(expected), "seed {seed}");
+        assert_eq!(counted, Ok(Some(expected)), "seed {seed}");
     }
 }
 
@@ -118,8 +118,8 @@ fn a_grid_folds_to_a_binomial_per_route_and_to_one_under_shared_marks() {
 
     let mut per_route = RouteCount::new(&table, MarkScope::Isolated);
     assert_eq!(
-        open_fold_post_order(&mut per_route, 0, OpenFoldConfig::new()),
-        Some(924),
+        open_fold(&mut per_route, 0, OpenFoldConfig::default()),
+        Ok(Some(924)),
         "C(12, 6)"
     );
     assert_eq!(
@@ -133,8 +133,8 @@ fn a_grid_folds_to_a_binomial_per_route_and_to_one_under_shared_marks() {
 
     let mut shared = RouteCount::new(&table, MarkScope::Shared);
     assert_eq!(
-        open_fold_post_order(&mut shared, 0, OpenFoldConfig::new()),
-        Some(1)
+        open_fold(&mut shared, 0, OpenFoldConfig::default()),
+        Ok(Some(1))
     );
     assert_eq!(shared.entered.len(), 49, "every node is folded once");
 }
@@ -145,8 +145,8 @@ fn shared_and_isolated_marks_differ_exactly_in_whether_the_second_route_is_folde
 
     let mut shared = RouteCount::new(&table, MarkScope::Shared);
     assert_eq!(
-        open_fold_post_order(&mut shared, 0, OpenFoldConfig::new()),
-        Some(1)
+        open_fold(&mut shared, 0, OpenFoldConfig::default()),
+        Ok(Some(1))
     );
     assert_eq!(
         shared.entered,
@@ -161,8 +161,8 @@ fn shared_and_isolated_marks_differ_exactly_in_whether_the_second_route_is_folde
 
     let mut isolated = RouteCount::new(&table, MarkScope::Isolated);
     assert_eq!(
-        open_fold_post_order(&mut isolated, 0, OpenFoldConfig::new()),
-        Some(2)
+        open_fold(&mut isolated, 0, OpenFoldConfig::default()),
+        Ok(Some(2))
     );
     assert_eq!(isolated.entered, [0, 1, 3, 2, 3]);
     assert_eq!(
@@ -186,8 +186,8 @@ fn the_scope_a_parent_chooses_decides_what_its_children_remember() {
     for (scopes, expected) in cases {
         let mut fold = RouteCount::new(&table, shared);
         fold.scopes[..3].copy_from_slice(&scopes);
-        let counted = open_fold_post_order(&mut fold, 0, OpenFoldConfig::new());
-        assert_eq!(counted, Some(expected), "scopes {scopes:?}");
+        let counted = open_fold(&mut fold, 0, OpenFoldConfig::default());
+        assert_eq!(counted, Ok(Some(expected)), "scopes {scopes:?}");
     }
 }
 
@@ -199,8 +199,8 @@ fn nodes_without_a_key_are_folded_every_time_and_a_keyed_cycle_is_cut() {
 
     let mut keyed = RouteCount::new(&cycle, MarkScope::Isolated);
     assert_eq!(
-        open_fold_post_order(&mut keyed, 0, OpenFoldConfig::new()),
-        Some(0)
+        open_fold(&mut keyed, 0, OpenFoldConfig::default()),
+        Ok(Some(0))
     );
     assert_eq!(
         keyed.entered,
@@ -210,8 +210,11 @@ fn nodes_without_a_key_are_folded_every_time_and_a_keyed_cycle_is_cut() {
 
     let mut unkeyed = RouteCount::new(&cycle, MarkScope::Isolated);
     unkeyed.guarded = false;
-    let bounded = OpenFoldConfig::new().with_max_depth(4);
-    assert_eq!(open_fold_post_order(&mut unkeyed, 0, bounded), Some(0));
+    let bounded = OpenFoldConfig {
+        max_depth: Some(4),
+        revisit: Revisit::Refuse,
+    };
+    assert_eq!(open_fold(&mut unkeyed, 0, bounded), Ok(Some(0)));
     assert_eq!(
         unkeyed.entered,
         [0, 1, 0, 1, 0],
@@ -222,8 +225,8 @@ fn nodes_without_a_key_are_folded_every_time_and_a_keyed_cycle_is_cut() {
     let mut diamond_fold = RouteCount::new(&table, MarkScope::Shared);
     diamond_fold.guarded = false;
     assert_eq!(
-        open_fold_post_order(&mut diamond_fold, 0, OpenFoldConfig::new()),
-        Some(2)
+        open_fold(&mut diamond_fold, 0, OpenFoldConfig::default()),
+        Ok(Some(2))
     );
     assert_eq!(
         diamond_fold.entered,
@@ -279,25 +282,25 @@ fn the_depth_bound_refuses_children_deeper_than_the_given_number_of_levels_below
         successors: vec![vec![1], vec![2], vec![3], vec![4], vec![]],
     };
     let mut fold = Height { table: &chain };
-    let height = |fold: &mut Height<'_>, config| open_fold_post_order(fold, 0, config);
+    let height = |fold: &mut Height<'_>, max_depth| {
+        let config = OpenFoldConfig {
+            max_depth,
+            revisit: Revisit::Refuse,
+        };
+        open_fold(fold, 0, config)
+    };
 
-    assert_eq!(height(&mut fold, OpenFoldConfig::new()), Some(5));
+    assert_eq!(height(&mut fold, None), Ok(Some(5)));
     assert_eq!(
-        height(&mut fold, OpenFoldConfig::new().with_max_depth(4)),
-        Some(5),
+        height(&mut fold, Some(4)),
+        Ok(Some(5)),
         "the last node is at depth 4"
     );
+    assert_eq!(height(&mut fold, Some(3)), Ok(Some(4)));
+    assert_eq!(height(&mut fold, Some(2)), Ok(Some(3)));
     assert_eq!(
-        height(&mut fold, OpenFoldConfig::new().with_max_depth(3)),
-        Some(4)
-    );
-    assert_eq!(
-        height(&mut fold, OpenFoldConfig::new().with_max_depth(2)),
-        Some(3)
-    );
-    assert_eq!(
-        height(&mut fold, OpenFoldConfig::new().with_max_depth(0)),
-        Some(1),
+        height(&mut fold, Some(0)),
+        Ok(Some(1)),
         "the root is depth zero"
     );
 }
@@ -364,8 +367,8 @@ fn a_break_in_absorb_finishes_the_node_now_and_leaves_its_remaining_children_unf
         declares: vec![false, false, false, false, false, true],
         entered: Vec::new(),
     };
-    let answer = open_fold_post_order(&mut fold, 0, OpenFoldConfig::new());
-    assert_eq!(answer, Some(5));
+    let answer = open_fold(&mut fold, 0, OpenFoldConfig::default());
+    assert_eq!(answer, Ok(Some(5)));
     assert_eq!(
         fold.entered,
         [0, 1, 4, 2, 5],
@@ -434,19 +437,19 @@ impl OpenFold for Halving {
 #[test]
 fn a_fold_over_computed_nodes_needs_no_ordering_on_them() {
     let fold = |width| {
-        open_fold_post_order(
+        open_fold(
             &mut Halving,
             Segment { start: 0.0, width },
-            OpenFoldConfig::new(),
+            OpenFoldConfig::default(),
         )
     };
-    assert_eq!(fold(8.0), Some(8));
+    assert_eq!(fold(8.0), Ok(Some(8)));
     assert_eq!(
         fold(5.0),
-        Some(8),
+        Ok(Some(8)),
         "5 -> 2.5 -> 1.25 -> 0.625 is three halvings"
     );
-    assert_eq!(fold(1.0), Some(1));
+    assert_eq!(fold(1.0), Ok(Some(1)));
 }
 
 #[test]
@@ -455,8 +458,8 @@ fn a_root_that_answers_as_a_leaf_never_asks_for_its_children() {
     let mut answering = RouteCount::new(&table, MarkScope::Shared);
     // Node 3 is a sink, so as the root it answers directly.
     assert_eq!(
-        open_fold_post_order(&mut answering, 3, OpenFoldConfig::new()),
-        Some(1)
+        open_fold(&mut answering, 3, OpenFoldConfig::default()),
+        Ok(Some(1))
     );
     assert_eq!(answering.probed, 0);
     assert_eq!(answering.absorbed.len(), 0);
@@ -467,8 +470,8 @@ fn a_root_that_answers_as_a_leaf_never_asks_for_its_children() {
         entered: Vec::new(),
     };
     assert_eq!(
-        open_fold_post_order(&mut declaring, 0, OpenFoldConfig::new()),
-        Some(0)
+        open_fold(&mut declaring, 0, OpenFoldConfig::default()),
+        Ok(Some(0))
     );
     assert_eq!(declaring.entered, [0]);
 }
@@ -478,7 +481,7 @@ fn a_fold_over_a_very_deep_space_costs_heap_not_stack() {
     let table = chain(100_000);
     let mut fold = Height { table: &table };
     assert_eq!(
-        open_fold_post_order(&mut fold, 0, OpenFoldConfig::new()),
-        Some(100_000)
+        open_fold(&mut fold, 0, OpenFoldConfig::default()),
+        Ok(Some(100_000))
     );
 }

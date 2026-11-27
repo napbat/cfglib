@@ -53,7 +53,7 @@ use core::fmt::{self, Write as _};
 
 use crate::graph::edge_view::EdgeView;
 use crate::graph::label::{Label, display_label, no_label};
-use crate::graph::store::{Graph, Id, IdTag};
+use crate::graph::store::{Graph, IdTag};
 use crate::graph::view::{DenseId, NodeView};
 
 mod parse;
@@ -141,8 +141,8 @@ impl core::error::Error for TextError {}
 /// How one graph is written as text: what labels a node, what labels an edge.
 ///
 /// The store has no distinguished entry, so its text form has no `entry`
-/// header; [`Cfg::to_text`](crate::Cfg::to_text) writes one because a CFG
-/// does have one.
+/// header; the listing of a CFG ([`Cfg::to_listing`](crate::Cfg::to_listing))
+/// is a form of its own and writes one, because a CFG does have one.
 #[derive(Debug, Clone, Copy)]
 pub struct TextStyle<NodeLabel, EdgeLabel> {
     node_label: NodeLabel,
@@ -151,7 +151,30 @@ pub struct TextStyle<NodeLabel, EdgeLabel> {
 
 impl<NodeLabel, EdgeLabel> TextStyle<NodeLabel, EdgeLabel> {
     /// A style over the two label hooks.
-    pub const fn new(node_label: NodeLabel, edge_label: EdgeLabel) -> Self {
+    ///
+    /// The bounds are the ones [`write_text`] places on the hooks, stated here
+    /// so a closure passed straight in is given the higher-ranked signature:
+    /// the text it returns may borrow the payload it was handed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::borrow::Cow;
+    /// use cfglib::{Graph, TextStyle, no_label, to_text};
+    ///
+    /// let mut graph = Graph::<u32, ()>::new();
+    /// graph.add_node(7);
+    ///
+    /// let style = TextStyle::new(|_, value| Cow::Owned(format!("{value:#x}")), no_label);
+    /// assert_eq!(to_text(&graph, &style), "n0 0x7\n");
+    /// ```
+    pub fn new<Node, NodeData, Edge, EdgeData>(node_label: NodeLabel, edge_label: EdgeLabel) -> Self
+    where
+        NodeData: ?Sized,
+        EdgeData: ?Sized,
+        NodeLabel: for<'d> Fn(Node, &'d NodeData) -> Cow<'d, str>,
+        EdgeLabel: for<'d> Fn(Edge, &'d EdgeData) -> Cow<'d, str>,
+    {
         Self {
             node_label,
             edge_label,
@@ -220,6 +243,8 @@ where
     NodeLabel: for<'d> Fn(G::NodeId, &'d G::NodeData) -> Cow<'d, str>,
     EdgeLabel: for<'d> Fn(G::EdgeId, &'d G::EdgeData) -> Cow<'d, str>,
 {
+    // A direct call on a local `String`, as in `to_dot`: through `render`,
+    // `api_to_text` took 1.065x its time on main; this form takes 1.00x.
     let mut out = String::new();
     write_text(view, &mut out, style).expect("writing text to a String cannot fail");
     out
@@ -456,24 +481,29 @@ pub(crate) fn split_tokens(line: &str, count: usize) -> Option<(Vec<&str>, &str)
 }
 
 impl<N: fmt::Display, E: fmt::Display, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
-    /// Render the store in the line-oriented text form, labeling nodes and
+    /// Write the store in the line-oriented text form, labeling nodes and
     /// edges with their payloads.
     ///
     /// Nodes are named `n0`, `n1`, … whatever the store's tag, because
     /// [`parse_text`] reads them back into a plain [`Graph`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the sink's formatting error if a write fails.
+    pub fn write_text(&self, sink: &mut dyn fmt::Write) -> fmt::Result {
+        write_text(self, sink, &TextStyle::new(display_label, display_label))
+    }
+
+    /// Produce the text form of the store as a [`String`].
+    ///
+    /// The allocating counterpart of [`write_text`](Self::write_text).
     ///
     /// # Panics
     ///
     /// Panics only if writing to an in-memory [`String`] unexpectedly fails.
     #[must_use]
     pub fn to_text(&self) -> String {
-        to_text(
-            self,
-            &TextStyle::new(
-                display_label as Label<Id<NT>, N>,
-                display_label as Label<Id<ET>, E>,
-            ),
-        )
+        to_text(self, &TextStyle::new(display_label, display_label))
     }
 }
 

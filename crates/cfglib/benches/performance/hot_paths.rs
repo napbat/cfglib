@@ -10,6 +10,7 @@ mod dataflow;
 mod dominance;
 mod edits;
 mod structure;
+mod structuring;
 mod traversal;
 
 use crate::fixtures::{branchy_cfg, branchy_graph};
@@ -30,7 +31,8 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     construction::register(suite);
     traversal::register(suite, &cfg, &graph);
     dominance::register(suite, &cfg);
-    structure::register(suite, &cfg, &graph);
+    structure::register(suite, &graph);
     dataflow::register(suite, &cfg, &graph);
+    structuring::register(suite, &cfg);
     edits::register(suite);
 }

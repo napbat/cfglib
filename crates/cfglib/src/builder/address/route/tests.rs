@@ -9,26 +9,26 @@ use alloc::vec::Vec;
 use super::{HopEnd, UnwindEnd, UnwindHop, UnwindPath, UnwindRoute, UnwindStep};
 use crate::block::BlockId;
 use crate::builder::address::tests::{Inst, inst, quiet_inst};
-use crate::builder::address::{AddressCfgOptions, AddressGraph, build_address_cfg_with_routes};
-use crate::edge::EdgeKind;
+use crate::builder::address::{AddressCfgOptions, AddressGraph, build_address_cfg};
+use crate::edge::{Edge, EdgeKind};
 use crate::flow::{EdgeRole, Flow};
 
 mod errors;
 mod shapes;
 
 /// `(source, target, is an unwind edge, route)`; the route is set on route
-/// edges only.
+/// and continue edges only.
 pub(super) type Wire = (u32, u32, bool, Option<usize>);
 
 pub(super) fn wire(info: crate::builder::address::AddressEdgeInfo<'_, u32, i32>) -> Wire {
     let route = match info.role {
-        EdgeRole::Route { route } => Some(route),
+        EdgeRole::Route { route } | EdgeRole::Continue { route } => Some(route),
         _ => None,
     };
     (
         info.source,
         info.target,
-        info.kind == EdgeKind::ExceptionUnwind,
+        info.role.kind() == EdgeKind::ExceptionUnwind,
         route,
     )
 }
@@ -82,11 +82,13 @@ pub(super) fn try_build(
     instructions: Vec<Inst>,
     routes: &[UnwindRoute<u32>],
 ) -> Result<Built, crate::builder::address::AddressBuildError<u32>> {
-    let mut graph = build_address_cfg_with_routes(
+    let mut graph = build_address_cfg(
         instructions,
         &[],
-        routes,
-        AddressCfgOptions::default(),
+        AddressCfgOptions {
+            routes: Some(routes),
+            ..AddressCfgOptions::default()
+        },
         wire,
     )?;
     let hops = graph.add_unwind_routes(routes, wire)?;
@@ -591,6 +593,23 @@ fn a_resume_end_is_an_edge_from_the_protected_block_to_itself() {
     let built = build(instructions, &routes);
 
     assert_eq!(built.route_edges(), BTreeSet::from([(0, 0), (0, 10)]));
+    let protected = built.block_of(0);
+    let kinds: BTreeSet<_> = built
+        .graph
+        .cfg
+        .outgoing(protected)
+        .map(|edge| built.graph.cfg.edge(edge))
+        .filter(|edge| edge.kind().is_exceptional())
+        .map(|edge| (built.first_address(edge.target()), edge.kind() as u8))
+        .collect();
+    assert_eq!(
+        kinds,
+        BTreeSet::from([
+            (0, EdgeKind::ExceptionContinue as u8),
+            (10, EdgeKind::ExceptionUnwind as u8),
+        ]),
+        "execution continues at the protected instruction; the funclet is unwound to"
+    );
     let itself: Vec<_> = built
         .hops_of(built.block_of(0))
         .into_iter()
@@ -670,18 +689,22 @@ fn a_funclet_entry_that_is_split_after_the_build_still_has_its_instances() {
         route(0..1, vec![(funclets(&[10, 20]), UnwindEnd::Propagate)]),
         route(1..2, vec![(funclets(&[10]), UnwindEnd::Propagate)]),
     ];
-    let mut graph = build_address_cfg_with_routes(
+    let mut graph = build_address_cfg(
         instructions,
         &[],
-        &routes,
-        AddressCfgOptions::default(),
+        AddressCfgOptions {
+            routes: Some(&routes),
+            ..AddressCfgOptions::default()
+        },
         wire,
     )
     .expect("valid");
     let head = graph.instruction_blocks[&10];
-    let tail = graph
-        .cfg
-        .split_block_with_payload(head, 1, (10, 11, false, None));
+    let tail = graph.cfg.split_block(
+        head,
+        1,
+        Edge::new(EdgeKind::Fallthrough).with_payload((10, 11, false, None)),
+    );
     graph.instruction_blocks.insert(11, tail);
     let hops = graph.add_unwind_routes(&routes, wire).expect("valid");
     let built = Built { graph, hops };

@@ -6,6 +6,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::graph::view::DenseId;
+use crate::identity::{NO_INDEX, define_dense_id};
 use crate::ir::rtl::{
     Action, BitSlice, Bits, Control, Dialect, Place, RecordView, Selection, Statement, ValueRange,
     WriteTarget,
@@ -13,27 +14,18 @@ use crate::ir::rtl::{
 
 use super::defs::Defs;
 use super::dialect::DialectEffects;
+use super::pool::Span;
 
-/// The identity of one node of a [`StatementTree`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TreeNodeId(u32);
-
-impl TreeNodeId {
-    /// Returns the dense index of the node in its tree.
-    #[must_use]
-    pub const fn index(self) -> usize {
-        self.0 as usize
-    }
-}
-
-impl DenseId for TreeNodeId {
-    fn from_index(index: usize) -> Self {
-        Self(u32::try_from(index).expect("a tree holds at most u32::MAX nodes"))
-    }
-
-    fn index(self) -> usize {
-        self.0 as usize
-    }
+define_dense_id! {
+    /// The identity of one node of a [`StatementTree`].
+    pub struct TreeNodeId(u32);
+    /// Creates an identity from a dense zero-based index.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `index` exceeds `u32::MAX`.
+    from_index = "a tree holds at most u32::MAX nodes";
+    dense_id;
 }
 
 /// One value of the instruction, as [`StatementTree::node`] lends it.
@@ -162,7 +154,7 @@ pub enum TreeItem<'t, D: Dialect> {
         /// The selector.
         index: TreeNodeId,
         /// The candidates, in index order.
-        candidates: &'t [Place<D>],
+        candidates: &'t [Place<D::Root>],
         /// The written value.
         value: TreeNodeId,
         /// The policy of the write.
@@ -185,30 +177,6 @@ pub enum TreeItem<'t, D: Dialect> {
     Control(Control<TreeNodeId>),
 }
 
-/// A run of one pool of a tree.
-#[derive(Debug, Clone, Copy)]
-struct Run {
-    start: u32,
-    len: u32,
-}
-
-impl Run {
-    fn push<T: Copy>(pool: &mut Vec<T>, items: impl IntoIterator<Item = T>) -> Self {
-        let start = pool.len();
-        pool.extend(items);
-        let len = pool.len() - start;
-        Self {
-            start: u32::try_from(start).expect("a tree pool holds at most u32::MAX items"),
-            len: u32::try_from(len).expect("a tree pool holds at most u32::MAX items"),
-        }
-    }
-
-    fn get<T>(self, pool: &[T]) -> &[T] {
-        let start = self.start as usize;
-        &pool[start..start + self.len as usize]
-    }
-}
-
 #[derive(Debug)]
 enum NodeData<'a, D: Dialect> {
     Read(Selection<'a, D, TreeNodeId>),
@@ -216,15 +184,9 @@ enum NodeData<'a, D: Dialect> {
         words: &'a [u64],
         width: Bits,
     },
-    /// An operator that the dialect knows as a number
-    /// ([`DialectEffects::constant`]): the number is `numbers[at]`.
-    Number {
-        at: u32,
-        width: Bits,
-    },
     Apply {
         operator: &'a D::Operator,
-        args: Run,
+        args: Span,
         result: u32,
         width: Bits,
     },
@@ -256,24 +218,24 @@ enum ItemData<'a, D: Dialect> {
     Let(TreeNodeId),
     Effect {
         operation: &'a D::EffectOp,
-        args: Run,
-        results: Run,
+        args: Span,
+        results: Span,
         outcomes: &'a [D::Outcome],
     },
     Raise {
         outcome: D::Outcome,
         guard: Option<TreeNodeId>,
-        payload: Run,
-        binds: Run,
+        payload: Span,
+        binds: Span,
     },
     Write {
         root: D::Root,
-        spans: Run,
+        spans: Span,
         policy: D::WritePolicy,
     },
     FiniteWrite {
         index: TreeNodeId,
-        candidates: &'a [Place<D>],
+        candidates: &'a [Place<D::Root>],
         value: TreeNodeId,
         policy: D::WritePolicy,
     },
@@ -324,8 +286,6 @@ impl<D: Dialect> Copy for ItemData<'_, D> {}
 pub struct StatementTree<'a, D: Dialect> {
     nodes: Vec<NodeData<'a, D>>,
     refs: Vec<TreeNodeId>,
-    /// The numbers of the [`NodeData::Number`] nodes.
-    numbers: Vec<u64>,
     binds: Vec<(D::Root, TreeNodeId)>,
     spans: Vec<TreeSpan<D>>,
     items: Vec<ItemData<'a, D>>,
@@ -336,43 +296,20 @@ pub struct StatementTree<'a, D: Dialect> {
 impl<'a, D: Dialect> StatementTree<'a, D> {
     /// Builds the tree of one sealed record.
     ///
-    /// # Panics
-    ///
-    /// Panics as [`Self::compute`] does.
-    #[must_use]
-    pub fn compute_record<C: DialectEffects<D>, R: RecordView<D>>(
-        dialect: &C,
-        record: &'a R,
-    ) -> Self {
-        Self::compute(dialect, record.statements(), record.control(), |value| {
-            record.width(value)
-        })
-    }
-
-    /// Builds the tree of the statements of one instruction and its control
-    /// boundary.
-    ///
-    /// `dialect` recognizes the select operators. `width` gives the type of
-    /// each value that the statements define.
+    /// `dialect` recognizes the select operators.
     ///
     /// # Panics
     ///
     /// Panics when an operand is not a value that an earlier statement
     /// defines, or when [`DialectEffects::select`] names an operand position
-    /// past the operands.
+    /// past the operands. A sealed record meets these conditions.
     #[must_use]
-    pub fn compute<C: DialectEffects<D>, V: DenseId + 'a>(
-        dialect: &C,
-        statements: impl IntoIterator<Item = Statement<'a, D, V>>,
-        control: Control<V>,
-        width: impl Fn(V) -> Bits,
-    ) -> Self {
+    pub fn compute<C: DialectEffects<D>, R: RecordView<D>>(dialect: &C, record: &'a R) -> Self {
         let mut build = Build {
             defs: Defs::new(),
             tree: Self {
                 nodes: Vec::new(),
                 refs: Vec::new(),
-                numbers: Vec::new(),
                 binds: Vec::new(),
                 spans: Vec::new(),
                 items: Vec::new(),
@@ -380,10 +317,11 @@ impl<'a, D: Dialect> StatementTree<'a, D> {
                 bound: Vec::new(),
             },
         };
-        for statement in statements {
+        let width = |value| record.width(value);
+        for statement in record.statements() {
             build.statement(dialect, &statement, &width);
         }
-        let control = build.control(control);
+        let control = record.control().map(|value| build.node(value));
         build.tree.items.push(ItemData::Control(control));
         let mut tree = build.tree;
         tree.count_uses();
@@ -407,10 +345,6 @@ impl<'a, D: Dialect> StatementTree<'a, D> {
         match self.nodes[id.index()] {
             NodeData::Read(selection) => TreeNode::Read(selection),
             NodeData::Const { words, width } => TreeNode::Const { words, width },
-            NodeData::Number { at, width } => TreeNode::Const {
-                words: core::slice::from_ref(&self.numbers[at as usize]),
-                width,
-            },
             NodeData::Apply {
                 operator,
                 args,
@@ -564,24 +498,7 @@ impl<'a, D: Dialect> StatementTree<'a, D> {
                 visit(key);
                 visit(value);
             }
-            ItemData::Control(control) => match control {
-                Control::Advance | Control::Terminating => {}
-                Control::Jump { target }
-                | Control::Call { target }
-                | Control::Return { target } => {
-                    visit(target);
-                }
-                Control::Branch {
-                    condition,
-                    taken,
-                    not_taken,
-                } => {
-                    visit(condition);
-                    visit(taken);
-                    not_taken.into_iter().for_each(visit);
-                }
-                Control::Dispatch { scrutinee } => visit(scrutinee),
-            },
+            ItemData::Control(control) => control.operands().for_each(visit),
         }
     }
 
@@ -593,7 +510,6 @@ impl<'a, D: Dialect> StatementTree<'a, D> {
             NodeData::Apply { args, .. } => args.get(&self.refs).iter().copied().for_each(visit),
             NodeData::Read(Selection::Direct(_))
             | NodeData::Const { .. }
-            | NodeData::Number { .. }
             | NodeData::Nondet { .. }
             | NodeData::Effect { .. } => {}
         }
@@ -683,7 +599,7 @@ impl<'a, D: Dialect, V: DenseId> Build<'a, D, V> {
         width: &impl Fn(V) -> Bits,
     ) {
         self.defs
-            .define(statement, width, |_, _| TreeNodeId(u32::MAX));
+            .define(statement, width, TreeNodeId::from_raw(NO_INDEX));
         match *statement {
             Statement::Read { result, source } => {
                 let source = match source {
@@ -705,21 +621,6 @@ impl<'a, D: Dialect, V: DenseId> Build<'a, D, V> {
                 words,
                 width,
             } => self.add_node(result, NodeData::Const { words, width }),
-            Statement::Apply {
-                results:
-                    ValueRange {
-                        first: value,
-                        len: 1,
-                    },
-                operator,
-                args: [],
-            } if let Some(number) = dialect.constant(operator) => {
-                let at = u32::try_from(self.tree.numbers.len())
-                    .expect("a tree holds fewer than 2^32 numbers");
-                self.tree.numbers.push(number);
-                let width = self.defs.slot(value).width;
-                self.add_node(value, NodeData::Number { at, width });
-            }
             Statement::Apply {
                 results,
                 operator,
@@ -753,7 +654,7 @@ impl<'a, D: Dialect, V: DenseId> Build<'a, D, V> {
             Statement::Raise(raise) => {
                 let guard = raise.guard.map(|guard| self.node(guard));
                 let payload = self.refs(raise.payload.iter().copied());
-                let binds = Run::push(
+                let binds = Span::push(
                     &mut self.tree.binds,
                     raise
                         .binds
@@ -805,9 +706,9 @@ impl<'a, D: Dialect, V: DenseId> Build<'a, D, V> {
     }
 
     /// Adds the nodes of `values` to the reference pool.
-    fn refs(&mut self, values: impl IntoIterator<Item = V>) -> Run {
+    fn refs(&mut self, values: impl IntoIterator<Item = V>) -> Span {
         let defs = &self.defs;
-        Run::push(
+        Span::push(
             &mut self.tree.refs,
             values.into_iter().map(|value| defs.slot(value).extra),
         )
@@ -827,41 +728,37 @@ impl<'a, D: Dialect, V: DenseId> Build<'a, D, V> {
     ) -> ItemData<'a, D> {
         match target {
             WriteTarget::Root { root, plan } => {
-                let start = self.tree.spans.len();
-                for span in plan {
-                    let value = match span.action {
-                        Action::PreservePreState => TreeSpanValue::Keep,
-                        Action::Nondeterministic(domain) => TreeSpanValue::Undefined(domain),
-                        Action::TakeInput { value, offset } => {
-                            match self.defs.conditional(
-                                dialect,
-                                root,
-                                span.span.offset,
-                                value,
-                                offset,
-                            ) {
-                                Some((guard, taken)) => TreeSpanValue::Conditional {
-                                    guard: self.node(guard),
-                                    value: self.node(taken),
-                                    offset,
-                                },
-                                None => TreeSpanValue::Assign {
-                                    value: self.node(value),
-                                    offset,
-                                },
-                            }
-                        }
-                    };
-                    self.tree.spans.push(TreeSpan {
+                let defs = &self.defs;
+                let node = |value| defs.slot(value).extra;
+                let spans = Span::push(
+                    &mut self.tree.spans,
+                    plan.iter().map(|span| TreeSpan {
                         span: span.span,
-                        value,
-                    });
-                }
-                let spans = Run {
-                    start: u32::try_from(start).expect("a tree pool holds at most u32::MAX items"),
-                    len: u32::try_from(plan.len())
-                        .expect("a tree pool holds at most u32::MAX items"),
-                };
+                        value: match span.action {
+                            Action::PreservePreState => TreeSpanValue::Keep,
+                            Action::Nondeterministic(domain) => TreeSpanValue::Undefined(domain),
+                            Action::TakeInput { value, offset } => {
+                                match defs.conditional(
+                                    dialect,
+                                    root,
+                                    span.span.offset,
+                                    value,
+                                    offset,
+                                ) {
+                                    Some((guard, taken)) => TreeSpanValue::Conditional {
+                                        guard: node(guard),
+                                        value: node(taken),
+                                        offset,
+                                    },
+                                    None => TreeSpanValue::Assign {
+                                        value: node(value),
+                                        offset,
+                                    },
+                                }
+                            }
+                        },
+                    }),
+                );
                 ItemData::Write {
                     root,
                     spans,
@@ -889,34 +786,6 @@ impl<'a, D: Dialect, V: DenseId> Build<'a, D, V> {
                 slice,
                 value: self.node(value),
                 policy,
-            },
-        }
-    }
-
-    fn control(&self, control: Control<V>) -> Control<TreeNodeId> {
-        match control {
-            Control::Advance => Control::Advance,
-            Control::Terminating => Control::Terminating,
-            Control::Jump { target } => Control::Jump {
-                target: self.node(target),
-            },
-            Control::Call { target } => Control::Call {
-                target: self.node(target),
-            },
-            Control::Return { target } => Control::Return {
-                target: self.node(target),
-            },
-            Control::Branch {
-                condition,
-                taken,
-                not_taken,
-            } => Control::Branch {
-                condition: self.node(condition),
-                taken: self.node(taken),
-                not_taken: not_taken.map(|value| self.node(value)),
-            },
-            Control::Dispatch { scrutinee } => Control::Dispatch {
-                scrutinee: self.node(scrutinee),
             },
         }
     }

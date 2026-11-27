@@ -1,27 +1,25 @@
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::ops::ControlFlow;
 
 use cfglib::{BlockId, canonical_hash, canonical_order, multiset_fingerprint, wl_colors};
 use cfglib::{
-    CallInfo, Cfg, DominatorTree, EdgeKind, EpochMarks, FoldEnter, Graph, GraphView, MarkScope,
-    NodeId, OpenBfsConfig, OpenDfsConfig, OpenFold, OpenFoldConfig, OpenPathsConfig,
-    OpenSearchConfig, Rooted, SearchConfig, SearchOrder, SearchScratch, SemanticValidator,
-    TraversalDirection, Visit, VisitedPolicy, breadth_first_events, call_graph, canonicalize_loops,
-    condensation, condensation_of, depth_first_edges, depth_first_events, depth_first_postorder,
-    detect_loops_tagged, find_back_edges_tagged, find_function, follow, follow_path,
-    insert_preheader, is_recursive_function, is_reducible, kosaraju_scc, loop_exit_blocks,
-    min_label_relaxation, open_breadth_first_events, open_breadth_first_paths,
-    open_depth_first_events, open_fold_post_order, open_search, propagate_summaries, reachable,
-    reverse_cfg, reverse_postorder, scan_predecessors, search, search_with_marks,
-    search_with_scratch, to_dot, to_text, topological_sort, topological_sort_or_cycle, verify,
-    verify_edge_view, verify_view, verify_with, write_dot, write_text,
+    CallMetadata, DotEdgeAttributes, DotStyle, EdgeId, FunctionIndex, FunctionNode, SummaryConfig,
+    SummaryProblem, TextStyle, call_graph_indexed, control_flow_edge_attributes, display_label,
+    no_label, parse_cfg_listing, parse_text, plain_edge_attributes, recursive_functions, render,
 };
 use cfglib::{
-    DotEdgeAttributes, DotStyle, EdgeId, FunctionIndex, TextStyle, bind_edge_attributes,
-    bind_label, call_graph_indexed, control_flow_edge_attributes, display_label, no_label,
-    parse_cfg_text, parse_text, plain_edge_attributes, propagate_summaries_widened,
-    recursive_functions,
+    Cfg, Direction, DominatorTree, EdgeKind, Flow, FlowControl, FlowEffect, FoldEnter, Graph,
+    GraphView, LoopForest, MarkScope, NodeId, OpenFold, OpenFoldConfig, Rooted, SccDecomposition,
+    SccNumbering, SearchConfig, SearchOrder, SearchScratch, SemanticValidator, Visit, call_graph,
+    canonicalize_loops, depth_first_edges, depth_first_events, depth_first_postorder,
+    find_back_edges, find_function, follow, follow_path, insert_preheader, is_recursive_function,
+    is_reducible, min_label_relaxation, open_breadth_first_events, open_breadth_first_paths,
+    open_depth_first_events, open_fold, open_search, propagate_summaries, reachable,
+    reverse_postorder, scan_predecessors, search, search_in, to_dot, to_text, topological_sort,
+    topological_sort_or_cycle, verify, verify_edge_view, verify_semantics, verify_view, write_dot,
+    write_text,
 };
 
 use super::BenchmarkSuite;
@@ -37,11 +35,12 @@ const FINGERPRINT_BLOCKS: usize = 10_000;
 #[derive(Clone, Copy)]
 pub(super) struct CallInst(Option<u32>);
 
-impl CallInfo for CallInst {
-    type Callee = u32;
+impl FlowControl for CallInst {
+    type Target = u32;
+    type CaseKey = ();
 
-    fn callee(&self) -> Option<Self::Callee> {
-        self.0
+    fn flow_effect(&self) -> FlowEffect<u32, ()> {
+        FlowEffect::Flow(self.0.map_or(Flow::Next, |target| Flow::Call { target }))
     }
 }
 
@@ -110,46 +109,29 @@ fn register_dense_traversals(suite: &mut BenchmarkSuite<'_>) {
         suite,
         "api_depth_first_postorder",
         covers[depth_first_postorder],
-        || depth_first_postorder(&graph, root, TraversalDirection::Outgoing),
+        || depth_first_postorder(&graph, root, Direction::Forward),
         |order: &Vec<_>| assert_eq!(order.len(), NODE_COUNT)
     );
     benchmark_case!(
         suite,
         "api_reverse_postorder",
         covers[reverse_postorder],
-        || reverse_postorder(&graph, root, TraversalDirection::Outgoing),
+        || reverse_postorder(&graph, root, Direction::Forward),
         |order: &Vec<_>| assert_eq!(order.len(), NODE_COUNT)
     );
     benchmark_case!(
         suite,
         "api_reachable",
         covers[reachable],
-        || reachable(&graph, [root], TraversalDirection::Outgoing),
+        || reachable(&graph, [root], Direction::Forward),
         |marks: &Vec<bool>| assert!(marks.iter().all(|marked| *marked))
     );
     benchmark_case!(
         suite,
         "api_depth_first_edges",
-        covers [depth_first_edges, depth_first_edges_with],
-        || depth_first_edges(&graph, root, TraversalDirection::Outgoing),
+        covers[depth_first_edges],
+        || depth_first_edges(&graph, root, Direction::Forward),
         |steps: &Vec<_>| assert_ne!(steps.as_slice(), [])
-    );
-    benchmark_case!(
-        suite,
-        "api_breadth_first_events",
-        covers[breadth_first_events],
-        || {
-            let mut events = 0_usize;
-            let stopped = breadth_first_events(&graph, root, TraversalDirection::Outgoing, |_| {
-                events += 1;
-                ControlFlow::<()>::Continue(())
-            });
-            (stopped, events)
-        },
-        |(stopped, events)| {
-            assert!(stopped.is_none());
-            assert!(*events >= NODE_COUNT);
-        }
     );
     benchmark_case!(
         suite,
@@ -157,7 +139,7 @@ fn register_dense_traversals(suite: &mut BenchmarkSuite<'_>) {
         covers[depth_first_events],
         || {
             let mut events = 0_usize;
-            let stopped = depth_first_events(&graph, root, TraversalDirection::Outgoing, |_| {
+            let stopped = depth_first_events(&graph, root, Direction::Forward, |_| {
                 events += 1;
                 ControlFlow::<()>::Continue(())
             });
@@ -174,14 +156,34 @@ fn register_dense_searches(suite: &mut BenchmarkSuite<'_>) {
     let graph = branchy_graph(NODE_COUNT);
     let root = cfglib::NodeId::from_raw(0);
 
-    let config = SearchConfig::new(SearchOrder::BreadthFirst, TraversalDirection::Outgoing);
+    let config = SearchConfig {
+        order: SearchOrder::BreadthFirst,
+        ..SearchConfig::default()
+    };
     benchmark_case!(
         suite,
         "api_search",
         covers[search],
         || {
             let mut visited = 0_usize;
-            let stopped = search(&graph, [root], config, |_, _| {
+            let stopped = search(&graph, [root], Direction::Forward, config, |_, _| {
+                visited += 1;
+                ControlFlow::<(), _>::Continue(Visit::Descend)
+            });
+            (stopped, visited)
+        },
+        |(stopped, visited)| {
+            assert!(stopped.is_none());
+            assert_eq!(*visited, NODE_COUNT);
+        }
+    );
+    benchmark_case!(
+        suite,
+        "api_search_depth_first",
+        || {
+            let mut visited = 0_usize;
+            let depth_first = SearchConfig::default();
+            let stopped = search(&graph, [root], Direction::Forward, depth_first, |_, _| {
                 visited += 1;
                 ControlFlow::<(), _>::Continue(Visit::Descend)
             });
@@ -193,33 +195,15 @@ fn register_dense_searches(suite: &mut BenchmarkSuite<'_>) {
         }
     );
 
-    let mut marks = EpochMarks::new(NODE_COUNT);
+    let mut scratch = SearchScratch::default();
     benchmark_case!(
         suite,
-        "api_search_with_marks",
-        covers[search_with_marks],
+        "api_search_in",
+        covers[search_in],
         || {
             let mut visited = 0_usize;
-            let stopped = search_with_marks(&graph, [root], config, &mut marks, |_, _| {
-                visited += 1;
-                ControlFlow::<(), _>::Continue(Visit::Descend)
-            });
-            (stopped, visited)
-        },
-        |(stopped, visited)| {
-            assert!(stopped.is_none());
-            assert_eq!(*visited, NODE_COUNT);
-        }
-    );
-
-    let mut scratch = SearchScratch::new(NODE_COUNT);
-    benchmark_case!(
-        suite,
-        "api_search_with_scratch",
-        covers[search_with_scratch],
-        || {
-            let mut visited = 0_usize;
-            let stopped = search_with_scratch(&graph, [root], config, &mut scratch, |_, _| {
+            let forward = Direction::Forward;
+            let stopped = search_in(&mut scratch, &graph, [root], forward, config, |_, _| {
                 visited += 1;
                 ControlFlow::<(), _>::Continue(Visit::Descend)
             });
@@ -265,11 +249,10 @@ fn register_open_traversals(suite: &mut BenchmarkSuite<'_>) {
         covers[open_breadth_first_events],
         || {
             let mut visited = 0_usize;
-            let stopped =
-                open_breadth_first_events([0_usize], OpenBfsConfig::new(), successors, |_| {
-                    visited += 1;
-                    ControlFlow::<(), _>::Continue(Visit::Descend)
-                });
+            let stopped = open_breadth_first_events([0_usize], None, successors, |_| {
+                visited += 1;
+                ControlFlow::<(), _>::Continue(Visit::Descend)
+            });
             (stopped, visited)
         },
         |(stopped, visited)| {
@@ -283,15 +266,11 @@ fn register_open_traversals(suite: &mut BenchmarkSuite<'_>) {
         covers[open_depth_first_events],
         || {
             let mut events = 0_usize;
-            let stopped = open_depth_first_events(
-                [0_usize],
-                OpenDfsConfig::new(VisitedPolicy::Global),
-                successors,
-                |_| {
+            let stopped =
+                open_depth_first_events([0_usize], SearchConfig::default(), successors, |_| {
                     events += 1;
                     ControlFlow::<(), _>::Continue(Visit::Descend)
-                },
-            );
+                });
             (stopped, events)
         },
         |(stopped, events)| {
@@ -305,11 +284,10 @@ fn register_open_traversals(suite: &mut BenchmarkSuite<'_>) {
         covers[open_breadth_first_paths],
         || {
             let mut routes = 0_usize;
-            let stopped =
-                open_breadth_first_paths([0_usize], OpenPathsConfig::new(), successors, |_| {
-                    routes += 1;
-                    ControlFlow::<(), _>::Continue(Visit::Descend)
-                });
+            let stopped = open_breadth_first_paths([0_usize], None, successors, |_| {
+                routes += 1;
+                ControlFlow::<(), _>::Continue(Visit::Descend)
+            });
             (stopped, routes)
         },
         |(stopped, routes)| {
@@ -320,9 +298,9 @@ fn register_open_traversals(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_open_fold_post_order",
-        covers[open_fold_post_order],
-        || open_fold_post_order(&mut SubtreeSize, 0_usize, OpenFoldConfig::new()),
-        |size: &Option<usize>| assert_eq!(*size, Some(NODE_COUNT))
+        covers[open_fold],
+        || open_fold(&mut SubtreeSize, 0_usize, OpenFoldConfig::default()),
+        |size: &Result<_, _>| assert_eq!(*size, Ok(Some(NODE_COUNT)))
     );
     benchmark_case!(
         suite,
@@ -330,15 +308,10 @@ fn register_open_traversals(suite: &mut BenchmarkSuite<'_>) {
         covers[open_search],
         || {
             let mut visited = 0_usize;
-            let stopped = open_search(
-                [0_usize],
-                OpenSearchConfig::new(SearchOrder::DepthFirst),
-                successors,
-                |_, _| {
-                    visited += 1;
-                    ControlFlow::<(), _>::Continue(Visit::Descend)
-                },
-            );
+            let stopped = open_search([0_usize], SearchConfig::default(), successors, |_, _| {
+                visited += 1;
+                ControlFlow::<(), _>::Continue(Visit::Descend)
+            });
             (stopped, visited)
         },
         |(stopped, visited)| {
@@ -404,19 +377,16 @@ fn register_graph_algorithms(suite: &mut BenchmarkSuite<'_>) {
         || scan_predecessors(&graph, scanned_target).collect::<BTreeSet<_>>(),
         |scanned: &BTreeSet<NodeId>| assert_eq!(scanned, &stored_predecessors)
     );
-    let components = kosaraju_scc(&graph);
+    let components = SccDecomposition::compute(&graph, SccNumbering::SourcesFirst);
     let dag = chain_graph(NODE_COUNT);
 
     benchmark_case!(
         suite,
         "api_min_label_relaxation",
         covers[min_label_relaxation],
-        || min_label_relaxation(
-            &graph,
-            [(root, 0_usize)],
-            TraversalDirection::Outgoing,
-            |_, label| Some(*label + 1),
-        ),
+        || min_label_relaxation(&graph, [(root, 0_usize)], Direction::Forward, |_, label| {
+            Some(*label + 1)
+        },),
         |labels: &Vec<Option<usize>>| assert!(labels.iter().all(Option::is_some))
     );
     benchmark_case!(
@@ -444,40 +414,51 @@ fn register_graph_algorithms(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "api_kosaraju_scc",
-        covers[kosaraju_scc],
-        || kosaraju_scc(&graph),
-        |result| assert_eq!(
+        "api_scc_sources_first",
+        || SccDecomposition::compute(&graph, SccNumbering::SourcesFirst),
+        |result: &SccDecomposition<NodeId>| assert_eq!(
             result.components().map(<[_]>::len).sum::<usize>(),
             NODE_COUNT
         )
     );
     benchmark_case!(
         suite,
-        "api_condensation",
-        covers[condensation],
-        || condensation(&graph),
+        "api_scc_decompose_and_condense",
+        || SccDecomposition::compute(&graph, SccNumbering::LeavesFirst).condensation(&graph),
         |result| assert!(topological_sort(result).is_some())
     );
     benchmark_case!(
         suite,
-        "api_condensation_of",
-        covers[condensation_of],
-        || condensation_of(&graph, &components),
-        |result| assert_eq!(result.node_count(), components.len())
+        "api_scc_condensation",
+        || components.condensation(&graph),
+        |result| assert_eq!(result.node_count(), components.component_count())
     );
     benchmark_case!(
         suite,
         "api_propagate_summaries",
         covers[propagate_summaries],
-        || propagate_summaries(&graph, &false, |graph, node, summaries| {
-            node.index() + 1 == NODE_COUNT
-                || graph
-                    .successors(node)
-                    .any(|successor| summaries[successor.index()])
-        }),
+        || propagate_summaries(&graph, &ReachesLast(NODE_COUNT), SummaryConfig::default()),
         |summaries: &Vec<bool>| assert!(summaries.iter().all(|summary| *summary))
     );
+}
+
+/// Whether a function reaches the last one, id `count - 1`, through its
+/// callees.
+struct ReachesLast(usize);
+
+impl SummaryProblem<Graph<(), ()>> for ReachesLast {
+    type Summary = bool;
+
+    fn bottom(&self, _graph: &Graph<(), ()>) -> bool {
+        false
+    }
+
+    fn compute(&self, graph: &Graph<(), ()>, node: NodeId, summaries: &[bool]) -> bool {
+        node.index() + 1 == self.0
+            || graph
+                .successors(node)
+                .any(|callee| summaries[callee.index()])
+    }
 }
 
 fn register_cfg_graphs(suite: &mut BenchmarkSuite<'_>) {
@@ -485,13 +466,6 @@ fn register_cfg_graphs(suite: &mut BenchmarkSuite<'_>) {
     let graph = branchy_graph(NODE_COUNT);
     let rooted = Rooted::new(&graph, cfglib::NodeId::from_raw(0));
 
-    benchmark_case!(
-        suite,
-        "api_reverse_cfg",
-        covers[reverse_cfg],
-        || reverse_cfg(&cfg),
-        |reversed| assert!(verify(reversed).is_ok())
-    );
     benchmark_case!(
         suite,
         "api_verify",
@@ -515,9 +489,9 @@ fn register_cfg_graphs(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "api_verify_with",
-        covers[verify_with],
-        || verify_with(&cfg, &NoopValidator),
+        "api_verify_semantics",
+        covers[verify_semantics],
+        || verify_semantics(&cfg, &NoopValidator),
         |report| assert!(report.is_ok())
     );
 }
@@ -542,15 +516,12 @@ fn register_output_formats(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_write_dot",
-        covers[write_dot, no_label, bind_edge_attributes],
+        covers[write_dot, no_label],
         || {
-            let style = DotStyle::new(
-                no_label,
-                bind_edge_attributes::<EdgeId, String, _>(|_, label| DotEdgeAttributes {
-                    label: std::borrow::Cow::Borrowed(label),
-                    ..DotEdgeAttributes::plain()
-                }),
-            );
+            let style = DotStyle::new(no_label, |_, label: &String| DotEdgeAttributes {
+                label: std::borrow::Cow::Borrowed(label),
+                ..DotEdgeAttributes::plain()
+            });
             let mut dot = String::new();
             let result = write_dot(&output_graph, &mut dot, &style);
             (result, dot)
@@ -559,6 +530,13 @@ fn register_output_formats(suite: &mut BenchmarkSuite<'_>) {
             assert!(result.is_ok());
             assert!(dot.starts_with("digraph view"));
         }
+    );
+    benchmark_case!(
+        suite,
+        "api_render",
+        covers[render],
+        || render(|sink| write_dot(&output_graph, sink, &DotStyle::plain())),
+        |dot: &String| assert!(dot.starts_with("digraph view"))
     );
     benchmark_case!(
         suite,
@@ -573,12 +551,12 @@ fn register_output_formats(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_to_text",
-        covers[to_text, bind_label],
+        covers[to_text],
         || to_text(
             &output_graph,
             &TextStyle::new(
-                bind_label::<NodeId, String, _>(|_, label| std::borrow::Cow::Borrowed(label)),
-                no_label,
+                |_, label: &String| std::borrow::Cow::Borrowed(label),
+                no_label
             )
         ),
         |text: &String| assert!(text.starts_with("n0 node 0"))
@@ -609,9 +587,9 @@ fn register_output_formats(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "api_parse_cfg_text",
-        covers[parse_cfg_text],
-        || parse_cfg_text(&cfg_text, |line| Ok::<_, String>(line.to_owned())),
+        "api_parse_cfg_listing",
+        covers[parse_cfg_listing],
+        || parse_cfg_listing(&cfg_text, |line| Ok::<_, String>(line.to_owned())),
         |parsed: &Result<Cfg<String>, _>| assert_eq!(parsed.as_ref().unwrap().block_count(), 128)
     );
 }
@@ -679,7 +657,7 @@ fn register_call_tree(suite: &mut BenchmarkSuite<'_>) {
         .map(|(index, cfg)| (fixture_u32(index), cfg))
         .collect();
     let tree = call_graph(&tree_functions);
-    let components = kosaraju_scc(&tree);
+    let components = SccDecomposition::compute(&tree, SccNumbering::SourcesFirst);
     let recursive = tree
         .node_ids()
         .filter(|&function| components.component(function).is_cyclic(&tree))
@@ -704,22 +682,37 @@ fn register_call_tree(suite: &mut BenchmarkSuite<'_>) {
     // Each function's summary is the set of `id % 64` over everything it
     // reaches: a finite-height domain that every recursive cluster of the
     // call tree has to iterate.
-    let reach_mask = |graph: &cfglib::Graph<cfglib::FunctionNode<u32>, cfglib::CallMetadata>,
-                      node: cfglib::NodeId,
-                      summaries: &[u64]| {
+    let tree_masks = propagate_summaries(&tree, &ReachMask, SummaryConfig::default());
+    benchmark_case!(
+        suite,
+        "call_tree_propagate_summaries",
+        || propagate_summaries(&tree, &ReachMask, SummaryConfig::default()),
+        |masks: &Vec<u64>| assert_eq!(*masks, tree_masks)
+    );
+}
+
+/// Each function's `id % 64` over everything it reaches.
+struct ReachMask;
+
+impl SummaryProblem<Graph<FunctionNode<u32>, CallMetadata>> for ReachMask {
+    type Summary = u64;
+
+    fn bottom(&self, _graph: &Graph<FunctionNode<u32>, CallMetadata>) -> u64 {
+        0
+    }
+
+    fn compute(
+        &self,
+        graph: &Graph<FunctionNode<u32>, CallMetadata>,
+        node: NodeId,
+        summaries: &[u64],
+    ) -> u64 {
         graph
             .successors(node)
             .fold(1_u64 << (node.index() % 64), |mask, callee| {
                 mask | summaries[callee.index()]
             })
-    };
-    let tree_masks = propagate_summaries(&tree, &0, reach_mask);
-    benchmark_case!(
-        suite,
-        "call_tree_propagate_summaries",
-        || propagate_summaries(&tree, &0, reach_mask),
-        |masks: &Vec<u64>| assert_eq!(*masks, tree_masks)
-    );
+    }
 }
 
 fn register_recursive_ring(suite: &mut BenchmarkSuite<'_>) {
@@ -733,12 +726,11 @@ fn register_recursive_ring(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "ring_propagate_summaries_seed_at_last",
-        || propagate_summaries(&ring, &false, |graph, node, summaries| {
-            node.index() + 1 == RING_FUNCTIONS
-                || graph
-                    .successors(node)
-                    .any(|callee| summaries[callee.index()])
-        }),
+        || propagate_summaries(
+            &ring,
+            &ReachesLast(RING_FUNCTIONS),
+            SummaryConfig::default()
+        ),
         |summaries: &Vec<bool>| assert!(summaries.iter().all(|summary| *summary))
     );
     // The deepest stack over the same ring grows forever. Widening at the
@@ -747,32 +739,57 @@ fn register_recursive_ring(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_propagate_summaries_widened",
-        covers[propagate_summaries_widened],
         || {
-            let mut calls = 0_usize;
-            let depths = propagate_summaries_widened(
-                &ring,
-                &None,
-                |graph, node, depths: &[Option<u32>]| {
-                    calls += 1;
-                    let deepest = graph
-                        .successors(node)
-                        .filter_map(|callee| depths[callee.index()])
-                        .max();
-                    Some(deepest.unwrap_or(0).saturating_add(1))
-                },
-                |_, previous, computed| match (*previous, *computed) {
-                    (Some(previous), Some(computed)) if computed > previous => Some(u32::MAX),
-                    (previous, computed) => previous.max(computed),
-                },
-            );
-            (depths, calls)
+            let problem = StackDepths::default();
+            let widened = SummaryConfig {
+                widening: true,
+                narrowing: false,
+            };
+            let depths = propagate_summaries(&ring, &problem, widened);
+            (depths, problem.computes.get())
         },
         |(depths, calls): &(Vec<Option<u32>>, usize)| {
             assert!(depths.iter().all(|depth| *depth == Some(u32::MAX)));
             assert!(*calls <= 3 * RING_FUNCTIONS, "{calls} compute calls");
         }
     );
+}
+
+/// The deepest call stack below each function: a widening point whose depth
+/// still grows jumps to `u32::MAX`. Counts the computes.
+#[derive(Default)]
+struct StackDepths {
+    computes: Cell<usize>,
+}
+
+impl SummaryProblem<Graph<(), ()>> for StackDepths {
+    type Summary = Option<u32>;
+
+    fn bottom(&self, _graph: &Graph<(), ()>) -> Option<u32> {
+        None
+    }
+
+    fn compute(&self, graph: &Graph<(), ()>, node: NodeId, depths: &[Option<u32>]) -> Option<u32> {
+        self.computes.set(self.computes.get() + 1);
+        let deepest = graph
+            .successors(node)
+            .filter_map(|callee| depths[callee.index()])
+            .max();
+        Some(deepest.unwrap_or(0).saturating_add(1))
+    }
+
+    fn widen(
+        &self,
+        _graph: &Graph<(), ()>,
+        _node: NodeId,
+        previous: &Option<u32>,
+        computed: &Option<u32>,
+    ) -> Option<u32> {
+        match (*previous, *computed) {
+            (Some(previous), Some(computed)) if computed > previous => Some(u32::MAX),
+            (previous, computed) => previous.max(computed),
+        }
+    }
 }
 
 /// Function `i` calls `2i + 1` and `2i + 2`; every 64th function also calls
@@ -800,25 +817,24 @@ pub(super) fn call_tree_cfgs(function_count: usize) -> Vec<Cfg<CallInst>> {
 fn register_loop_structure(suite: &mut BenchmarkSuite<'_>) {
     let cfg = loop_cfg();
     let dominators = DominatorTree::compute(&cfg);
-    let loops = detect_loops_tagged(&cfg, &dominators);
-    let natural_loop = loops
-        .first()
-        .expect("benchmark loop fixture must contain a loop")
-        .clone();
+    let loops = LoopForest::compute(&cfg, &dominators);
+    let lp = loops
+        .loops()
+        .next()
+        .expect("benchmark loop fixture must contain a loop");
 
     benchmark_case!(
         suite,
-        "api_find_back_edges_tagged",
-        covers[find_back_edges_tagged],
-        || find_back_edges_tagged(&cfg, &dominators),
+        "api_find_back_edges",
+        covers[find_back_edges],
+        || find_back_edges(&cfg, &dominators),
         |edges: &Vec<_>| assert_eq!(edges.len(), 1)
     );
     benchmark_case!(
         suite,
-        "api_detect_loops_tagged",
-        covers[detect_loops_tagged],
-        || detect_loops_tagged(&cfg, &dominators),
-        |found: &Vec<_>| assert_eq!(found.len(), 1)
+        "api_loop_forest",
+        || LoopForest::compute(&cfg, &dominators),
+        |found: &LoopForest| assert_eq!(found.loop_count(), 1)
     );
     benchmark_case!(
         suite,
@@ -829,10 +845,9 @@ fn register_loop_structure(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "api_loop_exit_blocks",
-        covers[loop_exit_blocks],
-        || loop_exit_blocks(&cfg, &natural_loop),
-        |exits| assert_eq!(exits.len(), 1)
+        "api_loop_exits",
+        || loops.exits(&cfg, lp),
+        |exits: &Vec<_>| assert_eq!(exits.len(), 1)
     );
     benchmark_case!(
         suite,
@@ -840,7 +855,7 @@ fn register_loop_structure(suite: &mut BenchmarkSuite<'_>) {
         covers[insert_preheader],
         || {
             let mut candidate = cfg.clone();
-            let preheader = insert_preheader(&mut candidate, &natural_loop);
+            let preheader = insert_preheader(&mut candidate, &loops, lp);
             (candidate, preheader)
         },
         |(candidate, preheader)| {

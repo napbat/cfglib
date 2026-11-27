@@ -2,6 +2,8 @@
 //! Edmonds–Karp for the maximum flow, and negative-cycle cancelling followed
 //! by Bellman–Ford successive shortest paths for the minimum-cost flow.
 
+use alloc::collections::VecDeque;
+
 use super::*;
 use crate::test_util::rng::Rng;
 

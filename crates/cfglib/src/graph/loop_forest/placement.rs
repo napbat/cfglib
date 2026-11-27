@@ -3,23 +3,25 @@
 //! nesting rule's parent and depth of every loop.
 
 extern crate alloc;
-use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::Reverse;
 use smallvec::SmallVec;
 
-use super::{LoopForest, LoopId, NONE, slot, word};
+use super::{LoopForest, LoopId};
+use crate::graph::fanout::DenseFanout;
 use crate::graph::view::DenseId;
+use crate::identity::{NO_INDEX, slot, word};
 
 impl<N: DenseId> LoopForest<N> {
     /// A preorder numbering of the properly nested loops that gives each loop's
-    /// subtree a run of positions. Children come before parents in `order`, so
-    /// the sizes add up in it and the positions are handed out in its reverse.
-    pub(super) fn number_subtrees(&mut self, order: &[usize]) {
+    /// subtree a run of positions, returning the number of positions. Children
+    /// come before parents in `order`, so the sizes add up in it and the
+    /// positions are handed out in its reverse.
+    pub(super) fn number_subtrees(&mut self, order: &[usize]) -> usize {
         let mut subtree: SmallVec<[u32; 8]> = SmallVec::from_elem(1, self.loops.len());
         for &k in order {
             let up = self.loops[k].enclosing;
-            if up != NONE {
+            if up != NO_INDEX {
                 subtree[slot(up)] += subtree[k];
             }
         }
@@ -27,7 +29,7 @@ impl<N: DenseId> LoopForest<N> {
         let mut next_outermost = 0_u32;
         for &k in order.iter().rev() {
             let up = self.loops[k].enclosing;
-            let cursor = if up == NONE {
+            let cursor = if up == NO_INDEX {
                 &mut next_outermost
             } else {
                 &mut next[slot(up)]
@@ -38,30 +40,25 @@ impl<N: DenseId> LoopForest<N> {
             self.loops[k].first = first;
             self.loops[k].last = first + subtree[k] - 1;
         }
-        self.member_starts = vec![0; slot(next_outermost) + 1];
+        slot(next_outermost)
     }
 
-    /// The blocks of each position, as one run apiece, in ascending order.
-    /// `member_starts` holds the number of positions plus one zeros.
-    pub(super) fn group_members(&mut self) {
-        let positions = self.member_starts.len() - 1;
-        for &held in self.innermost.iter().filter(|&&held| held != NONE) {
-            self.member_starts[slot(self.loops[slot(held)].first)] += 1;
-        }
-        let mut total = 0;
-        for count in &mut self.member_starts[..positions] {
-            total += *count;
-            *count = total;
-        }
-        self.member_starts[positions] = total;
-        self.members = vec![N::from_index(0); slot(total)];
-        for (node, &held) in self.innermost.iter().enumerate().rev() {
-            if held != NONE {
-                let end = &mut self.member_starts[slot(self.loops[slot(held)].first)];
-                *end -= 1;
-                self.members[slot(*end)] = N::from_index(node);
-            }
-        }
+    /// The blocks of each of `positions` preorder positions, as one run apiece,
+    /// in ascending order.
+    pub(super) fn group_members(&mut self, positions: usize) {
+        let (loops, innermost) = (&self.loops, &self.innermost);
+        DenseFanout::<N, u32>::group_into(
+            positions,
+            || {
+                innermost
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &held)| held != NO_INDEX)
+                    .map(|(node, &held)| (loops[slot(held)].first, N::from_index(node)))
+            },
+            &mut self.member_starts,
+            &mut self.members,
+        );
     }
 
     /// Work out the nesting rule's parent and depth of every loop, and the
@@ -88,7 +85,7 @@ impl<N: DenseId> LoopForest<N> {
 
         for &k in order.iter().rev() {
             let around = self.loops[k].enclosing;
-            let outer = if around == NONE {
+            let outer = if around == NO_INDEX {
                 0
             } else {
                 self.loops[slot(around)].deepest
@@ -102,7 +99,7 @@ impl<N: DenseId> LoopForest<N> {
     fn assign_depths(&mut self, outermost_first: impl Iterator<Item = usize>) {
         for k in outermost_first {
             self.loops[k].depth = match self.loops[k].parent {
-                NONE => 0,
+                NO_INDEX => 0,
                 parent => self.loops[slot(parent)].depth + 1,
             };
         }
@@ -115,7 +112,7 @@ impl<N: DenseId> LoopForest<N> {
     /// first, and their bodies grow along it, so the first one larger than the
     /// loop is the best of them. An explicit loop is found by asking each one.
     fn parents_among_explicit_loops(&self) -> (Vec<u32>, Vec<usize>) {
-        let sizes: Vec<usize> = self.loops().map(|lp| self.body_len(lp)).collect();
+        let sizes: Vec<usize> = self.loops().map(|lp| self.body_count(lp)).collect();
         let explicit: Vec<usize> = (0..self.loops.len())
             .filter(|&k| !self.loops[k].is_nested())
             .collect();
@@ -131,7 +128,7 @@ impl<N: DenseId> LoopForest<N> {
                     }
                 };
                 let mut chain = self.innermost[header.index()];
-                while chain != NONE {
+                while chain != NO_INDEX {
                     let candidate = slot(chain);
                     if sizes[candidate] > sizes[k] {
                         consider(candidate);
@@ -147,7 +144,7 @@ impl<N: DenseId> LoopForest<N> {
                         consider(candidate);
                     }
                 }
-                best.map_or(NONE, |(_, _, candidate)| word(candidate))
+                best.map_or(NO_INDEX, |(_, _, candidate)| word(candidate))
             })
             .collect();
 

@@ -65,7 +65,6 @@
   "entry": 0,
   "regions": [
     {
-      "id": 0,
       "protected_blocks": [
         0
       ],
@@ -83,19 +82,23 @@
       "parent": null
     }
   ],
-  "cleanups": [
-    {
-      "handler": {
-        "region": 0,
-        "handler": 0
-      },
-      "resume_from": 1,
-      "continuations": [
+  "cleanups": {
+    "entries": [
+      [
         {
-          "reason": "Normal",
-          "resume": 1
+          "region": 0,
+          "handler": 0
+        },
+        {
+          "exit_block": 1,
+          "continuations": [
+            {
+              "reason": "Normal",
+              "target": 1
+            }
+          ]
         }
       ]
-    }
-  ]
+    ]
+  }
 }

@@ -128,8 +128,9 @@ fn every_graph_of_up_to_three_blocks_is_covered_exactly_once() {
         let all = terminators(count, &ONE_SUCCESSOR, true);
         for_each_graph(count, &all, |picked| {
             let cfg = graph(picked, &vec![1; count]);
-            let (tree, report) = ControlTree::compute_with_report(&cfg);
-            check(&cfg, &tree, &report, &alloc::format!("{picked:?}"));
+            let tree = ControlTree::compute(&cfg);
+            let report = tree.report();
+            check(&cfg, &tree, report, &alloc::format!("{picked:?}"));
         });
     }
 }
@@ -139,8 +140,9 @@ fn every_graph_of_four_blocks_is_covered_exactly_once() {
     let all = terminators(4, &[EdgeKind::Fallthrough, EdgeKind::Jump], false);
     for_each_graph(4, &all, |picked| {
         let cfg = graph(picked, &[1; 4]);
-        let (tree, report) = ControlTree::compute_with_report(&cfg);
-        check(&cfg, &tree, &report, &alloc::format!("{picked:?}"));
+        let tree = ControlTree::compute(&cfg);
+        let report = tree.report();
+        check(&cfg, &tree, report, &alloc::format!("{picked:?}"));
     });
 }
 
@@ -175,11 +177,12 @@ fn blocks_without_instructions_are_covered_too() {
         for_each_length(count, most, |lengths| {
             for_each_graph(count, &all, |picked| {
                 let cfg = graph(picked, lengths);
-                let (tree, report) = ControlTree::compute_with_report(&cfg);
+                let tree = ControlTree::compute(&cfg);
+                let report = tree.report();
                 check(
                     &cfg,
                     &tree,
-                    &report,
+                    report,
                     &alloc::format!("{picked:?} with {lengths:?} instructions"),
                 );
             });
@@ -203,8 +206,8 @@ fn treating_blocks_as_empty_is_the_same_as_clearing_them() {
                     .map(BlockId::from_index)
                     .collect();
                 assert_eq!(
-                    ControlTree::compute_with_report_treating_empty(&full, &blocks),
-                    ControlTree::compute_with_report(&cleared),
+                    ControlTree::compute_treating_empty(&full, &blocks),
+                    ControlTree::compute(&cleared),
                     "{picked:?} with {blocks:?} emptied"
                 );
             }

@@ -3,7 +3,10 @@
 
 use std::fmt::{Debug, Display};
 
-use cfglib::{DominatorTree, EdgeId, Graph, HornClauses, KeyedGraph, NodeId, Rooted, tarjan_scc};
+use cfglib::{
+    DenseBits, DominatorTree, EdgeId, Graph, HornClauses, KeyedGraph, NodeId, NodeOrder, Rooted,
+    SccDecomposition, SccNumbering,
+};
 use serde_json::{Value, json};
 
 use crate::golden::assert_golden;
@@ -29,7 +32,7 @@ fn layered_store() -> Store {
     .zip(0..)
     .map(|((source, target), payload)| graph.add_edge(source, target, payload))
     .collect::<Vec<_>>();
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
 
     let link = graph.add_node("link".to_owned());
     let doomed = graph.add_node("doomed".to_owned());
@@ -146,7 +149,7 @@ fn evolve(mut graph: Store) -> (Store, Renumbered, Renumbered) {
     graph.remove_node(last);
 
     let (node_bound, edge_bound) = (graph.node_bound(), graph.edge_bound());
-    let renumbering = graph.compact();
+    let renumbering = graph.compact(NodeOrder::Insertion);
     let nodes = (0..node_bound)
         .map(|index| {
             renumbering
@@ -196,7 +199,7 @@ fn a_store_that_was_never_compacted_and_one_that_just_was_both_round_trip() {
     assert_same_store(&round_trip(&delta_only), &delta_only);
 
     let mut compacted = layered_store();
-    compacted.compact();
+    compacted.compact(NodeOrder::Insertion);
     let decoded: Store = round_trip(&compacted);
     assert_same_store(&decoded, &compacted);
     assert_eq!(decoded.node_bound(), decoded.node_count());
@@ -216,7 +219,7 @@ fn a_store_that_never_relocated_has_no_overlay_in_its_document_and_loads_without
     let a = graph.add_node("a".to_owned());
     let b = graph.add_node("b".to_owned());
     graph.add_edge(a, b, 1);
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
 
     let value = document(&graph);
     assert!(value.get("relocations").is_none(), "{value}");
@@ -235,7 +238,7 @@ fn the_store_document_is_stable() {
     let a = graph.add_node("a".to_owned());
     let b = graph.add_node("b".to_owned());
     let first = graph.add_edge(a, b, 1);
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
     let c = graph.add_node("c".to_owned());
     graph.add_edge(b, c, 2);
     graph.remove_edge(first);
@@ -279,7 +282,9 @@ fn a_keyed_graph_keeps_its_keys_ids_and_edges() {
         );
     }
     assert_same_store(decoded.graph(), original.graph());
-    assert_eq!(tarjan_scc(&decoded).len(), tarjan_scc(&original).len());
+    let components =
+        |graph| SccDecomposition::compute(graph, SccNumbering::LeavesFirst).component_count();
+    assert_eq!(components(&decoded), components(&original));
 }
 
 #[test]
@@ -291,10 +296,6 @@ fn a_decoded_keyed_graph_keeps_minting_dense_ids_in_the_same_order() {
         let new = graph.intern(&"pkg::e".to_owned());
         let known = graph.node_id(&"pkg::a".to_owned()).expect("a is minted");
         graph.add_edge(new, known, 6);
-        assert_eq!(
-            graph.add_edge_between(&"pkg::e".to_owned(), &"pkg::missing".to_owned(), 7),
-            None
-        );
     }
     assert_eq!(decoded, original);
     assert_eq!(
@@ -366,12 +367,17 @@ fn nullability() -> HornClauses {
     clauses
 }
 
+/// The set as one `bool` per fact of its universe, to compare against a row written by hand.
+fn row(bits: &DenseBits) -> Vec<bool> {
+    (0..bits.len()).map(|fact| bits.get(fact)).collect()
+}
+
 #[test]
 fn a_clause_set_decodes_equal_and_solves_to_the_same_fixpoint() {
     let original = nullability();
     let decoded: HornClauses = round_trip(&original);
     assert_eq!(decoded, original);
-    assert_eq!(decoded.derivable(), [true, true, true, false]);
+    assert_eq!(row(&decoded.derivable()), [true, true, true, false]);
     assert_eq!(decoded.derivable(), original.derivable());
 }
 
@@ -385,7 +391,7 @@ fn a_decoded_clause_set_keeps_accepting_clauses_and_counting_repeated_bodies() {
         clauses.add_clause(3, &[0]);
     }
     assert_eq!(decoded, original);
-    assert_eq!(decoded.derivable(), [true, true, true, true]);
+    assert_eq!(row(&decoded.derivable()), [true, true, true, true]);
 }
 
 #[test]
@@ -394,5 +400,5 @@ fn cyclic_support_with_no_axiom_stays_underivable_after_a_round_trip() {
     clauses.add_clause(0, &[1]);
     clauses.add_clause(1, &[0]);
     let decoded: HornClauses = round_trip(&clauses);
-    assert_eq!(decoded.derivable(), [false, false]);
+    assert_eq!(row(&decoded.derivable()), [false, false]);
 }

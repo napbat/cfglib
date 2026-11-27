@@ -13,10 +13,10 @@
 //! consumer that wants content in a fingerprint hashes its instructions into
 //! the node labels itself.
 //!
-//! Every value comes from one fixed 64-bit mixer, the `SplitMix64` finalizer
-//! applied to a running state, and never from a `RandomState`. A fingerprint
-//! is therefore the same across runs, platforms, and versions, and can be
-//! stored.
+//! Every value comes from one fixed 64-bit [`Mixer`], the `SplitMix64`
+//! finalizer applied to a running state, and never from a `RandomState`. A
+//! fingerprint is therefore the same across runs, platforms, and versions,
+//! and can be stored.
 //!
 //! A fingerprint has 64 bits, so two different graphs can collide: equal
 //! fingerprints are evidence of isomorphism, not proof. One-dimensional WL
@@ -31,6 +31,7 @@ use alloc::vec::Vec;
 
 use super::edge_view::EdgeView;
 use super::view::{DenseId, RootedView};
+use crate::identity::{NO_INDEX, check_bound, word};
 
 /// The rounds of [`wl_colors`] that [`canonical_hash`] runs to fingerprint
 /// the nodes the root does not reach.
@@ -39,18 +40,40 @@ const UNREACHED_ROUNDS: usize = 3;
 /// A running 64-bit hash: each value is folded into the state with the
 /// `SplitMix64` finalizer, so the result depends on the values and on their
 /// order.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Mixer(u64);
+///
+/// It is the one mixer behind every fingerprint of this module, and its
+/// values are part of the contract: the same values in the same order give
+/// the same hash on every run, platform, and version. A consumer that hashes
+/// its own block content, such as the [`BlockHashes`](crate::BlockHashes) of
+/// a [`CascadeDiff`](crate::CascadeDiff), can use it for the same guarantee.
+///
+/// # Examples
+///
+/// ```
+/// use cfglib::Mixer;
+///
+/// let hash = |values: &[u64]| {
+///     values
+///         .iter()
+///         .fold(Mixer::new(), |mixer, &value| mixer.mix(value))
+///         .finish()
+/// };
+/// assert_eq!(hash(&[1, 2]), hash(&[1, 2]));
+/// assert_ne!(hash(&[1, 2]), hash(&[2, 1]));
+/// ```
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Mixer(u64);
 
 impl Mixer {
     /// The state before any value is mixed in.
-    pub(crate) const fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self(0)
     }
 
     /// The state after `value`.
     #[must_use]
-    pub(crate) const fn mix(self, value: u64) -> Self {
+    pub const fn mix(self, value: u64) -> Self {
         Self(splitmix64(self.0 ^ value))
     }
 
@@ -73,7 +96,8 @@ impl Mixer {
     }
 
     /// The hash of everything mixed in so far.
-    pub(crate) const fn finish(self) -> u64 {
+    #[must_use]
+    pub const fn finish(self) -> u64 {
         self.0
     }
 }
@@ -223,9 +247,6 @@ pub fn multiset_fingerprint(colors: impl IntoIterator<Item = u64>) -> u64 {
         .finish()
 }
 
-/// The marker [`preorder`] leaves on a node the root does not reach.
-const UNREACHED: usize = usize::MAX;
-
 /// The canonical numbering of the nodes the root reaches: a depth-first
 /// preorder that visits each node's out-edges sorted by `edge_key`, and
 /// edges with equal keys in adjacency order.
@@ -245,6 +266,10 @@ const UNREACHED: usize = usize::MAX;
 ///
 /// `edge_key` is called once per live edge. The walk takes O(n + m log d)
 /// time for `n` nodes, `m` edges and maximum out-degree `d`.
+///
+/// # Panics
+///
+/// Panics when the node bound of `graph` exceeds `u32::MAX`.
 ///
 /// # Examples
 ///
@@ -270,10 +295,17 @@ pub fn canonical_order<G: RootedView + EdgeView>(
 }
 
 /// The [`canonical_order`] walk with the edge keys read from `keys`: the
-/// order, and each node's position in it by node index ([`UNREACHED`] for a
+/// order, and each node's position in it by node index ([`NO_INDEX`] for a
 /// node outside it).
-fn preorder<G: RootedView + EdgeView>(graph: &G, keys: &[u64]) -> (Vec<G::NodeId>, Vec<usize>) {
-    let mut position = vec![UNREACHED; graph.node_bound()];
+///
+/// The walk keeps its own loop instead of running the shared depth-first
+/// core over a successor table sorted up front: sorting each node's
+/// out-edges as the walk enters it, on one stack, and marking positions on
+/// entry. On 10,000 blocks the core form measured 1.14x the time of the
+/// previous release (`api_canonical_order`), and this loop 0.99x to 1.02x.
+fn preorder<G: RootedView + EdgeView>(graph: &G, keys: &[u64]) -> (Vec<G::NodeId>, Vec<u32>) {
+    check_bound(graph.node_bound(), "node bound of a canonical order");
+    let mut position = vec![NO_INDEX; graph.node_bound()];
     let mut order = Vec::new();
     // The out-edges of every node on the walk's stack, as `(key, adjacency
     // position, target)` sorted by key and then position, each node's run
@@ -284,7 +316,7 @@ fn preorder<G: RootedView + EdgeView>(graph: &G, keys: &[u64]) -> (Vec<G::NodeId
     let mut entered = Some(graph.root());
     loop {
         if let Some(node) = entered.take() {
-            position[node.index()] = order.len();
+            position[node.index()] = word(order.len());
             order.push(node);
             let start = edges.len();
             edges.extend(graph.outgoing(node).enumerate().map(|(adjacency, edge)| {
@@ -298,7 +330,7 @@ fn preorder<G: RootedView + EdgeView>(graph: &G, keys: &[u64]) -> (Vec<G::NodeId
         };
         if let Some(&(_, _, target)) = edges.get(frame.1) {
             frame.1 += 1;
-            if position[target.index()] == UNREACHED {
+            if position[target.index()] == NO_INDEX {
                 entered = Some(target);
             }
         } else {
@@ -328,6 +360,10 @@ fn preorder<G: RootedView + EdgeView>(graph: &G, keys: &[u64]) -> (Vec<G::NodeId
 /// edge. The hash takes O(n + m log d) time for `n` nodes, `m` edges and
 /// maximum degree `d`, and three rounds of [`wl_colors`] more when the root
 /// does not reach every node.
+///
+/// # Panics
+///
+/// Panics when the node bound of `graph` exceeds `u32::MAX`.
 ///
 /// # Examples
 ///
@@ -368,11 +404,11 @@ pub fn canonical_hash<G: RootedView + EdgeView>(
         out_edges.clear();
         out_edges.extend(graph.outgoing(node).map(|edge| {
             let target = graph.edge(edge).target();
-            (keys[edge.index()], position[target.index()] as u64)
+            (keys[edge.index()], u64::from(position[target.index()]))
         }));
         state = state.mix(labels[node.index()]).mix_pairs(&mut out_edges);
     }
-    let unreached = |node: &G::NodeId| position[node.index()] == UNREACHED;
+    let unreached = |node: &G::NodeId| position[node.index()] == NO_INDEX;
     let unreached_count = graph.node_ids().filter(unreached).count();
     state = state.mix_count(unreached_count);
     if unreached_count > 0 {
@@ -396,7 +432,8 @@ mod tests {
     use crate::cfg::Cfg;
     use crate::edge::EdgeKind;
     use crate::graph::store::{Graph, NodeId};
-    use crate::graph::traverse::{TraversalDirection, reachable};
+    use crate::graph::traverse::reachable;
+    use crate::graph::view::Direction;
     use crate::graph::view::Rooted;
     use crate::test_util::rng::Rng;
 
@@ -511,7 +548,7 @@ mod tests {
             let rooted = Rooted::new(&graph, NodeId::from_index(0));
             let order = canonical_order(&rooted, key(&graph));
             let root = NodeId::from_index(0);
-            let reached = reachable(&graph, [root], TraversalDirection::Outgoing);
+            let reached = reachable(&graph, [root], Direction::Forward);
             let mut sorted = order.clone();
             sorted.sort_unstable();
             let expected: Vec<NodeId> = graph

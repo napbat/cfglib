@@ -1,4 +1,5 @@
-//! Read-only graph view traits consumed by the generic algorithms.
+//! Read-only graph view traits consumed by the generic algorithms, and the
+//! adapters that reshape a view without copying it.
 //!
 //! [`GraphView`] abstracts forward and reverse adjacency over dense node
 //! identities, so traversals, SCC computation, and dominance run on
@@ -6,8 +7,13 @@
 //! without migration. [`NodeView`] adds access to graph-owned node payloads,
 //! [`EdgeView`](super::edge_view::EdgeView) adds edge identity and data, and
 //! [`RootedView`] adds a distinguished entry node for the algorithms that need
-//! one (dominators, reachability, structural analysis); [`Rooted`] roots any
-//! plain view at a chosen node.
+//! one (dominators, reachability, structural analysis).
+//!
+//! Four adapters compose over any view: [`Rooted`] roots it at a chosen node,
+//! [`Reversed`] reverses every edge, [`Induced`] confines it to a node set,
+//! and [`VirtualRoot`] puts one extra node in front of a list of roots. An
+//! analysis takes the view it needs instead of a root, direction, or region
+//! parameter of its own; where a direction is a value, it is a [`Direction`].
 //!
 //! # The dense-identity contract
 //!
@@ -63,6 +69,21 @@ impl DenseId for u32 {
     fn index(self) -> usize {
         usize::try_from(self).expect("u32 dense index exceeds usize::MAX")
     }
+}
+
+/// The direction in which an algorithm follows edges.
+///
+/// A walk follows `Forward` edges from source to target
+/// ([`GraphView::successors`]) and `Backward` edges from target to source
+/// ([`GraphView::predecessors`]). A data flow analysis carries a fact the same
+/// way: a forward analysis from a node to its successors, a backward analysis
+/// from a node to its predecessors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Direction {
+    /// Follow edges from source to target.
+    Forward,
+    /// Follow edges from target to source.
+    Backward,
 }
 
 /// Read-only directed adjacency consumed by generic graph algorithms.
@@ -284,11 +305,33 @@ impl<G: NodeView> NodeView for Reversed<'_, G> {
 ///
 /// The entry check of every walk that takes a node from its caller: a live
 /// node is below the bound, so one that is not is no node of the view, and the
-/// side tables a walk sizes by the bound could not be indexed by it.
+/// side tables a walk sizes by the bound could not be indexed by it. The
+/// comparison is inlined, because the store runs it once per adjacency query
+/// and a call there costs more than the comparison; the panic stays out of
+/// line, so each inlined copy is only the comparison and a call.
+#[inline]
 #[track_caller]
 pub(crate) fn assert_in_bound<G: GraphView>(graph: &G, node: G::NodeId, role: &str) {
-    assert!(node.index() < graph.node_bound(), "{role} is out of range");
+    if node.index() >= graph.node_bound() {
+        out_of_bound(role);
+    }
 }
+
+/// The panic of [`assert_in_bound`].
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn out_of_bound(role: &str) -> ! {
+    panic!("{role} is out of range");
+}
+
+mod induced;
+mod renumbered;
+mod virtual_root;
+
+pub use induced::Induced;
+pub(crate) use renumbered::{Positions, Renumbered};
+pub use virtual_root::VirtualRoot;
 
 /// The incoming neighbors of `node` by scanning every node's successors.
 ///

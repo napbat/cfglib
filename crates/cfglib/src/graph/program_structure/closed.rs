@@ -13,10 +13,13 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{ABSENT, SeseEdge, slot, word};
+use super::SeseEdge;
 use crate::graph::dominator::CutBuffers;
 use crate::graph::edge_view::EdgeView;
-use crate::graph::view::{DenseId, RootedView};
+use crate::graph::fanout::DenseFanout;
+use crate::graph::traverse::Steps;
+use crate::graph::view::{DenseId, GraphView, RootedView};
+use crate::identity::{NO_INDEX, slot, word};
 
 /// The closed graph as edge slots and incident lists over dense indices.
 ///
@@ -35,15 +38,14 @@ pub(super) struct ClosedGraph<N> {
     /// The blocks with an edge to the virtual exit: the exits and the cut
     /// roots, in ascending dense index.
     pub(super) outlets: Vec<N>,
-    /// The source of each slot, [`ABSENT`] for a slot outside the closed graph.
+    /// The source of each slot, [`NO_INDEX`] for a slot outside the closed graph.
     source: Vec<u32>,
-    /// The target of each slot, [`ABSENT`] for a slot outside the closed graph.
+    /// The target of each slot, [`NO_INDEX`] for a slot outside the closed graph.
     target: Vec<u32>,
-    /// Where each node's incident slots start in `incident`, with one more
-    /// entry for the end.
-    starts: Vec<u32>,
-    /// Where each node's outgoing slots end and its incoming slots start.
-    out_ends: Vec<u32>,
+    /// Where the incident slots of each node start in `incident`, two runs
+    /// per node: entry `2 * node` starts its outgoing slots and entry
+    /// `2 * node + 1` its incoming ones, with one more entry for the end.
+    runs: Vec<u32>,
     /// The slots incident to each node: its outgoing slots in adjacency order,
     /// then its incoming ones. A self-loop is in both parts.
     incident: Vec<u32>,
@@ -70,22 +72,24 @@ impl<N: DenseId> ClosedGraph<N> {
         let mut cut = CutBuffers::default();
         let structure = cut.analyze(graph, root);
         let reachable = &cut.reachable;
-        let outlets = merge_ascending(structure.exits, structure.cut_roots);
+        let outlets = structure.outlets;
         let slots = edge_bound + 1 + outlets.len();
         assert!(
-            bound < slot(ABSENT) && slots < slot(ABSENT),
+            bound < slot(NO_INDEX) && slots < slot(NO_INDEX),
             "the closed graph exceeds the dense u32 range of a program structure tree"
         );
 
-        let mut source = vec![ABSENT; slots];
-        let mut target = vec![ABSENT; slots];
-        let mut out_degree = vec![0_u32; bound + 1];
-        let mut in_degree = vec![0_u32; bound + 1];
+        let mut source = vec![NO_INDEX; slots];
+        let mut target = vec![NO_INDEX; slots];
+        // The slots in the order the incident lists take them: the edges of
+        // each reachable block in adjacency order, block by block, then the
+        // virtual slots. Recording them while linking lets the counting sort
+        // below read an array twice instead of walking the graph twice more.
+        let mut placed = Vec::with_capacity(slots);
         let mut link = |edge: usize, from: usize, to: usize| {
             source[edge] = word(from);
             target[edge] = word(to);
-            out_degree[from] += 1;
-            in_degree[to] += 1;
+            placed.push(word(edge));
         };
         for block in (0..bound).filter(|&block| reachable[block]) {
             for edge in graph.outgoing(N::from_index(block)) {
@@ -97,36 +101,21 @@ impl<N: DenseId> ClosedGraph<N> {
             link(edge_bound + 1 + offset, outlet.index(), bound);
         }
 
-        let mut starts = Vec::with_capacity(bound + 2);
-        let mut out_ends = Vec::with_capacity(bound + 1);
-        let mut end = 0_u32;
-        starts.push(end);
-        for (outgoing, incoming) in out_degree.iter().zip(&in_degree) {
-            out_ends.push(end + outgoing);
-            end += outgoing + incoming;
-            starts.push(end);
-        }
-
-        // The outgoing part fills in adjacency order, block by block; every
+        // The outgoing part of each list fills in adjacency order; every
         // incoming part fills in the same pass, in the order its sources come.
-        let mut out_cursor = starts[..=bound].to_vec();
-        let mut in_cursor = out_ends.clone();
-        let mut incident = vec![0_u32; slot(end)];
-        let mut place = |edge: usize| {
-            let (from, to) = (slot(source[edge]), slot(target[edge]));
-            incident[slot(out_cursor[from])] = word(edge);
-            out_cursor[from] += 1;
-            incident[slot(in_cursor[to])] = word(edge);
-            in_cursor[to] += 1;
-        };
-        for block in (0..bound).filter(|&block| reachable[block]) {
-            for edge in graph.outgoing(N::from_index(block)) {
-                place(edge.index());
-            }
-        }
-        for edge in edge_bound..slots {
-            place(edge);
-        }
+        let mut runs = Vec::new();
+        let mut incident = Vec::new();
+        DenseFanout::group_into(
+            2 * (bound + 1),
+            || {
+                placed.iter().flat_map(|&edge| {
+                    let (from, to) = (slot(source[slot(edge)]), slot(target[slot(edge)]));
+                    [(2 * from, edge), (2 * to + 1, edge)]
+                })
+            },
+            &mut runs,
+            &mut incident,
+        );
 
         Self {
             bound,
@@ -134,8 +123,7 @@ impl<N: DenseId> ClosedGraph<N> {
             outlets,
             source,
             target,
-            starts,
-            out_ends,
+            runs,
             incident,
         }
     }
@@ -168,12 +156,64 @@ impl<N: DenseId> ClosedGraph<N> {
 
     /// The slots leaving `node`, in adjacency order.
     pub(super) fn outgoing(&self, node: usize) -> &[u32] {
-        &self.incident[slot(self.starts[node])..slot(self.out_ends[node])]
+        &self.incident[slot(self.runs[2 * node])..slot(self.runs[2 * node + 1])]
     }
 
     /// The slots incident to `node`, leaving it first.
     pub(super) fn incident(&self, node: usize) -> &[u32] {
-        &self.incident[slot(self.starts[node])..slot(self.starts[node + 1])]
+        &self.incident[slot(self.runs[2 * node])..slot(self.runs[2 * node + 2])]
+    }
+}
+
+/// The closed graph as a view over dense indices, the virtual exit at
+/// `bound`, so that the walk cores run on it. A block the root does not reach
+/// is a node without edges.
+impl<N: DenseId> GraphView for ClosedGraph<N> {
+    type NodeId = usize;
+
+    fn node_bound(&self) -> usize {
+        self.node_count()
+    }
+
+    fn node_ids(&self) -> impl Iterator<Item = usize> + '_ {
+        0..self.node_count()
+    }
+
+    fn successors(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
+        self.outgoing(node)
+            .iter()
+            .map(|&edge| slot(self.target[slot(edge)]))
+    }
+
+    fn predecessors(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
+        self.incident[slot(self.runs[2 * node + 1])..slot(self.runs[2 * node + 2])]
+            .iter()
+            .map(|&edge| slot(self.source[slot(edge)]))
+    }
+}
+
+/// The slots leaving each node of a closed graph, in adjacency order, as the
+/// steps of a directed walk.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Leaving;
+
+impl<N: DenseId> Steps<ClosedGraph<N>> for Leaving {
+    type Node = usize;
+    type Step = u32;
+
+    #[inline]
+    fn steps(self, graph: &ClosedGraph<N>, node: usize) -> impl Iterator<Item = u32> + '_ {
+        graph.outgoing(node).iter().copied()
+    }
+
+    #[inline]
+    fn target(self, graph: &ClosedGraph<N>, edge: u32) -> usize {
+        graph.target(slot(edge))
+    }
+
+    #[inline]
+    fn index(node: usize) -> usize {
+        node
     }
 }
 
@@ -205,23 +245,4 @@ pub(super) fn edge_slot<N: DenseId, E: DenseId>(
             .ok()
             .map(|offset| edge_bound + 1 + offset),
     }
-}
-
-/// Two ascending lists of distinct blocks merged into one.
-///
-/// An exit has no successor and a cut root has one, so no block is in both.
-fn merge_ascending<N: DenseId>(first: Vec<N>, second: Vec<N>) -> Vec<N> {
-    if second.is_empty() {
-        return first;
-    }
-    let mut merged = Vec::with_capacity(first.len() + second.len());
-    let mut second = second.into_iter().peekable();
-    for block in first {
-        while let Some(earlier) = second.next_if(|other| other.index() < block.index()) {
-            merged.push(earlier);
-        }
-        merged.push(block);
-    }
-    merged.extend(second);
-    merged
 }

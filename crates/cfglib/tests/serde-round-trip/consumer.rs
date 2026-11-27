@@ -4,8 +4,8 @@
 use std::borrow::Cow;
 
 use cfglib::{
-    BlockId, Cfg, CompletionReason, Continuation, DisplayInstr, EdgeId, EdgeKind, Handler,
-    HandlerBody, HandlerKind, HandlerRef, Region, RegionId,
+    BlockId, Cfg, CompletionReason, Continuation, DisplayInstr, Edge, EdgeId, EdgeKind, Handler,
+    HandlerBody, HandlerKind, HandlerRef, NodeOrder, Probability, Region, RegionId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -53,7 +53,6 @@ impl Route {
 
 pub fn region(protected: &[BlockId], handlers: Vec<Handler>, parent: Option<RegionId>) -> Region {
     Region {
-        id: RegionId::from_raw(0),
         protected_blocks: protected.iter().copied().collect(),
         handlers,
         parent,
@@ -119,6 +118,11 @@ fn base_blocks(cfg: &mut Cfg<Op, Route>) -> BaseBlocks {
     }
 }
 
+/// The edge weight `value`, which lies in `0.0..=1.0`.
+fn probability(value: f64) -> Probability {
+    Probability::from_f64(value).expect("a fixture weight lies in 0.0..=1.0")
+}
+
 /// The base edges: weighted, parallel, and exceptional ones, with payloads of the consumer's own.
 /// Returns the edge that is removed before compaction.
 fn connect_base_blocks(cfg: &mut Cfg<Op, Route>, blocks: &BaseBlocks) -> EdgeId {
@@ -133,16 +137,24 @@ fn connect_base_blocks(cfg: &mut Cfg<Op, Route>, blocks: &BaseBlocks) -> EdgeId 
         ..
     } = *blocks;
     cfg.add_edge(entry, header, EdgeKind::Fallthrough);
-    cfg.add_weighted_edge_with_payload(
+    cfg.add_edge(
         header,
         body,
-        EdgeKind::ConditionalTrue,
-        0.75,
-        Route::from_source("loop condition"),
+        Edge::new(EdgeKind::ConditionalTrue)
+            .with_weight(probability(0.75))
+            .with_payload(Route::from_source("loop condition")),
     );
-    cfg.add_weighted_edge(header, after, EdgeKind::ConditionalFalse, 0.25);
+    cfg.add_edge(
+        header,
+        after,
+        Edge::<Route>::from(EdgeKind::ConditionalFalse).with_weight(probability(0.25)),
+    );
     cfg.add_edge(body, header, EdgeKind::Back);
-    cfg.add_edge_with_payload(header, body, EdgeKind::SwitchCase, Route::case(3));
+    cfg.add_edge(
+        header,
+        body,
+        Edge::new(EdgeKind::SwitchCase).with_payload(Route::case(3)),
+    );
     cfg.add_edge(body, catch, EdgeKind::ExceptionUnwind);
     cfg.add_edge(body, cleanup, EdgeKind::ExceptionLeave);
     cfg.add_edge(catch, cleanup, EdgeKind::Fallthrough);
@@ -162,23 +174,25 @@ fn add_regions(cfg: &mut Cfg<Op, Route>, blocks: &BaseBlocks) -> RegionId {
         cleanup,
         ..
     } = *blocks;
-    let outer = cfg.add_region(region(
-        &[header, body],
-        vec![
-            handler(catch, HandlerKind::Catch, HandlerBody::known([catch])),
-            handler(catch, HandlerKind::CatchAll, HandlerBody::known([])),
-            handler(
-                catch,
-                HandlerKind::Filter {
-                    filter_block: filter,
-                },
-                HandlerBody::Unknown,
-            ),
-            handler(cleanup, HandlerKind::Finally, HandlerBody::known([cleanup])),
-            handler(cleanup, HandlerKind::Fault, HandlerBody::Unknown),
-        ],
-        None,
-    ));
+    let outer = cfg
+        .add_region(region(
+            &[header, body],
+            vec![
+                handler(catch, HandlerKind::Catch, HandlerBody::known([catch])),
+                handler(catch, HandlerKind::CatchAll, HandlerBody::known([])),
+                handler(
+                    catch,
+                    HandlerKind::Filter {
+                        filter_block: filter,
+                    },
+                    HandlerBody::Unknown,
+                ),
+                handler(cleanup, HandlerKind::Finally, HandlerBody::known([cleanup])),
+                handler(cleanup, HandlerKind::Fault, HandlerBody::Unknown),
+            ],
+            None,
+        ))
+        .unwrap();
     cfg.add_region(region(
         &[body],
         vec![handler(
@@ -187,8 +201,9 @@ fn add_regions(cfg: &mut Cfg<Op, Route>, blocks: &BaseBlocks) -> RegionId {
             HandlerBody::known([catch]),
         )],
         Some(outer),
-    ));
-    let vanished = cfg.add_region(region(&[header], Vec::new(), None));
+    ))
+    .unwrap();
+    let vanished = cfg.add_region(region(&[header], Vec::new(), None)).unwrap();
     cfg.remove_region(vanished);
     outer
 }
@@ -203,24 +218,26 @@ fn record_cleanups(cfg: &mut Cfg<Op, Route>, blocks: &BaseBlocks, outer: RegionI
         ..
     } = *blocks;
     let finally = HandlerRef::new(outer, 3);
-    cfg.set_cleanup_resume(finally, cleanup);
-    for (reason, resume) in [
+    cfg.set_cleanup_exit(finally, cleanup).unwrap();
+    for (reason, target) in [
         (CompletionReason::Normal, after),
         (CompletionReason::Transfer, header),
         (CompletionReason::Return, after),
         (CompletionReason::Unwind, catch),
     ] {
-        cfg.add_continuation(finally, Continuation { reason, resume });
+        cfg.add_continuation(finally, Continuation { reason, target })
+            .unwrap();
     }
     let fault = HandlerRef::new(outer, 4);
-    cfg.set_cleanup_resume(fault, cleanup);
+    cfg.set_cleanup_exit(fault, cleanup).unwrap();
     cfg.add_continuation(
         fault,
         Continuation {
             reason: CompletionReason::Unwind,
-            resume: catch,
+            target: catch,
         },
-    );
+    )
+    .unwrap();
 }
 
 /// The delta after the compacted base: a new block with a weighted edge, a removed block and
@@ -231,7 +248,11 @@ fn add_delta(cfg: &mut Cfg<Op, Route>, header: BlockId, after: BlockId, cleanup:
     let doomed = cfg.new_block();
     cfg.block_mut(late).set_label("late");
     cfg.block_mut(late).push(Op::Return);
-    cfg.add_weighted_edge(after, late, EdgeKind::Fallthrough, 0.5);
+    cfg.add_edge(
+        after,
+        late,
+        Edge::<Route>::from(EdgeKind::Fallthrough).with_weight(probability(0.5)),
+    );
     let moved = cfg.add_edge(cleanup, late, EdgeKind::IndirectJump);
     cfg.add_edge(after, doomed, EdgeKind::Jump);
     cfg.add_edge(doomed, late, EdgeKind::Jump);
@@ -256,7 +277,7 @@ pub fn rich_cfg() -> Cfg<Op, Route> {
 
     cfg.remove_block(blocks.scratch);
     cfg.remove_edge(dropped);
-    let renumbering = cfg.compact();
+    let renumbering = cfg.compact(NodeOrder::Insertion);
     let header = renumbering
         .node(blocks.header)
         .expect("the header survived");
@@ -279,25 +300,28 @@ pub fn small_cfg(record_cleanup: bool) -> Cfg<String> {
     cfg.block_mut(entry).push("x = f()".to_owned());
     cfg.block_mut(handler_block).set_label("cleanup");
     cfg.add_edge(entry, handler_block, EdgeKind::ExceptionUnwind);
-    let region = cfg.add_region(region(
-        &[entry],
-        vec![handler(
-            handler_block,
-            HandlerKind::Finally,
-            HandlerBody::known([handler_block]),
-        )],
-        None,
-    ));
+    let region = cfg
+        .add_region(region(
+            &[entry],
+            vec![handler(
+                handler_block,
+                HandlerKind::Finally,
+                HandlerBody::known([handler_block]),
+            )],
+            None,
+        ))
+        .unwrap();
     if record_cleanup {
         let finally = HandlerRef::new(region, 0);
-        cfg.set_cleanup_resume(finally, handler_block);
+        cfg.set_cleanup_exit(finally, handler_block).unwrap();
         cfg.add_continuation(
             finally,
             Continuation {
                 reason: CompletionReason::Normal,
-                resume: handler_block,
+                target: handler_block,
             },
-        );
+        )
+        .unwrap();
     }
     cfg
 }

@@ -12,7 +12,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::graph::dominator::tests::support::{Digraph, node};
-use crate::graph::dominator::{FrontierScratch, PostDominatorTree, PostNode};
+use crate::graph::dominator::{DominanceFrontiers, DominatorScratch, PostDominatorTree, PostNode};
 use crate::graph::view::GraphView;
 
 /// The post-dominator facts of one graph rooted at node 0.
@@ -31,7 +31,7 @@ pub(super) struct PostReference {
     plain: Vec<Vec<bool>>,
     level: Vec<usize>,
     preorder: Vec<usize>,
-    /// `frontiers[b]`: the frontier of `b` on the reverse graph, in preorder.
+    /// `frontiers[b]`: the frontier of `b` on the reverse graph, ascending.
     frontiers: Vec<Vec<usize>>,
 }
 
@@ -240,7 +240,7 @@ impl PostReference {
         order
     }
 
-    /// The dominance frontier of `block` on the reverse graph, in preorder.
+    /// The dominance frontier of `block` on the reverse graph, ascending.
     pub(super) fn frontier(&self, block: usize) -> &[usize] {
         &self.frontiers[block]
     }
@@ -254,7 +254,7 @@ impl PostReference {
                 self.reachable[source] && !(source != block && self.post_dominates(block, source))
             })
             .collect();
-        self.in_preorder(&sources)
+        sources.into_iter().collect()
     }
 
     /// The least set that holds the frontier of every reachable block of
@@ -274,15 +274,7 @@ impl PostReference {
                 }
             }
         }
-        self.in_preorder(&members)
-    }
-
-    fn in_preorder(&self, members: &BTreeSet<usize>) -> Vec<usize> {
-        self.preorder
-            .iter()
-            .copied()
-            .filter(|block| members.contains(block))
-            .collect()
+        members.into_iter().collect()
     }
 }
 
@@ -503,7 +495,8 @@ pub(super) fn all_subsets(count: usize) -> Vec<Vec<usize>> {
 }
 
 /// Check the frontier of every block, and the iterated frontier of each of
-/// `sets` pruned three ways, against the reference.
+/// `sets` pruned three ways, against the reference, both per query and off a
+/// [`DominanceFrontiers`] table of the tree.
 ///
 /// The frontier on the reverse graph is where a block's control dependences
 /// come from. The pruning keeps every block, only even ones, or only odd ones,
@@ -513,44 +506,49 @@ pub(super) fn assert_frontiers(
     post: &PostDominatorTree<u32>,
     graph: &Digraph,
     reference: &PostReference,
-    scratch: &mut FrontierScratch,
+    scratch: &mut DominatorScratch,
     sets: &[Vec<usize>],
     context: &dyn core::fmt::Debug,
 ) {
+    let table = DominanceFrontiers::compute(graph, post);
     let mut out = Vec::new();
     for block in 0..reference.node_count() {
         post.frontier(graph, node(block), &mut out);
+        let expected = blocks(reference.frontier(block));
+        assert_eq!(out, expected, "frontier of {block} in {context:?}");
         assert_eq!(
-            out,
-            blocks(reference.frontier(block)),
-            "frontier of {block} in {context:?}"
+            table.frontier(node(block)),
+            expected,
+            "tabulated frontier of {block} in {context:?}"
         );
     }
 
+    let mut from_table = Vec::new();
     for members in sets {
         let twice: Vec<u32> = blocks(members).repeat(2);
         for parity in [None, Some(0_u32), Some(1)] {
             let accepts_id = parity.map(|parity| move |block: u32| block % 2 == parity);
+            let accepts_id = accepts_id
+                .as_ref()
+                .map(|accepts| accepts as &dyn Fn(u32) -> bool);
             let accepts_index = parity.map(|parity| move |block: usize| node(block) % 2 == parity);
-            post.iterated_frontier(
-                graph,
-                scratch,
-                twice.iter().copied(),
-                accepts_id
-                    .as_ref()
-                    .map(|accepts| accepts as &dyn Fn(u32) -> bool),
-                &mut out,
-            );
-            let expected = reference.iterated_frontier(
-                members,
-                accepts_index
-                    .as_ref()
-                    .map(|accepts| accepts as &dyn Fn(usize) -> bool),
+            post.iterated_frontier_in(scratch, graph, twice.iter().copied(), accepts_id, &mut out);
+            table.iterated_frontier_in(scratch, twice.iter().copied(), accepts_id, &mut from_table);
+            let expected = blocks(
+                &reference.iterated_frontier(
+                    members,
+                    accepts_index
+                        .as_ref()
+                        .map(|accepts| accepts as &dyn Fn(usize) -> bool),
+                ),
             );
             assert_eq!(
-                out,
-                blocks(&expected),
+                out, expected,
                 "iterated frontier of {members:?} pruned to {parity:?} in {context:?}"
+            );
+            assert_eq!(
+                from_table, expected,
+                "tabulated iterated frontier of {members:?} pruned to {parity:?} in {context:?}"
             );
         }
     }

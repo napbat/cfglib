@@ -1,7 +1,7 @@
 //! What the report says when flow cannot be structured: irreducible cycles,
 //! loops entered from the side, and transfers that leave a structural bound.
 
-use cfglib::{ControlNode, DominatorTree, GotoReason, detect_loops, is_reducible};
+use cfglib::{ControlNode, DominatorTree, GotoReason, LoopForest, is_reducible};
 
 use crate::builders::{Flow, irreducible_pair, pseudocode};
 use crate::golden::assert_golden;
@@ -10,7 +10,7 @@ use crate::tree_shape::{
     assert_children_precede_parents, goto_targets_in_tree, label_blocks_in_tree, nodes_where,
 };
 
-fn reasons(report: &cfglib::LiftReport) -> Vec<GotoReason> {
+fn reasons(report: &cfglib::StructuringReport) -> Vec<GotoReason> {
     report.gotos.iter().map(|goto| goto.reason).collect()
 }
 
@@ -23,11 +23,12 @@ fn irreducible_cycle_has_no_loop_and_every_goto_revisits_a_block() {
         "the fixture is irreducible"
     );
     assert!(
-        detect_loops(&flow.cfg, &dominators).is_empty(),
+        LoopForest::compute(&flow.cfg, &dominators).is_empty(),
         "neither block dominates the other, so there is no natural loop"
     );
 
-    let (tree, report) = structure_and_check(&flow.cfg);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
 
     assert!(!report.is_fully_structured());
     assert!(
@@ -35,7 +36,7 @@ fn irreducible_cycle_has_no_loop_and_every_goto_revisits_a_block() {
         "{tree:?}"
     );
     assert_eq!(
-        reasons(&report),
+        reasons(report),
         [GotoReason::RevisitedTarget, GotoReason::RevisitedTarget]
     );
     let mut targets = goto_targets_in_tree(&tree);
@@ -62,14 +63,15 @@ fn loop_entered_in_its_body_is_irreducible_and_reported_as_gotos() {
     let dominators = DominatorTree::compute(&flow.cfg);
     assert!(!is_reducible(&flow.cfg, &dominators));
 
-    let (tree, report) = structure_and_check(&flow.cfg);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
 
     assert!(!report.is_fully_structured());
     assert_eq!(
         nodes_where(&tree, |node| matches!(node, ControlNode::Loop { .. })),
         []
     );
-    assert_eq!(reasons(&report), [GotoReason::RevisitedTarget]);
+    assert_eq!(reasons(report), [GotoReason::RevisitedTarget]);
     assert_eq!(
         report.gotos[0].target, x,
         "the side-entered block is the goto target"
@@ -98,10 +100,11 @@ fn jump_out_of_a_loop_to_a_shared_tail_is_an_explicit_jump() {
     flow.fall(after, tail);
     flow.jump(cleanup, tail);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
 
     assert!(!report.is_fully_structured());
-    assert_eq!(reasons(&report), [GotoReason::ExplicitJump]);
+    assert_eq!(reasons(report), [GotoReason::ExplicitJump]);
     assert_eq!(report.gotos[0].target, tail);
     assert_eq!(label_blocks_in_tree(&tree), [tail]);
     assert!(
@@ -132,11 +135,12 @@ fn conditional_exit_to_a_shared_block_leaves_the_loop_bound() {
     flow.branch(second, fail, step);
     flow.jump(step, header);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
 
     assert!(!report.is_fully_structured());
     assert_eq!(
-        reasons(&report),
+        reasons(report),
         [GotoReason::BoundaryEscape, GotoReason::BoundaryEscape]
     );
     assert_eq!(goto_targets_in_tree(&tree), [fail, fail]);
@@ -157,7 +161,8 @@ fn jump_to_exclusively_owned_code_continues_in_sequence_without_a_goto() {
     flow.jump(flow.entry(), next);
     flow.jump(next, last);
 
-    let (tree, report) = structure_and_check(&flow.cfg);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
 
     assert!(report.is_fully_structured(), "{report:?}");
     assert_eq!(pseudocode(&flow.cfg, &tree), "a()\nb()\nreturn\n");
@@ -183,7 +188,8 @@ fn goto_to_an_empty_block_has_no_node_to_label_and_is_reported_unresolved() {
     flow.jump(cleanup, landing);
     flow.fall(landing, tail);
 
-    let (tree, report) = structure_and_check_dangling(&flow.cfg);
+    let tree = structure_and_check_dangling(&flow.cfg);
+    let report = tree.report();
 
     assert!(!report.is_fully_structured());
     assert_eq!(report.gotos.len(), 1);
@@ -196,7 +202,8 @@ fn goto_to_an_empty_block_has_no_node_to_label_and_is_reported_unresolved() {
 #[test]
 fn children_are_allocated_before_their_parents_when_goto_labels_are_applied() {
     let (flow, _, _) = irreducible_pair();
-    let (tree, report) = structure_and_check(&flow.cfg);
+    let tree = structure_and_check(&flow.cfg);
+    let report = tree.report();
     assert!(!report.gotos.is_empty(), "the fixture needs labels");
 
     assert_children_precede_parents(&tree);

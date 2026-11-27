@@ -2,6 +2,7 @@
 
 /// A xorshift64 generator, so a failing input reproduces from its seed
 /// without a dependency.
+#[derive(Clone)]
 pub(crate) struct Rng(u64);
 
 impl Rng {
@@ -11,7 +12,15 @@ impl Rng {
         Self(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
     }
 
-    fn next_u64(&mut self) -> u64 {
+    /// A generator that starts from `state` as given, for a test whose
+    /// sequence was fixed before seeds were mixed. A zero state draws only
+    /// zeros.
+    pub(crate) const fn from_state(state: u64) -> Self {
+        Self(state)
+    }
+
+    /// The next raw draw.
+    pub(crate) fn next_u64(&mut self) -> u64 {
         let mut state = self.0;
         state ^= state << 13;
         state ^= state >> 7;

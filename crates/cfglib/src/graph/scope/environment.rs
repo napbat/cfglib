@@ -2,24 +2,30 @@
 
 extern crate alloc;
 
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 use smallvec::SmallVec;
 
-use crate::graph::edge_view::EdgeRef;
-use crate::graph::scc::tarjan_scc;
+use crate::graph::edge_view::{EdgeRef, EdgeView};
+use crate::graph::open::{OpenFold, OpenFoldConfig, OpenFoldMemo, Revisit, open_fold_in};
+use crate::graph::scc::{SccDecomposition, SccNumbering};
+use crate::graph::search::{PathBudget, PathSearchConfig, PathSearchStats};
+use crate::graph::view::{GraphView, assert_in_bound};
 
 use super::index::ScopeResolutionIndex;
 use super::query::{
     ScopeGraphPathLabel, ScopePath, ScopeQuery, ScopeResolution, ScopeResolutionCandidate,
-    ScopeResolutionConfig, ScopeResolutionStats,
 };
-use super::storage::{ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeId, ScopeReferenceId};
+use super::storage::{ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeId};
 
+mod fold;
 #[cfg(test)]
 mod tests;
+
+use fold::{EnvironmentFold, EnvironmentMark, Reach};
 
 /// A scope-graph query whose hooks see neither the path nor the reference,
 /// so the visible data of a scope can be computed once and shared.
@@ -29,9 +35,8 @@ mod tests;
 /// another. This form gives each hook only the scope where the path ends and
 /// the path-language state there. The *environment* of a scope in a state
 /// (every datum visible from there, by key, with the path that reaches it)
-/// then depends on nothing else, and
-/// [`ScopeResolutionIndex::compute_cached`] computes it once for all the
-/// references that reach that scope in that state.
+/// then depends on nothing else, and a [`ScopeEnvironmentCache`] computes it
+/// once for all the references that reach that scope in that state.
 ///
 /// # Contract
 ///
@@ -103,9 +108,12 @@ pub trait ScopeEnvironmentQuery<S, L, R, D, Q> {
 /// The environments of the scopes of one graph, computed once per scope,
 /// state and remaining path length, for a [`ScopeEnvironmentQuery`].
 ///
-/// [`ScopeResolutionIndex::compute_cached`] fills one cache for all the
-/// references of a graph. Keeping a cache serves later ephemeral queries
-/// ([`resolve_from`](Self::resolve_from)) from the same environments.
+/// [`index`](Self::index) fills the cache for all the references of a graph.
+/// A kept cache serves later queries ([`resolve`](Self::resolve)), stored or
+/// ephemeral, from the same environments. The environments are the answers
+/// of a memoizing [`open_fold_in`] whose [`OpenFoldMemo`] the cache keeps:
+/// the environment of a scope folds the scope's own accepted data and the
+/// environments its admitted edges reach.
 ///
 /// - **Cycles.** [`new`](Self::new) finds the strongly connected components
 ///   of the graph once. A scope on a cycle (in a component of several scopes,
@@ -117,19 +125,35 @@ pub trait ScopeEnvironmentQuery<S, L, R, D, Q> {
 /// - **Validity.** A cache belongs to one state of one graph, and one query
 ///   policy. After an edit of the graph, or with another policy, make a new
 ///   cache.
+/// - **Results.** On a graph without cycles, under the contract of
+///   [`ScopeEnvironmentQuery`], each query sees the data that
+///   [`ScopeResolution::compute`] shows under a
+///   [`ScopeGraphQuery`](super::ScopeGraphQuery) with the same hooks. On a
+///   cycle the guard is (scope, state), not the scope alone, so a path
+///   language that comes back to a scope in another state (`A A B` on
+///   `s1 -A-> s2 -A-> s1 -B-> s3`) can reach data that `compute` cuts off.
+/// - **Order.** The candidates of a query come in depth-first edge order: a
+///   scope's own data first, then the candidates through each outgoing edge
+///   in insertion order. This differs from the breadth-first discovery order
+///   of `compute`.
+/// - **Bounds.** `max_path_length` applies exactly: environments are cached
+///   by the path length that is left. `max_path_count` bounds the
+///   environments one query computes, and a cache hit computes none; an
+///   environment that the bound cuts short is not cached. The cache reads
+///   neither `order` nor `max_complete_path_count`. In the statistics,
+///   `expanded_path_count` counts the environments a query computed, and
+///   `complete_path_count` its candidates after shadowing.
 #[derive(Debug, Clone)]
 pub struct ScopeEnvironmentCache<St, K> {
     on_cycle: Vec<bool>,
-    environments: BTreeMap<EnvironmentKey<St>, Environment<K>>,
+    /// Shared, so a fold that reaches a stored environment lifts it without
+    /// copying it.
+    environments: OpenFoldMemo<EnvironmentMark<St>, Arc<Environment<K>>>,
     links: Vec<Link>,
 }
 
-/// A scope, the state there, and the edges left under the length bound:
-/// what an environment depends on.
-type EnvironmentKey<St> = (ScopeId, St, Option<usize>);
-
 /// The visible data of one scope in one state, by key.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Environment<K> {
     entries: BTreeMap<K, SmallVec<[Entry; 1]>>,
     /// Whether the length bound refused an extension below this scope.
@@ -137,7 +161,7 @@ struct Environment<K> {
 }
 
 /// One visible datum and the path that reaches it.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Entry {
     datum: ScopeDatumId,
     /// The first link of the path, in the cache's link table.
@@ -154,56 +178,19 @@ struct Link {
     hop: Option<(ScopeEdgeId, usize)>,
 }
 
-/// The environment of one scope being computed.
-struct Frame<St, K> {
-    scope: ScopeId,
-    state: St,
-    remaining: Option<usize>,
-    /// The edge its parent frame reached it through.
-    via: Option<ScopeEdgeId>,
-    on_cycle: bool,
-    /// The admitted edges, with their targets and the states there.
-    edges: Vec<(ScopeEdgeId, ScopeId, St)>,
-    next: usize,
-    /// The candidates by key, each with its source: `0` for the scope's own
-    /// data, `n` for the `n`-th admitted edge.
-    candidates: BTreeMap<K, SmallVec<[(usize, Entry); 1]>>,
-    length_limited: bool,
-}
-
-/// The environment a resolution asked for.
-enum Computed<St, K> {
-    /// It is in the cache under this key.
-    Cached(EnvironmentKey<St>),
-    /// It is the environment of a scope on a cycle, or a bound cut it short.
-    Owned(Environment<K>),
-}
-
-/// The expansions one resolution may still make.
-struct Expansions {
-    max: Option<usize>,
-    count: usize,
-    limited: bool,
-}
-
-impl Expansions {
-    /// Counts one more computed environment, or records the truncation.
-    fn admit(&mut self) -> bool {
-        if self.max.is_some_and(|max| self.count >= max) {
-            self.limited = true;
-            return false;
-        }
-        self.count += 1;
-        true
-    }
-}
+/// The memoizing walk of the environment fold. The length bound lives in
+/// the reaches (see [`EnvironmentFold`]), so the walk has no depth bound.
+const MEMOIZE: OpenFoldConfig = OpenFoldConfig {
+    max_depth: None,
+    revisit: Revisit::Memoize,
+};
 
 impl<St: Clone + Ord, K: Clone + Ord> ScopeEnvironmentCache<St, K> {
     /// Creates an empty cache for `graph` and finds its cycles.
     #[must_use]
     pub fn new<S, L, R, D, Q>(graph: &ScopeGraph<S, L, R, D, Q>) -> Self {
-        let mut on_cycle = vec![false; graph.scope_bound()];
-        for component in tarjan_scc(graph).components() {
+        let mut on_cycle = vec![false; graph.node_bound()];
+        for component in SccDecomposition::compute(graph, SccNumbering::LeavesFirst).components() {
             let cyclic = component.len() > 1
                 || component.iter().any(|&scope| {
                     graph
@@ -218,86 +205,67 @@ impl<St: Clone + Ord, K: Clone + Ord> ScopeEnvironmentCache<St, K> {
         }
         Self {
             on_cycle,
-            environments: BTreeMap::new(),
+            environments: OpenFoldMemo::default(),
             links: Vec::new(),
         }
     }
 
     /// Returns the number of environments the cache holds.
-    #[must_use]
-    pub fn environment_count(&self) -> usize {
-        self.environments.len()
+    #[cfg(test)]
+    fn environment_count(&self) -> usize {
+        self.environments.answer_count()
     }
 
-    /// Resolves one stored reference of the cache's graph.
+    /// Resolves `input`, a stored reference or an ephemeral query on the
+    /// cache's graph, as [`ScopeResolution::compute`] does for a
+    /// [`ScopeGraphQuery`](super::ScopeGraphQuery).
     ///
     /// # Panics
     ///
-    /// Panics when `reference` is not a reference of `graph`.
+    /// Panics when `input` starts in a scope that does not belong to `graph`.
     pub fn resolve<S, L, R, D, Q, P>(
         &mut self,
         graph: &ScopeGraph<S, L, R, D, Q>,
-        reference: ScopeReferenceId,
+        input: ScopeQuery<'_, Q>,
         query: &P,
-        config: ScopeResolutionConfig,
+        config: PathSearchConfig,
     ) -> ScopeResolution
     where
         P: ScopeEnvironmentQuery<S, L, R, D, Q, State = St, Key = K>,
     {
-        self.resolve_query(
-            graph,
-            &ScopeQuery::from_reference(graph, reference),
-            query,
-            config,
-        )
-    }
-
-    /// Resolves an ephemeral query that starts in `scope`, as
-    /// [`ScopeResolution::compute_from`](super::ScopeResolution::compute_from)
-    /// does for a [`ScopeGraphQuery`](super::ScopeGraphQuery).
-    ///
-    /// # Panics
-    ///
-    /// Panics when `scope` is not a scope of `graph`.
-    pub fn resolve_from<S, L, R, D, Q, P>(
-        &mut self,
-        graph: &ScopeGraph<S, L, R, D, Q>,
-        scope: ScopeId,
-        data: &Q,
-        query: &P,
-        config: ScopeResolutionConfig,
-    ) -> ScopeResolution
-    where
-        P: ScopeEnvironmentQuery<S, L, R, D, Q, State = St, Key = K>,
-    {
-        let _ = graph.scope(scope);
-        self.resolve_query(graph, &ScopeQuery::new(scope, data), query, config)
-    }
-
-    fn resolve_query<S, L, R, D, Q, P>(
-        &mut self,
-        graph: &ScopeGraph<S, L, R, D, Q>,
-        input: &ScopeQuery<'_, Q>,
-        query: &P,
-        config: ScopeResolutionConfig,
-    ) -> ScopeResolution
-    where
-        P: ScopeEnvironmentQuery<S, L, R, D, Q, State = St, Key = K>,
-    {
-        let mut expansions = Expansions {
-            max: config.max_path_count,
-            count: 0,
-            limited: false,
-        };
-        let start = (
+        assert_in_bound(graph, input.scope(), "query scope");
+        let start = Reach::start(
             input.scope(),
             query.initial_state(graph),
             config.max_path_length,
         );
-        let computed = self.environment(graph, query, start, &mut expansions);
-        let environment = match &computed {
-            Computed::Cached(key) => self.environments.get(key),
-            Computed::Owned(environment) => Some(environment),
+        let mut fold = EnvironmentFold {
+            graph,
+            query,
+            on_cycle: &self.on_cycle,
+            links: &mut self.links,
+            budget: PathBudget::new(&config),
+        };
+        // A stored environment is read in place; only a missing one is
+        // folded, and handed over by value.
+        let mark = fold.mark(&start);
+        let stored = mark
+            .as_ref()
+            .is_some_and(|mark| self.environments.get(mark).is_some());
+        let computed = if stored {
+            None
+        } else {
+            open_fold_in(&mut self.environments, &mut fold, start, MEMOIZE)
+                .expect("the memoizing fold never fails")
+        };
+        let budget = fold.budget.stats();
+        let environment = if stored {
+            mark.as_ref()
+                .and_then(|mark| self.environments.get(mark))
+                .flatten()
+                .map(|environment| &**environment)
+        } else {
+            computed.as_deref()
         };
         let key = query.query_key(graph, input.data());
         let entries = environment
@@ -307,273 +275,16 @@ impl<St: Clone + Ord, K: Clone + Ord> ScopeEnvironmentCache<St, K> {
             .iter()
             .map(|entry| ScopeResolutionCandidate::new(entry.datum, self.path(entry.path)))
             .collect();
-        let stats = ScopeResolutionStats {
-            explored_path_count: expansions.count,
-            reachable_candidate_count: entries.len(),
+        let stats = PathSearchStats {
+            complete_path_count: entries.len(),
             path_length_limited: environment.is_some_and(|environment| environment.length_limited),
-            path_count_limited: expansions.limited,
+            ..budget
         };
-        ScopeResolution::from_visible(input, candidates, stats)
+        ScopeResolution::from_visible(&input, candidates, stats)
     }
 
-    /// Computes the environment of a scope in a state with a remaining path
-    /// length, reusing every cached environment.
-    fn environment<S, L, R, D, Q, P>(
-        &mut self,
-        graph: &ScopeGraph<S, L, R, D, Q>,
-        query: &P,
-        key: EnvironmentKey<St>,
-        expansions: &mut Expansions,
-    ) -> Computed<St, K>
-    where
-        P: ScopeEnvironmentQuery<S, L, R, D, Q, State = St, Key = K>,
-    {
-        if !self.on_cycle[key.0.index()] && self.environments.contains_key(&key) {
-            return Computed::Cached(key);
-        }
-        if !expansions.admit() {
-            return Computed::Owned(Environment {
-                entries: BTreeMap::new(),
-                length_limited: false,
-            });
-        }
-        // The (scope, state) pairs of the frames on a cycle that are open:
-        // the path guard of the environments that are not cached.
-        let mut guard = BTreeSet::new();
-        let mut stack = vec![self.open_frame(graph, query, key, None, &mut guard)];
-        loop {
-            let Some(top) = stack.last_mut() else {
-                unreachable!("the walk returns when its first frame finishes");
-            };
-            if !expansions.limited && top.next < top.edges.len() {
-                let (edge, target, next_state) = top.edges[top.next].clone();
-                top.next += 1;
-                let child_remaining = top.remaining.map(|remaining| remaining - 1);
-                let key = (target, next_state, child_remaining);
-                if !self.on_cycle[target.index()]
-                    && let Some(environment) = self.environments.get(&key)
-                {
-                    lift(&mut self.links, top, edge, environment);
-                    continue;
-                }
-                if expansions.admit() {
-                    let frame = self.open_frame(graph, query, key, Some(edge), &mut guard);
-                    stack.push(frame);
-                }
-                continue;
-            }
-
-            let Some(frame) = stack.pop() else {
-                unreachable!("the loop ran on the top frame");
-            };
-            if frame.on_cycle {
-                guard.remove(&(frame.scope, frame.state.clone()));
-            }
-            // An environment a bound cut short is not the scope's
-            // environment, and one on a cycle depends on the path.
-            let cacheable = !frame.on_cycle && !expansions.limited;
-            let key = (frame.scope, frame.state.clone(), frame.remaining);
-            let via = frame.via;
-            let environment = self.finish(graph, query, frame);
-            match stack.last_mut() {
-                Some(parent) => {
-                    let Some(edge) = via else {
-                        unreachable!("every frame but the first was reached through an edge");
-                    };
-                    lift(&mut self.links, parent, edge, &environment);
-                    if cacheable {
-                        self.environments.insert(key, environment);
-                    }
-                }
-                None => {
-                    return if cacheable {
-                        self.environments.insert(key.clone(), environment);
-                        Computed::Cached(key)
-                    } else {
-                        Computed::Owned(environment)
-                    };
-                }
-            }
-        }
-    }
-
-    /// Opens the frame of a scope in a state: the scope's own accepted data,
-    /// and the edges that the query admits and the guard and the length
-    /// bound allow.
-    fn open_frame<S, L, R, D, Q, P>(
-        &mut self,
-        graph: &ScopeGraph<S, L, R, D, Q>,
-        query: &P,
-        (scope, state, remaining): EnvironmentKey<St>,
-        via: Option<ScopeEdgeId>,
-        guard: &mut BTreeSet<(ScopeId, St)>,
-    ) -> Frame<St, K>
-    where
-        P: ScopeEnvironmentQuery<S, L, R, D, Q, State = St, Key = K>,
-    {
-        let on_cycle = self.on_cycle[scope.index()];
-        if on_cycle {
-            guard.insert((scope, state.clone()));
-        }
-        // The path that ends here, shared by every datum of the scope.
-        let mut end = None;
-        let mut candidates: BTreeMap<K, SmallVec<[(usize, Entry); 1]>> = BTreeMap::new();
-        for &datum in graph.scope_data(scope) {
-            if query.accepts(graph, scope, &state, datum) {
-                let path = *end.get_or_insert_with(|| {
-                    self.links.push(Link { scope, hop: None });
-                    self.links.len() - 1
-                });
-                candidates
-                    .entry(query.key(graph, datum))
-                    .or_default()
-                    .push((0, Entry { datum, path }));
-            }
-        }
-        let mut edges = Vec::new();
-        let mut length_limited = false;
-        for edge_id in graph.outgoing(scope) {
-            let edge = graph.edge(edge_id);
-            let Some(next_state) = query.step(graph, scope, &state, edge) else {
-                continue;
-            };
-            let target = edge.target();
-            if self.on_cycle[target.index()] && guard.contains(&(target, next_state.clone())) {
-                continue;
-            }
-            if remaining == Some(0) {
-                length_limited = true;
-                continue;
-            }
-            edges.push((edge_id, target, next_state));
-        }
-        Frame {
-            scope,
-            state,
-            remaining,
-            via,
-            on_cycle,
-            edges,
-            next: 0,
-            candidates,
-            length_limited,
-        }
-    }
-
-    /// Keeps, within each key, the candidates that no other candidate of the
-    /// frame shadows.
-    ///
-    /// Two candidates from one source never shadow each other: two data of
-    /// the scope both end at the declaration marker, and the candidates
-    /// through one edge are the visible ones of one environment, which no
-    /// other one of them shadows. Only pairs from different sources are
-    /// compared.
-    fn finish<S, L, R, D, Q, P>(
-        &self,
-        graph: &ScopeGraph<S, L, R, D, Q>,
-        query: &P,
-        frame: Frame<St, K>,
-    ) -> Environment<K>
-    where
-        P: ScopeEnvironmentQuery<S, L, R, D, Q, State = St, Key = K>,
-    {
-        let entries = frame
-            .candidates
-            .into_iter()
-            .map(|(key, candidates)| {
-                let visible = candidates
-                    .iter()
-                    .filter(|&&(source, candidate)| {
-                        !candidates.iter().any(|&(other_source, other)| {
-                            other_source != source
-                                && self.shadows(graph, query, other.path, candidate.path)
-                        })
-                    })
-                    .map(|&(_, candidate)| candidate)
-                    .collect();
-                (key, visible)
-            })
-            .collect();
-        Environment {
-            entries,
-            length_limited: frame.length_limited,
-        }
-    }
-
-    /// Whether the path from link `left` is lexicographically more specific
-    /// than the one from link `right`; both start in the same scope.
-    fn shadows<S, L, R, D, Q, P>(
-        &self,
-        graph: &ScopeGraph<S, L, R, D, Q>,
-        query: &P,
-        mut left: usize,
-        mut right: usize,
-    ) -> bool
-    where
-        P: ScopeEnvironmentQuery<S, L, R, D, Q, State = St, Key = K>,
-    {
-        let label = |hop: Option<(ScopeEdgeId, usize)>| {
-            hop.map_or(ScopeGraphPathLabel::Declaration, |(edge, _)| {
-                ScopeGraphPathLabel::Edge(graph.edge(edge).data())
-            })
-        };
-        loop {
-            let left_hop = self.links[left].hop;
-            let right_hop = self.links[right].hop;
-            match query.compare_labels(graph, label(left_hop), label(right_hop)) {
-                Some(Ordering::Less) => return true,
-                Some(Ordering::Greater) | None => return false,
-                Some(Ordering::Equal) => {}
-            }
-            let (Some((_, left_next)), Some((_, right_next))) = (left_hop, right_hop) else {
-                return false;
-            };
-            left = left_next;
-            right = right_next;
-        }
-    }
-
-    /// The stored path that starts at `link`.
-    fn path(&self, mut link: usize) -> ScopePath {
-        let mut path = ScopePath::new(self.links[link].scope);
-        while let Some((edge, next)) = self.links[link].hop {
-            link = next;
-            path.push(edge, self.links[link].scope);
-        }
-        path
-    }
-}
-
-/// Adds the entries of `environment`, at the target of `edge`, to the
-/// candidates of `frame`, with paths that start with `edge`. The edge is the
-/// one the frame took last, so its position names the source.
-fn lift<St, K: Clone + Ord>(
-    links: &mut Vec<Link>,
-    frame: &mut Frame<St, K>,
-    edge: ScopeEdgeId,
-    environment: &Environment<K>,
-) {
-    frame.length_limited |= environment.length_limited;
-    for (key, entries) in &environment.entries {
-        let candidates = frame.candidates.entry(key.clone()).or_default();
-        for entry in entries {
-            let path = links.len();
-            links.push(Link {
-                scope: frame.scope,
-                hop: Some((edge, entry.path)),
-            });
-            let lifted = Entry {
-                datum: entry.datum,
-                path,
-            };
-            candidates.push((frame.next, lifted));
-        }
-    }
-}
-
-impl ScopeResolutionIndex {
-    /// Resolves every reference in identity order through one
-    /// [`ScopeEnvironmentCache`] and builds the reverse index.
+    /// Resolves every reference of `graph` in identity order through this
+    /// cache and builds the reverse index.
     ///
     /// Each environment that no cycle reaches is computed once, so the
     /// references of one block, which climb the same parents and imports,
@@ -582,24 +293,12 @@ impl ScopeResolutionIndex {
     /// costs one cache lookup and the copy of its visible paths. The cache
     /// holds every key, so its memory is the sum of the environment sizes.
     ///
-    /// - **Results.** On a graph without cycles, under the contract of
-    ///   [`ScopeEnvironmentQuery`], each reference sees the data that
-    ///   [`compute`](Self::compute) shows under a
-    ///   [`ScopeGraphQuery`](super::ScopeGraphQuery) with the same hooks. On a
-    ///   cycle the guard is (scope, state), not the scope alone, so a path
-    ///   language that comes back to a scope in another state (`A A B` on
-    ///   `s1 -A-> s2 -A-> s1 -B-> s3`) can reach data that `compute` cuts off.
-    /// - **Order.** The candidates of a reference come in depth-first edge
-    ///   order: a scope's own data first, then the candidates through each
-    ///   outgoing edge in insertion order. This differs from the
-    ///   breadth-first discovery order of `compute`.
-    /// - **Bounds.** `max_path_length` applies exactly: environments are
-    ///   cached by the path length that is left. `max_path_count` bounds the
-    ///   environments one reference computes, and a cache hit computes none;
-    ///   an environment that the bound cuts short is not cached. In the
-    ///   statistics, `explored_path_count` counts the environments a reference
-    ///   computed, and `reachable_candidate_count` its candidates after
-    ///   shadowing.
+    /// The index records nothing of what its resolutions read, so it is not
+    /// incremental: its first
+    /// [`update`](ScopeResolutionIndex::update), which takes a
+    /// [`ScopeGraphQuery`](super::ScopeGraphQuery), resolves every reference
+    /// again, and can report a reference as changed whose candidates stayed
+    /// the same, since the statistics of the two resolvers differ.
     ///
     /// # Examples
     ///
@@ -607,8 +306,8 @@ impl ScopeResolutionIndex {
     /// use core::cmp::Ordering;
     ///
     /// use cfglib::{
-    ///     EdgeRef, ScopeDatumId, ScopeEdgeId, ScopeEnvironmentQuery, ScopeGraph,
-    ///     ScopeGraphPathLabel, ScopeId, ScopeResolutionConfig, ScopeResolutionIndex,
+    ///     EdgeRef, PathSearchConfig, ScopeDatumId, ScopeEdgeId, ScopeEnvironmentCache,
+    ///     ScopeEnvironmentQuery, ScopeGraph, ScopeGraphPathLabel, ScopeId,
     /// };
     ///
     /// #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -682,7 +381,8 @@ impl ScopeResolutionIndex {
     /// let x = graph.add_reference(function, "x");
     /// let y = graph.add_reference(function, "y");
     ///
-    /// let index = ScopeResolutionIndex::compute_cached(&graph, &Lexical, ScopeResolutionConfig::new());
+    /// let mut cache = ScopeEnvironmentCache::new(&graph);
+    /// let index = cache.index(&graph, &Lexical, PathSearchConfig::default());
     /// // The module's own `x` shadows the imported one.
     /// assert_eq!(index.resolution(x).candidates()[0].datum(), local);
     /// assert_eq!(index.resolution(x).candidates().len(), 1);
@@ -690,19 +390,36 @@ impl ScopeResolutionIndex {
     /// assert_eq!(index.references_to(local), [x]);
     /// ```
     #[must_use]
-    pub fn compute_cached<S, L, R, D, Q, P>(
+    pub fn index<S, L, R, D, Q, P>(
+        &mut self,
         graph: &ScopeGraph<S, L, R, D, Q>,
         query: &P,
-        config: ScopeResolutionConfig,
-    ) -> Self
+        config: PathSearchConfig,
+    ) -> ScopeResolutionIndex
     where
-        P: ScopeEnvironmentQuery<S, L, R, D, Q>,
+        P: ScopeEnvironmentQuery<S, L, R, D, Q, State = St, Key = K>,
     {
-        let mut cache = ScopeEnvironmentCache::new(graph);
         let resolutions = graph
             .reference_ids()
-            .map(|reference| cache.resolve(graph, reference, query, config))
+            .map(|reference| {
+                self.resolve(
+                    graph,
+                    ScopeQuery::from_reference(graph, reference),
+                    query,
+                    config,
+                )
+            })
             .collect();
-        Self::from_resolutions(graph, resolutions)
+        ScopeResolutionIndex::from_resolutions(graph, resolutions)
+    }
+
+    /// The stored path that starts at `link`.
+    fn path(&self, mut link: usize) -> ScopePath {
+        let mut path = ScopePath::new(self.links[link].scope);
+        while let Some((edge, next)) = self.links[link].hop {
+            link = next;
+            path.push(edge, self.links[link].scope);
+        }
+        path
     }
 }

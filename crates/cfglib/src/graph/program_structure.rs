@@ -49,12 +49,17 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
+use core::ops::ControlFlow;
 
 use crate::block::BlockId;
 use crate::edge::EdgeId;
 use crate::graph::edge_view::EdgeView;
+use crate::graph::fanout::DenseFanout;
+use crate::graph::search::Visit;
+use crate::graph::traverse::{DepthFirstStack, DepthFirstVisitor, StepKind, depth_first_core};
 use crate::graph::view::{DenseId, RootedView};
-use closed::{ClosedGraph, slot_edge};
+use crate::identity::{NO_INDEX, define_dense_id, slot, word};
+use closed::{ClosedGraph, Leaving, slot_edge};
 pub use cycle_equivalence::CycleEquivalence;
 use cycle_equivalence::cycle_classes;
 
@@ -62,21 +67,6 @@ mod closed;
 mod cycle_equivalence;
 #[cfg(test)]
 mod tests;
-
-/// No region, class or slot, in a table of them.
-const ABSENT: u32 = u32::MAX;
-
-/// The dense index a stored word names.
-const fn slot(stored: u32) -> usize {
-    stored as usize
-}
-
-/// The word that stores a dense index.
-///
-/// Every table is sized by a count the closed graph has already shown to fit.
-fn word(index: usize) -> u32 {
-    u32::try_from(index).expect("a dense index of the closed graph fits in u32")
-}
 
 /// An edge of the closed graph a region boundary can be.
 ///
@@ -93,19 +83,12 @@ pub enum SeseEdge<N = BlockId, E = EdgeId> {
     Exit(N),
 }
 
-/// A region of one [`ProgramStructureTree`], by position.
-///
-/// Regions are numbered in preorder, so a region's number is below the
-/// numbers of the regions inside it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SeseRegionId(u32);
-
-impl SeseRegionId {
-    /// The position of the region in preorder.
-    #[must_use]
-    pub const fn index(self) -> usize {
-        slot(self.0)
-    }
+define_dense_id! {
+    /// A region of one [`ProgramStructureTree`], by position.
+    ///
+    /// Regions are numbered in preorder, so a region's number is below the
+    /// numbers of the regions inside it.
+    pub struct SeseRegionId(u32);
 }
 
 /// The canonical single-entry single-exit regions of a rooted graph, nested
@@ -161,7 +144,7 @@ impl SeseRegionId {
 pub struct ProgramStructureTree<N = BlockId, E = EdgeId> {
     /// Every region, in preorder.
     regions: Vec<RegionRecord>,
-    /// The innermost region of each block by dense index, [`ABSENT`] for a
+    /// The innermost region of each block by dense index, [`NO_INDEX`] for a
     /// block in none.
     innermost: Vec<u32>,
     /// The blocks of every region, grouped by the preorder position of their
@@ -186,7 +169,7 @@ struct RegionRecord {
     entry: u32,
     /// The slot of the exit edge.
     exit: u32,
-    /// The region directly around this one, [`ABSENT`] for an outermost one.
+    /// The region directly around this one, [`NO_INDEX`] for an outermost one.
     parent: u32,
     /// The greatest preorder position in its subtree.
     last: u32,
@@ -213,7 +196,7 @@ impl<N: DenseId, E: DenseId> ProgramStructureTree<N, E> {
 
     /// The number of regions.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub fn region_count(&self) -> usize {
         self.regions.len()
     }
 
@@ -256,7 +239,7 @@ impl<N: DenseId, E: DenseId> ProgramStructureTree<N, E> {
     #[must_use]
     pub fn parent(&self, region: SeseRegionId) -> Option<SeseRegionId> {
         let parent = self.record(region).parent;
-        (parent != ABSENT).then_some(SeseRegionId(parent))
+        (parent != NO_INDEX).then_some(SeseRegionId(parent))
     }
 
     /// The smallest region `block` is in, `None` for a block in no region, a
@@ -265,7 +248,7 @@ impl<N: DenseId, E: DenseId> ProgramStructureTree<N, E> {
     #[must_use]
     pub fn innermost(&self, block: N) -> Option<SeseRegionId> {
         match self.innermost.get(block.index()).copied() {
-            None | Some(ABSENT) => None,
+            None | Some(NO_INDEX) => None,
             Some(region) => Some(SeseRegionId(region)),
         }
     }
@@ -314,30 +297,30 @@ impl<N: DenseId, E: DenseId> ProgramStructureTree<N, E> {
         // The children of each region in the order the search entered them,
         // and the outermost regions as the children of `count`.
         let group = |parent: u32| {
-            if parent == ABSENT {
+            if parent == NO_INDEX {
                 count
             } else {
                 slot(parent)
             }
         };
-        let mut child_starts = vec![0_u32; count + 2];
-        for &parent in &found.parent {
-            child_starts[group(parent) + 1] += 1;
-        }
-        for index in 1..child_starts.len() {
-            child_starts[index] += child_starts[index - 1];
-        }
-        let mut cursor = child_starts.clone();
-        let mut children = vec![0_u32; count];
-        for (region, &parent) in found.parent.iter().enumerate() {
-            let at = &mut cursor[group(parent)];
-            children[slot(*at)] = word(region);
-            *at += 1;
-        }
+        let mut child_starts = Vec::new();
+        let mut children = Vec::new();
+        DenseFanout::group_into(
+            count + 1,
+            || {
+                found
+                    .parent
+                    .iter()
+                    .enumerate()
+                    .map(|(region, &parent)| (group(parent), word(region)))
+            },
+            &mut child_starts,
+            &mut children,
+        );
         let children_of =
             |group: usize| &children[slot(child_starts[group])..slot(child_starts[group + 1])];
 
-        let mut number = vec![ABSENT; count];
+        let mut number = vec![NO_INDEX; count];
         let mut preorder = Vec::with_capacity(count);
         let mut stack: Vec<u32> = children_of(count).iter().rev().copied().collect();
         while let Some(region) = stack.pop() {
@@ -348,13 +331,13 @@ impl<N: DenseId, E: DenseId> ProgramStructureTree<N, E> {
         let mut last = number.clone();
         for &region in preorder.iter().rev() {
             let parent = found.parent[slot(region)];
-            if parent != ABSENT {
+            if parent != NO_INDEX {
                 last[slot(parent)] = last[slot(parent)].max(last[slot(region)]);
             }
         }
         let renumber = |region: u32| {
-            if region == ABSENT {
-                ABSENT
+            if region == NO_INDEX {
+                NO_INDEX
             } else {
                 number[slot(region)]
             }
@@ -376,24 +359,20 @@ impl<N: DenseId, E: DenseId> ProgramStructureTree<N, E> {
             .iter()
             .map(|&region| renumber(region))
             .collect();
-        let mut member_starts = vec![0_u32; count + 1];
-        for &region in &innermost {
-            if region != ABSENT {
-                member_starts[slot(region) + 1] += 1;
-            }
-        }
-        for index in 1..member_starts.len() {
-            member_starts[index] += member_starts[index - 1];
-        }
-        let mut cursor = member_starts.clone();
-        let mut members = vec![N::from_index(0); slot(member_starts[count])];
-        for (block, &region) in innermost.iter().enumerate() {
-            if region != ABSENT {
-                let at = &mut cursor[slot(region)];
-                members[slot(*at)] = N::from_index(block);
-                *at += 1;
-            }
-        }
+        let mut member_starts = Vec::new();
+        let mut members = Vec::new();
+        DenseFanout::group_into(
+            count,
+            || {
+                innermost
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &region)| region != NO_INDEX)
+                    .map(|(block, &region)| (slot(region), N::from_index(block)))
+            },
+            &mut member_starts,
+            &mut members,
+        );
 
         Self {
             regions,
@@ -414,9 +393,9 @@ struct Found {
     entry: Vec<u32>,
     /// The slot of each region's exit edge.
     exit: Vec<u32>,
-    /// The region directly around each one, [`ABSENT`] for an outermost one.
+    /// The region directly around each one, [`NO_INDEX`] for an outermost one.
     parent: Vec<u32>,
-    /// The innermost region of each node, [`ABSENT`] for a node in none.
+    /// The innermost region of each node, [`NO_INDEX`] for a node in none.
     innermost: Vec<u32>,
 }
 
@@ -434,7 +413,7 @@ impl Found {
     /// region current after that edge.
     fn search<N: DenseId>(closed: &ClosedGraph<N>, classes: &[u32], class_count: usize) -> Self {
         let mut class_size = vec![0_u32; class_count];
-        for &class in classes.iter().filter(|&&class| class != ABSENT) {
+        for &class in classes.iter().filter(|&&class| class != NO_INDEX) {
             class_size[slot(class)] += 1;
         }
         let regions = class_size
@@ -442,58 +421,82 @@ impl Found {
             .map(|&size| slot(size).saturating_sub(1))
             .sum();
         let nodes = closed.node_count();
-        let mut found = Self {
-            entry: Vec::with_capacity(regions),
-            exit: Vec::with_capacity(regions),
-            parent: Vec::with_capacity(regions),
-            innermost: vec![ABSENT; nodes],
+        let mut pairing = Pairing {
+            classes,
+            class_size,
+            seen: vec![0; class_count],
+            open: vec![NO_INDEX; class_count],
+            found: Self {
+                entry: Vec::with_capacity(regions),
+                exit: Vec::with_capacity(regions),
+                parent: Vec::with_capacity(regions),
+                innermost: vec![NO_INDEX; nodes],
+            },
         };
-        let mut seen = vec![0_u32; class_count];
-        let mut open = vec![ABSENT; class_count];
         let mut visited = vec![false; nodes];
-        let root = closed.bound;
-        visited[root] = true;
-        let mut stack = vec![(root, 0_usize)];
-        while let Some(frame) = stack.last_mut() {
-            let (node, position) = *frame;
-            let Some(&edge) = closed.outgoing(node).get(position) else {
-                stack.pop();
-                continue;
-            };
-            frame.1 += 1;
-            let edge = slot(edge);
-            let class = slot(classes[edge]);
-            seen[class] += 1;
-            let rank = seen[class];
-            let to = closed.target(edge);
-            let discovers = !visited[to];
-            let mut region = found.innermost[node];
-            if rank > 1 {
-                let closing = open[class];
-                found.exit[slot(closing)] = word(edge);
-                if discovers {
-                    debug_assert_eq!(region, closing, "an exit edge leaves the current region");
-                    region = found.parent[slot(closing)];
-                }
-            }
-            if rank < class_size[class] {
-                debug_assert!(
-                    discovers,
-                    "an entry edge discovers its region's first block"
-                );
-                let opened = word(found.entry.len());
-                found.entry.push(word(edge));
-                found.exit.push(ABSENT);
-                found.parent.push(region);
-                open[class] = opened;
-                region = opened;
-            }
+        depth_first_core(
+            Leaving,
+            closed,
+            [closed.bound],
+            visited.as_mut_slice(),
+            &mut DepthFirstStack::default(),
+            &mut pairing,
+        );
+        pairing.found
+    }
+}
+
+/// The callbacks of [`Found::search`]: the regions found so far, and how far
+/// the search has come through each class.
+struct Pairing<'a> {
+    /// The class of each slot, [`NO_INDEX`] outside the closed graph.
+    classes: &'a [u32],
+    /// The number of slots in each class.
+    class_size: Vec<u32>,
+    /// The number of slots of each class the search has met.
+    seen: Vec<u32>,
+    /// The region the last slot met of each class opened.
+    open: Vec<u32>,
+    found: Found,
+}
+
+impl DepthFirstVisitor<usize, u32, ()> for Pairing<'_> {
+    #[inline]
+    fn discover(&mut self, _node: usize, _depth: usize) -> ControlFlow<(), Visit> {
+        ControlFlow::Continue(Visit::Descend)
+    }
+
+    #[inline]
+    fn step(&mut self, node: usize, edge: u32, to: usize, kind: StepKind) -> ControlFlow<()> {
+        let found = &mut self.found;
+        let class = slot(self.classes[slot(edge)]);
+        self.seen[class] += 1;
+        let rank = self.seen[class];
+        let discovers = kind == StepKind::Tree;
+        let mut region = found.innermost[node];
+        if rank > 1 {
+            let closing = self.open[class];
+            found.exit[slot(closing)] = edge;
             if discovers {
-                visited[to] = true;
-                found.innermost[to] = region;
-                stack.push((to, 0));
+                debug_assert_eq!(region, closing, "an exit edge leaves the current region");
+                region = found.parent[slot(closing)];
             }
         }
-        found
+        if rank < self.class_size[class] {
+            debug_assert!(
+                discovers,
+                "an entry edge discovers its region's first block"
+            );
+            let opened = word(found.entry.len());
+            found.entry.push(edge);
+            found.exit.push(NO_INDEX);
+            found.parent.push(region);
+            self.open[class] = opened;
+            region = opened;
+        }
+        if discovers {
+            found.innermost[to] = region;
+        }
+        ControlFlow::Continue(())
     }
 }

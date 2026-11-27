@@ -6,11 +6,11 @@
 //! largest bag less one. Dynamic programs over a decomposition of small width
 //! (register allocation, constraint satisfaction) run in time linear in the
 //! graph, so a graph whose structured form has gotos or irreducible loops,
-//! which [`ControlTree::spl_decomposition`](crate::ControlTree::spl_decomposition)
+//! which [`SplDecomposition::compute`](crate::SplDecomposition::compute)
 //! does not decompose, can still be decomposed here.
 //!
-//! [`tree_decomposition`] eliminates the nodes of the undirected simple graph
-//! underlying a view one at a time, as Bodlaender and Koster survey
+//! [`TreeDecomposition::compute`] eliminates the nodes of the undirected
+//! simple graph underlying a view one at a time, as Bodlaender and Koster survey
 //! ("Treewidth computations I. Upper bounds", Information and Computation,
 //! 2010): the next node is the one with the fewest neighbors
 //! ([`EliminationHeuristic::MinDegree`]) or the fewest missing edges among
@@ -28,13 +28,13 @@ use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::block::BlockId;
+use crate::graph::epoch::EpochMarks;
 use crate::graph::view::{DenseId, GraphView};
+use crate::identity::{NO_INDEX, check_bound, slot, word};
 
 #[cfg(test)]
 mod tests;
-
-/// No bag, in a table of bag indices.
-const ABSENT: u32 = u32::MAX;
 
 /// The rule that picks the next node to eliminate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -58,7 +58,7 @@ pub enum EliminationHeuristic {
 /// # Examples
 ///
 /// ```
-/// use cfglib::{Cfg, EdgeKind, EliminationHeuristic, tree_decomposition};
+/// use cfglib::{Cfg, EdgeKind, EliminationHeuristic, TreeDecomposition};
 ///
 /// // A diamond: entry -> then | else -> merge.
 /// let mut cfg = Cfg::<u32>::new();
@@ -70,31 +70,53 @@ pub enum EliminationHeuristic {
 /// cfg.add_edge(then_block, merge, EdgeKind::Fallthrough);
 /// cfg.add_edge(else_block, merge, EdgeKind::Fallthrough);
 ///
-/// let decomposition = tree_decomposition(&cfg, EliminationHeuristic::MinDegree);
-/// assert_eq!(decomposition.len(), 4);
+/// let decomposition = TreeDecomposition::compute(&cfg, EliminationHeuristic::MinDegree);
+/// assert_eq!(decomposition.bag_count(), 4);
 /// // A cycle of four has treewidth 2.
 /// assert_eq!(decomposition.width(), 2);
 /// let bag = decomposition.bag_of(then_block).expect("every block has a bag");
 /// assert!(decomposition.bag(bag).contains(&then_block));
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TreeDecomposition<N> {
+pub struct TreeDecomposition<N = BlockId> {
     /// The nodes of every bag, bag after bag, the eliminated node first and
     /// its neighbors in ascending dense index.
     bags: Vec<N>,
     /// Where each bag starts in `bags`, with one more entry for the end.
     starts: Vec<usize>,
-    /// The parent of each bag, [`ABSENT`] for a root.
+    /// The parent of each bag, [`NO_INDEX`] for a root.
     parents: Vec<u32>,
-    /// The bag of each node by dense index, [`ABSENT`] for a slot the view
+    /// The bag of each node by dense index, [`NO_INDEX`] for a slot the view
     /// does not hold.
     bag_of: Vec<u32>,
 }
 
 impl<N: DenseId> TreeDecomposition<N> {
+    /// A tree decomposition of the undirected simple graph underlying
+    /// `graph`: edge directions, parallel edges and self-loops are ignored.
+    ///
+    /// See the [module documentation](self) for the heuristics. The result
+    /// depends only on the set of edges, not on adjacency order or parallel
+    /// edges.
+    ///
+    /// Min-degree costs O(n + m + Σ d²) for n nodes, m edges, and bags of
+    /// `d + 1` nodes, with a logarithmic factor for its ordered queue: about
+    /// O(n·w²) for width w. Min-fill also recomputes the fill of the nodes
+    /// next to each new edge, which costs about another factor of w.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the node bound exceeds the range of a dense `u32` table.
+    #[must_use]
+    pub fn compute<G: GraphView<NodeId = N>>(graph: &G, heuristic: EliminationHeuristic) -> Self {
+        let mut elimination = Elimination::new(graph, heuristic);
+        elimination.run();
+        elimination.finish()
+    }
+
     /// The number of bags, one per node.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub fn bag_count(&self) -> usize {
         self.parents.len()
     }
 
@@ -107,7 +129,7 @@ impl<N: DenseId> TreeDecomposition<N> {
     /// The size of the largest bag less one, `0` without a bag.
     #[must_use]
     pub fn width(&self) -> usize {
-        (0..self.len())
+        (0..self.bag_count())
             .map(|bag| self.bag(bag).len())
             .max()
             .unwrap_or(1)
@@ -119,7 +141,7 @@ impl<N: DenseId> TreeDecomposition<N> {
     ///
     /// # Panics
     ///
-    /// Panics when `bag` is not below [`len`](Self::len).
+    /// Panics when `bag` is not below [`bag_count`](Self::bag_count).
     #[must_use]
     pub fn bag(&self, bag: usize) -> &[N] {
         &self.bags[self.starts[bag]..self.starts[bag + 1]]
@@ -130,11 +152,11 @@ impl<N: DenseId> TreeDecomposition<N> {
     ///
     /// # Panics
     ///
-    /// Panics when `bag` is not below [`len`](Self::len).
+    /// Panics when `bag` is not below [`bag_count`](Self::bag_count).
     #[must_use]
     pub fn parent(&self, bag: usize) -> Option<usize> {
         let parent = self.parents[bag];
-        (parent != ABSENT).then_some(parent as usize)
+        (parent != NO_INDEX).then_some(slot(parent))
     }
 
     /// The bag where `node` was eliminated, which holds it, or `None` for a
@@ -142,35 +164,10 @@ impl<N: DenseId> TreeDecomposition<N> {
     #[must_use]
     pub fn bag_of(&self, node: N) -> Option<usize> {
         match self.bag_of.get(node.index()).copied() {
-            None | Some(ABSENT) => None,
-            Some(bag) => Some(bag as usize),
+            None | Some(NO_INDEX) => None,
+            Some(bag) => Some(slot(bag)),
         }
     }
-}
-
-/// A tree decomposition of the undirected simple graph underlying `graph`:
-/// edge directions, parallel edges and self-loops are ignored.
-///
-/// See [`TreeDecomposition`] for the result and the [module
-/// documentation](self) for the heuristics. The result depends only on the
-/// set of edges, not on adjacency order or parallel edges.
-///
-/// Min-degree costs O(n + m + Σ d²) for n nodes, m edges, and bags of `d + 1`
-/// nodes, with a logarithmic factor for its ordered queue: about O(n·w²) for
-/// width w. Min-fill also recomputes the fill of the nodes next to each new
-/// edge, which costs about another factor of w.
-///
-/// # Panics
-///
-/// Panics when the node bound exceeds the range of a dense `u32` table.
-#[must_use]
-pub fn tree_decomposition<G: GraphView>(
-    graph: &G,
-    heuristic: EliminationHeuristic,
-) -> TreeDecomposition<G::NodeId> {
-    let mut elimination = Elimination::new(graph, heuristic);
-    elimination.run();
-    elimination.finish()
 }
 
 /// The state of one elimination.
@@ -184,22 +181,19 @@ struct Elimination {
     key: Vec<u64>,
     /// The uneliminated nodes by key, then by dense index.
     queue: BTreeSet<(u64, u32)>,
-    /// The position of each eliminated node in the order, [`ABSENT`] before.
+    /// The position of each eliminated node in the order, [`NO_INDEX`] before.
     position: Vec<u32>,
     /// The bags in elimination order, flat.
     bags: Vec<u32>,
     starts: Vec<usize>,
-    /// Which node last stamped each slot, to collect a set without sorting.
-    stamp: Vec<u32>,
+    /// The slots one requeue has collected, to collect a set without sorting.
+    collected: EpochMarks,
 }
 
 impl Elimination {
     fn new<G: GraphView>(graph: &G, heuristic: EliminationHeuristic) -> Self {
         let bound = graph.node_bound();
-        assert!(
-            u32::try_from(bound).is_ok_and(|bound| bound < ABSENT),
-            "node bound exceeds the dense u32 range of a tree decomposition"
-        );
+        check_bound(bound, "node bound of a tree decomposition");
         let mut live = vec![false; bound];
         let mut neighbors: Vec<Vec<u32>> = vec![Vec::new(); bound];
         for node in graph.node_ids() {
@@ -223,10 +217,10 @@ impl Elimination {
             live,
             key: vec![0; bound],
             queue: BTreeSet::new(),
-            position: vec![ABSENT; bound],
+            position: vec![NO_INDEX; bound],
             bags: Vec::new(),
             starts: vec![0],
-            stamp: vec![ABSENT; bound],
+            collected: EpochMarks::new(bound),
         };
         for node in 0..bound {
             if elimination.live[node] {
@@ -262,33 +256,35 @@ impl Elimination {
                 }
                 *list = merged;
             }
-            self.requeue(node, &around, &gained);
+            self.requeue(&around, &gained);
         }
     }
 
-    /// Requeue the nodes whose key the elimination of `node` changed.
-    fn requeue(&mut self, node: usize, around: &[u32], gained: &[u32]) {
-        let stamp = word(node);
+    /// Requeue the nodes whose key the last elimination changed: `around`,
+    /// the neighbors of the eliminated node, and under min-fill the neighbors
+    /// of the members that `gained` an edge.
+    fn requeue(&mut self, around: &[u32], gained: &[u32]) {
+        self.collected.reset();
         let mut changed: Vec<u32> = Vec::new();
-        let mut mark = |member: u32, stamps: &mut Vec<u32>| {
-            if stamps[slot(member)] != stamp {
-                stamps[slot(member)] = stamp;
+        let mut mark = |member: u32, collected: &mut EpochMarks| {
+            if !collected.is_marked(slot(member)) {
+                collected.mark(slot(member));
                 changed.push(member);
             }
         };
         for &member in around {
-            mark(member, &mut self.stamp);
+            mark(member, &mut self.collected);
         }
         if self.heuristic == EliminationHeuristic::MinFill {
             for &member in gained {
                 for &next in &self.neighbors[slot(member)] {
-                    mark(next, &mut self.stamp);
+                    mark(next, &mut self.collected);
                 }
             }
         }
         for member in changed {
             let index = slot(member);
-            if self.position[index] != ABSENT {
+            if self.position[index] != NO_INDEX {
                 continue;
             }
             let key = self.key_of(index);
@@ -321,7 +317,7 @@ impl Elimination {
     /// neighbor eliminated next.
     fn finish<N: DenseId>(self) -> TreeDecomposition<N> {
         let count = self.starts.len() - 1;
-        let mut bag_of = vec![ABSENT; self.position.len()];
+        let mut bag_of = vec![NO_INDEX; self.position.len()];
         for (node, &position) in self.position.iter().enumerate() {
             bag_of[node] = position;
         }
@@ -331,7 +327,7 @@ impl Elimination {
                     .iter()
                     .map(|&member| self.position[slot(member)])
                     .min()
-                    .unwrap_or(ABSENT)
+                    .unwrap_or(NO_INDEX)
             })
             .collect();
         TreeDecomposition {
@@ -396,14 +392,4 @@ fn common(first: &[u32], second: &[u32]) -> usize {
         }
     }
     shared
-}
-
-/// The word that stores a dense index below the checked bound.
-fn word(index: usize) -> u32 {
-    u32::try_from(index).expect("a dense index below the checked bound fits in u32")
-}
-
-/// The dense index a stored word names.
-const fn slot(stored: u32) -> usize {
-    stored as usize
 }

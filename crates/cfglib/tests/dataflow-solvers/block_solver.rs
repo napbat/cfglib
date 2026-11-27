@@ -1,24 +1,23 @@
-//! The block-level solver (`solve_problem` and its seeded, bounded, and
-//! fallible forms) against a round-robin reference, plus the documented
-//! contracts of seeds, step limits, and consumer errors.
+//! Per-block problems over control-flow graphs, solved by the node solver
+//! the way a CFG analysis is rooted: forward from the entry
+//! (`Seeds::Reachable`), backward from every live block (`Seeds::Live`).
+//! They run against a round-robin reference, plus the documented contracts
+//! of seeds, step limits, and consumer errors.
 
 use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::fmt;
 
 use cfglib::{
-    BlockId, Cfg, DenseId, Direction, EdgeKind, IterationOrder, NodeProblem, Problem, ResumeMode,
-    RootedView, SolveConfig, SolveError, TryProblem, TrySolveError, meet_options, resume_problem,
-    solve_node_problem, solve_node_problem_with_config, solve_problem, solve_problem_from,
-    solve_problem_from_with_config, solve_problem_with_config, stream_node_problem, stream_problem,
-    try_solve_problem, try_solve_problem_from, try_solve_problem_from_with_config,
-    try_solve_problem_with_config,
+    BlockId, Cfg, Direction, EdgeKind, Facts, IterationOrder, NodeProblem, Resume, ResumeMode,
+    Seeds, Solve, SolveConfig, SolveError, TryNodeProblem, TrySolveError, meet_options,
+    resume_node_problem, solve_node_problem, stream_node_problem,
 };
 
 use crate::graphs::{
-    Edit, GenKill, ORDERS, Rng, Shape, assert_same_facts, assert_streams_like, intersection, union,
+    Edit, GenKill, ORDERS, Rng, Shape, assert_same_facts, assert_streams_like, intersection, live,
+    rooted, seeded, step_limit, union,
 };
-use crate::lifted::Lifted;
 use crate::reference::round_robin;
 
 /// The fact an analysis starts a boundary block with; no block generates or
@@ -29,24 +28,34 @@ fn boundary() -> BTreeSet<u8> {
     BTreeSet::from([BOUNDARY_MARK])
 }
 
+/// Solves `problem` as a per-block analysis of `cfg` within `config`:
+/// forward from the entry, backward from every live block.
+fn solve_rooted<P: TryNodeProblem<Cfg<()>>>(
+    cfg: &Cfg<()>,
+    problem: &P,
+    config: SolveConfig,
+) -> Result<Facts<P::Fact>, TrySolveError<P::Error>> {
+    solve_node_problem(cfg, problem, rooted(cfg, problem.direction(), config))
+}
+
 /// A gen/kill problem whose meet is union: reaching-definitions shaped.
 struct May<'a> {
     effects: &'a GenKill,
     direction: Direction,
 }
 
-impl<V: RootedView> Problem<V> for May<'_> {
+impl NodeProblem<Cfg<()>> for May<'_> {
     type Fact = BTreeSet<u8>;
 
     fn direction(&self) -> Direction {
         self.direction
     }
 
-    fn bottom(&self, _view: &V) -> Self::Fact {
+    fn bottom(&self, _cfg: &Cfg<()>) -> Self::Fact {
         BTreeSet::new()
     }
 
-    fn boundary(&self, _view: &V) -> Self::Fact {
+    fn boundary(&self, _cfg: &Cfg<()>) -> Self::Fact {
         boundary()
     }
 
@@ -54,7 +63,7 @@ impl<V: RootedView> Problem<V> for May<'_> {
         union(a, b)
     }
 
-    fn transfer(&self, _view: &V, block: V::NodeId, input: &Self::Fact) -> Self::Fact {
+    fn transfer(&self, _cfg: &Cfg<()>, block: BlockId, input: &Self::Fact) -> Self::Fact {
         self.effects.apply(block.index(), input)
     }
 }
@@ -65,18 +74,18 @@ struct Must<'a> {
     effects: &'a GenKill,
 }
 
-impl<V: RootedView> Problem<V> for Must<'_> {
+impl NodeProblem<Cfg<()>> for Must<'_> {
     type Fact = Option<BTreeSet<u8>>;
 
     fn direction(&self) -> Direction {
         Direction::Forward
     }
 
-    fn bottom(&self, _view: &V) -> Self::Fact {
+    fn bottom(&self, _cfg: &Cfg<()>) -> Self::Fact {
         None
     }
 
-    fn boundary(&self, _view: &V) -> Self::Fact {
+    fn boundary(&self, _cfg: &Cfg<()>) -> Self::Fact {
         Some(boundary())
     }
 
@@ -84,7 +93,7 @@ impl<V: RootedView> Problem<V> for Must<'_> {
         meet_options(a, b, intersection)
     }
 
-    fn transfer(&self, _view: &V, block: V::NodeId, input: &Self::Fact) -> Self::Fact {
+    fn transfer(&self, _cfg: &Cfg<()>, block: BlockId, input: &Self::Fact) -> Self::Fact {
         input
             .as_ref()
             .map(|facts| self.effects.apply(block.index(), facts))
@@ -102,11 +111,11 @@ fn domain(shape: &Shape, direction: Direction) -> Vec<usize> {
     }
 }
 
-/// The IN and OUT facts the block solver reports, from a reference whose
+/// The IN and OUT facts of a per-block analysis, from a reference whose
 /// "merged" side is the analysis direction's input.
 fn assert_matches_reference(shape: &Shape, direction: Direction, effects: &GenKill, what: &str) {
     let cfg = shape.cfg();
-    let facts = solve_problem(&cfg, &May { effects, direction }).unwrap();
+    let facts = solve_rooted(&cfg, &May { effects, direction }, SolveConfig::default()).unwrap();
     let forward = direction == Direction::Forward;
     let reference = round_robin(
         shape,
@@ -165,7 +174,8 @@ fn forward_must_analysis_lifted_with_meet_options_matches_the_reference() {
         let shape = Shape::random(&mut rng, true, false);
         let effects = GenKill::random(&mut rng, shape.blocks);
         let cfg = shape.cfg();
-        let facts = solve_problem(&cfg, &Must { effects: &effects }).unwrap();
+        let must = Must { effects: &effects };
+        let facts = solve_rooted(&cfg, &must, SolveConfig::default()).unwrap();
         let reference = round_robin(
             &shape,
             &domain(&shape, Direction::Forward),
@@ -190,85 +200,38 @@ fn forward_must_analysis_lifted_with_meet_options_matches_the_reference() {
     }
 }
 
-/// The gen/kill problem of [`May`] stated as a node problem over the same CFG.
-struct MayNodes<'a> {
-    effects: &'a GenKill,
-    direction: Direction,
-}
-
-impl NodeProblem<Cfg<()>> for MayNodes<'_> {
-    type Fact = BTreeSet<u8>;
-
-    fn direction(&self) -> Direction {
-        self.direction
-    }
-
-    fn bottom(&self, _graph: &Cfg<()>) -> Self::Fact {
-        BTreeSet::new()
-    }
-
-    fn boundary(&self, _graph: &Cfg<()>) -> Self::Fact {
-        boundary()
-    }
-
-    fn meet(&self, a: &Self::Fact, b: &Self::Fact) -> Self::Fact {
-        union(a, b)
-    }
-
-    fn transfer(&self, _graph: &Cfg<()>, node: BlockId, input: &Self::Fact) -> Self::Fact {
-        self.effects.apply(node.index(), input)
-    }
-}
-
+/// Where nothing flows back into the entry and the entry reaches every live
+/// block, the rooted forward solve of a control-flow graph is the solve from
+/// every live block: the whole result is equal, steps included.
 #[test]
-fn the_block_and_node_solvers_report_the_same_facts_in_program_order() {
+fn a_rooted_forward_solve_equals_the_live_solve_when_the_entry_reaches_every_block() {
     let mut rng = Rng::new(13);
-    for _ in 0..300 {
-        // Backward, both solvers start from every live block and treat a
-        // block without successors as the boundary, so the whole result is
-        // equal, steps included.
-        let shape = Shape::random(&mut rng, false, false);
+    let mut compared = 0;
+    while compared < 100 {
+        let shape = Shape::random(&mut rng, true, false);
         let effects = GenKill::random(&mut rng, shape.blocks);
+        if shape.reachable().len() != shape.live().len() {
+            continue;
+        }
+        compared += 1;
         let cfg = shape.cfg();
-        let direction = Direction::Backward;
-        let by_block = solve_problem(
-            &cfg,
-            &May {
-                effects: &effects,
-                direction,
-            },
-        )
-        .unwrap();
-        let by_node = solve_node_problem(
-            &cfg,
-            &MayNodes {
-                effects: &effects,
-                direction,
-            },
-        )
-        .unwrap();
-        assert_eq!(by_block, by_node, "{shape:?}");
+        let problem = May {
+            effects: &effects,
+            direction: Direction::Forward,
+        };
+        let from_entry = solve_rooted(&cfg, &problem, SolveConfig::default()).unwrap();
+        let from_live = solve_node_problem(&cfg, &problem, Solve::default()).unwrap();
+        assert_eq!(from_entry, from_live, "{shape:?}");
     }
-    // Forward, on a loop every block of which the entry reaches.
+    // A loop, every block of which the entry reaches.
     let (cfg, effects) = loop_graph();
-    let direction = Direction::Forward;
-    let by_block = solve_problem(
-        &cfg,
-        &May {
-            effects: &effects,
-            direction,
-        },
-    )
-    .unwrap();
-    let by_node = solve_node_problem(
-        &cfg,
-        &MayNodes {
-            effects: &effects,
-            direction,
-        },
-    )
-    .unwrap();
-    assert_eq!(by_block, by_node);
+    let problem = May {
+        effects: &effects,
+        direction: Direction::Forward,
+    };
+    let from_entry = solve_rooted(&cfg, &problem, SolveConfig::default()).unwrap();
+    let from_live = solve_node_problem(&cfg, &problem, Solve::default()).unwrap();
+    assert_eq!(from_entry, from_live);
 }
 
 #[test]
@@ -293,14 +256,11 @@ fn blocks_unreachable_from_the_entry_keep_bottom_and_feed_nothing_forward() {
     let shape = Shape::new(4, &[(0, 1), (1, 2), (3, 2)]);
     let effects = GenKill::with_gen(4, &[(1, 1), (3, 9)]);
     let cfg = shape.cfg();
-    let facts = solve_problem(
-        &cfg,
-        &May {
-            effects: &effects,
-            direction: Direction::Forward,
-        },
-    )
-    .unwrap();
+    let problem = May {
+        effects: &effects,
+        direction: Direction::Forward,
+    };
+    let facts = solve_rooted(&cfg, &problem, SolveConfig::default()).unwrap();
     assert_eq!(facts.fact_in(id(3)), &BTreeSet::new());
     assert_eq!(facts.fact_out(id(3)), &BTreeSet::new());
     assert_eq!(facts.fact_in(id(2)), &BTreeSet::from([BOUNDARY_MARK, 1]));
@@ -311,14 +271,11 @@ fn a_backward_solve_also_computes_facts_for_blocks_the_entry_cannot_reach() {
     let shape = Shape::new(4, &[(0, 1), (1, 2), (3, 2)]);
     let effects = GenKill::with_gen(4, &[(2, 5), (3, 4)]);
     let cfg = shape.cfg();
-    let facts = solve_problem(
-        &cfg,
-        &May {
-            effects: &effects,
-            direction: Direction::Backward,
-        },
-    )
-    .unwrap();
+    let problem = May {
+        effects: &effects,
+        direction: Direction::Backward,
+    };
+    let facts = solve_rooted(&cfg, &problem, SolveConfig::default()).unwrap();
     assert_eq!(facts.fact_in(id(3)), &BTreeSet::from([BOUNDARY_MARK, 5, 4]));
 }
 
@@ -329,14 +286,11 @@ fn forward_entry_fact_reaches_an_entry_that_is_also_a_branch_target() {
     let shape = Shape::new(2, &[(0, 1), (1, 0)]);
     let effects = GenKill::with_gen(2, &[(1, 2)]);
     let cfg = shape.cfg();
-    let facts = solve_problem(
-        &cfg,
-        &May {
-            effects: &effects,
-            direction: Direction::Forward,
-        },
-    )
-    .unwrap();
+    let problem = May {
+        effects: &effects,
+        direction: Direction::Forward,
+    };
+    let facts = solve_rooted(&cfg, &problem, SolveConfig::default()).unwrap();
     assert_eq!(facts.fact_in(id(0)), &BTreeSet::from([BOUNDARY_MARK, 2]));
     assert_eq!(facts.fact_in(id(1)), &BTreeSet::from([BOUNDARY_MARK, 2]));
 }
@@ -372,14 +326,15 @@ fn a_seeded_solve_visits_only_what_the_seeds_reach() {
         effects: &effects,
         direction: Direction::Forward,
     };
-    let facts = solve_problem_from(&cfg, &problem, &[id(1)]).unwrap();
+    let facts = solve_node_problem(&cfg, &problem, seeded(&[id(1)], SolveConfig::default()));
+    let facts = facts.unwrap();
     // Block 0 was never visited, so block 1 sees its bottom output and the
     // boundary fact (given only to a block with no predecessor) is absent.
     assert_eq!(facts.fact_in(id(0)), &BTreeSet::new());
     assert_eq!(facts.fact_out(id(0)), &BTreeSet::new());
     assert_eq!(facts.fact_in(id(1)), &BTreeSet::new());
     assert_eq!(facts.fact_out(id(3)), &BTreeSet::from([1, 2, 3]));
-    assert_eq!(facts.steps(), 3);
+    assert_eq!(facts.stats().step_count(), 3);
 }
 
 #[test]
@@ -394,24 +349,30 @@ fn seeding_the_entry_equals_the_full_solve_and_seeding_nothing_visits_nothing() 
                 effects: &effects,
                 direction,
             };
-            let full = solve_problem(&cfg, &problem).unwrap();
+            let full = solve_rooted(&cfg, &problem, SolveConfig::default()).unwrap();
             let seeds: Vec<BlockId> = domain(&shape, direction).into_iter().map(id).collect();
-            let seeded = solve_problem_from(&cfg, &problem, &seeds).unwrap();
-            assert_eq!(seeded.steps(), full.steps(), "{shape:?}");
+            let from_seeds = seeded(&seeds, SolveConfig::default());
+            let from_seeds = solve_node_problem(&cfg, &problem, from_seeds).unwrap();
+            assert_eq!(
+                from_seeds.stats().step_count(),
+                full.stats().step_count(),
+                "{shape:?}"
+            );
             for block in shape.live() {
                 assert_eq!(
-                    seeded.fact_in(id(block)),
+                    from_seeds.fact_in(id(block)),
                     full.fact_in(id(block)),
                     "{shape:?}"
                 );
                 assert_eq!(
-                    seeded.fact_out(id(block)),
+                    from_seeds.fact_out(id(block)),
                     full.fact_out(id(block)),
                     "{shape:?}"
                 );
             }
-            let nothing = solve_problem_from(&cfg, &problem, &[]).unwrap();
-            assert_eq!(nothing.steps(), 0);
+            let nothing = seeded(&[], SolveConfig::default());
+            let nothing = solve_node_problem(&cfg, &problem, nothing).unwrap();
+            assert_eq!(nothing.stats().step_count(), 0);
             assert!(
                 shape
                     .live()
@@ -429,14 +390,11 @@ fn a_seed_that_is_a_removed_block_panics() {
     shape.hole = Some(1);
     let effects = GenKill::with_gen(3, &[]);
     let cfg = shape.cfg();
-    let _ = solve_problem_from(
-        &cfg,
-        &May {
-            effects: &effects,
-            direction: Direction::Forward,
-        },
-        &[id(1)],
-    );
+    let problem = May {
+        effects: &effects,
+        direction: Direction::Forward,
+    };
+    let _ = solve_node_problem(&cfg, &problem, seeded(&[id(1)], SolveConfig::default()));
 }
 
 fn loop_graph() -> (Cfg<()>, GenKill) {
@@ -452,29 +410,28 @@ fn the_step_limit_reports_where_the_unfinished_solve_stopped() {
         effects: &effects,
         direction: Direction::Forward,
     };
-    let unbounded = solve_problem(&cfg, &problem).unwrap();
-    let needed = unbounded.steps();
+    let unbounded = solve_rooted(&cfg, &problem, SolveConfig::default()).unwrap();
+    let needed = unbounded.stats().step_count();
     assert!(
         needed > cfg.block_count(),
         "the loop forces at least one revisit"
     );
 
     let short = needed - 1;
-    let error =
-        solve_problem_with_config(&cfg, &problem, SolveConfig::with_step_limit(short)).unwrap_err();
+    let error = solve_rooted(&cfg, &problem, step_limit(short)).unwrap_err();
     let SolveError::StepLimitExceeded {
         limit,
         steps,
         pending_node,
-    } = error;
+    } = SolveError::from(error);
     assert_eq!((limit, steps), (short, short));
     assert!(
         cfg.contains_block(id(pending_node)),
         "the pending node is a live block"
     );
 
-    let SolveError::StepLimitExceeded { steps, .. } =
-        solve_problem_with_config(&cfg, &problem, SolveConfig::with_step_limit(0)).unwrap_err();
+    let error = solve_rooted(&cfg, &problem, step_limit(0)).unwrap_err();
+    let SolveError::StepLimitExceeded { steps, .. } = SolveError::from(error);
     assert_eq!(steps, 0);
 }
 
@@ -485,29 +442,29 @@ fn raising_the_step_limit_to_the_work_needed_converges_to_the_unbounded_facts() 
         effects: &effects,
         direction: Direction::Forward,
     };
-    let unbounded = solve_problem(&cfg, &problem).unwrap();
+    let unbounded = solve_rooted(&cfg, &problem, SolveConfig::default()).unwrap();
+    let needed = unbounded.stats().step_count();
     let seeds: Vec<BlockId> = cfg.block_ids().collect();
-    for limit in [
-        unbounded.steps(),
-        unbounded.steps() + 1,
-        unbounded.steps() + 100,
-    ] {
-        let config = SolveConfig::with_step_limit(limit);
-        let bounded = solve_problem_with_config(&cfg, &problem, config).unwrap();
-        let seeded = solve_problem_from_with_config(&cfg, &problem, &seeds, config).unwrap();
+    for limit in [needed, needed + 1, needed + 100] {
+        let config = step_limit(limit);
+        let bounded = solve_rooted(&cfg, &problem, config).unwrap();
+        let from_seeds = solve_node_problem(&cfg, &problem, seeded(&seeds, config)).unwrap();
         for block in cfg.block_ids() {
             assert_eq!(bounded.fact_out(block), unbounded.fact_out(block));
-            assert_eq!(seeded.fact_out(block), unbounded.fact_out(block));
+            assert_eq!(from_seeds.fact_out(block), unbounded.fact_out(block));
         }
-        assert_eq!(bounded.steps(), unbounded.steps());
+        assert_eq!(bounded.stats().step_count(), needed);
     }
 }
 
 #[test]
-fn a_solve_config_without_a_limit_is_unbounded() {
-    assert_eq!(SolveConfig::new().max_steps(), None);
-    assert_eq!(SolveConfig::default(), SolveConfig::new());
-    assert_eq!(SolveConfig::with_step_limit(7).max_steps(), Some(7));
+fn a_default_solve_starts_from_every_live_node_without_a_limit() {
+    let solve = Solve::<BlockId>::default();
+    assert_eq!(solve.seeds, Seeds::Live);
+    assert_eq!(solve.config, SolveConfig::default());
+    assert_eq!(solve.config.max_steps, None);
+    assert_eq!(solve.config.order, IterationOrder::Index);
+    assert_eq!(solve.config.narrowing_passes, 0);
 }
 
 /// What a fallible problem refuses to do.
@@ -532,7 +489,7 @@ struct Fallible<'a> {
     refusal: Option<Refusal>,
 }
 
-impl<V: RootedView> TryProblem<V> for Fallible<'_> {
+impl TryNodeProblem<Cfg<()>> for Fallible<'_> {
     type Fact = BTreeSet<u8>;
     type Error = Refusal;
 
@@ -540,11 +497,11 @@ impl<V: RootedView> TryProblem<V> for Fallible<'_> {
         Direction::Forward
     }
 
-    fn bottom(&self, _view: &V) -> Self::Fact {
+    fn bottom(&self, _cfg: &Cfg<()>) -> Self::Fact {
         BTreeSet::new()
     }
 
-    fn boundary(&self, _view: &V) -> Result<Self::Fact, Refusal> {
+    fn boundary(&self, _cfg: &Cfg<()>) -> Result<Self::Fact, Refusal> {
         match self.refusal {
             Some(Refusal::Entry) => Err(Refusal::Entry),
             _ => Ok(boundary()),
@@ -553,8 +510,8 @@ impl<V: RootedView> TryProblem<V> for Fallible<'_> {
 
     fn meet(
         &self,
-        _view: &V,
-        _block: V::NodeId,
+        _cfg: &Cfg<()>,
+        _block: BlockId,
         a: &Self::Fact,
         b: &Self::Fact,
     ) -> Result<Self::Fact, Refusal> {
@@ -566,8 +523,8 @@ impl<V: RootedView> TryProblem<V> for Fallible<'_> {
 
     fn transfer(
         &self,
-        _view: &V,
-        block: V::NodeId,
+        _cfg: &Cfg<()>,
+        block: BlockId,
         input: &Self::Fact,
     ) -> Result<Self::Fact, Refusal> {
         match self.refusal {
@@ -586,24 +543,19 @@ fn a_fallible_solve_without_refusals_equals_the_infallible_solve() {
         let shape = Shape::random(&mut rng, true, false);
         let effects = GenKill::random(&mut rng, shape.blocks);
         let cfg = shape.cfg();
-        let plain = solve_problem(
-            &cfg,
-            &May {
-                effects: &effects,
-                direction: Direction::Forward,
-            },
-        )
-        .unwrap();
+        let problem = May {
+            effects: &effects,
+            direction: Direction::Forward,
+        };
+        let plain = solve_rooted(&cfg, &problem, SolveConfig::default()).unwrap();
         let fallible = Fallible {
             effects: &effects,
             refusal: None,
         };
         let all: Vec<BlockId> = shape.reachable().into_iter().map(id).collect();
         let results = [
-            try_solve_problem(&cfg, &fallible),
-            try_solve_problem_with_config(&cfg, &fallible, SolveConfig::new()),
-            try_solve_problem_from(&cfg, &fallible, &all),
-            try_solve_problem_from_with_config(&cfg, &fallible, &all, SolveConfig::new()),
+            solve_rooted(&cfg, &fallible, SolveConfig::default()),
+            solve_node_problem(&cfg, &fallible, seeded(&all, SolveConfig::default())),
         ];
         for result in results {
             let facts = result.unwrap();
@@ -627,7 +579,7 @@ fn consumer_refusals_surface_as_problem_errors_naming_the_refusal() {
             refusal: Some(refusal),
         };
         assert_eq!(
-            try_solve_problem(&cfg, &problem).unwrap_err(),
+            solve_rooted(&cfg, &problem, SolveConfig::default()).unwrap_err(),
             TrySolveError::Problem(refusal)
         );
     }
@@ -643,10 +595,10 @@ fn a_refusal_in_code_the_solve_never_visits_is_not_raised() {
         effects: &effects,
         refusal: Some(Refusal::Transfer(4)),
     };
-    assert!(try_solve_problem(&cfg, &problem).is_ok());
+    assert!(solve_rooted(&cfg, &problem, SolveConfig::default()).is_ok());
     // Seeding it asks for exactly that transfer.
     assert_eq!(
-        try_solve_problem_from(&cfg, &problem, &[id(4)]).unwrap_err(),
+        solve_node_problem(&cfg, &problem, seeded(&[id(4)], SolveConfig::default())).unwrap_err(),
         TrySolveError::Problem(Refusal::Transfer(4))
     );
 }
@@ -661,7 +613,7 @@ fn a_fallible_problem_is_asked_for_its_entry_fact_when_the_root_is_seeded() {
         refusal: Some(Refusal::Entry),
     };
     assert_eq!(
-        try_solve_problem_from(&cfg, &problem, &[id(0)]).unwrap_err(),
+        solve_node_problem(&cfg, &problem, seeded(&[id(0)], SolveConfig::default())).unwrap_err(),
         TrySolveError::Problem(Refusal::Entry)
     );
 }
@@ -678,7 +630,8 @@ fn a_seeded_root_starts_with_the_entry_fact_and_a_seeded_inner_block_never_does(
         direction: Direction::Forward,
     };
 
-    let from_root = solve_problem_from(&cfg, &problem, &[id(0)]).unwrap();
+    let from_root = solve_node_problem(&cfg, &problem, seeded(&[id(0)], SolveConfig::default()));
+    let from_root = from_root.unwrap();
     assert_eq!(from_root.fact_in(id(0)), &BTreeSet::from([BOUNDARY_MARK]));
     assert_eq!(
         from_root.fact_in(id(2)),
@@ -689,7 +642,8 @@ fn a_seeded_root_starts_with_the_entry_fact_and_a_seeded_inner_block_never_does(
     // Seeded at a block that has a predecessor, the input is the meet of the
     // predecessors' outputs. The predecessor was never visited, so that is
     // bottom: the entry fact does not appear anywhere.
-    let from_inner = solve_problem_from(&cfg, &problem, &[id(1)]).unwrap();
+    let from_inner = solve_node_problem(&cfg, &problem, seeded(&[id(1)], SolveConfig::default()));
+    let from_inner = from_inner.unwrap();
     assert_eq!(from_inner.fact_in(id(1)), &BTreeSet::new());
     assert_eq!(from_inner.fact_out(id(1)), &BTreeSet::from([2]));
     assert_eq!(from_inner.fact_in(id(2)), &BTreeSet::from([2]));
@@ -712,12 +666,15 @@ fn a_fallible_solve_reports_its_own_step_limit_separately_from_consumer_errors()
         effects: &effects,
         refusal: None,
     };
-    let needed = try_solve_problem(&cfg, &fallible).unwrap().steps();
+    let needed = solve_rooted(&cfg, &fallible, SolveConfig::default())
+        .unwrap()
+        .stats()
+        .step_count();
     let seeds: Vec<BlockId> = cfg.block_ids().collect();
-    let short = SolveConfig::with_step_limit(needed - 1);
+    let short = step_limit(needed - 1);
     let errors = [
-        try_solve_problem_with_config(&cfg, &fallible, short).unwrap_err(),
-        try_solve_problem_from_with_config(&cfg, &fallible, &seeds, short).unwrap_err(),
+        solve_rooted(&cfg, &fallible, short).unwrap_err(),
+        solve_node_problem(&cfg, &fallible, seeded(&seeds, short)).unwrap_err(),
     ];
     for error in errors {
         match error {
@@ -740,8 +697,7 @@ fn a_fallible_solve_reports_its_own_step_limit_separately_from_consumer_errors()
             })
         );
     }
-    let enough = SolveConfig::with_step_limit(needed);
-    assert!(try_solve_problem_with_config(&cfg, &fallible, enough).is_ok());
+    assert!(solve_rooted(&cfg, &fallible, step_limit(needed)).is_ok());
 }
 
 #[test]
@@ -761,8 +717,7 @@ fn both_error_kinds_expose_their_cause_through_the_error_trait() {
 
 /// The least fixpoint does not depend on the iteration order: every order,
 /// with or without descending passes, reaches the facts of the index order,
-/// forward and backward, for full and seeded solves, and for the same
-/// problem stated over nodes.
+/// forward and backward, for rooted, seeded, and live solves.
 #[test]
 fn every_iteration_order_reaches_the_facts_of_the_index_order() {
     let mut rng = Rng::new(14);
@@ -771,42 +726,41 @@ fn every_iteration_order_reaches_the_facts_of_the_index_order() {
             let shape = Shape::random(&mut rng, false, false);
             let effects = GenKill::random(&mut rng, shape.blocks);
             let cfg = shape.cfg();
-            let live = shape.live();
-            let blocks = || live.iter().map(|&block| id(block));
-            let seeds = [id(live[rng.below(live.len())])];
+            let alive = shape.live();
+            let blocks = || alive.iter().map(|&block| id(block));
+            let seeds = [id(alive[rng.below(alive.len())])];
             let may = May {
                 effects: &effects,
                 direction,
             };
-            let nodes = MayNodes {
-                effects: &effects,
-                direction,
-            };
             let must = Must { effects: &effects };
-            let full = solve_problem(&cfg, &may).unwrap();
-            let seeded = solve_problem_from(&cfg, &may, &seeds).unwrap();
-            let over_nodes = solve_node_problem(&cfg, &nodes).unwrap();
-            let must_full = solve_problem(&cfg, &must).unwrap();
+            let full = solve_rooted(&cfg, &may, SolveConfig::default()).unwrap();
+            let from_seeds = seeded(&seeds, SolveConfig::default());
+            let from_seeds = solve_node_problem(&cfg, &may, from_seeds).unwrap();
+            let from_live = solve_node_problem(&cfg, &may, Solve::default()).unwrap();
+            let must_full = solve_rooted(&cfg, &must, SolveConfig::default()).unwrap();
             for order in ORDERS {
                 for passes in [0, 2] {
-                    let config = SolveConfig::new()
-                        .with_order(order)
-                        .with_narrowing_passes(passes);
+                    let config = SolveConfig {
+                        max_steps: None,
+                        order,
+                        narrowing_passes: passes,
+                    };
                     let what = format!("{order:?} with {passes} passes, {direction:?}, {shape:?}");
-                    let ordered = solve_problem_with_config(&cfg, &may, config).unwrap();
+                    let ordered = solve_rooted(&cfg, &may, config).unwrap();
                     assert_same_facts(&ordered, &full, blocks(), &what);
-                    let ordered = solve_problem_from_with_config(&cfg, &may, &seeds, config);
-                    assert_same_facts(&ordered.unwrap(), &seeded, blocks(), &what);
-                    let ordered = solve_node_problem_with_config(&cfg, &nodes, config).unwrap();
-                    assert_same_facts(&ordered, &over_nodes, blocks(), &what);
-                    let ordered = solve_problem_with_config(&cfg, &must, config).unwrap();
+                    let ordered = solve_node_problem(&cfg, &may, seeded(&seeds, config));
+                    assert_same_facts(&ordered.unwrap(), &from_seeds, blocks(), &what);
+                    let ordered = solve_node_problem(&cfg, &may, live(config)).unwrap();
+                    assert_same_facts(&ordered, &from_live, blocks(), &what);
+                    let ordered = solve_rooted(&cfg, &must, config).unwrap();
                     assert_same_facts(&ordered, &must_full, blocks(), &what);
                     if direction == Direction::Forward {
                         let fallible = Fallible {
                             effects: &effects,
                             refusal: None,
                         };
-                        let ordered = try_solve_problem_with_config(&cfg, &fallible, config);
+                        let ordered = solve_rooted(&cfg, &fallible, config);
                         assert_same_facts(&ordered.unwrap(), &full, blocks(), &what);
                     }
                 }
@@ -815,10 +769,11 @@ fn every_iteration_order_reaches_the_facts_of_the_index_order() {
     }
 }
 
-/// A stream visits every block the solve reaches exactly once, with the
-/// facts and in the steps of the solve in the weak topological order that
-/// keeps every fact, forward and backward, with and without narrowing
-/// passes; the same problem stated over nodes streams the same way.
+/// A rooted stream visits every block the solve reaches exactly once, with
+/// the facts and in the steps of the solve in the weak topological order
+/// that keeps every fact, forward and backward, with and without narrowing
+/// passes; the same problem streamed from every live block visits each of
+/// them the same way.
 #[test]
 fn a_stream_visits_every_reached_block_once_with_the_facts_of_the_solve() {
     let mut rng = Rng::new(17);
@@ -833,31 +788,30 @@ fn a_stream_visits_every_reached_block_once_with_the_facts_of_the_solve() {
                 direction,
             };
             let must = Must { effects: &effects };
-            let nodes = MayNodes {
-                effects: &effects,
-                direction,
-            };
             for passes in [0, 2] {
-                let config = SolveConfig::new()
-                    .with_order(IterationOrder::WeakTopological)
-                    .with_narrowing_passes(passes);
+                let config = SolveConfig {
+                    max_steps: None,
+                    order: IterationOrder::WeakTopological,
+                    narrowing_passes: passes,
+                };
                 let what = format!("{direction:?} with {passes} passes, {shape:?}");
-                let facts = solve_problem_with_config(&cfg, &may, config).unwrap();
+                let from_entry = rooted(&cfg, direction, config);
+                let facts = solve_node_problem(&cfg, &may, from_entry).unwrap();
                 let stream = |visit: &mut dyn FnMut(BlockId, &_, &_)| {
-                    stream_problem(&cfg, &Lifted(&may), config, visit).unwrap()
+                    stream_node_problem(&cfg, &may, from_entry, visit).unwrap()
                 };
                 assert_streams_like(&facts, reached(), stream, &what);
                 if direction == Direction::Forward {
-                    let facts = solve_problem_with_config(&cfg, &must, config).unwrap();
+                    let facts = solve_node_problem(&cfg, &must, from_entry).unwrap();
                     let stream = |visit: &mut dyn FnMut(BlockId, &_, &_)| {
-                        stream_problem(&cfg, &Lifted(&must), config, visit).unwrap()
+                        stream_node_problem(&cfg, &must, from_entry, visit).unwrap()
                     };
                     assert_streams_like(&facts, reached(), stream, &what);
                 }
-                let facts = solve_node_problem_with_config(&cfg, &nodes, config).unwrap();
+                let facts = solve_node_problem(&cfg, &may, live(config)).unwrap();
                 let every = shape.live().into_iter().map(id);
                 let stream = |visit: &mut dyn FnMut(BlockId, &_, &_)| {
-                    stream_node_problem(&cfg, &Lifted(&nodes), config, visit).unwrap()
+                    stream_node_problem(&cfg, &may, live(config), visit).unwrap()
                 };
                 assert_streams_like(&facts, every, stream, &what);
             }
@@ -882,15 +836,17 @@ fn a_resume_after_an_edit_equals_a_fresh_solve_of_the_edited_graph() {
             let shape = Shape::random(&mut rng, false, false);
             let mut effects = GenKill::random(&mut rng, shape.blocks);
             let mut cfg = shape.cfg();
-            let before = solve_problem(
+            let before = solve_rooted(
                 &cfg,
                 &May {
                     effects: &effects,
                     direction,
                 },
+                SolveConfig::default(),
             )
             .unwrap();
-            let must_before = solve_problem(&cfg, &Must { effects: &effects }).unwrap();
+            let must_before =
+                solve_rooted(&cfg, &Must { effects: &effects }, SolveConfig::default()).unwrap();
             let edit = Edit::random(&mut rng, &mut cfg, &mut effects, &shape, &kinds, only_grow);
             let changed = [edit.changed(direction)];
             let must_changed = [edit.changed(Direction::Forward)];
@@ -899,8 +855,8 @@ fn a_resume_after_an_edit_equals_a_fresh_solve_of_the_edited_graph() {
                 direction,
             };
             let must = Must { effects: &effects };
-            let fresh = solve_problem(&cfg, &may).unwrap();
-            let must_fresh = solve_problem(&cfg, &must).unwrap();
+            let fresh = solve_rooted(&cfg, &may, SolveConfig::default()).unwrap();
+            let must_fresh = solve_rooted(&cfg, &must, SolveConfig::default()).unwrap();
             let modes: &[ResumeMode] = if only_grow && direction == Direction::Forward {
                 &[ResumeMode::Reset, ResumeMode::Grow]
             } else {
@@ -908,20 +864,28 @@ fn a_resume_after_an_edit_equals_a_fresh_solve_of_the_edited_graph() {
             };
             let blocks = || shape.live().into_iter().map(id);
             for order in [IterationOrder::Index, IterationOrder::WeakTopological] {
-                let config = SolveConfig::new().with_order(order);
+                let config = SolveConfig {
+                    order,
+                    ..SolveConfig::default()
+                };
                 for &mode in modes {
                     let what =
                         format!("{mode:?} {order:?} {direction:?} after {edit:?}, {shape:?}");
-                    let previous = before.clone();
-                    let resumed =
-                        resume_problem(&cfg, &Lifted(&may), previous, &changed, mode, config);
+                    let resume = Resume {
+                        changed: &changed,
+                        mode,
+                    };
+                    let solve = rooted(&cfg, direction, config);
+                    let resumed = resume_node_problem(&cfg, &may, before.clone(), resume, solve);
                     assert_same_facts(&resumed.unwrap(), &fresh, blocks(), &what);
                 }
                 let what = format!("must {order:?} after {edit:?}, {shape:?}");
-                let previous = must_before.clone();
-                let reset = ResumeMode::Reset;
-                let resumed =
-                    resume_problem(&cfg, &Lifted(&must), previous, &must_changed, reset, config);
+                let resume = Resume {
+                    changed: &must_changed,
+                    mode: ResumeMode::Reset,
+                };
+                let solve = rooted(&cfg, Direction::Forward, config);
+                let resumed = resume_node_problem(&cfg, &must, must_before.clone(), resume, solve);
                 assert_same_facts(&resumed.unwrap(), &must_fresh, blocks(), &what);
             }
         }

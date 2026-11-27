@@ -7,9 +7,7 @@
 //! `graph.rs`; the call graph is wide and shallow, with leaf functions and
 //! small recursive cycles, which leaves the index more pairs to search.
 
-use cfglib::{
-    Graph, NodeId, ReachIndex, ReachIndexConfig, ReachScratch, TraversalDirection, reachable,
-};
+use cfglib::{Direction, Graph, NodeId, ReachIndex, ReachIndexConfig, ReachScratch, reachable};
 
 use super::BenchmarkSuite;
 use crate::fixtures::branchy_graph;
@@ -26,7 +24,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     let graph = branchy_graph(BRANCHY_NODES);
     let pairs = hashed_pairs(BRANCHY_NODES, PAIR_COUNT);
     let index = ReachIndex::compute(&graph, ReachIndexConfig::default());
-    let mut scratch = ReachScratch::new();
+    let mut scratch = ReachScratch::default();
     benchmark_case!(
         suite,
         "api_reach_index_build",
@@ -45,14 +43,14 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         || answer_by_walks(&graph, &pairs),
         |reached: &usize| assert_eq!(
             *reached,
-            answer_by_index(&index, &pairs, &mut ReachScratch::new())
+            answer_by_index(&index, &pairs, &mut ReachScratch::default())
         )
     );
 
     let graph = call_graph(CALL_GRAPH_FUNCTIONS);
     let pairs = hashed_pairs(CALL_GRAPH_FUNCTIONS, PAIR_COUNT);
     let index = ReachIndex::compute(&graph, ReachIndexConfig::default());
-    let mut scratch = ReachScratch::new();
+    let mut scratch = ReachScratch::default();
     benchmark_case!(
         suite,
         "api_reach_index_build_call_graph",
@@ -71,7 +69,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         || answer_by_walks(&graph, &pairs),
         |reached: &usize| assert_eq!(
             *reached,
-            answer_by_index(&index, &pairs, &mut ReachScratch::new())
+            answer_by_index(&index, &pairs, &mut ReachScratch::default())
         )
     );
 }
@@ -84,7 +82,7 @@ fn answer_by_index(
 ) -> usize {
     pairs
         .iter()
-        .filter(|&&(source, target)| index.reaches(source, target, scratch))
+        .filter(|&&(source, target)| index.reaches_in(scratch, source, target))
         .count()
 }
 
@@ -92,9 +90,7 @@ fn answer_by_index(
 fn answer_by_walks(graph: &Graph<(), ()>, pairs: &[(NodeId, NodeId)]) -> usize {
     pairs
         .iter()
-        .filter(|&&(source, target)| {
-            reachable(graph, [source], TraversalDirection::Outgoing)[target.index()]
-        })
+        .filter(|&&(source, target)| reachable(graph, [source], Direction::Forward)[target.index()])
         .count()
 }
 

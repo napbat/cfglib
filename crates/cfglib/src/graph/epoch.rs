@@ -1,75 +1,61 @@
-//! Epoch-stamped marking over a dense index space.
+//! Epoch-stamped marking over a dense index space, and the sizing policy of
+//! every reusable scratch in the crate.
 //!
 //! Marking a node visited is the one buffer every repeated walk allocates,
 //! and clearing it is the one O(node count) step a walk over five nodes
-//! should not be paying. Both types here answer that the same way: a node
-//! holds the epoch it was last touched in, so clearing is a bump of the
-//! current epoch rather than a pass over the buffer.
+//! should not be paying. [`EpochMarks`] answers that: a node holds the epoch
+//! it was last marked in, so clearing is a bump of the current epoch rather
+//! than a pass over the buffer.
 //!
-//! [`EpochMarks`] is the write-only half, for a search that only ever asks
-//! "have I been here". [`EpochSet`] adds the members, for a pass that has to
-//! read back what it marked.
+//! # Sizing
+//!
+//! Every reusable scratch of the crate — [`SearchScratch`](crate::SearchScratch),
+//! [`ShortestPathScratch`](crate::ShortestPathScratch), the dominator and cut
+//! scratches, and the marks here — follows one policy: it starts empty
+//! ([`Default`]) and grows on entry to fit the graph it is handed, keeping
+//! what it holds. A scratch therefore serves a sequence of graphs of any
+//! size, allocates only while it grows to the largest of them, and never
+//! panics because a graph outgrew it.
 
 extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-/// Reusable visited marks for repeated searches over one dense node space.
+/// Reusable visited marks over one dense node space.
 ///
-/// [`search`](crate::search) owns its marks, so every call allocates and zeroes a buffer
-/// sized to the whole graph. A pass that searches **once per root** over one
-/// node space — a nulling closure per grammar nonterminal, a reachable set per
-/// definition — pays that O(node count) buffer per root, so its cost scales
-/// with the graph even when each search touches a handful of nodes. That is
-/// the shape consumers hand-roll an epoch stamp for, and why they decline a
-/// substrate that owns its marks.
-///
-/// `EpochMarks` is that stamp, owned by the caller: each node holds the epoch
-/// it was last marked in, so clearing the marks is a bump of the current epoch
-/// rather than a walk over the buffer. Allocate one per node space, hand it to
-/// every [`search_with_marks`](crate::search_with_marks) of the pass, and marking costs O(1) amortized
-/// per root instead of O(node count).
+/// Each node holds the epoch it was last marked in, so clearing the marks is
+/// a bump of the current epoch rather than a walk over the buffer. A pass
+/// that walks once per root over one node space — a nulling closure per
+/// grammar nonterminal, a reachable set per definition — keeps one buffer and
+/// pays O(1) per root to clear it instead of O(node count).
 ///
 /// # Cost
 ///
-/// The win is exactly the buffer, so it is largest when each search is small
+/// The win is exactly the buffer, so it is largest when each walk is small
 /// against the graph. Measured on 16,384 nodes whose closures are four nodes
 /// each, one search per node: 8.3ms with a fresh buffer per search, 1.5ms over
-/// one reused buffer (5.4x). It narrows as searches grow — a search that
-/// visits a large fraction of the graph is dominated by the walk, and reuse
-/// lands in the noise.
+/// one reused buffer (5.4x). It narrows as walks grow — a walk that visits a
+/// large fraction of the graph is dominated by the walk, and reuse lands in
+/// the noise.
 ///
-/// # Allocation
+/// # Use
 ///
-/// The buffer holds one `u32` stamp per node and is the only allocation in a
-/// search whose size is O(node count); what remains per call is O(seeds) and
-/// O(nodes visited) — the seed vector, the frontier, and (for the depth-first
-/// cores alone, which read a node's successors in reverse) one adjacency
-/// buffer refilled per expansion. Those are what [`SearchScratch`](crate::SearchScratch) owns, for
-/// the pass whose searches are so small that the call itself is the cost.
-/// Sizing is fixed at
-/// construction: a buffer smaller than the graph is a panic, not a resize, so
-/// that a marks buffer never silently reallocates in the middle of the pass it
-/// exists to keep allocation-free. A buffer **larger** than the graph is fine,
-/// which is how one buffer covers a set of graphs — size it by the largest.
-/// A scratch that meets graphs one at a time calls
-/// [`grow_to`](Self::grow_to) and [`reset`](Self::reset) on entry instead,
-/// so the buffer grows only between passes.
-///
-/// # Marking by hand
-///
-/// A pass that walks on its own, such as a worklist over a graph, uses the
-/// same buffer through [`mark`](Self::mark) and
-/// [`is_marked`](Self::is_marked), and clears it with [`reset`](Self::reset)
-/// between two walks.
+/// A pass sizes the marks with [`new`](Self::new) or, as a scratch does on
+/// entry, with [`grow_to`](Self::grow_to); marks by hand with
+/// [`mark`](Self::mark) and [`is_marked`](Self::is_marked); and clears them
+/// with [`reset`](Self::reset) between two walks.
 ///
 /// # Examples
 ///
 /// ```
 /// use cfglib::EpochMarks;
 ///
-/// let marks = EpochMarks::new(64);
-/// assert_eq!(marks.capacity(), 64);
+/// let mut marks = EpochMarks::default();
+/// marks.grow_to(64);
+/// marks.mark(7);
+/// assert!(marks.is_marked(7));
+/// marks.reset();
+/// assert!(!marks.is_marked(7));
 /// ```
 #[derive(Debug, Clone)]
 pub struct EpochMarks {
@@ -77,13 +63,13 @@ pub struct EpochMarks {
     /// `epoch`.
     pub(crate) stamps: Vec<u32>,
     /// The current epoch. Never zero, so a zero stamp is always unmarked —
-    /// which is both the initial state and the un-mark of
-    /// [`VisitedPolicy::Path`].
+    /// which is both the initial state and the un-mark of a walk that marks
+    /// per path.
     pub(crate) epoch: u32,
 }
 
 impl Default for EpochMarks {
-    /// Marks covering nothing, for a consumer that sizes them on first use.
+    /// Marks covering nothing, for a scratch that grows them on entry.
     fn default() -> Self {
         Self::new(0)
     }
@@ -99,31 +85,10 @@ impl EpochMarks {
         }
     }
 
-    /// Return how many nodes these marks cover.
-    ///
-    /// A [`search_with_marks`](crate::search_with_marks) over a graph with more nodes than this panics;
-    /// a consumer whose node space grew builds a new buffer.
-    #[must_use]
-    pub fn capacity(&self) -> usize {
-        self.stamps.len()
-    }
-
     /// Clear every mark in O(1) by moving to a fresh epoch.
     ///
     /// The buffer is only walked when the epoch would wrap, which needs
     /// `u32::MAX` resets of one buffer.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use cfglib::EpochMarks;
-    ///
-    /// let mut marks = EpochMarks::new(4);
-    /// marks.mark(2);
-    /// assert!(marks.is_marked(2));
-    /// marks.reset();
-    /// assert!(!marks.is_marked(2));
-    /// ```
     pub fn reset(&mut self) {
         if self.epoch == u32::MAX {
             self.stamps.fill(0);
@@ -136,36 +101,18 @@ impl EpochMarks {
     /// Grow the buffer to cover `node_count` nodes, keeping the marks.
     ///
     /// A new stamp is zero, which is never the current epoch, so growing
-    /// never marks a node. This is what a reusable scratch does on entry,
-    /// which is a different moment from the one the fixed capacity above
-    /// protects: the size is settled before the pass starts rather than
-    /// changing under it. A buffer that already covers `node_count` nodes is
+    /// never marks a node. A buffer that already covers `node_count` nodes is
     /// left as it is.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use cfglib::EpochMarks;
-    ///
-    /// let mut marks = EpochMarks::default();
-    /// marks.grow_to(8);
-    /// assert_eq!(marks.capacity(), 8);
-    /// marks.mark(7);
-    /// marks.grow_to(4);
-    /// assert_eq!(marks.capacity(), 8);
-    /// assert!(marks.is_marked(7));
-    /// ```
     pub fn grow_to(&mut self, node_count: usize) {
-        if self.stamps.len() < node_count {
-            self.stamps.resize(node_count, 0);
-        }
+        grow_to(&mut self.stamps, node_count, 0);
     }
 
     /// Whether `index` is marked in the current epoch.
     ///
     /// # Panics
     ///
-    /// Panics when `index` is not below [`capacity`](Self::capacity).
+    /// Panics when `index` is beyond the nodes the marks cover.
+    #[inline]
     #[must_use]
     pub fn is_marked(&self, index: usize) -> bool {
         self.stamps[index] == self.epoch
@@ -175,149 +122,31 @@ impl EpochMarks {
     ///
     /// # Panics
     ///
-    /// Panics when `index` is not below [`capacity`](Self::capacity).
+    /// Panics when `index` is beyond the nodes the marks cover.
+    #[inline]
     pub fn mark(&mut self, index: usize) {
         self.stamps[index] = self.epoch;
     }
 
-    /// Un-mark `index`, the unwind of [`VisitedPolicy::Path`].
+    /// Un-mark `index`, the unwind of a walk that marks per path.
+    #[inline]
     pub(crate) fn unmark(&mut self, index: usize) {
         self.stamps[index] = 0;
     }
 }
 
-/// A dense set of indices that clears in constant time and can be read back.
-///
-/// [`EpochMarks`] never says *which* nodes it marked, because a search does
-/// not need to know. A pass that does — the blocks a phi-placement worklist
-/// touched, the classes one instruction wrote — reaches for a
-/// [`BTreeSet`](alloc::collections::BTreeSet) and pays a node allocation per
-/// member, or for a `Vec<bool>` plus a separate member list and clears the
-/// row per problem.
-///
-/// `EpochSet` is both halves at once: the epoch stamps answer
-/// [`contains`](Self::contains) in constant time, and the member list answers
-/// [`ones`](Self::ones) in one pass over the answer rather than over the
-/// universe. Neither buffer is released by [`clear`](Self::clear), so a set
-/// reused across a sequence of problems allocates only while it is growing
-/// to the largest of them.
-///
-/// # Order
-///
-/// [`ones`](Self::ones) yields members in **insertion** order, not ascending
-/// order. That is what makes it O(members): sorting would cost the pass the
-/// buffer it came here to avoid. Collect and sort when an ascending answer is
-/// what is wanted, or use [`DenseBits`](crate::DenseBits), whose
-/// [`ones`](crate::DenseBits::ones) is ascending because its representation
-/// already is.
-///
-/// # Sizing
-///
-/// The universe is fixed at construction, on the terms [`EpochMarks`] sets:
-/// an index outside it is a panic rather than a resize, so a set never
-/// silently reallocates inside the pass it exists to keep allocation-free. A
-/// set **larger** than the problem is fine, which is how one set covers a
-/// sequence of problems — size it by the largest.
-///
-/// # Examples
-///
-/// ```
-/// use cfglib::EpochSet;
-///
-/// let mut visited = EpochSet::new(64);
-/// assert!(visited.insert(7));
-/// assert!(!visited.insert(7), "a second insert is a no-op");
-/// assert!(visited.insert(3));
-/// assert!(visited.contains(7));
-/// assert_eq!(visited.ones().collect::<Vec<_>>(), vec![7, 3]);
-///
-/// visited.clear();
-/// assert!(!visited.contains(7));
-/// assert_eq!(visited.capacity(), 64);
-/// ```
-#[derive(Debug, Clone)]
-pub struct EpochSet {
-    /// Membership, answered in constant time and cleared by an epoch bump.
-    marks: EpochMarks,
-    /// The members of the current epoch, in insertion order.
-    members: Vec<usize>,
-}
-
-impl EpochSet {
-    /// An empty set over the universe `0..len`.
-    #[must_use]
-    pub fn new(len: usize) -> Self {
-        Self {
-            marks: EpochMarks::new(len),
-            members: Vec::new(),
-        }
-    }
-
-    /// The universe size the set was created with.
-    ///
-    /// An [`insert`](Self::insert) or [`contains`](Self::contains) outside it
-    /// panics; a consumer whose index space grew builds a new set.
-    #[must_use]
-    pub fn capacity(&self) -> usize {
-        self.marks.capacity()
-    }
-
-    /// Removes every member in constant time, keeping both buffers.
-    ///
-    /// The stamps are only walked when the epoch would wrap, which needs
-    /// `u32::MAX` clears of one set.
-    pub fn clear(&mut self) {
-        self.marks.reset();
-        self.members.clear();
-    }
-
-    /// Inserts `index`, returning whether it was newly a member.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `index` is outside the universe.
-    pub fn insert(&mut self, index: usize) -> bool {
-        assert!(
-            index < self.capacity(),
-            "index {index} outside universe {}",
-            self.capacity()
-        );
-        if self.marks.is_marked(index) {
-            return false;
-        }
-        self.marks.mark(index);
-        self.members.push(index);
-        true
-    }
-
-    /// Whether `index` is a member.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `index` is outside the universe.
-    #[must_use]
-    pub fn contains(&self, index: usize) -> bool {
-        assert!(
-            index < self.capacity(),
-            "index {index} outside universe {}",
-            self.capacity()
-        );
-        self.marks.is_marked(index)
-    }
-
-    /// The members, in insertion order.
-    pub fn ones(&self) -> impl Iterator<Item = usize> + '_ {
-        self.members.iter().copied()
+/// Grow `table` to `len` entries, filling the new ones with `fill` and keeping
+/// the rest: the sizing step of every scratch table (see the module docs). A
+/// table that already holds `len` entries is left as it is.
+pub(crate) fn grow_to<T: Clone>(table: &mut Vec<T>, len: usize, fill: T) {
+    if table.len() < len {
+        table.resize(len, fill);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    extern crate alloc;
-
-    use alloc::vec::Vec;
-
-    use super::{EpochMarks, EpochSet};
+    use super::EpochMarks;
 
     #[test]
     fn marks_clear_on_reset_and_on_an_epoch_wrap() {
@@ -339,68 +168,19 @@ mod tests {
     #[test]
     fn growing_keeps_the_marks_and_never_marks_a_new_node() {
         let mut marks = EpochMarks::default();
-        assert_eq!(marks.capacity(), 0);
         marks.grow_to(3);
         marks.mark(2);
         marks.grow_to(6);
-        assert_eq!(marks.capacity(), 6);
         assert!(marks.is_marked(2));
         assert!((3..6).all(|index| !marks.is_marked(index)));
         marks.grow_to(1);
-        assert_eq!(marks.capacity(), 6, "growing never shrinks");
+        assert!(marks.is_marked(2), "growing never shrinks");
+        assert!(!marks.is_marked(5));
     }
 
     #[test]
     #[should_panic(expected = "index out of bounds")]
-    fn marking_beyond_the_capacity_panics() {
+    fn marking_beyond_the_marked_nodes_panics() {
         EpochMarks::new(2).mark(2);
-    }
-
-    #[test]
-    fn insert_reports_novelty_and_contains_agrees() {
-        let mut set = EpochSet::new(16);
-        assert!(!set.contains(4));
-        assert!(set.insert(4));
-        assert!(!set.insert(4));
-        assert!(set.contains(4));
-        assert!(!set.contains(5));
-    }
-
-    #[test]
-    fn clear_keeps_the_universe_and_forgets_the_members() {
-        let mut set = EpochSet::new(16);
-        set.insert(1);
-        set.insert(15);
-        set.clear();
-        assert_eq!(set.capacity(), 16);
-        assert!(!set.contains(1));
-        assert!(set.ones().next().is_none());
-        assert!(set.insert(1), "a cleared member is new again");
-    }
-
-    #[test]
-    fn members_are_read_back_in_insertion_order() {
-        let mut set = EpochSet::new(8);
-        for index in [5, 0, 5, 3] {
-            set.insert(index);
-        }
-        assert_eq!(set.ones().collect::<Vec<_>>(), [5, 0, 3]);
-    }
-
-    #[test]
-    fn an_epoch_wrap_still_clears_every_member() {
-        let mut set = EpochSet::new(4);
-        set.insert(2);
-        for _ in 0..3 {
-            set.clear();
-            assert!(set.insert(2));
-        }
-        assert_eq!(set.ones().collect::<Vec<_>>(), [2]);
-    }
-
-    #[test]
-    #[should_panic(expected = "index 4 outside universe 4")]
-    fn inserting_outside_the_universe_panics() {
-        EpochSet::new(4).insert(4);
     }
 }

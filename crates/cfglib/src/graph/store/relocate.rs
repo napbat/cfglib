@@ -53,12 +53,12 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::mem;
 
-use crate::graph::traverse::TraversalDirection;
+use crate::graph::view::Direction;
 
 use super::Graph;
 use super::id::{Id, IdTag};
 use super::liveness::LiveSet;
-use super::raw_index;
+use crate::identity::word;
 
 use runs::Runs;
 
@@ -82,10 +82,10 @@ pub(super) struct Relocations {
 }
 
 impl Relocations {
-    fn runs(&self, direction: TraversalDirection) -> &Runs {
+    fn runs(&self, direction: Direction) -> &Runs {
         match direction {
-            TraversalDirection::Outgoing => &self.outgoing,
-            TraversalDirection::Incoming => &self.incoming,
+            Direction::Forward => &self.outgoing,
+            Direction::Backward => &self.incoming,
         }
     }
 
@@ -95,14 +95,14 @@ impl Relocations {
     /// lookup would go with it into every scan of a store that has never
     /// relocated an edge and so never reaches this.
     #[inline(never)]
-    fn run(&self, node: usize, direction: TraversalDirection) -> Option<&[u32]> {
+    fn run(&self, node: usize, direction: Direction) -> Option<&[u32]> {
         self.runs(direction).get(node)
     }
 
-    fn runs_mut(&mut self, direction: TraversalDirection) -> &mut Runs {
+    fn runs_mut(&mut self, direction: Direction) -> &mut Runs {
         match direction {
-            TraversalDirection::Outgoing => &mut self.outgoing,
-            TraversalDirection::Incoming => &mut self.incoming,
+            Direction::Forward => &mut self.outgoing,
+            Direction::Backward => &mut self.incoming,
         }
     }
 }
@@ -113,7 +113,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// One `Option` test per node for a store that has never relocated an
     /// edge, and nothing at all inside the walk.
     #[inline]
-    pub(super) fn overlay(&self, node: usize, direction: TraversalDirection) -> Option<&[u32]> {
+    pub(super) fn overlay(&self, node: usize, direction: Direction) -> Option<&[u32]> {
         self.relocations.as_deref()?.run(node, direction)
     }
 
@@ -140,7 +140,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// Panics when the edge has been removed, or when `source` names no live
     /// node in this store.
     pub fn redirect_edge_source(&mut self, edge: Id<ET>, source: Id<NT>) -> Id<NT> {
-        self.redirect(edge, source, TraversalDirection::Outgoing)
+        self.redirect(edge, source, Direction::Forward)
     }
 
     /// Move one edge's target, retaining its identity, kind, and payload.
@@ -169,21 +169,16 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// assert!(graph.incoming(first).next().is_none());
     /// ```
     pub fn redirect_edge_target(&mut self, edge: Id<ET>, target: Id<NT>) -> Id<NT> {
-        self.redirect(edge, target, TraversalDirection::Incoming)
+        self.redirect(edge, target, Direction::Backward)
     }
 
-    fn redirect(
-        &mut self,
-        edge: Id<ET>,
-        endpoint: Id<NT>,
-        direction: TraversalDirection,
-    ) -> Id<NT> {
+    fn redirect(&mut self, edge: Id<ET>, endpoint: Id<NT>, direction: Direction) -> Id<NT> {
         assert!(self.contains_edge(edge), "edge has been removed");
         self.assert_live_endpoint(endpoint, "replacement");
         let record = self.edge_mut(edge);
         let moved = match direction {
-            TraversalDirection::Outgoing => &mut record.source,
-            TraversalDirection::Incoming => &mut record.target,
+            Direction::Forward => &mut record.source,
+            Direction::Backward => &mut record.target,
         };
         let previous = *moved;
         if previous == endpoint {
@@ -191,7 +186,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         }
         *moved = endpoint;
 
-        let raw = raw_index(edge.index());
+        let raw = word(edge.index());
         self.with_run(previous, direction, |run, live| {
             sweep(run, live);
             if let Some(position) = run.iter().position(|&slot| slot == raw) {
@@ -217,12 +212,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     ///
     /// Panics when `old` is out of range, when it has edges to move and `new`
     /// names no live node in this store, or when `old` is `new`.
-    pub(crate) fn move_adjacency(
-        &mut self,
-        old: Id<NT>,
-        new: Id<NT>,
-        direction: TraversalDirection,
-    ) {
+    pub(crate) fn move_adjacency(&mut self, old: Id<NT>, new: Id<NT>, direction: Direction) {
         assert!(old != new, "adjacency cannot move onto its own node");
         if self.adjacent(old, direction).next().is_none() {
             return;
@@ -238,8 +228,8 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
         for &slot in &moved {
             let record = self.edge_mut(Id::from_raw(slot));
             match direction {
-                TraversalDirection::Outgoing => record.source = new,
-                TraversalDirection::Incoming => record.target = new,
+                Direction::Forward => record.source = new,
+                Direction::Backward => record.target = new,
             }
         }
         self.with_run(new, direction, |run, live| {
@@ -265,7 +255,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     fn with_run<R>(
         &mut self,
         node: Id<NT>,
-        direction: TraversalDirection,
+        direction: Direction,
         edit: impl FnOnce(&mut Vec<u32>, Option<&LiveSet>) -> R,
     ) -> R {
         let index = node.index();
@@ -273,7 +263,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
             self.start_run(node, direction);
         }
         let live = self.tombstoned_edges().then_some(&self.live_edges);
-        let delta_base = raw_index(self.base_edges.len());
+        let delta_base = word(self.base_edges.len());
         let run = self
             .relocations
             .as_deref_mut()
@@ -295,7 +285,7 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     /// handed in on every edit that stall was the dominant cost of a
     /// redirect.
     #[inline(never)]
-    fn start_run(&mut self, node: Id<NT>, direction: TraversalDirection) {
+    fn start_run(&mut self, node: Id<NT>, direction: Direction) {
         let run = self.live_base_run(node, direction);
         let node_bound = self.node_bound();
         self.relocations

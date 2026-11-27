@@ -4,31 +4,20 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-use super::{ScopeGraphChanges, ScopeIndexUpdate, ScopeResolutionIndex};
-use crate::graph::edge_view::EdgeRef;
+use super::super::test_support::{Label, name, parent_or_import, random_graph, rank};
+use super::{ScopeGraphChanges, ScopeIndexConfig, ScopeIndexUpdate, ScopeResolutionIndex};
+use crate::PathSearchConfig;
+use crate::graph::edge_view::{EdgeRef, EdgeView};
 use crate::graph::scope::{
-    ScopeDatumId, ScopeEdgeId, ScopeEnvironmentQuery, ScopeGraph, ScopeGraphPathLabel,
-    ScopeGraphQuery, ScopeId, ScopePath, ScopeQuery, ScopeReferenceId, ScopeResolutionConfig,
+    ScopeDatumId, ScopeEdgeId, ScopeEnvironmentCache, ScopeEnvironmentQuery, ScopeGraph,
+    ScopeGraphPathLabel, ScopeGraphQuery, ScopeId, ScopePath, ScopeQuery, ScopeReferenceId,
 };
+use crate::graph::view::GraphView;
 use crate::test_util::rng::Rng;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Label {
-    Parent,
-    Import,
-}
 
 /// Scopes that may be opaque, and data and references named by a small
 /// number.
 type Graph = ScopeGraph<bool, Label, (), u8, u8>;
-
-fn rank(label: ScopeGraphPathLabel<'_, Label>) -> u8 {
-    match label {
-        ScopeGraphPathLabel::Declaration => 0,
-        ScopeGraphPathLabel::Edge(Label::Import) => 1,
-        ScopeGraphPathLabel::Edge(Label::Parent) => 2,
-    }
-}
 
 /// Parents, then imports (`P* I*`). An opaque scope hides its data from
 /// every path that does not start in it. The hooks read only the scope at
@@ -54,7 +43,7 @@ impl ScopeGraphQuery<bool, Label, (), u8, u8> for Lookup {
         match (imported, edge.data()) {
             (false, Label::Parent) => Some(false),
             (_, Label::Import) => Some(true),
-            (true, Label::Parent) => None,
+            (true, Label::Parent) | (_, Label::Hidden | Label::A | Label::B) => None,
         }
     }
 
@@ -84,13 +73,13 @@ impl ScopeGraphQuery<bool, Label, (), u8, u8> for Lookup {
 /// The edits of the property test, each with the changes it reports.
 fn edit(graph: &mut Graph, random: &mut Rng) -> ScopeGraphChanges {
     let mut changes = ScopeGraphChanges::default();
-    let scopes: Vec<ScopeId> = graph.scope_ids().collect();
+    let scopes: Vec<ScopeId> = graph.node_ids().collect();
     let edges: Vec<ScopeEdgeId> = graph.edge_ids().collect();
     let scope = scopes[random.below(scopes.len())];
     match random.below(9) {
         0 => {
             let target = scopes[random.below(scopes.len())];
-            graph.add_edge(scope, target, label(random));
+            graph.add_edge(scope, target, parent_or_import(random));
             changes.scopes.push(scope);
         }
         1 if !edges.is_empty() => {
@@ -109,7 +98,7 @@ fn edit(graph: &mut Graph, random: &mut Rng) -> ScopeGraphChanges {
         }
         4 if !edges.is_empty() => {
             let edge = edges[random.below(edges.len())];
-            *graph.edge_label_mut(edge) = label(random);
+            *graph.edge_mut(edge) = parent_or_import(random);
             changes.scopes.push(graph.edge(edge).source());
         }
         5 => {
@@ -137,38 +126,6 @@ fn edit(graph: &mut Graph, random: &mut Rng) -> ScopeGraphChanges {
     changes
 }
 
-fn label(random: &mut Rng) -> Label {
-    if random.chance(60) {
-        Label::Parent
-    } else {
-        Label::Import
-    }
-}
-
-fn name(random: &mut Rng) -> u8 {
-    u8::try_from(random.below(3)).expect("a name below three fits in u8")
-}
-
-fn random_graph(random: &mut Rng) -> Graph {
-    let count = 1 + random.below(7);
-    let mut graph = Graph::new();
-    let scopes: Vec<ScopeId> = (0..count)
-        .map(|_| graph.add_scope(random.one_in(4)))
-        .collect();
-    for &scope in &scopes {
-        for _ in 0..random.below(3) {
-            graph.add_edge(scope, scopes[random.below(count)], label(random));
-        }
-        for _ in 0..random.below(3) {
-            graph.add_datum(scope, (), name(random));
-        }
-        for _ in 0..random.below(3) {
-            graph.add_reference(scope, name(random));
-        }
-    }
-    graph
-}
-
 /// The references whose resolution differs between `before` and `after`,
 /// counting the references `before` did not have.
 fn differing(before: &ScopeResolutionIndex, after: &ScopeResolutionIndex) -> Vec<ScopeReferenceId> {
@@ -184,26 +141,38 @@ fn differing(before: &ScopeResolutionIndex, after: &ScopeResolutionIndex) -> Vec
 fn updates_match_a_fresh_index_after_random_edits() {
     let mut random = Rng::new(0x73_5EED);
     for _ in 0..300 {
-        let mut graph = random_graph(&mut random);
+        // Up to seven scopes, a quarter of them opaque, with edges anywhere.
+        let mut graph = random_graph(&mut random, 7, None, |random| random.one_in(4));
         let config = match random.below(3) {
-            0 => ScopeResolutionConfig::new(),
-            1 => ScopeResolutionConfig::new().with_max_path_count(1 + random.below(4)),
-            _ => ScopeResolutionConfig::new().with_max_path_length(random.below(3)),
+            0 => PathSearchConfig::default(),
+            1 => PathSearchConfig {
+                max_path_count: Some(1 + random.below(4)),
+                ..PathSearchConfig::default()
+            },
+            _ => PathSearchConfig {
+                max_path_length: Some(random.below(3)),
+                ..PathSearchConfig::default()
+            },
+        };
+        let plain = ScopeIndexConfig {
+            search: config,
+            track_reads: false,
+        };
+        let tracking = ScopeIndexConfig {
+            track_reads: true,
+            ..plain
         };
         // A plain index records nothing, so its first update resolves every
         // reference and records them; a tracked one is incremental at once.
-        let mut index = if random.one_in(4) {
-            ScopeResolutionIndex::compute(&graph, &Lookup, config)
-        } else {
-            ScopeResolutionIndex::compute_tracked(&graph, &Lookup, config)
-        };
+        let config = if random.one_in(4) { plain } else { tracking };
+        let mut index = ScopeResolutionIndex::compute(&graph, &Lookup, config);
         for _ in 0..12 {
             let changes = edit(&mut graph, &mut random);
             let before = index.clone();
             let update = index.update(&graph, &Lookup, config, &changes);
-            let fresh = ScopeResolutionIndex::compute(&graph, &Lookup, config);
+            let fresh = ScopeResolutionIndex::compute(&graph, &Lookup, plain);
             assert_eq!(index, fresh, "{graph:?} {changes:?}");
-            let tracked = ScopeResolutionIndex::compute_tracked(&graph, &Lookup, config);
+            let tracked = ScopeResolutionIndex::compute(&graph, &Lookup, tracking);
             assert_eq!(index.reads, tracked.reads, "{graph:?} {changes:?}");
             assert_eq!(update.changed, differing(&before, &fresh));
             assert!(update.resolved_count >= update.changed.len());
@@ -237,8 +206,11 @@ fn blocks(count: usize) -> (Graph, Vec<ScopeId>, Vec<ScopeId>) {
 #[test]
 fn a_datum_in_a_leaf_scope_resolves_only_its_readers_again() {
     let (mut graph, _, modules) = blocks(6);
-    let config = ScopeResolutionConfig::new();
-    let mut index = ScopeResolutionIndex::compute_tracked(&graph, &Lookup, config);
+    let config = ScopeIndexConfig {
+        track_reads: true,
+        ..ScopeIndexConfig::default()
+    };
+    let mut index = ScopeResolutionIndex::compute(&graph, &Lookup, config);
     // Only the innermost block imports the innermost module.
     let datum = graph.add_datum(modules[5], (), 5);
     let changes = ScopeGraphChanges {
@@ -278,13 +250,16 @@ fn a_datum_in_a_leaf_scope_resolves_only_its_readers_again() {
 #[test]
 fn a_plain_index_records_nothing_until_its_first_update() {
     let (mut graph, blocks, _) = blocks(4);
-    let config = ScopeResolutionConfig::new();
+    let config = ScopeIndexConfig::default();
     let mut index = ScopeResolutionIndex::compute(&graph, &Lookup, config);
     assert!(index.reads.is_none());
-    assert_eq!(
-        index,
-        ScopeResolutionIndex::compute_tracked(&graph, &Lookup, config)
-    );
+    let tracking = ScopeIndexConfig {
+        track_reads: true,
+        ..config
+    };
+    let tracked = ScopeResolutionIndex::compute(&graph, &Lookup, tracking);
+    assert!(tracked.reads.is_some());
+    assert_eq!(index, tracked);
 
     // The first update has no record to go by: it resolves every reference.
     graph.add_datum(blocks[3], (), 3);
@@ -329,7 +304,7 @@ impl ScopeEnvironmentQuery<bool, Label, (), u8, u8> for Lookup {
         match (imported, edge.data()) {
             (false, Label::Parent) => Some(false),
             (_, Label::Import) => Some(true),
-            (true, Label::Parent) => None,
+            (true, Label::Parent) | (_, Label::Hidden | Label::A | Label::B) => None,
         }
     }
 
@@ -361,8 +336,8 @@ fn a_cached_index_resolves_every_reference_on_its_first_update() {
     for (level, &module) in modules.iter().enumerate() {
         graph.add_datum(module, (), u8::try_from(level).expect("a short chain"));
     }
-    let config = ScopeResolutionConfig::new();
-    let mut index = ScopeResolutionIndex::compute_cached(&graph, &Lookup, config);
+    let config = ScopeIndexConfig::default();
+    let mut index = ScopeEnvironmentCache::new(&graph).index(&graph, &Lookup, config.search);
     let cached: Vec<_> = index
         .resolutions()
         .iter()

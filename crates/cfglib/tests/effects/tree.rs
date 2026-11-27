@@ -7,10 +7,10 @@ use cfglib::ir::rtl::{Bits, Control, InstructionBuilder, Place, Raise, Selection
 use cfglib::{StatementTree, TreeItem, TreeNode, TreeNodeId, TreeSpanValue};
 
 use crate::wren::{
-    Eff, Fault, Op, Reg, Space, Undef, Wren, WrenEffects, bits, capture, constant, keep, part,
-    take, undefined, write_plan, write_whole,
+    BASE, Eff, Fault, Op, Reg, Space, Undef, Wren, WrenEffects, bits, capture, constant, keep,
+    part, take, undefined, whole, write_plan, write_whole,
 };
-use cfglib::{CapturedValue, DenseId};
+use cfglib::CapturedValue;
 
 /// Renders one node: the name of a named node, or the node inline.
 fn node(tree: &StatementTree<'_, Wren>, id: TreeNodeId) -> String {
@@ -37,6 +37,9 @@ fn inline(tree: &StatementTree<'_, Wren>, id: TreeNodeId) -> String {
         }
         TreeNode::Const { words, .. } => format!("{}", words[0]),
         TreeNode::Apply {
+            operator: Op::Base, ..
+        } => BASE.to_string(),
+        TreeNode::Apply {
             operator,
             args,
             result,
@@ -57,8 +60,8 @@ fn inline(tree: &StatementTree<'_, Wren>, id: TreeNodeId) -> String {
     }
 }
 
-fn place_name(place: Place<Wren>) -> String {
-    if place == Place::whole(place.root) {
+fn place_name(place: Place<Reg>) -> String {
+    if place == whole(place.root) {
         format!("{:?}", place.root)
     } else {
         format!(
@@ -152,13 +155,13 @@ fn lines_of(
     emit: impl FnOnce(&mut cfglib::CaptureBuilder<'_, Wren>) -> Control<CapturedValue>,
 ) -> Vec<String> {
     let captured = capture(emit);
-    render(&StatementTree::compute_record(&WrenEffects, &captured))
+    render(&StatementTree::compute(&WrenEffects, &captured))
 }
 
 #[test]
 fn a_value_with_one_use_stays_inline() {
     let lines = lines_of(|b| {
-        let a = b.read(Selection::Direct(Place::whole(Reg::A)));
+        let a = b.read(Selection::Direct(whole(Reg::A)));
         let one = constant(b, 1, 32);
         let sum = b.apply(&Op::Add, &[a, one], &[bits(32)]).first;
         write_whole(b, Reg::A, sum);
@@ -170,8 +173,8 @@ fn a_value_with_one_use_stays_inline() {
 #[test]
 fn a_shared_value_gets_a_let_before_its_first_use_after_the_lets_inside_it() {
     let lines = lines_of(|b| {
-        let a = b.read(Selection::Direct(Place::whole(Reg::A)));
-        let c = b.read(Selection::Direct(Place::whole(Reg::B)));
+        let a = b.read(Selection::Direct(whole(Reg::A)));
+        let c = b.read(Selection::Direct(whole(Reg::B)));
         let sum = b.apply(&Op::Add, &[a, c], &[bits(32)]).first;
         let difference = b.apply(&Op::Sub, &[sum, sum], &[bits(32)]).first;
         let low = b.apply(&Op::And, &[difference, a], &[bits(32)]).first;
@@ -238,7 +241,7 @@ fn a_shared_choice_keeps_one_name() {
 #[test]
 fn a_select_of_the_old_bits_is_a_conditional_assignment() {
     let captured = capture(|b| {
-        let guard = b.read(Selection::Direct(Place::whole(Reg::Z)));
+        let guard = b.read(Selection::Direct(whole(Reg::Z)));
         let new = b.read(Selection::Direct(part(Reg::B, 0, 16)));
         let old = b.read(Selection::Direct(part(Reg::A, 0, 16)));
         let chosen = b.apply(&Op::Select, &[guard, new, old], &[bits(16)]).first;
@@ -246,7 +249,7 @@ fn a_select_of_the_old_bits_is_a_conditional_assignment() {
         write_plan(b, Reg::A, &[take(0, 16, chosen, 0), take(16, 16, zero, 0)]);
         Control::Advance
     });
-    let tree = StatementTree::compute_record(&WrenEffects, &captured);
+    let tree = StatementTree::compute(&WrenEffects, &captured);
     assert_eq!(
         render(&tree),
         ["if Z A[0+:16] = B[0+:16]; A[16+:16] = 0", "next"]
@@ -279,7 +282,7 @@ fn a_select_of_the_old_bits_is_a_conditional_assignment() {
 #[test]
 fn effects_name_their_results_and_items_keep_program_order() {
     let lines = lines_of(|b| {
-        let base = b.read(Selection::Direct(Place::whole(Reg::A)));
+        let base = b.read(Selection::Direct(whole(Reg::A)));
         let four = constant(b, 4, 32);
         let address = b.apply(&Op::Add, &[base, four], &[bits(32)]).first;
         let loaded = b
@@ -320,14 +323,14 @@ fn effects_name_their_results_and_items_keep_program_order() {
 
 #[test]
 fn indexed_writes_and_a_branch_render_their_trees() {
-    let candidates = [Place::whole(Reg::Slot(0)), Place::whole(Reg::Slot(1))];
+    let candidates = [whole(Reg::Slot(0)), whole(Reg::Slot(1))];
     let lines = lines_of(|b| {
-        let index = b.read(Selection::Direct(Place::whole(Reg::Z)));
+        let index = b.read(Selection::Direct(whole(Reg::Z)));
         let slot = b.read(Selection::FiniteIndexed {
             index,
             candidates: &candidates,
         });
-        let key = b.read(Selection::Direct(Place::whole(Reg::B)));
+        let key = b.read(Selection::Direct(whole(Reg::B)));
         let element = b.read(Selection::SparseIndexed {
             bank: Reg::Bank,
             key,
@@ -369,14 +372,27 @@ fn indexed_writes_and_a_branch_render_their_trees() {
     );
 }
 
+/// The tree keeps an operator without operands as an operator, so a renderer
+/// that knows its value, here where the reader placed the module, writes the
+/// value instead.
 #[test]
-fn an_operator_that_the_dialect_knows_as_a_number_is_a_constant() {
-    let lines = lines_of(|b| {
-        let a = b.read(Selection::Direct(Place::whole(Reg::A)));
+fn a_renderer_substitutes_the_value_of_an_operator_without_operands() {
+    let captured = capture(|b| {
+        let a = b.read(Selection::Direct(whole(Reg::A)));
         let base = b.apply(&Op::Base, &[], &[bits(32)]).first;
         let sum = b.apply(&Op::Add, &[a, base], &[bits(32)]).first;
         write_whole(b, Reg::A, sum);
         Control::Advance
     });
-    assert_eq!(lines, ["A = add(A, 4096)", "next"]);
+    let tree = StatementTree::compute(&WrenEffects, &captured);
+    assert_eq!(
+        tree.node(TreeNodeId::from_index(1)),
+        TreeNode::Apply {
+            operator: &Op::Base,
+            args: &[],
+            result: 0,
+            width: bits(32),
+        }
+    );
+    assert_eq!(render(&tree), ["A = add(A, 4096)", "next"]);
 }

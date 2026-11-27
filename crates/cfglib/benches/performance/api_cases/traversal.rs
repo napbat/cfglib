@@ -9,10 +9,9 @@
 use std::ops::ControlFlow;
 
 use cfglib::{
-    DenseFanout, FoldEnter, MarkScope, OpenFixpointConfig, OpenFold, OpenFoldConfig,
-    OpenPathsConfig, OpenSearchConfig, SearchOrder, StackGraph, StackNodeId, StackReverseIndex,
-    StackSearchConfig, Visit, follow, open_breadth_first_paths, open_fold_fixpoint,
-    open_fold_post_order, open_fold_post_order_memoized, open_search,
+    DenseFanout, FoldEnter, MarkScope, OpenFold, OpenFoldConfig, OpenFoldMemo, Revisit,
+    SearchConfig, SearchOrder, Visit, follow, open_breadth_first_paths, open_fold, open_fold_in,
+    open_search,
 };
 
 use super::BenchmarkSuite;
@@ -34,15 +33,16 @@ const WIDTH: usize = 2;
 const DIAMONDS: usize = 16;
 /// Modules of the re-export ring of the fixpoint case.
 const RING: u32 = 64;
-/// References, scope hops per reference, and decoy edges of the stack graph.
-const STACK_REFERENCES: usize = 256;
-const STACK_HOPS: usize = 12;
+/// The fold of the fixpoint cases: iterate every cycle, with no bound.
+const ITERATE: OpenFoldConfig = OpenFoldConfig {
+    max_depth: None,
+    revisit: Revisit::Iterate { max_rounds: None },
+};
 
 pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     register_fanout(suite);
     register_small_walks(suite);
     register_layered(suite);
-    register_stack(suite);
 }
 
 /// Pairs scattered over the key space in an order unrelated to the keys, the
@@ -134,7 +134,10 @@ fn register_small_walks(suite: &mut BenchmarkSuite<'_>) {
                     let base = fixture_u32(walk) * 16;
                     let stopped = open_search(
                         [(base, 0), (base + 8, 0)],
-                        OpenSearchConfig::new(order),
+                        SearchConfig {
+                            order,
+                            ..SearchConfig::default()
+                        },
                         barrel,
                         |_, _| {
                             visited += 1;
@@ -207,7 +210,7 @@ fn register_layered(suite: &mut BenchmarkSuite<'_>) {
             let mut routes = 0_usize;
             let stopped = open_breadth_first_paths(
                 [0_usize],
-                OpenPathsConfig::new(),
+                None,
                 |node: &usize, out: &mut Vec<usize>| layered(*node, out),
                 |_| {
                     routes += 1;
@@ -224,44 +227,54 @@ fn register_layered(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "open_fold_isolated_layered",
-        || open_fold_post_order(&mut RouteCount, 0_usize, OpenFoldConfig::new()),
-        |size: &Option<usize>| assert_eq!(*size, Some((1 << LEVELS) - 1))
+        || open_fold(&mut RouteCount, 0_usize, OpenFoldConfig::default()),
+        |size: &Result<_, _>| assert_eq!(*size, Ok(Some((1 << LEVELS) - 1)))
     );
     // The same route count over stacked diamonds, folded once per route and
     // once per node.
     benchmark_case!(
         suite,
         "open_fold_isolated_diamonds",
-        || open_fold_post_order(&mut DiamondRoutes, 0_usize, OpenFoldConfig::new()),
-        |routes: &Option<usize>| assert_eq!(*routes, Some(1 << DIAMONDS))
+        || open_fold(&mut DiamondRoutes, 0_usize, OpenFoldConfig::default()),
+        |routes: &Result<_, _>| assert_eq!(*routes, Ok(Some(1 << DIAMONDS)))
     );
     benchmark_case!(
         suite,
         "open_fold_memoized_diamonds",
-        covers[open_fold_post_order_memoized],
-        || open_fold_post_order_memoized(&mut DiamondRoutes, 0_usize, OpenFoldConfig::new()),
-        |routes: &Option<usize>| assert_eq!(*routes, Some(1 << DIAMONDS))
+        covers[open_fold_in],
+        || {
+            let memoize = OpenFoldConfig {
+                max_depth: None,
+                revisit: Revisit::Memoize,
+            };
+            open_fold_in(
+                &mut OpenFoldMemo::default(),
+                &mut DiamondRoutes,
+                0_usize,
+                memoize,
+            )
+        },
+        |routes: &Result<_, _>| assert_eq!(*routes, Ok(Some(1 << DIAMONDS)))
     );
-    // The fixpoint driver memoizes every marked node, so it walks the
-    // diamonds as the memoized driver does.
+    // Iterating memoizes every marked node, so it walks the diamonds as
+    // memoizing does.
     benchmark_case!(
         suite,
         "open_fold_fixpoint_diamonds",
-        || open_fold_fixpoint(&mut DiamondRoutes, 0_usize, OpenFixpointConfig::new()),
+        || open_fold(&mut DiamondRoutes, 0_usize, ITERATE),
         |routes: &Result<_, _>| assert_eq!(*routes, Ok(Some(1 << DIAMONDS)))
     );
     benchmark_case!(
         suite,
         "open_fold_fixpoint_export_ring",
-        covers[open_fold_fixpoint],
-        || open_fold_fixpoint(&mut ExportRing, 0_u32, OpenFixpointConfig::new()),
+        || open_fold(&mut ExportRing, 0_u32, ITERATE),
         |names: &Result<_, _>| assert_eq!(*names, Ok(Some(u64::MAX)))
     );
 }
 
 /// `RING` modules in a ring: each exports its own name, one bit, and
 /// re-exports all of the next one, so every module exports every name. The
-/// whole ring is one cycle, which the fixpoint driver re-folds twice.
+/// whole ring is one cycle, which `Revisit::Iterate` re-folds twice.
 struct ExportRing;
 
 impl OpenFold for ExportRing {
@@ -332,10 +345,6 @@ impl OpenFold for DiamondRoutes {
         Some(*node)
     }
 
-    fn memo_key(&mut self, node: &usize) -> Option<usize> {
-        Some(*node)
-    }
-
     fn enter(&mut self, node: &usize) -> FoldEnter<usize, usize> {
         if *node == 3 * DIAMONDS {
             FoldEnter::Leaf(Some(1))
@@ -360,64 +369,4 @@ impl OpenFold for DiamondRoutes {
     fn finish(&mut self, _node: &usize, accumulator: usize) -> Option<usize> {
         Some(accumulator)
     }
-}
-
-type Stack = StackGraph<(), u32, (), ()>;
-
-/// One file of `STACK_REFERENCES` references. Each pushes its symbol, hops
-/// through `STACK_HOPS` scopes, and pops it at its definition; every scope also
-/// has an edge to a pop of another symbol, which every path rejects. The decoy
-/// is listed first on even hops and last on odd ones.
-fn stack_graph() -> (Stack, Vec<(StackNodeId, StackNodeId)>) {
-    let mut graph = Stack::new();
-    let file = graph.add_file(());
-    let mut bindings = Vec::with_capacity(STACK_REFERENCES);
-    for index in 0..STACK_REFERENCES {
-        let symbol = fixture_u32(index);
-        let reference = graph
-            .add_push_symbol_node(file, symbol, true, ())
-            .expect("known file");
-        let definition = graph
-            .add_pop_symbol_node(file, symbol, true, ())
-            .expect("known file");
-        let decoy = graph
-            .add_pop_symbol_node(file, u32::MAX, false, ())
-            .expect("known file");
-        let scopes: Vec<StackNodeId> = (0..STACK_HOPS)
-            .map(|_| graph.add_scope_node(file, false, ()).expect("known file"))
-            .collect();
-        let mut add = |source, target| {
-            graph
-                .add_edge(source, target, 0, ())
-                .expect("file-local edge");
-        };
-        add(reference, scopes[0]);
-        for (hop, &scope) in scopes.iter().enumerate() {
-            let onward = scopes.get(hop + 1).copied().unwrap_or(definition);
-            if hop % 2 == 0 {
-                add(scope, decoy);
-                add(scope, onward);
-            } else {
-                add(scope, onward);
-                add(scope, decoy);
-            }
-        }
-        bindings.push((reference, definition));
-    }
-    (graph, bindings)
-}
-
-fn register_stack(suite: &mut BenchmarkSuite<'_>) {
-    let (graph, bindings) = stack_graph();
-    benchmark_case!(
-        suite,
-        "stack_reverse_index_linear",
-        || StackReverseIndex::try_compute_linear(&graph, StackSearchConfig::new()),
-        |index| {
-            let index = index.as_ref().expect("every query is linear");
-            for &(reference, definition) in &bindings {
-                assert_eq!(index.references_to(definition), [reference]);
-            }
-        }
-    );
 }

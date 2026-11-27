@@ -10,7 +10,8 @@ use crate::rewrite::Rewrite;
 use super::Cfg;
 
 impl<I: Clone, E: Clone> Cfg<I, E> {
-    /// Extract a sub-CFG containing only the specified blocks.
+    /// Extract a sub-CFG containing only the specified blocks, and return it
+    /// with a complete old-to-new identity record.
     ///
     /// The resulting CFG preserves edges between the selected blocks
     /// and remaps block IDs to be contiguous starting from 0.
@@ -19,7 +20,7 @@ impl<I: Clone, E: Clone> Cfg<I, E> {
     /// Edges that cross the boundary (one endpoint outside the set)
     /// are dropped. So are the exception regions and cleanup records: the
     /// extracted CFG starts with none, and a caller that wants them registers
-    /// them against the new identities the mapping reports.
+    /// them against the new identities the record reports.
     ///
     /// # Examples
     ///
@@ -33,16 +34,11 @@ impl<I: Clone, E: Clone> Cfg<I, E> {
     /// cfg.add_edge(b0, b1, EdgeKind::Fallthrough);
     /// cfg.add_edge(b1, b2, EdgeKind::Fallthrough);
     ///
-    /// let sub = cfg.subgraph(&[b0, b1]);
+    /// let (sub, rewrite) = cfg.subgraph_mapped(&[b0, b1]);
     /// assert_eq!(sub.block_count(), 2);
     /// assert_eq!(sub.edge_count(), 1); // b1→b2 dropped
+    /// assert_eq!(rewrite.blocks(b2), Some([].as_slice()));
     /// ```
-    #[must_use]
-    pub fn subgraph(&self, blocks: &[BlockId]) -> Self {
-        self.subgraph_mapped(blocks).0
-    }
-
-    /// Extract a sub-CFG and return a complete old-to-new identity mapping.
     #[must_use]
     pub fn subgraph_mapped(&self, blocks: &[BlockId]) -> (Self, Rewrite) {
         let mut mapping = Rewrite::new();
@@ -80,15 +76,7 @@ impl<I: Clone, E: Clone> Cfg<I, E> {
             let new_source = id_map.get(edge.source().index()).copied().flatten();
             let new_target = id_map.get(edge.target().index()).copied().flatten();
             if let (Some(source), Some(target)) = (new_source, new_target) {
-                let new_edge = new_cfg.add_edge_with_payload(
-                    source,
-                    target,
-                    edge.kind(),
-                    edge.payload().clone(),
-                );
-                if let Some(weight) = edge.weight() {
-                    new_cfg.edge_mut(new_edge).set_weight(Some(weight));
-                }
+                let new_edge = new_cfg.add_edge(source, target, edge.data().clone());
                 mapping.record_edge(edge.id(), [new_edge]);
                 mapping.record_created_edge(new_edge);
             } else {

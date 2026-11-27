@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 
 use cfglib::{Graph, NodeId};
 
-use crate::Lcg;
+use crate::rng::Rng;
 
 /// A directed graph as plain successor lists in adjacency order.
 #[derive(Clone)]
@@ -14,7 +14,7 @@ pub(crate) struct Table {
 
 impl Table {
     /// Random edges, so parallel edges and self loops occur.
-    pub(crate) fn random(rng: &mut Lcg, nodes: usize, edges: usize) -> Self {
+    pub(crate) fn random(rng: &mut Rng, nodes: usize, edges: usize) -> Self {
         let mut successors = vec![Vec::new(); nodes];
         for _ in 0..edges {
             let source = rng.below(nodes);

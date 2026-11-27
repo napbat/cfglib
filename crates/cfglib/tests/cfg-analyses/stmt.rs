@@ -1,7 +1,7 @@
 //! The statement language the analyses read: three-address statements over
 //! named locals, with declared effects and returns.
 
-use cfglib::{BlockId, Cfg, EdgeId, EdgeKind, EffectInfo, FlowControl, FlowEffect, InstrInfo};
+use cfglib::{BlockId, Cfg, EdgeId, EdgeKind, Flow, FlowControl, FlowEffect, InstrInfo};
 
 pub type Local = &'static str;
 
@@ -75,20 +75,15 @@ impl InstrInfo for Stmt {
     }
 }
 
-impl EffectInfo for Stmt {
-    type Effect = Effect;
-
-    fn effects(&self) -> &[Effect] {
-        &self.effects
-    }
-}
-
 impl FlowControl for Stmt {
-    fn flow_effect(&self) -> FlowEffect {
-        match self.kind {
-            Kind::Return => FlowEffect::Return,
-            Kind::Compute | Kind::Effect | Kind::Plain => FlowEffect::Fallthrough,
-        }
+    type Target = ();
+    type CaseKey = ();
+
+    fn flow_effect(&self) -> FlowEffect<(), ()> {
+        FlowEffect::Flow(match self.kind {
+            Kind::Return => Flow::Return,
+            Kind::Compute | Kind::Effect | Kind::Plain => Flow::Next,
+        })
     }
 }
 
@@ -108,7 +103,7 @@ pub fn link<E: Default>(
     target: BlockId,
     kind: EdgeKind,
 ) -> EdgeId {
-    cfg.add_edge_with_payload(source, target, kind, E::default())
+    cfg.add_edge(source, target, kind)
 }
 
 pub fn fill<E>(cfg: &mut Cfg<Stmt, E>, at: BlockId, statements: impl IntoIterator<Item = Stmt>) {

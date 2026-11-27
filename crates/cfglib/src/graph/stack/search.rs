@@ -1,4 +1,4 @@
-//! Direct stack-graph path finding and forward/reverse binding indexes.
+//! Direct and linear stack-graph path finding, and the binding index.
 
 extern crate alloc;
 
@@ -7,109 +7,31 @@ use alloc::vec;
 use alloc::vec::Vec;
 use smallvec::SmallVec;
 
-use crate::graph::search::{PathBudget, PathFrontier, SearchOrder};
+use crate::graph::edge_view::EdgeView;
+use crate::graph::search::{
+    PathBudget, PathFrontier, PathSearchConfig, PathSearchStats, retain_unshadowed,
+    sources_by_target,
+};
 
-use super::path::{StackPath, StackPathError};
+use super::path::StackPath;
 use super::storage::{StackGraph, StackNodeId};
-
-/// Deterministic bounds and frontier order for direct stack-graph search.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StackSearchConfig {
-    /// Whether the next path prefix comes from the front or back of the frontier.
-    pub order: SearchOrder,
-    /// Maximum stored edges in a path. `None` is unbounded.
-    pub max_path_length: Option<usize>,
-    /// Maximum path prefixes to expand. `None` is unbounded.
-    pub max_path_count: Option<usize>,
-    /// Maximum complete paths retained before shadow filtering. `None` is unbounded.
-    pub max_complete_path_count: Option<usize>,
-}
-
-impl StackSearchConfig {
-    /// Construct an unbounded breadth-first search configuration.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            order: SearchOrder::BreadthFirst,
-            max_path_length: None,
-            max_path_count: None,
-            max_complete_path_count: None,
-        }
-    }
-
-    /// Return this configuration with a different frontier order.
-    #[must_use]
-    pub const fn with_order(mut self, order: SearchOrder) -> Self {
-        self.order = order;
-        self
-    }
-
-    /// Return this configuration with a stored-edge length bound.
-    #[must_use]
-    pub const fn with_max_path_length(mut self, max_path_length: usize) -> Self {
-        self.max_path_length = Some(max_path_length);
-        self
-    }
-
-    /// Return this configuration with an expanded-prefix bound.
-    #[must_use]
-    pub const fn with_max_path_count(mut self, max_path_count: usize) -> Self {
-        self.max_path_count = Some(max_path_count);
-        self
-    }
-
-    /// Return this configuration with a retained-complete-path bound.
-    #[must_use]
-    pub const fn with_max_complete_path_count(mut self, max_complete_path_count: usize) -> Self {
-        self.max_complete_path_count = Some(max_complete_path_count);
-        self
-    }
-
-    const fn budget(&self) -> PathBudget {
-        PathBudget::new(self.max_path_length, self.max_path_count)
-            .with_max_complete_path_count(self.max_complete_path_count)
-    }
-}
-
-impl Default for StackSearchConfig {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 /// Work, rejection, and truncation information for one stack-graph query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StackSearchStats {
-    /// Number of path prefixes expanded.
-    pub expanded_path_count: usize,
-    /// Number of complete paths found before shadow filtering and retention bounds.
-    pub complete_path_count: usize,
+    /// The prefixes expanded, the complete paths found, and the bounds that
+    /// refused work.
+    pub search: PathSearchStats,
     /// Extensions rejected by symbol or scope stack semantics.
     pub rejected_extension_count: usize,
     /// Extensions skipped because the stored edge already occurs on the path.
     pub cycle_cut_count: usize,
-    /// Whether an unused outgoing edge hit the path-length bound.
-    pub path_length_limited: bool,
-    /// Whether queued prefixes remained when the path-count bound was reached.
-    pub path_count_limited: bool,
-    /// Whether a complete path was omitted by the complete-path bound.
-    pub complete_path_count_limited: bool,
 }
 
-impl StackSearchStats {
-    /// Whether configured resource bounds may have omitted a binding.
-    #[must_use]
-    pub const fn is_truncated(&self) -> bool {
-        self.path_length_limited || self.path_count_limited || self.complete_path_count_limited
-    }
-}
-
-/// A stack query expected to be linear either encountered invalid path state or
-/// admitted several viable outgoing edges.
+/// A query that the linear walk resolves admitted several viable outgoing
+/// edges at one prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StackLinearResolutionError {
-    /// A node or edge could not participate in a well-formed stack path.
-    Path(StackPathError),
     /// More than one outgoing edge extended the same path prefix successfully.
     MultipleEdges {
         /// Node whose viable outgoing edges caused the branch.
@@ -120,7 +42,6 @@ pub enum StackLinearResolutionError {
 impl core::fmt::Display for StackLinearResolutionError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Path(error) => error.fmt(formatter),
             Self::MultipleEdges { node } => {
                 write!(
                     formatter,
@@ -131,20 +52,7 @@ impl core::fmt::Display for StackLinearResolutionError {
     }
 }
 
-impl core::error::Error for StackLinearResolutionError {
-    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
-        match self {
-            Self::Path(error) => Some(error),
-            Self::MultipleEdges { .. } => None,
-        }
-    }
-}
-
-impl From<StackPathError> for StackLinearResolutionError {
-    fn from(error: StackPathError) -> Self {
-        Self::Path(error)
-    }
-}
+impl core::error::Error for StackLinearResolutionError {}
 
 /// Visible complete paths for one stack-graph reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,45 +63,27 @@ pub struct StackResolution<S> {
 }
 
 impl<S: Clone + Eq> StackResolution<S> {
-    /// Resolve one reference, panicking if the node is not a source reference.
-    ///
-    /// Use [`try_compute`](Self::try_compute) when the node identity is not
-    /// already known to be a reference.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `reference` is not a source reference node.
-    #[must_use]
-    pub fn compute<F, N, E>(
-        graph: &StackGraph<F, S, N, E>,
-        reference: StackNodeId,
-        config: StackSearchConfig,
-    ) -> Self {
-        Self::try_compute(graph, reference, config)
-            .expect("stack resolution requires a source reference node")
-    }
-
-    /// Resolve one reference with a structured invalid-seed error.
+    /// Resolve one reference by direct search.
     ///
     /// Search follows only well-formed stack transitions. A stored edge may
     /// occur at most once on a path, matching the standard direct stack-graph
     /// cycle guard. Complete paths shadowed by greater edge precedence are
     /// removed after search.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// Returns [`StackPathError::UnknownNode`] when `reference` is outside the
-    /// graph, or [`StackPathError::NotReference`] when it is not a source
+    /// Panics when `reference` is out of range, retired, or not a source
     /// reference node.
-    pub fn try_compute<F, N, E>(
+    #[must_use]
+    pub fn compute<F, N, E>(
         graph: &StackGraph<F, S, N, E>,
         reference: StackNodeId,
-        config: StackSearchConfig,
-    ) -> Result<Self, StackPathError> {
-        let initial = StackPath::from_reference(graph, reference)?;
+        config: PathSearchConfig,
+    ) -> Self {
+        let initial = StackPath::from_reference(graph, reference);
         let mut frontier = PathFrontier::new(config.order);
         frontier.push(initial);
-        let mut state = SearchState::new(config);
+        let mut state = SearchState::new(&config);
 
         while let Some(path) = frontier.pop() {
             if !state.budget.admit_expansion() {
@@ -204,7 +94,7 @@ impl<S: Clone + Eq> StackResolution<S> {
                     state.cycle_cut_count += 1;
                     continue;
                 }
-                if !state.budget.admit_length(path.len() + 1) {
+                if !state.budget.admit_length(path.edge_count() + 1) {
                     continue;
                 }
                 let mut next = path.clone();
@@ -219,28 +109,33 @@ impl<S: Clone + Eq> StackResolution<S> {
             }
         }
 
-        Ok(state.finish(graph, reference))
+        state.finish(graph, reference)
     }
 
     /// Resolve a reference whose well-formed path has at most one viable
     /// outgoing edge at every prefix.
     ///
     /// This applies the same stack transitions, cycle guard, bounds, complete
-    /// path retention, and precedence filtering as [`try_compute`](Self::try_compute),
-    /// while updating a single path in place.
+    /// path retention, and precedence filtering as [`compute`](Self::compute),
+    /// while updating a single path in place. The walk follows one path, so
+    /// it does not read `config.order`.
     ///
     /// # Errors
     ///
-    /// Returns [`StackLinearResolutionError::Path`] for an invalid reference or
-    /// path identity, and [`StackLinearResolutionError::MultipleEdges`] when a
-    /// prefix branches into several well-formed paths.
+    /// Returns [`StackLinearResolutionError::MultipleEdges`] when a prefix
+    /// branches into several well-formed paths.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `reference` is out of range, retired, or not a source
+    /// reference node.
     pub fn try_compute_linear<F, N, E>(
         graph: &StackGraph<F, S, N, E>,
         reference: StackNodeId,
-        config: StackSearchConfig,
+        config: PathSearchConfig,
     ) -> Result<Self, StackLinearResolutionError> {
-        let mut path = StackPath::from_reference(graph, reference)?;
-        let mut state = SearchState::new(config);
+        let mut path = StackPath::from_reference(graph, reference);
+        let mut state = SearchState::new(&config);
 
         while state.budget.admit_expansion() {
             let mut next = None;
@@ -257,10 +152,10 @@ impl<S: Clone + Eq> StackResolution<S> {
                     state.cycle_cut_count += 1;
                     continue;
                 }
-                if !state.budget.admit_length(current.len() + 1) {
+                if !state.budget.admit_length(current.edge_count() + 1) {
                     continue;
                 }
-                let base = if edges.peek().is_some() {
+                let mut candidate = if edges.peek().is_some() {
                     current.clone()
                 } else {
                     let Some(prefix) = held.take() else {
@@ -268,10 +163,10 @@ impl<S: Clone + Eq> StackResolution<S> {
                     };
                     prefix
                 };
-                let Ok(candidate) = base.append_owned(graph, edge) else {
+                if candidate.append(graph, edge).is_err() {
                     state.rejected_extension_count += 1;
                     continue;
-                };
+                }
                 if next.is_some() {
                     return Err(StackLinearResolutionError::MultipleEdges { node: end });
                 }
@@ -328,46 +223,10 @@ impl<S: Clone + Eq> StackResolution<S> {
     pub fn is_ambiguous(&self) -> bool {
         self.target_count() > 1
     }
-
-    fn from_complete<F, N, E>(
-        graph: &StackGraph<F, S, N, E>,
-        reference: StackNodeId,
-        complete: SmallVec<[StackPath<S>; 1]>,
-        stats: StackSearchStats,
-    ) -> Self {
-        if complete.len() < 2 {
-            return Self {
-                reference,
-                paths: complete,
-                stats,
-            };
-        }
-        let mut unique: SmallVec<[StackPath<S>; 1]> = SmallVec::new();
-        for path in complete {
-            if !unique.contains(&path) {
-                unique.push(path);
-            }
-        }
-        let paths: SmallVec<[StackPath<S>; 1]> = unique
-            .iter()
-            .enumerate()
-            .filter(|&(index, path)| {
-                !unique
-                    .iter()
-                    .enumerate()
-                    .any(|(other_index, other)| index != other_index && other.shadows(graph, path))
-            })
-            .map(|(_, path)| path.clone())
-            .collect();
-        Self {
-            reference,
-            paths,
-            stats,
-        }
-    }
 }
 
-/// Direct resolutions for every source reference, plus a reverse index.
+/// Resolutions for every source reference, plus the reverse bindings from
+/// each definition to the references that resolve to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StackResolutionIndex<S> {
     resolutions: Vec<StackResolution<S>>,
@@ -376,9 +235,10 @@ pub struct StackResolutionIndex<S> {
 }
 
 impl<S: Clone + Eq> StackResolutionIndex<S> {
-    /// Resolve every source reference in node order and build reverse bindings.
+    /// Resolve every source reference in node order by direct search and
+    /// build the reverse bindings.
     #[must_use]
-    pub fn compute<F, N, E>(graph: &StackGraph<F, S, N, E>, config: StackSearchConfig) -> Self {
+    pub fn compute<F, N, E>(graph: &StackGraph<F, S, N, E>, config: PathSearchConfig) -> Self {
         let resolutions = graph
             .reference_nodes()
             .map(|reference| StackResolution::compute(graph, reference, config))
@@ -393,7 +253,7 @@ impl<S: Clone + Eq> StackResolutionIndex<S> {
     /// Returns the first [`StackLinearResolutionError`] in source-node order.
     pub fn try_compute_linear<F, N, E>(
         graph: &StackGraph<F, S, N, E>,
-        config: StackSearchConfig,
+        config: PathSearchConfig,
     ) -> Result<Self, StackLinearResolutionError> {
         let resolutions = graph
             .reference_nodes()
@@ -402,17 +262,24 @@ impl<S: Clone + Eq> StackResolutionIndex<S> {
         Ok(Self::from_resolutions(graph, resolutions))
     }
 
+    /// The index over `resolutions`, one per source reference of `graph` in
+    /// node order.
     pub(super) fn from_resolutions<F, N, E>(
         graph: &StackGraph<F, S, N, E>,
         resolutions: Vec<StackResolution<S>>,
     ) -> Self {
-        let mut resolution_by_node = vec![None; graph.node_bound()];
-        let mut references_by_definition = vec![Vec::new(); graph.node_bound()];
+        let bound = graph.graph().node_bound();
+        let mut resolution_by_node = vec![None; bound];
         for (index, resolution) in resolutions.iter().enumerate() {
-            let reference = resolution.reference();
-            resolution_by_node[reference.index()] = Some(index);
-            add_reverse_references(&mut references_by_definition, resolution);
+            resolution_by_node[resolution.reference().index()] = Some(index);
         }
+        let references_by_definition = sources_by_target(
+            bound,
+            resolutions.iter().map(|resolution| {
+                let paths = resolution.paths().iter();
+                (resolution.reference(), paths.map(|path| path.end().index()))
+            }),
+        );
         Self {
             resolutions,
             resolution_by_node,
@@ -445,91 +312,6 @@ impl<S: Clone + Eq> StackResolutionIndex<S> {
     }
 }
 
-/// Definition-to-reference bindings without retained forward resolutions.
-///
-/// This is the memory-efficient index for consumers that only need find-
-/// references queries. Each resolution is incorporated and discarded during
-/// construction; use [`StackResolutionIndex`] when forward paths are also
-/// required.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StackReverseIndex {
-    references_by_definition: Vec<Vec<StackNodeId>>,
-}
-
-impl StackReverseIndex {
-    /// Resolve every source reference and build only reverse bindings.
-    #[must_use]
-    pub fn compute<F, S: Clone + Eq, N, E>(
-        graph: &StackGraph<F, S, N, E>,
-        config: StackSearchConfig,
-    ) -> Self {
-        let mut index = Self::empty(graph);
-        for reference in graph.reference_nodes() {
-            let resolution = StackResolution::compute(graph, reference, config);
-            index.add_resolution(&resolution);
-        }
-        index
-    }
-
-    /// Resolve every source reference under the linear-path contract and build
-    /// only reverse bindings.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first [`StackLinearResolutionError`] in source-node order.
-    pub fn try_compute_linear<F, S: Clone + Eq, N, E>(
-        graph: &StackGraph<F, S, N, E>,
-        config: StackSearchConfig,
-    ) -> Result<Self, StackLinearResolutionError> {
-        let mut index = Self::empty(graph);
-        for reference in graph.reference_nodes() {
-            let resolution = StackResolution::try_compute_linear(graph, reference, config)?;
-            index.add_resolution(&resolution);
-        }
-        Ok(index)
-    }
-
-    fn empty<F, S, N, E>(graph: &StackGraph<F, S, N, E>) -> Self {
-        Self {
-            references_by_definition: vec![Vec::new(); graph.node_bound()],
-        }
-    }
-
-    fn add_resolution<S: Clone + Eq>(&mut self, resolution: &StackResolution<S>) {
-        add_reverse_references(&mut self.references_by_definition, resolution);
-    }
-
-    /// References resolving to `definition`, in source node order.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `definition` was not present in the resolved graph.
-    #[must_use]
-    pub fn references_to(&self, definition: StackNodeId) -> &[StackNodeId] {
-        &self.references_by_definition[definition.index()]
-    }
-}
-
-fn add_reverse_references<S: Clone + Eq>(
-    references_by_definition: &mut [Vec<StackNodeId>],
-    resolution: &StackResolution<S>,
-) {
-    let reference = resolution.reference();
-    match resolution.paths() {
-        [] => {}
-        [path] => references_by_definition[path.end().index()].push(reference),
-        paths => {
-            let mut seen = BTreeSet::new();
-            for path in paths {
-                let definition = path.end();
-                if seen.insert(definition) {
-                    references_by_definition[definition.index()].push(reference);
-                }
-            }
-        }
-    }
-}
-
 /// Work accounting and complete-path retention shared by the direct, linear,
 /// and stitched resolutions, so that all three bound and report a search
 /// identically.
@@ -541,9 +323,9 @@ pub(super) struct SearchState<S> {
 }
 
 impl<S: Clone + Eq> SearchState<S> {
-    pub(super) fn new(config: StackSearchConfig) -> Self {
+    pub(super) fn new(config: &PathSearchConfig) -> Self {
         Self {
-            budget: config.budget(),
+            budget: PathBudget::new(config),
             cycle_cut_count: 0,
             rejected_extension_count: 0,
             complete: SmallVec::new(),
@@ -558,21 +340,33 @@ impl<S: Clone + Eq> SearchState<S> {
         }
     }
 
-    /// Filter the retained paths by precedence and report the search.
+    /// Keep the distinct retained paths that no other one shadows by
+    /// precedence, and report the search.
     pub(super) fn finish<F, N, E>(
         self,
         graph: &StackGraph<F, S, N, E>,
         reference: StackNodeId,
     ) -> StackResolution<S> {
         let stats = StackSearchStats {
-            expanded_path_count: self.budget.expanded_path_count(),
-            complete_path_count: self.budget.complete_path_count(),
+            search: self.budget.stats(),
             rejected_extension_count: self.rejected_extension_count,
             cycle_cut_count: self.cycle_cut_count,
-            path_length_limited: self.budget.path_length_limited(),
-            path_count_limited: self.budget.path_count_limited(),
-            complete_path_count_limited: self.budget.complete_path_count_limited(),
         };
-        StackResolution::from_complete(graph, reference, self.complete, stats)
+        let mut paths = self.complete;
+        if paths.len() > 1 {
+            let mut unique: SmallVec<[StackPath<S>; 1]> = SmallVec::new();
+            for path in paths {
+                if !unique.contains(&path) {
+                    unique.push(path);
+                }
+            }
+            paths = unique;
+        }
+        retain_unshadowed(&mut paths, |other, path| other.shadows(graph, path));
+        StackResolution {
+            reference,
+            paths,
+            stats,
+        }
     }
 }

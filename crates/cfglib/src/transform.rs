@@ -13,7 +13,9 @@
 //! - [`critical`] — critical edge splitting (required for SSA).
 //! - [`layout`] — width relaxation for symbolic linear layouts.
 //! - [`linearize`] — re-serialize a CFG back to a flat instruction stream.
+//! - [`loops`] — loop preheaders and canonical loops.
 //! - [`pass`] — named, ordered, fallible pass composition and reports.
+//! - [`reducible`] — irreducible-to-reducible transformations: node splitting and dispatch.
 
 pub mod block_order;
 pub mod cleanup;
@@ -21,4 +23,6 @@ pub mod contract;
 pub mod critical;
 pub mod layout;
 pub mod linearize;
+pub mod loops;
 pub mod pass;
+pub mod reducible;

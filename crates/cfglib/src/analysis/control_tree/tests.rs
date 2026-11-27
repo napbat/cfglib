@@ -11,14 +11,14 @@ use alloc::vec::Vec;
 
 use super::{
     BlockSpan, CatchHandler, ControlBody, ControlNode, ControlNodeId, ControlRun, ControlTree,
-    GotoReason, LiftReport, LoopKind,
+    GotoReason, LoopKind, StructuringReport,
 };
 use crate::block::BlockId;
 use crate::builder::CfgBuilder;
 use crate::cfg::Cfg;
 use crate::display::DisplayInstr;
-use crate::edge::EdgeKind;
-use crate::flow::FlowEffect;
+use crate::edge::{Edge, EdgeKind};
+use crate::flow::{Flow, FlowEffect};
 use crate::test_util::{MockInst, ff};
 
 mod arms_beside_an_exit;
@@ -142,7 +142,7 @@ fn while_shaped_cfg() -> (Cfg<MockInst>, BlockId, BlockId, BlockId) {
     cfg.block_mut(header).push(ff("condition"));
     cfg.block_mut(body).push(ff("body_inst"));
     cfg.block_mut(exit)
-        .push(MockInst(FlowEffect::Return, "after_loop"));
+        .push(MockInst(FlowEffect::Flow(Flow::Return), "after_loop"));
     cfg.add_edge(cfg.entry(), header, EdgeKind::Fallthrough);
     cfg.add_edge(header, body, EdgeKind::ConditionalTrue);
     cfg.add_edge(header, exit, EdgeKind::ConditionalFalse);
@@ -153,7 +153,8 @@ fn while_shaped_cfg() -> (Cfg<MockInst>, BlockId, BlockId, BlockId) {
 #[test]
 fn machine_while_loop_is_classified_pre_tested() {
     let (cfg, header, body, exit) = while_shaped_cfg();
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     let loops = find_loops(&tree);
     assert_eq!(loops.len(), 1, "{tree:?}");
     let (found_header, kind, loop_body) = loops[0];
@@ -188,14 +189,15 @@ fn exit_on_true_while_loop_is_classified_pre_tested() {
     cfg.block_mut(header).push(ff("condition"));
     cfg.block_mut(body).push(ff("body_inst"));
     cfg.block_mut(exit)
-        .push(MockInst(FlowEffect::Return, "after_loop"));
+        .push(MockInst(FlowEffect::Flow(Flow::Return), "after_loop"));
     cfg.add_edge(cfg.entry(), init, EdgeKind::Fallthrough);
     cfg.add_edge(init, header, EdgeKind::Fallthrough);
     cfg.add_edge(header, exit, EdgeKind::ConditionalTrue);
     cfg.add_edge(header, body, EdgeKind::ConditionalFalse);
     cfg.add_edge(body, header, EdgeKind::Jump);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     let loops = find_loops(&tree);
     assert_eq!(loops.len(), 1, "{tree:?}");
     let (_, kind, loop_body) = loops[0];
@@ -227,7 +229,7 @@ fn multi_block_condition_chain_is_classified_pre_tested() {
     cfg.block_mut(body).push(ff("body_inst"));
     cfg.block_mut(latch).push(ff("increment"));
     cfg.block_mut(exit)
-        .push(MockInst(FlowEffect::Return, "after_loop"));
+        .push(MockInst(FlowEffect::Flow(Flow::Return), "after_loop"));
     cfg.add_edge(cfg.entry(), header, EdgeKind::Fallthrough);
     cfg.add_edge(header, compare_right, EdgeKind::Fallthrough);
     cfg.add_edge(compare_right, condition, EdgeKind::Fallthrough);
@@ -236,7 +238,8 @@ fn multi_block_condition_chain_is_classified_pre_tested() {
     cfg.add_edge(body, latch, EdgeKind::Fallthrough);
     cfg.add_edge(latch, header, EdgeKind::Jump);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     let loops = find_loops(&tree);
     assert_eq!(loops.len(), 1, "{tree:?}");
     let (found_header, kind, loop_body) = loops[0];
@@ -279,13 +282,14 @@ fn machine_do_while_loop_is_classified_post_tested() {
     cfg.block_mut(body).push(ff("body_inst"));
     cfg.block_mut(latch).push(ff("latch_cond"));
     cfg.block_mut(exit)
-        .push(MockInst(FlowEffect::Return, "after_loop"));
+        .push(MockInst(FlowEffect::Flow(Flow::Return), "after_loop"));
     cfg.add_edge(cfg.entry(), body, EdgeKind::Fallthrough);
     cfg.add_edge(body, latch, EdgeKind::Fallthrough);
     cfg.add_edge(latch, body, EdgeKind::ConditionalTrue);
     cfg.add_edge(latch, exit, EdgeKind::ConditionalFalse);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     let loops = find_loops(&tree);
     assert_eq!(loops.len(), 1, "{tree:?}");
     let (_, kind, loop_body) = loops[0];
@@ -321,7 +325,7 @@ fn loop_exit_from_the_body_becomes_a_break() {
     cfg.block_mut(body).push(ff("maybe_break"));
     cfg.block_mut(tail).push(ff("tail_inst"));
     cfg.block_mut(exit)
-        .push(MockInst(FlowEffect::Return, "after_loop"));
+        .push(MockInst(FlowEffect::Flow(Flow::Return), "after_loop"));
     cfg.add_edge(cfg.entry(), header, EdgeKind::Fallthrough);
     cfg.add_edge(header, body, EdgeKind::ConditionalTrue);
     cfg.add_edge(header, exit, EdgeKind::ConditionalFalse);
@@ -329,7 +333,8 @@ fn loop_exit_from_the_body_becomes_a_break() {
     cfg.add_edge(body, tail, EdgeKind::ConditionalFalse);
     cfg.add_edge(tail, header, EdgeKind::Jump);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert!(
         has_node_kind(&tree, |node| matches!(
             node,
@@ -359,7 +364,7 @@ fn multi_level_exit_becomes_a_labeled_break() {
     cfg.block_mut(inner_body).push(ff("inner_inst"));
     cfg.block_mut(outer_latch).push(ff("outer_latch_inst"));
     cfg.block_mut(exit)
-        .push(MockInst(FlowEffect::Return, "after"));
+        .push(MockInst(FlowEffect::Flow(Flow::Return), "after"));
     cfg.add_edge(cfg.entry(), outer_header, EdgeKind::Fallthrough);
     cfg.add_edge(outer_header, inner_header, EdgeKind::ConditionalTrue);
     cfg.add_edge(outer_header, exit, EdgeKind::ConditionalFalse);
@@ -370,7 +375,8 @@ fn multi_level_exit_becomes_a_labeled_break() {
     cfg.add_edge(inner_body, inner_header, EdgeKind::ConditionalFalse);
     cfg.add_edge(outer_latch, outer_header, EdgeKind::Jump);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert!(
         has_node_kind(&tree, |node| matches!(
             node,
@@ -402,7 +408,7 @@ fn if_else_merge_is_not_absorbed_into_an_arm() {
     cfg.block_mut(then_arm).push(ff("then_inst"));
     cfg.block_mut(else_arm).push(ff("else_inst"));
     cfg.block_mut(merge)
-        .push(MockInst(FlowEffect::Return, "merge_inst"));
+        .push(MockInst(FlowEffect::Flow(Flow::Return), "merge_inst"));
     cfg.add_edge(cfg.entry(), then_arm, EdgeKind::ConditionalTrue);
     cfg.add_edge(cfg.entry(), else_arm, EdgeKind::ConditionalFalse);
     cfg.add_edge(then_arm, merge, EdgeKind::Fallthrough);
@@ -446,7 +452,7 @@ fn switch_records_case_edges_and_default_arm() {
     cfg.block_mut(case_b).push(ff("case_b_inst"));
     cfg.block_mut(default_arm).push(ff("default_inst"));
     cfg.block_mut(merge)
-        .push(MockInst(FlowEffect::Return, "after"));
+        .push(MockInst(FlowEffect::Flow(Flow::Return), "after"));
     let edge_a = cfg.add_edge(cfg.entry(), case_a, EdgeKind::SwitchCase);
     let edge_a2 = cfg.add_edge(cfg.entry(), case_a, EdgeKind::SwitchCase);
     let edge_b = cfg.add_edge(cfg.entry(), case_b, EdgeKind::SwitchCase);
@@ -455,7 +461,8 @@ fn switch_records_case_edges_and_default_arm() {
     cfg.add_edge(case_b, merge, EdgeKind::Unconditional);
     cfg.add_edge(default_arm, merge, EdgeKind::Unconditional);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     let mut checked = false;
     for id in tree.preorder() {
         if let ControlNode::Switch {
@@ -489,8 +496,12 @@ fn compute_accepts_caller_owned_edge_payloads() {
     let exit = cfg.new_block();
     cfg.block_mut(cfg.entry()).push(ff("entry"));
     cfg.block_mut(exit)
-        .push(MockInst(FlowEffect::Return, "return"));
-    cfg.add_edge_with_payload(cfg.entry(), exit, EdgeKind::Fallthrough, "source identity");
+        .push(MockInst(FlowEffect::Flow(Flow::Return), "return"));
+    cfg.add_edge(
+        cfg.entry(),
+        exit,
+        Edge::new(EdgeKind::Fallthrough).with_payload("source identity"),
+    );
 
     let tree = ControlTree::compute(&cfg);
     let pseudo = pseudocode(&cfg, &tree);
@@ -507,11 +518,27 @@ fn compute_recovers_a_payload_bearing_loop_from_ordinary_jump_edges() {
     cfg.block_mut(header).push(ff("condition"));
     cfg.block_mut(body).push(ff("body"));
     cfg.block_mut(exit)
-        .push(MockInst(FlowEffect::Return, "return"));
-    cfg.add_edge_with_payload(cfg.entry(), header, EdgeKind::Fallthrough, "entry");
-    cfg.add_edge_with_payload(header, body, EdgeKind::ConditionalTrue, "true");
-    cfg.add_edge_with_payload(header, exit, EdgeKind::ConditionalFalse, "false");
-    cfg.add_edge_with_payload(body, header, EdgeKind::Jump, "native goto");
+        .push(MockInst(FlowEffect::Flow(Flow::Return), "return"));
+    cfg.add_edge(
+        cfg.entry(),
+        header,
+        Edge::new(EdgeKind::Fallthrough).with_payload("entry"),
+    );
+    cfg.add_edge(
+        header,
+        body,
+        Edge::new(EdgeKind::ConditionalTrue).with_payload("true"),
+    );
+    cfg.add_edge(
+        header,
+        exit,
+        Edge::new(EdgeKind::ConditionalFalse).with_payload("false"),
+    );
+    cfg.add_edge(
+        body,
+        header,
+        Edge::new(EdgeKind::Jump).with_payload("native goto"),
+    );
 
     let tree = ControlTree::compute(&cfg);
     assert!(
@@ -539,7 +566,7 @@ fn lift_linear() {
         ff("a"),
         ff("b"),
         ff("c"),
-        MockInst(FlowEffect::Return, "ret"),
+        MockInst(FlowEffect::Flow(Flow::Return), "ret"),
     ]);
     assert!(p.contains('a'), "should contain instruction a: {p}");
     assert!(p.contains("ret"), "should contain ret: {p}");
@@ -556,7 +583,7 @@ fn lift_if_no_else() {
         ff("b"),
         MockInst(FlowEffect::ConditionalClose, "endif"),
         ff("c"),
-        MockInst(FlowEffect::Return, "ret"),
+        MockInst(FlowEffect::Flow(Flow::Return), "ret"),
     ]);
     assert!(p.contains("if ("), "should have if: {p}");
     assert!(p.contains('b'), "then body should contain b: {p}");
@@ -573,7 +600,7 @@ fn lift_if_else() {
         ff("else_inst"),
         MockInst(FlowEffect::ConditionalClose, "endif"),
         ff("merge"),
-        MockInst(FlowEffect::Return, "ret"),
+        MockInst(FlowEffect::Flow(Flow::Return), "ret"),
     ]);
     assert!(p.contains("if ("), "should have if: {p}");
     assert!(p.contains("then_inst"), "then arm: {p}");
@@ -589,7 +616,7 @@ fn lift_simple_loop() {
         MockInst(FlowEffect::LoopOpen, "loop"),
         ff("body"),
         MockInst(FlowEffect::LoopClose, "endloop"),
-        MockInst(FlowEffect::Return, "ret"),
+        MockInst(FlowEffect::Flow(Flow::Return), "ret"),
     ]);
     assert!(p.contains("body"), "loop body: {p}");
     assert!(
@@ -606,7 +633,7 @@ fn lift_loop_with_break() {
         MockInst(FlowEffect::ConditionalBreak, "breakc"),
         ff("b"),
         MockInst(FlowEffect::LoopClose, "endloop"),
-        MockInst(FlowEffect::Return, "ret"),
+        MockInst(FlowEffect::Flow(Flow::Return), "ret"),
     ]);
     assert!(p.contains('a'), "should contain a: {p}");
     assert!(p.contains("ret"), "the continuation survives: {p}");
@@ -623,7 +650,7 @@ fn lift_switch() {
         ff("arm1"),
         MockInst(FlowEffect::SwitchClose, "endswitch"),
         ff("after"),
-        MockInst(FlowEffect::Return, "ret"),
+        MockInst(FlowEffect::Flow(Flow::Return), "ret"),
     ]);
     assert!(p.contains("switch ("), "should have switch: {p}");
     assert!(p.contains("case {"), "should have case: {p}");
@@ -642,7 +669,7 @@ fn lift_if_in_loop() {
         ff("else_body"),
         MockInst(FlowEffect::ConditionalClose, "endif"),
         MockInst(FlowEffect::LoopClose, "endloop"),
-        MockInst(FlowEffect::Return, "ret"),
+        MockInst(FlowEffect::Flow(Flow::Return), "ret"),
     ]);
     assert!(p.contains("if ("), "should have if inside loop: {p}");
     assert!(p.contains("then"), "{p}");
@@ -657,7 +684,7 @@ fn lift_loop_in_if() {
         MockInst(FlowEffect::ConditionalBreak, "breakc"),
         MockInst(FlowEffect::LoopClose, "endloop"),
         MockInst(FlowEffect::ConditionalClose, "endif"),
-        MockInst(FlowEffect::Return, "ret"),
+        MockInst(FlowEffect::Flow(Flow::Return), "ret"),
     ]);
     let has_if = p.contains("if (");
     let has_loop = p.contains("loop {") || p.contains("while {") || p.contains("do {");
@@ -666,7 +693,11 @@ fn lift_loop_in_if() {
 
 #[test]
 fn compute_returns_sequence_or_single() {
-    let cfg = CfgBuilder::build(vec![ff("a"), MockInst(FlowEffect::Return, "ret")]).unwrap();
+    let cfg = CfgBuilder::build(vec![
+        ff("a"),
+        MockInst(FlowEffect::Flow(Flow::Return), "ret"),
+    ])
+    .unwrap();
     let tree = ControlTree::compute(&cfg);
     assert!(!tree.is_empty(), "should not be empty");
 }
@@ -678,7 +709,7 @@ fn lift_conditional_produces_if_node() {
         MockInst(FlowEffect::ConditionalOpen, "if"),
         ff("b"),
         MockInst(FlowEffect::ConditionalClose, "endif"),
-        MockInst(FlowEffect::Return, "ret"),
+        MockInst(FlowEffect::Flow(Flow::Return), "ret"),
     ])
     .unwrap();
     let tree = ControlTree::compute(&cfg);
@@ -692,7 +723,7 @@ fn lift_loop_produces_loop_node() {
         MockInst(FlowEffect::LoopOpen, "loop"),
         ff("x"),
         MockInst(FlowEffect::LoopClose, "endloop"),
-        MockInst(FlowEffect::Return, "ret"),
+        MockInst(FlowEffect::Flow(Flow::Return), "ret"),
     ])
     .unwrap();
     let tree = ControlTree::compute(&cfg);
@@ -710,7 +741,7 @@ fn lift_switch_produces_switch_node() {
         MockInst(FlowEffect::SwitchCase, "c2"),
         ff("a2"),
         MockInst(FlowEffect::SwitchClose, "endswitch"),
-        MockInst(FlowEffect::Return, "ret"),
+        MockInst(FlowEffect::Flow(Flow::Return), "ret"),
     ])
     .unwrap();
     let tree = ControlTree::compute(&cfg);
@@ -731,7 +762,8 @@ fn lift_jump_edge_into_an_owned_target_continues_inline() {
 
     cfg.add_edge(cfg.entry(), target, EdgeKind::Jump);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert!(
         !has_node_kind(&tree, |n| matches!(n, ControlNode::Goto { .. })),
         "should continue inline: {tree:?}"
@@ -755,7 +787,6 @@ fn lift_jump_edge_produces_goto_and_reports_it() {
 
     cfg.add_edge(cfg.entry(), target, EdgeKind::Jump);
     cfg.add_region(crate::Region {
-        id: crate::RegionId::from_raw(0),
         protected_blocks: [target].into_iter().collect(),
         handlers: vec![crate::Handler {
             entry: pad,
@@ -763,9 +794,11 @@ fn lift_jump_edge_produces_goto_and_reports_it() {
             kind: crate::HandlerKind::CatchAll,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert!(
         has_node_kind(&tree, |n| matches!(n, ControlNode::Goto { .. })),
         "should contain Goto node: {tree:?}"
@@ -801,7 +834,8 @@ fn lift_jump_to_the_merge_converges_silently() {
     cfg.add_edge(jumper, target, EdgeKind::Jump);
     cfg.add_edge(target, end, EdgeKind::Fallthrough);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert!(
         report.is_fully_structured(),
         "the join jump is structural: {report:?}"
@@ -841,7 +875,8 @@ fn lift_jump_target_gets_label() {
     cfg.add_edge(target, end, EdgeKind::Fallthrough);
     cfg.add_edge(other, end, EdgeKind::Fallthrough);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert!(
         has_node_kind(&tree, |n| matches!(
             n,
@@ -862,11 +897,12 @@ fn structured_lifts_report_no_degradation() {
         MockInst(FlowEffect::ConditionalOpen, "if"),
         ff("b"),
         MockInst(FlowEffect::ConditionalClose, "endif"),
-        MockInst(FlowEffect::Return, "ret"),
+        MockInst(FlowEffect::Flow(Flow::Return), "ret"),
     ])
     .unwrap();
-    let (_, report) = ControlTree::compute_with_report(&cfg);
-    assert_eq!(report, LiftReport::default(), "{report:?}");
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
+    assert_eq!(*report, StructuringReport::default(), "{report:?}");
 }
 
 #[test]
@@ -878,7 +914,8 @@ fn tree_does_not_borrow_or_clone_the_instruction_type() {
     cfg.block_mut(cfg.entry()).push(NotClone(7));
     let entry = cfg.entry();
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     let ControlNode::Return(span) = *tree.node(tree.root()) else {
         panic!("a terminal entry block lifts as a return");
     };
@@ -887,7 +924,7 @@ fn tree_does_not_borrow_or_clone_the_instruction_type() {
     let read = &span.instructions(&cfg)[0];
     assert!(core::ptr::eq(read, source));
     assert_eq!(read.0, 7);
-    assert_eq!(report, LiftReport::default());
+    assert_eq!(*report, StructuringReport::default());
     // The tree is independent of the graph it was computed from.
     drop(cfg);
     assert_eq!(tree.node_count(), 1);

@@ -48,23 +48,18 @@
 //! `serde` feature, and the two disagree about the empty table: a fan-out has
 //! one canonical empty form, while a store distinguishes a fresh base from a
 //! compacted empty one and derives `PartialEq` over that difference. Neither
-//! is a behavior-preserving refactor, so the store keeps its own counting pass
-//! and this module owns the table that consumers build by hand.
+//! is a behavior-preserving refactor, so the store keeps its own columns and
+//! fills them with the counting sort that builds a [`DenseFanout`].
 
 extern crate alloc;
 
 use alloc::boxed::Box;
-use alloc::vec;
 use alloc::vec::Vec;
 use core::borrow::Borrow;
 use core::marker::PhantomData;
 
 use crate::graph::view::DenseId;
-
-/// Narrow a value count to the `u32` run-bound space.
-fn run_bound(count: usize) -> u32 {
-    u32::try_from(count).expect("fan-out value count exceeds u32::MAX")
-}
+use crate::identity::word;
 
 /// Reject a key outside a dense table's `0..bound` key space.
 ///
@@ -143,18 +138,6 @@ impl<K, V> Fanout<K, V> {
             .iter()
             .enumerate()
             .map(|(index, key)| (key, self.run(index)))
-    }
-
-    /// The bytes of heap this table owns.
-    ///
-    /// Exact: the three columns are exact-sized, so this is their contents and
-    /// nothing else. Heap reached *through* a key or a value belongs to that
-    /// key or value and is not counted here.
-    #[must_use]
-    pub fn heap_bytes(&self) -> usize {
-        self.keys.len() * size_of::<K>()
-            + self.offsets.len() * size_of::<u32>()
-            + self.values.len() * size_of::<V>()
     }
 
     /// The run owned by the key at `index`.
@@ -306,14 +289,14 @@ impl<K: PartialEq, V> Columns<K, V> {
         if self.keys.last() == Some(&key) {
             return;
         }
-        self.offsets.push(run_bound(self.values.len()));
+        self.offsets.push(word(self.values.len()));
         self.keys.push(key);
     }
 
     /// Closes the last run and freezes the columns to their exact sizes.
     fn finish(mut self) -> Fanout<K, V> {
         if !self.keys.is_empty() {
-            self.offsets.push(run_bound(self.values.len()));
+            self.offsets.push(word(self.values.len()));
         }
         Fanout {
             keys: self.keys.into_boxed_slice(),
@@ -393,10 +376,6 @@ impl<V, K: DenseId> DenseFanout<V, K> {
     #[must_use]
     pub fn from_pairs(bound: usize, pairs: impl IntoIterator<Item = (K, V)>) -> Self {
         let pairs: Vec<(K, V)> = pairs.into_iter().collect();
-        // Every run bound is a `u32`, so the total is checked once here,
-        // before the counting pass writes it into the offsets column.
-        let total = run_bound(pairs.len());
-        let value_count = total as usize;
         if bound == 0 {
             assert!(
                 pairs.is_empty(),
@@ -404,37 +383,23 @@ impl<V, K: DenseId> DenseFanout<V, K> {
             );
             return Self::default();
         }
+        let value_count = pairs.len();
 
         // The offsets column doubles as the placement cursors, so building
-        // needs no column of its own for them: it counts each key's pairs,
-        // turns the counts into the bounds where the runs *end*, and placing
-        // then walks the pairs backwards, each one taking the slot just below
-        // its key's bound. That leaves every bound at its run's start, and the
-        // closing bound is the total.
-        let mut offsets = vec![0_u32; bound + 1];
-        for (key, _) in &pairs {
-            let index = key.index();
-            assert!(index < bound, "dense fan-out key is outside 0..{bound}");
-            offsets[index] += 1;
-        }
-        let mut end = 0_u32;
-        for count in &mut offsets[..bound] {
-            end += *count;
-            *count = end;
-        }
-        offsets[bound] = total;
-
-        // A slot can only be written through an owned `Option`; every slot is
-        // written exactly once, because the counting pass reserved one per
-        // pair. Backwards placement keeps each key's arrival order: its last
-        // pair takes the highest slot of the run.
+        // needs no column of its own for them: placing puts each pair at its
+        // key's run start and advances it. A slot can only be written through
+        // an owned `Option`; every slot is written exactly once, because the
+        // counting pass reserved one per pair.
+        let mut offsets = Vec::with_capacity(bound + 2);
+        count_runs(bound, pairs.iter().map(|&(key, _)| key), &mut offsets);
         let mut slots: Vec<Option<V>> = Vec::with_capacity(value_count);
         slots.resize_with(value_count, || None);
-        for (key, value) in pairs.into_iter().rev() {
-            let start = &mut offsets[key.index()];
-            *start -= 1;
-            slots[*start as usize] = Some(value);
+        for (key, value) in pairs {
+            let cursor = &mut offsets[key.index() + 1];
+            slots[*cursor as usize] = Some(value);
+            *cursor += 1;
         }
+        offsets.truncate(bound + 1);
         let values = slots
             .into_iter()
             .map(|slot| slot.expect("every counted pair filled its reserved slot"))
@@ -484,18 +449,18 @@ impl<V, K: DenseId> DenseFanout<V, K> {
         let groups = groups.into_iter();
         // A group count the iterator already knows — every `Vec` or array of
         // groups knows it — sizes the offsets column once; the value column
-        // grows by one `extend` per group, and both are then frozen to the
-        // exact sizes `heap_bytes` reports.
+        // grows by one `extend` per group, and both are then frozen to their
+        // exact sizes.
         let mut offsets: Vec<u32> = Vec::with_capacity(groups.size_hint().0 + 1);
         let mut values: Vec<V> = Vec::new();
         for group in groups {
-            offsets.push(run_bound(values.len()));
+            offsets.push(word(values.len()));
             values.extend(group);
         }
         // The closing bound is also where the total is checked, so a table
         // that would overflow the run space panics rather than truncating.
         if !offsets.is_empty() {
-            offsets.push(run_bound(values.len()));
+            offsets.push(word(values.len()));
         }
 
         Self {
@@ -541,21 +506,89 @@ impl<V, K: DenseId> DenseFanout<V, K> {
         (0..self.bound()).map(|index| (K::from_index(index), self.run(index)))
     }
 
-    /// The bytes of heap this table owns.
-    ///
-    /// Exact: both columns are exact-sized, so this is their contents and
-    /// nothing else. Heap reached *through* a value belongs to that value and
-    /// is not counted here.
-    #[must_use]
-    pub fn heap_bytes(&self) -> usize {
-        self.offsets.len() * size_of::<u32>() + self.values.len() * size_of::<V>()
-    }
-
     /// The run owned by the key at `index`.
     fn run(&self, index: usize) -> &[V] {
         let start = self.offsets[index] as usize;
         let end = self.offsets[index + 1] as usize;
         &self.values[start..end]
+    }
+}
+
+impl<V: Copy, K: DenseId> DenseFanout<V, K> {
+    /// Groups `pairs` by key into the caller's columns: the counting sort of
+    /// [`from_pairs`](Self::from_pairs) for pairs that can be listed twice,
+    /// without collecting them.
+    ///
+    /// `pairs` is called once to count each key's pairs and once to place
+    /// them, and lists the same pairs both times. Afterwards `offsets` holds
+    /// the `bound + 1` run bounds, so key `index` owns
+    /// `values[offsets[index]..offsets[index + 1]]`, and each run keeps the
+    /// order its pairs were listed in. Both columns are cleared first and keep
+    /// their capacity, so a scratch that owns them stops allocating once they
+    /// have grown, and a table built once costs its two columns and nothing
+    /// else.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a key is not below `bound`, or when the pairs number more
+    /// than `u32::MAX`.
+    pub(crate) fn group_into<I: IntoIterator<Item = (K, V)>>(
+        bound: usize,
+        pairs: impl Fn() -> I,
+        offsets: &mut Vec<u32>,
+        values: &mut Vec<V>,
+    ) {
+        count_runs(bound, pairs().into_iter().map(|(key, _)| key), offsets);
+        values.clear();
+        // The first pair also fills the column, since every slot is written
+        // once.
+        let mut placing = pairs().into_iter();
+        if let Some((key, value)) = placing.next() {
+            values.resize(offsets[bound + 1] as usize, value);
+            let mut place = |key: K, value: V| {
+                let cursor = &mut offsets[key.index() + 1];
+                values[*cursor as usize] = value;
+                *cursor += 1;
+            };
+            place(key, value);
+            for (key, value) in placing {
+                place(key, value);
+            }
+        }
+        offsets.truncate(bound + 1);
+    }
+}
+
+/// Counts the pairs of each key into `offsets` and turns the counts into the
+/// start of each key's run, one entry late: `offsets` then holds `bound + 2`
+/// entries, and the run of `key` starts at `offsets[key + 1]`.
+///
+/// The placing pass that follows puts each pair at its key's entry and
+/// advances it, which leaves the entry at the end of the key's run, the start
+/// of the next. The first `bound + 1` entries are then the run bounds, each
+/// run in the order its pairs arrived in, and the last entry is a spare to
+/// truncate.
+///
+/// # Panics
+///
+/// Panics when a key is not below `bound`, or when the keys number more than
+/// `u32::MAX`.
+fn count_runs<K: DenseId>(bound: usize, keys: impl Iterator<Item = K>, offsets: &mut Vec<u32>) {
+    offsets.clear();
+    offsets.resize(bound + 2, 0);
+    let counts = &mut offsets[2..];
+    for key in keys {
+        let Some(count) = counts.get_mut(key.index()) else {
+            key_outside(bound)
+        };
+        *count += 1;
+    }
+    let mut end = 0_u32;
+    for count in counts {
+        end = end
+            .checked_add(*count)
+            .expect("dense fan-out value count exceeds u32::MAX");
+        *count = end;
     }
 }
 
@@ -618,16 +651,6 @@ impl<K, V> SortedMap<K, V> {
     /// Every key with its value, ascending by key.
     pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
         self.entries.iter().map(|(key, value)| (key, value))
-    }
-
-    /// The bytes of heap this map owns.
-    ///
-    /// Exact: the entry column is exact-sized, so this is its contents and
-    /// nothing else. Heap reached *through* a key or a value belongs to that
-    /// key or value and is not counted here.
-    #[must_use]
-    pub fn heap_bytes(&self) -> usize {
-        self.entries.len() * size_of::<(K, V)>()
     }
 }
 

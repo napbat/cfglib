@@ -3,12 +3,12 @@
 use std::borrow::Cow;
 
 use cfglib::{
-    BlockId, Cfg, DisplayInstr, EdgeKind, EffectInfo, Handler, HandlerBody, HandlerKind, InstrInfo,
-    Region, RegionId,
+    BlockId, Cfg, DisplayInstr, EdgeKind, Handler, HandlerBody, HandlerKind, InstrInfo, Region,
+    RegionId,
 };
 
-/// A source-like statement with the def, use, and effect sets the dataflow
-/// traits ask for.
+/// A source-like statement with the def and use sets the dataflow traits ask
+/// for, and the effects it declares.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stmt {
     text: String,
@@ -51,14 +51,6 @@ impl InstrInfo for Stmt {
 
     fn defs(&self) -> &[&'static str] {
         &self.defs
-    }
-}
-
-impl EffectInfo for Stmt {
-    type Effect = &'static str;
-
-    fn effects(&self) -> &[&'static str] {
-        &self.effects
     }
 }
 
@@ -108,11 +100,11 @@ pub fn handler(entry: BlockId, kind: HandlerKind, body: &[BlockId]) -> Handler {
 /// Register a region protecting `protected`.
 pub fn protect(cfg: &mut Cfg<Stmt>, protected: &[BlockId], handlers: Vec<Handler>) -> RegionId {
     cfg.add_region(Region {
-        id: RegionId::from_raw(0), // overwritten by `add_region`
         protected_blocks: protected.iter().copied().collect(),
         handlers,
         parent: None,
     })
+    .unwrap()
 }
 
 /// `setup(); try { risky() } catch { <pad> }; return`: the body falls through

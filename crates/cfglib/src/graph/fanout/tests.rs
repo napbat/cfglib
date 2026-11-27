@@ -13,11 +13,6 @@ use crate::test_util::rng::Rng;
 
 use super::{DenseFanout, Fanout, SortedMap};
 
-/// Sizes of the columns a `Fanout<u32, u32>` owns, in bytes.
-const KEY_BYTES: usize = 4;
-const OFFSET_BYTES: usize = 4;
-const VALUE_BYTES: usize = 4;
-
 fn collected(fanout: &Fanout<&'static str, u32>) -> Vec<(&'static str, Vec<u32>)> {
     fanout
         .iter()
@@ -33,7 +28,6 @@ fn an_empty_table_holds_nothing_and_allocates_nothing() {
     assert_eq!(empty.len(), 0);
     assert!(empty.is_empty());
     assert_eq!(empty.value_count(), 0);
-    assert_eq!(empty.heap_bytes(), 0);
     assert_eq!(empty.get(&7), [0_u32; 0]);
     assert!(!empty.contains_key(&7));
     assert_eq!(empty.keys().count(), 0);
@@ -155,22 +149,6 @@ fn a_path_keyed_table_is_looked_up_by_path() {
 }
 
 #[test]
-fn heap_bytes_counts_the_three_columns_and_nothing_else() {
-    let sites = Fanout::from_pairs(vec![(1_u32, 10_u32), (1, 11), (4, 40)]);
-
-    // Two keys, three run bounds, three values.
-    assert_eq!(
-        sites.heap_bytes(),
-        2 * KEY_BYTES + 3 * OFFSET_BYTES + 3 * VALUE_BYTES
-    );
-
-    // A value's own heap is the value's to report, not the table's.
-    let short = Fanout::from_pairs(vec![(1_u32, "x".to_string())]);
-    let long = Fanout::from_pairs(vec![(1_u32, "x".repeat(4096))]);
-    assert_eq!(short.heap_bytes(), long.heap_bytes());
-}
-
-#[test]
 fn a_dense_table_keeps_each_keys_arrival_order() {
     let rows = DenseFanout::from_pairs(3, [(2_usize, "c"), (0, "a"), (2, "b"), (0, "d")]);
 
@@ -224,7 +202,6 @@ fn a_dense_key_space_survives_having_no_values() {
     assert_eq!(rows.bound(), 4);
     assert_eq!(rows.value_count(), 0);
     assert_eq!(rows.get(3), [0_u32; 0]);
-    assert_eq!(rows.heap_bytes(), 5 * OFFSET_BYTES);
 }
 
 #[test]
@@ -234,16 +211,7 @@ fn an_empty_dense_key_space_allocates_nothing() {
     assert_eq!(rows, DenseFanout::default());
     assert_eq!(rows.bound(), 0);
     assert_eq!(rows.value_count(), 0);
-    assert_eq!(rows.heap_bytes(), 0);
     assert_eq!(rows.iter().count(), 0);
-}
-
-#[test]
-fn dense_heap_bytes_counts_both_columns_and_nothing_else() {
-    let rows = DenseFanout::from_pairs(3, [(2_usize, 7_u32), (0, 8), (2, 9)]);
-
-    // Four run bounds over a three-key space, three values.
-    assert_eq!(rows.heap_bytes(), 4 * OFFSET_BYTES + 3 * VALUE_BYTES);
 }
 
 #[test]
@@ -262,7 +230,6 @@ fn a_dense_groups_position_is_its_key() {
         grouped,
         DenseFanout::from_pairs(3, [(0_usize, 11_u32), (0, 10), (2, 30)])
     );
-    assert_eq!(grouped.heap_bytes(), 4 * OFFSET_BYTES + 3 * VALUE_BYTES);
 }
 
 #[test]
@@ -273,7 +240,6 @@ fn an_empty_group_is_still_a_key_of_the_space() {
     assert_eq!(rows.value_count(), 0);
     assert_eq!(rows.get(1), [0_u32; 0]);
     assert_eq!(rows.iter().count(), 2);
-    assert_eq!(rows.heap_bytes(), 3 * OFFSET_BYTES);
 }
 
 #[test]
@@ -283,7 +249,6 @@ fn no_groups_at_all_build_the_empty_key_space() {
     assert_eq!(rows, DenseFanout::default());
     assert_eq!(rows.bound(), 0);
     assert_eq!(rows.value_count(), 0);
-    assert_eq!(rows.heap_bytes(), 0);
 }
 
 #[test]
@@ -325,7 +290,6 @@ fn an_empty_sorted_map_holds_nothing_and_allocates_nothing() {
     assert_eq!(empty, SortedMap::default());
     assert_eq!(empty.len(), 0);
     assert!(empty.is_empty());
-    assert_eq!(empty.heap_bytes(), 0);
     assert_eq!(empty.get(&1), None);
     assert!(!empty.contains_key(&1));
     assert_eq!(empty.iter().count(), 0);
@@ -383,14 +347,4 @@ fn a_sorted_map_of_owned_keys_is_looked_up_through_a_borrowed_one() {
     // The owned form still reads, which is what a `&K` caller passes.
     assert_eq!(map.get(&"b".to_string()), Some(&1));
     assert!(map.contains_key(&"a".to_string()));
-}
-
-#[test]
-fn sorted_map_heap_bytes_counts_its_entry_column_exactly() {
-    let map = SortedMap::from_pairs(vec![(1_u32, 10_u32), (1, 11), (4, 40)], |slot, value| {
-        *slot = value;
-    });
-
-    assert_eq!(map.len(), 2);
-    assert_eq!(map.heap_bytes(), 2 * size_of::<(u32, u32)>());
 }

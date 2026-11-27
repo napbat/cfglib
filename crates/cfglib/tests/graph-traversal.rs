@@ -1,7 +1,7 @@
 //! Integration tests: traversal orders over stores with removed nodes.
 
 use cfglib::{
-    Graph, GraphView, NodeId, TraversalDirection, breadth_first, common_ancestors,
+    Direction, Graph, GraphView, NodeId, NodeOrder, breadth_first, common_ancestors,
     depth_first_postorder, depth_first_preorder, nearest_common_ancestor, reachable,
     reverse_postorder, scan_predecessors, shortest_path, topological_sort,
 };
@@ -90,14 +90,11 @@ fn diamond_with_a_hole() -> (Graph<&'static str, ()>, [NodeId; 5]) {
 fn traversals_over_a_hole_equal_the_traversals_after_compaction() {
     let (graph, [top, left, right, join, tail]) = diamond_with_a_hole();
     let mut compacted = graph.clone();
-    let renumbering = compacted.compact();
+    let renumbering = compacted.compact(NodeOrder::Insertion);
     let renumbered = |id: NodeId| renumbering.node(id).expect("a live node survives");
     let renumber = |ids: Vec<NodeId>| -> Vec<NodeId> { ids.into_iter().map(renumbered).collect() };
 
-    for (direction, start) in [
-        (TraversalDirection::Outgoing, top),
-        (TraversalDirection::Incoming, tail),
-    ] {
+    for (direction, start) in [(Direction::Forward, top), (Direction::Backward, tail)] {
         let new_start = renumbered(start);
         assert_eq!(
             renumber(breadth_first(&graph, start, direction)),
@@ -122,17 +119,17 @@ fn traversals_over_a_hole_equal_the_traversals_after_compaction() {
     }
 
     assert_eq!(
-        shortest_path(&graph, top, tail, TraversalDirection::Outgoing).map(|path| path.len()),
+        shortest_path(&graph, top, tail, Direction::Forward).map(|path| path.len()),
         shortest_path(
             &compacted,
             renumbered(top),
             renumbered(tail),
-            TraversalDirection::Outgoing
+            Direction::Forward
         )
         .map(|path| path.len())
     );
     assert_eq!(
-        nearest_common_ancestor(&graph, left, right, TraversalDirection::Outgoing),
+        nearest_common_ancestor(&graph, left, right, Direction::Forward),
         Some(join)
     );
     assert_eq!(
@@ -140,11 +137,11 @@ fn traversals_over_a_hole_equal_the_traversals_after_compaction() {
             &compacted,
             renumbered(left),
             renumbered(right),
-            TraversalDirection::Outgoing
+            Direction::Forward
         ),
         Some(renumbered(join))
     );
-    let shared = common_ancestors(&graph, left, right, TraversalDirection::Outgoing, None);
+    let shared = common_ancestors(&graph, left, right, Direction::Forward, None);
     assert_eq!(
         shared.iter().map(|found| found.node).collect::<Vec<_>>(),
         [join, tail]
@@ -153,19 +150,18 @@ fn traversals_over_a_hole_equal_the_traversals_after_compaction() {
     // The reachability table is slot-indexed, and the removed slot is not
     // reachable even though an edge into `join` once left it.
     assert_eq!(
-        reachable(&graph, [top], TraversalDirection::Outgoing),
+        reachable(&graph, [top], Direction::Forward),
         [true, false, true, true, true, true]
     );
     assert_eq!(
-        reachable(&graph, [tail], TraversalDirection::Incoming),
+        reachable(&graph, [tail], Direction::Backward),
         [true, false, true, true, true, true]
     );
 }
 
 use cfglib::{
-    BfsEvent, DfsEvent, OpenBfsConfig, OpenBfsEvent, OpenDfsConfig, OpenDfsEvent, OpenSearchConfig,
-    SearchConfig, SearchOrder, Visit, VisitedPolicy, breadth_first_events, depth_first_events,
-    open_breadth_first_events, open_depth_first_events, open_search, search,
+    DfsEvent, OpenBfsEvent, OpenDfsEvent, SearchConfig, SearchOrder, Visit, VisitedPolicy,
+    depth_first_events, open_breadth_first_events, open_depth_first_events, open_search, search,
 };
 use core::ops::ControlFlow;
 
@@ -281,9 +277,9 @@ fn build(shape: &Shape) -> Graph<usize, ()> {
 
 /// Every `(start, direction)` the agreement is checked from: each live node,
 /// along both edge directions.
-fn starts(graph: &Graph<usize, ()>) -> Vec<(NodeId, TraversalDirection)> {
+fn starts(graph: &Graph<usize, ()>) -> Vec<(NodeId, Direction)> {
     let mut starts = Vec::new();
-    for direction in [TraversalDirection::Outgoing, TraversalDirection::Incoming] {
+    for direction in [Direction::Forward, Direction::Backward] {
         starts.extend(graph.node_ids().map(|node| (node, direction)));
     }
     starts
@@ -292,11 +288,11 @@ fn starts(graph: &Graph<usize, ()>) -> Vec<(NodeId, TraversalDirection)> {
 /// The successor relation an open walk is driven by, matching `direction`.
 fn open_edges(
     graph: &Graph<usize, ()>,
-    direction: TraversalDirection,
+    direction: Direction,
 ) -> impl FnMut(&NodeId, &mut Vec<NodeId>) + '_ {
     move |&node, out| match direction {
-        TraversalDirection::Outgoing => out.extend(graph.successors(node)),
-        TraversalDirection::Incoming => out.extend(graph.predecessors(node)),
+        Direction::Forward => out.extend(graph.successors(node)),
+        Direction::Backward => out.extend(graph.predecessors(node)),
     }
 }
 
@@ -306,13 +302,18 @@ fn searched(
     start: NodeId,
     order: SearchOrder,
     visited: VisitedPolicy,
-    direction: TraversalDirection,
+    direction: Direction,
 ) -> Vec<(NodeId, usize)> {
     let mut visits = Vec::new();
     let outcome = search(
         graph,
         [start],
-        SearchConfig::new(order, direction).with_visited(visited),
+        direction,
+        SearchConfig {
+            order,
+            visited,
+            ..SearchConfig::default()
+        },
         |node, depth| {
             visits.push((node, depth));
             ControlFlow::<(), _>::Continue(Visit::Descend)
@@ -328,12 +329,16 @@ fn open_searched(
     start: NodeId,
     order: SearchOrder,
     visited: VisitedPolicy,
-    direction: TraversalDirection,
+    direction: Direction,
 ) -> Vec<(NodeId, usize)> {
     let mut visits = Vec::new();
     let outcome = open_search(
         [start],
-        OpenSearchConfig::new(order).with_visited(visited),
+        SearchConfig {
+            order,
+            visited,
+            ..SearchConfig::default()
+        },
         open_edges(graph, direction),
         |&node, depth| {
             visits.push((node, depth));
@@ -357,7 +362,7 @@ struct DepthFirst {
 fn dense_depth_first_events(
     graph: &Graph<usize, ()>,
     start: NodeId,
-    direction: TraversalDirection,
+    direction: Direction,
 ) -> DepthFirst {
     let mut walk = DepthFirst {
         discovered: Vec::new(),
@@ -379,7 +384,7 @@ fn open_depth_first_walk(
     graph: &Graph<usize, ()>,
     start: NodeId,
     visited: VisitedPolicy,
-    direction: TraversalDirection,
+    direction: Direction,
 ) -> DepthFirst {
     let mut walk = DepthFirst {
         discovered: Vec::new(),
@@ -387,7 +392,10 @@ fn open_depth_first_walk(
     };
     let outcome = open_depth_first_events(
         [start],
-        OpenDfsConfig::new(visited),
+        SearchConfig {
+            visited,
+            ..SearchConfig::default()
+        },
         open_edges(graph, direction),
         |event| {
             match event {
@@ -402,39 +410,18 @@ fn open_depth_first_walk(
     walk
 }
 
-fn dense_breadth_first_events(
-    graph: &Graph<usize, ()>,
-    start: NodeId,
-    direction: TraversalDirection,
-) -> Vec<(NodeId, usize)> {
-    let mut discovered = Vec::new();
-    let outcome = breadth_first_events(graph, start, direction, |event| {
-        if let BfsEvent::Discover(node, depth) = event {
-            discovered.push((node, depth));
-        }
-        ControlFlow::<()>::Continue(())
-    });
-    assert_eq!(outcome, None);
-    discovered
-}
-
 fn open_breadth_first_walk(
     graph: &Graph<usize, ()>,
     start: NodeId,
-    direction: TraversalDirection,
+    direction: Direction,
 ) -> Vec<(NodeId, usize)> {
     let mut discovered = Vec::new();
-    let outcome = open_breadth_first_events(
-        [start],
-        OpenBfsConfig::new(),
-        open_edges(graph, direction),
-        |event| {
-            if let OpenBfsEvent::Discover(&node, depth) = event {
-                discovered.push((node, depth));
-            }
-            ControlFlow::<(), _>::Continue(Visit::Descend)
-        },
-    );
+    let outcome = open_breadth_first_events([start], None, open_edges(graph, direction), |event| {
+        if let OpenBfsEvent::Discover(&node, depth) = event {
+            discovered.push((node, depth));
+        }
+        ControlFlow::<(), _>::Continue(Visit::Descend)
+    });
     assert_eq!(outcome, None);
     discovered
 }
@@ -510,9 +497,6 @@ fn every_breadth_first_walk_visits_the_same_nodes_in_the_same_order() {
                 direction,
             );
             assert_eq!(nodes_of(&searched), expected, "search: {context}");
-
-            let events = dense_breadth_first_events(&graph, start, direction);
-            assert_eq!(events, searched, "events: {context}");
 
             let open = open_searched(
                 &graph,

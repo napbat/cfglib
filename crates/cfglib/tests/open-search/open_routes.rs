@@ -2,14 +2,14 @@
 
 use std::ops::ControlFlow;
 
-use cfglib::{OpenPathsConfig, OpenPathsEvent, Visit, open_breadth_first_paths};
+use cfglib::{OpenPathsEvent, Visit, open_breadth_first_paths};
 
-use crate::Lcg;
 use crate::reference::{Table, Walk, keep_all, simple_routes, table_successors};
+use crate::rng::Rng;
 use crate::spaces::{GRID_SIDE, binomial, grid_successors};
 
 /// Every route event of a walk that never prunes, in event order.
-fn emitted_routes(table: &Table, seeds: &[usize], config: OpenPathsConfig) -> Vec<Vec<usize>> {
+fn emitted_routes(table: &Table, seeds: &[usize], config: Option<usize>) -> Vec<Vec<usize>> {
     let mut routes = Vec::new();
     let outcome = open_breadth_first_paths::<_, ()>(
         seeds.iter().copied(),
@@ -29,14 +29,11 @@ fn emitted_routes(table: &Table, seeds: &[usize], config: OpenPathsConfig) -> Ve
 #[test]
 fn routes_come_out_as_the_multiset_of_simple_routes_a_recursion_enumerates() {
     for seed in 1..=6 {
-        let table = Table::random(&mut Lcg(seed), 9, 16);
+        let table = Table::random(&mut Rng::lcg(seed, 33), 9, 16);
         for limit in [None, Some(3)] {
-            let config = limit.map_or(OpenPathsConfig::new(), |limit| {
-                OpenPathsConfig::new().with_max_depth(limit)
-            });
             let seeds = [0, 4, 0];
 
-            let mut actual = emitted_routes(&table, &seeds, config);
+            let mut actual = emitted_routes(&table, &seeds, limit);
             let mut expected = Vec::new();
             for &start in &seeds {
                 expected.extend(simple_routes(&table, start, limit));
@@ -51,8 +48,8 @@ fn routes_come_out_as_the_multiset_of_simple_routes_a_recursion_enumerates() {
 #[test]
 fn the_number_of_routes_equals_the_number_of_path_marked_depth_first_visits() {
     for seed in 1..=6 {
-        let table = Table::random(&mut Lcg(seed + 20), 10, 18);
-        let routes = emitted_routes(&table, &[0], OpenPathsConfig::new().with_max_depth(6));
+        let table = Table::random(&mut Rng::lcg(seed + 20, 33), 10, 18);
+        let routes = emitted_routes(&table, &[0], Some(6));
         let visits = Walk::new(&table, Some(6), &keep_all).depth_first_routes(&[0]);
         assert_eq!(routes.len(), visits.len(), "seed {seed}");
     }
@@ -61,8 +58,8 @@ fn the_number_of_routes_equals_the_number_of_path_marked_depth_first_visits() {
 #[test]
 fn routes_arrive_in_nondecreasing_length_and_the_first_route_to_a_node_is_a_shortest_one() {
     for seed in 1..=6 {
-        let table = Table::random(&mut Lcg(seed + 40), 25, 45);
-        let routes = emitted_routes(&table, &[0], OpenPathsConfig::new().with_max_depth(5));
+        let table = Table::random(&mut Rng::lcg(seed + 40, 33), 25, 45);
+        let routes = emitted_routes(&table, &[0], Some(5));
         let lengths: Vec<usize> = routes.iter().map(Vec::len).collect();
         assert!(
             lengths.is_sorted(),
@@ -86,17 +83,18 @@ fn the_first_route_to_a_goal_is_a_shortest_one_even_when_a_longer_route_is_liste
     let table = Table {
         successors: vec![vec![1, 4], vec![2], vec![3], vec![4], vec![]],
     };
-    let shortest = open_breadth_first_paths(
-        [0_usize],
-        OpenPathsConfig::new(),
-        table_successors(&table),
-        |event| match event {
-            OpenPathsEvent::Route(route) if route.last() == Some(&4) => {
-                ControlFlow::Break(route.to_vec())
-            }
-            _ => ControlFlow::Continue(Visit::Descend),
-        },
-    );
+    let shortest =
+        open_breadth_first_paths(
+            [0_usize],
+            None,
+            table_successors(&table),
+            |event| match event {
+                OpenPathsEvent::Route(route) if route.last() == Some(&4) => {
+                    ControlFlow::Break(route.to_vec())
+                }
+                _ => ControlFlow::Continue(Visit::Descend),
+            },
+        );
     assert_eq!(shortest, Some(vec![0, 4]));
 }
 
@@ -105,17 +103,13 @@ fn routes_through_a_grid_are_counted_by_binomial_coefficients() {
     let side = u64::from(GRID_SIDE);
     let goal = (GRID_SIDE, GRID_SIDE);
     let mut routes: Vec<Vec<(u32, u32)>> = Vec::new();
-    let outcome = open_breadth_first_paths::<_, ()>(
-        [(0_u32, 0_u32)],
-        OpenPathsConfig::new(),
-        grid_successors,
-        |event| {
+    let outcome =
+        open_breadth_first_paths::<_, ()>([(0_u32, 0_u32)], None, grid_successors, |event| {
             if let OpenPathsEvent::Route(route) = event {
                 routes.push(route.to_vec());
             }
             ControlFlow::Continue(Visit::Descend)
-        },
-    );
+        });
     assert_eq!(outcome, None);
 
     let total: u64 = (0..=side)
@@ -156,17 +150,13 @@ fn routes_through_a_grid_are_counted_by_binomial_coefficients() {
 #[test]
 fn a_depth_bound_over_the_grid_emits_two_to_the_depth_routes_per_level() {
     let mut count = 0;
-    let outcome = open_breadth_first_paths::<_, ()>(
-        [(0_u32, 0_u32)],
-        OpenPathsConfig::new().with_max_depth(5),
-        grid_successors,
-        |event| {
+    let outcome =
+        open_breadth_first_paths::<_, ()>([(0_u32, 0_u32)], Some(5), grid_successors, |event| {
             if matches!(event, OpenPathsEvent::Route(_)) {
                 count += 1;
             }
             ControlFlow::Continue(Visit::Descend)
-        },
-    );
+        });
     assert_eq!(outcome, None);
     assert_eq!(count, 63, "2^0 + ... + 2^5");
 
@@ -176,7 +166,7 @@ fn a_depth_bound_over_the_grid_emits_two_to_the_depth_routes_per_level() {
                 successors: vec![vec![0]]
             },
             &[0],
-            OpenPathsConfig::new().with_max_depth(0)
+            Some(0)
         ),
         [[0]],
         "a zero bound emits the seed route alone"
@@ -189,18 +179,14 @@ fn a_node_already_on_the_route_is_refused_instead_of_extended() {
         successors: vec![vec![1], vec![2], vec![0]],
     };
     let mut seen = Vec::new();
-    let outcome = open_breadth_first_paths::<_, ()>(
-        [0_usize],
-        OpenPathsConfig::new(),
-        table_successors(&table),
-        |event| {
+    let outcome =
+        open_breadth_first_paths::<_, ()>([0_usize], None, table_successors(&table), |event| {
             seen.push(match event {
                 OpenPathsEvent::Route(route) => (route.to_vec(), None),
                 OpenPathsEvent::Refused(route, node) => (route.to_vec(), Some(*node)),
             });
             ControlFlow::Continue(Visit::Descend)
-        },
-    );
+        });
     assert_eq!(outcome, None);
     assert_eq!(
         seen,
@@ -216,11 +202,11 @@ fn a_node_already_on_the_route_is_refused_instead_of_extended() {
 #[test]
 fn a_refusal_names_a_node_on_its_route_and_its_verdict_is_ignored() {
     for seed in 1..=4 {
-        let table = Table::random(&mut Lcg(seed + 60), 8, 16);
+        let table = Table::random(&mut Rng::lcg(seed + 60, 33), 8, 16);
         let mut refusals = 0;
         let outcome = open_breadth_first_paths::<_, ()>(
             [0_usize],
-            OpenPathsConfig::new().with_max_depth(5),
+            Some(5),
             table_successors(&table),
             |event| match event {
                 OpenPathsEvent::Refused(route, node) => {
@@ -237,7 +223,7 @@ fn a_refusal_names_a_node_on_its_route_and_its_verdict_is_ignored() {
         assert_eq!(outcome, None);
         assert!(refusals > 0, "seed {seed} never closes a cycle");
 
-        let routes = emitted_routes(&table, &[0], OpenPathsConfig::new().with_max_depth(5));
+        let routes = emitted_routes(&table, &[0], Some(5));
         let expected = simple_routes(&table, 0, Some(5));
         assert_eq!(
             routes.len(),
@@ -254,22 +240,20 @@ fn skip_seals_a_route_without_extending_it() {
         successors: vec![vec![1, 2], vec![3], vec![], vec![]],
     };
     let mut routes = Vec::new();
-    let outcome = open_breadth_first_paths::<_, ()>(
-        [0_usize],
-        OpenPathsConfig::new(),
-        table_successors(&table),
-        |event| match event {
-            OpenPathsEvent::Route(route) => {
-                routes.push(route.to_vec());
-                ControlFlow::Continue(if route.last() == Some(&1) {
-                    Visit::Skip
-                } else {
-                    Visit::Descend
-                })
+    let outcome =
+        open_breadth_first_paths::<_, ()>([0_usize], None, table_successors(&table), |event| {
+            match event {
+                OpenPathsEvent::Route(route) => {
+                    routes.push(route.to_vec());
+                    ControlFlow::Continue(if route.last() == Some(&1) {
+                        Visit::Skip
+                    } else {
+                        Visit::Descend
+                    })
+                }
+                OpenPathsEvent::Refused(..) => ControlFlow::Continue(Visit::Descend),
             }
-            OpenPathsEvent::Refused(..) => ControlFlow::Continue(Visit::Descend),
-        },
-    );
+        });
     assert_eq!(outcome, None);
     assert_eq!(routes, [vec![0], vec![0, 1], vec![0, 2]]);
 }
@@ -280,25 +264,18 @@ fn duplicate_seeds_start_independent_routes_and_a_break_returns_its_value() {
         successors: vec![vec![1], vec![]],
     };
     assert_eq!(
-        emitted_routes(&table, &[0, 0], OpenPathsConfig::new()),
+        emitted_routes(&table, &[0, 0], None),
         [vec![0], vec![0], vec![0, 1], vec![0, 1]]
     );
 
     let mut seen = 0;
-    let outcome = open_breadth_first_paths(
-        [0_usize],
-        OpenPathsConfig::new(),
-        table_successors(&table),
-        |event| {
-            seen += 1;
-            match event {
-                OpenPathsEvent::Route(route) if route.len() == 2 => {
-                    ControlFlow::Break(route.to_vec())
-                }
-                _ => ControlFlow::Continue(Visit::Descend),
-            }
-        },
-    );
+    let outcome = open_breadth_first_paths([0_usize], None, table_successors(&table), |event| {
+        seen += 1;
+        match event {
+            OpenPathsEvent::Route(route) if route.len() == 2 => ControlFlow::Break(route.to_vec()),
+            _ => ControlFlow::Continue(Visit::Descend),
+        }
+    });
     assert_eq!(outcome, Some(vec![0, 1]));
     assert_eq!(seen, 2, "nothing is emitted after the break");
 }

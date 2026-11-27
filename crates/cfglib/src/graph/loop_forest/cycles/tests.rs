@@ -8,6 +8,7 @@ use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
 use crate::graph::dominator::DominatorTree;
+use crate::graph::edge_view::{EdgeRef, EdgeView};
 use crate::graph::structure::is_reducible;
 use crate::graph::view::GraphView;
 use crate::test_util::rng::Rng;
@@ -44,6 +45,32 @@ impl GraphView for Bits {
 impl RootedView for Bits {
     fn root(&self) -> usize {
         0
+    }
+}
+
+/// An edge is its bit: `8 * from + to`.
+impl EdgeView for Bits {
+    type EdgeId = usize;
+    type EdgeData = ();
+
+    fn edge_bound(&self) -> usize {
+        64
+    }
+
+    fn edge_ids(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..self.count).flat_map(move |from| self.outgoing(from))
+    }
+
+    fn outgoing(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
+        self.successors(node).map(move |to| 8 * node + to)
+    }
+
+    fn incoming(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
+        self.predecessors(node).map(move |from| 8 * from + node)
+    }
+
+    fn edge(&self, edge: usize) -> EdgeRef<'_, usize, usize, ()> {
+        EdgeRef::new(edge, edge / 8, edge % 8, &())
     }
 }
 
@@ -194,7 +221,7 @@ fn assert_answers<N: DenseId>(forest: &LoopForest<N>, bound: usize, label: &str)
         assert_eq!(forest.loop_of_header(cycle.header), Some(lp), "{label}");
         assert!(forest.is_nested(lp), "{label}");
         assert_eq!(forest.enclosing(lp), forest.parent(lp), "{label}");
-        assert_eq!(forest.body_len(lp), cycle.body.len(), "{label}");
+        assert_eq!(forest.body_count(lp), cycle.body.len(), "{label}");
         assert_eq!(forest.body(lp).count(), cycle.body.len(), "{label}");
         assert_eq!(cycle.entries.first(), Some(&cycle.header), "{label}");
         assert_eq!(forest.entry_count(lp), cycle.entries.len(), "{label}");
@@ -291,7 +318,6 @@ fn the_irreducible_core_is_one_loop_with_two_entries() {
     // Dominance finds no loop there, and only a tag makes one.
     let dominators = DominatorTree::compute(&cfg);
     assert!(LoopForest::compute(&cfg, &dominators).is_empty());
-    assert!(LoopForest::compute_tagged(&cfg, &dominators).is_empty());
 }
 
 #[test]
@@ -311,7 +337,7 @@ fn tags_play_no_part() {
         LoopForest::compute_cycles(&untagged),
         LoopForest::compute_cycles(&tagged)
     );
-    assert_eq!(LoopForest::compute_cycles(&tagged).len(), 1);
+    assert_eq!(LoopForest::compute_cycles(&tagged).loop_count(), 1);
 }
 
 #[test]
@@ -357,11 +383,12 @@ fn every_digraph_of_up_to_five_blocks_has_the_forest_of_the_definition() {
 
 /// A graph of up to sixteen blocks with random edges of random kinds: self
 /// loops, parallel edges, blocks the root misses and, in a quarter of
-/// them, a removed block.
-fn random_graph(seed: u64) -> Cfg<u32> {
+/// them, a removed block. Without `tags`, no edge is tagged
+/// [`EdgeKind::Back`] and the graph is otherwise the same.
+fn random_graph(seed: u64, tags: bool) -> Cfg<u32> {
     let kinds = [
         EdgeKind::Fallthrough,
-        EdgeKind::Back,
+        if tags { EdgeKind::Back } else { EdgeKind::Jump },
         EdgeKind::ConditionalTrue,
         EdgeKind::Jump,
     ];
@@ -387,7 +414,7 @@ fn random_graph(seed: u64) -> Cfg<u32> {
 fn random_graphs_have_the_forest_of_the_definition() {
     let (mut irreducible, mut reducible, mut deep) = (0, 0, 0);
     for seed in 0..20_000_u64 {
-        let cfg = random_graph(seed);
+        let cfg = random_graph(seed, true);
         let label = format!("seed {seed}");
 
         let forest = LoopForest::compute_cycles(&cfg);
@@ -397,9 +424,12 @@ fn random_graphs_have_the_forest_of_the_definition() {
         let dominators = DominatorTree::compute(&cfg);
         if is_reducible(&cfg, &dominators) {
             reducible += 1;
+            // The tags name loops dominance does not, so the natural loops
+            // are those of the same graph without them.
+            let untagged = random_graph(seed, false);
             assert_eq!(
                 cycles_of(&forest),
-                cycles_of(&LoopForest::compute(&cfg, &dominators)),
+                cycles_of(&LoopForest::compute(&untagged, &dominators)),
                 "{label}: the natural loops of a reducible graph"
             );
         }
@@ -440,35 +470,31 @@ fn on_every_small_reducible_digraph_the_cycles_are_the_natural_loops() {
 }
 
 #[test]
-fn the_dominance_forests_list_the_entries_of_their_loops() {
+fn the_dominance_forest_lists_the_entries_of_its_loops() {
     let mut irreducible = 0_usize;
     for seed in 0..20_000_u64 {
-        let cfg = random_graph(seed);
+        let cfg = random_graph(seed, true);
         let dominators = DominatorTree::compute(&cfg);
-        for forest in [
-            LoopForest::compute(&cfg, &dominators),
-            LoopForest::compute_tagged(&cfg, &dominators),
-        ] {
-            for lp in forest.loops() {
-                let header = forest.header(lp);
-                let body: BTreeSet<BlockId> = forest.body(lp).collect();
-                let entered = body.iter().copied().filter(|&block| {
-                    block != header
-                        && (block == cfg.entry()
-                            || cfg.predecessors(block).any(|before| {
-                                dominators.is_reachable(before) && !body.contains(&before)
-                            }))
-                });
-                let entries: Vec<BlockId> = core::iter::once(header).chain(entered).collect();
-                assert_eq!(forest.entry_count(lp), entries.len(), "seed {seed}");
-                assert_eq!(forest.entries(lp), entries, "seed {seed}");
-                assert_eq!(
-                    forest.is_irreducible(lp),
-                    !forest.is_nested(lp),
-                    "seed {seed}"
-                );
-                irreducible += usize::from(forest.is_irreducible(lp));
-            }
+        let forest = LoopForest::compute(&cfg, &dominators);
+        for lp in forest.loops() {
+            let header = forest.header(lp);
+            let body: BTreeSet<BlockId> = forest.body(lp).collect();
+            let entered = body.iter().copied().filter(|&block| {
+                block != header
+                    && (block == cfg.entry()
+                        || cfg.predecessors(block).any(|before| {
+                            dominators.is_reachable(before) && !body.contains(&before)
+                        }))
+            });
+            let entries: Vec<BlockId> = core::iter::once(header).chain(entered).collect();
+            assert_eq!(forest.entry_count(lp), entries.len(), "seed {seed}");
+            assert_eq!(forest.entries(lp), entries, "seed {seed}");
+            assert_eq!(
+                forest.is_irreducible(lp),
+                !forest.is_nested(lp),
+                "seed {seed}"
+            );
+            irreducible += usize::from(forest.is_irreducible(lp));
         }
     }
     assert!(irreducible > 1_000, "{irreducible} irreducible loops");
@@ -513,7 +539,7 @@ fn deep_nests_need_no_recursion_and_cost_the_forest_only_its_size() {
 
         let forest = LoopForest::compute_cycles(&cfg);
 
-        assert_eq!(forest.len(), depth);
+        assert_eq!(forest.loop_count(), depth);
         assert_eq!(forest.max_nesting_depth(), depth);
         let outermost = forest
             .loop_of_header(headers[0])
@@ -527,8 +553,8 @@ fn deep_nests_need_no_recursion_and_cost_the_forest_only_its_size() {
             forest.parent(innermost),
             forest.loop_of_header(headers[depth - 2])
         );
-        assert_eq!(forest.body_len(outermost), 2 * depth);
-        assert_eq!(forest.body_len(innermost), 2);
+        assert_eq!(forest.body_count(outermost), 2 * depth);
+        assert_eq!(forest.body_count(innermost), 2);
         assert_eq!(forest.latches(innermost), [latches[depth - 1]]);
         assert!(forest.contains(outermost, latches[depth - 1]));
         assert!(!forest.contains(innermost, headers[depth - 2]));

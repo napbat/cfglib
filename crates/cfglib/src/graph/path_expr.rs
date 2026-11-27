@@ -35,7 +35,7 @@
 //!   paper, path compression bounds the work by O(m log n) for `m` edges and
 //!   `n` nodes; it is near-linear in practice.
 //! - On an irreducible view, each strongly connected group of `r` siblings in
-//!   the derived graph ([`tarjan_scc`](crate::tarjan_scc)) is solved by
+//!   the derived graph ([`SccDecomposition`](crate::SccDecomposition)) is solved by
 //!   Gaussian elimination at an extra O(r³).
 //!   [`make_reducible`](crate::make_reducible) removes that cost by splitting
 //!   nodes first.
@@ -52,6 +52,8 @@ use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::block::BlockId;
+use crate::edge::EdgeId;
 use crate::graph::edge_view::EdgeView;
 use crate::graph::view::{DenseId, RootedView};
 use crate::identity::define_dense_id;
@@ -74,21 +76,12 @@ define_dense_id! {
     ///
     /// Panics when `index` exceeds `u32::MAX`.
     from_index = "path expression index exceeds u32::MAX";
-}
-
-impl DenseId for PathExprId {
-    fn from_index(index: usize) -> Self {
-        Self::from_index(index)
-    }
-
-    fn index(self) -> usize {
-        self.index()
-    }
+    dense_id;
 }
 
 /// One node of a path expression over edges `E`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum PathExprNode<E> {
+pub enum PathExprNode<E = EdgeId> {
     /// No path at all.
     Zero,
     /// The empty path.
@@ -109,7 +102,7 @@ pub enum PathExprNode<E> {
 /// subexpression share its id, and an interpretation evaluates it once.
 /// [`ZERO`](Self::ZERO) and [`ONE`](Self::ONE) are always present.
 #[derive(Debug, Clone)]
-pub struct PathExprArena<E> {
+pub struct PathExprArena<E = EdgeId> {
     nodes: Vec<PathExprNode<E>>,
     /// The id of each node, for hash-consing.
     dedup: BTreeMap<PathExprNode<E>, PathExprId>,
@@ -204,7 +197,7 @@ impl<E: Copy + Ord> PathExprArena<E> {
 ///
 /// Made by [`path_expressions`]; evaluated by [`interpret`].
 #[derive(Debug, Clone)]
-pub struct PathExpressions<N, E> {
+pub struct PathExpressions<N = BlockId, E = EdgeId> {
     arena: PathExprArena<E>,
     /// Per dense node index, its expression; zero for a node the root does
     /// not reach.
@@ -251,6 +244,10 @@ impl<N: DenseId, E> PathExpressions<N, E> {
 ///
 /// See the [module docs](self) for the algorithm and its cost. A node the
 /// root does not reach, and a removed node slot, have no expression.
+///
+/// # Panics
+///
+/// Panics when the node bound of `graph` exceeds `u32::MAX`.
 ///
 /// # Examples
 ///

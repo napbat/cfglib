@@ -1,6 +1,6 @@
 //! Integration tests: structural CFG comparison.
 
-use cfglib::{BlockId, Cfg, CfgDiff, EdgeKind};
+use cfglib::{BlockId, Cfg, CfgDiff, Edge, EdgeKind};
 
 /// `entry -> head -> body -> latch`, with `latch` flowing back into `target`.
 fn loop_into(target: fn(&[BlockId; 3]) -> BlockId) -> Cfg<u32> {
@@ -187,16 +187,24 @@ fn cfgs_carrying_edge_payloads_are_compared_by_their_wiring() {
     let build = |label: &'static str| {
         let mut cfg = Cfg::<u32, &str>::with_edge_payload();
         let exit = cfg.new_block();
-        cfg.add_edge_with_payload(cfg.entry(), exit, EdgeKind::Fallthrough, label);
+        cfg.add_edge(
+            cfg.entry(),
+            exit,
+            Edge::new(EdgeKind::Fallthrough).with_payload(label),
+        );
         cfg
     };
     let mut other = Cfg::<u32, u64>::with_edge_payload();
     let exit = other.new_block();
-    other.add_edge_with_payload(other.entry(), exit, EdgeKind::Fallthrough, 9);
+    other.add_edge(
+        other.entry(),
+        exit,
+        Edge::new(EdgeKind::Fallthrough).with_payload(9),
+    );
 
     assert!(CfgDiff::compute(&build("a"), &build("b")).is_identical());
     assert!(CfgDiff::compute(&build("a"), &other).is_identical());
 
-    other.add_edge_with_payload(exit, exit, EdgeKind::Back, 9);
+    other.add_edge(exit, exit, Edge::new(EdgeKind::Back).with_payload(9));
     assert!(!CfgDiff::compute(&build("a"), &other).is_identical());
 }

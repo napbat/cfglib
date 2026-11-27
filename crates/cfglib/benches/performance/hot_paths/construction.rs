@@ -1,8 +1,8 @@
-use cfglib::{Cfg, EdgeKind, FlowEffect, Graph};
+use cfglib::{Cfg, EdgeKind, Graph};
 
 use super::NODE_COUNT;
 use crate::fixtures::{
-    BuilderInst, branchy_cfg, branchy_graph, build_conditional_break_chain,
+    BuilderInst, BuilderOp, branchy_cfg, branchy_graph, build_conditional_break_chain,
     build_eight_case_switch_chain, build_if_else_chain, build_two_case_switch_chain,
 };
 use crate::harness::{BenchmarkSuite, benchmark_case};
@@ -35,9 +35,9 @@ fn register_builder_chains(suite: &mut BenchmarkSuite<'_>) {
             1 + 3 * BUILDER_REGION_COUNT,
             4 * BUILDER_REGION_COUNT,
             &[
-                (FlowEffect::ConditionalOpen, BUILDER_REGION_COUNT),
-                (FlowEffect::ConditionalAlternate, BUILDER_REGION_COUNT),
-                (FlowEffect::Fallthrough, 2 * BUILDER_REGION_COUNT),
+                (BuilderOp::ConditionalOpen, BUILDER_REGION_COUNT),
+                (BuilderOp::ConditionalAlternate, BUILDER_REGION_COUNT),
+                (BuilderOp::Plain, 2 * BUILDER_REGION_COUNT),
             ],
             &[
                 (EdgeKind::ConditionalTrue, BUILDER_REGION_COUNT),
@@ -55,8 +55,8 @@ fn register_builder_chains(suite: &mut BenchmarkSuite<'_>) {
             1 + 4 * BUILDER_REGION_COUNT,
             5 * BUILDER_REGION_COUNT,
             &[
-                (FlowEffect::LoopOpen, BUILDER_REGION_COUNT),
-                (FlowEffect::ConditionalBreak, BUILDER_REGION_COUNT),
+                (BuilderOp::LoopOpen, BUILDER_REGION_COUNT),
+                (BuilderOp::ConditionalBreak, BUILDER_REGION_COUNT),
             ],
             &[
                 (EdgeKind::Fallthrough, BUILDER_REGION_COUNT),
@@ -76,9 +76,9 @@ fn register_builder_chains(suite: &mut BenchmarkSuite<'_>) {
             1 + 3 * BUILDER_REGION_COUNT,
             4 * BUILDER_REGION_COUNT,
             &[
-                (FlowEffect::SwitchOpen, BUILDER_REGION_COUNT),
-                (FlowEffect::SwitchCase, BUILDER_REGION_COUNT),
-                (FlowEffect::Fallthrough, 2 * BUILDER_REGION_COUNT),
+                (BuilderOp::SwitchOpen, BUILDER_REGION_COUNT),
+                (BuilderOp::SwitchCase, BUILDER_REGION_COUNT),
+                (BuilderOp::Plain, 2 * BUILDER_REGION_COUNT),
             ],
             &[
                 (EdgeKind::SwitchCase, 2 * BUILDER_REGION_COUNT),
@@ -97,9 +97,9 @@ fn register_builder_chains(suite: &mut BenchmarkSuite<'_>) {
                 1 + 9 * regions,
                 16 * regions,
                 &[
-                    (FlowEffect::SwitchOpen, regions),
-                    (FlowEffect::SwitchCase, 7 * regions),
-                    (FlowEffect::Fallthrough, 8 * regions),
+                    (BuilderOp::SwitchOpen, regions),
+                    (BuilderOp::SwitchCase, 7 * regions),
+                    (BuilderOp::Plain, 8 * regions),
                 ],
                 &[
                     (EdgeKind::SwitchCase, 8 * regions),

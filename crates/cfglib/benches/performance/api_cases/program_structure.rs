@@ -3,6 +3,7 @@ use cfglib::{Cfg, CycleEquivalence, EdgeKind, ProgramStructureTree, SeseEdge};
 use super::BenchmarkSuite;
 use crate::fixtures::linear_cfg;
 use crate::harness::benchmark_case;
+use crate::rng::Rng;
 
 /// Blocks of the chain.
 const CHAIN_BLOCKS: usize = 100_000;
@@ -42,13 +43,11 @@ fn random_cfg(block_count: usize) -> Cfg<u32> {
     let mut blocks = Vec::with_capacity(block_count);
     blocks.push(cfg.entry());
     blocks.extend((1..block_count).map(|_| cfg.new_block()));
-    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut rng = Rng::xorshift(0x9E37_79B9_7F4A_7C15);
     for index in 1..block_count {
         let from = index - 1;
         cfg.add_edge(blocks[from], blocks[index], EdgeKind::Fallthrough);
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
+        let state = rng.next_u64();
         let jump = usize::try_from(state >> 60).expect("four bits fit in usize");
         match state % 4 {
             0 => {}
@@ -79,7 +78,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         "program_structure_chain_100k",
         || ProgramStructureTree::compute(&chain),
         |tree: &ProgramStructureTree| {
-            assert_eq!(tree.len(), CHAIN_BLOCKS);
+            assert_eq!(tree.region_count(), CHAIN_BLOCKS);
             assert!(tree.regions().all(|region| tree.parent(region).is_none()));
         }
     );
@@ -92,7 +91,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         |tree: &ProgramStructureTree| {
             // The procedure, a diamond per inner level, each `else` arm, and
             // the innermost `then` block.
-            assert_eq!(tree.len(), 2 * NEST_DEPTH + 1);
+            assert_eq!(tree.region_count(), 2 * NEST_DEPTH + 1);
             assert!(is_well_formed(tree));
         }
     );

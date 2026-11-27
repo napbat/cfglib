@@ -12,6 +12,7 @@ use cfglib::{BidirectedDyck, Graph, NodeId, bidirected_dyck_classes};
 
 use super::BenchmarkSuite;
 use crate::harness::benchmark_case;
+use crate::rng::Rng;
 
 /// Edges per node.
 const FAN: usize = 3;
@@ -59,20 +60,13 @@ fn random_bidirected(nodes: usize) -> Graph<(), Option<u32>> {
     for _ in 0..nodes {
         graph.add_node(());
     }
-    let mut state = 0x2545_F491_4F6C_DD1D_u64;
-    let mut next = move || {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        state
-    };
-    let bound = u64::try_from(nodes).expect("the node count fits in u64");
-    let index = |value: u64| usize::try_from(value % bound).expect("an index below the count");
+    let mut rng = Rng::xorshift(0x2545_F491_4F6C_DD1D);
     for _ in 0..nodes * FAN {
-        let from = NodeId::from_index(index(next()));
-        let to = NodeId::from_index(index(next()));
-        let roll = next();
-        let label = (roll % 8 != 0).then(|| u32::try_from(roll % LABELS).expect("a small label"));
+        let from = NodeId::from_index(rng.below(nodes));
+        let to = NodeId::from_index(rng.below(nodes));
+        let roll = rng.next_u64();
+        let label =
+            (!roll.is_multiple_of(8)).then(|| u32::try_from(roll % LABELS).expect("a small label"));
         graph.add_edge(from, to, label);
     }
     graph

@@ -11,25 +11,26 @@ use cfglib::{
 use crate::shapes::{Stmt, Try, block_of, catch, protect, try_catch};
 
 #[test]
-fn add_region_assigns_sequential_identities_and_ignores_the_one_it_was_given() {
+fn add_region_assigns_sequential_identities() {
     let mut cfg = Cfg::<Stmt>::new();
     let pad = block_of(&mut cfg, &["catch"]);
 
-    let first = cfg.add_region(Region {
-        id: RegionId::from_raw(41),
-        protected_blocks: BTreeSet::from([cfg.entry()]),
-        handlers: vec![catch(pad)],
-        parent: None,
-    });
+    let first = cfg
+        .add_region(Region {
+            protected_blocks: BTreeSet::from([cfg.entry()]),
+            handlers: vec![catch(pad)],
+            parent: None,
+        })
+        .unwrap();
     let second = protect(&mut cfg, &[pad], vec![]);
 
     assert_eq!((first.index(), second.index()), (0, 1));
-    assert_eq!(cfg.regions().len(), 2);
-    for (index, region) in cfg.regions().iter().enumerate() {
-        assert_eq!(region.id.index(), index, "a region knows its own identity");
+    assert_eq!(cfg.region_count(), 2);
+    for (index, (id, _)) in cfg.regions().enumerate() {
+        assert_eq!(id.index(), index, "a region's identity is its position");
     }
-    assert_eq!(cfg.region(first).map(|region| region.id), Some(first));
-    assert!(cfg.region(RegionId::from_raw(2)).is_none());
+    assert!(cfg.contains_region(first));
+    assert!(!cfg.contains_region(RegionId::from_raw(2)));
 }
 
 #[test]
@@ -39,8 +40,8 @@ fn the_innermost_region_is_the_latest_added_one_and_the_index_agrees_everywhere(
     let outer = protect(&mut cfg, &blocks[0..4], vec![]);
     let middle = protect(&mut cfg, &blocks[1..3], vec![]);
     let inner = protect(&mut cfg, &blocks[2..3], vec![]);
-    cfg.region_mut(middle).expect("added").parent = Some(outer);
-    cfg.region_mut(inner).expect("added").parent = Some(middle);
+    cfg.region_mut(middle).parent = Some(outer);
+    cfg.region_mut(inner).parent = Some(middle);
 
     let index = RegionIndex::compute(&cfg);
 
@@ -53,11 +54,6 @@ fn the_innermost_region_is_the_latest_added_one_and_the_index_agrees_everywhere(
         (blocks[5], None),
     ];
     for (block, region) in expected {
-        assert_eq!(
-            cfg.protecting_region(block).map(|found| found.id),
-            region,
-            "{block}"
-        );
         assert_eq!(index.protecting(block), region, "{block}");
     }
     assert_eq!(index.protecting(cfg.entry()), None);
@@ -70,10 +66,7 @@ fn a_region_index_is_a_snapshot_of_the_regions_it_was_computed_from() {
     let stale = RegionIndex::compute(&cfg);
     let region = protect(&mut cfg, &[body], vec![]);
     let late = block_of(&mut cfg, &["added after the index"]);
-    cfg.region_mut(region)
-        .expect("added")
-        .protected_blocks
-        .insert(late);
+    cfg.region_mut(region).protected_blocks.insert(late);
 
     assert_eq!(
         stale.protecting(body),
@@ -97,25 +90,16 @@ fn handlers_and_regions_are_reached_by_identity_and_edited_in_place() {
     let handler = HandlerRef::new(region, 0);
     let replacement = block_of(&mut cfg, &["other pad"]);
 
-    assert_eq!(cfg.handler(handler).map(|found| found.entry), Some(pad));
-    assert!(cfg.handler(HandlerRef::new(region, 1)).is_none());
-    assert!(
-        cfg.handler(HandlerRef::new(RegionId::from_raw(9), 0))
-            .is_none()
-    );
+    assert_eq!(cfg.handler(handler).entry, pad);
+    assert!(!cfg.contains_handler(HandlerRef::new(region, 1)));
+    assert!(!cfg.contains_handler(HandlerRef::new(RegionId::from_raw(9), 0)));
 
-    cfg.handler_mut(handler).expect("exists").entry = replacement;
-    cfg.region_mut(region).expect("exists").parent = Some(region);
+    cfg.handler_mut(handler).entry = replacement;
+    cfg.region_mut(region).parent = Some(region);
 
-    assert_eq!(
-        cfg.handler(handler).map(|found| found.entry),
-        Some(replacement)
-    );
-    assert_eq!(
-        cfg.region(region).and_then(|found| found.parent),
-        Some(region)
-    );
-    assert!(cfg.handler_mut(HandlerRef::new(region, 5)).is_none());
+    assert_eq!(cfg.handler(handler).entry, replacement);
+    assert_eq!(cfg.region(region).parent, Some(region));
+    assert!(!cfg.contains_handler(HandlerRef::new(region, 5)));
 }
 
 #[test]
@@ -177,16 +161,21 @@ fn removing_a_region_leaves_an_inert_tombstone_so_later_identities_stay_put() {
     let second = protect(&mut try_one.cfg, &[second_body], vec![catch(second_pad)]);
     let cfg = &mut try_one.cfg;
 
-    let removed = cfg.remove_region(try_one.region).expect("it existed");
+    let removed = cfg.remove_region(try_one.region);
 
     assert_eq!(removed.protected_blocks, BTreeSet::from([try_one.body]));
     assert_eq!(removed.handlers.len(), 1);
-    assert_eq!(cfg.regions().len(), 2, "identities do not shift");
-    let tombstone = cfg.region(try_one.region).expect("the slot stays");
+    assert_eq!(cfg.region_count(), 2, "identities do not shift");
+    assert!(cfg.contains_region(try_one.region), "the slot stays");
+    let tombstone = cfg.region(try_one.region);
     assert!(tombstone.protected_blocks.is_empty() && tombstone.handlers.is_empty());
-    assert_eq!(cfg.region(second).map(|region| region.id), Some(second));
-    assert!(cfg.protecting_region(try_one.body).is_none());
-    assert!(cfg.remove_region(RegionId::from_raw(7)).is_none());
+    assert!(cfg.contains_region(second));
+    assert_eq!(
+        cfg.region(second).protected_blocks,
+        BTreeSet::from([second_body])
+    );
+    assert_eq!(RegionIndex::compute(cfg).protecting(try_one.body), None);
+    assert!(!cfg.contains_region(RegionId::from_raw(7)));
 }
 
 #[test]
@@ -208,7 +197,8 @@ fn structuring_ignores_a_removed_region_but_still_structures_the_live_one() {
     let live = protect(&mut first.cfg, &[second_body], vec![catch(second_pad)]);
     first.cfg.remove_region(first.region);
 
-    let (tree, report) = ControlTree::compute_with_report(&first.cfg);
+    let tree = ControlTree::compute(&first.cfg);
+    let report = tree.report();
 
     assert!(
         !report.unstructured_regions.contains(&first.region),
@@ -240,16 +230,17 @@ fn remove_unreachable_regions_keeps_a_region_while_any_of_its_handlers_can_be_en
     let removed = cfg.remove_unreachable_regions();
 
     assert_eq!(removed, 1);
-    assert!(cfg.region(live).is_some_and(|r| !r.handlers.is_empty()));
-    assert!(cfg.region(mixed).is_some_and(|r| r.handlers.len() == 2));
+    assert_eq!(cfg.region(live).handlers.len(), 1);
+    assert_eq!(cfg.region(mixed).handlers.len(), 2);
+    let dead = cfg.region(dead);
     assert!(
-        cfg.region(dead)
-            .is_some_and(|r| r.handlers.is_empty() && r.protected_blocks.is_empty()),
+        dead.handlers.is_empty() && dead.protected_blocks.is_empty(),
         "no handler of it can be entered"
     );
     assert!(
         cfg.region(without_handlers)
-            .is_some_and(|r| r.protected_blocks.contains(&body)),
+            .protected_blocks
+            .contains(&body),
         "a region with no handler has nothing to judge"
     );
     assert_eq!(cfg.remove_unreachable_regions(), 0, "idempotent");
@@ -265,8 +256,8 @@ fn statement_granular_protection_is_block_granular_once_split_at_its_boundaries(
         cfg.block_mut(entry).push(Stmt::text(text));
     }
     let pad = block_of(&mut cfg, &["recover()"]);
-    let tail = cfg.split_block(entry, 2);
-    let middle = cfg.split_block(entry, 1);
+    let tail = cfg.split_block(entry, 2, EdgeKind::Fallthrough);
+    let middle = cfg.split_block(entry, 1, EdgeKind::Fallthrough);
     cfg.add_edge(middle, pad, EdgeKind::ExceptionUnwind);
     cfg.add_edge(pad, tail, EdgeKind::Fallthrough);
     let region = protect(&mut cfg, &[middle], vec![catch(pad)]);
@@ -274,11 +265,13 @@ fn statement_granular_protection_is_block_granular_once_split_at_its_boundaries(
     assert_eq!(cfg.block(entry).instructions(), [Stmt::text("a()")]);
     assert_eq!(cfg.block(middle).instructions(), [Stmt::text("risky()")]);
     assert_eq!(cfg.block(tail).instructions(), [Stmt::text("b()")]);
-    assert_eq!(cfg.protecting_region(middle).map(|r| r.id), Some(region));
-    assert!(cfg.protecting_region(entry).is_none());
-    assert!(cfg.protecting_region(tail).is_none());
+    let index = RegionIndex::compute(&cfg);
+    assert_eq!(index.protecting(middle), Some(region));
+    assert_eq!(index.protecting(entry), None);
+    assert_eq!(index.protecting(tail), None);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert!(report.is_fully_structured(), "{report:?}");
     let [try_node] = tree
         .preorder()

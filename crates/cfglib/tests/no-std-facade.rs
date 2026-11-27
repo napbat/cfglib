@@ -19,14 +19,14 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use cfglib::{
-    BlockId, BuildError, CallInfo, Cfg, CfgBuilder, CfgSupergraph, ClrExceptionRegion, ClrHandler,
-    ClrHandlerKind, ControlNode, ControlTree, DenseBits, DenseFanout, Direction, DisplayInstr,
-    DominatorTree, EdgeKind, EhModel, Fanout, FlowControl, FlowEffect, Graph, Handler, HandlerBody,
-    HandlerKind, HandlerTypes, HornClauses, IfdsConfig, IfdsProblem, InstrInfo, KeyedGraph, NodeId,
-    PostDominatorTree, Problem, SortedMap, StackGraphError, Supergraph, TextError,
-    TraversalDirection, VectoredExceptionModel, VectoredHandlerKind, VectoredHandlerOrder,
-    breadth_first, install_clr_region, parse_cfg_text, parse_text, remove_unreachable,
-    shortest_path, simplify, solve_ifds, solve_problem, tarjan_scc, topological_sort, verify,
+    BlockId, BuildError, Cfg, CfgBuilder, CfgSupergraph, ControlNode, ControlTree, DenseBits,
+    DenseFanout, Direction, DisplayInstr, DominatorTree, EdgeKind, EhBlockKind, EhModel, Fanout,
+    Flow, FlowControl, FlowEffect, Graph, Handler, HandlerBody, HandlerKind, HandlerMetadata,
+    HornClauses, IfdsConfig, IfdsProblem, InstrInfo, KeyedGraph, NodeId, NodeOrder, NodeProblem,
+    PostDominatorTree, Region, RegionIndex, SccDecomposition, SccNumbering, Solve, SortedMap,
+    StackGraphError, Supergraph, TextError, breadth_first, parse_cfg_listing, parse_text,
+    remove_unreachable_mapped, shortest_path, simplify_mapped, solve_ifds, solve_node_problem,
+    topological_sort, verify,
 };
 
 /// An instruction a consumer owns: its text, and the variables it reads and
@@ -112,20 +112,21 @@ fn a_cfg_is_built_verified_and_dominated_with_alloc_types() {
 #[test]
 fn the_text_form_is_an_alloc_string_that_parses_back() {
     let (cfg, _) = diamond();
-    let text: String = cfg.to_text();
+    let text: String = cfg.to_listing();
     assert_eq!(
         text,
         "entry bb0\nbb0:\n    if c\nbb1:\n    x = 1\nbb2:\n    x = 2\nbb3:\n    use x\n\
          bb0 -> bb1 true\nbb0 -> bb2 false\nbb1 -> bb3 fallthrough\nbb2 -> bb3 fallthrough\n"
     );
 
-    let parsed = parse_cfg_text(&text, |line| Ok(Statement::new(line, &[], &[])))
+    let parsed = parse_cfg_listing(&text, |line| Ok(Statement::new(line, &[], &[])))
         .expect("the text is the writer's own");
-    assert_eq!(parsed.to_text(), text);
+    assert_eq!(parsed.to_listing(), text);
     assert_eq!(parsed.block_count(), cfg.block_count());
 
     let mut streamed = String::new();
-    cfg.write_text(&mut streamed).expect("a String never fails");
+    cfg.write_listing(&mut streamed)
+        .expect("a String never fails");
     assert_eq!(streamed, text);
     assert!(cfg.to_dot().contains("digraph cfg"));
 }
@@ -133,7 +134,7 @@ fn the_text_form_is_an_alloc_string_that_parses_back() {
 /// Live variables, as a consumer writes them with owned names.
 struct Live;
 
-impl Problem<Cfg<Statement>> for Live {
+impl NodeProblem<Cfg<Statement>> for Live {
     type Fact = BTreeSet<String>;
 
     fn direction(&self) -> Direction {
@@ -167,7 +168,8 @@ impl Problem<Cfg<Statement>> for Live {
 #[test]
 fn a_fixpoint_problem_runs_over_owned_string_variables() {
     let (cfg, [entry, then_block, else_block, merge]) = diamond();
-    let facts = solve_problem(&cfg, &Live).expect("the unbounded solve has no step limit");
+    let facts = solve_node_problem(&cfg, &Live, Solve::default())
+        .expect("the unbounded solve has no step limit");
 
     let at_merge: &BTreeSet<String> = facts.fact_in(merge);
     assert_eq!(
@@ -209,7 +211,8 @@ fn a_loop_is_structured_into_a_control_tree_and_printed_into_a_string() {
     cfg.add_edge(even, step, EdgeKind::Fallthrough);
     cfg.add_edge(step, header, EdgeKind::Jump);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert!(report.is_fully_structured(), "{report:?}");
     let pseudocode: String = tree
         .to_pseudocode(|sink, point| {
@@ -246,11 +249,11 @@ fn a_graph_store_runs_traversals_and_components_on_owned_payloads() {
     }
     assert_eq!(topological_sort(&graph), Some(ids.clone()));
     assert_eq!(
-        shortest_path(&graph, ids[0], ids[3], TraversalDirection::Outgoing),
+        shortest_path(&graph, ids[0], ids[3], Direction::Forward),
         Some(ids.clone())
     );
     assert_eq!(
-        breadth_first(&graph, ids[3], TraversalDirection::Incoming),
+        breadth_first(&graph, ids[3], Direction::Backward),
         [ids[3], ids[2], ids[1], ids[0]]
     );
 
@@ -260,11 +263,15 @@ fn a_graph_store_runs_traversals_and_components_on_owned_payloads() {
         None,
         "emit now feeds back into check"
     );
-    let components = tarjan_scc(&graph);
-    assert_eq!(components.len(), 2, "parse, and the check-lower-emit cycle");
+    let components = SccDecomposition::compute(&graph, SccNumbering::LeavesFirst);
+    assert_eq!(
+        components.component_count(),
+        2,
+        "parse, and the check-lower-emit cycle"
+    );
 
     graph.remove_node(ids[0]);
-    let renumbering = graph.compact();
+    let renumbering = graph.compact(NodeOrder::Insertion);
     assert_eq!(renumbering.node(ids[0]), None);
     assert_eq!(graph.node_count(), 3);
     let text: String = graph.to_text();
@@ -302,7 +309,10 @@ fn keyed_graphs_fanouts_and_clause_sets_use_alloc_collections() {
     let mut clauses = HornClauses::new(3);
     clauses.add_clause(0, &[1]);
     clauses.add_clause(1, &[]);
-    assert_eq!(clauses.derivable(), [true, true, false]);
+    let mut derivable = DenseBits::new(3);
+    derivable.insert(0);
+    derivable.insert(1);
+    assert_eq!(clauses.derivable(), derivable);
     let mut saturation = clauses.saturate();
     clauses.add_clause(2, &[0, 1]);
     let newly: Vec<usize> = saturation.update(&clauses);
@@ -320,13 +330,16 @@ enum Step {
 }
 
 impl FlowControl for Step {
-    fn flow_effect(&self) -> FlowEffect {
+    type Target = &'static str;
+    type CaseKey = ();
+
+    fn flow_effect(&self) -> FlowEffect<&'static str, ()> {
         match self {
-            Self::Plain(_) => FlowEffect::Fallthrough,
+            Self::Plain(_) => FlowEffect::Flow(Flow::Next),
             Self::If => FlowEffect::ConditionalOpen,
             Self::Else => FlowEffect::ConditionalAlternate,
             Self::EndIf => FlowEffect::ConditionalClose,
-            Self::Return => FlowEffect::Return,
+            Self::Return => FlowEffect::Flow(Flow::Return),
         }
     }
 }
@@ -347,15 +360,15 @@ fn a_structured_stream_builds_and_the_cleanup_passes_report_alloc_results() {
     assert!(verify(&cfg).is_ok());
 
     let before = cfg.block_count();
-    let removed: usize = remove_unreachable(&mut cfg);
+    let removed: usize = remove_unreachable_mapped(&mut cfg).0;
     assert_eq!(
         removed, 1,
         "the code after the return is the one unreachable block"
     );
     assert_eq!(cfg.block_count(), before - 1);
-    let _merged: usize = simplify(&mut cfg);
-    cfg.compact();
-    assert!(cfg.is_compact());
+    let _merged: usize = simplify_mapped(&mut cfg).0;
+    cfg.compact(NodeOrder::Insertion);
+    assert!(cfg.is_dense());
     assert!(verify(&cfg).is_ok());
     assert!(
         cfg.blocks()
@@ -369,32 +382,30 @@ fn a_structured_stream_builds_and_the_cleanup_passes_report_alloc_results() {
 #[test]
 fn exception_regions_and_models_are_described_with_alloc_collections() {
     let (mut cfg, [entry, then_block, else_block, merge]) = diamond();
-    let mut types = HandlerTypes::<String>::new();
-    let region = install_clr_region(
-        &mut cfg,
-        &mut types,
-        ClrExceptionRegion {
+    let mut types = HandlerMetadata::<String>::new();
+    let region = cfg
+        .add_region(Region {
             protected_blocks: BTreeSet::from([entry, then_block]),
-            handlers: vec![ClrHandler {
+            handlers: vec![Handler {
                 entry: else_block,
                 body: HandlerBody::known([else_block]),
-                kind: ClrHandlerKind::Catch {
-                    ty: "System.IO.IOException".to_string(),
-                },
+                kind: HandlerKind::Catch,
             }],
             parent: None,
-        },
-    );
-    assert_eq!(
-        cfg.protecting_region(then_block).map(|found| found.id),
-        Some(region)
-    );
-    assert_eq!(cfg.protecting_region(merge).map(|found| found.id), None);
+        })
+        .unwrap();
+    types.set_all(region, [(0, "System.IO.IOException".to_string())]);
+    let index = RegionIndex::compute(&cfg);
+    assert_eq!(index.protecting(then_block), Some(region));
+    assert_eq!(index.protecting(merge), None);
     assert_eq!(types.len(), 1);
 
     cfg.add_edge(then_block, else_block, EdgeKind::ExceptionUnwind);
     let model = EhModel::compute(&cfg);
-    assert_eq!(model.landing_pads(), [else_block]);
+    assert_eq!(
+        model.blocks_of(EhBlockKind::LandingPad).collect::<Vec<_>>(),
+        [else_block]
+    );
     assert_eq!(
         model
             .protected_by(else_block)
@@ -403,16 +414,8 @@ fn exception_regions_and_models_are_described_with_alloc_collections() {
             .collect::<Vec<_>>(),
         [entry, then_block]
     );
-    let handlers: Vec<&Handler> = cfg.regions()[0].handlers.iter().collect();
+    let handlers: Vec<&Handler> = cfg.region(region).handlers.iter().collect();
     assert!(matches!(handlers[0].kind, HandlerKind::Catch));
-
-    let mut vectored = VectoredExceptionModel::<String>::new();
-    vectored.register(
-        VectoredHandlerKind::Exception,
-        VectoredHandlerOrder::First,
-        "veh".to_string(),
-    );
-    assert_eq!(vectored.len(), 1);
 }
 
 /// Every error type of the facade implements `core::error::Error`, not the
@@ -430,8 +433,22 @@ fn facade_errors_implement_the_core_error_trait() {
     let build_error = CfgBuilder::build(vec![Step::EndIf]).expect_err("an unbalanced stream");
     let _ = assert_core_error(build_error);
     let _ = assert_core_error(StackGraphError::EdgeFromJumpToScope);
-    let split = Cfg::<Statement>::new().split_block_at_points(BlockId::from_index(0), &[5]);
+    let split = Cfg::<Statement>::new()
+        .split_block_at_points(BlockId::from_index(0), [(5, EdgeKind::Fallthrough)]);
     let _ = assert_core_error(split.expect_err("a point past the block"));
+    let mut cfg = Cfg::<Statement>::new();
+    let gone = cfg.new_block();
+    cfg.remove_block(gone);
+    let dangling = cfg.add_region(Region {
+        protected_blocks: BTreeSet::new(),
+        handlers: vec![Handler {
+            entry: gone,
+            body: HandlerBody::unknown(),
+            kind: HandlerKind::CatchAll,
+        }],
+        parent: None,
+    });
+    let _ = assert_core_error(dangling.expect_err("a handler entry that is no block"));
 }
 
 #[test]
@@ -455,14 +472,17 @@ enum CallOp {
     Call(String),
 }
 
-impl CallInfo for CallOp {
-    type Callee = String;
+impl FlowControl for CallOp {
+    type Target = String;
+    type CaseKey = ();
 
-    fn callee(&self) -> Option<String> {
-        match self {
-            Self::Call(name) => Some(name.clone()),
-            Self::Work => None,
-        }
+    fn flow_effect(&self) -> FlowEffect<String, ()> {
+        FlowEffect::Flow(match self {
+            Self::Call(name) => Flow::Call {
+                target: name.clone(),
+            },
+            Self::Work => Flow::Next,
+        })
     }
 }
 
@@ -497,8 +517,13 @@ fn an_interprocedural_solve_runs_over_keyed_cfgs_named_by_owned_strings() {
         ("unused".to_string(), &unused),
     ];
     let graph = CfgSupergraph::new(&functions);
-    let results = solve_ifds(&graph, &Reaches, &[(graph.start(0), 0)], IfdsConfig::new())
-        .expect("an unbounded solve");
+    let results = solve_ifds(
+        &graph,
+        &Reaches,
+        &[(graph.start(0), 0)],
+        IfdsConfig::default(),
+    )
+    .expect("an unbounded solve");
     let reached: Vec<usize> = (0..graph.node_bound())
         .filter(|&node| results.holds(node, 0))
         .collect();

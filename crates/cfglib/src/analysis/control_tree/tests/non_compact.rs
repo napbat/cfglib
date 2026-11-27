@@ -8,7 +8,8 @@ use super::pseudocode;
 use crate::ControlTree;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
+use crate::graph::store::NodeOrder;
+use crate::region::{Handler, HandlerBody, HandlerKind, Region};
 use crate::test_util::{MockInst, ff};
 
 /// A loop around a try, with a removed block before every named block.
@@ -33,7 +34,6 @@ fn with_gaps() -> Cfg<MockInst> {
     cfg.add_edge(body, pad, EdgeKind::ExceptionHandler);
     cfg.add_edge(pad, header, EdgeKind::Jump);
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [body].into_iter().collect(),
         handlers: vec![Handler {
             entry: pad,
@@ -41,7 +41,8 @@ fn with_gaps() -> Cfg<MockInst> {
             kind: HandlerKind::Catch,
         }],
         parent: None,
-    });
+    })
+    .unwrap();
     for gap in gaps {
         cfg.remove_block(gap);
     }
@@ -51,12 +52,14 @@ fn with_gaps() -> Cfg<MockInst> {
 #[test]
 fn removed_block_slots_do_not_change_the_structure() {
     let mut cfg = with_gaps();
-    assert!(!cfg.is_compact());
-    let (sparse, sparse_report) = ControlTree::compute_with_report(&cfg);
+    assert!(!cfg.is_dense());
+    let sparse = ControlTree::compute(&cfg);
+    let sparse_report = sparse.report();
     let sparse_text = pseudocode(&cfg, &sparse);
 
-    cfg.compact();
-    let (dense, dense_report) = ControlTree::compute_with_report(&cfg);
+    cfg.compact(NodeOrder::Insertion);
+    let dense = ControlTree::compute(&cfg);
+    let dense_report = dense.report();
     assert_eq!(sparse_text, pseudocode(&cfg, &dense));
     assert_eq!(sparse_report.gotos.len(), dense_report.gotos.len());
     assert_eq!(sparse.node_count(), dense.node_count());

@@ -4,8 +4,9 @@
 use std::collections::BTreeSet;
 
 use cfglib::{
-    BlockId, ControlNode, ControlTree, DominatorTree, EhBlockKind, EhEdgeKind, EhModel, Handler,
-    HandlerBody, HandlerKind, HandlerRef, RegionId, promote_handler_extents, verify,
+    AddressHandlerKind, BlockId, ControlNode, ControlTree, DominatorTree, EdgeKind, EhBlockKind,
+    EhModel, ExtentPromotionStatus, Handler, HandlerBody, HandlerKind, HandlerRef, RegionId,
+    RegionIndex, promote_handler_extents, verify,
 };
 
 use crate::harness::{
@@ -65,9 +66,9 @@ fn a_try_range_wires_unwind_edges_and_registers_one_region<I: Isa>() {
     );
 
     let cfg = built.cfg();
-    assert_eq!(cfg.regions().len(), 1);
-    let region = &cfg.regions()[0];
-    assert_eq!(region.id, RegionId::from_raw(0));
+    assert_eq!(cfg.region_count(), 1);
+    let id = RegionId::from_raw(0);
+    let region = cfg.region(id);
     assert_eq!(region.protected_blocks, blocks_of(&built, &[1, 2]));
     assert_eq!(region.parent, None);
     assert_eq!(
@@ -79,15 +80,12 @@ fn a_try_range_wires_unwind_edges_and_registers_one_region<I: Isa>() {
         }]
     );
     let handler = built.graph.handler_refs[0];
-    assert_eq!(handler, HandlerRef::new(region.id, 0));
-    assert_eq!(cfg.handler(handler), Some(&region.handlers[0]));
-    assert_eq!(cfg.region(region.id), Some(region));
-    let protecting = |position: usize| {
-        cfg.protecting_region(built.block_of(position))
-            .map(|r| r.id)
-    };
-    assert_eq!(protecting(1), Some(region.id));
-    assert_eq!(protecting(2), Some(region.id));
+    assert_eq!(handler, HandlerRef::new(id, 0));
+    assert_eq!(cfg.handler(handler), &region.handlers[0]);
+    let index = RegionIndex::compute(cfg);
+    let protecting = |position: usize| index.protecting(built.block_of(position));
+    assert_eq!(protecting(1), Some(id));
+    assert_eq!(protecting(2), Some(id));
     for outside in [0, 3, 4] {
         assert_eq!(
             protecting(outside),
@@ -129,7 +127,7 @@ fn a_non_throwing_protected_instruction_keeps_its_block_but_loses_its_unwind_edg
     // The pure block is still protected: pruning drops the edge, not the
     // coverage.
     assert_eq!(
-        built.cfg().regions()[0].protected_blocks,
+        built.cfg().region(RegionId::from_raw(0)).protected_blocks,
         blocks_of(&built, &[0, 1, 2])
     );
 }
@@ -150,7 +148,7 @@ fn handlers_sharing_a_range_share_one_region_and_unwind_in_table_order<I: Isa>()
             TryRange {
                 protected: 0..2,
                 entry: 5,
-                kind: HandlerKind::CatchAll,
+                kind: AddressHandlerKind::CatchAll,
             },
         ],
         Settings::default(),
@@ -177,10 +175,12 @@ fn handlers_sharing_a_range_share_one_region_and_unwind_in_table_order<I: Isa>()
             Role::Unwind { handler: 1 }
         ]
     );
-    let regions = built.cfg().regions();
-    assert_eq!(regions.len(), 1);
+    assert_eq!(built.cfg().region_count(), 1);
+    let region = RegionId::from_raw(0);
     assert_eq!(
-        regions[0]
+        built
+            .cfg()
+            .region(region)
             .handlers
             .iter()
             .map(|h| h.kind)
@@ -189,10 +189,7 @@ fn handlers_sharing_a_range_share_one_region_and_unwind_in_table_order<I: Isa>()
     );
     assert_eq!(
         built.graph.handler_refs,
-        [
-            HandlerRef::new(regions[0].id, 0),
-            HandlerRef::new(regions[0].id, 1)
-        ]
+        [HandlerRef::new(region, 0), HandlerRef::new(region, 1)]
     );
 }
 
@@ -220,12 +217,12 @@ fn a_range_ending_at_the_code_end_needs_no_end_instruction<I: Isa>() {
         ]
     );
     assert_eq!(
-        built.cfg().regions()[0].protected_blocks,
+        built.cfg().region(RegionId::from_raw(0)).protected_blocks,
         blocks_of(&built, &[3, 4])
     );
 }
 
-fn handler_kinds_pass_through_and_a_filter_is_patched_through_its_reference<I: Isa>() {
+fn handler_kinds_pass_through_and_a_filter_names_the_block_at_its_address<I: Isa>() {
     let mut ops = vec![Op::Work; 4];
     ops.push(Op::Return);
     // Five handler bodies, then the filter predicate's own funclet at
@@ -234,13 +231,11 @@ fn handler_kinds_pass_through_and_a_filter_is_patched_through_its_reference<I: I
         ops.extend([Op::Work, Op::Return]);
     }
     let kinds = [
-        (5, HandlerKind::Catch),
-        (7, HandlerKind::CatchAll),
-        (9, HandlerKind::Finally),
-        (11, HandlerKind::Fault),
-        // A filter names a block that does not exist at build time, so it is
-        // registered as a catch and patched afterwards.
-        (13, HandlerKind::Catch),
+        (5, AddressHandlerKind::Catch),
+        (7, AddressHandlerKind::CatchAll),
+        (9, AddressHandlerKind::Finally),
+        (11, AddressHandlerKind::Fault),
+        (13, AddressHandlerKind::Filter { filter: 15 }),
     ];
     let table = kinds
         .iter()
@@ -250,37 +245,53 @@ fn handler_kinds_pass_through_and_a_filter_is_patched_through_its_reference<I: I
             kind,
         })
         .collect();
-    let mut built = build_with::<I>(&ops, table, Settings::default());
-    assert_eq!(built.cfg().regions().len(), 1);
+    let built = build_with::<I>(&ops, table, Settings::default());
+    assert_eq!(built.cfg().region_count(), 1);
     let handlers = built.graph.handler_refs.clone();
-    for (&(_, kind), &handler) in kinds.iter().zip(&handlers) {
-        let stored = built.graph.cfg.handler(handler).unwrap();
+    let stored_kinds = [
+        HandlerKind::Catch,
+        HandlerKind::CatchAll,
+        HandlerKind::Finally,
+        HandlerKind::Fault,
+        HandlerKind::Filter {
+            filter_block: built.block_of(15),
+        },
+    ];
+    assert_eq!(handlers.len(), stored_kinds.len());
+    for (&kind, &handler) in stored_kinds.iter().zip(&handlers) {
+        let stored = built.graph.cfg.handler(handler);
         assert_eq!(stored.kind, kind);
         assert_eq!(stored.body, HandlerBody::Unknown);
         assert_eq!(stored.body.blocks(), None);
         assert!(!stored.body.is_known());
     }
-
-    let filter_block = built.block_of(15);
-    let patched = built.graph.cfg.handler_mut(handlers[4]).unwrap();
-    patched.kind = HandlerKind::Filter { filter_block };
     assert_eq!(
-        built.cfg().handler(handlers[4]).unwrap().kind,
-        HandlerKind::Filter { filter_block }
+        built.blocks()[built.block_of(15).index()].first(),
+        Some(&15)
     );
 
     let model = EhModel::compute(built.cfg());
     let entry = |position: usize| built.block_of(position);
-    assert_eq!(model.landing_pads(), [entry(5), entry(7)]);
-    assert_eq!(model.cleanup_blocks(), [entry(9), entry(11)]);
+    assert_eq!(
+        model.blocks_of(EhBlockKind::LandingPad).collect::<Vec<_>>(),
+        [entry(5), entry(7)]
+    );
+    assert_eq!(
+        model.blocks_of(EhBlockKind::Cleanup).collect::<Vec<_>>(),
+        [entry(9), entry(11)]
+    );
     assert_eq!(model.block_kind(entry(13)), EhBlockKind::CatchSwitch);
-    assert_empty(&model.resume_blocks());
+    assert_eq!(model.blocks_of(EhBlockKind::Resume).count(), 0);
     assert_eq!(model.block_kind(built.block_of(0)), EhBlockKind::Normal);
     assert_eq!(model.block_bound(), built.cfg().block_bound());
-    let region = built.cfg().regions()[0].id;
+    let region = RegionId::from_raw(0);
     for (slot, &(position, _)) in kinds.iter().enumerate() {
         assert_eq!(
-            model.handlers(entry(position)),
+            built
+                .cfg()
+                .handlers_at(entry(position))
+                .map(|(handler, _)| handler)
+                .collect::<Vec<_>>(),
             [HandlerRef::new(region, slot)]
         );
         assert_eq!(
@@ -306,7 +317,7 @@ fn the_exception_model_reads_one_unwind_edge_per_protected_instruction_and_handl
             TryRange {
                 protected: 0..2,
                 entry: 5,
-                kind: HandlerKind::Finally,
+                kind: AddressHandlerKind::Finally,
             },
         ],
         Settings::default(),
@@ -314,11 +325,9 @@ fn the_exception_model_reads_one_unwind_edge_per_protected_instruction_and_handl
     let cfg = built.cfg();
     let model = EhModel::compute(cfg);
     assert_eq!(model.eh_edges().len(), 4);
-    for edge in model.eh_edges() {
-        assert_eq!(edge.kind, EhEdgeKind::Unwind);
-        assert!(edge.kind.is_unwind());
-        let stored = cfg.edge(edge.edge_id);
-        assert_eq!((stored.source(), stored.target()), (edge.from, edge.to));
+    for &edge in model.eh_edges() {
+        let stored = cfg.edge(edge);
+        assert_eq!(stored.kind(), EdgeKind::ExceptionUnwind);
         assert_eq!(stored.kind(), UNWIND);
     }
     assert_eq!(model.block_kind(built.block_of(3)), EhBlockKind::LandingPad);
@@ -348,16 +357,19 @@ fn a_probe_without_any_table_still_makes_its_alternate_target_a_landing_pad<I: I
     );
     let model = EhModel::compute(built.cfg());
     assert_eq!(model.eh_edges().len(), 1);
-    let edge = &model.eh_edges()[0];
-    assert_eq!((edge.from, edge.to), (built.block_of(1), built.block_of(3)));
-    assert_eq!(edge.kind, EhEdgeKind::Unwind);
+    let edge = built.cfg().edge(model.eh_edges()[0]);
+    assert_eq!(
+        (edge.source(), edge.target()),
+        (built.block_of(1), built.block_of(3))
+    );
+    assert_eq!(edge.kind(), EdgeKind::ExceptionUnwind);
     assert_eq!(model.block_kind(built.block_of(3)), EhBlockKind::LandingPad);
     assert_eq!(
         model.protected_by(built.block_of(3)),
         &blocks_of(&built, &[1])
     );
-    assert_empty(model.handlers(built.block_of(3)));
-    assert_empty(built.cfg().regions());
+    assert_eq!(built.cfg().handlers_at(built.block_of(3)).count(), 0);
+    assert_eq!(built.cfg().region_count(), 0);
 }
 
 fn promoting_extents_claims_exactly_the_blocks_the_handler_entry_dominates<I: Isa>() {
@@ -382,8 +394,9 @@ fn promoting_extents_claims_exactly_the_blocks_the_handler_entry_dominates<I: Is
             vec![],
         ]
     );
-    let region = built.cfg().regions()[0].id;
-    let (before, report) = ControlTree::compute_with_report(built.cfg());
+    let region = RegionId::from_raw(0);
+    let before = ControlTree::compute(built.cfg());
+    let report = before.report();
     assert_eq!(report.unstructured_regions, [region]);
     assert!(
         !before
@@ -391,9 +404,12 @@ fn promoting_extents_claims_exactly_the_blocks_the_handler_entry_dominates<I: Is
             .any(|n| matches!(before.node(n), ControlNode::TryCatch { .. }))
     );
 
-    assert_eq!(promote_handler_extents(&mut built.graph.cfg), 1);
+    assert_eq!(
+        promote_handler_extents(&mut built.graph.cfg),
+        [(region, ExtentPromotionStatus::Promoted)]
+    );
     let handler = built.graph.handler_refs[0];
-    let body = built.cfg().handler(handler).unwrap().body.clone();
+    let body = built.cfg().handler(handler).body.clone();
     // Dominated by the entry: reachable, but not once the entry is removed.
     let entry = built.block_of(2);
     let reachable = reach(built.cfg(), &[built.cfg().entry()], None);
@@ -403,7 +419,8 @@ fn promoting_extents_claims_exactly_the_blocks_the_handler_entry_dominates<I: Is
     assert_eq!(body.blocks().unwrap(), &blocks_of(&built, &[2, 3, 4]));
     assert!(verify(built.cfg()).is_ok());
 
-    let (after, report) = ControlTree::compute_with_report(built.cfg());
+    let after = ControlTree::compute(built.cfg());
+    let report = after.report();
     assert_empty(&report.unstructured_regions);
     let arms: Vec<_> = after
         .preorder()
@@ -428,12 +445,15 @@ fn an_unreachable_handler_entry_stays_unknown_when_extents_are_promoted<I: Isa>(
         Settings::default(),
     );
     assert_eq!(built.successors(), vec![vec![(1, FALL)], vec![], vec![]]);
-    assert_eq!(promote_handler_extents(&mut built.graph.cfg), 0);
     let handler = built.graph.handler_refs[0];
     assert_eq!(
-        built.cfg().handler(handler).unwrap().body,
-        HandlerBody::Unknown
+        promote_handler_extents(&mut built.graph.cfg),
+        [(
+            handler.region(),
+            ExtentPromotionStatus::AmbiguousExtent { handler }
+        )]
     );
+    assert_eq!(built.cfg().handler(handler).body, HandlerBody::Unknown);
 }
 
 over_both_isas!(
@@ -441,7 +461,7 @@ over_both_isas!(
     a_non_throwing_protected_instruction_keeps_its_block_but_loses_its_unwind_edge,
     handlers_sharing_a_range_share_one_region_and_unwind_in_table_order,
     a_range_ending_at_the_code_end_needs_no_end_instruction,
-    handler_kinds_pass_through_and_a_filter_is_patched_through_its_reference,
+    handler_kinds_pass_through_and_a_filter_names_the_block_at_its_address,
     the_exception_model_reads_one_unwind_edge_per_protected_instruction_and_handler,
     a_probe_without_any_table_still_makes_its_alternate_target_a_landing_pad,
     promoting_extents_claims_exactly_the_blocks_the_handler_entry_dominates,

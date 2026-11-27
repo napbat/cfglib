@@ -47,7 +47,8 @@ use crate::dataflow::bits::DenseBits;
 /// clauses.add_clause(2, &[1, 1]); // B is nullable when A is
 ///                                 // C has no nullable production at all
 ///
-/// assert_eq!(clauses.derivable(), vec![true, true, true, false]);
+/// let derivable = clauses.derivable();
+/// assert_eq!(derivable.ones().collect::<Vec<_>>(), [0, 1, 2]);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -125,45 +126,23 @@ impl HornClauses {
 
     /// Solve to the least fixpoint: which facts are derivable.
     ///
-    /// Returns a dense `Vec<bool>` indexed by fact id. A fact is `true` when
-    /// some clause with it at head has every body fact derivable, transitively
-    /// from the axioms. Cyclic support derives nothing on its own — `a <- b`
-    /// with `b <- a` and no axiom leaves both `false`, which is what a least
-    /// fixpoint means.
+    /// Returns the derived facts as a dense bit row over the fact ids. A fact
+    /// is derived when some clause with it at head has every body fact
+    /// derived, transitively from the axioms. Cyclic support derives nothing
+    /// on its own — `a <- b` with `b <- a` and no axiom leaves both out,
+    /// which is what a least fixpoint means.
     ///
-    /// The input is untouched, so a clause set can be solved repeatedly (for
-    /// example after adding more clauses). Each call starts over and costs the
-    /// whole set; a consumer that adds clauses in batches and asks after each
-    /// one should keep a [`saturate`](Self::saturate) state instead, which
+    /// This is [`saturate`](Self::saturate) without the state: the input is
+    /// untouched, so a clause set can be solved repeatedly (for example after
+    /// adding more clauses), and each call starts over and costs the whole
+    /// set. A consumer that adds clauses in batches and asks after each one
+    /// should keep the [`saturate`](Self::saturate) state instead, which
     /// costs each batch only its own size.
     #[must_use]
-    pub fn derivable(&self) -> Vec<bool> {
-        let mut derived = vec![false; self.fact_count];
-        let mut remaining = self.body_lens.clone();
-        // Facts derived but not yet propagated. LIFO: the order in which a
-        // fixpoint is reached is immaterial to the fixpoint itself.
-        let mut worklist: Vec<usize> = Vec::new();
-
-        // Axioms seed the saturation.
-        for (clause, &count) in remaining.iter().enumerate() {
-            if count == 0 {
-                derive(self.heads[clause], &mut derived, &mut worklist);
-            }
-        }
-
-        while let Some(fact) = worklist.pop() {
-            for &clause in &self.dependents[fact] {
-                // Never underflows: a fact enters the worklist at most once,
-                // so a clause is decremented at most once per body occurrence.
-                let count = &mut remaining[clause];
-                *count -= 1;
-                if *count == 0 {
-                    derive(self.heads[clause], &mut derived, &mut worklist);
-                }
-            }
-        }
-
-        derived
+    pub fn derivable(&self) -> DenseBits {
+        let mut saturation = HornSaturation::new(self);
+        saturation.fold_in(self);
+        saturation.derived
     }
 
     /// Start an incremental saturation of the clauses so far.
@@ -195,14 +174,7 @@ impl HornClauses {
     /// ```
     #[must_use]
     pub fn saturate(&self) -> HornSaturation {
-        let mut saturation = HornSaturation {
-            derived: DenseBits::new(self.fact_count),
-            remaining: Vec::with_capacity(self.heads.len()),
-            solved_clauses: 0,
-            solved_occurrences: 0,
-            #[cfg(test)]
-            decrements: 0,
-        };
+        let mut saturation = HornSaturation::new(self);
         saturation.update(self);
         saturation
     }
@@ -238,6 +210,18 @@ pub struct HornSaturation {
 }
 
 impl HornSaturation {
+    /// A state that has folded in nothing yet.
+    fn new(clauses: &HornClauses) -> Self {
+        Self {
+            derived: DenseBits::new(clauses.fact_count),
+            remaining: Vec::with_capacity(clauses.heads.len()),
+            solved_clauses: 0,
+            solved_occurrences: 0,
+            #[cfg(test)]
+            decrements: 0,
+        }
+    }
+
     /// Fold in every clause and fact added to `clauses` since the last call,
     /// and propagate; returns the newly derived facts in ascending order.
     ///
@@ -252,6 +236,14 @@ impl HornSaturation {
     /// already folded in, which means it is not the set the state was made
     /// from.
     pub fn update(&mut self, clauses: &HornClauses) -> Vec<usize> {
+        let mut derived = self.fold_in(clauses);
+        derived.sort_unstable();
+        derived
+    }
+
+    /// [`update`](Self::update), with the newly derived facts in the order
+    /// they were derived.
+    fn fold_in(&mut self, clauses: &HornClauses) -> Vec<usize> {
         let clause_count = clauses.heads.len();
         assert!(
             self.solved_clauses <= clause_count && self.derived.len() <= clauses.fact_count,
@@ -261,13 +253,19 @@ impl HornSaturation {
 
         // Count every new body against the facts derived before this call and
         // only then derive: a fact derived during the call is propagated once
-        // to every clause that counted it, the new ones included.
-        for clause in self.solved_clauses..clause_count {
-            let end = self.solved_occurrences + clauses.body_lens[clause];
-            let body = &clauses.bodies[self.solved_occurrences..end];
-            self.solved_occurrences = end;
-            let pending = body.iter().filter(|&&fact| !self.derived.get(fact)).count();
-            self.remaining.push(pending);
+        // to every clause that counted it, the new ones included. Before the
+        // first clause nothing is derived, so every body counts in full.
+        if self.solved_clauses == 0 {
+            self.remaining.extend_from_slice(&clauses.body_lens);
+            self.solved_occurrences = clauses.bodies.len();
+        } else {
+            for clause in self.solved_clauses..clause_count {
+                let end = self.solved_occurrences + clauses.body_lens[clause];
+                let body = &clauses.bodies[self.solved_occurrences..end];
+                self.solved_occurrences = end;
+                let pending = body.iter().filter(|&&fact| !self.derived.get(fact)).count();
+                self.remaining.push(pending);
+            }
         }
         // The newly derived facts, which double as a first-in first-out
         // worklist: each is pushed once, when it is first derived.
@@ -297,7 +295,6 @@ impl HornSaturation {
                 }
             }
         }
-        derived.sort_unstable();
         derived
     }
 
@@ -396,17 +393,16 @@ mod stored {
     }
 }
 
-/// Mark `fact` derived, enqueueing it the first time.
-fn derive(fact: usize, derived: &mut [bool], worklist: &mut Vec<usize>) {
-    if !derived[fact] {
-        derived[fact] = true;
-        worklist.push(fact);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What `derivable` reports, as one flag per fact.
+    fn row(clauses: &HornClauses) -> Vec<bool> {
+        let derived = clauses.derivable();
+        assert_eq!(derived.len(), clauses.fact_count);
+        (0..derived.len()).map(|fact| derived.get(fact)).collect()
+    }
 
     #[test]
     fn axiom_chains_saturate() {
@@ -415,10 +411,10 @@ mod tests {
         clauses.add_clause(0, &[]);
         clauses.add_clause(1, &[0]);
         clauses.add_clause(2, &[1]);
-        assert_eq!(clauses.derivable(), vec![true, true, true]);
+        assert_eq!(row(&clauses), vec![true, true, true]);
 
         // Solving does not consume or mutate the input.
-        assert_eq!(clauses.derivable(), vec![true, true, true]);
+        assert_eq!(row(&clauses), vec![true, true, true]);
     }
 
     #[test]
@@ -427,11 +423,11 @@ mod tests {
         let mut clauses = HornClauses::new(3);
         clauses.add_clause(0, &[]);
         clauses.add_clause(2, &[0, 1]);
-        assert_eq!(clauses.derivable(), vec![true, false, false]);
+        assert_eq!(row(&clauses), vec![true, false, false]);
 
         // Supplying the missing conjunct unblocks the head.
         clauses.add_clause(1, &[]);
-        assert_eq!(clauses.derivable(), vec![true, true, true]);
+        assert_eq!(row(&clauses), vec![true, true, true]);
     }
 
     #[test]
@@ -441,7 +437,7 @@ mod tests {
         clauses.add_clause(1, &[]);
         clauses.add_clause(2, &[0]);
         clauses.add_clause(2, &[1]);
-        assert_eq!(clauses.derivable(), vec![false, true, true]);
+        assert_eq!(row(&clauses), vec![false, true, true]);
     }
 
     #[test]
@@ -450,18 +446,18 @@ mod tests {
         let mut clauses = HornClauses::new(2);
         clauses.add_clause(0, &[1]);
         clauses.add_clause(1, &[0]);
-        assert_eq!(clauses.derivable(), vec![false, false]);
+        assert_eq!(row(&clauses), vec![false, false]);
 
         // Grounding either one derives both.
         clauses.add_clause(0, &[]);
-        assert_eq!(clauses.derivable(), vec![true, true]);
+        assert_eq!(row(&clauses), vec![true, true]);
     }
 
     #[test]
     fn a_self_dependent_clause_alone_derives_nothing() {
         let mut clauses = HornClauses::new(1);
         clauses.add_clause(0, &[0]);
-        assert_eq!(clauses.derivable(), vec![false]);
+        assert_eq!(row(&clauses), vec![false]);
     }
 
     #[test]
@@ -471,12 +467,12 @@ mod tests {
         let mut clauses = HornClauses::new(2);
         clauses.add_clause(1, &[]);
         clauses.add_clause(0, &[1, 1]);
-        assert_eq!(clauses.derivable(), vec![true, true]);
+        assert_eq!(row(&clauses), vec![true, true]);
 
         // The same body without the axiom stays blocked.
         let mut blocked = HornClauses::new(2);
         blocked.add_clause(0, &[1, 1]);
-        assert_eq!(blocked.derivable(), vec![false, false]);
+        assert_eq!(row(&blocked), vec![false, false]);
     }
 
     #[test]
@@ -499,14 +495,14 @@ mod tests {
                 let (head, body) = rules[(rotation + offset) % rules.len()];
                 clauses.add_clause(head, body);
             }
-            assert_eq!(clauses.derivable(), expected, "rotation {rotation}");
+            assert_eq!(row(&clauses), expected, "rotation {rotation}");
         }
     }
 
     #[test]
     fn an_empty_fact_space_is_legal() {
         let clauses = HornClauses::new(0);
-        assert_eq!(clauses.derivable(), [] as [bool; 0]);
+        assert_eq!(row(&clauses), [] as [bool; 0]);
     }
 
     #[test]
@@ -523,10 +519,7 @@ mod tests {
 
     /// The facts `derivable` reports, as ascending ids.
     fn derivable_ids(clauses: &HornClauses) -> Vec<usize> {
-        let derivable = clauses.derivable();
-        (0..derivable.len())
-            .filter(|&fact| derivable[fact])
-            .collect()
+        clauses.derivable().ones().collect()
     }
 
     #[test]
@@ -636,7 +629,7 @@ mod tests {
         clauses.grow_facts(3);
         clauses.grow_facts(2);
         clauses.add_clause(2, &[0]);
-        assert_eq!(clauses.derivable(), [true, false, true]);
+        assert_eq!(row(&clauses), [true, false, true]);
         assert_eq!(state.update(&clauses), [2]);
         assert_eq!(state.derived().len(), 3);
         assert!(!state.is_derived(1));
@@ -677,10 +670,7 @@ mod tests {
         assert!(state.decrements <= total_body);
         // Solving from scratch after each batch costs about B times as much.
         assert!(rescan >= state.decrements * (BATCHES * 9 / 10));
-        assert_eq!(
-            state.derived().count_ones(),
-            clauses.derivable().iter().filter(|&&yes| yes).count()
-        );
+        assert_eq!(state.derived(), &clauses.derivable());
     }
 
     #[test]

@@ -2,19 +2,23 @@
 //!
 //! Both renderers — [`dot`](super::dot) and [`text`](super::text) — ask the
 //! same question of a consumer: given one identity and the payload it
-//! addresses, what text stands for it? [`Label`] is that question, and the
-//! two supplied answers cover the ordinary cases: render nothing, or render
-//! the payload with [`Display`](core::fmt::Display).
+//! addresses, what text stands for it? A hook is any closure or function item
+//! of the shape `for<'d> Fn(Id, &'d Data) -> Cow<'d, str>`, and the two
+//! supplied answers cover the ordinary cases: render nothing, or render the
+//! payload with [`Display`](core::fmt::Display).
 
 extern crate alloc;
 use alloc::borrow::Cow;
 use alloc::format;
 use core::fmt;
 
-/// Text standing for one identity and the payload it addresses.
+/// Text standing for one identity and the payload it addresses, as a plain
+/// function pointer.
 ///
-/// The return may borrow the payload, so a store that already holds rendered
-/// text labels its entities without copying.
+/// This is the hook type of the default styles (`plain()` and the store's
+/// own), which have to name their hooks. A consumer style takes any closure of
+/// the same shape. The return may borrow the payload, so a store that already
+/// holds rendered text labels its entities without copying.
 pub type Label<Id, Data> = for<'d> fn(Id, &'d Data) -> Cow<'d, str>;
 
 /// A label hook that renders nothing.
@@ -32,32 +36,4 @@ where
     Data: fmt::Display + ?Sized,
 {
     Cow::Owned(format!("{data}"))
-}
-
-/// Bind a label closure to the higher-ranked signature the writers require.
-///
-/// A closure that returns text built from the payload it was handed infers
-/// one fixed payload lifetime unless its signature is stated first. Passing
-/// it through this function states it:
-///
-/// ```
-/// use std::borrow::Cow;
-/// use cfglib::{Graph, NodeId, TextStyle, to_text};
-///
-/// let mut graph = Graph::<u32, ()>::new();
-/// graph.add_node(7);
-///
-/// let labels = cfglib::bind_label::<NodeId, u32, _>(|_, value| {
-///     Cow::Owned(format!("{value:#x}"))
-/// });
-/// let text = to_text(&graph, &TextStyle::new(labels, cfglib::no_label));
-/// assert_eq!(text, "n0 0x7\n");
-/// ```
-#[must_use]
-pub fn bind_label<Id, Data, Hook>(hook: Hook) -> Hook
-where
-    Data: ?Sized,
-    Hook: for<'d> Fn(Id, &'d Data) -> Cow<'d, str>,
-{
-    hook
 }

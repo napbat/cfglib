@@ -2,9 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use cfglib::{
-    BlockId, Cfg, ControlNode, ControlTree, DominatorTree, LiftReport, detect_loops_tagged,
-};
+use cfglib::{BlockId, Cfg, ControlNode, ControlTree, DominatorTree, LoopForest};
 
 use crate::coverage::{
     assert_each_block_in_exactly_one_leaf, assert_instruction_walk_is_a_partition,
@@ -20,13 +18,9 @@ fn run_checks(
     cfg: &Cfg<&'static str>,
     covered: &BTreeSet<BlockId>,
     check_flow: bool,
-) -> (ControlTree, LiftReport) {
-    let (tree, report) = ControlTree::compute_with_report(cfg);
-    assert_eq!(
-        ControlTree::compute(cfg),
-        tree,
-        "compute is compute_with_report without the report"
-    );
+) -> ControlTree {
+    let tree = ControlTree::compute(cfg);
+    let report = tree.report();
     assert_well_formed(&tree);
     if report.gotos.is_empty() {
         // Goto labels are applied after the walk, which is its own finding.
@@ -35,14 +29,14 @@ fn run_checks(
     assert_each_block_in_exactly_one_leaf(cfg, &tree, covered);
     assert_spans_tile_each_block(cfg, &tree, covered);
     assert_instruction_walk_is_a_partition(cfg, &tree, covered);
-    assert_report_matches_tree(&tree, &report);
+    assert_report_matches_tree(&tree, report);
     if report.unstructured_regions.is_empty() {
         assert_exception_edges_are_expressed_by_nesting(cfg, &tree);
     }
     if check_flow {
-        assert_flow_matches_graph(cfg, &tree, &report, covered);
+        assert_flow_matches_graph(cfg, &tree, report, covered);
     }
-    (tree, report)
+    tree
 }
 
 /// Structure `cfg` and hold the result to every invariant any tree has, whether
@@ -51,7 +45,7 @@ fn run_checks(
 pub fn structure_and_check_covering(
     cfg: &Cfg<&'static str>,
     covered: &BTreeSet<BlockId>,
-) -> (ControlTree, LiftReport) {
+) -> ControlTree {
     run_checks(cfg, covered, true)
 }
 
@@ -61,24 +55,24 @@ pub fn structure_and_check_covering(
 pub fn structure_and_check_shape_only(
     cfg: &Cfg<&'static str>,
     covered: &BTreeSet<BlockId>,
-) -> (ControlTree, LiftReport) {
+) -> ControlTree {
     run_checks(cfg, covered, false)
 }
 
 /// [`structure_and_check`] for a graph with a dangling goto: the goto's target
 /// holds nothing the tree can follow, so the flow beyond it is not implied.
-pub fn structure_and_check_dangling(cfg: &Cfg<&'static str>) -> (ControlTree, LiftReport) {
-    let (tree, report) = run_checks(cfg, &reachable_blocks(cfg), false);
-    assert_ne!(report.unresolved_labels, []);
-    (tree, report)
+pub fn structure_and_check_dangling(cfg: &Cfg<&'static str>) -> ControlTree {
+    let tree = run_checks(cfg, &reachable_blocks(cfg), false);
+    assert_ne!(tree.report().unresolved_labels, []);
+    tree
 }
 
 /// [`structure_and_check_covering`] for a graph whose covered blocks are the
 /// ones the entry reaches, and whose loops are the natural loops a dominator
 /// tree proves, honoring explicit `Back` tags as the structurer does: the tree
 /// holds one `Loop` node per header.
-pub fn structure_and_check(cfg: &Cfg<&'static str>) -> (ControlTree, LiftReport) {
-    let (tree, report) = structure_and_check_covering(cfg, &reachable_blocks(cfg));
+pub fn structure_and_check(cfg: &Cfg<&'static str>) -> ControlTree {
+    let tree = structure_and_check_covering(cfg, &reachable_blocks(cfg));
     let mut headers: Vec<BlockId> = tree
         .preorder()
         .filter_map(|id| match *tree.node(id) {
@@ -86,12 +80,10 @@ pub fn structure_and_check(cfg: &Cfg<&'static str>) -> (ControlTree, LiftReport)
             _ => None,
         })
         .collect();
-    let mut natural: Vec<BlockId> = detect_loops_tagged(cfg, &DominatorTree::compute(cfg))
-        .into_iter()
-        .map(|natural| natural.header)
-        .collect();
+    let loops = LoopForest::compute(cfg, &DominatorTree::compute(cfg));
+    let mut natural: Vec<BlockId> = loops.loops().map(|lp| loops.header(lp)).collect();
     headers.sort();
     natural.sort();
     assert_eq!(headers, natural, "one Loop node per natural loop\n{tree:?}");
-    (tree, report)
+    tree
 }

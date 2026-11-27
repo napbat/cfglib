@@ -4,17 +4,16 @@ use core::fmt::Debug;
 use core::hash::Hash;
 
 use crate::ir::rtl::{Bits, Dialect};
-use crate::memory::{MemoryAccessKind, MemoryAtomicity};
+use crate::memory::AccessMode;
 
 use super::vocabulary::StateTouch;
 
 /// The memory access that one effect operation makes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AccessShape<P> {
-    /// Whether the operation reads, writes, or reads and writes memory.
-    pub kind: MemoryAccessKind,
-    /// Whether the access is atomic.
-    pub atomicity: MemoryAtomicity,
+    /// Whether the operation reads, writes, or reads and writes memory, and
+    /// whether the access is atomic.
+    pub mode: AccessMode,
     /// The address space.
     pub space: P,
     /// The number of accessed bytes.
@@ -41,9 +40,16 @@ pub struct SelectShape {
 /// What one register-transfer dialect tells about the effects of its
 /// operations.
 ///
-/// This is the only knowledge of a dialect that the
-/// [`Summarizer`](super::Summarizer) and the [`StatementTree`](super::StatementTree) use. A
+/// This is the only knowledge of a dialect that [`Effect::compute`](super::Effect::compute)
+/// and [`StatementTree::compute`](super::StatementTree::compute) use. A
 /// generator or a hand-written table implements it beside the dialect.
+///
+/// The trait asks nothing that only one consumer knows. A reader that knows
+/// the value of an operator without operands, such as a value that moves
+/// with its module after the reader has placed the module, substitutes the
+/// value in the computed expressions. A reader that treats the outcomes of
+/// one effect apart finds them by the position of the effect (see
+/// [`RaiseOrigin`](super::RaiseOrigin)).
 pub trait DialectEffects<D: Dialect> {
     /// An address space of a memory access, such as the data space of a
     /// machine or the shared memory of a shader.
@@ -72,15 +78,6 @@ pub trait DialectEffects<D: Dialect> {
         StateTouch::Unrestricted
     }
 
-    /// Returns whether `operation` is the check that the dialect runs at the
-    /// start of each instruction. A view can hide the traffic of this check.
-    ///
-    /// The default is `false`.
-    fn is_instruction_check(&self, operation: &D::EffectOp) -> bool {
-        let _ = operation;
-        false
-    }
-
     /// Returns whether `operator` selects one of two values, and where its
     /// operands are.
     ///
@@ -93,15 +90,4 @@ pub trait DialectEffects<D: Dialect> {
 
     /// Returns the name of `operator`, for expressions.
     fn operator_name(&self, operator: &D::Operator) -> &'static str;
-
-    /// Returns the number that `operator` stands for, when it takes no
-    /// operand and the reader knows its value, such as a value that moves
-    /// with its module after the reader has placed the module. The
-    /// summarizer shows the operator as a constant of this value.
-    ///
-    /// The default is `None`: the operator stays an operator.
-    fn constant(&self, operator: &D::Operator) -> Option<u64> {
-        let _ = operator;
-        None
-    }
 }

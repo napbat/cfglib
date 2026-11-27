@@ -1,10 +1,8 @@
 //! `HornClauses` against naive forward chaining, and `min_label_relaxation` against Bellman-Ford.
 
-use cfglib::{
-    EdgeId, EdgeRecord, Graph, HornClauses, NodeId, TraversalDirection, min_label_relaxation,
-};
+use cfglib::{DenseBits, Direction, EdgeId, Graph, HornClauses, NodeId, min_label_relaxation};
 
-use crate::Lcg;
+use crate::rng::Rng;
 
 /// Repeat "derive every head whose body is derived" until nothing changes.
 fn forward_chaining(fact_count: usize, clauses: &[(usize, Vec<usize>)]) -> Vec<bool> {
@@ -31,8 +29,13 @@ fn clause_set(fact_count: usize, clauses: &[(usize, Vec<usize>)]) -> HornClauses
     set
 }
 
+/// The set as one `bool` per fact of its universe, to compare against a row written by hand.
+fn row(bits: &DenseBits) -> Vec<bool> {
+    (0..bits.len()).map(|fact| bits.get(fact)).collect()
+}
+
 /// Random clauses: a quarter are axioms, and bodies may repeat a fact.
-fn random_clauses(rng: &mut Lcg, fact_count: usize, count: usize) -> Vec<(usize, Vec<usize>)> {
+fn random_clauses(rng: &mut Rng, fact_count: usize, count: usize) -> Vec<(usize, Vec<usize>)> {
     (0..count)
         .map(|_| {
             let head = rng.below(fact_count);
@@ -47,10 +50,10 @@ fn random_clauses(rng: &mut Lcg, fact_count: usize, count: usize) -> Vec<(usize,
 fn derivability_matches_naive_forward_chaining_on_random_clause_sets() {
     let mut mixed = 0;
     for seed in 1..=40 {
-        let mut rng = Lcg(seed);
+        let mut rng = Rng::lcg(seed, 33);
         let facts = 30;
         let clauses = random_clauses(&mut rng, facts, 45);
-        let derived = clause_set(facts, &clauses).derivable();
+        let derived = row(&clause_set(facts, &clauses).derivable());
         assert_eq!(derived, forward_chaining(facts, &clauses), "seed {seed}");
         let count = derived.iter().filter(|&&yes| yes).count();
         if count > 0 && count < facts {
@@ -66,7 +69,7 @@ fn derivability_matches_naive_forward_chaining_on_random_clause_sets() {
 #[test]
 fn the_answer_does_not_depend_on_the_order_clauses_were_added() {
     for seed in 1..=10 {
-        let mut rng = Lcg(seed + 100);
+        let mut rng = Rng::lcg(seed + 100, 33);
         let clauses = random_clauses(&mut rng, 25, 40);
         let expected = clause_set(25, &clauses).derivable();
 
@@ -91,7 +94,7 @@ fn the_answer_does_not_depend_on_the_order_clauses_were_added() {
 #[test]
 fn a_saturation_updated_after_each_batch_matches_forward_chaining_on_the_clauses_so_far() {
     for seed in 1..=30 {
-        let mut rng = Lcg(seed + 200);
+        let mut rng = Rng::lcg(seed + 200, 33);
         let clauses = random_clauses(&mut rng, 30, 60);
         let mut set = HornClauses::new(20);
         let mut state = set.saturate();
@@ -117,7 +120,7 @@ fn a_saturation_updated_after_each_batch_matches_forward_chaining_on_the_clauses
                 .collect();
             let newly = state.update(&set);
             let oracle = forward_chaining(facts, &added);
-            assert_eq!(set.derivable(), oracle, "seed {seed}");
+            assert_eq!(row(&set.derivable()), oracle, "seed {seed}");
             let derived: Vec<bool> = (0..facts).map(|fact| state.is_derived(fact)).collect();
             assert_eq!(
                 derived,
@@ -135,7 +138,7 @@ fn a_saturation_updated_after_each_batch_matches_forward_chaining_on_the_clauses
 
 #[test]
 fn adding_a_clause_only_grows_the_derivable_set_and_solving_changes_nothing() {
-    let mut rng = Lcg(7);
+    let mut rng = Rng::lcg(7, 33);
     let clauses = random_clauses(&mut rng, 30, 40);
     let mut set = clause_set(30, &clauses);
     let before = set.derivable();
@@ -148,9 +151,9 @@ fn adding_a_clause_only_grows_the_derivable_set_and_solving_changes_nothing() {
     for round in 0..10 {
         set.add_clause(rng.below(30), &[rng.below(30), rng.below(30)]);
         let after = set.derivable();
-        for (fact, (&was, &is)) in before.iter().zip(&after).enumerate() {
+        for fact in before.ones() {
             assert!(
-                !was || is,
+                after.get(fact),
                 "round {round}: fact {fact} stopped being derivable"
             );
         }
@@ -169,7 +172,10 @@ fn grammar_nullability_of_a_small_language_is_derived_by_hand() {
     grammar.add_clause(opt, &[]);
     grammar.add_clause(block, &[stmts, opt]);
 
-    assert_eq!(grammar.derivable(), [true, true, false, true, false, true]);
+    assert_eq!(
+        row(&grammar.derivable()),
+        [true, true, false, true, false, true]
+    );
 }
 
 #[test]
@@ -184,13 +190,13 @@ fn a_cycle_of_callers_without_a_grounded_member_is_never_derived_dead() {
     dead.add_clause(5, &[4]);
 
     assert_eq!(
-        dead.derivable(),
+        row(&dead.derivable()),
         [false, false, false, false, true, true],
         "the least fixpoint has no ground for b and c"
     );
     dead.add_clause(2, &[]);
     assert_eq!(
-        dead.derivable(),
+        row(&dead.derivable()),
         [false, false, true, true, true, true],
         "grounding one derives both"
     );
@@ -200,15 +206,15 @@ fn a_cycle_of_callers_without_a_grounded_member_is_never_derived_dead() {
 fn a_repeated_body_fact_counts_once_per_occurrence_and_one_derivation_discharges_all() {
     let mut set = HornClauses::new(3);
     set.add_clause(0, &[1, 1, 2]);
-    assert_eq!(set.derivable(), [false, false, false]);
+    assert_eq!(row(&set.derivable()), [false, false, false]);
     set.add_clause(1, &[]);
     assert_eq!(
-        set.derivable(),
+        row(&set.derivable()),
         [false, true, false],
         "fact 2 is still missing"
     );
     set.add_clause(2, &[]);
-    assert_eq!(set.derivable(), [true, true, true]);
+    assert_eq!(row(&set.derivable()), [true, true, true]);
 }
 
 #[test]
@@ -223,11 +229,11 @@ fn the_empty_fact_space_and_clones_are_ordinary() {
     set.add_clause(1, &[0]);
     assert_ne!(copy, set);
     assert_eq!(
-        copy.derivable(),
+        row(&copy.derivable()),
         [true, false],
         "the clone does not see the later clause"
     );
-    assert_eq!(set.derivable(), [true, true]);
+    assert_eq!(row(&set.derivable()), [true, true]);
 }
 
 #[test]
@@ -310,7 +316,7 @@ type ModelEdge = (usize, usize, Step);
 
 /// A weighted graph with removed nodes and edges, with the live edges in the model's terms.
 fn weighted_scenario(seed: u64) -> (Graph<(), Step>, Vec<ModelEdge>) {
-    let mut rng = Lcg(seed);
+    let mut rng = Rng::lcg(seed, 33);
     let nodes = 24;
     let mut graph = Graph::new();
     let ids: Vec<NodeId> = (0..nodes).map(|_| graph.add_node(())).collect();
@@ -346,7 +352,7 @@ fn weighted_scenario(seed: u64) -> (Graph<(), Step>, Vec<ModelEdge>) {
 fn relaxed(
     graph: &Graph<(), Step>,
     seeds: &[(usize, u32, u32)],
-    direction: TraversalDirection,
+    direction: Direction,
 ) -> Vec<Option<Effort>> {
     min_label_relaxation(
         graph,
@@ -354,7 +360,7 @@ fn relaxed(
             .iter()
             .map(|&(node, hops, units)| (NodeId::from_index(node), Effort { hops, units })),
         direction,
-        |edge: &EdgeRecord<Step>, label: &Effort| advance(label, *edge.payload()),
+        |edge, label| advance(label, *edge.data()),
     )
 }
 
@@ -370,10 +376,7 @@ fn relaxation_matches_bellman_ford_in_both_directions_on_graphs_with_removed_ent
             (live[9], 1, 0),
             (live[5], 2, 1),
         ];
-        for (direction, forward) in [
-            (TraversalDirection::Outgoing, true),
-            (TraversalDirection::Incoming, false),
-        ] {
+        for (direction, forward) in [(Direction::Forward, true), (Direction::Backward, false)] {
             let actual = relaxed(&graph, &seeds, direction);
             let expected = bellman_ford(24, &edges, &seeds, forward);
             assert_eq!(actual, expected, "seed {seed}, {direction:?}");
@@ -387,7 +390,7 @@ fn the_scenarios_have_improvements_blocked_edges_and_unreachable_nodes() {
     let (graph, edges) = weighted_scenario(3);
     assert!(edges.iter().any(|(_, _, step)| *step == Step::Closed));
     let live: Vec<usize> = graph.node_ids().map(NodeId::index).collect();
-    let labels = relaxed(&graph, &[(live[0], 0, 0)], TraversalDirection::Outgoing);
+    let labels = relaxed(&graph, &[(live[0], 0, 0)], Direction::Forward);
     let reached = labels.iter().flatten().count();
     assert!(
         reached > 3 && reached < graph.node_count(),
@@ -415,12 +418,10 @@ fn diamond_with_shortcut() -> (Graph<&'static str, u32>, [NodeId; 4]) {
 #[test]
 fn a_smaller_label_reexpands_a_node_visited_earlier_with_a_larger_one() {
     let (graph, [s, a, b, t]) = diamond_with_shortcut();
-    let distances = min_label_relaxation(
-        &graph,
-        [(s, 0_u32)],
-        TraversalDirection::Outgoing,
-        |edge, label| Some(label + edge.payload()),
-    );
+    let distances =
+        min_label_relaxation(&graph, [(s, 0_u32)], Direction::Forward, |edge, label| {
+            Some(label + edge.data())
+        });
     assert_eq!(distances[s.index()], Some(0));
     assert_eq!(distances[a.index()], Some(1));
     assert_eq!(
@@ -439,15 +440,11 @@ fn a_smaller_label_reexpands_a_node_visited_earlier_with_a_larger_one() {
 fn incoming_relaxation_hands_the_stored_edge_to_the_transfer_and_expands_from_the_target() {
     let (graph, [s, a, b, t]) = diamond_with_shortcut();
     let mut first_call = None;
-    let distances = min_label_relaxation(
-        &graph,
-        [(t, 0_u32)],
-        TraversalDirection::Incoming,
-        |edge, label| {
+    let distances =
+        min_label_relaxation(&graph, [(t, 0_u32)], Direction::Backward, |edge, label| {
             first_call.get_or_insert((edge.source(), edge.target()));
-            Some(label + edge.payload())
-        },
-    );
+            Some(label + edge.data())
+        });
     assert_eq!(distances[t.index()], Some(0));
     assert_eq!(distances[b.index()], Some(1));
     assert_eq!(distances[a.index()], Some(2), "a -> b -> t beats a -> t");
@@ -474,8 +471,8 @@ fn parallel_edges_competing_seeds_and_blocked_edges_resolve_to_the_minimum() {
     let labels = min_label_relaxation(
         &graph,
         [(a, 5_u32), (a, 1), (a, 9)],
-        TraversalDirection::Outgoing,
-        |edge, label| edge.payload().map(|cost| label + cost),
+        Direction::Forward,
+        |edge, label| edge.data().map(|cost| label + cost),
     );
     assert_eq!(
         labels,
@@ -494,8 +491,8 @@ fn a_node_no_seed_reaches_has_no_label_and_two_seeds_label_two_regions() {
     let labels = min_label_relaxation(
         &graph,
         [(nodes[0], 0_u32), (nodes[3], 10)],
-        TraversalDirection::Outgoing,
-        |edge, label| Some(label + edge.payload()),
+        Direction::Forward,
+        |edge, label| Some(label + edge.data()),
     );
     assert_eq!(
         labels,
@@ -505,7 +502,7 @@ fn a_node_no_seed_reaches_has_no_label_and_two_seeds_label_two_regions() {
     let none = min_label_relaxation(
         &graph,
         Vec::<(NodeId, u32)>::new(),
-        TraversalDirection::Outgoing,
+        Direction::Forward,
         |_, label| Some(*label),
     );
     assert!(none.iter().all(Option::is_none));
@@ -519,7 +516,7 @@ fn a_seed_outside_the_graph_panics() {
     let _ = min_label_relaxation(
         &graph,
         [(NodeId::from_index(0), 0_u32)],
-        TraversalDirection::Outgoing,
+        Direction::Forward,
         |_, label| Some(*label),
     );
 }

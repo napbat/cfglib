@@ -4,9 +4,9 @@ use cfglib::ir::rtl::{
     BitSlice, Bits, Control, InstructionBuilder, Place, Raise, RecordView, Selection, Statement,
     ValueRange, WriteTarget,
 };
-use cfglib::{CaptureBuilder, Captured, CapturedValue, DenseId};
+use cfglib::{CaptureBuilder, Captured, CapturedValue};
 
-use crate::wren::{Eff, Fault, Op, Policy, Reg, Undef, Wren, bits, capture, constant, take};
+use crate::wren::{Eff, Fault, Op, Policy, Reg, Undef, Wren, bits, capture, constant, take, whole};
 
 fn value(index: usize) -> CapturedValue {
     CapturedValue::from_index(index)
@@ -15,9 +15,9 @@ fn value(index: usize) -> CapturedValue {
 /// Emits one statement of each kind and jumps to the indexed read.
 fn emit_every_statement(
     b: &mut CaptureBuilder<'_, Wren>,
-    candidates: &[Place<Wren>; 2],
+    candidates: &[Place<Reg>; 2],
 ) -> Control<CapturedValue> {
-    let index = b.read(Selection::Direct(Place::whole(Reg::Z)));
+    let index = b.read(Selection::Direct(whole(Reg::Z)));
     let slot = b.read(Selection::FiniteIndexed { index, candidates });
     let element = b.read(Selection::SparseIndexed {
         bank: Reg::Bank,
@@ -64,14 +64,14 @@ fn emit_every_statement(
 
 #[test]
 fn a_capture_gives_back_every_statement_with_dense_values() {
-    let candidates = [Place::whole(Reg::Slot(0)), Place::whole(Reg::Slot(1))];
+    let candidates = [whole(Reg::Slot(0)), whole(Reg::Slot(1))];
     let captured = capture(|b| emit_every_statement(b, &candidates));
 
     let plan = [take(0, 16, value(4), 0)];
     let expected = [
         Statement::Read {
             result: value(0),
-            source: Selection::Direct(Place::whole(Reg::Z)),
+            source: Selection::Direct(whole(Reg::Z)),
         },
         Statement::Read {
             result: value(1),
@@ -184,7 +184,7 @@ fn begin_starts_a_new_instruction_with_values_from_zero() {
     assert_eq!(captured.finished_control(), None);
 
     let mut builder = captured.begin();
-    let first = builder.read(Selection::Direct(Place::whole(Reg::A)));
+    let first = builder.read(Selection::Direct(whole(Reg::A)));
     builder
         .finish(Control::Return { target: first })
         .expect("a capture accepts every record");

@@ -10,15 +10,14 @@
 //! time, so the whole check is O(n + m).
 
 extern crate alloc;
-use alloc::vec;
 use alloc::vec::Vec;
 
 use super::{SplDecomposition, SplError, SplNode, SplNodeId};
 use crate::block::BlockId;
 use crate::cfg::Cfg;
-
-/// No stub, at the end of a list.
-const END: u32 = u32::MAX;
+use crate::graph::epoch::EpochMarks;
+use crate::graph::fanout::DenseFanout;
+use crate::identity::{NO_INDEX, slot, word};
 
 /// Check that the grammar's construction of `decomposition` gives exactly the
 /// edges of `cfg`, parallel edges counted once, from the entry.
@@ -38,38 +37,28 @@ pub(super) fn verify<I, E>(
 
     // The targets the construction makes, grouped by source.
     let bound = cfg.block_bound();
-    let mut starts = vec![0_usize; bound + 1];
-    for &(source, _) in &made {
-        starts[source.index() + 1] += 1;
-    }
-    for index in 1..starts.len() {
-        starts[index] += starts[index - 1];
-    }
-    let mut cursor = starts.clone();
-    let mut targets = vec![cfg.entry(); made.len()];
-    for &(source, target) in &made {
-        targets[cursor[source.index()]] = target;
-        cursor[source.index()] += 1;
-    }
+    let targets: DenseFanout<BlockId, BlockId> = DenseFanout::from_pairs(bound, made);
 
-    // Each source stamps its targets in the graph and in the construction.
-    let mut in_graph = vec![usize::MAX; bound];
-    let mut in_made = vec![usize::MAX; bound];
+    // Each source marks its targets in the graph and in the construction.
+    let mut in_graph = EpochMarks::new(bound);
+    let mut in_made = EpochMarks::new(bound);
     for source in cfg.block_ids() {
-        let stamp = source.index();
-        for &target in &targets[starts[stamp]..starts[stamp + 1]] {
-            in_made[target.index()] = stamp;
+        let made_here = targets.get(source);
+        in_graph.reset();
+        in_made.reset();
+        for &target in made_here {
+            in_made.mark(target.index());
         }
         for edge in cfg.outgoing(source) {
             let target = cfg.edge(edge).target();
-            if in_made[target.index()] != stamp {
+            if !in_made.is_marked(target.index()) {
                 return Err(SplError::UnplacedEdge(edge));
             }
-            in_graph[target.index()] = stamp;
+            in_graph.mark(target.index());
         }
-        if targets[starts[stamp]..starts[stamp + 1]]
+        if made_here
             .iter()
-            .any(|target| in_graph[target.index()] != stamp)
+            .any(|target| !in_graph.is_marked(target.index()))
         {
             return Err(cfg
                 .outgoing(source)
@@ -80,7 +69,8 @@ pub(super) fn verify<I, E>(
     Ok(())
 }
 
-/// A list of stubs, as the first and last of the arena's links.
+/// A list of stubs, as the first and last of the arena's links, both
+/// [`NO_INDEX`] for the empty list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Stubs {
     head: u32,
@@ -89,8 +79,8 @@ struct Stubs {
 
 impl Stubs {
     const EMPTY: Self = Self {
-        head: END,
-        tail: END,
+        head: NO_INDEX,
+        tail: NO_INDEX,
     };
 }
 
@@ -207,9 +197,9 @@ impl Construction {
             SplNode::Parallel { branch, arms } => {
                 // A parallel takes the one edge of its branch block that
                 // falls into it, and gives each arm one.
-                let alone = incoming.head != END
+                let alone = incoming.head != NO_INDEX
                     && incoming.head == incoming.tail
-                    && self.block[incoming.head as usize] == branch;
+                    && self.block[slot(incoming.head)] == branch;
                 if !alone {
                     return Err(SplError::UnplacedBlock(branch));
                 }
@@ -287,9 +277,9 @@ impl Construction {
 
     /// A list of one stub leaving `block`.
     fn single(&mut self, block: BlockId) -> Stubs {
-        let stub = u32::try_from(self.block.len()).expect("the stub count fits in u32");
+        let stub = word(self.block.len());
         self.block.push(block);
-        self.next.push(END);
+        self.next.push(NO_INDEX);
         Stubs {
             head: stub,
             tail: stub,
@@ -298,15 +288,15 @@ impl Construction {
 
     /// The stubs of both lists.
     fn join(&mut self, first: Stubs, second: Stubs) -> Stubs {
-        if first.head == END {
+        if first.head == NO_INDEX {
             return second;
         }
-        if second.head != END {
-            self.next[first.tail as usize] = second.head;
+        if second.head != NO_INDEX {
+            self.next[slot(first.tail)] = second.head;
         }
         Stubs {
             head: first.head,
-            tail: if second.head == END {
+            tail: if second.head == NO_INDEX {
                 first.tail
             } else {
                 second.tail
@@ -317,9 +307,9 @@ impl Construction {
     /// Make an edge from every stub of `stubs` to `target`.
     fn connect(&mut self, stubs: Stubs, target: BlockId) {
         let mut stub = stubs.head;
-        while stub != END {
-            self.made.push((self.block[stub as usize], target));
-            stub = self.next[stub as usize];
+        while stub != NO_INDEX {
+            self.made.push((self.block[slot(stub)], target));
+            stub = self.next[slot(stub)];
         }
     }
 }

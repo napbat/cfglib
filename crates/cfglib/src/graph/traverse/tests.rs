@@ -1,29 +1,80 @@
 use super::*;
-use crate::edge::EdgeKind;
-use crate::graph::scc::tarjan_scc;
+use crate::graph::scc::{SccDecomposition, SccNumbering};
 use crate::graph::store::{Graph, NodeId};
-use crate::test_util::ff;
+use crate::graph::view::Induced;
 use crate::test_util::rng::Rng;
 use alloc::collections::BTreeSet;
 use alloc::vec;
 
-#[test]
-fn cfg_traversal_methods_delegate_to_generic_algorithms() {
-    let mut cfg = Cfg::new();
-    let middle = cfg.new_block();
-    let last = cfg.new_block();
-    cfg.block_mut(cfg.entry()).push(ff("entry"));
-    cfg.block_mut(middle).push(ff("middle"));
-    cfg.block_mut(last).push(ff("last"));
-    cfg.add_edge(cfg.entry(), middle, EdgeKind::Fallthrough);
-    cfg.add_edge(middle, last, EdgeKind::Fallthrough);
-
-    assert_eq!(cfg.depth_first_preorder(), vec![cfg.entry(), middle, last]);
-    assert_eq!(cfg.depth_first_postorder(), vec![last, middle, cfg.entry()]);
-    assert_eq!(cfg.reverse_postorder(), vec![cfg.entry(), middle, last]);
-    assert_eq!(cfg.breadth_first(), vec![cfg.entry(), middle, last]);
+/// The neighbors of `node` along `direction`, for the oracles below.
+fn neighbors(graph: &Graph<(), ()>, node: NodeId, direction: Direction) -> Vec<NodeId> {
+    match direction {
+        Direction::Forward => GraphView::successors(graph, node).collect(),
+        Direction::Backward => GraphView::predecessors(graph, node).collect(),
+    }
 }
 
+/// Recursive depth-first search: the definition the walks must reproduce.
+fn recursive_orders(
+    graph: &Graph<(), ()>,
+    node: NodeId,
+    direction: Direction,
+    seen: &mut [bool],
+    orders: &mut (Vec<NodeId>, Vec<NodeId>),
+) {
+    seen[node.index()] = true;
+    orders.0.push(node);
+    for next in neighbors(graph, node, direction) {
+        if !seen[next.index()] {
+            recursive_orders(graph, next, direction, seen, orders);
+        }
+    }
+    orders.1.push(node);
+}
+
+/// Breadth-first search over a plain queue.
+fn queue_order(graph: &Graph<(), ()>, start: NodeId, direction: Direction) -> Vec<NodeId> {
+    let mut seen = vec![false; graph.node_bound()];
+    let mut queue = alloc::collections::VecDeque::from([start]);
+    let mut order = Vec::new();
+    seen[start.index()] = true;
+    while let Some(node) = queue.pop_front() {
+        order.push(node);
+        for next in neighbors(graph, node, direction) {
+            if !core::mem::replace(&mut seen[next.index()], true) {
+                queue.push_back(next);
+            }
+        }
+    }
+    order
+}
+
+#[test]
+fn the_walks_match_their_definitions_on_random_multigraphs() {
+    let mut rng = Rng::new(97);
+    for _ in 0..200 {
+        let graph = random_graph(&mut rng);
+        for start in graph.node_ids() {
+            for direction in [Direction::Forward, Direction::Backward] {
+                let mut orders = (Vec::new(), Vec::new());
+                let mut seen = vec![false; graph.node_bound()];
+                recursive_orders(&graph, start, direction, &mut seen, &mut orders);
+                assert_eq!(depth_first_preorder(&graph, start, direction), orders.0);
+                assert_eq!(depth_first_postorder(&graph, start, direction), orders.1);
+                assert_eq!(
+                    breadth_first(&graph, start, direction),
+                    queue_order(&graph, start, direction)
+                );
+                let reached = reachable(&graph, [start], direction);
+                assert!(
+                    graph
+                        .node_ids()
+                        .all(|node| reached[node.index()] == seen[node.index()])
+                );
+            }
+        }
+    }
+}
 #[test]
 fn directed_graph_can_be_walked_in_both_directions() {
     let mut graph = Graph::<&str, ()>::new();
@@ -34,15 +85,15 @@ fn directed_graph_can_be_walked_in_both_directions() {
     graph.add_edge(second, third, ());
 
     assert_eq!(
-        breadth_first(&graph, first, TraversalDirection::Outgoing),
+        breadth_first(&graph, first, Direction::Forward),
         vec![first, second, third]
     );
     assert_eq!(
-        breadth_first(&graph, third, TraversalDirection::Incoming),
+        breadth_first(&graph, third, Direction::Backward),
         vec![third, second, first]
     );
     assert_eq!(
-        shortest_path(&graph, first, third, TraversalDirection::Outgoing),
+        shortest_path(&graph, first, third, Direction::Forward),
         Some(vec![first, second, third])
     );
 }
@@ -63,17 +114,11 @@ fn reach_fixture() -> (Graph<(), ()>, [NodeId; 4]) {
 #[test]
 fn reachable_from_no_seeds_marks_nothing() {
     let (graph, _) = reach_fixture();
-    assert_eq!(
-        reachable(&graph, [], TraversalDirection::Outgoing),
-        vec![false; 4]
-    );
+    assert_eq!(reachable(&graph, [], Direction::Forward), vec![false; 4]);
 
     // An empty graph yields an empty table rather than panicking.
     let empty = Graph::<(), ()>::new();
-    assert_eq!(
-        reachable(&empty, [], TraversalDirection::Outgoing),
-        [] as [bool; 0]
-    );
+    assert_eq!(reachable(&empty, [], Direction::Forward), [] as [bool; 0]);
 }
 
 #[test]
@@ -81,21 +126,21 @@ fn reachable_unions_multiple_sources_and_terminates_on_cycles() {
     let (graph, [a, _, c, d]) = reach_fixture();
     // The b <-> c cycle terminates; d stays unreached.
     assert_eq!(
-        reachable(&graph, [a], TraversalDirection::Outgoing),
+        reachable(&graph, [a], Direction::Forward),
         vec![true, true, true, false]
     );
     // A second seed unions in, and duplicate seeds change nothing.
     assert_eq!(
-        reachable(&graph, [a, d, a, d], TraversalDirection::Outgoing),
+        reachable(&graph, [a, d, a, d], Direction::Forward),
         vec![true; 4]
     );
     // Order-insensitive: the answer is a set.
     assert_eq!(
-        reachable(&graph, [d, c], TraversalDirection::Outgoing),
-        reachable(&graph, [c, d], TraversalDirection::Outgoing)
+        reachable(&graph, [d, c], Direction::Forward),
+        reachable(&graph, [c, d], Direction::Forward)
     );
     assert_eq!(
-        reachable(&graph, [c], TraversalDirection::Outgoing),
+        reachable(&graph, [c], Direction::Forward),
         vec![false, true, true, false]
     );
 }
@@ -104,11 +149,11 @@ fn reachable_unions_multiple_sources_and_terminates_on_cycles() {
 fn reachable_walks_predecessors_in_the_incoming_direction() {
     let (graph, [a, _, c, _]) = reach_fixture();
     assert_eq!(
-        reachable(&graph, [c], TraversalDirection::Incoming),
+        reachable(&graph, [c], Direction::Backward),
         vec![true, true, true, false]
     );
     assert_eq!(
-        reachable(&graph, [a], TraversalDirection::Incoming),
+        reachable(&graph, [a], Direction::Backward),
         vec![true, false, false, false]
     );
 }
@@ -120,12 +165,12 @@ fn reachable_handles_self_loops() {
     let other = graph.add_node(());
     graph.add_edge(only, only, ());
     assert_eq!(
-        reachable(&graph, [only], TraversalDirection::Outgoing),
+        reachable(&graph, [only], Direction::Forward),
         vec![true, false]
     );
     // A self-loop is not a reason to be reachable from elsewhere.
     assert_eq!(
-        reachable(&graph, [other], TraversalDirection::Outgoing),
+        reachable(&graph, [other], Direction::Forward),
         vec![false, true]
     );
 }
@@ -139,10 +184,10 @@ fn reachable_in_gives_the_answer_of_reachable_over_reused_buffers() {
     let mut visited = vec![true; 9];
     let mut stack = vec![7, 8];
     for (seeds, direction) in [
-        (vec![a], TraversalDirection::Outgoing),
-        (vec![c], TraversalDirection::Incoming),
-        (vec![d, a], TraversalDirection::Outgoing),
-        (vec![], TraversalDirection::Incoming),
+        (vec![a], Direction::Forward),
+        (vec![c], Direction::Backward),
+        (vec![d, a], Direction::Forward),
+        (vec![], Direction::Backward),
     ] {
         reachable_in(
             &graph,
@@ -158,54 +203,59 @@ fn reachable_in_gives_the_answer_of_reachable_over_reused_buffers() {
 }
 
 #[test]
-fn reachable_in_stays_inside_the_set_it_is_confined_to() {
-    // a -> b -> c -> d, and the confinement leaves `c` out.
+fn reachable_over_an_induced_view_stays_inside_its_set() {
+    // a -> b -> c -> d, and the set leaves `c` out.
     let mut graph = Graph::<(), ()>::new();
     let [a, b, c, d] = [(); 4].map(|()| graph.add_node(()));
     graph.add_edge(a, b, ());
     graph.add_edge(b, c, ());
     graph.add_edge(c, d, ());
     let within = [true, true, false, true];
-    let (mut visited, mut stack) = (Vec::new(), Vec::new());
+    let region = Induced::new(&graph, &within);
 
-    reachable_in(
-        &graph,
-        [a],
-        TraversalDirection::Outgoing,
-        Some(&within),
-        &mut visited,
-        &mut stack,
-    );
     assert_eq!(
-        visited,
+        reachable(&region, [a], Direction::Forward),
         [true, true, false, false],
         "the walk cannot pass c"
     );
-
-    // A seed outside the set is still visited, and walks on into it.
-    reachable_in(
-        &graph,
-        [c],
-        TraversalDirection::Outgoing,
-        Some(&within),
-        &mut visited,
-        &mut stack,
-    );
-    assert_eq!(visited, [false, false, true, true]);
-
-    reachable_in(
-        &graph,
-        [d],
-        TraversalDirection::Incoming,
-        Some(&within),
-        &mut visited,
-        &mut stack,
+    // A seed outside the set is visited, and has no edges to walk on.
+    assert_eq!(
+        reachable(&region, [c], Direction::Forward),
+        [false, false, true, false]
     );
     assert_eq!(
-        visited,
+        reachable(&region, [d], Direction::Backward),
         [false, false, false, true],
         "c blocks the way back"
     );
+}
+
+#[test]
+fn reachable_in_within_a_mask_matches_the_induced_view_from_inside_seeds() {
+    // a -> b -> c -> d, and the mask leaves `c` out.
+    let mut graph = Graph::<(), ()>::new();
+    let [a, b, c, d] = [(); 4].map(|()| graph.add_node(()));
+    graph.add_edge(a, b, ());
+    graph.add_edge(b, c, ());
+    graph.add_edge(c, d, ());
+    let within = [true, true, false, true];
+    let region = Induced::new(&graph, &within);
+    let (mut visited, mut stack) = (Vec::new(), Vec::new());
+    for (seed, direction) in [
+        (a, Direction::Forward),
+        (b, Direction::Forward),
+        (d, Direction::Backward),
+    ] {
+        reachable_in(
+            &graph,
+            [seed],
+            direction,
+            Some(&within),
+            &mut visited,
+            &mut stack,
+        );
+        assert_eq!(visited, reachable(&region, [seed], direction));
+    }
 }
 
 #[test]
@@ -215,7 +265,7 @@ fn reachable_in_rejects_a_seed_beyond_the_node_bound() {
     reachable_in(
         &graph,
         [NodeId::from_index(4)],
-        TraversalDirection::Outgoing,
+        Direction::Forward,
         None,
         &mut Vec::new(),
         &mut Vec::new(),
@@ -245,21 +295,21 @@ fn nearest_common_ancestor_meets_at_the_closest_shared_node() {
     // `mid` (combined 2) beats `root` (combined 4) even though `root`
     // has the smaller id: distance ranks first.
     assert_eq!(
-        nearest_common_ancestor(&graph, left, right, TraversalDirection::Incoming),
+        nearest_common_ancestor(&graph, left, right, Direction::Backward),
         Some(mid)
     );
     // Forward, the same two legs merge at the bottom.
     assert_eq!(
-        nearest_common_ancestor(&graph, left, right, TraversalDirection::Outgoing),
+        nearest_common_ancestor(&graph, left, right, Direction::Forward),
         Some(bottom)
     );
     // The answer does not depend on which endpoint is passed first.
     assert_eq!(
-        nearest_common_ancestor(&graph, right, left, TraversalDirection::Incoming),
+        nearest_common_ancestor(&graph, right, left, Direction::Backward),
         Some(mid)
     );
     assert_eq!(
-        nearest_common_ancestor(&graph, bottom, mid, TraversalDirection::Incoming),
+        nearest_common_ancestor(&graph, bottom, mid, Direction::Backward),
         Some(mid)
     );
 }
@@ -269,20 +319,20 @@ fn nearest_common_ancestor_treats_endpoints_as_distance_zero() {
     let (graph, [root, _, left, _, bottom]) = diamond();
     // A node is its own meet, in either direction.
     assert_eq!(
-        nearest_common_ancestor(&graph, root, root, TraversalDirection::Outgoing),
+        nearest_common_ancestor(&graph, root, root, Direction::Forward),
         Some(root)
     );
     assert_eq!(
-        nearest_common_ancestor(&graph, bottom, bottom, TraversalDirection::Incoming),
+        nearest_common_ancestor(&graph, bottom, bottom, Direction::Backward),
         Some(bottom)
     );
     // `left` is reachable from `root`, so the meet is `left` itself.
     assert_eq!(
-        nearest_common_ancestor(&graph, root, left, TraversalDirection::Outgoing),
+        nearest_common_ancestor(&graph, root, left, Direction::Forward),
         Some(left)
     );
     assert_eq!(
-        nearest_common_ancestor(&graph, left, root, TraversalDirection::Outgoing),
+        nearest_common_ancestor(&graph, left, root, Direction::Forward),
         Some(left)
     );
 }
@@ -295,20 +345,15 @@ fn nearest_common_ancestor_breaks_ties_by_smallest_node_id() {
 
     // Both sinks sit at combined distance 2; the smaller id wins.
     assert_eq!(
-        nearest_common_ancestor(&graph, left, right, TraversalDirection::Outgoing),
+        nearest_common_ancestor(&graph, left, right, Direction::Forward),
         Some(first_sink)
     );
     assert_eq!(
-        nearest_common_ancestor(&graph, right, left, TraversalDirection::Outgoing),
+        nearest_common_ancestor(&graph, right, left, Direction::Forward),
         Some(first_sink)
     );
     assert_eq!(
-        nearest_common_ancestor(
-            &graph,
-            first_sink,
-            second_sink,
-            TraversalDirection::Incoming
-        ),
+        nearest_common_ancestor(&graph, first_sink, second_sink, Direction::Backward),
         Some(left)
     );
 }
@@ -322,16 +367,16 @@ fn nearest_common_ancestor_without_a_shared_node_is_none() {
     graph.add_edge(start, end, ());
 
     assert_eq!(
-        nearest_common_ancestor(&graph, start, lonely, TraversalDirection::Outgoing),
+        nearest_common_ancestor(&graph, start, lonely, Direction::Forward),
         None
     );
     assert_eq!(
-        nearest_common_ancestor(&graph, start, lonely, TraversalDirection::Incoming),
+        nearest_common_ancestor(&graph, start, lonely, Direction::Backward),
         None
     );
     // Two nodes with no shared successor, both inside the connected part.
     assert_eq!(
-        nearest_common_ancestor(&graph, end, lonely, TraversalDirection::Incoming),
+        nearest_common_ancestor(&graph, end, lonely, Direction::Backward),
         None
     );
 }
@@ -344,11 +389,11 @@ fn nearest_common_ancestor_terminates_on_cycles() {
     // Every node is now reachable from both legs; `bottom` (1 + 1) is
     // the closest forward meet and `mid` (1 + 1) the closest backward one.
     assert_eq!(
-        nearest_common_ancestor(&graph, left, right, TraversalDirection::Outgoing),
+        nearest_common_ancestor(&graph, left, right, Direction::Forward),
         Some(bottom)
     );
     assert_eq!(
-        nearest_common_ancestor(&graph, left, right, TraversalDirection::Incoming),
+        nearest_common_ancestor(&graph, left, right, Direction::Backward),
         Some(mid)
     );
 }
@@ -375,14 +420,14 @@ fn ancestor_nodes(found: &[CommonAncestor<NodeId>]) -> Vec<NodeId> {
 #[test]
 fn common_ancestors_returns_every_shared_node_with_both_distances() {
     let (graph, [root, mid, left, right, bottom]) = diamond();
-    let found = common_ancestors(&graph, left, right, TraversalDirection::Incoming, None);
+    let found = common_ancestors(&graph, left, right, Direction::Backward, None);
     assert_eq!(ancestor_nodes(&found), vec![mid, root]);
     assert_eq!((found[0].from_a, found[0].from_b), (1, 1));
     assert_eq!((found[1].from_a, found[1].from_b), (2, 2));
     assert_eq!(found[1].combined(), 4);
 
     // Forward, the same two legs share only the merge point.
-    let merged = common_ancestors(&graph, left, right, TraversalDirection::Outgoing, None);
+    let merged = common_ancestors(&graph, left, right, Direction::Forward, None);
     assert_eq!(ancestor_nodes(&merged), vec![bottom]);
 }
 
@@ -391,7 +436,7 @@ fn common_ancestors_are_in_b_discovery_order_not_id_order() {
     let (graph, [first_sink, second_sink, left, right]) = twin_sinks();
     // A walk from `right` reaches `second_sink` first because adjacency
     // offers it first, even though its id is larger.
-    let found = common_ancestors(&graph, left, right, TraversalDirection::Outgoing, None);
+    let found = common_ancestors(&graph, left, right, Direction::Forward, None);
     assert_eq!(ancestor_nodes(&found), vec![second_sink, first_sink]);
     // Both sit at the same combined distance, so a consumer's first-match
     // scan takes the discovery-order winner while the fixed rank of
@@ -399,12 +444,12 @@ fn common_ancestors_are_in_b_discovery_order_not_id_order() {
     let scanned = found.iter().min_by_key(|entry| entry.combined());
     assert_eq!(scanned.map(|entry| entry.node), Some(second_sink));
     assert_eq!(
-        nearest_common_ancestor(&graph, left, right, TraversalDirection::Outgoing),
+        nearest_common_ancestor(&graph, left, right, Direction::Forward),
         Some(first_sink)
     );
 
     // Swapping the endpoints swaps the order, since it is `b`'s.
-    let swapped = common_ancestors(&graph, right, left, TraversalDirection::Outgoing, None);
+    let swapped = common_ancestors(&graph, right, left, Direction::Forward, None);
     assert_eq!(ancestor_nodes(&swapped), vec![second_sink, first_sink]);
 }
 
@@ -417,26 +462,26 @@ fn common_ancestors_bound_each_side_by_max_depth() {
             &graph,
             left,
             right,
-            TraversalDirection::Incoming,
+            Direction::Backward,
             Some(1)
         )),
         vec![mid]
     );
     assert_eq!(
-        common_ancestors(&graph, left, right, TraversalDirection::Incoming, Some(0)),
+        common_ancestors(&graph, left, right, Direction::Backward, Some(0)),
         [] as [crate::graph::traverse::CommonAncestor<crate::NodeId>; 0]
     );
     // A bound at or beyond the eccentricity is the unbounded answer.
     assert_eq!(
-        common_ancestors(&graph, left, right, TraversalDirection::Incoming, Some(2)),
-        common_ancestors(&graph, left, right, TraversalDirection::Incoming, None)
+        common_ancestors(&graph, left, right, Direction::Backward, Some(2)),
+        common_ancestors(&graph, left, right, Direction::Backward, None)
     );
 }
 
 #[test]
 fn common_ancestors_of_a_node_with_itself_is_its_reachable_set() {
     let (graph, [_root, _mid, left, _right, bottom]) = diamond();
-    let found = common_ancestors(&graph, left, left, TraversalDirection::Outgoing, None);
+    let found = common_ancestors(&graph, left, left, Direction::Forward, None);
     assert_eq!(ancestor_nodes(&found), vec![left, bottom]);
     assert!(
         found
@@ -449,7 +494,7 @@ fn common_ancestors_of_a_node_with_itself_is_its_reachable_set() {
             &graph,
             left,
             left,
-            TraversalDirection::Outgoing,
+            Direction::Forward,
             Some(0)
         )),
         vec![left]
@@ -464,11 +509,11 @@ fn common_ancestors_without_a_shared_node_is_empty() {
     let end = graph.add_node(());
     graph.add_edge(start, end, ());
     assert_eq!(
-        common_ancestors(&graph, start, lonely, TraversalDirection::Outgoing, None),
+        common_ancestors(&graph, start, lonely, Direction::Forward, None),
         [] as [crate::graph::traverse::CommonAncestor<crate::NodeId>; 0]
     );
     assert_eq!(
-        common_ancestors(&graph, end, lonely, TraversalDirection::Incoming, None),
+        common_ancestors(&graph, end, lonely, Direction::Backward, None),
         [] as [crate::graph::traverse::CommonAncestor<crate::NodeId>; 0]
     );
 }
@@ -480,7 +525,7 @@ fn common_ancestors_terminates_on_cycles() {
 
     // Every node now reaches both legs; the walk still terminates and
     // reports each node exactly once, in `right`'s discovery order.
-    let found = common_ancestors(&graph, left, right, TraversalDirection::Incoming, None);
+    let found = common_ancestors(&graph, left, right, Direction::Backward, None);
     assert_eq!(ancestor_nodes(&found), vec![right, mid, root, bottom, left]);
     assert_eq!(
         found
@@ -500,7 +545,7 @@ fn common_ancestors_generalizes_nearest_common_ancestor() {
     for graph in [&plain, &twins, &cyclic] {
         for a in graph.node_ids() {
             for b in graph.node_ids() {
-                for direction in [TraversalDirection::Incoming, TraversalDirection::Outgoing] {
+                for direction in [Direction::Backward, Direction::Forward] {
                     // The fixed rank is a `min` over `(combined, id)` of
                     // exactly this candidate set.
                     let ranked = common_ancestors(graph, a, b, direction, None)
@@ -572,7 +617,7 @@ fn topological_sort_or_cycle_sorts_exactly_the_acyclic_graphs() {
     let (mut sorted, mut cyclic) = (0, 0);
     for seed in 0..800 {
         let graph = random_graph(&mut Rng::new(seed));
-        let components = tarjan_scc(&graph);
+        let components = SccDecomposition::compute(&graph, SccNumbering::LeavesFirst);
         let result = topological_sort_or_cycle(&graph);
         match &result {
             Ok(order) => {

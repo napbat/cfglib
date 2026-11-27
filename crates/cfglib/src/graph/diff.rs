@@ -26,6 +26,7 @@
 extern crate alloc;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
+use core::cmp::Ordering;
 
 use crate::block::BlockId;
 use crate::cfg::Cfg;
@@ -36,34 +37,49 @@ pub use region::{RegionDiff, RegionMatch};
 mod cascade;
 mod region;
 
-/// Per-block structural fingerprint used for matching.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct BlockFingerprint {
-    /// Number of instructions in the block.
-    pub instruction_count: usize,
-    /// Number of successor edges.
-    pub out_degree: usize,
-    /// Number of predecessor edges.
-    pub in_degree: usize,
-    /// Sorted edge kind discriminants of outgoing edges.
-    pub out_edge_discriminants: Vec<u8>,
+/// What two blocks must share to be matched: how they are wired, not how
+/// long they are. A block that only gained or lost instructions is the same
+/// block, changed.
+///
+/// Two shapes are equal when the blocks have the same in-degree and the same
+/// out-edge kinds, kind for kind; the order is the order of the out-degree,
+/// the in-degree, then the kinds.
+#[derive(Clone, Copy)]
+struct Shape<'a> {
+    in_degree: usize,
+    /// The out-edges, grouped by kind.
+    out_edges: &'a [(u8, BlockId)],
 }
 
-impl BlockFingerprint {
-    /// What two blocks must share to be matched: how they are wired, not how
-    /// long they are. A block that only gained or lost instructions is the
-    /// same block, changed.
-    fn shape(&self) -> Shape<'_> {
-        (
-            self.out_degree,
-            self.in_degree,
-            &self.out_edge_discriminants,
-        )
+impl Shape<'_> {
+    fn kinds(&self) -> impl Iterator<Item = u8> + '_ {
+        self.out_edges.iter().map(|&(kind, _)| kind)
     }
 }
 
-/// A block's out-degree, in-degree, and the kinds of its out-edges.
-type Shape<'a> = (usize, usize, &'a [u8]);
+impl PartialEq for Shape<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for Shape<'_> {}
+
+impl PartialOrd for Shape<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Shape<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.out_edges
+            .len()
+            .cmp(&other.out_edges.len())
+            .then(self.in_degree.cmp(&other.in_degree))
+            .then_with(|| self.kinds().cmp(other.kinds()))
+    }
+}
 
 /// A matched pair of blocks between two CFGs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,10 +146,20 @@ impl CfgDiff {
 
 /// What the matcher knows about one block.
 struct BlockFacts {
-    fingerprint: BlockFingerprint,
+    instruction_count: usize,
+    in_degree: usize,
     /// The outgoing `(kind discriminant, target)` pairs, grouped by kind with
     /// each group in adjacency order.
     out_edges: Vec<(u8, BlockId)>,
+}
+
+impl BlockFacts {
+    fn shape(&self) -> Shape<'_> {
+        Shape {
+            in_degree: self.in_degree,
+            out_edges: &self.out_edges,
+        }
+    }
 }
 
 /// One CFG, as the matcher sees it.
@@ -158,19 +184,12 @@ impl Side {
                     .collect();
                 // A stable sort keeps adjacency order within one kind.
                 out_edges.sort_by_key(|&(kind, _)| kind);
-                let fingerprint = BlockFingerprint {
+                let facts = BlockFacts {
                     instruction_count: cfg.block(block).instructions().len(),
-                    out_degree: out_edges.len(),
                     in_degree: cfg.incoming(block).count(),
-                    out_edge_discriminants: out_edges.iter().map(|&(kind, _)| kind).collect(),
+                    out_edges,
                 };
-                (
-                    block,
-                    BlockFacts {
-                        fingerprint,
-                        out_edges,
-                    },
-                )
+                (block, facts)
             })
             .collect();
         Self {
@@ -270,8 +289,7 @@ fn follow_edges(
             };
             for (&(_, left_target), &(_, right_target)) in left_group.iter().zip(right_group) {
                 if matching.both_free(left_target, right_target)
-                    && (left.facts(left_target).fingerprint.shape()
-                        == right.facts(right_target).fingerprint.shape()
+                    && (left.facts(left_target).shape() == right.facts(right_target).shape()
                         || also_accepts.is_some_and(|accepts| accepts(left_target, right_target)))
                 {
                     matching.pair(left_target, right_target);
@@ -304,10 +322,10 @@ fn match_by_wiring(left_side: &Side, right_side: &Side) -> Matching {
     let mut free_by_shape_and_length: BTreeMap<(Shape<'_>, usize), Bucket> = BTreeMap::new();
     for (&block, facts) in &right_side.blocks {
         if !matching.left_of.contains_key(&block) {
-            let shape = facts.fingerprint.shape();
+            let shape = facts.shape();
             free_by_shape.entry(shape).or_default().blocks.push(block);
             free_by_shape_and_length
-                .entry((shape, facts.fingerprint.instruction_count))
+                .entry((shape, facts.instruction_count))
                 .or_default()
                 .blocks
                 .push(block);
@@ -317,11 +335,11 @@ fn match_by_wiring(left_side: &Side, right_side: &Side) -> Matching {
         if matching.right_of.contains_key(&block) {
             continue;
         }
-        let shape = facts.fingerprint.shape();
+        let shape = facts.shape();
         // The first free block of the shape with the same instruction count,
         // else the first free block of the shape.
         let counterpart = free_by_shape_and_length
-            .get_mut(&(shape, facts.fingerprint.instruction_count))
+            .get_mut(&(shape, facts.instruction_count))
             .and_then(|bucket| bucket.first_free(&matching))
             .or_else(|| {
                 free_by_shape
@@ -421,8 +439,7 @@ impl CfgDiff {
                 Some(BlockMatch {
                     left: block,
                     right: counterpart,
-                    instruction_count_changed: facts.fingerprint.instruction_count
-                        != other.fingerprint.instruction_count,
+                    instruction_count_changed: facts.instruction_count != other.instruction_count,
                     edges_changed: !edges_preserved(facts, other, &matching),
                 })
             })
@@ -544,7 +561,7 @@ mod tests {
 
         let side = Side::new(&cfg);
         let facts = side.facts(cfg.entry());
-        assert_eq!(facts.fingerprint.out_edge_discriminants, [0, 4, 4]);
+        assert_eq!(facts.shape().kinds().collect::<Vec<_>>(), [0, 4, 4]);
         assert_eq!(facts.out_edges, [(0, second), (4, first), (4, third)]);
     }
 

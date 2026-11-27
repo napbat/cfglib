@@ -1,22 +1,35 @@
-//! `search`, `search_with_scratch` and `search_with_marks` over a dense `Graph`.
+//! `search` and `search_in` over a dense `Graph`.
 
 use std::ops::ControlFlow;
 
 use cfglib::{
-    Graph, NodeId, SearchConfig, SearchOrder, TraversalDirection, Visit, VisitedPolicy, search,
+    Direction, Graph, NodeId, NodeOrder, SearchConfig, SearchOrder, Visit, VisitedPolicy, search,
 };
 
-use crate::Lcg;
 use crate::reference::{Table, Visits, Walk, keep_all, nodes_of, prune_multiples_of_five};
+use crate::rng::Rng;
+
+/// A dense search's direction with its discipline.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Discipline {
+    pub(crate) direction: Direction,
+    pub(crate) config: SearchConfig,
+}
 
 pub(crate) fn config(
     order: SearchOrder,
-    direction: TraversalDirection,
+    direction: Direction,
     visited: VisitedPolicy,
-    limit: Option<usize>,
-) -> SearchConfig {
-    let base = SearchConfig::new(order, direction).with_visited(visited);
-    limit.map_or(base, |limit| base.with_max_depth(limit))
+    max_depth: Option<usize>,
+) -> Discipline {
+    Discipline {
+        direction,
+        config: SearchConfig {
+            order,
+            visited,
+            max_depth,
+        },
+    }
 }
 
 fn verdict(prune: &dyn Fn(usize) -> bool, node: NodeId) -> ControlFlow<(), Visit> {
@@ -30,14 +43,15 @@ fn verdict(prune: &dyn Fn(usize) -> bool, node: NodeId) -> ControlFlow<(), Visit
 fn run_search(
     graph: &Graph<(), ()>,
     seeds: &[usize],
-    config: SearchConfig,
+    discipline: Discipline,
     prune: &dyn Fn(usize) -> bool,
 ) -> Visits {
     let mut visits = Vec::new();
     let outcome = search(
         graph,
         seeds.iter().map(|&seed| NodeId::from_index(seed)),
-        config,
+        discipline.direction,
+        discipline.config,
         |node, depth| {
             visits.push((node.index(), depth));
             verdict(prune, node)
@@ -62,7 +76,7 @@ fn assert_each_node_once(visits: &Visits) {
 #[test]
 fn the_random_tables_make_walks_worth_comparing() {
     for seed in (1..=4).chain(11..=14) {
-        let table = Table::random(&mut Lcg(seed), 40, 90);
+        let table = Table::random(&mut Rng::lcg(seed, 33), 40, 90);
         let visits = Walk::new(&table, None, &keep_all).breadth_first(&[3, 17, 30]);
         assert!(
             visits.len() > 10,
@@ -80,12 +94,12 @@ fn the_random_tables_make_walks_worth_comparing() {
 fn depth_first_search_matches_a_recursive_reference_in_order_and_depth() {
     let prunes: [&dyn Fn(usize) -> bool; 2] = [&keep_all, &prune_multiples_of_five];
     for seed in 1..=4 {
-        let table = Table::random(&mut Lcg(seed), 40, 90);
+        let table = Table::random(&mut Rng::lcg(seed, 33), 40, 90);
         let graph = table.graph();
         let backward = table.reversed();
         for (direction, adjacency) in [
-            (TraversalDirection::Outgoing, &table),
-            (TraversalDirection::Incoming, &backward),
+            (Direction::Forward, &table),
+            (Direction::Backward, &backward),
         ] {
             for limit in [None, Some(0), Some(1), Some(3)] {
                 for prune in prunes {
@@ -113,12 +127,12 @@ fn depth_first_search_matches_a_recursive_reference_in_order_and_depth() {
 fn breadth_first_search_matches_a_queue_reference_in_order_and_depth() {
     let prunes: [&dyn Fn(usize) -> bool; 2] = [&keep_all, &prune_multiples_of_five];
     for seed in 1..=4 {
-        let table = Table::random(&mut Lcg(seed + 10), 40, 90);
+        let table = Table::random(&mut Rng::lcg(seed + 10, 33), 40, 90);
         let graph = table.graph();
         let backward = table.reversed();
         for (direction, adjacency) in [
-            (TraversalDirection::Outgoing, &table),
-            (TraversalDirection::Incoming, &backward),
+            (Direction::Forward, &table),
+            (Direction::Backward, &backward),
         ] {
             for limit in [None, Some(0), Some(1), Some(3)] {
                 for prune in prunes {
@@ -146,12 +160,12 @@ fn breadth_first_search_matches_a_queue_reference_in_order_and_depth() {
 fn path_marks_visit_a_node_once_per_simple_route_like_a_brute_force_enumeration() {
     let prunes: [&dyn Fn(usize) -> bool; 2] = [&keep_all, &prune_multiples_of_five];
     for seed in 1..=4 {
-        let table = Table::random(&mut Lcg(seed + 20), 14, 26);
+        let table = Table::random(&mut Rng::lcg(seed + 20, 33), 14, 26);
         let graph = table.graph();
         let backward = table.reversed();
         for (direction, adjacency) in [
-            (TraversalDirection::Outgoing, &table),
-            (TraversalDirection::Incoming, &backward),
+            (Direction::Forward, &table),
+            (Direction::Backward, &backward),
         ] {
             for prune in prunes {
                 let seeds = [2, 9, 2];
@@ -203,7 +217,7 @@ fn a_shared_node_is_reached_once_globally_and_once_per_route_under_path_marks() 
     let table = diamond_ladder();
     let graph = table.graph();
     let order = SearchOrder::DepthFirst;
-    let outgoing = TraversalDirection::Outgoing;
+    let outgoing = Direction::Forward;
 
     let global = run_search(
         &graph,
@@ -254,7 +268,7 @@ fn the_path_cycle_guard_stops_a_route_at_a_node_already_on_it() {
         &[0],
         config(
             SearchOrder::DepthFirst,
-            TraversalDirection::Outgoing,
+            Direction::Forward,
             VisitedPolicy::Path,
             None,
         ),
@@ -269,7 +283,7 @@ fn duplicate_seeds_are_visited_once_under_global_marks_and_again_under_path_mark
         successors: vec![vec![1], vec![]],
     };
     let graph = table.graph();
-    let outgoing = TraversalDirection::Outgoing;
+    let outgoing = Direction::Forward;
     let order = SearchOrder::DepthFirst;
 
     let global = run_search(
@@ -306,7 +320,7 @@ fn duplicate_seeds_are_visited_once_under_global_marks_and_again_under_path_mark
 
 #[test]
 fn a_break_ends_the_walk_with_its_value_and_visits_nothing_further() {
-    let table = Table::random(&mut Lcg(40), 40, 90);
+    let table = Table::random(&mut Rng::lcg(40, 33), 40, 90);
     let graph = table.graph();
     for order in [SearchOrder::DepthFirst, SearchOrder::BreadthFirst] {
         let full = match order {
@@ -323,12 +337,11 @@ fn a_break_ends_the_walk_with_its_value_and_visits_nothing_further() {
         let outcome = search(
             &graph,
             [NodeId::from_index(3)],
-            config(
+            Direction::Forward,
+            SearchConfig {
                 order,
-                TraversalDirection::Outgoing,
-                VisitedPolicy::Global,
-                None,
-            ),
+                ..SearchConfig::default()
+            },
             |node, depth| {
                 visits.push((node.index(), depth));
                 if node.index() == target {
@@ -358,7 +371,11 @@ fn the_first_match_depends_on_the_discipline() {
         search(
             &graph,
             [NodeId::from_index(0)],
-            SearchConfig::new(order, TraversalDirection::Outgoing),
+            Direction::Forward,
+            SearchConfig {
+                order,
+                ..SearchConfig::default()
+            },
             |node, depth| {
                 if table.successors[node.index()].is_empty() {
                     ControlFlow::Break((node.index(), depth))
@@ -387,7 +404,7 @@ fn a_skipped_node_counts_as_visited_but_its_successors_are_not_discovered_throug
         successors: vec![vec![1, 2], vec![3], vec![3], vec![4], vec![]],
     };
     let graph = table.graph();
-    let outgoing = TraversalDirection::Outgoing;
+    let outgoing = Direction::Forward;
     for order in [SearchOrder::DepthFirst, SearchOrder::BreadthFirst] {
         let walk = |prune: &dyn Fn(usize) -> bool| {
             nodes_of(&run_search(
@@ -421,7 +438,7 @@ fn max_depth_bounds_expansion_not_visiting() {
         successors: vec![vec![1], vec![2], vec![3], vec![]],
     };
     let graph = chain.graph();
-    let outgoing = TraversalDirection::Outgoing;
+    let outgoing = Direction::Forward;
     for order in [SearchOrder::DepthFirst, SearchOrder::BreadthFirst] {
         let walk = |limit| {
             run_search(
@@ -452,7 +469,7 @@ fn depth_first_depth_is_the_route_taken_not_the_shortest_one() {
         successors: vec![vec![1, 3], vec![2], vec![3], vec![]],
     };
     let graph = table.graph();
-    let outgoing = TraversalDirection::Outgoing;
+    let outgoing = Direction::Forward;
     let unbounded = |order| {
         run_search(
             &graph,
@@ -499,7 +516,7 @@ fn backward_search_follows_predecessors() {
         &[2],
         config(
             SearchOrder::DepthFirst,
-            TraversalDirection::Incoming,
+            Direction::Backward,
             VisitedPolicy::Global,
             None,
         ),
@@ -510,7 +527,7 @@ fn backward_search_follows_predecessors() {
 
 #[test]
 fn a_store_with_removed_nodes_walks_like_its_reduced_table_before_and_after_compaction() {
-    let table = Table::random(&mut Lcg(55), 40, 100);
+    let table = Table::random(&mut Rng::lcg(55, 33), 40, 100);
     let removed = [7, 8, 21, 22];
     let reduced = table.without(&removed);
     let mut graph = table.graph();
@@ -531,12 +548,7 @@ fn a_store_with_removed_nodes_walks_like_its_reduced_table_before_and_after_comp
             run_search(
                 graph,
                 seeds,
-                config(
-                    order,
-                    TraversalDirection::Outgoing,
-                    VisitedPolicy::Global,
-                    Some(4),
-                ),
+                config(order, Direction::Forward, VisitedPolicy::Global, Some(4)),
                 &keep_all,
             )
         };
@@ -548,7 +560,7 @@ fn a_store_with_removed_nodes_walks_like_its_reduced_table_before_and_after_comp
         assert!(expected.iter().all(|(node, _)| !removed.contains(node)));
 
         let mut compacted = graph.clone();
-        let renumbering = compacted.compact();
+        let renumbering = compacted.compact(NodeOrder::Insertion);
         let mapped_seeds: Vec<usize> = [0, 30]
             .iter()
             .map(|&seed| {

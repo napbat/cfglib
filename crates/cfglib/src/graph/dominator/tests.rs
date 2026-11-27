@@ -5,6 +5,7 @@ use super::*;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
 use crate::graph::store::{Graph, NodeId};
+use crate::graph::view::{GraphView, Rooted};
 use crate::test_util::MockInst;
 
 mod adversarial;
@@ -161,7 +162,7 @@ fn levels_and_preorder_follow_the_tree_when_parents_have_larger_ids() {
     graph.add_edge(child, middle, ());
     graph.add_edge(middle, leaf, ());
 
-    let dom = DominatorTree::compute_from(&graph, root);
+    let dom = DominatorTree::compute(&Rooted::new(&graph, root));
     for (node, level) in [(root, 0), (child, 1), (middle, 2), (leaf, 3)] {
         assert_eq!(dom.level(node), Some(level));
     }
@@ -182,7 +183,7 @@ fn dominance_keeps_its_answers_for_unreachable_nodes() {
     graph.add_edge(unreachable, child, ());
     graph.add_edge(unreachable, other, ());
 
-    let dom = DominatorTree::compute_from(&graph, root);
+    let dom = DominatorTree::compute(&Rooted::new(&graph, root));
     assert!(dom.dominates(unreachable, unreachable));
     assert!(!dom.strictly_dominates(unreachable, unreachable));
     assert!(!dom.dominates(root, unreachable));
@@ -198,7 +199,7 @@ fn dominance_keeps_its_answers_for_unreachable_nodes() {
 }
 
 #[test]
-fn nearest_common_dominator_of_skips_unreachable_nodes() {
+fn nearest_common_dominator_among_skips_unreachable_nodes() {
     let mut cfg: Cfg<MockInst> = Cfg::new();
     let a = cfg.new_block();
     let b = cfg.new_block();
@@ -214,15 +215,15 @@ fn nearest_common_dominator_of_skips_unreachable_nodes() {
     assert_eq!(dom.nearest_common_dominator(a, merge), Some(cfg.entry()));
     assert_eq!(dom.nearest_common_dominator(merge, merge), Some(merge));
     assert_eq!(
-        dom.nearest_common_dominator_of([merge, unreachable, a]),
+        dom.nearest_common_dominator_among([merge, unreachable, a]),
         Some(cfg.entry())
     );
     assert_eq!(
-        dom.nearest_common_dominator_of([unreachable, merge]),
+        dom.nearest_common_dominator_among([unreachable, merge]),
         Some(merge)
     );
-    assert_eq!(dom.nearest_common_dominator_of([unreachable]), None);
-    assert_eq!(dom.nearest_common_dominator_of([]), None);
+    assert_eq!(dom.nearest_common_dominator_among([unreachable]), None);
+    assert_eq!(dom.nearest_common_dominator_among([]), None);
 }
 
 #[cfg(target_pointer_width = "64")]
@@ -251,9 +252,9 @@ impl GraphView for Oversized {
 
 #[test]
 #[cfg(target_pointer_width = "64")]
-#[should_panic(expected = "node bound exceeds the dense u32 range")]
+#[should_panic(expected = "node bound of a dominator tree exceeds the dense u32 range")]
 fn a_node_bound_beyond_u32_is_rejected() {
-    let _ = DominatorTree::compute_from(&Oversized, 0);
+    let _ = DominatorTree::compute(&Rooted::new(&Oversized, 0));
 }
 
 #[test]
@@ -261,7 +262,7 @@ fn a_node_bound_beyond_u32_is_rejected() {
 fn a_root_outside_the_graph_is_rejected() {
     let mut graph = Graph::<(), ()>::new();
     graph.add_node(());
-    let _ = DominatorTree::compute_from(&graph, NodeId::from_raw(1));
+    let _ = DominatorTree::compute(&Rooted::new(&graph, NodeId::from_raw(1)));
 }
 
 #[test]
@@ -277,43 +278,26 @@ fn children_returns_immediate_children() {
     assert_eq!(dom.children(cfg.entry()).collect::<Vec<_>>(), [a, b]);
     assert_eq!(dom.children(a).collect::<Vec<_>>(), [c]);
     assert_eq!(dom.children(c).count(), 0);
+    assert_eq!(dom.roots().collect::<Vec<_>>(), [cfg.entry()]);
 }
 
 #[test]
-fn compute_with_diff_detects_an_idom_change() {
-    let mut cfg: Cfg<MockInst> = Cfg::new();
-    let a = cfg.new_block();
-    let b = cfg.new_block();
-    cfg.add_edge(cfg.entry(), a, EdgeKind::Fallthrough);
-    cfg.add_edge(a, b, EdgeKind::Fallthrough);
-
-    let dom = DominatorTree::compute(&cfg);
-    // Add a shortcut edge from entry directly to b.
-    cfg.add_edge(cfg.entry(), b, EdgeKind::ConditionalTrue);
-    let (next, changed) = DominatorTree::compute_with_diff(&cfg, &dom);
-
-    // b's idom should have changed from a to entry.
-    assert!(changed.contains(&b));
-    assert_eq!(next.idom(b), Some(cfg.entry()));
-}
-
-#[test]
-fn compute_with_diff_reports_no_change_for_a_redundant_edge() {
-    let mut cfg: Cfg<MockInst> = Cfg::new();
-    let a = cfg.new_block();
-    cfg.add_edge(cfg.entry(), a, EdgeKind::Fallthrough);
-
-    let dom = DominatorTree::compute(&cfg);
-    // A second entry→a edge doesn't change dominators.
-    cfg.add_edge(cfg.entry(), a, EdgeKind::ConditionalTrue);
-    let (_next, changed) = DominatorTree::compute_with_diff(&cfg, &dom);
-    assert_eq!(changed, [] as [crate::BlockId; 0]);
+fn roots_lists_every_tree_of_a_forest_in_ascending_order() {
+    // Two trees, 3 -> {1, 0} and 2 -> 4, and node 5 in neither.
+    let parents = [Some(3), Some(3), None, None, Some(2), None];
+    let reachable = [true, true, true, true, true, false];
+    let forest = DominatorTree::<usize>::from_forest_parts(&parents, &reachable);
+    assert_eq!(forest.roots().collect::<Vec<_>>(), [2, 3]);
+    assert_eq!(forest.children(3).collect::<Vec<_>>(), [0, 1]);
+    assert_eq!(forest.children(5).count(), 0);
+    let empty = DominatorTree::<usize>::from_forest_parts(&[], &[]);
+    assert_eq!(empty.roots().count(), 0);
 }
 
 #[test]
 fn one_scratch_reused_down_a_sequence_computes_the_allocating_answer() {
     let sequence = crate::test_util::shapes::scratch_sequence::<MockInst>();
-    let mut scratch = DominatorScratch::new();
+    let mut scratch = DominatorScratch::default();
     // Twice, so the second pass sees a scratch every buffer of which is
     // already at the sequence's high-water mark.
     for _ in 0..2 {
@@ -331,15 +315,15 @@ fn one_scratch_reused_down_a_sequence_computes_the_allocating_answer() {
 #[test]
 fn a_reused_scratch_computes_the_allocating_answer_from_any_root() {
     let cfg = crate::test_util::shapes::diamond_chain::<MockInst>(3);
-    let mut scratch = DominatorScratch::new();
+    let mut scratch = DominatorScratch::default();
     let large = crate::test_util::shapes::diamond_chain::<MockInst>(30);
     // Grow the scratch past the graph under test first: a stale entry left
     // beyond the node bound must not reach the answer.
     drop(DominatorTree::compute_in(&mut scratch, &large));
     for root in cfg.block_ids() {
         assert_eq!(
-            DominatorTree::compute_from_in(&mut scratch, &cfg, root),
-            DominatorTree::compute_from(&cfg, root),
+            DominatorTree::compute_in(&mut scratch, &Rooted::new(&cfg, root)),
+            DominatorTree::compute(&Rooted::new(&cfg, root)),
             "root {root:?}"
         );
     }
@@ -356,14 +340,14 @@ fn a_scratch_crosses_node_id_types() {
     graph.add_edge(nodes[0], nodes[2], ());
     graph.add_edge(nodes[1], nodes[3], ());
 
-    let mut scratch = DominatorScratch::new();
+    let mut scratch = DominatorScratch::default();
     assert_eq!(
         DominatorTree::compute_in(&mut scratch, &cfg),
         DominatorTree::compute(&cfg)
     );
     assert_eq!(
-        DominatorTree::compute_from_in(&mut scratch, &graph, nodes[0]),
-        DominatorTree::compute_from(&graph, nodes[0])
+        DominatorTree::compute_in(&mut scratch, &Rooted::new(&graph, nodes[0])),
+        DominatorTree::compute(&Rooted::new(&graph, nodes[0]))
     );
     assert_eq!(
         DominatorTree::compute_in(&mut scratch, &cfg),

@@ -131,7 +131,7 @@ fn register_fan_out(suite: &mut BenchmarkSuite<'_>) {
         "cfg_clone_split_weighted_high_fan_out",
         || {
             let mut cloned = weighted_high_fan_out.clone();
-            let split = cloned.split_block(fan_out_target, 1);
+            let split = cloned.split_block(fan_out_target, 1, EdgeKind::Fallthrough);
             (cloned, split)
         },
         |(result, split): &(Cfg<u32>, BlockId)| assert_split_weighted_fan_out(
@@ -197,7 +197,7 @@ fn register_irreducible(suite: &mut BenchmarkSuite<'_>) {
         "cfg_clone_make_reducible_small",
         || {
             let mut cloned = irreducible_small.clone();
-            let splits = make_reducible(&mut cloned);
+            let splits = make_reducible(&mut cloned).len();
             (cloned, splits)
         },
         |(result, splits): &(Cfg<u32>, usize)| {
@@ -216,7 +216,7 @@ fn register_irreducible(suite: &mut BenchmarkSuite<'_>) {
         "cfg_clone_make_reducible_large",
         || {
             let mut cloned = irreducible_large.clone();
-            let splits = make_reducible(&mut cloned);
+            let splits = make_reducible(&mut cloned).len();
             (cloned, splits)
         },
         |(result, splits): &(Cfg<u32>, usize)| {
@@ -235,7 +235,7 @@ fn register_irreducible(suite: &mut BenchmarkSuite<'_>) {
         "cfg_clone_make_reducible_weighted",
         || {
             let mut cloned = weighted_irreducible.clone();
-            let splits = make_reducible(&mut cloned);
+            let splits = make_reducible(&mut cloned).len();
             (cloned, splits)
         },
         |(result, splits): &(Cfg<u32>, usize)| {

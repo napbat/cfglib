@@ -5,48 +5,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
-use crate::graph::search::{Visit, VisitedPolicy, may_expand};
+use crate::graph::search::{SearchConfig, SearchOrder, Visit, VisitedPolicy, may_expand};
 
 use super::super::marks::Marks;
-
-/// The discipline an [`open_depth_first_events`] walk runs under.
-///
-/// This is [`crate::OpenSearchConfig`] minus its `order`: the walk is depth-first by
-/// construction, because a [`Finish`](OpenDfsEvent::Finish) *is* an unwind and
-/// a breadth-first frontier never unwinds. As with `direction`, the field is
-/// absent rather than checked — it could only lie.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OpenDfsConfig {
-    /// Whether marks are held for the whole walk or only for the current
-    /// path.
-    pub visited: VisitedPolicy,
-    /// Maximum depth to expand from, in hops from a seed. `None` is
-    /// unbounded; `Some(0)` visits the seeds alone.
-    pub max_depth: Option<usize>,
-}
-
-impl OpenDfsConfig {
-    /// An unbounded walk marked under `visited`.
-    ///
-    /// The policy is the argument because it is the semantics: a fold that
-    /// asks about *paths* (every base subobject that yields a name) needs
-    /// [`VisitedPolicy::Path`], and one that asks about *nodes* (every module
-    /// reached, once) needs [`VisitedPolicy::Global`].
-    #[must_use]
-    pub const fn new(visited: VisitedPolicy) -> Self {
-        Self {
-            visited,
-            max_depth: None,
-        }
-    }
-
-    /// Return this configuration bounded to `max_depth` hops from a seed.
-    #[must_use]
-    pub const fn with_max_depth(mut self, max_depth: usize) -> Self {
-        self.max_depth = Some(max_depth);
-        self
-    }
-}
 
 /// An event of an [`open_depth_first_events`] walk.
 ///
@@ -159,8 +120,11 @@ struct OpenDfsFrame<N> {
 /// - The verdict returned for a `Finish` or a `Refused` is **ignored**; there
 ///   is nothing left to prune. Return
 ///   `ControlFlow::Continue(`[`Visit::Descend`]`)`.
-/// - **`max_depth` bounds expansion, not visiting**: a node at the bound is
-///   discovered and finished, and its successors are never discovered.
+/// - **`config.max_depth` bounds expansion, not visiting**: a node at the
+///   bound is discovered and finished, and its successors are never
+///   discovered. `config.visited` chooses the marks. The walk is depth-first
+///   by construction, because a [`Finish`](OpenDfsEvent::Finish) *is* an
+///   unwind.
 /// - **Seeds**: under [`VisitedPolicy::Global`] a seed already reached from
 ///   an earlier seed is `Refused` at depth 0; under [`VisitedPolicy::Path`]
 ///   the stack is empty between seeds, so every mark has been released and a
@@ -177,7 +141,7 @@ struct OpenDfsFrame<N> {
 /// ```
 /// use core::ops::ControlFlow;
 ///
-/// use cfglib::{OpenDfsConfig, OpenDfsEvent, Visit, VisitedPolicy, open_depth_first_events};
+/// use cfglib::{OpenDfsEvent, SearchConfig, Visit, VisitedPolicy, open_depth_first_events};
 ///
 /// // The classic non-virtual diamond: `d` derives from `b1` and `b2`, both
 /// // derive from `base`, and only `base` declares the member.
@@ -204,7 +168,7 @@ struct OpenDfsFrame<N> {
 /// let mut answer = Lookup::Nothing;
 /// let outcome = open_depth_first_events::<_, ()>(
 ///     ["d"],
-///     OpenDfsConfig::new(VisitedPolicy::Path),
+///     SearchConfig { visited: VisitedPolicy::Path, ..SearchConfig::default() },
 ///     bases,
 ///     |event| {
 ///         match event {
@@ -234,13 +198,22 @@ struct OpenDfsFrame<N> {
 /// // `base` was folded once per route, which is what makes it ambiguous.
 /// assert_eq!(answer, Lookup::Ambiguous);
 /// ```
+///
+/// # Panics
+///
+/// Panics when `config.order` is [`SearchOrder::BreadthFirst`]: a
+/// breadth-first frontier never unwinds, so it has no finish to report.
 #[must_use]
 pub fn open_depth_first_events<N: Clone + Ord, B>(
     seeds: impl IntoIterator<Item = N>,
-    config: OpenDfsConfig,
+    config: SearchConfig,
     mut successors: impl FnMut(&N, &mut Vec<N>),
     mut on_event: impl FnMut(OpenDfsEvent<'_, N>) -> ControlFlow<B, Visit>,
 ) -> Option<B> {
+    assert!(
+        config.order == SearchOrder::DepthFirst,
+        "open_depth_first_events requires SearchOrder::DepthFirst: a breadth-first frontier never unwinds, so a node could never finish"
+    );
     let mut marks = Marks::new();
     let mut stack: Vec<OpenDfsFrame<N>> = Vec::new();
     // Every frame's successors, appended as the frame is pushed and truncated

@@ -2,7 +2,7 @@
 //!
 //! Two cases per graph start from it, add the same batches of random edges,
 //! each one percent of the graph's edge count, and after every batch either
-//! report it with `IncrementalScc::insert_edges` or run `kosaraju_scc` from
+//! report it with `IncrementalScc::insert_edges` or decompose sources first from
 //! scratch. Both clone the graph inside the measured operation and add the
 //! same edges to it, so what differs is the update; a third case per graph
 //! does only that shared part.
@@ -18,13 +18,14 @@
 use std::collections::BTreeSet;
 
 use cfglib::{
-    CallMetadata, Graph, IncrementalScc, NodeId, SccDecomposition, call_graph, kosaraju_scc,
+    CallMetadata, Graph, IncrementalScc, NodeId, SccDecomposition, SccNumbering, call_graph,
 };
 
 use super::BenchmarkSuite;
 use super::graph::call_tree_cfgs;
 use crate::fixtures::fixture_u32;
 use crate::harness::benchmark_case;
+use crate::rng::Rng;
 
 /// Functions of the call graph.
 const CALL_FUNCTIONS: usize = 1_024;
@@ -41,7 +42,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         .map(|(index, cfg)| (fixture_u32(index), cfg))
         .collect();
     let calls = call_graph(&functions);
-    let mut draws = Draws(1);
+    let mut draws = Rng::splitmix(1);
     let call_batches = batches(calls.edge_count(), || {
         let source = draws.below(CALL_FUNCTIONS);
         let target = draws.below(CALL_FUNCTIONS);
@@ -52,7 +53,10 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     };
     let seeded = IncrementalScc::compute(&calls);
     let added = BATCHES * call_batches[0].len();
-    let expected = partition(&kosaraju_scc(&with_batches(&calls, &call_batches, &call)));
+    let expected = partition(&SccDecomposition::compute(
+        &with_batches(&calls, &call_batches, &call),
+        SccNumbering::SourcesFirst,
+    ));
     benchmark_case!(
         suite,
         "incremental_scc_call_graph_edges_only",
@@ -69,7 +73,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "incremental_scc_call_graph_kosaraju_per_batch",
+        "incremental_scc_call_graph_sources_first_per_batch",
         || decompose_per_batch(&calls, &call_batches, &call),
         |components: &SccDecomposition<NodeId>| {
             assert_eq!(partition(components), expected);
@@ -77,7 +81,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     );
 
     let acyclic = nearly_acyclic(ACYCLIC_NODES);
-    let mut draws = Draws(2);
+    let mut draws = Rng::splitmix(2);
     let acyclic_batches = batches(acyclic.edge_count(), || {
         let source = draws.below(ACYCLIC_NODES);
         let target = if draws.below(100) == 0 {
@@ -89,11 +93,10 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     });
     let added = BATCHES * acyclic_batches[0].len();
     let seeded = IncrementalScc::compute(&acyclic);
-    let expected = partition(&kosaraju_scc(&with_batches(
-        &acyclic,
-        &acyclic_batches,
-        &(),
-    )));
+    let expected = partition(&SccDecomposition::compute(
+        &with_batches(&acyclic, &acyclic_batches, &()),
+        SccNumbering::SourcesFirst,
+    ));
     benchmark_case!(
         suite,
         "incremental_scc_nearly_acyclic_edges_only",
@@ -110,7 +113,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     );
     benchmark_case!(
         suite,
-        "incremental_scc_nearly_acyclic_kosaraju_per_batch",
+        "incremental_scc_nearly_acyclic_sources_first_per_batch",
         || decompose_per_batch(&acyclic, &acyclic_batches, &()),
         |components: &SccDecomposition<NodeId>| {
             assert_eq!(partition(components), expected);
@@ -168,12 +171,12 @@ fn decompose_per_batch<N: Clone, E: Clone>(
     payload: &E,
 ) -> SccDecomposition<NodeId> {
     let mut graph = graph.clone();
-    let mut components = kosaraju_scc(&graph);
+    let mut components = SccDecomposition::compute(&graph, SccNumbering::SourcesFirst);
     for batch in batches {
         for &(source, target) in batch {
             graph.add_edge(source, target, payload.clone());
         }
-        components = kosaraju_scc(&graph);
+        components = SccDecomposition::compute(&graph, SccNumbering::SourcesFirst);
     }
     components
 }
@@ -188,7 +191,7 @@ fn partition(components: &SccDecomposition<NodeId>) -> BTreeSet<Vec<NodeId>> {
 fn nearly_acyclic(node_count: usize) -> Graph<(), ()> {
     let mut graph = Graph::with_capacity(node_count, 2 * node_count);
     let nodes: Vec<NodeId> = (0..node_count).map(|_| graph.add_node(())).collect();
-    let mut draws = Draws(3);
+    let mut draws = Rng::splitmix(3);
     for index in 0..node_count - 1 {
         graph.add_edge(nodes[index], nodes[index + 1], ());
         let shortcut = index + 2 + draws.below(64);
@@ -200,20 +203,4 @@ fn nearly_acyclic(node_count: usize) -> Graph<(), ()> {
         graph.add_edge(nodes[index], nodes[index - 8], ());
     }
     graph
-}
-
-/// A splitmix64 sequence, so every run draws the same edges.
-struct Draws(u64);
-
-impl Draws {
-    /// A value in `0..bound`, which must be nonzero.
-    fn below(&mut self, bound: usize) -> usize {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut mixed = self.0;
-        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        mixed ^= mixed >> 31;
-        let bound = u64::try_from(bound).expect("a bound fits in u64");
-        usize::try_from(mixed % bound).expect("a value below a usize bound fits in usize")
-    }
 }

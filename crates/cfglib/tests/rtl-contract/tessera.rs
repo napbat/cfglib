@@ -78,10 +78,10 @@ impl Target for Tessera {
 }
 
 enum OwnedSource {
-    Direct(Place<Tessera>),
+    Direct(Place<Slot>),
     Finite {
         index: usize,
-        candidates: Box<[Place<Tessera>]>,
+        candidates: Box<[Place<Slot>]>,
     },
     Sparse {
         bank: Slot,
@@ -97,7 +97,7 @@ enum OwnedTarget {
     },
     Finite {
         index: usize,
-        candidates: Box<[Place<Tessera>]>,
+        candidates: Box<[Place<Slot>]>,
         value: usize,
     },
     Sparse {

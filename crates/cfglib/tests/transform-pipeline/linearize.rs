@@ -4,10 +4,13 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use cfglib::{BlockId, BlockOrder, Cfg, EdgeKind, LinearInst, linearize};
+use cfglib::{
+    BlockId, BlockOrder, Cfg, Direction, EdgeKind, LinearInst, linearize, reverse_postorder,
+};
 
 use crate::golden::assert_golden;
-use crate::programs::{Rng, random_program};
+use crate::programs::random_program;
+use crate::rng::Rng;
 use crate::toy::{
     Builder, FoldingEmitter, INPUTS, Inst, Kind, OBSERVED, ToyEmitter, run, run_linear,
 };
@@ -85,16 +88,16 @@ fn assert_stream_follows_the_cfg(
         position += run_length;
 
         assert_eq!(run[0].inst.kind, Kind::Label(block.index()), "{context}");
-        assert_eq!(run[0].index, usize::MAX, "{context}");
+        assert_eq!(run[0].index, None, "{context}");
         let own = cfg.block(block).instructions();
         for (offset, instruction) in own.iter().enumerate() {
-            assert_eq!(run[1 + offset].index, offset, "{context}");
+            assert_eq!(run[1 + offset].index, Some(offset), "{context}");
             assert_eq!(&run[1 + offset].inst, instruction, "{context}");
         }
         let synthetic: Vec<Kind> = run[1 + own.len()..]
             .iter()
             .map(|entry| {
-                assert_eq!(entry.index, usize::MAX, "{context}: only synthetics follow");
+                assert_eq!(entry.index, None, "{context}: only synthetics follow");
                 entry.inst.kind
             })
             .collect();
@@ -128,14 +131,11 @@ fn assert_stream_follows_the_cfg(
 }
 
 fn shuffled_order(cfg: &Cfg<Inst>, seed: u64) -> Vec<BlockId> {
-    let mut rng = Rng::new(seed);
     let mut rest: Vec<BlockId> = cfg
         .block_ids()
         .filter(|&block| block != cfg.entry())
         .collect();
-    for index in (1..rest.len()).rev() {
-        rest.swap(index, rng.below(index + 1));
-    }
+    Rng::new(seed).shuffle(&mut rest);
     let mut order = vec![cfg.entry()];
     order.extend(rest);
     order
@@ -157,7 +157,9 @@ fn assert_stream_runs_like_the_cfg(cfg: &Cfg<Inst>, stream: &[LinearInst<Inst>],
 fn every_reachable_block_is_emitted_once_in_reverse_postorder_and_runs_like_the_cfg() {
     for seed in 0..60 {
         let cfg = random_program::<()>(seed, true);
-        let reachable: BTreeSet<BlockId> = cfg.reverse_postorder().into_iter().collect();
+        let reachable: BTreeSet<BlockId> = reverse_postorder(&cfg, cfg.entry(), Direction::Forward)
+            .into_iter()
+            .collect();
         let stream = linearized(&cfg, BlockOrder::ReversePostorder);
         let context = format!("seed {seed}");
 
@@ -213,7 +215,7 @@ fn any_caller_chosen_order_still_runs_like_the_cfg_by_adding_jumps() {
 fn render(stream: &[LinearInst<Inst>]) -> String {
     let mut text = String::new();
     for entry in stream {
-        let synthetic = entry.index == usize::MAX;
+        let synthetic = entry.index.is_none();
         match entry.inst.kind {
             Kind::Label(block) => {
                 if !text.is_empty() {
@@ -223,7 +225,13 @@ fn render(stream: &[LinearInst<Inst>]) -> String {
             }
             Kind::Jump(block) if synthetic => write!(text, " jmp L{block}"),
             Kind::BranchIf(block) if synthetic => write!(text, " bnz L{block}"),
-            _ => write!(text, " {}", entry.index),
+            _ => write!(
+                text,
+                " {}",
+                entry
+                    .index
+                    .expect("the emitter creates only labels, jumps and branches")
+            ),
         }
         .expect("writing to a string cannot fail");
     }
@@ -284,7 +292,7 @@ fn folded_transfers(cfg: &Cfg<Inst>, block: BlockId, next: Option<BlockId>) -> V
 fn synthetic_transfers(stream: &[LinearInst<Inst>], block: BlockId) -> Vec<Kind> {
     stream
         .iter()
-        .filter(|entry| entry.block == block && entry.index == usize::MAX)
+        .filter(|entry| entry.block == block && entry.index.is_none())
         .map(|entry| entry.inst.kind)
         .filter(|kind| !matches!(kind, Kind::Label(_)))
         .collect()
@@ -295,7 +303,8 @@ fn a_folding_emitter_inverts_branches_and_drops_jumps_to_the_next_block() {
     let mut inverted = 0;
     for seed in 0..60 {
         let cfg = random_program::<()>(seed, true);
-        for order in [cfg.reverse_postorder(), shuffled_order(&cfg, seed)] {
+        let rpo = reverse_postorder(&cfg, cfg.entry(), Direction::Forward);
+        for order in [rpo, shuffled_order(&cfg, seed)] {
             let context = format!("seed {seed}, order {order:?}");
             let stream =
                 linearize(&cfg, BlockOrder::Custom(order.clone()), &FoldingEmitter).stream();

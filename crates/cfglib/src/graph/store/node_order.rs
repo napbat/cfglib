@@ -1,4 +1,4 @@
-//! The node orders an ordered compaction can number the survivors in.
+//! The node orders a compaction can number the survivors in.
 //!
 //! A node's identity decides where its payload, its adjacency offsets, and
 //! its entry in every node-indexed side table live, so an order that numbers
@@ -11,19 +11,22 @@ extern crate alloc;
 
 use alloc::vec;
 use alloc::vec::Vec;
-use core::mem;
+use core::ops::ControlFlow;
 
 use super::Graph;
-use super::adjacency::NONE;
 use super::id::{Id, IdTag, NodeTag};
+use crate::graph::search::Visit;
+use crate::graph::traverse::{Outgoing, breadth_first_core, postorder_in};
+use crate::graph::view::Direction;
+use crate::identity::NO_INDEX;
 
-/// How [`Graph::compact_ordered`] numbers the surviving nodes.
+/// How [`Graph::compact`] numbers the surviving nodes.
 ///
 /// Every order is deterministic: ties break by adjacency order, then by slot.
 /// The searches follow outgoing edges, read each node's edges in adjacency
 /// order, start from each root in turn, and skip the nodes an earlier root
 /// already reached, so a root listed twice or reached from an earlier one
-/// adds nothing. The live nodes an order does not reach follow in slot
+/// adds nothing. The live nodes a search does not reach follow in slot
 /// order.
 ///
 /// # Examples
@@ -38,20 +41,19 @@ use super::id::{Id, IdTag, NodeTag};
 /// graph.add_edge(entry, body, ());
 /// graph.add_edge(body, exit, ());
 ///
-/// graph.compact_ordered(NodeOrder::BreadthFirst(&[entry]));
+/// graph.compact(NodeOrder::BreadthFirst(&[entry]));
 /// assert_eq!(graph.nodes().copied().collect::<Vec<_>>(), ["entry", "body", "exit"]);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum NodeOrder<'a, NT: IdTag = NodeTag> {
-    /// First appearance as an endpoint, scanning the live edges in identity
-    /// order and reading each edge's source before its target; nodes with no
-    /// live edge follow in slot order.
+    /// Slot order: the survivors keep their relative order, so node
+    /// identity order still means insertion order.
     ///
-    /// Needs no roots and costs one pass over the edges, which suits a graph
-    /// with no natural entry. Its result follows the edge identity order,
-    /// which is the order the edges were added in.
-    FirstTouch,
+    /// Needs no roots, no search and no payload moves, which makes it the
+    /// cheapest order and the one to use when nothing reads the graph in
+    /// bulk.
+    Insertion,
     /// Breadth-first from the roots in turn: each root, then the nodes its
     /// search discovers, in the order it discovers them.
     ///
@@ -82,7 +84,7 @@ struct Numbering {
 impl Numbering {
     fn new(slots: usize) -> Self {
         Self {
-            map: vec![NONE; slots],
+            map: vec![NO_INDEX; slots],
             next: 0,
         }
     }
@@ -91,7 +93,7 @@ impl Numbering {
     /// was numbered now.
     fn assign<T: IdTag>(&mut self, node: Id<T>) -> bool {
         let entry = &mut self.map[node.index()];
-        if *entry != NONE {
+        if *entry != NO_INDEX {
             return false;
         }
         *entry = self.next;
@@ -101,17 +103,13 @@ impl Numbering {
 }
 
 impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
-    /// The new number of every node slot under `order`, with [`NONE`] for
+    /// The new number of every node slot under `order`, with [`NO_INDEX`] for
     /// the removed.
     pub(super) fn ordered_slots(&self, order: NodeOrder<'_, NT>) -> Vec<u32> {
         let mut numbering = Numbering::new(self.node_bound());
         match order {
-            NodeOrder::FirstTouch => {
-                for edge in self.edges() {
-                    numbering.assign(edge.source());
-                    numbering.assign(edge.target());
-                }
-            }
+            // Slot order is what the loop below hands out on its own.
+            NodeOrder::Insertion => {}
             NodeOrder::BreadthFirst(roots) => self.number_breadth_first(roots, &mut numbering),
             NodeOrder::ReversePostorder(roots) => {
                 self.number_reverse_postorder(roots, &mut numbering);
@@ -137,8 +135,8 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
     }
 
     fn number_breadth_first(&self, roots: &[Id<NT>], numbering: &mut Numbering) {
-        // Numbering a node when it is discovered makes the queue the order,
-        // so the queue doubles as the record of it.
+        // Numbering a node when it is discovered makes the queue the order, so
+        // the search's own marks are the numbering.
         let mut queue = Vec::new();
         for &root in roots {
             self.assert_live_endpoint(root, "root");
@@ -147,52 +145,26 @@ impl<N, E, NT: IdTag, ET: IdTag> Graph<N, E, NT, ET> {
             }
             queue.clear();
             queue.push(root);
-            let mut head = 0;
-            while let Some(&node) = queue.get(head) {
-                head += 1;
-                for next in self.successors(node) {
-                    if numbering.assign(next) {
-                        queue.push(next);
-                    }
-                }
-            }
+            breadth_first_core::<_, _, ()>(
+                Outgoing,
+                self,
+                &mut queue,
+                |_, _| ControlFlow::Continue(Visit::Descend),
+                |_, _, to, _| numbering.assign(to),
+            );
         }
     }
 
     fn number_reverse_postorder(&self, roots: &[Id<NT>], numbering: &mut Numbering) {
-        let mut visited = vec![false; self.node_bound()];
-        let mut postorder = Vec::new();
-        // A node is pushed to be entered and, once entered, again flagged to
-        // be finished after everything it reached. Its successors go on top
-        // in reverse, so the first is searched first, as a recursive search
-        // would. An eight-byte entry per pushed edge costs less than a frame
-        // holding an adjacency cursor per node on a path that can run the
-        // length of the graph.
-        let mut stack = Vec::new();
-        let mut successors = Vec::new();
         for &root in roots {
             self.assert_live_endpoint(root, "root");
-            stack.push((root, false));
-            while let Some((node, finished)) = stack.pop() {
-                if finished {
-                    postorder.push(node);
-                    continue;
-                }
-                if mem::replace(&mut visited[node.index()], true) {
-                    continue;
-                }
-                stack.push((node, true));
-                successors.clear();
-                successors.extend(self.successors(node));
-                stack.extend(
-                    successors
-                        .iter()
-                        .rev()
-                        .filter(|next| !visited[next.index()])
-                        .map(|&next| (next, false)),
-                );
-            }
         }
+        let postorder = postorder_in(
+            self,
+            roots.iter().copied(),
+            Direction::Forward,
+            &mut Vec::new(),
+        );
         for &node in postorder.iter().rev() {
             numbering.assign(node);
         }

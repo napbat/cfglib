@@ -1,5 +1,5 @@
 use super::*;
-use crate::graph::scc::tarjan_scc;
+use crate::graph::scc::SccNumbering;
 use crate::graph::store::{Graph, NodeId};
 use crate::test_util::rng::Rng;
 use alloc::collections::{BTreeMap, BTreeSet};
@@ -64,21 +64,21 @@ impl GraphView for Recording<'_> {
 }
 
 /// Asserts that `components` holds the strongly connected components of
-/// `graph` as `tarjan_scc` finds them, in an order that every edge agrees
-/// with and that lays the runs out back to back, and that the snapshot keeps
-/// the `kosaraju_scc` numbering contract.
+/// `graph` as the leaves-first decomposition finds them, in an order that
+/// every edge agrees with and that lays the runs out back to back, and that
+/// the snapshot keeps the sources-first numbering contract.
 fn assert_current(graph: &Graph<(), ()>, components: &IncrementalScc<NodeId>) {
-    let oracle = tarjan_scc(graph);
+    let oracle = SccDecomposition::compute(graph, SccNumbering::LeavesFirst);
     for node in graph.node_ids() {
         assert_eq!(
-            components.component_index(node),
+            components.component_id(node),
             oracle.component(node).nodes()[0].index(),
             "the component of {node:?}"
         );
     }
 
     let snapshot = components.decomposition();
-    assert_eq!(snapshot.len(), oracle.len());
+    assert_eq!(snapshot.component_count(), oracle.component_count());
     let mut position = 0;
     for nodes in snapshot.components() {
         assert_eq!(nodes, oracle.component(nodes[0]).nodes());
@@ -89,8 +89,8 @@ fn assert_current(graph: &Graph<(), ()>, components: &IncrementalScc<NodeId>) {
     for source in graph.node_ids() {
         for target in GraphView::successors(graph, source) {
             let (from, to) = (
-                components.component_index(source),
-                components.component_index(target),
+                components.component_id(source),
+                components.component_id(target),
             );
             assert!(
                 components.position(from) <= components.position(to),
@@ -112,7 +112,7 @@ fn layout(components: &IncrementalScc<NodeId>) -> Vec<(NodeId, usize)> {
         .decomposition()
         .components()
         .flatten()
-        .map(|&node| (node, components.component_index(node)))
+        .map(|&node| (node, components.component_id(node)))
         .collect()
 }
 
@@ -253,7 +253,10 @@ fn check_random_edits(seeds: Range<u64>, max_nodes: usize, steps: usize) -> (usi
         let mut graph = random_graph(&mut rng, max_nodes);
         let live: Vec<NodeId> = graph.node_ids().collect();
         let mut components = IncrementalScc::compute(&graph);
-        assert_eq!(components.decomposition(), kosaraju_scc(&graph));
+        assert_eq!(
+            components.decomposition(),
+            SccDecomposition::compute(&graph, SccNumbering::SourcesFirst)
+        );
         assert_current(&graph, &components);
         if live.is_empty() {
             continue;
@@ -336,8 +339,8 @@ fn an_edge_that_agrees_with_the_order_reads_no_adjacency() {
     let mut components = IncrementalScc::compute(&graph);
     for (source, target) in [(0, 4), (1, 3), (2, 2), (6, 6)] {
         let (source, target) = (node(source), node(target));
-        let from = components.position(components.component_index(source));
-        let to = components.position(components.component_index(target));
+        let from = components.position(components.component_id(source));
+        let to = components.position(components.component_id(target));
         assert!(from <= to);
         graph.add_edge(source, target, ());
         let recording = Recording::new(&graph);
@@ -370,12 +373,12 @@ fn window(
     source: NodeId,
     target: NodeId,
 ) -> BTreeSet<NodeId> {
-    let first = components.position(components.component_index(target));
-    let last = components.position(components.component_index(source));
+    let first = components.position(components.component_id(target));
+    let last = components.position(components.component_id(source));
     graph
         .node_ids()
         .filter(|&node| {
-            let start = components.position(components.component_index(node));
+            let start = components.position(components.component_id(node));
             first <= start && start <= last
         })
         .collect()
@@ -431,7 +434,7 @@ fn removing_one_of_two_parallel_edges_keeps_the_component() {
         components.remove_edge(&graph, node(1), node(0)),
         SccChange::default()
     );
-    assert_eq!(components.component_index(node(1)), 0);
+    assert_eq!(components.component_id(node(1)), 0);
     assert_current(&graph, &components);
 
     // The second copy was what held the cycle.
@@ -496,16 +499,16 @@ fn removed_slots_belong_to_no_component() {
     graph.add_edge(node(3), node(0), ());
     let change = components.insert_edge(&graph, node(3), node(0));
     assert_eq!(change.merged, [0, 3]);
-    assert_eq!(components.decomposition().len(), 1);
+    assert_eq!(components.decomposition().component_count(), 1);
     assert_current(&graph, &components);
 }
 
 #[test]
 #[should_panic(expected = "is not a node of the graph the components were computed for")]
-fn a_removed_slot_has_no_component_index() {
+fn a_removed_slot_has_no_component_id() {
     let mut graph = build(3, &[(0, 1)]);
     graph.remove_node(node(2));
-    let _ = IncrementalScc::compute(&graph).component_index(node(2));
+    let _ = IncrementalScc::compute(&graph).component_id(node(2));
 }
 
 #[test]

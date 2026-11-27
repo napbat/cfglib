@@ -7,8 +7,8 @@
 use std::collections::BTreeSet;
 
 use cfglib::{
-    DenseId, DominanceFrontiers, DominatorTree, GraphView, PostDominatorTree, PostNode, RootedView,
-    TraversalDirection, control_dependence_graph, reverse_postorder, tarjan_scc,
+    DenseId, Direction, DominanceFrontiers, DominatorTree, GraphView, PostDominatorTree, PostNode,
+    RootedView, SccDecomposition, SccNumbering, control_dependence_graph, reverse_postorder,
 };
 
 use crate::fixtures;
@@ -91,8 +91,12 @@ fn strongly_connected_components_are_the_mutual_reachability_classes_numbered_le
     for (name, function) in functions() {
         let cfg = extract::<Glint, _>(&function);
         let classes = cfg.components();
-        let scc = tarjan_scc(&function);
-        assert_eq!(scc.len(), classes.len(), "{name}: component count");
+        let scc = SccDecomposition::compute(&function, SccNumbering::LeavesFirst);
+        assert_eq!(
+            scc.component_count(),
+            classes.len(),
+            "{name}: component count"
+        );
         let same_class = |a: usize, b: usize| {
             classes
                 .iter()
@@ -134,7 +138,7 @@ fn reverse_postorder_lists_the_reachable_blocks_and_puts_forward_edges_in_order(
     for (name, function) in functions() {
         let cfg = extract::<Glint, _>(&function);
         let reachable = cfg.reachable();
-        let order = reverse_postorder(&function, function.root(), TraversalDirection::Outgoing);
+        let order = reverse_postorder(&function, function.root(), Direction::Forward);
         let listed: BTreeSet<usize> = order.iter().map(|&node| node.index()).collect();
         assert_eq!(order.len(), listed.len(), "{name}: no block twice");
         let expected: BTreeSet<usize> = cfg.live_nodes().filter(|&node| reachable[node]).collect();
@@ -284,7 +288,7 @@ fn a_dag_function_is_acyclic_and_a_loop_is_not() {
         fixtures::with_an_unreachable_block(),
     ];
     for function in &acyclic {
-        assert!(tarjan_scc(function).is_dag(function));
+        assert!(SccDecomposition::compute(function, SccNumbering::LeavesFirst).is_dag(function));
     }
     let cyclic = [
         fixtures::counting_sum(),
@@ -293,17 +297,17 @@ fn a_dag_function_is_acyclic_and_a_loop_is_not() {
         fixtures::irreducible(),
     ];
     for function in &cyclic {
-        assert!(!tarjan_scc(function).is_dag(function));
+        assert!(!SccDecomposition::compute(function, SccNumbering::LeavesFirst).is_dag(function));
     }
 }
 
 #[test]
 fn the_graph_view_of_a_function_with_a_removed_block_skips_the_slot() {
     let function = fixtures::with_a_removed_block();
-    let order = reverse_postorder(&function, function.root(), TraversalDirection::Outgoing);
+    let order = reverse_postorder(&function, function.root(), Direction::Forward);
     assert_eq!(order, [block(0), block(2)]);
-    let scc = tarjan_scc(&function);
-    assert_eq!(scc.len(), 2);
+    let scc = SccDecomposition::compute(&function, SccNumbering::LeavesFirst);
+    assert_eq!(scc.component_count(), 2);
     assert_eq!(GraphView::node_bound(&function), 3);
 }
 

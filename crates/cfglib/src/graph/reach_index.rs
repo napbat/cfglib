@@ -11,8 +11,9 @@
 //!
 //! # How a pair is answered
 //!
-//! Everything works on the condensation, numbered by [`kosaraju_scc`]
-//! (sources first, so a component only reaches higher-numbered ones):
+//! Everything works on the condensation, numbered by
+//! [`SccNumbering::SourcesFirst`] (so a component only reaches
+//! higher-numbered ones):
 //!
 //! - Two nodes of one component reach each other, and a source numbered
 //!   after its target reaches nothing of it.
@@ -58,11 +59,12 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+use crate::block::BlockId;
 use crate::graph::epoch::EpochMarks;
 use crate::graph::fanout::DenseFanout;
-use crate::graph::scc::{SccDecomposition, condensation_of, kosaraju_scc};
-use crate::graph::store::NodeId;
+use crate::graph::scc::{SccDecomposition, SccNumbering};
 use crate::graph::view::{DenseId, GraphView};
+use crate::identity::{slot, word};
 use chains::ChainTable;
 use observe::Observations;
 
@@ -75,20 +77,21 @@ const MAX_SUPPORTIVE: usize = 64;
 
 /// What a [`ReachIndex`] computes besides the components.
 ///
-/// The fields are public and the struct is `Copy`, so a consumer that stores
-/// a configuration as data can write it as a literal;
-/// [`new`](ReachIndexConfig::new) plus the setters are the ergonomic form, and
-/// [`Default`] is the same as [`new`](ReachIndexConfig::new).
+/// A plain struct with public fields: set the fields to change it.
+/// [`Default`] is the same as [`new`](ReachIndexConfig::new), which is also
+/// usable in a `const`.
 ///
 /// # Examples
 ///
 /// ```
 /// use cfglib::ReachIndexConfig;
 ///
-/// let config = ReachIndexConfig::new().with_orders(4).with_exact_max_chains(16);
-/// assert_eq!(config.orders, 4);
+/// let config = ReachIndexConfig {
+///     orders: 4,
+///     exact_max_chains: Some(16),
+///     ..ReachIndexConfig::default()
+/// };
 /// assert_eq!(config.supportive, 32);
-/// assert_eq!(config.exact_max_chains, Some(16));
 /// assert_eq!(ReachIndexConfig::default(), ReachIndexConfig::new());
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,29 +131,6 @@ impl ReachIndexConfig {
             exact_max_chains: None,
         }
     }
-
-    /// Return this configuration keeping `orders` extended topological
-    /// orders.
-    #[must_use]
-    pub const fn with_orders(mut self, orders: usize) -> Self {
-        self.orders = orders;
-        self
-    }
-
-    /// Return this configuration keeping `supportive` supportive components.
-    #[must_use]
-    pub const fn with_supportive(mut self, supportive: usize) -> Self {
-        self.supportive = supportive;
-        self
-    }
-
-    /// Return this configuration with the exact chain mode enabled for a
-    /// decomposition of at most `max_chains` chains.
-    #[must_use]
-    pub const fn with_exact_max_chains(mut self, max_chains: usize) -> Self {
-        self.exact_max_chains = Some(max_chains);
-        self
-    }
 }
 
 impl Default for ReachIndexConfig {
@@ -162,11 +142,13 @@ impl Default for ReachIndexConfig {
 /// Answers "does `source` reach `target`" exactly, for many pairs of one
 /// static graph.
 ///
-/// [`compute`](Self::compute) runs [`kosaraju_scc`] and builds the index over
-/// the condensation in O((t + 1)·(n + m)) for `t` orders: the supportive
-/// components cost one pass of 64-bit unions per direction however many are
-/// kept. An exact table of `c` chains costs O(c·(n + m)) instead.
-/// [`reaches`](Self::reaches) answers one pair. See the
+/// [`compute`](Self::compute) runs the sources-first [`SccDecomposition`]
+/// and builds the index over the condensation in O((t + 1)·(n + m)) for `t`
+/// orders: the supportive components cost one pass of 64-bit unions per
+/// direction however many are kept. An exact table of `c` chains costs
+/// O(c·(n + m)) instead.
+/// [`reaches`](Self::reaches) answers one pair, and
+/// [`reaches_in`](Self::reaches_in) one of many over reused buffers. See the
 /// [module documentation](self) for what is stored and how a pair is decided.
 ///
 /// Besides the decomposition, the observations keep both adjacency lists of
@@ -197,21 +179,22 @@ impl Default for ReachIndexConfig {
 /// calls.add_edge(eval, parse, ());
 ///
 /// let index = ReachIndex::compute(&calls, ReachIndexConfig::default());
-/// let mut scratch = ReachScratch::new();
-/// assert!(index.reaches(main, lex, &mut scratch));
-/// assert!(index.reaches(eval, lex, &mut scratch));
-/// assert!(!index.reaches(lex, main, &mut scratch));
-/// assert!(!index.reaches(main, log, &mut scratch));
-/// assert!(index.reaches(log, log, &mut scratch));
+/// let mut scratch = ReachScratch::default();
+/// assert!(index.reaches_in(&mut scratch, main, lex));
+/// assert!(index.reaches_in(&mut scratch, eval, lex));
+/// assert!(!index.reaches_in(&mut scratch, lex, main));
+/// assert!(!index.reaches_in(&mut scratch, main, log));
+/// assert!(index.reaches(log, log));
 ///
 /// // The same pairs from a chain table, without any search.
-/// let exact = ReachIndex::compute(&calls, ReachIndexConfig::new().with_exact_max_chains(8));
+/// let exact_mode = ReachIndexConfig { exact_max_chains: Some(8), ..ReachIndexConfig::default() };
+/// let exact = ReachIndex::compute(&calls, exact_mode);
 /// assert!(exact.chain_count().is_some());
-/// assert!(exact.reaches(main, lex, &mut scratch));
-/// assert!(!exact.reaches(main, log, &mut scratch));
+/// assert!(exact.reaches(main, lex));
+/// assert!(!exact.reaches(main, log));
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReachIndex<N> {
+pub struct ReachIndex<N = BlockId> {
     /// The strongly connected components, numbered sources first.
     components: SccDecomposition<N>,
     /// How a pair of distinct components, the source numbered first, is
@@ -233,8 +216,9 @@ impl<N: DenseId> ReachIndex<N> {
     ///
     /// # Panics
     ///
-    /// Panics when `config.supportive` is above 64, and when the
-    /// condensation has more than `u32::MAX` components or edges.
+    /// Panics when `config.supportive` is above 64, when the node bound
+    /// exceeds the range of a dense `u32` table, and when the condensation
+    /// has more than `u32::MAX` edges.
     #[must_use]
     pub fn compute<G: GraphView<NodeId = N>>(graph: &G, config: ReachIndexConfig) -> Self {
         assert!(
@@ -242,31 +226,25 @@ impl<N: DenseId> ReachIndex<N> {
             "a reach index keeps at most {MAX_SUPPORTIVE} supportive components, not {}",
             config.supportive
         );
-        let components = kosaraju_scc(graph);
-        let count = components.len();
-        // Every per-component value fits a `u32` once the count does, with
-        // `u32::MAX` itself left free as a sentinel.
-        assert!(
-            u32::try_from(count).is_ok(),
-            "a reach index holds at most u32::MAX components, not {count}"
-        );
-        let condensed = condensation_of(graph, &components);
-        let successors = DenseFanout::from_grouped((0..count).map(|component| {
-            condensed
-                .successors(NodeId::from_index(component))
-                .map(|next| component_u32(next.index()))
-        }));
+        let components = SccDecomposition::compute(graph, SccNumbering::SourcesFirst);
+        let count = components.component_count();
+        // The condensation's edges, straight into the two fan-outs rather
+        // than through a condensed graph. Every component index fits a `u32`
+        // because the node bound does, with `u32::MAX` itself left free as a
+        // sentinel.
+        let mut edges: Vec<(usize, u32)> = Vec::new();
+        components.for_each_component_edge(graph, |from, to| edges.push((from, word(to))));
+        let successors = DenseFanout::from_pairs(count, edges.iter().copied());
         let chains = config
             .exact_max_chains
             .and_then(|max_chains| ChainTable::compute(&successors, max_chains));
         let answers = if let Some(chains) = chains {
             Answers::Exact(chains)
         } else {
-            let predecessors = DenseFanout::from_grouped((0..count).map(|component| {
-                condensed
-                    .predecessors(NodeId::from_index(component))
-                    .map(|previous| component_u32(previous.index()))
-            }));
+            let predecessors = DenseFanout::from_pairs(
+                count,
+                edges.iter().map(|&(from, to)| (slot(to), word(from))),
+            );
             Answers::Observed(Observations::compute(successors, predecessors, config))
         };
         Self {
@@ -280,8 +258,8 @@ impl<N: DenseId> ReachIndex<N> {
     /// A node always reaches itself, with or without a self-loop. The answer
     /// is exact. It costs O(1) when the components or an observation decide
     /// it, and always in the exact chain mode; otherwise it is a pruned
-    /// bidirectional search over the condensation in `scratch`, which grows to
-    /// this index's component count and is reused by every later query.
+    /// bidirectional search over the condensation in buffers of its own.
+    /// [`reaches_in`](Self::reaches_in) keeps those buffers across queries.
     ///
     /// # Panics
     ///
@@ -290,7 +268,18 @@ impl<N: DenseId> ReachIndex<N> {
     /// removed, or one at or beyond its node bound. This is the contract of
     /// [`SccDecomposition::component_index`].
     #[must_use]
-    pub fn reaches(&self, source: N, target: N, scratch: &mut ReachScratch) -> bool {
+    pub fn reaches(&self, source: N, target: N) -> bool {
+        self.reaches_in(&mut ReachScratch::default(), source, target)
+    }
+
+    /// [`reaches`](Self::reaches) with the search in `scratch`, which grows
+    /// to this index's component count and is reused by every later query.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the conditions of [`reaches`](Self::reaches).
+    #[must_use]
+    pub fn reaches_in(&self, scratch: &mut ReachScratch, source: N, target: N) -> bool {
         let source = self.components.component_index(source);
         let target = self.components.component_index(target);
         #[cfg(test)]
@@ -322,13 +311,13 @@ impl<N: DenseId> ReachIndex<N> {
     }
 }
 
-/// The working buffers of [`ReachIndex::reaches`]: epoch marks and the two
+/// The working buffers of [`ReachIndex::reaches_in`]: epoch marks and the two
 /// frontiers of the fallback search.
 ///
-/// Nothing is fixed at construction and nothing is released by a query. The
-/// marks grow to the component count of the index a query runs on and are
-/// cleared in O(1) per search, so one scratch serves every query of a pass,
-/// across indexes of any size, and allocates only while it grows.
+/// It starts empty ([`Default`]) and nothing is released by a query. The
+/// marks grow on entry to the component count of the index a query runs on
+/// and are cleared in O(1) per search, so one scratch serves every query of a
+/// pass, across indexes of any size, and allocates only while it grows.
 ///
 /// # Examples
 ///
@@ -341,8 +330,8 @@ impl<N: DenseId> ReachIndex<N> {
 /// graph.add_edge(nodes[1], nodes[2], ());
 ///
 /// let index = ReachIndex::compute(&graph, ReachIndexConfig::default());
-/// let mut scratch = ReachScratch::new();
-/// let reached = nodes.iter().filter(|&&target| index.reaches(nodes[0], target, &mut scratch));
+/// let mut scratch = ReachScratch::default();
+/// let reached = nodes.iter().filter(|&&target| index.reaches_in(&mut scratch, nodes[0], target));
 /// assert_eq!(reached.count(), 3);
 /// ```
 #[derive(Debug, Clone, Default)]
@@ -359,17 +348,6 @@ pub struct ReachScratch {
     coverage: Coverage,
 }
 
-impl ReachScratch {
-    /// Scratch holding nothing yet.
-    ///
-    /// Every buffer is sized by the first search that needs it, so there is
-    /// no component count to state here.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
 /// The share of queries an index answered without its fallback search.
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -378,11 +356,6 @@ struct Coverage {
     queries: usize,
     /// The queries that ran the fallback search.
     searched: usize,
-}
-
-/// A component index as the `u32` the tables store.
-fn component_u32(component: usize) -> u32 {
-    u32::try_from(component).expect("compute checked that the component count fits in u32")
 }
 
 #[cfg(test)]

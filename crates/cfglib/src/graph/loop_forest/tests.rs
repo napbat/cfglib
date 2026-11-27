@@ -5,7 +5,7 @@
 use super::*;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::graph::loop_nest::nesting;
+use crate::test_util::loops::{NaturalLoop, natural_loops, nesting};
 use crate::test_util::rng::Rng;
 use alloc::vec;
 
@@ -100,26 +100,22 @@ fn oracle_loops_from_backs<G: GraphView>(
     loops
 }
 
-/// What `detect_loops` returned before the forest.
+/// The loops the builder this forest replaced found, from the back edges.
 fn oracle_loops(cfg: &Cfg<u32>, dom: &DominatorTree) -> Vec<NaturalLoop> {
     oracle_loops_from_backs(cfg, dom, &find_back_edges(cfg, dom))
 }
 
-/// What `detect_loops_tagged` returned before the forest.
-fn oracle_loops_tagged(cfg: &Cfg<u32>, dom: &DominatorTree) -> Vec<NaturalLoop> {
-    oracle_loops_from_backs(cfg, dom, &find_back_edges_tagged(cfg, dom))
-}
-
-/// What `detect_all_loops_tagged` returned before the forest: the tagged loops,
-/// then those of the dominator forest whose header the entry misses.
-fn oracle_all_loops_tagged(cfg: &Cfg<u32>, dom: &DominatorTree) -> Vec<NaturalLoop> {
-    let mut loops = oracle_loops_tagged(cfg, dom);
+/// The loops of all the code: those of the live program, then those of the
+/// dominator forest whose header the entry misses.
+fn oracle_all_loops(cfg: &Cfg<u32>, dom: &DominatorTree) -> Vec<NaturalLoop> {
+    let mut loops = oracle_loops(cfg, dom);
     let mut roots = Vec::new();
-    let Some(forest) = dom.complete_forest_in(&mut DominatorScratch::new(), &mut roots, cfg) else {
+    let Some(forest) = dom.complete_forest_in(&mut DominatorScratch::default(), &mut roots, cfg)
+    else {
         return loops;
     };
     loops.extend(
-        oracle_loops_tagged(cfg, &forest)
+        oracle_loops(cfg, &forest)
             .into_iter()
             .filter(|dead| !dom.is_reachable(dead.header)),
     );
@@ -127,7 +123,7 @@ fn oracle_all_loops_tagged(cfg: &Cfg<u32>, dom: &DominatorTree) -> Vec<NaturalLo
     loops
 }
 
-/// What `block_nesting_depths` computed from the flat loops.
+/// The loop depth of each block, from the flat loops.
 fn oracle_node_depths(bound: usize, loops: &[NaturalLoop]) -> Vec<usize> {
     let mut depths = vec![0_usize; bound];
     for lp in loops {
@@ -142,8 +138,8 @@ fn oracle_node_depths(bound: usize, loops: &[NaturalLoop]) -> Vec<usize> {
 
 /// Every question the forest answers, against the flat loops the oracle found.
 fn assert_forest_matches(cfg: &Cfg<u32>, forest: &LoopForest, oracle: &[NaturalLoop], label: &str) {
-    assert_eq!(forest.natural_loops(), oracle, "{label}: natural loops");
-    assert_eq!(forest.len(), oracle.len(), "{label}");
+    assert_eq!(natural_loops(forest), oracle, "{label}: natural loops");
+    assert_eq!(forest.loop_count(), oracle.len(), "{label}");
     assert_eq!(forest.is_empty(), oracle.is_empty(), "{label}");
 
     let mut by_header = oracle.to_vec();
@@ -173,7 +169,7 @@ fn assert_forest_matches(cfg: &Cfg<u32>, forest: &LoopForest, oracle: &[NaturalL
             "{label}: parent of {:?}",
             lp.header
         );
-        assert_eq!(forest.body_len(id), lp.body.len(), "{label}");
+        assert_eq!(forest.body_count(id), lp.body.len(), "{label}");
         assert_eq!(
             forest.body(id).collect::<BTreeSet<_>>(),
             lp.body,
@@ -225,7 +221,7 @@ fn assert_forest_matches(cfg: &Cfg<u32>, forest: &LoopForest, oracle: &[NaturalL
     );
 }
 
-fn check_all_three(cfg: &Cfg<u32>, label: &str) {
+fn check_both(cfg: &Cfg<u32>, label: &str) {
     let dom = DominatorTree::compute(cfg);
     assert_forest_matches(
         cfg,
@@ -235,14 +231,8 @@ fn check_all_three(cfg: &Cfg<u32>, label: &str) {
     );
     assert_forest_matches(
         cfg,
-        &LoopForest::compute_tagged(cfg, &dom),
-        &oracle_loops_tagged(cfg, &dom),
-        label,
-    );
-    assert_forest_matches(
-        cfg,
-        &LoopForest::compute_all_tagged(cfg, &dom),
-        &oracle_all_loops_tagged(cfg, &dom),
+        &LoopForest::compute_all(cfg, &dom),
+        &oracle_all_loops(cfg, &dom),
         label,
     );
 }
@@ -270,7 +260,7 @@ fn every_digraph_of_up_to_four_blocks_has_the_loops_of_the_oracle() {
                 .filter(|&(bit, _)| mask >> bit & 1 == 1)
                 .map(|(_, &(from, to))| (from, to, EdgeKind::Fallthrough))
                 .collect();
-            check_all_three(
+            check_both(
                 &graph_of(count, &edges),
                 &alloc::format!("{count} blocks, edges {edges:?}"),
             );
@@ -294,7 +284,7 @@ fn every_tagged_digraph_of_three_blocks_has_the_loops_of_the_oracle() {
             }
             rest /= 3;
         }
-        check_all_three(&graph_of(3, &edges), &alloc::format!("edges {edges:?}"));
+        check_both(&graph_of(3, &edges), &alloc::format!("edges {edges:?}"));
     }
 }
 
@@ -322,10 +312,10 @@ fn random_graphs_with_dead_code_and_tags_have_the_loops_of_the_oracle() {
             .collect();
         let cfg = graph_of(count, &edges);
         let label = alloc::format!("seed {seed}");
-        check_all_three(&cfg, &label);
+        check_both(&cfg, &label);
 
         let dom = DominatorTree::compute(&cfg);
-        let forest = LoopForest::compute_all_tagged(&cfg, &dom);
+        let forest = LoopForest::compute_all(&cfg, &dom);
         irreducible += usize::from(forest.loops().any(|lp| !forest.is_nested(lp)));
         dead_loops += usize::from(
             forest
@@ -349,12 +339,12 @@ fn a_graph_without_loops_has_an_empty_forest() {
         3,
         &[(0, 1, EdgeKind::Fallthrough), (1, 2, EdgeKind::Fallthrough)],
     );
-    let forest = LoopForest::compute_tagged(&cfg, &DominatorTree::compute(&cfg));
+    let forest = LoopForest::compute(&cfg, &DominatorTree::compute(&cfg));
     assert!(forest.is_empty());
     assert_eq!(forest.loops().count(), 0);
     assert_eq!(forest.max_nesting_depth(), 0);
     assert_eq!(forest.node_depths(), vec![0; 3]);
-    assert_eq!(forest.natural_loops(), []);
+    assert_eq!(natural_loops(&forest), []);
     assert_eq!(forest.loop_of_header(cfg.entry()), None);
 }
 
@@ -382,9 +372,9 @@ fn deeply_nested_loops_cost_the_forest_only_its_size() {
     }
     let dom = DominatorTree::compute(&cfg);
 
-    let forest = LoopForest::compute_tagged(&cfg, &dom);
+    let forest = LoopForest::compute(&cfg, &dom);
 
-    assert_eq!(forest.len(), depth);
+    assert_eq!(forest.loop_count(), depth);
     assert_eq!(forest.max_nesting_depth(), depth);
     let outermost = forest
         .loop_of_header(headers[0])
@@ -398,8 +388,8 @@ fn deeply_nested_loops_cost_the_forest_only_its_size() {
         forest.parent(innermost),
         forest.loop_of_header(headers[depth - 2])
     );
-    assert_eq!(forest.body_len(outermost), 2 * depth);
-    assert_eq!(forest.body_len(innermost), 2);
+    assert_eq!(forest.body_count(outermost), 2 * depth);
+    assert_eq!(forest.body_count(innermost), 2);
     assert!(forest.contains(outermost, latches[depth - 1]));
     assert!(!forest.contains(innermost, headers[depth - 2]));
     assert!(!forest.contains(outermost, exit));
@@ -425,7 +415,7 @@ fn an_irreducible_loop_is_answered_from_its_own_blocks() {
     );
     let dom = DominatorTree::compute(&cfg);
 
-    let forest = LoopForest::compute_tagged(&cfg, &dom);
+    let forest = LoopForest::compute(&cfg, &dom);
 
     let [a, b] = [BlockId::from_index(1), BlockId::from_index(2)];
     let cycle = forest
@@ -439,12 +429,7 @@ fn an_irreducible_loop_is_answered_from_its_own_blocks() {
     assert!(forest.contains(cycle, b));
     assert!(!forest.contains(cycle, cfg.entry()));
     assert_eq!(forest.node_depths(), vec![0, 1, 1, 0]);
-    assert_forest_matches(
-        &cfg,
-        &forest,
-        &oracle_loops_tagged(&cfg, &dom),
-        "irreducible pair",
-    );
+    assert_forest_matches(&cfg, &forest, &oracle_loops(&cfg, &dom), "irreducible pair");
 }
 
 /// A properly nested loop around a block can be deeper than the loop the block
@@ -477,10 +462,10 @@ fn a_block_is_as_deep_as_the_deepest_loop_around_it_not_its_innermost() {
             (5, 0, ConditionalTrue),
         ],
     );
-    check_all_three(&cfg, "chain maximum");
+    check_both(&cfg, "chain maximum");
 
     let dom = DominatorTree::compute(&cfg);
-    let forest = LoopForest::compute_tagged(&cfg, &dom);
+    let forest = LoopForest::compute(&cfg, &dom);
     let outer_is_deeper = forest.loops().any(|lp| {
         let record = forest.record(lp);
         record.is_nested() && record.deepest > record.depth
@@ -510,10 +495,10 @@ fn a_parent_can_hold_the_header_of_a_loop_without_enclosing_it() {
             (2, 1, Back),
         ],
     );
-    check_all_three(&cfg, "inexact parent");
+    check_both(&cfg, "inexact parent");
 
     let dom = DominatorTree::compute(&cfg);
-    let forest = LoopForest::compute_tagged(&cfg, &dom);
+    let forest = LoopForest::compute(&cfg, &dom);
     assert!(forest.loops().any(|lp| !forest.is_nested(lp)));
     let (parent, child) = forest
         .loops()
@@ -540,7 +525,7 @@ fn assert_nesting_getters(forest: &LoopForest, bound: usize, label: &str) {
         let smallest = forest
             .loops()
             .filter(|&lp| forest.is_nested(lp) && forest.contains(lp, block))
-            .min_by_key(|&lp| forest.body_len(lp));
+            .min_by_key(|&lp| forest.body_count(lp));
         assert_eq!(
             forest.innermost(block),
             smallest,
@@ -610,9 +595,9 @@ fn the_nesting_getters_name_only_the_properly_nested_loops() {
             (6, 7, Fallthrough),
         ],
     );
-    check_all_three(&cfg, "getters");
+    check_both(&cfg, "getters");
     let dom = DominatorTree::compute(&cfg);
-    let forest = LoopForest::compute_tagged(&cfg, &dom);
+    let forest = LoopForest::compute(&cfg, &dom);
     let [outer, inner, left] = [1, 2, 5].map(|index| {
         forest
             .loop_of_header(BlockId::from_index(index))

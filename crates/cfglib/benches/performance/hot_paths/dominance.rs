@@ -2,7 +2,7 @@ use std::cell::OnceCell;
 
 use cfglib::{
     BlockId, CertificateError, Cfg, DominanceFrontiers, DominatorScratch, DominatorTree,
-    DominatorUpdate, Graph, LowHighOrder, NodeId, PostDominatorTree, PostNode, Rooted,
+    DominatorUpdate, Graph, GraphView, LowHighOrder, NodeId, PostDominatorTree, PostNode, Rooted,
     control_dependence_graph,
 };
 
@@ -13,25 +13,10 @@ use crate::analysis_oracles::{
 };
 use crate::fixtures::{branchy_graph, linear_cfg, many_exit_cfg};
 use crate::harness::{BenchmarkSuite, benchmark_case};
+use crate::rng::Rng;
 
 /// Nodes of the large sparse graph of the update cases.
 const SPARSE_NODES: usize = 1 << 20;
-
-/// A deterministic stream of indices, so every run edits the same edges.
-struct Stream(u64);
-
-impl Stream {
-    /// An index below `bound`, from the splitmix64 sequence.
-    fn below(&mut self, bound: usize) -> usize {
-        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut mixed = self.0;
-        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        mixed ^= mixed >> 31;
-        usize::try_from(mixed % u64::try_from(bound).expect("a bound fits in u64"))
-            .expect("an index below a usize bound fits in usize")
-    }
-}
 
 /// A path through every node plus one random edge out of each, forward or
 /// back: about two edges per node, every node reachable from node 0.
@@ -41,7 +26,7 @@ fn sparse_graph(nodes: usize) -> Graph<(), ()> {
     for pair in ids.windows(2) {
         graph.add_edge(pair[0], pair[1], ());
     }
-    let mut stream = Stream(nodes as u64);
+    let mut stream = Rng::splitmix(nodes as u64);
     for &id in &ids {
         graph.add_edge(id, ids[stream.below(nodes)], ());
     }
@@ -64,7 +49,7 @@ impl Edited {
         let root = NodeId::from_index(0);
         let tree = DominatorTree::compute(&Rooted::new(graph, root));
         let mut edited = graph.clone();
-        let mut stream = Stream(seed);
+        let mut stream = Rng::splitmix(seed);
         let nodes = graph.node_count();
         let mut updates = Vec::new();
         while updates.len() < inserts {
@@ -123,9 +108,16 @@ impl Edited {
         (tree, changed.clone())
     }
 
-    /// Recompute the tree and diff it against the old one.
+    /// Recompute the tree and diff it against the old one: a full
+    /// construction plus an O(n) scan for the nodes whose parent changed.
     fn recompute(&self) -> (DominatorTree<NodeId>, Vec<NodeId>) {
-        DominatorTree::compute_with_diff(&self.rooted(), &self.tree)
+        let graph = self.rooted();
+        let next = DominatorTree::compute(&graph);
+        let changed = (0..graph.node_bound())
+            .map(NodeId::from_index)
+            .filter(|&node| self.tree.idom(node) != next.idom(node))
+            .collect();
+        (next, changed)
     }
 
     /// Check an answer against a fresh construction and its diff.
@@ -143,7 +135,7 @@ impl Edited {
 /// names given.
 macro_rules! update_cases {
     ($suite:expr, $edited:expr, $incremental:literal, $recomputed:literal) => {{
-        let mut scratch = DominatorScratch::new();
+        let mut scratch = DominatorScratch::default();
         let mut changed = Vec::new();
         benchmark_case!(
             $suite,
@@ -159,8 +151,8 @@ macro_rules! update_cases {
 
 /// One insertion that moves nodes, one deletion, and a batch of eight of
 /// each, on the branchy fixture and on a sparse graph of 2²⁰ nodes, each
-/// against the full recomputation of `compute_with_diff`. The large graph
-/// and its batches are built only when one of its cases runs.
+/// against a full recomputation and its diff. The large graph and its
+/// batches are built only when one of its cases runs.
 fn register_dominator_updates(suite: &mut BenchmarkSuite<'_>) {
     let branchy = branchy_graph(NODE_COUNT);
     let insert = Edited::new(&branchy, 1, 0, 1);
@@ -223,21 +215,18 @@ fn register_dominators(suite: &mut BenchmarkSuite<'_>, cfg: &Cfg<u32>) {
     benchmark_case!(
         suite,
         "cfg_dominators_certified",
-        || DominatorTree::compute_certified_in(&mut DominatorScratch::new(), cfg, cfg.entry()),
+        || DominatorTree::compute_certified_in(&mut DominatorScratch::default(), cfg),
         |(tree, certificate): &(DominatorTree, LowHighOrder)| {
             assert_branchy_dominators(tree, NODE_COUNT);
-            assert_eq!(
-                tree.verify_certificate(cfg, cfg.entry(), certificate),
-                Ok(())
-            );
+            assert_eq!(tree.verify_certificate(cfg, certificate), Ok(()));
         }
     );
     let (_, certificate) =
-        DominatorTree::compute_certified_in(&mut DominatorScratch::new(), cfg, cfg.entry());
+        DominatorTree::compute_certified_in(&mut DominatorScratch::default(), cfg);
     benchmark_case!(
         suite,
         "cfg_dominators_verify",
-        || cfg_dominators.verify_certificate(cfg, cfg.entry(), &certificate),
+        || cfg_dominators.verify_certificate(cfg, &certificate),
         |result: &Result<(), CertificateError<BlockId>>| assert_eq!(*result, Ok(()))
     );
     benchmark_case!(

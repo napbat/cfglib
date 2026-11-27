@@ -28,8 +28,11 @@ use crate::graph::dominator::PostDominatorTree;
 use crate::graph::epoch::EpochMarks;
 use crate::graph::store::Graph;
 use crate::graph::view::{DenseId, GraphView};
-pub use nontermination::{NonterminationScratch, nontermination_sensitive_controllers};
-pub use weak_closure::{ControlClosureScratch, weak_control_closure};
+pub use nontermination::{
+    NonterminationScratch, nontermination_sensitive_controllers,
+    nontermination_sensitive_controllers_in,
+};
+pub use weak_closure::{ControlClosureScratch, weak_control_closure, weak_control_closure_in};
 
 mod nontermination;
 mod weak_closure;
@@ -115,30 +118,6 @@ pub fn control_dependence_graph<G: GraphView>(
     source: &G,
     post_dominators: &PostDominatorTree<G::NodeId>,
 ) -> Graph<G::NodeId, ()> {
-    // A tree of the cut has no sink classes, so each arm is the plain walk;
-    // choosing it once here keeps that walk inline in the loop.
-    if post_dominators.has_sink_classes() {
-        collect_dependences(source, post_dominators, |from, to| {
-            post_dominators.control_dependents(from, to)
-        })
-    } else {
-        collect_dependences(source, post_dominators, |from, to| {
-            post_dominators.tree_dependents(from, to)
-        })
-    }
-}
-
-/// The control dependence graph of `source`, with `dependents_of` giving
-/// the blocks that depend on each arm.
-fn collect_dependences<G, I>(
-    source: &G,
-    post_dominators: &PostDominatorTree<G::NodeId>,
-    dependents_of: impl Fn(G::NodeId, G::NodeId) -> I,
-) -> Graph<G::NodeId, ()>
-where
-    G: GraphView,
-    I: Iterator<Item = G::NodeId>,
-{
     let mut graph = Graph::with_capacity(source.node_bound(), source.node_bound());
     let nodes: Vec<_> = (0..source.node_bound())
         .map(G::NodeId::from_index)
@@ -163,7 +142,7 @@ where
         seen_dependents.reset();
         dependents.clear();
         for target in source.successors(controller) {
-            for dependent in dependents_of(controller, target) {
+            for dependent in post_dominators.control_dependents(controller, target) {
                 if !seen_dependents.is_marked(dependent.index()) {
                     seen_dependents.mark(dependent.index());
                     dependents.push(dependent);

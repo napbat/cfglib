@@ -1,4 +1,4 @@
-use cfglib::{Cfg, Facts, Graph, solve_node_problem, solve_problem};
+use cfglib::{Cfg, Facts, Graph, Seeds, Solve, solve_node_problem};
 
 use super::NODE_COUNT;
 use crate::analysis_oracles::{
@@ -16,7 +16,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>, cfg: &Cfg<u32>, graph: &G
         suite,
         "directed_node_fixpoint_bool",
         || {
-            solve_node_problem(graph, &Reachability)
+            solve_node_problem(graph, &Reachability, Solve::default())
                 .expect("an unbounded solve cannot exceed its step limit")
         },
         |result: &Facts<bool>| assert_bool_node_facts(result, NODE_COUNT)
@@ -25,7 +25,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>, cfg: &Cfg<u32>, graph: &G
         suite,
         "directed_node_fixpoint_wide",
         || {
-            solve_node_problem(&wide_graph, &WideNodeFact)
+            solve_node_problem(&wide_graph, &WideNodeFact, Solve::default())
                 .expect("an unbounded solve cannot exceed its step limit")
         },
         |result: &Facts<Vec<u64>>| assert_wide_node_facts(result, 1_024)
@@ -34,7 +34,11 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>, cfg: &Cfg<u32>, graph: &G
         suite,
         "cfg_fixpoint_bool",
         || {
-            solve_problem(cfg, &CfgReachability)
+            let rooted = Solve {
+                seeds: Seeds::Reachable(cfg.entry()),
+                ..Solve::default()
+            };
+            solve_node_problem(cfg, &CfgReachability, rooted)
                 .expect("an unbounded solve cannot exceed its step limit")
         },
         |result: &Facts<bool>| assert_bool_cfg_facts(result, NODE_COUNT)
@@ -43,7 +47,11 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>, cfg: &Cfg<u32>, graph: &G
         suite,
         "cfg_fixpoint_wide",
         || {
-            solve_problem(&wide_cfg, &WideCfgFact)
+            let rooted = Solve {
+                seeds: Seeds::Reachable(wide_cfg.entry()),
+                ..Solve::default()
+            };
+            solve_node_problem(&wide_cfg, &WideCfgFact, rooted)
                 .expect("an unbounded solve cannot exceed its step limit")
         },
         |result: &Facts<Vec<u64>>| assert_wide_cfg_facts(result, 1_024)

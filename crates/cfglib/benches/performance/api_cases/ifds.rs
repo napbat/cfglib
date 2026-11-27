@@ -27,10 +27,13 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         suite,
         "api_solve_ifds",
         covers[solve_ifds],
-        || solve_ifds(&Tree, &Taint, &seeds, IfdsConfig::new()),
+        || solve_ifds(&Tree, &Taint, &seeds, IfdsConfig::default()),
         |results: &Result<IfdsResults<Tree>, _>| check(results.as_ref().expect("unbounded")),
     );
-    let collecting = IfdsConfig::new().with_path_edge_collection(true);
+    let collecting = IfdsConfig {
+        collect_path_edges: true,
+        ..IfdsConfig::default()
+    };
     benchmark_case!(
         suite,
         "api_solve_ifds_collecting_path_edges",
@@ -38,9 +41,9 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
         |results: &Result<IfdsResults<Tree>, _>| {
             let collected = results.as_ref().expect("unbounded");
             check(collected);
-            let kept = solve_ifds(&Tree, &Taint, &seeds, IfdsConfig::new()).expect("unbounded");
-            assert_eq!(collected.steps(), kept.steps());
-            assert!(collected.peak_path_edges() < kept.peak_path_edges());
+            let kept = solve_ifds(&Tree, &Taint, &seeds, IfdsConfig::default()).expect("unbounded");
+            assert_eq!(collected.stats().step_count(), kept.stats().step_count());
+            assert!(collected.stats().peak_count() < kept.stats().peak_count());
             for node in 0..PROCS * NODES {
                 assert!(collected.facts_at(node).eq(kept.facts_at(node)));
             }

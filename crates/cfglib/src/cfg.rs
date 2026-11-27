@@ -8,24 +8,27 @@ use crate::block::{BasicBlock, BlockId, BlockTag};
 use crate::edge::{Edge, EdgeId, EdgeTag};
 use crate::graph::edge_view::EdgeRef;
 use crate::graph::store::Graph;
-use crate::region::{Cleanup, Region};
+use crate::region::{Cleanup, HandlerMetadata, Region};
 
 mod anchors;
 mod cleanup;
 mod compact;
 #[cfg(feature = "serde")]
 mod document;
+mod dot;
+mod listing;
 mod mutation;
 mod regions;
 mod subgraph;
-mod text;
+mod verify;
 mod view;
 
 /// The store a [`Cfg`] is built on: blocks as nodes, edges as edges.
 pub(crate) type CfgStore<I, E> = Graph<BasicBlock<I>, Edge<E>, BlockTag, EdgeTag>;
 
-pub use compact::CfgRenumbering;
-pub use text::parse_cfg_text;
+pub use dot::control_flow_edge_attributes;
+pub use listing::parse_cfg_listing;
+pub use verify::{SemanticValidator, verify, verify_semantics};
 
 /// One borrowed control-flow edge: identity, endpoints, kind, weight, and
 /// consumer payload.
@@ -101,7 +104,7 @@ pub struct Cfg<I, E = ()> {
     pub(crate) regions: Vec<Region>,
     /// Cleanup records for handlers that continue somewhere once their body
     /// ends (optional; empty unless a frontend records them).
-    pub(crate) cleanups: Vec<Cleanup>,
+    pub(crate) cleanups: HandlerMetadata<Cleanup>,
 }
 
 impl<I, E> Cfg<I, E> {
@@ -117,12 +120,12 @@ impl<I, E> Cfg<I, E> {
     /// # Examples
     ///
     /// ```
-    /// use cfglib::{Cfg, EdgeKind};
+    /// use cfglib::{Cfg, Edge, EdgeKind};
     ///
     /// let mut cfg = Cfg::<u32, &str>::with_edge_payload();
     /// let entry = cfg.entry();
     /// let b1 = cfg.new_block();
-    /// let edge = cfg.add_edge_with_payload(entry, b1, EdgeKind::Fallthrough, "next");
+    /// let edge = cfg.add_edge(entry, b1, Edge::new(EdgeKind::Fallthrough).with_payload("next"));
     /// assert_eq!(cfg.block_count(), 2);
     /// assert_eq!(cfg.edge(edge).payload(), &"next");
     /// ```
@@ -134,7 +137,7 @@ impl<I, E> Cfg<I, E> {
             graph,
             entry,
             regions: Vec::new(),
-            cleanups: Vec::new(),
+            cleanups: HandlerMetadata::new(),
         }
     }
 

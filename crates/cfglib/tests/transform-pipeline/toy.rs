@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use cfglib::{BlockId, Cfg, EdgeId, EdgeKind, EffectInfo, Emitter, InstrInfo, LinearInst};
+use cfglib::{BlockId, Cfg, Edge, EdgeId, EdgeKind, Emitter, InstrInfo, LinearInst, Probability};
 
 pub type Reg = u8;
 
@@ -123,14 +123,6 @@ impl InstrInfo for Inst {
     }
 }
 
-impl EffectInfo for Inst {
-    type Effect = Effect;
-
-    fn effects(&self) -> &[Effect] {
-        &self.effects
-    }
-}
-
 /// Edge payload a payload-bearing consumer would attach. Edges the test
 /// builds are `Tagged`; edges a pass invents get the `Default`.
 pub trait Payload: Clone + Default + PartialEq + core::fmt::Debug {
@@ -190,10 +182,10 @@ impl<E: Payload> Builder<E> {
         self.next_tag += 1;
         let edge = self
             .cfg
-            .add_edge_with_payload(source, target, kind, E::tagged(tag));
-        self.cfg
-            .edge_mut(edge)
-            .set_weight(Some(f64::from(tag % 4) / 4.0));
+            .add_edge(source, target, Edge::new(kind).with_payload(E::tagged(tag)));
+        let weight = Probability::from_numerator(Probability::DENOMINATOR / 4 * (tag % 4))
+            .expect("at most three quarters");
+        self.cfg.edge_mut(edge).set_weight(Some(weight));
         edge
     }
 

@@ -2,17 +2,16 @@
 //! true before it becomes one.
 //!
 //! A document is untrusted input: every later use of the CFG assumes the
-//! entry is a live block and that the exception metadata names blocks that
-//! exist ([`Cfg::set_entry`] asserts the first, [`Cfg::compact`] requires the
-//! second), so a document that breaks either is an error at decode rather than
-//! a panic at first use.
+//! entry is a live block and that the exception metadata keeps the
+//! invariants [`Cfg::check_regions`] states ([`Cfg::set_entry`] asserts the
+//! first, [`Cfg::compact`] requires the second), so a document that breaks
+//! either is an error at decode rather than a panic at first use.
 
 extern crate alloc;
-use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use crate::block::BlockId;
-use crate::region::{Cleanup, Continuation, HandlerRef, Region, RegionId};
+use crate::region::{Cleanup, HandlerMetadata, Region, RegionError};
 
 use super::{Cfg, CfgStore};
 
@@ -24,8 +23,8 @@ pub(super) struct CfgDocument<I, E> {
     entry: BlockId,
     regions: Vec<Region>,
     /// Absent from documents written before cleanup records existed.
-    #[serde(default = "Vec::new")]
-    cleanups: Vec<Cleanup>,
+    #[serde(default)]
+    cleanups: HandlerMetadata<Cleanup>,
 }
 
 /// Why a serialized CFG was rejected.
@@ -33,24 +32,8 @@ pub(super) struct CfgDocument<I, E> {
 pub(super) enum DocumentError {
     /// The entry names no live block of the graph.
     EntryNotLive(BlockId),
-    /// A handler entry, filter block, cleanup resume point, or continuation
-    /// target names no live block of the graph.
-    AnchorNotLive(BlockId),
-    /// The region at `index` of the region list carries a different identity.
-    /// Regions are looked up by position, so the two must agree.
-    RegionIdMismatch {
-        /// Position in the region list.
-        index: usize,
-        /// The identity the document stored there.
-        id: RegionId,
-    },
-    /// A cleanup record names a handler that no region holds.
-    CleanupHandlerMissing(HandlerRef),
-    /// A region names a parent that is not a region of the graph.
-    ParentMissing(RegionId),
-    /// A cleanup record lists one route twice. [`Cleanup::continuations`] holds
-    /// each route once, so the second copy would be reported as a second path.
-    ContinuationRepeated(HandlerRef, Continuation),
+    /// The exception metadata breaks an invariant of [`Cfg::check_regions`].
+    Regions(RegionError),
 }
 
 impl core::fmt::Display for DocumentError {
@@ -62,29 +45,7 @@ impl core::fmt::Display for DocumentError {
                     "the entry {block} is not a live block of the graph"
                 )
             }
-            Self::AnchorNotLive(block) => write!(
-                formatter,
-                "exception metadata names {block}, which is not a live block of the graph"
-            ),
-            Self::RegionIdMismatch { index, id } => write!(
-                formatter,
-                "the region at position {index} carries identity {id}"
-            ),
-            Self::CleanupHandlerMissing(handler) => write!(
-                formatter,
-                "a cleanup record names handler {handler}, which no region holds"
-            ),
-            Self::ParentMissing(parent) => {
-                write!(
-                    formatter,
-                    "a region names parent {parent}, which does not exist"
-                )
-            }
-            Self::ContinuationRepeated(handler, continuation) => write!(
-                formatter,
-                "the cleanup of handler {handler} lists the route {:?} to {} twice",
-                continuation.reason, continuation.resume
-            ),
+            Self::Regions(error) => error.fmt(formatter),
         }
     }
 }
@@ -102,46 +63,8 @@ impl<I, E> TryFrom<CfgDocument<I, E>> for Cfg<I, E> {
         if !cfg.contains_block(cfg.entry) {
             return Err(DocumentError::EntryNotLive(cfg.entry));
         }
-        if let Some(anchor) = cfg.dangling_anchors().next() {
-            return Err(DocumentError::AnchorNotLive(anchor));
-        }
-        cfg.check_regions_and_cleanups()?;
+        cfg.check_regions().map_err(DocumentError::Regions)?;
         Ok(cfg)
-    }
-}
-
-impl<I, E> Cfg<I, E> {
-    /// Regions are addressed by position, cleanups by handler, and nesting by
-    /// parent identity: each of those references must resolve. A cleanup also
-    /// holds each of its routes once.
-    fn check_regions_and_cleanups(&self) -> Result<(), DocumentError> {
-        for (index, region) in self.regions.iter().enumerate() {
-            if region.id.index() != index {
-                return Err(DocumentError::RegionIdMismatch {
-                    index,
-                    id: region.id,
-                });
-            }
-            if let Some(parent) = region.parent
-                && self.region(parent).is_none()
-            {
-                return Err(DocumentError::ParentMissing(parent));
-            }
-        }
-        for cleanup in &self.cleanups {
-            if self.handler(cleanup.handler).is_none() {
-                return Err(DocumentError::CleanupHandlerMissing(cleanup.handler));
-            }
-            let mut routes = BTreeSet::new();
-            if let Some(&route) = cleanup
-                .continuations
-                .iter()
-                .find(|&&route| !routes.insert(route))
-            {
-                return Err(DocumentError::ContinuationRepeated(cleanup.handler, route));
-            }
-        }
-        Ok(())
     }
 }
 
@@ -155,7 +78,10 @@ mod tests {
     use serde_json::{Value, json};
 
     use crate::edge::EdgeKind;
-    use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
+    use crate::region::{
+        CompletionReason, Continuation, Handler, HandlerBody, HandlerKind, HandlerRef, Region,
+        RegionId,
+    };
 
     use super::*;
 
@@ -165,7 +91,6 @@ mod tests {
         let handler = cfg.new_block();
         cfg.add_edge(body, handler, EdgeKind::ExceptionHandler);
         cfg.add_region(Region {
-            id: RegionId::from_raw(0),
             protected_blocks: [body].into_iter().collect(),
             handlers: vec![Handler {
                 entry: handler,
@@ -173,7 +98,8 @@ mod tests {
                 kind: HandlerKind::CatchAll,
             }],
             parent: None,
-        });
+        })
+        .unwrap();
         cfg
     }
 
@@ -210,15 +136,6 @@ mod tests {
     }
 
     #[test]
-    fn a_region_stored_under_another_identity_is_rejected() {
-        let cfg = protected_cfg();
-        let mut document = serde_json::to_value(&cfg).unwrap();
-        document["regions"][0]["id"] = json!(5);
-        let error = decode(&document).unwrap_err();
-        assert!(error.to_string().contains("identity"), "{error}");
-    }
-
-    #[test]
     fn a_region_with_a_missing_parent_is_rejected() {
         let cfg = protected_cfg();
         let mut document = serde_json::to_value(&cfg).unwrap();
@@ -231,22 +148,21 @@ mod tests {
     fn a_cleanup_naming_a_missing_handler_is_rejected() {
         let mut cfg = protected_cfg();
         let handler = HandlerRef::new(RegionId::from_raw(0), 0);
-        cfg.set_cleanup_resume(handler, cfg.regions()[0].handlers[0].entry);
+        let entry = cfg.handler(handler).entry;
+        cfg.set_cleanup_exit(handler, entry).unwrap();
         let mut document = serde_json::to_value(&cfg).unwrap();
         assert_eq!(
             decode(&document).unwrap(),
             cfg,
             "the record is valid as written"
         );
-        document["cleanups"][0]["handler"]["handler"] = json!(9);
+        document["cleanups"]["entries"][0][0]["handler"] = json!(9);
         let error = decode(&document).unwrap_err();
         assert!(error.to_string().contains("cleanup"), "{error}");
     }
 
     #[test]
     fn a_cleanup_listing_one_route_twice_is_rejected() {
-        use crate::region::{CompletionReason, Continuation};
-
         let mut cfg = protected_cfg();
         let handler = HandlerRef::new(RegionId::from_raw(0), 0);
         let entry = cfg.entry();
@@ -255,9 +171,10 @@ mod tests {
                 handler,
                 Continuation {
                     reason,
-                    resume: entry,
+                    target: entry,
                 },
-            );
+            )
+            .unwrap();
         }
         let mut document = serde_json::to_value(&cfg).unwrap();
         assert_eq!(
@@ -265,7 +182,7 @@ mod tests {
             cfg,
             "two distinct routes are valid as written"
         );
-        let routes = document["cleanups"][0]["continuations"]
+        let routes = document["cleanups"]["entries"][0][1]["continuations"]
             .as_array_mut()
             .unwrap();
         let first = routes[0].clone();

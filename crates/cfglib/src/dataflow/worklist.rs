@@ -1,4 +1,4 @@
-//! The worklist behind every fixpoint solver.
+//! The deduplicating index queue behind every fixpoint of the crate.
 
 extern crate alloc;
 use alloc::vec;
@@ -6,15 +6,18 @@ use alloc::vec::Vec;
 
 use super::bits::{DenseBits, bit_slot};
 use crate::graph::view::{DenseId, GraphView};
+use crate::identity::{NO_INDEX, slot, word};
 
-/// A deduplicating queue of dense node indices, popped lowest first.
+/// A deduplicating queue of dense indices, popped lowest first.
 ///
 /// Every solver revisits a node only after one of its inputs changed, and
 /// queuing a node that is already queued must not visit it twice. The lowest
 /// index pops first, which is program order for a CFG whose blocks were
 /// created in order and keeps every solve deterministic. The queue is a bit
-/// row, so queuing allocates nothing.
-pub(super) struct Worklist {
+/// row, so queuing allocates nothing. The node and edge solvers, the slot
+/// drivers and the summary propagation of the call graph all queue on it.
+#[derive(Debug, Clone)]
+pub(crate) struct Worklist {
     queued: DenseBits,
     /// Words below this index hold no queued node.
     cursor: usize,
@@ -22,7 +25,7 @@ pub(super) struct Worklist {
 
 impl Worklist {
     /// An empty worklist for the indices `0..bound`.
-    pub(super) fn new(bound: usize) -> Self {
+    pub(crate) fn new(bound: usize) -> Self {
         Self {
             queued: DenseBits::new(bound),
             cursor: 0,
@@ -30,12 +33,17 @@ impl Worklist {
     }
 
     /// A worklist of `indices`, duplicates queued once.
-    pub(super) fn of(bound: usize, indices: impl IntoIterator<Item = usize>) -> Self {
-        let mut worklist = Self::new(bound);
+    ///
+    /// A fresh worklist pops from its first word, so the indices go straight
+    /// into the bit row without [`insert`](Self::insert)'s cursor update:
+    /// through `insert`, building the live set of a 100 000-node chain made
+    /// `api_resume_node_problem` 1.09x main.
+    pub(crate) fn of(bound: usize, indices: impl IntoIterator<Item = usize>) -> Self {
+        let mut queued = DenseBits::new(bound);
         for index in indices {
-            worklist.insert(index);
+            queued.insert(index);
         }
-        worklist
+        Self { queued, cursor: 0 }
     }
 
     /// Every live node of `graph`. A removed node's slot is never queued.
@@ -68,13 +76,22 @@ impl Worklist {
     }
 
     /// Queues `index` unless it is already queued.
-    pub(super) fn insert(&mut self, index: usize) {
+    pub(crate) fn insert(&mut self, index: usize) {
         self.cursor = self.cursor.min(bit_slot(index).0);
         self.queued.insert(index);
     }
 
+    /// Queues every index of `0..bound`, widening the worklist to fit, so one
+    /// worklist serves a run of problems of different sizes.
+    pub(crate) fn queue_all(&mut self, bound: usize) {
+        self.queued.grow(bound);
+        for index in 0..bound {
+            self.insert(index);
+        }
+    }
+
     /// Removes and returns the lowest queued index.
-    pub(super) fn pop_first(&mut self) -> Option<usize> {
+    pub(crate) fn pop_first(&mut self) -> Option<usize> {
         let words = self.queued.words();
         while let Some(&word) = words.get(self.cursor) {
             if word != 0 {
@@ -140,14 +157,10 @@ impl Queue for Worklist {
 /// of a [`Worklist`], indexed by position instead of by node.
 pub(super) struct Ranked {
     slots: Worklist,
-    /// Per dense node index: its position, `u32::MAX` outside the order.
+    /// Per dense node index: its position, [`NO_INDEX`] outside the order.
     position: Vec<u32>,
     /// Per position: the dense node index there.
     node: Vec<u32>,
-}
-
-fn to_u32(value: usize) -> u32 {
-    u32::try_from(value).expect("an iteration order holds fewer than u32::MAX nodes")
 }
 
 impl Ranked {
@@ -160,12 +173,12 @@ impl Ranked {
     ) -> Self {
         let mut ranked = Self {
             slots: Worklist::new(order.len()),
-            position: vec![u32::MAX; bound],
+            position: vec![NO_INDEX; bound],
             node: Vec::with_capacity(order.len()),
         };
         for (position, node) in order.enumerate() {
-            ranked.position[node.index()] = to_u32(position);
-            ranked.node.push(to_u32(node.index()));
+            ranked.position[node.index()] = word(position);
+            ranked.node.push(word(node.index()));
         }
         for index in worklist.queued() {
             ranked.push(index);
@@ -181,10 +194,10 @@ impl Ranked {
     fn position(&self, index: usize) -> usize {
         let position = self.position[index];
         assert!(
-            position != u32::MAX,
+            position != NO_INDEX,
             "the iteration order covers every node a solve queues"
         );
-        position as usize
+        slot(position)
     }
 }
 
@@ -203,7 +216,7 @@ impl Queue for Ranked {
 
     fn pop(&mut self) -> Option<usize> {
         let position = self.slots.pop_first()?;
-        Some(self.node[position] as usize)
+        Some(slot(self.node[position]))
     }
 }
 

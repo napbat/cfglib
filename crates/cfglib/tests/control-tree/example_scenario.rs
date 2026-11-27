@@ -42,16 +42,17 @@ fn example_graph() -> Cfg<&'static str> {
 fn the_example_graph_is_fully_structured() {
     let cfg = example_graph();
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
 
     assert!(report.is_fully_structured(), "{report:?}");
-    assert_fully_structured(&tree, &report);
+    assert_fully_structured(&tree, report);
 }
 
 #[test]
 fn the_example_prints_the_pseudocode_of_its_source() {
     let cfg = example_graph();
-    let (tree, _) = structure_and_check(&cfg);
+    let tree = structure_and_check(&cfg);
 
     let pseudocode = tree
         .to_pseudocode(|sink, point| {
@@ -65,7 +66,7 @@ fn the_example_prints_the_pseudocode_of_its_source() {
 #[test]
 fn the_example_summary_line_counts_eight_nodes_and_five_straight_line_leaves() {
     let cfg = example_graph();
-    let (tree, _) = structure_and_check(&cfg);
+    let tree = structure_and_check(&cfg);
 
     let statements = tree
         .preorder()

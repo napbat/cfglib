@@ -124,7 +124,7 @@ fn assert_matches_reference<I>(cfg: &Cfg<I>) {
         .collect();
     let actual_pairs: BTreeSet<(Boundary, Boundary)> = boundaries(&tree).into_iter().collect();
     assert_eq!(actual_pairs, expected_pairs, "canonical regions");
-    assert_eq!(tree.len(), expected.len());
+    assert_eq!(tree.region_count(), expected.len());
     for (entry, exit, blocks) in &expected {
         let region = region_between(&tree, *entry, *exit);
         let actual: BTreeSet<usize> = tree.blocks(region).iter().map(|b| b.index()).collect();
@@ -309,7 +309,7 @@ fn unreachable_and_removed_code_is_in_no_region() {
     assert_eq!(tree.innermost(blocks[3]), None);
     assert_eq!(tree.innermost(blocks[4]), None);
     assert_eq!(tree.innermost(BlockId::from_index(99)), None);
-    assert_eq!(tree.len(), 3, "the live chain");
+    assert_eq!(tree.region_count(), 3, "the live chain");
     assert_matches_reference(&cfg);
 }
 
@@ -380,7 +380,7 @@ fn diamond_nest(depth: usize) -> (Cfg<()>, Vec<BlockId>) {
 fn a_chain_of_a_hundred_thousand_blocks_needs_no_call_stack() {
     let cfg = chain(100_000);
     let tree = ProgramStructureTree::compute(&cfg);
-    assert_eq!(tree.len(), 100_000);
+    assert_eq!(tree.region_count(), 100_000);
     assert!(tree.regions().all(|region| tree.parent(region).is_none()));
 }
 
@@ -391,7 +391,7 @@ fn diamonds_nested_a_hundred_thousand_deep_need_no_call_stack() {
     let tree = ProgramStructureTree::compute(&cfg);
     // The whole procedure, one diamond per inner level, each `else` arm, and
     // the innermost `then` block.
-    assert_eq!(tree.len(), 2 * DEPTH + 1);
+    assert_eq!(tree.region_count(), 2 * DEPTH + 1);
     let mut depth = 0;
     let mut region = tree.innermost(branches[DEPTH]);
     while let Some(inside) = region {

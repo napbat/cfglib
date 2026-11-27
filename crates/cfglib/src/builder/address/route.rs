@@ -112,12 +112,12 @@ pub enum HopEnd {
     Leave,
 }
 
-/// Tests whether `flow` can end a funclet: a return, or a jump to code that
-/// the stream does not hold. The jump is a tail call, so the callee returns to
-/// the runtime for the funclet.
+/// Tests whether `flow` can end a funclet: a return, a tail call, or a jump
+/// to code that the stream does not hold. That jump is a tail call too, so
+/// the callee returns to the runtime for the funclet.
 pub(super) fn ends_funclet<A: AddressSpace, K>(flow: &Flow<A, K>, addresses: &[A]) -> bool {
     match flow {
-        Flow::Return => true,
+        Flow::Return | Flow::TailCall { .. } => true,
         Flow::Jump { target } => addresses.binary_search(target).is_err(),
         _ => false,
     }
@@ -195,7 +195,7 @@ pub(super) fn validate_routes<I: AddressInstruction>(
             for address in funclets.chain(handler) {
                 let position = addresses
                     .binary_search(&address)
-                    .map_err(|_| AddressBuildError::MissingRouteEntry { address })?;
+                    .map_err(|_| AddressBuildError::MissingHandlerEntry { address })?;
                 leaders[position] = true;
             }
         }

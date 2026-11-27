@@ -2,26 +2,24 @@
 
 use std::collections::BTreeSet;
 
-use cfglib::{
-    BlockId, Cfg, CfgPattern, EdgeKind, Graph, NodeId, detect_cfg_patterns, detect_patterns,
-};
+use cfglib::{BlockId, Cfg, EdgeKind, Graph, NodeId, Pattern, detect_patterns, empty_trampolines};
 
-use crate::random::Rng;
+use crate::rng::Rng;
 use crate::stmt::{Route, Stmt, block, link};
 
-fn diamonds<N: Clone>(patterns: &[CfgPattern<N>]) -> Vec<CfgPattern<N>> {
+fn diamonds<N: Clone>(patterns: &[Pattern<N>]) -> Vec<Pattern<N>> {
     patterns
         .iter()
-        .filter(|pattern| matches!(pattern, CfgPattern::Diamond { .. }))
+        .filter(|pattern| matches!(pattern, Pattern::Diamond { .. }))
         .cloned()
         .collect()
 }
 
-fn chains(patterns: &[CfgPattern]) -> Vec<Vec<BlockId>> {
+fn chains(patterns: &[Pattern]) -> Vec<Vec<BlockId>> {
     patterns
         .iter()
         .filter_map(|pattern| match pattern {
-            CfgPattern::Chain { blocks } => Some(blocks.clone()),
+            Pattern::Chain { blocks } => Some(blocks.clone()),
             _ => None,
         })
         .collect()
@@ -43,21 +41,23 @@ fn a_branch_whose_arms_rejoin_is_a_diamond_with_the_true_arm_first_when_oriented
 
     assert_eq!(
         diamonds(&detect_patterns(&cfg)),
-        [CfgPattern::Diamond {
+        [Pattern::Diamond {
             entry,
             arms: [else_arm, then_arm],
             merge
         }],
         "the topology-only scan keeps successor order"
     );
+    let mut oriented = detect_patterns(&cfg);
+    Pattern::orient_diamonds(&mut oriented, &cfg);
     assert_eq!(
-        diamonds(&detect_cfg_patterns(&cfg)),
-        [CfgPattern::Diamond {
+        diamonds(&oriented),
+        [Pattern::Diamond {
             entry,
             arms: [then_arm, else_arm],
             merge
         }],
-        "the CFG scan puts the ConditionalTrue side first"
+        "orientation puts the ConditionalTrue side first"
     );
 }
 
@@ -74,7 +74,6 @@ fn two_parallel_edges_to_one_block_are_not_a_diamond() {
     link(&mut cfg, arm, merge, EdgeKind::Fallthrough);
 
     assert_eq!(diamonds(&detect_patterns(&cfg)), []);
-    assert_eq!(diamonds(&detect_cfg_patterns(&cfg)), []);
 }
 
 #[test]
@@ -100,12 +99,12 @@ fn a_diamond_followed_by_a_tail_reports_the_diamond_and_the_chain_through_its_me
     assert_eq!(
         patterns,
         [
-            CfgPattern::Diamond {
+            Pattern::Diamond {
                 entry,
                 arms: [left, right],
                 merge
             },
-            CfgPattern::Chain {
+            Pattern::Chain {
                 blocks: vec![merge, first, second]
             },
         ]
@@ -137,10 +136,10 @@ fn a_block_with_an_edge_to_itself_is_a_self_loop_once_however_many_such_edges_it
 
     let loops: Vec<_> = detect_patterns(&cfg)
         .into_iter()
-        .filter(|pattern| matches!(pattern, CfgPattern::SelfLoop { .. }))
+        .filter(|pattern| matches!(pattern, Pattern::SelfLoop { .. }))
         .collect();
 
-    assert_eq!(loops, [CfgPattern::SelfLoop { block: spin }]);
+    assert_eq!(loops, [Pattern::SelfLoop { block: spin }]);
 }
 
 #[test]
@@ -190,21 +189,7 @@ fn an_empty_block_with_one_way_out_is_a_trampoline_unless_it_is_the_entry() {
     link(&mut cfg, left, exit, EdgeKind::Fallthrough);
     link(&mut cfg, right, exit, EdgeKind::Fallthrough);
 
-    let trampolines: BTreeSet<BlockId> = detect_cfg_patterns(&cfg)
-        .into_iter()
-        .filter_map(|pattern| match pattern {
-            CfgPattern::EmptyTrampoline { block } => Some(block),
-            _ => None,
-        })
-        .collect();
-
-    assert_eq!(trampolines, BTreeSet::from([trampoline]));
-    assert!(
-        detect_patterns(&cfg)
-            .iter()
-            .all(|pattern| !matches!(pattern, CfgPattern::EmptyTrampoline { .. })),
-        "emptiness is an instruction-level property the topology scan cannot see"
-    );
+    assert_eq!(empty_trampolines(&cfg), [trampoline]);
 }
 
 #[test]
@@ -216,7 +201,7 @@ fn the_topology_scan_serves_any_graph_and_skips_removed_nodes() {
     }
     assert_eq!(
         diamonds(&detect_patterns(&graph)),
-        [CfgPattern::Diamond {
+        [Pattern::Diamond {
             entry: nodes[0],
             arms: [nodes[1], nodes[2]],
             merge: nodes[3]
@@ -273,7 +258,7 @@ fn diamonds_are_exactly_two_way_branches_whose_arms_each_lead_only_to_one_shared
         let found: BTreeSet<(usize, [usize; 2], usize)> = diamonds(&detect_patterns(&cfg))
             .into_iter()
             .map(|pattern| match pattern {
-                CfgPattern::Diamond { entry, arms, merge } => {
+                Pattern::Diamond { entry, arms, merge } => {
                     (entry.index(), arms.map(BlockId::index), merge.index())
                 }
                 _ => unreachable!(),
@@ -281,27 +266,28 @@ fn diamonds_are_exactly_two_way_branches_whose_arms_each_lead_only_to_one_shared
             .collect();
         assert_eq!(found, expected, "seed {seed}");
 
-        let oriented: BTreeSet<(usize, BTreeSet<usize>, usize)> =
-            diamonds(&detect_cfg_patterns(&cfg))
-                .into_iter()
-                .map(|pattern| match pattern {
-                    CfgPattern::Diamond { entry, arms, merge } => {
-                        let true_target = cfg
-                            .outgoing(entry)
-                            .find(|&edge| cfg.edge(edge).kind() == EdgeKind::ConditionalTrue)
-                            .map(|edge| cfg.edge(edge).target());
-                        if let Some(target) = true_target {
-                            assert_eq!(arms[0], target, "seed {seed}: the true arm leads");
-                        }
-                        (
-                            entry.index(),
-                            arms.iter().map(|arm| arm.index()).collect(),
-                            merge.index(),
-                        )
+        let mut oriented_patterns = detect_patterns(&cfg);
+        Pattern::orient_diamonds(&mut oriented_patterns, &cfg);
+        let oriented: BTreeSet<(usize, BTreeSet<usize>, usize)> = diamonds(&oriented_patterns)
+            .into_iter()
+            .map(|pattern| match pattern {
+                Pattern::Diamond { entry, arms, merge } => {
+                    let true_target = cfg
+                        .outgoing(entry)
+                        .find(|&edge| cfg.edge(edge).kind() == EdgeKind::ConditionalTrue)
+                        .map(|edge| cfg.edge(edge).target());
+                    if let Some(target) = true_target {
+                        assert_eq!(arms[0], target, "seed {seed}: the true arm leads");
                     }
-                    _ => unreachable!(),
-                })
-                .collect();
+                    (
+                        entry.index(),
+                        arms.iter().map(|arm| arm.index()).collect(),
+                        merge.index(),
+                    )
+                }
+                _ => unreachable!(),
+            })
+            .collect();
         let unordered: BTreeSet<_> = expected
             .iter()
             .map(|&(entry, arms, merge)| (entry, arms.into_iter().collect::<BTreeSet<_>>(), merge))
@@ -370,12 +356,9 @@ fn trampolines_are_exactly_the_empty_non_entry_blocks_with_one_way_out_on_random
                 cfg.block(BlockId::from_index(index)).is_empty() && successors[index].len() == 1
             })
             .collect();
-        let found: BTreeSet<usize> = detect_cfg_patterns(&cfg)
+        let found: BTreeSet<usize> = empty_trampolines(&cfg)
             .into_iter()
-            .filter_map(|pattern| match pattern {
-                CfgPattern::EmptyTrampoline { block } => Some(block.index()),
-                _ => None,
-            })
+            .map(BlockId::index)
             .collect();
         assert_eq!(found, expected, "seed {seed}");
     }

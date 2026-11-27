@@ -18,10 +18,10 @@ fn check(count: usize, edges: &[(usize, usize)], scratch: &mut NonterminationScr
     let graph = graph_of(count, edges);
     let mut controllers = vec![NodeId::from_index(99)];
     for dependent in 0..count {
-        nontermination_sensitive_controllers(
+        nontermination_sensitive_controllers_in(
+            scratch,
             &graph,
             NodeId::from_index(dependent),
-            scratch,
             &mut controllers,
         );
         let wanted: Vec<NodeId> = expected
@@ -38,7 +38,7 @@ fn check(count: usize, edges: &[(usize, usize)], scratch: &mut NonterminationScr
 
 #[test]
 fn every_digraph_of_up_to_four_nodes_matches_the_definition() {
-    let mut scratch = NonterminationScratch::new();
+    let mut scratch = NonterminationScratch::default();
     for count in 1..=4 {
         for_each_multigraph(count, 1, |edges| check(count, edges, &mut scratch));
     }
@@ -46,7 +46,7 @@ fn every_digraph_of_up_to_four_nodes_matches_the_definition() {
 
 #[test]
 fn every_multigraph_of_up_to_three_nodes_matches_the_definition() {
-    let mut scratch = NonterminationScratch::new();
+    let mut scratch = NonterminationScratch::default();
     for count in 1..=3 {
         for_each_multigraph(count, 2, |edges| check(count, edges, &mut scratch));
     }
@@ -55,7 +55,7 @@ fn every_multigraph_of_up_to_three_nodes_matches_the_definition() {
 #[test]
 fn random_graphs_match_the_definition() {
     let mut rng = Rng::new(62);
-    let mut scratch = NonterminationScratch::new();
+    let mut scratch = NonterminationScratch::default();
     for _ in 0..300 {
         let count = 3 + rng.below(12);
         let edges: Vec<(usize, usize)> = (0..count + rng.below(2 * count))
@@ -71,18 +71,18 @@ fn a_branch_that_must_loop_back_controls_itself() {
     // not, so 0 controls 0; and 0 controls 1, which one arm must reach.
     let graph = graph_of(2, &[(0, 0), (0, 1)]);
     let mut controllers = Vec::new();
-    let mut scratch = NonterminationScratch::new();
-    nontermination_sensitive_controllers(
+    let mut scratch = NonterminationScratch::default();
+    nontermination_sensitive_controllers_in(
+        &mut scratch,
         &graph,
         NodeId::from_index(0),
-        &mut scratch,
         &mut controllers,
     );
     assert_eq!(controllers, [NodeId::from_index(0)]);
-    nontermination_sensitive_controllers(
+    nontermination_sensitive_controllers_in(
+        &mut scratch,
         &graph,
         NodeId::from_index(1),
-        &mut scratch,
         &mut controllers,
     );
     assert_eq!(controllers, [NodeId::from_index(0)]);
@@ -92,20 +92,20 @@ fn a_branch_that_must_loop_back_controls_itself() {
 fn removed_slots_and_a_reused_scratch_change_nothing() {
     let mut graph = graph_of(4, &[(0, 1), (0, 2), (1, 3), (2, 3), (0, 3)]);
     assert!(graph.remove_node(NodeId::from_index(2)));
-    let mut scratch = NonterminationScratch::new();
+    let mut scratch = NonterminationScratch::default();
     let mut controllers = Vec::new();
     for _ in 0..2 {
-        nontermination_sensitive_controllers(
+        nontermination_sensitive_controllers_in(
+            &mut scratch,
             &graph,
             NodeId::from_index(1),
-            &mut scratch,
             &mut controllers,
         );
         assert_eq!(controllers, [NodeId::from_index(0)]);
-        nontermination_sensitive_controllers(
+        nontermination_sensitive_controllers_in(
+            &mut scratch,
             &graph,
             NodeId::from_index(3),
-            &mut scratch,
             &mut controllers,
         );
         assert_eq!(controllers, Vec::<NodeId>::new());

@@ -5,29 +5,24 @@
 use std::collections::BTreeSet;
 use std::fmt::Debug;
 
-use cfglib::{BlockId, Cfg, DenseId, Direction, EdgeKind, Facts, IterationOrder, SolveStats};
+use cfglib::{
+    BlockId, Cfg, DenseId, Direction, EdgeKind, Facts, IterationOrder, Seeds, Solve, SolveConfig,
+    SolveStats,
+};
 
-/// A xorshift generator: the same seed gives the same graphs everywhere.
-pub struct Rng(u64);
+/// The suite's draws: the shared `xorshift64*` generator read from the high 48
+/// bits of each draw, so the same seed gives the same graphs everywhere.
+pub struct Rng(crate::rng::Rng);
 
 impl Rng {
-    pub fn new(seed: u64) -> Self {
-        Self(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut state = self.0;
-        state ^= state >> 12;
-        state ^= state << 25;
-        state ^= state >> 27;
-        self.0 = state;
-        state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    pub const fn new(seed: u64) -> Self {
+        Self(crate::rng::Rng::new(seed))
     }
 
     /// A value below `bound`.
     pub fn below(&mut self, bound: usize) -> usize {
         let bound = u64::try_from(bound).expect("a small bound");
-        usize::try_from((self.next_u64() >> 16) % bound).expect("below the bound")
+        usize::try_from((self.0.next_u64() >> 16) % bound).expect("below the bound")
     }
 }
 
@@ -292,6 +287,42 @@ pub const ORDERS: [IterationOrder; 3] = [
     IterationOrder::WeakTopological,
 ];
 
+/// An index-order solve config that stops after `max_steps` steps.
+pub fn step_limit(max_steps: usize) -> SolveConfig {
+    SolveConfig {
+        max_steps: Some(max_steps),
+        ..SolveConfig::default()
+    }
+}
+
+/// A solve from every live node, within `config`.
+pub fn live<'a, N>(config: SolveConfig) -> Solve<'a, N> {
+    Solve {
+        seeds: Seeds::Live,
+        config,
+    }
+}
+
+/// A solve from `seeds` alone, within `config`.
+pub fn seeded<N>(seeds: &[N], config: SolveConfig) -> Solve<'_, N> {
+    Solve {
+        seeds: Seeds::Of(seeds),
+        config,
+    }
+}
+
+/// The solve of a per-block analysis of a control-flow graph, within
+/// `config`: forward from the entry, which starts from the boundary fact
+/// even where it is a branch target, so that only what it reaches is
+/// solved; backward from every live block.
+pub fn rooted<'a>(cfg: &Cfg<()>, direction: Direction, config: SolveConfig) -> Solve<'a, BlockId> {
+    let seeds = match direction {
+        Direction::Forward => Seeds::Reachable(cfg.entry()),
+        Direction::Backward => Seeds::Live,
+    };
+    Solve { seeds, config }
+}
+
 /// Asserts that two solves agree on the IN and OUT facts of every node in
 /// `nodes`, whatever number of steps each took.
 pub fn assert_same_facts<N: DenseId, F: PartialEq + Debug>(
@@ -328,7 +359,11 @@ pub fn assert_streams_like<N: DenseId, F: PartialEq + Debug>(
         assert_eq!(output, expected.fact_out(node), "OUT of {node:?}: {what}");
         visited.push(node);
     });
-    assert_eq!(stats.steps(), expected.steps(), "steps: {what}");
+    assert_eq!(
+        stats.step_count(),
+        expected.stats().step_count(),
+        "steps: {what}"
+    );
     visited.sort_unstable();
     let mut nodes: Vec<N> = nodes.into_iter().collect();
     nodes.sort_unstable();

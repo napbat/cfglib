@@ -5,19 +5,14 @@ use alloc::string::String;
 use alloc::vec;
 use core::cmp::Ordering;
 
-use crate::{TraversalDirection, shortest_path};
+use crate::graph::edge_view::EdgeView;
+use crate::{Direction, PathSearchConfig, shortest_path};
 
+use super::test_support::{Label, rank};
 use super::{
-    ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeGraphPathLabel, ScopeGraphQuery,
-    ScopeLinearResolutionError, ScopePath, ScopeQuery, ScopeResolution, ScopeResolutionConfig,
-    ScopeResolutionIndex,
+    ScopeDatumId, ScopeEdgeId, ScopeGraph, ScopeGraphPathLabel, ScopeGraphQuery, ScopeIndexConfig,
+    ScopePath, ScopeQuery, ScopeResolution, ScopeResolutionIndex,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Label {
-    Parent,
-    Import,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Relation {
@@ -82,7 +77,9 @@ impl ScopeGraphQuery<ScopeMeta, Label, Relation, Declaration, Reference> for Lex
             (QueryState::Lexical | QueryState::Imported, Label::Import) => {
                 Some(QueryState::Imported)
             }
-            (QueryState::Imported, Label::Parent) => None,
+            (QueryState::Imported, Label::Parent) | (_, Label::Hidden | Label::A | Label::B) => {
+                None
+            }
         }
     }
 
@@ -137,13 +134,6 @@ impl ScopeGraphQuery<ScopeMeta, Label, Relation, Declaration, Reference> for Lex
         left: ScopeGraphPathLabel<'_, Label>,
         right: ScopeGraphPathLabel<'_, Label>,
     ) -> Option<Ordering> {
-        fn rank(label: ScopeGraphPathLabel<'_, Label>) -> u8 {
-            match label {
-                ScopeGraphPathLabel::Declaration => 0,
-                ScopeGraphPathLabel::Edge(Label::Import) => 1,
-                ScopeGraphPathLabel::Edge(Label::Parent) => 2,
-            }
-        }
         Some(rank(left).cmp(&rank(right)))
     }
 
@@ -252,17 +242,17 @@ fn storage_is_an_edge_aware_graph_view() {
     let parent = graph.add_scope("parent");
     let edge = graph.add_edge(child, parent, "lexical");
 
-    assert_eq!(graph.scope_count(), 2);
+    assert_eq!(graph.graph().node_count(), 2);
     assert_eq!(graph.edge_ids().collect::<alloc::vec::Vec<_>>(), vec![edge]);
     assert_eq!(graph.edge(edge).source(), child);
     assert_eq!(graph.edge(edge).target(), parent);
     assert_eq!(
-        shortest_path(&graph, child, parent, TraversalDirection::Outgoing),
+        shortest_path(&graph, child, parent, Direction::Forward),
         Some(vec![child, parent])
     );
 
     assert!(graph.remove_edge(edge));
-    assert_eq!(graph.edge_count(), 0);
+    assert_eq!(graph.graph().edge_count(), 0);
     assert_eq!(graph.edge_bound(), 1);
 }
 
@@ -277,14 +267,18 @@ fn local_data_shadows_parent_data_without_crossing_namespaces() {
     let inner = graph.add_datum(local, Relation::Value, declaration("x"));
     let use_x = graph.add_reference(local, reference("x", Relation::Value));
 
-    let result =
-        ScopeResolution::compute(&graph, use_x, &LexicalQuery, ScopeResolutionConfig::new());
-    assert_eq!(result.stats().reachable_candidate_count, 2);
+    let result = ScopeResolution::compute(
+        &graph,
+        ScopeQuery::from_reference(&graph, use_x),
+        &LexicalQuery,
+        PathSearchConfig::default(),
+    );
+    assert_eq!(result.stats().complete_path_count, 2);
     assert_eq!(result.target_count(), 1);
     assert_eq!(result.candidates()[0].datum(), inner);
     assert!(!result.is_ambiguous());
 
-    let index = ScopeResolutionIndex::compute(&graph, &LexicalQuery, ScopeResolutionConfig::new());
+    let index = ScopeResolutionIndex::compute(&graph, &LexicalQuery, ScopeIndexConfig::default());
     assert_eq!(index.references_to(inner), &[use_x]);
     assert_eq!(index.references_to(outer), []);
     assert_eq!(index.references_to(outer_type), []);
@@ -306,8 +300,12 @@ fn equal_import_paths_remain_ambiguous_and_do_not_admit_parents_after_imports() 
     graph.add_datum(parent, Relation::Value, declaration("x"));
     let use_x = graph.add_reference(start, reference("x", Relation::Value));
 
-    let result =
-        ScopeResolution::compute(&graph, use_x, &LexicalQuery, ScopeResolutionConfig::new());
+    let result = ScopeResolution::compute(
+        &graph,
+        ScopeQuery::from_reference(&graph, use_x),
+        &LexicalQuery,
+        PathSearchConfig::default(),
+    );
     assert_eq!(result.target_count(), 2);
     assert!(result.is_ambiguous());
     assert_eq!(
@@ -333,8 +331,12 @@ fn a_preferred_import_shadows_a_lexical_parent() {
     graph.add_datum(parent, Relation::Value, declaration("x"));
     let use_x = graph.add_reference(start, reference("x", Relation::Value));
 
-    let result =
-        ScopeResolution::compute(&graph, use_x, &LexicalQuery, ScopeResolutionConfig::new());
+    let result = ScopeResolution::compute(
+        &graph,
+        ScopeQuery::from_reference(&graph, use_x),
+        &LexicalQuery,
+        PathSearchConfig::default(),
+    );
     assert_eq!(result.target_count(), 1);
     assert_eq!(result.candidates()[0].datum(), imported_x);
 }
@@ -353,8 +355,12 @@ fn label_words_remain_comparable_after_paths_enter_different_scopes() {
     let direct_x = graph.add_datum(direct_branch, Relation::Value, declaration("x"));
     let use_x = graph.add_reference(start, reference("x", Relation::Value));
 
-    let result =
-        ScopeResolution::compute(&graph, use_x, &LexicalQuery, ScopeResolutionConfig::new());
+    let result = ScopeResolution::compute(
+        &graph,
+        ScopeQuery::from_reference(&graph, use_x),
+        &LexicalQuery,
+        PathSearchConfig::default(),
+    );
 
     assert_eq!(result.target_count(), 1);
     assert_eq!(result.candidates()[0].datum(), direct_x);
@@ -410,10 +416,18 @@ fn ordered_and_opaque_scope_rules_fit_the_generic_query_contract() {
         },
     );
 
-    let early_result =
-        ScopeResolution::compute(&graph, early, &LexicalQuery, ScopeResolutionConfig::new());
-    let late_result =
-        ScopeResolution::compute(&graph, late, &LexicalQuery, ScopeResolutionConfig::new());
+    let early_result = ScopeResolution::compute(
+        &graph,
+        ScopeQuery::from_reference(&graph, early),
+        &LexicalQuery,
+        PathSearchConfig::default(),
+    );
+    let late_result = ScopeResolution::compute(
+        &graph,
+        ScopeQuery::from_reference(&graph, late),
+        &LexicalQuery,
+        PathSearchConfig::default(),
+    );
     assert_eq!(early_result.candidates()[0].datum(), first);
     assert_eq!(late_result.candidates()[0].datum(), second);
 
@@ -435,26 +449,16 @@ fn ordered_and_opaque_scope_rules_fit_the_generic_query_contract() {
     );
     let hidden_use = graph.add_reference(nested, reference("hidden", Relation::Value));
     let visible_use = graph.add_reference(nested, reference("visible", Relation::Value));
-    assert!(
-        !ScopeResolution::compute(
-            &graph,
-            hidden_use,
-            &LexicalQuery,
-            ScopeResolutionConfig::new(),
-        )
-        .is_resolved()
-    );
-    assert_eq!(
+    let resolve = |reference| {
         ScopeResolution::compute(
             &graph,
-            visible_use,
+            ScopeQuery::from_reference(&graph, reference),
             &LexicalQuery,
-            ScopeResolutionConfig::new(),
+            PathSearchConfig::default(),
         )
-        .candidates()[0]
-            .datum(),
-        visible
-    );
+    };
+    assert!(!resolve(hidden_use).is_resolved());
+    assert_eq!(resolve(visible_use).candidates()[0].datum(), visible);
 }
 
 #[test]
@@ -470,18 +474,24 @@ fn configured_bounds_report_possible_truncation() {
 
     let length_limited = ScopeResolution::compute(
         &graph,
-        use_x,
+        ScopeQuery::from_reference(&graph, use_x),
         &LexicalQuery,
-        ScopeResolutionConfig::new().with_max_path_length(1),
+        PathSearchConfig {
+            max_path_length: Some(1),
+            ..PathSearchConfig::default()
+        },
     );
     assert!(!length_limited.is_resolved());
     assert!(length_limited.stats().path_length_limited);
 
     let count_limited = ScopeResolution::compute(
         &graph,
-        use_x,
+        ScopeQuery::from_reference(&graph, use_x),
         &LexicalQuery,
-        ScopeResolutionConfig::new().with_max_path_count(1),
+        PathSearchConfig {
+            max_path_count: Some(1),
+            ..PathSearchConfig::default()
+        },
     );
     assert!(!count_limited.is_resolved());
     assert!(count_limited.stats().path_count_limited);
@@ -502,10 +512,14 @@ fn a_wide_fan_out_is_explored_in_edge_order_at_every_level() {
     let declared = graph.add_datum(last, Relation::Value, declaration("x"));
     let use_x = graph.add_reference(start, reference("x", Relation::Value));
 
-    let result =
-        ScopeResolution::compute(&graph, use_x, &LexicalQuery, ScopeResolutionConfig::new());
+    let result = ScopeResolution::compute(
+        &graph,
+        ScopeQuery::from_reference(&graph, use_x),
+        &LexicalQuery,
+        PathSearchConfig::default(),
+    );
 
-    assert_eq!(result.stats().explored_path_count, WIDTH + 1);
+    assert_eq!(result.stats().expanded_path_count, WIDTH + 1);
     assert!(!result.stats().is_truncated());
     assert_eq!(result.candidates().len(), 1);
     assert_eq!(result.candidates()[0].datum(), declared);
@@ -513,108 +527,18 @@ fn a_wide_fan_out_is_explored_in_edge_order_at_every_level() {
 
     let limited = ScopeResolution::compute(
         &graph,
-        use_x,
+        ScopeQuery::from_reference(&graph, use_x),
         &LexicalQuery,
-        ScopeResolutionConfig::new().with_max_path_count(WIDTH),
+        PathSearchConfig {
+            max_path_count: Some(WIDTH),
+            ..PathSearchConfig::default()
+        },
     );
     assert!(
         !limited.is_resolved(),
         "breadth-first spends the bound on earlier siblings before the last child"
     );
     assert!(limited.stats().path_count_limited);
-}
-
-#[test]
-fn linear_resolution_matches_general_search_and_rejects_branching() {
-    let mut graph = Graph::new();
-    let parent = graph.add_scope(PLAIN);
-    let local = graph.add_scope(PLAIN);
-    graph.add_edge(local, parent, Label::Parent);
-    graph.add_datum(parent, Relation::Value, declaration("x"));
-    let use_x = graph.add_reference(local, reference("x", Relation::Value));
-
-    let general =
-        ScopeResolution::compute(&graph, use_x, &LexicalQuery, ScopeResolutionConfig::new());
-    let linear = ScopeResolution::try_compute_linear(
-        &graph,
-        use_x,
-        &LexicalQuery,
-        ScopeResolutionConfig::new(),
-    )
-    .expect("one parent edge is linear");
-    assert_eq!(linear, general);
-
-    let sibling = graph.add_scope(PLAIN);
-    graph.add_edge(local, sibling, Label::Parent);
-    assert_eq!(
-        ScopeResolution::try_compute_linear(
-            &graph,
-            use_x,
-            &LexicalQuery,
-            ScopeResolutionConfig::new(),
-        ),
-        Err(ScopeLinearResolutionError::MultipleEdges { scope: local })
-    );
-
-    let mut ambiguous = Graph::new();
-    let scope = ambiguous.add_scope(PLAIN);
-    ambiguous.add_datum(scope, Relation::Value, declaration("x"));
-    ambiguous.add_datum(scope, Relation::Value, declaration("x"));
-    let use_x = ambiguous.add_reference(scope, reference("x", Relation::Value));
-    assert_eq!(
-        ScopeResolution::try_compute_linear(
-            &ambiguous,
-            use_x,
-            &LexicalQuery,
-            ScopeResolutionConfig::new(),
-        ),
-        Err(ScopeLinearResolutionError::MultipleCandidates { scope })
-    );
-}
-
-#[test]
-fn linear_resolution_reports_exactly_what_general_search_does_under_every_bound() {
-    let mut graph = Graph::new();
-    let scopes: vec::Vec<_> = (0..4).map(|_| graph.add_scope(PLAIN)).collect();
-    for pair in scopes.windows(2) {
-        graph.add_edge(pair[0], pair[1], Label::Parent);
-    }
-    for (scope, name) in scopes.iter().zip(["a", "b", "c", "d"]) {
-        graph.add_datum(*scope, Relation::Value, declaration(name));
-    }
-    let everything = Reference {
-        name: "",
-        relation: Relation::Value,
-        start: u32::MAX,
-        name_match: NameMatch::Prefix,
-    };
-    let use_all = graph.add_reference(scopes[0], everything);
-    let unbounded =
-        ScopeResolution::compute(&graph, use_all, &LexicalQuery, ScopeResolutionConfig::new());
-    assert_eq!(
-        unbounded.candidates().len(),
-        4,
-        "the chain has four answers"
-    );
-
-    let limits = [None, Some(0), Some(1), Some(2), Some(3), Some(4), Some(5)];
-    let mut truncations = [false; 2];
-    for max_path_length in limits {
-        for max_path_count in limits {
-            let config = ScopeResolutionConfig {
-                max_path_length,
-                max_path_count,
-            };
-            let general = ScopeResolution::compute(&graph, use_all, &LexicalQuery, config);
-            let linear =
-                ScopeResolution::try_compute_linear(&graph, use_all, &LexicalQuery, config)
-                    .expect("the chain never branches");
-            assert_eq!(linear, general, "{config:?}");
-            truncations[0] |= general.stats().path_length_limited;
-            truncations[1] |= general.stats().path_count_limited;
-        }
-    }
-    assert_eq!(truncations, [true; 2], "the sweep hits both bounds");
 }
 
 #[test]
@@ -627,12 +551,12 @@ fn query_owned_candidate_index_avoids_unrelated_scope_data() {
 
     let resolution = ScopeResolution::compute(
         &graph,
-        reference,
+        ScopeQuery::from_reference(&graph, reference),
         &IndexedQuery {
             candidate,
             extend_after_match: true,
         },
-        ScopeResolutionConfig::new(),
+        PathSearchConfig::default(),
     );
 
     assert_eq!(resolution.candidates().len(), 1);
@@ -650,16 +574,41 @@ fn query_can_prune_extensions_after_a_decisive_local_match() {
 
     let resolution = ScopeResolution::compute(
         &graph,
-        reference,
+        ScopeQuery::from_reference(&graph, reference),
         &IndexedQuery {
             candidate,
             extend_after_match: false,
         },
-        ScopeResolutionConfig::new(),
+        PathSearchConfig::default(),
     );
 
-    assert_eq!(resolution.stats().explored_path_count, 1);
+    assert_eq!(resolution.stats().expanded_path_count, 1);
     assert_eq!(resolution.candidates()[0].datum(), candidate);
+}
+
+#[test]
+fn a_query_is_copy_whatever_its_data() {
+    fn twice<T: Copy>(value: T) -> (T, T) {
+        (value, value)
+    }
+    let name = alloc::string::String::from("x");
+    let (first, second) = twice(ScopeQuery::new(super::ScopeId::from_index(0), &name));
+    assert_eq!(first.data(), second.data());
+}
+
+#[test]
+#[should_panic(expected = "query scope is out of range")]
+fn a_general_query_that_starts_outside_the_graph_panics() {
+    let graph = Graph::new();
+    let _ = ScopeResolution::compute(
+        &graph,
+        ScopeQuery::new(
+            super::ScopeId::from_index(0),
+            &reference("x", Relation::Value),
+        ),
+        &LexicalQuery,
+        PathSearchConfig::default(),
+    );
 }
 
 #[test]
@@ -679,12 +628,11 @@ fn ephemeral_queries_support_shadow_aware_completion_without_graph_mutation() {
         name_match: NameMatch::Prefix,
     };
 
-    let result = ScopeResolution::compute_from(
+    let result = ScopeResolution::compute(
         &graph,
-        local,
-        &completion,
+        ScopeQuery::new(local, &completion),
         &LexicalQuery,
-        ScopeResolutionConfig::new(),
+        PathSearchConfig::default(),
     );
 
     assert_eq!(result.start_scope(), local);

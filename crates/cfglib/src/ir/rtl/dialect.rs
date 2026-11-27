@@ -42,18 +42,22 @@ pub trait Dialect: Copy + Eq + Ord + Hash + Debug + 'static {
 }
 
 /// A bit range of one storage root.
+///
+/// `R` is the root: the [`Dialect::Root`] of an instruction set in a record,
+/// or any storage place in the shared effect vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Place<D: Dialect> {
+pub struct Place<R> {
     /// The root that holds the range.
-    pub root: D::Root,
+    pub root: R,
     /// The bits of the root.
     pub slice: BitSlice,
 }
 
-impl<D: Dialect> Place<D> {
-    /// Returns the place that covers the whole of `root`.
+impl<R: Copy> Place<R> {
+    /// Returns the place that covers the whole of `root`, a root of the
+    /// dialect `D`.
     #[must_use]
-    pub fn whole(root: D::Root) -> Self {
+    pub fn whole<D: Dialect<Root = R>>(root: R) -> Self {
         Self {
             root,
             slice: BitSlice::whole(D::root_width(root)),

@@ -1,7 +1,8 @@
-//! `strong_cuts` and `strong_cuts_of` over one large strongly connected
-//! component whose cuts are known by construction.
+//! `StrongCuts::compute_in` over one large strongly connected component whose
+//! cuts are known by construction, alone and behind the decomposition that
+//! finds the component.
 
-use cfglib::{Graph, NodeId, StrongCutScratch, StrongCuts, strong_cuts, strong_cuts_of};
+use cfglib::{Graph, NodeId, SccDecomposition, SccNumbering, StrongCutScratch, StrongCuts};
 
 use super::BenchmarkSuite;
 use crate::harness::benchmark_case;
@@ -14,22 +15,35 @@ const STRONG_CUT_SEGMENT_NODES: usize = 800;
 pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     let (graph, expected) = segment_ring();
     let component: Vec<NodeId> = graph.node_ids().collect();
-    let mut scratch = StrongCutScratch::new();
+    let mut scratch = StrongCutScratch::default();
     benchmark_case!(
         suite,
-        "api_strong_cuts_segment_ring",
-        covers[strong_cuts],
-        || strong_cuts(&graph, &mut scratch),
+        "api_strong_cuts_whole_graph_segment_ring",
+        || graph_cuts(&graph, &mut scratch),
         |cuts: &StrongCuts<NodeId>| assert_eq!(cuts, &expected)
     );
-    let mut scratch = StrongCutScratch::new();
+    let mut scratch = StrongCutScratch::default();
     benchmark_case!(
         suite,
-        "api_strong_cuts_of_segment_ring",
-        covers[strong_cuts_of],
-        || strong_cuts_of(&graph, &component, &mut scratch),
+        "api_strong_cuts_component_segment_ring",
+        || StrongCuts::compute_in(&mut scratch, &graph, &component),
         |cuts: &StrongCuts<NodeId>| assert_eq!(cuts, &expected)
     );
+}
+
+/// The cuts of every component of `graph`, merged in dense-index order: what
+/// a consumer pays for the cuts of a graph it has not decomposed yet.
+fn graph_cuts(graph: &Graph<(), ()>, scratch: &mut StrongCutScratch) -> StrongCuts<NodeId> {
+    let mut cuts = StrongCuts::default();
+    for component in SccDecomposition::compute(graph, SccNumbering::LeavesFirst).components() {
+        let piece = StrongCuts::compute_in(scratch, graph, component);
+        cuts.articulation_points.extend(piece.articulation_points);
+        cuts.bridges.extend(piece.bridges);
+    }
+    cuts.articulation_points.sort_unstable();
+    cuts.bridges
+        .sort_unstable_by_key(|&(tail, head)| (tail.index(), head.index()));
+    cuts
 }
 
 /// One strongly connected component of about 10⁵ nodes and 2·10⁵ edges, and

@@ -2,8 +2,9 @@
 //!
 //! [`Imp`] and [`Sym`] share nothing but the traits, and every test body that
 //! is written over [`Kit`] runs over both. The storage behind them is
-//! [`ToyHlil`], a `Vec`-backed function that implements
-//! [`FunctionView`](super::FunctionView).
+//! [`ToyHlil`](storage::ToyHlil), a `Vec`-backed function that implements
+//! [`FunctionView`](super::FunctionView) and
+//! [`FunctionBuilder`](super::FunctionBuilder).
 
 /// Generates one test per toy dialect for each function named, a body
 /// written over [`Kit`](crate::ir::hlil::tests::Kit).
@@ -45,13 +46,13 @@ macro_rules! dense_id {
     };
 }
 
+mod contract;
 mod imp;
 mod kit;
 mod storage;
 mod sym;
-mod walks;
 
 pub(crate) use imp::Imp;
 pub(crate) use kit::{Kit, Prim, Ty};
-pub(crate) use storage::{StmtId, ToyHlil, ToyHlilBuilder};
+pub(crate) use storage::ToyHlilBuilder;
 pub(crate) use sym::Sym;

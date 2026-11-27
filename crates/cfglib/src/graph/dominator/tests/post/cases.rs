@@ -8,12 +8,10 @@ use alloc::vec::Vec;
 use super::reference::{PostReference, assert_matches};
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::graph::cdg::{
-    NonterminationScratch, control_dependence_graph, nontermination_sensitive_controllers,
-};
+use crate::graph::cdg::{control_dependence_graph, nontermination_sensitive_controllers};
 use crate::graph::dominator::tests::support::{EdgeList, node};
 use crate::graph::dominator::tests::{BoundedDiamond, BoundedNode};
-use crate::graph::dominator::{ExitPolicy, PostDominatorScratch, PostDominatorTree, PostNode};
+use crate::graph::dominator::{DominatorScratch, ExitPolicy, PostDominatorTree, PostNode};
 use crate::graph::store::{Graph, NodeId};
 use crate::graph::view::{GraphView, Rooted};
 
@@ -151,22 +149,19 @@ fn the_server_loop_has_no_dependences_as_a_sink_and_two_sensitive_ones() {
         ],
     );
     let graph = list.graph();
-    let sinks = PostDominatorTree::compute_with_in(
-        &mut PostDominatorScratch::new(),
+    let sinks = PostDominatorTree::compute_in(
+        &mut DominatorScratch::default(),
         &graph,
         ExitPolicy::SinkComponents,
     );
     assert_eq!(control_dependence_graph(&graph, &sinks).edge_count(), 0);
 
     let mut sensitive = Vec::new();
-    let mut controllers = Vec::new();
-    let mut scratch = NonterminationScratch::new();
     for dependent in 0..node(names.len()) {
-        nontermination_sensitive_controllers(&graph, dependent, &mut scratch, &mut controllers);
         sensitive.extend(
-            controllers
-                .iter()
-                .map(|&controller| (controller, dependent)),
+            nontermination_sensitive_controllers(&graph, dependent)
+                .into_iter()
+                .map(|controller| (controller, dependent)),
         );
     }
     let (head, ok, err) = (
@@ -299,7 +294,6 @@ fn the_frontier_of_a_block_lists_its_control_dependence_sources() {
     let mut sources = Vec::new();
     for (index, name) in NESTED_BLOCKS.iter().enumerate() {
         post.frontier(&graph, node(index), &mut sources);
-        sources.sort_unstable();
         let mut controllers: Vec<u32> = dependences
             .edges()
             .filter(|edge| *dependences.node(edge.target()) == node(index))
@@ -310,15 +304,14 @@ fn the_frontier_of_a_block_lists_its_control_dependence_sources() {
     }
 
     // `h2` is control dependent on itself, through its inner loop, and on the
-    // latch; the frontier lists them in the tree's preorder, root first.
+    // latch; the frontier lists them in ascending dense index.
     post.frontier(&graph, index_of(&NESTED_BLOCKS, "h2"), &mut sources);
-    assert_eq!(
-        sources,
-        [
-            index_of(&NESTED_BLOCKS, "l1"),
-            index_of(&NESTED_BLOCKS, "h2")
-        ]
-    );
+    let mut expected = [
+        index_of(&NESTED_BLOCKS, "l1"),
+        index_of(&NESTED_BLOCKS, "h2"),
+    ];
+    expected.sort_unstable();
+    assert_eq!(sources, expected);
 }
 
 #[test]
@@ -432,14 +425,14 @@ fn blocks_the_entry_cannot_reach_are_not_in_the_tree() {
         assert_eq!(post.nearest_common_post_dominator(outside, outside), None);
     }
     assert_eq!(
-        post.nearest_common_post_dominator_of([island, entry, island_exit]),
+        post.nearest_common_post_dominator_among([island, entry, island_exit]),
         Some(PostNode::Node(entry))
     );
     assert_eq!(
-        post.nearest_common_post_dominator_of([island, island_exit]),
+        post.nearest_common_post_dominator_among([island, island_exit]),
         None
     );
-    assert_eq!(post.nearest_common_post_dominator_of([]), None);
+    assert_eq!(post.nearest_common_post_dominator_among([]), None);
 }
 
 #[test]
@@ -463,15 +456,15 @@ fn the_nearest_common_post_dominator_of_separate_trees_is_the_virtual_exit() {
         Some(PostNode::Exit)
     );
     assert_eq!(
-        post.nearest_common_post_dominator_of([spin, out]),
+        post.nearest_common_post_dominator_among([spin, out]),
         Some(PostNode::Exit)
     );
     assert_eq!(
-        post.nearest_common_post_dominator_of([spin, spin]),
+        post.nearest_common_post_dominator_among([spin, spin]),
         Some(PostNode::Node(spin))
     );
     assert_eq!(
-        post.nearest_common_post_dominator_of([out, spin, entry]),
+        post.nearest_common_post_dominator_among([out, spin, entry]),
         Some(PostNode::Exit),
         "the virtual exit stays the answer however many blocks follow"
     );
@@ -621,12 +614,12 @@ fn one_scratch_reused_down_a_sequence_computes_what_a_fresh_one_does() {
         EdgeList::new(2, vec![(0, 1), (1, 1)]),
         EdgeList::new(2, vec![(0, 1)]),
     ];
-    let mut scratch = PostDominatorScratch::new();
+    let mut scratch = DominatorScratch::default();
     for _ in 0..2 {
         for edges in &sequence {
             let graph = edges.graph();
             assert_eq!(
-                PostDominatorTree::compute_in(&mut scratch, &graph),
+                PostDominatorTree::compute_in(&mut scratch, &graph, ExitPolicy::CutLoops),
                 PostDominatorTree::compute(&graph),
                 "{edges:?}"
             );
@@ -637,7 +630,7 @@ fn one_scratch_reused_down_a_sequence_computes_what_a_fresh_one_does() {
 #[test]
 fn a_scratch_crosses_node_id_types_and_threads() {
     fn assert_send<T: Send>() {}
-    assert_send::<PostDominatorScratch>();
+    assert_send::<DominatorScratch>();
 
     // One scratch, two graphs whose node identities are unrelated types.
     let mut cfg: Cfg<()> = Cfg::new();
@@ -649,17 +642,17 @@ fn a_scratch_crosses_node_id_types_and_threads() {
     graph.add_edge(first, second, ());
     let rooted = Rooted::new(&graph, first);
 
-    let mut scratch = PostDominatorScratch::new();
+    let mut scratch = DominatorScratch::default();
     assert_eq!(
-        PostDominatorTree::compute_in(&mut scratch, &cfg),
+        PostDominatorTree::compute_in(&mut scratch, &cfg, ExitPolicy::CutLoops),
         PostDominatorTree::compute(&cfg)
     );
     assert_eq!(
-        PostDominatorTree::compute_in(&mut scratch, &rooted),
+        PostDominatorTree::compute_in(&mut scratch, &rooted, ExitPolicy::CutLoops),
         PostDominatorTree::compute(&rooted)
     );
     assert_eq!(
-        PostDominatorTree::compute_in(&mut scratch, &cfg),
+        PostDominatorTree::compute_in(&mut scratch, &cfg, ExitPolicy::CutLoops),
         PostDominatorTree::compute(&cfg)
     );
 }

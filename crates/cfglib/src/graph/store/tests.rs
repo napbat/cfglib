@@ -6,12 +6,13 @@ use alloc::vec::Vec;
 
 use crate::graph::dominator::DominatorTree;
 use crate::graph::edge_view::EdgeView;
-use crate::graph::scc::tarjan_scc;
+use crate::graph::scc::{SccDecomposition, SccNumbering};
 use crate::graph::store::Graph;
-use crate::graph::traverse::{TraversalDirection, depth_first_preorder};
+use crate::graph::traverse::depth_first_preorder;
+use crate::graph::view::Direction;
 use crate::graph::view::{GraphView, Rooted};
 
-use super::{Id, NodeId};
+use super::{Id, NodeId, NodeOrder};
 
 mod model;
 mod ordered;
@@ -74,7 +75,7 @@ fn an_empty_store_has_nothing_and_is_already_compact() {
 #[test]
 fn insertion_order_survives_the_base_delta_boundary() {
     let (mut graph, nodes) = diamond();
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
     assert!(graph.is_compact());
 
     // Both endpoints are in the compressed base, so this edge can only be
@@ -92,7 +93,7 @@ fn insertion_order_survives_the_base_delta_boundary() {
     assert_eq!(observed, expected);
 
     // Compaction rebuilds the base from that same order.
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
     let after: Vec<_> = graph
         .outgoing(nodes[0])
         .map(|edge| *graph.edge(edge).payload())
@@ -119,7 +120,7 @@ fn the_delta_charges_nothing_per_node_of_a_compacted_store() {
     let (mut graph, nodes) = diamond();
     assert!(graph.chains.node_slots() > 0);
 
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
     assert_eq!(graph.chains.node_slots(), 0);
     assert_eq!(
         graph.successors(nodes[0]).collect::<Vec<_>>(),
@@ -140,7 +141,7 @@ fn the_delta_charges_nothing_per_node_of_a_compacted_store() {
         [nodes[0], nodes[1]]
     );
 
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
     assert_eq!(graph.chains.node_slots(), 0);
 }
 
@@ -163,7 +164,7 @@ fn parallel_and_self_edges_are_retained_in_order() {
         [other, node, other]
     );
 
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
     assert_eq!(
         graph.outgoing(node).collect::<Vec<_>>(),
         [first, loop_edge, parallel]
@@ -223,7 +224,7 @@ fn degrees_agree_with_the_walk_in_every_store_state() {
     assert_eq!(degrees(&graph), [(2, 0), (1, 1), (1, 1), (0, 2)]);
 
     // Entirely in the compressed base, which is the constant-time answer.
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
     assert_eq!(degrees(&graph), walked(&graph));
 
     // A base plus a delta, and then a tombstone, which is the counted walk.
@@ -239,7 +240,7 @@ fn degrees_agree_with_the_walk_in_every_store_state() {
 #[test]
 fn a_redirected_endpoint_is_counted_at_its_new_node() {
     let (mut graph, nodes) = diamond();
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
     let edge = graph.edge_ids().next().expect("the diamond has edges");
     graph.redirect_edge_target(edge, nodes[2]);
 
@@ -260,15 +261,15 @@ fn assert_mirrored<N, E>(graph: &Graph<N, E>) {
     for node in graph.node_ids() {
         for edge in graph.outgoing(node) {
             assert_eq!(graph.edge(edge).source(), node, "outgoing listing");
-            listed.push((edge, TraversalDirection::Outgoing));
+            listed.push((edge, Direction::Forward));
         }
         for edge in graph.incoming(node) {
             assert_eq!(graph.edge(edge).target(), node, "incoming listing");
-            listed.push((edge, TraversalDirection::Incoming));
+            listed.push((edge, Direction::Backward));
         }
     }
     for edge in graph.edge_ids() {
-        for direction in [TraversalDirection::Outgoing, TraversalDirection::Incoming] {
+        for direction in [Direction::Forward, Direction::Backward] {
             let count = listed
                 .iter()
                 .filter(|&&(candidate, side)| candidate == edge && side == direction)
@@ -333,7 +334,7 @@ fn a_chain_edge_leaves_a_node_that_already_has_an_overlay() {
 #[test]
 fn a_store_carries_an_overlay_only_once_it_relocates() {
     let (mut graph, nodes) = diamond();
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
     assert!(!graph.has_relocations());
     let edge = graph.edge_ids().next().expect("the diamond has edges");
 
@@ -341,7 +342,7 @@ fn a_store_carries_an_overlay_only_once_it_relocates() {
     assert!(graph.has_relocations());
     assert!(!graph.is_compact());
 
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
     assert!(!graph.has_relocations());
     assert!(graph.is_compact());
 }
@@ -365,7 +366,7 @@ fn nodes_added_after_the_first_relocation_relocate_too() {
 
     graph.redirect_edge_source(second, tail);
     graph.redirect_edge_target(first, tail);
-    graph.move_adjacency(head, tail, TraversalDirection::Outgoing);
+    graph.move_adjacency(head, tail, Direction::Forward);
 
     assert_eq!(graph.outgoing(tail).count(), 2);
     assert_eq!(graph.incoming(tail).count(), 2);
@@ -409,7 +410,7 @@ fn a_bulk_move_carries_the_overlay_and_the_delta_chain_in_order() {
     let appended = graph.add_edge(c, b, "appended");
     let own = graph.add_edge(a, d, "own");
 
-    graph.move_adjacency(c, a, TraversalDirection::Outgoing);
+    graph.move_adjacency(c, a, Direction::Forward);
 
     assert_eq!(
         graph.outgoing(a).collect::<Vec<_>>(),
@@ -434,10 +435,10 @@ fn a_bulk_move_leaves_removed_edges_as_they_were() {
     let [a, b, c] = ["a", "b", "c"].map(|payload| graph.add_node(payload));
     let dead = graph.add_edge(a, b, "dead");
     let live = graph.add_edge(a, c, "live");
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
     assert!(graph.remove_edge(dead));
 
-    graph.move_adjacency(a, b, TraversalDirection::Outgoing);
+    graph.move_adjacency(a, b, Direction::Forward);
 
     assert_eq!(graph.edge(dead).source(), a, "a removed edge is not moved");
     assert_eq!(graph.edge(live).source(), b);
@@ -451,7 +452,7 @@ fn a_bulk_move_of_nothing_names_no_replacement() {
     let [empty, gone] = ["empty", "gone"].map(|payload| graph.add_node(payload));
     graph.remove_node(gone);
 
-    graph.move_adjacency(empty, gone, TraversalDirection::Incoming);
+    graph.move_adjacency(empty, gone, Direction::Backward);
 
     assert!(graph.incoming(empty).next().is_none());
     assert!(graph.incoming(gone).next().is_none());
@@ -461,10 +462,9 @@ fn a_bulk_move_of_nothing_names_no_replacement() {
 fn verify_reports_an_edge_its_endpoint_stopped_listing() {
     // The shape of a dropped listing: the edge is live and its other
     // endpoint still lists it, but one endpoint's chain has forgotten it.
-    for (direction, (outgoing, incoming)) in [
-        (TraversalDirection::Outgoing, (0, 1)),
-        (TraversalDirection::Incoming, (1, 0)),
-    ] {
+    for (direction, (outgoing, incoming)) in
+        [(Direction::Forward, (0, 1)), (Direction::Backward, (1, 0))]
+    {
         let mut cfg = crate::Cfg::<u32>::new();
         let source = cfg.entry();
         let target = cfg.new_block();
@@ -472,8 +472,8 @@ fn verify_reports_an_edge_its_endpoint_stopped_listing() {
         assert!(crate::verify(&cfg).is_ok());
 
         let forgetful = match direction {
-            TraversalDirection::Outgoing => source,
-            TraversalDirection::Incoming => target,
+            Direction::Forward => source,
+            Direction::Backward => target,
         };
         cfg.graph.chains.detach_node(forgetful.index(), direction);
 
@@ -501,7 +501,7 @@ fn removed_payloads_stay_readable_until_compaction() {
     assert!(!graph.contains_edge(edge));
     assert_eq!(graph.edge(edge).payload(), &"a");
 
-    let renumbering = graph.compact();
+    let renumbering = graph.compact(NodeOrder::Insertion);
     assert_eq!(renumbering.node(nodes[1]), None);
     assert_eq!(renumbering.edge(edge), None);
     assert_eq!(graph.node_bound(), 3);
@@ -511,7 +511,7 @@ fn removed_payloads_stay_readable_until_compaction() {
 #[test]
 fn node_and_edge_payloads_are_mutable_in_place() {
     let (mut graph, nodes) = diamond();
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
     *graph.node_mut(nodes[0]) = "renamed";
     let edge = graph.edge_ids().next().expect("the diamond has edges");
     *graph.edge_mut(edge).payload_mut() = "retagged";
@@ -524,44 +524,43 @@ fn node_and_edge_payloads_are_mutable_in_place() {
 #[test]
 fn compacting_an_untouched_store_is_the_identity() {
     let (mut graph, _) = diamond();
-    let first = graph.compact();
+    let mut first = graph.compact(NodeOrder::Insertion);
     assert!(first.is_identity());
-    assert_eq!(first.node_bound(), 4);
-    assert_eq!(first.edge_bound(), 4);
 
-    let second = graph.compact();
+    let second = graph.compact(NodeOrder::Insertion);
     assert!(second.is_identity());
-    assert!(first.compose(&second).is_identity());
+    first.compose(&second);
+    assert!(first.is_identity());
 }
 
 #[test]
 fn compaction_keeps_the_adjacency_order_a_redirect_produced() {
     // A redirect appends the edge to its new endpoint's adjacency, so there
     // the older edge comes second and the order is no longer identity order.
-    for direction in [TraversalDirection::Outgoing, TraversalDirection::Incoming] {
+    for direction in [Direction::Forward, Direction::Backward] {
         let mut graph = Graph::<&'static str, &'static str>::new();
         let [hub, other, near, far] =
             ["hub", "other", "near", "far"].map(|payload| graph.add_node(payload));
         let (moved, resident) = match direction {
-            TraversalDirection::Outgoing => (
+            Direction::Forward => (
                 graph.add_edge(other, near, "moved"),
                 graph.add_edge(hub, far, "resident"),
             ),
-            TraversalDirection::Incoming => (
+            Direction::Backward => (
                 graph.add_edge(near, other, "moved"),
                 graph.add_edge(far, hub, "resident"),
             ),
         };
         match direction {
-            TraversalDirection::Outgoing => graph.redirect_edge_source(moved, hub),
-            TraversalDirection::Incoming => graph.redirect_edge_target(moved, hub),
+            Direction::Forward => graph.redirect_edge_source(moved, hub),
+            Direction::Backward => graph.redirect_edge_target(moved, hub),
         };
         assert_eq!(
             graph.adjacent(hub, direction).collect::<Vec<_>>(),
             [resident, moved]
         );
 
-        let renumbering = graph.compact();
+        let renumbering = graph.compact(NodeOrder::Insertion);
 
         let hub = renumbering.node(hub).expect("hub survives");
         let expected = [resident, moved].map(|edge| renumbering.edge(edge).expect("edge survives"));
@@ -573,7 +572,7 @@ fn compaction_keeps_the_adjacency_order_a_redirect_produced() {
 
         // The compacted base now holds that order, so the next compaction has
         // no overlay to read it from.
-        assert!(graph.compact().is_identity());
+        assert!(graph.compact(NodeOrder::Insertion).is_identity());
         assert_eq!(
             graph.adjacent(hub, direction).collect::<Vec<_>>(),
             expected,
@@ -587,29 +586,30 @@ fn only_a_compaction_that_removed_nothing_is_the_identity() {
     let (mut graph, nodes) = diamond();
     // Nothing moves down when the last slot goes, yet the slot has no number.
     graph.remove_node(nodes[3]);
-    let trailing = graph.compact();
+    let trailing = graph.compact(NodeOrder::Insertion);
     assert!(!trailing.is_identity());
     assert_eq!(trailing.node(nodes[3]), None);
     assert_eq!(trailing.node(nodes[2]), Some(nodes[2]));
 
     // A compaction that only folds the delta into the base removes nothing.
     graph.add_node("appended");
-    assert!(graph.compact().is_identity());
+    assert!(graph.compact(NodeOrder::Insertion).is_identity());
 }
 
 #[test]
 fn composed_renumberings_match_the_two_compactions_they_describe() {
     let (mut graph, nodes) = diamond();
     graph.remove_node(nodes[0]);
-    let first = graph.compact();
+    let first = graph.compact(NodeOrder::Insertion);
 
     let added = graph.add_node("added");
     let surviving = first.node(nodes[2]).expect("right survived the compaction");
     graph.add_edge(surviving, added, "g");
     graph.remove_node(first.node(nodes[1]).expect("left survived the compaction"));
-    let second = graph.compact();
+    let second = graph.compact(NodeOrder::Insertion);
 
-    let composed = first.compose(&second);
+    let mut composed = first.clone();
+    composed.compose(&second);
     assert_eq!(composed.node(nodes[0]), None, "removed before the first");
     assert_eq!(composed.node(nodes[1]), None, "removed before the second");
     for original in [nodes[2], nodes[3]] {
@@ -629,7 +629,6 @@ fn composed_renumberings_match_the_two_compactions_they_describe() {
         graph.node(composed.node(nodes[3]).expect("exit is still present")),
         &"exit"
     );
-    assert_eq!(composed.node_bound(), 4);
 }
 
 #[test]
@@ -643,12 +642,15 @@ fn the_view_reports_slots_so_dense_analyses_stay_in_bounds() {
 
     // A removed node is not a node of the view at all, so a whole-graph
     // partition reports no phantom singleton for it.
-    let uncompacted = tarjan_scc(&graph);
-    assert_eq!(uncompacted.len(), 3);
+    let uncompacted = SccDecomposition::compute(&graph, SccNumbering::LeavesFirst);
+    assert_eq!(uncompacted.component_count(), 3);
 
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
     assert_eq!(GraphView::node_bound(&graph), 3);
-    assert_eq!(tarjan_scc(&graph).len(), 3);
+    assert_eq!(
+        SccDecomposition::compute(&graph, SccNumbering::LeavesFirst).component_count(),
+        3
+    );
 }
 
 #[test]
@@ -669,7 +671,7 @@ fn liveness_answers_survive_the_tombstone_boundary() {
     assert_eq!(graph.incoming(nodes[3]).count(), 1);
 
     // Compaction retires every tombstone, so the counts answer again.
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
     assert_eq!(graph.node_ids().count(), 3);
     assert_eq!(graph.edge_ids().count(), 2);
     assert!(graph.contains_node(NodeId::from_raw(2)));
@@ -719,7 +721,7 @@ fn the_algorithms_agree_whether_the_edges_sit_in_the_delta_or_the_compacted_base
     let (mut base, base_nodes) = diamond();
     // A back edge makes the comparison cover a cycle as well as a diamond.
     base.add_edge(base_nodes[3], base_nodes[0], "back");
-    base.compact();
+    base.compact(NodeOrder::Insertion);
     let (mut delta, delta_nodes) = diamond();
     delta.add_edge(delta_nodes[3], delta_nodes[0], "back");
 
@@ -734,7 +736,7 @@ fn the_algorithms_agree_whether_the_edges_sit_in_the_delta_or_the_compacted_base
     }
 
     let components = |graph: &Graph<&'static str, &'static str>| {
-        tarjan_scc(graph)
+        SccDecomposition::compute(graph, SccNumbering::LeavesFirst)
             .components()
             .map(|nodes| indexes(nodes.iter().copied(), Id::index))
             .collect::<Vec<_>>()
@@ -743,29 +745,13 @@ fn the_algorithms_agree_whether_the_edges_sit_in_the_delta_or_the_compacted_base
 
     assert_eq!(
         indexes(
-            depth_first_preorder(&base, base_nodes[0], TraversalDirection::Outgoing),
+            depth_first_preorder(&base, base_nodes[0], Direction::Forward),
             Id::index
         ),
         indexes(
-            depth_first_preorder(&delta, delta_nodes[0], TraversalDirection::Outgoing),
+            depth_first_preorder(&delta, delta_nodes[0], Direction::Forward),
             Id::index
         )
-    );
-}
-
-#[test]
-fn a_compacted_store_hands_back_its_renumbering() {
-    let (mut graph, nodes) = diamond();
-    graph.remove_node(nodes[0]);
-    let (compacted, renumbering) = graph.compacted();
-
-    assert!(compacted.is_compact());
-    assert_eq!(compacted.node_count(), 3);
-    assert_eq!(compacted.edge_count(), 2);
-    assert_eq!(renumbering.node(nodes[0]), None);
-    assert_eq!(
-        compacted.node(renumbering.node(nodes[3]).expect("exit survived")),
-        &"exit"
     );
 }
 
@@ -782,7 +768,7 @@ fn a_compacted_store_round_trips_through_serde() {
     graph.add_edge(nodes[0], nodes[1], 1);
     graph.add_edge(nodes[1], nodes[2], 2);
     graph.remove_node(nodes[1]);
-    graph.compact();
+    graph.compact(NodeOrder::Insertion);
     graph.add_edge(nodes[0], nodes[0], 3);
 
     let encoded = serde_json::to_string(&graph).expect("the store serializes");

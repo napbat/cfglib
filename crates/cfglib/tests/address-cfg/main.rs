@@ -34,6 +34,9 @@ macro_rules! over_both_isas {
     };
 }
 
+#[path = "../common/rng.rs"]
+pub mod rng;
+
 mod bytecode;
 mod calls;
 mod consumer;
@@ -48,4 +51,5 @@ mod oracles;
 mod placement;
 mod random_programs;
 mod regions;
+mod routes;
 mod transfers;

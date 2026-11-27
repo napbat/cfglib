@@ -3,10 +3,16 @@
 //!
 //! Address-shaped streams (machine code, bytecode with branch targets and
 //! exception tables in one address space) build through
-//! [`address::build_address_cfg`] instead, which discovers leaders rather
-//! than consuming structured markers.
+//! [`build_address_cfg`] instead, which discovers leaders rather than
+//! consuming structured markers.
 
-pub mod address;
+mod address;
+
+pub use address::{
+    AddressBuildError, AddressCfgOptions, AddressEdgeInfo, AddressGraph, AddressHandler,
+    AddressHandlerKind, AddressInstruction, AddressSpace, CallPolicy, GivenEdge, GivenEdges,
+    HopEnd, UnwindEnd, UnwindHop, UnwindPath, UnwindRoute, UnwindStep, build_address_cfg,
+};
 
 extern crate alloc;
 use alloc::collections::BTreeMap;
@@ -16,7 +22,7 @@ use core::fmt;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::flow::{FlowControl, FlowEffect, JumpTargets};
+use crate::flow::{Flow, FlowControl, FlowEffect, UnresolvedTransfer};
 
 /// Error returned when the instruction stream contains mismatched or
 /// unexpected structured control-flow markers.
@@ -113,13 +119,8 @@ impl<I: FlowControl> BuildState<I> {
 
     fn process(&mut self, instruction: I) -> Result<(), BuildError> {
         match instruction.flow_effect() {
-            FlowEffect::Declaration
-            | FlowEffect::Fallthrough
-            | FlowEffect::Call
-            | FlowEffect::ConditionalCall
-            | FlowEffect::IndirectCall
-            | FlowEffect::MayThrow => {
-                self.push(instruction);
+            FlowEffect::Flow(flow) => {
+                self.transfer(instruction, &flow);
                 Ok(())
             }
             FlowEffect::ConditionalOpen => {
@@ -143,25 +144,32 @@ impl<I: FlowControl> BuildState<I> {
             FlowEffect::ConditionalBreak => self.add_conditional_break(instruction),
             FlowEffect::Continue => self.add_continue(instruction),
             FlowEffect::ConditionalContinue => self.add_conditional_continue(instruction),
-            FlowEffect::Return
-            | FlowEffect::Terminate
-            | FlowEffect::Jump
-            | FlowEffect::IndirectJump => {
-                self.end_block(instruction);
-                Ok(())
-            }
-            FlowEffect::ConditionalReturn => {
-                self.add_conditional_return(instruction);
-                Ok(())
-            }
-            FlowEffect::Label => {
+            FlowEffect::Label(_) => {
                 self.add_label(instruction);
                 Ok(())
             }
-            FlowEffect::ConditionalJump => {
-                self.add_conditional_jump(instruction);
-                Ok(())
+        }
+    }
+
+    /// Stores an instruction that leaves by `flow` and shapes the blocks
+    /// around it, as [`FlowEffect::Flow`] documents.
+    fn transfer(&mut self, instruction: I, flow: &Flow<I::Target, I::CaseKey>) {
+        match flow {
+            Flow::Next | Flow::Call { .. } | Flow::IndirectCall => self.push(instruction),
+            Flow::Return
+            | Flow::Throw
+            | Flow::Trap
+            | Flow::Indirect
+            | Flow::Jump { .. }
+            | Flow::TailCall { .. }
+            | Flow::Switch { .. } => self.end_block(instruction),
+            Flow::Conditional { .. } | Flow::ConditionalIndirect => {
+                self.continue_after(instruction, EdgeKind::ConditionalFalse);
             }
+            Flow::Exceptional { .. } | Flow::ConditionalTrap => {
+                self.continue_after(instruction, EdgeKind::Fallthrough);
+            }
+            Flow::ConditionalReturn => self.add_conditional_return(instruction),
         }
     }
 
@@ -409,11 +417,12 @@ impl<I: FlowControl> BuildState<I> {
         self.current = label_block;
     }
 
-    fn add_conditional_jump(&mut self, instruction: I) {
+    /// Ends the current block after `instruction` and continues in a new
+    /// block that the edge of `kind` reaches.
+    fn continue_after(&mut self, instruction: I, kind: EdgeKind) {
         self.push(instruction);
         let continuation = self.cfg.new_block();
-        self.cfg
-            .add_edge(self.current, continuation, EdgeKind::ConditionalFalse);
+        self.cfg.add_edge(self.current, continuation, kind);
         self.current = continuation;
     }
 
@@ -435,8 +444,10 @@ pub struct CfgBuilder;
 impl CfgBuilder {
     /// Build a CFG from a flat instruction stream.
     ///
-    /// Declarations ([`FlowEffect::Declaration`]) are stored in the
-    /// current block but do not affect control flow.
+    /// Each instruction's [`FlowEffect`] is a structured marker, a label, or
+    /// a [`Flow`]; [`FlowEffect`] documents the blocks and edges each one
+    /// makes. The named targets of the flows are wired afterwards by
+    /// [`resolve_jump_edges`].
     ///
     /// # Errors
     ///
@@ -446,23 +457,29 @@ impl CfgBuilder {
     /// # Examples
     ///
     /// ```
-    /// use cfglib::{CfgBuilder, FlowControl, FlowEffect};
+    /// use cfglib::{CfgBuilder, Flow, FlowControl, FlowEffect};
     ///
     /// #[derive(Debug, Clone)]
-    /// struct Inst(FlowEffect);
+    /// struct Inst(FlowEffect<u32, ()>);
     ///
     /// impl FlowControl for Inst {
-    ///     fn flow_effect(&self) -> FlowEffect { self.0 }
+    ///     type Target = u32;
+    ///     type CaseKey = ();
+    ///
+    ///     fn flow_effect(&self) -> FlowEffect<u32, ()> {
+    ///         self.0.clone()
+    ///     }
     /// }
     ///
+    /// let plain = || Inst(FlowEffect::Flow(Flow::Next));
     /// let cfg = CfgBuilder::build(vec![
-    ///     Inst(FlowEffect::Fallthrough),
+    ///     plain(),
     ///     Inst(FlowEffect::ConditionalOpen),
-    ///     Inst(FlowEffect::Fallthrough),
+    ///     plain(),
     ///     Inst(FlowEffect::ConditionalAlternate),
-    ///     Inst(FlowEffect::Fallthrough),
+    ///     plain(),
     ///     Inst(FlowEffect::ConditionalClose),
-    ///     Inst(FlowEffect::Return),
+    ///     Inst(FlowEffect::Flow(Flow::Return)),
     /// ]).unwrap();
     ///
     /// assert_eq!(cfg.block_count(), 4); // entry, then, else, merge
@@ -497,36 +514,39 @@ impl CfgBuilder {
 pub struct JumpResolution<T> {
     /// Number of jump edges wired.
     pub resolved: usize,
-    /// Jumps whose target token matched no label, as `(source block, target)`.
-    pub unresolved: Vec<(BlockId, T)>,
+    /// The transfers the pass could not wire, each from its block: a named
+    /// target that matched no label, or a computed one (`target: None`).
+    pub unresolved: Vec<UnresolvedTransfer<T, BlockId>>,
 }
 
-/// Wire the edges described by explicit jump targets after
+/// Wire the edges described by explicit targets after
 /// [`CfgBuilder::build`].
 ///
-/// [`CfgBuilder::build`] ends a block at a [`FlowEffect::Jump`] /
-/// [`FlowEffect::ConditionalJump`] instruction but cannot know where the jump
-/// lands. This pass maps every block-leading [`FlowEffect::Label`]
-/// instruction's [`JumpTargets::label`] token to its block, then adds an
-/// [`EdgeKind::Jump`] edge for each unconditional jump and an
-/// [`EdgeKind::ConditionalTrue`] edge for each conditional jump's taken path.
-/// The graph can carry any edge payload `E`; each edge the pass adds carries
-/// `E::default()`.
+/// [`CfgBuilder::build`] ends a block at an instruction whose [`Flow`]
+/// names a target but cannot know where the target lands. This pass maps
+/// the token of every block-leading [`FlowEffect::Label`] instruction to
+/// its block. Then, for the [`Flow`] of each block's last instruction, it
+/// adds an edge for every transfer other than the continuation and a call,
+/// of the kind [`EdgeRole::kind`](crate::EdgeRole::kind) gives: an
+/// [`EdgeKind::Jump`] for a jump, an [`EdgeKind::ConditionalTrue`] for a
+/// conditional branch's taken path, an [`EdgeKind::SwitchCase`] for each
+/// switch target, and an [`EdgeKind::ExceptionUnwind`] for an exceptional
+/// target. A call names a function rather than a label, so the pass
+/// leaves it alone. The graph can carry any edge payload `E`; each edge
+/// the pass adds carries `E::default()`.
 ///
 /// The pass is idempotent: an edge that already exists with the same
 /// endpoints and kind is not duplicated, so re-running it is safe.
 /// Duplicate label tokens resolve to the LAST block declaring them (later
 /// labels shadow earlier ones); frontends with label scoping enforce
 /// uniqueness before building.
-pub fn resolve_jump_edges<I: JumpTargets, E: Default>(
+pub fn resolve_jump_edges<I: FlowControl, E: Default>(
     cfg: &mut Cfg<I, E>,
 ) -> JumpResolution<I::Target> {
     let mut labels: BTreeMap<I::Target, BlockId> = BTreeMap::new();
     for block_id in cfg.block_ids() {
-        let block = cfg.block(block_id);
-        if let Some(first) = block.instructions().first()
-            && first.flow_effect() == FlowEffect::Label
-            && let Some(token) = first.label()
+        if let Some(first) = cfg.block(block_id).instructions().first()
+            && let FlowEffect::Label(token) = first.flow_effect()
         {
             labels.insert(token, block_id);
         }
@@ -538,22 +558,27 @@ pub fn resolve_jump_edges<I: JumpTargets, E: Default>(
         unresolved: Vec::new(),
     };
     for block_id in cfg.block_ids() {
-        let block = cfg.block(block_id);
-        let Some(last) = block.instructions().last() else {
+        let Some(last) = cfg.block(block_id).instructions().last() else {
             continue;
         };
-        let kind = match last.flow_effect() {
-            FlowEffect::Jump => EdgeKind::Jump,
-            FlowEffect::ConditionalJump => EdgeKind::ConditionalTrue,
-            _ => continue,
-        };
-        let Some(token) = last.jump_target() else {
+        let FlowEffect::Flow(flow) = last.flow_effect() else {
             continue;
         };
-        if let Some(&target) = labels.get(&token) {
-            pending.push((block_id, target, kind));
-        } else {
-            resolution.unresolved.push((block_id, token));
+        for transfer in flow.departures() {
+            let Some(role) = transfer.role.unresolved_role() else {
+                continue;
+            };
+            if transfer.role.is_call() {
+                continue;
+            }
+            match transfer.target.as_ref().and_then(|token| labels.get(token)) {
+                Some(&target) => pending.push((block_id, target, transfer.role.kind())),
+                None => resolution.unresolved.push(UnresolvedTransfer {
+                    source: block_id,
+                    target: transfer.target,
+                    role,
+                }),
+            }
         }
     }
 

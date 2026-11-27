@@ -20,17 +20,17 @@
 //! and handler identities survive into the caller's own edge type.
 //!
 //! A runtime does not take every handler of the table when an instruction
-//! throws. [`build_address_cfg_with_routes`] takes the exact ways instead, as
+//! throws. [`AddressCfgOptions::routes`] gives the exact ways instead, as
 //! [`UnwindRoute`] values, and [`AddressGraph::add_unwind_routes`] adds them
 //! as edges, with one instance of each funclet for each context that enters
 //! it.
 //!
 //! A caller that already decided the control flow of the stream, such as a
 //! recovery that knows which transfers it followed and why it followed no
-//! other, gives the normal edges of the instructions that end its paths.
-//! [`build_address_cfg_from_given_edges`] then takes the normal edges of
-//! those instructions from the given edges and not from their [`Flow`], and
-//! every other instruction continues at its end address.
+//! other, gives the normal edges of the instructions that end its paths in
+//! [`AddressCfgOptions::given_edges`]. The build then takes the normal edges
+//! of those instructions from the given edges and not from their [`Flow`],
+//! and every other instruction continues at its end address.
 
 extern crate alloc;
 
@@ -110,32 +110,49 @@ pub struct AddressHandler<A> {
     pub protected: Range<A>,
     /// Handler entry address.
     pub entry: A,
-    /// Catch classification stored on the produced region handler.
-    ///
-    /// [`HandlerKind::Filter`] names a block that does not exist yet at
-    /// build time; register such handlers as [`HandlerKind::Catch`] and
-    /// patch the kind through the returned [`HandlerRef`] afterwards.
-    pub kind: HandlerKind,
+    /// Catch classification, resolved to the [`HandlerKind`] stored on the
+    /// produced region handler.
+    pub kind: AddressHandlerKind<A>,
+}
+
+/// How a handler of the table catches, with any block it names spelled as
+/// an address.
+///
+/// The builder resolves it to a [`HandlerKind`] once the blocks exist: the
+/// filter address becomes the block that starts there, as the handler entry
+/// does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AddressHandlerKind<A> {
+    /// [`HandlerKind::Catch`].
+    Catch,
+    /// [`HandlerKind::CatchAll`].
+    CatchAll,
+    /// [`HandlerKind::Finally`].
+    Finally,
+    /// [`HandlerKind::Fault`].
+    Fault,
+    /// [`HandlerKind::Filter`], whose predicate starts at `filter`.
+    Filter {
+        /// The address of the first instruction of the filter predicate.
+        filter: A,
+    },
 }
 
 /// One edge as described to the consumer's payload builder.
+///
+/// The graph registers the edge under [`role.kind()`](EdgeRole::kind).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AddressEdgeInfo<'k, A, K> {
     /// Address of the transferring (or protected) instruction.
     pub source: A,
     /// Address of the first instruction of the target block.
     pub target: A,
-    /// The structural kind the edge is registered under.
-    ///
-    /// Always [`role.kind()`](EdgeRole::kind), carried here so a payload
-    /// builder that stores only the kind does not repeat the mapping.
-    pub kind: EdgeKind,
     /// Why the edge exists.
     pub role: EdgeRole<'k, A, K>,
 }
 
 /// One normal edge that a caller gives for an instruction that ends a path
-/// ([`build_address_cfg_from_given_edges`]).
+/// ([`AddressCfgOptions::given_edges`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GivenEdge<A, E> {
     /// The address of the instruction that the edge enters.
@@ -149,8 +166,8 @@ pub struct GivenEdge<A, E> {
     pub payload: E,
 }
 
-/// The normal edges that a caller gives to
-/// [`build_address_cfg_from_given_edges`], by the address of the instruction
+/// The normal edges that a caller gives in
+/// [`AddressCfgOptions::given_edges`], by the address of the instruction
 /// that they leave.
 pub type GivenEdges<A, E> = BTreeMap<A, Vec<GivenEdge<A, E>>>;
 
@@ -159,17 +176,19 @@ pub type GivenEdges<A, E> = BTreeMap<A, Vec<GivenEdge<A, E>>>;
 pub enum CallPolicy {
     /// A call is a transfer: the graph carries a `Call` edge to a recovered
     /// callee and a `CallReturn` edge to the continuation, and the call ends
-    /// its block.
+    /// its block. A [tail call](Flow::TailCall) has no continuation.
     #[default]
     Edges,
     /// A call is an operation of the caller: the graph carries only the
     /// sequential continuation, the call does not end its block, and every
-    /// call site is reported in [`AddressGraph::calls`].
+    /// call site is reported in [`AddressGraph::calls`]. A
+    /// [tail call](Flow::TailCall) does not continue, so it ends its block,
+    /// which no edge leaves.
     ///
     /// This is the intraprocedural view a function-local recovery wants: an
     /// edge into the callee would fuse two functions' graphs.
     ///
-    /// [`build_address_cfg_from_given_edges`] applies this policy only to a
+    /// With [`AddressCfgOptions::given_edges`], the policy applies only to a
     /// call without given edges. A call with given edges ends its block, and
     /// only its given edges leave it. [`AddressGraph::calls`] still reports
     /// it.
@@ -177,8 +196,8 @@ pub enum CallPolicy {
 }
 
 /// What [`build_address_cfg`] is asked to do beyond the stream itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AddressCfgOptions<A> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddressCfgOptions<'r, A, E> {
     /// The address the function is entered at.
     ///
     /// `None` enters at the first instruction in address order. An explicit
@@ -187,15 +206,61 @@ pub struct AddressCfgOptions<A> {
     pub entry: Option<A>,
     /// How calls appear in the graph.
     pub calls: CallPolicy,
+    /// The exact ways the runtime takes when an instruction throws.
+    ///
+    /// `None` takes the unwind edges from the handler table: an edge from
+    /// each protected instruction that retains it to each of its handlers.
+    /// `Some` takes no edge from the table and none from a route either: the
+    /// table only gives the validation, the leaders and the regions. Call
+    /// [`AddressGraph::add_unwind_routes`] with the same routes after the last
+    /// edit of the graph to add their edges; `Some(&[])` therefore builds a
+    /// graph without unwind edges.
+    ///
+    /// Each instruction of a protected range of a route leads a block of its
+    /// own, and so does each funclet entry and each handler that a route
+    /// names. When any route exists, each instruction that can end a funclet
+    /// leads a block of its own: a return, and a jump to code that the stream
+    /// lacks (a tail jump). An unwind edge then leaves a block that holds only
+    /// that instruction.
+    pub routes: Option<&'r [UnwindRoute<A>]>,
+    /// The normal edges of the instructions that end the caller's paths.
+    ///
+    /// `None` takes the normal edges of every instruction from its [`Flow`].
+    /// `Some(edges)` holds, by the address of each instruction that ends a
+    /// path, the normal edges that leave that instruction. The graph takes
+    /// the normal edges of such an instruction from `edges` only, not from
+    /// its flow: a caller can give a continuation that the flow does not
+    /// have, such as the return of a trap, and can leave out a transfer of
+    /// the flow, such as the continuation of a call that never returns. With
+    /// an empty list, no normal edge leaves the instruction. The caller
+    /// builds the payload of each given edge, and the payload builder of
+    /// [`build_address_cfg`] builds the payload of each other edge.
+    ///
+    /// Each other instruction continues at its end address. Its flow can
+    /// only continue (`Next`) or call: a call keeps the edges and the leaders
+    /// that [`calls`](Self::calls) gives it. A call without given edges thus
+    /// takes the edges of its flow: the call edge and the continuation edge
+    /// under [`CallPolicy::Edges`], and the sequential continuation under
+    /// [`CallPolicy::Flatten`]. The builder cannot detect a caller that did
+    /// not give the edges of a call that never returns: the graph then holds
+    /// the continuation of that call.
+    ///
+    /// The flow of each instruction still decides what the build reads of
+    /// its kind: an exceptional instruction leads its own block, and a return
+    /// or a tail jump can end a funclet of a route.
+    pub given_edges: Option<GivenEdges<A, E>>,
 }
 
-/// Enter at the first instruction and keep calls as edges. This needs no
-/// `Default` address type, which a derive would require.
-impl<A> Default for AddressCfgOptions<A> {
+/// Enter at the first instruction, keep calls as edges, take the unwind
+/// edges from the handler table and every normal edge from its flow. This
+/// needs no `Default` address or payload type, which a derive would require.
+impl<A, E> Default for AddressCfgOptions<'_, A, E> {
     fn default() -> Self {
         Self {
             entry: None,
             calls: CallPolicy::default(),
+            routes: None,
+            given_edges: None,
         }
     }
 }
@@ -242,20 +307,16 @@ pub enum AddressBuildError<A> {
         /// The invalid end address.
         address: A,
     },
-    /// A handler entry is not an instruction start.
+    /// An address that a handler or a route names as an entry is not an
+    /// instruction start: a handler entry, a filter of the handler table, or
+    /// a funclet entry or a handler of a route.
     MissingHandlerEntry {
         /// The invalid entry address.
         address: A,
     },
-    /// An address that a route names is not an instruction start: a funclet
-    /// entry or a handler.
-    MissingRouteEntry {
-        /// The invalid address.
-        address: A,
-    },
     /// An address that a route names does not start its block: a protected
-    /// instruction, a funclet entry or a handler. Only a graph that
-    /// [`build_address_cfg_with_routes`] built has a leader at each of them.
+    /// instruction, a funclet entry or a handler. Only a graph built with
+    /// these [`AddressCfgOptions::routes`] has a leader at each of them.
     RouteAddressNotBlockStart {
         /// The address that is inside a block.
         address: A,
@@ -327,10 +388,6 @@ impl<A: fmt::Display> fmt::Display for AddressBuildError<A> {
                 formatter,
                 "handler entry {address} is not an instruction start"
             ),
-            Self::MissingRouteEntry { address } => write!(
-                formatter,
-                "address {address} that a route names is not an instruction start"
-            ),
             Self::RouteAddressNotBlockStart { address } => write!(
                 formatter,
                 "address {address} that a route names does not start its block"
@@ -376,8 +433,8 @@ pub struct AddressGraph<I: AddressInstruction, E> {
     /// or call with an unresolved direct target still keeps its local
     /// continuation, and a switch keeps every destination that did resolve.
     ///
-    /// Only the edges that the build takes from a [`Flow`] report here. Under
-    /// [`build_address_cfg_from_given_edges`], a given edge always enters an
+    /// Only the edges that the build takes from a [`Flow`] report here. With
+    /// [`AddressCfgOptions::given_edges`], a given edge always enters an
     /// instruction, so an instruction with given edges reports nothing, and
     /// only a call without given edges can report its callee.
     pub unresolved_transfers: Vec<UnresolvedTransfer<I::Address>>,
@@ -403,12 +460,16 @@ pub struct AddressGraph<I: AddressInstruction, E> {
 /// [`promote_handler_extents`](crate::promote_handler_extents) or
 /// [`recover_exclusive_extents`](crate::recover_exclusive_extents) to
 /// recover extents, and run [`verify`](crate::verify) (or
-/// [`verify_with`](crate::verify_with)) afterwards — construction validates
-/// the stream, not the finished graph.
+/// [`verify_semantics`](crate::verify_semantics)) afterwards — construction
+/// validates the stream, not the finished graph.
 ///
-/// `options` selects the function entry and the call policy. `edge_payload`
-/// builds the consumer edge type from each [`AddressEdgeInfo`]; the
-/// structural [`EdgeKind`] is chosen here, by [`EdgeRole::kind`].
+/// `options` selects the function entry, the call policy, where the unwind
+/// edges come from ([`AddressCfgOptions::routes`]) and where the normal edges
+/// come from ([`AddressCfgOptions::given_edges`]). `edge_payload` builds the
+/// consumer edge type from each [`AddressEdgeInfo`]; the structural
+/// [`EdgeKind`] is chosen here, by [`EdgeRole::kind`]. A given edge carries
+/// its own payload and its own [`GivenEdge::kind`], which the builder does
+/// not check against the flow of the instruction.
 ///
 /// # Errors
 ///
@@ -422,134 +483,32 @@ pub struct AddressGraph<I: AddressInstruction, E> {
 /// instruction targets outside the recovered stream are returned as
 /// [`AddressGraph::unresolved_transfers`] while every known successor is
 /// retained.
-pub fn build_address_cfg<I: AddressInstruction, E>(
-    instructions: Vec<I>,
-    handlers: &[AddressHandler<I::Address>],
-    options: AddressCfgOptions<I::Address>,
-    edge_payload: impl FnMut(AddressEdgeInfo<'_, I::Address, I::CaseKey>) -> E,
-) -> Result<AddressGraph<I, E>, AddressBuildError<I::Address>> {
-    build_address_graph(
-        instructions,
-        handlers,
-        None,
-        options,
-        Normal::Flow,
-        edge_payload,
-    )
-}
-
-/// Builds a CFG like [`build_address_cfg`], with exact unwind routes.
 ///
-/// The graph gets no edge from the handler table, and no edge from a route:
-/// the table only gives the validation, the leaders and the regions, as in
-/// [`build_address_cfg`]. Each [`UnwindRoute`] states the ways that the
-/// runtime takes when an instruction of its range throws. Call
-/// [`AddressGraph::add_unwind_routes`] after the last edit of the graph to add
-/// the edges of the routes.
-///
-/// Each instruction of a protected range leads a block of its own, and so
-/// does each funclet entry and each handler that a route names. When any route
-/// exists, each instruction that can end a funclet leads a block of its own: a
-/// return, and a jump to code that the stream lacks (a tail jump). An unwind
-/// edge then leaves a block that holds only that instruction.
-///
-/// # Errors
-///
-/// Returns the errors of [`build_address_cfg`], the range errors of
+/// With routes, it also returns the range errors
 /// [`AddressBuildError::EmptyProtectedRange`],
 /// [`AddressBuildError::MissingRangeStart`] and
 /// [`AddressBuildError::MissingRangeEnd`] for a protected range of a route,
-/// an [`AddressBuildError::MissingRouteEntry`] when a funclet entry or a
+/// an [`AddressBuildError::MissingHandlerEntry`] when a funclet entry or a
 /// handler of a path is not an instruction start, and an
 /// [`AddressBuildError::ResumeAfterFunclet`] when a path has a funclet step
 /// and ends with [`UnwindEnd::Resume`].
-pub fn build_address_cfg_with_routes<I: AddressInstruction, E>(
-    instructions: Vec<I>,
-    handlers: &[AddressHandler<I::Address>],
-    routes: &[UnwindRoute<I::Address>],
-    options: AddressCfgOptions<I::Address>,
-    edge_payload: impl FnMut(AddressEdgeInfo<'_, I::Address, I::CaseKey>) -> E,
-) -> Result<AddressGraph<I, E>, AddressBuildError<I::Address>> {
-    build_address_graph(
-        instructions,
-        handlers,
-        Some(routes),
-        options,
-        Normal::Flow,
-        edge_payload,
-    )
-}
-
-/// Builds a CFG like [`build_address_cfg_with_routes`], with the normal
-/// edges that the caller gives.
 ///
-/// `edges` holds, by the address of each instruction that ends a path, the
-/// normal edges that leave that instruction. The graph takes the normal
-/// edges of such an instruction from `edges` only, not from its [`Flow`]: a
-/// caller can give a continuation that the flow does not have, such as the
-/// return of a trap, and can leave out a transfer of the flow, such as the
-/// continuation of a call that never returns. With an empty list, no normal
-/// edge leaves the instruction. The caller builds the payload of each given
-/// edge, and `edge_payload` builds the payload of each other edge.
-///
-/// [`GivenEdge::kind`] is the caller's choice. The builder registers each
-/// given edge under that kind and does not check it against the flow of the
-/// instruction.
-///
-/// Each other instruction continues at its end address. Its flow can only
-/// continue (`Next`) or call: a call keeps the edges and the leaders that
-/// `options` gives it, as in [`build_address_cfg`]. A call without given
-/// edges thus takes the edges of its flow: the call edge and the
-/// continuation edge under [`CallPolicy::Edges`], and the sequential
-/// continuation under [`CallPolicy::Flatten`]. The builder cannot detect a
-/// caller that did not give the edges of a call that never returns: the
-/// graph then holds the continuation of that call.
-///
-/// The flow of each instruction still decides what the build reads of its
-/// kind: an exceptional instruction leads its own block, and a return or a
-/// tail jump can end a funclet of a route. The handler table and the routes
-/// work as in [`build_address_cfg_with_routes`].
-///
-/// # Errors
-///
-/// Returns the errors of [`build_address_cfg_with_routes`], and these:
-/// [`AddressBuildError::MissingGivenSource`] when a key of `edges` is not
-/// an instruction start, [`AddressBuildError::MissingGivenTarget`] when a
+/// With given edges, it also returns
+/// [`AddressBuildError::MissingGivenSource`] when a key of the given edges is
+/// not an instruction start, [`AddressBuildError::MissingGivenTarget`] when a
 /// given target is not an instruction start,
 /// [`AddressBuildError::TransferWithoutGivenEdges`] when an instruction
 /// without given edges transfers other than by its continuation and its
 /// call, and [`AddressBuildError::MissingContinuation`] when such an
 /// instruction continues at an address that is not an instruction start.
-pub fn build_address_cfg_from_given_edges<I: AddressInstruction, E>(
-    instructions: Vec<I>,
-    edges: GivenEdges<I::Address, E>,
-    handlers: &[AddressHandler<I::Address>],
-    routes: &[UnwindRoute<I::Address>],
-    options: AddressCfgOptions<I::Address>,
-    edge_payload: impl FnMut(AddressEdgeInfo<'_, I::Address, I::CaseKey>) -> E,
-) -> Result<AddressGraph<I, E>, AddressBuildError<I::Address>> {
-    build_address_graph(
-        instructions,
-        handlers,
-        Some(routes),
-        options,
-        Normal::Given(edges),
-        edge_payload,
-    )
-}
-
-/// Builds the graph for every entry point. The handler table gives edges
-/// when no routes are given, and only validation, leaders and regions
-/// otherwise. `normal` gives the normal edges: the flow of each instruction,
-/// or the edges that the caller gives.
-fn build_address_graph<I: AddressInstruction, E>(
+pub fn build_address_cfg<I: AddressInstruction, E>(
     instructions: Vec<I>,
     handlers: &[AddressHandler<I::Address>],
-    routes: Option<&[UnwindRoute<I::Address>]>,
-    options: AddressCfgOptions<I::Address>,
-    normal: Normal<I::Address, E>,
+    options: AddressCfgOptions<'_, I::Address, E>,
     mut edge_payload: impl FnMut(AddressEdgeInfo<'_, I::Address, I::CaseKey>) -> E,
 ) -> Result<AddressGraph<I, E>, AddressBuildError<I::Address>> {
+    let routes = options.routes;
+    let normal = options.given_edges.map_or(Normal::Flow, Normal::Given);
     let (addresses, transfers, code_end) = inspect_instructions(&instructions)?;
     let entry_position = options
         .entry
@@ -679,10 +638,18 @@ fn inspect_instructions<I: AddressInstruction>(
 
 /// Whether `flow` ends its block under `policy`.
 ///
-/// A flattened call is an operation of its block, so only its continuation
-/// leaves it and it ends nothing.
+/// A flattened call that continues is an operation of its block, so only
+/// its continuation leaves it and it ends nothing. A flattened tail call
+/// ends its block, which [`is_flattened`] leaves without an edge.
 fn ends_block<A, K>(flow: &Flow<A, K>, policy: CallPolicy) -> bool {
-    flow.ends_block() && !(policy == CallPolicy::Flatten && flow.is_call())
+    flow.ends_block() && !(policy == CallPolicy::Flatten && flow.is_call() && flow.continues())
+}
+
+/// Whether `policy` flattens a transfer of `role`: the call transfer into a
+/// callee, which a flattened graph reports as a call site and not as an
+/// edge or a leader.
+fn is_flattened<A, K>(role: &EdgeRole<'_, A, K>, policy: CallPolicy) -> bool {
+    policy == CallPolicy::Flatten && role.is_call()
 }
 
 /// Every call site in address order, for a graph that flattens calls.
@@ -703,6 +670,8 @@ fn collect_call_sites<I: AddressInstruction>(
 struct HandlerIndex {
     ranges: Vec<Range<usize>>,
     entries: Vec<usize>,
+    /// Each handler's kind, its filter spelled as an instruction position.
+    kinds: Vec<AddressHandlerKind<usize>>,
 }
 
 fn validate_handlers<A: AddressSpace>(
@@ -713,6 +682,7 @@ fn validate_handlers<A: AddressSpace>(
 ) -> Result<HandlerIndex, AddressBuildError<A>> {
     let mut ranges = Vec::with_capacity(handlers.len());
     let mut entries = Vec::with_capacity(handlers.len());
+    let mut kinds = Vec::with_capacity(handlers.len());
     let mut range_starts = vec![0usize; addresses.len() + 1];
     let mut range_ends = vec![0usize; addresses.len() + 1];
     for handler in handlers {
@@ -723,6 +693,19 @@ fn validate_handlers<A: AddressSpace>(
                 address: handler.entry,
             }
         })?;
+        let kind = match handler.kind {
+            AddressHandlerKind::Catch => AddressHandlerKind::Catch,
+            AddressHandlerKind::CatchAll => AddressHandlerKind::CatchAll,
+            AddressHandlerKind::Finally => AddressHandlerKind::Finally,
+            AddressHandlerKind::Fault => AddressHandlerKind::Fault,
+            AddressHandlerKind::Filter { filter } => {
+                let position = addresses
+                    .binary_search(&filter)
+                    .map_err(|_| AddressBuildError::MissingHandlerEntry { address: filter })?;
+                leaders[position] = true;
+                AddressHandlerKind::Filter { filter: position }
+            }
+        };
         leaders[start_position] = true;
         if end_position < leaders.len() {
             leaders[end_position] = true;
@@ -732,6 +715,7 @@ fn validate_handlers<A: AddressSpace>(
         range_ends[end_position] += 1;
         ranges.push(start_position..end_position);
         entries.push(entry_position);
+        kinds.push(kind);
     }
 
     let mut active = 0usize;
@@ -742,7 +726,11 @@ fn validate_handlers<A: AddressSpace>(
             leaders[position] = true;
         }
     }
-    Ok(HandlerIndex { ranges, entries })
+    Ok(HandlerIndex {
+        ranges,
+        entries,
+        kinds,
+    })
 }
 
 struct Populated<I: AddressInstruction, E> {
@@ -833,13 +821,18 @@ fn add_regions<I: AddressInstruction, E>(
         let region_handlers = draft
             .handler_indices
             .iter()
-            .map(|&handler_position| {
-                let handler = &handlers[handler_position];
-                Handler {
-                    entry: blocks_by_instruction[handler_index.entries[handler_position]],
-                    body: HandlerBody::unknown(),
-                    kind: handler.kind,
-                }
+            .map(|&handler_position| Handler {
+                entry: blocks_by_instruction[handler_index.entries[handler_position]],
+                body: HandlerBody::unknown(),
+                kind: match handler_index.kinds[handler_position] {
+                    AddressHandlerKind::Catch => HandlerKind::Catch,
+                    AddressHandlerKind::CatchAll => HandlerKind::CatchAll,
+                    AddressHandlerKind::Finally => HandlerKind::Finally,
+                    AddressHandlerKind::Fault => HandlerKind::Fault,
+                    AddressHandlerKind::Filter { filter } => HandlerKind::Filter {
+                        filter_block: blocks_by_instruction[filter],
+                    },
+                },
             })
             .collect();
         let parent = drafts[..index]
@@ -849,12 +842,13 @@ fn add_regions<I: AddressInstruction, E>(
             .min_by_key(|(_, candidate)| span(&candidate.protected))
             .and_then(|(parent_index, _)| region_ids.get(parent_index).copied());
 
-        let region = cfg.add_region(Region {
-            id: RegionId::from_raw(0),
-            protected_blocks,
-            handlers: region_handlers,
-            parent,
-        });
+        let region = cfg
+            .add_region(Region {
+                protected_blocks,
+                handlers: region_handlers,
+                parent,
+            })
+            .expect("the builder creates every handler entry block and every parent region");
         region_ids.push(region);
         for (handler_position, &handler_index) in draft.handler_indices.iter().enumerate() {
             handler_refs[handler_index] = Some(HandlerRef::new(region, handler_position));

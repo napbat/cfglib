@@ -4,14 +4,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cfglib::{
-    GraphView, NodeId, SearchConfig, SearchOrder, TraversalDirection, Visit, breadth_first,
+    Direction, GraphView, NodeId, SearchConfig, SearchOrder, Visit, breadth_first,
     depth_first_preorder, follow, follow_path, reachable, scan_predecessors, search, shortest_path,
     topological_sort,
 };
 use std::ops::ControlFlow;
 
-use crate::Lcg;
 use crate::reference::Table;
+use crate::rng::Rng;
 use crate::spaces::{collatz_step, collatz_trajectory};
 
 #[test]
@@ -78,7 +78,7 @@ fn the_cycle_guard_is_the_whole_path_not_just_the_seed() {
 #[test]
 fn random_chases_match_a_manual_walk_with_a_visited_set() {
     for seed in 1..=8 {
-        let mut rng = Lcg(seed);
+        let mut rng = Rng::lcg(seed, 33);
         let next: Vec<Option<usize>> = (0..40)
             .map(|_| (rng.below(5) != 0).then(|| rng.below(40)))
             .collect();
@@ -194,7 +194,7 @@ fn indexes(nodes: Vec<NodeId>) -> Vec<usize> {
 #[test]
 fn scanning_finds_the_same_incoming_neighbors_a_store_keeps_in_its_reverse_adjacency() {
     for seed in 1..=6 {
-        let table = simple(&Table::random(&mut Lcg(seed), 25, 70));
+        let table = simple(&Table::random(&mut Rng::lcg(seed, 33), 25, 70));
         let view = ForwardOnly::new(&table);
         let graph = table.graph();
         for node in 0..25 {
@@ -217,7 +217,7 @@ fn a_self_loop_is_its_own_predecessor_in_the_scan() {
 
 #[test]
 fn a_removed_node_is_neither_a_node_nor_a_predecessor_of_the_view() {
-    let table = simple(&Table::random(&mut Lcg(9), 20, 50));
+    let table = simple(&Table::random(&mut Rng::lcg(9, 33), 20, 50));
     let removed = [3, 4];
     let view = ForwardOnly::without(&table, &removed);
     let mut graph = table.graph();
@@ -236,10 +236,10 @@ fn a_removed_node_is_neither_a_node_nor_a_predecessor_of_the_view() {
 #[test]
 fn the_backward_algorithms_agree_between_a_forward_only_view_and_the_store() {
     for seed in 1..=5 {
-        let table = simple(&Table::random(&mut Lcg(seed + 10), 25, 60));
+        let table = simple(&Table::random(&mut Rng::lcg(seed + 10, 33), 25, 60));
         let view = ForwardOnly::new(&table);
         let graph = table.graph();
-        let incoming = TraversalDirection::Incoming;
+        let incoming = Direction::Backward;
         for start in [0, 6, 17] {
             let id = NodeId::from_index(start);
             assert_eq!(
@@ -272,22 +272,33 @@ fn the_backward_algorithms_agree_between_a_forward_only_view_and_the_store() {
 
 #[test]
 fn a_backward_search_over_a_forward_only_view_visits_like_one_over_the_store() {
-    let table = simple(&Table::random(&mut Lcg(31), 25, 60));
+    let table = simple(&Table::random(&mut Rng::lcg(31, 33), 25, 60));
     let view = ForwardOnly::new(&table);
     let graph = table.graph();
     for order in [SearchOrder::DepthFirst, SearchOrder::BreadthFirst] {
-        let config = SearchConfig::new(order, TraversalDirection::Incoming).with_max_depth(4);
+        let config = SearchConfig {
+            order,
+            max_depth: Some(4),
+            ..SearchConfig::default()
+        };
+        let backward = Direction::Backward;
         let mut along_view = Vec::new();
-        let outcome = search(&view, [5_usize], config, |node, depth| {
+        let outcome = search(&view, [5_usize], backward, config, |node, depth| {
             along_view.push((node, depth));
             ControlFlow::<(), Visit>::Continue(Visit::Descend)
         });
         assert_eq!(outcome, None);
         let mut along_graph = Vec::new();
-        let outcome = search(&graph, [NodeId::from_index(5)], config, |node, depth| {
-            along_graph.push((node.index(), depth));
-            ControlFlow::<(), Visit>::Continue(Visit::Descend)
-        });
+        let outcome = search(
+            &graph,
+            [NodeId::from_index(5)],
+            backward,
+            config,
+            |node, depth| {
+                along_graph.push((node.index(), depth));
+                ControlFlow::<(), Visit>::Continue(Visit::Descend)
+            },
+        );
         assert_eq!(outcome, None);
         assert_eq!(along_view, along_graph, "{order:?}");
     }

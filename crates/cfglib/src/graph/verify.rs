@@ -1,22 +1,22 @@
-//! Structural verification of a CFG or of a consumer-owned graph view.
+//! Structural verification of a graph view.
 //!
-//! One definition of the invariants serves both: [`verify_view`] checks the
-//! node-level contract of any rooted view, [`verify_edge_view`] adds the
-//! stable-edge contract on top of it, and [`verify`] is the latter over a
-//! [`Cfg`]. The invariants are an entry that exists, in-bounds
-//! identities, mirrored forward and reverse adjacency, and a predecessor for
-//! every reachable non-entry node.
+//! One definition of the invariants serves every graph: [`verify_view`]
+//! checks the node-level contract of any rooted view, [`verify_edge_view`]
+//! adds the stable-edge contract on top of it, and
+//! [`verify`](crate::verify) is the latter over a [`Cfg`](crate::Cfg). The
+//! invariants are an entry that exists, in-bounds identities, mirrored forward
+//! and reverse adjacency, and a predecessor for every reachable non-entry
+//! node.
 
 extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::convert::Infallible;
 
-use crate::block::BlockId;
-use crate::cfg::Cfg;
-use crate::edge::EdgeId;
 use crate::graph::edge_traverse::EdgeAdjacency;
 use crate::graph::edge_view::EdgeView;
-use crate::graph::traverse::{Incoming, Outgoing, TraversalDirection, reachable};
+use crate::graph::traverse::{Incoming, Outgoing, reachable};
+use crate::graph::view::Direction;
 use crate::graph::view::{DenseId, RootedView};
 
 /// A single verification failure.
@@ -26,73 +26,41 @@ pub struct VerifyError {
     pub message: String,
 }
 
+/// The message alone: a view of any kind fails verification, not only a CFG.
 impl core::fmt::Display for VerifyError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "CFG verify: {}", self.message)
+        f.write_str(&self.message)
     }
 }
 
-/// Result of running [`verify`] on a CFG.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerifyReport {
-    /// All detected violations (empty = valid).
-    pub errors: Vec<VerifyError>,
-}
+impl core::error::Error for VerifyError {}
 
-impl VerifyReport {
-    /// True when the CFG passes all invariant checks.
-    #[must_use]
-    pub fn is_ok(&self) -> bool {
-        self.errors.is_empty()
-    }
-
-    /// Number of violations found.
-    #[must_use]
-    pub fn error_count(&self) -> usize {
-        self.errors.len()
-    }
-}
-
-/// Consumer-defined semantic checks layered over structural CFG verification.
+/// What a verification found: the structural violations, and the typed errors
+/// of a consumer's semantic checks.
 ///
-/// Hooks run in block allocation order, then live edge identity order, then
-/// once for whole-graph checks. Errors are consumer types, allowing frontends
-/// to report branch cardinality, handler order, continuation constraints, or
-/// format-specific provenance without putting those semantics in cfglib.
-pub trait SemanticValidator<I, E> {
-    /// Structured consumer error.
-    type Error;
-
-    /// Validate one block and its ordered adjacency.
-    fn validate_block(&self, _cfg: &Cfg<I, E>, _block: BlockId, _errors: &mut Vec<Self::Error>) {}
-
-    /// Validate one stable live edge.
-    fn validate_edge(&self, _cfg: &Cfg<I, E>, _edge: EdgeId, _errors: &mut Vec<Self::Error>) {}
-
-    /// Validate relationships that span several blocks or edges.
-    fn finish(&self, _cfg: &Cfg<I, E>, _errors: &mut Vec<Self::Error>) {}
-}
-
-/// Structural and consumer-semantic verification results.
+/// [`verify_view`], [`verify_edge_view`] and [`verify`](crate::verify) check
+/// structure only, so their report keeps the default `E = Infallible` and
+/// holds no semantic error. [`verify_semantics`](crate::verify_semantics)
+/// adds the errors of a [`SemanticValidator`](crate::SemanticValidator).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SemanticVerifyReport<E> {
-    /// Storage and adjacency invariants checked by [`verify`].
-    pub structural: VerifyReport,
-    /// Typed errors emitted by the consumer validator.
+pub struct VerifyReport<E = Infallible> {
+    /// Every structural violation, in the order found (empty = valid).
+    pub errors: Vec<VerifyError>,
+    /// The typed errors the consumer's validator emitted, in hook order.
     pub semantic_errors: Vec<E>,
 }
 
-impl<E> SemanticVerifyReport<E> {
-    /// Whether both structural and semantic validation succeeded.
+impl<E> VerifyReport<E> {
+    /// Whether neither the structural nor the semantic checks found an error.
     #[must_use]
     pub fn is_ok(&self) -> bool {
-        self.structural.is_ok() && self.semantic_errors.is_empty()
+        self.errors.is_empty() && self.semantic_errors.is_empty()
     }
 
-    /// Total structural plus semantic error count.
+    /// The number of structural plus semantic errors.
     #[must_use]
     pub fn error_count(&self) -> usize {
-        self.structural.error_count() + self.semantic_errors.len()
+        self.errors.len() + self.semantic_errors.len()
     }
 }
 
@@ -140,68 +108,6 @@ fn report_adjacency_mismatches(forward: &[Pair], reverse: &[Pair], errors: &mut 
     }
 }
 
-/// Validate structural invariants of a CFG.
-///
-/// A [`Cfg`] is an edge-aware rooted view of itself, so this is
-/// [`verify_edge_view`] over the entry block: the CFG store and consumer-owned
-/// storage are held to one definition of every invariant, and one set of
-/// messages. Checks performed:
-/// 1. The entry block index is within bounds.
-/// 2. Every live edge references valid source/target block IDs.
-/// 3. Adjacency lists (`succs`/`preds`) are consistent with edges, and every
-///    live edge is listed exactly once by each of its endpoints.
-/// 4. Every reachable non-entry block has at least one predecessor.
-/// 5. Every block exception metadata names by a single reference (a handler
-///    entry, a filter block, a cleanup resume point, a continuation target)
-///    is live: the references [`Cfg::compact`] panics on. The entry cannot
-///    be removed, so it is live by construction.
-///
-/// Returns a [`VerifyReport`] containing all violations found.
-///
-/// # Examples
-///
-/// ```
-/// use cfglib::{Cfg, EdgeKind, verify};
-///
-/// let mut cfg = Cfg::<u32>::new();
-/// let b1 = cfg.new_block();
-/// cfg.add_edge(cfg.entry(), b1, EdgeKind::Fallthrough);
-///
-/// let result = verify(&cfg);
-/// assert!(result.is_ok());
-/// ```
-#[must_use]
-pub fn verify<I, E>(cfg: &Cfg<I, E>) -> VerifyReport {
-    let mut report = verify_edge_view(cfg);
-    report
-        .errors
-        .extend(cfg.dangling_anchors().map(|block| VerifyError {
-            message: alloc::format!("exception metadata names {block}, which is not a live block"),
-        }));
-    report
-}
-
-/// Validate structural invariants and consumer semantics in stable order.
-#[must_use]
-pub fn verify_with<I, E, S>(cfg: &Cfg<I, E>, validator: &S) -> SemanticVerifyReport<S::Error>
-where
-    S: SemanticValidator<I, E>,
-{
-    let structural = verify(cfg);
-    let mut semantic_errors = Vec::new();
-    for block_id in cfg.block_ids() {
-        validator.validate_block(cfg, block_id, &mut semantic_errors);
-    }
-    for edge in cfg.edges() {
-        validator.validate_edge(cfg, edge.id(), &mut semantic_errors);
-    }
-    validator.finish(cfg, &mut semantic_errors);
-    SemanticVerifyReport {
-        structural,
-        semantic_errors,
-    }
-}
-
 fn report_out_of_bounds_neighbor(
     errors: &mut Vec<VerifyError>,
     node: usize,
@@ -231,8 +137,8 @@ fn report_out_of_bounds_neighbor(
 ///    `node_bound()` entries by those identities.
 ///
 /// This catches adapter bugs when a consumer implements the view traits over
-/// its own graph store — the counterpart of [`verify`], which checks the
-/// storage invariants of [`Cfg`] itself.
+/// its own graph store — the counterpart of [`verify`](crate::verify), which
+/// checks the storage invariants of [`Cfg`](crate::Cfg) itself.
 #[must_use]
 pub fn verify_view<G: RootedView>(graph: &G) -> VerifyReport {
     let mut errors = Vec::new();
@@ -246,7 +152,10 @@ pub fn verify_view<G: RootedView>(graph: &G) -> VerifyReport {
                 root.index()
             ),
         });
-        return VerifyReport { errors };
+        return VerifyReport {
+            errors,
+            semantic_errors: Vec::new(),
+        };
     }
 
     // Forward and reverse adjacency must agree as multisets of (source, target).
@@ -301,7 +210,7 @@ pub fn verify_view<G: RootedView>(graph: &G) -> VerifyReport {
 
     // Every reachable non-root node has a predecessor.
     if in_bounds {
-        let reached = reachable(graph, [root], TraversalDirection::Outgoing);
+        let reached = reachable(graph, [root], Direction::Forward);
         for node in graph.node_ids() {
             if reached[node.index()] && node != root && graph.predecessors(node).next().is_none() {
                 errors.push(VerifyError {
@@ -311,7 +220,10 @@ pub fn verify_view<G: RootedView>(graph: &G) -> VerifyReport {
         }
     }
 
-    VerifyReport { errors }
+    VerifyReport {
+        errors,
+        semantic_errors: Vec::new(),
+    }
 }
 
 /// What [`verify_edge_view`] has seen of one edge slot.

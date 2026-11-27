@@ -1,6 +1,6 @@
 //! `linear_arrangement` and `feedback_arc_set` over cyclic graphs.
 //!
-//! The timed cases run on the branchy chain behind `api_kosaraju_scc`, whose
+//! The timed cases run on the branchy chain behind `api_scc_sources_first`, whose
 //! latches close a cycle every 32 nodes. Before the plain set is timed, its
 //! oracle prints how the set compares with the depth-first back edges over
 //! that chain and over a denser tangle. The sizes are reported, not asserted:
@@ -9,8 +9,8 @@
 use std::ops::ControlFlow;
 
 use cfglib::{
-    DfsEvent, EdgeId, FeedbackConfig, FilteredEdges, Graph, NodeId, TraversalDirection,
-    depth_first_events, feedback_arc_set, linear_arrangement, topological_sort,
+    DfsEvent, Direction, EdgeId, FeedbackConfig, FilteredEdges, Graph, NodeId, depth_first_events,
+    feedback_arc_set, linear_arrangement, topological_sort,
 };
 
 use super::BenchmarkSuite;
@@ -45,7 +45,7 @@ pub(super) fn register(suite: &mut BenchmarkSuite<'_>) {
     benchmark_case!(
         suite,
         "api_feedback_arc_set_minimal",
-        || feedback_arc_set(&graph, FeedbackConfig::new().with_minimal(true)),
+        || feedback_arc_set(&graph, FeedbackConfig { minimal: true }),
         |set: &Vec<EdgeId>| assert!(acyclic_without(&graph, set))
     );
 }
@@ -70,7 +70,7 @@ fn report_quality() {
         ("tangle", tangle_graph(NODE_COUNT)),
     ] {
         let set = feedback_arc_set(&graph, FeedbackConfig::new()).len();
-        let minimal = feedback_arc_set(&graph, FeedbackConfig::new().with_minimal(true)).len();
+        let minimal = feedback_arc_set(&graph, FeedbackConfig { minimal: true }).len();
         println!(
             "  {name:<8} {:>6} {set:>6} {minimal:>8} {:>15}",
             graph.edge_count(),
@@ -84,19 +84,15 @@ fn report_quality() {
 fn depth_first_back_edges(graph: &Graph<(), ()>) -> usize {
     let mut discovered = 0;
     let mut back_edges = 0;
-    let outcome = depth_first_events::<_, ()>(
-        graph,
-        NodeId::from_raw(0),
-        TraversalDirection::Outgoing,
-        |event| {
+    let outcome =
+        depth_first_events::<_, ()>(graph, NodeId::from_raw(0), Direction::Forward, |event| {
             match event {
                 DfsEvent::Discover(..) => discovered += 1,
                 DfsEvent::BackEdge(..) => back_edges += 1,
                 _ => {}
             }
             ControlFlow::Continue(())
-        },
-    );
+        });
     assert_eq!(outcome, None);
     assert_eq!(discovered, graph.node_count(), "node 0 reaches every node");
     back_edges

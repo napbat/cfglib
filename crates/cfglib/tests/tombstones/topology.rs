@@ -3,11 +3,12 @@
 use std::collections::BTreeSet;
 
 use cfglib::{
-    BlockId, Cfg, CfgRenumbering, DenseId, EdgeId, EdgeKind, Graph, InstrInfo, NodeId, Renumbering,
-    Rooted, RootedView,
+    BlockId, BlockTag, Cfg, DenseId, EdgeId, EdgeKind, EdgeView, Graph, InstrInfo, KindedEdge,
+    NodeId, NodeOrder, Renumbering, Rooted, RootedView,
 };
 
 use crate::oracle::Reference;
+use crate::rng::Rng;
 
 /// A toy instruction: at most one definition and two reads of small variables.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,29 +29,13 @@ impl InstrInfo for Op {
     }
 }
 
-/// A small deterministic generator, so a failing seed reproduces anywhere.
-pub struct Lcg(u64);
-
-impl Lcg {
-    pub const fn new(seed: u64) -> Self {
-        Self(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03)
-    }
-
-    fn next_word(&mut self) -> u32 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        u32::try_from(self.0 >> 32).expect("a 64-bit state shifted by 32 fits in 32 bits")
-    }
-
-    pub fn below(&mut self, bound: usize) -> usize {
-        usize::try_from(self.next_word()).expect("a u32 fits in usize") % bound
-    }
-
-    pub fn percent(&mut self, chance: usize) -> bool {
-        self.below(100) < chance
-    }
+/// The suite's generator: an LCG read from the high half of a state that
+/// starts from a mix of `seed`, so a failing seed reproduces anywhere.
+fn seeded_rng(seed: u64) -> Rng {
+    Rng::lcg(
+        seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03,
+        32,
+    )
 }
 
 /// What a generated topology is allowed to look like.
@@ -83,11 +68,11 @@ const VARIABLES: usize = 4;
 impl Topology {
     pub fn random(seed: u64, shape: Shape) -> Self {
         assert!(shape.slots >= 5, "a topology needs room for holes");
-        let mut rng = Lcg::new(seed);
+        let mut rng = seeded_rng(seed);
         let slots = shape.slots;
         let exit = slots - 1;
 
-        let mut removed_nodes: BTreeSet<usize> = (1..exit).filter(|_| rng.percent(25)).collect();
+        let mut removed_nodes: BTreeSet<usize> = (1..exit).filter(|_| rng.chance(25)).collect();
         if removed_nodes.is_empty() {
             removed_nodes.insert(1);
         }
@@ -102,7 +87,7 @@ impl Topology {
                 edges.push((source, target));
             }
         }
-        let removed_edges = (0..edges.len()).filter(|_| rng.percent(12)).collect();
+        let removed_edges = (0..edges.len()).filter(|_| rng.chance(12)).collect();
 
         let blocks = (0..slots)
             .map(|_| (0..rng.below(4)).map(|_| random_op(&mut rng)).collect())
@@ -228,11 +213,11 @@ impl Topology {
     }
 }
 
-fn random_op(rng: &mut Lcg) -> Op {
-    let variable = |rng: &mut Lcg| {
+fn random_op(rng: &mut Rng) -> Op {
+    let variable = |rng: &mut Rng| {
         u8::try_from(rng.below(VARIABLES)).expect("a variable index below four fits in u8")
     };
-    let defs = if rng.percent(50) {
+    let defs = if rng.chance(50) {
         vec![variable(rng)]
     } else {
         Vec::new()
@@ -277,15 +262,13 @@ impl<N: DenseId> Slots<N> {
     }
 }
 
-/// An analysis over any rooted view, checked against the reference.
+/// An analysis over any rooted view, checked against the reference. Every
+/// realization is a rooted edge view whose edges carry no
+/// [`EdgeKind::Back`] tag.
 pub trait ViewCheck {
-    fn check<G: RootedView>(
-        &self,
-        view: &G,
-        slots: &Slots<G::NodeId>,
-        reference: &Reference<'_>,
-        label: &str,
-    );
+    fn check<G>(&self, view: &G, slots: &Slots<G::NodeId>, reference: &Reference<'_>, label: &str)
+    where
+        G: RootedView + EdgeView<EdgeData: KindedEdge>;
 }
 
 /// One topology realized in both stores, with and without holes.
@@ -294,7 +277,7 @@ pub struct Realizations {
     pub topology: Topology,
     pub cfg_holed: Cfg<Op>,
     pub cfg_compacted: Cfg<Op>,
-    pub cfg_renumbering: CfgRenumbering,
+    pub cfg_renumbering: Renumbering<BlockTag>,
     pub graph_holed: Graph<(), ()>,
     pub graph_compacted: Graph<(), ()>,
     pub graph_renumbering: Renumbering,
@@ -314,10 +297,10 @@ impl Realizations {
 
     fn of(topology: Topology, cfg_holed: Cfg<Op>) -> Self {
         let mut cfg_compacted = cfg_holed.clone();
-        let cfg_renumbering = cfg_compacted.compact();
+        let cfg_renumbering = cfg_compacted.compact(NodeOrder::Insertion);
         let graph_holed = topology.build_graph();
         let mut graph_compacted = graph_holed.clone();
-        let graph_renumbering = graph_compacted.compact();
+        let graph_renumbering = graph_compacted.compact(NodeOrder::Insertion);
         Self {
             label: String::new(),
             topology,

@@ -7,13 +7,13 @@ use alloc::vec::Vec;
 
 use super::{FeedbackConfig, feedback_arc_set, linear_arrangement};
 use crate::graph::edge_view::FilteredEdges;
-use crate::graph::scc::kosaraju_scc;
+use crate::graph::scc::{SccDecomposition, SccNumbering};
 use crate::graph::store::{EdgeId, Graph, NodeId};
 use crate::graph::traverse::topological_sort;
 use crate::test_util::rng::Rng;
 
 const PLAIN: FeedbackConfig = FeedbackConfig::new();
-const MINIMAL: FeedbackConfig = FeedbackConfig::new().with_minimal(true);
+const MINIMAL: FeedbackConfig = FeedbackConfig { minimal: true };
 
 /// A random multigraph over up to `max_slots` node slots and about
 /// `density` edges per slot: self-loops and parallel edges occur, and some
@@ -99,12 +99,12 @@ fn check(graph: &Graph<(), ()>) {
         graph.node_ids().collect::<Vec<_>>(),
         "a permutation of the live nodes"
     );
-    let components = kosaraju_scc(graph);
+    let components = SccDecomposition::compute(graph, SccNumbering::SourcesFirst);
     assert!(
         order.windows(2).all(|pair| {
             components.component_index(pair[0]) <= components.component_index(pair[1])
         }),
-        "components in kosaraju_scc order"
+        "components in sources-first order"
     );
 
     let rank = ranks(graph, &order);
@@ -122,8 +122,8 @@ fn check(graph: &Graph<(), ()>) {
 
     // Each component's backward edges, self-loops aside, are at most half of
     // its edges, self-loops aside.
-    let mut inside = vec![0_usize; components.len()];
-    let mut cut = vec![0_usize; components.len()];
+    let mut inside = vec![0_usize; components.component_count()];
+    let mut cut = vec![0_usize; components.component_count()];
     for edge in graph.edge_ids() {
         let record = graph.edge(edge);
         let (source, target) = (record.source(), record.target());
@@ -170,11 +170,7 @@ fn check(graph: &Graph<(), ()>) {
 fn the_config_defaults_to_the_plain_set() {
     assert_eq!(FeedbackConfig::default(), FeedbackConfig { minimal: false });
     assert_eq!(FeedbackConfig::new(), FeedbackConfig::default());
-    assert_eq!(
-        FeedbackConfig::new().with_minimal(true),
-        FeedbackConfig { minimal: true }
-    );
-    assert_eq!(MINIMAL.with_minimal(false), PLAIN);
+    assert_ne!(MINIMAL, PLAIN);
 }
 
 #[test]

@@ -1,24 +1,22 @@
-//! `depth_first_events` and `breadth_first_events`: the walks whose output order is the traversal.
+//! `depth_first_events`: the walk whose output order is the traversal.
 
-use std::collections::VecDeque;
 use std::ops::ControlFlow;
 
 use cfglib::{
-    BfsEvent, DfsEvent, Graph, NodeId, TraversalDirection, breadth_first, breadth_first_events,
-    depth_first_events, depth_first_postorder, depth_first_preorder, reachable,
+    DfsEvent, Direction, Graph, NodeId, depth_first_events, depth_first_postorder,
+    depth_first_preorder, reachable,
 };
 
-use crate::Lcg;
 use crate::reference::{Table, chain};
+use crate::rng::Rng;
 
-/// An event of either walk, with plain indices.
+/// An event of the walk, with plain indices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Event {
     Discover(usize, usize),
     Tree(usize, usize),
     Back(usize, usize),
     ForwardOrCross(usize, usize),
-    NonTree(usize, usize),
     Finish(usize),
 }
 
@@ -32,38 +30,11 @@ fn from_depth_first(event: DfsEvent<NodeId>) -> Event {
     }
 }
 
-fn from_breadth_first(event: BfsEvent<NodeId>) -> Event {
-    match event {
-        BfsEvent::Discover(node, depth) => Event::Discover(node.index(), depth),
-        BfsEvent::TreeEdge(from, to) => Event::Tree(from.index(), to.index()),
-        BfsEvent::NonTreeEdge(from, to) => Event::NonTree(from.index(), to.index()),
-    }
-}
-
-fn depth_first_stream(
-    graph: &Graph<(), ()>,
-    start: usize,
-    direction: TraversalDirection,
-) -> Vec<Event> {
+fn depth_first_stream(graph: &Graph<(), ()>, start: usize, direction: Direction) -> Vec<Event> {
     let mut events = Vec::new();
     let outcome =
         depth_first_events::<_, ()>(graph, NodeId::from_index(start), direction, |event| {
             events.push(from_depth_first(event));
-            ControlFlow::Continue(())
-        });
-    assert_eq!(outcome, None);
-    events
-}
-
-fn breadth_first_stream(
-    graph: &Graph<(), ()>,
-    start: usize,
-    direction: TraversalDirection,
-) -> Vec<Event> {
-    let mut events = Vec::new();
-    let outcome =
-        breadth_first_events::<_, ()>(graph, NodeId::from_index(start), direction, |event| {
-            events.push(from_breadth_first(event));
             ControlFlow::Continue(())
         });
     assert_eq!(outcome, None);
@@ -114,26 +85,6 @@ fn depth_first_reference(table: &Table, start: usize) -> Vec<Event> {
     walk.events
 }
 
-fn breadth_first_reference(table: &Table, start: usize) -> Vec<Event> {
-    let mut seen = vec![false; table.node_count()];
-    let mut events = vec![Event::Discover(start, 0)];
-    let mut queue = VecDeque::from([(start, 0)]);
-    seen[start] = true;
-    while let Some((node, depth)) = queue.pop_front() {
-        for &next in &table.successors[node] {
-            if seen[next] {
-                events.push(Event::NonTree(node, next));
-            } else {
-                seen[next] = true;
-                events.push(Event::Tree(node, next));
-                events.push(Event::Discover(next, depth + 1));
-                queue.push_back((next, depth + 1));
-            }
-        }
-    }
-    events
-}
-
 /// Whether the subgraph induced on `nodes` has a cycle, by repeatedly removing sources.
 fn is_cyclic(table: &Table, nodes: &[usize]) -> bool {
     let mut indegree = vec![0_usize; table.node_count()];
@@ -163,39 +114,18 @@ fn is_cyclic(table: &Table, nodes: &[usize]) -> bool {
 #[test]
 fn depth_first_events_match_the_recursive_tricolor_reference_in_both_directions() {
     for seed in 1..=5 {
-        let table = Table::random(&mut Lcg(seed), 30, 60);
+        let table = Table::random(&mut Rng::lcg(seed, 33), 30, 60);
         let backward = table.reversed();
         let graph = table.graph();
         for start in [0, 7, 19] {
             assert_eq!(
-                depth_first_stream(&graph, start, TraversalDirection::Outgoing),
+                depth_first_stream(&graph, start, Direction::Forward),
                 depth_first_reference(&table, start),
                 "seed {seed}, start {start}, forward"
             );
             assert_eq!(
-                depth_first_stream(&graph, start, TraversalDirection::Incoming),
+                depth_first_stream(&graph, start, Direction::Backward),
                 depth_first_reference(&backward, start),
-                "seed {seed}, start {start}, backward"
-            );
-        }
-    }
-}
-
-#[test]
-fn breadth_first_events_match_the_queue_reference_in_both_directions() {
-    for seed in 1..=5 {
-        let table = Table::random(&mut Lcg(seed + 30), 30, 60);
-        let backward = table.reversed();
-        let graph = table.graph();
-        for start in [0, 7, 19] {
-            assert_eq!(
-                breadth_first_stream(&graph, start, TraversalDirection::Outgoing),
-                breadth_first_reference(&table, start),
-                "seed {seed}, start {start}, forward"
-            );
-            assert_eq!(
-                breadth_first_stream(&graph, start, TraversalDirection::Incoming),
-                breadth_first_reference(&backward, start),
                 "seed {seed}, start {start}, backward"
             );
         }
@@ -208,7 +138,7 @@ fn a_hand_derived_depth_first_stream_names_every_edge_class() {
     let table = Table {
         successors: vec![vec![1, 2], vec![2], vec![0]],
     };
-    let events = depth_first_stream(&table.graph(), 0, TraversalDirection::Outgoing);
+    let events = depth_first_stream(&table.graph(), 0, Direction::Forward);
     assert_eq!(
         events,
         [
@@ -227,33 +157,13 @@ fn a_hand_derived_depth_first_stream_names_every_edge_class() {
 }
 
 #[test]
-fn a_hand_derived_breadth_first_stream_separates_tree_from_non_tree_edges() {
-    let table = Table {
-        successors: vec![vec![1, 2], vec![2], vec![0]],
-    };
-    let events = breadth_first_stream(&table.graph(), 0, TraversalDirection::Outgoing);
-    assert_eq!(
-        events,
-        [
-            Event::Discover(0, 0),
-            Event::Tree(0, 1),
-            Event::Discover(1, 1),
-            Event::Tree(0, 2),
-            Event::Discover(2, 1),
-            Event::NonTree(1, 2),
-            Event::NonTree(2, 0),
-        ]
-    );
-}
-
-#[test]
 fn self_loops_and_parallel_edges_are_classified_edge_by_edge() {
     let table = Table {
         successors: vec![vec![0, 1, 1], vec![]],
     };
     let graph = table.graph();
     assert_eq!(
-        depth_first_stream(&graph, 0, TraversalDirection::Outgoing),
+        depth_first_stream(&graph, 0, Direction::Forward),
         [
             Event::Discover(0, 0),
             Event::Back(0, 0),
@@ -265,24 +175,14 @@ fn self_loops_and_parallel_edges_are_classified_edge_by_edge() {
         ],
         "a self loop is a back edge; the second parallel edge reaches a finished node"
     );
-    assert_eq!(
-        breadth_first_stream(&graph, 0, TraversalDirection::Outgoing),
-        [
-            Event::Discover(0, 0),
-            Event::NonTree(0, 0),
-            Event::Tree(0, 1),
-            Event::Discover(1, 1),
-            Event::NonTree(0, 1),
-        ]
-    );
 }
 
 #[test]
 fn depth_first_events_agree_with_the_plain_depth_first_traversals() {
     for seed in 1..=5 {
-        let table = Table::random(&mut Lcg(seed + 50), 30, 60);
+        let table = Table::random(&mut Rng::lcg(seed + 50, 33), 30, 60);
         let graph = table.graph();
-        let events = depth_first_stream(&graph, 0, TraversalDirection::Outgoing);
+        let events = depth_first_stream(&graph, 0, Direction::Forward);
         let discovered: Vec<usize> = events
             .iter()
             .filter_map(|event| match event {
@@ -298,16 +198,14 @@ fn depth_first_events_agree_with_the_plain_depth_first_traversals() {
             })
             .collect();
         let start = NodeId::from_index(0);
-        let preorder: Vec<usize> =
-            depth_first_preorder(&graph, start, TraversalDirection::Outgoing)
-                .into_iter()
-                .map(NodeId::index)
-                .collect();
-        let postorder: Vec<usize> =
-            depth_first_postorder(&graph, start, TraversalDirection::Outgoing)
-                .into_iter()
-                .map(NodeId::index)
-                .collect();
+        let preorder: Vec<usize> = depth_first_preorder(&graph, start, Direction::Forward)
+            .into_iter()
+            .map(NodeId::index)
+            .collect();
+        let postorder: Vec<usize> = depth_first_postorder(&graph, start, Direction::Forward)
+            .into_iter()
+            .map(NodeId::index)
+            .collect();
         assert_eq!(
             discovered, preorder,
             "seed {seed}: discovery is the preorder"
@@ -320,64 +218,15 @@ fn depth_first_events_agree_with_the_plain_depth_first_traversals() {
 }
 
 #[test]
-fn breadth_first_events_discover_nodes_in_breadth_first_order_at_their_hop_distance() {
-    for seed in 1..=5 {
-        let table = Table::random(&mut Lcg(seed + 60), 30, 60);
-        let graph = table.graph();
-        let events = breadth_first_stream(&graph, 0, TraversalDirection::Outgoing);
-        let discovered: Vec<(usize, usize)> = events
-            .iter()
-            .filter_map(|event| match event {
-                Event::Discover(node, depth) => Some((*node, *depth)),
-                _ => None,
-            })
-            .collect();
-        let order: Vec<usize> =
-            breadth_first(&graph, NodeId::from_index(0), TraversalDirection::Outgoing)
-                .into_iter()
-                .map(NodeId::index)
-                .collect();
-        assert_eq!(
-            discovered.iter().map(|&(node, _)| node).collect::<Vec<_>>(),
-            order
-        );
-
-        let mut distance = vec![usize::MAX; 30];
-        distance[0] = 0;
-        let mut queue = VecDeque::from([0]);
-        while let Some(node) = queue.pop_front() {
-            for &next in &table.successors[node] {
-                if distance[next] == usize::MAX {
-                    distance[next] = distance[node] + 1;
-                    queue.push_back(next);
-                }
-            }
-        }
-        for &(node, depth) in &discovered {
-            assert_eq!(depth, distance[node], "seed {seed}: depth of n{node}");
-        }
-        for event in &events {
-            if let Event::Tree(from, to) = event {
-                assert_eq!(
-                    distance[*to],
-                    distance[*from] + 1,
-                    "a tree edge descends one level"
-                );
-            }
-        }
-    }
-}
-
-#[test]
 fn every_examined_edge_is_classified_once_and_a_back_edge_exists_exactly_when_a_cycle_does() {
     let mut cyclic_cases = 0;
     let mut acyclic_cases = 0;
     for seed in 1..=12 {
         // Sparse tables are often acyclic, which the cycle check needs as much as the dense ones.
         let edges = if seed % 2 == 0 { 70 } else { 22 };
-        let table = Table::random(&mut Lcg(seed + 70), 30, edges);
+        let table = Table::random(&mut Rng::lcg(seed + 70, 33), 30, edges);
         let graph = table.graph();
-        let events = depth_first_stream(&graph, 0, TraversalDirection::Outgoing);
+        let events = depth_first_stream(&graph, 0, Direction::Forward);
 
         let discovered: Vec<usize> = events
             .iter()
@@ -417,11 +266,7 @@ fn every_examined_edge_is_classified_once_and_a_back_edge_exists_exactly_when_a_
             "seed {seed}: a tree spans the discovered nodes"
         );
 
-        let reached = reachable(
-            &graph,
-            [NodeId::from_index(0)],
-            TraversalDirection::Outgoing,
-        );
+        let reached = reachable(&graph, [NodeId::from_index(0)], Direction::Forward);
         assert_eq!(discovered.len(), reached.iter().filter(|&&yes| yes).count());
         let cyclic = is_cyclic(&table, &discovered);
         assert_eq!(back > 0, cyclic, "seed {seed}");
@@ -440,9 +285,9 @@ fn every_examined_edge_is_classified_once_and_a_back_edge_exists_exactly_when_a_
 #[test]
 fn discover_and_finish_nest_like_a_stack_and_edge_classes_agree_with_the_node_colors() {
     for seed in 1..=5 {
-        let table = Table::random(&mut Lcg(seed + 80), 30, 60);
+        let table = Table::random(&mut Rng::lcg(seed + 80, 33), 30, 60);
         let graph = table.graph();
-        let events = depth_first_stream(&graph, 0, TraversalDirection::Outgoing);
+        let events = depth_first_stream(&graph, 0, Direction::Forward);
 
         let mut on_path: Vec<usize> = Vec::new();
         let mut finished = [false; 30];
@@ -482,7 +327,6 @@ fn discover_and_finish_nest_like_a_stack_and_edge_classes_agree_with_the_node_co
                         "the target is finished"
                     );
                 }
-                Event::NonTree(..) => unreachable!("a depth-first walk emits no non-tree edges"),
             }
         }
         assert!(on_path.is_empty(), "every discovery was finished");
@@ -496,33 +340,26 @@ fn only_nodes_reachable_from_the_start_produce_events() {
         successors: vec![vec![1], vec![], vec![3], vec![]],
     };
     let graph = table.graph();
-    for events in [
-        depth_first_stream(&graph, 0, TraversalDirection::Outgoing),
-        breadth_first_stream(&graph, 0, TraversalDirection::Outgoing),
-    ] {
-        for event in events {
-            match event {
-                Event::Discover(node, _) | Event::Finish(node) => assert!(node <= 1),
-                Event::Tree(from, to)
-                | Event::Back(from, to)
-                | Event::ForwardOrCross(from, to)
-                | Event::NonTree(from, to) => assert!(from <= 1 && to <= 1),
+    for event in depth_first_stream(&graph, 0, Direction::Forward) {
+        match event {
+            Event::Discover(node, _) | Event::Finish(node) => assert!(node <= 1),
+            Event::Tree(from, to) | Event::Back(from, to) | Event::ForwardOrCross(from, to) => {
+                assert!(from <= 1 && to <= 1);
             }
         }
     }
 }
 
 #[test]
-fn a_callback_can_break_either_walk_at_any_event_and_nothing_follows() {
-    let table = Table::random(&mut Lcg(99), 30, 70);
+fn a_callback_can_break_the_walk_at_any_event_and_nothing_follows() {
+    let table = Table::random(&mut Rng::lcg(99, 33), 30, 70);
     let graph = table.graph();
     let start = NodeId::from_index(0);
-    let full_depth_first = depth_first_stream(&graph, 0, TraversalDirection::Outgoing);
-    let full_breadth_first = breadth_first_stream(&graph, 0, TraversalDirection::Outgoing);
+    let full_depth_first = depth_first_stream(&graph, 0, Direction::Forward);
 
     for cut in [0, 1, full_depth_first.len() / 3, full_depth_first.len() - 1] {
         let mut seen = Vec::new();
-        let outcome = depth_first_events(&graph, start, TraversalDirection::Outgoing, |event| {
+        let outcome = depth_first_events(&graph, start, Direction::Forward, |event| {
             seen.push(from_depth_first(event));
             if seen.len() == cut + 1 {
                 ControlFlow::Break(cut)
@@ -533,65 +370,26 @@ fn a_callback_can_break_either_walk_at_any_event_and_nothing_follows() {
         assert_eq!(outcome, Some(cut));
         assert_eq!(seen, full_depth_first[..=cut]);
     }
-    for cut in [
-        0,
-        1,
-        full_breadth_first.len() / 2,
-        full_breadth_first.len() - 1,
-    ] {
-        let mut seen = Vec::new();
-        let outcome = breadth_first_events(&graph, start, TraversalDirection::Outgoing, |event| {
-            seen.push(from_breadth_first(event));
-            if seen.len() == cut + 1 {
-                ControlFlow::Break(cut)
-            } else {
-                ControlFlow::Continue(())
-            }
-        });
-        assert_eq!(outcome, Some(cut));
-        assert_eq!(seen, full_breadth_first[..=cut]);
-    }
 }
 
 #[test]
 #[should_panic(expected = "start node is out of range")]
 fn a_start_outside_the_graph_panics_in_the_depth_first_walk() {
-    let graph = Table::random(&mut Lcg(1), 4, 6).graph();
-    let _ = depth_first_events::<_, ()>(
-        &graph,
-        NodeId::from_index(4),
-        TraversalDirection::Outgoing,
-        |_| ControlFlow::Continue(()),
-    );
+    let graph = Table::random(&mut Rng::lcg(1, 33), 4, 6).graph();
+    let _ = depth_first_events::<_, ()>(&graph, NodeId::from_index(4), Direction::Forward, |_| {
+        ControlFlow::Continue(())
+    });
 }
 
 #[test]
-#[should_panic(expected = "start node is out of range")]
-fn a_start_outside_the_graph_panics_in_the_breadth_first_walk() {
-    let graph = Table::random(&mut Lcg(1), 4, 6).graph();
-    let _ = breadth_first_events::<_, ()>(
-        &graph,
-        NodeId::from_index(4),
-        TraversalDirection::Outgoing,
-        |_| ControlFlow::Continue(()),
-    );
-}
-
-#[test]
-fn the_dense_event_walks_run_over_a_very_deep_graph_without_recursion() {
+fn the_dense_event_walk_runs_over_a_very_deep_graph_without_recursion() {
     let table = chain(200_000);
     let graph = table.graph();
-    let depth_first = depth_first_stream(&graph, 0, TraversalDirection::Outgoing);
+    let depth_first = depth_first_stream(&graph, 0, Direction::Forward);
     assert_eq!(
         depth_first.len(),
         3 * 200_000 - 1,
         "a discovery and a finish per node, a tree edge per link"
     );
     assert_eq!(depth_first.last(), Some(&Event::Finish(0)));
-    let breadth_first = breadth_first_stream(&graph, 0, TraversalDirection::Outgoing);
-    assert_eq!(
-        breadth_first.len(),
-        2 * 200_000 - 1,
-        "a discovery per node, a tree edge per link"
-    );
 }

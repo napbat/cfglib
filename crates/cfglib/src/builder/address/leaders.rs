@@ -2,7 +2,7 @@
 
 use super::{
     AddressBuildError, AddressInstruction, AddressSpace, AddressTransfers, CallPolicy, GivenEdge,
-    GivenEdges, ends_block,
+    GivenEdges, ends_block, is_flattened,
 };
 use crate::flow::Flow;
 
@@ -47,7 +47,9 @@ pub(super) fn collect_flow_leaders<I: AddressInstruction>(
             .end_address()
             .expect("validated instruction end");
         for transfer in flow.transfers(addresses[position], Some(end)) {
-            if let Some(target) = transfer.target {
+            if let Some(target) = transfer.target
+                && !is_flattened(&transfer.role, policy)
+            {
                 mark_target(addresses, target, leaders);
             }
         }
@@ -162,11 +164,12 @@ fn mark_flow_leaders<I: AddressInstruction>(
         let end = instructions[position]
             .end_address()
             .expect("validated instruction end");
-        for target in flow
-            .transfers(address, Some(end))
-            .filter_map(|transfer| transfer.target)
-        {
-            mark_target(addresses, target, leaders);
+        for transfer in flow.transfers(address, Some(end)) {
+            if let Some(target) = transfer.target
+                && !is_flattened(&transfer.role, policy)
+            {
+                mark_target(addresses, target, leaders);
+            }
         }
         if position + 1 < addresses.len() {
             leaders[position + 1] = true;

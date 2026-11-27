@@ -7,12 +7,12 @@ use super::support::{
     EdgeList, Reference, assert_certified, assert_forest_invariants, for_each_multigraph, node,
 };
 use crate::graph::dominator::{DominatorScratch, DominatorTree};
-use crate::graph::view::GraphView;
+use crate::graph::view::{GraphView, Rooted};
 
 /// Check every query of a tree against the brute-force reference.
 fn check_against_definition(edges: &EdgeList, scratch: &mut DominatorScratch) {
     let graph = edges.graph();
-    let tree = DominatorTree::compute_from_in(scratch, &graph, 0);
+    let tree = DominatorTree::compute_in(scratch, &graph);
     let reference = Reference::new(&graph, 0);
     let count = edges.node_count;
     assert_forest_invariants(&tree, count);
@@ -98,7 +98,7 @@ fn check_against_definition(edges: &EdgeList, scratch: &mut DominatorScratch) {
                     .expect("reachable nodes share the root")
             });
         assert_eq!(
-            tree.nearest_common_dominator_of(members.iter().copied().map(node)),
+            tree.nearest_common_dominator_among(members.iter().copied().map(node)),
             expected.map(node),
             "nearest common dominator of {members:?} in {edges:?}"
         );
@@ -107,7 +107,7 @@ fn check_against_definition(edges: &EdgeList, scratch: &mut DominatorScratch) {
 
 #[test]
 fn every_digraph_of_up_to_four_nodes_matches_the_definition() {
-    let mut scratch = DominatorScratch::new();
+    let mut scratch = DominatorScratch::default();
     for node_count in 1..=4 {
         for_each_multigraph(node_count, 1, |edges| {
             check_against_definition(edges, &mut scratch);
@@ -117,7 +117,7 @@ fn every_digraph_of_up_to_four_nodes_matches_the_definition() {
 
 #[test]
 fn every_multigraph_of_up_to_three_nodes_matches_the_definition() {
-    let mut scratch = DominatorScratch::new();
+    let mut scratch = DominatorScratch::default();
     for node_count in 1..=3 {
         for_each_multigraph(node_count, 2, |edges| {
             check_against_definition(edges, &mut scratch);
@@ -128,8 +128,8 @@ fn every_multigraph_of_up_to_three_nodes_matches_the_definition() {
 #[test]
 fn doubling_every_edge_of_a_four_node_digraph_keeps_the_tree() {
     for_each_multigraph(4, 1, |edges| {
-        let once = DominatorTree::compute_from(&edges.graph(), 0);
-        let twice = DominatorTree::compute_from(&edges.repeated(2).graph(), 0);
+        let once = DominatorTree::compute(&edges.graph());
+        let twice = DominatorTree::compute(&edges.repeated(2).graph());
         assert_eq!(once, twice, "{edges:?}");
     });
 }
@@ -139,7 +139,7 @@ fn a_root_other_than_node_zero_is_honored() {
     for_each_multigraph(3, 1, |edges| {
         let graph = edges.graph();
         for root in 0..edges.node_count {
-            let tree = DominatorTree::compute_from(&graph, node(root));
+            let tree = DominatorTree::compute(&Rooted::new(&graph, node(root)));
             assert_eq!(tree.idom(node(root)), None, "{edges:?}");
             assert_eq!(tree.level(node(root)), Some(0), "{edges:?}");
             assert_eq!(tree.preorder().first(), Some(&node(root)), "{edges:?}");

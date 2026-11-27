@@ -6,13 +6,12 @@
 use std::convert::Infallible;
 
 use cfglib::{
-    BlockId, Cfg, DenseId, Direction, EdgeKind, EdgeProblem, Graph, IterationOrder, NodeId,
-    NodeProblem, Problem, SolveConfig, SolveError, TryEdgeProblem, TryNodeProblem, TryProblem,
-    TrySolveError, meet_options, solve_edge_problem_with_config,
-    solve_node_problem_from_with_config, solve_node_problem_with_config, solve_problem_with_config,
-    try_solve_edge_problem_with_config, try_solve_node_problem_with_config,
-    try_solve_problem_with_config,
+    BlockId, Cfg, DenseId, Direction, EdgeKind, EdgeProblem, Graph, GraphView, IterationOrder,
+    NodeId, NodeProblem, SolveConfig, SolveError, TryEdgeProblem, TryNodeProblem, TrySolveError,
+    meet_options, solve_edge_problem, solve_node_problem,
 };
+
+use crate::graphs::{live, rooted, seeded, step_limit};
 
 /// The values `i` may hold; `i64::MIN` and `i64::MAX` stand for the
 /// unbounded ends.
@@ -155,18 +154,18 @@ impl Counter {
     }
 }
 
-impl NodeProblem<Graph<(), ()>> for Counter {
+impl<G: GraphView> NodeProblem<G> for Counter {
     type Fact = Range;
 
     fn direction(&self) -> Direction {
         self.direction()
     }
 
-    fn bottom(&self, _graph: &Graph<(), ()>) -> Range {
+    fn bottom(&self, _graph: &G) -> Range {
         None
     }
 
-    fn boundary(&self, _graph: &Graph<(), ()>) -> Range {
+    fn boundary(&self, _graph: &G) -> Range {
         self.boundary()
     }
 
@@ -174,40 +173,8 @@ impl NodeProblem<Graph<(), ()>> for Counter {
         Self::join(left, right)
     }
 
-    fn transfer(&self, _graph: &Graph<(), ()>, node: NodeId, input: &Range) -> Range {
+    fn transfer(&self, _graph: &G, node: G::NodeId, input: &Range) -> Range {
         self.transfer(node.index(), input)
-    }
-
-    fn widen(&self, previous: &Range, next: &Range) -> Range {
-        Self::widen(previous, next)
-    }
-
-    fn narrow(&self, previous: &Range, next: &Range) -> Range {
-        Self::narrow(previous, next)
-    }
-}
-
-impl Problem<Cfg<()>> for Counter {
-    type Fact = Range;
-
-    fn direction(&self) -> Direction {
-        self.direction()
-    }
-
-    fn bottom(&self, _cfg: &Cfg<()>) -> Range {
-        None
-    }
-
-    fn boundary(&self, _cfg: &Cfg<()>) -> Range {
-        self.boundary()
-    }
-
-    fn meet(&self, left: &Range, right: &Range) -> Range {
-        Self::join(left, right)
-    }
-
-    fn transfer(&self, _cfg: &Cfg<()>, block: BlockId, input: &Range) -> Range {
-        self.transfer(block.index(), input)
     }
 
     fn widen(&self, previous: &Range, next: &Range) -> Range {
@@ -318,7 +285,7 @@ impl TryNodeProblem<Graph<(), ()>> for Fallible {
     }
 }
 
-impl TryProblem<Cfg<()>> for Fallible {
+impl TryNodeProblem<Cfg<()>> for Fallible {
     type Fact = Range;
     type Error = Infallible;
 
@@ -464,19 +431,33 @@ fn block(index: usize) -> BlockId {
 
 const LIMIT: usize = 1_000;
 
+/// The weak topological order, bounded by `LIMIT`, without narrowing.
 fn widening() -> SolveConfig {
-    SolveConfig::with_step_limit(LIMIT).with_order(IterationOrder::WeakTopological)
+    SolveConfig {
+        order: IterationOrder::WeakTopological,
+        ..step_limit(LIMIT)
+    }
+}
+
+/// [`widening`] with `passes` narrowing passes.
+fn narrowing(passes: usize) -> SolveConfig {
+    SolveConfig {
+        narrowing_passes: passes,
+        ..widening()
+    }
 }
 
 #[test]
 fn the_index_order_runs_out_of_steps_on_an_infinite_height_lattice() {
     let graph = loop_graph();
-    let bounded = SolveConfig::with_step_limit(LIMIT);
     for order in [IterationOrder::Index, IterationOrder::ReversePostorder] {
-        let config = bounded.with_order(order);
-        let error = solve_node_problem_with_config(&graph, &Counter::forward(), config);
+        let config = SolveConfig {
+            order,
+            ..step_limit(LIMIT)
+        };
+        let error = solve_node_problem(&graph, &Counter::forward(), live(config)).unwrap_err();
         assert!(matches!(
-            error.unwrap_err(),
+            SolveError::from(error),
             SolveError::StepLimitExceeded { limit: LIMIT, .. }
         ));
     }
@@ -485,8 +466,9 @@ fn the_index_order_runs_out_of_steps_on_an_infinite_height_lattice() {
 #[test]
 fn widening_at_the_loop_head_converges_to_the_unbounded_interval() {
     let graph = loop_graph();
-    let facts = solve_node_problem_with_config(&graph, &Counter::forward(), widening()).unwrap();
-    assert!(facts.steps() < 20, "converged in {} steps", facts.steps());
+    let facts = solve_node_problem(&graph, &Counter::forward(), live(widening())).unwrap();
+    let steps = facts.stats().step_count();
+    assert!(steps < 20, "converged in {steps} steps");
     assert_eq!(*facts.fact_out(node(INIT)), range(0, 0));
     assert_eq!(*facts.fact_in(node(HEAD)), range(0, i64::MAX));
     assert_eq!(*facts.fact_out(node(HEAD)), range(0, i64::MAX));
@@ -497,22 +479,20 @@ fn widening_at_the_loop_head_converges_to_the_unbounded_interval() {
 #[test]
 fn one_narrowing_pass_recovers_the_bound_that_the_guard_implies() {
     let graph = loop_graph();
-    let widened = solve_node_problem_with_config(&graph, &Counter::forward(), widening()).unwrap();
-    let config = widening().with_narrowing_passes(1);
-    let facts = solve_node_problem_with_config(&graph, &Counter::forward(), config).unwrap();
+    let widened = solve_node_problem(&graph, &Counter::forward(), live(widening())).unwrap();
+    let facts = solve_node_problem(&graph, &Counter::forward(), live(narrowing(1))).unwrap();
     assert_eq!(*facts.fact_in(node(HEAD)), range(0, N));
     assert_eq!(*facts.fact_out(node(BODY)), range(1, N));
     assert_eq!(*facts.fact_out(node(EXIT)), range(N, N));
     // The pass sweeps the loop's two nodes as soon as the solve leaves the
     // loop, so `EXIT` still runs once, on the narrowed fact.
-    assert_eq!(facts.steps(), widened.steps() + 2);
+    assert_eq!(facts.stats().step_count(), widened.stats().step_count() + 2);
 
     // A second pass finds nothing left to narrow: one more sweep of the loop,
     // and the passes stop.
-    let more = widening().with_narrowing_passes(5);
-    let again = solve_node_problem_with_config(&graph, &Counter::forward(), more).unwrap();
+    let again = solve_node_problem(&graph, &Counter::forward(), live(narrowing(5))).unwrap();
     assert_eq!(*again.fact_in(node(HEAD)), range(0, N));
-    assert_eq!(again.steps(), facts.steps() + 2);
+    assert_eq!(again.stats().step_count(), facts.stats().step_count() + 2);
 }
 
 #[test]
@@ -522,38 +502,49 @@ fn narrowing_passes_run_only_in_the_weak_topological_order() {
     let graph = loop_graph();
     let counter = Counter::up_to(5);
     for order in [IterationOrder::Index, IterationOrder::ReversePostorder] {
-        let plain = SolveConfig::new().with_order(order);
-        let exact = solve_node_problem_with_config(&graph, &counter, plain).unwrap();
+        let plain = SolveConfig {
+            order,
+            ..SolveConfig::default()
+        };
+        let exact = solve_node_problem(&graph, &counter, live(plain)).unwrap();
         assert_eq!(*exact.fact_in(node(HEAD)), range(0, 5));
-        let passes = plain.with_narrowing_passes(3);
-        let same = solve_node_problem_with_config(&graph, &counter, passes).unwrap();
-        assert_eq!(same.steps(), exact.steps(), "{order:?}");
+        let passes = SolveConfig {
+            narrowing_passes: 3,
+            ..plain
+        };
+        let same = solve_node_problem(&graph, &counter, live(passes)).unwrap();
+        assert_eq!(
+            same.stats().step_count(),
+            exact.stats().step_count(),
+            "{order:?}"
+        );
         assert_eq!(*same.fact_in(node(HEAD)), range(0, 5));
     }
-    let widened = solve_node_problem_with_config(&graph, &counter, widening()).unwrap();
+    let widened = solve_node_problem(&graph, &counter, live(widening())).unwrap();
     assert_eq!(*widened.fact_in(node(HEAD)), range(0, i64::MAX));
-    let narrowed = widening().with_narrowing_passes(1);
-    let narrowed = solve_node_problem_with_config(&graph, &counter, narrowed).unwrap();
+    let narrowed = solve_node_problem(&graph, &counter, live(narrowing(1))).unwrap();
     assert_eq!(*narrowed.fact_in(node(HEAD)), range(0, 5));
 }
 
 #[test]
 fn the_step_limit_also_bounds_the_narrowing_passes() {
     let graph = loop_graph();
-    let narrowing = widening().with_narrowing_passes(1);
-    let needed = solve_node_problem_with_config(&graph, &Counter::forward(), narrowing)
+    let needed = solve_node_problem(&graph, &Counter::forward(), live(narrowing(1)))
         .unwrap()
-        .steps();
+        .stats()
+        .step_count();
     // The last three steps are the sweep of `HEAD` and `BODY`, then `EXIT`:
     // a limit two short stops the sweep before `BODY`.
-    let config = SolveConfig::with_step_limit(needed - 2)
-        .with_order(IterationOrder::WeakTopological)
-        .with_narrowing_passes(1);
+    let config = SolveConfig {
+        max_steps: Some(needed - 2),
+        ..narrowing(1)
+    };
+    let error = solve_node_problem(&graph, &Counter::forward(), live(config)).unwrap_err();
     let SolveError::StepLimitExceeded {
         steps,
         pending_node,
         ..
-    } = solve_node_problem_with_config(&graph, &Counter::forward(), config).unwrap_err();
+    } = SolveError::from(error);
     assert_eq!(steps, needed - 2);
     assert_eq!(pending_node, BODY);
 }
@@ -561,14 +552,13 @@ fn the_step_limit_also_bounds_the_narrowing_passes() {
 #[test]
 fn a_seeded_solve_narrows_only_what_it_visited() {
     let graph = loop_graph();
-    let config = widening().with_narrowing_passes(1);
-    let facts =
-        solve_node_problem_from_with_config(&graph, &Counter::forward(), &[node(BODY)], config)
-            .unwrap();
+    let body = [node(BODY)];
+    let facts = solve_node_problem(&graph, &Counter::forward(), seeded(&body, narrowing(1)));
+    let facts = facts.unwrap();
     // Only `BODY` is visited: once ascending, and once by the sweep of its
     // loop, which skips the head that the seeded solve never reached. Nothing
     // flows into `BODY`, so it transfers bottom and queues nothing.
-    assert_eq!(facts.steps(), 2);
+    assert_eq!(facts.stats().step_count(), 2);
     for index in [INIT, HEAD, BODY, EXIT] {
         assert_eq!(*facts.fact_out(node(index)), None, "node {index}");
     }
@@ -578,35 +568,35 @@ fn a_seeded_solve_narrows_only_what_it_visited() {
 fn a_backward_solve_widens_the_fact_flowing_into_the_head_which_is_its_out_fact() {
     let graph = loop_graph();
     let backward = Counter::backward();
-    let bounded = SolveConfig::with_step_limit(LIMIT);
-    assert!(solve_node_problem_with_config(&graph, &backward, bounded).is_err());
-    let facts = solve_node_problem_with_config(&graph, &backward, widening()).unwrap();
+    assert!(solve_node_problem(&graph, &backward, live(step_limit(LIMIT))).is_err());
+    let facts = solve_node_problem(&graph, &backward, live(widening())).unwrap();
     assert_eq!(*facts.fact_out(node(HEAD)), range(0, i64::MAX));
     assert_eq!(*facts.fact_in(node(INIT)), range(0, i64::MAX));
     assert_eq!(*facts.fact_in(node(EXIT)), range(0, 0));
 }
 
 #[test]
-fn the_block_and_edge_solvers_widen_and_narrow_the_same_way() {
+fn the_node_and_edge_solvers_widen_and_narrow_the_same_way_over_a_cfg() {
     let cfg = loop_cfg();
     let counter = Counter::forward();
     let fallible = Fallible(Counter::forward());
-    let bounded = SolveConfig::with_step_limit(LIMIT);
-    assert!(solve_problem_with_config(&cfg, &counter, bounded).is_err());
-    assert!(solve_edge_problem_with_config(&cfg, &counter, bounded).is_err());
+    let from_entry = |config| rooted(&cfg, Direction::Forward, config);
+    let bounded = step_limit(LIMIT);
+    assert!(solve_node_problem(&cfg, &counter, from_entry(bounded)).is_err());
+    assert!(solve_edge_problem(&cfg, &counter, live(bounded)).is_err());
     let expected = [
         (0, range(0, i64::MAX), range(N, i64::MAX)),
         (1, range(0, N), range(N, N)),
     ];
     for (passes, head, exit) in expected {
-        let config = widening().with_narrowing_passes(passes);
-        let blocks = solve_problem_with_config(&cfg, &counter, config).unwrap();
-        let edges = solve_edge_problem_with_config(&cfg, &counter, config).unwrap();
-        let try_blocks = try_solve_problem_with_config(&cfg, &fallible, config).unwrap();
-        let try_edges = try_solve_edge_problem_with_config(&cfg, &fallible, config).unwrap();
+        let config = narrowing(passes);
+        let blocks = solve_node_problem(&cfg, &counter, from_entry(config)).unwrap();
+        let edges = solve_edge_problem(&cfg, &counter, live(config)).unwrap();
+        let try_blocks = solve_node_problem(&cfg, &fallible, from_entry(config)).unwrap();
+        let try_edges = solve_edge_problem(&cfg, &fallible, live(config)).unwrap();
         let solves = [
             (
-                "block",
+                "node",
                 blocks.fact_in(block(HEAD)),
                 blocks.fact_out(block(EXIT)),
             ),
@@ -616,7 +606,7 @@ fn the_block_and_edge_solvers_widen_and_narrow_the_same_way() {
                 edges.fact_out(block(EXIT)),
             ),
             (
-                "fallible block",
+                "fallible node",
                 try_blocks.fact_in(block(HEAD)),
                 try_blocks.fact_out(block(EXIT)),
             ),
@@ -637,12 +627,10 @@ fn the_block_and_edge_solvers_widen_and_narrow_the_same_way() {
 fn the_fallible_node_solver_widens_and_narrows_only_at_the_head() {
     let graph = loop_graph();
     let fallible = Fallible(Counter::forward());
-    let config = widening().with_narrowing_passes(1);
-    let facts = try_solve_node_problem_with_config(&graph, &fallible, config).unwrap();
+    let facts = solve_node_problem(&graph, &fallible, live(narrowing(1))).unwrap();
     assert_eq!(*facts.fact_in(node(HEAD)), range(0, N));
-    let bounded = SolveConfig::with_step_limit(LIMIT);
     assert!(matches!(
-        try_solve_node_problem_with_config(&graph, &fallible, bounded),
+        solve_node_problem(&graph, &fallible, live(step_limit(LIMIT))),
         Err(TrySolveError::Solver(_))
     ));
 }

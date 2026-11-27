@@ -12,6 +12,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::{AddressSpace, UnwindEnd, UnwindRoute, UnwindStep};
+use crate::identity::{NO_INDEX, word};
 
 /// The position of a node in [`Tries::nodes`].
 pub(super) type NodeId = usize;
@@ -61,15 +62,15 @@ impl<A: AddressSpace> Tries<A> {
     }
 
     /// The first route to reach each node, by node.
-    pub(super) fn first_routes(&self) -> Vec<usize> {
-        let mut first = vec![usize::MAX; self.nodes.len()];
+    pub(super) fn first_routes(&self) -> Vec<u32> {
+        let mut first = vec![NO_INDEX; self.nodes.len()];
         for (route, &root) in self.roots.iter().enumerate() {
             let mut pending = Vec::from([root]);
             while let Some(node) = pending.pop() {
-                if first[node] != usize::MAX {
+                if first[node] != NO_INDEX {
                     continue;
                 }
-                first[node] = route;
+                first[node] = word(route);
                 pending.extend(self.nodes[node].edges.iter().map(|&(_, child)| child));
             }
         }

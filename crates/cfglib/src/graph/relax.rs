@@ -1,4 +1,4 @@
-//! Edge-defined minimum-label relaxation over [`Graph`].
+//! Edge-defined minimum-label relaxation over any [`EdgeView`].
 //!
 //! Unlike node-only traversals, relaxation retains parallel edge identities and
 //! may revisit a node whenever a smaller label reaches it. This supports
@@ -10,24 +10,30 @@ use alloc::collections::BinaryHeap;
 use alloc::vec::Vec;
 use core::cmp::Reverse;
 
-use super::store::{EdgeRecord, Graph, NodeId};
-use super::traverse::TraversalDirection;
+use crate::graph::edge_traverse::EdgeAdjacency;
+use crate::graph::edge_view::{EdgeRef, EdgeView};
+use crate::graph::traverse::by_axis;
+use crate::graph::view::{DenseId, Direction, assert_in_bound};
 
 /// Compute the minimum label reachable at every node from `seeds`.
 ///
-/// `relax` receives each real edge in its stored direction plus the current
-/// label at the node being expanded. It returns the candidate label for the
-/// far endpoint, or `None` to reject that edge. A node is expanded again every
-/// time its known label decreases, so improvements propagate through cycles
-/// and through nodes visited earlier with a larger label. Incoming traversal
-/// changes which endpoint is considered far but does not reverse the edge
-/// passed to `relax`.
+/// `relax` receives each edge of the view as the view orients it, plus the
+/// current label at the node being expanded. It returns the candidate label
+/// for the far endpoint, or `None` to reject that edge. A node is expanded
+/// again every time its known label decreases, so improvements propagate
+/// through cycles and through nodes visited earlier with a larger label.
+/// [`Direction::Backward`] walks the incoming edges, which changes which
+/// endpoint is considered far but does not reverse the edge passed to
+/// `relax`.
 ///
 /// Labels need only be ordered; they do not need to be cloneable. For a stable,
 /// order-independent result, edge transfer must preserve improvements: a
 /// smaller input label cannot lose a candidate or produce a larger candidate
 /// than a larger input label. The reachable label space must also have no
 /// infinite strictly descending chain so the worklist terminates.
+///
+/// The result is indexed by [`DenseId::index`] and sized by the view's node
+/// bound; a node no seed reaches holds `None`.
 ///
 /// # Complexity
 ///
@@ -46,7 +52,7 @@ use super::traverse::TraversalDirection;
 /// # Examples
 ///
 /// ```rust
-/// use cfglib::{Graph, TraversalDirection, min_label_relaxation};
+/// use cfglib::{Graph, Direction, min_label_relaxation};
 ///
 /// let mut graph = Graph::new();
 /// let start = graph.add_node(());
@@ -59,61 +65,65 @@ use super::traverse::TraversalDirection;
 /// let distances = min_label_relaxation(
 ///     &graph,
 ///     [(start, 0_u32)],
-///     TraversalDirection::Outgoing,
-///     |edge, distance| distance.checked_add(*edge.payload()),
+///     Direction::Forward,
+///     |edge, distance| distance.checked_add(*edge.data()),
 /// );
 /// assert_eq!(distances, [Some(0), Some(2), Some(5)]);
 /// ```
 #[must_use]
-pub fn min_label_relaxation<N, E, L>(
-    graph: &Graph<N, E>,
-    seeds: impl IntoIterator<Item = (NodeId, L)>,
-    direction: TraversalDirection,
-    mut relax: impl FnMut(&EdgeRecord<E>, &L) -> Option<L>,
+pub fn min_label_relaxation<G, L>(
+    graph: &G,
+    seeds: impl IntoIterator<Item = (G::NodeId, L)>,
+    direction: Direction,
+    relax: impl FnMut(EdgeRef<'_, G::NodeId, G::EdgeId, G::EdgeData>, &L) -> Option<L>,
 ) -> Vec<Option<L>>
 where
+    G: EdgeView,
     L: Ord,
+{
+    by_axis!(direction, relax_along(graph, seeds, relax))
+}
+
+fn relax_along<G, L, A>(
+    axis: A,
+    graph: &G,
+    seeds: impl IntoIterator<Item = (G::NodeId, L)>,
+    mut relax: impl FnMut(EdgeRef<'_, G::NodeId, G::EdgeId, G::EdgeData>, &L) -> Option<L>,
+) -> Vec<Option<L>>
+where
+    G: EdgeView,
+    L: Ord,
+    A: EdgeAdjacency,
 {
     let mut labels: Vec<Option<L>> = (0..graph.node_bound()).map(|_| None).collect();
     // A min-heap of pending candidates, smallest label first and ties to the
-    // smaller node, so the expansion order is fixed by the labels alone.
-    let mut worklist: BinaryHeap<Reverse<(L, NodeId)>> = seeds
+    // smaller node index, so the expansion order is fixed by the labels alone.
+    let mut worklist: BinaryHeap<Reverse<(L, usize)>> = seeds
         .into_iter()
-        .map(|(node, label)| Reverse((label, node)))
+        .map(|(node, label)| {
+            assert_in_bound(graph, node, "seed node");
+            Reverse((label, node.index()))
+        })
         .collect();
-    let forward = matches!(direction, TraversalDirection::Outgoing);
 
-    while let Some(Reverse((candidate, node))) = worklist.pop() {
-        assert!(node.index() < labels.len(), "seed node is out of range");
-        if labels[node.index()]
+    while let Some(Reverse((candidate, index))) = worklist.pop() {
+        if labels[index]
             .as_ref()
             .is_some_and(|known| known <= &candidate)
         {
             continue;
         }
-        labels[node.index()] = Some(candidate);
-        let label = labels[node.index()]
+        labels[index] = Some(candidate);
+        let label = labels[index]
             .as_ref()
             .expect("the candidate label was just stored");
-        let adjacency = if forward {
-            graph.outgoing(node)
-        } else {
-            graph.incoming(node)
-        };
-        for edge_id in adjacency {
+        for edge_id in axis.edges(graph, G::NodeId::from_index(index)) {
             let edge = graph.edge(edge_id);
             if let Some(candidate) = relax(edge, label) {
-                let far = if forward {
-                    edge.target()
-                } else {
-                    edge.source()
-                };
+                let far = axis.next(edge).index();
                 // A candidate no smaller than the known label would be
                 // discarded when popped; leaving it out keeps the heap small.
-                if labels[far.index()]
-                    .as_ref()
-                    .is_none_or(|known| &candidate < known)
-                {
+                if labels[far].as_ref().is_none_or(|known| &candidate < known) {
                     worklist.push(Reverse((candidate, far)));
                 }
             }
@@ -126,6 +136,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::edge::EdgeId;
+    use crate::graph::store::{Graph, NodeId};
 
     #[derive(Clone, Copy)]
     enum Rule {
@@ -134,8 +146,8 @@ mod tests {
         Block,
     }
 
-    fn apply_rule(edge: &EdgeRecord<Rule>, label: u32) -> Option<u32> {
-        match *edge.payload() {
+    fn apply_rule(edge: EdgeRef<'_, NodeId, EdgeId, Rule>, label: u32) -> Option<u32> {
+        match *edge.data() {
             Rule::Mint(label) => Some(label),
             Rule::Carry => Some(label),
             Rule::Block => None,
@@ -156,12 +168,10 @@ mod tests {
         graph.add_edge(join, tail, Rule::Carry);
         graph.add_edge(root, blocked, Rule::Block);
 
-        let labels = min_label_relaxation(
-            &graph,
-            [(root, 0)],
-            TraversalDirection::Outgoing,
-            |edge, label| apply_rule(edge, *label),
-        );
+        let labels =
+            min_label_relaxation(&graph, [(root, 0)], Direction::Forward, |edge, label| {
+                apply_rule(edge, *label)
+            });
 
         assert_eq!(labels, [Some(0), Some(2), Some(2), Some(2), None]);
     }
@@ -175,12 +185,10 @@ mod tests {
         graph.add_edge(source, middle, Rule::Carry);
         graph.add_edge(middle, sink, Rule::Carry);
 
-        let labels = min_label_relaxation(
-            &graph,
-            [(sink, 4)],
-            TraversalDirection::Incoming,
-            |edge, label| apply_rule(edge, *label),
-        );
+        let labels =
+            min_label_relaxation(&graph, [(sink, 4)], Direction::Backward, |edge, label| {
+                apply_rule(edge, *label)
+            });
 
         assert_eq!(labels, [Some(4), Some(4), Some(4)]);
     }
@@ -196,7 +204,7 @@ mod tests {
         let labels = min_label_relaxation(
             &graph,
             [(source, 1), (source, 7)],
-            TraversalDirection::Outgoing,
+            Direction::Forward,
             |edge, label| apply_rule(edge, *label),
         );
 
@@ -210,7 +218,7 @@ mod tests {
         let _ = min_label_relaxation(
             &graph,
             [(NodeId::from_index(0), 0_u32)],
-            TraversalDirection::Outgoing,
+            Direction::Forward,
             |_, label| Some(*label),
         );
     }
@@ -238,10 +246,10 @@ mod tests {
         let labels = min_label_relaxation(
             &graph,
             [(start, 0_u64)],
-            TraversalDirection::Outgoing,
+            Direction::Forward,
             |edge, label| {
                 calls += 1;
-                label.checked_add(*edge.payload())
+                label.checked_add(*edge.data())
             },
         );
         assert_eq!(labels[spine.index()], Some(0));
@@ -265,15 +273,15 @@ mod tests {
                 graph.add_edge(nodes[source], nodes[target], weight);
                 edges.push((source, target, weight));
             }
-            for direction in [TraversalDirection::Outgoing, TraversalDirection::Incoming] {
+            for direction in [Direction::Forward, Direction::Backward] {
                 let seed = rng.below(node_count);
                 let mut expected = alloc::vec![None; node_count];
                 expected[seed] = Some(0_u64);
                 for _ in 0..node_count {
                     for &(source, target, weight) in &edges {
                         let (near, far) = match direction {
-                            TraversalDirection::Outgoing => (source, target),
-                            TraversalDirection::Incoming => (target, source),
+                            Direction::Forward => (source, target),
+                            Direction::Backward => (target, source),
                         };
                         if let Some(label) = expected[near] {
                             let candidate = label + weight;
@@ -290,7 +298,7 @@ mod tests {
                     direction,
                     |edge, label| {
                         calls += 1;
-                        label.checked_add(*edge.payload())
+                        label.checked_add(*edge.data())
                     },
                 );
                 assert_eq!(labels, expected);

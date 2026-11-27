@@ -30,7 +30,7 @@ fn unreachable_code_gets_numbered_trees_of_its_own() {
 
     let mut roots = Vec::new();
     let forest = dominators
-        .complete_forest_in(&mut DominatorScratch::new(), &mut roots, &cfg)
+        .complete_forest_in(&mut DominatorScratch::default(), &mut roots, &cfg)
         .expect("unreachable blocks call for a forest");
 
     // The entry, one block of the loop, and the unreachable source start trees.
@@ -63,7 +63,7 @@ fn unreachable_code_gets_numbered_trees_of_its_own() {
     assert_eq!(forest.nearest_common_dominator(left, right), Some(entry));
     assert_eq!(forest.nearest_common_dominator(left, join), None);
     assert_eq!(
-        forest.nearest_common_dominator_of([left, right, join]),
+        forest.nearest_common_dominator_among([left, right, join]),
         None
     );
 }
@@ -74,6 +74,7 @@ fn a_cfg_the_entry_reaches_entirely_needs_no_forest() {
     let next = cfg.new_block();
     cfg.add_edge(cfg.entry(), next, EdgeKind::Fallthrough);
     let dominators = DominatorTree::compute(&cfg);
-    let forest = dominators.complete_forest_in(&mut DominatorScratch::new(), &mut Vec::new(), &cfg);
+    let forest =
+        dominators.complete_forest_in(&mut DominatorScratch::default(), &mut Vec::new(), &cfg);
     assert!(forest.is_none());
 }

@@ -5,15 +5,18 @@ extern crate alloc;
 use alloc::borrow::Cow;
 
 use crate::display::DisplayInstr;
-use crate::flow::{FlowControl, FlowEffect};
+use crate::flow::{Flow, FlowControl, FlowEffect};
 
 /// A minimal mock instruction carrying only flow-effect and mnemonic.
 #[derive(Debug, Clone)]
-pub struct MockInst(pub FlowEffect, pub &'static str);
+pub struct MockInst(pub FlowEffect<&'static str, ()>, pub &'static str);
 
 impl FlowControl for MockInst {
-    fn flow_effect(&self) -> FlowEffect {
-        self.0
+    type Target = &'static str;
+    type CaseKey = ();
+
+    fn flow_effect(&self) -> FlowEffect<&'static str, ()> {
+        self.0.clone()
     }
 }
 
@@ -23,9 +26,14 @@ impl DisplayInstr for MockInst {
     }
 }
 
-/// Shorthand for a [`MockInst`] with [`FlowEffect::Fallthrough`].
+/// Shorthand for a [`MockInst`] with [`Flow::Next`].
 pub fn ff(name: &'static str) -> MockInst {
-    MockInst(FlowEffect::Fallthrough, name)
+    MockInst(FlowEffect::Flow(Flow::Next), name)
+}
+
+/// Shorthand for a [`MockInst`] with [`Flow::Return`].
+pub fn ret(name: &'static str) -> MockInst {
+    MockInst(FlowEffect::Flow(Flow::Return), name)
 }
 
 /// Build a diamond CFG: entry → A, entry → B, A → merge, B → merge.

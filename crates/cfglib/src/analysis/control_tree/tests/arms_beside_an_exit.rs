@@ -6,11 +6,15 @@ use crate::ControlTree;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::flow::FlowEffect;
+use crate::flow::{Flow, FlowEffect};
 use crate::test_util::{MockInst, ff};
 
 /// A new block that leaves the function through `effect`.
-fn exit(cfg: &mut Cfg<MockInst>, effect: FlowEffect, name: &'static str) -> BlockId {
+fn exit(
+    cfg: &mut Cfg<MockInst>,
+    effect: FlowEffect<&'static str, ()>,
+    name: &'static str,
+) -> BlockId {
     let block = cfg.new_block();
     cfg.block_mut(block).push(MockInst(effect, name));
     block
@@ -23,8 +27,8 @@ fn exit(cfg: &mut Cfg<MockInst>, effect: FlowEffect, name: &'static str) -> Bloc
 fn switch_arms_beside_a_throwing_default_rejoin_outside_a_try() {
     let mut cfg: Cfg<MockInst> = Cfg::new();
     let [dispatch, first_case, second_case, join] = blocks(&mut cfg, ["k", "p", "q", "z"]);
-    let throw = exit(&mut cfg, FlowEffect::Terminate, "throw");
-    let leave = exit(&mut cfg, FlowEffect::Return, "ret");
+    let throw = exit(&mut cfg, FlowEffect::Flow(Flow::Throw), "throw");
+    let leave = exit(&mut cfg, FlowEffect::Flow(Flow::Return), "ret");
     cfg.add_edge(cfg.entry(), dispatch, EdgeKind::Fallthrough);
     cfg.add_edge(dispatch, first_case, EdgeKind::SwitchCase);
     cfg.add_edge(dispatch, second_case, EdgeKind::SwitchCase);
@@ -48,8 +52,8 @@ fn else_if_arms_beside_a_return_rejoin_outside_a_try() {
     let mut cfg: Cfg<MockInst> = Cfg::new();
     let [test, then_arm, second_test, second_arm, join] =
         blocks(&mut cfg, ["a", "x", "b", "y", "z"]);
-    let early = exit(&mut cfg, FlowEffect::Return, "early");
-    let leave = exit(&mut cfg, FlowEffect::Return, "ret");
+    let early = exit(&mut cfg, FlowEffect::Flow(Flow::Return), "early");
+    let leave = exit(&mut cfg, FlowEffect::Flow(Flow::Return), "ret");
     cfg.add_edge(cfg.entry(), test, EdgeKind::Fallthrough);
     cfg.add_edge(test, then_arm, EdgeKind::ConditionalTrue);
     cfg.add_edge(test, second_test, EdgeKind::ConditionalFalse);
@@ -73,9 +77,9 @@ fn else_if_arms_beside_a_return_rejoin_outside_a_try() {
 fn arms_rejoin_before_code_that_leaves_by_several_exits() {
     let mut cfg: Cfg<MockInst> = Cfg::new();
     let [dispatch, first_case, second_case, join] = blocks(&mut cfg, ["k", "p", "q", "c"]);
-    let throw = exit(&mut cfg, FlowEffect::Terminate, "throw");
-    let one = exit(&mut cfg, FlowEffect::Return, "ret1");
-    let two = exit(&mut cfg, FlowEffect::Return, "ret2");
+    let throw = exit(&mut cfg, FlowEffect::Flow(Flow::Throw), "throw");
+    let one = exit(&mut cfg, FlowEffect::Flow(Flow::Return), "ret1");
+    let two = exit(&mut cfg, FlowEffect::Flow(Flow::Return), "ret2");
     cfg.add_edge(cfg.entry(), dispatch, EdgeKind::Fallthrough);
     cfg.add_edge(dispatch, first_case, EdgeKind::SwitchCase);
     cfg.add_edge(dispatch, second_case, EdgeKind::SwitchCase);
@@ -101,8 +105,8 @@ fn an_arm_that_may_return_early_still_rejoins() {
     let mut cfg: Cfg<MockInst> = Cfg::new();
     let [test, then_arm, early_test, second_arm, join] =
         blocks(&mut cfg, ["a", "x", "c", "y", "z"]);
-    let early = exit(&mut cfg, FlowEffect::Return, "early");
-    let leave = exit(&mut cfg, FlowEffect::Return, "ret");
+    let early = exit(&mut cfg, FlowEffect::Flow(Flow::Return), "early");
+    let leave = exit(&mut cfg, FlowEffect::Flow(Flow::Return), "ret");
     cfg.add_edge(cfg.entry(), test, EdgeKind::Fallthrough);
     cfg.add_edge(test, then_arm, EdgeKind::ConditionalTrue);
     cfg.add_edge(test, second_arm, EdgeKind::ConditionalFalse);
@@ -134,7 +138,7 @@ fn arms_beside_a_throw_rejoin_in_a_loop_body() {
         latch,
         after,
     ] = blocks(&mut cfg, ["l", "a", "x", "b", "y", "z", "after"]);
-    let throw = exit(&mut cfg, FlowEffect::Terminate, "throw");
+    let throw = exit(&mut cfg, FlowEffect::Flow(Flow::Throw), "throw");
     cfg.add_edge(cfg.entry(), header, EdgeKind::Fallthrough);
     cfg.add_edge(header, test, EdgeKind::ConditionalTrue);
     cfg.add_edge(header, after, EdgeKind::ConditionalFalse);
@@ -158,8 +162,8 @@ fn arms_beside_a_throw_rejoin_in_a_loop_body() {
 fn a_lone_completing_arm_still_runs_to_the_end_of_the_function() {
     let mut cfg: Cfg<MockInst> = Cfg::new();
     let [test, then_arm, join] = blocks(&mut cfg, ["a", "x", "z"]);
-    let early = exit(&mut cfg, FlowEffect::Return, "early");
-    let leave = exit(&mut cfg, FlowEffect::Return, "ret");
+    let early = exit(&mut cfg, FlowEffect::Flow(Flow::Return), "early");
+    let leave = exit(&mut cfg, FlowEffect::Flow(Flow::Return), "ret");
     cfg.add_edge(cfg.entry(), test, EdgeKind::Fallthrough);
     cfg.add_edge(test, then_arm, EdgeKind::ConditionalTrue);
     cfg.add_edge(test, early, EdgeKind::ConditionalFalse);
@@ -179,15 +183,16 @@ fn a_lone_completing_arm_still_runs_to_the_end_of_the_function() {
 fn arms_that_leave_by_their_own_exits_do_not_rejoin() {
     let mut cfg: Cfg<MockInst> = Cfg::new();
     let [dispatch] = blocks(&mut cfg, ["k"]);
-    let first_case = exit(&mut cfg, FlowEffect::Return, "p");
-    let second_case = exit(&mut cfg, FlowEffect::Return, "q");
-    let throw = exit(&mut cfg, FlowEffect::Terminate, "throw");
+    let first_case = exit(&mut cfg, FlowEffect::Flow(Flow::Return), "p");
+    let second_case = exit(&mut cfg, FlowEffect::Flow(Flow::Return), "q");
+    let throw = exit(&mut cfg, FlowEffect::Flow(Flow::Throw), "throw");
     cfg.add_edge(cfg.entry(), dispatch, EdgeKind::Fallthrough);
     cfg.add_edge(dispatch, first_case, EdgeKind::SwitchCase);
     cfg.add_edge(dispatch, second_case, EdgeKind::SwitchCase);
     cfg.add_edge(dispatch, throw, EdgeKind::Fallthrough);
 
-    let (tree, report) = ControlTree::compute_with_report(&cfg);
+    let tree = ControlTree::compute(&cfg);
+    let report = tree.report();
     assert!(report.is_fully_structured(), "{report:?}");
     let text = super::pseudocode(&cfg, &tree);
     assert!(
@@ -204,8 +209,8 @@ fn a_jump_into_the_other_arm_rejoins_beside_an_arm_that_returns() {
     let mut cfg: Cfg<MockInst> = Cfg::new();
     cfg.block_mut(cfg.entry()).push(ff("entry"));
     let [jumper, normal] = blocks(&mut cfg, ["jumper", "normal"]);
-    let target = exit(&mut cfg, FlowEffect::Return, "dst");
-    let other = exit(&mut cfg, FlowEffect::Return, "other");
+    let target = exit(&mut cfg, FlowEffect::Flow(Flow::Return), "dst");
+    let other = exit(&mut cfg, FlowEffect::Flow(Flow::Return), "other");
     cfg.add_edge(cfg.entry(), jumper, EdgeKind::ConditionalTrue);
     cfg.add_edge(cfg.entry(), normal, EdgeKind::ConditionalFalse);
     cfg.add_edge(jumper, target, EdgeKind::Jump);

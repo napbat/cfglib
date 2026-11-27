@@ -13,9 +13,9 @@ use super::small_stack::on_small_stack;
 use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::EdgeKind;
-use crate::region::{Handler, HandlerBody, HandlerKind, Region, RegionId};
+use crate::region::{Handler, HandlerBody, HandlerKind, Region};
 use crate::test_util::{DfInst, df_ff};
-use crate::{ControlTree, LiftReport};
+use crate::{ControlTree, StructuringReport};
 
 const BLOCKS: usize = 100_000;
 
@@ -28,10 +28,11 @@ fn new_block(cfg: &mut Cfg<DfInst>) -> BlockId {
 
 /// Structure `cfg` on a small stack and check that every instruction is in the
 /// tree once. Returns the report.
-fn structure_and_cover(build: fn(usize) -> Cfg<DfInst>) -> LiftReport {
+fn structure_and_cover(build: fn(usize) -> Cfg<DfInst>) -> StructuringReport {
     on_small_stack(move || {
         let cfg = build(BLOCKS);
-        let (tree, report) = ControlTree::compute_with_report(&cfg);
+        let tree = ControlTree::compute(&cfg);
+        let report = tree.report();
         let mut seen = 0;
         tree.for_each_instruction(&cfg, |_, _| seen += 1);
         let total: usize = cfg
@@ -40,7 +41,7 @@ fn structure_and_cover(build: fn(usize) -> Cfg<DfInst>) -> LiftReport {
             .sum();
         assert_eq!(seen, total, "every instruction once");
         assert_eq!(report.unresolved_labels, []);
-        report
+        report.clone()
     })
 }
 
@@ -121,7 +122,6 @@ fn dead_pads(count: usize) -> Cfg<DfInst> {
         cfg.add_edge(pads[index], dead[index], EdgeKind::Jump);
         cfg.add_edge(pads[index], dead[index + 1], EdgeKind::Jump);
         cfg.add_region(Region {
-            id: RegionId::from_raw(0),
             protected_blocks: [chain[index]].into_iter().collect(),
             handlers: alloc::vec![Handler {
                 entry: pads[index],
@@ -129,7 +129,8 @@ fn dead_pads(count: usize) -> Cfg<DfInst> {
                 kind: HandlerKind::Catch,
             }],
             parent: None,
-        });
+        })
+        .unwrap();
     }
     cfg
 }
@@ -157,7 +158,6 @@ fn pads_sharing_a_tail(count: usize) -> Cfg<DfInst> {
         cfg.add_edge(protected, pad, EdgeKind::ExceptionHandler);
         cfg.add_edge(pad, tail[0], EdgeKind::Jump);
         cfg.add_region(Region {
-            id: RegionId::from_raw(0),
             protected_blocks: [protected].into_iter().collect(),
             handlers: alloc::vec![Handler {
                 entry: pad,
@@ -165,7 +165,8 @@ fn pads_sharing_a_tail(count: usize) -> Cfg<DfInst> {
                 kind: HandlerKind::Catch,
             }],
             parent: None,
-        });
+        })
+        .unwrap();
     }
     cfg
 }
@@ -196,11 +197,11 @@ fn many_handlers(count: usize) -> Cfg<DfInst> {
         })
         .collect();
     cfg.add_region(Region {
-        id: RegionId::from_raw(0),
         protected_blocks: [protected].into_iter().collect(),
         handlers,
         parent: None,
-    });
+    })
+    .unwrap();
     cfg
 }
 
@@ -232,7 +233,6 @@ fn endless_loops_each_in_a_try(count: usize) -> Cfg<DfInst> {
         cfg.add_edge(header, pad, EdgeKind::ExceptionHandler);
         cfg.add_edge(pad, out, EdgeKind::Jump);
         cfg.add_region(Region {
-            id: RegionId::from_raw(0),
             protected_blocks: [header].into_iter().collect(),
             handlers: alloc::vec![Handler {
                 entry: pad,
@@ -240,7 +240,8 @@ fn endless_loops_each_in_a_try(count: usize) -> Cfg<DfInst> {
                 kind: HandlerKind::Catch,
             }],
             parent: None,
-        });
+        })
+        .unwrap();
     }
     cfg
 }

@@ -1,14 +1,13 @@
 //! `DenseFanout`: a dense `0..bound` key space to runs of values, built in arrival order.
 
-use std::mem::size_of;
-
 use cfglib::{DenseFanout, Graph, NodeId};
 
-use crate::Lcg;
+use crate::below_u32;
+use crate::rng::Rng;
 
 /// A graph with parallel edges, self loops, removed edges and removed nodes.
 fn tombstoned_graph(seed: u64) -> Graph<u32, ()> {
-    let mut rng = Lcg(seed);
+    let mut rng = Rng::lcg(seed, 33);
     let mut graph = Graph::new();
     let nodes: Vec<NodeId> = (0..60).map(|label| graph.add_node(label)).collect();
     for _ in 0..200 {
@@ -79,19 +78,15 @@ fn a_reverse_index_keyed_by_node_identity_equals_the_stores_predecessor_lists() 
             keys, every_slot,
             "iteration yields every key, empty runs included"
         );
-        assert_eq!(
-            incoming.heap_bytes(),
-            (graph.node_bound() + 1) * size_of::<u32>() + graph.edge_count() * size_of::<NodeId>()
-        );
     }
 }
 
 #[test]
 fn pairs_keep_their_arrival_order_inside_each_run_against_a_vec_oracle() {
     for (seed, bound) in [(1, 25_usize), (6, 64), (8, 65)] {
-        let mut rng = Lcg(seed);
+        let mut rng = Rng::lcg(seed, 33);
         let pairs: Vec<(usize, u32)> = (0..400)
-            .map(|_| (rng.below(bound), rng.below_u32(1000)))
+            .map(|_| (rng.below(bound), below_u32(&mut rng, 1000)))
             .chain([(0, 7), (bound - 1, 8)])
             .collect();
         let mut oracle: Vec<Vec<u32>> = vec![Vec::new(); bound];
@@ -129,9 +124,13 @@ fn a_key_with_no_pairs_still_owns_an_empty_run() {
 #[test]
 fn grouped_input_equals_the_same_pairs_flattened_in_key_order() {
     for seed in [3, 12] {
-        let mut rng = Lcg(seed);
+        let mut rng = Rng::lcg(seed, 33);
         let groups: Vec<Vec<u32>> = (0..70)
-            .map(|_| (0..rng.below(4)).map(|_| rng.below_u32(500)).collect())
+            .map(|_| {
+                (0..rng.below(4))
+                    .map(|_| below_u32(&mut rng, 500))
+                    .collect()
+            })
             .collect();
         let flattened: Vec<(usize, u32)> = groups
             .iter()
@@ -164,7 +163,7 @@ fn a_group_of_no_values_keeps_its_key_in_a_dense_table() {
 }
 
 #[test]
-fn the_empty_key_space_is_the_default_table_and_costs_nothing() {
+fn the_empty_key_space_is_the_default_table() {
     let empty = DenseFanout::<u32>::default();
     assert_eq!(
         empty,
@@ -174,41 +173,20 @@ fn the_empty_key_space_is_the_default_table_and_costs_nothing() {
         empty,
         DenseFanout::<u32>::from_grouped(Vec::<Vec<u32>>::new())
     );
-    assert_eq!(
-        (empty.bound(), empty.value_count(), empty.heap_bytes()),
-        (0, 0, 0)
-    );
+    assert_eq!((empty.bound(), empty.value_count()), (0, 0));
     assert_eq!(empty.iter().count(), 0);
 }
 
 #[test]
-fn a_nonempty_key_space_without_values_costs_exactly_its_run_bounds() {
+fn a_nonempty_key_space_without_values_keeps_its_empty_keys() {
     let rows = DenseFanout::<u32>::from_pairs(3, Vec::<(usize, u32)>::new());
     assert_eq!((rows.bound(), rows.value_count()), (3, 0));
-    assert_eq!(
-        rows.heap_bytes(),
-        4 * size_of::<u32>(),
-        "bound + 1 run bounds"
-    );
     assert_eq!(rows.iter().count(), 3);
     assert_ne!(
         rows,
         DenseFanout::default(),
         "three empty keys are not no keys"
     );
-}
-
-#[test]
-fn heap_bytes_counts_the_offsets_and_the_values_and_nothing_a_value_owns() {
-    let rows = DenseFanout::from_pairs(3, [(2_usize, 7_u64), (0, 8), (2, 9)]);
-    assert_eq!(
-        rows.heap_bytes(),
-        4 * size_of::<u32>() + 3 * size_of::<u64>()
-    );
-
-    let short = DenseFanout::from_pairs(2, [(1_usize, "x".to_owned())]);
-    let long = DenseFanout::from_pairs(2, [(1_usize, "x".repeat(4096))]);
-    assert_eq!(short.heap_bytes(), long.heap_bytes());
 }
 
 #[test]

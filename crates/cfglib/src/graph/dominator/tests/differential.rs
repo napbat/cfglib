@@ -5,7 +5,7 @@ use super::support::{
 };
 use crate::graph::dominator::{DominatorScratch, DominatorTree};
 use crate::graph::structure::is_reducible;
-use crate::graph::view::GraphView;
+use crate::graph::view::{GraphView, Rooted};
 
 /// Graph sizes and how many seeds to try at each.
 const SWEEP: [(usize, u64); 6] = [
@@ -26,7 +26,7 @@ fn family_of(seed: u64) -> Family {
 fn slt_matches_the_iterative_oracle_on_random_graphs() {
     // One scratch serves the whole sweep, so reuse across graphs of very
     // different sizes and shapes is part of what is compared.
-    let mut scratch = DominatorScratch::new();
+    let mut scratch = DominatorScratch::default();
     for (node_count, seeds) in SWEEP {
         let size = u64::try_from(node_count).expect("a graph size fits in u64");
         for seed in 0..seeds {
@@ -45,7 +45,7 @@ fn slt_matches_the_iterative_oracle_on_random_graphs() {
                 0
             };
 
-            let tree = DominatorTree::compute_from_in(&mut scratch, &graph, root);
+            let tree = DominatorTree::compute_in(&mut scratch, &Rooted::new(&graph, root));
             let oracle = DominatorTree::compute_iterative(&graph, root);
             assert!(tree == oracle, "{recipe:?} seed {seed} root {root}");
             assert_forest_invariants(&tree, graph.node_bound());
@@ -67,7 +67,7 @@ fn the_sweep_reaches_irreducible_graphs_and_unreachable_nodes() {
             detached: 25,
         };
         let graph = random_graph(&mut rng, recipe).graph();
-        let tree = DominatorTree::compute_from(&graph, 0);
+        let tree = DominatorTree::compute(&graph);
         irreducible += usize::from(!is_reducible(&graph, &tree));
         with_unreachable += usize::from(tree.preorder().len() < graph.node_bound());
     }
@@ -80,7 +80,7 @@ fn the_sweep_reaches_irreducible_graphs_and_unreachable_nodes() {
 
 #[test]
 fn a_reused_scratch_computes_what_a_fresh_one_does() {
-    let mut scratch = DominatorScratch::new();
+    let mut scratch = DominatorScratch::default();
     for seed in 0..60 {
         let mut rng = Rng::new(seed);
         let sizes = [8, 400, 12, 90];
@@ -92,8 +92,8 @@ fn a_reused_scratch_computes_what_a_fresh_one_does() {
         };
         let graph = random_graph(&mut rng, recipe).graph();
         assert_eq!(
-            DominatorTree::compute_from_in(&mut scratch, &graph, 0),
-            DominatorTree::compute_from(&graph, 0),
+            DominatorTree::compute_in(&mut scratch, &graph),
+            DominatorTree::compute(&graph),
             "{recipe:?} seed {seed}"
         );
     }

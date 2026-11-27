@@ -5,7 +5,7 @@ use alloc::vec;
 
 use crate::graph::dominator::tests::support::{Digraph, EdgeList, for_each_multigraph};
 use crate::graph::dominator::{
-    CertificateError, LowHighOrder, PostDominatorScratch, PostDominatorTree,
+    CertificateError, DominatorScratch, LowHighOrder, PostDominatorTree,
 };
 
 /// Check that the certified construction builds `post`, the post-dominator
@@ -13,7 +13,7 @@ use crate::graph::dominator::{
 pub(super) fn assert_post_certified(
     post: &PostDominatorTree<u32>,
     graph: &Digraph,
-    scratch: &mut PostDominatorScratch,
+    scratch: &mut DominatorScratch,
 ) {
     let (certified, certificate) = PostDominatorTree::compute_certified_in(scratch, graph);
     assert!(&certified == post, "the certified tree differs");
@@ -23,7 +23,7 @@ pub(super) fn assert_post_certified(
 
 #[test]
 fn a_tree_is_rejected_on_a_graph_one_edge_away_when_their_trees_differ() {
-    let mut scratch = PostDominatorScratch::new();
+    let mut scratch = DominatorScratch::default();
     for_each_multigraph(3, 1, |edges| {
         let graph = edges.graph();
         let (post, certificate) = PostDominatorTree::compute_certified_in(&mut scratch, &graph);
@@ -48,7 +48,7 @@ fn a_changed_exit_structure_or_node_bound_is_reported() {
     let graph = EdgeList::new(2, vec![(0, 1)]).graph();
     let looping = EdgeList::new(2, vec![(0, 1), (1, 0)]).graph();
     let larger = EdgeList::new(3, vec![(0, 1)]).graph();
-    let mut scratch = PostDominatorScratch::new();
+    let mut scratch = DominatorScratch::default();
     let (post, certificate) = PostDominatorTree::compute_certified_in(&mut scratch, &graph);
     assert_eq!(
         post.verify_certificate(&looping, &certificate),
