@@ -26,8 +26,8 @@ use crate::block::BlockId;
 use crate::cfg::Cfg;
 use crate::edge::{Edge, EdgeId, EdgeKind, Probability};
 use crate::graph::loop_forest::LoopForest;
-use crate::graph::traverse::reachable;
-use crate::graph::view::{Direction, Induced};
+use crate::graph::traverse::reachable_in;
+use crate::graph::view::Direction;
 
 mod dispatch;
 
@@ -95,13 +95,26 @@ pub fn make_reducible<I: Clone, E: Clone>(cfg: &mut Cfg<I, E>) -> Vec<BlockId> {
 /// The blocks of `cfg` that can be reached from `start` in `direction`
 /// without entering a block outside `within`, which holds every block of
 /// `start`.
+///
+/// The confinement is the walk's mask rather than an
+/// [`Induced`](crate::graph::view::Induced) view, whose filtered adjacency
+/// costs every step a lookup, as [`reachable_in`] documents.
 fn closure<I, E>(
     cfg: &Cfg<I, E>,
     start: impl IntoIterator<Item = BlockId>,
     direction: Direction,
     within: &[bool],
 ) -> Vec<bool> {
-    reachable(&Induced::new(cfg, within), start, direction)
+    let mut seen = Vec::new();
+    reachable_in(
+        cfg,
+        start,
+        direction,
+        Some(within),
+        &mut seen,
+        &mut Vec::new(),
+    );
+    seen
 }
 
 /// Make the cycle of the blocks in `member` single-entry: keep one of its

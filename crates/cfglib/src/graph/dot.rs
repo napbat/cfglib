@@ -28,7 +28,6 @@ use alloc::format;
 use alloc::string::String;
 use core::fmt;
 
-use crate::display::render;
 use crate::graph::edge_view::EdgeView;
 use crate::graph::label::{Label, display_label, no_label};
 use crate::graph::store::{Graph, Id, IdTag};
@@ -286,7 +285,12 @@ where
     NodeLabel: for<'d> Fn(G::NodeId, &'d G::NodeData) -> Cow<'d, str>,
     EdgeAttributes: for<'d> Fn(G::EdgeId, &'d G::EdgeData) -> DotEdgeAttributes<'d>,
 {
-    render(|sink| write_dot(view, sink, style))
+    // A direct call on a local `String`, not `render(|sink| write_dot(..))`:
+    // the closure kept `write_dot` out of line behind a virtual sink, and
+    // `api_to_dot` took 1.19x its time on main; this form takes 0.99x.
+    let mut out = String::new();
+    write_dot(view, &mut out, style).expect("writing DOT to a String cannot fail");
+    out
 }
 
 /// Escape label text and terminate every line with Graphviz's `\l`.

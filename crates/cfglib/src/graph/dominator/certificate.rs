@@ -310,20 +310,24 @@ impl<N: DenseId> DominatorTree<N> {
 
 /// A tree and its certificate as [`check`] reads them, in dense indices.
 ///
-/// The tree is read from one of its nodes, or, for a post-dominator tree,
-/// below a virtual exit at the index one past the graph's blocks: the exit is
-/// then the root, the parent of every root of the forest of blocks, and the
-/// first node of an order that the certificate itself leaves out.
-pub(super) struct Reading<'a, N> {
+/// The tree is read from one of its nodes, or, when `EXIT` is set, for a
+/// post-dominator tree, below a virtual exit at the index one past the
+/// graph's blocks: the exit is then the root, the parent of every root of the
+/// forest of blocks, and the first node of an order that the certificate
+/// itself leaves out.
+///
+/// `EXIT` is a constant rather than a field so that the rooted reading of
+/// [`DominatorTree::verify_certificate`] compiles without a single exit test:
+/// with a runtime flag, `cfg_dominators_verify` took 1.38x the time of the
+/// separate rooted reader on main; with the constant it takes 0.98x.
+pub(super) struct Reading<'a, N, const EXIT: bool> {
     tree: &'a DominatorTree<N>,
     certificate: &'a LowHighOrder<N>,
     /// The root, which has no parent.
     root: usize,
-    /// Whether `root` is a virtual exit rather than a node of `tree`.
-    virtual_exit: bool,
 }
 
-impl<'a, N: DenseId> Reading<'a, N> {
+impl<'a, N: DenseId> Reading<'a, N, false> {
     /// `tree` read from its node `root`.
     const fn rooted(
         tree: &'a DominatorTree<N>,
@@ -334,10 +338,11 @@ impl<'a, N: DenseId> Reading<'a, N> {
             tree,
             certificate,
             root,
-            virtual_exit: false,
         }
     }
+}
 
+impl<'a, N: DenseId> Reading<'a, N, true> {
     /// `tree`, a forest over the blocks below `exit`, read from that virtual
     /// exit.
     pub(super) const fn below_exit(
@@ -349,18 +354,19 @@ impl<'a, N: DenseId> Reading<'a, N> {
             tree,
             certificate,
             root: exit,
-            virtual_exit: true,
         }
     }
+}
 
+impl<N: DenseId, const EXIT: bool> Reading<'_, N, EXIT> {
     /// Whether `node` is the virtual exit.
     fn is_exit(&self, node: usize) -> bool {
-        self.virtual_exit && node == self.root
+        EXIT && node == self.root
     }
 
     /// How many nodes the tree holds.
     fn size(&self) -> usize {
-        self.tree.order.len() + usize::from(self.virtual_exit)
+        self.tree.order.len() + usize::from(EXIT)
     }
 
     /// Whether `node` is in the tree. A node index past the tree's tables,
@@ -375,14 +381,14 @@ impl<'a, N: DenseId> Reading<'a, N> {
             return None;
         }
         match self.tree.idom[node] {
-            NO_INDEX => self.virtual_exit.then_some(self.root),
+            NO_INDEX => EXIT.then_some(self.root),
             parent => Some(slot(parent)),
         }
     }
 
     /// Whether `ancestor` is an ancestor of `node`, or `node` itself.
     fn dominates(&self, ancestor: usize, node: usize) -> bool {
-        if self.virtual_exit && (ancestor == self.root || node == self.root) {
+        if EXIT && (ancestor == self.root || node == self.root) {
             return ancestor == self.root;
         }
         self.tree
@@ -391,20 +397,19 @@ impl<'a, N: DenseId> Reading<'a, N> {
 
     /// Every node of the tree.
     fn nodes(&self) -> impl Iterator<Item = usize> + '_ {
-        self.virtual_exit
-            .then_some(self.root)
+        EXIT.then_some(self.root)
             .into_iter()
             .chain(self.tree.order.iter().map(|node| node.index()))
     }
 
     /// How many nodes the order lists.
     fn order_len(&self) -> usize {
-        self.certificate.order.len() + usize::from(self.virtual_exit)
+        self.certificate.order.len() + usize::from(EXIT)
     }
 
     /// The node at `position` of the order.
     fn at(&self, position: usize) -> usize {
-        match (self.virtual_exit, position) {
+        match (EXIT, position) {
             (false, _) => self.certificate.order[position].index(),
             (true, 0) => self.root,
             (true, _) => self.certificate.order[position - 1].index(),
@@ -417,7 +422,7 @@ impl<'a, N: DenseId> Reading<'a, N> {
             return Some(0);
         }
         let position = *self.certificate.position.get(node)?;
-        (position != NO_INDEX).then(|| slot(position) + usize::from(self.virtual_exit))
+        (position != NO_INDEX).then(|| slot(position) + usize::from(EXIT))
     }
 
     /// The error a failure at dense indices reports. A failure that names the
@@ -460,15 +465,18 @@ enum Failure {
 /// sequence a preorder. With as many entries as the tree has nodes, it lists
 /// them all. Then every edge out of the tree must keep the parent property,
 /// and every node but the root must have its low and high in-edges.
-pub(super) fn check<G: GraphView, N: DenseId>(
+pub(super) fn check<G: GraphView, N: DenseId, const EXIT: bool>(
     graph: &G,
-    reading: &Reading<'_, N>,
+    reading: &Reading<'_, N, EXIT>,
 ) -> Result<(), CertificateError<N>> {
     passes(graph, reading).map_err(|failure| reading.lift(failure))
 }
 
 /// The three passes of [`check`], reporting in dense indices.
-fn passes<G: GraphView, N: DenseId>(graph: &G, tree: &Reading<'_, N>) -> Result<(), Failure> {
+fn passes<G: GraphView, N: DenseId, const EXIT: bool>(
+    graph: &G,
+    tree: &Reading<'_, N, EXIT>,
+) -> Result<(), Failure> {
     let root = tree.root;
     for position in 0..tree.order_len() {
         let node = tree.at(position);

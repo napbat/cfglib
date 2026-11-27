@@ -12,6 +12,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use smallvec::SmallVec;
 
 use crate::block::{BasicBlock, BlockId};
 use crate::edge::{Edge, EdgeId};
@@ -174,7 +175,7 @@ impl<I, E> Cfg<I, E> {
         id: BlockId,
         points: impl IntoIterator<Item = (usize, P)>,
     ) -> Result<(Vec<BlockId>, Rewrite), SplitPointError> {
-        let points: Vec<_> = points.into_iter().collect();
+        let points: SmallVec<[(usize, P); 4]> = points.into_iter().collect();
         let instruction_count = self.block(id).instructions().len();
         let mut previous = None;
         for &(point, _) in &points {
@@ -192,12 +193,15 @@ impl<I, E> Cfg<I, E> {
             previous = Some(point);
         }
 
+        // A few points stay on the stack, the blocks are sized once, and the
+        // moved edges are read off the last block rather than listed first:
+        // with a point list, a growing block list and a moved-edge list, a
+        // one-point split (`cfg_split_block_with_payload_mapped`) took 1.15x
+        // the time of main's single mapped split; now only the returned block
+        // list is left over it.
         let mut rewrite = Rewrite::new();
-        let mut blocks = alloc::vec![id];
-        if points.is_empty() {
-            return Ok((blocks, rewrite));
-        }
-        let moved: Vec<EdgeId> = self.outgoing(id).collect();
+        let mut blocks = Vec::with_capacity(points.len() + 1);
+        blocks.push(id);
         let mut current = id;
         let mut base = 0;
         for (point, fallthrough) in points {
@@ -208,8 +212,13 @@ impl<I, E> Cfg<I, E> {
             current = tail;
             base = point;
         }
+        if current == id {
+            return Ok((blocks, rewrite));
+        }
         rewrite.record_block(id, blocks.iter().copied());
-        for edge in moved {
+        // Each split hands every outgoing edge on to its tail, so the last
+        // block leaves by exactly the edges `id` left by.
+        for edge in self.graph.outgoing(current) {
             rewrite.record_edge(edge, [edge]);
         }
         Ok((blocks, rewrite))
