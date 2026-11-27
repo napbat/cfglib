@@ -7,7 +7,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use super::walk::Walk;
-use super::{FoldEnter, MarkScope, OpenFold, OpenFoldError};
+use super::{FoldEnter, MarkScope, OpenFold, OpenFoldError, Stored};
 
 #[cfg(test)]
 mod tests;
@@ -39,19 +39,15 @@ struct Fix {
     cut: bool,
 }
 
-/// The provisional answer of a member whose cycle is not finished.
-struct Provisional<V> {
-    /// The member's index in discovery order.
-    index: usize,
-    /// Its current answer.
-    value: Option<V>,
-}
-
 /// A marked node whose cycle is not finished.
 struct Member<F: OpenFold> {
     mark: F::Mark,
     /// The node, while no frame folds it.
     node: Option<F::Node>,
+    /// The member's index in discovery order.
+    index: usize,
+    /// Its provisional answer, which its entry in the table points here for.
+    value: Option<F::Value>,
     /// When its first fold finished; a round re-folds members in this order.
     finished: usize,
 }
@@ -92,16 +88,25 @@ enum Step<V> {
 
 struct Run<'a, F: OpenFold> {
     walk: Walk<F, Fix>,
-    /// The final answers by mark: the caller's table.
-    answers: &'a mut BTreeMap<F::Mark, Option<F::Value>>,
-    /// The provisional answers of the members by mark. They stay out of the
-    /// caller's table, so it never holds an answer that is not final.
-    provisional: BTreeMap<F::Mark, Provisional<F::Value>>,
+    /// The answers by mark: the caller's table. A member's entry is open,
+    /// naming its position on the member stack, until its cycle is final.
+    table: &'a mut BTreeMap<F::Mark, Stored<F::Value>>,
     members: Vec<Member<F>>,
     components: Vec<Component>,
     next_index: usize,
     finished: usize,
     max_rounds: Option<usize>,
+}
+
+impl<F: OpenFold> Drop for Run<'_, F> {
+    /// Removes the open entries of the members left when the walk ends
+    /// without an answer, by an error or a panicking hook, so the caller's
+    /// table keeps only final answers. A walk that answers leaves no member.
+    fn drop(&mut self) {
+        for member in &self.members {
+            self.table.remove(&member.mark);
+        }
+    }
 }
 
 impl<F: OpenFold> Run<'_, F>
@@ -134,35 +139,38 @@ where
                 }
             };
         };
-        if let Some(value) = self.answers.get(&mark) {
-            return Reached::Answer(node, value.clone());
-        }
-        if let Some(slot) = self.provisional.get(&mark) {
-            let index = slot.index;
-            let value = slot.value.clone();
-            if let Some(top) = self.walk.stack.last_mut() {
-                top.extra.lowlink = top.extra.lowlink.min(index);
-                if matches!(top.extra.role, Role::Marked { index: own, .. } if own == index) {
-                    top.extra.self_loop = true;
+        match self.table.get(&mark) {
+            Some(Stored::Final(value)) => return Reached::Answer(node, value.clone()),
+            Some(&Stored::Open(position)) => {
+                let member = &self.members[position];
+                let index = member.index;
+                let value = member.value.clone();
+                if let Some(top) = self.walk.stack.last_mut() {
+                    top.extra.lowlink = top.extra.lowlink.min(index);
+                    if matches!(top.extra.role, Role::Marked { index: own, .. } if own == index) {
+                        top.extra.self_loop = true;
+                    }
                 }
+                return Reached::Answer(node, value);
             }
-            return Reached::Answer(node, value);
+            None => {}
         }
         match fold.enter(&node) {
             // A leaf has no successors, so it lies on no cycle.
             FoldEnter::Leaf(value) => {
-                self.answers.insert(mark, value.clone());
+                self.table.insert(mark, Stored::Final(value.clone()));
                 Reached::Answer(node, value)
             }
             FoldEnter::Fold { accumulator, .. } => {
                 let index = self.next_index;
                 self.next_index += 1;
-                self.provisional
-                    .insert(mark.clone(), Provisional { index, value: None });
                 let position = self.members.len();
+                self.table.insert(mark.clone(), Stored::Open(position));
                 self.members.push(Member {
                     mark,
                     node: None,
+                    index,
+                    value: None,
                     finished: 0,
                 });
                 let fix = Fix {
@@ -190,11 +198,9 @@ where
 
     /// Stores a member's current answer, reporting whether it changed.
     fn update(&mut self, position: usize, value: Option<F::Value>) -> bool {
-        let Some(slot) = self.provisional.get_mut(&self.members[position].mark) else {
-            unreachable!("a member's answer stays provisional until its cycle is final");
-        };
-        let changed = slot.value != value;
-        slot.value = value;
+        let slot = &mut self.members[position].value;
+        let changed = *slot != value;
+        *slot = value;
         changed
     }
 
@@ -227,10 +233,7 @@ where
                     // A node on no cycle: its first answer is final, and
                     // stored unless the depth bound cut its subtree.
                     if let Some(member) = self.members.pop() {
-                        self.provisional.remove(&member.mark);
-                        if !fix.cut {
-                            self.answers.insert(member.mark, value.clone());
-                        }
+                        settle(self.table, member.mark, value.clone(), fix.cut);
                     }
                     return Ok(self.deliver(fold, &node, value));
                 }
@@ -345,10 +348,7 @@ where
         let Some(node) = member.node.take() else {
             unreachable!("a cycle's first member waits outside any frame");
         };
-        let Some(slot) = self.provisional.get(&member.mark) else {
-            unreachable!("a member's answer stays provisional until its cycle is final");
-        };
-        let value = slot.value.clone();
+        let value = member.value.clone();
         if let Some(parent) = self.walk.stack.last_mut() {
             parent.extra.lowlink = parent.extra.lowlink.min(component.lowlink);
             parent.extra.cut |= component.cut;
@@ -367,15 +367,10 @@ where
         };
         let mut root = None;
         for member in self.members.drain(component.base..) {
-            let Some(slot) = self.provisional.remove(&member.mark) else {
-                unreachable!("a member's answer stays provisional until its cycle is final");
-            };
             if root.is_none() {
-                root = Some((member.node, slot.value.clone()));
+                root = Some((member.node, member.value.clone()));
             }
-            if !component.cut {
-                self.answers.insert(member.mark, slot.value);
-            }
+            settle(self.table, member.mark, member.value, component.cut);
         }
         let Some((Some(node), value)) = root else {
             unreachable!("a cycle's first member waits outside any frame");
@@ -387,11 +382,21 @@ where
     }
 }
 
+/// Replaces the open entry of a member whose answer became final with that
+/// answer, or removes it when the depth bound cut the answer.
+fn settle<K: Ord, V>(table: &mut BTreeMap<K, Stored<V>>, mark: K, value: Option<V>, cut: bool) {
+    if cut {
+        table.remove(&mark);
+    } else {
+        table.insert(mark, Stored::Final(value));
+    }
+}
+
 /// Folds the space reachable from `root` in post-order and iterates every
-/// cycle of marked nodes until its answers are stable: `answers` holds the
+/// cycle of marked nodes until its answers are stable: `table` holds the
 /// final answers by mark, and the walk reads and extends it.
 pub(super) fn run<F: OpenFold>(
-    answers: &mut BTreeMap<F::Mark, Option<F::Value>>,
+    table: &mut BTreeMap<F::Mark, Stored<F::Value>>,
     fold: &mut F,
     root: F::Node,
     max_depth: Option<usize>,
@@ -402,8 +407,7 @@ where
 {
     let mut run = Run::<F> {
         walk: Walk::new(),
-        answers,
-        provisional: BTreeMap::new(),
+        table,
         members: Vec::new(),
         components: Vec::new(),
         next_index: 0,

@@ -33,12 +33,17 @@ impl Worklist {
     }
 
     /// A worklist of `indices`, duplicates queued once.
+    ///
+    /// A fresh worklist pops from its first word, so the indices go straight
+    /// into the bit row without [`insert`](Self::insert)'s cursor update:
+    /// through `insert`, building the live set of a 100 000-node chain made
+    /// `api_resume_node_problem` 1.09x main.
     pub(crate) fn of(bound: usize, indices: impl IntoIterator<Item = usize>) -> Self {
-        let mut worklist = Self::new(bound);
+        let mut queued = DenseBits::new(bound);
         for index in indices {
-            worklist.insert(index);
+            queued.insert(index);
         }
-        worklist
+        Self { queued, cursor: 0 }
     }
 
     /// Every live node of `graph`. A removed node's slot is never queued.

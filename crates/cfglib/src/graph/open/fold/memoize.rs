@@ -6,7 +6,7 @@ extern crate alloc;
 use alloc::collections::BTreeMap;
 
 use super::walk::Walk;
-use super::{FoldEnter, OpenFold};
+use super::{FoldEnter, OpenFold, Stored};
 
 #[cfg(test)]
 mod tests;
@@ -58,7 +58,7 @@ fn refuse_open<F: OpenFold>(
 /// Stores the answer of a leaf, unless the fold keeps the node's answer to
 /// its route.
 fn store_leaf<F: OpenFold>(
-    answers: &mut BTreeMap<F::Mark, Option<F::Value>>,
+    answers: &mut BTreeMap<F::Mark, Stored<F::Value>>,
     fold: &mut F,
     node: &F::Node,
     mark: Option<F::Mark>,
@@ -69,15 +69,16 @@ fn store_leaf<F: OpenFold>(
     if let Some(mark) = mark
         && fold.memoize(node)
     {
-        answers.insert(mark, value.cloned());
+        answers.insert(mark, Stored::Final(value.cloned()));
     }
 }
 
 /// Folds the space reachable from `root` in post-order, folding each marked
 /// node once: `answers` holds the finished answers by mark, and the walk
-/// reads and extends it.
+/// reads and extends it. Every entry it finds is final: only
+/// `Revisit::Iterate` writes open entries, and none outlives its walk.
 pub(super) fn run<F: OpenFold>(
-    answers: &mut BTreeMap<F::Mark, Option<F::Value>>,
+    answers: &mut BTreeMap<F::Mark, Stored<F::Value>>,
     fold: &mut F,
     root: F::Node,
     max_depth: Option<usize>,
@@ -87,7 +88,7 @@ where
 {
     let mark = fold.mark(&root);
     if let Some(mark) = &mark
-        && let Some(answer) = answers.get(mark)
+        && let Some(Stored::Final(answer)) = answers.get(mark)
     {
         return answer.clone();
     }
@@ -125,7 +126,7 @@ where
             if let Some(mark) = memo.mark {
                 open.remove(&mark);
                 if memo.reaches >= position && !memo.cut && fold.memoize(&node) {
-                    answers.insert(mark, value.clone());
+                    answers.insert(mark, Stored::Final(value.clone()));
                 }
             }
             let Some(parent) = walk.stack.last_mut() else {
@@ -146,7 +147,7 @@ where
         }
         let mark = fold.mark(&child);
         if let Some(mark) = &mark {
-            if let Some(answer) = answers.get(mark) {
+            if let Some(Stored::Final(answer)) = answers.get(mark) {
                 let answer = answer.clone();
                 walk.absorb(fold, &child, answer);
                 continue;

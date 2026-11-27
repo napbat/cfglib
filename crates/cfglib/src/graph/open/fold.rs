@@ -213,7 +213,25 @@ pub enum Revisit {
 /// [`remove`](Self::remove) the answers that went stale.
 #[derive(Debug, Clone)]
 pub struct OpenFoldMemo<K, V> {
-    answers: BTreeMap<K, Option<V>>,
+    answers: BTreeMap<K, Stored<V>>,
+}
+
+/// One entry of an [`OpenFoldMemo`].
+///
+/// The open entries keep `Revisit::Iterate` to one table lookup per reach.
+/// With the provisional answers in a second map beside the final ones, every
+/// first reach of a node missed in both and every finished node moved from
+/// one map to the other: `open_fold_fixpoint_diamonds` ran 1.53x and
+/// `open_fold_fixpoint_export_ring` 1.35x the time of one table.
+#[derive(Debug, Clone)]
+enum Stored<V> {
+    /// A final answer.
+    Final(Option<V>),
+    /// A marked node whose cycle `Revisit::Iterate` is still folding: its
+    /// position on that walk's member stack, which holds its provisional
+    /// answer. The walk replaces the entry once the cycle is final and
+    /// removes it if it ends without an answer, so no caller sees one.
+    Open(usize),
 }
 
 impl<K, V> Default for OpenFoldMemo<K, V> {
@@ -229,7 +247,10 @@ impl<K: Ord, V> OpenFoldMemo<K, V> {
     /// `Some(None)` when the fold of its node yielded nothing.
     #[must_use]
     pub fn get(&self, mark: &K) -> Option<Option<&V>> {
-        self.answers.get(mark).map(Option::as_ref)
+        match self.answers.get(mark)? {
+            Stored::Final(value) => Some(value.as_ref()),
+            Stored::Open(_) => None,
+        }
     }
 
     /// Removes the answer stored for `mark` and returns it, so the next fold
@@ -238,7 +259,10 @@ impl<K: Ord, V> OpenFoldMemo<K, V> {
     /// The answers of the nodes that absorbed it stay stored; remove them
     /// too when the removed answer went stale.
     pub fn remove(&mut self, mark: &K) -> Option<Option<V>> {
-        self.answers.remove(mark)
+        match self.answers.remove(mark)? {
+            Stored::Final(value) => Some(value),
+            Stored::Open(_) => None,
+        }
     }
 
     /// Removes every stored answer.

@@ -97,6 +97,11 @@ impl<F: OpenFold, X> Walk<F, X> {
 
     /// Opens a frame for `node`, whose own key (if it has one) is already the
     /// last mark set; `entry_marks` is how many marks were set before it.
+    ///
+    /// Inline: `open_fold_in` instantiates every policy's driver for a fold,
+    /// and beside the other two the inliner left this out of line in the
+    /// refusing walk, which made `open_fold_isolated_layered` 1.06x main.
+    #[inline]
     pub(super) fn push_frame(
         &mut self,
         fold: &mut F,
