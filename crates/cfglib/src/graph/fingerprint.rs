@@ -302,7 +302,7 @@ pub fn canonical_order<G: RootedView + EdgeView>(
 /// core over a successor table sorted up front: sorting each node's
 /// out-edges as the walk enters it, on one stack, and marking positions on
 /// entry. On 10,000 blocks the core form measured 1.14x the time of the
-/// previous release (`api_canonical_order`), and this loop 0.99x.
+/// previous release (`api_canonical_order`), and this loop 0.99x to 1.02x.
 fn preorder<G: RootedView + EdgeView>(graph: &G, keys: &[u64]) -> (Vec<G::NodeId>, Vec<u32>) {
     check_bound(graph.node_bound(), "node bound of a canonical order");
     let mut position = vec![NO_INDEX; graph.node_bound()];
